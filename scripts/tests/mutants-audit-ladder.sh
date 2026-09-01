@@ -112,10 +112,16 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED and every control ok. The floor catches COLLAPSE, not growth.
-# `run-tests.sh`'s own floor formula is `m - min(50, max(1, m/20))`; at m=11
-# that is 10. It catches COLLAPSE, not growth — losing one test still clears it,
+# `run-tests.sh`'s own floor formula is `m - min(50, max(1, m/20))`; at m=13
+# that is 12. It catches COLLAPSE, not growth — losing one test still clears it,
 # losing two reports HARNESS BROKE.
-MIN_TESTS=10
+#
+# 🔴 THIS FLOOR DOES NOT TRACK THE MODULE — RE-DERIVE IT WHEN YOU ADD A TEST.
+# Measured 2026-08-31: the module grew 11 → 13 while this stayed at 10, so the
+# gap it tolerated silently widened from one test to three. Nothing failed; a
+# floor that is too LOW never complains, which is exactly why it goes unnoticed.
+# Re-derive with the formula above against `--collect-only`, never by memory.
+MIN_TESTS=12
 failing() {
   local out n f total
   # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran" on
@@ -337,6 +343,47 @@ run "shape-B/C lesson tail inverted" \
 run "churn row reverted to the stale 1,002" \
     test_the_attribution_measurement_survives_where_the_skill_routes_to_it "$EVID" \
     '**1,051**' '**1,002**'
+
+echo
+echo "== the PROSE-payload escape hatch =="
+# 🔴 These three rows meet this battery's stated inclusion rule exactly: each
+# was MEASURED SURVIVING against a fully green module, and each is green only
+# because a pin was too short. Recording them in a comment is what this file
+# exists to stop -- the sweeps it replaces "happened in a session scratchpad
+# that no longer exists", including the rows that justified adding a pin.
+#
+# The first two invert the caveat's operational content while every other pin
+# stays byte-identical: the first is the ONLY sentence forbidding the hatch on a
+# CONVERGING ladder, the second is the default-to-continue instruction. Both
+# SURVIVED at 18131a61 with 13 passed.
+run "hatch: 'not a shortcut' inverted" \
+    test_the_prose_escape_hatch_demands_its_rationale_IN_THE_SUMMARY "$SKILL" \
+    'not a shortcut out of a
+converging one.' \
+    'not a shortcut out of a
+converging one, and equally a shortcut out of one.'
+# 🔴 The target is LINE-WRAPPED. A naive one-line pattern here is a no-op, and
+# `run` would print MUTATION DID NOT APPLY rather than a false SURVIVED — which
+# is precisely how a hand-run version of this control reported a false green
+# before it was moved in here.
+run "hatch: 'if in doubt' flipped to STOP" \
+    test_the_prose_escape_hatch_demands_its_rationale_IN_THE_SUMMARY "$SKILL" \
+    'If in
+doubt, run the next round:' \
+    'If in
+doubt, STOP:'
+# The blank line is what MAKES two paragraphs, so deleting it merges the caveat
+# into the criteria and "read the next paragraph" resolves to the history again.
+# Invisible to both whole-string pins (`_norm` collapses newlines) -- this row is
+# the only mechanical evidence the adjacency assertion is keyed to block
+# structure rather than to text.
+run "hatch: blank line before the caveat deleted" \
+    test_the_escape_hatch_pointer_resolves_to_the_NOT_A_LICENCE_caveat "$SKILL" \
+    'open rather than absent.
+
+⚠ **THIS DOES NOT OVERRIDE' \
+    'open rather than absent.
+⚠ **THIS DOES NOT OVERRIDE'
 
 echo
 echo "== REACHABILITY: relocations that leave every string pin byte-identical =="

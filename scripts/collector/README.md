@@ -52,6 +52,26 @@ tmux focus hooks   ─┼─► emit (pure shell, hot path) ─► spool/current
   Both tailers share `claude/_shared.py` (ts/project/emit/root/iter helpers) and run
   on the same 5-min `claude-activity-source` timer (both hosts).
   Layer B (`kind=session-insight`, qualitative goal/outcome/friction) is a later PR.
+- `mention_scan.py` — pure regex scanner for cross-platform **mentions** (clawgate
+  task ids, GitHub issues/PRs `owner/repo#N` / `repo#N`, ClickUp `868…` ids). No
+  I/O, no subprocess. `session-tailer.py` runs it over each session's **assistant
+  text** in the same pass and emits one `source=mentions, kind=mention-detected`
+  event per distinct mention, with `platform` / `reference_id` / `url` /
+  `context` / `candidates` in the payload (unknown keys → `payload`, so **no
+  schema change**). A bare `#N` could be either a clawgate task or a GitHub
+  issue, so it is emitted as `platform=ambiguous` with **no** url — the row
+  records the reference that was made, never a guess about which one it was.
+  Mentions are deduped per session in `session-summary-state.json` (`mentions`
+  key, capped) so the ~7 rollup re-emits a session makes per day do not
+  re-ship them. It lives at the collector ROOT, not inside `claude/`, because
+  `scripts/mention-open.py` — the Alacritty click-to-open hint handler — resolves
+  a click with the **same** module, so what the terminal underlines and what the
+  telemetry records cannot drift. A root module needs its own `home.file` entry
+  in `nix/home.nix`; `scripts/tests/test_collector_deploy_declares.py` derives
+  that requirement from the tailer's import line.
+  ⚠ No deadman change is needed: `deadman.py` measures the evaluated set from
+  what is in ClickHouse rather than from a declared table, so `mentions` joins on
+  its own once it clears the baseline and cannot alarm before then.
 - **External emitters** (write to the same spool, live outside this dir):
   `browser-ext/receiver.py` (`source=browser, kind=nav` — page nav/scroll from the
   collector's MV3 extension) and the **browser-bridge server**

@@ -81,7 +81,21 @@ _FTS_PREDICATE = re.compile(
     r"(\w+)\.search\s+@@\s+websearch_to_tsquery\('english',\s*%s\)", re.IGNORECASE)
 
 
-_IS_DDL = re.compile(r"CREATE\s+(SCHEMA|TABLE|INDEX)\b", re.IGNORECASE)
+_IS_DDL = re.compile(r"(CREATE\s+(SCHEMA|TABLE|INDEX)|ALTER\s+TABLE)\b",
+                     re.IGNORECASE)
+
+# 🔴 `ALTER TABLE signal.x ADD COLUMN IF NOT EXISTS y T` — the MIGRATION shape.
+# sqlite has `ALTER TABLE … ADD COLUMN` but NOT the `IF NOT EXISTS` clause, and
+# re-adding an existing column is a hard error there, so the idempotency that
+# `ensure_schema()` relies on has to be emulated: the substrate checks
+# `PRAGMA table_info` and skips the statement when the column is already
+# present, which is exactly what Postgres does. Emulated rather than dropped, on
+# purpose — dropping it would leave the column missing and make every mentions
+# assertion fail for a substrate reason instead of a code one.
+_ALTER_ADD_COLUMN = re.compile(
+    r"^ALTER\s+TABLE\s+signal\.(\w+)\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+    r"(\w+)\s+(.+?)\s*$",
+    re.IGNORECASE | re.DOTALL)
 
 
 class TranslationError(AssertionError):
@@ -206,6 +220,8 @@ class SqliteCursor:
     def _execute(self, sql, params=None):
         self._conn.executed.append((" ".join(str(sql).split()), params))
         if _IS_DDL.match(str(sql).strip()):
+            if self._maybe_add_column(str(sql).strip()):
+                return
             translated = translate_ddl(sql)
             if translated is None:
                 return                     # no sqlite equivalent; documented above
@@ -214,6 +230,32 @@ class SqliteCursor:
         translated = translate_dml(sql)
         translated, tparams = translate_params(translated, params)
         self._cur.execute(translated, tparams)
+
+    def _maybe_add_column(self, sql: str) -> bool:
+        """Handle an `ADD COLUMN IF NOT EXISTS` migration. True if handled.
+
+        Emulates Postgres's `IF NOT EXISTS` (see `_ALTER_ADD_COLUMN`). Raises on
+        an ALTER shape it does not recognise rather than passing it through —
+        the same rule the rest of this translator follows, because a silently
+        mistranslated migration would make every assertion about the migrated
+        column vacuous.
+        """
+        if not re.match(r"^ALTER\s+TABLE\b", sql, re.IGNORECASE):
+            return False
+        m = _ALTER_ADD_COLUMN.match(" ".join(sql.split()))
+        if not m:
+            raise TranslationError(
+                f"HARNESS BROKEN: an ALTER TABLE the substrate cannot translate "
+                f"reached sqlite:\n{sql}")
+        table, column, coltype = m.group(1), m.group(2), m.group(3)
+        existing = {r[1] for r in
+                    self._cur.execute(f"PRAGMA signal.table_info({table})").fetchall()}
+        if column in existing:
+            return True                    # Postgres's IF NOT EXISTS, emulated
+        for pattern, repl in _TYPE_MAP:
+            coltype = re.sub(pattern, repl, coltype)
+        self._cur.execute(f"ALTER TABLE signal.{table} ADD COLUMN {column} {coltype}")
+        return True
 
     def _rows(self, rows):
         if not self._dict_rows:

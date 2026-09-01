@@ -63,6 +63,9 @@ import {
   parsePageContext, annotatePageContext,
   // annotated text: structured element extraction for `text --annotated`.
   annotatedTextFn, ANNOTATED_TEXT_MAX_ITEMS_DEFAULT, byteCapElements,
+  // `bw://` tab references: the toolbar-click → clipboard path. Pure builder +
+  // its validation, so the refusals are unit-testable without a browser.
+  buildTabRef,
 } from "./protocol.js";
 
 // The BUILD MARKER (#324) — a generated LITERAL that travels with THIS module
@@ -1934,6 +1937,174 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// --- toolbar click → copy a `bw://` tab reference --------------------------- //
+// The manifest has always declared a click-only `action` (icon + title, no
+// popup) with NOTHING listening, so clicking the toolbar icon was a silent
+// no-op. It now copies a `bw://<host>/<instance>/<tabId>` reference for the tab
+// the operator is looking at — see protocol.js `buildTabRef` for the format and
+// why each field is in it.
+//
+// 🔴 THE CLIPBOARD IS NOT REACHABLE FROM AN MV3 SERVICE WORKER. There is no
+// `document`, so `navigator.clipboard.writeText()` is undefined here; and
+// `navigator.clipboard` in a page injected via chrome.scripting needs that
+// document to be FOCUSED, which it is not after a toolbar click (focus is in
+// browser chrome), and is refused outright on a strict-CSP page — the same class
+// as trap #2 in SKILL.md, which would make this feature fail precisely on
+// GitHub. So the copy goes through an OFFSCREEN DOCUMENT with reason
+// `CLIPBOARD`, which is Chrome's supported path for exactly this and is
+// independent of the page: it works on `brave://` pages and PDFs too.
+const TAB_REF_BADGE_MS = 2500;          // how long the ✓/✗ badge stays up
+const TAB_REF_WHOAMI_BUDGET_MS = 3000;  // the /whoami read is on the click path
+const TAB_REF_CLIPBOARD_BUDGET_MS = 3000;
+// The two budgets, read through one function so a test can shorten them without
+// waiting 3s per case — and, more to the point, so the BOUND ITSELF is a seam a
+// test can assert on. Pinning the constant is not the same claim as pinning that
+// the click path uses it (the same gap `loopTiming` exists to close one level
+// up). Production passes nothing and gets the constants above.
+function tabRefTiming() {
+  const o = (typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_TAB_REF_TIMING) || {};
+  return {
+    whoamiMs: o.whoamiMs != null ? o.whoamiMs : TAB_REF_WHOAMI_BUDGET_MS,
+    clipboardMs: o.clipboardMs != null ? o.clipboardMs : TAB_REF_CLIPBOARD_BUDGET_MS,
+    badgeMs: o.badgeMs != null ? o.badgeMs : TAB_REF_BADGE_MS,
+  };
+}
+const OFFSCREEN_URL = "offscreen.html";
+// The message envelope the offscreen document answers. `target` namespaces it so
+// an options page (or any future extension context) that also listens cannot
+// answer for it — sendMessage fans out to EVERY context except the sender.
+const OFFSCREEN_CLIPBOARD_TARGET = "offscreen-clipboard";
+
+// The host label, read from the bridge itself. It is deliberately NOT cached:
+// the extension has no other way to learn it, and a cached label would survive
+// the profile being carried to the other host — which is the one thing the ref's
+// host field exists to catch.
+async function fetchHostLabel(cfg) {
+  let res;
+  try {
+    res = await fetch(`${base(cfg.port)}/whoami`,
+                      { headers: authHeaders(cfg.token) });
+  } catch (e) {
+    throw new Error("bridge not reachable — is browser-bridge running?");
+  }
+  if (res.status === 401 || res.status === 403) {
+    throw new Error("bridge rejected the token — re-paste it in Options");
+  }
+  if (!res.ok) throw new Error(`bridge returned HTTP ${res.status}`);
+  const body = await res.json();
+  return (body && body.host && body.host.label) || "";
+}
+
+// Ensure the offscreen document exists, tolerating the two races that matter:
+// `hasDocument` is absent on older Chromium, and two rapid clicks can both see
+// "no document" and both call createDocument (the second rejects).
+async function ensureOffscreenDocument() {
+  if (!chrome.offscreen || !chrome.offscreen.createDocument) {
+    throw new Error("this browser has no offscreen API (needs Chromium 109+)");
+  }
+  try {
+    if (chrome.offscreen.hasDocument && await chrome.offscreen.hasDocument()) {
+      return;
+    }
+  } catch (e) { /* fall through and let createDocument decide */ }
+  try {
+    await chrome.offscreen.createDocument({
+      url: OFFSCREEN_URL,
+      reasons: ["CLIPBOARD"],
+      justification: "write a bw:// tab reference to the clipboard",
+    });
+  } catch (e) {
+    // "Only a single offscreen document may be created" — someone won the race,
+    // which is the outcome we wanted anyway.
+    if (!/single offscreen/i.test(String((e && e.message) || e))) throw e;
+  }
+}
+
+async function writeClipboard(text) {
+  await ensureOffscreenDocument();
+  try {
+    const reply = await chrome.runtime.sendMessage({
+      target: OFFSCREEN_CLIPBOARD_TARGET, type: "copy", text,
+    });
+    // 🔴 A missing/!ok reply is a FAILURE, not a maybe. execCommand("copy")
+    // reports false rather than throwing, so believing an absent reply is how
+    // the badge would say ✓ over an empty clipboard.
+    if (!reply || !reply.ok) {
+      throw new Error(`clipboard write refused${reply && reply.error ? `: ${reply.error}` : ""}`);
+    }
+  } finally {
+    // Close it again rather than leaving a hidden document alive: this worker's
+    // lifetime is load-bearing (the long-poll IS the keepalive), and an
+    // always-present offscreen document changes that lifetime for a feature
+    // that runs for ~20ms per click.
+    try {
+      if (chrome.offscreen && chrome.offscreen.closeDocument) {
+        await chrome.offscreen.closeDocument();
+      }
+    } catch (e) { /* best-effort */ }
+  }
+}
+
+// Badge + tooltip are the whole feedback surface. Deliberately NOT
+// chrome.notifications: that needs another permission on a live-cookie
+// extension, and the operator is looking at the toolbar button they just
+// clicked.
+async function flashBadge(text, color, title) {
+  if (!chrome.action) return;
+  try {
+    await chrome.action.setBadgeText({ text });
+    if (chrome.action.setBadgeBackgroundColor) {
+      await chrome.action.setBadgeBackgroundColor({ color });
+    }
+    await chrome.action.setTitle({ title });
+    setTimeout(() => {
+      try {
+        chrome.action.setBadgeText({ text: "" });
+        chrome.action.setTitle({ title: "Browser Bridge" });
+      } catch (e) { /* the worker may have been suspended; harmless */ }
+    }, tabRefTiming().badgeMs);
+  } catch (e) { /* feedback is best-effort — never mask the real outcome */ }
+}
+
+// Returns a {ok, ref?, error?} record. It NEVER throws: it is an event-listener
+// body, so a rejection would surface only as an unhandled promise in a worker
+// nobody is watching. Exported for tests/action_click.test.mjs, which drives it
+// against a mocked chrome; nothing in the extension imports it.
+async function handleActionClick() {
+  try {
+    const cfg = await config();
+    const tab = await activeTab();                   // throws no_active_tab
+    const host = await promiseWithTimeout(
+      fetchHostLabel(cfg), tabRefTiming().whoamiMs, "whoami", {}, "op_timeout");
+    const ref = buildTabRef({
+      host, label: cfg.label, instanceId: cfg.instanceId, tabId: tab.id,
+    });
+    await promiseWithTimeout(writeClipboard(ref), tabRefTiming().clipboardMs,
+                             "clipboard", {}, "op_timeout");
+    await flashBadge("✓", "#1a7f37", `Copied ${ref}`);
+    return { ok: true, ref };
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    const human = msg === "no_active_tab" ? "no active tab to reference" : msg;
+    await flashBadge("✗", "#b42318", `Browser Bridge — ${human}`);
+    return { ok: false, error: human };
+  }
+}
+
+// Wire the toolbar click to the handler above. Extracted from startBackground()
+// so a test can drive the REGISTRATION rather than only the handler: an audit
+// replaced the whole registration with `if (false) {}` and every one of the 549
+// node tests and 33 pytest cases stayed green, because `handleActionClick` is
+// exported and was only ever called directly. That is the seam nobody owned —
+// on the one path in this subsystem that cannot be live-verified from here.
+// `action` is a parameter so the test can pass its own recorder; production
+// passes nothing and gets chrome.action.
+function registerActionClick(action = (typeof chrome !== "undefined" && chrome.action)) {
+  if (!action || !action.onClicked) return false;
+  action.onClicked.addListener(() => { handleActionClick(); });
+  return true;
+}
+
 // --- MV3 keepalive + background wiring -------------------------------------- //
 // All the real-browser side effects (event listeners, the keepalive alarm, and the
 // immediate loop kick) are grouped here so a unit test can import this module for its
@@ -1942,6 +2113,7 @@ function sleep(ms) {
 function startBackground() {
   chrome.runtime.onInstalled.addListener(() => loop());
   chrome.runtime.onStartup.addListener(() => loop());
+  registerActionClick();
   chrome.alarms.create("bridge-keepalive", { periodInMinutes: 1 });
   chrome.alarms.onAlarm.addListener((a) => {
     // keepaliveTick, NOT loop(): a bare loop() call hits `if (running) return`
@@ -1985,8 +2157,22 @@ if (!(typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_NO_AUTOSTAR
 // suite stayed green, because the relationship test reads the constant while the
 // behavioural tests inject an override. Exporting it lets one assertion close that
 // gap without a 1.5s timing test.
+// `handleActionClick` is exported for TESTS only — the toolbar-click path has no
+// wire surface at all (no op, no /cmd, no result envelope), so the ONLY way to
+// assert it copies the right string, and refuses rather than copying a wrong
+// one, is to call it against a mocked chrome. Nothing in the extension imports
+// it; the listener above closes over it directly.
+// `registerActionClick`, `OFFSCREEN_CLIPBOARD_TARGET` and `OFFSCREEN_URL` are
+// exported for TESTS only. The first is the wiring seam described above. The
+// other two are the CROSS-FILE literals: this worker names a target string and a
+// page url that only `offscreen.js` and `offscreen.html` can honour, in two
+// other files, with no shared module and no schema — the same shape as the
+// CLI↔protocol.js seam that already has a guard. Renaming either half alone left
+// the whole suite green (measured: 7 of 8 offscreen mutants SURVIVED), so
+// tests/offscreen_clipboard.test.mjs compares them.
 export { execute, OPS, ALLOWED_OPS, cdpAttached, loop, emulationState,
-         documentEmulation, loopTiming };
+         documentEmulation, loopTiming, handleActionClick, registerActionClick,
+         OFFSCREEN_CLIPBOARD_TARGET, OFFSCREEN_URL };
 
 // A read/reset window onto the loop's private liveness state, for tests.
 export const loopState = {

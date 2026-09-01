@@ -131,6 +131,12 @@ __all__ = [
     "SubsystemMatch",
     "AmbiguousRef",
     "Association",
+    "TaskRef",
+    "TaskRefError",
+    "TAG_MAX_RUNES",
+    "parse_task_ref",
+    "format_task_refs",
+    "lossy_tag_for",
     "normalize_ref",
     "split_kind",
     "path_refs",
@@ -343,6 +349,208 @@ class MalformedEntry:
         return f"malformed index entry `{self.label}`: {self.reason}"
 
 
+# --- Task refs -----------------------------------------------------------------
+#
+# 🔴 THE ID HALF IS OPAQUE AND THIS MODULE ENUMERATES NO SYSTEMS.
+#
+# An entry says which tasks it answers as `<system>:<id>`. The split is on the
+# FIRST colon and nothing else is interpreted, which is what makes the schema
+# outlive the three systems in use today: `linear:ENG-441` and `jira:PROJ-7`
+# store, validate and round-trip here without this file learning either name.
+# URL resolution IS system-specific and lives elsewhere, deliberately — that is
+# the one place a system list is legitimate, and keeping it out of the parser is
+# what stops an unknown system becoming an unstorable one.
+#
+# 🔴 VERBATIM MEANS VERBATIM: `#` SURVIVES, AND THAT IS THE POINT.
+# GitHub's lossless form is `owner/repo#N`, so `github:innovation-upstream/devrc#428`
+# is one ref whose id half is `innovation-upstream/devrc#428`. Any encoding that
+# cannot carry a `#` cannot carry a GitHub reference — see `lossy_tag_for` below
+# for what happens when one tries.
+#
+# The system half is normalized (lowercase, `-`-folded) because it is an
+# identifier this code compares. The id half is NEVER normalized because it is an
+# identifier some OTHER system compares, and folding `ENG-441` to `eng-441` would
+# hand Linear a key it does not recognise.
+
+_TASK_REF_SPLIT = ":"
+
+TAG_MAX_RUNES = 64
+"""clawgate's tag length limit, which `lossy_tag_for` derives output for."""
+
+
+@dataclass(frozen=True)
+class TaskRef:
+    """One `<system>:<id>` reference from an entry's `tasks:` front matter."""
+
+    system: str
+    """Normalized system name — lowercased and `-`-folded, like every other ref."""
+
+    ident: str
+    """The id half, BYTE-IDENTICAL to what the file carried. Never normalized."""
+
+    raw: str
+    """The whole ref exactly as written, for evidence and for error messages."""
+
+    def __str__(self) -> str:
+        return f"{self.system}{_TASK_REF_SPLIT}{self.ident}"
+
+
+class TaskRefError(ValueError):
+    """A `tasks:` entry that is not a well-formed `<system>:<id>` ref."""
+
+
+def parse_task_ref(raw: object) -> TaskRef:
+    """`<system>:<id>` -> `TaskRef`, or raise `TaskRefError` naming the fix.
+
+    Split on the FIRST colon only. Both halves must be non-empty after stripping
+    surrounding whitespace — an empty half is the failure this rejects, because
+    `:428` and `github:` each look like a ref and address nothing.
+
+    Whitespace INSIDE either half is rejected too. A ref is a single token and a
+    space in one almost always means an inline list lost its brackets
+    (`tasks: clickup:868abc123 github:o/r#1`), which would otherwise store as one
+    ref with a nonsense id and never resolve.
+    """
+    if not isinstance(raw, str):
+        raise TaskRefError(
+            f"task ref {raw!r} is {type(raw).__name__}, not a string — "
+            f"write it as `<system>:<id>`"
+        )
+    text = raw.strip()
+    if not text:
+        raise TaskRefError("task ref is empty — write it as `<system>:<id>`")
+    system, sep, ident = text.partition(_TASK_REF_SPLIT)
+    if not sep:
+        raise TaskRefError(
+            f"task ref {raw!r} has no `:` — write it as `<system>:<id>`, "
+            f"e.g. `clickup:868abc123` or `github:owner/repo#428`"
+        )
+    system, ident = system.strip(), ident.strip()
+    if not system:
+        raise TaskRefError(
+            f"task ref {raw!r} has an empty system half — write it as `<system>:<id>`"
+        )
+    if not ident:
+        raise TaskRefError(
+            f"task ref {raw!r} has an empty id half — write it as `<system>:<id>`"
+        )
+    if any(c.isspace() for c in system) or any(c.isspace() for c in ident):
+        raise TaskRefError(
+            f"task ref {raw!r} contains whitespace — one ref per list item; "
+            f"write several as `tasks: [a, b]`"
+        )
+    # 🔴 A COMMA IS A SEPARATOR IN THE FORM THIS SCHEMA IS WRITTEN IN, so a ref
+    # containing one cannot survive its own serialization: `format_task_refs`
+    # emits `tasks: [clickup:a,b]`, the inline-list reader splits on `,`, and the
+    # entry comes back MALFORMED and invisible to every reader. Rejecting it at
+    # parse time is the only place that keeps "accepted" and "round-trips" the
+    # same set — a writer-side check would still let a hand-written file through.
+    if "," in text:
+        raise TaskRefError(
+            f"task ref {raw!r} contains a comma, which separates items in "
+            f"`tasks: [a, b]` — a ref cannot contain one"
+        )
+    # Control characters (NUL, ESC, a stray newline) round-trip through the file
+    # and reach a terminal, a JSON payload and an error message. Nothing legible
+    # needs them, and a task id containing one is a corrupted read, not an id.
+    # C0 (0x00-0x1F), DEL (0x7F) and C1 (0x80-0x9F). C1 is included because the
+    # claim is "printable text": omitting it left the check narrower than the
+    # sentence describing it, which is the defect this module keeps finding in
+    # its own guards.
+    if any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in text):
+        raise TaskRefError(
+            f"task ref {raw!r} contains a control character — task ids are "
+            f"printable text"
+        )
+    normalized_system = normalize_ref(system)
+    if not normalized_system:
+        raise TaskRefError(
+            f"task ref {raw!r} has a system half that normalizes to the empty string"
+        )
+    return TaskRef(system=normalized_system, ident=ident, raw=text)
+
+
+def format_task_refs(refs: "Sequence[TaskRef | str]") -> str:
+    """Refs -> the single front-matter LINE that reads back as the same refs.
+
+    Inline flow form on ONE line, on purpose and not as a style preference: a
+    wrapped list on a key the parser type-checks is what makes a whole entry
+    MALFORMED and invisible to every reader, and this repo has already paid for
+    that once (`subsystem_touch` carries the incident). A writer that emits one
+    line cannot produce the wrapped shape at all.
+
+    Returns `""` for no refs, so a caller can omit the key entirely rather than
+    writing `tasks: []` — an empty list and an absent key mean the same thing and
+    the absent one is what 120 of 120 existing entries carry today.
+
+    🔴 EVERY INPUT IS RE-PARSED, INCLUDING A `TaskRef`. An earlier version
+    short-circuited on `isinstance(r, TaskRef)` and re-parsed only bare strings —
+    which left the claim below false, because `TaskRef` is an exported frozen
+    dataclass with no validation of its own: `TaskRef("clickup", "a,b", "x")`
+    constructs happily and rendered `tasks: [clickup:a,b]`, a line the inline
+    reader splits into `clickup:a` and `b` — MALFORMED entry, invisible to every
+    reader. A hand-built `TaskRef` carrying a newline was worse still.
+
+    So the shortcut is gone. `parse_task_ref` is the single validator and it runs
+    on the way out as well as the way in, which is what makes "accepted by the
+    writer" and "accepted by the reader" the same set rather than merely a
+    sentence claiming they are. Re-parsing a `TaskRef` is a few microseconds
+    against a function that writes one line per entry.
+    """
+    items = [str(parse_task_ref(str(r))) for r in refs]
+    if not items:
+        return ""
+    return f"tasks: [{', '.join(items)}]"
+
+
+def lossy_tag_for(ref: TaskRef) -> str:
+    """A ref -> the flattened `<system>:<slug>` shape a TAG surface can hold.
+
+    🔴 DERIVATION ONLY. There is deliberately no inverse, and adding one would be
+    a bug rather than a feature. clawgate's tag grammar is `[a-z0-9._/-]`, at most
+    one colon, 64 runes — `#` is illegal — so a GitHub ref must lose structure to
+    become a tag at all, and the flattening is not injective:
+
+        github:zacxdev/homelab-infra#429   ->  github:zacxdev-homelab-infra-429
+        github:zacxdev-homelab/infra#429   ->  github:zacxdev-homelab-infra-429
+
+    Two distinct refs, one tag. `github-mirror`'s own docstring calls this "a
+    silent correlation collapse". So the lossless ref is the source of truth and
+    the tag is computed FROM it on the way out; anything that parses a tag back
+    into a ref is inventing one of the two originals with even odds.
+
+    🔴 THE GRAMMAR IS ENFORCED, NOT MERELY DESCRIBED. A docstring that states a
+    constraint the code does not apply is a claim no reader can rely on, and the
+    two failures here are reachable from refs `parse_task_ref` accepts:
+
+      * an ident of pure punctuation (`github:###`) normalizes to the empty
+        string, yielding the tag `github:` — an EMPTY slug half that collides
+        with every other such ref, which is the correlation collapse again;
+      * a long ident (a deep path, a 200-character id) exceeds 64 runes.
+
+    Both raise rather than returning a tag the destination will reject or, worse,
+    silently truncate. Raising is the correct direction: the caller has a
+    lossless ref in hand and can decide, whereas a bad tag propagates.
+
+    ⚠ `TAG_MAX_RUNES` is clawgate's limit, restated here because this function's
+    output is destined for it. It is not enforced anywhere else in this module.
+    """
+    slug = normalize_ref(ref.ident)
+    if not slug:
+        raise TaskRefError(
+            f"task ref {str(ref)!r} has an id half that normalizes to the empty "
+            f"string, so it has no distinguishable tag form"
+        )
+    tag = f"{ref.system}{_TASK_REF_SPLIT}{slug}"
+    if len(tag) > TAG_MAX_RUNES:
+        raise TaskRefError(
+            f"the tag form of {str(ref)!r} is {len(tag)} runes, over the "
+            f"{TAG_MAX_RUNES}-rune tag limit — the ref itself is still valid; "
+            f"only its lossy tag encoding is not"
+        )
+    return tag
+
+
 # --- The shared predicate ------------------------------------------------------
 
 
@@ -435,6 +643,18 @@ class SubsystemEntry:
     filename: str
     """`<slug>.md` or `<slug>.<kind>.md` — the name a candidate list must show."""
 
+    tasks: tuple[TaskRef, ...] = ()
+    """The tasks this entry answers, in FILE ORDER, deduped, never normalized.
+
+    Defaulted and appended LAST on purpose: every existing construction site —
+    including the ones in the test suite — builds an entry without it, and a
+    field with no default in the middle of the list would break all of them for
+    a key that 120 of 120 live entries do not carry.
+
+    Order is the file's, not sorted, because a hand-maintained list has an author's
+    ordering and re-sorting it would make every read-write cycle a diff.
+    """
+
     @property
     def ref(self) -> str:
         """The canonical ref that addresses this entry unambiguously."""
@@ -446,7 +666,9 @@ class SubsystemEntry:
 
         Accepted keys: `service` (required), `scope` or `repo` (required, one of),
         `aliases` (optional sequence), `kind` (optional), `filename` (optional —
-        supplied by the loader, otherwise derived).
+        supplied by the loader, otherwise derived), `tasks` (optional sequence of
+        `<system>:<id>` refs) or `task` (optional, scalar sugar for a one-element
+        `tasks`).
         """
 
         def bad(why: str) -> MalformedEntryError:
@@ -535,6 +757,58 @@ class SubsystemEntry:
             # ambiguity is measured per ENTRY and never per alias-occurrence.
             normalized.add(na)
 
+        # --- `tasks:` / `task:` -------------------------------------------------
+        # 🔴 VALIDATED HERE AND NOWHERE ELSE. `subsystem_touch --validate` answers
+        # "would the loader accept this file?" by constructing exactly what the
+        # loader constructs (see `entry_mapping`), so putting the check here is
+        # what makes the validator and the reader agree by construction rather
+        # than by two people remembering to edit both. A second spelling at the
+        # validator is the duplicated predicate `claude/RULES.md` names.
+        raw_tasks_in = mapping.get("tasks")
+        raw_task_in = mapping.get("task")
+        if raw_tasks_in and raw_task_in:
+            raise bad(
+                "both `tasks:` and `task:` are set — `task:` is sugar for a "
+                "one-element `tasks:`; keep one of them"
+            )
+        if raw_tasks_in:
+            # `task:` is a SCALAR by definition, so a list there is a mistake worth
+            # naming rather than silently flattening.
+            task_items: object = raw_tasks_in
+        elif raw_task_in:
+            if not isinstance(raw_task_in, str):
+                raise bad(
+                    f"`task:` must be a single `<system>:<id>` ref, got "
+                    f"{type(raw_task_in).__name__} — use `tasks: [...]` for several"
+                )
+            task_items = [raw_task_in]
+        else:
+            task_items = []
+        if isinstance(task_items, (str, bytes)):
+            raise bad(
+                "`tasks:` must be a list, not a bare string — write "
+                "`tasks: [<system>:<id>]`, or use `task:` for a single ref"
+            )
+        if not isinstance(task_items, _AbcSequence):
+            raise bad(f"`tasks:` must be a list, got {type(task_items).__name__}")
+        tasks: list[TaskRef] = []
+        seen_tasks: set[tuple[str, str]] = set()
+        for item in task_items:
+            try:
+                ref = parse_task_ref(item)
+            except TaskRefError as exc:
+                # The ref's own message already names the fix; `bad` prefixes the
+                # source, so the operator gets file AND remedy in one line.
+                raise bad(str(exc)) from exc
+            # Deduped, not rejected — the same reasoning as `aliases:` above. One
+            # task written twice is one task, and refusing the file over it would
+            # make a harmless duplicate invisible-until-fixed.
+            key = (ref.system, ref.ident)
+            if key in seen_tasks:
+                continue
+            seen_tasks.add(key)
+            tasks.append(ref)
+
         derived_filename = f"{slug}.{kind}.md" if kind else f"{slug}.md"
         return cls(
             slug=slug,
@@ -543,6 +817,7 @@ class SubsystemEntry:
             aliases=tuple(sorted(normalized)),
             raw_aliases=tuple(raw_aliases),
             filename=filename if isinstance(filename, str) else derived_filename,
+            tasks=tuple(tasks),
         )
 
 
@@ -1665,8 +1940,8 @@ def _bullet_date(first_line: str) -> str | None:
 #
 # Deliberately separate from everything above: the pure functions never touch the
 # filesystem, so the tests exercise them with in-memory fixtures and NEVER read
-# the real store (which is client-confidential, unbacked-up, and rewritten hourly
-# by the autocommit timer).
+# the real store (which is client-confidential, curated, and rewritten hourly by
+# the autocommit timer while other sessions write to it).
 
 
 def parse_front_matter(text: str) -> dict[str, object]:
@@ -1682,17 +1957,185 @@ def parse_front_matter(text: str) -> dict[str, object]:
       * P1 runs this from the collector timer's environment; a lib with no
         third-party import is one fewer thing that can be absent there.
 
-    Handles the two shapes the real corpus uses: `key: value` and an inline flow
-    list `key: [a, b, c]`. Quotes are stripped. Unknown keys are preserved so a
-    caller can see them; `SubsystemEntry.from_mapping` ignores what it does not
-    need.
+    Handles the three shapes: `key: value`, an inline flow list `key: [a, b, c]`,
+    and a block list (`key:` on its own line followed by `- item` lines). Quotes
+    are stripped. Unknown keys are preserved so a caller can see them;
+    `SubsystemEntry.from_mapping` ignores what it does not need.
+
+    🔴 THE BLOCK FORM IS PARSED BECAUSE NOT PARSING IT CORRUPTED THE MAPPING —
+    it was never merely "ignored". Measured on the real parser before this
+    change, `tasks:` followed by `  - clickup:868abc123` and
+    `  - github:innovation-upstream/devrc#428` produced::
+
+        {'service': 'thing', 'tasks': '',
+         '- clickup': '868abc123',
+         '- github': 'innovation-upstream/devrc#428'}
+
+    — the key silently empty and EVERY item promoted to a phantom front-matter
+    key by its own internal colon. A caller reading that mapping sees keys nobody
+    wrote and loses the data that was written. (A ref-shaped item always has a
+    colon, so the promotion is the rule here, not the exception: an item WITHOUT
+    one is instead dropped silently. Both halves of that are data loss.)
+    Rejecting the shape would have been the other option and is strictly worse:
+    it leaves the two-line hazard in the parser for every future key.
+
+    Widening this was verified SAFE by measurement rather than assumed: across
+    all 120 front-matter blocks in the live store, the count of lines beginning
+    `- ` is **zero**, so no existing entry changes meaning. That measurement is
+    what makes this additive; re-take it before widening further.
+
+    A block item is still ONE line. A wrapped item is not rescued here, and the
+    inline flow list remains the writer's form (`format_task_refs`) for exactly
+    that reason.
+
+    🔴 A BARE `key:` WITH NO ITEMS UNDER IT STILL READS AS `""`, NOT `[]`.
+    A block list is recognised by LOOKAHEAD — the key opens one only when a
+    following item actually exists — so no existing key changes type. That
+    matters concretely: `sensitivity:` is read by callers that call `.strip()` on
+    it, and handing them a list where they have always had a string would be an
+    `AttributeError` in a reader, raised from a file the operator would have to
+    guess at. The narrower rule costs one peek and cannot do that.
     """
     m = _FRONT_MATTER.match(text)
     if not m:
         return {}
     out: dict[str, object] = {}
-    for line in m.group(1).splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
+    lines = m.group(1).splitlines()
+
+    def _is_skippable(raw_line: str) -> bool:
+        return not raw_line.strip() or raw_line.lstrip().startswith("#")
+
+    def _is_block_item(raw_line: str) -> bool:
+        """🔴 ANY `-`-led line is an ITEM, INCLUDING AN EMPTY ONE.
+
+        The narrower `startswith("- ")` is a defect, not a style choice, and it
+        resurrected the exact corruption this parser was widened to fix. A bare
+        `-`, or `- ` with only trailing whitespace, does not satisfy it, so the
+        block scan TERMINATED there and every ref below was promoted to a
+        phantom key again. Worse than the original bug: `tasks` then reads as
+        falsy, `from_mapping` treats the key as absent, and the entry LOADS
+        CLEAN reporting no tasks — the data is gone and every surface says the
+        file is fine. An empty item in the MIDDLE truncates instead, which is
+        the same failure wearing a success costume.
+
+        So membership is decided by the leading `-` alone; whether the item
+        carries a payload is a separate question, answered in `_block_items_from`.
+        """
+        s = raw_line.strip()
+        return s == "-" or s.startswith("- ")
+
+    def _block_items_from(start: int) -> list[str]:
+        """The `- item` run beginning at `start`.
+
+        Stops at the first line that is neither an item, a comment, nor blank.
+        An EMPTY item contributes nothing but does NOT stop the scan — see
+        `_is_block_item`.
+
+        🔴 A BLANK LINE DOES NOT END THE BLOCK, AND AN EARLIER VERSION OF THIS
+        FUNCTION SAID THE OPPOSITE. Making a blank line terminate the scan was a
+        REGRESSION, measured against PyYAML: a list separated from its key by a
+        blank line is ordinary, valid YAML, and breaking there dropped the whole
+        list back out of the scan so its items were promoted to phantom keys —
+        reproducing byte for byte the corruption quoted above, with the entry
+        then LOADING CLEAN because `tasks` was falsy. It was introduced to bound
+        how far a bare `key:` reaches for items; that bound was a fix for a
+        hazard that does not exist, and it cost a correct parse.
+
+        🔴 THE `key:` / list BINDING IS NOT OURS TO NARROW. In YAML a `- ` list
+        belongs to the nearest preceding key, however many blank and comment
+        lines intervene — `yaml.safe_load` on `sensitivity:` + blank + comment +
+        `- x` returns `{'sensitivity': ['x']}`. Diverging from that to keep a key
+        string-typed would make this parser disagree with every other reader of
+        the same bytes. The type question belongs to the CONSUMERS, and they
+        already answer it: every reader of `sensitivity` / `created_by` /
+        `namespace` is `isinstance(..., str)`-guarded and degrades to its
+        fail-safe rather than raising.
+
+        What actually closes the phantom-key class is the outer loop refusing to
+        treat a `-`-led line as a key at all — see the `_is_block_item` skip
+        there. That is the right place for it: it holds no matter where a block
+        scan starts or stops, including for an ORPHAN list with no owning key,
+        which is not valid YAML in the first place (`yaml.safe_load` raises).
+        """
+        items: list[str] = []
+        for j in range(start, len(lines)):
+            candidate = lines[j]
+            if not candidate.strip() or candidate.lstrip().startswith("#"):
+                continue
+            if not _is_block_item(candidate):
+                break
+            item = candidate.strip()[1:].strip().strip("'\"")
+            if item:
+                items.append(item)
+        return items
+
+    def _block_ends_at(start: int) -> int:
+        """The index of the last line belonging to the block opened before
+        `start` — items, interleaved comments and blank lines alike.
+
+        🔴 SWALLOWS EMPTY ITEMS TOO, and must agree with `_block_items_from`
+        about MEMBERSHIP even where it disagrees about CONTENT. The two share
+        `_is_block_item` for exactly that reason — two spellings of one
+        membership rule is what produced the bug this parser was widened to fix.
+
+        ⚠ Trailing blanks and comments are NOT swallowed: `last` only advances on
+        a real member, so a block followed by a blank line and then a key leaves
+        that key readable. Consuming to the last blank would be harmless today
+        and is not done, because "swallow exactly the members" is the property
+        that stays true if the surrounding loop changes.
+
+        ⚠ TWO EQUIVALENT MUTANTS LIVE IN THIS NEIGHBOURHOOD, both measured and
+        stated rather than left for the next sweep to rediscover. The second is
+        narrowing the OUTER loop's skip from `_is_block_item(line)` to
+        `line.strip().startswith("- ")`: a bare `-` has no colon, so
+        `partition(":")` skips it either way. (An earlier note here said "one
+        equivalent mutant remains", which was one short — the same
+        count-nobody-re-derives problem this file keeps correcting elsewhere.)
+
+        The first: removing the blank-line skip here is an EQUIVALENT mutant. It would stop the scan at a
+        blank inside a list, leaving the items after it unswallowed — but the
+        outer loop now SKIPS every `-`-led line, so those items produce no
+        phantom key and nothing downstream can tell the difference. That is
+        defence-in-depth working as intended, not dead code: this function is
+        what keeps the members out of the key space if that outer skip is ever
+        narrowed, and the outer skip is what keeps them out if this is. Neither
+        is testable while the other holds, so BOTH are documented instead of one
+        being deleted as unreachable.
+        """
+        last = start - 1
+        for j in range(start, len(lines)):
+            if not lines[j].strip() or lines[j].lstrip().startswith("#"):
+                continue
+            if _is_block_item(lines[j]):
+                last = j
+                continue
+            break
+        return last
+
+    consumed_through = -1
+    for i, line in enumerate(lines):
+        if i <= consumed_through or _is_skippable(line):
+            continue
+        # 🔴 A `-`-LED LINE IS NEVER A KEY. This single skip is what closes the
+        # phantom-key class, and it closes it independently of where any block
+        # scan begins or ends — which is why it lives here rather than being
+        # implied by a well-behaved scan. Without it, ANY list item the scan does
+        # not claim gets `partition(":")`-ed and its own internal colon makes it
+        # a front-matter key nobody wrote (`- clickup: 868abc123`), while the
+        # real key reads empty.
+        #
+        # ⚠ TWO SHAPES REACH HERE, and an earlier version of this comment named
+        # only the rarer one. (a) A genuine ORPHAN list — no owning key at all —
+        # which is not valid YAML (`yaml.safe_load` raises), so there is nothing
+        # to preserve and skipping is the whole correct behaviour. (b) FAR more
+        # commonly, a `- ` line under a key that already has a SCALAR value,
+        # where an owning key does exist: YAML folds that into a multi-line plain
+        # scalar, and this parser drops it. That is a pre-existing limit of
+        # reading YAML line by line, not something this skip introduces — the
+        # alternative here is not "fold it correctly", it is "invent a key" —
+        # but the justification has to cover the case it actually meets most
+        # often, or it reads as a proof it has not done.
+        if _is_block_item(line):
             continue
         key, sep, value = line.partition(":")
         if not sep:
@@ -1704,6 +2147,17 @@ def parse_front_matter(text: str) -> dict[str, object]:
         if value.startswith("[") and value.endswith("]"):
             items = [v.strip().strip("'\"") for v in value[1:-1].split(",")]
             out[key] = [v for v in items if v]
+        elif not value:
+            block = _block_items_from(i + 1)
+            if block:
+                out[key] = block
+            else:
+                # No items followed, so this is an empty scalar, which is what a
+                # bare `key:` has always meant here. ⚠ NOT the same claim as "a
+                # bare key can never become a list": if a list DOES follow, it
+                # binds, exactly as YAML says.
+                out[key] = value.strip("'\"")
+            consumed_through = _block_ends_at(i + 1)
         else:
             out[key] = value.strip("'\"")
     return out

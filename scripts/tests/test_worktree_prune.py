@@ -1183,7 +1183,9 @@ def test_the_pathspec_batch_sizer_measures_bytes_not_characters(tmp_path, monkey
 
 # ── porcelain parsing ─────────────────────────────────────────────────────────
 
-PORCELAIN = """worktree /home/z/repo
+# 🔴 BYTES. `parse_worktree_porcelain` takes git's raw output, because the path
+# on this call is raw and unquoted — see #944 and the parser's own docstring.
+PORCELAIN = b"""worktree /home/z/repo
 HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 branch refs/heads/main
 
@@ -1216,7 +1218,8 @@ def test_porcelain_parser_reads_every_attribute():
 
 
 def test_porcelain_parser_handles_a_missing_trailing_blank_line():
-    rows = wp.parse_worktree_porcelain("worktree /a\nHEAD " + "e" * 40 + "\nbranch refs/heads/x")
+    rows = wp.parse_worktree_porcelain(
+        b"worktree /a\nHEAD " + b"e" * 40 + b"\nbranch refs/heads/x")
     assert len(rows) == 1 and rows[0]["branch"] == "x"
 
 
@@ -4468,6 +4471,273 @@ def test_an_undecodable_SUBMODULE_path_is_still_detected_and_printable(tmp_path,
     assert "[SUBMODULES" in out, out
 
 
+# ── #944: an undecodable worktree DIRECTORY NAME ─────────────────────────────
+#
+# 🔴 The fixture below is deliberately the NARROWEST one that reproduces:
+# one repo, one worktree whose DIRECTORY NAME holds an undecodable byte, NO
+# submodules anywhere. #935 closed this class for the one call it introduced
+# (`ls-files -z`) and its docstring said explicitly that the class was not
+# closed; this is the rest of it.
+#
+# 🔴 MEASURED before the fix, on `origin/main` and on #935's branch alike:
+# `scan_repo` ABORTED with `UnicodeDecodeError` and printed ZERO rows out of the
+# two it could classify. Pre-existing, not a regression.
+
+UNDECODABLE = b"wt-b\xe9d"                       # not valid utf-8, on purpose
+
+
+def git_bytes(repo: Path, *args: str) -> bytes:
+    """`git()` for a command whose OUTPUT can hold undecodable bytes.
+
+    The `git()` helper above decodes with `text=True`, which is the very defect
+    under test — using it to BUILD the fixture would abort the test before the
+    tool ever ran, and the red would be the harness's, not the tool's.
+    """
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                       check=False, timeout=120)
+    if r.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} in {repo} failed "
+                             f"rc={r.returncode} stderr={r.stderr!r}")
+    return r.stdout
+
+
+def undecodable_worktree(tmp_path: Path, name: str):
+    """(repo, worktree_path, gh) — the #944 fixture, plus its own control.
+
+    The worktree's branch has been squash-merged, so the row is `dead` and the
+    executor will act on it: this fixture has to reach `--execute`, not just the
+    report.
+    """
+    repo = new_repo(tmp_path, name)
+    commit_on_branch(repo, "topic", "feature.txt", "feature\n", "feature")
+    wt = Path(os.fsdecode(os.fsencode(str(tmp_path / name)) + b"-" + UNDECODABLE))
+    git_bytes(repo, "worktree", "add", "-q", str(wt), "topic")
+    squash_merge(repo, "topic", "feature.txt", "squash: feature")
+    assert os.path.isdir(wt), "the fixture worktree must exist on disk"
+
+    # 🔴 THE CONTROL, and the reason a green here cannot mean "the condition
+    # never occurred": git emits this path RAW, and it does NOT decode.
+    # `core.quotePath` is asserted irrelevant by construction below.
+    raw = git_bytes(repo, "worktree", "list", "--porcelain")
+    with pytest.raises(UnicodeDecodeError):
+        raw.decode("utf-8")
+    return repo, wt, gh_stub(tmp_path, [], name=f"gh-{name}")
+
+
+def test_core_quotepath_does_not_apply_to_the_worktree_list_porcelain_path(tmp_path):
+    """Why `-z`-style reasoning does not transfer, stated as a measurement.
+
+    #935's fix rested on quoting having been what kept git's output ASCII. On
+    THIS call there is no quoting to lose: the porcelain output is byte-for-byte
+    identical with `core.quotePath` on and off, so the path is raw either way
+    and nothing about the operator's config makes it safe.
+
+    🔴 AN INVARIANT GUARD ABOUT GIT, NOT A REGRESSION TEST — and it is labelled
+    so it is never counted as one. It pins a property of `git worktree list`
+    that the defect never violated, so it is GREEN on `origin/main` too (it was,
+    measured, while its seven siblings went red). Its job is to fail if a future
+    git starts quoting here, which would silently change what these tests mean.
+    """
+    repo, _wt, _gh = undecodable_worktree(tmp_path, "quotepath")
+    git(repo, "config", "core.quotePath", "true")
+    on = git_bytes(repo, "worktree", "list", "--porcelain")
+    git(repo, "config", "core.quotePath", "false")
+    off = git_bytes(repo, "worktree", "list", "--porcelain")
+    assert on == off, "quoting would have made these differ"
+    assert UNDECODABLE in on, on
+
+
+def test_an_undecodable_worktree_DIRECTORY_NAME_does_not_abort_the_scan(tmp_path):
+    """THE #944 REGRESSION. Red on `origin/main` with `UnicodeDecodeError`.
+
+    Not one bad row — the whole run. `_git`'s `text=True` decodes inside
+    `subprocess.run`, so `list_worktrees` never even sees the failure, and there
+    is no `try:` between `scan_repo` and `sys.exit(main())`. The standard this
+    violates is `is_dir`'s own: a row we cannot tell about is not a reason to
+    abandon the other 750.
+    """
+    repo, wt, gh = undecodable_worktree(tmp_path, "abort")
+
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1)      # must not raise
+    assert len(rows) == 2, [r["path"] for r in rows]
+    # BOTH rows classified — the main checkout AND the undecodable one.
+    assert {r["is_main"] for r in rows} == {True, False}
+    assert all(r["verdict"] for r in rows), rows
+
+
+def test_the_submodule_check_survives_an_undecodable_worktree_NAME(tmp_path):
+    """🔴 THE ABORT THE ISSUE DID NOT NAME — and the reason fixing only the
+    porcelain arm would have MOVED this crash rather than removed it.
+
+    `git rev-parse --git-path modules` ANSWERS with a path this tool never
+    supplied: for a linked worktree it resolves to
+    `<repo>/.git/worktrees/<DIRECTORY NAME>/modules`. So the submodule check
+    aborted on an undecodable worktree name too, under DEFAULT git config, with
+    no `-z` and no submodule anywhere in the fixture — and `execute_removals`
+    re-runs this check between two removals.
+    """
+    repo, wt, _gh = undecodable_worktree(tmp_path, "gitpath")
+
+    # The control: the answer really does carry the undecodable bytes.
+    answer = git_bytes(wt, "rev-parse", "--git-path", "modules")
+    assert UNDECODABLE in answer, answer
+    with pytest.raises(UnicodeDecodeError):
+        answer.decode("utf-8")
+
+    blocked, reasons = wp.worktree_submodules(Path(wt))    # must not raise
+    assert blocked is False, reasons                       # no submodules here
+
+
+def test_an_undecodable_worktree_NAME_is_classified_from_the_real_filesystem_path(tmp_path):
+    """DECODING DIRECTION 1 of 2 — `os.fsdecode`, to REACH the worktree.
+
+    Rendering the path for display and then handing THAT to the filesystem sends
+    U+FFFD to `stat`, which names nothing: the directory reads as absent, every
+    check downstream answers UNKNOWN and the row degrades to `cannot-tell`. The
+    scan would not crash — it would quietly stop being able to answer, which is
+    the failure mode a crash at least announces.
+    """
+    repo, wt, gh = undecodable_worktree(tmp_path, "reach")
+    row = next(r for r in wp.scan_repo(repo, gh, True, 2000, jobs=1)
+               if not r["is_main"])
+
+    assert row["path_exists"] is True, row["evidence"]
+    assert row["dirty"] is False, row["evidence"]
+    assert row["submodules"] is False, row["submodule_reasons"]
+    assert row["verdict"] == "dead", row["verdict_reason"]
+    assert row["removable"] is True, row["blockers"]
+    # …and the field that reaches the filesystem really does hold the BYTES.
+    assert os.fsencode(row["path_fs"]).endswith(UNDECODABLE), row["path_fs"]
+    assert os.path.isdir(row["path_fs"])
+
+
+def test_an_undecodable_worktree_NAME_survives_being_rendered_and_printed(tmp_path, capsys):
+    """DECODING DIRECTION 2 of 2 — `_printable`, to SHOW the worktree.
+
+    `os.fsdecode` round-trips to the filesystem by producing LONE SURROGATES,
+    and a lone surrogate raises `UnicodeEncodeError` at `print()`. Using it for
+    the reported field would MOVE the abort from git's output to the report
+    rather than remove it — measured in #935 round 3, and the trap this issue
+    warned about by name.
+    """
+    repo, wt, gh = undecodable_worktree(tmp_path, "show")
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1)
+    summary = wp.summarize(rows, agent_worktrees_included=True)
+
+    # 🔴 Asserted DIRECTLY, not only through pytest's capture: whether capsys
+    # would surface a UnicodeEncodeError is a fact about the harness, and a test
+    # that leans on it is measuring the harness.
+    text = wp.render_text(rows, summary, verbose=True)
+    text.encode("utf-8")                       # a lone surrogate raises HERE
+    # 🔴 THIS LINE USED TO BE `json.dumps({"summary": summary, "rows": rows})`,
+    # sitting beside the real guard above and LOOKING like a second one. It
+    # could not fail for the surrogate reason: `ensure_ascii=True` is the
+    # default — and is what `main` uses — so a lone surrogate is ESCAPED to
+    # `\udce9` rather than raised on. Measured: `json.dumps('a\udce9b')` returns
+    # `"a\udce9b"`, no exception. A guard that cannot go red is worse than none,
+    # because it stops anyone looking.
+    #
+    # 🔴 AND `ensure_ascii=False` IS NOT THE REPAIR, though it reads like one:
+    # `json.dumps(..., ensure_ascii=False)` does not raise either (it returns a
+    # `str` still holding the surrogate), and the `.encode("utf-8")` that WOULD
+    # raise must then fail on a CORRECT tool, because `path_fs` is supposed to
+    # carry surrogates. The claim actually worth pinning is about the REPORTED
+    # fields, so pin that: every non-`_fs` string on every row survives
+    # `print()`. `main`'s own JSON sinks are exercised for real below.
+    assert json.dumps({"p": "a\udce9b"}) == '{"p": "a\\udce9b"}', "the reason above"
+    for r in rows:
+        for key, value in r.items():
+            if key.endswith("_fs") or not isinstance(value, str):
+                continue
+            value.encode("utf-8")              # a lone surrogate raises HERE
+
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1", "--verbose"])
+    assert rc == wp.RC_OK
+    out = capsys.readouterr().out
+    assert "�" in out, "the undecodable byte should render as U+FFFD"
+    assert "wt-b" in out, out
+
+    # 🔴 …and the OTHER two output sinks, which are separate code paths and
+    # would each have to fail on their own: `--format json` to stdout, and
+    # `--out` to a file opened `encoding="utf-8"`. Reading the file back proves
+    # the bytes landed, not merely that `write_text` returned.
+    dest = tmp_path / "show.json"
+    assert wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                    "--format", "json", "--out", str(dest)]) == wp.RC_OK
+    capsys.readouterr()
+    payload = json.loads(dest.read_text(encoding="utf-8"))
+    row = next(r for r in payload["rows"] if not r["is_main"])
+    assert "�" in row["path"], row["path"]
+    assert os.fsencode(row["path_fs"]).endswith(UNDECODABLE), row["path_fs"]
+
+
+def test_execute_removes_an_undecodable_worktree_and_prints_its_accounting(tmp_path, capsys):
+    """🔴 THE WORST CASE THIS CLASS REACHES: an abort MID-EXECUTE.
+
+    `execute_removals` re-runs `list_worktrees` and the submodule check per row
+    and reads `worktree remove`'s stderr — three decode hazards inside the loop
+    that DELETES things. An abort there fires after some removals have already
+    happened and BEFORE the `execute: removed= skipped= failed=` line, i.e. the
+    operator is left with no record of what was done.
+    """
+    repo, wt, gh = undecodable_worktree(tmp_path, "exec")
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1)
+    targets = [r for r in rows if r.get("removable")]
+    assert len(targets) == 1, [(r["path"], r["verdict"]) for r in rows]
+
+    assert wp.execute_removals(rows, 1) == wp.RC_OK
+    err = capsys.readouterr().err
+    assert "execute: removed=1 skipped=0 failed=0" in err, err
+    assert not os.path.isdir(wt), "the worktree should be gone"
+    # git agrees it is gone — the removal was real, not just reported.
+    assert UNDECODABLE not in git_bytes(repo, "worktree", "list", "--porcelain")
+
+
+def test_a_refused_removal_of_an_undecodable_worktree_still_accounts_for_it(
+        tmp_path, capsys, monkeypatch):
+    """The FAILURE arm — where git NAMES THE PATH BACK AT US.
+
+    git's refusal message quotes the worktree path, so the one call whose whole
+    job is to report a removal that did NOT happen was itself the abort. The
+    dirty check is stubbed False so the executor reaches the removal on a tree
+    git will refuse: that is the only way to the arm, since every real re-check
+    is designed to skip first.
+    """
+    repo, wt, gh = undecodable_worktree(tmp_path, "refuse")
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1)
+    (Path(wt) / "unstaged.txt").write_bytes(b"written after the scan\n")
+    monkeypatch.setattr(wp, "worktree_dirty", lambda p: (False, 0, []))
+
+    rc = wp.execute_removals(rows, 1)
+    err = capsys.readouterr().err
+    assert "execute: removed=0 skipped=0 failed=1" in err, err
+    assert rc == 1
+    assert os.path.isdir(wt), "git should have refused; nothing was removed"
+    assert "FAILED" in err and "�" in err, err
+
+
+def test_a_submodule_store_under_an_undecodable_worktree_NAME_is_named_printably(tmp_path):
+    """`_printable_path`: the message names a path we only hold as surrogates.
+
+    Case F of `worktree_submodules`' table — an EMPTY-of-git-repos `modules/`
+    store, which git refuses on outright — but hung under a worktree whose name
+    is undecodable, so both the store path AND the entry names inside it come
+    back from `os.fsdecode` and neither can be printed as-is.
+    """
+    repo, wt, _gh = undecodable_worktree(tmp_path, "store")
+    store = Path(os.fsdecode(git_bytes(wt, "rev-parse", "--git-path", "modules").strip()))
+    if not store.is_absolute():
+        store = Path(wt) / store
+    store.mkdir(parents=True)
+    (store / os.fsdecode(b"su\xe9b")).mkdir()      # the ENTRY name is bad too
+
+    blocked, reasons = wp.worktree_submodules(Path(wt))
+    assert blocked is True, reasons
+    assert len(reasons) == 1, reasons
+    reasons[0].encode("utf-8")                     # a lone surrogate raises HERE
+    assert reasons[0].count("�") >= 2, reasons[0]  # the store AND the entry
+
+
 def test_the_overlap_line_states_the_measured_overlap_not_an_asserted_one(tmp_path, capsys):
     """DELTA FINDING 2 — the line was gated on both causes being non-zero and
     then DECLARED they overlap. With two DIFFERENT rows they are disjoint and
@@ -4557,3 +4827,348 @@ def test_the_marker_gate_is_path_exists_not_reasons(tmp_path, capsys, monkeypatc
     wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1", "--verbose"])
     out = capsys.readouterr().out
     assert "[submodules UNKNOWN — held back]" in out, out
+
+
+# ── #944 delta: an undecodable REPO DIRECTORY NAME ───────────────────────────
+#
+# 🔴 WHY THIS SECTION EXISTS, AND WHY THE SECTION ABOVE COULD NOT SEE IT. The
+# first round of #944 split the decoding at three sites — the worktree path, the
+# submodule store, the submodule entry names — and MISSED a fourth. `row["repo"]`
+# comes from `discover_repos`/argv, i.e. it is already `os.fsdecode`d, and it
+# went into the row RAW; `render_text` prints it in the per-repo table. So the
+# abort did not go away, it MOVED: `UnicodeDecodeError` inside `subprocess.run`
+# on `origin/main` became `UnicodeEncodeError` at `print(render_text(…))` on the
+# fix's own HEAD, under DEFAULT git config, in the DEFAULT output format.
+#
+#   origin/main   UnicodeDecodeError  list_worktrees -> _git -> subprocess.run
+#   b312ac3f      UnicodeEncodeError  worktree-prune:2064 print(render_text(…))
+#
+# `--format json` survived only by accident: `json.dumps` defaults to
+# `ensure_ascii=True`, which escapes a lone surrogate to `\udce9` instead of
+# raising. The DEFAULT format had no such luck.
+#
+# 🔴 AND THE OLD FIXTURE IS STRUCTURALLY BLIND TO IT. `undecodable_worktree`
+# always puts the bad byte on the LINKED worktree and builds the repo under an
+# ASCII `tmp_path`, so `repo` is ASCII in every one of those tests and no
+# assertion they contain could ever have gone red. The fixture below inverts
+# that: the REPO directory is undecodable and the linked worktree is ASCII, so
+# `repo` is the ONLY field carrying the byte and nothing else can be the cause.
+
+UNDECODABLE_REPO = b"rep\xe9o"                   # not valid utf-8, on purpose
+
+
+def undecodable_repo(tmp_path: Path, name: str, tail: bytes = UNDECODABLE_REPO,
+                     root: "Path | None" = None):
+    """(repo, worktree, gh) — a repo whose OWN directory name is undecodable.
+
+    Built entirely through `git_bytes`: `git()` decodes with `text=True`, which
+    is the defect class under test, so using it to build the fixture would put
+    the red in the harness rather than in the tool.
+
+    🔴 THE LINKED WORKTREE IS DELIBERATELY ASCII, and lives beside the repo
+    rather than under it. That is what isolates the finding: `path`/`path_fs`
+    are then plain ASCII on both rows and the only field that can carry an
+    undecodable byte is `repo`. A worktree nested under the bad directory would
+    have carried it too and the test could not say which field crashed.
+
+    The worktree's branch is squash-merged, so the row is `dead` and the
+    executor will act on it.
+
+    🔴 `root` IS A REAL PARAMETER, NOT CONVENIENCE. Two of these fixtures under
+    the SAME parent is the only way to build two repos whose PRINTABLE paths are
+    identical — which is what a mutant that groups or counts on the lossy form
+    has to be measured against. With each under its own `tmp_path / name` the two
+    printable strings differ in the parent component, the collapse never happens
+    and such a mutant SURVIVES a green suite. Caught by reasoning through the
+    mutants before running them; the first draft of the twin test had exactly
+    that blind spot.
+    """
+    root = root or tmp_path / name
+    root.mkdir(parents=True, exist_ok=True)
+    repo = Path(os.fsdecode(os.fsencode(str(root)) + b"/" + tail))
+    os.makedirs(repo)
+    git_bytes(repo, "init", "-q", "-b", "main")
+    write(repo / "README.md", "base\n")
+    git_bytes(repo, "add", "README.md")
+    git_bytes(repo, "commit", "-qm", "base")
+    git_bytes(repo, "remote", "add", "origin", "https://github.com/fixture/repo.git")
+    sha = git_bytes(repo, "rev-parse", "main").decode("ascii").strip()
+    git_bytes(repo, "update-ref", "refs/remotes/origin/main", sha)
+    git_bytes(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+    git_bytes(repo, "checkout", "-q", "-b", "topic")
+    write(repo / "feature.txt", "feature\n")
+    git_bytes(repo, "add", "feature.txt")
+    git_bytes(repo, "commit", "-qm", "feature")
+    git_bytes(repo, "checkout", "-q", "main")
+
+    wt = root / f"{name}-wt"                     # ASCII, on purpose
+    git_bytes(repo, "worktree", "add", "-q", str(wt), "topic")
+
+    # a REAL squash merge, so the linked worktree's row is `dead`
+    git_bytes(repo, "checkout", "topic", "--", "feature.txt")
+    git_bytes(repo, "add", "feature.txt")
+    git_bytes(repo, "commit", "-qm", "squash: feature")
+    sha = git_bytes(repo, "rev-parse", "main").decode("ascii").strip()
+    git_bytes(repo, "update-ref", "refs/remotes/origin/main", sha)
+
+    # 🔴 THE CONTROL. A green here must not be able to mean "the fixture was
+    # ASCII after all": the repo path really does hold a byte that is not utf-8.
+    with pytest.raises(UnicodeDecodeError):
+        os.fsencode(str(repo)).decode("utf-8")
+    assert os.path.isdir(repo) and os.path.isdir(wt)
+    return repo, wt, gh_stub(tmp_path, [], name=f"gh-{name}")
+
+
+def test_an_undecodable_REPO_DIRECTORY_NAME_does_not_abort_the_report(tmp_path, capsys):
+    """🔴 THE #944 DELTA REGRESSION. Red at b312ac3f with `UnicodeEncodeError`.
+
+    The fix for #944 made every GIT read safe and then printed a path git never
+    gave it. `render_text`'s per-repo table is the only place the repo path is
+    shown, and it showed the `os.fsdecode` form — so the report itself became
+    the abort, one `print()` after the last git call succeeded.
+
+    Note WHERE the assertions are, and their ORDER. The encode of the rendered
+    report comes FIRST, before any field assertion, so the red at `b312ac3f` is
+    the defect's own `UnicodeEncodeError` and not some tidier proxy for it; and
+    it is asserted DIRECTLY rather than through pytest's capture, because
+    whether capsys surfaces a `UnicodeEncodeError` is a fact about the harness.
+    """
+    repo, wt, gh = undecodable_repo(tmp_path, "report")
+
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1)      # must not raise
+    assert len(rows) == 2, [r["path"] for r in rows]
+
+    summary = wp.summarize(rows, agent_worktrees_included=True)
+    text = wp.render_text(rows, summary, verbose=True)
+    text.encode("utf-8")                                   # 🔴 RED AT b312ac3f
+
+    for r in rows:
+        # the REPORTED field is printable, and is the only one the table shows
+        assert "�" in r["repo"], r["repo"]
+        r["repo"].encode("utf-8")                          # a surrogate raises HERE
+        # …and the twin still names the real directory on disk
+        assert os.fsencode(r["repo_fs"]).endswith(UNDECODABLE_REPO), r["repo_fs"]
+        assert os.path.isdir(r["repo_fs"])
+
+    # 🔴 THE LINKED row's path is ASCII by construction, so on THAT row `repo`
+    # is provably the only field that could have carried the byte and no other
+    # explanation for a crash is available. (The MAIN worktree's path IS the
+    # repo directory, which is a finding in itself: the headline claim of this
+    # PR — "an undecodable worktree directory name no longer aborts" — was not
+    # fully true while `repo` was raw, because the main worktree of such a repo
+    # is exactly such a worktree.)
+    linked = next(r for r in rows if not r["is_main"])
+    main_row = next(r for r in rows if r["is_main"])
+    linked["path"].encode("ascii")
+    assert main_row["path_fs"] == str(repo), main_row["path_fs"]
+
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1"])
+    assert rc == wp.RC_OK
+    out = capsys.readouterr().out
+    assert "rep�o" in out, out
+    assert "across 1 repo(s)" in out, out
+
+    # …and the two OTHER sinks, which are separate code paths. `--format json`
+    # is the one that survived the defect by luck (`ensure_ascii=True` escapes a
+    # lone surrogate rather than raising), so it proves nothing on its own —
+    # what it pins here is that `repo_fs` still round-trips to the real BYTES
+    # through the file, which a reader has to decode itself.
+    dest = tmp_path / "report.json"
+    assert wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                    "--format", "json", "--out", str(dest)]) == wp.RC_OK
+    capsys.readouterr()
+    payload = json.loads(dest.read_text(encoding="utf-8"))
+    for r in payload["rows"]:
+        assert "�" in r["repo"], r["repo"]
+        assert os.fsencode(r["repo_fs"]).endswith(UNDECODABLE_REPO), r["repo_fs"]
+    # 🔴 …and the caveat the README now carries: the file holds `repo_fs` as the
+    # UNPAIRED escape `\udce9`, so a plain reader (`jq -r .repo_fs`) gets U+FFFD
+    # — the same lossy string `repo` already gave it. Recovering the bytes takes
+    # a surrogateescape-aware read, and this is that read.
+    assert dest.read_text(encoding="ascii").count("\\udce9") >= 2, "must be escaped"
+
+
+def test_one_undecodable_repo_does_not_take_the_OTHER_repos_rows_down_with_it(
+        tmp_path, capsys):
+    """🔴 THE BLAST RADIUS, which is the whole reason this is a 🔴 and not a nit.
+
+    `main` builds the ENTIRE report string before writing a byte of it, so the
+    encode failure was never confined to the offending row — it was the run.
+    Measured at b312ac3f on exactly this shape: rc 1, bare traceback, ZERO rows
+    printed, including every row of the perfectly ordinary repo next door.
+
+    That is `is_dir`'s published standard violated again — "a row we cannot tell
+    about, not a reason to abandon the other 750" — under default git config and
+    in the default output format. So the assertion is not "the tool survived",
+    it is "the GOOD repo's rows are still on stdout".
+    """
+    repo_bad, _wt_bad, gh = undecodable_repo(tmp_path, "blast")
+    root = tmp_path / "blast"
+    repo_good = new_repo(root, "goodrepo")
+    commit_on_branch(repo_good, "topic", "feature.txt", "feature\n", "feature")
+    add_worktree(repo_good, root / "goodrepo-wt", "topic")
+    squash_merge(repo_good, "topic", "feature.txt", "squash: feature")
+
+    rc = wp.main(["--scan-root", str(root), "--scan-depth", "2",
+                  "--gh-cmd", gh, "--jobs", "1"])
+    assert rc == wp.RC_OK
+    out = capsys.readouterr().out
+
+    # 🔴 THE GOOD REPO'S ROWS, degraded not abandoned — asserted through the
+    # per-repo table so this cannot pass on a run that printed a header and died.
+    good = _repo_table_row(out, repo_good)
+    assert good[1] == "1", good        # its dead row is still counted
+    assert "rep�o" in out, out    # …and the bad repo is REPORTED, not skipped
+    assert "4 worktree(s) across 2 repo(s)" in out, out
+
+
+def test_two_repos_differing_only_in_an_undecodable_byte_are_not_merged(
+        tmp_path, capsys):
+    """Grouping and counting are IDENTITY questions, so they key on `repo_fs`.
+
+    `_printable` is lossy: `rep\\xe9o` and `rep\\xeao` both render `rep�o`.
+    Keyed on what is printed, two distinct repos collapse into one table row
+    whose counts are silently summed, and `summary["repos"]` says 1 where 2 were
+    scanned — a wrong number in the line an operator reads as the scan's scope.
+    """
+    # 🔴 ONE parent for both, or the printable forms differ in the parent
+    # component, the collapse never happens and the mutants this test exists to
+    # kill would SURVIVE it. See `undecodable_repo`'s `root`.
+    root = tmp_path / "twins"
+    repo_a, _wt_a, gh = undecodable_repo(tmp_path, "twin", tail=b"rep\xe9o", root=root)
+    repo_b, _wt_b, _gh_b = undecodable_repo(tmp_path, "twin2", tail=b"rep\xeao", root=root)
+    # the CONTROL, on the whole string and not just the basename: the two repos
+    # really are indistinguishable once rendered, and really are distinct on disk.
+    assert wp._printable_path(repo_a) == wp._printable_path(repo_b), "not ambiguous"
+    assert os.fsencode(str(repo_a)) != os.fsencode(str(repo_b))
+
+    rows = (wp.scan_repo(repo_a, gh, True, 2000, jobs=1)
+            + wp.scan_repo(repo_b, gh, True, 2000, jobs=1))
+    summary = wp.summarize(rows, agent_worktrees_included=True)
+    assert summary["repos"] == 2, summary["repos"]
+
+    text = wp.render_text(rows, summary, verbose=False)
+    text.encode("utf-8")                                   # 🔴 RED AT b312ac3f
+    table = [ln for ln in text.splitlines() if "rep�o" in ln]
+    assert len(table) == 2, table
+    for ln in table:
+        assert ln.split()[1:] == ["1", "0", "1", "0", "0"], ln
+
+
+def test_execute_removes_a_worktree_in_an_undecodable_REPO_and_accounts_for_it(
+        tmp_path, capsys):
+    """The executor reaches the repo by its FILESYSTEM form.
+
+    `repo` is `git -C`'s cwd for the `list_worktrees` re-check and for the
+    removal itself. Handed the printable form it names no directory at all, so
+    every removal in such a repo would have failed — and this loop is the one
+    where a failure lands between two deletions.
+    """
+    repo, wt, gh = undecodable_repo(tmp_path, "exec")
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--execute", "--confirm", "1"])
+    err = capsys.readouterr().err
+    assert rc == wp.RC_OK, err
+    assert "execute: removed=1 skipped=0 failed=0" in err, err
+    assert not os.path.isdir(wt), "the dead worktree should be gone"
+    assert os.path.isdir(repo), "the repo itself must survive"
+
+
+def test_every_reported_row_field_is_printable_and_the_fs_twins_are_declared(
+        tmp_path):
+    """🔴 THE SEAM GUARD, and the thing that would have caught this round.
+
+    Neither of the two surfaces was untested: the worktree path had five
+    dedicated tests and the report had its own. What nobody owned was the
+    RELATIONSHIP — "every path-shaped field on a row splits into a printable one
+    and an `_fs` twin". A fourth field was added to the row without the split
+    and every existing test stayed green, because none of them built a row whose
+    `repo` was undecodable.
+
+    So this asserts the relationship, on a fixture where BOTH the repo directory
+    and the worktree directory are undecodable, and it fails in both directions:
+    a new path field that forgets its `_fs` twin makes some reported value
+    unencodable, and a new `_fs` field that nobody declared makes the key set
+    disagree with `ROW_PATH_FIELDS`. A structural check alone would not do —
+    it type-checks past a value that is simply the wrong string — so the
+    encodability half is behavioural, and it runs FIRST: read the ledger
+    constant before the behaviour and the red at `b312ac3f` is an
+    `AttributeError` about a name that did not exist yet, which is a fact about
+    the constant rather than about the tool.
+    """
+    # the worktree NESTED under the bad directory, so its path is bad too
+    repo, _wt, gh = undecodable_repo(tmp_path, "seam")
+    nested = Path(os.fsdecode(os.fsencode(str(repo)) + b"/nested-wt"))
+    git_bytes(repo, "checkout", "-q", "-b", "second")
+    write(repo / "second.txt", "second\n")
+    git_bytes(repo, "add", "second.txt")
+    git_bytes(repo, "commit", "-qm", "second")
+    git_bytes(repo, "checkout", "-q", "main")
+    git_bytes(repo, "worktree", "add", "-q", str(nested), "second")
+
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1)
+    assert len(rows) == 3, [r["path"] for r in rows]
+    declared = {"path_fs", "repo_fs"}          # spelled out, not read from the tool
+
+    def strings(v):
+        if isinstance(v, str):
+            yield v
+        elif isinstance(v, (list, tuple)):
+            for item in v:
+                yield from strings(item)
+
+    for r in rows:
+        # EVERY value the row carries that is not an `_fs` twin survives `print()`
+        for key, value in r.items():
+            if key in declared:
+                continue
+            for s in strings(value):
+                try:
+                    s.encode("utf-8")
+                except UnicodeEncodeError as exc:      # pragma: no cover - the finding
+                    raise AssertionError(
+                        f"row[{key!r}] cannot be printed: {exc}") from exc
+        # …and the ledger is COMPLETE — no undeclared `_fs` field, none missing
+        assert {k for k in r if k.endswith("_fs")} == declared, sorted(r)
+        for field in declared:
+            assert os.path.exists(r[field]), r[field]
+
+    # …and the whole report, which is where an unprintable field actually bites.
+    summary = wp.summarize(rows, agent_worktrees_included=True)
+    wp.render_text(rows, summary, verbose=True).encode("utf-8")
+
+    # 🔴 LAST, and deliberately so: the tool's own ledger must AGREE with the
+    # literal above. Read first, this line reds at `b312ac3f` with an
+    # `AttributeError` about a constant that did not exist — a fact about the
+    # constant, not about the defect. Read last, the red above is the defect.
+    assert {f"{f}_fs" for f in wp.ROW_PATH_FIELDS} == declared, wp.ROW_PATH_FIELDS
+
+
+def test_repos_from_reads_a_repo_path_that_is_not_valid_utf8(tmp_path, capsys):
+    """`--repos-from` was the last strict-utf-8 read of a PATH in the tool.
+
+    `read_text(encoding="utf-8")` raised `UnicodeDecodeError` on a repo list
+    naming a directory whose name is not valid utf-8 — before a single row was
+    classified, and with the same bare traceback the rest of #944 removed.
+    surrogateescape is also the RIGHT decoding and not merely a survivable one:
+    it is what `os.fsdecode` gives argv, so `--repos-from` and `--repo` now hand
+    `collect_repos` the same string for the same directory.
+    """
+    repo, _wt, gh = undecodable_repo(tmp_path, "list")
+    listing = tmp_path / "repos.txt"
+    listing.write_bytes(b"# a comment\n" + os.fsencode(str(repo)) + b"\n")
+    with pytest.raises(UnicodeDecodeError):             # the control
+        listing.read_text(encoding="utf-8")
+
+    rc = wp.main(["--repos-from", str(listing), "--gh-cmd", gh, "--jobs", "1"])
+    assert rc == wp.RC_OK
+    out = capsys.readouterr().out
+    assert "rep�o" in out, out
+    assert "across 1 repo(s)" in out, out
+
+    # …and it resolves to the SAME repo `--repo` would have: one identity, not
+    # two spellings of it.
+    by_flag = wp.collect_repos(wp.build_parser().parse_args(["--repo", str(repo)]))
+    by_file = wp.collect_repos(wp.build_parser().parse_args(["--repos-from", str(listing)]))
+    assert [str(p) for p in by_flag] == [str(p) for p in by_file]

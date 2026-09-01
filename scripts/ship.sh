@@ -171,14 +171,14 @@
 # 🔴 THE LADDER IS SHARED WITH scripts/drift-check.sh, RECIPROCALLY. That script
 # is the passive deadman for the same fleet and deliberately uses the same
 # vocabulary, so a number must not mean two things across the pair. It owns
-# 10, 14, 15, 16, 17, 18, 22 and 23 — DRIFT meanings this script does not take —
-# and reserves them here; this script owns 5, 7, 9, 11, 19, 20 and 21 and they
-# are reserved there. Its header says "a new DRIFT code has nowhere to go but
-# upward", which points the next one at 19 unless the reservation is written
-# down on both sides: so the next free code for THIS script is 24, and so is the
+# 10, 14, 15, 16, 17, 18, 22, 23 and 24 — DRIFT meanings this script does not
+# take — and reserves them here; this script owns 5, 7, 9, 11, 19, 20 and 21 and
+# they are reserved there. Its header says "a new DRIFT code has nowhere to go
+# but upward", which points the next one at 19 unless the reservation is written
+# down on both sides: so the next free code for THIS script is 25, and so is the
 # next free code for that one.
 #
-# RESERVED-TO-DRIFT-CHECK: 10 14 15 16 17 18 22 23
+# RESERVED-TO-DRIFT-CHECK: 10 14 15 16 17 18 22 23 24
 #
 # That line is a LEDGER, machine-read, not a comment: it must equal exactly the
 # set of codes drift-check.sh can return and this script cannot, so it fails when

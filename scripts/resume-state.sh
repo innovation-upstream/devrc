@@ -322,7 +322,10 @@ REPO="" HANDOFF="" SLUG=""
 #   exit 2 + the TOKEN  a handoff-shaped path was named and does not exist
 #   exit 1 + nothing    no handoff-shaped token in the argument at all
 embedded_md_path(){
-  local tok hit="" miss="" base dir noglob=""
+  local tok hit="" miss="" base dir noglob="" root=""
+  # The repo of $PWD, resolved ONCE. Used only to re-anchor a RELATIVE token
+  # that named a real doc from one directory up — see the clause below.
+  root=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null) || root=""
   # ⚠ `for tok in $1` is UNQUOTED on purpose — that is the word split. It is also
   # a PATHNAME EXPANSION, and the subject is arbitrary prose: an argument
   # containing `*` would otherwise expand against the cwd and hand this loop a
@@ -345,6 +348,35 @@ embedded_md_path(){
     case "$dir" in */claudedocs|claudedocs) ;; *) continue ;; esac
     case "$base" in handoff-*.md|*HANDOFF*.md) ;; *) continue ;; esac
     [ -f "$tok" ] && { hit="$tok"; break; }
+    # 🔴 A RELATIVE token anchored one level ABOVE the repo still names a real
+    # doc — and this is not a hypothetical shape: `/handoff`'s own kickoff
+    # template emits `<repo>/claudedocs/handoff-<topic>.md`, which resolves from
+    # the repo's PARENT and NOT from the repo, where the kickoff is pasted.
+    # MEASURED 2026-08-30: that miss sent the run down the newest-of-90 fallback
+    # and it reconciled a DIFFERENT INITIATIVE — PR states, DRIFT lines and all —
+    # with only the `!` gap naming the file it could not find. Re-anchor on the
+    # repo root and try again before calling it a miss.
+    #
+    # 🔴 RELATIVE ONLY, and that restriction is the load-bearing half. An
+    # ABSOLUTE token that is not on disk stays a miss: the caller named a
+    # specific tree, so serving a same-named doc out of THIS repo would be the
+    # very wrong-initiative bug this clause exists to remove, reintroduced one
+    # level down and harder to see. `$root` is empty outside a git repo, which
+    # disables the clause rather than guessing.
+    #
+    # ⚠ `[ -n "$root" ]` is DEFENSIVE AND UNCOVERED — say so rather than let it
+    # read as tested. Dropping it SURVIVED the mutation sweep: with `$root`
+    # empty the test becomes `[ -f "/claudedocs/$base" ]`, and killing that
+    # needs a literal `/claudedocs/handoff-*.md` at the filesystem ROOT, which
+    # no fixture here can create. It is kept because it is correct, not because
+    # anything proves it fires. The other four mutants of this clause are
+    # killed, each by a named test.
+    case "$tok" in
+      /*) ;;
+      *) if [ -n "$root" ] && [ -f "$root/claudedocs/$base" ]; then
+           hit="$root/claudedocs/$base"; break
+         fi ;;
+    esac
     # Shaped like a handoff reference, but not on disk. Remember the FIRST such
     # token: it is the caller's stated intent, and the run is about to ignore it.
     [ -n "$miss" ] || miss="$tok"

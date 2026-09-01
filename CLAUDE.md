@@ -157,6 +157,7 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - 🔴 **Zach works ENTIRELY via agents → modernization targets this agent-facing layer, NOT interactive-CLI ricing.**
 - **Several docs have enforced byte ceilings, each gated by its own test that OWNS the constants and prints an eviction playbook on failure** — `claude/RULES.md` (the only always-on one) plus the skill bodies `browser`, `prune-skill`, `session-manager` and `handoff`. 🔴 **Read the numbers in the tests, never restate them, and do not restate the LIST either** — `git grep -l MIN_HEADROOM_BYTES scripts/` answers it. This bullet has twice carried a count that was wrong within a day. Any addition needs an eviction in the SAME commit; raising a ceiling needs the commit message to say which instruction would not fit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
+- 🔴 **BUILD THE TWO `nix` CHECK DERIVATIONS ONE AT A TIME — a combined invocation produces FALSE FAILURES.** `nix build .#checks.x86_64-linux.pytests .#checks.x86_64-linux.nodetests` builds both concurrently, and the tests that shell out to nested `nix` then contend on the store. MEASURED 2026-08-30 on one tree: the combined call reported **2 failures** — `SQLite database … is busy` evaluating `nix/home.nix`, and `OperationalError('database is locked')` in dl-router — while the SAME tree, same derivations, run **sequentially**, reported **0**. Load-dependent, so earlier combined runs were green and looked fine. **A combined GREEN is trustworthy** (a contended run fails loudly, it does not fake a pass); **a combined RED is not**, until re-checked one at a time. This cost a near-miss report of "PR #1029 broke the gate", against a diff that touched one test file and could not reach either failure. ⚠ Same run also reproduced the documented `| tail` trap: `nix build … | tail` printed `NIXBUILD_RC=0` for a build that had just failed 45 tests — read the runners' own `RESULT:` lines, never the piped exit code.
 - **To run a SUBSET, use the flake devShell — it already carries the gate toolchain:** `nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q` (cwd-independent with absolute paths; MEASURED from the repo root and from `/tmp`, pytest 9.1.1). `gate.sh` has no per-file filter and `run-tests.sh`'s positional is a repo ROOT, not a test selector — but that is a gap in those two entry points, **not** in the repo: the toolchain is there, by another door. 🔴 **`.envrc` is `use opencode`, so a loaded direnv does NOT put pytest on PATH** — and the worktree recipe in `claude/RULES.md` says to copy `.envrc`, which propagates that env into every worktree. A bare `python3 -m pytest` failing with `No module named pytest` therefore means you are in the opencode shell, never that the suite is unrunnable. This bullet exists because three true observations — no `gate.sh` filter, no `run-tests.sh` selector, direnv has no pytest — were read as "no subset mode exists", and an ad-hoc `nix-shell -p` was built instead of opening the door that was already there.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
 - 🔴 **A MERGE IS BLOCKED BY BOTH TIERS — `tekton/devrc-pytests` AND `tekton/devrc-nodetests`.** <!-- merge-gate: other -->
@@ -170,8 +171,50 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   `.github/workflows`, so the marker stays `other`.
   🔴 **`enforce_admins: true` is LIVE now** — it protected nothing while nothing was
   required. If Tekton is down or wedged, NOTHING merges and there is no admin override.
-  The escape hatch, deliberately written down because you will want it under pressure:
-  `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`
+  The escape hatch, deliberately written down because you will want it under pressure —
+  🔴 **and it does NOT round-trip. Read all four steps before you run step 2.** MEASURED
+  over three uses on 2026-08-29/30: `DELETE` opens the window and **`PATCH` cannot close
+  it**, so two restores failed — one of them inside an EXIT trap that fired exactly as
+  designed and still left `main` open, because the untested command was *inside* the
+  safety net. `PATCH …/required_status_checks` **404s `Required status checks not
+  enabled`**: it updates checks that exist, it cannot recreate a deleted sub-resource.
+  Closing the window needs a full `PUT` of the WHOLE protection object.
+  ```bash
+  R=innovation-upstream/devrc; S=<scratchpad>          # 1. CAPTURE FIRST — without this
+  gh api /repos/$R/branches/main/protection --jq '{    #    you cannot restore at all.
+    required_status_checks:{strict:.required_status_checks.strict,
+      checks:[.required_status_checks.checks[]|{context,app_id}]},
+    enforce_admins:.enforce_admins.enabled,
+    required_pull_request_reviews, restrictions,
+    required_linear_history:.required_linear_history.enabled,
+    allow_force_pushes:.allow_force_pushes.enabled,
+    allow_deletions:.allow_deletions.enabled,
+    block_creations:.block_creations.enabled,
+    required_conversation_resolution:.required_conversation_resolution.enabled,
+    lock_branch:.lock_branch.enabled,
+    allow_fork_syncing:.allow_fork_syncing.enabled}' > $S/restore.json
+  gh api -X DELETE /repos/$R/branches/main/protection/required_status_checks   # 2. OPEN
+  gh api -X PUT /repos/$R/branches/main/protection --input $S/restore.json     # 3. CLOSE
+  gh api /repos/$R/branches/main/protection > $S/after.json                    # 4. READ BACK
+  ```
+  🔴 **Step 4 is not optional, and step 1 is what makes it possible.** A PARTIAL `PUT`
+  succeeds and silently drops every key you omitted — `enforce_admins`, force-push and
+  deletion settings included — so `PUT` returning 200 is a claim about the REQUEST, never
+  about the protection. Diff `after` against the step-1 capture **key by key** and report
+  which keys matched; `restore: OK` printed by your own trap is not evidence. All 11 keys
+  are load-bearing: `required_status_checks`, `enforce_admins`,
+  `required_pull_request_reviews` and `restrictions` are *required* by the endpoint (the
+  last two are legitimately `null` here), and the `app_id` pinning inside `checks` is what
+  makes the restored context bind to Tekton rather than to any app that can post the name.
+  ⚠ **Not measured, so do not reach for it under pressure:** whether `PUT` with
+  `required_status_checks: null` opens the window symmetrically was never tried — the
+  `DELETE`/`PUT` asymmetry above is what has actually been run.
+  🔴 **The backstop is a DETECTOR, not a restore:** `drift-check.sh` rc 24 reports an
+  unprotected `main`, on a timer that repeats every `OnUnitActiveSec=6h` — so detection
+  lags by up to a full interval, and only where the deadman is actually wired in
+  (`serverMode && enableDriftDeadman`; the timer runs on the workbench). It catches a
+  botched restore after the fact; it does not undo one, and it is not a substitute for
+  step 4.
   ⚠ **`strict` is FALSE on purpose.** `strict: true` would force every PR to be up to date
   with `main` before merging — correct in principle, and unworkable here: `main` moved 11+
   times in one session and each move would re-queue a ~20-minute gate for every open PR.

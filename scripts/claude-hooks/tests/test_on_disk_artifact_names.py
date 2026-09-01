@@ -110,6 +110,11 @@ LIB = os.path.join(ROOT, "scripts", "lib")
 # and from every task id the other suites use (193, 200, 201).
 TASK_A = 307
 TASK_B = 911
+# Fixture handoff docs for the handoff-write guard. Basenames sharing no letter after
+# the mandatory `handoff-` prefix, so a truncating or transposing mutant cannot turn
+# one into the other — the same discipline as the task ids above.
+DOC_A = "/repo/claudedocs/handoff-alpha.md"
+DOC_B = "/repo/claudedocs/handoff-zulu.md"
 SESSION = "sess-on-disk-a1"
 AGENT = "agent-on-disk-b2"
 
@@ -331,6 +336,76 @@ def test_the_read_write_is_still_ATOMIC_via_a_temp_file(home):
 
 
 # --------------------------------------------------------------------------- #
+# 2b. handoff-write-guard.py — the same name-set, on its own cache root
+# --------------------------------------------------------------------------- #
+def test_the_handoff_write_guard_writes_EXACTLY_these_paths(home):
+    """🔴 The whole tree, as literals — the same assertion shape as the write-back
+    guard's above, and for the same reason: `.cache`, `claude-handoff-write`, `s`,
+    `work`, `wrote` and `dismissals` are all names a rename could move with a green
+    suite behind it.
+
+    `wrote` is the one this hook adds over its precedent, and it is the load-bearing
+    one: it is the session-level record that a handoff WAS written, so a rename of it
+    makes every session look un-recorded and the guard blocks turns that did nothing
+    wrong. `work` and `wrote` differ in one letter and sort adjacently, which is
+    exactly the pair a transposing mutant would swap — so both are here.
+    """
+    guard = load(os.path.join(HOOKS, "handoff-write-guard.py"), "hwguard_names")
+    sd = guard._state_dir({"session_id": SESSION})
+
+    guard.record_read(sd, DOC_A, now=1787227200.0)
+    guard.record_work(sd, now=1787229000.0)
+    guard.record_wrote(sd, now=1787230800.0)
+    guard.bump_fires(sd, guard.doc_key(DOC_A))                  # the MEASURED counter
+    guard.bump_fires(sd, guard.doc_key(DOC_A), "unknown")       # the CANNOT-MEASURE one
+    guard.write_dismissal_tombstone(sd, guard.doc_key(DOC_B), now=1787229000.0)
+    guard.record_dismissal(guard.doc_key(DOC_B), SESSION, [], now=1787229000.0)
+
+    root = ".cache/claude-handoff-write"
+    a, b = guard.doc_key(DOC_A), guard.doc_key(DOC_B)
+    assert paths_under(home) == sorted([
+        "%s/dismissals" % root,
+        "%s/s/%s/dismissed-%s" % (root, SESSION, b),
+        "%s/s/%s/fires-%s" % (root, SESSION, a),
+        "%s/s/%s/read-%s" % (root, SESSION, a),
+        "%s/s/%s/unknown-%s" % (root, SESSION, a),
+        "%s/s/%s/work" % (root, SESSION),
+        "%s/s/%s/wrote" % (root, SESSION),
+    ])
+
+
+def test_the_handoff_guards_doc_key_is_in_the_NAME_not_only_in_the_body(home):
+    """The positive control for the assertion above: it must be able to MOVE.
+
+    A single-doc fixture could be satisfied by a writer that hardcodes that name, so
+    two docs are driven through the same writers and the trees compared. `alpha` and
+    `zulu` share no letter, so a mutant that truncates or transposes cannot produce
+    one from the other.
+    """
+    guard = load(os.path.join(HOOKS, "handoff-write-guard.py"), "hwguard_names_2")
+    sd = guard._state_dir({"session_id": SESSION})
+    guard.record_read(sd, DOC_A, now=1787227200.0)
+    guard.record_read(sd, DOC_B, now=1787227200.0)
+    names = sorted(n for n in os.listdir(sd) if n.startswith("read-"))
+    assert names == sorted(["read-" + guard.doc_key(DOC_A),
+                            "read-" + guard.doc_key(DOC_B)])
+    assert names[0] != names[1]
+
+
+def test_the_handoff_guards_cache_root_is_its_OWN(home):
+    """🔴 The two guards must not share a root. They have independent ladders and
+    independent TTL sweeps, and a shared root would let one hook's `prune` remove the
+    other's live ledger mid-session — silently, since both fail open."""
+    hw = load(os.path.join(HOOKS, "handoff-write-guard.py"), "hwguard_root")
+    wb = load(os.path.join(HOOKS, "clawgate-writeback-guard.py"), "wbguard_root")
+    assert hw._state_root() != wb._state_root()
+    assert hw._state_root() == os.path.join(
+        str(home), ".cache", "claude-handoff-write", "s")
+    assert hw._dismissals_path() == os.path.join(
+        str(home), ".cache", "claude-handoff-write", "dismissals")
+
+
+# --------------------------------------------------------------------------- #
 # 3. next-step-nudge.py — four unpinned names
 # --------------------------------------------------------------------------- #
 def test_the_next_step_nudge_writes_EXACTLY_this_path(home):
@@ -513,6 +588,7 @@ def test_the_ledger_directory_is_this_exact_path_under_HOME(home):
 # path assertion above is caught by the corroboration in the same test.
 PINNED_HERE = {
     "clawgate-writeback-guard.py",
+    "handoff-write-guard.py",
     "next-step-nudge.py",
     "shell-env-nudge.py",
     "search-tool-nudge.py",
@@ -551,6 +627,37 @@ OWNS_NO_ON_DISK_STATE = {
     "guard_core.py",             # pure predicate library
     "register-nudge-hook.py",    # writes ~/.claude/settings.json; the deployed-path
                                  # seam is pinned by test_registrar_activation.py
+    "session-stamp.py",          # delegates every path to lib/session_trailer.py,
+                                 # exactly as agent-ledger-hook.py and
+                                 # bg-command-capture.py do. Its names ARE pinned —
+                                 # as whole relative paths, in the same form as this
+                                 # file — by tests/test_session_trailer.py::
+                                 # test_the_on_disk_artifact_names_are_pinned_as_whole_paths.
+                                 # 🔴 CACHE_LITERAL below cannot match it, but NOT
+                                 # for the reason an earlier revision of this
+                                 # comment gave. That revision said the state root
+                                 # was "the repo's own <git-common-dir>, not a path
+                                 # under $HOME at all" — the opposite of the fix
+                                 # that landed in the same PR, which moved the state
+                                 # to $XDG_CACHE_HOME|~/.cache/claude-session-trailer
+                                 # precisely because a git-dir-derived root recorded
+                                 # against the WRONG repo. The scan is blind here
+                                 # because the `.cache` literal lives in
+                                 # scripts/lib/session_trailer.py, OUTSIDE this
+                                 # scan's root — a location fact, not a storage one.
+                                 # The enumeration, not the scan, is what covers it.
+                                 # 🔴 `session_trailer.py` is deliberately NOT listed
+                                 # here: this ledger enumerates SOURCE files in
+                                 # scripts/claude-hooks/, and that module's source
+                                 # lives in scripts/lib/. It only appears beside the
+                                 # hook as a DEPLOY artifact (the guard_core.py
+                                 # pattern, because a store copy cannot reach
+                                 # scripts/lib/ through __file__), and that deployed
+                                 # name is pinned by the registrar's
+                                 # HOOK_LIBRARY_MODULES instead. Listing it here
+                                 # made a stale entry naming a path that does not
+                                 # exist, which the corroboration scan then tried to
+                                 # open.
 }
 
 CACHE_LITERAL = re.compile(r'["\'/]\.cache\b|XDG_CACHE_HOME|\.local/share')

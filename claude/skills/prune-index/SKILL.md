@@ -17,7 +17,7 @@ The store is a **pointer/nuance sheet per service** under `~/.claude/analyze-ser
 | Before writing ANYTHING (§4–§5) — store safety, the diff contract, landing, verify | `~/.claude/skills/prune-index/reference/writing-and-safety.md` |
 
 ## 🔴 Store safety — read this before the audit, not after
-- The store is **curated, CLIENT-CONFIDENTIAL, irreplaceable, and has no off-machine backup.** It is not re-derivable by re-running recon.
+- The store is **curated, CLIENT-CONFIDENTIAL, and not re-derivable by re-running recon.** ⚠ This bullet used to read "and has no off-machine backup" — false since 2026-08-21: `analyze-service-index-commit.service` commits each scope hourly and `analyze-service-index-backup.service` sends age-encrypted bundles to MinIO daily (`restore-verify.py` reads them back). **The rules below are unchanged, because they never rested on that** — a prune loses back to the last hourly commit, and **uncommitted state is in no commit and no bundle.** Detail: `~/.claude/skills/analyze-service/reference/index-store.md` → Store safety.
 - **Each `<scope>/` is its own git repo** (the root is not). **Run NO git command inside it** — no `stash`, no `reset --hard`, no `clean`, no `checkout --`, no remote, no push. Set work aside with `cp <file> /tmp/…`.
 - **Never copy an entry's content into devrc, any public repo, a PR body, an issue or a commit message.** Aggregate integers about the corpus are fine; a line of prose is not. devrc `60e6d9d` exists because this data class had to be scrubbed out of a public repo retroactively.
 - Each scope's own `README.md` states the policy governing it — read it before writing there. A scope with no README has no stated policy; the audit reports those.
@@ -49,7 +49,7 @@ Prints, each **with its denominator**: per-entry bytes vs budget; bullet shape v
 
 If the verdict says **"no prune needed (stop; do not churn the files)"** — stop. It is a claim about the classes above and nothing else.
 
-## 2. Back up first (the cut rewrites curated, unbacked-up files)
+## 2. Back up first (the cut rewrites curated files the timers have not captured yet)
 🔴 **Chain with `&&` and count the files** — `cp …; echo ok` prints success even when the copy failed.
 ```bash
 BK=/tmp/index-prune-$(date +%s); mkdir -p "$BK"
@@ -68,7 +68,9 @@ cp -a ~/.claude/analyze-service-index/. "$BK"/ && echo "backed up to $BK: $(find
 Bias toward EVICT/MERGE **only inside the RESOLVED population**. Everywhere else this store is a router *and* the sole archive of things nobody wrote down.
 
 ## 4. Propose — confirm-gated, diff first
-Same contract as `analyze-service`'s write-back (`~/.claude/skills/analyze-service/reference/write-back.md`): present a **unified diff** against the current file, one compact block, ask one yes/no. On confirm, **re-read the file first** (a concurrent session may have appended), re-apply to current bytes, then plain `Write`. On decline, discard.
+Present a **unified diff** against the current file, one compact block, ask one yes/no. On confirm, **re-read the file first** (a concurrent session may have appended), re-apply to current bytes, then plain `Write`. On decline, discard. Full contract: `~/.claude/skills/prune-index/reference/writing-and-safety.md`.
+
+⚠ **This used to read "same contract as `analyze-service`'s write-back", and that pointer is now false** — the append prompt was retired everywhere on 2026-08-31 and `write-back.md` no longer carries a protocol at all (the one append protocol is `~/.claude/skills/subsystem-index/SKILL.md`, which asks nothing and mandates `Edit`). 🔴 **A prune is NOT an append, so the retirement does not reach it**: the evidence that retired the prompt was "the answer was always `y`" on an APPEND, and a cut REMOVES bytes that are often their content's only copy. Blast radius earns the gate. Keep the y/N here, and keep `Write` here — a cut necessarily rewrites the whole file, so the append rule's `Edit` anchor does not apply; step 2's `cp -a` backup is what stands in for it.
 
 🔴 **Never silent-mutate, never batch a whole scope behind one prompt, and write the file and run NO git command** — the store has an out-of-band autocommit of its own.
 

@@ -195,7 +195,39 @@ REFERENCE_DIR = SKILL_MD.parent / "reference"
 # block" taken one step further — the block got a SKILL of its own rather than a
 # reference/ file. An earlier draft called it lever 1, which is "move guidance
 # INTO the tool"; that is not what happened.
-MAX_BYTES = 24_000
+#
+# 🔴 2026-08-28: 24,000 -> 26,400 (+2,400). Lever 3, and it is THIRD here in fact
+# and not only in the message — the body grew +1,761 B net for the operator's
+# one-doc-per-effort decision (handoff_doc.py rules i and j) AFTER both cheaper
+# levers were spent on it:
+#
+#   lever 1, taken: every remedy is printed BY THE TOOL at the moment it fires.
+#     The three refusals (`dated-topic`, `new-doc`, `unforced`) each render their
+#     own fix, the existing-docs list and the forcing vocabulary, so none of that
+#     is paid by a run that does not hit them. The body carries no remedy text.
+#   lever 2, taken: the evidence — the 123-doc / 44%-dated measurement, the
+#     `remix-session` x8 collapse, the 384-item / 23% baseline, and the reasoning
+#     for why nothing fuzzy-matches and why `forcing: none` is accepted — went
+#     WHOLE to reference/write-gate.md §C.
+#
+# 🔴 WHAT COULD NOT BE EVICTED, which is what this option owes a reader:
+#   a. the CLOSED forcing vocabulary, in the step-2 template. The executor writes
+#      the scratch file BEFORE step 5 ever runs, so a vocabulary reachable only
+#      through the tool's refusal makes every single run fail once and fix — a
+#      gate that is red by construction on the ordinary path, which `RULES.md`
+#      names as worse than no gate.
+#   b. the one-doc-per-effort imperative at the TOPIC ARGUMENT line. It must be
+#      read before the topic is chosen, which is before any tool invocation
+#      exists to print it.
+#   c. the three status names at step 5. `test_every_exit_code_the_module_can_
+#      return_is_documented` derives them from the module and requires each in
+#      the body — an undocumented status leaves the agent improvising at the
+#      moment it is about to push.
+#
+# Sized at ~4 mean 🔴 rules (572 B each) against a +1,761 B need, which leaves
+# roughly ONE rule free above the floor. Deliberately tight, for the reason the
+# +600 entry above gives: the pressure is the point.
+MAX_BYTES = 26_400
 
 # Required working margin below the ceiling.
 #

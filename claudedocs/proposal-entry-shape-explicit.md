@@ -1,6 +1,15 @@
 # Proposal — make the `/analyze-service` entry shape explicit
 
 **Status:** proposal, 2026-08-19. Nothing here is built.
+⚠ **Superseded fact, 2026-08-31.** The risk argument below leans on the store being
+"an unbacked-up store" in three places (§ the migration cost, § the checker trade-off,
+§ the decidability argument). That was true when this was written and is **false since
+2026-08-21**: `analyze-service-index-commit.service` commits each scope hourly and
+`analyze-service-index-backup.service` writes age-encrypted bundles to MinIO daily. The
+phrase is left in place because it is load-bearing in the reasoning of the day and
+rewriting it would misrepresent what was weighed — but **a reader evaluating this
+proposal now is over-weighting that risk.** See 🔴 **Store safety** in
+`claude/skills/analyze-service/reference/index-store.md`.
 **Scope:** the entry grammar of the `/analyze-service` index, and the tooling that reads and
 writes it. **Read-only with respect to the store** — no entry was written, moved or reformatted
 to produce this document.

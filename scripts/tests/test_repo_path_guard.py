@@ -275,7 +275,11 @@ class TestBothCliSurfaces:
         The only permitted difference is the program prefix.
         """
         code = st.main(
-            ["--repo", SCOPE_IN_STORE, "--store", str(store), "--template", "widget"]
+            ["--repo", SCOPE_IN_STORE, "--store", str(store), "--template", "widget",
+             # `--template` refuses without `--writer` (exit 2) BEFORE the
+             # repo path is resolved, and that refusal is not what these two
+             # guard. Supply it so the run reaches the repo-path check they do.
+             "--writer", "handoff"]
         )
         err = capsys.readouterr().err.strip()
         assert code == 3
@@ -304,7 +308,11 @@ class TestBothCliSurfaces:
         rc.main(["--repo", SCOPE_IN_STORE, "--store", str(store)])
         read_err = capsys.readouterr().err.strip()
         st.main(
-            ["--repo", SCOPE_IN_STORE, "--store", str(store), "--template", "widget"]
+            ["--repo", SCOPE_IN_STORE, "--store", str(store), "--template", "widget",
+             # `--template` refuses without `--writer` (exit 2) BEFORE the
+             # repo path is resolved, and that refusal is not what these two
+             # guard. Supply it so the run reaches the repo-path check they do.
+             "--writer", "handoff"]
         )
         write_err = capsys.readouterr().err.strip()
         assert read_err.removeprefix("subsystem-recall: ") == write_err.removeprefix(

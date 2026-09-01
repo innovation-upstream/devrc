@@ -68,6 +68,7 @@
     },
     "find-session": { "tier": "A" },
     "handoff": { "tier": "A" },
+    "hetzner": { "tier": "B", "why": "asked for by name ('my Hetzner fleet', 'what am I paying Hetzner', 'price a node'); no symptom routes here, and cloud-cost questions are deliberate rather than incidental, so it does not need to auto-fire" },
     "i3": { "tier": "A" },
     "initiative-scan": {
       "tier": "B",
@@ -80,6 +81,10 @@
     "prune-index": {
       "tier": "B",
       "why": "'prune the analyze-service index' -- named, not described; and the three prune-* siblings spend most of their prose disambiguating each other, which name-only makes moot"
+    },
+    "quiesce-workload": {
+      "tier": "B",
+      "why": "called by name ('quiesce stash-sense', 'resume prometheus'); no symptom routes here -- you already know the workload"
     },
     "prune-memory": {
       "tier": "B",

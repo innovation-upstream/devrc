@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import os
 import re
 import shutil
@@ -111,8 +112,15 @@ UPDATE_DOC = f"""## State now
 ## Open investigations — live diagnosis state
 {NEW_FINDING_C}
 ## Next steps (ranked)
-1. Watch the drain rate for a day.
+1. Watch the drain rate for a day. forcing: gate — the load soak blocks the release
 """
+
+# 🔴 The fixture BASE_DOC's ranked items carry NO `forcing:` field, ON PURPOSE.
+# Rule (j) reads the UPDATE, never the merged doc, so a repo full of legacy
+# untagged items must keep updating cleanly — a gate that refused on history
+# would be red on every established repo, which `claude/RULES.md` calls worse
+# than no gate. `test_legacy_base_items_are_not_retroactively_refused` is the
+# guard, and it can only be honest while the base above stays untagged.
 
 
 # Hermetic git: the sandbox and the dev host must behave the same, so no global
@@ -252,8 +260,9 @@ def update_file(tmp_path: Path) -> Path:
 
 
 def run_tool(repo: Path, *extra: str, update: Path | None = None, advanced: str | None
-             = "the drain loop is fixed and the at-max reading was corrected"):
-    argv = [sys.executable, str(TOOL), "--repo", str(repo), "--topic", "sample-topic"]
+             = "the drain loop is fixed and the at-max reading was corrected",
+             topic: str = "sample-topic"):
+    argv = [sys.executable, str(TOOL), "--repo", str(repo), "--topic", topic]
     if update is not None:
         argv += ["--update", str(update)]
     if advanced is not None:
@@ -1379,10 +1388,109 @@ class TestRuleFDidNotMoveTheExitCodes:
         assert WARNING_HEAD not in res.stdout + res.stderr
         assert tree_hash(durable_repo) == before
 
+    def test_no_two_exit_constants_share_a_value(self) -> None:
+        """🔴 THE COLLISION THIS SUITE COULD NOT SEE. Every other guard here
+        pins a NAMED constant to a number, so two names sharing one value pass
+        them all: the enumeration below stops at 6, and nothing asks whether the
+        set is injective.
+
+        MEASURED on this PR. `main` landed `EXIT_DOC_PER_EFFORT = 7` while this
+        branch carried `EXIT_STALE_BASE = 7`. The merge conflicted only where
+        the two blocks sat ADJACENT — resolving it the obvious way, by keeping
+        both sides, yields two constants equal to 7 and an exit-code contract
+        where `status=stale-base` and `status=doc-per-effort` are
+        indistinguishable to any caller branching on the number. The doc/code
+        guard did not catch it either: it scrapes `status=` tokens, and both
+        tokens are present and documented.
+
+        A green suite on the merged tree would have said nothing. This is the
+        guard that makes the next PR to claim a code collide LOUDLY.
+        """
+        codes = {n: v for n, v in vars(hd).items()
+                 if n.startswith("EXIT_") and isinstance(v, int)}
+        # 🔴 THE INJECTIVITY LOOP RUNS FIRST, AND THE ORDER IS THE POINT. This
+        # test is named and documented for COLLISIONS, so a collision must be
+        # what it reports. A count assertion placed above it pre-empts that:
+        # adding a second constant equal to 9 — the #962/#1046 shape, one digit
+        # from what a PR in flight actually does — dies to `assert 10 == 9`, the
+        # remedial text below never renders, and the message that does render
+        # invites bumping the literal to 10, after which the real defect
+        # surfaces only on a SECOND run. That is #1093.1's defect ("the
+        # assertion that runs first misdirects") recreated in a sibling test.
+        seen: dict[int, str] = {}
+        for name, value in sorted(codes.items()):
+            assert value not in seen, (
+                f"{name} and {seen[value]} are both {value}. Two exit constants "
+                f"sharing a value make their statuses indistinguishable to any "
+                f"caller that branches on the number. Give the newer one the "
+                f"next free code and update the skill's exit-code list with it."
+            )
+            seen[value] = name
+        # 🔴 EXACT, not `>=`. Against exactly 9 constants a `>= 8` floor tolerates
+        # ONE silently vanishing — a rename, a deletion, or a value that stops
+        # being an int — which is the same class of drift this test exists for.
+        # A legitimate addition is expected to update this number; the failure
+        # prints the whole dict, so what changed is on screen.
+        assert len(codes) == 9, f"the EXIT_* constant set changed: {codes}"
+
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
         assert (hd.EXIT_OK, hd.EXIT_USAGE, hd.EXIT_FAIL) == (0, 2, 3)
         assert (hd.EXIT_NO_ADVANCE, hd.EXIT_NO_CHANGE, hd.EXIT_BEHIND) == (4, 5, 6)
+        # 🔴 THE LADDER'S OWN CODES, which stopped at 6 and were unpinned. #1046
+        # renumbered EXIT_STALE_BASE 7 -> 9 after #962 claimed 7; nothing asserted
+        # the new value, so setting it to 10 SURVIVED all 295 tests while three
+        # prose sites still said 9.
+        assert (hd.EXIT_DOC_PER_EFFORT, hd.EXIT_UNFORCED, hd.EXIT_STALE_BASE) == (7, 8, 9)
+
+    def test_the_prose_quotes_the_CONSTANT_not_a_stale_literal(self) -> None:
+        """🔴 PROSE AGAINST THE CONSTANT, not prose against prose.
+
+        `test_the_remedy_is_pinned_as_a_WHOLE_normalised_string` compares one
+        string to another string, so it fires when the WORDING moves and never
+        when the NUMBER does. Measured: `EXIT_STALE_BASE = 10` survives the whole
+        file while `SKILL.md`, `WRONG_BASE_REMEDY` and that pin all still say
+        "exit 9". A caller reads the number, so the number is what must agree.
+        """
+        remedy = hd.WRONG_BASE_REMEDY
+        assert f"(exit {hd.EXIT_STALE_BASE})" in remedy, (
+            f"WRONG_BASE_REMEDY names an exit code that is not "
+            f"EXIT_STALE_BASE={hd.EXIT_STALE_BASE}: {remedy!r}")
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        # 🔴 BIND THE STATUS TOKEN TO ITS CODE — a bare `f"({const})"` asks only
+        # whether the DIGIT appears anywhere in a 25 KB file, which any OTHER
+        # status spelling the same number satisfies. MEASURED: rewriting
+        # `status=new-doc` (7) to (9) — the exact drift this test exists to
+        # prevent — left all 297 tests GREEN, because `status=dated-topic` still
+        # spelled (7). The pair is the claim; the digit alone is not.
+        # 🔴 ALL SEVEN PAIRS THE SKILL DOCUMENTS, not the four this started with.
+        # MEASURED: with only four, `status=behind` (exit 6) → (exit 4) left all
+        # 297 tests green — the same walkability the four were added to close,
+        # surviving three statuses over. The set is the claim; a subset of it
+        # reads as coverage of the skill's numbers and is not.
+        for status, const, form in (
+            ("stale-base", hd.EXIT_STALE_BASE, "exit {}"),
+            ("behind", hd.EXIT_BEHIND, "exit {}"),
+            ("no-change", hd.EXIT_NO_CHANGE, "exit {}"),
+            ("dated-topic", hd.EXIT_DOC_PER_EFFORT, "{}"),
+            ("new-doc", hd.EXIT_DOC_PER_EFFORT, "{}"),
+            ("unforced", hd.EXIT_UNFORCED, "{}"),
+        ):
+            want = f"`status={status}` ({form.format(const)})"
+            assert want in doc, (
+                f"claude/skills/handoff/SKILL.md does not carry {want!r}; the "
+                f"skill's documented code for status={status} drifted from the "
+                f"module, where it is {const}.")
+        # Step 3's line names these two WITHOUT the `status=` prefix, so they
+        # need their own spelling — dropping them because the prefix differs is
+        # how a "covers the documented codes" claim quietly means "covers most".
+        for label, const in (("no-advance", hd.EXIT_NO_ADVANCE),
+                             ("no-change", hd.EXIT_NO_CHANGE)):
+            want = f"`{label}` ({const})"
+            assert want in doc, (
+                f"claude/skills/handoff/SKILL.md does not carry {want!r}; step "
+                f"3's bare-name spelling of {label} drifted from the module, "
+                f"where it is {const}.")
 
     def test_merge_still_returns_a_plain_string(self) -> None:
         """`merge()` is public and called directly by other tests in this file;
@@ -1397,6 +1505,20 @@ class TestRuleFDidNotMoveTheExitCodes:
 # --------------------------------------------------------------------------
 
 SKILL_PINS: list[tuple[str, str]] = [
+    # 🔴 THE WORD "only" IS THE CLAIM, and it was evicted once already. Two other
+    # files describe this clause as load-bearing — `handoff_doc.py`'s rule-(j)
+    # legend comment and `TestSkillAndModuleAgree`'s docstring both say "only ONE
+    # of the four means 'add a field'" — so both stop being true the moment a
+    # byte-pressure edit takes the word, and NOTHING saw it: MEASURED, deleting
+    # `only` leaves all 297 tests green. SKILL.md sits at 7 B of headroom, i.e.
+    # under exactly the pressure that removed it the first time.
+    (
+        "Read each row's marker — only one means \"add a field\"",
+        "🔴 only ONE of the four markers means add-a-field; without `only` the "
+        "executor applies that remedy to all four, when [unknown kind] needs a "
+        "LISTED kind, [unparsed] needs RE-SPELLING and [fenced] needs unfencing "
+        "or tagging the item",
+    ),
     (
         "scripts/lib/handoff_doc.py",
         "the step actually invokes the tool that owns the gate",
@@ -1474,6 +1596,27 @@ SKILL_PINS: list[tuple[str, str]] = [
     (
         "This step CREATES the doc as well as updating it",
         "🔴 …and the gate step claims the new-doc case, so it is not left orphaned",
+    ),
+    # 🔴 The skill scoped the block boundary to "the first unindented line after
+    # a blank one". A col-0 tag after the item's OWN indented fence has a FENCE,
+    # not a blank, immediately above it — so an author reading that sentence
+    # concluded the opposite of what the walk does, and got `[no forcing: field]`
+    # for a field they had written. Behaviour pinned by the `col-0` params of
+    # `test_an_indented_fence_does_not_cost_the_tag_that_follows_it`; this pins
+    # that the skill still states the scope.
+    (
+        "which an intervening FENCE does not reset",
+        "rule (j): the block boundary is stated as WIDE as the walk is",
+    ),
+    # 🔴 The same over-claim on the other side of that sentence: the skill said
+    # flatly that `forcing function:` / `forcing = gate` "are near-misses, NAMED
+    # not absent". `_FORCING_ATTEMPT` is anchored on the CLOSED VOCABULARY, so
+    # that holds only when the value IS a listed kind — `forcing function:
+    # followup` gets `[no forcing: field]`. Behaviour pinned by
+    # `test_a_near_miss_with_an_UNLISTED_kind_is_NOT_named_it_reads_ABSENT`.
+    (
+        "`forcing = gate` **with a listed kind**",
+        "rule (j): the near-miss promise is scoped to the closed vocabulary",
     ),
 ]
 
@@ -2331,6 +2474,264 @@ class TestSkillAndModuleAgree:
                 f"shared branch. Document it, or stop emitting it."
             )
 
+    def test_every_refusal_MARKER_the_module_prints_reaches_the_skill(self) -> None:
+        """🔴 THE SEAM. SKILL.md's step-5 legend now enumerates the four rule-(j)
+        row markers and tells the executor that **only one of them means "add a
+        field"** — that legend is the whole reason the other three stopped
+        getting the add-a-field remedy, i.e. it is load-bearing prose, not a
+        summary. Every marker is pinned on the MODULE side by the tests above;
+        nothing pinned the SKILL side.
+
+        🔴 DERIVED FROM `hd.REFUSAL_MARKERS`, and deliberately NOT four
+        `SKILL_PINS` entries, which is what this repo would ordinarily reach
+        for. A pin asserts the literal is still IN the skill — so renaming
+        `[fenced]` in the module goes red in the module's own tests, gets fixed
+        there, and leaves the legend naming a marker the tool no longer prints,
+        with the pin STILL GREEN because the skill does still contain the old
+        token. A pin catches deletion from the skill; only derivation catches
+        the rename, and the rename is the drift the auditor named.
+
+        Same idiom, and the same reason, as
+        `test_every_exit_code_the_module_can_return_is_documented` directly
+        above: a hand-written list is exactly how `behind` reached the skill's
+        only audience undocumented.
+
+        Shown reachable by the `refusal-marker-renamed` row in
+        `scripts/tests/mutants-handoff-cap.sh`.
+        """
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        assert len(hd.REFUSAL_MARKERS) == 4, (
+            "a fifth cause was added or one was dropped — the skill's legend "
+            "enumerates them, so it needs the same edit in the same commit"
+        )
+        assert len(set(hd.REFUSAL_MARKERS)) == 4, "two markers collapsed onto one token"
+        for marker in hd.REFUSAL_MARKERS:
+            assert marker in doc, (
+                f"scripts/lib/handoff_doc.py prints a refused row starting "
+                f"{marker!r} and claude/skills/handoff/SKILL.md's step-5 legend "
+                f"never mentions it. The executor's only map from a marker to "
+                f"what to do about it would send them to the wrong remedy — and "
+                f"three of the four mean something OTHER than 'add a field'. "
+                f"Update the legend, or stop printing the marker."
+            )
+
+    def test_the_marker_pin_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on the loop above — it iterates a module constant, so
+        without this it is indistinguishable from a loop over an empty tuple that
+        can only pass. A token shaped exactly like a marker, which the skill must
+        not contain."""
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        assert "[no forcing: declaration]" not in doc
+
+    # --- the seam the marker loop above CANNOT see: the legend's INSTRUCTION ---
+    #
+    # 🔴 THE BLIND SPOT, NAMED. `test_every_refusal_MARKER_the_module_prints
+    # _reaches_the_skill` asserts the TOKEN `[fenced]` is present. It stayed
+    # green for a whole round while the legend's instruction beside that token
+    # — "move it out of the fence" — was the exact thing
+    # `FENCED_FIELD_REMEDY`'s own comment says is harmful, because obeying it on
+    # a fence that quotes this tool's vocabulary line promotes a quoted example
+    # into a declaration and produces a FALSE `forcing: none`.
+    #
+    # 🔴 AND THE MODULE SIDE WAS UNPINNED TOO. MEASURED 2026-08-28 at
+    # `e34ed6ef`: reverting `FENCED_FIELD_REMEDY` to a bare
+    # "…where it does not count. Move it out of the fence onto one of the item's
+    # own lines." left the WHOLE suite green — 237 passed — because
+    # `test_a_field_inside_a_FENCE_still_does_not_count_and_says_why` asserts
+    # only `"[fenced]"` and `"code fence"`, both of which the bare text keeps.
+    # So the corrected remedy was documentation, not a guarantee.
+    #
+    # 🔴 WHOLE NORMALISED STRINGS, DELIBERATELY. `claude/RULES.md`: when the
+    # artifact under test IS prose, a guard on WORDS is walkable by REWORDING,
+    # so the whole string is pinned and a cosmetic reword costs a test edit.
+    # That price is the point — it makes the claim machine-readable.
+    _FENCED_REMEDY = (
+        "🔴 The item(s) marked [fenced] carry the field INSIDE a code fence, "
+        "where it does not count — a pasted sample is not a declaration. If "
+        "that field is YOUR declaration, move it out of the fence onto one of "
+        "the item's own lines, INDENTED — at column 0 it reads as absent. If "
+        "it is quoted output, a copied example or this tool's own vocabulary "
+        "line, the item is genuinely untagged and needs one of its own — do "
+        "NOT promote the quote."
+    )
+    _FENCED_LEGEND = (
+        "`[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT "
+        "promote it** 📖 write-gate §C."
+    )
+    #: The one instruction BOTH sides must carry. Derived rather than restated:
+    #: the skill assertion reads it off the module, so dropping it from either
+    #: side goes red, which is the relationship the token loop cannot see.
+    _NO_PROMOTE = "do NOT promote"
+
+    @staticmethod
+    def _norm(s: str) -> str:
+        return " ".join(s.split())
+
+    def _fenced_legend_clause(self) -> str:
+        """The step-5 legend's `[fenced]` clause, LOCATED not restated.
+
+        Anchored on the module's own `MARK_FENCED`, so a rename that the token
+        loop above forces into the skill lands here too rather than leaving this
+        test looking for a marker nobody prints."""
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        legend = doc.index("Read each row's marker")
+        start = doc.index(f"`{hd.MARK_FENCED}`", legend)
+        end = doc.index("⚠", start)
+        return self._norm(doc[start:end])
+
+    def test_the_FENCED_remedy_is_not_a_bare_move_it_out(self) -> None:
+        """🔴 THE MODULE HALF. Shown reachable by the
+        `fenced-remedy-reverted-to-bare-move-it-out` row in
+        `scripts/tests/mutants-handoff-cap.sh`, which reverts this constant to
+        the bare text measured green above and is killed here.
+
+        ⚠ NOT regression coverage — the remedy is already correct at
+        `e34ed6ef`. It is the guarantee that was missing, labelled as one."""
+        assert self._norm(hd.FENCED_FIELD_REMEDY) == self._norm(self._FENCED_REMEDY)
+        assert self._NO_PROMOTE in hd.FENCED_FIELD_REMEDY
+
+    def test_the_printed_refusal_carries_that_remedy_verbatim(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A constant nobody prints is not a remedy. The BEHAVIOURAL half: the
+        real refusal text an executor reads must contain it."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Land the fix.\n"
+            "   ```\n"
+            "   forcing: gate\n"
+            "   ```\n"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "fencedremedy.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert self._norm(hd.FENCED_FIELD_REMEDY) in self._norm(res.stderr)
+
+    def test_the_skill_legend_does_not_tell_the_executor_to_promote_a_quote(
+        self,
+    ) -> None:
+        """🔴 THE SKILL HALF, AND THE ONE THAT WAS ACTUALLY BROKEN. RED at
+        `e34ed6ef`, where the clause reads ``[fenced]` move it out of the
+        fence.` — the module's own comment calls that instruction harmful, and
+        the module comment elsewhere calls this legend "the executor's only map
+        from a marker to what to do about it".
+
+        The `_NO_PROMOTE` assertion is DERIVED from the module constant, so it
+        also fails if the module drops the instruction — that is the seam, and
+        it is what the marker-token loop above structurally cannot see.
+
+        Shown reachable by the `skill-legend-says-only-move-it-out` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        clause = self._fenced_legend_clause()
+        assert self._NO_PROMOTE in hd.FENCED_FIELD_REMEDY, (
+            "the module stopped telling the caller not to promote a quoted "
+            "field; the skill legend below is derived from it, so fix the "
+            "module first"
+        )
+        assert self._NO_PROMOTE in clause, (
+            f"claude/skills/handoff/SKILL.md's step-5 legend maps {hd.MARK_FENCED} "
+            f"to {clause!r}. FENCED_FIELD_REMEDY says the commonest fenced field "
+            f"is a QUOTE of this tool's own vocabulary line, and that obeying a "
+            f"bare 'move it out of the fence' promotes it into a declaration — a "
+            f"false `forcing: none`. The legend must not instruct the harm the "
+            f"module documents."
+        )
+        assert clause == self._norm(self._FENCED_LEGEND)
+
+    def test_the_legend_clause_locator_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on `_fenced_legend_clause`. A locator that silently
+        returned the whole document, or an empty string, would make both
+        assertions above unfalsifiable in one direction.
+
+        Two halves, and the docstring used to describe only the first as if it
+        covered both. The `_NO_PROMOTE` line is a control on the PREDICATE, not
+        on the locator — it feeds the predicate the bare legend text this suite
+        refuses and shows it goes false, so a predicate that could only ever be
+        true would be caught. The `len` and `startswith` lines are the control
+        on the LOCATOR's own return: bounded rather than the whole document,
+        and anchored on the marker rather than empty."""
+        clause = self._fenced_legend_clause()
+        assert self._NO_PROMOTE not in "`[fenced]` move it out of the fence."
+        assert 0 < len(clause) < 400, f"the locator returned {len(clause)} bytes"
+        assert clause.startswith(f"`{hd.MARK_FENCED}`")
+
+    # --- the OTHER prose claim round 4 corrected, and the one nothing pinned ---
+    #
+    # 🔴 THE EXISTING `SKILL_PINS` ENTRY CANNOT SEE THIS DRIFT. That entry is the
+    # substring "`forcing = gate` **with a listed kind**" — which the round-3
+    # wording ALSO contains, verbatim, because the correction moved the
+    # parenthetical rather than the phrase the pin quotes. So the pin is green
+    # against both the true and the false sentence and distinguishes nothing.
+    #
+    # 🔴 WHOLE NORMALISED STRING, for the same reason `_FENCED_REMEDY` is one.
+    _NEAR_MISS_CLAUSE = (
+        "`forcing function:`/`forcing = gate` **with a listed kind** "
+        "(unlisted reads ABSENT), and a fenced field regardless of kind, are "
+        "**near-misses, NAMED** not absent."
+    )
+
+    def _near_miss_clause(self) -> str:
+        """Step 3's near-miss sentence, LOCATED not restated.
+
+        Bounded by the 📖 reference marker that closes every clause in this
+        block, so the locator cannot silently widen to the rest of the file."""
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        start = doc.index("`forcing function:`")
+        return self._norm(doc[start : doc.index("📖", start)])
+
+    def test_the_skill_binds_UNLISTED_reads_ABSENT_to_the_right_antecedent(
+        self,
+    ) -> None:
+        """🔴 RED at `6a862d8c`, where the clause read "…**with a listed kind**,
+        and a fenced field, are **near-misses, NAMED** not absent (an unlisted
+        kind there reads ABSENT)". "there" sat against its nearest antecedent,
+        "a fenced field" — for which it is FALSE.
+
+        RE-MEASURED 2026-08-28 at `976b09b5`, both sides of the distinction:
+
+            fenced `forcing: followup`   -> fenced=True  -> row `[fenced]`
+            fenced `forcing: gate`       -> fenced=True  -> row `[fenced]`
+            `forcing = followup`         -> row `[no forcing: field]`
+            `forcing = gate`             -> row `[unparsed forcing field on: …]`
+
+        i.e. `fenced` is `any(_FORCING.search(ln) …)` and never consults
+        `FORCING_KINDS`, so an unlisted kind inside a fence is NAMED, not
+        absent. Only the `forcing function:` / `forcing = …` spellings fall
+        through to `[no forcing: field]`, because `_FORCING_ATTEMPT` is anchored
+        on the closed vocabulary. Round 4 rebound the parenthetical to those.
+
+        ⚠ NOT regression coverage — the sentence is already correct here. It is
+        the guarantee it never got: the only `SKILL_PINS` entry over it is a
+        substring of the FALSE wording too (see the comment above), so the
+        correction was revertible with the whole suite green.
+
+        Shown reachable by the `skill-near-miss-clause-rebound-to-the-fence`
+        row in `scripts/tests/mutants-handoff-cap.sh`."""
+        assert self._near_miss_clause() == self._norm(self._NEAR_MISS_CLAUSE), (
+            "claude/skills/handoff/SKILL.md's step-3 near-miss sentence no "
+            "longer reads as pinned. If '(unlisted reads ABSENT)' drifted back "
+            "onto 'a fenced field', that is the MEASURED-FALSE binding — a "
+            "fenced field with an unlisted kind is reported `[fenced]`, not "
+            "absent, because `fenced` never consults FORCING_KINDS. Re-measure "
+            "before rewording, and update _NEAR_MISS_CLAUSE in the SAME commit "
+            "for a deliberate reword."
+        )
+
+    def test_the_near_miss_clause_locator_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on `_near_miss_clause`, in both directions a locator
+        can be vacuous. The PREDICATE half feeds it the round-3 sentence this
+        suite refuses and shows the comparison goes false — an equality that
+        could only ever hold would be caught here. The LOCATOR half shows the
+        return is bounded rather than the whole document, and anchored where it
+        claims to be rather than empty."""
+        clause = self._near_miss_clause()
+        assert self._norm(self._NEAR_MISS_CLAUSE) != self._norm(
+            "`forcing function:`/`forcing = gate` **with a listed kind**, and a "
+            "fenced field, are **near-misses, NAMED** not absent (an unlisted "
+            "kind there reads ABSENT)."
+        )
+        assert 0 < len(clause) < 400, f"the locator returned {len(clause)} bytes"
+        assert clause.startswith("`forcing function:`")
+
     def test_the_tool_is_tracked_by_git(self) -> None:
         """A new file the flake never sees deploys as an absence, silently.
 
@@ -2628,10 +3029,15 @@ class TestBlockedCommitLeavesNoTrace:
         assert not doc.exists()
         self._block_commits(repo)
 
+        # `--new-effort` is rule (i-b)'s assertion, added 2026-08-28: this repo
+        # already carries `handoff-sample-topic.md`, so creating a SECOND doc is
+        # now refused (exit 7) unless the caller says it is a new effort. Here it
+        # genuinely is — this test is about the ROLLBACK path, and without the
+        # flag the run would never reach the commit it needs to see refused.
         res = subprocess.run(
             [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
              "brand-new-topic", "--update", str(update_file), "--advanced",
-             "a first-ever handoff for this topic", "--confirm"],
+             "a first-ever handoff for this topic", "--new-effort", "--confirm"],
             capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
         )
 
@@ -3085,7 +3491,12 @@ class TestAStaleBaseIsLoud:
         advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
         out = run_tool(work, update=update_file).stdout
         assert STALE_HEAD in out, out
-        assert "there is NO claudedocs/handoff-sample-topic.md in this checkout" in out
+        # Wording widened deliberately: the trigger is now "no USABLE doc"
+        # (missing, empty or whitespace), because a blank base destroys the
+        # committed document exactly as a missing one does. The old string said
+        # "there is NO <path>", which is false of a file that exists and is blank.
+        assert "no usable claudedocs/handoff-sample-topic.md" in out, out
+        assert "will be replaced by this delta" in out, out
 
     def test_a_CURRENT_clone_prints_NOTHING_new(self, repo: Path,
                                                 update_file: Path) -> None:
@@ -3244,10 +3655,12 @@ class TestBaseCurrencyMeasuresAndSaysWhenItCannot:
         cur = hd.BaseCurrency(None, ("origin/main",), None, None, None,
                               "no mainline ref resolves in this clone")
         loud = hd.wrong_base_report(("a tell",), cur, "d.md", Path("/r"),
-                                    hd.doc_shape(BASE_DOC))
+                                    hd.doc_shape(BASE_DOC),
+                                    cur.replaces_mainline_doc(BASE_DOC))
         assert "base currency UNCHECKED" in loud
         quiet = hd.wrong_base_report((), cur, "d.md", Path("/r"),
-                                     hd.doc_shape(BASE_DOC))
+                                     hd.doc_shape(BASE_DOC),
+                                     cur.replaces_mainline_doc(BASE_DOC))
         assert quiet == "", "an unmeasurable check must not speak on its own"
 
 
@@ -3289,3 +3702,2038 @@ class TestRuleHDidNotMoveTheExitCodes:
         res = run_tool(work, update=noop)
         assert res.returncode == hd.EXIT_NO_CHANGE, res.stdout + res.stderr
         assert STALE_HEAD not in res.stdout + res.stderr
+
+
+# --------------------------------------------------------------------------
+# rules (i) and (j) — one doc per effort, and a forcing function per rank
+# (operator decision 2026-08-28; see the module docstring and
+#  claude/skills/handoff/reference/write-gate.md §C)
+# --------------------------------------------------------------------------
+
+FORCED_UPDATE = """## State now
+- Branch / PR: `feat/sample` / #99
+
+## Next steps (ranked)
+1. Watch the drain rate for a day. forcing: gate — the load soak blocks the release
+"""
+
+
+def write_delta(tmp_path: Path, name: str, text: str) -> Path:
+    """A named delta file. NAMED per-test rather than reusing `update.md`,
+    because several tests in this class write two different deltas in one
+    tmp_path and a shared name would let one silently read the other's bytes."""
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+class TestADatedTopicIsRefused:
+    """Rule (i-a). A slug carrying a date names a PER-SESSION doc: next
+    session's date differs, so it can never be updated in place.
+
+    🔴 RED AT `origin/main` — before this change every case below exited 0 and
+    wrote the doc. That is the regression this class covers, and it is why the
+    write-nothing assertions hash the whole tree rather than checking the file.
+    """
+
+    @pytest.mark.parametrize(
+        "topic,token",
+        [
+            ("browser-bridge-2026-08-01", "2026-08-01"),   # devrc spelling: trailing
+            ("2026-07-18-remix-session", "2026-07-18"),    # homelab spelling: leading
+            # 🔴 RED AT `edbc596f` — the arm that catches this is NEW (#964 item
+            # 2). `\d{4}-\d{2}-\d{2}` needs the hyphens, so `date +%Y%m%d` — the
+            # likeliest AGENT-generated spelling, and the one a cron or a script
+            # produces without thinking — sailed straight through while
+            # `rfc-1918-addressing` was refused. Both spellings, so the arm is
+            # pinned at a leading and a trailing position rather than at one.
+            ("remix-20260801", "20260801"),                # compact, trailing
+            ("20260801-remix-session", "20260801"),        # compact, leading
+        ],
+        ids=["trailing-iso", "leading-iso", "trailing-compact", "leading-compact"],
+    )
+    def test_every_dated_spelling_in_the_corpus_is_refused(
+        self, repo: Path, update_file: Path, topic: str, token: str
+    ) -> None:
+        before = tree_hash(repo)
+        res = run_tool(repo, update=update_file, topic=topic)
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, res.stdout + res.stderr
+        assert "status=dated-topic" in res.stderr
+        assert token in res.stderr, "the refusal must name the date it found"
+        assert tree_hash(repo) == before, "a refusal wrote something"
+
+    def test_the_refusal_names_the_undated_topic_to_use(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """A refusal with no pasteable fix is one people work around."""
+        res = run_tool(repo, update=update_file, topic="2026-07-18-remix-session")
+        assert "--topic remix-session" in res.stderr, res.stderr
+
+    def test_new_effort_does_NOT_bypass_a_dated_topic(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE BYPASS TEST. `--new-effort` is rule (i-b)'s assertion; if it
+        also let a dated slug through, the crisp half of the rule would be
+        one flag away from inert — and that flag is right there in the OTHER
+        refusal's remedy text, so a session would find it."""
+        before = tree_hash(repo)
+        res = run_tool(
+            repo, "--new-effort", update=update_file, topic="remix-2026-08-01"
+        )
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT
+        assert "status=dated-topic" in res.stderr
+        assert tree_hash(repo) == before
+
+    def test_an_undated_topic_is_NOT_refused(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 POSITIVE CONTROL. A guard that refuses everything is not a guard,
+        and `_TOPIC_DATE` is a regex over a caller-supplied string — the
+        cheapest place for an over-broad pattern to hide."""
+        res = run_tool(repo, update=update_file, topic="sample-topic")
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+    @pytest.mark.parametrize(
+        "topic",
+        [
+            # The original four. 🔴 EVERY ONE OF THEM AVOIDS THE 19xx/20xx
+            # WINDOW, which is exactly why this test could not see #964 item 1:
+            # it was four points sampled entirely outside the hazard.
+            "h2-planning", "ipv6-rollout", "s3-403-triage", "phase-2-store",
+            # 🔴 RED AT `edbc596f`, all ten. Each is a plausible slug in this
+            # estate whose 4-digit run a human reads as a NUMBER, and each was
+            # refused with NO FLAG TO SAY SO — the refusal handing back an
+            # unreadable substitute (`rfc-1918-addressing` -> `rfc--addressing`).
+            # `security` is a first-class forcing kind, which makes
+            # `cve-YYYY-NNNN` a predictable slug rather than a contrived one.
+            "rfc-1918-addressing",      # the RFC, not the year
+            "rsa-2048-keys",            # a key size
+            "nfs-2049-mount",           # a port
+            "port-2000-collision",      # a port
+            "rtx-2080-passthrough",     # a GPU
+            "rtmp-1935-relay",          # a port
+            "y2038-timestamps",         # a bug's name
+            "viewport-1920x1080",       # a resolution
+            "iso-2022-jp-encoding",     # a character encoding
+            "cve-2024-3094-xz",         # a CVE id
+        ],
+    )
+    def test_ordinary_numbers_in_a_slug_are_not_dates(self, topic: str) -> None:
+        """The over-broad direction. A slug is allowed to carry digits — `h2`,
+        `ipv6`, `403`, `phase-2`, a port, a key size, a CVE — and a pattern that
+        ate them would make the rule unpredictable at the moment a session is
+        trying to obey it, with no bypass to reach for."""
+        assert hd.topic_carries_a_date(topic) is None
+
+    @pytest.mark.parametrize(
+        "topic", ["q3-2026-cleanup", "remix-2026-07-session"]
+    )
+    def test_a_year_only_slug_is_a_KNOWN_gap(self, topic: str) -> None:
+        """🔴 THE COST SIDE OF THE 2026-08-31 DELETION, PINNED SO IT IS A
+        DECISION RATHER THAN AN ACCIDENT — and RED AT `edbc596f`, where both of
+        these were refused.
+
+        Deleting `_TOPIC_DATE`'s bare-year arm (#964 item 1) buys the ten
+        false positives above and costs exactly this: a YEAR-ONLY per-session
+        slug is no longer refused. The trade was made on a measurement, not a
+        preference — across the 147 real handoff docs in devrc + homelab-talos
+        that arm had ZERO hits in BOTH directions, all 55 dated slugs carrying a
+        full ISO date. Rule (i-b)'s new-doc refusal still catches the SECOND doc
+        for an effort that already has one, which is what makes the gap
+        survivable.
+
+        If a year-only doc ever appears in the corpus, this test is the thing to
+        delete — and re-adding the arm then has a measurement behind it.
+        """
+        assert hd.topic_carries_a_date(topic) is None
+
+    @pytest.mark.parametrize("topic", ["remix-1756339200", "26-08-01-remix"])
+    def test_the_two_remaining_date_spellings_are_KNOWN_gaps(self, topic: str) -> None:
+        """🔴 GREEN ON BOTH SIDES — an INVARIANT GUARD, not regression coverage,
+        and labelled as one because `claude/RULES.md` asks for the distinction.
+
+        #964 item 2 listed four spellings that pass. Two are now refused (see
+        the compact params above); these two are NOT, and catching them would
+        cost more than it buys: a 10-digit epoch and a 2-digit-year `\\d{2}-
+        \\d{2}-\\d{2}` arm would both re-open exactly the false-positive surface
+        item 1 was just closed to remove.
+
+        The value of pinning them is the SENTENCE, not the behaviour: rule
+        (i-a)'s refusal says "there is no FLAG to bypass this", and that is now
+        the whole of the claim. A SPELLING still walks it — which is why the
+        skill body says `no flag bypasses it` rather than `no bypass exists`.
+        """
+        assert hd.topic_carries_a_date(topic) is None
+
+
+class TestASecondDocForAnExistingEffortIsRefused:
+    """Rule (i-b). Creating the N+1th doc stops being the SILENT DEFAULT.
+
+    🔴 WHAT THIS DOES NOT CLAIM: it does not detect that two slugs are the same
+    effort. No fuzzy match is attempted or wanted. What it pins is that the
+    caller is shown the list and must make an explicit assertion.
+    """
+
+    def test_a_new_topic_is_refused_and_lists_what_exists(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        before = tree_hash(repo)
+        res = run_tool(repo, update=update_file, topic="remix-hardening-session")
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, res.stdout + res.stderr
+        assert "status=new-doc" in res.stderr
+        assert "handoff-sample-topic.md" in res.stderr, (
+            "the refusal must LIST the existing docs — without the list it is a "
+            "block with no way to comply, and --new-effort becomes reflexive"
+        )
+        assert tree_hash(repo) == before
+
+    def test_new_effort_lands_it(self, repo: Path, update_file: Path) -> None:
+        """The assertion works — otherwise the rule bans new efforts outright."""
+        res = run_tool(repo, "--new-effort", update=update_file, topic="genuinely-new")
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+    def test_updating_an_EXISTING_doc_never_asks(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE SILENCE THAT MATTERS. The ordinary path — updating in place —
+        is the behaviour this whole change is trying to make normal, so it must
+        not acquire a flag. If this ever fails, the rule is inverted."""
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=new-doc" not in res.stdout + res.stderr
+
+    def test_the_FIRST_doc_in_a_repo_needs_no_flag(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE BOOTSTRAP CASE, and the one an over-eager rule would break.
+        A repo with no handoff docs at all has no effort to duplicate, so
+        `existing` is empty and the question is never asked. Requiring
+        `--new-effort` here would gate the one case that is unambiguously
+        correct."""
+        origin = tmp_path / "origin.git"
+        _sh("git", "init", "-q", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+        work = tmp_path / "fresh"
+        work.mkdir()
+        _sh("git", "init", "-q", "-b", "main", cwd=work)
+        for k, v in (("user.name", "T"), ("user.email", "t@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=work)
+        _sh("git", "remote", "add", "origin", str(origin), cwd=work)
+        (work / "README.md").write_text("fresh\n", encoding="utf-8")
+        _sh("git", "add", "--", "README.md", cwd=work)
+        _sh("git", "commit", "-q", "-m", "seed", cwd=work)
+
+        res = run_tool(work, update=update_file, topic="first-effort")
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+
+class TestARankedItemMustNameAForcingFunction:
+    """Rule (j). The closed vocabulary is the structural half; the truth of the
+    evidence beside it is NOT checkable and is not claimed to be."""
+
+    def test_an_untagged_item_is_refused_and_writes_nothing(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        upd = write_delta(
+            tmp_path, "untagged.md",
+            "## Next steps (ranked)\n1. Re-read the retry wrapper.\n",
+        )
+        before = tree_hash(repo)
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "status=unforced" in res.stderr
+        assert "Re-read the retry wrapper" in res.stderr, "name the offending item"
+        assert tree_hash(repo) == before
+
+    def test_a_kind_outside_the_vocabulary_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE POINT OF AN ALLOWLIST. `followup` is precisely the label a
+        self-generated item reaches for, and it is refused BY DEFAULT rather
+        than by being enumerated as banned — which is what a rewording cannot
+        walk around."""
+        upd = write_delta(
+            tmp_path, "followup.md",
+            "## Next steps (ranked)\n1. Tidy the docs. forcing: followup\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "'followup'" in res.stderr, "say WHAT was typed, or it cannot be fixed"
+
+    def test_the_refusal_prints_the_whole_vocabulary(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A closed set the caller cannot see is a guessing game."""
+        upd = write_delta(
+            tmp_path, "vocab.md", "## Next steps (ranked)\n1. Do a thing.\n"
+        )
+        res = run_tool(repo, update=upd)
+        for kind in hd.EXTERNAL_FORCING_KINDS:
+            assert kind in res.stderr, f"{kind} missing from the printed vocabulary"
+
+    @pytest.mark.parametrize("kind", sorted(hd.EXTERNAL_FORCING_KINDS))
+    def test_every_external_kind_is_accepted(
+        self, repo: Path, tmp_path: Path, kind: str
+    ) -> None:
+        """🔴 POSITIVE CONTROL, PER MEMBER. A set constant is exactly the place a
+        typo survives a green suite: one unreachable member would refuse an item
+        the skill's own vocabulary told the author to write."""
+        upd = write_delta(
+            tmp_path, f"kind-{kind}.md",
+            f"## Next steps (ranked)\n1. Do the thing. forcing: {kind} — evidence\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+    def test_forcing_none_is_ACCEPTED_and_reported(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 Refusing `none` would not delete self-generated items — it would
+        teach sessions to type `incident` falsely, moving the population
+        underground. So it lands, and it is COUNTED where a reader sees it."""
+        upd = write_delta(
+            tmp_path, "none.md",
+            "## Next steps (ranked)\n1. Refactor the parser. forcing: none\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+        assert "forcing: none" in res.stdout and "NO external forcing" in res.stdout
+        assert "Refactor the parser" in res.stdout
+
+    def test_the_self_generated_block_is_SILENT_when_every_item_is_external(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The ordinary run must not carry a reassuring "0 self-generated" line —
+        `dropped_durable_report`'s stated reason, applied to the same shape."""
+        res = run_tool(repo, update=update_file)
+        assert "NO external forcing" not in res.stdout
+
+    def test_legacy_base_items_are_not_retroactively_refused(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE PERMANENTLY-RED-GATE GUARD, and the reason rule (j) reads the
+        UPDATE rather than the merge. `BASE_DOC`'s two ranked items carry no
+        `forcing:` field — as every one of the 384 real ranked items in the
+        corpus does not. If this ever fails, the rule became a gate that no
+        established repo can pass, which `claude/RULES.md` calls worse than no
+        gate at all."""
+        assert "forcing:" not in BASE_DOC, (
+            "the fixture stopped being legacy, so this test proves nothing"
+        )
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+    def test_an_update_with_no_next_steps_section_is_not_asked(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Omitting a section leaves it ALONE (the merge's contract), so an
+        update that touches no ranks changes no ranks and must not be gated."""
+        upd = write_delta(
+            tmp_path, "nosteps.md",
+            "## State now\n- Branch / PR: `feat/sample` / #101\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+    def test_a_numbered_line_inside_a_FENCE_is_not_a_ranked_item(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Fence awareness, for the reason `split_sections` has it: a handoff
+        pastes numbered output constantly, and a sample log line is not a work
+        item to be tagged."""
+        upd = write_delta(
+            tmp_path, "fenced.md",
+            "## Next steps (ranked)\n"
+            "1. Watch the drain rate. forcing: incident — paging since 09:00Z\n"
+            "```\n1. this is sample output, not a rank\n2. neither is this\n```\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert len(hd.ranked_items(upd.read_text(encoding="utf-8"))) == 1
+
+    @pytest.mark.parametrize("indent", [1, 2, 3, 4, 5, 8])
+    def test_a_nested_numbered_line_is_not_a_rank(self, indent: int) -> None:
+        """The ranks are half a claim's identity (`claim-work --slug-for <doc>
+        <rank>`), so counting a sub-item as a rank would re-point live claims.
+
+        🔴 RED AT `edbc596f` FOR indent 1, 2 AND 3 — #964 item 5. This test
+        pinned FOUR SPACES only, and four is excluded by `_RANKED_ITEM`'s
+        `^ {0,3}` bound under both the real pattern and a wider one, so it could
+        never see the boundary it claimed to guard. **3 spaces is the CommonMark
+        content indent for `1. `** — the canonical column a sub-list under a
+        top-level rank starts at — and at three the old code returned TWO items
+        both numbered `1`: the exact miscount the comment above `_RANKED_ITEM`
+        said the bound prevented.
+
+        Parametrised ACROSS the boundary rather than at one point, so a fix that
+        merely moves the bound cannot pass: the old `^ {0,3}` reading and the
+        contextual one disagree only at 1-3, and the shared cases at 4+ are what
+        prove the widening did not cost the exclusion it already had.
+        """
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix it. forcing: gate — CI red\n"
+            + " " * indent + "1. sub-step, not a rank\n"
+        )
+        assert [i.rank for i in hd.ranked_items(text)] == ["1"]
+
+    def test_a_SIBLING_at_the_same_column_IS_a_rank(self) -> None:
+        """🔴 THE POSITIVE CONTROL for the test above, and the direction that
+        matters: an exclusion which also swallowed real siblings would make rule
+        (j) silently ACCEPT every item after the first. Same fixture shape, one
+        variable changed — the child's column."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix it. forcing: gate — CI red\n"
+            "1. Then ship it. forcing: user — Zach asked\n"
+        )
+        assert [i.rank for i in hd.ranked_items(text)] == ["1", "1"]
+
+    def test_a_queue_INDENTED_AS_A_WHOLE_still_has_every_item_counted(self) -> None:
+        """🔴 THE COLUMN IS RELATIVE, NEVER A LITERAL 0 — and this is the
+        fail-OPEN direction, so it is the expensive one to get wrong.
+
+        A section that indents its whole queue (CommonMark allows up to 3 spaces
+        on a top-level block) must still have all of its items gated. Pinning
+        the column at 0 instead of at the FIRST item's own column would exempt
+        every one of them from rule (j) — untagged items silently accepted,
+        which `_item_blocks` already records as strictly worse than a false
+        refusal. Green at `edbc596f` too: an INVARIANT GUARD on the new walk,
+        labelled as one.
+        """
+        text = (
+            "## Next steps (ranked)\n"
+            "  1. Fix it. forcing: gate — CI red\n"
+            "  2. Ship it. forcing: user — Zach asked\n"
+        )
+        assert [i.rank for i in hd.ranked_items(text)] == ["1", "2"]
+
+    def test_a_numbered_line_indented_PAST_the_commonmark_bound_is_never_a_rank(
+        self,
+    ) -> None:
+        """`_RANKED_ITEM`'s `^ {0,3}` bound, given its OWN killer.
+
+        Once the nesting exclusion moved into `_item_blocks` the regex bound
+        stopped being what excludes a CHILD, so nothing else reaches it: every
+        nesting case above is decided by the contextual check. This is the shape
+        only the pattern can refuse — the FIRST numbered line in a section,
+        deeply indented under a bullet, i.e. quoted output rather than a rank.
+        Widening the pattern to `^ *` makes it a rank, and rule (j) then refuses
+        a document over a line nobody wrote as a work item.
+        """
+        text = (
+            "## Next steps (ranked)\n"
+            "- context, not a queue:\n"
+            "      1. sample output, not a rank\n"
+        )
+        assert hd.ranked_items(text) == []
+
+    def test_items_outside_a_next_steps_heading_are_not_asked(self) -> None:
+        """Scoped to the queue. A numbered list under `## Goal` is prose."""
+        assert hd.ranked_items("## Goal\n1. ship the thing\n") == []
+
+
+class TestTheNextStepsSelectorHasOneOwner:
+    """#964 item 3. `ranked_items` re-derived "is this the ranked queue?" with a
+    raw `heading_text(h).lower().startswith(NEXT_STEPS_PREFIX)` while
+    `canonical_prefix` already owned the question WITH whitespace normalisation.
+    One rule, two places — and `claude/RULES.md` says such a predicate is
+    typically wrong at N-1 of N sites, which is what consolidating made audible.
+    """
+
+    #: 🔴 THE WHOLE MATRIX, not a sample — the seam is the relationship between
+    #: two predicates, and a table with only agreeing rows cannot see a
+    #: disagreement. Rows are `(heading text, is it the ranked queue?)`.
+    HEADINGS: tuple[tuple[str, bool], ...] = (
+        ("Next steps (ranked)", True),          # what the template mandates
+        ("NEXT STEPS", True),                   # case
+        ("Next  steps (ranked)", True),         # 🔴 the MEASURED disagreement
+        ("▶ Next steps (ranked)", True),        # 🔴 decoration, 1 real doc
+        ("🔴 Next steps", True),                # decoration, emoji
+        # The NON-GOAL half. These are REWORDINGS, and refusing to chase them is
+        # a decision — see `is_next_steps_heading`. 20 corpus sections carrying
+        # 96 items look like this and are deliberately not gated.
+        ("Ranked next steps", False),
+        ("Open items, ranked", False),
+        ("Backlog — the highest-ROI UNBUILT items (ranked)", False),
+        ("Resume next session", False),
+        ("Goal", False),
+        ("State now", False),
+    )
+
+    @pytest.mark.parametrize("heading,is_queue", HEADINGS)
+    def test_the_selector_answers_the_whole_matrix(
+        self, heading: str, is_queue: bool
+    ) -> None:
+        """🔴 RED AT `edbc596f` for `Next  steps` and both decorated rows — each
+        returned 0 items, silently exempting every item under it from rule (j).
+        The non-goal rows are GREEN on both sides: INVARIANT GUARDS that pin the
+        decision not to chase synonyms, so a later widening has to argue with a
+        test rather than slip past one."""
+        text = f"## {heading}\n\n1. do the thing. forcing: gate — CI red\n"
+        assert bool(hd.ranked_items(text)) is is_queue
+
+    @pytest.mark.parametrize("heading,is_queue", HEADINGS)
+    def test_the_TWO_call_sites_cannot_disagree(
+        self, heading: str, is_queue: bool
+    ) -> None:
+        """🔴 THE SEAM GUARD — it pins the RELATIONSHIP, which is the thing
+        neither predicate's own tests could see. Both surfaces were tested; what
+        nobody owned was that they answer the SAME question. Measured
+        disagreement at `edbc596f`: `Next  steps` was `canonical_prefix` ->
+        `next steps` and `ranked_items` -> not a queue.
+
+        🔴 IT COMPARES `canonical_prefix` AGAINST `ranked_items`' OWN VERDICT,
+        and an earlier version of this test did NOT — it compared
+        `canonical_prefix` against `is_next_steps_heading`, which literally calls
+        it, so the two could not disagree by construction. That version was this
+        PR's own headline defect committed against itself: a guard whose
+        DOCSTRING claims a relationship while its BODY inspects one side.
+        CAUGHT BY MUTATION, not by reading — `heading-test-open-coded-again`
+        (revert the call site to the raw `.startswith`) reported 🔴 `WRONG-KILLER`,
+        dying to the table test and the structural one while THIS test, the row's
+        named killer, stayed green. Comparing against the real call site is what
+        makes it a seam guard rather than a tautology.
+
+        `is_queue` is still asserted rather than only the equality: two sides
+        that agree on the WRONG answer would satisfy a bare `a is b`.
+        """
+        via_canonical = hd.canonical_prefix(heading) == hd.NEXT_STEPS_PREFIX
+        via_selector = bool(hd.ranked_items(
+            f"## {heading}\n\n1. do the thing. forcing: gate — CI red\n"
+        ))
+        assert via_selector is via_canonical, (
+            "the section selector and the canonical classifier disagree about "
+            f"{heading!r} — one rule, two places, wrong at one"
+        )
+        assert via_canonical is is_queue
+        assert hd.is_next_steps_heading(heading) is is_queue
+
+    def test_ranked_items_does_not_OPEN_CODE_the_predicate(self) -> None:
+        """The structural half. A behavioural table pins today's answers; only
+        this stops a future edit re-introducing a second copy that agrees on
+        these eleven rows and diverges on the twelfth. 🔴 It is NOT sufficient
+        alone — a structural check type-checks past a wrong argument — which is
+        why both halves exist."""
+        # 🔴 COMMENTS STRIPPED FIRST. The first version of this assertion read
+        # the raw source and went red on the COMMENT directly above the call
+        # site — a comment that says to use the one owner. `claude/RULES.md`:
+        # a search's answer is a claim about the searcher's VIEW.
+        src = inspect.getsource(hd.ranked_items)
+        code = "\n".join(line.split("#")[0] for line in src.splitlines())
+        assert "startswith" not in code, (
+            "`ranked_items` is open-coding the heading test again — ask "
+            "`is_next_steps_heading`, which asks `canonical_prefix`"
+        )
+        assert "is_next_steps_heading(" in code
+
+    def test_decoration_stripping_cannot_promote_a_SYNONYM(self) -> None:
+        """🔴 THE BOUND ON THE WIDENING, and the reason it is safe. Only LEADING
+        non-alphanumerics are stripped, so the normaliser can never turn a
+        different heading into this one — it only undoes ornament on the same
+        one. Without this, `_HEADING_DECORATION` could be widened to eat word
+        characters and the synonym rows above would start passing while every
+        other test stayed green."""
+        assert hd.canonical_prefix("Ranked next steps") is None
+        assert hd.canonical_prefix("The next steps") is None
+        assert hd.canonical_prefix("▶ ⚠ 🔴 Next steps") == hd.NEXT_STEPS_PREFIX
+
+
+class TestTheNewDocRefusalSeesTheMAINLINE:
+    """#964 item 4. Rule (i-b)'s list was a `glob` of the WORKING TREE, so in a
+    clone that is behind — the incident this module exists for — the doc it tells
+    you to name may exist only upstream and the list STRUCTURALLY CANNOT contain
+    the answer, while reading as though it were complete.
+
+    Distinct from `#1046`, which fixed the OTHER half: that one stopped rule (i)
+    pre-empting the stale-base refusal for THIS topic's doc. This is about the
+    OTHER efforts' docs, which is what makes the list usable.
+    """
+
+    @staticmethod
+    def _drop_locally(repo: Path, name: str) -> None:
+        """Delete a committed doc from the WORKING TREE and HEAD, leaving it on
+        `origin/main` — a stale clone, built rather than described."""
+        _sh("git", "rm", "-q", "--", f"claudedocs/{name}", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "local branch dropped it", cwd=repo)
+
+    def test_a_doc_only_the_MAINLINE_has_is_listed_and_labelled(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 RED AT `edbc596f` — the upstream-only doc was simply absent from
+        the list, and the count said `1 handoff doc(s)` while two efforts
+        existed."""
+        (repo / "claudedocs" / "handoff-other-effort.md").write_text(
+            BASE_DOC, encoding="utf-8"
+        )
+        _sh("git", "add", "--", "claudedocs/handoff-other-effort.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "a second effort", cwd=repo)
+        _sh("git", "push", "-q", "origin", "main", cwd=repo)
+        self._drop_locally(repo, "handoff-other-effort.md")
+
+        res = run_tool(repo, update=update_file, topic="remix-hardening-session")
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, res.stdout + res.stderr
+        assert "status=new-doc" in res.stderr
+        assert "handoff-other-effort.md" in res.stderr, (
+            "the upstream-only doc must be OFFERED — it is the answer to the "
+            "question the refusal asks"
+        )
+        assert "only)" in res.stderr, (
+            "and LABELLED, or the reader cannot tell 'you have this' from "
+            "'you would have to fetch this'"
+        )
+
+    def test_the_count_says_WORKING_TREE_not_repo(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A CLAIM ABOUT A CLONE IS NOT A CLAIM ABOUT A REPO. The sentence
+        said "this repo already has N handoff doc(s)" while counting a glob of
+        one checkout — the wording is what made the list read as complete. RED
+        at `edbc596f`."""
+        res = run_tool(repo, update=update_file, topic="remix-hardening-session")
+        assert "this WORKING TREE already has" in res.stderr, res.stderr
+        assert "this repo already has" not in res.stderr
+
+    def test_an_ELIDING_list_says_how_to_see_the_rest(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 RED AT `edbc596f`. `EXISTING_SHOWN_MAX` is 12 against 92 docs in
+        devrc, so the refusal shows 12 and elides 80 — and an effort last touched
+        three weeks ago is not in the newest-12 window. "Re-run with its topic"
+        then points at a list that cannot contain the answer, with no way to ask
+        for more.
+
+        🔴 BOTH SOURCES, because the two lists have different ones and NO SINGLE
+        COMMAND enumerates the union — an `ls-tree`-only line is wrong whenever
+        the elided tail is local, and an `ls`-only line wrong whenever it is
+        upstream. The fixture builds a repo that has both, one doc over the cap,
+        so a message naming only one of them fails here.
+        """
+        docs = repo / "claudedocs"
+        # an UPSTREAM-ONLY doc: committed and pushed, then dropped locally
+        (docs / "handoff-upstream-only.md").write_text(BASE_DOC, encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-upstream-only.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "upstream effort", cwd=repo)
+        _sh("git", "push", "-q", "origin", "main", cwd=repo)
+        self._drop_locally(repo, "handoff-upstream-only.md")
+        for n in range(hd.EXISTING_SHOWN_MAX):
+            (docs / f"handoff-effort-{n:02d}.md").write_text(BASE_DOC, encoding="utf-8")
+
+        res = run_tool(repo, update=update_file, topic="remix-hardening-session")
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, res.stdout + res.stderr
+        assert "… and 2 more" in res.stderr, res.stderr
+        assert f"ls {repo}/claudedocs/handoff-*.md" in res.stderr, (
+            "an elision with no way to see what was elided is the amplifier, "
+            "not the cap — and the LOCAL half is where the tail usually is"
+        )
+        assert "ls-tree" in res.stderr, (
+            "…and the MAINLINE half, or a stale clone is told to `ls` a tree "
+            "that does not have the doc it is being sent to find"
+        )
+
+    def test_an_UNRESOLVABLE_mainline_yields_no_rows_and_does_not_crash(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 AN UNANSWERED QUESTION MUST NOT BECOME A LIST. A repo with no
+        mainline ref, an unfetched ref, or no `claudedocs/` upstream all yield
+        `[]` — and `[]` is NOT "the mainline has no docs". The positive control
+        is the test above, which shows the same function CAN return rows; without
+        it this assertion is indistinguishable from a function wired to nothing.
+        """
+        work = tmp_path / "norem"
+        work.mkdir()
+        _sh("git", "init", "-q", "-b", "main", cwd=work)
+        assert hd.mainline_handoff_docs(work, None) == []
+        assert hd.mainline_handoff_docs(work, "origin/main") == []
+
+
+class TestTheFieldIsFoundOnTheWholeItemNotTheNumberedLine:
+    """🔴 RED AT `3f7f2e62` — every test in this class. Rule (j)'s first version
+    ran `_FORCING.search` against the single line `_RANKED_ITEM` had matched, so
+    a tag on any CONTINUATION line of a multi-line item was invisible.
+
+    MEASURED over the committed corpus: 179 of 257 ranked items in devrc's
+    `claudedocs/` and 99 of 181 in homelab-talos' wrap onto continuation lines,
+    so the majority shape was structurally unable to pass. And the refusal it
+    got was the worst kind — `[no forcing: field]` about an item that HAS one,
+    under a printed remedy already satisfied: the obvious fix is a no-op, the
+    re-run is byte-identical, and `/handoff` step 5 is this doc's SOLE writer,
+    so the session's handoff never lands at all.
+
+    Two halves, and the class covers both, because either alone is still broken:
+    the BLOCK search (the behaviour), and a remedy per CAUSE (the message).
+    """
+
+    # 🔴 THE OBSERVED FAILURE, verbatim in shape: two items that BOTH carry a
+    # correct tag, on the last line of a wrapped item. `rc=8` at `3f7f2e62`.
+    OBSERVED = (
+        "## Next steps (ranked)\n"
+        "1. 🔴 **Land the pre-push gate change-scoping** (`devrc#952`).\n"
+        "   The hook scopes to the whole tree, so every push re-runs the full\n"
+        "   suite and the gate is red for reasons the push did not cause.\n"
+        "   forcing: gate — devrc#952's CI leg has been red since 2026-08-26\n"
+        "2. **Fix the `measure.py` latent misreport.**\n"
+        "   It prints a zero where the query returned no rows at all.\n"
+        "   forcing: regression — measured against the 2026-08-20 baseline\n"
+    )
+
+    @staticmethod
+    def _naive_kinds(text: str) -> list[str | None]:
+        """The boundary this change REJECTED: numbered line to the next numbered
+        line, or the end of the section. Kept here as the sensitivity control for
+        `test_trailing_boilerplate_does_not_tag_the_last_item` — without it that
+        assertion could be passing for any reason at all."""
+        _fm, body = hd.split_front_matter(text)
+        _pre, secs = hd.split_sections(body)
+        out: list[str | None] = []
+        for heading, sb in secs:
+            if not hd.heading_text(heading).lower().startswith(hd.NEXT_STEPS_PREFIX):
+                continue
+            lines = [ln for _i, ln in hd._unfenced(sb)]
+            starts = [k for k, ln in enumerate(lines) if hd._RANKED_ITEM.match(ln)]
+            for n, k in enumerate(starts):
+                end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+                m = hd._FORCING.search("\n".join(lines[k:end]))
+                out.append(m.group(1).lower() if m else None)
+        return out
+
+    def test_the_observed_refusal_of_two_correctly_tagged_items_is_gone(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The exact reported symptom: `rc=8`, `status=unforced`, two items that
+        are both tagged. Reproduced through the TOOL, not just the parser."""
+        upd = write_delta(tmp_path, "wrapped.md", self.OBSERVED)
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=unforced" not in res.stderr
+        assert [i.kind for i in hd.ranked_items(self.OBSERVED)] == ["gate", "regression"]
+
+    @pytest.mark.parametrize(
+        "tagline",
+        (
+            "   forcing: gate — CI red",
+            "   **forcing: gate** — CI red",
+            "   `forcing: gate` — CI red",
+            "   Forcing: Gate — CI red",
+            "   forcing:gate — CI red",
+            # 🔴 THE ONE SPELLING THIS CHANGE ADMITTED rather than reported.
+            # Emphasis BETWEEN the key and the colon, in a skill body that bolds
+            # its field names. Safe structurally, not by a guess about intent:
+            # what follows the colon must be a member of a seven-word closed
+            # vocabulary, so a false positive requires prose that literally reads
+            # `forcing` + punctuation + a kind — which is the tag.
+            "   **forcing:** gate — CI red",
+            "   **forcing**: gate — CI red",
+        ),
+    )
+    def test_an_accepted_spelling_on_a_continuation_line_counts(
+        self, repo: Path, tmp_path: Path, tagline: str
+    ) -> None:
+        text = "## Next steps (ranked)\n1. Land the retry-wrapper fix.\n" + tagline + "\n"
+        res = run_tool(repo, update=write_delta(tmp_path, "spelling.md", text))
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert [i.kind for i in hd.ranked_items(text)] == ["gate"]
+
+    @pytest.mark.parametrize(
+        "attempt",
+        (
+            "forcing function: gate — CI red",   # a word between key and colon
+            "forcing = gate",                    # a separator that is not a colon
+            "forcing — gate",                    # ditto, em dash
+        ),
+    )
+    def test_a_near_miss_is_REFUSED_and_NAMED_never_called_absent(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE MESSAGE HALF. These stay refused — the grammar is deliberately
+        strict, `subsystem_resolver._NEAR_MISS_MARKER`'s reason — but the refusal
+        must say the field is UNPARSED, not ABSENT, and must not print the remedy
+        the author has already carried out."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        res = run_tool(repo, update=write_delta(tmp_path, "nearmiss.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        err = res.stderr
+        assert "[no forcing: field]" not in err, (
+            "the item HAS a field — telling it there is none is the reported bug"
+        )
+        assert "Tag each item marked" not in err, (
+            "a remedy already satisfied: the fix is a no-op and the re-run "
+            "prints identical bytes, so the session cannot recover"
+        )
+        assert "unparsed forcing field on:" in err, "say WHICH line, or it cannot be fixed"
+        assert attempt in err, "quote the offending line verbatim"
+
+    @pytest.mark.parametrize(
+        "attempt",
+        ("forcing function: followup", "forcing = tech-debt", "forcing — someday"),
+    )
+    def test_a_near_miss_with_an_UNLISTED_kind_is_NOT_named_it_reads_ABSENT(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE SCOPE OF THE TEST ABOVE, WHICH SKILL.md USED TO OVERSTATE.
+        `_FORCING_ATTEMPT` is anchored on the CLOSED VOCABULARY at both ends —
+        that anchoring is the entire reason it is safe to run over prose — so a
+        near-miss whose VALUE is not a listed kind matches nothing and falls
+        through to `[no forcing: field]`.
+
+        The skill said flatly that ``forcing function:`` / ``forcing = gate``
+        "are near-misses, NAMED not absent"; measured at `e34ed6ef`,
+        `forcing function: followup` gets `[no forcing: field]`. The sentence is
+        now scoped to a listed kind, and this is what makes that scoping a
+        claim rather than a promise.
+
+        ⚠ NOT a defect and NOT being fixed: loosening the kind anchor is how the
+        net starts quoting ordinary prose back at an author. It is a documented
+        limit — `claude/RULES.md`, a comment is a claim too."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None and item.near_miss is None, repr(attempt)
+        res = run_tool(repo, update=write_delta(tmp_path, "unlisted.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert hd.MARK_NO_FIELD in res.stderr
+        assert "unparsed forcing field on:" not in res.stderr
+
+    def test_a_field_inside_a_FENCE_still_does_not_count_and_says_why(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """`_unfenced`'s contract is preserved — a pasted sample is not a
+        declaration — but the author can SEE the field in their file, so
+        `[no forcing: field]` would read as a lie about the input."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Land the fix.\n"
+            "   ```\n"
+            "   forcing: gate\n"
+            "   ```\n"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == [None], (
+            "a fenced field must NOT be accepted as a tag"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "fencedtag.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[fenced]" in res.stderr
+        assert "[no forcing: field]" not in res.stderr
+        assert "code fence" in res.stderr, "name the reason it did not count"
+
+    def test_trailing_boilerplate_does_not_tag_the_last_item(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 WHY THE BLOCK DOES NOT SIMPLY RUN TO THE NEXT NUMBERED ITEM.
+
+        The corpus shows what sits after a ranked list: 14 blocks are followed by
+        unindented prose after a blank line, and 7 of those are the skill's own
+        `🔴 **This list is a WORK QUEUE …**` boilerplate, copied verbatim. The
+        template block it comes from also carries "`forcing: none` is the honest
+        opt-out" — so under the naive boundary the LAST untagged item silently
+        acquires a `none` from text its author pasted out of the instructions.
+
+        The `_naive_kinds` control is what makes this test sensitive: it asserts
+        the rejected boundary DOES tag item 2 on this very input.
+
+        ⚠ NOT RED AT `3f7f2e62` — labelled, not counted as regression coverage.
+        It is the ONE test in this class that passes against the pre-change tree
+        (measured: 15 failed, 1 passed), because a single-line search cannot see
+        the boilerplate either. It guards the ALTERNATIVE fix — the naive block
+        boundary a reader would reach for next — and it is shown reachable by
+        the `naive-block-boundary` row in `scripts/tests/mutants-handoff-cap.sh`,
+        which it kills.
+        """
+        skill = HANDOFF_SKILL.read_text(encoding="utf-8").splitlines()
+        start = next(i for i, ln in enumerate(skill) if "EVERY item MUST carry" in ln)
+        tail = "\n".join(ln.strip() for ln in skill[start : start + 4])
+        assert "forcing: none" in tail, (
+            "the copied boilerplate no longer spells a valid kind, so this test "
+            "proves nothing — re-derive the window or drop it"
+        )
+        text = "## Next steps (ranked)\n1. Fix A.\n2. Fix B.\n\n" + tail + "\n"
+        assert self._naive_kinds(text) == [None, "none"], (
+            "CONTROL: the rejected boundary must still mis-tag this input, or "
+            "the assertion below is vacuous"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == [None, None]
+        res = run_tool(repo, update=write_delta(tmp_path, "boiler.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+
+    def test_a_genuinely_untagged_multi_line_item_still_reports_ABSENCE(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE PRECISION HALF. The block widened; the DIAGNOSIS must not. A
+        legacy wrapped item using the ordinary English word "forcing" is not an
+        attempt at the field, and reporting it as one would replace one wrong
+        message with another."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. **Land the retry-wrapper fix.** The pre-push hook is forcing a\n"
+            "   full-tree run on every push, which is the thing to scope.\n"
+            "   Files: `githooks/pre-push`, `scripts/lib/git_mainline.py`.\n"
+        )
+        items = hd.ranked_items(text)
+        assert [i.kind for i in items] == [None]
+        assert items[0].near_miss is None and items[0].fenced is False
+        res = run_tool(repo, update=write_delta(tmp_path, "legacy.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[no forcing: field]" in res.stderr
+        assert "unparsed" not in res.stderr
+        assert "continuation line counts" in res.stderr, (
+            "the remedy must state the thing the old one did not: where the "
+            "field is allowed to sit"
+        )
+
+    def test_the_block_stops_at_the_next_ranked_item(self) -> None:
+        """A tag belongs to the item it is written under, and to no other. Item 1
+        must NOT borrow item 2's."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "   more about A.\n"
+            "2. Fix B.\n"
+            "   forcing: user — the operator asked on 2026-08-26\n"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == [None, "user"]
+
+    def test_an_indented_paragraph_after_a_blank_line_is_still_the_item(self) -> None:
+        """The other side of the boundary. A blank line does not end a list item
+        when what follows is indented — that is ordinary markdown, and a handoff
+        item with two paragraphs is a shape the corpus has."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   The second paragraph, still item 1.\n"
+            "   forcing: security — the token in the log is live\n"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == ["security"]
+
+
+class TestTheWIDENINGDidNotOpenTwoHOLES:
+    """🔴 RED AT `503d7136` — and both defects were INTRODUCED by the round that
+    widened rule (j)'s search from the numbered line to the whole item. Delta
+    re-audited and reproduced 2026-08-28 before either was touched.
+
+    **The fence erased the boundary's memory.** `_item_blocks` reset its
+    "a blank line has intervened" flag on every line inside a fence, so the first
+    VISIBLE line after a fence close could never be a boundary. An item with its
+    own correctly-INDENTED fence therefore swallowed the section's trailing
+    paragraph — the skill's `🔴 **This list is a WORK QUEUE …**` boilerplate,
+    which spells `forcing: none` — and `ranked_items` returned `kind='none'`.
+    An UNTAGGED item accepted, counted as self-generated, and the gate passed.
+    That is the exact counterfactual `_item_blocks`' own docstring cites as its
+    reason for rejecting the naive boundary, re-entered through the fence path,
+    and it is the ACCEPT direction: nothing downstream refuses it.
+
+    **`\\b` cannot see past an underscore.** `_MARKUP` was widened to
+    ``[*_`~]{0,3}`` to admit emphasis, but both patterns anchored the key on
+    `\\b{FORCING_KEY}` — and `_` is a word character, so `_forcing: gate_` has no
+    boundary to match. Measured at `503d7136`: `**forcing: gate**` parsed to
+    `gate`; `_forcing: gate_`, `__forcing: gate__` and `_forcing_: gate` all came
+    back `kind=None, near_miss=None`, i.e. `[no forcing: field]` plus a remedy
+    the author had already carried out — the unrecoverable refusal, for one of
+    markdown's two emphasis characters, in the very spelling class that round set
+    out to admit. `_FORCING_ATTEMPT` shared the anchor, so the safety net that
+    exists to catch exactly this had the identical hole.
+
+    🔴 THE MATRIX, PER TEST AND MEASURED — deliberately not "every test in this
+    class", which would be false here and is exactly the kind of blanket claim a
+    reader stops checking. **7 failed, 6 passed at `503d7136`:**
+
+      * `test_a_fence_does_not_erase_the_blank_line_boundary` — RED,
+        `assert ['none'] == [None]`.
+      * `test_UNDERSCORE_emphasis_parses_like_asterisk_emphasis` — RED on 3 of 4
+        params. `` _`forcing: gate`_ `` PASSED: the backtick between the `_` and
+        the key hands `\\b` a boundary to match, so that one param is an
+        INVARIANT GUARD carried along, not regression coverage.
+      * `test_an_UNDERSCORE_emphasised_near_miss_is_NAMED_not_called_absent` —
+        RED on all 3 params.
+      * `test_an_indented_fence_does_not_cost_the_tag_that_follows_it` — PASSED,
+        both params. It is the COST side of the fence fix rather than coverage
+        of the defect, and is shown reachable by the `a-blank-line-ends-the-item`
+        and `block-collapsed-to-the-numbered-line` mutation rows, which it kills.
+      * `test_a_longer_word_around_the_key_is_STILL_not_the_field` — PASSED.
+        Labelled an invariant guard in its own docstring.
+    """
+
+    @staticmethod
+    def _boilerplate_tail() -> str:
+        """The skill's own trailing paragraph, READ FROM THE SKILL — the same
+        window `test_trailing_boilerplate_does_not_tag_the_last_item` derives,
+        and for its reason: a hand-copied constant would quietly stop being the
+        text the corpus actually pastes under a ranked list."""
+        skill = HANDOFF_SKILL.read_text(encoding="utf-8").splitlines()
+        start = next(i for i, ln in enumerate(skill) if "EVERY item MUST carry" in ln)
+        tail = "\n".join(ln.strip() for ln in skill[start : start + 4])
+        assert "forcing: none" in tail, (
+            "the copied boilerplate no longer spells a valid kind, so this test "
+            "proves nothing — re-derive the window or drop it"
+        )
+        return tail
+
+    def test_a_fence_does_not_erase_the_blank_line_boundary(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE ACCEPT DIRECTION, which is the one that costs something: the
+        gate PASSES on an item nobody tagged.
+
+        Distinct from the col-0-fence gap declared in the last round's report —
+        the fence here is INDENTED, i.e. genuinely the item's own, so a rule
+        about fences at column 0 does not reach it.
+        """
+        tail = self._boilerplate_tail()
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   ```\n"
+            "   ./scripts/measure.py --since 2026-08-01\n"
+            "   ```\n" + tail + "\n"
+        )
+        items = hd.ranked_items(text)
+        assert [i.kind for i in items] == [None], (
+            "the item carries NO tag — the `none` is boilerplate its author "
+            "pasted out of the instructions, being read as a declaration"
+        )
+        assert items[0].fenced is False and items[0].near_miss is None, (
+            "and the diagnosis must stay the plain one: nothing in the item's "
+            "own fence looks like a field, and nothing in it is a near-miss"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "fencebound.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[no forcing: field]" in res.stderr
+
+    @pytest.mark.parametrize(
+        "gap,indent,expected",
+        (
+            ("", "   ", "regression"),
+            ("\n", "   ", "regression"),
+            ("", "", None),
+            ("\n", "", None),
+        ),
+        ids=("no-blank-indented", "blank-indented", "no-blank-col0", "blank-col0"),
+    )
+    def test_an_indented_fence_does_not_cost_the_tag_that_follows_it(
+        self, gap: str, indent: str, expected: str | None
+    ) -> None:
+        """Both sides of the same boundary, measured at FOUR points.
+
+        **INDENTED (the cost side of the fix).** A tag on an indented line after
+        the item's own fence still counts, whether or not a blank line sits
+        between them — dropping the memory reset must not buy the fix above at
+        the price of this shape, which the corpus has. ⚠ PASSED at `503d7136`,
+        both params: labelled, not counted as regression coverage. Shown
+        reachable by the `a-blank-line-ends-the-item` and
+        `block-collapsed-to-the-numbered-line` rows in
+        `scripts/tests/mutants-handoff-cap.sh`, which they kill.
+
+        🔴 **COLUMN 0 — the cost the fix DID charge, asserted as DELIBERATE.**
+        The `no-blank-col0` param is RED at `503d7136`, where it returned
+        `kind='regression'`: the fence used to clear the "a blank has
+        intervened" flag, so a col-0 line after it continued the item. Here the
+        blank before the fence still counts, that line IS the boundary, and the
+        tag is dropped. **This is not a bug to fix on sight.** The walk cannot
+        tell an author's col-0 tag from col-0 pasted boilerplate — which is
+        exactly what `test_a_fence_does_not_erase_the_blank_line_boundary`
+        refuses — and falsely ACCEPTING an untagged item is worse than refusing
+        a tagged one. Corpus impact: **0 of 442** ranked items. What makes the
+        refusal clearable rather than unrecoverable is `MISSING_FIELD_REMEDY`
+        naming the indent, pinned by
+        `test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT`.
+        (`blank-col0` was already absent at `503d7136` — an invariant guard
+        carried along, not coverage of this change.)"""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   ```\n"
+            "   ./scripts/measure.py --since 2026-08-01\n"
+            "   ```\n" + gap + indent
+            + "forcing: regression — vs the 2026-08-20 baseline\n"
+        )
+        item = hd.ranked_items(text)[0]
+        assert item.kind == expected, (repr(gap), repr(indent))
+        if expected is None:
+            # The DIAGNOSIS half: a dropped boundary line is not in the item's
+            # own lines and not in its fenced lines either, so the row must be
+            # the plain one — anything else would be a claim about a line this
+            # walk never looked at.
+            assert item.near_miss is None and item.fenced is False
+
+    def test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 RED at `e34ed6ef`. The remedy said only "A continuation line
+        counts — the field does not have to sit on the numbered line", which is
+        read as a promise this walk does not keep: the col-0 param above HAS a
+        tag on a continuation line and is told it carries none.
+
+        That is the unrecoverable-refusal shape the whole ladder exists to
+        remove — the printed fix is already done, so the re-run is byte-
+        identical. The boundary is deliberately NOT loosened (see the docstring
+        above); naming the INDENT is what makes the refusal clearable instead.
+
+        Shown reachable by the `missing-field-remedy-omits-the-indent` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   ```\n"
+            "   ./scripts/measure.py --since 2026-08-01\n"
+            "   ```\n"
+            "forcing: regression — vs the 2026-08-20 baseline\n"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "col0tag.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert hd.MARK_NO_FIELD in res.stderr
+        norm = " ".join(res.stderr.split())
+        assert " ".join(hd.MISSING_FIELD_REMEDY.split()) in norm
+        assert "MUST be INDENTED" in norm, (
+            "the author HAS written the field on a continuation line and is "
+            "being told to write one. Without the indent instruction the fix "
+            "the refusal prints is a no-op and the re-run prints identical "
+            "bytes — the unrecoverable refusal, re-entered through the fence "
+            "boundary."
+        )
+
+    #: The whole of `MISSING_FIELD_REMEDY`, normalised.
+    #:
+    #: 🔴 A WHOLE STRING, DELIBERATELY, and the same discipline as
+    #: `TestSkillAndModuleAgree._FENCED_REMEDY`. `claude/RULES.md`: when the
+    #: artifact under test IS prose, a guard on WORDS is walkable by REWORDING —
+    #: pin the WHOLE normalised string. A cosmetic reword then costs a test edit;
+    #: that price is the point, because it is what makes the claim
+    #: machine-readable.
+    #:
+    #: 🔴 A LITERAL, NOT `hd.MISSING_FIELD_REMEDY`. The test above asserts the
+    #: constant reaches stderr by comparing the constant against the output that
+    #: PRINTED it — self-referential, so it is the BEHAVIOURAL half and any
+    #: reword passes it. That is what left this clause unguarded.
+    _MISSING_REMEDY = (
+        "Tag each item marked [no forcing: field] above. A continuation line "
+        "counts — the field does not have to sit on the numbered line, but it "
+        "MUST be INDENTED: a flush-left line ENDS the item once a blank has "
+        "intervened, so a tag at column 0 below one is outside the item and "
+        "reads as absent."
+    )
+
+    def test_the_missing_field_remedy_states_the_walks_ACTUAL_boundary(self) -> None:
+        """🔴 THE SCOPE, PINNED. At `6a862d8c` this remedy printed the
+        unqualified "a flush-left line ENDS the item", which is FALSE: the walk
+        breaks on an unindented line only ONCE A BLANK HAS INTERVENED.
+        RE-MEASURED 2026-08-28 at `976b09b5`, both points, `ranked_items` on
+        `## Next steps (ranked)\\n1. Fix A.\\n` plus a col-0 `forcing: gate`:
+
+            no blank between them -> kind='gate'   (the tag PARSES)
+            a blank between them  -> kind=None     (the tag is DROPPED)
+
+        So the unqualified sentence was wrong in the first case, and it
+        contradicted write-gate.md, the constant's own `#:` comment and
+        SKILL.md, all three of which were already scoped.
+
+        ⚠ NOT regression coverage — round 4 already corrected the wording. This
+        is the GUARANTEE that correction never got, labelled as one: the
+        clause was revertible with the whole suite green, because the only
+        assertion over it was the self-referential one in the test above.
+
+        The BEHAVIOURAL half — that this constant actually reaches an
+        executor's stderr rather than sitting unprinted — is
+        `test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT`
+        directly above; a literal-only check would type-check past a constant
+        nobody prints.
+
+        Shown reachable by the `missing-field-remedy-scope-unqualified` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        assert " ".join(hd.MISSING_FIELD_REMEDY.split()) == " ".join(
+            self._MISSING_REMEDY.split()
+        ), (
+            "MISSING_FIELD_REMEDY no longer reads as pinned. If the boundary "
+            "clause was re-widened to a bare 'a flush-left line ENDS the item', "
+            "that is the MEASURED-FALSE wording — a col-0 tag with no blank "
+            "before it parses fine. Re-measure before rewording, and update "
+            "_MISSING_REMEDY in the SAME commit for a deliberate reword."
+        )
+
+    @pytest.mark.parametrize(
+        "tagline",
+        (
+            "   _forcing: gate_ — CI red",
+            "   __forcing: gate__ — CI red",
+            "   _forcing_: gate — CI red",
+            "   _`forcing: gate`_ — CI red",
+        ),
+    )
+    def test_UNDERSCORE_emphasis_parses_like_asterisk_emphasis(
+        self, repo: Path, tmp_path: Path, tagline: str
+    ) -> None:
+        """`*` and `_` are the SAME markdown construct. Admitting one and
+        refusing the other with `[no forcing: field]` is a refusal over which of
+        two interchangeable characters the author's editor inserted — and it is
+        unrecoverable, because the remedy it prints is already done.
+
+        ⚠ The last param passed at `503d7136` — see the class docstring's
+        matrix. It is kept as an invariant guard, not counted as coverage."""
+        text = "## Next steps (ranked)\n1. Land the retry-wrapper fix.\n" + tagline + "\n"
+        assert [i.kind for i in hd.ranked_items(text)] == ["gate"]
+        res = run_tool(repo, update=write_delta(tmp_path, "underscore.md", text))
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=unforced" not in res.stderr
+
+    @pytest.mark.parametrize(
+        "attempt",
+        (
+            "_forcing = gate_",
+            "_forcing function: gate_",
+            "__forcing — gate__",
+        ),
+    )
+    def test_an_UNDERSCORE_emphasised_near_miss_is_NAMED_not_called_absent(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE SAFETY NET'S OWN HOLE. `_FORCING_ATTEMPT` shared the broken
+        anchor, so an emphasised near-miss fell all the way through to
+        `[no forcing: field]` — the one refusal a re-run cannot clear — for a
+        spelling the skill now actively tells authors is fine."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        res = run_tool(repo, update=write_delta(tmp_path, "usnearmiss.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[no forcing: field]" not in res.stderr, (
+            "the item HAS a field — telling it there is none is the reported bug"
+        )
+        assert "Tag each item marked" not in res.stderr
+        assert "[unparsed forcing field on:" in res.stderr
+        assert attempt in res.stderr, "quote the offending line verbatim"
+
+    @pytest.mark.parametrize(
+        "line",
+        (
+            "   The pre-push hook is enforcing: gate-scoped runs, which is fine.",
+            "   reinforcing: gate — a longer word merely ENDING with the key",
+            "   forcings: gate — plural, so not the key either",
+        ),
+    )
+    def test_a_longer_word_around_the_key_is_STILL_not_the_field(
+        self, line: str
+    ) -> None:
+        """INVARIANT GUARD — labelled, not counted as regression coverage: this
+        passes at `503d7136` too. It pins the ONE job `\\b` was doing, so the
+        lookbehind that replaced it cannot buy underscore emphasis by admitting
+        `enforcing:` — in BOTH patterns, or the near-miss net starts quoting
+        ordinary prose back at an author as an unparsed field."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n" + line + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None, f"{line!r} was accepted as the field"
+        assert item.near_miss is None, f"{line!r} was reported as a near-miss"
+
+    @pytest.mark.parametrize(
+        "line",
+        (
+            "   forcing = mygate — a longer word merely ENDING with a kind",
+            "   forcing — theincident, which is not the vocabulary word",
+            "   forcing = wontregression, nor is that one",
+        ),
+    )
+    def test_a_longer_word_around_the_KIND_is_not_a_near_miss_either(
+        self, line: str
+    ) -> None:
+        """🔴 THE LEADING ANCHOR ON THE **KIND**, WHICH NOTHING DISTINGUISHED.
+
+        `_FORCING_ATTEMPT` anchors both ends of both tokens, and the module's
+        comment claims exactly that — but the only fixture exercising the kind's
+        anchors was `_forcing = gate_`, whose `gate` is at the END of the line,
+        so it can only see the TRAILING one. MEASURED at `e34ed6ef`: DELETING
+        the LEADING `(?<![A-Za-z0-9])` before the kind alternation makes
+        `forcing = mygate` a near-miss, and the full suite stayed green — 237
+        passed against the `e34ed6ef` test file. Three of four anchors were
+        shown reachable; this is the fourth.
+
+        The stake is not cosmetic: `_FORCING_ATTEMPT` QUOTES the line it matched
+        back at the author as "an unparsed forcing field", so a leaky kind
+        anchor means ordinary prose containing a vocabulary word inside a longer
+        word gets read back as a malformed tag.
+
+        ⚠ INVARIANT GUARD, not regression coverage — green at `503d7136` too
+        (`\\b` excluded these as well). It is shown reachable by the
+        `near-miss-kind-LEADING-anchor-DELETED` row in
+        `scripts/tests/mutants-handoff-cap.sh`. 🔴 It is deliberately NOT the
+        killer for `near-miss-kind-LEADING-anchor-on-word-boundary`: MEASURED,
+        `\\b` excludes `mygate` exactly as the lookbehind does, so that row needs
+        the OPPOSITE direction, which
+        `test_an_EMPHASISED_KIND_is_still_seen_by_the_near_miss_net` supplies.
+        Two failure directions, two rows, two fixtures — the first draft of this
+        pair pointed the `\\b` row at THIS test and the battery reported it
+        SURVIVED, which is how the distinction was found."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n" + line + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None, f"{line!r} was accepted as the field"
+        assert item.near_miss is None, f"{line!r} was reported as a near-miss"
+
+    @pytest.mark.parametrize(
+        "attempt", ("forcing = _gate — CI red", "forcing — _incident")
+    )
+    def test_an_EMPHASISED_KIND_is_still_seen_by_the_near_miss_net(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE OTHER DIRECTION ON THE SAME ANCHOR, AND THE ONE THAT ISOLATES
+        IT. The round that replaced `\\b` with `(?<![A-Za-z0-9])` did it on the
+        KEY *and* the KIND for one reason — `_` is a word character — but every
+        fixture put the emphasis around the KEY (`_forcing = gate_`), where the
+        kind's LEADING anchor is never exercised: `gate` there is preceded by a
+        space, which `\\b` handles fine.
+
+        This puts the emphasis on the KIND instead. MEASURED at `e34ed6ef`
+        across all three one-anchor mutants: `forcing = _gate` is a near-miss at
+        HEAD, is NOT one when the kind's leading anchor becomes `\\b`, and IS
+        still one when the TRAILING anchor becomes `\\b` — so it separates the
+        two ends, which `_forcing = gate_` (killed only by the trailing row)
+        cannot.
+
+        ⚠ INVARIANT GUARD, not regression coverage: this is current behaviour,
+        red only against the mutant. Shown reachable by the
+        `near-miss-kind-LEADING-anchor-on-word-boundary` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None, f"{attempt!r} was accepted as the field"
+        assert item.near_miss is not None, (
+            f"{attempt!r} fell through to [no forcing: field] — the refusal a "
+            f"re-run cannot clear, for an emphasised kind"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "emphkind.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert hd.MARK_NO_FIELD not in res.stderr
+        assert attempt in res.stderr, "quote the offending line verbatim"
+
+    @pytest.mark.parametrize(
+        "line,kind,near_miss",
+        (
+            # P1 — `_FORCING`'s key, LEADING. Parses to a kind; the rest are
+            # `_FORCING_ATTEMPT`'s, which can only ever produce a near-miss.
+            ("   some_forcing: none", "none", False),
+            ("   éforcing: gate", "gate", False),
+            ("   強forcing: gate", "gate", False),
+            # P2 — `_FORCING_ATTEMPT`'s key, LEADING. No colon, so `_FORCING`
+            # cannot match and this position is isolated from P1.
+            ("   my_forcing = gate", None, True),
+            ("   éforcing = gate", None, True),
+            # P3 — `_FORCING_ATTEMPT`'s key, TRAILING.
+            ("   the forcing_fn returns none", None, True),
+            ("   the forcingé returns none", None, True),
+            ("   the forcing強 returns none", None, True),
+            # P4 — that pattern's KIND, LEADING.
+            ("   forcing = _gate", None, True),
+            ("   forcing = égate", None, True),
+            # P5 — that pattern's KIND, TRAILING.
+            ("   forcing the user_id column", None, True),
+            ("   forcing the gate_keeper to retry", None, True),
+            ("   forcing = gateé", None, True),
+        ),
+        ids=("P1-key-leading-underscore", "P1-key-leading-latin1",
+             "P1-key-leading-cjk",
+             "P2-attempt-key-leading-underscore", "P2-attempt-key-leading-latin1",
+             "P3-attempt-key-trailing-underscore",
+             "P3-attempt-key-trailing-latin1", "P3-attempt-key-trailing-cjk",
+             "P4-attempt-kind-leading-underscore",
+             "P4-attempt-kind-leading-latin1",
+             "P5-attempt-kind-trailing-underscore",
+             "P5-attempt-kind-trailing-underscore-2",
+             "P5-attempt-kind-trailing-latin1"),
+    )
+    def test_the_widened_anchors_admit_these_and_the_comment_says_so(
+        self, line: str, kind: str | None, near_miss: bool
+    ) -> None:
+        """🔴 THE COMMENT'S CLAIM, MADE MACHINE-READABLE — AND THE PARAMS ARE A
+        GRID, BECAUSE AN ENUMERATION OF EXAMPLES UNDERCOUNTED IT TWICE.
+
+        `_FORCING`'s comment first named *only* "a snake_case identifier ending
+        in `_forcing`"; a delta audit found three more and the comment was
+        rewritten to "FOUR ADMISSIONS, NOT ONE"; a second delta audit found six
+        more still. The reason is structural: the widening replaced `\\b` with a
+        `[A-Za-z0-9]` lookaround at FIVE positions, and `\\b` differs from it for
+        TWO character classes — `_`, and any non-ASCII word character, since
+        Python's `\\w` is unicode. That is a 5x2 GRID, so the params enumerate
+        all ten cells rather than the examples anyone happened to notice:
+
+          P1 `_FORCING`'s key, LEADING            P2 `_FORCING_ATTEMPT`'s, LEADING
+          P3 `_FORCING_ATTEMPT`'s key, TRAILING   P4 its KIND, LEADING
+          P5 its KIND, TRAILING
+
+        There is no P6: `_FORCING`'s own KIND, `([A-Za-z-]+)`, carries no
+        trailing lookaround. MEASURED 2026-08-28, all ten cells alike — admitted
+        at HEAD, and NO match under the old `\\b` spelling of the same pattern.
+
+        Each is bounded by the same closed-vocabulary argument as the markup
+        class, and each occurs 0 times over both corpora, so none is being
+        fixed. They are pinned so the comment stops being the only record —
+        `claude/RULES.md`: a comment is a claim too.
+
+        ⚠ NOT regression coverage: this asserts CURRENT behaviour. Its evidence
+        is the base measurement above, and it is shown reachable by the four
+        anchor rows in `scripts/tests/mutants-handoff-cap.sh`."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n" + line + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind == kind, f"{line!r} -> {item.kind!r}"
+        assert (item.near_miss is not None) is near_miss, (
+            f"{line!r} -> near_miss={item.near_miss!r}"
+        )
+
+    def test_the_comment_still_states_the_ASCII_scope(self) -> None:
+        """The half above cannot see: the module's prose must SAY the exclusion
+        is ASCII-only, because a maintainer reading "the character before the
+        key is a letter" would conclude `éforcing:` is excluded and it is not.
+
+        A phrase pin, and a weak one by construction — the behaviour is pinned
+        by the params above; this only keeps the comment from re-narrowing.
+
+        🔴 NO COUNT IS PINNED HERE ANY MORE, AND THAT IS THE FIX. This used to
+        assert the literal "FOUR ADMISSIONS, NOT ONE" — a guard machine-
+        enforcing a number that a later delta audit measured wrong (ten cells,
+        not four). A count in prose goes stale the moment a position or a
+        character class is added; the params above are the census, and what the
+        comment owes is the SHAPE — that the scope is stated by POSITION rather
+        than by a list of examples, which is the failure mode that undercounted
+        it twice.
+
+        Shown reachable by the `ascii-scope-narrowed-off-every-position`,
+        `admissions-restated-as-a-list` and `retired-count-back-in-the-comment`
+        rows in `scripts/tests/mutants-handoff-cap.sh` — one per assertion,
+        because a mutant that gutted the paragraph would die to whichever
+        assertion runs first and prove nothing about the other two.
+
+        ⚠ `assert "an ASCII letter" in src` has NO row of its own. It is the
+        antecedent the `AT EVERY POSITION` clause qualifies, and that row moves
+        the clause rather than this phrase; it is carried, not shown reachable."""
+        src = TOOL.read_text(encoding="utf-8")
+        assert "an ASCII letter" in src
+        assert "AT EVERY POSITION" in src
+        assert "THE ADMISSIONS ARE A GRID, NOT A LIST" in src
+        assert "FOUR ADMISSIONS, NOT ONE" not in src, (
+            "the retired count is back in the comment; it was measured wrong "
+            "(ten cells, not four) and pinning it re-enforces the error"
+        )
+
+
+class TestRulesIAndJDidNotMoveTheOtherExits:
+    """INVARIANT GUARDS — not regression coverage, and labelled so.
+
+    The new refusals sit BEFORE rules (d) and (h) in `main()`, which is exactly
+    the shape that silently steals another rule's exit code.
+    """
+
+    def test_no_advance_is_still_4_on_an_undated_existing_doc(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        res = run_tool(repo, update=update_file, advanced="nothing")
+        assert res.returncode == hd.EXIT_NO_ADVANCE, res.stdout + res.stderr
+
+    def test_no_change_is_still_5(self, repo: Path, tmp_path: Path) -> None:
+        noop = write_delta(
+            tmp_path, "noop2.md",
+            "## Goal\nMake the sample subsystem stop dropping work under load.\n",
+        )
+        res = run_tool(repo, update=noop)
+        assert res.returncode == hd.EXIT_NO_CHANGE, res.stdout + res.stderr
+
+    def test_the_new_codes_do_not_collide_with_the_old(self) -> None:
+        codes = [
+            hd.EXIT_OK, hd.EXIT_USAGE, hd.EXIT_FAIL, hd.EXIT_NO_ADVANCE,
+            hd.EXIT_NO_CHANGE, hd.EXIT_BEHIND, hd.EXIT_DOC_PER_EFFORT,
+            hd.EXIT_UNFORCED,
+        ]
+        assert len(set(codes)) == len(codes), f"exit codes collide: {codes}"
+
+    def test_none_is_in_the_vocabulary_but_not_in_the_external_set(self) -> None:
+        """`EXTERNAL_FORCING_KINDS` is DERIVED. If it ever became a second
+        literal list, a kind added to one and not the other would silently
+        un-count items — the N-sites-wrong-at-N-1 shape."""
+        assert "none" in hd.FORCING_KINDS
+        assert "none" not in hd.EXTERNAL_FORCING_KINDS
+        assert hd.EXTERNAL_FORCING_KINDS < hd.FORCING_KINDS
+
+def repo_lacking_the_doc(tmp_path: Path) -> Path:
+    """A checkout whose mainline HAS the handoff doc and whose HEAD does not.
+
+    🔴 This is the talos-infra shape, measured 2026-08-29: the doc was authored
+    and pushed from a WORKTREE, the primary clone was never re-synced, and the
+    doc therefore exists at `origin/main` and nowhere in the working tree. It is
+    NOT the new-doc case — a genuinely new doc is absent on BOTH sides.
+    """
+    origin = tmp_path / "origin.git"
+    _sh("git", "init", "-q", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+
+    work = tmp_path / "work"
+    work.mkdir()
+    _sh("git", "init", "-q", "-b", "main", cwd=work)
+    for k, v in (("user.name", "Test Runner"),
+                 ("user.email", "test@example.invalid"),
+                 ("commit.gpgsign", "false")):
+        _sh("git", "config", k, v, cwd=work)
+    _sh("git", "remote", "add", "origin", str(origin), cwd=work)
+    (work / "README.md").write_text("sample\n", encoding="utf-8")
+    _sh("git", "add", "--", "README.md", cwd=work)
+    _sh("git", "commit", "-q", "-m", "seed without the doc", cwd=work)
+    _sh("git", "push", "-q", "origin", "main", cwd=work)
+
+    # The other worktree authors and pushes the doc. `work` never merges it.
+    other = tmp_path / "other"
+    _sh("git", "clone", "-q", str(origin), str(other), cwd=tmp_path)
+    for k, v in (("user.name", "Other"), ("user.email", "o@example.invalid"),
+                 ("commit.gpgsign", "false")):
+        _sh("git", "config", k, v, cwd=other)
+    (other / "claudedocs").mkdir()
+    (other / "claudedocs" / "handoff-sample-topic.md").write_text(
+        BASE_DOC, encoding="utf-8")
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+    _sh("git", "commit", "-q", "-m", "the real handoff, authored elsewhere", cwd=other)
+    _sh("git", "push", "-q", "origin", "main", cwd=other)
+
+    # Fetched, deliberately not merged — exactly the state the tool must judge.
+    _sh("git", "fetch", "-q", "origin", cwd=work)
+    return work
+
+
+class TestAbsentBasePresentOnMainlineIsRefused:
+    """🔴 The doc is absent HERE and present on mainline ⇒ every section merges
+    as NEW and the committed document is REPLACED by the delta.
+
+    The tool already DETECTED this and printed it; it exited 0 anyway. That was
+    survivable while a human answered a y/N, but that prompt was retired
+    2026-08-23, so the warning became the only thing between the diff and a
+    pushed commit — against this skill's own rule that blast radius earns a
+    REFUSAL, not a question. `--push` does not cover it: the `behind` check asks
+    about `<remote>/<push-branch>`, a DIFFERENT ref from the mainline this
+    compares against, so a current feature branch sails past it.
+    """
+
+    def test_it_REFUSES_and_writes_nothing(self, tmp_path: Path,
+                                           update_file: Path) -> None:
+        work = repo_lacking_the_doc(tmp_path)
+        shas_before = commit_shas(work)
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            res.returncode, res.stdout, res.stderr)
+        assert "status=stale-base" in res.stderr, res.stderr
+        assert not (work / "claudedocs" / "handoff-sample-topic.md").exists(), (
+            "the doc was written despite the refusal")
+        assert commit_shas(work) == shas_before, "a commit was made anyway"
+
+    def test_the_refusal_names_the_remedy(self, tmp_path: Path,
+                                          update_file: Path) -> None:
+        """A refusal a caller cannot act on gets worked around."""
+        work = repo_lacking_the_doc(tmp_path)
+        res = run_tool(work, "--confirm", update=update_file)
+        blob = res.stdout + res.stderr
+        assert "origin/main" in blob
+        assert "claudedocs/handoff-sample-topic.md" in blob
+        assert "--allow-replacing-mainline-doc" in blob, (
+            "the override must be named, or the refusal is a dead end")
+
+    def test_the_explicit_override_still_lets_it_through(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 NEGATIVE CONTROL. A refusal with no way past it would make a
+        legitimate re-author impossible and train everyone to route around it."""
+        work = repo_lacking_the_doc(tmp_path)
+        res = run_tool(work, "--confirm", "--allow-replacing-mainline-doc",
+                       update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=written" in res.stdout
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_a_GENUINELY_NEW_doc_is_untouched_by_this(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE CASE THIS MUST NOT BREAK. Absent on BOTH sides is the new-doc
+        path the skill says step 5 owns. Refusing it would make first writes
+        impossible — the failure mode that matters more than the one being fixed.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        # Same clone, a topic that exists nowhere — mainline included.
+        argv = [sys.executable, str(TOOL), "--repo", str(work),
+                "--topic", "brand-new-topic", "--update", str(update_file),
+                "--advanced", "first write", "--confirm"]
+        res = subprocess.run(argv, capture_output=True, text=True,
+                             env=dict(os.environ, **GIT_ENV))
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=written" in res.stdout
+        assert (work / "claudedocs" / "handoff-brand-new-topic.md").exists()
+
+    def test_a_doc_PRESENT_locally_but_behind_stays_a_WARNING(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE OTHER CASE THIS MUST NOT BREAK. When the doc exists here, the
+        merge can still classify its sections, so updating a deliberately-behind
+        clone stays legitimate — a warning, exit 0, as the tool already says.
+
+        🔴 THE REMOTE COMMIT MUST TOUCH THE DOC ITSELF. An earlier version of
+        this test used `advance_remote`, which pushes an unrelated `OTHER.md`:
+        `doc_behind` stayed 0, so `mainline` was never read and the case the
+        assertion names could not arise. MEASURED — the mutant that drops the
+        `not base_text` half of the predicate SURVIVED against that fixture,
+        because the fixture could not produce a doc-behind reading at all. The
+        test read as coverage while providing none.
+        """
+        other = tmp_path / "doc-mover"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other),
+            cwd=tmp_path)
+        for k, v in (("user.name", "Other"), ("user.email", "o@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        moved = other / "claudedocs" / "handoff-sample-topic.md"
+        moved.write_text(BASE_DOC + "\n## Added elsewhere\n\nlater work.\n",
+                         encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "advance the DOC itself", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=repo)
+
+        # The precondition the old fixture silently lacked: the mainline really
+        # is ahead ON THIS PATH, so `mainline` is populated and the predicate's
+        # two halves are actually distinguishable.
+        behind = _sh("git", "rev-list", "--count", "HEAD..origin/main", "--",
+                     "claudedocs/handoff-sample-topic.md", cwd=repo)
+        assert behind.strip() != "0", (
+            "fixture is vacuous: the mainline is not ahead on the doc path, so "
+            "this test cannot tell the two halves of the predicate apart")
+
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=stale-base" not in res.stderr
+        assert "status=written" in res.stdout
+
+    @pytest.mark.parametrize(
+        "blank,label",
+        [("", "empty"), ("\n", "one newline"), ("   \n\n", "whitespace")],
+    )
+    def test_a_BLANK_local_doc_is_as_absent_as_a_MISSING_one(
+        self, tmp_path: Path, update_file: Path, blank: str, label: str
+    ) -> None:
+        """🔴 A bare falsiness test let a single newline WALK this guard.
+
+        MEASURED before the fix, against a mainline doc of 6 sections: `""`
+        refused (rc 7), while `"\\n"` and `"   \\n\\n"` both exited 0 and REPLACED
+        the committed document with the delta. The merge treats all three the
+        same — 0 sections, so every section arrives NEW — so the destructive
+        outcome is identical and only the predicate disagreed. `wrong_base_tells`
+        already used `.strip()` 74 lines earlier in the same file.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        doc = work / "claudedocs" / "handoff-sample-topic.md"
+        doc.parent.mkdir(exist_ok=True)
+        doc.write_text(blank, encoding="utf-8")
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            f"a {label} local doc walked the guard", res.stdout, res.stderr)
+        assert doc.read_text(encoding="utf-8") == blank, (
+            "the committed document was replaced by the delta")
+
+    def test_the_PROPOSAL_run_still_shows_the_diff_and_does_not_refuse(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE `args.confirm` HALF OF THE GUARD, which nothing else pins.
+
+        An adversarial mutation that drops `and args.confirm` SURVIVED the whole
+        176-test file: the refusal then fires on the PROPOSAL run too, exiting 7
+        before the diff is printed. `reference/write-gate.md` calls that diff
+        "the only record of what landed", and the proposal run exists to put it
+        in the transcript — so refusing there destroys the thing the two-run
+        shape is for, while writing nothing and looking like a working guard.
+
+        The proposal run must WARN and show the diff; only `--confirm` refuses.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        res = run_tool(work, update=update_file)  # no --confirm
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=proposed" in res.stdout
+        assert "status=stale-base" not in res.stderr
+        assert "THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY" in res.stdout, (
+            "the proposal run must still carry the warning")
+        # 🔴 A `+`-prefixed line FROM THE UPDATE BODY, not merely "+" anywhere.
+        # `unified()` always emits a `+++` header, so `"+" in res.stdout` was
+        # satisfied by the header alone: MEASURED, a mutant that stripped every
+        # +/- body line from the printed diff left that assertion green. The
+        # message claimed the diff reached the transcript and did not check it.
+        body = [l for l in res.stdout.splitlines()
+                if l.startswith("+") and not l.startswith("+++")]
+        assert body, "the diff's added lines must reach the transcript"
+
+    def test_the_override_is_NOT_reachable_by_abbreviation(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 The flag's help calls it "deliberately long" so it cannot be passed
+        by reflex — but argparse abbreviates long options by DEFAULT, and `--al`
+        was measured to be accepted and to replace the committed document. A
+        guard spelled as a long name is walkable by shortening it unless
+        `allow_abbrev=False` says otherwise.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        for abbrev in ("--al", "--allow", "--allow-replacing"):
+            res = run_tool(work, "--confirm", abbrev, update=update_file)
+            assert res.returncode == hd.EXIT_USAGE, (
+                f"{abbrev} was accepted as the override", res.stdout, res.stderr)
+            assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    @pytest.mark.parametrize("blank,label", [("", "empty"), ("\n", "one newline")])
+    def test_the_WARNING_and_the_REFUSAL_describe_the_SAME_set(
+        self, tmp_path: Path, update_file: Path, blank: str, label: str
+    ) -> None:
+        """🔴 THE SEAM. Two consumers of one fact, and they drifted for a round.
+
+        The refusal decides whether to stop; the warning decides whether to print
+        the loud "the committed document will be replaced" line or a mild size
+        comparison. When the refusal was widened to `.strip()` the warning kept
+        `if not local.lines:` — true only for a strictly 0-line file — so a
+        `"\\n"` base got `0 sections / 1 lines` and never the loud line, in
+        exactly the shape where every section merges as NEW. They had been
+        equivalent before the widening, which is why the drift was silent.
+
+        So this pins the RELATIONSHIP, on the PROPOSAL run — the one an operator
+        reads before deciding — not either half alone.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        doc = work / "claudedocs" / "handoff-sample-topic.md"
+        doc.parent.mkdir(exist_ok=True)
+        doc.write_text(blank, encoding="utf-8")
+
+        proposal = run_tool(work, update=update_file)  # no --confirm
+        assert proposal.returncode == 0, proposal.stderr
+        assert "will be replaced by this delta" in proposal.stdout, (
+            f"a {label} base got the MILD warning in the shape that replaces the "
+            f"document: {proposal.stdout[-400:]}")
+
+        confirmed = run_tool(work, "--confirm", update=update_file)
+        assert confirmed.returncode == hd.EXIT_STALE_BASE, (
+            "the warning said REPLACED but the refusal did not fire — the two "
+            "halves disagree", confirmed.stdout, confirmed.stderr)
+
+    def test_the_remedy_does_not_tell_a_PROPOSAL_reader_they_are_safe(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 The remedy block once said "if you do not see `status=stale-base`,
+        this run is the warning". The refusal is gated on `--confirm`, so a
+        proposal run can NEVER print that line — the sentence told every reader
+        of the run they use to decide that they were in the benign case,
+        including the ones about to destroy a document.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        out = run_tool(work, update=update_file).stdout
+        assert "will be replaced by this delta" in out
+        assert "If you do not see that line, this run is the warning" not in out
+        assert "ONLY on `--confirm`" in out, (
+            "the remedy must say the refusal is deferred, not absent")
+
+    def test_a_doc_DELETED_on_the_mainline_gets_NEITHER_the_loud_line_nor_a_refusal(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE OTHER ARM OF THE SEAM — the one two rounds of fixes missed.
+
+        `nothing_to_merge_into` is true whenever there is no usable base HERE.
+        The refusal additionally needs a mainline copy to LOSE. The set
+        difference is real: the mainline's commits to this doc DELETED it (a
+        retirement, a revert, a rename), so this checkout never had it and
+        neither does the mainline.
+
+        MEASURED at the round-2 tip: the warning fired on the blank half alone
+        and printed "and <ref> has one … will be replaced by this delta" about a
+        document that does not exist, while `--confirm` exited 0 and wrote — and
+        the remedy told the operator that confirming would refuse.
+
+        So: no loud replacement claim, and no refusal. A first write here is
+        legitimate and must land.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        # Delete it on the mainline, so `doc_behind` is non-zero but `git show`
+        # finds nothing — the shape that populates `mainline` with None.
+        other = tmp_path / "deleter"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "D"), ("user.email", "d@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        _sh("git", "rm", "-q", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "retire the handoff", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=work)
+
+        proposal = run_tool(work, update=update_file)
+        assert proposal.returncode == 0, proposal.stderr
+        # 🔴 ASSERT THE PRECONDITION, not only the two negatives. Every other
+        # assertion here is satisfied by "the currency check never ran" —
+        # MEASURED with a mutant that returns an UNMEASURED BaseCurrency when
+        # `git show` fails: the run then printed NOTHING AT ALL and this test
+        # stayed green, along with the whole 186-test file. The negatives are
+        # only meaningful once the stale path is known to have executed.
+        assert "THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY" in proposal.stdout, (
+            "the stale path never ran, so the negatives below prove nothing")
+        assert "will be replaced by this delta" not in proposal.stdout, (
+            "claimed a replacement of a document the mainline does not have")
+
+        confirmed = run_tool(work, "--confirm", update=update_file)
+        assert confirmed.returncode == 0, (
+            "a legitimate first write was refused", confirmed.stdout, confirmed.stderr)
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_the_remedy_is_pinned_as_a_WHOLE_normalised_string(self) -> None:
+        """🔴 A guard on WORDS is walkable by REWORDING. The previous version
+        asserted the presence of "ONLY on `--confirm`" and the absence of one
+        retired sentence — both satisfied by a reword that reintroduces the exact
+        false meaning ("…refuses ONLY on --confirm. If no status=stale-base
+        appears, you are in the benign case."). `WRONG_BASE_REMEDY` is a module
+        constant, so the whole normalised string can be pinned. A cosmetic reword
+        then fails this test — that is the price of a machine-readable claim.
+        """
+        expected = (
+            "Settle it BEFORE confirming: read the mainline copy — `git -C "
+            "{repo} show {ref}:{relpath}` — and re-run against a current clone "
+            "if it is the fuller document. Updating a deliberately-behind clone "
+            "is legitimate, so on its own this is a WARNING and no exit code "
+            "changed. It is a FLOOR: a silent run is NOT evidence that the base "
+            "is current. 🔴 ONE shape refuses instead — no usable doc here while "
+            "the mainline has one — and it refuses ONLY on `--confirm`, as "
+            "`status=stale-base` (exit 9). A proposal run therefore NEVER prints "
+            "that line whatever shape it is in, so its absence here is not "
+            "evidence you are in the benign case: read the line above instead, "
+            "which fires on exactly the shape that refuses."
+        )
+        assert " ".join(hd.WRONG_BASE_REMEDY.split()) == " ".join(expected.split())
+
+    @pytest.mark.parametrize("blank", ["", "\n", "   \n\n"])
+    def test_wrong_base_tells_shares_the_predicate_and_stays_SILENT_on_a_blank_base(
+        self, blank: str
+    ) -> None:
+        """🔴 GUARDS THE CONSOLIDATION ITSELF, which shipped unguarded.
+
+        `wrong_base_tells` used to open-code `not base_text.strip()`; it now
+        calls `nothing_to_merge_into`. MEASURED: mutating that call back to a
+        bare `not base_text` SURVIVED the whole 186-test file — no mutant existed
+        for the line the commit had just changed.
+
+        The consequence is not cosmetic. With the bare test, a first write into a
+        newline-only file raises a tell, so the operator gets the whole
+        "THIS MERGE LOOKS LIKE IT RESOLVED THE WRONG BASE" block on a run where
+        nothing is wrong. Measured: 0 tells at HEAD, 1 tell under the mutant.
+        """
+        assert hd.wrong_base_tells(blank, UPDATE_DOC, {}) == ()
+
+    def test_an_EMPTY_mainline_doc_is_NOT_something_to_lose(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE MIRROR BUG: refusing where NOTHING is destroyed.
+
+        `self.mainline is not None` is not "there is a copy to lose" — a
+        committed but EMPTY mainline doc parses to `DocShape(0, 0, …)`, which is
+        not None. MEASURED before the fix: an empty committed mainline copy plus
+        no local doc exited 7 `NOTHING WRITTEN` and printed "and <ref> has one
+        (0 section(s) / 0 line(s))" — a self-contradicting sentence — blocking a
+        legitimate first write. Replacing nothing with something costs nothing,
+        so it must not refuse.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        other = tmp_path / "emptier"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "E"), ("user.email", "e@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "claudedocs" / "handoff-sample-topic.md").write_text("", encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        # No `--allow-empty`: git refusing "nothing to commit" is the guard
+        # against a fixture body identical to what the mainline already holds.
+        _sh("git", "commit", "-q", "-m", "empty the handoff", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=work)
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == 0, (
+            "refused a first write where the mainline copy is EMPTY — nothing "
+            "would have been destroyed", res.stdout, res.stderr)
+        assert "status=stale-base" not in res.stderr
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def _mainline_doc(self, tmp_path: Path, work: Path, body: str, msg: str) -> None:
+        """Commit `body` as the mainline copy of the handoff doc, then fetch."""
+        other = tmp_path / f"ml-{abs(hash(body)) % 10**8}"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "M"), ("user.email", "m@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        d = other / "claudedocs"
+        d.mkdir(exist_ok=True)
+        (d / "handoff-sample-topic.md").write_text(body, encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        # 🔴 NO `--allow-empty`. Git refusing "nothing to commit" is what
+        # catches a fixture body identical to what the mainline already
+        # holds; suppressing it would let a test go silently vacuous.
+        _sh("git", "commit", "-q", "-m", msg, cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=work)
+
+    @pytest.mark.parametrize("blank", ["\n", "   \n\n"])
+    def test_a_WHITESPACE_mainline_doc_is_ALSO_not_something_to_lose(
+        self, tmp_path: Path, update_file: Path, blank: str
+    ) -> None:
+        """🔴 The MIRROR bug, one notch along — round 4 fixed only `""`.
+
+        `bool(mainline.lines)` called a whitespace-only mainline "a document to
+        lose": `doc_shape("\\n")` is `DocShape(0, 1)`. MEASURED at that tip, the
+        refusal printed — in ONE sentence — that whitespace is equivalent to
+        absent for the LOCAL copy, and that a 1-line whitespace MAINLINE copy is
+        "one" that would be destroyed. The local side went through
+        `nothing_to_merge_into`; the mainline side was a bare falsiness test on
+        a line count, so the two halves of one equivalence class disagreed.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        self._mainline_doc(tmp_path, work, blank, "whitespace the handoff")
+
+        # 🔴 ASSERT THE MECHANISM. Every assertion below is satisfied by "the
+        # mainline copy was never read at all" — MEASURED, a mutant making
+        # `base_currency` skip the `git show` entirely SURVIVES this test when
+        # run alone, while the sibling headingless test dies to it. The stale
+        # HEADER is not enough either: it prints whenever `doc_behind` is
+        # non-zero. Only the mainline SHAPE line proves the copy was read and
+        # measured, which is the claim this test's name makes.
+        prop = run_tool(work, update=update_file)
+        # 🔴 ORDER MATTERS. Assert the loud-line ABSENCE first: if
+        # `replaces_mainline_doc` regresses to `bool(mainline.lines)`, the loud
+        # branch is taken and the shape line never prints — so the shape
+        # assertion would fire with "the mainline copy was never read", which is
+        # FALSE and points a maintainer two functions away from the defect.
+        assert "will be replaced by this delta" not in prop.stdout, (
+            "the guard MIS-FIRED on a whitespace mainline copy — the copy WAS "
+            "read; `replaces_mainline_doc` said it was something to lose",
+            prop.stdout[-400:])
+        # 🔴 And the NON-degenerate half of the shape. `0 sections` alone is what
+        # `doc_shape("")` and a hardcoded DocShape(0,0) also produce, so pinning
+        # it cannot see a mutant that reads the blob then measures the wrong
+        # text — MEASURED: `doc_shape(shown.out)` -> `doc_shape("")` survived
+        # this test scoped to itself. The line count differs per fixture, so it
+        # is the half that proves the real bytes were measured.
+        want_lines = 1 if blank == "\n" else 2
+        assert f"origin/main: 0 sections / {want_lines} lines" in prop.stdout, (
+            "the mainline copy was never read or was measured from the wrong "
+            "text, so the negatives below prove nothing", prop.stdout[-400:])
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == 0, (
+            "refused a first write against a WHITESPACE mainline copy — nothing "
+            "would have been destroyed", res.stdout, res.stderr)
+        assert "status=stale-base" not in res.stderr
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_a_HEADINGLESS_prose_mainline_doc_IS_something_to_lose(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 PINS THE QUANTITY, and it is the fail-OPEN direction.
+
+        MEASURED: swapping `bool(mainline.lines)` for `bool(mainline.sections)`
+        SURVIVED the whole 190-test file. A real prose handoff carrying no `##`
+        heading is `DocShape(sections=0, lines=6)` — under `sections` the guard
+        does not fire and `--confirm` REPLACES that committed document with the
+        delta. That is the exact destruction this PR exists to prevent, and no
+        test could see the difference because every fixture pinned the
+        `lines == 0` boundary rather than the quantity.
+
+        Real content with zero headings must therefore REFUSE.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        prose = ("A real handoff that happens to carry no markdown heading.\n"
+                 "Second line of genuine content.\n"
+                 "Third line, still content.\n")
+        self._mainline_doc(tmp_path, work, prose, "headingless prose handoff")
+
+        # The precondition this test turns on: content, but zero sections.
+        shape = hd.doc_shape(prose)
+        assert shape.sections == 0 and shape.lines > 0, shape
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            "did NOT refuse against a headingless prose mainline doc — that is "
+            "the fail-open direction, and it destroys a real document",
+            res.stdout, res.stderr)
+        assert "status=stale-base" in res.stderr
+
+    def test_a_STALE_BASE_in_a_REALISTIC_repo_is_not_reported_as_a_NEW_effort(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE SHADOW. Every other test in this class uses a repo with NO other
+        handoff docs — and that is the only reason they see the stale-base
+        refusal at all.
+
+        #962's rule (i) refuses `status=new-doc` when the doc does not exist AND
+        the repo already has handoff docs. Every real repo does: talos-infra, the
+        clone this whole guard was built from, has 100+. So in the shape that
+        motivated this PR the run stops at rule (i) and NEVER reaches
+        `status=stale-base`.
+
+        MEASURED on the merge before this fix: realistic repo, doc absent here
+        and present on the mainline, `--confirm` -> rc 7 `status=new-doc`.
+
+        Worse than the wrong code: rule (i) says "If this really is a NEW effort,
+        say so: re-run with `--new-effort`". For a stale clone that is FALSE — the
+        doc exists, upstream — and following it walks the operator around the
+        guard. A doc on the mainline answers rule (i)'s own question: not a new
+        effort, a stale checkout.
+
+        🔴 Neither PR is wrong alone and git reported NO conflict here. Both added
+        refusals to one `main()`; the merge only conflicted where two constant
+        blocks sat adjacent.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        # What makes the repo realistic — and what every other fixture lacks.
+        others = work / "claudedocs"
+        others.mkdir(exist_ok=True)
+        for name in ("handoff-other-effort.md", "handoff-third-thing.md"):
+            (others / name).write_text("# Handoff: other\n\n## State now\n\nx.\n",
+                                       encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs", cwd=work)
+        _sh("git", "commit", "-q", "-m", "this repo has other handoff docs", cwd=work)
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            "rule (i) shadowed the stale-base refusal — the operator is told this "
+            "is a NEW effort when the doc exists on the mainline",
+            res.returncode, res.stdout, res.stderr)
+        assert "status=stale-base" in res.stderr
+        assert "status=new-doc" not in res.stderr
+        assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_rule_i_asks_WHICH_predicate_not_merely_whether_stale(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 PINS THE PREDICATE, not the outcome — and in the fail-OPEN direction.
+
+        #1046 narrowed rule (i) with `not currency.replaces_mainline_doc("")`.
+        Broadening it to `not currency.stale` SURVIVED all 295 tests while
+        changing behaviour: a whitespace-only mainline copy is `stale` but is NOT
+        something to lose, so under the mutant rule (i) stops firing and the doc
+        is WRITTEN — silently bypassing #962's one-doc-per-effort cap.
+
+        MEASURED: repo with other handoff docs, topic's doc absent locally,
+        mainline copy whitespace-only -> HEAD rc 7 (cap fires, nothing written);
+        mutant rc 0 (written).
+
+        `test_an_EMPTY_mainline_doc_is_NOT_something_to_lose` cannot see this —
+        its fixture has no other handoff docs, so rule (i) never applies there.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        others = work / "claudedocs"
+        others.mkdir(exist_ok=True)
+        (others / "handoff-other-effort.md").write_text(
+            "# Handoff: other\n\n## State now\n\nx.\n", encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs", cwd=work)
+        _sh("git", "commit", "-q", "-m", "repo has other handoff docs", cwd=work)
+
+        # A mainline copy that is STALE but holds nothing to lose. Uses the
+        # class's own `_mainline_doc` rather than a fourth inlined clone —
+        # #1093.3, which this change closes, WAS a sibling inlining this helper,
+        # and the `--allow-empty` suppression it removed lives in here.
+        self._mainline_doc(tmp_path, work, "   \n\n", "whitespace mainline copy")
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, (
+            "the one-doc-per-effort cap did not fire — rule (i) was broadened to "
+            "`stale`, which is true of a mainline copy that holds nothing",
+            res.returncode, res.stdout, res.stderr)
+        assert "status=new-doc" in res.stderr
+        assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()
