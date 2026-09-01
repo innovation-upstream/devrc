@@ -16,19 +16,12 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Diagnose and resolve disk pressure on the workbench NixOS host (root partition `/dev/nvme0n1p2`, 1.8TB). The host was at 87% usage with ~228G free. The session freed ~200G through cleanup, then investigated why the filesystem reports 1.5TB used while only ~600GB of data is measurable.
 
 ## State now
-- Branch: `handoff-nix-disk-v3` (worktree off `origin/handoff-nix-disk-cleanup`), 3 commits, pushed. **No PR yet.**
-  - `34f3c9e9` corrected handoff doc · `6d21f5f3` `scripts/diagnose-disk-accounting.sh` · `9ef89fa7` its three post-first-run fixes
-- Claim held: `nix-disk-cleanup-1`. No clawgate task (`resolve` exited 5).
-- **THE INVESTIGATION IS RESOLVED.** The operator ran the root diagnostic 2026-09-01 13:01 −05:00. Answer: `/tmp`.
-- Live at run start: 374,283,766 blocks used = **1427.8 GiB**; **97,058,969 inodes used** of 122,036,224. `Inode size: 256` — so static ext4 metadata is **30.2 GiB**, measured, not assumed.
-
-### What's DONE this session (session 3)
-1. **REFUTED** the session-2 "ext4 metadata overhead — SOLVED/CONFIRMED" diagnosis, then **MEASURED** the real answer.
-2. Wrote, ran and then fixed `scripts/diagnose-disk-accounting.sh`.
-3. Cross-checked the root run against a completed unprivileged run — they agree within ~1% on every readable tree.
+- Branch `handoff-nix-disk-v3`, pushed, **no PR**, gate NOT run. Commits: `34f3c9e9` doc · `6d21f5f3` script · `9ef89fa7` fixes · `c79202f1` doc · `bd0f0c20` fixes.
+- Claim held: `nix-disk-cleanup-1`. No clawgate task.
+- **The root run completed cleanly.** Investigation RESOLVED: the mass is `/tmp`. Nothing running; filesystem untouched by these sessions.
 
 ### What's IN FLIGHT
-- Nothing running. No `tune2fs`, no deletion, no deploy. The filesystem is untouched by this session.
+- Nothing. Three items await an operator decision (`/tmp` triage, the PR, the three `sudo` one-liners).
 
 ## Open investigations — live diagnosis state
 
@@ -187,20 +180,48 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **A re-run is needed for true byte figures.** Everything above is sound for *where* the mass is and useless for *exactly how much*.
 - **The filesystem moved during this session — three readings, so quote one with its timestamp, never as "the" value:** session-2 `output.txt` = 384,774,395 blocks used (1467.8 GiB), 95,273,683 inodes · session-3 mid-session `df` = 1.4T used / 315G avail / 82%, **96,660,275** inodes · root run 13:01 −05:00 = 374,283,766 blocks (**1427.8 GiB**), **97,058,969** inodes. Inodes rose ~1.8M while bytes fell ~40 GiB — consistent with `/tmp` churn, and a reason not to treat any single `df` as the baseline for a cleanup claim.
 
+### `/home` breakdown, and a section-6c defect that made it unreadable
+- **`/home` on the ROOT filesystem is ~370 GB**, top entries: `workspace` 167G · `.ollama` 63G · `.local` 45G · `.cache` 36G · `.npm` 13G · `go` 13G · `hetzner-volumes` 6.4G · `.claude` 6.4G · `.nuget` 5.8G · `Downloads` 4.8G · `.var` 4.1G · `.config` 3.9G · `.rancher` 1.7G.
+- 🔴 **The 12T and 1.2T lines in the run's section 6c are NOT root-filesystem usage.** `/home/zach/hdd-20tb` is `/dev/sda1` (xfs, 18.2T, dev 801) and `/home/zach/old-nix-hdd` is `/dev/sdc1` (xfs, 3.6T, dev 821); root is dev 10308 and 1.8T in total. Also foreign: `old-nix-ssd` (`/dev/sdb2`), `workspace/fast` (`/dev/nvme1n1p1`, 2.5T used), `workspace/nvme-2tb` (`/dev/nvme3n1p1`, 556G).
+- **Cause:** `du -x` only stops du crossing AWAY from its starting point; when the starting point IS a foreign mount, du walks all of it. Fixed in `bd0f0c20` by comparing each candidate's device against `/` and listing foreign mounts separately. Controls: hdd-20tb / old-nix-hdd / old-nix-ssd excluded, `.ollama` kept, 94 root-fs entries retained.
+    via: measurement
+- **This also explains the ~3-hour runtime** — 13T of external disk was being walked for a `/home` breakdown. The re-run will be far quicker.
+- **Useful cross-check that falls out of it:** `du` (dedups hardlinks) gives ~370 GB for `/home`'s top 15, while section 2's naive `find` gave 686.8 GiB. The ratio is consistent with the hardlink inflation already documented, and is independent evidence the `bd0f0c20`/`9ef89fa7` dedup was the right correction.
+
+### 🔴 RETRACTION — "section 6c printed nothing" was false, and was diagnosed from truncated output
+- **The claim, recorded above and in `9ef89fa7`:** section 6c printed nothing because `/home/*/.*` expands to `.` and `..`.
+- **It is wrong.** The section had simply not run yet at the point the output was read; the old glob worked and produced the table above.
+- **How it happened:** a partial paste of a still-running script was read as a complete result — *the same failure this doc already records as the session's primary lesson*, committed as a fix while writing that lesson down. The enumeration change is harmless and was kept; its stated reason was false, and the real 6c defect (cross-filesystem) was shared by both the old and new versions.
+- **Generalisation worth carrying:** knowing the failure mode does not protect you from it. The defence is mechanical, not attentional — **never diagnose from output whose producer has not exited.** Check for the terminator, or the process, before reading a section as absent.
+    via: measurement
+
+### `/tmp` — the answer, still un-triaged
+- 78,501,285 entries / 469 GiB, 81% of this filesystem's inodes, 173,346 top-level entries, on the ROOT partition not tmpfs so nothing clears it at boot.
+- **Three independent runs agree on the readable trees and disagree wildly on the blocked one** — root vs two unprivileged: `/tmp` 78,501,285 / 78,021,477 / 77,750,210 · `/home` 37,693,686 / 37,942,259 / 37,985,716 · `/nix` 10,402,665 / 10,155,398 / 10,541,985 · **`/var` 2,785,594 / 21,400 / 980**.
+- 🔴 **An unprivileged count of a permission-blocked tree is not merely a floor, it is an UNSTABLE floor** — two runs by the same user minutes apart differed 20× on `/var`. So it cannot be used as a consistent lower bound, nor compared across runs to infer growth, which is exactly what a capacity investigation reaches for.
+    via: measurement
+
+### UNMEASURED this run — deleted-but-open files
+- Section 7 printed `count=-1`: the awk did `NR-1` to drop lsof's header, but with no output `NR` is 0. **That is not a zero and must not be read as one** — it also collapsed "lsof found nothing" with "lsof did not run".
+- Fixed in `bd0f0c20`: a not-on-PATH branch printing COULD NOT MEASURE, an empty-output branch reporting 0 alongside lsof's exit code, and a count that cannot go negative. Controls: old code reproduces `-1` on empty input, new code gives 0, and two rows give `count=2 bytes=2.0 GiB`.
+- **So session 2's `lsof +L1 = 0` elimination has NOT been re-confirmed as root.** It stands on session 2's evidence alone.
+
 ## Next steps (ranked)
-1. **Triage `/tmp` before deleting anything** — 469 GiB / 78.5M entries, the whole answer. Re-run the patched script (section 6d now breaks `/tmp` down by size, inode count and entry-name family) and find what generates it. Known families from session 2: ~17K `nix-develop-*`, ~16K `nix-shell.*`, agent worktrees, playwright/chromium profiles. **Do not mass-delete `/tmp` on a live box** — k3s, agent worktrees and running sessions hold paths there.
+1. **Triage `/tmp` before deleting anything** — 469 GiB / 78.5M entries. Re-run the patched script (section 6d breaks `/tmp` down by size, inode count and entry-name family) or scope a read-only pass to `/tmp` alone. Known families: ~17K `nix-develop-*`, ~16K `nix-shell.*`, agent worktrees, playwright/chromium profiles. **Do not mass-delete on a live box** — k3s, agent worktrees and running sessions hold paths there.
    forcing: none
-2. **Decide whether `/var/lib/docker` (57 GB, 1.64M inodes) is live at all.** k3s uses containerd. `docker ps -a` and `docker system df` answer it; `docker system prune -a` if not.
+2. **Re-run the patched script** for deduped bytes, a correct `/home` breakdown and a real deleted-but-open reading. Much faster now that 13T of external disk is excluded.
    forcing: none
-3. **Re-run the patched script for true deduped byte figures.** Every number in this doc is an upper bound until then.
+3. **Decide whether `/var/lib/docker` (57 GB, 1.64M inodes) is live.** k3s uses containerd; `docker ps -a` and `docker system df` answer it.
    forcing: none
-4. **`sudo tune2fs -m 1 /dev/nvme0n1p2`** → +74.5 GiB Avail, `Used` unchanged, reversible with `-m 5`. Trims the root-fs reserve from 93 to 18.6 GiB on a filesystem that also backs k3s PVCs. Independent of everything above.
+4. **`/home` candidates if more is needed:** `.ollama` 63G, `.cache` 36G, `.npm` 13G, `go` 13G — all rebuildable caches.
    forcing: none
-5. **Open a PR for `handoff-nix-disk-v3`.** Three commits, pushed, unmerged; `handoff-nix-disk-cleanup` never had one. The gate has NOT been run on this tree — both Tekton tiers are required.
+5. **`sudo tune2fs -m 1 /dev/nvme0n1p2`** → +74.5 GiB Avail, `Used` unchanged, reversible with `-m 5`.
    forcing: none
-6. **Housekeeping:** `sudo umount /mnt/rootcheck && sudo rmdir /mnt/rootcheck`; `sudo rmdir '/&&'` (a directory literally named `&&`, debris from a mangled shell command); delete the untracked `scripts/diagnose-nix-disk.sh` and `output.txt`.
+6. **Open a PR for `handoff-nix-disk-v3`** (5 commits, unmerged; gate not run, both Tekton tiers required).
    forcing: none
-7. **Only then, capacity work** — automatic GC config, moving `/nix` to its own partition, Attic. All were premised on the refuted diagnosis. With `/tmp` at 469 GiB and `/nix` at 147 GB unique, moving `/nix` addresses the smaller problem.
+7. **Housekeeping:** `sudo umount /mnt/rootcheck && sudo rmdir /mnt/rootcheck` · `sudo rmdir '/&&'` · delete untracked `scripts/diagnose-nix-disk.sh` and `output.txt` · release the claim.
+   forcing: none
+8. **Only then, capacity work.** With `/tmp` at 469 GiB and `/nix` at 147 GB unique, moving `/nix` to its own partition addresses the smaller problem.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -235,9 +256,15 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **`grep -c` prints `0` and exits `1`** on no match, so `$(grep -c … || echo 0)` yields a two-line `"0\n0"` that breaks every later integer test — a guard that fails precisely when it has something to report.
 - **kubelet `stats/summary` is useless per-PVC on local-path volumes** — a local-path volume is a plain directory, so every volume reports the whole filesystem's figures. Its node-level `fs.usedBytes`/`inodesUsed` are good, and were the first independent confirmation here.
 
+- 🔴 **`du -x` does not mean "only this filesystem".** It stops du crossing AWAY from its starting point; started ON a foreign mount it walks the whole mount. To restrict to one filesystem, compare `stat -c '%D'` against the target device per candidate.
+- 🔴 **Knowing a failure mode does not protect you from it.** This session wrote "a truncated scan reported as a total is what produced this whole false diagnosis" into the doc, and then committed a fix for a non-existent defect diagnosed from truncated output. The defence has to be mechanical — check the producer has exited before reading its output as complete.
+- **`NR-1` to strip a header yields −1 on empty input.** Any "count" that can go negative is hiding the difference between "nothing found" and "did not run", and the zero is usually the reassuring reading.
+- **This host has 6 non-root filesystems mounted under `/home`** (`sda1`, `sdb2`, `sdc1`, `nvme1n1p1`, `nvme3n1p1` plus root) — any `/home` figure must say which filesystem it is about.
+
 ## How to verify
-1. **The answer:** `sudo find /tmp -xdev -printf . | wc -c` — tens of millions. Compare to `df -i /` used inodes; `/tmp` is ~81% of them.
-2. **The metadata refutation:** `dumpe2fs -h /dev/nvme0n1p2 | grep -iE 'Inode size|Inode count|journal size'` → 256 B × 122,036,224 + 488,115,343/8 + 1 GiB ≈ 30 GiB.
-3. **The dedup fix:** create one file hardlinked 4×; the script's deduped bytes must equal `du -sx` and the `dup-links` column must read 3.
-4. **The denial guard:** run as a normal user — exit 2, nothing written. As root, section 4 must print three integer counts and no `integer expected` error.
-5. **`tune2fs`:** Avail rises ~74.5 GiB, `Used` does not move. If `Used` drops, this analysis is wrong.
+1. **The answer:** `sudo find /tmp -xdev -printf . | wc -c` — tens of millions; compare to `df -i /` used inodes (~81%).
+2. **The metadata refutation:** `dumpe2fs -h /dev/nvme0n1p2 | grep -iE 'Inode size|Inode count|journal size'` → ≈30 GiB, not 902.
+3. **The 6c fix:** section 6c must NOT list `hdd-20tb` or `old-nix-hdd` in the top-15 table, and must name them under "NOT on the root filesystem". Its total must be reconcilable with section 2's `/home`.
+4. **The dedup fix:** one file hardlinked 4× → deduped bytes equal `du -sx`, `dup-links` column reads 3.
+5. **Section 7:** must print `count=0` or a positive count, never a negative one, and COULD NOT MEASURE if lsof is absent.
+6. **`tune2fs`:** Avail rises ~74.5 GiB, `Used` does not move.
