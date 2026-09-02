@@ -190,10 +190,15 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   :3959, :4011, :4087, :4134, :4360, :4377, :9968, :11755, :11852, :12584`). **Three of them —
   `:11755, :11852, :12584` — drive the WRITE endpoints (`post_bullet`/`PUT`)**, which is where the
   in-request fsync lives. ⚠ **Only `:11755` is asserted to REACH `_replace_bytes`** (it asserts
-  `200` / `x-store-status: appended`); `:11852` is refused at `412` and `:12584` at `422
-  entry-shape`, both **before** the `_replace_bytes` call at `server.py:2211` — `:12584` even
-  asserts `read_bytes() == before`. An earlier draft said all three were "`_replace_bytes` itself",
-  which over-certified by 3x; the SET is still the right one to name, the mechanism claim is not. 🔴 **#1219 does NOT reach them:** it re-sites the two
+  `200` / `x-store-status: appended`); `:11852` (a **PUT**) is refused at `412`
+  (`server.py:2194`) before its write at `:2211` in `replace_entry`, and `:12584` (a **POST**) at
+  `422 entry-shape` (`:2082`) before its write at `:2115` in `append_bullet` — `:12584` even
+  asserts `read_bytes() == before`. 🔴 **Two write sites, one per verb: an earlier draft sent both
+  to `:2211`, which the POST path never enters** — the citation-into-the-wrong-function bug this
+  doc corrects elsewhere, reintroduced in the sentence that corrected it. A draft before THAT said
+  all three were "`_replace_bytes` itself", which over-certified by 3x; the SET is still the right
+  one to name, the mechanism claim is not.
+  🔴 **#1219 does NOT reach them:** it re-sites the two
   *fixtures*, and these are not fixtures — so "the file is done once #1219 merges" will be wrong in
   the same way "the file is done because #1211 landed" was. This is the third granularity this arc
   has been wrong at: file → fixture → call site. Assume there is a fourth.
