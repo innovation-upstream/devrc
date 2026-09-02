@@ -16,38 +16,39 @@ removing the tests' dependence on disk latency rather than by tuning bounds. Dis
 from `handoff-ci-speedup.md`, which is about gate SPEED and is owned elsewhere.
 
 ## State now
-- devrc `main`; no branch of this effort is open. ⚠ Another session's dirty
-  `nix/programs/alacritty/default.nix` has been in this shared checkout all session —
-  untouched, and checked for collision before every fast-forward.
-- **SHIPPED: `innovation-upstream/devrc#1211` → squash `1a4350f3`.** Sites the
-  store-api test store on tmpfs. Verified by content: blob `4eb805eb` identical on
-  `origin/main`, and the siting, the fstype guard, the 6 new tests and the recorded
-  classifier defect all confirmed present in the merged file.
-- Gate green on it with real counts: `collected=20345 passed=20342 skipped=3 failed=0`
-  (floor 18404), nodetests `1449/1449` (floor 1367).
-- 🔴 **NOT the same as "the flake is fixed."** The gate that validated the fix is the
-  thing being fixed, so one green cannot distinguish "the fix worked" from "this run
-  would not have flaked anyway." **The verifier is the flake RATE over the next stretch
-  of PRs**, not this run. See rank 1.
+🔴 **`devrc#1219` is the live artefact: OPEN, `mergeable=MERGEABLE`, `mergeStateStatus=CLEAN`,
+both required checks SUCCESS at `734cb0bc`.** It consolidates the store siting that `#1211`
+applied to one file out of three, and it has been through **six audit rounds**.
 
-**What was actually established (narrower than "fixed"):**
-- fsync on tmpfs does not move under contention — measured, below
-- the store lands there when a tmpfs exists, pinned by a test that fails if it silently
-  falls back
-- the change cannot make things worse: every failure mode degrades to `tmp_path`
+- devrc `main` @ `a6e50641`. Worktree `~/workspace/devrc-r6` holds the branch
+  `fix/consolidate-store-siting`; the shared checkout was never committed to.
+- ⚠ Another session's dirty `nix/programs/alacritty/default.nix` has been in the shared
+  checkout all session, untouched, and checked for collision before every fast-forward.
 
-**The 8-of-14 red PRs, triaged — it is NOT one phenomenon.** This corrects an earlier
-framing in this session that called the gate uniformly "permanently red":
-- **6 likely flakes** — 5 in `test_subsystem_store_api.py`
-  (`TestTheBackstopNeverSendsASecondResponse`, `TestAHungRoundTripSAYSWhichSideBlocked`
-  ×2, `TestTheActorComesFromTheTOKEN` ×2) plus `#1166`
-  (`test_release_deletes_the_ref_and_the_slug_becomes_claimable_again`, a claim-work
-  test hitting a real git remote, on a docs-only diff).
-- 🔴 **2 are the gate WORKING CORRECTLY, and belong to their authors, not here:**
-  `#1194` adds `scripts/break-glass-merge.sh` and fails the runtime-shebang scanner;
-  `#1177` adds `claude/skills/rig-control/SKILL.md` and fails
-  `test_every_shipped_skill_has_exactly_one_ledger_entry` — CLAUDE.md requires a
-  `claude/skill-tiers.json` entry in the SAME commit, pinned two-way.
+**What `#1219` ships** — `scripts/testlib/store_siting.py` (new) plus
+`test_store_siting_ledger.py` (new seam guard), with `test_subsystem_store_api.py`,
+`test_cairn_write.py` and `test_cairn_cli.py` taking their store root from it.
+Merged-tree suite: **782 passed, rc 0**.
+
+**🔴 THE SINGLE MOST USEFUL EVENT WAS THE MERGE, NOT AN AUDIT ROUND.** `#1219` went
+CONFLICTING; on merging `origin/main` the ratchet immediately read **21 against a
+constant of 20**, because main had added `(tmp_path / name).write_text(body)` — a scratch
+file named `"wrapped.md"`. The guard fired on real divergence **and was wrong**: round 3's
+audit had called the unrestricted `tmp_path / <Name>` arm "a false accusation" and I left
+it as a 🟢. It stopped being hypothetical the moment main moved. Narrowed in round 6 to
+expressions actually USED as a store root; merged tree now reads 20 == 20.
+
+**Audit ladder, six rounds, every round's findings caused by the previous round's fixes:**
+| round | outcome |
+|---|---|
+| 1 (full) | 4 🟡 — shadowed-mount fstype, ENOSPC on a full tmpfs, a spelled membership scanner, files-not-fixtures |
+| 2 | all 9 claims verified; 3 new 🟡 — my three fixes shipped **unpinned** and all survived mutation |
+| 3 | 1 🔴 **caused by my round-3 fix**: I lowered the floor below the payload |
+| 4 | 1 MEDIUM — the peak constant was pinned to nothing |
+| 5 | F1 (the derivation under-reported silently in 3 shapes) + my replacement measurement was also wrong |
+| 6 | merge + all of round 5's findings; **delta not yet audited** |
+
+**🔴 Rank 1's baseline is now known to be measuring the wrong thing — see rank 1.**
 
 ## Open investigations — live diagnosis state
 
@@ -109,32 +110,80 @@ Found by accident while doing the tmpfs work. Documented on `main` in
   done | command grep -c "subsystem_store_api\|TestTheActor\|TestAHungRoundTrip\|TestTheBackstop"
   ```
 
+### The store-siting fix is WIDER than the baseline rank 1 would measure it against
+Not a bug — a measurement that would mislead if run as written.
+
+- **Symptom + exact repro:** run rank 1's probe today and compare to the recorded
+  baseline (5 store-api failures among 14 open PRs, 2026-09-01). A flat rate would read
+  as "the fix did nothing".
+- **Observed (with values):** the baseline was taken when `#1211` had sited **one** file
+  (`test_subsystem_store_api.py`'s `store` fixture) of three. Since then `#1219` sites
+  all three plus `scoped_store` (which alone feeds ~110 `running(...)` sites), and the
+  audit measured the population it had missed. So baseline and post-fix state differ by
+  more than time.
+- **Ruled out:** *"the baseline is still comparable"* — it was measured against a suite
+  where 2 of 3 files and the largest fixture were still disk-backed. via: measurement
+- **Ruled out:** *"one green CI run shows the fix works"* — the gate validating a gate
+  fix is not independent evidence; a run that would not have flaked anyway is
+  indistinguishable. via: assumed
+- **Leading hypothesis:** the rate should drop materially once `#1219` merges, and
+  measuring before it merges measures the partial state.
+- **Next probe, verbatim:** measure AFTER `#1219` merges, and record the new baseline
+  date alongside the count:
+  ```bash
+  for p in $(gh pr list --repo innovation-upstream/devrc --state all --limit 40 --json number --jq '.[].number'); do
+    gh api "repos/innovation-upstream/devrc/commits/$(gh pr view $p --repo innovation-upstream/devrc --json headRefOid --jq .headRefOid)/status" \
+      --jq '[.statuses[]?|select(.context=="tekton/devrc-pytests")|select(.state=="failure")|.description]|first' 2>/dev/null
+  done | command grep -c "subsystem_store_api\|TestTheActor\|TestAHungRoundTrip\|TestTheBackstop\|TestAppendLands"
+  ```
+
+### Round 6's delta has not been audited
+- **Symptom + exact repro:** `1eafc40c..734cb0bc` carries the merge plus F1–F4 fixes and
+  the predicate narrowing. No round has looked at it.
+- **Observed (with values):** round 5's auditor's own guidance — *"if F2–F4 are taken
+  together with F1 in one commit, one delta re-audit of that commit is the right amount,
+  and a clean result there ends the ladder."* That is exactly the shape of `734cb0bc`.
+- **Ruled out:** *"six rounds is enough, stop counting"* — the stop rule is keyed on
+  FINDINGS, never a round count; five rounds returned findings that needed fixing. via: doc
+- **Leading hypothesis:** the delta is small and the fixes were each mutation-verified,
+  so a clean round is plausible — but round 6 introduced a new predicate and a new
+  summing derivation, which is exactly where the last five rounds found things.
+- **Next probe, verbatim:** post the claims block, then
+  `python3 scripts/audit-dispatch.py 1219 --round 6` and dispatch it over
+  `1eafc40c..734cb0bc`.
+
 ## Next steps (ranked)
-1. **Measure whether the flake rate actually dropped** — devrc, no files. The verifier
-   for `#1211`, which is otherwise a fix nobody has confirmed works. Baseline recorded
-   above (5 store-api failures among 14 open PRs, 2026-09-01); probe command in the
-   second Open-investigations block. 🔴 Until this runs, `#1211` is a plausible fix, not
-   a demonstrated one — do not describe it as having fixed the flake.
+🔴 Numbering is STABLE — `claim-work --slug-for <this doc> <rank>` derives from it.
+
+1. **Measure whether the flake rate actually dropped** — devrc, no files. 🔴 **DO NOT run
+   it against the recorded baseline as-is**: that baseline (5 store-api failures among 14
+   open PRs, 2026-09-01) was measured when only 1 of 3 files was sited, so a flat result
+   would be uninterpretable. Measure AFTER `#1219` merges and record a fresh baseline
+   date. Probe in the first Open-investigations block.
    forcing: gate — a required check has been failing PRs whose diff cannot reach it.
 2. **Fix the hung-server classifier's path sensitivity** — devrc,
-   `scripts/tests/test_subsystem_store_api.py`, `_HUNG_SERVER_RULES` and
+   `scripts/tests/test_subsystem_store_api.py`, `_HUNG_SERVER_RULES` /
    `_why_the_server_did_not_answer`. Scan frames' SOURCE LINES, not filenames. Full
-   reproduction in the first Open-investigations block; the defect is already
-   documented in-file on `main`, so the code and the comment agree today.
-   forcing: gate — it makes the gate's own diagnostic lie, in the direction that sends
-   the reader to the wrong mechanism, and agent worktrees are routinely named after
-   the bug being fixed.
+   reproduction in the doc's earlier Open-investigations block; documented in-file on
+   `main`, so code and comment agree today.
+   forcing: gate — it makes the gate's own diagnostic lie, and agent worktrees are
+   routinely named after the bug being fixed, which is how it was found.
 3. **Decide the `#1166` claim-work flake** —
-   `test_release_deletes_the_ref_and_the_slug_becomes_claimable_again` failed a
-   docs-only PR. It hits a real git remote, so it is plausibly the same
-   wall-clock-under-load shape, but that is UNMEASURED — no reproducer, no control run.
-   Start by checking whether it has failed on other shas.
-   forcing: gate — same required check, different test; a red gate on a docs-only diff.
+   `test_release_deletes_the_ref_and_the_slug_becomes_claimable_again` failed a docs-only
+   PR. Hits a real git remote, so plausibly the same wall-clock shape, but UNMEASURED —
+   no reproducer, no control. Start by checking whether it failed on other shas.
+   forcing: gate — same required check, different test, red on a docs-only diff.
 4. **Tell the authors of `#1194` and `#1177` their reds are real** — not this effort's
-   work and deliberately not done here. `#1194` needs its script to satisfy the
-   runtime-shebang scanner; `#1177` needs a `claude/skill-tiers.json` entry in the same
-   commit. Both were misread as flakes earlier in this session before triage.
+   work. `#1194` needs its script to satisfy the runtime-shebang scanner; `#1177` needs a
+   `claude/skill-tiers.json` entry in the same commit. Both were misread as flakes before
+   triage.
    forcing: none — someone else's PRs; recorded so the misreading is not repeated.
+5. **Audit round 6's delta, then merge `#1219`** — IN FLIGHT: `innovation-upstream/devrc#1219`.
+   Delta is `1eafc40c..734cb0bc`. Claims block not yet posted. If that round is clean the
+   ladder ENDS (do not run a seventh to confirm); then re-run BOTH gate tiers on the
+   merged tree — the current Tekton green is on the branch and `strict` is false — and
+   merge.
+   forcing: gate — the PR is the mitigation for a required check that fails unrelated PRs.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A CHANGE THAT COULD SILENTLY DO NOTHING NEEDS A TEST THAT FAILS WHEN IT DOES
@@ -182,22 +231,61 @@ Found by accident while doing the tmpfs work. Documented on `main` in
   costs no fidelity — and the one test that IS about stalls patches `_fsync_dir`
   explicitly, so it is unaffected by where the store lives.
 
+- 🔴 **THE MERGED TREE FOUND WHAT SIX AUDIT ROUNDS DID NOT.** Every round audited the PR
+  branch; the branch was clean and the merge was not. Main added one `tmp_path / <Name>`
+  and the ratchet accused it. **Gate on the merged tree — and note the corollary: the
+  finding was a FALSE POSITIVE that an earlier round had predicted and I had deferred as
+  a 🟢.** A 🟢 that describes a guard being wrong is a latent red, not a nit.
+- 🔴 **THREE OF MY OWN "MEASURED" NUMBERS WERE MEASUREMENTS OF SOMETHING ELSE.** (a) apparent
+  bytes from a SYNTHETIC store labelled as the real fixture's; (b) the correction to that,
+  which double-counted DIRECTORY pages — tmpfs dirs cost zero, and
+  `1,253,376 + 3*4096 = 1,265,664` exactly; (c) a floor lowered on the strength of a 🟢
+  note without measuring the payload at all, landing BELOW it and opening an ENOSPC
+  window. **The fix that held was not a fourth number — it was deriving the value from
+  the fixture that produces it.** Ship the derivation, never the transcription.
+- 🔴 **A HARDCODED LITERAL WAS REINTRODUCED INSIDE THE FIX FOR HARDCODED LITERALS.**
+  `_SEEDED_ENTRIES = 3` — a bare constant about another file's function, pinned by
+  nothing — was added by the commit whose entire subject was "a constant checked against
+  a constant is not a guard". Now derived by counting write calls outside any loop.
+- 🔴 **FOUR GUARDS OF MINE WERE NARROWER THAN THEIR NAMES, ACROSS FOUR ROUNDS.** A regex
+  matching a word my own comment spelled; a test named "…takes its store root from the
+  shared siting" that only checked *a* call existed; a floor guard that monkeypatched the
+  variable it claimed to bound; a derivation that took the MAX of one loop in one file.
+  **The pattern is not carelessness — it is that a guard over TEXT, or over one instance,
+  is walkable by construction.** The AST/derived versions were available every time.
+- 🔴 **A SCRIPTED MASS EDIT SKIPPED 9 OF 19 SITES WHILE ITS OWN ASSERTION PASSED.** It
+  asserted the target count reached zero, not that every function got its new parameter.
+  Reverted rather than shipped; the sites are held by a ratchet instead. **Assert the
+  post-condition you actually need, not the one that is easy to count.**
+- ⚠ **`nix build` needs longer than the 10-minute foreground Bash cap** — `run_in_background`,
+  redirected to a file, and **never piped**: `| tail` replaces nix's exit status with
+  `tail`'s and truncates the counts. That cost the pytests signal on `#1211`; the
+  runner's own `RESULT:` line survived only because it is emitted behind an EXIT trap.
+- ⚠ **The `audit-dispatch.py` delta brief REFUSES without a posted `audit-claims` block** —
+  correctly, since an empty one silently turns a delta into a blind full audit that then
+  reads as covered. Post the claims comment first, every round.
+- ⚠ **A resumed subagent keeps its context** — round 3's auditor died on a session limit
+  after only creating its worktree; `SendMessage` to its id resumed it with the brief
+  restated, rather than paying for a fresh dispatch.
+
 ## How to verify
 ```bash
-# the shipped change is on main, by CONTENT (a squash never makes the head an ancestor)
-git -C $DEVRC show origin/main:scripts/tests/test_subsystem_store_api.py \
-  | command grep -c '_tmpfs_dir'                      # non-zero
-git -C $DEVRC rev-parse origin/main:scripts/tests/test_subsystem_store_api.py  # 4eb805eb…
+# the PR, and that its checks are on the CURRENT head
+gh pr view 1219 --repo innovation-upstream/devrc --json mergeable,mergeStateStatus,headRefOid
+gh api "repos/innovation-upstream/devrc/commits/$(gh pr view 1219 --repo innovation-upstream/devrc \
+  --json headRefOid --jq .headRefOid)/status" --jq '.statuses[]|"\(.context) \(.state): \(.description)"'
 
-# the guards still discriminate — clear __pycache__ or the run may not be honest
+# the merged-tree ratchet — the number that caught main's new site
+git -C $DEVRC worktree add /tmp/v6 fix/consolidate-store-siting && \
+  nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  /tmp/v6/scripts/tests/test_store_siting_ledger.py -q -p no:cacheprovider   # 8 passed
+
+# the four affected files on the merged tree
 nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
-  $DEVRC/scripts/tests/test_subsystem_store_api.py \
-  -k "TestTheStoreIsSitedOffTheContendedDisk" -q          # 6 passed
-
-# 🔴 do NOT run this from a worktree whose path contains fsync/flock/_EntryLock —
-# the classifier will misreport and the failure is the PATH, not the code (rank 2).
+  /tmp/v6/scripts/tests/{test_store_siting_ledger,test_cairn_write,test_cairn_cli,test_subsystem_store_api}.py \
+  -q -p no:cacheprovider                                                      # 782 passed
 ```
-🔴 Run **both** tiers before claiming a merge is safe, and name the tier and base sha:
-`scripts/gate.sh` is the dev host; `nix build .#checks.x86_64-linux.{pytests,nodetests}`
-is what Tekton gates on. **Build them ONE AT A TIME**, in the background, redirected to
-a file — never piped.
+🔴 Run **both** tiers before claiming a merge is safe, and name the tier and base sha.
+Build the two `nix` checks **ONE AT A TIME**, backgrounded, redirected to a file, never
+piped. The current Tekton green is a claim about the PR BRANCH; `strict` is false, so
+gating the merged tree is still manual.
