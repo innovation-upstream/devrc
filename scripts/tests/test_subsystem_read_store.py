@@ -165,6 +165,59 @@ WIRE_CONSTANTS: tuple[tuple[object, str, object], ...] = (
 NOT_WIRE_FACTS: frozenset[str] = frozenset()
 
 
+#: Statements that carry MODULE scope into their bodies. A name bound inside one
+#: of these at a module's top level is a module attribute exactly like one bound
+#: beside it — Python has no block scope. `FunctionDef`/`ClassDef`/`Lambda` are
+#: deliberately absent: those DO introduce a scope, and descending into them is
+#: what makes a sweep report function locals (N3).
+_SCOPE_TRANSPARENT: tuple[type[ast.stmt], ...] = tuple(
+    node
+    for node in (
+        getattr(ast, name, None)
+        for name in ("If", "Try", "TryStar", "With", "AsyncWith", "For", "AsyncFor", "While")
+    )
+    if node is not None
+)
+
+
+def _module_scope_statements(body: list[ast.stmt]):
+    """Every statement executing at module scope, including nested block bodies."""
+    for node in body:
+        yield node
+        if isinstance(node, _SCOPE_TRANSPARENT):
+            yield from _module_scope_statements(list(node.body))
+            yield from _module_scope_statements(list(getattr(node, "orelse", [])))
+            yield from _module_scope_statements(list(getattr(node, "finalbody", [])))
+            for handler in getattr(node, "handlers", []):
+                yield from _module_scope_statements(list(handler.body))
+
+
+def _bound_names(target: ast.expr):
+    """Every name a single assignment TARGET binds, unpacking tuples and lists."""
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            yield from _bound_names(element)
+    elif isinstance(target, ast.Starred):
+        yield from _bound_names(target.value)
+
+
+#: Nodes that open a NEW scope, so a binding inside them is not a module
+#: attribute. A `lambda` is here for the same reason a `def` is.
+_NEW_SCOPE = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _walrus_names(node: ast.AST):
+    """Names bound by `:=` in this node's own scope, comprehensions included."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, _NEW_SCOPE):
+            continue
+        if isinstance(child, ast.NamedExpr):
+            yield from _bound_names(child.target)
+        yield from _walrus_names(child)
+
+
 def _module_scope_assignments(path: Path) -> set[str]:
     """Every non-underscore name ASSIGNED at a module's top level, from source.
 
@@ -173,39 +226,81 @@ def _module_scope_assignments(path: Path) -> set[str]:
     NAME SHAPE (`isupper()`) and VALUE TYPE (`isinstance(..., str)`) — and both
     filters are holes: a `Path`, a tuple, a frozenset or a mixed-case name walks
     straight through. An assignment is an assignment whatever it holds.
+
+    🔴 "TOP LEVEL" IS NOT "IN `tree.body`", AND THAT GAP WAS THE FIFTH RECURRENCE
+    OF THIS FILE'S OWN DEFECT CLASS. This walked `tree.body` and required
+    `isinstance(target, ast.Name)` under the sentence above. Python has no block
+    scope, so a name bound inside a top-level `try:`/`if:`/`with:`/`for:` — or by
+    a tuple unpack — is a module attribute exactly like one bound beside it, and
+    MEASURED, all three SURVIVED: `FROZEN_MIRROR = …` in a `try:` body,
+    `LEGACY_STATUS = …` under `if True:`, and `LEGACY_STATUS, LEGACY_REMEDY = …`.
+    So the walk now follows module scope wherever it goes and unpacks targets.
+    It still does NOT enter a `def`/`class` body: those really are new scopes,
+    and a sweep that entered them would report function locals as
+    re-declarations.
+
+    🔴 AND "ASSIGNED" IS NOT ONLY `=`. Widening to the block bodies above and
+    stopping there reproduced the defect one level in: MEASURED,
+    `for [LOOP_STATUS] in [["store-frozen"]]:` at module scope SURVIVED the
+    widened walk, because a `for` TARGET is a binding this collected no targets
+    from. Every statement-level binding form that leaves a DURABLE module
+    attribute is now collected — `for … in`, `with … as`, and a `:=` anywhere in
+    a module-scope expression. `except … as` is excluded ON PURPOSE; the reason
+    is in the body. KNOWN RESIDUAL, stated rather than discovered: a `:=` inside
+    a module-scope `def`'s decorator or default argument is not seen, because
+    that hangs off a node this walk skips whole.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     found: set[str] = set()
-    for node in tree.body:
+    for node in _module_scope_statements(list(tree.body)):
         targets: list[ast.expr] = []
         if isinstance(node, ast.Assign):
             targets = list(node.targets)
         elif isinstance(node, ast.AnnAssign):
             targets = [node.target]
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [it.optional_vars for it in node.items if it.optional_vars]
         for target in targets:
-            if isinstance(target, ast.Name) and not target.id.startswith("_"):
-                found.add(target.id)
+            for name in _bound_names(target):
+                if not name.startswith("_"):
+                    found.add(name)
+        # 🔴 `except … as NAME` is DELIBERATELY NOT COLLECTED. Python unbinds it
+        # at the end of the handler, so it is never a module attribute — and
+        # collecting it would make this sweep report a name the `hasattr` check
+        # below can never find, i.e. a false RED on an ordinary
+        # `except OSError as exc:` at module scope.
+        # `:=` binds in the ENCLOSING scope — including from inside a
+        # comprehension, which is why an expression walk is the only way to see
+        # it. A `def`/`class` statement is skipped WHOLE (not merely its body):
+        # walking it here would report every walrus in the function as a module
+        # attribute, which is the N3 over-width defect in a new place.
+        if not isinstance(node, _NEW_SCOPE):
+            for name in _walrus_names(node):
+                if not name.startswith("_"):
+                    found.add(name)
     return found
 
 
-def _assigned_anywhere(path: Path) -> set[str]:
-    """Every non-underscore name assigned at ANY depth in a file.
+def _module_scope_bindings(path: Path) -> set[str]:
+    """Every non-underscore module attribute a file DEFINES: assignments AND
+    top-level `def`/`class` names.
 
-    Wider than `_module_scope_assignments` on purpose: a re-declaration inside a
-    `try:` at module scope, or a local shadowing an imported constant, is the
-    same "second copy of somebody else's fact" hazard.
+    Kept separate from `_module_scope_assignments` because the two answer
+    different questions. The ledger asks "which CONSTANTS must be pinned", so a
+    function name there would demand a `WIRE_CONSTANTS` row for every `def`. The
+    re-declaration guard asks "which names must a consumer IMPORT rather than
+    define", and a `def` is as re-declarable as a constant.
     """
-    found: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        targets: list[ast.expr] = []
-        if isinstance(node, ast.Assign):
-            targets = list(node.targets)
-        elif isinstance(node, ast.AnnAssign):
-            targets = [node.target]
-        for target in targets:
-            if isinstance(target, ast.Name) and not target.id.startswith("_"):
-                found.add(target.id)
-    return found
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    defined = {
+        node.name
+        for node in _module_scope_statements(list(tree.body))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and not node.name.startswith("_")
+    }
+    return _module_scope_assignments(path) | defined
 
 
 class TestTheWireConstants:
@@ -508,19 +603,49 @@ class TestTheResolver:
         Path.home() / ".cache" / "subsystem-store"` at `cairn`'s module scope
         SURVIVED it. Reading as text also made the arm sensitive to whitespace
         and blind to prose containing the same characters, so it is now an AST
-        walk, and the forbidden set is DERIVED from `subsystem_read_store`'s own
-        `__all__` — a constant added there is covered here the same day, with no
-        second list to keep in step. Parsed rather than imported because `cairn`
-        has no `.py` suffix and importing it would run its argparse module scope.
+        walk. Parsed rather than imported because `cairn` has no `.py` suffix and
+        importing it would run its argparse module scope.
+
+        🔴 `__all__` IS A SECOND LIST, AND THE ARM THAT SAID OTHERWISE COULD NOT
+        SEE IT DRIFT. The forbidden set was `set(rs.__all__)` alone under the
+        sentence "no second list to keep in step" — but `__all__` is exported by
+        hand, and it starts with `_`, so the two-way ledger above deliberately
+        excludes it and nothing anywhere reconciles the two. MEASURED, both
+        SURVIVED: a `SECOND_STAMP` added to the module and to `WIRE_CONSTANTS`
+        (ledger green) but omitted from `__all__`, then re-declared verbatim in
+        `cairn`; and deleting `stamp_header` from `__all__` and defining a second
+        one in `cairn`. So the forbidden set is the UNION of `__all__` and what
+        the module actually DEFINES at module scope. It covers `def`s and classes
+        as well as constants, because the second survivor above was a `def` and a
+        set that stopped at constants would have left it standing — the same
+        "narrower than the sentence above it" shape as the sweep itself.
+
+        🔴 THE CAIRN SIDE IS MODULE SCOPE, NOT EVERY DEPTH. The old walk was
+        `ast.walk`, so a FUNCTION-LOCAL in `cairn` named after any exported symbol
+        tripped it. MEASURED: a helper assigning `stamp_header = [...]` turned
+        this red with "`scripts/cairn` assigns ['stamp_header'], which it must
+        IMPORT" — a re-declaration claim about a local, and not hypothetical:
+        `subsystem_recall.main` already uses `stamp_header` as exactly such a
+        local. A local shadows nothing another module reads; the hazard this
+        guards is a second MODULE-SCOPE definition.
         """
         path = ROOT / "scripts" / "cairn"
         src = path.read_text(encoding="utf-8")
         assert "from subsystem_read_store import" in src
-        assigned = _assigned_anywhere(path)
-        # POSITIVE CONTROL: the walk really saw `cairn`'s assignments, so an
+        assigned = _module_scope_bindings(path)
+        # POSITIVE CONTROL: the walk really saw `cairn`'s definitions, so an
         # empty intersection below means "no re-declaration", not "no parse".
+        # Both halves, because they are collected by different code paths.
         assert "EXIT_REFRESH_FAILED" in assigned, sorted(assigned)[:20]
-        clash = assigned & set(rs.__all__)
+        assert "cmd_sync" in assigned, sorted(assigned)[:20]
+        swept = _module_scope_bindings(
+            ROOT / "scripts" / "lib" / "subsystem_read_store.py"
+        )
+        # POSITIVE CONTROL on the half `__all__` cannot supply: the sweep really
+        # read names off the module, so a union that quietly collapsed back to
+        # `__all__` alone fails here rather than passing as a clean run.
+        assert {"SYNC_STAMP", "stamp_header"} <= swept, sorted(swept)
+        clash = assigned & (set(rs.__all__) | swept)
         assert clash == set(), (
             f"`scripts/cairn` assigns {sorted(clash)}, which it must IMPORT from "
             f"`subsystem_read_store` — a second copy is a second thing to keep in "

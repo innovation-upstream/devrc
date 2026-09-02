@@ -78,8 +78,17 @@ Markdown, so prose is surfaced verbatim via Read and reads well in a diff.
 ## How the recon brief reports this
 
 `service_recon.py` prints one `index:` line plus the three surfaced sections, in
-schema order. Every status below except the last comes from
-`subsystem_recall.recall`, unchanged:
+schema order. Where each status comes from — three different answers, because
+"recall said so" and "recall was never asked" are not the same claim:
+
+- `scope-absent`, `ref-absent`, `ref-ambiguous` — **`recall`'s own status
+  strings, passed through unchanged.**
+- `hit`, `store-missing`, `store-unreadable` — `service_recon`'s names for what
+  `recall` DID: `hit` renames `recall`'s `recalled`, and the other two name the
+  two exceptions it can raise.
+- `not-attempted`, `store-unstamped` — 🔴 **produced by `service_recon` BEFORE
+  `recall` is asked at all** (`read_index` / `_scope_of` / `_resolve_store`), so
+  neither is a statement about the store's contents.
 
 | line | meaning |
 |---|---|
@@ -88,7 +97,8 @@ schema order. Every status below except the last comes from
 | `index: scope-absent` | the store holds no directory for this repo yet |
 | `index: AMBIGUOUS in <scope> — a.md \| b.md` | 🔴 more than one candidate; **pick one, never guess** — no body is surfaced |
 | `index: store-missing` | the store root does not exist on this host |
-| `index: not-attempted` | 🔴 **no root could be examined**, so no scope was derivable and the store was never asked. NOT a miss. |
+| `index: store-unreadable (scope <s>) — …` | the store was reached and `recall` RAISED — a broken/unparsable store, not an absent one |
+| `index: not-attempted` | 🔴 **no root could be examined**, so no scope was derivable and the store was never asked. NOT a miss. Built by `service_recon` before `recall` is asked, same as the row below. |
 | `index: store-unstamped — the index could not be read: …` | 🔴 **the DEFAULT read store carries no `.sync-stamp`, so nothing was read.** Not from `recall` — `service_recon._resolve_store` refuses before asking. Run `cairn sync`, or pass `--store <path>` to read a directory deliberately. |
 
 That `not-attempted` row is the one to read carefully: it and `ref-absent` both
@@ -97,8 +107,12 @@ is a third such shape, and also not a finding about the service.
 
 🔴 **A read store that CAN date itself prints its date, as `stamp:` lines
 directly under the `index:` line** (`synced=`, `revision=`, `snapshot=`,
-`entries=`, `coverage=` — `.sync-stamp` verbatim but for a trailing-whitespace
-strip, no age computed). **The refusal above covers UNDATEABLE, never STALE**: a
+`entries=`, `coverage=` — the `.sync-stamp` file's lines, with blank lines
+dropped and each line's TRAILING whitespace stripped, and nothing else done to
+them: no parsing, no reordering, no age computed. That is the whole
+normalisation `read_stamp` applies, and "verbatim" is the word the module
+retired for being false about it). **The refusal above covers UNDATEABLE, never
+STALE**: a
 cache last synced three days ago serves a `HIT` that reads exactly like a fresh
 one, so the stamp lines are the only thing in the brief that says how old it is.
 No stamp lines means the store carried no stamp — never that it is fresh.
