@@ -1,5 +1,6 @@
 **
 !scripts/lib/subsystem_recall.py
+!scripts/lib/subsystem_read_store.py
 !scripts/lib/subsystem_resolver.py
 !scripts/lib/subsystem_touch.py
 !scripts/lib/git_mainline.py

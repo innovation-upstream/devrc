@@ -60,11 +60,33 @@ Topic argument (optional): `$ARGUMENTS`.
    ```
    A hit means read those commits before re-deriving anything. The cost is one command; the cost of skipping it is a whole session.
 
-4. **Surface what the subsystem index already records for this repo** (read-only, ~1 command, no network):
+4. **Surface what the subsystem index already records for this repo** (~1 command):
 
    ```bash
-   python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo <path>
+   cairn recall --repo <path>
    ```
+
+   🔴 **`cairn`, NOT `subsystem_recall.py` directly — and this changed on 2026-09-02.**
+   The Cairn cutover made a hosted pod the datastore and FROZE the per-host mirror at
+   `~/.claude/analyze-service-index` (entry files `0444`, nothing refreshes it). The
+   reader's `--store` default was never repointed, so **every `/resume` between the
+   cutover and that date oriented on a frozen store while being told it was complete**:
+   MEASURED on the workbench, the frozen mirror served **26** `devrc/` entries and the
+   synced cache **29**, and the frozen one still printed
+   "ALL 26 entries in `devrc/`, none omitted" with no staleness stamp anywhere.
+   `cairn recall` syncs first, then runs the SAME reader against the cache, and says in
+   its banner whether it reached the pod or served a stale cache — so the answer carries
+   its own freshness instead of asserting completeness it cannot check.
+
+   🔴 **The reader now REFUSES an undateable store rather than serving it.** `cairn`
+   drives `scripts/lib/subsystem_recall.py` — the same module, the same output — and run
+   bare that module defaults to the synced cache and **exits 4** with
+   `REFUSING to read … Run \`cairn sync\` and re-run` when that cache carries no
+   `.sync-stamp`. That is a working state, not a broken one: run `cairn sync`, or just
+   use `cairn recall` above. An explicit `--store <path>` is never refused — that is you
+   naming a directory. A stamped read prints the stamp's own fields in its header, one
+   per line and UNPARSED (`stamp: synced=…`, `revision=…`, `entries=…`, `coverage=ALL`) —
+   the reader neither interprets them nor computes an age from them.
 
    🔴 **`--repo` takes a PATH, not a repo name.** A bare name is resolved against your
    **cwd**, so `--repo datapacket-talos` becomes `$PWD/datapacket-talos` and the run
@@ -114,7 +136,11 @@ Topic argument (optional): `$ARGUMENTS`.
 
    **`scope-unreadable` is NOT `scope-empty`.** It means the scope holds entry files and *not one* of them could be indexed, so nothing was read at all — the command exits non-zero for it, and it is the one "empty screen" you must not report as "nothing recorded yet".
 
-   **Non-blocking, always.** It never prompts and never writes. **It exits non-zero only when NOTHING readable came back** (missing store, unreadable entry, or `scope-unreadable`/`search-unreadable`) — a scope that served some entries alongside a `MALFORMED` block exits **0**, because recall was available and was also honest about its gaps. If it does exit non-zero, print the stderr line verbatim, note that recall was unavailable, and **continue the resume** — a broken index is not a reason to stop re-entering the work. Never fall back to recollection about what the index "probably says".
+   **Non-blocking, always.** It never prompts, and it never writes the *store*. ⚠ **But `cairn recall` is not read-only and not offline** — it fetches from the pod (20s timeout) and unpacks the refreshed cache, `.sync-stamp` included, *before* running the reader. Only the reader half is the read-only, clock-free, no-network thing; the sync in front of it is the part that makes the answer dateable. An outage is absorbed, not fatal: it serves the cache behind a `⚠ cairn: cached …` banner at exit **0**.
+
+   **The READER exits non-zero only when NOTHING readable came back** (missing store, unreadable entry, or `scope-unreadable`/`search-unreadable` ⇒ **3**) — a scope that served some entries alongside a `MALFORMED` block exits **0**, because recall was available and was also honest about its gaps. ⚠ **That rule is the reader's, and `cairn` wraps it with codes of its own that do NOT follow it**: **2** (no scope could be derived — pass `--scope`) and **5** (the pod answered with something cairn refuses to install — which fires *even when a perfectly readable cache is sitting there*, because installing a corrupt snapshot over it is the worse outcome). So a non-zero from `cairn recall` does not by itself mean nothing was readable; read the banner. If it does exit non-zero, print the stderr line verbatim, note that recall was unavailable, and **continue the resume** — a broken index is not a reason to stop re-entering the work.
+
+   🔴 **Do NOT read a `4` from `cairn` as "run `cairn sync`".** Two different tools spell 4 differently and the wrong reading sends you to the command that just failed. **`cairn recall` never returns 4** — it reaches the reader as a *library*, where the refusal below does not exist. `cairn`'s own 4 is `sync`-only (`EXIT_REFRESH_FAILED`) and means *the store was NOT reached, but a usable cache survived*; re-running `cairn sync` is exactly the thing that just did not work. **The 4 that `cairn sync` fixes belongs to the raw reader** — `python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py` run bare against a default store carrying no `.sync-stamp`, which refuses rather than serving a store that cannot date itself. Never fall back to recollection about what the index "probably says".
 
 5. **Report**:
    - One-paragraph "where things stand" (reconciled with what you just verified).

@@ -53,8 +53,10 @@ nothing" from "did not look":
 
     roots     `searched` / `absent` / `not-a-directory` / `walk-failed`
     locate    `hits` / `no-match` / `not-searched`
-    index     recall's own status (`recalled`/`scope-absent`/`ref-absent`/…), plus
-              the BASIS naming which repo the scope was derived from
+    index     recall's own status (`recalled`/`scope-absent`/`ref-absent`/…), or
+              `store-unstamped` — the host's read store cannot say how fresh it
+              is, so it was NOT read (run `cairn sync`) — plus the BASIS naming
+              which repo the scope was derived from
     config    `extracted` / `no-manifests` / `not-attempted`
     git       `commits` / `no-commits` / `not-attempted` / `git-failed`
     live      `off` / `no-context` / `no-namespace` / `ran` / `failed`
@@ -107,10 +109,27 @@ from subsystem_recall import (  # noqa: E402
 #: HERE (KeyError at import) instead of turning into a silent zero.
 RECALLED_STATUS = STATUS_PRECEDENCE[STATUS_PRECEDENCE.index("recalled")]
 from subsystem_resolver import normalize_ref  # noqa: E402
-from subsystem_touch import DEFAULT_STORE_ROOT, scope_for_repo  # noqa: E402
+from subsystem_touch import scope_for_repo  # noqa: E402
+
+# 🔴 THE SAME RESOLVER THE READER USES, NOT `subsystem_touch.DEFAULT_STORE_ROOT`.
+# This module's store default WAS the writer's root, which the Cairn cutover
+# froze — so `/analyze-service`'s recon and `/resume`'s recall were BOTH reading
+# a mirror that had stopped moving. One resolver, imported as a module so the
+# module global stays the single point of truth. See `subsystem_read_store`.
+import subsystem_read_store as _read_store  # noqa: E402
+
+#: The index section's verdict when the DEFAULT store resolution landed
+#: somewhere that cannot date itself. It is a section-level degrade, not an
+#: abort: recon still has roots, config, git log and (opt-in) live state to
+#: report, and throwing those away over one unreadable section would trade a
+#: whole brief for a defect the brief can simply name.
+INDEX_UNSTAMPED = "store-unstamped"
 
 __all__ = [
     "RECALLED_STATUS",
+    "INDEX_UNSTAMPED",
+    "NOT_READ_PREFIX",
+    "brief_store_root",
     "ENV_ROOT_HANDLES",
     "SKIP_DIRS",
     "MANIFEST_SUFFIXES",
@@ -411,7 +430,9 @@ class LocateResult:
 @dataclass(frozen=True)
 class IndexResult:
     status: str
-    """recall's own status, or `not-attempted` / `store-missing`."""
+    """recall's own status, or `not-attempted` / `store-missing` /
+    `store-unstamped` (== `INDEX_UNSTAMPED`: the default read store carries no
+    snapshot stamp, so nothing was read — never "nothing recorded")."""
     scope: str | None = None
     ref: str | None = None
     what: str = ""
@@ -522,6 +543,29 @@ class Brief:
     git: GitResult
     live: LiveResult
     store_root: str = ""
+    """WHICH store this brief actually read — the RESOLVED root, never the
+    caller's argument.
+
+    🔴 IT MUST NOT NAME A PATH THAT WAS NOT READ. When the default resolution is
+    refused (`INDEX_UNSTAMPED`) the value is prefixed `NOT READ (…)`, so a
+    consumer that treats it as a bare path fails loudly instead of recording a
+    directory the brief never opened. It read `"None"` for one commit — `recon`
+    stringified its own `store_root=None` sentinel — which is the exact question
+    this field exists to answer, answered with a word.
+    """
+    store_stamp: tuple[str, ...] = ()
+    """The read store's `.sync-stamp` lines, UNPARSED — HOW FRESH the index is.
+
+    🔴 THE REFUSAL DOES NOT COVER STALENESS, SO THIS FIELD IS NOT DECORATION.
+    `INDEX_UNSTAMPED` fires only when a store cannot date itself at ALL. A cache
+    stamped three days ago — pod down, `cairn sync` exiting 4 with its warning on
+    STDERR, `;` correctly letting the recon run anyway — is served in full, and
+    for one round the text brief printed `HIT (from index)` with no freshness
+    field anywhere in it. That is a store that cannot say how fresh it is serving
+    as if current: this change's own thesis, one layer up. Empty when the store
+    carries no stamp (a refusal, or an explicitly-named unstamped directory) —
+    nothing is invented.
+    """
     notes: tuple[str, ...] = field(default=())
 
     @property
@@ -814,11 +858,65 @@ def index_scopes(loc: LocateResult) -> tuple[tuple[str, str], ...]:
     return tuple(out)
 
 
+def _resolve_store(
+    store_root: str | Path | None,
+) -> tuple[Path, IndexResult | None, tuple[str, ...]]:
+    """`(root, refusal, stamp)` — ONE decision site for "which store does recon read?".
+
+    `store_root=None` is the DEFAULT resolution and is REFUSED when the store
+    carries no snapshot stamp: an undateable store is exactly what the frozen
+    pre-cutover mirror is, and serving it silently is the defect. A store passed
+    EXPLICITLY is the caller naming a directory — every test in this repo, and
+    any operator pointing at a snapshot — and stays permissive.
+
+    The refusal is an `IndexResult`, not an exception, because `recon` has four
+    other sections to print and none of them depend on the index.
+
+    🔴 THE STAMP IS RETURNED BECAUSE THE REFUSAL DOES NOT COVER STALENESS. It
+    fires on an UNDATEABLE store only; a cache stamped three days ago is served,
+    correctly and in full — and for one round this file served it with no
+    freshness field anywhere in the text brief, which is the same shape as the
+    defect this module exists to kill, one layer up. The stamp is read for an
+    EXPLICIT store too: `--store <path>` is permissive about the refusal, not a
+    request to hide a date the directory is carrying.
+    """
+    resolved = _read_store.resolve_read_store(store_root)
+    if store_root is not None or resolved.stamped:
+        return resolved.root, None, tuple(resolved.stamp or ())
+    return resolved.root, IndexResult(
+        INDEX_UNSTAMPED,
+        detail=(
+            f"the index could not be read: {resolved.reason}, so {resolved.root} cannot "
+            f"say how fresh it is and was NOT served. Run `{_read_store.REMEDY}` and "
+            f"re-run, or pass --store <path>. Nothing was checked — this is not "
+            f"'nothing recorded'."
+        ),
+    ), ()
+
+
+#: Prefix on `Brief.store_root` when the store was resolved but NOT read. It is
+#: not decoration: without it the field emits a directory nobody opened, and the
+#: whole point of the field is to say which store the brief's index came from.
+NOT_READ_PREFIX = "NOT READ"
+
+
+def brief_store_root(resolved: str | Path, refusal: "IndexResult | None") -> str:
+    """The value `Brief.store_root` carries — ONE spelling, for one question.
+
+    On a successful resolution it is the resolved root and nothing else, so a
+    consumer can use it as a path. On a refusal it names the path AND says it
+    was not read, because a bare path here is a claim that the brief read it.
+    """
+    if refusal is None:
+        return str(resolved)
+    return f"{NOT_READ_PREFIX} ({refusal.status}) — {resolved}"
+
+
 def read_index(
     loc: LocateResult | str | None,
     service: str,
     *,
-    store_root: str | Path = DEFAULT_STORE_ROOT,
+    store_root: str | Path | None = None,
 ) -> IndexResult:
     """Front-load the curated recall — through `subsystem_recall`, not a `cat`.
 
@@ -831,7 +929,24 @@ def read_index(
 
     Accepts a `LocateResult` (the real caller) or a bare repo path (tests and any
     caller that already knows the repo).
+
+    `store_root=None` resolves the host-local read store and refuses an unstamped
+    one — see `_resolve_store`. Resolved once here so the multi-candidate loop
+    below cannot ask a different store per candidate.
+
+    🔴 THIS GUARD IS FOR **DIRECT** CALLERS ONLY, AND THAT IS WHY IT NEEDS ITS OWN
+    TEST. `recon` resolves the store itself (it has to, to report which store the
+    brief read) and hands this function an already-resolved `Path`, so nothing
+    reached through `recon` ever takes this branch. It went from covered to
+    uncovered the moment `recon` started resolving: a mutant deleting these two
+    lines SURVIVED the whole suite, because every test that had exercised the
+    branch now went through `recon`. `read_index` is exported, so the branch is
+    live surface, not dead code — it is pinned by
+    `TestServiceReconDegradesGracefully::test_read_index_*` rather than by luck.
     """
+    store_root, refusal, _stamp = _resolve_store(store_root)
+    if refusal is not None:
+        return refusal
     if isinstance(loc, LocateResult):
         candidates = index_scopes(loc)
         if not candidates:
@@ -898,7 +1013,7 @@ def _read_index_one(
     owner: str,
     service: str,
     *,
-    store_root: str | Path = DEFAULT_STORE_ROOT,
+    store_root: str | Path | None = None,
     basis: str = OWNER_BASIS,
     scope: str | None = None,
 ) -> IndexResult:
@@ -907,7 +1022,17 @@ def _read_index_one(
 
     `scope` is accepted already-derived: the loop needs it to de-duplicate, and
     deriving it twice would run `git rev-parse` twice per candidate.
+
+    `store_root=None` goes through the SAME `_resolve_store` the loop above uses,
+    for the benefit of a direct caller. The loop always passes a resolved root,
+    so the second call makes no second DECISION (it re-reads that directory's
+    stamp and discards it; only `recon` renders one) — which means, exactly as in
+    `read_index`, that this branch is reachable ONLY by a direct caller and must
+    be pinned by a test that is one.
     """
+    store_root, refusal, _stamp = _resolve_store(store_root)
+    if refusal is not None:
+        return refusal
     if scope is None:
         scope, failure = _scope_of(owner)
         if failure is not None:
@@ -1249,7 +1374,7 @@ def recon(
     service: str,
     *,
     repos: Sequence[str] = (),
-    store_root: str | Path = DEFAULT_STORE_ROOT,
+    store_root: str | Path | None = None,
     env: dict[str, str] | None = None,
     cwd: str | Path | None = None,
     live: bool = False,
@@ -1263,7 +1388,21 @@ def recon(
     """Locate → index → config → git log (→ live, opt-in). One process, one brief."""
     roots = search_roots(repos, env=env, cwd=cwd)
     loc = locate(service, roots, file_cap=file_cap)
-    idx = read_index(loc, service, store_root=store_root)
+    # 🔴 RESOLVED HERE, ONCE, so the BRIEF can report which store it read. The
+    # previous version passed the caller's argument straight through and then
+    # stringified it into `Brief.store_root` — which rendered `"None"` for the
+    # default, i.e. the field that answers "which store did this read?" answered
+    # with the sentinel that means "work it out". `read_index` below receives an
+    # already-resolved Path, so its own `_resolve_store` cannot make a second
+    # DECISION — the DEFAULT is resolved exactly once per recon. (It does re-read
+    # that directory's stamp, which is a cheap `open` of one file and not a
+    # second answer: the brief renders the stamp this call returns.)
+    resolved_root, store_refusal, store_stamp = _resolve_store(store_root)
+    idx = (
+        store_refusal
+        if store_refusal is not None
+        else read_index(loc, service, store_root=resolved_root)
+    )
     cfg = config_for(loc, file_limit=file_limit, knob_limit=knob_limit)
     log = git_log(loc, limit=log_limit)
     lv = live_state(cfg, enabled=live, context=context, namespace=namespace)
@@ -1293,7 +1432,10 @@ def recon(
             f"directories, or a name that is too broad — the located list says which."
         )
     return Brief(service=service, token=loc.token, locate=loc, index=idx, config=cfg,
-                 git=log, live=lv, store_root=str(store_root), notes=tuple(notes))
+                 git=log, live=lv,
+                 store_root=brief_store_root(resolved_root, store_refusal),
+                 store_stamp=store_stamp,
+                 notes=tuple(notes))
 
 
 # --- Rendering -----------------------------------------------------------------
@@ -1366,6 +1508,11 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
     # indistinguishable from "I asked one scope out of three".
     checked = (f" — checked {len(i.scopes_checked)} scope(s): "
                + ", ".join(i.scopes_checked)) if i.scopes_checked else ""
+    # 🔴 WHERE THE FRESHNESS GOES IN. Remembered here, emitted after whichever
+    # branch below runs, so the stamp sits directly under the `index:` line on
+    # EVERY branch rather than on the one someone remembered to edit. A `HIT`
+    # with no date beside it reads as current, whatever its cache's age.
+    index_header_at = len(L)
     if i.status == "hit":
         sens = f" sensitivity={i.sensitivity}" if i.sensitivity else ""
         L.append(f"index: {i.scope}/{i.ref} — HIT (from index){sens}{via}")
@@ -1426,6 +1573,10 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
                  + via
                  + (f" — {i.detail}" if i.detail else "")
                  + checked)
+    # Unparsed, one field per line, and NO AGE COMPUTED — `subsystem_recall`
+    # renders the same lines with the same prefix (`_read_store.stamp_header` is
+    # the one spelling) and `cairn.cache_age` owns the arithmetic.
+    L[index_header_at + 1:index_header_at + 1] = _read_store.stamp_header(b.store_stamp)
 
     # --- config --------------------------------------------------------------
     L.append("")
@@ -1492,6 +1643,9 @@ def brief_json(b: Brief) -> dict:
         "service": b.service,
         "token": b.token,
         "store_root": b.store_root,
+        # Same key as `subsystem_recall --json`: one name for one fact, so a
+        # consumer reading both tools does not need two spellings of "how fresh".
+        "read_store_stamp": list(b.store_stamp),
         "notes": list(b.notes),
         "exit_code": b.exit_code,
         "locate": {
@@ -1555,7 +1709,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("service", help="the subsystem to recon (normalized like an index ref)")
     p.add_argument("--repo", action="append", default=[],
                    help="a search root; repeatable. Default: the $HOMELAB/$DATAPACKET handles + cwd.")
-    p.add_argument("--store", default=str(DEFAULT_STORE_ROOT), help="index store root")
+    # 🔴 `None`, NOT a baked path. `None` IS the "resolve the host-local read
+    # store, and refuse it if it cannot date itself" case; any literal default
+    # here would be a second copy of a path `subsystem_read_store` already owns,
+    # and the old literal was the FROZEN pre-cutover mirror.
+    p.add_argument("--store", default=None,
+                   help="index store root (default: the cairn-synced read cache)")
     p.add_argument("--live", action="store_true", help="also probe the cluster (read-only)")
     p.add_argument("--context", default=None, help="kube context; --live never infers one")
     p.add_argument("--namespace", default=None, help="override the namespace found in the manifests")
