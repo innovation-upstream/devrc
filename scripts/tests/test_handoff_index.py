@@ -2650,6 +2650,32 @@ class TestScopedSilentZeroGuard:
         assert "utterly-absent (no-such-directory)" in out
         assert "the ones listed above are fine" in out
 
+    def test_the_UNMEASURABLE_sentence_reads_the_DENOMINATOR_not_the_failures(self):
+        """🔴 THE MUTANT THIS EXISTS TO KILL, AND WHY IT NEEDED ITS OWN TEST.
+        Swapping the renderer's `len(outcome.targets)` back to
+        `len(outcome.unmeasured)` SURVIVED a full green sweep driven through
+        `main`: `run_search` only emits `unmeasured-corpus` when the two are
+        EQUAL, so every fixture that reaches this branch through the classifier
+        makes the two constants coincide — exactly the blind spot
+        `claude/RULES.md` describes, where a fixture can only ever produce the
+        value the assertion names.
+
+        The renderer is its own function with its own contract, so it is reached
+        DIRECTLY with an outcome the classifier would never build: 3 repos
+        pointed at, 2 unmeasured. The right sentence names 3. Reading `unmeasured`
+        prints 2 — the F3 defect, in the one place it is still spellable."""
+        outcome = hs.SearchOutcome(
+            query="zarfwidget",
+            stats=hi.IndexStats(indexed_docs=0, indexed_sections=0),
+            hits=(), status="unmeasured-corpus", backend="memory",
+            unmeasured=(("plimforth", "no-such-directory"),
+                        ("marganser", "no-mainline-ref")),
+            targets=("plimforth", "marganser", "trundlebore"),
+        )
+        text = hs.render(outcome)
+        assert "all 3 repo(s) this run was pointed at" in text
+        assert "all 2 repo(s)" not in text
+
     def test_the_json_surface_carries_the_denominator(self, tmp_path, capsys):
         """The count fix has to reach the MACHINE surface too, or a consumer
         recomputes the same wrong ratio from `unmeasured` alone — which is exactly
