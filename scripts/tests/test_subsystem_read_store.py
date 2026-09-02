@@ -31,6 +31,7 @@ before this file was written: neither shells the CLI, neither calls `rc.main`.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -49,7 +50,7 @@ SCOPE = "workbench-cfg"
 
 # The stamp `cairn sync` actually writes, field-for-field. Values are synthetic
 # but the SHAPE is the writer's — a stamp missing `coverage` or `entries` would
-# be a different artifact and would not exercise the verbatim render.
+# be a different artifact and would not exercise the multi-line header render.
 STAMP_LINES = (
     "synced=1788363567",
     "revision=r-fixture-9",
@@ -110,12 +111,156 @@ def repointed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 # =============================================================================
+# THE WIRE CONSTANTS. One ledger, because this defect kept coming back.
+# =============================================================================
+#
+# 🔴 THIS CLASS EXISTS BECAUSE THE SAME FINDING RECURRED FOUR TIMES.
+# `SYNC_STAMP`, then `REMEDY` and `DEFAULT_CACHE_ROOT`, then `NOT_READ_PREFIX`
+# and `INDEX_UNSTAMPED` — every one asserted only as `<constant> in <output>`,
+# i.e. the constant agreeing with itself, and every one SURVIVING a rename
+# against a fully green suite. Fixing them one at a time is what let the fourth
+# happen: the F1 fix introduced `NOT_READ_PREFIX` unpinned in the same session
+# that pinned the other three.
+#
+# So the remedy is a LEDGER rather than another one-off pin. Each entry maps a
+# constant to the literal it must equal, and `test_the_ledger_is_two_way` fails
+# when the new module grows a string constant nobody put here — which is the
+# only part that can stop the fifth.
+#
+#: `(module, attribute, the literal it MUST equal)`.
+WIRE_CONSTANTS: tuple[tuple[object, str, str], ...] = (
+    # A FILENAME on disk, written by a deployed `cairn sync`.
+    (rs, "SYNC_STAMP", ".sync-stamp"),
+    # A COMMAND a human is told to type, by the refusal and by two SKILL.mds.
+    (rs, "REMEDY", "cairn sync"),
+    # A STATUS other code and `analyze-service/SKILL.md` match on by name.
+    (srec, "INDEX_UNSTAMPED", "store-unstamped"),
+    # A PREFIX a JSON consumer parses to tell "read" from "refused".
+    (srec, "NOT_READ_PREFIX", "NOT READ"),
+)
+
+#: Module-level `str` constants of `subsystem_read_store` that are NOT wire
+#: facts. Enumerated, not pattern-matched: an unlisted one is a wire fact by
+#: default, which is the direction that fails safe.
+NOT_WIRE_FACTS: frozenset[str] = frozenset()
+
+
+class TestTheWireConstants:
+    """Every string that crosses a boundary, pinned to its literal."""
+
+    @pytest.mark.parametrize(
+        "module, name, literal",
+        [(m, n, lit) for m, n, lit in WIRE_CONSTANTS],
+        ids=[f"{n}" for _m, n, _lit in WIRE_CONSTANTS],
+    )
+    def test_the_constant_equals_its_literal(self, module, name, literal) -> None:
+        """The literal is written out HERE, so the assertion cannot be satisfied
+        by the constant being consistent with itself."""
+        assert getattr(module, name) == literal
+
+    def test_the_ledger_is_two_way_over_the_new_module(self) -> None:
+        """🔴 THE HALF THAT STOPS THE NEXT ONE.
+
+        Pinning four constants does nothing about the fifth. This enumerates
+        every module-level `str` constant in `subsystem_read_store` — the module
+        this change introduced, so its whole surface is in scope — and requires
+        each to be either in `WIRE_CONSTANTS` or explicitly excused. Adding one
+        without a literal pin fails here.
+
+        `service_recon` is deliberately NOT swept: it predates this change and
+        carries many string constants that are not wire facts, so a sweep there
+        would either be noise or need an exclusion list long enough to hide a
+        real omission. Its two are pinned by name above.
+        """
+        declared = {
+            name
+            for name, value in vars(rs).items()
+            if name.isupper() and isinstance(value, str) and not name.startswith("_")
+        }
+        pinned = {n for m, n, _lit in WIRE_CONSTANTS if m is rs}
+        assert declared - pinned - NOT_WIRE_FACTS == set(), (
+            f"`subsystem_read_store` grew string constant(s) "
+            f"{sorted(declared - pinned - NOT_WIRE_FACTS)} with no literal pin. "
+            f"Add them to WIRE_CONSTANTS, or to NOT_WIRE_FACTS with a reason."
+        )
+        assert pinned <= declared, (
+            f"WIRE_CONSTANTS names {sorted(pinned - declared)}, which "
+            f"`subsystem_read_store` no longer declares."
+        )
+
+    def test_the_analyze_service_step_does_NOT_chain_the_sync_with_double_ampersand(
+        self,
+    ) -> None:
+        """🔴 `&&` HERE DELETES THE WHOLE BRIEF, AND THE PROSE PROMISES OTHERWISE.
+
+        `cairn sync` exits 4 whenever the pod is unreachable but a usable cache
+        survives — that is `cmd_sync`'s stated contract, not an edge case. Under
+        `&&` that non-zero short-circuits and `service_recon.py` never runs, so
+        `/analyze-service` emits NOTHING during an outage, exactly when the
+        stamped cache would have served the index at full fidelity. Eight lines
+        below, the same file promises "a failed sync costs you the index block,
+        never the brief".
+
+        Pinned on the COMMAND, because nothing else could: the REMEDY test only
+        requires the substring `cairn sync`, which `&&` satisfies.
+        """
+        doc = (ROOT / "claude/skills/analyze-service/SKILL.md").read_text(encoding="utf-8")
+        step = [
+            ln for ln in doc.splitlines()
+            if rs.REMEDY in ln and "service_recon.py" in ln
+        ]
+        assert len(step) == 1, f"expected one step-1 command line, found {step}"
+        assert "&&" not in step[0], (
+            f"step 1 chains the sync with `&&`: {step[0]!r}. A failed sync then "
+            f"suppresses the entire recon. Use `;`."
+        )
+        assert f"{rs.REMEDY};" in step[0], (
+            f"step 1 must separate the two commands with `;`: {step[0]!r}"
+        )
+        # …and the promise the separator has to keep is still there to keep.
+        assert "costs you the index block, never the brief" in doc
+
+    def test_cairns_cache_default_FOLLOWS_a_repointed_resolver(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 THE WRITER MUST MOVE WITH THE READER.
+
+        `scripts/cairn` used to do `from subsystem_read_store import
+        DEFAULT_CACHE_ROOT as DEFAULT_CACHE`, which binds at IMPORT — the exact
+        spelling `read_store_root`'s docstring warns defeats repointing. Nothing
+        depended on it yet, so the hazard was invisible: a future cairn test
+        repointing the resolver would have moved the reader and left cairn
+        writing to the operator's real cache. Asserted behaviourally, through
+        cairn's own parser, rather than by grepping for the import shape.
+        """
+        path = ROOT / "scripts" / "cairn"
+        assert "DEFAULT_CACHE_ROOT as DEFAULT_CACHE" not in path.read_text(encoding="utf-8")
+        # `scripts/cairn` has no `.py` suffix, so `spec_from_file_location`
+        # returns None. Same loader-less exec the cairn suites use.
+        spec = importlib.util.spec_from_loader(
+            "cairn_cache_default_probe", loader=None, origin=str(path)
+        )
+        module = importlib.util.module_from_spec(spec)
+        module.__file__ = str(path)
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
+        monkeypatch.setattr(module._read_store, "DEFAULT_CACHE_ROOT", tmp_path / "moved")
+        assert module.build_parser().parse_args(["sync"]).cache == tmp_path / "moved"
+
+    def test_the_status_literal_matches_the_skill_prose_that_quotes_it(self) -> None:
+        """`analyze-service/SKILL.md` hardcodes `store-unstamped` in prose. That
+        is the same code/prose drift closed for `REMEDY`, so it gets the same
+        cross-check rather than a second copy of the fact."""
+        doc = (ROOT / "claude/skills/analyze-service/SKILL.md").read_text(encoding="utf-8")
+        assert f"index: {srec.INDEX_UNSTAMPED}" in doc
+
+
+# =============================================================================
 # The resolver itself.
 # =============================================================================
 
 
 class TestTheResolver:
-    def test_a_stamped_store_reports_its_stamp_verbatim(self, tmp_path: Path) -> None:
+    def test_a_stamped_store_reports_its_stamp_UNPARSED(self, tmp_path: Path) -> None:
         store = _store(tmp_path, stamped=True)
         got = rs.resolve_read_store(store)
         assert got.stamped is True
@@ -382,7 +527,7 @@ class TestTheCliRefusesAnUnstampedDefaultStore:
 
 
 class TestAStampedDefaultStoreCarriesItsFreshness:
-    def test_the_header_carries_every_stamp_line_verbatim(
+    def test_the_header_carries_every_stamp_line_UNPARSED(
         self, tmp_path: Path, repointed, capsys
     ) -> None:
         """🔴 (b) VERBATIM, and in the HEADER — beside `store:` and `store host:`.
@@ -432,7 +577,7 @@ class TestAStampedDefaultStoreCarriesItsFreshness:
         for line in STAMP_LINES:
             assert f"  stamp: {line}" in out, line
 
-    def test_the_json_payload_carries_the_stamp_verbatim(
+    def test_the_json_payload_carries_the_stamp_UNPARSED(
         self, tmp_path: Path, repointed, capsys
     ) -> None:
         """A `--json` consumer has no header block, so without this it is the

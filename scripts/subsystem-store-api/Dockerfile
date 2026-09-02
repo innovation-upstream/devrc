@@ -23,8 +23,9 @@
 # via `seed.sh`.
 #
 # 🔴 DO NOT TRIM A `COPY` BY EYE, AND DO NOT COUNT THEM HERE. This comment used
-# to say "only four .py files"; there are seven, and a stale count is exactly
-# what a maintainer consults before deciding a line is dead. The authority is
+# to say "only four .py files" and was wrong; a first correction replaced the
+# number with a different number, which is the same artefact one module later.
+# There is no count in this file any more, on purpose. The authority is
 # `test_subsystem_store_api.py::test_the_image_copies_every_module_it_needs`,
 # which computes the TRANSITIVE closure of local `scripts/lib` imports from
 # `server.py`'s entrypoint and asserts BOTH this file and the (allowlist-shaped)

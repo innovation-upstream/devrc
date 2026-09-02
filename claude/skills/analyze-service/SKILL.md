@@ -14,8 +14,17 @@ Input: `$ARGUMENTS`. Split it into:
 ## Step 1 — run the recon script. One call, not six.
 
 ```
-cairn sync && python3 ~/workspace/devrc/scripts/lib/service_recon.py <service>
+cairn sync; python3 ~/workspace/devrc/scripts/lib/service_recon.py <service>
 ```
+
+🔴 **`;` — NOT `&&`. The separator is load-bearing and `&&` silently deletes the
+whole brief.** `cairn sync` exits **4** whenever the pod is unreachable but a
+usable cache survives (that is `sync`'s contract: its job is to REFRESH, so a
+stale cache is a failed refresh). Under `&&` that non-zero short-circuits, the
+recon never runs, and `/analyze-service` produces **nothing at all** — during an
+outage, when the stamped cache would have served the index block at full
+fidelity. The paragraph below promises "a failed sync costs you the index block,
+never the brief"; `;` is what makes that true.
 
 It performs, in ONE process: resolve the search roots → locate the service →
 read the index (via `subsystem_recall`, the store's one reader) → extract the
