@@ -9,8 +9,9 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Ranks 1–8, 10, 13, 14, 15 and 16 are ✅ DONE. Ranks 11, 12 and 17 are OPEN** (12 is clawgate task
-#463 and explicitly NOT ours; 17 is new this session and is CI infrastructure, not this feature).
+**Ranks 1–8, 10, 12, 13, 14, 15 and 16 are ✅ CLOSED. Ranks 11 and 17 are OPEN** (17 is new this
+session and is CI infrastructure, not this feature). 🔴 **Rank 12 closed as REFUTED, not fixed** —
+read its entry before believing the word "complete" anywhere near it.
 The live-refresh work (`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as 0.8.21**.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.**
@@ -303,12 +304,29 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     drawer's `open` — mutant H is asserted to PASS, so the spec will not red when someone fixes it;
     but a listener that SWALLOWS the summary's click is mutant PD, which it DOES red. Read both.
     forcing: none
-12. **NOT MINE, RECORDED SO IT IS NOT LOST: 24% of the tasks board cannot be scrolled to — clawgate
-    task #463.** Measured live on 0.8.19 at 1280x720: `scrollHeight` 21,997 vs `innerHeight` 720;
-    at maxScroll the last card sits at `rect.top +6,510`, `inViewport:false` — **60 of 248 cards
-    unreachable**. Full detail in the `clawgate` subsystem-index entry.
-    forcing: incident — a shipped, measured defect on the version live on both hosts, filed as
-    task #463 by the session that found it.
+12. ✅ **CLOSED AS REFUTED 2026-09-01 17:02Z — there was never a defect. NOT MINE, and NOT A FIX.**
+    Clawgate task #463 reads `status: complete`, and 🔴 **`complete` here does NOT mean the bug was
+    fixed — the board has four statuses and none of them is *invalid*/*wontfix*.** Its closing
+    comment says so verbatim: *"there is no fix, and there must not be one."*
+    **What the original 60-of-248 measurement actually counted:** 59 of the cards sit inside the
+    deliberately collapsed `Done` `<details>`, and 3 are final-screenful cards fully visible at the
+    bottom of the viewport. 59 + 3 = 62, the exact count, no residue. Chromium implements
+    `::details-content` with **`content-visibility: hidden`** (measured via
+    `getComputedStyle(d, '::details-content')`, not assumed), so descendants of a CLOSED `<details>`
+    still return non-zero `getBoundingClientRect()` — any script enumerating
+    `article[id^="task-"]` and comparing rects counts collapsed cards as laid out. The count was
+    honest; the SET was wrong. `document.scrollHeight` was correct all along.
+    `trulyOffscreenAtMaxScroll` is **0** at both 1280x720 and 390x844.
+    🔴 **Criterion 2 of that task is a TRAP — do not attempt it.** *"The count of cards with
+    document-y beyond maxScroll is 0"* is unsatisfiable by any correct scrollable page: the final
+    screenful always has `top > maxScroll` while being fully visible. An agent picking it up would
+    "satisfy" it by expanding the container, paginating, or deleting content — damage in service of
+    a bar a healthy system cannot clear. **Ask what a healthy system scores before writing a bar.**
+    The one REAL finding was split out as clawgate #468, fixed and deployed in 0.8.21 (and #468's
+    own recorded premise was wrong too — `scrollIntoView` does not auto-expand a closed `<details>`,
+    so it repaired a live failure rather than pinning a browser detail).
+    forcing: none — closed. Left in place, not deleted, because the refutation is the artifact: the
+    measurement that filed it is reproducible and still reads as a defect to anyone who repeats it.
 13. ✅ **DONE 2026-09-01.** `--slug-for` discarded a lettered sub-rank instead of rejecting it, so
     `8c`, `8d` and every lettered sub-rank of every rank minted ONE slug — and the collision was
     reported as **rc 12 “ALREADY YOURS, carry on”**, the one answer that means PROCEED. Measured
