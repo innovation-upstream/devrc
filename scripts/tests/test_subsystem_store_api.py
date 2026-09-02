@@ -62,6 +62,7 @@ import json
 from testlib import hermetic_git  # noqa: E402
 from testlib import mockbin  # noqa: E402
 from testlib import public_ip_scan  # noqa: E402
+from testlib import store_siting  # noqa: E402
 import io
 import os
 import re
@@ -73,7 +74,6 @@ import tarfile
 import secrets
 import subprocess
 import sys
-import tempfile
 import textwrap
 import threading
 import time
@@ -337,92 +337,21 @@ def _entry(
 # 🔴 It does NOT weaken `TestAHungRoundTripSAYSWhichSideBlocked`. That class does not
 # depend on the real filesystem being slow: it monkeypatches `_fsync_dir` to stall
 # deliberately, so it exercises the same code path wherever the store lives.
-def _mount_fstype(path: Path) -> str | None:
-    """The filesystem type backing `path`, from /proc/mounts — or None.
-
-    Resolved by LONGEST matching mount point, not by string prefix: `/dev/shm`
-    and `/dev` are both prefixes of a path under the former, and taking the first
-    hit would report `devtmpfs` for a `tmpfs` mount.
-    """
-    try:
-        target = path.resolve()
-        entries = Path("/proc/mounts").read_text().splitlines()
-    except OSError:
-        return None
-    best: tuple[int, str] | None = None
-    for line in entries:
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        mount_point, fstype = parts[1], parts[2]
-        try:
-            mp = Path(mount_point).resolve()
-        except OSError:
-            continue
-        if target == mp or mp in target.parents:
-            depth = len(mp.parts)
-            if best is None or depth > best[0]:
-                best = (depth, fstype)
-    return None if best is None else best[1]
-
-
-def _tmpfs_dir() -> Path | None:
-    """A writable tmpfs directory for the store, or None to use the disk.
-
-    Three conditions, all required, because each fails independently in a real
-    container: the candidate is a directory, /proc/mounts says the filesystem
-    backing it is `tmpfs`, and an actual write succeeds. 🔴 The PATH is never the
-    test — `/dev/shm` is tmpfs only by convention and a container may mount
-    anything there, so trusting the name would be a guard that passes while the
-    hazard (a disk-backed store) is present in a different spelling.
-    """
-    for candidate in (os.environ.get("DEVRC_TEST_TMPFS"), "/dev/shm"):
-        if not candidate:
-            continue
-        path = Path(candidate)
-        try:
-            if not path.is_dir():
-                continue
-            if _mount_fstype(path) != "tmpfs":
-                continue
-            probe = path / f".devrc-tmpfs-probe-{os.getpid()}"
-            probe.write_bytes(b"probe")
-            probe.unlink()
-        except OSError:
-            continue
-        return path
-    return None
-
-
 @pytest.fixture
 def store(tmp_path: Path) -> Iterator[Path]:
     """A synthetic store: two populated scopes, one empty, one all-malformed."""
-    base = _tmpfs_dir()
-    holder: Path | None = None
-    if base is None:
-        root = tmp_path / "store"
-    else:
-        # tmp_path is auto-cleaned by pytest; a tmpfs directory is not, and tmpfs
-        # is RAM — leaking one per test would hold memory for the whole run.
-        holder = Path(tempfile.mkdtemp(prefix="devrc-store-", dir=str(base)))
-        root = holder / "store"
-    (root / SCOPE).mkdir(parents=True)
-    (root / OTHER_SCOPE).mkdir(parents=True)
-    (root / EMPTY_SCOPE).mkdir(parents=True)
-    (root / BROKEN_SCOPE).mkdir(parents=True)
-    (root / SCOPE / "thing-alpha.md").write_text(_entry("thing-alpha", SCOPE))
-    (root / OTHER_SCOPE / "thing-beta.md").write_text(
-        _entry("thing-beta", OTHER_SCOPE, nuance=OTHER_NUANCE)
-    )
-    # No front matter at all: the loader collects it as MALFORMED.
-    (root / BROKEN_SCOPE / "thing-gamma.md").write_text("no front matter here\n")
-    try:
+    with store_siting.store_root(tmp_path) as root:
+        (root / SCOPE).mkdir(parents=True)
+        (root / OTHER_SCOPE).mkdir(parents=True)
+        (root / EMPTY_SCOPE).mkdir(parents=True)
+        (root / BROKEN_SCOPE).mkdir(parents=True)
+        (root / SCOPE / "thing-alpha.md").write_text(_entry("thing-alpha", SCOPE))
+        (root / OTHER_SCOPE / "thing-beta.md").write_text(
+            _entry("thing-beta", OTHER_SCOPE, nuance=OTHER_NUANCE)
+        )
+        # No front matter at all: the loader collects it as MALFORMED.
+        (root / BROKEN_SCOPE / "thing-gamma.md").write_text("no front matter here\n")
         yield root
-    finally:
-        if holder is not None:
-            # Best-effort: a tmpfs leak costs RAM for the run, but failing the
-            # teardown would turn a passing test red for a cleanup problem.
-            shutil.rmtree(holder, ignore_errors=True)
 
 
 # RFC 5737 TEST-NET-3, and three DISTINCT addresses: a test that used one
@@ -10519,22 +10448,30 @@ def _build_store(root: Path, scopes: "dict[str, str]", *, malformed: str = "") -
 
 
 @pytest.fixture
-def scoped_store(tmp_path: Path) -> Path:
+def scoped_store(tmp_path: Path) -> Iterator[Path]:
     """Three populated scopes, and the malformed row lives in a DENIED one.
 
     The malformed placement is the point: `malformed_elsewhere` is rendered on
     EVERY status, so a reject sitting in a scope the caller cannot name is the
     channel that leaks without any miss ever happening.
+
+    🔴 SITED off the contended disk like `store` above, and it matters MORE than
+    that one: this fixture feeds ~110 `running(scoped_store, …)` sites, i.e. most
+    of the in-request-fsync population in this file, including the whole
+    concurrent-append and If-Match/revision blocks. It was missed when #1211 sited
+    `store` alone — the same "fixed one call site of N" error that PR was written
+    to correct, repeated one level down inside the file it had just fixed.
     """
-    return _build_store(
-        tmp_path / "store",
-        {
-            ALLOW_SCOPE: KELP_NUANCE,
-            DENY_SCOPE: QUARTZ_NUANCE,
-            THIRD_SCOPE: LANTERN_NUANCE,
-        },
-        malformed=DENY_SCOPE,
-    )
+    with store_siting.store_root(tmp_path) as root:
+        yield _build_store(
+            root,
+            {
+                ALLOW_SCOPE: KELP_NUANCE,
+                DENY_SCOPE: QUARTZ_NUANCE,
+                THIRD_SCOPE: LANTERN_NUANCE,
+            },
+            malformed=DENY_SCOPE,
+        )
 
 
 class TestScopedTokenRowGuards:
@@ -17853,16 +17790,16 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         # /dev/shm is tmpfs while /dev is devtmpfs, and both are prefixes of a
         # path under the former. A first-match-wins scan reports devtmpfs and the
         # store then silently lands on the wrong filesystem.
-        if _mount_fstype(Path("/dev")) is None:
+        if store_siting.mount_fstype(Path("/dev")) is None:
             pytest.skip("no /proc/mounts on this platform")
-        assert _mount_fstype(Path("/dev/shm")) == "tmpfs", (
+        assert store_siting.mount_fstype(Path("/dev/shm")) == "tmpfs", (
             "/dev/shm must resolve to its OWN mount, not to /dev's"
         )
 
     def test_a_disk_path_is_NOT_reported_as_tmpfs(self):
         # The negative control. Without it, a helper hardcoded to return "tmpfs"
         # would satisfy every other assertion here.
-        fstype = _mount_fstype(Path("/"))
+        fstype = store_siting.mount_fstype(Path("/"))
         assert fstype is not None and fstype != "tmpfs", (
             f"root filesystem reported as {fstype!r} — if this box really does run "
             "root on tmpfs the siting logic is untestable here, not wrong"
@@ -17876,7 +17813,7 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         # This is the case that makes `/dev/shm` being conventionally-tmpfs safe
         # to rely on — we do not rely on it.
         monkeypatch.setenv("DEVRC_TEST_TMPFS", str(tmp_path))
-        got = _tmpfs_dir()
+        got = store_siting.tmpfs_dir()
         assert got != tmp_path, (
             "a disk-backed directory was accepted as tmpfs — the type check is "
             "not doing the work its docstring claims"
@@ -17889,20 +17826,28 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         # current behaviour, never fail the suite.
         missing = tmp_path / "definitely-not-here"
         monkeypatch.setenv("DEVRC_TEST_TMPFS", str(missing))
-        got = _tmpfs_dir()
-        assert got is None or _mount_fstype(got) == "tmpfs"
+        got = store_siting.tmpfs_dir()
+        assert got is None or store_siting.mount_fstype(got) == "tmpfs"
 
     def test_the_store_fixture_ACTUALLY_lands_on_tmpfs_when_one_exists(
         self, store: Path
     ):
-        # 🔴 The positive control for the whole change. If `_tmpfs_dir()` finds a
+        # 🔴 The positive control for the whole change. If `store_siting.tmpfs_dir()` finds a
         # tmpfs, the store MUST be on it — otherwise the fixture fell back and the
         # fix is inert while this file stays green.
-        available = _tmpfs_dir()
+        available = store_siting.tmpfs_dir()
         if available is None:
-            pytest.skip("no tmpfs available here; the fallback path is exercised")
-        assert _mount_fstype(store) == "tmpfs", (
-            f"store landed on {_mount_fstype(store)!r} while a tmpfs at "
+            pytest.skip(
+                # 🔴 `tmpfs_dir()` returning None gained a SECOND cause when the
+                # free-space floor landed, and this message named only the first.
+                # In the environment that matters this skip is the only signal,
+                # so the whole fix going inert must not read as "no tmpfs here".
+                "no USABLE tmpfs: absent, not tmpfs, under _MIN_FREE_BYTES "
+                "free, or unwritable. The fallback path is exercised. Check "
+                "WHICH cause applies before reading this as a bare absence."
+            )
+        assert store_siting.mount_fstype(store) == "tmpfs", (
+            f"store landed on {store_siting.mount_fstype(store)!r} while a tmpfs at "
             f"{available} was available — the fix is inert"
         )
 
@@ -17916,4 +17861,208 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         assert (store / EMPTY_SCOPE).is_dir()
         assert (store / BROKEN_SCOPE / "thing-gamma.md").read_text().startswith(
             "no front matter"
+        )
+
+
+class TestTheSitingRULESThemselvesArePinned:
+    """🔴 THE THREE FIXES OF ROUND 2 ARE PINNED HERE — NOT every guard in the module.
+
+    An earlier header read "EVERY FIX IN THIS MODULE HAS A TEST" and that is
+    FALSE: dropping the write probe, the `is_dir()` check, or the tmpfs `rmtree`
+    cleanup each still SURVIVES. (That header also carried a passed-count, which
+    the very commit adding tests to this class falsified — a live count in a
+    docstring is stale the moment the class grows, so it is gone rather than
+    re-stated.) The header is what a reader takes away, which is the half that
+    stops anyone looking.
+
+    Audit round 2 ran a battery over the 105 tests that touch `store_siting` and
+    found `>=`→`>`, dropping the free-space floor, and dropping the `mkdtemp`
+    try/except ALL survived — 105 passed each time — while a positive control
+    (fstype check always true) was correctly KILLED. So the selected set could go
+    red on a defect in this module; these three simply were not pinned by anything.
+
+    They are the fixes most likely to be "simplified" back: `>=` reads like a typo
+    against a docstring that says "LONGEST matching mount point", and the floor
+    reads redundant beside the write probe. Each mutation lands the store back on
+    the contended disk with a fully green suite — the exact defect this module
+    exists to remove, arriving through the check meant to prevent it, and showing up
+    in CI as an unattributable flake on somebody else's PR.
+    """
+
+    def _mounts(self, tmp_path: Path, body: str) -> str:
+        table = tmp_path / "mounts"
+        table.write_text(body)
+        return str(table)
+
+    def test_a_SHADOWED_mount_point_reports_the_LAST_entry_not_the_first(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # /proc/mounts is LAST-WINS: when two mounts share a path the later line is
+        # the live filesystem. `depth > best[0]` kept the FIRST at equal depth, so a
+        # disk bind over a tmpfs reported `tmpfs` and the store landed on disk.
+        # This is the mutation that survived round 2; it dies here.
+        monkeypatch.setattr(
+            store_siting,
+            "_MOUNTS_PATH",
+            self._mounts(
+                tmp_path,
+                "tmpfs /dev/shm tmpfs rw 0 0\n"
+                "/dev/sda1 /dev/shm ext4 rw 0 0\n",
+            ),
+        )
+        assert store_siting.mount_fstype(Path("/dev/shm")) == "ext4", (
+            "the shadowing (last) entry must win — with `>` this returns 'tmpfs' "
+            "and a disk-backed bind is silently accepted as tmpfs"
+        )
+
+    def test_the_MIRROR_shadow_also_resolves_to_the_last_entry(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The opposite order must also follow last-wins, or the rule is just a
+        # coincidence that happens to favour one spelling.
+        monkeypatch.setattr(
+            store_siting,
+            "_MOUNTS_PATH",
+            self._mounts(
+                tmp_path,
+                "/dev/sda1 /dev/shm ext4 rw 0 0\ntmpfs /dev/shm tmpfs rw 0 0\n",
+            ),
+        )
+        assert store_siting.mount_fstype(Path("/dev/shm")) == "tmpfs"
+
+    def test_a_genuinely_NESTED_mount_still_resolves_to_the_deepest(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The `>=` change must not break real nesting: distinct paths at different
+        # depths still resolve to the longest match, not to whatever came last.
+        monkeypatch.setattr(
+            store_siting,
+            "_MOUNTS_PATH",
+            self._mounts(
+                tmp_path,
+                # 🔴 `/` LAST, deliberately. Ordered shallowest-first this
+                # fixture cannot tell "longest match" from "last match" —
+                # both rules give the same answer on every line, so a mutant
+                # that drops the depth comparison entirely SURVIVES here. It
+                # was killed only by the round-1 test that reads the real
+                # /proc/mounts, where `/` happens to come after /dev/shm on
+                # this host — and in the nix build sandbox the order is
+                # reversed, so the depth rule was unpinned in the tier the
+                # merge is gated on.
+                "devtmpfs /dev devtmpfs rw 0 0\n"
+                "tmpfs /dev/shm tmpfs rw 0 0\n"
+                "/dev/sda1 /home ext4 rw 0 0\n"
+                "/dev/sda1 / ext4 rw 0 0\n",
+            ),
+        )
+        assert store_siting.mount_fstype(Path("/dev/shm/inner/deeper")) == "tmpfs"
+        assert store_siting.mount_fstype(Path("/dev/null")) == "devtmpfs"
+        assert store_siting.mount_fstype(Path("/etc/passwd")) == "ext4"
+
+    def test_a_tmpfs_UNDER_the_free_space_floor_is_REFUSED(self, monkeypatch):
+        # A five-byte probe passes on a tmpfs with five bytes free; the caller's
+        # real writes then raise ENOSPC, turning a test that would have PASSED on
+        # disk into an error. Driving the floor above any real filesystem is the
+        # hermetic equivalent of filling one.
+        if store_siting.tmpfs_dir() is None:
+            pytest.skip("no usable tmpfs here, so the floor cannot be exercised")
+        monkeypatch.setattr(store_siting, "_MIN_FREE_BYTES", 1 << 60)
+        assert store_siting.tmpfs_dir() is None, (
+            "a tmpfs with less than _MIN_FREE_BYTES free must be refused; without "
+            "the floor this returns the path and the caller dies on ENOSPC"
+        )
+
+    def test_the_floor_is_not_so_high_that_it_refuses_EVERY_tmpfs(self, monkeypatch):
+        # The mirror. A floor that rejects everything is indistinguishable from
+        # having no tmpfs at all — the fix would go inert with the suite green.
+        if store_siting.mount_fstype(Path("/dev/shm")) != "tmpfs":
+            pytest.skip("no tmpfs at /dev/shm on this host")
+        monkeypatch.setattr(store_siting, "_MIN_FREE_BYTES", 0)
+        assert store_siting.tmpfs_dir() is not None
+
+    def test_mkdtemp_REFUSING_falls_back_instead_of_raising(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # mkdtemp sat outside the try, so its OSError propagated rather than
+        # falling back — the candidate can fill or go read-only between the probe
+        # and the call. Dropping the try/except survived round 2's battery.
+        if store_siting.tmpfs_dir() is None:
+            pytest.skip("no usable tmpfs here, so the mkdtemp path is not taken")
+
+        def raiser(*a, **k):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(store_siting.tempfile, "mkdtemp", raiser)
+        with store_siting.store_root(tmp_path) as root:
+            assert tmp_path in root.parents, (
+                f"expected the tmp_path fallback, got {root} — without the "
+                "try/except this raises OSError instead"
+            )
+
+    def test_the_fallback_honours_a_custom_store_NAME(self, tmp_path: Path, monkeypatch):
+        # test_cairn_cli.py passes name="src"; a fallback that hardcoded "store"
+        # would hand it the wrong directory only on hosts without a tmpfs.
+        def raiser(*a, **k):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(store_siting.tempfile, "mkdtemp", raiser)
+        with store_siting.store_root(tmp_path, "src") as root:
+            assert root.name == "src"
+
+    def test_scoped_store_is_ALSO_sited_off_the_disk(self, scoped_store: Path):
+        # The fixture round 2 fixed had no positive control of its own — only the
+        # ratchet, and only for one spelling. It feeds ~110 `running(...)` sites,
+        # i.e. most of the in-request-fsync population in this file.
+        available = store_siting.tmpfs_dir()
+        if available is None:
+            pytest.skip(
+                # 🔴 `tmpfs_dir()` returning None gained a SECOND cause when the
+                # free-space floor landed, and this message named only the first.
+                # In the environment that matters this skip is the only signal,
+                # so the whole fix going inert must not read as "no tmpfs here".
+                "no USABLE tmpfs: absent, not tmpfs, under _MIN_FREE_BYTES "
+                "free, or unwritable. The fallback path is exercised. Check "
+                "WHICH cause applies before reading this as a bare absence."
+            )
+        assert store_siting.mount_fstype(scoped_store) == "tmpfs", (
+            f"scoped_store landed on {store_siting.mount_fstype(scoped_store)!r} "
+            f"while a tmpfs at {available} was available"
+        )
+
+    def test_the_floor_CONSTANT_clears_the_largest_store_this_suite_builds(self):
+        """🔴 ASSERTS THE CONSTANT, NOT A CALL — because the call-based guards CANNOT
+        see a bad value, and a bad value shipped.
+
+        `_MIN_FREE_BYTES` was lowered to 1 MiB for one commit while the largest store
+        this suite builds page-allocates ~1.2 MiB (1,253,376 B), opening an ENOSPC window at
+        1 MiB <= free < ~1.3 MiB. The whole battery stayed green, because:
+
+          * `test_the_floor_is_not_so_high...` monkeypatches `_MIN_FREE_BYTES` to 0
+            before measuring — it overrides the exact variable it claims to bound, so
+            no value of that variable can ever fail it;
+          * `test_a_tmpfs_UNDER_the_free_space_floor_is_REFUSED` skips when
+            `tmpfs_dir()` is None, i.e. its assertion is unreachable precisely when
+            the fix has gone inert.
+
+        Measured: setting the floor to `1 << 60` (every store falls back to the
+        contended disk, the fix fully inert) gave 95 passed, 4 skipped, rc 0.
+
+        This test takes no fixture, monkeypatches nothing and cannot skip, so it holds
+        in the sandbox tier the merge is gated on.
+        """
+        assert store_siting._MIN_FREE_BYTES > store_siting._LARGEST_STORE_BYTES, (
+            f"_MIN_FREE_BYTES ({store_siting._MIN_FREE_BYTES:,}) must exceed the "
+            f"largest store this suite builds ({store_siting._LARGEST_STORE_BYTES:,} "
+            "page-allocated bytes) or a mount that passes the check can still run out "
+            "mid-test. Apparent file sizes understate tmpfs cost ~17x — measure "
+            "page allocation, not st_size."
+        )
+        # And an upper bound, because too HIGH silently disables the whole module.
+        # Generous: this only has to catch an order-of-magnitude mistake, not tune it.
+        # `<`, not `<=`: 64 MiB exactly is the value the message below calls
+        # fatal, and `f_bavail` is never the full mount size anyway.
+        assert store_siting._MIN_FREE_BYTES < 64 * 1024 * 1024, (
+            f"_MIN_FREE_BYTES ({store_siting._MIN_FREE_BYTES:,}) exceeds a container's "
+            "default 64Mi /dev/shm, so every store would fall back to disk and this "
+            "module would be inert with the suite green"
         )
