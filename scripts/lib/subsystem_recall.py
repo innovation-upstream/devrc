@@ -3201,6 +3201,13 @@ def _exit_for(status: str, label: str, malformed: Sequence[MalformedEntry]) -> i
     need every consumer to learn it before it changed any behaviour — a
     declaration no code path honours.
 
+    ⚠ THAT ARGUMENT DOES NOT COVER `EXIT_UNSTAMPED_READ_STORE` (4), which `main`
+    returns before ever reaching this function. Its handling is NOT identical to
+    3's: 3 means "nothing readable is there", while 4 means "the store is fine,
+    this host has not fetched it" and names a one-command remedy. `/resume`'s
+    step 4 documents the difference, so the code is honoured rather than merely
+    declared. Everything decided HERE still lands on 0 or 3.
+
     The DETAIL is on stdout (per-entry rows, the whole point); this line is the
     quotable one-sentence summary, and it is the only thing written to stderr, so
     the verbatim-print instruction yields a sentence and not a wall.

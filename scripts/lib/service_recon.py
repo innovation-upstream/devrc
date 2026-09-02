@@ -53,8 +53,10 @@ nothing" from "did not look":
 
     roots     `searched` / `absent` / `not-a-directory` / `walk-failed`
     locate    `hits` / `no-match` / `not-searched`
-    index     recall's own status (`recalled`/`scope-absent`/`ref-absent`/…), plus
-              the BASIS naming which repo the scope was derived from
+    index     recall's own status (`recalled`/`scope-absent`/`ref-absent`/…), or
+              `store-unstamped` — the host's read store cannot say how fresh it
+              is, so it was NOT read (run `cairn sync`) — plus the BASIS naming
+              which repo the scope was derived from
     config    `extracted` / `no-manifests` / `not-attempted`
     git       `commits` / `no-commits` / `not-attempted` / `git-failed`
     live      `off` / `no-context` / `no-namespace` / `ran` / `failed`
@@ -426,7 +428,9 @@ class LocateResult:
 @dataclass(frozen=True)
 class IndexResult:
     status: str
-    """recall's own status, or `not-attempted` / `store-missing`."""
+    """recall's own status, or `not-attempted` / `store-missing` /
+    `store-unstamped` (== `INDEX_UNSTAMPED`: the default read store carries no
+    snapshot stamp, so nothing was read — never "nothing recorded")."""
     scope: str | None = None
     ref: str | None = None
     what: str = ""
