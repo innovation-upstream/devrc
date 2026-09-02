@@ -518,7 +518,14 @@ ACQ_BASE = {"matches": [
      "label": "Process feedback: dispatch subagent + elicit scope",
      "search_terms": ["ask", "clarifying", "feedback", "dispatch", "process",
                       "elicit", "scope", "include"]},
-    {"trigger": ":acq", "replace": "...", "label": "ask clarifying questions",
+    # 🔴 2026-09-02: the LABEL grew "and recommend improvements and anything
+    # useful to include" in a720d30d. Mirrored here for the same reason the
+    # 2026-08-29 note above gives — a fixture that lags the file it claims to
+    # mirror asserts the past. This label is exactly what made 'recom' ambiguous
+    # against ':rna' on the live config; see the FIX 6 block below.
+    {"trigger": ":acq", "replace": "...",
+     "label": "ask clarifying questions and recommend improvements and "
+              "anything useful to include",
      "search_terms": ["ask", "clarify", "clarifying", "questions"]},
 ]}
 
@@ -682,6 +689,95 @@ def test_naming_a_trigger_still_beats_the_declared_owner(monkeypatch):
     monkeypatch.setitem(ED._AMBIGUOUS_TERM_OWNER, "acq", ":dacq")
     d = _det_for(ACQ_BASE)
     assert d._attribute("acq") == ":acq"
+
+
+# -- FIX 6: an incidental LABEL word colliding with another snippet's interface -
+# 2026-09-02. `a720d30d` — a one-line direct-to-main commit — gave ':acq' the
+# label "ask clarifying questions and recommend improvements and anything useful
+# to include". `_token_matches` reads the label, so 'recom'/'recommend' began
+# matching ':acq' as well as ':rna' and BOTH went to None, turning
+# `test_live_existing_resolutions_not_made_ambiguous` red on `main`.
+#
+# The operator's ruling was to keep the label and relax the gate, so the fix is
+# a DECLARED owner — the same hatch as FIX 5, used for the case it was designed
+# for. The asymmetry that makes ':rna' the honest owner: 'recom' and 'recommend'
+# are two of its six declared `search_terms` and its label is "Recommend next
+# actions", while on ':acq' the word is incidental prose. Neither snippet is
+# NAMED by either term, so `_names_trigger` cannot rescue them.
+#
+# 🔴 WHICH OF THESE ARE REGRESSION COVERAGE, measured at 778dbd2d (the tree the
+# bug is live on) with these tests in place and only the two table entries
+# removed:
+#   RED at base  — test_declared_owner_resolves_the_recommend_terms,
+#                  test_recommend_terms_resolve_on_the_live_config
+#   GREEN at base — test_recommend_terms_still_reach_both_picker_rows (an
+#                  INVARIANT GUARD: the picker never consulted the table, so it
+#                  cannot fail on its own) and
+#                  test_declared_owner_cannot_invent_an_rna_resolution (it
+#                  guards `owner in matched`, which FIX 5 already exercised).
+#                  Both were mutation-checked instead — see the PR body.
+RNA_ACQ_BASE = {"matches": [
+    {"trigger": ":acq", "replace": "...",
+     "label": "ask clarifying questions and recommend improvements and "
+              "anything useful to include",
+     "search_terms": ["ask", "clarify", "clarifying", "questions"]},
+    {"trigger": ":rna", "replace": "...", "label": "Recommend next actions",
+     "search_terms": ["recommend", "recom", "next", "actions", "rank",
+                      "leverage"]},
+]}
+
+
+def test_declared_owner_resolves_the_recommend_terms():
+    # RED without the ':rna' entries: both are None, because ':acq''s label
+    # spells "recommend" and 'recom' is a substring of it.
+    d = _det_for(RNA_ACQ_BASE)
+    assert d._term_matches("recom", ":acq") is True      # the incidental label
+    assert d._term_matches("recom", ":rna") is True      # the real interface
+    assert d._names_trigger("recom", ":rna") is False    # no outright naming
+    assert d._names_trigger("recom", ":acq") is False
+    assert d._attribute("recom") == ":rna"
+    assert d._attribute("recommend") == ":rna"
+
+
+def test_recommend_terms_still_reach_both_picker_rows():
+    # The point of the table: attribution gets one answer, the picker keeps BOTH
+    # rows. If this shrinks to one, the fix has become the label edit the
+    # operator declined.
+    d = _det_for(RNA_ACQ_BASE)
+    for term in ("recom", "recommend"):
+        assert {t for t in d.ts.triggers if d._term_matches(term, t)} == {
+            ":acq", ":rna"}, term
+
+
+def test_declared_owner_cannot_invent_an_rna_resolution(monkeypatch):
+    # 🔴 The honesty half, pinned for THESE terms specifically: a declaration
+    # whose owner is not among the matched snippets must go INERT (None), never
+    # return the declared owner. Point both terms at a snippet neither reaches
+    # and the answer must be None, not ':dacq'.
+    d = _det_for(RNA_ACQ_BASE)
+    assert ":dacq" not in d.ts.triggers
+    for term in ("recom", "recommend"):
+        monkeypatch.setitem(ED._AMBIGUOUS_TERM_OWNER, term, ":dacq")
+    for term in ("recom", "recommend"):
+        assert [t for t in d.ts.triggers if d._term_matches(term, t)] != []
+        assert d._attribute(term) is None, term
+
+
+def test_recommend_terms_resolve_on_the_live_config():
+    # The hermetic fixture above can drift from nix/home.nix; this reads the
+    # real file. ANTI-VACUITY: an empty trigger set would pass vacuously, so
+    # assert both snippets are actually present and actually collide.
+    d = _live_det()
+    assert ":acq" in d.ts.triggers and ":rna" in d.ts.triggers
+    for term in ("recom", "recommend"):
+        assert sorted(t for t in d.ts.triggers
+                      if d._term_matches(term, t)) == [":acq", ":rna"], term
+        assert d._attribute(term) == ":rna", term
+    # The collision comes from the LABEL, not from ':acq''s search_terms — if
+    # that stops being true this test is no longer covering the reported bug.
+    assert "recommend" in d.ts.meta[":acq"]["label"].lower()
+    assert not any("recom" in s.lower()
+                   for s in d.ts.meta[":acq"].get("search_terms") or [])
 
 
 def test_every_declared_owner_names_a_real_live_trigger():
