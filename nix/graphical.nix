@@ -406,7 +406,22 @@ lib.mkIf isNixOS {
   # as a bare `deep-search` from any terminal. It execs the live script symlinked
   # into scriptsDir below (same file HM manages), pinned to a python3 with the
   # stdlib it needs (urllib/json/argparse) — no secret enters the nix store.
-  home.packages = [ pkgs.nerd-fonts.jetbrains-mono ]
+  #
+  # Ferdium: multi-messenger desktop client (WhatsApp, Telegram, Slack, Discord,
+  # 400+ recipes). Its login prompt is bypassed by pointing it at a self-hosted
+  # Ferdium Server — see claudedocs/handoff-ferdium-server.md.
+  #
+  # Fonts: WhatsApp Web renders poorly without noto-fonts + colour emoji, and
+  # liberation_ttf supplies the Segoe UI metrics it expects. `noto-fonts-emoji`
+  # was RENAMED to `noto-fonts-color-emoji` in current nixpkgs — the old name
+  # fails the switch with an attribute error, not a warning.
+  home.packages = with pkgs; [
+    nerd-fonts.jetbrains-mono
+    ferdium
+    noto-fonts
+    noto-fonts-color-emoji
+    liberation_ttf
+  ]
     ++ lib.optional (!isLaptop) (pkgs.writeShellScriptBin "deep-search" ''
       exec ${pkgs.python3}/bin/python3 ${scriptsDir}/deep-search "$@"
     '');
