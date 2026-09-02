@@ -1668,23 +1668,61 @@ def _acceptance(args: argparse.Namespace, cache_dir: Path) -> int:
     sys.stdout.write(verified.out)
     sys.stderr.write(verified.err)
     if not verified.ok:
-        # 🔴 THE INSTRUCTION IS CONDITIONAL ON THERE BEING SOMETHING TO READ.
-        # `run` now preserves a timed-out child's partial stdout, but a sweep
-        # killed before its first scope completed still leaves nothing — and
-        # "read the FAIL lines above" over an empty capture sends the operator
-        # looking for output that does not exist.
-        where = (
-            "Read its per-scope FAIL lines above."
-            if verified.out.strip()
-            else "It printed NO per-scope lines at all — so this says nothing "
-                 "about any individual scope, and the sweep may have been cut "
-                 "short rather than found a difference."
-        )
-        return refuse(RC_ACCEPTANCE, (
-            f"verify-byte-identity.sh exited {verified.rc}. {where} "
-            f"The store was NOT frozen."
-        ))
+        return refuse(RC_ACCEPTANCE, _acceptance_refusal(verified))
     return RC_OK
+
+
+def _acceptance_refusal(verified: Ran) -> str:
+    """The refusal text, branching on what the sweep ACTUALLY printed.
+
+    🔴 IT BRANCHES ON *FAIL LINES*, NOT ON "did it print anything" — and the
+    difference is the likeliest failure shape, not a corner case.
+
+    The first version of this branch tested `verified.out.strip()`, i.e.
+    emptiness, while the message it selected promised FAIL LINES. A sweep that
+    compares 8 of 16 scopes cleanly and then times out has plenty of stdout and
+    ZERO FAIL lines, so it took the "read the FAIL lines above" arm and sent the
+    operator hunting for output that does not exist. That is the same defect the
+    branch was added to fix, narrowed rather than closed.
+
+    It is reachable: `verify-byte-identity.sh` passes no `--max-time` to `curl`,
+    so a hung pod stalls the sweep wherever it happens to have got to, and
+    `_acceptance` runs it under `timeout=600`. `run` preserves the partial
+    stdout precisely so the completed scopes are still readable — which is what
+    makes "some output, no FAIL lines" the ordinary timeout outcome rather than
+    an exotic one.
+
+    Three outcomes, because they need three different next actions:
+      * FAIL lines present   -> read them; a real difference was found.
+      * output, none of them -> nothing was found; the sweep did not finish.
+      * no output at all     -> it never got started.
+    """
+    fails = [ln for ln in verified.out.splitlines() if ln.startswith("FAIL scope=")]
+    passes = [ln for ln in verified.out.splitlines() if ln.startswith("PASS scope=")]
+    timed_out = verified.rc == 124
+
+    if fails:
+        where = f"Read its {len(fails)} per-scope FAIL line(s) above."
+    elif verified.out.strip():
+        where = (
+            f"⚠ IT PRINTED NO `FAIL scope=` LINE AT ALL — {len(passes)} scope(s) "
+            f"compared clean and then the sweep STOPPED"
+            + (" (timed out)" if timed_out else "")
+            + ". So NO scope was found to differ; the sweep did not finish, and "
+              "every scope after the last PASS above is UNCOMPARED. Do not read "
+              "this as a byte-identity failure."
+        )
+    else:
+        where = (
+            "It printed NO per-scope lines at all — so this says nothing about "
+            "any individual scope, and the sweep was cut short"
+            + (" (timed out)" if timed_out else "")
+            + " rather than finding a difference."
+        )
+    return (
+        f"verify-byte-identity.sh exited {verified.rc}. {where} "
+        f"The store was NOT frozen."
+    )
 
 
 if __name__ == "__main__":

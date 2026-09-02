@@ -21,6 +21,7 @@ controls rather than assertions:
 
 from __future__ import annotations
 
+import argparse
 import http.server
 import importlib.machinery
 import importlib.util
@@ -1501,3 +1502,96 @@ class TestRunPreservesPartialOutputOnTimeout:
             f"an empty partial capture was not distinguished from a clean one: "
             f"{r.err!r}"
         )
+
+
+class TestAcceptanceRefusalNamesWhatItActuallyHas:
+    """🔴 THE REFUSAL TEXT, WHICH HAD NO TEST AT ALL UNTIL NOW.
+
+    `_acceptance`'s refusal is the last thing an operator reads before deciding
+    what a failed cutover means, and it selects between "read the FAIL lines"
+    and "there are none". Nothing outside `cairn-cutover.py` mentioned
+    `printed NO per-scope lines`, and there was no `RC_ACCEPTANCE` test in this
+    file — so the branch was shipped on reasoning alone, twice, and was wrong
+    the first time.
+
+    The three cases need three different next actions, so they are three tests.
+    """
+
+    def test_FAIL_lines_present_points_at_them_AND_COUNTS_THEM(self, cc):
+        r = cc.Ran(
+            1,
+            "PASS scope=one entries=2\n"
+            "FAIL scope=two entry SET differs local-only=1 pod-only=0\n"
+            "FAIL scope=three ref=x entry bytes differ\n"
+            "verify: scopes=3 pass=1 fail=2\n",
+            "",
+        )
+        msg = cc._acceptance_refusal(r)
+        assert "2 per-scope FAIL line(s) above" in msg, msg
+        assert "NO `FAIL scope=` LINE" not in msg
+        assert "The store was NOT frozen." in msg
+
+    def test_OUTPUT_but_NO_FAIL_lines_says_the_sweep_STOPPED_not_that_it_FAILED(
+        self, cc
+    ):
+        """🔴 THE SHAPE THE FIRST VERSION OF THIS BRANCH GOT WRONG.
+
+        8 of 16 scopes compared clean, then the pod hangs and the 600s timeout
+        fires. There is plenty of stdout and not one FAIL line — so the old
+        `if verified.out.strip()` test selected "Read its per-scope FAIL lines
+        above" over zero of them.
+
+        The distinction is not cosmetic: "a scope differs" and "the sweep did
+        not finish" have opposite next actions. One means the push was lossy;
+        the other means re-run it.
+        """
+        out = "".join(f"PASS scope=s{i} entries=1 bytes=10\n" for i in range(8))
+        msg = cc._acceptance_refusal(cc.Ran(124, out, "timed out after 600s"))
+        assert "NO `FAIL scope=` LINE AT ALL" in msg, msg
+        assert "8 scope(s) compared clean" in msg, msg
+        assert "timed out" in msg, msg
+        assert "UNCOMPARED" in msg, msg
+        # 🔴 AND IT MUST NOT TELL THEM TO READ FAIL LINES THAT DO NOT EXIST.
+        assert "Read its" not in msg, msg
+        assert "Do not read this as a byte-identity failure." in msg
+
+    def test_NO_output_at_all_says_it_never_got_started(self, cc):
+        msg = cc._acceptance_refusal(cc.Ran(124, "", "timed out after 600s"))
+        assert "NO per-scope lines at all" in msg, msg
+        assert "cut short" in msg and "timed out" in msg, msg
+        assert "Read its" not in msg, msg
+
+    def test_a_NON_timeout_failure_does_not_claim_a_timeout(self, cc):
+        """The `(timed out)` clause is gated on rc 124, not glued on.
+
+        A verifier that exited 1 having printed nothing is a different fault
+        from one that was killed, and saying "timed out" about it would send
+        the operator to look at the pod instead of at the script.
+        """
+        msg = cc._acceptance_refusal(cc.Ran(1, "", ""))
+        assert "timed out" not in msg, msg
+        assert "NO per-scope lines at all" in msg, msg
+
+    def test_the_refusal_is_what_ACCEPTANCE_actually_returns(self, cc, monkeypatch):
+        """🔴 THE SEAM. The three tests above exercise the text in isolation;
+        this proves `_acceptance` reaches it and returns `RC_ACCEPTANCE`.
+
+        Without this they are a claim about a helper nobody calls — the
+        "verified in isolation" shape. The verifier is stubbed to the
+        completed-then-stopped case, which is the one that was mis-worded.
+        """
+        out = "PASS scope=one entries=1 bytes=10\n"
+
+        def fake_run(cmd, *, timeout=120, cwd=None):
+            if "verify-byte-identity.sh" in " ".join(str(c) for c in cmd):
+                return cc.Ran(124, out, "timed out after 600s")
+            return cc.Ran(0, "", "")
+
+        monkeypatch.setattr(cc, "run", fake_run)
+        monkeypatch.setattr(cc, "read_store", lambda root: {})
+        monkeypatch.setattr(cc, "_config", lambda: ("http://127.0.0.1:1", "t"))
+        monkeypatch.setenv("SUBSYSTEM_STORE_TOKEN_FILE", "/nonexistent-token")
+
+        args = argparse.Namespace(store=Path("/nonexistent-store"))
+        rc = cc._acceptance(args, Path("/nonexistent-cache"))
+        assert rc == cc.RC_ACCEPTANCE, f"expected RC_ACCEPTANCE, got {rc}"

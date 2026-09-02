@@ -61,6 +61,7 @@ import importlib.util
 import json
 from testlib import hermetic_git  # noqa: E402
 from testlib import mockbin  # noqa: E402
+from testlib import public_ip_scan  # noqa: E402
 import io
 import os
 import re
@@ -4179,9 +4180,9 @@ def _normalise_prose(text: str) -> str:
     return " ".join(text.split())
 
 
-# The retracted sentences, in every spelling they were written in, plus the
-# entry count that produced them. Matched case-INSENSITIVELY: the same claim
-# appears here shouted and in sentence case.
+# The retracted sentences, in every spelling they have been found in. Three of
+# these came from `claudedocs/handoff-cairn-phase3.md`, which the hand-written
+# ledger this replaced did not know about.
 _RETRACTED_BOUNDARY = (
     "the only two-entry scope",
     "the lone pass being the only two-entry scope",
@@ -4189,52 +4190,133 @@ _RETRACTED_BOUNDARY = (
     "could not pass for any scope with more than two entries",
     "every passing scope had 2 entries",
     "pass scope=storage-resolver (2 entries)",
+    "every pass had ≤2 entries",
+    "any scope with >2 entries",
+    # 🔴 NOT A BOUNDARY CLAIM, BUT THE SAME FAILURE MODE AND THE SAME SCANNER.
+    # "51 entries of headroom" was the pagination headroom taken from the LOCAL
+    # store while the paragraph itself said the POD was the binding side and
+    # was unmeasured. Measured since: pod 51, so the headroom is 49. Three
+    # copies of the number drifted together, which is exactly what a repo-wide
+    # needle catches and three hand-checked sites do not.
+    "51 entries of headroom",
 )
 
-# A line carrying one of these is QUOTING the claim in order to retract it.
-# Kept deliberately short and explicit: a longer list is a wider exemption, and
+# A retraction has to QUOTE the claim to retract it, so an occurrence preceded
+# by one of these within `_MARKER_WINDOW` characters is a correction, not an
+# assertion. Kept deliberately short: a longer list is a wider exemption, and
 # the exemption is the part that can make this check vacuous.
-_RETRACTION_MARKERS = ("used to", "concluded", "said", "was not", "is wrong")
+_RETRACTION_MARKERS = (
+    "used to", "concluded", "said", "was not", "is wrong", "retracted",
+)
+_MARKER_WINDOW = 260
+
+# 🔴 EMPHASIS AND LINE WRAPS ARE STRIPPED BEFORE MATCHING, BECAUSE BOTH DEFEATED
+# THE FIRST VERSION OF THIS SCANNER — demonstrated twice, live:
+#   * `handoff-cairn-phase3.md` spelled it `had **2** entries`, so markdown
+#     emphasis alone walked past a substring match;
+#   * `README.md` passed only because the phrase happened to straddle a line
+#     wrap, i.e. for a reason nobody chose and any reflow would undo.
+# So the whole file is normalised — emphasis characters removed, every
+# whitespace run collapsed, lowercased — and the needles are normalised the
+# same way. Matching then survives reflowing and bolding.
+_EMPHASIS = re.compile(r"[*_`]+")
+
+
+def _normalise_for_scan(text: str) -> str:
+    return " ".join(_EMPHASIS.sub("", text).split()).lower()
+
+
+# The ONE path this scan structurally cannot cover: its own source, whose
+# needles would match themselves at the line that spells them. Every other
+# tracked text file in the repo IS scanned — see
+# `test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary` for why this
+# is derived rather than a hand-written list of sites.
+_SCAN_EXEMPT = ("scripts/tests/test_subsystem_store_api.py",)
+_SCAN_SUFFIXES = (".md", ".py", ".sh", ".txt", ".rst")
+
+
+def _tracked_text_files() -> list[str]:
+    """Every tracked text file — via the content gates' OWN enumerator.
+
+    🔴 REUSED, NOT REIMPLEMENTED, AND THE FIRST CUT OF THIS GOT IT WRONG. It
+    called `git ls-files` directly with `check=True`, which raises in any tree
+    without a `.git` — and the tier the merge is gated on is exactly that tree:
+    `nix build .#checks…` builds from a `cp -r ${./.}` store copy with NO
+    `.git`. So the sandbox leg would have ERRORED while the dev-host leg stayed
+    green, which is the two-tier blindness `claude/RULES.md` names, pointed at
+    the tier that actually blocks.
+
+    `public_ip_scan.repo_files` already solves this for the four content gates:
+    `git ls-files` when there is a `.git`, a filesystem walk otherwise, with
+    `_is_skipped` applied relative to the root (a worktree lives under
+    `…/worktrees/<id>/`, and an absolute-parts skip test would drop the entire
+    repo and report a clean zero over nothing). One rule, one place.
+    """
+    return [
+        str(p.relative_to(ROOT))
+        for p in public_ip_scan.repo_files(ROOT)
+        if not public_ip_scan._is_skipped(p, ROOT)
+        and p.name.endswith(_SCAN_SUFFIXES)
+        and str(p.relative_to(ROOT)) not in _SCAN_EXEMPT
+    ]
 
 
 def _unmarked_retractions(
     sites: Sequence[str], root: Path | None = None
 ) -> list[str]:
-    """Every line at `sites` that ASSERTS a retracted claim without marking it."""
+    """Every place in `sites` that ASSERTS a retracted claim without marking it.
+
+    Reports the normalised window around each hit, because after normalisation
+    there are no line numbers left to quote.
+    """
     base = ROOT if root is None else root
+    needles = [(_normalise_for_scan(p), p) for p in _RETRACTED_BOUNDARY]
+    markers = [_normalise_for_scan(m) for m in _RETRACTION_MARKERS]
     found: list[str] = []
     for rel in sites:
         path = base / rel
         assert path.is_file(), f"the ledger names a path that does not exist: {rel}"
-        for line in path.read_text().splitlines():
-            low = line.lower()
-            if any(m in low for m in _RETRACTION_MARKERS):
-                continue
-            if any(phrase in low for phrase in _RETRACTED_BOUNDARY):
-                found.append(f"{rel}: {line.strip()}")
+        try:
+            text = _normalise_for_scan(path.read_text(encoding="utf-8"))
+        except UnicodeDecodeError:
+            continue
+        for needle, original in needles:
+            start = 0
+            while (at := text.find(needle, start)) != -1:
+                start = at + 1
+                window = text[max(0, at - _MARKER_WINDOW):at]
+                if any(m in window for m in markers):
+                    continue
+                excerpt = text[max(0, at - 60):at + len(needle) + 40]
+                found.append(f"{rel}: …{excerpt}…  (needle: {original!r})")
     return found
 
 
-# 🔴 THE SITES THAT CARRIED THE RETRACTED BOUNDARY, AND THE TWO THIS CANNOT
-# SCAN — enumerated so the gap is a stated fact rather than an omission.
+# 🔴 THERE IS NO HAND-WRITTEN LIST OF SITES ANY MORE, AND THAT IS THE FIX.
 #
-# SCANNED (below): the three non-test sources it was copied to.
+# This used to be a tuple of three paths, under a comment asserting "the claim
+# was copied to FIVE places" and enumerating the two that could not be scanned.
+# The count was wrong: there was a SIXTH site, `claudedocs/handoff-cairn-
+# phase3.md` — and it is the doc `/resume` OPENS for this work, so it is the
+# one copy a resuming session actually reads. It asserted the retracted
+# boundary in three separate places, one of which ("every PASS had ≤2 entries;
+# every FAIL had more") is flatly false on that very run: `homelab-infra`
+# indexes ZERO entries and FAILED.
 #
-# NOT SCANNED, and why:
-#   * `scripts/tests/test_subsystem_store_api.py` — THIS FILE. A scanner whose
-#     needles live in its own source matches itself: every phrase below would
-#     be reported at the line that spells it. Excluding it is not a shrug —
-#     including it would make the check report a permanent, meaningless red,
-#     which is the permanently-red-gate shape. This file's own copy of the
-#     claim was corrected in the same commit, by hand.
+# A hand-maintained ledger of sites is the same shape as the bug it was
+# guarding against — a claim about coverage that nobody re-derives. So the
+# site list is now DERIVED from `git ls-files` at scan time, and the only
+# asserted number is the one structural exemption below. A seventh site is
+# caught automatically; a seventh site was exactly what a fixed list missed.
+#
+# STILL NOT COVERABLE, and named rather than omitted:
+#   * `_SCAN_EXEMPT` — this file's own source. Its needles would match
+#     themselves at the line that spells them, making the check permanently and
+#     meaninglessly red. Its own copy of the claim is corrected by hand.
 #   * the SQUASH COMMIT SUBJECT of #1222 on `main` — "it could not pass for any
-#     scope with more than two entries". Immutable; nothing can fix it, and
-#     this ledger exists because that is where the wrong sentence still lives.
-_BOUNDARY_SITES = (
-    "scripts/subsystem-store-api/verify-byte-identity.sh",
-    "scripts/subsystem-store-api/README.md",
-    "scripts/cairn-cutover.py",
-)
+#     scope with more than two entries". Immutable. Nothing in a working tree
+#     can reach it, and this guard exists because that is where the wrong
+#     sentence permanently lives and is the place it would be copied back from.
 
 
 @pytest.fixture
@@ -4601,11 +4683,17 @@ class TestByteIdentityVerifier:
 
         It refuses instead, and the refusal names the scope. This is the
         unobserved case made reachable rather than a reproduction of one that
-        happened — but the headroom is finite and shrinking: measured
-        2026-09-01 on the workbench, `LISTING_PAGE_SIZE` is 100 and the largest
-        scope (`datapacket-talos`) indexes 49, i.e. 51 entries of headroom in
-        an append-mostly store that is pruned by hand. When it crosses, this
-        refusal fails the cutover's acceptance gate with the store unfrozen.
+        happened — but the headroom is finite and shrinking.
+
+        🔴 THE HEADROOM COMES FROM THE BINDING SIDE, WHICH IS THE POD. The
+        refusal greps BOTH renders, so the larger store is the one that trips
+        it. This docstring used to say "51 entries of headroom" from the LOCAL
+        count — the non-binding side, and wrong in the unsafe direction.
+        Measured on both sides 2026-09-02 over the live store ingress,
+        `LISTING_PAGE_SIZE` = 100: `datapacket-talos` indexes 49 locally and
+        **51 on the pod**, so the headroom is 100 - 51 = **49 entries**, in an
+        append-mostly store pruned by hand. When it crosses, this refusal fails
+        the cutover's acceptance gate with the store unfrozen.
         """
         root = tmp_path / "big"
         (root / ORDER_SCOPE).mkdir(parents=True)
@@ -4843,36 +4931,99 @@ class TestByteIdentityVerifier:
             f"pinned here:\n{_normalise_prose(_EXPECTED_EVIDENCE_BLOCK)}"
         )
 
-    def test_NO_scanned_site_ASSERTS_the_RETRACTED_two_entry_boundary(self):
-        """🔴 THE CLAIM WAS COPIED TO FIVE PLACES. This is the ledger for three.
+    def test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary(self):
+        """🔴 EVERY TRACKED TEXT FILE, DERIVED — not a hand-written site list.
 
-        The pin above holds ONE site, word for word. This is deliberately a
-        different KIND of check, and neither subsumes the other: the pin fails
-        on any reword of that one block, this fails only when a specific
-        retracted sentence is ASSERTED at any of the three other sources. A
-        correct rewrite of the block passes this and fails the pin; a wrong
-        claim newly added to `README.md` passes the pin and fails this.
+        The pin above holds ONE block, word for word. This is deliberately a
+        different KIND of check and neither subsumes the other: the pin fails
+        on any reword of that block, this fails when a specific retracted
+        sentence is ASSERTED anywhere in the repo. A correct rewrite of the
+        block passes this and fails the pin; a wrong claim newly added to a
+        handoff doc passes the pin and fails this.
 
-        ⚠ TWO STATED LIMITS, because a guard that reads wider than it is
-        would be worse than none:
+        ⚠ IT IS STILL A SPELLED GUARD, and that limit is real: a REWORDED
+        version of the same false claim walks straight past it. What it
+        prevents is one of these literal sentences being copied back — and the
+        place it would be copied back FROM is #1222's merged commit subject,
+        which permanently carries it.
 
-          * IT IS A SPELLED GUARD. A reworded version of the same false claim
-            walks straight past it. What it actually prevents is the literal
-            sentence being copied back — and the place it would be copied back
-            FROM is #1222's merged commit subject, which still carries it and
-            cannot be corrected.
-          * IT SCANS THREE OF THE FIVE SITES. See `_BOUNDARY_SITES` for which
-            two it cannot reach and why.
+        What it no longer does is assert a COUNT of sites. That claim was wrong
+        once (see the block above `_SCAN_EXEMPT`), in the one way that mattered
+        — it missed the doc `/resume` opens. The enumeration is now derived, so
+        a site nobody remembered is covered by construction.
 
-        A retraction has to be able to QUOTE the wrong sentence, so a bare
-        occurrence is not the finding — an occurrence on a line that does not
-        mark it as retracted is. `test_the_RETRACTION_MARKERS_do_not_exempt_a_
-        bare_assertion` is the negative control for that exemption.
+        A retraction has to QUOTE the wrong sentence, so a bare occurrence is
+        not the finding — an occurrence with no retraction marker in the
+        preceding window is. `test_the_RETRACTION_MARKERS_do_not_exempt_a_bare_
+        assertion` is the negative control for that exemption, and
+        `test_the_SCAN_actually_reaches_the_repo` is the positive control for
+        the enumeration.
         """
-        found = _unmarked_retractions(_BOUNDARY_SITES)
+        found = _unmarked_retractions(_tracked_text_files())
         assert not found, (
-            "the retracted two-entry boundary is ASSERTED again, unmarked, at:\n  "
+            "the retracted two-entry boundary is ASSERTED, unmarked, at:\n  "
             + "\n  ".join(found)
+        )
+
+    def test_the_SCAN_actually_reaches_the_repo(self):
+        """🔴 POSITIVE CONTROL FOR THE ENUMERATION — a zero over nothing.
+
+        `_tracked_text_files()` returning an empty list would make the scan
+        above a permanent, meaningless green: `assert not []` passes whether
+        the repo is clean or was never read. `claude/RULES.md` — report the
+        pair, never the zero alone.
+
+        So: the enumeration is non-trivial, it REACHES the files the claim was
+        actually copied to (including the handoff doc a fixed list missed), and
+        it excludes exactly the one file that would match itself.
+        """
+        files = _tracked_text_files()
+        assert len(files) > 500, (
+            f"the scan enumerated only {len(files)} tracked text files — it is "
+            f"not reaching the repo, so its zero means nothing"
+        )
+        for must in (
+            "scripts/subsystem-store-api/verify-byte-identity.sh",
+            "scripts/subsystem-store-api/README.md",
+            "scripts/cairn-cutover.py",
+            # 🔴 THE SITE THE HAND-WRITTEN LEDGER MISSED.
+            "claudedocs/handoff-cairn-phase3.md",
+        ):
+            assert must in files, f"the scan does not reach {must}"
+        assert "scripts/tests/test_subsystem_store_api.py" not in files, (
+            "this file is in the scan set; its needles will match themselves"
+        )
+
+    def test_the_scan_ENUMERATES_in_a_tree_with_NO_git_dir(self, tmp_path: Path):
+        """🔴 THE TIER THE MERGE IS GATED ON HAS NO `.git`, AND THE FIRST CUT
+        OF THIS SCAN RAISED THERE.
+
+        `nix build .#checks.x86_64-linux.{pytests,nodetests}` builds from a
+        `cp -r ${./.}` store copy with no `.git` dir. A `git ls-files` with
+        `check=True` raises over that tree, so the sandbox leg would have
+        ERRORED while the dev-host leg — a real checkout — stayed green: one
+        tier structurally unable to see what the other reports, pointed at the
+        tier that actually blocks a merge.
+
+        `public_ip_scan.repo_files` falls back to a filesystem walk, so this
+        drives the fallback DIRECTLY rather than trusting that it exists.
+        """
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "doc.md").write_text(
+            "the run failed for every scope with more than two entries\n"
+        )
+        (tmp_path / "sub" / "binary.bin").write_bytes(b"\x00\x01")
+        assert not (tmp_path / ".git").exists(), "the fixture must have no .git"
+
+        files = public_ip_scan.repo_files(tmp_path)
+        assert any(p.name == "doc.md" for p in files), (
+            f"the walk fallback enumerated nothing usable: {files}"
+        )
+        # And the scanner runs over it and REPORTS — the positive control, so
+        # this is not "it did not crash" dressed up as coverage.
+        hits = _unmarked_retractions(("sub/doc.md",), root=tmp_path)
+        assert len(hits) == 1, (
+            f"the scan produced no finding in a no-git tree: {hits}"
         )
 
     def test_the_RETRACTION_MARKERS_do_not_exempt_a_bare_assertion(
@@ -4904,6 +5055,48 @@ class TestByteIdentityVerifier:
         assert _unmarked_retractions(("retracted.md",), root=tmp_path) == [], (
             "the scanner reported a line that explicitly retracts the claim, "
             "which would make every correction permanently red"
+        )
+
+    def test_the_scanner_sees_through_EMPHASIS_and_LINE_WRAPS(self, tmp_path: Path):
+        """🔴 THE TWO EVASIONS THAT WERE DEMONSTRATED LIVE, AS CONTROLS.
+
+        The first version of this scanner matched raw substrings line by line,
+        and both of these walked past it — not hypothetically:
+
+          * `handoff-cairn-phase3.md` wrote `had **2** entries`, so markdown
+            emphasis alone defeated the match;
+          * `README.md` passed only because the phrase straddled a line wrap,
+            which is to say for a reason nobody chose and any reflow would undo.
+
+        Neither is a clever attack; both are ordinary prose formatting. A guard
+        that a `git commit` of reflowed text can silently disarm is not a guard.
+        """
+        emphasised = tmp_path / "emphasised.md"
+        emphasised.write_text(
+            "the run showed every **passing** scope had **2** entries\n"
+        )
+        assert _unmarked_retractions(("emphasised.md",), root=tmp_path), (
+            "markdown emphasis walked past the scanner"
+        )
+
+        wrapped = tmp_path / "wrapped.md"
+        wrapped.write_text(
+            "the comparator could not pass for any scope\nwith more than two\nentries\n"
+        )
+        assert _unmarked_retractions(("wrapped.md",), root=tmp_path), (
+            "a line wrap walked past the scanner"
+        )
+
+        # 🔴 AND THE NORMALISATION DID NOT BECOME A SLEDGEHAMMER. Collapsing
+        # everything would make unrelated prose match; a sentence that merely
+        # shares words must still not be reported.
+        innocent = tmp_path / "innocent.md"
+        innocent.write_text(
+            "every scope with more than two READMEs is unusual, and entries "
+            "are indexed per scope\n"
+        )
+        assert _unmarked_retractions(("innocent.md",), root=tmp_path) == [], (
+            "the normalisation is over-broad and matches unrelated prose"
         )
 
     def test_every_permitted_difference_is_ACCOUNTED_FOR_not_merely_small(

@@ -348,13 +348,23 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 ### 🔴 OPEN — `verify-byte-identity.sh` STILL cannot pass for a multi-entry scope: it is mtime-ordered
 - **Symptom + exact repro:** `cairn-cutover.py --apply` reaches P4 and reports
   `verify: scopes=16 pass=11 fail=5` (and `scopes=12 pass=0 fail=12` for the laptop store) on
-  stores that are byte-identical. Reproduce: run the cutover against any scope with >2 entries.
+  stores that are byte-identical. Reproduce: run the cutover against any scope whose index
+  holds **2 or more** entries (see the boundary correction in the RESOLVED block below — the
+  original wording here said `>2`, which is wrong at the boundary).
 - **Observed (with values):** the failing diff is the *index listing*, not entry content —
   `local: … tekton-ci, clawgate` vs `pod: … alloy-talos, autoremix`, while the filename SETS
   are identical. `subsystem_recall`'s index is **newest-first by mtime**, and the transport does
   not preserve mtime: an entry pushed minutes earlier read pod `2026-09-01 15:32:44` vs local
   `2026-09-01 00:19:56`; one never in a delta read pod `13:27:03` vs local `2026-08-30 13:49:04`.
-  Every PASSING scope had **2** entries; every failing one had **24–50**.
+  ⚠ **RETRACTED — this line used to read "Every PASSING scope had 2 entries; every failing one
+  had 24–50", and it is false.** Entry counts re-measured 2026-09-02 on the same store, counted
+  as `subsystem_recall` INDEXES them (a `README.md` in a scope is correctly not indexed):
+  `civitai`=23, `datapacket-talos`=49, `devrc`=26, `homelab-talos`=24, `cli`=5,
+  `civitai-app-starters`=3, `civitai-spine-controller`=3, `storage-resolver`=1,
+  `homelab-infra`=**0**, and seven more at 1. **There is no 2-entry scope in this store at all**,
+  and only three scopes are in the 24–50 band — so neither half of that sentence can be true of a
+  `pass=11 fail=5` split. This run's per-scope verdicts were not recorded, so the split cannot be
+  re-derived; the boundary below is what actually holds.
 - **Ruled out:** that #1214 fixed it — #1214 closed the `host:` gap only, and after it the same
   runs still failed on ordering. via: measurement
 - **Ruled out:** a snapshot race — the failure persisted across repeated applies with a fresh
@@ -402,8 +412,19 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
   any code: `verify: scopes=5 pass=1 fail=4`, and the `cli` scope isolated it cleanly — index
   rows byte-identical, the only unaccounted difference a single row's POSITION
   (`pkgzip` at local line 10 vs pod line 13).
-- **Observed (with values):** every PASS had ≤2 entries; every FAIL had more. Fixed in #1222;
-  post-fix live run in `State now`.
+- ⚠ **RETRACTED — this line used to read "every PASS had ≤2 entries; every FAIL had more", and
+  it is FLATLY FALSE on this very run.** `homelab-infra/` holds one `README.md`, which is
+  correctly not indexed, so that scope has **0** indexed entries — and it **FAILED**
+  (`raw-diff-lines=108 accounted-for=6`). "Every FAIL had more" is wrong in the same direction
+  the script header was. The lone PASS, `storage-resolver`, indexes **1** entry, not 2.
+- **The boundary that actually holds, and it is ARITHMETIC rather than measured:** a **1-entry**
+  index has exactly one possible order, so it cannot diverge by ordering and is safe; **2 or
+  more** is where the order can differ. And a FAIL does **not** imply an ordering problem at any
+  count — `homelab-infra` failed on a **SET** difference with 0 entries (its local render is
+  `status=scope-empty` with no INDEX block at all, so 102 of its 108 differing lines are
+  something ordering structurally cannot produce). Three of that run's four FAILs were ordering.
+  Fixed in #1222; the boundary corrected in the #1222 round-1 follow-up; post-fix live run in
+  `State now`.
 - **Ruled out:** that #1214 covered it — #1214 closed the `host:` canonicalisation gap only, and
   the ordering failures persisted after it. via: measurement
 - **Ruled out:** that row order was the whole defect — the digest's single featured BODY is

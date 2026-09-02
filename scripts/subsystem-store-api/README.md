@@ -384,18 +384,40 @@ difference. Three of the four FAILs were ordering.
 mtime-derived, and the refs past page 1 are never read — so page 1 is not
 comparable and a PASS over it would be a partial check reported as a clean one.
 
-🔴 **The headroom, because that is the number that says when to act.**
-`LISTING_PAGE_SIZE` is **100**. Measured 2026-09-01 on the workbench, the
-largest scope is `datapacket-talos` at 50 files / **49 indexed** — 49% of the
-cap, **51 entries of headroom**. The verifier greps *both* renders, so the
-binding side is whichever store is larger, and the pod's copy of that scope is
-the larger one. When it crosses, this refusal exits 1,
-`cairn-cutover.py::_acceptance` returns `RC_ACCEPTANCE`, and the cutover
-refuses with the store left **unfrozen** — the permanently-red-gate shape this
-comparator was rewritten to remove, relocated rather than eliminated. The store
-is append-mostly and pruning is manual, so the number only grows. The two ways
-out are unchanged: raise the reader's page cap, or teach this script to walk
-every page and normalise the padding.
+🔴 **The headroom, because that is the number that says when to act — and it
+must come from the BINDING side.** This arm greps *both* renders, so whichever
+store is **larger** is the one that trips it, and that is the **pod**. This
+paragraph used to say **51 entries of headroom**, taken from the *local* count,
+while correctly noting in the same breath that the pod was larger and
+unmeasured — i.e. it quoted the non-binding side, and the error ran in the
+unsafe direction.
+
+Measured on both sides 2026-09-02 over the live store ingress, counting entries
+as `subsystem_recall` **indexes** them. `LISTING_PAGE_SIZE` is **100**:
+
+| scope | local | pod |
+|---|---:|---:|
+| **`datapacket-talos`** | 49 | **51** ← the binding scope |
+| `homelab-talos` | 24 | 30 |
+| `devrc` | 26 | 29 |
+| `civitai` | 23 | 24 |
+| `homelab-infra` | 0 | 4 |
+| **TOTAL** | **141** | **189** |
+
+(154 vs 201 `.md` files; 16 vs 23 scopes.)
+
+So the headroom is **100 − 51 = 49 entries**, not 51. When it crosses, this
+refusal exits 1, `cairn-cutover.py::_acceptance` returns `RC_ACCEPTANCE`, and
+the cutover refuses with the store left **unfrozen** — the permanently-red-gate
+shape this comparator was rewritten to remove, relocated rather than
+eliminated. The store is append-mostly and pruning is manual, so the number
+only shrinks. The two ways out are unchanged: raise the reader's page cap, or
+teach this script to walk every page and normalise the padding.
+
+⚠ Also visible in that table, and not a defect this arm owns: the scope list is
+enumerated from the **local** store, so the 7 scopes that exist only on the pod
+(`auditloop`, `civitai-gpu-fleet`, `naida-ai`, `vetr`, `vetr-api`, `vetr-app`,
+`vetr-infra`) are not compared by this script at all.
 
 🔴 **A per-entry render that is not `recalled` is REFUSED, not compared.** A
 `--ref` run that resolves to no single entry still prints a well-formed report

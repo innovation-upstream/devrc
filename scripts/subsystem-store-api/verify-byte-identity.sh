@@ -382,12 +382,34 @@ for scope in "${SCOPES[@]}"; do
   # number that says WHEN to act, and when it runs out this refusal becomes the
   # permanently-red gate this whole script exists to have removed: the verifier
   # exits 1, `cairn-cutover.py::_acceptance` returns `RC_ACCEPTANCE`, and the
-  # cutover refuses with the store left unfrozen. MEASURED 2026-09-01 on this
-  # host, `LISTING_PAGE_SIZE = 100`: the largest scope is `datapacket-talos` at
-  # 50 files / 49 INDEXED — 49% of the cap, 51 entries of headroom. This arm
-  # greps BOTH renders, so the binding side is whichever store is larger; the
-  # pod's copy of that scope is the larger one and is NOT measured from here.
-  # The store is append-mostly and pruning is manual, so the number only grows.
+  # cutover refuses with the store left unfrozen.
+  #
+  # 🔴 THE NUMBER MUST COME FROM THE BINDING SIDE, AND AN EARLIER VERSION OF
+  # THIS COMMENT TOOK IT FROM THE OTHER ONE. This arm greps BOTH renders, so
+  # whichever store is LARGER is the one that trips it — and that is the pod.
+  # The comment said "51 entries of headroom" from the local count while
+  # correctly saying the pod was larger and unmeasured, i.e. it quoted the
+  # non-binding side, and the error was in the UNSAFE direction.
+  #
+  # NOW MEASURED ON BOTH SIDES, 2026-09-02, over the live store ingress,
+  # counting entries as `subsystem_recall` INDEXES them. `LISTING_PAGE_SIZE`
+  # is 100; the largest scope is `datapacket-talos`:
+  #
+  #     scope              local   pod
+  #     datapacket-talos      49    51     <- the binding scope
+  #     homelab-talos         24    30
+  #     devrc                 26    29
+  #     civitai               23    24
+  #     homelab-infra          0     4
+  #     TOTAL                141   189     (154 vs 201 files; 16 vs 23 scopes)
+  #
+  # So the headroom is 100 - 51 = 49 ENTRIES, not 51. The store is
+  # append-mostly and pruning is manual, so the number only shrinks.
+  #
+  # ⚠ ALSO VISIBLE IN THAT TABLE, AND NOT A DEFECT THIS ARM OWNS: the scope
+  # list is enumerated from the LOCAL store, so the 7 scopes that exist only on
+  # the pod (auditloop, civitai-gpu-fleet, naida-ai, vetr, vetr-api, vetr-app,
+  # vetr-infra) are not compared by this script at all.
   paged=$(( $(grep -cE '^INDEX \(.*\(page [0-9]+ of [0-9]+\):$' "$local_out" || true) \
           + $(grep -cE '^INDEX \(.*\(page [0-9]+ of [0-9]+\):$' "$remote_out" || true) ))
   if [[ "$paged" -gt 0 ]]; then
@@ -555,12 +577,35 @@ for scope in "${SCOPES[@]}"; do
     #
     # ⚠ THE TWO HALVES ARE NOT INDEPENDENTLY TESTABLE, AND THIS SAYS SO RATHER
     # THAN READING AS TWO COVERED CASES. Mutating either half away leaves both
-    # regression tests GREEN (measured: mutants M6/M7 SURVIVED), because a
-    # one-sided status disagreement implies the two stores index DIFFERENT
-    # REFS, and the SET ARM above already failed the scope by then. What the
-    # remote half is actually for is a served body that is not a render at all
-    # — no `subsystem-recall: status=` line, so `st_remote` is empty — which no
-    # deployed image has been seen to produce and no test here reaches.
+    # regression tests GREEN (measured: mutants M6/M7 SURVIVED).
+    #
+    # 🔴 THE REASON IS THE `cmp` BELOW, NOT THE SET ARM — AND AN EARLIER
+    # VERSION OF THIS COMMENT GOT THAT WRONG, WHICH IS WHY IT IS SPELLED OUT.
+    # It claimed a one-sided status disagreement "implies the two stores index
+    # DIFFERENT REFS, so the SET ARM already failed the scope". That is FALSE,
+    # and the counterexample was built: byte-identical stores with IDENTICAL
+    # index ref sets, and a resolver-version skew on one side only (tier 1
+    # matching `e.ref` instead of `e.slug`) yields
+    # `local=recalled pod=ref-ambiguous` with the SET ARM PASSING.
+    #
+    # The true reason is structural and stronger. The status line is the FIRST
+    # line of the render and NO canonicalisation touches it — the two seds
+    # rewrite `store:`/`host:`, and the block strip removes only the head run of
+    # banner-or-blank lines. So `cmp -s` succeeding implies the first lines are
+    # equal, which implies the two statuses are equal. A one-sided disagreement
+    # therefore ALWAYS fails, one step later, at the per-entry `cmp` (measured
+    # with M6 applied: still `FAIL … entry bytes differ`).
+    #
+    # 🔴 SO IN THE ONE-SIDED CASE THIS GUARD CONTRIBUTES THE DIAGNOSIS, NOT THE
+    # DETECTION — "ref=X rendered NO ENTRY BODY, pod status=ref-ambiguous"
+    # instead of "entry bytes differ (N canonicalised lines)". Deleting either
+    # half would not let a difference through; it would make the report name
+    # the wrong thing. Do not read the surviving mutants as dead code.
+    #
+    # The remaining case only the remote half can see is a served body that is
+    # not a render at all — no `subsystem-recall: status=` line, so `st_remote`
+    # is empty. No deployed image has been seen to produce that, and no test
+    # here reaches it.
     st_local="$(recall_status "$tmp/e.l")"
     st_remote="$(recall_status "$tmp/e.r")"
     if [[ "$st_local" != "recalled" || "$st_remote" != "recalled" ]]; then
