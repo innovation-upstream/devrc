@@ -23,35 +23,28 @@ linked worktrees by construction — `claude/RULES.md` makes worktree isolation 
 default for any file-modifying agent — so this fires on the repo's own mandated workflow.
 
 ## State now
-🔴 **DONE AND MERGED.** devrc#1197 landed as squash **`6421df3c`**, closing **#1164**
-(`CLOSED`). Claim `resume-state-worktree-resolution` **RELEASED**. Verified by CONTENT on
-`origin/main` — a squash is never an ancestor, so ancestry says nothing: `worktrees_holding`
-present (6 refs), the `$mine` gate present (10 refs), `scripts/tests/test_mutation_battery_anchors.py`
-present (310 lines).
+🔴 **BOTH EFFORTS ARE MERGED AND CLOSED. The only thing left is the DEPLOY, which has not
+happened.**
 
-- **What shipped.** `scripts/resume-state.sh` resolves an explicit handoff path into the
-  **linked worktrees of the clone the path NAMED** — never `$PWD`'s — and a handoff-shaped
-  path that resolves nowhere no longer falls back to newest-of-N, so the digest reconciles
-  NOTHING instead of a different initiative. No exit code was added: the script has none and
-  always reports, so the empty-`HANDOFF` branch that already existed carries it.
-- **Gate at the merged head `8fce256b`**, both tiers ONE AT A TIME (#1088), read from each
-  runner's own `RESULT:` line: `pytests` PASS collected=20414 passed=20411 skipped=3 failed=0
-  (floor 18404) · `nodetests` PASS suites=5 files=41 tests=1449 pass=1449 fail=0.
-  Both required Tekton checks `success` against that sha itself.
-  Battery: **73/73 killed for the RIGHT reason**, 0 NOT APPLIED, control 190/0.
-  Skill battery: **38/38 for the right reason**, 0 NOT APPLIED, control 42/0.
+- **devrc#1197** → squash `6421df3c`, closing **#1164** (`CLOSED`). The resolver fix.
+- **devrc#1146** → squash `edbc596f`, closing **#1093** and **#1115** (both `CLOSED`).
+- **devrc#1166** → squash `e2a9f781`. Carried both efforts' close-out docs.
+- All verified by CONTENT on `origin/main`, never by ancestry — a squash makes the branch head
+  permanently NOT an ancestor, so `merge-base --is-ancestor` says "not merged" forever.
+- **Both claims RELEASED** (`devrc-1093-1115-scaffolding`, `resume-state-worktree-resolution`).
+- **Subsystem index written for BOTH efforts** and validated (`devrc/tests.md`; the effort-2
+  entry was initially MISSED and added on a completion audit — see the gotcha below).
+- **Session artifacts cleaned**: three worktrees (`devrc-rsw`, `devrc-merged`,
+  `devrc-scaffold`) removed, `/tmp` fixtures removed, 0 of mine remaining.
 
-🔴 **NOT DEPLOYED, AND THE TWO HALVES DEPLOY DIFFERENTLY — this is the live next step.**
-Measured with the arbiter, not inferred:
-| path | `readlink -f` | deploys on |
+🔴 **NOT DEPLOYED — and the two halves deploy on DIFFERENT triggers.** Measured with the
+arbiter, not inferred:
+| path | `readlink -f` | goes live on |
 |---|---|---|
-| `scripts/resume-state.sh` | **itself** | a plain `git pull` (0 references in `nix/`) |
-| `claude/skills/resume/SKILL.md` | `/nix/store/…-devrc-claude-skills/resume/SKILL.md` | a `home-manager switch` |
+| `scripts/resume-state.sh` | **itself** | a plain `git pull` — 0 references in `nix/` |
+| `claude/skills/resume/SKILL.md` | `/nix/store/…-devrc-claude-skills/resume/SKILL.md` | `home-manager switch` |
 Pull without switching and the narrowed resolver is LIVE while the deployed prose still
-describes the old rule. Pull and switch together.
-
-- **The audit ladder CLOSED after 4 rounds / 24 findings / 0 deploy-blocking.** Executable
-  payload by round: 187 → 1 → 0 → 0.
+describes the old rule — the one state that actively misleads an agent.
 
 ## Open investigations — live diagnosis state
 ### The mutation battery's 56/56 is the agent's number, not mine
@@ -96,29 +89,49 @@ describes the old rule. Pull and switch together.
   Tekton retains ~14 pipelineruns and the GitHub status is truncated at 140 chars with no
   `target_url`, which is why none of these four has a preserved log.
 
+### 🔴 RETRACTED — "Tekton reds that attribute ELSEWHERE" was ALREADY DIAGNOSED by another session
+- **Symptom + exact repro:** the block above this one treats four Tekton reds
+  (`test_a_FORGED_actor_in_the_body_is_DISCARDED`, `TestAHungRoundTripSAYSWhichSideBlocked.
+  test_a_stall_in_the_FSYNC_region_is_NAMED`, `test_no_test_writes_a_usr_bin_env_shebang_at_
+  runtime`, `test_release_deletes_the_ref_and_the_slug_becomes_claimable_again`) as an
+  unexplained flake and proposes filing an issue. **Do not file it.**
+- **Observed (with values):** `scripts/ci-repro/README.md` is ON `origin/main` and names the
+  mechanism: `server.py:_replace_bytes` fsyncs the file and then the parent directory INSIDE
+  the request, before the response is written; `devrc-ci` is pinned to one node, so stacked
+  runs contend on one disk. It states outright that it hits **PRs whose diff cannot reach it,
+  docs-only included**. The `devrc/tests.md` index entry carries the same finding dated
+  2026-09-01, measured across two docs-only PRs: **4 reds, 3 DIFFERENT tests**, `scripts/tests`
+  targets 464–530 s, each passing **3/3 locally in ~5 s** with a `--collect-only` positive
+  control proving the failing test was actually selected.
+- **Ruled out:** *that this needed a new issue* — the diagnosis, the reproduction harness and
+  the written warning all already exist on `main`.
+  via: doc
+- **Leading hypothesis:** n/a — root-caused upstream, not by this effort.
+- **Next probe:** none from here. 🔴 **Read `scripts/ci-repro/README.md` BEFORE re-pushing or
+  debugging your diff** when a required check goes red on a test your PR cannot reach.
+
 ## Next steps (ranked)
 1. **Deploy — `scripts/ship.sh`** (converges both hosts: fetch → `merge --ff-only` →
-   `home-manager switch` → verify). 🔴 **Read every per-host line, not the final verdict** —
-   one skip hides among greens. ⚠ At close-out the base clone was **1 behind and dirty with
-   ANOTHER session's files** (`nix/programs/alacritty/default.nix`,
-   `nix/system/apply-tmp-churn-retention.sh`); `ship.sh` skips a host it cannot fast-forward
-   and leaves it exactly as found, so check that first rather than assuming a clean run.
+   `home-manager switch` → verify HEAD==origin/main). 🔴 **Read every per-host line, not the
+   final verdict** — one skip hides among greens, and it prints its own rc legend on failure.
+   ⚠ At close-out the base clone was dirty with **another session's** uncommitted work
+   (`nix/programs/alacritty/default.nix` and others); `ship.sh` never stashes and leaves a
+   host it cannot fast-forward exactly as found, naming the blocking files. Check that before
+   assuming a clean run.
    forcing: gate — the resolver half goes live on the pull while the skill half waits for the
    switch, so a partial deploy is the one state that actively misleads an agent.
-2. **File the CI-flake issue** — four distinct tests, four PRs, one session, each needing a
-   fresh push. The Open-investigations block above has the evidence and the next probe.
-   A permanently-flaky required check trains everyone to click through red.
+2. **Close devrc#1160** — four `status`→code associations `claude/skills/handoff/SKILL.md`
+   documents in prose that nothing pins (`written`⇒0, `failed`⇒3, `push-failed`⇒3,
+   behind-but-usable⇒0), plus a stale `MIN_TESTS` ledger comment. The issue carries its own
+   closing condition. ⚠ The byte budget MOVED: **#1144 merged (`3d0b77e5`) and raised
+   `MAX_BYTES` to 27,000**, so the budget is 26,100 and that file is 25,864 → **236 B** of
+   headroom, not the 7 B an earlier note claimed.
    forcing: none
-3. **Close devrc#1160** — four `status`→code associations `claude/skills/handoff/SKILL.md`
-   documents in prose that nothing pins, plus a stale `MIN_TESTS` ledger comment. Note the
-   headroom moved: **#1144 merged (`3d0b77e5`) and raised `MAX_BYTES` to 27,000**, so the
-   budget is 26,100 and that file is 25,864 → **236 B**, not the 7 B an earlier note claimed.
-   forcing: none
-4. **Apply the staged dnsmasq fix** — `sudo ~/workspace/devrc/nix/system/apply-dnsmasq-docker-io-pin.sh`.
-   Only the operator can run it.
+3. **Apply the staged dnsmasq fix** — `sudo ~/workspace/devrc/nix/system/apply-dnsmasq-docker-io-pin.sh`.
+   Only the operator can run it; it is staged, not applied.
    forcing: incident — measured 2026-08-29: the LAN router pins `registry-1.docker.io` with a
    487-day TTL and two of those IPs were reassigned to other AWS customers, so every
-   `docker build` fails TLS.
+   `docker build` fails TLS. Worked around once with `--add-host`; unfixed.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`paste -sd' or '` DOES NOT JOIN WITH " or " — `-d` is a LIST OF CHARACTERS it cycles
@@ -223,23 +236,39 @@ describes the old rule. Pull and switch together.
   `git archive`, nine files read one by one), never seniority. Ask for the check that
   distinguishes the two claims, then run it yourself.
 
+- 🔴 **READ THE SUBSYSTEM INDEX BEFORE RE-DERIVING A CI FAILURE.** This effort measured the
+  same flake FOUR times across four PRs — attribution, a pristine-`main` control, a
+  same-window sibling PR — and wrote a ranked step proposing to file it. The answer was
+  already in `devrc/tests.md` and in `scripts/ci-repro/README.md`, both on `main`, with a
+  deeper diagnosis than any of those four measurements produced. `/resume` step 4 exists for
+  exactly this and running it costs one command.
+- 🔴 **THE INDEX WRITE IS PER-EFFORT, AND A MULTI-EFFORT SESSION WILL SKIP THE SECOND ONE.**
+  `/handoff` step 4 ran for effort 1 and not for effort 2; nothing noticed until a completion
+  audit asked "is every objective addressed?" — the doc, the PRs and the claims were all
+  clean. **If a session lands more than one PR, run `subsystem_touch --pr <n>` once per
+  effort**, and check the store for each before declaring done.
+- ⚠ **`status=unevidenced` (exit 10) is a NEW refusal** — rule (k), shipped by devrc#1144 on
+  2026-09-01. Every `Ruled out:` bullet now needs `via: <kind>` (`change`/`code`/`command`/
+  `doc`/`measurement`, or `assumed` for reasoning). It refused this very doc's first write.
+
 ## How to verify
 ```bash
-# 1. it landed, by CONTENT (a squash is never an ancestor)
+# 1. all three PRs landed, by CONTENT (a squash is never an ancestor)
 git -C ~/workspace/devrc fetch origin main
-git -C ~/workspace/devrc show origin/main:scripts/resume-state.sh | grep -c worktrees_holding   # 6
-gh pr view 1197 --repo innovation-upstream/devrc --json state,mergeCommit --jq '.state, .mergeCommit.oid'
+for p in 1146 1166 1197; do
+  gh pr view $p --repo innovation-upstream/devrc --json number,state,mergeCommit \
+    --jq '"#\(.number) \(.state) \(.mergeCommit.oid)"'
+done
+git -C ~/workspace/devrc show origin/main:scripts/resume-state.sh | grep -c worktrees_holding  # 6
 
-# 2. WHICH HALF IS LIVE ON THIS HOST — readlink is the only arbiter
-readlink -f ~/workspace/devrc/scripts/resume-state.sh          # itself  => live on pull
-readlink -f ~/.claude/skills/resume/SKILL.md                   # /nix/store/… => needs a switch
+# 2. the issues they closed
+for i in 1093 1115 1164; do gh issue view $i --repo innovation-upstream/devrc --json number,state; done
 
-# 3. the behaviour, end to end: a doc that exists in exactly ONE linked worktree,
-#    named by the BASE CLONE's path, must resolve and re-anchor `# repo:` to that worktree
-bash ~/workspace/devrc/scripts/resume-state.sh \
-  ~/workspace/devrc/claudedocs/handoff-<one-that-lives-only-in-a-worktree>.md | grep -E '^# repo:|^  handoff:'
+# 3. WHICH HALF IS LIVE ON THIS HOST — readlink is the only arbiter, never a diff
+readlink -f ~/workspace/devrc/scripts/resume-state.sh   # itself      => live on pull
+readlink -f ~/.claude/skills/resume/SKILL.md            # /nix/store/ => needs a switch
 
-# 4. the guards still re-derive
+# 4. the guards still re-derive (batteries are author instruments; the gate never runs them)
 PYTHONDONTWRITEBYTECODE=1 nix develop ~/workspace/devrc -c \
   python3 ~/workspace/devrc/scripts/tests/mutation_battery_resume_state.py   # 73/73, 0 NOT APPLIED
 nix develop ~/workspace/devrc -c python3 -m pytest \
