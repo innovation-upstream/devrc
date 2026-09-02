@@ -46,44 +46,52 @@ CAN match. Mapped credential → **200**; legacy credential → **401, dead**; *
 200**. PR #1187 (`9-before-8` sequencing) merged 2026-09-01T03:17:40Z; that ordering is now
 history, since both ranks are done.
 
-🔴 **The claim `cairn-phase3-1` is NOT held** (re-verified 2026-09-01). `cairn-phase1-migration`
-was held for the phase-1 work and has been **released**. `cairn-phase3-11` IS held by the
-session that shipped #1222 — release it when the ladder closes.
+🔴 **Claim state (carried forward, updated 2026-09-02):** `cairn-phase3-1` is **NOT held**
+(re-verified 2026-09-01). `cairn-phase1-migration` was held for the phase-1 work and was
+**released**. `cairn-phase3-11` was held for the rank-11 work and is **now RELEASED** — the
+ladder closed and both PRs merged.
 
 ---
 
-🔴 **RANK 11 IS FIXED AND LIVE-VERIFIED AGAINST THE POD — devrc PR #1222, `MERGEABLE/CLEAN`,
-both required Tekton checks SUCCESS. NOT MERGED; audit round 1 IN FLIGHT.** Branch
-`fix/verify-byte-identity-order-independent`, tip `d2fa8a88` on base `b59b0475`.
+🔴 **RANK 11 IS CLOSED AND MERGED. The audit ladder ran FOUR rounds and ended on a clean one.**
+
+| PR | squash | what |
+|---|---|---|
+| **#1222** | `7d9da8f5` | the order-independent comparator |
+| **#1218** | `e557ed19` | phase-1 closure handoff (merged WITHOUT `--delete-branch`; it was #1225's stacked parent) |
+| **#1225** | `80625392` | this doc's rank-11 update |
+| **#1228** | `85257361` | the round-1..3 audit fixes |
+
+All verified **by content** on `origin/main`, never by ancestry (a squash is never an ancestor).
+Claim `cairn-phase3-11` **released**.
 
 **The defect was TWO mtime dependencies, not one.** `subsystem_recall` orders its INDEX
 newest-first by entry-file mtime **and picks the digest's one featured BODY the same way**;
-`seed.sh`'s transport (`rsync` → stage → `tar` → pod) carries no mtime. The second half was
-found during implementation and is not in this doc's earlier diagnosis.
+`seed.sh`'s transport (`rsync` → stage → `tar` → pod) carries no mtime. The comparator now
+compares (1) the `mode=list` render with index rows **sorted**, (2) the entry **SET** via `comm`
+run FIRST, (3) **each entry's** own `?ref=` render, refusing a paginated index outright.
 
-**The comparator now does three things per scope**, replacing one whole-scope render: (1) the
-`mode=list` render with index **rows sorted**, rest verbatim; (2) the entry **SET** via `comm`,
-naming refs, **run FIRST** so it is not an unreachable guard; (3) **each entry's** own `?ref=`
-render. A **paginated** index is refused rather than partly compared — page membership *and*
-the per-page ref column width are both mtime-derived. `index-order-lines` joins the printed
-accounting sum, **measured** as the diff reduction the sort bought, so identity is
-`raw == store-root + host + block + order`, exact on a PASS.
+**Live acceptance against the pod** (port-forward, store `~/.claude/analyze-service-index`):
+`cli` (5 entries, byte-identical) **FAILED before / PASSES after** with `accounted-for=38` equal
+to `raw-diff-lines=38`; `storage-resolver` passed before **and** after — the control proving the
+fix did not simply paint everything green.
 
-**Live run against the pod (this session, port-forward, store `~/.claude/analyze-service-index`)
-— the acceptance step the implementing agent could not do:**
+**What the ladder found after the fix shipped**, all closed in #1228: a **false green** — the
+per-entry arm compared an "AMBIGUOUS REF" notice instead of entry bytes for any ref
+`resolve_ref_tiered` could not resolve uniquely (`_exit_for` returns **0** for `ref-ambiguous`),
+reproduced as a clean PASS over a **one-character** divergence; a **measured-evidence block that
+was wrong twice**; the **pagination headroom taken from the non-binding side** (real headroom
+**49**, not 51 — the pod is the larger store); and a **seam test that pinned no seam** (severing
+the call site left the whole suite green — 84/678 passed).
 
-| scope | before #1222 | after #1222 |
-|---|---|---|
-| `cli` (5 entries, byte-identical) | **FAIL** `raw-diff-lines=8` | **PASS** `index-order-lines=2`, `accounted-for=38` = `raw=38` |
-| `storage-resolver` (1 entry, was passing) | PASS | **PASS** — the fix did not just paint everything green |
-| `devrc` | FAIL `canonicalised-cmp=differs raw=45` | **FAIL — `entry SET differs pod-only=3`** |
-| `datapacket-talos` | FAIL `raw=336` | **FAIL — `entry SET differs pod-only=2`** |
+⚠ **ONLY criterion 10 (d) remains from the earlier arc** (rank 1): the plaintext backups
+`~/.config/subsystem-store/env.bak-legacy-2026-08-29` are still on disk on **both** hosts. Dead
+credential (401), so hygiene not exposure.
 
-The two remaining FAILs are the **correct** verdict and now name a real cause; before the fix
-they were indistinguishable from the ordering artifact.
-
-**Criterion 10 (d) still outstanding** (rank 1) and criteria 8/9/10 remain as recorded above —
-this session changed none of that.
+🔴 **THE DOC'S OWN GOAL IS NOT YET MET, and the gap is a READ path.** "The single datastore
+every host reads **and writes**" — writes are done; **reads are not.** See the open
+investigation below: `subsystem_recall.py --repo`, the command `/resume` step 4 and the top of
+this doc both prescribe, reads a **frozen** local mirror, not the pod. New rank **16**.
 
 ## Open investigations — live diagnosis state
 
@@ -497,6 +505,37 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
   and `subsystem-index` skills **and** in both cairn handoff docs. The refusal arm is the one
   that also protects the next store that gets frozen.
 
+### 🔴 OPEN — `drift-check` is now a PERMANENTLY-RED deadman, by operator decision
+- **Symptom + exact repro:** `bash ~/workspace/devrc/scripts/drift-check.sh` → **rc 24**, and
+  the `drift-check.timer` unit fails on every fire, firing its `OnFailure` toast.
+- **Observed (with values), 2026-09-02:** `main` on the canonical remote has **no
+  `required_status_checks` key at all** (the sub-resource 404s: *"Required status checks not
+  enabled"*) and `enforce_admins.enabled = false`. `drift-check.sh` prints
+  *"🔴 DRIFT — innovation-upstream/devrc main has ZERO required status checks (protected=true),
+  by CLASSIC protection and by RULESETS alike — both were checked"*. The unit is
+  `SuccessExitStatus=16` **only** — rc 24 is NOT in it — and the timer is `OnUnitActiveUSec=6h`,
+  so this fails **4×/day indefinitely**.
+- **Ruled out:** that this is transient or self-healing — the state is an unclosed break-glass
+  (`protected=true` with the sub-resource deleted), and `PATCH` cannot restore it. via: measurement
+- **Ruled out:** that this session caused it — the capture step of the break-glass procedure was
+  attempted and **failed** (`cannot iterate over: null`), so nothing was deleted here; CLAUDE.md
+  records the same state measured twice on 2026-08-29. via: command
+- 🔴 **OPERATOR DECISION 2026-09-02: LEAVE PROTECTION OFF.** That is settled and is not to be
+  re-litigated. What is NOT settled is the alarm: `claude/RULES.md` says a permanently-red gate
+  is worse than no gate because it trains everyone to click through, and rc 16 already has
+  precedent for a deliberate state being made a systemd success.
+- **Next probe:** none — decide. Either add rc 24 to `SuccessExitStatus` in the nix unit with
+  the reason recorded beside it, or accept 4 failure toasts a day. Rank **18**.
+
+### RESOLVED BY MEASUREMENT — `cairn put` IS exercised against the live pod
+- **Supersedes the OPEN block above it.** Used twice this session on
+  `devrc/subsystem-store-api`: `If-Match 3aee155a848e1670` → `c865d70976d961e0`, then
+  `9eee662af4986546` → `4056a7d18b5c0f75`, each deriving `If-Match` from a live `cairn sync` and
+  each answering `replaced`.
+- **Ruled out:** that this closes rank 12 — it does not. Rank 12's closing condition is one prune
+  observed landing on the pod **through `prune-index`**, and that caller is still unexercised.
+  The VERB is proven; the CALLER is not. via: doc
+
 ## Next steps (ranked)
 
 🔴 **Numbering is UNCHANGED on purpose** — the rank is half a claim's identity
@@ -504,10 +543,9 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 
 1. 🔴 **Criterion 10 step 2 — (a),(b),(c) DONE 2026-08-31. Only (d) is left:**
    `shred -u ~/.config/subsystem-store/env.bak-legacy-2026-08-29` on **BOTH** hosts
-   (`ssh zach@192.168.50.155` for the laptop). Confirm first that the store has been healthy
-   since (`cairn sync` on each host), because this destroys the last local copy of the retired
-   credential. Recovery after this is `git log -p` on the secrets file or the backup CronJob —
-   **not** these files.
+   (`ssh zach@192.168.50.155` for the laptop). Confirm `cairn sync` health on each host first —
+   this destroys the last local copy of the retired credential. Recovery afterwards is
+   `git log -p` on the secrets file or the backup CronJob, **not** these files.
    forcing: security
 2. ~~**The backup CronJob.**~~ ✅ **CLOSED 2026-08-30** — homelab-infra#551, squash `c4e0f82b`.
    forcing: none
@@ -518,55 +556,92 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
    credential to a second host. **Do not re-work.**
    forcing: none
 4. ✅ **DONE 2026-09-01 — criterion 9, the cutover.** Write-through shipped (#1210), verifier
-   fixed (#1214), both stores frozen, runbook §8 final check clean. **Do not re-work.**
+   fixed (#1214), both stores frozen, runbook §8 clean. **Do not re-work.**
    forcing: none
 5. **Verify criteria 1, 2, 5, 6, 7 against the POD**, not just in tests. Criterion 4 is done
    there; 2's denied-scope arm is done for WRITES (404 `scope-unknown`) but not for the three
-   read routes. ⚠ The allowlist is now **23 scopes**, not 15 — re-read it before reasoning
-   about what a denied-scope read proves.
+   read routes. ⚠ The allowlist is **23 scopes**, not 15.
    forcing: none
-6. **Add the `internal-error` alert** in the monitoring config. Without it the dispatch
-   backstop turns a dropped connection into a quiet 500 only the audit log sees.
+6. **Add the `internal-error` alert** in the monitoring config. Without it the dispatch backstop
+   turns a dropped connection into a quiet 500 only the audit log sees.
    forcing: none
-7. ✅ **DONE — `scripts/cairn` has a write verb.** `cairn append` and `cairn put` shipped in
-   #1196 and are deployed on both hosts. `append` is proved live; `put` is **not** — see the
-   open investigation. **Do not re-work the verb; do close the `put` proof (rank 12).**
+7. ✅ **DONE — `scripts/cairn` has a write verb, and BOTH verbs are now proven live.** `append`
+   was proved 2026-09-01; `put` was proved 2026-09-02 (see the open investigation). The
+   `prune-index` caller is rank 12. **Do not re-work.**
    forcing: none
 8. **§5's off-mesh control, still unrun** — from a phone on cellular:
    `curl -si https://store.zacx.dev/api/v1/recall/devrc` (expect 401) and
    `curl -si https://store.zacx.dev/` (expect 404). Cannot be done from a host on the mesh.
    forcing: none
 9. **devrc #1045** — three pre-existing `seed.sh` gaps; the third (local-side `-type f`
-   uncovered) is the mirror of what #998 fixed. ⚠ `#1045` is an **issue, not a PR**.
+   uncovered) mirrors what #998 fixed. ⚠ `#1045` is an **issue, not a PR**.
    forcing: none
 10. 🔴 **`scripts/provision-vaultwarden-backup-bucket.sh` has an orphaned-credential window.**
-    It runs `mc ilm rule add` **LAST**, after `mc admin user add` + `policy attach`, with no
-    pre-flight refusals — an abort at that step leaves a live write-capable MinIO key whose
-    secret was never printed. **Closing condition:** a merged homelab-infra PR moving
-    `ilm rule add` above `user add`.
+    `mc ilm rule add` runs **LAST**, after `mc admin user add` + `policy attach`, with no
+    pre-flight refusals — an abort there leaves a live write-capable MinIO key whose secret was
+    never printed. **Closing condition:** a merged homelab-infra PR moving `ilm rule add` above
+    `user add`.
     forcing: security
-11. 🔴 **Make `verify-byte-identity.sh` order-independent.**
-    **IN FLIGHT: devrc#1222** — fix written, live-verified against the pod, both required
-    checks green, **audit round 1 dispatched and not yet returned.** Closing condition: the
-    ladder returns a clean round, then #1222 merges. Do not re-implement it.
-    forcing: gate — the cutover's own P4 fails on byte-identical stores, and a permanently-red
-    gate trains everyone to click through it.
-12. **Exercise `cairn put` once, live, through `prune-index`.** Repo `devrc`. That skill's
-    closing condition is one prune observed landing on the pod; nothing has run it.
+11. ✅ **DONE 2026-09-02 — `verify-byte-identity.sh` is order-independent.** #1222 `7d9da8f5` +
+    #1228 `85257361`, four audit rounds to a clean round, live-verified against the pod.
+    **Do not re-work.**
+    forcing: none
+12. **Exercise `cairn put` once, live, through `prune-index`.** Repo `devrc`. The VERB is proven
+    (see the open investigation); the `prune-index` caller is not. **Closing condition:** one
+    prune observed landing on the pod, with the revision printed.
     forcing: none
 13. **Close the allowlist-staleness hole.** Repo `homelab-infra` (token minting) and/or `devrc`
     (`scripts/drift-check.sh` arm comparing each host's scope set to the allowlist).
     forcing: none
 14. **`claude/skills/subsystem-index/reference/index-write.md` documents the RETIRED
-    `Edit`-anchor protocol.** Repo `devrc`. The skill body says so in one line; the sidecar
-    still reads as current.
+    `Edit`-anchor protocol.** Repo `devrc`. The skill body says so in one line; the sidecar still
+    reads as current.
     forcing: none
-15. **Merge devrc#1218 (this doc's own PR) and re-sync the base clone.** Until it lands, the
-    copy of this doc on `main` is the pre-phase-1-closure one: it has 10 ranks, no rank 11, and
-    a 132-entry pod. A `/resume` reconciles against `origin/main` and therefore reads the STALE
-    copy while reporting `handoff-read: working-tree copy (identical to origin/main)` — a green
-    freshness line that is true and misleading at once. **This session hit exactly that.**
+15. ✅ **DONE 2026-09-02 — #1218 merged (`e557ed19`) and the base clone re-synced.**
+    **Do not re-work.**
     forcing: none
+16. 🔴 **`/resume` READS A FROZEN STORE — this is what stops the doc's Goal being met.** Repo
+    `devrc`, file `scripts/lib/subsystem_recall.py` (+ the `resume` and `subsystem-index` skills
+    and this doc's own header command). Measured 2026-09-01 minutes after two live writes:
+    `subsystem_recall.py --repo` reads `~/.claude/analyze-service-index` — **26 entries, mode
+    444, nothing refreshes it, 0 occurrences of the new bullet** — while `cairn recall` reads
+    `~/.cache/subsystem-store` — **29 entries, 1 occurrence**. Criterion 9 repointed the WRITE
+    path and `cairn`'s read; the **prescribed READ surface was never repointed**, and the frozen
+    mirror still prints `ALL 26 entries … none omitted`. **Closing condition:** a merged devrc PR
+    doing ONE of — point `--repo` at the synced cache; make it REFUSE a store carrying no
+    snapshot stamp; or rewrite the prescribed command to `cairn recall` in both skills and this
+    doc — verified by a `/resume` step 4 that surfaces an entry written through `cairn append` in
+    the same session. **The refusal arm is preferred: it also protects the next store that gets
+    frozen.**
+    forcing: regression — the cutover changed the read path's meaning and nothing detects it
+17. **The verifier can never see 7 of 23 scopes.** Repo `devrc`,
+    `scripts/subsystem-store-api/verify-byte-identity.sh`. It enumerates scopes from the LOCAL
+    store, so `auditloop civitai-gpu-fleet naida-ai vetr vetr-api vetr-app vetr-infra` — **48
+    entries, 25% of the served store** — are never compared. #1228 made every run print a
+    `verify: COVERAGE —` line saying so, which is honesty, not coverage; the API deliberately has
+    **no enumeration route** (`README.md:103`), so closing it needs one. **Closing condition:**
+    either a merged PR adding that route and widening the sweep, or a recorded decision that the
+    COVERAGE disclosure is the permanent answer.
+    forcing: none
+18. 🔴 **`drift-check` fails 4×/day forever unless rc 24 is made a success.** Repo `devrc`, the
+    nix unit carrying `SuccessExitStatus=16`. Consequence of the operator decision to leave
+    branch protection off (see the open investigation). rc 16 is the precedent: a deliberate
+    state made a systemd success so the DND-defeating failure toast stops. **Closing condition:**
+    a merged devrc PR adding rc 24 to `SuccessExitStatus` with its reason recorded beside it, or
+    a recorded decision to accept the toasts.
+    forcing: gate — a permanently-red deadman trains everyone to click through it
+19. **Two store-api CI flakes, both live, neither diagnosed.** Repo `devrc`. (a) The
+    store-api gate flake **RECURRED TWICE after #1211's tmpfs fix** — two runs of ONE unchanged
+    revision (`bf433490`, docs-only) failed on TWO DIFFERENT tests, the second being
+    `TestTheActorComesFromTheTOKEN.test_a_FORGED_actor_in_the_body_is_DISCARDED`, the same test
+    named in the 2026-08-31 `TimeoutError` investigation. (b)
+    `test_live_cotenants_sees_another_process_in_the_repo` failed once in the sandbox on
+    `732ef4b6` then passed on the **identical derivation hash**; it is in none of that PR's 8
+    files and operates on a fresh `tmp_path/repo`, never `ROOT`, so no PR change can be its
+    co-tenant. **Closing condition:** `claudedocs/handoff-gate-flake-store-api.md` records a
+    measured flake RATE over a named run count post-#1211, and (b) is either reproduced or filed
+    as its own item there.
+    forcing: gate — these red a required check on PRs whose diff cannot reach them
 
 ## Gotchas / decisions / dead-ends
 
@@ -1147,30 +1222,87 @@ text of a status that outlives it — and treat "not found" as NOT A VERDICT, ex
   stated closing condition is one prune observed landing on the pod **through `prune-index`**,
   and that skill's path is still unexercised. The VERB is proven; the CALLER is not.
 
+**Operator decisions 2026-09-02:**
+- 🔴 **Branch protection on `main` STAYS OFF.** Asked with the blast radius stated and answered
+  directly. The consequence — a permanently-red `drift-check` — is rank 18 and is a *separate*
+  decision, not a re-litigation of this one.
+- **Break-glass was NOT performed and was NOT needed.** The procedure was started; **its capture
+  step failed** (`cannot iterate over: null`) because there was nothing to capture. That refusal
+  is exactly why CLAUDE.md puts capture FIRST — deleting anything at that point would have been
+  unrecoverable.
+
+**The merge lessons from this arc, all paid for:**
+- 🔴 **`UNSTABLE` IS NOT `BLOCKED`.** #1218 was called unmergeable here and it never was —
+  `mergeable=MERGEABLE`, `mergeStateStatus=UNSTABLE` means *mergeable with a failing check*. A
+  whole break-glass was proposed on that misreading. **Read `mergeable`, not the status word.**
+- 🔴 **A squash-merged parent makes its stacked child CONFLICTING.** #1218 merged as a squash, so
+  #1225 — whose branch carried the real commit — went `CONFLICTING/DIRTY` immediately. The fix is
+  `git rebase --onto origin/main <squashed-commit> <branch>`, dropping the now-redundant commit,
+  then `--force-with-lease`. Merging the parent **without** `--delete-branch` is what kept the
+  child's PR alive to be rebased.
+- 🔴 **A grep zero is a claim about the PATTERN, not the tree — this cost three false alarms in
+  one session.** `THE CUTOVER LEFT TWO STORES` read 0 against a mixed-case heading;
+  `ACCEPTANCE actually PRINTS` read 0 against a name spelled with **underscores**; and
+  `49 entries of headroom` read 0 against prose spelling it `100 - 51 = 49 ENTRIES`. Each looked
+  like missing content and each was a bad pattern. **Normalise, or check context, before
+  reporting an absence.**
+
+**On the audit ladder, four rounds, and when to stop:**
+- 🔴 **The ATTRIBUTION LEDGER is what ended it, not a verdict.** Rounds 2 and 3 both returned
+  "safe to merge" *and* real defects. What ended the ladder was payload lines trending
+  **118 → 38 → 0** with round 3's own ratio at **17 executable lines out of 414 changed** (4%) —
+  i.e. the rounds had left the PR and were auditing their own guards. Round 4 was briefed that a
+  clean round is the CORRECT outcome and returned one.
+- 🔴 **A "seam" test that asserts only a return code pins nothing.** Severing the call site
+  (`_acceptance_refusal(verified)` → a constant string) left the suite **entirely green**, four
+  helper unit tests included — which is exactly why they were never sufficient. The fix is one
+  line: read stderr and assert text only the real helper can produce.
+- ⚠ **A fixture constant equal to a constant the assertion names is still a blind spot here.**
+  Round 4 found a *different* one-line call-site edit that survives — passing
+  `Ran(124, …)` — because the seam fixture's rc IS the literal the branch tests. Not a plausible
+  accidental edit, and it does not sever the seam; recorded so nobody re-derives it.
+- **Two agents corrected the auditor rather than deferring**: the `service:` field of a
+  kind-qualified entry must equal the filename's **slug** part or the loader rejects it as
+  MALFORMED (so the F1 repro needs `service: alpha`, not `service: alpha.process`); and the
+  stated reason two mutants survive was FALSE while the conclusion held for a stronger reason.
+
+**Verification discipline that paid off, worth repeating:**
+- The implementing agent could not run the fix against the live pod; the dispatching session did,
+  and that is what turned "the tests pass" into "the original failing scope now passes".
+- Round 4 **forced both sandbox derivations to rebuild** rather than reading cached logs — a
+  silent `nix build` is the CACHED case, not a pass.
+- An agent **retracted its own theory** for the `test_live_cotenants` flake (a detached
+  `gc --auto`) after a direct probe found no lingering process and 12/12 serial runs passed.
+  "Pre-existing flake, mechanism unknown" is the honest state; do not adopt the retracted theory.
+
 ## How to verify
 
 ```bash
-# ---- rank 11: the fix, against the LIVE pod (the acceptance step) ----
-# 1. port-forward; there is deliberately no ingress path that works (see the OPEN block).
+# ---- rank 11 is CLOSED: the fix is on main, verified BY CONTENT (a squash is never an ancestor)
+git -C ~/workspace/devrc show origin/main:scripts/subsystem-store-api/verify-byte-identity.sh \
+  | grep -c 'index-order-lines'          # >0
+git -C ~/workspace/devrc show origin/main:scripts/subsystem-store-api/verify-byte-identity.sh \
+  | grep -n 'COVERAGE'                   # the rank-17 disclosure is present
+
+# ---- the live acceptance run (the ONLY thing that proves the gate works) ----
+# 🔴 there is NO working public-ingress path: the script sends CF-Connecting-IP and Cloudflare
+#    answers 403 `error code: 1000`. Use a port-forward.
 KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store port-forward svc/subsystem-store-api 8102:8102 &
-# 2. stage the credential in a file, umask 077, and SHRED it afterwards.
 umask 077; ( set -a; . ~/.config/subsystem-store/env; set +a; printf '%s' "$SUBSYSTEM_STORE_TOKEN" > /tmp/tok )
-# 3. `cli` is the discriminating pair: >2 entries, byte-identical, FAILED before #1222.
 bash scripts/subsystem-store-api/verify-byte-identity.sh \
   --store ~/.claude/analyze-service-index --url http://127.0.0.1:8102 --token-file /tmp/tok \
   --scope cli --scope storage-resolver
-#   expect: PASS cli … index-order-lines=2 accounted-for=38   (raw-diff-lines must EQUAL accounted-for)
-#           PASS storage-resolver …                            (the control: it passed BEFORE the fix too)
+#   expect PASS on both; `cli` is the discriminating one (>2 entries, byte-identical, FAILED
+#   before #1222). raw-diff-lines MUST equal accounted-for.
 shred -u /tmp/tok
 # 🔴 kill the port-forward by RESOLVED PID — never let a pattern reach pkill -f.
 
-# ---- the lag is real and expected; this is what it looks like ----
-#   FAIL scope=devrc entry SET differs local-only=0 pod-only=3
-#   That is the CORRECT verdict, not a regression. See the OPEN block.
+# ---- rank 16: the read path is still frozen. This is the Goal gap, and it reproduces instantly.
+python3 scripts/lib/subsystem_recall.py --repo ~/workspace/devrc --list | head -3   # store: ~/.claude/…
+cairn recall --scope devrc | head -3                                               # store: ~/.cache/…
+#   the two entry counts DIFFER; the first is the frozen mirror and it says "none omitted".
 
-# ---- criterion 10 is DONE: one row, no unrestricted credential ----
-POD=$(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod -l app=subsystem-store-api \
-  -o jsonpath='{.items[0].metadata.name}')
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs $POD | grep -o 'token-ids=[^ ]*'
-#   expect exactly: token-ids=a8f329c534d7:zach
+# ---- rank 18: the deadman is red by decision, not by fault ----
+bash scripts/drift-check.sh; echo "rc=$?"     # 24 — expected while protection is off
+systemctl --user show drift-check.service -p SuccessExitStatus   # 16 only; rc 24 is NOT a success
 ```
