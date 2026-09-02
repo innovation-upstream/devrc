@@ -34,6 +34,8 @@ from types import SimpleNamespace
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts"))
+from testlib import store_siting  # noqa: E402
 CAIRN_CLI = REPO / "scripts" / "cairn"
 SERVER_PY = REPO / "scripts" / "subsystem-store-api" / "server.py"
 GOOD_TOKEN = "w" * 20 + "R" * 20 + "t" * 8
@@ -79,8 +81,18 @@ def _entry(service: str, scope: str, *nuance: str) -> str:
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> Path:
-    root = tmp_path / "store"
+def store(tmp_path: Path):
+    # 🔴 The root comes from `testlib.store_siting`, not from `tmp_path` directly:
+    # this file stands up the real store server, so its writes fsync INSIDE the
+    # request and a contended disk fails the gate on PRs that cannot reach this
+    # test. That is not hypothetical here — `TestAppendLands` below is the test
+    # that went red in CI on a docs-only PR. Falls back to `tmp_path` wherever no
+    # tmpfs is usable, so it can never be worse than the original.
+    with store_siting.store_root(tmp_path) as root:
+        yield _populate_store(root)
+
+
+def _populate_store(root: Path) -> Path:
     (root / "widget-cfg").mkdir(parents=True)
     (root / "widget-cfg" / "thing-alpha.md").write_text(
         _entry("thing-alpha", "widget-cfg", "- 2026-01-02: the probe lies for 40s.")

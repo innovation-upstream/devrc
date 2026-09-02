@@ -21,9 +21,11 @@ controls rather than assertions:
 
 from __future__ import annotations
 
+import argparse
 import http.server
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -1438,3 +1440,211 @@ class TestTheDeltaTree:
         saved = sorted(str(p.relative_to(dest)) for p in dest.rglob("*.md"))
         assert saved == ["sc/changed.md"]
         assert "the served copy" in (dest / "sc" / "changed.md").read_text()
+
+
+class TestRunPreservesPartialOutputOnTimeout:
+    """🔴 A TIMED-OUT CHILD'S STDOUT IS EVIDENCE, NOT DEBRIS.
+
+    `run` used to return `Ran(124, "", …)`, so `_acceptance`'s refusal — "Read
+    its per-scope FAIL lines above" — pointed at output the same function had
+    just discarded. The acceptance sweep is now N+1 requests per scope, which
+    makes the 600s timeout genuinely reachable and makes the partial capture
+    the only record of which scopes DID complete.
+    """
+
+    def test_a_TIMEOUT_keeps_what_the_child_had_already_printed(self, cc):
+        r = cc.run(
+            ["bash", "-c", "echo PASS scope=one; echo PASS scope=two; sleep 30"],
+            timeout=2,
+        )
+        assert r.rc == 124, f"expected the timeout code, got {r.rc}"
+        # 🔴 THE LOAD-BEARING ASSERTION. Pre-change this was `""`.
+        assert "PASS scope=one" in r.out and "PASS scope=two" in r.out, (
+            f"the timed-out child's stdout was discarded: {r.out!r}"
+        )
+        assert "timed out after 2s" in r.err
+
+    def test_the_partial_capture_is_a_STR_not_the_BYTES_python_hands_back(self, cc):
+        """⚠ MEASURED ON CPython 3.12.14: `TimeoutExpired.stdout` is BYTES even
+        under `text=True`, and `.stderr` came back None.
+
+        Passing either through unchanged is not a cosmetic wart — `_acceptance`
+        does `sys.stdout.write(verified.out)`, and a `bytes` there raises
+        `TypeError`, turning a timeout into a traceback. So this asserts the
+        TYPE, which is the thing the caller depends on, and then exercises the
+        caller's actual operation.
+        """
+        r = cc.run(["bash", "-c", "echo something; sleep 30"], timeout=2)
+        # 🔴 THE CONTENT CHECK COMES FIRST, AND IT IS WHAT KEEPS THE TYPE CHECK
+        # FROM BEING VACUOUS. `""` is a `str`, so the assertions below are
+        # satisfied by the pre-change code that discarded the capture entirely
+        # — they say something only about a capture that actually happened.
+        assert r.out.strip(), (
+            f"nothing was captured, so the type assertions below would pass "
+            f"against a `run` that threw the output away: {r.out!r}"
+        )
+        assert isinstance(r.out, str), f"partial stdout is {type(r.out).__name__}"
+        assert isinstance(r.err, str), f"partial stderr is {type(r.err).__name__}"
+        # The operation `_acceptance` performs on it, run for real.
+        io.StringIO().write(r.out)
+
+    def test_a_child_that_printed_NOTHING_before_timing_out_SAYS_SO(self, cc):
+        """🔴 THE EMPTY CASE IS REPORTED, NOT LEFT AS AN EMPTY STRING.
+
+        `claude/RULES.md`: an empty result cannot distinguish two mechanisms.
+        "No FAIL lines" reads identically whether the sweep found nothing or
+        never got started, so the timeout note says which one this was.
+        """
+        r = cc.run(["bash", "-c", "sleep 30"], timeout=2)
+        assert r.rc == 124
+        assert r.out == ""
+        assert "printed NOTHING to stdout" in r.err, (
+            f"an empty partial capture was not distinguished from a clean one: "
+            f"{r.err!r}"
+        )
+
+
+class TestAcceptanceRefusalNamesWhatItActuallyHas:
+    """🔴 THE REFUSAL TEXT, WHICH HAD NO TEST AT ALL UNTIL NOW.
+
+    `_acceptance`'s refusal is the last thing an operator reads before deciding
+    what a failed cutover means, and it selects between "read the FAIL lines"
+    and "there are none". Nothing outside `cairn-cutover.py` mentioned
+    `printed NO per-scope lines`, and there was no `RC_ACCEPTANCE` test in this
+    file — so the branch was shipped on reasoning alone, twice, and was wrong
+    the first time.
+
+    The three cases need three different next actions, so they are three tests.
+    """
+
+    def test_FAIL_lines_present_points_at_them_AND_COUNTS_THEM(self, cc):
+        r = cc.Ran(
+            1,
+            "PASS scope=one entries=2\n"
+            "FAIL scope=two entry SET differs local-only=1 pod-only=0\n"
+            "FAIL scope=three ref=x entry bytes differ\n"
+            "verify: scopes=3 pass=1 fail=2\n",
+            "",
+        )
+        msg = cc._acceptance_refusal(r)
+        assert "2 per-scope FAIL line(s) above" in msg, msg
+        assert "NO `FAIL scope=` LINE" not in msg
+        assert "The store was NOT frozen." in msg
+
+    def test_OUTPUT_but_NO_FAIL_lines_says_the_sweep_STOPPED_not_that_it_FAILED(
+        self, cc
+    ):
+        """🔴 THE SHAPE THE FIRST VERSION OF THIS BRANCH GOT WRONG.
+
+        8 of 16 scopes compared clean, then the pod hangs and the 600s timeout
+        fires. There is plenty of stdout and not one FAIL line — so the old
+        `if verified.out.strip()` test selected "Read its per-scope FAIL lines
+        above" over zero of them.
+
+        The distinction is not cosmetic: "a scope differs" and "the sweep did
+        not finish" have opposite next actions. One means the push was lossy;
+        the other means re-run it.
+        """
+        out = "".join(f"PASS scope=s{i} entries=1 bytes=10\n" for i in range(8))
+        msg = cc._acceptance_refusal(cc.Ran(124, out, "timed out after 600s"))
+        assert "NO `FAIL scope=` LINE AT ALL" in msg, msg
+        assert "8 scope(s) compared clean" in msg, msg
+        assert "timed out" in msg, msg
+        assert "UNCOMPARED" in msg, msg
+        # 🔴 AND IT MUST NOT TELL THEM TO READ FAIL LINES THAT DO NOT EXIST.
+        assert "Read its" not in msg, msg
+        assert "Do not read this as a byte-identity failure." in msg
+
+    def test_NO_output_at_all_says_it_never_got_started(self, cc):
+        msg = cc._acceptance_refusal(cc.Ran(124, "", "timed out after 600s"))
+        assert "NO per-scope lines at all" in msg, msg
+        assert "cut short" in msg and "timed out" in msg, msg
+        assert "Read its" not in msg, msg
+
+    def test_a_NON_timeout_failure_does_not_claim_a_timeout(self, cc):
+        """The `(timed out)` clause is gated on rc 124, not glued on.
+
+        A verifier that exited 1 having printed nothing is a different fault
+        from one that was killed, and saying "timed out" about it would send
+        the operator to look at the pod instead of at the script.
+        """
+        msg = cc._acceptance_refusal(cc.Ran(1, "", ""))
+        assert "timed out" not in msg, msg
+        assert "NO per-scope lines at all" in msg, msg
+
+    def test_FAIL_lines_AND_a_TIMEOUT_report_BOTH_facts(self, cc):
+        """🔴 THE FOURTH COMBINATION, which used to drop the timeout entirely.
+
+        "Did it find something" and "did it finish" are independent, and the
+        first version of this branch computed `timed_out` and then used it in
+        only two of three arms. With FAIL lines present the message was
+        prose-identical to the no-timeout one apart from the exit numeral — so
+        an operator read "5 scopes differ" when the truth was "5 errored AND 11
+        were never compared".
+
+        Reachable exactly as F7 described: a degrading pod 5xx's fast for a few
+        scopes (the loop `continue`s, printing a FAIL each time) and then
+        hangs, with no `--max-time` on curl to stop it.
+        """
+        out = (
+            "PASS scope=a entries=1 bytes=10\n"
+            "FAIL scope=b remote HTTP 503 (body: )\n"
+            "FAIL scope=c remote HTTP 503 (body: )\n"
+        )
+        msg = cc._acceptance_refusal(cc.Ran(124, out, "timed out after 600s"))
+        # Both halves, not one.
+        assert "2 per-scope FAIL line(s) above" in msg, msg
+        assert "BUT IT ALSO TIMED OUT" in msg, msg
+        assert "3 scope(s) reported (1 clean, 2 differing)" in msg, msg
+        assert "UNCOMPARED" in msg, msg
+        assert "Re-run" in msg, msg
+
+        # 🔴 AND THE SAME FAILS WITHOUT A TIMEOUT MUST *NOT* SAY THAT. Without
+        # this pair the assertions above are satisfied by gluing the clause on
+        # unconditionally, which would be a different lie.
+        clean = cc._acceptance_refusal(cc.Ran(1, out, ""))
+        assert "2 per-scope FAIL line(s) above" in clean, clean
+        assert "TIMED OUT" not in clean, clean
+        assert "UNCOMPARED" not in clean, clean
+        assert msg != clean, "the two cases produce identical prose"
+
+    def test_the_refusal_is_what_ACCEPTANCE_actually_PRINTS(self, cc, monkeypatch, capsys):
+        """🔴 THE SEAM — AND IT NOW PINS THE SEAM, WHICH IT DID NOT BEFORE.
+
+        This test's docstring already claimed to prove `_acceptance` reaches
+        the refusal text, but its body asserted only `rc == RC_ACCEPTANCE`.
+        That is the repo's own "a docstring names a RELATIONSHIP, the body
+        inspects one SIDE" pattern, and it was demonstrated live: replacing the
+        `_acceptance_refusal(verified)` call site with a constant string left
+        the ENTIRE suite green. The whole F7 fix was one call-site edit from
+        being inert while four unit tests went on passing.
+
+        `refuse` writes to stderr, so the fix is to read stderr and assert the
+        text that only the real helper can produce.
+        """
+        out = "PASS scope=one entries=1 bytes=10\n"
+
+        def fake_run(cmd, *, timeout=120, cwd=None):
+            if "verify-byte-identity.sh" in " ".join(str(c) for c in cmd):
+                return cc.Ran(124, out, "timed out after 600s")
+            return cc.Ran(0, "", "")
+
+        monkeypatch.setattr(cc, "run", fake_run)
+        monkeypatch.setattr(cc, "read_store", lambda root: {})
+        monkeypatch.setattr(cc, "_config", lambda: ("http://127.0.0.1:1", "t"))
+        monkeypatch.setenv("SUBSYSTEM_STORE_TOKEN_FILE", "/nonexistent-token")
+
+        args = argparse.Namespace(store=Path("/nonexistent-store"))
+        rc = cc._acceptance(args, Path("/nonexistent-cache"))
+        assert rc == cc.RC_ACCEPTANCE, f"expected RC_ACCEPTANCE, got {rc}"
+
+        # 🔴 THE ASSERTION THAT MAKES THIS A SEAM TEST. A severed call site
+        # still returns RC_ACCEPTANCE; it cannot produce this sentence.
+        err = capsys.readouterr().err
+        assert "NO `FAIL scope=` LINE AT ALL" in err, (
+            f"the refusal `_acceptance` actually printed did not come from "
+            f"`_acceptance_refusal` — the call site may be severed:\n{err}"
+        )
+        assert "1 scope(s) compared clean" in err, err
+        assert "UNCOMPARED" in err, err
+        assert f"REFUSED (rc {cc.RC_ACCEPTANCE})" in err, err

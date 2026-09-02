@@ -71,10 +71,17 @@ Read this before trusting the 2026-08-16 block above as coverage:
   exist at base, so "red at base" is a collection error and proves nothing. The evidence
   that they bite is the 22-mutant sweep, not the red-at-base matrix.
 - **`seed.sh --push` has no hermetic test** (needs a cluster); it was exercised live 3×.
-- **`--mode=full` / `--page` / `?mode=list` over HTTP** were never byte-compared against the pod;
+- ~~**`--mode=full` / `--page` / `?mode=list` over HTTP** were never byte-compared against the pod;
   only the default digest was. (`verify-byte-identity.sh` passes no `mode` param at all, so the
   uncompared set is *every* mode but the default — `list` included, which the phase-2 manifest
-  would depend on.)
+  would depend on.)~~ 🔴 **EXACTLY INVERTED as of `#1222` (2026-09-01) — and this bullet said the
+  opposite for as long as it stood.** The verifier now sends `mode=list` for the scope-level render
+  and `ref=<ref>` per entry, and it **no longer compares the default digest at all**: the digest
+  picks its one featured BODY by entry-file mtime, which the transport does not carry, so it could
+  not pass. So the compared set is `list` **and** `ref`, and **the DEFAULT DIGEST is now the
+  uncompared one**, along with `--mode=full` and `--page`. Same size of gap, moved. `--page` is
+  additionally *refused* rather than silently skipped: a scope whose index paginates fails with
+  "Nothing about this scope was verified."
 
 ### `#505` in one paragraph
 An entry proposed a one-line remedy at **15:00:18** on 2026-07-24; the remedy landed at **15:02:21** — 2m03s later — and the entry served it as outstanding for **22 days**. `/handoff` step 4 runs MID-session, so the writer is gone by the time the work finishes. Openness is now a typed prefix, not prose, because a prose detector is walkable by rewording. Six populations, one precedence source (`JournalBullet.openness_population`); `--validate` reports four of them and its VERDICT is deliberately unchanged (an entry with unfinished business is well-formed; failing it would be a permanently-red gate). Index rows gain `🔴 N OPEN`, conditional so the common case is byte-identical.
