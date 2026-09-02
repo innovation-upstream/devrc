@@ -3636,7 +3636,14 @@ class TestSkillDocsArePinned:
     because its executor is an LLM."""
 
     RESUME_SENTENCES: list[tuple[str, str]] = [
-        ("scripts/lib/subsystem_recall.py", "the step actually calls this module"),
+        # 🔴 The step's prescribed command became `cairn recall` on 2026-09-02 —
+        # `cairn` syncs the read cache and then runs THIS module against it, so
+        # the step still calls it, one hop away. The path stays pinned because
+        # the module is where every flag, exit code and output shape documented
+        # below actually lives; a step naming only `cairn` would leave a reader
+        # with nowhere to check them.
+        ("scripts/lib/subsystem_recall.py", "the step drives this module, via `cairn`"),
+        ("cairn recall", "the prescribed command — it syncs first, so the read is dateable"),
         (
             "read half",
             "why the step exists — the store had two writers and no reader",

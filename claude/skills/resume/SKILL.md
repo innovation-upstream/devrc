@@ -78,8 +78,9 @@ Topic argument (optional): `$ARGUMENTS`.
    its banner whether it reached the pod or served a stale cache — so the answer carries
    its own freshness instead of asserting completeness it cannot check.
 
-   🔴 **The reader now REFUSES an undateable store rather than serving it.** Run bare,
-   `subsystem_recall.py` defaults to the synced cache and **exits 4** with
+   🔴 **The reader now REFUSES an undateable store rather than serving it.** `cairn`
+   drives `scripts/lib/subsystem_recall.py` — the same module, the same output — and run
+   bare that module defaults to the synced cache and **exits 4** with
    `REFUSING to read … Run \`cairn sync\` and re-run` when that cache carries no
    `.sync-stamp`. That is a working state, not a broken one: run `cairn sync`, or just
    use `cairn recall` above. An explicit `--store <path>` is never refused — that is you
