@@ -16,39 +16,48 @@ removing the tests' dependence on disk latency rather than by tuning bounds. Dis
 from `handoff-ci-speedup.md`, which is about gate SPEED and is owned elsewhere.
 
 ## State now
-🔴 **`devrc#1219` is the live artefact: OPEN, `mergeable=MERGEABLE`, `mergeStateStatus=CLEAN`,
-both required checks SUCCESS at `734cb0bc`.** It consolidates the store siting that `#1211`
-applied to one file out of three, and it has been through **six audit rounds**.
+🔴 **`devrc#1219` MERGED — squash `b4fde334`, 2026-09-02T16:48:50Z, by `ZacxDev` — and it merged
+WITHOUT the round-6 delta audit that rank 5 existed to run.** The previous version of this doc
+described `#1219` as OPEN because the doc's own PR (`#1231`) merged **17 minutes later**, at
+17:05:55Z. The doc was born stale; a session resuming on it was handed a completed item.
 
-- devrc `main` @ `a6e50641`. Worktree `~/workspace/devrc-r6` holds the branch
-  `fix/consolidate-store-siting`; the shared checkout was never committed to.
-- ⚠ Another session's dirty `nix/programs/alacritty/default.nix` has been in the shared
-  checkout all session, untouched, and checked for collision before every fast-forward.
+- devrc `main` @ `220e7893`. Base clone was 2 behind and has been fast-forwarded (no collision:
+  the 2 incoming commits touch none of the 5 dirty paths). ⚠ Another session's dirty
+  `nix/programs/alacritty/default.nix`, `nix/system/apply-tmp-churn-retention.sh` and three
+  untracked `diagnose-*`/`output.txt` files are still in the shared checkout — untouched.
+- Claim held: `gate-flake-store-api-5` (`claim-work --release gate-flake-store-api-5` when done).
 
-**What `#1219` ships** — `scripts/testlib/store_siting.py` (new) plus
-`test_store_siting_ledger.py` (new seam guard), with `test_subsystem_store_api.py`,
-`test_cairn_write.py` and `test_cairn_cli.py` taking their store root from it.
-Merged-tree suite: **782 passed, rc 0**.
+**What rank 5 asked for, against what happened:**
 
-**🔴 THE SINGLE MOST USEFUL EVENT WAS THE MERGE, NOT AN AUDIT ROUND.** `#1219` went
-CONFLICTING; on merging `origin/main` the ratchet immediately read **21 against a
-constant of 20**, because main had added `(tmp_path / name).write_text(body)` — a scratch
-file named `"wrapped.md"`. The guard fired on real divergence **and was wrong**: round 3's
-audit had called the unrestricted `tmp_path / <Name>` arm "a false accusation" and I left
-it as a 🟢. It stopped being hypothetical the moment main moved. Narrowed in round 6 to
-expressions actually USED as a store root; merged tree now reads 20 == 20.
-
-**Audit ladder, six rounds, every round's findings caused by the previous round's fixes:**
-| round | outcome |
+| step | status |
 |---|---|
-| 1 (full) | 4 🟡 — shadowed-mount fstype, ENOSPC on a full tmpfs, a spelled membership scanner, files-not-fixtures |
-| 2 | all 9 claims verified; 3 new 🟡 — my three fixes shipped **unpinned** and all survived mutation |
-| 3 | 1 🔴 **caused by my round-3 fix**: I lowered the floor below the payload |
-| 4 | 1 MEDIUM — the peak constant was pinned to nothing |
-| 5 | F1 (the derivation under-reported silently in 3 shapes) + my replacement measurement was also wrong |
-| 6 | merge + all of round 5's findings; **delta not yet audited** |
+| post the round-6 claims block | ❌ never posted — **now posted late**, `#1219` comment `5513658674` |
+| audit the delta `1eafc40c..734cb0bc` | ⏳ **IN FLIGHT** — dispatched this session, worktree-isolated, report-only |
+| re-run both gate tiers on the merged tree | ✅ satisfied post-merge by Tekton's `main` pipeline |
+| merge | ✅ done |
 
-**🔴 Rank 1's baseline is now known to be measuring the wrong thing — see rank 1.**
+🔴 **THE MERGED TREE IS GREEN ON BOTH REQUIRED TIERS — measured on the merge commit itself,
+not on the branch.** `b4fde334`: `tekton/devrc-main-pytests collected=20491 passed=20488
+skipped=3 failed=0` (floor 18404); `tekton/devrc-main-nodetests tests=1449 pass=1449 fail=0`
+(floor 1367). Identical on the current head `220e7893`. This is *stronger* than the branch-green
+the doc worried about — `strict:false` meant the branch check never covered the merged tree — so
+the outstanding item is **an unclosed audit ladder, not a known-broken `main`.**
+
+🔴 **The branch head IS the live content — verified by blob OID, not assumed.** All five files
+are byte-identical between `734cb0bc` (branch, a MERGE commit) and `b4fde334` (squash on main):
+`store_siting.py` `1d968d51`, `test_store_siting_ledger.py` `abad1584`,
+`test_subsystem_store_api.py` `673a70be`, `test_cairn_write.py` `8153a785`,
+`test_cairn_cli.py` `f9c932aa`. So auditing the branch range audits what is deployed.
+
+**Round-6 delta, correctly sized.** `734cb0bc` is a merge commit (parents `1eafc40c` and
+`a6e50641`), so the naive `git diff 1eafc40c..734cb0bc` reads 30 files / +7267 — almost all of it
+main flowing in, authored by no round. The round-6 **authored** delta is ~186 lines:
+`store_siting.py` +28, `test_store_siting_ledger.py` +158, plus a slice of
+`test_subsystem_store_api.py` that must be separated from main's own heavy movement of that file.
+
+**No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for this
+session. An unknown session id answers `200` with an empty array, so that cannot distinguish
+"touched no task" from "wrong id". No `clawgate-task:` field written; this is not a clean bill.
 
 ## Open investigations — live diagnosis state
 
@@ -152,38 +161,80 @@ Not a bug — a measurement that would mislead if run as written.
   `python3 scripts/audit-dispatch.py 1219 --round 6` and dispatch it over
   `1eafc40c..734cb0bc`.
 
-## Next steps (ranked)
-🔴 Numbering is STABLE — `claim-work --slug-for <this doc> <rank>` derives from it.
+### The round-6 delta audit — dispatched, verdict not yet in
+- **Symptom + exact repro:** not a bug — an owed verification. Rounds 1–5 EACH found a defect
+  introduced by the PREVIOUS round's fix, five for five; round 6's fixes shipped as `734cb0bc`
+  and no round ever read them. The code is now on `main`.
+- **Observed (with values):** `#1219` carries 5 comments; before this session the newest was the
+  **round-5** claims block (`2026-09-02T07:17:20Z`). No `audit-claims round=6` block existed, and
+  `audit-dispatch.py` correctly REFUSES a delta brief without one. Brief assembled after posting:
+  15,465 chars, `--round 6`, range `1eafc40c..734cb0bc`.
+- **Ruled out:** *"the merged tree is unvalidated"* — both required tiers are green on the merge
+  commit with real counts (20488 passed / 1449 passed), quoted in State now. via: measurement
+- **Ruled out:** *"auditing the branch audits something not live"* — all five blob OIDs are
+  identical between `734cb0bc` and `b4fde334`. via: command
+- **Ruled out:** *"six rounds is enough, stop counting"* — the stop rule is keyed on FINDINGS,
+  and round 6's findings were never looked at by anyone. via: doc
+- **Leading hypothesis:** the two places round 6 introduced NEW code are where a finding is most
+  likely — F8's narrowing predicate (a guard that was too wide, now possibly too narrow, and
+  keyed on a *root-ish variable name*, i.e. SPELLED rather than structural) and the summing
+  derivation, whose conservatism rests on an argument about `-n 4 --dist loadfile` rather than a
+  measurement.
+- **Next probe:** read the dispatched auditor's verdict. If CLEAN the ladder ENDS — do not run a
+  seventh round to confirm it. If it finds anything, the remedy is a **fix-forward PR against
+  `main`**, never a push to the merged branch.
 
-1. **Measure whether the flake rate actually dropped** — devrc, no files. 🔴 **DO NOT run
-   it against the recorded baseline as-is**: that baseline (5 store-api failures among 14
-   open PRs, 2026-09-01) was measured when only 1 of 3 files was sited, so a flat result
-   would be uninterpretable. Measure AFTER `#1219` merges and record a fresh baseline
-   date. Probe in the first Open-investigations block.
+### Rank 1's flake-rate probe is still not measurable — now for a NEW reason
+- **Symptom + exact repro:** running the rank-1 probe today samples a population that mostly does
+  not contain the fix, so a flat rate would again be uninterpretable.
+- **Observed (with values):** head-commit dates of the 5 newest open PRs against the
+  `b4fde334` merge at 16:48:50Z — `#1233` 16:11:09Z, `#1232` 15:40:05Z, `#1230` 17:23:43Z,
+  `#1227` 01:39:33Z, `#1209` 00:52:53Z. Only **1 of 5** postdates the merge.
+- **Ruled out:** *"the merge unblocked rank 1"* — `strict:false` on `main` means a PR branch is
+  not required to be up to date, so a branch built before `b4fde334` does not carry the fix at
+  all, whatever its head date. via: measurement
+- **Leading hypothesis:** the probe becomes meaningful once a substantial fraction of open PRs
+  have been pushed or rebased after `b4fde334`. Days, not hours.
+- **Next probe:** re-run the date comparison above; when most heads postdate `b4fde334`, run the
+  probe from the doc's earlier block and **record the new baseline date beside the count**.
+
+## Next steps (ranked)
+🔴 Numbering is STABLE — `claim-work --slug-for <this doc> <rank>` derives from it. Rank 5 is
+CLAIMED (`gate-flake-store-api-5`) and IN FLIGHT.
+
+1. **Measure whether the flake rate actually dropped** — devrc, no files. 🔴 **Two independent
+   reasons it is still not runnable, and the second is new.** (a) The recorded baseline — 5
+   store-api failures among 14 open PRs, 2026-09-01 — was measured when only **1 of 3** files was
+   sited, so it is not comparable to anything measured now and a flat result would be
+   uninterpretable; a fresh baseline is required, not a comparison to that one. (b) It is no
+   longer "wait for `#1219` to merge" (it merged) but "wait for open PRs to actually carry the
+   fix": only 1 of the 5 newest open PR heads postdates `b4fde334`, and `strict:false` means an
+   older branch does not contain it at all. Re-check the dates before running; record a fresh
+   baseline date beside the count.
    forcing: gate — a required check has been failing PRs whose diff cannot reach it.
 2. **Fix the hung-server classifier's path sensitivity** — devrc,
    `scripts/tests/test_subsystem_store_api.py`, `_HUNG_SERVER_RULES` /
-   `_why_the_server_did_not_answer`. Scan frames' SOURCE LINES, not filenames. Full
-   reproduction in the doc's earlier Open-investigations block; documented in-file on
-   `main`, so code and comment agree today.
-   forcing: gate — it makes the gate's own diagnostic lie, and agent worktrees are
-   routinely named after the bug being fixed, which is how it was found.
+   `_why_the_server_did_not_answer`. Scan frames' SOURCE LINES, not filenames. Reproduction in the
+   doc's earlier Open-investigations block; documented in-file on `main`. **Unblocked and
+   self-contained — the best next item if rank 5's audit comes back clean.**
+   forcing: gate — it makes the gate's own diagnostic lie, and agent worktrees are routinely
+   named after the bug being fixed, which is how it was found.
 3. **Decide the `#1166` claim-work flake** —
-   `test_release_deletes_the_ref_and_the_slug_becomes_claimable_again` failed a docs-only
-   PR. Hits a real git remote, so plausibly the same wall-clock shape, but UNMEASURED —
-   no reproducer, no control. Start by checking whether it failed on other shas.
+   `test_release_deletes_the_ref_and_the_slug_becomes_claimable_again` failed a docs-only PR.
+   Hits a real git remote, so plausibly the same wall-clock shape, but UNMEASURED. Start by
+   checking whether it failed on other shas.
    forcing: gate — same required check, different test, red on a docs-only diff.
-4. **Tell the authors of `#1194` and `#1177` their reds are real** — not this effort's
-   work. `#1194` needs its script to satisfy the runtime-shebang scanner; `#1177` needs a
-   `claude/skill-tiers.json` entry in the same commit. Both were misread as flakes before
-   triage.
+4. **Tell the authors of `#1194` and `#1177` their reds are real** — both still OPEN with
+   `ci=pending` as of 2026-09-02T17:24Z. `#1194` needs its script to satisfy the runtime-shebang
+   scanner; `#1177` needs a `claude/skill-tiers.json` entry in the same commit.
    forcing: none — someone else's PRs; recorded so the misreading is not repeated.
-5. **Audit round 6's delta, then merge `#1219`** — IN FLIGHT: `innovation-upstream/devrc#1219`.
-   Delta is `1eafc40c..734cb0bc`. Claims block not yet posted. If that round is clean the
-   ladder ENDS (do not run a seventh to confirm); then re-run BOTH gate tiers on the
-   merged tree — the current Tekton green is on the branch and `strict` is false — and
-   merge.
-   forcing: gate — the PR is the mitigation for a required check that fails unrelated PRs.
+5. **Close the audit ladder on `#1219`** — IN FLIGHT, claimed as `gate-flake-store-api-5`.
+   The claims block is posted (`#1219` comment `5513658674`); the delta audit over
+   `1eafc40c..734cb0bc` is dispatched and its verdict is not yet in. **A CLEAN verdict ENDS the
+   ladder — do not run a seventh round to confirm it.** Any finding is a fix-forward PR against
+   `main`, never a push to the merged branch. Release the claim when the verdict lands.
+   forcing: gate — unaudited code from an unclosed ladder is live on the branch every PR merges
+   into.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A CHANGE THAT COULD SILENTLY DO NOTHING NEEDS A TEST THAT FAILS WHEN IT DOES
@@ -268,24 +319,61 @@ Not a bug — a measurement that would mislead if run as written.
   after only creating its worktree; `SendMessage` to its id resumed it with the brief
   restated, rather than paying for a fresh dispatch.
 
+- 🔴 **A HANDOFF DOC CAN MERGE AFTER THE PR IT DESCRIBES, SO IT IS BORN STALE.** `#1231` (this
+  doc) merged 17 minutes after `#1219`, and shipped saying `#1219` was OPEN with rank 5 as
+  in-flight work. The next session's kickoff message repeated it, and the whole item was already
+  done. **The doc's own commit timestamp is not evidence of its currency** — reconcile the PRs it
+  names against `gh pr view` before acting, which is exactly what `resume-state.sh` DRIFT does and
+  what caught this one. Writing the doc last does not help; merging it last is the problem.
+- 🔴 **A MERGE COMMIT MAKES `git diff <base>..<head>` A MEASUREMENT OF THE WRONG THING.**
+  `734cb0bc` has parents `1eafc40c` and `a6e50641`, so the "delta since round 5" reads 30 files /
+  +7267 — main flowing in, authored by no round. Handing that to an auditor turns a delta re-audit
+  into a blind full audit that then reads as covered. **Size the authored delta first** (~186
+  lines here), and tell the auditor which files main moved underneath it.
+- 🔴 **BEFORE AUDITING A MERGED PR'S BRANCH, PROVE THE BRANCH IS THE LIVE CONTENT.** A squash
+  merge produces a different commit with different parents, so ancestry says nothing. Compare
+  **blob OIDs per file** between the branch head and the squash commit; all five matched here, and
+  that is what makes the branch range a valid handle on what is deployed.
+- 🔴 **"BOTH TIERS GREEN ON THE MERGED TREE" IS AVAILABLE FOR FREE AFTER THE MERGE, AND IS
+  STRONGER THAN THE PRE-MERGE CHECK.** Tekton runs `devrc-main-pytests`/`devrc-main-nodetests` on
+  `main` itself, so the merge commit carries a real merged-tree verdict with counts. The doc spent
+  effort worrying that `strict:false` left the merged tree ungated; post-merge, `gh api
+  repos/.../commits/<merge-sha>/status` answers it directly. That is a *detector*, not a
+  substitute for gating before the merge.
+- ⚠ **`audit-dispatch.py --round N` warns when the newest claims block is already `round=N`.**
+  That warning is a generic re-audit guard and is EXPECTED in the normal flow: the `round=N` block
+  states what round N fixed, and round N's audit is what checks it. Read the range it printed
+  before treating the warning as a problem.
+- ⚠ **A branch name from a previous round of the same effort will still exist locally and on
+  origin.** `git worktree add -b docs/handoff-gate-flake-r6` failed because that branch was
+  `#1231`, already merged. Pick a fresh name rather than reusing or deleting.
+
 ## How to verify
 ```bash
-# the PR, and that its checks are on the CURRENT head
-gh pr view 1219 --repo innovation-upstream/devrc --json mergeable,mergeStateStatus,headRefOid
-gh api "repos/innovation-upstream/devrc/commits/$(gh pr view 1219 --repo innovation-upstream/devrc \
-  --json headRefOid --jq .headRefOid)/status" --jq '.statuses[]|"\(.context) \(.state): \(.description)"'
+# #1219 is merged, and the merged tree is green on BOTH required tiers — by content, not ancestry
+gh pr view 1219 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
+gh api repos/innovation-upstream/devrc/commits/b4fde334223ad594308295802f1918b07c101493/status \
+  --jq '.state, (.statuses[]|"\(.context) \(.state): \(.description)")'   # both success, real counts
 
-# the merged-tree ratchet — the number that caught main's new site
-git -C $DEVRC worktree add /tmp/v6 fix/consolidate-store-siting && \
-  nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
-  /tmp/v6/scripts/tests/test_store_siting_ledger.py -q -p no:cacheprovider   # 8 passed
+# the branch head is the live content (all five must print SAME)
+for f in scripts/testlib/store_siting.py scripts/tests/test_store_siting_ledger.py \
+         scripts/tests/test_subsystem_store_api.py scripts/tests/test_cairn_write.py \
+         scripts/tests/test_cairn_cli.py; do
+  a=$(git -C $DEVRC rev-parse "734cb0bc:$f"); b=$(git -C $DEVRC rev-parse "b4fde334:$f")
+  [ "$a" = "$b" ] && echo "SAME  $f" || echo "DIFF  $f"
+done
 
-# the four affected files on the merged tree
-nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
-  /tmp/v6/scripts/tests/{test_store_siting_ledger,test_cairn_write,test_cairn_cli,test_subsystem_store_api}.py \
-  -q -p no:cacheprovider                                                      # 782 passed
+# the round-6 claims block exists (audit-dispatch REFUSES a delta brief without it)
+gh pr view 1219 --repo innovation-upstream/devrc --json comments \
+  --jq '[.comments[]|select(.body|contains("audit-claims round=6"))]|length'   # 1
+
+# rank 1 is still not measurable — how many open PR heads postdate the merge
+for p in $(gh pr list --repo innovation-upstream/devrc --state open --json number --jq '.[].number'); do
+  gh api "repos/innovation-upstream/devrc/commits/$(gh pr view $p --repo innovation-upstream/devrc \
+    --json headRefOid --jq .headRefOid)" --jq '.commit.committer.date'
+done | sort | tail -5      # compare against 2026-09-02T16:48:50Z
 ```
-🔴 Run **both** tiers before claiming a merge is safe, and name the tier and base sha.
-Build the two `nix` checks **ONE AT A TIME**, backgrounded, redirected to a file, never
-piped. The current Tekton green is a claim about the PR BRANCH; `strict` is false, so
-gating the merged tree is still manual.
+🔴 Do NOT run the tests from a worktree whose path contains `fsync`, `flock`, `_EntryLock` or
+`_audit_lock` — the classifier substring-matches rendered tracebacks, which include FILENAMES,
+and the failure is the PATH, not the code (rank 2). Clear `__pycache__` or set
+`PYTHONDONTWRITEBYTECODE=1` before trusting any control.
