@@ -25,10 +25,13 @@ claims and both are needed.
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 TESTS = REPO / "scripts" / "tests"
+sys.path.insert(0, str(REPO / "scripts"))
+from testlib import store_siting  # noqa: E402
 
 # The ledger. Every file here calls `api.build_server`, therefore writes through
 # `server.py:_replace_bytes`, therefore fsyncs inside the request — and must take its
@@ -324,3 +327,128 @@ def test_the_inline_disk_rooted_store_sites_do_not_GROW():
         "predicate narrowed, widen it back — lowering the constant would bank a "
         "coverage loss as if it were progress."
     )
+
+
+# 🔴 THE SECOND RATCHET, AND IT CLOSES THE ONE HOLE THE FIRST ONE'S OWN LESSON NAMES.
+# `store_siting._LARGEST_STORE_BYTES` is the peak a store reaches on tmpfs, and
+# `_MIN_FREE_BYTES` must clear it. Round 4 asserted one constant against the other —
+# two literals sixteen lines apart in one file, checked by a test whose NAME claims to
+# know "the largest store this suite builds" while its body knows nothing about the
+# suite. An audit measured the consequence: grow the concurrency fixture from
+# `range(303)` to `range(1200)`, touch neither constant, and every guard stays green
+# while a /dev/shm of 4500k dies `OSError: [Errno 28]` — the ENOSPC hazard this whole
+# module exists to close, re-armed through the guard added to prevent it.
+#
+# So the requirement is DERIVED from the fixture that produces it.
+_STORE_PAGE_BYTES = 4096
+# `_populate_source_store` seeds this many entries before the bulk loop.
+_SEEDED_ENTRIES = 3
+# Directories, and slack for a fixture that grows by a few files rather than a loop.
+_FIXTURE_SLACK_PAGES = 16
+
+
+def _biggest_fixture_entry_count() -> int | None:
+    """Entries in the largest store fixture, read from the source, or None.
+
+    Returns None rather than 0 when it cannot find the loop: a zero would make the
+    requirement trivially satisfiable, which is the failure mode this exists to stop.
+    """
+    path = TESTS / "test_cairn_cli.py"
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return None
+    # 🔴 ONLY loops that WRITE ENTRIES. A bare max over every `range(N)` in the file
+    # is wrong and was measured wrong: it picked up an unrelated `range(60_000)` that
+    # builds a large string, demanding a 245 MB floor. The discriminator is a
+    # `write_text` call inside the loop body — verified to separate the 303-entry
+    # store loop (True) from `range(60_000)` and `range(80)` (both False).
+    best = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.For):
+            continue
+        it = node.iter
+        if not (
+            isinstance(it, ast.Call)
+            and isinstance(it.func, ast.Name)
+            and it.func.id == "range"
+            and len(it.args) == 1
+            and isinstance(it.args[0], ast.Constant)
+            and isinstance(it.args[0].value, int)
+        ):
+            continue
+        writes = any(
+            isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Attribute)
+            and c.func.attr == "write_text"
+            for c in ast.walk(node)
+        )
+        if not writes:
+            continue
+        n = it.args[0].value
+        if best is None or n > best:
+            best = n
+    return None if best is None else best + _SEEDED_ENTRIES
+
+
+def test_the_largest_store_constant_still_covers_the_biggest_fixture():
+    entries = _biggest_fixture_entry_count()
+    assert entries is not None, (
+        "could not find the bulk `range(N)` loop in test_cairn_cli.py. That is a "
+        "BROKEN SCAN, not a satisfied requirement — fix the scan rather than the "
+        "constant, or the floor silently stops being checked against anything."
+    )
+    required = entries * _STORE_PAGE_BYTES + _FIXTURE_SLACK_PAGES * _STORE_PAGE_BYTES
+    assert required <= store_siting._LARGEST_STORE_BYTES, (
+        f"the biggest store fixture is now {entries} entries, needing "
+        f"{required:,} page-allocated bytes, but _LARGEST_STORE_BYTES is "
+        f"{store_siting._LARGEST_STORE_BYTES:,}. Raise it AND re-check "
+        f"_MIN_FREE_BYTES ({store_siting._MIN_FREE_BYTES:,}), which must stay above "
+        "it. tmpfs charges whole 4 KiB pages, so entry COUNT drives this, not text "
+        "size — apparent bytes understate the cost ~17x."
+    )
+
+
+def test_the_fixture_scan_can_actually_SEE_a_range_loop():
+    # Positive control: without it, a scan that matched nothing would return None...
+    # which the test above does catch — but a scan that matched only a TINY range
+    # elsewhere would silently under-report and pass. Pin that it finds a big one.
+    entries = _biggest_fixture_entry_count()
+    assert entries is not None and entries >= 100, (
+        f"the fixture scan found {entries} entries — expected the ~300-entry "
+        "concurrency fixture. The scan, not the constant, is what to fix."
+    )
+
+
+def test_the_string_literal_half_of_the_membership_scan_is_LOAD_BEARING(tmp_path: Path):
+    """A store server stood up inside a `sys.executable -c` script.
+
+    The AST scan cannot see a call inside a string, and seven test files here
+    already drive that shape. Disabling the Constant half left the ledger suite
+    at 99 passed — the widening reverted green, so nothing pinned it.
+    """
+    import test_store_siting_ledger as led
+
+    probe = tmp_path / "test_probe_subprocess_server.py"
+    probe.write_text(
+        "import textwrap\n"
+        'SCRIPT = textwrap.dedent("""\n'
+        "    build_server(store_root=arg)\n"
+        '""")\n'
+    )
+    assert _calls_build_server(probe), (
+        "a build_server( call inside a string literal must count as standing up "
+        "the server — otherwise a subprocess-driven test is silently dropped from "
+        "the ledger, which is worse than the comment false positive this replaced"
+    )
+
+def test_a_hash_COMMENT_mentioning_build_server_is_still_not_a_call(tmp_path: Path):
+    """The mirror. Widening for strings must not undo the false-positive fix."""
+    import test_store_siting_ledger as led
+
+    probe = tmp_path / "test_probe_comment_only.py"
+    probe.write_text(
+        "# this file deliberately never calls build_server(...) itself\n"
+        "def test_x():\n    assert True\n"
+    )
+    assert not _calls_build_server(probe)

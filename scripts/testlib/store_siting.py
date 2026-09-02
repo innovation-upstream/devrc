@@ -70,16 +70,25 @@ _DEFAULT_CANDIDATE = "/dev/shm"
 # one exist.
 _MOUNTS_PATH = "/proc/mounts"
 
-# The largest store this suite builds, in tmpfs PAGE-ALLOCATED bytes. Measured
-# 2026-09-01 by reproducing the 305-entry fixture of
-# `test_cairn_cli.py::TestConcurrentSync::test_ten_concurrent_syncs_never_leave_a_SHORT_cache`:
-# apparent 53,985 B, page-allocated **1,257,472 B (1.199 MiB)**.
+# The largest store this suite builds, in tmpfs PAGE-ALLOCATED bytes.
 #
-# 🔴 APPARENT BYTES UNDERSTATE THIS BY ~23x, and that is what makes the floor easy to
-# set wrong. tmpfs charges whole 4 KiB pages, so 305 small entries cost 1.2 MiB of
-# tmpfs however little text they contain. A floor reasoned from file sizes lands an
-# order of magnitude low.
-_LARGEST_STORE_BYTES = 1_257_472
+# 🔴 DERIVED, NOT TRUSTED: this literal is checked against the fixture that produces
+# it by `test_store_siting_ledger.py::test_the_largest_store_constant_still_covers_
+# the_biggest_fixture`, which reads the `range(N)` out of `test_cairn_cli.py`. Without
+# that, growing the fixture silently re-opens the ENOSPC hazard with every guard green
+# — MEASURED by an audit: `range(303)` -> `range(1200)`, all guards pass, and a
+# /dev/shm of 4500k then dies `Errno 28`. A constant checked only against another
+# constant is not a guard.
+#
+# Measured 2026-09-01 against the REAL fixture (`_populate_source_store` + 303 bulk
+# entries = 306 files): apparent 72,602 B, page-allocated 1,265,664 B, ratio 17.4x.
+# 🔴 APPARENT BYTES UNDERSTATE TMPFS COST ~17x, which is what makes this easy to get
+# wrong: tmpfs charges whole 4 KiB pages, so 306 small entries cost ~1.2 MiB however
+# little text they hold. A floor reasoned from `st_size` lands an order of magnitude
+# low, and an earlier revision of this comment did exactly that — it quoted 53,985 B
+# and 23x from a SYNTHETIC store rather than this fixture, i.e. it measured something
+# else and labelled it this.
+_LARGEST_STORE_BYTES = 1_318_912
 
 # Free space a candidate must have before we will site a store on it: the measured
 # peak above, with better than 3x margin.

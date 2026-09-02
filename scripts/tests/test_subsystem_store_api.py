@@ -16444,8 +16444,10 @@ class TestTheSitingRULESThemselvesArePinned:
 
     An earlier header read "EVERY FIX IN THIS MODULE HAS A TEST" and that is
     FALSE: dropping the write probe, the `is_dir()` check, or the tmpfs `rmtree`
-    cleanup each SURVIVES this suite (99 passed). The scoped sentence below was
-    accurate; the header was what a reader took away, which is the half that
+    cleanup each still SURVIVES. (That header also carried a passed-count, which
+    the very commit adding tests to this class falsified — a live count in a
+    docstring is stale the moment the class grows, so it is gone rather than
+    re-stated.) The header is what a reader takes away, which is the half that
     stops anyone looking.
 
     Audit round 2 ran a battery over the 105 tests that touch `store_siting` and
@@ -16632,45 +16634,10 @@ class TestTheSitingRULESThemselvesArePinned:
         )
         # And an upper bound, because too HIGH silently disables the whole module.
         # Generous: this only has to catch an order-of-magnitude mistake, not tune it.
-        assert store_siting._MIN_FREE_BYTES <= 64 * 1024 * 1024, (
+        # `<`, not `<=`: 64 MiB exactly is the value the message below calls
+        # fatal, and `f_bavail` is never the full mount size anyway.
+        assert store_siting._MIN_FREE_BYTES < 64 * 1024 * 1024, (
             f"_MIN_FREE_BYTES ({store_siting._MIN_FREE_BYTES:,}) exceeds a container's "
             "default 64Mi /dev/shm, so every store would fall back to disk and this "
             "module would be inert with the suite green"
         )
-
-    def test_the_string_literal_half_of_the_membership_scan_is_LOAD_BEARING(
-        self, tmp_path: Path
-    ):
-        """A store server stood up inside a `sys.executable -c` script.
-
-        The AST scan cannot see a call inside a string, and seven test files here
-        already drive that shape. Disabling the Constant half left the ledger suite
-        at 99 passed — the widening reverted green, so nothing pinned it.
-        """
-        import test_store_siting_ledger as led
-
-        probe = tmp_path / "test_probe_subprocess_server.py"
-        probe.write_text(
-            "import textwrap\n"
-            'SCRIPT = textwrap.dedent("""\n'
-            "    build_server(store_root=arg)\n"
-            '""")\n'
-        )
-        assert led._calls_build_server(probe), (
-            "a build_server( call inside a string literal must count as standing up "
-            "the server — otherwise a subprocess-driven test is silently dropped from "
-            "the ledger, which is worse than the comment false positive this replaced"
-        )
-
-    def test_a_hash_COMMENT_mentioning_build_server_is_still_not_a_call(
-        self, tmp_path: Path
-    ):
-        """The mirror. Widening for strings must not undo the false-positive fix."""
-        import test_store_siting_ledger as led
-
-        probe = tmp_path / "test_probe_comment_only.py"
-        probe.write_text(
-            "# this file deliberately never calls build_server(...) itself\n"
-            "def test_x():\n    assert True\n"
-        )
-        assert not led._calls_build_server(probe)
