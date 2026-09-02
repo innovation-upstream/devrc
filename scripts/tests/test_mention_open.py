@@ -87,13 +87,26 @@ def test_a_bare_number_with_no_repo_context_offers_only_clawgate():
     picker for a choice that does not exist."""
     _span, cands = MO.resolve("#370")
     assert [(c["platform"], c["url"]) for c in cands] == [
-        ("clawgate", "https://clawgate.zacx.dev/tasks#task-370")]
+        ("clawgate", "https://clawgate.zacx.dev/tasks/370")]
+
+
+def test_the_clawgate_candidate_opens_a_page_not_a_fragment():
+    """🔴 Regression guard against a partial revert to `…/tasks#task-<n>`. The
+    fragment form only resolved for a card the board had already rendered; the
+    details page at `/tasks/{id}` has no such precondition, so a `#` reappearing
+    anywhere in the openable URL is a defect, not a cosmetic difference. Pinned
+    as an ABSENCE because `…/tasks/370#task-370` would satisfy a substring or
+    `endswith` check on the new form."""
+    _span, (clawgate,) = MO.resolve("#370")
+    assert clawgate["platform"] == "clawgate"
+    assert "#" not in clawgate["url"], clawgate["url"]
+    assert clawgate["url"].endswith("/tasks/370")
 
 
 def test_a_bare_number_with_a_repo_context_offers_both():
     _span, cands = MO.resolve("#370", default_repo="civitai/talos-infra")
     assert [(c["platform"], c["url"]) for c in cands] == [
-        ("clawgate", "https://clawgate.zacx.dev/tasks#task-370"),
+        ("clawgate", "https://clawgate.zacx.dev/tasks/370"),
         ("github", "https://github.com/civitai/talos-infra/issues/370"),
     ]
 
@@ -136,7 +149,7 @@ def test_picker_rows_show_the_platform_and_the_url():
     rows = MO.picker_rows(cands)
     assert len(rows) == 2
     assert rows[0].startswith("clawgate task 370 ")
-    assert rows[0].endswith("https://clawgate.zacx.dev/tasks#task-370")
+    assert rows[0].endswith("https://clawgate.zacx.dev/tasks/370")
     assert rows[1].endswith("https://github.com/civitai/talos-infra/issues/370")
 
 
@@ -180,7 +193,7 @@ def test_an_ambiguous_click_prints_every_candidate():
     r = _run("--print", "--no-discovery", "--default-repo", "civitai/talos-infra", "#370")
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines() == [
-        "https://clawgate.zacx.dev/tasks#task-370",
+        "https://clawgate.zacx.dev/tasks/370",
         "https://github.com/civitai/talos-infra/issues/370",
     ]
 
@@ -239,7 +252,16 @@ def test_an_ambiguous_click_measures_then_shows_the_picker(spy):
     assert spy[0] == "tmux"
     assert "discover" in spy
     assert ("pick", 2) in spy
-    assert spy[-1] == ("open", "https://clawgate.zacx.dev/tasks#task-370")
+    assert spy[-1] == ("open", "https://clawgate.zacx.dev/tasks/370")
+
+
+def test_a_multi_digit_clawgate_id_round_trips_to_the_click(spy):
+    """A five-digit id must arrive at `open` INTACT — the widest id the bare-`#`
+    pattern admits (`_NUM = \\d{1,5}`), and distinct from every other id in this
+    file, so a mutant that truncates the id or reuses a neighbouring value cannot
+    land on the expected string by accident."""
+    assert MO.main(["#10593"]) == 0
+    assert spy[-1] == ("open", "https://clawgate.zacx.dev/tasks/10593")
 
 
 def test_a_dismissed_picker_opens_nothing_and_is_not_an_error(spy, monkeypatch):
