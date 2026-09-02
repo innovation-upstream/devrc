@@ -78,7 +78,8 @@ Markdown, so prose is surfaced verbatim via Read and reads well in a diff.
 ## How the recon brief reports this
 
 `service_recon.py` prints one `index:` line plus the three surfaced sections, in
-schema order. Its statuses come from `subsystem_recall.recall`, unchanged:
+schema order. Every status below except the last comes from
+`subsystem_recall.recall`, unchanged:
 
 | line | meaning |
 |---|---|
@@ -88,9 +89,19 @@ schema order. Its statuses come from `subsystem_recall.recall`, unchanged:
 | `index: AMBIGUOUS in <scope> — a.md \| b.md` | 🔴 more than one candidate; **pick one, never guess** — no body is surfaced |
 | `index: store-missing` | the store root does not exist on this host |
 | `index: not-attempted` | 🔴 **no root could be examined**, so no scope was derivable and the store was never asked. NOT a miss. |
+| `index: store-unstamped — the index could not be read: …` | 🔴 **the DEFAULT read store carries no `.sync-stamp`, so nothing was read.** Not from `recall` — `service_recon._resolve_store` refuses before asking. Run `cairn sync`, or pass `--store <path>` to read a directory deliberately. |
 
-That last row is the one to read carefully: `not-attempted` and `ref-absent` both
-show "nothing from the index", and only one of them is a finding.
+That `not-attempted` row is the one to read carefully: it and `ref-absent` both
+show "nothing from the index", and only one of them is a finding. `store-unstamped`
+is a third such shape, and also not a finding about the service.
+
+🔴 **A read store that CAN date itself prints its date, as `stamp:` lines
+directly under the `index:` line** (`synced=`, `revision=`, `snapshot=`,
+`entries=`, `coverage=` — `.sync-stamp` verbatim but for a trailing-whitespace
+strip, no age computed). **The refusal above covers UNDATEABLE, never STALE**: a
+cache last synced three days ago serves a `HIT` that reads exactly like a fresh
+one, so the stamp lines are the only thing in the brief that says how old it is.
+No stamp lines means the store carried no stamp — never that it is fresh.
 
 🔴 **`## What it is` is surfaced on the BODY paths only, never on an index row.**
 Until 2026-08-21 no BRIEFING path printed it — `subsystem_recall` left it out of

@@ -553,6 +553,19 @@ class Brief:
     stringified its own `store_root=None` sentinel — which is the exact question
     this field exists to answer, answered with a word.
     """
+    store_stamp: tuple[str, ...] = ()
+    """The read store's `.sync-stamp` lines, UNPARSED — HOW FRESH the index is.
+
+    🔴 THE REFUSAL DOES NOT COVER STALENESS, SO THIS FIELD IS NOT DECORATION.
+    `INDEX_UNSTAMPED` fires only when a store cannot date itself at ALL. A cache
+    stamped three days ago — pod down, `cairn sync` exiting 4 with its warning on
+    STDERR, `;` correctly letting the recon run anyway — is served in full, and
+    for one round the text brief printed `HIT (from index)` with no freshness
+    field anywhere in it. That is a store that cannot say how fresh it is serving
+    as if current: this change's own thesis, one layer up. Empty when the store
+    carries no stamp (a refusal, or an explicitly-named unstamped directory) —
+    nothing is invented.
+    """
     notes: tuple[str, ...] = field(default=())
 
     @property
@@ -845,8 +858,10 @@ def index_scopes(loc: LocateResult) -> tuple[tuple[str, str], ...]:
     return tuple(out)
 
 
-def _resolve_store(store_root: str | Path | None) -> tuple[Path, IndexResult | None]:
-    """`(root, refusal)` — ONE decision site for "which store does recon read?".
+def _resolve_store(
+    store_root: str | Path | None,
+) -> tuple[Path, IndexResult | None, tuple[str, ...]]:
+    """`(root, refusal, stamp)` — ONE decision site for "which store does recon read?".
 
     `store_root=None` is the DEFAULT resolution and is REFUSED when the store
     carries no snapshot stamp: an undateable store is exactly what the frozen
@@ -856,12 +871,18 @@ def _resolve_store(store_root: str | Path | None) -> tuple[Path, IndexResult | N
 
     The refusal is an `IndexResult`, not an exception, because `recon` has four
     other sections to print and none of them depend on the index.
+
+    🔴 THE STAMP IS RETURNED BECAUSE THE REFUSAL DOES NOT COVER STALENESS. It
+    fires on an UNDATEABLE store only; a cache stamped three days ago is served,
+    correctly and in full — and for one round this file served it with no
+    freshness field anywhere in the text brief, which is the same shape as the
+    defect this module exists to kill, one layer up. The stamp is read for an
+    EXPLICIT store too: `--store <path>` is permissive about the refusal, not a
+    request to hide a date the directory is carrying.
     """
-    if store_root is not None:
-        return Path(store_root), None
-    resolved = _read_store.resolve_read_store()
-    if resolved.stamped:
-        return resolved.root, None
+    resolved = _read_store.resolve_read_store(store_root)
+    if store_root is not None or resolved.stamped:
+        return resolved.root, None, tuple(resolved.stamp or ())
     return resolved.root, IndexResult(
         INDEX_UNSTAMPED,
         detail=(
@@ -870,7 +891,7 @@ def _resolve_store(store_root: str | Path | None) -> tuple[Path, IndexResult | N
             f"re-run, or pass --store <path>. Nothing was checked — this is not "
             f"'nothing recorded'."
         ),
-    )
+    ), ()
 
 
 #: Prefix on `Brief.store_root` when the store was resolved but NOT read. It is
@@ -923,7 +944,7 @@ def read_index(
     live surface, not dead code — it is pinned by
     `TestServiceReconDegradesGracefully::test_read_index_*` rather than by luck.
     """
-    store_root, refusal = _resolve_store(store_root)
+    store_root, refusal, _stamp = _resolve_store(store_root)
     if refusal is not None:
         return refusal
     if isinstance(loc, LocateResult):
@@ -1004,11 +1025,12 @@ def _read_index_one(
 
     `store_root=None` goes through the SAME `_resolve_store` the loop above uses,
     for the benefit of a direct caller. The loop always passes a resolved root,
-    so the second resolution is a no-op there rather than a second decision —
-    which means, exactly as in `read_index`, that this branch is reachable ONLY
-    by a direct caller and must be pinned by a test that is one.
+    so the second call makes no second DECISION (it re-reads that directory's
+    stamp and discards it; only `recon` renders one) — which means, exactly as in
+    `read_index`, that this branch is reachable ONLY by a direct caller and must
+    be pinned by a test that is one.
     """
-    store_root, refusal = _resolve_store(store_root)
+    store_root, refusal, _stamp = _resolve_store(store_root)
     if refusal is not None:
         return refusal
     if scope is None:
@@ -1371,9 +1393,11 @@ def recon(
     # stringified it into `Brief.store_root` — which rendered `"None"` for the
     # default, i.e. the field that answers "which store did this read?" answered
     # with the sentinel that means "work it out". `read_index` below receives an
-    # already-resolved Path, so its own `_resolve_store` is a no-op and the
-    # default is still resolved exactly once per recon.
-    resolved_root, store_refusal = _resolve_store(store_root)
+    # already-resolved Path, so its own `_resolve_store` cannot make a second
+    # DECISION — the DEFAULT is resolved exactly once per recon. (It does re-read
+    # that directory's stamp, which is a cheap `open` of one file and not a
+    # second answer: the brief renders the stamp this call returns.)
+    resolved_root, store_refusal, store_stamp = _resolve_store(store_root)
     idx = (
         store_refusal
         if store_refusal is not None
@@ -1410,6 +1434,7 @@ def recon(
     return Brief(service=service, token=loc.token, locate=loc, index=idx, config=cfg,
                  git=log, live=lv,
                  store_root=brief_store_root(resolved_root, store_refusal),
+                 store_stamp=store_stamp,
                  notes=tuple(notes))
 
 
@@ -1483,6 +1508,11 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
     # indistinguishable from "I asked one scope out of three".
     checked = (f" — checked {len(i.scopes_checked)} scope(s): "
                + ", ".join(i.scopes_checked)) if i.scopes_checked else ""
+    # 🔴 WHERE THE FRESHNESS GOES IN. Remembered here, emitted after whichever
+    # branch below runs, so the stamp sits directly under the `index:` line on
+    # EVERY branch rather than on the one someone remembered to edit. A `HIT`
+    # with no date beside it reads as current, whatever its cache's age.
+    index_header_at = len(L)
     if i.status == "hit":
         sens = f" sensitivity={i.sensitivity}" if i.sensitivity else ""
         L.append(f"index: {i.scope}/{i.ref} — HIT (from index){sens}{via}")
@@ -1543,6 +1573,10 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
                  + via
                  + (f" — {i.detail}" if i.detail else "")
                  + checked)
+    # Unparsed, one field per line, and NO AGE COMPUTED — `subsystem_recall`
+    # renders the same lines with the same prefix (`_read_store.stamp_header` is
+    # the one spelling) and `cairn.cache_age` owns the arithmetic.
+    L[index_header_at + 1:index_header_at + 1] = _read_store.stamp_header(b.store_stamp)
 
     # --- config --------------------------------------------------------------
     L.append("")
@@ -1609,6 +1643,9 @@ def brief_json(b: Brief) -> dict:
         "service": b.service,
         "token": b.token,
         "store_root": b.store_root,
+        # Same key as `subsystem_recall --json`: one name for one fact, so a
+        # consumer reading both tools does not need two spellings of "how fresh".
+        "read_store_stamp": list(b.store_stamp),
         "notes": list(b.notes),
         "exit_code": b.exit_code,
         "locate": {

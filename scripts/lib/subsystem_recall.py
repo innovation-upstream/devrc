@@ -3305,7 +3305,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Printed UNPARSED, one field per line, and NOT interpreted: no age is
     # computed here. `recall` documents itself "no clock" and `cairn.cache_age`
     # owns that arithmetic — a second, cheaper age here would be a second answer.
-    stamp_header = [f"  stamp: {line}" for line in (read_store.stamp or ())]
+    # The PREFIX comes from `_read_store`, not from an f-string here: the recon's
+    # `index:` block prints the same lines, and two copies of the spelling is how
+    # one renderer quietly stops matching what a skill tells a reader to relay.
+    stamp_header = list(_read_store.stamp_header(read_store.stamp))
 
     # `--limit` is what selects the pre-digest full-body mode. Nothing else does:
     # a default of DEFAULT_ENTRY_LIMIT here would make "the caller asked for a cap"

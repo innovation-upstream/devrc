@@ -22,24 +22,36 @@ whole brief.** `cairn sync` exits **4** whenever the pod is unreachable but a
 usable cache survives (that is `sync`'s contract: its job is to REFRESH, so a
 stale cache is a failed refresh). Under `&&` that non-zero short-circuits, the
 recon never runs, and `/analyze-service` produces **nothing at all** — during an
-outage, when the stamped cache would have served the index block at full
-fidelity. The paragraph below promises "a failed sync costs you the index block,
-never the brief"; `;` is what makes that true.
+outage, when the cache would still have served the index block in full, from its
+last successful sync. The paragraph below promises "a failed sync costs you the
+index block, never the brief"; `;` is what makes that true — and the `stamp:`
+lines it also promises are what stop `;` from trading a loud nothing for a quiet
+stale something.
 
 It performs, in ONE process: resolve the search roots → locate the service →
 read the index (via `subsystem_recall`, the store's one reader) → extract the
 load-bearing config knobs → `git log` the located directories. The recon itself
 is read-only and touches no cluster.
 
-🔴 **The `cairn sync` prefix is what makes the `index:` block current, and the
-recon REFUSES an undateable store rather than serving a stale one.** Since the
-Cairn cutover the pod is the datastore and `~/.claude/analyze-service-index` is a
-FROZEN mirror; the recon now reads the synced cache (`~/.cache/subsystem-store`)
-and, if that cache carries no `.sync-stamp`, prints
+🔴 **The recon refuses a store that cannot DATE itself, and dates the one it
+reads. It does NOT refuse a stale store — nothing here does.** Since the Cairn
+cutover the pod is the datastore and `~/.claude/analyze-service-index` is a
+FROZEN mirror; the recon reads the synced cache (`~/.cache/subsystem-store`) and,
+if that cache carries no `.sync-stamp`, prints
 `index: store-unstamped — the index could not be read: …` and names `cairn sync`.
 That degrades ONE section — roots, config and git log still run — so a failed
 sync costs you the index block, never the brief. `--store <path>` reads a
 directory deliberately and is not refused.
+
+🔴 **So READ THE `stamp:` LINES under `index:` — they are the only thing in the
+brief that says how old it is.** A cache stamped three days ago is served in
+full, and `HIT (from index)` reads exactly the same whether the sync ran a second
+ago or failed all week: the age `cairn sync` computes goes to **stderr**, which
+the brief does not carry. The stamp lines (`synced=`, `revision=`, `snapshot=`,
+`entries=`, `coverage=`) sit directly under the `index:` line, unparsed, with no
+age computed here. **Relay them, or state the sync's outcome, whenever you
+present index content.** Absent stamp lines mean the store carried no stamp,
+never that it is fresh.
 
 Flags you may need — everything else has a default that is deliberate:
 
@@ -76,7 +88,9 @@ steps by hand; if something is missing, raise the matching limit and re-run.
 
 **Provenance honesty:** nuance/pointers are `from index`; roots/locate/config/log
 are `re-derived live`; cluster state is `live @ <context>` or `unverified`. Never
-present index recall as live observation. Keep it dense — `file:line` over prose.
+present index recall as live observation — and `from index` carries a DATE, the
+`stamp:` lines under `index:`; quote it rather than let a three-day-old cache
+read as current. Keep it dense — `file:line` over prose.
 
 🔴 **When the script is not enough.** It locates by path component and reads
 YAML knobs; it does not read code. If the answer is in Go/Python/TS, use the

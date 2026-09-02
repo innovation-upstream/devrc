@@ -40,16 +40,19 @@ disagree with the writer the first time either moved.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 __all__ = [
     "DEFAULT_CACHE_ROOT",
     "SYNC_STAMP",
+    "STAMP_PREFIX",
     "ReadStore",
     "read_store_root",
     "read_stamp",
     "resolve_read_store",
+    "stamp_header",
     "REMEDY",
     "refusal_message",
 ]
@@ -62,6 +65,15 @@ SYNC_STAMP = ".sync-stamp"
 
 #: The one-command remedy, spelled once so every refusal quotes the same thing.
 REMEDY = "cairn sync"
+
+#: How a rendered stamp line is introduced, wherever a reader sees one.
+#:
+#: 🔴 ONE SPELLING, TWO RENDERERS. `subsystem_recall`'s CLI header and
+#: `service_recon`'s `index:` block both print the stamp; when the second was
+#: added it open-coded the same f-string, which is the shape that regenerates the
+#: same drift at every site. A reader (human or agent) is told to relay
+#: "the `stamp:` line", so the token is a wire fact, not a formatting whim.
+STAMP_PREFIX = "  stamp: "
 
 
 @dataclass(frozen=True)
@@ -136,6 +148,17 @@ def resolve_read_store(root: str | Path | None = None) -> ReadStore:
     resolved = Path(root) if root is not None else read_store_root()
     stamp, reason = read_stamp(resolved)
     return ReadStore(root=resolved, stamp=stamp, reason=reason)
+
+
+def stamp_header(lines: Sequence[str] | None) -> tuple[str, ...]:
+    """The stamp's lines as rendered header lines — the ONE spelling.
+
+    Takes the lines rather than a `ReadStore` so a caller that carried the stamp
+    through its own dataclass (`service_recon.Brief.store_stamp`) renders them
+    identically to the one that still holds the `ReadStore`. Still clock-free and
+    still unparsed: it prefixes, and does nothing else.
+    """
+    return tuple(f"{STAMP_PREFIX}{line}" for line in (lines or ()))
 
 
 def refusal_message(prog: str, store: ReadStore) -> str:

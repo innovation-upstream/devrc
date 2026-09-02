@@ -31,6 +31,7 @@ before this file was written: neither shells the CLI, neither calls `rc.main`.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import importlib.util
 import json
 import sys
@@ -114,7 +115,7 @@ def repointed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 # THE WIRE CONSTANTS. One ledger, because this defect kept coming back.
 # =============================================================================
 #
-# 🔴 THIS CLASS EXISTS BECAUSE THE SAME FINDING RECURRED FOUR TIMES.
+# 🔴 THIS CLASS EXISTS BECAUSE THE SAME FINDING RECURRED FIVE TIMES.
 # `SYNC_STAMP`, then `REMEDY` and `DEFAULT_CACHE_ROOT`, then `NOT_READ_PREFIX`
 # and `INDEX_UNSTAMPED` — every one asserted only as `<constant> in <output>`,
 # i.e. the constant agreeing with itself, and every one SURVIVING a rename
@@ -124,25 +125,87 @@ def repointed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 #
 # So the remedy is a LEDGER rather than another one-off pin. Each entry maps a
 # constant to the literal it must equal, and `test_the_ledger_is_two_way` fails
-# when the new module grows a string constant nobody put here — which is the
-# only part that can stop the fifth.
+# when the new module grows a constant nobody put here — which is the only part
+# that can stop the sixth.
 #
-#: `(module, attribute, the literal it MUST equal)`.
-WIRE_CONSTANTS: tuple[tuple[object, str, str], ...] = (
+# 🔴 THE FIFTH HID INSIDE THE LEDGER ITSELF. The sweep was `isupper() and
+# isinstance(value, str)` while its docstring claimed the module's "whole
+# surface" was in scope. MEASURED: `FROZEN_MIRROR = Path.home() / ".claude" /
+# "analyze-service-index"` (a `Path`), `STAMP_FIELDS = ("synced", …)` (a tuple)
+# and `Wire_Fact_v2 = "another-status"` (mixed case) each SURVIVED it — and
+# `DEFAULT_CACHE_ROOT`, the most load-bearing wire fact in the module, is a
+# `Path` and was therefore invisible to the sweep, surviving only on a
+# hand-written pin below: exactly the one-off pattern the ledger replaces. The
+# sweep now enumerates module-scope ASSIGNMENTS from the SOURCE, so the shape of
+# the value cannot excuse one.
+#
+#: `(module, attribute, the value it MUST equal)`. The expected value is written
+#: out HERE — never read back off the module — so no entry can be satisfied by a
+#: constant agreeing with itself.
+WIRE_CONSTANTS: tuple[tuple[object, str, object], ...] = (
     # A FILENAME on disk, written by a deployed `cairn sync`.
     (rs, "SYNC_STAMP", ".sync-stamp"),
     # A COMMAND a human is told to type, by the refusal and by two SKILL.mds.
     (rs, "REMEDY", "cairn sync"),
+    # A DIRECTORY every reader resolves and `scripts/cairn` writes. Not a `str`,
+    # which is precisely why the old sweep could not see it.
+    (rs, "DEFAULT_CACHE_ROOT", Path.home() / ".cache" / "subsystem-store"),
+    # A RENDERED TOKEN two renderers emit and `analyze-service/SKILL.md` tells
+    # the reader to relay ("the `stamp:` lines").
+    (rs, "STAMP_PREFIX", "  stamp: "),
     # A STATUS other code and `analyze-service/SKILL.md` match on by name.
     (srec, "INDEX_UNSTAMPED", "store-unstamped"),
     # A PREFIX a JSON consumer parses to tell "read" from "refused".
     (srec, "NOT_READ_PREFIX", "NOT READ"),
 )
 
-#: Module-level `str` constants of `subsystem_read_store` that are NOT wire
-#: facts. Enumerated, not pattern-matched: an unlisted one is a wire fact by
-#: default, which is the direction that fails safe.
+#: Module-scope names of `subsystem_read_store` that are NOT wire facts.
+#: Enumerated, not pattern-matched: an unlisted one is a wire fact by default,
+#: which is the direction that fails safe.
 NOT_WIRE_FACTS: frozenset[str] = frozenset()
+
+
+def _module_scope_assignments(path: Path) -> set[str]:
+    """Every non-underscore name ASSIGNED at a module's top level, from source.
+
+    🔴 READ OFF THE AST, NOT `vars()`. `vars()` cannot tell a constant this
+    module declares from a name it imported, so a sweep over it has to filter by
+    NAME SHAPE (`isupper()`) and VALUE TYPE (`isinstance(..., str)`) — and both
+    filters are holes: a `Path`, a tuple, a frozenset or a mixed-case name walks
+    straight through. An assignment is an assignment whatever it holds.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for node in tree.body:
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                found.add(target.id)
+    return found
+
+
+def _assigned_anywhere(path: Path) -> set[str]:
+    """Every non-underscore name assigned at ANY depth in a file.
+
+    Wider than `_module_scope_assignments` on purpose: a re-declaration inside a
+    `try:` at module scope, or a local shadowing an imported constant, is the
+    same "second copy of somebody else's fact" hazard.
+    """
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                found.add(target.id)
+    return found
 
 
 class TestTheWireConstants:
@@ -161,26 +224,39 @@ class TestTheWireConstants:
     def test_the_ledger_is_two_way_over_the_new_module(self) -> None:
         """🔴 THE HALF THAT STOPS THE NEXT ONE.
 
-        Pinning four constants does nothing about the fifth. This enumerates
-        every module-level `str` constant in `subsystem_read_store` — the module
-        this change introduced, so its whole surface is in scope — and requires
+        Pinning five constants does nothing about the sixth. This enumerates
+        every module-scope ASSIGNMENT in `subsystem_read_store` — the module this
+        change introduced, so its whole surface really is in scope — and requires
         each to be either in `WIRE_CONSTANTS` or explicitly excused. Adding one
-        without a literal pin fails here.
+        without a pin fails here.
+
+        🔴 SHAPE-BLIND ON PURPOSE. The previous version filtered `isupper() and
+        isinstance(value, str)` under this same docstring, so a wire fact
+        arriving as a `Path`, a tuple, a frozenset or a mixed-case name passed
+        silently — and `DEFAULT_CACHE_ROOT` was already such a fact, covered only
+        by a hand-written pin. Reading assignments out of the SOURCE removes both
+        filters: what a constant HOLDS stops being an escape hatch.
 
         `service_recon` is deliberately NOT swept: it predates this change and
         carries many string constants that are not wire facts, so a sweep there
         would either be noise or need an exclusion list long enough to hide a
         real omission. Its two are pinned by name above.
         """
-        declared = {
-            name
-            for name, value in vars(rs).items()
-            if name.isupper() and isinstance(value, str) and not name.startswith("_")
-        }
+        source = ROOT / "scripts" / "lib" / "subsystem_read_store.py"
+        declared = _module_scope_assignments(source)
+        # POSITIVE CONTROL. A walk that returned nothing — wrong path, a parse
+        # that found no `Assign` — would report a clean sweep over zero names,
+        # which is the silent zero this whole change exists to kill.
+        assert "SYNC_STAMP" in declared, declared
+        # Every swept name must really be on the module: an AST name the module
+        # does not expose would mean the sweep and the import disagree.
+        for name in declared:
+            assert hasattr(rs, name), f"{name} is assigned but not importable"
+
         pinned = {n for m, n, _lit in WIRE_CONSTANTS if m is rs}
         assert declared - pinned - NOT_WIRE_FACTS == set(), (
-            f"`subsystem_read_store` grew string constant(s) "
-            f"{sorted(declared - pinned - NOT_WIRE_FACTS)} with no literal pin. "
+            f"`subsystem_read_store` grew module-scope constant(s) "
+            f"{sorted(declared - pinned - NOT_WIRE_FACTS)} with no pin. "
             f"Add them to WIRE_CONSTANTS, or to NOT_WIRE_FACTS with a reason."
         )
         assert pinned <= declared, (
@@ -265,7 +341,7 @@ class TestTheResolver:
         got = rs.resolve_read_store(store)
         assert got.stamped is True
         assert got.reason is None
-        assert got.stamp == STAMP_LINES  # verbatim, unparsed, in file order
+        assert got.stamp == STAMP_LINES  # unparsed, in file order
 
     def test_an_unstamped_store_is_not_stamped_and_says_why(self, tmp_path: Path) -> None:
         store = _store(tmp_path, stamped=False)
@@ -305,12 +381,16 @@ class TestTheResolver:
         world-writable directory, and `scripts/cairn` imports this same constant
         for its `--cache` default, so the WRITER would have followed it there.
 
-        The expectation is built from `Path.home()` and two literals, never read
-        back off `rs.DEFAULT_CACHE_ROOT` — per-user placement is the spec, not
-        this module's opinion of it.
+        🔴 THE LITERAL ITSELF NOW LIVES IN `WIRE_CONSTANTS`, NOT HERE. This test
+        held the only pin on it, which is exactly the one-off shape the ledger
+        exists to replace — and because the constant is a `Path`, the ledger's
+        old `isinstance(..., str)` sweep could not see that it was unpinned. The
+        two-way sweep fails if the entry is ever removed, so deleting the ledger
+        row cannot quietly re-open this. What stays here is the PROPERTY the
+        `/var/tmp` mutant violated and a literal cannot state on its own.
         """
-        assert rs.DEFAULT_CACHE_ROOT == Path.home() / ".cache" / "subsystem-store"
         assert rs.DEFAULT_CACHE_ROOT.is_relative_to(Path.home())
+        assert rs.DEFAULT_CACHE_ROOT != Path.home()
 
     def test_the_REMEDY_names_a_subcommand_cairn_ACTUALLY_HAS(self) -> None:
         """🔴 THE REMEDY IS A WIRE FACT: it is the one thing the refusal tells a
@@ -419,13 +499,36 @@ class TestTheResolver:
         The cache path and the stamp name lived in `cairn` alone, which is why
         the readers could not see them — a second copy in a reader would have
         been a second thing to keep in step, and the whole defect is the two
-        sides disagreeing. Read as TEXT because `cairn` has no `.py` suffix and
-        an import of it here would run its argparse module scope.
+        sides disagreeing.
+
+        🔴 THE ARM THIS REPLACES GUARDED A SPELLING THAT CAN NO LONGER EXIST.
+        It matched the TEXT `'DEFAULT_CACHE = Path.home()'`, and the round that
+        deleted the `DEFAULT_CACHE` name from `cairn` left the check behind
+        matching nothing: MEASURED, re-declaring `DEFAULT_CACHE_ROOT =
+        Path.home() / ".cache" / "subsystem-store"` at `cairn`'s module scope
+        SURVIVED it. Reading as text also made the arm sensitive to whitespace
+        and blind to prose containing the same characters, so it is now an AST
+        walk, and the forbidden set is DERIVED from `subsystem_read_store`'s own
+        `__all__` — a constant added there is covered here the same day, with no
+        second list to keep in step. Parsed rather than imported because `cairn`
+        has no `.py` suffix and importing it would run its argparse module scope.
         """
-        src = (ROOT / "scripts" / "cairn").read_text(encoding="utf-8")
+        path = ROOT / "scripts" / "cairn"
+        src = path.read_text(encoding="utf-8")
         assert "from subsystem_read_store import" in src
-        for spelling in ('DEFAULT_CACHE = Path.home()', 'SYNC_STAMP = "'):
-            assert spelling not in src, f"cairn re-declares {spelling!r}"
+        assigned = _assigned_anywhere(path)
+        # POSITIVE CONTROL: the walk really saw `cairn`'s assignments, so an
+        # empty intersection below means "no re-declaration", not "no parse".
+        assert "EXIT_REFRESH_FAILED" in assigned, sorted(assigned)[:20]
+        clash = assigned & set(rs.__all__)
+        assert clash == set(), (
+            f"`scripts/cairn` assigns {sorted(clash)}, which it must IMPORT from "
+            f"`subsystem_read_store` — a second copy is a second thing to keep in "
+            f"step, and the readers cannot see it."
+        )
+        # The pre-cutover name is gone and must not come back under its old
+        # spelling either; that one is dead, so it is asserted as text.
+        assert "DEFAULT_CACHE = " not in src
 
 
 # =============================================================================
@@ -530,7 +633,9 @@ class TestAStampedDefaultStoreCarriesItsFreshness:
     def test_the_header_carries_every_stamp_line_UNPARSED(
         self, tmp_path: Path, repointed, capsys
     ) -> None:
-        """🔴 (b) VERBATIM, and in the HEADER — beside `store:` and `store host:`.
+        """🔴 (b) UNPARSED, and in the HEADER — beside `store:` and `store host:`.
+        (This said "VERBATIM" while the reader `rstrip()`s each line; the word
+        was retired in the module and left standing here.)
 
         Every line is asserted, not a sampled one: a render that dropped
         `coverage=ALL` would let a scope-filtered cache read as complete, and a
@@ -975,3 +1080,216 @@ class TestServiceReconDegradesGracefully:
         literal here would be a second copy of a path the resolver owns — and
         the literal it used to hold was the FROZEN mirror."""
         assert srec._build_parser().get_default("store") is None
+
+
+# =============================================================================
+# The recon DATES the store it serves. The refusal never covered staleness.
+# =============================================================================
+
+
+class TestTheBriefSaysHowFreshItsIndexIs:
+    """🔴 THE REFUSAL FIRES ON UNDATEABLE, NOT ON STALE — AND `;` EXPOSED THAT.
+
+    Changing step 1 from `cairn sync && …` to `cairn sync; …` was right: under
+    `&&` a sync failing with exit 4 (pod down, usable cache) deleted the whole
+    brief. But it turned a loud nothing into a quiet something: pod down three
+    days, cache stamped three days ago, `cairn sync` printing its age warning on
+    STDERR, `;` letting the recon run — and a full brief whose `index:` block was
+    three days old with NO freshness field anywhere in the text output. That is
+    a store that cannot say how fresh it is serving as if current, which is this
+    change's own thesis one layer up.
+
+    So the brief renders the stamp. These pin that it does, that it invents one
+    when there is none, that the two renderers spell it the same way, and that
+    the skill prose says what the code does — the prose asserted the opposite for
+    one round ("REFUSES an undateable store rather than serving a stale one",
+    "served the index block at full fidelity").
+    """
+
+    def _brief_text(self, tmp_path: Path, *, stamped: bool) -> str:
+        return srec.render_brief(
+            srec.recon("collector", repos=[str(tmp_path)], cwd=tmp_path)
+        )
+
+    def test_a_stamped_default_prints_EVERY_stamp_line_INSIDE_the_index_block(
+        self, tmp_path: Path, repointed
+    ) -> None:
+        """Every line, and POSITIONED — a freshness fact printed under `config:`
+        answers a question nobody asked there.
+
+        The block is delimited the way `render_brief` delimits every section: a
+        blank line. So the assertion is "between the `index:` line and the next
+        blank line", which a stamp appended to the end of the brief would fail.
+        """
+        repointed(_store(tmp_path, stamped=True))
+        text = self._brief_text(tmp_path, stamped=True)
+        lines = text.splitlines()
+        index_at = next(i for i, ln in enumerate(lines) if ln.startswith("index: "))
+        end = next(
+            (i for i in range(index_at + 1, len(lines)) if lines[i] == ""), len(lines)
+        )
+        block = lines[index_at:end]
+        for i, line in enumerate(STAMP_LINES):
+            assert block[1 + i] == f"  stamp: {line}", block
+        # …and the store really was SERVED, so this is a date beside a read and
+        # not beside a refusal that happens to print one.
+        assert srec.INDEX_UNSTAMPED not in block[0], block
+
+    def test_the_stamp_precedes_the_ENTRY_BODY_on_a_hit(
+        self, tmp_path: Path, repointed
+    ) -> None:
+        """🔴 THE BRANCH WITH SUB-LINES, WHICH IS THE ONE A READER ACTUALLY SEES.
+
+        On a `hit` the `index:` header is followed by `## What it is`, pointers
+        and nuance. A stamp appended after those would date a paragraph the
+        reader has already believed. Rendered from a `hit` `IndexResult` swapped
+        into a real brief, because reaching a hit end-to-end needs a git repo
+        whose name is the scope — a heavier fixture that would test the locate
+        step, not this one.
+        """
+        repointed(_store(tmp_path, stamped=True))
+        brief = srec.recon("collector", repos=[str(tmp_path)], cwd=tmp_path)
+        hit = dataclasses.replace(
+            brief,
+            index=srec.IndexResult(
+                "hit", scope=SCOPE, ref="collector",
+                what="A durable thing a recall block MUST name.",
+                pointers="- ops skill `manage-widget`",
+                nuance="- the readiness probe lies for 40s.",
+                basis=srec.OWNER_BASIS,
+            ),
+        )
+        lines = srec.render_brief(hit).splitlines()
+        index_at = next(i for i, ln in enumerate(lines) if ln.startswith("index: "))
+        assert "HIT (from index)" in lines[index_at]
+        for i, line in enumerate(STAMP_LINES):
+            assert lines[index_at + 1 + i] == f"{rs.STAMP_PREFIX}{line}", lines
+        what_at = next(i for i, ln in enumerate(lines) if "What it is" in ln)
+        assert index_at + len(STAMP_LINES) < what_at, lines
+
+    def test_the_stamp_prefix_is_the_ONE_spelling_both_renderers_use(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """🔴 TWO RENDERERS, ONE TOKEN. `subsystem_recall`'s CLI header and the
+        recon's `index:` block both print the stamp, and the skill tells a reader
+        to relay "the `stamp:` lines" — one token, or the instruction is true of
+        one output and false of the other. Asserted by comparing the two RENDERED
+        outputs, not by grepping both sources for the same f-string.
+        """
+        store = _store(tmp_path, stamped=True)
+        repointed(store)
+        assert rc.main(["--scope", SCOPE]) == 0
+        cli_lines = {
+            ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("  stamp:")
+        }
+        brief_lines = {
+            ln for ln in self._brief_text(tmp_path, stamped=True).splitlines()
+            if ln.startswith("  stamp:")
+        }
+        assert cli_lines == brief_lines != set()
+        assert cli_lines == {f"{rs.STAMP_PREFIX}{ln}" for ln in STAMP_LINES}
+
+    def test_the_brief_json_carries_the_stamp_UNPARSED(
+        self, tmp_path: Path, repointed
+    ) -> None:
+        """A `--json` consumer reads no header. Same key as `subsystem_recall
+        --json` (`read_store_stamp`), because two names for one fact is how a
+        consumer ends up reading freshness from one tool and not the other."""
+        repointed(_store(tmp_path, stamped=True))
+        blob = srec.brief_json(
+            srec.recon("collector", repos=[str(tmp_path)], cwd=tmp_path)
+        )
+        assert blob["read_store_stamp"] == list(STAMP_LINES)
+
+    def test_a_REFUSED_default_invents_no_stamp(
+        self, tmp_path: Path, repointed
+    ) -> None:
+        """Nothing is invented, and the absence is not silence: the refusal text
+        is what carries the reason."""
+        repointed(_store(tmp_path, stamped=False))
+        brief = srec.recon("collector", repos=[str(tmp_path)], cwd=tmp_path)
+        assert brief.store_stamp == ()
+        text = srec.render_brief(brief)
+        assert rs.STAMP_PREFIX not in text
+        assert srec.INDEX_UNSTAMPED in text
+
+    def test_an_explicitly_named_store_is_dated_when_it_can_be_and_not_when_it_cannot(
+        self, tmp_path: Path, repointed
+    ) -> None:
+        """🔴 BOTH HALVES, because either alone passes over a renderer that
+        always prints or never does.
+
+        `--store <path>` is exempt from the REFUSAL, not from the date: a
+        snapshot an operator names is as capable of being three days old as the
+        default cache is.
+        """
+        repointed(_store(tmp_path / "default", stamped=False))
+        named_stamped = _store(tmp_path / "fresh", stamped=True)
+        named_bare = _store(tmp_path / "bare", stamped=False)
+
+        dated = srec.render_brief(
+            srec.recon("collector", repos=[str(tmp_path)],
+                       store_root=named_stamped, cwd=tmp_path)
+        )
+        for line in STAMP_LINES:
+            assert f"{rs.STAMP_PREFIX}{line}" in dated, line
+
+        undated = srec.render_brief(
+            srec.recon("collector", repos=[str(tmp_path)],
+                       store_root=named_bare, cwd=tmp_path)
+        )
+        assert rs.STAMP_PREFIX not in undated
+        # The undated one still SERVED — the missing stamp is a missing date,
+        # never a refusal.
+        assert srec.INDEX_UNSTAMPED not in undated
+
+    #: 🔴 THE WHOLE PARAGRAPH, NORMALISED — not a keyword.
+    #:
+    #: The artifact under test is PROSE, and a guard on words is walkable by
+    #: rewording: this file's prose has now made a false freshness claim twice
+    #: (`&&` "costs you nothing", then "REFUSES … rather than serving a stale
+    #: one"), each time surviving because the tests only matched keywords that
+    #: stayed true. Pinning the normalised paragraph makes a reword go red, which
+    #: is the price of a machine-readable claim — re-read the code, then paste
+    #: the new text here.
+    FRESHNESS_PARAGRAPH = (
+        "🔴 **So READ THE `stamp:` LINES under `index:` — they are the only thing in "
+        "the brief that says how old it is.** A cache stamped three days ago is served "
+        "in full, and `HIT (from index)` reads exactly the same whether the sync ran a "
+        "second ago or failed all week: the age `cairn sync` computes goes to "
+        "**stderr**, which the brief does not carry. The stamp lines (`synced=`, "
+        "`revision=`, `snapshot=`, `entries=`, `coverage=`) sit directly under the "
+        "`index:` line, unparsed, with no age computed here. **Relay them, or state "
+        "the sync's outcome, whenever you present index content.** Absent stamp lines "
+        "mean the store carried no stamp, never that it is fresh."
+    )
+
+    #: Claims the prose made that the code does not keep. Asserted ABSENT as
+    #: well as the paragraph above being present, because a reword could
+    #: reintroduce one somewhere else in the file.
+    RETIRED_CLAIMS = (
+        "REFUSES an undateable store rather than serving a stale one",
+        "served the index block at full fidelity",
+        "would have served the index block at full",
+    )
+
+    def test_the_skill_prose_says_what_the_recon_ACTUALLY_does(self) -> None:
+        doc = (ROOT / "claude/skills/analyze-service/SKILL.md").read_text(encoding="utf-8")
+        paragraphs = [
+            " ".join(p.split()) for p in doc.split("\n\n")
+        ]
+        assert " ".join(self.FRESHNESS_PARAGRAPH.split()) in paragraphs, (
+            "the freshness paragraph in `analyze-service/SKILL.md` no longer "
+            "matches the one pinned here. Re-read `render_brief`'s index block "
+            "and `_resolve_store`, then paste the corrected paragraph into "
+            "`FRESHNESS_PARAGRAPH` — do not delete this pin."
+        )
+        for claim in self.RETIRED_CLAIMS:
+            assert claim not in doc, f"retired claim is back: {claim!r}"
+
+    def test_the_prose_token_is_the_one_the_code_emits(self) -> None:
+        """The paragraph tells the reader to look for `stamp:` lines under
+        `index:`. Derived from the constant, so renaming the token fails HERE
+        rather than at a reader wondering where the date went."""
+        doc = (ROOT / "claude/skills/analyze-service/SKILL.md").read_text(encoding="utf-8")
+        assert f"`{rs.STAMP_PREFIX.strip()}` LINES under `index:`" in doc
