@@ -42,6 +42,10 @@ docstring claimed that.** Two residual windows, both real and both narrower than
 free-space floor above rather than closed by it:
   * a tmpfs that passes the checks and then FILLS mid-run — a concurrent writer, or a
     suite far larger than these stores — surfaces ENOSPC where disk would have passed.
+    Half of that is now closed and half is not, and the halves are different in kind:
+    a store of OURS growing past what `_MIN_FREE_BYTES` was sized for is caught by
+    `_check_store_budget`, which walks the real tree at teardown; a CONCURRENT writer
+    filling the mount is not, and cannot be from in here.
   * a run killed by SIGKILL (a gate timeout, `panic: test timed out`) skips the
     `finally`, so `/dev/shm/devrc-store-*` survives; on a persistent container
     `/dev/shm` repeated kills accumulate toward the first case. Nothing reaps them.
@@ -70,40 +74,97 @@ _DEFAULT_CANDIDATE = "/dev/shm"
 # one exist.
 _MOUNTS_PATH = "/proc/mounts"
 
-# The largest store this suite builds, in tmpfs PAGE-ALLOCATED bytes.
-#
-# 🔴 DERIVED, NOT TRUSTED: this literal is checked against the fixture that produces
-# it by `test_store_siting_ledger.py::test_the_largest_store_constant_still_covers_
-# the_biggest_fixture`, which reads the `range(N)` out of `test_cairn_cli.py`. Without
-# that, growing the fixture silently re-opens the ENOSPC hazard with every guard green
-# — MEASURED by an audit: `range(303)` -> `range(1200)`, all guards pass, and a
-# /dev/shm of 4500k then dies `Errno 28`. A constant checked only against another
-# constant is not a guard.
-#
-# Measured 2026-09-01 against the REAL fixture (`_populate_source_store` + 303 bulk
-# entries = 306 files, on tmpfs): apparent **74,613 B**, page-allocated
-# **1,253,376 B**, ratio **16.80x**. Confirmed four independent ways — `sum(st_size)`,
-# `st_blocks*512`, `du -sB1`, and the `/dev/shm` statvfs used-delta — all agreeing.
-#
-# 🔴 TWO EARLIER REVISIONS OF THIS COMMENT WERE MEASUREMENTS OF SOMETHING ELSE, and
-# the second was mine correcting the first. "53,985 B / 23x" came from a SYNTHETIC
-# store, not this fixture. "72,602 B / 1,265,664 B / 17.4x" then double-counted
-# DIRECTORY pages: tmpfs directories cost zero, and 1,253,376 + 3*4096 = 1,265,664
-# exactly. In a module whose subject is a number being wrong, three revisions were
-# needed to get this one right — which is why the value below is DERIVED and pinned
-# rather than transcribed.
-#
-# 🔴 APPARENT BYTES UNDERSTATE TMPFS COST ~17x. tmpfs charges whole 4 KiB pages, so
-# entry COUNT drives this, not text size; a floor reasoned from `st_size` lands an
-# order of magnitude low.
-#
-# The value is the DERIVED requirement, not the single-fixture measurement: the
-# ratchet sums every ledgered file's fixtures (conservative — under `-n 4 --dist
-# loadfile` they do not all hold stores at once) and adds slack pages.
-_LARGEST_STORE_BYTES = 1875968
+# tmpfs charges whole 4 KiB pages per file, and directories cost nothing. Both halves
+# are load-bearing: an earlier revision of the measurement below double-counted
+# directory pages and landed 12,288 B high (1,253,376 + 3*4096 = 1,265,664 exactly).
+_PAGE_BYTES = 4096
 
-# Free space a candidate must have before we will site a store on it: the measured
-# peak above, with better than 3x margin.
+# The peak page-allocated footprint any store in this suite has been MEASURED to reach.
+#
+# 🔴 THIS IS A MEASUREMENT, AND IT IS NOT WHAT MAKES THE BUDGET HONEST. Rounds 4-6 tried
+# to keep `_LARGEST_STORE_BYTES` truthful by DERIVING it from a syntactic sweep of the
+# ledgered test files — counting `write_text` calls and `range(N)` loops. Every revision
+# of that sweep was walked through by a shape it could not see: two write loops in one
+# test, nested loops summed instead of multiplied (`for a in range(4): for b in
+# range(300)` reported 304 for 1,200 real files), `range(303)` respelled as
+# `range(0, 303)`, a for-loop rewritten as a list comprehension, a loop body extracted
+# into a helper. Each of those under-reported SILENTLY with the whole suite green —
+# re-arming the ENOSPC hazard through the guard added to prevent it.
+#
+# A syntactic sweep can only ever see the shapes its author imagined. So the enforcement
+# moved to `_check_store_budget` below, which WALKS THE REAL STORE at teardown and
+# raises when it exceeds the budget. That cannot be fooled by a spelling, a nesting or a
+# refactor, because it is not reading the source at all.
+#
+# Measured 2026-09-02 by `store_root` itself over a full run of the three ledgered files
+# (`scripts/tests/test_{subsystem_store_api,cairn_write,cairn_cli}.py`): **448 stores**
+# walked, largest 1,253,376 B / 306 entries, second largest 176,128 B / 43 entries. The
+# peak is `test_cairn_cli.py`'s concurrency fixture — `_populate_source_store`'s 3 seed
+# entries + 303 bulk entries = 306 files, apparent 74,613 B — a 16.8x ratio, confirmed
+# four independent ways (`sum(st_size)`, `st_blocks*512`, `du -sB1`, and the `/dev/shm`
+# statvfs used-delta).
+#
+# ⚠ SAY WHAT WAS MEASURED, because this constant has been wrong twice by being a
+# measurement of something else. The raw `PEAK_STORE_BYTES` from that run reads
+# 1,884,160 — bigger than the number below — and that peak is the ledger suite's OWN
+# deliberately-over-budget probe, not a fixture. 1,253,376 is the largest store the
+# suite builds in the course of testing something else, which is what this constant is
+# for. The gap to the runner-up (176,128) is 7x, so the peak is not a close call.
+#
+# 🔴 APPARENT BYTES UNDERSTATE TMPFS COST ~17x. Entry COUNT drives this, not text size;
+# a floor reasoned from `st_size` lands an order of magnitude low.
+_MEASURED_PEAK_STORE_BYTES = 1253376
+
+# Headroom the budget carries over that measured peak.
+#
+# 🔴 THE PREVIOUS VALUE HAD ZERO SLACK AND THAT MADE IT A TRIPWIRE, NOT A BUDGET.
+# `_LARGEST_STORE_BYTES` was 1,875,968 = (442 + 16) * 4096, where 442 was the sweep's
+# own output — so the required value and the constant were the same number and the gate
+# sat exactly on its own boundary. Appending a single unrelated five-byte scratch write
+# to a ledgered file turned the required merge check RED, on a machine with no store,
+# no server and no tmpfs involved. Measured base rate: that derived requirement moved
+# SIX times in nineteen commits, three of them on one day.
+#
+# 1.5x is chosen so a fixture can grow by half again — the kind of change an author
+# makes without thinking about tmpfs — before anyone has to touch a constant, while
+# still leaving `_MIN_FREE_BYTES` (4 MiB) more than 2x above the budget. It is pinned
+# by `test_store_siting_ledger.py::test_the_budget_keeps_real_HEADROOM_over_the_
+# measured_peak`, so shrinking the slack to buy room is a visible act, not a quiet one.
+_BUDGET_HEADROOM = 1.5
+
+# The budget: no store this suite builds may page-allocate more than this.
+#
+# 🔴 ENFORCED AT RUNTIME, against the real directory tree, by `_check_store_budget`.
+# It is not a floor reasoned from source and it is not checked against another constant:
+# every store `store_root` yields is walked at teardown and compared to this number, so
+# a fixture that grows past it fails LOUDLY on the test that grew it, whatever spelling
+# the growth arrived in.
+#
+# 🔴 COMPUTED, NOT TRANSCRIBED — and that is not tidiness. Written as the literal
+# 1,880,064 it would be a THIRD number that can disagree with the two above it, so
+# `_BUDGET_HEADROOM = 1.5` could read 1.5 while the budget carried 1.26x and nothing
+# would notice. That is the same defect as the "better than 3x margin" comment one
+# constant further down, which was false for a whole round. Rounded UP to a whole page
+# because a budget is a page count.
+_LARGEST_STORE_BYTES = (
+    -(-int(_MEASURED_PEAK_STORE_BYTES * _BUDGET_HEADROOM) // _PAGE_BYTES) * _PAGE_BYTES
+)  # 1,880,064 at the two values above — a snapshot, not a second definition
+
+# Free space a candidate must have before we will site a store on it: the budget above,
+# with better than 2x margin. 🔴 **2x IS THE CLAIM AND IT IS THE CLAIM A TEST READS**
+# (`test_the_free_space_floor_keeps_the_MARGIN_its_comment_claims`). Today the ratio
+# happens to be 2.23x (4,194,304 / 1,880,064), and that figure is a SNAPSHOT — do not
+# promote it to the guarantee, because a snapshot in this position is precisely what
+# went stale last time.
+#
+# ⚠ The margin used to be stated as "better than 3x" and round 6 falsified that without
+# updating the sentence — it was 2.24x by then, and had been 3.18x when written. The
+# fix is not a better sentence — it is that the RATIO IS NOW READ BY A TEST.
+# `test_the_floor_CONSTANT_clears_the_largest_store_this_suite_builds` in
+# `test_subsystem_store_api.py` enforces the bare inequality;
+# `test_store_siting_ledger.py::test_the_free_space_floor_keeps_the_MARGIN_its_comment_
+# claims` enforces the 2x promised above. A prose margin nothing reads is how the "3x"
+# survived being false, and rewording it would have left that mechanism intact.
 #
 # 🔴 THIS WAS 1 MiB FOR EXACTLY ONE COMMIT AND THAT WAS A REGRESSION — BELOW the peak.
 # It was lowered from 8 MiB on the strength of an observation that 8 MiB rejects a
@@ -195,6 +256,90 @@ def tmpfs_dir() -> Path | None:
     return None
 
 
+class StoreBudgetExceeded(AssertionError):
+    """A store grew past `_LARGEST_STORE_BYTES`, so `_MIN_FREE_BYTES` is now a lie.
+
+    An `AssertionError` on purpose: this is a failed invariant of the test suite, not
+    an environment problem, and pytest should report it as a failure rather than an
+    internal error.
+    """
+
+
+# The peak any store has reached in THIS process, and where. Written by
+# `_check_store_budget`, read by the ledger tests as the positive control that the
+# measurement is wired to something: a budget checker that walks nothing reports a
+# reassuring zero for every store in the suite, which is indistinguishable from a
+# suite that builds no stores at all.
+PEAK_STORE_BYTES = 0
+PEAK_STORE_ENTRIES = 0
+PEAK_STORE_PATH = ""
+
+
+def page_allocated_bytes(root: Path) -> tuple[int, int]:
+    """`(entries, page-allocated bytes)` for the tree under `root`.
+
+    Files only. Directories are excluded because tmpfs charges nothing for them —
+    measured, and an earlier revision of `_LARGEST_STORE_BYTES` was 12,288 B high
+    precisely for counting three of them.
+
+    A missing root is `(0, 0)`: a caller may take a root and never create it, and
+    that is not a budget violation. An unreadable entry is skipped rather than
+    raising — the walk is a measurement, and it must not be the thing that fails a
+    test whose store was fine.
+
+    Every file costs AT LEAST one page, including an empty one. That overstates a
+    zero-byte file, which tmpfs charges no data pages for, and it is the deliberate
+    direction: under-reporting is what re-arms ENOSPC, and these stores hold no empty
+    files anyway. `lstat`, not `stat`, so a symlink is measured as the link it is
+    rather than followed — the suite plants broken ones on purpose.
+    """
+    entries = 0
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(root, onerror=lambda _e: None):
+        for filename in filenames:
+            try:
+                size = os.lstat(os.path.join(dirpath, filename)).st_size
+            except OSError:
+                continue
+            entries += 1
+            pages = max(1, -(-size // _PAGE_BYTES))
+            total += pages * _PAGE_BYTES
+    return entries, total
+
+
+def _check_store_budget(root: Path) -> None:
+    """Walk the store that was just used and fail if it broke the budget.
+
+    🔴 THIS IS THE ENFORCEMENT, AND IT REPLACES A SYNTACTIC SWEEP OF THE TEST FILES.
+    See `_MEASURED_PEAK_STORE_BYTES` for the six shapes that walked through that
+    sweep. Reading the directory rather than the source removes the whole class:
+    there is no spelling of a write loop that produces files this cannot see.
+
+    It runs on BOTH branches of `store_root` — tmpfs and the `tmp_path` fallback —
+    on purpose. Enforcing only on tmpfs would make the guard structurally blind on
+    exactly the machines that have no tmpfs, so a fixture could grow unchecked on a
+    developer's box and only fail once it reached a host where it mattered.
+    """
+    global PEAK_STORE_BYTES, PEAK_STORE_ENTRIES, PEAK_STORE_PATH
+    entries, allocated = page_allocated_bytes(root)
+    if allocated > PEAK_STORE_BYTES:
+        PEAK_STORE_BYTES = allocated
+        PEAK_STORE_ENTRIES = entries
+        PEAK_STORE_PATH = str(root)
+    if allocated <= _LARGEST_STORE_BYTES:
+        return
+    raise StoreBudgetExceeded(
+        f"store {root} page-allocates {allocated:,} bytes across {entries:,} entries, "
+        f"over the _LARGEST_STORE_BYTES budget of {_LARGEST_STORE_BYTES:,}. tmpfs "
+        f"charges whole {_PAGE_BYTES}-byte pages per file, so entry COUNT drives this "
+        "and apparent size understates it ~17x. This is the ENOSPC hazard, not a "
+        "bookkeeping nit: _MIN_FREE_BYTES "
+        f"({_MIN_FREE_BYTES:,}) is what decides whether a tmpfs is accepted, and it "
+        "was sized against that budget. Either shrink the fixture, or raise BOTH "
+        "constants together and re-check the margin."
+    )
+
+
 @contextlib.contextmanager
 def store_root(tmp_path: Path, name: str = "store") -> Generator[Path]:
     """Yield a store root sited off the contended disk when that is possible.
@@ -205,24 +350,37 @@ def store_root(tmp_path: Path, name: str = "store") -> Generator[Path]:
     Cleanup is the reason this is a context manager rather than a function: pytest
     auto-cleans `tmp_path`, but a tmpfs directory is not pytest's to clean and tmpfs
     is RAM, so leaking one per test would hold memory for the whole run.
+
+    On the way out it also MEASURES the store against `_LARGEST_STORE_BYTES` — see
+    `_check_store_budget`. That check is skipped when the body is already raising:
+    a budget violation reported over the top of the real failure would replace the
+    error the author needs to read with one about a constant.
     """
     base = tmpfs_dir()
-    if base is None:
-        yield tmp_path / name
-        return
+    holder: Path | None = None
+    if base is not None:
+        try:
+            holder = Path(tempfile.mkdtemp(prefix="devrc-store-", dir=str(base)))
+        except OSError:
+            # The candidate passed every check above and still would not give us a
+            # directory (it filled between the probe and here, hit a quota, or went
+            # read-only). Falling back reproduces the pre-tmpfs behaviour for THIS
+            # call — which is the contract for this branch, and not the absolute
+            # "never worse than disk" the module docstring above retracts.
+            holder = None
+    root = (tmp_path if holder is None else holder) / name
+    body_raised = False
     try:
-        holder = Path(tempfile.mkdtemp(prefix="devrc-store-", dir=str(base)))
-    except OSError:
-        # The candidate passed every check above and still would not give us a
-        # directory (it filled between the probe and here, hit a quota, or went
-        # read-only). Falling back reproduces the pre-tmpfs behaviour for THIS
-        # call — which is the contract for this branch, and not the absolute
-        # "never worse than disk" the module docstring above retracts.
-        yield tmp_path / name
-        return
-    try:
-        yield holder / name
+        yield root
+    except BaseException:
+        body_raised = True
+        raise
     finally:
-        # Best-effort: a tmpfs leak costs RAM for the run, but raising in teardown
-        # would turn a passing test red for a cleanup problem.
-        shutil.rmtree(holder, ignore_errors=True)
+        try:
+            if not body_raised:
+                _check_store_budget(root)
+        finally:
+            if holder is not None:
+                # Best-effort: a tmpfs leak costs RAM for the run, but raising in
+                # teardown would turn a passing test red for a cleanup problem.
+                shutil.rmtree(holder, ignore_errors=True)
