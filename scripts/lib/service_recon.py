@@ -107,10 +107,25 @@ from subsystem_recall import (  # noqa: E402
 #: HERE (KeyError at import) instead of turning into a silent zero.
 RECALLED_STATUS = STATUS_PRECEDENCE[STATUS_PRECEDENCE.index("recalled")]
 from subsystem_resolver import normalize_ref  # noqa: E402
-from subsystem_touch import DEFAULT_STORE_ROOT, scope_for_repo  # noqa: E402
+from subsystem_touch import scope_for_repo  # noqa: E402
+
+# 🔴 THE SAME RESOLVER THE READER USES, NOT `subsystem_touch.DEFAULT_STORE_ROOT`.
+# This module's store default WAS the writer's root, which the Cairn cutover
+# froze — so `/analyze-service`'s recon and `/resume`'s recall were BOTH reading
+# a mirror that had stopped moving. One resolver, imported as a module so the
+# module global stays the single point of truth. See `subsystem_read_store`.
+import subsystem_read_store as _read_store  # noqa: E402
+
+#: The index section's verdict when the DEFAULT store resolution landed
+#: somewhere that cannot date itself. It is a section-level degrade, not an
+#: abort: recon still has roots, config, git log and (opt-in) live state to
+#: report, and throwing those away over one unreadable section would trade a
+#: whole brief for a defect the brief can simply name.
+INDEX_UNSTAMPED = "store-unstamped"
 
 __all__ = [
     "RECALLED_STATUS",
+    "INDEX_UNSTAMPED",
     "ENV_ROOT_HANDLES",
     "SKIP_DIRS",
     "MANIFEST_SUFFIXES",
@@ -814,11 +829,39 @@ def index_scopes(loc: LocateResult) -> tuple[tuple[str, str], ...]:
     return tuple(out)
 
 
+def _resolve_store(store_root: str | Path | None) -> tuple[Path, IndexResult | None]:
+    """`(root, refusal)` — ONE decision site for "which store does recon read?".
+
+    `store_root=None` is the DEFAULT resolution and is REFUSED when the store
+    carries no snapshot stamp: an undateable store is exactly what the frozen
+    pre-cutover mirror is, and serving it silently is the defect. A store passed
+    EXPLICITLY is the caller naming a directory — every test in this repo, and
+    any operator pointing at a snapshot — and stays permissive.
+
+    The refusal is an `IndexResult`, not an exception, because `recon` has four
+    other sections to print and none of them depend on the index.
+    """
+    if store_root is not None:
+        return Path(store_root), None
+    resolved = _read_store.resolve_read_store()
+    if resolved.stamped:
+        return resolved.root, None
+    return resolved.root, IndexResult(
+        INDEX_UNSTAMPED,
+        detail=(
+            f"the index could not be read: {resolved.reason}, so {resolved.root} cannot "
+            f"say how fresh it is and was NOT served. Run `{_read_store.REMEDY}` and "
+            f"re-run, or pass --store <path>. Nothing was checked — this is not "
+            f"'nothing recorded'."
+        ),
+    )
+
+
 def read_index(
     loc: LocateResult | str | None,
     service: str,
     *,
-    store_root: str | Path = DEFAULT_STORE_ROOT,
+    store_root: str | Path | None = None,
 ) -> IndexResult:
     """Front-load the curated recall — through `subsystem_recall`, not a `cat`.
 
@@ -831,7 +874,14 @@ def read_index(
 
     Accepts a `LocateResult` (the real caller) or a bare repo path (tests and any
     caller that already knows the repo).
+
+    `store_root=None` resolves the host-local read store and refuses an unstamped
+    one — see `_resolve_store`. Resolved ONCE here so a multi-candidate loop
+    cannot ask a different store per candidate.
     """
+    store_root, refusal = _resolve_store(store_root)
+    if refusal is not None:
+        return refusal
     if isinstance(loc, LocateResult):
         candidates = index_scopes(loc)
         if not candidates:
@@ -898,7 +948,7 @@ def _read_index_one(
     owner: str,
     service: str,
     *,
-    store_root: str | Path = DEFAULT_STORE_ROOT,
+    store_root: str | Path | None = None,
     basis: str = OWNER_BASIS,
     scope: str | None = None,
 ) -> IndexResult:
@@ -907,7 +957,14 @@ def _read_index_one(
 
     `scope` is accepted already-derived: the loop needs it to de-duplicate, and
     deriving it twice would run `git rev-parse` twice per candidate.
+
+    `store_root=None` goes through the SAME `_resolve_store` the loop above uses,
+    for the benefit of a direct caller. The loop always passes a resolved root,
+    so the second resolution is a no-op there rather than a second decision.
     """
+    store_root, refusal = _resolve_store(store_root)
+    if refusal is not None:
+        return refusal
     if scope is None:
         scope, failure = _scope_of(owner)
         if failure is not None:
@@ -1249,7 +1306,7 @@ def recon(
     service: str,
     *,
     repos: Sequence[str] = (),
-    store_root: str | Path = DEFAULT_STORE_ROOT,
+    store_root: str | Path | None = None,
     env: dict[str, str] | None = None,
     cwd: str | Path | None = None,
     live: bool = False,
@@ -1555,7 +1612,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("service", help="the subsystem to recon (normalized like an index ref)")
     p.add_argument("--repo", action="append", default=[],
                    help="a search root; repeatable. Default: the $HOMELAB/$DATAPACKET handles + cwd.")
-    p.add_argument("--store", default=str(DEFAULT_STORE_ROOT), help="index store root")
+    # 🔴 `None`, NOT a baked path. `None` IS the "resolve the host-local read
+    # store, and refuse it if it cannot date itself" case; any literal default
+    # here would be a second copy of a path `subsystem_read_store` already owns,
+    # and the old literal was the FROZEN pre-cutover mirror.
+    p.add_argument("--store", default=None,
+                   help="index store root (default: the cairn-synced read cache)")
     p.add_argument("--live", action="store_true", help="also probe the cluster (read-only)")
     p.add_argument("--context", default=None, help="kube context; --live never infers one")
     p.add_argument("--namespace", default=None, help="override the namespace found in the manifests")

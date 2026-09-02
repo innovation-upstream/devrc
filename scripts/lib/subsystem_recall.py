@@ -294,8 +294,20 @@ from subsystem_resolver import (  # noqa: E402
     visible_scope_set,
 )
 from subsystem_resolver import extract_sections as _extract_sections  # noqa: E402
+
+# 🔴 IMPORTED AS A MODULE, NOT `from … import`. The CLI resolves the read store
+# through `_read_store.read_store_root()` so the module global stays the single
+# point of truth (and the single point a test can repoint). A `from … import
+# DEFAULT_CACHE_ROOT` here would bind the value at import and make both
+# properties false.
+#
+# 🔴 THIS IS A CLI CONCERN ONLY. Nothing below `main()`/`_build_parser()` may
+# consult it: `recall`, `search`, `load_store` and `read_entry` are the LIBRARY,
+# and the subsystem-store POD imports them to serve `/data` — a directory that
+# has no `.sync-stamp` and never will. A refusal in the library would take down
+# the pod and `scripts/cairn` with it.
+import subsystem_read_store as _read_store  # noqa: E402
 from subsystem_touch import (  # noqa: E402
-    DEFAULT_STORE_ROOT,
     STORE_IS_PER_HOST,
     StoreMissingError,
     TouchError,
@@ -1924,17 +1936,23 @@ def _render_listing(report: RecallReport) -> list[str]:
     return out
 
 
-def render_text(report: RecallReport) -> str:
+def render_text(report: RecallReport, *, extra_header: Sequence[str] = ()) -> str:
     """The agent-facing recall block.
 
     Deterministic in the REPORT with ONE exception: `store_host_line` reads THIS
     machine's identity, which is the entire point of it — a recall that does not
     name whose disk it read states one host's store as the fleet's.
+
+    `extra_header` is how the CLI puts the read store's snapshot stamp WITH the
+    `store:`/`store host:` lines instead of somewhere else on the page. It is a
+    keyword with an empty default because the subsystem-store POD calls this
+    function with a report only, and its `/data` has no stamp to print.
     """
     out: list[str] = [
         f"subsystem-recall: status={report.status} scope={report.scope}",
         f"  store: {report.store_root}",
         store_host_line(),
+        *extra_header,
         f"  caveat: {report.caveat}",
     ]
 
@@ -2830,14 +2848,20 @@ def search(
     )
 
 
-def render_search(report: SearchReport) -> str:
-    """The agent-facing search block. Deterministic: same report in, same bytes out."""
+def render_search(report: SearchReport, *, extra_header: Sequence[str] = ()) -> str:
+    """The agent-facing search block. Deterministic: same report in, same bytes out.
+
+    `extra_header` — same contract as `render_text`'s: the CLI's read-store stamp
+    belongs in the header block, and a search is a read like any other, so it
+    carries its own freshness too.
+    """
     ctx = "bullet" if report.context == CONTEXT_BULLET else f"±{report.context} raw lines"
     out: list[str] = [
         f"subsystem-recall: status={report.status} scope={report.scope} "
         f"query={report.query!r} threshold={report.threshold:.2f} context={ctx}",
         f"  store: {report.store_root}",
         store_host_line(),
+        *extra_header,
         f"  caveat: {report.caveat}",
     ]
 
@@ -2966,6 +2990,37 @@ def search_json(report: SearchReport) -> dict:
 
 # --- CLI -----------------------------------------------------------------------
 
+#: 🔴 A CODE OF ITS OWN, and `_exit_for`'s "don't mint a fourth code" argument
+#: does NOT cover it. That argument is about statuses whose documented handling
+#: is identical to 3's ("the store is broken; recall was unavailable"). This one
+#: has a DIFFERENT remedy — one command, `cairn sync` — and a caller that cannot
+#: tell it from 3 cannot act on it. 3 says "nothing readable is there"; 4 says
+#: "what is there cannot date itself, and here is how to fix that in one step".
+EXIT_UNSTAMPED_READ_STORE = 4
+
+
+class _StoreAction(argparse.Action):
+    """Records that `--store` was given EXPLICITLY, alongside its value.
+
+    🔴 THE DISTINCTION IS THE CONTRACT, NOT AN IMPLEMENTATION DETAIL. The
+    DEFAULT resolution of `--store` is refused when the store carries no
+    snapshot stamp, because a default that silently lands on a frozen mirror is
+    the defect this guard exists for. An EXPLICIT `--store <path>` stays
+    permissive: that is an operator naming a directory deliberately, and the
+    store-api's own `/data`, every test fixture and `prune-index`'s prescribed
+    commands are all exactly that case.
+
+    Comparing the parsed value against the default would NOT answer this —
+    `--store` pointed at the cache by hand is byte-identical to not passing it,
+    and the two must not behave the same. Recording the ACT of passing it is the
+    only thing that can tell them apart, and it survives `--store=X`, `--store X`
+    and argparse's prefix abbreviations alike.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):  # noqa: D102
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "store_explicit", True)
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -2987,7 +3042,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="PATH to the repo whose scope to read — not a repo name (default: cwd)",
     )
     p.add_argument("--scope", default=None, help="override the derived store scope")
-    p.add_argument("--store", default=str(DEFAULT_STORE_ROOT), help="store root")
+    # 🔴 THE SYNCED CACHE, NOT THE WRITER'S `DEFAULT_STORE_ROOT`. Since the Cairn
+    # cutover `~/.claude/analyze-service-index` is a FROZEN mirror that nothing
+    # refreshes; defaulting to it made every `/resume` orient on a store that had
+    # stopped moving while printing "ALL N entries … none omitted". Resolved at
+    # parser-BUILD time through `read_store_root()`, so the module global is the
+    # only place the path is written down.
+    p.add_argument(
+        "--store",
+        action=_StoreAction,
+        default=str(_read_store.read_store_root()),
+        help="store root (default: the cairn-synced read cache)",
+    )
+    # The other half of `_StoreAction`: absent the flag, nothing sets this.
+    p.set_defaults(store_explicit=False)
     p.add_argument(
         "--ref",
         default=None,
@@ -3150,6 +3218,17 @@ def _exit_for(status: str, label: str, malformed: Sequence[MalformedEntry]) -> i
     return 3
 
 
+def _with_stamp(payload: dict, store: "_read_store.ReadStore") -> dict:
+    """The read store's stamp, into a JSON payload, VERBATIM as a list of lines.
+
+    A `--json` consumer has no header block to read, so without this it is the
+    one reader that gets no freshness at all — which is the whole defect, in the
+    one output format nobody would think to check. Unparsed on purpose: this
+    module does not own the stamp's schema and must not fork it.
+    """
+    return {**payload, "read_store_stamp": list(store.stamp or ())}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(list(argv) if argv is not None else None)
 
@@ -3203,6 +3282,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
 
+    # 🔴 THE READ STORE MUST BE ABLE TO DATE ITSELF — and the guard is placed
+    # HERE, after the flag-combination rejections and before ANY store I/O, on
+    # purpose. Every check above rejects a malformed COMMAND; this one is the
+    # first that looks at the world, so a well-formed command reaches it and no
+    # earlier check can win on its behalf.
+    #
+    # 🔴 ONLY THE DEFAULT RESOLUTION IS REFUSED. `--store <path>` given
+    # explicitly is the operator naming a directory (see `_StoreAction`), and it
+    # stays permissive whether or not that directory is stamped.
+    read_store = _read_store.resolve_read_store(args.store)
+    if not read_store.stamped and not args.store_explicit:
+        print(_read_store.refusal_message("subsystem-recall", read_store), file=sys.stderr)
+        return EXIT_UNSTAMPED_READ_STORE
+    # Printed VERBATIM, one field per line, and NOT interpreted: no age is
+    # computed here. `recall` documents itself "no clock" and `cairn.cache_age`
+    # owns that arithmetic — a second, cheaper age here would be a second answer.
+    stamp_header = [f"  stamp: {line}" for line in (read_store.stamp or ())]
+
     # `--limit` is what selects the pre-digest full-body mode. Nothing else does:
     # a default of DEFAULT_ENTRY_LIMIT here would make "the caller asked for a cap"
     # indistinguishable from "the caller asked for nothing".
@@ -3233,9 +3330,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 all_scopes=args.all_scopes,
             )
             print(
-                json.dumps(search_json(found), indent=2)
+                json.dumps(_with_stamp(search_json(found), read_store), indent=2)
                 if args.json
-                else render_search(found)
+                else render_search(found, extra_header=stamp_header)
             )
             return _exit_for(found.status, found.label, found.malformed)
         # The ONE call to `focus_window`, and only where it is EVIDENCE. The
@@ -3267,7 +3364,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"subsystem-recall: {exc}", file=sys.stderr)
         return 3
 
-    print(json.dumps(report_json(report), indent=2) if args.json else render_text(report))
+    print(
+        json.dumps(_with_stamp(report_json(report), read_store), indent=2)
+        if args.json
+        else render_text(report, extra_header=stamp_header)
+    )
     return _exit_for(report.status, f"{report.scope}/", report.malformed)
 
 

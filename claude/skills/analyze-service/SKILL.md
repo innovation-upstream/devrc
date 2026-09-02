@@ -14,13 +14,23 @@ Input: `$ARGUMENTS`. Split it into:
 ## Step 1 — run the recon script. One call, not six.
 
 ```
-python3 ~/workspace/devrc/scripts/lib/service_recon.py <service>
+cairn sync && python3 ~/workspace/devrc/scripts/lib/service_recon.py <service>
 ```
 
 It performs, in ONE process: resolve the search roots → locate the service →
 read the index (via `subsystem_recall`, the store's one reader) → extract the
-load-bearing config knobs → `git log` the located directories. Read-only, no
-network, no cluster.
+load-bearing config knobs → `git log` the located directories. The recon itself
+is read-only and touches no cluster.
+
+🔴 **The `cairn sync` prefix is what makes the `index:` block current, and the
+recon REFUSES an undateable store rather than serving a stale one.** Since the
+Cairn cutover the pod is the datastore and `~/.claude/analyze-service-index` is a
+FROZEN mirror; the recon now reads the synced cache (`~/.cache/subsystem-store`)
+and, if that cache carries no `.sync-stamp`, prints
+`index: store-unstamped — the index could not be read: …` and names `cairn sync`.
+That degrades ONE section — roots, config and git log still run — so a failed
+sync costs you the index block, never the brief. `--store <path>` reads a
+directory deliberately and is not refused.
 
 Flags you may need — everything else has a default that is deliberate:
 

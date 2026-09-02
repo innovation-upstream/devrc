@@ -28,6 +28,7 @@ FROM python:3.12-slim
 # and `subsystem_resolver`/`subsystem_touch`, and shells out to nothing. There
 # is no requirements.txt to install and there must not be one.
 COPY scripts/lib/subsystem_recall.py   /app/scripts/lib/
+COPY scripts/lib/subsystem_read_store.py /app/scripts/lib/
 COPY scripts/lib/subsystem_resolver.py /app/scripts/lib/
 COPY scripts/lib/subsystem_touch.py    /app/scripts/lib/
 COPY scripts/lib/git_mainline.py       /app/scripts/lib/

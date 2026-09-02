@@ -81,9 +81,16 @@ import subsystem_recall as rc  # noqa: E402
 import subsystem_touch  # noqa: E402
 from subsystem_touch import scope_for_repo  # noqa: E402
 
+# 🔴 THE CACHE PATH AND THE STAMP NAME ARE IMPORTED, NOT DECLARED. They used to
+# live here, which made this file the only thing that knew where a host reads the
+# store from — and the readers (`subsystem_recall.py`'s CLI, `service_recon.py`)
+# went on pointing at the FROZEN pre-cutover mirror for a day because nothing
+# they imported could tell them otherwise. One definition, in
+# `subsystem_read_store`; the writer and every reader now move together.
+from subsystem_read_store import DEFAULT_CACHE_ROOT as DEFAULT_CACHE  # noqa: E402
+from subsystem_read_store import SYNC_STAMP  # noqa: E402
+
 DEFAULT_CONFIG = Path.home() / ".config" / "subsystem-store" / "env"
-DEFAULT_CACHE = Path.home() / ".cache" / "subsystem-store"
-SYNC_STAMP = ".sync-stamp"
 DEFAULT_TIMEOUT = 20
 # Ceiling on what a snapshot may unpack to. The whole store measured ~63 KB of
 # markdown across 305 entries in 2026-08; 256 MB is ~4000x that, so it bounds a
