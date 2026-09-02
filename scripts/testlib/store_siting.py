@@ -81,14 +81,26 @@ _MOUNTS_PATH = "/proc/mounts"
 # constant is not a guard.
 #
 # Measured 2026-09-01 against the REAL fixture (`_populate_source_store` + 303 bulk
-# entries = 306 files): apparent 72,602 B, page-allocated 1,265,664 B, ratio 17.4x.
-# 🔴 APPARENT BYTES UNDERSTATE TMPFS COST ~17x, which is what makes this easy to get
-# wrong: tmpfs charges whole 4 KiB pages, so 306 small entries cost ~1.2 MiB however
-# little text they hold. A floor reasoned from `st_size` lands an order of magnitude
-# low, and an earlier revision of this comment did exactly that — it quoted 53,985 B
-# and 23x from a SYNTHETIC store rather than this fixture, i.e. it measured something
-# else and labelled it this.
-_LARGEST_STORE_BYTES = 1_318_912
+# entries = 306 files, on tmpfs): apparent **74,613 B**, page-allocated
+# **1,253,376 B**, ratio **16.80x**. Confirmed four independent ways — `sum(st_size)`,
+# `st_blocks*512`, `du -sB1`, and the `/dev/shm` statvfs used-delta — all agreeing.
+#
+# 🔴 TWO EARLIER REVISIONS OF THIS COMMENT WERE MEASUREMENTS OF SOMETHING ELSE, and
+# the second was mine correcting the first. "53,985 B / 23x" came from a SYNTHETIC
+# store, not this fixture. "72,602 B / 1,265,664 B / 17.4x" then double-counted
+# DIRECTORY pages: tmpfs directories cost zero, and 1,253,376 + 3*4096 = 1,265,664
+# exactly. In a module whose subject is a number being wrong, three revisions were
+# needed to get this one right — which is why the value below is DERIVED and pinned
+# rather than transcribed.
+#
+# 🔴 APPARENT BYTES UNDERSTATE TMPFS COST ~17x. tmpfs charges whole 4 KiB pages, so
+# entry COUNT drives this, not text size; a floor reasoned from `st_size` lands an
+# order of magnitude low.
+#
+# The value is the DERIVED requirement, not the single-fixture measurement: the
+# ratchet sums every ledgered file's fixtures (conservative — under `-n 4 --dist
+# loadfile` they do not all hold stores at once) and adds slack pages.
+_LARGEST_STORE_BYTES = 1875968
 
 # Free space a candidate must have before we will site a store on it: the measured
 # peak above, with better than 3x margin.

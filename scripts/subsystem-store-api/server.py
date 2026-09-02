@@ -16,13 +16,33 @@ one thing this file adds to the body is a trailing newline, because the CLI's
 `print()` adds one and the phase-1 acceptance criterion is byte-identity with
 the CLI's stdout.
 
-⚠ THE BODY IS NOT PATH-INDEPENDENT. `render_text` prints `  store: <root>` —
-one line, and the only line in the whole render that names the store root. The
-pod serves from `/data` and the workbench reads `~/.claude/analyze-service-index`,
-so remote and local bytes CANNOT be identical on that line and byte-identity has
-to be asserted modulo exactly it. `verify-byte-identity.sh` does that
-mechanically: it canonicalises that one line on both sides AND asserts the raw
-diff is exactly one line, so a second divergence cannot hide inside the excuse.
+⚠ THE BODY IS NOT PATH-INDEPENDENT, AND IT IS NOT ORDER-INDEPENDENT EITHER.
+`render_text` prints `  store: <root>` and `  host: <id>`; the pod serves from
+`/data` under a pod identity while the workbench reads
+`~/.claude/analyze-service-index` under its own, so remote and local bytes
+CANNOT be identical on those two lines. The server also prepends the `SNAPSHOT`
+block, which the local CLI correctly does not emit. And the INDEX is ordered
+newest-first by entry-file MTIME — metadata the transport does not carry — so
+two byte-identical stores render their rows in a different ORDER and (in the
+default digest) feature a different entry.
+
+`verify-byte-identity.sh` asserts identity modulo exactly those FOUR
+differences, mechanically: it canonicalises the two lines on both sides, strips
+the measured snapshot block from the remote, compares the index rows as a
+SORTED set, and compares each entry's own single-ref render byte for byte.
+⚠ THIS PARAGRAPH USED TO SAY "one line … the raw diff is exactly one line",
+which was already false when `host:` shipped and stayed false through two more
+causes.
+
+⚠ AND IT USED TO ADD "decomposes the raw diff into the four named causes SO A
+FIFTH DIVERGENCE CANNOT HIDE INSIDE THE EXCUSE", which is a reworded version of
+the same overclaim. NOTHING GATES ON THE DECOMPOSITION — the script says so
+itself ("those numbers are EVIDENCE, not a second gate; gating on them would be
+an unreachable guard counted as coverage"), and so does its README. What
+actually catches a fifth divergence is the `residual != 0` branch (a frame or
+sorted-row difference that survived every canonicalisation) and the per-entry
+`cmp`. The counts are there so a READER can see the excuse was spent on the
+lines it claims, which is a different and weaker job.
 
 PHASE 1 SCOPE — read-only, cluster-internal, no ingress
 -------------------------------------------------------

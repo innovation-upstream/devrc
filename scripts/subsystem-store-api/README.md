@@ -39,7 +39,7 @@ Replication happens over this API; those tests are untouched.
 | `Dockerfile` | image, built from the **repo root** as context (the modules live in `scripts/lib`) |
 | `build-push.sh` | build + push to Harbor. Refuses to push if `/data` in the image is non-empty |
 | `seed.sh` | `rsync` the local store into a stage, optionally `tar`-push it into the pod. Never writes to the source |
-| `verify-byte-identity.sh` | the phase-1 acceptance comparator: pod digest vs local CLI digest, per scope |
+| `verify-byte-identity.sh` | the phase-1 acceptance comparator, per scope: the `mode=list` render (index rows as a **sorted set**), the entry **set** by `comm`, then **each entry's** own single-ref render |
 
 Manifests: `homelab-talos` → `clusters/homelab/apps/subsystem-store/`.
 
@@ -330,20 +330,131 @@ client identity. See "Rate limit, lockout and the client address" below.
 ⚠ `verify-byte-identity.sh` prints a `diff` on failure, and that diff is store
 content. Redirect it to a file on a shared terminal.
 
-## Why byte-identity is asserted "modulo THREE named differences"
+## Why byte-identity is asserted "modulo FOUR named differences"
 
 `render_text` prints `  store: <root>`, and the pod's root is `/data` while the
 workbench's is `~/.claude/analyze-service-index`. The streams therefore cannot be
 byte-identical, and a verifier that said they were would be lying.
 
-There are **three** such differences, not one, and the second is the one that
-made this script permanently red:
+There are **four** such differences, not one, and the second and fourth are the
+two that each made this script permanently red in turn:
 
 | difference | why it is legitimate | how it is canonicalised |
 |---|---|---|
 | `  store: <root>` | the pod serves a copy at a different path | rewritten to a fixed token **on both sides** |
 | `  host: <id>` | `store_host_line()` names the machine whose disk was read — the store is PER-HOST, and saying so is the entire point of the line | rewritten to a fixed token **on both sides** |
 | the `🔴 SNAPSHOT` block | a transport annotation the server prepends and the local CLI correctly does not emit | removed from the **remote** only |
+| the INDEX row **order** | the index is newest-first by entry-file **mtime**, and the transport (`rsync` to a stage, `tar` into the pod) does not carry mtime | index rows compared as a **sorted set** on both sides; everything else in the stream compared verbatim, in order |
+
+🔴 **The fourth is why it no longer compares the whole-scope digest at all.**
+The digest also picks its one featured BODY by mtime (`select_featured`'s
+most-recent fallback), so on a multi-entry scope two byte-identical stores
+render a different index order *and* a different featured entry. Measured
+2026-09-01 against the live pod: `scopes=5 pass=1 fail=4`, and the `cli`
+scope's entire unaccounted difference being one row's POSITION. Instead, per
+scope:
+
+1. the **`mode=list` render** — no body, so no mtime-selected featured entry —
+   with the index rows sorted and the rest compared verbatim;
+2. the **entry SET**, by `comm` over the refs the two index blocks list. A ref
+   on one side only FAILS and names it;
+3. **each entry's own bytes**, as its `--ref` / `?ref=` render — a narrowing
+   that prints no index, so it carries no order. There is no route serving raw
+   entry bytes; the API only ever returns renders. 🔴 That render must report
+   `status=recalled` **on both sides**, or the scope is REFUSED — see below.
+
+🔴 **That run was read wrong twice, and the corrected reading is this.** This
+paragraph used to add "the lone PASS being the only two-entry scope", and
+`verify-byte-identity.sh` concluded from it that the comparator "could not pass
+for any scope with more than two entries". Re-measured 2026-09-01 on the
+workbench, same store, counting entries as `subsystem_recall` **indexes** them:
+`cli`=5, `devrc`=26, `datapacket-talos`=49, `homelab-infra`=0,
+`storage-resolver`=1. `storage-resolver/` holds `backblaze.md` plus a
+`README.md`, and a README in a scope is correctly not indexed — so it is a
+**one**-entry scope, and **no two-entry scope appears in that run at all**. The
+boundary that holds is arithmetic rather than measured: a one-entry index has
+exactly one possible order and cannot diverge; **two or more** is where order
+can differ. `homelab-infra` was also not an ordering failure — 0 indexed
+entries means its local render is `status=scope-empty` with no INDEX block, so
+its 102 unaccounted lines cannot be ordering; that FAIL was a **set**
+difference. Three of the four FAILs were ordering.
+
+⚠ **A scope whose index PAGINATES is refused, not partly compared.** Past
+`LISTING_PAGE_SIZE` both the page membership and the ref column's width are
+mtime-derived, and the refs past page 1 are never read — so page 1 is not
+comparable and a PASS over it would be a partial check reported as a clean one.
+
+🔴 **The headroom, because that is the number that says when to act — and it
+must come from the BINDING side.** This arm greps *both* renders, so whichever
+store is **larger** is the one that trips it, and that is the **pod**. This
+paragraph used to say **51 entries of headroom**, taken from the *local* count,
+while correctly noting in the same breath that the pod was larger and
+unmeasured — i.e. it quoted the non-binding side, and the error ran in the
+unsafe direction.
+
+Measured on both sides 2026-09-02 over the live store ingress, counting entries
+as `subsystem_recall` **indexes** them. `LISTING_PAGE_SIZE` is **100**:
+
+| scope | local | pod |
+|---|---:|---:|
+| **`datapacket-talos`** | 49 | **51** ← the binding scope |
+| `homelab-talos` | 24 | 30 |
+| `devrc` | 26 | 29 |
+| `civitai` | 23 | 24 |
+| `homelab-infra` | 0 | 4 |
+| **TOTAL** | **141** | **189** |
+
+(154 vs 201 `.md` files; 16 vs 23 scopes.)
+
+So the headroom is **100 − 51 = 49 entries**, not 51. When it crosses, this
+refusal exits 1, `cairn-cutover.py::_acceptance` returns `RC_ACCEPTANCE`, and
+the cutover refuses with the store left **unfrozen** — the permanently-red-gate
+shape this comparator was rewritten to remove, relocated rather than
+eliminated. The store is append-mostly and pruning is manual, so the number
+only shrinks. The two ways out are unchanged: raise the reader's page cap, or
+teach this script to walk every page and normalise the padding.
+
+🔴 **The sweep is ONE-DIRECTIONAL, and the verdict line now says so.** Scopes
+are enumerated from the **local** store, so a scope the pod holds and this host
+does not is never requested, never compared and never counted — and no arm can
+see one, because every arm starts from that list (the set arm compares entries
+*within* a shared scope). From the table above: 7 pod-only scopes
+(`auditloop`, `civitai-gpu-fleet`, `naida-ai`, `vetr`, `vetr-api`, `vetr-app`,
+`vetr-infra`) holding **48 entries — 25% of the served store** — are outside
+every run's reach.
+
+It is not fixable by looking harder: the API exposes **no scope-enumeration
+route**, by design. So the remedy is honesty rather than coverage. `verify:
+scopes=16 pass=16 fail=0 entries-compared=141` is a true sentence that reads as
+"the two stores agree", so every run now prints a second line naming which side
+was enumerated and stating that the served copy may hold scopes it never saw —
+the same rule the script enforces one notch down, where a zero-scope run exits
+4 instead of passing trivially, and the same rule `drift-check.sh` follows by
+printing links EXAMINED beside links dangling.
+
+🔴 **A per-entry render that is not `recalled` is REFUSED, not compared.** A
+`--ref` run that resolves to no single entry still prints a well-formed report
+— a notice where the body should be — and `subsystem_recall._exit_for` returns
+**0** for it (only `*-unreadable` is non-zero), so an exit-code check cannot
+see it. The two notices are then byte-identical whenever the stores index the
+same refs, so `cmp` accepts them and `entries=` counts a body that was never
+rendered. Reachable by a supported convention, not only by a defect: a bare ref
+resolves on `e.slug` alone, so a scope holding `alpha.md` **and**
+`alpha.process.md` indexes the refs `alpha` and `alpha.process` while `--ref
+alpha` is ambiguous. The FAIL names the scope, the ref and both sides' status.
+Refusing rather than merely not counting: a silently uncounted entry inside a
+PASS is the same coverage-in-name-only shape one level down. No live scope uses
+that shape today; the remedy when one does is a store fix (`prune-index`).
+
+⚠ **The set arm is an acceptance check for the moment right after a push.**
+Post-cutover the pod is canonical and each host's store is a read-through cache
+that may legitimately lag — measured 2026-09-01, scope `devrc` at 26 entries
+locally against 29 on the pod, with nothing wrong. `cairn-cutover.py` runs this
+at P4, immediately after the push, which is where a set difference means the
+push was lossy. It is deliberately not weakened for the lagging-cache case: a
+check that shrugged at a missing entry could not detect a half-copied seed.
+
+⚠ **It is now N+1 requests per scope**, not 1 — a 50-entry scope issues 51.
 
 🔴 **`host:` was added late and nothing stripped it**, so every comparison
 between a workbench and a pod failed by construction — `verify: scopes=16 pass=0
@@ -365,18 +476,32 @@ that are the banner or are blank; it is stripped only if that run **contains**
 the banner, and a server that emits no banner (pre-0.3.0) has nothing removed.
 
 Beside the verdict the script prints how many lines differ **with no
-canonicalisation at all**, decomposed into the three causes and summed as
-`accounted-for`. A real pod-vs-workbench run reads `store-root-lines=2
-host-lines=2 snapshot-block-lines=2 accounted-for=6`; the three-line block in
+canonicalisation at all**, decomposed into the four causes and summed as
+`accounted-for`:
+
+```
+raw-diff-lines == store-root-lines + host-lines + snapshot-block-lines + index-order-lines
+```
+
+🔴 **The counts are SUMS over every stream compared for the scope** — one
+scope-level `mode=list` render plus one single-ref render per entry — so
+against a pod-shaped remote `store-root-lines` reads `2 * (1 + entries)`, not a
+flat 2. `entries=` is printed for exactly that reason and one more: a scope
+that compared no bodies must be readable as one, the same rule `drift-check.sh`
+follows by printing links EXAMINED beside links dangling.
+
+`index-order-lines` is **measured, not assumed** — it is the diff reduction the
+row sort actually bought (differing lines after the `store:`/`host:`/snapshot
+canonicalisation, minus what still differs once the rows are sorted). A rule
+that erased a difference without a matching count would widen the blind spot
+rather than the gate, which is why it joined the sum in the same commit as the
+sort. The three-line block in
 `test_a_POD_SHAPED_remote_PASSES_when_only_the_THREE_permitted_lines_differ` is
 a SYNTHESISED skew, not a shape any deployed image has been seen to emit.
-Those numbers are EVIDENCE, not a second gate:
-they can only disagree if a `sed` erased a line that was none of the three,
-which the renderer cannot produce (no entry body renders at two-space
-indentation — measured across all four modes). Gating on them would be an
+
+Those numbers are EVIDENCE, not a second gate: gating on them would be an
 unreachable guard counted as coverage. But every canonicalisation rule **must**
-appear in that sum: a rule that erases a difference without a matching count
-widens the blind spot rather than the gate.
+appear in that sum.
 
 ## The token is a SET, and rotation is by overlap
 

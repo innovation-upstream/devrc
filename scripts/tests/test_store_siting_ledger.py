@@ -277,19 +277,23 @@ _ROOT_NAMES = {"store", "src"}
 def _is_disk_rooted_store_expr(node: ast.AST) -> bool:
     """`tmp_path / "store"` and its spellings — a store root that skips the siting.
 
-    A bare `tmp_path / <Name>` counts because the variable could be anything; that is
-    deliberately conservative, since the failure this bounds is silent.
+    🔴 A BARE `tmp_path / <Name>` IS NOT ENOUGH, and this was measured on the merged
+    tree rather than argued. Round 3's audit called the unrestricted Name arm "a false
+    accusation"; `main` then added
+    `(tmp_path / name).write_text(body)` — a scratch file called "wrapped.md" — and the
+    ratchet counted 21, demanding an author use `store_root()` for something that is
+    not a store. So a Name only counts when the expression is USED as a store root:
+    assigned to a root-ish variable, or passed to `_build_store`/`running`.
+
+    Quoting and spacing still do not matter: they do not survive parsing.
     """
-    if (
-        isinstance(node, ast.BinOp)
-        and isinstance(node.op, ast.Div)
-        and isinstance(node.left, ast.Name)
-        and node.left.id == "tmp_path"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and (
+        isinstance(node.left, ast.Name) and node.left.id == "tmp_path"
     ):
         right = node.right
         if isinstance(right, ast.Constant) and right.value in _ROOT_NAMES:
             return True
-        return isinstance(right, ast.Name)
+        return isinstance(right, ast.Name) and _used_as_a_store_root(node)
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -301,13 +305,55 @@ def _is_disk_rooted_store_expr(node: ast.AST) -> bool:
         first = node.args[0]
         if isinstance(first, ast.Constant) and first.value in _ROOT_NAMES:
             return True
-        return isinstance(first, ast.Name)
+        return isinstance(first, ast.Name) and _used_as_a_store_root(node)
     return False
+
+
+# Variables a store root is bound to in this suite, and the calls that consume one.
+_ROOT_BINDINGS = {"root", "store", "store_root", "src", "source_store", "scoped"}
+_ROOT_CONSUMERS = {"_build_store", "running", "build_server"}
+_STORE_ROOT_PARENTS: dict[int, bool] = {}
+
+
+def _index_store_root_uses(tree: ast.AST) -> None:
+    """Record which `tmp_path / X` nodes are USED as a store root.
+
+    Two shapes, both structural: bound to a root-ish name, or handed to a call that
+    takes a store root. Anything else — a scratch file, a token path, a cache dir —
+    is not this ratchet's business.
+    """
+    _STORE_ROOT_PARENTS.clear()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in _ROOT_BINDINGS:
+                    _STORE_ROOT_PARENTS[id(node.value)] = True
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id in _ROOT_BINDINGS:
+                if node.value is not None:
+                    _STORE_ROOT_PARENTS[id(node.value)] = True
+        elif isinstance(node, ast.Call):
+            name = None
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            if name in _ROOT_CONSUMERS:
+                for arg in node.args:
+                    _STORE_ROOT_PARENTS[id(arg)] = True
+                    # `_build_store(root / "store", …)` — the tmp_path expr is nested
+                    for sub in ast.walk(arg):
+                        _STORE_ROOT_PARENTS[id(sub)] = True
+
+
+def _used_as_a_store_root(node: ast.AST) -> bool:
+    return _STORE_ROOT_PARENTS.get(id(node), False)
 
 
 def test_the_inline_disk_rooted_store_sites_do_not_GROW():
     path = TESTS / "test_subsystem_store_api.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    _index_store_root_uses(tree)
     actual = sum(1 for n in ast.walk(tree) if _is_disk_rooted_store_expr(n))
     assert actual <= _DISK_ROOTED_SITES, (
         f"{actual} inline disk-backed store roots, up from {_DISK_ROOTED_SITES}. "
@@ -341,29 +387,72 @@ def test_the_inline_disk_rooted_store_sites_do_not_GROW():
 #
 # So the requirement is DERIVED from the fixture that produces it.
 _STORE_PAGE_BYTES = 4096
-# `_populate_source_store` seeds this many entries before the bulk loop.
-_SEEDED_ENTRIES = 3
 # Directories, and slack for a fixture that grows by a few files rather than a loop.
 _FIXTURE_SLACK_PAGES = 16
 
 
-def _biggest_fixture_entry_count() -> int | None:
-    """Entries in the largest store fixture, read from the source, or None.
+def _seeded_entry_count(tree: ast.AST) -> int:
+    """Entries a module writes OUTSIDE any loop — the fixture seed.
 
-    Returns None rather than 0 when it cannot find the loop: a zero would make the
+    🔴 DERIVED, because `_SEEDED_ENTRIES = 3` was a bare literal about another file's
+    function, pinned by nothing — the exact defect this ratchet exists to prevent,
+    reintroduced inside its own fix. Add 200 seeded entries and a hardcoded 3 is blind
+    to all of them.
+    """
+    loop_writes: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.For, ast.While, ast.comprehension)):
+            for sub in ast.walk(node) if not isinstance(node, ast.comprehension) else []:
+                loop_writes.add(id(sub))
+    seeded = 0
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("write_text", "write_bytes")
+            and id(node) not in loop_writes
+        ):
+            seeded += 1
+    return seeded
+
+
+def _biggest_fixture_entry_count() -> int | None:
+    """Entries in the largest store fixture across EVERY ledgered file, or None.
+
+    🔴 SUM, NOT MAX, and every ledgered file, not one. Round 5 took the max of one
+    loop in `test_cairn_cli.py`; an audit measured three shapes that under-report
+    SILENTLY — two write loops in one test (reports 303, truth 603), nested loops
+    (203 vs 1003), and a bigger non-`write_text` loop beside the existing one, which
+    passed while the true need was 21 MB against a 4 MiB floor. Under-reporting is the
+    dangerous direction: it re-arms ENOSPC through the guard added to prevent it.
+
+    Returns None rather than 0 when nothing is found: a zero would make the
     requirement trivially satisfiable, which is the failure mode this exists to stop.
     """
-    path = TESTS / "test_cairn_cli.py"
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError):
-        return None
-    # 🔴 ONLY loops that WRITE ENTRIES. A bare max over every `range(N)` in the file
-    # is wrong and was measured wrong: it picked up an unrelated `range(60_000)` that
-    # builds a large string, demanding a 245 MB floor. The discriminator is a
-    # `write_text` call inside the loop body — verified to separate the 303-entry
-    # store loop (True) from `range(60_000)` and `range(80)` (both False).
-    best = None
+    total = 0
+    found_any = False
+    for name in sorted(EXPECTED_SERVER_TESTS):
+        path = TESTS / name
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        n = _entries_written_by_loops(tree)
+        if n is not None:
+            found_any = True
+            total += n + _seeded_entry_count(tree)
+    return total if found_any else None
+
+
+def _entries_written_by_loops(tree: ast.AST) -> int | None:
+    """Total entries written by `for … in range(<int>)` loops that write files."""
+    total = 0
+    found = False
+    # 🔴 ONLY loops that WRITE ENTRIES. A bare max over every `range(N)` is wrong and
+    # was measured wrong: it picked up an unrelated `range(60_000)` building a string,
+    # demanding a 245 MB floor. The discriminator is a write call in the loop body.
+    # `write_bytes` counts too — round 5 checked only `write_text`, and an audit showed
+    # a `write_bytes` loop beside the existing one passes while needing 21 MB.
     for node in ast.walk(tree):
         if not isinstance(node, ast.For):
             continue
@@ -380,15 +469,14 @@ def _biggest_fixture_entry_count() -> int | None:
         writes = any(
             isinstance(c, ast.Call)
             and isinstance(c.func, ast.Attribute)
-            and c.func.attr == "write_text"
+            and c.func.attr in ("write_text", "write_bytes")
             for c in ast.walk(node)
         )
         if not writes:
             continue
-        n = it.args[0].value
-        if best is None or n > best:
-            best = n
-    return None if best is None else best + _SEEDED_ENTRIES
+        found = True
+        total += it.args[0].value
+    return total if found else None
 
 
 def test_the_largest_store_constant_still_covers_the_biggest_fixture():
@@ -424,11 +512,11 @@ def test_the_string_literal_half_of_the_membership_scan_is_LOAD_BEARING(tmp_path
     """A store server stood up inside a `sys.executable -c` script.
 
     The AST scan cannot see a call inside a string, and seven test files here
-    already drive that shape. Disabling the Constant half left the ledger suite
-    at 99 passed — the widening reverted green, so nothing pinned it.
+    already drive that shape. Before this test existed, disabling the Constant
+    half left this file's suite fully green — the widening reverted unnoticed.
+    (No passed-count here on purpose: the previous one was falsified by the very
+    commit that moved this test, which is how it earned its own finding.)
     """
-    import test_store_siting_ledger as led
-
     probe = tmp_path / "test_probe_subprocess_server.py"
     probe.write_text(
         "import textwrap\n"
@@ -444,8 +532,6 @@ def test_the_string_literal_half_of_the_membership_scan_is_LOAD_BEARING(tmp_path
 
 def test_a_hash_COMMENT_mentioning_build_server_is_still_not_a_call(tmp_path: Path):
     """The mirror. Widening for strings must not undo the false-positive fix."""
-    import test_store_siting_ledger as led
-
     probe = tmp_path / "test_probe_comment_only.py"
     probe.write_text(
         "# this file deliberately never calls build_server(...) itself\n"
