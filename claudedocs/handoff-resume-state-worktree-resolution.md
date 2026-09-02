@@ -179,7 +179,8 @@ paths, so this is evidence about committed source, not a deployed copy.
 2. ✅ **The staged dnsmasq fix is ALREADY APPLIED — do NOT run the script.** Re-measured
    2026-09-02 before acting, per `claude/RULES.md` → "Memory Is a Hypothesis".
    `/etc/nixos/configuration.nix:76` already reads
-   `servers = ["/docker.io/1.1.1.1" "192.168.50.1" "1.1.1.1"];` and the script's own
+   `servers = ["/docker.io/<public-resolver>" "<lan-router>" "<public-resolver>"];` (the
+   domain-specific entry wins, so docker.io alone bypasses the router) and the script's own
    precondition (exactly 1 match for the pre-fix line) now matches **0** — it would print
    `already applied — nothing to do`. It is LIVE, not merely edited: via `127.0.0.1`,
    `registry-1.docker.io` answers TTL **49 s** with **8/8** serving `*.docker.com`, and
@@ -190,8 +191,11 @@ paths, so this is evidence about committed source, not a deployed copy.
    work:** `dig @192.168.50.1 registry-1.docker.io` still returns the pin — TTL
    **41,697,864 s ≈ 482 days**, counting down ~4 days from the original 487. Its eight
    addresses today are **0 correct / 2 third-party certs / 6 no handshake**
-   (`52.4.106.100` → `grafana.staging.us-east-1.orcasecurity.io`, `54.90.53.108` →
-   `eportfoliodev.com`), against 4/2/2 when measured on 2026-08-29. Any LAN device without
+   — the two that DO complete a handshake present certificates for an unrelated company's
+   staging Grafana and an unrelated personal site, neither of them Docker's (the addresses
+   and hostnames are deliberately not recorded here; this repo is PUBLIC and they are third
+   parties' — re-measure with `dig @<lan-router>` and read the certs yourself). That is
+   against 4/2/2 when measured on 2026-08-29. Any LAN device without
    the host-side bypass now fails **every** pull, not half. Clearing that entry on the
    router is the actual repair — the script's own header says so; it is a host-side bypass
    for two machines, not a fix.
