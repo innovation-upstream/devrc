@@ -125,6 +125,8 @@ __all__ = [
     "extract_sections",
     "scan_headings",
     "parse_journal_bullets",
+    "line_openness",
+    "line_mentions_marker",
     "SubsystemEntry",
     "SubsystemIndex",
     "Evidence",
@@ -1659,6 +1661,65 @@ def _as_opening_line(line: str) -> str:
     return f"- {stripped}"
 
 
+_MARKER_ANYWHERE = re.compile(
+    r"(?:OPEN|RESOLVED)(?![A-Za-z0-9_])"        # word-boundaried, either case…
+    r"(?:[ \t]*(?:[0-9a-fA-F]{7,40}(?![0-9a-fA-F])|PR#\d+|#\d+"
+    r"|\([^)]{1,30}\)|\[[^\]]{1,30}\]))*"       # …optional sha / PR / paren ref…
+    r"[^A-Za-z0-9\n]{0,4}:",                    # …and a COLON, always.
+    re.IGNORECASE,
+)
+"""A declaration ANYWHERE in a line — used ONLY to rank a DROPPED line's urgency.
+
+🔴 THE COLON IS NOT OPTIONAL HERE, and that is the whole difference from
+`_NEAR_MISS_MARKER`'s shouted branch. That branch may skip the terminator
+because it is ANCHORED at a bullet head, where "prose does not shout"; unanchored
+over a whole line the same rule fires on `OPEN SOURCE`. Requiring the colon keeps
+`OPEN:` and `RESOLVED <sha>:` and rejects `OPEN SOURCE`, `RESOLVED_ADDR in the
+trace…` (word boundary) and `resolved upstream in 1.2.3.` (no colon follows the
+token or a ref form).
+
+🔴 IT IS NOT A PARSE AND MUST NEVER GATE ONE. A marker mid-line declares nothing
+to any reader in this module — that is deliberate and unchanged. This exists
+because a line that is ALREADY LOST is a different question from a line being
+parsed: the whole 2026-08-19 incident is a bullet whose `OPEN:` sat mid-line, so
+a signal anchored at position 0 is 0 on the only shape ever observed in the wild.
+Ranking that as ordinary lost text, rather than as a lost DECLARATION, is what
+the audit called inert.
+"""
+
+
+def line_mentions_marker(line: str) -> bool:
+    """Does this line MENTION a declaration anywhere in it? Ranking only.
+
+    Distinct from `line_openness`, which asks whether the line PARSES as one.
+    Every reader in this module uses the latter; only the dropped-line scanner's
+    urgency flag uses this, and it never gates whether a finding is reported.
+    """
+    return _MARKER_ANYWHERE.search(line) is not None
+
+
+def line_openness(line: str) -> tuple[str | None, str | None]:
+    """`(openness, resolved_by)` for ANY line, opening or continuation.
+
+    🔴 THE ONE PLACE THAT ANSWERS "DOES THIS NON-OPENING LINE CARRY A MARKER".
+    `JournalBullet.unreachable_markers` asks it of a bullet's lines 2..n, and
+    `subsystem_touch.scan_dropped_lines` asks it of a line that reaches no
+    bullet at all. Both had the same question and only one of them had the
+    answer: the dropped-line scanner shipped a hand-spelled copy that fired on
+    `* OPEN:` (a bullet char the corpus does not use), missed `- OPEN:` and
+    every dated `- 2026-08-19: OPEN: …`, and returned True for the prose
+    `resolved upstream in 1.2.3.` — inert on the field shape and loose on
+    everything else. Consolidating is what made that audible.
+
+    It restates no vocabulary: `_as_opening_line` puts the line in opening
+    position and `_bullet_openness` — the same function `parse_journal_bullets`
+    calls for line 1 — decides. A marker MID-line declares nothing, here as
+    everywhere else in this module, because that pattern is anchored at
+    position 0.
+    """
+    return _bullet_openness(_as_opening_line(line))
+
+
 @dataclass(frozen=True)
 class JournalBullet:
     """One top-level bullet of a `## Nuance / work-history` section, VERBATIM.
@@ -1825,8 +1886,8 @@ class JournalBullet:
             if in_fence or not line.strip():
                 continue
             # 🔴 THE REAL PARSER, not a second copy of its vocabulary. See
-            # `_as_opening_line`.
-            openness, sha = _bullet_openness(_as_opening_line(line))
+            # `line_openness`, which `scan_dropped_lines` shares.
+            openness, sha = line_openness(line)
             if openness is None:
                 continue
             out.append(
