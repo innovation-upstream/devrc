@@ -116,10 +116,13 @@ CONTRACT SUMMARY
 ----------------
     resolve_mainline(repo)                    -> (ref | None, ladder)
     identity_collisions(rows)                 -> tuple[str, ...]        PURE
-    rebuild_refusal(derivations, rows)        -> str | None             PURE
+    rebuild_refusal(derivations, rows, ..)    -> str | None             PURE
     partial_scope_warnings(derivations)       -> tuple[str, ...]        PURE
     rebuild_delete_labels(derivs, stored, ..) -> tuple[str, ...]        PURE
-    handoff_paths_in_ref(repo, ref)           -> tuple[str, ...]
+    orphan_labels(derivs, stored, ..)         -> tuple[str, ...]        PURE
+    orphan_label_warning(labels)              -> tuple[str, ...]        PURE
+    rebuild_plan_lines(derivs, ..)            -> tuple[str, ...]        PURE
+    handoff_paths_in_ref(repo, ref)           -> tuple[str, ...] | None
     doc_text_at_ref(repo, ref, path)          -> str | None
     handoff_paths_on_disk(repo)               -> DiskScan
     untracked_docs(on_disk, tracked)          -> tuple[str, ...]        PURE
@@ -191,6 +194,9 @@ __all__ = [
     "rebuild_refusal",
     "partial_scope_warnings",
     "rebuild_delete_labels",
+    "orphan_labels",
+    "orphan_label_warning",
+    "rebuild_plan_lines",
     "derivation_warnings",
     "all_clear_blockers",
     "derivation_json",
@@ -527,8 +533,26 @@ def resolve_mainline(repo: str | Path) -> tuple[str | None, tuple[str, ...]]:
     return resolve_base_ref(repo)
 
 
-def handoff_paths_in_ref(repo: str | Path, ref: str) -> tuple[str, ...]:
-    """`claudedocs/handoff-*.md` paths present in `ref`, sorted.
+def handoff_paths_in_ref(repo: str | Path, ref: str) -> tuple[str, ...] | None:
+    """`claudedocs/handoff-*.md` paths present in `ref`, sorted — or `None`.
+
+    🔴 `None` IS "GIT FAILED", `()` IS "THE REF GENUINELY HOLDS NONE", AND THEY
+    USED TO BE THE SAME VALUE. `_git` returns `None` on a non-zero rc, and this
+    function folded that into an empty tuple — so a `ls-tree` that failed (a
+    corrupt or partially-fetched object store, a ref that vanished between
+    `resolve_mainline` and here, a repo whose `.git` became unreadable mid-run)
+    was indistinguishable from a mainline that simply carries no handoff docs.
+    The repo then landed in `derive_repo`'s MEASURED set with `unmeasured=None,
+    docs=0` and no warning at all.
+
+    That was survivable while the distinction only affected a count. It is not
+    survivable now that `rebuild_delete_labels` reads the same MEASURED set to
+    decide what a `--rebuild` may DELETE: a failed `ls-tree` would make the run
+    authoritative over that repo, delete its rows, re-insert none, and exit 0.
+    `claude/RULES.md` → "an EMPTY RESULT cannot distinguish two mechanisms";
+    here the two mechanisms have opposite correct actions, so the caller is
+    given the fact rather than a shared observable. `derive_repo` turns the
+    `None` into a structural `unmeasured` reason, which is what keeps the rows.
 
     🔴 THE FILTER IS APPLIED IN PYTHON, NOT AS A GIT PATHSPEC. `git ls-tree`
     pathspecs are matched by git's own glob rules and a `*` there does not mean
@@ -537,7 +561,7 @@ def handoff_paths_in_ref(repo: str | Path, ref: str) -> tuple[str, ...]:
     can state. `-z` because a path may contain anything but NUL."""
     out = _git(repo, ["ls-tree", "-r", "--name-only", "-z", ref, "--", HANDOFF_DIR])
     if out is None:
-        return ()
+        return None
     names = [p for p in out.split("\0") if p]
     return tuple(sorted(p for p in names if _HANDOFF_NAME.match(Path(p).name)))
 
@@ -1027,6 +1051,22 @@ def derive_repo(repo: str | Path, *, label: str | None = None) -> RepoDerivation
     out.ref = ref
     sha = ref_commit_sha(root, ref)
     tracked = handoff_paths_in_ref(root, ref)
+    # 🔴 A FAILED `ls-tree` IS UNMEASURED, NOT "NO HANDOFF DOCS". Those two
+    # states share the observable (zero paths) and nothing else — see
+    # `handoff_paths_in_ref`. Folding them together put a repo git could not read
+    # into the MEASURED set, which is the set `rebuild_delete_labels` is
+    # authoritative over: the run would have deleted its rows and re-inserted
+    # none, silently, exit 0. Returning here (rather than continuing with an
+    # empty `tracked`) is what keeps it out of that set.
+    if tracked is None:
+        out.unmeasured = "ls-tree-failed"
+        out.warnings.append(
+            f"⚠ UNMEASURED — {name}: `git ls-tree {ref} -- {HANDOFF_DIR}` failed, so "
+            f"this repo's mainline could not be enumerated. Contributed 0 rows — this "
+            f"is NOT 'the repo has no handoff docs', and its existing index rows are "
+            f"left alone rather than rebuilt from a reading that never happened."
+        )
+        return out
     out.disk = handoff_paths_on_disk(root)
     out.untracked = untracked_docs(out.disk.paths, tracked)
     out.warnings.extend(untracked_warnings(name, out.untracked))
@@ -1473,7 +1513,10 @@ def import_maildb():
 
 
 def rebuild_refusal(
-    derivations: Sequence[RepoDerivation], rows: Sequence[Section]
+    derivations: Sequence[RepoDerivation],
+    rows: Sequence[Section],
+    *,
+    prune: bool = False,
 ) -> str | None:
     """`None` when a `--rebuild` is safe to run; otherwise WHY it is refused.
 
@@ -1517,6 +1560,33 @@ def rebuild_refusal(
     path prints and which the write's own success line repeats — a partial run
     must not be able to read as a complete one."""
     bad = [d for d in derivations if d.unmeasured]
+    # 🔴 `--prune` NEEDS THE CONFIG TO BE AUTHORITATIVE ABOUT REPO IDENTITY, AND AN
+    # UNMEASURED REPO IS EXACTLY WHERE IT IS NOT. Pruning means "delete every
+    # stored label the config does not name" — a claim that the CONFIGURED
+    # spelling of each repo is the STORED spelling. A repo that could not be read
+    # is the case where those two can differ: table holds `civitai`, the checkout
+    # is renamed, `$CIVITAI` now yields the label `civitai-old`, that label is
+    # UNMEASURED, and `civitai` reads as "dropped from the config" and is
+    # collected. This docstring's own text names a renamed checkout as a cause of
+    # UNMEASURED, so the collision is not hypothetical.
+    #
+    # Refusing here rather than filtering inside `rebuild_delete_labels` is the
+    # deliberate choice: the run cannot tell a rename from a genuine removal, and
+    # guessing either way destroys or preserves rows on a coin flip. It cannot
+    # become a permanently-red gate the way the ALL-unmeasured arm nearly did,
+    # because `--prune` is typed by an operator and is never in the unit's argv.
+    if prune and bad:
+        detail = ", ".join(f"{d.label} ({d.unmeasured})" for d in bad)
+        return (
+            f"REFUSING --rebuild --prune: {len(bad)} of {len(derivations)} repo(s) came "
+            f"back UNMEASURED — {detail}. --prune deletes every stored label this "
+            f"config does not name, which is only sound if the config's spelling of "
+            f"every repo is the table's spelling; an unmeasured repo (a renamed or "
+            f"missing checkout) is precisely where those can differ, and the rows it "
+            f"would collect may be that same repo under its old label. Fix the handles "
+            f"so every repo measures, then re-run --prune — or drop --prune, which "
+            f"deletes only what this run MEASURED."
+        )
     if derivations and len(bad) == len(derivations):
         detail = ", ".join(f"{d.label} ({d.unmeasured})" for d in bad)
         return (
@@ -1548,7 +1618,23 @@ def partial_scope_warnings(derivations: Sequence[RepoDerivation]) -> tuple[str, 
 
     Printed by `render_derivation` (so `--dry-run` and `--json` carry it) AND
     repeated on the write's own success line, because the success line is the one
-    output a scripted caller is most likely to be reading alone."""
+    output a scripted caller is most likely to be reading alone.
+
+    🔴 THE LAST SENTENCE IS A PROMISE ABOUT ANOTHER FUNCTION'S BEHAVIOUR, AND IT
+    WAS FALSE. This reasons over CONFIGURED labels; `rebuild_delete_labels` used
+    to compute its extra "disappeared from config" set over STORED labels, and a
+    repo can be configured-but-unmeasured under one spelling and
+    not-configured-at-all under another (a renamed checkout: table holds
+    `civitai`, `$CIVITAI` now yields `civitai-old`). The delete scope then
+    included `civitai` while this sentence promised, in the same transaction,
+    that the unmeasured repo's rows were preserved.
+
+    It is true now, and true STRUCTURALLY rather than by inspection: the
+    disappeared-set is behind an explicit `--prune`, and `rebuild_refusal`
+    refuses any `--prune` run with an unmeasured repo. So whenever this warning
+    fires AND a write happens, the delete scope is exactly the MEASURED labels.
+    `TestThePartialPromiseIsKept` pins that as a relationship between the two
+    functions rather than trusting either one's own docstring."""
     bad = [d for d in derivations if d.unmeasured]
     if not bad or len(bad) == len(derivations):
         # All-unmeasured is `rebuild_refusal`'s case, not this one; saying it twice
@@ -1572,6 +1658,7 @@ def rebuild_delete_labels(
     stored: Sequence[str],
     *,
     scoped: bool,
+    prune: bool = False,
 ) -> tuple[str, ...]:
     """The repo labels a `--rebuild` run is AUTHORITATIVE for — what it may delete.
 
@@ -1592,22 +1679,145 @@ def rebuild_delete_labels(
         this run may destroy. This is what makes `rebuild_refusal`'s new
         partial-tolerance safe: the absent `$CIVITAI` keeps its rows.
 
-    🔴 AND A FULL RUN STILL COLLECTS THE REPOS THAT DISAPPEARED FROM THE CONFIG.
-    Deleting only what MEASURED would leave a repo that was dropped from the env
-    handles indexed forever, un-refreshed and un-removable — a stale corpus that
-    every query keeps answering from. So an unscoped run (the timer's shape) also
-    claims authority over any stored label that is not in the CONFIGURED set at
-    all. Note the asymmetry, which is the whole point: configured-but-unmeasured
-    is preserved, not-configured-at-all is removed. A scoped run claims neither —
-    it was never told what the full config is.
+    🔴 A REBUILD NEVER DELETES ROWS FOR A REPO IT WAS NOT TOLD ABOUT. THAT IS A
+    REVERSAL, AND THE THING IT REVERSES SHIPPED ONE ROUND AGO. An earlier version
+    of this function let an UNSCOPED run also claim authority over "any stored
+    label the config no longer names", reasoning that a repo dropped from the env
+    handles would otherwise stay indexed forever. Two measurements killed it:
+
+      * The unit's own environment sets only `$DEVRC` and `$HOMELAB` while a
+        human `--dry-run` on this host measures FOUR repos. Once the timer is
+        armed, its unscoped `--rebuild --write` classifies `datapacket-talos` and
+        `civitai` as "disappeared from config" and deletes ~2,476 of ~4,008
+        sections — 62% of the corpus — every 6h, exit 0, with `## warnings:
+        none` printed above it, because from the unit's environment nothing IS
+        unmeasured. An implicit garbage collection that runs on every timer tick
+        is not something an operator can reason about.
+      * CONFIGURED and STORED are two spellings of the same repo, and they can
+        disagree. Table holds `civitai`; the checkout is renamed so
+        `$CIVITAI=…/civitai-old`. The configured label is now `civitai-old`
+        (UNMEASURED — `rebuild_refusal`'s own docstring names a renamed checkout
+        as a cause), so stored `civitai` is "not configured at all" and was
+        COLLECTED — while `partial_scope_warnings` printed, in the same
+        transaction, that the unmeasured repo's rows were left untouched.
+
+    So the collection is now an EXPLICIT `--prune`, which the timer does not
+    pass. The harm it was buying against — a removed repo's rows lingering — is
+    strictly smaller than silently destroying the majority of the corpus on a
+    schedule, and it is recoverable by an operator running `--prune` on purpose.
+    Lingering rows are also no longer SILENT: `orphan_label_warning` reports them
+    on every run, so the stale-corpus case is loud rather than auto-collected.
+
+    Three inputs decide the scope, and all three are structural:
+
+      * `scoped` — did the caller name repos with `--repo`? A scoped run speaks
+        only for what it was pointed at, and `main` rejects `--prune` with
+        `--repo` as a usage error rather than guessing.
+      * `d.unmeasured` — a repo that could not be READ is not a repo whose rows
+        this run may destroy. This is what makes `rebuild_refusal`'s
+        partial-tolerance safe: the absent `$CIVITAI` keeps its rows.
+      * `prune` — an operator act, never the timer's. `rebuild_refusal` refuses a
+        `--prune` run in which ANY repo came back unmeasured, which is what makes
+        the two-spellings collision above unreachable: it REQUIRES a
+        configured-but-unmeasured label.
+
+    🔴 THE INVARIANT THAT MAKES `partial_scope_warnings` TRUE: whenever that
+    warning fires (some repos measured, some did not) and the run is allowed to
+    write, the returned scope is exactly `measured`. Scoped and default runs
+    return `measured` outright; a `--prune` run with any unmeasured repo never
+    reaches a write. Pinned as a seam test, not left as prose.
 
     PURE, so the whole decision is testable without a database."""
     measured = {d.label for d in derivations if d.unmeasured is None}
-    if scoped:
+    if scoped or not prune:
         return tuple(sorted(measured))
     configured = {d.label for d in derivations}
     disappeared = {r for r in stored if r not in configured}
     return tuple(sorted(measured | disappeared))
+
+
+def orphan_labels(
+    derivations: Sequence[RepoDerivation], stored: Sequence[str], *, scoped: bool
+) -> tuple[str, ...]:
+    """Stored labels this run's CONFIG does not name at all. PURE.
+
+    Empty for a scoped run: `--repo` says what to look at, never what the whole
+    config is, so "not configured" is a question a scoped run cannot answer.
+
+    🔴 THIS IS THE LOUD HALF OF REMOVING THE IMPLICIT PRUNE. Auto-collecting
+    these was the 62%-of-the-corpus delete; NOT collecting them, silently, would
+    just move the failure from data loss to a stale corpus every query keeps
+    answering from. So they are REPORTED on every write, with the one command
+    that removes them, and the operator decides."""
+    if scoped:
+        return ()
+    configured = {d.label for d in derivations}
+    return tuple(sorted({r for r in stored if r not in configured}))
+
+
+def orphan_label_warning(labels: Sequence[str]) -> tuple[str, ...]:
+    """The sentence `orphan_labels` earns. Empty when there are none — a per-run
+    "0 orphans" is `untracked_warnings`' problem: it buries the real ones."""
+    if not labels:
+        return ()
+    return (
+        f"⚠ ORPHANED LABELS — the table holds {len(labels)} repo label(s) this "
+        f"config does not name: {', '.join(labels)}. Nothing will ever refresh "
+        f"them, and a query can still answer FROM them. They are NOT deleted: a "
+        f"rebuild only ever deletes repos it was told about. Remove them "
+        f"deliberately with `--rebuild --prune --write` (which refuses while any "
+        f"repo is UNMEASURED, because a renamed checkout looks exactly like a "
+        f"removed one), or re-add the handle if the repo is meant to be indexed.",
+    )
+
+
+def rebuild_plan_lines(
+    derivations: Sequence[RepoDerivation], *, scoped: bool, prune: bool
+) -> tuple[str, ...]:
+    """What a `--rebuild` would DELETE, as far as this run can know it. PURE.
+
+    🔴 THE PRE-FLIGHT COULD NOT SHOW THE ONE THING THE RUN DESTROYS. The delete
+    scope was computed only inside `main`'s `--write` branch — it needed
+    `store.repos()` — so `--dry-run`, which `nix/home.nix` documents as the thing
+    to watch before arming the timer, was structurally incapable of printing it.
+    `scripts/README.md`'s "a green dry-run is a real pre-flight" read wider than
+    what dry-run actually checked.
+
+    Half of that is fixed by the same change that fixed the delete itself: with
+    the disappeared-from-config set behind `--prune`, a DEFAULT rebuild's scope
+    is exactly the MEASURED labels, which is a fact about the derivation alone
+    and needs no database. So dry-run now prints the real scope.
+
+    ⚠ THE OTHER HALF IS STATED, NOT CLOSED. Under `--prune` the scope also
+    includes stored labels this config does not name, and that set exists only in
+    the table. Dry-run says so in those words rather than printing a scope that
+    is missing rows — a pre-flight that quietly under-reports what a run deletes
+    is worse than one that names its own blind spot."""
+    measured = tuple(sorted(d.label for d in derivations if d.unmeasured is None))
+    kept = tuple(sorted(d.label for d in derivations if d.unmeasured is not None))
+    out = [
+        "## rebuild delete scope",
+        f"  DELETE (measured, will be re-derived): {', '.join(measured) or '(none)'}",
+        f"  KEPT (configured but UNMEASURED): {', '.join(kept) or '(none)'}",
+    ]
+    if scoped:
+        out.append(
+            "  This run is SCOPED by --repo, so it claims authority over nothing else "
+            "— no stored label outside the list above can be deleted."
+        )
+    elif prune:
+        out.append(
+            "  --prune: ALSO deletes every stored label this config does not name. "
+            "That set lives in the TABLE, not in this derivation, so a --dry-run "
+            "CANNOT show it — this is the one part of the delete a pre-flight does "
+            "not cover. The --write run prints the full bound scope."
+        )
+    else:
+        out.append(
+            "  No --prune, so a stored label this config does not name is REPORTED "
+            "and kept, never deleted. This list is the COMPLETE delete scope."
+        )
+    return tuple(out)
 
 
 def derivation_warnings(derivations: Sequence[RepoDerivation]) -> tuple[str, ...]:
@@ -1641,15 +1851,27 @@ def all_clear_blockers(derivations: Sequence[RepoDerivation]) -> tuple[str, ...]
     So the sentence is now gated on the measurement it actually describes:
 
       * every repo's disk walk RAN and hid nothing (`DiskScan.complete`), and
-      * the walk saw at least one path — a set difference whose disk side is
-        empty compared nothing, and "every handoff doc on disk is also in it" over
-        zero docs is vacuously true, which is the shape `claude/RULES.md` calls
-        worse than no check.
+      * the walks saw at least one path BETWEEN THEM — a set difference whose
+        disk side is empty compared nothing, and "every handoff doc on disk is
+        also in it" over zero docs is vacuously true, which is the shape
+        `claude/RULES.md` calls worse than no check.
 
     The ref-side count stays as a third condition (it is `render_derivation`'s
     original one, and it is right — it just was not sufficient). Returning the
     REASONS rather than a bool is what lets the report say which measurement was
     missing instead of a bare NOT AN ALL-CLEAR.
+
+    ⚠ ARMS 1 AND 3 ARE AGGREGATE; ARM 2 IS PER-REPO. That asymmetry is
+    deliberate and this docstring used to obscure it by describing arm 3 in
+    per-repo language ("the walk saw at least one path"). It sums across every
+    derivation, and it has to: a repo with no `claudedocs/` directory at all is
+    an ordinary, correct state, so a per-repo version of arms 1 and 3 would
+    withhold the all-clear forever on any host indexing one — a permanently-red
+    gate, which is the mistake `rebuild_refusal` already had to unwind once.
+    Arm 2 is per-repo because a FAILED walk is not an ordinary state and the
+    report has to name which repo hid something. The all-clear these gate is
+    itself a single sentence about the whole run, so the aggregate reading is
+    also the one it claims.
 
     ⚠ THE `incomplete` ARM CANNOT CHANGE `render_derivation`'S OUTPUT, AND THAT IS
     STATED BECAUSE A MUTATION SWEEP FOUND IT. Deleting the arm left the whole
@@ -1773,8 +1995,10 @@ def render_derivation(derivations: Sequence[RepoDerivation]) -> str:
 #: Exit codes, named because the systemd unit's `OnFailure` fires on ANY non-zero
 #: and a human reading the journal needs to know which failure it was.
 #:   0  wrote, or dry-ran, cleanly
-#:   2  nothing to do / contradictory flags — a usage error, no database touched
-#:   4  the derivation could not be trusted; the write was REFUSED (F1's guard)
+#:   2  nothing to do / contradictory flags (--write+--dry-run, --prune without
+#:      --rebuild, --prune with --repo) — a usage error, no database touched
+#:   4  the derivation could not be trusted; the write was REFUSED (F1's guard,
+#:      and the --prune-with-an-UNMEASURED-repo guard)
 #:   5  the derivation is internally inconsistent (an identity collision)
 RC_OK = 0
 RC_USAGE = 2
@@ -1810,9 +2034,15 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
     ap.add_argument("--rebuild", action="store_true",
                     help="DELETE this run's in-scope repo rows and re-derive them from "
                          "scratch, in ONE transaction; the delete is scoped to the "
-                         "repos this run MEASURED (never the whole table), and is "
-                         "refused if ALL repos came back UNMEASURED or the "
-                         "derivation is empty")
+                         "repos this run MEASURED (never the whole table, and never a "
+                         "repo it was not told about), and is refused if ALL repos "
+                         "came back UNMEASURED or the derivation is empty")
+    ap.add_argument("--prune", action="store_true",
+                    help="ALSO delete stored rows for repo labels this config does not "
+                         "name (an OPERATOR act — the timer never passes it). Requires "
+                         "--rebuild, incompatible with --repo, and refused while any "
+                         "repo is UNMEASURED: a renamed checkout is indistinguishable "
+                         "from a removed one, and guessing deletes the wrong rows")
     ap.add_argument("--write", action="store_true",
                     help="actually write to the database (without it, this only "
                          "derives and reports — see --dry-run)")
@@ -1833,6 +2063,27 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
               file=sys.stderr)
         return RC_USAGE
 
+    # 🔴 `--prune` IS REJECTED, NEVER REINTERPRETED. Both of these are cases where
+    # the flag has no coherent meaning, and the tempting "just ignore it" is how a
+    # destructive flag becomes decoration in one argv and live in the next.
+    #   * without --rebuild there is no delete for it to widen;
+    #   * with --repo the run was told what to LOOK at and never what the whole
+    #     config is, so "a label the config does not name" is unanswerable — and
+    #     answering it from a partial config would delete every repo the caller
+    #     did not happen to list.
+    if args.prune and not args.rebuild:
+        print("handoff-index: --prune only widens a --rebuild's delete; it does "
+              "nothing on its own. Pass --rebuild, or drop --prune.",
+              file=sys.stderr)
+        return RC_USAGE
+    if args.prune and args.repo:
+        print("handoff-index: --prune and --repo contradict each other. --prune "
+              "deletes every stored label THE CONFIG does not name, and a --repo run "
+              "was never told what the config is — treating its argv as the config "
+              "would delete every repo you did not list. Re-run --prune unscoped.",
+              file=sys.stderr)
+        return RC_USAGE
+
     repos = [(r, Path(r).name) for r in args.repo] or default_repos()
     if not repos:
         print(
@@ -1845,16 +2096,36 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
     # 🔴 EXPLICIT `--repo` IS WHAT MAKES A RUN SCOPED, and the distinction decides
     # what a `--rebuild` may delete. A run told which repos to look at speaks only
     # for those; a run that read the CONFIGURED set (`default_repos`) is
-    # authoritative over the whole table, including labels that have since
-    # disappeared from the config. See `rebuild_delete_labels`.
+    # authoritative over that config — never, any more, over labels it was not
+    # told about, which is what `--prune` now opts into. See
+    # `rebuild_delete_labels`.
     scoped = bool(args.repo)
     derivations = [derive_repo(path, label=label) for path, label in repos]
     rows = [s for d in derivations for s in d.sections]
+
+    # 🔴 `--json` KEEPS STDOUT PURE. Everything else this function prints goes to
+    # stderr in that mode. `--json --write` used to emit the JSON document and
+    # then the prose success line on the SAME stream, so `json.loads(stdout)`
+    # raised on a run that had worked perfectly — the machine surface, which is
+    # the one consumed without a human reading it, was the one that could not be
+    # parsed. `say` is the one place that choice is made, so a new line cannot
+    # reintroduce it by being added in the wrong place.
+    def say(text: str) -> None:
+        print(text, file=sys.stderr if args.json else sys.stdout)
 
     if args.json:
         print(json.dumps(derivation_json(derivations), indent=2, sort_keys=True))
     else:
         print(render_derivation(derivations))
+
+    # 🔴 THE PRE-FLIGHT NOW SHOWS THE DELETE SCOPE, and it names its own blind
+    # spot. See `rebuild_plan_lines`: this is printed in BOTH modes, because the
+    # thing an operator is told to watch before arming the timer is a --dry-run,
+    # and what a rebuild DESTROYS was the one fact that mode could not reach.
+    if args.rebuild:
+        say("")
+        for line in rebuild_plan_lines(derivations, scoped=scoped, prune=args.prune):
+            say(line)
 
     # 🔴 EVERY GATE IS EVALUATED BEFORE THE `--write` BRANCH, and that is the fix
     # for a pre-flight that passed for a config the real run refused.
@@ -1886,7 +2157,7 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
         # unrecoverable is DELETING on a derivation that could not be measured at
         # all, and that is what refuses. The timer passes `--rebuild`, so the
         # scheduled path is the covered one.
-        refusal = rebuild_refusal(derivations, rows)
+        refusal = rebuild_refusal(derivations, rows, prune=args.prune)
         if refusal:
             gate = (RC_REFUSED, [f"🔴 {refusal}"])
 
@@ -1901,17 +2172,20 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
         return rc
 
     if not args.write:
-        print("\n(no --write: nothing was written. Dry-run is the DEFAULT; pass "
-              "--write to touch the database.)")
+        say("\n(no --write: nothing was written. Dry-run is the DEFAULT; pass "
+            "--write to touch the database.)")
         return RC_OK
 
     with open_store() as store:
         store.ensure_schema()
-        # 🔴 READ THE STORED LABELS BEFORE DECIDING WHAT TO DELETE. The delete
-        # scope needs to know which repos the table holds that the CONFIG no
-        # longer names, and that fact exists only in the database.
+        # 🔴 READ THE STORED LABELS BEFORE DECIDING WHAT TO DELETE. Two different
+        # consumers need them and only one may destroy anything: `--prune` widens
+        # the delete scope with the labels the config no longer names, and
+        # `orphan_labels` REPORTS that same set on every run. Without --prune the
+        # scope does not depend on this read at all — the report still does.
+        stored = tuple(store.repos())
         labels = (
-            rebuild_delete_labels(derivations, store.repos(), scoped=scoped)
+            rebuild_delete_labels(derivations, stored, scoped=scoped, prune=args.prune)
             if args.rebuild else ()
         )
         n = store.write(rows, rebuild=args.rebuild, rebuild_labels=labels)
@@ -1923,11 +2197,18 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
     # 🔴 THE SUCCESS LINE ITSELF SAYS PARTIAL. It is the one line a scripted
     # caller is most likely to read alone, and `wrote 968 section row(s)` reads as
     # a complete index whether or not it is one.
-    print(f"\nwrote {n} section row(s) to {TABLE}{scope_note}"
-          + ("\n🔴 THIS INDEX IS PARTIAL — see the PARTIAL INDEX warning above; "
-             "some configured repos contributed nothing and kept their old rows."
-             if partial else ""))
+    say(f"\nwrote {n} section row(s) to {TABLE}{scope_note}"
+        + ("\n🔴 THIS INDEX IS PARTIAL — see the PARTIAL INDEX warning above; "
+           "some configured repos contributed nothing and kept their old rows."
+           if partial else ""))
     for line in partial:
+        print(line, file=sys.stderr)
+    # 🔴 A REPO THE CONFIG NO LONGER NAMES IS REPORTED, NEVER COLLECTED. This is
+    # the other half of removing the implicit prune: not deleting them silently
+    # would only trade a data-loss bug for a stale-corpus one. Printed AFTER the
+    # write so it sits beside the row count a reader is checking, and to stderr
+    # like every other warning.
+    for line in orphan_label_warning(orphan_labels(derivations, stored, scoped=scoped)):
         print(line, file=sys.stderr)
     return RC_OK
 

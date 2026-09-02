@@ -43,6 +43,17 @@ let
   # go red. It now evaluates the collision and refusal gates in BOTH modes and
   # returns the same exit code, so a green dry-run is evidence about the run that
   # follows it. Read the exit code, not just the report.
+  # 🔴 AND IT NOW PRINTS THE DELETE SCOPE — the one thing a pre-flight for a
+  # DESTRUCTIVE command has to show, and the one thing it could not. The scope
+  # was computed only inside the `--write` branch (it needed `store.repos()`), so
+  # `--dry-run` was structurally incapable of reaching it. With the
+  # disappeared-from-config collection moved behind an explicit `--prune`, a
+  # default rebuild's scope is exactly the MEASURED labels — a fact about the
+  # derivation alone — so dry-run prints it under `## rebuild delete scope`.
+  # ⚠ THE REMAINING BLIND SPOT, STATED RATHER THAN PAPERED OVER: under `--prune`
+  # the scope also covers stored labels this config does not name, and that set
+  # exists only in the table. A `--dry-run --prune` says so in those words. This
+  # unit never passes `--prune`, so the scope it prints IS complete.
   enableHandoffIndexSync = false;
   # Drift-deadman master switch (scripts/drift-check.sh) — gates ONLY whether the
   # timer is wired into timers.target. The SERVICE definition is always emitted, so
@@ -2837,15 +2848,22 @@ in
   # carried in three places and two of them disagreed with the third inside one
   # PR. Nothing pins it, so a copy is a claim that rots. Do not re-state it here.)
   #
-  # 🔴 `--rebuild` TRUNCATES, AND THAT IS SAFE ONLY BECAUSE OF WHAT GUARDS IT. The
+  # 🔴 `--rebuild` DELETES, AND THAT IS SAFE ONLY BECAUSE OF WHAT GUARDS IT. The
   # index is DERIVED and DISPOSABLE and git is the system of record — but "a
   # re-run can rebuild it" is a claim about a run that MEASURED something. The
-  # truncate is refused (non-zero, so the OnFailure toast below fires) when any
-  # repo comes back UNMEASURED or the derivation is empty, and it now runs in the
+  # delete is refused (non-zero, so the OnFailure toast below fires) when ALL
+  # repos come back UNMEASURED or the derivation is empty, and it runs in the
   # SAME transaction as the inserts: it used to commit on its own, so any
   # exception in the row loop left the table empty AND committed. A full rebuild
   # each pass is also what keeps a SHRUNK doc from leaving orphaned high ordinals
   # behind (see PostgresSectionStore.write).
+  # 🔴 IT IS A SCOPED `DELETE … WHERE repo = ANY(%s)`, NOT A `TRUNCATE`, AND THIS
+  # COMMENT SAID TRUNCATE FOR ONE ROUND AFTER THAT CHANGED. The unqualified
+  # TRUNCATE was a measured data-loss bug: `--repo <one> --rebuild --write`
+  # emptied EVERY repo and reported success. The bound scope is the labels this
+  # run MEASURED and NOTHING else — a rebuild never deletes rows for a repo it
+  # was not told about (see the Environment block below for what that cost when
+  # it did).
   #
   # WHY 6h AND NOT 15min: unlike initiative-scan there is no live-state component
   # here — a handoff doc changes when a session ends, a handful of times a day.
@@ -2873,26 +2891,50 @@ in
         # .zshenv, so `handoff_index.default_repos()` would find none of the
         # $DEVRC/$HOMELAB/… handles and index NOTHING — a silent zero that renders
         # as an empty index, which the search CLI reports as `🔴 BROKEN INDEX`.
-        # Only the two repos this host is guaranteed to hold are set here.
+        #
+        # 🔴 IT IS **EVERY** HANDLE, DERIVED FROM nix/agent-handles.nix, AND IT
+        # USED TO BE A HARDCODED TWO. That is defence in depth for a data-loss
+        # bug fixed on the Python side, and the incident is worth having here
+        # because the unit's ENVIRONMENT was the whole of it. This unit set only
+        # $DEVRC and $HOMELAB while a human `--dry-run` on this host measures
+        # FOUR repos (439 docs / ~4,008 sections). The rebuild's delete then
+        # collected any stored label "the config no longer names" — and from
+        # inside this unit, `datapacket-talos` and `civitai` ARE unnamed. Armed,
+        # the timer would have deleted ~2,476 of ~4,008 sections every 6h,
+        # exit 0, printing `## warnings: none` above it, with no PARTIAL INDEX
+        # fired because from here nothing is UNMEASURED. Two independent fixes,
+        # and neither one is a substitute for the other:
+        #   * a rebuild NEVER deletes a repo it was not told about — the
+        #     collection is now an explicit `--prune` this unit does not pass
+        #     (`rebuild_delete_labels`), and orphaned labels are REPORTED;
+        #   * and the unit's config can no longer silently differ from the
+        #     module's, because both sides derive from ONE file. Every handle
+        #     `handoff_index.REPO_ENV_HANDLES` reads is exported here.
+        #     `scripts/tests/test_handoff_index.py::TestTheUnitEnvironmentMatches
+        #     TheHandlesTheIndexerReads` fails if the two sets ever diverge, so
+        #     "they disagree" is a red gate rather than a silent delete.
+        #
         # 🔴 A HANDLE POINTING AT AN ABSENT CHECKOUT IS NOT FREE, AND THIS
         # COMMENT USED TO SAY IT WAS. It is reported as UNMEASURED rather than
         # folded into a clean count — that part is true — but the run then
         # proceeds as a PARTIAL index: the absent repo contributes nothing, keeps
         # whatever rows it already had (the rebuild's delete is scoped to what
-        # MEASURED), and every run prints a `🔴 PARTIAL INDEX` warning. So adding
-        # a handle for a repo this host may not have is SUPPORTED, not free:
+        # MEASURED), and every run prints a `🔴 PARTIAL INDEX` warning. So a
+        # handle for a repo this host may not have is SUPPORTED, not free:
         # expect a standing warning on every run, and do not read an unscoped
-        # query's silence as evidence that repo is silent.
+        # query's silence as evidence that repo is silent. That standing warning
+        # is the price of the paragraph above, and it is the right side of the
+        # trade: a loud partial beats a silent 62% delete.
         # ⚠ The refusal it does NOT trip is worth naming, because the first
         # version of that guard tripped on exactly this: refusing whenever ANY
         # repo was unmeasured made a host with one absent checkout fire
         # `OnFailure=notify-failure@%n.service` 4×/day forever with the index
         # frozen — a permanently-red gate, which trains everyone to click
-        # through. It now refuses only when ALL repos are unmeasured, or when the
-        # measured subset yields zero rows.
-        "DEVRC=%h/workspace/devrc"
-        "HOMELAB=%h/workspace/homelab-talos"
-      ];
+        # through. It now refuses only when ALL repos are unmeasured, when the
+        # measured subset yields zero rows, or when `--prune` (never passed
+        # here) meets an unmeasured repo.
+      ] ++ lib.mapAttrsToList (n: v: "${n}=${v}")
+        (import ./agent-handles.nix { home = "%h"; }).repos;
       # nix-shell pulls psycopg2 (the _db.py write path). git/kubectl come from
       # PATH above and are inherited into the nix-shell (it is not --pure).
       # 🔴 `--write` IS REQUIRED AND IS NOT DECORATION. Dry-run is the module's

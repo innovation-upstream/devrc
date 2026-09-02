@@ -637,16 +637,38 @@ class TestSilentZeroGuard:
             assert f"indexed_docs={expect_docs} indexed_sections=" in text
             assert "backend=memory" in text
 
-    def test_the_broken_index_status_exits_non_zero_through_main(self, tmp_path, capsys):
-        """A caller that only reads the exit code must not read a broken index as
-        'no results'. Driven through `main` with an --offline repo holding no docs."""
+    def test_a_derived_empty_corpus_exits_non_zero_through_main(self, tmp_path, capsys):
+        """A caller that only reads the exit code must not read an empty corpus as
+        'no results'. Driven through `main` with an --offline repo holding no docs.
+
+        ⚠ THIS TEST USED TO ASSERT rc 3 / `🔴 BROKEN INDEX` FOR THIS EXACT ARGV,
+        and that was the Y3 defect surviving in its sibling case: `--offline`
+        opens no database, so a remedy naming a table to rebuild and the
+        handoff-index-sync unit is a confident wrong next step. Only the
+        unresolvable half had been fixed. `broken-index` is now reachable ONLY
+        from a store this run READ, which the memory backend never is."""
         repo = tmp_path / "emptyrepo"
         _write_repo(repo, {}, commit=False)
         subprocess.run(["git", "-C", str(repo), "commit", "-qm", "empty",
                         "--allow-empty"], check=True)
         rc = hs.main(["--query", "zarfwidget", "--offline", "--offline-repo", str(repo)])
-        assert rc == 3
-        assert "🔴 BROKEN INDEX" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert rc == hs.EXIT_CODES["derived-zero-docs"] == 7
+        assert "🔴 ZERO HANDOFF DOCS DERIVED" in out
+        assert "BROKEN INDEX" not in out
+        assert "handoff-index-sync" not in out
+        assert "--rebuild --write" not in out
+
+    def test_the_broken_index_status_is_still_reachable_from_a_read_store(self):
+        """The negative control for the reclassification above: `broken-index` and
+        its rc must still EXIST and still fire for the case it was written for —
+        a store that was READ and holds nothing, with no derivation behind it (the
+        Postgres shape, which passes no `targets`). Otherwise the assertion above
+        proves only that the branch was deleted."""
+        out = hs.run_search(hi.MemorySectionStore([]), "zarfwidget", backend="postgres")
+        assert out.status == "broken-index"
+        assert hs.exit_code_for(out) == 3
+        assert "🔴 BROKEN INDEX" in hs.render(out)
 
     def test_a_real_hit_exits_zero_through_main(self, tmp_path, capsys):
         """The positive control for the exit code — otherwise rc 3 above could be
@@ -691,8 +713,16 @@ class TestRecallBanner:
             hs.run_search(_store(), "zarfwidget", backend="memory",
                           repo="norepo-by-that-name").status,
             hs.run_search(hi.MemorySectionStore([]), "x", backend="memory").status,
+            # ALL targets unmeasured -> unmeasured-corpus. The denominator is what
+            # makes "all" true, and passing `unmeasured` without `targets` is the
+            # shape that used to say "all 1 repo(s)" for a run pointed at two.
             hs.run_search(hi.MemorySectionStore([]), "x", backend="memory",
-                          unmeasured=(("gone", "no-such-directory"),)).status,
+                          unmeasured=(("gone", "no-such-directory"),),
+                          targets=("gone",)).status,
+            # SOME target resolved and the built corpus is empty -> the fifth zero.
+            hs.run_search(hi.MemorySectionStore([]), "x", backend="memory",
+                          unmeasured=(("gone", "no-such-directory"),),
+                          targets=("gone", "hollow")).status,
         }
         assert emitted == set(hs.STATUSES)
 
@@ -932,6 +962,47 @@ class RecordingConn:
             else:
                 out.append("DDL")
         return out
+
+
+def _handoff_unit_block() -> str:
+    """The `systemd.user.services.handoff-index-sync` attrset, and NOTHING after it.
+
+    🔴 BOUNDED AT BOTH ENDS ON PURPOSE. A bare `split(marker)[1]` runs to the end
+    of `home.nix` — 14 other units' `ExecStart` lines included — so an assertion
+    about "the unit's ExecStart" would be reading somebody else's. Ends at the
+    next `systemd.user.` declaration, which is what closes this one."""
+    text = (REPO_ROOT / "nix" / "home.nix").read_text()
+    after = text.split("systemd.user.services.handoff-index-sync")[1]
+    return after.split("\n  systemd.user.")[0]
+
+
+class StoredReposCursor(RecordingCursor):
+    """A `RecordingCursor` whose `fetchall` answers `PostgresSectionStore.repos()`.
+
+    🔴 THE PLAIN RECORDER RETURNS `[]` THERE, WHICH IS THE ONE VALUE THAT MAKES
+    THE BUG UNREACHABLE. `rebuild_delete_labels`' collect-what-the-config-no-
+    longer-names arm is a set difference against the STORED labels; with an empty
+    stored set the difference is always empty, so every existing end-to-end test
+    exercised the delete scope with the input that cannot show it. This cursor is
+    what lets a test drive `main` against a table that already holds rows."""
+
+    def __init__(self, log, stored):
+        super().__init__(log)
+        self._stored = stored
+
+    def fetchall(self):
+        return [(r,) for r in self._stored]
+
+
+class StoredReposConn(RecordingConn):
+    """`RecordingConn` over a table that already holds `stored` repo labels."""
+
+    def __init__(self, stored):
+        super().__init__()
+        self._stored = tuple(stored)
+
+    def cursor(self):
+        return StoredReposCursor(self.log, self._stored)
 
 
 def _recording_store(conn):
@@ -1199,30 +1270,134 @@ class TestScopedRebuildDelete:
         assert hi.rebuild_delete_labels(ds, (), scoped=True) == ("measured",)
         assert hi.rebuild_delete_labels(ds, (), scoped=False) == ("measured",)
 
-    def test_a_FULL_run_still_collects_a_repo_that_left_the_config(self, tmp_path):
-        """🔴 THE ASYMMETRY IS THE WHOLE DESIGN, and scoping the delete without it
-        would trade a data-loss bug for a stale-corpus bug: a repo dropped from
-        the env handles would stay indexed forever, un-refreshed and unremovable,
-        with every query still answering from it.
+    def _renamed_checkout_fixture(self, tmp_path):
+        """🔴 THE FIXTURE IS THE POINT, AND THE OLD ONE STRUCTURALLY COULD NOT FAIL.
 
-        configured-but-UNMEASURED  -> preserved (it may come back)
-        NOT CONFIGURED at all      -> deleted   (nothing will ever refresh it)
+        This shape used `cantread` and `dropped-from-config` as DISJOINT
+        identities, so no configured label could ever be a second spelling of a
+        stored one and the collision below was unreachable from it. The values
+        here are pairwise distinct AND two of them are two spellings of ONE repo:
 
-        A scoped run claims neither, because it was never told what the full
-        config is. Three-way differential over ONE stored set."""
-        good = tmp_path / "stillhere"
+          zarfrepo            measured, real, has docs
+          plimforth-renamed   CONFIGURED (a renamed checkout), UNMEASURED
+          plimforth           STORED under the repo's OLD label — the SAME repo
+          wibbleton-retired   STORED, genuinely gone from the config
+
+        `plimforth` is therefore "not configured at all" (nothing named
+        `plimforth` is in the config) while ALSO being "configured but
+        unmeasured" (as `plimforth-renamed`), which is the contradiction the
+        delete scope used to resolve in the destructive direction. Returned as a
+        helper so several tests read the SAME state rather than each inventing a
+        near-miss of it."""
+        good = tmp_path / "zarfrepo"
         _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
-        ds = [hi.derive_repo(good, label="stillhere"),
-              hi.derive_repo(tmp_path / "cantread", label="cantread")]
-        stored = ("stillhere", "cantread", "dropped-from-config")
+        ds = [hi.derive_repo(good, label="zarfrepo"),
+              hi.derive_repo(tmp_path / "plimforth-renamed", label="plimforth-renamed")]
+        stored = ("zarfrepo", "plimforth", "wibbleton-retired")
+        return ds, stored
+
+    def test_a_FULL_run_never_deletes_a_repo_it_was_not_told_about(self, tmp_path):
+        """🔴 A DELIBERATE REVERSAL, AND THE OPERATOR DECIDED IT. The previous
+        round's asymmetry — configured-but-UNMEASURED preserved, NOT-CONFIGURED-
+        at-all collected — was defensible on its own terms (a repo dropped from
+        the env handles would otherwise stay indexed forever) and wrong in
+        practice, twice over:
+
+          * `nix/home.nix`'s unit sets only $DEVRC and $HOMELAB while a human
+            dry-run on this host measures FOUR repos, so an armed timer's
+            unscoped rebuild would delete ~62% of the corpus every 6h at exit 0;
+          * and CONFIGURED and STORED are two spellings that can disagree — see
+            `_renamed_checkout_fixture`.
+
+        So the collection is behind an explicit `--prune`. Three-way differential
+        over ONE stored set, and the stored set contains a genuine orphan
+        (`wibbleton-retired`) so this cannot pass by the fixture having nothing
+        to collect."""
+        ds, stored = self._renamed_checkout_fixture(tmp_path)
 
         full = hi.rebuild_delete_labels(ds, stored, scoped=False)
-        assert full == ("dropped-from-config", "stillhere")
-        assert "cantread" not in full
+        assert full == ("zarfrepo",)
+        assert "wibbleton-retired" not in full     # the genuine orphan: kept
+        assert "plimforth" not in full             # the renamed repo: kept
+        assert "plimforth-renamed" not in full     # unmeasured: kept, as before
 
         scoped = hi.rebuild_delete_labels(ds, stored, scoped=True)
-        assert scoped == ("stillhere",)
-        assert "dropped-from-config" not in scoped
+        assert scoped == ("zarfrepo",)
+
+        # …and `--prune` is what an operator uses instead. It is refused on THIS
+        # derivation (an unmeasured repo is present), which is the collision
+        # guard; the collection itself is asserted on a fully-measured one below.
+        assert hi.rebuild_refusal(ds, [s for d in ds for s in d.sections],
+                                  prune=True) is not None
+
+    def test_PRUNE_is_what_collects_an_orphan_and_it_needs_every_repo_MEASURED(
+            self, tmp_path):
+        """The positive control for `--prune`: with every configured repo
+        measured, it DOES collect the label the config no longer names. Without
+        this, the test above proves only that the collection was deleted rather
+        than moved behind a flag.
+
+        The differential is one argument on one call, so nothing but `prune` can
+        explain the two answers."""
+        good = tmp_path / "zarfrepo"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        other = tmp_path / "trundlerepo"
+        _write_repo(other, {"handoff-cable-audit.md": DOC_SPARSE})
+        ds = [hi.derive_repo(good, label="zarfrepo"),
+              hi.derive_repo(other, label="trundlerepo")]
+        stored = ("zarfrepo", "trundlerepo", "wibbleton-retired")
+        rows = [s for d in ds for s in d.sections]
+
+        assert hi.rebuild_refusal(ds, rows, prune=True) is None
+        assert hi.rebuild_delete_labels(ds, stored, scoped=False, prune=True) == (
+            "trundlerepo", "wibbleton-retired", "zarfrepo")
+        assert hi.rebuild_delete_labels(ds, stored, scoped=False, prune=False) == (
+            "trundlerepo", "zarfrepo")
+
+    def test_a_PRUNE_over_an_UNMEASURED_repo_is_REFUSED_by_name(self, tmp_path):
+        """🔴 THE COLLISION GUARD, AND ITS MESSAGE HAS TO SAY WHY. `--prune`
+        asserts that the config's spelling of every repo is the table's spelling.
+        An unmeasured repo is exactly where those can differ, so the run refuses
+        rather than guessing which of "renamed" and "removed" it is looking at —
+        the two have opposite correct actions and one of them destroys rows.
+
+        Differential against the SAME derivations without `--prune`, which must
+        proceed: a refusal that fired either way would be the permanently-red
+        gate `rebuild_refusal` already had to unwind once."""
+        ds, _ = self._renamed_checkout_fixture(tmp_path)
+        rows = [s for d in ds for s in d.sections]
+
+        refusal = hi.rebuild_refusal(ds, rows, prune=True)
+        assert refusal is not None
+        assert "REFUSING --rebuild --prune" in refusal
+        assert "plimforth-renamed (no-such-directory)" in refusal
+        assert "1 of 2 repo(s)" in refusal
+
+        assert hi.rebuild_refusal(ds, rows, prune=False) is None
+
+    def test_an_orphaned_label_is_REPORTED_rather_than_silently_left(self, tmp_path):
+        """🔴 THE OTHER HALF OF REMOVING THE IMPLICIT PRUNE. Not deleting an
+        orphan silently would only trade a data-loss bug for a stale-corpus bug —
+        rows nothing refreshes that every query still answers from. So the set is
+        reported, with the command that removes it.
+
+        A SCOPED run reports none: it was told what to look at, never what the
+        config is, so it cannot answer 'not configured'."""
+        ds, stored = self._renamed_checkout_fixture(tmp_path)
+
+        orphans = hi.orphan_labels(ds, stored, scoped=False)
+        assert orphans == ("plimforth", "wibbleton-retired")
+        assert hi.orphan_labels(ds, stored, scoped=True) == ()
+
+        warning = hi.orphan_label_warning(orphans)
+        assert len(warning) == 1
+        assert "⚠ ORPHANED LABELS" in warning[0]
+        assert "plimforth, wibbleton-retired" in warning[0]
+        assert "--rebuild --prune --write" in warning[0]
+        assert "They are NOT deleted" in warning[0]
+        # The negative control: no orphans, no sentence. A per-run "0 orphaned"
+        # buries the real ones.
+        assert hi.orphan_label_warning(()) == ()
 
     def test_a_rebuild_with_an_EMPTY_scope_raises_rather_than_wiping(self):
         """🔴 THE LIBRARY-LEVEL BELT. `main` cannot reach this — the refusal guard
@@ -1254,6 +1429,425 @@ class TestScopedRebuildDelete:
             assert f"{col} = EXCLUDED.{col}" not in inserts[0]
         for col in ("doc_path", "body", "heading", "doc_date"):
             assert f"{col} = EXCLUDED.{col}" in inserts[0]
+
+
+class TestTheTimersShapeDeletesOnlyWhatItWasToldAbout:
+    """🔴 F2 — the unit's own ENVIRONMENT made an armed timer delete 62% of the
+    corpus every 6h at exit 0, and every existing test was blind to it because the
+    fake table was empty."""
+
+    def test_an_unscoped_rebuild_through_main_deletes_no_stored_orphan(self, tmp_path):
+        """🔴 THE REPRODUCTION, END TO END, AGAINST A TABLE THAT HOLDS ROWS.
+
+        The unit runs `--rebuild --write` UNSCOPED with only two handles in its
+        environment, on a host whose corpus spans four repos. So from inside the
+        unit the other two repos are "labels the config no longer names", and the
+        old scope collected them: measured on this host's real numbers, ~2,476 of
+        ~4,008 sections deleted per tick, printing `## warnings: none` above it
+        because from that environment nothing is UNMEASURED — no PARTIAL INDEX
+        fires, and there is nothing in the output to read as a warning.
+
+        The assertion is on the BOUND SCOPE of the DELETE. That is the only place
+        the difference shows: the statement text, the exit code, the row count and
+        the warning block are all identical between the correct run and the
+        destructive one."""
+        indexed = tmp_path / "zarfrepo"
+        _write_repo(indexed, {"handoff-widget-relay.md": DOC_FULL})
+        # The table already holds two repos this run's config does not name —
+        # the shape the unit's two-handle environment creates.
+        conn = StoredReposConn(("zarfrepo", "trundlerepo", "marganserrepo"))
+        rc = hi.main(["--repo", str(indexed)], open_store=_recording_store(conn))
+        assert rc == hi.RC_OK  # a non-rebuild write: no delete at all
+
+        conn2 = StoredReposConn(("zarfrepo", "trundlerepo", "marganserrepo"))
+        rc2 = hi.main(["--repo", str(indexed), "--rebuild", "--write"],
+                      open_store=_recording_store(conn2))
+        assert rc2 == hi.RC_OK
+        assert conn2.params_for("DELETE") == [[["zarfrepo"]]]
+
+    def test_the_unscoped_default_path_is_the_one_that_regressed(self, tmp_path,
+                                                                 monkeypatch):
+        """The same claim on the UNSCOPED path — the timer's actual argv shape.
+        `--repo` makes a run scoped, and a scoped run was never the bug; driving
+        only the scoped path would leave the regressing branch untested.
+
+        `default_repos()` is steered through the env handles, which is exactly the
+        surface the incident was about."""
+        indexed = tmp_path / "zarfrepo"
+        _write_repo(indexed, {"handoff-widget-relay.md": DOC_FULL})
+        for handle in hi.REPO_ENV_HANDLES:
+            monkeypatch.delenv(handle, raising=False)
+        monkeypatch.setenv("DEVRC", str(indexed))
+
+        conn = StoredReposConn(("zarfrepo", "trundlerepo", "marganserrepo"))
+        rc = hi.main(["--rebuild", "--write"], open_store=_recording_store(conn))
+        assert rc == hi.RC_OK
+        # 🔴 NOT ("marganserrepo", "trundlerepo", "zarfrepo") — which is what this
+        # returned before, with no warning and exit 0.
+        assert conn.params_for("DELETE") == [[["zarfrepo"]]]
+
+    def test_the_orphans_it_did_not_delete_are_named_on_stderr(self, tmp_path, capsys):
+        """Leaving them silently would trade data loss for a stale corpus. The
+        write's own output has to say the table holds labels nothing will refresh,
+        and name the one command that removes them."""
+        indexed = tmp_path / "zarfrepo"
+        _write_repo(indexed, {"handoff-widget-relay.md": DOC_FULL})
+        for handle in hi.REPO_ENV_HANDLES:
+            os.environ.pop(handle, None)
+        os.environ["DEVRC"] = str(indexed)
+        try:
+            conn = StoredReposConn(("zarfrepo", "trundlerepo"))
+            rc = hi.main(["--rebuild", "--write"], open_store=_recording_store(conn))
+        finally:
+            os.environ.pop("DEVRC", None)
+        err = capsys.readouterr().err
+        assert rc == hi.RC_OK
+        assert "⚠ ORPHANED LABELS" in err
+        assert "trundlerepo" in err
+        assert "--rebuild --prune --write" in err
+
+    def test_a_SCOPED_run_reports_no_orphans_because_it_cannot_know(self, tmp_path,
+                                                                    capsys):
+        """The negative control for the report: a `--repo` run was told what to
+        LOOK at, never what the config is, so every label outside its argv would
+        read as an orphan. Silence there is correct, and it is what proves the
+        sentence above is conditional rather than unconditional."""
+        indexed = tmp_path / "zarfrepo"
+        _write_repo(indexed, {"handoff-widget-relay.md": DOC_FULL})
+        conn = StoredReposConn(("zarfrepo", "trundlerepo"))
+        rc = hi.main(["--repo", str(indexed), "--rebuild", "--write"],
+                     open_store=_recording_store(conn))
+        assert rc == hi.RC_OK
+        assert "ORPHANED LABELS" not in capsys.readouterr().err
+
+
+class TestThePartialPromiseIsKept:
+    """🔴 F1 — a SEAM guard, not a component one. `partial_scope_warnings` printed
+    'Their existing rows are left untouched (the rebuild delete is scoped to what
+    MEASURED)' while `rebuild_delete_labels`, in the same transaction, put those
+    rows in the DELETE. Both functions were individually tested and individually
+    correct by their own docstrings; the defect lived only in the RELATIONSHIP,
+    because one reasons over CONFIGURED labels and the other over STORED ones."""
+
+    def test_the_warning_and_the_delete_scope_cannot_contradict_each_other(
+            self, tmp_path):
+        """The relationship, pinned directly: whenever the PARTIAL sentence is
+        printed and a write is allowed, the delete scope is a subset of the
+        MEASURED labels — so no repo the sentence speaks for can be in it.
+
+        Driven over the renamed-checkout state, which is the one that broke it."""
+        good = tmp_path / "zarfrepo"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        ds = [hi.derive_repo(good, label="zarfrepo"),
+              hi.derive_repo(tmp_path / "plimforth-renamed", label="plimforth-renamed")]
+        stored = ("zarfrepo", "plimforth", "wibbleton-retired")
+        rows = [s for d in ds for s in d.sections]
+        measured = {d.label for d in ds if d.unmeasured is None}
+
+        partial = hi.partial_scope_warnings(ds)
+        assert partial, "the fixture must actually be partial, or this pins nothing"
+        assert "left untouched" in partial[0]
+
+        for scoped in (True, False):
+            for prune in (True, False):
+                if hi.rebuild_refusal(ds, rows, prune=prune) is not None:
+                    continue  # this run never reaches a write; the promise holds
+                scope = set(hi.rebuild_delete_labels(
+                    ds, stored, scoped=scoped, prune=prune))
+                assert scope <= measured, (scoped, prune, scope)
+
+    def test_the_two_spellings_of_one_repo_no_longer_decide_a_delete(self, tmp_path):
+        """The concrete case, named: the table's `plimforth` and the config's
+        `plimforth-renamed` are the same repo. `plimforth` is 'not configured at
+        all' AND `plimforth-renamed` is 'configured but unmeasured', and the old
+        scope resolved that contradiction by deleting.
+
+        Asserted as a differential on `prune` alone — the same derivations, the
+        same stored set, one argument apart — so nothing else can explain it."""
+        good = tmp_path / "zarfrepo"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        ds = [hi.derive_repo(good, label="zarfrepo"),
+              hi.derive_repo(tmp_path / "plimforth-renamed", label="plimforth-renamed")]
+        stored = ("zarfrepo", "plimforth")
+
+        assert "plimforth" not in hi.rebuild_delete_labels(ds, stored, scoped=False)
+        # …and the path that WOULD collect it is refused before it can.
+        rows = [s for d in ds for s in d.sections]
+        assert hi.rebuild_refusal(ds, rows, prune=True) is not None
+
+    def test_the_collision_state_through_main_deletes_only_the_measured_repo(
+            self, tmp_path, capsys):
+        """End to end, because the two functions meet in `main` and nowhere else.
+        The recording connection is what shows the BOUND scope — the statement
+        text, the exit code and the row count are identical either way."""
+        good = tmp_path / "zarfrepo"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        for handle in hi.REPO_ENV_HANDLES:
+            os.environ.pop(handle, None)
+        os.environ["DEVRC"] = str(good)
+        os.environ["HOMELAB"] = str(tmp_path / "plimforth-renamed")
+        try:
+            conn = StoredReposConn(("zarfrepo", "plimforth"))
+            rc = hi.main(["--rebuild", "--write"], open_store=_recording_store(conn))
+        finally:
+            for handle in ("DEVRC", "HOMELAB"):
+                os.environ.pop(handle, None)
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK
+        assert conn.params_for("DELETE") == [[["zarfrepo"]]]
+        # The sentence that was false is printed, and now it is true.
+        assert "🔴 PARTIAL INDEX" in cap.err
+        assert "left untouched" in cap.err
+
+
+class TestPruneIsAnOperatorActNotAFlagYouCanDriftInto:
+    def test_prune_without_rebuild_is_a_usage_error(self, tmp_path, capsys):
+        """A destructive flag that silently does nothing in one argv and fires in
+        the next is how it becomes decoration. Rejected, never reinterpreted."""
+        repo = tmp_path / "zarfrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        rc = hi.main(["--repo", str(repo), "--prune", "--write"],
+                     open_store=_refusing_store())
+        assert rc == hi.RC_USAGE
+        assert "--prune only widens a --rebuild" in capsys.readouterr().err
+
+    def test_prune_with_an_explicit_repo_is_a_usage_error(self, tmp_path, capsys):
+        """🔴 THE DANGEROUS COMBINATION, AND IT IS REFUSED RATHER THAN NARROWED.
+        `--prune` deletes every stored label THE CONFIG does not name; a `--repo`
+        run was never told what the config is. Treating its argv as the config
+        would delete every repo the caller did not happen to list — a wider
+        version of the very bug this round is fixing."""
+        repo = tmp_path / "zarfrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        rc = hi.main(["--repo", str(repo), "--rebuild", "--prune", "--write"],
+                     open_store=_refusing_store())
+        assert rc == hi.RC_USAGE
+        assert "--prune and --repo contradict each other" in capsys.readouterr().err
+
+    def test_a_prune_run_over_an_unmeasured_repo_is_refused_through_main(
+            self, tmp_path, capsys):
+        """The refusal reaches the exit code, and the store is never opened."""
+        good = tmp_path / "zarfrepo"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        for handle in hi.REPO_ENV_HANDLES:
+            os.environ.pop(handle, None)
+        os.environ["DEVRC"] = str(good)
+        os.environ["HOMELAB"] = str(tmp_path / "plimforth-renamed")
+        try:
+            rc = hi.main(["--rebuild", "--prune", "--write"],
+                         open_store=_refusing_store())
+        finally:
+            for handle in ("DEVRC", "HOMELAB"):
+                os.environ.pop(handle, None)
+        assert rc == hi.RC_REFUSED
+        assert "REFUSING --rebuild --prune" in capsys.readouterr().err
+
+    def test_the_timers_argv_does_not_carry_prune(self):
+        """The whole point of the flag is that the SCHEDULED run does not pass it.
+        Read out of `nix/home.nix`, so a future edit to the unit's ExecStart that
+        adds it fails here rather than 6h later."""
+        block = _handoff_unit_block()
+        execstart = [ln for ln in block.splitlines() if "ExecStart" in ln]
+        assert len(execstart) == 1, execstart
+        assert "handoff_index.py --rebuild --write" in execstart[0]
+        assert "--prune" not in execstart[0]
+
+
+class TestTheUnitEnvironmentMatchesTheHandlesTheIndexerReads:
+    """🔴 F2's DEFENCE IN DEPTH. The Python fix stops a rebuild deleting a repo it
+    was not told about; this stops the unit and the module DISAGREEING about which
+    repos exist in the first place, which is what made the delete destructive."""
+
+    def test_every_handle_the_indexer_reads_is_exported_by_the_unit(self):
+        """The unit hardcoded two handles (`DEVRC`, `HOMELAB`) while
+        `REPO_ENV_HANDLES` names four, so `default_repos()` inside the unit saw a
+        different config from the one a human sees — silently, since a handle that
+        is simply UNSET contributes nothing and produces no warning at all.
+
+        It now derives its Environment from `nix/agent-handles.nix`, the same file
+        `programs/zsh` and the opencode plugin read. Pinned as a relationship
+        between the two files rather than as a literal list, so adding a handle to
+        either side fails here instead of silently narrowing the unit's view."""
+        handles = (REPO_ROOT / "nix" / "agent-handles.nix").read_text()
+        repos_block = handles.split("repos = {")[1].split("};")[0]
+        declared = set(re.findall(r"^\s*([A-Z][A-Z0-9_]*)\s*=", repos_block, re.M))
+        assert declared, "the repos block must parse, or this test measures nothing"
+
+        # Every handle the module reads must be one nix exports…
+        missing = set(hi.REPO_ENV_HANDLES) - declared
+        assert not missing, (
+            f"{sorted(missing)} is read by handoff_index.REPO_ENV_HANDLES but is not "
+            f"declared in nix/agent-handles.nix, so the systemd unit cannot export it "
+            f"and the unit's view of the config differs from a human's."
+        )
+
+        # …and the unit must export the whole block rather than a hand-picked
+        # subset, which is the state that caused the incident.
+        env = _handoff_unit_block().split("Environment = [")[1].split("ExecStart")[0]
+        assert "agent-handles.nix" in env, (
+            "the handoff-index-sync unit must DERIVE its repo handles from "
+            "nix/agent-handles.nix, not list them — a hand-picked subset is what "
+            "made an unscoped rebuild delete the repos it could not see."
+        )
+        for handle in hi.REPO_ENV_HANDLES:
+            assert f'"{handle}=' not in env, (
+                f"{handle} is hardcoded in the unit's Environment beside the derived "
+                f"block; two sources for one fact is how they drifted before."
+            )
+
+
+class TestTheDryRunShowsWhatTheRebuildDeletes:
+    """🔴 F2's aggravator: the delete scope was computed only inside the `--write`
+    branch, so the pre-flight `nix/home.nix` tells an operator to watch was
+    structurally incapable of showing the one thing the run destroys."""
+
+    def test_a_dry_run_prints_the_complete_delete_scope(self, tmp_path, capsys):
+        good = tmp_path / "zarfrepo"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        for handle in hi.REPO_ENV_HANDLES:
+            os.environ.pop(handle, None)
+        os.environ["DEVRC"] = str(good)
+        os.environ["HOMELAB"] = str(tmp_path / "plimforth-renamed")
+        try:
+            rc = hi.main(["--rebuild"], open_store=_refusing_store())
+        finally:
+            for handle in ("DEVRC", "HOMELAB"):
+                os.environ.pop(handle, None)
+        out = capsys.readouterr().out
+        assert rc == hi.RC_OK
+        assert "## rebuild delete scope" in out
+        assert "DELETE (measured, will be re-derived): zarfrepo" in out
+        assert "KEPT (configured but UNMEASURED): plimforth-renamed" in out
+        assert "This list is the COMPLETE delete scope." in out
+
+    def test_a_dry_run_WITH_prune_names_its_own_blind_spot(self, tmp_path, capsys):
+        """⚠ THE HALF THAT IS STATED, NOT CLOSED. `--prune`'s extra set lives in
+        the TABLE, and a dry-run opens none. Printing a scope that silently omits
+        those rows would be a pre-flight that under-reports what the run deletes,
+        which is worse than one that names its blind spot."""
+        good = tmp_path / "zarfrepo"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        for handle in hi.REPO_ENV_HANDLES:
+            os.environ.pop(handle, None)
+        os.environ["DEVRC"] = str(good)
+        try:
+            rc = hi.main(["--rebuild", "--prune"], open_store=_refusing_store())
+        finally:
+            os.environ.pop("DEVRC", None)
+        out = capsys.readouterr().out
+        assert rc == hi.RC_OK
+        assert "a --dry-run CANNOT show it" in out
+        assert "This list is the COMPLETE delete scope." not in out
+
+    def test_a_non_rebuild_run_prints_no_delete_scope_at_all(self, tmp_path, capsys):
+        """The negative control: a run that deletes nothing must not print a
+        section about a delete, or the assertions above prove only that the block
+        is unconditional."""
+        good = tmp_path / "zarfrepo"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        rc = hi.main(["--repo", str(good)], open_store=_refusing_store())
+        assert rc == hi.RC_OK
+        assert "rebuild delete scope" not in capsys.readouterr().out
+
+
+class TestAFailedLsTreeIsNotAnEmptyRef:
+    """🔴 F5 — `_git` returns None on a non-zero rc and `handoff_paths_in_ref`
+    folded that into `()`, so a git failure and a genuinely empty mainline were
+    ONE value. Survivable while it only affected a count; not survivable once that
+    same MEASURED set decides what a `--rebuild` may DELETE."""
+
+    def test_the_two_mechanisms_return_different_values(self, tmp_path):
+        """The distinction at its source, as a natural differential — a real repo
+        whose mainline holds no handoff docs, versus a ref that does not exist.
+        No monkeypatching: `git ls-tree <missing-ref>` genuinely exits non-zero."""
+        repo = tmp_path / "bareish"
+        _write_repo(repo, {}, commit=False)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "e", "--allow-empty"],
+                       check=True)
+        assert hi.handoff_paths_in_ref(repo, "main") == ()
+        assert hi.handoff_paths_in_ref(repo, "refs/heads/no-such-branch") is None
+
+    def test_a_failed_ls_tree_makes_the_repo_UNMEASURED(self, tmp_path, monkeypatch):
+        """`derive_repo` must turn the `None` into a STRUCTURAL unmeasured reason.
+        The mainline resolves, so nothing earlier can catch this; the failure is
+        injected at `_git` and ONLY for `ls-tree`, so the repo is otherwise a
+        perfectly ordinary measured one — which is the differential."""
+        repo = tmp_path / "zarfrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        assert hi.derive_repo(repo, label="zarfrepo").unmeasured is None  # control
+
+        real_git = hi._git
+
+        def failing_ls_tree(r, args):
+            return None if args and args[0] == "ls-tree" else real_git(r, args)
+
+        monkeypatch.setattr(hi, "_git", failing_ls_tree)
+        d = hi.derive_repo(repo, label="zarfrepo")
+        assert d.unmeasured == "ls-tree-failed"
+        assert d.docs == 0 and d.sections == []
+        assert any("ls-tree" in w and "UNMEASURED" in w for w in d.warnings), d.warnings
+        assert any("NOT 'the repo has no handoff docs'" in w for w in d.warnings)
+
+    def test_a_repo_whose_ls_tree_failed_is_not_in_the_delete_scope(
+            self, tmp_path, monkeypatch):
+        """🔴 THE CONSEQUENCE THAT MAKES IT URGENT. Before this, the repo landed
+        in the MEASURED set with `docs=0` and no warning, so `--rebuild` deleted
+        its rows, re-inserted none, and exited 0 — an index silently emptied for
+        one repo by a transient git failure."""
+        good = tmp_path / "zarfrepo"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        blind = tmp_path / "trundlerepo"
+        _write_repo(blind, {"handoff-cable-audit.md": DOC_SPARSE})
+
+        real_git = hi._git
+
+        def failing_for_blind(r, args):
+            if args and args[0] == "ls-tree" and Path(r).name == "trundlerepo":
+                return None
+            return real_git(r, args)
+
+        monkeypatch.setattr(hi, "_git", failing_for_blind)
+        ds = [hi.derive_repo(good, label="zarfrepo"),
+              hi.derive_repo(blind, label="trundlerepo")]
+        assert ds[0].unmeasured is None and ds[1].unmeasured == "ls-tree-failed"
+        labels = hi.rebuild_delete_labels(ds, ("zarfrepo", "trundlerepo"), scoped=False)
+        assert labels == ("zarfrepo",)
+        assert "trundlerepo" not in labels
+
+
+class TestTheJsonSurfaceIsParseable:
+    def test_json_and_write_leave_stdout_pure(self, tmp_path, capsys):
+        """🔴 `--json --write` EMITTED JSON AND THEN PROSE ON ONE STREAM, so
+        `json.loads(stdout)` raised on a run that had worked perfectly — the
+        machine surface, the one consumed without a human reading it, was the one
+        that could not be parsed. Asserted by PARSING, not by grepping for the
+        absence of a word: a second document appended after the first would pass a
+        substring check and still break every consumer."""
+        repo = tmp_path / "zarfrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        conn = RecordingConn()
+        rc = hi.main(["--repo", str(repo), "--rebuild", "--write", "--json"],
+                     open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK
+        payload = json.loads(cap.out)
+        assert payload["totals"]["sections"] == 9
+        # …and the prose is not lost, it is on stderr where a human still sees it.
+        assert "wrote 9 section row(s)" in cap.err
+        assert "## rebuild delete scope" in cap.err
+
+    def test_the_text_mode_still_prints_the_prose_on_stdout(self, tmp_path, capsys):
+        """The negative control: without `--json` nothing moved, or the assertion
+        above would be satisfied by a change that simply stopped printing."""
+        repo = tmp_path / "zarfrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        conn = RecordingConn()
+        rc = hi.main(["--repo", str(repo), "--rebuild", "--write"],
+                     open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK
+        assert "wrote 9 section row(s)" in cap.out
+        assert "## rebuild delete scope" in cap.out
 
 
 class TestDryRunIsTheDefault:
@@ -1891,35 +2485,50 @@ class TestScopedSilentZeroGuard:
         text = hs.render(hs.run_search(_store(), "quixotry", backend="memory"))
         assert "in_scope_sections=" not in text
 
-    def test_the_five_statuses_render_with_no_shared_opening_phrase(self):
-        """🔴 WIDENED FROM TWO TO FOUR TO FIVE. Each zero must be
+    def test_the_six_statuses_render_with_no_shared_opening_phrase(self):
+        """🔴 WIDENED FROM TWO TO FOUR TO FIVE TO SIX. Each zero must be
         machine-distinguishable from the others, or a caller reading prose
-        conflates them. `unmeasured-corpus` joins the ledger because it used to
+        conflates them. `unmeasured-corpus` joined the ledger because it used to
         render as `broken-index` — same words, wrong diagnosis, confident next
-        step."""
+        step. `derived-zero-docs` joins for the SAME reason one round later: the
+        fix carved out the repos that did not RESOLVE and left the repos that
+        resolved and hold no docs still rendering the table-and-unit remedy."""
         broken = hs.render(hs.run_search(hi.MemorySectionStore([]), "zarfwidget",
-                                        backend="memory"))
+                                        backend="postgres"))
         unmeasured = hs.render(hs.run_search(
             hi.MemorySectionStore([]), "zarfwidget", backend="memory",
-            unmeasured=(("gone", "no-such-directory"),)))
+            unmeasured=(("gone", "no-such-directory"),), targets=("gone",)))
+        derived_empty = hs.render(hs.run_search(
+            hi.MemorySectionStore([]), "zarfwidget", backend="memory",
+            targets=("hollow",)))
         scope = hs.render(hs.run_search(_store(), "zarfwidget", backend="memory",
                                         repo="norepo"))
         genuine = hs.render(hs.run_search(_store(), "hexapoddery", backend="memory"))
         hit = hs.render(hs.run_search(_store(), "zarfwidget", backend="memory"))
 
+        rendered = (broken, unmeasured, derived_empty, scope, genuine, hit)
         marks = {
             "ran against NOTHING": broken,
             "failed to resolve, so no corpus was ever built": unmeasured,
+            "resolved a mainline ref and hold no": derived_empty,
             "the filter, not the corpus, is what is empty": scope,
             "the index WAS searched": genuine,
             "section(s), best first": hit,
         }
         for phrase, owner in marks.items():
-            for other in (broken, unmeasured, scope, genuine, hit):
+            for other in rendered:
                 if other is owner:
                     assert phrase in other, phrase
                 else:
                     assert phrase not in other, phrase
+
+        # 🔴 AND THE TWO WRONG REMEDIES APPEAR ONLY ON THE ONE PATH THAT HAS THEM.
+        # This is the actual Y3 claim — "shares no opening phrase" would still
+        # pass for a derived-empty block that ALSO told you to rebuild a table.
+        for other in (unmeasured, derived_empty, scope, genuine, hit):
+            assert "handoff-index-sync" not in other
+            assert "--rebuild --write" not in other
+        assert "handoff-index-sync" in broken
 
     def test_the_no_match_prose_reports_the_SCOPE_size_not_the_index_size(self):
         out = hs.run_search(_store(), "hexapoddery", backend="memory", repo="cablerepo")
@@ -1983,22 +2592,80 @@ class TestScopedSilentZeroGuard:
         assert rc == hs.EXIT_CODES["unmeasured-corpus"] == 6
         assert "🔴 UNMEASURABLE CORPUS" in out
         assert "no-such-directory" in out
+        assert "all 1 repo(s) this run was pointed at" in out
         # 🔴 THE WRONG REMEDIES MUST BE GONE, not merely joined by a right one.
         assert "BROKEN INDEX" not in out
         assert "--rebuild --write" not in out
         assert "handoff-index-sync" not in out
 
         # The differential: a real repo that resolves and holds no handoff docs is
-        # a measured empty corpus, and IS a broken index.
+        # a MEASURED empty corpus — a different status, a different code, and
+        # still not a broken index, because this path opens no database either.
         empty = tmp_path / "measurably-empty"
         _write_repo(empty, {}, commit=False)
         subprocess.run(["git", "-C", str(empty), "commit", "-qm", "e", "--allow-empty"],
                        check=True)
         rc2 = hs.main(["--query", "zarfwidget", "--offline", "--offline-repo", str(empty)])
         out2 = capsys.readouterr().out
-        assert rc2 == hs.EXIT_CODES["broken-index"] == 3
-        assert "🔴 BROKEN INDEX" in out2
+        assert rc2 == hs.EXIT_CODES["derived-zero-docs"] == 7
+        assert "🔴 ZERO HANDOFF DOCS DERIVED" in out2
         assert "UNMEASURABLE CORPUS" not in out2
+        assert "BROKEN INDEX" not in out2
+
+    def test_the_UNMEASURABLE_count_is_the_repos_POINTED_AT_not_the_failures(
+            self, tmp_path, capsys):
+        """🔴 THE MISCOUNT, AND THE REMEDY IT MISDIRECTED. MEASURED: pointing
+        `--offline` at one repo that RESOLVES (and holds no handoff docs) plus one
+        that does not exist printed
+
+            🔴 UNMEASURABLE CORPUS — all **1** repo(s) this run was pointed at
+            failed to resolve, so no corpus was ever built
+
+        It was pointed at TWO, one resolved, and a corpus WAS built — it is empty.
+        `len(outcome.unmeasured)` is a count of FAILURES being read as a count of
+        ATTEMPTS. The remedy then told the reader to fix the checkout paths, one
+        of which is fine.
+
+        Both halves are asserted, and the second is the one a count fix alone
+        would not give: the status itself must move, because "no corpus was ever
+        built" is false here however the number is spelled. The resolvable repo
+        is NAMED as fine, and only the absent one is offered as a path to fix."""
+        resolvable = tmp_path / "resolves-but-bare"
+        _write_repo(resolvable, {}, commit=False)
+        subprocess.run(["git", "-C", str(resolvable), "commit", "-qm", "e",
+                        "--allow-empty"], check=True)
+        rc = hs.main(["--query", "zarfwidget", "--offline",
+                      "--offline-repo", str(resolvable),
+                      "--offline-repo", str(tmp_path / "utterly-absent")])
+        out = capsys.readouterr().out
+
+        assert rc == hs.EXIT_CODES["derived-zero-docs"] == 7
+        # The false sentence, in the exact shape it was measured in.
+        assert "all 1 repo(s) this run was pointed at" not in out
+        assert "no corpus was ever built" not in out
+        # The true one: one repo read, one of two did not resolve, and the reader
+        # is told WHICH path to fix rather than "the checkout path(s)".
+        assert "the 1 repo(s) this run read (resolves-but-bare)" in out
+        assert "1 of the 2 repo(s) named did not resolve AT ALL" in out
+        assert "utterly-absent (no-such-directory)" in out
+        assert "the ones listed above are fine" in out
+
+    def test_the_json_surface_carries_the_denominator(self, tmp_path, capsys):
+        """The count fix has to reach the MACHINE surface too, or a consumer
+        recomputes the same wrong ratio from `unmeasured` alone — which is exactly
+        what the text renderer did."""
+        resolvable = tmp_path / "jsondenominator"
+        _write_repo(resolvable, {}, commit=False)
+        subprocess.run(["git", "-C", str(resolvable), "commit", "-qm", "e",
+                        "--allow-empty"], check=True)
+        hs.main(["--query", "zarfwidget", "--offline", "--json",
+                 "--offline-repo", str(resolvable),
+                 "--offline-repo", str(tmp_path / "jsonabsent")])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "derived-zero-docs"
+        assert payload["exit_code"] == 7
+        assert payload["targets"] == ["jsondenominator", "jsonabsent"]
+        assert len(payload["unmeasured"]) == 1 < len(payload["targets"])
 
     def test_no_repos_at_all_is_a_usage_error_in_the_siblings_wording(
             self, monkeypatch, capsys):
