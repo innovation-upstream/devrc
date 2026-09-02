@@ -782,6 +782,49 @@ class TestServiceReconDegradesGracefully:
         assert blob["store_root"] != str(unstamped)
         assert blob["index"]["status"] == srec.INDEX_UNSTAMPED
 
+    def test_read_index_called_DIRECTLY_refuses_an_unstamped_default(
+        self, tmp_path: Path, repointed
+    ) -> None:
+        """🔴 A GUARD MY OWN FIX UNCOVERED, CAUGHT BY RE-RUNNING THE SWEEP.
+
+        `read_index`'s refusal branch was covered while `recon` delegated the
+        resolution to it. Fixing F1 moved that resolution into `recon` — correct,
+        because only `recon` can report which store the brief read — and the
+        branch instantly became reachable only by a DIRECT caller, which no test
+        was. MEASURED: deleting both lines then SURVIVED all 624 tests, having
+        been KILLED by four of them one commit earlier.
+
+        `read_index` is exported, so this is live surface. Both accepted shapes
+        of `loc` are exercised, because the refusal sits before the branch that
+        tells them apart and a test of one would not prove the other.
+        """
+        repointed(_store(tmp_path / "cache", stamped=False))
+        for loc in (str(tmp_path), srec.locate("collector", ((str(tmp_path), "test"),))):
+            got = srec.read_index(loc, "collector")
+            assert got.status == srec.INDEX_UNSTAMPED, loc
+            assert rs.REMEDY in (got.detail or "")
+
+    def test_read_index_one_called_DIRECTLY_refuses_an_unstamped_default(
+        self, tmp_path: Path, repointed
+    ) -> None:
+        """The same uncovering, one level down: `read_index`'s loop always passes
+        a resolved root, so `_read_index_one`'s own guard has no in-tree caller
+        that can reach it either."""
+        repointed(_store(tmp_path / "cache", stamped=False))
+        got = srec._read_index_one(str(tmp_path), "collector")
+        assert got.status == srec.INDEX_UNSTAMPED
+        assert rs.REMEDY in (got.detail or "")
+
+    def test_read_index_called_directly_with_an_explicit_store_still_reads(
+        self, tmp_path: Path, repointed
+    ) -> None:
+        """The permissive half of the pair above — otherwise the two tests would
+        pass equally well over a `read_index` that refused everything."""
+        repointed(_store(tmp_path / "cache", stamped=False))
+        named = _store(tmp_path / "named", stamped=False)
+        got = srec.read_index(str(tmp_path), "collector", store_root=named)
+        assert got.status != srec.INDEX_UNSTAMPED
+
     def test_the_cli_store_default_is_None_so_it_resolves(self) -> None:
         """`None` IS the "resolve, and refuse an undateable store" case. A
         literal here would be a second copy of a path the resolver owns — and

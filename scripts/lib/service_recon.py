@@ -910,8 +910,18 @@ def read_index(
     caller that already knows the repo).
 
     `store_root=None` resolves the host-local read store and refuses an unstamped
-    one — see `_resolve_store`. Resolved ONCE here so a multi-candidate loop
-    cannot ask a different store per candidate.
+    one — see `_resolve_store`. Resolved once here so the multi-candidate loop
+    below cannot ask a different store per candidate.
+
+    🔴 THIS GUARD IS FOR **DIRECT** CALLERS ONLY, AND THAT IS WHY IT NEEDS ITS OWN
+    TEST. `recon` resolves the store itself (it has to, to report which store the
+    brief read) and hands this function an already-resolved `Path`, so nothing
+    reached through `recon` ever takes this branch. It went from covered to
+    uncovered the moment `recon` started resolving: a mutant deleting these two
+    lines SURVIVED the whole suite, because every test that had exercised the
+    branch now went through `recon`. `read_index` is exported, so the branch is
+    live surface, not dead code — it is pinned by
+    `TestServiceReconDegradesGracefully::test_read_index_*` rather than by luck.
     """
     store_root, refusal = _resolve_store(store_root)
     if refusal is not None:
@@ -994,7 +1004,9 @@ def _read_index_one(
 
     `store_root=None` goes through the SAME `_resolve_store` the loop above uses,
     for the benefit of a direct caller. The loop always passes a resolved root,
-    so the second resolution is a no-op there rather than a second decision.
+    so the second resolution is a no-op there rather than a second decision —
+    which means, exactly as in `read_index`, that this branch is reachable ONLY
+    by a direct caller and must be pinned by a test that is one.
     """
     store_root, refusal = _resolve_store(store_root)
     if refusal is not None:
