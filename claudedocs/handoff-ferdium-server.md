@@ -4,24 +4,25 @@
 Deploy Ferdium Server (self-hosted multi-messenger backend) on the homelab Talos cluster, exposed at `ferdium.zacx.dev` behind Authelia, so the Ferdium desktop client can sync without a cloud account.
 
 ## State now
-- **Branch / PR**: devrc `fix/ferdium-client-packages` → **PR #1240 OPEN** (MERGEABLE / UNSTABLE, checks running). homelab-infra `feat/ferdium-server` exists with a worktree at `/home/zach/workspace/homelab-ferdium` — a subagent is building it; **its PR number is not recorded here because this doc was written before that agent reported.**
+- **Branch / PR**: devrc `fix/ferdium-client-packages` → **PR #1240 OPEN** (client packages). devrc `docs/handoff-ferdium-server-pickup` → **PR #1241 OPEN** (this doc). homelab-infra `feat/ferdium-server` → **PR #647 OPEN**, commit `71c7d475`, rebased onto `origin/trunk` `8cfa319d` — 16 files, +633/-2. **Not merged. Nothing applied to any cluster or node.**
 - **Clawgate task**: none recorded. `clawgate_handoff.sh resolve` exited 5 (0 tasks for this session). That cannot distinguish "touched no task" from "wrong session id", so no `clawgate-task:` field was written — it is not a clean bill of health.
 
-### What's DONE this session
-- **Landed the client-side packages that were deployed but never committed** — devrc PR #1240, branch `fix/ferdium-client-packages`, built in a worktree off `origin/main`.
-  🔴 **The previous version of this doc recorded that step as done with a ✅, and that was half true.** The `home-manager switch` had genuinely succeeded — `~/.nix-profile/bin/ferdium` resolves today — but the edit to `nix/graphical.nix` was **in no commit**. It existed only in the workbench's working tree. Consequences, both silent: the laptop was never going to receive it (`ship.sh` converges to `origin/main`), and any `git checkout` in that shared clone would have erased it while the already-built store path kept resolving, so nothing would have looked wrong. **"Deployed" and "committed" are independent claims and only one had been made.**
-- Verified the edit by evaluation, not by parsing: `nix eval` of `homeConfigurations.zach.config.home.packages` returns `ferdium-7.1.2`, `noto-fonts-2026.08.01`, `noto-fonts-color-emoji-2.051`, `liberation-fonts-2.1.5`, `nerd-fonts-jetbrains-mono-3.5.0+2.304` **and `deep-search`**. That last entry is the real check — the list now opens with `with pkgs;` whose scope extends across the `++ lib.optional (!isLaptop)` tail, so a shadowed `lib` would have dropped the wrapper silently. `nix-instantiate --parse` passes too but could not have caught that. Measured on the workbench (`isLaptop = false`); the laptop branch of that conditional was **not** evaluated.
-- **Verified port 8117 is free on BOTH gateway configs** (rather than inheriting the claim): highest in that band is 8116 on each of `clusters/{homelab,production}/apps/nebula/gateway/gateway-nginx-config.yaml`. Positive-controlled — the same grep pattern finds 8115.
-- Confirmed **no ferdium manifests exist anywhere** in homelab-infra, so rank 1 was genuinely unstarted, and swept both repos' open PRs for a duplicate (none).
+### What's DONE
+- **Ranks 1-5 built and staged as homelab-infra PR #647.** Homelab app dir (`namespace`/`pvc`/`deployment`/`service`/`kustomization`) + Flux root Kustomization, both nginx gateway blocks, production Service/Endpoints + IngressRoute + DNS Ingress, and the Authelia `one_factor` rule for `user:zach`.
+- **Landed the client-side packages that were deployed but never committed** — devrc PR #1240. The prior version of this doc marked that step done with a ✅: the `home-manager switch` had genuinely succeeded (`~/.nix-profile/bin/ferdium` resolves) but the `nix/graphical.nix` edit was **in no commit**, so the laptop was never going to receive it and any `git checkout` would have erased it while the built store path kept resolving. **"Deployed" and "committed" are independent claims and only one had been made.**
+- Verified that edit by **evaluation, not parsing**: `nix eval` of `homeConfigurations.zach.config.home.packages` returns all five packages **and `deep-search`** — the real check, since the list now opens with `with pkgs;` whose scope reaches across the `++ lib.optional (!isLaptop)` tail. Measured on the workbench (`isLaptop = false`) only.
+- **Port 8117 verified free on both gateway configs** (8116 is the highest in that band on each; positive-controlled against 8115), and the PR diff independently confirmed to move **exactly one token** in the relay deny-list and add exactly two `listen` lines with their matching `proxy_pass` — no other port moved.
+- Confirmed the PR diff contains **no `cam` / `clowden4077` / argon2 hash** — the unrelated uncommitted Authelia user stayed out.
 - Base clone `~/workspace/devrc` fast-forwarded `30b0e7dc → 946a51f0`; it had never received this doc.
-- Work claimed under the shared-queue lock as slug **`ferdium-server-1`** — release it with `claim-work --release ferdium-server-1` when rank 1 lands.
+- Claimed under the shared-queue lock as **`ferdium-server-1`** — `claim-work --release ferdium-server-1` once #647 merges.
 
-### What's IN FLIGHT
-- **Rank 1–5 manifests**, in the `feat/ferdium-server` worktree. Brief given: homelab app dir + Flux Kustomization, both nginx gateway blocks, production Service/Endpoints + IngressRoute + DNS Ingress, the Authelia rule. **Nothing applied to any cluster** — commit-to-trunk IS deploy in that repo, so it lands behind a PR a human merges.
+### Two additions beyond the original plan, both required
+1. **`8117` added to the `diffsona` arm of `k0s/host-firewall/relay-firewall.sh`** — see Gotchas. Without it the port is internet-open past Authelia.
+2. **`nebula` root Kustomization now `dependsOn: [comic-flex-pwa, ferdium]`**, matching the `:8115` precedent — the gateway nginx config has no `resolver`, so a missing Service arms a latent gateway-WIDE outage rather than failing at apply time.
 
 ### Deploy / verify status
-- **Client**: deployed on the workbench, and now committed. **Not** deployed to the laptop — that needs #1240 merged then `scripts/ship.sh`.
-- **Server**: not built, not deployed, not verified. No cluster has been touched.
+- **Client**: deployed on the workbench and now committed; **not** on the laptop until #1240 merges and `scripts/ship.sh` runs.
+- **Server**: staged only. Not merged, not reconciled, not deployed, not verified. No cluster or node has been touched.
 
 ## Architecture (researched, not yet implemented)
 
@@ -33,24 +34,26 @@ Ferdium client → Cloudflare → production nebula gateway (10.0.0.2)
 Authelia runs on the production cluster. Cloudflare handles TLS termination. The homelab nebula gateway proxies traffic to internal services.
 
 ## Next steps (ranked)
-🔴 Ranks 1–7 are UNCHANGED from the previous version of this doc on purpose — the rank is half a `claim-work` slug's identity and re-ranking silently re-points live claims.
+🔴 Ranks 1-7 keep their original numbering on purpose — the rank is half a `claim-work` slug's identity and re-ranking silently re-points live claims. Ranks 1-5 are now all carried by **PR #647**.
 
-1. **IN FLIGHT** (`homelab-infra` `feat/ferdium-server`, claim `ferdium-server-1`) — Ferdium Server manifests on the homelab cluster: `clusters/homelab/apps/ferdium/{namespace,deployment,service,pvc,kustomization}.yaml` + `clusters/homelab/flux-system/root-kustomizations/system/ferdium.yaml`, registered in that dir's `kustomization.yaml`. **Check for the open PR before starting anything here.**
+1. **STAGED as homelab-infra PR #647** — review and merge it. `/audit-pr 647` is worth running first: it carries an Authelia access-control rule and an internet-facing relay port. Merging IS deploying.
    forcing: user
-2. Ferdium proxy block on the homelab nebula gateway — `listen 10.42.0.10:8117` → `ferdium.ferdium.svc.cluster.local:80`. File: `clusters/homelab/apps/nebula/gateway/gateway-nginx-config.yaml`. Likely folded into rank 1's PR.
+2. (in #647) homelab nebula gateway block, `listen 10.42.0.10:8117` → `ferdium.ferdium.svc.cluster.local:80`.
    forcing: user
-3. `homelab-ferdium` Service + Endpoints on the production cluster, port 8117 → `10.0.0.2`. File: `clusters/production/apps/nebula/gateway/services.yaml`, plus the matching `listen 0.0.0.0:8117` → `proxy_pass http://10.42.0.10:8117` block in that cluster's `gateway-nginx-config.yaml`.
+3. (in #647) production `homelab-ferdium` Service + Endpoints and the `listen 0.0.0.0:8117` → `10.42.0.10:8117` block.
    forcing: user
-4. `clusters/production/apps/nebula/gateway/ferdium-ingress.yaml` — IngressRoute with the authelia middleware + the external-dns DNS Ingress. Model on `comics-ingress.yaml`.
+4. (in #647) `ferdium-ingress.yaml` — IngressRoute + external-dns DNS Ingress.
    forcing: user
-5. `ferdium.zacx.dev` → `one_factor` for `user:zach` in Authelia access control. File: `clusters/production/flux-system/charts/authelia/authelia.yaml`.
+5. (in #647) `ferdium.zacx.dev` → `one_factor` for `user:zach` in Authelia.
    forcing: user
-6. Merge the manifest PR, `flux reconcile`, verify pod health and reach `https://ferdium.zacx.dev`. **This is the step that deploys** — everything above only stages.
+6. **After merging #647: copy `k0s/host-firewall/relay-firewall.sh` to the relay node and apply it.** 🔴 That file is NOT Flux-reconciled, so the merge does not deliver it — until this is done, `8117` is open on the node's public interface, bypassing Authelia. Then `flux reconcile`, verify pod health, and check `https://ferdium.zacx.dev` 302s to `login.zacx.dev`.
+   forcing: security
+7. Open the Ferdium desktop client → custom server URL → register → then flip `IS_REGISTRATION_ENABLED` to `false` and redeploy. **Watch for background sync failing with 302s while a browser works** — that is the untested forward-auth gap in Gotchas, and the fix is a scoped bypass, not deleting the Authelia rule.
    forcing: user
-7. Open the Ferdium desktop client → set the custom server URL → register the account → flip `IS_REGISTRATION_ENABLED` to `false` and redeploy.
-   forcing: user
-8. **NEW** — merge devrc **PR #1240** and run `scripts/ship.sh`, so the laptop actually receives the client packages. Until this lands the two hosts differ, and the workbench's copy is a store path with no committed source behind it on either host.
+8. Merge devrc **PR #1240** and run `scripts/ship.sh` so the laptop receives the client packages.
    forcing: regression
+9. Digest-pin `ferdium/ferdium-server:latest` — upstream publishes no version tag, so the deployed image can change under a reconcile.
+   forcing: none
 
 ## Ferdium Server config (reference)
 
@@ -91,6 +94,14 @@ Port: 3333 (container) → 8117 (nebula gateway) → homelab Service port 80.
 - **Port 8117 was confirmed, not assumed.** Both gateway configs top out at 8116 in that band.
 - The `cam` Authelia user sitting uncommitted on homelab-talos `trunk` is **unrelated** to this work but lives in the same file as rank 5. Branching off `origin/trunk` excludes it; a worktree off the dirty checkout would not.
 - **Do not `git stash` in homelab-talos**, and do not copy an `.envrc` into a worktree of it — `.envrc` is *tracked* there, a documented exception to the usual worktree recipe.
+
+- 🔴 **An 81xx port on the production relay is INTERNET-OPEN unless it is in the `diffsona` deny-list of `k0s/host-firewall/relay-firewall.sh`** — that list is the only filter on the node's public interface, and adding `listen 0.0.0.0:<port>` without the matching DROP publishes an unauthenticated path straight past Authelia. This is the measured `8102` failure the file documents: a SYN to `:8102` was answered **from the host** 71µs later. `scripts/check-relay-guard.py` gates it. 🔴 **That script is NOT Flux-reconciled** — merging the PR does not deliver it; copying it to the relay node is an owed human step.
+- 🔴 **Ferdium Server's `/health` never touches the database.** It is a real route (upstream `start/routes/web.ts`, outside every middleware group) but `HealthController` returns a hardcoded `{api,db}:success` with an upstream `TODO`. **A Ready pod is not evidence that sync works.** Related: the fallback route `/*` redirects to `/`, so a typo'd probe path returns 302 and reads as success.
+- **No WebSockets** — no `ws`/`socket.io` dependency and no upgrade handler in `server.ts`; client sync is plain REST on `/v1/...`. So neither nginx block carries `Upgrade` headers, deliberately.
+- **`APP_KEY` is deliberately unset.** Setting it on a fresh volume takes the entrypoint's `else` branch, which `cat`s a nonexistent file, and the env-schema check then rejects the empty key.
+- 🔴 **The biggest UNVERIFIED risk: whether the Ferdium desktop client's background sync survives an Authelia forward-auth gate.** The client holds its own bearer token; as an Electron app its top-level navigation can follow the 302 and log in, but whether background requests then carry the `zacx.dev` session cookie was never tested. **If sync fails with 302s to login.zacx.dev while a browser works fine, that is this gap** — and the fix is a scoped bypass for the client's API prefix, NOT deleting the Authelia rule.
+- **`ferdium/ferdium-server:latest` is a mutable tag** — upstream publishes no version tag. A digest pin is an owed follow-up.
+- **`scripts-tests` was already red on `origin/trunk`** before any of this work: a pristine baseline worktree produced byte-identical verdict lines (`files_run=54 tests_ran=1316`, same failed/broken sets). Do not attribute it to the ferdium diff.
 
 ## How to verify
 ```bash
