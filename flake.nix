@@ -343,8 +343,23 @@
             # copy step is `rsync -a --delete "$STORE"/ "$STAGE"/`. Without the
             # binary those tests fail with `rsync: command not found` (rc 127),
             # which is a FAILURE and not a skip, deliberately: the property they
-            # pin is that seeding never writes to the local store, and that store
-            # is the only copy of client-confidential content. The same
+            # pin is that seeding never writes to the local store, which is the
+            # AUTHORITATIVE copy of client-confidential content — the daily MinIO
+            # bundle and the served pod are both lagging derivatives, so a
+            # corrupted source replicates outward rather than being repairable
+            # from either — though a bundle already in the bucket still holds
+            # what was reachable when it was written, so "lagging" is not
+            # "useless": check what is in the bucket, with restore-verify.py,
+            # before concluding anything is unrecoverable.
+            #
+            # 🔴 This block is the TWIN of the one in scripts/run-tests.sh — the
+            # same argument in different words, and NOTHING ENFORCES THAT THEY
+            # AGREE. They have drifted apart three times: on "the only copy", on
+            # the bucket qualifier above, and on "check the retention window"
+            # (which is false — see backup.py). Each time one was corrected and
+            # the other was not, and each time the correcting commit believed it
+            # had reconciled them. Change both in the same commit, or delete one
+            # and point at the other. The same
             # nix-shell-stripped-PATH method as the `nix` entry above reproduced
             # it. Present on the workbench (`~/.nix-profile/bin/rsync`), so the
             # pre-push tier is unaffected.

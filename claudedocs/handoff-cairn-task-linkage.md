@@ -21,58 +21,44 @@ durable output is the linkage: which ClickUp ticket, which clawgate card, and wh
 genuinely built versus assumed.
 
 ## State now
-- **Branch / PR:** nothing in flight for this effort. Everything merged.
-- 🔴 **RANK 2 IS DONE — cg#445 is fixed and merged.** devrc#1148 → squash **`8e8ee3bc`**,
-  verified BY CONTENT on `origin/main` (`held_count` and `_config_write_lock` both present),
-  never by ancestry.
-  - **The card's stated mechanism was WRONG, and that is why it was rediscovered three
-    times.** It blamed the git **common dir's** config shared by ~117 worktrees — an
-    environmental fact, therefore unfixable, which is where 2026-08-22, 08-28 and 08-30 all
-    stopped. The contended file was the guard's **own** `GIT_CONFIG_GLOBAL` target with a
-    fixed filename (`guard_dir / "gitconfig"`), and `nogit_plugin.py`'s own comment said so.
-  - 🔴 **The obvious fix (per-pid filename) would have broken GUARD 10 on EVERY target.**
-    `scripts/run-tests.sh` builds that path independently in shell as `$NOGIT_CONFIG` and
-    tests it for **equality** (`:4562`), and counts control keys in that **one** file
-    (`:3023`). Neither greps for `guard_config_path`. Shipped instead: an advisory `flock`
-    on a separate `<guard-dir>/gitconfig.pylock` — never `.lock`, which is git's own lock
-    name for the same file.
-  - **Four audit rounds, ending clean.** Payload lines per fix round: **113 → 69 → 35 → 0 →
-    0**. Rounds 1–3 each found a defect created by the previous round's fix; round 4 found
-    nothing and both stop conditions fired together (clean round + two consecutive
-    zero-payload rounds).
-  - **The three prior rediscoveries were 2026-08-22, 08-28 and 08-30**, each costing
-    ~20-minute control runs, all recorded in the `devrc/tests` index entry.
-- 🔴 **Cairn's integration is planned in its OWN doc — do not re-derive it here.**
-  `claudedocs/plan-cairn-integration.md` (merged `093a63db`): 11 decisions from an alignment
-  session — Cairn is a **per-person agent re-entry cache, multi-tenant, one store per
-  person**, hosted pod canonical, local disk a read-through cache, automatic capture, age-out
-  on read recency, opt-in sharing gated by `sensitivity:`. Phases 0–4 live there.
-  **Store state measured 2026-08-31: workbench 146 entries / 15 scopes, laptop 47 / 12; 22
-  distinct scopes of which 5 overlap and 7 are laptop-only.** The figures in the
-  `subsystem-index` skill are from 2026-08-27 and are stale.
-- ✅ **GATED ON THE MERGED TREE, three tiers** — `origin/main 74b427d5` + `21176d1d`, built
-  in a real clone (never a worktree — `nix build path:<worktree>` breaks every git call in
-  the sandbox), one at a time:
-  - sandbox `pytests` → `/nix/store/gzx25hxsyzz8…` GREEN
-  - sandbox `nodetests` → `/nix/store/s112ljw56ww0…` GREEN
-  - dev-host `gate.sh --tier pytest` → `GATE: RESULT=PASS exit=0`, 19914 passed / 0 failed
-  - 🔴 **The two sandbox tiers prove MERGE SAFETY ONLY.** `NOGIT_REPO_LOCAL` is empty in the
-    nix sandbox, so GUARD 10 is not the same guard there. Only the dev-host tier is evidence
-    about cg#445 — keep those two claims separate.
-  - **The GUARD 10 evidence, on the merged tree:** **zero** occurrences of `unmeasured` or
-    `lock-contended` in the whole run (grepped explicitly — that value is *pass-shaped* if
-    you only read an exit code); `config-control` equals `plugin` on **all 38 targets**; and
-    `scripts/validation/tests`, the exact target cg#445 named, reports `config-control=4
-    plugin=4`.
-- **cg#365 and cg#445 are both at `ready_for_review`, awaiting the operator's `complete`
-  call** — neither body carries a `## Acceptance criteria` heading, so per the status gate
-  an agent may not mark them complete.
-- **The CI diagnosis went to cg#348 as comment 593**, not a new card — cg#348 already covered
-  the priority mechanism, and cg#337/#303 are adjacent.
-- ⚠ **The base clone `~/workspace/devrc` is on `main`, behind `origin/main`, with another
-  session's uncommitted work** (`M nix/pkgs/default.nix`, plus untracked
-  `output.txt`, `scripts/diagnose-nix-disk.sh`, `scripts/tests/test_opencode_rig_control.py`).
-  Theirs to sync, not this effort's.
+- **Branch / PR:** NOTHING IN FLIGHT. All five PRs merged.
+- ✅ **CAIRN PHASE 0 IS CLOSED — both halves, and they were separate claims.** The
+  CONSOLIDATION is devrc#1170 → `50bfd91f`; the ACCEPTANCE CRITERION (*"a test that fails if a
+  second protocol reappears"*) is devrc#1186 → **`27a0e998`**. Phase 1 (pod canonical) is now
+  unblocked.
+  - ⚠ **#1186's `devrc-pytests` was RED on an earlier head and PASSED on the final one**
+    (`20067 passed / 0 failed`). The red was the store-api fsync contention, diagnosed
+    independently in devrc#1181 — see the closed investigation below. It was never this diff.
+- ✅ **RANK 7 DONE AND DEPLOYED — cg#348's REPORTING half.** homelab-infra#600 → squash
+  **`4e1a7970`**, verified BY CONTENT. 🔴 **Merged ≠ deployed, checked separately:** Flux
+  `tekton-triggers` reports `lastApplied=trunk@sha1:4e1a7970…` and the LIVE `devrc-ci-report`
+  Task carries the new arm. Immediately after the merge the live Task had **0** occurrences;
+  reconcile took ~80s.
+  - Four mechanisms now post four strings — `NO CAPACITY` / `NO GATE POD` / `KILLED` /
+    `BROKEN GATE` — all still GitHub `error`. **It recovers no lost check; it makes the loss
+    legible.**
+  - **Audit ladder ran 3 rounds and stopped on a clean one.** Round 1: 1🟡 2🟢. Round 2:
+    3🟡 2🟢, **every one introduced by round 1's own fix**. Round 3: 0🔴 0🟡, 2🟢.
+    Payload lines 63 → 36 → 24, executable shell 5 → 1 → **0**.
+- ✅ **devrc#1170 → `50bfd91f`** — one owner for the index-append protocol, y/N retired at the
+  last door, `created_by` supplied by the caller. A 🔴 found on the way and fixed in `97d898e5`:
+  `analyze-service`'s `allowed-tools` lacked `Edit` while the PR routed it to an `Edit`-mandated
+  protocol, so the measured-unsafe `Write` was the PRE-APPROVED path at that door.
+- ✅ **devrc#1179 merged** — three wall-clock bounds in
+  `scripts/browser-bridge/tests/test_server.py` were `< 1.0` against a **5.0s** mechanism, i.e.
+  load detectors rather than timeout detectors. Each is now `TIMEOUT / 2`, derived from a named
+  local. Mutation-verified: a **3.0s** delay (a partial regression, under the full timeout)
+  still fails all three on their own assertion.
+- ✅ **devrc#1174 → `314ea94f`** and **devrc#1184 → `329f0d40`** — the rank 7 and rank 8
+  ledger entries.
+- **Filed this session:** **cg#469** (rank 9) and **cg#473** (rank 10).
+- ⚠ **The devrc base clone is on `main` and CLEAN of tracked changes** (untracked `output.txt`,
+  `scripts/diagnose-nix-disk.sh` only) — it moved off `feat/opencode-rig-control-skill` during
+  the session, by another session, not by us. The **homelab-talos** base clone is still behind
+  and dirty with another session's work; left exactly as found.
+- **All worktrees removed and ALL claims released** — nothing of this session's is held.
+  ⚠ `/home/zach/workspace/devrc-close8-beb749f5` (`docs/rank8-closeout`) is ANOTHER session's
+  worktree; left alone.
 
 ## The cluster — ClickUp ↔ clawgate ↔ Cairn
 All six ClickUp tickets came from the **2026-08-26 harness / knowledge-sharing meeting**
@@ -290,44 +276,193 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
   diagnosis. **Closed forward:** the verdict now prints `mutex=held N/6,
   stale-git-lock=PRESENT|absent`, so a fourth rediscovery names its own mechanism.
 
+### CLOSED BY ANOTHER SESSION — the store-api "flake" is fsync CONTENTION, not a flaky test
+- **Why it is here:** it went red on **devrc#1186** on
+  `TestAHungRoundTripSAYSWhichSideBlocked.test_a_stall_in_the_FSYNC_region_is_NAMED`, in a file
+  that PR does not touch. I could attribute it AWAY from the diff but could not diagnose it.
+- **Observed (mine, with values):** the PR touches ONE file
+  (`scripts/tests/test_index_append_protocol.py`) which nothing imports; the failing test passes
+  on `origin/main` **and** on the PR head, same environment, in isolation; the whole class is
+  **5/5 pass locally**, ~5s each, no variance; the identical `nix build` sandbox derivation is
+  green on that head. `target_url` is **null** on the status, so there was no step log and no way
+  to tell WHICH assertion failed — and that class has two very different ones
+  (`assert stalled.is_set()` vs the mechanism assertions).
+- **Ruled out by me:** that it is this PR's defect. **NOT** ruled out: anything about the CI
+  mechanism — I declined to call it a flake on an absence.
+- **RESOLUTION, from devrc#1181 (`0c333846`), landed by another session while this ran:**
+  `server.py:_replace_bytes` fsyncs BEFORE the response is written, and fsync blocks in
+  **uninterruptible sleep**. When one fsync exceeds `HANG_TIMEOUT` (60.0) the client raises
+  `TimeoutError` at `socket.py:720` and **the gate reports a code failure for an I/O stall**.
+  devrc-ci is pinned to one node, the gate workspace is `emptyDir medium=disk` and the nix
+  caches are `local-path` PVCs, so every concurrent pipelinerun contends on ONE physical disk —
+  **12 pipelineruns overlapped the failing window.** It ships an LD_PRELOAD reproducer
+  (`scripts/ci-repro/slowfsync.c`) that fails the identical test on the dev host.
+- 🔴 **Two fixes it records as looking right and NOT being — do not re-attempt:** CPU/memory
+  requests cannot fix it (k8s requests govern CPU and memory, **not disk I/O**), and raising
+  `HANG_TIMEOUT` again is worse than nothing (60 is already the symptom fix from 15 on
+  2026-08-29 and it did not hold; ~320 hung-call sites × 60s ≈ 5.3h against a 45m budget).
+- ⚠ **Read it beside cg#348: it is the SAME SHAPE.** An I/O stall reported as a code failure,
+  and a capacity loss reported as a code failure, are one class — a red check that is not about
+  the diff. Rank 7 made one of them legible; this one the suite already classified correctly
+  and said so unprompted (`MECHANISM = SERVER_BLOCKED_IN_FSYNC … accept loop parked=True`).
+
+### OPEN — cg#348's SCHEDULING half is untouched
+- **Observed (comment 593, re-read this session):** priority is split by trigger — 34
+  `devrc-ci-pr` TaskRuns with `priorityClassName` **unset** (effective 0) vs 7
+  `devrc-ci-push-main` at `ci-bulk` (**−10000**), both `nodeSelector`-pinned to the same node.
+  So every PR-leg gate pod is a valid preemptor of the main-leg pod. Separately, **2 of 28
+  terminal PR-gate runs (7.1%) lost a REQUIRED check to pure queueing** — a TaskRun's timeout
+  clock starts at CREATION, so a pod that never schedules burns its whole budget queued.
+- **Ruled out WITH MEASUREMENTS — do not re-propose:** raising `ci-bulk` (would let CI preempt
+  cert-manager and Flux); `retries` on the gate (retries genuine verdicts; `timeouts.tasks` is
+  cumulative across attempts); a concurrency cap (simulated against the real arrival trace and
+  WORSE at every cap that helps); ResourceQuota (cannot be scoped safely).
+- **Leading hypothesis:** the only real lever left is moving the main leg to a different node,
+  which has an **unverified prerequisite** — free disk for a third 30Gi local-path nix cache was
+  never measured.
+- **Next probe:** measure that free disk before designing anything.
+- 🔴 **`kubectl delete pod` is NOT a preemption stand-in — MEASURED TWICE this session.** Both
+  attempts ended `gate: reason=Succeeded`: Tekton RECREATED the pod. Card #348's proposed probe
+  3 measures a different mechanism. Kill the step process instead.
+
+### SUPERSEDED 2026-09-01 — rank 11 / cg#348's SCHEDULING half: the free-disk prerequisite was measured, and the lever it gates is no longer the lever
+🔴 **This block supersedes "OPEN — cg#348's SCHEDULING half is untouched" above. Rank 11's
+"Next probe: measure that free disk before designing anything" is DONE. Do not re-measure it,
+and do not design the third-cache change it was gating.**
+
+- **What was asked:** rank 11's leading hypothesis was *"the only real lever left is moving the
+  main leg to a different node, which has an unverified prerequisite — free disk for a third
+  30Gi local-path nix cache was never measured."*
+
+- 🔴 **The premise was wrong before the measurement mattered.** `/var/lib/mnt/disk-1/<pvc>` is a
+  **directory on the Talos `/var` partition, not a separate mount** — node-exporter reports 42
+  distinct mountpoints and that path is not among them. So "free disk for a local-path PV" is
+  free space on `/var`, and any figure taken against another filesystem is answering a
+  different question.
+
+- **Observed (with values), two instruments and two readings ~12 min apart.** Instruments:
+  kubelet `stats/summary` (`.node.fs.availableBytes`) and node-exporter
+  `node_filesystem_avail_bytes{mountpoint="/var"}` via `scripts/obs-read`. Positive control on
+  the metric: `count(node_filesystem_avail_bytes)` = **99 series**.
+
+  | node | `/var` size | reading 1 | reading 2 | nix cache today |
+  |---|---|---|---|---|
+  | `talos-xr6-r7p` | 3722 GiB | 3378 | **3379** | `nix-store-cache` 30Gi — gate pinned here |
+  | `talos-uvh-gtj` | 221 GiB | 119 | **116** | `nix-store-cache-2` 30Gi (gitops-validate) |
+  | `talos-jkj-deb` | 230 GiB | 102 | **102** | none |
+  | `talos-deu-s2q` | 109 GiB | 16 → 80 | **92** | none |
+
+  At reading 2 the two instruments agreed **exactly** on all four nodes. The 16→92 swing on
+  `deu-s2q` was TIME, not instrument bias — three nodes agreed across both readings while that
+  one moved 76 GiB in ten minutes, on a 109 GiB disk carrying 58 tekton-ci PVs.
+
+- **Verdict on the prerequisite: satisfiable in the narrow sense, and a bad bet.** The only
+  candidate with stable room is `talos-jkj-deb` — and it is the one node CI must not use: sole
+  untainted control-plane node, shares its `sda` with etcd; unpinned CI landed there **82%** of
+  the time and drove etcd p99 to **60s**, silently dropping **253** Tekton trigger evaluations
+  and costing PR 355 its verdict (recorded at length in
+  `clawgate-ci-triggertemplate.yaml`). `deu-s2q`, the other candidate, is the volatile one above.
+
+- 🔴 **And the lever is superseded, which makes the disk question moot.** homelab-infra shipped
+  `clusters/homelab/apps/tekton-pipelines/triggers/nix-binary-cache.yaml` on **2026-08-31** — a
+  MinIO bucket serving the Nix binary-cache file layout over HTTP, deliberately **not** a cache
+  server (`attic` and `harmonia`/`nix-serve` were evaluated and rejected in writing, because
+  both re-introduce the node-bound PVC the change exists to remove). Its own header: *"the
+  mechanism that lets a pipeline stop being pinned to one node."* A pod fetching store paths
+  over HTTP needs **no PVC for `/nix`, and therefore no `nodeSelector`.**
+
+- **Proof the pattern works, not just that it exists:** `auditloop-ci` took it the same day —
+  per-run `emptyDir` for `/nix` + HTTP substitution ⇒ one PVC ⇒ `nodeSelector` **deleted**,
+  replaced by a `NotIn: [talos-jkj-deb]` exclusion (3 candidate nodes, not 4, for the etcd
+  reason above). Live: its pods now land on **2 different nodes**.
+
+- **Still true, re-verified live 2026-09-01** — the parts of rank 11's diagnosis that hold:
+  `devrc-ci` is still hard-pinned (`nodeSelector: kubernetes.io/hostname: talos-xr6-r7p`;
+  **12 of 12** recent gate pods there), and the priority split is intact — main-leg pods
+  `ci-bulk` / **−10000**, PR-leg pods unset / **0**, same node, so PR legs remain valid
+  preemptors of the main leg.
+
+- **Ruled out:** building a third 30Gi local-path nix cache. It costs a node choice that is
+  either unsafe (`jkj-deb`) or unstable (`deu-s2q`), and it re-commits to the node-bound-PVC
+  design that `nix-binary-cache.yaml` exists to retire.
+
+- ⚠ **One measured caveat before anyone assumes the unpin is free:** the `nix-cache-warm`
+  CronJob is **weekly** (`0 3 * * 0`) and has **never run** (`LAST SCHEDULE <none>`, age 21h at
+  measurement). Bucket contents are whatever the initial fill left. **Measure the cache hit rate
+  before quoting a wall-clock win.**
+
+- 🔴 **A CLAIMED near-duplicate the lock cannot merge with this one:** `ci-speedup-7` is HELD
+  (*"retry the devrc-ci node unpin behind a nix-store-ownership probe on a SCRATCH pipeline"*),
+  and `claudedocs/handoff-ci-speedup.md` is its doc. Same constraint, different remedy, and it
+  has already re-taken the perf baseline at `requests.cpu: 2` — gate pod-start latency **p50
+  101s, p90 748s, max 1043s** against a 45m budget, **24 of 24** gate pods on `talos-xr6-r7p`.
+  **Rank 11 and `ci-speedup-7` must not be worked independently.** Its own open blocker is
+  *which uid takes the nix store lock* — a root client cannot receive `EACCES` on a mode-0600
+  file it owns, so whoever hit "Permission denied" during the hostPath window was not root.
+
+- **Next probe:** none for the disk question — it is answered and closed. The live question is
+  whether `devrc-ci` should follow `auditloop-ci` onto the binary cache, and that belongs to
+  `ci-speedup-7`'s holder, not to a fresh draw of rank 11.
+
 ## Next steps (ranked)
-🔴 **NUMBERING IS STABLE — done items stay as tombstones, never removed or renumbered.**
-The rank is half a `claim-work` slug's identity. Ranks 1, 2 and 3 are closed.
+🔴 **NUMBERING IS STABLE — items are marked done IN PLACE, never removed or renumbered.**
+The rank is half a `claim-work` slug's identity. New items APPEND to the end even when they
+belong topically beside an earlier one.
 
 1. ✅ **DONE — cg#365's trailer separator.** Merged `ec102d00`. **Do not re-work.**
    forcing: none — closed.
-2. ✅ **DONE — cg#445, GUARD 10 unmeasurable.** Merged `8e8ee3bc`, four audit rounds, gated
-   on the merged tree across three tiers. `ready_for_review`; the `complete` call is the
-   operator's. **Do not re-work.**
+2. ✅ **DONE — cg#445, GUARD 10 unmeasurable.** Merged `8e8ee3bc`. **Do not re-work.**
    forcing: none — closed.
 3. ✅ **DONE — trailer confirmed on a real devrc commit** (`fa64c986`). **Do not re-work.**
    forcing: none — closed.
-4. ⚠ **cg#428 — RE-CHECK BEFORE TOUCHING.** Was "BLOCKED on devrc#1011"; measured 2026-08-31
-   it is **`ready_for_review`** with 5 comments — another session worked it. Read the card
-   first. If anything remains it must IMPORT `scripts/collector/mention_scan.py`'s
-   `CLICKUP_TASK_URL` / `_github_url` / `clawgate_url`, never write a second resolver.
+4. ⚠ **cg#428 — RE-CHECK BEFORE TOUCHING; CHEAPEST OPEN ITEM.** Live read 2026-08-31:
+   **`ready_for_review`**, 5 comments — another session worked it. Read the card first; the work
+   may be done and need only confirming. If anything remains it must IMPORT
+   `scripts/collector/mention_scan.py`'s `CLICKUP_TASK_URL` / `_github_url` / `clawgate_url`,
+   never write a second resolver.
    forcing: none — likely already delivered; verify rather than assume.
 5. **cg#429 — clickup-mirror per-task repo override.** Repo `homelab-talos`, files
    `scripts/clickup-mirror/mirror.py`,
    `clusters/workbench/apps/clickup-mirror/config-configmap.yaml`.
-   forcing: none — re-probed 2026-08-30: cg#363/364/365 still read
-   `innovation-upstream/devrc`, cg#362 still unset. Real mechanism, has not fired.
-6. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo
-   migration ticket.
+   forcing: none — the mechanism is real and has not fired; cg#363/364/365 still read
+   `innovation-upstream/devrc`, cg#362 still unset.
+6. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo migration.
    forcing: none — blocked on a third party.
-7. 🔴 **cg#348 — make the CI reporter distinguish capacity from a broken gate.** Repo
-   `zacxdev/homelab-infra`, files `devrc-ci-pipeline.yaml` (the `clone` step and `post_leg`
-   in the `report` finally task). Diagnosis and ranked fixes are in **comment 593**.
-   🔴 The fix **recovers no lost check — it makes the loss legible**; the commit message must
-   say so or a reviewer reads it as a reliability fix.
-   forcing: gate — measured 2026-08-31, **2 of 28 terminal PR-gate runs (7.1%) lost a
-   REQUIRED check to pure queueing**, and with `enforce_admins: true` those PRs are BLOCKED
-   until someone pushes again. Three capacity outcomes and one real defect currently post the
-   same string.
-8. **Cairn integration, phase 0** — reconcile the two conflicting writers of the subsystem
-   store before automatic capture multiplies the inconsistency. Plan and all 11 decisions:
-   `claudedocs/plan-cairn-integration.md` (merged `093a63db`). Do not re-derive them here.
-   forcing: none — nothing external is waiting.
+7. ✅ **DONE AND DEPLOYED — cg#348's REPORTING half.** homelab-infra#600 → `4e1a7970`; Flux
+   `lastApplied` confirms the live Task. **Do not re-work.** 🔴 **cg#348 ITSELF STAYS OPEN** —
+   only the reporting half shipped; criteria 1 and 3 want a REAL gate run under contention and
+   the probes were a scratch pipeline, and criterion 4 is deliberately not implemented
+   (comment 256 retracted it). The scheduling half is rank 11.
+   forcing: none — the reporting half is shipped and live.
+8. ✅ **DONE — Cairn phase 0 is CLOSED.** Consolidation devrc#1170 → `50bfd91f`; the
+   acceptance criterion devrc#1186 → `27a0e998`. **They were separate claims and only the first
+   had shipped for most of this session** — the entry is kept as a tombstone saying so, because
+   "one protocol" reads as done while "a test that catches a second one" is what phase 0 asked
+   for. Phase 1 (make the pod canonical) is now unblocked. **Do not re-work.**
+   forcing: none — closed.
+9. **cg#469 — a 4xx on the FIRST leg's status POST costs the SECOND leg its check.** Repo
+   `homelab-talos`, file
+   `clusters/homelab/apps/tekton-pipelines/triggers/devrc-ci-pipeline.yaml`. Under `set -eu`,
+   `curl -sf` on the pytests POST aborts before nodetests posts at all — both required contexts
+   stuck `pending` forever, the same end-state as `devrc-ci-nnt6f`/`9p6mf`. 🔴 The fix is NOT
+   `|| true`: that trades a loud failure for a silent one. Also carries a stale
+   "six pipelines / devrc-ci 3m" comment (live scan says ≥11 and 5.0m).
+   forcing: none — read off the code, NOT observed in the wild.
+10. ✅ **DONE — cg#473's disagreement predicate.** devrc#1186 → `27a0e998`. Independently
+   re-verified before merge: the reworded-fork mutant reproduces **no** pinned literal
+   (`MANDATE: False`, banned imperatives: none — checked mechanically against literals parsed
+   from the module source) and dies naming the file and the lines. 71 passed on the merged tree.
+   🔴 **Residual, stated in the class docstring:** a fork that describes a whole-file retype
+   WITHOUT naming a tool or a confirm gate is outside every layer — the mechanism half is a
+   token list, the narrowest thing a real fork cannot avoid, not a completeness proof.
+   **Do not re-work.**
+   forcing: none — closed.
+11. **cg#348's SCHEDULING half — the only item here with a live external forcing function.**
+   Repo `homelab-talos`. See the open-investigation block above for what is already
+   rejected-with-measurement; the surviving lever is moving the main leg to another node, whose
+   free-disk prerequisite was never measured. Measure that first.
+   forcing: gate — 2 of 28 terminal PR-gate runs (7.1%) lost a REQUIRED check to pure queueing,
+   and with `enforce_admins: true` those PRs are BLOCKED until someone pushes again.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **cg#428 COLLIDES WITH OPEN PR #1011 (`feat/mention-detection-click-to-open`), and
@@ -709,20 +844,104 @@ The rank is half a `claim-work` slug's identity. Ranks 1, 2 and 3 are closed.
   cg#348 as a comment because the duplicate sweep found cg#348/#337/#303 already open on it;
   a fourth card would have been the exact collision class this whole effort investigated.
 
+- 🔴 **CARRIED FORWARD from `State now`, which a REPLACE would otherwise have dropped —
+  cg#445's REAL mechanism, and why it was rediscovered three times.** The card blamed the git
+  **common dir's** config shared by ~117 worktrees — an environmental fact, therefore
+  unfixable, which is where **2026-08-22, 08-28 and 08-30 all stopped**, each costing ~20-minute
+  control runs. The contended file was actually the guard's **own** `GIT_CONFIG_GLOBAL` target
+  with a fixed filename (`guard_dir / "gitconfig"`), and `nogit_plugin.py`'s own comment said
+  so. 🔴 **A card's stated mechanism is a hypothesis, and a wrong one that sounds environmental
+  is the most expensive kind — it reads as "not ours to fix" and stops the search.**
+- 🔴 **CARRIED FORWARD — the Cairn store's measured state, 2026-08-31.** Workbench **146
+  entries / 15 scopes**, laptop **47 / 12**; **22 distinct scopes of which 5 overlap and 7 are
+  laptop-only**. The figures in the `subsystem-index` skill are from 2026-08-27 and are stale.
+  🔴 The store is **PER-HOST and unreplicated**, so a `scope-absent` on one machine is never a
+  claim about the fleet — phase 1 makes the pod canonical and has to reconcile the 5 overlaps.
+- 🔴 **RANK 8 WAS ALREADY BUILT, BY ANOTHER SESSION, AND NOTHING IN THE LOCK COULD SEE IT.**
+  devrc#1170 was open and unclaimed and was *exactly* phase 0. Only `gh pr list` surfaced it —
+  `claim-work` locks an item, it does not notice the item being done elsewhere. Starting rank 8
+  fresh would have written a second append protocol into the change that exists to remove one.
+  **Sweep `gh pr list` before drawing ANY ranked item, not just the one you intend to take.**
+- 🔴 **`allowed-tools` IS A PRE-APPROVAL, NOT A RESTRICTION** — *"every tool remains callable,
+  and your permission settings still govern tools that are not listed."* So a skill routed to an
+  `Edit`-mandated protocol while declaring only `Write` is not blocked; it is **incentivised
+  toward the unsafe path**, because `Write` runs unprompted and `Edit` falls to normal
+  permissions (this host: `defaultMode: default`, 210 allow entries, **zero** Edit/Write). In a
+  headless or subagent run nobody answers the prompt. **Nothing in devrc read `allowed-tools` at
+  all** until #1170; there is now a guard with a negative control.
+- 🔴 **A GUARD'S FIXTURE CAN MAKE ITS OWN BRANCH UNREACHABLE.**
+  `test_an_UNSET_BUILD_REASON_does_not_abort_the_reporter` existed for exactly the defect a fix
+  round then introduced — a bare `${BUILD_REASON}` under `set -eu` — and could not see it,
+  because its fixture set a phase, so `[ -z "$phase" ] && …` short-circuited before the bare
+  expansion was evaluated. **Ask what the fixture makes UNREACHABLE, not just what it asserts.**
+- 🔴 **A NON-ISOLATED MUTANT PRODUCES FALSE EVIDENCE, AND IT READS AS PROOF.** #1170's claim
+  that its ledger caught a *reworded* fork rested on a mutant whose count could only move if it
+  reproduced the pinned literal **verbatim**. Measured: a genuinely reworded fork passed all 56.
+  **Check mechanically that a mutant reproduces none of the pinned literals** before believing
+  what it kills — a one-command check against literals parsed from the module source.
+- 🔴 **`kubectl delete pod` is NOT a preemption stand-in** — twice, Tekton RECREATED the pod and
+  the TaskRun `Succeeded`. Kill the step process instead; that reproduces the recorded
+  preemption signature (`StepFailed`, step killed).
+- 🔴 **A SKIPPED gate's `$(tasks.gate.reason)` is the EMPTY STRING**, not `PipelineRun was
+  stopping`. Measured on a scratch pipeline whose first task blew its own timeout: the reporter
+  received `status=None reason=<empty>`. Two revisions of a test docstring asserted otherwise —
+  one of them while its own fixture passed `""`.
+- 🔴 **POINT `nix develop` AT YOUR WORKTREE, NEVER A SHARED BASE CLONE.** A base clone carrying
+  another session's modified `nix/pkgs/default.nix` / `flake.nix` yields a DIFFERENT dev shell:
+  20 test files lost PyYAML and the suite reported `tests_ran=655` instead of 1349. It looks
+  like a broken suite, not a wrong shell.
+- ⚠ **A BLOCKED PreToolUse hook EATS THE WHOLE COMMAND, including work that ran BEFORE the
+  blocked part.** A `cat > file <<EOF … EOF` preceding a refused `clawgatectl task create` never
+  wrote the file, so the retry failed with *"the --body-file path could not be read"* and looked
+  like a permissions problem. Write the file with the `Write` tool in its own call.
+- ⚠ **`git … | tail; echo "rc=$?"` REPORTS TAIL'S STATUS.** A `merge --ff-only` that printed
+  `fatal: Not possible to fast-forward` was followed by a cheerful `ff rc=0`. Read the output
+  TEXT, never the piped code. (The refusal itself was correct: the base clone was on another
+  session's branch.)
+- **`gh pr merge --auto` is the honest answer to "merge now" under `enforce_admins: true`** —
+  there is no admin override, and the documented protection-deletion escape hatch does NOT
+  round-trip (`PATCH` 404s; closing the window needs a full `PUT` of the whole object). Not
+  worth it for a docs PR. Arm auto-merge and verify `autoMergeRequest != null` rather than
+  trusting the exit code.
+- **Three of five substantive changes this session had defects only a blind audit or a control
+  run caught** — a `NO CAPACITY` arm asserting a mechanism the code cannot observe, a bare
+  `${BUILD_REASON}` under `set -eu`, and the `allowed-tools` mismatch. **None was visible from a
+  green suite.**
+
+- 🔴 **RANK 11'S ANSWER CAME FROM READING THE REPO, NOT THE CLUSTER — and the ranked item could
+  not have told you that.** The disk measurement was the assigned probe and it was worth
+  running, but the finding that ended the item was a manifest committed **two days after this
+  doc's rank 11 was written**. A ranked item records the world as it was; the mechanism that
+  retires it can land in a sibling repo with no signal here. **Before working an infra item,
+  `git log --since=<doc-date>` the subsystem it names.**
+- 🔴 **A "prerequisite never measured" can be the wrong question rather than an open one.**
+  Rank 11 framed the blocker as an unmeasured quantity. Measuring it was cheap and correct, and
+  the answer that mattered was that the *filesystem the question named did not exist* — the
+  local-path PVs live on `/var`, not on a `disk-1` mount. **Confirm the object of a measurement
+  exists before trusting the number you take against it.**
+- ⚠ **Cairn phase-1 work was scoped and dispatched this session and is recorded in
+  `claudedocs/handoff-cairn-phase3.md`, not here** — that doc owns criteria 8 and 9. Claim
+  `cairn-phase1-migration` is held. Headline for anyone reading this doc first: the plan's
+  "5 overlapping scopes need a merge rule" is a **scope-level** count; at entry level there is
+  exactly **one** collision (`devrc/signal.md`, genuinely diverged), plus two alias collisions
+  one of which the merge itself introduces.
+
 ## How to verify
 ```bash
-# rank 2 landed, BY CONTENT (squash — never ancestry)
-git -C ~/workspace/devrc show origin/main:scripts/testlib/nogit_plugin.py | grep -c held_count
+# rank 7 landed AND is deployed — merged != deployed, both must hold
+git -C ~/workspace/homelab-talos show origin/trunk:clusters/homelab/apps/tekton-pipelines/triggers/devrc-ci-pipeline.yaml | grep -c "NO GATE POD"
+KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get task devrc-ci-report -o yaml | grep -c "NO GATE POD"
+KUBECONFIG=$KC_HOMELAB kubectl get kustomization -n flux-system tekton-triggers -o jsonpath='{.status.lastAppliedRevision}'
 
-# 🔴 GUARD 10 is actually measuring — the dev-host tier ONLY; the nix sandbox is NOT this guard
-nix develop ~/workspace/devrc -c bash ~/workspace/devrc/scripts/gate.sh --tier pytest > /tmp/g.log 2>&1
-grep -cE "unmeasured|lock-contended" /tmp/g.log        # MUST be 0 — this is the failure mode
-grep -E "config-control=" /tmp/g.log | awk '{c="";p="";for(i=1;i<=NF;i++){if($i~/^config-control=/){split($i,a,"=");c=a[2]}if($i~/^plugin=/){split($i,b,"=");p=b[2]}}; print $1, (c==p?"OK":"*** MISMATCH ***")}'
+# rank 8/10 — did #1186 land, and does the guard actually catch a REWORDED fork?
+gh pr view 1186 --repo innovation-upstream/devrc --json state,mergeCommit
+# then, in a cp -a copy with .git REMOVED first, append a conflicting protocol to
+# claude/skills/analyze-service/reference/write-back.md and confirm it goes RED:
+nix develop <worktree> --command python3 -m pytest <copy>/scripts/tests/test_index_append_protocol.py -q -p no:cacheprovider
 
-# the trailer works through the DEPLOYED hook — reproduce the original symptom
-printf 'fix: one line only\n' > /tmp/t1 && ~/workspace/devrc/.git/hooks/prepare-commit-msg /tmp/t1 message
-git interpret-trailers --parse < /tmp/t1     # must print Claude-Session-Id; EMPTY was the bug
+# every ranked item's LIVE state — this doc goes stale under you
+clawgatectl task ls --summary | jq -r '.[] | select([348,362,363,428,429,469,473]|index(.id)) | "cg#\(.id) \(.status)"'
 
-# 🔴 every ranked item's LIVE state — this doc goes stale under you
-clawgatectl task ls --summary | jq -r '.[] | select([348,362,363,364,365,428,429,439,445]|index(.id)) | "cg#\(.id) \(.status)"'
+# the shared queue's lock, before drawing ANY item
+claim-work --list
 ```

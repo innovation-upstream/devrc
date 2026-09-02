@@ -24,14 +24,21 @@ WHAT IS EXERCISED IN BOTH DIRECTIONS, IN-BAND
     near-miss-token watched to be rejected. An auth layer never seen to deny is
     not known to be an auth layer.
   * `TestByteIdentityVerifier` — the phase-1 acceptance comparator run against
-    identical stores (PASS) and against a store differing by ONE character
-    (FAIL, naming the scope). A comparator that always says PASS is
-    indistinguishable from one that works.
+    identical stores (PASS), against identical stores whose entry-file MTIMES
+    are in a different ORDER (PASS — the red it could not pass at all), and
+    against a store differing by ONE character, with and without that shuffle
+    (FAIL, naming the scope and the ref). A comparator that always says PASS is
+    indistinguishable from one that works, and order-independence bought by
+    comparing LESS is the failure mode the shuffled negative control exists to
+    catch.
   * `TestSeedIsNonDestructive` — the tree hasher is shown to CHANGE when the
     source is deliberately modified, before its "unchanged" verdict is believed.
 
 🔴 NO TEST HERE READS THE REAL STORE. `~/.claude/analyze-service-index/` is
-client-confidential, has no off-machine backup, and this repo is PUBLIC. Every
+client-confidential and not re-derivable by re-running recon, and this repo is
+PUBLIC. (Was "has no off-machine backup" — false; daily age-encrypted bundles go
+to MinIO. The reason no test reads the live store is confidentiality, not
+fragility.) Every
 fixture below is synthetic, under `tmp_path`, with names invented for this file
 and pairwise-distinct fields so a renderer that surfaced the wrong section
 cannot pass by coincidence.
@@ -43,6 +50,8 @@ status strings are all spelled again here by hand. Importing them would assert
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterator
 
 import ast
 import errno
@@ -63,9 +72,11 @@ import tarfile
 import secrets
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
@@ -106,6 +117,61 @@ ROOT = Path(__file__).resolve().parents[2]
 #
 # 🔴 This is the SYMPTOM fix. The cause is a 10-minute parallel suite competing
 # with a saturated cluster, which belongs to Tekton capacity, not to this file.
+#
+# 🔴 AND 60 DID NOT HOLD — it recurred 2026-08-31, so do not read the paragraph
+# above as closed. What is new is that the contention is now NAMED and can be
+# reproduced ON THE DEV HOST in ~70 s; see `scripts/ci-repro/`. Two corrections
+# to the framing above, both measured:
+#
+#   * IT IS DISK LATENCY, NOT CPU. On run `devrc-ci-86zxj` (sha 5de43017) this
+#     suite's own classifier printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC …
+#     accept loop parked=True`. `server.py:_replace_bytes` fsyncs the file
+#     (:2012) and the parent dir (_fsync_dir, :1961) INSIDE the request, before
+#     the response is written, and fsync blocks in uninterruptible sleep.
+#     devrc-ci is pinned to ONE node (talos-xr6-r7p). 🔴 The contention set is
+#     the 7 devrc-ci runs, NOT the 12 overlapping pipelineruns: gitops-validate
+#     is pinned to talos-uvh-gtj and the one auditloop run was on
+#     talos-deu-s2q. 🔴 And the stalling fsync lands on NEITHER named volume —
+#     not `nix-store-cache` (/nix) nor the per-run `source` PVC
+#     (/workspace/source), but the step container's EPHEMERAL layer under /tmp,
+#     where the gate sets no TMPDIR and mounts nothing.
+#     ⚠ "give the gate CPU/memory requests" does NOT fix the latency — requests
+#     govern CPU and memory, not IOPS — but it is not useless either: every run
+#     is pinned to one node, so non-zero requests are the standard way to make
+#     excess runs Pending instead of co-scheduled, i.e. a concurrency cap. Do
+#     not read this as "requests are the wrong lever"; read it as "they cap
+#     concurrency, they do not speed up fsync". `computeResources: null` is a
+#     platform-wide default — EVERY taskrun in that namespace declares none,
+#     at every reading; the absolute count drifts — not a devrc oversight.
+#   * SEED/ORDERING IS NOT THE MECHANISM — but mind what proves that. The
+#     REPRODUCER (`scripts/ci-repro/`) shows fsync latency SUFFICES: delaying a
+#     single fsync past this bound reproduces the exact failure, on the
+#     identical test and parametrisation the gate reported (control 8 passed /
+#     4.63 s; with one stalled fsync, 1 failed). Sufficiency is not necessity —
+#     what actually refutes seed/ordering is the CI classifier above, not the
+#     reproducer.
+#   * ⚠ THE 3 FAILURES ON THAT RUN WERE NOT ONE FLAKE. The third was
+#     TestAHungRoundTripSAYSWhichSideBlocked::test_a_stall_in_the_FSYNC_region_
+#     is_NAMED, which failed on its assertion ("the server never reached the stall
+#     site") against `CLIENT_BOUND` (0.25) — NOT against this constant. Both
+#     live in TestAHungRoundTripSAYSWhichSideBlocked; find them by NAME, never
+#     by line — this comment block shifts them every time it is edited, which
+#     already shipped one wrong citation.
+#     So it evidences an fsync exceeding 0.25 s, and the advice below about not
+#     raising HANG_TIMEOUT does not address the bound that actually failed
+#     there. That 0.25/1.2 pair was the same "bound tighter than the thing it
+#     discriminates" shape as commit f4a3d69b.
+#     ✅ FIXED — and the pair is GONE rather than retuned. `SERVER_STALL` no
+#     longer exists and nothing samples `stalled.is_set()`: the caller WAITS for
+#     the stall site to be reached, and the handler is then held by an Event
+#     until the report has been taken. Retuning the two numbers was the obvious
+#     fix and would have been wrong — ANY fixed pair is a bet on the scheduler,
+#     and this one was lost in CI while winning on every dev host. Do not
+#     reintroduce a fixed stall duration here; the guard below pins that.
+#
+# 🔴 Do NOT raise this constant again in response to a recurrence. Read the
+# per-hung-call arithmetic directly below — the bound is not the lever, and the
+# next raise buys a longer outage, not a greener gate.
 #
 # 🔴 THE COST IS PER HUNG CALL, NOT PER SUITE — corrected after audit. The
 # commit that introduced this said "4x longer to fail … still fits" the 45m gate
@@ -162,6 +228,21 @@ assert resolver.classify_path is api.classify_path, (
     "'what IS this path' is the defect the move was made to prevent"
 )
 
+# 🔴 THE SEAM THAT MAKES A POD-SHAPED `host:` LINE REACHABLE IN-PROCESS.
+# `subsystem_recall` does `from subsystem_touch import store_host_line`, and
+# `store_host_line` calls `store_host()` — a lookup in THIS module's globals, by
+# design (`subsystem_touch.store_host`'s docstring: "one injection point makes
+# the reader and the writer agree"). So patching it here moves what the
+# IN-PROCESS server renders while the local CLI, which `run_verify` starts as a
+# SUBPROCESS, keeps this machine's real identity. That asymmetry is precisely
+# the workbench-vs-pod shape, and nothing else in this harness produces it.
+touch = sys.modules["subsystem_touch"]
+assert hasattr(touch, "store_host"), (
+    "subsystem_touch no longer exposes `store_host` — the byte-identity "
+    "verifier's `host:` canonicalisation is tested through this seam, and a "
+    "rename here would silently turn those tests into same-host self-checks"
+)
+
 
 # =============================================================================
 # Synthetic fixtures — realistic SHAPES, invented names, pairwise-distinct text.
@@ -181,6 +262,14 @@ OTHER_NUANCE = "- 2026-01-03: the sidecar drops its lease during a rollout."
 
 # A token that clears the 43-character floor pinned literally below.
 GOOD_TOKEN = "a" * 20 + "B" * 20 + "c" * 8  # 48 chars
+
+# What `store_host()` returns INSIDE THE POD, in shape: the pod name as the
+# label, and `machine-id-unreadable` because a container image carries no
+# `/etc/machine-id` this reader will accept (`host_identity.MACHINE_ID_UNREADABLE`).
+# Synthetic — an invented replicaset/pod suffix, like every other fixture here.
+# 🔴 IT MUST SHARE NO PREFIX WITH THIS MACHINE'S OWN IDENTITY, or a
+# canonicalisation that matched only a prefix would pass by coincidence.
+POD_HOST = "subsystem-store-api-6f4d8c9b7a-qz2wl-machine-id-unreadable"
 
 
 def _entry(
@@ -209,10 +298,113 @@ def _entry(
     return "\n".join(lines)
 
 
+# 🔴 THE STORE FIXTURE IS SITED ON tmpfs WHEN ONE IS USABLE, AND THAT IS A FIX FOR
+# THE GATE FLAKE, NOT A PERFORMANCE TWEAK.
+#
+# `server.py:_replace_bytes` fsyncs the FILE and then the parent DIRECTORY *inside
+# the request, before the response is written*, and fsync blocks in uninterruptible
+# sleep. Under disk contention on the single node `devrc-ci` is pinned to, one such
+# fsync can exceed `HANG_TIMEOUT` and the gate reports a code failure for an I/O
+# stall — on PRs whose diff cannot reach this file at all. Full mechanism, and the
+# on-demand reproducer, in `scripts/ci-repro/README.md`.
+#
+# Raising `HANG_TIMEOUT` is explicitly banned above and does not address the bound.
+# The lever that remains is to remove the DEPENDENCE on disk latency, because these
+# tests are about HTTP and store semantics and assert nothing whatsoever about how
+# long an fsync takes. On tmpfs there is no backing device to contend for, so the
+# stall cannot occur by construction.
+#
+# Measured 2026-09-01 on this host, `_replace_bytes`'s exact sequence (mkstemp →
+# write → fsync file → replace → fsync dir), reporting MAX because HANG_TIMEOUT is
+# breached by a single worst-case call and a mean would hide it:
+#
+#              idle                          under 3 concurrent fsync writers
+#   disk    median 6.562ms  MAX 12.431ms     median 11.725ms  MAX 17.843ms
+#   tmpfs   median 0.017ms  MAX  0.140ms     median  0.011ms  MAX  0.090ms
+#
+# Disk latency doubled under a deliberately modest load; tmpfs did not move. That
+# load was nowhere near CI's, and no 60s stall was reproduced here — the claim is
+# that tmpfs is FLAT under contention, not that this measured the CI event.
+#
+# 🔴 IT FALLS BACK TO `tmp_path`, so it can never make the gate worse than it is
+# today. In the nix build sandbox `TMPDIR` is `/build` on ext2/ext3 while `/dev/shm`
+# is tmpfs and writable (probed). But CI builds UNSANDBOXED — its traceback shows
+# `/tmp/nix-build-…`, not `/build` — so there `/dev/shm` is the container's own
+# mount, which is 64Mi by default and may be absent or read-only. Every one of those
+# cases lands on the fallback and simply restores current behaviour.
+#
+# 🔴 It does NOT weaken `TestAHungRoundTripSAYSWhichSideBlocked`. That class does not
+# depend on the real filesystem being slow: it monkeypatches `_fsync_dir` to stall
+# deliberately, so it exercises the same code path wherever the store lives.
+def _mount_fstype(path: Path) -> str | None:
+    """The filesystem type backing `path`, from /proc/mounts — or None.
+
+    Resolved by LONGEST matching mount point, not by string prefix: `/dev/shm`
+    and `/dev` are both prefixes of a path under the former, and taking the first
+    hit would report `devtmpfs` for a `tmpfs` mount.
+    """
+    try:
+        target = path.resolve()
+        entries = Path("/proc/mounts").read_text().splitlines()
+    except OSError:
+        return None
+    best: tuple[int, str] | None = None
+    for line in entries:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mount_point, fstype = parts[1], parts[2]
+        try:
+            mp = Path(mount_point).resolve()
+        except OSError:
+            continue
+        if target == mp or mp in target.parents:
+            depth = len(mp.parts)
+            if best is None or depth > best[0]:
+                best = (depth, fstype)
+    return None if best is None else best[1]
+
+
+def _tmpfs_dir() -> Path | None:
+    """A writable tmpfs directory for the store, or None to use the disk.
+
+    Three conditions, all required, because each fails independently in a real
+    container: the candidate is a directory, /proc/mounts says the filesystem
+    backing it is `tmpfs`, and an actual write succeeds. 🔴 The PATH is never the
+    test — `/dev/shm` is tmpfs only by convention and a container may mount
+    anything there, so trusting the name would be a guard that passes while the
+    hazard (a disk-backed store) is present in a different spelling.
+    """
+    for candidate in (os.environ.get("DEVRC_TEST_TMPFS"), "/dev/shm"):
+        if not candidate:
+            continue
+        path = Path(candidate)
+        try:
+            if not path.is_dir():
+                continue
+            if _mount_fstype(path) != "tmpfs":
+                continue
+            probe = path / f".devrc-tmpfs-probe-{os.getpid()}"
+            probe.write_bytes(b"probe")
+            probe.unlink()
+        except OSError:
+            continue
+        return path
+    return None
+
+
 @pytest.fixture
-def store(tmp_path: Path) -> Path:
+def store(tmp_path: Path) -> Iterator[Path]:
     """A synthetic store: two populated scopes, one empty, one all-malformed."""
-    root = tmp_path / "store"
+    base = _tmpfs_dir()
+    holder: Path | None = None
+    if base is None:
+        root = tmp_path / "store"
+    else:
+        # tmp_path is auto-cleaned by pytest; a tmpfs directory is not, and tmpfs
+        # is RAM — leaking one per test would hold memory for the whole run.
+        holder = Path(tempfile.mkdtemp(prefix="devrc-store-", dir=str(base)))
+        root = holder / "store"
     (root / SCOPE).mkdir(parents=True)
     (root / OTHER_SCOPE).mkdir(parents=True)
     (root / EMPTY_SCOPE).mkdir(parents=True)
@@ -223,7 +415,13 @@ def store(tmp_path: Path) -> Path:
     )
     # No front matter at all: the loader collects it as MALFORMED.
     (root / BROKEN_SCOPE / "thing-gamma.md").write_text("no front matter here\n")
-    return root
+    try:
+        yield root
+    finally:
+        if holder is not None:
+            # Best-effort: a tmpfs leak costs RAM for the run, but failing the
+            # teardown would turn a passing test red for a cleanup problem.
+            shutil.rmtree(holder, ignore_errors=True)
 
 
 # RFC 5737 TEST-NET-3, and three DISTINCT addresses: a test that used one
@@ -296,6 +494,159 @@ def running(
         thread.join(timeout=10)
 
 
+# 🔴 WHICH SIDE WAS BLOCKED, AND ON WHAT. Ordered innermost-first: the first
+# token found scanning a stuck handler's frames from the innermost outward wins,
+# so `fsync` reached from inside `_replace_bytes` reports as FSYNC and not as the
+# entry lock it is holding on the way in.
+#
+# 🔴 KNOWN DEFECT, MEASURED 2026-09-01, NOT FIXED HERE — THE SCAN MATCHES THE
+# CHECKOUT PATH, BECAUSE `traceback.format_stack` RENDERS EACH FRAME'S FILENAME.
+# These are substring tokens matched against the whole rendered stack, so a clone
+# or worktree whose PATH contains one of them misclassifies EVERY hang, confidently
+# and wrongly — which is worse than no verdict. Reproduced by accident: a worktree
+# named `devrc-fsync` (named after the flake being fixed, which is the likely case)
+# turned `test_a_stall_on_the_ENTRY_LOCK_reads_DIFFERENTLY` red with
+# `MECHANISM = SERVER_BLOCKED_IN_FSYNC`, while the identical tree at
+# `devrc-storetmp` passed. `flock`, `_EntryLock` and `_audit_lock` are exposed the
+# same way.
+# ⚠ The first attempt to CONFIRM that was itself wrong and read as a refutation:
+# after `git worktree move`, a stale `__pycache__` kept the old `co_filename`
+# baked into the code objects, so the renamed tree still rendered the OLD path and
+# still failed. Clearing `__pycache__` (or `PYTHONDONTWRITEBYTECODE=1`) is what
+# made the control honest — the documented mtime+size revalidation trap, hit here
+# in the wild.
+# The fix is to scan the frames' SOURCE LINES rather than their filenames; it is
+# deliberately left out of the change that found it, because this classifier has
+# its own tests and that is its own edit.
+_HUNG_SERVER_RULES: tuple[tuple[str, str], ...] = (
+    ("fsync", "SERVER_BLOCKED_IN_FSYNC"),
+    ("flock", "SERVER_BLOCKED_ON_ENTRY_LOCK"),
+    ("_EntryLock", "SERVER_BLOCKED_ON_ENTRY_LOCK"),
+    ("_audit_lock", "SERVER_BLOCKED_IN_AUDIT_SINK"),
+    ("self.audit(", "SERVER_BLOCKED_IN_AUDIT_SINK"),
+)
+
+
+def _why_the_server_did_not_answer() -> str:
+    """Every live thread's stack, plus a one-line `MECHANISM =` verdict.
+
+    🔴 DIAGNOSTICS, NOT A MITIGATION. Nothing here retries, drains, or moves a
+    bound, and the `TimeoutError` is re-raised unchanged — a test that hung
+    still fails, exactly as loudly. What this adds is the one fact the bare
+    exception cannot carry, and whose absence is why the store-api hang stayed
+    open for weeks: **a client-side read timeout is the observable that the
+    most mechanisms share, so on its own it identifies none of them.**
+
+    The rivals, every one of which surfaces identically as `TimeoutError` at
+    `socket.py:720` (`SocketIO.readinto` -> `recv_into`):
+
+      * **the handler parked in `fsync`.** `server.py:_replace_bytes` issues
+        TWO — the file, then the parent directory — INSIDE the request and
+        BEFORE the response is written. `fsync` blocks in uninterruptible
+        D-state, is bounded by nothing, and burns no CPU, so it is invisible in
+        CPU/PSI-cpu metrics. The handler's `timeout = 15` does NOT bound it:
+        that is a SOCKET timeout and does not reach a syscall.
+      * **the handler parked on the entry `flock`** (also unbounded).
+      * **the handler parked in the audit sink** — `_audit_lock` is a CLASS
+        attribute and therefore process-global across every server in the
+        worker.
+      * **the connection was never ACCEPTED** — accept-queue overflow, or the
+        `serve_forever` thread simply not scheduled. Distinguished from all of
+        the above by there being no handler thread at all.
+
+    The verdict is emitted as a `MECHANISM = ...` line so a CI log can be
+    grepped for it without a human reading the stacks, the same shape the
+    transport investigation in `claudedocs/handoff-cairn-phase3.md` used.
+    """
+    frames = sys._current_frames()
+    main_ident = threading.main_thread().ident
+    handlers: list[tuple[str, list[str]]] = []
+    accept_loop_parked = False
+    report: list[str] = []
+
+    for thread in threading.enumerate():
+        frame = frames.get(thread.ident)
+        if frame is None or thread.ident == main_ident:
+            continue
+        stack = traceback.format_stack(frame)
+        report.append(
+            f"--- thread {thread.name!r} daemon={thread.daemon} ---\n" + "".join(stack)
+        )
+        blob = "".join(stack)
+        # `process_request_thread` is socketserver's per-connection worker, so
+        # its presence is what makes a thread a HANDLER rather than the accept
+        # loop. A thread can be both only if `serve_forever` ran inline, which
+        # `running()` never does.
+        if "process_request_thread" in blob:
+            handlers.append((thread.name, stack))
+        elif "serve_forever" in blob:
+            accept_loop_parked = True
+
+    # 🔴 EVERY handler is classified, not the first one found — and if they
+    # DISAGREE the headline says so instead of picking one. `ThreadingHTTPServer`
+    # runs daemon handler threads that `shutdown()`/`server_close()` do NOT join,
+    # so a thread stuck in an EARLIER test is still alive here and would
+    # otherwise be reported as this request's mechanism. That is not
+    # hypothetical: it happened while writing the tests for this function, and a
+    # confident wrong verdict is worse than none.
+    per_handler: list[str] = []
+    for name, stack in handlers:
+        found = "BLOCKED_ELSEWHERE"
+        for line in reversed(stack):          # innermost frame first
+            hit = next(
+                (m for token, m in _HUNG_SERVER_RULES if token in line), None
+            )
+            if hit:
+                found = hit
+                break
+        per_handler.append(f"{name}={found}")
+
+    distinct = {entry.split("=", 1)[1] for entry in per_handler}
+    if len(distinct) == 1:
+        verdict = distinct.pop()
+    elif len(distinct) > 1:
+        verdict = "AMBIGUOUS(" + ",".join(sorted(distinct)) + ")"
+    elif accept_loop_parked:
+        # No handler exists at all, so the connection was never accepted. That
+        # names the FAMILY — accept-queue overflow or an unscheduled accept loop
+        # — and deliberately does not choose between them; the listening
+        # socket's own queue depth is what separates those two.
+        verdict = "NEVER_ACCEPTED"
+    else:
+        verdict = "NO_SERVER_THREAD_ALIVE"
+
+    return (
+        f"\nMECHANISM = {verdict}   "
+        f"(handler threads={len(handlers)} [{' '.join(per_handler) or '-'}], "
+        f"accept loop parked={accept_loop_parked})\n"
+        + "".join(report)
+    )
+
+
+def _await_no_handler_threads(bound: float = HANG_TIMEOUT) -> int:
+    """Block until no `process_request_thread` is alive. Returns what is left.
+
+    🔴 A TEST THAT DELIBERATELY WEDGES A HANDLER MUST DRAIN IT. Handler threads
+    are daemons and `running()`'s teardown does not join them, so one left
+    parked leaks into every later test in this worker — where
+    `_why_the_server_did_not_answer` will see it and report ITS mechanism for
+    somebody else's hang. Bounded, and the count is returned rather than
+    asserted so the caller decides what a leftover means.
+    """
+    deadline = time.monotonic() + bound
+    while time.monotonic() < deadline:
+        alive = [
+            t for t in threading.enumerate()
+            if "process_request_thread" in t.name
+        ]
+        if not alive:
+            return 0
+        time.sleep(0.02)
+    return len(
+        [t for t in threading.enumerate() if "process_request_thread" in t.name]
+    )
+
+
 def fetch(
     url: str,
     *,
@@ -333,6 +684,30 @@ def fetch(
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers), exc.read()
+    except TimeoutError:
+        # 🔴 RE-RAISED UNCHANGED — this is a report, not a recovery. The dump is
+        # taken HERE, while the server is still blocked, because by the time the
+        # exception reaches the test the `with running(...)` teardown has torn
+        # down the very threads whose stacks answer the question.
+        #
+        # ⚠ `TimeoutError` IS THE READ PHASE, and that is why this clause is
+        # narrow rather than an `except OSError`. `urllib` wraps only
+        # `h.request()`, so a CONNECT-phase timeout arrives as `URLError` and
+        # already names its own phase; letting it past unhandled keeps the two
+        # distinguishable in the log instead of collapsing them into one report.
+        #
+        # 🔴 THE REPORTER MAY NEVER REPLACE THE FAILURE IT DESCRIBES. ~200 call
+        # sites share this helper; if `_why_the_server_did_not_answer` ever
+        # raised, that exception would propagate INSTEAD of the `TimeoutError`
+        # and every hang in the module would report as a defect in the
+        # diagnostic. A best-effort report is worth having; a diagnostic that
+        # can rewrite the diagnosis is not.
+        try:
+            report = _why_the_server_did_not_answer()
+        except Exception as diag_exc:  # noqa: BLE001 — see above
+            report = f"\nMECHANISM = REPORTER_FAILED ({diag_exc!r})\n"
+        print(report, file=sys.stderr, flush=True)
+        raise
 
 
 def _raw_request(host: str, path: str, headers: list[tuple[str, str]]) -> int:
@@ -2443,7 +2818,7 @@ class TestAuditLog:
 
 
 # =============================================================================
-# 10. The seed — 🔴 the local store is the ONLY copy.
+# 10. The seed — 🔴 the local store is AUTHORITATIVE; every other copy lags it.
 # =============================================================================
 
 
@@ -3477,12 +3852,165 @@ def run_verify(*args: str) -> subprocess.CompletedProcess:
     )
 
 
+# 🔴 PINNED LITERALLY, PASS LINES ONLY. The field names are spelled here by hand
+# rather than imported or derived, per this file's header: a rename in the
+# script must break these tests, not be absorbed by them. It is anchored on
+# `PASS` because the accounting identity is a claim about a run the comparator
+# called byte-identical; a FAIL line prints a different field set on purpose.
+#
+# 🔴 `entries=` AND `index-order-lines=` JOINED WHEN THE COMPARATOR STOPPED
+# COMPARING THE MTIME-ORDERED WHOLE-SCOPE DIGEST. The counts are now SUMS over
+# every stream compared for the scope — one scope-level `mode=list` render plus
+# one single-ref render per entry — so `store_root` reads `2 * (1 + entries)`
+# against a pod-shaped remote rather than a flat 2, and the tests below assert
+# that relationship rather than a constant: a per-entry stream that silently
+# skipped the canonicalisation would otherwise be invisible.
+# `index-order-lines` is the diff reduction the row-sorting rule bought,
+# MEASURED (canonicalised diff minus what still differs once sorted), so the
+# accounting identity is now four-term:
+#     raw == store_root + host + block + order
+_EVIDENCE_RE = re.compile(
+    r"^PASS scope=\S+ entries=(?P<entries>\d+) bytes=\d+ "
+    r"raw-diff-lines=(?P<raw>\d+) "
+    r"store-root-lines=(?P<store_root>\d+) "
+    r"host-lines=(?P<host>\d+) "
+    r"snapshot-line=(?P<snapshot>\d+) "
+    r"snapshot-block-lines=(?P<block>\d+) "
+    r"index-order-lines=(?P<order>\d+) "
+    r"accounted-for=(?P<accounted>\d+) ",
+    re.MULTILINE,
+)
+
+
+def _evidence_rows(stdout: str) -> list[dict[str, int]]:
+    """Every PASS line's accounting, as ints."""
+    return [
+        {k: int(v) for k, v in m.groupdict().items()}
+        for m in _EVIDENCE_RE.finditer(stdout)
+    ]
+
+
+def _wider_separator(module):
+    """A `snapshot_freshness` whose prose ends in a newline.
+
+    🔴 IT MODELS A DIFFERENT IMAGE, NOT A BROKEN ONE, AND THE SKEW IS
+    SYNTHETIC. `_serve_report` builds the body as `prose + "\\n\\n" + text`, so
+    a prose carrying its own trailing newline yields banner + TWO blank
+    separators — a three-line transport annotation instead of this tree's two.
+
+    ⚠ NO DEPLOYED IMAGE HAS BEEN SEEN TO EMIT THAT. This fixture exists because
+    the verifier is pointed at a POD, and the pod's `server.py` is whatever was
+    last deployed rather than this checkout: hardcoding the block's length is a
+    bet on those two being the same version, and nothing in the script can check
+    that bet. It is the unobserved case made reachable, not a reproduction of
+    one that happened.
+    """
+    real = module.snapshot_freshness
+
+    def _wrapped(store_root):
+        header, prose = real(store_root)
+        return header, prose + "\n"
+
+    return _wrapped
+
+
 @pytest.fixture
 def token_file(tmp_path: Path) -> Path:
     path = tmp_path / "token"
     path.write_text(GOOD_TOKEN + "\n")
     path.chmod(0o600)
     return path
+
+
+# =============================================================================
+# 🔴 THE ORDERING FIXTURE — the shape the comparator could not pass at all.
+#
+# `subsystem_recall` orders its INDEX newest-first by entry-file mtime, and the
+# transport (`seed.sh`: `rsync -a --delete` into a stage, then `tar` into the
+# pod) does not carry mtime. So two stores holding IDENTICAL BYTES render their
+# index in a different order — measured against the live pod on 2026-09-01,
+# where every scope with more than two entries failed and the `cli` scope's only
+# unaccounted difference was one row's POSITION.
+#
+# FOUR entries, not two: two entries can only be in one of two orders and the
+# fixture would be one coin-flip away from asserting nothing. Names are pairwise
+# distinct and share no prefix, so a comparison that matched on a prefix cannot
+# pass by coincidence.
+# =============================================================================
+
+ORDER_SCOPE = "cable-tray"
+ORDER_REFS = ("clamp-north", "clamp-south", "duct-east", "duct-west")
+# Stamped oldest-first, so the reader's newest-first index is the REVERSE of
+# this. Chosen so the resulting index order differs from the local one in more
+# than one position — the test asserts that rather than trusting it.
+SHUFFLED_ORDER = ("duct-west", "clamp-north", "duct-east", "clamp-south")
+
+
+def _write_ordered_scope(root: Path) -> None:
+    (root / ORDER_SCOPE).mkdir(parents=True)
+    for ref in ORDER_REFS:
+        (root / ORDER_SCOPE / f"{ref}.md").write_text(
+            _entry(ref, ORDER_SCOPE, nuance=f"- 2026-02-11: {ref} seats on a shim.")
+        )
+
+
+def _stamp(root: Path, order) -> None:
+    """Set every entry file's mtime EXPLICITLY, oldest first.
+
+    🔴 NEVER LET WRITE ORDER STAND IN FOR MTIME ORDER. `cp -a` preserves
+    mtimes, a filesystem can stamp two writes inside one clock tick, and the
+    reader breaks a tie on `ref` — so a fixture that merely wrote its files in
+    some sequence would be asserting a property of this machine's clock instead
+    of a property of the store, and would go quietly vacuous on a faster one.
+    100-second gaps make the order a fact of the fixture.
+    """
+    base = time.time() - 100_000
+    for i, ref in enumerate(order):
+        stamp = base + i * 100
+        os.utime(root / ORDER_SCOPE / f"{ref}.md", (stamp, stamp))
+
+
+def _index_refs(root: Path, scope: str = ORDER_SCOPE) -> list[str]:
+    """The refs the reader's own index lists, IN ORDER, for one store.
+
+    Read out of the CLI rather than off the filesystem: the set arm's claim is
+    about what `subsystem_recall` INDEXES, and a `*.md` the loader rejects is a
+    real file that is not indexed and not `--ref`-addressable.
+    """
+    out = subprocess.run(
+        [sys.executable, str(RECALL_PATH), "--store", str(root), "--scope", scope,
+         "--list"],
+        capture_output=True, text=True, timeout=HANG_TIMEOUT,
+    )
+    assert out.returncode <= 3, out.stderr
+    refs: list[str] = []
+    inside = False
+    for line in out.stdout.splitlines():
+        if line.startswith("INDEX ("):
+            inside = True
+            continue
+        if not inside:
+            continue
+        if not line.strip():
+            break
+        if line.startswith("  ("):
+            continue
+        refs.append(line.split()[0])
+    return refs
+
+
+@pytest.fixture
+def shuffled_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """A local store and a served copy: same bytes, different mtime ORDER."""
+    local = tmp_path / "ordered-local"
+    served = tmp_path / "ordered-served"
+    _write_ordered_scope(local)
+    subprocess.run(
+        ["cp", "-a", str(local), str(served)], check=True, capture_output=True
+    )
+    _stamp(local, ORDER_REFS)
+    _stamp(served, SHUFFLED_ORDER)
+    return local, served
 
 
 class TestByteIdentityVerifier:
@@ -3549,6 +4077,245 @@ class TestByteIdentityVerifier:
         assert "verify: scopes=4" in r.stdout
         assert "pass=3 fail=1" in r.stdout
 
+    # ------------------------------------------------------------------
+    # 🔴 THE ORDERING REGRESSION AND ITS THREE CONTROLS.
+    # ------------------------------------------------------------------
+
+    def test_a_MULTI_ENTRY_scope_in_a_DIFFERENT_MTIME_ORDER_still_PASSES(
+        self, shuffled_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE REGRESSION. This is the run that could not pass at all.
+
+        Both stores hold byte-identical entries; only the entry-file MTIMES
+        differ. The reader orders its INDEX newest-first by mtime and picks the
+        digest's one featured BODY the same way, and the transport does not
+        carry mtime — so the old whole-scope `cmp` reported a difference for a
+        store that was identical, on every scope with more than two entries.
+        MEASURED against the live pod on 2026-09-01: `scopes=5 pass=1 fail=4`,
+        the single PASS being the only two-entry scope.
+
+        `claude/RULES.md`: a permanently-red gate is worse than no gate.
+        """
+        local, served = shuffled_pair
+
+        # 🔴 THE FIXTURE'S OWN POSITIVE CONTROL, BEFORE THE COMPARATOR RUNS.
+        # A green below means nothing unless the condition it is about is
+        # actually present: if the two stores happened to render the same
+        # order, this test would pass against the OLD script too and assert
+        # nothing at all.
+        local_order = _index_refs(local)
+        served_order = _index_refs(served)
+        assert len(local_order) == len(ORDER_REFS), (
+            f"the fixture did not produce {len(ORDER_REFS)} indexed entries: "
+            f"{local_order}"
+        )
+        assert local_order != served_order, (
+            f"the fixture produced the SAME index order on both sides "
+            f"({local_order}) — the regression it is about is not reachable"
+        )
+        assert sorted(local_order) == sorted(served_order), (
+            f"the fixture changed the entry SET, not the order: "
+            f"{local_order} vs {served_order}"
+        )
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: scopes=1 pass=1 fail=0 entries-compared=4" in r.stdout
+
+        rows = _evidence_rows(r.stdout)
+        assert len(rows) == 1, f"expected one evidence row:\n{r.stdout}"
+        row = rows[0]
+        # Every entry's bytes were actually compared — a comparator that
+        # skipped the per-entry arm would be green here for the wrong reason.
+        assert row["entries"] == len(ORDER_REFS), (
+            f"the per-entry arm compared {row['entries']} of {len(ORDER_REFS)}: {row}"
+        )
+        # 🔴 AND THE REORDER RULE WAS SPENT. A zero here would mean the two
+        # renders agreed without it, i.e. the fixture's divergence never reached
+        # the comparator and this green is about nothing.
+        assert row["order"] > 0, (
+            f"index-order-lines=0 — the sort accounted for nothing, so the "
+            f"ordering difference never reached the comparison: {row}"
+        )
+        assert row["raw"] == (
+            row["store_root"] + row["host"] + row["block"] + row["order"]
+        ), f"unaccounted differing lines: {row}"
+        assert row["accounted"] == row["raw"], (
+            f"the printed accounted-for does not cover the raw diff: {row}"
+        )
+
+    def test_an_entry_on_ONE_SIDE_ONLY_FAILS_and_NAMES_the_scope_and_the_ref(
+        self, shuffled_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE SET ARM, IN BOTH DIRECTIONS.
+
+        Order-independence must not become a blanket excuse: an entry that
+        exists on one side and not the other is a real difference, and the
+        message has to name WHICH ref so the reader is not left diffing two
+        stores by hand.
+
+        Both directions, because a `comm -23` written without its `-13` mirror
+        is a guard that is half there and reads as whole.
+
+        ⚠ WHAT A FAILURE HERE MEANS DEPENDS ON WHEN IT RAN. After the phase-1
+        cutover the pod is canonical and each host's store is a read-through
+        cache that may legitimately lag — measured 2026-09-01, scope `devrc` at
+        26 entries locally against 29 on the pod, with nothing wrong. This arm
+        is an ACCEPTANCE check immediately after a seed/push, which is where
+        `cairn-cutover.py` P4 runs it. It is deliberately not weakened to
+        tolerate a lagging cache: a check that shrugged at a missing entry
+        could not detect a half-copied seed, which is the one thing P4 exists
+        for.
+        """
+        local, served = shuffled_pair
+
+        # a) an entry the pod has and this host does not.
+        extra = served / ORDER_SCOPE / "duct-north.md"
+        extra.write_text(
+            _entry("duct-north", ORDER_SCOPE, nuance="- 2026-02-12: a fifth run.")
+        )
+        os.utime(extra, (time.time() - 50_000, time.time() - 50_000))
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={ORDER_SCOPE} entry SET differs" in r.stdout
+        assert f"ONLY ON THE POD:   scope={ORDER_SCOPE} ref=duct-north" in r.stdout
+        assert "local-only=0 pod-only=1" in r.stdout
+
+        # b) the mirror: an entry this host has and the pod does not.
+        extra.unlink()
+        (served / ORDER_SCOPE / "duct-east.md").unlink()
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={ORDER_SCOPE} entry SET differs" in r.stdout
+        assert f"ONLY ON THIS HOST: scope={ORDER_SCOPE} ref=duct-east" in r.stdout
+        assert "local-only=1 pod-only=0" in r.stdout
+
+    def test_a_CONTENT_difference_UNDER_a_SHUFFLED_order_is_STILL_caught(
+        self, shuffled_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE CONTROL THAT KEEPS ORDER-INDEPENDENCE FROM BEING AN EXCUSE.
+
+        The same shuffled mtimes as the regression above, PLUS a single changed
+        character inside one entry. A comparator that reached order-independence
+        by comparing less — sorting the whole stream into a multiset, or
+        dropping the per-entry arm — is green here, and that is exactly the
+        failure mode a wider canonicalisation introduces.
+
+        The mutation is inside `## Nuance / work-history`, which the index row
+        does NOT reproduce (the row carries the bullet COUNT, not its text), so
+        the scope-level arm cannot see it: only the per-entry comparison can.
+        """
+        local, served = shuffled_pair
+        path = served / ORDER_SCOPE / "duct-east.md"
+        path.write_text(path.read_text().replace("seats on a shim", "seats on a shin"))
+        # The rewrite stamped `now`; re-stamp so the ordering divergence this
+        # test is about is still present rather than accidentally repaired.
+        _stamp(served, SHUFFLED_ORDER)
+
+        assert _index_refs(local) != _index_refs(served), (
+            "the re-stamp lost the shuffled order, so this is no longer the "
+            "'content difference UNDER a shuffle' case it claims to be"
+        )
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={ORDER_SCOPE} ref=duct-east entry bytes differ" in r.stdout
+        assert "verify: scopes=1 pass=0 fail=1" in r.stdout
+
+    def test_a_difference_VISIBLE_IN_THE_INDEX_ROW_is_reported_AS_ONE(
+        self, shuffled_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE ROW COMPARISON IS LIVE, AND ITS COUNT IS NOT DECORATION.
+
+        Every field on an index row (`ref`, the nuance COUNT, the sensitivity,
+        the `🔴 N OPEN` badge) is derived from the entry body, so the per-entry
+        arm would catch any row difference too — which makes it easy to write a
+        row comparison that observes NOTHING and never be told. It matters for
+        one specific reason: `index-order-lines` is measured as the diff
+        reduction the row SORT bought, so a row comparison wired to a constant
+        zero would fold a GENUINE row difference into the reorder excuse and
+        report it as `accounted-for`.
+
+        MUTATION-VERIFIED: with `rows_diff` pinned to 0 the run still FAILS —
+        the per-entry arm catches the same entry a step later — so `returncode
+        == 1` proves nothing here. The load-bearing assertion is that the
+        difference was seen BY THE ROW COMPARISON and counted as such.
+
+        The served copy's entry gains a second `## Nuance / work-history`
+        bullet, which moves its row's count from `1 nuance` to `2 nuance`.
+        """
+        local, served = shuffled_pair
+        path = served / ORDER_SCOPE / "clamp-north.md"
+        path.write_text(path.read_text() + "- 2026-02-13: and a second bullet.\n")
+        _stamp(served, SHUFFLED_ORDER)
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={ORDER_SCOPE} scope-level render differs" in r.stdout, (
+            f"the index-row difference was not attributed to the index — the "
+            f"row comparison did not fire:\n{r.stdout}"
+        )
+        seen = re.search(r"sorted-row-lines=(\d+)", r.stdout)
+        assert seen, f"the FAIL line printed no sorted-row-lines count:\n{r.stdout}"
+        assert int(seen.group(1)) > 0, (
+            f"sorted-row-lines=0 while the rows genuinely differ — the row "
+            f"comparison is wired to nothing, and the difference would be "
+            f"folded into the index-order excuse:\n{r.stdout}"
+        )
+
+    def test_a_PAGINATED_index_is_REFUSED_rather_than_partially_compared(
+        self, tmp_path: Path, token_file: Path
+    ):
+        """🔴 THE ONE SHAPE THIS COMPARATOR CANNOT ANSWER, SAID OUT LOUD.
+
+        Past `LISTING_PAGE_SIZE` the reader pages its index, and BOTH the page
+        membership and the ref column's width (`max(len(ref) …)` over the
+        entries on THAT page) become functions of the mtime order. Page 1 of two
+        byte-identical stores would then hold different refs padded to different
+        widths, and the refs past page 1 were never read at all — so comparing
+        page 1 would be a partial check reported as a clean one, which is the
+        silent-zero shape this whole file refuses.
+
+        It refuses instead, and the refusal names the scope. No scope in the
+        real store is near the cap today (largest measured: 50 entries), so this
+        is the unobserved case made reachable rather than a reproduction of one
+        that happened.
+        """
+        root = tmp_path / "big"
+        (root / ORDER_SCOPE).mkdir(parents=True)
+        n = api.rc.LISTING_PAGE_SIZE + 1
+        for i in range(n):
+            ref = f"run-{i:04d}"
+            (root / ORDER_SCOPE / f"{ref}.md").write_text(
+                _entry(ref, ORDER_SCOPE, nuance=f"- 2026-02-11: {ref}.")
+            )
+        with running(root) as (base, _):
+            r = run_verify(
+                "--store", str(root), "--url", base, "--token-file", str(token_file)
+            )
+        # 🔴 SAME STORE ON BOTH SIDES — so every other arm would pass, and a
+        # comparator that did not refuse would print a PASS that covered one
+        # page out of two.
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={ORDER_SCOPE} index is PAGINATED" in r.stdout
+        assert "Nothing about this scope was verified." in r.stdout
+        assert "verify: scopes=1 pass=0 fail=1 entries-compared=0" in r.stdout
+
     def test_every_permitted_difference_is_ACCOUNTED_FOR_not_merely_small(
         self, store: Path, tmp_path: Path, token_file: Path
     ):
@@ -3564,15 +4331,25 @@ class TestByteIdentityVerifier:
         comment is a claim too"; a name is louder than a comment.
 
         The replacement is STRONGER than a bumped constant. It asserts the raw
-        difference is FULLY DECOMPOSED by its two named causes:
+        difference is FULLY DECOMPOSED by its named causes:
 
-            raw == store_root_lines + 2 * snapshot_lines
+            raw == store_root_lines + host_lines + snapshot_block_lines
 
-        (the block contributes its prose line AND its blank separator, and both
-        appear one-sided in the diff). An unexplained differing line therefore
-        still fails — which a hardcoded `raw-diff-lines=4` would not, since it
-        would go on passing if a store-root line vanished and some other
-        difference appeared in its place.
+        An unexplained differing line therefore still fails — which a hardcoded
+        `raw-diff-lines=4` would not, since it would go on passing if a
+        store-root line vanished and some other difference appeared in its
+        place.
+
+        🔴 `host_lines` JOINED THE SUM WITH THE `host:` CANONICALISATION, in the
+        same commit, and that ordering is the point: a rule that erases a
+        difference without a matching count widens the blind spot rather than
+        the gate. Here both sides run on this machine, so `host_lines` is 0 and
+        the identity is unchanged from the two-cause version — the case where it
+        is 2 is `test_a_POD_SHAPED_remote_PASSES_when_only_the_THREE_permitted_
+        lines_differ` below, which is where that term is actually exercised.
+        `snapshot_block_lines` replaces `2 * snapshot_lines`: the block's LENGTH
+        is now measured rather than assumed, so a served image whose separator
+        arrangement is not this tree's is still fully accounted for.
         """
         served = tmp_path / "served-elsewhere"
         subprocess.run(
@@ -3584,20 +4361,301 @@ class TestByteIdentityVerifier:
             )
         assert r.returncode == 0, r.stdout + r.stderr
 
-        rows = re.findall(
-            r"raw-diff-lines=(\d+) store-root-lines=(\d+) snapshot-line=(\d+)",
-            r.stdout,
-        )
-        assert rows, f"the verifier printed no evidence triples:\n{r.stdout}"
-        for raw, store_root, snapshot in rows:
-            assert int(raw) == int(store_root) + 2 * int(snapshot), (
-                f"unaccounted differing lines: raw={raw} "
-                f"store-root={store_root} snapshot={snapshot}"
+        rows = _evidence_rows(r.stdout)
+        assert rows, f"the verifier printed no evidence rows:\n{r.stdout}"
+        for row in rows:
+            assert row["raw"] == (
+                row["store_root"] + row["host"] + row["block"] + row["order"]
+            ), f"unaccounted differing lines: {row}"
+            # The script's own arithmetic, read back rather than re-derived —
+            # a printed `accounted-for` that disagreed with its own parts would
+            # be a reader-facing lie even while the identity above held.
+            assert row["accounted"] == (
+                row["store_root"] + row["host"] + row["block"] + row["order"]
+            ), f"the printed accounted-for does not equal its own parts: {row}"
+            # 🔴 EVERY STREAM CARRIED THE CANONICALISATION, not just the first.
+            # The counts are sums over `1 + entries` streams — the scope-level
+            # `mode=list` render plus one single-ref render per entry — so a
+            # per-entry stream that silently skipped a `sed` shows up as a
+            # count that is short of the multiple, which a bare
+            # `store_root > 0` could not see.
+            streams = 1 + row["entries"]
+            assert row["store_root"] == 2 * streams, (
+                f"the store-root rule was not spent on all {streams} streams: {row}"
             )
-        # …and the two causes are each genuinely PRESENT, or the identity above
-        # is satisfiable by a run that compared nothing (0 == 0 + 2*0).
-        assert any(int(s) == 1 for _r, _sr, s in rows), "no snapshot line observed"
-        assert any(int(sr) == 2 for _r, sr, _s in rows), "no store-root line observed"
+            assert row["block"] == 2 * streams, (
+                f"the snapshot block was not stripped from all {streams} remote "
+                f"streams: {row}"
+            )
+            assert row["snapshot"] == streams, (
+                f"the banner was not served on all {streams} streams: {row}"
+            )
+        # …and the causes exercised here are genuinely PRESENT, or the identity
+        # above is satisfiable by a run that compared nothing (0 == 0 + 0 + 0).
+        assert any(row["snapshot"] >= 1 for row in rows), "no snapshot line observed"
+        assert any(row["block"] == 2 for row in rows), (
+            "no snapshot BLOCK observed — this tree's server emits the banner "
+            "plus exactly one blank separator, so a 2 is the expected length "
+            "for the single-stream (zero-entry) scopes"
+        )
+        assert any(row["store_root"] == 2 for row in rows), "no store-root line observed"
+        # 🔴 AND THE PER-ENTRY ARM RAN. Every count above is a sum over
+        # `1 + entries` streams, and `entries == 0` satisfies all of them while
+        # comparing no entry bytes at all — the silent zero this file refuses
+        # everywhere else. Two of the four fixture scopes hold no indexed entry
+        # by design, so this is `any`, not `all`.
+        assert any(row["entries"] > 0 for row in rows), (
+            f"no scope compared a single entry body: {rows}"
+        )
+        # Both sides are this machine, so the host line must be IDENTICAL here.
+        # A non-zero would mean the harness accidentally diverged the two hosts,
+        # which would make the pod-shaped test below prove nothing new.
+        assert all(row["host"] == 0 for row in rows), (
+            f"the local self-check saw a host-line difference: {rows}"
+        )
+
+    def test_a_POD_SHAPED_remote_PASSES_when_only_the_THREE_permitted_lines_differ(
+        self, store: Path, tmp_path: Path, token_file: Path, monkeypatch
+    ):
+        """🔴 THE REGRESSION. This is the run that could not pass at all.
+
+        Every earlier test in this class compares two renders produced ON THE
+        SAME MACHINE, so their `host:` lines are byte-identical and the verifier
+        never had to canonicalise one. Against the actual pod they are different
+        BY CONSTRUCTION — `store_host_line()` names the machine whose disk was
+        read, and that is the entire reason it exists — so the comparator was
+        structurally unable to return anything but FAIL, on every scope, for a
+        store whose content was identical. `claude/RULES.md`: a permanently-red
+        gate is worse than no gate.
+
+        Three differences are set up here and NOTHING else:
+
+          * `store:`  — the served copy lives at a different root;
+          * `host:`   — the server renders a pod identity, the CLI subprocess
+                        this machine's;
+          * the SNAPSHOT block — and deliberately NOT in this tree's shape. The
+            served prose carries an extra separator, so the block is THREE lines
+            rather than two.
+
+        ⚠ THAT THIRD DIFFERENCE IS A SYNTHESISED SKEW, AND ONLY THE FIRST TWO
+        ARE PART OF THE REGRESSION. No deployed image has been seen to emit a
+        three-line block, and the old anchored two-line delete was correct for
+        the arrangement this tree emits — `test_every_permitted_difference_is_
+        ACCOUNTED_FOR_not_merely_small` passes on it before and after. The skew
+        is here because the verifier compares against whatever image is
+        DEPLOYED, not this checkout, so a hardcoded length is an unverifiable
+        bet; measuring it also makes the deletion countable in the accounting,
+        which a fixed-size delete never was.
+
+        The negative control is the next test, not a comment: the same three
+        permitted differences plus ONE mutated character must still FAIL.
+        """
+        served = tmp_path / "served-elsewhere"
+        subprocess.run(
+            ["cp", "-a", str(store), str(served)], check=True, capture_output=True
+        )
+        monkeypatch.setattr(touch, "store_host", lambda: POD_HOST)
+        monkeypatch.setattr(api, "snapshot_freshness", _wider_separator(api))
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: scopes=4 pass=4 fail=0" in r.stdout
+
+        rows = _evidence_rows(r.stdout)
+        assert len(rows) == 4, f"expected one evidence row per scope:\n{r.stdout}"
+        for row in rows:
+            # 🔴 EACH PERMITTED DIFFERENCE PRESENT AND COUNTED, ON EVERY STREAM.
+            # Asserting only the PASS would be satisfied by a canonicalisation
+            # that flattened the whole stream. The multiple is `1 + entries` —
+            # the scope-level `mode=list` render plus one single-ref render per
+            # entry — so a per-entry stream that skipped one of the three rules
+            # fails here rather than passing on the scope-level stream's count.
+            streams = 1 + row["entries"]
+            assert row["store_root"] == 2 * streams, (
+                f"no store-root difference on all {streams} streams: {row}"
+            )
+            assert row["host"] == 2 * streams, (
+                f"no host-line difference on all {streams} streams: {row}"
+            )
+            assert row["block"] == 3 * streams, (
+                f"the served banner + TWO blank separators were not measured "
+                f"as a 3-line block on all {streams} streams: {row}"
+            )
+            assert row["raw"] == (
+                row["store_root"] + row["host"] + row["block"] + row["order"]
+            ), f"unaccounted differing lines: {row}"
+            assert row["accounted"] == row["raw"], (
+                f"the printed accounted-for does not cover the raw diff: {row}"
+            )
+        assert any(row["entries"] > 0 for row in rows), (
+            f"no scope compared a single entry body — the per-entry arm never "
+            f"ran, so the multiples above are all about one stream: {rows}"
+        )
+
+    def test_a_POD_SHAPED_remote_STILL_FAILS_on_a_real_content_difference(
+        self, store: Path, tmp_path: Path, token_file: Path, monkeypatch
+    ):
+        """🔴 The control for the test above. Same three permitted differences,
+        plus a single changed character inside one entry.
+
+        Without this, "the pod-shaped run passes" is equally true of a verifier
+        that stopped comparing anything — which is exactly the failure mode a
+        wider canonicalisation introduces, and the reason the new rules are
+        counted rather than merely applied.
+        """
+        served = tmp_path / "served-elsewhere"
+        subprocess.run(
+            ["cp", "-a", str(store), str(served)], check=True, capture_output=True
+        )
+        path = served / SCOPE / "thing-alpha.md"
+        path.write_text(path.read_text().replace("40s", "41s"))
+
+        monkeypatch.setattr(touch, "store_host", lambda: POD_HOST)
+        monkeypatch.setattr(api, "snapshot_freshness", _wider_separator(api))
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={SCOPE}" in r.stdout
+        # Attributed, not a blanket red: the other scopes differ by the three
+        # permitted lines ONLY and still pass.
+        assert f"PASS scope={OTHER_SCOPE}" in r.stdout
+        assert "pass=3 fail=1" in r.stdout
+
+    def test_LEADING_BLANKS_WITHOUT_the_banner_are_NOT_stripped(
+        self, store: Path, token_file: Path, monkeypatch
+    ):
+        """🔴 THE NARROWING, EXERCISED — not merely asserted in a comment.
+
+        The snapshot block is measured as a run of banner-or-blank lines at the
+        head of the remote stream, and a run that does NOT contain the banner
+        must be left alone: blank lines the server put there for some other
+        reason are a real difference, and a rule that swallowed them would be
+        the "erase a difference it does not claim" failure this whole commit is
+        about.
+
+        Same store on both sides, so `store:` and `host:` are identical and the
+        ONLY difference is two leading blanks. The verifier must FAIL, and its
+        accounting must say `snapshot-block-lines=0` — it stripped nothing, and
+        it says so.
+        """
+        # An image that emits the separator but no banner. `_serve_report` builds
+        # `prose + "\n\n" + text`, so an empty prose is exactly two blank lines.
+        monkeypatch.setattr(api, "snapshot_freshness", lambda root: ("x", ""))
+
+        with running(store) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, (
+            f"two unexplained leading blank lines were swallowed:\n{r.stdout}"
+        )
+        assert "verify: scopes=4 pass=0 fail=4" in r.stdout
+        for line in r.stdout.splitlines():
+            if line.startswith("FAIL scope="):
+                assert "snapshot-block-lines=0" in line, (
+                    f"the block claimed lines it did not earn: {line}"
+                )
+                assert "raw-diff-lines=2 " in line, (
+                    f"expected exactly the two leading blanks to differ: {line}"
+                )
+
+    def test_a_server_that_serves_NO_SNAPSHOT_BLOCK_at_all_still_PASSES(
+        self, store: Path, token_file: Path
+    ):
+        """🔴 THE 0.2.0 PATH. The stamp shipped in 0.3.0; this script has to keep
+        working against an image that predates it.
+
+        The old rule got that for free — a `sed` address that matches nothing
+        deletes nothing. The measured rule does not: it computes a block LENGTH,
+        and `sed '1,0d'` is an ERROR, not a no-op, so an empty block has to be
+        branched on rather than passed through. That branch is the whole reason
+        this test exists; without it the script would exit non-zero on every
+        scope against a pre-0.3.0 pod and the failure would read as a content
+        difference.
+
+        The stub replays the local CLI's own bytes — a server that renders
+        identically and stamps nothing.
+
+        🔴 IT HONOURS `mode` AND `ref`, WHICH IS NOT COSMETIC. The comparator no
+        longer fetches one digest per scope: it asks for `?mode=list` and then
+        `?ref=<name>` per entry. A stub keyed on the path alone would 404 every
+        one of those and this test would pass on the 404 branch, proving nothing
+        about the empty-block path it exists for.
+        """
+        import http.server
+        from urllib.parse import parse_qs, urlsplit
+
+        def render(scope: str, params: dict[str, list[str]]) -> bytes:
+            argv = [sys.executable, str(RECALL_PATH), "--store", str(store),
+                    "--scope", scope]
+            if params.get("ref"):
+                argv += ["--ref", params["ref"][-1]]
+            elif params.get("mode", [""])[-1] == "list":
+                argv += ["--list"]
+            out = subprocess.run(argv, capture_output=True, timeout=HANG_TIMEOUT)
+            # exit 3 is "nothing readable" — a legitimate render, which the
+            # verifier itself tolerates. Anything harder is a broken fixture.
+            assert out.returncode <= 3, out.stderr.decode()
+            return out.stdout
+
+        known = {SCOPE, OTHER_SCOPE, EMPTY_SCOPE, BROKEN_SCOPE}
+
+        class Unstamped(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                split = urlsplit(self.path)
+                scope = split.path.rsplit("/", 1)[-1]
+                if scope not in known:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                body = render(scope, parse_qs(split.query))
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):  # noqa: D102
+                pass
+
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Unstamped)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            r = run_verify(
+                "--store", str(store),
+                "--url", f"http://127.0.0.1:{httpd.server_address[1]}",
+                "--token-file", str(token_file),
+            )
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=10)
+
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: scopes=4 pass=4 fail=0" in r.stdout
+        # 🔴 And the accounting says WHY it is green: nothing differed and
+        # nothing was canonicalised away. A green with a non-zero block here
+        # would mean the strip invented a block to delete.
+        rows = _evidence_rows(r.stdout)
+        assert len(rows) == 4, f"expected one evidence row per scope:\n{r.stdout}"
+        for row in rows:
+            assert {k: v for k, v in row.items() if k != "entries"} == {
+                "raw": 0, "store_root": 0, "host": 0,
+                "snapshot": 0, "block": 0, "order": 0, "accounted": 0,
+            }, f"an unstamped identical render was not a clean zero: {row}"
+        # `entries` is deliberately outside that zero: two of the four fixture
+        # scopes hold indexed entries and their bodies WERE compared, and a run
+        # in which nothing was is the silent zero, not the clean one.
+        assert sum(row["entries"] for row in rows) == 2, (
+            f"the per-entry arm did not compare the two indexed entries: {rows}"
+        )
 
     def test_an_UNREACHABLE_pod_FAILS_rather_than_comparing_nothing(
         self, store: Path, token_file: Path
@@ -5300,6 +6358,27 @@ class TestAuditLogCannotBeForged:
         assert f"token={api.token_id(GOOD_TOKEN)}" in line
 
 
+def _smuggling_verdict(responses: "list[bytes]", what: str) -> str:
+    """Say WHICH WAY a smuggling count was wrong — 0 and 2 are opposite bugs.
+
+    🔴 The same mis-description devrc#1165 was about, in the sibling family.
+    "a GET body was re-parsed as a request" is a sentence about `2`, asserted by
+    a predicate that also fails at `0` — and `0` is what an empty read produces.
+    A reader that returned nothing would have accused the server of smuggling.
+    """
+    if not responses:
+        return (
+            f"NO complete response came back for {what}. The read was EMPTY or "
+            "PARTIAL — the server did not answer, or had not answered yet. "
+            "NOTHING was re-parsed as a request; this is not a smuggling result "
+            "at all, and re-reading it as one is how this flake was misdiagnosed."
+        )
+    return (
+        f"{len(responses)} responses came back for {what} — the body WAS "
+        f"re-parsed as a request on the same connection: {responses!r}"
+    )
+
+
 class TestNoRequestSmuggling:
     """🔴 CRITICAL. The server keeps connections alive and never read request
     bodies, so a body was parsed as the NEXT request on the same socket.
@@ -5311,24 +6390,23 @@ class TestNoRequestSmuggling:
     attacker chose.
     """
 
-    def _raw(self, host: str, payload: bytes, expect: int = 2) -> list[bytes]:
-        """Write raw bytes on ONE socket and read every response that comes back."""
-        import socket
+    def _raw(self, host: str, payload: bytes, expect: int = 1) -> list[bytes]:
+        """Write raw bytes on ONE socket and read every response that comes back.
 
-        host_name, port = host.split(":")
-        with socket.create_connection((host_name, int(port)), timeout=10) as sock:
-            sock.sendall(payload)
-            sock.settimeout(5)
-            chunks = []
-            try:
-                while True:
-                    chunk = sock.recv(65536)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-            except (TimeoutError, OSError):
-                pass
-        return b"".join(chunks).split(b"HTTP/1.1 ")[1:]
+        🔴 `expect` USED TO BE DECLARED AND NEVER READ, which is worse than not
+        having it: the signature advertised "I wait for this many" while the
+        body read until a 5 s timeout and returned whatever had arrived, and
+        every caller took the default without passing anything. A parameter is
+        not a code path. It is now the bound the reader actually waits on.
+
+        Reads through `_raw_exchange` (defined further down, at the desync
+        tests) rather than open-coding a second socket loop — that duplicate is
+        how this family kept the empty-read race after the other one was fixed.
+        Only the SPLIT pieces are returned here, which is the difference that
+        justified two helpers in the first place.
+        """
+        raw, _eof = _raw_exchange(host, payload, expect=expect)
+        return _responses(raw)
 
     def test_a_POST_BODY_is_not_served_as_the_next_request(self, store: Path):
         """The end-to-end property. ⚠ It is defended by BOTH layers, so a sweep
@@ -5353,8 +6431,8 @@ class TestNoRequestSmuggling:
                 f"Content-Length: {len(smuggled)}\r\n\r\n"
             ).encode() + smuggled
             responses = self._raw(host, payload)
-        assert len(responses) == 1, (
-            f"the body was re-parsed as a request: {len(responses)} responses"
+        assert len(responses) == 1, _smuggling_verdict(
+            responses, "a POST whose BODY held a complete second request line"
         )
         assert POINTER_LINE.encode() not in b"".join(responses)
 
@@ -5379,7 +6457,9 @@ class TestNoRequestSmuggling:
                 f"Content-Length: {len(smuggled)}\r\n\r\n"
             ).encode() + smuggled
             responses = self._raw(host, payload)
-        assert len(responses) == 1, "a GET body was re-parsed as a request"
+        assert len(responses) == 1, _smuggling_verdict(
+            responses, "a GET with a BODY on a deliberately kept-alive connection"
+        )
         assert POINTER_LINE.encode() not in b"".join(responses)
 
     def test_POSITIVE_CONTROL_the_raw_harness_CAN_see_two_responses(
@@ -5393,8 +6473,12 @@ class TestNoRequestSmuggling:
             one = (
                 f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n\r\n"
             ).encode()
-            responses = self._raw(host, one + one)
-        assert len(responses) == 2, f"the harness cannot see two: {len(responses)}"
+            responses = self._raw(host, one + one, expect=2)
+        assert len(responses) == 2, (
+            f"the harness cannot see two responses on one connection: "
+            f"{len(responses)} came back ({responses!r}). Every 'exactly 1' "
+            "assertion in this class is vacuous until this passes."
+        )
 
     def test_a_rejected_request_does_not_keep_its_connection(self, store: Path):
         with running(store) as (base, _):
@@ -5404,7 +6488,9 @@ class TestNoRequestSmuggling:
                 f"CF-Connecting-IP: {CLIENT_IP}\r\n\r\n"
             ).encode()
             responses = self._raw(host, bad + bad)
-        assert len(responses) == 1, "a 401 left the connection open for reuse"
+        assert len(responses) == 1, _smuggling_verdict(
+            responses, "two pipelined requests the FIRST of which is a 401"
+        )
         assert b"Connection: close" in responses[0]
 
 
@@ -7097,6 +8183,97 @@ def test_the_drain_guard_catches_the_sweep_it_exists_to_catch():
     blocking = [(ln, a) for ln, a in _drain_bounds(blocking_mutant) if a == "None"]
     assert len(blocking) == 1, (
         f"a `settimeout(None)` drain — block forever — was not detected: {blocking!r}"
+    )
+
+
+def _sampled_event_preconditions(source: "str | None" = None) -> "list[tuple[int, str]]":
+    """Every `assert <event>.is_set()` — a PRECONDITION that samples a race.
+
+    🔴 THE SHAPE, NOT THE SPELLING. `is_set()` is not banned: `await_audit`
+    calls it twice, inside a deadline-bounded polling loop, which is correct and
+    must stay legal. What cannot be legal is using it as the TEST OF AN ASSERT,
+    because that reads a background thread's progress at one instant and fails
+    the build if the thread has not got there yet — a claim about the scheduler
+    wearing the words of a claim about the code.
+
+    That is exactly how `TestAHungRoundTripSAYSWhichSideBlocked` failed in CI on
+    PRs whose diff could not reach it: within `CLIENT_BOUND` (0.25 s) the server
+    had to accept, spawn, parse, authenticate, meter, resolve and read before
+    reaching the stall site. Idle dev host: a few ms, so it passed 5/5 even
+    pinned to one core under 27 CPU hogs. Contended CI node: not always.
+
+    The fix is `.wait(HANG_TIMEOUT)`, which is strictly stronger — it still
+    fails when the site is genuinely never reached (proved by mutation), and it
+    stops failing when the site is merely reached late.
+    """
+    src = source if source is not None else Path(__file__).read_text()
+    bad = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Assert):
+            continue
+        test = node.test
+        if (
+            isinstance(test, ast.Call)
+            and getattr(test.func, "attr", None) == "is_set"
+        ):
+            bad.append((node.lineno, ast.unparse(test)))
+    return bad
+
+
+def test_no_precondition_SAMPLES_an_event_instead_of_WAITING_for_it():
+    """🔴 A precondition that samples a race is a flake with a good error message.
+
+    It blocks every PR exactly as a real defect would, while saying the code is
+    wrong — the most expensive possible failure, because the accusation is
+    specific and false.
+    """
+    sampled = _sampled_event_preconditions()
+    assert not sampled, (
+        f"these assertions SAMPLE an Event instead of waiting on it: {sampled}. "
+        "Use `assert ev.wait(HANG_TIMEOUT)` — it still fails when the event is "
+        "never set, and stops failing when it is merely set late. See "
+        "`_hang_and_report`."
+    )
+
+
+def test_the_sampled_event_DETECTOR_can_actually_see_one():
+    """🔴 The positive control. Without it a clean zero above is
+    indistinguishable from a walk that matches nothing — and this detector is
+    narrow by design (asserts only), so "it found none" is very easy to get for
+    the wrong reason.
+    """
+    src = Path(__file__).read_text()
+    assert _sampled_event_preconditions(src) == [], "fixture drift: one is already present"
+
+    # Re-introduce exactly the form that was removed.
+    #
+    # 🔴 THE ANCHOR IS BUILT BY CONCATENATION, NOT WRITTEN AS ONE LITERAL, and
+    # that is load-bearing rather than style. Spelled whole, this string would
+    # appear TWICE in the file — once here and once in the code it targets — and
+    # `replace(..., 1)` would hit THIS line first. It did: the mutation applied
+    # (so `mutant != src` passed), the guard reported zero, and the test failed
+    # with an empty list while the real code was untouched. Split like this, the
+    # file contains exactly one copy, which the assertion below pins.
+    target = "            armed = stalled" + ".wait(HANG_TIMEOUT)"
+    assert src.count(target) == 1, (
+        f"the anchor is no longer unique ({src.count(target)} copies) — a "
+        "count=1 replace would mutate the wrong one and this control would pass "
+        "while testing nothing"
+    )
+    mutant = src.replace(target, "            assert stalled" + ".is_set()", 1)
+    assert mutant != src, "the mutation did not apply — this test is vacuous"
+    found = _sampled_event_preconditions(mutant)
+    assert len(found) == 1 and found[0][1] == "stalled.is_set()", (
+        f"re-introducing the sampled precondition did not surface it: {found!r}"
+    )
+
+    # 🔴 AND THE NEGATIVE HALF: the legal uses must NOT be flagged, or the guard
+    # is unleaveable and someone will delete it. `await_audit` calls `is_set()`
+    # in a loop and in an assignment; neither is an assert test.
+    assert "closed.is_set()" in src, "fixture drift: await_audit no longer calls is_set"
+    assert not [f for f in _sampled_event_preconditions(src) if "closed" in f[1]], (
+        "the legal polling-loop use of is_set() was flagged — this guard would "
+        "be permanently red and would train people to delete it"
     )
 
 
@@ -13344,7 +14521,60 @@ BULLET_BACKSTOP = "the anchor windlass trips its breaker on a cold morning"
 BULLET_AFTER_PUT = "the chart plotter loses its fix under the bridge"
 
 
-def _raw_exchange(host: str, payload: bytes, *, settle: float = 3.0):
+# 🔴 HOW LONG THE RAW READER LINGERS *AFTER* THE RESPONSES IT WAS TOLD TO EXPECT
+# HAVE ARRIVED, watching for an extra one. This is a DRAIN bound in the sense
+# `test_the_drain_bounds_were_NOT_swept_into_the_hang_bound` means it: it is paid
+# in full by every PASSING run, so it stays small and must never be swept onto
+# `HANG_TIMEOUT`. It is NOT the bound that decides whether the answer arrived —
+# that is the completion wait below, and conflating the two is the defect this
+# constant was extracted to make impossible to re-introduce.
+RAW_SETTLE_S = 3.0
+
+# Poll granularity for the completion wait. Deliberately small: every `settimeout`
+# in this file stays a drain-sized number, and the OVERALL deadline is enforced by
+# the loop re-checking the clock instead of by one long `settimeout`. Written this
+# way on purpose — a single `sock.settimeout(HANG_TIMEOUT)` would be the exact
+# sweep the drain guard forbids, and would also make a passing run pay 60 s.
+RAW_POLL_S = 0.5
+
+
+def _complete_responses(raw: bytes) -> int:
+    """How many FULLY-FRAMED responses `raw` holds.
+
+    🔴 THE POINT IS TO TELL "NOT YET" FROM "NEVER". A byte count cannot: a
+    response that is half-written and a response that will never come look
+    identical from the reader's side, and the whole flake below is what happens
+    when a reader treats the first as the second.
+
+    Framing is exact rather than heuristic because `server.py:_respond` is the
+    ONLY thing that writes a response and it ALWAYS sends `Content-Length`
+    (`/healthz` and the uniform 401 included — `send_error` is overridden to go
+    through `_respond` too). A response whose headers are incomplete, or whose
+    body has not all arrived, counts as NOT complete; so does one with no
+    `Content-Length`, since an unframeable response cannot be known to have
+    ended. ⚠ Assumes no HEAD on a raw socket, which no caller in this file does:
+    a HEAD reply advertises a length it never sends, and would read as forever
+    incomplete.
+    """
+    n, pos = 0, 0
+    while True:
+        head_end = raw.find(b"\r\n\r\n", pos)
+        if head_end < 0:
+            return n
+        head = raw[pos:head_end]
+        match = re.search(rb"\r\ncontent-length:[ \t]*(\d+)", head, re.I)
+        if match is None:
+            return n
+        end = head_end + 4 + int(match.group(1))
+        if len(raw) < end:
+            return n
+        n += 1
+        pos = end
+
+
+def _raw_exchange(
+    host: str, payload: bytes, *, expect: int = 1, settle: float = RAW_SETTLE_S
+):
     """Send `payload` on ONE socket; return `(every byte that came back, saw_eof)`.
 
     🔴 THE RAW SOCKET IS THE ONLY INSTRUMENT THAT CAN SEE THIS DEFECT. `urllib`
@@ -13357,31 +14587,121 @@ def _raw_exchange(host: str, payload: bytes, *, settle: float = 3.0):
 
     Deliberately NOT `TestNoRequestSmuggling._raw`: that one returns only the
     split pieces, and the assertion below needs the UNSPLIT bytes to say
-    "nothing trailed the first response".
+    "nothing trailed the first response". (That helper now delegates HERE for
+    its reading, so there is one reader rather than two that drift.)
+
+    🔴 TWO BOUNDS, AND COLLAPSING THEM INTO ONE IS THE FLAKE (devrc#1165).
+    This helper used to `settimeout(3.0)` and read until that expired, treating
+    the timeout as "the server has finished talking". Under the disk contention
+    PR #1181 measured, a response that takes longer than 3 s to start is
+    ordinary — so the reader returned an EMPTY buffer, no exception was raised
+    anywhere, and the failure surfaced further down as `len(answers) == 0`
+    against a message about a SECOND response. Four CI runs were read as a
+    response-desync defect when the server had simply not answered yet.
+
+      * PHASE 1 — WAIT FOR AN ANSWER. Read until `expect` responses are fully
+        framed, or EOF, bounded by `HANG_TIMEOUT`. Costs nothing on a healthy
+        run (it stops the instant the last byte of the response lands) and
+        raises a message that says HANG when it does give up.
+      * PHASE 2 — THEN LINGER `settle`, which is what actually detects the extra
+        response these tests exist to catch. Unchanged in value and meaning.
+
+    So a slow server is now slow rather than silent, and only a server that
+    never answers fails — with a sentence naming that.
     """
     import socket
 
     name, port = host.split(":")
-    chunks: "list[bytes]" = []
+    buf = b""
     saw_eof = False
     with socket.create_connection((name, int(port)), timeout=10) as sock:
+        # 🔴 SEND UNDER THE CONNECT TIMEOUT, not under the poll slice. Setting
+        # the poll bound first would put a 0.5 s deadline on `sendall`, which is
+        # a send bound nobody asked for and a new flake on a slow write.
         sock.sendall(payload)
-        sock.settimeout(settle)
-        try:
-            while True:
+        sock.settimeout(RAW_POLL_S)
+
+        deadline = time.monotonic() + HANG_TIMEOUT
+        while not saw_eof and _complete_responses(buf) < expect:
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"NO complete response within {HANG_TIMEOUT:g}s: expected "
+                    f"{expect}, framed {_complete_responses(buf)} from "
+                    f"{len(buf)} bytes: {buf!r}. THE SERVER DID NOT ANSWER IN "
+                    "TIME — this is a hang or an I/O stall on the server side, "
+                    "NOT a wrong number of responses. Do not read it as a "
+                    "desync, and do not raise this bound: see HANG_TIMEOUT."
+                )
+            try:
                 chunk = sock.recv(65536)
-                if not chunk:
-                    saw_eof = True
-                    break
-                chunks.append(chunk)
-        except (TimeoutError, OSError):
-            pass
-    return b"".join(chunks), saw_eof
+            except TimeoutError:
+                continue  # poll slice expired; the deadline above is the bound
+            except OSError:
+                break
+            if not chunk:
+                saw_eof = True
+                break
+            buf += chunk
+
+        # 🔴 The extra-response watch. It runs even once `expect` are in hand —
+        # that is the entire point, and shortening it blunts every desync
+        # assertion below without failing any of them.
+        linger_until = time.monotonic() + settle
+        while not saw_eof and time.monotonic() < linger_until:
+            try:
+                chunk = sock.recv(65536)
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            if not chunk:
+                saw_eof = True
+                break
+            buf += chunk
+    return buf, saw_eof
 
 
 def _responses(raw: bytes) -> "list[bytes]":
     """The status lines + everything after them, one per response on the wire."""
     return raw.split(b"HTTP/1.1 ")[1:]
+
+
+def _one_response(raw: bytes, what: str, *, saw_eof: "bool | None" = None) -> "list[bytes]":
+    """Assert `raw` holds EXACTLY ONE response, saying WHICH WAY it was wrong.
+
+    🔴 THE MESSAGE MUST DISCRIMINATE 0 FROM 2, BECAUSE THOSE ARE OPPOSITE BUGS
+    WITH OPPOSITE FIXES (devrc#1165). Every site here used to be spelled
+
+        assert len(answers) == 1, "a SECOND complete response followed ..."
+
+    which is a sentence about `> 1` attached to a predicate that also fails at
+    `0`. In CI it failed at `0` — `raw` was `b''` — and reported a response
+    desync that had not happened. Four runs, three sessions and two wrong
+    diagnoses came out of that one mis-description, so the count is now reported
+    by the branch that actually fired rather than by whichever case the author
+    had in mind.
+
+    `what` names the request under test, so the sentence identifies the site
+    without the reader having to resolve a line number that shifts whenever a
+    comment above it is edited.
+    """
+    answers = _responses(raw)
+    if len(answers) == 1:
+        return answers
+    eof = "" if saw_eof is None else f" (saw_eof={saw_eof})"
+    if not answers:
+        raise AssertionError(
+            f"NO complete response came back for {what}{eof}: {raw!r}. The read "
+            "was EMPTY or PARTIAL — either the request vanished without an "
+            "answer, or the server had not answered yet and the reader stopped "
+            "waiting. THIS IS NOT A SECOND RESPONSE and is not a desync; a "
+            "trailing-response bug reports as 2 below, never as 0."
+        )
+    raise AssertionError(
+        f"{len(answers)} responses came back for {what}{eof} — a SECOND "
+        f"complete response followed the first on ONE connection, which a "
+        f"pooling proxy hands to the next client: {raw!r}"
+    )
 
 
 def _request(host: str, method: str, target: str, body: bytes | None = None) -> bytes:
@@ -13394,6 +14714,162 @@ def _request(host: str, method: str, target: str, body: bytes | None = None) -> 
     if body is None:
         return (head + "\r\n").encode()
     return (head + f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+
+
+class TestTheRawReaderWaitsForTheAnswerItWasPromised:
+    """🔴 THE REGRESSION GUARD FOR devrc#1165 — RED AT THE PARENT COMMIT.
+
+    Unlike almost everything else in this file, these are NOT invariant guards.
+    There was a real defect: `_raw_exchange` read with a single 3 s
+    `settimeout` and treated its expiry as "the server has finished talking",
+    so a server slower than 3 s returned an EMPTY buffer with no exception
+    anywhere. `tekton/devrc-pytests` failed four times on it, on three
+    different test names, and every report named a SECOND response that did not
+    exist.
+
+    Each test below fails at the parent commit, and the matrix is in the PR
+    body. They use a stub TCP server rather than the real one: the property is
+    "the reader waits for a slow answer", which does not depend on what is
+    slow, and pinning it to `server.py`'s fsync would re-pin it to the one
+    cause that happened to be observed.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _slow_server(delay: float, reply: bytes, *, repeat: int = 1):
+        """A socket that accepts, waits `delay`, then writes `reply` `repeat` times."""
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+
+        def serve():
+            try:
+                conn, _addr = srv.accept()
+            except OSError:
+                return
+            with conn:
+                conn.recv(65536)
+                time.sleep(delay)
+                try:
+                    conn.sendall(reply * repeat)
+                except OSError:
+                    # The client gave up and closed — exactly the BrokenPipeError
+                    # the CI failures printed alongside the empty read.
+                    return
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            yield f"127.0.0.1:{srv.getsockname()[1]}"
+        finally:
+            srv.close()
+            thread.join(timeout=10)
+
+    # A complete, correctly framed response — the thing the reader must wait for.
+    _REPLY = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nCache-Control: no-store\r\n\r\nok"
+
+    def test_a_response_SLOWER_than_the_settle_bound_is_still_READ(self):
+        """🔴 THE DEFECT ITSELF. `RAW_SETTLE_S` is 3.0; this server takes longer,
+        which under CI disk contention is ordinary rather than exotic. Before the
+        fix this returned `b''` and the caller reported a phantom second response.
+        """
+        slow = RAW_SETTLE_S + 1.5
+        assert slow > RAW_SETTLE_S, "fixture drift: the delay must exceed the drain"
+        with self._slow_server(slow, self._REPLY) as host:
+            raw, _eof = _raw_exchange(host, b"GET / HTTP/1.1\r\n\r\n", settle=0.2)
+        assert _complete_responses(raw) == 1, (
+            f"the reader gave up before a {slow:g}s answer arrived: {raw!r}"
+        )
+        assert _one_response(raw, "a deliberately slow stub server")[0].startswith(b"200 ")
+
+    def test_the_reader_still_sees_a_SECOND_response_after_waiting(self):
+        """🔴 THE OTHER DIRECTION, and the reason the fix is not just a longer
+        timeout. Waiting for `expect` responses must not stop the reader
+        noticing an EXTRA one — that detection is the entire point of these
+        tests, and a fix that traded it away would pass every assertion above
+        while silently disarming the class.
+        """
+        with self._slow_server(RAW_SETTLE_S + 1.5, self._REPLY, repeat=2) as host:
+            raw, _eof = _raw_exchange(host, b"GET / HTTP/1.1\r\n\r\n")
+        assert _complete_responses(raw) == 2, (
+            f"the trailing response was not observed after the wait: {raw!r}"
+        )
+
+    def test_a_server_that_NEVER_answers_says_HANG_not_response_count(self):
+        """🔴 The bound still exists; only its MESSAGE changed. A reader that
+        waited forever would swap a wrong diagnosis for a hung gate.
+        """
+        # 🔴 HOLDS THE CONNECTION OPEN AND SENDS NOTHING. An earlier draft passed
+        # `delay=0` with an empty reply, which CLOSED the socket immediately —
+        # the reader saw EOF, returned cleanly and the test failed DID-NOT-RAISE.
+        # A stub that hangs up is not a stub that hangs, and only the second one
+        # reaches the deadline arm.
+        with self._slow_server(2.0, b"") as host:
+            with pytest.raises(AssertionError) as excinfo:
+                _raw_exchange_with_bound(host, bound=0.5)
+        message = str(excinfo.value)
+        assert "NO complete response within" in message, message
+        assert "DID NOT ANSWER IN TIME" in message, message
+        # 🔴 The mis-description that started all this must not come back by
+        # another route: a hang is never reported as a response-count defect.
+        assert "SECOND complete response" not in message, message
+
+    def test_an_EMPTY_read_is_reported_as_EMPTY_and_never_as_a_SECOND_response(self):
+        """🔴 THE ASSERTION-SHAPE FIX, pinned as a normalised STRING rather than
+        by keyword. The old sentence was reachable at `len == 0`, and a guard
+        that only greps for a word is walkable by rewording — so this asserts
+        what the reader is actually told.
+        """
+        with pytest.raises(AssertionError) as empty:
+            _one_response(b"", "the CI case", saw_eof=False)
+        said = str(empty.value)
+        assert "NO complete response came back for the CI case" in said, said
+        assert "THIS IS NOT A SECOND RESPONSE" in said, said
+        assert "saw_eof=False" in said, said
+
+        # And the >=2 case still says the thing it was always meant to say.
+        two = self._REPLY * 2
+        with pytest.raises(AssertionError) as extra:
+            _one_response(two, "the desync case")
+        also = str(extra.value)
+        assert "2 responses came back for the desync case" in also, also
+        assert "SECOND complete response followed the first" in also, also
+
+    def test_the_FRAMING_parser_tells_partial_from_complete(self):
+        """🔴 The positive/negative control for `_complete_responses`. Without
+        it, "the reader waited for a complete response" is a claim about a
+        function nobody has watched distinguish anything.
+        """
+        assert _complete_responses(b"") == 0
+        assert _complete_responses(self._REPLY) == 1
+        assert _complete_responses(self._REPLY * 3) == 3
+        # Headers complete, body one byte short — the case a byte-count check
+        # cannot see and the whole reason framing is parsed rather than sniffed.
+        assert _complete_responses(self._REPLY[:-1]) == 0
+        # Headers themselves truncated.
+        assert _complete_responses(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n") == 0
+        # A first complete response followed by a partial second counts as ONE,
+        # so a desync assertion cannot be tripped by a half-arrived trailer.
+        assert _complete_responses(self._REPLY + self._REPLY[:-1]) == 1
+
+
+def _raw_exchange_with_bound(host: str, *, bound: float):
+    """`_raw_exchange` with its completion deadline shortened, for the hang test.
+
+    🔴 A SEPARATE ENTRY POINT rather than a parameter on `_raw_exchange` itself:
+    a `deadline=` argument would be one refactor away from a call site pinning
+    its own bound, which is exactly the drift
+    `test_no_hang_detector_is_still_bound_by_a_LITERAL` exists to stop. Nothing
+    in the suite proper reaches this; it exists so the hang MESSAGE can be
+    asserted without spending `HANG_TIMEOUT` seconds to see it.
+    """
+    global HANG_TIMEOUT
+    previous = HANG_TIMEOUT
+    HANG_TIMEOUT = bound
+    try:
+        return _raw_exchange(host, b"GET / HTTP/1.1\r\n\r\n", settle=0.2)
+    finally:
+        HANG_TIMEOUT = previous
 
 
 class TestTheBackstopNeverSendsASecondResponse:
@@ -13449,10 +14925,8 @@ class TestTheBackstopNeverSendsASecondResponse:
         # round has produced three times: a file nothing wrote to trivially has
         # no second response either. The 200 is a real 200 about a real append.
         assert BULLET_BACKSTOP in nuance_of(path), path.read_text()
-        answers = _responses(raw)
-        assert len(answers) == 1, (
-            "a SECOND complete response followed the 200 on one connection — a "
-            f"pooling proxy hands it to the next client: {raw!r}"
+        answers = _one_response(
+            raw, "a POST whose handler raised AFTER its 200", saw_eof=saw_eof
         )
         assert answers[0].startswith(b"200 "), raw
         assert b"internal error" not in raw, raw
@@ -13477,8 +14951,20 @@ class TestTheBackstopNeverSendsASecondResponse:
         with running(scoped_store, tokens=(ZACH,)) as (base, _):
             host = base.split("//", 1)[1]
             one = f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
-            raw, _eof = _raw_exchange(host, one + one)
-        assert len(_responses(raw)) == 2, f"the reader cannot see two: {raw!r}"
+            raw, _eof = _raw_exchange(host, one + one, expect=2)
+        # 🔴 Spelled as an exact count, NOT `>= 2`: this control is the reason
+        # "exactly one" above is a claim about the SERVER rather than about the
+        # reader, and a floor would keep saying so if the reader started
+        # duplicating. It is also the site that would go red first if the
+        # completion wait ever stopped waiting — `expect=2` makes the reader
+        # hold out for BOTH pipelined answers instead of whatever the drain
+        # happened to catch.
+        assert len(_responses(raw)) == 2, (
+            f"the reader cannot see two responses on one connection: {raw!r}. "
+            "Every 'exactly one response' assertion in this class is worthless "
+            "until this passes — a reader that can only ever see one satisfies "
+            "them all."
+        )
 
     def test_an_exception_BEFORE_the_response_still_yields_ONE_500(
         self, scoped_store: Path, monkeypatch
@@ -13506,8 +14992,7 @@ class TestTheBackstopNeverSendsASecondResponse:
             lines = await_audit(audit, 1)
         monkeypatch.undo()
 
-        answers = _responses(raw)
-        assert len(answers) == 1, raw
+        answers = _one_response(raw, "a POST whose handler raised BEFORE any response")
         assert answers[0].startswith(b"500 "), raw
         assert b"internal error\n" in raw, raw
         assert any("result=500" in ln and "status=internal-error" in ln for ln in lines), lines
@@ -13548,8 +15033,7 @@ class TestTheBackstopNeverSendsASecondResponse:
 
         # The replace LANDED — the assertion that stops this being vacuous.
         assert path.read_bytes() == replacement
-        answers = _responses(raw)
-        assert len(answers) == 1, f"the PUT sent a second response too: {raw!r}"
+        answers = _one_response(raw, "a PUT whose handler raised AFTER its 200")
         assert answers[0].startswith(b"200 "), raw
         assert any(
             "result=500" in ln and "status=internal-error-after-response" in ln
@@ -13583,10 +15067,7 @@ class TestTheREADDispatchIsBackstoppedToo:
             raw, _eof = _raw_exchange(
                 host, _request(host, "GET", f"/api/v1/recall/{ALLOW_SCOPE}")
             )
-            answers = _responses(raw)
-            assert len(answers) == 1, (
-                f"the READ dispatch vanished instead of answering: {raw!r}"
-            )
+            answers = _one_response(raw, "a GET whose read handler raised")
             assert answers[0].startswith(b"500 "), raw
             lines = await_audit(audit, 1)
         monkeypatch.undo()
@@ -13612,8 +15093,7 @@ class TestTheREADDispatchIsBackstoppedToo:
         with running(scoped_store, tokens=(ZACH,)) as (base, audit):
             host = base.split("//", 1)[1]
             raw, _eof = _raw_exchange(host, _request(host, "GET", "/api/v1/snapshot"))
-            answers = _responses(raw)
-            assert len(answers) == 1, raw
+            answers = _one_response(raw, "a GET whose snapshot handler raised")
             assert answers[0].startswith(b"500 "), raw
             lines = await_audit(audit, 1)
         monkeypatch.undo()
@@ -13639,8 +15119,9 @@ class TestTheREADDispatchIsBackstoppedToo:
             lines = await_audit(audit, 2)
         monkeypatch.undo()
 
-        answers = _responses(raw)
-        assert len(answers) == 1, f"the read path sent a second response: {raw!r}"
+        answers = _one_response(
+            raw, "a GET whose recall handler raised AFTER its 200", saw_eof=saw_eof
+        )
         assert answers[0].startswith(b"200 "), raw
         # The recall really was SERVED — the anti-vacuity half. An answer that
         # never rendered the digest would satisfy "exactly one response" too.
@@ -13723,10 +15204,10 @@ class TestTheBackstopSurvivesITSOWNLogSink:
                     body,
                 ),
             )
-            answers = _responses(raw)
-            assert len(answers) == 1, (
-                "the request VANISHED — the backstop's own log write took the "
-                f"answer with it: {raw!r}"
+            answers = _one_response(
+                raw,
+                "a POST whose backstop had to log through a RAISING print_exc "
+                "(the request must not vanish with the log write)",
             )
             assert answers[0].startswith(b"500 "), raw
             lines = await_audit(audit, 1)
@@ -13800,8 +15281,11 @@ class TestTheBackstopSurvivesITSOWNLogSink:
         # and it is also the half that makes the `500` below a TRADE rather than
         # a clean refusal. See the docstring.
         assert BULLET_SINKLESS in nuance_of(path), path.read_text()
-        answers = _responses(raw)
-        assert len(answers) == 1, f"a second response followed the answer: {raw!r}"
+        answers = _one_response(
+            raw,
+            "a POST whose audit sink was gone (EPIPE) and whose print_exc raised",
+            saw_eof=saw_eof,
+        )
         assert answers[0].startswith(b"500 "), (
             "a request whose audit record could not be written was SERVED. With "
             "`_audit` before `_respond` the sink raises before any byte is on "
@@ -13952,10 +15436,10 @@ class TestAnUndecodableEntryNameIsNotTheCallersFault:
             raw, _eof = _raw_exchange(
                 host, _request(host, "GET", f"/api/v1/recall/{ALLOW_SCOPE}")
             )
-            answers = _responses(raw)
-            assert len(answers) == 1, (
-                "the request VANISHED — this arm's own log write took the answer "
-                f"with it, past a SIBLING backstop that never sees it: {raw!r}"
+            answers = _one_response(
+                raw,
+                "a GET on an unreadable store whose own log write raised, past a "
+                "SIBLING backstop that never sees it",
             )
             assert answers[0].startswith(b"503 "), raw
             lines = await_audit(audit, 1)
@@ -15129,3 +16613,285 @@ class TestTheListenBacklogIsDeepEnoughForThisServersOwnConcurrency:
             )
         finally:
             httpd.server_close()
+
+
+class TestAHungRoundTripSAYSWhichSideBlocked:
+    """🔴 THE INSTRUMENT, NOT A FIX — and the distinction is the whole point.
+
+    `test_a_FORGED_actor_in_the_body_is_DISCARDED` failed in CI (`devrc-ci-ddrxx`,
+    revision `857fc3f5`) with a bare `TimeoutError` out of `socket.py:720` and
+    nothing else. Nothing in that traceback says whether the server was blocked,
+    and if so on what — which is why the investigation in
+    `claudedocs/handoff-cairn-phase3.md` ran for weeks against an observable that
+    every candidate mechanism produces identically.
+
+    These tests do NOT make the flake reproduce, do NOT retry and do NOT move a
+    bound. They pin that `_why_the_server_did_not_answer` can TELL THE RIVALS
+    APART, because a classifier that answered `SERVER_BLOCKED_IN_FSYNC` to every
+    hang would be worse than no classifier: it would end the investigation with
+    a confident wrong answer.
+
+    ⚠ LABELLED HONESTLY: these are INVARIANT GUARDS on the reporter, not
+    regression coverage for the flake. The flake has never been made to
+    reproduce, and no test here claims otherwise. Each arm's own evidence is the
+    mutation matrix in the PR body — the arm's rule deleted from
+    `_HUNG_SERVER_RULES` and the test watched to fail with its own message.
+    """
+
+    # 🔴 THE CLIENT BOUND, AND NOTHING ELSE. There is deliberately no
+    # `SERVER_STALL` any more — see `_hang_and_report`. The stall is now held
+    # open by an Event until the report has been taken, so its duration is
+    # DECIDED by this test rather than guessed in advance, and the pair of
+    # bounds that had to be "far apart" no longer has to be anything.
+    CLIENT_BOUND = 0.25
+
+    def _hang_and_report(self, store, monkeypatch, where: str) -> str:
+        """Drive one POST into a server deliberately stuck at `where`.
+
+        Returns the reporter's own text, captured by calling it at the moment
+        the client gives up — the same instant `fetch` calls it in anger.
+        """
+        # 🔴 Every arm starts from a clean thread table. Without this, a handler
+        # wedged by the PREVIOUS arm is still alive and the verdict below is
+        # about that one — the exact mis-attribution these tests exist to
+        # prevent, and the reason the headline reports AMBIGUOUS on disagreement.
+        assert _await_no_handler_threads(HANG_TIMEOUT) == 0, (
+            "a handler thread from an earlier test is still parked, so this "
+            "arm's verdict would not be about this arm's request"
+        )
+        stalled = threading.Event()
+        released = threading.Event()
+
+        def _stall(*_a, **_k):
+            stalled.set()
+            # 🔴 HELD UNTIL THE REPORT HAS BEEN TAKEN, not for a fixed span.
+            # The old form slept `SERVER_STALL` (1.2 s) and the caller sampled
+            # `stalled.is_set()` the instant the client gave up at
+            # `CLIENT_BOUND` (0.25 s) — two independent races against one
+            # unsynchronised handler:
+            #   (a) ARMING: within 250 ms the server had to accept, spawn a
+            #       thread, parse, authenticate, meter, resolve and read before
+            #       reaching this line. Idle dev host: a few ms. Contended CI
+            #       node: not always — and the guard then blamed the CODE for a
+            #       SCHEDULING outcome.
+            #   (b) REPORTING: if the stack walk took longer than the remaining
+            #       sleep, the handler unblocked mid-report and the verdict was
+            #       about a server that was no longer stuck.
+            # Both disappear once the two sides synchronise instead of racing:
+            # the caller WAITS for this line to be reached, and this line waits
+            # for the caller to be done. Bounded so a defect cannot park a
+            # handler forever and wedge the drain below.
+            released.wait(HANG_TIMEOUT)
+
+        if where == "fsync":
+            # 🔴 `_fsync_dir`, not `os.fsync`: patching the stdlib's `os.fsync`
+            # is process-global and would stall any OTHER thread that happened
+            # to fsync during this test. This module-level function is reached
+            # only from `_replace_bytes`, so the blast radius is exactly the
+            # request under test.
+            monkeypatch.setattr(api, "_fsync_dir", _stall)
+        elif where == "entry-lock":
+            class _StallingLock:
+                def __init__(self, _path):
+                    pass
+
+                def __enter__(self):
+                    _stall()
+                    return self
+
+                def __exit__(self, *_exc):
+                    return None
+
+            monkeypatch.setattr(api, "_EntryLock", _StallingLock)
+        else:                                    # pragma: no cover - typo guard
+            raise AssertionError(f"unknown stall site {where!r}")
+
+        with running(store, tokens=(ZACH,)) as (base, _audit):
+            # 🔴 `fetch` DIRECTLY, not `post_bullet`. `post_bullet` forwards
+            # `**payload` into the JSON BODY, so a `timeout=` passed to it is
+            # silently sent to the server as a field instead of bounding the
+            # client — the request then waits the full HANG_TIMEOUT, the stall
+            # elapses, and the test passes while measuring nothing. Cost one
+            # debugging round; do not "simplify" this back.
+            with pytest.raises(TimeoutError):
+                fetch(
+                    bullets_url(base, ALLOW_SCOPE),
+                    token=ZACH_TOKEN,
+                    method="POST",
+                    timeout=self.CLIENT_BOUND,
+                    data=json.dumps(
+                        {"text": BULLET_A, "session": SESSION_A}
+                    ).encode("utf-8"),
+                )
+            # 🔴 WAIT FOR THE ARMING — DO NOT SAMPLE IT. `stalled.is_set()` here
+            # was an instantaneous read of a race the server had no obligation
+            # to have won yet, so a slow-to-schedule handler failed the guard
+            # with "the server never reached the stall site" while the code was
+            # fine. Waiting cannot mask a real regression: if the stall site is
+            # genuinely never reached — the fix stops calling `_fsync_dir`, or
+            # the request is rejected before the write path — this returns False
+            # and the assertion below still fires, just on evidence instead of
+            # on timing. It costs a PASSING run nothing: the event is normally
+            # already set by the time the client has given up.
+            armed = stalled.wait(HANG_TIMEOUT)
+            try:
+                assert armed, (
+                    f"the server never reached the {where!r} stall site within "
+                    f"{HANG_TIMEOUT:g}s, so the hang under test was NOT the one "
+                    "this test set up — the report would be about some other "
+                    "mechanism. This is now a WAITED verdict, not a sampled "
+                    "one, so it is a claim about the SERVER rather than about "
+                    "scheduling: the handler never got to the stall site at all."
+                )
+                return _why_the_server_did_not_answer()
+            finally:
+                # 🔴 RELEASE FIRST, THEN DRAIN — and in `finally`, so a failed
+                # assertion above cannot leave the handler parked for the full
+                # bound and strand the next arm's precondition.
+                released.set()
+                # Drain OUR wedged handler before handing back, so the leak
+                # this arm created cannot be inherited by the next one.
+                _await_no_handler_threads(HANG_TIMEOUT)
+
+    def test_a_stall_in_the_FSYNC_region_is_NAMED(self, scoped_store, monkeypatch):
+        """`_replace_bytes` fsyncs the file AND the parent directory inside the
+        request, before the response is written. Both are unbounded: the
+        handler's `timeout = 15` is a SOCKET timeout and does not reach a
+        syscall."""
+        report = self._hang_and_report(scoped_store, monkeypatch, "fsync")
+        assert "MECHANISM = SERVER_BLOCKED_IN_FSYNC" in report, report
+        assert "_fsync_dir" in report, (
+            "the verdict was right but the stacks do not name the blocking "
+            "frame, so a reader still cannot check the verdict"
+        )
+
+    def test_a_stall_on_the_ENTRY_LOCK_reads_DIFFERENTLY(
+        self, scoped_store, monkeypatch
+    ):
+        """🔴 THE DISCRIMINATION CONTROL. A reporter that said FSYNC to every
+        hang would pass the test above and be worthless. This one hangs the
+        server somewhere ELSE and requires the verdict to MOVE."""
+        report = self._hang_and_report(scoped_store, monkeypatch, "entry-lock")
+        assert "MECHANISM = SERVER_BLOCKED_ON_ENTRY_LOCK" in report, report
+        assert "SERVER_BLOCKED_IN_FSYNC" not in report, (
+            "a hang that is not in fsync was reported as fsync — the verdict "
+            "is a constant, not a measurement"
+        )
+
+    def test_a_request_that_is_NEVER_ACCEPTED_reads_as_NEVER_ACCEPTED(
+        self, scoped_store
+    ):
+        """The rival family the backlog work was about: no handler thread exists
+        at all, because the connection was never accepted.
+
+        Modelled with a real parked `serve_forever` (from `running`) plus a
+        second socket that is listening and never accepted — which is exactly
+        the state an accept-queue overflow leaves the client in.
+        """
+        assert _await_no_handler_threads(HANG_TIMEOUT) == 0, (
+            "a handler thread from an earlier test is still parked — this arm "
+            "asserts there is NO handler, so a leftover would fail it for the "
+            "wrong reason"
+        )
+        with running(scoped_store, tokens=(ZACH,)) as (_base, _audit):
+            with socket.socket() as never:
+                never.bind(("127.0.0.1", 0))
+                never.listen(1)
+                url = f"http://127.0.0.1:{never.getsockname()[1]}/api/v1/status"
+                with pytest.raises(TimeoutError):
+                    fetch(url, token=ZACH_TOKEN, timeout=self.CLIENT_BOUND)
+                report = _why_the_server_did_not_answer()
+        assert "MECHANISM = NEVER_ACCEPTED" in report, report
+        assert "handler threads=0" in report, report
+
+    def test_the_reporter_is_a_REPORT_and_changes_no_OUTCOME(self, scoped_store):
+        """🔴 The property that makes this safe to add to a helper 200+ call
+        sites share: a healthy round-trip is untouched, and a hung one still
+        RAISES. `fetch` swallowing the timeout to print a nice message would be
+        the suppression this investigation is explicitly forbidden to ship."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_B, session=SESSION_B,
+            )
+        assert code == 200, (code, headers)
+        assert headers["X-Store-Status"] == "appended"
+
+
+class TestTheStoreIsSitedOffTheContendedDisk:
+    """The gate flake is fsync latency under disk contention; tmpfs removes it.
+
+    🔴 These pin the SITING, which is the only thing that makes the fix real. A
+    fixture that silently fell back to disk everywhere would leave the suite exactly
+    as flaky while every test still passed — the change would be inert and
+    indistinguishable from a working one, which is the failure mode this class
+    exists to make impossible.
+    """
+
+    def test_the_fstype_is_resolved_by_LONGEST_mount_point_not_by_prefix(self):
+        # /dev/shm is tmpfs while /dev is devtmpfs, and both are prefixes of a
+        # path under the former. A first-match-wins scan reports devtmpfs and the
+        # store then silently lands on the wrong filesystem.
+        if _mount_fstype(Path("/dev")) is None:
+            pytest.skip("no /proc/mounts on this platform")
+        assert _mount_fstype(Path("/dev/shm")) == "tmpfs", (
+            "/dev/shm must resolve to its OWN mount, not to /dev's"
+        )
+
+    def test_a_disk_path_is_NOT_reported_as_tmpfs(self):
+        # The negative control. Without it, a helper hardcoded to return "tmpfs"
+        # would satisfy every other assertion here.
+        fstype = _mount_fstype(Path("/"))
+        assert fstype is not None and fstype != "tmpfs", (
+            f"root filesystem reported as {fstype!r} — if this box really does run "
+            "root on tmpfs the siting logic is untestable here, not wrong"
+        )
+
+    def test_the_candidate_is_rejected_when_it_is_NOT_tmpfs(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # A directory that exists and is writable but is disk-backed must be
+        # refused: the guard is the FILESYSTEM TYPE, never the path's spelling.
+        # This is the case that makes `/dev/shm` being conventionally-tmpfs safe
+        # to rely on — we do not rely on it.
+        monkeypatch.setenv("DEVRC_TEST_TMPFS", str(tmp_path))
+        got = _tmpfs_dir()
+        assert got != tmp_path, (
+            "a disk-backed directory was accepted as tmpfs — the type check is "
+            "not doing the work its docstring claims"
+        )
+
+    def test_an_ABSENT_candidate_falls_back_rather_than_raising(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The CI sandbox may have no usable tmpfs at all. That must degrade to
+        # current behaviour, never fail the suite.
+        missing = tmp_path / "definitely-not-here"
+        monkeypatch.setenv("DEVRC_TEST_TMPFS", str(missing))
+        got = _tmpfs_dir()
+        assert got is None or _mount_fstype(got) == "tmpfs"
+
+    def test_the_store_fixture_ACTUALLY_lands_on_tmpfs_when_one_exists(
+        self, store: Path
+    ):
+        # 🔴 The positive control for the whole change. If `_tmpfs_dir()` finds a
+        # tmpfs, the store MUST be on it — otherwise the fixture fell back and the
+        # fix is inert while this file stays green.
+        available = _tmpfs_dir()
+        if available is None:
+            pytest.skip("no tmpfs available here; the fallback path is exercised")
+        assert _mount_fstype(store) == "tmpfs", (
+            f"store landed on {_mount_fstype(store)!r} while a tmpfs at "
+            f"{available} was available — the fix is inert"
+        )
+
+    def test_the_store_fixture_is_still_a_correct_store_wherever_it_lands(
+        self, store: Path
+    ):
+        # Siting must not change CONTENT. Cheap, and it is what stops the tmpfs
+        # branch quietly producing a different fixture from the disk branch.
+        assert (store / SCOPE / "thing-alpha.md").is_file()
+        assert (store / OTHER_SCOPE / "thing-beta.md").is_file()
+        assert (store / EMPTY_SCOPE).is_dir()
+        assert (store / BROKEN_SCOPE / "thing-gamma.md").read_text().startswith(
+            "no front matter"
+        )

@@ -87,7 +87,8 @@ REJECTED with a warning and the resolved fallback is used instead — see
 `hook_python`, which also explains why it falls back rather than hard-failing.
 
 Registers (APPEND surface):
-  * PostToolUse(Bash): audit-pr-nudge.py, shell-env-nudge.py, search-tool-nudge.py
+  * PostToolUse(Bash): audit-pr-nudge.py, shell-env-nudge.py, search-tool-nudge.py,
+    git-add-provenance-nudge.py
   * UserPromptSubmit / Stop / SubagentStop: claude-notify.py (the turn-finished
     notifier — a best-effort side-effect hook, appended alongside any existing
     Stop/clawgate-stop/tmux hooks).
@@ -230,6 +231,7 @@ MANAGED_HOOK_SCRIPTS = frozenset({
     "clawgate-task-interview-guard.py",
     "clawgate-writeback-guard.py",
     "gh-issue-closing-condition-guard.py",
+    "git-add-provenance-nudge.py",
     "handoff-write-guard.py",
     "next-step-nudge.py",
     "search-tool-nudge.py",
@@ -581,6 +583,12 @@ POST_BASH_CMDS = [
     with_python("~/.claude/hooks/audit-pr-nudge.py"),
     with_python("~/.claude/hooks/shell-env-nudge.py"),
     with_python("~/.claude/hooks/search-tool-nudge.py"),
+    # git-add-provenance: warns when a `git add` staged an untracked file whose
+    # mtime predates the session — another effort's in-flight work swept into the
+    # index. PostToolUse, not a guard_core check: staging is reversible, and in this
+    # repo staging a NEW file is mandatory, so a blocking version would fire on the
+    # deploy path for every new skill, hook and test.
+    with_python("~/.claude/hooks/git-add-provenance-nudge.py"),
     # Not a nudge — INSTRUMENTATION. It injects nothing and blocks nothing; on
     # this event it exists only to capture `tool_response.backgroundTaskId`,
     # which names the output file a backgrounded run writes to and appears on NO

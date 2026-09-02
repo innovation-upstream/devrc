@@ -15,6 +15,18 @@ claim-work "$SLUG" --subject "<the item, in generic words>"   # 0 = yours · 10 
 claim-work --release "$SLUG"                                  # when you finish or abandon it
 ```
 
+🔴 **`--subject` is a NO-OP on a claim you ALREADY HOLD — there is no in-place
+edit.** Re-running `claim-work "$SLUG" --subject "<new text>"` on your own live
+claim prints `✅ THIS IS YOURS — carry on with it. Nothing to do.` at **rc 0** and
+**silently keeps the OLD subject**. Measured 2026-08-31: an item whose premise had
+just been *refuted* went on advertising that refuted premise to every other
+session for the rest of the run, because rc 0 read as "updated". The subject is
+the SOFT signal other sessions scan for a near-duplicate of their item (see the
+EXACT-slug limitation below), so a stale one is worse than a terse one. **To
+correct it: `--release "$SLUG"` then re-claim with the new `--subject`.** That
+briefly opens the slug to a racing claimant — acceptable for a correction, and
+the only route there is.
+
 🔴 **The namespace is GLOBAL — ONE canonical remote, resolved from the script's
 own location, never from the cwd's `origin`.** That is not a detail: the queue is
 global (handoff docs live in devrc while the work happens in other repos), and it
@@ -182,11 +194,73 @@ neither substitutes for the other:
 - **Push the branch the moment you create it**, before doing the work (an empty
   commit is enough) — it is visible to `git ls-remote` the instant it lands.
 
+## 🔴 A LETTERED SUB-RANK SILENTLY LOSES ITS RANK, so the lock cannot tell `8a`…`8d` apart
+
+**Measured 2026-08-31** against `claudedocs/handoff-tmux-webapp.md`, whose rank 8
+carried sub-items `8a`–`8e`:
+
+```
+8   -> tmux-webapp-8      12  -> tmux-webapp-12     13  -> tmux-webapp-13
+8a  -> tmux-webapp        8c  -> tmux-webapp
+```
+
+Every lettered rank collapses to the **bare doc slug** — which is also what a
+whole-doc claim derives — so `8a`, `8b`, `8c`, `8d` and "the tmux-webapp work"
+are **one lock between them**. Claiming `8c` silently takes `8d` as well, and a
+session claiming the doc as a whole collides with all four.
+
+**Mechanism**, `scripts/claim-work.sh:357`:
+
+```sh
+if [ "$#" -gt 0 ] && [[ ${1} =~ ^[0-9]+$ ]]; then SLUG_RANK="$1"; shift; fi
+```
+
+`^[0-9]+$` accepts bare digits only. `8c` fails it, `SLUG_RANK` stays empty,
+`derive_slug` takes its no-rank branch, and the argument is left unshifted to be
+ignored. 🔴 **It is DISCARDED, not rejected** — no warning, exit 0, and a
+well-formed slug on stdout. The comment there shows the intent was to avoid
+swallowing a following *flag*; a lettered rank is neither a digit string nor a
+flag, and falls into the gap between those two cases.
+
+**Why this is the worst possible place for it:** the rank is half a claim's
+identity, and sub-lettering is what a doc does to its *housekeeping* tier — the
+small, parallelisable items most likely to be picked up by two sessions at once.
+The lock is inert exactly where contention is highest.
+
+⚠ **Do not "fix" this by hand-writing a slug** (`claim-work tmux-webapp-8c …`).
+The slug's whole job is that both sessions derive the *same* string from the same
+doc and rank; a hand-typed one is a lock only against someone who typed it
+identically.
+
+### ✅ FIXED 2026-09-01 — the closing condition is met and pinned
+
+`--slug-for <doc> 8c` now returns `<doc>-8c`, distinct from `8d` and from `8`,
+and a following flag is still not swallowed. Measured before the fix on the real
+handoff doc: `8c` and `8d` **both** printed the bare `tmux-webapp`.
+
+Two things beyond the literal condition, because widening the pattern alone
+would have fixed the instance and left the class:
+
+- **An unparseable rank is now a USAGE ERROR (rc 2), not a silent drop.** The
+  hazard was never the spelling `8c` — it was a rank the caller typed and the
+  script ignored at exit 0. `8-c`, `8.1` and `part2` would each still have
+  derived the bare doc slug under a merely-wider regex.
+- **The rank is case-folded**, for the reason the base already is: `8C` and `8c`
+  are one item, and `validate_slug` is lowercase-only, so an unfolded `8C` would
+  not merely split the namespace — it would be rc 2 at claim time.
+
+Pinned by `scripts/tests/test_claim_work.py`; seven of the eight cases were
+watched RED on the pre-change `origin/main`, and the eighth is labelled in place
+as an invariant guard rather than counted as regression coverage.
+
 ## Producing side
 
 When writing an item into `## Next steps (ranked)`, make "is this already taken?"
 cheap to answer: name the repo and the files it will touch, and mark anything
 already in progress as `IN FLIGHT: <repo>#<pr>` or `BRANCH: <name>`.
+
+🔴 **And prefer plain integers for ranks while the defect above is open** — a
+sub-lettered item is unclaimable in its own right.
 
 🔴 **NEVER write a status marker from an INFERRED human action.** A marker asserts
 somebody DID something, and a queue item is the one place where being wrong about

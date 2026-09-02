@@ -33,8 +33,15 @@ Both skills were correct on their own terms:
   ends with "Then wait for direction", and says that creating index entries is
   "`/handoff`'s confirm-gated job at the end of a session, not this step's."
   It followed all of that.
-* **`/handoff`** gates its **index** write: "Write only on explicit confirm,
-  diff first… on decline, discard", and the step blocks on a y/N.
+* **`/handoff`** gated its **index** write: "Write only on explicit confirm,
+  diff first… on decline, discard", and the step blocked on a y/N.
+  ⚠ **Past tense on purpose — that prompt no longer exists.** It was retired at
+  the index write 2026-08-15, at step 5 on 2026-08-23, and at the last remaining
+  door (`/analyze-service`'s) on 2026-08-31, all by operator decision on the same
+  evidence: the answer was always `y`. **The argument in this document is
+  unaffected** — what it turns on is that the write was SPECIFIED somewhere, not
+  that a human typed a letter, and both writes still show a diff first and are
+  still declinable on content.
 
 What nothing covered: the handoff **doc's own** write+push, and the behaviour of
 the session that runs *after* a resume — which inherits no constraint at all. It
@@ -124,8 +131,21 @@ collapsing by date:  remix-session x8 (homelab-talos)
 ```
 
 Every one is the same effort wearing a new filename. So a dated topic is refused
-with **no bypass** — under a one-doc-per-effort rule a date in the slug has no
-legitimate use, and a bypass would be taken every time.
+with **no flag bypass** — under a one-doc-per-effort rule a date in the slug has
+no legitimate use, and a flag would be taken every time.
+
+🔴 **"No bypass" was too strong, and the sentence is now scoped to what the code
+does** (devrc#964 item 2). No FLAG bypasses rule (i-a); a **SPELLING** still
+does. What `_TOPIC_DATE` catches is the ISO date hyphenated (`2026-08-01`) or
+compact (`20260801`, the `date +%Y%m%d` form an agent reaches for). What it
+knowingly does **not** catch, each pinned by a named test so the gap is a
+recorded decision rather than an accident:
+
+| spelling | why it is left | backstop |
+|---|---|---|
+| `q3-2026-cleanup`, `remix-2026-07-session` — a bare YEAR | the bare-year arm was **deleted 2026-08-31** on an operator decision: across 147 real handoff docs it had **zero hits in both directions**, while refusing `rfc-1918-addressing`, `rsa-2048-keys`, `cve-2024-3094-xz` and seven more, handing back unreadable slugs (`rfc--addressing`) with no flag to say "that is a number" | rule (i-b) |
+| `remix-1756339200` — an epoch | a 10-digit arm buys one spelling and re-opens the false-positive surface just closed | rule (i-b) |
+| `26-08-01-remix` — a 2-digit year | same trade: `\d{2}-\d{2}-\d{2}` eats ordinary numbers | rule (i-b) |
 
 The second arm cannot be made crisp and is not pretended to be. Whether
 `remix-session` and `remix-hardening-session` are one effort is a judgement, and
@@ -150,11 +170,27 @@ to type `incident` falsely, moving the population underground where nothing can
 measure it. Measured baseline for that population: of **384 ranked items across
 83 docs**, only **89 (23%)** cite a PR, issue or `IN FLIGHT` marker of any kind.
 
-🔴 **Two things this does NOT do.** It cannot check that a cited forcing function
-is real or genuinely external — the enumeration is structural, the evidence
-beside it is prose. And the *"does not get worked"* half is **not enforced**:
-this module writes the doc, it does not consume the queue. The skip belongs in
-`/resume` step 6 and `claim-work`, and is not implemented.
+🔴 **Three things this does NOT do.** It cannot check that a cited forcing
+function is real or genuinely external — the enumeration is structural, the
+evidence beside it is prose. The *"does not get worked"* half is **not
+enforced**: this module writes the doc, it does not consume the queue. The skip
+belongs in `/resume` step 6 and `claim-work`, and is not implemented.
+
+And 🔴 **rule (j) only gates a section headed `Next steps`** — the spelling the
+template mandates. Cosmetic variants of that heading ARE covered (case,
+repeated whitespace, and leading ornament, so `▶ Next steps (ranked)` counts);
+a **REWORDING** is not. MEASURED across the 147-doc corpus: 20 sections
+carrying **96 items** read to a human as the ranked queue and are exempt —
+`Ranked next steps`, `Open items, ranked`, `Backlog — the highest-ROI UNBUILT
+items (ranked)`, `Resume next session`, `Next session — priority order`, and 15
+more. Chasing those by synonym is refused for the same reason the forcing
+vocabulary is an allowlist: a guard on WORDS is walkable by rewording, and a
+synonym list makes rule (j)'s coverage unpredictable at the moment a session is
+trying to obey it. **Head the section `## Next steps` and it is gated; head it
+anything else and it is not.** Pinned by
+`TestTheNextStepsSelectorHasOneOwner`, whose non-goal rows are green in both
+directions so a later widening has to argue with a test rather than slip past
+one.
 
 ### An item is a BLOCK, and the refusal diagnoses instead of assuming absence
 
@@ -327,3 +363,91 @@ question to be answered before any diff is computed, and an answer that means
 prompt. Because that answer comes from the caller, there is a second guard that
 does not depend on it: a merge whose result equals what is already on disk exits
 `no-change` rather than making an empty commit.
+
+## §D — rule (k): an elimination names HOW it was eliminated (2026-08-30)
+
+`status=unevidenced`, exit **10**. A `Ruled out:` bullet in the update must
+carry `via: <kind>` — `command`, `measurement`, `code`, `change`, `doc`, or the
+honest opt-out `assumed`.
+
+### The incident
+
+An opencode session running a weaker model wrote this into a handoff's
+open-investigations block:
+
+```
+- **Ruled out:** Not a per-DIMM issue (all 4 identical)
+```
+
+It had run `inxi -CmG` and `inxi -dm`. **Neither prints a part number.** The
+sentence was an elimination its own data could not support, and it was false —
+one flag away (`inxi -max`) sat two different part numbers from two different
+kits, which killed the theory the doc then ranked **first**, with a ⚠ and "free
+performance sitting on the table". That rank-1 instruction was to reboot a
+26-day-uptime workstation into its BIOS.
+
+Nothing in the session was incompetent. It navigated the repo cleanly, checked
+package availability properly, tested under `nix-shell` before installing, and
+correctly diagnosed a dispatch failure from a log tail. What it could not do was
+separate *what it measured* from *what was merely consistent with what it
+measured* — and an elimination is where that gap does the most damage, because
+it is the claim a later session trusts most and re-checks least. `/resume`
+already warns that a mid-diagnosis block "reads as current forever"; this is the
+same hazard one level down, at the individual bullet.
+
+### Why a closed vocabulary and not a content check
+
+The obvious gate is to require the bullet to *look* evidenced — cite a backtick,
+a number, a `file:line`. Measured against the bullet above, **every cheap
+heuristic accepts it**: it contains a digit, it is fluent, it is the same length
+as bullets that do cite evidence. Nothing in its text separates it from a real
+elimination, because what it lacks is not a word but a measurement.
+`claude/RULES.md` names this directly — "a guard on WORDS is walkable by
+REWORDING". So the author declares the KIND instead, from an allowlist. A
+blocklist of weasel phrases would be defeated by any synonym; an allowlist you
+must pick from cannot be, because a kind outside the set is refused by default.
+
+There is deliberately no `obvious`, `known`, `checked`, `verified` or `tested`.
+Those are what an unmeasured elimination reaches for, and their absence is what
+forces such a bullet onto `assumed`.
+
+### Why `assumed` is accepted
+
+Same argument as `forcing: none`, and it is not a softening. Refusing it would
+not stop anyone reasoning their way to an elimination — it would teach them to
+type `command` falsely, which moves the population underground and destroys the
+signal. The failure was never that the session reasoned rather than measured; it
+was that the doc did not **say so**, so a later reader could not tell the two
+apart. `via: assumed` lands, and it is counted in an advisory above the diff.
+
+The gate cannot tell a true elimination from a false one and does not try. It
+makes the provenance mandatory and greppable — nothing more.
+
+### Two things that make it not a permanently-red gate
+
+1. **It reads the UPDATE, never the merged doc.** `open investigations` is an
+   APPEND heading, so the merged doc accumulates every elimination any session
+   ever wrote — **151 of them across 47 of this repo's 93 docs** (measured 2026-09-01; the corpus grows, so this is a dated figure), none of which
+   can now be edited to add a field. Checking the merge would refuse on run one,
+   forever, which `claude/RULES.md` calls worse than no gate. Rule (j) reads the
+   update for a related but weaker reason; here it is the whole design.
+2. **The marker needs no punctuation.** The first version demanded a separator
+   straight after `Ruled out` and MISSED nine real bullets, every one the same
+   shape: a qualifier before the colon — `**Ruled out as writers:**`,
+   `**Ruled out (structurally):**`, `**Ruled out, and still true:**`,
+   `**Ruled out** (do NOT re-run these):`. Nine is a house style, not noise, and
+   a gate blind to it is escaped by typing `Ruled out (obviously):`. So the
+   marker alone opens the bullet and the rest of the line is the claim.
+
+### Controls
+
+A pattern that matches nothing is indistinguishable from a gate that passes, so
+both directions are pinned. **Positive:** the committed corpus yields ≥90
+elimination bullets (measured 2026-09-01: 151) — if the house style drifts, the floor
+fails rather than the gate silently going quiet. **False-positive:** `via:`
+followed by a member of the vocabulary occurs **0 times** across the corpus
+outside a deliberate tag. That is also why the key is `via` and not the more
+self-documenting `evidence`: `evidence: the ACCESS_DENIED is positive evidence
+it is NOT` is a real shape here, and against it the kind group captures `the`,
+refusing a bullet whose author *did* cite a measurement. `via` needs a colon
+immediately after it, and prose writes `via the`, never `via:`.

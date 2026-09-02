@@ -153,7 +153,14 @@ failing() {
   fi
   # Parametrised ids are `name[param]`; the class stops at `[`, which collapses
   # every case of one test onto its base name — what `want` is spelled as.
-  sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\)::\([A-Za-z0-9_]*\).*/\2/p;s/^FAILED [^:]*::\([A-Za-z0-9_]*\)$/\1/p' <<<"$out" | sort -u
+  # 🔴 THREE PATTERNS, AND THE THIRD IS A FIX. The first two are class::method
+  # and a BARE module-level test — the second END-ANCHORED, so a module-level
+  # PARAMETRISED test (`name[param]`) matched NEITHER: no second `::` for the
+  # first, and `[param]` after the name for the second. Such a failure was
+  # therefore invisible, and its mutant scored SURVIVED. MEASURED 2026-08-31 on
+  # `leading-decoration-rejected`: the harness said SURVIVED while running the
+  # killing test by hand failed 3 of its 4 cases.
+  sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\)::\([A-Za-z0-9_]*\).*/\2/p;s/^FAILED [^:]*::\([A-Za-z0-9_]*\)$/\1/p;s/^FAILED [^:]*::\([A-Za-z0-9_]*\)\[.*/\1/p' <<<"$out" | sort -u
 }
 
 # 🔴 ONE IMPLEMENTATION, TWO TARGETS. `run` mutates the module, `run_skill` the
@@ -216,20 +223,40 @@ printf '\n== rule (i-a): a dated topic is a PER-SESSION doc (must be KILLED) ==\
 # The guard deleted outright: the predicate can no longer say yes to anything.
 run 'date-predicate-always-none' test_every_dated_spelling_in_the_corpus_is_refused \
   's|return m.group(0) if m else None|return None|'
-# ONE ARM of the pattern, not the whole thing — `q3-2026-cleanup` is a real
-# corpus spelling and the ISO arms alone are blind to it.
-run 'date-bare-year-arm-removed' test_every_dated_spelling_in_the_corpus_is_refused \
-  's/|(?<!\\d)(?:19|20)\\d{2}(?!\\d)//'
-# ⚠ A `date-year-month-arm-removed` row sat here and SURVIVED — correctly. The
-# arm was redundant with the bare-year one (both refuse `remix-2026-07-session`,
-# differing only in the token quoted), so no test could tell it apart. The arm
-# was DELETED rather than the row being marked SURVIVES_BY_DESIGN: a branch no
-# test can reach is not a documented redundancy, it is dead code.
+# ⚠ RE-ANCHORED, AND ITS SUBJECT CHANGED. A `date-bare-year-arm-removed` row sat
+# here anchored on `|(?<!\d)(?:19|20)\d{2}(?!\d)`. That arm was DELETED
+# 2026-08-31 (#964 item 1), so the sed now matches nothing and the row reported
+# `MUTATION DID NOT APPLY` — the harness's own `cmp -s` control is what made that
+# loud rather than a flattering SURVIVED. It is replaced by the row below, which
+# names the arm that took its place.
+#
+# ⚠ A `date-year-month-arm-removed` row also sat here and SURVIVED — correctly.
+# The arm was redundant with the bare-year one, so no test could tell it apart,
+# and it was DELETED rather than marked SURVIVES_BY_DESIGN: a branch no test can
+# reach is not a documented redundancy, it is dead code.
+#
+# ONE ARM of the pattern, not the whole thing — the COMPACT `20260801` spelling
+# is what `date +%Y%m%d` produces, and the hyphenated arm alone is blind to it.
+run 'date-compact-arm-removed' test_every_dated_spelling_in_the_corpus_is_refused \
+  's/|(?<!\\d)(?:19|20)\\d{6}(?!\\d)//'
+# 🔴 THE ARM'S OWN WIDTH, ISOLATED FROM ITS EXISTENCE. `\d{6}` -> `\d{2}` puts
+# the DELETED bare-year arm back under a new spelling, so the ten
+# `test_ordinary_numbers_in_a_slug_are_not_dates` hazards start refusing again.
+# Without this row the deletion is pinned only by the absence of a line, which a
+# rewrite can undo without any test noticing.
+run 'compact-arm-widened-back-to-a-bare-year' test_ordinary_numbers_in_a_slug_are_not_dates \
+  's@(?:19|20)\\d{6}(?!\\d)@(?:19|20)\\d{2}(?!\\d)@'
 # The OVER-BROAD direction. Without a row here, a pattern that ate `h2-planning`
 # and `s3-403-triage` would sweep clean — the narrowness assertion would never
 # have been shown reachable.
 run 'date-pattern-eats-any-digits' test_ordinary_numbers_in_a_slug_are_not_dates \
   's|_TOPIC_DATE = re.compile(r"[^"]*")|_TOPIC_DATE = re.compile(r"\\d")|'
+# 🔴 THE COST SIDE, PINNED. The deletion is an operator DECISION, so the tests
+# that record what it costs must themselves be reachable: put the bare-year arm
+# back and `test_a_year_only_slug_is_a_KNOWN_gap` must go red. A "known gap"
+# nothing can falsify is a comment, not a guard.
+run 'bare-year-arm-restored' test_a_year_only_slug_is_a_KNOWN_gap \
+  's@_TOPIC_DATE = re.compile(r"@_TOPIC_DATE = re.compile(r"(?<!\\d)(?:19|20)\\d{2}(?!\\d)|@'
 
 printf '\n== rule (i-b): a second doc for an existing effort (must be KILLED) ==\n'
 # 🔴 THE TWO HALVES OF THE CONDITION GET SEPARATE ROWS. Mutating both together
@@ -253,6 +280,37 @@ run 'stale-clone-treated-as-new-effort' test_a_STALE_BASE_in_a_REALISTIC_repo_is
 # existing doc is a block with no way past it but the flag.
 run 'existing-docs-list-suppressed' test_a_new_topic_is_refused_and_lists_what_exists \
   's|^    docs = (repo / "claudedocs").glob("handoff-\*.md")|    docs = []|'
+# 🔴 THE MAINLINE HALF OF THE LIST — #964 item 4. The working-tree glob above and
+# this are DIFFERENT sources, so they get different rows: a clone that is behind
+# is offered docs it does not have, and suppressing only one of the two still
+# leaves the refusal looking complete.
+run 'mainline-docs-never-listed' test_a_doc_only_the_MAINLINE_has_is_listed_and_labelled \
+  's|name for name in mainline_handoff_docs(repo, currency.base_ref)|name for name in []|'
+# The LABEL, isolated from the list. An upstream-only doc offered WITHOUT saying
+# so reads as "you have this" — and the session then re-runs with a topic whose
+# file is not in its tree.
+run 'mainline-only-rows-not-labelled' test_a_doc_only_the_MAINLINE_has_is_listed_and_labelled \
+  's|f"    {name}" + (f"    (on {ref} only)" if name in upstream_set else "")|f"    {name}"|'
+# 🔴 THE SENTENCE, which is the half that made the list read as complete. A count
+# of one CHECKOUT'S glob described as "this repo" is a claim wider than the code.
+# ⚠ THE ANCHOR CARRIES THE MESSAGE'S OWN LEADING SPACES. A first version dropped
+# the two spaces after `f"` and reported `MUTATION DID NOT APPLY` — caught by the
+# harness's `cmp -s` control, which is the only reason it was not scored `ok`.
+run 'count-claims-the-whole-repo' test_the_count_says_WORKING_TREE_not_repo \
+  's|f"  {relpath} does not exist, and this WORKING TREE already has "|f"  {relpath} does not exist, and this repo already has "|'
+# The elision's escape hatch, ONE ROW PER SOURCE — the two lists come from
+# different places and no single command enumerates the union, so a message that
+# names only one of them is wrong for half the callers. Showing 12 of 92 with no
+# way to see the rest is the amplifier that turns the cap into a dead end.
+run 'elision-omits-the-LOCAL-enumeration' \
+  test_an_ELIDING_list_says_how_to_see_the_rest \
+  's@`ls {repo}/claudedocs/@`stat {repo}/claudedocs/@'
+# The MAINLINE half, isolated: keep the local command, drop the ref one. A stale
+# clone is then told to `ls` a tree that does not have the doc it is being sent
+# to find.
+run 'elision-omits-the-MAINLINE-source' \
+  test_an_ELIDING_list_says_how_to_see_the_rest \
+  's@f" lists {ref}'"'"'s" if upstream else ""@f" lists {ref}'"'"'s" if False else ""@'
 
 printf '\n== rule (j): a ranked item names a forcing function (must be KILLED) ==\n'
 run 'unforced-refusal-never-fires' test_an_untagged_item_is_refused_and_writes_nothing \
@@ -274,9 +332,49 @@ run 'external-set-includes-none' test_none_is_in_the_vocabulary_but_not_in_the_e
 # rather than scoring the stale row `ok` against an unmutated file.
 run 'ranked-items-not-fence-aware' test_a_numbered_line_inside_a_FENCE_is_not_a_ranked_item \
   's|visible = {idx for idx, _ln in _unfenced(section_body)}|visible = set(range(len(all_lines)))|'
+# ⚠ RE-ANCHORED. #964 item 3 replaced this call site's open-coded
+# `heading_text(heading).lower().startswith(NEXT_STEPS_PREFIX)` with the one
+# owner, so the old anchor matched nothing.
 run 'ranked-items-ignore-the-heading' test_items_outside_a_next_steps_heading_are_not_asked \
-  's|if not heading_text(heading).lower().startswith(NEXT_STEPS_PREFIX):|if False:|'
+  's|if not is_next_steps_heading(heading_text(heading)):|if False:|'
+# 🔴 THE CONSOLIDATION, REVERTED — #964 item 3. Puts the raw `.startswith` back
+# at this call site, byte-for-byte the predicate that disagreed with
+# `canonical_prefix` over `## Next  steps`. The seam guard is what must catch it;
+# every OTHER heading test agrees under both spellings, which is exactly why the
+# duplication survived unnoticed.
+run 'heading-test-open-coded-again' test_the_TWO_call_sites_cannot_disagree \
+  's|if not is_next_steps_heading(heading_text(heading)):|if not heading_text(heading).lower().startswith(NEXT_STEPS_PREFIX):|'
+# The decoration half, ISOLATED from the consolidation above: keep one owner,
+# make it stop stripping ornament. `▶ Next steps (ranked)` is a real corpus
+# heading whose five items were exempt from rule (j).
+run 'heading-decoration-not-stripped' test_the_selector_answers_the_whole_matrix \
+  's|^_HEADING_DECORATION = re.compile(r"\^\[\^0-9A-Za-z\]+")|_HEADING_DECORATION = re.compile(r"^$")|'
+# 🔴 THE OTHER DIRECTION, and the bound that makes the widening safe: let the
+# stripper eat WORD characters and a SYNONYM gets promoted into the canonical
+# set. Without this row, `_HEADING_DECORATION` could be widened and every
+# behavioural row above would stay green.
+run 'decoration-stripper-eats-words' test_decoration_stripping_cannot_promote_a_SYNONYM \
+  's|^_HEADING_DECORATION = re.compile(r"\^\[\^0-9A-Za-z\]+")|_HEADING_DECORATION = re.compile(r"^[A-Za-z ]*?(?=next)")|'
+# 🔴 RE-AIMED, AND ITS SUBJECT MOVED — #964 item 5. This row used to widen
+# `_RANKED_ITEM` to `^ *` and be killed by the 4-space nesting test. The regex
+# bound is no longer what excludes a child (the contextual walk is), so under the
+# fix that mutation SURVIVES the nesting tests: the row was measuring a guard
+# that had moved. Two rows now, one per guard.
+#
+# The CONTEXTUAL exclusion, deleted. `1. parent` + `   1. child` (three spaces —
+# CommonMark's content indent for `1. `) returns TWO items both ranked `1`, which
+# re-points live `claim-work --slug-for <doc> <rank>` claims.
 run 'nested-sub-items-counted-as-ranks' test_a_nested_numbered_line_is_not_a_rank \
+  's|if top_indent is not None and indent > top_indent:|if False:|'
+# The same exclusion made ABSOLUTE rather than relative — the fail-OPEN failure
+# mode. A queue indented as a whole then has every item after the first dropped
+# from rule (j), silently accepting untagged work.
+run 'nesting-column-pinned-at-zero' test_a_queue_INDENTED_AS_A_WHOLE_still_has_every_item_counted \
+  's|if top_indent is not None and indent > top_indent:|if indent > 0:|'
+# `_RANKED_ITEM`'s own `^ {0,3}` bound, which now has exactly one killer: the
+# FIRST numbered line in a section, indented past CommonMark's top-level bound.
+run 'ranked-item-pattern-accepts-any-indent' \
+  test_a_numbered_line_indented_PAST_the_commonmark_bound_is_never_a_rank \
   's|r"\^ {0,3}(\\d+)\[.)\]|r"^ *(\\d+)[.)]|'
 run 'self-generated-block-suppressed' test_forcing_none_is_ACCEPTED_and_reported \
   's|none_items = \[i for i in items if i.kind == "none"\]|none_items = []|'
@@ -621,6 +719,60 @@ else
     FAILURES=$((FAILURES+1))
   fi
 fi
+printf '\n== rule (k): an elimination names HOW it was eliminated (must be KILLED) ==\n'
+# The refusal deleted outright: no bullet is ever unevidenced.
+run 'elimination-refusal-never-fires' test_the_MEASURED_bullet_that_this_rule_exists_for_is_refused \
+  's|bad = \[b for b in bullets if not b.is_declared\]|bad = []|'
+# The CLOSED VOCABULARY opened up. Anything typed after `via:` would count,
+# which is the whole difference between an allowlist and a keyword sniff.
+run 'elimination-kind-allowlist-opened' test_an_unknown_kind_is_refused_and_NAMED \
+  's|return self.kind in ELIMINATION_KINDS|return self.kind is not None|'
+# 🔴 THE WALKABILITY ROW. Reverts the marker to the narrow form that demanded a
+# separator straight after `Ruled out` — the shape that MISSED nine real corpus
+# bullets and is escaped by typing `Ruled out (obviously):`. The anchor carries
+# the `\b` because `ruled[ -]out` alone also matches the comment above it, and a
+# sed that hits the comment mutates nothing while reporting the guard held.
+run 'elimination-marker-requires-a-separator' test_a_qualifier_between_the_marker_and_the_claim_cannot_escape \
+  's|ruled\[ -\]out\\b|ruled[ -]out\\s*:|'
+# The near-miss net removed: a bullet that DOES carry a tag gets told to add one.
+run 'elimination-near-miss-net-removed' test_a_near_miss_is_NAMED_not_reported_as_absent \
+  's|if _VIA_ATTEMPT.search(ln)|if False|'
+# The fenced diagnosis removed: a field the author can SEE reads as absent.
+run 'elimination-fenced-diagnosis-removed' test_a_field_inside_a_fence_is_NAMED_as_fenced \
+  's|        fenced = near is None and any(|        fenced = False and any(|'
+# 🔴 THE COLLISION THIS REPO ALREADY SHIPPED ONCE — two constants both taking 7.
+# The killing guard is PRE-EXISTING; this row proves rule (k)'s new code is
+# inside its reach rather than beside it.
+run 'exit-code-collides-with-unforced' test_no_two_exit_constants_share_a_value \
+  's|^EXIT_UNEVIDENCED = 10|EXIT_UNEVIDENCED = 8|'
+# The legend half: a code can be unique and still undocumented. MEASURED — the
+# legend ended at 8 while EXIT_STALE_BASE = 9 was live and printed at callers.
+run 'exit-legend-omits-the-new-code' test_the_module_legend_documents_every_nonzero_code \
+  's|^ 10  unevidenced|# 10 unevidenced|'
+# The ADVISORY half — `via: assumed` must land AND be counted where a reader
+# sees it. Rule (j) has the same row for `forcing: none`.
+run 'assumed-advisory-suppressed' test_via_assumed_is_ACCEPTED_and_reported \
+  's|    assumed = \[b for b in bullets if b.kind == "assumed"\]|    assumed = []|'
+# 🔴 THE CLEARABILITY ROWS. An audit found rule (k) shipped with ONE trailer for
+# all four causes, reproducing all three unrecoverable-refusal shapes rule (j)
+# had already been fixed for twice. Collapsing the per-cause selection back is
+# what these rows forbid.
+run 'remedies-collapse-to-all-causes' test_only_the_causes_PRESENT_get_a_remedy \
+  's|) if c in causes|) if True|'
+run 'nothing-written-line-dropped' test_the_refusal_says_NOTHING_WAS_WRITTEN \
+  's|f"NOTHING WRITTEN — not the doc|f"nothing written — not the doc|'
+run 'elided-count-suppressed' test_more_bullets_than_are_shown_says_so \
+  's|    if elided:|    if False:|'
+# The leading-decoration widening, reverted — the mirror of the qualifier row.
+run 'leading-decoration-rejected' test_leading_decoration_before_the_marker_cannot_escape \
+  's|rf"(?:\[\^A-Za-z\\s\]+\\s\*)\*"|rf""|'
+# The col-0-fence false verdict, reintroduced by dropping the indent filter.
+run 'fenced-filter-ignores-indent' test_an_unrelated_column_0_fence_does_not_forge_a_fenced_verdict \
+  's|_VIA.search(ln) for ln in hidden if ln\[:1\] in (" ", "\\t")|_VIA.search(ln) for ln in hidden|'
+# BEHAVIOUR-FREE CONTROL for this block specifically — the rows above must key on
+# behaviour, not on the presence of rule (k)'s own comment text.
+run 'rule-k-comment-reword-control' SURVIVES \
+  's|# --- rule (k): an elimination names HOW it was eliminated|# --- rule k: elimination evidence (reworded comment)|'
 
 printf '\n== controls ==\n'
 # 🔴 POSITIVE CONTROL — a mutant to a PRE-EXISTING guard (rule d) that the suite

@@ -593,6 +593,13 @@ PINNED_HERE = {
     "shell-env-nudge.py",
     "search-tool-nudge.py",
     "claude-notify.py",          # pinned by test_claude_notify.py + test_notifs.py
+    "git-add-provenance-nudge.py",  # pinned by
+                                 # test_git_add_provenance_nudge.py, which asserts
+                                 # the CACHE_DIR literal and the sanitised
+                                 # per-session filename. It keeps a once-per
+                                 # (session, repo, path) dedupe ledger so the same
+                                 # staged file is not re-reported on every
+                                 # subsequent `git add` in the session.
 }
 OWNS_NO_ON_DISK_STATE = {
     "agent-ledger-hook.py",      # delegates every path to lib/agent_ledger.py

@@ -281,7 +281,7 @@ in
           # you, and it is not optional to read.
           { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
           { trigger = ":acq"; replace = "ask clarifying questions"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
-          { trigger = ":alo"; replace = "anything left outstanding from this thread? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
+          { trigger = ":alo"; replace = "anything left outstanding from this arc? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
           # Added 2026-08-05 via /espanso-audit — both are WHOLE-STANDALONE-MESSAGE
@@ -1328,6 +1328,16 @@ in
   # deduped to once per kind per session.
   home.file.".claude/hooks/search-tool-nudge.py" = {
     source = ../scripts/claude-hooks/search-tool-nudge.py;
+  };
+  # git-add-provenance-nudge fires PostToolUse on Bash and warns when a `git add`
+  # staged an untracked file whose mtime PREDATES the session — i.e. another
+  # effort's uncommitted work swept into your index, which is how half a feature
+  # gets committed. Deliberately NOT a guard_core check: that layer has no warn
+  # tier, and in this repo staging a NEW file is mandatory (the flake omits
+  # untracked paths), so a blocking version would fire on the deploy path for
+  # every new skill, hook and test — the permanently-red shape RULES.md rejects.
+  home.file.".claude/hooks/git-add-provenance-nudge.py" = {
+    source = ../scripts/claude-hooks/git-add-provenance-nudge.py;
   };
   # claude-notify is the turn-finished notifier: on UserPromptSubmit/Stop/SubagentStop
   # it fires a desktop toast (or, headless, a clawgate phone push as FALLBACK) when a
@@ -2743,10 +2753,10 @@ in
         "ACTIVITY_HOST=workbench"
         # Phase B — LLM recap generation (best-effort; the sync NEVER fails if the model
         # is down/slow — cards fall back to the deterministic summary). Points at the
-        # homelab vLLM (ns promptver, svc/vllm-recap:8000, served model "recap"); the
+        # homelab vLLM (ns vllm-recap, svc/vllm-recap:8000, served model "recap"); the
         # generator kubectl-port-forwards to it on an ephemeral local port.
         "INITIATIVES_RECAP_ENABLED=1"
-        "RECAP_NAMESPACE=promptver"
+        "RECAP_NAMESPACE=vllm-recap"
         "RECAP_SERVICE=svc/vllm-recap"
         "RECAP_SERVICE_PORT=8000"
         "RECAP_MODEL=recap"
@@ -3264,11 +3274,11 @@ in
         "AGENT_MODEL=openclaw/initiatives"
         "AGENT_SECRET=initiatives-agent-secrets"
         # FALLBACK model for /api/ask when the agent is unreachable: the deterministic regex
-        # assistant phrases over the SAME homelab vLLM the recap generator uses (ns promptver,
+        # assistant phrases over the SAME homelab vLLM the recap generator uses (ns vllm-recap,
         # svc/vllm-recap:8000, served model "recap"). Best-effort; a model outage degrades to
         # the plain deterministic renderer.
         "INITIATIVES_RECAP_ENABLED=1"
-        "RECAP_NAMESPACE=promptver"
+        "RECAP_NAMESPACE=vllm-recap"
         "RECAP_SERVICE=svc/vllm-recap"
         "RECAP_SERVICE_PORT=8000"
         "RECAP_MODEL=recap"
