@@ -224,10 +224,10 @@ def test_every_ledgered_file_IMPORTS_AND_CALLS_the_shared_siting_at_least_once()
     true thing.
 
     `scoped_store` is fixed. The residual gap is recorded and NOT closed here:
-    `test_subsystem_store_api.py` still builds store roots inline from
-    `tmp_path / "store"` at the sites `_DISK_ROOTED_SITES` counts below, each in one
-    or two tests rather than a shared fixture. That count is asserted so it can only
-    go DOWN — see the next test.
+    `test_subsystem_store_api.py` still builds store roots inline from `tmp_path` at
+    the sites `_DISK_ROOTED_SITES` counts below — 20 of them spelled `tmp_path /
+    "store"` and 13 not — each in one or two tests rather than a shared fixture. That
+    count is asserted so it can only go DOWN — see the next test.
     """
     offenders = []
     for name in sorted(EXPECTED_SERVER_TESTS):
@@ -273,13 +273,24 @@ def test_the_scan_can_actually_SEE_a_build_server_call():
 # rather than a rushed refactor.
 # 🔴 33, UP FROM 20, AND NOT ONE SITE WAS ADDED. The predicate below stopped being
 # spelled, and 13 inline disk-backed store roots that had always been there became
-# visible. Every one of them was a REAL store served by `running(...)`:
-# `served = tmp_path / "served"` (a `cp -a` of the store fixture, written into, then
-# served — five sites), `served-elsewhere` (three), `stage` (two, the output of
-# `run_seed` served back), `big`, `at-the-cap`, `unambiguous`, and two
-# `running(tmp_path / "absent")`. The last pair is the only debatable entry: an
-# absent store writes nothing and fsyncs nothing, so counting it errs WIDE — the
-# safe direction for a ratchet, and not worth a second spelled exception to avoid.
+# visible. Every one of them was a REAL store served by `running(...)`. The
+# breakdown, RE-MEASURED 2026-09-02 and summing to 13 — an earlier revision of this
+# comment said "five" `served` and summed to 15, which is the sort of arithmetic
+# nobody re-does:
+#
+#     served              3    a `cp -a` of the store fixture, written into, served
+#     served-elsewhere    3
+#     stage               2    the output of `run_seed`, served back
+#     absent              2    `running(tmp_path / "absent")`
+#     big                 1
+#     at-the-cap          1
+#     unambiguous         1
+#                        --
+#                        13   + the 20 `store`/`name`/`kind` sites = 33
+#
+# The `absent` pair is the only debatable entry: an absent store writes nothing and
+# fsyncs nothing, so counting it errs WIDE — the safe direction for a ratchet, and not
+# worth a second spelled exception to avoid.
 #
 # 🔴 SO THIS NUMBER MOVING UP IS NOT ALWAYS DEBT ARRIVING. The assertion below cannot
 # tell "13 new store sites were written" from "the predicate got 13 sites wider", and
@@ -289,10 +300,23 @@ _DISK_ROOTED_SITES = 33
 
 # Directory names that make a `tmp_path / "<name>"` a store root ON SIGHT, with no
 # need for it to flow anywhere. MEASURED 2026-09-02: of the 33 counted sites, 26 flow
-# into a store consumer and would be caught without this set — but 7 are built and
-# used without ever reaching `_build_store`/`running`/`build_server`, so deleting it
-# would lose those seven. It is a residual shortcut, not the test; the flow-based arm
-# in `_index_store_root_uses` is what makes the predicate structural.
+# into a store consumer and would be caught without this set; 7 are counted ONLY by
+# this set, so deleting it would lose those seven.
+#
+# 🔴 BUT DO NOT READ THOSE 7 AS "SITES THAT GENUINELY DO NOT FLOW ANYWHERE" — an
+# earlier revision of this comment said exactly that and it is false of all seven. They
+# are every `tmp_path / "store"` at :11310, :11765, :13099, :14086, :14201, :14227 and
+# :14803 of `test_subsystem_store_api.py`, and they split two ways, each one a MASKED
+# GAP in the flow arm rather than a shortcut:
+#   * :11310 and :13099 are `root = tmp_path / "store"` in a `_phases` helper whose
+#     NESTED `present()`/`absent()` closures call `_build_store(root, …)` — a consumer
+#     `_ROOT_CONSUMERS` names. They are invisible only because `_walk_scope` stops at a
+#     nested function boundary, so no single scope sees both the binding and the call.
+#   * the other five reach `api.append_bullet` / `api.rc.load_index` — real store
+#     consumers that `_ROOT_CONSUMERS` simply does not name (see its own comment: the
+#     set closes renames, not GROWTH into a new consumer name).
+# So `_ROOT_NAMES` is currently propping up the flow arm on this file. Deleting it
+# would not "lose seven non-flowing sites", it would expose two structural gaps.
 _ROOT_NAMES = {"store", "src"}
 
 
@@ -346,13 +370,26 @@ def _is_disk_rooted_store_expr(node: ast.AST) -> bool:
     return False
 
 
-# The calls that CONSUME a store root. A callee name is a real referent — the
-# function being invoked — so this is not the "spelled guard" hazard the binding set
-# below used to be; renaming `_build_store` renames its definition too.
+# The calls that CONSUME a store root.
+#
+# 🔴 THIS SET CLOSES RENAMES AND NOT GROWTH, AND ONLY THE FIRST HALF USED TO BE SAID.
+# The rename argument holds: a callee name is a real referent — the function being
+# invoked — so renaming `_build_store` renames its definition too and the set follows.
+# (The set it replaced, `_ROOT_BINDINGS`, keyed on the name of the VARIABLE a root was
+# bound to, which no rename follows. That set is deleted; `test_the_site_index_keys_on_
+# USE_not_on_the_variables_NAME` is the control that killed it.)
+#
+# But a ratchet's job is to notice GROWTH, and growth arrives as a NEW consumer name,
+# which no rename argument covers. Measured with this file's own control probe:
+# `running(served)` counts 1 and `serve_store(served)` — same expression, same copy,
+# same writes — counts 0. So only half the spelled-guard class is closed here, and
+# `_ROOT_NAMES` above records what that already costs on the real file today.
 _ROOT_CONSUMERS = {"_build_store", "running", "build_server"}
 # Wrappers a path is handed through on its way into a consumer. `str(root)` is the
-# live shape: `build_server(..., store_root=str(store))`.
-_PATH_WRAPPERS = {"str", "fspath", "os.fspath", "Path"}
+# live shape: `build_server(..., store_root=str(store))`. Bare names only: `_unwrap`
+# matches an `ast.Attribute` on its `.attr`, so `os.fspath(x)` is matched by the
+# `"fspath"` entry and a dotted `"os.fspath"` entry could never match anything.
+_PATH_WRAPPERS = {"str", "fspath", "Path"}
 _STORE_ROOT_PARENTS: dict[int, bool] = {}
 
 
@@ -435,9 +472,19 @@ def _walk_scope(scope: ast.AST):
 def _assignments(scope: ast.AST):
     """`(dotted-target, value)` for every binding form that can hold a store root.
 
-    🔴 The four shapes past a plain `x = …` are here because an audit walked each of
-    them through the previous index: a tuple target, an attribute target, a walrus,
-    and a helper that RETURNS the root instead of binding it.
+    The shapes past a plain `x = …` that THIS function handles are: an annotated
+    assignment (`ast.AnnAssign`), a walrus (`ast.NamedExpr`), a `with … as` target
+    (`ast.withitem`), and a tuple/list target on any of them.
+
+    🔴 SAY WHICH ONES ARE HERE. A previous revision of this docstring listed four
+    shapes as "here" and two of them were not: a helper that RETURNS the root is
+    resolved in `_index_store_root_uses` via `flowing_callees`, not by any binding
+    form; and it omitted `ast.withitem`, which the body below does handle. The walrus
+    IS here, but it is an INVARIANT guard rather than regression coverage — it already
+    counted before this function existed, because a consumer's argument is walked
+    recursively, so the nested `tmp_path / name` was reached without the binding ever
+    being resolved. `test_the_site_index_sees_the_BINDING_FORMS_a_plain_assignment_is_
+    not`'s docstring says the same thing, and the two used to disagree.
     """
     for node in _walk_scope(scope):
         pairs: list[tuple[ast.AST, ast.AST]] = []
@@ -768,9 +815,24 @@ def test_one_tests_store_root_does_not_vouch_for_ANOTHERS_scratch_directory():
     authors of not using `store_root()` for things that are not stores. Round 3's
     audit called exactly that "a false accusation", and `main` then hit it.
 
-    ⚠ This pins the SCOPING, not a hazard anyone has been bitten by twice: the count
-    over the real file is 20 either way today. It is here so the docstring's
-    per-function claim is checked rather than asserted.
+    ⚠ THE SCOPING IS NOT FREE, AND THIS DOCSTRING USED TO SAY IT WAS. It read "the
+    count over the real file is 20 either way today" — wrong in both halves. MEASURED
+    2026-09-02 on `test_subsystem_store_api.py`: **per-scope 33, file-wide 39**. The
+    scoping suppresses SIX sites, and they are not one kind:
+
+      * four `tmp_path / "stage"` (:2658, :3619, :3647, :3750) are stage directories
+        handed to `seed.sh` as a `--stage` SUBPROCESS argument and never served
+        in-process. File-wide indexing would count them only by colliding with the
+        genuinely-served `stage` at :5710/:5726 — precisely the false accusation this
+        scoping exists to prevent. Here the scoping is RIGHT.
+      * two — `ordered-served` (:3945) and `ambig-served` (:4294) — ARE real
+        disk-backed store roots, `cp -a`'d and served in-process. File-wide would
+        count them for the right reason by accident. They are missed for a different
+        reason entirely, recorded and NOT closed: see
+        `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted` below.
+
+    So file-wide indexing is not "the same answer, more cheaply" — it is four false
+    accusations bought with two accidental catches, which is why it stays rejected.
     """
     probe = (
         "def test_a(tmp_path, name):\n"
@@ -785,6 +847,88 @@ def test_one_tests_store_root_does_not_vouch_for_ANOTHERS_scratch_directory():
         f"counted {_count_disk_rooted(probe)} store roots in a module with one store "
         "and one scratch directory. The index is resolving names across function "
         "boundaries, so an unrelated local called `root` is being counted as a store."
+    )
+
+
+def test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted():
+    """🔴 A KNOWN, MEASURED RESIDUAL — THIS IS A GAP GUARD, NOT COVERAGE.
+
+    Read the name literally: it asserts the ratchet CANNOT see a store root bound
+    inside a `@pytest.fixture` and served in a test that requests it. That is a hole,
+    it is recorded here so it cannot be rediscovered as news, and it is pinned so that
+    CLOSING it fails this test and forces whoever closes it to delete this guard and
+    move `_DISK_ROOTED_SITES` in the same commit.
+
+    Fixture-binding is this file's dominant idiom, so the hole is not exotic. TWO LIVE
+    INSTANCES on `test_subsystem_store_api.py`, both real `cp -a` copies of a store,
+    written into, and served in-process by the real store server:
+
+      * `served = tmp_path / "ordered-served"` in the `shuffled_pair` fixture (:3945),
+        served at :4392 and four more `running(served)` sites;
+      * `served = tmp_path / "ambig-served"` in the `ambiguous_pair` fixture (:4294),
+        served at :4758 and one more.
+
+    🔴 WHY IT IS NOT CLOSED, stated rather than implied. The flow arm is scoped per
+    function (`_walk_scope` stops at a function boundary), and a pytest fixture crosses
+    exactly that boundary through pytest's own name-injection, which is not a Python
+    binding the AST can see. Following it would mean a NEW cross-scope resolver:
+    fixture def -> fixture name -> parameter of a consuming scope -> and, for both live
+    instances, the ELEMENT POSITION in a returned tuple that the consumer destructures
+    (`local, served = shuffled_pair`). File-wide indexing is not the shortcut: it was
+    measured (see the scoping test above) to buy these two catches at the cost of four
+    false accusations, and round 3 rejected it for exactly that.
+
+    So the honest statement, which replaces the one this PR shipped: the predicate does
+    NOT cover the flow case generally. It covers the flow case WITHIN ONE FUNCTION
+    SCOPE.
+    """
+    inline = (
+        "def test_probe(tmp_path):\n"
+        "    served = tmp_path / 'served'\n"
+        "    (served / 'scope' / 'e.md').write_text('x')\n"
+        "    running(served)\n"
+    )
+    via_fixture = (
+        "import pytest\n"
+        "@pytest.fixture\n"
+        "def pair(tmp_path):\n"
+        "    served = tmp_path / 'served'\n"
+        "    (served / 'scope' / 'e.md').write_text('x')\n"
+        "    return served\n"
+        "def test_probe(pair):\n"
+        "    running(pair)\n"
+    )
+    # The live shape: the fixture returns a TUPLE and the test destructures it.
+    via_fixture_tuple = (
+        "import pytest\n"
+        "@pytest.fixture\n"
+        "def pair(tmp_path):\n"
+        "    local = tmp_path / 'local'\n"
+        "    served = tmp_path / 'served'\n"
+        "    (served / 'scope' / 'e.md').write_text('x')\n"
+        "    return local, served\n"
+        "def test_probe(pair):\n"
+        "    local, served = pair\n"
+        "    running(served)\n"
+    )
+    # The positive control. Without it a probe that counts nothing for an unrelated
+    # reason (a typo in the template, a consumer name that is not in the set) would
+    # make the two zeros below look like the documented residual when they are not.
+    assert _count_disk_rooted(inline) == 1, (
+        f"the inline form of this probe counts {_count_disk_rooted(inline)}, not 1 — "
+        "this control cannot demonstrate a residual if the shape is uncountable for "
+        "some other reason entirely"
+    )
+    assert _count_disk_rooted(via_fixture) == 0, (
+        "the ratchet now SEES a store root bound in a fixture. That is good news and "
+        "it makes this guard wrong: delete it, re-measure _DISK_ROOTED_SITES (the two "
+        "live instances at test_subsystem_store_api.py:3945 and :4294 will start "
+        "counting), and rewrite the residual in "
+        "test_one_tests_store_root_does_not_vouch_for_ANOTHERS_scratch_directory."
+    )
+    assert _count_disk_rooted(via_fixture_tuple) == 0, (
+        "the tuple-returning fixture form — the shape both live instances actually "
+        "use — is now counted. Same action as above."
     )
 
 
@@ -823,20 +967,25 @@ def test_one_tests_store_root_does_not_vouch_for_ANOTHERS_scratch_directory():
 # that it can go red, that it does so on both siting branches, and that it does not
 # eat the failure of the test it is attached to.
 #
-# MEASURED 2026-09-02 over the three ledgered files: the check ran on **448 stores**,
-# the largest being 1,253,376 B / 306 entries (`test_cairn_cli.py`'s concurrency
-# fixture) and the next largest 176,128 B / 43 entries. So the coverage claim is not a
-# reassuring zero — the instrument was watched observing 448 things, and the peak it
-# reported is the fixture the module docstring has always named.
+# ⚠ WHAT IS AND IS NOT AUTOMATED HERE — an earlier revision of this comment blurred
+# the two. A ONE-OFF, HAND-INSTRUMENTED run over the three ledgered files on 2026-09-02
+# saw the check called on 448 stores, the largest 1,253,376 B / 306 entries
+# (`test_cairn_cli.py`'s concurrency fixture) and the next 176,128 B / 43 entries. That
+# was a manual measurement; the instrumentation it used has been removed, NOTHING
+# re-runs it, and it must not be quoted as a standing positive control. The standing
+# controls are the two tests below, both of which run every time and were
+# mutation-verified: `test_store_root_INVOKES_the_budget_check_on_the_root_it_yielded`
+# (the check is reached at all) and `test_a_store_over_the_budget_RAISES_with_the_
+# budget_checks_own_message` (it can go red, on its own wording).
 #
 # The residual, stated rather than hidden: this is a claim about stores that are
 # actually BUILT by a run. A fixture nobody executes is not measured. The gate runs the
 # whole suite, and `test_every_ledgered_file_IMPORTS_AND_CALLS_the_shared_siting_at_
 # least_once` above is what keeps the ledgered files routed through the seam, so the
 # two together cover the population. A deselected subset run is not that claim. Nor is
-# it a claim about the 20 inline `tmp_path / "store"` sites the FIRST ratchet counts:
-# those never reach `store_root`, live on disk rather than tmpfs, and are that
-# ratchet's business, not this budget's.
+# it a claim about the 33 inline sites the FIRST ratchet counts (20 of them spelled
+# `tmp_path / "store"`, 13 not): those never reach `store_root`, live on disk rather
+# than tmpfs, and are that ratchet's business, not this budget's.
 
 # How much bigger than the measured peak the budget must be. 🔴 THE PREVIOUS BUDGET HAD
 # ZERO SLACK — 1,875,968 was exactly (442 + 16) * 4096 where 442 was the sweep's own

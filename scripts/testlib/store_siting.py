@@ -105,11 +105,19 @@ _PAGE_BYTES = 4096
 # statvfs used-delta).
 #
 # ⚠ SAY WHAT WAS MEASURED, because this constant has been wrong twice by being a
-# measurement of something else. The raw `PEAK_STORE_BYTES` from that run reads
-# 1,884,160 — bigger than the number below — and that peak is the ledger suite's OWN
-# deliberately-over-budget probe, not a fixture. 1,253,376 is the largest store the
-# suite builds in the course of testing something else, which is what this constant is
-# for. The gap to the runner-up (176,128) is 7x, so the peak is not a close call.
+# measurement of something else. The largest store that run saw AT ALL was 1,884,160 B
+# / 460 entries — bigger than the number below — and that one is the ledger suite's OWN
+# deliberately-over-budget probe (`_OVER_BUDGET_ENTRIES`), not a fixture. 1,253,376 is
+# the largest store the suite builds in the course of testing something else, which is
+# what this constant is for. The gap to the runner-up (176,128) is 7x, so the peak is
+# not a close call.
+#
+# ⚠ THAT WAS A ONE-OFF, HAND-RUN MEASUREMENT AND NOTHING RE-RUNS IT. There is no
+# instrumentation left in this module that records a peak; re-deriving this constant
+# means adding a print to `_check_store_budget` and running the three ledgered files
+# again. What IS automated is the other direction: `_check_store_budget` fails loudly
+# when a real store exceeds the budget below, so this number going stale LOW is caught
+# and this number going stale HIGH only wastes headroom.
 #
 # 🔴 APPARENT BYTES UNDERSTATE TMPFS COST ~17x. Entry COUNT drives this, not text size;
 # a floor reasoned from `st_size` lands an order of magnitude low.
@@ -132,7 +140,25 @@ _MEASURED_PEAK_STORE_BYTES = 1253376
 # measured_peak`, so shrinking the slack to buy room is a visible act, not a quiet one.
 _BUDGET_HEADROOM = 1.5
 
-# The budget: no store this suite builds may page-allocate more than this.
+# The budget: no ONE store this suite builds may page-allocate more than this.
+#
+# 🔴 SAY WHICH POPULATION — THIS NUMBER STOPPED BEING A SUM AND NOTHING SAID SO.
+# `main`'s predecessor constant was documented as the sum over every ledgered file's
+# fixtures, with the note that under `-n 4 --dist loadfile` they do not all hold stores
+# at once, i.e. it was deliberately conservative about CONCURRENCY. This value is a
+# single measured PEAK x `_BUDGET_HEADROOM`, and `_check_store_budget` enforces it
+# PER STORE. Two consequences, both real:
+#   * adding a second large fixture no longer moves this number at all. Only a single
+#     store growing past the budget does. That is the whole point of the move — the
+#     old sum moved six times in nineteen commits on edits that touched no store — but
+#     it means this constant is NOT an estimate of what the suite holds in RAM.
+#   * the gated tier runs `-n 4 --dist loadfile`, so up to `PYTEST_JOBS` stores can be
+#     live on one `/dev/shm` simultaneously, each permitted this much. `_MIN_FREE_BYTES`
+#     below is a margin over ONE store, not over four.
+# It is not a regression in VALUE today — 1,880,064 slightly exceeds the old sum of
+# 1,875,968 — and `tmpfs_dir()` re-reads `statvfs` on EVERY `store_root` entry, so the
+# free-space floor is a live check against whatever the other workers have already
+# taken rather than a static reservation. What is gone is the modelling, not the check.
 #
 # 🔴 ENFORCED AT RUNTIME, against the real directory tree, by `_check_store_budget`.
 # It is not a floor reasoned from source and it is not checked against another constant:
@@ -151,7 +177,13 @@ _LARGEST_STORE_BYTES = (
 )  # 1,880,064 at the two values above — a snapshot, not a second definition
 
 # Free space a candidate must have before we will site a store on it: the budget above,
-# with better than 2x margin. 🔴 **2x IS THE CLAIM AND IT IS THE CLAIM A TEST READS**
+# with better than 2x margin — over ONE store. 🔴 IT IS NOT A MARGIN OVER A PARALLEL
+# RUN, and the budget above says why: `PYTEST_JOBS` xdist workers (4 in the gated
+# sandbox) may each hold a store this large at the same moment on one `/dev/shm`.
+# What keeps that honest is not this constant but the fact that `tmpfs_dir()`
+# consults `statvfs` afresh at every `store_root` entry, so a worker arriving after the
+# others have filled the mount sees the reduced free space and falls back to disk.
+# 🔴 **2x IS THE CLAIM AND IT IS THE CLAIM A TEST READS**
 # (`test_the_free_space_floor_keeps_the_MARGIN_its_comment_claims`). Today the ratio
 # happens to be 2.23x (4,194,304 / 1,880,064), and that figure is a SNAPSHOT — do not
 # promote it to the guarantee, because a snapshot in this position is precisely what
@@ -265,14 +297,19 @@ class StoreBudgetExceeded(AssertionError):
     """
 
 
-# The peak any store has reached in THIS process, and where. Written by
-# `_check_store_budget`, read by the ledger tests as the positive control that the
-# measurement is wired to something: a budget checker that walks nothing reports a
-# reassuring zero for every store in the suite, which is indistinguishable from a
-# suite that builds no stores at all.
-PEAK_STORE_BYTES = 0
-PEAK_STORE_ENTRIES = 0
-PEAK_STORE_PATH = ""
+# 🔴 THERE USED TO BE THREE `PEAK_STORE_*` MODULE GLOBALS HERE AND THEIR COMMENT WAS
+# FALSE. It said they were "read by the ledger tests as the positive control that the
+# measurement is wired to something"; nothing in this repo read them — `git grep`
+# across the whole branch found only the lines that WROTE them. They were deleted
+# rather than given a reader, because the reachability claim they pretended to make is
+# already made properly, by two tests that were mutation-verified:
+#   * `test_store_root_INVOKES_the_budget_check_on_the_root_it_yielded` — the check is
+#     actually called on the root `store_root` yielded (a checker that walks nothing
+#     reports a reassuring zero, indistinguishable from a suite that builds no stores);
+#   * `test_a_store_over_the_budget_RAISES_with_the_budget_checks_own_message` — it can
+#     go red, on THIS check's own wording rather than on "something failed".
+# A global that a run leaves holding the ledger suite's own over-budget probe would
+# have been the wrong number to read anyway — see `_MEASURED_PEAK_STORE_BYTES` above.
 
 
 def page_allocated_bytes(root: Path) -> tuple[int, int]:
@@ -320,12 +357,7 @@ def _check_store_budget(root: Path) -> None:
     exactly the machines that have no tmpfs, so a fixture could grow unchecked on a
     developer's box and only fail once it reached a host where it mattered.
     """
-    global PEAK_STORE_BYTES, PEAK_STORE_ENTRIES, PEAK_STORE_PATH
     entries, allocated = page_allocated_bytes(root)
-    if allocated > PEAK_STORE_BYTES:
-        PEAK_STORE_BYTES = allocated
-        PEAK_STORE_ENTRIES = entries
-        PEAK_STORE_PATH = str(root)
     if allocated <= _LARGEST_STORE_BYTES:
         return
     raise StoreBudgetExceeded(
