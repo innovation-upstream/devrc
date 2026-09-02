@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 # Phase-1 acceptance criterion: the pod's store is the local CLI's store, for
-# EVERY scope (proposal §4 phase 1, §5 "byte-identity … `cmp`, not eyeballing").
+# every scope THIS HOST HOLDS (proposal §4 phase 1, §5 "byte-identity … `cmp`,
+# not eyeballing").
+#
+# 🔴 "EVERY SCOPE" IS WHAT THIS LINE USED TO SAY, AND IT IS NOT TRUE — the
+# sweep is one-directional and can never be complete. Scopes are enumerated
+# from the LOCAL store, so a scope the pod holds and this host does not is
+# never requested, never compared, and never counted. MEASURED 2026-09-02:
+# local 16 scopes / 141 indexed entries, pod 23 / 189 — so 7 pod-only scopes
+# (auditloop, civitai-gpu-fleet, naida-ai, vetr, vetr-api, vetr-app,
+# vetr-infra) holding 48 entries, a QUARTER of the served store, are outside
+# every run's reach.
+#
+# It is not fixable here: the API deliberately exposes no scope-enumeration
+# route, so this script cannot ask the pod what it holds. The remedy is
+# therefore HONESTY, not coverage — the verdict line says which side was
+# enumerated and that the served copy may hold scopes the run could not see.
+# That is the same rule this script already enforces one notch down, where a
+# zero-scope run exits 4 rather than passing trivially.
 #
 # ⚠ IT CANNOT BE A BARE `cmp`, AND SAYING SO IS THE POINT.
 # `subsystem_recall.render_text` emits exactly one line naming the store root
@@ -173,7 +190,20 @@ done
 TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
 [[ -n "$TOKEN" ]] || { echo "verify: token file $TOKEN_FILE is empty" >&2; exit 3; }
 
+# 🔴 ENUMERATED FROM THE LOCAL STORE, WHICH MAKES THE SWEEP ONE-DIRECTIONAL.
+# A scope the POD holds and this host does not is never requested, never
+# compared, and never counted — and no arm below can see it, because every arm
+# starts from this list. The set arm catches a missing ENTRY within a shared
+# scope; nothing catches a missing SCOPE.
+#
+# The API has no scope-enumeration route by design, so this script cannot ask
+# the pod what it holds. MEASURED 2026-09-02: local 16 scopes / 141 entries,
+# pod 23 / 189 — 7 pod-only scopes holding 48 entries, 25% of the served store.
+# `EXPLICIT_SCOPES` records whether the operator narrowed the run, so the
+# verdict can say which of the two it is rather than implying completeness.
+EXPLICIT_SCOPES=1
 if [[ ${#SCOPES[@]} -eq 0 ]]; then
+  EXPLICIT_SCOPES=0
   shopt -s nullglob
   for d in "$STORE"/*/; do SCOPES+=("$(basename "$d")"); done
   shopt -u nullglob
@@ -650,5 +680,22 @@ for scope in "${SCOPES[@]}"; do
   pass=$((pass + 1))
 done
 
+# 🔴 THE VERDICT NAMES WHICH SIDE WAS ENUMERATED, BECAUSE OTHERWISE IT READS AS
+# COMPLETE COVERAGE. `verify: scopes=16 pass=16 fail=0 entries-compared=141` is
+# a true sentence that an operator reads as "the two stores agree" — and the
+# sweep never looked at the 7 scopes the pod holds and this host does not (48
+# entries, 25% of the served store, measured 2026-09-02). The disclosure has to
+# be ON the verdict, not 200 lines away in a comment about pagination: this is
+# the line that gets pasted into a handoff.
+#
+# Same rule as the zero-scope refusal above and as `drift-check.sh` printing
+# links EXAMINED beside links dangling — a count is only honest beside what it
+# could not count.
+if [[ "$EXPLICIT_SCOPES" -eq 1 ]]; then
+  scope_source="the ${#SCOPES[@]} scope(s) named with --scope"
+else
+  scope_source="scopes enumerated from the LOCAL store ($STORE)"
+fi
 echo "verify: scopes=${#SCOPES[@]} pass=$pass fail=$fail entries-compared=$entries_compared"
+echo "verify: COVERAGE — $scope_source. This sweep is ONE-DIRECTIONAL: the served copy may hold scopes this run never requested and therefore never compared, and no arm above can see one. NOT a claim that the two stores agree in full."
 [[ $fail -eq 0 ]] || exit 1

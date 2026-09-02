@@ -414,10 +414,23 @@ eliminated. The store is append-mostly and pruning is manual, so the number
 only shrinks. The two ways out are unchanged: raise the reader's page cap, or
 teach this script to walk every page and normalise the padding.
 
-⚠ Also visible in that table, and not a defect this arm owns: the scope list is
-enumerated from the **local** store, so the 7 scopes that exist only on the pod
+🔴 **The sweep is ONE-DIRECTIONAL, and the verdict line now says so.** Scopes
+are enumerated from the **local** store, so a scope the pod holds and this host
+does not is never requested, never compared and never counted — and no arm can
+see one, because every arm starts from that list (the set arm compares entries
+*within* a shared scope). From the table above: 7 pod-only scopes
 (`auditloop`, `civitai-gpu-fleet`, `naida-ai`, `vetr`, `vetr-api`, `vetr-app`,
-`vetr-infra`) are not compared by this script at all.
+`vetr-infra`) holding **48 entries — 25% of the served store** — are outside
+every run's reach.
+
+It is not fixable by looking harder: the API exposes **no scope-enumeration
+route**, by design. So the remedy is honesty rather than coverage. `verify:
+scopes=16 pass=16 fail=0 entries-compared=141` is a true sentence that reads as
+"the two stores agree", so every run now prints a second line naming which side
+was enumerated and stating that the served copy may hold scopes it never saw —
+the same rule the script enforces one notch down, where a zero-scope run exits
+4 instead of passing trivially, and the same rule `drift-check.sh` follows by
+printing links EXAMINED beside links dangling.
 
 🔴 **A per-entry render that is not `recalled` is REFUSED, not compared.** A
 `--ref` run that resolves to no single entry still prints a well-formed report

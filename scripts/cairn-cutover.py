@@ -1692,7 +1692,22 @@ def _acceptance_refusal(verified: Ran) -> str:
     makes "some output, no FAIL lines" the ordinary timeout outcome rather than
     an exotic one.
 
-    Three outcomes, because they need three different next actions:
+    🔴 "DID IT FIND SOMETHING" AND "DID IT FINISH" ARE INDEPENDENT, AND AN
+    EARLIER VERSION COLLAPSED THEM. It computed `timed_out` and then used it in
+    only two of the three branches, so the FOURTH combination — FAIL lines AND
+    a timeout — printed a message prose-identical to the no-timeout one apart
+    from the exit numeral:
+
+        rc 124: "…exited 124. Read its 5 per-scope FAIL line(s) above."
+        rc 1  : "…exited 1.   Read its 5 per-scope FAIL line(s) above."
+
+    Reachable by the very mechanism this docstring already names: a degrading
+    pod returns 5xx fast for a few scopes (the loop `continue`s, printing a
+    FAIL for each) and then HANGS. The operator is told "5 scopes differ" when
+    the truth is "5 errored AND 11 were never compared — re-run". So the
+    timeout fact is now carried in EVERY branch that can see it.
+
+    Three findings-outcomes, each crossed with did-it-finish:
       * FAIL lines present   -> read them; a real difference was found.
       * output, none of them -> nothing was found; the sweep did not finish.
       * no output at all     -> it never got started.
@@ -1700,9 +1715,21 @@ def _acceptance_refusal(verified: Ran) -> str:
     fails = [ln for ln in verified.out.splitlines() if ln.startswith("FAIL scope=")]
     passes = [ln for ln in verified.out.splitlines() if ln.startswith("PASS scope=")]
     timed_out = verified.rc == 124
+    reported = len(fails) + len(passes)
 
     if fails:
         where = f"Read its {len(fails)} per-scope FAIL line(s) above."
+        if timed_out:
+            # 🔴 THE FAILS ARE REAL *AND* THE SWEEP IS INCOMPLETE. Reporting
+            # only the first half is what sends an operator to diagnose five
+            # scopes while eleven were never looked at.
+            where += (
+                f" ⚠ BUT IT ALSO TIMED OUT: only {reported} scope(s) reported "
+                f"({len(passes)} clean, {len(fails)} differing) before it "
+                f"STOPPED, so every scope after the last line above is "
+                f"UNCOMPARED. The FAILs are real; the sweep is INCOMPLETE. "
+                f"Re-run — this is not the whole story."
+            )
     elif verified.out.strip():
         where = (
             f"⚠ IT PRINTED NO `FAIL scope=` LINE AT ALL — {len(passes)} scope(s) "

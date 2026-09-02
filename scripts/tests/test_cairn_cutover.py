@@ -1572,13 +1572,55 @@ class TestAcceptanceRefusalNamesWhatItActuallyHas:
         assert "timed out" not in msg, msg
         assert "NO per-scope lines at all" in msg, msg
 
-    def test_the_refusal_is_what_ACCEPTANCE_actually_returns(self, cc, monkeypatch):
-        """🔴 THE SEAM. The three tests above exercise the text in isolation;
-        this proves `_acceptance` reaches it and returns `RC_ACCEPTANCE`.
+    def test_FAIL_lines_AND_a_TIMEOUT_report_BOTH_facts(self, cc):
+        """🔴 THE FOURTH COMBINATION, which used to drop the timeout entirely.
 
-        Without this they are a claim about a helper nobody calls — the
-        "verified in isolation" shape. The verifier is stubbed to the
-        completed-then-stopped case, which is the one that was mis-worded.
+        "Did it find something" and "did it finish" are independent, and the
+        first version of this branch computed `timed_out` and then used it in
+        only two of three arms. With FAIL lines present the message was
+        prose-identical to the no-timeout one apart from the exit numeral — so
+        an operator read "5 scopes differ" when the truth was "5 errored AND 11
+        were never compared".
+
+        Reachable exactly as F7 described: a degrading pod 5xx's fast for a few
+        scopes (the loop `continue`s, printing a FAIL each time) and then
+        hangs, with no `--max-time` on curl to stop it.
+        """
+        out = (
+            "PASS scope=a entries=1 bytes=10\n"
+            "FAIL scope=b remote HTTP 503 (body: )\n"
+            "FAIL scope=c remote HTTP 503 (body: )\n"
+        )
+        msg = cc._acceptance_refusal(cc.Ran(124, out, "timed out after 600s"))
+        # Both halves, not one.
+        assert "2 per-scope FAIL line(s) above" in msg, msg
+        assert "BUT IT ALSO TIMED OUT" in msg, msg
+        assert "3 scope(s) reported (1 clean, 2 differing)" in msg, msg
+        assert "UNCOMPARED" in msg, msg
+        assert "Re-run" in msg, msg
+
+        # 🔴 AND THE SAME FAILS WITHOUT A TIMEOUT MUST *NOT* SAY THAT. Without
+        # this pair the assertions above are satisfied by gluing the clause on
+        # unconditionally, which would be a different lie.
+        clean = cc._acceptance_refusal(cc.Ran(1, out, ""))
+        assert "2 per-scope FAIL line(s) above" in clean, clean
+        assert "TIMED OUT" not in clean, clean
+        assert "UNCOMPARED" not in clean, clean
+        assert msg != clean, "the two cases produce identical prose"
+
+    def test_the_refusal_is_what_ACCEPTANCE_actually_PRINTS(self, cc, monkeypatch, capsys):
+        """🔴 THE SEAM — AND IT NOW PINS THE SEAM, WHICH IT DID NOT BEFORE.
+
+        This test's docstring already claimed to prove `_acceptance` reaches
+        the refusal text, but its body asserted only `rc == RC_ACCEPTANCE`.
+        That is the repo's own "a docstring names a RELATIONSHIP, the body
+        inspects one SIDE" pattern, and it was demonstrated live: replacing the
+        `_acceptance_refusal(verified)` call site with a constant string left
+        the ENTIRE suite green. The whole F7 fix was one call-site edit from
+        being inert while four unit tests went on passing.
+
+        `refuse` writes to stderr, so the fix is to read stderr and assert the
+        text that only the real helper can produce.
         """
         out = "PASS scope=one entries=1 bytes=10\n"
 
@@ -1595,3 +1637,14 @@ class TestAcceptanceRefusalNamesWhatItActuallyHas:
         args = argparse.Namespace(store=Path("/nonexistent-store"))
         rc = cc._acceptance(args, Path("/nonexistent-cache"))
         assert rc == cc.RC_ACCEPTANCE, f"expected RC_ACCEPTANCE, got {rc}"
+
+        # 🔴 THE ASSERTION THAT MAKES THIS A SEAM TEST. A severed call site
+        # still returns RC_ACCEPTANCE; it cannot produce this sentence.
+        err = capsys.readouterr().err
+        assert "NO `FAIL scope=` LINE AT ALL" in err, (
+            f"the refusal `_acceptance` actually printed did not come from "
+            f"`_acceptance_refusal` — the call site may be severed:\n{err}"
+        )
+        assert "1 scope(s) compared clean" in err, err
+        assert "UNCOMPARED" in err, err
+        assert f"REFUSED (rc {cc.RC_ACCEPTANCE})" in err, err

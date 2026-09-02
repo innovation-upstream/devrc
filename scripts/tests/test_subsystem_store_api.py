@@ -4201,29 +4201,55 @@ _RETRACTED_BOUNDARY = (
     "51 entries of headroom",
 )
 
-# A retraction has to QUOTE the claim to retract it, so an occurrence preceded
-# by one of these within `_MARKER_WINDOW` characters is a correction, not an
-# assertion. Kept deliberately short: a longer list is a wider exemption, and
-# the exemption is the part that can make this check vacuous.
+# A retraction has to QUOTE the claim to retract it, so an occurrence with one
+# of these NEARBY is a correction, not an assertion. Kept deliberately short: a
+# longer list is a wider exemption, and the exemption is the part that can make
+# this check vacuous.
 _RETRACTION_MARKERS = (
     "used to", "concluded", "said", "was not", "is wrong", "retracted",
 )
-_MARKER_WINDOW = 260
 
-# 🔴 EMPHASIS AND LINE WRAPS ARE STRIPPED BEFORE MATCHING, BECAUSE BOTH DEFEATED
-# THE FIRST VERSION OF THIS SCANNER — demonstrated twice, live:
-#   * `handoff-cairn-phase3.md` spelled it `had **2** entries`, so markdown
-#     emphasis alone walked past a substring match;
-#   * `README.md` passed only because the phrase happened to straddle a line
-#     wrap, i.e. for a reason nobody chose and any reflow would undo.
-# So the whole file is normalised — emphasis characters removed, every
-# whitespace run collapsed, lowercased — and the needles are normalised the
-# same way. Matching then survives reflowing and bolding.
+# 🔴 THE WINDOW IS THE EXEMPTION'S WIDTH, AND 260 MADE `"said"` A WILDCARD.
+# This started as a SAME-LINE rule and was widened to 260 characters when the
+# scan went whole-file — silently turning a tight test into a loose one.
+# Measured: an unrelated "the operator said the rollout looked clean" 155
+# characters earlier exempted a bare re-assertion outright. Every genuine
+# retraction in this repo sits within 39 characters of its quote, so 60 costs
+# nothing and closes the hole. `test_the_marker_window_is_TIGHT` pins it —
+# without that, the window could take any value and no test would notice.
+_MARKER_WINDOW = 60
+
+# 🔴 SEARCHED ON BOTH SIDES, because widening to a preceding-only window also
+# went NARROWER on the other axis: the original same-line rule exempted a marker
+# placed AFTER the quote ("…more than two entries — RETRACTED"), and a
+# preceding-only window reports it. Both directions, same tight width.
+
+# 🔴 THREE THINGS ARE STRIPPED BEFORE MATCHING, EACH BECAUSE IT WAS WALKED:
+#   * EMPHASIS — `handoff-cairn-phase3.md` spelled it `had **2** entries`, so
+#     markdown bold alone defeated a substring match;
+#   * LINE WRAPS — `README.md` passed only because the phrase straddled one,
+#     i.e. for a reason nobody chose and any reflow would undo;
+#   * LINE-LEADING COMMENT PREFIXES — and this was the NORMAL case, not an edge
+#     one. Collapsing whitespace across a wrapped `#` comment leaves the `#`
+#     sitting inside the sentence, so the needle never matches. Demonstrated
+#     live in all three flavours: a wrapped `#` comment in a shell script, the
+#     same in a `.py` file, and a wrapped `> ` blockquote in a handoff doc — all
+#     three WALKED, while the one-line and plain-markdown forms were caught.
+#     Every prose comment in `verify-byte-identity.sh` and `cairn-cutover.py` is
+#     already wrapped that way, and the live occurrence at
+#     `verify-byte-identity.sh:38` is 76 chars in a file whose comments run to
+#     82 — one word of editing and the guard would have gone silently green.
+#
+# ⚠ SO THE OLD CLAIM "survives reflowing and bolding" WAS TRUE ONLY OF
+# UN-PREFIXED MARKDOWN, which is the minority of the corpus. It survives
+# reflowing, bolding AND comment wrapping now.
 _EMPHASIS = re.compile(r"[*_`]+")
+_LINE_PREFIX = re.compile(r"^[ \t]*(?:#+|>+|//+)[ \t]*")
 
 
 def _normalise_for_scan(text: str) -> str:
-    return " ".join(_EMPHASIS.sub("", text).split()).lower()
+    stripped = " ".join(_LINE_PREFIX.sub("", ln) for ln in text.splitlines())
+    return " ".join(_EMPHASIS.sub("", stripped).split()).lower()
 
 
 # The ONE path this scan structurally cannot cover: its own source, whose
@@ -4232,11 +4258,19 @@ def _normalise_for_scan(text: str) -> str:
 # `test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary` for why this
 # is derived rather than a hand-written list of sites.
 _SCAN_EXEMPT = ("scripts/tests/test_subsystem_store_api.py",)
+# ⚠ THE SUFFIX LIST IS NARROWER THAN "EVERY TRACKED TEXT FILE", SO SAY SO.
+# Measured 2026-09-02: 952 of 1261 tracked files match these suffixes; 309 do
+# not, including 29 `.nix`. Zero of the unscanned files match a needle today
+# and no site the claim was ever copied to is in the gap — but the docstrings
+# below say "with one of these suffixes", not "every text file", because a
+# description wider than its implementation reads as coverage while providing
+# none.
 _SCAN_SUFFIXES = (".md", ".py", ".sh", ".txt", ".rst")
 
 
 def _tracked_text_files() -> list[str]:
-    """Every tracked text file — via the content gates' OWN enumerator.
+    """Every tracked file with a `_SCAN_SUFFIXES` suffix — via the content
+    gates' OWN enumerator.
 
     🔴 REUSED, NOT REIMPLEMENTED, AND THE FIRST CUT OF THIS GOT IT WRONG. It
     called `git ls-files` directly with `check=True`, which raises in any tree
@@ -4284,7 +4318,12 @@ def _unmarked_retractions(
             start = 0
             while (at := text.find(needle, start)) != -1:
                 start = at + 1
-                window = text[max(0, at - _MARKER_WINDOW):at]
+                end = at + len(needle)
+                window = (
+                    text[max(0, at - _MARKER_WINDOW):at]
+                    + " "
+                    + text[end:end + _MARKER_WINDOW]
+                )
                 if any(m in window for m in markers):
                     continue
                 excerpt = text[max(0, at - 60):at + len(needle) + 40]
@@ -4889,6 +4928,107 @@ class TestByteIdentityVerifier:
         )
 
     # ------------------------------------------------------------------
+    # 🔴 THE COVERAGE DISCLOSURE — the sweep is ONE-DIRECTIONAL.
+    # ------------------------------------------------------------------
+
+    def test_the_VERDICT_discloses_that_scopes_came_from_the_LOCAL_store(
+        self, store: Path, token_file: Path
+    ):
+        """🔴 `verify: scopes=16 pass=16 fail=0` READS AS COMPLETE COVERAGE.
+
+        It is a true sentence that an operator reads as "the two stores agree",
+        and it is not that: scopes are enumerated from the LOCAL store, so a
+        scope the pod holds and this host does not is never requested, never
+        compared and never counted. No arm can see one — the set arm compares
+        entries WITHIN a shared scope. Measured 2026-09-02: local 16 scopes /
+        141 entries, pod 23 / 189, so 7 pod-only scopes holding 48 entries —
+        25% of the served store — are outside every run's reach.
+
+        The API has no scope-enumeration route by design, so this cannot be
+        fixed by looking harder; the remedy is that the verdict says so. It has
+        to be ON the verdict rather than in a comment 200 lines away, because
+        the verdict is the line that gets pasted into a handoff.
+
+        Same rule the script already enforces one notch down, where a
+        zero-scope run exits 4 instead of passing trivially.
+        """
+        with running(store) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: COVERAGE —" in r.stdout, (
+            f"the verdict carries no coverage disclosure:\n{r.stdout}"
+        )
+        assert "scopes enumerated from the LOCAL store" in r.stdout, r.stdout
+        assert "ONE-DIRECTIONAL" in r.stdout, r.stdout
+        assert "NOT a claim that the two stores agree in full." in r.stdout, r.stdout
+
+    def test_the_disclosure_says_NARROWED_when_scopes_were_named(
+        self, store: Path, token_file: Path
+    ):
+        """🔴 THE TWO CASES ARE DIFFERENT AND MUST READ DIFFERENTLY.
+
+        `--scope X` is the operator deliberately narrowing the run; the default
+        is the script enumerating what happens to be on this disk. Printing the
+        same sentence for both would tell an operator who asked for one scope
+        that the LOCAL STORE was their limit, which is not what happened.
+
+        Without this pair, the assertion above is satisfied by hardcoding one
+        string — the guard would read as coverage while distinguishing nothing.
+        """
+        with running(store) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base,
+                "--token-file", str(token_file), "--scope", SCOPE,
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: scopes=1 " in r.stdout, r.stdout
+        assert "the 1 scope(s) named with --scope" in r.stdout, r.stdout
+        assert "scopes enumerated from the LOCAL store" not in r.stdout, r.stdout
+        # The one-directional warning stands either way: a named scope can
+        # still be one of several the pod holds.
+        assert "ONE-DIRECTIONAL" in r.stdout, r.stdout
+
+    def test_the_disclosure_survives_a_FAILING_run(
+        self, store: Path, tmp_path: Path, token_file: Path
+    ):
+        """A FAIL is exactly when someone reads the output closely, so the
+        coverage caveat must be there too — it sits after the loop, and a
+        `continue` that skipped it would drop it on the runs that matter."""
+        served = tmp_path / "served"
+        subprocess.run(
+            ["cp", "-a", str(store), str(served)], check=True, capture_output=True
+        )
+        path = served / SCOPE / "thing-alpha.md"
+        path.write_text(path.read_text().replace("40s", "41s"))
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1
+        assert "verify: COVERAGE —" in r.stdout, (
+            f"a failing run printed no coverage disclosure:\n{r.stdout}"
+        )
+
+    def test_the_HEADER_no_longer_claims_EVERY_scope(self):
+        """🔴 `--help` PRINTS THE HEADER, so its first sentence is the claim a
+        reader arrives at — and it said the check covers "EVERY scope".
+
+        That is the same overclaim as the verdict line, one level up, and it is
+        the one a new operator meets first. Pinned as a pair: the false phrasing
+        must be gone AND the true one present, because deleting the sentence
+        entirely would also satisfy a one-sided check.
+        """
+        header = VERIFY_PATH.read_text()[:4000]
+        assert "the pod's store is the local CLI's store, for\n# EVERY scope" not in header, (
+            "the header still claims coverage of EVERY scope"
+        )
+        assert "every scope THIS HOST HOLDS" in header, (
+            "the header does not say which side bounds the sweep"
+        )
+
+    # ------------------------------------------------------------------
     # 🔴 THE PROSE CLAIM ITSELF, PINNED.
     # ------------------------------------------------------------------
 
@@ -4932,7 +5072,9 @@ class TestByteIdentityVerifier:
         )
 
     def test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary(self):
-        """🔴 EVERY TRACKED TEXT FILE, DERIVED — not a hand-written site list.
+        """🔴 EVERY TRACKED `_SCAN_SUFFIXES` FILE, DERIVED — not a hand-written
+        site list. (952 of 1261 tracked files; see `_SCAN_SUFFIXES` for what the
+        other 309 are and why the gap is currently empty.)
 
         The pin above holds ONE block, word for word. This is deliberately a
         different KIND of check and neither subsumes the other: the pin fails
@@ -5031,12 +5173,20 @@ class TestByteIdentityVerifier:
     ):
         """🔴 THE NEGATIVE CONTROL FOR THE SCANNER ABOVE.
 
-        That scanner exempts any line carrying a retraction marker, and an
-        exemption that swallowed the assertion it is meant to catch would make
-        the whole check a reassuring zero. So: feed it a file that ASSERTS the
-        boundary with no marker (must be reported) and one that RETRACTS it
-        (must not be), and read both answers — the non-zero is what proves the
-        scanner can observe anything at all.
+        The scanner exempts an occurrence with a retraction marker NEARBY —
+        within `_MARKER_WINDOW` characters, on either side — and an exemption
+        that swallowed the assertion it is meant to catch would make the whole
+        check a reassuring zero. So: feed it a file that ASSERTS the boundary
+        with no marker (must be reported) and one that RETRACTS it (must not
+        be), and read both answers — the non-zero is what proves the scanner
+        can observe anything at all.
+
+        ⚠ THIS DOCSTRING USED TO DESCRIBE A SAME-LINE RULE, which the scan
+        stopped using when it went whole-file. A stale description of a guard's
+        own rule is why nobody re-examined the window when it was widened to
+        260 — see `test_the_marker_window_is_TIGHT`. Both markers below are
+        deliberately close to their quotes, so this test says nothing about the
+        WIDTH; that is the other test's job.
         """
         asserted = tmp_path / "asserted.md"
         asserted.write_text(
@@ -5097,6 +5247,95 @@ class TestByteIdentityVerifier:
         )
         assert _unmarked_retractions(("innocent.md",), root=tmp_path) == [], (
             "the normalisation is over-broad and matches unrelated prose"
+        )
+
+    def test_the_scanner_sees_through_WRAPPED_COMMENT_PREFIXES(self, tmp_path: Path):
+        """🔴 THE NORMAL CASE, NOT AN EDGE ONE — and the first normalisation
+        missed it entirely.
+
+        Collapsing whitespace across a wrapped `#` comment leaves the `#` inside
+        the sentence, so the needle never matches. Every prose comment in
+        `verify-byte-identity.sh` and `cairn-cutover.py` is wrapped exactly that
+        way, and the live occurrence at `verify-byte-identity.sh:38` is 76 chars
+        in a file whose comments run to 82 — one word of editing and the guard
+        would have gone silently green.
+
+        All three flavours, because all three were demonstrated to walk: a shell
+        `#` comment, a Python `#` comment, and a `> ` blockquote. The one-line
+        forms were already caught, so the wrap is the whole variable.
+        """
+        one_line = tmp_path / "oneline.sh"
+        one_line.write_text(
+            "# the comparator could not pass for any scope with more than two entries\n"
+        )
+        assert _unmarked_retractions(("oneline.sh",), root=tmp_path), (
+            "the one-line comment case regressed — the wrapped cases below "
+            "prove nothing if this one is not caught"
+        )
+
+        for name, body in (
+            ("wrapped.sh",
+             "# the comparator could not pass for any scope\n"
+             "# with more than two entries\n"),
+            ("wrapped.py",
+             "    # the comparator could not pass for any scope\n"
+             "    # with more than two entries\n"),
+            ("wrapped.md",
+             "> the comparator could not pass for any scope\n"
+             "> with more than two entries\n"),
+            ("slashes.js",
+             "// the comparator could not pass for any scope\n"
+             "// with more than two entries\n"),
+        ):
+            (tmp_path / name).write_text(body)
+            assert _unmarked_retractions((name,), root=tmp_path), (
+                f"a wrapped comment prefix walked past the scanner in {name}"
+            )
+
+    def test_the_marker_window_is_TIGHT(self, tmp_path: Path):
+        """🔴 NOTHING TESTED THE WINDOW, SO IT COULD TAKE ANY VALUE.
+
+        The existing marker test puts `"used to"` on the same line as its
+        quote, so it passes at a window of 20 or 2000 — the width was
+        unconstrained, and it had already been widened from same-line to 260
+        without anyone noticing that `"said"` then reached across whole
+        paragraphs.
+
+        Measured: an unrelated *"the operator said the rollout looked clean"*
+        155 characters earlier silently exempted a bare re-assertion. This pins
+        the width by exercising both sides of it.
+        """
+        far = tmp_path / "far.md"
+        far.write_text(
+            "the operator said the rollout looked clean. "
+            + "padding words to push the marker out of range. " * 3
+            + "the comparator could not pass for any scope with more than two entries\n"
+        )
+        assert _unmarked_retractions(("far.md",), root=tmp_path), (
+            "a distant, unrelated `said` exempted a bare re-assertion — the "
+            "marker window is too wide to mean anything"
+        )
+
+        near = tmp_path / "near.md"
+        near.write_text(
+            "this used to say the comparator could not pass for any scope "
+            "with more than two entries\n"
+        )
+        assert _unmarked_retractions(("near.md",), root=tmp_path) == [], (
+            "a genuine retraction was reported — the window is now too tight, "
+            "which would make every correction permanently red"
+        )
+
+        # 🔴 THE OTHER AXIS. Widening from same-line to a PRECEDING window also
+        # went narrower: a marker placed AFTER the quote used to be exempt and
+        # would now be reported. Both directions, same width.
+        after = tmp_path / "after.md"
+        after.write_text(
+            "the comparator could not pass for any scope with more than two "
+            "entries — RETRACTED, see the corrected boundary below\n"
+        )
+        assert _unmarked_retractions(("after.md",), root=tmp_path) == [], (
+            "a marker placed AFTER the quote was reported as an assertion"
         )
 
     def test_every_permitted_difference_is_ACCOUNTED_FOR_not_merely_small(
