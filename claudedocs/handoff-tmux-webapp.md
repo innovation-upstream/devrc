@@ -9,37 +9,32 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Ranks 1–8, 13, 15 and 16 are ✅ DONE. Ranks 10, 11, 12, 14 are OPEN** (12 is clawgate task
-#463 and explicitly NOT ours). The live-refresh work
-(`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as 0.8.21** — see below.
+**Ranks 1–8, 13, 14, 15 and 16 are ✅ DONE. Ranks 10, 11, 12 remain OPEN** (12 is clawgate task
+#463 and explicitly NOT ours). Rank 14 merged as `ZacxDev/homelab-infra#632`, squash `b2fecf49`,
+content-verified on `origin/trunk`. The live-refresh work (`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as
+0.8.21**.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.**
-Measured 2026-09-01: server **0.8.21**. It was 0.8.19 earlier the same session and 0.8.20 in
-between, shipped by another session mid-work — which is the whole reason the number is derived
+Measured 2026-09-01 21:51Z: server **0.8.21**, uptime 3007 s. It was 0.8.19 and 0.8.20 earlier the
+same day, shipped by another session mid-work — which is the whole reason the number is derived
 from the live pin and never from a doc.
 
-✅ **RANK 8a — still RECURRING, not closed.** At its last measurement both hosts' `clawgatectl`
-matched the server and a cross-host round trip moved a number (`view create` on the laptop →
-`view ls` on the workbench, `[]` → 1 → `[]`). 🔴 **0.8.21 has since shipped, so both clients are
-stale again by construction** — nothing converges `homelab-talos`, so re-run the round trip rather
-than reading this paragraph. ⚠ **That "stale by construction" prediction was WRONG when tested.**
-Re-measured 2026-09-01 16:29Z: server 0.8.21, workbench client 0.8.21, laptop client 0.8.21, and the
-round trip moved a number cross-host (`view create` on the laptop → `view ls` on the workbench →
-`view rm`, `[] → 1 → []`). Something converged both checkouts after 0.8.21 shipped. The item stays
-RECURRING — the point is that "stale by construction" is a hypothesis to test, not a fact to carry.
-Source currency at that measurement: workbench at `trunk`; laptop 9
-commits behind but **0 of them touching `containers/clawgate`**, which is the subtree-not-repo
-distinction `drift-check.sh` rc 17 makes.
+✅ **RANK 8a — RE-MEASURED GREEN 2026-09-01 21:52Z, and still RECURRING.** Server 0.8.21, workbench
+client 0.8.21, laptop client 0.8.21, and the cross-host round trip **moved a number**: `view create`
+on the laptop → `view ls` on the workbench → `view rm`, `[] → 1 → []` (view id 8). 🔴 **A matching
+label is NOT the check — the round trip is**, and this is the second consecutive session in which
+the "both clients are stale again by construction" prediction was REFUTED on test. The item stays
+RECURRING because nothing converges `homelab-talos`: re-run the round trip, never read this
+paragraph. Source currency at that measurement: `~/workspace/homelab-talos` base clone **3 commits
+behind `origin/trunk`** (repo-wide; not evaluated per-subtree).
 
 ✅ **RANK 6 REMAINS FULLY CLOSED.** `devrc#1056` merged; the sentinel is live end to end —
 `GET /api/tmux/snapshot` returns `tmuxServerId` non-null for both hosts (`2509:1609459239` laptop,
-`4025325:1785949442` workbench). The old "`tmux_server_id` is NULL on both hosts, so the resolver's
-window-id tier disables itself" reading is obsolete.
+`4025325:1785949442` workbench).
 
 ✅ **RANKS 8c AND 8d MERGED** — `ZacxDev/homelab-infra#591` (squash `d6dc52cf`) and `#592`
 (squash `d2d2346e`), both verified on the merged tree at `d2d2346e` in BOTH tiers: go 20 ok / 0
 FAIL, bats 67 ok / 0 not ok under the CI image, and `ALL LEGS PASS` on a re-run `clawgate-ci`.
-Audited post-merge; findings became ranks 14–16, not a revert.
 
 🔴 **THE LIVE-REFRESH GAP IS CLOSED AND DEPLOYED — `#611`, squash `5d11d9a7`, live as 0.8.21.**
 The server had broadcast `tmux.changed` on every snapshot ingest since #468 with **nothing
@@ -50,12 +45,12 @@ so the premise was never true. Both panels now carry
 deadman, because SSE drops silently and a tab that stops updating with no signal is this
 codebase's recurring failure mode.
 **Verified live, not inferred:** the served `/tasks` page shows the trigger on both `#panel-tmux`
-and `#panel-layout`; the SSE stream carried **2 `tmux.changed` events in a 180 s window** (two
-feeder ticks at the 2-minute cadence) against 159 total events as a control.
+and `#panel-layout`; the SSE stream carried **2 `tmux.changed` events in a 180 s window** against
+159 total events as a control.
 
 **What the UI does today, for whoever asks next:**
-- `/ui/tmux` — every window on both hosts, now refreshing within ~1 s of a snapshot push. "What I
-  have open is always there" is TRUE of this tab.
+- `/ui/tmux` — every window on both hosts, refreshing within ~1 s of a snapshot push. "What I have
+  open is always there" is TRUE of this tab.
 - `/ui/layout` — only panels you declare. A newly-opened window does **not** appear. Panels
   re-resolve against the live snapshot each read, so a closed window reports `missing` rather than
   silently rebinding.
@@ -65,48 +60,52 @@ feeder ticks at the 2-minute cadence) against 159 total events as a control.
   run with no `ControlMaster`.
 - Terminal WRITE is still `DISABLED (fail-closed)` — read-only until a token is provisioned.
 
-- **Repo/branch:** `devrc` on `main`; `homelab-talos` on `trunk`. No branch of mine open — all four
-  PRs from this session are MERGED and content-verified on their remote refs.
-- **DONE this session, all four merged and verified by CONTENT (never ancestry — a squash makes
-  `--is-ancestor` false forever):**
-  | PR | what | squash |
-  |---|---|---|
-  | `devrc#1205` | handoff correction: superseded store-api flake blocks + a committed diff3 conflict marker | `ca044933` |
-  | `ZacxDev/homelab-infra#618` | rank 16 — the `clawgate-ci` bats collected-test floor | `b5992890` |
-  | `devrc#1212` | rank 13 — `--slug-for` discarded a lettered sub-rank | `76bb7507` |
-  | `ZacxDev/homelab-infra#625` | rank 15 — the bats scanners' heredoc blind spot | `0dd62cd9` |
-- **Deployed AND verified, stated separately:** `ship.sh` rc 0, both hosts at `26e16eca`, cross-host
-  agreement **COMPARED**, no skipped host (every per-host line read, not the verdict). Verified the
-  two things it was run for: `~/.claude/skills/handoff/reference/shared-queue.md` is current on this
-  host (it was a stale `/nix/store` copy), and the laptop's `clawgatectl`-adjacent `claim-work` now
-  returns `tmux-webapp-8c` / `-8d` instead of one collapsed slug.
-- 🔴 **Rank 16 is now PROVEN LIVE, which #618 alone could not do.** #618 changed a Tekton Task, and
-  a PipelineRun executes the DEPLOYED object — its own green `clawgate-ci` ran the OLD leg (measured:
-  one plan line `1..67`, zero `floor=` lines). #618 also triggered nothing on merge, being
-  path-filtered on `containers/clawgate/**` which it never touched. #625 DOES touch that path, so its
-  run `clawgate-ci-kdmd7` is the end-to-end proof:
-  ```
-  1..35
-    hook/tests/clawgate-hook.bats: rc=0 plan=1..35 ok=35 not_ok=0 ran=35 floor=34
-  1..32
-    hook/tests/clawgate-stop-hook.bats: rc=0 plan=1..32 ok=32 not_ok=0 ran=32 floor=31
-  hook leg rc=0
-  ```
-  Two plan lines, two floors. The deployed Task carries `run_suite` x2 (confirmed against the live
-  cluster object, byte-identical to what was tested).
-- **Rank 8a re-measured 2026-09-01 16:29Z and its standing prediction REFUTED.** Server 0.8.21, both
-  hosts' `clawgatectl` 0.8.21, and the cross-host round trip moved a number (`view create` on the
-  laptop → `view ls` on the workbench → `view rm`: `[] → 1 → []`). The doc's "stale again by
-  construction" is a hypothesis to test, not a fact to carry.
-- **IN FLIGHT: nothing.** No branch, no claim held (`tmux-webapp-13/15/16` and the doc-correction
-  slug all released), both worktrees removed and pruned, both base clones fast-forwarded.
-- ⚠ **Not verified, and it cannot be from here:** `trunk` has no post-merge `clawgate-ci` run over
-  the #625 bats files — the leg runs the deployed Task against a *PR's* checkout, so the next PR
-  touching `containers/clawgate/**` is the first thing that will exercise them on trunk.
-- ⚠ **The workbench's built generation is `origin/main` PLUS an uncommitted
-  `nix/programs/alacritty/default.nix`** (another session's WIP that nix reads at eval time).
-  `ship.sh` flags this itself as `DIRTY AND IN THE ARTIFACT`. The two hosts agree on the SHA; the
-  workbench's artifact is not purely that SHA.
+### This session (2026-09-01, `/resume`)
+- **Repo/branch:** `devrc` — this doc authored from a worktree off `origin/main` on
+  `docs/handoff-tmux-webapp-rank14`, because the shared `~/workspace/devrc` checkout was on `main`,
+  1 behind, and **dirty with another session's WIP** (`nix/programs/alacritty/default.nix`,
+  `nix/system/apply-tmp-churn-retention.sh`, plus untracked `scripts/diagnose-nix-disk.sh` /
+  `diagnose-disk-accounting.sh` / `output.txt` — the live `nix-disk-cleanup-1` claim).
+  `homelab-talos` — work done in the PID-unique worktree `~/workspace/ht-r14-800677` off
+  `origin/trunk` (`c9c6388d`).
+- **DONE this session:** rank 14 built, mutation-verified and shipped as
+  `ZacxDev/homelab-infra#632` (head `94cf920e`). Rank 8a re-measured green (above).
+- ✅ **#632's CI came back and it MERGED** — `clawgate-ci` pass (build/vet/test **-race** +
+  extension + hook bats), `clawgate-e2e` pass (127 tests, 2 skipped), `ux-audit-clawgate` pass;
+  `gitops-validate` RED on two Python tests that fail on two other revisions independently (see
+  rank 14). The PR touches `containers/clawgate/**` so the path filter DID fire — rank 16's live
+  proof (`step-hook`: TWO plan lines, `floor=34` / `floor=31`, never a single `1..67`) is readable
+  off this run.
+- ✅ **This doc's own PR, `devrc#1224`, merged as squash `f8ade1d7`** — required checks green:
+  pytests `collected=20359 passed=20356 skipped=3 failed=0` (floor 18404), nodetests
+  `tests=1449 pass=1449 fail=0` (floor 1367). Base clone fast-forwarded; the other session's five
+  WIP files were left untouched.
+- **Branch verified after push, not trusted from the push message:** local HEAD ==
+  `git ls-remote` == `94cf920e`, 1 commit ahead of `origin/trunk`, tree clean, no `autocommit:`
+  fixture commits. `core.hooksPath` measured at push time was repo-LOCAL and pointed at
+  `<repo>/.git/hooks` (sample-only, so nothing ran) — the documented volatile value.
+- **Claim `tmux-webapp-14` RELEASED**; worktree `~/workspace/ht-r14-800677` removed and pruned;
+  `~/workspace/homelab-talos` fast-forwarded to `b2fecf49`.
+- **No `clawgate-task:` field is recorded for this session.** `clawgate_handoff.sh resolve` exited
+  **5** — 0 tasks — with its positive control confirming the board was reachable and the token
+  accepted. 🔴 That is NOT a clean bill of health: a wrong `CLAUDE_CODE_SESSION_ID` also answers 200
+  with an empty array, so the reading cannot distinguish "touched no task" from "wrong id".
+
+### How to verify rank 14 (the new guard), from `~/workspace/ht-r14-800677/containers/clawgate`
+```bash
+# 1. it passes on the unmutated tree (the M0 control — a kill means nothing without it)
+go test ./internal/api/ -run '^TestNoPushDecisionIsReachedOnAnUnawaitedGoroutine$' -count=1 -v
+# 2. it REDS on the closing condition. Wrap server.go:2160 and watch its OWN message:
+#    s.notifyAgentRunning(agentName)
+#      -> safeGo(s.logger, "x", func() { s.notifyAgentRunning(agentName) })
+#    expect: "server.go:2160:52: BroadcastAgentChanged reaches notifyAgentRunning via safeGo"
+# 3. 🔴 the discriminating control — the OLD ledger must stay GREEN under that same mutant:
+go test ./internal/api/ -run '^TestEveryPushFanOutGoesThroughTheOneChokePoint$' -count=1 -v
+```
+🔴 **Build the gitignored CSS first or two unrelated tests red for that reason alone:**
+`nix-shell -p tailwindcss --run "cd <clawgate> && tailwindcss -i web/css/input.css -o web/static/app.css --minify"`
+— **`tailwindcss`, NOT `tailwindcss_4`.** Discriminator measured again this session: 41,992 B with
+`.h-14` present is correct; `_4` gives 18,707 B with `.h-14` absent; the real cwd trap gives ~5 KB.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -329,15 +328,51 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     pre-change `origin/main`; the 8th is labelled in place as an invariant guard, not counted as
     regression coverage.
     forcing: none
-14. **Pin the settle barrier's PRECONDITION, which nothing currently asserts.** Repo:
-    `homelab-talos`, `containers/clawgate/internal/api/push_fanout_ledger_test.go`. Extend the
-    ledger to AST-assert that no `notify*`/`pushTask` call appears inside a `go` statement or a
-    `safeGo` closure anywhere in `internal/api` — i.e. pin the RELATIONSHIP `awaitPushesSettled`
-    depends on, not a call-site count. Evidence and the 20/20-vs-0/20 measurement are in the
-    resolved investigation above. Closing condition: the ledger reds when
-    `s.notifyAgentRunning(agentName)` at `server.go:2160` is wrapped in `safeGo`.
+14. ✅ **DONE 2026-09-01 — `ZacxDev/homelab-infra#632`, squash `b2fecf49`.** Content-verified on
+    `origin/trunk` (never ancestry): the file went **168 → 558 lines**, all three new functions
+    present, with a nonexistent-marker grep returning 0 as the control that the check discriminates.
+    🔴 **It was merged over a RED `tekton/gitops-validate`, and that is NOT a claim the leg passed.**
+    The check text said `FAILED: scripts-tests` while `step-scripts-tests` **exited 0** — the
+    documented text-vs-PipelineRun disagreement; the real failures were
+    `test_s3_public_bucket_allowlist.py` and `test_loki_ruler_rules_wired.py`. **The discriminating
+    control, measured, not theorised:** `gitops-validate-wb42q` (rev `d2b775d9`, not mine) fails the
+    first and `gitops-validate-9gckk` (rev `2fe700b9`, not mine) fails the second, while mine
+    (`78rgf`, rev `94cf920e`) fails both — and this diff is ONE Go test file under
+    `containers/clawgate/`. The legs that DO cover it were green: `clawgate-ci` pass (build/vet/test
+    **-race** + extension + hook bats), `clawgate-e2e` pass (127 tests, 2 skipped),
+    `ux-audit-clawgate` pass. **Do not later infer from the merge that `gitops-validate` was green
+    for this change** — nobody can make that claim.
+    **What landed:** `push_fanout_ledger_test.go` now pins the RELATIONSHIP, not a call-site count.
+    Both sets are DERIVED, never spelled: push-deciders = transitive callers of `goPushBroadcast`
+    (39 on trunk today), spawners = any function with a func-typed parameter and a `go` in its body
+    (so a sibling of `safeGo` is covered the day it is written).
+    **Measured in the worktree, not carried over from the audit that filed this:** bug = flip
+    `notifyAgentRunning`'s running-status skip, so a task-linked NON-running agent pushes.
+    D1 (bug alone) → `TestProvisioningPushSkipsNonRunning` **20/20 caught**, new guard silent
+    (correct — not a scheduling change). D2 (bug + the call wrapped in `safeGo`) → behavioural
+    **1/20 caught**, new guard **20/20 red**. 🔴 **The doc previously recorded 0/20; the measured
+    value here is 1/20** — same direction, and the residual 1 is timing luck, because D2 converts a
+    deterministic detector into a race. The guard's own line names the closing condition verbatim:
+    `server.go:2160:52: BroadcastAgentChanged reaches notifyAgentRunning via safeGo`.
+    🔴 **The decisive control: `TestEveryPushFanOutGoesThroughTheOneChokePoint` stays GREEN under
+    BOTH D1 and D2.** Wrapping a CALLER moves no `push.Broadcast` call site, so the old ledger
+    cannot see this — that is what made it a real gap rather than a duplicate guard.
+    Mutation battery **6/6 killed**, M0 control green, restore verified by hash (M1 safeGo-wrap /
+    M2 bare `go` → guard red, old ledger green; M3 seed renamed → coverage floor; M4 spawner
+    detection blinded → `safeGo` floor; M5/M6 finder narrowed → finder control). A 7th mutant
+    (dropping the status clause outright) was scored **INVALID, not a kill** — it left the `agents`
+    import unused and did not compile.
+    Anti-vacuity in the file: a 9-name coverage floor, a `safeGo` spawner floor, and a
+    positive/negative control with one case per boundary claimed plus three it must stay silent on
+    — including `goPushBroadcast`'s own goroutine, flagging which would make the guard permanently
+    red. Known limits are stated in the file: it follows CALLS not function VALUES (so
+    `notifyTaskCreated`, which hands `flushCreatedTasks` to a timer, is correctly absent — that path
+    is async by design and the barrier never covered it), it is lexical and single-package, and
+    names are not receiver-qualified.
+    Full module at that tree: `go build` rc 0, `go vet` rc 0, `go test ./...` rc 0, **20 ok / 0
+    FAIL** counted from the runner's own lines.
     forcing: regression — measured, the conversion took one bug class from a 20/20 detector to a
-    0/20 non-detector, and the guard that would have caught the enabling refactor does not exist.
+    1/20 one, and until #632 merges the guard that would catch the enabling refactor is unmerged.
 15. ✅ **DONE 2026-09-01 — `ZacxDev/homelab-infra#625`, squash `0dd62cd9`.** All three parts.
     (a) KNOWN LIMIT 4 said no test body uses a heredoc; two do, and `/^}/ { inbody = 0 }` is shared
     by BOTH scanners, so a column-0 `}` in one blinds them for the rest of the body while EXAMINED
@@ -1663,6 +1698,80 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
   and the wait is ~15 minutes.** `clawgate-ci` was missing from #625's list on first read; it
   registered on the 5th poll iteration and passed. The doc already records this class from #566 —
   it recurred, and waiting is the whole remedy.
+
+- 🔴 **THE WORKING-TREE COPY OF THIS DOC WAS 103 LINES STALE AT `/resume`, AND ONLY THE
+  RECONCILER SAID SO.** Measured 2026-09-01: `~/workspace/devrc/claudedocs/handoff-tmux-webapp.md`
+  held **1686 lines against 1789 on `origin/main`**, and `resume-state.sh` printed
+  `handoff-read: 🔴 origin/main copy` with the authoritative text dropped at
+  `/tmp/resume-handoff-*.md`. Reading the tree copy would have framed the whole session on a doc
+  the last session did not write. **Read the `handoff-read:` line BEFORE opening the file** — the
+  two copies are byte-plausible either way, and nothing else distinguishes them.
+- 🔴 **A COMPILE ERROR MAKES A MUTANT INVALID, NOT A KILL — and the one that bit here looked
+  perfectly reasonable.** Dropping `a.Status != agents.StatusRunning ||` from
+  `notifyAgentRunning`'s guard removed the last use of the `agents` import, so the package stopped
+  building. Scored INVALID and re-cut as a one-operator flip (`!=` → `==`), which keeps the import
+  referenced and produces the same behavioural bug. **A battery that does not check the build
+  before scoring reports that as a survivor or a kill, both wrong.**
+- 🔴 **REPORT THE NUMBER YOU MEASURED, NOT THE ONE THE DOC CARRIES.** This doc recorded the
+  detector loss as **0/20**; re-measuring it in a fresh worktree gave **1/20** — same direction,
+  and the difference matters, because D2 turns a deterministic detector into a RACE rather than
+  switching it off. A doc's measurement is a reading from one tree at one moment; re-run it rather
+  than quote it.
+- 🔴 **A STRUCTURAL GUARD MUST BE SHOWN DETERMINISTIC, NOT ASSUMED SO.** "It reads the AST, so of
+  course it is deterministic" is reasoning, not measurement. Run it `-count=20` under the mutant
+  and count `--- FAIL:` lines: 20/20 here. That number is what makes it a replacement for a
+  20/20 behavioural detector rather than a hopeful one.
+- 🔴 **A NEW GUARD'S REAL PROOF IS THAT THE EXISTING ONE STAYS GREEN.** Before writing #632 the
+  question "is this a duplicate of the fan-out ledger?" was answerable in one run:
+  `TestEveryPushFanOutGoesThroughTheOneChokePoint` is GREEN under BOTH the bug and the
+  bug+`safeGo` mutant, because wrapping a CALLER moves no `push.Broadcast` call site. **Measure the
+  incumbent under your mutant before building the challenger** — if it reds, you are about to add
+  a second copy of a guard that already works.
+- 🔴 **DERIVE THE SET, DO NOT SPELL IT — and check the derivation on the REAL tree before
+  committing to it.** The obvious shape for #632 was a hardcoded `notify*`/`pushTask` name list;
+  the shape that shipped derives push-deciders as transitive callers of `goPushBroadcast` (39
+  functions) and spawners as "takes a func parameter and contains a `go`" (which finds `safeGo`
+  and `goPushBroadcast`, and would find a sibling helper). ⚠ **A derived set can over-reach into a
+  permanently-red gate**, so it was measured on trunk FIRST with a throwaway `go run` probe — 0
+  violations — before a line of the test was written. **A permanently-red gate is worse than no
+  gate; spend the probe.**
+- ⚠ **`goPushBroadcast` is itself a spawner, and flagging its own goroutine would make the guard
+  permanently red.** It falls out correctly rather than needing a special case — the `go func(){}`
+  inside it calls `s.push.Broadcast` and `onDelivered`, neither of which is a declared function in
+  package `api` — but the negative control pins it explicitly, because the next person to widen
+  the finder will not know that.
+- ⚠ **`gofmt -l` on this package lists SIX pre-existing unformatted files** (`agent_test.go`,
+  `agents_test.go`, `attention_reap_loop_test.go`, `auto_approve_persist_test.go`,
+  `noop_provisioner.go`, `push_task.go`). They are on trunk, not yours. `gofmt -w` the FILE you
+  edited, never the directory — the doc already records that `gofmt -w <dir>` silently widens a
+  diff by seven files.
+- ⚠ **`homelab-talos`'s `.envrc` is TRACKED, so the worktree recipe's "write a one-line `use
+  flake`" shows up as a modified file.** Harmless until you stage it. `git -C <wt> checkout --
+  .envrc` before committing, and check `git status --porcelain` shows only the file you meant.
+- ⚠ **`parsePackageFilesWithPositions` and `sortedKeys` already exist in
+  `task_status_ledger_test.go`** — the compiler caught the duplicate immediately, which is the
+  cheap outcome. Reuse them: the shared parser owns the "0 files scanned is the failure, not the
+  all-clear" check, and a second copy is exactly how that check ends up true in one ledger and
+  forgotten in another.
+
+- 🔴 **A `git show <ref>:<path>` WITHOUT `-C` READS THE CWD'S REPO, AND THE WRONG-REPO ANSWER IS A
+  CONFIDENT ZERO.** Content-verifying the #632 squash, four `git show origin/trunk:<file> | grep -c`
+  calls ran from `~/workspace/devrc`, which has no `origin/trunk`: each printed `fatal: invalid
+  object name` to stderr and **`0`** to stdout, and the zeros lined up under a heading that said
+  CONTENT VERIFICATION. The negative control was 0 too, so it agreed. **Re-run with `-C <repo>` and
+  pair every such count with a probe that MUST be non-zero** — the pattern that catches this is a
+  positive control, never a tidier-looking zero.
+- 🔴 **A CONTENT CHECK IS A CLAIM ABOUT YOUR PATTERN FIRST.** Verifying the #1224 squash,
+  `grep -c 'caught \*\*1/20\*\*'` returned 0 — the doc says `**1/20 caught**`, the index bullet says
+  `caught **1/20**`, and the pattern was copied from the wrong one. Cross-checked with a
+  regex-free `str.count` in python (fails differently) plus a negative control: 4 real occurrences.
+  **Never report an absence from a single pattern in a single tool.**
+- 🔴 **MERGING MAKES YOUR OWN FRESHLY-WRITTEN HANDOFF WRONG, AND THE WRONG PART IS AN INSTRUCTION.**
+  `#1224` landed saying rank 14 was `IN FLIGHT … read the PR, then merge it`; `#632` merged one
+  minute later, so the canonical doc carried a live instruction to do something already done. A
+  stale FACT is survivable — `resume-state.sh` prints `PR … MERGED` as a DRIFT line — but a stale
+  IMPERATIVE is read as a work item. **If you merge after writing the handoff, correct the ranked
+  item in the same session.**
 
 ## How to verify
 

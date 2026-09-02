@@ -24,9 +24,13 @@ WHAT IS EXERCISED IN BOTH DIRECTIONS, IN-BAND
     near-miss-token watched to be rejected. An auth layer never seen to deny is
     not known to be an auth layer.
   * `TestByteIdentityVerifier` — the phase-1 acceptance comparator run against
-    identical stores (PASS) and against a store differing by ONE character
-    (FAIL, naming the scope). A comparator that always says PASS is
-    indistinguishable from one that works.
+    identical stores (PASS), against identical stores whose entry-file MTIMES
+    are in a different ORDER (PASS — the red it could not pass at all), and
+    against a store differing by ONE character, with and without that shuffle
+    (FAIL, naming the scope and the ref). A comparator that always says PASS is
+    indistinguishable from one that works, and order-independence bought by
+    comparing LESS is the failure mode the shuffled negative control exists to
+    catch.
   * `TestSeedIsNonDestructive` — the tree hasher is shown to CHANGE when the
     source is deliberately modified, before its "unchanged" verdict is believed.
 
@@ -3853,13 +3857,26 @@ def run_verify(*args: str) -> subprocess.CompletedProcess:
 # script must break these tests, not be absorbed by them. It is anchored on
 # `PASS` because the accounting identity is a claim about a run the comparator
 # called byte-identical; a FAIL line prints a different field set on purpose.
+#
+# 🔴 `entries=` AND `index-order-lines=` JOINED WHEN THE COMPARATOR STOPPED
+# COMPARING THE MTIME-ORDERED WHOLE-SCOPE DIGEST. The counts are now SUMS over
+# every stream compared for the scope — one scope-level `mode=list` render plus
+# one single-ref render per entry — so `store_root` reads `2 * (1 + entries)`
+# against a pod-shaped remote rather than a flat 2, and the tests below assert
+# that relationship rather than a constant: a per-entry stream that silently
+# skipped the canonicalisation would otherwise be invisible.
+# `index-order-lines` is the diff reduction the row-sorting rule bought,
+# MEASURED (canonicalised diff minus what still differs once sorted), so the
+# accounting identity is now four-term:
+#     raw == store_root + host + block + order
 _EVIDENCE_RE = re.compile(
-    r"^PASS scope=\S+ bytes=\d+ "
+    r"^PASS scope=\S+ entries=(?P<entries>\d+) bytes=\d+ "
     r"raw-diff-lines=(?P<raw>\d+) "
     r"store-root-lines=(?P<store_root>\d+) "
     r"host-lines=(?P<host>\d+) "
     r"snapshot-line=(?P<snapshot>\d+) "
     r"snapshot-block-lines=(?P<block>\d+) "
+    r"index-order-lines=(?P<order>\d+) "
     r"accounted-for=(?P<accounted>\d+) ",
     re.MULTILINE,
 )
@@ -3903,6 +3920,97 @@ def token_file(tmp_path: Path) -> Path:
     path.write_text(GOOD_TOKEN + "\n")
     path.chmod(0o600)
     return path
+
+
+# =============================================================================
+# 🔴 THE ORDERING FIXTURE — the shape the comparator could not pass at all.
+#
+# `subsystem_recall` orders its INDEX newest-first by entry-file mtime, and the
+# transport (`seed.sh`: `rsync -a --delete` into a stage, then `tar` into the
+# pod) does not carry mtime. So two stores holding IDENTICAL BYTES render their
+# index in a different order — measured against the live pod on 2026-09-01,
+# where every scope with more than two entries failed and the `cli` scope's only
+# unaccounted difference was one row's POSITION.
+#
+# FOUR entries, not two: two entries can only be in one of two orders and the
+# fixture would be one coin-flip away from asserting nothing. Names are pairwise
+# distinct and share no prefix, so a comparison that matched on a prefix cannot
+# pass by coincidence.
+# =============================================================================
+
+ORDER_SCOPE = "cable-tray"
+ORDER_REFS = ("clamp-north", "clamp-south", "duct-east", "duct-west")
+# Stamped oldest-first, so the reader's newest-first index is the REVERSE of
+# this. Chosen so the resulting index order differs from the local one in more
+# than one position — the test asserts that rather than trusting it.
+SHUFFLED_ORDER = ("duct-west", "clamp-north", "duct-east", "clamp-south")
+
+
+def _write_ordered_scope(root: Path) -> None:
+    (root / ORDER_SCOPE).mkdir(parents=True)
+    for ref in ORDER_REFS:
+        (root / ORDER_SCOPE / f"{ref}.md").write_text(
+            _entry(ref, ORDER_SCOPE, nuance=f"- 2026-02-11: {ref} seats on a shim.")
+        )
+
+
+def _stamp(root: Path, order) -> None:
+    """Set every entry file's mtime EXPLICITLY, oldest first.
+
+    🔴 NEVER LET WRITE ORDER STAND IN FOR MTIME ORDER. `cp -a` preserves
+    mtimes, a filesystem can stamp two writes inside one clock tick, and the
+    reader breaks a tie on `ref` — so a fixture that merely wrote its files in
+    some sequence would be asserting a property of this machine's clock instead
+    of a property of the store, and would go quietly vacuous on a faster one.
+    100-second gaps make the order a fact of the fixture.
+    """
+    base = time.time() - 100_000
+    for i, ref in enumerate(order):
+        stamp = base + i * 100
+        os.utime(root / ORDER_SCOPE / f"{ref}.md", (stamp, stamp))
+
+
+def _index_refs(root: Path, scope: str = ORDER_SCOPE) -> list[str]:
+    """The refs the reader's own index lists, IN ORDER, for one store.
+
+    Read out of the CLI rather than off the filesystem: the set arm's claim is
+    about what `subsystem_recall` INDEXES, and a `*.md` the loader rejects is a
+    real file that is not indexed and not `--ref`-addressable.
+    """
+    out = subprocess.run(
+        [sys.executable, str(RECALL_PATH), "--store", str(root), "--scope", scope,
+         "--list"],
+        capture_output=True, text=True, timeout=HANG_TIMEOUT,
+    )
+    assert out.returncode <= 3, out.stderr
+    refs: list[str] = []
+    inside = False
+    for line in out.stdout.splitlines():
+        if line.startswith("INDEX ("):
+            inside = True
+            continue
+        if not inside:
+            continue
+        if not line.strip():
+            break
+        if line.startswith("  ("):
+            continue
+        refs.append(line.split()[0])
+    return refs
+
+
+@pytest.fixture
+def shuffled_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """A local store and a served copy: same bytes, different mtime ORDER."""
+    local = tmp_path / "ordered-local"
+    served = tmp_path / "ordered-served"
+    _write_ordered_scope(local)
+    subprocess.run(
+        ["cp", "-a", str(local), str(served)], check=True, capture_output=True
+    )
+    _stamp(local, ORDER_REFS)
+    _stamp(served, SHUFFLED_ORDER)
+    return local, served
 
 
 class TestByteIdentityVerifier:
@@ -3969,6 +4077,245 @@ class TestByteIdentityVerifier:
         assert "verify: scopes=4" in r.stdout
         assert "pass=3 fail=1" in r.stdout
 
+    # ------------------------------------------------------------------
+    # 🔴 THE ORDERING REGRESSION AND ITS THREE CONTROLS.
+    # ------------------------------------------------------------------
+
+    def test_a_MULTI_ENTRY_scope_in_a_DIFFERENT_MTIME_ORDER_still_PASSES(
+        self, shuffled_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE REGRESSION. This is the run that could not pass at all.
+
+        Both stores hold byte-identical entries; only the entry-file MTIMES
+        differ. The reader orders its INDEX newest-first by mtime and picks the
+        digest's one featured BODY the same way, and the transport does not
+        carry mtime — so the old whole-scope `cmp` reported a difference for a
+        store that was identical, on every scope with more than two entries.
+        MEASURED against the live pod on 2026-09-01: `scopes=5 pass=1 fail=4`,
+        the single PASS being the only two-entry scope.
+
+        `claude/RULES.md`: a permanently-red gate is worse than no gate.
+        """
+        local, served = shuffled_pair
+
+        # 🔴 THE FIXTURE'S OWN POSITIVE CONTROL, BEFORE THE COMPARATOR RUNS.
+        # A green below means nothing unless the condition it is about is
+        # actually present: if the two stores happened to render the same
+        # order, this test would pass against the OLD script too and assert
+        # nothing at all.
+        local_order = _index_refs(local)
+        served_order = _index_refs(served)
+        assert len(local_order) == len(ORDER_REFS), (
+            f"the fixture did not produce {len(ORDER_REFS)} indexed entries: "
+            f"{local_order}"
+        )
+        assert local_order != served_order, (
+            f"the fixture produced the SAME index order on both sides "
+            f"({local_order}) — the regression it is about is not reachable"
+        )
+        assert sorted(local_order) == sorted(served_order), (
+            f"the fixture changed the entry SET, not the order: "
+            f"{local_order} vs {served_order}"
+        )
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: scopes=1 pass=1 fail=0 entries-compared=4" in r.stdout
+
+        rows = _evidence_rows(r.stdout)
+        assert len(rows) == 1, f"expected one evidence row:\n{r.stdout}"
+        row = rows[0]
+        # Every entry's bytes were actually compared — a comparator that
+        # skipped the per-entry arm would be green here for the wrong reason.
+        assert row["entries"] == len(ORDER_REFS), (
+            f"the per-entry arm compared {row['entries']} of {len(ORDER_REFS)}: {row}"
+        )
+        # 🔴 AND THE REORDER RULE WAS SPENT. A zero here would mean the two
+        # renders agreed without it, i.e. the fixture's divergence never reached
+        # the comparator and this green is about nothing.
+        assert row["order"] > 0, (
+            f"index-order-lines=0 — the sort accounted for nothing, so the "
+            f"ordering difference never reached the comparison: {row}"
+        )
+        assert row["raw"] == (
+            row["store_root"] + row["host"] + row["block"] + row["order"]
+        ), f"unaccounted differing lines: {row}"
+        assert row["accounted"] == row["raw"], (
+            f"the printed accounted-for does not cover the raw diff: {row}"
+        )
+
+    def test_an_entry_on_ONE_SIDE_ONLY_FAILS_and_NAMES_the_scope_and_the_ref(
+        self, shuffled_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE SET ARM, IN BOTH DIRECTIONS.
+
+        Order-independence must not become a blanket excuse: an entry that
+        exists on one side and not the other is a real difference, and the
+        message has to name WHICH ref so the reader is not left diffing two
+        stores by hand.
+
+        Both directions, because a `comm -23` written without its `-13` mirror
+        is a guard that is half there and reads as whole.
+
+        ⚠ WHAT A FAILURE HERE MEANS DEPENDS ON WHEN IT RAN. After the phase-1
+        cutover the pod is canonical and each host's store is a read-through
+        cache that may legitimately lag — measured 2026-09-01, scope `devrc` at
+        26 entries locally against 29 on the pod, with nothing wrong. This arm
+        is an ACCEPTANCE check immediately after a seed/push, which is where
+        `cairn-cutover.py` P4 runs it. It is deliberately not weakened to
+        tolerate a lagging cache: a check that shrugged at a missing entry
+        could not detect a half-copied seed, which is the one thing P4 exists
+        for.
+        """
+        local, served = shuffled_pair
+
+        # a) an entry the pod has and this host does not.
+        extra = served / ORDER_SCOPE / "duct-north.md"
+        extra.write_text(
+            _entry("duct-north", ORDER_SCOPE, nuance="- 2026-02-12: a fifth run.")
+        )
+        os.utime(extra, (time.time() - 50_000, time.time() - 50_000))
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={ORDER_SCOPE} entry SET differs" in r.stdout
+        assert f"ONLY ON THE POD:   scope={ORDER_SCOPE} ref=duct-north" in r.stdout
+        assert "local-only=0 pod-only=1" in r.stdout
+
+        # b) the mirror: an entry this host has and the pod does not.
+        extra.unlink()
+        (served / ORDER_SCOPE / "duct-east.md").unlink()
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={ORDER_SCOPE} entry SET differs" in r.stdout
+        assert f"ONLY ON THIS HOST: scope={ORDER_SCOPE} ref=duct-east" in r.stdout
+        assert "local-only=1 pod-only=0" in r.stdout
+
+    def test_a_CONTENT_difference_UNDER_a_SHUFFLED_order_is_STILL_caught(
+        self, shuffled_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE CONTROL THAT KEEPS ORDER-INDEPENDENCE FROM BEING AN EXCUSE.
+
+        The same shuffled mtimes as the regression above, PLUS a single changed
+        character inside one entry. A comparator that reached order-independence
+        by comparing less — sorting the whole stream into a multiset, or
+        dropping the per-entry arm — is green here, and that is exactly the
+        failure mode a wider canonicalisation introduces.
+
+        The mutation is inside `## Nuance / work-history`, which the index row
+        does NOT reproduce (the row carries the bullet COUNT, not its text), so
+        the scope-level arm cannot see it: only the per-entry comparison can.
+        """
+        local, served = shuffled_pair
+        path = served / ORDER_SCOPE / "duct-east.md"
+        path.write_text(path.read_text().replace("seats on a shim", "seats on a shin"))
+        # The rewrite stamped `now`; re-stamp so the ordering divergence this
+        # test is about is still present rather than accidentally repaired.
+        _stamp(served, SHUFFLED_ORDER)
+
+        assert _index_refs(local) != _index_refs(served), (
+            "the re-stamp lost the shuffled order, so this is no longer the "
+            "'content difference UNDER a shuffle' case it claims to be"
+        )
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={ORDER_SCOPE} ref=duct-east entry bytes differ" in r.stdout
+        assert "verify: scopes=1 pass=0 fail=1" in r.stdout
+
+    def test_a_difference_VISIBLE_IN_THE_INDEX_ROW_is_reported_AS_ONE(
+        self, shuffled_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE ROW COMPARISON IS LIVE, AND ITS COUNT IS NOT DECORATION.
+
+        Every field on an index row (`ref`, the nuance COUNT, the sensitivity,
+        the `🔴 N OPEN` badge) is derived from the entry body, so the per-entry
+        arm would catch any row difference too — which makes it easy to write a
+        row comparison that observes NOTHING and never be told. It matters for
+        one specific reason: `index-order-lines` is measured as the diff
+        reduction the row SORT bought, so a row comparison wired to a constant
+        zero would fold a GENUINE row difference into the reorder excuse and
+        report it as `accounted-for`.
+
+        MUTATION-VERIFIED: with `rows_diff` pinned to 0 the run still FAILS —
+        the per-entry arm catches the same entry a step later — so `returncode
+        == 1` proves nothing here. The load-bearing assertion is that the
+        difference was seen BY THE ROW COMPARISON and counted as such.
+
+        The served copy's entry gains a second `## Nuance / work-history`
+        bullet, which moves its row's count from `1 nuance` to `2 nuance`.
+        """
+        local, served = shuffled_pair
+        path = served / ORDER_SCOPE / "clamp-north.md"
+        path.write_text(path.read_text() + "- 2026-02-13: and a second bullet.\n")
+        _stamp(served, SHUFFLED_ORDER)
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={ORDER_SCOPE} scope-level render differs" in r.stdout, (
+            f"the index-row difference was not attributed to the index — the "
+            f"row comparison did not fire:\n{r.stdout}"
+        )
+        seen = re.search(r"sorted-row-lines=(\d+)", r.stdout)
+        assert seen, f"the FAIL line printed no sorted-row-lines count:\n{r.stdout}"
+        assert int(seen.group(1)) > 0, (
+            f"sorted-row-lines=0 while the rows genuinely differ — the row "
+            f"comparison is wired to nothing, and the difference would be "
+            f"folded into the index-order excuse:\n{r.stdout}"
+        )
+
+    def test_a_PAGINATED_index_is_REFUSED_rather_than_partially_compared(
+        self, tmp_path: Path, token_file: Path
+    ):
+        """🔴 THE ONE SHAPE THIS COMPARATOR CANNOT ANSWER, SAID OUT LOUD.
+
+        Past `LISTING_PAGE_SIZE` the reader pages its index, and BOTH the page
+        membership and the ref column's width (`max(len(ref) …)` over the
+        entries on THAT page) become functions of the mtime order. Page 1 of two
+        byte-identical stores would then hold different refs padded to different
+        widths, and the refs past page 1 were never read at all — so comparing
+        page 1 would be a partial check reported as a clean one, which is the
+        silent-zero shape this whole file refuses.
+
+        It refuses instead, and the refusal names the scope. No scope in the
+        real store is near the cap today (largest measured: 50 entries), so this
+        is the unobserved case made reachable rather than a reproduction of one
+        that happened.
+        """
+        root = tmp_path / "big"
+        (root / ORDER_SCOPE).mkdir(parents=True)
+        n = api.rc.LISTING_PAGE_SIZE + 1
+        for i in range(n):
+            ref = f"run-{i:04d}"
+            (root / ORDER_SCOPE / f"{ref}.md").write_text(
+                _entry(ref, ORDER_SCOPE, nuance=f"- 2026-02-11: {ref}.")
+            )
+        with running(root) as (base, _):
+            r = run_verify(
+                "--store", str(root), "--url", base, "--token-file", str(token_file)
+            )
+        # 🔴 SAME STORE ON BOTH SIDES — so every other arm would pass, and a
+        # comparator that did not refuse would print a PASS that covered one
+        # page out of two.
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={ORDER_SCOPE} index is PAGINATED" in r.stdout
+        assert "Nothing about this scope was verified." in r.stdout
+        assert "verify: scopes=1 pass=0 fail=1 entries-compared=0" in r.stdout
+
     def test_every_permitted_difference_is_ACCOUNTED_FOR_not_merely_small(
         self, store: Path, tmp_path: Path, token_file: Path
     ):
@@ -4017,23 +4364,49 @@ class TestByteIdentityVerifier:
         rows = _evidence_rows(r.stdout)
         assert rows, f"the verifier printed no evidence rows:\n{r.stdout}"
         for row in rows:
-            assert row["raw"] == row["store_root"] + row["host"] + row["block"], (
-                f"unaccounted differing lines: {row}"
-            )
+            assert row["raw"] == (
+                row["store_root"] + row["host"] + row["block"] + row["order"]
+            ), f"unaccounted differing lines: {row}"
             # The script's own arithmetic, read back rather than re-derived —
             # a printed `accounted-for` that disagreed with its own parts would
             # be a reader-facing lie even while the identity above held.
-            assert row["accounted"] == row["store_root"] + row["host"] + row["block"], (
-                f"the printed accounted-for does not equal its own parts: {row}"
+            assert row["accounted"] == (
+                row["store_root"] + row["host"] + row["block"] + row["order"]
+            ), f"the printed accounted-for does not equal its own parts: {row}"
+            # 🔴 EVERY STREAM CARRIED THE CANONICALISATION, not just the first.
+            # The counts are sums over `1 + entries` streams — the scope-level
+            # `mode=list` render plus one single-ref render per entry — so a
+            # per-entry stream that silently skipped a `sed` shows up as a
+            # count that is short of the multiple, which a bare
+            # `store_root > 0` could not see.
+            streams = 1 + row["entries"]
+            assert row["store_root"] == 2 * streams, (
+                f"the store-root rule was not spent on all {streams} streams: {row}"
+            )
+            assert row["block"] == 2 * streams, (
+                f"the snapshot block was not stripped from all {streams} remote "
+                f"streams: {row}"
+            )
+            assert row["snapshot"] == streams, (
+                f"the banner was not served on all {streams} streams: {row}"
             )
         # …and the causes exercised here are genuinely PRESENT, or the identity
         # above is satisfiable by a run that compared nothing (0 == 0 + 0 + 0).
-        assert any(row["snapshot"] == 1 for row in rows), "no snapshot line observed"
+        assert any(row["snapshot"] >= 1 for row in rows), "no snapshot line observed"
         assert any(row["block"] == 2 for row in rows), (
             "no snapshot BLOCK observed — this tree's server emits the banner "
-            "plus exactly one blank separator, so a 2 is the expected length"
+            "plus exactly one blank separator, so a 2 is the expected length "
+            "for the single-stream (zero-entry) scopes"
         )
         assert any(row["store_root"] == 2 for row in rows), "no store-root line observed"
+        # 🔴 AND THE PER-ENTRY ARM RAN. Every count above is a sum over
+        # `1 + entries` streams, and `entries == 0` satisfies all of them while
+        # comparing no entry bytes at all — the silent zero this file refuses
+        # everywhere else. Two of the four fixture scopes hold no indexed entry
+        # by design, so this is `any`, not `all`.
+        assert any(row["entries"] > 0 for row in rows), (
+            f"no scope compared a single entry body: {rows}"
+        )
         # Both sides are this machine, so the host line must be IDENTICAL here.
         # A non-zero would mean the harness accidentally diverged the two hosts,
         # which would make the pod-shaped test below prove nothing new.
@@ -4094,21 +4467,33 @@ class TestByteIdentityVerifier:
         rows = _evidence_rows(r.stdout)
         assert len(rows) == 4, f"expected one evidence row per scope:\n{r.stdout}"
         for row in rows:
-            # 🔴 EACH PERMITTED DIFFERENCE PRESENT AND COUNTED. Asserting only
-            # the PASS would be satisfied by a canonicalisation that flattened
-            # the whole stream.
-            assert row["store_root"] == 2, f"no store-root difference: {row}"
-            assert row["host"] == 2, f"no host-line difference: {row}"
-            assert row["block"] == 3, (
+            # 🔴 EACH PERMITTED DIFFERENCE PRESENT AND COUNTED, ON EVERY STREAM.
+            # Asserting only the PASS would be satisfied by a canonicalisation
+            # that flattened the whole stream. The multiple is `1 + entries` —
+            # the scope-level `mode=list` render plus one single-ref render per
+            # entry — so a per-entry stream that skipped one of the three rules
+            # fails here rather than passing on the scope-level stream's count.
+            streams = 1 + row["entries"]
+            assert row["store_root"] == 2 * streams, (
+                f"no store-root difference on all {streams} streams: {row}"
+            )
+            assert row["host"] == 2 * streams, (
+                f"no host-line difference on all {streams} streams: {row}"
+            )
+            assert row["block"] == 3 * streams, (
                 f"the served banner + TWO blank separators were not measured "
-                f"as a 3-line block: {row}"
+                f"as a 3-line block on all {streams} streams: {row}"
             )
-            assert row["raw"] == row["store_root"] + row["host"] + row["block"], (
-                f"unaccounted differing lines: {row}"
-            )
+            assert row["raw"] == (
+                row["store_root"] + row["host"] + row["block"] + row["order"]
+            ), f"unaccounted differing lines: {row}"
             assert row["accounted"] == row["raw"], (
                 f"the printed accounted-for does not cover the raw diff: {row}"
             )
+        assert any(row["entries"] > 0 for row in rows), (
+            f"no scope compared a single entry body — the per-entry arm never "
+            f"ran, so the multiples above are all about one stream: {rows}"
+        )
 
     def test_a_POD_SHAPED_remote_STILL_FAILS_on_a_real_content_difference(
         self, store: Path, tmp_path: Path, token_file: Path, monkeypatch
@@ -4194,31 +4579,43 @@ class TestByteIdentityVerifier:
         scope against a pre-0.3.0 pod and the failure would read as a content
         difference.
 
-        The stub replays the local CLI's own bytes per scope — a server that
-        renders identically and stamps nothing.
+        The stub replays the local CLI's own bytes — a server that renders
+        identically and stamps nothing.
+
+        🔴 IT HONOURS `mode` AND `ref`, WHICH IS NOT COSMETIC. The comparator no
+        longer fetches one digest per scope: it asks for `?mode=list` and then
+        `?ref=<name>` per entry. A stub keyed on the path alone would 404 every
+        one of those and this test would pass on the 404 branch, proving nothing
+        about the empty-block path it exists for.
         """
         import http.server
+        from urllib.parse import parse_qs, urlsplit
 
-        bodies = {}
-        for scope in (SCOPE, OTHER_SCOPE, EMPTY_SCOPE, BROKEN_SCOPE):
-            out = subprocess.run(
-                [sys.executable, str(RECALL_PATH), "--store", str(store),
-                 "--scope", scope],
-                capture_output=True, timeout=HANG_TIMEOUT,
-            )
+        def render(scope: str, params: dict[str, list[str]]) -> bytes:
+            argv = [sys.executable, str(RECALL_PATH), "--store", str(store),
+                    "--scope", scope]
+            if params.get("ref"):
+                argv += ["--ref", params["ref"][-1]]
+            elif params.get("mode", [""])[-1] == "list":
+                argv += ["--list"]
+            out = subprocess.run(argv, capture_output=True, timeout=HANG_TIMEOUT)
             # exit 3 is "nothing readable" — a legitimate render, which the
             # verifier itself tolerates. Anything harder is a broken fixture.
             assert out.returncode <= 3, out.stderr.decode()
-            bodies[scope] = out.stdout
+            return out.stdout
+
+        known = {SCOPE, OTHER_SCOPE, EMPTY_SCOPE, BROKEN_SCOPE}
 
         class Unstamped(http.server.BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802
-                body = bodies.get(self.path.rsplit("/", 1)[-1])
-                if body is None:
+                split = urlsplit(self.path)
+                scope = split.path.rsplit("/", 1)[-1]
+                if scope not in known:
                     self.send_response(404)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
+                body = render(scope, parse_qs(split.query))
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -4249,10 +4646,16 @@ class TestByteIdentityVerifier:
         rows = _evidence_rows(r.stdout)
         assert len(rows) == 4, f"expected one evidence row per scope:\n{r.stdout}"
         for row in rows:
-            assert row == {
+            assert {k: v for k, v in row.items() if k != "entries"} == {
                 "raw": 0, "store_root": 0, "host": 0,
-                "snapshot": 0, "block": 0, "accounted": 0,
+                "snapshot": 0, "block": 0, "order": 0, "accounted": 0,
             }, f"an unstamped identical render was not a clean zero: {row}"
+        # `entries` is deliberately outside that zero: two of the four fixture
+        # scopes hold indexed entries and their bodies WERE compared, and a run
+        # in which nothing was is the silent zero, not the clean one.
+        assert sum(row["entries"] for row in rows) == 2, (
+            f"the per-entry arm did not compare the two indexed entries: {rows}"
+        )
 
     def test_an_UNREACHABLE_pod_FAILS_rather_than_comparing_nothing(
         self, store: Path, token_file: Path

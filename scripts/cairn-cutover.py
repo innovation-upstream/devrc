@@ -1550,13 +1550,39 @@ def _acceptance(args: argparse.Namespace, cache_dir: Path) -> int:
     about the push and this is a claim about the STATE.
 
     `verify-byte-identity.sh` is then run unmodified over every scope. Its own
-    header documents the two controls that make its green meaningful, and its
-    PASS lines print `raw-diff-lines` beside the verdict, decomposed into
-    `store-root-lines` + `host-lines` + `snapshot-block-lines` and summed as
-    `accounted-for`, so a reader can see the canonicalisation was spent where it
-    claims. 🔴 THREE named differences, not one: this sentence used to name only
-    the store root, which was already false when `host:` shipped and is exactly
-    the difference that made that script permanently red.
+    header documents the controls that make its green meaningful, and its PASS
+    lines print `raw-diff-lines` beside the verdict, decomposed into
+    `store-root-lines` + `host-lines` + `snapshot-block-lines` +
+    `index-order-lines` and summed as `accounted-for`, so a reader can see the
+    canonicalisation was spent where it claims. 🔴 FOUR named differences, not
+    one: this sentence used to name only the store root, which was already
+    false when `host:` shipped, and it still named three after `index-order`
+    joined — each omission being exactly the kind of difference that made that
+    script permanently red.
+
+    🔴 IT NO LONGER COMPARES THE WHOLE-SCOPE DIGEST, AND P4's READING CHANGES
+    WITH IT. The reader's index is newest-first by entry-file MTIME and the
+    digest's one featured body is chosen the same way, while the transport
+    (`seed.sh`: `rsync` to a stage, `tar` into the pod) carries no mtime — so
+    the old whole-scope `cmp` failed on stores that were byte-identical
+    (measured 2026-09-01 against the live pod: `scopes=5 pass=1 fail=4`, the
+    lone PASS being the only two-entry scope). It now compares, per scope, the
+    `mode=list` render with its index ROWS sorted, the entry SET via `comm`,
+    and then EACH entry's own single-ref render. A `FAIL … entry SET differs`
+    names the refs.
+
+    ⚠ THE SET ARM IS AN ACCEPTANCE CHECK, AND IT IS ONLY ONE HERE. After this
+    cutover the pod is canonical and each host's store is a read-through cache
+    that may legitimately lag — measured the same day, scope `devrc` at 26
+    entries locally against 29 on the pod, with nothing wrong. Run at P4,
+    immediately after the push, a set difference means the push was lossy; run
+    at an arbitrary moment it may only mean the cache is behind. The arm is
+    deliberately not weakened for that: a check that tolerated a missing entry
+    could not detect a half-copied seed, which is the one thing P4 exists for.
+
+    ⚠ AND IT IS NOW N+1 REQUESTS PER SCOPE, not 1. A 50-entry scope issues 51.
+    The `timeout=600` below is what bounds that; the whole real store measured
+    at ~400 entries, and one local `--ref` render costs ~73 ms.
     """
     refreshed = run(
         [sys.executable, str(CAIRN), "--cache", str(cache_dir), "sync"], timeout=120
