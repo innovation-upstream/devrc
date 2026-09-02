@@ -76,6 +76,18 @@ ESPANSO_SEARCH_WM_CLASS = ".espanso-wrapped"
 # because "ask"/"clarify" is how the dispatch snippet is actually searched for.
 # ':acq' ("ask clarifying questions") is what a bare 'ask' MEANS.
 #
+# 'recom'/'recommend' arrived the same way on 2026-09-02 (a720d30d, a one-line
+# direct-to-main commit that RED-ed `main`): ':acq' grew the LABEL "ask
+# clarifying questions and recommend improvements and anything useful to
+# include", and `_token_matches` reads the label, so both terms started matching
+# ':acq' as well as ':rna'. Note the asymmetry that decides the owner — the two
+# terms are ':rna''s declared INTERFACE (they are literally two of its six
+# `search_terms`, and its label is "Recommend next actions"), whereas on ':acq'
+# the word is incidental PROSE inside a sentence about asking questions. The
+# picker listing both rows is fine and wanted; attribution has one honest
+# answer. The label is the operator's and stays as written — this table is the
+# designed place to say so without editing either snippet.
+#
 # 🔴 BLIND SPOT, MEASURED — THE LOOKUP IS AN EXACT-STRING MATCH, SO PREFIXES OF
 # AN OWNED TERM ARE NOT OWNED. `_term_matches` is a SUBSTRING test, so a typed
 # prefix reaches both snippets and lands on the ambiguous branch, where
@@ -94,12 +106,22 @@ ESPANSO_SEARCH_WM_CLASS = ".espanso-wrapped"
 # prefix-aware lookup can re-point terms the exact form never touched, so it
 # needs its own mutation battery.
 #
+# 🔴 STILL ACCEPTED, and the 'recom' entries below do NOT close it — re-measured
+# 2026-09-02 against the live config: "rec", "reco" and "recomm" all match
+# BOTH ':acq' and ':rna' and all three still resolve to None, because only the
+# two exact strings keyed below are owned. This is the same blind spot, not a
+# new one, and it is recorded here so the next reader does not mistake the two
+# entries for prefix coverage. The decision is unchanged for the same reason:
+# widening it is a mechanism change, not a table entry.
+#
 # Same measurement, recorded so it is not re-litigated: "clarifying" has been
 # typed ZERO times, so it gets no entry — an owner justified by intuition rather
 # than the search stream is exactly what this comment exists to prevent.
 _AMBIGUOUS_TERM_OWNER = {
     "ask": ":acq",
     "clarify": ":acq",
+    "recom": ":rna",
+    "recommend": ":rna",
 }
 
 
