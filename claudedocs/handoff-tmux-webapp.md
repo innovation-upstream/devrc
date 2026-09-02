@@ -9,9 +9,10 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Ranks 1–8, 10, 12, 13, 14, 15 and 16 are ✅ CLOSED. Ranks 11 and 17 are OPEN** (17 is new this
-session and is CI infrastructure, not this feature). 🔴 **Rank 12 closed as REFUTED, not fixed** —
-read its entry before believing the word "complete" anywhere near it.
+**Ranks 1–8 and 10–16 are ✅ CLOSED. Ranks 17 and 18 are OPEN, and BOTH are CI
+infrastructure — not one item of this feature is outstanding.** 🔴 **Rank 12 closed as REFUTED,
+not fixed** — read its entry before believing the word "complete" anywhere near it. 17 and 18 are
+siblings, NOT one item: different legs, different mechanisms, different closing conditions.
 The live-refresh work (`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as 0.8.21**.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.**
@@ -72,14 +73,54 @@ host-side feeder (`tmux-snapshot-push.timer` on the workbench, which collects BO
   with its positive control confirming the board was reachable. 🔴 That is NOT a clean bill of
   health: a wrong `CLAUDE_CODE_SESSION_ID` also answers 200 with an empty array.
 
+### Session 2026-09-02 (`/resume`) — rank 11 CLOSED, and the feature has no open items left
+
+- **Repos:** `devrc` on `main`; `homelab-talos` on `trunk`, re-synced to `27a09792`. Both base
+  clones still carry **another session's uncommitted WIP** (unchanged, untouched) — author from a
+  worktree off the mainline, as above.
+- **Merged and content-verified (never ancestry):**
+
+  | PR | what | squash |
+  |---|---|---|
+  | `devrc#1230` | rank 10 done + rank 17 filed; amended in-flight to correct rank 12 | `ef77d9cb` |
+  | `ZacxDev/homelab-infra#640` | rank 11 — the archive drawer's open state survives a swap | `27a09792` |
+
+- 🔴 **THE DRIFT THAT STARTED THIS SESSION IS THE ONE THIS DOC KEEPS RE-CREATING.** `/resume`'s
+  reconciler correctly reported the working-tree doc "identical to `origin/main`" — and it was
+  STALE anyway, because the rank-10 update was sitting in an unmerged `devrc#1230` for eight hours
+  with both required checks already green. **"Identical to origin/main" is not "current" when the
+  update is in flight.** The reconciler cannot see an open PR against the doc; only
+  `gh pr list --state open` can. Rank 12 had been closed-as-refuted a full day before #1230 was
+  written and #1230 still called it OPEN, so the stale line was about to land a THIRD time.
+- **Rank 12 corrected in flight rather than after the fact.** #1230 was already green; amending it
+  re-queued both required checks (~25 min) and risked the documented wedged-`pending` state. Paid
+  deliberately, because landing a status line already known to be false is how this exact drift
+  propagates.
+- **Rank 8a re-measured GREEN — the round trip, not the labels.** Server 0.8.21, workbench client
+  0.8.21, laptop client 0.8.21, and `view create` on the LAPTOP → `view ls` on the WORKBENCH →
+  `view rm`: `[] → 1 (id 9) → []`. **Third consecutive session to refute the "both clients are
+  stale again by construction" prediction on test.** Still RECURRING; still do the round trip.
+- **Claim `tmux-webapp-11` taken and RELEASED**; both worktrees removed and pruned.
+
 ### 🔴 Not done, and deliberately named rather than left implicit
 
-- **`/audit-pr` was NOT run on `#632`, `devrc#1224` or `devrc#1226`.** Only #637 got a ladder. #632
-  in particular touches the same file family whose predecessor took six audit rounds.
+- **`/audit-pr` was NOT run on `#632`, `devrc#1224`, `devrc#1226` or `#640`.** Only #637 got a
+  ladder. #632 in particular touches the same file family whose predecessor took six audit rounds.
+- 🔴 **`#640` was merged with ALL FOUR CHECKS PENDING on the merged sha, by operator decision.**
+  Nobody holds a CI verdict for `3e08acaf`. The evidence that the pre-rebase red was not that diff
+  is real and is recorded under rank 18 — but it is evidence about a DIFFERENT sha, and it is not
+  the same thing as a green.
+- ⚠ **`npx prettier` reformatted the whole of `layout.spec.ts`** (271 insertions) on first attempt.
+  There is no prettier config in `e2e/`, prettier is not a devDependency, and no CI leg runs it —
+  `npx` had fetched a default-config copy and applied a style the repo does not use. Reverted and
+  hand-formatted to 71 additions. **Do not run a formatter this repo does not itself install.**
 - **#632 was merged over a RED `tekton/gitops-validate`** on two Python tests that failed on two
   other revisions independently. That was the right call on the evidence, but **"gitops-validate is
   green for #632" is a claim nobody can make** and must not be inferred later from the merge.
-- **Rank 11 never started.** Rank 17 is filed, not worked.
+- ~~**Rank 11 never started.**~~ **SUPERSEDED — rank 11 was built and merged on 2026-09-02
+  (`#640`).** Struck rather than deleted, because it is the shape this doc keeps getting wrong: a
+  "not done" bullet is written in the present tense about ONE session and then reads as live
+  forever. Rank 17 was still only filed as of that session; 18 did not exist yet.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -298,11 +339,48 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     plausible correct shape** — a property of a guard this strict, mitigated by the routing, not
     removed by it.
     forcing: none
-11. **The archive drawer loses its `open` after every write-triggered swap.** KNOWN, UNFIXED, noted
-    in-code at `layoutArchivedDrawer`. The fix is the `taskCardScript` treatment (a once-bound
-    listener re-applying `open` after settle). 🔴 `layout.spec.ts` deliberately does NOT pin the
-    drawer's `open` — mutant H is asserted to PASS, so the spec will not red when someone fixes it;
-    but a listener that SWALLOWS the summary's click is mutant PD, which it DOES red. Read both.
+11. ✅ **DONE 2026-09-02 — `ZacxDev/homelab-infra#640`, squash `27a09792`.** Content-verified on
+    `origin/trunk` (never ancestry): drawer key attribute, `__cgLayoutDrawerInit`, the shell call
+    site, the e2e spec and the Go guard all present; nonexistent-marker grep 0 as the control.
+    🔴 **THE DOC'S OWN TITLE FOR THIS ITEM WAS WRONG, AND THE IN-CODE COMMENT HAD ALREADY SAID SO.**
+    It was never "write-triggered". Since `#611` the panel subscribes to `sse:tmux.changed`, so an
+    outside agent posting a tmux snapshot **on its own 2-minute timer** snaps the drawer shut
+    mid-read, with no action of the operator's. A maintainer told only "it closes when you write"
+    cannot reproduce the report they are handed. **Read the code's comment over this list's summary
+    of it** — the code had been corrected and the rank line had not.
+    **What landed:** `layoutDrawerScript`, the prescribed `taskCardScript` treatment. Three
+    constraints, none of them stylistic:
+    🔴 **The key is the VIEW ID, not the archived count.** `data-layout-archived` holds a number
+    that CHANGES on archive/restore — the very swaps being survived — so a count-keyed memory
+    forgets the drawer exactly when it matters. New `data-layout-archived-drawer` carries the view
+    id. #527's lesson one layer up: store a REFERENCE, not a DESCRIPTION.
+    🔴 **It cannot live in the panel**, for two independent reasons: the panel body IS the swap
+    target (`hx-swap: innerHTML`), so a script inside it is destroyed by the swap it exists to
+    survive; and `layout.spec.ts` forbids any `on*`/`hx-on*` attribute inside `#panel-layout`, so an
+    inline handler is not available either. Hence the page shell.
+    🔴 **It must not swallow the summary click** — mutant PD, named in `layout.spec.ts`. The
+    listener only OBSERVES toggles and writes `open` solely in `restore()`.
+    Binding is once-guarded with state on `window`, and the listeners are on `document`, NOT
+    `document.body`: the guard plus a body-scoped listener is worse than either alone, because an
+    hx-boost body swap would kill the listener while the guard suppressed the rebind.
+    **Verification matrix:** the Go keying guard was watched RED at `origin/trunk`
+    (`found 0 drawers carrying data-layout-archived-drawer, want 2`, from a `git archive` extract)
+    and GREEN at HEAD; the fixture pairs view 7 with 3 archived and view 8 with 2, so no id equals
+    its own count and a count-keyed implementation is visible rather than passing by coincidence.
+    The e2e case passed at HEAD (4.7s), and mutation **M1 — the narrowest that can be wrong**
+    (script still defined, call site removed) was **KILLED at the behavioural line**, the locator
+    resolving to `<details data-layout-archived="1" data-layout-archived-drawer="1">` with `open`
+    **false**; everything before it passed, so the swap demonstrably happened and only persistence
+    was lost. Full `layout.spec.ts` 5/5 including the ladder's summary-click-FLIP assertion.
+    Module: build 0, vet 0, `go test ./...` 20 ok / 0 FAIL from the runner's own lines.
+    ⚠ **`clawgate-e2e` reported 128 tests, up from 127** — that is the new spec running in CI, and
+    it is the only proof the spec is not local-only.
+    🔴 **MERGED WITH ALL FOUR CHECKS PENDING ON THE MERGED SHA, BY OPERATOR DECISION — so "the
+    checks are green for this change" is a claim NOBODY CAN MAKE, and must not be inferred later
+    from the merge.** The branch was rebased onto trunk (`ea98254a` → `3e08acaf`) to gate the
+    MERGED tree, which re-queued every check; they had not reported by merge time and still had
+    not afterwards. The pre-rebase red was `clawgate-ci` and is diagnosed under rank 18.
+    ⚠ **`/audit-pr` was NOT run on `#640`.** Offered and declined; recorded, not hidden.
     forcing: none
 12. ✅ **CLOSED AS REFUTED 2026-09-01 17:02Z — there was never a defect. NOT MINE, and NOT A FIX.**
     Clawgate task #463 reads `status: complete`, and 🔴 **`complete` here does NOT mean the bug was
@@ -432,6 +510,32 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     resource. Until then, re-run the PipelineRun from its own spec (recipe in "How to verify").
     forcing: gate — two of the four checks on every clawgate PR produce reds that are not about the
     change, which is the permanently-red-gate shape: it trains readers to click through.
+18. **`clawgate-ci`'s `go` leg reds on POSTGRES-BACKED tests under contention — a SIBLING of 17,
+    deliberately not folded into it.** Repo: `homelab-talos`, `containers/clawgate/internal/store/`
+    and `cmd/clawgatectl/`. 🔴 **Different leg, different mechanism, different closing condition:**
+    17 is an ephemeral server missing a 15s HEALTH-CHECK budget in `clawgate-e2e`/`ux-audit`; this
+    is `go test` itself timing out against Postgres inside `clawgate-ci`. Merging them would give
+    one item two closing conditions, and neither would ever be checkable.
+    **Measured 2026-09-02, and the discriminator is that the FAILING TEST MOVES:**
+    | PipelineRun | revision | failed |
+    |---|---|---|
+    | `clawgate-ci-btr4h` | `20a277d7` (not mine) | `TestSeamClientToServerMovesTheThreadCount` (30.03s), `TestDeleteSucceedsWhenArchiveFails` (10.35s) |
+    | `clawgate-ci-vrpc4` | `ea98254a` (rank 11) | `TestSweepArchivesEveryUndecidedRowInABatch`, on `pgstore: sweep iterate: timeout: context deadline exceeded` |
+    Three tests, two packages, two revisions, ~100 minutes apart, all timeout-shaped — and
+    `internal/ui`, the ONLY package rank 11's diff touched, PASSED in that same run (5.291s, 94.8%
+    coverage). Same family as devrc's diagnosed store-api fsync contention.
+    🔴 **THE DEV-HOST TIER IS STRUCTURALLY BLIND TO THIS, SO A LOCAL GREEN IS NOT A REBUTTAL.**
+    Measured, not assumed: `go test ./internal/store/ -run TestSweepArchivesEveryUndecidedRowInABatch`
+    prints `--- SKIP` with *"set CLAWGATE_TEST_DATABASE_URL to run the Postgres-backed
+    request-history tests"*. A local `20 ok / 0 FAIL` therefore says NOTHING about these tests, and
+    quoting it as though it did is the two-tier error this repo already documents.
+    Closing condition: a red on the `go` leg can be attributed to a diff without a re-run — the
+    store tests get their own Postgres with a bounded startup, or the failure names the contended
+    resource. Until then, read WHICH test failed and check whether it moved between runs before
+    debugging the diff.
+    forcing: gate — with 17 this makes three of the four clawgate checks capable of reds that are
+    not about the change, and this one is the worst of the three to dismiss: unlike 17 it can fail
+    on a package a Go diff genuinely touches, so "it is just the flake" will eventually be wrong.
 
 ## Open investigations — live diagnosis state
 
