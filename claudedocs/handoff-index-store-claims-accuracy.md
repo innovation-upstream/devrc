@@ -22,23 +22,33 @@ reading, and per the protocol no field was written and no task was created.
 
 ## State now
 
-**DONE — merged and deployed:**
-- **devrc#1132 → `f9c86a8b`** (squash). The store's docs claimed **no off-machine backup**
-  in what turned out to be **34 sites**, nine days after `analyze-service-index-backup.service`
-  started running daily. Shipped to both hosts (`ship.sh`, both at `f9c86a8b`), and verified
-  at the CONSUMER, not the rollout: `readlink -f ~/.claude/skills/analyze-service/reference/index-store.md`
-  resolves into `/nix/store/…-devrc-claude-skills/`, corrected claim present on workbench and
-  laptop, stale claim 0 occurrences.
-- **New guard `scripts/tests/test_index_store_backup_claim.py`** — pins the doc claim against
-  the nix wiring (`A == B`), not against a phrase. Plus `scripts/testlib/nix_units.py` and
-  `scripts/tests/test_nix_units.py` (the shared nix-source reader had **no tests at all**).
-- **devrc#1170 → `50bfd91f`** (operator-merged) and **devrc#1186** closed the two-protocol fork.
+**DONE — merged, deployed and verified at the consumer:**
+- **devrc#1215 → `b59b0475`** (rank 1 of the previous list). Both gate tiers run on the
+  MERGED tree, proven with `git merge-tree --write-tree` = the gated tree's own OID; the
+  branch had been **6 commits behind main**, so gating it as-shipped would not have been a
+  claim about the merge. Verified by content on `origin/main`.
+- **devrc#1223 → `540e748d`** — the `dropped lines:` advisory in `--validate`. Verified by
+  content AND behaviour: run against the real 2026-08-19 blob it reports 13 dropped lines
+  and flags nuance line 11 as a lost declaration.
+- **`ship.sh` rc 0, both hosts at `a6e5064`.** Verified at the CONSUMER, not the rollout:
+  the new `dropped lines:` paragraph resolves live in the nix-store copy on the workbench
+  AND the laptop, and the laptop carries the validator code. ⚠ ship.sh independently
+  reported the operator's uncommitted `nix/programs/alacritty/default.nix` as baked into
+  the generation it built, so `save_to_clipboard` is now LIVE; both dirty files were copied
+  to a scratchpad first and nothing was reverted.
 
 **IN FLIGHT:**
-- **devrc#1215** `fix/stale-confirm-gated` — both proposal headers in `subsystem_touch.py`
-  still printed `confirm-gated` after the y/N was retired twice. Guard added on the RENDERED
-  OUTPUT. Red-at-base `76bb7507` confirmed, 1553 tests green on the affected suites.
-  **Full `gate.sh` and the sandbox tier NOT yet run on that branch.**
+- **devrc#1232** `docs/ci-claim-protection-disabled` — CLAUDE.md asserted `main` was gated
+  by both tiers with `enforce_admins: true`; it is protected in NAME ONLY. Green on both
+  tiers (20,474 pytest / 1,449 node, 0 failed, 0 timeout panics) — but **that run is now 2
+  commits behind main, so it no longer covers the merge result.** Re-gate before merging.
+
+**NOT DONE, by explicit operator decision (not oversight):**
+- `/audit-pr 1215` — skipped.
+- Audit round 3 on #1223 — skipped, though round 2 returned five real findings, so the
+  ladder ended by decision rather than on a clean round.
+- The local-store freeze bypass — left alone; the freeze is temporary.
+- `main` stays unprotected until the Tekton capacity work lands (another session owns it).
 
 ## Open investigations — live diagnosis state
 
@@ -70,20 +80,75 @@ reading, and per the protocol no field was written and no task was created.
   `pytests exit 0` + `verdict exit 1` means a test FAILED; a step that emitted no `RESULT:` line
   was KILLED, which is a different problem.
 
+### Entries are still being WRITTEN to the local mirror while the pod is canonical
+- **Symptom + exact repro:** post-Cairn-cutover the pod is the authority and every skill
+  routes writes through `cairn append`/`cairn put`, yet the local mirror keeps changing.
+  `find ~/.claude/analyze-service-index -name '*.md' ! -name README.md -newermt '-1 day'`
+- **Observed (with values):** `~/.claude/analyze-service-index/devrc/tests.md` — mode
+  `-r--r--r--`, mtime **2026-09-02 10:39:27**, carrying a new `- 2026-09-02:` bullet;
+  autocommitted at **2026-09-02T11:04:10 `e2f21cf`**; working copy == HEAD. The
+  `analyze-service-index-commit.timer` is **active** (ran 10:07, next 11:04). All **16 of
+  16** scopes are still git repos with commits through `2026-09-02T03:01`. Entry-file mode
+  census: **141/141 at 0444** — the single 0644 `.md` in the tree is the store-root
+  `README.md`, not an entry.
+- **Ruled out:** "the local mirror is frozen / inert / no longer a git repo" — the store
+  ROOT has no `.git`, but all 16 scopes do, the commit timer is live, and content changed
+  today.
+  via: measurement
+- **Ruled out:** "the 0444 freeze prevents local writes" — a file at 0444 gained a bullet
+  today and is still 0444.
+  via: measurement
+- **Ruled out:** "it is the naive temp-file-and-rename bypass" — measured in a replica
+  (0755 dir, 0444 file): rename succeeds and leaves the file **0644**. The live file is
+  still 0444, so whatever wrote it preserves or restores the mode.
+  via: measurement
+- **Leading hypothesis:** a local writer that handles the mode deliberately — either it
+  chmods around the freeze, or something syncs pod→local. Not yet identified. The
+  consequence is the part that matters: two authorities are accumulating divergent content,
+  which is a stronger reason not to run `seed.sh` than the staleness the previous doc
+  assumed.
+- **Next probe:** identify the writer, not the mechanism:
+  `git -C ~/.claude/analyze-service-index/devrc show e2f21cf -- tests.md` for what landed,
+  then `inotifywait -m -e close_write,moved_to ~/.claude/analyze-service-index/devrc/`
+  across one write to catch the process.
+
 ## Next steps (ranked)
-1. **Run both gate tiers on `fix/stale-confirm-gated` and merge devrc#1215.** `gate.sh` and
-   `nix build .#checks.x86_64-linux.{pytests,nodetests}` one at a time, clean tree asserted.
-   forcing: gate
-2. **`/audit-pr 1215`** before merging it — never run on that branch.
-   forcing: none
-3. **Verify devrc#1170's 🟡 5 and 🟡 6.** Its blind audit reported seven findings; 🔴 1, 🔴 2,
-   🟡 3, 🟡 4 and 🟡 7 are dispositioned (see Gotchas). Five and six were never checked.
-   forcing: none
-4. **Measure whether anything reads the hosted store before automating its seed.**
-   `store.zacx.dev` snapshot lags the source (seeded 2026-08-29, 132 entry-files vs 143 local)
-   and `seed.sh` has no timer. `cairn` prints its own freshness banner, so it degrades honestly;
-   its docstring records *309 requests, all from the session that built it*. Measure request
-   volume first — a seed timer with no consumer is harness.
+
+1. **Resolve the local-vs-pod divergence** (`~/.claude/analyze-service-index/` vs the
+   `store.zacx.dev` pod). It is the only item actively accumulating: 48 entries exist only
+   on the pod, 1 only locally, 153 in both, and local writes are still landing (see the
+   open investigation). Decide which side is authoritative in practice, then make the other
+   one stop or reconcile.
+   forcing: regression — the Cairn cutover reversed the direction of truth and local
+   writes did not stop; content is diverging now, unattended.
+
+2. **Re-gate and merge devrc#1232** (`docs/ci-claim-protection-disabled`, one file:
+   `CLAUDE.md`). It was green on both tiers but is now 2 commits behind main, so re-run
+   `scripts/gate.sh --tier both` and the two sandbox derivations one at a time on the
+   merged tree first.
+   forcing: regression — until it merges, an always-loaded file tells every session the
+   merge is gated by both Tekton checks when nothing gates it at all.
+
+3. **Hard-guard `scripts/subsystem-store-api/seed.sh`** (devrc). Its header still opens
+   `🔴 THE LOCAL STORE IS AUTHORITATIVE` (line 4) and its extract "adds and overwrites but
+   never deletes" (lines 322-323), so running it today reverts live pod content. Measured
+   blast radius: 28 cairn-attributed bullets on the pod vs 6 locally — **22 bullets written
+   by real sessions destroyed**, 13,623 bytes across the 153 shared entries. Fix is an
+   inversion of the `comm -23` containment set it already computes, plus the header.
+   forcing: regression — the cutover inverted the authority and the script was never
+   updated; a one-off footgun becomes a recurring data-loss job if anyone automates it.
+
+4. **Fix devrc#1170's 🟡 5 and 🟡 6** (`scripts/lib/subsystem_touch.py`,
+   `claude/skills/subsystem-index/SKILL.md`, `claude/skills/analyze-service/reference/index-store.md`).
+   🟡5: `SKILL.md:148` says read the policy the probe named on its `policy:` line, but the
+   `/analyze-service` door reaches the write half via `service_recon.py` + `--template`,
+   **neither of which emits one** (verified: 0 occurrences in both) — so that caller is told
+   to read a policy nobody named and forbidden from looking, while
+   `index-store.md:55` tells it to read the scope README. 🟡6: `--template` over an EXISTING
+   entry prints the first-ever-file template and **exits 0 with no warning** (reproduced);
+   `SKILL.md` then says to write it and "run no git command", so an `OPEN:` bullet is
+   destroyed silently. Fixes: emit `policy:` from the existing `governing_policy()`; add a
+   create mode using `os.open(..., O_CREAT|O_EXCL, 0o444)`.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -118,16 +183,61 @@ reading, and per the protocol no field was written and no task was created.
 - **The ladder stopped on the payload-attribution gate, not on a clean round** — rounds 6 and 7
   both changed zero payload lines.
 
-## How to verify
-```bash
-# the correction is in main AND live at the consumer, both hosts
-git -C ~/workspace/devrc show origin/main:claude/skills/analyze-service/reference/index-store.md \
-  | grep -c 'bundles every scope'                      # 1
-readlink -f ~/.claude/skills/analyze-service/reference/index-store.md   # -> /nix/store/...
-grep -c 'no off-machine backup\. Inside any scope' ~/.claude/skills/analyze-service/reference/index-store.md  # 0
+- 🔴 **THE PREVIOUS DOC'S PREMISE INVERTED — carried forward here because the ranked item
+  that held it was replaced.** It recorded: *"`store.zacx.dev` snapshot lags the source
+  (seeded 2026-08-29, 132 entry-files vs 143 local)"*. MEASURED 2026-09-02: the pod's
+  `.seed-stamp` reads `2026-09-01T20:38:36Z staged_entries=49`, the pod holds **201**
+  entries to the local **154**, and **48 exist only on the pod against 1 only locally**.
+  The snapshot does not lag the source — **the local mirror lags the pod**, because the
+  Cairn cutover made the pod authoritative. Anything reasoning from the old numbers is
+  reasoning backwards, which is what made "automate the seed" look sensible.
+- 🔴 **Two of this effort's own numbers were README-inclusive and wrong, and the same
+  mistake recurred in a subagent's report.** "154 entry files" and "153/153 at 0444" count
+  the 13 scope READMEs; `validate_scope` excludes them, so the real figure is **141**, and
+  141/141 are 0444. "789 blob versions" was likewise README-inclusive AND a moving number —
+  the store commits hourly, and it read 777 entry-file versions / 791 including READMEs when
+  re-measured hours later. **Date any count taken from this store and say it moves.**
+- 🔴 **A two-dot `git diff A..B` between a branch tip and main lists YOUR OWN changes as
+  main's.** It produced a false "both incoming commits touch exactly my two files" and a
+  semantic-conflict scare that did not exist. `git log --name-only <tip>..origin/main` is
+  the question actually being asked.
+- 🔴 **The audit's headline finding was one I could not have reached by re-reading my own
+  code**: `carries_marker` was inert on all 7 historical blobs for TWO independent reasons —
+  a hand-spelled marker vocabulary AND position-0 anchoring against a mid-line marker.
+  Fixing only the first still read 0 on every one of them. Consolidating into
+  `subsystem_resolver.line_openness` / `line_mentions_marker` is what made the disagreement
+  audible.
+- **Re-verify a subagent's numbers, not just its reasoning.** Both dispatched agents were
+  substantially right and each carried one wrong datum: a "post-freeze locally-created entry
+  at 0644" that is really the store-root README, and "the mirror is no longer a git repo"
+  when all 16 scopes are and are still autocommitting.
+- **The `--template`-over-existing-file loss needs no race to reproduce.** The audit framed
+  🟡6 as a concurrency hazard; the single-writer variant is a two-command demonstration.
+- **`_MARKER_ANYWHERE` requires the colon on purpose.** `_NEAR_MISS_MARKER`'s shouted branch
+  may skip the terminator because it is ANCHORED at a bullet head; unanchored over a whole
+  line that same rule fires on `OPEN SOURCE`.
+- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
+  this session — which cannot distinguish "touched no task" from "wrong session id", so no
+  `clawgate-task:` field was written and none was created.
+- ⚠ **Environment, unaddressed:** the shared `devrc` clone carries ~150 worktrees from
+  finished agent runs, and its working tree holds another session's uncommitted WIP
+  (`nix/programs/alacritty/default.nix`, `nix/system/apply-tmp-churn-retention.sh`,
+  `output.txt`, two `scripts/diagnose-*.sh`).
 
-# the guard is real: red at base, green at head
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_index_store_backup_claim.py \
-  ~/workspace/devrc/scripts/tests/test_nix_units.py -q
+## How to verify
+
+```bash
+# the two merged fixes are on main AND live at the consumer, both hosts
+git -C ~/workspace/devrc show origin/main:scripts/lib/subsystem_touch.py | grep -c 'def scan_dropped_lines'   # 1
+grep -c 'dropped lines:' ~/.claude/skills/subsystem-index/SKILL.md                                            # 1
+ssh zach@192.168.50.155 'grep -c "dropped lines:" ~/.claude/skills/subsystem-index/SKILL.md'                  # 1
+
+# the advisory fires on the REAL historical corruption, and ranks the lost declaration
+git -C ~/.claude/analyze-service-index/datapacket-talos show 409fd27b15 > /tmp/o.md   # into a scope dir
+nix develop ~/workspace/devrc -c python3 ~/workspace/devrc/scripts/lib/subsystem_touch.py \
+  --store <scratch> --validate <scratch>/datapacket-talos/orchestration.md            # 13 dropped, 1 DECLARATION
+
+# the divergence is still accumulating (rank 1)
+find ~/.claude/analyze-service-index -name '*.md' ! -name README.md -newermt '-1 day' -printf '%TF %TR %p\n'
+systemctl --user list-timers 'analyze-service-index-commit*' --no-pager
 ```
