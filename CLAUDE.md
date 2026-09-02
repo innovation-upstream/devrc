@@ -160,17 +160,27 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - 🔴 **BUILD THE TWO `nix` CHECK DERIVATIONS ONE AT A TIME — a combined invocation produces FALSE FAILURES.** `nix build .#checks.x86_64-linux.pytests .#checks.x86_64-linux.nodetests` builds both concurrently, and the tests that shell out to nested `nix` then contend on the store. MEASURED 2026-08-30 on one tree: the combined call reported **2 failures** — `SQLite database … is busy` evaluating `nix/home.nix`, and `OperationalError('database is locked')` in dl-router — while the SAME tree, same derivations, run **sequentially**, reported **0**. Load-dependent, so earlier combined runs were green and looked fine. **A combined GREEN is trustworthy** (a contended run fails loudly, it does not fake a pass); **a combined RED is not**, until re-checked one at a time. This cost a near-miss report of "PR #1029 broke the gate", against a diff that touched one test file and could not reach either failure. ⚠ Same run also reproduced the documented `| tail` trap: `nix build … | tail` printed `NIXBUILD_RC=0` for a build that had just failed 45 tests — read the runners' own `RESULT:` lines, never the piped exit code.
 - **To run a SUBSET, use the flake devShell — it already carries the gate toolchain:** `nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q` (cwd-independent with absolute paths; MEASURED from the repo root and from `/tmp`, pytest 9.1.1). `gate.sh` has no per-file filter and `run-tests.sh`'s positional is a repo ROOT, not a test selector — but that is a gap in those two entry points, **not** in the repo: the toolchain is there, by another door. 🔴 **`.envrc` is `use opencode`, so a loaded direnv does NOT put pytest on PATH** — and the worktree recipe in `claude/RULES.md` says to copy `.envrc`, which propagates that env into every worktree. A bare `python3 -m pytest` failing with `No module named pytest` therefore means you are in the opencode shell, never that the suite is unrunnable. This bullet exists because three true observations — no `gate.sh` filter, no `run-tests.sh` selector, direnv has no pytest — were read as "no subset mode exists", and an ad-hoc `nix-shell -p` was built instead of opening the door that was already there.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
-- 🔴 **A MERGE IS BLOCKED BY BOTH TIERS — `tekton/devrc-pytests` AND `tekton/devrc-nodetests`.** <!-- merge-gate: other -->
-  Measured 2026-08-23: `required_status_checks.contexts =
-  ["tekton/devrc-nodetests","tekton/devrc-pytests"]` on `main`, `enforce_admins: true`. A
-  Python-only change is now genuinely gated. ⚠ **It was not, earlier the same day** —
-  `contexts` held nodetests ALONE, which collects `*.test.mjs` ONLY, so a Python-only PR
-  could not fail it and read `UNSTABLE` (mergeable) with pytests red. **That observation is
-  OBSOLETE**; it reads `BLOCKED` today. Kept because a one-element `contexts` list reads as
-  "blocked" at a glance — check the LIST, not that the key exists. There is still no
-  `.github/workflows`, so the marker stays `other`.
-  🔴 **`enforce_admins: true` is LIVE now** — it protected nothing while nothing was
-  required. If Tekton is down or wedged, NOTHING merges and there is no admin override.
+- 🔴 **NOTHING BLOCKS A MERGE TODAY — `main` is protected in NAME ONLY. You are the gate.** <!-- merge-gate: other -->
+  MEASURED 2026-09-02: `required_status_checks` is **absent from the protection object
+  entirely** and `enforce_admins: false`, while `GET /branches/main` still reports
+  `protected: true`. A PR merges with both Tekton checks red, or with none posted at all.
+  🔴 **DELIBERATE AND CURRENT — not drift, and not yours to "restore".** The operator turned
+  it off because the gate was slowing work down; it stays off until the Tekton capacity
+  issue is addressed, which a different session owns. `drift-check.sh` rc 24 will report an
+  unprotected `main` every run in the meantime: that report is EXPECTED, not a finding.
+  ⚠ **Tekton still RUNS** — both checks post on a PR head, they just do not gate. That is
+  exactly why the marker stays `other`: it records that something runs at merge time, never
+  that it blocks. There is still no `.github/workflows`.
+  🔴 **So run BOTH tiers yourself before merging** — `scripts/gate.sh --tier both` AND
+  `nix build .#checks.x86_64-linux.{pytests,nodetests}` one at a time, on the MERGED tree —
+  and name the tier and the base sha in the claim. ⚠ 2026-08-23 measured the OPPOSITE state
+  (`contexts` = both checks, `enforce_admins: true`), and earlier that same day `contexts`
+  held nodetests ALONE, which collects `*.test.mjs` only — so a Python-only PR could not
+  fail it and read `UNSTABLE` with pytests red. **Check the LIST, never that the key
+  exists**, and re-measure rather than trusting this paragraph's age:
+  `gh api /repos/innovation-upstream/devrc/branches/main/protection --jq .required_status_checks`
+  🔴 **WHEN IT IS RESTORED, `enforce_admins: true` leaves no admin override** — if Tekton is
+  down or wedged, NOTHING merges.
   The escape hatch, deliberately written down because you will want it under pressure —
   🔴 **and it does NOT round-trip. Read all four steps before you run step 2.** MEASURED
   over three uses on 2026-08-29/30: `DELETE` opens the window and **`PATCH` cannot close
@@ -227,18 +237,22 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   container's PID 1 does not reap. Fixed in #722; first green run was `devrc-ci-hkgtf`.
   Read a red check's step log before believing its verdict — the SUMMARY counts nearly
   matched a local run there and pointed at a different test entirely.
-  🔴 This line used to read `CI gates both suites` and later `NO AUTOMATED GATE IS
-  RUNNING`. Both were false at some point, in **opposite** directions — the exact kind of
-  claim nobody re-checks: an agent reads it, believes the merge is protected (or that no
-  check exists), and skips the run either way.
+  🔴 This line has now been WRONG IN BOTH DIRECTIONS TWICE. It read `CI gates both suites`,
+  then `NO AUTOMATED GATE IS RUNNING`, then (2026-08-23) `A MERGE IS BLOCKED BY BOTH
+  TIERS` — which stayed after protection was turned off and was false again by 2026-09-02,
+  found only because a session re-measured before merging. That is the exact kind of claim
+  nobody re-checks: an agent reads it, believes the merge is protected (or that no check
+  exists), and skips the run either way. **Re-measure; do not trust this paragraph.**
   🔴 **`error` is not `failure`.** A check posted as `error` with `COULD NOT RUN: <leg>`
   means the gate stopped before that leg reported — a broken gate, not a bad change. Do not
   debug your diff against it.
-  🔴 **Both checks are REQUIRED, so this failure mode is LIVE:** when a run hits
-  `timeouts.tasks` the `finally` report task never runs, so **nothing is posted and the PR's
-  checks stay `pending` forever** — measured on `devrc-ci-nnt6f` and `devrc-ci-9p6mf`,
-  `childReferences` `[notify, gate]` only, still `pending` hours later. A required check in
-  that state is unsatisfiable and no re-run clears it; only a fresh push does.
+  🔴 **A run that hits `timeouts.tasks` posts NOTHING** — the `finally` report task never
+  runs, so the PR's checks stay `pending` forever: measured on `devrc-ci-nnt6f` and
+  `devrc-ci-9p6mf`, `childReferences` `[notify, gate]` only, still `pending` hours later,
+  and no re-run clears it; only a fresh push does. ⚠ **This is currently survivable and was
+  not** — while the checks were REQUIRED a PR in that state was unsatisfiable and stuck.
+  With protection off it merely means you have no CI signal, so the local two-tier run is
+  the only evidence there is. It becomes blocking again the moment protection is restored.
   🔴 **But a gate SHIPS IN THIS REPO, and whether it is INSTALLED is not a fact this file can
   state** — `githooks/` (`install.sh`, `pre-push`, `tests-on-push.sh`) is a real blocking
   pre-push test gate, and `scripts/run-tests.sh` treats it as a first-class consumer.
