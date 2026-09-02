@@ -37,18 +37,30 @@ survives adversarial re-derivation, and fix whatever it exposes.
   12,288 B target, and is **STILL OVER the 40,960 B hard cap**. 🔴 **The −28.7% the PR description
   claimed is WRONG and was corrected publicly** — every audit round correctly bought back bytes
   the eviction should not have taken.
-- 🔴 **RE-DERIVE THE SIZE, NEVER QUOTE ONE FROM THIS DOC.** Measured trail:
+- 🔴 **RE-DERIVE THE SIZE, NEVER QUOTE ONE FROM THIS DOC** — including the "5.3x" and "64,837"
+  in the bullet above, which describe the tree as it stood at #1207 and **not** the one you are
+  reading. Measured trail, each figure pinned to a **fixed sha** and none to a moving ref:
   `f71ff648` 80,397 · `21ee51d7` 57,356 · `1127e620` 60,964 · `ef49ac82` 62,298 · `34924645`
-  64,397 · `384e1c37`/`main` **64,837**. A figure quoted from a report that measured an EARLIER
-  commit of the same PR is the trap this arc hit in its own verification step.
+  64,397 · `384e1c37` 64,837 · `66eee1d7` **65,506** (this was `main` when rank 13 branched; #1217
+  added 669 B after #1207). 🔴 **`384e1c37` was labelled "/`main`" here and that label went stale
+  within the day** — a fixed number on a moving ref is the very trap this bullet exists to name.
+  A figure quoted from a report that measured an EARLIER commit of the same PR is the other half
+  of it, and is what this arc hit in its own verification step.
 - ✅ **Ranks 4 and 11 DONE.** Rank 4 needed **no deploy** — the store copy of
   `claude/skills/clawgate/SKILL.md` was already byte-identical to `origin/main` (15086 B), so
   `home-manager switch` was deliberately skipped rather than run as a no-op riding another
   session's uncommitted `nix/programs/alacritty/default.nix`. Rank 11 forward-merged `main` into
   #1064 and its gate went green.
-- **OPEN: ranks 5, 8, 10, 12.** Derive, don't trust this line —
-  `python3 scripts/handoff-audit.py --sections 1 <this doc>` from the devrc repo root prints
-  `N/12 ranked items done` (8/12 at 2026-09-01).
+- **OPEN: ranks 5, 8, 10, 12 — FOUR of 13; DONE are 1,2,3,4,6,7,9,11,13 — NINE. Count the list, do
+  not quote the tool.** `python3 scripts/handoff-audit.py --sections 1 <this doc>` prints
+  **`10/13`**, and 10 + 4 = 14 ≠ 13, which is the tell. 🔴 **The extra one is rank 5, and the
+  mis-read is structural, not a typo:** `DONE_MARK` matches `\bDONE\b` on an item's **first line
+  only** (`scripts/handoff-audit.py:145`, `:339`), and rank 5 opens *"The WORKED EXAMPLE is DONE
+  (#1207"* — whose very next clause is *"the CONTRACT is not"*. So the tool silently closes **the
+  largest open item, the one whose own text documents that this tool's bucketing is broken.**
+  Until that is fixed, this doc's `N/13` is a lower bound on open work, not a reading.
+  (The `8/12` this line used to carry was one item and one denominator stale; the denominator was
+  already 13 in the same commit that wrote `12`.)
 - 🔴 **CARRIED FORWARD — durable specifics the condensed status above would otherwise drop.**
   *Ranks 2+7, the hook:* devrc**#1092** `ad891a5c`; `ship.sh` converged BOTH hosts to **`bd1572f3`**
   (verified by ancestry of the shipped sha PLUS a byte check of the deployed blob **`6d25558e`**);
@@ -98,7 +110,10 @@ commit, three different verdicts — already run, days earlier, and it moves que
 outcomes is equally consistent with a gate that is simply nondeterministic.
 
 **What survives and what does not.** The capacity MECHANISM stands — it is measured and written
-down in-tree at `scripts/tests/test_subsystem_store_api.py:99-108`, and attempt 2's failure is
+down in-tree at `8c108d8b:scripts/tests/test_subsystem_store_api.py:100-105` — 🔴 **sha-pinned,
+because a bare line range DRIFTS: at `b59b0475` that same `:99-108` holds an unrelated DRAIN-bounds
+comment and the capacity text has moved to `:106`. Grep the string `Why 60 and not 15`, which does
+not move** — and attempt 2's failure is
 unambiguous (60m13s against a 60m task budget). What does NOT survive is the causal claim about
 attempt 3 specifically: a single green at one depth is not an experiment. **Do not cite the
 8→7→5 / 3→2→0 table as evidence that draining the queue fixes the gate.**
@@ -154,6 +169,77 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   cited `devrc/tests.md` as carrying it; that store file contains **no loopback bullet at all**
   (measured, with a positive control). The socket timeout is the SURFACE; the fsync-in-request is
   the CAUSE. The blocks after this one are kept only for the reasoning they rule out.
+- 🔴 **PARTIALLY MITIGATED 2026-09-01 by #1211 `1a4350f3` (merged 19:30:17Z) — and the unit of
+  "partially" is the CALL SITE — not the file, and not the fixture either (this line said
+  "FIXTURE" until round 4; the table below is the authority).** #1211 sites the store on tmpfs so fsync cannot stall.
+  Measured on `origin/main` **at `b59b0475`** (anchor it — bare "origin/main" moves), where
+  `api.build_server` has **exactly three caller files**, and inside the one file #1211 touched there
+  are **two** store fixtures:
+
+  | site | sited on tmpfs? | `with running(...)` sites | `tmpfs\|/dev/shm\|store_siting` hits |
+  |---|---|---|---|
+  | `test_subsystem_store_api.py` `store` (`:393`, calls `_tmpfs_dir()`) | **yes** | 133 | 44 (file total) |
+  | `test_subsystem_store_api.py` `scoped_store` (`:9097`, `_build_store(tmp_path / "store", …)`) | **NO** | 110 | — |
+  | same file, **UNFIXTURED** `running(served\|stage\|root\|tmp_path/"absent")` | **NO** | 13 | — |
+  | `test_cairn_write.py` | **NO** | — | **0** |
+  | `test_cairn_cli.py` | **NO** | — | **0** |
+
+  🔴 **The unit is the CALL SITE, and that third row is the one nobody has counted.** Of **256**
+  real `with running(...)` sites in that file, **123 are disk-backed** — 110 in `scoped_store` and
+  **13 that belong to no fixture at all**, built straight from `tmp_path` (`:1481, :1501, :3938,
+  :3959, :4011, :4087, :4134, :4360, :4377, :9968, :11755, :11852, :12584`). **Three of them —
+  `:11755, :11852, :12584` — drive the WRITE endpoints (`post_bullet`/`PUT`)**, which is where the
+  in-request fsync lives. ⚠ **Only `:11755` is asserted to REACH `_replace_bytes`** (it asserts
+  `200` / `x-store-status: appended`); `:11852` (a **PUT**) is refused at `412`
+  (`server.py:2194`) before its write at `:2211` in `replace_entry`, and `:12584` (a **POST**) at
+  `422 entry-shape` (`:2082`) before its write at `:2115` in `append_bullet` — `:12584` even
+  asserts `read_bytes() == before`. 🔴 **Two write sites, one per verb: an earlier draft sent both
+  to `:2211`, which the POST path never enters** — the citation-into-the-wrong-function bug this
+  doc corrects elsewhere, reintroduced in the sentence that corrected it. A draft before THAT said
+  all three were "`_replace_bytes` itself", which over-certified by 3x; the SET is still the right
+  one to name, the mechanism claim is not.
+  🔴 **#1219 does NOT reach them:** it re-sites the two
+  *fixtures*, and these are not fixtures — so "the file is done once #1219 merges" will be wrong in
+  the same way "the file is done because #1211 landed" was. This is the third granularity this arc
+  has been wrong at: file → fixture → call site. Assume there is a fourth.
+  ⚠ **Derive this partition with an AST walker, and beware that the naive grep is RIGHT BY
+  CANCELLATION.** `grep -c 'running(store'` reads **133**, which is the correct answer reached by
+  two equal and opposite errors: it **misses 3 line-wrapped** `running(\n store, …)` sites
+  (`:8764, :8792, :8832`) and **over-counts 3 lines inside a `textwrap.dedent("""…""")` string**
+  (`:8017` in `misplaced`, `:8033` in `correct`, `:8300` in a different test's helper). Full partition of the 272 lines containing `running(`: **256** real
+  sites · 4 comments · **11 inside string literals** · 1 `def running(`.
+  🔴 **This paragraph previously published 136/259 and claimed a walker produced them — both were
+  wrong, and the mechanism is the joke of the arc:** a *text* walker that resolved the wrap but not
+  the string counted `textwrap` string bodies as production code — and `:8017` sits in **another walker's
+  positive-control fixture**, four lines under the comment *"the detector must be able to SEE a
+  misplaced call, or the empty list above is a fact about the walker and nothing else."* The
+  instrument was fooled by the fixture built to test exactly that. Use `ast.walk` over
+  `With`/`AsyncWith` items — it cannot see comments **or** strings, and resolves wraps for free.
+
+  `scripts/testlib/store_siting.py` — the shared siting #1219 introduces — **does not exist at that
+  ref**, which is the one-command check that #1219 has not landed yet.
+  The cairn half is demonstrated too, not just inferred from a zero: the first PR gated after #1211
+  merged (#1213 `063b02be`, pending 19:37:09Z) went red at 20:00:31Z on **`TestAppendLands`** in
+  `test_cairn_write.py:250`, against a diff of one markdown file.
+
+  🔴 **So a red on `test_subsystem_store_api.py` IS still very possibly this mechanism** — do not
+  send yourself off for a fresh diagnosis on the strength of the file's name. The live instance:
+  **#1216 `1e5942a8`, a diff of ONE markdown file, went `devrc-pytests FAILURE` on
+  `TestTheActorComesFromTheTOKEN`** — a class that runs on `scoped_store`, i.e. on the contended
+  disk, and the same class `scripts/ci-repro/README.md:79,83` uses as its reproducer. #1219's own
+  code says this in as many words (`22dd33df:scripts/tests/test_subsystem_store_api.py:9033-9037`:
+  *"It was missed when #1211 sited `store` alone"*).
+  🔴 **And "sited" is not "proven sited on the CI node":** `_tmpfs_dir()` falls back to `tmp_path`
+  (disk) on four conditions, and #1211's own message notes CI's `/dev/shm` is the container's mount,
+  64Mi by default and **possibly absent**. Nobody has verified the probe engages on
+  `talos-xr6-r7p`, so read #1211 as removing the mechanism *wherever the probe succeeds*, which is
+  unmeasured where it matters. The consolidation is devrc**#1219** (`fix/consolidate-store-siting`),
+  **OPEN as of 2026-09-01** — re-derive its state before quoting any of this.
+  ⚠ `scripts/ci-repro/README.md` — which this block sends you to, and which remains correct about
+  the mechanism, the code sites and the reproducer — carries **no mitigation note at all**
+  (grepped `tmpfs|1211|mitigat|shm` at `origin/main`: **zero hits**), so read on arrival there as
+  describing a failure mode still live on **123 of that file's 256 `with running(...)` sites, plus
+  both cairn suites** — not on all of it, and not on none.
 
 ### Was the devrc-ci outage fully closed?
 - **Symptom:** 2026-08-29 ~22:23–22:48Z every devrc-ci gate leg reported
@@ -410,25 +496,39 @@ EVICTED 2026-09-01 (terminal). Verdict: #1064 green, MERGED `f71ff648`; the two-
   `~/.claude/analyze-service-index/devrc/skills.md` (2026-09-01 bullet) first; it carries this
   ratio and the four reusable rules.
 
-### 🔴 CROSS-PR STALENESS, ALREADY BITING: the CI mechanism this doc now documents was MITIGATED 33 minutes BEFORE #1207 merged
+### ✅ CLOSED (rank 13) — CROSS-PR STALENESS, ALREADY BITING: the CI mechanism this doc documents was PARTIALLY MITIGATED 33 minutes BEFORE #1207 merged
+🔴 **Heading corrected 2026-09-01 — it read "was MITIGATED", flat, and headings here are machine-read (`handoff-audit.py` buckets on the H3 alone). It still fires: see the fixture/call-site table in the CI block.**
+- ✅ **CLOSED 2026-09-01 — caveat written; values in the CI block and rank 13, not repeated here.**
+  🔴 **The one thing that belongs only here:** this item was filed because a sibling change (#1211)
+  falsified the doc's claim — and the *item written to repair that* was itself falsified by a second
+  sibling change before anyone worked it. 🔴 **The window is the finding, and it is far shorter than
+  it feels: rank 13 was filed at 21:00:22Z (`66eee1d7`) and worked at 21:41:58Z (`afe68628`) — 41 m
+  36 s — and #1219, which refutes its premise, was opened at 21:11:38Z, ELEVEN MINUTES after
+  filing.** The mechanism still fires; only "should no longer fire" was wrong. **A staleness-repair
+  item decays exactly like the claim it repairs**, and on this repo the half-life is minutes, not
+  days — re-measure the REMEDY's premise, not just the original claim. That is rank 6's lesson
+  ("re-measure before editing") arriving one level up, and rank 6 is where it was already written
+  down. via: measurement
 - **Symptom:** the doc's superseded-hypothesis block (the one round 4 corrected) tells a reader the
   `devrc-ci` red-gate mechanism is `server.py:_replace_bytes` fsyncing inside the request against a
   one-node pin, and to read `scripts/ci-repro/README.md`. That was correct when written.
 - **Observed (with values):** **#1211 `1a4350f3` merged 2026-09-01T19:30:17Z** — *"site the store on
-  tmpfs so the gate stops failing on disk contention"* — i.e. the mechanism is **mitigated**. #1207
+  tmpfs so the gate stops failing on disk contention"* — ~~i.e. the mechanism is **mitigated**~~
+  (**superseded: PARTIALLY, at CALL-SITE granularity — see the fixture/call-site table in the CI block, `## Open investigations` → the PARTIALLY MITIGATED bullet**). #1207
   merged at **20:03:27Z**, 33 minutes LATER, carrying the un-caveated warning. Also landed since:
   **#1213 `793a2b8e`** (the store-api gate flake: tmpfs fix shipped, 8-red triage, a classifier that
   reads the checkout PATH) and **#1214 `07a22f14`**.
 - **Ruled out:** *"the doc is simply wrong"* — it is not; the mechanism and the reproducer are real
   and `scripts/ci-repro/README.md` still documents them. What is missing is the **mitigation**, so a
-  reader will expect a failure mode that should no longer fire. via: change
+  reader will expect a failure mode that ~~should no longer fire~~ **mostly still fires** (see the fixture/call-site
+  table in the CI block — this line's premise is the one that was refuted). via: change
 - **Leading hypothesis:** this is the arc's own recurring shape operating ACROSS PRs rather than
   within one — a claim true at write time, falsified by a sibling change, inside no audit round's
   range. Six rounds could not have caught it: #1211 was not in any range.
-- **Next probe, verbatim:**
-  `gh pr view 1211 --repo innovation-upstream/devrc --json state,mergedAt` then
-  `git -C ~/workspace/devrc show origin/main:scripts/ci-repro/README.md | head -40` — confirm the
-  tmpfs siting, then add a one-line MITIGATED caveat to the doc's CI block naming `1a4350f3`.
+- **Next probe:** none — closed, and 🔴 **do not run the probe this bullet used to carry.** It said
+  *"confirm the tmpfs siting, then add a one-line MITIGATED caveat"*, in the flat singular framing
+  three audit rounds then refuted; following it now re-introduces the error. What was actually
+  done, and what a reader should copy instead, is the fixture/call-site table in the CI block.
   🔴 Do NOT delete the mechanism text: the reproducer and code sites remain the durable content.
 
 ### ⚠ STILL UNATTRIBUTED — the whole-class `TestPushabilityCasesTheFetchVersionGotWRONG` failure
@@ -472,8 +572,12 @@ rather than removed and renumbered. New work is appended at the end.
    `4162dab1`); the CONTRACT is not.** Four requirements it produced are recorded in this item's
    own text in the doc: tombstone-not-deletion · the rank NUMBER must survive · assert structure
    before writing · 🔴 **the measurement is NOT IDEMPOTENT** (`handoff-audit.py` buckets a resolved
-   investigation on its **H3 heading alone**, so it still reports "8 resolved investigations" over
-   8 one-line tombstones — an automated `EVICT_HISTORY` would re-evict tombstones and DELETE them).
+   investigation on its **H3 heading alone**. 🔴 **Re-measured 2026-09-01: it reports 10, not the
+   "8" this item asserted — and the equality is what broke, not just the number.** Of the 10 blocks
+   it books, only **8** are one-line tombstones; the other two (the #1207 ladder block and the
+   rank-13 block) are full live content, and the rank-13 one was added by THIS PR's first commit.
+   So an automated `EVICT_HISTORY` would re-evict the 8 tombstones AND DELETE two blocks that were
+   never tombstones — the hazard is WIDER than this item stated, in the dangerous direction).
    🔴 **Fix that signal before automating anything.** Before proposing a GATE, re-run the ratchet
    replay for handoff docs: the caps file for gate 11 records the general rule REFUTED over 365
    days / 901 commits. Files: `scripts/handoff-audit.py`, `claude/skills/handoff/SKILL.md`.
@@ -511,6 +615,12 @@ rather than removed and renumbered. New work is appended at the end.
    `talos-xr6-r7p`, not the request size. 🔴 **DO NOT START — LOCKED** by another session's claim
    `ci-speedup-7` (verified live 2026-09-01). 🔴 **And re-read the premise first: #1211 `1a4350f3`
    sited the store on tmpfs**, so the contention this item was motivated by may already be gone.
+   ⚠ **CORRECTED 2026-09-01 — do NOT act on the sentence above without reading the CI block's
+   fixture/call-site table first.** #1211 sited **one fixture of two** in one file of three; **123 of that
+   file's 256** `running()` sites — the 110 in `scoped_store` PLUS 13 that belong to no fixture,
+   three of them write-path — plus both cairn suites are still disk-backed, and the tmpfs probe is UNVERIFIED on
+   `talos-xr6-r7p`. So the contention is **not** established as gone, and de-prioritising this item
+   on that reading is the misroute rank 13 exists to prevent.
    forcing: none
 11. ✅ **DONE (2026-09-01)** — `origin/main` merged forward into `feat/handoff-audit`, gate green,
    **#1064 MERGED as `f71ff648`**. It was 124 behind, not the 93 recorded — re-derive when you act.
@@ -525,14 +635,55 @@ rather than removed and renumbered. New work is appended at the end.
    a run whose control block is absent is void). CLOSES WHEN: the split is measured over those 5
    and one remedy shape is chosen in writing.
    forcing: none
-13. **Add the MITIGATED caveat to the doc's CI block.** 🔴 #1211 `1a4350f3` sited the store-api test
-   store on tmpfs at 19:30Z, **33 min before #1207 merged**, so the doc ships an un-caveated
-   warning about a mechanism that should no longer fire. One line naming `1a4350f3`; do NOT delete
-   the mechanism text (`scripts/ci-repro/README.md`, the code sites) — that is the durable half.
-   Also read **#1213 `793a2b8e`** (8-red triage + a classifier reading the checkout PATH) before
-   writing, in case it supersedes this again.
-   forcing: regression — the doc asserts a live failure mode that a merged change has mitigated,
-   and it is read as authoritative at session start
+13. ✅ **DONE (2026-09-01) — caveat shipped as PARTIALLY mitigated; the item's own premise ("should
+   no longer fire") was REFUTED in the doing, and so was the FIRST version of the caveat.** Evidence
+   in the CI block above. Mechanism text kept verbatim, as the item required. 🔴 The audit round
+   caught that the first draft said "`test_subsystem_store_api.py` is now sited" — **false at
+   fixture granularity** (`scoped_store`, 110 sites) **and then wrong again at fixture level —
+   the unit is the CALL SITE, 123 of 256 disk-backed** — i.e. the fix for a
+   one-of-three error repeated it one level down. That is the shape to expect, not a one-off.
+   🔴 **Left undone deliberately — the next reader's, and it is a devrc-repo edit, not a doc edit:**
+   `scripts/ci-repro/README.md` carries **no mitigation note** (zero hits for
+   `tmpfs|1211|mitigat|shm` at `origin/main`), so the reproducer reads as fully live at the one place
+   this doc sends people. 🔴 **CLOSES WHEN (a) ALONE — #1219 merging does NOT close it**, and the
+   earlier draft of this item said it did. #1219 touches five files and **`scripts/ci-repro/README.md`
+   is not one of them** (verified 2026-09-01), so its merge leaves this deliverable exactly as
+   undone; it also leaves the *second* half of the caveat standing, because `store_siting.py`'s
+   probe keeps a disk fallback and nobody has verified it engages on `talos-xr6-r7p`.
+   **(a) = that README names `1a4350f3` AND says what is STILL unsited — and "still unsited" is
+   THREE populations (`scoped_store`, the two cairn suites, the 13 unfixtured sites), so with the
+   sha that is FOUR required greps.** 🔴 An alternation would certify all four by naming one, which
+   is this arc's own recurring bug expressed as a regex. ⚠ **This sentence said "three greps" until
+   round 5 — one round AFTER a4 was added below it, so the definition of (a) contradicted its own
+   check for a whole round. Count the `# (aN)` lines in the block; they are the authority.**
+   ```bash
+   DEVRC=~/workspace/devrc
+   git -C "$DEVRC" fetch origin main -q      # or a stale clone answers for a ref you do not have
+   R=scripts/ci-repro/README.md
+   git -C "$DEVRC" grep -c fsync        origin/main -- "$R"   # CONTROL first: must be NON-ZERO (25 today)
+   git -C "$DEVRC" grep -c '1a4350f3'   origin/main -- "$R"   # (a1) the sha
+   git -C "$DEVRC" grep -c scoped_store origin/main -- "$R"   # (a2) the unsited fixture
+   git -C "$DEVRC" grep -c cairn        origin/main -- "$R"   # (a3) the two cairn suites
+   git -C "$DEVRC" grep -cE 'unfixtured|11755' origin/main -- "$R"   # (a4) the 13 unfixtured sites
+   ```
+   The control runs INSIDE the block on purpose: `git grep -c` prints nothing and exits 1 on zero,
+   so a copy-paste that omits the control returns four blanks that are indistinguishable from a
+   broken probe. **(a) is met only when a1, a2, a3 AND a4 are all non-zero and the control is
+   non-zero.** ⚠ **The control is a POSITIVE control, not an equality — it was written `must be 25`
+   until round 6.** The edit that SATISFIES (a) is a mitigation note about an fsync bug, which
+   plausibly says "fsync" and moves the count to 26, making an equality-conjunction false at the
+   exact moment (a) is genuinely met.
+   🔴 **And re-read a2/a3 after #1219 merges:** it re-sites `scoped_store` AND both cairn suites, so
+   those two populations stop being "still unsited" — at which point demanding those words in the
+   README pushes you to write a false sentence or to score a met (a) as unmet. a4's population is
+   the one #1219 leaves alone, so a4 is the durable half of this check.
+   🔴 **a4 was an advisory `⚠` until round 4 — i.e. the condition required three greps for FOUR
+   populations, which is the same certify-by-naming-one bug as the alternation it replaced, one
+   level further down and inside its own fix.** The population it omitted is the write-path one
+   (`:11755, :11852, :12584`), the most on-mechanism of the four and the only one #1219 will not
+   touch — so it was the worst possible one to leave optional.
+   forcing: regression — the doc asserted a live failure mode that a merged change PARTIALLY
+   mitigated, and it is read as authoritative at session start
 
 ## Gotchas / decisions / dead-ends
 
@@ -783,7 +934,9 @@ of this doc — re-read them before trusting any similar analysis.**
   twice this arc.
 - **Doc size / open ranks, both DERIVED:**
   `(cd "$DEVRC" && python3 scripts/handoff-audit.py --sections 1 claudedocs/handoff-skill-chain-usage-audit.md)`
-  → `N/12 ranked items done` and the size line. Never quote a size from prose.
+  → `N/<total> ranked items done` and the size line. Never quote a size from prose — and 🔴 **never
+  quote the ranked-item count from the tool either: it over-counts** (see `## State now`, which
+  carries the one copy of that caveat and the reason). The SIZE line is the trustworthy half.
 - **The gate's node ceiling:**
   ```bash
   export KUBECONFIG=$KC_HOMELAB
