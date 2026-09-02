@@ -176,21 +176,31 @@ echo "=== 6c. /home breakdown — ROOT FILESYSTEM ONLY (top 15 by allocated size
 # take for root-fs usage, contradicting section 2's correct 686.8 GiB for /home.
 # Walking them is also what made that run take ~3 hours. Compare each candidate's
 # device against / and skip the foreign ones, then list them separately.
+# 🔴 The loop must NOT be the head of a pipeline. It was, so `FOREIGN=` assigned in
+# a SUBSHELL and was empty by the time the listing read it — on a host with five
+# foreign filesystems under /home the report affirmatively printed "none". The
+# exclusion half worked and the listing half could never fire, so the code was
+# narrower than its own comment. shellcheck SC2030/SC2031 flags exactly this; the
+# repo has no shellcheck gate, so nothing caught it.
 ROOT_DEV=$(stat -c '%D' / 2>/dev/null)
-FOREIGN=""
+ONROOT_LIST=$(mktemp) || exit 3
+FOREIGN_LIST=$(mktemp) || exit 3
+trap 'rm -f "$DENIED_LOG" "$ONROOT_LIST" "$FOREIGN_LIST"' EXIT
 for p in /home/*/* /home/*/.*; do
   case "${p##*/}" in .|..) continue ;; esac
   [ -d "$p" ] || continue
   d=$(stat -c '%D' "$p" 2>/dev/null) || continue
-  if [ "$d" = "$ROOT_DEV" ]; then echo "$p"; else FOREIGN="$FOREIGN $p"; fi
-done | tr '\n' '\0' | xargs -0 -r du -sh -x 2>/dev/null | sort -rh | head -15
+  if [ "$d" = "$ROOT_DEV" ]; then printf '%s\0' "$p" >> "$ONROOT_LIST"
+  else printf '%s\n' "$p" >> "$FOREIGN_LIST"; fi
+done
+xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>/dev/null | sort -rh | head -15
 echo "--- NOT on the root filesystem, so NOT part of this accounting ---"
-if [ -n "$FOREIGN" ]; then
-  for p in $FOREIGN; do
+if [ -s "$FOREIGN_LIST" ]; then
+  while IFS= read -r p; do
     printf '  %-40s %s\n' "$p" "$(findmnt -n -o SOURCE,FSTYPE,SIZE,USED --target "$p" 2>/dev/null | head -1)"
-  done
+  done < "$FOREIGN_LIST"
 else
-  echo "  none"
+  echo "  none found — on a host with foreign mounts under /home this is a BUG, not a clean result"
 fi
 
 echo
@@ -199,10 +209,23 @@ echo "  78,501,285 entries / 469 GiB, 81% of this filesystem's inodes. /tmp is o
 echo "  the ROOT partition here, not tmpfs, so nothing clears it at boot."
 printf 'top-level entries : %d\n' "$(ls -A /tmp 2>/dev/null | wc -l)"
 echo "--- top 15 by allocated size ---"
-du -sh -x /tmp/* 2>/dev/null | sort -rh | head -15
+# 🔴 NOT `du -sh -x /tmp/*`. MEASURED 2026-09-02: /tmp held 171,886 top-level
+# entries = ~4.32 MiB of argv against an ARG_MAX of 2,097,152, so the glob dies
+# E2BIG. `2>/dev/null` swallows the message and `set -euo pipefail` then kills the
+# WHOLE SCRIPT mid-section — sections 6d-inodes, 7 and 8 never run, and the report
+# ends with no error. That is the "truncated scan reported as a total" failure this
+# very script exists to prevent, reintroduced by the fix for section 6c.
+find /tmp -xdev -mindepth 1 -maxdepth 1 -print0 2>/dev/null \
+  | xargs -0 -r du -sh -x 2>/dev/null | sort -rh | head -15
 echo "--- top 15 by inode count ---"
-find /tmp -xdev -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null \
-  | xargs -0 -r -I{} sh -c 'printf "%12d  %s\n" "$(find "{}" -xdev -printf . 2>/dev/null | wc -c)" "{}"' \
+# 🔴 NOT `xargs -I{} sh -c '… "{}" …'`. That substitutes the directory NAME into a
+# shell string, and /tmp is mode 1777, and this script demands sudo — so any local
+# process could plant a directory whose name is a command and get it run AS ROOT.
+# VERIFIED 2026-09-02: a dir named `evil";echo PWNED-AS-$(id -un) >&2;"x` made the
+# old pipeline print PWNED-AS-zach. -exec with "$1" passes the name as an ARGUMENT,
+# never as text to parse.
+find /tmp -xdev -mindepth 1 -maxdepth 1 -type d \
+  -exec sh -c 'printf "%12d  %s\n" "$(find "$1" -xdev -printf . 2>/dev/null | wc -c)" "$1"' _ {} \; 2>/dev/null \
   | sort -rn | head -15
 echo "--- entry-name families (what is generating them) ---"
 ls -A /tmp 2>/dev/null | sed -E 's/[0-9]{3,}.*$//; s/[A-Za-z0-9]{8,}$//' \
@@ -221,7 +244,24 @@ else
   if [ -z "$LSOF_OUT" ]; then
     echo "count=0 bytes=0.0 GiB  (lsof exited $LSOF_RC with no rows — no deleted-but-open files)"
   else
-    printf '%s\n' "$LSOF_OUT" | awk 'NR>1{n++; s+=$8} END {printf "count=%d bytes=%.1f GiB\n", n+0, s/1073741824}'
+    # 🔴 DO NOT HARDCODE THE COLUMN. The original summed $8, which under `+L1` is
+    # NLINK — 0 for every row by the definition of +L1 — so it printed a hard
+    # `bytes=0.0 GiB` on every run: the reassuring reading, in the very section
+    # rewritten to stop emitting a misleading number. Its "two rows give
+    # bytes=2.0 GiB" control passed only against a fixture shaped to the code.
+    #
+    # $7 is correct for `+L1` on this host (MEASURED 2026-09-02: header is
+    # `COMMAND PID USER FD TYPE DEVICE SIZE/OFF NLINK NODE NAME`) — but the index is
+    # NOT stable across invocations: plain `lsof -n -P` here emits TID and TASKCMD
+    # too, putting SIZE/OFF at $9. A fixed index is a latent version dependency, so
+    # find the column by NAME from the header and fail loudly if it is absent.
+    printf '%s\n' "$LSOF_OUT" | awk '
+      NR==1 { for (i=1; i<=NF; i++) if ($i == "SIZE/OFF") col=i; next }
+      { n++; if (col) s += $col }
+      END {
+        if (!col) { printf "COULD NOT MEASURE: no SIZE/OFF column in lsof header (rows=%d) — NOT a zero\n", n+0; exit }
+        printf "count=%d bytes=%.1f GiB (SIZE/OFF=col %d, resolved from the header)\n", n+0, s/1073741824, col
+      }'
   fi
 fi
 
