@@ -43,10 +43,16 @@ A zero-result query has FIVE causes that mean different things:
                                       where SOME resolved is the next row, not
                                       this one.
     the repos read fine and hold      ZERO HANDOFF DOCS DERIVED — `--offline`
-    no handoff docs                   only. Same "no table, no unit" as above,
-                                      and it kept rendering as BROKEN INDEX for
+    no handoff docs, OR hold some     only. Same "no table, no unit" as above,
+    that git could not produce        and it kept rendering as BROKEN INDEX for
                                       one round after that was fixed, because
                                       only the unresolvable half was fixed.
+                                      🔴 ONE STATUS, TWO MECHANISMS, AND THE
+                                      RENDERING SPLITS ON `unreadable`: a ref
+                                      that lists handoff docs whose blobs git
+                                      cannot produce also derives zero, and
+                                      saying "holds none" there sends the reader
+                                      to WRITE a doc that is already committed.
 
 `claude/RULES.md` → "An EMPTY RESULT cannot distinguish two mechanisms". So every
 response — hit, no-match, empty-scope, unmeasured and broken alike — carries the
@@ -102,8 +108,9 @@ that could not be measured are none of them readings.
     3   broken-index                      the table is empty
     4   empty-scope                       the FILTER selected nothing
     6   unmeasured-corpus                 NO repo resolved (--offline)
-    7   derived-zero-docs                 the repos resolved and hold no handoff
-                                          docs (--offline)
+    7   derived-zero-docs                 the repos resolved and derived no handoff
+                                          docs — they hold none, or every one they
+                                          hold failed to read (--offline)
 
 🔴 `empty-scope` EXITS 4 FOR **BOTH** OF ITS REASONS, INCLUDING `no-rows` — a
 filter that is entirely valid (a real repo label, a declared section kind) over a
@@ -304,6 +311,16 @@ class SearchOutcome:
     #: also what tells a corpus this run BUILT (and found empty) from a Postgres
     #: table that is empty, which are the two rung-1 zeros with opposite remedies.
     targets: tuple[str, ...] = ()
+    #: `((label, path), …)` for every doc that IS in a repo's mainline ref and
+    #: that git could not produce. 🔴 IT IS WHAT MAKES rc 7's SENTENCE TRUE OR
+    #: FALSE. `derive_repo` reports both "the ref holds no handoff docs" and
+    #: "every handoff doc in the ref failed to read" as `docs == 0` with no
+    #: `unmeasured` reason, and `derived-zero-docs` rendered the first sentence
+    #: for both — MEASURED by deleting a committed doc's blob from the object
+    #: store: `ls-tree` still listed it, `git show` failed, and the CLI said the
+    #: repo holds no `claudedocs/handoff-*.md`. Same empty-result trap as
+    #: `handoff_paths_in_ref`'s `None`-vs-`()`, carried one seam further.
+    unreadable: tuple[tuple[str, str], ...] = ()
 
     @property
     def in_scope(self) -> IndexStats:
@@ -387,6 +404,7 @@ def run_search(
     limit: int = DEFAULT_LIMIT,
     unmeasured: Sequence[tuple[str, str]] = (),
     targets: Sequence[str] = (),
+    unreadable: Sequence[tuple[str, str]] = (),
 ) -> SearchOutcome:
     """Query the store and CLASSIFY the result. The one place `status` is decided.
 
@@ -464,6 +482,7 @@ def run_search(
             repo=repo, sections=tuple(sections), limit=limit, scoped=stats,
             known_repos=tuple(store.repos()), unmeasured=tuple(unmeasured),
             targets=tuple(targets),
+            unreadable=tuple(unreadable),
         )
 
     known = tuple(store.repos())
@@ -488,6 +507,7 @@ def run_search(
             repo=repo, sections=tuple(sections), limit=limit, scoped=scoped,
             known_repos=known, scope_reason=reason, unmeasured=tuple(unmeasured),
             targets=tuple(targets),
+            unreadable=tuple(unreadable),
         )
 
     hits = tuple(store.search(query, repo=repo, sections=sections, limit=limit))
@@ -504,6 +524,7 @@ def run_search(
         known_repos=known,
         unmeasured=tuple(unmeasured),
         targets=tuple(targets),
+        unreadable=tuple(unreadable),
     )
 
 
@@ -559,6 +580,36 @@ def render(outcome: SearchOutcome) -> str:
         # The remedy here is about DOCS, because that is the thing that is absent.
         failed = {label for label, _ in outcome.unmeasured}
         resolved = [t for t in outcome.targets if t not in failed]
+        # 🔴 "HOLDS NONE" AND "COULD NOT READ ANY" ARE TWO MECHANISMS BEHIND ONE
+        # ZERO, AND THIS BRANCH USED TO ASSERT THE FIRST FOR BOTH. REPRODUCED by
+        # committing a handoff doc and deleting its blob from `.git/objects`:
+        # `ls-tree` still lists the path, `git show` fails, `derive_repo` returns
+        # `docs=0` with NO `unmeasured` reason — and the sentence below claimed
+        # the repo holds no `handoff-*.md`, sending the reader to write one. The
+        # remedies are opposite (write a doc / repair the object store), which is
+        # exactly `claude/RULES.md`'s empty-result trap. `unreadable` is the
+        # upstream signal the two mechanisms disagree about.
+        if outcome.unreadable:
+            detail = ", ".join(f"{lab}:{path}" for lab, path in outcome.unreadable)
+            lines += [
+                "",
+                f"🔴 ZERO HANDOFF DOCS DERIVED — and NOT because there are none. The "
+                f"{len(resolved)} repo(s) this run read "
+                f"({', '.join(resolved) or '(none)'}) resolved a mainline ref that DOES "
+                f"list {len(outcome.unreadable)} `{handoff_index.HANDOFF_DIR}/"
+                f"handoff-*.md`, and git could not produce the content of a single one: "
+                f"{detail}.",
+                "   So the corpus is empty because every document in it FAILED TO READ, "
+                "not because the ref holds none. Do NOT read this as 'write a handoff "
+                "doc' — the docs are committed. A `git show <ref>:<path>` that fails on "
+                "a path `git ls-tree` lists means the object store is incomplete: try "
+                "`git fsck` and re-fetch, then re-run.",
+                "   This is NOT a broken index either: the corpus was BUILT here, "
+                "in-process, from git — there is no table to rebuild and no unit to "
+                "check on this path. It is also NOT the answer 'the corpus does not "
+                "mention that'.",
+            ]
+            return "\n".join(lines)
         lines += [
             "",
             f"🔴 ZERO HANDOFF DOCS DERIVED — the {len(resolved)} repo(s) this run read "
@@ -695,6 +746,14 @@ def outcome_json(outcome: SearchOutcome) -> dict:
         # the text renderer came to say "all 1 repo(s) … failed" for a run pointed
         # at 2. Empty on the Postgres path, which builds no corpus.
         "targets": list(outcome.targets),
+        # 🔴 THE OTHER MECHANISM BEHIND A ZERO CORPUS, and it belongs here for
+        # `unmeasured`'s reason: a consumer reading `indexed_docs=0` with an
+        # empty `unmeasured` would otherwise conclude the repos hold no handoff
+        # docs, which is the exact false sentence rc 7 used to print. Non-empty
+        # means the mainline LISTS docs that git could not produce.
+        "unreadable": [
+            {"repo": label, "doc_path": path} for label, path in outcome.unreadable
+        ],
         "exit_code": exit_code_for(outcome),
         "hits": [
             {
@@ -719,22 +778,34 @@ def offline_targets(repos: Sequence[str]) -> list[tuple[str, str]]:
 
 def _offline_store(
     targets: Sequence[tuple[str, str]],
-) -> tuple[MemorySectionStore, list[str], tuple[tuple[str, str], ...]]:
-    """The in-process corpus, its warnings, AND what it could not measure.
+) -> tuple[MemorySectionStore, list[str], tuple[tuple[str, str], ...],
+           tuple[tuple[str, str], ...]]:
+    """The in-process corpus, its warnings, what it could NOT measure, and which
+    committed docs it could not READ.
 
     🔴 THE THIRD ELEMENT IS THE FIX FOR A MISDIAGNOSIS. This function called
     `derive_repo` — which sets a STRUCTURAL `unmeasured` reason per repo — and
     returned only the rows and the warning strings, so `run_search` saw an empty
     store and could not tell an unresolvable checkout from an empty table. The
     flag is carried across the seam rather than re-derived or grepped out of the
-    warnings, for `RepoDerivation.unmeasured`'s reason."""
+    warnings, for `RepoDerivation.unmeasured`'s reason.
+
+    🔴 THE FOURTH IS THE SAME FIX ONE MECHANISM LATER, AND IT IS NOT COVERED BY
+    THE THIRD. A repo whose mainline LISTS handoff docs that git cannot produce
+    is fully MEASURED — `unmeasured is None` — and contributes `docs == 0`, so it
+    reaches `run_search` as the same empty store a genuinely doc-less repo does.
+    rc 7 then asserted the doc-less reading. Carried as `(label, path)` pairs so
+    the renderer can name the documents rather than a count."""
     derivations = [handoff_index.derive_repo(p, label=lab) for p, lab in targets]
     rows = [s for d in derivations for s in d.sections]
     warnings = [w for d in derivations for w in d.warnings]
     unmeasured = tuple(
         (d.label, d.unmeasured) for d in derivations if d.unmeasured is not None
     )
-    return MemorySectionStore(rows), warnings, unmeasured
+    unreadable = tuple(
+        (d.label, path) for d in derivations for path in d.unreadable
+    )
+    return MemorySectionStore(rows), warnings, unmeasured, unreadable
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -789,13 +860,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        store, warnings, unmeasured = _offline_store(targets)
+        store, warnings, unmeasured, unreadable = _offline_store(targets)
         for w in warnings:
             print(w, file=sys.stderr)
         backend = "memory"
         outcome = run_search(store, args.query, backend=backend, repo=args.repo,
                              sections=args.section, limit=args.limit,
-                             unmeasured=unmeasured,
+                             unmeasured=unmeasured, unreadable=unreadable,
                              targets=tuple(label for _, label in targets))
     else:
         MailDB = handoff_index.import_maildb()

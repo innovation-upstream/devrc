@@ -128,6 +128,33 @@ Prove the vorpling case parses as preamble.
 """
 
 
+def _norm(text: str) -> str:
+    """Collapse whitespace. The ONLY normalisation the prose pins apply, so
+    re-wrapping an f-string is free and every WORD stays load-bearing."""
+    return " ".join(text.split())
+
+
+#: 🔴 THE WHOLE ORPHAN SENTENCE, PINNED. Three substring assertions (headline,
+#: label list, remedy command) let a mutant rewrite "only ever" to "ALWAYS" and
+#: survive — `claude/RULES.md`: when the artifact under test IS prose, a guard on
+#: WORDS is walkable by REWORDING, so pin the whole normalised string. Written
+#: here rather than imported so the test states the expectation independently of
+#: the implementation it checks.
+_EXPECTED_ORPHAN_WARNING = (
+    "⚠ ORPHANED LABELS — the table holds 2 repo label(s) THIS config does not "
+    "name: plimforth, wibbleton-retired. A query can still answer FROM them, and "
+    "nothing on THIS host will refresh them — the index is shared, so another "
+    "host whose config DOES name them still can. They are NOT deleted: a rebuild "
+    "only ever deletes repos it was told about. If the repo is meant to be "
+    "indexed, RE-ADD ITS HANDLE — that is the fix whenever the checkout still "
+    "exists somewhere, and an unset handle is the ordinary reason a label reads "
+    "as unnamed here. Only when the repo is genuinely gone, remove the rows "
+    "deliberately with `--rebuild --prune --write` (which refuses unless every "
+    "handle is SET and every repo MEASURES, because an absent or renamed "
+    "checkout looks exactly like a removed one)."
+)
+
+
 def _write_repo(root: Path, docs: dict[str, str], *, commit: bool = True) -> None:
     """A real git repo with `claudedocs/handoff-*.md` committed on `main`."""
     root.mkdir(parents=True, exist_ok=True)
@@ -1019,6 +1046,38 @@ def _recording_store(conn):
     return _open
 
 
+def _apply_handles(monkeypatch, mapping: dict[str, str]) -> None:
+    """Put `REPO_ENV_HANDLES` in exactly the state `mapping` describes.
+
+    🔴 IT CLEARS EVERY HANDLE FIRST. These tests run on a real workbench where
+    `$DEVRC`/`$HOMELAB`/… are exported by `.zshenv`, so a test that only SETS the
+    handles it cares about inherits the rest and measures a config it did not
+    construct — and `--prune`'s config-width guard is a claim about the WHOLE
+    handle set, so an inherited handle is the difference between refusing and
+    proceeding. `monkeypatch` restores the real environment afterwards."""
+    for handle in hi.REPO_ENV_HANDLES:
+        monkeypatch.delenv(handle, raising=False)
+    for handle, value in mapping.items():
+        monkeypatch.setenv(handle, value)
+
+
+def _every_handle_set(tmp_path, *, docs=True) -> dict[str, str]:
+    """A COMPLETE config: one real, readable repo per `REPO_ENV_HANDLES` entry.
+
+    🔴 THE COMPLETE CONFIG IS NOW A PRECONDITION OF `--prune`, so a fixture that
+    sets two of four handles no longer reaches the guard under test — it trips
+    `prune_config_refusal` first. Each repo is named after its handle so a
+    delete-scope assertion reads as a list of labels, and every label is a
+    nonsense word distinct from every other fixture's."""
+    out: dict[str, str] = {}
+    for handle in hi.REPO_ENV_HANDLES:
+        root = tmp_path / f"{handle.lower()}repo"
+        _write_repo(root, {"handoff-widget-relay.md": DOC_FULL} if docs else {},
+                    commit=docs)
+        out[handle] = str(root)
+    return out
+
+
 def _refusing_store():
     """An `open_store` that FAILS if anything opens it. The positive control for
     'the write was refused': a test asserting only on the exit code cannot tell a
@@ -1391,13 +1450,57 @@ class TestScopedRebuildDelete:
 
         warning = hi.orphan_label_warning(orphans)
         assert len(warning) == 1
-        assert "⚠ ORPHANED LABELS" in warning[0]
-        assert "plimforth, wibbleton-retired" in warning[0]
-        assert "--rebuild --prune --write" in warning[0]
-        assert "They are NOT deleted" in warning[0]
+        assert _norm(warning[0]) == _norm(_EXPECTED_ORPHAN_WARNING)
         # The negative control: no orphans, no sentence. A per-run "0 orphaned"
         # buries the real ones.
         assert hi.orphan_label_warning(()) == ()
+
+    def test_a_label_this_run_DELETED_is_no_longer_an_orphan(self, tmp_path):
+        """🔴 F2, AT THE PURE LEVEL. `orphan_labels` read only the PRE-write
+        `stored` list, so a successful `--prune` reported the rows it had just
+        deleted as "NOT deleted". It now subtracts the run's BOUND DELETE SCOPE —
+        the thing that actually happened — rather than an `args.prune` boolean,
+        which would be a second spelling of that fact, free to drift from it.
+
+        Asserted as a differential on `deleted` alone: same derivations, same
+        stored set, one argument apart."""
+        ds, stored = self._renamed_checkout_fixture(tmp_path)
+        assert hi.orphan_labels(ds, stored, scoped=False) == (
+            "plimforth", "wibbleton-retired")
+        assert hi.orphan_labels(ds, stored, scoped=False,
+                                deleted=("wibbleton-retired",)) == ("plimforth",)
+        assert hi.orphan_labels(
+            ds, stored, scoped=False,
+            deleted=("plimforth", "wibbleton-retired")) == ()
+        # …and a non-prune scope (the MEASURED labels) subtracts nothing, because
+        # a measured label is configured by construction and never an orphan.
+        measured = tuple(d.label for d in ds if d.unmeasured is None)
+        assert measured
+        assert hi.orphan_labels(ds, stored, scoped=False, deleted=measured) == (
+            "plimforth", "wibbleton-retired")
+
+    def test_the_orphan_sentence_is_pinned_as_a_WHOLE_normalised_string(self):
+        """🔴 F5's SECOND SURVIVING MUTANT. Three substring assertions — the
+        headline, the label list and the remedy command — let a mutant rewrite
+        "a rebuild **only ever** deletes repos it was told about" to "**ALWAYS**"
+        and survive. `claude/RULES.md`: when the artifact under test IS prose, a
+        guard on WORDS is walkable by REWORDING, so pin the WHOLE normalised
+        string. A cosmetic reword now fails this test; that is the intended cost
+        of a machine-readable claim.
+
+        Normalised on whitespace only, so re-wrapping the f-string is free and
+        every WORD is load-bearing."""
+        got = hi.orphan_label_warning(("plimforth", "wibbleton-retired"))
+        assert len(got) == 1
+        assert _norm(got[0]) == _norm(_EXPECTED_ORPHAN_WARNING)
+        # 🔴 THE CLAIMS THAT WERE FALSE, named individually so a future reword
+        # cannot quietly restore them while the whole-string pin is updated to
+        # match. "Nothing will ever refresh them" is a claim about EVERY host
+        # over a SHARED index; and offering the destructive command before
+        # "re-add the handle" pointed at deletion in the state where an unset
+        # handle is the likeliest cause.
+        assert "Nothing will ever refresh" not in got[0]
+        assert got[0].index("RE-ADD ITS HANDLE") < got[0].index("--prune --write")
 
     def test_a_rebuild_with_an_EMPTY_scope_raises_rather_than_wiping(self):
         """🔴 THE LIBRARY-LEVEL BELT. `main` cannot reach this — the refusal guard
@@ -1506,6 +1609,53 @@ class TestTheTimersShapeDeletesOnlyWhatItWasToldAbout:
         assert "trundlerepo" in err
         assert "--rebuild --prune --write" in err
 
+    def test_a_SUCCESSFUL_prune_does_not_report_what_it_just_deleted(
+            self, tmp_path, capsys, monkeypatch):
+        """🔴 F2 — THE SUCCESSFUL PRUNE PATH HAD NO END-TO-END TEST AT ALL, and
+        it was the one path where the report contradicted the transaction above
+        it. MEASURED: `--rebuild --prune --write` DELETEd `wibbleton-retired` and
+        then printed "the table holds 1 repo label(s) this config does not name:
+        wibbleton-retired … They are NOT deleted … Remove them deliberately with
+        `--rebuild --prune --write`" — the remedy for a state the run had just
+        left, naming rows that no longer existed.
+
+        The positive control only ever drove the pure functions, which is why
+        `stored` being the PRE-write read went unnoticed: nothing joined
+        `orphan_labels` to the delete scope except `main`.
+
+        The DELETE scope is asserted too, so this cannot pass by the prune having
+        quietly stopped working — a silent no-op would also print no orphan."""
+        _apply_handles(monkeypatch, _every_handle_set(tmp_path))
+        labels = [f"{h.lower()}repo" for h in hi.REPO_ENV_HANDLES]
+        conn = StoredReposConn((*labels, "wibbleton-retired"))
+        rc = hi.main(["--rebuild", "--prune", "--write"],
+                     open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK
+        # It really did prune — the orphan is in the bound DELETE scope…
+        assert conn.params_for("DELETE") == [[sorted([*labels, "wibbleton-retired"])]]
+        assert "wibbleton-retired" in cap.out  # named in the success line's scope
+        # …and it is NOT then reported as a label that was left behind.
+        assert "ORPHANED LABELS" not in cap.err
+        assert "They are NOT deleted" not in cap.err
+
+    def test_the_SAME_fixture_WITHOUT_prune_still_reports_the_orphan(
+            self, tmp_path, capsys, monkeypatch):
+        """The differential that makes the assertion above mean something: one
+        flag apart, over the same repos and the same stored set. Silence after a
+        prune is correct; silence without one would be the stale-corpus bug the
+        report exists to prevent."""
+        _apply_handles(monkeypatch, _every_handle_set(tmp_path))
+        labels = [f"{h.lower()}repo" for h in hi.REPO_ENV_HANDLES]
+        conn = StoredReposConn((*labels, "wibbleton-retired"))
+        rc = hi.main(["--rebuild", "--write"], open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK
+        assert conn.params_for("DELETE") == [[sorted(labels)]]
+        assert "⚠ ORPHANED LABELS" in cap.err
+        assert "wibbleton-retired" in cap.err
+        assert "They are NOT deleted" in cap.err
+
     def test_a_SCOPED_run_reports_no_orphans_because_it_cannot_know(self, tmp_path,
                                                                     capsys):
         """The negative control for the report: a `--repo` run was told what to
@@ -1603,13 +1753,31 @@ class TestThePartialPromiseIsKept:
 class TestPruneIsAnOperatorActNotAFlagYouCanDriftInto:
     def test_prune_without_rebuild_is_a_usage_error(self, tmp_path, capsys):
         """A destructive flag that silently does nothing in one argv and fires in
-        the next is how it becomes decoration. Rejected, never reinterpreted."""
+        the next is how it becomes decoration. Rejected, never reinterpreted.
+
+        🔴 NO `--repo` HERE, AND ITS ABSENCE IS THE POINT. This used to pass
+        `--repo` — which trips the OTHER usage error — so it asserted the
+        no-rebuild message while driving an argv that is wrong for two reasons,
+        and the two checks' ORDER was the only thing making it green."""
+        rc = hi.main(["--prune", "--write"], open_store=_refusing_store())
+        assert rc == hi.RC_USAGE
+        assert "--prune only widens a --rebuild" in capsys.readouterr().err
+
+    def test_prune_with_repo_and_no_rebuild_names_the_repo_conflict(
+            self, tmp_path, capsys):
+        """🔴 WHEN BOTH USAGE ERRORS APPLY, THE ONE THAT SURVIVES THE OBVIOUS FIX
+        IS THE ONE TO SAY. `--prune --repo X` (no `--rebuild`) used to answer
+        "pass --rebuild" — an instruction that leaves the argv still wrong, and
+        reads as a nudge toward the dangerous combination. Both exit RC_USAGE, so
+        only the sentence differs, and only the check order decides it."""
         repo = tmp_path / "zarfrepo"
         _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
         rc = hi.main(["--repo", str(repo), "--prune", "--write"],
                      open_store=_refusing_store())
+        err = capsys.readouterr().err
         assert rc == hi.RC_USAGE
-        assert "--prune only widens a --rebuild" in capsys.readouterr().err
+        assert "--prune and --repo contradict each other" in err
+        assert "--prune only widens a --rebuild" not in err
 
     def test_prune_with_an_explicit_repo_is_a_usage_error(self, tmp_path, capsys):
         """🔴 THE DANGEROUS COMBINATION, AND IT IS REFUSED RATHER THAN NARROWED.
@@ -1625,22 +1793,162 @@ class TestPruneIsAnOperatorActNotAFlagYouCanDriftInto:
         assert "--prune and --repo contradict each other" in capsys.readouterr().err
 
     def test_a_prune_run_over_an_unmeasured_repo_is_refused_through_main(
-            self, tmp_path, capsys):
-        """The refusal reaches the exit code, and the store is never opened."""
-        good = tmp_path / "zarfrepo"
-        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
-        for handle in hi.REPO_ENV_HANDLES:
-            os.environ.pop(handle, None)
-        os.environ["DEVRC"] = str(good)
-        os.environ["HOMELAB"] = str(tmp_path / "plimforth-renamed")
-        try:
-            rc = hi.main(["--rebuild", "--prune", "--write"],
-                         open_store=_refusing_store())
-        finally:
-            for handle in ("DEVRC", "HOMELAB"):
-                os.environ.pop(handle, None)
+            self, tmp_path, capsys, monkeypatch):
+        """The refusal reaches the exit code, and the store is never opened.
+
+        🔴 EVERY HANDLE IS SET, AND ONE POINTS AT AN ABSENT CHECKOUT. This used
+        to set two of four, which now trips `prune_config_refusal` FIRST — so the
+        test would have gone on passing while never reaching the guard it names.
+        The assertion is on the UNMEASURED wording, not on the shared "REFUSING
+        --rebuild --prune" prefix, for the same reason: two guards whose messages
+        share an opening are two guards one assertion cannot tell apart."""
+        handles = _every_handle_set(tmp_path)
+        handles[hi.REPO_ENV_HANDLES[1]] = str(tmp_path / "plimforth-renamed")
+        _apply_handles(monkeypatch, handles)
+        rc = hi.main(["--rebuild", "--prune", "--write"], open_store=_refusing_store())
+        err = capsys.readouterr().err
         assert rc == hi.RC_REFUSED
-        assert "REFUSING --rebuild --prune" in capsys.readouterr().err
+        assert "came back UNMEASURED" in err
+        assert "plimforth-renamed (no-such-directory)" in err
+        assert "handle(s) are UNSET" not in err
+
+
+class TestPruneRefusesAConfigNarrowerThanTheCorpus:
+    """🔴 THE OTHER HALF OF `--prune`'s PRECONDITION, AND THE ONE THE FIRST ROUND
+    MISSED. `rebuild_refusal` asks "did a configured repo fail to READ";
+    `prune_config_refusal` asks "is this config as WIDE as the corpus". They are
+    disjoint by construction — an UNSET handle produces no derivation, so it can
+    never appear in the unmeasured set — which means **the narrowest configs
+    produce ZERO unmeasured repos and the old guard was weakest exactly where the
+    risk was highest.**"""
+
+    def test_the_refusal_names_the_unset_handles(self):
+        """PURE, and the negative control is the whole point: a guard that fired
+        on a complete config would make `--prune` unusable rather than safe."""
+        refusal = hi.prune_config_refusal(("DATAPACKET", "CIVITAI"))
+        assert refusal is not None
+        assert "handle(s) are UNSET" in refusal
+        assert "$DATAPACKET, $CIVITAI" in refusal
+        assert f"2 of {len(hi.REPO_ENV_HANDLES)}" in refusal
+        assert hi.prune_config_refusal(()) is None
+
+    def test_unset_handles_are_the_exact_complement_of_the_derived_config(self):
+        """The relationship the guard rests on, pinned rather than assumed:
+        `len(default_repos()) == len(REPO_ENV_HANDLES) - len(unset_repo_handles())`
+        for every partial config, so "the config is narrower than the corpus" and
+        "a handle is unset" are one fact and cannot drift apart.
+
+        Driven over EVERY subset size, not just the empty and full ones — a
+        boundary-only check cannot see a guard that is off by one in the middle."""
+        handles = hi.REPO_ENV_HANDLES
+        for n in range(len(handles) + 1):
+            env = {h: f"/nonexistent/{h.lower()}" for h in handles[:n]}
+            unset = hi.unset_repo_handles(env)
+            assert set(unset) == set(handles[n:])
+            assert len(unset) == len(handles) - n
+            assert (hi.prune_config_refusal(unset) is None) == (n == len(handles))
+
+    def test_an_UNSET_handle_makes_prune_refuse_END_TO_END(self, tmp_path, capsys,
+                                                           monkeypatch):
+        """🔴 THE REPRODUCTION, MEASURED BEFORE THE FIX. Two handles set to real,
+        READABLE repos and two unset — the ordinary state on a host without those
+        checkouts, since `nix/agent-handles.nix` existence-guards every handle —
+        with a table holding all four labels. `--rebuild --prune --write` derived
+        2 repos, BOTH measured, `bad == []`, no refusal fired, and bound the
+        DELETE to all four labels at rc 0. Same ~62%-of-the-corpus blast radius as
+        the unit's two-handle `Environment`, relocated to the operator's shell.
+
+        The store is `_refusing_store()`, so this cannot pass on an exit code
+        alone: a run that opened the table would raise."""
+        handles = _every_handle_set(tmp_path)
+        for dropped in hi.REPO_ENV_HANDLES[2:]:
+            handles.pop(dropped)
+        _apply_handles(monkeypatch, handles)
+
+        rc = hi.main(["--rebuild", "--prune", "--write"], open_store=_refusing_store())
+        err = capsys.readouterr().err
+        assert rc == hi.RC_REFUSED
+        assert "handle(s) are UNSET" in err
+        for dropped in hi.REPO_ENV_HANDLES[2:]:
+            assert f"${dropped}" in err
+        # It is NOT the read-failure guard: both configured repos measured fine.
+        assert "came back UNMEASURED" not in err
+
+    def test_a_COMPLETE_config_still_prunes(self, tmp_path, capsys, monkeypatch):
+        """🔴 THE DIFFERENTIAL THAT KEEPS THIS FROM BEING A PERMANENTLY-RED GATE.
+        Same fixture, same argv, every handle SET: the run proceeds and the DELETE
+        is bound to the four measured labels plus the stored orphan. Without this
+        the guard above is indistinguishable from one that refuses everything —
+        which is the mistake `rebuild_refusal`'s all-unmeasured arm had to unwind
+        once already."""
+        _apply_handles(monkeypatch, _every_handle_set(tmp_path))
+        labels = [f"{h.lower()}repo" for h in hi.REPO_ENV_HANDLES]
+        conn = StoredReposConn((*labels, "wibbleton-retired"))
+        rc = hi.main(["--rebuild", "--prune", "--write"],
+                     open_store=_recording_store(conn))
+        assert rc == hi.RC_OK
+        assert "REFUSING" not in capsys.readouterr().err
+        assert conn.params_for("DELETE") == [[sorted([*labels, "wibbleton-retired"])]]
+
+    def test_the_two_prune_guards_report_in_words_that_cannot_be_confused(
+            self, tmp_path, monkeypatch, capsys):
+        """🔴 A SEAM ASSERTION, NOT A COMPONENT ONE. Both refusals open
+        "REFUSING --rebuild --prune", so an assertion on that prefix passes for
+        either — which is how the UNMEASURED test above went on passing while the
+        new guard was the one actually firing. The discriminating tokens are
+        asserted as a MATRIX over the two states, each present in one and absent
+        in the other."""
+        complete = _every_handle_set(tmp_path)
+
+        narrow = dict(complete)
+        narrow.pop(hi.REPO_ENV_HANDLES[-1])
+        _apply_handles(monkeypatch, narrow)
+        hi.main(["--rebuild", "--prune"], open_store=_refusing_store())
+        narrow_err = capsys.readouterr().err
+
+        unreadable = dict(complete)
+        unreadable[hi.REPO_ENV_HANDLES[-1]] = str(tmp_path / "plimforth-renamed")
+        _apply_handles(monkeypatch, unreadable)
+        hi.main(["--rebuild", "--prune"], open_store=_refusing_store())
+        unmeasured_err = capsys.readouterr().err
+
+        assert "handle(s) are UNSET" in narrow_err
+        assert "came back UNMEASURED" not in narrow_err
+        assert "came back UNMEASURED" in unmeasured_err
+        assert "handle(s) are UNSET" not in unmeasured_err
+
+    def test_the_gate_fires_in_DRY_RUN_too(self, tmp_path, monkeypatch, capsys):
+        """A pre-flight that passes for a config the real run refuses is not a
+        pre-flight — the same claim every other gate in this CLI already makes.
+        Same argv one `--write` apart, and the SAME exit code."""
+        handles = _every_handle_set(tmp_path)
+        handles.pop(hi.REPO_ENV_HANDLES[-1])
+        _apply_handles(monkeypatch, handles)
+        dry = hi.main(["--rebuild", "--prune"], open_store=_refusing_store())
+        dry_err = capsys.readouterr().err
+        wet = hi.main(["--rebuild", "--prune", "--write"], open_store=_refusing_store())
+        wet_err = capsys.readouterr().err
+        assert dry == wet == hi.RC_REFUSED
+        assert "handle(s) are UNSET" in dry_err and "handle(s) are UNSET" in wet_err
+        assert "this was a DRY RUN" in dry_err
+        assert "this was a DRY RUN" not in wet_err
+
+    def test_a_NON_prune_rebuild_over_a_narrow_config_is_UNAFFECTED(
+            self, tmp_path, monkeypatch, capsys):
+        """🔴 THE BLAST-RADIUS CONTROL. The timer runs `--rebuild --write` with no
+        `--prune`, on hosts that legitimately lack a checkout. If this guard
+        reached that path it would fire a failure toast 4×/day forever, which is
+        the permanently-red gate `claude/RULES.md` says is worse than no gate."""
+        handles = _every_handle_set(tmp_path)
+        for dropped in hi.REPO_ENV_HANDLES[2:]:
+            handles.pop(dropped)
+        _apply_handles(monkeypatch, handles)
+        labels = [f"{h.lower()}repo" for h in hi.REPO_ENV_HANDLES[:2]]
+        conn = StoredReposConn((*labels, "wibbleton-retired"))
+        rc = hi.main(["--rebuild", "--write"], open_store=_recording_store(conn))
+        assert rc == hi.RC_OK
+        assert "REFUSING" not in capsys.readouterr().err
+        assert conn.params_for("DELETE") == [[sorted(labels)]]
 
     def test_the_timers_argv_does_not_carry_prune(self):
         """The whole point of the flag is that the SCHEDULED run does not pass it.
@@ -1679,6 +1987,38 @@ class TestTheUnitEnvironmentMatchesTheHandlesTheIndexerReads:
             f"{sorted(missing)} is read by handoff_index.REPO_ENV_HANDLES but is not "
             f"declared in nix/agent-handles.nix, so the systemd unit cannot export it "
             f"and the unit's view of the config differs from a human's."
+        )
+
+        # 🔴 …AND THE OTHER DIRECTION IS CHECKED TOO, AGAINST AN ENUMERATED
+        # LEDGER. This assertion used to run one way only while `nix/home.nix`
+        # described it as failing "if the two sets ever diverge" — and the two
+        # sets DID diverge (nix declared five repo handles, the module read
+        # four) with the suite green. A description wider than its check reads as
+        # coverage and provides none, which is the failure that stops the next
+        # person looking.
+        #
+        # It is an ENUMERATION and not a pattern, for `drift-check.sh`'s
+        # `IGNORED` allowlist reason: a new handle is a candidate for the corpus
+        # BY DEFAULT, and adding one to `agent-handles.nix` must force a decision
+        # here rather than being silently excluded. Each entry carries the reason
+        # it is not indexed, in the source.
+        not_indexed = {
+            # A CLI client checkout, not a project with a handoff corpus of its
+            # own — the docs about it live in `civitai`. Indexing it would add a
+            # repo whose mainline holds no `claudedocs/handoff-*.md`, i.e. a
+            # standing PARTIAL/zero-doc contribution for no retrieval value.
+            "CIVITAI_CLI",
+        }
+        extra = declared - set(hi.REPO_ENV_HANDLES)
+        assert extra == not_indexed, (
+            f"nix/agent-handles.nix declares {sorted(extra)} which "
+            f"handoff_index.REPO_ENV_HANDLES does not read, and the deliberate "
+            f"exclusions are {sorted(not_indexed)}. A new repo handle is a candidate "
+            f"for the handoff corpus by DEFAULT: either add it to REPO_ENV_HANDLES, "
+            f"or add it here with the reason it is excluded. 🔴 It also decides "
+            f"whether `--prune` can run — `prune_config_refusal` requires every "
+            f"REPO_ENV_HANDLES entry to be SET, so widening that tuple narrows the "
+            f"hosts an operator can prune from."
         )
 
         # …and the unit must export the whole block rather than a hand-picked
@@ -1720,23 +2060,84 @@ class TestTheDryRunShowsWhatTheRebuildDeletes:
         assert "KEPT (configured but UNMEASURED): plimforth-renamed" in out
         assert "This list is the COMPLETE delete scope." in out
 
-    def test_a_dry_run_WITH_prune_names_its_own_blind_spot(self, tmp_path, capsys):
+    def test_a_dry_run_WITH_prune_names_its_own_blind_spot(self, tmp_path, capsys,
+                                                           monkeypatch):
         """⚠ THE HALF THAT IS STATED, NOT CLOSED. `--prune`'s extra set lives in
         the TABLE, and a dry-run opens none. Printing a scope that silently omits
         those rows would be a pre-flight that under-reports what the run deletes,
-        which is worse than one that names its blind spot."""
-        good = tmp_path / "zarfrepo"
-        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
-        for handle in hi.REPO_ENV_HANDLES:
-            os.environ.pop(handle, None)
-        os.environ["DEVRC"] = str(good)
-        try:
-            rc = hi.main(["--rebuild", "--prune"], open_store=_refusing_store())
-        finally:
-            os.environ.pop("DEVRC", None)
+        which is worse than one that names its blind spot.
+
+        Every handle is SET, because a `--prune` run over a narrower config now
+        refuses before it can print a plan at all."""
+        _apply_handles(monkeypatch, _every_handle_set(tmp_path))
+        rc = hi.main(["--rebuild", "--prune"], open_store=_refusing_store())
         out = capsys.readouterr().out
         assert rc == hi.RC_OK
         assert "a --dry-run CANNOT show it" in out
+        assert "This list is the COMPLETE delete scope." not in out
+
+    def test_the_WRITE_runs_plan_does_not_claim_a_dry_run_blind_spot(
+            self, tmp_path, capsys, monkeypatch):
+        """The nit under F4: the `--prune` plan line said "a --dry-run CANNOT
+        show it" on `--write` runs too, where the bound scope IS printed a few
+        lines later. Same argv one flag apart, so only `--write` explains it."""
+        _apply_handles(monkeypatch, _every_handle_set(tmp_path))
+        conn = StoredReposConn(tuple(f"{h.lower()}repo" for h in hi.REPO_ENV_HANDLES))
+        rc = hi.main(["--rebuild", "--prune", "--write"],
+                     open_store=_recording_store(conn))
+        out = capsys.readouterr().out
+        assert rc == hi.RC_OK
+        assert "a --dry-run CANNOT show it" not in out
+        assert "the full bound scope is printed with the row count below" in out
+
+    def test_a_NON_prune_DRY_RUN_does_not_promise_a_report_it_cannot_make(
+            self, tmp_path, capsys, monkeypatch):
+        """🔴 F4 — THE PLAN LINE ASSERTED A REPORT AND THEN SHOWED NONE. It said
+        "a stored label this config does not name is REPORTED and kept"; the
+        report needs `store.repos()`, and a dry-run opens no store. The branch two
+        lines above it names precisely this blind spot, which is what makes the
+        claim read as considered rather than as an oversight.
+
+        Asserted as the PAIR — same argv, one `--write` apart — because a test on
+        the dry-run alone cannot tell "the promise is now conditional" from "the
+        promise was deleted"."""
+        _apply_handles(monkeypatch, _every_handle_set(tmp_path))
+        rc_dry = hi.main(["--rebuild"], open_store=_refusing_store())
+        dry = capsys.readouterr().out
+        assert rc_dry == hi.RC_OK
+        assert "is REPORTED" not in dry
+        assert "cannot list them" in dry
+        assert "This list is the COMPLETE delete scope." in dry
+
+        conn = StoredReposConn(("marganserrepo",))
+        rc_wet = hi.main(["--rebuild", "--write"], open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc_wet == hi.RC_OK
+        # The write run DOES make the report, and says so where the dry-run says
+        # it cannot — and the report it points at is actually printed.
+        assert "is REPORTED (see ORPHANED LABELS below)" in cap.out
+        assert "cannot list them" not in cap.out
+        assert "⚠ ORPHANED LABELS" in cap.err
+
+    def test_a_SCOPED_rebuild_plan_says_it_reports_nothing_either(
+            self, tmp_path, capsys):
+        """🔴 F5's SURVIVING MUTANT. `rebuild_plan_lines`' `if scoped:` mutated to
+        `if False:` left the whole suite green: a scoped run fell through to the
+        no-prune branch and printed "a stored label this config does not name is
+        REPORTED and kept" — false twice over, because `orphan_labels` returns ()
+        for a scoped run, so nothing is reported at all.
+
+        Killed by asserting the scoped sentence is PRESENT and the no-prune one is
+        ABSENT. Either assertion alone is walkable: an unconditional scoped
+        sentence passes the first, and a deleted branch passes the second."""
+        repo = tmp_path / "quixotryrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        rc = hi.main(["--repo", str(repo), "--rebuild"], open_store=_refusing_store())
+        out = capsys.readouterr().out
+        assert rc == hi.RC_OK
+        assert "This run is SCOPED by --repo" in out
+        assert "and none is REPORTED either" in out
+        assert "No --prune, so a stored label" not in out
         assert "This list is the COMPLETE delete scope." not in out
 
     def test_a_non_rebuild_run_prints_no_delete_scope_at_all(self, tmp_path, capsys):
@@ -2805,3 +3206,201 @@ class TestPackaging:
         assert first.startswith("#!"), first
         assert "python3" in first, first
         assert os.stat(path).st_mode & 0o111, f"{name} is not executable"
+
+
+# --------------------------------------------------------------------------- #
+# The README row is a CLAIM about this module, and it drifted
+# --------------------------------------------------------------------------- #
+
+
+def _readme_row(name: str) -> str:
+    """The `scripts/README.md` table row whose first cell names `name`.
+
+    🔴 BOUNDED TO ONE ROW. A `split()` on the module name runs to the end of a
+    2,000-line file, so an assertion about "the row" would happily be satisfied
+    by any later row that happens to mention the same status word."""
+    text = (REPO_ROOT / "scripts" / "README.md").read_text()
+    rows = [ln for ln in text.splitlines() if ln.startswith(f"| `{name}` |")]
+    assert len(rows) == 1, f"expected exactly one README row for {name}, got {len(rows)}"
+    return rows[0]
+
+
+class TestTheReadmeRowMatchesTheExitCodeLedger:
+    """🔴 F3 — THE ROW SAID `handoff_search` HAS **FOUR** ZEROS AND FOUR EXIT
+    CODES. It had five: `derived-zero-docs`/rc 7 was added and the same commit
+    updated the SIBLING `lib/handoff_index.py` row and not this one. Nothing
+    pinned it, so the prose was free to describe a CLI that no longer existed —
+    and a reader trusting "four causes" would read rc 7 as an undocumented code.
+
+    Pinned against the module's own ledgers rather than against a literal, so a
+    sixth zero fails HERE instead of being discovered by whoever hits it."""
+
+    _WORDS = {0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+              6: "six", 7: "seven", 8: "eight", 9: "nine"}
+
+    def test_every_status_keyed_exit_code_is_named_in_the_row(self):
+        """The direction that catches an ADDED code. `EXIT_CODES` holds every
+        status whose rc depends on the status alone; each must appear in the row
+        as `(N —`, the shape the prose uses to introduce one."""
+        row = _readme_row("lib/handoff_search.py")
+        for status, code in hs.EXIT_CODES.items():
+            assert f"({code} —" in row, (
+                f"scripts/README.md's lib/handoff_search.py row does not document "
+                f"exit code {code} ({status}). Every entry in "
+                f"handoff_search.EXIT_CODES must be named there."
+            )
+
+    def test_the_row_counts_the_zeros_the_module_actually_has(self):
+        """The direction that catches a STALE COUNT — the actual defect. The
+        zeros are every status that is not `hit`: `no-match` is a zero that is an
+        ANSWER, and the row counts it (it is the `(0, an answer)` entry)."""
+        row = _readme_row("lib/handoff_search.py")
+        zeros = [s for s in hs.STATUSES if s != "hit"]
+        word = self._WORDS[len(zeros)]
+        assert f"A zero has **{word}** causes" in row, (
+            f"scripts/README.md claims a different number of zero-causes than "
+            f"handoff_search.STATUSES has ({len(zeros)}: {zeros}). Update the row."
+        )
+        assert f"carrying {word} exit codes" in row
+
+    def test_the_count_word_map_is_not_silently_short(self):
+        """The instrument's own control: a `KeyError` here would fail the test
+        above for the wrong reason, and a `.get(…, 'four')` would make it
+        permanently green. Asserted rather than assumed."""
+        assert len(hs.STATUSES) - 1 in self._WORDS
+
+
+# --------------------------------------------------------------------------- #
+# rc 7 — "the repos hold no handoff docs" is TWO mechanisms behind one zero
+# --------------------------------------------------------------------------- #
+
+
+def _blob_of(repo: Path, ref: str, path: str) -> str:
+    out = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{ref}:{path}"],
+                         check=True, capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def _break_every_doc_blob(repo: Path) -> tuple[str, ...]:
+    """Delete the loose object behind every handoff doc in the mainline ref.
+
+    🔴 THE REAL MECHANISM, NOT A MONKEYPATCH. `git ls-tree` reads the TREE
+    object, `git show <ref>:<path>` reads the BLOB, and they are separate objects
+    — so removing the blob leaves the path listed and its content unreadable,
+    which is what an incomplete or partially-fetched object store looks like.
+    Stubbing `doc_text_at_ref` would test the stub and could not show that the
+    two git commands really do disagree."""
+    ref, _ = hi.resolve_mainline(repo)
+    assert ref is not None
+    tracked = hi.handoff_paths_in_ref(repo, ref)
+    assert tracked, "the fixture must commit at least one handoff doc"
+    for path in tracked:
+        sha = _blob_of(repo, ref, path)
+        (repo / ".git" / "objects" / sha[:2] / sha[2:]).unlink()
+    return tracked
+
+
+class TestAnUnreadableDocIsNotAnAbsentOne:
+    """🔴 F7 — `derive_repo` reported "this ref holds no handoff docs" and "git
+    could not produce any of the handoff docs this ref holds" as ONE value:
+    `docs == 0`, `unmeasured is None`. `handoff_search`'s rc 7 then asserted the
+    first for both, telling a reader to WRITE a doc that was already committed.
+
+    Same conflation as `handoff_paths_in_ref`'s `None`-vs-`()`, one function
+    later, and the same `claude/RULES.md` rule: an EMPTY RESULT cannot
+    distinguish two mechanisms — go find the step that differs. Here the two
+    disagree about `git ls-tree`, which lists the path either way."""
+
+    def test_the_derivation_records_the_paths_it_could_not_read(self, tmp_path):
+        """REPRODUCED, not inferred. The pre-fix state is asserted alongside the
+        new field so the record shows exactly what was and was not observable:
+        `docs` and `unmeasured` are unchanged — this repo really is MEASURED —
+        and `unreadable` is the only thing that separates it from a repo whose
+        mainline is genuinely doc-free."""
+        repo = tmp_path / "zarfrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        tracked = _break_every_doc_blob(repo)
+
+        d = hi.derive_repo(repo, label="zarfrepo")
+        assert d.unmeasured is None          # the repo resolved and enumerated
+        assert d.docs == 0                   # …and derived nothing
+        assert d.unreadable == tracked       # …because THIS is why
+        assert any("UNREADABLE" in w for w in d.warnings)
+
+    def test_a_genuinely_doc_free_ref_records_NO_unreadable_paths(self, tmp_path):
+        """The negative control. Without it, `unreadable` could be unconditional
+        and every assertion above would still pass."""
+        repo = tmp_path / "emptyrepo"
+        _write_repo(repo, {}, commit=False)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "e", "--allow-empty"],
+                       check=True)
+        d = hi.derive_repo(repo, label="emptyrepo")
+        assert d.unmeasured is None
+        assert d.docs == 0
+        assert d.unreadable == ()
+
+    def test_rc7_does_not_claim_the_repo_holds_no_docs(self, tmp_path, capsys):
+        """🔴 THE FALSE SENTENCE, THROUGH THE CLI. Both states exit 7 — the status
+        is correct — but the two remedies are opposite (write a doc / repair the
+        object store), so the prose is the whole of the diagnosis."""
+        repo = tmp_path / "zarfrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        _break_every_doc_blob(repo)
+
+        rc = hs.main(["--query", "zarfwidget", "--offline", "--offline-repo", str(repo)])
+        out = capsys.readouterr().out
+        assert rc == 7
+        assert "ZERO HANDOFF DOCS DERIVED — and NOT because there are none" in out
+        assert "resolved a mainline ref and hold no" not in out
+        # It names the document it could not read, and points at the object store
+        # rather than at writing a doc that already exists.
+        assert "claudedocs/handoff-widget-relay.md" in out
+        assert "git fsck" in out
+
+    def test_the_genuinely_doc_free_rc7_sentence_is_unchanged(self, tmp_path, capsys):
+        """The differential: same status, same exit code, and the doc-free repo
+        must still get the sentence that IS true of it. A fix that rendered the
+        unreadable prose for both would trade one false sentence for another."""
+        repo = tmp_path / "emptyrepo"
+        _write_repo(repo, {}, commit=False)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "e", "--allow-empty"],
+                       check=True)
+        rc = hs.main(["--query", "zarfwidget", "--offline", "--offline-repo", str(repo)])
+        out = capsys.readouterr().out
+        assert rc == 7
+        assert "resolved a mainline ref and hold no" in out
+        assert "NOT because there are none" not in out
+        assert "git fsck" not in out
+
+    def test_the_machine_surface_carries_the_same_discriminator(self, tmp_path,
+                                                                capsys):
+        """🔴 A CAVEAT SPELLED IN ONE RENDERER IS A CAVEAT THE OTHER DOES NOT
+        HAVE — and `--json` is the surface consumed without a human reading it.
+        `indexed_docs: 0` with an empty `unmeasured` is exactly the shape that
+        reads as 'these repos hold no handoff docs'."""
+        repo = tmp_path / "zarfrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        _break_every_doc_blob(repo)
+        rc = hs.main(["--query", "zarfwidget", "--offline", "--json",
+                      "--offline-repo", str(repo)])
+        doc = json.loads(capsys.readouterr().out)
+        assert rc == 7
+        assert doc["indexed_docs"] == 0
+        assert doc["unmeasured"] == []
+        assert doc["unreadable"] == [
+            {"repo": "zarfrepo", "doc_path": "claudedocs/handoff-widget-relay.md"}
+        ]
+
+    def test_the_indexers_own_json_carries_it_too(self, tmp_path, capsys):
+        """The same fact on the OTHER CLI's machine surface, because a consumer
+        deciding whether the corpus is really empty may be reading either."""
+        repo = tmp_path / "zarfrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        _break_every_doc_blob(repo)
+        rc = hi.main(["--repo", str(repo), "--json"], open_store=_refusing_store())
+        doc = json.loads(capsys.readouterr().out)
+        assert rc == hi.RC_OK
+        assert doc["totals"]["docs"] == 0
+        assert doc["repos"][0]["unreadable"] == [
+            "claudedocs/handoff-widget-relay.md"
+        ]

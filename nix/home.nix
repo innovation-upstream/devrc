@@ -2911,8 +2911,19 @@ in
         #     module's, because both sides derive from ONE file. Every handle
         #     `handoff_index.REPO_ENV_HANDLES` reads is exported here.
         #     `scripts/tests/test_handoff_index.py::TestTheUnitEnvironmentMatches
-        #     TheHandlesTheIndexerReads` fails if the two sets ever diverge, so
+        #     TheHandlesTheIndexerReads` fails if the two sets diverge, so
         #     "they disagree" is a red gate rather than a silent delete.
+        #     ⚠ THE TWO DIRECTIONS ARE NOT SYMMETRIC, AND THIS COMMENT USED TO
+        #     IMPLY THEY WERE. A handle the module reads and nix does not export
+        #     is a HAZARD (the unit sees a narrower config than a human) and is
+        #     forbidden outright. A handle nix exports and the module does not
+        #     read is a CHOICE — `agent-handles.nix` serves every agent shell,
+        #     not just this indexer, and `CIVITAI_CLI` is a client checkout with
+        #     no handoff corpus of its own. That direction is pinned against an
+        #     ENUMERATED ledger in the test, so a new handle forces a decision
+        #     instead of being silently excluded; it is not left unchecked. The
+        #     sets DID diverge (five declared, four read) while this line claimed
+        #     otherwise and the suite was green.
         #
         # 🔴 A HANDLE POINTING AT AN ABSENT CHECKOUT IS NOT FREE, AND THIS
         # COMMENT USED TO SAY IT WAS. It is reported as UNMEASURED rather than
