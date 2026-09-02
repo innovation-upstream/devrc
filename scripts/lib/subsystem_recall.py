@@ -3226,7 +3226,7 @@ def _exit_for(status: str, label: str, malformed: Sequence[MalformedEntry]) -> i
 
 
 def _with_stamp(payload: dict, store: "_read_store.ReadStore") -> dict:
-    """The read store's stamp, into a JSON payload, VERBATIM as a list of lines.
+    """The read store's stamp, into a JSON payload, UNPARSED as a list of lines.
 
     A `--json` consumer has no header block to read, so without this it is the
     one reader that gets no freshness at all — which is the whole defect, in the
@@ -3302,7 +3302,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not read_store.stamped and not args.store_explicit:
         print(_read_store.refusal_message("subsystem-recall", read_store), file=sys.stderr)
         return EXIT_UNSTAMPED_READ_STORE
-    # Printed VERBATIM, one field per line, and NOT interpreted: no age is
+    # Printed UNPARSED, one field per line, and NOT interpreted: no age is
     # computed here. `recall` documents itself "no clock" and `cairn.cache_age`
     # owns that arithmetic — a second, cheaper age here would be a second answer.
     stamp_header = [f"  stamp: {line}" for line in (read_store.stamp or ())]

@@ -128,6 +128,8 @@ INDEX_UNSTAMPED = "store-unstamped"
 __all__ = [
     "RECALLED_STATUS",
     "INDEX_UNSTAMPED",
+    "NOT_READ_PREFIX",
+    "brief_store_root",
     "ENV_ROOT_HANDLES",
     "SKIP_DIRS",
     "MANIFEST_SUFFIXES",
@@ -541,6 +543,16 @@ class Brief:
     git: GitResult
     live: LiveResult
     store_root: str = ""
+    """WHICH store this brief actually read — the RESOLVED root, never the
+    caller's argument.
+
+    🔴 IT MUST NOT NAME A PATH THAT WAS NOT READ. When the default resolution is
+    refused (`INDEX_UNSTAMPED`) the value is prefixed `NOT READ (…)`, so a
+    consumer that treats it as a bare path fails loudly instead of recording a
+    directory the brief never opened. It read `"None"` for one commit — `recon`
+    stringified its own `store_root=None` sentinel — which is the exact question
+    this field exists to answer, answered with a word.
+    """
     notes: tuple[str, ...] = field(default=())
 
     @property
@@ -859,6 +871,24 @@ def _resolve_store(store_root: str | Path | None) -> tuple[Path, IndexResult | N
             f"'nothing recorded'."
         ),
     )
+
+
+#: Prefix on `Brief.store_root` when the store was resolved but NOT read. It is
+#: not decoration: without it the field emits a directory nobody opened, and the
+#: whole point of the field is to say which store the brief's index came from.
+NOT_READ_PREFIX = "NOT READ"
+
+
+def brief_store_root(resolved: str | Path, refusal: "IndexResult | None") -> str:
+    """The value `Brief.store_root` carries — ONE spelling, for one question.
+
+    On a successful resolution it is the resolved root and nothing else, so a
+    consumer can use it as a path. On a refusal it names the path AND says it
+    was not read, because a bare path here is a claim that the brief read it.
+    """
+    if refusal is None:
+        return str(resolved)
+    return f"{NOT_READ_PREFIX} ({refusal.status}) — {resolved}"
 
 
 def read_index(
@@ -1324,7 +1354,19 @@ def recon(
     """Locate → index → config → git log (→ live, opt-in). One process, one brief."""
     roots = search_roots(repos, env=env, cwd=cwd)
     loc = locate(service, roots, file_cap=file_cap)
-    idx = read_index(loc, service, store_root=store_root)
+    # 🔴 RESOLVED HERE, ONCE, so the BRIEF can report which store it read. The
+    # previous version passed the caller's argument straight through and then
+    # stringified it into `Brief.store_root` — which rendered `"None"` for the
+    # default, i.e. the field that answers "which store did this read?" answered
+    # with the sentinel that means "work it out". `read_index` below receives an
+    # already-resolved Path, so its own `_resolve_store` is a no-op and the
+    # default is still resolved exactly once per recon.
+    resolved_root, store_refusal = _resolve_store(store_root)
+    idx = (
+        store_refusal
+        if store_refusal is not None
+        else read_index(loc, service, store_root=resolved_root)
+    )
     cfg = config_for(loc, file_limit=file_limit, knob_limit=knob_limit)
     log = git_log(loc, limit=log_limit)
     lv = live_state(cfg, enabled=live, context=context, namespace=namespace)
@@ -1354,7 +1396,9 @@ def recon(
             f"directories, or a name that is too broad — the located list says which."
         )
     return Brief(service=service, token=loc.token, locate=loc, index=idx, config=cfg,
-                 git=log, live=lv, store_root=str(store_root), notes=tuple(notes))
+                 git=log, live=lv,
+                 store_root=brief_store_root(resolved_root, store_refusal),
+                 notes=tuple(notes))
 
 
 # --- Rendering -----------------------------------------------------------------

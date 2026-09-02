@@ -27,7 +27,8 @@ unstamped would reinstate the defect under a nicer name: the caller would still
 get an index, still get a completeness claim, and still have no way to tell. The
 refusal names a one-command remedy (`cairn sync`) instead.
 
-🔴 NO CLOCK. This module reads a file and returns its lines verbatim. It does NOT
+🔴 NO CLOCK. This module reads a file and returns its lines UNINTERPRETED — see
+`read_stamp` for the one normalisation it does apply. It does NOT
 compute an age — `subsystem_recall` documents itself "READ-ONLY. No clock, no
 network, no git, no prompt" and its consumers depend on that. `cairn.cache_age`
 owns age computation and is the only place that should.
@@ -67,9 +68,15 @@ REMEDY = "cairn sync"
 class ReadStore:
     """The resolved host-local read store, and whether it can date itself.
 
-    `stamp` holds the stamp file's non-blank lines VERBATIM — a caller renders
-    them, it does not interpret them. `reason` says why there is no stamp and is
-    `None` exactly when `stamp` is not.
+    `stamp` holds the stamp file's non-blank lines with TRAILING WHITESPACE
+    STRIPPED, and nothing else done to them — no parsing, no reordering, no
+    interpretation; a caller renders them. (This docstring said "VERBATIM" while
+    the body called `rstrip()`; the fixture had no trailing whitespace, so no
+    test could see the difference and the word was simply wrong. The strip stays
+    — it is what keeps a `\\r` from a CRLF write out of the rendered header — and
+    the sentence now describes it.)
+
+    `reason` says why there is no stamp and is `None` exactly when `stamp` is not.
     """
 
     root: Path
@@ -93,11 +100,14 @@ def read_store_root() -> Path:
 
 
 def read_stamp(root: str | Path) -> tuple[tuple[str, ...] | None, str | None]:
-    """`(verbatim lines, reason-there-are-none)` — exactly one is not None.
+    """`(lines, reason-there-are-none)` — exactly one is not None.
 
-    READ-ONLY and clock-free: it opens one file and splits it. An unreadable or
-    empty stamp is reported as ABSENT, never as a stamp with no fields — "the
-    store is stamped" must not be satisfiable by a zero-byte file.
+    READ-ONLY and clock-free: it opens one file, splits it, drops blank lines and
+    strips each line's TRAILING whitespace. That is the whole normalisation — the
+    fields are neither parsed nor reordered, and this module does not own the
+    stamp's schema. An unreadable or empty stamp is reported as ABSENT, never as
+    a stamp with no fields: "the store is stamped" must not be satisfiable by a
+    zero-byte file.
     """
     path = Path(root) / SYNC_STAMP
     try:
