@@ -149,6 +149,32 @@ class TestTheResolver:
         assert rs.DEFAULT_CACHE_ROOT.name == "subsystem-store"
         assert rs.DEFAULT_CACHE_ROOT.parent.name == ".cache"
 
+    def test_the_stamp_FILENAME_is_pinned_to_the_literal_cairn_writes(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 FOUND BY THE MUTATION SWEEP, AND IT IS A REAL GAP.
+
+        Every fixture in this file writes the stamp through `rs.SYNC_STAMP`, so
+        a mutant that RENAMES the constant renames the fixture with it and the
+        suite stays green: MEASURED, `SYNC_STAMP = ".sync-stampX"` SURVIVED all
+        615 tests in the three files that cover this change. That is the
+        expectation-derived-from-the-implementation shape — the suite could not
+        tell the two names apart because it never named either.
+
+        The filename is a WIRE fact, not an internal choice. Caches already on
+        disk were written by a deployed `cairn sync`; a reader looking for a
+        different name reports every one of them as unstamped and refuses the
+        lot. So it is pinned to the literal, and the behavioural half writes the
+        literal by hand — never through the constant — so the pin cannot be
+        satisfied by the constant agreeing with itself.
+        """
+        assert rs.SYNC_STAMP == ".sync-stamp"
+        store = _store(tmp_path, stamped=False)
+        (store / ".sync-stamp").write_text("synced=1\n", encoding="utf-8")
+        got = rs.resolve_read_store(store)
+        assert got.stamped is True
+        assert got.stamp == ("synced=1",)
+
     def test_the_refusal_names_the_store_the_reason_and_the_remedy(self, tmp_path: Path) -> None:
         """A refusal that does not say what to do next is a dead end.
 
