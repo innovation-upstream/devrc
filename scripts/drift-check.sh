@@ -521,10 +521,21 @@
 # a different session owns. A checker that keys on the bare state fires on every
 # 6-hourly run for as long as that decision stands: `drift-check.service`'s
 # OnFailure is `notify-failure@`, the ONE toast class deliberately wired to bypass
-# do-not-disturb, and nix/home.nix justifies that bypass by a MEASURED rate of ~1
-# firing in 9 days. 5 failures in 3 days is three orders of magnitude past it, and
-# the outcome is not "the operator is informed" — it is the operator learning to
-# ignore the one alert that has to keep its meaning.
+# do-not-disturb. The measured breach rate and the arithmetic against the rate
+# that justifies that bypass are stated ONCE, in nix/home.nix's
+# `zz_notify_failure_bypass` block — the same number lived at three sites and was
+# wrong at all three. The outcome is not "the operator is informed"; it is the
+# operator learning to ignore the one alert that has to keep its meaning.
+#
+# ⚠ AND THIS CHANGE DOES NOT MAKE THE TOASTS STOP ON THIS HOST. Measured from
+# `journalctl --user -u drift-check.service`, 2026-08-25..09-03: 32 unit failures
+# in 9 days, of which rc 24 was the VERDICT on exactly 5 — all inside one 24-hour
+# span — and on all 5 at least one other DRIFT finding was co-present (`local main
+# is BEHIND` on 5 of 5, `BUILT SOURCE … is NOT current` on 4 of 5). Removing rc 24
+# lowers those runs to rc 17 or rc 10: still non-zero, still OnFailure, still the
+# DND-bypassing toast. What this closes is the STRUCTURALLY PERMANENT contributor
+# — the one finding that could never be repaired because nobody intended to —
+# not the toast rate, which is owned by rc 17 and rc 10 and is a separate job.
 #
 # 🔴 AND EXCUSING IT IS NOT THE FIX EITHER, because rc 24 is the only thing that
 # catches a BOTCHED BREAK-GLASS RESTORE — the measured 2026-08-29 shape, where
@@ -535,6 +546,9 @@
 #   declared ON,  live OFF  ->  rc 24. The botched-restore alarm, preserved whole.
 #   declared ON,  live ON   ->  no code. The gate is up.
 #   declared OFF, live OFF  ->  no code. Reported plainly, as an intended state.
+#                               EXCEPT a PARTIAL restore (required checks back,
+#                               enforce_admins false) -> rc 25; see the verdict
+#                               block for why that is staleness, not agreement.
 #   declared OFF, live ON   ->  rc 25. The declaration is stale, and a stale
 #                               "off" DISARMS rc 24 — see the code list above.
 #   gh cannot answer        ->  COULD NOT MEASURE, no code, unchanged. A
@@ -553,11 +567,24 @@
 # path either. It is `bp_declared_off_reason` and nothing else, which means the
 # only way to disarm this arm is a diff a human reviews.
 #
-# ⚠ DRIFT_PROTECT_SLUG is NOT that hole, and the distinction matters. It changes
-# WHICH repo is asked about, never what is expected of it: point it anywhere and
-# the answer is still read out of the enumeration, and an unenumerated slug is
-# expected ON. It cannot turn a finding off — it can only ask a different
-# question, which is why the suite is allowed to have it.
+# ⚠ DRIFT_PROTECT_SLUG IS A DIFFERENT HOLE, AND AN EARLIER REVISION OF THIS
+# PARAGRAPH DENIED IT EXISTED. It said the variable "cannot turn a finding off".
+# That is FALSE and was demonstrated: point the arm at a repo whose main IS gated
+# and the run exits 0 with `expected ON … and live ON`, under exactly the "a unit
+# file, a shell profile or a stray export" threat model used three lines above to
+# reject a hypothetical DRIFT_PROTECT_EXPECT. An env var can silence this alarm.
+#
+# The defensible distinction is a narrower one, and it is the reason the suite is
+# allowed to have this variable: the run PRINTS THE SLUG IT ASKED ABOUT, on every
+# line of the finding and of the pass. So a silence produced this way is NOT
+# indistinguishable from a real pass — the journal names a subject the operator
+# never chose, which is the tell. An EXPECTATION override would leave the correct
+# subject in place and change only the verdict, and nothing in the output would
+# differ from a healthy run. Redirecting the subject is loud; flipping the
+# expectation is silent. That is the whole of it — not that one is harmless.
+#
+# It is also not forwarded over the ssh hop (the arm runs in the driver only),
+# so it cannot be used to make the far host lie about a repo.
 #
 # ⚠ KNOWN AND ACCEPTED: rc 25 has NO escalation ladder — it fires on the first
 # run that sees the disagreement, unlike rc 13/18/23. That is deliberate and it
@@ -565,7 +592,7 @@
 # declaration is never a state anybody has decided to keep, and closing it is a
 # one-line edit to the enumeration below by whoever restored the protection. An
 # alarm whose repair is in the operator's hand and takes a minute is closable;
-# the 4x/day toast it can produce lasts exactly as long as they leave it.
+# the toast it can produce lasts exactly as long as they leave it.
 #
 # ── UNREACHABLE IS NOT DRIFT (the alerting policy) ────────────────────────────
 # 🔴 The timer runs on the WORKBENCH ONLY (gated on the ~/.server-mode marker in
@@ -3190,19 +3217,35 @@ elif [ -z "$BP_EXPECT_WHY" ]; then
     # reads a lowercase `case` ARM LABEL as a command word, so `enforce-admins)`
     # arrives at test_the_unit_path_table_accounts_for_every_command_the_scripts_run
     # as a binary nobody can name. Same reason perhost_reason is spelled this way.
+    #
+    # 🔴 EVERY OFF KIND IS BRANCHED ON EXPLICITLY, INCLUDING THE LAST ONE. An
+    # earlier revision let `classic-zero` fall through to a bare
+    # `[ "$BP_PROT" = true ]` heuristic, which made the value DEAD: deleting the
+    # assignment changed nothing, and a mutation that removed it SURVIVED the
+    # whole suite. Harmless for the three kinds that exist — and exactly how a
+    # FOURTH kind, added later, would silently inherit break-glass repair text
+    # written for a state it is not in. The `*` arm below is a refusal, not a
+    # default. Pinned two-way by
+    # test_every_BP_OFF_KIND_assigned_is_branched_on_in_the_verdict.
     if [ "$BP_OFF_KIND" = enforce-admins ]; then
       echo "[protect]   fix: PUT /repos/$BP_SLUG/branches/main/protection with enforce_admins true."
     elif [ "$BP_OFF_KIND" = ruleset-nonbinding ]; then
       echo "[protect]   fix: set enforcement=active and remove the bypass actors on one of them."
-    elif [ "$BP_PROT" = true ]; then
-      echo "[protect]   protected=true: the protection object stands and required_status_checks"
-      echo "[protect]   was deleted out of it — the exact break-glass shape. 🔴 PATCH CANNOT"
-      echo "[protect]   restore it; it returns non-zero and changes nothing. Use a full PUT of"
-      echo "[protect]   /repos/$BP_SLUG/branches/main/protection, then READ IT BACK — a restore"
-      echo "[protect]   that has never been run is a hypothesis, and that is how this was missed."
+    elif [ "$BP_OFF_KIND" = classic-zero ]; then
+      if [ "$BP_PROT" = true ]; then
+        echo "[protect]   protected=true: the protection object stands and required_status_checks"
+        echo "[protect]   was deleted out of it — the exact break-glass shape. 🔴 PATCH CANNOT"
+        echo "[protect]   restore it; it returns non-zero and changes nothing. Use a full PUT of"
+        echo "[protect]   /repos/$BP_SLUG/branches/main/protection, then READ IT BACK — a restore"
+        echo "[protect]   that has never been run is a hypothesis, and that is how this was missed."
+      else
+        echo "[protect]   protected=false: there is no protection object at all, so this is a"
+        echo "[protect]   create rather than a restore. Same endpoint, full PUT, read it back."
+      fi
     else
-      echo "[protect]   protected=false: there is no protection object at all, so this is a"
-      echo "[protect]   create rather than a restore. Same endpoint, full PUT, read it back."
+      echo "[protect]   ⚠ NO SPECIFIC REPAIR — this run measured an OFF kind ('$BP_OFF_KIND')"
+      echo "[protect]   the verdict block does not know, so it will not guess one. Read the"
+      echo "[protect]   live state below and add the kind to the chain in drift-check.sh."
     fi
     # 🔴 The DIAGNOSTIC must be runnable in the state it is printed in. The
     # protection endpoint 404s with `Branch not protected` exactly when
@@ -3221,25 +3264,70 @@ elif [ -z "$BP_EXPECT_WHY" ]; then
   fi
 else
   # Declared OFF in bp_declared_off_reason(), in this file, in a diff a human read.
-  if [ "$BP_LIVE" = off ]; then
+  #
+  # 🔴 A PARTIAL RESTORE IS A STALE DECLARATION, NOT AGREEMENT — and reading it
+  # as agreement was a REGRESSION this arm shipped with. `enforce-admins` means
+  # required status checks EXIST again on this repo's own protection object and
+  # only admin enforcement is missing. The declared state is the one where those
+  # checks were DELETED; checks being back is positive evidence that somebody has
+  # started restoring, so the declaration no longer describes reality.
+  #
+  # 🔴 IT IS ALSO THE FAILURE MODE devrc/CLAUDE.md DOCUMENTS AS MEASURED: a
+  # partial `PUT …/branches/main/protection` silently drops every key it omits,
+  # `enforce_admins` among them. Restore-with-omission then lands on exactly this
+  # state, and reading it as agreement means NO toast, so nobody deletes the
+  # declaration and rc 24 stays disarmed over a half-restored gate indefinitely.
+  # Before the declaration existed, that same state fired rc 24.
+  #
+  # ⚠ `ruleset-nonbinding` deliberately does NOT get this treatment, and the
+  # asymmetry is argued rather than convenient. `/rules/branches/main` returns the
+  # rules of EVERY applying ruleset, repo- and ORG-level mixed (see the loop
+  # above), and an org ruleset parked in `evaluate` mode is the standard org
+  # rollout pattern — nothing this repo created and nothing its operator can
+  # remove. Firing rc 25 on it would be a permanently-red gate on a state nobody
+  # can close, which is the one thing this arm refuses everywhere else. It stays
+  # in the agreement cell and converts to rc 25 the moment any ruleset actually
+  # BINDS (BP_LIVE=on).
+  # ⚠ KNOWN BOUND, stated rather than hidden: a REPO-level ruleset the operator
+  # created and left in evaluate mode is indistinguishable from the org case at
+  # the endpoint this arm reads, so it too stays quiet. `ruleset_source_type` on
+  # /rules/branches/main is the field that would separate them; it is not read
+  # today, and closing this needs that read plus its own tests.
+  if [ "$BP_LIVE" = off ] && [ "$BP_OFF_KIND" != enforce-admins ]; then
     echo "[protect] DECLARED OFF, and live OFF — expectation and reality agree. No rc is set."
     echo "[protect]   why: $BP_EXPECT_WHY"
-    echo "[protect]   🔴 The alarm is QUIET, not DISABLED: it fires the moment the two disagree."
-    echo "[protect]   Restore protection and this becomes rc 25 until the declaration is deleted."
+    echo "[protect]   🔴 The alarm is QUIET, not DISABLED. It fires as rc 25 as soon as the"
+    echo "[protect]   gate is re-established — including a PARTIAL restore that puts the"
+    echo "[protect]   required checks back and omits enforce_admins."
     echo "[protect]   ⚠ Nothing gates a merge to $BP_SLUG main while this stands — run both"
     echo "[protect]   tiers of the gate yourself, on the MERGED tree, and name the base sha."
   else
     echo "[protect] 🔴 DRIFT — STALE DECLARATION. drift-check.sh declares the merge gate on"
-    echo "[protect]   $BP_SLUG main OFF, and it is LIVE ON."
+    if [ "$BP_OFF_KIND" = enforce-admins ]; then
+      echo "[protect]   $BP_SLUG main OFF, and its required status checks are BACK — a PARTIAL"
+      echo "[protect]   restore, with enforce_admins still FALSE. The declared state was the one"
+      echo "[protect]   where those checks had been DELETED; they exist again, so the"
+      echo "[protect]   declaration no longer describes this repo. 🔴 This is the shape a"
+      echo "[protect]   partial PUT produces — it silently drops every key it omits — and"
+      echo "[protect]   before the declaration existed it fired rc 24."
+      echo "[protect]   fix, BOTH halves: PUT the WHOLE protection object with enforce_admins"
+      echo "[protect]   true and read it back, AND delete the $BP_SLUG arm from"
+      echo "[protect]   bp_declared_off_reason(). Finishing one and not the other leaves this"
+      echo "[protect]   red (checks half-bound) or silent (declaration stale) respectively."
+    else
+      echo "[protect]   $BP_SLUG main OFF, and it is LIVE ON."
+      echo "[protect]   fix: delete the $BP_SLUG arm from bp_declared_off_reason() in"
+      echo "[protect]   scripts/drift-check.sh, and correct any prose that still says the gate is"
+      echo "[protect]   off (devrc/CLAUDE.md carries such a paragraph). It is a one-line edit."
+    fi
     echo "[protect]   declared: $BP_EXPECT_WHY"
     echo "[protect]   🔴 This DISARMS rc 24. While the declaration stands, a gate that is"
     echo "[protect]   removed again — the measured 2026-08-29 break-glass shape, where DELETE"
     echo "[protect]   opened the window and PATCH could not close it — passes SILENTLY, because"
     echo "[protect]   declared-off/live-off is exactly the cell above this one. Nothing is lost"
     echo "[protect]   yet; what is lost is the ability to notice when it next goes down."
-    echo "[protect]   fix: delete the $BP_SLUG arm from bp_declared_off_reason() in"
-    echo "[protect]   scripts/drift-check.sh, and correct any prose that still says the gate is"
-    echo "[protect]   off (devrc/CLAUDE.md carries such a paragraph). It is a one-line edit."
+    echo "[protect]   ⚠ The unit runs the WORKING TREE (%h/workspace/devrc/scripts/drift-check.sh),"
+    echo "[protect]   so that edit takes effect on a merge + pull — no home-manager switch."
     echo "[protect]   read the live state: gh api /repos/$BP_SLUG/branches/main/protection"
     note_rc 25
   fi
