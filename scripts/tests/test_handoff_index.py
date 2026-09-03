@@ -2092,7 +2092,7 @@ class TestTheDryRunShowsWhatTheRebuildDeletes:
         out = capsys.readouterr().out
         assert rc == hi.RC_OK
         assert "## rebuild delete scope" in out
-        assert "DELETE (measured, will be re-derived): zarfrepo" in out
+        assert "DELETE (read in FULL, will be re-derived): zarfrepo" in out
         assert "KEPT (configured but UNMEASURED): plimforth-renamed" in out
         assert "This list is the COMPLETE delete scope." in out
 
@@ -3646,7 +3646,7 @@ class TestThePlanDescribesTheRunThatActuallyHappens:
     def _plan_absent(self, out, err):
         both = out + err
         assert "## rebuild delete scope" not in both
-        assert "DELETE (measured, will be re-derived)" not in both
+        assert "DELETE (read in FULL, will be re-derived)" not in both
         assert "KEPT (configured but UNMEASURED)" not in both
 
     def test_a_refusing_prune_write_prints_no_plan_promising_a_bound_scope(
@@ -3733,7 +3733,7 @@ class TestThePlanDescribesTheRunThatActuallyHappens:
         out = capsys.readouterr().out
         assert rc == hi.RC_OK
         assert "## rebuild delete scope" in out
-        assert "DELETE (measured, will be re-derived): zarfrepo" in out
+        assert "DELETE (read in FULL, will be re-derived): zarfrepo" in out
 
 
 class TestTheTwoPruneGuardsHaveAFIXEDOrder:
@@ -3872,3 +3872,405 @@ class TestTheUnreadableReportIsMeasuredForMoreThanOneDoc:
         tracked = self._broken_repo(repo, self.A_DOCS[:1])
         _, _, _, unreadable = hs._offline_store([(str(repo), "zarfrepo")])
         assert unreadable == (("zarfrepo", tracked[0]),)
+
+
+# --------------------------------------------------------------------------- #
+# F8 — a repo this run could not read IN FULL is not a repo it may DELETE
+# --------------------------------------------------------------------------- #
+
+
+# 🔴 THREE DOCS, AND THE COUNT IS LOAD-BEARING. Breaking ONE of three makes
+# `docs`, `len(unreadable)` and the total pairwise distinct (2, 1, 3), so a
+# mutant that hardcodes any of those literals — or that keys the guard on
+# `docs == 0` — cannot survive by accident of a fixture where they coincide.
+#
+# 🔴 AND THE THREE BODIES ARE DISTINCT, WHICH IS NOT COSMETIC. Git addresses a
+# blob by the hash of its CONTENT, so two docs with identical text are ONE
+# object: the first draft of this fixture reused `DOC_FULL` twice, and deleting
+# "one" blob took out two documents — `docs` came back 1 instead of 2 and the
+# partial case silently became the total one. A fixture that cannot express the
+# distinction it is built to test is the same vacuous green one level down.
+_TRIAD = {
+    "handoff-glimmerwick-bus.md": DOC_FULL,
+    "handoff-quorlbane-cache.md": DOC_SPARSE,
+    "handoff-fandrelly-probe.md": DOC_FULL.replace(
+        "widget-relay", "fandrelly-probe").replace("quixotry", "snorrelquim"),
+}
+
+
+def _break_doc_blob(repo: Path, path: str) -> None:
+    """Delete the loose object behind ONE doc, leaving the tree entry listed.
+
+    `_break_every_doc_blob`'s mechanism, applied to a single path — the same
+    reason it is git and not a monkeypatch: `git ls-tree` reads the TREE and
+    `git show` reads the BLOB, and only a real object store can show that the
+    two commands disagree."""
+    ref, _ = hi.resolve_mainline(repo)
+    assert ref is not None
+    (repo / ".git" / "objects" / _blob_of(repo, ref, path)[:2]
+     / _blob_of(repo, ref, path)[2:]).unlink()
+
+
+class TestARepoReadIncompletelyIsNotAuthoritativeOverItsRows:
+    """🔴 F8 — REPRODUCED, then fixed. `--rebuild --write` over one healthy repo
+    plus one whose committed doc blobs were removed from `.git/objects` bound
+    BOTH labels to the DELETE, re-inserted only the healthy repo's rows, printed
+    no PARTIAL notice and exited 0. The broken repo resolved its mainline ref, so
+    `unmeasured is None`, and `unmeasured` was the only field the delete scope
+    read.
+
+    MEASURED before the fix, on the exact fixtures below's shape:
+    `partial_scope_warnings() == ()`, `rebuild_refusal() is None`,
+    `DELETE params == [['badrepo', 'goodrepo']]`, rc 0. The only signal anywhere
+    in the run was one `⚠ UNREADABLE` line on stderr.
+
+    🔴 AND THE FILING UNDERSTATED IT. Breaking ONE blob of several produces the
+    same silent deletion from a run that looks HEALTHIER — it writes rows — so
+    the guard is on ANY unreadable doc, not on "every doc unreadable". The
+    ONE-of-three cases below are what separate the two fixes."""
+
+    def test_the_predicate_withholds_authority_and_names_which_kind(self, tmp_path):
+        """PURE, over all three states of one predicate, with the healthy repo as
+        the negative control. Without that control an unconditional
+        `incomplete_reason` would satisfy every other assertion here."""
+        healthy = tmp_path / "glimmerrepo"
+        _write_repo(healthy, _TRIAD)
+        whole = hi.derive_repo(healthy, label="glimmerrepo")
+        assert hi.incomplete_reason(whole) is None
+        assert hi.may_replace_stored_rows(whole) is True
+
+        partial = tmp_path / "quorlrepo"
+        _write_repo(partial, _TRIAD)
+        _break_doc_blob(partial, "claudedocs/handoff-quorlbane-cache.md")
+        d = hi.derive_repo(partial, label="quorlrepo")
+        # The pre-fix state, asserted alongside the new one so the record shows
+        # exactly what was and was not observable: the ref DID resolve.
+        assert d.unmeasured is None
+        assert d.docs == 2
+        assert d.unreadable == ("claudedocs/handoff-quorlbane-cache.md",)
+        assert hi.may_replace_stored_rows(d) is False
+        # The reason names the KIND and the counts — "1 of 40" and "40 of 40" are
+        # different operator situations and the label alone cannot say which.
+        assert hi.incomplete_reason(d) == "docs-unreadable (1 of 3)"
+
+        gone = hi.derive_repo(tmp_path / "fandrellyrepo", label="fandrellyrepo")
+        assert hi.incomplete_reason(gone) == "no-such-directory"
+        assert hi.may_replace_stored_rows(gone) is False
+
+    def test_the_delete_scope_excludes_a_repo_whose_docs_would_not_READ(self, tmp_path):
+        """The scope itself, PURE, as a differential over the ONE variable: two
+        repos built from the SAME fixture, one with a blob removed."""
+        good = tmp_path / "glimmerrepo"
+        bad = tmp_path / "quorlrepo"
+        _write_repo(good, _TRIAD)
+        _write_repo(bad, _TRIAD)
+        _break_every_doc_blob(bad)
+        ds = [hi.derive_repo(good, label="glimmerrepo"),
+              hi.derive_repo(bad, label="quorlrepo")]
+        # 🔴 NOT ("glimmerrepo", "quorlrepo") — which is what this returned
+        # before, with no warning and exit 0.
+        assert hi.rebuild_delete_labels(ds, (), scoped=True) == ("glimmerrepo",)
+
+    def test_ONE_unreadable_doc_of_THREE_also_withholds_authority(self, tmp_path):
+        """🔴 THE WIDEST READING, AND THE MUTANT THIS EXISTS TO KILL. A guard
+        written for the filed symptom — every doc unreadable — would read
+        `d.unreadable and not d.docs` and pass every other test in this class.
+        Here the repo contributed 2 of 3 docs, so a total-only guard puts it back
+        in the scope and its third doc's stored rows are deleted with nothing to
+        replace them."""
+        good = tmp_path / "glimmerrepo"
+        bad = tmp_path / "quorlrepo"
+        _write_repo(good, _TRIAD)
+        _write_repo(bad, _TRIAD)
+        _break_doc_blob(bad, "claudedocs/handoff-fandrelly-probe.md")
+        ds = [hi.derive_repo(good, label="glimmerrepo"),
+              hi.derive_repo(bad, label="quorlrepo")]
+        assert ds[1].docs == 2, "the fixture must be PARTIALLY readable, or this pins nothing"
+        assert hi.rebuild_delete_labels(ds, (), scoped=True) == ("glimmerrepo",)
+
+    def test_what_it_DID_read_is_still_indexed(self, tmp_path):
+        """The boundary the fix must NOT have moved. Withholding the DELETE is
+        not a reason to throw away the docs that read: an ON CONFLICT insert
+        REFRESHES without destroying, so those rows are still contributed. A fix
+        that reclassified the repo as UNMEASURED would drop them, and this is
+        what says so."""
+        bad = tmp_path / "quorlrepo"
+        _write_repo(bad, _TRIAD)
+        _break_doc_blob(bad, "claudedocs/handoff-quorlbane-cache.md")
+        d = hi.derive_repo(bad, label="quorlrepo")
+        assert d.sections, "the readable docs must still produce rows"
+        assert {s.slug for s in d.sections} == {"glimmerwick-bus", "fandrelly-probe"}
+
+    def test_the_bound_DELETE_through_main_names_only_what_was_read_in_FULL(
+            self, tmp_path, capsys):
+        """🔴 THE REGRESSION TEST, END TO END, AND THE ASSERTION IS ON THE BOUND
+        SCOPE. The statement text, the exit code and the row count are IDENTICAL
+        between the correct run and the destructive one — the bound parameters
+        are the only place the difference shows, which is why `RecordingConn`
+        keeps them.
+
+        The table is pre-loaded with both labels so the delete has something real
+        to be wrong about."""
+        good = tmp_path / "glimmerrepo"
+        bad = tmp_path / "quorlrepo"
+        _write_repo(good, _TRIAD)
+        _write_repo(bad, _TRIAD)
+        _break_every_doc_blob(bad)
+
+        conn = StoredReposConn(("glimmerrepo", "quorlrepo"))
+        rc = hi.main(["--repo", str(good), "--repo", str(bad), "--rebuild", "--write"],
+                     open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK
+        # 🔴 NOT [[['glimmerrepo', 'quorlrepo']]].
+        assert conn.params_for("DELETE") == [[["glimmerrepo"]]]
+        # …and the run SAYS it is partial, on both the warning path and the one
+        # line a scripted caller is most likely to read alone.
+        assert "🔴 PARTIAL INDEX" in cap.err
+        assert "quorlrepo (docs-unreadable (3 of 3))" in cap.err
+        assert "🔴 THIS INDEX IS PARTIAL" in cap.out
+        # The pre-flight names it in its own bucket rather than omitting it.
+        assert "KEPT (resolved, but a doc would not READ" in cap.out
+
+    def test_a_run_over_only_HEALTHY_repos_deletes_both_and_says_nothing(
+            self, tmp_path, capsys):
+        """The negative control for the test above, over the same shape one blob
+        apart. Without it, the assertions there are satisfied by a scope that
+        withholds authority from everything — which would be a permanently-red
+        rebuild, not a fix."""
+        good = tmp_path / "glimmerrepo"
+        also = tmp_path / "quorlrepo"
+        _write_repo(good, _TRIAD)
+        _write_repo(also, _TRIAD)
+
+        conn = StoredReposConn(("glimmerrepo", "quorlrepo"))
+        rc = hi.main(["--repo", str(good), "--repo", str(also), "--rebuild", "--write"],
+                     open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK
+        assert conn.params_for("DELETE") == [[["glimmerrepo", "quorlrepo"]]]
+        assert "PARTIAL" not in cap.out + cap.err
+
+    def test_the_machine_surface_publishes_the_same_decision(self, tmp_path, capsys):
+        """🔴 A CAVEAT SPELLED IN ONE RENDERER IS A CAVEAT THE OTHER DOES NOT
+        HAVE. `--json` is the surface consumed without a human reading it, and a
+        consumer deciding whether a repo's rows are current has to be able to
+        read the SAME value the DELETE read — not re-derive it from `unmeasured`
+        and `unreadable`, which is exactly how this predicate came to be spelled
+        four different ways inside the module."""
+        bad = tmp_path / "quorlrepo"
+        _write_repo(bad, _TRIAD)
+        _break_doc_blob(bad, "claudedocs/handoff-glimmerwick-bus.md")
+        rc = hi.main(["--repo", str(bad), "--json"], open_store=_refusing_store())
+        doc = json.loads(capsys.readouterr().out)
+        assert rc == hi.RC_OK
+        repo = doc["repos"][0]
+        assert repo["unmeasured"] is None
+        assert repo["rebuildable"] is False
+        assert repo["incomplete_reason"] == "docs-unreadable (1 of 3)"
+
+
+class TestThePartialPromiseCoversTheUnreadableRepoToo:
+    """🔴 THE SEAM, RE-PINNED OVER THE STATE THAT BROKE IT. `TestThePartialPromiseIsKept`
+    asserts the PARTIAL sentence and the delete scope cannot contradict each
+    other — and it drove only the UNMEASURED state, because that was the only
+    state either function could see. A repo whose docs would not read was in
+    NEITHER: silently deleted, and unmentioned by the sentence that claims to
+    name every repo this run does not speak for.
+
+    `claude/RULES.md`: a seam guard must pin a RELATIONSHIP, not a component."""
+
+    def _mixed(self, tmp_path):
+        good = tmp_path / "glimmerrepo"
+        partial = tmp_path / "quorlrepo"
+        _write_repo(good, _TRIAD)
+        _write_repo(partial, _TRIAD)
+        _break_doc_blob(partial, "claudedocs/handoff-quorlbane-cache.md")
+        return [hi.derive_repo(good, label="glimmerrepo"),
+                hi.derive_repo(partial, label="quorlrepo")]
+
+    def test_no_repo_the_warning_speaks_for_can_be_in_the_delete_scope(self, tmp_path):
+        """The relationship itself, over every (scoped, prune) combination the
+        run can reach a write in — the delete scope is a SUBSET of the labels
+        this run read in FULL, so no repo the sentence names is in it."""
+        ds = self._mixed(tmp_path)
+        rows = [s for d in ds for s in d.sections]
+        full = {d.label for d in ds if hi.may_replace_stored_rows(d)}
+        spoken_for = {d.label for d in ds if not hi.may_replace_stored_rows(d)}
+
+        partial = hi.partial_scope_warnings(ds)
+        assert partial, "the fixture must actually be partial, or this pins nothing"
+        assert "left untouched" in partial[0]
+        assert "quorlrepo" in partial[0]
+
+        for scoped in (True, False):
+            for prune in (True, False):
+                if hi.rebuild_refusal(ds, rows, prune=prune) is not None:
+                    continue  # this run never reaches a write; the promise holds
+                scope = set(hi.rebuild_delete_labels(ds, ("glimmerrepo", "quorlrepo"),
+                                                     scoped=scoped, prune=prune))
+                assert scope <= full, (scoped, prune, scope)
+                assert not (scope & spoken_for), (scoped, prune, scope)
+
+    def test_the_warning_no_longer_claims_the_repo_contributed_NOTHING(self, tmp_path):
+        """🔴 A SENTENCE THE WIDENING WOULD HAVE MADE FALSE. The warning used to
+        say the repos it names "came back UNMEASURED and contributed NOTHING" —
+        true of an absent checkout, false of a repo that read 2 of its 3 docs and
+        whose rows are in the very transaction that prints it."""
+        ds = self._mixed(tmp_path)
+        assert ds[1].sections, "the fixture must contribute rows, or this pins nothing"
+        text = hi.partial_scope_warnings(ds)[0]
+        assert "contributed NOTHING" not in text
+        assert "were NOT read completely" in text
+
+
+class TestNoRepoReadInFullIsRefusedNotCrashed:
+    """🔴 THE ARM THE WIDER SCOPE MADE NECESSARY. `PostgresSectionStore.write`
+    RAISES on an empty rebuild scope — deliberately, so a caller that forgets the
+    scope cannot get a whole-table wipe as the default — and until now
+    `rebuild_refusal` guaranteed the scope was non-empty: "not every repo is
+    unmeasured" implied "at least one repo is in the scope". With authority
+    withheld from partially-readable repos that implication is gone, and a
+    traceback out of a 6h timer is a worse report than a refusal naming the
+    repos and a remedy."""
+
+    def _all_partial(self, tmp_path):
+        a = tmp_path / "glimmerrepo"
+        b = tmp_path / "quorlrepo"
+        for root in (a, b):
+            _write_repo(root, _TRIAD)
+            _break_doc_blob(root, "claudedocs/handoff-fandrelly-probe.md")
+        return a, b
+
+    def test_a_rebuild_with_nothing_read_in_FULL_refuses_before_the_store_opens(
+            self, tmp_path, capsys):
+        """`_refusing_store()` is the positive control: an assertion on the exit
+        code alone cannot tell a refusal from a write that happened and then
+        returned non-zero. It also proves the empty scope never reaches
+        `write()`, which is where the raise lives."""
+        a, b = self._all_partial(tmp_path)
+        rc = hi.main(["--repo", str(a), "--repo", str(b), "--rebuild", "--write"],
+                     open_store=_refusing_store())
+        err = capsys.readouterr().err
+        assert rc == hi.RC_REFUSED
+        assert "not ONE of the 2 repo(s) was read COMPLETELY" in err
+        assert "the delete scope would be EMPTY" in err
+        # It must NOT reach for the all-unmeasured arm's remedy: both repos
+        # resolved, so "fix the repo handles" would be a confident wrong step.
+        assert "came back UNMEASURED" not in err
+
+    def test_the_remedy_it_names_is_a_run_that_actually_writes(self, tmp_path, capsys):
+        """🔴 A REMEDY IS A CLAIM ABOUT THE STATE IT IS PRINTED IN, and the
+        all-unmeasured arm one screen up had to RETRACT this exact sentence for
+        being false in its own state ("re-run without --rebuild" writes 0 rows
+        when nothing measured). Here the zero-rows arm has already returned for
+        every derivation with no rows, so `rows` is non-empty by construction —
+        and the claim is measured rather than reasoned about."""
+        a, b = self._all_partial(tmp_path)
+        conn = StoredReposConn(("glimmerrepo", "quorlrepo"))
+        rc = hi.main(["--repo", str(a), "--repo", str(b), "--write"],
+                     open_store=_recording_store(conn))
+        out = capsys.readouterr().out
+        assert rc == hi.RC_OK
+        assert conn.kinds().count("INSERT") > 0
+        assert "DELETE" not in conn.kinds()
+        assert "wrote 0 section row(s)" not in out
+
+    def test_the_all_UNMEASURED_arm_still_wins_where_it_applies(self, tmp_path, capsys):
+        """The ladder's ordering, pinned. Both arms fire on "every repo is
+        unusable"; only the narrower one can honestly say `came back UNMEASURED`
+        and send the reader to the handles, so it must be reached first."""
+        rc = hi.main(["--repo", str(tmp_path / "glimmerrepo"),
+                      "--repo", str(tmp_path / "quorlrepo"), "--rebuild", "--write"],
+                     open_store=_refusing_store())
+        err = capsys.readouterr().err
+        assert rc == hi.RC_REFUSED
+        assert "ALL 2 repo(s) came back UNMEASURED" in err
+        assert "was read COMPLETELY" not in err
+
+    def test_a_healthy_rebuild_is_NOT_refused(self, tmp_path, capsys):
+        """The negative control that keeps this from being a permanently-red
+        gate — the mistake `rebuild_refusal`'s all-unmeasured arm had to unwind
+        once already."""
+        good = tmp_path / "glimmerrepo"
+        _write_repo(good, _TRIAD)
+        conn = StoredReposConn(("glimmerrepo",))
+        rc = hi.main(["--repo", str(good), "--rebuild", "--write"],
+                     open_store=_recording_store(conn))
+        assert rc == hi.RC_OK
+        assert "REFUSING" not in capsys.readouterr().err
+        assert conn.params_for("DELETE") == [[["glimmerrepo"]]]
+
+
+class TestPruneRefusesARepoItCannotReplace:
+    """`--prune` widens the delete to every stored label the config does not
+    name. That is only sound if the run can replace what it keeps, so the same
+    predicate gates it — and the message has to stay distinguishable from the
+    config-width guard, which opens with the same six words."""
+
+    def test_prune_refuses_while_a_doc_would_not_read(self, tmp_path, monkeypatch,
+                                                      capsys):
+        """Every handle SET — so `prune_config_refusal` is not what fires — with
+        one checkout carrying a broken blob."""
+        handles = _every_handle_set(tmp_path)
+        broken = Path(handles[hi.REPO_ENV_HANDLES[2]])
+        _break_every_doc_blob(broken)
+        _apply_handles(monkeypatch, handles)
+
+        rc = hi.main(["--rebuild", "--prune", "--write"], open_store=_refusing_store())
+        err = capsys.readouterr().err
+        assert rc == hi.RC_REFUSED
+        assert "came back UNMEASURED or INCOMPLETE" in err
+        assert f"{broken.name} (docs-unreadable (1 of 1))" in err
+        assert "handle(s) are UNSET" not in err
+
+    def test_the_same_config_with_every_doc_readable_still_prunes(
+            self, tmp_path, monkeypatch, capsys):
+        """The differential over the ONE variable — one blob — so nothing else
+        can explain the two outcomes."""
+        _apply_handles(monkeypatch, _every_handle_set(tmp_path))
+        labels = [f"{h.lower()}repo" for h in hi.REPO_ENV_HANDLES]
+        conn = StoredReposConn((*labels, "brindlewick-retired"))
+        rc = hi.main(["--rebuild", "--prune", "--write"],
+                     open_store=_recording_store(conn))
+        assert rc == hi.RC_OK
+        assert "REFUSING" not in capsys.readouterr().err
+        assert conn.params_for("DELETE") == [
+            [sorted([*labels, "brindlewick-retired"])]]
+
+
+class TestTheAuthorityPredicateIsREACHEDByTheDeleteScope:
+    """🔴 PROVING THE GUARD REACHABLE, NOT MERELY BREAKABLE. `claude/RULES.md`: a
+    mutation test still passes when an EARLIER check always wins, so the guard
+    never executes. Here the earlier check is `d.unmeasured`, and every fixture
+    above reaches the `unreadable` clause only because `derive_repo` happens to
+    leave `unmeasured` as `None` for a resolvable repo.
+
+    These drive `RepoDerivation` DIRECTLY — the functions are PURE and public, so
+    this is a supported call, not a contrivance — and construct the one state
+    that can only be answered by the second clause: `unmeasured is None` with
+    `unreadable` non-empty. If a future change made the first clause subsume the
+    second, these fail while everything above stays green."""
+
+    def _d(self, label, *, unmeasured=None, unreadable=()):
+        return hi.RepoDerivation(repo=f"/nowhere/{label}", label=label,
+                                 ref="refs/heads/main", docs=len(unreadable) and 1,
+                                 unmeasured=unmeasured, unreadable=unreadable)
+
+    def test_the_second_clause_alone_decides_a_label(self):
+        only_unreadable = self._d("thackrepo",
+                                  unreadable=("claudedocs/handoff-thack-relay.md",))
+        assert only_unreadable.unmeasured is None      # the earlier check does NOT fire
+        assert hi.incomplete_reason(only_unreadable) is not None
+        assert hi.may_replace_stored_rows(only_unreadable) is False
+
+    def test_the_delete_scope_reads_it_rather_than_re_deriving_it(self):
+        """The scope is the consumer that matters, and it is asserted over a
+        derivation the git layer cannot produce — so the answer comes from the
+        predicate and from nothing else in `derive_repo`."""
+        ds = [self._d("venlorepo"),
+              self._d("thackrepo", unreadable=("claudedocs/handoff-thack-relay.md",))]
+        assert hi.rebuild_delete_labels(ds, (), scoped=True) == ("venlorepo",)
+        # …and with the SAME two derivations minus the unreadable path, both.
+        ds[1] = self._d("thackrepo")
+        assert hi.rebuild_delete_labels(ds, (), scoped=True) == ("thackrepo", "venlorepo")
