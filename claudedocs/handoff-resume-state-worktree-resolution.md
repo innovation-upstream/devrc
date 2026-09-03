@@ -37,14 +37,31 @@ happened.**
 - **Session artifacts cleaned**: three worktrees (`devrc-rsw`, `devrc-merged`,
   `devrc-scaffold`) removed, `/tmp` fixtures removed, 0 of mine remaining.
 
-🔴 **NOT DEPLOYED — and the two halves deploy on DIFFERENT triggers.** Measured with the
-arbiter, not inferred:
-| path | `readlink -f` | goes live on |
-|---|---|---|
-| `scripts/resume-state.sh` | **itself** | a plain `git pull` — 0 references in `nix/` |
-| `claude/skills/resume/SKILL.md` | `/nix/store/…-devrc-claude-skills/resume/SKILL.md` | `home-manager switch` |
-Pull without switching and the narrowed resolver is LIVE while the deployed prose still
-describes the old rule — the one state that actively misleads an agent.
+✅ **DEPLOYED to both hosts 2026-09-02.** `ship.sh` converged workbench + laptop to
+`aa1c2abf` (workbench `1cc720ba`→, laptop `26e16eca`→ — the laptop was 4 commits further
+behind), 0 dangling managed symlinks on either, both switched, no host skipped.
+
+The two halves go live on DIFFERENT triggers, which is why a partial deploy was the hazard.
+Measured with the arbiter, not inferred — BEFORE the switch and AFTER:
+| path | `readlink -f` | goes live on | after the switch |
+|---|---|---|---|
+| `scripts/resume-state.sh` | **itself** | a plain `git pull` — 0 references in `nix/` | `worktrees_holding` ×6 |
+| `claude/skills/resume/SKILL.md` | `/nix/store/…-devrc-claude-skills/resume/SKILL.md` | `home-manager switch` | store path moved `p900zd0v…`→`iy8zczaj…`, now byte-identical to `origin/main` |
+It DIFFERED from the repo copy before the switch, so the skill half was genuinely stale.
+The misleading half-deployed state never existed on either host.
+
+🔴 **Behaviour verified end to end on the DEFECT, not just the artifact.** Naming a
+handoff-shaped path absent from the base clone but present in linked worktrees now refuses
+to choose instead of falling back to newest-of-N:
+```
+! requested handoff "…/handoff-discord-embed-ext-rescue.md" — NO SUCH FILE, and … exists
+  in 28 worktrees of the clone that path resolves against (…, and 24 more), so NONE was
+  chosen. NOTHING was reconciled; the DRIFT section below is about no document at all.
+```
+⚠ **The verifier recipe below asks for a doc in EXACTLY ONE worktree and no such doc
+existed** — the one available lives in 28. The multi-holder case exercises the same
+suppression and is the stronger test; `resume-state.sh` was not among the tree's dirty
+paths, so this is evidence about committed source, not a deployed copy.
 
 ## Open investigations — live diagnosis state
 ### The mutation battery's 56/56 is the agent's number, not mine
@@ -110,28 +127,79 @@ describes the old rule — the one state that actively misleads an agent.
 - **Next probe:** none from here. 🔴 **Read `scripts/ci-repro/README.md` BEFORE re-pushing or
   debugging your diff** when a required check goes red on a test your PR cannot reach.
 
+### ✅ CI reds: mechanism CONFIRMED from CI's own logs, and the retention claim above is WRONG
+- **Symptom + exact repro:** supersedes the "Next probe" two blocks up, which reads "Tekton
+  retains ~14 pipelineruns … which is why none of these four has a preserved log". That figure
+  is what stopped anyone looking, and it is false.
+- **Observed (with values):** MEASURED 2026-09-02 — **235 pipelineruns** in `tekton-ci`,
+  `devrc-ci` history back **16 hours**, `-gate-pod` containers still present with logs readable
+  hours after the run ended. Two retained reds (`devrc-ci-v54t7`, `devrc-ci-89m9l`, both started
+  15:40 UTC) failed on the SAME test on different xdist workers, and the in-tree diagnostic named
+  the arm outright, with no theorising required:
+  `MECHANISM = SERVER_BLOCKED_IN_FSYNC (handler threads=1, accept loop parked=True)` →
+  `_fsync_dir(path.parent)` → `os.fsync(fd)` at `server.py:1996`, on
+  `TestTheAppendRequestIsValidated.test_a_text_at_the_LIMIT_is_accepted`
+  (`collected=20474 passed=20470 failed=1`).
+  Those two reds are **PRE-FIX**: `#1219` (`b4fde334`, 16:48:49 UTC) sites `scoped_store` — the
+  fixture that stalled — ~68 min after they started; before it that fixture used plain
+  `tmp_path`, i.e. real disk. Every `devrc-ci` run since is green (16:49, 17:06, 17:24).
+- **Ruled out:** *that the tmpfs mitigation silently falls back in CI*, which
+  `scripts/testlib/store_siting.py` explicitly flags as possible ("CI builds UNSANDBOXED …
+  `/dev/shm` is the container's own mount — 64Mi by default, possibly absent or read-only. All
+  of those land on the fallback"). On `talos-xr6-r7p` — the single node all 25 `devrc-ci` gate
+  pods are pinned to, with no `/dev/shm` override in the Tekton pod spec —
+  `shm /dev/shm tmpfs rw,seclabel,relatime,size=65536k` and WRITABLE. 64 MiB against the 4 MiB
+  `_MIN_FREE_BYTES` floor; CI runs `-n 4`, so peak demand is 4 × `_LARGEST_STORE_BYTES`
+  (1,875,968 B) ≈ **7.2 MiB, ~9× headroom**. The module's accumulation hazard (a SIGKILLed run
+  skips the `finally`, leaving `/dev/shm/devrc-store-*` on a persistent container) does not
+  apply — Tekton gives every PipelineRun a fresh pod, so `/dev/shm` starts empty.
+  via: measurement
+- **Leading hypothesis:** closed for the store-api arm. `_why_the_server_did_not_answer` works —
+  **read its `MECHANISM =` line before forming any hypothesis about a store-api hang.**
+- **Next probe:** ⚠ **TWO of the four named tests are NOT explained by this mechanism** and no
+  evidence for them survives. `test_no_test_writes_a_usr_bin_env_shebang_at_runtime`
+  (`scripts/tests/test_runtime_shebangs.py`) and
+  `test_release_deletes_the_ref_and_the_slug_becomes_claimable_again`
+  (`scripts/tests/test_claim_work.py`) contain **0** references to `build_server` or
+  `store_siting`, so the fsync/tmpfs story cannot reach them. Status is *2 of 4 explained* — do
+  not restate it as "the flake is solved". If either recurs, capture its `-gate-pod` log the
+  same day; retention is hours, not the ~14 runs this doc used to claim.
+- ⚠ **Scope:** 3 clearly post-fix green runs is consistent with a fix, **not proof** against a
+  load-dependent flake. What is established is the mechanism, that the mitigation reaches the
+  fixture, and that its precondition holds in CI.
+
 ## Next steps (ranked)
-1. **Deploy — `scripts/ship.sh`** (converges both hosts: fetch → `merge --ff-only` →
-   `home-manager switch` → verify HEAD==origin/main). 🔴 **Read every per-host line, not the
-   final verdict** — one skip hides among greens, and it prints its own rc legend on failure.
-   ⚠ At close-out the base clone was dirty with **another session's** uncommitted work
-   (`nix/programs/alacritty/default.nix` and others); `ship.sh` never stashes and leaves a
-   host it cannot fast-forward exactly as found, naming the blocking files. Check that before
-   assuming a clean run.
-   forcing: gate — the resolver half goes live on the pull while the skill half waits for the
-   switch, so a partial deploy is the one state that actively misleads an agent.
-2. **Close devrc#1160** — four `status`→code associations `claude/skills/handoff/SKILL.md`
+1. **Close devrc#1160** — four `status`→code associations `claude/skills/handoff/SKILL.md`
    documents in prose that nothing pins (`written`⇒0, `failed`⇒3, `push-failed`⇒3,
    behind-but-usable⇒0), plus a stale `MIN_TESTS` ledger comment. The issue carries its own
    closing condition. ⚠ The byte budget MOVED: **#1144 merged (`3d0b77e5`) and raised
    `MAX_BYTES` to 27,000**, so the budget is 26,100 and that file is 25,864 → **236 B** of
    headroom, not the 7 B an earlier note claimed.
    forcing: none
-3. **Apply the staged dnsmasq fix** — `sudo ~/workspace/devrc/nix/system/apply-dnsmasq-docker-io-pin.sh`.
-   Only the operator can run it; it is staged, not applied.
-   forcing: incident — measured 2026-08-29: the LAN router pins `registry-1.docker.io` with a
-   487-day TTL and two of those IPs were reassigned to other AWS customers, so every
-   `docker build` fails TLS. Worked around once with `--add-host`; unfixed.
+2. ✅ **The staged dnsmasq fix is ALREADY APPLIED — do NOT run the script.** Re-measured
+   2026-09-02 before acting, per `claude/RULES.md` → "Memory Is a Hypothesis".
+   `/etc/nixos/configuration.nix:76` already reads
+   `servers = ["/docker.io/<public-resolver>" "<lan-router>" "<public-resolver>"];` (the
+   domain-specific entry wins, so docker.io alone bypasses the router) and the script's own
+   precondition (exactly 1 match for the pre-fix line) now matches **0** — it would print
+   `already applied — nothing to do`. It is LIVE, not merely edited: via `127.0.0.1`,
+   `registry-1.docker.io` answers TTL **49 s** with **8/8** serving `*.docker.com`, and
+   `registry-1.docker.io/v2/` returns `http=401 tls=0`. Laptop equally healthy (TTL 41 s,
+   `*.docker.com`, `http=401 tls=0`) — confirmed behaviourally; its `/etc/nixos` is not
+   readable without sudo.
+   🔴 **BUT THE ROOT CAUSE IS LIVE AND HAS GOTTEN WORSE, and that is the real remaining
+   work:** `dig @192.168.50.1 registry-1.docker.io` still returns the pin — TTL
+   **41,697,864 s ≈ 482 days**, counting down ~4 days from the original 487. Its eight
+   addresses today are **0 correct / 2 third-party certs / 6 no handshake**
+   — the two that DO complete a handshake present certificates for an unrelated company's
+   staging Grafana and an unrelated personal site, neither of them Docker's (the addresses
+   and hostnames are deliberately not recorded here; this repo is PUBLIC and they are third
+   parties' — re-measure with `dig @<lan-router>` and read the certs yourself). That is
+   against 4/2/2 when measured on 2026-08-29. Any LAN device without
+   the host-side bypass now fails **every** pull, not half. Clearing that entry on the
+   router is the actual repair — the script's own header says so; it is a host-side bypass
+   for two machines, not a fix.
+   forcing: none from these two hosts — router admin, and both hosts are already covered.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`paste -sd' or '` DOES NOT JOIN WITH " or " — `-d` is a LIST OF CHARACTERS it cycles
@@ -251,6 +319,50 @@ describes the old rule — the one state that actively misleads an agent.
   2026-09-01. Every `Ruled out:` bullet now needs `via: <kind>` (`change`/`code`/`command`/
   `doc`/`measurement`, or `assumed` for reasoning). It refused this very doc's first write.
 
+- 🔴 **A HANDOFF IS A MUTABLE FILE ON A BRANCH THAT MOVES — re-read it from `origin/main`
+  before acting on its ranked steps, even when a kickoff message quotes them.** 2026-09-02: a
+  session resumed from a kickoff quoting a rank 2 of "file the CI-flake issue". That rank had
+  ALREADY been retracted on `origin/main` — the retraction block says "Do not file it" — and the
+  session re-derived the whole diagnosis from CI logs anyway. It is the FIFTH occurrence of the
+  bullet above about re-deriving a CI failure, and the first where the answer was in *this very
+  document*. `git -C <repo> show origin/main:claudedocs/handoff-<topic>.md` costs one command.
+  ⚠ It did produce three genuinely new facts (the retention figure being wrong, the `MECHANISM =`
+  confirmation, the `/dev/shm` probe) — so the lesson is *read first*, not *don't look*.
+- 🔴 **`main` HAS NO MERGE GATE, THIS IS DELIBERATE, AND `drift-check.sh` rc 24 IS EXPECTED —
+  NOT A FINDING.** Measured 2026-09-02: `required_status_checks` absent from the protection
+  object entirely and `enforce_admins: false`, while `GET /branches/main` still reports
+  `protected: true`. The operator turned it off because the gate was slowing work down; it
+  stays off until the Tekton capacity issue is addressed, which a **different session owns**.
+  `CLAUDE.md` is the authority — read it there, do not re-litigate it here, and **do not
+  "restore" it**. Tekton still RUNS (both checks post on a PR head), it just does not block.
+  ⚠ **This session got the framing wrong first**: it read `required_status_checks: null` plus
+  `enforce_admins: false` as the signature of a break-glass window closed with a partial `PUT`,
+  and filed it as rank 1 to be restored. The API shape is identical either way — a deliberate
+  disable and a botched restore are **indistinguishable from the endpoint alone**. Ask whether
+  someone turned it off before concluding something broke.
+  🔴 **The live consequence is real regardless of intent: run BOTH tiers yourself before
+  merging** — `scripts/gate.sh --tier both` AND `nix build .#checks.x86_64-linux.{pytests,
+  nodetests}` one at a time, on the MERGED tree — and name the tier and base sha in the claim.
+  A direct `commit` onto `main` in the workbench checkout pushed successfully in this window
+  (`git reflog` → `HEAD@{0}: commit:`); required checks would have rejected it.
+- ⚠ **`drift-check.sh | tail` REPORTS rc 0 FOR A RUN THAT EXITED 24.** The pipe returns `tail`'s
+  status — the documented `nix build … | tail` trap, one level over. The script prints its own
+  `drift-check: DRIFT (rc=24)` verdict line, which is the only reason it was caught; the echoed
+  number was still wrong. **Redirect to a file and read the verdict line, never `| tail`.**
+- 🔴 **A `kubectl get <resource> | tail -20` OF A 235-ROW LIST READS EXACTLY LIKE THE WHOLE
+  POPULATION**, and that is how the "~14 pipelineruns" retention claim survived. It was
+  reproduced live while checking it: the tail showed ~20 rows, the oldest 106 min old, and the
+  obvious reading — "retention is about two hours" — was wrong by 16 hours and 215 rows.
+  **Count before concluding a window:** `--no-headers | wc -l`.
+- 🔴 **`handoff_doc.py` IS THE DOC'S ONLY WRITER, AND HAND-EDITING BYPASSES REAL GATES.** Editing
+  the markdown directly skips rule (k) `status=unevidenced` (exit 10), the durable-line
+  drop-warning, and the `forcing:` audit. Measured here: a hand edit looked complete and the tool
+  then refused it for an inherited `- **Ruled out:** nothing yet.` carrying no `via:` field.
+  🔴 **Bucketing is not uniform and it changes what you must supply:** `State now`,
+  `Next steps` and `How to verify` are **REPLACE** (supply the section whole, or lose what you
+  omit), while `Open investigations` and `Gotchas` are **APPEND** (supply ONLY new content, or
+  you duplicate the section). The tool prints the buckets — read that line before writing.
+
 ## How to verify
 ```bash
 # 1. all three PRs landed, by CONTENT (a squash is never an ancestor)
@@ -267,6 +379,13 @@ for i in 1093 1115 1164; do gh issue view $i --repo innovation-upstream/devrc --
 # 3. WHICH HALF IS LIVE ON THIS HOST — readlink is the only arbiter, never a diff
 readlink -f ~/workspace/devrc/scripts/resume-state.sh   # itself      => live on pull
 readlink -f ~/.claude/skills/resume/SKILL.md            # /nix/store/ => needs a switch
+# post-switch the skill half must be byte-identical to the branch, not merely present:
+diff <(cat ~/.claude/skills/resume/SKILL.md) \
+     <(git -C ~/workspace/devrc show origin/main:claude/skills/resume/SKILL.md) && echo SAME
+
+# 3b. BOTH HOSTS actually converged (read every per-host line, never the final verdict)
+~/workspace/devrc/scripts/drift-check.sh > /tmp/drift.txt 2>&1; echo "rc=$?"  # NEVER `| tail`
+grep -E '^\[(workbench|laptop)\].*(BEHIND|AHEAD|DIVERG|clean)' /tmp/drift.txt
 
 # 4. the guards still re-derive (batteries are author instruments; the gate never runs them)
 PYTHONDONTWRITEBYTECODE=1 nix develop ~/workspace/devrc -c \
