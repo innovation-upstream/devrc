@@ -583,7 +583,38 @@ in
       # `notify-send -a notify-failure`. That is ALL unit-failure toasts, not an
       # opt-in subset — justified by the measured firing rate (7 activations in
       # ~6 months of laptop journal, 1 in 9 days of workbench journal), which is
-      # far too low to make DND feel broken. Deliberately NOT keyed on
+      # far too low to make DND feel broken.
+      #
+      # 🔴 THAT RATE IS A MEASUREMENT WITH A DATE, IT IS CURRENTLY BREACHED BY
+      # ~32×, AND THIS IS THE ONE PLACE THE ARITHMETIC IS STATED. Measured from
+      # `journalctl --user -u drift-check.service`, 2026-08-25..2026-09-03:
+      #   32 unit failures in 9 days — every one of them through THIS rule —
+      #   against a justification of ~1 firing in 9 days. That is 32×, not the
+      #   "three orders of magnitude" an earlier wording claimed at three
+      #   different sites; 4/day against 1-per-9-days is 36× (~1.6 orders), and
+      #   no restatement of it was ever right. Verdicts in that window:
+      #   rc 10 ×13, rc 17 ×11, rc 24 ×5, rc 12 ×2, rc 8 ×1.
+      # Do not restate this number elsewhere — point here. It was wrong at every
+      # copy, in both directions, and a figure nobody can locate is a figure
+      # nobody re-measures.
+      #
+      # 🔴 AND THE BREACH IS NOT CLOSED. The rc-24 arm (see the drift-check block
+      # below) was the STRUCTURALLY PERMANENT contributor — the one finding that
+      # could never be repaired because nobody intended to repair it — and it is
+      # fixed. It was not the only one: rc 24 was the verdict on only 5 of those
+      # 32 runs, all inside a single 24-hour span, and on all 5 at least one other
+      # DRIFT finding was co-present (`local main is BEHIND` on 5 of 5, `BUILT
+      # SOURCE homelab-talos/containers/clawgate is NOT current` on 4 of 5).
+      # Removing rc 24 lowers those runs to rc 17 or rc 10 — still non-zero, still
+      # OnFailure, still a toast through this rule, still ~4×/day. 🔴 A reader who
+      # stops here concludes the breach was closed and stops looking, which is the
+      # exact "learns to ignore the one alert that must keep its meaning" outcome
+      # this rule's scope argument exists to prevent. rc 17 and rc 10 on this
+      # fleet are a separate, still-open job.
+      #
+      # Anything wired to OnFailure=notify-failure@ inherits this bypass, so any
+      # unit that can fail on a STANDING condition breaches it again.
+      # Deliberately NOT keyed on
       # `urgency = critical`: other tools send critical toasts, and those must
       # still respect DND.
       zz_notify_failure_bypass = {
@@ -3072,6 +3103,53 @@ in
   # SuccessExitStatus (which `test_only_16_is_excused_from_failing_the_unit`
   # pins to exactly one code).
   #
+  # 🔴 rc 24 AND rc 25 DO TOAST, AND rc 24 IS THE THIRD WAY INTO THE SAME
+  # HAZARD — reached, this time, by a finding that was TRUE. This ledger did not
+  # list rc 24 when it landed, and that omission is what let the following
+  # happen. MEASURED 2026-09-02 (`Result=exit-code`, `ExecMainStatus=24`): the
+  # merge gate on innovation-upstream/devrc is off — DELIBERATELY, until the
+  # Tekton capacity issue is addressed, which a different session owns — and the
+  # arm reported it as drift on every run that reached it. A true finding about a
+  # state nobody intends to change is a permanently-red gate exactly like a false
+  # one. The breach arithmetic against the DND-bypass justification is stated
+  # ONCE, in the `zz_notify_failure_bypass` block above; do not restate it here.
+  #
+  # ⚠ AND FIXING THIS DOES NOT STOP THE TOASTS ON THIS HOST. rc 24 was the
+  # verdict on only 5 of the 32 failures in that window, and every one of those 5
+  # had another DRIFT finding co-present, so they now land on rc 17 or rc 10 —
+  # still non-zero, still OnFailure. What is closed is the contributor that could
+  # never be repaired, not the rate. See the block above.
+  #
+  # 🔴 THE FIX IS NOT SuccessExitStatus, AND THAT IS WHY THIS PIN STILL READS 16
+  # ALONE. Excusing rc 24 would silence the only thing that catches a BOTCHED
+  # BREAK-GLASS RESTORE — the 2026-08-29 shape where DELETE opened the window,
+  # the restore trap RAN, and PATCH could not close it. So the SCRIPT changed
+  # instead: `bp_declared_off_reason()` in drift-check.sh declares the expected
+  # state per repo, in reviewable source no environment can flip (the SUBJECT can
+  # still be redirected with DRIFT_PROTECT_SLUG — but the run prints the slug it
+  # asked about, so that silence names a repo the operator never chose; see the
+  # script's header), and rc 24
+  # now fires on DISAGREEMENT — declared-off/live-off is reported plainly and
+  # sets no code, while declared-on/live-off is the alarm, unchanged. A PARTIAL
+  # restore (required checks back, enforce_admins still false) is rc 25, not
+  # agreement: the checks existing again is evidence the declaration is stale,
+  # and that is the exact state a partial PUT produces. rc 25 is
+  # the mirror: declared OFF, live ON, i.e. the declaration has gone stale and
+  # rc 24 is DISARMED by it. Both are real divergences with real fixes (restore
+  # the protection; delete the declaration), so both must reach OnFailure, and
+  # the excuse list stays at exactly one code. rc 25 has no escalation ladder on
+  # purpose — its repair is a one-line edit by whoever restored the protection,
+  # so unlike the LADDER codes rc 13/18/23 it is closable the moment it is seen.
+  # (rc 13 = DRIFT_UNREACHABLE_ESCALATE, rc 18 = DRIFT_UNMEASURED_ESCALATE and
+  # _FETCH_ESCALATE, rc 23 = DRIFT_NIXDIRT_ESCALATE. An earlier wording named
+  # "rc 13/16/18" here: rc 16 has NO ladder and is the single code on
+  # SuccessExitStatus, so naming it muddled the very paragraph arguing about the
+  # excuse list, and it disagreed with drift-check.sh's own correct list.)
+  # ⚠ The unit's ExecStart is `%h/workspace/devrc/scripts/drift-check.sh` — the
+  # WORKING TREE — so that one-line repair takes effect on a merge + pull and
+  # needs no home-manager switch. The X-Restart-Triggers below only re-run the
+  # unit; they are not what makes the edit live.
+  #
   # 🔴 AND IT DOES NOT MOVE TimeoutStartSec. The budget below is a function of
   # what the script FETCHES; the rc 18 ladder adds no fetch and no ssh — it reads
   # and writes one ~16-byte counter per (host, scope) in $XDG_STATE_HOME, four
@@ -3102,10 +3180,11 @@ in
       # the readers, and the timer runs every 6h — so the DND-bypassing alert
       # would fire 4× a day, forever, on a run where nothing is wrong. The DND
       # bypass is justified in this file by a MEASURED rate of ~1 firing in 9
-      # days; 4/day is three orders of magnitude past that, and it is exactly
-      # the "permanently-red gate trains you to click through the one alert that
-      # must keep its meaning" hazard the unreachable-remote note below already
-      # refuses. The script's own header refuses it for rc 13 for the same
+      # days — see the `zz_notify_failure_bypass` block for that measurement and
+      # the arithmetic against it, which is stated ONCE and nowhere else. This is
+      # exactly the "permanently-red gate trains you to click through the one
+      # alert that must keep its meaning" hazard the unreachable-remote note
+      # below already refuses. The script's own header refuses it for rc 13 for the same
       # reason. Correct about a printed LINE, wrong about an EXIT CODE.
       #
       # NOTHING IS HIDDEN. The script still exits 16, still prints the
