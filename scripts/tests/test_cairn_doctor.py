@@ -426,6 +426,29 @@ class TestTheScopeVisibility:
         assert check.state == cd.PROBLEM
         assert "11" in check.detail and "9 live in scopes" in check.detail
 
+    def test_an_UNREADABLE_local_root_makes_this_UNMEASURED_not_OK(
+        self, tmp_path
+    ) -> None:
+        """🔴 The first version returned OK with the hole named in its tail. An
+        OK carrying a caveat is how a partial answer gets read as a clean one —
+        "every scope on this disk is among them" is a claim about a set the walk
+        could not finish building. Graded against the OK case below, which is
+        identical except that both roots are readable."""
+        cache = _store(tmp_path / "c", {"alpha": ["a.md"]})
+        blocked = tmp_path / "m"
+        blocked.mkdir()
+        blocked.chmod(0o000)
+        try:
+            check = _by_name(_collect(
+                cache_root=cache, mirror_root=blocked,
+                pod=cd.PodFacts(reached=True, visible_entries=1, store_wide_entries=1,
+                                visible_scopes=("alpha",)),
+            ))["token-scopes"]
+        finally:
+            blocked.chmod(0o700)
+        assert check.state == cd.UNMEASURED
+        assert "could not be fully read" in check.detail
+
     def test_equal_counts_and_no_missing_scope_is_OK(self, tmp_path) -> None:
         cache = _store(tmp_path / "c", {"alpha": ["a.md"]})
         check = _by_name(_collect(

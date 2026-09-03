@@ -78,7 +78,7 @@ are where the exemptions are argued. Read them before adding a row.
 
 ## Operator surface
 
-`reference/operator-surface.md` — the pod, `seed.sh`, `verify-byte-identity.sh`
+`~/.claude/skills/cairn/reference/operator-surface.md` — the pod, `seed.sh`, `verify-byte-identity.sh`
 and its measured coverage gap, `build-push.sh`, `cairn-cutover.py`, the backup
 CronJob, and 🔴 **the token file is read ONCE at startup**: editing the secret
 changes nothing until the pod is replaced, and the wrong replacement command

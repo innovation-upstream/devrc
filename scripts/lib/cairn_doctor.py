@@ -324,10 +324,15 @@ def collect(
             f"the store ANSWERED HTTP {pod.http_status} — {pod.reason}",
         ))
     else:
+        # 🔴 THE PREFIX IS NEUTRAL ON PURPOSE. It used to read "no answer from the
+        # store", which CONTRADICTS one of the reasons that arrives here: a
+        # snapshot the pod served and the client could not unpack is an answer.
+        # A heading that argues with the reason beneath it is a comment the code
+        # falsifies, which is the same defect class one layer up.
         checks.append(Check(
             "pod", UNMEASURED,
-            f"no answer from the store — {pod.reason}. Nothing below that needs "
-            f"the pod could be measured.",
+            f"the store's state could not be established — {pod.reason}. Nothing "
+            f"below that needs the pod could be measured.",
         ))
 
     # 5. CACHE vs POD. Only readable once the pod answered; otherwise UNMEASURED
@@ -425,10 +430,23 @@ def _visibility_check(pod: PodFacts, cache_root: Path, mirror_root: Path) -> Che
     unread_note = (" Some local roots were unreadable: " + "; ".join(unread)) if unread else ""
 
     if not missing and not hidden_entries:
+        # 🔴 AN UNREADABLE LOCAL ROOT MAKES THIS UNMEASURED, NOT OK-WITH-A-NOTE.
+        # "every scope on this disk is among them" is a claim about a set this
+        # walk could not finish building, and an OK carrying a caveat in its tail
+        # is exactly how a partial answer gets read as a clean one. The note
+        # alone was the first version; it stated the hole and still graded the
+        # check green.
+        if unread:
+            return Check(
+                "token-scopes", UNMEASURED,
+                f"the {len(visible)} scope(s) the store sent are all reachable, but "
+                f"this host's own scope set could not be fully read, so nothing is "
+                f"established about scopes present locally.{unread_note}",
+            )
         return Check(
             "token-scopes", OK,
             f"this credential reaches all {len(visible)} scope(s) the store sent, "
-            f"and every scope on this disk is among them.{unread_note}",
+            f"and every scope on this disk is among them.",
         )
     if not missing:
         return Check("token-scopes", PROBLEM, hidden_entries.strip() + unread_note)
