@@ -760,8 +760,24 @@ def test_bad_source_is_rejected():
 # nothing is FATAL, and deliberate losses are stated with --accept.
 _A = {"trigger": ":aa", "replace": "alpha text", "label": "Alpha thing",
       "search_terms": ["alpha", "firstword"]}
+# 🔴 ':bb' DECLARING "thing" IS LOAD-BEARING FIXTURE ISOLATION — do not prune it,
+# and if you replace it, replace it with another word that is ALSO in ':bb''s
+# label. Why: `_probe_universe` includes single-character prefixes, and 't' is a
+# prefix of the label word "thing" that BOTH snippets carry, while also being a
+# substring of ':aa''s declared "firstword". Under the detector's declared-
+# interface precedence that made ':aa' out-bid ':bb' for the probe 't' in the
+# before-config, and ':bb' win it after ':aa' is stripped — a genuine
+# `moved_expansion`, which is FATAL and deliberately NOT acknowledgeable with
+# --accept, so it drowned the axis
+# `test_gate_exit_codes_accept_semantics_and_that_it_lints` exists to pin.
+# Declaring the word on ':bb' too makes both snippets declared for that probe, so
+# precedence narrows nothing and 't' is ambiguous exactly as the fixture author
+# assumed. It must be a word that is ALSO in the label because `_mut` REPLACES
+# `search_terms` wholesale in two tests below — a word living only in
+# `search_terms` would vanish there and be graded as a LOST QUERY. (Measured: the
+# first attempt at this used a search_terms-only word and did exactly that.)
 _B = {"trigger": ":bb", "replace": "bravo text", "label": "Bravo thing",
-      "search_terms": ["bravo"]}
+      "search_terms": ["bravo", "thing"]}
 
 
 def _mut(base, trig, **changes):

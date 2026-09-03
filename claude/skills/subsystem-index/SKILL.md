@@ -24,6 +24,11 @@ rewrites-and-renames (needing only the directory bit, and leaving the file
 whole entries and 24 dated bullets were stranded that way. The full mechanism is
 in the write half at the end of this document.
 
+⚠ **The STORE itself is a different skill.** The pod, the client, `cairn doctor`,
+`cairn sync`/`search`/`ls-entries`/`who`, seeding and the two different exit 4s
+are **`cairn`**. This document is the write PROTOCOL, and nothing about the store
+is restated here.
+
 ⚠ **It was genuinely forked until 2026-08-31, so a stale memory of that is not
 paranoia — read this before re-deriving it.** `/analyze-service`'s door,
 `claude/skills/analyze-service/reference/write-back.md`, carried a second copy of

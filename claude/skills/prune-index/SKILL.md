@@ -1,6 +1,6 @@
 ---
 name: prune-index
-description: "Audit and prune the /analyze-service index store so recall keeps surfacing the RIGHT entry — evicts RESOLVED bullets, keeps every OPEN one, finds refs that resolve to two entries. Use for: prune/shrink/audit the analyze-service index, the subsystem index store, an entry that got huge, `--ref X` returns ref-ambiguous, RESOLVED bullets piling up, ~/.claude/analyze-service-index. Shrinking a SKILL.md body is `prune-skill`; the per-session MEMORY.md index is `prune-memory`."
+description: "Audit and prune the /analyze-service index store — evicts RESOLVED bullets, keeps every OPEN one, finds refs resolving to two entries. Use for: prune/shrink/audit the analyze-service index, the subsystem index store, an entry that got huge, `--ref X` is ref-ambiguous, RESOLVED bullets piling up, ~/.claude/analyze-service-index. A SKILL.md body is `prune-skill`; MEMORY.md is `prune-memory`; the store itself is `cairn`."
 argument-hint: "[SCOPE | SCOPE/ENTRY.md] — optional; defaults to the whole store"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
@@ -19,7 +19,7 @@ The store is a **pointer/nuance sheet per service** under `~/.claude/analyze-ser
 ## 🔴 Store safety — read this before the audit, not after
 - The store is **curated, CLIENT-CONFIDENTIAL, and not re-derivable by re-running recon.** ⚠ This bullet used to read "and has no off-machine backup" — false since 2026-08-21: `analyze-service-index-commit.service` commits each scope hourly and `analyze-service-index-backup.service` sends age-encrypted bundles to MinIO daily (`restore-verify.py` reads them back). **The rules below are unchanged, because they never rested on that** — a prune loses back to the last hourly commit, and **uncommitted state is in no commit and no bundle.** Detail: `~/.claude/skills/analyze-service/reference/index-store.md` → Store safety.
 - **Each `<scope>/` is its own git repo** (the root is not). **Run NO git command inside it** — no `stash`, no `reset --hard`, no `clean`, no `checkout --`, no remote, no push. Set work aside with `cp <file> /tmp/…`.
-- 🔴 **Since the Cairn cutover the tree under `~/.claude/analyze-service-index/` is a FROZEN mirror — entry files are `0444` and the pod is the authority.** Every write in this skill goes through `cairn put` (§4). ⚠ **The `0444` is a marker, not an enforcement — measured 2026-09-02:** a shell `>>` gets `EACCES`, but `Edit` rewrites-and-renames through it (leaving the file still `0444`) and `Write` makes a fresh `0644` file. An editor write there SUCCEEDS and is then invisible to every reader, so the protection is the verb you choose, never the mode bits.
+- 🔴 **`~/.claude/analyze-service-index/` is a FROZEN mirror; the pod is the authority.** §4 writes through the store API instead. ⚠ **The `0444` is a marker, not an enforcement — measured 2026-09-02:** a shell `>>` gets `EACCES`, but `Edit` rewrites-and-renames through it (leaving the file still `0444`) and `Write` makes a fresh `0644` file. An editor write there SUCCEEDS and is then invisible to every reader, so the protection is the verb you choose, never the mode bits. The store itself, its client and `cairn doctor` are the **`cairn`** skill.
 - **Never copy an entry's content into devrc, any public repo, a PR body, an issue or a commit message.** Aggregate integers about the corpus are fine; a line of prose is not. devrc `60e6d9d` exists because this data class had to be scrubbed out of a public repo retroactively.
 - Each scope's own `README.md` states the policy governing it — read it before writing there. A scope with no README has no stated policy; the audit reports those.
 
@@ -71,7 +71,7 @@ cp -a ~/.cache/subsystem-store/. "$BK"/ && echo "backed up to $BK: $(find "$BK" 
 Bias toward EVICT/MERGE **only inside the RESOLVED population**. Everywhere else this store is a router *and* the sole archive of things nobody wrote down.
 
 ## 4. Propose — confirm-gated, diff first
-Present a **unified diff** against the current file, one compact block, ask one yes/no. On confirm, land the cut **through the store API** — the local entry files are `0444` and any editor write against one fails with `EACCES`:
+Present a **unified diff** against the current file, one compact block, ask one yes/no. On confirm, land the cut **through the store API** — the local entry files are `0444`, but 🔴 **that does NOT stop an editor: `Edit` rewrites-and-renames straight through it and `Write` makes a fresh `0644` file** (only a shell `>>` gets `EACCES`). A cut applied locally therefore SUCCEEDS silently and is invisible to every reader, which is the loss this step exists to prevent:
 ```bash
 cairn sync                                                    # the live bytes
 cp ~/.cache/subsystem-store/<scope>/<entry>.md /tmp/prune-<entry>.md

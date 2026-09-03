@@ -36,7 +36,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
-from testlib import store_siting  # noqa: E402
+from testlib import hang_mechanism, store_siting  # noqa: E402
 CAIRN_CLI = REPO / "scripts" / "cairn"
 SERVER_PY = REPO / "scripts" / "subsystem-store-api" / "server.py"
 GOOD_TOKEN = "w" * 20 + "R" * 20 + "t" * 8
@@ -257,6 +257,47 @@ def run_cairn(*args: str, url: str | None, cache: Path, token: str = GOOD_TOKEN)
     )
 
 
+def why_the_write_failed(proc: subprocess.CompletedProcess, live=None) -> str:
+    """The assertion message for a write that was supposed to land.
+
+    🔴 EXIT 7 HERE HAS TWO CAUSES AND THE BARE ASSERTION NAMES NEITHER. `cairn`
+    passes `--timeout 5`, and `server.py:_replace_bytes` fsyncs the file and then
+    the parent directory INSIDE the request, before the response is written. So a
+    single fsync slower than five seconds makes the client report the store
+    UNREACHABLE, and the gate prints
+
+        AssertionError: cairn: the write did NOT happen — ... unreachable: timed out
+        assert 7 == 0
+
+    for an I/O stall — a sentence about this client's code, describing the disk.
+    Measured in CI on `devrc-ci-jfg67` (2026-09-02) and reproduced on the dev host
+    by stalling `os.fsync` past the bound. A gate that reports a code failure for an
+    I/O stall trains everyone to click through, which is the actual cost.
+
+    So the message carries the two facts that separate the causes: whether any
+    server thread is parked in an unbounded wait RIGHT NOW
+    (`testlib.hang_mechanism`), and which filesystem the store was sited on — the
+    standing precondition, since `testlib.store_siting` falls back to disk in five
+    documented ways and says nothing when it does.
+
+    🔴 This is DIAGNOSIS, NOT TOLERANCE. It changes no bound, retries nothing, and
+    the assertion fails exactly as it did before; only the message is wider. It is
+    also NOT a proof of an I/O stall: a stall that had already cleared reads the
+    same as a genuine code failure, and `hang_mechanism.report` says
+    `NO_LEDGERED_STALL` for both rather than guessing between them.
+    """
+    note = ""
+    if live is not None:
+        note = (
+            f"\nstore={live.store} fs={store_siting.mount_fstype(live.store)} "
+            f"(tmpfs = the contended-disk mitigation was in force)"
+        )
+    return (
+        f"exit={proc.returncode}\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+        + hang_mechanism.report(note)
+    )
+
+
 # =============================================================================
 
 
@@ -268,7 +309,7 @@ class TestAppendLands:
             "--session", SESSION,
             url=live.base, cache=tmp_path / "c",
         )
-        assert proc.returncode == 0, proc.stderr
+        assert proc.returncode == 0, why_the_write_failed(proc, live)
         assert "appended" in proc.stdout, proc.stdout
         # 🔴 THE POSITIVE CONTROL, and it is not optional. `RULES.md` on this
         # exact API: "reading '0 occurrences' off the response is a FALSE GREEN —
@@ -293,9 +334,9 @@ class TestAppendLands:
             "--text", "attribution comes from the credential",
             "--session", SESSION, url=live.base, cache=tmp_path / "c",
         )
-        assert proc.returncode == 0, proc.stderr
-        landed = (live.store / "widget-cfg" / "thing-alpha.md").read_text()
-        assert "[cairn: tester/" in landed
+        assert proc.returncode == 0, why_the_write_failed(proc, live)
+        on_disk = (live.store / "widget-cfg" / "thing-alpha.md").read_text()
+        assert "[cairn: tester/" in on_disk
         help_text = subprocess.run(
             [sys.executable, str(CAIRN_CLI), "append", "--help"],
             capture_output=True, text=True, timeout=60,
@@ -314,7 +355,8 @@ class TestAppendLands:
                 "--text", "the same observation twice", "--session", SESSION)
         first = run_cairn(*args, url=live.base, cache=tmp_path / "c")
         second = run_cairn(*args, url=live.base, cache=tmp_path / "c")
-        assert first.returncode == 0 and second.returncode == 0
+        assert first.returncode == 0, why_the_write_failed(first, live)
+        assert second.returncode == 0, why_the_write_failed(second, live)
         assert "appended" in first.stdout and "duplicate" not in first.stdout
         assert "duplicate" in second.stdout
         body = (live.store / "widget-cfg" / "thing-beta.md").read_text()
@@ -332,7 +374,7 @@ class TestAppendLands:
             "--text", "reached through the alias tier", "--session", SESSION,
             url=live.base, cache=tmp_path / "c",
         )
-        assert proc.returncode == 0, proc.stderr
+        assert proc.returncode == 0, why_the_write_failed(proc, live)
         assert "reached through the alias tier" in (
             live.store / "widget-cfg" / "thing-gamma.md"
         ).read_text()
@@ -599,7 +641,7 @@ class TestPutReplacesBehindAPrecondition:
             "put", "--scope", "widget-cfg", "--ref", "thing-beta",
             "--file", str(replacement), url=live.base, cache=tmp_path / "c",
         )
-        assert proc.returncode == 0, (proc.stdout, proc.stderr)
+        assert proc.returncode == 0, why_the_write_failed(proc, live)
         assert "derived If-Match" in proc.stderr
         on_disk = (live.store / "widget-cfg" / "thing-beta.md").read_text()
         assert "RESOLVED abc1234" in on_disk

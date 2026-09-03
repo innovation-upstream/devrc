@@ -18,6 +18,51 @@ let
   # DDL/insert path (snapshot #1 wrote 23 rows to prod, telemetry-on, and the DSN role
   # is confirmed to have CREATE SCHEMA). The timer runs hourly (see the timer below).
   enableInitiativesSync = true;
+  # handoff-index-sync (P1) master switch — gates ONLY whether the TIMER is wired
+  # into timers.target; the service definition is always emitted, so
+  # `systemctl --user start handoff-index-sync` works by hand.
+  #
+  # 🔴 OFF, and it must stay off until a supervised live run has validated the
+  # write path. This is exactly `enableInitiativesSync`'s original posture and for
+  # the same reason: `handoff_index.py` creates a NEW schema object
+  # (`initiatives.handoff_section`, with a GENERATED tsvector column and a GIN
+  # index) in a PROD database, and NOTHING in the test suite can exercise that —
+  # the gate runs in a nix sandbox with no cluster and no Postgres, so the DDL has
+  # been read and never executed. A routine `ship.sh` must not be able to silently
+  # arm an unvalidated prod-write timer. Flip it after a hand-run of
+  # `--dry-run` and then a real `--rebuild --write` has been watched to work.
+  # 🔴 `--write` IS PART OF THAT INSTRUCTION NOW, not a detail: dry-run is the
+  # module's DEFAULT, so a validation run of bare `--rebuild` would derive,
+  # report, write NOTHING and exit 0 — and be read as the supervised live run
+  # this switch is waiting for.
+  # 🔴 AND THE `--dry-run` HALF IS ONLY A PRE-FLIGHT SINCE IT LEARNED TO FAIL.
+  # It used to skip the refusal guard entirely: MEASURED, `--repo /nope
+  # --rebuild` exited 0 with no "REFUS" text while the identical argv plus
+  # `--write` exited 4 — the documented pre-flight passed for a config the real
+  # run refuses, which is the shape `claude/RULES.md` calls a harness that cannot
+  # go red. It now evaluates the collision and refusal gates in BOTH modes and
+  # returns the same exit code, so a green dry-run is evidence about the run that
+  # follows it. Read the exit code, not just the report.
+  # 🔴 AND IT NOW PRINTS THE DELETE SCOPE — the one thing a pre-flight for a
+  # DESTRUCTIVE command has to show, and the one thing it could not. The scope
+  # was computed only inside the `--write` branch (it needed `store.repos()`), so
+  # `--dry-run` was structurally incapable of reaching it. With the
+  # disappeared-from-config collection moved behind an explicit `--prune`, a
+  # default rebuild's scope is exactly the MEASURED labels — a fact about the
+  # derivation alone — so dry-run prints it under `## rebuild delete scope`.
+  # ⚠ THE REMAINING BLIND SPOT, STATED RATHER THAN PAPERED OVER: under `--prune`
+  # the scope also covers stored labels this config does not name, and that set
+  # exists only in the table. A `--dry-run --prune` says so in those words. This
+  # unit never passes `--prune`, so the scope it prints IS complete.
+  # 🔴 THE PLAN IS PRINTED ONLY AFTER EVERY GATE HAS PASSED, in BOTH modes — so a
+  # REFUSING dry-run shows the refusal and NO `## rebuild delete scope` block.
+  # That is the fix, not a regression: the block's sentences describe what the run
+  # WILL DO, and above the gate they were statements about a run that never
+  # happened (measured: `--rebuild --prune --write` with one handle unset printed
+  # "the full bound scope is printed with the row count below" at rc 4, with the
+  # store never opened). Absence of the block on a red run is therefore expected;
+  # the exit code is still what you read.
+  enableHandoffIndexSync = false;
   # Drift-deadman master switch (scripts/drift-check.sh) — gates ONLY whether the
   # timer is wired into timers.target. The SERVICE definition is always emitted, so
   # `systemctl --user start drift-check` works by hand on either host regardless.
@@ -280,7 +325,7 @@ in
           # `test_live_existing_resolutions_not_made_ambiguous` is what tells
           # you, and it is not optional to read.
           { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
-          { trigger = ":acq"; replace = "ask clarifying questions"; label = "ask clarifying questions and recommend improvements and anything useful to include"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
+          { trigger = ":acq"; replace = "ask clarifying questions and recommend improvements and anything useful to include"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this arc? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
@@ -538,7 +583,38 @@ in
       # `notify-send -a notify-failure`. That is ALL unit-failure toasts, not an
       # opt-in subset — justified by the measured firing rate (7 activations in
       # ~6 months of laptop journal, 1 in 9 days of workbench journal), which is
-      # far too low to make DND feel broken. Deliberately NOT keyed on
+      # far too low to make DND feel broken.
+      #
+      # 🔴 THAT RATE IS A MEASUREMENT WITH A DATE, IT IS CURRENTLY BREACHED BY
+      # ~32×, AND THIS IS THE ONE PLACE THE ARITHMETIC IS STATED. Measured from
+      # `journalctl --user -u drift-check.service`, 2026-08-25..2026-09-03:
+      #   32 unit failures in 9 days — every one of them through THIS rule —
+      #   against a justification of ~1 firing in 9 days. That is 32×, not the
+      #   "three orders of magnitude" an earlier wording claimed at three
+      #   different sites; 4/day against 1-per-9-days is 36× (~1.6 orders), and
+      #   no restatement of it was ever right. Verdicts in that window:
+      #   rc 10 ×13, rc 17 ×11, rc 24 ×5, rc 12 ×2, rc 8 ×1.
+      # Do not restate this number elsewhere — point here. It was wrong at every
+      # copy, in both directions, and a figure nobody can locate is a figure
+      # nobody re-measures.
+      #
+      # 🔴 AND THE BREACH IS NOT CLOSED. The rc-24 arm (see the drift-check block
+      # below) was the STRUCTURALLY PERMANENT contributor — the one finding that
+      # could never be repaired because nobody intended to repair it — and it is
+      # fixed. It was not the only one: rc 24 was the verdict on only 5 of those
+      # 32 runs, all inside a single 24-hour span, and on all 5 at least one other
+      # DRIFT finding was co-present (`local main is BEHIND` on 5 of 5, `BUILT
+      # SOURCE homelab-talos/containers/clawgate is NOT current` on 4 of 5).
+      # Removing rc 24 lowers those runs to rc 17 or rc 10 — still non-zero, still
+      # OnFailure, still a toast through this rule, still ~4×/day. 🔴 A reader who
+      # stops here concludes the breach was closed and stops looking, which is the
+      # exact "learns to ignore the one alert that must keep its meaning" outcome
+      # this rule's scope argument exists to prevent. rc 17 and rc 10 on this
+      # fleet are a separate, still-open job.
+      #
+      # Anything wired to OnFailure=notify-failure@ inherits this bypass, so any
+      # unit that can fail on a STANDING condition breaches it again.
+      # Deliberately NOT keyed on
       # `urgency = critical`: other tools send critical toasts, and those must
       # still respect DND.
       zz_notify_failure_bypass = {
@@ -2794,6 +2870,153 @@ in
     };
   };
 
+  # ── HANDOFF-DOC SECTION INDEX (scripts/lib/handoff_index.py) ─────────────────
+  # Derives a SECTION-grained full-text index of the handoff corpus into
+  # `initiatives.handoff_section` (re-measured 2026-09-01: devrc 94 docs / 968
+  # sections off origin/main, homelab-talos 54 / 512 off origin/trunk), so `/resume` and
+  # subagents can query what past sessions ALREADY wrote down instead of
+  # re-deriving it. Sibling of initiatives-sync: same database, same schema, same
+  # MailDB connection path (kubectl port-forward + psycopg2 + DSN-from-secret).
+  #
+  # 🔴 THE CORPUS IS READ FROM GIT REFS, NOT THE WORKING TREE. This box carries
+  # many worktrees per repo; a working-tree scan would index mid-edit branches, the same doc
+  # N times, and stale orphan copies, and two runs an hour apart would disagree
+  # for reasons unrelated to what anyone wrote. Each repo's mainline is DERIVED
+  # via scripts/lib/git_mainline.py — never hardcoded to main/trunk. (The measured
+  # worktree count lives in handoff_index.py's docstring and NOWHERE ELSE: it was
+  # carried in three places and two of them disagreed with the third inside one
+  # PR. Nothing pins it, so a copy is a claim that rots. Do not re-state it here.)
+  #
+  # 🔴 `--rebuild` DELETES, AND THAT IS SAFE ONLY BECAUSE OF WHAT GUARDS IT. The
+  # index is DERIVED and DISPOSABLE and git is the system of record — but "a
+  # re-run can rebuild it" is a claim about a run that MEASURED something. The
+  # delete is refused (non-zero, so the OnFailure toast below fires) when ALL
+  # repos come back UNMEASURED or the derivation is empty, and it runs in the
+  # SAME transaction as the inserts: it used to commit on its own, so any
+  # exception in the row loop left the table empty AND committed. A full rebuild
+  # each pass is also what keeps a SHRUNK doc from leaving orphaned high ordinals
+  # behind (see PostgresSectionStore.write).
+  # 🔴 IT IS A SCOPED `DELETE … WHERE repo = ANY(%s)`, NOT A `TRUNCATE`, AND THIS
+  # COMMENT SAID TRUNCATE FOR ONE ROUND AFTER THAT CHANGED. The unqualified
+  # TRUNCATE was a measured data-loss bug: `--repo <one> --rebuild --write`
+  # emptied EVERY repo and reported success. The bound scope is the labels this
+  # run MEASURED and NOTHING else — a rebuild never deletes rows for a repo it
+  # was not told about (see the Environment block below for what that cost when
+  # it did).
+  #
+  # WHY 6h AND NOT 15min: unlike initiative-scan there is no live-state component
+  # here — a handoff doc changes when a session ends, a handful of times a day.
+  # The run is git-only plus one write transaction (no gh, no ClickHouse, no LLM),
+  # so it is cheap; the interval is set by how fast the SOURCE moves, not by cost.
+  systemd.user.services.handoff-index-sync = lib.mkIf serverMode {
+    Unit = {
+      Description = "Handoff index sync — handoff docs (git refs) → homelab Postgres (initiatives.handoff_section)";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Hard ceiling so a half-hung kubectl can't wedge the timer; the cgroup is
+      # killed and the timer re-arms on the next OnUnitActiveSec. 300s is ample —
+      # the measured corpus is 424 `git show` calls plus one write transaction.
+      TimeoutStartSec = 300;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.kubectl pkgs.bash pkgs.coreutils ]}"
+        "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
+        "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        "HOME=%h"
+        # 🔴 The repo set, as EXPLICIT env handles. A user unit does NOT source
+        # .zshenv, so `handoff_index.default_repos()` would find none of the
+        # $DEVRC/$HOMELAB/… handles and index NOTHING — a silent zero that renders
+        # as an empty index, which the search CLI reports as `🔴 BROKEN INDEX`.
+        #
+        # 🔴 IT IS **EVERY** HANDLE, DERIVED FROM nix/agent-handles.nix, AND IT
+        # USED TO BE A HARDCODED TWO. That is defence in depth for a data-loss
+        # bug fixed on the Python side, and the incident is worth having here
+        # because the unit's ENVIRONMENT was the whole of it. This unit set only
+        # $DEVRC and $HOMELAB while a human `--dry-run` on this host measures
+        # FOUR repos (439 docs / ~4,008 sections). The rebuild's delete then
+        # collected any stored label "the config no longer names" — and from
+        # inside this unit, `datapacket-talos` and `civitai` ARE unnamed. Armed,
+        # the timer would have deleted ~2,476 of ~4,008 sections every 6h,
+        # exit 0, printing `## warnings: none` above it, with no PARTIAL INDEX
+        # fired because from here nothing is UNMEASURED. Two independent fixes,
+        # and neither one is a substitute for the other:
+        #   * a rebuild NEVER deletes a repo it was not told about — the
+        #     collection is now an explicit `--prune` this unit does not pass
+        #     (`rebuild_delete_labels`), and orphaned labels are REPORTED;
+        #   * and the unit's config can no longer silently differ from the
+        #     module's, because both sides derive from ONE file. Every handle
+        #     `handoff_index.REPO_ENV_HANDLES` reads is exported here.
+        #     `scripts/tests/test_handoff_index.py::TestTheUnitEnvironmentMatches
+        #     TheHandlesTheIndexerReads` fails if the two sets diverge, so
+        #     "they disagree" is a red gate rather than a silent delete.
+        #     ⚠ THE TWO DIRECTIONS ARE NOT SYMMETRIC, AND THIS COMMENT USED TO
+        #     IMPLY THEY WERE. A handle the module reads and nix does not export
+        #     is a HAZARD (the unit sees a narrower config than a human) and is
+        #     forbidden outright. A handle nix exports and the module does not
+        #     read is a CHOICE — `agent-handles.nix` serves every agent shell,
+        #     not just this indexer, and `CIVITAI_CLI` is a client checkout with
+        #     no handoff corpus of its own. That direction is pinned against an
+        #     ENUMERATED ledger in the test, so a new handle forces a decision
+        #     instead of being silently excluded; it is not left unchecked. The
+        #     sets DID diverge (five declared, four read) while this line claimed
+        #     otherwise and the suite was green.
+        #
+        # 🔴 A HANDLE POINTING AT AN ABSENT CHECKOUT IS NOT FREE, AND THIS
+        # COMMENT USED TO SAY IT WAS. It is reported as UNMEASURED rather than
+        # folded into a clean count — that part is true — but the run then
+        # proceeds as a PARTIAL index: the absent repo contributes nothing, keeps
+        # whatever rows it already had (the rebuild's delete is scoped to what
+        # MEASURED), and every run prints a `🔴 PARTIAL INDEX` warning. So a
+        # handle for a repo this host may not have is SUPPORTED, not free:
+        # expect a standing warning on every run, and do not read an unscoped
+        # query's silence as evidence that repo is silent. That standing warning
+        # is the price of the paragraph above, and it is the right side of the
+        # trade: a loud partial beats a silent 62% delete.
+        # ⚠ The refusal it does NOT trip is worth naming, because the first
+        # version of that guard tripped on exactly this: refusing whenever ANY
+        # repo was unmeasured made a host with one absent checkout fire
+        # `OnFailure=notify-failure@%n.service` 4×/day forever with the index
+        # frozen — a permanently-red gate, which trains everyone to click
+        # through. It now refuses only when ALL repos are unmeasured, when the
+        # measured subset yields zero rows, or when `--prune` (never passed
+        # here) meets an unmeasured repo.
+      ] ++ lib.mapAttrsToList (n: v: "${n}=${v}")
+        (import ./agent-handles.nix { home = "%h"; }).repos;
+      # nix-shell pulls psycopg2 (the _db.py write path). git/kubectl come from
+      # PATH above and are inherited into the nix-shell (it is not --pure).
+      # 🔴 `--write` IS REQUIRED AND IS NOT DECORATION. Dry-run is the module's
+      # DEFAULT: a bare invocation derives and reports and touches no database,
+      # because `main([])` used to open a port-forward to prod and upsert every
+      # row — the shape somebody types to see what it does was a prod write.
+      # Dropping `--write` here turns this unit into a very expensive no-op that
+      # still exits 0, so it is load-bearing in both directions.
+      ExecStart = ''${pkgs.bash}/bin/bash -c "exec nix-shell -p 'python3.withPackages(p:[p.psycopg2])' --run 'python %h/workspace/devrc/scripts/lib/handoff_index.py --rebuild --write'"'';
+      # Re-run the unit when the deriver changes (cf. X-Restart-Triggers above).
+      X-Restart-Triggers = [ "${../scripts/lib/handoff_index.py}" ];
+    };
+  };
+
+  # DOUBLE-GATED: serverMode (workbench-only) AND enableHandoffIndexSync (the
+  # OFF-by-default master switch in the let-block above). With the switch false
+  # the timer unit is not emitted at all, so no deploy can wire an unvalidated
+  # prod-write timer into timers.target — the DDL in this path has been read and
+  # never executed (the gate's nix sandbox has no Postgres).
+  systemd.user.timers.handoff-index-sync = lib.mkIf (serverMode && enableHandoffIndexSync) {
+    Unit = {
+      Description = "Periodic timer for the handoff-doc section index";
+    };
+    Timer = {
+      OnStartupSec = "10min";
+      OnUnitActiveSec = "6h";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   # ── PASSIVE DRIFT DEADMAN (scripts/drift-check.sh) ───────────────────────────
   # The gap this closes: `scripts/ship.sh` converges both hosts correctly, and a
   # host it cannot fast-forward is SKIPPED and left as found (rc=8). But NOTHING
@@ -2880,6 +3103,53 @@ in
   # SuccessExitStatus (which `test_only_16_is_excused_from_failing_the_unit`
   # pins to exactly one code).
   #
+  # 🔴 rc 24 AND rc 25 DO TOAST, AND rc 24 IS THE THIRD WAY INTO THE SAME
+  # HAZARD — reached, this time, by a finding that was TRUE. This ledger did not
+  # list rc 24 when it landed, and that omission is what let the following
+  # happen. MEASURED 2026-09-02 (`Result=exit-code`, `ExecMainStatus=24`): the
+  # merge gate on innovation-upstream/devrc is off — DELIBERATELY, until the
+  # Tekton capacity issue is addressed, which a different session owns — and the
+  # arm reported it as drift on every run that reached it. A true finding about a
+  # state nobody intends to change is a permanently-red gate exactly like a false
+  # one. The breach arithmetic against the DND-bypass justification is stated
+  # ONCE, in the `zz_notify_failure_bypass` block above; do not restate it here.
+  #
+  # ⚠ AND FIXING THIS DOES NOT STOP THE TOASTS ON THIS HOST. rc 24 was the
+  # verdict on only 5 of the 32 failures in that window, and every one of those 5
+  # had another DRIFT finding co-present, so they now land on rc 17 or rc 10 —
+  # still non-zero, still OnFailure. What is closed is the contributor that could
+  # never be repaired, not the rate. See the block above.
+  #
+  # 🔴 THE FIX IS NOT SuccessExitStatus, AND THAT IS WHY THIS PIN STILL READS 16
+  # ALONE. Excusing rc 24 would silence the only thing that catches a BOTCHED
+  # BREAK-GLASS RESTORE — the 2026-08-29 shape where DELETE opened the window,
+  # the restore trap RAN, and PATCH could not close it. So the SCRIPT changed
+  # instead: `bp_declared_off_reason()` in drift-check.sh declares the expected
+  # state per repo, in reviewable source no environment can flip (the SUBJECT can
+  # still be redirected with DRIFT_PROTECT_SLUG — but the run prints the slug it
+  # asked about, so that silence names a repo the operator never chose; see the
+  # script's header), and rc 24
+  # now fires on DISAGREEMENT — declared-off/live-off is reported plainly and
+  # sets no code, while declared-on/live-off is the alarm, unchanged. A PARTIAL
+  # restore (required checks back, enforce_admins still false) is rc 25, not
+  # agreement: the checks existing again is evidence the declaration is stale,
+  # and that is the exact state a partial PUT produces. rc 25 is
+  # the mirror: declared OFF, live ON, i.e. the declaration has gone stale and
+  # rc 24 is DISARMED by it. Both are real divergences with real fixes (restore
+  # the protection; delete the declaration), so both must reach OnFailure, and
+  # the excuse list stays at exactly one code. rc 25 has no escalation ladder on
+  # purpose — its repair is a one-line edit by whoever restored the protection,
+  # so unlike the LADDER codes rc 13/18/23 it is closable the moment it is seen.
+  # (rc 13 = DRIFT_UNREACHABLE_ESCALATE, rc 18 = DRIFT_UNMEASURED_ESCALATE and
+  # _FETCH_ESCALATE, rc 23 = DRIFT_NIXDIRT_ESCALATE. An earlier wording named
+  # "rc 13/16/18" here: rc 16 has NO ladder and is the single code on
+  # SuccessExitStatus, so naming it muddled the very paragraph arguing about the
+  # excuse list, and it disagreed with drift-check.sh's own correct list.)
+  # ⚠ The unit's ExecStart is `%h/workspace/devrc/scripts/drift-check.sh` — the
+  # WORKING TREE — so that one-line repair takes effect on a merge + pull and
+  # needs no home-manager switch. The X-Restart-Triggers below only re-run the
+  # unit; they are not what makes the edit live.
+  #
   # 🔴 AND IT DOES NOT MOVE TimeoutStartSec. The budget below is a function of
   # what the script FETCHES; the rc 18 ladder adds no fetch and no ssh — it reads
   # and writes one ~16-byte counter per (host, scope) in $XDG_STATE_HOME, four
@@ -2910,10 +3180,11 @@ in
       # the readers, and the timer runs every 6h — so the DND-bypassing alert
       # would fire 4× a day, forever, on a run where nothing is wrong. The DND
       # bypass is justified in this file by a MEASURED rate of ~1 firing in 9
-      # days; 4/day is three orders of magnitude past that, and it is exactly
-      # the "permanently-red gate trains you to click through the one alert that
-      # must keep its meaning" hazard the unreachable-remote note below already
-      # refuses. The script's own header refuses it for rc 13 for the same
+      # days — see the `zz_notify_failure_bypass` block for that measurement and
+      # the arithmetic against it, which is stated ONCE and nowhere else. This is
+      # exactly the "permanently-red gate trains you to click through the one
+      # alert that must keep its meaning" hazard the unreachable-remote note
+      # below already refuses. The script's own header refuses it for rc 13 for the same
       # reason. Correct about a printed LINE, wrong about an EXIT CODE.
       #
       # NOTHING IS HIDDEN. The script still exits 16, still prints the

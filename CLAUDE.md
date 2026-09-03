@@ -166,8 +166,23 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   `protected: true`. A PR merges with both Tekton checks red, or with none posted at all.
   🔴 **DELIBERATE AND CURRENT — not drift, and not yours to "restore".** The operator turned
   it off because the gate was slowing work down; it stays off until the Tekton capacity
-  issue is addressed, which a different session owns. `drift-check.sh` rc 24 will report an
-  unprotected `main` every run in the meantime: that report is EXPECTED, not a finding.
+  issue is addressed, which a different session owns. 🔴 **That decision is now DECLARED IN
+  CODE, and the declaration is load-bearing.** `bp_declared_off_reason()` in
+  `scripts/drift-check.sh` names this repo with the reason above, so rc 24 fires on
+  DISAGREEMENT rather than on the bare state: declared-off/live-off is printed plainly and
+  sets no code, while an UNDECLARED unprotected `main` is still the alarm, unchanged. (The
+  measured breach rate against the DND-bypass justification is stated ONCE, in
+  `nix/home.nix`'s `zz_notify_failure_bypass` block — do not restate it; it was wrong at
+  every copy.) 🔴 **When protection is restored, DELETE that arm in the same change** — a
+  declaration left saying "off" over a live gate DISARMS rc 24, which is `drift-check.sh`
+  rc 25 and toasts until it is removed. **A HALF-finished restore fires rc 25 too**, in
+  either spelling: required checks back with `enforce_admins` omitted (the exact shape step 4
+  below warns a partial `PUT` produces), or an ACTIVE ruleset listing a check but keeping
+  `bypass_actors`. A gate existing again is evidence the declaration is stale, so both are
+  findings rather than agreement. The declaration is deliberately not
+  env-overridable and has no ledger path: a run must not be able to excuse itself. ⚠ The
+  SUBJECT can still be redirected (`DRIFT_PROTECT_SLUG`), but the run prints the slug it
+  asked about, so that silence names a repo nobody chose.
   ⚠ **Tekton still RUNS** — both checks post on a PR head, they just do not gate. That is
   exactly why the marker stays `other`: it records that something runs at merge time, never
   that it blocks. There is still no `.github/workflows`.
@@ -224,7 +239,16 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   lags by up to a full interval, and only where the deadman is actually wired in
   (`serverMode && enableDriftDeadman`; the timer runs on the workbench). It catches a
   botched restore after the fact; it does not undo one, and it is not a substitute for
-  step 4.
+  step 4. ⚠ **And while this repo's gate is DECLARED off, rc 24 cannot fire for it.** What
+  narrows that is rc 25, which fires on any OFF state carrying evidence a gate was
+  re-established: a completed restore, a PARTIAL one (checks back, `enforce_admins` dropped —
+  the failure step 4 exists for), and an ACTIVE ruleset that lists a check but keeps bypass
+  actors. 🔴 **The one state still uncovered is a ruleset parked in `evaluate`/`disabled`
+  mode** — not a gate anybody built, and indistinguishable at the endpoint drift-check reads
+  from the org-level evaluate rollout it must not fire on. (Closable, not structural:
+  `ruleset_source_type` is on `/rules/branches/main` and is simply not read yet.) Note a full
+  restore followed by a *later* deletion is NOT uncovered — deleting the declaration is part
+  of restoring protection, and after that it is ordinary rc 24 again.
   ⚠ **`strict` is FALSE on purpose.** `strict: true` would force every PR to be up to date
   with `main` before merging — correct in principle, and unworkable here: `main` moved 11+
   times in one session and each move would re-queue a ~20-minute gate for every open PR.

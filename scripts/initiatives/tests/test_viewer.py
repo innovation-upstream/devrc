@@ -5252,7 +5252,31 @@ def _tv(tid, status="open", title=None, with_url=True):
     """A linked-task view as `tasks.task_view` produces it."""
     return {"id": tid, "title": title or f"task {tid}", "status": status,
             "open": status in ("open", "in_progress", "ready_for_review"),
-            "url": f"http://cg.test:30302/tasks#task-{tid}" if with_url else ""}
+            "url": f"http://cg.test:30302/tasks/{tid}" if with_url else ""}
+
+
+def test_the_linked_task_fixture_matches_what_tasks_task_view_really_produces():
+    """🔴 SEAM GUARD, not a regression test — it is green at the base ref too, and
+    is labelled so rather than counted as deeplink coverage.
+
+    `_tv`'s docstring CLAIMS it is "a linked-task view as `tasks.task_view`
+    produces it", and nothing checked that claim: every URL in this file was a
+    hand-written literal, so the whole linked-task section stayed green through a
+    change to the real constructor. That is the failure mode where each side is
+    verified in isolation and the SEAM is owned by nobody. This pins the
+    RELATIONSHIP — the fixture and the producer must agree field-for-field — so
+    the deeplink assertions below become real coverage instead of a self-portrait."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import tasks  # noqa: PLC0415
+
+    for tid, status in ((7, "open"), (42, "in_progress"), (370, "complete"),
+                        (10593, "ready_for_review")):
+        real = tasks.task_view({"id": tid, "title": f"task {tid}", "status": status},
+                               "http://cg.test:30302")
+        assert real == _tv(tid, status=status), (tid, status)
+    # …and the no-URL variant of the fixture is the producer's own no-base answer
+    assert tasks.task_view({"id": 7, "title": "task 7", "status": "open"})["url"] == \
+        _tv(7, with_url=False)["url"] == ""
 
 
 def test_build_model_attaches_linked_tasks_by_exact_slug():
@@ -5477,7 +5501,7 @@ def test_render_html_ships_the_linked_task_css_and_guard_css():
     assert ".linked-task .lt-status{" in html and ".linked-task.open .lt-status{" in html
     assert ".dispatch-btn.guarded{" in html and ".dispatch-btn.armed{" in html
     # the data reaches the page through the SAME JSON island as everything else
-    assert '"open_task_count": 1' in html and "tasks#task-1" in html
+    assert '"open_task_count": 1' in html and "tasks/1" in html
 
 
 # --- 🔴 the clawgate read must NOT hold DataProvider._lock ------------------- #

@@ -29,7 +29,7 @@ questions you would otherwise pay for live:
 | field | what it saves you |
 |---|---|
 | `ready.testid` + `ready._comment` | the anchor that means BOOTED — **and the rejected candidates, each with the reason it fails**: a validation message that vanishes once the control unblocks, loading art present in one read and absent in the next, the static `#root` shell that exists before boot and in a deadlocked frame |
-| `clickable` | every selector that recipe may activate. 🔴 Read this as a HAZARD list: the spend path rejects untrusted events, but an ordinary authenticated mutation — post, vote, edit, withdraw — does not, so these are the controls that really act on the operator's account. Here no guard will refuse one for you |
+| `clickable` | every selector that recipe may activate. 🔴 Read this as a HAZARD list: an ordinary authenticated mutation — post, vote, edit, withdraw, report — really does act on the operator's account, and **no guard will refuse one for you**. 🔴 Do NOT justify a click with "the spend path rejects untrusted events" — that mechanism is RETRACTED (see below). The correct reason these are dangerous is simpler and stronger: they are not spend-path controls at all, they are plain authenticated writes, and nothing anywhere refuses them |
 | `states` | the screens known to be reachable, named, in the order that reaches them |
 
 ⚠ The pointer is **cross-repo and gated by nothing** — no check in this repo can
@@ -51,10 +51,34 @@ takes CDP `Input.dispatch*Event` and arrives `trusted:true`. So dropping `--fram
 does not merely miss the element — it upgrades the event's trust, and that is the
 second route to a trusted event, one that spells no `xdotool` anywhere.
 
-**Corollary, and the reason a "broken" money button is usually not broken:** the
-spend path *rejects untrusted events*, so a synthetic in-frame click does nothing
-at all on a billing control. That is the platform working as designed, not a
-defect — do not report it as one, and do not "fix" it by dropping `--frame`.
+**Corollary, and the reason a "broken" money button is usually not broken:** a
+synthetic in-frame click does nothing at all on a billing control. Do not report
+that as a defect, and do not "fix" it by dropping `--frame`.
+
+🔴 **The OBSERVATION above stands; the EXPLANATION this file used to give —
+"the spend path rejects untrusted events" — is RETRACTED. Measured 2026-08-30; do
+not re-derive it.** There is no `isTrusted` / `userActivation` / transient-activation
+check anywhere on the spend path: both identifiers return **zero** matches across
+`<civitai>/src/components/AppBlocks`, `blocks.router.ts` and
+`src/server/services/blocks` — and the positive control is that `isTrusted` DOES
+match elsewhere in `src`, so that zero is a measurement rather than a broken
+search. `blocks.submitWorkflow` is a **`publicProcedure`** taking the block JWT as
+an *input*, not a cookie, so a `curl` from outside any browser submits fine.
+What actually gates spend is **token scopes, `buzzBudget`, the author capability
+and the Buzz caps**.
+
+🔴 **So the CAUSE of the dead in-frame click is NOT established** — only that it is
+not an untrusted-event rejection. The operational rule is unchanged and rests on
+the reproducible observation: keep using `trustedKey` for a real money-path click.
+
+🔴 **Security corollary, now that the mechanism is known: "it came from a browser"
+is NOT a boundary here.** A non-browser client holding a valid scoped token can
+drive this path.
+
+The likely source of the false belief: `openBuzzPurchaseGate.ts` and
+`requestConsentGate.ts` gate on handshake **readiness**, and the SDK bans the
+`allow-top-navigation-by-user-activation` sandbox token — all *about* user
+activation, none an `isTrusted` check, none on the spend path.
 
 ## 🔴 The frame id changes on EVERY load — re-poll `frames` after any nav
 
