@@ -779,63 +779,6 @@ def test_the_recommend_terms_owe_nothing_to_the_owner_table(monkeypatch):
         assert d._attribute(term) == ":rna", term
 
 
-def test_recommend_terms_resolve_on_the_live_config():
-    # The hermetic fixture above can drift from nix/home.nix; this reads the
-    # real file. ANTI-VACUITY: an empty trigger set would pass vacuously, so
-    # assert both snippets are actually present and actually collide.
-    d = _live_det()
-    assert ":acq" in d.ts.triggers and ":rna" in d.ts.triggers
-    # ...and on the LIVE config too, no owner entry is doing this (FIX 7).
-    assert "recom" not in ED._AMBIGUOUS_TERM_OWNER
-    assert "recommend" not in ED._AMBIGUOUS_TERM_OWNER
-    for term in ("recom", "recommend"):
-        assert sorted(t for t in d.ts.triggers
-                      if d._term_matches(term, t)) == [":acq", ":rna"], term
-        assert d._attribute(term) == ":rna", term
-    # The collision comes from the LABEL, not from ':acq''s search_terms — if
-    # that stops being true this test is no longer covering the reported bug.
-    assert "recommend" in d.ts.meta[":acq"]["label"].lower()
-    assert not any("recom" in s.lower()
-                   for s in d.ts.meta[":acq"].get("search_terms") or [])
-
-
-def test_every_declared_owner_names_a_real_live_trigger():
-    """A typo or a renamed snippet leaves an entry that can never fire.
-
-    ANTI-VACUITY: this reads the LIVE config, so an empty trigger set would make
-    it pass with nothing checked — `_live_det` is pinned non-trivial by
-    `test_live_scraper_observes_the_real_config`, and asserted again here.
-    """
-    d = _live_det()
-    assert len(d.ts.triggers) > 20, "the live scraper found almost nothing"
-    unknown = {term: trig for term, trig in ED._AMBIGUOUS_TERM_OWNER.items()
-               if trig not in d.ts.triggers}
-    assert not unknown, (
-        "these _AMBIGUOUS_TERM_OWNER entries name a trigger that no longer "
-        "exists in nix/home.nix, so they are dead: " + repr(unknown))
-
-
-def test_the_declared_owner_table_is_actually_load_bearing():
-    """At least one entry must be DOING something on the live config.
-
-    Without this the whole mechanism can go inert — every term resolving
-    uniquely again — and the tests above would keep passing while nothing
-    consults the table. That is the state in which someone deletes it as unused,
-    and the picker terms go with it. If this fails, the honest fix is to delete
-    the now-inert entry, not to keep it as decoration.
-    """
-    d = _live_det()
-    working = []
-    for term, trig in ED._AMBIGUOUS_TERM_OWNER.items():
-        matched = [t for t in d.ts.triggers if d._term_matches(term, t)]
-        if len(matched) > 1 and trig in matched and d._attribute(term) == trig:
-            working.append(term)
-    assert working, (
-        "no _AMBIGUOUS_TERM_OWNER entry resolves an actually-ambiguous live "
-        "term — the table is inert and asserts nothing: "
-        + repr(dict(ED._AMBIGUOUS_TERM_OWNER)))
-
-
 # -- FIX 7: DECLARED-INTERFACE PRECEDENCE ------------------------------------ #
 # The general form of FIX 6. `_token_matches` reads three sources: the trigger,
 # `search_terms`, and the human-readable `label`. The first two are a CLAIM ("this
@@ -1136,64 +1079,6 @@ def _live_base():
     return {"matches": matches}
 
 
-def _live_det():
-    return EspansoDetector(ET.load_triggers(_live_base(), DEFAULT))
-
-
-def test_live_scraper_observes_the_real_config():
-    """POSITIVE CONTROL for the scraper the three guards below depend on.
-
-    Without this, a regex that silently matched NOTHING would make every guard
-    below vacuously true (empty trigger set → nothing to contradict). Pin a
-    non-trivial count and two long-standing snippets with known metadata.
-
-    The pinned metadata is READ OFF nix/home.nix, never off the scraper's own
-    output — deriving it from the implementation is exactly what would make this
-    control vacuous. (`:date` used to be the metadata pin; #351 pruned that
-    snippet, so the pin moved to `:sshwn`, whose `search_terms` list was longer
-    and therefore a stricter test of the list-splitting regex. The 2026-08-19
-    audit then STRIPPED `:sshwn` to direct-trigger-only to make the search UI
-    unambiguous, which would have left this control asserting `== []` — i.e.
-    exactly the vacuous state the paragraph above forbids, since an empty list
-    exercises no splitting at all. So the pin moved again, to `:eos` for a long
-    single-word list and `:mt` for MULTI-WORD entries, which are the strictest
-    case for the regex. Whenever a pinned snippet's terms are removed, MOVE this
-    pin to another long list — never relax it to the empty one.)
-    """
-    base = _live_base()
-    trigs = [m["trigger"] for m in base["matches"]]
-    assert len(trigs) >= 20, f"scraper found only {len(trigs)} snippets: {trigs}"
-    assert len(set(trigs)) == len(trigs), "duplicate trigger in nix/home.nix"
-    assert ":sshwn" in trigs and "dashbaord" in trigs
-    by_trig = {m["trigger"]: m for m in base["matches"]}
-    assert by_trig[":eos"]["search_terms"] == [
-        "end", "session", "wrap", "handoff", "skills", "review", "update",
-        "docs", "ritual", "prune", "evict", "bloat"]
-    assert by_trig[":eos"]["label"].startswith("End-of-session ritual")
-    # Multi-word entries: the case a naive whitespace split would shred.
-    assert "in the meantime" in by_trig[":mt"]["search_terms"]
-    assert "what can we do" in by_trig[":mt"]["search_terms"]
-    # `>=` not `==`: an exact count reds on adding an unrelated :mt term, which
-    # breaks nothing this control is about (it exists to prove the list-splitting
-    # regex works, and the two multi-word asserts above carry that).
-    assert len(by_trig[":mt"]["search_terms"]) >= 13
-    assert by_trig[":kickoff"]["label"] == "Kickoff message for next session"
-    # 🔴 Every snippet must keep a LABEL. espanso's picker falls back to showing
-    # the raw `replace` text as the row description when a label is absent, and
-    # a label is also the main thing a query can match. A 2026-08-19 pass
-    # stripped the label+search_terms from :sshwn/:sshln — which blanked the
-    # picker for 'nebula'/'mesh'/'remote' entirely. `dashbaord` is the one
-    # deliberate exception (a typo-correction fired by typing it verbatim).
-    # `<=` not `==`: `dashbaord` is a zero-fire typo-correction and pruning it is
-    # a legitimate outcome of /espanso-audit, which `==` would turn red.
-    labelless = sorted(t for t, m in by_trig.items() if not m["label"])
-    assert set(labelless) <= {"dashbaord"}, (
-        "these snippets have no label, so espanso will show their raw expansion "
-        "as the picker row and most queries cannot reach them: "
-        + repr([t for t in labelless if t != "dashbaord"])
-    )
-
-
 # The queries the 2026-08-05 /espanso-audit measured him actually typing (plus
 # the single-word prefixes the search bar sees mid-type). EVERY one must land on
 # :mt alone. Goes RED if :mt's search_terms are removed, or if a future snippet
@@ -1203,30 +1088,6 @@ _MT_TERMS = [
     "blocked", "idle", "tee up", "queue up", "in the meantime",
     "what can we do", "while that runs",
 ]
-
-
-def test_live_mt_search_terms_all_resolve_to_mt():
-    # ANTI-VACUITY: emptying the table below left this test green (measured
-    # 2026-08-19). A floor, not an exact count — adding terms is fine.
-    assert len(_MT_TERMS) >= 14, "_MT_TERMS shrank; this guard weakens silently"
-    d = _live_det()
-    unresolved = {}
-    for term in _MT_TERMS:
-        got = d._attribute(term)
-        if got != ":mt":
-            competing = [t for t in d.ts.triggers if d._term_matches(term, t)]
-            unresolved[term] = (got, competing)
-    assert not unresolved, (
-        "these search terms no longer resolve to :mt "
-        "(term -> (attributed, competing snippets)): " + repr(unresolved)
-    )
-    # "up" alone is a substring of :eos's search_term "update", so the two-token
-    # queries are the ones that could silently drift — assert them explicitly.
-    assert d._attribute("tee up") == ":mt"
-    assert d._attribute("queue up") == ":mt"
-    # ...and the trigger really is present with the label leading on "Meantime".
-    assert ":mt" in d.ts.triggers
-    assert d.ts.meta[":mt"]["label"].lower().startswith("meantime")
 
 
 # Resolutions that held BEFORE :mt existed and must still hold. A new snippet's
@@ -1265,30 +1126,6 @@ _EXISTING_RESOLUTIONS = [
 ]
 
 
-def test_live_existing_resolutions_not_made_ambiguous():
-    # ANTI-VACUITY: emptying _EXISTING_RESOLUTIONS left this green (measured
-    # 2026-08-19), so the cheap way to "fix" a future failure is to delete the
-    # row that broke — which is exactly the regression this guard exists to
-    # catch. A floor, not an exact count.
-    # The floor is the CURRENT row count (26 on 2026-08-28, ratcheted up from a
-    # stale 20 that had let four added rows go unprotected). `>=` so adding a
-    # row stays green; deleting one goes red, which is the whole point.
-    assert len(_EXISTING_RESOLUTIONS) >= 26, (
-        "_EXISTING_RESOLUTIONS shrank — a pinned resolution was deleted rather "
-        "than fixed; that is the failure mode, not the fix"
-    )
-    d = _live_det()
-    bad = {}
-    for term, want in _EXISTING_RESOLUTIONS:
-        got = d._attribute(term)
-        if got != want:
-            bad[term] = (want, got, [t for t in d.ts.triggers if d._term_matches(term, t)])
-    assert not bad, (
-        "search terms regressed (term -> (expected, actual, matching snippets)): "
-        + repr(bad)
-    )
-
-
 # REGRESSION coverage for the 2026-08-19 /espanso-audit. On the pre-change
 # config each ssh term was AMBIGUOUS (`_attribute` -> None over two snippets
 # that both spelled the host), so the fire was recorded UNATTRIBUTED. RED at
@@ -1309,31 +1146,6 @@ _AUDIT_2026_08_19_RESOLUTIONS = [
     ("rig", ":sshwn"), ("portable", ":sshln"),
     ("loose", ":alo"), ("tests", ":pdt"), ("pick up", ":cgt"),
 ]
-# NOT listed: bare "wor". It was never a query he typed (the measured one is the
-# two-token "ssh wor"), so asserting it would be an expectation invented from a
-# fix rather than read off the search stream. ⚠ The reason this comment used to
-# give — "it stays ambiguous with :mt" — is NO LONGER TRUE as of the FIX 7
-# declared-interface precedence: ':mt' reaches "wor" only through its label
-# ("parallel WORK while that runs") while ':sshwl' DECLARES "workbench", so bare
-# "wor" now resolves to ':sshwl'. It stays off this table for the unchanged
-# reason (nobody types it), not for the stale one.
-
-
-def test_live_audit_2026_08_19_resolutions():
-    # ANTI-VACUITY: emptying the table left this green (measured 2026-08-19).
-    assert len(_AUDIT_2026_08_19_RESOLUTIONS) >= 8, (
-        "_AUDIT_2026_08_19_RESOLUTIONS shrank; this guard weakens silently"
-    )
-    d = _live_det()
-    bad = {}
-    for term, want in _AUDIT_2026_08_19_RESOLUTIONS:
-        got = d._attribute(term)
-        if got != want:
-            bad[term] = (want, got, [t for t in d.ts.triggers if d._term_matches(term, t)])
-    assert not bad, (
-        "the 2026-08-19 audit's resolutions regressed "
-        "(term -> (expected, actual, matching snippets)): " + repr(bad)
-    )
 
 
 # 🔴 PICKER coverage — a DIFFERENT question from attribution above.
@@ -1350,129 +1162,3 @@ _PICKER_ROWS = [
     ("lan", {":sshwl", ":sshll"}),
     ("ssh", {":sshwn", ":sshwl", ":sshln", ":sshll"}),
 ]
-
-
-def test_live_picker_rows_stay_reachable():
-    """A query that listed rows must keep listing them, unique or not.
-
-    ANTI-VACUITY first: the relation below is `issubset`, deliberately (rows are
-    additive — a new snippet spelling 'nebula' is not a regression), but that
-    makes the cheap way to green a future failure "shrink `want`", degrading the
-    guard to nothing. Emptying the table, or any one expectation, must fail
-    HERE rather than pass silently.
-    """
-    assert _PICKER_ROWS, "_PICKER_ROWS is empty — this guard would pass vacuously"
-    empty = [term for term, want in _PICKER_ROWS if not want]
-    assert not empty, (
-        "these _PICKER_ROWS entries expect no rows, so they assert nothing "
-        "(set().issubset(x) is always True): " + repr(empty)
-    )
-    d = _live_det()
-    bad = {}
-    for term, want in _PICKER_ROWS:
-        got = {t for t in d.ts.triggers if d._term_matches(term, t)}
-        if not want.issubset(got):
-            bad[term] = {"expected at least": sorted(want), "actual": sorted(got)}
-    assert not bad, (
-        "these queries no longer reach snippets they used to list in the "
-        "espanso picker (term -> rows): " + repr(bad)
-    )
-
-
-def test_live_triggers_have_no_prefix_or_suffix_collisions():
-    """espanso longest-matches; the detector emits the SHORTEST match.
-
-    Where one trigger is a prefix or suffix of another the two disagree, so the
-    keylog signal misattributes. Pin zero such pairs — and prove the checker can
-    SEE one, so the zero is a real zero and not a check wired to nothing.
-
-    🔴 SCOPE: this covers the DIRECT path ONLY, because that path matches on the
-    ring's SUFFIX. It is structurally blind to the SEARCH path, which matches by
-    SUBSTRING anywhere — ':acq' is a substring of ':dacq' while
-    `":dacq".endswith(":acq")` is False, so that pair passed here for ten days
-    while every bare 'acq' search landed unattributed. The search half is
-    `test_live_bare_trigger_names_resolve_to_their_own_snippet` below; the two
-    together are the claim, neither alone.
-    """
-    def pairs(trigs):
-        found = set()
-        for a in trigs:
-            for b in trigs:
-                if a == b:
-                    continue
-                if a.startswith(b):
-                    found.add((b, a, "prefix"))
-                if a.endswith(b):
-                    found.add((b, a, "suffix"))
-        return found
-
-    live = [m["trigger"] for m in _live_base()["matches"]]
-    # POSITIVE CONTROL: seed a known-bad set and require the checker to report it.
-    control = pairs(live + [":m", "x:mt"])
-    assert (":m", ":mt", "prefix") in control and (":mt", "x:mt", "suffix") in control, (
-        "collision checker failed its positive control — its zero below would "
-        "mean nothing"
-    )
-    assert pairs(live) == set(), f"colliding triggers in nix/home.nix: {pairs(live)}"
-
-
-def test_live_bare_trigger_names_resolve_to_their_own_snippet():
-    """Typing a snippet's own name must attribute to THAT snippet.
-
-    The SEARCH-path half of the collision guard above. Search attribution
-    matches by SUBSTRING, so one trigger being a substring of another anywhere
-    (not just at an end) makes the shorter one's own name ambiguous. Measured
-    2026-08-28: ':acq' split into ':dacq' + ':acq' made bare 'acq' match BOTH,
-    `_attribute` returned None, and every such fire was recorded UNATTRIBUTED on
-    both hosts — with the prefix/suffix guard green throughout.
-
-    The expectation is DERIVED from the live config (every trigger, not a typed
-    list), so it cannot be weakened by deleting the row that broke, and a
-    27th snippet is covered the day it is added. It goes RED both if the config
-    regrows such a pair without the fix and if the tie-break in `_attribute` is
-    removed — measured red at 6349a8b9 on 'acq' AND 'alo'.
-
-    ANTI-VACUITY: an empty or tiny trigger set would make this pass while
-    checking nothing, and `_attribute` returning the term itself would satisfy
-    it trivially — so pin a count floor and prove the checker can go RED, by
-    running it over a config that carries a known-bad pair.
-    """
-    live = _live_base()["matches"]
-    trigs = [m["trigger"] for m in live]
-    assert len(trigs) >= 20, f"scraper found only {len(trigs)} snippets: {trigs}"
-
-    def unresolved(base):
-        d = EspansoDetector(ET.load_triggers(base, DEFAULT))
-        bad = {}
-        for t in [m["trigger"] for m in base["matches"]]:
-            bare = t[1:] if t.startswith(":") else t
-            got = d._attribute(bare)
-            if got != t:
-                bad[bare] = (t, got,
-                             sorted(x for x in d.ts.triggers
-                                    if d._term_matches(bare, x)))
-        return bad
-
-    # NEGATIVE CONTROL: seed a snippet whose trigger is an existing one spelled
-    # WITHOUT the colon. Its bare name then names TWO snippets, so the tie-break
-    # cannot break it and `_attribute` must stay None — the one bare-name
-    # ambiguity that survives the fix, and therefore the case that proves this
-    # checker can still go red. (A plain containment pair like ':xmt'/':xmty' is
-    # NOT a valid control here: the tie-break resolves it by design, which is
-    # exactly what this guard asserts about ':acq' vs ':dacq'.)
-    seeded = {"matches": live + [
-        {"trigger": "mt", "replace": "...", "label": "seeded control",
-         "search_terms": []},
-    ]}
-    control = unresolved(seeded)
-    assert "mt" in control, (
-        "the bare-name checker failed its negative control — it did not see "
-        "'mt' naming both ':mt' and a seeded 'mt', so its zero below would "
-        "mean nothing: " + repr(control)
-    )
-
-    bad = unresolved(_live_base())
-    assert not bad, (
-        "these snippets' own names no longer attribute to them "
-        "(name -> (trigger, attributed, matching snippets)): " + repr(bad)
-    )

@@ -351,6 +351,8 @@ class EspansoDetector:
         # six declared `search_terms` — ambiguous and unattributable, reddening
         # `test_live_existing_resolutions_not_made_ambiguous` on `main`. A
         # cosmetic reword must not shadow another snippet's declared route.
+        # 🔴 That guard was REMOVED 2026-09-03 (it re-broke on every snippet
+        # edit); this logic stays, but nothing tests it against the live config.
         #
         # This can only ever SHRINK the candidate set, so it cannot invent a
         # resolution or re-point a term that already resolves uniquely (that
