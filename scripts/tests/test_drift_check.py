@@ -7016,11 +7016,23 @@ def test_every_BP_OFF_KIND_assigned_is_branched_on_in_the_verdict():
     )
 
 
-def test_an_unrecognised_OFF_kind_refuses_to_guess_a_repair(fleet):
-    """The `else` arm of the repair chain is a REFUSAL, not a default. Driven by
-    pointing the arm at a state whose kind the chain does know, then asserting the
-    known repair is what prints — the refusal text must not appear for a kind that
-    IS handled, or the arm would be printing 'I do not know' over a state it does.
+def test_a_KNOWN_off_kind_does_not_take_the_unrecognised_arm(fleet):
+    """⚠ NAMED FOR WHAT IT CHECKS, AND NOT FOR WHAT IT CANNOT.
+
+    The repair chain's `else` arm is a refusal rather than a default — but it is
+    UNREACHABLE from any input, by construction: every value BP_OFF_KIND can hold
+    is branched on, which is exactly what
+    `test_every_BP_OFF_KIND_assigned_is_branched_on_in_the_verdict` asserts as a
+    two-way ledger. No fixture can drive it without mutating the script, so
+    nothing here exercises it, and this test is GREEN AT BASE — an invariant
+    guard, not regression coverage.
+
+    An earlier name ("…refuses_to_guess_a_repair") claimed it covered that arm.
+    It did not, and that is the same defect the audit found in the
+    DRIFT_PROTECT_SLUG test: a name asserting more than the body. What is pinned
+    here is the negative — a kind that IS handled must not print "I do not know"
+    over a state the chain understands. The ledger test is what keeps the `else`
+    arm unreachable; if it ever becomes reachable, that test goes red first.
     """
     rc, out = _protect(fleet, "--no-remote", gh=GATE_IS_LIVE_OFF)
     assert rc == 24, out
