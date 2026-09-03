@@ -42,6 +42,7 @@ actually observed — including the half of the original claim that is FALSE.
 
 from __future__ import annotations
 
+import ast
 import collections
 import hashlib
 import importlib.util
@@ -80,6 +81,7 @@ from testlib.skills_mapping import (  # noqa: E402
     assert_skills_mapping_declared,
 )
 
+import subsystem_read_store as rs  # noqa: E402
 import subsystem_recall as rc  # noqa: E402
 import subsystem_resolver as sr  # noqa: E402
 import subsystem_touch as st  # noqa: E402
@@ -3182,11 +3184,43 @@ class TestCli:
         assert "resolved via claudedocs/handoff-topic.md" in out, out
         assert "### status-bar" in out
 
-    def test_the_default_store_is_the_writers_default(self) -> None:
-        """Asserted on the parser's DEFAULT, not on its help text: the help
-        string does not interpolate it, so a check against the text would pass
-        for any default at all."""
-        assert rc._build_parser().get_default("store") == str(st.DEFAULT_STORE_ROOT)
+    def test_the_default_store_is_the_synced_read_cache_not_the_frozen_mirror(self) -> None:
+        """🔴 PINNED TWO-WAY, and the second half is the one that matters.
+
+        This test used to assert the CLI defaulted to the WRITER's root
+        (`subsystem_touch.DEFAULT_STORE_ROOT`). The Cairn cutover froze that
+        directory — entry files `0444`, nothing refreshes it — and this
+        assertion went on passing, which is precisely how the reader spent a day
+        serving a store that had stopped moving while printing
+        "ALL N entries … none omitted".
+
+        So it pins BOTH directions: the default IS the synced read cache, and it
+        is NOT the frozen mirror. One assertion alone is walkable — a third path
+        would satisfy "not the mirror", and "is the cache" alone would go green
+        again the moment somebody re-pointed the resolver at the mirror.
+
+        Asserted on the parser's DEFAULT, not on its help text: the help string
+        does not interpolate it, so a check against the text would pass for any
+        default at all.
+        """
+        default = rc._build_parser().get_default("store")
+        assert default == str(rs.DEFAULT_CACHE_ROOT)
+        assert default != str(st.DEFAULT_STORE_ROOT)
+
+    def test_the_store_flag_records_that_it_was_passed(self) -> None:
+        """The explicit/default distinction is a PARSED FACT, not a comparison.
+
+        `--store <the cache>` and passing nothing produce identical values, and
+        they must not behave identically — the first is permissive, the second
+        is refused when unstamped. Only the ACT of passing the flag separates
+        them, so that act is what gets recorded.
+        """
+        p = rc._build_parser()
+        assert p.parse_args([]).store_explicit is False
+        assert p.parse_args(["--store", "/x"]).store_explicit is True
+        assert p.parse_args(["--store=/x"]).store_explicit is True
+        # Passing the flag with the default's own value is still EXPLICIT.
+        assert p.parse_args(["--store", str(rs.DEFAULT_CACHE_ROOT)]).store_explicit is True
 
 
 class TestSearchAndPageCli:
@@ -3325,11 +3359,65 @@ class TestSearchAndPageCli:
 
 
 class TestNoRealStoreIsRead:
-    """🔴 No test here may touch `~/.claude/analyze-service-index/`."""
+    """🔴 No test here may touch a REAL store — and since the Cairn cutover
+    there are TWO of them.
+
+    This class guarded `~/.claude/analyze-service-index/` alone, which was the
+    whole hazard while that was the only store a default could land on. The
+    reader's default is now the synced cache at `~/.cache/subsystem-store`, so a
+    guard scoped to the mirror would leave the live cache — same disk, same
+    client-confidential entries — reachable by any test that omits `--store`.
+    Both are named below.
+    """
 
     def test_the_real_store_root_is_outside_this_repo(self) -> None:
         assert ROOT not in st.DEFAULT_STORE_ROOT.parents
         assert not str(st.DEFAULT_STORE_ROOT).startswith(str(ROOT))
+
+    def test_the_real_read_cache_is_outside_this_repo(self) -> None:
+        assert ROOT not in rs.DEFAULT_CACHE_ROOT.parents
+        assert not str(rs.DEFAULT_CACHE_ROOT).startswith(str(ROOT))
+
+    def test_no_rc_main_call_here_can_reach_the_live_read_cache(self) -> None:
+        """🔴 THE GUARD HAD TO WIDEN WHEN THE DEFAULT MOVED.
+
+        A CLI call with an empty argv was the only spelling that could reach the
+        live store while the default was the writer's root and every other test
+        passed `--store`. Now ANY CLI call without `--store` resolves the host's
+        real cache, so the check is per-CALL-SITE rather than one literal: every
+        `main` call in this file must pass `--store`, or sit in a test that has
+        repointed `DEFAULT_CACHE_ROOT` first.
+
+        Matched by AST, not by grep. The sibling guard above holds the same call
+        spelling inside a STRING literal, and a textual scan counted it as a call
+        site — a self-inflicted false positive that would have to be papered over
+        with an exclusion, which is how a guard stops meaning anything. The AST
+        sees a call only where there is a call.
+        """
+        src = Path(__file__).read_text(encoding="utf-8")
+        offenders = []
+        for fn in ast.walk(ast.parse(src)):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not any(
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "main"
+                and isinstance(n.func.value, ast.Name)
+                and n.func.value.id == "rc"
+                for n in ast.walk(fn)
+            ):
+                continue
+            body = ast.get_source_segment(src, fn) or ""
+            if "--store" in body or "DEFAULT_CACHE_ROOT" in body:
+                continue
+            offenders.append(fn.name)
+        assert not offenders, (
+            f"these tests call the CLI with no --store and no repointed cache, so "
+            f"they would read the operator's live store: {offenders}"
+        )
+        # and neither live path ever appears as a literal
+        assert str(rs.DEFAULT_CACHE_ROOT) not in src
 
     def test_every_call_in_this_file_passes_an_explicit_store(self) -> None:
         """The module's own default is never exercised, so a test cannot reach
@@ -3548,7 +3636,14 @@ class TestSkillDocsArePinned:
     because its executor is an LLM."""
 
     RESUME_SENTENCES: list[tuple[str, str]] = [
-        ("scripts/lib/subsystem_recall.py", "the step actually calls this module"),
+        # 🔴 The step's prescribed command became `cairn recall` on 2026-09-02 —
+        # `cairn` syncs the read cache and then runs THIS module against it, so
+        # the step still calls it, one hop away. The path stays pinned because
+        # the module is where every flag, exit code and output shape documented
+        # below actually lives; a step naming only `cairn` would leave a reader
+        # with nowhere to check them.
+        ("scripts/lib/subsystem_recall.py", "the step drives this module, via `cairn`"),
+        ("cairn recall", "the prescribed command — it syncs first, so the read is dateable"),
         (
             "read half",
             "why the step exists — the store had two writers and no reader",

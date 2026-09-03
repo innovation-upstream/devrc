@@ -3,9 +3,9 @@ clawgate-task: 371
 ---
 # Handoff: cairn-phase3 — 2026-08-28
 
-## Run this first — the index, one read-only command
+## Run this first — the index, one command
 ```bash
-python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc
+cairn recall --repo ~/workspace/devrc
 ```
 Terse pointers this doc does not carry, curated by past sessions and outliving it.
 🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current
@@ -48,8 +48,46 @@ history, since both ranks are done.
 
 🔴 **Claim state (carried forward, updated 2026-09-02):** `cairn-phase3-1` is **NOT held**
 (re-verified 2026-09-01). `cairn-phase1-migration` was held for the phase-1 work and was
-**released**. `cairn-phase3-11` was held for the rank-11 work and is **now RELEASED** — the
-ladder closed and both PRs merged.
+**released**. `cairn-phase3-11` was held for the rank-11 work and is **released**.
+`cairn-phase3-16` was held for the rank-16 work and is **now RELEASED** — merged, shipped
+and verified.
+
+---
+
+🔴 **THE DOC'S GOAL IS MET. RANK 16 IS CLOSED — the prescribed READ surface goes through the
+pod.** devrc **#1233**, squash **`9519781f`**, verified by content on `origin/main` (never by
+ancestry — a squash is never an ancestor). Four audit rounds, no 🔴 in any of them.
+
+**What shipped.** A new leaf module `scripts/lib/subsystem_read_store.py` owns
+`DEFAULT_CACHE_ROOT` and `SYNC_STAMP` (moved out of `scripts/cairn`, which now imports them —
+one definition each). The `subsystem_recall` **CLI** defaults to the synced cache, prints the
+`.sync-stamp` **verbatim-but-unparsed** in its header, and **REFUSES** a store carrying no
+stamp with exit **4** (`EXIT_UNSTAMPED_READ_STORE`) naming `cairn sync`. `service_recon`
+degrades only its index section. An explicit `--store` stays permissive — recorded by a custom
+`argparse.Action`, because `--store <the cache>` parses byte-identically to passing nothing.
+
+🔴 **THE REFUSAL IS CLI-ONLY BY DESIGN, AND THAT IS THE LOAD-BEARING CONSTRAINT.** `server.py`
+and `scripts/cairn` call `recall`/`search`/`load_store`/`read_entry`/`_exit_for` as a
+**LIBRARY**, against `/data`, which has **no** `.sync-stamp`. A refusal on a library path takes
+the store down for **every host**. Pinned by a set-equality AST guard asserting the set of
+top-level defs referencing the resolver **equals** `{_build_parser, _with_stamp, main}` — both
+directions. Round 2 found that guard's first version split the file positionally at
+`def _build_parser(` and so **excluded `_exit_for`** (line 3186), which the pod calls on every
+`/recall` and `/search`; a refusal grown there survived. Round 4 re-verified the CLI output is
+**byte-identical** across the round and the pod contract intact.
+
+**The closing condition, executed 2026-09-02 in one session:**
+
+| step | result |
+|---|---|
+| `cairn append --scope devrc --ref cairn` | `revision=98262ec6a03fcfe4` |
+| `cairn recall --repo ~/workspace/devrc` (what deployed `/resume` step 4 prescribes) | exit 0, `cairn: live — fetched … 201 entries`, **29 entries** in `devrc/` |
+| the bullet written seconds earlier | **present** (1 occurrence); positive control string **0** |
+| raw `subsystem_recall.py --repo` | `store: ~/.cache/subsystem-store` + 5 `stamp:` lines |
+| `ship.sh` | both hosts at `9519781f`, **cross-host agreement compared**, both switched |
+| deployed skill | `readlink -f` → a NEW `/nix/store/c0hn5z05…` path prescribing `cairn recall` |
+
+Before: `~/.claude/analyze-service-index`, **26 entries**, `ALL 26 … none omitted`, no stamp.
 
 ---
 
@@ -88,10 +126,31 @@ the call site left the whole suite green — 84/678 passed).
 `~/.config/subsystem-store/env.bak-legacy-2026-08-29` are still on disk on **both** hosts. Dead
 credential (401), so hygiene not exposure.
 
-🔴 **THE DOC'S OWN GOAL IS NOT YET MET, and the gap is a READ path.** "The single datastore
-every host reads **and writes**" — writes are done; **reads are not.** See the open
-investigation below: `subsystem_recall.py --repo`, the command `/resume` step 4 and the top of
-this doc both prescribe, reads a **frozen** local mirror, not the pod. New rank **16**.
+⚠ **The Goal's read half was the last gap and it is now CLOSED (rank 16, above).** This
+paragraph used to say the Goal was not met. It is met: writes go to the pod, and the
+prescribed read now does too.
+
+### 🔴 The defect class this PR kept regenerating — FIVE occurrences, worth not re-paying
+
+Every one was **an assertion satisfied by a constant agreeing with itself**, and every fix was
+narrower than the class it closed, which is how the next one got in:
+
+1. `SYNC_STAMP` — the sweep's own **positive control SURVIVED** 615 tests, because every
+   fixture wrote the stamp *through* `rs.SYNC_STAMP`.
+2. `REMEDY` and 3. `DEFAULT_CACHE_ROOT` — `REMEDY = "cairn resync-the-store"` and a
+   `DEFAULT_CACHE_ROOT` moved to world-writable `/var/tmp` both survived; nothing pinned
+   `Path.home()`, and `cairn` imports the same constant for its **writer** default.
+4. `NOT_READ_PREFIX` — **introduced by the fix for 1–3.** `= "READ"` survived all 42 tests, so
+   `--json` would emit `"store_root": "READ (store-unstamped) — …"`: the field asserting the
+   brief *read* the store it explicitly refused to open.
+5. `Path`/tuple/mixed-case constants — **introduced by the fix for 4.** The `WIRE_CONSTANTS`
+   ledger built to stop the fifth was `isinstance(value, str)`-only, so `DEFAULT_CACHE_ROOT`
+   itself — a `Path` — was invisible to it.
+
+🔴 **The lesson is the FIX WIDTH, not the pins.** The cure was to stop writing one-off pins and
+build a **ledger** whose two-way sweep enumerates module-scope assignments off the AST and fails
+on an unpinned one — then to widen that sweep past its own prescribed hunk when `for … in` and a
+`def` still escaped. **Ask what SHAPE the next instance takes, not what the last one was named.**
 
 ## Open investigations — live diagnosis state
 
@@ -600,7 +659,10 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 15. ✅ **DONE 2026-09-02 — #1218 merged (`e557ed19`) and the base clone re-synced.**
     **Do not re-work.**
     forcing: none
-16. 🔴 **`/resume` READS A FROZEN STORE — this is what stops the doc's Goal being met.** Repo
+16. ✅ **DONE 2026-09-02 — the read path goes through the pod.** #1233 squash `9519781f`, four
+    audit rounds, both hosts switched, closing condition executed end-to-end (see `State now`).
+    Claim released. **Do not re-work.** Superseded text follows for context only:
+    🔴 ~~**`/resume` READS A FROZEN STORE — this is what stops the doc's Goal being met.**~~ Repo
     `devrc`, file `scripts/lib/subsystem_recall.py` (+ the `resume` and `subsystem-index` skills
     and this doc's own header command). Measured 2026-09-01 minutes after two live writes:
     `subsystem_recall.py --repo` reads `~/.claude/analyze-service-index` — **26 entries, mode
@@ -642,10 +704,81 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     measured flake RATE over a named run count post-#1211, and (b) is either reproduced or filed
     as its own item there.
     forcing: gate — these red a required check on PRs whose diff cannot reach them
+20. 🔴 **A THIRD frozen read surface, untouched by #1233.** Repo `devrc`,
+    `scripts/subsystem-audit.py:101` open-codes its own
+    `DEFAULT_STORE_ROOT = ~/.claude/analyze-service-index` and defaults `--store` to it. The
+    `prune-index` skill always passes `--store ~/.cache/subsystem-store` explicitly, so the
+    **prescribed** path is safe — but `claudedocs/handoff-analyze-service-index-backup.md:452`
+    prescribes it **bare**, which now reads the frozen mirror. Deliberately left out of #1233:
+    that tool drives **deletions** via `prune-index`, so repointing its default has its own
+    blast radius and belongs in its own change. **Closing condition:** a merged devrc PR either
+    routing it through `subsystem_read_store.read_store_root()` or refusing an unstamped
+    default, plus the bare prescription in that handoff corrected.
+    forcing: regression — same defect as rank 16, in a tool whose verb is `delete`
+21. **57 historical `claudedocs/handoff-*.md` still prescribe the old reader.** Repo `devrc`.
+    #1233 updated the two cairn docs plus the `/handoff` generator; 57 others keep the old
+    "Run this first" block. ⚠ **This is not obviously worth fixing** — a stale block now exits
+    **4** with a refusal naming `cairn sync`, i.e. it fails loudly with its own remedy instead
+    of lying, and several of those lines quote the command as *evidence about this very
+    defect*, so a blind rewrite would corrupt them. **Closing condition:** a recorded decision
+    that the loud refusal is the permanent answer, **or** a merged PR doing a reviewed (not
+    mechanical) pass. Either closes it; do not leave it open as a vague cleanup.
+    forcing: none
+22. 🔴 **A direct-to-main commit RED-ed `main` and nothing caught it.** Repo `devrc`.
+    `a720d30d` ("espanso", one line, no PR) changed `:acq`'s label so `recom`/`recommend`
+    matched two snippets and resolved to `None`, failing
+    `test_espanso_detect.py::test_live_existing_resolutions_not_made_ambiguous` on **both**
+    tiers. Fixed 2026-09-02 by **#1247** (squash `b9b2493d`) on the operator's ruling *"the gate
+    is overly strict, relax it"* — two `_AMBIGUOUS_TERM_OWNER` entries declaring `:rna` the
+    owner, which is the mechanism the detector already provides; `nix/home.nix` and
+    `_EXISTING_RESOLUTIONS` untouched. ⚠ **The residual is recorded and NOT closed:** the lookup
+    is exact-string, so `rec`, `reco` and `recomm` still resolve to `None`. **The durable item
+    is the detection gap, not the fix:** with branch protection off (a live operator decision),
+    a direct commit can red `main` and the only detector is whoever next runs the gate by hand —
+    here, this session, hours later. **Closing condition:** a recorded decision that manual
+    gating is accepted while protection is off, or a merged PR adding a cheap post-push check.
+    forcing: gate — `main` was red for hours and no mechanism reported it
 
 ## Gotchas / decisions / dead-ends
 
+**From the rank-16 session (2026-09-02) — instrument and process lessons:**
+- 🔴 **`find` IS A SHELL FUNCTION ON THIS HOST, and its `-print0` emits nothing.** Bounding a
+  blast radius with `find … -print0 | xargs -0 grep -l` returned **0 files** — and the
+  **positive control returned 0 too**, which is the only reason it was caught. `command grep`
+  alone is not enough when `find` is *also* shadowed. `command grep -rl <pat> <dir>` with a
+  control that must be non-zero (got 15) is what worked. Generalises past the documented
+  `grep`-honours-`.gitignore` trap: **`type <tool>` before trusting a pipeline's zero.**
+- 🔴 **AN AUDITOR MEASURED "RED AT BASE" AGAINST A MID-PR COMMIT, and I relayed it as fact.**
+  Round 2 declared the matrix wrong and "corrected" 26/29 → 25/30. Both it and I were wrong:
+  it used `c05b2df8`, a commit that already contained this PR's own SKILL.md change. Measured:
+  `analyze-service/SKILL.md` holds `store-unstamped` **0×** at the true base `a6e50641`, 1× at
+  `c05b2df8`, 1× at head (positive control). **The implementer refused the instruction and
+  re-measured — which is what should happen.** A "red at base" claim that does not NAME its
+  base cannot be checked; naming it is now part of the claim.
+- 🔴 **`main` MOVED THREE TIMES mid-ladder** (`a6e50641` → `3d0695c7` → `946a51f0` →
+  `5a82aaa9` → `b9b2493d`). Every merged-tree gate went stale on both axes — head *and* base.
+  **Re-derive the base immediately before the run that will justify the merge**, not at the
+  start of the session.
+- **DISJOINT FILES, MEASURED CLEAR RATHER THAN ASSUMED.** #1219 (`b4fde334`, "one shared store
+  siting") landed mid-ladder touching the same subsystem with **zero** files in common. The
+  merged-tree gate is what cleared it; the file-overlap check would have been a cheaper,
+  different claim.
+- **The ladder's stop was the ATTRIBUTION GATE, not a clean round** — payload/scaffolding went
+  1:2.7 → 1:5.5 → **1:16**, and rounds 3 and 4 returned 4-of-5 then **4-of-4** findings about
+  guards the ladder itself had written. Round 4's fixes touched **no runtime file at all**.
+  Recorded on the PR, because a closure on this gate is otherwise indistinguishable from
+  convergence.
+- ⚠ **An agent session can expire mid-task and leave uncommitted work with no branch.** One did,
+  holding 119 lines across two files and no PR. Nothing was lost, but nothing was saved either.
+  **Resuming it, the first instruction was "commit what you have."**
+
 **Operator rulings this session (all acted on):**
+- 🔴 **Espanso: "the gate is overly strict, relax it."** Acted on via the detector's own
+  `_AMBIGUOUS_TERM_OWNER` declaration, **not** by editing `_EXISTING_RESOLUTIONS` — whose
+  docstring calls deleting the row that broke "exactly the regression this guard exists to
+  catch". The distinction matters: a *declaration* that `:rna` owns the terms is honest
+  (`owner in matched` makes a stale entry go inert), whereas lowering the floor would have been
+  the failure mode wearing the fix's clothes.
 - **PUT does not enforce attribution.** The claim is scoped to POST everywhere it is asserted, with a guard test pinning the limit. PUT is a whole-file replace used for `## Pointers` and the `OPEN:` → `RESOLVED <sha>:` rewrite; per-bullet enforcement would have to diff old against new bullet sets and risks refusing legitimate rewrites.
 - **#371 MAY touch `scripts/lib/subsystem_resolver.py`.** #360's non-goal was #360's. This is what let the `visible_scopes` pushdown into `load_index` happen.
 - **Entry-kind guard is NARROW.** Refuse `KIND_BROKEN_LINK`, `KIND_OTHER`, `KIND_LINK_TO_OTHER`, `KIND_DIRECTORY`, `KIND_LINK_TO_DIR`. **`KIND_LINK_TO_FILE` and regular files stay accepted** — no behaviour change for any legitimate caller. The broad form (mirroring `_ENTRY_ACTIONS` wholesale) was considered and rejected.
@@ -1297,10 +1430,27 @@ bash scripts/subsystem-store-api/verify-byte-identity.sh \
 shred -u /tmp/tok
 # 🔴 kill the port-forward by RESOLVED PID — never let a pattern reach pkill -f.
 
-# ---- rank 16: the read path is still frozen. This is the Goal gap, and it reproduces instantly.
-python3 scripts/lib/subsystem_recall.py --repo ~/workspace/devrc --list | head -3   # store: ~/.claude/…
-cairn recall --scope devrc | head -3                                               # store: ~/.cache/…
-#   the two entry counts DIFFER; the first is the frozen mirror and it says "none omitted".
+# ---- rank 16 is CLOSED. Both readers now resolve the SAME store; they used to differ (26 vs 29).
+python3 scripts/lib/subsystem_recall.py --repo ~/workspace/devrc --list | head -6
+#   expect `store: /home/zach/.cache/subsystem-store` PLUS `stamp:` lines. A `store:` ending in
+#   `.claude/analyze-service-index` means you are on a host that never took #1233.
+cairn recall --repo ~/workspace/devrc | head -3     # same store, fetched live first
+
+# the refusal arm — the half that protects the NEXT store to get frozen. Point the resolver at an
+# unstamped dir and the CLI must exit 4 and render NOTHING (empty stdout, refusal on stderr):
+python3 - <<'PY'
+import pathlib, sys, tempfile
+sys.path.insert(0, "/home/zach/workspace/devrc/scripts/lib")
+import subsystem_read_store as rs
+d = pathlib.Path(tempfile.mkdtemp()); (d / "devrc").mkdir()
+rs.DEFAULT_CACHE_ROOT = d
+import subsystem_recall as rc
+print("EXIT =", rc.main(["--scope", "devrc", "--list"]))       # 4, and stdout EMPTY
+print("LIBRARY still serves it:", rc.recall(str(d), "devrc").status)  # the POD's contract
+PY
+#   MEASURED 2026-09-02: `EXIT = 4`, refusal on stderr, stdout empty — and the library prints
+#   `scope-empty` (an empty scope dir), NOT a refusal. `scope-empty` is the pass here: the point
+#   is that `recall()` ANSWERED. If it ever raises or refuses, the pod is down for every host.
 
 # ---- rank 18: the deadman is red by decision, not by fault ----
 bash scripts/drift-check.sh; echo "rc=$?"     # 24 — expected while protection is off

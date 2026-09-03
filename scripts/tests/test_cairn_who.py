@@ -1025,7 +1025,12 @@ def test_every_STORE_subcommand_reaches_the_network_with_a_POSITIVE_bound(
         raise SystemExit(0)
 
     monkeypatch.setattr(cli, "resolve_state", fake_resolve_state, raising=False)
-    monkeypatch.setattr(cli, "DEFAULT_CACHE", tmp_path / "cache", raising=False)
+    # 🔴 THE SEAM, NOT A MODULE-LOCAL ALIAS — and `raising` is left at its
+    # DEFAULT. This used to patch `cli.DEFAULT_CACHE` with `raising=False`, so
+    # when that alias went away (cairn now calls `read_store_root()`) the line
+    # would have kept "succeeding" by inventing a dead attribute nothing reads.
+    # A monkeypatch that cannot fail is a monkeypatch that cannot be trusted.
+    monkeypatch.setattr(cli._read_store, "DEFAULT_CACHE_ROOT", tmp_path / "cache")
     # `--cache` is a TOP-LEVEL flag, so it goes BEFORE the subcommand — the
     # same namespace-position distinction this round's precedence fix is about.
     args = cli.build_parser().parse_args(["--cache", str(tmp_path / "c")] + argv)

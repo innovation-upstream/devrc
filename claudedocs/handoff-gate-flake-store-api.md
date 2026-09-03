@@ -16,48 +16,37 @@ removing the tests' dependence on disk latency rather than by tuning bounds. Dis
 from `handoff-ci-speedup.md`, which is about gate SPEED and is owned elsewhere.
 
 ## State now
-🔴 **`devrc#1219` MERGED — squash `b4fde334`, 2026-09-02T16:48:50Z, by `ZacxDev` — and it merged
-WITHOUT the round-6 delta audit that rank 5 existed to run.** The previous version of this doc
-described `#1219` as OPEN because the doc's own PR (`#1231`) merged **17 minutes later**, at
-17:05:55Z. The doc was born stale; a session resuming on it was handed a completed item.
+🔴 **THE AUDIT LADDER IS CLOSED — by decision, not by a clean round.** `#1219` and its
+successor `#1239` are both MERGED. The ladder ran **8 rounds on `#1219` + 2 on `#1239`**;
+every round but the last produced findings, and the last was ended deliberately because the
+findings had converged on prose accuracy inside a test guard while the effort's actual
+verifier (rank 1) had still never been run.
 
-- devrc `main` @ `220e7893`. Base clone was 2 behind and has been fast-forwarded (no collision:
-  the 2 incoming commits touch none of the 5 dirty paths). ⚠ Another session's dirty
-  `nix/programs/alacritty/default.nix`, `nix/system/apply-tmp-churn-retention.sh` and three
-  untracked `diagnose-*`/`output.txt` files are still in the shared checkout — untouched.
-- Claim held: `gate-flake-store-api-5` (`claim-work --release gate-flake-store-api-5` when done).
+- devrc `main` @ `65f7325b`. Claim `gate-flake-store-api-5` **RELEASED**.
+- `#1219` → squash `b4fde334`. `#1234` (doc) → `3d0695c7`. `#1239` → squash **`65f7325b`**.
+- Content-verified on `origin/main`: the gap guard
+  `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted` is present; the three dead
+  `PEAK_STORE_*` globals are gone.
 
-**What rank 5 asked for, against what happened:**
+**What the last three rounds actually did:**
+- **round 6 delta audit** (owed before the merge, run after it): 7 findings, 4 🔴 — the
+  worst being `_LARGEST_STORE_BYTES` pinned with **zero headroom** against a file-wide
+  write-call census that moved 6 times in 19 commits, plus a nested-loop shape that
+  under-reported 1,200 entries as 443 (2.7×). Together: the gate goes red on an unrelated
+  commit, someone bumps the constant to unblock, and the ENOSPC guard silently dies.
+- **round 7** (`#1239`): stopped parsing source and made `_check_store_budget` **walk the
+  real store directory** at every `store_root` teardown. F2/F3/F4/F9 ceased to exist rather
+  than being patched. Site count 20 → 33 with no site added.
+- **round 8**: its own round-1 audit returned 8 findings (2 🔴); 7 fixed, 1 **disclosed**.
 
-| step | status |
-|---|---|
-| post the round-6 claims block | ❌ never posted — **now posted late**, `#1219` comment `5513658674` |
-| audit the delta `1eafc40c..734cb0bc` | ⏳ **IN FLIGHT** — dispatched this session, worktree-isolated, report-only |
-| re-run both gate tiers on the merged tree | ✅ satisfied post-merge by Tekton's `main` pipeline |
-| merge | ✅ done |
-
-🔴 **THE MERGED TREE IS GREEN ON BOTH REQUIRED TIERS — measured on the merge commit itself,
-not on the branch.** `b4fde334`: `tekton/devrc-main-pytests collected=20491 passed=20488
-skipped=3 failed=0` (floor 18404); `tekton/devrc-main-nodetests tests=1449 pass=1449 fail=0`
-(floor 1367). Identical on the current head `220e7893`. This is *stronger* than the branch-green
-the doc worried about — `strict:false` meant the branch check never covered the merged tree — so
-the outstanding item is **an unclosed audit ladder, not a known-broken `main`.**
-
-🔴 **The branch head IS the live content — verified by blob OID, not assumed.** All five files
-are byte-identical between `734cb0bc` (branch, a MERGE commit) and `b4fde334` (squash on main):
-`store_siting.py` `1d968d51`, `test_store_siting_ledger.py` `abad1584`,
-`test_subsystem_store_api.py` `673a70be`, `test_cairn_write.py` `8153a785`,
-`test_cairn_cli.py` `f9c932aa`. So auditing the branch range audits what is deployed.
-
-**Round-6 delta, correctly sized.** `734cb0bc` is a merge commit (parents `1eafc40c` and
-`a6e50641`), so the naive `git diff 1eafc40c..734cb0bc` reads 30 files / +7267 — almost all of it
-main flowing in, authored by no round. The round-6 **authored** delta is ~186 lines:
-`store_siting.py` +28, `test_store_siting_ledger.py` +158, plus a slice of
-`test_subsystem_store_api.py` that must be separated from main's own heavy movement of that file.
-
-**No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for this
-session. An unknown session id answers `200` with an empty array, so that cannot distinguish
-"touched no task" from "wrong id". No `clawgate-task:` field written; this is not a clean bill.
+🔴 **GATE EVIDENCE, AT THE SCOPE IT WAS MEASURED — three tiers, base named.**
+Merged tree `eaf2c0ca` (= `5a3d7fe7` + `origin/main` `146770ef`), derivations built ONE AT
+A TIME, backgrounded, redirected, never piped:
+- `nix build …#pytests` (sandbox, the gated tier): `RESULT: PASS (exit=0)`,
+  `collected=20504 passed=20501 skipped=3 failed=0`, floor 18404, no timeout panic
+- `nix build …#nodetests`: `RESULT: PASS (exit=0)`, `tests=1449 pass=1449 fail=0`, floor 1367
+- `scripts/gate.sh --tier both` (dev-host): `GATE: RESULT=PASS exit=0`, both legs' exit
+  codes agreeing with the runners' own `RESULT:` lines
 
 ## Open investigations — live diagnosis state
 
@@ -198,43 +187,73 @@ Not a bug — a measurement that would mislead if run as written.
 - **Next probe:** re-run the date comparison above; when most heads postdate `b4fde334`, run the
   probe from the doc's earlier block and **record the new baseline date beside the count**.
 
-## Next steps (ranked)
-🔴 Numbering is STABLE — `claim-work --slug-for <this doc> <rank>` derives from it. Rank 5 is
-CLAIMED (`gate-flake-store-api-5`) and IN FLIGHT.
+### 🔴 `main` IS RED, and it is NOT this effort's doing — espanso `:acq` shadows `:rna`
+- **Symptom + exact repro:** `scripts/collector/keylog/tests/test_espanso_detect.py:929`,
+  `test_live_existing_resolutions_not_made_ambiguous`, fails on **plain `origin/main`**:
+  ```bash
+  git -C $DEVRC worktree add --detach /tmp/ctl origin/main
+  nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+    /tmp/ctl/scripts/collector/keylog/tests -q -p no:cacheprovider   # 1 failed, 100 passed
+  ```
+- **Observed (with values):** `AssertionError: search terms regressed (term -> (expected,
+  actual, matching snippets)): {'recom': (':rna', None, [':acq', ':rna']), 'recommend':
+  (':rna', None, [':acq', ':rna'])}`. A new `:acq` snippet's search terms collide with
+  `:rna`, so both `recom` and `recommend` now resolve to **nothing** instead of `:rna`.
+  Introduced by `a720d30d` (`espanso`) touching `nix/home.nix` — a bare commit straight to
+  `main`, no PR.
+- 🔴 **This is a REAL user-facing regression, not a test being fussy.** The espanso audit
+  established Zach fires ~100% via Ctrl+Space SEARCH, so `search_terms` ARE the interface:
+  typing "recommend" used to reach `:rna` and now reaches an ambiguous set.
+- **Confirmed three independent ways:** the merged-tree `gate.sh` run; a control run on
+  plain `origin/main`; and Tekton's own `tekton/devrc-main-pytests` on `5a82aaa9` —
+  `failure: FAILING: test_live_existing_resolutions_not_made_ambiguous`.
+- **Ruled out:** *"`#1239` caused it"* — `#1239` touches only `scripts/testlib/store_siting.py`
+  and `scripts/tests/test_store_siting_ledger.py`, which cannot reach espanso resolution;
+  and the control on plain `main` fails identically. via: measurement
+- **Ruled out:** *"a load flake"* — it fails in 0.22s, deterministically, with a value-bearing
+  assertion naming the colliding snippets. via: measurement
+- **Leading hypothesis:** `:acq`'s `search_terms` need narrowing so they stop matching
+  `recom`/`recommend`, OR `:rna`'s need a disambiguating term. The fix is in `nix/home.nix`,
+  and it belongs to whoever added `:acq`.
+- **Next probe, verbatim:** `git -C $DEVRC show a720d30d -- nix/home.nix` to read the added
+  snippet, then decide which side's `search_terms` move.
 
-1. **Measure whether the flake rate actually dropped** — devrc, no files. 🔴 **Two independent
-   reasons it is still not runnable, and the second is new.** (a) The recorded baseline — 5
-   store-api failures among 14 open PRs, 2026-09-01 — was measured when only **1 of 3** files was
-   sited, so it is not comparable to anything measured now and a flat result would be
-   uninterpretable; a fresh baseline is required, not a comparison to that one. (b) It is no
-   longer "wait for `#1219` to merge" (it merged) but "wait for open PRs to actually carry the
-   fix": only 1 of the 5 newest open PR heads postdates `b4fde334`, and `strict:false` means an
-   older branch does not contain it at all. Re-check the dates before running; record a fresh
-   baseline date beside the count.
+## Next steps (ranked)
+🔴 Numbering is STABLE — `claim-work --slug-for <this doc> <rank>` derives from it.
+**Rank 5 is CLOSED** and is retained, unrenumbered, so live claims keep resolving.
+
+1. **Measure whether the flake rate actually dropped** — devrc, no files. 🔴 **NOW GENUINELY
+   UNBLOCKED for the first time**: `#1211` sited 1 of 3 files, `#1219` sited all three plus
+   `scoped_store`, and `#1239` replaced the whole census. The old baseline (5 store-api
+   failures among 14 open PRs, 2026-09-01) is **not comparable** — it was measured against a
+   partially-sited suite. Record a FRESH baseline with its date, and wait until a substantial
+   fraction of open PR heads postdate `65f7325b` before reading anything into the number.
    forcing: gate — a required check has been failing PRs whose diff cannot reach it.
 2. **Fix the hung-server classifier's path sensitivity** — devrc,
    `scripts/tests/test_subsystem_store_api.py`, `_HUNG_SERVER_RULES` /
-   `_why_the_server_did_not_answer`. Scan frames' SOURCE LINES, not filenames. Reproduction in the
-   doc's earlier Open-investigations block; documented in-file on `main`. **Unblocked and
-   self-contained — the best next item if rank 5's audit comes back clean.**
+   `_why_the_server_did_not_answer`. Scan frames' SOURCE LINES, not filenames. Reproduction in
+   the doc's earlier Open-investigations block. **The best next item — self-contained,
+   unblocked, and it bit three separate agents this session as a briefing caveat.**
    forcing: gate — it makes the gate's own diagnostic lie, and agent worktrees are routinely
-   named after the bug being fixed, which is how it was found.
+   named after the bug being fixed.
 3. **Decide the `#1166` claim-work flake** —
    `test_release_deletes_the_ref_and_the_slug_becomes_claimable_again` failed a docs-only PR.
-   Hits a real git remote, so plausibly the same wall-clock shape, but UNMEASURED. Start by
-   checking whether it failed on other shas.
+   Hits a real git remote; plausibly the same wall-clock shape, UNMEASURED.
    forcing: gate — same required check, different test, red on a docs-only diff.
-4. **Tell the authors of `#1194` and `#1177` their reds are real** — both still OPEN with
-   `ci=pending` as of 2026-09-02T17:24Z. `#1194` needs its script to satisfy the runtime-shebang
-   scanner; `#1177` needs a `claude/skill-tiers.json` entry in the same commit.
+4. **Tell the authors of `#1194` and `#1177` their reds are real** — `#1194` needs its script
+   to satisfy the runtime-shebang scanner; `#1177` needs a `claude/skill-tiers.json` entry in
+   the same commit.
    forcing: none — someone else's PRs; recorded so the misreading is not repeated.
-5. **Close the audit ladder on `#1219`** — IN FLIGHT, claimed as `gate-flake-store-api-5`.
-   The claims block is posted (`#1219` comment `5513658674`); the delta audit over
-   `1eafc40c..734cb0bc` is dispatched and its verdict is not yet in. **A CLEAN verdict ENDS the
-   ladder — do not run a seventh round to confirm it.** Any finding is a fix-forward PR against
-   `main`, never a push to the merged branch. Release the claim when the verdict lands.
-   forcing: gate — unaudited code from an unclosed ladder is live on the branch every PR merges
-   into.
+5. **CLOSED — the store-siting consolidation and its audit ladder.** `#1219` (`b4fde334`) and
+   `#1239` (`65f7325b`) both merged and content-verified; ladder ended by decision after 10
+   rounds. Five residuals are disclosed in-source and listed under Gotchas. Nothing to do.
+   forcing: none — done; retained so the rank numbering stays stable.
+6. **Fix the espanso `:acq`/`:rna` collision — `main` IS RED** — devrc, `nix/home.nix`. Full
+   diagnosis in the Open-investigations block above. Not this effort's change and deliberately
+   not fixed here; it is one snippet's `search_terms`. **Whoever fixes it should run the
+   keylog tests, which are the deterministic check.**
+   forcing: regression — `main` is red on `tekton/devrc-main-pytests` and a real
+   Ctrl+Space search path is broken.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A CHANGE THAT COULD SILENTLY DO NOTHING NEEDS A TEST THAT FAILS WHEN IT DOES
@@ -348,32 +367,72 @@ CLAIMED (`gate-flake-store-api-5`) and IN FLIGHT.
   origin.** `git worktree add -b docs/handoff-gate-flake-r6` failed because that branch was
   `#1231`, already merged. Pick a fresh name rather than reusing or deleting.
 
+- 🔴 **A LADDER CAN END BY DECISION, AND THAT IS NOT THE SAME AS ABANDONING IT.** The stop
+  rule is "rounds continue while findings need fixing", which is a rule about *not stopping
+  early* — it is not a promise that findings converge to zero. Here they converged on *prose
+  accuracy inside a test guard* while rank 1, the effort's actual verifier, had gone unrun
+  across ten rounds. **Ending deliberately, with the residuals disclosed and pinned, is a
+  legitimate terminal state; the illegitimate one is stopping quietly and calling it clean.**
+- 🔴 **THE BEST FIX FOR A CLASS OF PARSING BUGS WAS TO STOP PARSING.** Round 6's ladder kept
+  finding new spellings that walked through a syntactic sweep (two-arg `range`, comprehension,
+  extracted helper, nested loops, `AsyncFor`). Round 7 made the check **walk the real store
+  directory** instead, and four findings ceased to exist rather than being patched. **When
+  round N+1 keeps finding new spellings, the sweep is the bug — change what you measure.**
+- 🔴 **DISCLOSE-AND-PIN BEATS DISCLOSE.** Round 8 could not close the fixture-bound-store gap
+  cheaply (both instances return a tuple the consumer destructures, needing a cross-scope
+  resolver; and the shortcut — file-wide indexing — measured **two accidental catches for
+  four false accusations**). It wrote the residual down AND added
+  `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted`, labelled a **gap guard, not
+  coverage**. Closing the hole now fails the suite and forces the prose to be updated.
+  **A residual in prose rots; a residual as an assertion cannot.**
+- 🔴 **"DISJOINT FILES" WAS NOT SAFETY, AND CHECKING IT PAID OFF TWICE.** `main` moved twice
+  mid-gate. The first move touched `nix/graphical.nix` — disjoint from the PR's two
+  `scripts/` files, yet **nine tests reference `graphical`**, so the re-gate was warranted (it
+  came back identical: an answer, not an assumption). The second move touched `nix/home.nix`
+  and **the re-gate went RED** — inherited from `main`, but only a control run could say so.
+- 🔴 **`main` MOVES FASTER THAN A THREE-TIER GATE COMPLETES, so name the BASE in every claim.**
+  Four commits landed during one gate run. Chasing a fully-current merged-tree gate across all
+  three tiers does not converge. The proportionate answer: re-run the **full dev-host suite**
+  on the current merged tree (cheapest complete coverage) and let the sandbox-tier claim stand
+  at its own named base — then say both scopes separately. "The gate passed" is true of one
+  run, one tier, one base, and reads as a property of the change.
+- 🔴 **A MONITOR CAN OUTLIVE ITS SUBJECT AND REPORT A FALSE TIMEOUT.** A watcher polling an
+  agent's task-output file for an RC marker printed `GAVE UP: still running after ~57min` for
+  builds that had **already finished and been reported by the agent itself**. Silence and
+  "still running" are indistinguishable; so are "subject ended" and "subject hung". **Read the
+  authoritative artefact, never the watcher's verdict about it.**
+- 🔴 **THE `FAILED`-LINE GREP FOUND NOTHING ON A RUN WITH A REAL FAILURE.** pytest embeds ANSI
+  inside `FAILED` lines, so `grep -E "^FAILED"` matched **zero** on a log containing exactly
+  one failure. `sed -e 's/\x1b\[[0-9;]*[mGKHF]//g'` first, and cross-check against the
+  `TOTAL … failed=N` line — which is what actually located it. A documented trap, hit anyway.
+- ⚠ **Do not append `echo "(empty = none)"` to a grep whose output you have not read.** It
+  printed a confident "(empty = none)" beneath NINE matching files, twice in one session. The
+  label is written before the answer is known, so it asserts the result it hoped for.
+- ⚠ **`main` is protected in NAME ONLY, and this is DELIBERATE** — `required_status_checks`
+  absent, `enforce_admins: false`, while `GET /branches/main` still says `protected: true`.
+  The operator turned it off until a Tekton capacity issue is resolved; `drift-check.sh` rc 24
+  reporting it is EXPECTED, not a finding, and it is **not yours to restore**. Now documented
+  in `CLAUDE.md`. Consequence: **you are the gate** — a green Tekton check is information, not
+  permission.
+
 ## How to verify
 ```bash
-# #1219 is merged, and the merged tree is green on BOTH required tiers — by content, not ancestry
-gh pr view 1219 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
-gh api repos/innovation-upstream/devrc/commits/b4fde334223ad594308295802f1918b07c101493/status \
-  --jq '.state, (.statuses[]|"\(.context) \(.state): \(.description)")'   # both success, real counts
+# both PRs landed, by CONTENT (a squash never makes the head an ancestor)
+git -C $DEVRC show origin/main:scripts/tests/test_store_siting_ledger.py \
+  | command grep -c "test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted"   # >=1
+git -C $DEVRC show origin/main:scripts/testlib/store_siting.py \
+  | command grep -c "^PEAK_STORE_BYTES"                                            # 0
 
-# the branch head is the live content (all five must print SAME)
-for f in scripts/testlib/store_siting.py scripts/tests/test_store_siting_ledger.py \
-         scripts/tests/test_subsystem_store_api.py scripts/tests/test_cairn_write.py \
-         scripts/tests/test_cairn_cli.py; do
-  a=$(git -C $DEVRC rev-parse "734cb0bc:$f"); b=$(git -C $DEVRC rev-parse "b4fde334:$f")
-  [ "$a" = "$b" ] && echo "SAME  $f" || echo "DIFF  $f"
-done
+# the ratchet still discriminates (clear __pycache__ or the run may not be honest)
+nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  $DEVRC/scripts/tests/test_store_siting_ledger.py -q -p no:cacheprovider
 
-# the round-6 claims block exists (audit-dispatch REFUSES a delta brief without it)
-gh pr view 1219 --repo innovation-upstream/devrc --json comments \
-  --jq '[.comments[]|select(.body|contains("audit-claims round=6"))]|length'   # 1
-
-# rank 1 is still not measurable — how many open PR heads postdate the merge
-for p in $(gh pr list --repo innovation-upstream/devrc --state open --json number --jq '.[].number'); do
-  gh api "repos/innovation-upstream/devrc/commits/$(gh pr view $p --repo innovation-upstream/devrc \
-    --json headRefOid --jq .headRefOid)" --jq '.commit.committer.date'
-done | sort | tail -5      # compare against 2026-09-02T16:48:50Z
+# 🔴 main's OWN red — expected until rank 6 is fixed; it is NOT this effort's
+nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  $DEVRC/scripts/collector/keylog/tests -q -p no:cacheprovider    # 1 failed, 100 passed
+gh api repos/innovation-upstream/devrc/commits/$(git -C $DEVRC rev-parse origin/main)/status \
+  --jq '.statuses[]|"\(.context) \(.state): \(.description[0:100])"'
 ```
-🔴 Do NOT run the tests from a worktree whose path contains `fsync`, `flock`, `_EntryLock` or
-`_audit_lock` — the classifier substring-matches rendered tracebacks, which include FILENAMES,
-and the failure is the PATH, not the code (rank 2). Clear `__pycache__` or set
-`PYTHONDONTWRITEBYTECODE=1` before trusting any control.
+🔴 Do NOT run these from a worktree whose path contains `fsync`, `flock`, `_EntryLock` or
+`_audit_lock` — the hung-server classifier substring-matches rendered tracebacks, which
+include FILENAMES, and the failure is the PATH, not the code (rank 2).
