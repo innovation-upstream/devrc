@@ -448,8 +448,13 @@ nix-shell -p 'python3.withPackages(p:[p.minio])' --run \
 systemctl --user list-timers analyze-service-index-backup.timer --all
 systemctl --user show analyze-service-index-backup.service -p Result
 
-# the index store's own verdict
-python3 ~/workspace/devrc/scripts/subsystem-audit.py
+# the index store's own verdict — 🔴 sync FIRST, and note the `stamp:` line it prints.
+# Bare (no --store) now resolves to the cairn-synced cache, never the frozen
+# `~/.claude/analyze-service-index` mirror, and REFUSES with exit 4 if that cache
+# carries no `.sync-stamp`. `;` not `&&`: `cairn sync` exits 4 when the pod is
+# unreachable but a usable cache survives, and the audit of a stamped-but-stale
+# cache is still worth reading — the stamp says how stale.
+cairn sync; python3 ~/workspace/devrc/scripts/subsystem-audit.py
 ```
 
 🔴 **The web-vault paste check is `age-keygen -y <file> | sha256sum | cut -c1-16` →

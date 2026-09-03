@@ -59,10 +59,31 @@ CANNOT be performed — a scope whose owning repo is not derivable, a PR ref tha
 would need the network — it is reported as `NOT CHECKED` with its count, never
 folded into a clean total.
 
+WHICH STORE IT READS
+--------------------
+🔴 THE SYNCED CACHE, NOT THE FROZEN MIRROR. Since the Cairn cutover a hosted pod
+is the canonical datastore, `~/.claude/analyze-service-index` is a FROZEN (`0444`)
+per-host mirror that nothing refreshes, and `cairn sync` maintains a read-through
+cache at `~/.cache/subsystem-store`. This tool defaulted to the mirror, which is
+worse here than in a plain reader: its output DRIVES DELETIONS through the
+`prune-index` skill, and a prune computed against a store that is missing entries
+the canonical one has cuts bullets from the wrong bytes. The default now resolves
+through `scripts/lib/subsystem_read_store.read_store_root()` — the one place that
+path is written down, shared with `subsystem_recall` and `service_recon`.
+
+🔴 AND THE DEFAULT REFUSES A STORE THAT CANNOT DATE ITSELF (exit 4), naming
+`cairn sync`. The discriminator is the `.sync-stamp`, not the path, so it also
+catches a cache nobody has ever synced. An EXPLICIT `--store <path>` stays
+PERMISSIVE — that is an operator naming a directory deliberately, and it is what
+`prune-index` prescribes, what every test fixture is, and what a restored backup
+bundle would be. Same contract, same exit code and the same refusal text as
+`subsystem_recall`'s CLI, because a caller must not need two rules.
+
 Usage:
-  subsystem-audit.py                     audit the whole store
+  subsystem-audit.py                     audit the whole store (the synced cache)
   subsystem-audit.py --scope devrc       one scope
-  subsystem-audit.py --store PATH        a different store root (tests use this)
+  subsystem-audit.py --store PATH        a different store root (tests use this;
+                                         explicit ⇒ no stamp requirement)
   --all           list every entry in the size table (default: over-budget only)
   --detail N      entries to render a per-entry lifecycle block for (default 8)
   --check-prs     ALSO verify PR/issue refs with `gh` (network; off by default,
@@ -80,11 +101,13 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
+import subsystem_read_store as _read_store  # noqa: E402
 from subsystem_resolver import (  # noqa: E402
     AmbiguousRefError,
     NUANCE_HEADING,
@@ -98,7 +121,15 @@ from subsystem_resolver import (  # noqa: E402
     resolve_ref_tiered,
 )
 
-DEFAULT_STORE_ROOT = Path.home() / ".claude" / "analyze-service-index"
+# 🔴 `DEFAULT_STORE_ROOT = Path.home() / ".claude" / "analyze-service-index"` USED
+# TO BE DECLARED HERE. It was the pre-cutover mirror, and after the cutover it was
+# a THIRD open-coded read path that #1233 did not reach. Deleted rather than
+# repointed: a constant here would be a second spelling of
+# `subsystem_read_store.DEFAULT_CACHE_ROOT`, and the whole defect is two copies
+# disagreeing. `main()` calls `_read_store.resolve_read_store(None)`, which reads
+# `read_store_root()` at CALL time — one call that both resolves the directory and
+# reads its stamp, and what lets a test repoint the default without touching this
+# file.
 
 # --- budgets -------------------------------------------------------------------
 # 🔴 THESE TWO LITERALS ARE PINNED, NOT OWNED, HERE.
@@ -832,9 +863,17 @@ def render(
     show_all: bool,
     n_detail: int,
     check_prs: bool,
-    out=sys.stdout,
+    out=None,
     acknowledged: dict[str, str] | None = None,
+    stamp: Sequence[str] | None = None,
 ) -> None:
+    # 🔴 `out=sys.stdout` AS A DEFAULT BOUND THE STREAM AT IMPORT TIME. Whatever
+    # `sys.stdout` was when this module loaded is what every default-`out` call
+    # wrote to, forever — so redirecting `sys.stdout` afterwards (a test's
+    # `capsys`, a caller's `redirect_stdout`) silently did nothing, and the only
+    # reason no test saw it is that every existing one passes `out=` explicitly.
+    # Resolved at CALL time instead.
+    out = sys.stdout if out is None else out
     p = lambda *x: print(*x, file=out)  # noqa: E731
     ents = sorted(a.entries, key=lambda e: -e.size)
     n = len(ents)
@@ -844,6 +883,13 @@ def render(
 
     p(f"# /analyze-service index audit — {n} entries in {len(a.scopes)} scope(s)")
     p(f"  store: {a.store_root}")
+    # 🔴 WHICH SNAPSHOT THESE COUNTS ARE ABOUT. Printed UNPARSED and with no age
+    # computed — `cairn.cache_age` owns that arithmetic and a cheaper second answer
+    # here would be a second answer. Nothing is invented when there is no stamp:
+    # an explicitly-named store legitimately has none, and printing "unknown"
+    # would be a claim where the honest output is silence.
+    for line in _read_store.stamp_header(stamp):
+        p(line)
     p(f"\nbudget  target {TARGET:,} B   hard cap {HARD:,} B   per ENTRY")
     p(f"        {BUDGET_JUSTIFICATION}")
     p(f"        constants owned by {BUDGET_OWNER} — read the numbers there")
@@ -1124,7 +1170,20 @@ def render(
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="audit the /analyze-service index store (READ-ONLY)")
-    ap.add_argument("--store", default=str(DEFAULT_STORE_ROOT), help="store root")
+    # 🔴 `None` IS THE SENTINEL, AND THAT IS THE CONTRACT — NOT A DEFAULT VALUE.
+    # "the operator named a directory" and "the operator named nothing" must not
+    # be the same state, because only the second is refused. Comparing the parsed
+    # value against the cache path would NOT answer it: `--store ~/.cache/
+    # subsystem-store` typed by hand is byte-identical to omitting the flag, and
+    # the two behave differently on purpose. (`subsystem_recall` reaches the same
+    # distinction with a custom argparse Action because other code there reads
+    # `args.store` as a `str`; here `main` is the only reader, so the sentinel is
+    # the whole mechanism. Same contract, cheaper spelling.)
+    ap.add_argument(
+        "--store",
+        default=None,
+        help="store root (default: the cairn-synced read cache; explicit ⇒ permissive)",
+    )
     ap.add_argument("--scope", default=None, help="audit one scope only")
     ap.add_argument("--all", action="store_true", help="list every entry, not just over-budget")
     ap.add_argument("--detail", type=int, default=8, help="rows per findings block")
@@ -1132,7 +1191,32 @@ def main(argv=None) -> int:
                     help="also verify PR/issue refs with `gh` (network)")
     args = ap.parse_args(argv)
 
-    root = Path(os.path.expanduser(args.store))
+    store_explicit = args.store is not None
+    read_store = _read_store.resolve_read_store(
+        os.path.expanduser(args.store) if store_explicit else None
+    )
+    root = read_store.root
+
+    # 🔴 THE REFUSAL SITS BEFORE THE `is_dir()` CHECK, ON PURPOSE — otherwise it
+    # is UNREACHABLE for the case that matters most. A host that has never run
+    # `cairn sync` has no `~/.cache/subsystem-store` at all, so `is_dir()` would
+    # win every time and answer `store root not found` — true, but with no remedy
+    # in it, for the one situation whose remedy is a single command. Ordered this
+    # way the two codes divide cleanly: 4 = "the DEFAULT landed somewhere that
+    # cannot date itself; run `cairn sync`", 2 = "you named a path and it is not
+    # a directory".
+    #
+    # 🔴 ONLY THE DEFAULT RESOLUTION IS REFUSED. An explicit `--store <path>` is
+    # the operator naming a directory — `prune-index`'s prescribed commands, a
+    # `cp -a` backup, a restored bundle, every test fixture — and stays permissive
+    # whether or not that directory is stamped.
+    if not store_explicit and not read_store.stamped:
+        print(_read_store.refusal_message("subsystem-audit", read_store), file=sys.stderr)
+        print("  An audit of a frozen mirror does not merely read stale: it is what "
+              "`prune-index`\n  computes DELETIONS from, so its entry list is the "
+              "wrong denominator for a cut.", file=sys.stderr)
+        return _read_store.EXIT_UNSTAMPED_READ_STORE
+
     if not root.is_dir():
         print(f"subsystem-audit: store root not found: {root}\n"
               "  This is `store-missing`, NOT an empty store — nothing was examined.",
@@ -1143,7 +1227,12 @@ def main(argv=None) -> int:
         print(f"subsystem-audit: no scope matched {args.scope!r} in {root}; "
               "nothing was examined.", file=sys.stderr)
         return 2
-    render(a, args.all, args.detail, args.check_prs)
+    # The stamp travels with the counts. Every number below is a measurement of ONE
+    # snapshot, and §6 of `prune-index` compares an OPEN count from one run against
+    # another — two runs of different snapshots is exactly the comparison that
+    # silently means nothing. Rendered through `stamp_header`, so this prints the
+    # same `stamp:` token `subsystem_recall` does rather than a second f-string.
+    render(a, args.all, args.detail, args.check_prs, stamp=read_store.stamp)
     return 0
 
 
