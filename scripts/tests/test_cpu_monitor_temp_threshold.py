@@ -135,10 +135,19 @@ def test_the_workbench_keeps_the_EARLIER_warning():
 
 
 def test_home_nix_still_binds_isLaptop_to_the_backlight_probe():
-    """INVARIANT GUARD (not regression coverage — it did not fail before this
-    change). The tests above INJECT `isLaptop`; production gets it from the
-    `let` block. If that binding is renamed or removed, `home.nix` breaks while
-    every assertion here stays green over an expression nothing can evaluate."""
+    """Two halves, with two different statuses — stated so neither is
+    over-claimed.
+
+    The first assertion is an INVARIANT GUARD: `isLaptop` was already bound to
+    the backlight probe before this change, so it was green at base. It is here
+    because the tests above INJECT `isLaptop`; a rename in `home.nix` would
+    break production while every assertion in this file stayed green over an
+    expression nothing can evaluate.
+
+    The second is REGRESSION COVERAGE: at base the deployed expression was the
+    bare literal `"CPU_MON_TEMP_THRESHOLD=88"` and did not mention `isLaptop`
+    at all, so it was RED there.
+    """
     src = HOME_NIX.read_text()
     assert re.search(
         r'^\s*isLaptop = builtins\.pathExists "/sys/class/backlight/', src, re.M), (
