@@ -698,24 +698,29 @@ def test_naming_a_trigger_still_beats_the_declared_owner(monkeypatch):
 # matching ':acq' as well as ':rna' and BOTH went to None, turning
 # `test_live_existing_resolutions_not_made_ambiguous` red on `main`.
 #
-# The operator's ruling was to keep the label and relax the gate, so the fix is
-# a DECLARED owner — the same hatch as FIX 5, used for the case it was designed
-# for. The asymmetry that makes ':rna' the honest owner: 'recom' and 'recommend'
-# are two of its six declared `search_terms` and its label is "Recommend next
-# actions", while on ':acq' the word is incidental prose. Neither snippet is
-# NAMED by either term, so `_names_trigger` cannot rescue them.
+# The operator's ruling was to keep the label and relax the gate, so #1247's fix
+# was a DECLARED owner — the same hatch as FIX 5. The asymmetry that made ':rna'
+# the honest owner: 'recom' and 'recommend' are two of its six declared
+# `search_terms` and its label is "Recommend next actions", while on ':acq' the
+# word is incidental prose. Neither snippet is NAMED by either term, so
+# `_names_trigger` cannot rescue them.
+#
+# 🔴 THAT ASYMMETRY IS NOW A RULE, NOT TWO TABLE ROWS — see FIX 7 below. The two
+# entries have been DELETED: with declared-interface precedence in `_attribute`
+# they are unreachable (the declared-narrowed candidate set for these terms is a
+# single snippet, so `_attribute` returns before the owner lookup), and this repo
+# does not keep entries nothing can reach. The tests in this section therefore
+# still pin the RESOLUTION — which is the contract that matters and must not
+# regress — while no longer claiming the table is what produces it.
 #
 # 🔴 WHICH OF THESE ARE REGRESSION COVERAGE, measured at 778dbd2d (the tree the
 # bug is live on) with these tests in place and only the two table entries
 # removed:
-#   RED at base  — test_declared_owner_resolves_the_recommend_terms,
+#   RED at base  — test_precedence_resolves_the_recommend_terms,
 #                  test_recommend_terms_resolve_on_the_live_config
 #   GREEN at base — test_recommend_terms_still_reach_both_picker_rows (an
 #                  INVARIANT GUARD: the picker never consulted the table, so it
-#                  cannot fail on its own) and
-#                  test_declared_owner_cannot_invent_an_rna_resolution (it
-#                  guards `owner in matched`, which FIX 5 already exercised).
-#                  Both were mutation-checked instead — see the PR body.
+#                  cannot fail on its own). Mutation-checked instead.
 RNA_ACQ_BASE = {"matches": [
     {"trigger": ":acq", "replace": "...",
      "label": "ask clarifying questions and recommend improvements and "
@@ -727,10 +732,13 @@ RNA_ACQ_BASE = {"matches": [
 ]}
 
 
-def test_declared_owner_resolves_the_recommend_terms():
-    # RED without the ':rna' entries: both are None, because ':acq''s label
-    # spells "recommend" and 'recom' is a substring of it.
+def test_precedence_resolves_the_recommend_terms():
+    # RED on the pre-precedence detector with the two ':rna' table entries
+    # removed: both are None, because ':acq''s label spells "recommend" and
+    # 'recom' is a substring of it. GREEN here with NO table entry for either.
     d = _det_for(RNA_ACQ_BASE)
+    assert "recom" not in ED._AMBIGUOUS_TERM_OWNER
+    assert "recommend" not in ED._AMBIGUOUS_TERM_OWNER
     assert d._term_matches("recom", ":acq") is True      # the incidental label
     assert d._term_matches("recom", ":rna") is True      # the real interface
     assert d._names_trigger("recom", ":rna") is False    # no outright naming
@@ -749,18 +757,26 @@ def test_recommend_terms_still_reach_both_picker_rows():
             ":acq", ":rna"}, term
 
 
-def test_declared_owner_cannot_invent_an_rna_resolution(monkeypatch):
-    # 🔴 The honesty half, pinned for THESE terms specifically: a declaration
-    # whose owner is not among the matched snippets must go INERT (None), never
-    # return the declared owner. Point both terms at a snippet neither reaches
-    # and the answer must be None, not ':dacq'.
+def test_the_recommend_terms_owe_nothing_to_the_owner_table(monkeypatch):
+    """🔴 THE LOAD-BEARING CONTROL, made permanent.
+
+    #1247 resolved these two terms with `_AMBIGUOUS_TERM_OWNER` entries. FIX 7
+    deleted them, claiming precedence does the work on its own. This proves the
+    claim can never quietly stop being true: point the table at a DIFFERENT
+    snippet for both terms and the answer must still be ':rna'.
+
+    It is not a restatement of the test above — that one runs with an empty
+    table, this one runs with a table actively arguing for the wrong answer, so
+    it fails if precedence is ever moved BELOW the owner lookup rather than
+    above it. (Ordering, not existence, is what it pins.)
+    """
     d = _det_for(RNA_ACQ_BASE)
-    assert ":dacq" not in d.ts.triggers
     for term in ("recom", "recommend"):
-        monkeypatch.setitem(ED._AMBIGUOUS_TERM_OWNER, term, ":dacq")
+        monkeypatch.setitem(ED._AMBIGUOUS_TERM_OWNER, term, ":acq")
     for term in ("recom", "recommend"):
-        assert [t for t in d.ts.triggers if d._term_matches(term, t)] != []
-        assert d._attribute(term) is None, term
+        assert ED._AMBIGUOUS_TERM_OWNER[term] == ":acq"
+        assert ":acq" in [t for t in d.ts.triggers if d._term_matches(term, t)]
+        assert d._attribute(term) == ":rna", term
 
 
 def test_recommend_terms_resolve_on_the_live_config():
@@ -769,6 +785,9 @@ def test_recommend_terms_resolve_on_the_live_config():
     # assert both snippets are actually present and actually collide.
     d = _live_det()
     assert ":acq" in d.ts.triggers and ":rna" in d.ts.triggers
+    # ...and on the LIVE config too, no owner entry is doing this (FIX 7).
+    assert "recom" not in ED._AMBIGUOUS_TERM_OWNER
+    assert "recommend" not in ED._AMBIGUOUS_TERM_OWNER
     for term in ("recom", "recommend"):
         assert sorted(t for t in d.ts.triggers
                       if d._term_matches(term, t)) == [":acq", ":rna"], term
@@ -815,6 +834,248 @@ def test_the_declared_owner_table_is_actually_load_bearing():
         "no _AMBIGUOUS_TERM_OWNER entry resolves an actually-ambiguous live "
         "term — the table is inert and asserts nothing: "
         + repr(dict(ED._AMBIGUOUS_TERM_OWNER)))
+
+
+# -- FIX 7: DECLARED-INTERFACE PRECEDENCE ------------------------------------ #
+# The general form of FIX 6. `_token_matches` reads three sources: the trigger,
+# `search_terms`, and the human-readable `label`. The first two are a CLAIM ("this
+# word means this snippet"); the label is a DESCRIPTION the operator rewords
+# freely. Before this, a reword could silently shadow another snippet's declared
+# route and the only remedy was a hand-written `_AMBIGUOUS_TERM_OWNER` row per
+# collision — one row per false collision, forever. So: on the ambiguous branch,
+# a snippet that reaches the term through its DECLARED interface out-bids one
+# that reaches it only through its label.
+#
+# 🔴 THESE FIXTURES ARE DELIBERATELY NOT THE LIVE CONFIG. FIX 6's live guards
+# already cover the reported incident; these must keep testing the RULE after
+# nix/home.nix changes, so every word below is invented. Every field is pairwise
+# distinct and none equals a constant the assertions name.
+#
+# 🔴 RED/GREEN MATRIX, measured with PYTHONDONTWRITEBYTECODE=1 against base
+# bf5516fc — and measured TWICE, because running these tests unchanged at base
+# mostly raises `AttributeError: _term_matches_declared`, which is API absence,
+# NOT evidence the behaviour was wrong. So each test's BEHAVIOURAL assertion (its
+# `_attribute` / `_term_matches` outcome alone) was also evaluated directly
+# against the base detector. What that measured:
+#
+#   GENUINELY RED at base — the behaviour, not the API, differs:
+#     test_label_only_match_does_not_shadow_a_declared_term      None -> ':wid'
+#     test_precedence_narrows_three_candidates_to_the_declared_one None -> ':wid'
+#     test_precedence_requires_every_token_declared              None -> ':nub'
+#     test_the_recommend_terms_owe_nothing_to_the_owner_table   ':acq' -> ':rna'
+#       (the only one that is red at base as an ordinary pytest failure too —
+#        base returns the owner ':acq' where HEAD returns ':rna')
+#
+#   RED at base ONLY WITH #1247's TWO ENTRIES REMOVED — i.e. red on the tree that
+#   reddened `main`, which is the regression they were written for and the same
+#   framing #1247's own matrix used:
+#     test_precedence_resolves_the_recommend_terms                None -> ':rna'
+#     test_recommend_terms_resolve_on_the_live_config             None -> ':rna'
+#   With base's table intact they are GREEN at base — the entries produced the
+#   same answer. That is the point of deleting them: the answer now comes from
+#   the rule, and these two tests keep the ANSWER pinned either way.
+#
+#   GREEN at base (INVARIANT GUARDS, labelled as such below; they pin behaviour
+#   precedence must NOT change, so by construction they cannot be regression
+#   coverage) — leaves_a_genuine_collision_to_the_owner_table,
+#   is_inert_when_every_match_is_label_only,
+#   never_repoints_a_unique_label_only_match, does_not_reach_the_picker,
+#   naming_a_trigger_outright_survives_precedence. Mutation-checked instead.
+#   test_token_matches_default_still_reads_the_label is an API-CONTRACT guard for
+#   espanso-usage.py's positional caller, not a behaviour claim about either
+#   tree; it can only fail on a signature change.
+
+# One term, 'glimmer', reachable three different ways. Only ':wid' DECLARES it.
+PRECEDENCE_BASE = {"matches": [
+    {"trigger": ":wid", "replace": "...", "label": "Sparkle report",
+     "search_terms": ["glimmer", "sheen"]},
+    {"trigger": ":pfx", "replace": "...",
+     "label": "notes on glimmer as observed downstream",   # incidental PROSE
+     "search_terms": ["downstream", "notes"]},
+]}
+
+
+def test_label_only_match_does_not_shadow_a_declared_term():
+    """🔴 THE REGRESSION TEST. RED at bf5516fc, GREEN here."""
+    d = _det_for(PRECEDENCE_BASE)
+    # Both are genuinely matched — this is the ambiguity that used to be fatal.
+    assert d._term_matches("glimmer", ":wid") is True
+    assert d._term_matches("glimmer", ":pfx") is True
+    # ...and neither is NAMED by the term, so the FIX-5 tie-break cannot rescue
+    # it, and no table entry exists for it. Precedence is the ONLY thing that can
+    # produce an answer here.
+    assert d._names_trigger("glimmer", ":wid") is False
+    assert d._names_trigger("glimmer", ":pfx") is False
+    assert "glimmer" not in ED._AMBIGUOUS_TERM_OWNER
+    # The asymmetry precedence reads.
+    assert d._term_matches_declared("glimmer", ":wid") is True
+    assert d._term_matches_declared("glimmer", ":pfx") is False
+    assert d._attribute("glimmer") == ":wid"
+
+
+def test_precedence_narrows_three_candidates_to_the_declared_one():
+    """A SECOND POINT ON THE DIMENSION — two candidates is the boundary case.
+
+    One measurement is not a general claim: with only two snippets the narrowed
+    set is a singleton whichever way the code slices it. Three matches, TWO of
+    them label-only, is the middle of the range and the case a mutant that
+    narrows by 'drop the last match' would survive.
+    """
+    base = {"matches": [
+        {"trigger": ":wid", "replace": "...", "label": "Sparkle report",
+         "search_terms": ["glimmer", "sheen"]},
+        {"trigger": ":pfx", "replace": "...",
+         "label": "notes on glimmer as observed downstream",
+         "search_terms": ["downstream", "notes"]},
+        {"trigger": ":qzz", "replace": "...",
+         "label": "a glimmer of an idea, filed for later",
+         "search_terms": ["idea", "filed"]},
+    ]}
+    d = _det_for(base)
+    assert sorted(t for t in d.ts.triggers
+                  if d._term_matches("glimmer", t)) == [":pfx", ":qzz", ":wid"]
+    assert [t for t in d.ts.triggers
+            if d._term_matches_declared("glimmer", t)] == [":wid"]
+    assert d._attribute("glimmer") == ":wid"
+
+
+def test_precedence_requires_every_token_declared():
+    """Multi-word: a term is a declared match only if EVERY token is declared.
+
+    RED at bf5516fc. ':vex' declares 'lantern' but reaches 'harbor' only through
+    its label, so it is NOT a declared match for the two-token query, and ':nub'
+    — which declares both — takes it.
+    """
+    base = {"matches": [
+        {"trigger": ":vex", "replace": "...",
+         "label": "harbor lights at dusk",
+         "search_terms": ["lantern", "dusk"]},
+        {"trigger": ":nub", "replace": "...", "label": "Quay inventory",
+         "search_terms": ["harbor", "lantern"]},
+    ]}
+    d = _det_for(base)
+    assert d._term_matches("harbor lantern", ":vex") is True   # label + terms
+    assert d._term_matches("harbor lantern", ":nub") is True
+    assert d._term_matches_declared("harbor lantern", ":vex") is False
+    assert d._term_matches_declared("harbor lantern", ":nub") is True
+    assert d._attribute("harbor lantern") == ":nub"
+    # ...and the single token ':vex' DOES declare stays symmetric, so the
+    # all()-over-tokens really is per-token and not a whole-term shortcut.
+    assert d._term_matches_declared("lantern", ":vex") is True
+
+
+def test_precedence_leaves_a_genuine_collision_to_the_owner_table():
+    """🔴 INVARIANT GUARD (green at base) — precedence must NOT take the table's
+    job. When BOTH snippets declare the term there is nothing to narrow, so the
+    answer stays None unless an owner is declared. This is the 'ask'/'clarify'
+    shape, in fixture form: if precedence ever started picking a winner among
+    two declared snippets, the live owner table would become unreachable and the
+    highest-traffic term in the config would silently re-point.
+    """
+    base = {"matches": [
+        {"trigger": ":vex", "replace": "...", "label": "Harbour lights",
+         "search_terms": ["lantern", "dusk"]},
+        {"trigger": ":nub", "replace": "...", "label": "Quay inventory",
+         "search_terms": ["lantern", "crates"]},
+    ]}
+    d = _det_for(base)
+    assert d._term_matches_declared("lantern", ":vex") is True
+    assert d._term_matches_declared("lantern", ":nub") is True
+    assert d._attribute("lantern") is None
+    # ...and the table still decides it, over the narrowed-to-nothing set.
+    ED._AMBIGUOUS_TERM_OWNER["lantern"] = ":nub"
+    try:
+        assert d._attribute("lantern") == ":nub"
+    finally:
+        del ED._AMBIGUOUS_TERM_OWNER["lantern"]
+
+
+def test_precedence_is_inert_when_every_match_is_label_only():
+    """🔴 INVARIANT GUARD (green at base). With nothing but labels to go on there
+    is no basis to prefer one snippet, so the set is left alone and the answer is
+    still None. A mutant that narrows to the (empty) declared set would return
+    None here too — which is why the owner-table half below is asserted: it
+    proves the candidate set SURVIVED the narrowing step rather than being
+    emptied by it.
+    """
+    base = {"matches": [
+        {"trigger": ":vex", "replace": "...", "label": "a lantern by the door",
+         "search_terms": ["dusk"]},
+        {"trigger": ":nub", "replace": "...", "label": "lantern oil, spare",
+         "search_terms": ["crates"]},
+    ]}
+    d = _det_for(base)
+    assert d._term_matches_declared("lantern", ":vex") is False
+    assert d._term_matches_declared("lantern", ":nub") is False
+    assert d._attribute("lantern") is None
+    ED._AMBIGUOUS_TERM_OWNER["lantern"] = ":vex"
+    try:
+        assert d._attribute("lantern") == ":vex", (
+            "the declared-narrowing step emptied the candidate set, so "
+            "`owner in matched` can no longer find a legitimately-matched owner")
+    finally:
+        del ED._AMBIGUOUS_TERM_OWNER["lantern"]
+
+
+def test_precedence_never_repoints_a_unique_label_only_match():
+    """🔴 INVARIANT GUARD (green at base). `('rig', ':sshwn')` and
+    `('portable', ':sshln')` resolve through their LABEL by design on the live
+    config. Precedence runs only on the ambiguous branch, so a term with exactly
+    one match must be untouched even when that match is label-only.
+    """
+    base = {"matches": [
+        {"trigger": ":vex", "replace": "...", "label": "the lantern room",
+         "search_terms": ["dusk"]},
+        {"trigger": ":nub", "replace": "...", "label": "Quay inventory",
+         "search_terms": ["crates"]},
+    ]}
+    d = _det_for(base)
+    assert [t for t in d.ts.triggers if d._term_matches("lantern", t)] == [":vex"]
+    assert d._term_matches_declared("lantern", ":vex") is False
+    assert d._attribute("lantern") == ":vex"
+
+
+def test_precedence_does_not_reach_the_picker():
+    """🔴 INVARIANT GUARD (green at base). espanso lists EVERY match as a row and
+    the user picks one; narrowing is an ATTRIBUTION concept only. If this shrinks
+    to one row, precedence has become the label edit the operator declined.
+    """
+    d = _det_for(PRECEDENCE_BASE)
+    assert {t for t in d.ts.triggers
+            if d._term_matches("glimmer", t)} == {":wid", ":pfx"}
+
+
+def test_naming_a_trigger_outright_survives_precedence():
+    """Naming implies declaring (`token in trig`), so the FIX-5 tie-break can
+    never be the candidate precedence drops. Pinned rather than argued.
+    """
+    base = {"matches": [
+        {"trigger": ":lantern", "replace": "...", "label": "Quay inventory",
+         "search_terms": ["crates"]},
+        {"trigger": ":xlanterny", "replace": "...", "label": "Dock roster",
+         "search_terms": ["lantern", "roster"]},
+    ]}
+    d = _det_for(base)
+    assert d._term_matches_declared("lantern", ":lantern") is True
+    assert d._term_matches_declared("lantern", ":xlanterny") is True
+    assert d._names_trigger("lantern", ":lantern") is True
+    assert d._attribute("lantern") == ":lantern"
+
+
+def test_token_matches_default_still_reads_the_label():
+    """`_token_matches` is called POSITIONALLY by espanso-usage.py's
+    reachability probe (`det._token_matches(tok, "", meta)`). The new flag is
+    keyword-only WITH a default, so that caller must be unaffected — a
+    three-source match by default, declared-only on request.
+    """
+    meta = {"label": "a lantern by the door", "search_terms": ["dusk"]}
+    assert ED.EspansoDetector._token_matches("lantern", ":vex", meta) is True
+    assert ED.EspansoDetector._token_matches(
+        "lantern", ":vex", meta, use_label=False) is False
+    assert ED.EspansoDetector._token_matches(
+        "dusk", ":vex", meta, use_label=False) is True
+    # The empty-trigger call shape espanso-usage.py actually uses.
+    assert ED.EspansoDetector._token_matches("lantern", "", meta) is True
 
 
 # --------------------------------------------------------------------------- #
@@ -1048,10 +1309,14 @@ _AUDIT_2026_08_19_RESOLUTIONS = [
     ("rig", ":sshwn"), ("portable", ":sshln"),
     ("loose", ":alo"), ("tests", ":pdt"), ("pick up", ":cgt"),
 ]
-# NOT listed: bare "wor". It stays ambiguous with :mt, whose label says
-# "parallel WORK while that runs" — and it was never a query he typed (the
-# measured one is the two-token "ssh wor"). Asserting it would have been an
-# expectation invented from the fix rather than read off the search stream.
+# NOT listed: bare "wor". It was never a query he typed (the measured one is the
+# two-token "ssh wor"), so asserting it would be an expectation invented from a
+# fix rather than read off the search stream. ⚠ The reason this comment used to
+# give — "it stays ambiguous with :mt" — is NO LONGER TRUE as of the FIX 7
+# declared-interface precedence: ':mt' reaches "wor" only through its label
+# ("parallel WORK while that runs") while ':sshwl' DECLARES "workbench", so bare
+# "wor" now resolves to ':sshwl'. It stays off this table for the unchanged
+# reason (nobody types it), not for the stale one.
 
 
 def test_live_audit_2026_08_19_resolutions():
