@@ -367,7 +367,21 @@ def test_notify_navigation_leaves_search_mode_intact():
 # search_term), so a term containing a space could never match ANY snippet — the
 # four :ssh* snippets and :cgf/:subk therefore read as dead when they are not.
 # Fix: tokenize on whitespace and require EVERY token to match by the old rules.
-# These fixtures carry the REAL labels/search_terms from nix/home.nix.
+# 🔴 THESE NO LONGER MIRROR nix/home.nix — CORRECTED 2026-09-03. They were
+# written from the live config and have DRIFTED; they are now synthetic
+# fixtures that pin the multiword RULE, which is what the tests below need.
+# Measured against the live file on 2026-09-03, 4 of 7 assertions below INVERT:
+#   _term_matches('ssh work', ':sshwn')  here True   -> live False
+#   _term_matches('ssh lap',  ':sshln')  here True   -> live False
+#   _attribute('ssh work')               here None   -> live ':sshwl'
+#   _attribute('ssh work nebula')        here ':sshwn' -> live None
+# 🔴 That last one is a LIVE TELEMETRY GAP, not a fixture nit: 'ssh work nebula'
+# and 'ssh lap nebula' both attribute to None on the real config, so those fires
+# record UNATTRIBUTED. The live words that reach the nebula rows are 'rig' and
+# 'portable' (the labels became "SSH rig via nebula mesh" / "SSH portable via
+# nebula mesh"). Nothing detects this any more — `test_live_audit_2026_08_19_
+# resolutions` pinned exactly ('rig', ':sshwn') and ('portable', ':sshln') and
+# was removed with the other live guards.
 SSH_BASE = {"matches": [
     {"label": "SSH workbench (nebula)", "replace": "...", "trigger": ":sshwn",
      "search_terms": ["ssh", "workbench", "wb", "nebula", "mesh", "remote"]},
@@ -760,6 +774,12 @@ def test_recommend_terms_still_reach_both_picker_rows():
     # The point of the table: attribution gets one answer, the picker keeps BOTH
     # rows. If this shrinks to one, the fix has become the label edit the
     # operator declined.
+    # 🔴 CORRECTED 2026-09-03: it HAS shrunk to one, LIVE. a451abc0 moved
+    # "recommend" out of ':acq''s label, so on the real config 'recom' and
+    # 'recommend' give candidates=[':rna'] — measured. This guard stays green
+    # only because RNA_ACQ_BASE below still carries the PRE-SWAP ':acq' label.
+    # It pins the RULE, not the live two-row property, and after the live-config
+    # guards were removed nothing checks the latter at all.
     d = _det_for(RNA_ACQ_BASE)
     for term in ("recom", "recommend"):
         assert {t for t in d.ts.triggers if d._term_matches(term, t)} == {
@@ -798,9 +818,12 @@ def test_the_recommend_terms_owe_nothing_to_the_owner_table(monkeypatch):
 # a snippet that reaches the term through its DECLARED interface out-bids one
 # that reaches it only through its label.
 #
-# 🔴 THESE FIXTURES ARE DELIBERATELY NOT THE LIVE CONFIG. FIX 6's live guards
-# already cover the reported incident; these must keep testing the RULE after
-# nix/home.nix changes, so every word below is invented. Every field is pairwise
+# 🔴 THESE FIXTURES ARE DELIBERATELY NOT THE LIVE CONFIG — they must keep
+# testing the RULE after nix/home.nix changes, so every word below is invented.
+# ⚠ CORRECTED 2026-09-03: this used to justify that with "FIX 6's live guards
+# already cover the reported incident". Those guards were REMOVED, so the
+# reported incident now has NO live coverage — the synthetic fixtures below are
+# all there is, and they cannot see a config change. Every field is pairwise
 # distinct and none equals a constant the assertions name.
 #
 # 🔴 RED/GREEN MATRIX, measured with PYTHONDONTWRITEBYTECODE=1 against base
