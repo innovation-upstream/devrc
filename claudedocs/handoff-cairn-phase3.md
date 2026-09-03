@@ -52,105 +52,32 @@ history, since both ranks are done.
 `cairn-phase3-16` was held for the rank-16 work and is **now RELEASED** — merged, shipped
 and verified.
 
----
-
-🔴 **THE DOC'S GOAL IS MET. RANK 16 IS CLOSED — the prescribed READ surface goes through the
-pod.** devrc **#1233**, squash **`9519781f`**, verified by content on `origin/main` (never by
-ancestry — a squash is never an ancestor). Four audit rounds, no 🔴 in any of them.
-
-**What shipped.** A new leaf module `scripts/lib/subsystem_read_store.py` owns
-`DEFAULT_CACHE_ROOT` and `SYNC_STAMP` (moved out of `scripts/cairn`, which now imports them —
-one definition each). The `subsystem_recall` **CLI** defaults to the synced cache, prints the
-`.sync-stamp` **verbatim-but-unparsed** in its header, and **REFUSES** a store carrying no
-stamp with exit **4** (`EXIT_UNSTAMPED_READ_STORE`) naming `cairn sync`. `service_recon`
-degrades only its index section. An explicit `--store` stays permissive — recorded by a custom
-`argparse.Action`, because `--store <the cache>` parses byte-identically to passing nothing.
-
-🔴 **THE REFUSAL IS CLI-ONLY BY DESIGN, AND THAT IS THE LOAD-BEARING CONSTRAINT.** `server.py`
-and `scripts/cairn` call `recall`/`search`/`load_store`/`read_entry`/`_exit_for` as a
-**LIBRARY**, against `/data`, which has **no** `.sync-stamp`. A refusal on a library path takes
-the store down for **every host**. Pinned by a set-equality AST guard asserting the set of
-top-level defs referencing the resolver **equals** `{_build_parser, _with_stamp, main}` — both
-directions. Round 2 found that guard's first version split the file positionally at
-`def _build_parser(` and so **excluded `_exit_for`** (line 3186), which the pod calls on every
-`/recall` and `/search`; a refusal grown there survived. Round 4 re-verified the CLI output is
-**byte-identical** across the round and the pod contract intact.
-
-**The closing condition, executed 2026-09-02 in one session:**
-
-| step | result |
-|---|---|
-| `cairn append --scope devrc --ref cairn` | `revision=98262ec6a03fcfe4` |
-| `cairn recall --repo ~/workspace/devrc` (what deployed `/resume` step 4 prescribes) | exit 0, `cairn: live — fetched … 201 entries`, **29 entries** in `devrc/` |
-| the bullet written seconds earlier | **present** (1 occurrence); positive control string **0** |
-| raw `subsystem_recall.py --repo` | `store: ~/.cache/subsystem-store` + 5 `stamp:` lines |
-| `ship.sh` | both hosts at `9519781f`, **cross-host agreement compared**, both switched |
-| deployed skill | `readlink -f` → a NEW `/nix/store/c0hn5z05…` path prescribing `cairn recall` |
-
-Before: `~/.claude/analyze-service-index`, **26 entries**, `ALL 26 … none omitted`, no stamp.
+⚠ **The pod counts above are the 2026-09-01 execution record and have MOVED** — 205 entries as of
+2026-09-03 after four orphaned entries were rescued onto it (rank 23). Carried verbatim because it
+is the phase-1 evidence, not a current reading.
 
 ---
 
-🔴 **RANK 11 IS CLOSED AND MERGED. The audit ladder ran FOUR rounds and ended on a clean one.**
+**2026-09-03 — THREE RANKS CLOSED, SHIPPED AND VERIFIED ON BOTH HOSTS.**
 
-| PR | squash | what |
-|---|---|---|
-| **#1222** | `7d9da8f5` | the order-independent comparator |
-| **#1218** | `e557ed19` | phase-1 closure handoff (merged WITHOUT `--delete-branch`; it was #1225's stacked parent) |
-| **#1225** | `80625392` | this doc's rank-11 update |
-| **#1228** | `85257361` | the round-1..3 audit fixes |
+| rank | what | squash | verified by |
+|---|---|---|---|
+| **16** | the prescribed READ path goes through the pod | `9519781f` | `cairn append` → `cairn recall --repo` surfaces it in the same session, positive control on the grep |
+| **20** | the third frozen read surface routed | `2c6b2ac9` | constant DELETED (0 code-level definitions), resolver wired, by content |
+| **18** | `drift-check` fires on DISAGREEMENT, not on the bare state | `77dc3642` | **rc 24 → 17 → 0** |
+| — | cairn skill + `cairn doctor` + the store-root ledger | `ac09c18` | skill live in the listing; doctor found a real defect on run 1 |
+| — | espanso gate relaxed per operator ruling | `b9b2493d` | red at base, green at head, consumer suites 596 |
 
-All verified **by content** on `origin/main`, never by ancestry (a squash is never an ancestor).
-Claim `cairn-phase3-11` **released**.
+🔴 **`drift-check` now exits 0** — it took BOTH halves: the declared-expectation change cleared
+rc 24, and fast-forwarding the laptop's `homelab-talos` (26 behind) cleared rc 17. Round 1's
+audit was right that the first alone would not stop the toasts.
 
-**The defect was TWO mtime dependencies, not one.** `subsystem_recall` orders its INDEX
-newest-first by entry-file mtime **and picks the digest's one featured BODY the same way**;
-`seed.sh`'s transport (`rsync` → stage → `tar` → pod) carries no mtime. The comparator now
-compares (1) the `mode=list` render with index rows **sorted**, (2) the entry **SET** via `comm`
-run FIRST, (3) **each entry's** own `?ref=` render, refusing a paginated index outright.
+**IN FLIGHT, nothing else outstanding from this session:**
+- **devrc#1262** — unbreaks `main`, which is **RED right now** (`test_recommend_terms_resolve_on_the_live_config`, confirmed on plain `origin/main` with nothing merged). Merged-tree gate RUNNING at hand-off time. Diff is **one test file**; `espanso_detect.py`, `_AMBIGUOUS_TERM_OWNER`, `_EXISTING_RESOLUTIONS` and the `>= 26` floor have **0** changed lines.
+- **devrc#1261** — rank 25. Gated on the merged tree: **exactly 1 failure on both tiers, and it is the inherited espanso one; 0 cpu_monitor failures.** Blocked only by `main`. Merge after #1262, then **delete `laptop/cpu-mon-temp-92` (`44ebd9c6`)** — it sets the SHARED line to 92 and would reintroduce the value #1261 exists to remove.
 
-**Live acceptance against the pod** (port-forward, store `~/.claude/analyze-service-index`):
-`cli` (5 entries, byte-identical) **FAILED before / PASSES after** with `accounted-for=38` equal
-to `raw-diff-lines=38`; `storage-resolver` passed before **and** after — the control proving the
-fix did not simply paint everything green.
-
-**What the ladder found after the fix shipped**, all closed in #1228: a **false green** — the
-per-entry arm compared an "AMBIGUOUS REF" notice instead of entry bytes for any ref
-`resolve_ref_tiered` could not resolve uniquely (`_exit_for` returns **0** for `ref-ambiguous`),
-reproduced as a clean PASS over a **one-character** divergence; a **measured-evidence block that
-was wrong twice**; the **pagination headroom taken from the non-binding side** (real headroom
-**49**, not 51 — the pod is the larger store); and a **seam test that pinned no seam** (severing
-the call site left the whole suite green — 84/678 passed).
-
-⚠ **ONLY criterion 10 (d) remains from the earlier arc** (rank 1): the plaintext backups
-`~/.config/subsystem-store/env.bak-legacy-2026-08-29` are still on disk on **both** hosts. Dead
-credential (401), so hygiene not exposure.
-
-⚠ **The Goal's read half was the last gap and it is now CLOSED (rank 16, above).** This
-paragraph used to say the Goal was not met. It is met: writes go to the pod, and the
-prescribed read now does too.
-
-### 🔴 The defect class this PR kept regenerating — FIVE occurrences, worth not re-paying
-
-Every one was **an assertion satisfied by a constant agreeing with itself**, and every fix was
-narrower than the class it closed, which is how the next one got in:
-
-1. `SYNC_STAMP` — the sweep's own **positive control SURVIVED** 615 tests, because every
-   fixture wrote the stamp *through* `rs.SYNC_STAMP`.
-2. `REMEDY` and 3. `DEFAULT_CACHE_ROOT` — `REMEDY = "cairn resync-the-store"` and a
-   `DEFAULT_CACHE_ROOT` moved to world-writable `/var/tmp` both survived; nothing pinned
-   `Path.home()`, and `cairn` imports the same constant for its **writer** default.
-4. `NOT_READ_PREFIX` — **introduced by the fix for 1–3.** `= "READ"` survived all 42 tests, so
-   `--json` would emit `"store_root": "READ (store-unstamped) — …"`: the field asserting the
-   brief *read* the store it explicitly refused to open.
-5. `Path`/tuple/mixed-case constants — **introduced by the fix for 4.** The `WIRE_CONSTANTS`
-   ledger built to stop the fifth was `isinstance(value, str)`-only, so `DEFAULT_CACHE_ROOT`
-   itself — a `Path` — was invisible to it.
-
-🔴 **The lesson is the FIX WIDTH, not the pins.** The cure was to stop writing one-off pins and
-build a **ledger** whose two-way sweep enumerates module-scope assignments off the AST and fails
-on an unpinned one — then to widen that sweep past its own prescribed hunk when `for … in` and a
-`def` still escaped. **Ask what SHAPE the next instance takes, not what the last one was named.**
+⚠ **The doc's Goal is met for READS and APPENDS, not for CREATES.** The store has no create
+route; that is rank 24 and **devrc#1254 (another session) owns it** — do not duplicate it.
 
 ## Open investigations — live diagnosis state
 
@@ -595,7 +522,33 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
   observed landing on the pod **through `prune-index`**, and that caller is still unexercised.
   The VERB is proven; the CALLER is not. via: doc
 
+### `main` goes red from direct-to-main espanso commits — TWICE in one session, both times found by hand
+- **Symptom + exact repro:** `nix develop <repo> -c python3 -m pytest scripts/collector/keylog/tests/test_espanso_detect.py -q` on plain `origin/main`.
+- **Observed (with values):** break 1 — `a720d30d` put *"and recommend improvements…"* into `:acq`'s **label**; `_token_matches` reads the label, so `recom`/`recommend` matched both `:acq` and `:rna`, `_attribute` saw 2 candidates and returned `None`. Break 2 — `a451abc0` **swapped** `label` and `replace`, removing the collision at source, which falsified the anti-vacuity premise of the guard that fixed break 1: `AssertionError: recom / assert [':rna'] == [':acq', ':rna']`.
+- **Ruled out:** that break 2 was a regression — it is a guard whose premise died; `_attribute('recom')` and `_attribute('recommend')` both return `':rna'` via the plain uniqueness branch, printed live. via: measurement
+- **Ruled out:** that #1247's `_AMBIGUOUS_TERM_OWNER` entries still exist — `de677683` (#1252) deleted them; the table today is `{'ask': ':acq', 'clarify': ':acq'}`. via: command
+- **Leading hypothesis:** not a code defect at all. The mechanism — **a label edit silently re-attributing telemetry terms, in EITHER direction** — is live and will recur; branch protection is deliberately off, so nothing observes it.
+- **Next probe:** none for diagnosis. The open decision is rank 22's detector.
+
+### 🔴 MY OWN "10 entries / 102 local-only lines" FIGURE CONFLATES TWO POPULATIONS — correcting #1260
+- **Symptom + exact repro:** diff every entry present in BOTH `~/.claude/analyze-service-index` and `~/.cache/subsystem-store`, count lines present locally and absent from the pod.
+- **Observed (with values):** 2026-09-03 first reading **10 entries / 102 lines**; an hour later **13 / 109**, on a mirror that is now `0555` and CANNOT gain content. Three of the new ones are **supersessions, not strandings** — including `devrc/subsystem-store-api.md: 1`, which is **my own `cairn put`** closing an `OPEN:` to `RESOLVED`. The pod legitimately rewrote the line; the frozen mirror still holds the old one.
+- **Ruled out:** that the count only measures stranded content — a `cairn put` that rewrites or deletes a line makes the mirror's old copy read as "local-only" identically. via: measurement
+- **Ruled out:** that another session's reconciliation had already cleared it — the #1254 session's `devrc/cairn` bullet records **21 stranded bullets reconciled by `cairn put` on 2026-09-03**, and the count did not fall. via: measurement
+- **Leading hypothesis:** the honest metric is **what the POD LACKS**, per bullet, not what the mirror holds — and it must exclude bullets the pod deliberately rewrote. The real stranded population is therefore **unknown and ≤ 109 lines**, not the 102 rank 23 asserts.
+- **Next probe:** re-derive per-bullet (not per-line) against the pod, treating a rewritten `OPEN:`→`RESOLVED` as reconciled rather than stranded, before doing any of the hand-merges.
+
+### 🔴 My #1247 was a WORKAROUND and another session shipped the STRUCTURAL fix over it
+- **Observed (with values):** `b9b2493d` (#1247, mine) declared `:rna` the owner of `recom`/`recommend` — a table entry. `de677683` (#1252, another session) made *a snippet's declared `search_terms` outbid another snippet's LABEL*, which is the mechanism, and removed my entries as unnecessary.
+- **Ruled out:** that the two are alternatives — the structural one strictly subsumes the declaration. via: code
+- **Leading hypothesis:** `claude/RULES.md`'s *"prefer deterministic/structural fixes over prose"* applied to me. I fixed the instance under a "relax the gate" ruling; the class needed the mechanism.
+- **Next probe:** none. Recorded so the pattern is visible, not to be re-derived.
+
 ## Next steps (ranked)
+
+🔴 **Numbering is UNCHANGED on purpose** — the rank is half a claim's identity
+(`claim-work --slug-for <this doc> <rank>`). Items are marked done IN PLACE; new items APPEND.
+
 
 🔴 **Numbering is UNCHANGED on purpose** — the rank is half a claim's identity
 (`claim-work --slug-for <this doc> <rank>`). Items are marked done IN PLACE; new items APPEND.
@@ -753,7 +706,17 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     a direct commit can red `main` and the only detector is whoever next runs the gate by hand —
     here, this session, hours later. **Closing condition:** a recorded decision that manual
     gating is accepted while protection is off, or a merged PR adding a cheap post-push check.
-    forcing: gate — `main` was red for hours and no mechanism reported it
+    🔴 **RECURRED 2026-09-03, so the rate is measured rather than hypothetical: TWICE in one
+    session.** `a451abc0` ("espanso", direct to main, no PR) swapped `:acq`'s `label` and
+    `replace`, which red-ed `main` a second time — and BOTH times the only detector was a human
+    running the gate by hand, hours later, incidentally. ⚠ **The second break was a GUARD WHOSE
+    PREMISE DIED, not a regression** (the collision it asserted was gone at the source), so a
+    detector that only greps "did attribution regress" would have missed it — whatever is built
+    must run the REAL suite, not a distilled check. **Concrete cheap option, proposed with
+    evidence:** trigger `scripts/collector/keylog/tests/test_espanso_detect.py` (0.3 s, hermetic
+    apart from reading `nix/home.nix`) whenever `nix/home.nix`'s espanso `matches` block changes
+    — it would have caught both, at authoring time.
+    forcing: gate — `main` was red for hours, twice, and no mechanism reported it
 
 23. 🔴 **THE FREEZE WAS INCOMPLETE AND SIX WRITES LANDED IN THE DEAD STORE — closed 2026-09-03,
     but the WRITER is not fixed.** Found by `cairn doctor` on its first live run (#1255).
@@ -828,7 +791,7 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     that seeding is permanently the only create path, with `subsystem-index` saying so).
     forcing: regression — the missing route is the upstream cause of rank 23
 
-25. **`CPU_MON_TEMP_THRESHOLD` is host-specific pretending to be shared.** Repo `devrc`,
+25. 🔶 **IN FLIGHT: devrc#1261** — **`CPU_MON_TEMP_THRESHOLD` is host-specific pretending to be shared.** Repo `devrc`,
     `nix/home.nix`. The laptop carried an UNCOMMITTED `88 → 92` edit that blocked EVERY
     `ship.sh` fast-forward to it (rc 7) — the documented "skipped host silently stops receiving
     changes while looking healthy" failure. Preserved as branch `laptop/cpu-mon-temp-92`
@@ -1551,51 +1514,172 @@ text of a status that outlives it — and treat "not found" as NOT A VERDICT, ex
   `gc --auto`) after a direct probe found no lingering process and 12/12 serial runs passed.
   "Pre-existing flake, mechanism unknown" is the honest state; do not adopt the retracted theory.
 
+🔴 **RELOCATED 2026-09-03 FROM `## State now`, VERBATIM — this is the rank-11 and rank-16 CLOSURE
+EVIDENCE, and it was being dropped by every update because `State now` is a REPLACE heading.**
+`handoff_doc.py` flagged it as durable-content-under-a-replace-heading twice in one run; the fix
+it recommends first is to move such content under an APPEND heading, which is what this is. It is
+evidence, not status — do not summarise it away.
+
+🔴 **THE DOC'S GOAL IS MET. RANK 16 IS CLOSED — the prescribed READ surface goes through the
+pod.** devrc **#1233**, squash **`9519781f`**, verified by content on `origin/main` (never by
+ancestry — a squash is never an ancestor). Four audit rounds, no 🔴 in any of them.
+
+**What shipped.** A new leaf module `scripts/lib/subsystem_read_store.py` owns
+`DEFAULT_CACHE_ROOT` and `SYNC_STAMP` (moved out of `scripts/cairn`, which now imports them —
+one definition each). The `subsystem_recall` **CLI** defaults to the synced cache, prints the
+`.sync-stamp` **verbatim-but-unparsed** in its header, and **REFUSES** a store carrying no
+stamp with exit **4** (`EXIT_UNSTAMPED_READ_STORE`) naming `cairn sync`. `service_recon`
+degrades only its index section. An explicit `--store` stays permissive — recorded by a custom
+`argparse.Action`, because `--store <the cache>` parses byte-identically to passing nothing.
+
+🔴 **THE REFUSAL IS CLI-ONLY BY DESIGN, AND THAT IS THE LOAD-BEARING CONSTRAINT.** `server.py`
+and `scripts/cairn` call `recall`/`search`/`load_store`/`read_entry`/`_exit_for` as a
+**LIBRARY**, against `/data`, which has **no** `.sync-stamp`. A refusal on a library path takes
+the store down for **every host**. Pinned by a set-equality AST guard asserting the set of
+top-level defs referencing the resolver **equals** `{_build_parser, _with_stamp, main}` — both
+directions. Round 2 found that guard's first version split the file positionally at
+`def _build_parser(` and so **excluded `_exit_for`** (line 3186), which the pod calls on every
+`/recall` and `/search`; a refusal grown there survived. Round 4 re-verified the CLI output is
+**byte-identical** across the round and the pod contract intact.
+
+**The closing condition, executed 2026-09-02 in one session:**
+
+| step | result |
+|---|---|
+| `cairn append --scope devrc --ref cairn` | `revision=98262ec6a03fcfe4` |
+| `cairn recall --repo ~/workspace/devrc` (what deployed `/resume` step 4 prescribes) | exit 0, `cairn: live — fetched … 201 entries`, **29 entries** in `devrc/` |
+| the bullet written seconds earlier | **present** (1 occurrence); positive control string **0** |
+| raw `subsystem_recall.py --repo` | `store: ~/.cache/subsystem-store` + 5 `stamp:` lines |
+| `ship.sh` | both hosts at `9519781f`, **cross-host agreement compared**, both switched |
+| deployed skill | `readlink -f` → a NEW `/nix/store/c0hn5z05…` path prescribing `cairn recall` |
+
+Before: `~/.claude/analyze-service-index`, **26 entries**, `ALL 26 … none omitted`, no stamp.
+
+---
+
+🔴 **RANK 11 IS CLOSED AND MERGED. The audit ladder ran FOUR rounds and ended on a clean one.**
+
+| PR | squash | what |
+|---|---|---|
+| **#1222** | `7d9da8f5` | the order-independent comparator |
+| **#1218** | `e557ed19` | phase-1 closure handoff (merged WITHOUT `--delete-branch`; it was #1225's stacked parent) |
+| **#1225** | `80625392` | this doc's rank-11 update |
+| **#1228** | `85257361` | the round-1..3 audit fixes |
+
+All verified **by content** on `origin/main`, never by ancestry (a squash is never an ancestor).
+Claim `cairn-phase3-11` **released**.
+
+**The defect was TWO mtime dependencies, not one.** `subsystem_recall` orders its INDEX
+newest-first by entry-file mtime **and picks the digest's one featured BODY the same way**;
+`seed.sh`'s transport (`rsync` → stage → `tar` → pod) carries no mtime. The comparator now
+compares (1) the `mode=list` render with index rows **sorted**, (2) the entry **SET** via `comm`
+run FIRST, (3) **each entry's** own `?ref=` render, refusing a paginated index outright.
+
+**Live acceptance against the pod** (port-forward, store `~/.claude/analyze-service-index`):
+`cli` (5 entries, byte-identical) **FAILED before / PASSES after** with `accounted-for=38` equal
+to `raw-diff-lines=38`; `storage-resolver` passed before **and** after — the control proving the
+fix did not simply paint everything green.
+
+**What the ladder found after the fix shipped**, all closed in #1228: a **false green** — the
+per-entry arm compared an "AMBIGUOUS REF" notice instead of entry bytes for any ref
+`resolve_ref_tiered` could not resolve uniquely (`_exit_for` returns **0** for `ref-ambiguous`),
+reproduced as a clean PASS over a **one-character** divergence; a **measured-evidence block that
+was wrong twice**; the **pagination headroom taken from the non-binding side** (real headroom
+**49**, not 51 — the pod is the larger store); and a **seam test that pinned no seam** (severing
+the call site left the whole suite green — 84/678 passed).
+
+⚠ **ONLY criterion 10 (d) remains from the earlier arc** (rank 1): the plaintext backups
+`~/.config/subsystem-store/env.bak-legacy-2026-08-29` are still on disk on **both** hosts. Dead
+credential (401), so hygiene not exposure.
+
+⚠ **The Goal's read half was the last gap and it is now CLOSED (rank 16, above).** This
+paragraph used to say the Goal was not met. It is met: writes go to the pod, and the
+prescribed read now does too.
+
+### 🔴 The defect class this PR kept regenerating — FIVE occurrences, worth not re-paying
+
+Every one was **an assertion satisfied by a constant agreeing with itself**, and every fix was
+narrower than the class it closed, which is how the next one got in:
+
+1. `SYNC_STAMP` — the sweep's own **positive control SURVIVED** 615 tests, because every
+   fixture wrote the stamp *through* `rs.SYNC_STAMP`.
+2. `REMEDY` and 3. `DEFAULT_CACHE_ROOT` — `REMEDY = "cairn resync-the-store"` and a
+   `DEFAULT_CACHE_ROOT` moved to world-writable `/var/tmp` both survived; nothing pinned
+   `Path.home()`, and `cairn` imports the same constant for its **writer** default.
+4. `NOT_READ_PREFIX` — **introduced by the fix for 1–3.** `= "READ"` survived all 42 tests, so
+   `--json` would emit `"store_root": "READ (store-unstamped) — …"`: the field asserting the
+   brief *read* the store it explicitly refused to open.
+5. `Path`/tuple/mixed-case constants — **introduced by the fix for 4.** The `WIRE_CONSTANTS`
+   ledger built to stop the fifth was `isinstance(value, str)`-only, so `DEFAULT_CACHE_ROOT`
+   itself — a `Path` — was invisible to it.
+
+🔴 **The lesson is the FIX WIDTH, not the pins.** The cure was to stop writing one-off pins and
+build a **ledger** whose two-way sweep enumerates module-scope assignments off the AST and fails
+on an unpinned one — then to widen that sweep past its own prescribed hunk when `for … in` and a
+`def` still escaped. **Ask what SHAPE the next instance takes, not what the last one was named.**
+
+**From the ranks-18/20 + cairn-skill session (2026-09-03) — the instrument lessons:**
+- 🔴 **A NEW COMMAND FOUND A LIVE DATA-LOSS PATH ON ITS FIRST RUN.** `cairn doctor`, built on
+  the operator's *"minimise prose, prefer scripts"* instruction, reported `frozen-mirror PROBLEM`
+  **before it merged**. A skill DESCRIBING what to check would have described it and found
+  nothing. That is the argument for the form, and it is now measured rather than asserted.
+- 🔴 **I READ ONE TIER'S TOTAL AND REPORTED IT AS BOTH.** Quoted `failed=1` off the dev-host
+  gate; the SANDBOX tier — the one the merge gates on — had **24** (115 `CalledProcessError`,
+  23 `exit status 128`, an unguarded `git ls-files` in a tree with no `.git`). Read each tier's
+  OWN total, and name the tier in the claim.
+- 🔴 **THREE INSTRUMENT FAILURES IN ONE HOUR, each caught ONLY by a control.** `find` is a shell
+  FUNCTION on this host and its `-print0` emits nothing — the positive control returning 0 was
+  the only tell; a `grep -cE "A|B"` matched a line present regardless of the variable under
+  test; and a "positive control" aimed at a repo whose protection API 404s exercised
+  COULD-NOT-MEASURE instead of the alarm. **A zero is a claim about the instrument until a
+  control has moved it.** `type <tool>` before trusting a pipeline's zero.
+- 🔴 **A MUTATION THAT DOES NOT APPLY SCORES AS A FALSE NEGATIVE.** Proving the rc-24 alarm still
+  fires, my first regex assumed quotes the real line does not have: `arms removed: 0`, and the
+  run was the UNMUTATED script. Printing the applied-count is what stopped it being recorded as
+  *"the alarm is dead"*. Assert the mutation applied exactly once, every time.
+- ⚠ **A grep count is a claim about the PATTERN.** Verifying #1249, `grep -c 'DEFAULT_STORE_ROOT
+  = Path.home()'` returned **1**, reading as "the constant survived". It was the comment saying
+  what USED to be there; stripping comments gives 0.
+- 🔴 **THE SWEEP CAUGHT A DUPLICATE THE LOCK STRUCTURALLY COULD NOT.** `gh pr list` surfaced
+  **#1254**, an unclaimed PR already building rank 24 with the same root-cause diagnosis. The
+  claim namespace cannot see unclaimed work. Run the sweep before drawing ANY item.
+- **Agents corrected me FIVE times and were right every time:** `subsystem-audit.py` is READ-ONLY
+  by contract, not a delete tool; an auditor's "red at base" was measured against a MID-PR commit
+  and the implementer refused the instruction and re-measured; tier B is NOT free (the
+  description budget is separate from the tier ledger and had 12 chars of headroom); my ledger
+  population was missing five sites; and the `_AMBIGUOUS_TERM_OWNER` entries I told an agent to
+  delete had already been deleted by #1252. **The refusals were worth more than the compliance.**
+- ⚠ **`ship.sh` re-executed itself** — the run shipped a change to `ship.sh`, so the CONVERGE
+  payload it had already expanded was stale and it re-ran the new copy before the remote leg.
+  Working as designed; the first block's output is not the final word.
+- ⚠ **A shared-scratchpad collision is real** — a sibling agent overwrote `sweep.py`/`msg.txt`
+  in the shared scratchpad mid-session. Nothing in the repo was touched. Name scratch dirs
+  per-agent.
+
 ## How to verify
 
 ```bash
-# ---- rank 11 is CLOSED: the fix is on main, verified BY CONTENT (a squash is never an ancestor)
-git -C ~/workspace/devrc show origin/main:scripts/subsystem-store-api/verify-byte-identity.sh \
-  | grep -c 'index-order-lines'          # >0
-git -C ~/workspace/devrc show origin/main:scripts/subsystem-store-api/verify-byte-identity.sh \
-  | grep -n 'COVERAGE'                   # the rank-17 disclosure is present
+# ---- ranks 16/18/20 are CLOSED. All three are verified BY CONTENT (a squash is never an ancestor).
+python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc --list | head -6
+#   expect `store: /home/zach/.cache/subsystem-store` PLUS `stamp:` lines. A store ending
+#   `.claude/analyze-service-index` means a host that never took #1233.
 
-# ---- the live acceptance run (the ONLY thing that proves the gate works) ----
-# 🔴 there is NO working public-ingress path: the script sends CF-Connecting-IP and Cloudflare
-#    answers 403 `error code: 1000`. Use a port-forward.
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store port-forward svc/subsystem-store-api 8102:8102 &
-umask 077; ( set -a; . ~/.config/subsystem-store/env; set +a; printf '%s' "$SUBSYSTEM_STORE_TOKEN" > /tmp/tok )
-bash scripts/subsystem-store-api/verify-byte-identity.sh \
-  --store ~/.claude/analyze-service-index --url http://127.0.0.1:8102 --token-file /tmp/tok \
-  --scope cli --scope storage-resolver
-#   expect PASS on both; `cli` is the discriminating one (>2 entries, byte-identical, FAILED
-#   before #1222). raw-diff-lines MUST equal accounted-for.
-shred -u /tmp/tok
-# 🔴 kill the port-forward by RESOLVED PID — never let a pattern reach pkill -f.
+bash ~/workspace/devrc/scripts/drift-check.sh; echo "rc=$?"      # 0 — was 24, then 17
+cairn doctor; echo "rc=$?"                                       # 9 = the 2 un-seeded scopes (ranks 23/24), NOT a defect
 
-# ---- rank 16 is CLOSED. Both readers now resolve the SAME store; they used to differ (26 vs 29).
-python3 scripts/lib/subsystem_recall.py --repo ~/workspace/devrc --list | head -6
-#   expect `store: /home/zach/.cache/subsystem-store` PLUS `stamp:` lines. A `store:` ending in
-#   `.claude/analyze-service-index` means you are on a host that never took #1233.
-cairn recall --repo ~/workspace/devrc | head -3     # same store, fetched live first
+# ---- the mirror is genuinely frozen now. Prove it by WATCHED REFUSAL, never by `stat`.
+M=~/.claude/analyze-service-index
+printf '' >> "$M/civitai/model-retention.md" && echo "🔴 STILL WRITABLE" || echo "refused (correct)"
+: > "$M/civitai/zz-probe.md" && { echo "🔴 CREATE ACCEPTED"; rm -f "$M/civitai/zz-probe.md"; } || echo "create refused (correct)"
+#   POSITIVE CONTROL — the same probe MUST succeed where writes are legal, or it proves nothing:
+: > ~/.cache/subsystem-store/zz-probe.md && { echo "control OK"; rm -f ~/.cache/subsystem-store/zz-probe.md; }
 
-# the refusal arm — the half that protects the NEXT store to get frozen. Point the resolver at an
-# unstamped dir and the CLI must exit 4 and render NOTHING (empty stdout, refusal on stderr):
-python3 - <<'PY'
-import pathlib, sys, tempfile
-sys.path.insert(0, "/home/zach/workspace/devrc/scripts/lib")
-import subsystem_read_store as rs
-d = pathlib.Path(tempfile.mkdtemp()); (d / "devrc").mkdir()
-rs.DEFAULT_CACHE_ROOT = d
-import subsystem_recall as rc
-print("EXIT =", rc.main(["--scope", "devrc", "--list"]))       # 4, and stdout EMPTY
-print("LIBRARY still serves it:", rc.recall(str(d), "devrc").status)  # the POD's contract
-PY
-#   MEASURED 2026-09-02: `EXIT = 4`, refusal on stderr, stdout empty — and the library prints
-#   `scope-empty` (an empty scope dir), NOT a refusal. `scope-empty` is the pass here: the point
-#   is that `recall()` ANSWERED. If it ever raises or refuses, the pod is down for every host.
+# ---- rank 23's orphans: 4 rescued, 2 blocked, 10 shared entries still divergent
+cairn ls-entries | wc -l                                          # 205 (was 201 before the rescue)
+ls ~/.local/share/cairn-orphans-2026-09-03/                       # the preserved copies — do NOT delete
+ls ~/.local/share/cairn-orphans-2026-09-03/shared-divergent/      # the 10 two-way divergent entries
 
-# ---- rank 18: the deadman is red by decision, not by fault ----
-bash scripts/drift-check.sh; echo "rc=$?"     # 24 — expected while protection is off
-systemctl --user show drift-check.service -p SuccessExitStatus   # 16 only; rc 24 is NOT a success
+# ---- IN FLIGHT at hand-off: `main` is RED until #1262 lands. Confirm before blaming your branch:
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc/scripts/collector/keylog/tests/test_espanso_detect.py -q -p no:cacheprovider
 ```
