@@ -339,16 +339,6 @@ class EspansoDetector:
         matched = [trig for trig in self.ts.triggers if self._term_matches(t, trig)]
         if len(matched) == 1:
             return matched[0]
-        # Matching is by SUBSTRING (see `_token_matches`), so a term can match a
-        # snippet it merely occurs INSIDE. When ":acq" was split into ":dacq" +
-        # ":acq" on 2026-08-28 the bare term "acq" started matching BOTH
-        # (`"acq" in ":dacq"` is True) and every such fire was recorded
-        # UNATTRIBUTED. A term that NAMES one snippet outright — it equals that
-        # trigger, with or without the leading ":" — is not ambiguous about
-        # which snippet it means, so that snippet wins over the ones that merely
-        # contain it. This is consulted ONLY on the already-ambiguous branch, so
-        # it can never re-point a term that resolves uniquely today; the tie is
-        # broken only when EXACTLY ONE candidate is named outright.
         # 🔴 DECLARED-INTERFACE PRECEDENCE. `_token_matches` reads three sources:
         # the trigger, the `search_terms` list, and the human-readable `label`.
         # The first two are the snippet's DECLARED interface — an authored claim
@@ -375,6 +365,18 @@ class EspansoDetector:
             matched = declared
             if len(matched) == 1:
                 return matched[0]
+        # Matching is by SUBSTRING (see `_token_matches`), so a term can match a
+        # snippet it merely occurs INSIDE. When ":acq" was split into ":dacq" +
+        # ":acq" on 2026-08-28 the bare term "acq" started matching BOTH
+        # (`"acq" in ":dacq"` is True) and every such fire was recorded
+        # UNATTRIBUTED. A term that NAMES one snippet outright — it equals that
+        # trigger, with or without the leading ":" — is not ambiguous about
+        # which snippet it means, so that snippet wins over the ones that merely
+        # contain it. This is consulted ONLY on the already-ambiguous branch, so
+        # it can never re-point a term that resolves uniquely today; the tie is
+        # broken only when EXACTLY ONE candidate is named outright. (It now runs
+        # over the declared-narrowed set — which cannot drop a named candidate,
+        # since naming implies declaring.)
         exact = [trig for trig in matched if self._names_trigger(t, trig)]
         if len(exact) == 1:
             return exact[0]
