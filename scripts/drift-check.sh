@@ -2951,6 +2951,16 @@ bp_slug_of() { # bp_slug_of <remote-url> -> owner/repo, or "" if not GitHub
 # 🔴 NOT ENV-OVERRIDABLE, and neither is a path to it. The whole point of a
 # declaration is that the run cannot write it. See the header.
 #
+# ⚠ WHAT "OFF" MEANS HERE IS NARROWER THAN THE WORD. The verdict block excuses a
+# declared-off gate only while NOTHING has re-established one; an OFF state that
+# carries evidence somebody did — required checks back with enforce_admins false,
+# or an ACTIVE ruleset listing a check but with bypass actors — is rc 25, not
+# agreement. So a repo whose HALF-gate is deliberate (checks present, admins
+# knowingly unbound) cannot be silenced by this list: it would be permanently
+# rc 25. That is latent — no such repo exists today — and it is gated by the
+# two-way ledger in the suite, which forces any second entry through a human
+# diff where this note is one line up. Do not build for it; do read this first.
+#
 # Written as `if [ "$1" = <slug> ]` rather than a `case`, for the same reason
 # perhost_reason below is: the suite's reverse PATH tokenizer reads a lowercase
 # `case` ARM LABEL as a command word, and putting the slug in ARGUMENT position
