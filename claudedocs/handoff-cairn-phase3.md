@@ -46,11 +46,10 @@ CAN match. Mapped credential → **200**; legacy credential → **401, dead**; *
 200**. PR #1187 (`9-before-8` sequencing) merged 2026-09-01T03:17:40Z; that ordering is now
 history, since both ranks are done.
 
-🔴 **Claim state (carried forward, updated 2026-09-02):** `cairn-phase3-1` is **NOT held**
-(re-verified 2026-09-01). `cairn-phase1-migration` was held for the phase-1 work and was
-**released**. `cairn-phase3-11` was held for the rank-11 work and is **released**.
-`cairn-phase3-16` was held for the rank-16 work and is **now RELEASED** — merged, shipped
-and verified.
+🔴 **Claim state (carried forward, updated 2026-09-03):** `cairn-phase3-1` is **NOT held**
+(re-verified 2026-09-01). `cairn-phase1-migration`, `cairn-phase3-11` and `cairn-phase3-16`
+were held for their ranks and are **released**. **`cairn-phase3-25` is HELD by this session**
+(`claim-work --release cairn-phase3-25` when rank 25 is finished).
 
 ⚠ **The pod counts above are the 2026-09-01 execution record and have MOVED** — 205 entries as of
 2026-09-03 after four orphaned entries were rescued onto it (rank 23). Carried verbatim because it
@@ -72,9 +71,58 @@ is the phase-1 evidence, not a current reading.
 rc 24, and fast-forwarding the laptop's `homelab-talos` (26 behind) cleared rc 17. Round 1's
 audit was right that the first alone would not stop the toasts.
 
-**IN FLIGHT, nothing else outstanding from this session:**
-- **devrc#1262** — unbreaks `main`, which is **RED right now** (`test_recommend_terms_resolve_on_the_live_config`, confirmed on plain `origin/main` with nothing merged). Merged-tree gate RUNNING at hand-off time. Diff is **one test file**; `espanso_detect.py`, `_AMBIGUOUS_TERM_OWNER`, `_EXISTING_RESOLUTIONS` and the `>= 26` floor have **0** changed lines.
-- **devrc#1261** — rank 25. Gated on the merged tree: **exactly 1 failure on both tiers, and it is the inherited espanso one; 0 cpu_monitor failures.** Blocked only by `main`. Merge after #1262, then **delete `laptop/cpu-mon-temp-92` (`44ebd9c6`)** — it sets the SHARED line to 92 and would reintroduce the value #1261 exists to remove.
+---
+
+**2026-09-03 (later session) — `main` WAS RED AND IS NOW UNBROKEN. #1262 IS MERGED.**
+
+🔴 **The red was REPRODUCED on plain `origin/main` before anything was merged**, at
+`a36d3a40`: `test_recommend_terms_resolve_on_the_live_config` →
+`AssertionError: recom / assert [':rna'] == [':acq', ':rna']`, 1 failed / 69 passed.
+
+| | value |
+|---|---|
+| **#1262 merged** | squash **`df02571f`**, `mergedAt=2026-09-03T23:33:13Z`, remote branch deleted |
+| gate base | `a36d3a40` (merged tree = `a36d3a40` + `fix/retire-vacuous-recommend-collision-guard`) |
+| dev-host tier | `GATE: RESULT=PASS exit=0` — pytest `PASS`, node `PASS` |
+| sandbox tier (the one Tekton gates on) | `pytests` **collected=21007 passed=21004 skipped=3 failed=0** (floor 18404 = sum of 30 per-target floors); `nodetests` **tests=1449 pass=1449 fail=0** (floor 1367) |
+| `scripts/collector/keylog/tests` | **113 passed, floor 79** |
+
+🔴 **#1262 DELETES a red test, which is also what a bad fix looks like — so the replacement
+coverage was VERIFIED, not taken on the PR's word.** `_EXISTING_RESOLUTIONS` (line 1270 of
+`scripts/collector/keylog/tests/test_espanso_detect.py`) carries `("recom", ":rna"),
+("recommend", ":rna")`, and `test_live_existing_resolutions_not_made_ambiguous` evaluates them
+against **`_live_det()`** under a `>= 26` anti-vacuity floor. The live **resolution** is still
+pinned; only the dead **collision** assertion went away.
+
+🔴 **THE BASE MOVED BETWEEN THE GATE AND THE MERGE — scope the #1262 claim accordingly.**
+`22bbac57` (#1263) and `baa95854` (#1264) landed from other sessions in that window, so #1262
+was gated at `a36d3a40` and merged onto `baa95854`. Both are **pure markdown additions** (183
+lines: `claudedocs/handoff-handoff-search-index.md` +139, `scripts/browser-bridge/reference/
+sites/civit.ai.md` +44), so the merged-tree claim survives — but the honest statement is
+"green at `a36d3a40`", never "green at what `main` is now". The #1261 gate below re-covers it
+on real current `main`.
+
+**IN FLIGHT — rank 25, claim `cairn-phase3-25` HELD:**
+- **devrc#1261** — `MERGEABLE`. Merged tree built on **real current `main` (`df02571f`)** in
+  `integ/gate-1261`; the conditional resolves as
+  `"CPU_MON_TEMP_THRESHOLD=${if isLaptop then "92" else "88"}"`.
+  🔴 **Regression matrix MEASURED, not asserted: 4 RED at `df02571f`** — `test_the_deployed_
+  threshold_differs_between_the_two_hosts`, `test_each_host_gets_its_own_measured_threshold`,
+  `test_the_workbench_keeps_the_EARLIER_warning`, `test_home_nix_still_binds_isLaptop_to_the_
+  backlight_probe` — **6/6 GREEN at head**. The 2 that passed at base are exactly the file's
+  two declared harness controls (`test_the_harness_can_observe_a_difference`,
+  `test_the_harness_reports_SAME_for_a_constant`), which is the correct result for a control.
+  **Full two-tier gate was still RUNNING when this doc was written.**
+- **Then:** `scripts/ship.sh`, then **delete `laptop/cpu-mon-temp-92` (`44ebd9c6`)** — it sets
+  the **SHARED** line to 92, which would hand the *workbench* the laptop's threshold.
+- **Then:** `claim-work --release cairn-phase3-25`.
+
+⚠ **The laptop precondition #1261 was written for is ALREADY GONE — re-measured, do not
+re-derive it.** `ssh zach@10.42.0.100` 2026-09-03: `git status -s` is **empty** (clean tree),
+HEAD `a451abc0` (2 commits behind), and `nix/home.nix:2197` reads the shared
+`"CPU_MON_TEMP_THRESHOLD=88"`. The uncommitted `88 → 92` edit that blocked `ship.sh` with rc 7
+is no longer there, so **`ship.sh` is not blocked by it**. #1261 still earns its place: it
+stops that edit being re-made, and it gives the laptop 92 declaratively instead of by hand.
 
 ⚠ **The doc's Goal is met for READS and APPENDS, not for CREATES.** The store has no create
 route; that is rank 24 and **devrc#1254 (another session) owns it** — do not duplicate it.
@@ -1656,10 +1704,59 @@ on an unpinned one — then to widen that sweep past its own prescribed hunk whe
   in the shared scratchpad mid-session. Nothing in the repo was touched. Name scratch dirs
   per-agent.
 
+- 🔴 **`gate.sh` run OUTSIDE the dev shell is a FALSE RED, and it reads like a real one.**
+  Measured 2026-09-03: `bash scripts/gate.sh --tier both <worktree>` from a plain shell printed
+  `FAIL pytest exit=3` and `GATE: RESULT=FAIL exit=1` — but **no test ran at all**. The content
+  says so explicitly: `run-tests: FATAL — required tool(s) missing from PATH: logrotate` …
+  *"This is a MISSING ENVIRONMENT, not a code failure — nothing in the repo is broken."* The
+  node tier passed in the same run (1449/1449), which makes the pytest line look like a
+  targeted failure rather than a refusal to start. **Always invoke it as
+  `nix develop "<worktree>" --command bash "<worktree>/scripts/gate.sh" … "<worktree>"`.** The
+  script prints that exact command in its own error; read the content, never the verdict line
+  alone.
+- 🔴 **The base clone sits on `main` and CLAUDE.md forbids committing to `main` in either host
+  checkout — but `handoff_doc.py` commits wherever the checkout sits** (its own docs say so, and
+  no PreToolUse hook sees the commit because it runs git from inside Python). So this doc was
+  landed from a **worktree on `docs/handoff-cairn-phase3-rank25`**, not from
+  `~/workspace/devrc`. Check `git branch --show-current` before running the write gate here.
+- **`clawgate_handoff.sh resolve` returned exit 5 (nothing resolved) for this session**, with
+  its positive control confirming the board is reachable (2 links for a different session). Per
+  the skill that is **not** a clean bill of health — a wrong session id also answers 200 with an
+  empty array — so **no `clawgate-task:` field was written**. The doc's existing
+  `clawgate-task: 371` was already readable (`field` → exit 0) and is preserved by the merge.
+
 ## How to verify
 
 ```bash
-# ---- ranks 16/18/20 are CLOSED. All three are verified BY CONTENT (a squash is never an ancestor).
+# 1. main is no longer red — the exact test that was failing, on real main
+cd /home/zach/workspace/devrc && git fetch origin
+nix develop . -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  scripts/collector/keylog/tests/test_espanso_detect.py -q -p no:randomly
+# expect: 69 passed (was: 1 failed, 69 passed at a36d3a40)
+
+# 2. #1262 landed by CONTENT, not by ancestry (a squash is never an ancestor)
+gh pr view 1262 --json state,mergedAt,mergeCommit
+git log --oneline -1 origin/main    # df02571f or later
+
+# 3. the two-tier gate, on the MERGED tree, one nix build at a time
+nix develop "<worktree>" --command bash "<worktree>/scripts/gate.sh" --tier both "<worktree>"
+nix build "<worktree>#checks.x86_64-linux.pytests"   -L --no-link
+nix build "<worktree>#checks.x86_64-linux.nodetests" -L --no-link
+
+# 4. after #1261 ships: the threshold really differs per host
+grep -n CPU_MON_TEMP_THRESHOLD /home/zach/workspace/devrc/nix/home.nix
+ssh zach@10.42.0.100 'systemctl --user show cpu-monitor -p Environment' | tr ' ' '\n' | grep TEMP
+# expect 92 on the laptop, 88 on the workbench
+
+# 5. the superseded branch is gone
+git ls-remote --heads origin laptop/cpu-mon-temp-92   # expect empty
+```
+
+🔴 **CARRIED FORWARD — the ranks 16/18/20/23 checks. `How to verify` is a REPLACE heading, so
+these are deleted by any update that does not re-state them.** All verified BY CONTENT (a
+squash is never an ancestor).
+
+```bash
 python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc --list | head -6
 #   expect `store: /home/zach/.cache/subsystem-store` PLUS `stamp:` lines. A store ending
 #   `.claude/analyze-service-index` means a host that never took #1233.
@@ -1678,8 +1775,4 @@ printf '' >> "$M/civitai/model-retention.md" && echo "🔴 STILL WRITABLE" || ec
 cairn ls-entries | wc -l                                          # 205 (was 201 before the rescue)
 ls ~/.local/share/cairn-orphans-2026-09-03/                       # the preserved copies — do NOT delete
 ls ~/.local/share/cairn-orphans-2026-09-03/shared-divergent/      # the 10 two-way divergent entries
-
-# ---- IN FLIGHT at hand-off: `main` is RED until #1262 lands. Confirm before blaming your branch:
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/collector/keylog/tests/test_espanso_detect.py -q -p no:cacheprovider
 ```
