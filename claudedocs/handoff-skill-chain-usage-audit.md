@@ -16,6 +16,21 @@ whether sessions that resume a handoff end up recording their work. Ship a numbe
 survives adversarial re-derivation, and fix whatever it exposes.
 
 ## State now
+- 🔴 **RE-MEASURED 2026-09-02 — #1219 MERGED (`b4fde334`, 16:48:50Z) AND IT MOVED EVERYTHING RANK 13
+  MEASURED. The CI block below is CORRECT-AS-OF-#1211 and STALE-AS-OF-NOW; read this bullet first.**
+  Fresh AST walk over `origin/main`, not the doc's numbers and not #1219's:
+  **270 `with running(...)` sites — 135 `store` SITED · 110 `scoped_store` SITED · 25 UNFIXTURED,
+  all 25 still disk-backed.** The population went **123 of 256 disk-backed → 25 of 270**; both cairn
+  suites are sited too (`store_siting` in all three files) and `scripts/testlib/store_siting.py`
+  now EXISTS. ⚠ **All 25 verified individually** — 17 bind `tmp_path` directly, 8 arrive via
+  `shuffled_pair`/`ambiguous_pair`, themselves `tmp_path`-rooted; **0 are sited**.
+  🔴 **The 25 are not the 13 grown by attrition — the FILE grew (256→270 sites). Do not diff the
+  two counts.** 🔴 **And #1219's own ratchet `test_store_siting_ledger.py:299
+  `_DISK_ROOTED_SITES = 33`` counts store-root CONSTRUCTIONS — a DIFFERENT UNIT from these 25 call
+  sites. Do not equate them.**
+  🔴 **This is rank 13's own subject recurring within 9 h of its merge** — the doc said "#1219 OPEN
+  as of 2026-09-01" and that was true when written. Signature failure of the arc; it is why every
+  figure here is sha-stamped.
 - 🔴 **THE INITIATIVE'S HEADLINE MEASUREMENT, carried forward because it is durable and this
   section is REPLACED on every update.** Window 2026-08-15 → 08-29, both hosts, both runtimes
   (`find-session` stderr silent on every run ⇒ full coverage per its own contract):
@@ -30,7 +45,8 @@ survives adversarial re-derivation, and fix whatever it exposes.
   a write-back comment; **0** of 186 were agent-dispatched.
 - 🔴 **EVERY PR OF THIS ARC IS MERGED. Work off `origin/main`; there is no branch.**
   **#1055** `8c108d8b` · **#1064** `f71ff648` · **#1198** `40d7fef2` · **#1204** `ae8e68d3` ·
-  **#1207** `4162dab1` (2026-09-01T20:03:27Z). 🔴 **All verified by CONTENT on `origin/main`,
+  **#1207** `4162dab1` (2026-09-01T20:03:27Z) · **#1220** `aa1c2abf` (rank 13).
+  🔴 **All verified by CONTENT on `origin/main`,
   never by ancestry** — `merge-base --is-ancestor` reads **false** forever after a squash.
 - ✅ **RANK 5's WORKED EXAMPLE LANDED (#1207), and the ladder that graded it is CLOSED at 6
   rounds with round 6 CLEAN.** The doc went **80,397 → 64,837 B (−19.4%)**, 6.5x → **5.3x** the
@@ -41,8 +57,9 @@ survives adversarial re-derivation, and fix whatever it exposes.
   in the bullet above, which describe the tree as it stood at #1207 and **not** the one you are
   reading. Measured trail, each figure pinned to a **fixed sha** and none to a moving ref:
   `f71ff648` 80,397 · `21ee51d7` 57,356 · `1127e620` 60,964 · `ef49ac82` 62,298 · `34924645`
-  64,397 · `384e1c37` 64,837 · `66eee1d7` **65,506** (this was `main` when rank 13 branched; #1217
-  added 669 B after #1207). 🔴 **`384e1c37` was labelled "/`main`" here and that label went stale
+  64,397 · `384e1c37` 64,837 · `66eee1d7` 65,506 (this was `main` when rank 13 branched; #1217
+  added 669 B after #1207) · `aa1c2abf` **79,511** (rank 13 merged; the 7-round audit ladder added
+  ~14,000 B to a doc rank 5 exists to SHRINK — that tension is real and unresolved). 🔴 **`384e1c37` was labelled "/`main`" here and that label went stale
   within the day** — a fixed number on a moving ref is the very trap this bullet exists to name.
   A figure quoted from a report that measured an EARLIER commit of the same PR is the other half
   of it, and is what this arc hit in its own verification step.
@@ -551,6 +568,36 @@ EVICTED 2026-09-01 (terminal). Verdict: #1064 green, MERGED `f71ff648`; the two-
 - **Next probe:** if it recurs, capture `/proc/loadavg` and `iostat -x 1 3` at failure time, and
   re-run the class alone vs combined to test the shared-precondition reading.
 
+### ✅ CLOSED (re-measured 2026-09-02) — #1219 landed and the rank-13 caveat went stale in 9 hours
+- **Symptom + exact repro:** the doc merged at `aa1c2abf` asserts *"#1219 … OPEN as of 2026-09-01"*
+  and a fixture/call-site table reading 123 of 256 disk-backed. Reproduce:
+  `gh pr view 1219 --repo innovation-upstream/devrc --json state,mergedAt` and an AST walk of
+  `origin/main:scripts/tests/test_subsystem_store_api.py`.
+- **Observed (with values):** #1219 MERGED **2026-09-02T16:48:50Z** as **`b4fde334`**.
+  `scripts/testlib/store_siting.py` now EXISTS on `origin/main`. Fresh AST walk over
+  `With`/`AsyncWith` items: **270** `with running(...)` sites — **135 `store` SITED**
+  (`store_siting.store_root(tmp_path)` at `:343`), **110 `scoped_store` SITED** (at `:10465`),
+  **25 UNFIXTURED**. Per-site classification of all 25: **17** bind `tmp_path` directly, **8**
+  arrive via `shuffled_pair` (`:3942`) / `ambiguous_pair` (`:4291`), both `tmp_path`-rooted ⇒
+  **0 sited, 25 disk-backed**. Both cairn suites now carry `store_siting` (3 hits each).
+  Rank 13's closing condition (a) is **still UNMET**: `scripts/ci-repro/README.md` returns **0**
+  for `1a4350f3`, `scoped_store`, `cairn` and `unfixtured|11755`, with the positive control
+  `grep -c fsync` = **25**, so the zeros are readings and not a dead probe.
+- **Ruled out:** *"the 25 are the 13 having grown"* — the FILE grew, 256 → 270 sites, so the two
+  counts are not differenceable. via: measurement
+- **Ruled out:** *"#1219's `_DISK_ROOTED_SITES = 33` is this number"* — that ratchet
+  (`test_store_siting_ledger.py:299`) counts store-root CONSTRUCTIONS, a different unit from
+  `with running(...)` call sites. Equating them would be the arc's own certify-by-resemblance bug.
+  via: code
+- **Ruled out:** *"#1219 closes rank 13"* — it touches five files and `scripts/ci-repro/README.md`
+  is not among them, so the one named deliverable is exactly as undone. via: command
+- **Leading hypothesis:** none needed — measured and closed. The durable consequence is that (a)'s
+  a2/a3 greps are now OBSOLETE and would force a false sentence into the README; a1 + a4 are the
+  surviving halves, as the doc predicted in writing before #1219 merged.
+- **Next probe:** none for the measurement. The remaining work is rank 13's (a): write the
+  mitigation note into `scripts/ci-repro/README.md` naming `1a4350f3` and the unfixtured
+  population, then re-run the a1/a4 greps with the `fsync` control.
+
 ## Next steps (ranked)
 
 🔴 **The numbering below is STABLE and load-bearing** — `claim-work --slug-for <this doc> <rank>`
@@ -616,11 +663,12 @@ rather than removed and renumbered. New work is appended at the end.
    `ci-speedup-7` (verified live 2026-09-01). 🔴 **And re-read the premise first: #1211 `1a4350f3`
    sited the store on tmpfs**, so the contention this item was motivated by may already be gone.
    ⚠ **CORRECTED 2026-09-01 — do NOT act on the sentence above without reading the CI block's
-   fixture/call-site table first.** #1211 sited **one fixture of two** in one file of three; **123 of that
-   file's 256** `running()` sites — the 110 in `scoped_store` PLUS 13 that belong to no fixture,
-   three of them write-path — plus both cairn suites are still disk-backed, and the tmpfs probe is UNVERIFIED on
-   `talos-xr6-r7p`. So the contention is **not** established as gone, and de-prioritising this item
-   on that reading is the misroute rank 13 exists to prevent.
+   fixture/call-site table first.** ⚠ **SUPERSEDED 2026-09-02 by #1219 (`b4fde334`): both fixtures
+   AND both cairn suites are now sited, and the disk-backed population is **25 of 270** `with
+   running(...)` sites, all unfixtured — down from 123 of 256. The tmpfs probe is STILL UNVERIFIED
+   on `talos-xr6-r7p`, so the contention is still **not** established as gone; the remaining
+   exposure is ~5x smaller and is entirely the unfixtured population. Re-derive before acting —
+   see the RE-MEASURED bullet in `## State now`.
    forcing: none
 11. ✅ **DONE (2026-09-01)** — `origin/main` merged forward into `feat/handoff-audit`, gate green,
    **#1064 MERGED as `f71ff648`**. It was 124 behind, not the 93 recorded — re-derive when you act.
@@ -640,8 +688,8 @@ rather than removed and renumbered. New work is appended at the end.
    in the CI block above. Mechanism text kept verbatim, as the item required. 🔴 The audit round
    caught that the first draft said "`test_subsystem_store_api.py` is now sited" — **false at
    fixture granularity** (`scoped_store`, 110 sites) **and then wrong again at fixture level —
-   the unit is the CALL SITE, 123 of 256 disk-backed** — i.e. the fix for a
-   one-of-three error repeated it one level down. That is the shape to expect, not a one-off.
+   the unit is the CALL SITE** — i.e. the fix for a one-of-three error repeated it one level down.
+   That is the shape to expect, not a one-off: it recurred AGAIN 9 h after merge, via #1219.
    🔴 **Left undone deliberately — the next reader's, and it is a devrc-repo edit, not a doc edit:**
    `scripts/ci-repro/README.md` carries **no mitigation note** (zero hits for
    `tmpfs|1211|mitigat|shm` at `origin/main`), so the reproducer reads as fully live at the one place
@@ -650,9 +698,12 @@ rather than removed and renumbered. New work is appended at the end.
    is not one of them** (verified 2026-09-01), so its merge leaves this deliverable exactly as
    undone; it also leaves the *second* half of the caveat standing, because `store_siting.py`'s
    probe keeps a disk fallback and nobody has verified it engages on `talos-xr6-r7p`.
-   **(a) = that README names `1a4350f3` AND says what is STILL unsited — and "still unsited" is
-   THREE populations (`scoped_store`, the two cairn suites, the 13 unfixtured sites), so with the
-   sha that is FOUR required greps.** 🔴 An alternation would certify all four by naming one, which
+   🔴 **REVISED 2026-09-02 — the revision SHRINKS the condition. #1219 sited `scoped_store` and
+   both cairn suites, so "still unsited" is now ONE population: the 25 unfixtured sites. a2 and a3
+   below are OBSOLETE and must NOT be required — demanding those words would force a FALSE sentence
+   into the README. Require a1 + a4 only.**
+   **(a) = that README names `1a4350f3` AND says what is STILL unsited — as of #1219, the
+   unfixtured population alone.** 🔴 An alternation would certify all four by naming one, which
    is this arc's own recurring bug expressed as a regex. ⚠ **This sentence said "three greps" until
    round 5 — one round AFTER a4 was added below it, so the definition of (a) contradicted its own
    check for a whole round. Count the `# (aN)` lines in the block; they are the authority.**
