@@ -18,6 +18,51 @@ let
   # DDL/insert path (snapshot #1 wrote 23 rows to prod, telemetry-on, and the DSN role
   # is confirmed to have CREATE SCHEMA). The timer runs hourly (see the timer below).
   enableInitiativesSync = true;
+  # handoff-index-sync (P1) master switch — gates ONLY whether the TIMER is wired
+  # into timers.target; the service definition is always emitted, so
+  # `systemctl --user start handoff-index-sync` works by hand.
+  #
+  # 🔴 OFF, and it must stay off until a supervised live run has validated the
+  # write path. This is exactly `enableInitiativesSync`'s original posture and for
+  # the same reason: `handoff_index.py` creates a NEW schema object
+  # (`initiatives.handoff_section`, with a GENERATED tsvector column and a GIN
+  # index) in a PROD database, and NOTHING in the test suite can exercise that —
+  # the gate runs in a nix sandbox with no cluster and no Postgres, so the DDL has
+  # been read and never executed. A routine `ship.sh` must not be able to silently
+  # arm an unvalidated prod-write timer. Flip it after a hand-run of
+  # `--dry-run` and then a real `--rebuild --write` has been watched to work.
+  # 🔴 `--write` IS PART OF THAT INSTRUCTION NOW, not a detail: dry-run is the
+  # module's DEFAULT, so a validation run of bare `--rebuild` would derive,
+  # report, write NOTHING and exit 0 — and be read as the supervised live run
+  # this switch is waiting for.
+  # 🔴 AND THE `--dry-run` HALF IS ONLY A PRE-FLIGHT SINCE IT LEARNED TO FAIL.
+  # It used to skip the refusal guard entirely: MEASURED, `--repo /nope
+  # --rebuild` exited 0 with no "REFUS" text while the identical argv plus
+  # `--write` exited 4 — the documented pre-flight passed for a config the real
+  # run refuses, which is the shape `claude/RULES.md` calls a harness that cannot
+  # go red. It now evaluates the collision and refusal gates in BOTH modes and
+  # returns the same exit code, so a green dry-run is evidence about the run that
+  # follows it. Read the exit code, not just the report.
+  # 🔴 AND IT NOW PRINTS THE DELETE SCOPE — the one thing a pre-flight for a
+  # DESTRUCTIVE command has to show, and the one thing it could not. The scope
+  # was computed only inside the `--write` branch (it needed `store.repos()`), so
+  # `--dry-run` was structurally incapable of reaching it. With the
+  # disappeared-from-config collection moved behind an explicit `--prune`, a
+  # default rebuild's scope is exactly the MEASURED labels — a fact about the
+  # derivation alone — so dry-run prints it under `## rebuild delete scope`.
+  # ⚠ THE REMAINING BLIND SPOT, STATED RATHER THAN PAPERED OVER: under `--prune`
+  # the scope also covers stored labels this config does not name, and that set
+  # exists only in the table. A `--dry-run --prune` says so in those words. This
+  # unit never passes `--prune`, so the scope it prints IS complete.
+  # 🔴 THE PLAN IS PRINTED ONLY AFTER EVERY GATE HAS PASSED, in BOTH modes — so a
+  # REFUSING dry-run shows the refusal and NO `## rebuild delete scope` block.
+  # That is the fix, not a regression: the block's sentences describe what the run
+  # WILL DO, and above the gate they were statements about a run that never
+  # happened (measured: `--rebuild --prune --write` with one handle unset printed
+  # "the full bound scope is printed with the row count below" at rc 4, with the
+  # store never opened). Absence of the block on a red run is therefore expected;
+  # the exit code is still what you read.
+  enableHandoffIndexSync = false;
   # Drift-deadman master switch (scripts/drift-check.sh) — gates ONLY whether the
   # timer is wired into timers.target. The SERVICE definition is always emitted, so
   # `systemctl --user start drift-check` works by hand on either host regardless.
@@ -2788,6 +2833,153 @@ in
     Timer = {
       OnStartupSec = "2min";
       OnUnitActiveSec = "15min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # ── HANDOFF-DOC SECTION INDEX (scripts/lib/handoff_index.py) ─────────────────
+  # Derives a SECTION-grained full-text index of the handoff corpus into
+  # `initiatives.handoff_section` (re-measured 2026-09-01: devrc 94 docs / 968
+  # sections off origin/main, homelab-talos 54 / 512 off origin/trunk), so `/resume` and
+  # subagents can query what past sessions ALREADY wrote down instead of
+  # re-deriving it. Sibling of initiatives-sync: same database, same schema, same
+  # MailDB connection path (kubectl port-forward + psycopg2 + DSN-from-secret).
+  #
+  # 🔴 THE CORPUS IS READ FROM GIT REFS, NOT THE WORKING TREE. This box carries
+  # many worktrees per repo; a working-tree scan would index mid-edit branches, the same doc
+  # N times, and stale orphan copies, and two runs an hour apart would disagree
+  # for reasons unrelated to what anyone wrote. Each repo's mainline is DERIVED
+  # via scripts/lib/git_mainline.py — never hardcoded to main/trunk. (The measured
+  # worktree count lives in handoff_index.py's docstring and NOWHERE ELSE: it was
+  # carried in three places and two of them disagreed with the third inside one
+  # PR. Nothing pins it, so a copy is a claim that rots. Do not re-state it here.)
+  #
+  # 🔴 `--rebuild` DELETES, AND THAT IS SAFE ONLY BECAUSE OF WHAT GUARDS IT. The
+  # index is DERIVED and DISPOSABLE and git is the system of record — but "a
+  # re-run can rebuild it" is a claim about a run that MEASURED something. The
+  # delete is refused (non-zero, so the OnFailure toast below fires) when ALL
+  # repos come back UNMEASURED or the derivation is empty, and it runs in the
+  # SAME transaction as the inserts: it used to commit on its own, so any
+  # exception in the row loop left the table empty AND committed. A full rebuild
+  # each pass is also what keeps a SHRUNK doc from leaving orphaned high ordinals
+  # behind (see PostgresSectionStore.write).
+  # 🔴 IT IS A SCOPED `DELETE … WHERE repo = ANY(%s)`, NOT A `TRUNCATE`, AND THIS
+  # COMMENT SAID TRUNCATE FOR ONE ROUND AFTER THAT CHANGED. The unqualified
+  # TRUNCATE was a measured data-loss bug: `--repo <one> --rebuild --write`
+  # emptied EVERY repo and reported success. The bound scope is the labels this
+  # run MEASURED and NOTHING else — a rebuild never deletes rows for a repo it
+  # was not told about (see the Environment block below for what that cost when
+  # it did).
+  #
+  # WHY 6h AND NOT 15min: unlike initiative-scan there is no live-state component
+  # here — a handoff doc changes when a session ends, a handful of times a day.
+  # The run is git-only plus one write transaction (no gh, no ClickHouse, no LLM),
+  # so it is cheap; the interval is set by how fast the SOURCE moves, not by cost.
+  systemd.user.services.handoff-index-sync = lib.mkIf serverMode {
+    Unit = {
+      Description = "Handoff index sync — handoff docs (git refs) → homelab Postgres (initiatives.handoff_section)";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Hard ceiling so a half-hung kubectl can't wedge the timer; the cgroup is
+      # killed and the timer re-arms on the next OnUnitActiveSec. 300s is ample —
+      # the measured corpus is 424 `git show` calls plus one write transaction.
+      TimeoutStartSec = 300;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.kubectl pkgs.bash pkgs.coreutils ]}"
+        "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
+        "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        "HOME=%h"
+        # 🔴 The repo set, as EXPLICIT env handles. A user unit does NOT source
+        # .zshenv, so `handoff_index.default_repos()` would find none of the
+        # $DEVRC/$HOMELAB/… handles and index NOTHING — a silent zero that renders
+        # as an empty index, which the search CLI reports as `🔴 BROKEN INDEX`.
+        #
+        # 🔴 IT IS **EVERY** HANDLE, DERIVED FROM nix/agent-handles.nix, AND IT
+        # USED TO BE A HARDCODED TWO. That is defence in depth for a data-loss
+        # bug fixed on the Python side, and the incident is worth having here
+        # because the unit's ENVIRONMENT was the whole of it. This unit set only
+        # $DEVRC and $HOMELAB while a human `--dry-run` on this host measures
+        # FOUR repos (439 docs / ~4,008 sections). The rebuild's delete then
+        # collected any stored label "the config no longer names" — and from
+        # inside this unit, `datapacket-talos` and `civitai` ARE unnamed. Armed,
+        # the timer would have deleted ~2,476 of ~4,008 sections every 6h,
+        # exit 0, printing `## warnings: none` above it, with no PARTIAL INDEX
+        # fired because from here nothing is UNMEASURED. Two independent fixes,
+        # and neither one is a substitute for the other:
+        #   * a rebuild NEVER deletes a repo it was not told about — the
+        #     collection is now an explicit `--prune` this unit does not pass
+        #     (`rebuild_delete_labels`), and orphaned labels are REPORTED;
+        #   * and the unit's config can no longer silently differ from the
+        #     module's, because both sides derive from ONE file. Every handle
+        #     `handoff_index.REPO_ENV_HANDLES` reads is exported here.
+        #     `scripts/tests/test_handoff_index.py::TestTheUnitEnvironmentMatches
+        #     TheHandlesTheIndexerReads` fails if the two sets diverge, so
+        #     "they disagree" is a red gate rather than a silent delete.
+        #     ⚠ THE TWO DIRECTIONS ARE NOT SYMMETRIC, AND THIS COMMENT USED TO
+        #     IMPLY THEY WERE. A handle the module reads and nix does not export
+        #     is a HAZARD (the unit sees a narrower config than a human) and is
+        #     forbidden outright. A handle nix exports and the module does not
+        #     read is a CHOICE — `agent-handles.nix` serves every agent shell,
+        #     not just this indexer, and `CIVITAI_CLI` is a client checkout with
+        #     no handoff corpus of its own. That direction is pinned against an
+        #     ENUMERATED ledger in the test, so a new handle forces a decision
+        #     instead of being silently excluded; it is not left unchecked. The
+        #     sets DID diverge (five declared, four read) while this line claimed
+        #     otherwise and the suite was green.
+        #
+        # 🔴 A HANDLE POINTING AT AN ABSENT CHECKOUT IS NOT FREE, AND THIS
+        # COMMENT USED TO SAY IT WAS. It is reported as UNMEASURED rather than
+        # folded into a clean count — that part is true — but the run then
+        # proceeds as a PARTIAL index: the absent repo contributes nothing, keeps
+        # whatever rows it already had (the rebuild's delete is scoped to what
+        # MEASURED), and every run prints a `🔴 PARTIAL INDEX` warning. So a
+        # handle for a repo this host may not have is SUPPORTED, not free:
+        # expect a standing warning on every run, and do not read an unscoped
+        # query's silence as evidence that repo is silent. That standing warning
+        # is the price of the paragraph above, and it is the right side of the
+        # trade: a loud partial beats a silent 62% delete.
+        # ⚠ The refusal it does NOT trip is worth naming, because the first
+        # version of that guard tripped on exactly this: refusing whenever ANY
+        # repo was unmeasured made a host with one absent checkout fire
+        # `OnFailure=notify-failure@%n.service` 4×/day forever with the index
+        # frozen — a permanently-red gate, which trains everyone to click
+        # through. It now refuses only when ALL repos are unmeasured, when the
+        # measured subset yields zero rows, or when `--prune` (never passed
+        # here) meets an unmeasured repo.
+      ] ++ lib.mapAttrsToList (n: v: "${n}=${v}")
+        (import ./agent-handles.nix { home = "%h"; }).repos;
+      # nix-shell pulls psycopg2 (the _db.py write path). git/kubectl come from
+      # PATH above and are inherited into the nix-shell (it is not --pure).
+      # 🔴 `--write` IS REQUIRED AND IS NOT DECORATION. Dry-run is the module's
+      # DEFAULT: a bare invocation derives and reports and touches no database,
+      # because `main([])` used to open a port-forward to prod and upsert every
+      # row — the shape somebody types to see what it does was a prod write.
+      # Dropping `--write` here turns this unit into a very expensive no-op that
+      # still exits 0, so it is load-bearing in both directions.
+      ExecStart = ''${pkgs.bash}/bin/bash -c "exec nix-shell -p 'python3.withPackages(p:[p.psycopg2])' --run 'python %h/workspace/devrc/scripts/lib/handoff_index.py --rebuild --write'"'';
+      # Re-run the unit when the deriver changes (cf. X-Restart-Triggers above).
+      X-Restart-Triggers = [ "${../scripts/lib/handoff_index.py}" ];
+    };
+  };
+
+  # DOUBLE-GATED: serverMode (workbench-only) AND enableHandoffIndexSync (the
+  # OFF-by-default master switch in the let-block above). With the switch false
+  # the timer unit is not emitted at all, so no deploy can wire an unvalidated
+  # prod-write timer into timers.target — the DDL in this path has been read and
+  # never executed (the gate's nix sandbox has no Postgres).
+  systemd.user.timers.handoff-index-sync = lib.mkIf (serverMode && enableHandoffIndexSync) {
+    Unit = {
+      Description = "Periodic timer for the handoff-doc section index";
+    };
+    Timer = {
+      OnStartupSec = "10min";
+      OnUnitActiveSec = "6h";
     };
     Install = {
       WantedBy = [ "timers.target" ];

@@ -90,6 +90,21 @@ ALLOWLIST = [
     # literal it exists to find. Match the assertion's shape instead.
     ("scripts/tests/test_session_stamp_seam.py", "assert first ==",
      "ASSERTS the hook's shebang (a fail-open requirement), never writes one"),
+    # Shape (b) again, same reasoning as the entry above. `handoff_index.py` and
+    # `handoff_search.py` are 0755 and document bare invocation, so a test pins
+    # that the two claims agree — a shebang on a non-executable file is a claim
+    # the filesystem refuses. It reads `scripts/lib/*.py` off disk; it writes no
+    # stub and execs nothing, so `testlib.mockbin.write_exec` has nothing to own
+    # here. The assertion was already reduced to the two-character prefix plus a
+    # separate `"python3" in first`, precisely so it does NOT carry the
+    # env-based interpreter path — but a quote followed by those two characters
+    # is itself one of the scan's needles, which is the guard matching text
+    # rather than intent and is why this pin exists rather than a reword.
+    # 🔴 The needle deliberately does not spell the prefix, or
+    # `test_this_guards_source_does_not_match_itself` would flag this entry.
+    ("scripts/tests/test_handoff_index.py", "assert first.startswith(",
+     "ASSERTS a module's shebang shape to justify its executable bit; writes no "
+     "stub and execs nothing"),
     ("scripts/tests/test_playwright_nixos.py", "/bin/sh",
      "writes /bin/sh directly — absolute, present in the sandbox"),
     ("scripts/tests/test_notify_failure.py", "_bash",
