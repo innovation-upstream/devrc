@@ -1636,14 +1636,21 @@ class TestTheAuditorRefusesAnUnstampedDefault:
 
 
 class TestTheAuditorStaysPermissiveOnAnExplicitStore:
-    """🔴 INVARIANT GUARDS, NOT REGRESSION COVERAGE — all three pass on
-    pre-change code and are labelled so.
+    """🔴 THE HALF THE CHANGE MUST NOT MOVE.
 
-    They pin the half of the contract the change must NOT move. Every prescribed
-    invocation of this tool passes `--store` explicitly (`prune-index/SKILL.md`
-    x4), as does every fixture in `test_subsystem_audit.py`, and a `cp -a` backup
-    or a restored bundle is the same case. A refusal that reached them would be a
-    regression dressed as a guard.
+    Every prescribed invocation of this tool passes `--store` explicitly
+    (`prune-index/SKILL.md` x4), as does every fixture in
+    `test_subsystem_audit.py`, and a `cp -a` backup or a restored bundle is the
+    same case. A refusal that reached them would be a regression dressed as a
+    guard.
+
+    🔴 LABELLED HONESTLY, AND THE LABEL IS NOT UNIFORM — measured at
+    `c616b7ae`, not assumed. Two of these three are INVARIANT GUARDS: they pass
+    on pre-change code and are NOT regression coverage. The first is RED at that
+    base, but for a DIFFERENT defect than the store repoint — `render`'s
+    `out=sys.stdout` default bound the stream at import, so `capsys` saw nothing
+    and the content assertion failed. It is regression coverage for THAT fix, and
+    it is the permissive contract only at HEAD.
     """
 
     def test_an_explicit_store_at_an_unstamped_path_still_audits(
@@ -1899,8 +1906,14 @@ class TestTheHandoffPrescriptionReadsTheCache:
         cache survives — its stated contract, not an edge case. Under `&&` the
         audit would then not run at all, during exactly the outage when a
         stamped-but-stale cache is still worth auditing and its stamp is what
-        says how stale. Pinned on the COMMAND, because the `PRESCRIPTION` pin
-        above would be satisfied by an `&&` variant if it were ever relaxed.
+        says how stale.
+
+        🔴 AN INVARIANT GUARD ON THE PIN ITSELF, NOT ON THE DOCUMENT — green at
+        `c616b7ae`, and NOT regression coverage. `PRESCRIPTION` is what the test
+        above compares the file against, so if someone relaxes the pin to an
+        `&&` variant the document check keeps passing and this is the only thing
+        that objects. Guarding the constant a guard is built from, because the
+        document arm cannot see its own expectation change.
         """
         assert "&&" not in self.PRESCRIPTION
         assert f"{rs.REMEDY};" in self.PRESCRIPTION
