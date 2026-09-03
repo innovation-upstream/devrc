@@ -140,6 +140,15 @@ def _norm(text: str) -> str:
 #: WORDS is walkable by REWORDING, so pin the whole normalised string. Written
 #: here rather than imported so the test states the expectation independently of
 #: the implementation it checks.
+#:
+#: 🔴 THE TAIL CHANGED IN ROUND 5: it used to end at "remove the rows
+#: deliberately with `--rebuild --prune --write` (which refuses unless every
+#: handle is SET …)", which is a command the state it describes — a repo
+#: GENUINELY GONE — makes impossible on every host, because the handles are
+#: existence-guarded. The retired-repo route (drop the handle from the nix file
+#: AND from `REPO_ENV_HANDLES`, ship, then prune) is now named, and
+#: `TestARetiredRepoIsToldTheOneRemedyThatWorks` proves it is the one that
+#: actually unblocks the prune rather than merely asserting the words.
 _EXPECTED_ORPHAN_WARNING = (
     "⚠ ORPHANED LABELS — the table holds 2 repo label(s) THIS config does not "
     "name: plimforth, wibbleton-retired. A query can still answer FROM them, and "
@@ -148,10 +157,37 @@ _EXPECTED_ORPHAN_WARNING = (
     "only ever deletes repos it was told about. If the repo is meant to be "
     "indexed, RE-ADD ITS HANDLE — that is the fix whenever the checkout still "
     "exists somewhere, and an unset handle is the ordinary reason a label reads "
-    "as unnamed here. Only when the repo is genuinely gone, remove the rows "
-    "deliberately with `--rebuild --prune --write` (which refuses unless every "
-    "handle is SET and every repo MEASURES, because an absent or renamed "
-    "checkout looks exactly like a removed one)."
+    "as unnamed here. Only when the repo is genuinely gone do you remove the "
+    "rows, and HOW depends on whether any host still has the checkout. If one "
+    "does, run `--rebuild --prune --write` THERE: it refuses unless every handle "
+    "is SET and every repo MEASURES, because an absent or renamed checkout looks "
+    "exactly like a removed one. If the checkout is gone EVERYWHERE, no host can "
+    "ever satisfy that — the handles are existence-guarded, so an absent "
+    "checkout is an unset handle on all of them — and the fix is a CONFIG "
+    "change, not a command: drop the handle from nix/agent-handles.nix and from "
+    "handoff_index.REPO_ENV_HANDLES, ship it, and then --prune."
+)
+
+#: 🔴 THE OTHER HALF OF THE SAME DEFECT, PINNED THE SAME WAY. `--prune`'s
+#: config-width refusal offered "Set every handle and re-run --prune from a host
+#: that has all the checkouts — or drop --prune", and for a RETIRED repo neither
+#: exists: the checkout is gone everywhere, so no host has the handle set, and
+#: dropping `--prune` leaves the rows. Two handles, in `REPO_ENV_HANDLES` order.
+_EXPECTED_PRUNE_CONFIG_REFUSAL = (
+    "REFUSING --rebuild --prune: 2 of 4 repo handle(s) are UNSET — $DATAPACKET, "
+    "$CIVITAI. --prune deletes every stored label THIS config does not name, "
+    "which is only sound if this config is as wide as the corpus; an unset "
+    "handle narrows it SILENTLY (the repo produces no derivation at all, so it "
+    "is not even UNMEASURED), and its rows would be collected as 'removed from "
+    "config'. If those checkouts still exist somewhere, re-run --prune from a "
+    "host that has ALL of them. If the repo is RETIRED and its checkout is gone "
+    "everywhere, NO host can satisfy this guard — the handle is "
+    "existence-guarded, so it is unset on all of them: drop it from BOTH "
+    "nix/agent-handles.nix and handoff_index.REPO_ENV_HANDLES, ship that, and "
+    "then --prune, which stops asking for a handle the config no longer has. "
+    "Dropping --prune is not a third route to the same place: it un-blocks the "
+    "REBUILD but deletes only what this run MEASURED, so the rows you came to "
+    "remove stay exactly where they are."
 )
 
 
@@ -3404,3 +3440,435 @@ class TestAnUnreadableDocIsNotAnAbsentOne:
         assert doc["repos"][0]["unreadable"] == [
             "claudedocs/handoff-widget-relay.md"
         ]
+
+
+# --------------------------------------------------------------------------- #
+# Round 5 — operator guidance is a claim about the state it is printed in
+# --------------------------------------------------------------------------- #
+
+
+class TestARetiredRepoIsToldTheOneRemedyThatWorks:
+    """🔴 EVERY REMEDY THIS CLI PRINTS NAMES A COMMAND; NOT ALL OF THEM CHECKED
+    THAT THE STATE ALLOWS IT. Two shipped sentences recommended `--rebuild
+    --prune --write` (or "set every handle and re-run it") for a repo that is
+    GENUINELY RETIRED — and `nix/agent-handles.nix` existence-guards every handle
+    on its directory, so a deleted checkout leaves that handle unset on EVERY
+    host. `prune_config_refusal` then refuses everywhere, forever: the two
+    remedies the tool offered were "do it on a host that cannot exist" and "drop
+    --prune", which un-blocks the rebuild while leaving the exact rows the
+    operator came to remove.
+
+    The prose pins below are WHOLE NORMALISED STRINGS, for
+    `_EXPECTED_ORPHAN_WARNING`'s reason. The behavioural test after them is what
+    makes those words more than an assertion about themselves: it drives the
+    retired-repo state end to end and shows that the newly-named route — drop the
+    handle from `REPO_ENV_HANDLES` — is the one that actually lets the prune run,
+    while the state the old sentences described stays refused."""
+
+    def test_the_orphan_warning_names_the_config_route(self):
+        got = hi.orphan_label_warning(("plimforth", "wibbleton-retired"))
+        assert _norm(got[0]) == _norm(_EXPECTED_ORPHAN_WARNING)
+
+    def test_the_prune_config_refusal_names_the_config_route(self):
+        """Pinned whole, so a reword that drops the retired-repo route fails.
+
+        The literal counts in `_EXPECTED_PRUNE_CONFIG_REFUSAL` are asserted
+        against the tuple first: adding a handle legitimately changes "2 of 4",
+        and a bare string mismatch would send the next reader hunting a prose
+        change that never happened."""
+        assert len(hi.REPO_ENV_HANDLES) == 4, (
+            "REPO_ENV_HANDLES changed size — update the '2 of N' literal in "
+            "_EXPECTED_PRUNE_CONFIG_REFUSAL, and re-read it: the message names "
+            "the handles by value too."
+        )
+        got = hi.prune_config_refusal(("DATAPACKET", "CIVITAI"))
+        assert got is not None
+        assert _norm(got) == _norm(_EXPECTED_PRUNE_CONFIG_REFUSAL)
+
+    def test_dropping_the_handle_is_what_actually_unblocks_the_prune(
+            self, tmp_path, monkeypatch, capsys):
+        """🔴 THE BEHAVIOURAL HALF — a guard on WORDS is walkable by REWORDING,
+        and a remedy is a claim that a command WORKS, which only running it can
+        settle. Three runs over ONE fixture, differing in exactly one thing:
+
+          1. the retired repo's handle is unset (the state on every host once its
+             checkout is deleted) -> rc 4, the store is never opened. This is the
+             state the old prose told the operator to "re-run from a host that
+             has all the checkouts" out of, and no such host exists.
+          2. same argv, `--prune` dropped -> rc 0, and the retired label is NOT
+             in the bound DELETE. The rebuild proceeds; the rows stay. That is
+             the second old remedy, measured, and it does not remove them.
+          3. same argv as (1), with the retired handle dropped from
+             `REPO_ENV_HANDLES` — the config change the message now names -> rc 0
+             and the retired label IS in the bound DELETE.
+
+        Only (3) reaches the outcome the operator wanted, which is the whole
+        content of the fixed sentence."""
+        retired = hi.REPO_ENV_HANDLES[-1]
+        retired_label = f"{retired.lower()}repo"
+        live = _every_handle_set(tmp_path)
+        del live[retired]                      # its checkout no longer exists
+        _apply_handles(monkeypatch, live)
+        stored = tuple(f"{h.lower()}repo" for h in hi.REPO_ENV_HANDLES)
+
+        # 1. the remedy the message used to lead with: impossible here.
+        rc = hi.main(["--rebuild", "--prune", "--write"], open_store=_refusing_store())
+        assert rc == hi.RC_REFUSED
+        assert "handle(s) are UNSET" in capsys.readouterr().err
+
+        # 2. the remedy it offered second: succeeds, and removes nothing.
+        conn = StoredReposConn(stored)
+        rc = hi.main(["--rebuild", "--write"], open_store=_recording_store(conn))
+        capsys.readouterr()
+        assert rc == hi.RC_OK
+        deleted = conn.params_for("DELETE")[0][0]
+        assert retired_label not in deleted, (
+            "a --prune-less rebuild must not delete the retired label — if it "
+            "does, the message's claim that dropping --prune leaves the rows is "
+            "false and this whole remedy needs rewriting"
+        )
+
+        # 3. the remedy it now names: drop the handle from the config.
+        monkeypatch.setattr(
+            hi, "REPO_ENV_HANDLES",
+            tuple(h for h in hi.REPO_ENV_HANDLES if h != retired))
+        conn = StoredReposConn(stored)
+        rc = hi.main(["--rebuild", "--prune", "--write"],
+                     open_store=_recording_store(conn))
+        err = capsys.readouterr().err
+        assert rc == hi.RC_OK
+        assert "REFUSING" not in err
+        assert retired_label in conn.params_for("DELETE")[0][0]
+
+    def test_the_all_unmeasured_refusal_does_not_offer_a_run_that_writes_nothing(
+            self, tmp_path, monkeypatch, capsys):
+        """🔴 THE THIRD SITE OF THE SAME SHAPE, and its old remedy was measured
+        false rather than merely unhelpful. The arm said "re-run without
+        --rebuild to refresh what CAN be measured" in the one state where NOTHING
+        can be measured. MEASURED, same argv minus `--rebuild`: rc 0, `wrote 0
+        section row(s)`, store opened — a silent success, which is verbatim the
+        failure the sentence directly above it gives as the reason to refuse.
+
+        The second half of this test is that measurement, run here so the prose
+        assertion cannot outlive the behaviour it describes."""
+        bad = {h: str(tmp_path / f"nope-{h.lower()}") for h in hi.REPO_ENV_HANDLES}
+        _apply_handles(monkeypatch, bad)
+
+        rc = hi.main(["--rebuild", "--write"], open_store=_refusing_store())
+        err = capsys.readouterr().err
+        assert rc == hi.RC_REFUSED
+        assert "ALL 4 repo(s) came back UNMEASURED" in err
+        assert "Fix the repo handles — in THIS state that is the only remedy" in err
+        assert "writes 0 row(s) and exits 0" in err
+        # The retracted remedy must not survive anywhere in the message.
+        assert "refresh what CAN be measured" not in err
+
+        # …and the claim it now makes about that run is true.
+        conn = StoredReposConn(())
+        rc = hi.main(["--write"], open_store=_recording_store(conn))
+        out = capsys.readouterr().out
+        assert rc == hi.RC_OK
+        assert "wrote 0 section row(s)" in out
+        assert "INSERT" not in conn.kinds()
+
+
+class TestTheNoMatchRemedyMatchesTheFilterTheRunActuallyHAD:
+    """🔴 THE FOURTH SITE, IN THE OTHER MODULE. `NO MATCH` told every reader to
+    "widen --repo / --section", including the common case where the run passed
+    neither: there is no filter to widen, and the advice reads as "your scope
+    caused this zero" when the scope was the entire index. `outcome.filtered`
+    is the discriminator and was already being read two lines above for the
+    parenthetical, which is what makes this a miss rather than a missing signal.
+
+    A differential over the ONE variable, so nothing else can explain the two
+    messages: same corpus, same query that matches nothing, `--section` present
+    or absent."""
+
+    def _repo(self, tmp_path):
+        repo = tmp_path / "zarfrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        return repo
+
+    def test_an_unfiltered_no_match_does_not_send_you_to_widen_a_filter(
+            self, tmp_path, capsys):
+        repo = self._repo(tmp_path)
+        rc = hs.main(["--query", "brimsculp", "--offline", "--offline-repo", str(repo)])
+        out = capsys.readouterr().out
+        # rc 0: `no-match` is the one zero that IS an answer about the corpus —
+        # the index was searched and holds nothing on this. Asserted so the test
+        # cannot pass off some other status' message as the one under test.
+        assert rc == 0
+        assert "NO MATCH" in out
+        assert "widen --repo / --section" not in out
+        assert "There is no filter to widen" in out
+        assert "every section in the index was already in scope" in out
+
+    def test_a_FILTERED_no_match_still_says_widen(self, tmp_path, capsys):
+        """The differential. Without it the fix is indistinguishable from one
+        that deleted the widen advice outright, which would be a worse message
+        for the case it IS true of."""
+        repo = self._repo(tmp_path)
+        rc = hs.main(["--query", "brimsculp", "--offline", "--offline-repo", str(repo),
+                      "--section", "goal"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "NO MATCH" in out
+        assert "widen --repo / --section" in out
+        assert "There is no filter to widen" not in out
+
+
+class TestThePlanDescribesTheRunThatActuallyHappens:
+    """🔴 THE REBUILD PLAN WAS PRINTED ABOVE THE GATES, SO ON A REFUSING RUN
+    EVERY SENTENCE IN IT WAS ABOUT A RUN THAT NEVER HAPPENED. `rebuild_plan_lines`
+    is handed `args.write` — the INTENT — and its branches describe an OUTCOME.
+
+    MEASURED before the fix, both at rc 4 with the store never opened:
+
+      * `--rebuild --prune --write`, three handles set and one unset: stdout
+        carried "this run opens the table, and the full bound scope is printed
+        with the row count below". The recorded SQL log was `[]` — no table was
+        opened, no bound scope and no row count were ever printed.
+      * `--rebuild --write` with every repo unmeasured: "…is REPORTED (see
+        ORPHANED LABELS below) and kept", above a run that emitted no ORPHANED
+        LABELS section at all.
+
+    The fix is ORDERING — `main` prints the block after every gate has passed —
+    chosen over threading a "this run will actually write" boolean, because that
+    boolean IS "no gate fired" and would be a second spelling of the gate's own
+    verdict, free to drift from it. Ordering also makes the two sentences that
+    speak about a DIFFERENT run sound, since the gates are mode-identical.
+
+    🔴 THE POSITIVE CONTROL IS NOT OPTIONAL HERE. Every assertion below is an
+    ABSENCE, and a plan block deleted outright would satisfy all of them; the
+    passing runs at the end are what separate "printed only when true" from
+    "never printed"."""
+
+    def _plan_absent(self, out, err):
+        both = out + err
+        assert "## rebuild delete scope" not in both
+        assert "DELETE (measured, will be re-derived)" not in both
+        assert "KEPT (configured but UNMEASURED)" not in both
+
+    def test_a_refusing_prune_write_prints_no_plan_promising_a_bound_scope(
+            self, tmp_path, monkeypatch, capsys):
+        handles = _every_handle_set(tmp_path)
+        handles.pop(hi.REPO_ENV_HANDLES[-1])
+        _apply_handles(monkeypatch, handles)
+        rc = hi.main(["--rebuild", "--prune", "--write"], open_store=_refusing_store())
+        out, err = capsys.readouterr()
+        assert rc == hi.RC_REFUSED
+        assert "handle(s) are UNSET" in err
+        self._plan_absent(out, err)
+        assert "the full bound scope is printed with the row count below" not in out + err
+
+    def test_a_refusing_rebuild_write_does_not_promise_an_orphan_report(
+            self, tmp_path, monkeypatch, capsys):
+        bad = {h: str(tmp_path / f"nope-{h.lower()}") for h in hi.REPO_ENV_HANDLES}
+        _apply_handles(monkeypatch, bad)
+        rc = hi.main(["--rebuild", "--write"], open_store=_refusing_store())
+        out, err = capsys.readouterr()
+        assert rc == hi.RC_REFUSED
+        self._plan_absent(out, err)
+        assert "see ORPHANED LABELS below" not in out + err
+
+    def test_a_refusing_prune_DRY_RUN_does_not_promise_what_the_write_run_prints(
+            self, tmp_path, monkeypatch, capsys):
+        """The third branch, and the one a `write` boolean would not have fixed:
+        its claim is about a DIFFERENT run ("The --write run prints the full
+        bound scope"), which is false in exactly the states where that run also
+        refuses."""
+        handles = _every_handle_set(tmp_path)
+        handles.pop(hi.REPO_ENV_HANDLES[-1])
+        _apply_handles(monkeypatch, handles)
+        rc = hi.main(["--rebuild", "--prune"], open_store=_refusing_store())
+        out, err = capsys.readouterr()
+        assert rc == hi.RC_REFUSED
+        self._plan_absent(out, err)
+        assert "The --write run prints the full bound scope" not in out + err
+
+    def test_a_refusing_SCOPED_rebuild_prints_no_plan_either(self, tmp_path, capsys):
+        """A scoped run has its own plan branch, and its own way to refuse: a
+        repo that resolves and yields zero rows. Included so the class covers a
+        gate other than the two prune ones — the ordering fix is not per-gate,
+        and a test suite that only exercised the prune gates could not say so."""
+        repo = tmp_path / "norows"
+        _write_repo(repo, {}, commit=False)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "e", "--allow-empty"],
+                       check=True)
+        rc = hi.main(["--repo", str(repo), "--rebuild", "--write"],
+                     open_store=_refusing_store())
+        out, err = capsys.readouterr()
+        assert rc == hi.RC_REFUSED
+        assert "ZERO rows" in err
+        self._plan_absent(out, err)
+
+    def test_a_PASSING_write_still_prints_the_plan_ABOVE_the_row_count(
+            self, tmp_path, monkeypatch, capsys):
+        """🔴 THE POSITIVE CONTROL, AND IT PINS THE PLAN'S OWN CLAIM. The
+        `--prune --write` branch says the bound scope is "printed with the row
+        count BELOW", so the assertion is on ORDER, not merely on presence: the
+        plan line must precede the success line in the same stream."""
+        _apply_handles(monkeypatch, _every_handle_set(tmp_path))
+        conn = StoredReposConn((*(f"{h.lower()}repo" for h in hi.REPO_ENV_HANDLES),
+                                "wibbleton-retired"))
+        rc = hi.main(["--rebuild", "--prune", "--write"],
+                     open_store=_recording_store(conn))
+        out = capsys.readouterr().out
+        assert rc == hi.RC_OK
+        assert "## rebuild delete scope" in out
+        plan = out.index("the full bound scope is printed with the row count below")
+        count = out.index("wrote ")
+        assert plan < count, (
+            "the plan promises the row count BELOW it; printing it after would "
+            "make the sentence false in the run it is true of"
+        )
+        assert "(after DELETE of 5 repo label(s)" in out
+
+    def test_a_PASSING_dry_run_still_prints_the_plan(self, tmp_path, capsys):
+        """The other half of the control: the pre-flight `nix/home.nix` tells an
+        operator to watch must not have been moved out of dry-run mode."""
+        good = tmp_path / "zarfrepo"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        rc = hi.main(["--repo", str(good), "--rebuild"], open_store=_refusing_store())
+        out = capsys.readouterr().out
+        assert rc == hi.RC_OK
+        assert "## rebuild delete scope" in out
+        assert "DELETE (measured, will be re-derived): zarfrepo" in out
+
+
+class TestTheTwoPruneGuardsHaveAFIXEDOrder:
+    """🟢 THE ORDER `main` CLAIMS WAS UNPINNED. `prune_config_refusal` runs
+    before `rebuild_refusal` and the comment says so, but swapping the two
+    survived the whole suite: `test_the_two_prune_guards_report_in_words_that
+    _cannot_be_confused` builds each state SEPARATELY, and in a state where only
+    one guard can fire the order is unobservable.
+
+    The COMBINED state is the only one that can see it — a handle UNSET *and* a
+    set handle pointing at a checkout that is not there — so it is built here.
+    There is no safety consequence either way (both refuse at rc 4); what is at
+    stake is which DIAGNOSIS the operator reads first, and the config-width one
+    is the precondition for `--prune`'s whole premise."""
+
+    def test_the_config_width_guard_wins_when_BOTH_could_fire(
+            self, tmp_path, monkeypatch, capsys):
+        handles = _every_handle_set(tmp_path)
+        handles.pop(hi.REPO_ENV_HANDLES[-1])                       # UNSET
+        handles[hi.REPO_ENV_HANDLES[1]] = str(tmp_path / "plimforth-renamed")  # UNMEASURED
+        _apply_handles(monkeypatch, handles)
+
+        rc = hi.main(["--rebuild", "--prune", "--write"], open_store=_refusing_store())
+        err = capsys.readouterr().err
+        assert rc == hi.RC_REFUSED
+        # Both guards are ARMED in this state…
+        assert hi.prune_config_refusal(hi.unset_repo_handles()) is not None
+        derivations = [hi.derive_repo(p, label=Path(p).name)
+                       for p, _ in hi.default_repos()]
+        assert any(d.unmeasured for d in derivations), (
+            "the fixture must also arm the read-failure guard, or this test "
+            "measures a state in which the order is still unobservable"
+        )
+        # …and the config-width one is the message the operator gets.
+        assert "handle(s) are UNSET" in err
+        assert "came back UNMEASURED" not in err
+
+
+class TestTheUnreadableReportIsMeasuredForMoreThanOneDoc:
+    """🟢 EVERY W7 FIXTURE HAD EXACTLY ONE UNREADABLE DOC, so `for path in
+    d.unreadable[:1]` SURVIVED the suite: with N == 1 the slice is the identity.
+    `claude/RULES.md`'s "a fixture that can only ever produce the constant's own
+    value cannot see a mutant that hardcodes the literal" — here the constant is
+    the implicit 1.
+
+    So: two repos, with 3 and 4 unreadable docs. Every number an assertion names
+    is pairwise distinct and distinct from 1 and from the repo count — 7 total,
+    3 and 4 per repo, 2 repos — so no mutant can survive by landing on a value
+    the fixture could only ever have produced. The shipped code is correct; what
+    was missing was any measurement that could tell."""
+
+    #: 3 and 4, deliberately not equal to each other, to 1, or to the repo count.
+    A_DOCS = ("handoff-quixotry-latch.md", "handoff-drumble-cache.md",
+              "handoff-snarfle-probe.md")
+    B_DOCS = ("handoff-marganser-log.md", "handoff-blimflark-path.md",
+              "handoff-trundlebore-count.md", "handoff-flanterbly-sweep.md")
+
+    def _broken_repo(self, root, names):
+        """A repo whose mainline LISTS every doc and whose blobs are all gone.
+
+        Each doc body is unique: identical content would share ONE blob, and
+        `_break_every_doc_blob` would fail unlinking the second — the fixture
+        would then be measuring fewer docs than it thinks it is."""
+        docs = {
+            name: DOC_FULL.replace("quixotry relay", f"{name[8:-3]} relay")
+            for name in names
+        }
+        _write_repo(root, docs)
+        return _break_every_doc_blob(root)
+
+    def test_every_unreadable_doc_is_carried_across_the_offline_seam(self, tmp_path):
+        a = tmp_path / "zarfrepo"
+        b = tmp_path / "plimforthrepo"
+        tracked_a = self._broken_repo(a, self.A_DOCS)
+        tracked_b = self._broken_repo(b, self.B_DOCS)
+        assert len(tracked_a) == 3 and len(tracked_b) == 4
+
+        _, _, unmeasured, unreadable = hs._offline_store(
+            [(str(a), "zarfrepo"), (str(b), "plimforthrepo")])
+        assert unmeasured == ()          # both repos MEASURED — that is the trap
+        assert unreadable == (
+            *(("zarfrepo", p) for p in tracked_a),
+            *(("plimforthrepo", p) for p in tracked_b),
+        )
+        assert len(unreadable) == 7
+
+    def test_the_rc7_message_counts_and_lists_every_one_of_them(self, tmp_path,
+                                                                 capsys):
+        """🔴 THE COUNT AND THE LIST ARE SEPARATE CLAIMS AND BOTH ARE ASSERTED. A
+        mutant that truncated the pairs would leave a correct-looking count if
+        the count were derived from the same truncated tuple — it is not, so the
+        two move together and a per-repo slice moves both. Naming 7 explicitly is
+        what makes the truncation visible at all."""
+        a = tmp_path / "zarfrepo"
+        b = tmp_path / "plimforthrepo"
+        tracked_a = self._broken_repo(a, self.A_DOCS)
+        tracked_b = self._broken_repo(b, self.B_DOCS)
+
+        rc = hs.main(["--query", "zarfwidget", "--offline",
+                      "--offline-repo", str(a), "--offline-repo", str(b)])
+        out = capsys.readouterr().out
+        assert rc == 7
+        assert "ZERO HANDOFF DOCS DERIVED — and NOT because there are none" in out
+        assert "list 7 `claudedocs/handoff-*.md`" in out
+        assert "The 2 repo(s) this run read" in out
+        for path in tracked_a:
+            assert f"zarfrepo:{path}" in out
+        for path in tracked_b:
+            assert f"plimforthrepo:{path}" in out
+
+    def test_the_machine_surface_carries_all_seven_pairs(self, tmp_path, capsys):
+        """The `--json` half, for `test_the_machine_surface_carries_the_same
+        _discriminator`'s reason: a consumer deciding whether the corpus is
+        really empty may be reading either surface, and a truncated list there is
+        the same false answer without the prose to hint at it."""
+        a = tmp_path / "zarfrepo"
+        b = tmp_path / "plimforthrepo"
+        tracked_a = self._broken_repo(a, self.A_DOCS)
+        tracked_b = self._broken_repo(b, self.B_DOCS)
+
+        rc = hs.main(["--query", "zarfwidget", "--offline", "--json",
+                      "--offline-repo", str(a), "--offline-repo", str(b)])
+        doc = json.loads(capsys.readouterr().out)
+        assert rc == 7
+        assert doc["unreadable"] == [
+            *({"repo": "zarfrepo", "doc_path": p} for p in tracked_a),
+            *({"repo": "plimforthrepo", "doc_path": p} for p in tracked_b),
+        ]
+        assert len(doc["unreadable"]) == 7
+
+    def test_a_repo_with_ONE_unreadable_doc_is_still_reported_whole(self, tmp_path):
+        """The lower-boundary control. `claude/RULES.md` asks for a boundary AND
+        a middle; the N>1 cases above are the middle, and this is the boundary
+        the old fixtures pinned — kept so a fix aimed at N>1 cannot break it."""
+        repo = tmp_path / "zarfrepo"
+        tracked = self._broken_repo(repo, self.A_DOCS[:1])
+        _, _, _, unreadable = hs._offline_store([(str(repo), "zarfrepo")])
+        assert unreadable == (("zarfrepo", tracked[0]),)

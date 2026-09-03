@@ -1170,7 +1170,21 @@ def prune_config_refusal(unset: Sequence[str]) -> str | None:
     and is never in the unit's argv, and every non-prune path is untouched. What
     it DOES mean is that pruning is only possible from a host that has every
     checkout — which is the correct answer, because pruning from a partial view
-    is precisely the thing that deletes the repos you cannot see."""
+    is precisely the thing that deletes the repos you cannot see.
+
+    🔴 THE REMEDY HAS TO NAME THE RETIRED-REPO ROUTE, BECAUSE THE OBVIOUS TWO DO
+    NOT EXIST THERE. This message used to say "Set every handle and re-run
+    --prune from a host that has all the checkouts — or drop --prune", and for
+    the case an operator most often runs `--prune` for — a repo that is GONE —
+    NEITHER remedy is reachable. `nix/agent-handles.nix` existence-guards every
+    handle (`[[ -d <path> ]]`), so a deleted checkout leaves its handle unset on
+    EVERY host: there is no host to re-run from, and dropping `--prune` un-blocks
+    the rebuild while leaving the very rows the operator came to remove. The only
+    thing that works is to stop the label being part of the config — drop the
+    handle from `nix/agent-handles.nix` AND `REPO_ENV_HANDLES`, ship, then prune —
+    and that route was named nowhere in the tool. Guidance that recommends a
+    command the printing state makes impossible is worse than no guidance: it
+    reads as considered, so the reader retries it instead of looking further."""
     if not unset:
         return None
     names = ", ".join(f"${h}" for h in unset)
@@ -1180,9 +1194,16 @@ def prune_config_refusal(unset: Sequence[str]) -> str | None:
         f"config does not name, which is only sound if this config is as wide as "
         f"the corpus; an unset handle narrows it SILENTLY (the repo produces no "
         f"derivation at all, so it is not even UNMEASURED), and its rows would be "
-        f"collected as 'removed from config'. Set every handle and re-run --prune "
-        f"from a host that has all the checkouts — or drop --prune, which deletes "
-        f"only what this run MEASURED."
+        f"collected as 'removed from config'. If those checkouts still exist "
+        f"somewhere, re-run --prune from a host that has ALL of them. If the repo "
+        f"is RETIRED and its checkout is gone everywhere, NO host can satisfy this "
+        f"guard — the handle is existence-guarded, so it is unset on all of them: "
+        f"drop it from BOTH nix/agent-handles.nix and "
+        f"handoff_index.REPO_ENV_HANDLES, ship that, and then --prune, which stops "
+        f"asking for a handle the config no longer has. Dropping --prune is not a "
+        f"third route to the same place: it un-blocks the REBUILD but deletes only "
+        f"what this run MEASURED, so the rows you came to remove stay exactly "
+        f"where they are."
     )
 
 
@@ -1643,7 +1664,18 @@ def rebuild_refusal(
     are rather than truncated away. Refusing here as well would buy nothing and
     cost the toast. The loud half is `partial_scope_warnings`, which every output
     path prints and which the write's own success line repeats — a partial run
-    must not be able to read as a complete one."""
+    must not be able to read as a complete one.
+
+    🔴 THE ALL-UNMEASURED ARM'S REMEDY WAS FALSE IN ITS OWN STATE. It offered
+    "re-run without --rebuild to refresh what CAN be measured", and when ALL
+    repos are unmeasured there is nothing that can be measured. MEASURED, same
+    argv minus `--rebuild`: rc 0, `wrote 0 section row(s)`, and the store WAS
+    opened — a silent success, which is the precise failure the sentence above it
+    describes as the reason to refuse. A remedy is a claim about the state it is
+    printed in, so it earns the same evidence a diagnosis does; the arm now names
+    fixing the handles as the only route and says why the other is not one. Swept
+    with `prune_config_refusal` and `orphan_label_warning`, which had the same
+    shape for a different state."""
     bad = [d for d in derivations if d.unmeasured]
     # 🔴 `--prune` NEEDS THE CONFIG TO BE AUTHORITATIVE ABOUT REPO IDENTITY, AND AN
     # UNMEASURED REPO IS EXACTLY WHERE IT IS NOT. Pruning means "delete every
@@ -1685,7 +1717,10 @@ def rebuild_refusal(
             f"REFUSING --rebuild: ALL {len(derivations)} repo(s) came back "
             f"UNMEASURED — {detail}. A rebuild here would replace a good index with "
             f"a confident nothing, and the run would report success. Fix the repo "
-            f"handles, or re-run without --rebuild to refresh what CAN be measured."
+            f"handles — in THIS state that is the only remedy. Re-running without "
+            f"--rebuild is not a second one: with every repo unmeasured there is "
+            f"nothing left to refresh, so it writes 0 row(s) and exits 0, which is "
+            f"the silent success this refusal exists to prevent."
         )
     if not rows:
         measured = len(derivations) - len(bad)
@@ -1820,6 +1855,31 @@ def rebuild_delete_labels(
     return `measured` outright; a `--prune` run with any unmeasured repo never
     reaches a write. Pinned as a seam test, not left as prose.
 
+    ⚠ OPEN EXPOSURE, RECORDED HERE RATHER THAN ONLY IN A REVIEW THREAD: A REPO
+    THAT *MEASURES* AND WHOSE EVERY DOC IS UNREADABLE HAS ITS ROWS DELETED AND
+    ZERO RE-INSERTED, AT rc 0. `unmeasured` is the only field this scope reads,
+    and it answers "did the ref resolve", not "did anything come back". A repo
+    whose mainline LISTS handoff docs that git cannot produce resolves fine —
+    `unmeasured is None`, `docs == 0` — so it lands in `measured` and is bound to
+    the DELETE with nothing to put back. `RepoDerivation.unreadable` is the field
+    that distinguishes it, and it is derived one function away in `derive_repo`;
+    this scope does not consult it.
+
+    MEASURED on two repos (one healthy, one with every doc blob removed from
+    `.git/objects`), `--rebuild --write`: rc 0, `DELETE … ['plimforthrepo',
+    'zarfrepo']`, two INSERTs, both for `zarfrepo` — the broken repo's rows gone,
+    nothing re-inserted, success reported. It needs a second, healthy repo:
+    alone, the derivation yields zero rows and `rebuild_refusal`'s zero-rows arm
+    stops it, which is why the single-repo path looks safe.
+
+    🔴 DELIBERATELY NOT FIXED IN THE ROUND THAT WROTE THIS NOTE, and the reason
+    is scope, not doubt: reading `unreadable` here moves the delete scope, and the
+    same signal is what `handoff_search` splits rc 6 from rc 7 on — so the two
+    have to move together or the two front ends disagree about one fact, which is
+    the failure `run_search`'s own docstring records. It is its own round. Until
+    then this is the honest statement of what the scope covers: a repo this run
+    could not READ is still a repo it will DELETE, provided the ref resolved.
+
     PURE, so the whole decision is testable without a database."""
     measured = {d.label for d in derivations if d.unmeasured is None}
     if scoped or not prune:
@@ -1884,7 +1944,20 @@ def orphan_label_warning(labels: Sequence[str]) -> tuple[str, ...]:
     🔴 PINNED AS A WHOLE NORMALISED STRING by the test, not by substrings. A
     guard on WORDS is walkable by REWORDING, and a mutant that changed "only
     ever" to "ALWAYS" survived three substring assertions. A cosmetic reword now
-    fails the suite; that is the intended cost of a machine-readable claim."""
+    fails the suite; that is the intended cost of a machine-readable claim.
+
+    🔴 AND THE THIRD THING WRONG WITH IT: IT RECOMMENDED A COMMAND THE PRINTING
+    STATE CAN MAKE IMPOSSIBLE. The tail said "Only when the repo is genuinely
+    gone, remove the rows deliberately with `--rebuild --prune --write` (which
+    refuses unless every handle is SET…)" — and "genuinely gone" is exactly the
+    state where the handle CANNOT be set: `nix/agent-handles.nix`
+    existence-guards each one on its directory, so a deleted checkout leaves it
+    unset on EVERY host and `prune_config_refusal` then refuses everywhere,
+    forever. The sentence named the one command its own parenthetical rules out.
+    The remedy now splits on the question that decides it — does ANY host still
+    have the checkout — and names the config change for the case where none does.
+    Same defect and same fix as `prune_config_refusal`'s own remedy line: one bug
+    printed in two places, which is why they were swept together."""
     if not labels:
         return ()
     return (
@@ -1896,10 +1969,16 @@ def orphan_label_warning(labels: Sequence[str]) -> tuple[str, ...]:
         f"If the repo is meant to be indexed, RE-ADD ITS HANDLE — that is the "
         f"fix whenever the checkout still exists somewhere, and an unset handle "
         f"is the ordinary reason a label reads as unnamed here. Only when the "
-        f"repo is genuinely gone, remove the rows deliberately with `--rebuild "
-        f"--prune --write` (which refuses unless every handle is SET and every "
-        f"repo MEASURES, because an absent or renamed checkout looks exactly "
-        f"like a removed one).",
+        f"repo is genuinely gone do you remove the rows, and HOW depends on "
+        f"whether any host still has the checkout. If one does, run `--rebuild "
+        f"--prune --write` THERE: it refuses unless every handle is SET and "
+        f"every repo MEASURES, because an absent or renamed checkout looks "
+        f"exactly like a removed one. If the checkout is gone EVERYWHERE, no "
+        f"host can ever satisfy that — the handles are existence-guarded, so an "
+        f"absent checkout is an unset handle on all of them — and the fix is a "
+        f"CONFIG change, not a command: drop the handle from "
+        f"nix/agent-handles.nix and from handoff_index.REPO_ENV_HANDLES, ship "
+        f"it, and then --prune.",
     )
 
 
@@ -1932,7 +2011,28 @@ def rebuild_plan_lines(
     no-prune sentence promised that an unnamed stored label "is REPORTED", which
     needs `store.repos()` — a read a dry-run never performs. That second one is
     the sharper error, because the branch two lines above names precisely this
-    blind spot while its sibling asserts a report and then shows none."""
+    blind spot while its sibling asserts a report and then shows none.
+
+    🔴 AND `write` ALONE WAS NOT ENOUGH, BECAUSE IT IS THE INTENT AND EVERY
+    SENTENCE HERE DESCRIBES AN OUTCOME. `main` used to print this block ABOVE its
+    gates, so a refusing run got a plan for a run that never ran. MEASURED, both
+    at rc 4 with the store never opened: `--rebuild --prune --write` with one
+    handle unset printed "this run opens the table, and the full bound scope is
+    printed with the row count below" (recorded SQL log: `[]`); `--rebuild
+    --write` with every repo unmeasured printed "is REPORTED (see ORPHANED LABELS
+    below) and kept" above a run that emitted no such section. `--prune
+    --dry-run`'s "The --write run prints the full bound scope" had the same
+    falsity mode via a collision or a zero-row derivation.
+
+    🔴 SO THIS FUNCTION HAS A CALL-SITE PRECONDITION, AND IT IS NOT DECORATION:
+    **it must be called only after every gate has passed.** All four branches
+    then describe a run that is going to happen, and the two that speak about a
+    DIFFERENT run ("The --write run prints…") are sound because the gates are
+    mode-identical — a dry-run reaching this point proves the `--write` run
+    reaches it too. Pinned by `TestThePlanDescribesTheRunThatActuallyHappens`,
+    which asserts the plan block is ABSENT from a refusing run of each shape:
+    stating the precondition here and not testing it is how the last two rounds
+    of this same defect got through."""
     measured = tuple(sorted(d.label for d in derivations if d.unmeasured is None))
     kept = tuple(sorted(d.label for d in derivations if d.unmeasured is not None))
     out = [
@@ -2301,16 +2401,6 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
     else:
         print(render_derivation(derivations))
 
-    # 🔴 THE PRE-FLIGHT NOW SHOWS THE DELETE SCOPE, and it names its own blind
-    # spot. See `rebuild_plan_lines`: this is printed in BOTH modes, because the
-    # thing an operator is told to watch before arming the timer is a --dry-run,
-    # and what a rebuild DESTROYS was the one fact that mode could not reach.
-    if args.rebuild:
-        say("")
-        for line in rebuild_plan_lines(derivations, scoped=scoped, prune=args.prune,
-                                       write=args.write):
-            say(line)
-
     # 🔴 EVERY GATE IS EVALUATED BEFORE THE `--write` BRANCH, and that is the fix
     # for a pre-flight that passed for a config the real run refused.
     # `nix/home.nix` tells the operator to watch a `--dry-run` before arming the
@@ -2366,6 +2456,38 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
                   "SAME check would stop the --write run with this same exit code. "
                   "Fix it before arming the timer.", file=sys.stderr)
         return rc
+
+    # 🔴 THE PRE-FLIGHT SHOWS THE DELETE SCOPE, and it names its own blind spot.
+    # See `rebuild_plan_lines`: printed in BOTH modes, because the thing an
+    # operator is told to watch before arming the timer is a --dry-run, and what a
+    # rebuild DESTROYS was the one fact that mode could not reach.
+    #
+    # 🔴 IT IS PRINTED *AFTER* THE GATE, AND THAT ORDERING IS WHAT MAKES THE PLAN'S
+    # SENTENCES TRUE. They were emitted above the gate block and describe what the
+    # run WILL DO, so on a refusing run every one of them was a statement about a
+    # run that never happened. MEASURED, `--rebuild --prune --write` with three
+    # handles set and one unset: stdout printed "this run opens the table, and the
+    # full bound scope is printed with the row count below" — recorded SQL log
+    # `[]`, rc 4, no bound scope, no row count. And `--rebuild --write` with every
+    # repo unmeasured printed "is REPORTED (see ORPHANED LABELS below) and kept"
+    # above a run that emitted no ORPHANED LABELS section and exited 4.
+    #
+    # The alternative — keep the position and pass a "this run will actually
+    # write" boolean instead of `args.write` — was rejected: that boolean IS "no
+    # gate fired", so it would be a second spelling of the gate's own verdict, free
+    # to drift from it, which is exactly the argument `orphan_labels` makes for
+    # taking the BOUND SCOPE rather than an `args.prune` flag. Ordering makes every
+    # branch sound at once instead of one flag per claim, INCLUDING the two that
+    # speak about a DIFFERENT run: because the gates are mode-identical (the
+    # comment above, pinned by `test_the_gate_fires_in_DRY_RUN_too`), a dry-run
+    # that reaches this point proves the `--write` run reaches it too — so "The
+    # --write run prints the full bound scope" is now true by construction rather
+    # than by hope.
+    if args.rebuild:
+        say("")
+        for line in rebuild_plan_lines(derivations, scoped=scoped, prune=args.prune,
+                                       write=args.write):
+            say(line)
 
     if not args.write:
         say("\n(no --write: nothing was written. Dry-run is the DEFAULT; pass "

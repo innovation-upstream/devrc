@@ -54,6 +54,14 @@ let
   # the scope also covers stored labels this config does not name, and that set
   # exists only in the table. A `--dry-run --prune` says so in those words. This
   # unit never passes `--prune`, so the scope it prints IS complete.
+  # 🔴 THE PLAN IS PRINTED ONLY AFTER EVERY GATE HAS PASSED, in BOTH modes — so a
+  # REFUSING dry-run shows the refusal and NO `## rebuild delete scope` block.
+  # That is the fix, not a regression: the block's sentences describe what the run
+  # WILL DO, and above the gate they were statements about a run that never
+  # happened (measured: `--rebuild --prune --write` with one handle unset printed
+  # "the full bound scope is printed with the row count below" at rc 4, with the
+  # store never opened). Absence of the block on a red run is therefore expected;
+  # the exit code is still what you read.
   enableHandoffIndexSync = false;
   # Drift-deadman master switch (scripts/drift-check.sh) — gates ONLY whether the
   # timer is wired into timers.target. The SERVICE definition is always emitted, so

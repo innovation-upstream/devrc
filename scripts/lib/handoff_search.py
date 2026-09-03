@@ -685,9 +685,25 @@ def render(outcome: SearchOutcome) -> str:
             f"{scoped_note}.",
             "   That is an answer about the corpus, not a broken tool: the docs do not "
             "discuss this in these words.",
-            "   Try fewer/other terms, or widen --repo / --section before concluding "
-            "nobody wrote it down.",
         ]
+        # 🔴 "WIDEN --repo / --section" IS NOT A REMEDY WHEN THERE IS NO FILTER TO
+        # WIDEN. This line read "Try fewer/other terms, or widen --repo / --section"
+        # unconditionally, and an UNFILTERED no-match is the common case: the reader
+        # is sent to relax a filter they never passed, which either wastes a round
+        # trip or — worse — reads as "the zero came from your scope", when the scope
+        # was the whole index. Same shape as `handoff_index`'s three remedy lines: a
+        # next step that names a command without checking the state it prints in.
+        # `outcome.filtered` is the discriminator and it is already read two lines
+        # above for `scoped_note`, which is what makes the omission a miss rather
+        # than a missing measurement.
+        lines.append(
+            "   Try fewer/other terms, or widen --repo / --section before concluding "
+            "nobody wrote it down."
+            if outcome.filtered else
+            "   Try fewer or different terms before concluding nobody wrote it down. "
+            "There is no filter to widen: this run passed no --repo / --section, so "
+            "every section in the index was already in scope."
+        )
         return "\n".join(lines)
 
     boosted = ", ".join(f"{k}×{v}" for k, v in sorted(SECTION_BOOST.items()))
