@@ -47,17 +47,31 @@ import re
 # --------------------------------------------------------------------------- #
 # URL templates
 # --------------------------------------------------------------------------- #
-# clawgate serves a real, server-rendered browser UI at GET /tasks (see
-# internal/api/server.go, `s.handleIndex`), and every task card carries a stable
-# DOM id `task-<id>` — `internal/ui/notes.go`, `ID("task-"+ids)`, pinned by
-# `internal/ui/notes_test.go` as "stable card id for outerHTML swaps". So the
-# fragment is a real anchor for any task the list renders.
+# clawgate serves a server-rendered PAGE PER TASK at `GET /tasks/{id}`
+# (`internal/api/server.go` → `handleTaskDetail`), which loads the task by id and
+# renders it whatever the board is currently showing. So the deeplink is a PATH.
 #
-# ⚠ HONEST SCOPE: an anchor only scrolls to a card that is ON the page. A task
-# filtered out of the list (archived, or in a collapsed section the server did
-# not render) leaves the browser at the top of /tasks. That is a graceful
-# degradation — the page you wanted, not the wrong page — and it is why the
-# fragment is appended rather than relied upon.
+# 🔴 THE OLD `…/tasks#task-<id>` FRAGMENT IS DEAD AS A CONSTRUCTOR — it must not
+# come back, and this paragraph replaces one that documented its limits as an
+# accepted cost. That comment described a hazard the page CLOSES, and a stale
+# note about a closed hazard is how a maintainer later deletes the thing that
+# closed it. The limit it recorded: an anchor only scrolls to a card already ON
+# the page, so a task that was filtered out, archived, or inside a collapsed
+# section left the browser at the top of /tasks. `/tasks/<id>` has no such
+# precondition — the server renders the task itself.
+#
+# ⚠ HONEST SCOPE, restated for the page. This module cannot tell a real id from a
+# typo — `#370` in agent output is five characters, not a lookup — so it does not
+# claim the URL RESOLVES, only that if the task exists the page shows it. What
+# changed is the failure mode, and not uniformly for the better: a bad id now
+# gets whatever clawgate answers for an id it does not hold, instead of silently
+# landing on the board. Do not describe that as strictly safer.
+#
+# 🔴 ORDERING: this URL is only correct against a clawgate that serves the route.
+# Deploy the clawgate carrying `GET /tasks/{id}` BEFORE anything here reaches a
+# machine, or every mention click 404s. Old `#task-N` links already out in the
+# world (ClickUp comments, activity.events, docs) are clawgate's problem to
+# redirect, not this module's — nothing here should mint one either way.
 CLAWGATE_TASKS_URL = "https://clawgate.zacx.dev/tasks"
 CLICKUP_TASK_URL = "https://app.clickup.com/t/{id}"
 # `/issues/<n>` is deliberate and not a bug: GitHub redirects /issues/<n> to
@@ -177,9 +191,10 @@ def _github_url(full_repo: str | None, num: str) -> str:
 
 
 def clawgate_url(task_id: str) -> str:
-    """The clawgate task's browser URL: the real /tasks page, anchored on the
-    task card's own stable DOM id."""
-    return f"{CLAWGATE_TASKS_URL}#task-{task_id}"
+    """The clawgate task's browser URL: `https://clawgate.zacx.dev/tasks/<id>`,
+    the server-rendered details page for that one task. NO fragment — see the
+    URL-templates block above for why the old `#task-<id>` anchor is gone."""
+    return f"{CLAWGATE_TASKS_URL}/{task_id}"
 
 
 def _resolve_repo(owner: str | None, repo: str, repos: dict | None) -> str:
