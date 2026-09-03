@@ -83,6 +83,16 @@ validated preset; treat unvalidated ones as starting points.
   `~/workspace/devrc/scripts/tests/test_obs_read.py`. (Both paths are in the
   **devrc** repo — every relative path in this doc is relative to that clone.)
 - `--since` applies to range/profile queries (Loki, Pyroscope, `--kind range`).
+- 🔴 **`--kind range` COLLAPSES a matrix to one summary value + a point count — it does
+  NOT expose the individual points, and the value it prints is not the max.** Measured
+  2026-08-19: a range query over a series that peaked at **4704** printed
+  `VALUE 0  POINTS 1441`, with the silent-zero guard saying `a REAL zero` — because the
+  summary is a real value, just not the one being looked for. Reading that as "flat at
+  zero" is the trap: it hid a 15-minute production incident until the same series was
+  re-queried instantly. **To get a TIMELINE, loop INSTANT queries** —
+  `max_over_time(<expr>[5m] offset Nm)` over increasing N — which is what actually
+  located the event. Use `--kind range` for "does this series exist over the window",
+  never for "what shape was it".
 - Signal-safe teardown: kubectl runs in its own session and is torn down by
   killing the process group on success/error/SIGINT/SIGTERM (no leaked tunnel).
 - Local-port race NARROWED, not closed: `_free_port` is TOCTOU by construction
