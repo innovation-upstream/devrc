@@ -1386,10 +1386,15 @@ class TestThePruneDoorMovedItsMechanismAndKeptItsGate:
         ),
         (
             "SKILL.md",
-            "the local entry files are `0444` and any editor write against one "
-            "fails with `EACCES`",
-            "WHY it moved, stated where the command is, so an EACCES is read as "
-            "the design and not as a broken store",
+            "that does NOT stop an editor: `Edit` rewrites-and-renames straight "
+            "through it and `Write` makes a fresh `0644` file",
+            "🔴 WHY it moved, stated where the command is. This pin USED to "
+            "require the sentence 'the local entry files are `0444` and any "
+            "editor write against one fails with `EACCES`', which was FALSE and "
+            "is the claim that let content strand: only a shell `>>` gets "
+            "EACCES. The mechanism claim is unchanged — a cut still lands via "
+            "`cairn put` — but its JUSTIFICATION flipped, from 'the mode stops "
+            "you' to 'nothing stops you, so the verb is the only protection'",
         ),
         (
             "SKILL.md",
