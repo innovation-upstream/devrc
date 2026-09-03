@@ -155,6 +155,21 @@ class TestTheStateVocabulary:
         with pytest.raises(ValueError, match="unknown check state"):
             cd.Check("x", "FINE", "detail")
 
+    def test_PodFacts_ENFORCES_its_reason_it_does_not_merely_document_one(
+        self,
+    ) -> None:
+        """🔴 THE ASYMMETRY WAS THE FINDING. `Check` refused an empty detail at
+        construction; `PodFacts` said "Mandatory in that case" and checked
+        nothing. An unreasoned `PodFacts(reached=False)` renders `… could not be
+        established — .` and walks straight past `Check`'s guard, because the
+        empty string is wrapped in literal f-string text before it gets there."""
+        with pytest.raises(ValueError, match="requires a reason"):
+            cd.PodFacts(reached=False)
+        with pytest.raises(ValueError, match="requires a reason"):
+            cd.PodFacts(reached=False, reason="   ")
+        # A REACHED pod needs none — there is nothing unexplained about success.
+        assert cd.PodFacts(reached=True).reason == ""
+
 
 class TestTheVerdict:
     def test_a_problem_outranks_an_unmeasured(self) -> None:
@@ -273,6 +288,29 @@ class TestAnUnmeasuredAnswerIsNotAZero:
         present = cd._describe(_store(tmp_path / "s", {"a": []}), cd.store_scopes)
         assert present.ok and present.absent is False and present.value == ("a",)
 
+    def test_a_file_VANISHING_MID_WALK_is_not_reported_as_an_absent_store(
+        self, tmp_path
+    ) -> None:
+        """🔴 `absent` IS RE-CHECKED, NOT INFERRED FROM THE EXCEPTION TYPE.
+
+        Mapping any `FileNotFoundError` to `absent=True` produces a confident OK
+        with a FALSE reason — `frozen-mirror OK … does not exist` for a directory
+        that is right there. This store has two writers that make it happen: the
+        hourly `analyze-service-index-commit.service`, and `cairn sync`, which
+        replaces the cache root by rename.
+        """
+        root = _store(tmp_path / "s", {"alpha": ["a.md"]})
+
+        def vanishing(_root):
+            raise FileNotFoundError(2, "No such file or directory", "alpha/a.md")
+
+        reading = cd._describe(root, vanishing)
+        assert reading.absent is False, "a live root was reported as absent"
+        assert not reading.ok
+        assert "concurrent writer" in reading.reason
+        # …and the root genuinely being gone still reads as absent.
+        assert cd._describe(tmp_path / "gone", vanishing).absent is True
+
     def test_a_no_sync_run_says_SO_rather_than_reporting_an_outage(self) -> None:
         """`--no-sync` is a choice, not a failure. The reason has to name it, or
         an operator reads a deliberate offline run as a broken store."""
@@ -322,10 +360,19 @@ class TestTheReaderResolution:
 
 class TestTheFrozenMirror:
     def test_a_WRITABLE_entry_file_is_a_PROBLEM(self, tmp_path) -> None:
-        """🔴 MEASURED ON THE WORKBENCH 2026-09-03: 6 of 160 entry files under
-        the mirror were still mode 644 after the cutover froze it. A write to
-        one of those lives on one host and the pod never sees it — the exact
-        stranding the freeze exists to prevent, in a mirror that LOOKS frozen."""
+        """🔴 THIS FOUND A LIVE DATA-LOSS PATH ON ITS FIRST RUN.
+
+        Measured on the workbench 2026-09-03: **7** entry files under the
+        supposedly-frozen mirror were still mode 644, an append was watched to
+        SUCCEED on one, and six entries created on the dead mirror after the
+        cutover existed nowhere else. The operator has since completed the
+        freeze; the tree now measures 159 files, all `0444`, writable=0, and
+        `cairn doctor` reports `frozen-mirror OK`.
+
+        ⚠ Which is exactly why this builds its OWN fixture rather than asserting
+        against the live tree: those numbers moved within a day of being taken,
+        and a guard pinned to them would now be red for the wrong reason.
+        """
         mirror = _store(tmp_path / "m", {"alpha": ["a.md", "b.md"]})
         (mirror / "alpha" / "a.md").chmod(0o444)
         (mirror / "alpha" / "b.md").chmod(0o644)
@@ -396,6 +443,44 @@ class TestTheScopeVisibility:
         ))["token-scopes"]
         assert check.state == cd.PROBLEM
         assert "orphan" in check.detail
+
+    def test_a_missing_scope_is_TAGGED_with_the_tree_it_came_from(
+        self, tmp_path
+    ) -> None:
+        """🔴 THE TWO ROOTS MEAN DIFFERENT THINGS AND LEAD TO DIFFERENT ACTIONS.
+
+        A scope in the SYNCED CACHE the pod no longer sends is a credential or a
+        deletion. A scope in the FROZEN MIRROR only is a pre-cutover leftover
+        that may never have reached the pod at all — so "add it to the allowlist"
+        is the wrong first question. The first version merged the two sets and
+        said "N scope(s) exist on this disk", and both scopes it named live were
+        mirror-only.
+        """
+        cache = _store(tmp_path / "c", {"alpha": ["a.md"], "cache-only": ["c.md"]})
+        mirror = _store(tmp_path / "m", {"alpha": ["a.md"], "mirror-only": ["m.md"]})
+        check = _by_name(_collect(
+            cache_root=cache, mirror_root=mirror,
+            pod=cd.PodFacts(reached=True, visible_entries=1, store_wide_entries=1,
+                            visible_scopes=("alpha",)),
+        ))["token-scopes"]
+        assert check.state == cd.PROBLEM
+        assert "mirror-only [mirror]" in check.detail
+        assert "cache-only [cache]" in check.detail
+        # …and the mirror-only one gets the leftover reading spelled out, while
+        # the cache-only one does not inherit it.
+        assert "ONLY in the frozen pre-cutover mirror (mirror-only)" in check.detail
+
+    def test_a_scope_in_BOTH_trees_is_tagged_with_both(self, tmp_path) -> None:
+        cache = _store(tmp_path / "c", {"shared": ["a.md"]})
+        mirror = _store(tmp_path / "m", {"shared": ["a.md"]})
+        detail = _by_name(_collect(
+            cache_root=cache, mirror_root=mirror,
+            pod=cd.PodFacts(reached=True, visible_entries=0, store_wide_entries=0,
+                            visible_scopes=()),
+        ))["token-scopes"].detail
+        assert "shared [cache+mirror]" in detail
+        # Present in the live cache too, so it is NOT a pre-cutover leftover.
+        assert "ONLY in the frozen" not in detail
 
     def test_it_refuses_to_GUESS_which_of_the_two_readings_is_right(
         self, tmp_path
@@ -557,6 +642,32 @@ class TestTheCliWiring:
         cli = _load_cairn_cli()
         with pytest.raises(SystemExit):
             cli.build_parser().parse_args(["doctor", "--scope", "devrc"])
+
+    def test_an_ABSENT_doctor_module_does_not_kill_an_UNRELATED_subcommand(
+        self, monkeypatch
+    ) -> None:
+        """🔴 MEASURED: with `cairn_doctor.py` absent, `cairn ls-entries` — which
+        has nothing to do with doctor — died `ModuleNotFoundError`, exit 1, with
+        a traceback. `build_parser` calls `_doctor_epilog()` eagerly to build a
+        HELP STRING, so an unguarded import there put every verb behind a module
+        only one of them needs.
+
+        `cmd_doctor` itself must still fail loudly — that caller asked for it.
+        """
+        cli = _load_cairn_cli()
+
+        def gone():
+            raise ImportError("No module named 'cairn_doctor'")
+
+        monkeypatch.setattr(cli, "_cairn_doctor", gone)
+        epilog = cli._doctor_epilog()
+        assert "UNAVAILABLE" in epilog and "cairn_doctor" in epilog
+        # The parser still builds, so unrelated verbs still parse and dispatch.
+        args = cli.build_parser().parse_args(["ls-entries"])
+        assert args.func is cli.cmd_ls_entries
+        # …and doctor itself does NOT quietly degrade.
+        with pytest.raises(ImportError):
+            cli.cmd_doctor(cli.build_parser().parse_args(["doctor"]))
 
     def test_the_help_epilog_carries_the_exit_codes(self) -> None:
         cli = _load_cairn_cli()

@@ -142,6 +142,26 @@ class PodFacts:
     #: The raw `X-Store-Snapshot` header, relayed verbatim.
     snapshot_header: str = ""
 
+    def __post_init__(self) -> None:
+        """🔴 THE MANDATORY REASON, ENFORCED — it was only DOCUMENTED before.
+
+        `Check` refuses an empty detail at construction; this dataclass said
+        "Mandatory in that case" about `reason` and checked nothing. The
+        asymmetry is the defect, in the module whose whole thesis is that a bare
+        UNMEASURED is the reassuring zero wearing a new word: a future
+        `PodFacts(reached=False)` renders `the store's state could not be
+        established — .` and walks straight past `Check`'s guard, because the
+        empty string is wrapped in literal f-string text before it gets there.
+        Not reachable from today's three call sites; that is what makes now the
+        cheap time to close it.
+        """
+        if not self.reached and not self.reason.strip():
+            raise ValueError(
+                "PodFacts(reached=False) requires a reason — an unmeasured "
+                "store with no stated cause is the silent zero this module "
+                "exists to prevent"
+            )
+
 
 # --------------------------------------------------------------------------- #
 # Disk facts. Each one is a plain function so a test can drive it directly.
@@ -218,11 +238,29 @@ class Reading:
 
 
 def _describe(root: Path, what: Callable[[Path], object]) -> Reading:
-    """Read one fact off disk, or say why not. Never a silent zero."""
+    """Read one fact off disk, or say why not. Never a silent zero.
+
+    🔴 `absent` MEANS THE ROOT IS ABSENT — it is re-checked, not inferred from
+    the exception type. Mapping ANY `FileNotFoundError` to `absent=True` is wrong
+    in a way that produces a confident OK: a file vanishing MID-WALK raises the
+    same exception, and this store has two writers that do exactly that — the
+    hourly `analyze-service-index-commit.service`, and `cairn sync`, which
+    replaces the cache root by rename. The report would have read
+    `frozen-mirror OK … does not exist` for a directory that was right there,
+    with a false reason attached. Same shape as the defect `dd8411ca` fixed, one
+    level in: a state derived from a proxy instead of from the thing itself.
+    """
     try:
         return Reading(what(root), "", absent=False)
-    except FileNotFoundError:
-        return Reading(None, f"{root} does not exist", absent=True)
+    except FileNotFoundError as exc:
+        if not root.exists():
+            return Reading(None, f"{root} does not exist", absent=True)
+        return Reading(
+            None,
+            f"{root} exists but something under it vanished while it was being "
+            f"read ({exc}) — a concurrent writer, not an absent store",
+            absent=False,
+        )
     except OSError as exc:
         return Reading(None, f"{root} could not be read: {exc}", absent=False)
 
@@ -400,9 +438,17 @@ def _visibility_check(pod: PodFacts, cache_root: Path, mirror_root: Path) -> Che
             f"which scopes this credential can reach",
         )
 
-    local: set[str] = set()
+    # 🔴 PROVENANCE PER SCOPE, NOT ONE MERGED SET. The two roots mean different
+    # things and lead to different actions: a scope in the SYNCED CACHE that the
+    # pod no longer sends is a credential or a deletion; a scope in the FROZEN
+    # MIRROR only is a pre-cutover leftover that may never have reached the pod
+    # at all. The first version merged them and said "N scope(s) exist on this
+    # disk", offering two remedies that were both about the live store — so an
+    # operator could not tell which they were looking at. Measured: the two it
+    # named on the workbench were mirror-only.
+    where: dict[str, list[str]] = {}
     unread: list[str] = []
-    for root in (cache_root, mirror_root):
+    for label, root in (("cache", cache_root), ("mirror", mirror_root)):
         reading = _describe(root, store_scopes)
         if not reading.ok:
             # An ABSENT root contributes nothing and is not a failure; an
@@ -412,8 +458,10 @@ def _visibility_check(pod: PodFacts, cache_root: Path, mirror_root: Path) -> Che
             if not reading.absent:
                 unread.append(reading.reason)
             continue
-        local |= set(reading.value)  # type: ignore[arg-type]
+        for name in reading.value:  # type: ignore[union-attr]
+            where.setdefault(name, []).append(label)
 
+    local = set(where)
     visible = set(pod.visible_scopes)
     missing = sorted(local - visible)
 
@@ -450,14 +498,25 @@ def _visibility_check(pod: PodFacts, cache_root: Path, mirror_root: Path) -> Che
         )
     if not missing:
         return Check("token-scopes", PROBLEM, hidden_entries.strip() + unread_note)
+    named = ", ".join(f"{s} [{'+'.join(where[s])}]" for s in missing)
+    mirror_only = [s for s in missing if where[s] == ["mirror"]]
+    leftover_note = (
+        f" 🔴 {len(mirror_only)} of them exist ONLY in the frozen pre-cutover "
+        f"mirror ({', '.join(mirror_only)}) — those may never have reached the "
+        f"pod, so the question is whether they were ever seeded, NOT whether "
+        f"access was lost."
+        if mirror_only else ""
+    )
     return Check(
         "token-scopes", PROBLEM,
         f"{len(missing)} scope(s) exist on this disk and are NOT in the store's "
-        f"answer to this token: {', '.join(missing)}. The API cannot tell you "
-        f"which of the two this is — a refused scope is byte-identical to one the "
-        f"store has never held, deliberately, so that an error cannot enumerate "
-        f"the store. Both readings are actionable: either seed the scope, or add "
-        f"it to this token's allowlist.{hidden_entries}{unread_note}",
+        f"answer to this token, each tagged with WHERE it was found: {named}. "
+        f"For a scope the store should hold, the API cannot tell you which of "
+        f"two things you are seeing — a refused scope is byte-identical to one "
+        f"the store has never held, deliberately, so that an error cannot "
+        f"enumerate the store. Both readings are actionable: seed the scope, or "
+        f"add it to this token's allowlist.{leftover_note}"
+        f"{hidden_entries}{unread_note}",
     )
 
 

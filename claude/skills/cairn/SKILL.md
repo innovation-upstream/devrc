@@ -44,6 +44,15 @@ hosts.
 every writer; `prune-index` owns deletion, with its own confirmation gate. Load
 whichever applies rather than reconstructing their steps here.
 
+🔴 **There is no CREATE route, and the failure does not say so.** `PUT` demands
+an `If-Match` the caller derives from bytes that must already exist (`428` with
+none, and `If-Match: *` is refused because it is no precondition at all), and
+`POST …/bullets` appends to something. A ref the pod has never held answers
+`404 ref-unknown` — the same bytes as a ref outside your allowlist. So a scope's
+FIRST record cannot be made through the API at all; it is an operator step, and
+until somebody takes it the record does not exist anywhere the pod can serve.
+Measured 2026-09-03, on real entries stranded by exactly this.
+
 ## 🔴 The two different exit 4s
 
 Confusing them sends you to re-run the command that just failed.
@@ -70,11 +79,17 @@ itself is refused rather than served.
 ## Adding a consumer that reads the store
 
 Call `subsystem_read_store.resolve_read_store()`. Do **not** compute a path.
-`scripts/tests/test_store_root_ledger.py` enumerates every file that resolves a
+`scripts/tests/test_store_root_ledger.py` enumerates the files that resolve a
 store root and requires each to route through that module or carry a written
-exemption; it fails when the set grows **or** shrinks. That test — not this
-paragraph — is what stops the fourth open-coded reader, and its ledger reasons
-are where the exemptions are argued. Read them before adding a row.
+exemption; it fails when the set grows **or** shrinks, and pins WHICH KIND of
+resolution each ledgered file performs. Read its ledger reasons before adding a
+row — that test, not this paragraph, is what an addition has to satisfy.
+
+⚠ **It is not total, and its own docstring is the authority on how far it
+reaches** — it scans `scripts/` only (so `nix/` is uncovered, and `nix/home.nix`
+names the frozen mirror today), it parses Python and shell but not `.nix`, and a
+path assembled at run time out of `os.environ` is invisible to it. Treat a green
+run as "no *detectable* new open-coded reader", never as proof there is none.
 
 ## Operator surface
 

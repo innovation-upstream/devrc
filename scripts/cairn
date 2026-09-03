@@ -1107,7 +1107,12 @@ def cmd_put(args: argparse.Namespace) -> int:
 
 
 def _cairn_doctor():
-    """The `doctor` module, imported lazily — same idiom as `_cairn_who`."""
+    """The `doctor` module, imported inside a function — see `_doctor_epilog`.
+
+    ⚠ NOT "lazily", in effect. `build_parser` calls `_doctor_epilog()` to build
+    the help text, so this runs on EVERY invocation of every subcommand. Saying
+    otherwise is a cost model a maintainer would reason from and be wrong.
+    """
     lib = str(Path(__file__).resolve().parent / "lib")
     if lib not in sys.path:
         sys.path.insert(0, lib)
@@ -1350,8 +1355,27 @@ def _doctor_epilog() -> str:
     SKILL.md — is a second thing to keep true, and the numbers are the part a
     caller branches on. `cairn_doctor.EXIT_LEGEND` is the one definition; both
     `--help` and every run's own output render it from there.
+
+    ⚠ CALLED EAGERLY FROM `build_parser`, AND THE COMMENT THAT SAID OTHERWISE WAS
+    FALSE IN EFFECT. `argparse` wants `epilog` as a string, so `cairn_doctor` is
+    imported on EVERY invocation — the same trap `_cairn_who`'s own docstring
+    records for `_who_default_timeout`. The import stays function-scoped for
+    honesty about what this file needs to START, not as an optimisation.
+
+    🔴 AND IT FAILS SOFT. With `cairn_doctor.py` missing, an eager unguarded
+    import took `cairn ls-entries` — a subcommand that has nothing to do with
+    doctor — down with `ModuleNotFoundError` at exit 1, traceback and all.
+    `cmd_doctor` still fails LOUDLY, because that is the caller who asked for it;
+    an unrelated verb must not inherit the blast radius of a help string.
     """
-    doctor = _cairn_doctor()
+    try:
+        doctor = _cairn_doctor()
+    except ImportError as exc:
+        return (
+            f"exit codes: UNAVAILABLE — `cairn_doctor` could not be imported "
+            f"({exc}). `cairn doctor` itself will fail with this; every other "
+            f"subcommand is unaffected."
+        )
     lines = ["exit codes:"]
     lines += [f"  {code}  {why}" for code, why in doctor.EXIT_LEGEND]
     lines.append("")

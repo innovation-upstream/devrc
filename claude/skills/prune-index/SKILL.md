@@ -1,6 +1,6 @@
 ---
 name: prune-index
-description: "Audit and prune the /analyze-service index store — evicts RESOLVED bullets, keeps every OPEN one, finds refs resolving to two entries. Use for: prune/shrink/audit the analyze-service index, an entry that got huge, `--ref X` is ref-ambiguous. A SKILL.md body is `prune-skill`; MEMORY.md is `prune-memory`; the store is `cairn`."
+description: "Audit and prune the /analyze-service index store — evicts RESOLVED bullets, keeps every OPEN one, finds refs resolving to two entries. Use for: prune/shrink/audit the analyze-service index, the subsystem index store, an entry that got huge, `--ref X` is ref-ambiguous, RESOLVED bullets piling up, ~/.claude/analyze-service-index. A SKILL.md body is `prune-skill`; MEMORY.md is `prune-memory`; the store itself is `cairn`."
 argument-hint: "[SCOPE | SCOPE/ENTRY.md] — optional; defaults to the whole store"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
