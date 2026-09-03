@@ -83,20 +83,38 @@ MIN_SKILLS = 30
 # 36-entry total quoted in a 37-entry tree, and one contradicted the number the
 # same change reported to its reviewer.
 # --------------------------------------------------------------------------- #
-MEASURED_ENTRIES = 39
+MEASURED_ENTRIES = 40
 MEASURED_TIER_A_ENTRIES = 24
-MEASURED_TIER_A_CHARS = 8_847
+MEASURED_TIER_A_CHARS = 8_567
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 9_068
-# ...and what the same 37 entries would cost with every skill tier A. The
-# difference is what the ledger buys: 3,907 chars.
-MEASURED_ALL_TIER_A_CHARS = 13_111
+MEASURED_UNDER_LEDGER_CHARS = 8_796
+# ...and what the same 40 entries would cost with every skill tier A. The
+# difference is what the ledger buys: 4,295 chars.
+MEASURED_ALL_TIER_A_CHARS = 13_091
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
 #
 # The ceiling sits 254 chars above MEASURED_TIER_A_CHARS — less than the MEAN
-# tier-A entry, which is 8,946 / 24 = 372.8.
+# tier-A entry, which is 8,567 / 24 = 357.0.
+#
+# ⚠ IT WAS LOWERED FROM 9,200 -> 8,935 -> 8,821 WHEN `cairn` LANDED, and the
+# lowering is the point rather than paperwork: `cairn` is tier B and cost this
+# block nothing, but paying for its LISTING entry meant cutting mechanism prose
+# out of six tier-A descriptions (`mailbox`, `session-manager`, `signal`,
+# `initiatives`, `window-triage`, `activity`), which took the tier-A total DOWN
+# 280. Leaving the ceiling where it was would have banked that cut as slack
+# larger than one whole average entry, which is exactly the regrowth this
+# constant exists to refuse. `test_control_the_tier_a_ratchet_can_go_red` fails
+# when the slack grows past the mean, so the lowering is enforced, not
+# remembered — it caught both steps of this and named the replacement each time.
+#
+# 🔴 THE SECOND STEP WAS A CORRECTION, NOT MORE TRIMMING. The first `prune-index`
+# cut dropped two real TRIGGER phrases (`~/.claude/analyze-service-index` and
+# "the subsystem index store") under a commit message claiming none were dropped.
+# Both are restored; the 148 chars were re-taken from architecture prose instead.
+# A dropped trigger silently stops a skill auto-firing, which is the one failure
+# mode this whole budget exists to manage.
 #
 # 🔴 READ WHAT THAT DOES AND DOES NOT BUY. A headroom below the mean bounds an
 # AVERAGE entry. It does NOT stop every addition, and the difference is not
@@ -117,7 +135,7 @@ MEASURED_ALL_TIER_A_CHARS = 13_111
 # LOWER it when you cut; do NOT raise it to make a new description fit. Demoting
 # one skill to tier B in claude/skill-tiers.json is a ONE-LINE edit and is the
 # intended move. The playbook is printed by the failing assertion below.
-TIER_A_CEILING_CHARS = 9_200
+TIER_A_CEILING_CHARS = 8_821
 
 # 🔴 Skills that must NEVER be tier B, pinned as a RELATIONSHIP rather than left
 # to review. Each one fires from a SYMPTOM Zach describes rather than from its own
