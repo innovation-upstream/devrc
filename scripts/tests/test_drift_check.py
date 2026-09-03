@@ -6485,6 +6485,378 @@ def test_rc24_is_ranked_between_rc8_and_rc17_in_the_severity_table():
     )
 
 
+# --------------------------------------------------------------------------- #
+# THE DECLARED EXPECTATION (rc 24 / rc 25)
+#
+# 🔴 THE DESIGN DECISION THESE TESTS EXIST TO PIN. Measured 2026-09-02: the merge
+# gate on innovation-upstream/devrc is OFF, DELIBERATELY — the operator turned it
+# off until the Tekton capacity issue is addressed, which a different session
+# owns. The bare-state arm therefore fired rc 24 on EVERY 6-hourly run (5
+# failures in 3 days, and it would have continued indefinitely), and
+# `drift-check.service`'s OnFailure is the ONE toast class deliberately wired to
+# bypass do-not-disturb — nix/home.nix justifies that bypass by a MEASURED rate
+# of ~1 firing in 9 days. That is the permanently-red gate `claude/RULES.md`
+# refuses, arrived at from a third direction: not a broken instrument and not a
+# false positive, but a TRUE finding about a state nobody intends to change.
+#
+# 🔴 AND SIMPLY EXCUSING IT IS THE WRONG FIX, because rc 24 is the only thing
+# that catches a BOTCHED BREAK-GLASS RESTORE — the measured 2026-08-29 shape
+# where DELETE opened the window, the restore trap RAN, and PATCH could not close
+# it. So the arm fires on the DISAGREEMENT between a declared expectation and
+# what was measured, and the four cells are tested independently:
+#
+#   declared ON,  live OFF  -> rc 24   (the alarm, preserved whole)
+#   declared ON,  live ON   -> no code
+#   declared OFF, live OFF  -> no code, reported plainly
+#   declared OFF, live ON   -> rc 25   (the declaration is stale, and a stale
+#                                       "off" DISARMS rc 24 — that is the hazard)
+#   gh cannot answer        -> COULD NOT MEASURE, no code, under EITHER declaration
+#
+# 🔴 THE EXPECTATIONS BELOW ARE LITERALS WRITTEN OUT IN THIS FILE, never read
+# back out of drift-check.sh. An assertion built from the module under test is
+# satisfied by that module agreeing with itself, which is the defect class devrc
+# #1233 hit five times in one PR.
+# --------------------------------------------------------------------------- #
+
+# The one repo whose merge gate drift-check.sh declares OFF, spelled out here
+# rather than parsed from the script. Changing the declaration must fail these.
+DECLARED_OFF_SLUG = "innovation-upstream/devrc"
+
+# A `gh` branch-endpoint payload for a branch that IS gated: two classic required
+# checks. stub_gh answers the follow-up /protection call with `true`, so
+# enforce_admins binds and the arm reads the gate as LIVE ON.
+GATE_IS_LIVE_ON = "true 2 alpha-check,bravo-check"
+# ...and one for a standing protection object whose required_status_checks was
+# deleted out of it: the measured 2026-08-29 shape, and the 2026-09-02 one.
+GATE_IS_LIVE_OFF = "true 0 "
+
+
+def _declared(fleet, *args, gh=None, gh_rc=0, **env):
+    """Run the checker with the arm pointed at the DECLARED-OFF slug."""
+    fleet.catch_up()
+    if gh is not None:
+        fleet.stub_gh(gh, exit_code=gh_rc)
+    return fleet.check(*args, DRIFT_PROTECT_SLUG=DECLARED_OFF_SLUG, **env)
+
+
+# --- cell 3: declared OFF, live OFF — the state measured 2026-09-02 --------- #
+def test_a_declared_off_gate_that_is_live_off_sets_no_rc(fleet):
+    """🔴 THE REGRESSION. This exact input exited 24 before the change, on every
+    run, forever. It must now be a clean run that SAYS what it saw."""
+    rc, out = _declared(fleet, "--no-remote", gh=GATE_IS_LIVE_OFF)
+    assert rc == 0, f"a declared-off gate still fired: {rc}\n{out}"
+    assert "DECLARED OFF, and live OFF" in out, out
+    # 🔴 REPORTED, NOT SWALLOWED. The state is still printed, with its reason,
+    # because a difference that is TOLERATED and a difference that was never
+    # LOOKED AT must not read the same way.
+    assert "ZERO required status checks" in out, (
+        "the measured fact was suppressed along with the code\n" + out
+    )
+    assert "Tekton" in out, "the declaration's reason was not printed\n" + out
+    assert "DRIFT" not in out, out
+
+
+def test_a_declared_off_run_says_the_alarm_is_still_armed(fleet):
+    """🔴 A quiet alarm and a disabled alarm are different claims, and the only
+    reader of this output is a journal. The run must say which one it is, or the
+    next person to read it concludes rc 24 was deleted."""
+    rc, out = _declared(fleet, "--no-remote", gh=GATE_IS_LIVE_OFF)
+    assert rc == 0, out
+    assert "QUIET, not DISABLED" in out, out
+    assert "rc 25" in out, "the report does not name what fires if this goes stale\n" + out
+
+
+# --- cell 4: declared OFF, live ON — the STALE DECLARATION ------------------ #
+def test_a_declared_off_gate_that_is_live_ON_is_rc25(fleet):
+    """🔴 THE HAZARD THE DECLARATION CREATES, and why it cannot pass silently.
+
+    Once protection is back, a declaration that still says "off" makes cell 3 —
+    no code — the verdict for a gate that has been REMOVED. The rc-24 alarm is
+    then disarmed, and the botched-restore shape it was built for passes without
+    a sound. Nothing is lost yet; the ability to notice is.
+    """
+    rc, out = _declared(fleet, "--no-remote", gh=GATE_IS_LIVE_ON)
+    assert rc == 25, f"a stale declaration did not fire rc 25: {rc}\n{out}"
+    assert "STALE DECLARATION" in out, out
+    assert "DISARMS rc 24" in out, (
+        "the finding does not say WHY a stale declaration matters\n" + out
+    )
+    # The repair has to name the thing to edit; "fix the declaration" is not one.
+    assert "bp_declared_off_reason" in out, out
+
+
+def test_a_stale_declaration_is_reached_through_the_RULESET_path_too(fleet):
+    """🔴 REACHABILITY, on the second of the two places the arm decides LIVE ON.
+
+    A branch with zero CLASSIC checks that is gated by a ruleset reads ON by a
+    completely different code path. If only the classic path fed the verdict,
+    this input would take the ruleset branch, print "the gate is ON", and then
+    fall through to cell 3 and exit 0 — a stale declaration that passes because
+    the gate happens to be spelled the newer way.
+    """
+    fleet.catch_up()
+    # The live shape measured on astral-sh/uv: `true 0` classically, one active
+    # ruleset with a required_status_checks rule and no bypass actors.
+    _gh_router(fleet, branch="true 0 ", rules="1 20260902", ruleset="active 0")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=DECLARED_OFF_SLUG)
+    assert rc == 25, f"the ruleset path did not reach the stale-declaration arm: {rc}\n{out}"
+    assert "STALE DECLARATION" in out, out
+    # The fixture's own ruleset id, distinct from every other constant here — the
+    # classic path cannot print it, so this pins WHICH branch decided LIVE ON.
+    assert "ruleset 20260902 gates it" in out, (
+        "the ruleset branch was not the one that ran\n" + out
+    )
+
+
+# --- cell 1: declared ON (the default), live OFF — the alarm, preserved ----- #
+def test_an_UNDECLARED_repo_with_no_gate_still_fires_rc24(fleet):
+    """🔴 FAILS CLOSED. A repo nobody has argued about is expected to be GATED,
+    so the 2026-08-29 alarm survives the change untouched for every remote but
+    the one enumerated. BP_SLUG is a fixture owner/repo that appears in no
+    declaration."""
+    rc, out = _protect(fleet, "--no-remote", gh=GATE_IS_LIVE_OFF)
+    assert rc == 24, f"the botched-restore alarm was lost: {rc}\n{out}"
+    assert "NOTHING DECLARES" in out, (
+        "the finding does not say that the state is undeclared\n" + out
+    )
+    # ...and it points at the reviewable place to declare it, not at an env var.
+    assert "bp_declared_off_reason" in out, out
+
+
+def test_enforce_admins_false_on_a_DECLARED_off_repo_sets_no_rc(fleet):
+    """🔴 REACHABILITY, on the second of the two places the arm decides LIVE OFF.
+
+    Required checks present but enforce_admins FALSE is half a gate, and the arm
+    calls that OFF. On a declared-off repo it must therefore be excused like any
+    other off — if only the zero-checks path consulted the declaration, this
+    input would fire rc 24 on the very repo the operator declared off.
+    """
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 2 alpha-check,bravo-check", protection="false")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=DECLARED_OFF_SLUG)
+    assert rc == 0, f"half a gate on a declared-off repo still fired: {rc}\n{out}"
+    assert "enforce_admins is FALSE" in out, "the wrong branch ran\n" + out
+    assert "DECLARED OFF, and live OFF" in out, out
+
+
+# --- cell 2: declared ON, live ON ------------------------------------------- #
+def test_an_undeclared_repo_with_a_live_gate_says_so_explicitly(fleet):
+    """🔴 REPORT THE PASS ALONGSIDE THE REDS. An arm that only ever prints on a
+    finding is indistinguishable from one wired to nothing."""
+    rc, out = _protect(fleet, "--no-remote", gh=GATE_IS_LIVE_ON)
+    assert rc == 0, f"a gated main was reported as drift: {rc}\n{out}"
+    assert "expected ON" in out and "live ON" in out, out
+    assert "STALE DECLARATION" not in out, out
+
+
+# --- the could-not-measure family, now under a DECLARATION ------------------ #
+def test_a_gh_that_answers_nothing_is_still_could_not_measure_for_a_declared_repo(fleet):
+    """🔴 THE LOAD-BEARING ONE, and the declaration must not have created a
+    second way to manufacture a verdict from an absence.
+
+    An empty `gh` answer is neither "the gate is off" nor "the gate is on", so it
+    is neither cell 3 nor cell 4. It must print a reason and set NO code — and
+    crucially it must NOT print the declared-off report, which would be an
+    affirmative claim about a state nobody read.
+    """
+    rc, out = _declared(fleet, "--no-remote", gh="", gh_rc=1)
+    assert rc == 0, f"an unreadable gh produced a verdict: {rc}\n{out}"
+    assert "[protect] COULD NOT MEASURE" in out, out
+    assert "DECLARED OFF, and live OFF" not in out, (
+        "an absence was reported as agreement with the declaration\n" + out
+    )
+    assert "STALE DECLARATION" not in out, out
+
+
+def test_no_gh_binary_at_all_is_could_not_measure_for_a_declared_repo(fleet):
+    """The other spelling of the same refusal: the binary is simply absent."""
+    rc, out = _declared(fleet, "--no-remote", gh=None)
+    assert rc == 0, out
+    assert "[protect] COULD NOT MEASURE" in out, out
+    assert "DECLARED OFF" not in out, out
+    assert "STALE DECLARATION" not in out, out
+
+
+# --- the declaration itself -------------------------------------------------- #
+def _declaration_body():
+    src = DRIFT.read_text()
+    assert "bp_declared_off_reason() {" in src, (
+        "the declaration function is gone — the expectation is being taken from "
+        "somewhere else now"
+    )
+    return src.split("bp_declared_off_reason() {", 1)[1].split("\n}", 1)[0]
+
+
+def test_the_declaration_names_exactly_the_repos_argued_for():
+    """🔴 A TWO-WAY LEDGER, asserted against a literal in THIS file.
+
+    A repo silently added to the declaration is an rc-24 alarm silently switched
+    off for that remote, and it is the one change to this file that produces no
+    visible symptom at all — the run just goes quiet. So the set is pinned in
+    both directions: an addition fails here, and so does a removal.
+    """
+    slugs = set(re.findall(r'\[\s*"\$1"\s*=\s*(\S+)\s*\]', _declaration_body()))
+    assert slugs == {DECLARED_OFF_SLUG}, (
+        f"drift-check.sh declares the merge gate off for {sorted(slugs)}, and this "
+        f"ledger says {sorted({DECLARED_OFF_SLUG})}. Every entry has to be argued "
+        f"for in a diff a human read."
+    )
+
+
+def test_every_declared_repo_carries_a_written_reason():
+    """An entry with no reason is an expectation nobody can audit later. The
+    reason is also what the run PRINTS, so an empty one produces a report that
+    excuses a finding and declines to say why."""
+    body = _declaration_body()
+    reasons = [r for r in re.findall(r'^\s*echo "([^"]*)"', body, re.M) if r.strip()]
+    assert len(reasons) == 1, (
+        f"expected one non-empty reason for the one declared repo, got {reasons!r}"
+    )
+    assert len(reasons[0]) >= 40, f"the reason is a placeholder, not a reason: {reasons[0]!r}"
+
+
+def test_the_declaration_is_a_pure_function_of_its_argument():
+    """🔴 THE STRUCTURAL HALF of "not env-overridable", and it is wider than a
+    grep for variable names.
+
+    The behavioural test below can only refuse the env var names somebody thought
+    of. This asserts the shape instead: every line of the function is a literal
+    comparison against `$1`, an `echo` of a literal, or block punctuation. No
+    other parameter expansion, no command substitution, no redirection — so the
+    answer cannot come from the environment, from a file, or from a path someone
+    can point elsewhere. A ledger PATH would be the same hole one level out.
+    """
+    allowed = re.compile(
+        r'^(?:'
+        r'(?:el)?if \[ "\$1" = [A-Za-z0-9._/-]+ \]; then'
+        r'|else'
+        r'|fi'
+        r'|echo "[^"$`]*"'
+        r')$'
+    )
+    offenders = []
+    for ln in _declaration_body().splitlines():
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        if not allowed.match(s):
+            offenders.append(s)
+    assert offenders == [], (
+        "bp_declared_off_reason takes its answer from something other than its "
+        "own argument and its own literals: %r" % offenders
+    )
+
+
+def test_the_declaration_cannot_be_set_from_the_environment(fleet):
+    """🔴 The behavioural half. An expectation a run can set is an expectation
+    the run can use to excuse itself — the checker would be policed by the same
+    environment it is policing. Every plausible spelling is set to declare the
+    fixture repo off; the alarm must fire anyway.
+    """
+    src = "\n".join(ln for ln in DRIFT.read_text().splitlines()
+                    if not ln.strip().startswith("#"))
+    assert not re.search(r"DRIFT_(PROTECT_EXPECT|EXPECT|DECLAR|GATE)", src), (
+        "the protection expectation reads an environment variable — it must be "
+        "reviewable source, not runtime input"
+    )
+    rc, out = _protect(
+        fleet, "--no-remote", gh=GATE_IS_LIVE_OFF,
+        DRIFT_PROTECT_EXPECT="off",
+        DRIFT_EXPECT_PROTECTION="off",
+        DRIFT_DECLARED_OFF=BP_SLUG,
+        DRIFT_GATE_DECLARED_OFF="1",
+        DRIFT_PROTECT_DECLARATION="/dev/null",
+    )
+    assert rc == 24, f"an env var declared the gate off: {rc}\n{out}"
+
+
+def test_DRIFT_PROTECT_SLUG_changes_the_subject_and_never_the_expectation(fleet):
+    """⚠ THE ONE OVERRIDE THAT REMAINS, and the distinction that makes it safe.
+
+    It selects WHICH repo is asked about; the expectation is still looked up in
+    the enumeration, and an unenumerated slug is expected ON. So it cannot turn a
+    finding off — pointing it at a repo nobody declared still fires rc 24 on an
+    ungated main, which is exactly what the rest of this file relies on.
+    """
+    rc, out = _protect(fleet, "--no-remote", gh=GATE_IS_LIVE_OFF)
+    assert rc == 24, out
+    assert BP_SLUG in out, out
+    rc2, out2 = _declared(fleet, "--no-remote", gh=GATE_IS_LIVE_OFF)
+    assert rc2 == 0, out2
+    assert DECLARED_OFF_SLUG in out2, out2
+
+
+# --- one rule, one place ----------------------------------------------------- #
+def test_the_arm_decides_its_code_in_exactly_one_place():
+    """🔴 THE CONSOLIDATION, pinned. `note_rc 24` used to sit at THREE sites — the
+    zero-classic-checks branch, the enforce_admins branch and the ruleset branch
+    — and a predicate open-coded at N sites is wrong at N-1 of them in the same
+    direction. Adding the declaration to two of three would leave an arm that
+    still fires on a declared-off gate, correct at both of the sites anyone would
+    think to read. Both codes are now decided once, at the bottom, from BP_LIVE.
+    """
+    src = "\n".join(ln for ln in DRIFT.read_text().splitlines()
+                    if not ln.strip().startswith("#"))
+    for code in (24, 25):
+        n = len(re.findall(rf"^\s*note_rc {code}\b", src, re.M))
+        assert n == 1, (
+            f"note_rc {code} is called {n} times; the branch-protection verdict "
+            f"must be decided in exactly one place, against the declaration"
+        )
+
+
+# --- severity ---------------------------------------------------------------- #
+def test_a_stale_declaration_is_outranked_by_unpushed_commits(fleet):
+    """rc 8 is work that exists on exactly one machine and a careless rescue
+    destroys it. A disarmed detector has lost nothing yet."""
+    fleet.catch_up()
+    fleet.add_local_commit("commit the workbench never pushed")
+    fleet.stub_gh(GATE_IS_LIVE_ON)
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=DECLARED_OFF_SLUG)
+    assert rc == 8, f"rc 25 masked the un-pushed commits: {rc}\n{out}"
+    assert "STALE DECLARATION" in out, "the rc25 finding was lost\n" + out
+
+
+def test_a_stale_declaration_outranks_a_merely_behind_host(fleet):
+    """The fixture clone starts one commit BEHIND (rc 10). A host that just needs
+    a ship must not hide the fact that the merge-gate alarm is switched off."""
+    fleet.stub_gh(GATE_IS_LIVE_ON)                  # no catch_up: still behind
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=DECLARED_OFF_SLUG)
+    assert rc == 25, f"rc 10 masked the stale declaration: {rc}\n{out}"
+    assert "local main is BEHIND origin/main" in out, "the rc10 finding was lost\n" + out
+
+
+def test_rc25_is_ranked_between_rc17_and_rc14_in_the_severity_table():
+    """🔴 The digit is the LARGEST in the table and its rank is fourth.
+
+    BELOW 17 by this table's own published principle — "a hazard that has already
+    cost something outranks one that is merely open": rc 17's measured failure
+    had already shipped a binary that ran, exited 0 and silently did nothing.
+    ABOVE 14 by the other one: 14 is LOUD at the moment of use, and this is
+    silent by construction — its whole symptom is that nothing says anything.
+    """
+    body = DRIFT.read_text().split("severity() {", 1)[1].split("\n}", 1)[0]
+    body = "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("#"))
+    ranks = {int(c): int(r) for c, r in re.findall(r"^\s*(\d+)\)\s*echo (\d+)", body, re.M)}
+    assert 25 in ranks, "rc 25 is not ranked in severity(); it would fall to 99, above rc 8"
+    assert ranks[17] > ranks[25] > ranks[14], (
+        "rc 25 is not between rc 17 and rc 14: %r" % {k: ranks[k] for k in (17, 25, 14)}
+    )
+    header = DRIFT.read_text().split("\nset -", 1)[0]
+    assert "17 > 25 > 14" in header, (
+        "the header's severity ladder does not place rc 25 where severity() does"
+    )
+
+
+def test_the_rc25_legend_is_printed_with_the_verdict(fleet):
+    """The journal is the only place this output is ever read."""
+    rc, out = _declared(fleet, "--no-remote", gh=GATE_IS_LIVE_ON)
+    assert rc == 25, out
+    assert "rc25=" in out, out
+    assert "drift-check: DRIFT (rc=25)" in out, out
+
+
+
 # --- passivity, on a surface the git allowlist cannot see -------------------- #
 # 🔴 THE ALLOWLIST, built on the tokenizer this file ALREADY has. A second,
 # private tokenizer was the first attempt and it read ZERO calls: `shlex` on

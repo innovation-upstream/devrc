@@ -538,7 +538,17 @@ in
       # `notify-send -a notify-failure`. That is ALL unit-failure toasts, not an
       # opt-in subset — justified by the measured firing rate (7 activations in
       # ~6 months of laptop journal, 1 in 9 days of workbench journal), which is
-      # far too low to make DND feel broken. Deliberately NOT keyed on
+      # far too low to make DND feel broken.
+      # ⚠ THAT RATE IS A MEASUREMENT WITH A DATE, AND IT HAS BEEN BREACHED ONCE.
+      # 2026-08-30..09-02: drift-check.service exited 24 on every 6-hourly fire —
+      # 5 failures in 3 days through this rule — because the branch-protection
+      # arm reported a merge gate the operator had deliberately turned off. The
+      # justification above is what the breach was measured AGAINST, not
+      # something the breach retired; it was closed in the SCRIPT (see the rc 24 /
+      # rc 25 note in the drift-check block below), not by narrowing this rule.
+      # Anything wired to OnFailure=notify-failure@ inherits this bypass, so a
+      # unit that can fail on a standing condition breaches it again.
+      # Deliberately NOT keyed on
       # `urgency = critical`: other tools send critical toasts, and those must
       # still respect DND.
       zz_notify_failure_bypass = {
@@ -2879,6 +2889,32 @@ in
   # 17 it is a real divergence with a real fix, so it is NOT excused on
   # SuccessExitStatus (which `test_only_16_is_excused_from_failing_the_unit`
   # pins to exactly one code).
+  #
+  # 🔴 rc 24 AND rc 25 DO TOAST, AND rc 24 IS THE THIRD WAY INTO THE SAME
+  # HAZARD — reached, this time, by a finding that was TRUE. This ledger did not
+  # list rc 24 when it landed, and that omission is what let the following
+  # happen. MEASURED 2026-09-02: the branch-protection arm exited 24 on every
+  # fire (5 failures in 3 days, `Result=exit-code`, `ExecMainStatus=24`) because
+  # the merge gate on innovation-upstream/devrc is off — DELIBERATELY, until the
+  # Tekton capacity issue is addressed, which a different session owns. A true
+  # finding about a state nobody intends to change is a permanently-red gate
+  # exactly like a false one, and at 4×/day it is three orders of magnitude past
+  # the ~1-in-9-days rate this file uses to justify the DND bypass.
+  #
+  # 🔴 THE FIX IS NOT SuccessExitStatus, AND THAT IS WHY THIS PIN STILL READS 16
+  # ALONE. Excusing rc 24 would silence the only thing that catches a BOTCHED
+  # BREAK-GLASS RESTORE — the 2026-08-29 shape where DELETE opened the window,
+  # the restore trap RAN, and PATCH could not close it. So the SCRIPT changed
+  # instead: `bp_declared_off_reason()` in drift-check.sh declares the expected
+  # state per repo, in reviewable source that no environment can flip, and rc 24
+  # now fires on DISAGREEMENT — declared-off/live-off is reported plainly and
+  # sets no code, while declared-on/live-off is the alarm, unchanged. rc 25 is
+  # the mirror: declared OFF, live ON, i.e. the declaration has gone stale and
+  # rc 24 is DISARMED by it. Both are real divergences with real fixes (restore
+  # the protection; delete the declaration), so both must reach OnFailure, and
+  # the excuse list stays at exactly one code. rc 25 has no escalation ladder on
+  # purpose — its repair is a one-line edit by whoever restored the protection,
+  # so unlike rc 13/16/18 it is closable the moment it is seen.
   #
   # 🔴 AND IT DOES NOT MOVE TimeoutStartSec. The budget below is a function of
   # what the script FETCHES; the rc 18 ladder adds no fetch and no ssh — it reads

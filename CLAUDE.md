@@ -166,8 +166,16 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   `protected: true`. A PR merges with both Tekton checks red, or with none posted at all.
   🔴 **DELIBERATE AND CURRENT — not drift, and not yours to "restore".** The operator turned
   it off because the gate was slowing work down; it stays off until the Tekton capacity
-  issue is addressed, which a different session owns. `drift-check.sh` rc 24 will report an
-  unprotected `main` every run in the meantime: that report is EXPECTED, not a finding.
+  issue is addressed, which a different session owns. 🔴 **That decision is now DECLARED IN
+  CODE, and the declaration is load-bearing.** `bp_declared_off_reason()` in
+  `scripts/drift-check.sh` names this repo with the reason above, so rc 24 fires on
+  DISAGREEMENT rather than on the bare state: declared-off/live-off is printed plainly and
+  sets no code (it exited 24 on every 6-hourly fire before that — 5 DND-bypassing toasts in
+  3 days), while an UNDECLARED unprotected `main` is still the alarm, unchanged. 🔴 **When
+  protection is restored, DELETE that arm in the same change** — a declaration left saying
+  "off" over a live gate DISARMS rc 24, which is `drift-check.sh` rc 25 and toasts until it
+  is removed. The declaration is deliberately not env-overridable and has no ledger path: a
+  run must not be able to excuse itself.
   ⚠ **Tekton still RUNS** — both checks post on a PR head, they just do not gate. That is
   exactly why the marker stays `other`: it records that something runs at merge time, never
   that it blocks. There is still no `.github/workflows`.
@@ -224,7 +232,10 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   lags by up to a full interval, and only where the deadman is actually wired in
   (`serverMode && enableDriftDeadman`; the timer runs on the workbench). It catches a
   botched restore after the fact; it does not undo one, and it is not a substitute for
-  step 4.
+  step 4. ⚠ **And it is only armed for a repo whose declared expectation is ON** — while
+  the arm above declares this repo's gate off, a botched restore lands in the same cell as
+  the intended state and passes silently. That is the price of the declaration, and it is
+  why deleting the arm is part of restoring protection rather than a follow-up.
   ⚠ **`strict` is FALSE on purpose.** `strict: true` would force every PR to be up to date
   with `main` before merging — correct in principle, and unworkable here: `main` moved 11+
   times in one session and each move would re-queue a ~20-minute gate for every open PR.
