@@ -117,9 +117,15 @@ prune anything from a run that printed one.
   trigger, every **label word**, and every `search_term`, so `'bench'` ⊂
   `'workbench'`, `'la'` ⊂ `'nebula'`, `'ask'` ⊂ `'task'`. A `:cgt` labelled
   "task" would have silently hijacked all 58 of `:acq`'s `'ask'` fires. Two
-  consequences: (a) when two snippets both spell the same word, **no**
-  `search_terms` edit makes a bare query resolve — one of them must stop
-  spelling it; (b) always gate with `--replay --config <candidate>` and **diff
+  consequences: (a) when two snippets both **DECLARE** the same word (in
+  `search_terms` or the trigger), **no** `search_terms` edit makes a bare query
+  resolve — one of them must stop spelling it, or the word needs an
+  `_AMBIGUOUS_TERM_OWNER` entry. 🔴 **But a snippet that spells the word only in
+  its LABEL no longer competes**: `_attribute` gives DECLARED matches precedence
+  over label-only ones, so the fix for that case IS a `search_terms` edit — add
+  the word to the snippet that should own it. The picker still lists both rows
+  either way; precedence is attribution-only. (b) always gate with
+  `--replay --config <candidate>` and **diff
   it against the deployed config for REGRESSIONS**, not just for new
   resolutions. Validate that diff with a planted mutant before believing a
   clean result.

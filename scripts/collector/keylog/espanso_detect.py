@@ -80,13 +80,18 @@ ESPANSO_SEARCH_WM_CLASS = ".espanso-wrapped"
 # direct-to-main commit that RED-ed `main`): ':acq' grew the LABEL "ask
 # clarifying questions and recommend improvements and anything useful to
 # include", and `_token_matches` reads the label, so both terms started matching
-# ':acq' as well as ':rna'. Note the asymmetry that decides the owner — the two
-# terms are ':rna''s declared INTERFACE (they are literally two of its six
-# `search_terms`, and its label is "Recommend next actions"), whereas on ':acq'
-# the word is incidental PROSE inside a sentence about asking questions. The
-# picker listing both rows is fine and wanted; attribution has one honest
-# answer. The label is the operator's and stays as written — this table is the
-# designed place to say so without editing either snippet.
+# ':acq' as well as ':rna'. #1247 gave them entries here. 🔴 THOSE TWO ENTRIES
+# ARE NOW DELETED, because the asymmetry that chose ':rna' as their owner is a
+# GENERAL rule, not a per-term fact: the terms are ':rna''s declared INTERFACE
+# (two of its six `search_terms`; its label is "Recommend next actions") whereas
+# on ':acq' the word is incidental PROSE. That is what `_attribute`'s
+# declared-interface precedence now decides on its own — MEASURED against the
+# live config with the entries removed, both still resolve to ':rna', and the
+# owner branch is not even REACHED for them (the declared-narrowed set is a
+# single snippet, so `_attribute` returns before the lookup). An entry nothing
+# can reach is dead code, so they went rather than staying as decoration.
+# Re-add them only if ':acq' ever DECLARES 'recom' in its own `search_terms` —
+# that would be a real collision, and then this table is again the right answer.
 #
 # 🔴 BLIND SPOT, MEASURED — THE LOOKUP IS AN EXACT-STRING MATCH, SO PREFIXES OF
 # AN OWNED TERM ARE NOT OWNED. `_term_matches` is a SUBSTRING test, so a typed
@@ -106,13 +111,23 @@ ESPANSO_SEARCH_WM_CLASS = ".espanso-wrapped"
 # prefix-aware lookup can re-point terms the exact form never touched, so it
 # needs its own mutation battery.
 #
-# 🔴 STILL ACCEPTED, and the 'recom' entries below do NOT close it — re-measured
-# 2026-09-02 against the live config: "rec", "reco" and "recomm" all match
-# BOTH ':acq' and ':rna' and all three still resolve to None, because only the
-# two exact strings keyed below are owned. This is the same blind spot, not a
-# new one, and it is recorded here so the next reader does not mistake the two
-# entries for prefix coverage. The decision is unchanged for the same reason:
-# widening it is a mechanism change, not a table entry.
+# 🔴 SINCE THE DECLARED-INTERFACE PRECEDENCE STEP (see `_attribute`), THIS TABLE
+# ONLY ARBITRATES REAL COLLISIONS — `search_terms` vs `search_terms`. A term one
+# snippet DECLARES and another merely spells in its LABEL is now settled by
+# precedence before the lookup is reached, so no entry is needed for that class.
+# 'ask'/'clarify' are the genuine case and still need it: ':acq' and ':dacq' BOTH
+# declare them (':dacq' spells "clarifying", which "clarify" is a substring of),
+# so precedence narrows nothing and the table is what decides.
+#
+# 🔴 STILL ACCEPTED FOR THE TABLE — but note that precedence closes the prefix
+# case for the LABEL-COLLISION class, and does so exactly because it is a
+# mechanism rather than an enumeration. Re-measured 2026-09-02 with precedence
+# in place: "rec"/"reco"/"recomm"/"recomme"/"recommen" all now resolve to ':rna'
+# where every one of them was None before, and no table entry names any of them.
+# 'clar' remains None: ':acq' and ':dacq' BOTH declare it, so precedence has
+# nothing to narrow and the exact-string lookup is still the only hatch. That is
+# the residual blind spot, and it is unchanged — widening the lookup is still a
+# mechanism change, not a table entry, and would need its own mutation battery.
 #
 # Same measurement, recorded so it is not re-litigated: "clarifying" has been
 # typed ZERO times, so it gets no entry — an owner justified by intuition rather
@@ -120,8 +135,6 @@ ESPANSO_SEARCH_WM_CLASS = ".espanso-wrapped"
 _AMBIGUOUS_TERM_OWNER = {
     "ask": ":acq",
     "clarify": ":acq",
-    "recom": ":rna",
-    "recommend": ":rna",
 }
 
 
@@ -326,6 +339,32 @@ class EspansoDetector:
         matched = [trig for trig in self.ts.triggers if self._term_matches(t, trig)]
         if len(matched) == 1:
             return matched[0]
+        # 🔴 DECLARED-INTERFACE PRECEDENCE. `_token_matches` reads three sources:
+        # the trigger, the `search_terms` list, and the human-readable `label`.
+        # The first two are the snippet's DECLARED interface — an authored claim
+        # that this word means this snippet. The label is a DESCRIPTION, and it
+        # is prose the operator rewords freely. So a snippet that names the term
+        # in its declared interface outbids one that only happens to SPELL it in
+        # a sentence. Measured motivation (2026-09-02, a720d30d): ':acq' grew the
+        # label "ask clarifying questions and recommend improvements and anything
+        # useful to include", which made 'recom'/'recommend' — two of ':rna''s
+        # six declared `search_terms` — ambiguous and unattributable, reddening
+        # `test_live_existing_resolutions_not_made_ambiguous` on `main`. A
+        # cosmetic reword must not shadow another snippet's declared route.
+        #
+        # This can only ever SHRINK the candidate set, so it cannot invent a
+        # resolution or re-point a term that already resolves uniquely (that
+        # branch returned above). When NO candidate matches declaredly the set is
+        # left alone: with nothing but labels to go on there is no basis to
+        # prefer one, and narrowing to the empty set would lose the answer that
+        # `_names_trigger` or `_AMBIGUOUS_TERM_OWNER` can still give. Naming a
+        # trigger outright implies a declared match (`token in trig`), so the
+        # tie-break below can never be the thing this drops.
+        declared = [trig for trig in matched if self._term_matches_declared(t, trig)]
+        if declared:
+            matched = declared
+            if len(matched) == 1:
+                return matched[0]
         # Matching is by SUBSTRING (see `_token_matches`), so a term can match a
         # snippet it merely occurs INSIDE. When ":acq" was split into ":dacq" +
         # ":acq" on 2026-08-28 the bare term "acq" started matching BOTH
@@ -335,7 +374,9 @@ class EspansoDetector:
         # which snippet it means, so that snippet wins over the ones that merely
         # contain it. This is consulted ONLY on the already-ambiguous branch, so
         # it can never re-point a term that resolves uniquely today; the tie is
-        # broken only when EXACTLY ONE candidate is named outright.
+        # broken only when EXACTLY ONE candidate is named outright. (It now runs
+        # over the declared-narrowed set — which cannot drop a named candidate,
+        # since naming implies declaring.)
         exact = [trig for trig in matched if self._names_trigger(t, trig)]
         if len(exact) == 1:
             return exact[0]
@@ -372,15 +413,41 @@ class EspansoDetector:
         meta = self.ts.meta.get(trig) or {}
         return all(self._token_matches(tok, trig, meta) for tok in tokens)
 
+    def _term_matches_declared(self, term, trig):
+        """`_term_matches`, but WITHOUT consulting the label.
+
+        i.e. every token reaches `trig` through its DECLARED interface — the
+        trigger string or an entry in `search_terms`. Used only by `_attribute`'s
+        precedence step; the picker (`_term_matches`) keeps reading the label, so
+        a label-matched row is still LISTED, it just stops out-bidding a declared
+        one for the single name telemetry records.
+
+        Same rule as `_term_matches`, same helper, one flag — deliberately not a
+        second copy of the substring logic.
+        """
+        tokens = (term or "").split()
+        if not tokens:
+            return False
+        meta = self.ts.meta.get(trig) or {}
+        return all(self._token_matches(tok, trig, meta, use_label=False)
+                   for tok in tokens)
+
     @staticmethod
-    def _token_matches(token, trig, meta):
-        """One token vs one snippet, by the original (pre-2026-08-05) rules."""
+    def _token_matches(token, trig, meta, *, use_label=True):
+        """One token vs one snippet, by the original (pre-2026-08-05) rules.
+
+        `use_label=False` restricts the test to the snippet's declared interface
+        (trigger + `search_terms`). The default keeps every existing caller —
+        `_term_matches`, and `espanso-usage.py`'s reachability probe, which calls
+        this positionally — on the original three-source behaviour.
+        """
         if token in trig.lower():
             return True
-        label = (meta.get("label") or "").lower()
-        for w in _WORD_RE.findall(label):
-            if token in w:
-                return True
+        if use_label:
+            label = (meta.get("label") or "").lower()
+            for w in _WORD_RE.findall(label):
+                if token in w:
+                    return True
         for st in meta.get("search_terms") or []:
             if isinstance(st, str) and token in st.lower():
                 return True
