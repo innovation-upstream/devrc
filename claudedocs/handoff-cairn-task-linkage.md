@@ -404,6 +404,50 @@ and do not design the third-cache change it was gating.**
   whether `devrc-ci` should follow `auditloop-ci` onto the binary cache, and that belongs to
   `ci-speedup-7`'s holder, not to a fresh draw of rank 11.
 
+### 🔴 `clawgate_handoff.sh` resolves session→task from a CLAUDE-ONLY variable, so opencode is invisible to it — and when nested, it resolves the WRONG session's tasks
+- **Symptom + exact repro:** an opencode session ran `/handoff`, reported `NO SESSION ID` (exit
+  3), wrote no `clawgate-task:` field, and asserted in prose that the work was clawgate task
+  **#477**. Repro of the mechanism:
+  `CLAUDE_CODE_SESSION_ID= bash ~/workspace/devrc/scripts/lib/clawgate_handoff.sh resolve` ⇒ exit 3.
+- **Observed (with values):** `clawgate_resolve()` reads `${CLAUDE_CODE_SESSION_ID:-}` and returns
+  3 when empty, printing *"the board was never asked. This is NOT 'no task'."* — note that is
+  **NOT** the same as the skill's "the board did not answer" bucket, which the caller conflated.
+  `grep -c OPENCODE_SESSION_ID scripts/lib/clawgate_handoff.sh` = **0**, and no skill mentions
+  that variable in this context. Meanwhile `nix/home.nix:1894` and
+  `scripts/opencode/plugin/session-env.js` both state — read out of the shipped opencode
+  **1.18.18** binary, not inferred — that opencode **INHERITS** `CLAUDE_CODE_SESSION_ID` and
+  hands it to its tool shells verbatim (`ShellTool.shellEnv` returns
+  `{ ...process.env, ...overlay }`).
+- 🔴 **TWO failure modes, and the dangerous one is the OPPOSITE of what was reported:**
+  a **DETACHED** opencode run (how `opencode-dispatch` launches it) has nothing to inherit ⇒
+  exit 3 **every time**, so an opencode-authored handoff can never record a task — silent and
+  permanent, not an incident. A **NESTED** run inherits the OUTER Claude Code session's id ⇒
+  resolve exits **0 with another session's tasks**, which then get written into an
+  opencode-authored doc as if they were its own. That path is unguarded today.
+- **Ruled out:** "the work was on clawgate task #477" — `cairn who 477` reports **no session with
+  role `worked`**; both links are `read`, and both were minted during this very investigation
+  (timestamps 21:20:44Z and 21:22:10Z). Task 477 is *"Bot-account detection agent for new
+  accounts, filing into the mute-audit queue"* (civitai moderation), unrelated to any
+  handoff/store work. Per the flow's own contract the no-worked case means the doc belongs to
+  **none** of them. via: measurement
+- **Ruled out:** "the doc records the task in its body" — **no** `*.md` anywhere under
+  `~/workspace` modified since 2026-09-02 mentions task 477. The `477` in THIS doc is part of the
+  sha `3b1a0477`, not a task id. So the likelier reading is that the handoff never landed at all,
+  which is a larger problem than a missing front-matter field. via: command
+- **Ruled out:** "exit 3 means something broke" — it is the designed outcome for a shell with no
+  inherited Claude session, and the script says so in its own message. via: code
+- **Leading hypothesis:** the resolver was written when Claude Code was the only runtime and was
+  never revisited when opencode gained its own identity. `scripts/opencode/plugin/session-env.js`
+  exists precisely because a nested opencode run "had no identity of its own" — the **browser
+  bridge** was taught to fail closed on this (`X-Session-Origin: opencode-inherited`, drops the
+  session key); the handoff/clawgate flow never learned the same lesson.
+- **Next probe:** confirm the nested case end-to-end rather than from the binary read — launch a
+  nested opencode from a Claude Code session and run
+  `bash ~/workspace/devrc/scripts/lib/clawgate_handoff.sh resolve` inside it. If it exits 0 and
+  names the OUTER session's task, the misattribution path is confirmed live. The fix is to prefer
+  `OPENCODE_SESSION_ID` when set and to REFUSE with its own exit code when only an inherited
+  `CLAUDE_CODE_SESSION_ID` is present — both variables already exist, so nothing new is plumbed.
+
 ## Next steps (ranked)
 🔴 **NUMBERING IS STABLE — items are marked done IN PLACE, never removed or renumbered.**
 The rank is half a `claim-work` slug's identity. New items APPEND to the end even when they
@@ -925,6 +969,24 @@ belong topically beside an earlier one.
   "5 overlapping scopes need a merge rule" is a **scope-level** count; at entry level there is
   exactly **one** collision (`devrc/signal.md`, genuinely diverged), plus two alias collisions
   one of which the merge itself introduces.
+
+- 🔴 **An agent's report is a claim, not a reading — two of two factual claims here failed
+  verification.** "The work was on task #477" and "the doc records it in the body" were both
+  checkable and both false; the mechanism claim (exit 3) was true but read backwards. The tools
+  that settled it were `cairn who <task>` (which sessions actually WORKED it, by role) and a
+  workspace-wide `find -newermt … | xargs grep`. **Ask the board and the filesystem before
+  accepting a task linkage that arrives as prose.**
+- 🔴 **`GET /api/tasks/<id>` MINTS A `read` LINK against the calling session.** Checking a task
+  to verify someone else's claim writes a row on the board's attribution ledger — this
+  investigation put a `read` link on 477 for session
+  `7576fffa-1a82-4991-9a7c-1d6997491fff` at 21:22:10Z. Harmless, but it means a `read` row is
+  NOT evidence of intent, and a later reader must not treat one as a sign the session engaged
+  with the task. `cairn who` reports the role, which is what makes the distinction readable.
+- **The skill's exit-code table conflates two different outcomes.** Step 1 buckets "3 or 4, the
+  board did not answer", but exit 3 is *"the board was never asked"* (no session id) while exit 4
+  is *"the board did not answer"* (no token). Same remedy today — write no field — but they have
+  different fixes, and the wording is what let a caller report a structural, permanent condition
+  as if it were a transient outage.
 
 ## How to verify
 ```bash
