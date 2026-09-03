@@ -778,6 +778,47 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     unblocks them. Until then the backup directory is the only copy.
     forcing: regression — silent data loss, observed at roughly one entry every few hours
 
+    🔴 **RANK 23 WAS UNDER-COUNTED AND THE RESCUE WAS INCOMPLETE — measured 2026-09-03 after
+    the item above was written.** The rescue moved whole FILES whose names were absent from
+    the pod. It never looked for extra content INSIDE entries that exist on both sides.
+    Measured across all 157 shared entries: **10 carry local-only content, 102 local-only
+    lines total** — and **all 10 are TWO-WAY divergent** (every one also has pod-only content),
+    so `seed.sh` would DESTROY pod content in all ten cases:
+
+    | entry | local-only | pod-only |
+    |---|---|---|
+    | `civitai/blocks.md` | 15 | 31 |
+    | `civitai-spine-controller/resourcedownload.md` | 6 | 10 |
+    | `homelab-talos/tekton-ci.md` | 3 | 6 |
+    | `homelab-talos/gitops-validate.md` | 19 | 20 |
+    | `civitai-app-sensei/sensei-app.md` | 14 | 16 |
+    | `devrc/tests.md` | 15 | 17 |
+    | `devrc/dl-router.md` | 21 | 17 |
+    | `devrc/diagnose-disk-accounting.md` | 3 | 4 |
+    | `datapacket-talos/claude-pool.md` | 3 | 9 |
+    | `datapacket-talos/tekton-builds.md` | 3 | 24 |
+
+    All ten preserved byte-identical (`cmp` AND `diff`) at
+    `~/.local/share/cairn-orphans-2026-09-03/shared-divergent/`, outside the PUBLIC repo —
+    they are client-scoped. 🔴 **This is TEN HAND-MERGES, not a migration.** It is the
+    `devrc/signal.md` decision from phase 1 — *union of both, neither copy discarded* — which
+    that entry called "one file; the cost is trivial". It is ten now. The merge path exists and
+    is proven: `cairn put` works on an EXISTING entry (If-Match from a live sync).
+    **Closing condition:** all ten merged onto the pod and the backup directory removed, or a
+    recorded decision that the local-only content is disposable.
+    forcing: regression — 102 lines of curated content are dark to every reader on every host
+
+    ⚠ **Independently found and better diagnosed by another session — see devrc #1254.** It
+    measured the same population (*"5 whole entries and 24 dated bullets across 10 shared
+    entries"*) and, unlike this item as originally written, identified WHY the `0444` freeze
+    did not stop it: **the freeze is inert against the tools agents actually use.** In a
+    replica (0444 file, 0755 dir) a shell `>>` gets EACCES, but Claude Code's `Edit` **writes
+    through** — rewrite-and-rename needs only the DIRECTORY bit and leaves the file 0444 — and
+    `Write` creates a fresh 0644 file. Four documents asserted the freeze stops an editor.
+    The 2026-09-03 `0555` directory change closes this, and its three watched refusals
+    (append / create-entry / create-scope) are exactly the three paths that mechanism predicts —
+    but the mechanism was identified there, not here.
+
 24. 🔴 **THE API HAS NO CREATE ROUTE, which is very likely WHY rank 23 happened.** Verified in
     `server.py`: `If-Match` is **mandatory** on PUT, `*` is refused, and the handler resolves an
     existing entry — so `cairn put --file` on a new ref fails *"cannot derive a revision"*. A
