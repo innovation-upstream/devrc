@@ -546,9 +546,13 @@
 #   declared ON,  live OFF  ->  rc 24. The botched-restore alarm, preserved whole.
 #   declared ON,  live ON   ->  no code. The gate is up.
 #   declared OFF, live OFF  ->  no code. Reported plainly, as an intended state.
-#                               EXCEPT a PARTIAL restore (required checks back,
-#                               enforce_admins false) -> rc 25; see the verdict
-#                               block for why that is staleness, not agreement.
+#                               EXCEPT an OFF state carrying evidence a gate was
+#                               RE-ESTABLISHED — required checks back with
+#                               enforce_admins false, or an ACTIVE ruleset
+#                               listing a check but with bypass actors -> rc 25.
+#                               See the verdict block for why that is staleness
+#                               rather than agreement, and for the one OFF kind
+#                               (evaluate/disabled rulesets) still excluded.
 #   declared OFF, live ON   ->  rc 25. The declaration is stale, and a stale
 #                               "off" DISARMS rc 24 — see the code list above.
 #   gh cannot answer        ->  COULD NOT MEASURE, no code, unchanged. A
@@ -3130,7 +3134,14 @@ EOF
       # The rules list checks. Now ask whether ANY ruleset holding one actually
       # BINDS — active, with no bypass actors. Every id is examined, because one
       # non-binding ruleset among several says nothing about the others.
+      # 🔴 BP_RS_BYPASSED IS NOT BOOKKEEPING — IT SPLITS TWO STATES THIS LOOP
+      # USED TO REPORT AS ONE. A ruleset that is ACTIVE and lists a required
+      # check IS a gate; bypass actors only mean somebody can step around it.
+      # A ruleset in evaluate/disabled mode is not a gate at all. Both used to
+      # collapse into one OFF kind, and under a declaration that made the first
+      # one silent — see the verdict block's asymmetry note.
       BP_GATED=0; BP_GATE_ID=""; BP_UNREADABLE=0; BP_SEEN=0; BP_CAPPED=0; BP_WHY=""
+      BP_RS_BYPASSED=0
       for BP_ID in $(printf '%s' "$BP_RULE_IDS" | tr ',' ' '); do
         BP_SEEN=$((BP_SEEN + 1))
         if [ "$BP_SEEN" -gt "$DRIFT_GH_RULESET_MAX" ]; then BP_CAPPED=1; break; fi
@@ -3146,6 +3157,7 @@ EOF
           BP_WHY="$BP_WHY $BP_ID=enforcement:$BP_RS_ENF"
         elif [ "$BP_RS_BYPASS" -gt 0 ]; then
           BP_WHY="$BP_WHY $BP_ID=bypass-actors:$BP_RS_BYPASS"
+          BP_RS_BYPASSED=1
         else
           BP_GATED=1; BP_GATE_ID="$BP_ID"; break
         fi
@@ -3181,7 +3193,20 @@ EOF
         echo "[protect]   bypass actors is the ruleset spelling of enforce_admins=false, letting"
         echo "[protect]   whoever is listed push straight past every check — the mechanism behind"
         echo "[protect]   837d3fde. Either way nothing gates main."
-        BP_LIVE=off; BP_OFF_KIND=ruleset-nonbinding
+        # 🔴 TWO OFF KINDS, NOT ONE. "Either way nothing gates main" is true of
+        # the EXIT CODE and false of what the state TELLS YOU: an active ruleset
+        # listing a check is a gate somebody built, and one in evaluate mode is
+        # not. Only the first is evidence that a declared-off gate has been
+        # restored. A single kind here made the bypass-actors case silent under a
+        # declaration while its exact classic twin (enforce_admins=false) fired.
+        # If ANY examined ruleset was active-with-bypass, that is the finding —
+        # a non-enforcing sibling alongside it does not soften it.
+        BP_LIVE=off
+        if [ "$BP_RS_BYPASSED" = 1 ]; then
+          BP_OFF_KIND=ruleset-bypassed
+        else
+          BP_OFF_KIND=ruleset-inactive
+        fi
       fi
     else
     echo "[protect] $BP_SLUG main has ZERO required status checks (protected=$BP_PROT),"
@@ -3195,6 +3220,21 @@ fi
 # The ONLY place this arm sets a code. See "THE DECLARED EXPECTATION" in the
 # header for the truth table and the argument for each cell.
 BP_EXPECT_WHY="$(bp_declared_off_reason "$BP_SLUG")"
+# 🔴 ONE PREDICATE, ONE PLACE: does this OFF state carry positive evidence that a
+# gate was RE-ESTABLISHED on this repo? That is the whole discriminator the
+# declared-OFF branch turns on, and open-coding it into that `if` is how it came
+# to cover `enforce-admins` and miss `ruleset-bypassed` — two spellings of one
+# state, by this file's own account 100 lines up ("one with bypass actors is the
+# ruleset spelling of enforce_admins=false").
+#   YES — required checks exist in the classic protection object with
+#         enforce_admins false, or an ACTIVE ruleset lists a check but has
+#         bypass actors. Somebody built a gate; some actor can step around it.
+#   NO  — no checks anywhere (classic-zero), or every ruleset holding a check is
+#         in evaluate/disabled mode (ruleset-inactive). Nothing was built.
+BP_RESTORED_GATE=0
+if [ "$BP_OFF_KIND" = enforce-admins ] || [ "$BP_OFF_KIND" = ruleset-bypassed ]; then
+  BP_RESTORED_GATE=1
+fi
 if [ "$BP_LIVE" = unknown ]; then
   # 🔴 UNCHANGED, AND IT MUST STAY THAT WAY. Every path that reaches here has
   # already printed its own COULD NOT MEASURE line and its own reason. It sets no
@@ -3229,8 +3269,10 @@ elif [ -z "$BP_EXPECT_WHY" ]; then
     # test_every_BP_OFF_KIND_assigned_is_branched_on_in_the_verdict.
     if [ "$BP_OFF_KIND" = enforce-admins ]; then
       echo "[protect]   fix: PUT /repos/$BP_SLUG/branches/main/protection with enforce_admins true."
-    elif [ "$BP_OFF_KIND" = ruleset-nonbinding ]; then
-      echo "[protect]   fix: set enforcement=active and remove the bypass actors on one of them."
+    elif [ "$BP_OFF_KIND" = ruleset-bypassed ]; then
+      echo "[protect]   fix: remove the bypass actors from the active ruleset named above."
+    elif [ "$BP_OFF_KIND" = ruleset-inactive ]; then
+      echo "[protect]   fix: set enforcement=active on one of the rulesets named above."
     elif [ "$BP_OFF_KIND" = classic-zero ]; then
       if [ "$BP_PROT" = true ]; then
         echo "[protect]   protected=true: the protection object stands and required_status_checks"
@@ -3279,26 +3321,45 @@ else
   # declaration and rc 24 stays disarmed over a half-restored gate indefinitely.
   # Before the declaration existed, that same state fired rc 24.
   #
-  # ⚠ `ruleset-nonbinding` deliberately does NOT get this treatment, and the
-  # asymmetry is argued rather than convenient. `/rules/branches/main` returns the
-  # rules of EVERY applying ruleset, repo- and ORG-level mixed (see the loop
-  # above), and an org ruleset parked in `evaluate` mode is the standard org
-  # rollout pattern — nothing this repo created and nothing its operator can
-  # remove. Firing rc 25 on it would be a permanently-red gate on a state nobody
-  # can close, which is the one thing this arm refuses everywhere else. It stays
-  # in the agreement cell and converts to rc 25 the moment any ruleset actually
-  # BINDS (BP_LIVE=on).
-  # ⚠ KNOWN BOUND, stated rather than hidden: a REPO-level ruleset the operator
-  # created and left in evaluate mode is indistinguishable from the org case at
-  # the endpoint this arm reads, so it too stays quiet. `ruleset_source_type` on
-  # /rules/branches/main is the field that would separate them; it is not read
-  # today, and closing this needs that read plus its own tests.
-  if [ "$BP_LIVE" = off ] && [ "$BP_OFF_KIND" != enforce-admins ]; then
+  # 🔴 AND THE RULESET SPELLING OF IT COUNTS THE SAME — `ruleset-bypassed`. An
+  # EARLIER REVISION EXCLUDED THE WHOLE RULESET CLASS AND THAT WAS TOO WIDE. An
+  # ACTIVE ruleset whose required_status_checks rule lists a check IS a gate
+  # somebody built; bypass actors only mean a listed actor can step around it —
+  # which the loop above calls, in this file's own words, "the ruleset spelling
+  # of enforce_admins=false". Excluding it made the LIKELY repair path silent:
+  # this file's own header calls a ruleset "the most likely next repair of THIS
+  # repo", so the realistic sequence is an operator restoring by ruleset and
+  # leaving an admin or an app in `bypass_actors` — the exact state F3 exists to
+  # catch, going quiet indefinitely under the declaration.
+  #
+  # ⚠ `ruleset-inactive` — every ruleset holding a check parked in
+  # evaluate/disabled — is what remains excluded, and THAT asymmetry is the
+  # argued one. Evaluate mode is not a gate at all: it is explicitly a
+  # non-enforcing dry run, so it is not evidence anybody restored anything.
+  # `/rules/branches/main` also returns the rules of EVERY applying ruleset,
+  # repo- and ORG-level mixed, and an org ruleset parked in evaluate is the
+  # standard org rollout — nothing this repo created or can remove. Firing on it
+  # would be a permanently-red gate on a state nobody can close. It stays in the
+  # agreement cell and converts to rc 25 the moment a ruleset BINDS (BP_LIVE=on)
+  # or turns out to be active-with-bypass.
+  # ⚠ KNOWN BOUND, and now genuinely narrow: a REPO-level ruleset the operator
+  # created and left in EVALUATE mode is indistinguishable, at the endpoint this
+  # arm reads today, from the org rollout above — so it stays quiet. That is
+  # CLOSABLE, not structural: `ruleset_source_type` IS present on
+  # /rules/branches/main (measured on astral-sh/uv: `Organization` for the org
+  # ruleset, `Repository` for the required_status_checks one). It is not read
+  # today, and closing it needs that read plus its own tests. Because it is
+  # closable, it cannot carry an exclusion any wider than this one.
+  if [ "$BP_LIVE" = off ] && [ "$BP_RESTORED_GATE" = 0 ]; then
     echo "[protect] DECLARED OFF, and live OFF — expectation and reality agree. No rc is set."
     echo "[protect]   why: $BP_EXPECT_WHY"
-    echo "[protect]   🔴 The alarm is QUIET, not DISABLED. It fires as rc 25 as soon as the"
-    echo "[protect]   gate is re-established — including a PARTIAL restore that puts the"
-    echo "[protect]   required checks back and omits enforce_admins."
+    echo "[protect]   🔴 The alarm is QUIET, not DISABLED. It fires as rc 25 as soon as a gate"
+    echo "[protect]   is re-established on this repo — a full restore, a PARTIAL one that puts"
+    echo "[protect]   the required checks back and omits enforce_admins, or an ACTIVE ruleset"
+    echo "[protect]   listing a check but carrying bypass actors (the ruleset spelling of the"
+    echo "[protect]   same half-gate)."
+    echo "[protect]   ⚠ It stays quiet for a ruleset parked in evaluate/disabled mode — that is"
+    echo "[protect]   not a gate anybody built. See the asymmetry note in this script."
     echo "[protect]   ⚠ Nothing gates a merge to $BP_SLUG main while this stands — run both"
     echo "[protect]   tiers of the gate yourself, on the MERGED tree, and name the base sha."
   else
@@ -3314,6 +3375,17 @@ else
       echo "[protect]   true and read it back, AND delete the $BP_SLUG arm from"
       echo "[protect]   bp_declared_off_reason(). Finishing one and not the other leaves this"
       echo "[protect]   red (checks half-bound) or silent (declaration stale) respectively."
+    elif [ "$BP_OFF_KIND" = ruleset-bypassed ]; then
+      echo "[protect]   $BP_SLUG main OFF, and an ACTIVE ruleset now lists a required check —"
+      echo "[protect]   a PARTIAL restore by the RULESET mechanism, with bypass actors still"
+      echo "[protect]   set:$BP_WHY"
+      echo "[protect]   Somebody built a gate on this branch; listed actors can step around it."
+      echo "[protect]   🔴 That is the ruleset spelling of enforce_admins=false, and this script"
+      echo "[protect]   calls a ruleset 'the most likely next repair of THIS repo' — so this is"
+      echo "[protect]   the LIKELY shape of a half-finished restore, not an exotic one."
+      echo "[protect]   fix, BOTH halves: remove the bypass actors from that ruleset, AND delete"
+      echo "[protect]   the $BP_SLUG arm from bp_declared_off_reason(). Finishing one and not the"
+      echo "[protect]   other leaves this red (gate half-bound) or silent (declaration stale)."
     else
       echo "[protect]   $BP_SLUG main OFF, and it is LIVE ON."
       echo "[protect]   fix: delete the $BP_SLUG arm from bp_declared_off_reason() in"

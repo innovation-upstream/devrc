@@ -6491,13 +6491,16 @@ def test_rc24_is_ranked_between_rc8_and_rc17_in_the_severity_table():
 # 🔴 THE DESIGN DECISION THESE TESTS EXIST TO PIN. Measured 2026-09-02: the merge
 # gate on innovation-upstream/devrc is OFF, DELIBERATELY — the operator turned it
 # off until the Tekton capacity issue is addressed, which a different session
-# owns. The bare-state arm therefore fired rc 24 on EVERY 6-hourly run (5
-# failures in 3 days, and it would have continued indefinitely), and
-# `drift-check.service`'s OnFailure is the ONE toast class deliberately wired to
-# bypass do-not-disturb — nix/home.nix justifies that bypass by a MEASURED rate
-# of ~1 firing in 9 days. That is the permanently-red gate `claude/RULES.md`
-# refuses, arrived at from a third direction: not a broken instrument and not a
-# false positive, but a TRUE finding about a state nobody intends to change.
+# owns. The bare-state arm therefore reported it as DRIFT on every run that
+# reached it, and would have indefinitely, while `drift-check.service`'s
+# OnFailure is the ONE toast class deliberately wired to bypass do-not-disturb.
+# That is the permanently-red gate `claude/RULES.md` refuses, arrived at from a
+# third direction: not a broken instrument and not a false positive, but a TRUE
+# finding about a state nobody intends to change.
+# ⚠ The breach rate and the arithmetic against the bypass's justification are
+# stated ONCE, in nix/home.nix's `zz_notify_failure_bypass` block. Do not restate
+# them here — an earlier wording of this very comment carried a wrong count and a
+# wrong multiple, which is why that rule exists.
 #
 # 🔴 AND SIMPLY EXCUSING IT IS THE WRONG FIX, because rc 24 is the only thing
 # that catches a BOTCHED BREAK-GLASS RESTORE — the measured 2026-08-29 shape
@@ -6943,33 +6946,108 @@ def test_a_PARTIAL_restore_under_a_declaration_is_rc25_not_agreement(fleet):
     assert "BOTH halves" in out, out
 
 
-def test_the_agreement_cell_no_longer_promises_something_false(fleet):
-    """The cell-3 report used to say "Restore protection and this becomes rc 25",
-    which was false for a partial restore. It must now describe what actually
-    happens, and the journal is the only place this is ever read."""
+def test_the_agreement_cell_promises_exactly_what_the_arm_does(fleet):
+    """🔴 THE REPORT IS A CLAIM, AND THE JOURNAL IS THE ONLY PLACE IT IS READ.
+
+    Cell 3 used to say "Restore protection and this becomes rc 25" — false for a
+    partial restore, which set no code. It was corrected once for the
+    enforce_admins spelling and was then false again for the ruleset spelling.
+
+    So this pins the RELATIONSHIP rather than a phrase: the agreement cell must
+    name every state that DOES fire (both half-gate spellings) and the one that
+    does NOT (evaluate/disabled). A guard on a single word is walkable by
+    rewording, and this sentence has been reworded twice.
+    """
     rc, out = _declared(fleet, "--no-remote", gh=GATE_IS_LIVE_OFF)
     assert rc == 0, out
-    assert "PARTIAL restore" in out, (
-        "the agreement cell does not say that a partial restore also fires\n" + out
+    cell = "\n".join(ln for ln in out.splitlines() if ln.startswith("[protect]"))
+    for fires in ("enforce_admins", "bypass actors"):
+        assert fires in cell, (
+            f"the agreement cell does not say a {fires!r} half-gate also fires\n" + cell
+        )
+    assert "evaluate" in cell, (
+        "the agreement cell does not say which state it stays quiet for\n" + cell
     )
 
 
-def test_a_NONBINDING_RULESET_under_a_declaration_stays_in_the_agreement_cell(fleet):
-    """⚠ THE ARGUED ASYMMETRY, pinned so it cannot drift into "we forgot".
+def test_an_INACTIVE_ruleset_under_a_declaration_stays_in_the_agreement_cell(fleet):
+    """⚠ THE ARGUED ASYMMETRY, and it is now narrow enough to be argued.
 
-    `/rules/branches/main` returns the rules of every APPLYING ruleset, repo- and
-    ORG-level mixed, and an org ruleset parked in `evaluate` mode is the standard
-    org rollout pattern — nothing this repo created or can remove. Firing rc 25 on
-    it would be a permanently-red gate on a state nobody can close. Unlike the
-    enforce_admins case, it carries no evidence that anyone restored anything on
-    THIS repo, so it stays quiet and converts to rc 25 the moment a ruleset binds.
+    ⚠ THIS TEST USED TO GENERALISE OVER "a nonbinding ruleset" WHILE ITS BODY
+    EXERCISED ONLY `evaluate` — the docstring-claims-a-relationship,
+    body-inspects-one-side shape. The other sub-state, `active` with
+    `bypass_actors > 0`, landed in the same OFF kind and was SILENT under a
+    declaration while its exact classic twin (enforce_admins=false) fired. It now
+    fires rc 25; see the sibling test. This one is scoped to what it checks.
+
+    Evaluate/disabled is not a gate anybody built — it is explicitly a
+    non-enforcing dry run — so it is not evidence that a declared-off gate was
+    restored. `/rules/branches/main` also returns the rules of every APPLYING
+    ruleset, repo- and ORG-level mixed, and an org ruleset parked in evaluate is
+    the standard rollout: firing on it would be a permanently-red gate on a state
+    nobody can close. It converts to rc 25 the moment a ruleset binds.
     """
     fleet.catch_up()
     _gh_router(fleet, branch="true 0 ", rules="1 20260903", ruleset="evaluate 0")
     rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=DECLARED_OFF_SLUG)
-    assert rc == 0, f"a non-binding ruleset fired under a declaration: {rc}\n{out}"
+    assert rc == 0, f"an inactive ruleset fired under a declaration: {rc}\n{out}"
     assert "DECLARED OFF, and live OFF" in out, out
     assert "STALE DECLARATION" not in out, out
+
+
+def test_an_ACTIVE_ruleset_with_BYPASS_ACTORS_under_a_declaration_is_rc25(fleet):
+    """🔴 THE OTHER HALF, and by this script's own account the LIKELY one.
+
+    drift-check.sh calls a ruleset "the most likely next repair of THIS repo", so
+    the realistic sequence is: the operator restores the gate with a repo ruleset
+    and leaves an admin or an app in `bypass_actors`. The ruleset is ACTIVE and
+    lists a required check — somebody built a gate — and the script's own loop
+    calls bypass actors "the ruleset spelling of enforce_admins=false".
+
+    Reading that as agreement made the deadman go quiet indefinitely on exactly
+    the state F3 exists to catch, while the classic spelling of the identical
+    state fired rc 25 three lines earlier.
+    """
+    fleet.catch_up()
+    # ACTIVE, one required-checks rule, 2 bypass actors. Fixture ruleset id is
+    # distinct from every other constant in this file.
+    _gh_router(fleet, branch="true 0 ", rules="1 20260904", ruleset="active 2")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=DECLARED_OFF_SLUG)
+    assert rc == 25, f"an active-but-bypassed ruleset passed silently: {rc}\n{out}"
+    assert "STALE DECLARATION" in out, out
+    assert "PARTIAL restore by the RULESET mechanism" in out, out
+    # The finding must name the actual bypass count it measured, not just "some".
+    assert "20260904=bypass-actors:2" in out, out
+    assert "expectation and reality agree" not in out, (
+        "a half-restored ruleset gate is still reported as agreement\n" + out
+    )
+    assert "BOTH halves" in out, out
+
+
+def test_an_ACTIVE_bypassed_ruleset_on_an_UNDECLARED_repo_is_still_rc24(fleet):
+    """The alarm for a repo nobody declared must not move. Same input, fixture
+    slug — this was rc 24 before the declaration existed and must stay so."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="1 20260904", ruleset="active 2")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"an active-but-bypassed ruleset stopped firing rc 24: {rc}\n{out}"
+    assert "NOTHING DECLARES" in out, out
+    assert "remove the bypass actors" in out, out
+
+
+def test_a_bypassed_ruleset_ALONGSIDE_an_inactive_one_is_still_rc25(fleet):
+    """🔴 A NON-ENFORCING SIBLING DOES NOT SOFTEN THE FINDING. Both rulesets are
+    examined; one is evaluate-mode, one is active-with-bypass. The verdict must
+    be decided by the one that IS a gate, not by whichever the loop saw last."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="2 20260903,20260904",
+               ruleset={"20260903": "evaluate 0", "20260904": "active 2"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=DECLARED_OFF_SLUG)
+    assert rc == 25, f"an inactive sibling suppressed the finding: {rc}\n{out}"
+    assert "STALE DECLARATION" in out, out
+    # ...and both reasons are still reported, so the operator sees the whole set.
+    assert "20260903=enforcement:evaluate" in out, out
+    assert "20260904=bypass-actors:2" in out, out
 
 
 def test_an_UNDECLARED_partial_restore_is_still_rc24(fleet):
@@ -7011,7 +7089,8 @@ def test_every_BP_OFF_KIND_assigned_is_branched_on_in_the_verdict():
     )
     # ...and the literal set, written out HERE, so a fourth kind has to be argued
     # for rather than merely spelled consistently in two places.
-    assert assigned == {"classic-zero", "enforce-admins", "ruleset-nonbinding"}, (
+    assert assigned == {"classic-zero", "enforce-admins",
+                        "ruleset-bypassed", "ruleset-inactive"}, (
         f"the OFF-kind vocabulary changed: {sorted(assigned)}"
     )
 

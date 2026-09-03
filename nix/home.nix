@@ -2988,10 +2988,11 @@ in
       # the readers, and the timer runs every 6h — so the DND-bypassing alert
       # would fire 4× a day, forever, on a run where nothing is wrong. The DND
       # bypass is justified in this file by a MEASURED rate of ~1 firing in 9
-      # days; 4/day is three orders of magnitude past that, and it is exactly
-      # the "permanently-red gate trains you to click through the one alert that
-      # must keep its meaning" hazard the unreachable-remote note below already
-      # refuses. The script's own header refuses it for rc 13 for the same
+      # days — see the `zz_notify_failure_bypass` block for that measurement and
+      # the arithmetic against it, which is stated ONCE and nowhere else. This is
+      # exactly the "permanently-red gate trains you to click through the one
+      # alert that must keep its meaning" hazard the unreachable-remote note
+      # below already refuses. The script's own header refuses it for rc 13 for the same
       # reason. Correct about a printed LINE, wrong about an EXIT CODE.
       #
       # NOTHING IS HIDDEN. The script still exits 16, still prints the

@@ -175,10 +175,11 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   `nix/home.nix`'s `zz_notify_failure_bypass` block — do not restate it; it was wrong at
   every copy.) 🔴 **When protection is restored, DELETE that arm in the same change** — a
   declaration left saying "off" over a live gate DISARMS rc 24, which is `drift-check.sh`
-  rc 25 and toasts until it is removed. **A PARTIAL restore fires rc 25 too**: put the
-  required checks back and omit `enforce_admins` — the exact shape step 4 below warns a
-  partial `PUT` produces — and the checks existing again is evidence the declaration is
-  stale, so it is a finding rather than agreement. The declaration is deliberately not
+  rc 25 and toasts until it is removed. **A HALF-finished restore fires rc 25 too**, in
+  either spelling: required checks back with `enforce_admins` omitted (the exact shape step 4
+  below warns a partial `PUT` produces), or an ACTIVE ruleset listing a check but keeping
+  `bypass_actors`. A gate existing again is evidence the declaration is stale, so both are
+  findings rather than agreement. The declaration is deliberately not
   env-overridable and has no ledger path: a run must not be able to excuse itself. ⚠ The
   SUBJECT can still be redirected (`DRIFT_PROTECT_SLUG`), but the run prints the slug it
   asked about, so that silence names a repo nobody chose.
@@ -238,13 +239,16 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   lags by up to a full interval, and only where the deadman is actually wired in
   (`serverMode && enableDriftDeadman`; the timer runs on the workbench). It catches a
   botched restore after the fact; it does not undo one, and it is not a substitute for
-  step 4. ⚠ **And while this repo's gate is DECLARED off, rc 24 cannot fire for it** — a
-  restore that is later undone lands in the same cell as the intended state. Two things
-  narrow that: a PARTIAL restore (checks back, `enforce_admins` dropped — the failure step 4
-  exists for) fires **rc 25**, not silence; and a completed restore fires rc 25 until the
-  declaration is deleted. What is genuinely uncovered is a full restore, the declaration
-  deleted, and a *later* deletion — which is ordinary rc 24 again. Deleting the arm is part
-  of restoring protection, not a follow-up.
+  step 4. ⚠ **And while this repo's gate is DECLARED off, rc 24 cannot fire for it.** What
+  narrows that is rc 25, which fires on any OFF state carrying evidence a gate was
+  re-established: a completed restore, a PARTIAL one (checks back, `enforce_admins` dropped —
+  the failure step 4 exists for), and an ACTIVE ruleset that lists a check but keeps bypass
+  actors. 🔴 **The one state still uncovered is a ruleset parked in `evaluate`/`disabled`
+  mode** — not a gate anybody built, and indistinguishable at the endpoint drift-check reads
+  from the org-level evaluate rollout it must not fire on. (Closable, not structural:
+  `ruleset_source_type` is on `/rules/branches/main` and is simply not read yet.) Note a full
+  restore followed by a *later* deletion is NOT uncovered — deleting the declaration is part
+  of restoring protection, and after that it is ordinary rc 24 again.
   ⚠ **`strict` is FALSE on purpose.** `strict: true` would force every PR to be up to date
   with `main` before merging — correct in principle, and unworkable here: `main` moved 11+
   times in one session and each move would re-queue a ~20-minute gate for every open PR.
