@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import importlib.machinery
 import importlib.util
 import json
 import sys
@@ -147,6 +148,11 @@ WIRE_CONSTANTS: tuple[tuple[object, str, object], ...] = (
     (rs, "SYNC_STAMP", ".sync-stamp"),
     # A COMMAND a human is told to type, by the refusal and by two SKILL.mds.
     (rs, "REMEDY", "cairn sync"),
+    # An EXIT CODE two CLIs return and a script branches on. Not a `str` either,
+    # and the number is written out here rather than read off `subsystem_recall`
+    # — which now imports it — so the pin cannot be satisfied by the two agreeing
+    # with each other while both drifted from the documented contract.
+    (rs, "EXIT_UNSTAMPED_READ_STORE", 4),
     # A DIRECTORY every reader resolves and `scripts/cairn` writes. Not a `str`,
     # which is precisely why the old sweep could not see it.
     (rs, "DEFAULT_CACHE_ROOT", Path.home() / ".cache" / "subsystem-store"),
@@ -1418,3 +1424,496 @@ class TestTheBriefSaysHowFreshItsIndexIs:
         rather than at a reader wondering where the date went."""
         doc = (ROOT / "claude/skills/analyze-service/SKILL.md").read_text(encoding="utf-8")
         assert f"`{rs.STAMP_PREFIX.strip()}` LINES under `index:`" in doc
+
+
+# =============================================================================
+# The THIRD read surface: `scripts/subsystem-audit.py`, whose verb is DELETE.
+# =============================================================================
+#
+# 🔴 #1233 REPOINTED TWO OF THREE. `subsystem_recall`'s CLI and `service_recon`
+# were fixed; `scripts/subsystem-audit.py` kept its own
+# `DEFAULT_STORE_ROOT = ~/.claude/analyze-service-index` and defaulted `--store`
+# to it. It was left out deliberately — it is the tool `prune-index` computes
+# DELETIONS from, so repointing it has its own blast radius — and that is also
+# exactly why it is the worst one to leave: a stale mirror is missing entries the
+# canonical store has, so a cut planned against it is planned against the wrong
+# denominator, and §6 of `prune-index` compares an OPEN count across two runs.
+#
+# The prescribed invocations all pass `--store` explicitly and were never broken;
+# the BARE one in `claudedocs/handoff-analyze-service-index-backup.md` was.
+
+_AUDIT_SRC = ROOT / "scripts" / "subsystem-audit.py"
+
+
+def _fenced_command_lines(doc: str, needle: str) -> list[str]:
+    """Lines inside a ``` fence that mention `needle`, whitespace-normalised.
+
+    🔴 PROSE THAT NAMES A COMMAND IS NOT A PRESCRIPTION OF IT. Both markdown
+    guards below first matched any line containing `subsystem-audit.py`, which
+    swept up sentences like "re-run `scripts/subsystem-audit.py` and read …" —
+    true statements that prescribe no argv and must stay free to be reworded.
+    Only a fenced line is something a reader copies and runs, so only a fenced
+    line can be wrong about `--store`.
+    """
+    out, inside = [], False
+    for line in doc.splitlines():
+        if line.lstrip().startswith("```"):
+            inside = not inside
+            continue
+        if inside and needle in line and not line.lstrip().startswith("#"):
+            out.append(" ".join(line.split()))
+    return out
+
+
+def _python_code_only(src: str) -> str:
+    """`src` with comment lines and every triple-quoted block removed.
+
+    A literal ban has to read CODE. This file's own first attempt stripped the
+    module docstring alone and then failed on prose inside a FUNCTION docstring —
+    a guard going red for a sentence, which is how a literal ban gets deleted
+    rather than fixed. Both quote styles, because either delimits a docstring.
+    """
+    stripped, inside, closer = [], False, ""
+    for line in src.splitlines():
+        rest = line
+        while rest:
+            if inside:
+                idx = rest.find(closer)
+                if idx < 0:
+                    rest = ""
+                    break
+                rest, inside, closer = rest[idx + 3:], False, ""
+                continue
+            hits = [(rest.find(q), q) for q in ('"""', "'''") if rest.find(q) >= 0]
+            if not hits:
+                break
+            at, quote = min(hits)
+            stripped.append(rest[:at])
+            rest, inside, closer = rest[at + 3:], True, quote
+        if not inside and rest and not rest.lstrip().startswith("#"):
+            stripped.append(rest)
+    return "\n".join(stripped)
+
+
+def _load_audit():
+    """`subsystem-audit.py` has a hyphen, so it cannot be imported by name.
+
+    Loaded under a module name of this file's own, NOT the one
+    `test_subsystem_audit.py` uses: two suites sharing a `sys.modules` key would
+    make whichever imported second silently reuse the first's module object.
+    `subsystem_read_store` itself is still shared through `sys.modules`, which is
+    what lets `repointed` reach the auditor at all.
+    """
+    loader = importlib.machinery.SourceFileLoader(
+        "subsystem_audit_under_readstore_test", str(_AUDIT_SRC)
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+sa = _load_audit()
+
+#: The auditor's own store-missing code, written out here rather than read off
+#: the module. It is the number the refusal must NOT collide with.
+AUDIT_EXIT_STORE_MISSING = 2
+
+
+class TestTheAuditorResolvesThroughTheSharedResolver:
+    def test_the_default_reads_the_repointed_cache_and_names_it(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """🔴 THE HEADLINE. With no `--store`, the auditor reads whatever
+        `read_store_root()` resolves to — so repointing the resolver moves it,
+        which is only true if it stopped carrying a path of its own.
+
+        Asserted through the OUTPUT, not by reading a constant back off the
+        module: `store: <path>` is the line a human uses to answer "which store
+        did this audit?", and it is the one that was wrong.
+        """
+        store = repointed(_store(tmp_path, stamped=True))
+        assert sa.main([]) == 0
+        out = capsys.readouterr().out
+        assert f"  store: {store}" in out
+        # …and it really audited THAT store, rather than printing its name over
+        # somebody else's counts.
+        assert "collector" in out
+
+    def test_the_default_is_NOT_the_frozen_mirror(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """Pinned two-way, the same as the resolver's own default test: where it
+        points, and where it must not. The mirror is named through
+        `subsystem_touch` — the module that legitimately owns that path — so this
+        cannot be satisfied by the auditor agreeing with a copy of its own."""
+        repointed(_store(tmp_path, stamped=True))
+        assert sa.main([]) == 0
+        out = capsys.readouterr().out
+        assert f"  store: {st.DEFAULT_STORE_ROOT}" not in out
+        assert "analyze-service-index" not in out
+
+
+class TestTheAuditorRefusesAnUnstampedDefault:
+    def test_an_unstamped_DEFAULT_is_refused_and_audits_nothing(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """🔴 Non-zero exit, and — the half that matters — no report a reader
+        could act on. An audit that still printed its counts would be an
+        advisory, and `prune-index` step 1 says to stop when the verdict is
+        clean: a clean verdict computed off a frozen mirror is the failure."""
+        repointed(_store(tmp_path, stamped=False))
+        assert sa.main([]) == 4
+        cap = capsys.readouterr()
+        assert "REFUSING" in cap.err
+        assert rs.REMEDY in cap.err
+        assert cap.out.strip() == ""
+        assert "index audit" not in cap.out
+
+    def test_the_refusal_names_DELETION_as_the_stake(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """This tool is not just another reader, and its refusal says so — a
+        reader who has seen the recall refusal must not read this one as the
+        same, weaker fact."""
+        repointed(_store(tmp_path, stamped=False))
+        assert sa.main([]) == 4
+        err = capsys.readouterr().err
+        assert "DELETIONS" in err
+        assert "prune-index" in err
+
+    def test_the_exit_code_is_the_SAME_number_BOTH_read_surfaces_return(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """🔴 ONE VOCABULARY, OR A CALLER NEEDS TWO RULES.
+
+        The literal is written out here, and the two tools are compared to it
+        rather than to each other — two modules agreeing while both drifted from
+        the documented contract is the failure this file has already seen five
+        times. `2` is asserted distinct because it is this auditor's OWN
+        store-missing code, and a refusal that returned it would be
+        indistinguishable from "you named a path that is not a directory".
+        """
+        repointed(_store(tmp_path, stamped=False))
+        assert sa.main([]) == 4
+        capsys.readouterr()
+        assert rs.EXIT_UNSTAMPED_READ_STORE == 4
+        assert rc.EXIT_UNSTAMPED_READ_STORE == 4
+        assert rc.main(["--scope", SCOPE]) == 4
+        capsys.readouterr()
+        assert 4 != AUDIT_EXIT_STORE_MISSING
+        assert 4 != 0
+
+    def test_the_guard_is_REACHABLE_the_store_missing_check_does_not_win(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """🔴 REACHABILITY, and this one is not hypothetical — it is the ONLY
+        case a fresh host produces.
+
+        A host that has never run `cairn sync` has no `~/.cache/subsystem-store`
+        at all. `root.is_dir()` sits in this same function and answers that with
+        `store root not found`, which is TRUE and carries no remedy. Placed
+        after it, the refusal would be dead code for the exact population it
+        exists to serve. So the input here is a default that does not exist, and
+        the assertion is that the answer is 4 with `cairn sync` in it — never 2.
+        """
+        repointed(tmp_path / "never-synced")
+        assert sa.main([]) == rs.EXIT_UNSTAMPED_READ_STORE
+        err = capsys.readouterr().err
+        assert rs.REMEDY in err
+        assert "store root not found" not in err
+
+    def test_the_same_command_succeeds_once_the_store_is_stamped(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """The positive half of the reachability pair: same argv, same store
+        contents, stamp present ⇒ exit 0 and a real audit. Without this, a
+        `main` that refused everything would pass every test above."""
+        repointed(_store(tmp_path, stamped=True))
+        assert sa.main([]) == 0
+        assert "index audit" in capsys.readouterr().out
+
+
+class TestTheAuditorStaysPermissiveOnAnExplicitStore:
+    """🔴 THE HALF THE CHANGE MUST NOT MOVE.
+
+    Every prescribed invocation of this tool passes `--store` explicitly
+    (`prune-index/SKILL.md` x4), as does every fixture in
+    `test_subsystem_audit.py`, and a `cp -a` backup or a restored bundle is the
+    same case. A refusal that reached them would be a regression dressed as a
+    guard.
+
+    🔴 LABELLED HONESTLY, AND THE LABEL IS NOT UNIFORM — measured at
+    `c616b7ae`, not assumed. Two of these three are INVARIANT GUARDS: they pass
+    on pre-change code and are NOT regression coverage. The first is RED at that
+    base, but for a DIFFERENT defect than the store repoint — `render`'s
+    `out=sys.stdout` default bound the stream at import, so `capsys` saw nothing
+    and the content assertion failed. It is regression coverage for THAT fix, and
+    it is the permissive contract only at HEAD.
+    """
+
+    def test_an_explicit_store_at_an_unstamped_path_still_audits(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        # The default is repointed at an unstamped store too, so a pass here
+        # cannot come from the default happening to be fine.
+        repointed(_store(tmp_path / "default", stamped=False))
+        elsewhere = _store(tmp_path / "named", stamped=False)
+        assert sa.main(["--store", str(elsewhere)]) == 0
+        cap = capsys.readouterr()
+        assert "collector" in cap.out
+        assert "REFUSING" not in cap.err
+
+    def test_an_explicit_MISSING_store_is_store_missing_not_the_refusal(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """The two codes divide on WHO named the path. `store-missing` still
+        answers an operator who typed one, and the remedy for that is not
+        `cairn sync`."""
+        repointed(_store(tmp_path / "default", stamped=True))
+        assert sa.main(["--store", str(tmp_path / "nope")]) == AUDIT_EXIT_STORE_MISSING
+        err = capsys.readouterr().err
+        assert "store root not found" in err
+        assert rs.REMEDY not in err
+
+    def test_the_prescribed_skill_commands_all_name_a_store(self) -> None:
+        """The premise of this whole class, pinned rather than recalled. If
+        `prune-index` ever stops passing `--store`, the permissive arm above
+        stops describing the prescribed path and the refusal starts reaching
+        it — and nothing else would say so."""
+        doc = (ROOT / "claude/skills/prune-index/SKILL.md").read_text(encoding="utf-8")
+        calls = _fenced_command_lines(doc, "subsystem-audit.py")
+        # POSITIVE CONTROL: the fence walk really found commands, so an
+        # all-pass loop below is not a loop over nothing.
+        assert len(calls) >= 4, calls
+        for line in calls:
+            assert "--store" in line, f"prune-index now invokes the auditor bare: {line!r}"
+
+
+class TestTheAuditCarriesTheSnapshotItMeasured:
+    """🔴 THE PRESCRIBED PATH IS EXPLICIT, SO THE REFUSAL NEVER FIRES ON IT.
+
+    Repointing the default fixes the bare invocation and nothing else. What the
+    prescribed `--store ~/.cache/subsystem-store` run gains is this: the counts
+    now print the snapshot they were measured against. `prune-index` §6 compares
+    an OPEN count from a run before the cut with one after, and two runs of
+    DIFFERENT snapshots is precisely the comparison that silently means nothing —
+    the same shape as the completeness claim that started all this.
+    """
+
+    def test_the_stamp_prints_between_the_store_line_and_the_budget_block(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """Every line, and POSITIONED. A freshness fact printed below the size
+        table dates a page the reader has already believed."""
+        repointed(_store(tmp_path, stamped=True))
+        assert sa.main([]) == 0
+        lines = capsys.readouterr().out.splitlines()
+        store_at = next(i for i, ln in enumerate(lines) if ln.startswith("  store: "))
+        budget_at = next(i for i, ln in enumerate(lines) if ln.startswith("budget "))
+        for i, line in enumerate(STAMP_LINES):
+            assert lines[store_at + 1 + i] == f"  stamp: {line}", lines[:12]
+        assert store_at + len(STAMP_LINES) < budget_at
+
+    def test_the_stamp_prefix_is_the_ONE_spelling_ALL_THREE_renderers_use(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """🔴 THREE RENDERERS NOW, ONE TOKEN. `analyze-service/SKILL.md` tells a
+        reader to relay "the `stamp:` lines"; that instruction is true of every
+        surface or of none. Compared as RENDERED OUTPUT — the recall CLI's
+        against the auditor's — never by grepping two sources for one f-string.
+        """
+        store = _store(tmp_path, stamped=True)
+        repointed(store)
+        assert rc.main(["--scope", SCOPE]) == 0
+        reader_lines = {
+            ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("  stamp:")
+        }
+        assert sa.main([]) == 0
+        audit_lines = {
+            ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("  stamp:")
+        }
+        assert reader_lines == audit_lines != set()
+        assert audit_lines == {f"{rs.STAMP_PREFIX}{ln}" for ln in STAMP_LINES}
+
+    def test_an_explicitly_named_store_is_dated_when_it_can_be_and_not_when_it_cannot(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """🔴 BOTH HALVES, because either alone passes over a renderer that
+        always prints or never does. `--store` is exempt from the refusal, not
+        from the date — and where there is no stamp, nothing is invented."""
+        repointed(_store(tmp_path / "default", stamped=True))
+        fresh = _store(tmp_path / "fresh", stamped=True)
+        bare = _store(tmp_path / "bare", stamped=False)
+
+        assert sa.main(["--store", str(fresh)]) == 0
+        dated = capsys.readouterr().out
+        for line in STAMP_LINES:
+            assert f"{rs.STAMP_PREFIX}{line}" in dated, line
+
+        assert sa.main(["--store", str(bare)]) == 0
+        undated = capsys.readouterr().out
+        assert rs.STAMP_PREFIX not in undated
+        assert "index audit" in undated
+
+    def test_NO_AGE_IS_COMPUTED_by_the_auditor_either(
+        self, tmp_path: Path, repointed, capsys
+    ) -> None:
+        """`cairn.cache_age` owns that arithmetic. Asserted behaviourally — the
+        stamp's own epoch is echoed, never converted — because a structural
+        `import time` ban cannot apply here: this auditor legitimately shells
+        `git` and has other clock-free reasons to hold none."""
+        repointed(_store(tmp_path, stamped=True))
+        assert sa.main([]) == 0
+        assert "  stamp: synced=1788363567" in capsys.readouterr().out
+
+
+class TestTheAuditorHoldsNoSecondCopyOfTheReadStoreFacts:
+    def test_it_IMPORTS_the_resolver_rather_than_declaring_one(self) -> None:
+        """The one-line structural claim behind every behavioural test above."""
+        assert "import subsystem_read_store" in _AUDIT_SRC.read_text(encoding="utf-8")
+
+    def test_no_MODULE_SCOPE_assignment_anchors_a_path_at_HOME(self) -> None:
+        """🔴 THE SHAPE THE OLD CONSTANT HAD, BANNED BY SHAPE.
+
+        `DEFAULT_STORE_ROOT = Path.home() / ".claude" / "analyze-service-index"`
+        is what this closes, and a ban on that NAME would be walkable by picking
+        another one. What cannot be walked is the shape: a store root written
+        down here at all is a second copy of something the resolver owns.
+
+        Scoped to MODULE SCOPE deliberately — `workspace_roots()` calls
+        `Path.home()` inside a function for an unrelated purpose, and a
+        whole-file ban would have to exempt it by name, which is how a guard
+        starts describing less than its docstring.
+        """
+        tree = ast.parse(_AUDIT_SRC.read_text(encoding="utf-8"))
+        offenders = []
+        for node in _module_scope_statements(list(tree.body)):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            if node.value is None:
+                continue
+            for sub in ast.walk(node.value):
+                if (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "home"
+                ):
+                    offenders.extend(
+                        n
+                        for t in (
+                            node.targets if isinstance(node, ast.Assign) else [node.target]
+                        )
+                        for n in _bound_names(t)
+                    )
+        assert offenders == [], (
+            f"`scripts/subsystem-audit.py` declares module-scope {offenders}, "
+            f"anchored at `$HOME`. A store root belongs in "
+            f"`subsystem_read_store`; call `read_store_root()` instead."
+        )
+        # POSITIVE CONTROL: the walk really reached this file's module scope, so
+        # an empty `offenders` means "no such constant", not "no parse".
+        assert "TARGET" in _module_scope_assignments(_AUDIT_SRC), "the sweep saw nothing"
+
+    def test_it_redeclares_NOTHING_the_resolver_defines(self) -> None:
+        """🔴 THE ARM THAT STOPS THE NEXT ONE — an INVARIANT GUARD, labelled.
+
+        It passes on pre-change code (the auditor's old `DEFAULT_STORE_ROOT` is
+        `subsystem_touch`'s name, not this module's), so it is not regression
+        coverage for anything. It is the same two-way pin
+        `test_the_constants_have_exactly_one_definition` puts on `scripts/cairn`,
+        extended to the third consumer: the cache path, the stamp filename, the
+        remedy and the refusal's exit code now have exactly one definition each
+        and THREE importers, and a fourth copy appearing in any of them is the
+        only way this defect comes back in the shape it came back in five times.
+        """
+        assigned = _module_scope_bindings(_AUDIT_SRC)
+        # POSITIVE CONTROL, both collection paths: a constant and a `def`.
+        assert {"TARGET", "audit_store"} <= assigned, sorted(assigned)[:20]
+        swept = _module_scope_bindings(ROOT / "scripts" / "lib" / "subsystem_read_store.py")
+        assert {"SYNC_STAMP", "stamp_header"} <= swept, sorted(swept)
+        clash = assigned & (set(rs.__all__) | swept)
+        assert clash == set(), (
+            f"`scripts/subsystem-audit.py` assigns {sorted(clash)}, which it must "
+            f"IMPORT from `subsystem_read_store` — a second copy is a second thing "
+            f"to keep in step, and the readers cannot see it."
+        )
+
+    def test_it_spells_neither_the_stamp_FILENAME_nor_the_cache_PATH(self) -> None:
+        """It bans the third definition arriving as a bare STRING rather than as
+        a named constant, which the name-clash arm above cannot see.
+
+        MIXED, and split on purpose. `analyze-service-index` is REGRESSION
+        coverage — pre-change code spelled it, in the constant this change
+        deleted. The other two are INVARIANT GUARDS: pre-change code held
+        neither, and they exist so a future edit cannot re-open the hole from the
+        cache side instead of the mirror side.
+
+        Comments and docstrings are stripped, so prose naming any of these — this
+        file's own module docstring names all three — stays free to explain them.
+        """
+        code = _python_code_only(_AUDIT_SRC.read_text(encoding="utf-8"))
+        # REGRESSION: the frozen mirror's own directory name.
+        assert "analyze-service-index" not in code, (
+            "`scripts/subsystem-audit.py` spells the FROZEN MIRROR's path in code. "
+            "That is the constant this change deleted; call `resolve_read_store()`."
+        )
+        # INVARIANT: the cache side of the same fact.
+        for literal in (rs.SYNC_STAMP, rs.DEFAULT_CACHE_ROOT.name):
+            assert literal not in code, (
+                f"`scripts/subsystem-audit.py` spells {literal!r} in code. That is a "
+                f"second definition of a fact `subsystem_read_store` owns."
+            )
+        # POSITIVE CONTROL: the stripping left real code behind to search — and
+        # a control the strip CANNOT satisfy from a docstring, since these two
+        # tokens appear in this file's code and nowhere in its prose.
+        assert "resolve_read_store(" in code
+        assert "def main(" in code
+
+
+class TestTheHandoffPrescriptionReadsTheCache:
+    """🔴 THE ONE BARE INVOCATION IN THE REPO, AND WHY IT MATTERED.
+
+    `claudedocs/handoff-analyze-service-index-backup.md` prescribes the auditor
+    with no `--store`, inside a "verify the backup path" checklist. Before this
+    change that read the frozen mirror; after it, bare is CORRECT — but a bare
+    run with no sync audits whatever the cache last held, which in a backup
+    verification is the wrong claim.
+    """
+
+    #: 🔴 THE WHOLE NORMALISED COMMAND, NOT A KEYWORD. The artifact is prose, and
+    #: a guard on words ("cairn sync appears somewhere in the file") is walkable
+    #: by rewording — `claude/RULES.md`, "a guard can be SPELLED rather than
+    #: STRUCTURAL". A cosmetic edit here fails the test; pay it, and paste the
+    #: new line in.
+    PRESCRIPTION = "cairn sync; python3 ~/workspace/devrc/scripts/subsystem-audit.py"
+
+    def test_the_command_syncs_first_and_takes_the_default_store(self) -> None:
+        doc = (ROOT / "claudedocs" / "handoff-analyze-service-index-backup.md").read_text(
+            encoding="utf-8"
+        )
+        calls = _fenced_command_lines(doc, "subsystem-audit.py")
+        assert calls == [self.PRESCRIPTION], (
+            f"the auditor prescription in handoff-analyze-service-index-backup.md "
+            f"changed to {calls}. Expected exactly {[self.PRESCRIPTION]}."
+        )
+
+    def test_it_is_NOT_chained_with_double_ampersand(self) -> None:
+        """🔴 SAME TRAP `analyze-service/SKILL.md` STEP 1 ALREADY PAID FOR.
+
+        `cairn sync` exits non-zero when the pod is unreachable but a usable
+        cache survives — its stated contract, not an edge case. Under `&&` the
+        audit would then not run at all, during exactly the outage when a
+        stamped-but-stale cache is still worth auditing and its stamp is what
+        says how stale.
+
+        🔴 AN INVARIANT GUARD ON THE PIN ITSELF, NOT ON THE DOCUMENT — green at
+        `c616b7ae`, and NOT regression coverage. `PRESCRIPTION` is what the test
+        above compares the file against, so if someone relaxes the pin to an
+        `&&` variant the document check keeps passing and this is the only thing
+        that objects. Guarding the constant a guard is built from, because the
+        document arm cannot see its own expectation change.
+        """
+        assert "&&" not in self.PRESCRIPTION
+        assert f"{rs.REMEDY};" in self.PRESCRIPTION
