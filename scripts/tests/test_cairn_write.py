@@ -18,6 +18,7 @@ Every test here therefore pins a CODE and a SENTENCE, not merely "non-zero".
 from __future__ import annotations
 
 import http.server
+import importlib.machinery
 import importlib.util
 import ipaddress
 import json
@@ -760,6 +761,213 @@ class TestTheRequestItself:
         assert "--session" in env_probe.stderr
 
 
+# The entry `_populate_store` does NOT create. Distinct from every service name
+# above so an assertion cannot pass by matching a neighbour.
+NEW_SERVICE = "thing-gamma"
+NEW_NUANCE = "- 2026-05-14: the shim retries once before it gives up."
+
+
+def _new_entry_file(tmp_path: Path, service: str = NEW_SERVICE,
+                    scope: str = "widget-cfg") -> Path:
+    path = tmp_path / f"{service}.md"
+    path.write_text(_entry(service, scope, NEW_NUANCE))
+    return path
+
+
+class TestCreateMakesAnEntryThatDidNotExist:
+    """🔴 THE VERB THAT CLOSES THE STRANDING. `append` and `put` both resolve an
+    EXISTING ref, so before `create` the only route to a new entry was a local
+    write into `~/.claude/analyze-service-index/` — which, once reads moved to
+    the pod cache, put the content on one host and in front of nobody. Measured
+    2026-09-02: five whole entries.
+
+    Every test pins a CODE and a SENTENCE, and the landing tests assert the
+    FILE, exactly as `TestAppendLands` does — an exit code cannot tell a write
+    that landed from one that did not.
+    """
+
+    def test_a_new_entry_is_created_and_is_READABLE_through_the_read_path(
+        self, live, tmp_path
+    ):
+        """🔴 THE POSITIVE CONTROL IS THE READ, NOT THE FILE. The defect being
+        fixed is content that exists on disk and reaches no reader, so "the bytes
+        are in the store root" is exactly the claim that was TRUE the whole time
+        content was being stranded. The recall below is what makes it evidence."""
+        source = _new_entry_file(tmp_path)
+        target = live.store / "widget-cfg" / f"{NEW_SERVICE}.md"
+        assert not target.exists()
+        proc = run_cairn(
+            "create", "--scope", "widget-cfg", "--ref", NEW_SERVICE,
+            "--file", str(source), url=live.base, cache=tmp_path / "c",
+        )
+        assert proc.returncode == 0, (proc.returncode, proc.stderr)
+        assert "created" in proc.stdout, proc.stdout
+        assert target.read_bytes() == source.read_bytes()
+        seen = run_cairn(
+            "recall", "--scope", "widget-cfg", url=live.base, cache=tmp_path / "c",
+        )
+        assert seen.returncode == 0, seen.stderr
+        assert NEW_SERVICE in seen.stdout, seen.stdout
+
+    def test_creating_over_an_EXISTING_entry_exits_9_and_writes_NOTHING(
+        self, live, tmp_path
+    ):
+        target = live.store / "widget-cfg" / "thing-alpha.md"
+        before = target.read_bytes()
+        source = _new_entry_file(tmp_path, service="thing-alpha")
+        assert source.read_bytes() != before
+        proc = run_cairn(
+            "create", "--scope", "widget-cfg", "--ref", "thing-alpha",
+            "--file", str(source), url=live.base, cache=tmp_path / "c",
+        )
+        assert proc.returncode == 9, (proc.returncode, proc.stdout, proc.stderr)
+        assert "already-exists" in proc.stderr, proc.stderr
+        assert target.read_bytes() == before, "a create OVERWROTE an existing entry"
+
+    def test_exit_9_is_NOT_the_precondition_code_8(self, live, tmp_path):
+        """🔴 THE SERVER ANSWERS 412 FOR BOTH, AND THE REMEDIES ARE OPPOSITE.
+        8 says the entry moved — re-sync, re-derive, re-apply, and a retry is
+        right. 9 says it is already there — the identical retry loops forever.
+        The two are asserted DIFFERENT against each other in one test, rather
+        than each asserted equal to its own constant, because the hazard is that
+        they COLLAPSE."""
+        source = _new_entry_file(tmp_path, service="thing-alpha")
+        exists = run_cairn(
+            "create", "--scope", "widget-cfg", "--ref", "thing-alpha",
+            "--file", str(source), url=live.base, cache=tmp_path / "c",
+        )
+        stale = run_cairn(
+            "put", "--scope", "widget-cfg", "--ref", "thing-alpha",
+            "--file", str(source), "--if-match", "0" * 16,
+            url=live.base, cache=tmp_path / "c",
+        )
+        assert stale.returncode == 8, (stale.returncode, stale.stderr)
+        assert exists.returncode == 9, (exists.returncode, exists.stderr)
+        assert exists.returncode != stale.returncode
+
+    def test_it_sends_If_None_Match_STAR_and_no_If_Match(self, live, tmp_path):
+        """The wire fact, read off what the CLIENT actually sent — a header the
+        client believes it sends is not a header on the wire."""
+        source = _new_entry_file(tmp_path)
+        live.handler.seen.clear()
+        assert run_cairn(
+            "create", "--scope", "widget-cfg", "--ref", NEW_SERVICE,
+            "--file", str(source), url=live.base, cache=tmp_path / "c",
+        ).returncode == 0
+        puts = [r for r in live.handler.seen if r["verb"] == "PUT"]
+        assert len(puts) == 1, live.handler.seen
+        assert puts[0]["headers"].get("if-none-match") == "*"
+        assert "if-match" not in puts[0]["headers"]
+        assert puts[0]["path"] == f"/api/v1/entry/widget-cfg/{NEW_SERVICE}"
+        assert puts[0]["body"] == source.read_bytes()
+
+    def test_it_makes_NO_request_at_all_when_the_file_cannot_be_read(
+        self, live, tmp_path
+    ):
+        """🔴 THE `cmd_put` LESSON, APPLIED HERE RATHER THAN REDISCOVERED: a
+        missing `--file` must report ITSELF (rc 2), never the store. The
+        assertion is on the REQUESTS the server saw, not only on the code — a
+        version that read the file after building the request would still exit 2
+        while having already sent it."""
+        live.handler.seen.clear()
+        proc = run_cairn(
+            "create", "--scope", "widget-cfg", "--ref", NEW_SERVICE,
+            "--file", str(tmp_path / "no-such-entry.md"),
+            url=live.base, cache=tmp_path / "c",
+        )
+        assert proc.returncode == 2, (proc.returncode, proc.stderr)
+        assert "cannot read --file" in proc.stderr
+        assert live.handler.seen == [], live.handler.seen
+
+    def test_an_unreachable_store_is_7_and_says_nothing_was_written(self, tmp_path):
+        """A write NEVER degrades: there is no cache to write into and no spool,
+        so an outage is a refusal at the write code, never a read code."""
+        source = _new_entry_file(tmp_path)
+        proc = run_cairn(
+            "create", "--scope", "widget-cfg", "--ref", NEW_SERVICE,
+            "--file", str(source), url=None, cache=tmp_path / "c",
+        )
+        assert proc.returncode == 7, (proc.returncode, proc.stderr)
+        assert "the write did NOT happen" in proc.stderr
+        assert "Nothing was queued and nothing was written locally" in proc.stderr
+
+    def test_it_offers_NO_if_match_and_NO_no_sync(self):
+        """Both would be meaningless: a create has no prior bytes to base a
+        precondition on, and it reads no cache. Absent rather than accepted-and-
+        ignored, so a caller cannot believe they set something."""
+        help_text = subprocess.run(
+            [sys.executable, str(CAIRN_CLI), "create", "--help"],
+            capture_output=True, text=True, timeout=60,
+        ).stdout
+        assert "--if-match" not in help_text, help_text
+        assert "--no-sync" not in help_text, help_text
+        assert "--ref" in help_text and "--file" in help_text
+
+
+class TestTheAlreadyExistsTokenIsTheDISCRIMINATOR:
+    """🔴 A SECOND MAPPING TABLE EXISTS ONLY BECAUSE ONE STATUS CODE CARRIES TWO
+    OUTCOMES. These pin it against LITERALS built here, never against the
+    module's own constants — `<constant> in <output>` is the shape that let four
+    renamed constants survive in this PR family, because the constant agreed with
+    itself.
+    """
+
+    def _token_table(self) -> "dict[str, object]":
+        import ast as _ast
+
+        for node in _cairn_ast().body:
+            targets = getattr(node, "targets", []) or (
+                [node.target] if isinstance(node, _ast.AnnAssign) else []
+            )
+            for target in targets:
+                if isinstance(target, _ast.Name) and \
+                        target.id == "_WRITE_STATUS_TOKEN_EXITS":
+                    return {
+                        k.value: (v.id if isinstance(v, _ast.Name) else v.value)
+                        for k, v in zip(node.value.keys, node.value.values)
+                    }
+        raise AssertionError("`_WRITE_STATUS_TOKEN_EXITS` is gone from scripts/cairn")
+
+    def test_the_already_exists_token_maps_to_its_own_exit_code(self):
+        table = self._token_table()
+        assert table == {"already-exists": "EXIT_WRITE_EXISTS"}, table
+        assert _module_constants()["EXIT_WRITE_EXISTS"] == 9
+
+    def test_the_token_the_SERVER_emits_is_the_token_the_CLIENT_keys_on(self):
+        """🔴 THE SEAM. Both sides are read from their own source and compared
+        to each other; neither is compared to a constant it defines. A rename on
+        one side alone fails here, which is exactly the failure two hermetically
+        tested components cannot see."""
+        server_src = SERVER_PY.read_text()
+        assert '"X-Store-Status": "already-exists"' in server_src, (
+            "server.py no longer answers the `already-exists` token, so the "
+            "client's discriminator keys on nothing"
+        )
+        assert set(self._token_table()) == {"already-exists"}
+
+    def test_an_UNKNOWN_token_falls_through_to_the_code_table(self):
+        """A token not in the table is advisory routing that did not apply, never
+        a pass: the HTTP code still decides."""
+        cairn = _load_cairn()
+        refused = cairn._classify(412, "precondition-failed", "moved")
+        assert refused.exit_code == 8, refused.exit_code
+        assert cairn._classify(503, "store-unreachable", "down").exit_code == 7
+        assert cairn._classify(412, "already-exists", "there").exit_code == 9
+
+
+def _load_cairn():
+    """Import `scripts/cairn` (no `.py` suffix) as a module."""
+    spec = importlib.util.spec_from_loader(
+        "cairn_cli_w",
+        importlib.machinery.SourceFileLoader("cairn_cli_w", str(CAIRN_CLI)),
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class TestExitCodesDoNotOverlap:
     def test_the_write_codes_are_disjoint_from_every_read_code(self):
         """Pinned as a SET, not as four separate assertions, because the hazard
@@ -769,8 +977,8 @@ class TestExitCodesDoNotOverlap:
         reads = {ns["EXIT_OK"], ns["EXIT_UNREACHABLE_NO_CACHE"], ns["EXIT_USAGE"],
                  ns["EXIT_REFRESH_FAILED"], ns["EXIT_CORRUPT"]}
         writes = {ns["EXIT_WRITE_REFUSED"], ns["EXIT_WRITE_UNREACHABLE"],
-                  ns["EXIT_WRITE_PRECONDITION"]}
-        assert len(writes) == 3, writes
+                  ns["EXIT_WRITE_PRECONDITION"], ns["EXIT_WRITE_EXISTS"]}
+        assert len(writes) == 4, writes
         assert reads & writes == set(), (
             f"a write code collides with a read code: {reads & writes}. A caller "
             f"cannot then tell a refused write from a served-from-cache read."
@@ -797,7 +1005,15 @@ class TestExitCodesDoNotOverlap:
         # bounded by where one method happens to sit in the file.
         emitted = {int(m) for m in _re.findall(r"self\._respond\(\s*(\d{3})", server_src)}
         emitted |= {int(m) for m in _re.findall(r"self\.send_response\(\s*(\d{3})", server_src)}
-        emitted -= {200, 204, 206, 304}   # successes and a conditional-GET code
+        # 🔴 `201` JOINED THIS SET ON 2026-09-03 BECAUSE IT IS A SUCCESS, NOT
+        # BECAUSE IT WAS INCONVENIENT. `PUT … If-None-Match: *` answers
+        # `201 created`; `urlopen` returns any 2xx rather than raising, so it
+        # never reaches `_classify` and mapping it to a WRITE-FAILED exit code
+        # would be a lie about a write that landed. The `already-exists` refusal
+        # that shares this route is a `412`, and it IS mapped — through
+        # `_WRITE_STATUS_TOKEN_EXITS`, which `test_the_already_exists_token_maps`
+        # pins.
+        emitted -= {200, 201, 204, 206, 304}   # successes and a conditional-GET code
         # POSITIVE CONTROL: the scan must see the statuses this PR learned about
         # the hard way. A regex that matched nothing would pass vacuously.
         for known in (404, 405, 500):

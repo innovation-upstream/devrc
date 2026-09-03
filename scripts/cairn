@@ -42,14 +42,24 @@ never absorbed into "served from cache"; an outage is benign and that is not.
 Beyond those, a report exits with the READER's own code, so a scope whose
 entries are all malformed still exits non-zero as it always did.
 
-🔴 AND THE WRITE VERBS ARE THE MIRROR IMAGE — `append` and `put` DO NOT DEGRADE.
-The table above exists because a read must never report an outage as an empty
-store. A write has the opposite obligation: there is no cache to answer from and
-no such thing as a stale write, so an unreachable store is a REFUSED write at
-exit 7, never a queued one and never a local one. Codes 6/7/8 (refused /
-unreachable / precondition-failed) are disjoint from every read code precisely so
-a caller cannot read "nothing was displayed" as "the bullet landed". The pod is
-the authority; this cache has none. See the WRITE PATH block below the readers.
+🔴 AND THE WRITE VERBS ARE THE MIRROR IMAGE — `append`, `put` and `create` DO
+NOT DEGRADE. The table above exists because a read must never report an outage as
+an empty store. A write has the opposite obligation: there is no cache to answer
+from and no such thing as a stale write, so an unreachable store is a REFUSED
+write at exit 7, never a queued one and never a local one. Codes 6/7/8/9
+(refused / unreachable / precondition-failed / already-exists) are disjoint from
+every read code precisely so a caller cannot read "nothing was displayed" as "the
+bullet landed". The pod is the authority; this cache has none. See the WRITE PATH
+block below the readers.
+
+🔴 `create` IS THE VERB THAT MAKES A NEW ENTRY, AND IT DID NOT EXIST UNTIL
+2026-09-03. `append` and `put` both resolve an EXISTING ref, so the store had no
+create primitive at all and the write protocol told sessions to write a
+brand-new entry into the local `~/.claude/analyze-service-index/` tree. That was
+correct while that tree WAS the store; after the read path moved to the pod
+cache it meant the entry was dark to every reader. Measured 2026-09-02: five
+whole entries existed only on one host. `create` sends `If-None-Match: *`, so it
+creates only if absent and REFUSES (exit 9) rather than overwriting.
 
 CONFIG: `~/.config/subsystem-store/env` (mode 0600) — `SUBSYSTEM_STORE_URL`,
 `SUBSYSTEM_STORE_TOKEN`. Environment variables of the same name win, so a test
@@ -125,7 +135,7 @@ EXIT_CORRUPT = 5
 # `recall`'s job is to answer, so an outage degrades to a stale answer that says
 # it is stale, at exit 0. A write's job is to make a durable record; there is no
 # such thing as a stale write, and a queued one is a write the caller believes
-# landed. So `append`/`put` FAIL LOUDLY when the store cannot be reached — the
+# landed. So `append`/`put`/`create` FAIL LOUDLY when the store cannot be reached — the
 # accepted cost of decision 8 in `claudedocs/plan-cairn-integration.md`, stated
 # there and stated again here so a future reader cannot mistake it for an
 # oversight and "fix" it by adding a spool.
@@ -145,6 +155,15 @@ EXIT_WRITE_UNREACHABLE = 7
 #     6 would invite a blind retry that either 412s forever or, with `If-Match`
 #     dropped, silently overwrites somebody else's change.
 EXIT_WRITE_PRECONDITION = 8
+# 9 = `create` only: the entry ALREADY EXISTS, so nothing was created and
+#     nothing was overwritten. 🔴 ITS OWN CODE EVEN THOUGH THE SERVER ANSWERS
+#     THE SAME 412 AS 8, because the two remedies are opposites: 8 means "the
+#     entry moved under you — re-sync, re-derive, re-apply, put again", and a
+#     retry is right; 9 means "you asked to create something that is there —
+#     use `append` or `put`", and the identical retry loops forever. They are
+#     told apart by `X-Store-Status` (`precondition-failed` vs `already-exists`),
+#     which is the only place on the wire the difference exists.
+EXIT_WRITE_EXISTS = 9
 
 STATE_LIVE = "live"
 STATE_CACHED = "cached"
@@ -874,7 +893,25 @@ _WRITE_STATUS_EXITS: dict[int, int] = {
 }
 
 
+# 🔴 A SECOND TABLE, KEYED ON THE SERVER'S `X-Store-Status` TOKEN, CONSULTED
+# FIRST. It exists because one HTTP status can carry two outcomes with opposite
+# remedies: `412` is `precondition-failed` (the entry moved — retry after a
+# re-sync) on a `put`, and `already-exists` (it is there — do not retry) on a
+# `create`. The code table above cannot express that, and collapsing the two
+# would give a `create` caller an exit that says "re-derive and try again" for a
+# condition no retry can change.
+#
+# 🔴 A TOKEN NOT IN THIS TABLE FALLS THROUGH TO THE CODE TABLE, never to a pass.
+# The token is advisory routing, not the verdict.
+_WRITE_STATUS_TOKEN_EXITS: dict[str, int] = {
+    "already-exists": EXIT_WRITE_EXISTS,
+}
+
+
 def _classify(code: int, status: str, detail: str) -> WriteRefused:
+    by_token = _WRITE_STATUS_TOKEN_EXITS.get(status)
+    if by_token is not None:
+        return WriteRefused(by_token, status, detail)
     exit_code = _WRITE_STATUS_EXITS.get(code)
     if exit_code is None:
         return WriteRefused(
@@ -1085,6 +1122,54 @@ def cmd_put(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_create(args: argparse.Namespace) -> int:
+    """`PUT /api/v1/entry/<scope>/<ref>` with `If-None-Match: *` — a NEW entry.
+
+    🔴 WHY THIS VERB EXISTS, since `append` and `put` already write. Neither can
+    make an entry that is not there: both resolve an EXISTING ref and 404 when it
+    is absent. So the protocol told a session to write a brand-new entry into
+    `~/.claude/analyze-service-index/` directly — which was true and safe while
+    that tree WAS the store, and became content loss the moment reads moved to
+    the pod cache: measured 2026-09-02, five whole entries existed only on one
+    host and were dark to every reader. This is the verb that closes it.
+
+    🔴 NO `--if-match`, AND NO SYNC. `put` derives a precondition from a LIVE
+    snapshot because it is editing bytes that may have moved; a create has no
+    prior bytes, and its precondition is the constant `*`. The server decides
+    absence under its own lock, so there is nothing a local cache read could add
+    except a stale answer and a wasted round trip.
+
+    🔴 EXIT 9 IS NOT A FAILURE TO RETRY. It means the entry already exists and
+    NOTHING was written — the remedy is `cairn append` (a bullet) or `cairn put`
+    (a rewrite), never the same `create` again.
+    """
+    scope = _write_scope(args)
+    if scope is None:
+        return EXIT_USAGE
+    # 🔴 READ THE FILE BEFORE THE NETWORK, for the reason `cmd_put`'s comment
+    # gives at length: an unreadable `--file` must report itself (rc 2) and not
+    # be reported as the store being unreachable.
+    try:
+        payload = args.file.read_bytes()
+    except OSError as exc:
+        print(f"cairn: cannot read --file {args.file}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    url, token = load_config()
+    quoted = f"/api/v1/entry/{quote(scope, safe='')}/{quote(args.ref, safe='')}"
+    headers, body = send_write(
+        url, token, method="PUT", path=quoted, body=payload,
+        timeout=_store_timeout(args),
+        extra_headers={"If-None-Match": "*"},
+    )
+    revision = (headers.get("ETag") or "").strip('"')
+    print(
+        f"cairn: {headers.get('X-Store-Status', 'unknown')} scope={scope} "
+        f"ref={args.ref} revision={revision or 'unknown'}"
+    )
+    sys.stdout.write(body.decode("utf-8", "replace"))
+    return EXIT_OK
+
+
 def _cairn_who():
     """The `who` module, imported lazily — it owns the timeout predicate.
 
@@ -1275,6 +1360,24 @@ def build_parser() -> argparse.ArgumentParser:
              "sync when omitted",
     )
     pu.set_defaults(func=cmd_put, writes=True)
+
+    # 🔴 `create` IS THE THIRD WRITE VERB AND THE ONLY ONE THAT CAN MAKE AN
+    # ENTRY. `append` and `put` both resolve an existing ref; before this the
+    # protocol's only route to a new entry was a local write into the frozen
+    # mirror, which no reader sees. It takes no `--if-match` (there are no prior
+    # bytes) and no `--no-sync` (it reads no cache at all).
+    cr = sub.add_parser(
+        "create",
+        help="create a NEW entry that does not exist yet (refuses to overwrite)",
+    )
+    cr.add_argument("--scope", default=None)
+    cr.add_argument("--repo", default=".")
+    cr.add_argument(
+        "--ref", required=True,
+        help="the new entry's filename stem — it becomes `<ref>.md` in the scope",
+    )
+    cr.add_argument("--file", type=Path, required=True, help="the new entry bytes")
+    cr.set_defaults(func=cmd_create, writes=True)
 
     # 🔴 `who` TOUCHES NO STORE AND NO CACHE. It is the first cairn subcommand
     # about a different noun — a TASK, not a subsystem entry — so it takes none

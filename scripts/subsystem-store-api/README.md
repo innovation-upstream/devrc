@@ -52,6 +52,7 @@ GET  /api/v1/search/{scope}?q=…[&threshold=&max_hits=&context=&all_scopes=]
 GET  /api/v1/snapshot[?scope=]             gzipped tar of the entry files
 POST /api/v1/entry/{scope}/{ref}/bullets   append ONE attributed bullet
 PUT  /api/v1/entry/{scope}/{ref}           whole-file replace, `If-Match` REQUIRED
+                                           …or CREATE, with `If-None-Match: *`
 ```
 
 ### The write path (phase 3, criteria 4-7)
@@ -196,6 +197,56 @@ legitimate rewrite from a forged trailer, refusing real edits whenever that diff
 was wrong. A holder of a PUT-capable token is already trusted with the whole
 file. `TestPUTDoesNotEnforceAttribution` pins the limit so it cannot drift into
 being assumed.
+
+### Creating an entry — the same PUT, with `If-None-Match: *`
+
+```
+PUT /api/v1/entry/{scope}/{ref}
+If-None-Match: *
+<the whole new entry file>
+```
+
+🔴 **This is the store's ONLY create verb, and until 2026-09-03 there was
+none.** `POST .../bullets` and `PUT` with `If-Match` both resolve an *existing*
+ref, so a brand-new entry could only be made by `seed.sh` or by writing into a
+host's local tree — and once reads moved to the pod cache, a locally-created
+entry was dark to every reader on every host. Measured 2026-09-02: five whole
+entries and 24 dated bullets existed on one machine only.
+
+* **`201 created`**, `X-Store-Status: created`, with the new revision as `ETag`.
+* **`412`** with `X-Store-Status: **already-exists**` if the target already has a
+  representation — **nothing is written and nothing is overwritten**. 🔴 That
+  token is a DIFFERENT one from the `precondition-failed` an `If-Match` miss
+  gets, deliberately: the two share a status code and have opposite remedies
+  ("re-sync and re-apply" vs "it is there — use `put` or `append`"), and a client
+  that collapses them retries forever. `cairn` exits **9** on this one and **8**
+  on the other.
+* It resolves the ref exactly as a read does, so a ref answered by an **alias**
+  of another entry is `already-exists` too — creating `<ref>.md` beside it would
+  make that ref permanently ambiguous.
+* **`428`** for a PUT with NEITHER precondition, unchanged. **`400`** for both
+  headers at once (a contradiction, refused rather than resolved), for
+  `If-Match: *`, and for an `If-None-Match` naming entity-tags rather than `*`
+  — that form means "overwrite unless it is one of these", which is a blind
+  overwrite of every other revision.
+* The body runs the **same** `entry_mapping` + `SubsystemEntry.from_mapping`
+  validation a PUT-replace runs (`422` otherwise), and it runs BEFORE the name is
+  claimed, so a refused body leaves the ref free to retry into. `service:` must
+  normalize to the same slug as `{ref}`, because the filename is derived from the
+  ref and never from the body.
+* The scope **directory is created** when the scope is in the caller's allowlist
+  but has none yet — a scope's first entry. A scope outside the allowlist is the
+  same `404` everything else gets.
+* 🔴 **Exclusivity is the FILESYSTEM'S, not a `path.exists()` check.** The bytes
+  are written to a temp file in the same directory, fsynced, and published with
+  `os.link`, which fails `EEXIST` in the kernel. So two concurrent creates cannot
+  both win, a writer that never took the per-entry `flock` (`seed.sh`, an
+  operator's editor) cannot be clobbered, and a reader never sees a
+  half-written `*.md`. A file already at that name that the loader classifies as
+  MALFORMED — invisible to ref resolution — is refused here too.
+* ⚠ Only a bare `<slug>.md` can be created. `SAFE_PATH_COMPONENT` excludes `.`,
+  so a kind-qualified ref (`<slug>.<kind>`) reaches no write route at all; that
+  is a pre-existing limit of the write path, not a create-specific gap.
 
 ⚠ **THE REVISION IS THE ENTRY'S CONTENT HASH — `sha256(entry file)[:16]` — NOT
 the scope's git head.** No scope in the served copy is a git repository, so

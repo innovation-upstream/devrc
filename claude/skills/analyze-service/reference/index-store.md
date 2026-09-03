@@ -43,6 +43,15 @@ for every caller of this store; `write-back.md` decides *whether* an
 Stated out here for the same reason as the redirect above: the wording is inside
 the hash.
 
+🔴 **Same bullet, third correction — WHERE the lazily-created file appears moved
+on 2026-09-01.** `~/.claude/analyze-service-index/<scope>/` is a read-only mirror
+since the Cairn cutover and reads come from the synced cache, so a scope dir or
+entry file that appears only *there* reaches no reader on any host (measured
+2026-09-02: five entries, one machine, invisible). A new entry now appears
+**because `cairn create` made it on the pod**, and the local file follows on the
+next `cairn sync`. Stated out here rather than in the bullet for the same
+hash reason.
+
 🔴 **Store safety.** The content is **curated, client-confidential, and not re-derivable by re-running recon.** ⚠ **This paragraph used to say "with no off-machine backup". That has been false since 2026-08-21 and it was false in a RECOVERY path** — an agent reading it concludes a loss is unrecoverable and never looks for the restore tooling below. Two layers exist, and neither makes the store disposable:
 - **hourly, local** — each `<scope>/` is its own git repo, committed by `analyze-service-index-commit.service` (`OnCalendar=hourly`, `RandomizedDelaySec=600`, so it fires within ten minutes AFTER the hour, not on it).
 - **daily, off-machine** — `analyze-service-index-backup.service` bundles every scope, **age-encrypted**, to the homelab MinIO `minio-archive` tenant, bucket `analyze-service-index-backups`, key `<host>-<machine-id>/<scope>/<ts>.bundle.age`. Read them back with `scripts/analyze-service-index/restore-verify.py`; `escrow-verify.py` checks the key material.
