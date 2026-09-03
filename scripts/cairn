@@ -158,7 +158,21 @@ class StoreUnreachable(Exception):
     🔴 The reason is mandatory: criterion 5 of the card this implements is that
     an unreachable host is reported as UNMEASURED **with a reason**, never as a
     silent success or a zero.
+
+    🔴 `http_status` IS THE STRUCTURAL DISCRIMINATOR, AND IT EXISTS BECAUSE THE
+    MESSAGE IS NOT ONE. "the host never answered" and "the host answered 401"
+    are both raised here — deliberately, since a read degrades to the cache
+    either way — but they are NOT the same fact to a human: one is an outage and
+    the other is a credential that has to be replaced. The only thing that told
+    them apart was the phrasing of `str(exc)`, and a caller that greps a message
+    for `HTTP 401` has pinned an f-string. `None` means there was no answer at
+    all; an int is the status the server sent. `resolve_state` reads neither, so
+    nothing about the read path changes.
     """
+
+    def __init__(self, *args: object, http_status: int | None = None) -> None:
+        super().__init__(*args)
+        self.http_status = http_status
 
 
 class StoreCorrupt(Exception):
@@ -300,7 +314,9 @@ def fetch_snapshot(
         except Exception:
             detail = ""
         detail = f" — {detail[:300]}" if detail else ""
-        raise StoreUnreachable(f"{url} answered HTTP {exc.code}{detail}") from exc
+        raise StoreUnreachable(
+            f"{url} answered HTTP {exc.code}{detail}", http_status=exc.code
+        ) from exc
     except urllib.error.URLError as exc:
         raise StoreUnreachable(f"{url} unreachable: {exc.reason}") from exc
     except OSError as exc:  # socket timeouts and friends
@@ -1085,6 +1101,148 @@ def cmd_put(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# =============================================================================
+# DOCTOR. Reads everything, installs nothing.
+# =============================================================================
+
+
+def _cairn_doctor():
+    """The `doctor` module, imported lazily — same idiom as `_cairn_who`."""
+    lib = str(Path(__file__).resolve().parent / "lib")
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+    import cairn_doctor  # noqa: PLC0415
+
+    return cairn_doctor
+
+
+#: How an operator reads the identity and the DECLARED allowlist behind a token.
+#: Spelled once, printed by `doctor`, and pinned by
+#: `test_cairn_doctor.py::test_the_identity_remedy_names_the_pods_own_token_file`
+#: against `server.DEFAULT_TOKEN_FILE`, so it cannot drift from the path the pod
+#: actually mounts. 🔴 It is a REMEDY, not a step this command takes: `doctor`
+#: never reads a secret and never shells `kubectl`.
+IDENTITY_REMEDY = (
+    "`kubectl -n subsystem-store exec deploy/subsystem-store-api -- "
+    "cut -d' ' -f2,3 /run/secrets/subsystem-store/token` "
+    "(fields 2 and 3 are the identity and the allowlist; field 1 is the secret)"
+)
+
+
+def probe_store(url: str, token: str, *, timeout: int):
+    """ONE snapshot fetch, read for facts and THROWN AWAY. Never installed.
+
+    🔴 IT REUSES `fetch_snapshot` RATHER THAN BUILDING A SECOND REQUEST. That
+    keeps `_apply_standard_headers` — and the measured User-Agent requirement
+    behind it — on this path without a second site to forget it at, and it is
+    what `test_cairn_write.py::test_no_request_builder_ANYWHERE_bypasses_this_
+    helper` would otherwise have to grow a case for.
+
+    🔴 IT NEVER CALLS `install_snapshot`. A diagnostic that repaired the cache
+    would destroy the staleness it was run to measure.
+    """
+    doctor = _cairn_doctor()
+    try:
+        body, headers = fetch_snapshot(url, token, scope=None, timeout=timeout)
+    except StoreUnreachable as exc:
+        return doctor.PodFacts(
+            reached=False, reason=str(exc), http_status=exc.http_status
+        )
+
+    visible = headers.get("x-store-entries")
+    snapshot = headers.get("x-store-snapshot", "")
+    scopes: set[str] = set()
+    try:
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+            for member in tar.getmembers():
+                if not member.isfile():
+                    continue
+                parts = Path(member.name).parts
+                if len(parts) == 2 and parts[1].endswith(".md"):
+                    scopes.add(parts[0])
+    except (tarfile.ReadError, EOFError, zlib.error) as exc:
+        return doctor.PodFacts(
+            reached=False,
+            reason=f"{url} answered, but the archive could not be read: {exc}",
+        )
+
+    # 🔴 `entry-files=` OUT OF THE STORE-WIDE HEADER, and the store-wide-ness is
+    # the point. `server.snapshot_freshness` counts the WHOLE served store, not
+    # the caller's slice — a documented, deliberate residual count leak — so the
+    # gap between it and `X-Store-Entries` is the only client-side evidence that
+    # entries exist which this credential cannot reach.
+    store_wide = None
+    for field in snapshot.split():
+        key, _, value = field.partition("=")
+        if key == "entry-files" and value.isdigit():
+            store_wide = int(value)
+
+    # 🔴 NO FALLBACK TO THE ARCHIVE'S OWN COUNT. Without `X-Store-Entries` the
+    # only number available is how many members ARRIVED, which is exactly the
+    # side of the comparison a truncated transfer moves — substituting it would
+    # make the cache-vs-pod check agree with itself and report OK over a short
+    # answer. `install_snapshot` cross-checks against this header for the same
+    # reason. Absent header => the count is UNMEASURED, with that as the stated
+    # reason.
+    return doctor.PodFacts(
+        reached=True,
+        visible_entries=int(visible) if visible and visible.isdigit() else None,
+        store_wide_entries=store_wide,
+        visible_scopes=tuple(sorted(scopes)),
+        snapshot_header=snapshot,
+    )
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """One call for every fact a reader otherwise assembles by hand."""
+    doctor = _cairn_doctor()
+    resolved = _read_store.resolve_read_store(None)
+
+    # 🔴 THE CONFIG LOAD HAPPENS EVEN UNDER `--no-sync`, AND THAT IS A FIX. It is
+    # a local file read, so "is a credential configured on this host" is
+    # answerable with the network switched off — and the first version skipped it,
+    # which made `doctor --no-sync` report `token PROBLEM: no token is configured`
+    # on a host whose token was sitting in `~/.config/subsystem-store/env`
+    # unread. A check that says PROBLEM about something it never looked at is the
+    # same defect as one that says OK about it.
+    token: str | None = None
+    token_reason = ""
+    try:
+        url, token = load_config()
+    except StoreUnreachable as exc:
+        token_reason = str(exc)
+        config_error: str | None = str(exc)
+    else:
+        config_error = None
+
+    if args.no_sync:
+        pod = doctor.PodFacts(
+            reached=False,
+            reason="--no-sync was given, so the store was never contacted",
+        )
+    elif config_error is not None:
+        pod = doctor.PodFacts(reached=False, reason=config_error)
+    else:
+        pod = probe_store(url, token, timeout=_store_timeout(args))
+
+    checks = doctor.collect(
+        resolved_root=resolved.root,
+        stamp_lines=resolved.stamp,
+        stamp_reason=resolved.reason,
+        cache_root=args.cache,
+        mirror_root=subsystem_touch.DEFAULT_STORE_ROOT,
+        pod=pod,
+        token=token,
+        token_reason=token_reason,
+        identity_remedy=IDENTITY_REMEDY,
+    )
+    if args.json:
+        print(json.dumps(doctor.to_dict(checks), indent=2))
+    else:
+        print(doctor.render(checks))
+    return doctor.exit_code(checks)
+
+
 def _cairn_who():
     """The `who` module, imported lazily — it owns the timeout predicate.
 
@@ -1185,6 +1343,27 @@ def cmd_who(args: argparse.Namespace) -> int:
     return report.exit_code
 
 
+def _doctor_epilog() -> str:
+    """`doctor --help`'s exit-code legend, read from the module that owns it.
+
+    🔴 READ, NEVER RESTATED. A second copy of the legend in this file — or in a
+    SKILL.md — is a second thing to keep true, and the numbers are the part a
+    caller branches on. `cairn_doctor.EXIT_LEGEND` is the one definition; both
+    `--help` and every run's own output render it from there.
+    """
+    doctor = _cairn_doctor()
+    lines = ["exit codes:"]
+    lines += [f"  {code}  {why}" for code, why in doctor.EXIT_LEGEND]
+    lines.append("")
+    lines.append(
+        "check states: "
+        + ", ".join(doctor.STATES)
+        + " — UNMEASURED means the check could not look and says why; "
+        "NOT-OBSERVABLE means no client can answer it at all and names who can."
+    )
+    return "\n".join(lines)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="cairn",
@@ -1232,6 +1411,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     e = common(sub.add_parser("ls-entries", help="one `<scope>/<entry>.md` per line"))
     e.set_defaults(func=cmd_ls_entries)
+
+    # 🔴 `doctor` TAKES NO `--scope`/`--repo` AND IS NOT `common()`. It asks about
+    # THIS HOST and THIS CREDENTIAL, not about a scope, and a `--scope` here would
+    # invite the filtered-cache mistake `cmd_sync` documents. `--no-sync` it does
+    # take: "diagnose without touching the network" is a real mode, and it turns
+    # every pod-dependent check UNMEASURED with that as the stated reason rather
+    # than reporting a zero.
+    #
+    # 🔴 ITS EXIT CODES ARE DOCUMENTED BY THE COMMAND. `cairn_doctor.EXIT_LEGEND`
+    # is printed at the foot of every human-readable run and carried in `--json`,
+    # so no skill has to restate them and none can restate them wrongly.
+    d = sub.add_parser(
+        "doctor",
+        help="one call: pod reachability, credential, cache stamp, counts, "
+             "scope visibility, and which store this host's reader resolves",
+        epilog=_doctor_epilog(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    d.add_argument("--json", action="store_true")
+    d.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="do not contact the store; pod-dependent checks report UNMEASURED",
+    )
+    d.set_defaults(func=cmd_doctor)
 
     # --- the write verbs -----------------------------------------------------
     # 🔴 `writes=True` IS NOT DECORATION. `main` maps a `StoreUnreachable` to

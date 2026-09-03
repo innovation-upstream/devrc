@@ -1,6 +1,6 @@
 ---
 name: mailbox
-description: "Query and operate the self-hosted mail inbox (Gmail -> inbox.zacx.dev -> homelab Postgres `mail`) and its mail-actions automation, and SEND email as the operator via Gmail SMTP. Use for: my mail inbox, inbox.zacx.dev, forwarded email, the mail-receiver, the mailbox namespace, querying my email, the action-items queue, invoice/tax archiving, the sent-poller, mail automation, \"email someone on my behalf\", \"send an email as me\"."
+description: "Query and operate the self-hosted mail inbox and its mail-actions automation, and SEND email as the operator via Gmail SMTP. Use for: my mail inbox, inbox.zacx.dev, forwarded email, the mail-receiver, the mailbox namespace, querying my email, the action-items queue, invoice/tax archiving, the sent-poller, mail automation, \"email someone on my behalf\", \"send an email as me\"."
 ---
 
 # self-hosted mail inbox operations
