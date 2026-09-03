@@ -250,6 +250,29 @@ class TestAnUnmeasuredAnswerIsNotAZero:
         assert unreadable.state == cd.UNMEASURED
         assert absent.detail != unreadable.detail
 
+    def test_the_absent_vs_unreadable_split_is_STRUCTURAL_not_a_sentence(
+        self, tmp_path
+    ) -> None:
+        """🔴 A guard SPELLED rather than structural is walkable by rewording.
+        The first version asked `reason.endswith("does not exist")`, so changing
+        that message would have made an UNREADABLE mirror report as "nothing
+        pre-cutover on this host" — an OK, silently. `Reading.absent` is a flag."""
+        missing = cd._describe(tmp_path / "gone", cd.store_scopes)
+        assert missing.absent is True and missing.value is None
+
+        blocked = tmp_path / "blocked"
+        blocked.mkdir()
+        blocked.chmod(0o000)
+        try:
+            denied = cd._describe(blocked, cd.store_scopes)
+        finally:
+            blocked.chmod(0o700)
+        assert denied.absent is False and denied.value is None
+        assert not denied.ok and not missing.ok
+
+        present = cd._describe(_store(tmp_path / "s", {"a": []}), cd.store_scopes)
+        assert present.ok and present.absent is False and present.value == ("a",)
+
     def test_a_no_sync_run_says_SO_rather_than_reporting_an_outage(self) -> None:
         """`--no-sync` is a choice, not a failure. The reason has to name it, or
         an operator reads a deliberate offline run as a broken store."""

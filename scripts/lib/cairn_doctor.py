@@ -197,14 +197,34 @@ def writable_entry_files(root: Path) -> tuple[str, ...]:
     return tuple(loose)
 
 
-def _describe(root: Path, what: Callable[[Path], object]) -> tuple[object | None, str]:
-    """`(value, reason-it-is-None)` — exactly one is set. No silent zero."""
+@dataclass(frozen=True)
+class Reading:
+    """One disk fact, or the structured reason there is none.
+
+    🔴 `absent` IS A FLAG, NOT A SENTENCE. The first version had callers ask
+    `reason.endswith("does not exist")` to tell a missing directory from an
+    unreadable one — a guard SPELLED rather than STRUCTURAL, which `claude/RULES.md`
+    names directly: reword the message and the branch silently stops firing, with
+    an unreadable mirror then reported as "nothing pre-cutover on this host".
+    """
+
+    value: object | None
+    reason: str
+    absent: bool
+
+    @property
+    def ok(self) -> bool:
+        return self.reason == ""
+
+
+def _describe(root: Path, what: Callable[[Path], object]) -> Reading:
+    """Read one fact off disk, or say why not. Never a silent zero."""
     try:
-        return what(root), ""
+        return Reading(what(root), "", absent=False)
     except FileNotFoundError:
-        return None, f"{root} does not exist"
+        return Reading(None, f"{root} does not exist", absent=True)
     except OSError as exc:
-        return None, f"{root} could not be read: {exc}"
+        return Reading(None, f"{root} could not be read: {exc}", absent=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -260,15 +280,16 @@ def collect(
 
     # 3. THE FROZEN MIRROR. Absent is fine — a fresh host never had one. Present
     #    and fully read-only is fine. Present with a WRITABLE entry is not.
-    loose, mirror_reason = _describe(mirror_root, writable_entry_files)
-    if loose is None:
-        if mirror_reason.endswith("does not exist"):
+    mirror = _describe(mirror_root, writable_entry_files)
+    loose = mirror.value
+    if not mirror.ok:
+        if mirror.absent:
             checks.append(Check(
                 "frozen-mirror", OK,
                 f"{mirror_root} does not exist — nothing pre-cutover on this host",
             ))
         else:
-            checks.append(Check("frozen-mirror", UNMEASURED, mirror_reason))
+            checks.append(Check("frozen-mirror", UNMEASURED, mirror.reason))
     elif loose:
         shown = ", ".join(list(loose)[:5]) + ("…" if len(loose) > 5 else "")
         checks.append(Check(
@@ -311,16 +332,17 @@ def collect(
 
     # 5. CACHE vs POD. Only readable once the pod answered; otherwise UNMEASURED
     #    with the reason, never a zero.
-    cached, cache_reason = _describe(cache_root, store_entry_files)
+    cache = _describe(cache_root, store_entry_files)
+    cached = cache.value
     if not pod.reached:
         checks.append(Check(
             "cache-vs-pod", UNMEASURED,
             f"the pod was not reached ({pod.reason}), so the cache's "
-            f"{cached if cached is not None else 'unreadable'} entry file(s) "
+            f"{cached if cache.ok else 'unreadable'} entry file(s) "
             f"could not be compared against anything",
         ))
-    elif cached is None:
-        checks.append(Check("cache-vs-pod", UNMEASURED, cache_reason))
+    elif not cache.ok:
+        checks.append(Check("cache-vs-pod", UNMEASURED, cache.reason))
     elif pod.visible_entries is None:
         checks.append(Check(
             "cache-vs-pod", UNMEASURED,
@@ -376,12 +398,16 @@ def _visibility_check(pod: PodFacts, cache_root: Path, mirror_root: Path) -> Che
     local: set[str] = set()
     unread: list[str] = []
     for root in (cache_root, mirror_root):
-        names, reason = _describe(root, store_scopes)
-        if names is None:
-            if not reason.endswith("does not exist"):
-                unread.append(reason)
+        reading = _describe(root, store_scopes)
+        if not reading.ok:
+            # An ABSENT root contributes nothing and is not a failure; an
+            # UNREADABLE one is a hole in this check's own coverage and is named
+            # in the detail, so a clean-looking answer cannot come from a walk
+            # that could not see half its input.
+            if not reading.absent:
+                unread.append(reading.reason)
             continue
-        local |= set(names)  # type: ignore[arg-type]
+        local |= set(reading.value)  # type: ignore[arg-type]
 
     visible = set(pod.visible_scopes)
     missing = sorted(local - visible)
