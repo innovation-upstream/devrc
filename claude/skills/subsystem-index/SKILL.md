@@ -20,6 +20,11 @@ copy has none. An `Edit` or `Write` against an entry file now fails with
 seed replaced the served copy with a file that never had it. The full mechanism
 is in the write half at the end of this document.
 
+⚠ **The STORE itself is a different skill.** The pod, the client, `cairn doctor`,
+`cairn sync`/`search`/`ls-entries`/`who`, seeding and the two different exit 4s
+are **`cairn`**. This document is the write PROTOCOL, and nothing about the store
+is restated here.
+
 ⚠ **It was genuinely forked until 2026-08-31, so a stale memory of that is not
 paranoia — read this before re-deriving it.** `/analyze-service`'s door,
 `claude/skills/analyze-service/reference/write-back.md`, carried a second copy of
