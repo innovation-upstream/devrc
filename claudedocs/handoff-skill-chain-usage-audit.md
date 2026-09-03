@@ -579,7 +579,8 @@ EVICTED 2026-09-01 (terminal). Verdict: #1064 green, MERGED `f71ff648`; the two-
   (`store_siting.store_root(tmp_path)` at `:343`), **110 `scoped_store` SITED** (at `:10465`),
   **25 UNFIXTURED**. Per-site classification of all 25: **17** bind `tmp_path` directly, **8**
   arrive via `shuffled_pair` (`:3942`) / `ambiguous_pair` (`:4291`), both `tmp_path`-rooted ⇒
-  **0 sited, 25 disk-backed**. Both cairn suites now carry `store_siting` (3 hits each).
+  **0 sited, 25 disk-backed**. Both cairn suites now carry `store_siting` (`test_cairn_write.py` **5**, `test_cairn_cli.py` **3**
+  — measured, not "3 each", which an earlier draft asserted).
   Rank 13's closing condition (a) is **still UNMET**: `scripts/ci-repro/README.md` returns **0**
   for `1a4350f3`, `scoped_store`, `cairn` and `unfixtured|11755`, with the positive control
   `grep -c fsync` = **25**, so the zeros are readings and not a dead probe.
@@ -620,10 +621,13 @@ rather than removed and renumbered. New work is appended at the end.
    own text in the doc: tombstone-not-deletion · the rank NUMBER must survive · assert structure
    before writing · 🔴 **the measurement is NOT IDEMPOTENT** (`handoff-audit.py` buckets a resolved
    investigation on its **H3 heading alone**. 🔴 **Re-measured 2026-09-01: it reports 10, not the
-   "8" this item asserted — and the equality is what broke, not just the number.** Of the 10 blocks
-   it books, only **8** are one-line tombstones; the other two (the #1207 ladder block and the
+   "8" this item asserted — and the equality is what broke, not just the number.** 🔴 **Re-measured
+   2026-09-03 it reports ELEVEN (11,302 B): this PR's own `✅ CLOSED (re-measured 2026-09-02)` block
+   is a THIRD full-content H3 the tool books on its heading alone, and it is the one carrying the
+   live measurement rank 13's remaining work depends on.** Of the 11 blocks
+   it books, only **8** are one-line tombstones; the other three (the #1207 ladder block and the
    rank-13 block) are full live content, and the rank-13 one was added by THIS PR's first commit.
-   So an automated `EVICT_HISTORY` would re-evict the 8 tombstones AND DELETE two blocks that were
+   So an automated `EVICT_HISTORY` would re-evict the 8 tombstones AND DELETE three blocks that were
    never tombstones — the hazard is WIDER than this item stated, in the dangerous direction).
    🔴 **Fix that signal before automating anything.** Before proposing a GATE, re-run the ratchet
    replay for handoff docs: the caps file for gate 11 records the general rule REFUTED over 365
@@ -663,7 +667,7 @@ rather than removed and renumbered. New work is appended at the end.
    `ci-speedup-7` (verified live 2026-09-01). 🔴 **And re-read the premise first: #1211 `1a4350f3`
    sited the store on tmpfs**, so the contention this item was motivated by may already be gone.
    ⚠ **CORRECTED 2026-09-01 — do NOT act on the sentence above without reading the CI block's
-   fixture/call-site table first.** ⚠ **SUPERSEDED 2026-09-02 by #1219 (`b4fde334`): both fixtures
+   fixture/call-site table first.** ⚠ **SUPERSEDED 2026-09-02 by #1219 (`b4fde334`)** — both fixtures
    AND both cairn suites are now sited, and the disk-backed population is **25 of 270** `with
    running(...)` sites, all unfixtured — down from 123 of 256. The tmpfs probe is STILL UNVERIFIED
    on `talos-xr6-r7p`, so the contention is still **not** established as gone; the remaining
@@ -706,21 +710,24 @@ rather than removed and renumbered. New work is appended at the end.
    unfixtured population alone.** 🔴 An alternation would certify all four by naming one, which
    is this arc's own recurring bug expressed as a regex. ⚠ **This sentence said "three greps" until
    round 5 — one round AFTER a4 was added below it, so the definition of (a) contradicted its own
-   check for a whole round. Count the `# (aN)` lines in the block; they are the authority.**
+   check for a whole round. Count the LIVE `# (aN)` lines in the block — a2/a3 are commented out and
+   are NOT among them.**
    ```bash
    DEVRC=~/workspace/devrc
    git -C "$DEVRC" fetch origin main -q      # or a stale clone answers for a ref you do not have
    R=scripts/ci-repro/README.md
    git -C "$DEVRC" grep -c fsync        origin/main -- "$R"   # CONTROL first: must be NON-ZERO (25 today)
    git -C "$DEVRC" grep -c '1a4350f3'   origin/main -- "$R"   # (a1) the sha
-   git -C "$DEVRC" grep -c scoped_store origin/main -- "$R"   # (a2) the unsited fixture
-   git -C "$DEVRC" grep -c cairn        origin/main -- "$R"   # (a3) the two cairn suites
-   git -C "$DEVRC" grep -cE 'unfixtured|11755' origin/main -- "$R"   # (a4) the 13 unfixtured sites
+   # (a2) scoped_store and (a3) cairn are RETIRED — #1219 sited both, so requiring those words
+   #      would force a FALSE sentence into the README. 🔴 a3 is now SPURIOUSLY SATISFIED:
+   #      `grep -c cairn` reads 7 on main because #1244 landed cairn content, nothing to do with
+   #      the mitigation note. That is certify-by-naming-one, live.
+   git -C "$DEVRC" grep -c unfixtured   origin/main -- "$R"   # (a4) the 25 unfixtured sites
    ```
    The control runs INSIDE the block on purpose: `git grep -c` prints nothing and exits 1 on zero,
-   so a copy-paste that omits the control returns four blanks that are indistinguishable from a
-   broken probe. **(a) is met only when a1, a2, a3 AND a4 are all non-zero and the control is
-   non-zero.** ⚠ **The control is a POSITIVE control, not an equality — it was written `must be 25`
+   so a copy-paste that omits the control returns blanks that are indistinguishable from a
+   broken probe. **(a) is met only when a1 AND a4 are non-zero and the control is non-zero — TWO
+   greps, not four.** ⚠ **The control is a POSITIVE control, not an equality — it was written `must be 25`
    until round 6.** The edit that SATISFIES (a) is a mitigation note about an fsync bug, which
    plausibly says "fsync" and moves the count to 26, making an equality-conjunction false at the
    exact moment (a) is genuinely met.
@@ -731,8 +738,11 @@ rather than removed and renumbered. New work is appended at the end.
    🔴 **a4 was an advisory `⚠` until round 4 — i.e. the condition required three greps for FOUR
    populations, which is the same certify-by-naming-one bug as the alternation it replaced, one
    level further down and inside its own fix.** The population it omitted is the write-path one
-   (`:11755, :11852, :12584`), the most on-mechanism of the four and the only one #1219 will not
-   touch — so it was the worst possible one to leave optional.
+   (write-path sites), the most on-mechanism of the four and the only one #1219 will not touch —
+   so it was the worst possible one to leave optional. 🔴 **The line anchors this sentence used to
+   carry (`:11755, :11852, :12584`) are DEAD — re-measured 2026-09-03 they are a docstring, a
+   comment and a `running(scoped_store, …)` block. Line numbers in a file under active edit are
+   not durable; DERIVE the write-path sites with the AST walker instead of quoting anchors.**
    forcing: regression — the doc asserted a live failure mode that a merged change PARTIALLY
    mitigated, and it is read as authoritative at session start
 
