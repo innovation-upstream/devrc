@@ -307,6 +307,12 @@ from subsystem_resolver import extract_sections as _extract_sections  # noqa: E4
 # has no `.sync-stamp` and never will. A refusal in the library would take down
 # the pod and `scripts/cairn` with it.
 import subsystem_read_store as _read_store  # noqa: E402
+
+# The refusal's exit code, imported rather than re-declared. Binding it by value
+# at import is safe in a way `DEFAULT_CACHE_ROOT` is not: it is an `int` nothing
+# repoints, and the whole point is that this number is the SAME one
+# `scripts/subsystem-audit.py` returns.
+from subsystem_read_store import EXIT_UNSTAMPED_READ_STORE  # noqa: E402,F401
 from subsystem_touch import (  # noqa: E402
     STORE_IS_PER_HOST,
     StoreMissingError,
@@ -2990,13 +2996,13 @@ def search_json(report: SearchReport) -> dict:
 
 # --- CLI -----------------------------------------------------------------------
 
-#: 🔴 A CODE OF ITS OWN, and `_exit_for`'s "don't mint a fourth code" argument
-#: does NOT cover it. That argument is about statuses whose documented handling
-#: is identical to 3's ("the store is broken; recall was unavailable"). This one
-#: has a DIFFERENT remedy — one command, `cairn sync` — and a caller that cannot
-#: tell it from 3 cannot act on it. 3 says "nothing readable is there"; 4 says
-#: "what is there cannot date itself, and here is how to fix that in one step".
-EXIT_UNSTAMPED_READ_STORE = 4
+# 🔴 `EXIT_UNSTAMPED_READ_STORE` USED TO BE DECLARED HERE, AND MOVED to
+# `subsystem_read_store` when `scripts/subsystem-audit.py` grew the same refusal:
+# two `= 4` literals in two tools would have been two things to keep in step, with
+# nothing reconciling them. It is imported at the top of this file (beside the
+# resolver itself) and stays reachable as `subsystem_recall.EXIT_UNSTAMPED_READ_STORE`
+# for every existing caller. The reasoning that used to sit here — why it is not
+# folded into 3 — moved with it.
 
 
 class _StoreAction(argparse.Action):

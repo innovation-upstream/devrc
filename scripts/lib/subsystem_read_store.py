@@ -54,6 +54,7 @@ __all__ = [
     "resolve_read_store",
     "stamp_header",
     "REMEDY",
+    "EXIT_UNSTAMPED_READ_STORE",
     "refusal_message",
 ]
 
@@ -65,6 +66,35 @@ SYNC_STAMP = ".sync-stamp"
 
 #: The one-command remedy, spelled once so every refusal quotes the same thing.
 REMEDY = "cairn sync"
+
+#: The exit code a CLI returns when its DEFAULT resolution landed on a store that
+#: cannot date itself. THE one definition — it lives beside `refusal_message` and
+#: `REMEDY` because it is the third part of one wire contract: the message a human
+#: reads, the command they type, and the number a script branches on.
+#:
+#: 🔴 IT IS SHARED BY MORE THAN ONE TOOL, WHICH IS WHY IT MOVED HERE. It was
+#: declared in `subsystem_recall` alone. `subsystem-audit.py` then grew the same
+#: refusal, and a second `= 4` would have been two literals nobody reconciles —
+#: the shape `claude/RULES.md` ("One rule, one place") names, and the shape this
+#: whole module exists to close for the cache path and the stamp filename. A
+#: caller that sees 4 from EITHER host-local read surface must be able to act on
+#: it with one rule.
+#:
+#: 🔴 A CODE OF ITS OWN, and `subsystem_recall._exit_for`'s "don't mint a fourth
+#: code" argument does NOT cover it. That argument is about statuses whose
+#: documented handling is identical to 3's ("the store is broken; recall was
+#: unavailable"). This one has a DIFFERENT remedy — one command, `cairn sync` —
+#: and a caller that cannot tell it from 3 cannot act on it. 3 says "nothing
+#: readable is there"; 4 says "what is there cannot date itself, and here is how
+#: to fix that in one step".
+#:
+#: ⚠ `scripts/cairn`'s own `EXIT_REFRESH_FAILED` is ALSO 4 and means the opposite
+#: thing (the store was not reached but a usable cache survived, i.e. re-running
+#: `cairn sync` is the command that just failed). The collision is real and
+#: deliberate-by-accident; `test_subsystem_read_store.py::
+#: test_cairns_exit_4_is_SYNC_ONLY_and_is_not_the_readers_refusal` pins that
+#: cairn's 4 never escapes `cmd_sync`, which is what keeps the two tellable apart.
+EXIT_UNSTAMPED_READ_STORE = 4
 
 #: How a rendered stamp line is introduced, wherever a reader sees one.
 #:
