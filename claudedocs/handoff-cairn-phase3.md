@@ -685,7 +685,14 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     either a merged PR adding that route and widening the sweep, or a recorded decision that the
     COVERAGE disclosure is the permanent answer.
     forcing: none
-18. 🔴 **`drift-check` fails 4×/day forever unless rc 24 is made a success.** Repo `devrc`, the
+18. ✅ **DONE 2026-09-03 — the deadman exits 0.** #1250 squash `77dc3642`, two audit rounds,
+    both hosts switched, claim released. Implemented as the operator chose: an in-repo
+    DECLARED expectation, so rc 24 fires on DISAGREEMENT rather than on the bare state —
+    the botched-restore alarm is preserved, not silenced. New **rc 25** catches the
+    declaration going stale. 🔴 **Deleting the declaration arm is PART OF restoring
+    protection**; leaving it disarms rc 24 for this repo. **Do not re-work.**
+    Superseded text follows for context only:
+    ~~🔴 `drift-check` fails 4×/day forever unless rc 24 is made a success.~~ Repo `devrc`, the
     nix unit carrying `SuccessExitStatus=16`. Consequence of the operator decision to leave
     branch protection off (see the open investigation). rc 16 is the precedent: a deliberate
     state made a systemd success so the DND-defeating failure toast stops. **Closing condition:**
@@ -704,7 +711,16 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     measured flake RATE over a named run count post-#1211, and (b) is either reproduced or filed
     as its own item there.
     forcing: gate — these red a required check on PRs whose diff cannot reach them
-20. 🔴 **A THIRD frozen read surface, untouched by #1233.** Repo `devrc`,
+20. ✅ **DONE 2026-09-03 — the third frozen read surface is routed.** #1249 squash
+    `2c6b2ac9`, both hosts switched, claim released. `subsystem-audit.py`'s constant is
+    **deleted**, not repointed; it resolves through `subsystem_read_store` and refuses an
+    unstamped default (exit 4) while an explicit `--store` stays permissive.
+    ⚠ **Correction to this item as originally written:** the tool is **READ-ONLY by
+    contract** (`test_the_audit_source_contains_no_write_call`) — it *drives* deletions
+    through a human-confirmed skill. "It deletes, therefore refuse everything" does not
+    follow, and that is what makes the permissive half defensible. **Do not re-work.**
+    Superseded text follows for context only:
+    ~~🔴 A THIRD frozen read surface, untouched by #1233.~~ Repo `devrc`,
     `scripts/subsystem-audit.py:101` open-codes its own
     `DEFAULT_STORE_ROOT = ~/.claude/analyze-service-index` and defaults `--store` to it. The
     `prune-index` skill always passes `--store ~/.cache/subsystem-store` explicitly, so the
@@ -739,7 +755,93 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     gating is accepted while protection is off, or a merged PR adding a cheap post-push check.
     forcing: gate — `main` was red for hours and no mechanism reported it
 
+23. 🔴 **THE FREEZE WAS INCOMPLETE AND SIX WRITES LANDED IN THE DEAD STORE — closed 2026-09-03,
+    but the WRITER is not fixed.** Found by `cairn doctor` on its first live run (#1255).
+    The cutover chmod'd the 153 files that existed to `0444` and left the scope
+    **DIRECTORIES** writable, and `subsystem_touch.py` still targets the mirror — so new
+    entries could still be created there. Six were, 2026-09-02 13:54 → 2026-09-03 11:17, and
+    **none was on the pod**. This is rank 16 INVERTED: reads pointed at a store nobody writes,
+    versus writes landing where nobody reads.
+    **Measured, not inferred:** 7 files at 644 (not 6), and an append was WATCHED to succeed.
+    **Done:** all six preserved byte-identical at `~/.local/share/cairn-orphans-2026-09-03/`
+    (outside the PUBLIC repo — they are client-scoped); the four whose scopes the pod serves
+    pushed via a CURATED `seed.sh --store` (201 → 205 entries, seed's own note confirming the
+    other 201 untouched, all four byte-identical through the API afterwards, backup CronJob
+    re-verified unsuspended + successful 03:45Z immediately before); the mirror now 160 files
+    `0444` / 1068 dirs `0555`, proven by THREE watched refusals — append, create-entry,
+    create-scope — plus a positive control showing the probe still succeeds on the live cache,
+    and a confirmation that READS still work.
+    🔴 **Still open — the writer.** Permissions stop it; `subsystem_touch.py` still points at
+    the mirror, so the next writer gets EACCES rather than being routed. **Closing condition:**
+    a merged devrc PR making the write path refuse or route, plus the two remaining orphans
+    (`civitai-app-requests/app-requests`, `civitai-developer-docs/apps`) pushed once rank 24
+    unblocks them. Until then the backup directory is the only copy.
+    forcing: regression — silent data loss, observed at roughly one entry every few hours
+
+24. 🔴 **THE API HAS NO CREATE ROUTE, which is very likely WHY rank 23 happened.** Verified in
+    `server.py`: `If-Match` is **mandatory** on PUT, `*` is refused, and the handler resolves an
+    existing entry — so `cairn put --file` on a new ref fails *"cannot derive a revision"*. A
+    scope's first record can only reach the pod through an operator `seed.sh`. So the only
+    create path available to a session is LOCAL, and nothing carries it onward.
+    **Closing condition:** a merged PR adding a create route (or an explicit, recorded decision
+    that seeding is permanently the only create path, with `subsystem-index` saying so).
+    forcing: regression — the missing route is the upstream cause of rank 23
+
+25. **`CPU_MON_TEMP_THRESHOLD` is host-specific pretending to be shared.** Repo `devrc`,
+    `nix/home.nix`. The laptop carried an UNCOMMITTED `88 → 92` edit that blocked EVERY
+    `ship.sh` fast-forward to it (rc 7) — the documented "skipped host silently stops receiving
+    changes while looking healthy" failure. Preserved as branch `laptop/cpu-mon-temp-92`
+    (`44ebd9c6`, pushed, content verified from the WORKBENCH rather than the machine that made
+    it) and upstream taken so the host could converge. It is one shared line whose own comment
+    says *"This laptop runs hot at idle"* — which is why it keeps coming back as a local edit.
+    **Operator decision 2026-09-03: split it host-conditional**, 92 laptop / 88 workbench.
+    **Closing condition:** a merged devrc PR doing that split, after which the preserved branch
+    is deleted.
+    forcing: gate — while it exists uncommitted, the laptop receives nothing
+
+26. **`present/measure.py` resolves the frozen mirror, and its provenance string is false.**
+    Repo `devrc`. Found by #1255's ledger sweep — `Env.live()` resolves the mirror for the
+    explainer page while the page still claims it was *"read via `subsystem_recall.load_store()`"*.
+    Ledgered as SITED with the question recorded OPEN rather than fixed, because the fix is a
+    judgement about what the page should claim. **Closing condition:** a merged PR either
+    routing it through the resolver or correcting the provenance string to what it does.
+    forcing: none — a stale page, not a data path
+
 ## Gotchas / decisions / dead-ends
+
+**From the rank-18/20/24 session (2026-09-03) — what cost time, and what paid:**
+- 🔴 **A NEW COMMAND FOUND A LIVE DATA-LOSS PATH ON ITS FIRST RUN.** `cairn doctor` was built
+  on the instruction *"minimise prose, prefer scripts"*, and before it merged it reported
+  `frozen-mirror PROBLEM` — six entries written to the dead mirror over two days, invisible to
+  every reader. **A skill DESCRIBING what to check would have described it and found nothing.**
+  That is the whole argument for the script-over-prose form; it is not a style preference.
+- 🔴 **I READ ONE TIER'S TOTAL AND REPORTED IT AS BOTH.** I quoted `failed=1` off the dev-host
+  gate; the SANDBOX tier — the one the merge gates on — had **24** (115 `CalledProcessError`,
+  23 `exit status 128`, from an unguarded `git ls-files` in a tree with no `.git`). `RULES.md`
+  names this exactly; read each tier's OWN total, and quote the tier with the claim.
+- 🔴 **THREE INSTRUMENT FAILURES IN ONE HOUR, each caught ONLY by a control.** `find` is a
+  shell FUNCTION here and its `-print0` emits nothing (positive control also returned 0 — the
+  only tell); a `grep -cE "A|B"` matched a line present regardless of the variable under test;
+  and a "positive control" was pointed at a repo whose protection API 404s, so it exercised
+  COULD-NOT-MEASURE instead of the alarm. **A zero is a claim about the instrument until a
+  control has moved it.**
+- 🔴 **A MUTATION THAT DOES NOT APPLY SCORES AS A FALSE NEGATIVE.** My first attempt to prove
+  the rc-24 alarm still fires used a regex assuming quotes the real line does not have:
+  `arms removed: 0`, and the run was the UNMUTATED script. Printing the applied-count is what
+  stopped it being recorded as "the alarm is dead". **Assert the mutation applied exactly once,
+  every time.**
+- ⚠ **A grep count is a claim about the PATTERN.** Verifying #1249, `grep -c 'DEFAULT_STORE_ROOT
+  = Path.home()'` returned **1** — reading as "the constant survived". It was the comment
+  documenting what USED to be there; stripping comments gives 0.
+- **Agents corrected me four times, and were right each time:** `subsystem-audit.py` is
+  READ-ONLY by contract, not a delete tool (my framing would have justified refusing every
+  invocation); an auditor's "red at base" was measured against a MID-PR commit and the
+  implementer refused the instruction and re-measured; tier B is NOT free (the description
+  budget is separate from the tier ledger and had 12 chars of headroom); and my ledger
+  population was missing five sites. **The refusals were more valuable than the compliance.**
+- ⚠ **`ship.sh` re-executed itself** — the run shipped a change to `ship.sh`, so the CONVERGE
+  payload it had already expanded was stale and it re-ran the new copy before the remote leg.
+  Working as designed; do not read the first block's output as the final word.
 
 **From the rank-16 session (2026-09-02) — instrument and process lessons:**
 - 🔴 **`find` IS A SHELL FUNCTION ON THIS HOST, and its `-print0` emits nothing.** Bounding a
