@@ -493,14 +493,17 @@ def test_multiword_term_with_extra_whitespace_is_tokenized():
 # The fix is STRUCTURAL, not a rename: when several snippets match and exactly
 # one of them is NAMED outright by the term (the term IS that trigger, with or
 # without the ':'), that one wins. It closes the whole `:dX` / `:X` class rather
-# than this instance. `test_live_bare_trigger_names_resolve_to_their_own_snippet`
-# is the live-config half of the same claim.
+# than this instance. 🔴 The live-config half of this claim
+# (`test_live_bare_trigger_names_resolve_to_their_own_snippet`) was REMOVED
+# 2026-09-03 with the other live-config guards. Only the hermetic half below
+# survives, so a `:X` -> `:dX`+`:X` split in nix/home.nix is NOT detected.
 #
 # 🔴 WHICH OF THESE ARE REGRESSION COVERAGE. Measured against 6349a8b9 (the tree
 # the bug is live on), with the tests below in place and only the fix reverted:
 #   RED at base  — test_bare_acq_resolves_to_acq_not_ambiguous,
 #                  test_acq_end_to_end_through_search_ui,
 #                  test_live_bare_trigger_names_resolve_to_their_own_snippet
+#                  (REMOVED 2026-09-03 — historical record, not current coverage)
 #   GREEN at base — the other four here. They are INVARIANT GUARDS, not
 #                  regression coverage: they pin what the tie-break must NOT do
 #                  (re-point a unique match, break the picker, break the direct
@@ -519,13 +522,18 @@ ACQ_BASE = {"matches": [
      "search_terms": ["ask", "clarifying", "feedback", "dispatch", "process",
                       "elicit", "scope", "include"]},
     # 🔴 2026-09-02: the LABEL grew "and recommend improvements and anything
-    # useful to include" in a720d30d. Mirrored here for the same reason the
-    # 2026-08-29 note above gives — a fixture that lags the file it claims to
-    # mirror asserts the past. This label is exactly what made 'recom' ambiguous
-    # against ':rna' on the live config; see the FIX 6 block below.
-    {"trigger": ":acq", "replace": "...",
-     "label": "ask clarifying questions and recommend improvements and "
-              "anything useful to include",
+    # useful to include" in a720d30d, and was mirrored here.
+    # 🔴 2026-09-03: a451abc0 SWAPPED that back — `replace` now carries the long
+    # text and `label` is short again — so the mirror above had already drifted.
+    # RE-MIRRORED to the live value. Consequence, measured: 'recom'/'recommend'/
+    # 'improvements'/'useful' no longer resolve to ':acq' (they go None), and
+    # 'include' resolves to ':dacq' from a one-candidate set instead of two.
+    # No surviving assertion touches those five terms, so nothing goes red —
+    # which is exactly why this needed doing by hand: after the live-config
+    # guards were removed, NOTHING can detect this fixture drifting again.
+    {"trigger": ":acq", "replace": "ask clarifying questions and recommend "
+                                   "improvements and anything useful to include",
+     "label": "ask clarifying questions",
      "search_terms": ["ask", "clarify", "clarifying", "questions"]},
 ]}
 
@@ -718,6 +726,7 @@ def test_naming_a_trigger_still_beats_the_declared_owner(monkeypatch):
 # removed:
 #   RED at base  — test_precedence_resolves_the_recommend_terms,
 #                  test_recommend_terms_resolve_on_the_live_config
+#                  (REMOVED 2026-09-03 — historical record, not current coverage)
 #   GREEN at base — test_recommend_terms_still_reach_both_picker_rows (an
 #                  INVARIANT GUARD: the picker never consulted the table, so it
 #                  cannot fail on its own). Mutation-checked instead.
@@ -813,7 +822,7 @@ def test_the_recommend_terms_owe_nothing_to_the_owner_table(monkeypatch):
 #   reddened `main`, which is the regression they were written for and the same
 #   framing #1247's own matrix used:
 #     test_precedence_resolves_the_recommend_terms                None -> ':rna'
-#     test_recommend_terms_resolve_on_the_live_config             None -> ':rna'
+#     test_recommend_terms_resolve_on_the_live_config  (REMOVED 2026-09-03)  None -> ':rna'
 #   With base's table intact they are GREEN at base — the entries produced the
 #   same answer. That is the point of deleting them: the answer now comes from
 #   the rule, and these two tests keep the ANSWER pinned either way.
@@ -1019,146 +1028,3 @@ def test_token_matches_default_still_reads_the_label():
         "dusk", ":vex", meta, use_label=False) is True
     # The empty-trigger call shape espanso-usage.py actually uses.
     assert ED.EspansoDetector._token_matches("lantern", "", meta) is True
-
-
-# --------------------------------------------------------------------------- #
-# LIVE-CONFIG guards — these read nix/home.nix, NOT a fixture.
-#
-# Everything above pins detector SEMANTICS against hand-written fixtures. That
-# is structurally blind to the config itself: a fixture keeps asserting whatever
-# was true the day it was typed, so deleting a snippet's search_terms in
-# nix/home.nix leaves every test above green. But `label` + `search_terms` ARE
-# the interface — 168 of 173 measured fires go through the Ctrl+Space search UI
-# — so a snippet whose terms stop resolving is a DEAD snippet, and the next
-# /espanso-audit prunes it for recording zero fires.
-#
-# So these guards parse the real file. It is scraped, not nix-evaluated: every
-# snippet is a single-line `{ trigger = "…"; … }` record, and a regex over that
-# needs no nix binary in the sandbox. A MISSING file FAILS rather than skips —
-# the whole point is that this cannot go quietly green.
-# --------------------------------------------------------------------------- #
-import re  # noqa: E402
-import pytest  # noqa: E402
-
-HOME_NIX = Path(__file__).resolve().parents[4] / "nix" / "home.nix"
-
-_NIX_REC = re.compile(r"^\s*\{\s*trigger\s*=\s*\"((?:[^\"\\]|\\.)*)\"\s*;")
-_NIX_LABEL = re.compile(r"label\s*=\s*\"((?:[^\"\\]|\\.)*)\"\s*;")
-_NIX_REPLACE = re.compile(r"replace\s*=\s*\"((?:[^\"\\]|\\.)*)\"\s*;")
-_NIX_TERMS = re.compile(r"search_terms\s*=\s*\[([^\]]*)\]")
-_NIX_STR = re.compile(r"\"((?:[^\"\\]|\\.)*)\"")
-
-
-def _live_base():
-    """The espanso match set as written in nix/home.nix, in base.yml dict shape.
-
-    CAVEAT: `replace` here is the RAW nix source, so a path snippet reads
-    "${workspace}/…" pre-interpolation. That is fine — the detector never
-    consults `replace` (see `_token_matches`), and the fields it DOES consult
-    (trigger, label, search_terms) were verified byte-identical to the base.yml
-    nix actually generates (2026-08-05, via `nix build …#homeConfigurations.zach
-    .activationPackage` + espanso_triggers.load_triggers over the emitted YAML).
-    """
-    if not HOME_NIX.exists():
-        pytest.fail(f"nix/home.nix not found at {HOME_NIX} — this guard cannot "
-                    f"be allowed to skip; fix the path.")
-    matches = []
-    for line in HOME_NIX.read_text(encoding="utf-8").splitlines():
-        m = _NIX_REC.match(line)
-        if not m:
-            continue
-        lab = _NIX_LABEL.search(line)
-        rep = _NIX_REPLACE.search(line)
-        ter = _NIX_TERMS.search(line)
-        matches.append({
-            "trigger": m.group(1),
-            "replace": rep.group(1) if rep else "",
-            "label": lab.group(1) if lab else "",
-            "search_terms": _NIX_STR.findall(ter.group(1)) if ter else [],
-        })
-    return {"matches": matches}
-
-
-# The queries the 2026-08-05 /espanso-audit measured him actually typing (plus
-# the single-word prefixes the search bar sees mid-type). EVERY one must land on
-# :mt alone. Goes RED if :mt's search_terms are removed, or if a future snippet
-# makes any of them ambiguous.
-_MT_TERMS = [
-    "meantime", "mean", "while", "parallel", "queue", "tee", "wait",
-    "blocked", "idle", "tee up", "queue up", "in the meantime",
-    "what can we do", "while that runs",
-]
-
-
-# Resolutions that held BEFORE :mt existed and must still hold. A new snippet's
-# search_terms are the classic way to make an existing one ambiguous.
-_EXISTING_RESOLUTIONS = [
-    ("rit", ":eos"), ("kick", ":kickoff"), ("kic", ":kickoff"),
-    ("recom", ":rna"), ("recommend", ":rna"),
-    ("limit", ":lr"), ("resume", ":lr"), ("restored", ":lr"),
-    # 'ask' is the HIGHEST-traffic term in the whole config (58 fires in the
-    # 2026-08-06..19 window) and was the one term not pinned here. A snippet
-    # labelled with the word "task" silently takes it, because 'ask' ⊂ 'task'
-    # — that exact mutant survived a full green suite on 2026-08-19.
-    ("ask", ":acq"),
-    # 2026-08-28: :acq SPLIT into :dacq (dispatch) + :acq (the bare ask), so
-    # these three moved to :dacq — a RETARGET, not a relaxation: each still
-    # pins a unique resolution, and the pair below pins the split itself.
-    # Retargeting is only legitimate because the snippet they name was renamed;
-    # had the term merely gone ambiguous, the fix would be the config, not this
-    # table (see the ANTI-VACUITY note on the test that reads it).
-    ("feedback", ":dacq"), ("dispatch", ":dacq"), ("process", ":dacq"),
-    # The split's own guard. 'ask' above must NOT drift to :dacq, and these
-    # must NOT drift back to :acq — the failure mode is one snippet's label or
-    # search_terms swallowing the other's interface words. `_token_matches`
-    # reads the LABEL too, so this fails if either label regains the other's
-    # vocabulary, not only if search_terms do.
-    ("clarify", ":acq"), ("questions", ":acq"),
-    ("elicit", ":dacq"), ("subagent", ":dacq"),
-    # The split's OTHER half, missed by the row above and by the prefix/suffix
-    # collision guard alike: the bare trigger name "acq" is a SUBSTRING of
-    # ":dacq", so it matched both and every such fire landed UNATTRIBUTED. The
-    # collision guard cannot see it — ":dacq".endswith(":acq") is False. ADDED,
-    # never in place of a row; see the ANTI-VACUITY note below.
-    ("acq", ":acq"), ("dacq", ":dacq"),
-    ("cc", ":cc"), ("kubecl", ":kuc"), ("spine", ":csc"), ("orch", ":cmo"),
-    ("home", ":hlt"), ("prod", ":cpk"), ("datap", ":cdp"), ("civit prod", ":cpk"),
-]
-
-
-# REGRESSION coverage for the 2026-08-19 /espanso-audit. On the pre-change
-# config each ssh term was AMBIGUOUS (`_attribute` -> None over two snippets
-# that both spelled the host), so the fire was recorded UNATTRIBUTED. RED at
-# merge-base a29b97b, green here — not an invariant guard.
-#
-# 🔴 The LAST THREE pin a term the snippet's LABEL does NOT contain, so deleting
-# its search_terms kills the test. The first version pinned
-# 'unaddressed'/'proceed'/'clawgate', every one of which is spelled in its own
-# label — deleting all three snippets' search_terms left the suite fully green.
-# ('rig', ':sshwn') and ('portable', ':sshln') resolve via their LABEL by
-# design: for those two the label IS the interface, and their search_terms hold
-# no unique word at all. They pin the RESOLUTION, not the search_terms — an
-# earlier version of this comment claimed every entry was label-independent,
-# and a mutation sweep showed these two survive deleting the entry they were
-# supposed to guard. Do not count them as search_terms coverage.
-_AUDIT_2026_08_19_RESOLUTIONS = [
-    ("lap", ":sshll"), ("ssh lap", ":sshll"), ("ssh wor", ":sshwl"),
-    ("rig", ":sshwn"), ("portable", ":sshln"),
-    ("loose", ":alo"), ("tests", ":pdt"), ("pick up", ":cgt"),
-]
-
-
-# 🔴 PICKER coverage — a DIFFERENT question from attribution above.
-# espanso lists EVERY match as a row and the user picks one; ambiguity means
-# "two rows", NOT a dead query. Only `_attribute` needs uniqueness, and only so
-# telemetry can name the snippet. Conflating the two is what led a 2026-08-19
-# pass to STRIP these labels to force uniqueness — which blanked the picker for
-# every word that describes the nebula endpoints ('nebula'/'mesh'/'remote' went
-# from 2 rows to 0). Assert the rows stay REACHABLE; do not demand uniqueness.
-_PICKER_ROWS = [
-    ("nebula", {":sshwn", ":sshln"}),
-    ("mesh", {":sshwn", ":sshln"}),
-    ("remote", {":sshwn", ":sshln"}),
-    ("lan", {":sshwl", ":sshll"}),
-    ("ssh", {":sshwn", ":sshwl", ":sshln", ":sshll"}),
-]
