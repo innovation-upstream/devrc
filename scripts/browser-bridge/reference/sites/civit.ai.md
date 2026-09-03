@@ -118,3 +118,47 @@ The 404 renders, screenshots, crops and frames just as well as a real app, so
 nothing downstream will tell you. **Check auth first**, before any read you intend
 to draw a conclusion from — an unauthenticated session makes a working block and a
 nonexistent one indistinguishable.
+
+🔴 **A 404 has a SECOND ordinary cause, and it is invisible from the browser: the block's
+`app_blocks.status` is `suspended`.** The run-page resolver filters to approved, so a
+suspended block 404s for an authenticated moderator exactly as it does for a logged-out
+stranger — and it is not rendered in the model slot either. Measured 2026-09-03, **13 of
+24** blocks were suspended, including `hello-world`, `dogfood-manual` and `who-am-i`, so
+this is the ordinary state of an internal app, not evidence of a takedown. **An
+unauthenticated 404 and a suspended 404 are indistinguishable in the browser**, so a
+control pair (a known-serving slug in the same session) is what separates them — logging
+in is not enough.
+
+## 🔴 A top-level load of `<slug>.civit.ai` WILL NOT HOLD STILL — it bounces after 2 s
+
+Serving 200 with no HTTP redirect, the bare origin *looks* like a way to observe a block
+with no host attached — no `BLOCK_INIT`, so it should sit in its pre-ready state
+indefinitely. It does not. `@civitai/blocks-react`'s `dist/internal/directLoad.js` bounces
+to `civitai.com/apps/run/<slug>` after `DIRECT_LOAD_TIMEOUT_MS = 2000` when no handshake
+arrives — deliberate, so a shared link lands somewhere useful.
+
+**Two bridge round-trips exceed 2 s**, so a nav-then-read sequence reads the HOST page and
+reports the block's own values as absent. The tell is `location.href` coming back as
+`/apps/run/<slug>` when you navigated to the bare origin. Measured 2026-09-03.
+
+## 🔴 `emulate --color-scheme` does NOT reach the block iframe
+
+The block is a cross-origin OOPIF with its own renderer; `emulate` applies the override to
+the tab's **top-level** target. Measured 2026-09-03 with a positive control: under a
+CDP-session read the TOP frame correctly reported `osDark: False`, while the durable
+`data-civitai-boot-theme` the block had written at load still read `dark`.
+
+**So an OS-vs-host theme mismatch cannot be staged from outside.** If you need one, change
+the HOST theme — a real change to the operator's account, so ask first — or accept the case
+is unobservable and say so rather than reporting the arm you could not run.
+
+Related: **`--wake` and `--frame` are mutually exclusive** (`wake_with_frame_unsupported`)
+— un-throttling is tab-level. Wake the tab, then issue the framed read as a separate op.
+The emulation above is live only *inside* a CDP session, so a plain framed read sees no
+override either way; read the **durable attribute** the boot wrote, not `matchMedia`.
+
+🔴 **The generalisable half, and it applies well beyond theme:** an app's boot state is
+transient by definition, so racing it with a screenshot is the reassuring-zero trap — miss
+the frame and you report "no flash" from a sample you never took. Prefer a **durable
+artifact** the boot wrote and left behind (here `<html data-civitai-boot-theme>`, set once
+at parse and never removed). If none exists, say the transient was not observed.
