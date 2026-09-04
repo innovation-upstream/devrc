@@ -28,12 +28,17 @@ does while every behavioural test stays green.
 import os
 import re
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
 SCRIPT = ROOT / "scripts" / "main-green-check.sh"
 
 RC_GREEN, RC_RED, RC_UNMEASURED, RC_BLIND, RC_USAGE = 0, 10, 11, 12, 2
@@ -83,12 +88,19 @@ def world(tmp_path):
 
 
 def _stub(world, script_body):
-    """Write a gate stub. It is handed (checkout, tier) exactly as production is."""
-    p = world["tmp"] / "gate-stub.sh"
-    p.write_text("#!/usr/bin/env bash\n"
-                 'echo "$2" >> "$CALLS"\n' + script_body)
-    p.chmod(0o755)
-    return p
+    """Write a gate stub. It is handed (checkout, tier) exactly as production is.
+
+    🔴 THE SHEBANG IS NOT OURS TO WRITE — `testlib.mockbin.write_exec` owns it.
+    The first draft wrote `#!/usr/bin/env bash` by hand, which works on the dev
+    host and does NOT exist inside the nix build sandbox: every stub exec came
+    back `rc=126` (found, not executable), the script correctly reported RED, and
+    9 tests in this file failed in the sandbox tier while all 22 passed on the
+    dev host. `test_no_test_writes_a_usr_bin_env_shebang_at_runtime` is the
+    repo's existing guard for exactly that and caught it as the 10th failure.
+    Bodies must be POSIX sh — write_exec's shebang is /bin/sh, not bash.
+    """
+    return write_exec(world["tmp"] / "gate-stub.sh",
+                      'echo "$2" >> "$CALLS"\n' + script_body)
 
 
 def _run(world, stub, *args, extra_env=None):
