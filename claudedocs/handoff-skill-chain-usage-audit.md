@@ -18,7 +18,11 @@ survives adversarial re-derivation, and fix whatever it exposes.
 ## State now
 - 🔴 **RE-MEASURED 2026-09-02 — #1219 MERGED (`b4fde334`, 16:48:50Z) AND IT MOVED EVERYTHING RANK 13
   MEASURED. The CI block below is CORRECT-AS-OF-#1211 and STALE-AS-OF-NOW; read this bullet first.**
-  Fresh AST walk over `origin/main`, not the doc's numbers and not #1219's:
+  Fresh AST walk **at the fixed sha `b4fde334`** (#1219's merge) — not `origin/main`, which MOVES:
+  🔴 **at `a7dac5bd` these read 288 / 136 / 127 / 25, because #1254 (`34d00d90`) added 18 sited
+  sites. Three of the four figures below are sha-bound. THE 25 IS NOT — it is still exactly 25,
+  all `tmp_path`-rooted, 0 sited, re-verified per-site at current `main`, and it is the only one
+  any decision rests on.** Figures, at `b4fde334`:
   **270 `with running(...)` sites — 135 `store` SITED · 110 `scoped_store` SITED · 25 UNFIXTURED,
   all 25 still disk-backed.** The population went **123 of 256 disk-backed → 25 of 270**; both cairn
   suites are sited too (`store_siting` in all three files) and `scripts/testlib/store_siting.py`
@@ -253,7 +257,9 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   unmeasured where it matters. The consolidation is devrc**#1219** (`fix/consolidate-store-siting`),
   **OPEN as of 2026-09-01** — re-derive its state before quoting any of this.
   ⚠ `scripts/ci-repro/README.md` — which this block sends you to, and which remains correct about
-  the mechanism, the code sites and the reproducer — carries **no mitigation note at all**
+  the mechanism, the code sites and the reproducer — ⚠ **STALE AS OF #1244 (`1b769b64`): it DOES
+  carry a mitigation note now, naming `b4fde334` (#1219), added 2026-09-03T21:35Z. The claim below
+  was true when written.** ~~carries **no mitigation note at all**~~
   (grepped `tmpfs|1211|mitigat|shm` at `origin/main`: **zero hits**), so read on arrival there as
   describing a failure mode still live on **123 of that file's 256 `with running(...)` sites, plus
   both cairn suites** — not on all of it, and not on none.
@@ -579,8 +585,11 @@ EVICTED 2026-09-01 (terminal). Verdict: #1064 green, MERGED `f71ff648`; the two-
   (`store_siting.store_root(tmp_path)` at `:343`), **110 `scoped_store` SITED** (at `:10465`),
   **25 UNFIXTURED**. Per-site classification of all 25: **17** bind `tmp_path` directly, **8**
   arrive via `shuffled_pair` (`:3942`) / `ambiguous_pair` (`:4291`), both `tmp_path`-rooted ⇒
-  **0 sited, 25 disk-backed**. Both cairn suites now carry `store_siting` (`test_cairn_write.py` **5**, `test_cairn_cli.py` **3**
-  — measured, not "3 each", which an earlier draft asserted).
+  **0 sited, 25 disk-backed**. Both cairn suites now carry `store_siting` — ⚠ **and the count
+  correction here was itself wrong: at `b4fde334`, the sha this block is stamped to, it is 3 and 3;
+  the earlier "3 each" draft was RIGHT. `5` is true only at `a7dac5bd`, where #1244 added two PROSE
+  mentions to `test_cairn_write.py` that are not siting sites. Each file has exactly ONE
+  `store_root(...)` call — the number that actually matters.**
   Rank 13's closing condition (a) is **still UNMET**: `scripts/ci-repro/README.md` returns **0**
   for `1a4350f3`, `scoped_store`, `cairn` and `unfixtured|11755`, with the positive control
   `grep -c fsync` = **25**, so the zeros are readings and not a dead probe.
@@ -695,9 +704,15 @@ rather than removed and renumbered. New work is appended at the end.
    the unit is the CALL SITE** — i.e. the fix for a one-of-three error repeated it one level down.
    That is the shape to expect, not a one-off: it recurred AGAIN 9 h after merge, via #1219.
    🔴 **Left undone deliberately — the next reader's, and it is a devrc-repo edit, not a doc edit:**
-   `scripts/ci-repro/README.md` carries **no mitigation note** (zero hits for
-   `tmpfs|1211|mitigat|shm` at `origin/main`), so the reproducer reads as fully live at the one place
-   this doc sends people. 🔴 **CLOSES WHEN (a) ALONE — #1219 merging does NOT close it**, and the
+   ⚠ **REFUTED 2026-09-04 — and refuted by a commit this PR's own merge brought in.**
+   `scripts/ci-repro/README.md` **DOES** carry a mitigation note: 4 hits for
+   `tmpfs|1211|mitigat|shm`, added by **#1244 (`1b769b64`)**, naming **`b4fde334` (#1219)** — the
+   CORRECT, consolidated sha — and stating that `store_siting` falls back to disk in five
+   documented ways. 🔴 **So a1 is not merely satisfied, it is now ACTIVELY WRONG TO ACT ON:**
+   following the Next probe below would add the SUPERSEDED one-of-three `1a4350f3` alongside the
+   right one, leaving the README asserting two shas as "the" siting fix with the partial one added
+   last — the certify-by-resemblance defect this arc exists to correct, executed by following this
+   doc. **a1 is RETIRED.** ~~carries no mitigation note~~ 🔴 **CLOSES WHEN (a) ALONE — #1219 merging does NOT close it**, and the
    earlier draft of this item said it did. #1219 touches five files and **`scripts/ci-repro/README.md`
    is not one of them** (verified 2026-09-01), so its merge leaves this deliverable exactly as
    undone; it also leaves the *second* half of the caveat standing, because `store_siting.py`'s
@@ -710,14 +725,16 @@ rather than removed and renumbered. New work is appended at the end.
    unfixtured population alone.** 🔴 An alternation would certify all four by naming one, which
    is this arc's own recurring bug expressed as a regex. ⚠ **This sentence said "three greps" until
    round 5 — one round AFTER a4 was added below it, so the definition of (a) contradicted its own
-   check for a whole round. Count the LIVE `# (aN)` lines in the block — a2/a3 are commented out and
-   are NOT among them.**
+   check for a whole round. 🔴 **Do NOT count `# (aN)` lines — that arbiter is itself broken:
+   "live" is not a property a count can see (a1/a4's markers are shell comments too, and a regex
+   finds THREE). The authority is the sentence naming the required checks, immediately below.**
    ```bash
    DEVRC=~/workspace/devrc
    git -C "$DEVRC" fetch origin main -q      # or a stale clone answers for a ref you do not have
    R=scripts/ci-repro/README.md
    git -C "$DEVRC" grep -c fsync        origin/main -- "$R"   # CONTROL first: must be NON-ZERO (25 today)
-   git -C "$DEVRC" grep -c '1a4350f3'   origin/main -- "$R"   # (a1) the sha
+   # (a1) '1a4350f3' is RETIRED 2026-09-04 — #1244 already put a mitigation note there naming
+   #      b4fde334 (#1219), the consolidated fix. Re-adding 1a4350f3 would make it WORSE.
    # (a2) scoped_store and (a3) cairn are RETIRED — #1219 sited both, so requiring those words
    #      would force a FALSE sentence into the README. 🔴 a3 is now SPURIOUSLY SATISFIED:
    #      `grep -c cairn` reads 7 on main because #1244 landed cairn content, nothing to do with
@@ -726,8 +743,9 @@ rather than removed and renumbered. New work is appended at the end.
    ```
    The control runs INSIDE the block on purpose: `git grep -c` prints nothing and exits 1 on zero,
    so a copy-paste that omits the control returns blanks that are indistinguishable from a
-   broken probe. **(a) is met only when a1 AND a4 are non-zero and the control is non-zero — TWO
-   greps, not four.** ⚠ **The control is a POSITIVE control, not an equality — it was written `must be 25`
+   broken probe. **(a) is met only when a4 is non-zero and the control is non-zero — ONE
+   check, not four. a1 retired 2026-09-04 (#1244 already satisfied it, with a BETTER sha); a2/a3
+   retired 2026-09-02 (#1219 sited those populations).** ⚠ **The control is a POSITIVE control, not an equality — it was written `must be 25`
    until round 6.** The edit that SATISFIES (a) is a mitigation note about an fsync bug, which
    plausibly says "fsync" and moves the count to 26, making an equality-conjunction false at the
    exact moment (a) is genuinely met.
@@ -979,15 +997,32 @@ of this doc — re-read them before trusting any similar analysis.**
 - 🔴 **Every command cites a SHA or derives its value; no branch names survive** —
   `zach/skill-chain-usage-audit` was deleted after #1055 merged.
 - **The #1055 stale-base diagnosis, the reusable two-arm control, in two commands:**
+  🔴 **BROKEN 2026-09-04 AND REPLACED — read this before running it.** The `main` arm below used
+  to run `test_live_existing_resolutions_not_made_ambiguous` against `origin/main`. **That test no
+  longer exists**: devrc**#1265** (`68d10b19`) deleted all ten espanso live-config guards. Run as
+  written it now prints `60 deselected in 0.05s` and **exits 5** — under `-q` there is no `passed`
+  and no `failed`, so a reader scanning for failures reads it as "green on `main`" and concludes
+  STALE BASE for any red branch — **including one red for a real defect.** That is this doc's own
+  "a reassuring zero is indistinguishable from a probe wired to nothing", inside its own
+  verification block, caused by citing the moving ref `origin/main` in the one place `:979` says
+  every command must cite a sha.
+  ⚠ **The TECHNIQUE is the durable output, not this example.** Restated so it cannot rot: take the
+  test the gate NAMES, run it at your branch tip and at the mainline tip you would merge into.
+  **Red on the branch, green on the base ⇒ stale base. Green on BOTH ⇒ environment. Red on BOTH ⇒
+  inherited from the base.** 🔴 **Assert the test was SELECTED** — `-k` that matches nothing exits
+  5 and reads as success; require a `passed`/`failed` count, never an exit code.
+  The historical worked example, both arms pinned to fixed shas so neither can rot:
   ```bash
   DEVRC=~/workspace/devrc
-  git -C "$DEVRC" worktree add --detach /tmp/ctl-main origin/main
-  (cd /tmp/ctl-main && python3 -m pytest scripts/collector/keylog/tests/test_espanso_detect.py -k live_existing_resolutions -q)   # expect: 1 passed
-  git -C "$DEVRC" worktree remove --force /tmp/ctl-main
+  # RED arm — the pre-merge sha; expect: 1 failed
+  git -C "$DEVRC" worktree add --detach /tmp/ctl-red f85b7444
+  (cd /tmp/ctl-red && python3 -m pytest scripts/collector/keylog/tests/test_espanso_detect.py -k live_existing_resolutions -q)
+  # GREEN arm — the fix's own merge sha; expect: 1 passed
+  git -C "$DEVRC" worktree add --detach /tmp/ctl-green c2daa65d
+  (cd /tmp/ctl-green && python3 -m pytest scripts/collector/keylog/tests/test_espanso_detect.py -k live_existing_resolutions -q)
+  git -C "$DEVRC" worktree remove --force /tmp/ctl-red; git -C "$DEVRC" worktree remove --force /tmp/ctl-green
   ```
-  At the pre-merge sha **`f85b7444`** the same command FAILS with
-  `{'ask': (':acq', None, [':dacq', ':acq']), ...}`. Red on the branch, green on `main` ⇒ stale
-  base. Green on BOTH ⇒ environment. That pair is the arc's durable output.
+  At `f85b7444` it FAILS with `{'ask': (':acq', None, [':dacq', ':acq']), ...}`.
 - **The skill-ratchet half:** `git -C "$DEVRC" cat-file -s f85b7444:claude/skills/clawgate/SKILL.md`
   = **15491** (red, ceiling 15088) vs `origin/main` = **15086** (green).
   🔴 **Build `<rev>:<path>` with `printf '%s:%s'`** — zsh eats `$VAR:c…` as a history modifier and
