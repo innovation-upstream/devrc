@@ -1522,7 +1522,13 @@ def test_an_orphaned_lock_with_a_dead_holder_is_stolen_without_waiting(rig):
 
 
 def test_a_lock_whose_holder_is_ALIVE_is_not_stolen_on_the_fast_path(rig):
-    """🔴 THE DISCRIMINATOR, and the reason the test above is not sufficient.
+    """INVARIANT GUARD — it passes at base too, so it is NOT regression coverage.
+    Measured: green at `aba48864` (no pid check exists there, so a live holder is
+    waited for anyway) and green at HEAD. It is kept because it guards the FIX,
+    not the bug: mutating `_oc_lock_holder_is_dead` to `return 0` (always "dead")
+    turns it RED with this assertion, so it is reachable and non-vacuous.
+
+    🔴 THE DISCRIMINATOR, and the reason the test above is not sufficient.
     A steal that fires regardless of the pid would pass the headline test while
     destroying the mutual exclusion the lock exists to provide — two runs would
     `rm -rf` node_modules under each other, the exact corruption `_oc_lock`
@@ -1562,7 +1568,11 @@ def test_a_lock_whose_holder_is_ALIVE_is_not_stolen_on_the_fast_path(rig):
 
 
 def test_a_lock_with_NO_pid_file_is_not_stolen_on_the_fast_path(rig):
-    """🔴 THE RACE THE FAST PATH MUST NOT WIN. Between another run's `mkdir` and
+    """INVARIANT GUARD — green at base `aba48864` and at HEAD, so not regression
+    coverage. Kept because it kills the same `_oc_lock_holder_is_dead -> return 0`
+    mutant with its own assertion.
+
+    🔴 THE RACE THE FAST PATH MUST NOT WIN. Between another run's `mkdir` and
     its `echo $$` the lock exists with no pid file. Reading "no pid" as "dead"
     would steal a lock whose holder is moments from using it. Absent ⇒ wait,
     which is the pre-existing behaviour and the safe one.
