@@ -201,11 +201,12 @@ def test_a_checkout_DISAGREEING_with_the_api_row_resolves_to_nothing():
 
 
 def test_a_checkout_directory_named_differently_maps_BOTH_spellings():
-    """`~/workspace/homelab-talos` whose remote is `owner/homelab-infra` must
-    resolve under the directory name AND the real repo name."""
-    out = RG.build_mapping([], {"homelab-talos": "gardenersguild/homelab-infra"})
-    assert out["homelab-talos"] == "gardenersguild/homelab-infra"
-    assert out["homelab-infra"] == "gardenersguild/homelab-infra"
+    """A checkout whose DIRECTORY name differs from the repo name — the shape
+    that occurs when a clone was named after the project rather than the repo.
+    Both spellings must resolve, because either is what the operator types."""
+    out = RG.build_mapping([], {"toolshed-cluster": "gardenersguild/toolshed-infra"})
+    assert out["toolshed-cluster"] == "gardenersguild/toolshed-infra"
+    assert out["toolshed-infra"] == "gardenersguild/toolshed-infra"
 
 
 def test_a_malformed_row_is_skipped_not_crashed_on():
