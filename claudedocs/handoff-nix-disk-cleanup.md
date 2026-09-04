@@ -229,7 +229,7 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **Next probe if it recurs:** read the gate pod log directly rather than the check state — `KUBECONFIG=$KC_HOMELAB kubectl logs -n tekton-ci <pipelinerun>-gate-pod --all-containers`, and match the PipelineRun to a sha via `.spec.params[?(@.name=="revision")]`.
 
 ## Next steps (ranked)
-1. **Take the `/tmp` reclaim — no rebuild needed, and the rebuild is BLOCKED anyway.** `sudo bash nix/system/apply-tmp-churn-retention.sh --emit-rules > /tmp/churn.conf`, inspect with `sudo systemd-tmpfiles --dry-run --clean /tmp/churn.conf 2>&1 | tail` (read BOTH streams — "Would remove" is on stderr), then `sudo systemd-tmpfiles --clean /tmp/churn.conf`. Measure `df -i /` before and after; that difference is the only real answer to how much `/tmp` was holding.
+1. **Take the `/tmp` reclaim — no rebuild needed, and the rebuild is BLOCKED anyway.** `sudo sh -c 'nix/system/apply-tmp-churn-retention.sh --emit-rules > /run/churn.conf'`, inspect with `sudo systemd-tmpfiles --dry-run --clean /run/churn.conf 2>&1 | tail` (read BOTH streams — "Would remove" is on stderr), then `sudo systemd-tmpfiles --clean /run/churn.conf`. Measure `df -i /` before and after; that difference is the only real answer to how much `/tmp` was holding.
    forcing: none
 2. **Merge #1227** once Tekton settles. Both tiers are green locally on the merged tree. `/audit-pr 1227` has NOT been run and is recommended — this PR produced two retracted claims and one caught regression.
    forcing: none

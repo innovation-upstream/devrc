@@ -73,6 +73,14 @@ def _extract_inserter() -> str:
     return body
 
 
+def _shell_marker() -> str:
+    """MARKER as the shipped script defines it — hardcoding it here let a change to
+    the shell constant leave this suite green against the old string."""
+    m = re.search(r"^MARKER='([^']*)'", _script_text(), re.M)
+    assert m, "could not find the MARKER constant in the script"
+    return m.group(1)
+
+
 def _bash_ledger() -> list[str]:
     """The single TMPFILES_RULES ledger, as the shipped script defines it."""
     text = _script_text()
@@ -111,7 +119,7 @@ def _run_inserter(tmp_path: Path, config_text: str) -> tuple[int, str, str, str]
     src = tmp_path / "inserter.py"
     src.write_text(_extract_inserter())
     proc = subprocess.run(
-        [sys.executable, str(src), str(cfg), "/tmp churn retention", *_bash_ledger()],
+        [sys.executable, str(src), str(cfg), _shell_marker(), *_bash_ledger()],
         capture_output=True,
         text=True,
     )
@@ -363,8 +371,15 @@ def test_eviction_never_splices_a_line_it_did_not_match(tmp_path):
     rc, _out, err, text = _run_inserter(tmp_path, seeded)
 
     assert rc == 0, err
-    assert '"d /srv/critical 0755 root root -"' in text, (
-        "an unrelated live rule was destroyed — the splice is not anchored to the match"
+    # 🔴 Assert the rule is a LINE OF ITS OWN, not merely a substring. Against the
+    # pre-fix code the rule survived as `    # was:     "d /srv/critical …"` —
+    # commented out and disabled — and a plain `in text` check PASSED over it. The
+    # message named the hazard while the assertion could not see it.
+    live = [ln for ln in text.splitlines()
+            if ln.strip() == '"d /srv/critical 0755 root root -"']
+    assert live, (
+        "an unrelated live rule was destroyed or commented out — the splice is not "
+        "anchored to the match"
     )
     assert '# was: "e /tmp/go-build* - - - m:7d"' in text, "the comment was mangled"
     stale = [
@@ -405,3 +420,89 @@ def test_an_already_applied_host_gets_exactly_one_comment_header(tmp_path):
     assert "mtime-ONLY ageing" not in text, (
         "the superseded header wording survived — the reword reached no applied host"
     )
+
+
+def test_a_fully_applied_host_still_gets_its_stale_header_replaced(tmp_path):
+    """🔴 The header reconciliation used to run AFTER the `nothing to insert` early
+    return, so on the one population it was written for — a host that already has
+    every rule — the run exited first and the stale header survived. MEASURED
+    against this workbench's live /etc/nixos: rc 0, "all 7 rules already present",
+    file byte-identical, the superseded `mtime-ONLY ageing (m:)` sentence still
+    there. The correction landed nowhere.
+
+    The prior test seeds the old header with NO rules, so `missing` is non-empty and
+    the early return is never reached. This one seeds EVERY rule."""
+    old_header = "    # /tmp churn retention (2026-08-15). mtime-ONLY ageing (`m:`), because\n"
+    seeded = FRESH_CONFIG.replace(
+        ANCHOR,
+        ANCHOR + old_header + "".join(f"    {r}\n" for r in _python_rules()),
+        1,
+    )
+    assert "mtime-ONLY ageing" in seeded, "fixture built wrong"
+
+    rc, out, err, text = _run_inserter(tmp_path, seeded)
+
+    assert rc == 0, err
+    assert "mtime-ONLY ageing" not in text, (
+        "a fully-applied host kept the superseded header — the reconciliation is "
+        "behind the early return again"
+    )
+    headers = [ln for ln in text.splitlines() if ln.strip().startswith("# /tmp churn retention")]
+    assert len(headers) == 1, f"expected one header block, got {len(headers)}"
+
+
+def test_a_close_on_the_same_line_as_a_rule_does_not_leak_into_the_next_list(tmp_path):
+    """🔴 A whole-line-only scan for `];` walked PAST a list closed as
+    `"rule" ];` and stopped at the `];` of a FOLLOWING attribute — re-opening the
+    cross-list eviction that scoping had closed, deleting a
+    `systemd.user.tmpfiles.rules` entry, and reporting it as evicted "from
+    systemd.tmpfiles.rules"."""
+    cfg = (
+        "{ ... }:\n{\n"
+        + ANCHOR
+        + '    "e /tmp/go-build* - - - m:7d" ];\n\n'
+        + "  systemd.user.tmpfiles.rules = [\n"
+        + '    "e /tmp/go-build* - - - 30d"\n  ];\n}\n'
+    )
+    rc, _out, err, text = _run_inserter(tmp_path, cfg)
+
+    assert rc == 0, err
+    assert '"e /tmp/go-build* - - - 30d"' in text, (
+        "a systemd.user.tmpfiles.rules entry was evicted — the block close leaked "
+        "past the system list"
+    )
+
+
+def test_a_spaced_close_bracket_is_accepted(tmp_path):
+    """🟡 The whole-line scan rejected `] ;` outright — legitimate Nix that the
+    code it replaced handled — aborting the run with 'never closed'."""
+    cfg = "{ ... }:\n{\n" + ANCHOR + '    "e /tmp/go-build* - - - m:7d"\n  ] ;\n}\n'
+    rc, _out, err, _text = _run_inserter(tmp_path, cfg)
+
+    assert rc == 0, f"a ']  ;' close was rejected: {err}"
+
+
+def test_a_ledger_naming_one_path_twice_is_refused(tmp_path):
+    """🟡 Two ledger entries for one `type path` compile to the same regex, match
+    the same stale line, and push the SAME span twice. The second splice then cut
+    the same byte-length at a shifted offset: `"d /srv/critical …"` was chopped to
+    `t -"` — invalid Nix, a live rule destroyed — while the run printed
+    `evicted 2 … inserted 2 of 2` and exited 0 and the verifier passed."""
+    cfg = (
+        "{ ... }:\n{\n" + ANCHOR
+        + '    "e /tmp/run3.* - - - m:7d"\n    "d /srv/critical 0755 root root -"\n  ];\n}\n'
+    )
+    dup = _bash_ledger() + ["e /tmp/run3.* - - - mM:30d"]
+
+    cfgp = tmp_path / "configuration.nix"
+    cfgp.write_text(cfg)
+    src = tmp_path / "inserter.py"
+    src.write_text(_extract_inserter())
+    proc = subprocess.run(
+        [sys.executable, str(src), str(cfgp), _shell_marker(), *dup],
+        capture_output=True, text=True,
+    )
+
+    assert proc.returncode != 0, "a duplicate-path ledger was accepted"
+    assert "twice" in proc.stderr, proc.stderr
+    assert cfgp.read_text() == cfg, "the config was modified on the refusal path"
