@@ -2,11 +2,11 @@
   "_comment": [
     "Registry for per-site reference docs. `sites` maps a HOST SUFFIX to a filename in this directory.",
     "A host matches a key when it IS the key, or ENDS WITH '.' + the key. So an apex and any",
-    "subdomain of it both resolve, while `notexample.test` and `example.test.evil.invalid` do NOT — the",
+    "subdomain of it both resolve, while `notexample.test` and `example.test.evil.invalid` do NOT \u2014 the",
     "match is on label boundaries, never a substring. When several keys match, the LONGEST wins, so a",
     "more specific entry beats a broader catch-all for the same apex.",
     "Keys are lowercase bare hostnames: no scheme, no port, no path, no leading dot.",
-    "The key set here and the *.md file set in this directory must be IDENTICAL — an orphan entry and",
+    "The key set here and the *.md file set in this directory must be IDENTICAL \u2014 an orphan entry and",
     "an unregistered file are both errors, pinned both ways by tests/test_site_notes.py.",
     "server.py reads this to emit `site_notes` on a matching result envelope; a missing or malformed",
     "file degrades to no site_notes and never breaks a browser op."
@@ -14,6 +14,8 @@
   "sites": {
     "civit.ai": "civit.ai.md",
     "civitai.com": "civitai.com.md",
+    "comic-flex.homelab.lan": "comic-flex.homelab.lan.md",
+    "comics.zacx.dev": "comics.zacx.dev.md",
     "vetr.com": "vetr.com.md"
   }
 }
