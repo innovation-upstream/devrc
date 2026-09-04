@@ -75,16 +75,27 @@ Per-source detail that matters when querying:
   stream), `session-summary` (Layer A rollups), `session-insight` (Layer B facets).
   🔴 **"Was skill X ever used?" — do NOT hand-write SQL or grep `text` for the name.**
   The `session-summary` payload carries `skills_used` / `skills_invoked` /
-  `commands_typed` (skill→count maps, forward-only, **first rows 2026-08-04** —
-  re-measured 2026-09-04, earliest non-empty value `{"manage-spend-exporter":76}` on
-  the workbench; the previously recorded 2026-08-29 was 25 days late), and the
+  `commands_typed` (skill→count maps, forward-only; earliest non-empty row
+  **2026-08-04**, `{"manage-spend-exporter":76}` on the workbench — but see the
+  UNDERCOUNT bullet below: that date is when the field first appears, NOT when it
+  became reliable, and the previously recorded 2026-08-29 was neither), and the
   owning entry point is **`find-session --skill NAME`** — not this skill and not
   `adoption-scan`, which sees only the 9 `invocation.py` emitters and cannot see a skill
   at all. Measured 2026-08-29: keyword-searching `signal` returned **678** sessions
-  against **6** real uses — **all 6 on the laptop** (re-measured 2026-09-04 over all
-  time; the earlier "5 of them" was one short) — so a grep, or a one-host search,
-  answers the reverse of the truth. Report "no recorded use since <date>", never
-  "never used".
+  against **10** real uses (**9 laptop / 1 workbench**, re-measured 2026-09-04 over all
+  time) — so a grep, or a one-host search, answers the reverse of the truth. Report
+  "no recorded use since <date>", never "never used".
+  🔴 **`skills_used` IN CLICKHOUSE UNDERCOUNTS — it is NOT the authoritative surface,
+  and querying it instead of `find-session` is how a correct-looking SQL answer comes
+  back 40% low.** Measured 2026-09-04 for `signal`: `find-session --skill signal`
+  (transcript-derived, every reachable host, no peer unanswered) returns **10** sessions;
+  the ClickHouse `skills_used` map returns **6**, and the 6 are a strict SUBSET. The 4 it
+  misses are NOT an ingestion gap — each HAS `session-summary` rows (9–19 of them) with
+  an **empty** `skills_used`, and all 4 started 2026-08-19 → 2026-08-25. So attribution
+  coverage is **partial well after** the field's 2026-08-04 first appearance. **The
+  transcripts are the defining surface and `skills_used` is a derived one** — enumerating
+  the derived surface and reporting it as usage is the same sampling-vs-enumerating error
+  the rule above is about, just one layer in.
   🔴 **The mechanism that makes hand-written SQL fail SILENTLY, and why the rule above
   is not merely a preference: `JSONExtractString(payload,'skills_used','<name>') IS NOT
   NULL` IS ALWAYS TRUE.** ClickHouse returns `''` for a missing key, never `NULL`, so
