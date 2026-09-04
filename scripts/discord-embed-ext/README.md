@@ -52,6 +52,51 @@ earlier version of this file described the cap walk as the whole mechanism
 while enlarged media stayed visibly cropped; the pair above is what the
 extension actually does.
 
+## Uncapping is bounded by the VIEWPORT, not unbounded
+
+Removing Discord's cap is not the same as having no cap. Until 0.3.1 the
+element was left `max-width: 100%; max-height: none`, which overflowed the
+window by two independent routes:
+
+* **vertically**, by construction — `max-height: none` means a tall image runs
+  off the bottom of the window on *every* enlarge, no resize required;
+* **horizontally**, because `100%` resolves against the container whose own
+  `max-width` this same function has just set to `none`, so the effective bound
+  was an ancestor chain that need not be viewport-bounded at all.
+
+0.3.1 replaces those with `max-width: min(100%, 96vw)` and `max-height: 92vh`.
+
+* **Both halves of the width rule are load-bearing.** `100%` keeps media inside
+  Discord's message column, which is much narrower than the window; `96vw` keeps
+  it inside the window when the column is not. Measured in Brave/Chromium 144 at
+  a 1000px window, the same declaration rendered 400.00px inside a 400px column
+  and 960.00px inside a 2000px one.
+* **The cap is expressed in CSS viewport units and there is no `resize`
+  listener.** The engine re-evaluates `vw`/`vh` on resize itself, so there is no
+  listener to leak and no cached pixel value to go stale.
+* **Under 100 on purpose.** `vw` includes the gutter a classic vertical
+  scrollbar occupies. Measured in the same engine with a scrolling document:
+  `innerWidth` 1000 against `documentElement.clientWidth` 985 — a 15px gutter — so
+  a `100vw` box rendered 1000.00px and grew a *horizontal* scrollbar. `96vw` did
+  not. A test named for this trap fails if anyone rounds it up.
+* **`vh`, not `dvh`, deliberately.** `dvh` tracks a retracting mobile toolbar and
+  would relayout media mid-scroll; on desktop Brave — the only place this content
+  script runs — the two are identical.
+
+🔴 **Accepted tradeoff: enlarge now does LESS for portrait media than it used
+to.** A tall image is capped to 92vh and letterboxed (`object-fit: contain` was
+already set, and the aspect ratio is preserved — a 200×2000 image measured
+58.88 × 588.80). Previously it rendered at full height and simply ran off the
+screen. That is the intended behaviour, not a regression.
+
+The cap goes on the **element only**. The container keeps its `max-width: none;
+max-height: none; width: auto; height: auto` and gets no viewport cap of its
+own: with `auto` sizing it tracks its content, so bounding the media bounds the
+wrapper too. Measured — wrapper 592.80px against a 588.80px image, a 4px inline
+baseline gap rather than an open box, inside a 640px viewport. Capping the
+container as well would be redundant at best, and at worst re-imposes a
+constraint on Discord's own layout box that the uncapping just removed.
+
 The last one is a heuristic and the most likely thing to rot. It has a
 `MESSAGE_WALK_DEPTH` of 15 and falls back to treating the media as its own only
 sibling, so the failure mode is "navigation does nothing", never a crash.
