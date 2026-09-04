@@ -84,20 +84,37 @@ window by two independent routes:
   script runs — the two are identical.
 
 🔴 **Accepted tradeoff: enlarge now does LESS for portrait media than it used
-to.** A tall image is capped to 92vh and letterboxed (`object-fit: contain` was
-already set, and the aspect ratio is preserved — a 200×2000 image measured
-58.88 × 588.80). Previously it rendered at full height and simply ran off the
-screen. That is the intended behaviour, not a regression.
+to.** A tall image is capped to 92vh with its aspect ratio preserved — a
+200×2000 image measured 58.88 × 588.80. Previously it rendered at full height
+and simply ran off the screen. That is the intended behaviour, not a regression.
+
+⚠ **The ratio is preserved by the replaced-element sizing algorithm, NOT by
+`object-fit: contain`.** In the ordinary block case the box ratio already
+equals the intrinsic one, and the render measured identical with `contain`,
+with `fill`, and with the declaration removed. Keep it anyway: where the box
+ratio differs from the content's — `display:flex; flex-direction:column` gives
+614.39 × 588.80 for the same image — `fill` squashes and `contain` letterboxes.
+No behavioural test in this suite can observe that; only the structural
+declaration-set assertion holds it.
+
+⚠ **"Viewport" means the WINDOW, not the visible message area.** Discord insets
+the scroller by a channel header and a composer, so a 92vh image is still taller
+than what you can see — you scroll to its bottom. Measured on a synthetic
+Discord-shaped layout (1200×800, 48px header, 68px composer): scroller visible
+height 684px, a 1000×3000 image capped to 736px. Much better than the shipped
+`max-height: none` (2000px in a 640px viewport), but not "fits on screen".
+`ENLARGED_MAX_VH` is the single lever if fitting matters more than size.
 
 The cap goes on the **element only**. The container keeps its `max-width: none;
 max-height: none; width: auto; height: auto` and gets no viewport cap of its
 own: with `auto` sizing it tracks its content, so bounding the media bounds the
-wrapper too. Measured — wrapper 592.80px against a 588.80px image, a 4px inline
-baseline gap rather than an open box, inside a 640px viewport. Capping the
-container as well would be redundant at best, and at worst re-imposes a
-constraint on Discord's own layout box that the uncapping just removed.
+wrapper too. Measured — wrapper 588.80px against a 588.80px image, i.e. the
+container tracks the media exactly with no open box, inside a 640px viewport.
+Capping the container as well would be redundant at best, and at worst
+re-imposes a constraint on Discord's own layout box that the uncapping just
+removed.
 
-The last one is a heuristic and the most likely thing to rot. It has a
+The message-boundary walk is a heuristic and the most likely thing to rot. It has a
 `MESSAGE_WALK_DEPTH` of 15 and falls back to treating the media as its own only
 sibling, so the failure mode is "navigation does nothing", never a crash.
 

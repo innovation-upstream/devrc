@@ -45,6 +45,16 @@
   // LARGE viewport — stable, and numerically identical to `dvh` on desktop
   // Brave, which is the only place this content script runs. Revisit only if
   // this manifest ever matches a mobile browser.
+  // ⚠ `vh` IS THE WINDOW, NOT THE VISIBLE MESSAGE AREA. Discord insets the
+  // scroller by a channel header and a composer, so a 92vh image is still
+  // taller than what you can see and you will scroll to its bottom. That is a
+  // large improvement on `max-height: none` (2000px in a 640px viewport,
+  // measured) but it is NOT "now fits on screen", and the README must not say
+  // so. MEASURED on a synthetic Discord-shaped layout, 1200x800 with a 48px
+  // header and a 68px composer: scroller visible height 684px, a 1000x3000
+  // image capped to 736px. NOT measured against the live client. If fitting
+  // matters more than size, this constant is the single lever — ~85 rather
+  // than 92.
   var ENLARGED_MAX_VH = 92;
   // 🔴 BOTH HALVES, OR THE MEDIA ESCAPES SIDEWAYS. `100%` alone was the bug: it
   // resolves against the container, whose own max-width applyOverride sets to
@@ -293,10 +303,15 @@
       // box, and re-imposing a max-height on a flex parent can squeeze the
       // media the uncapping just freed. MEASURED, not reasoned: rendering this
       // exact four-declaration set on a wrapper around a 92vh-capped 200x2000
-      // image in Brave/Chromium 144 gave wrapper height 592.80px against image
-      // height 588.80px — a 4px inline baseline gap, not an open box — and
-      // 592.80 <= the 640px viewport. There is nothing here for a container cap
-      // to fix.
+      // image in Brave/Chromium 144 gave wrapper height 588.80px against image
+      // height 588.80px — the container tracks the media exactly, no open box —
+      // and 588.80 <= the 640px viewport. There is nothing here for a container
+      // cap to fix.
+      //
+      // (An earlier version of this comment said 592.80 against 588.80 and
+      // called the 4px an inline baseline gap. That figure does not reproduce:
+      // re-measured at 0px in three line-height contexts. The decision it
+      // supports is unchanged and in fact stronger.)
       var ccs = container.style;
       ccs.setProperty("max-width", "none", "important");
       ccs.setProperty("max-height", "none", "important");
@@ -307,11 +322,22 @@
     // 🔴 THE VIEWPORT CAP. `max-height: none` here was the vertical overflow by
     // construction: any tall image ran off the bottom of the window, resize or
     // no resize. `max-width: 100%` was the horizontal half — see the
-    // ENLARGED_MAX_WIDTH header. object-fit: contain below is what makes a
-    // capped portrait image letterbox instead of squashing. MEASURED: a
-    // 200x2000 image under these declarations rendered 58.88 x 588.80 in
-    // Brave/Chromium 144 — the 1:10 ratio intact — where the shipped
-    // `max-height: none` rendered it 2000px tall against a 640px viewport.
+    // ENLARGED_MAX_WIDTH header. MEASURED: a 200x2000 image under these
+    // declarations rendered 58.88 x 588.80 in Brave/Chromium 144 — the 1:10
+    // ratio intact — where the shipped `max-height: none` rendered it 2000px
+    // tall against a 640px viewport.
+    //
+    // 🔴 `object-fit: contain` IS NOT WHAT PRESERVES THAT RATIO — do not cite
+    // it as the reason, and do not delete it as useless either. In the ordinary
+    // BLOCK case the box ratio already equals the intrinsic ratio (58.88 x 10 =
+    // 588.80), so the replaced-element auto/max-constraint algorithm does the
+    // work: MEASURED identical at 58.88 x 588.80 with `contain`, with `fill`,
+    // and with the declaration deleted outright. It becomes load-bearing where
+    // the box ratio DIFFERS from the content's — same engine, same image,
+    // inside `display:flex; flex-direction:column` the box is 614.39 x 588.80,
+    // and there `fill` squashes while `contain` letterboxes. Kept for that
+    // case; no behavioural test in this suite can observe it, so only the
+    // structural declaration-set assertion holds the line.
     el.style.setProperty("max-width", ENLARGED_MAX_WIDTH, "important");
     el.style.setProperty("max-height", ENLARGED_MAX_HEIGHT, "important");
     el.style.setProperty("width", "auto", "important");
