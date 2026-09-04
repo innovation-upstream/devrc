@@ -285,6 +285,18 @@ test("an avatar with no link is left alone -- the guard is REACHABLE", () => {
   assert.equal(originalFromPreview(av), av);
 });
 
+test("an ORIGIN-host attachment keeps its query -- the preview-host guard", () => {
+  // Pins the host guard, which survived round 1's sweep unkilled. The reason
+  // it was waved off was wrong in mechanism: DISCORD_CDN_HOSTS holds BOTH
+  // hosts, so `discordChannelId` accepts an origin-host attachment too, and
+  // without the host check this would have its resize knobs stripped -- a URL
+  // rewritten for no reason. Inert today only because origin URLs are not
+  // observed carrying those knobs, and "inert today" is exactly what a guard
+  // is for.
+  assert.equal(originalFromPreview(`${ORIGINAL}?ex=1&width=550`),
+    `${ORIGINAL}?ex=1&width=550`);
+});
+
 test("originalFromPreview passes through anything it does not own", () => {
   assert.equal(originalFromPreview("https://example-site.test/a.png?width=1"),
     "https://example-site.test/a.png?width=1");

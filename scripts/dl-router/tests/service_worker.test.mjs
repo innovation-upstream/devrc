@@ -518,9 +518,16 @@ test("the menu downloads a plain link", async () => {
 });
 
 test("the menu saves the original, not the proxy thumbnail in the src", async () => {
-  // Discord puts a downscaled webp from its resizing proxy in the <img src>
-  // and the posted file on the wrapping <a href>. Taking `srcUrl` because it
-  // is listed first saves the thumbnail and silently calls it the download.
+  // Discord puts a downscaled webp from its resizing proxy in the <img src>.
+  // Taking `srcUrl` because it is listed first saves the thumbnail and
+  // silently calls it the download.
+  //
+  // This test SUPPLIES a `linkUrl`, which is why it kept passing while the
+  // feature was inert: measured, a Discord image has no ancestor <a>, so a
+  // real right-click never carries one -- the case below this one. Keep both:
+  // this exercise the swap, which is still correct wherever a browser does
+  // supply a link. The comment here used to say the original sits "on the
+  // wrapping <a href>", which is false and is why the swap looked sufficient.
   reset();
   const ch = "119283746551234567";
   const original

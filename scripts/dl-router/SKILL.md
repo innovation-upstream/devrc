@@ -205,24 +205,38 @@ media = [
 ]
 ```
 
-An image's own `src` is often a **downscaled copy from a resizing proxy**.
-🔴 **Do NOT expect the original on a wrapping `<a>` — on the chat site this was
-built for there is no wrapping anchor at all.** MEASURED 2026-09-03 on the live
-client, 3 image attachments across 2 channels and 2 message shapes: the number
-of ancestor `<a>` elements between the image and its message was **0 of 3**. The
-origin anchor exists in the same message but as a **sibling**, and a browser
-fills the context menu's `linkUrl` only from an ANCESTOR link — so a rule that
-waits for one waits forever.
+An image's own `src` is often a **downscaled copy from a resizing proxy**, which
+is why the anchor accessor goes FIRST in the list above: it is how this rule
+reaches the original. 🔴 **That accessor is a DESCENDANT query and it does not
+need a wrapping `<a>`.** `safeQuery` resolves each `element` with
+`container.querySelectorAll` (`player_buttons.js`), so an anchor that is merely
+somewhere inside `container` — a SIBLING of the image, which is the live shape —
+resolves fine. Do not delete it on the strength of the context-menu note below:
+🔴 **the player-button path does NOT rewrite anything.** `playerDownload` hands
+its `mediaUrl` straight to the download API and never calls
+`originalFromPreview()`, so for THIS path the anchor accessor is the only route
+to the original.
 
-🔴 **Rewriting the proxy URL's host IS the supported route, and the rule here
-used to say the opposite.** It claimed the two hosts carry different signature
-parameters; they do not. Measured for one asset: the proxy URL carries the
-signature parameters **plus** the resize knobs, with the signature **values
-byte-identical** to the origin anchor's, so the rewrite keeps a valid signature.
-Probed with both controls — the message's own origin anchor **206**, the
-rewritten URL **206**, the same URL with the signature stripped **fails**.
-`originalFromPreview()` in `route_core.js` is the one implementation; do not
-open-code a second.
+### The "Save to library…" CONTEXT MENU is a different path with a different rule
+
+🔴 **Scoped to `info.linkUrl`, and it does NOT apply to the `media` list above.**
+A browser fills a context menu's `linkUrl` only from an ANCESTOR link, and on
+the chat site this was built for an image attachment has none. MEASURED
+2026-09-03 on the live client, 3 image attachments across 2 channels and 2
+message shapes: ancestor `<a>` elements between the image and its message,
+**0 of 3**. The origin anchor is a sibling — reachable by a descendant query,
+invisible to `linkUrl`. So the menu path cannot wait for a link and must
+rewrite instead.
+
+🔴 **For the menu path, rewriting the proxy URL's host IS the supported route,
+and this file used to say the opposite.** It claimed the two hosts carry
+different signature parameters; they do not. Measured for one asset: the proxy
+URL carries the signature parameters **plus** the resize knobs, with the
+signature **values byte-identical** to the origin anchor's, so the rewrite keeps
+a valid signature. Probed with both controls — the message's own origin anchor
+**206**, the rewritten URL **206**, the same URL with the signature stripped
+**fails**. `originalFromPreview()` in `route_core.js` is the one implementation
+**of the rewrite**; do not open-code a second.
 
 ⚠ **A video's `src` is USUALLY the origin already, but that is not guaranteed
 and was measured at zero points** — every video in the live route log was

@@ -146,8 +146,13 @@ max_jobs = 4
 # # http(s) hit wins. That exists because `attr` is ONE name, so a single pair
 # # cannot cover a site that posts both an image and a video: the image's own
 # # `src` is often a downscaled copy from a resizing proxy, with the original on
-# # the wrapping <a>, while a video's `src` IS the original. Put the accessor
-# # that resolves the BEST copy first.
+# # a sibling <a> INSIDE the container, while a video's `src` is usually the
+# # original already. Put the accessor that resolves the BEST copy first.
+# #
+# # "sibling, inside the container" is exact, and it is why this works: each
+# # `element` is resolved with container.querySelectorAll, a DESCENDANT query,
+# # so the anchor does not have to wrap the image. On the chat site this was
+# # built for it never does -- measured, 0 ancestor <a> of 3 attachments.
 # #
 # # [site_rules."chat.example.test".player]
 # # container = "[class^=mediaWrapper]"
@@ -156,10 +161,14 @@ max_jobs = 4
 # #   { element = "video", attr = "src" },
 # # ]
 # #
-# # Do NOT try to reach the original by rewriting a proxy URL's host: the two
-# # hosts commonly carry DIFFERENT signature parameters, so a rewritten URL
-# # drops a signature that belonged to the other host. Taking the anchor's own
-# # href works because it is already signed for the host it points at.
+# # This accessor is the ONLY route to the original for the player button:
+# # `playerDownload` downloads the URL the rule resolves and never rewrites it.
+# # (The separate "Save to library..." CONTEXT MENU cannot see a sibling anchor
+# # at all -- a browser fills `linkUrl` only from an ANCESTOR link -- so that
+# # path reaches the original by rewriting the proxy host instead. The two
+# # hosts were measured to carry the SAME signature values, so the rewrite
+# # keeps a valid signature. An earlier version of this comment asserted the
+# # opposite and told you never to rewrite; it was wrong.)
 # #
 # # One malformed accessor rejects the WHOLE rule and renders no button --
 # # keeping the good ones would silently cover only some media on the page,
