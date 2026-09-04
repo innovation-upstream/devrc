@@ -662,8 +662,11 @@ REPO_PROBE_TIMEOUT = 15.0
 # `CLICKHOUSE_HTTP_TIMEOUT` out of `~/.config/activity-collector/env` at RUNTIME.
 # A host setting it to 90 (a value this repo records having tried) passed every
 # test and would still have spent 90s after a 70s host loop, i.e. rc 124 in the
-# pusher and NO snapshot for either host. Measured: the key is not set on the
-# workbench today, so this closes a live gap rather than a live break.
+# pusher and NO snapshot for either host. Measured 2026-09-04 on BOTH hosts —
+# workbench and laptop, neither sets the key — so this closes a live gap rather
+# than a live break. ⚠ That measurement is a fact about TODAY's env files, which
+# is exactly why the reserve is a BOUND and not a note: an operator can set the
+# key on either host tomorrow and nothing in this repo would see it.
 #
 # ⚠ RESIDUAL, STATED BECAUSE IT IS NOT CLOSED: `urlopen`'s timeout is per socket
 # operation, not a total for the request, so a pathological connect-then-stall

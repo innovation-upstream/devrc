@@ -14019,9 +14019,10 @@ def test_the_CH_RESERVE_is_ENFORCED_on_the_client_that_SPENDS_it():
     passed every test in this file and would still have spent 90 s after a 70 s
     host loop: rc 124 in the pusher, no snapshot for EITHER host.
 
-    Measured 2026-09-04: the key is not set on the workbench, so this closes a
-    live gap rather than a live break. The laptop was not checked, which is
-    precisely why the reserve is now a BOUND and not an assumption.
+    Measured 2026-09-04 on BOTH hosts — `~/.config/activity-collector/env` on
+    the workbench and on the laptop, neither sets the key — so this closes a
+    live gap rather than a live break. That is a fact about today's env files,
+    which is precisely why the reserve is now a BOUND and not an assumption.
     """
     over = _FakeCHClient(90.0)
     base_gather(use_ch=True, ch_client_factory=lambda: over)
