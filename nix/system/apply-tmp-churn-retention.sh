@@ -206,9 +206,15 @@ MARKER='/tmp churn retention'
 # 00-nixos.conf — but nothing was live, because activation never ran.
 #
 # So the cleanup can be taken without any system change at all:
-#     sudo bash nix/system/apply-tmp-churn-retention.sh --emit-rules > /tmp/churn.conf
-#     sudo systemd-tmpfiles --dry-run --clean /tmp/churn.conf 2>&1 | tail    # inspect
-#     sudo systemd-tmpfiles --clean /tmp/churn.conf                          # do it
+#     sudo sh -c 'nix/system/apply-tmp-churn-retention.sh --emit-rules > /run/churn.conf'
+#     sudo systemd-tmpfiles --dry-run --clean /run/churn.conf 2>&1 | tail    # inspect
+#     sudo systemd-tmpfiles --clean /run/churn.conf                          # do it
+# 🔴 `/run`, NOT `/tmp`, and the redirect INSIDE the sudo. Written the obvious way —
+# `sudo … --emit-rules > /tmp/churn.conf` — the redirect happens in the UNPRIVILEGED
+# shell into a 1777 directory, and the second command then has ROOT read it. Any
+# process running as the same user can swap the file in between, and a tmpfiles
+# config can express recursive removal (`r`/`R`). The sticky bit stops other users,
+# not the same one, and this box runs many agents as one user.
 # 🔴 Read BOTH streams: --dry-run prints "Would remove" on STDERR, so a
 # `2>/dev/null | grep -c` returns a reassuring 0 for a rule that works.
 # This is the same rule text the timer would use, generated from the same ledger —
