@@ -1524,7 +1524,12 @@ class TestSkillDocsArePinned:
             "persist the *derivation method and what a stale reading looks like*",
             "the liveness convention",
         ),
-        ("Write the file and run no git command", "store safety"),
+        # 🔴 SUPERSEDES `("Write the file and run no git command", …)`. The
+        # "Write the file" half named a LOCAL write, which was the last one left
+        # after the 2026-09-01 cutover and became a content-loss path the moment
+        # reads moved to the pod cache. `cairn create` (2026-09-03) closes it, so
+        # the sentence keeps the git rule and drops the local write.
+        ("Run no git command against the store", "store safety"),
         ("Do not demand the full schema", "a thin entry that exists beats a rich one"),
         ("write nothing", "ambiguity writes nothing"),
         (
@@ -1561,8 +1566,15 @@ class TestSkillDocsArePinned:
             "do not go looking for one it did not name",
             "🔴 the 80%-absent case: an unfollowable instruction invites invention",
         ),
+        # 🔴 SUPERSEDES `("--validate <path-you-just-wrote>", …)`. That branch
+        # existed for a brand-new entry, on the reasoning "it exists only locally
+        # and the pod has never seen it" — which `cairn create` made false on
+        # 2026-09-03. Worse, it was the branch that ROUTED a session into the
+        # local write in the first place. The claim it pinned — the writer finds
+        # its own defect rather than a different tool in a later session —
+        # survives at the post-write check, which is now the single one.
         (
-            "--validate <path-you-just-wrote>",
+            "cairn sync && cairn validate --scope <scope>",
             "🔴 the write-time parse check — the writer finds its own defect, "
             "not a different tool in a later session",
         ),
@@ -1655,8 +1667,11 @@ class TestSkillDocsArePinned:
         # cannot tell "waiting for the timer" from "silently not backed up" —
         # which is the reading one session actually reached, at the cost of a
         # round trip.
+        # ⚠ WORDING FOLLOWED THE MECHANISM on 2026-09-03: `cairn create` now
+        # makes the scope DIRECTORY on the pod as well, so the sentence forbids
+        # creating either it or its repository by hand. The claim is unchanged.
         (
-            "do not create the repository yourself",
+            "do not create either yourself",
             "the no-git rule covers a brand-new scope directory too",
         ),
         (

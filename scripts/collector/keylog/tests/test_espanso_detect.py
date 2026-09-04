@@ -818,6 +818,23 @@ def test_the_recommend_terms_owe_nothing_to_the_owner_table(monkeypatch):
 # a snippet that reaches the term through its DECLARED interface out-bids one
 # that reaches it only through its label.
 #
+# 🔴 THE COLLISION IS GONE AT THE SOURCE — carried forward from #1262
+# (`df02571f`), whose prose this merge would otherwise have dropped. `a451abc0`
+# SWAPPED ':acq''s `label` and `replace`: the long "…and recommend improvements…"
+# text is now what the snippet EXPANDS to, and the label is back to "ask
+# clarifying questions". `_token_matches` reads the label, not `replace`, so
+# 'recom'/'recommend' stopped reaching ':acq' entirely — they now match ':rna'
+# ALONE and resolve by the plain uniqueness branch, before precedence or the
+# owner table is consulted.
+#
+# 🔴 SUPERSEDED HALF — #1262's accounting said "NOTHING WAS LOST, the resolution
+# is still pinned by the `_EXISTING_RESOLUTIONS` rows … untouched, and green."
+# That was true when #1262 was written and is FALSE after this PR: this change
+# deletes `_EXISTING_RESOLUTIONS` along with the other nine live guards. So the
+# resolution is now pinned by NOTHING. #1262 retired one live guard whose premise
+# had died; this PR retires all ten because they re-break on every snippet edit —
+# a wider decision, not a contradiction of it. Read both together.
+
 # 🔴 THESE FIXTURES ARE DELIBERATELY NOT THE LIVE CONFIG — they must keep
 # testing the RULE after nix/home.nix changes, so every word below is invented.
 # ⚠ CORRECTED 2026-09-03: this used to justify that with "FIX 6's live guards
