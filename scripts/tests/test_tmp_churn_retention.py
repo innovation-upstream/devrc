@@ -277,7 +277,6 @@ def test_no_shipped_rule_matches_a_path_that_must_never_be_reaped(protected):
     assert not hits, f"{protected} would be reaped by {hits}"
 
 
-# ------------------------------------------------------- the eviction block --
 # 🔴 These exist because an audit mutated the WHOLE eviction block away and all
 # 11 tests still passed: the PR's central new payload — code that DELETES LINES
 # FROM /etc/nixos — had no coverage at all. Each test below kills that mutant.
@@ -291,52 +290,6 @@ def _seed(rules: list[str], *, user_list: str = "", trailing_comment: bool = Fal
     return f"{{ ... }}:\n{{\n{user}{ANCHOR}{body}    \"d /var/tmp 1777 root root 30d\"\n  ];\n}}\n"
 
 
-def test_a_stale_variant_of_a_ledger_rule_is_evicted(tmp_path):
-    """Without eviction the old line stays ABOVE the new one, and systemd takes the
-    FIRST line for a path — so the corrected rule is inert while reading as applied."""
-    stale = '"e /tmp/nix-shell.* - - - m:7d"'
-    rc, out, err, text = _run_inserter(tmp_path, _seed([stale]))
-
-    assert rc == 0, err
-    assert stale not in text, "the stale m:7d line survived — the new rule is inert"
-    assert LATE_RULE in text
-    assert "evicted" in out
-
-
-def test_eviction_does_not_reach_outside_systemd_tmpfiles_rules(tmp_path):
-    """MEASURED defect: the regex ran over the whole file, so a rule for a ledger
-    path in `systemd.user.tmpfiles.rules` — a different unit's list this script has
-    nothing to do with — was deleted."""
-    user_rule = '    "e /tmp/go-build* - - - 30d"\n'
-    rc, _out, err, text = _run_inserter(
-        tmp_path, _seed(['"e /tmp/go-build* - - - m:7d"'], user_list=user_rule)
-    )
-
-    assert rc == 0, err
-    assert user_rule.strip() in text, (
-        "a rule in systemd.user.tmpfiles.rules was evicted — eviction is not scoped"
-    )
-    assert '"e /tmp/go-build* - - - m:7d"' not in text, "the system-list stale rule survived"
-
-
-def test_a_trailing_comment_does_not_defeat_eviction(tmp_path):
-    """The first regex ended `.*"\\n`, so a comment after the closing quote made the
-    line unmatchable and the config ended carrying BOTH spellings for one path."""
-    rc, _out, err, text = _run_inserter(
-        tmp_path, _seed(['"e /tmp/go-build* - - - m:7d"'], trailing_comment=True)
-    )
-
-    assert rc == 0, err
-    assert "m:7d" not in text.replace("mM:7d", ""), "a commented stale line survived eviction"
-
-
-def test_eviction_leaves_unrelated_rules_alone(tmp_path):
-    rc, _out, err, text = _run_inserter(tmp_path, _seed(['"e /tmp/nix-shell.* - - - m:7d"']))
-
-    assert rc == 0, err
-    assert '"d /var/tmp 1777 root root 30d"' in text, "an unrelated rule was evicted"
-
-
 def test_every_ledger_glob_names_a_directory_form(tmp_path):
     """`e` acts on a directory's CONTENTS and silently ignores a plain file, so a
     glob whose real matches are files is a DEAD RULE. `homelab-talos-prs-*` was one
@@ -348,67 +301,25 @@ def test_every_ledger_glob_names_a_directory_form(tmp_path):
     )
 
 
-# --------------------------------------- regressions the FIX round introduced --
 # 🔴 Round 2 of the audit found these in code round 1 wrote. Both passed all 16
 # tests that existed at the time, in the module that had just been extended to
 # cover eviction — so "covered" meant covered against the defects we imagined.
 
 
-def test_eviction_never_splices_a_line_it_did_not_match(tmp_path):
-    """🔴 The removal loop re-found the STRIPPED rule text with `_block.find()` — an
-    unanchored substring search — and spliced to the next newline. Given a COMMENT
-    quoting the rule above a live rule, it cut inside the comment and swallowed the
-    following line: an unrelated `d /srv/critical` rule was silently commented out
-    and DISABLED, while the stale rule it claimed to evict survived. It printed
-    `evicted 1`, `inserted 7 of 7`, exited 0, and the post-write verifier passed."""
-    seeded = _seed(
-        [
-            '# was: "e /tmp/go-build* - - - m:7d"',
-            '"d /srv/critical 0755 root root -"',
-            '"e /tmp/go-build* - - - m:7d"',
-        ]
-    )
-    rc, _out, err, text = _run_inserter(tmp_path, seeded)
+def test_an_already_applied_host_does_not_get_a_SECOND_comment_header(tmp_path):
+    """The inserter is append-only, so the one thing it must never do to a host that
+    already carries a header is add another.
 
-    assert rc == 0, err
-    # 🔴 Assert the rule is a LINE OF ITS OWN, not merely a substring. Against the
-    # pre-fix code the rule survived as `    # was:     "d /srv/critical …"` —
-    # commented out and disabled — and a plain `in text` check PASSED over it. The
-    # message named the hazard while the assertion could not see it.
-    live = [ln for ln in text.splitlines()
-            if ln.strip() == '"d /srv/critical 0755 root root -"']
-    assert live, (
-        "an unrelated live rule was destroyed or commented out — the splice is not "
-        "anchored to the match"
-    )
-    assert '# was: "e /tmp/go-build* - - - m:7d"' in text, "the comment was mangled"
-    stale = [
-        ln for ln in text.splitlines()
-        if ln.strip() == '"e /tmp/go-build* - - - m:7d"'
-    ]
-    assert not stale, "the real stale rule survived while something else was cut"
+    🔴 The guard is keyed on MARKER, the shell constant — NOT on the header's first
+    line. Keying on the prose meant that REWORDING the header made this read
+    "absent" and prepend a second block, leaving two contradicting comments in
+    /etc/nixos. The old assertion could not see it either: it counted
+    `"/tmp churn retention (2026-08-15)"` WITH a closing paren, a spelling only the
+    original wording contains, so the reword took its count to 0.
 
-
-def test_a_bracket_in_a_comment_does_not_truncate_the_eviction_scope(tmp_path):
-    """🟡 `src.find("];")` took the first `];` ANYWHERE after the anchor, so a
-    comment mentioning nix list syntax ended the block early and eviction silently
-    found nothing — no `evicted` line, no error, stale rule left in place."""
-    seeded = _seed(
-        ["# nix list syntax is [ ]; keep that in mind", '"e /tmp/go-build* - - - m:7d"']
-    )
-    rc, out, err, text = _run_inserter(tmp_path, seeded)
-
-    assert rc == 0, err
-    assert "evicted" in out, "eviction reported nothing — the scope was truncated"
-    assert '"e /tmp/go-build* - - - m:7d"' not in text
-
-
-def test_an_already_applied_host_gets_exactly_one_comment_header(tmp_path):
-    """🟡 The anti-duplication guard tested `HEADER.splitlines()[0] not in src`, so
-    REWORDING the header made it read absent on every already-applied host and
-    prepend a SECOND block — leaving the stale `mtime-ONLY ageing (m:)` sentence
-    that the reword exists to delete. The old test could not see it: it counted
-    `(2026-08-15)` with a closing paren, which only the OLD wording contains."""
+    Removing a stale header is deliberately NOT this script's job — see the
+    append-only block in the inserter, and nix/system/patch-tmp-churn-stale-lines-*.
+    """
     old_header = "    # /tmp churn retention (2026-08-15). mtime-ONLY ageing (`m:`), because\n"
     seeded = FRESH_CONFIG.replace(ANCHOR, ANCHOR + old_header, 1)
 
@@ -416,71 +327,7 @@ def test_an_already_applied_host_gets_exactly_one_comment_header(tmp_path):
 
     assert rc == 0, err
     headers = [ln for ln in text.splitlines() if ln.strip().startswith("# /tmp churn retention")]
-    assert len(headers) == 1, f"expected exactly one comment header, got {len(headers)}: {headers}"
-    assert "mtime-ONLY ageing" not in text, (
-        "the superseded header wording survived — the reword reached no applied host"
-    )
-
-
-def test_a_fully_applied_host_still_gets_its_stale_header_replaced(tmp_path):
-    """🔴 The header reconciliation used to run AFTER the `nothing to insert` early
-    return, so on the one population it was written for — a host that already has
-    every rule — the run exited first and the stale header survived. MEASURED
-    against this workbench's live /etc/nixos: rc 0, "all 7 rules already present",
-    file byte-identical, the superseded `mtime-ONLY ageing (m:)` sentence still
-    there. The correction landed nowhere.
-
-    The prior test seeds the old header with NO rules, so `missing` is non-empty and
-    the early return is never reached. This one seeds EVERY rule."""
-    old_header = "    # /tmp churn retention (2026-08-15). mtime-ONLY ageing (`m:`), because\n"
-    seeded = FRESH_CONFIG.replace(
-        ANCHOR,
-        ANCHOR + old_header + "".join(f"    {r}\n" for r in _python_rules()),
-        1,
-    )
-    assert "mtime-ONLY ageing" in seeded, "fixture built wrong"
-
-    rc, out, err, text = _run_inserter(tmp_path, seeded)
-
-    assert rc == 0, err
-    assert "mtime-ONLY ageing" not in text, (
-        "a fully-applied host kept the superseded header — the reconciliation is "
-        "behind the early return again"
-    )
-    headers = [ln for ln in text.splitlines() if ln.strip().startswith("# /tmp churn retention")]
-    assert len(headers) == 1, f"expected one header block, got {len(headers)}"
-
-
-def test_a_close_on_the_same_line_as_a_rule_does_not_leak_into_the_next_list(tmp_path):
-    """🔴 A whole-line-only scan for `];` walked PAST a list closed as
-    `"rule" ];` and stopped at the `];` of a FOLLOWING attribute — re-opening the
-    cross-list eviction that scoping had closed, deleting a
-    `systemd.user.tmpfiles.rules` entry, and reporting it as evicted "from
-    systemd.tmpfiles.rules"."""
-    cfg = (
-        "{ ... }:\n{\n"
-        + ANCHOR
-        + '    "e /tmp/go-build* - - - m:7d" ];\n\n'
-        + "  systemd.user.tmpfiles.rules = [\n"
-        + '    "e /tmp/go-build* - - - 30d"\n  ];\n}\n'
-    )
-    rc, _out, err, text = _run_inserter(tmp_path, cfg)
-
-    assert rc == 0, err
-    assert '"e /tmp/go-build* - - - 30d"' in text, (
-        "a systemd.user.tmpfiles.rules entry was evicted — the block close leaked "
-        "past the system list"
-    )
-
-
-def test_a_spaced_close_bracket_is_accepted(tmp_path):
-    """🟡 The whole-line scan rejected `] ;` outright — legitimate Nix that the
-    code it replaced handled — aborting the run with 'never closed'."""
-    cfg = "{ ... }:\n{\n" + ANCHOR + '    "e /tmp/go-build* - - - m:7d"\n  ] ;\n}\n'
-    rc, _out, err, _text = _run_inserter(tmp_path, cfg)
-
-    assert rc == 0, f"a ']  ;' close was rejected: {err}"
-
+    assert len(headers) == 1, f"a second header block was added: {headers}"
 
 def test_a_ledger_naming_one_path_twice_is_refused(tmp_path):
     """🟡 Two ledger entries for one `type path` compile to the same regex, match

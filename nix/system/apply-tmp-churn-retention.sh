@@ -300,188 +300,72 @@ path = sys.argv[1]
 MARKER = sys.argv[2]
 src = open(path).read()
 
-HEADER = '''    # /tmp churn retention (2026-08-15, age-by corrected 2026-09-02). mtime-only
+HEADER = """    # /tmp churn retention (2026-08-15, age-by corrected 2026-09-02). mtime-only
     # ageing for BOTH files and directories (`mM:`) — lower-case covers files only,
-    # systemd-tmpfiles ages on the newest of atime/mtime/ctime and any `du`/`find`
-    # over /tmp refreshes atime — which made the stock 10d rule never expire
-    # anything. Scoped to machine-generated prefixes ONLY: a blanket rule would
-    # delete live git worktrees parked in /tmp. See nix/system/apply-tmp-churn-retention.sh.
-'''
+    # which ages no directory at all. systemd-tmpfiles otherwise ages on the newest
+    # of atime/mtime/ctime, and any `du`/`find` over /tmp refreshes atime, which is
+    # why the stock 10d rule never expires anything. Scoped to machine-generated
+    # prefixes ONLY: a blanket rule would delete live git worktrees parked in /tmp.
+    # See nix/system/apply-tmp-churn-retention.sh.
+"""
 
 # 🔴 A hyphen is a LITERAL. `nix-shell-*` and `nix-shell.*` are two globs, and
 # nix-shell writes both spellings — see the header for the 3340-vs-1017 count.
-# The ledger arrives on argv from TMPFILES_RULES so the inserter and the verifier
-# below cannot disagree about what the rule set is.
+# The ledger arrives on argv from TMPFILES_RULES so the inserter and the post-write
+# verifier below cannot disagree about what the rule set is.
 RULES = ['    "%s"' % r for r in sys.argv[3:]]
 if not RULES:
     raise SystemExit("ERROR: no rules passed on argv — TMPFILES_RULES is empty")
 
-# 🔴 EVICT STALE VARIANTS OF A LEDGER PATH FIRST. systemd-tmpfiles takes the FIRST
-# line for a path and logs `Duplicate line for path "...", ignoring.` for the rest.
-# Measured 2026-09-01: with the old `m:7d` line above the new `mM:7d` one, the
-# directory that only `mM` removes was NOT removed — the corrected rule was fully
-# inert, and the only signal was one low-severity log line. Appending alone is
-# therefore NOT an upgrade path, and the verifier below cannot see the problem: it
-# proves the TEXT is on disk, never that the rule is in EFFECT.
-import re as _re
-
-# 🔴 EVICT ONLY INSIDE `systemd.tmpfiles.rules = [ … ]`. The first version ran the
-# regex over the WHOLE file with re.M, so any indented, quoted, tmpfiles-shaped
-# line for a ledger path was removed no matter which attribute it belonged to.
-# MEASURED: a config whose `systemd.user.tmpfiles.rules` contained
-# `"e /tmp/go-build* - - - 30d"` had that line DELETED — a USER-unit list this
-# script has nothing to do with — while the replacement went into the system list.
-_anchor = "  systemd.tmpfiles.rules = [\n"
-_start = src.find(_anchor)
-if _start == -1:
-    raise SystemExit("ERROR: could not find 'systemd.tmpfiles.rules = [' in configuration.nix")
-_open = _start + len(_anchor)
-# 🔴 NOT `src.find("];")`. MEASURED: a comment line `# nix list syntax is [ ]; keep
-# that in mind` above a stale rule truncated the block there, so NOTHING was
-# evicted and the run printed no `evicted` line at all — a silent false negative.
-# Scan line by line for the first line whose ONLY content is the closing bracket.
-# 🔴 THE CLOSE MUST MATCH `];` AT END-OF-LINE, NOT WHOLE-LINE-ONLY.
-# Round 2 replaced `src.find("];")` with a whole-line scan to stop a comment like
-# `# nix list syntax is [ ]; keep that in mind` truncating the block. That fixed the
-# comment case and BROKE two others, MEASURED:
-#   `"e /tmp/nix-shell-* - - - m:7d" ];`  — a rule and the close on ONE line. No line
-#     strips to `];`, so the scan walked PAST the system list and stopped at the
-#     `];` of a following `systemd.user.tmpfiles.rules` — re-opening the exact
-#     cross-list eviction round 1 closed, and deleting a user-list rule while
-#     reporting it as evicted "from systemd.tmpfiles.rules".
-#   `] ;`  — legitimate Nix the scan rejected outright, aborting a run the old code
-#     handled.
-# Ending-match satisfies all three: a `];` that ends the line closes the list; a
-# `];` mid-comment does not. Comment lines are skipped outright so a commented-out
-# `"rule" ];` cannot close it either.
-_close = -1
-_probe = _open
-while True:
-    _eol = src.find("\n", _probe)
-    _line = src[_probe:_eol] if _eol != -1 else src[_probe:]
-    _stripped = _line.strip()
-    if _stripped and not _stripped.startswith("#"):
-        # `];`, `] ;`, or `<content> ];` all end the list here.
-        _norm = _stripped.replace(" ", "").replace("\t", "")
-        if _norm.endswith("];") or _norm == "]":
-            _close = _probe + _line.index("]")
-            break
-    if _eol == -1:
-        break
-    _probe = _eol + 1
-if _close == -1:
-    raise SystemExit(
-        "ERROR: 'systemd.tmpfiles.rules = [' is never closed — no non-comment line ends with '];'"
-    )
-_head, _block, _tail = src[:_open], src[_open:_close], src[_close:]
-
-# 🔴 SPLICE ON THE MATCH'S OWN OFFSETS. An earlier revision computed the match,
-# threw the offsets away, and then re-found the STRIPPED text with
-# `_block.find(_e_line)` — an unanchored substring search. MEASURED: given
-#
-#     # was: "e /tmp/go-build* - - - m:7d"
-#     "d /srv/critical 0755 root root -"
-#     "e /tmp/go-build* - - - m:7d"
-#
-# it found the text inside the COMMENT, spliced to the end of that line, and
-# produced `# was:     "d /srv/critical 0755 root root -"` — silently commenting
-# out an unrelated live rule — while the real stale line SURVIVED. It then printed
-# `evicted 1` and `inserted 7 of 7` and exited 0, and the post-write verifier
-# passed, because every ledger rule really was present. Both halves of the report
-# were the opposite of what happened. The version before that used
-# `src.replace(_m.group(0), "")`, whose match included the leading indentation and
-# the trailing newline and so could only ever hit a whole line — this is a
-# regression the fix for the count-of-matches nit introduced.
-#
-# Collect (start, end) spans, then splice from the RIGHT so earlier offsets stay
-# valid.
-# 🔴 DEDUPLICATE THE SPANS. Two ledger entries naming the same `type path` — a
-# plain duplicate, or a retention change written as an addition — compile to the
-# SAME regex, both match the one stale line, and the span lands in the list
-# twice. The second splice then removes the same byte-length at a now-shifted
-# offset. MEASURED: `"d /srv/critical 0755 root root -"` was chopped to `t -"`,
-# invalid Nix, while the run printed `evicted 2 … inserted 2 of 2` and exited 0
-# and the post-write verifier passed. An earlier revision of this comment claimed
-# "each span is removed exactly once"; that was false, which is why the ledger
-# also carries a uniqueness assertion below.
-_seen_paths = {}
+# One path, one rule. Two entries for the same `type path` would insert two lines
+# systemd cannot both honour — it takes the first and logs `Duplicate line for
+# path`, so the second is silently dead.
+_seen = {}
 for _r in RULES:
-    _b = _r.strip().strip('"').split()
-    _k = (_b[0], _b[1])
-    if _k in _seen_paths:
-        raise SystemExit(
-            "ERROR: the ledger names %s %s twice — one path, one rule. "
-            "Two rules for one path evict each other's line." % _k
-        )
-    _seen_paths[_k] = True
+    _f = _r.strip().strip('"').split()
+    _k = (_f[0], _f[1])
+    if _k in _seen:
+        raise SystemExit("ERROR: the ledger names %s %s twice — one path, one rule." % _k)
+    _seen[_k] = True
 
-_evicted = []
-_spans = []
-for _r in RULES:
-    _body = _r.strip().strip('"')
-    _type, _path = _body.split()[0], _body.split()[1]
-    # `[^"\n]*"` stops at the closing quote, so a trailing comment after it does
-    # NOT defeat the match — an upgrade used to leave both an m:7d and an mM:7d
-    # line for one path whenever the old line carried a comment.
-    _pat = _re.compile(
-        r'^[ \t]*"%s %s [^"\n]*"[ \t]*(?:#[^\n]*)?\n' % (_re.escape(_type), _re.escape(_path)),
-        _re.M,
-    )
-    for _m in _pat.finditer(_block):
-        if _m.group(0).strip() != _r.strip():
-            _spans.append((_m.start(), _m.end()))
-            _evicted.append(_m.group(0).strip())
-for _s, _e in sorted(set(_spans), reverse=True):
-    _block = _block[:_s] + _block[_e:]
-src = _head + _block + _tail
-
-if _evicted:
-    print("      evicted %d stale rule line(s) from systemd.tmpfiles.rules:" % len(_evicted))
-    for _e in _evicted:
-        print("        - " + _e)
-    print("      🔴 IF ANY OF THOSE WAS A DELIBERATE HUMAN RULE, restore it now — this")
-    print("         script cannot tell an older revision of its own rule from someone")
-    print("         else's decision, and the backup above is your undo.")
+# 🔴 THIS INSERTER IS APPEND-ONLY. IT MUST NEVER DELETE OR REWRITE A LINE.
+#
+# It used to evict "stale" rule lines — an earlier revision's `m:7d` spelling — from
+# `systemd.tmpfiles.rules`. That code was removed on 2026-09-04 after three audit
+# rounds, and the reason is worth keeping so nobody rebuilds it:
+#
+#   * ITS PREMISE WAS FALSE. Eviction existed because a stale line ABOVE the new one
+#     would win (systemd takes the first line per path and logs `Duplicate line for
+#     path …, ignoring`). But insertion is `src.replace(anchor, anchor + block, 1)`,
+#     so new rules always land at the TOP, above any survivor. This script cannot
+#     produce the ordering eviction was defending against. The measurement that
+#     justified it came from a hand-edited config, not from this code path.
+#   * IT COST TWO RED REGRESSIONS IN THREE ROUNDS. An unanchored substring splice
+#     silently commented out an unrelated live rule while leaving the stale one; a
+#     whole-line scan for the closing bracket walked into a following
+#     `systemd.user.tmpfiles.rules` and deleted an entry there. Both reported
+#     success. Both were introduced by the fix for the previous finding.
+#   * THE POPULATION WAS TWO MACHINES. Stale lines are fixed by one reviewable hand
+#     patch per host — see nix/system/patch-tmp-churn-stale-lines-2026-09-04.md.
+#
+# A surviving stale line is COSMETIC here: cruft plus one log line, not a dead rule.
+# Deleting lines from a hand-maintained /etc/nixos as root is not worth that.
 
 anchor = "  systemd.tmpfiles.rules = [\n"
 if anchor not in src:
     raise SystemExit("ERROR: could not find 'systemd.tmpfiles.rules = [' in configuration.nix")
 
-# 🔴 RECONCILE THE HEADER BEFORE THE "nothing to insert" RETURN. It used to run
-# after, so on the ONLY population it was written for — a host that already has
-# every rule — the run early-exited and the stale header survived. MEASURED against
-# this workbench's live /etc/nixos: rc 0, "all 7 rules already present", file
-# byte-identical, `mtime-ONLY ageing` still there, `age-by corrected` absent. The
-# F14 correction landed nowhere.
-# 🔴 And search the SCOPED BLOCK, not `src`. Over the whole file the pattern took
-# the FIRST `# /tmp churn retention` mention anywhere — a note above the attribute
-# would be rewritten instead of the real in-block header, converging to a state
-# where the real one is never touched again. The trailing `(?:#…)*` also swallowed
-# any human comment block directly beneath the header; requiring each continuation
-# line to be indented at least as far as the header keeps it inside its own block.
-import re as _re2
-_hdr_pat = _re2.compile(r'^([ \t]*)# /tmp churn retention[^\n]*\n(?:\1[ \t]*#[^\n]*\n)*', _re2.M)
-_hdr_hits = list(_hdr_pat.finditer(_block))
-if not _hdr_hits:
-    _header_action = "insert"
-else:
-    # Replace EVERY header block in the list — an earlier defect left hosts with two.
-    _header_action = "present"
-    for _mh in reversed(_hdr_hits):
-        if _mh.group(0) != HEADER:
-            _block = _block[:_mh.start()] + (HEADER if _mh is _hdr_hits[0] else "") + _block[_mh.end():]
-            _header_action = "replaced"
-    src = _head + _block + _tail
-
 missing = [r for r in RULES if r.strip() not in src]
-if not missing and not _evicted and _header_action != "replaced":
+if not missing:
     print("      all %d rules already present — nothing to insert" % len(RULES))
     raise SystemExit(0)
-if _header_action == "replaced":
-    print("      replaced a stale comment header (its wording predates this revision)")
 
 block = "".join(r + "\n" for r in missing)
-if _header_action == "insert":
+# Re-applying onto a config that already carries the block must not duplicate the
+# comment header; a first application must not omit it. Keyed on MARKER — the shell
+# constant — and NOT on the header's first line: keying on the prose meant that
+# rewording the header made this read "absent" and prepend a second block.
+if MARKER not in src:
     block = HEADER + block
 
 open(path, "w").write(src.replace(anchor, anchor + block, 1))
