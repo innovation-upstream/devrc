@@ -329,9 +329,11 @@ in
           # :acq owns "ask"/"clarify" for ATTRIBUTION while the picker keeps
           # listing both rows. 🔴 Adding a term here that another snippet also
           # spells is therefore fine for the picker but silently costs
-          # attribution unless that table names an owner — the live guard
-          # `test_live_existing_resolutions_not_made_ambiguous` is what tells
-          # you, and it is not optional to read.
+          # attribution unless that table names an owner. 🔴 The live guard that
+          # used to tell you (`test_live_existing_resolutions_not_made_ambiguous`)
+          # was REMOVED 2026-09-03 along with the other 9 live-config tests: they
+          # re-broke on every snippet edit. NOTHING enforces this coupling now —
+          # if attribution matters for a term, check it by hand.
           { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
           { trigger = ":acq"; replace = "ask clarifying questions and recommend improvements and anything useful to include"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this arc? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }

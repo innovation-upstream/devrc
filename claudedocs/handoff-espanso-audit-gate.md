@@ -16,58 +16,43 @@ advice turned out to be built on a false premise, make the correction enforceabl
 than written down.
 
 ## State now
-- devrc `main`, HEAD == `origin/main`. **Nothing in flight.** Claim
-  `espanso-label-only-match-precedence` released. ⚠ Another session's dirty
-  `nix/programs/alacritty/default.nix`, `nix/system/apply-tmp-churn-retention.sh` and three
-  untracked `diagnose-*`/`output.txt` files sit in the shared checkout — untouched.
+- 🔴 **CARRIED FORWARD (the REPLACE would otherwise drop it): THE ENFORCEABLE CORRECTION THIS
+  DOC'S GOAL ASKS FOR EXISTS — a LABEL edit can no longer shadow a snippet that DECLARES the
+  term.** Shipped by `#1247` (`b9b2493d`, the `_AMBIGUOUS_TERM_OWNER` patch) and `#1252`
+  (`de677683`, declared-interface precedence). 🔴 **That correction is CODE and SURVIVES #1265** —
+  what #1265 removes is only the LIVE-CONFIG tests over it; `_attribute`'s declared-interface,
+  name-tiebreak and owner-lookup branches all keep killing hermetic coverage (mutation-verified in
+  the #1265 round-1 audit: 5, 5 and 4 survivors go red respectively). ⚠ But note the live value is
+  now ZERO instances: `a451abc0` moved "recommend" out of `:acq`'s label, so the collision the
+  precedence rule was built for no longer exists on the real config. The rule is not wrong; it is
+  currently unexercised live, and nothing measures that any more.
 
-🔴 **THE ENFORCEABLE CORRECTION THIS DOC'S GOAL ASKS FOR NOW EXISTS: a LABEL edit can no
-longer shadow a snippet that DECLARES the term.** Two PRs, one day, by two different sessions:
-
-- **`#1247` → `b9b2493d`** (another session) — `main` had gone RED. The operator edited
-  `:acq`'s **`label`** to *"ask clarifying questions and recommend improvements and anything
-  useful to include"*; `replace` and `search_terms` were untouched. `_token_matches` reads the
-  label, so the new word "recommend" made `:acq` match `recom`/`recommend` — `:rna`'s declared
-  terms — and both went ambiguous → `None`. Patched by adding `"recom": ":rna"` and
-  `"recommend": ":rna"` to `_AMBIGUOUS_TERM_OWNER`. **`nix/home.nix` untouched: the operator's
-  label stands as written.**
-- **`#1252` → `de677683`** (this session) — the structural fix. In `_attribute`, on the
-  **already-ambiguous branch only**, candidates are first narrowed to those reaching the term
-  through their **declared** interface (trigger or `search_terms`) before the naming tie-break
-  and the owner table. `_term_matches_declared` is `_term_matches` with the label switched off
-  — one keyword-only flag, not a second copy of the substring logic. **The picker is
-  untouched**: `_term_matches` still reads labels, so snippets stay findable by description.
-
-🔴 **`#1247`'s two table rows were DELETED by `#1252`, because they became structurally
-unreachable** — for `recom`/`recommend` the declared-narrowed set is a single snippet, so
-`_attribute` returns *before* the owner lookup. `_AMBIGUOUS_TERM_OWNER` is now `ask` and
-`clarify` only; those stay because `:acq` **and** `:dacq` both DECLARE `ask` in
-`search_terms`, so precedence narrows nothing and the table is still what decides. The re-add
-condition is written into the source (`:acq` declaring `recom` in its own `search_terms`).
-
-**Measured, not asserted** — 26 snippets, **735 terms** (every `search_term`, label word,
-trigger name ±`:`, the four pinned test tables, and every prefix) resolved before and after:
-**523 → 564, LOST 0 · REPOINTED 0 · picker-row diffs 0 · GAINED 41.** Instrument validated
-both ways: identical modules → 0 on every counter; a deliberately broken module → exactly 4
-diffs (`ask`/`clarify`/`recom`/`recommend`, the owner table's entire live effect).
-
-**Independently reproduced (not taken from the agent's report):** with the two rows deleted,
-`nix develop $DEVRC -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest <branch>/scripts/collector/keylog/tests
-<branch>/scripts/session-analysis/tests/test_espanso_usage.py -q -p no:cacheprovider` → **190
-passed**, including `test_live_existing_resolutions_not_made_ambiguous` — the test that had
-reddened `main`. Owner table and `nix/home.nix` diff also verified by content on `origin/main`.
-
-**Gate:** all three tiers green on the merged tree at base `2c6b2ac9` (which had not moved at
-merge time) — sandbox `nix build …#pytests` `RESULT: PASS` 20,599 passed / 0 failed; sandbox
-`…#nodetests` `RESULT: PASS` 1,449; dev-host `gate.sh --tier both` `GATE: RESULT=PASS`. Built
-one at a time, redirected, never piped.
-
-⚠ **`#1252` merged WITHOUT an adversarial audit — operator's explicit call.** Recorded so it
-is not later mistaken for audited work. See rank 5.
-
-**No clawgate task recorded** — `clawgate_handoff.sh resolve` exited **5** (0 tasks). Its
-positive control answered 3 links for another session, so the board was reachable and the 0
-is a real reading; it still cannot prove the session id under test is right. No field written.
+- 🔴 **THE LIVE-CONFIG GUARDS ARE BEING RETIRED — operator decision 2026-09-03, "drop the
+  espanso guards/tests, they keep getting in the way".** In flight as devrc **#1265**
+  (`fix/drop-espanso-live-guards`, head `a319056e`), NOT merged.
+  Removes all **10** live-config-coupled tests from `test_espanso_detect.py` (each read
+  `nix/home.nix` at test time), the dead `_live_base()`/`_live_det()` scrapers, `HOME_NIX`, and
+  four unconsumed tables. **KEEPS the 60 hermetic tests** + all 11 in `test_espanso_triggers.py`
+  + all 76 in `test_espanso_usage.py`. 180 pass.
+- 🔴 **#1262 (`df02571f`) RETIRED ONE OF THE SAME GUARDS INDEPENDENTLY, ~3 MINUTES AFTER this
+  branch's first fix commit** — `test_recommend_terms_resolve_on_the_live_config`, because
+  `a451abc0` removed the collision it read. #1265 is a SUPERSET, not a contradiction; the merge
+  commit `b8ea45df` reconciles them and carries #1262's prose forward with its "nothing was lost /
+  `_EXISTING_RESOLUTIONS` is still green" accounting explicitly marked SUPERSEDED — #1265 deletes
+  that table too.
+- ✅ **`main` IS GREEN.** Re-measured at `79338677`: `test_espanso_detect.py` **69 passed**. #1265's
+  original framing ("main is red and this unbreaks it") was true when written and is WITHDRAWN
+  publicly on the PR. There is no urgency left; the PR stands on whether dropping the remaining
+  nine guards is wanted.
+- 🔴 **WHAT IS LOST, stated rather than hidden.** Nothing enforces the live coupling after #1265:
+  a snippet edit that costs attribution ships silently. The `/espanso-audit` skill was still
+  naming the deleted pytest run as its backstop (the one documented as catching the 2026-08-19
+  `'dispatch'` case `--replay` missed) — corrected in the PR to say the backstop is GONE.
+- **Audit ladder on #1265: 3 rounds, all with findings, none clean yet.** Round 1: 141 dead lines
+  left behind + the skill backstop + 5 dangling refs + a drifted fixture. Round 2: the fix
+  re-mirrored ONE fixture and not its two siblings, and orphaned a pointer in payload code.
+  Round 3: the "these are synthetic" correction swept in `CIVIT_BASE`, which IS an exact mirror;
+  "4 of 7" is 4 of 10; a "no dangling pointer remains" claim that was false.
 
 ## Open investigations — live diagnosis state
 None. Everything opened this session was closed or merged. The single unverified claim is the
@@ -115,6 +100,50 @@ keystroke check below, which is not an investigation — it needs a human at the
   diverges from its direct-trigger count more than other snippets — that is the signal that
   near-noise probes are inflating it.
 
+### ⚠ CORRECTED 2026-09-04 — NOT a telemetry gap. A muscle-memory regression, and smaller
+🔴 **The diagnosis below was WRONG on its mechanism and its fix, and it was merged before anyone
+re-derived it. Read this correction first; the block under it is kept as the retracted reading.**
+- **What is actually true, re-measured on `origin/main`:** `nebula` and `mesh` ARE in both
+  snippets' `search_terms` (`:sshwn` and `:sshln` each declare `['nebula','mesh','remote']`). So
+  `_attribute('nebula')` → `None` is **CORRECT BEHAVIOUR, not a defect**: two snippets legitimately
+  spell the term, the picker shows BOTH rows — which the design calls the feature — and attribution
+  declines to guess. I mistook the documented picker/attribution split for a regression.
+- **The real, smaller issue:** the rename took "workbench" → **rig** and "laptop" → **portable**
+  and dropped `ssh`/`workbench`/`wb` from those two snippets' terms. Measured:
+  `'ssh work nebula'` matches **[]** — zero picker rows, not an ambiguous result — and
+  `'ssh work'` matches `[':sshwl']` alone, so it silently yields the LAN shortcut where it used to
+  offer both workbench variants. The nebula snippets remain reachable by `rig`, `portable`,
+  `nebula`, `mesh`, `remote`.
+- **So the harm is muscle memory, not telemetry.** It bites only someone still typing "work"/"lap".
+  Nothing is unattributed that should be attributed.
+- 🔴 **The FIX named below is a NO-OP** — it says to add `nebula`/`mesh` to `search_terms`, and they
+  are already there. If the old words are wanted back, the edit is to re-add `ssh`/`workbench`/`wb`
+  (and `laptop`) — which would re-create the `'ssh work'` two-row ambiguity the rename removed. That
+  is a trade, not a repair. via: measurement
+
+### ~~🔴 OPEN — a LIVE telemetry gap: the `:ssh*` nebula routes attribute to None~~ (RETRACTED — see above)
+- **Symptom + exact repro:** searching `ssh work nebula` or `ssh lap nebula` in the Ctrl+Space
+  picker records an UNATTRIBUTED fire. Reproduce by building a detector from the real config:
+  scrape `nix/home.nix` for `{ trigger = …; replace = …; label = …; search_terms = […] }` records,
+  then `EspansoDetector(espanso_triggers.load_triggers({"matches": recs}, {"search_shortcut": "CTRL+SPACE"}))`.
+- **Observed (with values):** `_attribute('ssh work nebula')` → **None**; `_attribute('ssh lap
+  nebula')` → **None**; `_attribute('ssh work')` → `':sshwl'`; `_attribute('rig')` → `':sshwn'`;
+  `_attribute('portable')` → `':sshln'`. The labels became *"SSH rig via nebula mesh"* /
+  *"SSH portable via nebula mesh"*, so `rig`/`portable` are the live words that reach those rows
+  and ~~`nebula`/`mesh` are not in either snippet's `search_terms`~~ 🔴 **FALSE — they are in BOTH;
+  that is why the term is ambiguous rather than missing. See the correction above.**
+- **Ruled out:** *"the fixture is right and the probe is wrong"* — reproduced on two independent
+  instruments (a scrape of `nix/home.nix`, and the rendered `~/.config/espanso/match/base.yml`
+  the daemon actually reads), by two different sessions. via: measurement
+- **Ruled out:** *"a guard would have caught this"* — the guard that pinned exactly
+  `('rig', ':sshwn')` and `('portable', ':sshln')` is `test_live_audit_2026_08_19_resolutions`,
+  one of the ten #1265 removes. via: code
+- **Leading hypothesis:** an ordinary label reword took the routing words with it — the
+  2026-08-19 defect class, live. It is NOT caused by #1265; #1265 removes the detector for it.
+- **Next probe:** none needed to confirm. The FIX is one line: add `"nebula"` and `"mesh"` to
+  `:sshwn`'s and `:sshln`'s `search_terms` in `nix/home.nix`, then re-run the probe above and
+  confirm both terms resolve. OPERATOR'S CALL — it is snippet config, not code.
+
 ## Next steps (ranked)
 🔴 Numbering is STABLE — `claim-work --slug-for <this doc> <rank>` derives from it.
 
@@ -143,6 +172,26 @@ keystroke check below, which is not an investigation — it needs a human at the
    assumption about the change — but "edited a fixture so the test passes" is the shape that
    earns a second reader.
    forcing: none — merged and green; this is discretionary assurance, not a live signal.
+6. **Decide #1265: merge or close.** 🔴 The urgency is GONE — `main` is green via #1262, so this
+   is now purely "do you want the remaining nine live guards dropped". Merging accepts that no
+   automated check will ever again catch a snippet edit that costs attribution. Closing keeps the
+   guards and accepts they will redden `main` on the next label reword. Files:
+   `scripts/collector/keylog/tests/test_espanso_detect.py`, `claude/skills/espanso-audit/SKILL.md`.
+   IN FLIGHT: devrc#1265. CLOSES WHEN: the PR is merged or closed with a reason in writing.
+   forcing: user — the operator asked for the guards to be dropped; what changed is only the urgency
+7. ⚠ **CORRECTED 2026-09-04 — the premise was wrong and this item shrinks to a judgement call.**
+   `nebula`/`mesh` are ALREADY in both snippets' `search_terms`, so the "one line" fix was a no-op
+   and `nebula` → None is correct two-row behaviour, not a gap. What actually changed is that
+   `'ssh work nebula'` now matches NOTHING and `'ssh work'` yields the LAN snippet alone, because
+   the rename dropped `ssh`/`workbench`/`wb`. DECIDE: re-add those words (restoring the old muscle
+   memory, and with it the `'ssh work'` ambiguity the rename removed), or leave it and use
+   `rig`/`portable`. CLOSES WHEN: either is recorded here in writing.
+   forcing: none — nothing external is broken; this is a preference about search words
+8. **Finish #1265's audit ladder or stop it on the stated criterion.** Three rounds, three sets of
+   findings, all now comment-accuracy in scaffolding rather than behaviour. If round 4 returns only
+   prose nits, stop on the criterion and record what is left open rather than grinding.
+   CLOSES WHEN: a round returns no findings, or a stop is recorded on the PR with its rationale.
+   forcing: none
 
 ## Gotchas / decisions / dead-ends
 

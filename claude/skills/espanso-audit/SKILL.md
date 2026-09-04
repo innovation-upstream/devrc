@@ -134,11 +134,17 @@ prune anything from a run that printed one.
   invisible to it, so "0 regressions" from `--replay` is a claim about the
   observed stream, not about the config. On 2026-08-19 it reported 0 while a new
   `:pdt` label had taken `'dispatch'` away from `:acq`; the repo's own pinned
-  list caught it. **Always also run
-  `pytest scripts/collector/keylog/tests/test_espanso_detect.py`**, which pins
-  `_EXISTING_RESOLUTIONS` — and add the new snippet's own terms to it.
-  **Pin a term the snippet's LABEL does not spell**, or the guard passes with
-  every `search_terms` entry deleted (three such pins shipped on 2026-08-19).
+  list caught it. 🔴 **THAT BACKSTOP NO LONGER EXISTS.** The live-config guards
+  — `_EXISTING_RESOLUTIONS` and the other nine — were REMOVED 2026-09-03 because
+  they re-broke on every snippet edit. `pytest
+  scripts/collector/keylog/tests/test_espanso_detect.py` still passes and still
+  covers detector LOGIC, but it reads no config, so running it after a snippet
+  edit proves NOTHING about attribution, and there is no longer a list to add
+  the new snippet's terms to. **A 2026-08-19-class regression would now ship
+  silently past BOTH `--replay` and that pytest run.** Until something replaces
+  it, check attribution BY HAND for any term the new snippet's label or
+  `search_terms` spell — `--gate` (step 4) reports ambiguity but does not grade
+  it, so it is not a substitute either.
   🔴 **Neither sweeps the whole input space on its own — that is what
   `--gate` is for** (step 4). It replaced the hand-rolled prefix-universe
   diff this rule used to describe; do not re-derive it by hand.

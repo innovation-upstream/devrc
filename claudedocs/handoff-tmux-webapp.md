@@ -9,8 +9,12 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Ranks 1–8 and 10–16 are ✅ CLOSED. Ranks 17 and 18 are OPEN, and BOTH are CI
-infrastructure — not one item of this feature is outstanding.** 🔴 **Rank 12 closed as REFUTED,
+
+**Ranks 1–8, 10–16, 19 and 20 are ✅ CLOSED. Ranks 17, 18, 21, 22 and 23 are OPEN.**
+🔴 **17 and 18 are CI infrastructure; 21, 22 and 23 are THIS FEATURE and were opened 2026-09-04** —
+21 is the Phase B repo field that rank 19 shipped a seam for and nobody filed, 22 is the audit
+`#667` never got, 23 is three loose follow-ups. The old claim that "not one item of this feature is
+outstanding" was true of ranks 1–18 and is no longer true. 🔴 **Rank 12 closed as REFUTED,
 not fixed** — read its entry before believing the word "complete" anywhere near it. 17 and 18 are
 siblings, NOT one item: different legs, different mechanisms, different closing conditions.
 The live-refresh work (`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as 0.8.21**.
@@ -46,81 +50,35 @@ closed one reports `missing` rather than silently rebinding. The remaining lag i
 host-side feeder (`tmux-snapshot-push.timer` on the workbench, which collects BOTH hosts in one pass
 — if it stops, both go stale together). Terminal WRITE is still `DISABLED (fail-closed)`.
 
-### This session (2026-09-01 → 09-02)
 
-- **Repos:** `devrc` on `main`; `homelab-talos` on `trunk` at `97aed04d`. Both base clones
-  fast-forwarded. ⚠ Both carry **another session's uncommitted WIP** — devrc:
-  `nix/programs/alacritty/default.nix`, `nix/system/apply-tmp-churn-retention.sh`, untracked
-  `scripts/diagnose-*.sh` / `output.txt`; homelab-talos:
-  `clusters/production/flux-system/charts/authelia/authelia.yaml` and an untracked
-  `claudedocs/handoff-limewire-torrent-comps.md`. **Author from a worktree off the mainline.**
-- **DONE, all four PRs merged and content-verified (never by ancestry):**
+### Session 2026-09-03 → 09-04 — the tmux page redesign (operator feedback)
+
+
+- **Branch / PR:** nothing in flight. Everything this session opened is merged and content-verified
+  on its mainline; no branch of mine is outstanding, no claim of mine is held.
+- **The tmux page redesign shipped — three operator-specified items, two PRs:**
 
   | PR | what | squash |
   |---|---|---|
-  | `ZacxDev/homelab-infra#632` | rank 14 — the settle barrier's precondition | `b2fecf49` |
-  | `devrc#1224` | handoff for rank 14 | `f8ade1d7` |
-  | `devrc#1226` | correction: the doc carried a wrong IMPERATIVE one minute after landing | `14b00c3f` |
-  | `ZacxDev/homelab-infra#637` | rank 10 — cadence guards for all four loops, 8 audit rounds | `97aed04d` |
+  | `ZacxDev/homelab-infra#660` | tmux tab regrouped host→PROJECT, `<details>` collapsible, collapse remembered in localStorage, host as a per-card badge | `3d576f19` |
+  | `ZacxDev/homelab-infra#667` | auto-approve moved to a header button + dropdown; ONE `contentWidth()` from phone to ultrawide | `b49db6d1` |
+  | `devrc#1230` | rank 10 done + rank 17 filed; rank 12 corrected in flight | `ef77d9cb` |
+  | `devrc#1238` | rank 11 closed, rank 18 filed | `30b0e7dc` |
 
-- **#637's four checks ALL PASSED before merge.** Two went red first
-  (`clawgate-e2e`, `clawgate-ux-audit`), both from ONE mechanism —
-  `clawgate health check did not pass on port <N> within 15000ms` — and both went green on a re-run
-  from their own PipelineRun spec, same revision, no commit. See rank 17; the diagnosis and its four
-  controls are in the Gotchas.
-- **No claims held** (`tmux-webapp-10` and `-14` released), no worktrees left, `refs/audit` empty.
-- **No `clawgate-task:` field is recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks —
-  with its positive control confirming the board was reachable. 🔴 That is NOT a clean bill of
-  health: a wrong `CLAUDE_CODE_SESSION_ID` also answers 200 with an empty array.
-
-### Session 2026-09-02 (`/resume`) — rank 11 CLOSED, and the feature has no open items left
-
-- **Repos:** `devrc` on `main`; `homelab-talos` on `trunk`, re-synced to `27a09792`. Both base
-  clones still carry **another session's uncommitted WIP** (unchanged, untouched) — author from a
-  worktree off the mainline, as above.
-- **Merged and content-verified (never ancestry):**
-
-  | PR | what | squash |
-  |---|---|---|
-  | `devrc#1230` | rank 10 done + rank 17 filed; amended in-flight to correct rank 12 | `ef77d9cb` |
-  | `ZacxDev/homelab-infra#640` | rank 11 — the archive drawer's open state survives a swap | `27a09792` |
-
-- 🔴 **THE DRIFT THAT STARTED THIS SESSION IS THE ONE THIS DOC KEEPS RE-CREATING.** `/resume`'s
-  reconciler correctly reported the working-tree doc "identical to `origin/main`" — and it was
-  STALE anyway, because the rank-10 update was sitting in an unmerged `devrc#1230` for eight hours
-  with both required checks already green. **"Identical to origin/main" is not "current" when the
-  update is in flight.** The reconciler cannot see an open PR against the doc; only
-  `gh pr list --state open` can. Rank 12 had been closed-as-refuted a full day before #1230 was
-  written and #1230 still called it OPEN, so the stale line was about to land a THIRD time.
-- **Rank 12 corrected in flight rather than after the fact.** #1230 was already green; amending it
-  re-queued both required checks (~25 min) and risked the documented wedged-`pending` state. Paid
-  deliberately, because landing a status line already known to be false is how this exact drift
-  propagates.
-- **Rank 8a re-measured GREEN — the round trip, not the labels.** Server 0.8.21, workbench client
-  0.8.21, laptop client 0.8.21, and `view create` on the LAPTOP → `view ls` on the WORKBENCH →
-  `view rm`: `[] → 1 (id 9) → []`. **Third consecutive session to refute the "both clients are
-  stale again by construction" prediction on test.** Still RECURRING; still do the round trip.
-- **Claim `tmux-webapp-11` taken and RELEASED**; both worktrees removed and pruned.
-
-### 🔴 Not done, and deliberately named rather than left implicit
-
-- **`/audit-pr` was NOT run on `#632`, `devrc#1224`, `devrc#1226` or `#640`.** Only #637 got a
-  ladder. #632 in particular touches the same file family whose predecessor took six audit rounds.
-- 🔴 **`#640` was merged with ALL FOUR CHECKS PENDING on the merged sha, by operator decision.**
-  Nobody holds a CI verdict for `3e08acaf`. The evidence that the pre-rebase red was not that diff
-  is real and is recorded under rank 18 — but it is evidence about a DIFFERENT sha, and it is not
-  the same thing as a green.
-- ⚠ **`npx prettier` reformatted the whole of `layout.spec.ts`** (271 insertions) on first attempt.
-  There is no prettier config in `e2e/`, prettier is not a devDependency, and no CI leg runs it —
-  `npx` had fetched a default-config copy and applied a style the repo does not use. Reverted and
-  hand-formatted to 71 additions. **Do not run a formatter this repo does not itself install.**
-- **#632 was merged over a RED `tekton/gitops-validate`** on two Python tests that failed on two
-  other revisions independently. That was the right call on the evidence, but **"gitops-validate is
-  green for #632" is a claim nobody can make** and must not be inferred later from the merge.
-- ~~**Rank 11 never started.**~~ **SUPERSEDED — rank 11 was built and merged on 2026-09-02
-  (`#640`).** Struck rather than deleted, because it is the shape this doc keeps getting wrong: a
-  "not done" bullet is written in the present tense about ONE session and then reads as live
-  forever. Rank 17 was still only filed as of that session; 18 did not exist yet.
+- **`#660` took a four-round audit ladder** (findings 7 → 5 → 2 → 0 executable, never a 🔴). What it
+  caught, all measured: a live htmx double-generation bug silently DELETING stored collapses; a
+  prune that could be suspended forever; a prune arm with zero coverage at BOTH tiers; and a false
+  ordering mechanism that round 1 itself had introduced. Claims blocks are on the PR.
+- **`#667` was merged WITHOUT an audit** — see rank 22. It has 0 `audit-claims` blocks against
+  `#660`'s 3.
+- **Deploy status, stated separately from merge:** both PRs are merged to `trunk` and
+  content-verified there. **Neither has been deployed** — no image was built or rolled out this
+  session, so the live pod does not carry either change. `clawgatectl health` is the only authority
+  on what is live.
+- **Verification tiers, and what they did not cover:** `go test ./...` 20 ok / 0 FAIL and the full
+  Playwright suite (167 ran-ok / 2 skipped, corroborated three ways) were run on each PR's head.
+  `internal/store` and `internal/tmux` report `ok` by SKIPPING without `CLAWGATE_TEST_DATABASE_URL`
+  — that `ok` is not evidence. No nix sandbox tier exists for this repo.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -267,6 +225,7 @@ From the analyze-service index (**recall — verify before relying on**):
   two different actions behind one button; design them explicitly.
 
 ## Next steps (ranked)
+
 
 🔴 **Ranks are STABLE and are NOT renumbered when an item completes** — the rank is half a claim's
 identity (`claim-work --slug-for claudedocs/handoff-tmux-webapp.md <rank>`), so re-ranking silently
@@ -536,6 +495,69 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     forcing: gate — with 17 this makes three of the four clawgate checks capable of reds that are
     not about the change, and this one is the worst of the three to dismiss: unlike 17 it can fail
     on a package a Go diff genuinely touches, so "it is just the flake" will eventually be wrong.
+
+19. ✅ **DONE 2026-09-03 — `ZacxDev/homelab-infra#660`, squash `3d576f19`.** The tmux tab groups by
+    PROJECT, not host: `<details>` per group, collapse remembered per project in localStorage, host
+    as a per-card badge, groups ordered by their most urgent member (reusing `triageRank`
+    unforked), and a group holding a WAITING window renders open **display-only** — the operator's
+    stored collapse is never overwritten and returns when the window stops waiting.
+    🔴 **`label` IS A TRAP AND THE NEXT READER WILL REACH FOR IT: 74 of 93 live windows carry
+    `label_source: codename`** (Gold, orange, wheat…), so grouping on `label` yields ~20 codename
+    pseudo-groups. `path` is 93/93 populated and yields 15 real groups. `tmuxSessionName` is not the
+    project either — one session held windows from several repos.
+    All derivation sits behind ONE `projectOf()` seam: `repo` field if present → leaf of `path` →
+    `Other`. The `repo` branch is tested but DEAD until rank 21 lands.
+    Four audit rounds; claims blocks on the PR.
+    forcing: none
+20. ✅ **DONE 2026-09-04 — `ZacxDev/homelab-infra#667`, squash `b49db6d1`.** Auto-approve is a header
+    button + body-level dropdown (`#auto-approve-popover`, reusing the existing `hidden fixed
+    right-3 top-16` pattern); the shell takes ONE width from `contentWidth()`, used by both the tab
+    container and the header row so they cannot drift, capped at `2xl:max-w-[96rem]` (1920 and 3440
+    both render 1536px centred, deliberately — an unbounded column gives ~3400px lines).
+    🔴 **THE LOUD "auto-approve ALL is ON" BAR STAYS IN PAGE FLOW, BY DESIGN.** Only the per-project
+    list moved into the dropdown. Folding the global bar in would hide, behind a click, the fact
+    that every request is being auto-approved. The header button carries an amber count so "on" is
+    legible without opening it. Do not "tidy" this later.
+    It also fixed a PRE-EXISTING funnel-walk defect (see rank 23's history).
+    forcing: none
+21. **Phase B — publish an authoritative `repo` per window from the OWNING host.** Repo: `devrc`,
+    `scripts/session-manager` (the producer), consumed by `internal/api/tmux_ui.go` +
+    `projectOf()` in `homelab-infra`. Rank 19 shipped the seam on the explicit understanding that
+    this follows; it has not been started, and nothing else records it.
+    🔴 **IT CANNOT BE DONE IN CLAWGATE OR IN SESSION-MANAGER'S AGGREGATION STEP.** `label_from_path`
+    already documents why: *"`path` is a STRING FROM ANOTHER MACHINE — half of these rows come off
+    the laptop over ssh — so a local `git rev-parse` would silently answer about whatever happens to
+    sit at that path on THIS host, or about nothing."* Only the per-host collection step can resolve
+    it; `scripts/tmux-autoname-session.sh` already does exactly that, on the machine that owns the
+    directory. Clawgate is a pod and cannot stat either host.
+    **Visible consequence until it lands:** a git worktree forms its own project group
+    (`ht-r11-930492` sits apart from `homelab-talos`), which on a worktree-heavy box is most of the
+    long tail. Do NOT paper over it with a path heuristic — `ht-r11-930492 → homelab-talos` is not
+    derivable from the string, and guessing is worse than the honest split.
+    **Closing condition:** a window carries `repo` on the wire, `projectOf()`'s first branch stops
+    being dead, and two worktrees of one repo group together in the UI.
+    forcing: user — the operator chose the two-phase split explicitly; this is the half that was
+    promised and not delivered.
+22. **Run `/audit-pr 667`.** Repo: `ZacxDev/homelab-infra`. It was merged on verification alone —
+    both tiers green, three-way e2e agreement, the safety property checked by reading — but never
+    adversarially audited. `#660` carries 3 `audit-claims` blocks; `#667` carries **0**. It is the
+    higher-risk of the two by surface: it rewrites the page shell every tab loads and ships JS that
+    owns persisted operator state, and it touches the auto-approve controls, which are a safety
+    surface. Post-merge, so a finding becomes a follow-up PR rather than a merge block.
+    **Closing condition:** a round returns no findings that need fixing, or the findings are fixed
+    or filed.
+    forcing: none
+23. **Three loose follow-ups from the tmux page work, none filed anywhere else.**
+    (a) `task_detail.go:87,170` and `task_not_found.go:53` still carry the old `max-w-xl …
+    lg:max-w-5xl` — a one-line `contentWidth()` adoption each, deliberately scoped OUT of `#667`
+    because they are separate routes rather than tabs. `agents_detail.go`/`operator.go` must NOT be
+    touched: their `max-w-xl` pairs with `lg:pl-72`, a sidebar layout that breaks if widened.
+    (b) The funnel walk still skips `auto-approve-armed` — see Open investigations.
+    (c) Clawgate task **#495** (clock-skew freshness trade) is open with explicit accept-or-dismiss
+    criteria; it is deliberately NOT a defect.
+    **Closing condition:** (a) merged, (b) either root-caused or recorded as accepted, (c) #495
+    closed by either of its two criteria.
+    forcing: none
 
 ## Open investigations — live diagnosis state
 
@@ -1069,6 +1091,34 @@ previous round's fix — three times consecutively.
 payload files at all. Two consecutive zero-payload rounds ⇒ the ladder had left the PR and was
 auditing scaffolding it had itself written. The final comment corrections were made directly rather
 than as a round 4, because re-auditing a comment edit is the loop the gate exists to stop.
+
+### The ux-audit funnel walk still SKIPS `auto-approve-armed`, and the arming failure is unexplained
+
+- **Symptom + exact repro:** `make ux-audit` (or `tekton/clawgate-ux-audit`) on any recent revision.
+  The funnel walk logs `ux-audit SKIP auto-approve-armed (/): could not reach the state:
+  expect(locator).toBeVisible() failed / Locator:
+  locator('#auto-approve-banner').getByText('Auto-approve ALL is ON') / Error: element(s) not found`.
+  The walk then CONTINUES — that view is non-core, record-and-skip.
+- **Observed (with values):** present on `clawgate-ux-audit-pnnkw` (trunk `29504948`, BEFORE the tmux
+  page work) and again on the post-fix re-run `clawgate-ux-audit-rerun-9nntr` (`963f768c`), which
+  reported `12 view-rows, 1 skipped` with the funnel test itself PASSING. So the arming failure
+  survives `#667`'s walk fix and predates it.
+- **Ruled out:** that `#667` introduced it — the same skip appears on trunk `29504948`, which
+  predates the PR. via: measurement
+- **Ruled out:** that it is the rank-17 health-check budget — that failure reads `clawgate health
+  check did not pass on port <N> within 15000ms` and kills the run before the walk; this one occurs
+  with the budget cleared (`captured one view in 934ms`) and lets the walk continue. via: measurement
+- **Ruled out:** that the arming controls were removed by `#667` — `[data-global-aa]`
+  (`components.go:1258`), the `aria-label="Turn off auto-approve all"` button (`:1275`) and
+  `[data-global-aa-control]` as a `Details`+`Summary` (`:1308`) all still render. via: code
+- **Leading hypothesis:** the arming POST lands but the banner text is not observable when the walk
+  reads it — i.e. an observation race on `#auto-approve-banner`, not a failure to arm. UNPROVEN.
+  🔴 If the POST *does* land, the server is left ARMED, which is exactly the state `#667`'s disarm
+  reconciliation now cleans up unconditionally — that is why the walk survives it.
+- **Next probe:** instrument the arming step the way the disarm step now is — print the SERVER's
+  answer (`GET /ui/auto-approve-banner`) beside the walk's DOM-derived one, immediately after the
+  duration click, and compare. The disarm probe shape is already in
+  `e2e/ux-audit/clawgate-funnel.audit.ts`; reuse it rather than inventing one.
 
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
@@ -1953,7 +2003,57 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
   arms now carry it; the other two are bare because nothing has been measured for them, and
   inventing a shape would be the same defect one level up.
 
+- 🔴 **"IDENTICAL TO `origin/main`" IS NOT "CURRENT" WHEN THE UPDATE IS IN FLIGHT.** `/resume`'s
+  reconciler correctly reported this doc identical to `origin/main` and it was STALE anyway: the
+  rank-10 update sat in an unmerged `devrc#1230` for eight hours with both required checks already
+  green. The reconciler cannot see an open PR against the doc; only `gh pr list --state open` can.
+  Rank 12 had been closed-as-refuted a full day before #1230 was written and #1230 still called it
+  OPEN, so the stale line was about to land a third time. **Sweep for open PRs against the handoff
+  before trusting a freshness verdict about it.**
+- 🔴 **`audit-dispatch.py <n>` RESOLVES AGAINST THE CWD'S REPO AND WILL SILENTLY AUDIT THE WRONG
+  PR.** Run from `devrc`, `audit-dispatch.py 660` assembled a full brief for
+  `innovation-upstream/devrc#660` — an unrelated PR about a skill-body byte count — whose WHERE TO
+  WORK section asserted the PR lived in devrc and prescribed `isolation: "worktree"`. Dispatched, it
+  would have audited the wrong change confidently. **Always pass `--repo owner/name` for a
+  cross-repo PR**; with it, the brief correctly flags CROSS-REPO, forbids the isolation flag, and
+  prescribes NOTHING for the toolchain rather than inventing devrc commands.
+- 🔴 **A CONTROL TABLE THAT COMPARES FAILURE MESSAGES MUST FIRST CHECK EACH RUN REACHED THE SAME
+  STAGE.** I diagnosed a ux-audit red as "a new failure mode unique to this revision" from three
+  runs' messages. Two of those runs had died at the health check and never reached the walk at all —
+  their silence about that failure mode was not evidence of its absence. The defect was pre-existing
+  on trunk. **"Not seen elsewhere" and "not reachable elsewhere" are the same observation** — this
+  is the empty-result rule applied to one's own control.
+- 🔴 **A FIXTURE CAN BE STRUCTURALLY TOO SMALL TO EXECUTE THE BEHAVIOUR ITS OWN ASSERTION NAMES.**
+  `sort.SliceStable → sort.Slice` SURVIVED a stability guard because Go's `sort.Slice` uses
+  insertion sort below n=12 — which IS stable — and the fixture had 4 groups / 3 members. **And the
+  obvious repair does not work either: an ALL-EQUAL-rank fixture stays blind at ANY size** (pdqsort
+  has an all-equal fast path; measured byte-identical at 21 and at 40). Interleaved ranks past n=12
+  is the discriminator.
+- ⚠ **One of the two named mutants there is a genuine EQUIVALENT mutant, not a gap.** Once the group
+  comparator became `(Rank, Project)` over project-keyed groups it is a strict total order, so
+  `sort.Slice` and `sort.SliceStable` are provably identical for any input and no fixture can
+  separate them. The guard that replaces it drops the `Project` tie-break instead, and dies.
+- 🔴 **`make e2e` AND `make ux-audit` ARE DIFFERENT TIERS WITH DIFFERENT `testDir`s** —
+  `playwright.config.ts` is `testDir: './tests'`, `playwright.ux-audit.config.ts` is
+  `testDir: "./ux-audit"`. A commit touching only the walks is STRUCTURALLY INVISIBLE to `make e2e`,
+  and a green there says nothing about them. Run both, and say which you ran.
+- 🔴 **The clawgate e2e harness rebuilds the Go binary every run but builds `web/static/app.css`
+  ONLY WHEN MISSING.** So a mutant that swaps one Tailwind utility for another reads SURVIVED
+  because the new rule was never generated. Force a CSS rebuild before trusting any CSS mutation
+  result. (`tailwindcss`, never `tailwindcss_4` — ~42.7 KB with `.h-14` present is correct.)
+- ⚠ **The clawgate task-authoring PreToolUse hook fails CLOSED on a body it cannot read**, which is
+  correct and cost three attempts: it cannot see through `--body "$(cat <<'EOF' …)"` shell
+  substitution or a `$VAR` path. Write the body with the Write tool, pass a LITERAL path to
+  `--body-file`. A blocked command does not run its own heredoc, so the file the next attempt
+  expects will not exist.
+- ⚠ **The editor reported a Go syntax error on three separate occasions that did not exist on the
+  pushed branch** — stale mid-edit worktree snapshots. Always check the branch before believing one.
+  Worth checking anyway: the JS in `internal/ui/*.go` lives in Go raw string literals, where a
+  backtick in a comment terminates the literal — a real near-miss this session, caught by the
+  compiler.
+
 ## How to verify
+
 
 ```bash
 clawgatectl health                 # the LIVE version; never expect a number from this doc
@@ -2063,6 +2163,30 @@ triggers nothing, and a PipelineRun runs the DEPLOYED Task rather than the PR's 
 ```bash
 kubectl -n tekton-ci logs pod/<clawgate-ci-run>-clawgate-ci-pod -c step-hook | grep -E 'floor=|^1\.\.'
 # expect TWO plan lines and floor=34 / floor=31. A single `1..67` means the Task did not reconcile.
+```
+
+```bash
+# 1. Both PRs' content is on trunk (never ancestry — both were squashes)
+git -C ~/workspace/homelab-talos show origin/trunk:containers/clawgate/internal/ui/tmux.go \
+  | grep -c 'func projectOf'                       # 1
+git -C ~/workspace/homelab-talos show origin/trunk:containers/clawgate/internal/ui/components.go \
+  | grep -c 'func contentWidth'                    # 1
+# negative control — a marker that must NOT be there
+git -C ~/workspace/homelab-talos show origin/trunk:containers/clawgate/internal/ui/tmux.go \
+  | grep -c 'ZZZ-NOT-PRESENT'                      # 0
+
+# 2. Both tiers, from containers/clawgate. Build the gitignored CSS FIRST or unrelated tests red.
+nix-shell -p tailwindcss --run "tailwindcss -i web/css/input.css -o web/static/app.css --minify"
+go build ./... && go vet ./... && go test ./...    # 20 ok / 0 FAIL, counted from ^ok / ^FAIL
+./e2e/run.sh --reporter=list                       # 167 ran-ok (passed+flaky) / 2 skipped
+./e2e/run.sh --list <spec>                         # ALWAYS first with any -g filter: a filter
+                                                   # matching nothing prints "No tests found", exit 0
+
+# 3. The walks are a SEPARATE tier and `make e2e` cannot see them
+make ux-audit                                      # funnel 12 view-rows; auto-approve-armed skips
+
+# 4. What is actually DEPLOYED is a different claim from what is merged
+clawgatectl health                                 # the only authority on the live version
 ```
 ## Run this first — the index, one read-only command
 ```bash
