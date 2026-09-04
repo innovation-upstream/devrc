@@ -32,6 +32,7 @@ import json
 import os
 import re
 import shlex
+import pathlib
 import subprocess
 import sys
 import time
@@ -39,6 +40,8 @@ import time
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(_HERE, os.pardir)))
+from testlib import mockbin  # noqa: E402
 _SCRIPT = os.path.normpath(os.path.join(_HERE, "..", "session-manager"))
 
 # session-manager has no .py extension -> load it by explicit path.
@@ -12983,15 +12986,10 @@ def test_the_REAL_probe_reports_a_per_path_failure_rather_than_not_a_repo(
     _, parsed = _r_probe([repo], home)
     assert sm.build_repo_index(parsed, [repo])[repo] == {"repo": "alpha",
                                                          "status": "ok"}
-    nogit = str(tmp_path / "nogit-bin")
-    os.makedirs(nogit)
-    for tool in ("sh", "timeout"):
-        src = _r_which(tool)
-        assert src, tool
-        os.symlink(src, os.path.join(nogit, tool))
+    binp = _r_only_bin(tmp_path, "nogit-bin", "sh", "timeout")
     proc = subprocess.run(list(sm.repo_probe_argv([repo])),
                           capture_output=True, text=True, timeout=60,
-                          env={"PATH": nogit, "HOME": home})
+                          env=_r_path_only(binp, home))
     assert proc.returncode == 0, proc.stderr
     parsed = sm.parse_repo_probe(proc.stdout, [repo])
     assert parsed["measured"] is True, proc.stdout
@@ -13298,6 +13296,39 @@ def _r_which(tool):
                           capture_output=True, text=True).stdout.strip() or None
 
 
+def _r_only_bin(tmp_path, name, *tools):
+    """A PATH holding EXACTLY `tools`, symlinked, and nothing else.
+
+    🔴 PATH IS REPLACED, NOT PREPENDED, AND THAT IS THE MEASUREMENT. The three
+    tests below assert what the probe does when `git` or `timeout` is ABSENT on
+    the owning host, and no amount of PREPENDING can make a binary unfindable —
+    both are on PATH in the sandbox and on the dev host, so a prepending version
+    would measure the environment instead of the script. Pinned in
+    `test_no_real_launchers.py`'s PINNED_PATH_CLOBBERS with that justification;
+    the directory is CONSTRUCTED here, one symlink per named tool, so its
+    contents are asserted rather than audited and no launcher this repo treats
+    as hazardous is reachable through it.
+    """
+    binp = tmp_path / name
+    binp.mkdir()
+    for tool in tools:
+        src = _r_which(tool)
+        assert src, tool
+        os.symlink(src, str(binp / tool))
+    assert sorted(p.name for p in binp.iterdir()) == sorted(tools)
+    return str(binp)
+
+
+def _r_path_only(binp, home):
+    """The env for a probe run whose PATH is REPLACED by `binp`.
+
+    🔴 ONE SPELLING FOR ALL THREE CALL SITES, on purpose. `PINNED_PATH_CLOBBERS`
+    matches a file by ONE needle, so three hand-written dict literals would pin
+    whichever one the scan reached first and leave the others unjustified.
+    """
+    return {"PATH": binp, "HOME": home}
+
+
 def test_the_probe_script_BOUNDS_EACH_git_call(tmp_path):
     """🔴 TWO SWEEP SURVIVORS IN ONE BEHAVIOURAL GUARD. `T="timeout 3"` ->
     `T="timeout 900"` SURVIVED all 743 tests, and so did deleting the
@@ -13311,24 +13342,19 @@ def test_the_probe_script_BOUNDS_EACH_git_call(tmp_path):
     """
     home = str(tmp_path / "home")
     os.makedirs(home)
-    binp = str(tmp_path / "slowbin")
-    os.makedirs(binp)
-    sh, sleep = _r_which("sh"), _r_which("sleep")
-    assert sh and sleep
-    for tool in ("sh", "timeout"):
-        src = _r_which(tool)
-        assert src, tool
-        os.symlink(src, os.path.join(binp, tool))
-    fake_git = os.path.join(binp, "git")
-    with open(fake_git, "w", encoding="utf-8") as fh:
-        fh.write("#!%s\nexec %s 60\n" % (sh, sleep))
-    os.chmod(fake_git, 0o755)
+    binp = _r_only_bin(tmp_path, "slowbin", "sh", "timeout")
+    sleep = _r_which("sleep")
+    assert sleep
+    # 🔴 `mockbin.write_exec` OWNS THE SHEBANG. A hand-written `#!` here is the
+    # `/usr/bin/env` hazard `test_runtime_shebangs.py` exists to catch, and it
+    # is invisible on the dev host — only the nix sandbox has no `/usr/bin/env`.
+    mockbin.write_exec(pathlib.Path(binp) / "git", "exec %s 60\n" % sleep)
 
     bound = sm.REPO_PROBE_GIT_TIMEOUT
     t0 = time.monotonic()
     proc = subprocess.run(list(sm.repo_probe_argv(["/w/one"])),
                           capture_output=True, text=True, timeout=45,
-                          env={"PATH": binp, "HOME": home})
+                          env=_r_path_only(binp, home))
     wall = time.monotonic() - t0
     assert proc.returncode == 0, proc.stderr
     assert wall < bound + 12, (
@@ -13360,16 +13386,11 @@ def test_the_probe_still_ANSWERS_on_a_host_with_no_timeout_binary(tmp_path):
     home = str(tmp_path / "home")
     os.makedirs(home)
     repo = _r_mkrepo(tmp_path / "ws" / "alpha")
-    binp = str(tmp_path / "notimeout")
-    os.makedirs(binp)
-    for tool in ("sh", "git"):
-        src = _r_which(tool)
-        assert src, tool
-        os.symlink(src, os.path.join(binp, tool))
+    binp = _r_only_bin(tmp_path, "notimeout", "sh", "git")
     assert not os.path.exists(os.path.join(binp, "timeout"))
     proc = subprocess.run(list(sm.repo_probe_argv([repo])),
                           capture_output=True, text=True, timeout=60,
-                          env={"PATH": binp, "HOME": home})
+                          env=_r_path_only(binp, home))
     assert proc.returncode == 0, proc.stderr
     parsed = sm.parse_repo_probe(proc.stdout, [repo])
     assert sm.build_repo_index(parsed, [repo])[repo] == {"repo": "alpha",
