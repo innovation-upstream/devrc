@@ -31,12 +31,17 @@ import importlib.util
 import json
 import os
 import re
+import shlex
+import pathlib
 import subprocess
 import sys
+import time
 
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(_HERE, os.pardir)))
+from testlib import mockbin  # noqa: E402
 _SCRIPT = os.path.normpath(os.path.join(_HERE, "..", "session-manager"))
 
 # session-manager has no .py extension -> load it by explicit path.
@@ -274,16 +279,98 @@ SLOTS_FIXTURE = {
 }
 
 
+def repo_out(*answers, home="/home/zach", sentinel=None):
+    """The bytes a host's repo probe actually returns (protocol V2).
+
+    The sentinel line carrying that host's OWN `$HOME`, then one
+    `<1-based index>\\t<git rc>\\t<common dir>` record per input path, in input
+    order. The paths are NOT echoed back — the index is the key, which is what
+    makes a path containing a tab harmless.
+
+    Each positional is either a common-dir string (rc 0), `""`/`None` for "git
+    said this is not a work tree" (rc `REPO_PROBE_RC_NOT_A_REPO`), or an
+    explicit `(rc, common_dir)` pair for the failure statuses.
+
+    🔴 THE rc IS PART OF THE RECORD, AND THAT IS THE FIX IT CARRIES. V1 had no
+    rc, so `git` timing out, `git` being absent and `git` saying "not a work
+    tree" arrived as the same empty string and were all published as the
+    MEASURED status `not_a_repo`.
+
+    🔴 RENDERED, NOT TYPED, for the same reason the window fixtures are: a
+    hand-typed body encodes a reader's belief about the format instead of the
+    format itself.
+    """
+    head = "%s %s" % (sentinel or sm.REPO_PROBE_SENTINEL, home) if home \
+        else (sentinel or sm.REPO_PROBE_SENTINEL)
+    rows = []
+    for i, a in enumerate(answers, start=1):
+        if isinstance(a, tuple):
+            rc, d = a
+        elif a:
+            rc, d = 0, a
+        else:
+            rc, d = sm.REPO_PROBE_RC_NOT_A_REPO, ""
+        rows.append("%d\t%d\t%s" % (i, rc, d or ""))
+    return "\n".join([head] + rows) + "\n"
+
+
+# The DEFAULT probe answers, one per host, matching each host's sorted-unique
+# pane paths. Workbench: `/home/zach/tmp` (no repo), `/home/zach/workspace/
+# repo-alpha` (a repo). Laptop: `/home/zach/workspace/naida` (a repo, and its
+# common dir is the LAPTOP's — the workbench has no such checkout, which is the
+# whole point of resolving on the owning host).
+WORKBENCH_REPO_OUT = repo_out("", "/home/zach/workspace/repo-alpha/.git")
+LAPTOP_REPO_OUT = repo_out("/home/zach/workspace/naida/.git")
+
+
+def classify_call(argv):
+    """`argv` -> `(where, what)`; `where` is local/remote, `what` names the read.
+
+    🔴 ONE WRITER, because two consumers need the SAME answer: `make_runner`
+    decides which fixture output to hand back, and the call-ORDER guards decide
+    which read a recorded argv was. Open-coded twice, they would drift, and the
+    order guard would then be pinning a sequence of its own invention.
+
+    An argv it cannot name RAISES — never a fall-through to `panes`. That
+    default silently answered the repo probe, and later the ledger read, with
+    the panes output while the suite stayed green.
+    """
+    where = "remote" if (argv and argv[0] == "ssh") else "local"
+    joined = " ".join(argv)
+    if "list-windows" in joined:
+        what = "windows"
+    elif "capture-pane" in joined:
+        what = "capture"
+    elif sm.REPO_PROBE_SENTINEL in joined:
+        what = "repo"
+    elif sm.AL.SENTINEL in joined:
+        what = "ledger"
+    elif "list-panes" in joined:
+        what = "panes"
+    else:
+        raise AssertionError(
+            "make_runner cannot classify this argv, so it must not answer "
+            "it: %r. Add an arm to the table — do not let it fall through "
+            "to the panes output." % (list(argv),))
+    return where, what
+
+
 def make_runner(local_panes=WORKBENCH_PANES, local_windows=WORKBENCH_WINDOWS,
                 remote_panes=LAPTOP_PANES, remote_windows=LAPTOP_WINDOWS,
                 local_capture="local captured output\n",
                 remote_capture="remote captured output\n",
+                local_repo=WORKBENCH_REPO_OUT, remote_repo=LAPTOP_REPO_OUT,
                 remote_rc=0, remote_err="", local_rc=0, local_err="",
                 local_windows_rc=None, local_windows_err=None,
                 remote_windows_rc=None, remote_windows_err=None,
                 local_capture_rc=None, local_capture_err=None,
                 remote_capture_rc=None, remote_capture_err=None,
-                calls=None):
+                local_repo_rc=None, local_repo_err=None,
+                remote_repo_rc=None, remote_repo_err=None,
+                local_ledger="", remote_ledger="",
+                local_ledger_rc=None, local_ledger_err=None,
+                remote_ledger_rc=None, remote_ledger_err=None,
+                calls=None, budget=None):
     """A fake `_default_runner` that answers PER SUBCOMMAND. Records argv.
 
     🔴 THE FIXTURE BLIND SPOT THIS EXISTS TO CLOSE. The first version returned
@@ -295,11 +382,30 @@ def make_runner(local_panes=WORKBENCH_PANES, local_windows=WORKBENCH_WINDOWS,
     cannot pin which one a fact came from — so it certifies nothing about that
     fact's provenance, however many tests are green.
 
-    `*_windows_rc` / `*_capture_rc` (and their `_err` twins) default to the
-    host-wide `*_rc` / `*_err`, so every existing call site keeps its exact
-    meaning. Pass them to fail EXACTLY ONE subcommand.
+    `*_windows_rc` / `*_capture_rc` / `*_repo_rc` (and their `_err` twins)
+    default to the host-wide `*_rc` / `*_err`, so every existing call site keeps
+    its exact meaning. Pass them to fail EXACTLY ONE subcommand.
+
+    🔴 THE REPO PROBE IS A FOURTH DISTINGUISHABLE CALL, NOT FOLDED INTO `panes`.
+    It was, briefly, and the fall-through was silent: the probe argv matched
+    neither `list-windows` nor `capture-pane`, so the fixture answered it with
+    the PANES output, `parse_repo_probe` found no sentinel, and every host
+    reported `repos_measured: false` while the suite stayed green. That is
+    exactly the blind spot the paragraph above was written about, one call
+    later. It is keyed on the probe's own sentinel, which is IN the script text.
+
+    🔴 THERE IS NO FALL-THROUGH ANY MORE — AN UNRECOGNISED ARGV RAISES, AND THAT
+    IS WHAT CLOSES THE CLASS. Renaming the sentinel does NOT "break the fixture
+    loudly", which is what this docstring claimed until it was measured: both
+    the script and the classifier read `sm.REPO_PROBE_SENTINEL`, so a rename
+    moves them together and nothing notices — correctly. The defect was never
+    the sentinel; it was that `else: "panes"` gave every argv nobody had thought
+    about a confident wrong answer. The LEDGER read was the fifth such call and
+    was being answered with the panes output at the moment this was written. A
+    `raise` costs the next call an obvious failure instead of a silent green.
     """
     calls = calls if calls is not None else []
+    budget = budget if budget is not None else []
 
     def _or(specific, general):
         return general if specific is None else specific
@@ -317,18 +423,25 @@ def make_runner(local_panes=WORKBENCH_PANES, local_windows=WORKBENCH_WINDOWS,
         ("remote", "capture"): (_or(remote_capture_rc, remote_rc),
                                 remote_capture,
                                 _or(remote_capture_err, remote_err)),
+        ("local", "repo"): (_or(local_repo_rc, local_rc), local_repo,
+                            _or(local_repo_err, local_err)),
+        ("remote", "repo"): (_or(remote_repo_rc, remote_rc), remote_repo,
+                             _or(remote_repo_err, remote_err)),
+        ("local", "ledger"): (_or(local_ledger_rc, local_rc), local_ledger,
+                              _or(local_ledger_err, local_err)),
+        ("remote", "ledger"): (_or(remote_ledger_rc, remote_rc), remote_ledger,
+                               _or(remote_ledger_err, remote_err)),
     }
 
     def runner(argv, timeout):
         calls.append(list(argv))
-        where = "remote" if (argv and argv[0] == "ssh") else "local"
-        joined = " ".join(argv)
-        what = ("windows" if "list-windows" in joined else
-                "capture" if "capture-pane" in joined else "panes")
+        budget.append((list(argv), timeout))
+        where, what = classify_call(argv)
         rc, out, err = table[(where, what)]
         return (rc, "", err) if rc != 0 else (0, out, "")
 
     runner.calls = calls
+    runner.budget = budget
     return runner
 
 
@@ -353,6 +466,42 @@ def test_make_runner_can_distinguish_the_two_subprocesses():
     # capture-pane is a THIRD distinguishable call, not folded into panes
     cap = make_runner(local_capture="scrollback\n")
     assert cap(sm.tail_argv("scratch7:3"), 5)[1] == "scrollback\n"
+    # 🔴 ...and the repo probe is a FOURTH. Both directions, on the SAME runner,
+    # so this cannot pass by the probe silently receiving the panes answer —
+    # which is what it did before this arm existed.
+    probe = sm.repo_probe_argv(["/home/zach/workspace/repo-alpha"])
+    rep = make_runner(local_repo="PROBE-OUT\n")
+    assert rep(list(probe), 5)[1] == "PROBE-OUT\n"
+    assert rep(list(sm.TMUX_PANES_ARGV), 5)[1] == WORKBENCH_PANES
+    # ...and it can fail ALONE, while panes on the same host stay green.
+    only = make_runner(local_repo_rc=1, local_repo_err="probe blew up")
+    assert only(list(probe), 5) == (1, "", "probe blew up")
+    assert only(list(sm.TMUX_PANES_ARGV), 5)[0] == 0
+    # 🔴 ...and the LEDGER read is a FIFTH. It was being answered with the panes
+    # output at the moment the probe arm was added — the same fall-through, one
+    # call along, and no test could see it.
+    led = make_runner(local_ledger="LEDGER-OUT\n")
+    assert led(list(sm.AL.read_argv()), 5)[1] == "LEDGER-OUT\n"
+    assert led(list(sm.TMUX_PANES_ARGV), 5)[1] == WORKBENCH_PANES
+
+
+def test_make_runner_REFUSES_an_argv_it_cannot_classify():
+    """🔴 THE FALL-THROUGH ITSELF, PINNED — and the reason this test exists at
+    all is that a mutation sweep put `what = "panes"` back and NOTHING went red.
+    Of course it did not: every argv `gather` makes today IS classified, so the
+    guard had no live case and read as a defence it was not providing.
+
+    This gives it one. The sixth call — whatever it turns out to be — must make
+    this fixture fail loudly rather than hand back another call's output.
+    """
+    runner = make_runner()
+    with pytest.raises(AssertionError, match="cannot classify"):
+        runner(["tmux", "some-future-subcommand", "-x"], 5)
+    with pytest.raises(AssertionError, match="cannot classify"):
+        runner(["ssh", "zach@10.42.0.100", "tmux some-future-subcommand"], 5)
+    # POSITIVE CONTROL: a recognised argv on the same runner still answers, so
+    # this is a claim about the classifier and not about the fixture being dead.
+    assert runner(list(sm.TMUX_PANES_ARGV), 5)[1] == WORKBENCH_PANES
 
 
 # Captured BEFORE any test monkeypatches sm.gather — otherwise a test that
@@ -1540,11 +1689,27 @@ def test_ssh_uses_batchmode_so_a_prompt_can_never_hang_the_scan():
 
 
 def test_ssh_opts_are_bounded_enough_to_matter():
-    """The pinned values above are only meaningful as a BOUND. Stated at the
-    scope measured: a 2-host scan issues 2 SSH calls, so the worst case the
-    laptop can impose is 2 x SSH_TIMEOUT."""
-    assert sm.SSH_TIMEOUT * 2 <= 30, (
-        "a scan must not be able to block for half a minute on a dead laptop")
+    """The pinned values above are only meaningful as a BOUND, and the bound is
+    on the RUN, not on one call.
+
+    🔴 THIS GUARD USED TO ASSERT `SSH_TIMEOUT * 2 <= 30`, with a docstring
+    saying "a 2-host scan issues 2 SSH calls". That number was wrong when it was
+    written (four: panes, windows, the capture batch, the ledger read) and
+    wronger once the repo probe made it five — and it stayed green through both,
+    because nothing in it was derived from the calls the scan actually makes.
+    A guard whose subject is a count nobody counts is a guard on a literal.
+
+    So the real budget arithmetic lives in
+    `test_the_WORST_CASE_collection_fits_the_pushers_own_cap`, which measures a
+    real `gather` against the cap read out of `tmux-snapshot-push.sh`. What is
+    left here is the per-call claim this test can honestly make: one hung SSH
+    call must not, on its own, eat a meaningful share of that cap.
+    """
+    assert sm.SSH_TIMEOUT <= sm.COLLECT_BUDGET / 4, (
+        "one SSH call must not be able to spend a quarter of the whole "
+        "collection budget")
+    assert sm.LOCAL_TIMEOUT < sm.SSH_TIMEOUT, (
+        "a local call has no network to wait for")
 
 
 # --------------------------------------------------------------------------- #
@@ -1907,7 +2072,9 @@ def test_json_golden_schema_and_values():
     assert set(wb) == {"reachable", "error", "ssh_target", "windows",
                        "live_window_ids", "windows_measured", "windows_error",
                        "tmux_server_id", "tmux_server_id_reason",
-                       "captures_measured", "captures_status", "captures_seen"}
+                       "captures_measured", "captures_status", "captures_seen",
+                       "repos_measured", "repos_status", "repos_error",
+                       "repos_paths", "repos_resolved", "repos_unparseable"}
     assert wb["ssh_target"] is None
     assert wb["live_window_ids"] == ["@41", "@52", "@63"]
     assert wb["windows_measured"] is True
@@ -1946,6 +2113,15 @@ def test_json_golden_schema_and_values():
         "hotkey_display": "Alt+Shift+S",
         "pane_id": "%11",
         "path": "/home/zach/workspace/repo-alpha",
+        # 🔴 THE PROJECT KEY, and it is NOT the label. This row's `label` is
+        # `Grove` (the slot table won tier 1) and its path leaf is
+        # `repo-alpha` — three different strings for three different
+        # questions, so a mutant that sourced `repo` from either of the other
+        # two cannot satisfy this golden. The value comes from the WORKBENCH's
+        # probe answer (`/home/zach/workspace/repo-alpha/.git`), so this
+        # asserts the common dir reached the row through the real parser.
+        "repo": "repo-alpha",
+        "repo_status": "ok",
         "command": "claude",
         "task": "Working on alpha",
         "claude": True,
@@ -6774,6 +6950,13 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
         # it wrong against a live fleet — see `sm.hotkey_display`.
         "hotkey_display",
         "pane_id", "path",
+        # 🔴 The PROJECT key and its provenance. `repo` is the MAIN CLONE,
+        # resolved on the host that owns the directory, so two worktrees of one
+        # repo share it — which `path`'s leaf structurally cannot do.
+        # `repo_status` rides with it because `repo: null` from a probe that
+        # never ran and `repo: null` from a pane outside a work tree are the
+        # same value and completely different facts. See `sm.REPO_STATUSES`.
+        "repo", "repo_status",
         "command",
         "task", "claude", "busy", "age_secs", "age_source", "status",
         "waiting_probable", "waiting_signals", "waiting_status",
@@ -7369,6 +7552,11 @@ def test_the_LEAN_row_field_ledger_fails_when_it_grows_or_shrinks():
         # `Alt+Shift+V`; dropping it here puts the derivation back where it
         # already failed.
         "hotkey_display",
+        # 🔴 The project key. This view's consumer is the one that GROUPS, and
+        # grouping on `label` yields codename pseudo-groups while grouping on
+        # the `path` leaf splits every worktree off on its own. `repo_status`
+        # is provenance, and provenance never goes from this view.
+        "repo", "repo_status",
         "path", "task", "runtime", "claude", "busy", "status", "age_secs",
         "age_source",
         "waiting_probable", "waiting_signals", "waiting_status",
@@ -7557,6 +7745,10 @@ def test_the_LEAN_HOST_field_ledger_fails_when_it_grows_or_shrinks():
     assert set(sm.LEAN_HOST_FIELDS) == {
         "reachable", "error", "windows_measured", "windows_error",
         "captures_measured", "captures_status", "captures_seen",
+        # The repo probe's own provenance — a FOURTH independent measurement,
+        # and the only thing that makes a host of `repo: null` rows readable.
+        "repos_measured", "repos_status", "repos_error",
+        "repos_paths", "repos_resolved", "repos_unparseable",
     }
     assert lean["lean_host_fields"] == list(sm.LEAN_HOST_FIELDS)
     for host, h in lean["hosts"].items():
@@ -11957,3 +12149,2060 @@ def test_the_flag_reaches_gather_and_is_OFF_in_its_signature():
     p = sm.build_parser()
     assert p.parse_args(["scan", "--json"]).pane_preview is False
     assert p.parse_args(["scan", "--json", "--pane-preview"]).pane_preview is True
+
+
+# =========================================================================== #
+# §R — `repo`: THE PROJECT KEY, RESOLVED ON THE HOST THAT OWNS THE DIRECTORY
+#
+# 🔴 THE DEFECT THIS SECTION EXISTS FOR. clawgate's tmux page groups windows by
+# project through ONE seam, `projectOf()`: `repo` if non-empty -> the LEAF of
+# `path` -> `Other`. The producer published no `repo`, so the leaf won every
+# time and a git WORKTREE formed its own project group — `ht-r11-930492` sat
+# apart from `homelab-talos`, which on a worktree-heavy box is most of the long
+# tail. No string operation on `path` can fix that: `ht-r11-930492` is not
+# derivable from `homelab-talos`, and guessing is worse than the honest split.
+#
+# 🔴 AND IT CANNOT BE RESOLVED HERE. `label_from_path`'s docstring already
+# states why: `path` is A STRING FROM ANOTHER MACHINE — roughly half these rows
+# come off the laptop over ssh — so a local `git rev-parse` would answer about
+# whatever happens to sit at that path on THIS host, or about nothing. The
+# resolution therefore travels over the same per-host `run_tmux` seam the tmux
+# calls use, batched into ONE `sh -c` per host.
+# =========================================================================== #
+
+# 🔴 NOT a skipif, the same rule `test_git_repo_isolation.py` states for itself:
+# `git` is in run-tests.sh's REQUIRED_TOOLS and in the flake's pytests check, so
+# its absence is an ERROR. A skipped worktree test reports the closing condition
+# of this whole feature as met without ever measuring it.
+import shutil  # noqa: E402 — beside the guard it exists for
+
+if shutil.which("git") is None:  # pragma: no cover - the gate puts git on PATH
+    raise RuntimeError(
+        "git is not on PATH. Add it to REQUIRED_TOOLS in scripts/run-tests.sh "
+        "and to the pytests check in flake.nix rather than skipping §R.")
+
+_R_GIT_ENV = {
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_AUTHOR_NAME": "repo probe",
+    "GIT_AUTHOR_EMAIL": "repo-probe@example.invalid",
+    "GIT_COMMITTER_NAME": "repo probe",
+    "GIT_COMMITTER_EMAIL": "repo-probe@example.invalid",
+}
+
+
+def _r_env(**extra):
+    e = dict(os.environ)
+    e.update(_R_GIT_ENV)
+    e.update({k: str(v) for k, v in extra.items()})
+    return e
+
+
+def _r_mkrepo(path):
+    """A real committed repo at `path`."""
+    os.makedirs(str(path), exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)],
+                   check=True, capture_output=True, env=_r_env())
+    with open(os.path.join(str(path), "f.txt"), "w", encoding="utf-8") as fh:
+        fh.write("base\n")
+    subprocess.run(["git", "-C", str(path), "add", "f.txt"],
+                   check=True, capture_output=True, env=_r_env())
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "base"],
+                   check=True, capture_output=True, env=_r_env())
+    return str(path)
+
+
+def _r_probe(paths, home, cwd=None):
+    """Run the REAL `repo_probe_argv` through a REAL `sh`, parsed by the REAL
+    parser.
+
+    🔴 THE SHIPPING INSTRUMENT, NOT A COPY OF IT — the same argument
+    `agent_ledger._dir_expr` makes for its `abs_dir` hook: a hand-copied command
+    in a test validates the copy while the one that ships stays unexercised.
+    """
+    proc = subprocess.run(list(sm.repo_probe_argv(paths)),
+                          capture_output=True, text=True,
+                          env=_r_env(HOME=home), cwd=cwd, timeout=60)
+    return proc, sm.parse_repo_probe(proc.stdout, paths)
+
+
+# --------------------------------------------------------------------------- #
+# §R.1 — the pure resolution. Literal expectations, never derived from the impl.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("common_dir,home,repo,status", [
+    # the ordinary case: a clone at /w/devrc
+    ("/home/zach/workspace/devrc/.git", "/home/zach", "devrc", "ok"),
+    # trailing slash: `/w/devrc/.git/` and `/w/devrc/.git` are one directory
+    ("/home/zach/workspace/devrc/.git/", "/home/zach", "devrc", "ok"),
+    # surrounding whitespace is stripped — the probe prints a bare line, but a
+    # value arriving with a stray \r must not become a repo called `.git\r`
+    ("  /home/zach/workspace/devrc/.git  ", "/home/zach", "devrc", "ok"),
+    # 🔴 $HOME IS NOT A PROJECT. The consumer routes an unparented shell to
+    # `Other`; `repo` is the branch it PREFERS, so a name here overrides that.
+    ("/home/zach/.git", "/home/zach", None, "home"),
+    # ...and it is a NORMALISED comparison, not a string equality: a `$HOME`
+    # with a trailing slash is the same directory.
+    ("/home/zach/.git", "/home/zach/", None, "home"),
+    # ...and it is the OWNING host's home. `/root` is home on a host that says
+    # so, and an ordinary directory name on one that does not.
+    ("/root/.git", "/root", None, "home"),
+    ("/root/.git", "/home/zach", "root", "ok"),
+    # not in a work tree at all: the probe prints an empty field
+    ("", "/home/zach", None, "not_a_repo"),
+    (None, "/home/zach", None, "not_a_repo"),
+    ("   ", "/home/zach", None, "not_a_repo"),
+    # 🔴 A BARE REPO's common dir is the repo itself, so its parent is NOT a
+    # clone root. Naming `srv` here would publish a confident wrong group.
+    ("/srv/foo.git", "/home/zach", None, "not_a_repo"),
+    # 🔴 A SUBMODULE's common dir is <super>/.git/modules/<name>, whose parent
+    # is `modules`. Fail soft, never guess.
+    ("/home/zach/workspace/super/.git/modules/sub", "/home/zach", None,
+     "not_a_repo"),
+    # the filesystem root: dirname is `/`, whose basename is empty
+    ("/.git", "/home/zach", None, "not_a_repo"),
+])
+def test_repo_from_common_dir_pure_cases(common_dir, home, repo, status):
+    """🔴 LITERAL expectations, never derived from the implementation — the whole
+    point of a pure seam is that its contract can be written down before the
+    code and read against it afterwards."""
+    assert sm.repo_from_common_dir(common_dir, home) == {"repo": repo,
+                                                         "status": status}
+
+
+def test_repo_from_common_dir_takes_home_with_NO_DEFAULT():
+    """🔴 THE GUARD MUST NOT BE SKIPPABLE BY FORGETTING AN ARGUMENT.
+
+    An earlier draft had `home=None`, which made the `$HOME` branch silently
+    inert at any call site that omitted it — and the call site that matters is
+    inside a loop over every path on a host. A required parameter turns that
+    into a TypeError the suite catches, instead of a wrong group in production.
+    """
+    import inspect
+    p = inspect.signature(sm.repo_from_common_dir).parameters["home"]
+    assert p.default is inspect.Parameter.empty
+    with pytest.raises(TypeError):
+        sm.repo_from_common_dir("/home/zach/workspace/devrc/.git")
+
+
+def test_every_repo_status_a_row_can_carry_is_ENUMERATED():
+    """🔴 The set IS the contract, and `REPO_STATUSES` is where it is written.
+    Both directions: a status the code emits but the tuple does not name is a
+    value no consumer can branch on."""
+    assert set(sm.REPO_STATUSES) == {
+        "ok", "not_a_repo", "home", "no_path", "missing", "unmeasured",
+        "skipped"}
+    for cd, home in [("/home/zach/workspace/devrc/.git", "/home/zach"),
+                     ("/home/zach/.git", "/home/zach"),
+                     ("", "/home/zach"), ("/srv/foo.git", "/home/zach")]:
+        assert sm.repo_from_common_dir(cd, home)["status"] in sm.REPO_STATUSES
+    for path, idx, host_status in [
+            ("", None, "unmeasured"),
+            ("/p", None, "unmeasured"), ("/p", None, "skipped"),
+            ("/p", {}, "unmeasured"),
+            ("/p", {"/p": {"repo": "x", "status": "ok"}}, "unmeasured")]:
+        assert sm.row_repo(path, idx, host_status=host_status)["repo_status"] \
+            in sm.REPO_STATUSES
+
+
+# --------------------------------------------------------------------------- #
+# §R.2 — the batch parser
+# --------------------------------------------------------------------------- #
+def test_parse_repo_probe_reads_the_sentinel_the_home_and_every_row():
+    paths = ["/w/a", "/w/b", "/w/c"]
+    out = sm.parse_repo_probe(
+        repo_out("/w/a/.git", "", "/w/c/.git", home="/home/op"), paths)
+    assert out["measured"] is True
+    assert out["home"] == "/home/op"
+    assert out["answers"] == {
+        "/w/a": {"rc": 0, "common": "/w/a/.git"},
+        "/w/b": {"rc": sm.REPO_PROBE_RC_NOT_A_REPO, "common": None},
+        "/w/c": {"rc": 0, "common": "/w/c/.git"}}
+    assert out["seen"] == 3
+    assert out["unparseable"] == 0
+
+
+def test_parse_repo_probe_with_NO_sentinel_is_unmeasured_not_empty():
+    """🔴 THE POSITIVE CONTROL. A host where nothing resolved and a host whose
+    probe was swallowed produce output with no common dirs in it either way;
+    only the sentinel tells them apart. `measured: False` and EVERY count None,
+    never 0 — a 0 here is the fabricated measurement this file refuses."""
+    out = sm.parse_repo_probe("1\t0\t/w/a/.git\n2\t128\t\n", ["/w/a", "/w/b"])
+    assert out == {"measured": False, "home": None, "answers": {},
+                   "seen": None, "unparseable": None}
+    assert sm.parse_repo_probe("", ["/w/a"])["measured"] is False
+    assert sm.parse_repo_probe(None, ["/w/a"])["measured"] is False
+
+
+def test_a_sentinel_carrying_NO_home_is_refused_as_unmeasured():
+    """🔴 THE HOME IS HALF THE PROTOCOL. Accepting a bare sentinel would leave
+    `repo_from_common_dir` no way to refuse `$HOME` as a project, so the choice
+    would be between publishing a repo called `zach` for every unparented shell
+    and carrying a guard that can never fire. Declining the host is the honest
+    third option."""
+    assert sm.parse_repo_probe(sm.REPO_PROBE_SENTINEL + "\n1\t0\t/w/a/.git\n",
+                               ["/w/a"])["measured"] is False
+    assert sm.parse_repo_probe(sm.REPO_PROBE_SENTINEL + "   \n1\t0\t/w/a/.git\n",
+                               ["/w/a"])["measured"] is False
+    # ...while the SAME bytes with a home ARE measured, so this is a claim about
+    # the home and not about the rest of the line.
+    assert sm.parse_repo_probe(sm.REPO_PROBE_SENTINEL + " /h\n1\t0\t/w/a/.git\n",
+                               ["/w/a"])["measured"] is True
+
+
+@pytest.mark.parametrize("bad,why", [
+    ("no-tab-at-all", "a line with no tab separator"),
+    ("1\t/w/a/.git", "a V1 two-field record — the rc field is not optional"),
+    ("x\t0\t/w/a/.git", "a non-integer index"),
+    ("\t0\t/w/a/.git", "an empty index"),
+    ("1\tx\t/w/a/.git", "a non-integer rc"),
+    ("1\t\t/w/a/.git", "an empty rc"),
+    ("99\t0\t/w/a/.git", "an index past the end of the input list"),
+    ("0\t0\t/w/a/.git", "a 0 index — the protocol is 1-based"),
+    ("-1\t0\t/w/a/.git", "a negative index"),
+])
+def test_parse_repo_probe_counts_a_malformed_line_and_keeps_the_rest(bad, why):
+    """A partial or corrupted reply must cost exactly the lines it corrupts. The
+    1-based index is what buys that: nothing silently re-aligns."""
+    paths = ["/w/a", "/w/b"]
+    raw = "%s /home/op\n%s\n2\t0\t/w/b/.git\n" % (sm.REPO_PROBE_SENTINEL, bad)
+    out = sm.parse_repo_probe(raw, paths)
+    assert out["measured"] is True, why
+    assert out["unparseable"] == 1, why
+    assert out["seen"] == 2, why
+    # the GOOD line still landed, on the RIGHT path
+    assert out["answers"] == {"/w/b": {"rc": 0, "common": "/w/b/.git"}}, why
+
+
+def test_a_path_holding_a_TAB_or_a_NEWLINE_still_round_trips():
+    """🔴 THE PATH IS NEVER ECHOED BACK, and this is why. A `path<TAB>repo` line
+    format is corrupted by either character; a 1-based sequence number is not.
+    tmux hands us `pane_current_path` off a remote machine and nothing
+    validates it."""
+    paths = ["/w/tab\there", "/w/new\nline", "/w/plain"]
+    out = sm.parse_repo_probe(
+        repo_out("/w/x/.git", "/w/y/.git", "/w/z/.git", home="/home/op"), paths)
+    assert out["answers"] == {"/w/tab\there": {"rc": 0, "common": "/w/x/.git"},
+                              "/w/new\nline": {"rc": 0, "common": "/w/y/.git"},
+                              "/w/plain": {"rc": 0, "common": "/w/z/.git"}}
+
+
+def test_build_repo_index_gives_a_SHORT_reply_the_missing_status():
+    """🔴 `missing` IS ITS OWN FACT. The host answered; this path did not. Folding
+    it into `not_a_repo` publishes "the owning host looked and this is not a work
+    tree" about a path the reply never mentioned."""
+    paths = ["/w/a", "/w/b", "/w/c"]
+    parsed = sm.parse_repo_probe(
+        repo_out("/w/a/.git", "", home="/home/op"), paths)  # two rows, three paths
+    assert sm.build_repo_index(parsed, paths) == {
+        "/w/a": {"repo": "a", "status": "ok"},
+        "/w/b": {"repo": None, "status": "not_a_repo"},
+        "/w/c": {"repo": None, "status": "missing"}}
+
+
+def test_row_repos_missing_branch_is_UNREACHABLE_from_gather_and_says_so():
+    """🔴 A GUARD NOBODY CAN REACH IS NOT A DEFENCE — so this pins WHICH of the
+    two spellings of `missing` is live, rather than letting the row-level one
+    read as coverage it does not provide.
+
+    `gather` feeds the probe EVERY pane path on a host and `build_repo_index`
+    fills an entry for each one, so a row's lead path is always a key and
+    `row_repo`'s `missing` branch never executes in the pipeline. The STATUS is
+    still real — `build_repo_index` produces it whenever the reply is SHORTER
+    than its input, which a truncated ssh read genuinely does.
+    """
+    # (a) the row-level branch: reachable only by hand, and it is CORRECT there
+    assert sm.row_repo("/w/a", {}) == {"repo": None, "repo_status": "missing"}
+    # (b) ...and NOT reachable through gather: every lead path is probed. Feed a
+    # host three panes at three paths and assert none comes back `missing`.
+    panes = "\n".join([
+        "%1|1|s|1|w|/w/one|claude|t",
+        "%2|2|s|2|w|/w/two|zsh|t",
+        "%3|3|s|3|w|/w/three|zsh|t"])
+    rep = base_gather(runner=make_runner(
+        local_panes=panes,
+        local_repo=repo_out("/w/one/.git", "", "/w/three/.git")))
+    got = {r["repo_status"] for r in rep["hosts"]["workbench"]["windows"]}
+    assert "missing" not in got, got
+    assert got == {"ok", "not_a_repo"}
+    # (c) the docstring SAYS it is unreachable, so the claim travels with the
+    # code rather than living only here.
+    assert "UNREACHABLE FROM `gather`" in sm.row_repo.__doc__
+
+
+def test_build_repo_index_returns_NONE_for_an_unmeasured_probe():
+    """🔴 NOT a dict of `not_a_repo` entries. That substitution — a failed probe
+    rendered as a completed measurement — is the worst outcome available here,
+    because it reads as "none of these panes is in a repo"."""
+    parsed = sm.parse_repo_probe("garbage with no sentinel\n", ["/w/a"])
+    assert sm.build_repo_index(parsed, ["/w/a"]) is None
+
+
+# --------------------------------------------------------------------------- #
+# §R.3 — 🔴 THE CLOSING CONDITION: two worktrees of one repo carry ONE name.
+#        Against REAL git, through the REAL shipped probe command.
+# --------------------------------------------------------------------------- #
+def test_TWO_WORKTREES_OF_ONE_REPO_RESOLVE_TO_THE_SAME_REPO(tmp_path):
+    """🔴 THIS IS THE FEATURE. Everything else in §R is scaffolding around it.
+
+    A real clone plus two real linked worktrees, resolved by the real
+    `REPO_PROBE_SCRIPT` under a real `sh` and a real `git`. All must carry ONE
+    repo name — the MAIN clone's — though their own directory leaves are
+    different strings, which is exactly the split the operator sees today
+    (`ht-r11-930492` apart from `homelab-talos`).
+
+    🔴 AND THE CONTROL IS IN THE SAME TEST: `label_from_path` — the producer's
+    OTHER path-derived field, and what `projectOf()` falls back to without
+    `repo` — gives all four DIFFERENT answers on the same four paths. Without
+    that line this could pass against an implementation that grouped by nothing.
+    """
+    home = str(tmp_path / "home")
+    os.makedirs(home)
+    main = _r_mkrepo(tmp_path / "ws" / "homelab-talos")
+    wt1 = str(tmp_path / "ws" / "ht-r11-930492")
+    wt2 = str(tmp_path / "ws" / "ht-r19-114477")
+    for wt, br in ((wt1, "r11"), (wt2, "r19")):
+        subprocess.run(
+            ["git", "-C", main, "worktree", "add", "-q", "-b", br, wt],
+            check=True, capture_output=True, env=_r_env())
+    sub = os.path.join(main, "sub", "deeper")   # a plain subdirectory too
+    os.makedirs(sub)
+
+    paths = [main, wt1, wt2, sub]
+    proc, parsed = _r_probe(paths, home)
+    assert proc.returncode == 0, proc.stderr
+    assert parsed["measured"] is True, proc.stdout
+    assert parsed["home"] == home
+    idx = sm.build_repo_index(parsed, paths)
+
+    assert [idx[p]["repo"] for p in paths] == ["homelab-talos"] * 4, (
+        "two worktrees of one repo must carry ONE repo name — that IS the "
+        "closing condition of this feature.\nprobe stdout:\n" + proc.stdout)
+    assert [idx[p]["status"] for p in paths] == ["ok"] * 4
+    # 🔴 THE CONTROL. The field this REPLACES splits them four ways.
+    assert [sm.label_from_path(p, home=home) for p in paths] == [
+        "homelab-talos", "ht-r11-930492", "ht-r19-114477", "deeper"]
+
+
+def test_the_real_probe_answers_not_a_repo_OUTSIDE_any_repo(tmp_path):
+    """The measured-absence half, against real git. A path genuinely not in a
+    work tree comes back `not_a_repo` — and the probe still exits 0, because a
+    missing repo is an ANSWER, not a failure."""
+    home = str(tmp_path / "home")
+    os.makedirs(home)
+    loose = str(tmp_path / "loose")
+    os.makedirs(loose)
+    repo = _r_mkrepo(tmp_path / "ws" / "alpha")
+    paths = [loose, repo]
+    proc, parsed = _r_probe(paths, home, cwd=str(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    idx = sm.build_repo_index(parsed, paths)
+    assert idx[loose] == {"repo": None, "status": "not_a_repo"}
+    # 🔴 THE POSITIVE CONTROL IN THE SAME RUN: a real repo in the same batch
+    # resolves. A probe wired to nothing would answer `not_a_repo` for both.
+    assert idx[repo] == {"repo": "alpha", "status": "ok"}
+
+
+def test_the_real_probe_refuses_to_name_the_OWNING_HOSTS_HOME(tmp_path):
+    """🔴 END TO END, because this guard is what stops every unparented shell
+    from forming a project called `zach`. `$HOME` IS a real repo here and the
+    probe resolves it — the resolver still declines to name it."""
+    home = _r_mkrepo(tmp_path / "home")
+    paths = [home]
+    proc, parsed = _r_probe(paths, home)
+    assert proc.returncode == 0, proc.stderr
+    # the probe DID resolve it, so the refusal below is the resolver's rather
+    # than a failure to measure
+    assert parsed["answers"][home] == {"rc": 0,
+                                       "common": os.path.join(home, ".git")}
+    assert sm.build_repo_index(parsed, paths)[home] == {"repo": None,
+                                                        "status": "home"}
+    # ...and the mirror image: the SAME directory against a DIFFERENT home is an
+    # ordinary repo. So `home` is a comparison, not a name rule.
+    other = sm.build_repo_index(
+        sm.parse_repo_probe(repo_out(os.path.join(home, ".git"),
+                                     home="/somewhere/else"), paths), paths)
+    assert other[home] == {"repo": os.path.basename(home), "status": "ok"}
+
+
+def test_a_HOSTILE_path_cannot_become_shell_syntax(tmp_path):
+    """🔴 PANE PATHS COME FROM tmux ON A REMOTE MACHINE. They are interpolated
+    into nothing: `sh -c <constant script> <argv0> path...` puts them in `"$@"`.
+
+    The canary is a real file the injected command WOULD create. A probe built
+    by string concatenation creates it; this one must not — and the run must
+    still be a clean `exit 0` with well-formed rows.
+    """
+    home = str(tmp_path / "home")
+    os.makedirs(home)
+    canary = str(tmp_path / "PWNED")
+    hostile = ["/w/a;touch %s" % canary,
+               "/w/b$(touch %s)" % canary,
+               "/w/c`touch %s`" % canary,
+               "/w/d'\"; touch %s; #" % canary,
+               "/w/e\ntouch %s" % canary,
+               "/w/f | touch %s" % canary]
+    repo = _r_mkrepo(tmp_path / "ws" / "alpha")
+    paths = [*hostile, repo]
+    proc, parsed = _r_probe(paths, home, cwd=str(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    assert not os.path.exists(canary), (
+        "a pane path became shell syntax — the probe interpolated it into the "
+        "command instead of passing it as a positional parameter")
+    idx = sm.build_repo_index(parsed, paths)
+    for p in hostile:
+        assert idx[p] == {"repo": None, "status": "not_a_repo"}, p
+    # 🔴 THE POSITIVE CONTROL, IN THE SAME BATCH. Without it, a probe that had
+    # simply died on the first hostile path would satisfy every assertion above
+    # by answering `not_a_repo` for everything.
+    assert idx[repo] == {"repo": "alpha", "status": "ok"}
+
+
+def test_the_probe_script_TEXT_is_a_constant_and_never_holds_a_path():
+    """The structural half of the test above: paths are argv, and the script that
+    ships is the same bytes for every call."""
+    a = sm.repo_probe_argv(["/w/one", "/w/two"])
+    b = sm.repo_probe_argv(["/totally/different"])
+    assert a[:3] == ("sh", "-c", sm.REPO_PROBE_SCRIPT)
+    assert b[:3] == ("sh", "-c", sm.REPO_PROBE_SCRIPT)
+    assert "/w/one" not in sm.REPO_PROBE_SCRIPT
+    # 🔴 `$0` IS CONSUMED BY `sh -c`. Without an explicit argv0 the FIRST PATH
+    # becomes the shell's name and is silently dropped from `"$@"`.
+    assert a[3] == "sm-repo-probe"
+    assert list(a[4:]) == ["/w/one", "/w/two"]
+
+
+def test_the_probe_asks_git_for_the_COMMON_dir_not_the_TOPLEVEL():
+    """🔴 THE ONE FLAG THAT MAKES THIS WORK. `--show-toplevel` returns the
+    WORKTREE on a linked worktree, so it cannot group two worktrees at all —
+    the exact bug rank 21 exists to fix, silently reintroduced. And
+    `--path-format=absolute` is what makes `dirname` name the clone root rather
+    than a relative fragment."""
+    assert "--git-common-dir" in sm.REPO_PROBE_SCRIPT
+    assert "--path-format=absolute" in sm.REPO_PROBE_SCRIPT
+    assert "--show-toplevel" not in sm.REPO_PROBE_SCRIPT
+
+
+def test_ssh_wrap_QUOTES_a_hostile_path_for_the_remote_hop():
+    """The second quoting layer. `ssh_wrap`'s `shlex.join` is what stands between
+    a pane path and the REMOTE shell's parser."""
+    hostile = "/w/a;touch /tmp/PWNED"
+    remote = sm.ssh_wrap(sm.repo_probe_argv([hostile]))[-1]
+    # it round-trips: the remote shell re-splits it into exactly our argv
+    assert shlex.split(remote) == list(sm.repo_probe_argv([hostile]))
+
+
+# --------------------------------------------------------------------------- #
+# §R.4 — 🔴 IT RESOLVES ON THE OWNING HOST. The whole reason for the design.
+# --------------------------------------------------------------------------- #
+def test_the_SAME_path_on_TWO_HOSTS_resolves_from_EACH_HOSTS_OWN_answer():
+    """🔴 THE CONSTRAINT THIS FEATURE IS BUILT AROUND, pinned as a RELATIONSHIP.
+
+    One path string, two hosts, two different repos — because the two machines
+    genuinely have different things at that path. A local `git rev-parse` could
+    not produce this at all: it would give BOTH rows the workbench's answer, or
+    neither. So the assertion is that the two rows DISAGREE, which no
+    single-source implementation can satisfy.
+    """
+    shared = "/home/zach/workspace/thing"
+    panes = f"%1|1|s-wb|1|w|{shared}|claude|t"
+    rep = base_gather(runner=make_runner(
+        local_panes=panes, remote_panes=panes.replace("s-wb", "s-lt"),
+        local_repo=repo_out("/home/zach/workspace/thing/.git"),
+        remote_repo=repo_out("/home/zach/clones/other-name/.git")))
+    wb = rep["hosts"]["workbench"]["windows"][0]
+    lt = rep["hosts"]["laptop"]["windows"][0]
+    assert wb["path"] == lt["path"] == shared
+    assert wb["repo"] == "thing"
+    assert lt["repo"] == "other-name"
+    assert wb["repo"] != lt["repo"], (
+        "both hosts resolved to one name — the probe is not running per host")
+    assert wb["repo_status"] == lt["repo_status"] == "ok"
+
+
+def test_each_hosts_HOME_comes_from_ITS_OWN_sentinel():
+    """🔴 "THE OWNING HOST'S `$HOME`, NOT YOURS." A laptop whose home is
+    `/home/other` must have ITS home compared against ITS paths — using the
+    workbench's would let a laptop `$HOME` shell be published as a project."""
+    panes = "%1|1|s|1|w|/home/other|claude|t"
+    rep = base_gather(runner=make_runner(
+        local_panes="%9|9|s2|1|w|/home/zach|claude|t",
+        local_repo=repo_out("/home/zach/.git", home="/home/zach"),
+        remote_panes=panes,
+        remote_repo=repo_out("/home/other/.git", home="/home/other")))
+    wb = rep["hosts"]["workbench"]["windows"][0]
+    lt = rep["hosts"]["laptop"]["windows"][0]
+    assert (wb["repo"], wb["repo_status"]) == (None, "home")
+    assert (lt["repo"], lt["repo_status"]) == (None, "home")
+    # 🔴 THE MUTATION CONTROL: swap the two homes and both become ordinary
+    # repos. So the `home` verdicts above are a comparison against the sentinel
+    # — not a hardcoded `/home/zach`, and not a refusal to resolve.
+    swapped = base_gather(runner=make_runner(
+        local_panes="%9|9|s2|1|w|/home/zach|claude|t",
+        local_repo=repo_out("/home/zach/.git", home="/home/other"),
+        remote_panes=panes,
+        remote_repo=repo_out("/home/other/.git", home="/home/zach")))
+    assert swapped["hosts"]["workbench"]["windows"][0]["repo"] == "zach"
+    assert swapped["hosts"]["laptop"]["windows"][0]["repo"] == "other"
+
+
+# --------------------------------------------------------------------------- #
+# §R.5 — ONE CALL PER HOST. Not one per path.
+# --------------------------------------------------------------------------- #
+def test_the_probe_is_ONE_batched_call_per_host_over_every_unique_path():
+    """🔴 THE COST CONSTRAINT, MEASURED RATHER THAN ASSERTED. `WINDOW_FORMAT`'s
+    comment records that the pusher already makes up to four ssh calls per run
+    with no ControlMaster; this is the fifth. N round trips for N panes was
+    never acceptable — the box carries ~93 live windows.
+
+    Also asserts the argv is DEDUPED and SORTED: two panes of one window share a
+    cwd, and the workbench fixture has exactly that.
+    """
+    calls = []
+    rep = base_gather(runner=make_runner(calls=calls))
+    probes = [c for c in calls if any(sm.REPO_PROBE_SENTINEL in a for a in c)]
+    assert len(probes) == 2, [c[:2] for c in calls]
+    local = [c for c in probes if c[0] != "ssh"][0]
+    remote = [c for c in probes if c[0] == "ssh"][0]
+    # the local call's paths are the tail of the argv, after `sh -c <script> $0`
+    assert local[4:] == ["/home/zach/tmp", "/home/zach/workspace/repo-alpha"]
+    # 🔴 DEDUPED: WORKBENCH_PANES holds THREE panes, two of which share
+    # `/home/zach/workspace/repo-alpha`.
+    assert len(local[4:]) == len(set(local[4:])) == 2
+    assert len(sm.parse_panes(WORKBENCH_PANES)) == 3
+    # the remote call goes through ssh_wrap, so its paths live inside the joined
+    # command string
+    assert shlex.split(remote[-1])[4:] == ["/home/zach/workspace/naida"]
+    assert rep["hosts"]["workbench"]["repos_paths"] == 2
+    assert rep["hosts"]["laptop"]["repos_paths"] == 1
+
+
+def test_the_probe_gets_its_OWN_timeout_budget_not_the_tmux_one():
+    """🔴 FOUND BY A MUTATION SWEEP, WHICH THIS GUARD DID NOT PREVIOUSLY COVER.
+    Replacing `timeout=REPO_PROBE_TIMEOUT` with `timeout=None` SURVIVED a fully
+    green suite: `run_tmux` then falls back to `SSH_TIMEOUT`/`LOCAL_TIMEOUT`, so
+    the probe is still bounded — by the budget sized for ONE `tmux list-panes`.
+
+    That is not a cosmetic difference. This call fans out over every unique path
+    on a host and each `git` is bounded at 3s by the script itself, so on a box
+    with ~93 windows the 5s local budget is reached long before the answer is.
+    The failure mode is silent in exactly the wrong direction: the host times
+    out, goes `repos_measured: false`, and every row loses its repo — a real
+    measurement replaced by an unmeasured one because of a constant.
+
+    Pinned as a RELATIONSHIP (`> SSH_TIMEOUT`), not as a literal, so tuning the
+    number does not require editing a test that would then pin nothing.
+    """
+    seen = []
+    inner = make_runner()
+
+    def recording(argv, timeout):
+        seen.append((list(argv), timeout))
+        return inner(argv, timeout)
+
+    base_gather(runner=recording)
+    probes = [(a, t) for a, t in seen
+              if any(sm.REPO_PROBE_SENTINEL in x for x in a)]
+    assert len(probes) == 2, [a[:2] for a, _ in seen]
+    for argv, timeout in probes:
+        assert timeout == sm.REPO_PROBE_TIMEOUT, argv[:2]
+    # ...and the two tmux calls still get the ORDINARY budget, so this is a
+    # claim about the probe rather than about every call growing one.
+    panes = [(a, t) for a, t in seen if "list-panes" in " ".join(a)]
+    assert panes and all(t != sm.REPO_PROBE_TIMEOUT for _, t in panes)
+    # the budget is BIGGER than a single tmux call's, which is the whole point
+    assert sm.REPO_PROBE_TIMEOUT > sm.SSH_TIMEOUT > sm.LOCAL_TIMEOUT
+
+
+def test_no_repo_makes_ZERO_probe_calls():
+    """The flag is the cost control, so it must remove the round trip — not
+    merely discard the answer."""
+    calls = []
+    base_gather(runner=make_runner(calls=calls), use_repo=False)
+    assert [c for c in calls
+            if any(sm.REPO_PROBE_SENTINEL in a for a in c)] == []
+
+
+def test_a_host_with_no_pane_paths_is_MEASURED_and_makes_no_call():
+    """`{}` and not `None`, the same distinction `captures` draws. We know every
+    pane on this host and none reported a cwd, so there was nothing to ask —
+    calling that `unmeasured` reports a complete enumeration as a failure. And
+    an empty probe would buy a round trip for no paths."""
+    calls = []
+    rep = base_gather(runner=make_runner(
+        calls=calls, remote_panes="%21|1|s|1|w||claude|t"))
+    lt = rep["hosts"]["laptop"]
+    assert lt["repos_measured"] is True
+    assert lt["repos_status"] == "ok"
+    assert (lt["repos_paths"], lt["repos_resolved"]) == (0, 0)
+    assert [c for c in calls
+            if c[0] == "ssh" and sm.REPO_PROBE_SENTINEL in c[-1]] == []
+    # the row still says WHY it has no repo, and it is a fact about the PANE
+    assert lt["windows"][0]["repo"] is None
+    assert lt["windows"][0]["repo_status"] == "no_path"
+
+
+# --------------------------------------------------------------------------- #
+# §R.6 — 🔴 UNMEASURED IS NOT EMPTY. A failed probe must never read as
+#        "these panes are not in repos".
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("kw,host_status", [
+    ({"remote_repo_rc": 1, "remote_repo_err": "ssh: connect timed out"},
+     "error"),
+    ({"remote_repo": "1\t/home/zach/workspace/naida/.git\n"}, "no_sentinel"),
+    ({"remote_repo": ""}, "no_sentinel"),
+    ({"remote_repo": "sh: git: not found\n"}, "no_sentinel"),
+])
+def test_a_failed_probe_is_UNMEASURED_on_every_row_never_not_a_repo(
+        kw, host_status):
+    """🔴 THE SUBSTITUTION THIS REFUSES. A probe that failed, timed out, or came
+    back without its sentinel produces the same empty answer a host of non-repo
+    panes would. Rendering the first as the second publishes "the owning host
+    looked and none of these panes is in a repo" about a look that never
+    happened.
+
+    Note the mirror in the same assertion: the WORKBENCH, whose probe DID
+    answer, still carries a real repo. So this is a per-host verdict, not the
+    run giving up.
+    """
+    rep = base_gather(runner=make_runner(**kw))
+    lt = rep["hosts"]["laptop"]
+    assert lt["repos_measured"] is False
+    assert lt["repos_status"] == host_status
+    assert lt["repos_error"], "an unmeasured host must say WHY"
+    # 🔴 EVERY COUNT IS None, NEVER 0 — a 0 here is a fabricated measurement.
+    assert lt["repos_resolved"] is None
+    assert lt["repos_unparseable"] is None
+    for row in lt["windows"]:
+        assert row["repo"] is None
+        assert row["repo_status"] == "unmeasured", (
+            "a failed probe rendered as a measurement")
+    wb = rep["hosts"]["workbench"]
+    assert wb["repos_measured"] is True
+    assert wb["windows"][0]["repo"] == "repo-alpha"
+
+
+def test_no_repo_reports_SKIPPED_on_the_row_and_the_host_never_not_a_repo():
+    """`--no-repo` means nothing was asked. `skipped` is its own status for the
+    same reason `--no-capture` gets one: "you did not ask" and "asked, found
+    nothing" are different facts."""
+    rep = base_gather(use_repo=False)
+    for host in ("workbench", "laptop"):
+        h = rep["hosts"][host]
+        assert h["repos_measured"] is False
+        assert h["repos_status"] == "skipped"
+        assert h["repos_paths"] is None and h["repos_resolved"] is None
+        assert h["windows"], host
+        for row in h["windows"]:
+            assert (row["repo"], row["repo_status"]) == (None, "skipped")
+
+
+def test_an_unreachable_host_says_the_probe_was_NEVER_ATTEMPTED():
+    """The same reasoning the ledger read uses: a host that did not answer
+    `list-panes` has no measured paths, so a probe could only buy another
+    ConnectTimeout. The reason must SAY the read was not attempted rather than
+    imply it was tried and failed — different facts about the host."""
+    calls = []
+    rep = base_gather(runner=make_runner(calls=calls, remote_rc=255,
+                                         remote_err="ssh: no route to host"))
+    lt = rep["hosts"]["laptop"]
+    assert lt["repos_measured"] is False
+    assert lt["repos_status"] == "unmeasured"
+    assert "not attempted" in lt["repos_error"]
+    assert [c for c in calls
+            if c[0] == "ssh" and sm.REPO_PROBE_SENTINEL in c[-1]] == []
+
+
+def test_a_MEASURED_host_publishes_real_counts():
+    """The other side of every None above. When it IS measured the integers are
+    real, and `repos_resolved` counts only the `ok` rows."""
+    wb = base_gather()["hosts"]["workbench"]
+    assert wb["repos_measured"] is True
+    assert wb["repos_status"] == "ok"
+    assert wb["repos_error"] is None
+    # two unique paths; one is `/home/zach/tmp`, which is not a repo
+    assert (wb["repos_paths"], wb["repos_resolved"]) == (2, 1)
+    assert wb["repos_unparseable"] == 0
+    by_path = {r["path"]: r for r in wb["windows"]}
+    assert by_path["/home/zach/tmp"]["repo"] is None
+    assert by_path["/home/zach/tmp"]["repo_status"] == "not_a_repo"
+    assert by_path["/home/zach/workspace/repo-alpha"]["repo"] == "repo-alpha"
+
+
+# --------------------------------------------------------------------------- #
+# §R.7 — the field reaches the WIRE, in both views, and the flag reaches gather
+# --------------------------------------------------------------------------- #
+def test_repo_and_repo_status_survive_the_LEAN_projection():
+    """🔴 THE PRODUCER'S FIELD LIST IS WHAT ACTUALLY SHIPS THE KEY. The Go
+    decoder is permissive — an absent `repo` decodes to `""` and `projectOf()`
+    silently falls back to the path leaf, which IS the pre-change behaviour. So
+    a `repo` computed and then dropped by the lean projection is an INERT
+    feature that looks shipped."""
+    assert "repo" in sm.LEAN_ROW_FIELDS
+    assert "repo_status" in sm.LEAN_ROW_FIELDS
+    lean = lean_of(base_gather())
+    row = lean["hosts"]["workbench"]["windows"][0]
+    assert row["repo"] == "repo-alpha"
+    assert row["repo_status"] == "ok"
+    assert "repo" in lean["lean_row_fields"]
+    # the host-level discriminant rides along, or a lean reader cannot tell a
+    # host of nulls from a host nobody probed
+    assert lean["hosts"]["workbench"]["repos_measured"] is True
+    assert lean["hosts"]["workbench"]["repos_status"] == "ok"
+
+
+def test_repo_is_JSON_SERIALISABLE_and_present_on_every_row():
+    """The wire, end to end: whatever `--json` writes is what clawgate ingests."""
+    blob = json.loads(json.dumps(base_gather(), default=str))
+    rows = [r for h in blob["hosts"].values() for r in h["windows"]]
+    assert rows, "fixture produced no rows"
+    for r in rows:
+        assert "repo" in r and "repo_status" in r
+        assert r["repo_status"] in sm.REPO_STATUSES
+        # `repo` is a name ONLY on `ok`; every other status carries a null
+        assert (r["repo"] is not None) == (r["repo_status"] == "ok"), r
+
+
+def test_the_flag_reaches_gather_and_the_probe_is_ON_by_default():
+    """🔴 A flag parsed and never passed is the shape that ships an inert
+    feature — the same wiring guard `--pane-preview` carries. And `use_repo`
+    must default to TRUE: the point of rank 21 is that the field IS published,
+    so an opt-in would ship the seam dead a second time."""
+    import inspect
+    assert inspect.signature(sm.gather).parameters["use_repo"].default is True
+    p = sm.build_parser()
+    assert p.parse_args(["scan", "--json"]).no_repo is False
+    assert p.parse_args(["scan", "--json", "--no-repo"]).no_repo is True
+    with open(_SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "use_repo=not args.no_repo" in src, (
+        "main() does not pass the flag through to gather()")
+
+
+def test_fold_windows_takes_the_index_PER_HOST_not_globally():
+    """The seam, pinned structurally. A single module-level index would be the
+    exact bug this feature exists to avoid — one host's answers applied to the
+    other host's paths."""
+    import inspect
+    params = inspect.signature(sm.fold_windows).parameters
+    assert params["repo_index"].default is None
+    assert params["repo_status"].default == "unmeasured"
+    with open(_SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "repo_index=repo_index.get(host)" in src
+
+
+# --------------------------------------------------------------------------- #
+# §R.8 — 🔴 THE SEAMS. Every defect below was found by an adversarial audit of
+#        §R.1-§R.7, and every one of them lived BETWEEN two components that were
+#        each individually correct and individually tested. A guard here pins a
+#        RELATIONSHIP; a guard on either component alone is what let these ship.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("rc,status,why", [
+    (0, "ok", "git answered — the only rc that can carry a name"),
+    (sm.REPO_PROBE_RC_NOT_A_REPO, "not_a_repo",
+     "git's own 'not inside a work tree'. The ONLY measured absence."),
+    (124, "unmeasured", "the per-path `timeout` fired — nobody looked"),
+    (127, "unmeasured", "`git` is not installed on the owning host"),
+    (129, "unmeasured", "this git does not understand `--path-format`"),
+    (sm.REPO_PROBE_RC_NEWLINE, "unmeasured",
+     "the script refused a common dir holding a newline"),
+])
+def test_only_gits_OWN_not_a_repo_rc_reads_as_a_measured_absence(rc, status, why):
+    """🔴 THE SUBSTITUTION §R.6 REFUSES AT HOST GRANULARITY, ONE LEVEL DOWN.
+
+    `d=$(git …) || d=""` collapsed EVERY failure into one empty string, and an
+    empty string was published as the MEASURED status `not_a_repo` — "the owning
+    host looked and this path is not in a work tree" about a look that never
+    happened. Measured twice through the real shipped script (git replaced by a
+    30s sleep; git removed from PATH): a REAL repo reported
+    `{'repo': None, 'status': 'not_a_repo'}`.
+
+    The rc travels in the record so this is a claim about what GIT said, not
+    about what the string looked like afterwards.
+    """
+    paths = ["/w/only"]
+    parsed = sm.parse_repo_probe(
+        repo_out((rc, "/w/only/.git" if rc == 0 else ""), home="/home/op"),
+        paths)
+    assert parsed["measured"] is True, why
+    assert sm.build_repo_index(parsed, paths)["/w/only"]["status"] == status, why
+
+
+def test_a_path_that_could_not_be_measured_is_unmeasured_while_the_HOST_is_OK():
+    """🔴 THE RELATIONSHIP, NOT EITHER COMPONENT. The host's provenance block
+    and the row's status are two writers describing one probe, and the defect
+    was that they disagreed silently: the host said `repos_measured: true,
+    repos_status: ok` (true — the probe DID answer) while a row whose `git` had
+    timed out said `not_a_repo` (false — nothing measured it). Both halves are
+    asserted in ONE test, against ONE run, because separately each was already
+    green.
+
+    The `ok` row in the same host is the positive control: a probe that had
+    simply failed would make every row `unmeasured` and satisfy half of this.
+    """
+    rep = base_gather(runner=make_runner(
+        # workbench paths, sorted: `/home/zach/tmp`, `/home/zach/workspace/repo-alpha`
+        local_repo=repo_out((124, ""), "/home/zach/workspace/repo-alpha/.git")))
+    wb = rep["hosts"]["workbench"]
+    # the HOST is honestly measured — the probe answered
+    assert wb["repos_measured"] is True
+    assert wb["repos_status"] == "ok"
+    by_path = {r["path"]: r for r in wb["windows"]}
+    # ...and the PATH is honestly unmeasured, rather than borrowing the host's ok
+    assert by_path["/home/zach/tmp"]["repo"] is None
+    assert by_path["/home/zach/tmp"]["repo_status"] == "unmeasured", (
+        "a per-path failure to measure was published as a measured absence")
+    # THE POSITIVE CONTROL, same host, same probe, same run
+    assert by_path["/home/zach/workspace/repo-alpha"]["repo"] == "repo-alpha"
+    assert by_path["/home/zach/workspace/repo-alpha"]["repo_status"] == "ok"
+
+
+def test_a_per_path_unmeasured_can_never_inflate_repos_resolved():
+    """`repos_resolved` counts `ok` and nothing else. A per-path `unmeasured`
+    that landed in it would say a look succeeded because a look was attempted.
+
+    Three paths, three DIFFERENT dispositions, so no single wrong rule (count
+    the records, count the non-empty commons, count everything) produces 1.
+    """
+    panes = "\n".join([
+        "%1|9001|s|1|w1|/w/resolved|zsh|t1",
+        "%2|9002|s|2|w2|/w/timedout|zsh|t2",
+        "%3|9003|s|3|w3|/w/notarepo|zsh|t3",
+    ])
+    wins = window_rows(("@1", "1", "s"), ("@2", "2", "s"), ("@3", "3", "s"))
+    rep = base_gather(runner=make_runner(
+        local_panes=panes, local_windows=wins,
+        # sorted unique: /w/notarepo, /w/resolved, /w/timedout
+        local_repo=repo_out("", "/w/resolved/.git", (124, ""))))
+    wb = rep["hosts"]["workbench"]
+    assert wb["repos_paths"] == 3
+    assert wb["repos_resolved"] == 1, "only the `ok` path resolved"
+    got = {r["path"]: r["repo_status"] for r in wb["windows"]}
+    assert got == {"/w/resolved": "ok", "/w/timedout": "unmeasured",
+                   "/w/notarepo": "not_a_repo"}
+
+
+def test_the_REAL_probe_reports_a_per_path_failure_rather_than_not_a_repo(
+        tmp_path):
+    """🔴 THE SAME CLAIM AGAINST THE SHIPPING INSTRUMENT, not the fixture. A
+    REAL repo, resolved by the REAL script under a real `sh` — once with `git`
+    on PATH and once without. Same directory, same script, two different
+    answers, and the failing one must not be the measured word.
+    """
+    home = str(tmp_path / "home")
+    os.makedirs(home)
+    repo = _r_mkrepo(tmp_path / "ws" / "alpha")
+    # POSITIVE CONTROL FIRST: with git present this path IS a repo, so the
+    # `unmeasured` below cannot be "that directory was never a repo anyway".
+    _, parsed = _r_probe([repo], home)
+    assert sm.build_repo_index(parsed, [repo])[repo] == {"repo": "alpha",
+                                                         "status": "ok"}
+    binp = _r_only_bin(tmp_path, "nogit-bin", "sh", "timeout")
+    proc = subprocess.run(list(sm.repo_probe_argv([repo])),
+                          capture_output=True, text=True, timeout=60,
+                          env=_r_path_only(binp, home))
+    assert proc.returncode == 0, proc.stderr
+    parsed = sm.parse_repo_probe(proc.stdout, [repo])
+    assert parsed["measured"] is True, proc.stdout
+    assert sm.build_repo_index(parsed, [repo])[repo] == {
+        "repo": None, "status": "unmeasured"}, (
+            "`git` absent from the owning host published a MEASURED "
+            "`not_a_repo` about a real repo.\nprobe stdout:\n" + proc.stdout)
+
+
+def test_a_common_dir_holding_a_NEWLINE_cannot_forge_ANOTHER_paths_answer(
+        tmp_path):
+    """🔴 THE CLAIM THAT WAS FALSE. Two docstrings said a newline "costs that one
+    path its answer and leaves every other index correct". Demonstrated false
+    end to end with real git, real `sh` and the real `REPO_PROBE_SCRIPT`: a
+    directory named `zzz-attacker\\n1\\t0\\t<other>` makes the probe emit a SECOND
+    record claiming index 1, and index 1 — a genuine repo — resolved to the
+    attacker's string with `repos_unparseable` reporting 0.
+
+    Not a security hole (the paths are the operator's own panes on his own
+    hosts) and precisely for that reason worth closing: a CONFIDENT WRONG repo
+    is worse than the honest per-worktree split this feature replaces.
+
+    The victim sorts FIRST so its genuine record is emitted before the forged
+    one — the ordering under which "first answer wins" alone would still have
+    saved it. The forged index is checked by NAME, not merely by "is not None".
+    """
+    home = str(tmp_path / "home")
+    os.makedirs(home)
+    ws = tmp_path / "ws"
+    wrong = _r_mkrepo(ws / "WRONG-REPO")
+    victim = _r_mkrepo(ws / "aaa-victim")
+    attacker = _r_mkrepo(ws / ("zzz-attacker\n1\t0\t%s" % wrong))
+    paths = [victim, attacker]
+    proc, parsed = _r_probe(paths, home)
+    assert proc.returncode == 0, proc.stderr
+    assert parsed["measured"] is True, proc.stdout
+    idx = sm.build_repo_index(parsed, paths)
+    assert idx[victim] == {"repo": "aaa-victim", "status": "ok"}, (
+        "a directory NAME forged another path's answer.\nprobe stdout:\n"
+        + proc.stdout)
+    # and the attacker's OWN path pays for it, honestly — not `not_a_repo`,
+    # because its common dir was measured and simply cannot be transmitted
+    assert idx[attacker] == {"repo": None, "status": "unmeasured"}
+
+
+def test_a_DUPLICATE_index_is_unparseable_and_the_FIRST_answer_stands():
+    """The parser-side half of the defence above, at the record level. A plain
+    assignment let the LAST record for an index win, which is how a forged
+    record placed after a genuine one replaced a real repo — and `unparseable`
+    reported 0, so nothing in the payload said anything was wrong."""
+    paths = ["/w/a", "/w/b"]
+    raw = "%s /home/op\n1\t0\t/w/real/.git\n1\t0\t/w/forged/.git\n2\t0\t/w/b/.git\n" \
+        % sm.REPO_PROBE_SENTINEL
+    out = sm.parse_repo_probe(raw, paths)
+    assert out["answers"]["/w/a"] == {"rc": 0, "common": "/w/real/.git"}
+    assert out["unparseable"] == 1, "a duplicate index must be COUNTED, not silent"
+    assert out["seen"] == 3
+    # the untouched index is unaffected — this costs exactly the forged record
+    assert out["answers"]["/w/b"] == {"rc": 0, "common": "/w/b/.git"}
+
+
+@pytest.mark.parametrize("tail", ["", "\n"], ids=["lone", "then-newline"])
+@pytest.mark.parametrize("sep", sm.REPO_PROBE_RECORD_BREAKERS,
+                         ids=lambda c: "U+%04X" % ord(c))
+def test_the_parser_splits_on_NEWLINE_ONLY_never_str_splitlines(sep, tail):
+    """🔴 A READER THAT SPLITS ON MORE CHARACTERS THAN THE WRITER JOINED WITH IS
+    A FORGING SURFACE BY ITSELF. The script's record separator is `\\n`;
+    `str.splitlines()` also breaks on every character in
+    `REPO_PROBE_RECORD_BREAKERS`, any of which can appear in a directory name.
+    With `splitlines()` the string below becomes TWO records — and the forged
+    index is a LATER one, which is the case the duplicate-index guard cannot
+    cover: a forged record for an index whose genuine record has not arrived yet
+    lands FIRST and wins, and the real one is then rejected as the duplicate.
+
+    🔴 THE `sep` LIST IS DERIVED FROM THE CONSTANT, NOT TYPED. The hand-typed
+    version covered seven of the nine breakers — `\\x1d` and `\\x1e` were never
+    exercised — so the parametrisation claimed a coverage it did not have.
+    Adding a breaker to the constant now widens this test by itself.
+
+    🔴 AND `tail` IS THE HALF THIS TEST STRUCTURALLY COULD NOT SEE. It was
+    parametrised over SINGLE characters, so the two-character sequence
+    `<breaker>\\n` was outside its reach entirely — and that sequence was the
+    live hole: the `\\n` ends the line, so per-line refusal saw and refused only
+    the FIRST fragment while the SECOND was a well-formed record free to claim
+    any index. Measured before the fix with `sep="\\r"`, `tail="\\n"`: `/w/c`
+    resolved to `{'repo': 'forged', 'status': 'ok'}`.
+
+    Both arms now assert the same shape, because the fix is one rule for both: a
+    record carrying a breaker POISONS THE REMAINDER OF THE REPLY. ⚠ For the
+    `lone` arm that is a DELIBERATE WIDENING — before it, a lone breaker cost
+    only its own path and `/w/c` still resolved. The cost is bounded and honest
+    (`missing`: a measured host with unmeasured paths), and it is the only rule
+    with no evadable spelling — see the adjacency test below.
+
+    The script's own newline guard cannot help here: these are not newlines, so
+    it passes them through as data, exactly as it should.
+    """
+    paths = ["/w/a", "/w/b", "/w/c"]
+    # `/w/b` is answered BEFORE the corrupted record on purpose: it is the
+    # positive control, and a control placed after the poison would be dropped
+    # by the very rule under test and would prove nothing.
+    raw = ("%s /home/op\n"
+           "2\t0\t/w/b/.git\n"
+           "1\t0\t/w/a/.git%s%s3\t0\t/w/forged/.git\n"
+           "3\t0\t/w/c/.git\n"
+           % (sm.REPO_PROBE_SENTINEL, sep, tail))
+    out = sm.parse_repo_probe(raw, paths)
+    idx = sm.build_repo_index(out, paths)
+    assert idx["/w/c"] == {"repo": None, "status": "missing"}, (
+        "U+%04X (tail=%r) forged another path's answer: %r"
+        % (ord(sep), tail, out["answers"]))
+    # index 1 pays for its own corrupted record, and does NOT get a confident
+    # name out of it either.
+    assert idx["/w/a"] == {"repo": None, "status": "missing"}
+    # POSITIVE CONTROL: the record that arrived BEFORE the corruption still
+    # lands, so this is a claim about the separator and not about the parser
+    # giving up on every reply that contains one.
+    assert out["answers"]["/w/b"] == {"rc": 0, "common": "/w/b/.git"}
+    assert idx["/w/b"] == {"repo": "b", "status": "ok"}
+    # ...and every refused line is COUNTED. `then-newline` splits the corrupted
+    # record across two lines, so it costs one more than `lone` — a pair of
+    # numbers no single hardcoded constant can satisfy.
+    assert out["unparseable"] == (2 if tail == "" else 3), out
+
+
+def test_a_CRLF_PAIR_cannot_forge_a_LATER_index():
+    """🔴 THE EXACT MEASURED FORGE, PINNED BY VALUE. The parametrised guard above
+    covers this shape, but this reply is the literal one that was measured
+    landing a wrong answer, so pinning it here means a future re-parametrisation
+    cannot quietly drop it.
+
+    Before the fix: `/w/c` -> `{'repo': 'forged', 'status': 'ok'}` with
+    `unparseable: 2`. `\\r\\n` is TWO characters — the `\\n` closes the line, so
+    the breaker guard rejected the `\\r` fragment and then ACCEPTED the next
+    line, a well-formed record claiming index 3 and winning on first-come over
+    the genuine index-3 record two lines later.
+    """
+    paths = ["/w/a", "/w/b", "/w/c"]
+    raw = ("%s /home/op\n1\t0\t/w/a/.git\r\n3\t0\t/w/forged/.git\n"
+           "2\t0\t/w/b/.git\n3\t0\t/w/c/.git\n" % sm.REPO_PROBE_SENTINEL)
+    out = sm.parse_repo_probe(raw, paths)
+    idx = sm.build_repo_index(out, paths)
+    assert "forged" not in repr(out["answers"]), out["answers"]
+    for p in paths:
+        assert idx[p] == {"repo": None, "status": "missing"}, (p, idx[p])
+    # POSITIVE CONTROL on the fixture: the SAME reply with the CR record removed
+    # is an ordinary one that resolves every path, so the verdict above is about
+    # the CR and not about a malformed test string.
+    clean = raw.replace("1\t0\t/w/a/.git\r\n3\t0\t/w/forged/.git\n",
+                        "1\t0\t/w/a/.git\n")
+    ok = sm.build_repo_index(sm.parse_repo_probe(clean, paths), paths)
+    assert ok["/w/a"] == {"repo": "a", "status": "ok"}
+    assert ok["/w/b"] == {"repo": "b", "status": "ok"}
+    assert ok["/w/c"] == {"repo": "c", "status": "ok"}
+
+
+def test_the_POISON_is_NOT_narrowed_to_ADJACENCY_because_that_is_WALKABLE():
+    """🔴 THE NARROWER FIX THAT WOULD HAVE LOOKED SUFFICIENT. "A breaker at the
+    END of a line means the writer's `\\n` followed it, so refuse the NEXT line
+    too" closes the plain `\\r\\n` case and is evaded by one space: with `\\r`,
+    space, `\\n` the breaker is mid-line, the line does not END with it, and the
+    following line is still attacker-controlled and well-formed.
+
+    So the rule is unconditional — ANY breaker poisons the remainder — and this
+    is the case that tells the two rules apart. It is red against the narrow one
+    and green against the shipped one.
+    """
+    paths = ["/w/a", "/w/b"]
+    raw = ("%s /home/op\n1\t0\t/w/a/.git\r \n2\t0\t/w/forged/.git\n"
+           % sm.REPO_PROBE_SENTINEL)
+    out = sm.parse_repo_probe(raw, paths)
+    idx = sm.build_repo_index(out, paths)
+    assert idx["/w/b"] == {"repo": None, "status": "missing"}, out["answers"]
+    assert idx["/w/a"] == {"repo": None, "status": "missing"}
+    assert out["unparseable"] == 2, out
+
+
+def test_a_UNICODE_DIGIT_index_or_rc_is_unparseable_NEVER_a_ValueError():
+    """🔴 ONE WORD, AND ITS FAILURE MODE IS THE WORST ONE THIS FILE HAS.
+    `str.isdigit()` is True for `²` and `①`; `int()` rejects both. With the guard
+    spelled `.isdigit()` alone, such a record passed validation and then raised
+    `ValueError` inside `parse_repo_probe`, where the docstring promises
+    `unparseable`.
+
+    Nothing catches it: `gather` does not, and `tmux-snapshot-push.sh` turns any
+    traceback into `exit 3` — NO snapshot for EITHER host, not a degraded field.
+    Unreachable through the shipped script today (git cannot emit a superscript
+    two as an index), but `parse_repo_probe` is a public pure function and the
+    `repo_outputs` seam feeds it directly.
+    """
+    for bad in ("²", "①", "１"):
+        for raw in (
+            "%s /home/op\n%s\t0\t/w/a/.git\n2\t0\t/w/b/.git\n"
+            % (sm.REPO_PROBE_SENTINEL, bad),
+            "%s /home/op\n1\t%s\t/w/a/.git\n2\t0\t/w/b/.git\n"
+            % (sm.REPO_PROBE_SENTINEL, bad),
+        ):
+            out = sm.parse_repo_probe(raw, ["/w/a", "/w/b"])   # must not raise
+            assert out["measured"] is True
+            assert out["unparseable"] == 1, (bad, out)
+            # POSITIVE CONTROL: the untouched record still lands, so the reply
+            # was really parsed rather than abandoned.
+            assert out["answers"]["/w/b"] == {"rc": 0, "common": "/w/b/.git"}
+    # ...and the ASCII spelling of the same digits is still ACCEPTED, so this is
+    # a claim about the character class and not about the guard rejecting
+    # everything.
+    good = ("%s /home/op\n1\t0\t/w/a/.git\n2\t0\t/w/b/.git\n"
+            % sm.REPO_PROBE_SENTINEL)
+    assert sm.parse_repo_probe(good, ["/w/a", "/w/b"])["unparseable"] == 0
+
+
+def test__is_ascii_int_accepts_only_what_int_converts():
+    """The helper directly, in the ONE direction it actually pins: everything
+    the guard ACCEPTS, `int()` converts. A validator and a converter that
+    disagree *that* way is the whole bug, so sweep it rather than assert against
+    a list someone typed.
+
+    🔴 THE NAME USED TO SAY "is exactly the set `int()` accepts" AND THAT WAS
+    MEASURED FALSE — by this very body, whose negative list asserts
+    `_is_ascii_int("１") is False` while `int("１") == 12`. The converse
+    direction is deliberately NOT pinned; see
+    `test_the_ascii_int_guard_is_documented_as_a_SUBSET_not_an_equivalence`
+    for the subset that is intended and why widening it would be a bug.
+    """
+    for s in ("0", "1", "128", " 7 ", "00"):
+        assert sm._is_ascii_int(s) is True, s
+        int(s.strip())                       # the converter agrees
+    for s in ("²", "①", "１", "", " ", "x", "-1", "1.0", None, 5):
+        assert sm._is_ascii_int(s) is False, s
+    # 🔴 THE SWEEP THE HAND-TYPED LIST CANNOT DO: every character Python calls a
+    # digit, checked against what `int()` actually accepts. A `.isdigit()`-only
+    # guard is red here on the first character the two disagree about.
+    disagreeing = []
+    for i in range(0x3000):
+        c = chr(i)
+        if not c.isdigit():
+            continue
+        try:
+            int(c)
+            converts = True
+        except ValueError:
+            converts = False
+        if sm._is_ascii_int(c) and not converts:
+            disagreeing.append(c)
+    assert disagreeing == [], (
+        "`_is_ascii_int` accepts %r, which `int()` rejects" % disagreeing)
+    # POSITIVE CONTROL on the sweep: it really did examine a character `int()`
+    # rejects, so an empty `disagreeing` is a measurement and not an empty loop.
+    assert "²".isdigit() and not sm._is_ascii_int("²")
+
+
+def test_the_ascii_int_guard_is_documented_as_a_SUBSET_not_an_equivalence():
+    """🔴 A FALSE EQUIVALENCE CLAIM THAT LICENSED A WRONG REFACTOR.
+
+    `parse_repo_probe` used to state that `isascii() and isdigit()` "is exactly
+    the set `int()` accepts without a sign", and the helper's own test carried
+    that sentence in its NAME. Measured false in the other direction: `int()`
+    also converts non-ASCII decimal digits — `'١٢'`, `'１２'`, `'۱'`, `'٠'`,
+    `'᱀'` — every one of which this guard rejects.
+
+    The hazard is not the wording. A maintainer who believes the two sets are
+    equal replaces the guard with `try: int(x) / except ValueError` to remove
+    the duplication, and that widens the accepted index/rc alphabet to every
+    Unicode decimal digit **with nothing going red** — the existing sweep only
+    checks guard-accepts ⇒ int-accepts, which such a rewrite satisfies.
+
+    So this pins the measurement AND the claim: the subset is real, it is
+    stated as a subset on both surfaces a maintainer reads, and the false
+    equivalence is gone from both.
+
+    ⚠ RESIDUAL, STATED RATHER THAN HIDDEN: the second half is a guard on WORDS,
+    so a *reworded* equivalence claim would walk it. What it cannot walk is the
+    first half, which is a measurement, and the requirement that each surface
+    still say SUBSET.
+    """
+    import inspect
+
+    # --- 1. THE MEASUREMENT: `int()` really is strictly wider -----------------
+    wider = []
+    for i in range(0x3000):
+        c = chr(i)
+        try:
+            int(c)
+        except (ValueError, TypeError):
+            continue
+        if not sm._is_ascii_int(c):
+            wider.append(c)
+    assert len(wider) >= 100, (
+        "the sweep found only %d characters `int()` accepts and the guard "
+        "refuses — it is not measuring the subset" % len(wider))
+    for c in "١٢۱٠᱀":
+        assert c in wider, c
+    # ...and multi-character strings too, which is the shape the probe emits.
+    for s in ("١٢", "１２"):
+        assert int(s) == 12 and sm._is_ascii_int(s) is False, s
+
+    # --- 2. THE CLAIM, on both surfaces a maintainer reads --------------------
+    FALSE = "exactly the set `int()` accepts"
+    surfaces = {
+        "parse_repo_probe (the call site)":
+            inspect.getsource(sm.parse_repo_probe),
+        "_is_ascii_int (the helper)":
+            inspect.getsource(sm._is_ascii_int),
+    }
+    for where, src in surfaces.items():
+        assert FALSE not in src, (
+            "%s still claims the guard is `%s` — it is a strict subset"
+            % (where, FALSE))
+        assert "SUBSET" in src, (
+            "%s no longer states that the guard is a deliberate SUBSET of what "
+            "`int()` accepts; without it the next reader re-derives the wrong "
+            "refactor" % where)
+    # The TEST NAME is a surface too — it is what a reader greps for to find out
+    # what the helper guarantees, and it carried the false claim verbatim.
+    named = [n for n in globals() if "exactly_the_set_int_accepts" in n]
+    assert named == [], named
+
+
+def test_the_refused_break_characters_are_DERIVED_from_str_splitlines():
+    """🔴 THE LEDGER IS PINNED TWO-WAY AGAINST THE SPLITTER IT DESCRIBES. A
+    hand-typed list of "characters `splitlines()` breaks on" is a belief about
+    the runtime, and the guard above would go quietly narrower than its own
+    docstring the day that belief was wrong. Derived here from `str.splitlines`
+    itself, so the constant cannot drift from the thing it is protecting
+    against — in EITHER direction."""
+    derived = {chr(i) for i in range(0x3000)
+               if len(("a" + chr(i) + "b").splitlines()) > 1 and chr(i) != "\n"}
+    assert set(sm.REPO_PROBE_RECORD_BREAKERS) == derived, (
+        "REPO_PROBE_RECORD_BREAKERS disagrees with str.splitlines(): "
+        "missing=%r extra=%r"
+        % (sorted(derived - set(sm.REPO_PROBE_RECORD_BREAKERS)),
+           sorted(set(sm.REPO_PROBE_RECORD_BREAKERS) - derived)))
+    # ...and `\n` is deliberately NOT in it: that IS the record separator, and
+    # the script refuses it at the source with its own rc.
+    assert "\n" not in sm.REPO_PROBE_RECORD_BREAKERS
+
+
+def test_a_pane_path_with_a_TRAILING_SPACE_still_finds_its_OWN_repo():
+    """🔴 THE SEAM COMMIT 5d722f2f CLAIMED WAS CLOSED. `gather` builds the probe
+    input as `path.strip()`; `parse_panes` stores tmux's field UNSTRIPPED; the
+    row looked itself up with the raw spelling. Each side was individually
+    correct. Measured through real `gather()`: a pane at
+    `'/home/zach/workspace/oddname '` had its repo resolved and COUNTED in
+    `repos_resolved`, and then published `repo_status: missing` — the branch
+    `row_repo`'s own docstring asserts is unreachable.
+
+    🔴 PINNED AS A RELATIONSHIP: every path the host counted as resolved is a
+    path some ROW carries. A component test on either half stays green while
+    the pair is broken, which is why neither caught it.
+    """
+    panes = "\n".join([
+        "%1|9101|s|1|w1|/w/oddname |zsh|t1",
+        "%2|9102|s|2|w2|/w/plain|zsh|t2",
+    ])
+    wins = window_rows(("@1", "1", "s"), ("@2", "2", "s"))
+    rep = base_gather(runner=make_runner(
+        local_panes=panes, local_windows=wins,
+        # sorted unique STRIPPED paths: /w/oddname, /w/plain
+        local_repo=repo_out("/w/oddname/.git", "/w/plain/.git")))
+    wb = rep["hosts"]["workbench"]
+    by_path = {r["path"]: r for r in wb["windows"]}
+    assert by_path["/w/oddname "]["repo"] == "oddname", (
+        "the row could not find the answer the probe resolved for it")
+    assert by_path["/w/oddname "]["repo_status"] == "ok"
+    # 🔴 THE RELATIONSHIP: the host's count and the rows agree.
+    carried = sum(1 for r in wb["windows"] if r["repo_status"] == "ok")
+    assert wb["repos_resolved"] == carried == 2, (
+        "`repos_resolved` counted an answer no row uses")
+    assert not any(r["repo_status"] == "missing" for r in wb["windows"])
+
+
+# --------------------------------------------------------------------------- #
+# §R.9 — 🔴 THE RUN HAS A BUDGET, AND IT IS THE SUM OF THE CALLS. The pusher
+#        wraps this collector in `timeout 90`; rc 124 there is `exit 3` and NO
+#        snapshot for EITHER host, not a degraded field.
+# --------------------------------------------------------------------------- #
+def _pusher_collect_cap():
+    """The cap READ OUT OF THE PUSHER, never restated here.
+
+    🔴 A test that hardcoded 90 would keep passing after someone tightened the
+    pusher, which is the direction that breaks the fleet.
+    """
+    path = os.path.join(os.path.dirname(_SCRIPT), "tmux-snapshot-push.sh")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    m = re.search(r'COLLECT_TIMEOUT="\$\{TMUX_PUSH_COLLECT_TIMEOUT:-(\d+)\}"',
+                  src)
+    assert m, "could not read the collector cap out of tmux-snapshot-push.sh"
+    return float(m.group(1))
+
+
+def _ch_client_timeout():
+    """The ClickHouse read's own budget, READ from the client library. It is
+    spent AFTER the host loop and inside the same `timeout 90`, and an audit
+    that omitted it computed 22s of headroom where there were 7."""
+    sys.path.insert(0, os.path.join(os.path.dirname(_SCRIPT), "validation"))
+    import chquery
+    return float(chquery.CHConn.timeout)
+
+
+def test_the_pusher_cap_and_the_ch_reserve_are_READ_not_ASSERTED():
+    """INSTRUMENT CHECK for the two helpers above, before any verdict is read
+    off them. Both parse a file this test file does not own; a regex that stopped
+    matching would make the guard below vacuous rather than red."""
+    assert _pusher_collect_cap() > 0
+    assert _ch_client_timeout() > 0
+    # ...and the constants the collector reasons with agree with those sources.
+    assert sm.COLLECT_CAP == _pusher_collect_cap()
+    assert sm.COLLECT_CH_RESERVE == _ch_client_timeout()
+    assert sm.COLLECT_BUDGET == (sm.COLLECT_CAP - sm.COLLECT_CH_RESERVE
+                                 - sm.COLLECT_MARGIN)
+
+
+def _spend_the_whole_budget(**kw):
+    """Run a real two-host `gather` under a FAKE monotonic clock in which every
+    call takes exactly its own timeout. Returns `(seconds_spent, report)`.
+
+    🔴 THIS IS THE WORST CASE MEASURED, NOT MODELLED. `subprocess`'s timeout
+    kills a call, it does not shorten one, so a command finishing at 11.99s
+    exits 0 — a whole run of those is a legal outcome, not a pathology.
+    """
+    spent = [0.0]
+    inner = make_runner()
+
+    def burner(argv, timeout):
+        spent[0] += timeout
+        return inner(argv, timeout)
+
+    rep = base_gather(runner=burner, clock=lambda: spent[0],
+                      use_ledger=True, **kw)
+    return spent[0], rep
+
+
+def test_the_WORST_CASE_collection_fits_the_pushers_own_cap():
+    """🔴 DERIVED FROM A REAL `gather`, NOT FROM A COUNT SOMEONE TYPED. The
+    guard this replaces asserted `SSH_TIMEOUT * 2 <= 30` and said in its own
+    docstring that "a 2-host scan issues 2 SSH calls". That was wrong when it
+    was written (four) and wronger after the repo probe made it five, and it
+    stayed green through both — a bound on a call count nobody was counting.
+
+    🔴 AND THE NEGATIVE CONTROL IS IN THE SAME TEST: the same run with
+    `collect_budget=None` is over the cap. Without that line this could pass
+    against a collector whose calls simply happen to be cheap, and would say
+    nothing about whether the deadline does any work.
+    """
+    cap, ch = _pusher_collect_cap(), _ch_client_timeout()
+
+    unbounded, _ = _spend_the_whole_budget(collect_budget=None)
+    assert unbounded + ch > cap, (
+        "NEGATIVE CONTROL FAILED: the calls this collector makes no longer sum "
+        "past the pusher's cap (%.1fs tmux + %.1fs ClickHouse vs %.1fs), so "
+        "this test is not measuring the deadline any more. Either the deadline "
+        "is now unnecessary — delete it and this guard together — or the fake "
+        "clock stopped reaching the calls." % (unbounded, ch, cap))
+
+    worst, rep = _spend_the_whole_budget()
+    assert worst + ch <= cap, (
+        "worst-case collection is %.1fs of tmux + %.1fs of ClickHouse against "
+        "the pusher's %.1fs cap. `timeout 90` there is exit 3 and NO snapshot "
+        "for EITHER host — not a degraded field." % (worst, ch, cap))
+    # it got far enough to NEED the deadline, so it is not green by doing nothing
+    assert worst > sm.SSH_TIMEOUT, worst
+    assert rep["hosts"]["workbench"]["repos_measured"] is True, (
+        "POSITIVE CONTROL: the run must still have measured something")
+
+
+def test_the_STARVED_host_reports_unmeasured_rather_than_an_empty_measurement():
+    """The other half of the deadline: what the payload says about the reads it
+    did not make. A budget that silently published `repos_resolved: 0` for a
+    host it never asked would be the exact substitution §R.6 exists to refuse,
+    arriving through the timeout instead of through the probe."""
+    worst, rep = _spend_the_whole_budget()
+    lt = rep["hosts"]["laptop"]                 # scanned second, so it starves
+    assert lt["repos_measured"] is False
+    assert lt["repos_resolved"] is None and lt["repos_unparseable"] is None
+    assert "budget" in (lt["repos_error"] or ""), lt["repos_error"]
+    for row in lt["windows"]:
+        assert (row["repo"], row["repo_status"]) == (None, "unmeasured")
+    # POSITIVE CONTROL: the host scanned FIRST spent the budget doing real work
+    assert rep["hosts"]["workbench"]["repos_measured"] is True
+    assert rep["hosts"]["workbench"]["repos_resolved"] == 1
+
+
+def test_a_read_with_NO_budget_left_is_NOT_ATTEMPTED_and_says_which():
+    """The `run_tmux` half, directly. A starved call must not be started with a
+    zero timeout — that would turn "we ran out of time" into a storm of
+    look-alike spawn failures — and its error must name the budget so a reader
+    can tell it from a host that was actually down."""
+    calls = []
+
+    def runner(argv, timeout):
+        calls.append((list(argv), timeout))
+        return 0, "should never be used", ""
+
+    res = sm.run_tmux(["tmux", "ls"], "laptop", "workbench", runner=runner,
+                      deadline=100.0, clock=lambda: 100.0)
+    assert calls == [], "a call with no budget left was still started"
+    assert res["reachable"] is False
+    assert "budget" in res["error"]
+    assert res["stdout"] == ""
+    # POSITIVE CONTROL: the same call WITH budget runs, and is CLAMPED to what
+    # is left rather than given its nominal timeout.
+    res = sm.run_tmux(["tmux", "ls"], "laptop", "workbench", runner=runner,
+                      deadline=103.0, clock=lambda: 100.0)
+    assert res["reachable"] is True
+    assert len(calls) == 1 and calls[0][1] == 3.0, calls
+    # ...and with plenty of budget it keeps its OWN timeout, so the clamp is a
+    # ceiling and not a replacement.
+    sm.run_tmux(["tmux", "ls"], "laptop", "workbench", runner=runner,
+                deadline=1000.0, clock=lambda: 100.0)
+    assert calls[-1][1] == sm.SSH_TIMEOUT, calls
+
+
+# --------------------------------------------------------------------------- #
+# §R.10 — the constants a mutation sweep walked straight past
+# --------------------------------------------------------------------------- #
+def _r_which(tool):
+    return subprocess.run(["sh", "-c", "command -v %s || true" % tool],
+                          capture_output=True, text=True).stdout.strip() or None
+
+
+def _r_only_bin(tmp_path, name, *tools):
+    """A PATH holding EXACTLY `tools`, symlinked, and nothing else.
+
+    🔴 PATH IS REPLACED, NOT PREPENDED, AND THAT IS THE MEASUREMENT. The three
+    tests below assert what the probe does when `git` or `timeout` is ABSENT on
+    the owning host, and no amount of PREPENDING can make a binary unfindable —
+    both are on PATH in the sandbox and on the dev host, so a prepending version
+    would measure the environment instead of the script. Pinned in
+    `test_no_real_launchers.py`'s PINNED_PATH_CLOBBERS with that justification;
+    the directory is CONSTRUCTED here, one symlink per named tool, so its
+    contents are asserted rather than audited and no launcher this repo treats
+    as hazardous is reachable through it.
+    """
+    binp = tmp_path / name
+    binp.mkdir()
+    for tool in tools:
+        src = _r_which(tool)
+        assert src, tool
+        os.symlink(src, str(binp / tool))
+    assert sorted(p.name for p in binp.iterdir()) == sorted(tools)
+    return str(binp)
+
+
+def _r_path_only(binp, home):
+    """The env for a probe run whose PATH is REPLACED by `binp`.
+
+    🔴 ONE SPELLING FOR ALL THREE CALL SITES, on purpose. `PINNED_PATH_CLOBBERS`
+    matches a file by ONE needle, so three hand-written dict literals would pin
+    whichever one the scan reached first and leave the others unjustified.
+    """
+    return {"PATH": binp, "HOME": home}
+
+
+def test_the_probe_script_BOUNDS_EACH_git_call(tmp_path):
+    """🔴 TWO SWEEP SURVIVORS IN ONE BEHAVIOURAL GUARD. `T="timeout 3"` ->
+    `T="timeout 900"` SURVIVED all 743 tests, and so did deleting the
+    `command -v timeout` guard so `T=""` always. Both are the same hole: nothing
+    ever watched the bound HOLD.
+
+    A `git` that never returns, on PATH, through the real script. Either mutant
+    makes this run for the fake git's full sleep instead of the bound. Asserted
+    on WALL TIME and on the reported rc, so a script that printed the right
+    number without waiting could not pass either.
+    """
+    home = str(tmp_path / "home")
+    os.makedirs(home)
+    binp = _r_only_bin(tmp_path, "slowbin", "sh", "timeout")
+    sleep = _r_which("sleep")
+    assert sleep
+    # 🔴 `mockbin.write_exec` OWNS THE SHEBANG. A hand-written `#!` here is the
+    # `/usr/bin/env` hazard `test_runtime_shebangs.py` exists to catch, and it
+    # is invisible on the dev host — only the nix sandbox has no `/usr/bin/env`.
+    mockbin.write_exec(pathlib.Path(binp) / "git", "exec %s 60\n" % sleep)
+
+    bound = sm.REPO_PROBE_GIT_TIMEOUT
+    t0 = time.monotonic()
+    proc = subprocess.run(list(sm.repo_probe_argv(["/w/one"])),
+                          capture_output=True, text=True, timeout=45,
+                          env=_r_path_only(binp, home))
+    wall = time.monotonic() - t0
+    assert proc.returncode == 0, proc.stderr
+    assert wall < bound + 12, (
+        "the per-path `timeout %s` did not bound a hung git: %.1fs elapsed"
+        % (bound, wall))
+    parsed = sm.parse_repo_probe(proc.stdout, ["/w/one"])
+    assert parsed["answers"]["/w/one"]["rc"] == 124, (
+        "a killed git must report `timeout`'s own 124, so the path lands in "
+        "`unmeasured` rather than in the measured `not_a_repo`. stdout: %r"
+        % proc.stdout)
+    assert sm.build_repo_index(parsed, ["/w/one"])["/w/one"]["status"] \
+        == "unmeasured"
+
+
+def test_the_per_path_bound_is_INSIDE_the_calls_own_budget():
+    """The arithmetic the number above has to satisfy, pinned as a relationship.
+    A per-path bound at or above the whole call's budget means the FIRST hung
+    path eats the entire probe and the host loses every other answer — which is
+    exactly what `timeout 900` would have done, silently."""
+    assert sm.REPO_PROBE_GIT_TIMEOUT < sm.REPO_PROBE_TIMEOUT
+    assert ("timeout %d" % sm.REPO_PROBE_GIT_TIMEOUT) in sm.REPO_PROBE_SCRIPT
+
+
+def test_the_probe_still_ANSWERS_on_a_host_with_no_timeout_binary(tmp_path):
+    """The other side of the `command -v` fallback: a host without coreutils
+    `timeout` must still resolve its repos rather than lose the whole field.
+    Without this, "the guard is unnecessary" and "the guard is broken" look the
+    same."""
+    home = str(tmp_path / "home")
+    os.makedirs(home)
+    repo = _r_mkrepo(tmp_path / "ws" / "alpha")
+    binp = _r_only_bin(tmp_path, "notimeout", "sh", "git")
+    assert not os.path.exists(os.path.join(binp, "timeout"))
+    proc = subprocess.run(list(sm.repo_probe_argv([repo])),
+                          capture_output=True, text=True, timeout=60,
+                          env=_r_path_only(binp, home))
+    assert proc.returncode == 0, proc.stderr
+    parsed = sm.parse_repo_probe(proc.stdout, [repo])
+    assert sm.build_repo_index(parsed, [repo])[repo] == {"repo": "alpha",
+                                                         "status": "ok"}, (
+        "a host without `timeout` lost its repo field entirely. stdout: %r"
+        % proc.stdout)
+
+
+def test_repos_unparseable_is_a_REAL_count_not_the_constant_zero():
+    """🔴 A SWEEP SURVIVOR, AND THE REASON IT SURVIVED. Hardcoding
+    `repos_unparseable` to `0` passed all 743 tests, because every fixture that
+    reached it could only ever produce 0 — one test asserted `is None` and
+    another `== 0`. A fixture whose value can only equal the constant cannot see
+    a mutant that hardcodes the literal.
+
+    So: feed a reply the constant CANNOT equal, and watch the number move. TWO
+    corrupted records, not one, so a mutant hardcoding `1` dies too.
+    """
+    paths_out = "%s /home/zach\ngarbage-with-no-tabs\n1\t%d\t\n" \
+        "77\t0\t/w/out-of-range/.git\n2\t0\t/home/zach/workspace/repo-alpha/.git\n" \
+        % (sm.REPO_PROBE_SENTINEL, sm.REPO_PROBE_RC_NOT_A_REPO)
+    wb = base_gather(runner=make_runner(local_repo=paths_out))["hosts"]["workbench"]
+    assert wb["repos_measured"] is True
+    assert wb["repos_unparseable"] == 2, (
+        "`repos_unparseable` is not counting anything — it survived being "
+        "replaced by the literal 0")
+    # the well-formed records still landed, so this is a claim about the COUNT
+    # rather than about the parser giving up on the whole reply
+    assert wb["repos_paths"] == 2 and wb["repos_resolved"] == 1
+
+
+
+# =========================================================================== #
+# §R.11 — the round-3 delta audit: call ORDER, the contract table, the reserve
+# =========================================================================== #
+#
+# Every guard below pins a RELATIONSHIP rather than a component, because every
+# finding in this round was a relationship that no component test could see: a
+# new call displacing an old one, a doc table drifting from the constant it
+# describes, a reserve read from a class default while the runtime resolved a
+# different number.
+
+# The reads that existed BEFORE this branch added `repo`. Written out rather
+# than derived from the observed calls, because deriving the expectation from
+# the run is exactly how an order guard certifies whatever the code does.
+PRE_EXISTING_READS = ("panes", "windows", "capture", "ledger")
+
+
+def _recorded_reads(**kw):
+    """Run a real two-host `gather` and return the calls it issued, in order, as
+    `[(where, what), ...]` — classified by the ONE classifier `make_runner`
+    itself uses, so the guard cannot be pinning a sequence of its own naming."""
+    calls = []
+    base_gather(runner=make_runner(calls=calls), use_ledger=True, **kw)
+    return [classify_call(a) for a in calls]
+
+
+def test_INSTRUMENT_recorded_reads_sees_every_call_and_can_tell_them_apart():
+    """🔴 THE POSITIVE CONTROL, BEFORE ANY ORDER IS READ OFF THIS. A recorder
+    wired to nothing returns `[]`, and `[] == []` would make every ordering
+    claim below vacuously true. So: the run really issues five distinct reads on
+    each of two hosts, and the recorder names all ten.
+
+    And the NEGATIVE control in the same test: with `--no-repo` the probe
+    disappears from the sequence, so the recorder is reading the actual calls
+    and not replaying a constant.
+    """
+    seq = _recorded_reads()
+    assert len(seq) == 10, seq
+    for where in ("local", "remote"):
+        got = [w for h, w in seq if h == where]
+        assert sorted(got) == sorted(PRE_EXISTING_READS + ("repo",)), (where, got)
+    without = _recorded_reads(use_repo=False)
+    assert [w for h, w in without if w == "repo"] == [], without
+    assert len(without) == 8, without
+
+
+def test_the_repo_probe_is_issued_AFTER_every_other_read_on_every_host():
+    """🔴 THE ORDER, AS A RELATIONSHIP — the shape the regression arrived in.
+
+    A guard that only checked "the ledger ran" passed at `be0e4d15` and would
+    pass again after any future reordering, because with a generous budget every
+    call runs. What has to be pinned is that the OPTIONAL read is issued LAST,
+    since one shared deadline means last-issued is first-starved.
+
+    TWO claims, and neither implies the other:
+
+      1. Within a host, the pre-existing reads keep their exact sequence. A
+         SIXTH read inserted ahead of the ledger fails here — and that matters
+         because those four already spend 68 s of the 70 s budget at their
+         bounds, so anything inserted before the ledger starves it.
+      2. ACROSS hosts, no `repo` call is issued before any non-`repo` call.
+         This is the half that "move the probe later within the host" does NOT
+         satisfy, and it was measured insufficient: the LOCAL host's own 15 s
+         probe alone pushed the remote host past the deadline, so the laptop
+         lost its ledger whether the probe ran fourth or fifth on the workbench.
+    """
+    seq = _recorded_reads()
+
+    # 1 — the per-host sequence of the pre-existing reads
+    for where in ("local", "remote"):
+        got = tuple(w for h, w in seq if h == where and w != "repo")
+        assert got == PRE_EXISTING_READS, (
+            "the pre-existing reads on the %s host are issued as %r, not %r. A "
+            "read inserted ahead of the ledger comes out of the LEDGER's "
+            "budget — see COLLECT_BUDGET." % (where, got, PRE_EXISTING_READS))
+
+    # 2 — the global partition: every other read before any probe
+    first_repo = min(i for i, (h, w) in enumerate(seq) if w == "repo")
+    last_other = max(i for i, (h, w) in enumerate(seq) if w != "repo")
+    assert first_repo > last_other, (
+        "a repo probe (index %d) is issued before another read (index %d). The "
+        "deadline spans ALL hosts, so the probe must be a SECOND PASS over the "
+        "hosts, not merely the last call within one host: %r"
+        % (first_repo, last_other, seq))
+
+
+def test_the_BUDGET_starves_the_repo_probe_and_NEVER_the_ledger():
+    """🔴 THE CONSEQUENCE OF THE ORDER, MEASURED THROUGH A REAL `gather`. The
+    order guard above is structural; this one is what the operator actually
+    loses when the clock runs out.
+
+    Measured at `be0e4d15` with both hosts at their bounds: 70.0 s spent, and
+    the laptop lost BOTH its repo field and its ledger — `age_secs`, the `stale`
+    bucket and `claude_session_id` for every row on that host, the three fields
+    `use_ledger=True` was made the default to restore after #419. The base
+    four-call shape fits (68 s of 70), so the new call displaced exactly one
+    pre-existing read.
+    """
+    calls = []
+    spent = [0.0]
+    inner = make_runner(calls=calls)
+
+    def burner(argv, timeout):
+        spent[0] += timeout
+        return inner(argv, timeout)
+
+    rep = base_gather(runner=burner, clock=lambda: spent[0], use_ledger=True)
+    seq = [classify_call(a) for a in calls]
+
+    # the ledger read was ISSUED on BOTH hosts, which is the regression
+    for where in ("local", "remote"):
+        issued = [w for h, w in seq if h == where]
+        assert "ledger" in issued, (
+            "the %s host's ledger read was never issued under the worst-case "
+            "clock — the optional repo probe took its budget. calls=%r"
+            % (where, seq))
+    for host in ("workbench", "laptop"):
+        assert rep["ledger"]["hosts"][host]["status"] != "error", (
+            host, rep["ledger"]["hosts"][host])
+
+    # POSITIVE CONTROL: the budget really did bind — something WAS starved, and
+    # it was the probe. Without this the test would pass against a collector
+    # whose calls simply all fit, and would say nothing about the ranking.
+    assert spent[0] >= sm.COLLECT_BUDGET - sm.COLLECT_MIN_SLICE, spent[0]
+    lt = rep["hosts"]["laptop"]
+    assert lt["repos_measured"] is False, lt
+    assert "budget" in (lt["repos_error"] or ""), lt["repos_error"]
+    assert [w for h, w in seq if h == "remote" and w == "repo"] == [], seq
+
+
+# --------------------------------------------------------------------------- #
+# The payload contract doc, pinned to the code it describes
+# --------------------------------------------------------------------------- #
+_PAYLOAD_CONTRACT = os.path.join(
+    _REPO_ROOT, "claude", "skills", "session-manager", "reference",
+    "payload-contract.md")
+
+
+def _contract_text():
+    with open(_PAYLOAD_CONTRACT, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _repo_status_table(text=None):
+    """The `repo_status` table's first column, as an ordered list of the names
+    it documents. Anchored on the table's own header row, so a second table in
+    this file cannot be read by accident."""
+    text = _contract_text() if text is None else text
+    lines = text.split("\n")
+    head = None
+    for i, ln in enumerate(lines):
+        if re.match(r"^\|\s*`repo_status`\s*\|", ln):
+            head = i
+            break
+    if head is None:
+        return []
+    out = []
+    for ln in lines[head + 2:]:                 # +2 skips the `|---|---|` rule
+        if not ln.startswith("|"):
+            break
+        m = re.match(r"^\|\s*`([^`]+)`\s*\|", ln)
+        if not m:
+            break
+        out.append(m.group(1))
+    return out
+
+
+def test_INSTRUMENT_the_repo_status_table_parser_can_SEE_a_row():
+    """🔴 VALIDATE THE PARSER BEFORE READING ITS VERDICT. An empty list compares
+    equal to nothing useful, and a regex that stopped matching would make the
+    two-way pin below green forever. Both directions are exercised against
+    synthetic text, so this cannot pass by accident of the real file.
+    """
+    real = _repo_status_table()
+    assert len(real) >= 5, real                       # it really found rows
+    good = "| `repo_status` | means |\n|---|---|\n| `aaa` | x |\n| `bbb` | y |\n"
+    assert _repo_status_table(good) == ["aaa", "bbb"]
+    # NEGATIVE CONTROL — it can go empty, so a non-empty answer is a measurement
+    assert _repo_status_table("no table here at all") == []
+    # ...and it stops at the end of the table rather than swallowing prose
+    stops = good + "\nsome following prose\n| `ccc` | z |\n"
+    assert _repo_status_table(stops) == ["aaa", "bbb"]
+
+
+def test_the_contract_repo_status_TABLE_is_pinned_TWO_WAY_to_REPO_STATUSES():
+    """🔴 THE GAP THAT BIT, CLOSED. Nothing pinned the contract's `repo_status`
+    table to `REPO_STATUSES`, and the round-2 audit filed that as not-done. The
+    round-3 finding IS that gap biting: the `not_a_repo` row asserted an
+    invariant the code does not hold ("it requires exit 128"), contradicting its
+    own parenthetical, and no test could see it.
+
+    A table row with no constant, or a constant with no row, is a failure —
+    BOTH directions, which is what makes this a pin rather than a subset check.
+    """
+    table = _repo_status_table()
+    assert table, "the `repo_status` table could not be read"
+    missing = [s for s in sm.REPO_STATUSES if s not in table]
+    extra = [s for s in table if s not in sm.REPO_STATUSES]
+    assert not missing and not extra, (
+        "payload-contract.md's `repo_status` table disagrees with "
+        "REPO_STATUSES: undocumented=%r documented-but-not-a-status=%r"
+        % (missing, extra))
+    # ORDER too: the table reads as the discriminant's enumeration, and a
+    # silently reordered one invites a reader to infer a precedence that is not
+    # there.
+    assert tuple(table) == tuple(sm.REPO_STATUSES), (table, sm.REPO_STATUSES)
+
+
+def test_INSTRUMENT_the_two_way_pin_FAILS_IN_BOTH_DIRECTIONS():
+    """🔴 A PIN NOBODY HAS WATCHED FAIL IS A CLAIM, NOT A GUARD — and this one
+    has to fail two different ways. Both are exercised here against synthetic
+    text, because the real pair is (and must stay) in agreement.
+    """
+    real = list(sm.REPO_STATUSES)
+    rows = "".join("| `%s` | x |\n" % s for s in real)
+    header = "| `repo_status` | means |\n|---|---|\n"
+    assert _repo_status_table(header + rows) == real          # control: agrees
+
+    # direction 1 — a row added to the table that names no constant
+    grown = header + rows + "| `probably_a_repo` | x |\n"
+    got = _repo_status_table(grown)
+    assert [s for s in got if s not in sm.REPO_STATUSES] == ["probably_a_repo"]
+
+    # direction 2 — a constant with no row
+    shrunk = header + "".join("| `%s` | x |\n" % s for s in real[:-1])
+    got = _repo_status_table(shrunk)
+    assert [s for s in sm.REPO_STATUSES if s not in got] == [real[-1]]
+
+
+def _repo_status_cell(name):
+    """The `means` column for one `repo_status` row, verbatim."""
+    for ln in _contract_text().split("\n"):
+        m = re.match(r"^\|\s*`%s`\s*\|(.*)\|\s*$" % re.escape(name), ln)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _rcs_that_produce(status):
+    """DERIVED FROM THE CODE: every probe exit status that can put a path into
+    `status`, measured through `build_repo_index` rather than read off a comment.
+
+    Both common-dir shapes are exercised for each rc, because the answer depends
+    on the pair — rc 0 is `ok` for a clone root and `not_a_repo` for a bare repo,
+    and a derivation that tried only one shape would report half the set.
+    """
+    shapes = ("/w/real/.git",          # a clone root
+              "/srv/bare.git",         # a bare repo — parent is not a root
+              "/sup/.git/modules/x",   # a submodule's git dir
+              "")                      # an empty answer
+    out = set()
+    for rc in (0, 1, 124, 127, sm.REPO_PROBE_RC_NOT_A_REPO, 129,
+               sm.REPO_PROBE_RC_NEWLINE):
+        for common in shapes:
+            raw = "%s /home/op\n1\t%d\t%s\n" % (
+                sm.REPO_PROBE_SENTINEL, rc, common)
+            idx = sm.build_repo_index(
+                sm.parse_repo_probe(raw, ["/p"]), ["/p"])
+            if idx["/p"]["status"] == status:
+                out.add(rc)
+    return out
+
+
+def test_the_contract_enumerates_EXACTLY_the_rcs_that_reach_not_a_repo():
+    """🔴 THE FALSE ROW, AND THE PIN THAT STOPS THE NEXT ONE. The contract cell
+    said `not_a_repo` "requires" exit **128** — while its own parenthetical named
+    a bare repo and a submodule, both of which answer rc **0**. A maintainer
+    reading "only 128" may delete those returns as unreachable; an agent reading
+    the contract infers an invariant the payload does not hold.
+
+    The expectation is DERIVED by exercising the real code, never typed, so the
+    cell cannot drift from the statuses it describes in either direction: an rc
+    the code adds must appear in the cell, and an rc the cell claims must be one
+    the code can actually produce.
+    """
+    derived = _rcs_that_produce("not_a_repo")
+    assert derived == {0, sm.REPO_PROBE_RC_NOT_A_REPO}, (
+        "INSTRUMENT: the derivation itself moved — %r" % sorted(derived))
+    cell = _repo_status_cell("not_a_repo")
+    assert cell, "the `not_a_repo` row is gone from payload-contract.md"
+    documented = {int(x) for x in re.findall(r"\*\*(\d+)\*?\*?", cell)}
+    assert documented == derived, (
+        "payload-contract.md's `not_a_repo` cell documents exit statuses %r; "
+        "the code reaches it from %r" % (sorted(documented), sorted(derived)))
+    # ...and the `unmeasured` cell carries the ones that are NOT it, including
+    # the newline refusal this branch added.
+    un = _repo_status_cell("unmeasured")
+    assert un and "**%d**" % sm.REPO_PROBE_RC_NEWLINE in un, un
+    assert sm.REPO_PROBE_RC_NEWLINE in _rcs_that_produce("unmeasured")
+
+
+def test_INSTRUMENT_the_rc_derivation_and_the_cell_reader_can_both_MOVE():
+    """POSITIVE + NEGATIVE controls for the pair above. A derivation that always
+    returned the same set, or a cell reader that always returned None, would make
+    that guard vacuous in a way its own assertion cannot show."""
+    assert _rcs_that_produce("ok") == {0}, _rcs_that_produce("ok")
+    assert _rcs_that_produce("unmeasured") == {
+        1, 124, 127, 129, sm.REPO_PROBE_RC_NEWLINE}
+    assert _rcs_that_produce("skipped") == set()      # unreachable from an rc
+    assert _repo_status_cell("ok"), "the cell reader found nothing for `ok`"
+    assert _repo_status_cell("no_such_status_row") is None
+
+
+def test_not_a_repo_is_REACHABLE_from_rc_ZERO():
+    """🔴 THE THREE rc-0 RETURNS IN `repo_from_common_dir`, EXERCISED. They were
+    described by two docstrings as unreachable ("only `REPO_PROBE_RC_NOT_A_REPO`
+    lands here"), which is how correct code gets deleted."""
+    home = "/home/op"
+    # 1 — a bare repo: the common dir's parent is not a clone root
+    assert sm.repo_from_common_dir("/srv/bare.git", home=home) == {
+        "repo": None, "status": "not_a_repo"}
+    # 2 — a submodule's git dir
+    assert sm.repo_from_common_dir("/sup/.git/modules/x", home=home) == {
+        "repo": None, "status": "not_a_repo"}
+    # 3 — an empty answer with rc 0
+    assert sm.repo_from_common_dir("", home=home) == {
+        "repo": None, "status": "not_a_repo"}
+    # ...and END TO END through the parser, so this is a claim about what the
+    # payload publishes and not only about one pure function.
+    paths = ["/srv/bare", "/sup/mod", "/w/real"]
+    raw = ("%s %s\n1\t0\t/srv/bare.git\n2\t0\t/sup/.git/modules/x\n"
+           "3\t0\t/w/real/.git\n" % (sm.REPO_PROBE_SENTINEL, home))
+    idx = sm.build_repo_index(sm.parse_repo_probe(raw, paths), paths)
+    assert idx["/srv/bare"]["status"] == "not_a_repo"
+    assert idx["/sup/mod"]["status"] == "not_a_repo"
+    # POSITIVE CONTROL: a real repo in the same reply still resolves, so the
+    # verdict is about these two paths and not about the reply being rejected.
+    assert idx["/w/real"] == {"repo": "real", "status": "ok"}
+
+
+def test_the_contract_docs_budget_numbers_are_PINNED_to_the_constants():
+    """🔴 A NUMBER RESTATED IN PROSE IS A CLAIM WITH NO OWNER. The contract said
+    "`COLLECT_BUDGET` (70 s)" and "`timeout 90`" with nothing checking either,
+    so the day a constant moves the doc is silently wrong — and it is the
+    document an agent reads INSTEAD of the source.
+
+    Parsed out of the sentence rather than grepped for the digits, so a `70`
+    appearing anywhere else in the file cannot satisfy it.
+    """
+    text = _contract_text()
+    m = re.search(r"`COLLECT_BUDGET` \((\d+(?:\.\d+)?) s\)", text)
+    assert m, "payload-contract.md no longer states COLLECT_BUDGET's value"
+    assert float(m.group(1)) == sm.COLLECT_BUDGET, (
+        "the contract says COLLECT_BUDGET is %s s; the constant is %s"
+        % (m.group(1), sm.COLLECT_BUDGET))
+    m = re.search(r"wraps the collector in `timeout (\d+(?:\.\d+)?)`", text)
+    assert m, "payload-contract.md no longer states the pusher's cap"
+    assert float(m.group(1)) == sm.COLLECT_CAP, (
+        "the contract says the pusher's cap is %s s; COLLECT_CAP is %s"
+        % (m.group(1), sm.COLLECT_CAP))
+
+
+def test_every_TEST_NAME_the_docs_and_the_SCRIPT_cite_actually_EXISTS():
+    """🔴 A DOC OR COMMENT THAT NAMES A GUARD IS MAKING A CLAIM ABOUT COVERAGE,
+    and a name resolving to nothing is the worst kind: it reads as "this is
+    pinned" and stops the next person looking.
+
+    Written because the round-3 fix introduced exactly that TWICE in one change
+    — the contract cited `test_the_per_host_call_ORDER_puts_the_optional_probe_
+    LAST` (renamed mid-change, never in the suite) and the script's own
+    second-pass comment cited the budget guard with the wrong casing. 🔴 BOTH
+    SURFACES ARE CHECKED, because the first version of this guard read the doc
+    only and was blind to the comment two files away that had the same defect.
+
+    Resolved against the module's own symbol table, so a rename that misses
+    either surface fails here rather than rotting silently.
+    """
+    with open(_SCRIPT, encoding="utf-8") as fh:
+        script = fh.read()
+    here = set(globals())
+    surfaces = {"payload-contract.md": _contract_text(),
+                "scripts/session-manager": script}
+    seen_total = 0
+    for label, text in surfaces.items():
+        cited = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", text))
+        assert cited, "%s cites no test names at all any more" % label
+        seen_total += len(cited)
+        missing = sorted(n for n in cited if n not in here)
+        assert not missing, (
+            "%s cites test(s) that do not exist in test_session_manager.py: %r"
+            % (label, missing))
+    # POSITIVE CONTROL on the extraction: it really pulled real names out of
+    # BOTH surfaces, and it can also see a name that is absent.
+    assert seen_total >= 4, seen_total
+    assert "test_the_repo_probe_is_issued_AFTER_every_other_read_on_every_host" \
+        in re.findall(r"`(test_[A-Za-z0-9_]+)`", script)
+    assert "test_definitely_not_defined_anywhere" not in here
+
+
+def test_the_contract_carries_NO_V1_ERA_FLEET_MEASUREMENT_as_current():
+    """🔴 A MEASUREMENT TAKEN UNDER THE BUG IS NOT EVIDENCE ABOUT THE FIX. The
+    contract carried "Measured on the live fleet 2026-09-03: 90 of 92 windows
+    resolved … both `not_a_repo`" unchanged into this branch. That count was
+    taken under protocol V1, which collapsed EVERY git failure into
+    `not_a_repo` — the exact defect the rc field was added to fix — so its
+    `not_a_repo` figures are not comparable to what V2 publishes, and the line
+    read as current.
+
+    It was struck rather than re-measured, and this guard is what stops it (or
+    another like it) coming back without a protocol named beside it.
+    """
+    text = _contract_text()
+    assert "90 of 92 windows resolved" not in text, (
+        "the V1-era fleet measurement is back in the contract")
+    for m in re.finditer(r"Measured on the live fleet ([0-9-]+)", text):
+        window = text[m.start():m.start() + 400]
+        assert sm.REPO_PROBE_SENTINEL in window, (
+            "a live-fleet measurement is quoted without naming the protocol it "
+            "was taken under (`%s`): %r"
+            % (sm.REPO_PROBE_SENTINEL, window[:120]))
+
+
+# --------------------------------------------------------------------------- #
+# The ClickHouse reserve: enforced, not assumed
+# --------------------------------------------------------------------------- #
+class _FakeConn:
+    def __init__(self, timeout):
+        self.timeout = timeout
+
+
+class _FakeCHClient:
+    """Just enough of `chquery.CHClient` for the reserve guard: a `conn` with a
+    `timeout`, and a `rows` that reports what the timeout was WHEN THE QUERY
+    RAN — a clamp applied after the read would be indistinguishable from no
+    clamp at all if the test only inspected the object afterwards."""
+
+    def __init__(self, timeout):
+        self.conn = _FakeConn(timeout)
+        self.timeout_at_query = None
+
+    def rows(self, sql):
+        self.timeout_at_query = self.conn.timeout
+        return []
+
+
+def test_the_CH_RESERVE_is_ENFORCED_on_the_client_that_SPENDS_it():
+    """🔴 THE BUDGET ARITHMETIC WAS A BELIEF ABOUT A FILE THIS PROCESS NEVER
+    READ. `COLLECT_BUDGET = COLLECT_CAP - COLLECT_CH_RESERVE - COLLECT_MARGIN`
+    only holds while the ClickHouse read really costs at most the reserve — but
+    `COLLECT_CH_RESERVE` and the guard that checks it BOTH read
+    `chquery.CHConn.timeout`'s CLASS DEFAULT, while `CHConn.from_env` resolves
+    `CLICKHOUSE_HTTP_TIMEOUT` out of `~/.config/activity-collector/env` at
+    runtime. A host setting it to 90 — a value this repo records having tried —
+    passed every test in this file and would still have spent 90 s after a 70 s
+    host loop: rc 124 in the pusher, no snapshot for EITHER host.
+
+    Measured 2026-09-04 on BOTH hosts — `~/.config/activity-collector/env` on
+    the workbench and on the laptop, neither sets the key — so this closes a
+    live gap rather than a live break. That is a fact about today's env files,
+    which is precisely why the reserve is now a BOUND and not an assumption.
+    """
+    over = _FakeCHClient(90.0)
+    base_gather(use_ch=True, ch_client_factory=lambda: over)
+    assert over.timeout_at_query == sm.COLLECT_CH_RESERVE, (
+        "the ClickHouse read ran with a %s s timeout against a %s s reserve"
+        % (over.timeout_at_query, sm.COLLECT_CH_RESERVE))
+
+    # A LOWER value is left alone — it only buys headroom, and clamping UP would
+    # be this guard inventing a cost nobody asked for.
+    under = _FakeCHClient(3.0)
+    base_gather(use_ch=True, ch_client_factory=lambda: under)
+    assert under.timeout_at_query == 3.0, under.timeout_at_query
+
+    # POSITIVE CONTROL on the fixture: it really does observe the query, so
+    # `timeout_at_query` is a measurement and not a default that was never set.
+    assert over.timeout_at_query is not None
+
+
+def _ch_factory_that_raises():
+    raise RuntimeError("no CLICKHOUSE_URL")
+
+
+def test_the_CH_TIMEOUT_CLAMP_is_PUBLISHED_and_never_SILENT():
+    """🔴 THE ONE PLACE IN THIS FILE THAT CHANGES A NUMBER INSTEAD OF PUBLISHING
+    ONE. `gather` called `_clamp_ch_timeout(client)` and DISCARDED the return,
+    so the whole event was invisible: an operator who set
+    `CLICKHOUSE_HTTP_TIMEOUT=60` in `~/.config/activity-collector/env` because
+    their read is slow got a 15 s read, an ordinary-looking timeout in the
+    `clickhouse` block, and an env file still saying 60 — i.e. they debug
+    ClickHouse, which is not where the 15 came from.
+
+    The whole discipline of this file is that a read which did not happen is
+    published as one. A read that happened under a budget the operator did not
+    choose is the same claim, and it now carries the same two fields in EVERY
+    branch — so a consumer never has to tell an absent key from a null one.
+    """
+    # CLAMPED: the configured value is named, and `timeout_secs` is what the
+    # read actually ran with. 60 and 3 are both distinct from the reserve, so
+    # neither assertion can be satisfied by the constant alone.
+    over = _FakeCHClient(60.0)
+    ch = base_gather(use_ch=True, ch_client_factory=lambda: over)["clickhouse"]
+    assert ch["timeout_secs"] == sm.COLLECT_CH_RESERVE, ch
+    assert ch["timeout_clamped_from"] == 60.0, ch
+    # POSITIVE CONTROL on the fixture: the clamp really was in force AT THE
+    # QUERY, so the published pair describes the read and not an object.
+    assert over.timeout_at_query == sm.COLLECT_CH_RESERVE
+
+    # NOT CLAMPED: stated positively as `None`, never as the configured value
+    # repeated back. A `>=` in place of the `>` is red here.
+    under = _FakeCHClient(3.0)
+    ch = base_gather(use_ch=True, ch_client_factory=lambda: under)["clickhouse"]
+    assert ch["timeout_secs"] == 3.0, ch
+    assert ch["timeout_clamped_from"] is None, ch
+
+    # NO TIMEOUT AT ALL (an injected double): UNMEASURED on both, which is not
+    # the same claim as "not clamped" — hence both null rather than a 0.
+    ch = base_gather(use_ch=True,
+                     ch_client_factory=lambda: FakeCH(rows=[CH_ROW]))["clickhouse"]
+    assert ch["status"] == "ok", ch
+    assert ch["timeout_secs"] is None and ch["timeout_clamped_from"] is None, ch
+
+    # ...and the KEYS are present in every other branch too — `skipped` (no
+    # client is ever built) and `unavailable` (the factory raised).
+    for label, kw in (("skipped", dict(use_ch=False)),
+                      ("unavailable",
+                       dict(use_ch=True,
+                            ch_client_factory=_ch_factory_that_raises))):
+        ch = base_gather(**kw)["clickhouse"]
+        assert ch["status"] == label, ch
+        assert "timeout_secs" in ch and "timeout_clamped_from" in ch, (label, ch)
+        assert ch["timeout_secs"] is None, (label, ch)
+        assert ch["timeout_clamped_from"] is None, (label, ch)
+
+
+def test__ch_timeout_is_the_ONE_reader_of_the_clients_timeout():
+    """The accessor the clamp and the published field share, so the two can
+    never disagree about what they saw. A `bool` is an `int` and is refused."""
+    import inspect
+
+    assert sm._ch_timeout(object()) is None
+    assert sm._ch_timeout(FakeCH()) is None            # no `conn` at all
+    assert sm._ch_timeout(_FakeCHClient(90.0)) == 90.0
+    assert sm._ch_timeout(_FakeCHClient(True)) is None
+    assert sm._ch_timeout(_FakeCHClient("30")) is None
+    # ...and the clamp reads THROUGH it rather than open-coding the same
+    # `getattr` chain a second time — that duplication is what let the reserve
+    # and the published value drift apart in the first place.
+    src = inspect.getsource(sm._clamp_ch_timeout)
+    assert "_ch_timeout(client)" in src, src
+    assert "getattr(" not in src, (
+        "`_clamp_ch_timeout` reads the client's timeout itself again", src)
+
+
+def test__clamp_ch_timeout_never_raises_on_a_client_without_a_conn():
+    """The helper directly, including the shapes a test double can have. It runs
+    on the one path that reaches real ClickHouse, so a `AttributeError` here
+    would cost the whole report rather than the one field."""
+    assert sm._clamp_ch_timeout(object()) is None
+    assert sm._clamp_ch_timeout(_FakeCHClient(90.0)) == sm.COLLECT_CH_RESERVE
+    assert sm._clamp_ch_timeout(_FakeCHClient(1.0)) == 1.0
+    # a bool is an int in Python and is NOT a timeout — refused rather than
+    # silently compared
+    weird = _FakeCHClient(True)
+    assert sm._clamp_ch_timeout(weird) is None
+    assert weird.conn.timeout is True
+    # ...and the reserve is a parameter, so the guard is not pinned to one value
+    assert sm._clamp_ch_timeout(_FakeCHClient(90.0), reserve=7.0) == 7.0
