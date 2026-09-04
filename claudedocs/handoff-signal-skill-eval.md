@@ -17,14 +17,15 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Evaluate the signal skill's performance, quality, and token efficiency using activity telemetry data from ClickHouse.
 
 ## State now
-- Branch: `main` (devrc), clean w.r.t. this work — this session wrote no code, only read-only ClickHouse queries.
-- Clawgate: `clawgate_handoff.sh resolve` returned **rc=5, 0 tasks** for this session (positive control passed: the same endpoint answered 3 links for another session, so the board was reachable). Per protocol NO `clawgate-task:` field was written. The doc's existing `clawgate-task: none` is an **unreadable** field (`field` subcommand ⇒ rc=2) and makes every `/resume` emit a GAP line — see Gotchas.
-- What's DONE this session:
-  - **Refuted the entire prior measurement.** The previous session's session-selection predicate was vacuous; all of its reported figures were computed over the whole session population, not over signal-skill sessions.
-  - Re-derived the real token/cost decomposition over 30 days / 1,027 sessions from `activity.events`.
-  - Identified the actual cost driver and the real reduction lever (below).
-- What's IN FLIGHT: nothing.
-- Deploy/verify status: N/A — analysis only, no code changes.
+- Branch: `main` (devrc). This session wrote no product code — read-only ClickHouse/transcript queries plus two doc changes.
+- Clawgate: `clawgate_handoff.sh resolve` ⇒ **rc=5, 0 tasks** (positive control passed). No `clawgate-task:` field written. The doc's existing `clawgate-task: none` is UNREADABLE (`field` ⇒ rc=2) and makes every `/resume` emit a GAP line.
+- What's DONE:
+  - **Refuted the prior measurement** — the session predicate was vacuous, so every figure was population-wide (detail below).
+  - Re-derived the real token/cost decomposition (30 d, 1,027 sessions) and the real lever.
+  - **Corrected my OWN first figure**: the authoritative signal-usage count is **10**, not 6 — see the correction block below.
+  - Landed `5faf248d` (this doc) on `main`; opened **devrc#1271** (`b96737c7` + `c8879ade`) correcting `claude/skills/activity/SKILL.md`.
+- What's IN FLIGHT: **devrc#1271** — two Tekton gates (`tekton/devrc-nodetests`, `tekton/devrc-pytests`) were still `pending` when this was written. **NOT verified green.**
+- Deploy/verify status: docs only. Local `test_doc_path_rot.py` 77 passed; the two remote gates are unsettled.
 
 ## Open investigations — live diagnosis state
 ### Signal skill token consumption patterns
@@ -61,12 +62,22 @@ Evaluate the signal skill's performance, quality, and token efficiency using act
   `python3 ~/workspace/devrc/scripts/session-analysis/insights.py --days 14 --json`
   and cross-check against raw transcripts under `~/.claude/projects/*/`.
 
+### CORRECTION to the block above — the "6 sessions, all laptop" figure was itself wrong
+- **Symptom:** the CLOSED block above records the real signal population as **6 sessions, all 6 on laptop**, from ClickHouse `skills_used != ''`. That is the count in a **derived** surface, reported as if it were usage.
+- **Observed (with values):** `find-session --skill signal` (transcript-derived, every reachable host; stderr carried only the opencode caveat and named **no** unreachable peer) returns **10** sessions — **9 laptop / 1 workbench**. ClickHouse `skills_used` returns **6**, a strict SUBSET. The 4 missing: `50e9157d…` (workbench), `6fb90d0d…`, `9f8092ed…`, `ef3bf4ba…`.
+- **Ruled out:** "the 4 missing sessions were never ingested" — each HAS `session-summary` rows in ClickHouse (9, 13, 13 and 19 respectively); their `skills_used` map is simply **empty**. All 4 started 2026-08-19 → 2026-08-25. via: measurement
+- **Ruled out:** "`skills_used` is reliable from its 2026-08-04 first appearance" — that date is when the field first appears, NOT when it became reliable; coverage is partial at least three weeks later. via: measurement
+- **Leading hypothesis:** `skills_used` undercounts signal by **40%**. Treat transcripts (`find-session --skill`) as the defining surface and `skills_used` as derived. The token/cost findings in this doc are UNAFFECTED — they aggregate over all sessions and never filter on `skills_used`.
+- **Next probe:** measure the undercount on a second skill to see whether 40% is signal-specific or general: compare `find-session --skill <other>` against the same `!= ''` test.
+
 ## Next steps (ranked)
-1. Sample ~5 of the heaviest sessions' raw transcripts and classify text-only assistant turns as removable vs necessary, to size the real saving before changing any guidance. Repo: `devrc`. Touches `scripts/session-analysis/`.
+1. Get **devrc#1271** to a terminal gate state and merge it. Repo: `devrc`. IN FLIGHT: `devrc#1271`.
+   forcing: gate — two Tekton commit statuses are attached to the PR and unsettled; the change cannot land until they report.
+2. Quantify the `skills_used` undercount beyond one skill, then decide whether the field needs a backfill or only a documented caveat (the caveat is already in #1271). Repo: `devrc`. Touches `scripts/collector/`.
    forcing: none
-2. Fix the vacuous-predicate class at its source: `skills_used` is a JSON map and every consumer must test `!= ''`, never `IS NOT NULL`. Audit `scripts/session-analysis/` + `scripts/collector/` for the same shape and add a regression test. Repo: `devrc`.
-   forcing: regression — a shipped analysis in this repo's own claudedocs reported figures that were off by the entire population; the same predicate shape will silently do it again.
-3. Repair this doc's `clawgate-task: none` front-matter field so `/resume` stops emitting a GAP line on every read. Repo: `devrc`.
+3. Sample ~5 of the heaviest sessions' transcripts and classify text-only assistant turns as removable vs necessary, to size the real saving before changing guidance. Repo: `devrc`. Touches `scripts/session-analysis/`.
+   forcing: none
+4. Repair this doc's `clawgate-task: none` front-matter field so `/resume` stops emitting a GAP line. Repo: `devrc`.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -83,16 +94,25 @@ Evaluate the signal skill's performance, quality, and token efficiency using act
 - SOPS flag ordering matters: `sops -d --extract '…' --input-type yaml <(git show …)` — putting `--input-type yaml` AFTER the process substitution yields an empty password and a confusing `AUTHENTICATION_FAILED` from ClickHouse rather than a decrypt error.
 - devrc is a **PUBLIC** repo — client repo names are deliberately kept out of this doc.
 
+- 🔴 **The vacuous predicate exists NOWHERE in devrc's committed tooling** — scanned `scripts/` + `claude/` for `JSONExtract*(...) IS [NOT] NULL`; **0 hits**, with a positive control proving the regex matches the two known-bad forms and ignores the safe `!= ''`. So the earlier "audit the codebase for this shape" item was **retired**: the defect was introduced ad-hoc in a session and only ever lived in this handoff. The durable fix is the skill correction (devrc#1271), not a code change.
+- 🔴 **`find-session --skill` writes its report to STDOUT and its caveat to STDERR — do not split those streams with `cmd 2>&1 >/dev/null` in zsh.** MULTIOS copies stdout into the redirect too, so that idiom returns stdout while looking like it returns stderr, and a "no unreachable peer" conclusion drawn from it is unfounded. Redirect each to its OWN file and read both.
+- 🔴 **A poll loop that emits only on TRANSITIONS is indistinguishable from a dead poller.** A 20-minute Monitor over two `pending` gates exited 0 having printed nothing, because its filter emitted only newly-settled checks — the docs' "silence is not success" trap. Emit a per-poll heartbeat so *still pending* and *dead* are different observations.
+- ClickHouse aggregate aliasing: `SELECT any(host) AS host … GROUP BY host` is `ILLEGAL_AGGREGATION`. Alias to a different name (`AS h`) or nest the aggregate in a subquery.
+
 ## How to verify
 ```bash
-# 1. Reproduce the refutation (four-arm control). Expect: 1946 / 1946 / 0 / 6.
-SP=~/workspace/devrc/scripts   # reader creds via SOPS, see the activity skill
-# arm A: handoff predicate | arm B: no predicate | arm C: IS NULL | arm D: real test
+# 1. The refutation — four-arm control. Expect 1946 / 1946 / 0 / 6.
 #   ... AND JSONExtractString(payload,'skills_used','signal') IS NOT NULL   -> 1946
 #   ... (no predicate)                                                      -> 1946
 #   ... AND JSONExtractString(payload,'skills_used','signal') IS NULL       -> 0
 #   ... AND JSONExtractString(payload,'skills_used','signal') != ''         -> 6
 
-# 2. The authoritative way to ask "was skill X used?" — never hand-written SQL:
-find-session --skill signal
+# 2. The undercount — the authoritative surface disagrees with the derived one.
+#    Expect 10 sessions (9 laptop / 1 workbench) against the 6 above.
+python3 ~/workspace/devrc/scripts/find-session.py --skill signal >/tmp/fs.out 2>/tmp/fs.err
+grep -c 'claude --resume' /tmp/fs.out      # 10
+cat /tmp/fs.err                            # must name NO unreachable peer
+
+# 3. The PR's gates (never trust an empty rollup on a fresh PR — require >=2 terminal states)
+gh pr checks 1271 --repo innovation-upstream/devrc
 ```
