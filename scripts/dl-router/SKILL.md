@@ -247,16 +247,21 @@ and was measured at zero points** — every video in the live route log was
 already on the origin host, so the rewrite simply does not fire for them. It
 *will* fire on a proxy-host video src, and that shape is unverified.
 
+⚠ **The menu path has no PLAYER rules — but it is not rule-free.** It is
+governed by `[site_rules."<host>".context]`, which `content_capture.js` reads
+on the `contextmenu` event; those `subject`/`tags` selectors go in first as the
+most specific signal, and the sidecar's `/match` weighs them against the title,
+Open Graph, link text and the url-derived signals. So a context rule does not
+by itself *decide* the directory — it is the strongest lever a config author
+has. 🔴 **If menu downloads keep landing in the catch-all, that context rule is
+the first thing to add.**
+
 ### Player button details — everything below is about the BUTTON, not the menu
 
 🔴 The heading above closes the context-menu subsection. Without it, this
 block, the troubleshooting list and the DEPLOY ORDER note all read as
-context-menu guidance — and the context-menu path has no **player** rules, no
-accessors and no buttons, so every word of it would be filed under a path it
-cannot apply to. ⚠ It is not rule-free: the menu path IS governed by
-`[site_rules."<host>".context]`, which `content_capture.js` reads on the
-`contextmenu` event and which decides where a menu download files. If menu
-downloads keep landing in the catch-all, that context rule is the thing to add.
+context-menu guidance — and the menu path has no player rules, no accessors and
+no buttons, so every word of it would be filed under a path it cannot apply to.
 
 **Important details**
 - The media URL is **signed and rotates** — `player_buttons.js` reads it **at

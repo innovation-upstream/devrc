@@ -526,11 +526,17 @@ test("the menu saves the original, not the proxy thumbnail in the src", async ()
   // feature was inert: measured, a Discord image has no ancestor <a>, so a
   // real right-click never carries one -- the case below this one.
   //
-  // Keep both, and keep them for DIFFERENT reasons: THIS test is the only one
-  // that reaches the swap at all, because the one below supplies no `linkUrl`
-  // and therefore cannot. Deleting this one as redundant would remove the
-  // swap branch's only coverage. The swap is still correct wherever a browser
-  // does supply a link, which is why it stays.
+  // Keep both, and keep them for DIFFERENT reasons: of the two menu tests IN
+  // THIS FILE, only THIS one reaches the swap, because the one below supplies
+  // no `linkUrl` and therefore cannot. The swap is still correct wherever a
+  // browser does supply a link, which is why it stays.
+  //
+  // Scoped to this file deliberately. The swap's UNIT coverage lives in
+  // `identity.test.mjs` ("a proxy thumbnail is swapped for the original behind
+  // it"), which predates this PR and kills the swap mutant on its own; this
+  // one covers the same branch through the `onMenuClicked` seam. Two levels,
+  // not a duplicate -- an earlier version of this comment claimed this was the
+  // swap's ONLY coverage, which would have justified deleting the unit test.
   //
   // The comment here used to say the original sits "on the wrapping
   // <a href>", which is false and is why the swap looked sufficient.
