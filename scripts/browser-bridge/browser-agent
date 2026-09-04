@@ -79,6 +79,104 @@ die() { echo "browser-agent: $*" >&2; exit 2; }
 # binary can never leave an orphaned tab. Both constraints point the same way.)
 command -v "$OPENCODE_BIN" >/dev/null 2>&1 || die "opencode not found on PATH ('$OPENCODE_BIN') — install it or set BROWSER_AGENT_OPENCODE"
 
+# --- parse args (MUST stay above the config-dir bootstrap and the WARM block) - #
+# 🔴 THIS BLOCK USED TO LIVE ~300 LINES BELOW, after the warm/bootstrap block, and
+# that ordering cost 90 s on EVERY invocation that was going to be refused anyway.
+# The warm step is bounded by OC_WARM_TIMEOUT (90 s) and needs a writable config
+# dir plus network to npm-install @opencode-ai/plugin; under a fresh HOME it can
+# do neither, so it burns the FULL timeout and only THEN did `a goal is required`
+# fire. MEASURED 2026-09-04 with a fresh HOME: `browser-agent --dry-run` (no goal)
+# took 91 s to emit a refusal that needs no opencode at all. Argument validation is
+# free; do it before anything expensive. This is the SAME fix, for the same reason,
+# that moved the `command -v opencode` preflight above the bootstrap (see the
+# comment on that check) — cheap refusals must not pay for setup they never use.
+#
+# Nothing between here and the warm block reads a parsed variable (the only
+# `$STEPS` in it are prose and an ESCAPED `x\$STEPS` inside a warning string), and
+# nothing in the warm block reads a positional — every `$1` there is function-local.
+#
+# 🔴 THIS IS A REORDER, NOT A NO-OP: IT CHANGES WHICH `die` WINS A RACE. The block
+# is byte-identical and every input that reached the goal check before still gets
+# the same exit code and the same text — but an input that used to die EARLIER, in
+# the code this now precedes, is refused by THIS block instead. MEASURED 2026-09-04,
+# all three previously failing before argument validation and now after it:
+#   env -u HOME …              `HOME: unbound variable` rc 1  ->  `a goal is required` rc 2
+#   BROWSER_AGENT_WARM_TIMEOUT=abc  its own validation error  ->  `a goal is required`
+#   BROWSER_AGENT_LOCK_BUDGET=abc   its own validation error  ->  `a goal is required`
+#   a stray AGENTS.md in the config dir  `unexpected instruction file` -> same
+# 🔴 NOT AN EXHAUSTIVE LIST, and one class does NOT fit the "refused by this block
+# instead" shape — it flips a FAILURE INTO A SUCCESS. `-h`/`--help` is handled inside
+# this block, so in an environment that used to die before reaching it the exit code
+# now goes DOWN, not sideways: `env -u HOME … -h` was rc 1, is rc 0 with the help
+# printed; `BROWSER_AGENT_WARM_TIMEOUT=abc … -h` was rc 2, is rc 0. Read this as a
+# shape to check, never as a closed set.
+# ⚠ The first row is conditional on XDG_CACHE_HOME being unset — see the
+# `${XDG_CACHE_HOME:-$HOME/.cache}` assignment below; with it set, the old tree also
+# reached the goal check. The contexts named below are ones where it is unset.
+# `OC_CONFIG_DIR` derives from `$HOME` under `set -u` (see its assignment below),
+# which is why the first one is an EXIT-CODE change and not merely a wording one —
+# reachable from exactly the contexts the preflight comment above names (systemd
+# user units, cron, `env -i`). All three are improvements: a missing goal is the
+# user's actual error and needs no environment at all. Stated because "no behaviour
+# change" is the claim someone will check, and for these three inputs it is false.
+#
+# 🔴 WHAT PINS THIS BLOCK'S POSITION, precisely — an earlier draft of this comment got
+# it wrong and is the reason the wording is now this careful.
+#   * BELOW the warm/bootstrap  -> caught, by the BEHAVIOURAL guard
+#     `test_a_refusal_never_pays_for_the_opencode_warm` in
+#     `scripts/browser-bridge/tests/test_browser_agent.py`. Revert the reorder and it
+#     fails on its own config-dir assertion. That is the regression that matters.
+#   * ABOVE the `command -v opencode` preflight -> NOT CAUGHT BY ANYTHING. MEASURED
+#     2026-09-04: built exactly that mutant and `pytest scripts/tests/test_opencode_config.py
+#     -k browser_agent` returned 11 passed, and `scripts/browser-bridge/tests` 891 passed.
+# §7 of `test_opencode_config.py` asserts `preflight < bootstrap_call` on the
+# comment-stripped source; moving THIS block does not reorder that pair, so the
+# assertion stays true either way. It pins the preflight, NOT this block. The earlier
+# claim that a reorder above the preflight "would break it" was false, and a false
+# coverage claim is worse than none because it stops the next reader looking.
+# That file is still worth running after any reorder here (the
+# `scripts/browser-bridge/tests` target does NOT collect it) — just do not read a pass
+# as proof this block is where it should be.
+GOAL=""; GOAL_SEEN=0; INSTANCE=""; ALLOW=""; DENY=""; STEPS=12; TIMEOUT=120; DRYRUN=0
+_csv_to_ws() { printf '%s' "$1" | tr ',' ' '; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --instance) shift; [ $# -ge 1 ] || die "usage: --instance <key>"; INSTANCE="$1" ;;
+    --instance=*) INSTANCE="${1#--instance=}" ;;
+    --allow-domains) shift; [ $# -ge 1 ] || die "usage: --allow-domains a,b"; ALLOW="$(_csv_to_ws "$1")" ;;
+    --allow-domains=*) ALLOW="$(_csv_to_ws "${1#--allow-domains=}")" ;;
+    --deny-domains) shift; [ $# -ge 1 ] || die "usage: --deny-domains a,b"; DENY="$(_csv_to_ws "$1")" ;;
+    --deny-domains=*) DENY="$(_csv_to_ws "${1#--deny-domains=}")" ;;
+    --steps) shift; [ $# -ge 1 ] || die "usage: --steps N"; STEPS="$1" ;;
+    --steps=*) STEPS="${1#--steps=}" ;;
+    --timeout) shift; [ $# -ge 1 ] || die "usage: --timeout S"; TIMEOUT="$1" ;;
+    --timeout=*) TIMEOUT="${1#--timeout=}" ;;
+    --dry-run) DRYRUN=1 ;;
+    -h|--help) grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'; exit 0 ;;
+    # `--` ends the flags: everything after it is the goal, even if it starts with
+    # `-`. It used to take only the FIRST remaining arg and silently DROP the rest
+    # (`browser agent -- g1 g2` ran with goal "g1"), the same drop-after-`--` shape
+    # fixed in the `browser` CLI's nine loops. GOAL_SEEN (not [ -z "$GOAL" ]) so an
+    # empty first goal cannot be silently overwritten by a second.
+    --) shift
+        while [ $# -gt 0 ]; do
+          [ "$GOAL_SEEN" -eq 0 ] || die "only one goal is accepted (got extra: $1)"
+          GOAL="$1"; GOAL_SEEN=1; shift
+        done
+        break ;;
+    -*) die "unknown flag: $1" ;;
+    *) [ "$GOAL_SEEN" -eq 0 ] || die "only one goal is accepted (got extra: $1)"; GOAL="$1"; GOAL_SEEN=1 ;;
+  esac
+  shift
+done
+
+[ -n "$GOAL" ] || die "a goal is required: browser agent \"<goal>\""
+case "$STEPS" in (*[!0-9]*|"") die "--steps must be a positive integer (got: $STEPS)";; esac
+[ "$STEPS" -ge 1 ] 2>/dev/null || die "--steps must be >= 1 (got: $STEPS)"
+case "$TIMEOUT" in (*[!0-9]*|"") die "--timeout must be a positive integer of seconds (got: $TIMEOUT)";; esac
+[ "$TIMEOUT" -ge 1 ] 2>/dev/null || die "--timeout must be >= 1 (got: $TIMEOUT)"
+
+
 # --- isolated opencode CONFIG dir (token containment) ------------------------ #
 # devrc now deploys a ~43 KB global ~/.config/opencode/AGENTS.md (PRINCIPLES +
 # RULES + addendum). MEASURED on 1.18.4: that file IS injected into a run whose
@@ -439,45 +537,6 @@ print(json.dumps({"answer": sys.argv[1], "evidence": [],
                  separators=(",",":")))' "$reason" "$steps")"
 }
 
-# --- parse args -------------------------------------------------------------- #
-GOAL=""; GOAL_SEEN=0; INSTANCE=""; ALLOW=""; DENY=""; STEPS=12; TIMEOUT=120; DRYRUN=0
-_csv_to_ws() { printf '%s' "$1" | tr ',' ' '; }
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --instance) shift; [ $# -ge 1 ] || die "usage: --instance <key>"; INSTANCE="$1" ;;
-    --instance=*) INSTANCE="${1#--instance=}" ;;
-    --allow-domains) shift; [ $# -ge 1 ] || die "usage: --allow-domains a,b"; ALLOW="$(_csv_to_ws "$1")" ;;
-    --allow-domains=*) ALLOW="$(_csv_to_ws "${1#--allow-domains=}")" ;;
-    --deny-domains) shift; [ $# -ge 1 ] || die "usage: --deny-domains a,b"; DENY="$(_csv_to_ws "$1")" ;;
-    --deny-domains=*) DENY="$(_csv_to_ws "${1#--deny-domains=}")" ;;
-    --steps) shift; [ $# -ge 1 ] || die "usage: --steps N"; STEPS="$1" ;;
-    --steps=*) STEPS="${1#--steps=}" ;;
-    --timeout) shift; [ $# -ge 1 ] || die "usage: --timeout S"; TIMEOUT="$1" ;;
-    --timeout=*) TIMEOUT="${1#--timeout=}" ;;
-    --dry-run) DRYRUN=1 ;;
-    -h|--help) grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'; exit 0 ;;
-    # `--` ends the flags: everything after it is the goal, even if it starts with
-    # `-`. It used to take only the FIRST remaining arg and silently DROP the rest
-    # (`browser agent -- g1 g2` ran with goal "g1"), the same drop-after-`--` shape
-    # fixed in the `browser` CLI's nine loops. GOAL_SEEN (not [ -z "$GOAL" ]) so an
-    # empty first goal cannot be silently overwritten by a second.
-    --) shift
-        while [ $# -gt 0 ]; do
-          [ "$GOAL_SEEN" -eq 0 ] || die "only one goal is accepted (got extra: $1)"
-          GOAL="$1"; GOAL_SEEN=1; shift
-        done
-        break ;;
-    -*) die "unknown flag: $1" ;;
-    *) [ "$GOAL_SEEN" -eq 0 ] || die "only one goal is accepted (got extra: $1)"; GOAL="$1"; GOAL_SEEN=1 ;;
-  esac
-  shift
-done
-
-[ -n "$GOAL" ] || die "a goal is required: browser agent \"<goal>\""
-case "$STEPS" in (*[!0-9]*|"") die "--steps must be a positive integer (got: $STEPS)";; esac
-[ "$STEPS" -ge 1 ] 2>/dev/null || die "--steps must be >= 1 (got: $STEPS)"
-case "$TIMEOUT" in (*[!0-9]*|"") die "--timeout must be a positive integer of seconds (got: $TIMEOUT)";; esac
-[ "$TIMEOUT" -ge 1 ] 2>/dev/null || die "--timeout must be >= 1 (got: $TIMEOUT)"
 [ -f "$TEMPLATE" ] || die "agent template not found: $TEMPLATE"
 [ -r "$TOOL_JS" ] || die "custom tool not found: $TOOL_JS"
 [ -r "$TOOL_IMPL" ] || die "custom tool impl not found: $TOOL_IMPL"

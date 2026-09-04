@@ -33,6 +33,7 @@ column — **how it is counted**) are different, and `caveats.kind_scope` carrie
 | `--no-ch` | skip ClickHouse — drops the **largest non-row block** (17.4 KB below), which answers a different question |
 | `--no-capture` | skip the pane scrape; **every** `waiting_probable` AND `unsent_prompt` becomes `null` (both roll-ups `null`, never `0`) |
 | `--no-ledger` | skip the ledger read → **no age, no session id** on any row |
+| `--no-repo` | skip the per-host repo probe; every `repo` becomes `null` with `repo_status: skipped` — never `not_a_repo` |
 | `--fuzzyclaw` | the task-file join, **OFF by default** (see below) |
 
 `--json`, `--no-fuzzyclaw`, `--plain`, `--stale-threshold`, `--lines`, and what each drops:
