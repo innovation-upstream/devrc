@@ -1772,6 +1772,10 @@ def _is_ascii_int(s) -> bool:
     `²` and `①`; `int()` rejects both. Anywhere those two predicates are
     open-coded apart, the gap is an unhandled `ValueError` on a path a docstring
     promised would be `unparseable`.
+
+    ⚠ ONE-WAY, and deliberately so: this is a strict SUBSET of what `int()`
+    accepts (`int('١٢')` is 12; this returns False). See the call site in
+    `parse_repo_probe` for why that is correct and must not be "fixed".
     """
     return isinstance(s, str) and s.strip().isascii() and s.strip().isdigit()
 
@@ -1897,8 +1901,20 @@ def parse_repo_probe(raw, paths) -> dict:
         # promises `unparseable`. The blast radius is what makes a one-word bug
         # worth a comment: `gather` does not catch it, `tmux-snapshot-push.sh`
         # turns any traceback into `exit 3`, and that is NO snapshot for EITHER
-        # host. `isascii() and isdigit()` is exactly the set `int()` accepts
-        # without a sign, so the guard and the conversion can no longer disagree.
+        # host.
+        #
+        # 🔴 `isascii() and isdigit()` is a deliberate SUBSET of what `int()`
+        # accepts, NOT the same set — and the difference is the whole reason
+        # this comment exists. `int()` also takes non-ASCII decimal digits
+        # (`'١٢'`, `'１２'`, `'۱'`, `'٠'`, `'᱀'` all convert); this guard refuses
+        # every one of them, on purpose. The field it validates is `$n` out of
+        # the probe's POSIX arithmetic, which is ASCII by construction, so a
+        # non-ASCII digit here is a corrupted reply and not an index.
+        # ⚠ DO NOT "simplify" this to `try: int(x) / except ValueError` to make
+        # the validator and the converter agree — that widens the accepted
+        # index/rc alphabet to every Unicode decimal digit with nothing going
+        # red. What must not disagree is narrower: everything this guard
+        # ACCEPTS, `int()` converts.
         if not _is_ascii_int(idx) or not _is_ascii_int(code):
             unparseable += 1
             continue
@@ -3568,6 +3584,21 @@ def make_ch_client(env_file=ACTIVITY_ENV, opener=None):
     return _chq.CHClient(_chq.CHConn.from_env(env), opener=opener)
 
 
+def _ch_timeout(client):
+    """The HTTP timeout this client carries, or None when it carries none (an
+    injected test double, or a non-numeric attribute). PURE.
+
+    🔴 THE ONE READER of that attribute, so the clamp and the field that
+    PUBLISHES the clamp cannot disagree about what they saw. A `bool` is an
+    `int` in Python and is not a timeout; it is refused here rather than
+    silently compared against the reserve.
+    """
+    t = getattr(getattr(client, "conn", None), "timeout", None)
+    if not isinstance(t, (int, float)) or isinstance(t, bool):
+        return None
+    return t
+
+
 def _clamp_ch_timeout(client, reserve=COLLECT_CH_RESERVE):
     """Hold the ClickHouse client to `COLLECT_CH_RESERVE`. Returns the timeout
     in force, or None when this client carries none (an injected test double).
@@ -3580,13 +3611,12 @@ def _clamp_ch_timeout(client, reserve=COLLECT_CH_RESERVE):
     lowered value is left alone (it only buys headroom); only an over-run is
     clamped.
     """
-    conn = getattr(client, "conn", None)
-    t = getattr(conn, "timeout", None)
-    if not isinstance(t, (int, float)) or isinstance(t, bool):
+    t = _ch_timeout(client)
+    if t is None:
         return None
     if t > reserve:
-        conn.timeout = float(reserve)
-    return conn.timeout
+        client.conn.timeout = float(reserve)
+    return client.conn.timeout
 
 
 def ch_query(client, sql) -> dict:
@@ -3697,8 +3727,14 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         "local_host": local_host,
         "stale_threshold_secs": threshold,
         "hosts": {},
+        # `timeout_secs` / `timeout_clamped_from` are None here and in the
+        # `unavailable` branch below for the same reason every other count in
+        # this file is: no client was ever built, so nothing was clamped AND
+        # nothing was measured. A `0` or a `false` would be a fabricated
+        # reading of the operator's env file.
         "clickhouse": {"status": "skipped", "rows": [], "error": None,
-                       "code": None, "sql": ch_sql if use_ch else None},
+                       "code": None, "sql": ch_sql if use_ch else None,
+                       "timeout_secs": None, "timeout_clamped_from": None},
         # 🔴 Every count here is None, not 0. Under `--no-fuzzyclaw` NOTHING was
         # measured — the directory is never read — so a `files_live: 0` is a
         # fabricated measurement of exactly the class the `unmeasured` status
@@ -4309,14 +4345,37 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         except Exception as e:  # noqa: BLE001
             report["clickhouse"] = {"status": "unavailable", "rows": [],
                                     "error": f"{type(e).__name__}: {e}",
-                                    "code": None, "sql": ch_sql}
+                                    "code": None, "sql": ch_sql,
+                                    "timeout_secs": None,
+                                    "timeout_clamped_from": None}
         if client is not None:
-            # 🔴 The reserve, ENFORCED on the client that spends it. See
-            # `_clamp_ch_timeout` — without this the budget arithmetic is a
-            # belief about a per-host env file this process never checks.
-            _clamp_ch_timeout(client)
+            # 🔴 The reserve, ENFORCED on the client that spends it — and then
+            # PUBLISHED. See `_clamp_ch_timeout` — without the enforcement the
+            # budget arithmetic is a belief about a per-host env file this
+            # process never checks.
+            #
+            # 🔴 THE FIELDS ARE THE OTHER HALF, AND THEY ARE NOT DECORATION.
+            # This is the ONE place in this file that CHANGES a number instead
+            # of measuring one and publishing it, and it changes a number an
+            # operator SET. An operator who put `CLICKHOUSE_HTTP_TIMEOUT=60` in
+            # `~/.config/activity-collector/env` because their read is slow got
+            # a 15 s read, an ordinary-looking timeout in the block below, and
+            # an env file still saying 60 — i.e. they debug ClickHouse. The
+            # override is now visible in the payload: `timeout_secs` is what
+            # the read actually ran with, and `timeout_clamped_from` is the
+            # configured value it was reduced FROM, or None when nothing was
+            # reduced. Both are None when the client carries no timeout at all,
+            # which is "not measured" and not "not clamped".
+            configured = _ch_timeout(client)
+            in_force = _clamp_ch_timeout(client)
             res = ch_query(client, ch_sql)
             res["sql"] = ch_sql
+            res["timeout_secs"] = in_force
+            res["timeout_clamped_from"] = (
+                configured
+                if (configured is not None and in_force is not None
+                    and configured > in_force)
+                else None)
             report["clickhouse"] = res
 
     report["summary"] = summarize(report)

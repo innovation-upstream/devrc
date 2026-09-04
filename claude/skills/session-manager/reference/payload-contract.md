@@ -281,6 +281,17 @@ is published as one. *(Both numbers above are pinned to `COLLECT_BUDGET` / `COLL
 reads and their ORDER by
 `test_the_repo_probe_is_issued_AFTER_every_other_read_on_every_host`.)*
 
+🔴 **The ClickHouse read's own timeout is CLAMPED to `COLLECT_CH_RESERVE` (15 s), and the
+clamp is PUBLISHED.** `CHConn.from_env` resolves `CLICKHOUSE_HTTP_TIMEOUT` out of the
+collector's per-HOST env file, so an operator can configure a value the budget arithmetic
+cannot afford — and this is the one place in the collector that CHANGES a number instead of
+measuring one. `clickhouse.timeout_secs` is what the read actually ran with;
+`clickhouse.timeout_clamped_from` is the configured value it was reduced FROM, and is
+**`null` when nothing was reduced**. Both are `null` when no client carrying a timeout was
+built (`skipped`, `unavailable`, an injected double) — unmeasured, which is not the same
+claim as "not clamped". Without them a 60 s setting produced a 15 s read that read as an
+ordinary ClickHouse timeout, and the operator debugs ClickHouse.
+
 🔴 **ORDER MATTERS AND IT IS PART OF THE CONTRACT.** One deadline spans ALL hosts, so the
 LAST call issued is the one that starves. The repo probe is therefore a **second pass over
 the hosts**: every pre-existing read — panes, windows, capture, ledger — is issued for

@@ -13213,10 +13213,19 @@ def test_a_UNICODE_DIGIT_index_or_rc_is_unparseable_NEVER_a_ValueError():
     assert sm.parse_repo_probe(good, ["/w/a", "/w/b"])["unparseable"] == 0
 
 
-def test__is_ascii_int_is_exactly_the_set_int_accepts():
-    """The helper directly, in both directions — a validator and a converter
-    that disagree is the whole bug, so pin them against each other rather than
-    against a list someone typed."""
+def test__is_ascii_int_accepts_only_what_int_converts():
+    """The helper directly, in the ONE direction it actually pins: everything
+    the guard ACCEPTS, `int()` converts. A validator and a converter that
+    disagree *that* way is the whole bug, so sweep it rather than assert against
+    a list someone typed.
+
+    🔴 THE NAME USED TO SAY "is exactly the set `int()` accepts" AND THAT WAS
+    MEASURED FALSE — by this very body, whose negative list asserts
+    `_is_ascii_int("１") is False` while `int("１") == 12`. The converse
+    direction is deliberately NOT pinned; see
+    `test_the_ascii_int_guard_is_documented_as_a_SUBSET_not_an_equivalence`
+    for the subset that is intended and why widening it would be a bug.
+    """
     for s in ("0", "1", "128", " 7 ", "00"):
         assert sm._is_ascii_int(s) is True, s
         int(s.strip())                       # the converter agrees
@@ -13242,6 +13251,73 @@ def test__is_ascii_int_is_exactly_the_set_int_accepts():
     # POSITIVE CONTROL on the sweep: it really did examine a character `int()`
     # rejects, so an empty `disagreeing` is a measurement and not an empty loop.
     assert "²".isdigit() and not sm._is_ascii_int("²")
+
+
+def test_the_ascii_int_guard_is_documented_as_a_SUBSET_not_an_equivalence():
+    """🔴 A FALSE EQUIVALENCE CLAIM THAT LICENSED A WRONG REFACTOR.
+
+    `parse_repo_probe` used to state that `isascii() and isdigit()` "is exactly
+    the set `int()` accepts without a sign", and the helper's own test carried
+    that sentence in its NAME. Measured false in the other direction: `int()`
+    also converts non-ASCII decimal digits — `'١٢'`, `'１２'`, `'۱'`, `'٠'`,
+    `'᱀'` — every one of which this guard rejects.
+
+    The hazard is not the wording. A maintainer who believes the two sets are
+    equal replaces the guard with `try: int(x) / except ValueError` to remove
+    the duplication, and that widens the accepted index/rc alphabet to every
+    Unicode decimal digit **with nothing going red** — the existing sweep only
+    checks guard-accepts ⇒ int-accepts, which such a rewrite satisfies.
+
+    So this pins the measurement AND the claim: the subset is real, it is
+    stated as a subset on both surfaces a maintainer reads, and the false
+    equivalence is gone from both.
+
+    ⚠ RESIDUAL, STATED RATHER THAN HIDDEN: the second half is a guard on WORDS,
+    so a *reworded* equivalence claim would walk it. What it cannot walk is the
+    first half, which is a measurement, and the requirement that each surface
+    still say SUBSET.
+    """
+    import inspect
+
+    # --- 1. THE MEASUREMENT: `int()` really is strictly wider -----------------
+    wider = []
+    for i in range(0x3000):
+        c = chr(i)
+        try:
+            int(c)
+        except (ValueError, TypeError):
+            continue
+        if not sm._is_ascii_int(c):
+            wider.append(c)
+    assert len(wider) >= 100, (
+        "the sweep found only %d characters `int()` accepts and the guard "
+        "refuses — it is not measuring the subset" % len(wider))
+    for c in "١٢۱٠᱀":
+        assert c in wider, c
+    # ...and multi-character strings too, which is the shape the probe emits.
+    for s in ("١٢", "１２"):
+        assert int(s) == 12 and sm._is_ascii_int(s) is False, s
+
+    # --- 2. THE CLAIM, on both surfaces a maintainer reads --------------------
+    FALSE = "exactly the set `int()` accepts"
+    surfaces = {
+        "parse_repo_probe (the call site)":
+            inspect.getsource(sm.parse_repo_probe),
+        "_is_ascii_int (the helper)":
+            inspect.getsource(sm._is_ascii_int),
+    }
+    for where, src in surfaces.items():
+        assert FALSE not in src, (
+            "%s still claims the guard is `%s` — it is a strict subset"
+            % (where, FALSE))
+        assert "SUBSET" in src, (
+            "%s no longer states that the guard is a deliberate SUBSET of what "
+            "`int()` accepts; without it the next reader re-derives the wrong "
+            "refactor" % where)
+    # The TEST NAME is a surface too — it is what a reader greps for to find out
+    # what the helper guarantees, and it carried the false claim verbatim.
+    named = [n for n in globals() if "exactly_the_set_int_accepts" in n]
+    assert named == [], named
 
 
 def test_the_refused_break_characters_are_DERIVED_from_str_splitlines():
@@ -14039,6 +14115,81 @@ def test_the_CH_RESERVE_is_ENFORCED_on_the_client_that_SPENDS_it():
     # POSITIVE CONTROL on the fixture: it really does observe the query, so
     # `timeout_at_query` is a measurement and not a default that was never set.
     assert over.timeout_at_query is not None
+
+
+def _ch_factory_that_raises():
+    raise RuntimeError("no CLICKHOUSE_URL")
+
+
+def test_the_CH_TIMEOUT_CLAMP_is_PUBLISHED_and_never_SILENT():
+    """🔴 THE ONE PLACE IN THIS FILE THAT CHANGES A NUMBER INSTEAD OF PUBLISHING
+    ONE. `gather` called `_clamp_ch_timeout(client)` and DISCARDED the return,
+    so the whole event was invisible: an operator who set
+    `CLICKHOUSE_HTTP_TIMEOUT=60` in `~/.config/activity-collector/env` because
+    their read is slow got a 15 s read, an ordinary-looking timeout in the
+    `clickhouse` block, and an env file still saying 60 — i.e. they debug
+    ClickHouse, which is not where the 15 came from.
+
+    The whole discipline of this file is that a read which did not happen is
+    published as one. A read that happened under a budget the operator did not
+    choose is the same claim, and it now carries the same two fields in EVERY
+    branch — so a consumer never has to tell an absent key from a null one.
+    """
+    # CLAMPED: the configured value is named, and `timeout_secs` is what the
+    # read actually ran with. 60 and 3 are both distinct from the reserve, so
+    # neither assertion can be satisfied by the constant alone.
+    over = _FakeCHClient(60.0)
+    ch = base_gather(use_ch=True, ch_client_factory=lambda: over)["clickhouse"]
+    assert ch["timeout_secs"] == sm.COLLECT_CH_RESERVE, ch
+    assert ch["timeout_clamped_from"] == 60.0, ch
+    # POSITIVE CONTROL on the fixture: the clamp really was in force AT THE
+    # QUERY, so the published pair describes the read and not an object.
+    assert over.timeout_at_query == sm.COLLECT_CH_RESERVE
+
+    # NOT CLAMPED: stated positively as `None`, never as the configured value
+    # repeated back. A `>=` in place of the `>` is red here.
+    under = _FakeCHClient(3.0)
+    ch = base_gather(use_ch=True, ch_client_factory=lambda: under)["clickhouse"]
+    assert ch["timeout_secs"] == 3.0, ch
+    assert ch["timeout_clamped_from"] is None, ch
+
+    # NO TIMEOUT AT ALL (an injected double): UNMEASURED on both, which is not
+    # the same claim as "not clamped" — hence both null rather than a 0.
+    ch = base_gather(use_ch=True,
+                     ch_client_factory=lambda: FakeCH(rows=[CH_ROW]))["clickhouse"]
+    assert ch["status"] == "ok", ch
+    assert ch["timeout_secs"] is None and ch["timeout_clamped_from"] is None, ch
+
+    # ...and the KEYS are present in every other branch too — `skipped` (no
+    # client is ever built) and `unavailable` (the factory raised).
+    for label, kw in (("skipped", dict(use_ch=False)),
+                      ("unavailable",
+                       dict(use_ch=True,
+                            ch_client_factory=_ch_factory_that_raises))):
+        ch = base_gather(**kw)["clickhouse"]
+        assert ch["status"] == label, ch
+        assert "timeout_secs" in ch and "timeout_clamped_from" in ch, (label, ch)
+        assert ch["timeout_secs"] is None, (label, ch)
+        assert ch["timeout_clamped_from"] is None, (label, ch)
+
+
+def test__ch_timeout_is_the_ONE_reader_of_the_clients_timeout():
+    """The accessor the clamp and the published field share, so the two can
+    never disagree about what they saw. A `bool` is an `int` and is refused."""
+    import inspect
+
+    assert sm._ch_timeout(object()) is None
+    assert sm._ch_timeout(FakeCH()) is None            # no `conn` at all
+    assert sm._ch_timeout(_FakeCHClient(90.0)) == 90.0
+    assert sm._ch_timeout(_FakeCHClient(True)) is None
+    assert sm._ch_timeout(_FakeCHClient("30")) is None
+    # ...and the clamp reads THROUGH it rather than open-coding the same
+    # `getattr` chain a second time — that duplication is what let the reserve
+    # and the published value drift apart in the first place.
+    src = inspect.getsource(sm._clamp_ch_timeout)
+    assert "_ch_timeout(client)" in src, src
+    assert "getattr(" not in src, (
+        "`_clamp_ch_timeout` reads the client's timeout itself again", src)
 
 
 def test__clamp_ch_timeout_never_raises_on_a_client_without_a_conn():
