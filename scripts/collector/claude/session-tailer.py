@@ -875,11 +875,63 @@ def emit_event(emit: str, ev: dict) -> None:
 # state file grow without limit, not that 200 is a meaningful threshold.
 MENTIONS_PER_SESSION_CAP = 200
 
-# Cheap pre-filter before the regex pass. Every pattern in mention_scan requires
-# a literal '#' or the literal '868', so a text block containing neither cannot
-# possibly match and does not need scanning. This is the same short-circuit the
-# rejected hook design needed, applied where it is nearly free.
-_MENTION_HINTS = ("#", "868")
+# Cheap pre-filter before the regex pass: a text block containing none of these
+# literals cannot match any pattern this tailer scans for, and does not need
+# scanning. Measured over one 24h window it skipped 81% of assistant text blocks.
+#
+# 🔴 DERIVED FROM THE SCANNER'S OWN LEDGER, NEVER HAND-MAINTAINED. This used to
+# be the literal `("#", "868")`, and that made it the exact place a widening goes
+# to die: every telemetry-only shape the scanner learned — `audit-pr 1291`,
+# `gh pr view 1291`, `clawgate task 370` — contains neither literal, so the
+# regexes would have been reachable in a unit test calling `scan_mentions()`
+# directly and DEAD in production, with the whole suite green. Deriving it means
+# a pattern added to `PATTERN_LEDGER` widens the filter in the same commit,
+# because there is nowhere else to put the fact.
+#
+# 🔴 AND IT IS THE TELEMETRY PROFILE, not the default. `mention_hints()` with no
+# argument returns the TERMINAL profile's two literals — the old value — which
+# would look correct, pass a "derived from the ledger" review, and still skip
+# every new shape.
+_MENTION_HINTS = MS.mention_hints(MS.PROFILE_TELEMETRY)
+
+# Where the operator's generated repo mapping lives — the same per-host file
+# `scripts/mention-open.py` reads, and for the same reason: it names PRIVATE
+# repositories, so it lives OUTSIDE every checkout and this repo is public.
+# Nothing breaks when it is absent; a `#N` simply stays unattributed.
+#
+# 🔴 THIS EXPRESSION IS THE THIRD COPY OF ONE PATH — the generator writes it, the
+# hint handler reads it, and now so does this tailer. They agree only by
+# coincidence, so `scripts/tests/test_mention_open.py` imports all three modules
+# and pins the three answers equal. Move one and the mapping is generated into
+# a file nothing loads, or read from a file nothing writes, with every suite green.
+#
+# 🔴 A FUNCTION, NOT A MODULE CONSTANT, and that is not a style choice. A
+# constant is evaluated at IMPORT, so a test setting `MENTION_OPEN_KNOWN_REPOS`
+# afterwards changes nothing and the tailer reads the OPERATOR'S REAL mapping —
+# which names private repositories. `scripts/mention-open.py` records the same
+# defect twice (`load_known_repos`, `discover_repos`): once measured running 91
+# real `git remote` calls from a test that believed it had an empty fixture.
+def mention_repos_path() -> Path:
+    return Path(
+        os.environ.get("MENTION_OPEN_KNOWN_REPOS")
+        or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        / "mention-open" / "known_repos.json")
+
+
+def load_mention_repos(path: Path | None = None) -> dict:
+    """{repo name: "owner/repo"} from the operator's generated mapping, or {}.
+
+    🔴 EVERY failure is {} — absent, unreadable, malformed, wrong shape. This
+    runs inside a timer-driven collector: a mapping it cannot read must cost
+    attribution, never the telemetry pass. The value SHAPE rule is
+    `mention_scan.clean_repo_map`, shared with the hint handler so the two
+    cannot disagree about what a usable entry is.
+    """
+    p = path or mention_repos_path()
+    try:
+        return MS.clean_repo_map(json.loads(p.read_text()))
+    except (OSError, ValueError):
+        return {}
 
 
 def mention_key(m: dict) -> str:
@@ -892,8 +944,13 @@ def mention_key(m: dict) -> str:
     return f"{m['platform']}:{m['raw']}"
 
 
-def collect_mentions(objects: list[dict]) -> list[dict]:
+def collect_mentions(objects: list[dict], *, repos: dict | None = None) -> list[dict]:
     """Distinct mentions in this session's ASSISTANT text, in first-seen order.
+
+    `repos` is the caller-measured {name: "owner/repo"} mapping used to attribute
+    a bare `#N` written next to a repo token (`devrc PR #1291`). It is a
+    PARAMETER and not a module read for the same reason the rest of this function
+    is pure: `main()` loads it once per pass, and every test can supply its own.
 
     Assistant TEXT blocks only — not tool inputs, not tool results, not user
     messages. A tool result is usually a file the agent read, so scanning it
@@ -927,12 +984,19 @@ def collect_mentions(objects: list[dict]) -> list[dict]:
                 continue
             if not any(h in text for h in _MENTION_HINTS):
                 continue
-            for span in MS.scan_mention_spans(text):
+            # 🔴 THE WIDER PROFILE. Telemetry is a private row, not an underlined
+            # span on the operator's screen, so this side of the split takes the
+            # enumerated widening (`gh pr view N`, `clawgate task N`, GitHub URLs)
+            # that `scripts/mention-open.py` deliberately does not.
+            for span in MS.scan_mention_spans(text, repos=repos,
+                                              profile=MS.PROFILE_TELEMETRY):
                 m = {
                     "platform": span["platform"],
                     "id": span["id"],
                     "raw": span["raw"],
                     "url": span["url"],
+                    "repo": span["repo"],
+                    "repo_source": span["repo_source"],
                     "context": span["context"],
                     "candidates": ",".join(c["platform"] for c in span["candidates"]),
                     "ts": ts,
@@ -949,8 +1013,16 @@ def collect_mentions(objects: list[dict]) -> list[dict]:
 
 def build_mention_emit_args(ev: dict, m: dict) -> list[str]:
     """The v1 emit line for one mention. Unknown keys (`platform`,
-    `reference_id`, `url`, `context`, `candidates`) land in the collector's
-    `payload` JSON — no schema change, see collector.parse_line."""
+    `reference_id`, `url`, `repo`, `repo_source`, `context`, `candidates`) land
+    in the collector's `payload` JSON — no schema change, see collector.parse_line.
+
+    `repo` is the ATTRIBUTION and it is what makes an ambiguous row useful: 92%
+    of mentions in a measured 24h window were a bare `#N`, and a row that names
+    the repository can be grouped even when the platform is still open.
+    `repo_source` rides beside it so a consumer can tell a repo the text stated
+    from one resolved through the operator's mapping — an analysis that cannot
+    separate those is one measurement pretending to be two.
+    """
     args = [
         "source=mentions",
         "kind=mention-detected",
@@ -960,6 +1032,9 @@ def build_mention_emit_args(ev: dict, m: dict) -> list[str]:
         f"platform={m['platform']}",
         f"b64:reference_id={m['id']}",
         f"b64:url={m['url']}",
+        f"b64:repo={m.get('repo', '')}",
+        # Also a fixed vocabulary (mention_scan's SOURCE_* constants).
+        f"repo_source={m.get('repo_source', '')}",
         f"b64:context={m['context']}",
         f"b64:candidates={m['candidates']}",
         f"b64:project={ev['project']}",
@@ -1195,6 +1270,9 @@ def run(now: float | None = None) -> int:
     sp = state_path()
     prev = load_state(sp)
     emit = emit_path()
+    # ONCE per pass, not once per transcript: the mapping is a property of the
+    # host, and re-reading it per session would be hundreds of identical reads.
+    mention_repos = load_mention_repos()
 
     # Start from the prior state and update a session's entry ONLY after it has
     # been (re-)emitted (or confirmed unchanged/deferred), checkpointing
@@ -1268,7 +1346,7 @@ def run(now: float | None = None) -> int:
                 mentions = []
             else:
                 rollup = build_rollup(objects)
-                mentions = collect_mentions(objects)
+                mentions = collect_mentions(objects, repos=mention_repos)
             ev = build_event(session, rollup)
         except Exception as exc:  # noqa: BLE001 — deliberately broad; see above
             failed += 1

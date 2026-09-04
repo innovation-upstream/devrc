@@ -302,3 +302,474 @@ def test_results_are_ordered_by_position():
     text = "868abc123 then devrc#1 then #2"
     assert [m["start"] for m in MS.scan_mentions(text)] == sorted(
         m["start"] for m in MS.scan_mentions(text))
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PROFILE SPLIT
+#
+# The module used to run ONE set of regexes so the terminal and the telemetry
+# could never disagree. That invariant is deliberately relaxed along exactly one
+# axis, so the relaxation has to be EXPLICIT: a ledger, pinned two-way, and a
+# default that keeps the click surface where it was.
+# --------------------------------------------------------------------------- #
+def _compiled_pattern_names():
+    """Every module-level compiled regex, read from the module itself rather
+    than restated here — so a pattern added tomorrow is covered without editing
+    this file. Private helpers (leading underscore) are excluded: the ledger is
+    about what the SCAN consults, and `_` marks an implementation detail."""
+    import re as _re
+    return {name for name, val in vars(MS).items()
+            if isinstance(val, _re.Pattern) and not name.startswith("_")}
+
+
+def test_the_pattern_ledger_is_pinned_TWO_WAY():
+    """🔴 BOTH DIRECTIONS, because each one fails differently and silently.
+
+    A pattern with NO ledger entry is never consulted in any profile — it
+    compiles, it looks live, and `scan_mentions` skips it forever.
+    A ledger entry naming NO pattern is a row asserting coverage that does not
+    exist, which is worse than no row because it stops anyone looking."""
+    declared = set(MS.PATTERN_LEDGER)
+    compiled = _compiled_pattern_names()
+    assert declared - compiled == set(), (
+        "ledger entries that name no compiled pattern: "
+        f"{sorted(declared - compiled)}")
+    # `NON_SCAN_PATTERNS` is the ONLY other home a compiled pattern may have,
+    # and it is itself pinned below — so "in neither" is a failure, not a gap.
+    unclassified = compiled - declared - MS.NON_SCAN_PATTERNS
+    assert unclassified == set(), (
+        "compiled patterns in NEITHER the ledger nor NON_SCAN_PATTERNS — they "
+        f"are consulted in NO profile and are dead: {sorted(unclassified)}")
+
+
+def test_the_non_scan_escape_hatch_is_pinned_TOO():
+    """An escape hatch nobody has to justify is how the next pattern lands in no
+    ledger at all. Both directions again: a name here must be a real compiled
+    pattern, and it must not ALSO claim a profile in the ledger."""
+    compiled = _compiled_pattern_names()
+    assert MS.NON_SCAN_PATTERNS <= compiled, (
+        f"names no compiled pattern: {sorted(MS.NON_SCAN_PATTERNS - compiled)}")
+    assert not (MS.NON_SCAN_PATTERNS & set(MS.PATTERN_LEDGER)), (
+        "a pattern cannot be both scanned and not-scanned")
+    assert MS.NON_SCAN_PATTERNS == {"OWNER_REPO_VALUE_RE"}, (
+        "the hatch grew — every addition needs its own reason in the module")
+
+
+def test_every_ledger_entry_names_real_profiles_and_a_real_role():
+    for name, entry in MS.PATTERN_LEDGER.items():
+        assert entry.profiles, f"{name} is enabled in no profile at all"
+        assert set(entry.profiles) <= set(MS.PROFILES), name
+        assert entry.role in ("detect", "attribute"), f"{name}: {entry.role}"
+
+
+def test_every_ledger_SAMPLE_actually_matches_its_pattern():
+    """A sample that does not match makes the hint check below vacuous — it
+    would prove a property of a string nothing ever matched."""
+    for name, entry in MS.PATTERN_LEDGER.items():
+        pattern = getattr(MS, name)
+        assert pattern.search(entry.sample), (
+            f"{name}'s ledger sample {entry.sample!r} does not match it")
+
+
+def test_every_detecting_patterns_HINTS_are_honest_about_its_sample():
+    """🔴 THE HINT IS A CLAIM: "a text without one of these cannot match". A hint
+    that is not present in a text the pattern DOES match is a false claim, and it
+    shows up in production as a shape that is silently never scanned."""
+    for name, entry in MS.PATTERN_LEDGER.items():
+        if entry.role != "detect":
+            continue
+        assert entry.hints, f"{name} declares no hints"
+        assert any(h in entry.sample for h in entry.hints), (
+            f"{name}'s hints {entry.hints} appear in none of its own sample "
+            f"{entry.sample!r} — the pre-filter would skip it")
+
+
+def test_attribution_patterns_contribute_NO_hints():
+    """They cannot produce a mention on their own, so a text carrying only one
+    of them has nothing to emit; letting them widen the pre-filter would cost
+    the short-circuit and buy nothing."""
+    for name, entry in MS.PATTERN_LEDGER.items():
+        if entry.role == "attribute":
+            assert entry.hints == (), f"{name} widened the filter for nothing"
+
+
+def test_the_terminal_profiles_hints_are_still_the_original_two():
+    """🔴 THE CLICK SURFACE DID NOT MOVE. This is the value the tailer used to
+    hardcode, and it is the value `scripts/mention-open.py` still implies."""
+    assert MS.mention_hints() == ("#", "868")
+    assert MS.mention_hints(MS.PROFILE_TERMINAL) == ("#", "868")
+
+
+def test_the_telemetry_profiles_hints_cover_every_new_shape():
+    """🔴 THE INERT-PREFILTER GUARD, at the module end of the seam. Each of these
+    shapes contains NEITHER '#' NOR '868', so under the terminal hints the
+    tailer's short-circuit would skip the block and the regex would never run."""
+    hints = MS.mention_hints(MS.PROFILE_TELEMETRY)
+    for text in ("https://github.com/gardenersguild/trowelcast/pull/7",
+                 "/audit-pr 1291",
+                 "audit-pr 1291",
+                 "gh pr view 1291",
+                 "gh issue close 42",
+                 "clawgate task 370"):
+        assert any(h in text for h in hints), f"{text!r} would be pre-filtered away"
+        assert not any(h in text for h in MS.mention_hints(MS.PROFILE_TERMINAL)), (
+            f"{text!r} was expected to be invisible to the OLD hints — if it is "
+            "not, this test proves nothing about the widening")
+
+
+def test_an_unknown_profile_falls_back_to_the_NARROW_one():
+    """🔴 A typo must never widen the click surface. Falling back to `telemetry`
+    would be the same defect in the direction nobody notices."""
+    assert MS.patterns_in("teleemtry") == MS.patterns_in(MS.PROFILE_TERMINAL)
+    assert MS.scan_mentions("gh pr view 1291", profile="teleemtry") == []
+    assert MS.mention_hints("nonsense") == ("#", "868")
+
+
+def test_the_terminal_profile_is_the_DEFAULT():
+    """Pinned as a behaviour, not only as a default argument: this is what keeps
+    `scripts/mention-open.py` unchanged without it having to say anything."""
+    for text in ("https://github.com/gardenersguild/trowelcast/pull/7",
+                 "/audit-pr 1291", "gh pr view 1291", "clawgate task 370",
+                 "https://clawgate.zacx.dev/tasks#task-370"):
+        assert MS.scan_mentions(text) == [], f"the DEFAULT profile matched {text!r}"
+        assert MS.scan_mention_spans(text) == []
+
+
+# --------------------------------------------------------------------------- #
+# The enumerated widening — one positive per new shape (telemetry profile)
+# --------------------------------------------------------------------------- #
+TELEMETRY = {"profile": MS.PROFILE_TELEMETRY}
+
+
+def test_a_github_pull_url_is_a_mention_and_carries_its_own_owner():
+    (span,) = MS.scan_mention_spans(
+        "landed https://github.com/gardenersguild/trowelcast/pull/7 today", **TELEMETRY)
+    assert span["platform"] == "github"
+    assert span["id"] == "7"
+    assert span["repo"] == "gardenersguild/trowelcast"
+    assert span["repo_source"] == MS.SOURCE_URL
+    assert span["url"] == "https://github.com/gardenersguild/trowelcast/issues/7"
+
+
+def test_a_github_issues_url_too_and_a_scheme_is_optional():
+    for text in ("github.com/hobbyist/plotwidget/issues/4213",
+                 "https://github.com/hobbyist/plotwidget/issues/4213",
+                 "http://github.com/hobbyist/plotwidget/issues/4213"):
+        (span,) = MS.scan_mention_spans(text, **TELEMETRY)
+        assert span["repo"] == "hobbyist/plotwidget", text
+        assert span["id"] == "4213", text
+
+
+def test_a_url_with_trailing_path_segments_still_names_the_same_pr():
+    """`/pull/7/files` is PR 7. `_NUM_END` permits a following `/` on purpose."""
+    (span,) = MS.scan_mention_spans(
+        "https://github.com/gardenersguild/trowelcast/pull/7/files", **TELEMETRY)
+    assert span["id"] == "7"
+
+
+def test_a_dotted_repo_name_IS_detected_in_the_URL_form():
+    """The no-dots rule exists to keep `index.html#12` out of the `repo#N` form.
+    A URL delimits `owner/repo` with slashes, so the hazard is absent and the
+    cost the module documents for `repo#N` is not paid here."""
+    (span,) = MS.scan_mention_spans(
+        "https://github.com/hobbyist/plot.widget.js/pull/9", **TELEMETRY)
+    assert span["repo"] == "hobbyist/plot.widget.js"
+
+
+@pytest.mark.parametrize("text,num", [
+    ("/audit-pr 1291", "1291"),
+    ("audit-pr 1291", "1291"),
+    ("run /audit-pr 1291 next", "1291"),
+])
+def test_the_audit_pr_command_is_a_github_reference(text, num):
+    (span,) = MS.scan_mention_spans(text, **TELEMETRY)
+    assert span["platform"] == "github"
+    assert span["id"] == num
+
+
+@pytest.mark.parametrize("text,num", [
+    ("gh pr view 1291", "1291"),
+    ("gh pr merge 887 --squash", "887"),
+    ("gh issue close 42", "42"),
+    ("gh issue comment 3", "3"),
+])
+def test_the_gh_cli_forms_are_github_references(text, num):
+    spans = MS.scan_mention_spans(text, **TELEMETRY)
+    assert [s["id"] for s in spans] == [num], text
+    assert spans[0]["platform"] == "github"
+
+
+def test_a_gh_subcommand_that_is_NOT_on_the_enumerated_list_is_not_detected():
+    """🔴 THE ENUMERATION IS THE GUARD. `\\w+` there would make `gh pr 12345`,
+    `gh repo clone 3` and any future subcommand a reference."""
+    assert MS.scan_mentions("gh pr rebase 1291", **TELEMETRY) == []
+    assert MS.scan_mentions("gh repo view 1291", **TELEMETRY) == []
+    assert "rebase" not in MS.GH_CLI_SUBCOMMANDS
+
+
+@pytest.mark.parametrize("text", ["clawgate task 370", "Clawgate task 370",
+                                  "the clawgate Task 370 board"])
+def test_clawgate_task_N_is_a_clawgate_reference(text):
+    (span,) = MS.scan_mention_spans(text, **TELEMETRY)
+    assert span["platform"] == "clawgate"
+    assert span["id"] == "370"
+    assert span["url"] == "https://clawgate.zacx.dev/tasks/370"
+
+
+def test_a_BARE_task_N_is_deliberately_NOT_detected():
+    """🔴 179 occurrences in one measured 24h window, overwhelmingly prose. The
+    literal `clawgate` is the entire anchor; without it there is no pattern here
+    worth having."""
+    for text in ("task 5 of 9", "the task 3 lines down", "task 370"):
+        assert MS.scan_mentions(text, **TELEMETRY) == [], text
+
+
+def test_the_legacy_task_anchor_resolves_to_the_task_page():
+    (span,) = MS.scan_mention_spans(
+        "https://clawgate.zacx.dev/tasks#task-370", **TELEMETRY)
+    assert span["platform"] == "clawgate"
+    assert span["url"] == "https://clawgate.zacx.dev/tasks/370"
+    assert "#" not in span["url"], "the constructor must not mint a fragment"
+
+
+def test_the_legacy_anchor_is_reachable_AFTER_A_WORD_CHARACTER():
+    """🔴 THE INERT-GUARD CASE FOR THIS PATTERN. Every real occurrence of the
+    legacy form sits at the end of `.../tasks#task-N`, where the character before
+    `#` is a LETTER — so the module's standard left guard rejects all of them and
+    a pattern carrying it would be dead on arrival. Deleting the relaxed
+    lookbehind turns this red while every other case above stays green."""
+    (span,) = MS.scan_mention_spans("tasks#task-370", **TELEMETRY)
+    assert span["id"] == "370"
+
+
+def test_git_shas_are_NOT_detected_in_either_profile():
+    """🔴 A `[0-9a-f]{7,12}` probe over one 24h window returned ~520,000 hits.
+    Pinned because it is the widening somebody will reach for next."""
+    for text in ("fixed in 099771da", "squash fd68d48c", "at a1adf740 today"):
+        assert MS.scan_mentions(text, **TELEMETRY) == [], text
+        assert MS.scan_mentions(text) == [], text
+
+
+def test_no_two_spans_ever_OVERLAP_in_the_wider_profile():
+    """🔴 The widening's structural hazard: two patterns claiming overlapping
+    text emit the SAME reference twice. `clawgate task #370` is the case that
+    forced `CLAWGATE_TASK_RE` to refuse a `#`."""
+    text = ("clawgate task 370 and clawgate task #371, "
+            "https://github.com/gardenersguild/trowelcast/pull/7 "
+            "plus gh pr view 12 and /audit-pr 13 and tasks#task-14 "
+            "and 868abc123 and hobbyist/plotwidget#15 and #16")
+    spans = MS.scan_mention_spans(text, **TELEMETRY)
+    assert len(spans) >= 9, spans
+    ends = [(s["start"], s["end"]) for s in spans]
+    for (_a_start, a_end), (b_start, _b_end) in zip(ends, ends[1:]):
+        assert a_end <= b_start, f"spans overlap: {ends}"
+
+
+# --------------------------------------------------------------------------- #
+# ATTRIBUTION — each source proved SEPARATELY
+#
+# 🔴 THE FIXTURE VALUES ARE PAIRWISE DISTINCT AND DISTINCT FROM EVERY CONSTANT
+# THE ASSERTIONS NAME, so a mutant that hardcodes any one owner/repo literal
+# cannot survive by landing on the expected value.
+# --------------------------------------------------------------------------- #
+REPOS = {
+    "trowelcast": "gardenersguild/trowelcast",
+    "plotwidget": "hobbyist/plotwidget",
+    "spadeworks": "rivalorg/spadeworks",
+}
+
+
+def test_A2_a_repo_token_immediately_before_the_ref_attributes_it():
+    (span,) = MS.scan_mention_spans("trowelcast PR #1291", repos=REPOS, **TELEMETRY)
+    assert span["repo"] == "gardenersguild/trowelcast"
+    assert span["repo_source"] == MS.SOURCE_ADJACENT
+    assert span["candidates"][1]["url"] == (
+        "https://github.com/gardenersguild/trowelcast/issues/1291")
+
+
+def test_A2_works_without_a_connector_word_too():
+    (span,) = MS.scan_mention_spans("plotwidget #42", repos=REPOS, **TELEMETRY)
+    assert span["repo"] == "hobbyist/plotwidget"
+
+
+def test_A2_picks_the_repo_ACTUALLY_written_not_a_fixed_one():
+    """Three distinct owners in the fixture, three distinct expectations — a
+    mutant returning any single literal dies on two of the three."""
+    for token, expected in (("trowelcast", "gardenersguild/trowelcast"),
+                            ("plotwidget", "hobbyist/plotwidget"),
+                            ("spadeworks", "rivalorg/spadeworks")):
+        (span,) = MS.scan_mention_spans(f"{token} PR #7", repos=REPOS, **TELEMETRY)
+        assert span["repo"] == expected, token
+
+
+def test_A2_STAYS_AMBIGUOUS_when_the_token_is_not_in_the_measured_mapping():
+    """🔴 THE NO-GUESSING RULE, at the new site. `zzzunknown` is a word, not
+    evidence: without a measured mapping entry there is no owner and none is
+    synthesised."""
+    (span,) = MS.scan_mention_spans("zzzunknown PR #1291", repos=REPOS, **TELEMETRY)
+    assert span["repo"] == ""
+    assert span["repo_source"] == ""
+    assert span["url"] == ""
+    assert all(c["url"] == "" or c["platform"] == "clawgate"
+               for c in span["candidates"])
+
+
+def test_A2_does_not_fire_without_a_repos_mapping_at_all():
+    (span,) = MS.scan_mention_spans("trowelcast PR #1291", **TELEMETRY)
+    assert span["repo"] == ""
+
+
+def test_A2_does_not_attribute_across_a_LINE_BREAK():
+    """`\\Z` not `$`: a repo token ending the previous line is not adjacent."""
+    (span,) = MS.scan_mention_spans("trowelcast\n#1291", repos=REPOS, **TELEMETRY)
+    assert span["repo"] == ""
+
+
+def test_A2_a_common_english_word_before_a_ref_attributes_NOTHING():
+    for text in ("fixed in #370", "PR #370", "see #370"):
+        (span,) = MS.scan_mention_spans(text, repos=REPOS, **TELEMETRY)
+        assert span["repo"] == "", text
+
+
+def test_A3_a_github_url_elsewhere_in_the_block_attributes_a_bare_ref():
+    text = ("reviewed https://github.com/rivalorg/spadeworks/pull/8 "
+            "and then fixed #1291")
+    spans = MS.scan_mention_spans(text, **TELEMETRY)
+    bare = [s for s in spans if s["id"] == "1291"]
+    assert len(bare) == 1
+    assert bare[0]["repo"] == "rivalorg/spadeworks"
+    assert bare[0]["repo_source"] == MS.SOURCE_URL
+
+
+def test_A4_a_repo_flag_elsewhere_in_the_block_attributes_a_bare_ref():
+    text = "ran gh pr list --repo hobbyist/plotwidget, then closed #1291"
+    bare = [s for s in MS.scan_mention_spans(text, **TELEMETRY) if s["id"] == "1291"]
+    assert len(bare) == 1
+    assert bare[0]["repo"] == "hobbyist/plotwidget"
+    assert bare[0]["repo_source"] == MS.SOURCE_FLAG
+
+
+def test_A4_attributes_the_gh_cli_reference_beside_it():
+    """The measured 14/14 case: `gh pr <sub> N --repo owner/repo`."""
+    (span,) = MS.scan_mention_spans(
+        "gh pr view 1291 --repo rivalorg/spadeworks", **TELEMETRY)
+    assert span["repo"] == "rivalorg/spadeworks"
+    assert span["url"] == "https://github.com/rivalorg/spadeworks/issues/1291"
+
+
+def test_the_ladder_ranks_ADJACENT_above_URL_above_FLAG_above_DEFAULT():
+    """🔴 ONE ASSERTION PER RUNG, each removing the rung above it. Testing only
+    the top of a priority list proves nothing about the order below it."""
+    url = "https://github.com/rivalorg/spadeworks/pull/8"
+    flag = "--repo hobbyist/plotwidget"
+    default = "gardenersguild/trowelcast"
+
+    def repo_of(text, **kw):
+        return [s for s in MS.scan_mention_spans(text, **kw, **TELEMETRY)
+                if s["id"] == "1291"][0]["repo"]
+
+    assert repo_of(f"{url} {flag} trowelcast PR #1291",
+                   repos=REPOS, default_repo=default) == "gardenersguild/trowelcast"
+    assert repo_of(f"{url} {flag} fixed #1291",
+                   repos=REPOS, default_repo=default) == "rivalorg/spadeworks"
+    assert repo_of(f"{flag} fixed #1291",
+                   repos=REPOS, default_repo=default) == "hobbyist/plotwidget"
+    assert repo_of("fixed #1291", repos=REPOS,
+                   default_repo=default) == "gardenersguild/trowelcast"
+
+
+def test_TWO_different_repos_in_one_block_attribute_NOTHING():
+    """🔴 SEVERAL IS AN ABSENCE OF AN ANSWER, NOT A TIE TO BREAK. Nearest-wins or
+    first-wins would both be a guess wearing a heuristic's clothes."""
+    text = ("https://github.com/rivalorg/spadeworks/pull/8 and "
+            "https://github.com/hobbyist/plotwidget/pull/9 then #1291")
+    bare = [s for s in MS.scan_mention_spans(text, **TELEMETRY) if s["id"] == "1291"]
+    assert bare[0]["repo"] == ""
+    text2 = ("gh pr list --repo rivalorg/spadeworks; "
+             "gh pr list --repo hobbyist/plotwidget; #1291")
+    bare2 = [s for s in MS.scan_mention_spans(text2, **TELEMETRY) if s["id"] == "1291"]
+    assert bare2[0]["repo"] == ""
+
+
+def test_the_SAME_repo_named_twice_still_attributes():
+    """The other side of `_sole`: a boundary that also swallowed the legitimate
+    case would be a refusal dressed as a rule."""
+    text = ("https://github.com/rivalorg/spadeworks/pull/8 and "
+            "https://github.com/rivalorg/spadeworks/pull/9 then #1291")
+    bare = [s for s in MS.scan_mention_spans(text, **TELEMETRY) if s["id"] == "1291"]
+    assert bare[0]["repo"] == "rivalorg/spadeworks"
+
+
+def test_a_ref_that_NAMES_a_repo_is_never_re_attributed_from_the_block():
+    """🔴 Substituting a different repository for the one the operator wrote is
+    strictly worse than admitting the owner is unknown."""
+    text = ("https://github.com/rivalorg/spadeworks/pull/8 "
+            "and separately zzzunknown#1291")
+    named = [s for s in MS.scan_mention_spans(text, **TELEMETRY) if s["id"] == "1291"]
+    assert named[0]["repo"] == ""
+    assert named[0]["url"] == ""
+
+
+def test_attribution_does_not_SETTLE_the_platform():
+    """Which repository and which platform are two questions. A `#N` next to a
+    repo name is still possibly a clawgate task."""
+    (span,) = MS.scan_mention_spans("trowelcast PR #1291", repos=REPOS, **TELEMETRY)
+    assert span["ambiguous"] is True
+    assert span["platform"] == "ambiguous"
+    assert span["url"] == ""
+    assert [c["platform"] for c in span["candidates"]] == ["clawgate", "github"]
+
+
+def test_repo_source_is_EMPTY_exactly_when_repo_is():
+    for text, kw in (("fixed #1", {}),
+                     ("trowelcast PR #1", {"repos": REPOS}),
+                     ("gardenersguild/trowelcast#1", {}),
+                     ("#1", {"default_repo": "rivalorg/spadeworks"})):
+        for span in MS.scan_mention_spans(text, **kw, **TELEMETRY):
+            assert bool(span["repo"]) == bool(span["repo_source"]), (text, span)
+
+
+def test_the_explicit_source_is_reported_for_an_owner_written_out():
+    (span,) = MS.scan_mention_spans("gardenersguild/trowelcast#1065", **TELEMETRY)
+    assert span["repo_source"] == MS.SOURCE_EXPLICIT
+    (span,) = MS.scan_mention_spans("#1065", default_repo="hobbyist/plotwidget",
+                                    **TELEMETRY)
+    assert span["repo_source"] == MS.SOURCE_DEFAULT
+
+
+# --------------------------------------------------------------------------- #
+# The wider profile's own documented residuals
+# --------------------------------------------------------------------------- #
+def test_the_telemetry_residual_false_positives_are_pinned_as_a_set():
+    """Same discipline as `_KNOWN_FALSE_POSITIVES`: the acceptance stays a
+    DECISION rather than becoming a surprise. Each of these DOES match, and each
+    is documented in the module."""
+    assert set(MS._KNOWN_FALSE_POSITIVES_TELEMETRY) == {
+        "gh pr view 12", "/audit-pr 12", "[the old anchor](#task-1)"}
+    for shape in MS._KNOWN_FALSE_POSITIVES_TELEMETRY:
+        assert MS.scan_mentions(shape, **TELEMETRY), (
+            f"{shape!r} was expected to still match in the wider profile")
+
+
+def test_the_original_residual_set_is_UNCHANGED():
+    """The click surface's accepted noise did not move — pinned separately so a
+    telemetry-only addition cannot quietly land on it."""
+    assert set(MS._KNOWN_FALSE_POSITIVES) == {"#123"}
+
+
+# --------------------------------------------------------------------------- #
+# clean_repo_map — ONE definition of the mapping-value rule
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("value", [
+    "acme/widget/", "acme//widget", "acme/widget ", "acme/wid\nget",
+    "acme/widget\n", "/acme/widget", "acme", 12, None,
+])
+def test_clean_repo_map_drops_anything_that_is_not_exactly_owner_slash_repo(value):
+    assert MS.clean_repo_map({"widget": value}) == {}
+
+
+def test_clean_repo_map_keeps_a_good_entry_and_is_total_on_junk():
+    assert MS.clean_repo_map({"a": "gardenersguild/trowelcast", "b": "nope"}) == {
+        "a": "gardenersguild/trowelcast"}
+    for junk in (None, [], "", 3, {1: "a/b"}):
+        assert MS.clean_repo_map(junk) == {}
