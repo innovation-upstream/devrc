@@ -13925,6 +13925,31 @@ def test_the_contract_docs_budget_numbers_are_PINNED_to_the_constants():
         % (m.group(1), sm.COLLECT_CAP))
 
 
+def test_every_TEST_NAME_the_contract_cites_actually_EXISTS():
+    """🔴 A DOC THAT NAMES A GUARD IS MAKING A CLAIM ABOUT COVERAGE, and a name
+    that resolves to nothing is the worst kind: it reads as "this is pinned" and
+    stops the next person looking. This guard was written because the round-3
+    fix introduced exactly that — the contract cited
+    `test_the_per_host_call_ORDER_puts_the_optional_probe_LAST`, a name that had
+    been changed during the same change and never existed in the suite.
+
+    Resolved against the module's own symbol table, so a rename that misses the
+    doc fails here rather than rotting silently.
+    """
+    cited = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", _contract_text()))
+    assert cited, "the contract cites no test names at all any more"
+    here = set(globals())
+    missing = sorted(n for n in cited if n not in here)
+    assert not missing, (
+        "payload-contract.md cites test(s) that do not exist in "
+        "test_session_manager.py: %r" % missing)
+    # POSITIVE CONTROL on the extraction: it really pulled real names out, and
+    # it can also SEE a name that is absent.
+    assert "test_the_contract_docs_budget_numbers_are_PINNED_to_the_constants" \
+        in cited, sorted(cited)
+    assert "test_definitely_not_defined_anywhere" not in here
+
+
 def test_the_contract_carries_NO_V1_ERA_FLEET_MEASUREMENT_as_current():
     """🔴 A MEASUREMENT TAKEN UNDER THE BUG IS NOT EVIDENCE ABOUT THE FIX. The
     contract carried "Measured on the live fleet 2026-09-03: 90 of 92 windows

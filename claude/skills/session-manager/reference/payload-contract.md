@@ -278,14 +278,18 @@ sum past that, so a read with no budget left is **not attempted** and its host r
 `unmeasured` with an error naming the budget. That is a read that did not happen, and it
 is published as one. *(Both numbers above are pinned to `COLLECT_BUDGET` / `COLLECT_CAP` by
 `test_the_contract_docs_budget_numbers_are_PINNED_to_the_constants`; the count of five
-reads and their ORDER are pinned by
-`test_the_per_host_call_ORDER_puts_the_optional_probe_LAST`.)*
+reads and their ORDER by
+`test_the_repo_probe_is_issued_AFTER_every_other_read_on_every_host`.)*
 
-🔴 **ORDER MATTERS AND IT IS PART OF THE CONTRACT.** The reads share one deadline, so the
-LAST call on the LAST host is the one that starves. The **agent ledger is read before the
-repo probe**, because the probe is the optional one (`--no-repo`) while a starved ledger
-costs every row on that host `age_secs`, its `stale` bucket and `claude_session_id`. With
-both hosts at their bounds, the laptop's `repo` is the field that is dropped — deliberately.
+🔴 **ORDER MATTERS AND IT IS PART OF THE CONTRACT.** One deadline spans ALL hosts, so the
+LAST call issued is the one that starves. The repo probe is therefore a **second pass over
+the hosts**: every pre-existing read — panes, windows, capture, ledger — is issued for
+EVERY host before the probe is issued for ANY host. The probe is the read a consumer can
+turn off (`--no-repo`) with the payload still whole, while a starved ledger silently costs
+every row on that host `age_secs`, its `stale` bucket and `claude_session_id`. Moving the
+probe later *within* a host is not enough and was measured so: the local host's own 15 s
+probe alone pushed the remote host past the deadline. With both hosts at their bounds it is
+the laptop's `repo` that is dropped — deliberately.
 
 ⚠ **There is no current fleet measurement of the resolve rate.** The only one taken (90 of
 92 windows, 2026-09-03) was measured under protocol **V1**, which collapsed every `git`
