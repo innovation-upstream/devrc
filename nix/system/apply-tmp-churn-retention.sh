@@ -44,9 +44,38 @@
 #
 # ── THE FIX: mtime-only ageing, SCOPED to machine-generated churn ────────────
 #
-# systemd >= 253 accepts an age-by prefix (`m:7d` = consider mtime only). Verified
-# on this host's systemd 258 by control pair: `z:7d` -> "Invalid age-by 'z'",
-# `m:7d` -> parses and matches.
+# systemd >= 253 accepts an age-by prefix. Verified on this host's systemd 258 by
+# control pair: `z:7d` -> "Invalid age-by 'z'", `mM:7d` -> parses and matches.
+#
+# 🔴 THE PREFIX IS `mM:`, NOT `m:` — CASE IS THE FILE/DIRECTORY SWITCH, and this
+# file said `m:7d` ("consider mtime only") from 2026-08-15 until 2026-09-01.
+# tmpfiles.d(5), Age: "The lower-case letter signifies that the given timestamp
+# type should be considered for FILES, while the upper-case letter signifies that
+# the given timestamp type should be considered for DIRECTORIES." The default is
+# `abcmABM`; naming `m` alone therefore selects mtime for files and NO criterion
+# at all for directories. The docs' own example spells both: `bmA:1h`.
+#
+# Measured 2026-09-01 on a fixture (60-day-old dir + file, dir containing a subdir):
+#   m:7d   -> removes ./file.txt, ./sub/inner.txt          ... and LEAVES ./sub
+#   mM:7d  -> removes ./file.txt, ./sub/inner.txt, and     ... removes ./sub
+#   7d     -> removes NOTHING (default includes ctime, which the fixture just set)
+# So the old spelling emptied every directory and removed none of them. On a
+# filesystem whose problem is INODES — /tmp measured 2026-09-01 at ~78.5M entries,
+# 81% of the root fs — leaving the whole directory skeleton behind forfeits most
+# of the reclaim: nix-shell.* alone is 17,809 dirs of nested pytest trees.
+#
+# ✅ SAFETY, measured the same day with a REAL (not dry-run) --clean: an old
+# directory containing a RECENT file is NOT destroyed. tmpfiles uses rmdir
+# semantics, so a non-empty directory survives; the recent file was still there
+# with its contents intact afterwards. `mM` is strictly more thorough, not more
+# dangerous — the scoping to machine-generated globs is what carries the safety.
+#
+# 🔴 AND `--dry-run` OVER-REPORTS: it printed `Would remove directory "./olddir"`
+# for exactly that directory the real run then left alone. Dry-run counts are
+# UPPER bounds on directories. The "4,255,261 entries / ~47 GB" figure below came
+# from a dry-run and is therefore not a reclaim estimate in the direction its
+# "LOWER BOUND" note claims for the root-owned-paths reason; the two biases run
+# in opposite directions and neither has been quantified.
 #
 # 🔴 It is scoped by GLOB, not applied to /tmp as a whole, because /tmp holds
 # real work that a blanket rule would destroy. Measured: a blanket mtime-only
@@ -58,8 +87,19 @@
 # Coverage, measured 2026-08-15 (dirs / of those with mtime >7d):
 #   nix-shell-*           1003 /  988      go-build*              114 /  98
 #   nix-develop-*         1196 /  392      chromedp-runner*       158 / 158
-#   nix-[0-9]*             778 /  612      homelab-talos-prs-*   2554 / 2537
-# Every glob matches real entries — none is a dead rule.
+#   nix-[0-9]*             778 /  612
+#
+# 🔴 `homelab-talos-prs-*` WAS in that table and is now REMOVED from the ledger —
+# it was a DEAD RULE for its whole life, and the table above is why nobody noticed:
+# its heading says "dirs" and the 2554 counted FILES. Measured 2026-09-02 on live
+# /tmp: 821 matches, **0 directories, 821 plain files**. The producer is
+# `homelab-talos/flake.nix` — `_pr_cache="/tmp/homelab-talos-prs-$EUID"`, written
+# with `echo … > "$_pr_cache"`. `e` acts on a directory's CONTENTS and silently
+# ignores a plain file, so this rule could never have reaped anything. After the
+# 2026-09-02 --clean, `find /tmp -maxdepth 1 -name 'homelab-talos-prs-*' -type d`
+# returns 0 — consistent, and the reason the withdrawal is safe.
+# 🔴 So: EVERY GLOB IN THE LEDGER MUST NAME DIRECTORIES. Verify a new one with
+# `-type d` before adding it, and do not trust a count whose heading says "dirs".
 #
 # 🔴 A HYPHEN IS NOT A WILDCARD: `nix-shell-*` CANNOT MATCH `nix-shell.<mktemp>`.
 # nix-shell writes its TMPDIR in two spellings and this rule set only ever saw
@@ -99,11 +139,130 @@
 
 set -euo pipefail
 
-CFG=/etc/nixos/configuration.nix
+# ── THE RULE LEDGER — ONE definition, read by BOTH the inserter and the verifier.
+# 🔴 These used to be two hardcoded lists (a Python one that inserted, a bash one
+# that verified). Nothing tied them together, so a rule added to the inserter and
+# not to the verifier would be written and then "verified present" by a loop that
+# never looked for it — the verification would report success over an unchecked
+# rule. `claude/RULES.md` -> "One rule, one place": a predicate duplicated across
+# call sites regenerates the same bug at every site.
+TMPFILES_RULES=(
+  'e /tmp/nix-shell-* - - - mM:7d'
+  'e /tmp/nix-shell.* - - - mM:7d'
+  'e /tmp/nix-develop-* - - - mM:7d'
+  'e /tmp/nix-[0-9]* - - - mM:7d'
+  'e /tmp/go-build* - - - mM:7d'
+  'e /tmp/chromedp-runner* - - - mM:7d'
+  # Added 2026-09-01. devrc's own scripts/run3 capture dirs: its header states they
+  # are deliberately NOT removed ("reading the two files afterwards is the point"),
+  # so they need retention, not a code fix. 1266 dirs, 438 with mtime >7d; none
+  # carries a .git. Dry-run: 1066 entries would be removed.
+  'e /tmp/run3.* - - - mM:7d'
+)
+# 🔴 `e` ACTS ON A DIRECTORY'S CONTENTS AND SILENTLY IGNORES A PLAIN FILE. Every
+# glob in this ledger must therefore name DIRECTORIES. Measured 2026-09-01 on a
+# clean fixture (a 60-day-old file and a 60-day-old dir, rule `e <glob> - - - m:7d`):
+# the file glob removed 0 with no error or warning; the directory removed its
+# content. So these three, added and then withdrawn the same day, are DEAD RULES —
+# they match thousands of real entries and reap none of them:
+#     gh-status-response.*  18925 entries / 10065 mtime>7d  (0-byte .json)   -> 0
+#     htoken.*               3202 /  2842  (13-byte "letsgethookie" marker)  -> 0
+#     health.*               2949 /  2613  (2-byte json, "[]")               -> 0
+# Do not re-add them in `e` form. Plain files at the top level of /tmp are reached
+# only by the /tmp rule ITSELF, which is the stock atime-based `q /tmp ... 10d`
+# this whole file exists to work around — and changing that one to mtime-only is
+# the blanket rule the 2026-08-15 revision refused, because it would delete live
+# git worktrees parked in /tmp. So this is a genuine gap, not an oversight.
+#
+# 🔴 The dry-run that catches a dead rule prints "Would remove" on STDERR, not
+# stdout. `… 2>/dev/null | grep -c 'Would remove'` returns 0 for a rule that works
+# perfectly — measured here as 0 on stdout against 1066 on stderr for the same
+# command. Always read both streams before believing a zero.
+# 🔴 DELIBERATELY NOT ADDED, and this is a measurement not a hunch. Sampled
+# 2026-09-01: cgparent-* 19044 dirs averaging 3 inodes (~57K), fx-excerpt-*
+# 15002 averaging 1 (~15K), cbf-* 7260 averaging 1, tmp.* 4088 averaging 1.
+# Together ~80K inodes against a filesystem holding 96-97M — reaping them buys
+# nothing measurable, and none of their producers has been identified. `tmp.*`
+# is bare mktemp's default and would need its own audit. The 2026-08-15 revision
+# declined these for lack of verification; the inode measurement now says the
+# trade was never worth making.
+
+# TMP_CHURN_CFG points the edit at a fixture instead of the real config. It exists
+# so the insert/idempotence logic can be exercised at all: without it the only way
+# to test this script is to run it against /etc/nixos as root, which is precisely
+# the thing you want tested BEFORE you do. Test mode needs no root because it
+# touches no system file — and it says so loudly, so a real run can never be
+# mistaken for one.
+CFG="${TMP_CHURN_CFG:-/etc/nixos/configuration.nix}"
 BAK="${CFG}.bak-tmp-churn-$(date +%Y%m%d-%H%M%S)"
 MARKER='/tmp churn retention'
 
-if [[ $EUID -ne 0 ]]; then
+# --emit-rules prints the ledger as a standalone tmpfiles.d config and exits,
+# changing nothing. It exists because the rebuild can be BLOCKED for reasons that
+# have nothing to do with these rules: measured 2026-09-01, `nixos-rebuild switch`
+# failed its `switchInhibitors` pre-switch check on an unrelated
+# `dbus-implementation : dbus -> broker` channel migration. The config edit was
+# correct and built fine — all 8 rules were present in the built system's
+# 00-nixos.conf — but nothing was live, because activation never ran.
+#
+# So the cleanup can be taken without any system change at all:
+#     sudo sh -c 'nix/system/apply-tmp-churn-retention.sh --emit-rules > /run/churn.conf'
+#     sudo systemd-tmpfiles --dry-run --clean /run/churn.conf 2>&1 | tail    # inspect
+#     sudo systemd-tmpfiles --clean /run/churn.conf                          # do it
+# 🔴 `/run`, NOT `/tmp`, and the redirect INSIDE the sudo. Written the obvious way —
+# `sudo … --emit-rules > /tmp/churn.conf` — the redirect happens in the UNPRIVILEGED
+# shell into a 1777 directory, and the second command then has ROOT read it. Any
+# process running as the same user can swap the file in between, and a tmpfiles
+# config can express recursive removal (`r`/`R`). The sticky bit stops other users,
+# not the same one, and this box runs many agents as one user.
+# 🔴 Read BOTH streams: --dry-run prints "Would remove" on STDERR, so a
+# `2>/dev/null | grep -c` returns a reassuring 0 for a rule that works.
+# This is the same rule text the timer would use, generated from the same ledger —
+# no second copy to drift.
+# 🔴 AN UNRECOGNISED ARGUMENT MUST NOT FALL THROUGH TO THE LIVE EDIT. Before this
+# block existed the script took no arguments, so anything extra was harmless. Now
+# that it has a flag interface, `--help`, `--dry-run` or a typo'd `--emit-rule`
+# under sudo silently performed the full /etc/nixos edit — the operator asks for
+# help and gets a config change. Reject anything not explicitly recognised.
+# 🔴 BRANCH ON $#, NOT ON "${1:-}". `case "${1:-}"` cannot distinguish NO argument
+# from ONE EMPTY argument, so `sudo bash "$0" "$SOMEVAR"` with SOMEVAR unset edited
+# /etc/nixos. Check the COUNT first; only argc 0 reaches the apply path.
+if [[ $# -gt 1 ]]; then
+  echo "ERROR: too many arguments (got $#). Refusing rather than editing /etc/nixos." >&2
+  exit 64
+fi
+if [[ $# -eq 1 && -z "${1}" ]]; then
+  echo "ERROR: empty argument. Refusing rather than editing /etc/nixos." >&2
+  exit 64
+fi
+case "${1:-}" in
+  --emit-rules)
+    printf '# generated by nix/system/apply-tmp-churn-retention.sh --emit-rules\n'
+    printf '# see that file for why each glob is here and which were withdrawn\n'
+    printf '%s\n' "${TMPFILES_RULES[@]}"
+    exit 0
+    ;;
+  -h|--help)
+    sed -n '2,12p' "$0"
+    echo
+    echo "Usage: sudo bash $0            # edit /etc/nixos and reconcile the rules"
+    echo "       bash $0 --emit-rules    # print the ledger as a tmpfiles.d config, change nothing"
+    exit 0
+    ;;
+  "")
+    : # no argument — the ordinary apply path, below
+    ;;
+  *)
+    echo "ERROR: unrecognised argument '${1}'." >&2
+    echo "This script EDITS /etc/nixos when run with no arguments, so it refuses" >&2
+    echo "anything it does not recognise rather than falling through to that." >&2
+    echo "Run with --help for usage." >&2
+    exit 64
+    ;;
+esac
+if [[ -n "${TMP_CHURN_CFG:-}" ]]; then
+  echo "🔴 TEST MODE — editing fixture ${CFG}, NOT /etc/nixos. No system change."
+elif [[ $EUID -ne 0 ]]; then
   echo "This script edits ${CFG} and must run as root:" >&2
   echo "    sudo bash $0" >&2
   exit 1
@@ -131,45 +290,82 @@ trap restore_on_err ERR
 # /etc/nixos is not readable from here, so its state is UNMEASURED, not clean.
 # The ledger below is the single source of truth; the script inserts exactly the
 # rules that are absent and then re-reads the file to prove every one landed.
+
 echo "[1/1] reconciling tmpfiles rules in systemd.tmpfiles.rules"
-python3 - "$CFG" <<'PY'
+python3 - "$CFG" "$MARKER" "${TMPFILES_RULES[@]}" <<'PY'
 import sys
 
 path = sys.argv[1]
+# argv[2] is MARKER, argv[3:] is the ledger — see the invocation above.
+MARKER = sys.argv[2]
 src = open(path).read()
 
-HEADER = '''    # /tmp churn retention (2026-08-15). mtime-ONLY ageing (`m:`), because
-    # systemd-tmpfiles ages on the newest of atime/mtime/ctime and any `du`/`find`
-    # over /tmp refreshes atime — which made the stock 10d rule never expire
-    # anything. Scoped to machine-generated prefixes ONLY: a blanket rule would
-    # delete live git worktrees parked in /tmp. See nix/system/apply-tmp-churn-retention.sh.
-'''
+HEADER = """    # /tmp churn retention (2026-08-15, age-by corrected 2026-09-02). mtime-only
+    # ageing for BOTH files and directories (`mM:`) — lower-case covers files only,
+    # which ages no directory at all. systemd-tmpfiles otherwise ages on the newest
+    # of atime/mtime/ctime, and any `du`/`find` over /tmp refreshes atime, which is
+    # why the stock 10d rule never expires anything. Scoped to machine-generated
+    # prefixes ONLY: a blanket rule would delete live git worktrees parked in /tmp.
+    # See nix/system/apply-tmp-churn-retention.sh.
+"""
 
 # 🔴 A hyphen is a LITERAL. `nix-shell-*` and `nix-shell.*` are two globs, and
 # nix-shell writes both spellings — see the header for the 3340-vs-1017 count.
-RULES = [
-    '    "e /tmp/nix-shell-* - - - m:7d"',
-    '    "e /tmp/nix-shell.* - - - m:7d"',
-    '    "e /tmp/nix-develop-* - - - m:7d"',
-    '    "e /tmp/nix-[0-9]* - - - m:7d"',
-    '    "e /tmp/go-build* - - - m:7d"',
-    '    "e /tmp/chromedp-runner* - - - m:7d"',
-    '    "e /tmp/homelab-talos-prs-* - - - m:7d"',
-]
+# The ledger arrives on argv from TMPFILES_RULES so the inserter and the post-write
+# verifier below cannot disagree about what the rule set is.
+RULES = ['    "%s"' % r for r in sys.argv[3:]]
+if not RULES:
+    raise SystemExit("ERROR: no rules passed on argv — TMPFILES_RULES is empty")
+
+# One path, one rule. Two entries for the same `type path` would insert two lines
+# systemd cannot both honour — it takes the first and logs `Duplicate line for
+# path`, so the second is silently dead.
+_seen = {}
+for _r in RULES:
+    _f = _r.strip().strip('"').split()
+    _k = (_f[0], _f[1])
+    if _k in _seen:
+        raise SystemExit("ERROR: the ledger names %s %s twice — one path, one rule." % _k)
+    _seen[_k] = True
+
+# 🔴 THIS INSERTER IS APPEND-ONLY. IT MUST NEVER DELETE OR REWRITE A LINE.
+#
+# It used to evict "stale" rule lines — an earlier revision's `m:7d` spelling — from
+# `systemd.tmpfiles.rules`. That code was removed on 2026-09-04 after three audit
+# rounds, and the reason is worth keeping so nobody rebuilds it:
+#
+#   * ITS PREMISE WAS FALSE. Eviction existed because a stale line ABOVE the new one
+#     would win (systemd takes the first line per path and logs `Duplicate line for
+#     path …, ignoring`). But insertion is `src.replace(anchor, anchor + block, 1)`,
+#     so new rules always land at the TOP, above any survivor. This script cannot
+#     produce the ordering eviction was defending against. The measurement that
+#     justified it came from a hand-edited config, not from this code path.
+#   * IT COST TWO RED REGRESSIONS IN THREE ROUNDS. An unanchored substring splice
+#     silently commented out an unrelated live rule while leaving the stale one; a
+#     whole-line scan for the closing bracket walked into a following
+#     `systemd.user.tmpfiles.rules` and deleted an entry there. Both reported
+#     success. Both were introduced by the fix for the previous finding.
+#   * THE POPULATION WAS TWO MACHINES. Stale lines are fixed by one reviewable hand
+#     patch per host — see nix/system/patch-tmp-churn-stale-lines-2026-09-04.md.
+#
+# A surviving stale line is COSMETIC here: cruft plus one log line, not a dead rule.
+# Deleting lines from a hand-maintained /etc/nixos as root is not worth that.
+
+anchor = "  systemd.tmpfiles.rules = [\n"
+if anchor not in src:
+    raise SystemExit("ERROR: could not find 'systemd.tmpfiles.rules = [' in configuration.nix")
 
 missing = [r for r in RULES if r.strip() not in src]
 if not missing:
     print("      all %d rules already present — nothing to insert" % len(RULES))
     raise SystemExit(0)
 
-anchor = "  systemd.tmpfiles.rules = [\n"
-if anchor not in src:
-    raise SystemExit("ERROR: could not find 'systemd.tmpfiles.rules = [' in configuration.nix")
-
-# Re-applying onto a config that already carries the block must not duplicate the
-# comment header; a first application must not omit it.
 block = "".join(r + "\n" for r in missing)
-if HEADER.splitlines()[0] not in src:
+# Re-applying onto a config that already carries the block must not duplicate the
+# comment header; a first application must not omit it. Keyed on MARKER — the shell
+# constant — and NOT on the header's first line: keying on the prose meant that
+# rewording the header made this read "absent" and prepend a second block.
+if MARKER not in src:
     block = HEADER + block
 
 open(path, "w").write(src.replace(anchor, anchor + block, 1))
@@ -181,17 +377,18 @@ PY
 
 # Verify by RE-READING the file, every rule individually — the insert reporting
 # success is a claim about the writer, not about what is now on disk.
-for _rule in \
-  'e /tmp/nix-shell-* - - - m:7d' \
-  'e /tmp/nix-shell.* - - - m:7d' \
-  'e /tmp/nix-develop-* - - - m:7d' \
-  'e /tmp/nix-[0-9]* - - - m:7d' \
-  'e /tmp/go-build* - - - m:7d' \
-  'e /tmp/chromedp-runner* - - - m:7d' \
-  'e /tmp/homelab-talos-prs-* - - - m:7d'
-do
+_verified=0
+for _rule in "${TMPFILES_RULES[@]}"; do
   grep -qF "$_rule" "$CFG" || { echo "ERROR: rule missing after edit: $_rule" >&2; false; }
+  _verified=$((_verified + 1))
 done
+# A loop over an empty array exits 0 having checked nothing — the "verified" that
+# means least. Assert it actually iterated, and that it saw the whole ledger.
+if [[ "$_verified" -ne "${#TMPFILES_RULES[@]}" || "$_verified" -eq 0 ]]; then
+  echo "ERROR: verified $_verified of ${#TMPFILES_RULES[@]} rules — not a pass" >&2
+  false
+fi
+echo "      verified $_verified of ${#TMPFILES_RULES[@]} rules individually"
 grep -qF "$MARKER" "$CFG" || { echo "ERROR: comment header missing after edit" >&2; false; }
 echo "      all rules verified present on disk"
 
@@ -203,7 +400,16 @@ echo "    systemd-tmpfiles --clean --dry-run 2>&1 | head"
 echo "  (a bad age-by prefix reports 'Invalid age-by' and names the file:line)"
 echo
 
-if [[ -t 0 ]]; then
+# 🔴 TEST MODE MUST NEVER OFFER THE REBUILD. TMP_CHURN_CFG edits a FIXTURE; a
+# `nixos-rebuild switch` here would build the REAL system from an /etc/nixos this
+# run never touched, so the operator would see a rebuild scroll past and
+# reasonably conclude the rules had been applied. Nothing about the fixture edit
+# would be in it. Introduced with TMP_CHURN_CFG on 2026-09-01 and caught in the
+# same session's audit.
+if [[ -n "${TMP_CHURN_CFG:-}" ]]; then
+  echo "TEST MODE — not offering nixos-rebuild (the fixture is not the system config)."
+  ans=n
+elif [[ -t 0 ]]; then
   read -r -p "Run 'nixos-rebuild switch' now? [y/N] " ans || ans=n
 else
   echo "Non-interactive shell — skipping the rebuild prompt."
