@@ -75,13 +75,28 @@ Per-source detail that matters when querying:
   stream), `session-summary` (Layer A rollups), `session-insight` (Layer B facets).
   🔴 **"Was skill X ever used?" — do NOT hand-write SQL or grep `text` for the name.**
   The `session-summary` payload carries `skills_used` / `skills_invoked` /
-  `commands_typed` (skill→count maps, forward-only, **first rows 2026-08-29**), and the
+  `commands_typed` (skill→count maps, forward-only, **first rows 2026-08-04** —
+  re-measured 2026-09-04, earliest non-empty value `{"manage-spend-exporter":76}` on
+  the workbench; the previously recorded 2026-08-29 was 25 days late), and the
   owning entry point is **`find-session --skill NAME`** — not this skill and not
   `adoption-scan`, which sees only the 9 `invocation.py` emitters and cannot see a skill
   at all. Measured 2026-08-29: keyword-searching `signal` returned **678** sessions
-  against **6** real uses, 5 of them on the *laptop* — so a grep, or a one-host search,
+  against **6** real uses — **all 6 on the laptop** (re-measured 2026-09-04 over all
+  time; the earlier "5 of them" was one short) — so a grep, or a one-host search,
   answers the reverse of the truth. Report "no recorded use since <date>", never
   "never used".
+  🔴 **The mechanism that makes hand-written SQL fail SILENTLY, and why the rule above
+  is not merely a preference: `JSONExtractString(payload,'skills_used','<name>') IS NOT
+  NULL` IS ALWAYS TRUE.** ClickHouse returns `''` for a missing key, never `NULL`, so
+  the predicate selects the WHOLE TABLE and every statistic derived under it becomes a
+  population statistic wearing a skill's name. Measured 2026-09-04, four-arm control on
+  `source='claude' AND kind='session-summary'`: with the predicate **1,946** distinct
+  sessions · predicate REMOVED **1,946** (identical) · `IS NULL` **0** (it can never be
+  false) · the correct `!= ''` test **6**. A shipped analysis reported 1,024 "signal
+  skill" sessions, a 96.5% cache rate and a 40,000% output/input ratio this way; all
+  three were facts about every Claude session on both hosts. **Test membership with
+  `!= ''`, and run the predicate-removed arm as a negative control — if it returns the
+  same count, your filter is inert.**
 - `i3` — `window::focus` + `workspace::focus` → `i3-source`; captures attention even when
   NOT typing. Carries `app`=WM_CLASS + `payload.workspace`.
 - `browser-bridge` — TWO kinds, and the distinction is load-bearing. `kind=cmd` is one row
