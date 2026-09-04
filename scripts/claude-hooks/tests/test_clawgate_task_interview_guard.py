@@ -435,6 +435,43 @@ def test_a_body_file_written_by_a_heredoc_WITHOUT_criteria_is_denied():
     assert denied_missing(cmd)
 
 
+def _heredoc_over(path, body):
+    return ("cat > %s <<'EOF'\n%s\nEOF\n"
+            "clawgatectl task create --title T --body-file %s" % (path, body, path))
+
+
+def test_a_STALE_file_at_the_path_cannot_HIDE_the_heredoc_overwriting_it(tmp_path):
+    """REGRESSION. PreToolUse runs BEFORE the command, so a file that exists at the
+    `--body-file` path right now is the previous occupant the heredoc is about to
+    destroy. Reading it instead of the heredoc made the verdict a property of the
+    HOST: an unrelated leftover at the shared path `/tmp/body.md` denied a command
+    whose heredoc carried perfectly good criteria."""
+    p = tmp_path / "body.md"
+    p.write_text(NO_AC)
+    assert allowed(_heredoc_over(p, AC))
+
+
+def test_a_STALE_file_WITH_criteria_cannot_RESCUE_a_heredoc_that_lacks_them(tmp_path):
+    """The same relationship in the direction that matters more: the task will carry
+    the heredoc, so a heading found only in the doomed on-disk copy is a false ALLOW
+    — exactly what this gate exists to prevent."""
+    p = tmp_path / "body.md"
+    p.write_text(AC)
+    assert denied_missing(_heredoc_over(p, NO_AC))
+
+
+def test_a_heredoc_writing_a_DIFFERENT_file_does_not_speak_for_this_one(tmp_path):
+    """The guard keys on the relationship, not on 'a heredoc exists somewhere'. The
+    body-file here is its own readable file with no criteria, and the heredoc on the
+    line writes somewhere else entirely."""
+    body = tmp_path / "body.md"
+    body.write_text(NO_AC)
+    other = tmp_path / "notes.md"
+    cmd = ("cat > %s <<'EOF'\n%s\nEOF\n"
+           "clawgatectl task create --title T --body-file %s" % (other, AC, body))
+    assert denied_missing(cmd)
+
+
 # =========================================================================== #
 # 4. BODY SOURCE: heredoc
 # =========================================================================== #
