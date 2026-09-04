@@ -22,6 +22,7 @@ _Moved verbatim out of `SKILL.md` on 2026-08-21, when the body was cut from 23,2
 | `--pane-preview` | publish each Claude pane's **visible screen** as `pane_preview`. Costs no extra tmux work (the capture already runs — `waiting`/`unsent` are derived from it and it used to throw the screen away), but makes the document **2.63x** larger: measured live back to back, 122,731 B without / 322,204 B with. Off by default for that reason; `--lean` drops it, so do not pass both |
 | `--fuzzyclaw` / `--no-fuzzyclaw` | the task-file join is **OFF by default** (see below) |
 | `--no-ledger` | skip the per-host agent-ledger read. Rows then have **no age and no session id** — the #419 view, reproducible on demand |
+| `--no-repo` | skip the per-host repo probe (one batched `sh -c` per host, the FIFTH ssh call). Every row's `repo` becomes `null` with `repo_status: **skipped**` and every per-host `repos_*` count becomes `null` — never `not_a_repo`, never `0`. This is the cost control for the probe; the field is otherwise ON by default |
 | `--plain` | `tail` only: strip ANSI at the source instead of `sed`-ing it out |
 | `--stale-threshold <secs>` | default 3600; `age >= threshold` is stale |
 | `--lines N` | `tail` scrollback depth (default 100) |
@@ -252,17 +253,30 @@ repo" without it:
 | `repo_status` | means |
 |---|---|
 | `ok` | resolved; `repo` names the main clone. The ONLY status carrying a name. |
-| `not_a_repo` | MEASURED: the owning host says this path is not in a work tree (or its common dir cannot be honestly named — a bare repo, a submodule). |
+| `not_a_repo` | MEASURED: the owning host's `git` exited **128** for this path — it is not in a work tree (or its common dir cannot be honestly named: a bare repo, a submodule). 🔴 It requires that exit status. Until 2026-09-04 every OTHER failure — `git` timing out, `git` absent, an unknown flag — arrived here too, so a real repo could read as a measured absence. |
 | `home` | MEASURED and deliberately withheld: the main clone IS the owning host's `$HOME`. `projectOf()` routes an unparented shell to `Other`, and `repo` is the branch it PREFERS, so a name here would override that guard. |
 | `no_path` | the pane reported no cwd. |
-| `missing` | the probe answered for this host but not for this path (a partial reply). |
-| `unmeasured` | **nobody looked** — the probe failed, timed out, or came back without its sentinel. NOT a measured absence. |
+| `missing` | the probe answered for this host but not for this path — a partial reply, or a record refused because it carried a character `str.splitlines()` would treat as a line break. |
+| `unmeasured` | **nobody looked.** TWO granularities, and both are real: the whole HOST's probe failed / timed out / came back without its sentinel, **or** THIS path's `git` exited non-zero for a reason that is not 128 (the per-path `timeout` fired, `git` is not installed, the flag is unsupported). NOT a measured absence either way. |
 | `skipped` | `--no-repo`. |
 
 Per host, `repos_measured` / `repos_status` / `repos_error` / `repos_paths` /
 `repos_resolved` / `repos_unparseable` are the FOURTH independent measurement beside
 `reachable`, `windows_measured` and `captures_measured`. The counts are integers only when
 `repos_measured` is true; otherwise they are null, never 0.
+
+🔴 **A host can be honestly `repos_measured: true` while one of its ROWS is `unmeasured`,
+and reading only the host block hides that.** The probe answering is a fact about the
+probe; each path's `git` exit status is a separate fact about that path.
+`repos_resolved` counts `ok` rows and nothing else, so a per-path `unmeasured` can never
+inflate it — but `repos_paths - repos_resolved` is **not** a count of non-repo panes.
+
+🔴 **The whole collection is bounded by `COLLECT_BUDGET` (70 s), not by the per-call
+timeouts.** `tmux-snapshot-push.sh` wraps the collector in `timeout 90`, and rc 124 there
+is `exit 3` — no snapshot for EITHER host. Five reads per host plus the ClickHouse query
+sum past that, so a read with no budget left is **not attempted** and its host reports
+`unmeasured` with an error naming the budget. That is a read that did not happen, and it
+is published as one.
 
 Measured on the live fleet 2026-09-03: 90 of 92 windows resolved (laptop 31/32, workbench
 59/60); the two that did not are `/home/zach` and a non-repo directory, both `not_a_repo`.

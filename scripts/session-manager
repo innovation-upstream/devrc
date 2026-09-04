@@ -495,6 +495,39 @@ TMUX_WINDOWS_ARGV = ("tmux", "list-windows", "-a", "-F", WINDOW_FORMAT)
 # 1-based sequence number cannot. A line whose first field is not an integer is
 # counted `unparseable` and the rest still align.
 #
+# 🔴 …BUT AN INDEX IS ONLY A KEY IF NOTHING ELSE CAN SPELL ONE, and the earlier
+# revision of this comment claimed the opposite of what the code did. It said a
+# newline "costs that one path its answer and leaves every other index correct".
+# MEASURED FALSE 2026-09-03 through this same script under a real `sh`: a
+# directory named `zzz-attacker\n1\t0\t/w/WRONG` makes `git` print a common dir
+# containing a newline, the reply then carries a SECOND record claiming index 1,
+# and index 1 — a genuine repo — resolved to `WRONG`, with `unparseable: 0`. The
+# paths are the operator's own panes on his own hosts, so this is not a security
+# hole; it is a CONFIDENT WRONG ANSWER, which is worse than the honest split
+# this feature replaces. THREE independent defences now, because each closes a
+# different half:
+#   1. the script REFUSES a common dir containing a newline (`case $d in *"$NL"*`
+#      — POSIX, no `tr`, so it cannot be disarmed by a missing coreutils) and
+#      reports `REPO_PROBE_RC_NEWLINE` for that path instead;
+#   2. the parser splits on `"\n"` ONLY, never `str.splitlines()`, which also
+#      splits `\r`, `\x0b`, `\x0c`, `\x1c`-`\x1e`, `\x85`, `\u2028`, `\u2029` —
+#      a reader that splits on MORE characters than the writer joined with is a
+#      forging surface all by itself;
+#   3. a DUPLICATE index is counted `unparseable` and the FIRST answer stands,
+#      so even a forged record cannot overwrite a real one.
+#
+# 🔴 EVERY RECORD CARRIES `git`'s OWN EXIT STATUS, and that is what makes
+# `not_a_repo` a measurement. `d=$(git …) || d=""` collapsed exit 128 (git says:
+# not in a work tree) with 124 (the per-path `timeout` fired), 127 (`git` is not
+# installed) and every other error into ONE empty string, which the parser then
+# published as the MEASURED status `not_a_repo`. Measured twice through the real
+# shipped script: with `git` replaced by a 30s sleep, and with `git` removed from
+# `PATH`, a REAL repo reported `{'repo': None, 'status': 'not_a_repo'}` while the
+# host reported `repos_measured: true`. That is the unmeasured-vs-measured
+# substitution this file exists to refuse, one granularity down from the host
+# level where it was already refused. Only rc 128 is `not_a_repo` now; every
+# other non-zero is the per-path `unmeasured`.
+#
 # 🔴 THE SENTINEL CARRIES THE HOST'S OWN `$HOME`, and that coupling is the same
 # one-call-one-instant argument `agent_ledger.read_command` makes for the tmux
 # pid. It is the POSITIVE CONTROL — without it, "the probe ran and no pane is in
@@ -502,27 +535,119 @@ TMUX_WINDOWS_ARGV = ("tmux", "list-windows", "-a", "-F", WINDOW_FORMAT)
 # is the value `repo_from_common_dir` needs to refuse to name `$HOME` as a
 # project. It must be the OWNING host's `$HOME`, which is exactly what a local
 # `HOME` constant could not supply for a laptop row.
-REPO_PROBE_SENTINEL = "SM_REPO_V1"
+# 🔴 `V2`, AND THE BUMP IS THE PROTOCOL. V1 records were `<idx>\t<common dir>`;
+# V2 records are `<idx>\t<rc>\t<common dir>`. The reader REQUIRES three fields,
+# so a V1 reply would be `unparseable` on every line while still carrying a
+# V1 sentinel — i.e. `measured: true, resolved: 0`, a fabricated measurement.
+# Renaming the sentinel makes that same reply land in `no_sentinel` instead,
+# which is the honest verdict. Both halves ship in this one file and are always
+# in step; the bump costs nothing and removes the one way they could not be.
+REPO_PROBE_SENTINEL = "SM_REPO_V2"
+
+# The per-path bound INSIDE the script, in seconds. A Python constant rather
+# than a number typed into the shell text, so a guard can pin it — a mutation
+# sweep turned `timeout 3` into `timeout 900` and it SURVIVED all 743 tests.
+REPO_PROBE_GIT_TIMEOUT = 3
+# git's own "this is not inside a work tree". The ONLY non-zero status that is a
+# measurement rather than a failure to measure.
+REPO_PROBE_RC_NOT_A_REPO = 128
+# Ours, not git's: the script measured a common dir it refuses to transmit
+# because it contains a newline (see the record-forging note above). Chosen
+# outside git's and `timeout`'s ranges so it cannot collide with a real status.
+REPO_PROBE_RC_NEWLINE = 201
+# 🔴 EVERY CHARACTER `str.splitlines()` TREATS AS A LINE BREAK EXCEPT `\n`.
+# The probe joins records with `\n` and nothing else, so a record holding one of
+# these is a record whose meaning depends on WHICH splitter reads it — and a
+# reader that disagrees with the writer about where a record ends is a forging
+# surface even when neither is buggy. Such a record is refused outright
+# (`unparseable`), which makes the two splitters equivalent on everything the
+# parser accepts. Pinned two-way against `str.splitlines()` itself by
+# `test_the_refused_break_characters_are_DERIVED_from_str_splitlines`.
+REPO_PROBE_RECORD_BREAKERS = ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e",
+                              "\x85", "\u2028", "\u2029")
 REPO_PROBE_SCRIPT = (
     'echo "%s $HOME"\n'
     # `timeout` is coreutils and present on both hosts, but a probe that dies
     # on a host without it would take the whole host's repo field with it. The
     # unquoted `$T` word-splits, which is the intent and is POSIX sh behaviour
     # (this runs under `sh`, never zsh — see RULES.md on zsh not splitting).
-    'if command -v timeout >/dev/null 2>&1; then T="timeout 3"; else T=""; fi\n'
+    'if command -v timeout >/dev/null 2>&1; then T="timeout %d"; else T=""; fi\n'
+    # A literal newline held in a variable, so the `case` pattern below can be
+    # written in POSIX sh with no external command. `tr` would have worked and
+    # would have made this guard evaporate on a host without coreutils — the
+    # exact hazard the `command -v timeout` fallback above exists for.
+    "NL='\n'\n"
     'n=0\n'
     'for p do\n'
     '  n=$((n+1))\n'
+    # 🔴 `rc=$?` ON ITS OWN LINE. `d=$(…) || d=""` would leave `$?` holding the
+    # status of the ASSIGNMENT (always 0), so git's status must be captured
+    # before anything else runs.
     '  d=$($T git -C "$p" rev-parse --path-format=absolute '
-    '--git-common-dir 2>/dev/null) || d=""\n'
-    '  printf \'%%s\\t%%s\\n\' "$n" "$d"\n'
+    '--git-common-dir 2>/dev/null)\n'
+    '  rc=$?\n'
+    '  [ "$rc" -eq 0 ] || d=""\n'
+    '  case $d in *"$NL"*) rc=%d; d="" ;; esac\n'
+    '  printf \'%%s\\t%%s\\t%%s\\n\' "$n" "$rc" "$d"\n'
     'done\n'
-    'exit 0\n' % REPO_PROBE_SENTINEL)
+    'exit 0\n' % (REPO_PROBE_SENTINEL, REPO_PROBE_GIT_TIMEOUT,
+                  REPO_PROBE_RC_NEWLINE))
 # Its own budget, above SSH_TIMEOUT: this call fans out over every unique path
-# on the host and each `git` is bounded at 3s by the script itself, so the
-# worst realistic case is slower than a single `list-panes`. The pusher's own
-# 90s cap still bounds the whole run.
-REPO_PROBE_TIMEOUT = 25.0
+# on the host and each `git` is bounded by the script itself, so the worst
+# realistic case is slower than a single `list-panes`.
+#
+# 🔴 IT IS NOT THE BOUND ON THE RUN — `COLLECT_BUDGET` is. This number used to
+# be 25.0 and the comment said "the pusher's own 90s cap still bounds the whole
+# run", which read as reassurance and was arithmetic nobody had done. See
+# `COLLECT_BUDGET` for the sum that was actually over the cap, and for why a
+# per-call number can never be the answer.
+REPO_PROBE_TIMEOUT = 15.0
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE WHOLE-COLLECTION DEADLINE. `scripts/tmux-snapshot-push.sh` wraps this
+# script in `timeout 90` (`TMUX_PUSH_COLLECT_TIMEOUT`), and rc 124 there is NOT
+# a degraded field: it is `exit 3`, no snapshot pushed for EITHER host, and a
+# read model that silently stops advancing — this codebase's documented worst
+# failure mode.
+#
+# 🔴 A PER-CALL NUMBER CANNOT BOUND A RUN, AND ADDING THE FIFTH CALL IS WHAT
+# PROVED IT. Every per-call budget is a bound on ONE call; the run is their SUM,
+# and nothing was summing them. Worst case = every call returning at, not past,
+# its own bound (a command that finishes at 11.99s exits 0 — `subprocess`'s
+# timeout only kills, it does not shorten), plus the ClickHouse read:
+#
+#   leg                     calls                            seconds
+#   remote (ssh)            panes+windows+capture+ledger      4 x 12.0 = 48.0
+#   remote (ssh)            repo probe                            15.0
+#   local                   panes+windows+capture+ledger      4 x  5.0 = 20.0
+#   local                   repo probe                            15.0
+#   ClickHouse              chquery.CHConn.timeout                15.0
+#                                                            ---------------
+#                                                                  113.0  > 90
+#
+# ⚠ AND THE FIFTH CALL IS NOT THE WHOLE STORY: the same sum at the BASE of this
+# branch — four calls, no probe — is 48 + 20 + 15 = 83, i.e. already inside 90
+# by only 7 seconds. An audit that omitted ClickHouse read that as 68 and 22
+# seconds of headroom. So sizing the probe to fit would have meant a budget of
+# 3.5s, which is not a probe; the envelope had to become explicit instead.
+#
+# So the bound is a DEADLINE, enforced in `run_tmux` — the one place that starts
+# a subprocess — rather than a table of constants that must be re-summed by hand
+# every time a call is added. A call that would run past the deadline is given
+# only the time that remains; one with no time left is not started at all and
+# its host reports `unmeasured` with a reason, which is the honest verdict and
+# the one this file already publishes for every other read that did not happen.
+# The sixth call is covered the day it is written, with no arithmetic.
+COLLECT_CAP = 90.0          # `TMUX_PUSH_COLLECT_TIMEOUT` in tmux-snapshot-push.sh
+COLLECT_CH_RESERVE = 15.0   # chquery.CHConn.timeout, spent AFTER the host loop
+COLLECT_MARGIN = 5.0        # interpreter start, fuzzyclaw + cache reads, render
+COLLECT_BUDGET = 70.0       # = COLLECT_CAP - COLLECT_CH_RESERVE - COLLECT_MARGIN
+# The floor a clamped call still gets. A `timeout=0` would make `subprocess`
+# raise instantly on every remaining host, turning "we ran out of time" into a
+# storm of look-alike failures; a call is either given a usable slice or is not
+# attempted, and the two are different reports.
+COLLECT_MIN_SLICE = 0.5
+# --------------------------------------------------------------------------- #
 
 # 🔴 THE PER-ROW DISCRIMINANT, enumerated here so a consumer can branch on the
 # set and a test can assert it is exactly this — the same contract
@@ -536,7 +661,9 @@ REPO_PROBE_TIMEOUT = 25.0
 #   not_a_repo   — MEASURED: the owning host says this path is not inside a git
 #                  work tree (or its common dir cannot honestly be named — a
 #                  bare repo, a submodule's `…/.git/modules/<n>`). A real
-#                  measured absence.
+#                  measured absence, and it now REQUIRES git to have said so:
+#                  the probe carries `git`'s exit status per path and only
+#                  `REPO_PROBE_RC_NOT_A_REPO` lands here.
 #   home         — MEASURED, and deliberately withheld. The resolved main clone
 #                  IS the owning host's `$HOME`. `projectOf()` in clawgate
 #                  routes `/home/zach` and `/root` to `Other` precisely so every
@@ -1595,16 +1722,24 @@ def repo_probe_argv(paths):
 
 
 def parse_repo_probe(raw, paths) -> dict:
-    """Probe stdout -> `{"measured", "home", "common_dirs", "seen", "unparseable"}`.
+    """Probe stdout -> `{"measured", "home", "answers", "seen", "unparseable"}`.
 
-    `common_dirs` is `{path: common_dir_or_None}`, keyed back to the INPUT list
-    by the 1-based sequence number each line carries.
+    `answers` is `{path: {"rc": int, "common": str|None}}`, keyed back to the
+    INPUT list by the 1-based sequence number each record carries. `rc` is the
+    OWNING host's `git` exit status for that path, and it is what makes
+    `not_a_repo` a measurement rather than a shrug — see `build_repo_index`.
+
+    🔴 THE KEY IS `answers`, NOT `common_dirs`, AND THE RENAME IS DELIBERATE. A
+    common dir alone cannot distinguish "git says this is not a work tree" from
+    "git never ran", and the old name invited a reader to treat `None` as the
+    former. Renaming it means no consumer can keep reading the old shape by
+    accident; a missed call site is an AttributeError, not a wrong answer.
 
     🔴 `measured` IS THE POSITIVE CONTROL and it comes off the sentinel, never
     off the row count. A host whose panes are all outside a work tree and a host
     whose probe was swallowed both produce output with no common dirs in it;
     only the sentinel tells them apart. When `measured` is False, `home` is None
-    and `common_dirs` is empty — the caller must publish `unmeasured`, never
+    and `answers` is empty — the caller must publish `unmeasured`, never
     `not_a_repo`.
 
     🔴 A SENTINEL WITH NO `$HOME` IS NOT A SENTINEL. The home is half the
@@ -1615,16 +1750,29 @@ def parse_repo_probe(raw, paths) -> dict:
     sentinel is `measured: False` — the caller publishes `unmeasured`, and the
     guard downstream has no unreachable branch.
 
-    A line whose first field is not an integer, or whose index is outside the
-    input list, is counted `unparseable` and skipped. That is the disposition a
-    common dir containing a newline lands in: it costs that one path its answer
-    and leaves every other index correct.
+    A record whose index or rc is not an integer, or whose index is outside the
+    input list, is counted `unparseable` and skipped.
+
+    🔴 A DUPLICATE INDEX IS `unparseable` AND THE FIRST ANSWER STANDS. This
+    branch is not hygiene — it is the third of the three defences described at
+    `REPO_PROBE_SCRIPT` against a common dir forging a second record. A plain
+    assignment here let the LAST record for an index win, so a forged one
+    landing after the genuine one replaced a real repo with a confident wrong
+    name while `unparseable` reported 0. First-wins alone is not sufficient
+    either (a forged record for a LATER index arrives before its genuine one),
+    which is why the script refuses the newline at the source and the split
+    below is on `"\n"` and nothing else.
     """
-    lines = (raw or "").splitlines()
+    # 🔴 `.split("\n")`, NEVER `.splitlines()`. The writer joins records with
+    # `\n`; `splitlines()` ALSO splits on `\r`, `\x0b`, `\x0c`, `\x1c`-`\x1e`,
+    # `\x85`, `\u2028` and `\u2029`, so it would break a record apart on
+    # characters the script never used as a separator — a reader that splits on
+    # more than the writer joined with is a record-forging surface by itself.
+    lines = (raw or "").split("\n")
     head = next((ln for ln in lines
                  if ln.strip().split(None, 1)[:1] == [REPO_PROBE_SENTINEL]),
                 None)
-    unmeasured = {"measured": False, "home": None, "common_dirs": {},
+    unmeasured = {"measured": False, "home": None, "answers": {},
                   "seen": None, "unparseable": None}
     if head is None:
         return unmeasured
@@ -1642,16 +1790,30 @@ def parse_repo_probe(raw, paths) -> dict:
         if not line.strip():
             continue
         seen += 1
-        idx, sep, common = line.partition("\t")
-        if not sep or not idx.strip().isdigit():
+        if any(ch in line for ch in REPO_PROBE_RECORD_BREAKERS):
+            # A record whose extent depends on WHICH line splitter reads it.
+            # Refusing it costs that path its answer (`missing`) and cannot cost
+            # any OTHER path a wrong one. See REPO_PROBE_RECORD_BREAKERS.
+            unparseable += 1
+            continue
+        fields = line.split("\t", 2)
+        if len(fields) != 3:
+            unparseable += 1
+            continue
+        idx, code, common = fields
+        if not idx.strip().isdigit() or not code.strip().isdigit():
             unparseable += 1
             continue
         i = int(idx.strip()) - 1
         if i < 0 or i >= len(paths):
             unparseable += 1
             continue
-        out[paths[i]] = common.strip() or None
-    return {"measured": True, "home": home, "common_dirs": out,
+        if paths[i] in out:
+            unparseable += 1
+            continue
+        out[paths[i]] = {"rc": int(code.strip()),
+                         "common": common.strip() or None}
+    return {"measured": True, "home": home, "answers": out,
             "seen": seen, "unparseable": unparseable}
 
 
@@ -1711,15 +1873,32 @@ def build_repo_index(parsed, paths) -> dict:
     if not parsed.get("measured"):
         return None
     home = parsed.get("home")
-    common = parsed.get("common_dirs") or {}
+    answers = parsed.get("answers") or {}
     out = {}
     for p in paths:
-        if p not in common:
+        ans = answers.get(p)
+        if ans is None:
             # The probe answered for this host, and did not answer for this
             # path. Its own status — not folded into `not_a_repo`.
             out[p] = {"repo": None, "status": "missing"}
+        elif ans["rc"] == 0:
+            out[p] = repo_from_common_dir(ans["common"], home=home)
+        elif ans["rc"] == REPO_PROBE_RC_NOT_A_REPO:
+            # 🔴 GIT SAID SO, so this is a measurement. Every OTHER non-zero
+            # status is a failure to measure and falls through below.
+            out[p] = {"repo": None, "status": "not_a_repo"}
         else:
-            out[p] = repo_from_common_dir(common[p], home=home)
+            # 🔴 THE PER-PATH `unmeasured`, and the whole point of carrying rc.
+            # 124 (the per-path `timeout` fired), 127 (`git` is not installed),
+            # 129 (this git does not know `--path-format`) and
+            # `REPO_PROBE_RC_NEWLINE` all used to arrive here as an empty string
+            # and be published as the MEASURED status `not_a_repo`. The host
+            # meanwhile reported `repos_measured: true`, so nothing anywhere in
+            # the payload said a look had failed.
+            #
+            # It cannot inflate `repos_resolved`: that counts `status == "ok"`
+            # and this is not it, by construction rather than by convention.
+            out[p] = {"repo": None, "status": "unmeasured"}
     return out
 
 
@@ -1730,12 +1909,25 @@ def row_repo(path, repo_index, host_status="unmeasured") -> dict:
     every row gets `host_status` — `unmeasured` or `skipped` — and a null repo.
     A dict means it DID answer, so a null repo there carries a measured reason.
 
+    🔴 THE LOOKUP KEY IS `.strip()`ed, AND THAT IS A SEAM, NOT A NICETY.
+    `gather` builds the probe's input as `p["path"].strip()`; `parse_panes`
+    stores tmux's field UNSTRIPPED. Each side was individually fine and the pair
+    was broken: a pane whose `pane_current_path` carries a trailing space had
+    its repo resolved under the stripped spelling, counted in `repos_resolved`,
+    and then looked up here under the raw one — a MISS. The row published
+    `repo_status: missing` (the branch the note below calls unreachable) while
+    the host's own count said the answer existed. Measured through real
+    `gather()` with a pane path of `'/home/zach/workspace/oddname '`. One
+    `.strip()`, and the two halves address the same key.
+
     🔴 THE `missing` BRANCH HERE IS UNREACHABLE FROM `gather`, AND SAYING SO IS
     THE POINT. `gather` feeds the probe EVERY pane path on the host and
     `build_repo_index` fills an entry for every one it was given, so a row's
     lead path is always a key. An unreachable guard reads as a defence and is
     not one — see the same note in `label_from_path`, where a mutation sweep
-    caught exactly that.
+    caught exactly that. ⚠ That claim was FALSE until the `.strip()` above
+    landed — the branch was reachable, by the seam it describes, and the commit
+    asserting it was unreachable is what sent an audit looking.
 
     It is kept rather than deleted because this is a PUBLIC pure function whose
     contract is `{path: {...}}` -> a row pair, and a caller that hands it a
@@ -1752,7 +1944,7 @@ def row_repo(path, repo_index, host_status="unmeasured") -> dict:
         return {"repo": None, "repo_status": "no_path"}
     if repo_index is None:
         return {"repo": None, "repo_status": host_status}
-    hit = repo_index.get(path)
+    hit = repo_index.get((path or "").strip())
     if hit is None:
         return {"repo": None, "repo_status": "missing"}
     return {"repo": hit.get("repo"), "repo_status": hit.get("status")}
@@ -3172,12 +3364,27 @@ def _host_ledger(read_result, live_windows, host) -> dict:
             "no_window": filt["no_window"]}
 
 
-def run_tmux(argv, host, local_host, runner=None, timeout=None):
+def run_tmux(argv, host, local_host, runner=None, timeout=None,
+             deadline=None, clock=None):
     """Run a tmux argv on `host`, locally or over SSH.
 
     Returns {"reachable", "error", "stdout", "no_server"}. A non-zero exit whose
     stderr says "no server running" is REACHABLE with empty output — see the
     silent-zero note in the header.
+
+    🔴 `deadline` IS THE WHOLE-COLLECTION BOUND, ENFORCED HERE BECAUSE THIS IS
+    THE ONE PLACE THAT STARTS A SUBPROCESS. A monotonic instant, not a duration.
+    Every call's own timeout is a bound on ONE call; the run is their SUM, and
+    with five calls per host plus the ClickHouse read that sum is over the
+    pusher's `timeout 90` — see `COLLECT_BUDGET` for the arithmetic. Clamping at
+    each call site would be the same predicate open-coded five times and would
+    be wrong at the sixth; clamping here covers a call nobody has written yet.
+
+    A call with less than `COLLECT_MIN_SLICE` left is NOT STARTED, and says so:
+    `reachable: False` with an error naming the budget. That is a read that did
+    not happen, which is the fact this file publishes as `unmeasured` — never as
+    an empty measurement. `deadline=None` (every caller outside `gather`,
+    `tail` included) keeps the old unbounded behaviour exactly.
 
     🔴 `no_server` is the discriminant that case CANNOT be recovered from
     afterwards. For a whole-host scan "reachable host, zero windows" is the
@@ -3193,6 +3400,16 @@ def run_tmux(argv, host, local_host, runner=None, timeout=None):
         cmd, tmo = list(argv), (timeout or LOCAL_TIMEOUT)
     else:
         cmd, tmo = ssh_wrap(argv), (timeout or SSH_TIMEOUT)
+    if deadline is not None:
+        left = deadline - (clock or time.monotonic)()
+        if left < COLLECT_MIN_SLICE:
+            return {"reachable": False, "stdout": "", "no_server": False,
+                    "stderr": "",
+                    "error": (f"the {COLLECT_BUDGET:g}s collection budget was "
+                              "exhausted before this read was attempted — it "
+                              "was NOT run, so nothing here was measured "
+                              "(see COLLECT_BUDGET)")}
+        tmo = min(tmo, left)
     try:
         rc, out, err = runner(cmd, tmo)
     except Exception as e:  # noqa: BLE001 — timeout / OSError / anything
@@ -3287,9 +3504,18 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
            clawgate_reader=None, clawgate_path=None,
            use_ledger=True, ledger_outputs=None, pane_preview=False,
            match=None, match_path=False, prefilter_index_map=False,
-           use_repo=True, repo_outputs=None) -> dict:
+           use_repo=True, repo_outputs=None,
+           collect_budget=COLLECT_BUDGET, clock=None) -> dict:
     """Build the whole report. Every source is injectable, so this is the
     function the hermetic suite exercises end-to-end.
+
+    🔴 `collect_budget` BOUNDS THE HOST LOOP AS A WHOLE, and `clock` is its
+    seam. Five `run_tmux` calls per host, each with its own timeout, sum past
+    the pusher's `timeout 90` — see `COLLECT_BUDGET`. A monotonic deadline is
+    computed once here and handed to every read; a read with no budget left is
+    not attempted and its host reports the honest `unmeasured`. `clock` is a
+    monotonic-seconds callable so a test can spend the budget without spending
+    the wall clock. `collect_budget=None` disables the deadline entirely.
 
     🔴 `ch_client_factory` defaults to None and is resolved to `make_ch_client`
     AT CALL TIME, not bound as a default argument. A default of
@@ -3406,6 +3632,16 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         "summary": {},
     }
 
+    # 🔴 ONE deadline for the WHOLE host loop, taken before the first read. Not
+    # per host and not per call: the pusher's cap is on the run, so the budget
+    # has to be too. See `COLLECT_BUDGET`.
+    _clock = clock or time.monotonic
+    deadline = None if collect_budget is None else _clock() + collect_budget
+
+    def _read(argv, host, **kw):
+        return run_tmux(argv, host, local_host, runner=runner,
+                        deadline=deadline, clock=_clock, **kw)
+
     # --- per host: ONE tmux call each for panes and for live window ids ------
     # 🔴 `None`, not `set()`. An empty set is a MEASURED "this host has no
     # windows"; None is "we never asked, or the answer never came back". The two
@@ -3421,8 +3657,8 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     # this host's probe did not answer or was not run; a dict = it answered.
     repo_index, repo_host_status, repo_stats = {}, {}, {}
     for host in hosts:
-        panes_res = run_tmux(TMUX_PANES_ARGV, host, local_host, runner=runner)
-        wins_res = run_tmux(TMUX_WINDOWS_ARGV, host, local_host, runner=runner)
+        panes_res = _read(TMUX_PANES_ARGV, host)
+        wins_res = _read(TMUX_WINDOWS_ARGV, host)
         raw_panes[host] = panes_res["stdout"]
 
         # --- 🔴 the capture batch: ONE tmux call per host, CLAUDE PANES ONLY --
@@ -3446,8 +3682,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             # none of them is Claude. `{}`, not None.
             captures[host], capture_status[host] = {}, "ok"
         else:
-            cap_res = run_tmux(capture_argv(claude_ids, capture_nonce),
-                               host, local_host, runner=runner)
+            cap_res = _read(capture_argv(claude_ids, capture_nonce), host)
             if cap_res["reachable"]:
                 captures[host] = parse_captures(cap_res["stdout"],
                                                 capture_nonce)
@@ -3463,6 +3698,13 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         #
         # DEDUPED and SORTED before the call: ~93 live windows share far fewer
         # distinct cwds, and the order is fixed so the argv is reproducible.
+        #
+        # 🔴 `.strip()` HERE IS HALF OF A KEY, AND `row_repo` HOLDS THE OTHER
+        # HALF. `parse_panes` stores tmux's `pane_current_path` unstripped, so
+        # the index built here is keyed on the STRIPPED spelling; a row looking
+        # itself up under the raw one misses. Both sides were individually
+        # correct and the pair was broken — do not change either without the
+        # other. Pinned as a relationship, not as two component tests.
         repo_paths = sorted({p.get("path", "").strip()
                              for p in host_panes if (p.get("path") or "").strip()})
         if not use_repo:
@@ -3489,6 +3731,14 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             # none of them reported a cwd, so there was nothing to ask about.
             # Publishing `unmeasured` here would call a complete enumeration a
             # failure.
+            #
+            # ⚠ THE `"unmeasured"` BESIDE THE `{}` IS INERT, AND THE COMMENT
+            # ABOVE USED TO READ AS IF IT WERE NOT. `repo_host_status` is the
+            # fallback `row_repo` uses ONLY when `repo_index` is None; a `{}`
+            # index means every row takes its own per-path status instead — and
+            # on this branch every pane reported no cwd, so each one is
+            # `no_path`. Kept (rather than left unset) so the two dicts always
+            # carry the same key set; read as a placeholder, not a verdict.
             repo_index[host], repo_host_status[host] = {}, "unmeasured"
             repo_stats[host] = {"measured": True, "status": "ok", "error": None,
                                 "paths": 0, "resolved": 0, "unparseable": 0}
@@ -3500,9 +3750,8 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
                              "error": None if raw_repo is not None
                              else "no injected repo probe output for this host"}
             else:
-                repo_read = run_tmux(repo_probe_argv(repo_paths), host,
-                                     local_host, runner=runner,
-                                     timeout=REPO_PROBE_TIMEOUT)
+                repo_read = _read(repo_probe_argv(repo_paths), host,
+                                  timeout=REPO_PROBE_TIMEOUT)
             if not repo_read["reachable"]:
                 repo_index[host], repo_host_status[host] = None, "unmeasured"
                 repo_stats[host] = {
@@ -3514,6 +3763,8 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
                 parsed_repo = parse_repo_probe(repo_read["stdout"], repo_paths)
                 idx = build_repo_index(parsed_repo, repo_paths)
                 repo_index[host] = idx
+                # Only consulted when `idx is None` (the no-sentinel branch
+                # below); with a real index every row carries its own status.
                 repo_host_status[host] = "unmeasured"
                 if idx is None:
                     # 🔴 IT ANSWERED WITHOUT ITS SENTINEL, so the output is not
@@ -3624,8 +3875,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
                             "error": None if raw_led is not None
                             else "no injected ledger output for this host"}
             else:
-                led_read = run_tmux(AL.read_argv(), host, local_host,
-                                    runner=runner)
+                led_read = _read(AL.read_argv(), host)
             ledger_res[host] = _host_ledger(led_read, live, host)
         if host == local_host:
             local_live_windows = live

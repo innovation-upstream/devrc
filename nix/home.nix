@@ -3470,9 +3470,10 @@ in
   #
   # ⚠ THE PER-RUN COST IS MORE THAN ONE SSH, and this comment used to say "~720
   # ssh round trips a day" as though it were. `session-manager --json` makes up
-  # to FOUR ssh invocations to the laptop per run (list-panes, list-windows, the
-  # capture batch, the ledger read) with no ControlMaster, so it is nearer
-  # ~2,880 handshakes/day; it also runs one ClickHouse query per run (~720/day),
+  # to FIVE ssh invocations to the laptop per run (list-panes, list-windows, the
+  # capture batch, the repo probe, the ledger read) with no ControlMaster, so it
+  # is nearer ~3,600 handshakes/day; it also runs one ClickHouse query per run
+  # (~720/day),
   # which the old figure omitted entirely. Store side: ~720 upserts/day of
   # ~100 KB jsonb onto a two-row table, i.e. real TOAST/WAL churn for data that
   # currently has no reader. If that cost ever matters, `--lean` is the lever —
