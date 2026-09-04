@@ -100,7 +100,28 @@ keystroke check below, which is not an investigation — it needs a human at the
   diverges from its direct-trigger count more than other snippets — that is the signal that
   near-noise probes are inflating it.
 
-### 🔴 OPEN — a LIVE telemetry gap: the `:ssh*` nebula routes attribute to None
+### ⚠ CORRECTED 2026-09-04 — NOT a telemetry gap. A muscle-memory regression, and smaller
+🔴 **The diagnosis below was WRONG on its mechanism and its fix, and it was merged before anyone
+re-derived it. Read this correction first; the block under it is kept as the retracted reading.**
+- **What is actually true, re-measured on `origin/main`:** `nebula` and `mesh` ARE in both
+  snippets' `search_terms` (`:sshwn` and `:sshln` each declare `['nebula','mesh','remote']`). So
+  `_attribute('nebula')` → `None` is **CORRECT BEHAVIOUR, not a defect**: two snippets legitimately
+  spell the term, the picker shows BOTH rows — which the design calls the feature — and attribution
+  declines to guess. I mistook the documented picker/attribution split for a regression.
+- **The real, smaller issue:** the rename took "workbench" → **rig** and "laptop" → **portable**
+  and dropped `ssh`/`workbench`/`wb` from those two snippets' terms. Measured:
+  `'ssh work nebula'` matches **[]** — zero picker rows, not an ambiguous result — and
+  `'ssh work'` matches `[':sshwl']` alone, so it silently yields the LAN shortcut where it used to
+  offer both workbench variants. The nebula snippets remain reachable by `rig`, `portable`,
+  `nebula`, `mesh`, `remote`.
+- **So the harm is muscle memory, not telemetry.** It bites only someone still typing "work"/"lap".
+  Nothing is unattributed that should be attributed.
+- 🔴 **The FIX named below is a NO-OP** — it says to add `nebula`/`mesh` to `search_terms`, and they
+  are already there. If the old words are wanted back, the edit is to re-add `ssh`/`workbench`/`wb`
+  (and `laptop`) — which would re-create the `'ssh work'` two-row ambiguity the rename removed. That
+  is a trade, not a repair. via: measurement
+
+### ~~🔴 OPEN — a LIVE telemetry gap: the `:ssh*` nebula routes attribute to None~~ (RETRACTED — see above)
 - **Symptom + exact repro:** searching `ssh work nebula` or `ssh lap nebula` in the Ctrl+Space
   picker records an UNATTRIBUTED fire. Reproduce by building a detector from the real config:
   scrape `nix/home.nix` for `{ trigger = …; replace = …; label = …; search_terms = […] }` records,
@@ -109,7 +130,8 @@ keystroke check below, which is not an investigation — it needs a human at the
   nebula')` → **None**; `_attribute('ssh work')` → `':sshwl'`; `_attribute('rig')` → `':sshwn'`;
   `_attribute('portable')` → `':sshln'`. The labels became *"SSH rig via nebula mesh"* /
   *"SSH portable via nebula mesh"*, so `rig`/`portable` are the live words that reach those rows
-  and `nebula`/`mesh` are not in either snippet's `search_terms`.
+  and ~~`nebula`/`mesh` are not in either snippet's `search_terms`~~ 🔴 **FALSE — they are in BOTH;
+  that is why the term is ambiguous rather than missing. See the correction above.**
 - **Ruled out:** *"the fixture is right and the probe is wrong"* — reproduced on two independent
   instruments (a scrape of `nix/home.nix`, and the rendered `~/.config/espanso/match/base.yml`
   the daemon actually reads), by two different sessions. via: measurement
@@ -157,11 +179,14 @@ keystroke check below, which is not an investigation — it needs a human at the
    `scripts/collector/keylog/tests/test_espanso_detect.py`, `claude/skills/espanso-audit/SKILL.md`.
    IN FLIGHT: devrc#1265. CLOSES WHEN: the PR is merged or closed with a reason in writing.
    forcing: user — the operator asked for the guards to be dropped; what changed is only the urgency
-7. **Restore the `:ssh*` nebula routing, or accept the gap in writing.** One line in
-   `nix/home.nix`: add `"nebula"`/`"mesh"` to `:sshwn` and `:sshln` `search_terms`. Until then
-   those searches record unattributed and nothing detects it. CLOSES WHEN: the probe in the open
-   investigation above resolves both terms, or a decision to leave it is recorded here.
-   forcing: regression — a label reword silently removed a working search route
+7. ⚠ **CORRECTED 2026-09-04 — the premise was wrong and this item shrinks to a judgement call.**
+   `nebula`/`mesh` are ALREADY in both snippets' `search_terms`, so the "one line" fix was a no-op
+   and `nebula` → None is correct two-row behaviour, not a gap. What actually changed is that
+   `'ssh work nebula'` now matches NOTHING and `'ssh work'` yields the LAN snippet alone, because
+   the rename dropped `ssh`/`workbench`/`wb`. DECIDE: re-add those words (restoring the old muscle
+   memory, and with it the `'ssh work'` ambiguity the rename removed), or leave it and use
+   `rig`/`portable`. CLOSES WHEN: either is recorded here in writing.
+   forcing: none — nothing external is broken; this is a preference about search words
 8. **Finish #1265's audit ladder or stop it on the stated criterion.** Three rounds, three sets of
    findings, all now comment-accuracy in scaffolding rather than behaviour. If round 4 returns only
    prose nits, stop on the criterion and record what is left open rather than grinding.
