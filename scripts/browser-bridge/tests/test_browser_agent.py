@@ -579,6 +579,57 @@ def rig(tmp_path):
     return rig
 
 
+def test_a_refusal_never_pays_for_the_opencode_warm(rig, tmp_path):
+    """REGRESSION: argument validation runs BEFORE the config-dir warm/bootstrap.
+
+    The wrapper used to parse its args ~300 lines BELOW the warm block, so an
+    invocation it was always going to refuse still paid for the warm first. That
+    warm is bounded by BROWSER_AGENT_WARM_TIMEOUT (default 90 s) and needs a
+    writable dir plus network to npm-install @opencode-ai/plugin; under a fresh
+    HOME it can do neither, so it burned the FULL budget and only then said
+    `a goal is required`. MEASURED 2026-09-04 with a fresh HOME: 91 s to emit a
+    refusal that needs no opencode at all; 9 ms after the reorder.
+
+    🔴 THE OBSERVABLE IS THE CONFIG DIR, NOT THE OPENCODE CALL LOG. `_oc_calls`
+    cannot see this: the fake opencode deliberately does NOT touch FAKE_OC_LOG for
+    `debug agent` (it counts only the real `run`), so a guard written against the
+    call log passes on the OLD code too and measures nothing. The warm bootstrap
+    CREATES the config dir; a refusal that precedes it leaves the path absent.
+
+    🔴 REACHABILITY, both arms measured 2026-09-04 by running the wrapper directly
+    with a cold BROWSER_AGENT_OPENCODE_CONFIG_DIR and no goal:
+        origin/main  -> rc=2, dir CREATED  (this assertion FAILS — the guard bites)
+        after fix    -> rc=2, dir ABSENT   (passes)
+    The rig's own oc_config_dir is PRE-WARMED, which would skip the warm on either
+    code path and make this vacuous — hence the deliberately cold override below.
+
+    🔴 WHAT THIS DOES NOT PIN, stated because the docstring above reads wider than
+    the assertion. It pins that the WARM/BOOTSTRAP does not run before a refusal —
+    the config dir is the observable, so only work that CREATES that dir is caught.
+    It puts NO budget on cost: an expensive step added between the `command -v
+    opencode` preflight and this parse block (a network probe, a lock acquisition,
+    a version query) would make every refusal slow again while `not cold.exists()`
+    stays true and this test still passes. A wall-clock budget was considered and
+    rejected: this suite's own CI flake was a wall-clock timeout under load, and
+    trading a silent gap for a flaky gate is the wrong side of that trade. If cost
+    regresses, the thing to add is a call-count on the rig's fake opencode, not a
+    stopwatch.
+    """
+    cold = tmp_path / "cold-oc-config"
+    assert not cold.exists(), "the override must start cold or the guard is vacuous"
+
+    r = rig.run(["--dry-run"],
+                extra_env={"BROWSER_AGENT_OPENCODE_CONFIG_DIR": str(cold)})
+
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "a goal is required" in r.stderr, r.stderr
+    assert not cold.exists(), (
+        "the wrapper bootstrapped the opencode config dir at "
+        f"{cold} before refusing an invocation it was always going to refuse — "
+        "argument validation has moved back below the warm block, which costs "
+        "the full BROWSER_AGENT_WARM_TIMEOUT on every such call")
+
+
 def _browser_calls(frb_log: Path):
     if not frb_log.exists():
         return []

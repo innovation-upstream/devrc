@@ -1715,7 +1715,25 @@ TARGET_FLOORS=(
   # is to re-pin when the gate FIRES and to copy the number it prints, not to
   # tighten a band that is holding. (For reference only, not applied:
   # _suggested_floor 680 = 646.)
-  "scripts/browser-bridge/tests|716"
+  # 2026-09-04, #1285: 716 -> 867. The gate FIRED (collected=912 above the drift
+  # ceiling 895), and per the convention two paragraphs up this copies the number
+  # the failure printed rather than re-deriving one: 912 - min(50, max(1, 912/20))
+  # = 867. New band 867/1083.
+  #
+  # The +21 are ONE parametrized drift-guard,
+  # test_the_stub_agent_agrees_with_the_real_wrapper_on_what_it_refuses, which
+  # runs a 21-argv matrix through the real `browser-agent` and through the stub
+  # that #1285 substitutes for it, asserting the two reach the same accept/refuse
+  # decision. Cheap (~50 ms/case): the wrapper is driven with a stub opencode, so
+  # an ACCEPTED argv dies at the tool-set gate instead of warming and running a
+  # model.
+  #
+  # 🔴 This bump was found by CI, not locally, and the reason is worth keeping:
+  # the tests were added and then verified with a bare `pytest <target>`, which
+  # does not enforce this band — only `scripts/run-tests.sh` does. `failed=0` on
+  # that run; the gate was red purely on the COUNT. Run the repo's own gate after
+  # adding tests, not the runner underneath it.
+  "scripts/browser-bridge/tests|867"
   "scripts/validation/tests|97"
   # 2026-08-12, initiative-scan's `gh_available` honesty flag: 381 -> 386
   # collected, +5 for the flag's probe/report/render cases in
