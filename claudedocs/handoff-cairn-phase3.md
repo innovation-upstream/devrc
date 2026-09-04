@@ -56,13 +56,35 @@ was right that the first alone would not stop the toasts.
 
 ---
 
-**2026-09-03/04 — RANKS 25 AND 22 CLOSED. THREE PRs MERGED, ALL SHIPPED OR READY.**
+**2026-09-03/04 — RANKS 25 AND 22 CLOSED, SHIPPED, AND VERIFIED LIVE ON THE REAL PATH.**
 
 | rank | what | squash | verified by |
 |---|---|---|---|
 | — | unbreak `main` (the espanso live guard) | **`df02571f`** (#1262) | red reproduced at `a36d3a40`, both tiers green on the merged tree |
-| **25** | `CPU_MON_TEMP_THRESHOLD` host-conditional | **`d544cdad`** (#1261) | **live consumer on both hosts**: workbench 88 (no backlight ⇒ isLaptop=false), laptop 92 (`intel_backlight` ⇒ true) |
-| **22** | the deadman that reports a RED `main` | **`454db6fd`** (#1274) | 5 audit rounds to a clean round; sandbox tier green on the merged tree |
+| **25** | `CPU_MON_TEMP_THRESHOLD` host-conditional | **`d544cdad`** (#1261) | **live consumer, both hosts**: workbench 88 (no backlight ⇒ isLaptop=false), laptop 92 (`intel_backlight` ⇒ true) |
+| **22** | the deadman that reports a RED `main` | **`454db6fd`** (#1274) | 5 audit rounds to a clean round; **first live run produced a correct verdict** (below) |
+
+**Deploy state:** both hosts at **`2882d2c7`**. Workbench `main-green-check.timer` = **`enabled`**,
+fired on deploy via `OnStartupSec`. Laptop has the unit files but the timer is correctly
+**inactive** — `serverMode` is false there (no `~/.server-mode`), so `WantedBy` is empty.
+
+🔴 **THE DEADMAN'S FIRST LIVE RUN EXERCISED EVERY CONTESTED DESIGN DECISION, AND ONE AUDIT FIX
+FIRED IN PRODUCTION ON RUN ONE:**
+
+```
+attempt 1 · pytests   · rc=1 · verdict=red      <- dl-router OperationalError('database is locked')
+attempt 1 · nodetests · rc=0 · verdict=green
+🔴 red on attempt 1 — re-running ONCE to separate a real break from a load flake
+attempt 2 · pytests   · rc=0 · verdict=green
+attempt 2 · nodetests · rc=0 · verdict=cached
+  ↳ nodetests was already realised — nix rebuilt nothing, which for a check derivation IS a pass
+✅ GREEN (FLAKE ABSORBED) — 2882d2c7 failed attempt 1 and passed attempt 2.
+```
+`Result=success`, `ExecMainStatus=0`, **no toast**. State file records **`verdict flake`**, not
+`green`. `--status` reads it back. 🔴 **The `cached` arm is audit round 1's finding 4** — without
+that fix `nodetests` would have been `noverdict` ⇒ UNMEASURED ⇒ laddering to a BLIND toast about
+a green `main`, and it fired on the FIRST run exactly as the auditor predicted ("the MODAL case,
+not an edge one").
 
 🔴 **The rank-25 check measured the DISCRIMINATOR as well as the value on each host.** A
 conditional that had silently collapsed to one value is the failure mode #1261 exists to
@@ -73,13 +95,27 @@ have separated them.
 clean tree, `nix/home.nix:2197` back at the shared `88`. So the rc-7 block was not what the
 merge relieved. #1261 still earns its place: it stops the edit being re-made.
 
-⚠ **`ship.sh` flagged the workbench DIRTY-AND-IN-THE-ARTIFACT** — nix reads `flake.lock` and
-`nix/programs/alacritty/default.nix` at eval/build time and both were uncommitted, so that
-generation is `origin/main` **PLUS** them while the laptop is clean. **Both hosts at the same
-SHA are NOT running the same ARTIFACT.** Pre-existing WIP from another thread; untouched.
+⚠ **DIRTY-AND-IN-THE-ARTIFACT is a RECURRING CLASS on the workbench, not one incident.**
+`ship.sh` names it: nix reads some paths at eval/build time, so an uncommitted one makes that
+host's generation `origin/main` **PLUS** it. Seen 2026-09-03 with `flake.lock` +
+`nix/programs/alacritty/default.nix`; still dirty 2026-09-04 with
+`nix/programs/alacritty/default.nix` + `nix/system/apply-tmp-churn-retention.sh`. 🔴 **Both
+hosts at the same SHA are NOT necessarily running the same ARTIFACT** — read `ship.sh`'s
+per-host artifact block, never just the final verdict. Always another thread's WIP; do not
+stash, commit or reset it.
+
+⚠ **`ship.sh` returned rc 7 then rc 11, and NEITHER was a defect in the change.** rc 7: a
+one-line uncommitted espanso edit to `nix/home.nix` blocked the branch switch — `ship.sh`
+refused rather than stashing, as designed, and named the file. rc 11 after it was cleared: the
+workbench leg cached `origin/main=a0a4d508`, `main` advanced to `2882d2c7` mid-run, and the
+verify compared HEAD against its own stale snapshot. Re-measured directly: both hosts
+`2882d2c7`, 0 ahead / 0 behind, switch demonstrably ran. **This is the documented rc-19
+base-moved race surfacing as rc 11.**
 
 ⚠ **The doc's Goal is met for READS and APPENDS, not for CREATES.** The store has no create
-route; that is rank 24 and **devrc#1254 (another session) owns it** — do not duplicate it.
+route; that is rank 24 and **devrc#1254 (another session) owns it** — do not duplicate it. It
+bit this session: a new `main-green-check` index entry could not be created, so the subsystem
+was recorded as a bullet on `devrc/drift-check` (rev `8873d60b9128d3a8`) instead.
 
 ## Open investigations — live diagnosis state
 
@@ -600,6 +636,21 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 - **Symptom + exact repro:** `nix develop . -c python3 -m pytest scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py -k body_file_written_by_a_heredoc` fails on the DEV HOST whenever `/tmp/body.md` exists, and passes in the sandbox where `/tmp` is clean.
 - **Observed (with values):** 2026-09-03, `/tmp/body.md` existed — 21,181 bytes, mtime 19:41, written by ANOTHER session doing real clawgate work, content starting `## What and why` with no `## Acceptance criteria` heading. The test asserts a heredoc-written body is `allowed` using the hardcoded shared path `/tmp/body.md`; with the file present the guard reads the real file, finds no AC heading, and denies.
 - **Ruled out:** that `main` was red — the sandbox tier passed the same file on the same trees throughout. via: measurement
+- **Ruled out:** deleting `/tmp/body.md` as the fix — it is another session's live working file. via: doc
+- **Next probe:** none needed. **Closing condition:** a merged devrc PR switching that test to pytest's `tmp_path`.
+
+### RESOLVED BY LIVE OBSERVATION — the main-green deadman works end-to-end, including the assumption no test could reach
+- **Symptom + exact repro:** n/a — this records the first production run, because three of its arguments had only ever been argued, not observed.
+- **Observed (with values), 2026-09-04:** ssh clone under systemd **works** — `main-green: first run — cloning git@github.com:innovation-upstream/devrc.git`, completed in 5 s with no agent and no login environment. This was the one assumption no test in #1274 could reach and the one flagged to the auditor as the biggest suspicion. Full run: attempt 1 pytests red (`test_six_writers_with_a_tiny_busy_timeout_still_land_every_row`, `OperationalError('database is locked')`, 5 of 6 writers, load 26-29) → retry → attempt 2 green + `cached` → `verdict flake`, exit 0, `Result=success`, no toast. Wall time 23:45:37 → 00:31:01.
+- **Ruled out:** that the retry is belt-and-braces — a deadman wired to ONE hermetic run would have fired a DND-defeating toast on its first fire, naming an innocent commit, for a flake `CLAUDE.md` already documents for dl-router. via: measurement
+- **Ruled out:** that the timer needs a manual start — it fired on deploy via `OnStartupSec=15min`. via: command
+- **Leading hypothesis:** none needed; the mechanism is confirmed. The open question is only whether the dl-router SQLite flake RECURS, which the `flake` verdict plus retained logs are designed to make visible.
+- **Next probe:** `bash ~/workspace/devrc/scripts/main-green-check.sh --status` after a few days. If the same test appears in repeated `flake` verdicts it is a timing dependency to fix (rank 19 territory), not a flake to re-run.
+
+### 🔴 OPEN — a test depends on GLOBAL /tmp state and reddens the dev-host tier for everyone
+- **Symptom + exact repro:** `nix develop . -c python3 -m pytest scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py -k body_file_written_by_a_heredoc` fails on the DEV HOST whenever `/tmp/body.md` exists; passes in the sandbox where `/tmp` is clean.
+- **Observed (with values):** 2026-09-03, `/tmp/body.md` existed — 21,181 bytes, mtime 19:41, written by ANOTHER session doing real clawgate work, content beginning `## What and why` with no `## Acceptance criteria` heading. The test asserts a heredoc-written body is `allowed` using the hardcoded shared path `/tmp/body.md`; with the file present the guard reads the real file, finds no AC heading, and denies.
+- **Ruled out:** that `main` was red — the sandbox tier passed that same file on the same trees throughout. via: measurement
 - **Ruled out:** deleting `/tmp/body.md` as the fix — it is another session's live working file. via: doc
 - **Next probe:** none needed. **Closing condition:** a merged devrc PR switching that test to pytest's `tmp_path`.
 
