@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 # Seed the cluster store from the LOCAL one. Phase 1 (proposal §4).
 #
-# 🔴 THE LOCAL STORE IS AUTHORITATIVE, AND THIS SCRIPT NEVER WRITES TO IT.
-# `~/.claude/analyze-service-index/` is client-confidential, not re-derivable by
-# re-running recon, and phase 1's whole premise is "local stays authoritative and
-# untouched".
+# 🔴 THE LOCAL STORE IS *NOT* AUTHORITATIVE ANY MORE — THE POD IS. This header
+# said the opposite until 2026-09-04, and the sentence outlived the fact by the
+# whole life of the Cairn cutover, which made the hosted store canonical and
+# froze `~/.claude/analyze-service-index/` to a per-host mirror.
+#
+# What still holds, unchanged: THIS SCRIPT NEVER WRITES TO THE LOCAL STORE. It is
+# client-confidential and not re-derivable by re-running recon, so it is read
+# ONLY, for the reasons enumerated below.
+#
+# What CHANGED is the direction of the risk. The push can no longer be reasoned
+# about as "authoritative source refreshing a derivative": it is a DERIVATIVE
+# overwriting the AUTHORITY, and the extract adds and overwrites but never
+# deletes. That is why the pre-flight before the tar refuses any staged entry
+# whose bytes differ from the pod's — measured 2026-09-02/03, a re-seed would
+# have reverted five pod-newer bullets, two of them `OPEN:` -> `RESOLVED`
+# closures, and reported success.
 #
 # ⚠ This block used to open "THE LOCAL STORE IS THE ONLY COPY … has no
 # off-machine backup". Both halves are now false — daily age-encrypted bundles go
@@ -38,6 +50,7 @@ STORE=""
 STAGE=""
 PUSH=""
 DEST="/data"
+ALLOW_OVERWRITE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -45,6 +58,7 @@ while [[ $# -gt 0 ]]; do
     --stage) STAGE="${2:?--stage needs a path}"; shift 2 ;;
     --push)  PUSH="${2:?--push needs <namespace>/<deployment>}"; shift 2 ;;
     --dest)  DEST="${2:?--dest needs a path}"; shift 2 ;;
+    --allow-overwrite) ALLOW_OVERWRITE=1; shift ;;
     -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "seed: unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -308,6 +322,79 @@ echo "seed: pushing $STAGE -> $ns/$pod:$DEST"
 # of the archive, and the push would land content with no date on it while
 # reporting OK. It is not `*.md`, so it does not disturb the entry counts the
 # mismatch guard below compares.
+# --- 🔴 REFUSE TO OVERWRITE A POD ENTRY WHOSE BYTES DIFFER ------------------- #
+# THE CUTOVER INVERTED THE AUTHORITY AND THIS SCRIPT WAS NEVER UPDATED. The tar
+# extract below "adds and overwrites but never deletes" — which was safe while
+# the LOCAL store was authoritative, and is silent data loss now that the pod is.
+# A shared entry whose pod copy has moved on (a bullet appended through
+# `cairn append`, an `OPEN:` rewritten `RESOLVED <sha>:`) is replaced by this
+# host's older copy, and the verdict below still prints OK because the NAME
+# landed.
+#
+# MEASURED 2026-09-02/03 on the real store: of 25 bullets present locally but not
+# on the pod, FIVE were the pod being NEWER — including two `OPEN:` -> `RESOLVED`
+# closures carrying ~20 lines of later corrections. A re-seed would have reverted
+# all five and reported success.
+#
+# 🔴 WHY THIS IS A PRE-FLIGHT AND NOT A LOUDER VERDICT. The existing containment
+# check runs AFTER the extract, so by the time it can speak the bytes are gone.
+# The only useful place for this question is before the push.
+#
+# 🔴 WHY IT COMPARES BYTES AND NOT MTIME OR "NEWNESS". We cannot order two copies
+# — a local edit not yet pushed and a pod edit not yet pulled both read as
+# "different". Post-cutover the pod is the authority, so ANY difference means
+# this push would overwrite the authoritative copy with a derivative. That is
+# exactly what must not happen silently, so difference is the right predicate and
+# it needs no clock.
+#
+# 🔴 IT ASKS THE POD ABOUT `$staged_list` AND ADDS NO THIRD `find`. Reusing the
+# one list `_shippable_entries` already wrote keeps this comparison on the SAME
+# population as the verdict below — the symlink case in that function is what
+# happens when two walks are allowed to disagree — and leaves
+# `test_the_two_find_expressions_are_IDENTICAL` pinning exactly two listings.
+# `test -f` on the pod yields the INTERSECTION for free: a staged path the pod
+# does not have is a pure addition and cannot clobber anything.
+_clobber_f="$_seed_tmp/clobber"; : > "$_clobber_f"
+if [[ -s "$staged_list" ]]; then
+  _local_h="$_seed_tmp/local-h"; _remote_h="$_seed_tmp/remote-h"
+  ( cd "$STAGE" && xargs -r sha256sum ) < "$staged_list" \
+    | awk '{print $2" "$1}' | LC_ALL=C sort > "$_local_h"
+  # `test -f … && sha256sum …` per path: absent on the pod ⇒ no line ⇒ not in the
+  # join ⇒ a pure addition. `-r` so an empty list runs nothing.
+  # 🔴 `|| :` IS LOAD-BEARING, NOT DEFENSIVE. `xargs` exits 123 when ANY child
+  # exits non-zero, and a staged path the pod does not have is the ORDINARY case
+  # — the pure addition this whole script exists to perform. Without it the
+  # probe returns 123, `set -euo pipefail` aborts, and seeding a genuinely new
+  # entry dies with exit 123 and an EMPTY stderr. Measured: all four tests in
+  # this class failed that way, including the two that must pass.
+  # `_ {}` passes the path as "$1" rather than interpolating it into the inner
+  # script, so a path is never re-parsed as shell text.
+  kubectl -n "$ns" exec -i "$pod" -- \
+    sh -c "cd '$DEST' && xargs -r -I{} sh -c 'test -f \"\$1\" && sha256sum \"\$1\" || :' _ {}" \
+    < "$staged_list" \
+    | awk '{print $2" "$1}' | LC_ALL=C sort > "$_remote_h"
+  # 🔴 `LC_ALL=C` on the join too, for the reason spelled out at the `comm` below:
+  # GNU join order-checks in the AMBIENT locale, and C-sorted input is "not
+  # sorted" to a join running under en_US.UTF-8 — which is this host.
+  LC_ALL=C join "$_local_h" "$_remote_h" | awk '$2 != $3 {print $1}' > "$_clobber_f"
+fi
+_n_clobber=$(wc -l < "$_clobber_f" | tr -d ' ')
+
+if [[ "$_n_clobber" -gt 0 && "$ALLOW_OVERWRITE" != "1" ]]; then
+  echo "seed: REFUSING — $_n_clobber staged entry file(s) EXIST ON THE POD WITH DIFFERENT BYTES." >&2
+  sed 's/^/  /' "$_clobber_f" >&2
+  echo "seed: the pod is the authority since the Cairn cutover; this push would replace its copy" >&2
+  echo "seed:   with this host's, and the verdict would still say OK because the NAME landed." >&2
+  echo "seed: reconcile first (\`cairn sync\`, then \`cairn put\` the merged bytes), or pass" >&2
+  echo "seed:   --allow-overwrite if you have decided this host's copy should win." >&2
+  echo "seed: NOTHING WAS PUSHED." >&2
+  exit 8
+fi
+if [[ "$_n_clobber" -gt 0 ]]; then
+  echo "seed: WARNING --allow-overwrite given; REPLACING $_n_clobber pod entry file(s) with this host's copy:"
+  sed 's/^/  /' "$_clobber_f"
+fi
+
 members=()
 for d in "$STAGE"/*/; do members+=("$(basename "$d")"); done
 members+=(".seed-stamp")

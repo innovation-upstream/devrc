@@ -18488,3 +18488,117 @@ class TestTheSitingRULESThemselvesArePinned:
             "default 64Mi /dev/shm, so every store would fall back to disk and this "
             "module would be inert with the suite green"
         )
+
+
+class TestSeedRefusesToOverwriteANewerPodEntry:
+    """🔴 THE CUTOVER INVERTED THE AUTHORITY AND `seed.sh` WAS NEVER UPDATED.
+
+    The extract "adds and overwrites but never deletes" — safe while the LOCAL
+    store was authoritative, silent data loss now that the pod is. A shared entry
+    whose pod copy has moved on (a bullet appended via `cairn append`, an `OPEN:`
+    rewritten `RESOLVED <sha>:`) was replaced by this host's older copy, and the
+    verdict still printed OK because the NAME landed.
+
+    MEASURED 2026-09-02/03 on the real store: of 25 bullets present locally but
+    not on the pod, FIVE were the pod being NEWER — two of them `OPEN:` ->
+    `RESOLVED` closures with ~20 lines of later corrections. A re-seed would have
+    reverted all five and reported success.
+
+    🔴 The guard is a PRE-FLIGHT. The pre-existing containment check runs after
+    the extract, so by the time it can speak the bytes are gone.
+    """
+
+    def _push(self, store: Path, tmp_path: Path, env, *extra):
+        return run_seed(
+            "--store", str(store),
+            "--stage", str(tmp_path / "stage"),
+            "--push", "ns/app",
+            *extra,
+            env=env,
+        )
+
+    @staticmethod
+    def _pod_copy(dest: Path, body: str) -> Path:
+        """The pod's copy of the SAME entry the store fixture ships."""
+        d = dest / SCOPE
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "thing-alpha.md"
+        p.write_text(body)
+        return p
+
+    def test_a_pod_copy_with_DIFFERENT_bytes_refuses_and_pushes_NOTHING(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE REGRESSION. Red before this change: the push overwrote the pod
+        and exited 0 with `seed: OK`.
+
+        The assertion that matters is not the exit code — it is that the pod's
+        bytes are UNTOUCHED. A guard that refused after clobbering would satisfy
+        an exit-code-only test while losing exactly the content it exists to
+        protect."""
+        env, dest = fake_cluster
+        newer = "---\nservice: thing-alpha\n---\n\n## Nuance / work-history\n- 2026-09-03: RESOLVED abc1234: closed on the pod.\n"
+        pod_file = self._pod_copy(dest, newer)
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 8, (
+            f"expected exit 8 (refused), got {r.returncode}.\n{r.stdout}\n{r.stderr}"
+        )
+        assert pod_file.read_text() == newer, (
+            "THE POD'S BYTES WERE REPLACED. The guard must run BEFORE the extract; "
+            "refusing afterwards is the data loss it exists to prevent."
+        )
+        assert "NOTHING WAS PUSHED" in r.stderr, r.stderr
+        assert f"{SCOPE}/thing-alpha.md" in r.stderr, (
+            "the refusal must NAME the entries it protected, or the operator "
+            f"cannot reconcile them: {r.stderr}"
+        )
+
+    def test_IDENTICAL_bytes_on_the_pod_are_not_a_clobber(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The discriminator. A guard that fired on mere PRESENCE would refuse
+        every ordinary re-seed and be turned off within a day."""
+        env, dest = fake_cluster
+        same = (store / SCOPE / "thing-alpha.md").read_text()
+        self._pod_copy(dest, same)
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, (
+            f"an identical pod copy is not an overwrite: {r.stdout}\n{r.stderr}"
+        )
+        assert "seed: OK" in r.stdout
+
+    def test_an_entry_ABSENT_from_the_pod_is_a_pure_addition(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The other half of the discriminator, and the case that makes seeding
+        useful at all. `test -f` on the pod yields the intersection for free: a
+        staged path the pod does not have cannot clobber anything."""
+        env, dest = fake_cluster
+        assert not (dest / SCOPE / "thing-alpha.md").exists()
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+        assert (dest / SCOPE / "thing-alpha.md").exists(), "the addition did not land"
+
+    def test_allow_overwrite_proceeds_AND_names_what_it_replaced(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The override is deliberate, not a silent bypass: it still prints which
+        entries it replaced, because 'I chose this' and 'I did not notice' must
+        not look the same in a log read afterwards."""
+        env, dest = fake_cluster
+        pod_file = self._pod_copy(dest, "---\nservice: thing-alpha\n---\nDIFFERENT\n")
+
+        r = self._push(store, tmp_path, env, "--allow-overwrite")
+
+        assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+        assert "WARNING --allow-overwrite" in r.stdout, r.stdout
+        assert f"{SCOPE}/thing-alpha.md" in r.stdout, r.stdout
+        assert pod_file.read_text() == (store / SCOPE / "thing-alpha.md").read_text(), (
+            "--allow-overwrite was given, so this host's copy must actually win"
+        )
