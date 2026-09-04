@@ -49,7 +49,7 @@ FRESH_CONFIG = f"""{{ config, pkgs, ... }}:
 # The glob added after the script had already shipped. Case 1 above is the reason
 # this constant is spelled out separately rather than read from the ledger: the
 # test must know which rule is the LATE one.
-LATE_RULE = '"e /tmp/nix-shell.* - - - m:7d"'
+LATE_RULE = '"e /tmp/nix-shell.* - - - mM:7d"'
 
 
 def _script_text() -> str:
@@ -57,29 +57,59 @@ def _script_text() -> str:
 
 
 def _extract_inserter() -> str:
-    """The body of the `python3 - "$CFG" <<'PY' … PY` heredoc, verbatim."""
+    """The body of the `python3 - "$CFG" "${TMPFILES_RULES[@]}" <<'PY' … PY` heredoc.
+
+    The ledger moved OUT of this heredoc on 2026-09-01 and is now a bash array
+    passed on argv, so the inserter and the post-write verifier read one
+    definition. This regex therefore tolerates arguments after "$CFG" — but see
+    `test_the_inserter_and_the_verifier_read_ONE_ledger`, which pins that they
+    both actually reference it.
+    """
     text = _script_text()
-    m = re.search(r"^python3 - \"\$CFG\" <<'PY'\n(.*?)^PY$", text, re.M | re.S)
+    m = re.search(r"^python3 - \"\$CFG\"[^\n]*<<'PY'\n(.*?)^PY$", text, re.M | re.S)
     assert m, "could not find the python heredoc — has the script's shape changed?"
     body = m.group(1)
     assert "systemd.tmpfiles.rules" in body, "extracted the wrong block"
     return body
 
 
-def _python_rules() -> list[str]:
-    """The RULES ledger as the inserter itself defines it."""
-    body = _extract_inserter()
-    m = re.search(r"^RULES = \[\n(.*?)^\]$", body, re.M | re.S)
-    assert m, "could not find the RULES ledger in the inserter"
-    return re.findall(r"'\s*(\"e /tmp/.*?\")\s*'", m.group(1))
+def _shell_marker() -> str:
+    """MARKER as the shipped script defines it — hardcoding it here let a change to
+    the shell constant leave this suite green against the old string."""
+    m = re.search(r"^MARKER='([^']*)'", _script_text(), re.M)
+    assert m, "could not find the MARKER constant in the script"
+    return m.group(1)
 
 
-def _shell_verified_rules() -> list[str]:
-    """The rules the script re-reads off disk after writing, in its `for` loop."""
+def _bash_ledger() -> list[str]:
+    """The single TMPFILES_RULES ledger, as the shipped script defines it."""
     text = _script_text()
-    m = re.search(r"^for _rule in \\\n(.*?)^do$", text, re.M | re.S)
-    assert m, "could not find the post-write verification loop"
-    return re.findall(r"'(e /tmp/.*?)'", m.group(1))
+    m = re.search(r"^TMPFILES_RULES=\(\n(.*?)^\)$", text, re.M | re.S)
+    assert m, "could not find the TMPFILES_RULES ledger — has the script's shape changed?"
+    return re.findall(r"^\s*'(e /tmp/[^']*)'", m.group(1), re.M)
+
+
+def _python_rules() -> list[str]:
+    """The ledger in the quoted form the inserter writes into configuration.nix.
+
+    Reads the SAME array the script passes on argv, so there is still no second
+    copy of the rules here to drift out of sync.
+    """
+    return [f'"{r}"' for r in _bash_ledger()]
+
+
+def _verifier_iterates_the_ledger() -> bool:
+    """Does the post-write verification loop iterate the ONE ledger?
+
+    It used to carry its own hardcoded copy of the rules, which this module
+    compared against the inserter's. That comparison is obsolete now that there is
+    a single array — but the property it protected is not, so it is pinned
+    structurally instead: a verifier that stopped reading TMPFILES_RULES would
+    once again be able to "verify" a rule set it never looked at.
+    """
+    return re.search(
+        r'^for _rule in "\$\{TMPFILES_RULES\[@\]\}"; do$', _script_text(), re.M
+    ) is not None
 
 
 def _run_inserter(tmp_path: Path, config_text: str) -> tuple[int, str, str, str]:
@@ -89,7 +119,7 @@ def _run_inserter(tmp_path: Path, config_text: str) -> tuple[int, str, str, str]
     src = tmp_path / "inserter.py"
     src.write_text(_extract_inserter())
     proc = subprocess.run(
-        [sys.executable, str(src), str(cfg)],
+        [sys.executable, str(src), str(cfg), _shell_marker(), *_bash_ledger()],
         capture_output=True,
         text=True,
     )
@@ -99,19 +129,28 @@ def _run_inserter(tmp_path: Path, config_text: str) -> tuple[int, str, str, str]
 # ---------------------------------------------------------------- the ledger --
 
 
-def test_the_shell_verification_ledger_equals_the_python_rule_ledger():
+def test_the_inserter_and_the_verifier_read_ONE_ledger():
     """A rule written but never re-read off disk is unverified; a rule verified but
-    never written is a permanently-failing check. The two lists must be the SAME
-    set — this fails when either grows or shrinks, not merely when one is empty."""
-    written = {r.strip('"') for r in _python_rules()}
-    verified = set(_shell_verified_rules())
+    never written is a permanently-failing check.
 
-    assert written, "the python RULES ledger parsed empty — the extractor is broken"
-    assert verified, "the shell verification loop parsed empty — the extractor is broken"
-    assert written == verified, (
-        "the rules the script WRITES and the rules it VERIFIES have diverged.\n"
-        f"  written but not verified: {sorted(written - verified)}\n"
-        f"  verified but not written: {sorted(verified - written)}"
+    Until 2026-09-01 those were two hardcoded lists and this test compared them as
+    SETS. They are now one bash array, so the property is pinned at its source
+    instead: the ledger exists and is non-empty, the inserter is handed it on
+    argv, and the verifier iterates that same array. Any of the three breaking
+    re-opens the divergence this test has always been about.
+    """
+    ledger = _bash_ledger()
+    assert ledger, "the TMPFILES_RULES ledger parsed empty — the extractor is broken"
+
+    assert re.search(
+        r'^python3 - "\$CFG" "\$MARKER" "\$\{TMPFILES_RULES\[@\]\}" <<\'PY\'$',
+        _script_text(),
+        re.M,
+    ), "the inserter is no longer handed TMPFILES_RULES on argv"
+
+    assert _verifier_iterates_the_ledger(), (
+        "the post-write verification loop no longer iterates TMPFILES_RULES — it "
+        "can now 'verify' a rule set it never looked at"
     )
 
 
@@ -202,8 +241,14 @@ def test_an_already_applied_host_still_receives_a_newly_added_rule(tmp_path):
         "is keyed on the comment header again"
     )
     assert f"inserted 1 of {len(_python_rules())}" in out, out
-    assert text.count("/tmp churn retention (2026-08-15)") == 1, (
-        "the comment header was duplicated onto a config that already had it"
+    # 🔴 NOT `text.count("/tmp churn retention (2026-08-15)")`. That spelling — with
+    # a CLOSING PAREN — appears only in the header's original wording, so the moment
+    # the header was reworded the count went to 0 and this assertion stopped
+    # observing the duplication it exists to catch. Count header BLOCKS structurally
+    # instead, so any future reword leaves the guard intact.
+    headers = [ln for ln in text.splitlines() if ln.strip().startswith("# /tmp churn retention")]
+    assert len(headers) == 1, (
+        f"the comment header was duplicated onto a config that already had it: {headers}"
     )
 
 
@@ -230,3 +275,81 @@ def test_no_shipped_rule_matches_a_path_that_must_never_be_reaped(protected):
     globs = [r.strip('"').split()[1] for r in _python_rules()]
     hits = [g for g in globs if fnmatch.fnmatchcase(protected, g)]
     assert not hits, f"{protected} would be reaped by {hits}"
+
+
+# 🔴 These exist because an audit mutated the WHOLE eviction block away and all
+# 11 tests still passed: the PR's central new payload — code that DELETES LINES
+# FROM /etc/nixos — had no coverage at all. Each test below kills that mutant.
+
+
+def _seed(rules: list[str], *, user_list: str = "", trailing_comment: bool = False) -> str:
+    body = "".join(
+        f"    {r}" + ("  # added 2026-08-15\n" if trailing_comment else "\n") for r in rules
+    )
+    user = f"  systemd.user.tmpfiles.rules = [\n{user_list}  ];\n" if user_list else ""
+    return f"{{ ... }}:\n{{\n{user}{ANCHOR}{body}    \"d /var/tmp 1777 root root 30d\"\n  ];\n}}\n"
+
+
+def test_every_ledger_glob_names_a_directory_form(tmp_path):
+    """`e` acts on a directory's CONTENTS and silently ignores a plain file, so a
+    glob whose real matches are files is a DEAD RULE. `homelab-talos-prs-*` was one
+    for its whole life — 821 matches, 0 directories — and the coverage table hid it
+    by labelling a file count 'dirs'. This pins the withdrawal."""
+    globs = [r.strip('"').split()[1] for r in _python_rules()]
+    assert not any("homelab-talos-prs" in g for g in globs), (
+        "homelab-talos-prs-* is back in the ledger; it matches only plain files"
+    )
+
+
+# 🔴 Round 2 of the audit found these in code round 1 wrote. Both passed all 16
+# tests that existed at the time, in the module that had just been extended to
+# cover eviction — so "covered" meant covered against the defects we imagined.
+
+
+def test_an_already_applied_host_does_not_get_a_SECOND_comment_header(tmp_path):
+    """The inserter is append-only, so the one thing it must never do to a host that
+    already carries a header is add another.
+
+    🔴 The guard is keyed on MARKER, the shell constant — NOT on the header's first
+    line. Keying on the prose meant that REWORDING the header made this read
+    "absent" and prepend a second block, leaving two contradicting comments in
+    /etc/nixos. The old assertion could not see it either: it counted
+    `"/tmp churn retention (2026-08-15)"` WITH a closing paren, a spelling only the
+    original wording contains, so the reword took its count to 0.
+
+    Removing a stale header is deliberately NOT this script's job — see the
+    append-only block in the inserter, and nix/system/patch-tmp-churn-stale-lines-*.
+    """
+    old_header = "    # /tmp churn retention (2026-08-15). mtime-ONLY ageing (`m:`), because\n"
+    seeded = FRESH_CONFIG.replace(ANCHOR, ANCHOR + old_header, 1)
+
+    rc, _out, err, text = _run_inserter(tmp_path, seeded)
+
+    assert rc == 0, err
+    headers = [ln for ln in text.splitlines() if ln.strip().startswith("# /tmp churn retention")]
+    assert len(headers) == 1, f"a second header block was added: {headers}"
+
+def test_a_ledger_naming_one_path_twice_is_refused(tmp_path):
+    """🟡 Two ledger entries for one `type path` compile to the same regex, match
+    the same stale line, and push the SAME span twice. The second splice then cut
+    the same byte-length at a shifted offset: `"d /srv/critical …"` was chopped to
+    `t -"` — invalid Nix, a live rule destroyed — while the run printed
+    `evicted 2 … inserted 2 of 2` and exited 0 and the verifier passed."""
+    cfg = (
+        "{ ... }:\n{\n" + ANCHOR
+        + '    "e /tmp/run3.* - - - m:7d"\n    "d /srv/critical 0755 root root -"\n  ];\n}\n'
+    )
+    dup = _bash_ledger() + ["e /tmp/run3.* - - - mM:30d"]
+
+    cfgp = tmp_path / "configuration.nix"
+    cfgp.write_text(cfg)
+    src = tmp_path / "inserter.py"
+    src.write_text(_extract_inserter())
+    proc = subprocess.run(
+        [sys.executable, str(src), str(cfgp), _shell_marker(), *dup],
+        capture_output=True, text=True,
+    )
+
+    assert proc.returncode != 0, "a duplicate-path ledger was accepted"
+    assert "twice" in proc.stderr, proc.stderr
+    assert cfgp.read_text() == cfg, "the config was modified on the refusal path"
