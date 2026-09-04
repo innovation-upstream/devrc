@@ -4,25 +4,29 @@
 Deploy Ferdium Server (self-hosted multi-messenger backend) on the homelab Talos cluster, exposed at `ferdium.zacx.dev` behind Authelia, so the Ferdium desktop client can sync without a cloud account.
 
 ## State now
-- **Branch / PR**: devrc `fix/ferdium-client-packages` → **PR #1240 OPEN** (client packages). devrc `docs/handoff-ferdium-server-pickup` → **PR #1241 OPEN** (this doc). homelab-infra `feat/ferdium-server` → **PR #647 OPEN**, commit `71c7d475`, rebased onto `origin/trunk` `8cfa319d` — 16 files, +633/-2. **Not merged. Nothing applied to any cluster or node.**
-- **Clawgate task**: none recorded. `clawgate_handoff.sh resolve` exited 5 (0 tasks for this session). That cannot distinguish "touched no task" from "wrong session id", so no `clawgate-task:` field was written — it is not a clean bill of health.
+**WORKING END TO END.** The Ferdium desktop client logs in against the self-hosted server at
+`ferdium.zacx.dev` and syncs. Confirmed by the operator 2026-09-03.
 
-### What's DONE
-- **Ranks 1-5 built and staged as homelab-infra PR #647.** Homelab app dir (`namespace`/`pvc`/`deployment`/`service`/`kustomization`) + Flux root Kustomization, both nginx gateway blocks, production Service/Endpoints + IngressRoute + DNS Ingress, and the Authelia `one_factor` rule for `user:zach`.
-- **Landed the client-side packages that were deployed but never committed** — devrc PR #1240. The prior version of this doc marked that step done with a ✅: the `home-manager switch` had genuinely succeeded (`~/.nix-profile/bin/ferdium` resolves) but the `nix/graphical.nix` edit was **in no commit**, so the laptop was never going to receive it and any `git checkout` would have erased it while the built store path kept resolving. **"Deployed" and "committed" are independent claims and only one had been made.**
-- Verified that edit by **evaluation, not parsing**: `nix eval` of `homeConfigurations.zach.config.home.packages` returns all five packages **and `deep-search`** — the real check, since the list now opens with `with pkgs;` whose scope reaches across the `++ lib.optional (!isLaptop)` tail. Measured on the workbench (`isLaptop = false`) only.
-- **Port 8117 verified free on both gateway configs** (8116 is the highest in that band on each; positive-controlled against 8115), and the PR diff independently confirmed to move **exactly one token** in the relay deny-list and add exactly two `listen` lines with their matching `proxy_pass` — no other port moved.
-- Confirmed the PR diff contains **no `cam` / `clowden4077` / argon2 hash** — the unrelated uncommitted Authelia user stayed out.
-- Base clone `~/workspace/devrc` fast-forwarded `30b0e7dc → 946a51f0`; it had never received this doc.
-- Claimed under the shared-queue lock as **`ferdium-server-1`** — `claim-work --release ferdium-server-1` once #647 merges.
+| Merged | What |
+|---|---|
+| devrc **#1240**, **#1241**, **#1245** | client packages; handoff updates |
+| homelab-infra **#647** | manifests, both gateways, Authelia rule, relay firewall |
+| homelab-infra **#651** | incident fix — dead promptver upstreams crashing the gateway |
+| homelab-infra **#668** | registration closed + scoped Authelia bypass for the API |
 
-### Two additions beyond the original plan, both required
-1. **`8117` added to the `diffsona` arm of `k0s/host-firewall/relay-firewall.sh`** — see Gotchas. Without it the port is internet-open past Authelia.
-2. **`nebula` root Kustomization now `dependsOn: [comic-flex-pwa, ferdium]`**, matching the `:8115` precedent — the gateway nginx config has no `resolver`, so a missing Service arms a latent gateway-WIDE outage rather than failing at apply time.
+**Open:** homelab-infra **#653** — gateway config `subPath` → directory mount. Unmerged on
+purpose: it rolls the gateway pod on each cluster.
 
-### Deploy / verify status
-- **Client**: deployed on the workbench and now committed; **not** on the laptop until #1240 merges and `scripts/ship.sh` runs.
-- **Server**: staged only. Not merged, not reconciled, not deployed, not verified. No cluster or node has been touched.
+### Final verified state
+- users = 1 (`zachlowden1@gmail.com`); `IS_REGISTRATION_ENABLED=false`, and signup returns
+  `{"message":"Registration is disabled on this server","status":401}` — the flag gates the API,
+  not just the dashboard.
+- Login through the **public edge** returns HTTP 200 + token; a deliberately wrong password
+  returns 401 `User credentials not valid`. Both measured — the wrong-password control is what
+  makes the 200 mean anything.
+- `GET /` still 302s to `login.zacx.dev`; `POST /v1/auth/signup` still 302s (excluded from the
+  bypass by rule negation). 8117 remains dropped from the public internet.
+- Vaultwarden holds the PLAINTEXT, which is correct: the client hashes it before sending.
 
 ## Architecture (researched, not yet implemented)
 
@@ -34,26 +38,23 @@ Ferdium client → Cloudflare → production nebula gateway (10.0.0.2)
 Authelia runs on the production cluster. Cloudflare handles TLS termination. The homelab nebula gateway proxies traffic to internal services.
 
 ## Next steps (ranked)
-🔴 Ranks 1-7 keep their original numbering on purpose — the rank is half a `claim-work` slug's identity and re-ranking silently re-points live claims. Ranks 1-5 are now all carried by **PR #647**.
-
-1. **STAGED as homelab-infra PR #647** — review and merge it. `/audit-pr 647` is worth running first: it carries an Authelia access-control rule and an internet-facing relay port. Merging IS deploying.
-   forcing: user
-2. (in #647) homelab nebula gateway block, `listen 10.42.0.10:8117` → `ferdium.ferdium.svc.cluster.local:80`.
-   forcing: user
-3. (in #647) production `homelab-ferdium` Service + Endpoints and the `listen 0.0.0.0:8117` → `10.42.0.10:8117` block.
-   forcing: user
-4. (in #647) `ferdium-ingress.yaml` — IngressRoute + external-dns DNS Ingress.
-   forcing: user
-5. (in #647) `ferdium.zacx.dev` → `one_factor` for `user:zach` in Authelia.
-   forcing: user
-6. **After merging #647: copy `k0s/host-firewall/relay-firewall.sh` to the relay node and apply it.** 🔴 That file is NOT Flux-reconciled, so the merge does not deliver it — until this is done, `8117` is open on the node's public interface, bypassing Authelia. Then `flux reconcile`, verify pod health, and check `https://ferdium.zacx.dev` 302s to `login.zacx.dev`.
-   forcing: security
-7. Open the Ferdium desktop client → custom server URL → register → then flip `IS_REGISTRATION_ENABLED` to `false` and redeploy. **Watch for background sync failing with 302s while a browser works** — that is the untested forward-auth gap in Gotchas, and the fix is a scoped bypass, not deleting the Authelia rule.
-   forcing: user
-8. Merge devrc **PR #1240** and run `scripts/ship.sh` so the laptop receives the client packages.
-   forcing: regression
-9. Digest-pin `ferdium/ferdium-server:latest` — upstream publishes no version tag, so the deployed image can change under a reconcile.
-   forcing: none
+10. Digest-pin `ferdium/ferdium-server:latest` — upstream publishes no version tag, so the
+    running image can change under any reconcile or restart with no diff in git.
+    forcing: none
+11. Commit or discard `nix/programs/alacritty/default.nix`, uncommitted in `~/workspace/devrc`
+    and baked into the workbench's built generation, so the two hosts are not identical despite
+    reporting the same sha.
+    forcing: regression
+12. A gate asserting every `proxy_pass … .svc.cluster.local` in both gateway configs resolves to
+    a Service defined in the repo. The promptver pair was found by checking all 37 by hand.
+    forcing: none
+13. Merge homelab-infra **#653** during a window where a brief mesh interruption per cluster is
+    acceptable.
+    forcing: incident — the 2026-09-02 gateway CrashLoopBackOff
+14. Restart Brave on the `personal - other` profile — it runs a stale extension build
+    (`b817ef1e88267a40` vs expected `66b98084daecd880`) and **cannot open tabs at all**, which
+    silently degrades the `browser` skill on that profile.
+    forcing: none
 
 ## Ferdium Server config (reference)
 
@@ -103,26 +104,73 @@ Port: 3333 (container) → 8117 (nebula gateway) → homelab Service port 80.
 - **`ferdium/ferdium-server:latest` is a mutable tag** — upstream publishes no version tag. A digest pin is an owed follow-up.
 - **`scripts-tests` was already red on `origin/trunk`** before any of this work: a pristine baseline worktree produced byte-identical verdict lines (`files_run=54 tests_ran=1316`, same failed/broken sets). Do not attribute it to the ferdium diff.
 
+- 🔴 **FERDIUM PASSWORDS: EVERY REAL CONSUMER SENDS `sha256_base64(password)`, NOT THE
+  PLAINTEXT — so the account must be registered with the HASH.** `ferdium-app` builds
+  `Authorization: Basic base64(email + ":" + sha256_b64(password))`, and the server's own web
+  dashboard controller hashes what the form submits. The ONLY path that takes a raw plaintext is
+  a hand-rolled Basic-auth call to `v1/auth/login`. Register via the API with
+  `printf %s '<plaintext>' | openssl dgst -sha256 -binary | base64` as the `password` field, and
+  keep the PLAINTEXT in the password manager — the client hashes it for you. Corroborated three
+  ways: the client's `password-helpers` (`sha256` → base64, no salt), the server's Franz-import
+  handler using the identical expression, and empirically — submitting the hash into the web form
+  fails (double-hashed) while the client and the dashboard both accept the plaintext.
+- 🔴 **THE VERIFICATION TRAP THAT COST THIS EFFORT A DAY: I VERIFIED THE ONE PATH NOBODY USES.**
+  A raw Basic-auth `curl` to the login API returned 200 + a token, and that was reported as "the
+  credential is confirmed". It confirmed only that the plaintext matched the stored hash on the
+  single code path that does no client-side hashing — the path no human or client ever takes.
+  Both real consumers were broken the whole time and the green check could not see it. **Ask
+  which path the USER takes, and exercise THAT one.** A credential check must run through the
+  actual client, or through the same transformation the client applies.
+- 🔴 **There is NO password-change API.** `PUT /v1/me` merges `request.all()` into a settings
+  JSON column and never touches auth. There is a web account page (`POST /user/account`), but it
+  is useless when the stored credential is wrong in a way that blocks the dashboard too. The only
+  reliable repair is: delete the user row, briefly re-enable registration, re-register with the
+  correct value, and let Flux restore the flag to `false` on its next reconcile — which it does
+  by itself, so no second PR is needed.
+- **There is no web signup form.** `user/signup` 302s to `user/login`; `signup` 302s to `/`. The
+  fallback route `/*` redirects to `/`, so a typo'd probe path returns a 302 that reads as
+  success — check the redirect target, not just the status.
+- **The Ferdium `/health` endpoint returns a hardcoded `{"api":"success","db":"success"}`** with
+  an upstream `TODO` and never queries the database. A Ready pod is not evidence sync works.
+- **Ferdium's first run clones a recipes repo**, so readiness legitimately takes ~2 min after the
+  image pull. A `connection refused` readiness probe in that window is expected.
+- **Stored password format is Adonis PHC scrypt** (`$scrypt$n=16384,r=8,p=…`), not bcrypt — do
+  not hand-craft a replacement hash into SQLite.
+
 ## How to verify
 ```bash
-# Client half — the packages resolve from the committed source, and the
-# conditional tail survived the `with pkgs;` widening (this is the real check):
-nix eval --impure --raw \
-  '/home/zach/workspace/devrc#homeConfigurations.zach.config.home.packages' \
-  --apply 'ps: builtins.concatStringsSep "\n" (map (p: p.name or "?") ps)' \
-  | grep -E 'ferdium|noto|liberation|deep-search'
+# 1. The account, and that registration is shut (the flag gates the API, not just the UI):
+KUBECONFIG=$KC_HOMELAB kubectl -n ferdium exec deploy/ferdium -- \
+  sh -c 'sqlite3 /data/ferdium.sqlite "select id,email from users;"'
+curl -sS -X POST -H 'Content-Type: application/json' \
+  -d '{"firstname":"a","lastname":"b","email":"probe@example.invalid","password":"abcdefgh12"}' \
+  http://10.42.0.10:8117/v1/auth/signup      # expect "Registration is disabled on this server"
 
-# Client half — actually delivered to BOTH hosts (not just built):
-git -C /home/zach/workspace/devrc log --oneline -1 origin/main -- nix/graphical.nix
-scripts/drift-check.sh          # read every per-host line, never the final verdict
+# 2. 🔴 Login through the PUBLIC EDGE, with the wrong-password control. Read BOTH lines —
+#    a 200 alone proves nothing, and the password here is the sha256_b64 the CLIENT sends:
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+  -u "zachlowden1@gmail.com:$(printf %s '<plaintext>' | openssl dgst -sha256 -binary | base64)" \
+  https://ferdium.zacx.dev/v1/auth/login     # expect 200
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+  -u 'zachlowden1@gmail.com:WRONG' https://ferdium.zacx.dev/v1/auth/login   # expect 401
 
-# Server half — ONLY meaningful after the manifest PR is merged and reconciled:
-flux reconcile kustomization ferdium -n flux-system          # homelab cluster
-KUBECONFIG=$KC_HOMELAB kubectl -n ferdium get pods           # expect Running
-curl -sS -o /dev/null -w '%{http_code}\n' https://ferdium.zacx.dev/
-#   expect a 302 to login.zacx.dev while unauthenticated — a 200 here would mean
-#   the Authelia middleware is NOT in the path, which is a finding, not a pass.
+# 3. The edge is still gated where it should be:
+curl -sSI https://ferdium.zacx.dev/ | head -1                       # 302 -> login.zacx.dev
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST -d '{}' \
+  -H 'Content-Type: application/json' https://ferdium.zacx.dev/v1/auth/signup   # 303 (gated)
 
-# End to end: Ferdium desktop -> custom server -> https://ferdium.zacx.dev
-# -> register -> add the WhatsApp recipe. Nothing short of this proves the goal.
+# 4. 8117 must stay dropped from the internet — read all three, one proves nothing.
+#    🔴 The relay's public IP is DERIVED here, never written down: this repo is
+#    PUBLIC and scripts/tests/test_no_public_ips.py fails the suite on a literal.
+#    Do not "simplify" this back to a hardcoded address — it caught exactly that.
+RELAY=$(awk '/ssh:/{f=1} f&&/address:/{print $2; exit}' "$HOMELAB/k0s/diffsona.yaml")
+nix-shell -p netcat-openbsd --run "for p in 8117 8114 8118; do nc -vz -w 6 $RELAY \$p; done"
+#   8117 timeout · 8114 timeout (guarded control) · 8118 refused (unguarded control)
+
+# 5. The only thing that proves the GOAL: the desktop client logs in with the PLAINTEXT and syncs.
 ```
+## Open investigations — live diagnosis state
+### (CLOSED) Does the desktop client survive the Authelia forward-auth gate?
+- **Resolved 2026-09-03.** It did not, and could not: Authelia intercepted the whole `/v1/` API
+  (`POST /v1/auth/signup` → 303, `GET /v1/auth/login` → 302, both to `login.zacx.dev`). Fixed by
+  the scoped bypass in #668, which excludes signup. Verified working through the public edge.
