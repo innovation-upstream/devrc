@@ -1590,7 +1590,8 @@ def repo_probe_argv(paths):
     a recognisable name rather than `sh` so it is identifiable in a `ps` on
     either host.
     """
-    return ("sh", "-c", REPO_PROBE_SCRIPT, "sm-repo-probe", *[str(p) for p in paths])
+    return ("sh", "-c", REPO_PROBE_SCRIPT, "sm-repo-probe",
+            *[str(p) for p in paths])
 
 
 def parse_repo_probe(raw, paths) -> dict:

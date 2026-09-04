@@ -227,6 +227,46 @@ repo resolve to the SAME label, so quote both. New non-scratch sessions get a re
 at creation from `scripts/tmux-autoname-session.sh`; `label` is what covers the ones that
 predate it.
 
+## 🔴 `repo` — the PROJECT key, and it is not `label`
+
+`label` answers "where is this" for an OPERATOR (the leaf of the cwd, or a codename).
+`repo` answers "which project is this" for a CONSUMER: the **MAIN CLONE** of the pane's
+cwd, so **every linked worktree of a repo carries ONE name**. That is a thing no string
+operation on `path` can produce — a worktree called `clawgate-extension` is a worktree of
+`homelab-talos`, and `ht-r11-930492` is not derivable from `homelab-talos` at all.
+
+Its consumer is clawgate's tmux page, whose `projectOf()` prefers `repo` when non-empty,
+falls back to the LEAF of `path`, then to `Other`. Before this field existed the leaf won
+every time, so each worktree formed its own project group.
+
+🔴 **IT IS RESOLVED ON THE HOST THAT OWNS THE DIRECTORY**, by one batched `sh -c` per host
+over the same SSH transport as the tmux calls — `git rev-parse --path-format=absolute
+--git-common-dir`, whose parent directory is the main clone. Roughly half these rows come
+off the laptop, and a LOCAL `git rev-parse` would answer about whatever happens to sit at
+that path on the workbench, or about nothing. `--show-toplevel` is the wrong flag: on a
+linked worktree it returns the worktree itself, so it cannot group two worktrees at all.
+
+🔴 **`repo_status` IS WHAT MAKES A NULL `repo` READABLE.** Never read a null as "not in a
+repo" without it:
+
+| `repo_status` | means |
+|---|---|
+| `ok` | resolved; `repo` names the main clone. The ONLY status carrying a name. |
+| `not_a_repo` | MEASURED: the owning host says this path is not in a work tree (or its common dir cannot be honestly named — a bare repo, a submodule). |
+| `home` | MEASURED and deliberately withheld: the main clone IS the owning host's `$HOME`. `projectOf()` routes an unparented shell to `Other`, and `repo` is the branch it PREFERS, so a name here would override that guard. |
+| `no_path` | the pane reported no cwd. |
+| `missing` | the probe answered for this host but not for this path (a partial reply). |
+| `unmeasured` | **nobody looked** — the probe failed, timed out, or came back without its sentinel. NOT a measured absence. |
+| `skipped` | `--no-repo`. |
+
+Per host, `repos_measured` / `repos_status` / `repos_error` / `repos_paths` /
+`repos_resolved` / `repos_unparseable` are the FOURTH independent measurement beside
+`reachable`, `windows_measured` and `captures_measured`. The counts are integers only when
+`repos_measured` is true; otherwise they are null, never 0.
+
+Measured on the live fleet 2026-09-03: 90 of 92 windows resolved (laptop 31/32, workbench
+59/60); the two that did not are `/home/zach` and a non-repo directory, both `not_a_repo`.
+
 ## The caveats are in the OUTPUT, not just in this file
 
 `report["caveats"]` (structured) + one footer line each in the table, printed
