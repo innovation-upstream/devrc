@@ -42,6 +42,20 @@ TS = "100.64.0.5"
 
 RS = "\x1e"  # record separator between logged invocations
 
+#: Every executable `sandbox()` may place on the stub PATH. Asserted live by
+#: test_the_stub_path_contains_only_declared_stubs, so this set cannot rot away
+#: from what sandbox() actually writes — which is what lets
+#: scripts/tests/test_no_real_launchers.py pin this file's PATH clobber by
+#: ENUMERATION rather than by prose.
+SANDBOX_BINARIES = {
+    "ssh", "scp", "rsync", "tmux", "kubectl", "ip", "tailscale",  # stubs we write
+    "bash", "cp",                                                 # real, by symlink
+}
+
+#: Names in the above set that are also real launchers on this host. They are
+#: present ONLY as stubs this file writes; the assertion below proves it.
+SANDBOX_FAKED_LAUNCHERS = {"ssh", "scp", "rsync", "tmux", "kubectl"}
+
 #: Absolute paths captured from the REAL environment once, so the stubs can use
 #: them while PATH itself stays restricted to the stub dir. A stub that reached
 #: for a bare `cat` would exit 127 under that restricted PATH and be scored as
@@ -939,6 +953,37 @@ def test_adding_a_host_is_a_table_entry_not_a_code_fork():
 # ---------------------------------------------------------------------------
 # 14. Delivery
 # ---------------------------------------------------------------------------
+
+
+def test_the_stub_path_contains_only_declared_stubs(tmp_path):
+    """The live invariant behind this file's PATH clobber.
+
+    `sandbox()` REPLACES PATH rather than prepending to it, which
+    scripts/tests/test_no_real_launchers.py pins as a deliberate site. Replacing
+    is required, not stylistic: the `not-configured` assertions depend on
+    `tailscale` being genuinely ABSENT, and no amount of PREPENDING can make a
+    binary unfindable if one is ever installed on the dev host. The real `ip` is
+    the mirror image — on workbench it reports the nebula address, so a
+    prepended PATH would let the host's true identity leak into tests that must
+    believe they are remote.
+
+    What makes that safe is enumeration: the directory holds only the names
+    below, and every launcher-shaped one among them is a stub THIS FILE wrote.
+    Asserted here rather than asserted in prose, so it cannot rot.
+    """
+    bindir, _, _ = sandbox(tmp_path, ok_addrs=(LAN,), tailscale=[peer("workbench")])
+    names = {p.name for p in bindir.iterdir()}
+
+    assert names <= SANDBOX_BINARIES, "undeclared binary on the stub PATH: %s" % (
+        names - SANDBOX_BINARIES,
+    )
+    # Every launcher-shaped name is a regular file we wrote inside tmp_path —
+    # never a symlink or copy reaching a real system binary.
+    for name in SANDBOX_FAKED_LAUNCHERS & names:
+        path = bindir / name
+        assert not path.is_symlink(), "%s escapes to a real binary" % name
+        body = path.read_text(encoding="utf-8", errors="replace")
+        assert "WH_LOGDIR" in body, "%s is not one of this file's stubs" % name
 
 
 def test_workhost_is_executable():
