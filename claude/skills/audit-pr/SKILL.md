@@ -26,6 +26,22 @@ generates the range, the cross-repo worktree directive, checkout state and toolc
 prior round's claims from the fenced `audit-claims` block ONLY, and carries the invariant clauses
 verbatim. **A delta round with no parseable block is REFUSED.**
 
+🔴 **That refusal covers NO block at all — it does NOT cover a MISSING INTERMEDIATE one, which
+proceeds and SILENTLY WIDENS the range.** The anchor is the newest block the script can PARSE, not
+the previous round's, so when round N−1 posted nothing, round N anchors on round N−2's tip and the
+"delta" silently spans two rounds' fixes. It is the mirror of the empty-range trap below — that one
+under-covers, this one over-covers — and it is worse to spot, because a wider range reads as a
+perfectly ordinary delta and the extra commits look like work the round was meant to see.
+**It is announced on stderr, once, and nowhere in the brief**: `the newest claims block says
+round=3, and you asked for round 5`. Read that line before you dispatch; if it fires, say in the
+dispatch which rounds the range actually spans, and hold the un-blocked round's commit to the same
+per-claim standard by reading its commit message for what it claimed. Measured 2026-09-02 on
+`ZacxDev/civitai-block-generate-from-model#7`: round 4 posted no block, so round 5's range came
+back `acce7a2..02c07f1f`, spanning both R3's and R4's fixes. 🔴 **One reason a block goes missing is
+not forgetfulness: `gh pr view --json comments` does NOT return REVIEW comments**, so a block posted
+as a review is invisible to the script even though a human can see it on the PR. The script says so
+in the same stderr line — post the block as an ISSUE comment.
+
 🔴 **Post the round's block with `--round N --emit-claims --audited <the tip that round's audit
 READ>`.** `--emit-claims` runs after the fixes land, so every sha it can see is a FIX tip; omit
 `--audited` and HEAD is *assumed* — it says so on stderr, because the next round then diffs a range

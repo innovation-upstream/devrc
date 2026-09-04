@@ -17,17 +17,28 @@
 #     docker build -f scripts/subsystem-store-api/Dockerfile -t <tag> .
 # `build-push.sh` next to this file does that and nothing else.
 #
-# 🔴 THE IMAGE CONTAINS CODE, NEVER STORE CONTENT. Only four .py files are
-# copied, by name — no `COPY . .`, so a stray entry file in a working tree
-# cannot be baked into a layer and pushed to a registry. The store arrives at
-# runtime, on a PVC, via `seed.sh`.
+# 🔴 THE IMAGE CONTAINS CODE, NEVER STORE CONTENT. Every .py file is copied BY
+# NAME — no `COPY . .`, so a stray entry file in a working tree cannot be baked
+# into a layer and pushed to a registry. The store arrives at runtime, on a PVC,
+# via `seed.sh`.
+#
+# 🔴 DO NOT TRIM A `COPY` BY EYE, AND DO NOT COUNT THEM HERE. This comment used
+# to say "only four .py files" and was wrong; a first correction replaced the
+# number with a different number, which is the same artefact one module later.
+# There is no count in this file any more, on purpose. The authority is
+# `test_subsystem_store_api.py::test_the_image_copies_every_module_it_needs`,
+# which computes the TRANSITIVE closure of local `scripts/lib` imports from
+# `server.py`'s entrypoint and asserts BOTH this file and the (allowlist-shaped)
+# `Dockerfile.dockerignore` cover it. Add an import, run that test.
 
 FROM python:3.12-slim
 
 # Stdlib only: `subsystem_recall` imports argparse/difflib/json/re/sys/pathlib
-# and `subsystem_resolver`/`subsystem_touch`, and shells out to nothing. There
-# is no requirements.txt to install and there must not be one.
+# and the local `subsystem_read_store`/`subsystem_resolver`/`subsystem_touch`,
+# and shells out to nothing. There is no requirements.txt to install and there
+# must not be one.
 COPY scripts/lib/subsystem_recall.py   /app/scripts/lib/
+COPY scripts/lib/subsystem_read_store.py /app/scripts/lib/
 COPY scripts/lib/subsystem_resolver.py /app/scripts/lib/
 COPY scripts/lib/subsystem_touch.py    /app/scripts/lib/
 COPY scripts/lib/git_mainline.py       /app/scripts/lib/

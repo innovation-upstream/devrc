@@ -29,7 +29,7 @@ questions you would otherwise pay for live:
 | field | what it saves you |
 |---|---|
 | `ready.testid` + `ready._comment` | the anchor that means BOOTED — **and the rejected candidates, each with the reason it fails**: a validation message that vanishes once the control unblocks, loading art present in one read and absent in the next, the static `#root` shell that exists before boot and in a deadlocked frame |
-| `clickable` | every selector that recipe may activate. 🔴 Read this as a HAZARD list: the spend path rejects untrusted events, but an ordinary authenticated mutation — post, vote, edit, withdraw — does not, so these are the controls that really act on the operator's account. Here no guard will refuse one for you |
+| `clickable` | every selector that recipe may activate. 🔴 Read this as a HAZARD list: an ordinary authenticated mutation — post, vote, edit, withdraw, report — really does act on the operator's account, and **no guard will refuse one for you**. 🔴 Do NOT justify a click with "the spend path rejects untrusted events" — that mechanism is RETRACTED (see below). The correct reason these are dangerous is simpler and stronger: they are not spend-path controls at all, they are plain authenticated writes, and nothing anywhere refuses them |
 | `states` | the screens known to be reachable, named, in the order that reaches them |
 
 ⚠ The pointer is **cross-repo and gated by nothing** — no check in this repo can
@@ -51,10 +51,34 @@ takes CDP `Input.dispatch*Event` and arrives `trusted:true`. So dropping `--fram
 does not merely miss the element — it upgrades the event's trust, and that is the
 second route to a trusted event, one that spells no `xdotool` anywhere.
 
-**Corollary, and the reason a "broken" money button is usually not broken:** the
-spend path *rejects untrusted events*, so a synthetic in-frame click does nothing
-at all on a billing control. That is the platform working as designed, not a
-defect — do not report it as one, and do not "fix" it by dropping `--frame`.
+**Corollary, and the reason a "broken" money button is usually not broken:** a
+synthetic in-frame click does nothing at all on a billing control. Do not report
+that as a defect, and do not "fix" it by dropping `--frame`.
+
+🔴 **The OBSERVATION above stands; the EXPLANATION this file used to give —
+"the spend path rejects untrusted events" — is RETRACTED. Measured 2026-08-30; do
+not re-derive it.** There is no `isTrusted` / `userActivation` / transient-activation
+check anywhere on the spend path: both identifiers return **zero** matches across
+`<civitai>/src/components/AppBlocks`, `blocks.router.ts` and
+`src/server/services/blocks` — and the positive control is that `isTrusted` DOES
+match elsewhere in `src`, so that zero is a measurement rather than a broken
+search. `blocks.submitWorkflow` is a **`publicProcedure`** taking the block JWT as
+an *input*, not a cookie, so a `curl` from outside any browser submits fine.
+What actually gates spend is **token scopes, `buzzBudget`, the author capability
+and the Buzz caps**.
+
+🔴 **So the CAUSE of the dead in-frame click is NOT established** — only that it is
+not an untrusted-event rejection. The operational rule is unchanged and rests on
+the reproducible observation: keep using `trustedKey` for a real money-path click.
+
+🔴 **Security corollary, now that the mechanism is known: "it came from a browser"
+is NOT a boundary here.** A non-browser client holding a valid scoped token can
+drive this path.
+
+The likely source of the false belief: `openBuzzPurchaseGate.ts` and
+`requestConsentGate.ts` gate on handshake **readiness**, and the SDK bans the
+`allow-top-navigation-by-user-activation` sandbox token — all *about* user
+activation, none an `isTrusted` check, none on the spend path.
 
 ## 🔴 The frame id changes on EVERY load — re-poll `frames` after any nav
 
@@ -94,3 +118,47 @@ The 404 renders, screenshots, crops and frames just as well as a real app, so
 nothing downstream will tell you. **Check auth first**, before any read you intend
 to draw a conclusion from — an unauthenticated session makes a working block and a
 nonexistent one indistinguishable.
+
+🔴 **A 404 has a SECOND ordinary cause, and it is invisible from the browser: the block's
+`app_blocks.status` is `suspended`.** The run-page resolver filters to approved, so a
+suspended block 404s for an authenticated moderator exactly as it does for a logged-out
+stranger — and it is not rendered in the model slot either. Measured 2026-09-03, **13 of
+24** blocks were suspended, including `hello-world`, `dogfood-manual` and `who-am-i`, so
+this is the ordinary state of an internal app, not evidence of a takedown. **An
+unauthenticated 404 and a suspended 404 are indistinguishable in the browser**, so a
+control pair (a known-serving slug in the same session) is what separates them — logging
+in is not enough.
+
+## 🔴 A top-level load of `<slug>.civit.ai` WILL NOT HOLD STILL — it bounces after 2 s
+
+Serving 200 with no HTTP redirect, the bare origin *looks* like a way to observe a block
+with no host attached — no `BLOCK_INIT`, so it should sit in its pre-ready state
+indefinitely. It does not. `@civitai/blocks-react`'s `dist/internal/directLoad.js` bounces
+to `civitai.com/apps/run/<slug>` after `DIRECT_LOAD_TIMEOUT_MS = 2000` when no handshake
+arrives — deliberate, so a shared link lands somewhere useful.
+
+**Two bridge round-trips exceed 2 s**, so a nav-then-read sequence reads the HOST page and
+reports the block's own values as absent. The tell is `location.href` coming back as
+`/apps/run/<slug>` when you navigated to the bare origin. Measured 2026-09-03.
+
+## 🔴 `emulate --color-scheme` does NOT reach the block iframe
+
+The block is a cross-origin OOPIF with its own renderer; `emulate` applies the override to
+the tab's **top-level** target. Measured 2026-09-03 with a positive control: under a
+CDP-session read the TOP frame correctly reported `osDark: False`, while the durable
+`data-civitai-boot-theme` the block had written at load still read `dark`.
+
+**So an OS-vs-host theme mismatch cannot be staged from outside.** If you need one, change
+the HOST theme — a real change to the operator's account, so ask first — or accept the case
+is unobservable and say so rather than reporting the arm you could not run.
+
+Related: **`--wake` and `--frame` are mutually exclusive** (`wake_with_frame_unsupported`)
+— un-throttling is tab-level. Wake the tab, then issue the framed read as a separate op.
+The emulation above is live only *inside* a CDP session, so a plain framed read sees no
+override either way; read the **durable attribute** the boot wrote, not `matchMedia`.
+
+🔴 **The generalisable half, and it applies well beyond theme:** an app's boot state is
+transient by definition, so racing it with a screenshot is the reassuring-zero trap — miss
+the frame and you report "no flash" from a sample you never took. Prefer a **durable
+artifact** the boot wrote and left behind (here `<html data-civitai-boot-theme>`, set once
+at parse and never removed). If none exists, say the transient was not observed.

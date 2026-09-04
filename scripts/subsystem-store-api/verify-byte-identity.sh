@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 # Phase-1 acceptance criterion: the pod's store is the local CLI's store, for
-# EVERY scope (proposal §4 phase 1, §5 "byte-identity … `cmp`, not eyeballing").
+# every scope THIS HOST HOLDS (proposal §4 phase 1, §5 "byte-identity … `cmp`,
+# not eyeballing").
+#
+# 🔴 "EVERY SCOPE" IS WHAT THIS LINE USED TO SAY, AND IT IS NOT TRUE — the
+# sweep is one-directional and can never be complete. Scopes are enumerated
+# from the LOCAL store, so a scope the pod holds and this host does not is
+# never requested, never compared, and never counted. MEASURED 2026-09-02:
+# local 16 scopes / 141 indexed entries, pod 23 / 189 — so 7 pod-only scopes
+# (auditloop, civitai-gpu-fleet, naida-ai, vetr, vetr-api, vetr-app,
+# vetr-infra) holding 48 entries, a QUARTER of the served store, are outside
+# every run's reach.
+#
+# It is not fixable here: the API deliberately exposes no scope-enumeration
+# route, so this script cannot ask the pod what it holds. The remedy is
+# therefore HONESTY, not coverage — the verdict line says which side was
+# enumerated and that the served copy may hold scopes the run could not see.
+# That is the same rule this script already enforces one notch down, where a
+# zero-scope run exits 4 rather than passing trivially.
 #
 # ⚠ IT CANNOT BE A BARE `cmp`, AND SAYING SO IS THE POINT.
 # `subsystem_recall.render_text` emits exactly one line naming the store root
@@ -25,14 +42,39 @@
 #
 #     FAIL scope=devrc            raw-diff-lines=45   accounted-for=6
 #     FAIL scope=cli              raw-diff-lines=8    accounted-for=6
-#     PASS scope=storage-resolver (2 entries)
+#     PASS scope=storage-resolver (1 entry)
 #     FAIL scope=homelab-infra    raw-diff-lines=108  accounted-for=6
 #     FAIL scope=datapacket-talos raw-diff-lines=336  accounted-for=6
 #
 # The `cli` scope is the clean isolation — its index ROWS were identical and the
-# only unaccounted difference was one row's POSITION. Every passing scope had 2
-# entries; every failing one had more. `claude/RULES.md`: a permanently-red gate
-# is worse than no gate.
+# only unaccounted difference was one row's POSITION. `claude/RULES.md`: a
+# permanently-red gate is worse than no gate.
+#
+# 🔴 TWO READINGS OF THAT RUN WERE WRONG, AND THIS IS THE CORRECTION.
+# The `storage-resolver` line above said `(2 entries)` and the paragraph
+# concluded "every passing scope had 2 entries; every failing one had more".
+# RE-MEASURED 2026-09-01 on this host, same store, counting entries as
+# `subsystem_recall` INDEXES them rather than as files on disk:
+#
+#     cli=5  devrc=26  datapacket-talos=49  homelab-infra=0  storage-resolver=1
+#
+# `storage-resolver/` holds `backblaze.md` plus a `README.md`, and a README in a
+# scope is correctly NOT indexed — so it is a ONE-entry scope. NO TWO-ENTRY
+# SCOPE APPEARS IN THAT RUN AT ALL, so the data could never support a two-entry
+# boundary, in either direction.
+#
+# The boundary that does hold is ARITHMETIC, not measured: a ONE-entry index has
+# exactly one possible order and cannot diverge; TWO OR MORE is where the order
+# can differ. That is the same argument the ordering fixture in
+# `scripts/tests/test_subsystem_store_api.py` makes for itself when it chooses
+# FOUR refs — two entries admit only two orders, so a two-entry fixture is one
+# coin-flip away from asserting nothing.
+#
+# And `homelab-infra` was NOT an ordering failure. It holds ZERO indexed entries
+# on this host (one `README.md`), so its local render is `status=scope-empty`
+# with no INDEX block at all — 102 unaccounted lines that ordering structurally
+# cannot produce. That FAIL was a SET difference, the lagging read-through cache
+# case described below. THREE of the four FAILs were ordering, not four.
 #
 # 🔴 SO THE CLAIM IS RESTATED AT THE LEVEL IT CAN HOLD. Byte-identity of the
 # RENDER was always a proxy; what phase 1 actually needs is that the pod holds
@@ -49,6 +91,11 @@
 #      that prints no index at all, so it carries no order. There is NO route
 #      serving raw entry bytes; the API only ever returns renders, so "the
 #      entry's bytes" is realised as "the entry's own single-ref render".
+#      🔴 AND THAT RENDER MUST SAY `status=recalled`, OR THE SCOPE IS REFUSED.
+#      A `--ref` run that resolves to no single entry still prints a well-formed
+#      report — a NOTICE where the body should be — and still exits 0. See the
+#      per-entry arm for the mechanism; without that check `entries=N` counts
+#      streams that carry no entry at all.
 #
 # What is claimed, precisely:
 #
@@ -91,8 +138,9 @@
 # `scripts/tests/test_subsystem_store_api.py::TestByteIdentityVerifier`:
 # identical stores -> PASS, one entry mutated by a single character -> FAIL with
 # the scope named, a shuffled-mtime store -> PASS, an extra entry on one side ->
-# FAIL naming the ref, and a mutation UNDER a shuffle -> FAIL. Do not trust a
-# green run of this script that has not been preceded by a red one.
+# FAIL naming the ref, a mutation UNDER a shuffle -> FAIL, and a mutation behind
+# an AMBIGUOUS REF -> FAIL naming the status. Do not trust a green run of this
+# script that has not been preceded by a red one.
 #
 # Usage:
 #   verify-byte-identity.sh --store <local-root> --url http://127.0.0.1:8102 \
@@ -142,7 +190,20 @@ done
 TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
 [[ -n "$TOKEN" ]] || { echo "verify: token file $TOKEN_FILE is empty" >&2; exit 3; }
 
+# 🔴 ENUMERATED FROM THE LOCAL STORE, WHICH MAKES THE SWEEP ONE-DIRECTIONAL.
+# A scope the POD holds and this host does not is never requested, never
+# compared, and never counted — and no arm below can see it, because every arm
+# starts from this list. The set arm catches a missing ENTRY within a shared
+# scope; nothing catches a missing SCOPE.
+#
+# The API has no scope-enumeration route by design, so this script cannot ask
+# the pod what it holds. MEASURED 2026-09-02: local 16 scopes / 141 entries,
+# pod 23 / 189 — 7 pod-only scopes holding 48 entries, 25% of the served store.
+# `EXPLICIT_SCOPES` records whether the operator narrowed the run, so the
+# verdict can say which of the two it is rather than implying completeness.
+EXPLICIT_SCOPES=1
 if [[ ${#SCOPES[@]} -eq 0 ]]; then
+  EXPLICIT_SCOPES=0
   shopt -s nullglob
   for d in "$STORE"/*/; do SCOPES+=("$(basename "$d")"); done
   shopt -u nullglob
@@ -289,6 +350,14 @@ diff_lines() {  # $1, $2 -> count of differing lines
   diff "$1" "$2" | grep -c '^[<>]' || true
 }
 
+# `render_text`'s FIRST line is `subsystem-recall: status=<status> scope=<scope>`,
+# on every status branch including the ones that return immediately — so this
+# reads the report's own verdict rather than inferring one from the body.
+# Empty output means the line was absent, which is itself a refusable answer.
+recall_status() {  # $1 = a render -> its status token, or empty
+  awk '/^subsystem-recall: status=/ { s = $2; sub(/^status=/, "", s); print s; exit }' "$1"
+}
+
 pass=0
 fail=0
 entries_compared=0
@@ -337,8 +406,40 @@ for scope in "${SCOPES[@]}"; do
   # 1 is not comparable and the refs beyond it were never read at all. Comparing
   # page 1 alone would be a partial check reported as a clean one; this says so
   # instead. Enlarging the reader's page cap, or teaching this script to walk
-  # every page and normalise the padding, are the two ways out — neither is
-  # needed by any scope in the store today (largest measured: 50 entries).
+  # every page and normalise the padding, are the two ways out.
+  #
+  # 🔴 STATE THE HEADROOM, NOT JUST "NOT NEEDED TODAY" — the headroom is the
+  # number that says WHEN to act, and when it runs out this refusal becomes the
+  # permanently-red gate this whole script exists to have removed: the verifier
+  # exits 1, `cairn-cutover.py::_acceptance` returns `RC_ACCEPTANCE`, and the
+  # cutover refuses with the store left unfrozen.
+  #
+  # 🔴 THE NUMBER MUST COME FROM THE BINDING SIDE, AND AN EARLIER VERSION OF
+  # THIS COMMENT TOOK IT FROM THE OTHER ONE. This arm greps BOTH renders, so
+  # whichever store is LARGER is the one that trips it — and that is the pod.
+  # The comment said "51 entries of headroom" from the local count while
+  # correctly saying the pod was larger and unmeasured, i.e. it quoted the
+  # non-binding side, and the error was in the UNSAFE direction.
+  #
+  # NOW MEASURED ON BOTH SIDES, 2026-09-02, over the live store ingress,
+  # counting entries as `subsystem_recall` INDEXES them. `LISTING_PAGE_SIZE`
+  # is 100; the largest scope is `datapacket-talos`:
+  #
+  #     scope              local   pod
+  #     datapacket-talos      49    51     <- the binding scope
+  #     homelab-talos         24    30
+  #     devrc                 26    29
+  #     civitai               23    24
+  #     homelab-infra          0     4
+  #     TOTAL                141   189     (154 vs 201 files; 16 vs 23 scopes)
+  #
+  # So the headroom is 100 - 51 = 49 ENTRIES, not 51. The store is
+  # append-mostly and pruning is manual, so the number only shrinks.
+  #
+  # ⚠ ALSO VISIBLE IN THAT TABLE, AND NOT A DEFECT THIS ARM OWNS: the scope
+  # list is enumerated from the LOCAL store, so the 7 scopes that exist only on
+  # the pod (auditloop, civitai-gpu-fleet, naida-ai, vetr, vetr-api, vetr-app,
+  # vetr-infra) are not compared by this script at all.
   paged=$(( $(grep -cE '^INDEX \(.*\(page [0-9]+ of [0-9]+\):$' "$local_out" || true) \
           + $(grep -cE '^INDEX \(.*\(page [0-9]+ of [0-9]+\):$' "$remote_out" || true) ))
   if [[ "$paged" -gt 0 ]]; then
@@ -464,6 +565,84 @@ for scope in "${SCOPES[@]}"; do
       break
     fi
     canon_pair "$el" "$er" "$tmp/e"
+
+    # 🔴 A PER-ENTRY STREAM THAT RENDERED NO ENTRY IS REFUSED, NOT COMPARED —
+    # AND THIS IS A FALSE-GREEN, NOT A MISSING NICETY.
+    # Every non-`recalled` status prints a well-formed report with a NOTICE
+    # where the body should be (`AMBIGUOUS REF …`, `NO SUCH ENTRY …`), and
+    # `subsystem_recall._exit_for` returns 0 for all of them — only
+    # `*-unreadable` is non-zero — so `rc_entry > 3` above cannot see it. The
+    # two notices are then byte-identical whenever the two stores index the
+    # same refs, which the SET ARM has already established by the time this
+    # loop runs. `cmp` therefore accepts them, and `entries=` counts a body
+    # that was never rendered on either side.
+    #
+    # 🔴 REACHABLE BY A SUPPORTED CONVENTION, NOT ONLY BY A STORE DEFECT.
+    # `resolve_ref_tiered` matches a bare ref on `e.slug` alone, so a scope
+    # holding `alpha.md` AND `alpha.process.md` indexes the refs `alpha` and
+    # `alpha.process` while `--ref alpha` raises `AmbiguousRefError` —
+    # `<slug>.<kind>.md` is documented (`KINDS = service|process|org|doc`,
+    # worked example `repo-cos.process` in the resolver's own docstring).
+    # No scope in the live store uses that shape today (0 of 154 files, measured
+    # 2026-09-01); the store is append-mostly. REPRODUCED end-to-end against a
+    # real in-process server, two stores identical but for ONE CHARACTER inside
+    # `alpha.md`'s nuance bullet — this script, at 7d9da8f5, printed:
+    #   PASS scope=gadget-rack entries=3 bytes=6801 raw-diff-lines=18 … accounted-for=18
+    #   verify: scopes=1 pass=1 fail=0 entries-compared=3
+    # and exited 0. The fixture is `ambiguous_pair` in
+    # `scripts/tests/test_subsystem_store_api.py`.
+    #
+    # REFUSED, not merely left out of `entries=`. A stream silently dropped
+    # from the count is the same coverage-in-name-only shape one level down:
+    # the scope would still print PASS while one of its entries had not been
+    # compared by anything. The remedy is a store fix (`prune-index` exists for
+    # exactly `ref-ambiguous`), and until it lands the honest verdict about
+    # this scope is that it was not verified.
+    #
+    # The server sets the same value in `X-Store-Status` (`_serve_report`, from
+    # the same `report.status`), so gating on the header too would be one fact
+    # read twice — and would additionally bet on the DEPLOYED image emitting
+    # that header, which nothing here can check. The body is the thing being
+    # compared, so the body is what is gated on.
+    #
+    # ⚠ THE TWO HALVES ARE NOT INDEPENDENTLY TESTABLE, AND THIS SAYS SO RATHER
+    # THAN READING AS TWO COVERED CASES. Mutating either half away leaves both
+    # regression tests GREEN (measured: mutants M6/M7 SURVIVED).
+    #
+    # 🔴 THE REASON IS THE `cmp` BELOW, NOT THE SET ARM — AND AN EARLIER
+    # VERSION OF THIS COMMENT GOT THAT WRONG, WHICH IS WHY IT IS SPELLED OUT.
+    # It claimed a one-sided status disagreement "implies the two stores index
+    # DIFFERENT REFS, so the SET ARM already failed the scope". That is FALSE,
+    # and the counterexample was built: byte-identical stores with IDENTICAL
+    # index ref sets, and a resolver-version skew on one side only (tier 1
+    # matching `e.ref` instead of `e.slug`) yields
+    # `local=recalled pod=ref-ambiguous` with the SET ARM PASSING.
+    #
+    # The true reason is structural and stronger. The status line is the FIRST
+    # line of the render and NO canonicalisation touches it — the two seds
+    # rewrite `store:`/`host:`, and the block strip removes only the head run of
+    # banner-or-blank lines. So `cmp -s` succeeding implies the first lines are
+    # equal, which implies the two statuses are equal. A one-sided disagreement
+    # therefore ALWAYS fails, one step later, at the per-entry `cmp` (measured
+    # with M6 applied: still `FAIL … entry bytes differ`).
+    #
+    # 🔴 SO IN THE ONE-SIDED CASE THIS GUARD CONTRIBUTES THE DIAGNOSIS, NOT THE
+    # DETECTION — "ref=X rendered NO ENTRY BODY, pod status=ref-ambiguous"
+    # instead of "entry bytes differ (N canonicalised lines)". Deleting either
+    # half would not let a difference through; it would make the report name
+    # the wrong thing. Do not read the surviving mutants as dead code.
+    #
+    # The remaining case only the remote half can see is a served body that is
+    # not a render at all — no `subsystem-recall: status=` line, so `st_remote`
+    # is empty. No deployed image has been seen to produce that, and no test
+    # here reaches it.
+    st_local="$(recall_status "$tmp/e.l")"
+    st_remote="$(recall_status "$tmp/e.r")"
+    if [[ "$st_local" != "recalled" || "$st_remote" != "recalled" ]]; then
+      entry_fail="ref=$ref rendered NO ENTRY BODY — status local=${st_local:-<no status line>} pod=${st_remote:-<no status line>}, expected recalled on both. This entry's bytes were NOT compared and nothing about it is verified."
+      break
+    fi
+
     raw=$((raw + P_RAW))
     store_lines=$((store_lines + P_STORE))
     host_lines=$((host_lines + P_HOST))
@@ -501,5 +680,22 @@ for scope in "${SCOPES[@]}"; do
   pass=$((pass + 1))
 done
 
+# 🔴 THE VERDICT NAMES WHICH SIDE WAS ENUMERATED, BECAUSE OTHERWISE IT READS AS
+# COMPLETE COVERAGE. `verify: scopes=16 pass=16 fail=0 entries-compared=141` is
+# a true sentence that an operator reads as "the two stores agree" — and the
+# sweep never looked at the 7 scopes the pod holds and this host does not (48
+# entries, 25% of the served store, measured 2026-09-02). The disclosure has to
+# be ON the verdict, not 200 lines away in a comment about pagination: this is
+# the line that gets pasted into a handoff.
+#
+# Same rule as the zero-scope refusal above and as `drift-check.sh` printing
+# links EXAMINED beside links dangling — a count is only honest beside what it
+# could not count.
+if [[ "$EXPLICIT_SCOPES" -eq 1 ]]; then
+  scope_source="the ${#SCOPES[@]} scope(s) named with --scope"
+else
+  scope_source="scopes enumerated from the LOCAL store ($STORE)"
+fi
 echo "verify: scopes=${#SCOPES[@]} pass=$pass fail=$fail entries-compared=$entries_compared"
+echo "verify: COVERAGE — $scope_source. This sweep is ONE-DIRECTIONAL: the served copy may hold scopes this run never requested and therefore never compared, and no arm above can see one. NOT a claim that the two stores agree in full."
 [[ $fail -eq 0 ]] || exit 1

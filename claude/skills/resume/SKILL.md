@@ -15,7 +15,9 @@ Topic argument (optional): `$ARGUMENTS`.
 
 1. **Locate the handoff**: if a topic is given, read `claudedocs/handoff-<topic>.md`; otherwise find the most recently modified `claudedocs/handoff-*.md` in the active repo (`ls -t claudedocs/handoff-*.md | head`). **Not every repo uses that lowercase shape** — civitai-manager names its handoff `<civitai-manager>/claudedocs/SESSION-HANDOFF.md` — so if the glob comes back empty, fall back to `ls -t claudedocs/*HANDOFF*.md | head` before concluding there is no handoff (`resume-state.sh` resolves it in exactly that order). If BOTH come back empty, say so and offer to reconstruct state from git/PRs instead — and say plainly that nothing was reconciled, rather than reporting the absence of drift as a clean bill of health.
 
-   🔴 **If you know the doc, put its PATH in the argument.** `resume-state.sh` reads a `claudedocs/handoff-*.md` / `claudedocs/*HANDOFF*.md` path out of a prose topic (`"…the listing work; handoff: <path>"`), which is the form this skill passes through verbatim — and only that shape. A bare `README.md` mentioned **inside a prose topic** is prose, not a handoff reference. ⚠ That is about the SCAN, not about the whole argument: an argument that IS a path to an existing file is taken as the handoff whatever it is named — `resume-state.sh README.md` reconciles `README.md` — because the explicit-path form accepts any filename by design. **If you supply an argument and it resolves nothing — a mistyped topic, or a path that is not there — the run says so as a `!` gap** naming what you asked for and what it read instead, and withdraws the DRIFT all-clear. **That gap means the digest is about a different initiative than you named** — re-run with the path. A run with NO argument stays silent, because there "newest" is the contract rather than a guess.
+   🔴 **If you know the doc, put its PATH in the argument.** `resume-state.sh` reads a `claudedocs/handoff-*.md` / `claudedocs/*HANDOFF*.md` path out of a prose topic (`"…the listing work; handoff: <path>"`), which is the form this skill passes through verbatim — and only that shape. A bare `README.md` mentioned **inside a prose topic** is prose, not a handoff reference. ⚠ That is about the SCAN, not about the whole argument: an argument that IS a path to an existing file is taken as the handoff whatever it is named — `resume-state.sh README.md` reconciles `README.md` — because the explicit-path form accepts any filename by design. **If you supply an argument and it resolves nothing the run says so as a `!` gap** naming what you asked for, and withdraws the DRIFT all-clear. **Two shapes, and they differ in what the digest underneath is then about:** a **mistyped topic slug** still falls back to the newest doc — the gap names what it read instead, and **that digest is about a different initiative than you named**, so re-run with the path; a **handoff PATH that is not there** reconciles **NOTHING** (`handoff: (none found — git-only)`, and the gap says so), because a confident digest about a document you did not ask for is worse than no digest. A run with NO argument stays silent, because there "newest" is the contract rather than a guess.
+
+   🔴 **A handoff living in a LINKED WORKTREE resolves from the base-clone path** — which is what `/handoff`'s kickoff template emits, and where worktree isolation puts the doc. `resume-state.sh` searches a clone's linked worktrees and resolves the doc if exactly one holds it. **WHICH clone it searches depends on the shape you pass, and it is never "whatever is nearby":** a directory in front of `claudedocs/` is searched in **that** tree's clone *when the directory actually resolves* — an absolute path, or a relative one naming something under your cwd. The two shapes that name no other tree — a bare `claudedocs/handoff-<topic>.md`, and `<this repo's own directory name>/claudedocs/handoff-<topic>.md` (the kickoff-template shape, pasted inside the repo) — are searched in the clone you are standing in, the only one they can mean. **Anything else relative is neither searched nor re-anchored**: `some-other-repo/claudedocs/…`, or a sibling worktree named relatively, resolve from inside the repo to nothing, so they stay a miss and you get the `!` gap — serving a same-named doc out of a clone you did not name is the wrong-initiative bug itself. ⚠ **But the discriminator is the NAME, so state its residual rather than trusting the sentence above past what it checks:** only `<Y>`'s LAST component is compared, so a relative token pointing at a genuinely foreign tree that happens to END in this checkout's own directory name — `backup/devrc/claudedocs/…` or `../elsewhere/devrc/claudedocs/…`, typed inside a `devrc` — re-anchors here, and is then resolved **exactly as a token naming this repo honestly would be** — which is *more* than "this repo's copy", because the worktree search runs too. Three legs: the base clone's copy if it holds one (no gap); **otherwise a linked worktree's — another branch's checkout, which is what the `# repo:` line then names** (also no gap); and if **several** worktrees hold it, none is chosen and you get the ambiguity gap. That is the unavoidable cost of a name-based test, and it is bounded: a different name misses, the compare is case-sensitive (`DEVRC/…` misses), and an absolute path never re-anchors. **Pass the absolute path when the doc is in a sibling worktree.** If **several** worktrees hold it, it picks none and the gap names them and how many — that is a real fork, not a hiccup: pass the worktree's own path. (The gap lists human-named worktrees before ephemeral `.claude/worktrees/agent-*` checkouts, and caps the list at four while never capping the count.)
 
    The gap carries one extra clause — *"the newest of N … MOVES between runs"* — only when the fallback actually had two or more docs to choose between, because only then is it true.
 
@@ -58,11 +60,33 @@ Topic argument (optional): `$ARGUMENTS`.
    ```
    A hit means read those commits before re-deriving anything. The cost is one command; the cost of skipping it is a whole session.
 
-4. **Surface what the subsystem index already records for this repo** (read-only, ~1 command, no network):
+4. **Surface what the subsystem index already records for this repo** (~1 command):
 
    ```bash
-   python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo <path>
+   cairn recall --repo <path>
    ```
+
+   🔴 **`cairn`, NOT `subsystem_recall.py` directly — and this changed on 2026-09-02.**
+   The Cairn cutover made a hosted pod the datastore and FROZE the per-host mirror at
+   `~/.claude/analyze-service-index` (entry files `0444`, nothing refreshes it). The
+   reader's `--store` default was never repointed, so **every `/resume` between the
+   cutover and that date oriented on a frozen store while being told it was complete**:
+   MEASURED on the workbench, the frozen mirror served **26** `devrc/` entries and the
+   synced cache **29**, and the frozen one still printed
+   "ALL 26 entries in `devrc/`, none omitted" with no staleness stamp anywhere.
+   `cairn recall` syncs first, then runs the SAME reader against the cache, and says in
+   its banner whether it reached the pod or served a stale cache — so the answer carries
+   its own freshness instead of asserting completeness it cannot check.
+
+   🔴 **The reader now REFUSES an undateable store rather than serving it.** `cairn`
+   drives `scripts/lib/subsystem_recall.py` — the same module, the same output — and run
+   bare that module defaults to the synced cache and **exits 4** with
+   `REFUSING to read … Run \`cairn sync\` and re-run` when that cache carries no
+   `.sync-stamp`. That is a working state, not a broken one: run `cairn sync`, or just
+   use `cairn recall` above. An explicit `--store <path>` is never refused — that is you
+   naming a directory. A stamped read prints the stamp's own fields in its header, one
+   per line and UNPARSED (`stamp: synced=…`, `revision=…`, `entries=…`, `coverage=ALL`) —
+   the reader neither interprets them nor computes an age from them.
 
    🔴 **`--repo` takes a PATH, not a repo name.** A bare name is resolved against your
    **cwd**, so `--repo datapacket-talos` becomes `$PWD/datapacket-talos` and the run
@@ -112,7 +136,11 @@ Topic argument (optional): `$ARGUMENTS`.
 
    **`scope-unreadable` is NOT `scope-empty`.** It means the scope holds entry files and *not one* of them could be indexed, so nothing was read at all — the command exits non-zero for it, and it is the one "empty screen" you must not report as "nothing recorded yet".
 
-   **Non-blocking, always.** It never prompts and never writes. **It exits non-zero only when NOTHING readable came back** (missing store, unreadable entry, or `scope-unreadable`/`search-unreadable`) — a scope that served some entries alongside a `MALFORMED` block exits **0**, because recall was available and was also honest about its gaps. If it does exit non-zero, print the stderr line verbatim, note that recall was unavailable, and **continue the resume** — a broken index is not a reason to stop re-entering the work. Never fall back to recollection about what the index "probably says".
+   **Non-blocking, always.** It never prompts, and it never writes the *store*. ⚠ **But `cairn recall` is not read-only and not offline** — it fetches from the pod (20s timeout) and unpacks the refreshed cache, `.sync-stamp` included, *before* running the reader. Only the reader half is the read-only, clock-free, no-network thing; the sync in front of it is the part that makes the answer dateable. An outage is absorbed, not fatal: it serves the cache behind a `⚠ cairn: cached …` banner at exit **0**.
+
+   **The READER exits non-zero only when NOTHING readable came back** (missing store, unreadable entry, or `scope-unreadable`/`search-unreadable` ⇒ **3**) — a scope that served some entries alongside a `MALFORMED` block exits **0**, because recall was available and was also honest about its gaps. ⚠ **That rule is the reader's, and `cairn` wraps it with codes of its own that do NOT follow it**: **2** (no scope could be derived — pass `--scope`) and **5** (the pod answered with something cairn refuses to install — which fires *even when a perfectly readable cache is sitting there*, because installing a corrupt snapshot over it is the worse outcome). So a non-zero from `cairn recall` does not by itself mean nothing was readable; read the banner. If it does exit non-zero, print the stderr line verbatim, note that recall was unavailable, and **continue the resume** — a broken index is not a reason to stop re-entering the work.
+
+   🔴 **Do NOT read a `4` from `cairn` as "run `cairn sync`".** Two different tools spell 4 differently and the wrong reading sends you to the command that just failed. **`cairn recall` never returns 4** — it reaches the reader as a *library*, where the refusal below does not exist. `cairn`'s own 4 is `sync`-only (`EXIT_REFRESH_FAILED`) and means *the store was NOT reached, but a usable cache survived*; re-running `cairn sync` is exactly the thing that just did not work. **The 4 that `cairn sync` fixes belongs to the raw reader** — `python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py` run bare against a default store carrying no `.sync-stamp`, which refuses rather than serving a store that cannot date itself. Never fall back to recollection about what the index "probably says".
 
 5. **Report**:
    - One-paragraph "where things stand" (reconciled with what you just verified).

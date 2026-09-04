@@ -382,3 +382,74 @@ is a 24-core host with fast NVMe; the arming path is a few ms of CPU, so a ~50x
 slowdown would be needed to miss 250 ms. The deterministic injection above reproduces
 the exact failure and the mutation matrix bounds the fix — but the *natural* CI
 scheduling failure was not reproduced here.
+
+---
+
+## `slow_cairn_fsync.py` — the SAME stall, twelve times more sensitive (devrc#1242)
+
+**What it answers.** `tekton/devrc-pytests` fails on
+`test_cairn_write.py::TestAppendLands::test_a_bullet_is_appended_and_the_status_is_named`
+— and, because `--dist loadfile` puts a whole file on one worker, on its siblings in
+the same run — with
+
+```
+AssertionError: 🔴 cairn: the write did NOT happen — http://127.0.0.1:PORT unreachable: timed out
+                Nothing was queued and nothing was written locally.
+assert 7 == 0
+```
+
+🔴 **It is the same fsync mechanism as the store-api half above, but this was VERIFIED
+rather than assumed, and it does not simply inherit that root cause.**
+`test_cairn_write.py` imports `http.server` and stands up its OWN loopback servers; it
+carries no `MECHANISM` classifier of its own. The transfer was established from the CI
+log directly, not by analogy: on `devrc-ci-jfg67` the store root was
+`/tmp/nix-build-devrc-pytests.drv-0/pytest-of-nixbld1/pytest-0/popen-gw1/…` — the step
+container's ephemeral layer, exactly as documented above — and the message names a
+client-side `timed out`, not a refused connection.
+
+🔴 **THE BOUND IS `--timeout 5`, NOT `HANG_TIMEOUT` 60.0.** `run_cairn` passes it to the
+client subprocess, so a single fsync slower than **five seconds** breaches it. That is
+**twelve times tighter** than the store-api half, which is why this file is the more
+frequent casualty of the same contention, and why sizing a reproducer at 65 s here
+would overstate how much latency it takes.
+
+**Why a third instrument.** `slowfsync.c` is `LD_PRELOAD`, which is inherited across
+`exec()` — and here the store server is IN-PROCESS while the cairn client is a
+SUBPROCESS, so preloading would stall both sides and muddy which one timed out.
+Patching `os.fsync` inside the test process stalls exactly the server. No compiler.
+Full usage, controls and measurements are in the plugin's own docstring.
+
+**What changed in the repo, and what did not.**
+
+* `testlib/hang_mechanism.py` (new) gives this suite the `MECHANISM =` verdict the
+  store-api suite already had, and `test_cairn_write.py`'s write assertions now carry
+  it. Under the reproduction the failure reads
+  `MECHANISM = SERVER_BLOCKED_IN_FSYNC (handler threads=2 [...=BLOCKED_ELSEWHERE
+  ...=SERVER_BLOCKED_IN_FSYNC], accept loop parked=True)` plus the store's filesystem.
+  🔴 **DIAGNOSIS, NOT TOLERANCE** — no bound moved, nothing retries, the test fails
+  exactly as before. A gate that reports a code failure for an I/O stall trains
+  everyone to click through, and that was the whole cost.
+* 🔴 **The headline is deliberately NOT a consensus of the handler threads.** Two
+  servers are live here — the store and the shim in front of it — so when a write times
+  out they legitimately disagree: the shim is parked in `urlopen`, the store in
+  `fsync`. Measured. A rule requiring agreement would answer `AMBIGUOUS` for the
+  textbook case the classifier exists to name.
+* 🔴 **`hang_mechanism` scans frames' SOURCE LINES, never their FILENAME**, which is the
+  known-and-unfixed defect `_HUNG_SERVER_RULES` carries above (a worktree named
+  `devrc-fsync` misclassifies every hang there). Pinned by
+  `test_hang_mechanism.py::test_a_checkout_PATH_containing_a_token_does_not_decide_the_verdict`,
+  which was watched to fail when the filename is folded back in. **The store-api
+  classifier was NOT rewired onto the shared module** — it has its own tests and that is
+  its own edit; two copies exist today and that is a known debt, not an oversight.
+* **Nothing here fixes the stall**, and the disk-siting half was already fixed:
+  `b4fde334` (#1219) moved this file's store onto tmpfs. ⚠ **Both reproductions above
+  ran with that mitigation fully in force** (`/dev/shm/devrc-store-…`), so this is a
+  **latency** dependency, not a filesystem one. tmpfs makes a breach far less likely; it
+  does not remove the 5 s bound, and `store_siting` falls back to disk in five
+  documented ways without saying so. The levers for the stall itself remain the infra
+  ones ranked in the store-api section.
+
+⚠ **A PR branched before `b4fde334` still carries the old disk-backed fixture**, because
+branch protection sets `strict: false` and never rebases. Both failures examined here
+(#1209, #1233) were such branches. Rebasing is what picks the mitigation up — the fix
+does not reach an open PR on its own.

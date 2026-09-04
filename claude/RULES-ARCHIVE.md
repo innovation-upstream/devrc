@@ -38,6 +38,7 @@ the last revision before the core/archive split.
 - [isolation-seam](#isolation-seam)
 - [spelled-guards](#spelled-guards)
 - [dto-field-not-a-guard](#dto-field-not-a-guard)
+- [disjoint-file-merge-break](#disjoint-file-merge-break)
 
 **Memory / Failure Investigation**
 - [stale-observation](#stale-observation)
@@ -1607,6 +1608,37 @@ every tile showing a real-looking 0 rather than an empty state. The trap is what
 fix would have bought: "just set the field correctly" upstream **would have changed nothing on
 screen**, because no code branched on it. A reviewer reading the type definition sees the case
 handled; only `git grep` over the consumers shows it is not.
+
+## disjoint-file-merge-break
+
+*Supports: "DISJOINT FILES ARE NOT SAFETY — when the base moves after a merged-tree test, re-run it."*
+
+`civitai/civitai` #4491 widened the required inputs of `listingModActions` (two new fields) for a
+new branch. #4493, authored in parallel, added a **second caller** of that same function in a
+different component. Neither PR touched a file the other touched.
+
+The merged-tree discipline was actually followed — and then abandoned one step too early. #4491's
+author merged `main` in, re-ran the full unit tier on the merged tree, and got 1601 files green.
+Then #4493 landed in roughly the **90 seconds** between that run and the squash. Rather than
+repeating the merged-tree test, the author substituted a cheaper proxy: a check that the two
+changesets' FILE LISTS were disjoint. They were. `main`'s typecheck went red on merge.
+
+Three things make this worth its own entry rather than a clause on the existing one:
+
+- **The existing rule's wording does not reach it.** "Two changes touching one file" and "read the
+  merged result of any overlapping region" both presuppose an overlap. Here there was none, and the
+  rule read as inapplicable — the exact failure mode the preamble warns about ("when a rule looks
+  inapplicable on a technicality, widen it").
+- **The substitute felt like the same check.** File-disjointness and merged-tree-green are not
+  degrees of the same evidence; they are different claims. Only one of them can see a new *caller*
+  of a signature the other side changed. Type-level coupling is invisible to a path comparison.
+- **The window is arbitrarily small and cannot be closed by being quick.** There is no interval
+  short enough to make "the base has not moved" safe to assume; the only safe form is to re-derive
+  it. `gh pr view --json mergeable` says nothing about this either — the merge was genuinely CLEAN.
+
+Repaired 25 minutes later. The repair's own guard is the useful shape: the second call site can
+never reach the new branch for two INDEPENDENT reasons, so its regression test pins both rather
+than only the output, because either could regress alone and an output-only check would still pass.
 
 ## object-leak
 

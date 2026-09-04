@@ -63,9 +63,9 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    ---
    # Handoff: <topic> — <YYYY-MM-DD>
 
-   ## Run this first — the index, one read-only command
+   ## Run this first — the index, one command
    ```bash
-   python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo <path>
+   cairn recall --repo <path>
    ```
    Terse pointers this doc does not carry, curated by past sessions and outliving it.
    🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current

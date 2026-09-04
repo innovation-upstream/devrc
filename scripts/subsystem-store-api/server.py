@@ -29,10 +29,20 @@ default digest) feature a different entry.
 `verify-byte-identity.sh` asserts identity modulo exactly those FOUR
 differences, mechanically: it canonicalises the two lines on both sides, strips
 the measured snapshot block from the remote, compares the index rows as a
-SORTED set, and decomposes the raw diff into the four named causes so a fifth
-divergence cannot hide inside the excuse. ⚠ THIS PARAGRAPH USED TO SAY "one
-line … the raw diff is exactly one line", which was already false when `host:`
-shipped and stayed false through two more causes.
+SORTED set, and compares each entry's own single-ref render byte for byte.
+⚠ THIS PARAGRAPH USED TO SAY "one line … the raw diff is exactly one line",
+which was already false when `host:` shipped and stayed false through two more
+causes.
+
+⚠ AND IT USED TO ADD "decomposes the raw diff into the four named causes SO A
+FIFTH DIVERGENCE CANNOT HIDE INSIDE THE EXCUSE", which is a reworded version of
+the same overclaim. NOTHING GATES ON THE DECOMPOSITION — the script says so
+itself ("those numbers are EVIDENCE, not a second gate; gating on them would be
+an unreachable guard counted as coverage"), and so does its README. What
+actually catches a fifth divergence is the `residual != 0` branch (a frame or
+sorted-row difference that survived every canonicalisation) and the per-entry
+`cmp`. The counts are there so a READER can see the excuse was spent on the
+lines it claims, which is a different and weaker job.
 
 PHASE 1 SCOPE — read-only, cluster-internal, no ingress
 -------------------------------------------------------
@@ -234,6 +244,20 @@ rows too.
     A DELIBERATE DEVIATION FROM THE CARD'S WORDING — no scope in the served copy
     is a git repo, so `scope_revision` answers "unknown" for all of them and a
     precondition keyed on it could never refuse anything. See `entry_revision`.
+  * **`PUT /api/v1/entry/<scope>/<ref>` with `If-None-Match: *` CREATES** an
+    entry that is absent, answering `201 created`. 🔴 IT IS THE SAME ROUTE AND
+    THE SAME REQUIRED-PRECONDITION RULE: a PUT with NEITHER header is still 428,
+    both headers together is a contradiction and is 400, and `If-Match: *` is
+    still refused. An existing target is `412` with `X-Store-Status:
+    already-exists` — a DIFFERENT token from the `precondition-failed` an
+    `If-Match` miss gets, because the two share a status code and have opposite
+    remedies. Exclusivity is the FILESYSTEM'S (`os.link` from a fully-written
+    temp file), not a `path.exists()` check, so two concurrent creates cannot
+    both win and a MALFORMED file already occupying the name is not overwritten.
+    🔴 IT EXISTS BECAUSE THE STORE HAD NO CREATE VERB AT ALL, which is why the
+    protocol still told sessions to write a brand-new entry to the local mirror —
+    where, since the read path moved to the pod cache, it was dark to every
+    reader.
   * **Writes go through the SAME auth path as reads.** Same
     `_identify_and_meter`, same `authorize`, same uniform 401, same lockout. A
     write to a scope outside the caller's allowlist is refused, and 🔴 THAT
@@ -1728,6 +1752,33 @@ class PreconditionFailed(Exception):
         self.current = current
 
 
+class EntryExists(Exception):
+    """`If-None-Match: *` was sent and the target already has a representation.
+
+    🔴 ITS OWN EXCEPTION, NOT A `PreconditionFailed`, EVEN THOUGH BOTH ANSWER
+    412. The two are the same HTTP status and DIFFERENT remedies, which is the
+    exact pair `claude/RULES.md` says must not be collapsed: `PreconditionFailed`
+    means "somebody moved it under you — re-sync and re-apply", and this one
+    means "it is already there — you wanted `put`, not `create`". A client that
+    retries the first is right; a client that retries the second loops forever.
+    The wire carries the difference in `X-Store-Status` (`precondition-failed` vs
+    `already-exists`), because the status CODE cannot.
+
+    ⚠ IT CARRIES THE FILENAME AND NOTHING ELSE, AND THAT IS THE HONEST SHAPE.
+    This exception is raised only from the FILESYSTEM arm — a name the index did
+    not know about, which is a file the loader classifies as MALFORMED or a
+    racing create that landed first — so there is no resolved entry to name. The
+    other arm (the ref already resolves) never reaches here at all; the route
+    answers it directly, where the resolved filename IS known. A field for "what
+    it resolved to" would be `None` on every raise, which is a declaration no
+    code path honours.
+    """
+
+    def __init__(self, filename: str) -> None:
+        super().__init__(f"entry {filename} already exists")
+        self.filename = filename
+
+
 def entry_revision(data: bytes) -> str:
     """The revision an `If-Match` is compared against: the entry file's content.
 
@@ -2034,6 +2085,57 @@ def _replace_bytes(path: Path, data: bytes) -> None:
         raise
 
 
+def _create_bytes(path: Path, data: bytes) -> None:
+    """Materialise `path` with `data`, or raise `FileExistsError`. NEVER clobbers.
+
+    🔴 THE EXCLUSIVITY IS THE FILESYSTEM'S, NOT A CHECK THIS PROCESS MAKES.
+    `path.exists()` followed by a write is a TOCTOU: two concurrent creates both
+    see nothing and the second silently destroys the first, which is the same
+    lost update `If-Match` exists to refuse — arriving through the one verb that
+    has no prior revision to name. `os.link` fails with `EEXIST` when the target
+    is there, and it does so in the kernel, so exactly one of two racing creates
+    can win. The per-entry `_EntryLock` is held as well; this is what holds when
+    the other writer never took that lock (`seed.sh`, an operator's editor, a
+    second pod).
+
+    🔴 AND IT IS A LINK FROM A FULLY-WRITTEN TEMP FILE, NOT AN
+    `O_CREAT|O_EXCL` DIRECTLY AT `path`. A direct exclusive create claims the
+    name and only then starts writing, so a concurrent `/recall` can glob a
+    `*.md` that is EMPTY or half-written and serve it as a `MALFORMED` entry —
+    `_replace_bytes`' partial-read hazard, reproduced by the create path. Linking
+    a complete, fsynced file publishes the name and the bytes in one atomic step,
+    so a reader sees the entry or sees nothing.
+
+    ⚠ IT REQUIRES HARD LINKS, and that is a stated dependency rather than an
+    assumption: `tempfile.mkstemp` (already used by `_replace_bytes` on this same
+    directory) proves `O_EXCL` works on the store volume, `os.link` is not
+    otherwise exercised there, and this has NOT been run against the deployed
+    PVC. A filesystem that refuses it raises `OSError`, which the route answers
+    503 with the errno text — loud, and never a silent overwrite.
+
+    The temp file is unlinked either way: it is a dotfile with no `.md` suffix,
+    so no walker would ever report one left behind.
+    """
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".cairn-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o644)
+        # 🔴 THE INTERLEAVE POINT FOR A CREATE: the bytes are ready, the name is
+        # not yet claimed. A second creator racing in here is what the `EEXIST`
+        # below has to catch. See `_WRITE_INTERLEAVE`.
+        _WRITE_INTERLEAVE()
+        os.link(tmp, path)
+        _fsync_dir(path.parent)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def append_bullet(
     path: Path, *, text: str, actor: str, session: str, today: str
 ) -> "tuple[str, str, str]":
@@ -2222,6 +2324,56 @@ def replace_entry(
         return entry_revision(data)
 
 
+def create_entry(
+    path: Path, *, data: bytes, scope: str, filename: str
+) -> str:
+    """Create an entry that is not there. Returns its revision, or RAISES.
+
+    The `If-None-Match: *` half of PUT — RFC 9110 §13.1.2's way of saying "only
+    if absent". Raises `EntryExists` if the name is taken, `EntryShapeError` or
+    `UnicodeDecodeError` if the bytes are not an entry the reader would accept.
+
+    🔴 IT VALIDATES THE BODY THROUGH THE **SAME** LOADER PATH `replace_entry`
+    DOES, and that is not defensive symmetry — it is the only thing that stops a
+    create landing bytes the reader classifies as MALFORMED. A malformed entry is
+    worse on a create than on a replace: it is invisible to `resolve_ref_tiered`,
+    so the ref it was meant to answer keeps resolving to nothing while the file
+    sits there occupying the name, and the next create gets a 412 for a file
+    nobody can read. Validating first means the only way to get one is to write
+    it by some other route entirely.
+
+    🔴 THE VALIDATION RUNS **BEFORE** THE NAME IS CLAIMED, which is the opposite
+    order from `replace_entry`'s (there the precondition must be read under the
+    lock, so the check comes first by necessity). Here the whole point is that a
+    refused body must leave the store exactly as it found it — including leaving
+    the NAME free, so a caller that fixes its body can retry into the same ref.
+
+    🔴 THE PARENT DIRECTORY IS CREATED, AND ONLY THE PARENT. A scope the caller
+    is allowed to write that has no directory yet is the genuine first-entry
+    case — it is how the store gained every scope it has — and refusing it would
+    make this verb unable to do the one thing the local protocol could.
+    `parents=True` is deliberately NOT passed: `scope` is a single
+    `SAFE_PATH_COMPONENT`, so one level is all that can be needed, and a missing
+    STORE ROOT is `StoreMissingError`'s to report, never something a write
+    silently conjures.
+    """
+    text = data.decode("utf-8", errors="strict")
+    try:
+        rc.SubsystemEntry.from_mapping(
+            entry_mapping(text, filename=filename, scope=scope),
+            source=filename,
+        )
+    except rc.MalformedEntryError as exc:
+        raise EntryShapeError(f"the index loader would reject these bytes: {exc}")
+    path.parent.mkdir(exist_ok=True)
+    with _EntryLock(path):
+        try:
+            _create_bytes(path, data)
+        except FileExistsError as exc:
+            raise EntryExists(filename) from exc
+    return entry_revision(data)
+
+
 # =============================================================================
 # 🔴 THE ACTION TABLES. The CLASSIFIER they read moved to `subsystem_resolver`.
 #
@@ -2325,9 +2477,18 @@ API_ROUTES: dict[str, tuple[str, int]] = {
 # its ledger names it. That guard was NOT deleted when the write path landed —
 # it was converted, and the write-verb half of it still fails when a verb is
 # bound outside the ledger below.
+#
+# ⚠ `PUT entry` IS **ONE** ROUTE CARRYING **TWO** OPERATIONS, AND THAT IS NOT
+# THE SHAPE THIS TABLE WARNS ABOUT ABOVE. The warning is against branching on
+# the METHOD inside a handler — that is how a PUT reaches an append. Branching on
+# the PRECONDITION is different in kind: RFC 9110 §13 defines `If-Match` and
+# `If-None-Match` as evaluated by the origin server for one target resource, and
+# create-if-absent has no verb of its own in HTTP. Two rows would mean two URLs
+# for one noun. So the row names `_put_entry`, which does nothing but arbitrate
+# the two precondition headers and hand off — see it for the whole ladder.
 WRITE_ROUTES: dict[tuple[str, str], tuple[str, int, tuple[str, ...]]] = {
     ("POST", "entry"): ("_append_bullet", 4, ("bullets",)),
-    ("PUT", "entry"): ("_replace_entry", 3, ()),
+    ("PUT", "entry"): ("_put_entry", 3, ()),
 }
 
 # How deep to walk when dating the served copy. Deliberately the SAME depth
@@ -2737,6 +2898,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # read cannot be unsaid, so the flag is set before the write, not after.
         self._responded = True
         if code != 200:
+            # ⚠ READ AS "NOT 200", NOT AS "REJECTED": the create route answers
+            # `201`, so a SUCCESS takes this branch too and closes its
+            # connection. That is a wasted handshake on a verb that runs once per
+            # entry, not a defect — and widening the test to `2xx` was declined
+            # because the value of this line is that it is unconditional. The
+            # rule it enforces is stated for the codes it was written for:
             # 🔴 A REJECTED REQUEST NEVER KEEPS ITS CONNECTION. Belt to
             # `_drain_body`'s braces: if framing was ever mis-read, the socket
             # is already untrustworthy and reusing it is the smuggling primitive
@@ -4056,45 +4223,92 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
-    def _replace_entry(
+    def _put_entry(
         self, scope: str, ref: str, body: bytes, path: str
     ) -> None:
-        """`PUT /api/v1/entry/<scope>/<ref>` — criterion 6, whole-file replace.
+        """`PUT /api/v1/entry/<scope>/<ref>` — REPLACE or CREATE, per precondition.
 
-        🔴 `If-Match` IS REQUIRED, NOT OPTIONAL, and a request without one is
-        refused 428 rather than served. An optional precondition is no
-        precondition: the caller that most needs it — a retry after a timeout, on
-        a store two agents share — is exactly the one that would omit it.
+        🔴 ONE ROUTE, TWO OPERATIONS, AND THE PRECONDITION HEADER IS WHAT
+        CHOOSES. `If-Match: <rev>` replaces an existing entry (criterion 6);
+        `If-None-Match: *` creates one that is absent (RFC 9110 §13.1.2, the only
+        standard way to say create-only-if-absent). HTTP has no create verb, and
+        inventing a second URL for the same noun would mean two routes a caller
+        has to choose between and two places every later guard has to be added.
 
-        🔴 `If-Match: *` IS REFUSED. It means "any current representation", which
-        is the one value that turns the guard off while looking like it is on.
+        🔴 A PRECONDITION IS STILL REQUIRED — 428 WITHOUT ONE, EXACTLY AS
+        BEFORE. This method is where that property could silently be lost, so it
+        is stated here: a PUT carrying NEITHER header is refused, and adding the
+        create half must not turn "no precondition" into "create it then". An
+        optional precondition is no precondition.
 
-        The header is a LIST (RFC 9110 §13.1.1) and is read as one — see
-        `parse_if_match`. Reading it as a single opaque string made
-        `If-Match: "stale", "<correct>"` a permanent 412.
+        🔴 BOTH HEADERS TOGETHER IS A CONTRADICTION AND IS REFUSED 400, NOT
+        RESOLVED. `If-Match: <rev>` says "it exists and is exactly this";
+        `If-None-Match: *` says "it does not exist". Picking one would be
+        guessing which of two mutually exclusive intents the caller meant, on the
+        verb that can destroy content.
 
-        ⚠ THIS ROUTE DOES NOT ENFORCE ATTRIBUTION. The bytes are written
+        `If-Match: *` stays refused (400). It means "any current
+        representation", which is the one value that turns the guard off while
+        looking like it is on — and it is NOT a spelling of the create case:
+        `*` on `If-Match` requires the entry to EXIST.
+
+        ⚠ NEITHER OPERATION ENFORCES ATTRIBUTION. The bytes are written
         verbatim, forged `[cairn: …]` trailers included; criterion 4's guarantee
         is a claim about `POST /bullets` only. Decided, not overlooked — see
         `replace_entry`'s docstring for why enforcement was declined.
         """
-        raw = sole_header(self.headers, "If-Match")
-        if raw is None:
+        raw_match = sole_header(self.headers, "If-Match")
+        raw_none = sole_header(self.headers, "If-None-Match")
+        if raw_match is not None and raw_none is not None:
+            self._audit(path, 400, "bad-request")
+            self._respond(
+                400,
+                b"bad request: If-Match and If-None-Match are contradictory on a "
+                b"PUT - If-Match replaces an entry that exists, If-None-Match: * "
+                b"creates one that does not. Send exactly one\n",
+                headers={"X-Store-Status": "bad-request"},
+            )
+            return
+        if raw_match is None and raw_none is None:
             self._audit(path, 428, "precondition-required")
             self._respond(
                 428,
                 b"precondition required: send If-Match with the entry revision "
-                b"(sha256 of the entry file, first 16 hex characters)\n",
+                b"(sha256 of the entry file, first 16 hex characters) to replace "
+                b"an existing entry, or If-None-Match: * to create a new one\n",
                 headers={"X-Store-Status": "precondition-required"},
             )
             return
-        if_match = parse_if_match(raw)
+        if raw_none is not None:
+            # 🔴 `*` AND NOTHING ELSE. RFC 9110 §13.1.2 also allows a LIST of
+            # entity-tags, meaning "proceed only if the current representation
+            # matches none of these" — which on a PUT is "overwrite unless it is
+            # one of the revisions I name", i.e. a blind overwrite of every
+            # OTHER revision. That is the lost update `If-Match` exists to
+            # refuse, spelled backwards. It is refused rather than implemented,
+            # and the refusal says which form to send.
+            tags = parse_if_match(raw_none)
+            if tags != ["*"]:
+                self._audit(path, 400, "bad-request")
+                self._respond(
+                    400,
+                    b"bad request: only `If-None-Match: *` is supported - a list "
+                    b"of entity-tags there would mean 'overwrite unless it is one "
+                    b"of these', which is a blind overwrite of every other "
+                    b"revision. To replace a known revision send If-Match\n",
+                    headers={"X-Store-Status": "bad-request"},
+                )
+                return
+            self._create_entry(scope, ref, body, path)
+            return
+        if_match = parse_if_match(raw_match)
         if "*" in if_match:
             self._audit(path, 400, "bad-request")
             self._respond(
                 400,
                 b"bad request: If-Match: * is refused - it matches any revision, "
-                b"which is the same as sending no precondition at all\n",
+                b"which is the same as sending no precondition at all. To create "
+                b"an entry that does not exist yet, send If-None-Match: *\n",
                 headers={"X-Store-Status": "bad-request"},
             )
             return
@@ -4109,6 +4323,169 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 headers={"X-Store-Status": "bad-request"},
             )
             return
+        self._replace_entry(scope, ref, body, path, if_match)
+
+    def _create_entry(
+        self, scope: str, ref: str, body: bytes, path: str
+    ) -> None:
+        """The `If-None-Match: *` half of PUT — create an entry that is absent.
+
+        🔴 THE SCOPE CHECK IS EXPLICIT HERE AND CANNOT REUSE
+        `_resolve_writable`. That helper answers "which EXISTING entry does this
+        address", and on a create there is none: its `UnknownScopeError` arm
+        cannot tell a scope outside the caller's allowlist (404, and it must stay
+        404 — see `_not_found` on enumeration) from a scope the caller MAY write
+        that simply has no directory yet, which is the genuine first-entry case
+        this verb exists for. So the allowlist is consulted directly, through
+        `visible_scope_set` — the same one place every other narrowing site uses,
+        never a second spelling of "is this scope yours".
+
+        🔴 THE FILENAME IS DERIVED FROM THE REF, NOT TAKEN FROM THE BODY. A
+        caller could otherwise name one file in the URL and another in
+        `service:`, and the loader would then serve an entry no ref reaches.
+        `entry_mapping` is handed exactly the filename this writes, so
+        `from_mapping`'s "filename slug and `service:` must agree" check is what
+        refuses the mismatch — one predicate, at the loader, as everywhere else.
+
+        ⚠ ONLY A BARE `<slug>.md` CAN BE CREATED, and that is a consequence of
+        `SAFE_PATH_COMPONENT` rather than a decision made here: it excludes `.`,
+        so a kind-qualified ref (`<slug>.<kind>`) cannot reach any write route at
+        all — `PUT` has never been able to address one either. Stated so it is
+        not mistaken for a create-specific gap.
+        """
+        allowed = rc.visible_scope_set(self._visible_scopes)
+        folded_scope = rc.normalize_ref(scope)
+        if allowed is not None and folded_scope not in allowed:
+            # Indistinguishable from "that scope has never existed" — the same
+            # answer `_resolve_writable` gives, for the same reason.
+            self._not_found(path, "scope-unknown")
+            return
+        folded_ref = rc.normalize_ref(ref)
+        if not folded_scope or not folded_ref:
+            # A component that is a valid path segment but normalizes away
+            # entirely (`___`, `--`). It names no scope and no entry, and it is a
+            # caller error with a defined remedy, so it is said rather than 404'd.
+            self._audit(path, 400, "bad-request")
+            self._respond(
+                400,
+                b"bad request: the scope and the ref must each normalize to a "
+                b"non-empty slug\n",
+                headers={"X-Store-Status": "bad-request"},
+            )
+            return
+        filename = f"{folded_ref}.md"
+        try:
+            _store, index = rc.load_store(
+                self.store_root,
+                verb="written",
+                visible_scopes=self._visible_scopes,
+            )
+        except (rc.StoreMissingError, rc.EntryUnreadableError) as exc:
+            # 🔴 THE STORE WAS NOT READ, so we do not know whether the ref is
+            # taken. "I could not look" is never a 404 and never a create.
+            self._audit(path, 503, "store-unreachable")
+            self._respond(
+                503,
+                f"{exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            return
+        try:
+            existing, _tier = rc.resolve_ref_tiered(ref, index, scope)
+        except rc.UnknownScopeError:
+            # 🔴 THE ONE PLACE THIS IS NOT AN ERROR. The allowlist already said
+            # yes above, so an unknown scope here means the directory does not
+            # exist yet — a scope's first entry, which is how the store gained
+            # every scope it has.
+            existing = None
+        except rc.AmbiguousRefError as exc:
+            self._audit(path, 400, "bad-request")
+            self._respond(
+                400,
+                f"bad request: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "bad-request"},
+            )
+            return
+        if existing is not None:
+            # 🔴 RESOLVING TO AN ENTRY IS "IT EXISTS", EVEN THROUGH AN ALIAS.
+            # `If-None-Match: *` is a question about the TARGET RESOURCE, and the
+            # resource `entry/<scope>/<ref>` addresses is whatever a read of that
+            # ref returns. Creating `<ref>.md` beside an entry that already
+            # answers `<ref>` would make the ref AMBIGUOUS — the store's own
+            # 400 — for every later reader.
+            self._entry_exists(path, filename, existing.filename)
+            return
+        target = Path(self.store_root) / folded_scope / filename
+        try:
+            revision = create_entry(
+                target, data=body, scope=folded_scope, filename=filename
+            )
+        except EntryExists:
+            # The index did not know about it and the filesystem did: a file the
+            # loader collected as MALFORMED, or a racing create that landed
+            # first. Either way the name is taken and nothing was written.
+            self._entry_exists(path, filename, None)
+            return
+        except (EntryShapeError, UnicodeDecodeError) as exc:
+            self._audit(path, 422, "entry-shape")
+            self._respond(
+                422,
+                f"unprocessable: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "entry-shape"},
+            )
+            return
+        except OSError as exc:
+            self._audit(path, 503, "store-unreachable")
+            self._respond(
+                503,
+                f"store unwritable: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            return
+        self._audit(path, 201, "created")
+        # 🔴 201, NOT 200 — RFC 9110 §9.3.4 says a PUT that creates a
+        # representation MUST tell the user agent so. It is also the only way a
+        # client can distinguish a create that landed from a replace that did,
+        # since both carry an `ETag`.
+        self._respond(
+            201,
+            b"created\n",
+            headers={"X-Store-Status": "created", "ETag": f'"{revision}"'},
+        )
+
+    def _entry_exists(
+        self, path: str, filename: str, resolved: str | None
+    ) -> None:
+        """The `If-None-Match: *` refusal. 412, and a DISTINCT status token.
+
+        🔴 THE CODE IS THE SAME 412 `If-Match` GETS AND THE REMEDY IS THE
+        OPPOSITE, so the difference has to ride somewhere a client can read it.
+        `X-Store-Status: already-exists` is that place: a caller told only "412"
+        cannot tell "somebody moved it, re-sync and re-apply" from "it is already
+        there, you wanted a replace", and one of those two is an infinite retry.
+        """
+        detail = f" as `{resolved}`" if resolved else ""
+        self._audit(path, 412, "already-exists")
+        self._respond(
+            412,
+            f"precondition failed: `{filename}` already exists{detail}, and "
+            f"If-None-Match: * means create only if absent. Nothing was written; "
+            f"use PUT with If-Match to replace it, or POST .../bullets to append "
+            f"to it\n".encode("utf-8"),
+            headers={"X-Store-Status": "already-exists"},
+        )
+
+    def _replace_entry(
+        self, scope: str, ref: str, body: bytes, path: str, if_match: "Sequence[str]"
+    ) -> None:
+        """The `If-Match` half of PUT — criterion 6, whole-file replace.
+
+        `if_match` has already been parsed and validated by `_put_entry`: it is a
+        non-empty list of entity-tags with no `*` in it. The header is a LIST
+        (RFC 9110 §13.1.1) and is read as one — see `parse_if_match`. Reading it
+        as a single opaque string made `If-Match: "stale", "<correct>"` a
+        permanent 412.
+        """
         entry = self._resolve_writable(scope, ref, path)
         if entry is None:
             return

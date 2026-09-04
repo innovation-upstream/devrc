@@ -294,6 +294,8 @@ from subsystem_resolver import (  # noqa: E402
     normalize_ref,
     parse_front_matter,
     parse_journal_bullets,
+    line_openness,
+    line_mentions_marker,
     path_refs,
     resolve_ref_tiered,
     scan_headings,
@@ -375,6 +377,9 @@ __all__ = [
     "UNREACHABLE_MARKER",
     "UnreachableMarkerFinding",
     "scan_unreachable_markers",
+    "scan_dropped_lines",
+    "DroppedLineFinding",
+    "DROPPED_LINE",
     "POLICY_SCOPE",
     "POLICY_STORE_ROOT",
     "POLICY_NONE",
@@ -5357,6 +5362,20 @@ class ValidationReport:
     the readers to the wrong remedy.
     """
 
+    dropped: tuple[DroppedLineFinding, ...] = ()
+    """Nuance lines that reach no bullet — content no reader can see. Advisory.
+
+    🔴 IT DOES NOT AFFECT `clean`, AND THIS ONE IS THE TEMPTING EXCEPTION. Unlike
+    an open action, a dropped line IS damage: the entry holds text nothing will
+    ever surface. It still must not move the verdict, for the reason the verdict
+    exists — `--validate` answers "would the loader accept this file?", the
+    loader does accept it, and the append protocol
+    (`claude/skills/subsystem-index/SKILL.md`, which `handoff/SKILL.md` step 4
+    delegates to) branches on the exit code to mean "write NOTHING". Failing here
+    would stop a session recording anything into an entry whose only defect is
+    that an OLDER write lost a line, which makes the store lossier, not safer.
+    """
+
     @property
     def clean(self) -> bool:
         return not self.malformed
@@ -5428,6 +5447,26 @@ class ValidationReport:
                     "openness": u.openness,
                 }
                 for u in self.unreachable
+            ],
+            # 🔴 ITS OWN KEY AND ITS OWN REASON TOKEN, NEVER SUMMED WITH
+            # `unreachable_marker_count`. Both are "the reader cannot see it",
+            # and they are still different quantities with different remedies:
+            # an unreachable marker sits INSIDE a bullet that is read, a dropped
+            # line sits in NO bullet. `dropped_marker_count` is a subset of
+            # `dropped_line_count`, never an addition to it, and never an
+            # addition to `declared_open_count` either — the bullet that would
+            # have carried the declaration no longer exists.
+            "dropped_line_count": len(self.dropped),
+            "dropped_marker_count": sum(1 for d in self.dropped if d.carries_marker),
+            "dropped_line_reason": DROPPED_LINE,
+            "dropped_lines": [
+                {
+                    "file": d.filename,
+                    "offset": d.offset,
+                    "line": d.line,
+                    "carries_marker": d.carries_marker,
+                }
+                for d in self.dropped
             ],
             "shape_headings_checked": list(SHAPE_HEADINGS),
             "shape": [
@@ -5609,6 +5648,180 @@ def validate_scope(store_root: str | Path, scope: str) -> tuple[tuple[str, ...],
     return checked, index.malformed_in(scope)
 
 
+DROPPED_LINE = "dropped-line"
+"""The reason token for a nuance line that reaches NO bullet.
+
+A population OF ITS OWN, and the one furthest from every other: the openness
+shapes are all readings OF a bullet, so each is about content a reader can at
+least see. (Deliberately NOT numbered into that series —
+`subsystem_resolver.openness_population` already counts six of a DIFFERENT set,
+and a second "six" in one subsystem means two things at once.) This is content
+the file HOLDS and no reader can reach at all —
+`parse_journal_bullets` drops text that precedes the first bullet, so those
+lines are in the entry, in `git`, in the backup, and in no consumer's output.
+"""
+
+
+@dataclass(frozen=True)
+class DroppedLineFinding:
+    """One `## Nuance / work-history` line that belongs to no parsed bullet.
+
+    🔴 THE SHAPE, AND WHY IT IS NOT `UnreachableMarkerFinding`. That one is a
+    marker on a line that IS inside a bullet — the bullet is read, the marker is
+    not. This is a line inside NO bullet: nothing about it is read, marker or
+    otherwise. The remedies differ for the same reason the populations do —
+    an unreachable marker is fixed by PROMOTING one line, a dropped line by
+    restoring the bullet opening that used to sit above it.
+
+    🔴 MEASURED, NOT HYPOTHETICAL (2026-09-01, over the live store's own git
+    history: every committed version of every entry file across 16 scope repos
+    — 777 of them at the time of measuring, a figure that MOVES because the
+    store is live and commits hourly). SEVEN versions carried dropped lines:
+    `datapacket-talos/image-cacher.md` (written 2026-08-19, repaired 08-21) and
+    `.../orchestration.md` (written 2026-08-19, repaired 08-27), both with the
+    whole bullet block indented. For those eight days `orchestration.md` held a
+    mid-line `OPEN:` that raised no badge — and still raises none, because every
+    marker reader here anchors at position 0; see `_carries_marker`. The current
+    tree is clean: 0 across 141 entry files (154 `.md` minus 13 scope READMEs,
+    which `validate_scope` excludes — an earlier draft of this line quoted 154
+    and was counting READMEs as entries).
+    """
+
+    filename: str
+    offset: int
+    """1-based line index within the `## Nuance / work-history` section body."""
+
+    line: str
+    """The dropped line, verbatim."""
+
+    carries_marker: bool = False
+    """The line looks like it declared `OPEN:`/`RESOLVED:`.
+
+    Recorded because it changes the URGENCY and nothing else: a dropped line is
+    lost content either way, but a dropped DECLARATION is an open action the
+    store is actively failing to report. It is NOT counted as an open action and
+    never added to `declared_open_count` — the bullet it belonged to no longer
+    exists, so there is nothing to declare it ON.
+    """
+
+
+def scan_dropped_lines(
+    paths: Iterable[str | Path],
+) -> tuple[DroppedLineFinding, ...]:
+    """Nuance lines present on disk that reach no bullet. READ-ONLY.
+
+    🔴 IT ASKS THE READER'S OWN PARSER, AND DERIVES NOTHING ITSELF. The set of
+    reachable lines is taken from `parse_journal_bullets`' output rather than
+    re-deduced from a bullet pattern here, so this check cannot drift away from
+    what consumers actually see. Re-deriving it would be the duplicated
+    predicate `claude/RULES.md` names, with the checker's worst failure mode:
+    blessing lines the reader drops.
+
+    🔴 WHAT IT STRUCTURALLY CANNOT SEE, stated because the gap is the whole
+    reason to read this twice. A bullet that loses its opening line while
+    ANOTHER bullet sits above it is not detectable — `parse_journal_bullets`
+    appends every non-bullet line to `bullets[-1]`, so the orphaned tail is
+    absorbed into the previous bullet and inherits its date. The resulting file
+    is BYTE-IDENTICAL to one where that bullet legitimately wrapped. No check
+    can separate the two, and this one does not pretend to: it covers the case
+    where the drop is decidable — text before the first bullet, which includes
+    every entry whose NEWEST bullet lost its head, the store being newest-first.
+
+    Same tolerance as its siblings: a file that cannot be read, or that has no
+    `## Nuance / work-history`, contributes nothing. It runs BESIDE the parse
+    check, never in front of it.
+    """
+    out: list[DroppedLineFinding] = []
+    for p in paths:
+        path = Path(p)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        body = extract_sections(text, (NUANCE_HEADING,)).get(NUANCE_HEADING)
+        if not body:
+            continue
+        # 🔴 REACHABILITY IS KEYED ON (OFFSET, LINE), NOT ON THE LINE ALONE.
+        # A `set[str]` masks an orphan whose text is byte-identical to any line
+        # inside any bullet of the same file — and a read-modify-write race,
+        # which is the shape that produces a decapitated bullet in the first
+        # place, is exactly what duplicates a block. Measured over every version
+        # of every entry in the store: 0 masked today, so this changes no
+        # current reading and closes the case that the origin story implies.
+        reachable: set[tuple[int, str]] = set()
+        lines = body.splitlines()
+        cursor = 0
+        for b in parse_journal_bullets(body):
+            for ln in b.lines:
+                # `parse_journal_bullets` preserves order and never reorders or
+                # rewrites a line, so a forward scan re-attaches each bullet line
+                # to its own offset. Trailing blanks it stripped are simply not
+                # looked for; the skip below treats them as reachable anyway.
+                while cursor < len(lines) and lines[cursor] != ln:
+                    cursor += 1
+                if cursor < len(lines):
+                    reachable.add((cursor + 1, ln))
+                    cursor += 1
+        in_fence = False
+        for i, line in enumerate(lines, 1):
+            # 🔴 FENCES ARE SKIPPED, as in both sibling scanners. A fenced
+            # snippet BEFORE the first bullet is sample text, and reporting it
+            # would hand the operator the remedy "restore the bullet opening
+            # line" for content that never had one. `parse_journal_bullets`
+            # learned this for the same reason; the corpus has 0 fence lines
+            # today and a fence is one pasted snippet away.
+            if line.strip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence or not line.strip() or (i, line) in reachable:
+                continue
+            out.append(
+                DroppedLineFinding(
+                    filename=path.name,
+                    offset=i,
+                    line=line,
+                    carries_marker=_carries_marker(line),
+                )
+            )
+    return tuple(out)
+
+
+def _carries_marker(line: str) -> bool:
+    """Does this dropped line carry an `OPEN:`/`RESOLVED:` declaration?
+
+    🔴 IT RESTATES NO GRAMMAR. It asks `_bullet_openness` — the same function
+    `parse_journal_bullets` calls for a bullet's line 1 — through
+    `_as_opening_line`, exactly as `JournalBullet.unreachable_markers` does for
+    a continuation line. That is the whole implementation, and it is the point:
+    a hand-spelled copy could not stay in step with the real pattern, and the
+    committed shape ledger (`scripts/tests/fixtures/near_miss_shapes.json`) then
+    pins this call site against the others.
+
+    🔴 IT REPLACED A HAND-SPELLED VERSION THAT WAS INERT ON THE FIELD CASE AND
+    LOOSE ON PROSE — the exact inversion of what its docstring claimed. That
+    version stripped `"*_`🔴⚠ "` and matched `startswith`, so it fired on
+    `* OPEN: x` (a bullet character the corpus does not use), missed
+    `- OPEN: x` and every dated `- 2026-08-19: OPEN: …` (the shapes it does),
+    and returned True for the prose `resolved upstream in 1.2.3.` and
+    `RESOLVED_ADDR in the trace…` because it required no colon and no
+    word-boundary guard. Measured against all 7 historical dropped-line blobs
+    in the live store: `carries_marker` was 0 on every one of them, including
+    the `OPEN:` this feature's own docstrings cite as the motivating incident.
+
+    ⚠ A MARKER MID-LINE IS STILL NOT DETECTED, and that is deliberate rather
+    than a remaining gap: every marker reader in this subsystem anchors at
+    position 0, so a mid-line `OPEN:` declares nothing anywhere — it did not
+    declare anything while its bullet was intact either. Widening only here
+    would make this one field disagree with every other surface.
+
+    It may ONLY rank urgency. A dropped line is a finding on its own and this
+    flag never gates reporting, so a miss costs a word of emphasis, never a
+    silent pass.
+    """
+    openness, _sha = line_openness(line)
+    return openness is not None or line_mentions_marker(line)
+
+
 def validate_command(store_root: str | Path, scope: str) -> str:
     """The literal, runnable `--validate` invocation for one scope. ONE spelling.
 
@@ -5745,6 +5958,7 @@ def render_validation(report: ValidationReport) -> str:
         return "\n".join(
             out
             + _render_validation_shape(report)
+            + _render_validation_dropped(report)
             + _render_validation_open_actions(report)
             + _render_validation_unreachable(report)
         )
@@ -5764,9 +5978,82 @@ def render_validation(report: ValidationReport) -> str:
     return "\n".join(
         out
         + _render_validation_shape(report)
+        + _render_validation_dropped(report)
         + _render_validation_open_actions(report)
         + _render_validation_unreachable(report)
     )
+
+
+def _render_validation_dropped(report: ValidationReport) -> list[str]:
+    """The DROPPED-LINE advisory. Prints on every path that CHECKED something.
+
+    🔴 IT COMES BEFORE THE OPEN-ACTION AND MARKER-REACHABILITY BLOCKS,
+    deliberately, and for the reason `_render_validation_shape` states for its
+    own position: a dropped line is content NO reader reaches, so
+    `scan_open_actions` and `scan_unreachable_markers` never see it. Their
+    `0 declared` and `0 out-of-reach` are then facts about text the parser never
+    got to. Read in the other order they are simply false — and that is exactly
+    the order this shipped in until an audit read the rendered output for the
+    real 2026-08-19 entry and found the two reassuring zeros printing above the
+    🔴.
+
+    🔴 IT PRINTS ITS DENOMINATOR EVEN WHEN IT FINDS NOTHING, like all three
+    siblings, and it has a second way to be vacuous the zero must not hide: it
+    reads only `## Nuance / work-history`, so an entry whose heading is renamed
+    contributes zero here for a reason the SHAPE block is the one to state.
+
+    🔴 AND THE ZERO CARRIES ITS OWN BLIND SPOT IN WORDS. Unlike the siblings,
+    this check is knowingly PARTIAL — the absorbed-tail case is undecidable (see
+    `scan_dropped_lines`) — so a bare "0 dropped" would read as "no bullet has
+    lost its head", which is a claim this cannot make. Saying which half was
+    checked is the difference between a measurement and a reassurance.
+    """
+    n_files = len(report.checked)
+    out = [""]
+    if not report.dropped:
+        out.append(
+            f"dropped lines: 0 across {n_files} entry file(s) — every non-blank "
+            f"`## Nuance / work-history` line reaches a bullet some reader will "
+            f"surface. [{DROPPED_LINE}] 🔴 PARTIAL BY CONSTRUCTION: this sees text "
+            f"before the FIRST bullet. A bullet that lost its opening line while "
+            f"another bullet sat above it is absorbed into that one and is "
+            f"byte-identical to a legitimate wrap — no check can see it, and this "
+            f"zero is not a claim about that case."
+        )
+        return out
+    n = len(report.dropped)
+    marked = sum(1 for d in report.dropped if d.carries_marker)
+    out.append(
+        f"🔴 {n} DROPPED LINE(S) across {n_files} entry file(s) [{DROPPED_LINE}] — "
+        f"present in the file, inside NO bullet, so EVERY reader skips them: "
+        f"`--ref`, `--search`, the digest and every openness count. "
+        f"`parse_journal_bullets` drops text that precedes the first bullet. The "
+        f"cause is almost always a lost or indented bullet OPENING line; the fix "
+        f"is to restore it, NOT to delete the text."
+    )
+    if marked:
+        out.append(
+            f"  🔴 {marked} of them look{'s' if marked == 1 else ''} like a "
+            f"`OPEN:`/`RESOLVED:` DECLARATION. "
+            f"That is an open action the store is actively failing to report — it "
+            f"raises no badge and is counted in no openness total, because the "
+            f"bullet that would carry it no longer exists."
+        )
+    for d in report.dropped:
+        flag = "  ← looks like a DECLARATION" if d.carries_marker else ""
+        out.append(f"    {d.filename}: nuance line {d.offset}{flag}")
+        out.append(f"      {d.line.strip()[:120]}")
+    out.append(
+        "  🔴 RESTORE FROM HISTORY, NOT FROM MEMORY. Each scope is its own git "
+        "repo and the entry's previous version is one `git -C <store>/<scope> log "
+        "-p -- <file>` away. Reconstructing the opening line by hand invents a "
+        "date and an author the store never had."
+    )
+    out.append(
+        "  (Advisory. It changes no verdict, for the same reason the blocks above "
+        "do not: the loader accepts the file.)"
+    )
+    return out
 
 
 def _render_validation_shape(report: ValidationReport) -> list[str]:
@@ -6264,6 +6551,7 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
                 open_actions=scan_open_actions(scanned),
                 shape=scan_entry_shape(scanned),
                 unreachable=scan_unreachable_markers(scanned),
+                dropped=scan_dropped_lines(scanned),
             )
             print(
                 json.dumps(report.to_json(), indent=2)

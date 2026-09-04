@@ -3,9 +3,9 @@ clawgate-task: 364
 ---
 # Handoff: cairn-task-linkage — 2026-08-29
 
-## Run this first — the index, one read-only command
+## Run this first — the index, one command
 ```bash
-python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc
+cairn recall --repo ~/workspace/devrc
 ```
 Terse pointers this doc does not carry, curated by past sessions and outliving it.
 🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current

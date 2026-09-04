@@ -51,7 +51,7 @@ status strings are all spelled again here by hand. Importing them would assert
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 import ast
 import errno
@@ -61,6 +61,8 @@ import importlib.util
 import json
 from testlib import hermetic_git  # noqa: E402
 from testlib import mockbin  # noqa: E402
+from testlib import public_ip_scan  # noqa: E402
+from testlib import store_siting  # noqa: E402
 import io
 import os
 import re
@@ -72,7 +74,6 @@ import tarfile
 import secrets
 import subprocess
 import sys
-import tempfile
 import textwrap
 import threading
 import time
@@ -336,92 +337,21 @@ def _entry(
 # 🔴 It does NOT weaken `TestAHungRoundTripSAYSWhichSideBlocked`. That class does not
 # depend on the real filesystem being slow: it monkeypatches `_fsync_dir` to stall
 # deliberately, so it exercises the same code path wherever the store lives.
-def _mount_fstype(path: Path) -> str | None:
-    """The filesystem type backing `path`, from /proc/mounts — or None.
-
-    Resolved by LONGEST matching mount point, not by string prefix: `/dev/shm`
-    and `/dev` are both prefixes of a path under the former, and taking the first
-    hit would report `devtmpfs` for a `tmpfs` mount.
-    """
-    try:
-        target = path.resolve()
-        entries = Path("/proc/mounts").read_text().splitlines()
-    except OSError:
-        return None
-    best: tuple[int, str] | None = None
-    for line in entries:
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        mount_point, fstype = parts[1], parts[2]
-        try:
-            mp = Path(mount_point).resolve()
-        except OSError:
-            continue
-        if target == mp or mp in target.parents:
-            depth = len(mp.parts)
-            if best is None or depth > best[0]:
-                best = (depth, fstype)
-    return None if best is None else best[1]
-
-
-def _tmpfs_dir() -> Path | None:
-    """A writable tmpfs directory for the store, or None to use the disk.
-
-    Three conditions, all required, because each fails independently in a real
-    container: the candidate is a directory, /proc/mounts says the filesystem
-    backing it is `tmpfs`, and an actual write succeeds. 🔴 The PATH is never the
-    test — `/dev/shm` is tmpfs only by convention and a container may mount
-    anything there, so trusting the name would be a guard that passes while the
-    hazard (a disk-backed store) is present in a different spelling.
-    """
-    for candidate in (os.environ.get("DEVRC_TEST_TMPFS"), "/dev/shm"):
-        if not candidate:
-            continue
-        path = Path(candidate)
-        try:
-            if not path.is_dir():
-                continue
-            if _mount_fstype(path) != "tmpfs":
-                continue
-            probe = path / f".devrc-tmpfs-probe-{os.getpid()}"
-            probe.write_bytes(b"probe")
-            probe.unlink()
-        except OSError:
-            continue
-        return path
-    return None
-
-
 @pytest.fixture
 def store(tmp_path: Path) -> Iterator[Path]:
     """A synthetic store: two populated scopes, one empty, one all-malformed."""
-    base = _tmpfs_dir()
-    holder: Path | None = None
-    if base is None:
-        root = tmp_path / "store"
-    else:
-        # tmp_path is auto-cleaned by pytest; a tmpfs directory is not, and tmpfs
-        # is RAM — leaking one per test would hold memory for the whole run.
-        holder = Path(tempfile.mkdtemp(prefix="devrc-store-", dir=str(base)))
-        root = holder / "store"
-    (root / SCOPE).mkdir(parents=True)
-    (root / OTHER_SCOPE).mkdir(parents=True)
-    (root / EMPTY_SCOPE).mkdir(parents=True)
-    (root / BROKEN_SCOPE).mkdir(parents=True)
-    (root / SCOPE / "thing-alpha.md").write_text(_entry("thing-alpha", SCOPE))
-    (root / OTHER_SCOPE / "thing-beta.md").write_text(
-        _entry("thing-beta", OTHER_SCOPE, nuance=OTHER_NUANCE)
-    )
-    # No front matter at all: the loader collects it as MALFORMED.
-    (root / BROKEN_SCOPE / "thing-gamma.md").write_text("no front matter here\n")
-    try:
+    with store_siting.store_root(tmp_path) as root:
+        (root / SCOPE).mkdir(parents=True)
+        (root / OTHER_SCOPE).mkdir(parents=True)
+        (root / EMPTY_SCOPE).mkdir(parents=True)
+        (root / BROKEN_SCOPE).mkdir(parents=True)
+        (root / SCOPE / "thing-alpha.md").write_text(_entry("thing-alpha", SCOPE))
+        (root / OTHER_SCOPE / "thing-beta.md").write_text(
+            _entry("thing-beta", OTHER_SCOPE, nuance=OTHER_NUANCE)
+        )
+        # No front matter at all: the loader collects it as MALFORMED.
+        (root / BROKEN_SCOPE / "thing-gamma.md").write_text("no front matter here\n")
         yield root
-    finally:
-        if holder is not None:
-            # Best-effort: a tmpfs leak costs RAM for the run, but failing the
-            # teardown would turn a passing test red for a cleanup problem.
-            shutil.rmtree(holder, ignore_errors=True)
 
 
 # RFC 5737 TEST-NET-3, and three DISTINCT addresses: a test that used one
@@ -3929,8 +3859,17 @@ def token_file(tmp_path: Path) -> Path:
 # transport (`seed.sh`: `rsync -a --delete` into a stage, then `tar` into the
 # pod) does not carry mtime. So two stores holding IDENTICAL BYTES render their
 # index in a different order — measured against the live pod on 2026-09-01,
-# where every scope with more than two entries failed and the `cli` scope's only
-# unaccounted difference was one row's POSITION.
+# `scopes=5 pass=1 fail=4`, the `cli` scope's only unaccounted difference being
+# one row's POSITION.
+#
+# ⚠ THAT RUN USED TO BE SUMMARISED AS "every scope with more than two entries
+# failed", WHICH IS WRONG. Re-measured 2026-09-01, entries as `subsystem_recall`
+# INDEXES them: cli=5, devrc=26, datapacket-talos=49, homelab-infra=0,
+# storage-resolver=1. No two-entry scope appears in that run at all, so the data
+# could not support a two-entry boundary; and `homelab-infra` FAILED on a SET
+# difference, not on order (0 indexed entries means `status=scope-empty` with no
+# INDEX block, which ordering cannot make differ by 102 lines). The boundary
+# that holds is the arithmetic one this fixture argues for itself, below.
 #
 # FOUR entries, not two: two entries can only be in one of two orders and the
 # fixture would be one coin-flip away from asserting nothing. Names are pairwise
@@ -4013,6 +3952,355 @@ def shuffled_pair(tmp_path: Path) -> tuple[Path, Path]:
     return local, served
 
 
+# =============================================================================
+# 🔴 THE AMBIGUOUS-REF FIXTURE — the shape the per-entry arm cannot compare and
+# used to report as compared anyway.
+#
+# `resolve_ref_tiered` matches a BARE ref on `e.slug` alone, so `alpha.md` and
+# `alpha.process.md` (a documented `<slug>.<kind>.md`, `KINDS =
+# service|process|org|doc`) both carry slug `alpha` and both index — as the
+# refs `alpha` and `alpha.process`. `--ref alpha` then raises
+# `AmbiguousRefError`, and `subsystem_recall._exit_for` maps `ref-ambiguous` to
+# exit **0**, so nothing in the verifier's rc check can see it.
+#
+# ⚠ `alpha.process.md` MUST DECLARE `service: alpha`, not `service:
+# alpha.process`. The loader requires the filename's SLUG PART and `service:`
+# to agree, and rejects the file as MALFORMED otherwise — which would make this
+# fixture a store-defect case rather than the supported-convention case it is
+# about. `_ambiguous_refs` asserts the resulting index, so a fixture that
+# silently degraded that way fails loudly instead of going vacuous.
+# =============================================================================
+
+AMBIG_SCOPE = "gadget-rack"
+
+
+def _write_ambiguous_scope(root: Path) -> None:
+    (root / AMBIG_SCOPE).mkdir(parents=True)
+    # Same slug, two kinds -> the refs `alpha` and `alpha.process`, and a bare
+    # `--ref alpha` that resolves to neither.
+    (root / AMBIG_SCOPE / "alpha.md").write_text(
+        _entry("alpha", AMBIG_SCOPE, nuance="- 2026-02-11: alpha seats on a shim.")
+    )
+    (root / AMBIG_SCOPE / "alpha.process.md").write_text(
+        _entry(
+            "alpha",
+            AMBIG_SCOPE,
+            nuance="- 2026-02-11: the alpha process runs on a rota.",
+        )
+    )
+    # A third, unambiguous entry: the per-entry arm must still be seen to work
+    # on the refs it CAN resolve, or a FAIL here would not distinguish "refused
+    # the ambiguous one" from "refused the scope for some other reason".
+    (root / AMBIG_SCOPE / "beta.md").write_text(
+        _entry("beta", AMBIG_SCOPE, nuance="- 2026-02-11: beta seats on a shim.")
+    )
+
+
+def _ambiguous_refs(root: Path) -> None:
+    """The fixture's own positive control, asserted before any comparator runs.
+
+    🔴 EVERY ASSERTION BELOW IS ABOUT REACHABILITY, NOT ABOUT THE FIX. If the
+    loader rejected `alpha.process.md`, or the two files landed under one ref,
+    the scope would hold two ordinary entries and every test using this fixture
+    would pass against the OLD verifier while asserting nothing.
+    """
+    refs = _index_refs(root, AMBIG_SCOPE)
+    assert sorted(refs) == ["alpha", "alpha.process", "beta"], (
+        f"the fixture did not index three entries as `alpha`, `alpha.process` "
+        f"and `beta` — the ambiguity it is about is not reachable: {refs}"
+    )
+    out = subprocess.run(
+        [
+            sys.executable, str(RECALL_PATH), "--store", str(root),
+            "--scope", AMBIG_SCOPE, "--ref", "alpha",
+        ],
+        capture_output=True, text=True, timeout=HANG_TIMEOUT,
+    )
+    # 🔴 THE EXIT CODE IS THE DEFECT, SPELLED OUT. A non-zero here would mean
+    # the verifier's own `rc_entry > 3` check already covered this case and the
+    # guard under test is unreachable.
+    assert out.returncode == 0, (
+        f"`--ref alpha` exited {out.returncode}; the false-green this fixture "
+        f"is about depends on it exiting 0:\n{out.stdout}\n{out.stderr}"
+    )
+    assert out.stdout.startswith("subsystem-recall: status=ref-ambiguous "), (
+        f"`--ref alpha` did not report `ref-ambiguous`:\n{out.stdout[:400]}"
+    )
+
+
+# =============================================================================
+# 🔴 THE MEASURED-EVIDENCE BLOCK, PINNED AS A WHOLE NORMALISED STRING.
+#
+# This block is the verifier's own account of the run that motivated it, and it
+# has already been WRONG ONCE, in two places at once: it called a one-entry
+# scope a two-entry one, and it read a set-difference FAIL as an ordering FAIL.
+# Both errors then propagated to four other sites and into a merged commit
+# SUBJECT, which cannot be corrected.
+#
+# 🔴 A KEYWORD OR SUBSTRING ASSERTION WOULD NOT HAVE CAUGHT EITHER. Both wrong
+# claims were fluent English containing every word a plausible partial
+# assertion would have looked for — "storage-resolver", "PASS", "entries" —
+# which is the "a guard on WORDS is walkable by REWORDING" shape in
+# `claude/RULES.md`. When the artefact under test IS PROSE, the whole
+# normalised string is the only pin that holds.
+#
+# ⚠ THE PRICE IS DELIBERATE: a cosmetic reword of that comment fails this test.
+# Pay it by updating `_EXPECTED_EVIDENCE_BLOCK` in the same commit — and, when
+# a NUMBER in it moves, by re-running the measurement rather than editing the
+# literal to match. The anchors are asserted separately from the content, so a
+# block that was moved or deleted fails with "anchor not found" rather than
+# with a diff nobody can read.
+# =============================================================================
+
+_EVIDENCE_BLOCK_START = "# 🔴 AND IT CANNOT COMPARE THE WHOLE-SCOPE DIGEST AT ALL"
+_EVIDENCE_BLOCK_END = "# 🔴 SO THE CLAIM IS RESTATED AT THE LEVEL IT CAN HOLD."
+
+_EXPECTED_EVIDENCE_BLOCK = """
+    🔴 AND IT CANNOT COMPARE THE WHOLE-SCOPE DIGEST AT ALL — THAT IS THE SECOND
+    THING THAT MADE THIS SCRIPT PERMANENTLY RED, AFTER `host:`.
+    `subsystem_recall` orders its INDEX **newest-first by entry-file mtime**, and
+    picks the digest's one featured BODY the same way (`select_featured`'s
+    most-recent fallback). The transport does not preserve mtime — `seed.sh`
+    `rsync`s into a stage and `tar`s that into the pod — so two stores holding
+    byte-identical entries render their index in a DIFFERENT ORDER and feature a
+    DIFFERENT entry. MEASURED 2026-09-01 against the live pod, store
+    `~/.claude/analyze-service-index`, over a `kubectl port-forward`:
+
+    FAIL scope=devrc            raw-diff-lines=45   accounted-for=6
+    FAIL scope=cli              raw-diff-lines=8    accounted-for=6
+    PASS scope=storage-resolver (1 entry)
+    FAIL scope=homelab-infra    raw-diff-lines=108  accounted-for=6
+    FAIL scope=datapacket-talos raw-diff-lines=336  accounted-for=6
+
+    The `cli` scope is the clean isolation — its index ROWS were identical and the
+    only unaccounted difference was one row's POSITION. `claude/RULES.md`: a
+    permanently-red gate is worse than no gate.
+
+    🔴 TWO READINGS OF THAT RUN WERE WRONG, AND THIS IS THE CORRECTION.
+    The `storage-resolver` line above said `(2 entries)` and the paragraph
+    concluded "every passing scope had 2 entries; every failing one had more".
+    RE-MEASURED 2026-09-01 on this host, same store, counting entries as
+    `subsystem_recall` INDEXES them rather than as files on disk:
+
+    cli=5  devrc=26  datapacket-talos=49  homelab-infra=0  storage-resolver=1
+
+    `storage-resolver/` holds `backblaze.md` plus a `README.md`, and a README in a
+    scope is correctly NOT indexed — so it is a ONE-entry scope. NO TWO-ENTRY
+    SCOPE APPEARS IN THAT RUN AT ALL, so the data could never support a two-entry
+    boundary, in either direction.
+
+    The boundary that does hold is ARITHMETIC, not measured: a ONE-entry index has
+    exactly one possible order and cannot diverge; TWO OR MORE is where the order
+    can differ. That is the same argument the ordering fixture in
+    `scripts/tests/test_subsystem_store_api.py` makes for itself when it chooses
+    FOUR refs — two entries admit only two orders, so a two-entry fixture is one
+    coin-flip away from asserting nothing.
+
+    And `homelab-infra` was NOT an ordering failure. It holds ZERO indexed entries
+    on this host (one `README.md`), so its local render is `status=scope-empty`
+    with no INDEX block at all — 102 unaccounted lines that ordering structurally
+    cannot produce. That FAIL was a SET difference, the lagging read-through cache
+    case described below. THREE of the four FAILs were ordering, not four.
+"""
+
+
+def _normalise_prose(text: str) -> str:
+    """Collapse every whitespace run to one space. Reflowing is free; words are not."""
+    return " ".join(text.split())
+
+
+# The retracted sentences, in every spelling they have been found in. Three of
+# these came from `claudedocs/handoff-cairn-phase3.md`, which the hand-written
+# ledger this replaced did not know about.
+_RETRACTED_BOUNDARY = (
+    "the only two-entry scope",
+    "the lone pass being the only two-entry scope",
+    "every scope with more than two entries",
+    "could not pass for any scope with more than two entries",
+    "every passing scope had 2 entries",
+    "pass scope=storage-resolver (2 entries)",
+    "every pass had ≤2 entries",
+    "any scope with >2 entries",
+    # 🔴 NOT A BOUNDARY CLAIM, BUT THE SAME FAILURE MODE AND THE SAME SCANNER.
+    # "51 entries of headroom" was the pagination headroom taken from the LOCAL
+    # store while the paragraph itself said the POD was the binding side and
+    # was unmeasured. Measured since: pod 51, so the headroom is 49. Three
+    # copies of the number drifted together, which is exactly what a repo-wide
+    # needle catches and three hand-checked sites do not.
+    "51 entries of headroom",
+)
+
+# A retraction has to QUOTE the claim to retract it, so an occurrence with one
+# of these NEARBY is a correction, not an assertion. Kept deliberately short: a
+# longer list is a wider exemption, and the exemption is the part that can make
+# this check vacuous.
+_RETRACTION_MARKERS = (
+    "used to", "concluded", "said", "was not", "is wrong", "retracted",
+)
+
+# 🔴 THE WINDOW IS THE EXEMPTION'S WIDTH, AND 260 MADE `"said"` A WILDCARD.
+# This started as a SAME-LINE rule and was widened to 260 characters when the
+# scan went whole-file — silently turning a tight test into a loose one.
+# Measured: an unrelated "the operator said the rollout looked clean" 155
+# characters earlier exempted a bare re-assertion outright. Every genuine
+# retraction in this repo sits within 39 characters of its quote, so 60 costs
+# nothing and closes the hole. `test_the_marker_window_is_TIGHT` pins it —
+# without that, the window could take any value and no test would notice.
+_MARKER_WINDOW = 60
+
+# 🔴 SEARCHED ON BOTH SIDES, because widening to a preceding-only window also
+# went NARROWER on the other axis: the original same-line rule exempted a marker
+# placed AFTER the quote ("…more than two entries — RETRACTED"), and a
+# preceding-only window reports it. Both directions, same tight width.
+
+# 🔴 THREE THINGS ARE STRIPPED BEFORE MATCHING, EACH BECAUSE IT WAS WALKED:
+#   * EMPHASIS — `handoff-cairn-phase3.md` spelled it `had **2** entries`, so
+#     markdown bold alone defeated a substring match;
+#   * LINE WRAPS — `README.md` passed only because the phrase straddled one,
+#     i.e. for a reason nobody chose and any reflow would undo;
+#   * LINE-LEADING COMMENT PREFIXES — and this was the NORMAL case, not an edge
+#     one. Collapsing whitespace across a wrapped `#` comment leaves the `#`
+#     sitting inside the sentence, so the needle never matches. Demonstrated
+#     live in all three flavours: a wrapped `#` comment in a shell script, the
+#     same in a `.py` file, and a wrapped `> ` blockquote in a handoff doc — all
+#     three WALKED, while the one-line and plain-markdown forms were caught.
+#     Every prose comment in `verify-byte-identity.sh` and `cairn-cutover.py` is
+#     already wrapped that way, and the live occurrence at
+#     `verify-byte-identity.sh:38` is 76 chars in a file whose comments run to
+#     82 — one word of editing and the guard would have gone silently green.
+#
+# ⚠ SO THE OLD CLAIM "survives reflowing and bolding" WAS TRUE ONLY OF
+# UN-PREFIXED MARKDOWN, which is the minority of the corpus. It survives
+# reflowing, bolding AND comment wrapping now.
+_EMPHASIS = re.compile(r"[*_`]+")
+_LINE_PREFIX = re.compile(r"^[ \t]*(?:#+|>+|//+)[ \t]*")
+
+
+def _normalise_for_scan(text: str) -> str:
+    stripped = " ".join(_LINE_PREFIX.sub("", ln) for ln in text.splitlines())
+    return " ".join(_EMPHASIS.sub("", stripped).split()).lower()
+
+
+# The ONE path this scan structurally cannot cover: its own source, whose
+# needles would match themselves at the line that spells them. Every other
+# tracked text file in the repo IS scanned — see
+# `test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary` for why this
+# is derived rather than a hand-written list of sites.
+_SCAN_EXEMPT = ("scripts/tests/test_subsystem_store_api.py",)
+# ⚠ THE SUFFIX LIST IS NARROWER THAN "EVERY TRACKED TEXT FILE", SO SAY SO.
+# Measured 2026-09-02: 952 of 1261 tracked files match these suffixes; 309 do
+# not, including 29 `.nix`. Zero of the unscanned files match a needle today
+# and no site the claim was ever copied to is in the gap — but the docstrings
+# below say "with one of these suffixes", not "every text file", because a
+# description wider than its implementation reads as coverage while providing
+# none.
+_SCAN_SUFFIXES = (".md", ".py", ".sh", ".txt", ".rst")
+
+
+def _tracked_text_files() -> list[str]:
+    """Every tracked file with a `_SCAN_SUFFIXES` suffix — via the content
+    gates' OWN enumerator.
+
+    🔴 REUSED, NOT REIMPLEMENTED, AND THE FIRST CUT OF THIS GOT IT WRONG. It
+    called `git ls-files` directly with `check=True`, which raises in any tree
+    without a `.git` — and the tier the merge is gated on is exactly that tree:
+    `nix build .#checks…` builds from a `cp -r ${./.}` store copy with NO
+    `.git`. So the sandbox leg would have ERRORED while the dev-host leg stayed
+    green, which is the two-tier blindness `claude/RULES.md` names, pointed at
+    the tier that actually blocks.
+
+    `public_ip_scan.repo_files` already solves this for the four content gates:
+    `git ls-files` when there is a `.git`, a filesystem walk otherwise, with
+    `_is_skipped` applied relative to the root (a worktree lives under
+    `…/worktrees/<id>/`, and an absolute-parts skip test would drop the entire
+    repo and report a clean zero over nothing). One rule, one place.
+    """
+    return [
+        str(p.relative_to(ROOT))
+        for p in public_ip_scan.repo_files(ROOT)
+        if not public_ip_scan._is_skipped(p, ROOT)
+        and p.name.endswith(_SCAN_SUFFIXES)
+        and str(p.relative_to(ROOT)) not in _SCAN_EXEMPT
+    ]
+
+
+def _unmarked_retractions(
+    sites: Sequence[str], root: Path | None = None
+) -> list[str]:
+    """Every place in `sites` that ASSERTS a retracted claim without marking it.
+
+    Reports the normalised window around each hit, because after normalisation
+    there are no line numbers left to quote.
+    """
+    base = ROOT if root is None else root
+    needles = [(_normalise_for_scan(p), p) for p in _RETRACTED_BOUNDARY]
+    markers = [_normalise_for_scan(m) for m in _RETRACTION_MARKERS]
+    found: list[str] = []
+    for rel in sites:
+        path = base / rel
+        assert path.is_file(), f"the ledger names a path that does not exist: {rel}"
+        try:
+            text = _normalise_for_scan(path.read_text(encoding="utf-8"))
+        except UnicodeDecodeError:
+            continue
+        for needle, original in needles:
+            start = 0
+            while (at := text.find(needle, start)) != -1:
+                start = at + 1
+                end = at + len(needle)
+                window = (
+                    text[max(0, at - _MARKER_WINDOW):at]
+                    + " "
+                    + text[end:end + _MARKER_WINDOW]
+                )
+                if any(m in window for m in markers):
+                    continue
+                excerpt = text[max(0, at - 60):at + len(needle) + 40]
+                found.append(f"{rel}: …{excerpt}…  (needle: {original!r})")
+    return found
+
+
+# 🔴 THERE IS NO HAND-WRITTEN LIST OF SITES ANY MORE, AND THAT IS THE FIX.
+#
+# This used to be a tuple of three paths, under a comment asserting "the claim
+# was copied to FIVE places" and enumerating the two that could not be scanned.
+# The count was wrong: there was a SIXTH site, `claudedocs/handoff-cairn-
+# phase3.md` — and it is the doc `/resume` OPENS for this work, so it is the
+# one copy a resuming session actually reads. It asserted the retracted
+# boundary in three separate places, one of which ("every PASS had ≤2 entries;
+# every FAIL had more") is flatly false on that very run: `homelab-infra`
+# indexes ZERO entries and FAILED.
+#
+# A hand-maintained ledger of sites is the same shape as the bug it was
+# guarding against — a claim about coverage that nobody re-derives. So the
+# site list is now DERIVED from `git ls-files` at scan time, and the only
+# asserted number is the one structural exemption below. A seventh site is
+# caught automatically; a seventh site was exactly what a fixed list missed.
+#
+# STILL NOT COVERABLE, and named rather than omitted:
+#   * `_SCAN_EXEMPT` — this file's own source. Its needles would match
+#     themselves at the line that spells them, making the check permanently and
+#     meaninglessly red. Its own copy of the claim is corrected by hand.
+#   * the SQUASH COMMIT SUBJECT of #1222 on `main` — "it could not pass for any
+#     scope with more than two entries". Immutable. Nothing in a working tree
+#     can reach it, and this guard exists because that is where the wrong
+#     sentence permanently lives and is the place it would be copied back from.
+
+
+@pytest.fixture
+def ambiguous_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """A local store and a served copy holding an ambiguous ref, same bytes."""
+    local = tmp_path / "ambig-local"
+    served = tmp_path / "ambig-served"
+    _write_ambiguous_scope(local)
+    subprocess.run(
+        ["cp", "-a", str(local), str(served)], check=True, capture_output=True
+    )
+    _ambiguous_refs(local)
+    _ambiguous_refs(served)
+    return local, served
+
+
 class TestByteIdentityVerifier:
     def test_POSITIVE_identical_stores_PASS_for_every_scope(
         self, store: Path, token_file: Path
@@ -4090,9 +4378,14 @@ class TestByteIdentityVerifier:
         differ. The reader orders its INDEX newest-first by mtime and picks the
         digest's one featured BODY the same way, and the transport does not
         carry mtime — so the old whole-scope `cmp` reported a difference for a
-        store that was identical, on every scope with more than two entries.
-        MEASURED against the live pod on 2026-09-01: `scopes=5 pass=1 fail=4`,
-        the single PASS being the only two-entry scope.
+        store that was identical. MEASURED against the live pod on 2026-09-01:
+        `scopes=5 pass=1 fail=4`.
+
+        ⚠ THAT PASS WAS NOT "the only two-entry scope" — see the fixture header
+        above. `storage-resolver` indexes ONE entry, no two-entry scope appears
+        in the run, and one of the four FAILs was a set difference rather than
+        an ordering one. The boundary is arithmetic: one entry admits one order,
+        two or more can diverge.
 
         `claude/RULES.md`: a permanently-red gate is worse than no gate.
         """
@@ -4278,6 +4571,71 @@ class TestByteIdentityVerifier:
             f"folded into the index-order excuse:\n{r.stdout}"
         )
 
+    def test_a_FRAME_ONLY_divergence_is_caught_with_the_ROWS_and_SET_identical(
+        self, shuffled_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE FRAME ARM, ISOLATED — the one arm with no control of its own.
+
+        Every other test in this class moves the rows, the set or an entry
+        body, so each of them would still fail with the frame comparison wired
+        to a constant zero. The only test that could see a frame-only
+        difference was `test_LEADING_BLANKS_WITHOUT_the_banner_are_NOT_stripped`
+        — which is about the snapshot-block narrowing, and would go on passing
+        for its own reason if this arm died.
+
+        The served copy gains an UNINDEXABLE file: no front matter, so the
+        loader collects it as MALFORMED. Nothing addressable changes —
+
+          * the entry SET is identical (a rejected file is not indexed and not
+            `--ref`-addressable, which is the same rule that keeps a `README`
+            out of the comparison);
+          * every index ROW is identical, byte for byte;
+
+        — while the FRAME moves twice: a `🔴 MALFORMED` block appears, and the
+        INDEX head switches from "ALL N entries, none omitted" to "the N
+        READABLE entries … NOT complete". A comparator blind to the frame would
+        report this pod as byte-identical to this host while it holds a corrupt
+        file the operator has never been told about.
+
+        The assertion is on `sorted-row-lines=0`, not merely on the FAIL: a
+        difference that leaked into the rows would fail here too and would be
+        proving the row arm, not this one.
+        """
+        local, served = shuffled_pair
+        (served / ORDER_SCOPE / "duct-broken.md").write_text("no front matter here\n")
+        _stamp(served, SHUFFLED_ORDER)
+
+        # 🔴 REACHABILITY, ASSERTED BEFORE THE COMPARATOR RUNS. If the loader
+        # ever INDEXED that file, this would become a set-difference test
+        # wearing a frame-difference name.
+        assert sorted(_index_refs(local)) == sorted(_index_refs(served)), (
+            "the unindexable file changed the entry SET, so this is a set "
+            "test, not the frame-only case it claims to be"
+        )
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, (
+            f"a pod holding an unreadable entry file compared as identical:\n"
+            f"{r.stdout}"
+        )
+        assert f"FAIL scope={ORDER_SCOPE} scope-level render differs" in r.stdout
+        frame = re.search(r"frame-lines=(\d+)", r.stdout)
+        rows = re.search(r"sorted-row-lines=(\d+)", r.stdout)
+        assert frame and rows, f"the FAIL line printed no arm counts:\n{r.stdout}"
+        assert int(frame.group(1)) > 0, (
+            f"frame-lines=0 while the MALFORMED block and the index head "
+            f"genuinely differ — the frame comparison is wired to nothing:\n"
+            f"{r.stdout}"
+        )
+        assert int(rows.group(1)) == 0, (
+            f"sorted-row-lines={rows.group(1)} — the divergence reached the "
+            f"ROWS, so this test is not the frame-only isolation it claims and "
+            f"proves nothing about the frame arm:\n{r.stdout}"
+        )
+
     def test_a_PAGINATED_index_is_REFUSED_rather_than_partially_compared(
         self, tmp_path: Path, token_file: Path
     ):
@@ -4291,10 +4649,19 @@ class TestByteIdentityVerifier:
         page 1 would be a partial check reported as a clean one, which is the
         silent-zero shape this whole file refuses.
 
-        It refuses instead, and the refusal names the scope. No scope in the
-        real store is near the cap today (largest measured: 50 entries), so this
-        is the unobserved case made reachable rather than a reproduction of one
-        that happened.
+        It refuses instead, and the refusal names the scope. This is the
+        unobserved case made reachable rather than a reproduction of one that
+        happened — but the headroom is finite and shrinking.
+
+        🔴 THE HEADROOM COMES FROM THE BINDING SIDE, WHICH IS THE POD. The
+        refusal greps BOTH renders, so the larger store is the one that trips
+        it. This docstring used to say "51 entries of headroom" from the LOCAL
+        count — the non-binding side, and wrong in the unsafe direction.
+        Measured on both sides 2026-09-02 over the live store ingress,
+        `LISTING_PAGE_SIZE` = 100: `datapacket-talos` indexes 49 locally and
+        **51 on the pod**, so the headroom is 100 - 51 = **49 entries**, in an
+        append-mostly store pruned by hand. When it crosses, this refusal fails
+        the cutover's acceptance gate with the store unfrozen.
         """
         root = tmp_path / "big"
         (root / ORDER_SCOPE).mkdir(parents=True)
@@ -4315,6 +4682,590 @@ class TestByteIdentityVerifier:
         assert f"FAIL scope={ORDER_SCOPE} index is PAGINATED" in r.stdout
         assert "Nothing about this scope was verified." in r.stdout
         assert "verify: scopes=1 pass=0 fail=1 entries-compared=0" in r.stdout
+
+    def test_a_scope_of_EXACTLY_LISTING_PAGE_SIZE_is_COMPARED_not_refused(
+        self, tmp_path: Path, token_file: Path
+    ):
+        """🔴 THE OTHER SIDE OF THE SAME BOUNDARY.
+
+        The refusal above is measured at `LISTING_PAGE_SIZE + 1` only, and one
+        point does not locate a boundary: an off-by-one that refused at exactly
+        the cap would pass that test and quietly stop verifying the largest
+        scope that is still fully comparable. `claude/RULES.md` — measure at
+        two points, and name them.
+
+        So this is the cap EXACTLY. The index fits one page, nothing is
+        mtime-derived about its membership, and every body must be compared:
+        `entries-compared` equal to the cap is the load-bearing assertion, not
+        the exit code — a run that refused and a run that compared nothing both
+        differ from this.
+        """
+        n = api.rc.LISTING_PAGE_SIZE
+        root = tmp_path / "at-the-cap"
+        (root / ORDER_SCOPE).mkdir(parents=True)
+        for i in range(n):
+            ref = f"run-{i:04d}"
+            (root / ORDER_SCOPE / f"{ref}.md").write_text(
+                _entry(ref, ORDER_SCOPE, nuance=f"- 2026-02-11: {ref}.")
+            )
+        with running(root) as (base, _):
+            r = run_verify(
+                "--store", str(root), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "index is PAGINATED" not in r.stdout, (
+            f"a scope of exactly {n} entries — one page, nothing past it — was "
+            f"refused as paginated:\n{r.stdout}"
+        )
+        assert f"verify: scopes=1 pass=1 fail=0 entries-compared={n}" in r.stdout, (
+            f"the per-entry arm did not compare all {n} bodies:\n{r.stdout}"
+        )
+
+    # ------------------------------------------------------------------
+    # 🔴 THE AMBIGUOUS-REF FALSE GREEN, AND ITS REACHABILITY CONTROL.
+    # ------------------------------------------------------------------
+
+    def test_a_ONE_CHARACTER_divergence_BEHIND_an_AMBIGUOUS_REF_is_NOT_reported_as_PASS(
+        self, ambiguous_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE REGRESSION. This is the run that printed a FALSE GREEN.
+
+        The two stores are identical except for ONE CHARACTER inside
+        `alpha.md`'s nuance bullet — the same divergence
+        `test_a_CONTENT_difference_UNDER_a_SHUFFLED_order_is_STILL_caught`
+        catches — and EVERY arm of the comparator is structurally blind to it:
+
+          * the SET arm sees the same three refs on both sides;
+          * the index ROW for `alpha` carries the bullet COUNT, not its text,
+            so it is unchanged;
+          * the FRAME is unchanged;
+          * and the per-entry arm's `--ref alpha` resolves to NEITHER
+            `alpha.md` nor `alpha.process.md`, so both sides render a
+            byte-identical `AMBIGUOUS REF` notice — with exit 0, because
+            `_exit_for` maps `ref-ambiguous` outside `UNREADABLE_STATUSES`.
+
+        Before this guard the run printed `PASS scope=gadget-rack entries=3 …
+        entries-compared=3` and exited 0. `entries=3` ACTIVELY ASSERTED that
+        three bodies were compared when only two had been, so the count was not
+        merely silent about the gap — it denied it.
+
+        ⚠ WHAT THIS TEST PROVES IS THE REFUSAL, NOT DETECTION. The comparator
+        still cannot see the changed character; there is no route serving raw
+        entry bytes and no way to address that entry. It now declines to
+        certify the scope instead of certifying it wrongly, which is the same
+        answer the pagination arm gives.
+        """
+        local, served = ambiguous_pair
+        path = served / AMBIG_SCOPE / "alpha.md"
+        mutated = path.read_text().replace("seats on a shim", "seats on a shin")
+        assert mutated != path.read_text(), "the mutation did not apply"
+        path.write_text(mutated)
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, (
+            f"a one-character divergence hidden behind an ambiguous ref was "
+            f"reported as a PASS:\n{r.stdout}\n{r.stderr}"
+        )
+        assert f"FAIL scope={AMBIG_SCOPE} ref=alpha rendered NO ENTRY BODY" in r.stdout, (
+            f"the refusal did not name the scope, the ref and the shape:\n{r.stdout}"
+        )
+        # 🔴 THE STATUS IS NAMED, ON BOTH SIDES. A refusal that said only "not
+        # recalled" would leave the reader unable to tell an ambiguous ref from
+        # a lagging pod, which are different remedies.
+        assert "status local=ref-ambiguous pod=ref-ambiguous" in r.stdout, (
+            f"the refusal did not name the status of both sides:\n{r.stdout}"
+        )
+        assert "verify: scopes=1 pass=0 fail=1 entries-compared=0" in r.stdout, (
+            f"a refused scope still contributed to entries-compared:\n{r.stdout}"
+        )
+        # 🔴 AND NO PASS LINE SURVIVED. The refusal breaks out of the per-entry
+        # loop, so a mutant that reported the failure and then printed the PASS
+        # anyway is red here rather than green on the returncode alone.
+        assert not _evidence_rows(r.stdout), (
+            f"a refused scope printed an accounting row:\n{r.stdout}"
+        )
+
+    def test_an_AMBIGUOUS_REF_alone_is_REFUSED_even_when_the_stores_are_IDENTICAL(
+        self, ambiguous_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE SAME SCOPE WITH NOTHING WRONG — AND STILL REFUSED.
+
+        This is the deliberate behaviour change, stated as a test rather than
+        as a comment. The two stores here are byte-identical, so the old
+        comparator's PASS was *correct about identity* and false about
+        COVERAGE: it counted `entries=3` for a scope in which one entry had not
+        been compared by anything, and no reader could tell.
+
+        A ref that resolves to no single entry is not addressable, so its bytes
+        cannot be compared by any arm — the honest verdict is that the scope
+        was not verified, exactly as for a paginated index. It is not a
+        permanently-red gate: no scope in the live store carries a
+        `<slug>.<kind>.md` pair today, and the remedy when one does is a store
+        fix (`prune-index` exists for `ref-ambiguous`), not a weaker check.
+
+        `beta` is in the fixture so this FAIL is attributable: a comparator
+        that refused the scope for some unrelated reason would fail here too,
+        which is why the assertion names the ref.
+        """
+        local, served = ambiguous_pair
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, (
+            f"an unverifiable entry was certified as compared:\n{r.stdout}"
+        )
+        assert f"FAIL scope={AMBIG_SCOPE} ref=alpha rendered NO ENTRY BODY" in r.stdout
+        assert "verify: scopes=1 pass=0 fail=1 entries-compared=0" in r.stdout
+
+    def test_an_UNAMBIGUOUS_scope_of_the_SAME_SHAPE_still_PASSES(
+        self, tmp_path: Path, token_file: Path
+    ):
+        """🔴 THE POSITIVE CONTROL FOR THE TWO ABOVE.
+
+        A guard that refused every scope would satisfy both tests above and
+        make the whole comparator useless. This is the same fixture with the
+        kind-qualified twin removed, so all three refs resolve: it must PASS,
+        and it must compare all THREE bodies.
+
+        The `alpha.process` entry is what makes `alpha` ambiguous; dropping it
+        leaves `alpha`, `gamma` and `beta` — three ordinary entries whose
+        `--ref` renders all report `status=recalled`.
+        """
+        root = tmp_path / "unambiguous"
+        _write_ambiguous_scope(root)
+        (root / AMBIG_SCOPE / "alpha.process.md").unlink()
+        (root / AMBIG_SCOPE / "gamma.md").write_text(
+            _entry("gamma", AMBIG_SCOPE, nuance="- 2026-02-11: gamma runs on a rota.")
+        )
+        assert sorted(_index_refs(root, AMBIG_SCOPE)) == ["alpha", "beta", "gamma"], (
+            "the control fixture is not the three-unambiguous-entry scope it claims"
+        )
+
+        with running(root) as (base, _):
+            r = run_verify(
+                "--store", str(root), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: scopes=1 pass=1 fail=0 entries-compared=3" in r.stdout
+        rows = _evidence_rows(r.stdout)
+        assert len(rows) == 1 and rows[0]["entries"] == 3, (
+            f"the per-entry arm did not compare all three bodies: {rows}"
+        )
+
+    # ------------------------------------------------------------------
+    # 🔴 THE COVERAGE DISCLOSURE — the sweep is ONE-DIRECTIONAL.
+    # ------------------------------------------------------------------
+
+    def test_the_VERDICT_discloses_that_scopes_came_from_the_LOCAL_store(
+        self, store: Path, token_file: Path
+    ):
+        """🔴 `verify: scopes=16 pass=16 fail=0` READS AS COMPLETE COVERAGE.
+
+        It is a true sentence that an operator reads as "the two stores agree",
+        and it is not that: scopes are enumerated from the LOCAL store, so a
+        scope the pod holds and this host does not is never requested, never
+        compared and never counted. No arm can see one — the set arm compares
+        entries WITHIN a shared scope. Measured 2026-09-02: local 16 scopes /
+        141 entries, pod 23 / 189, so 7 pod-only scopes holding 48 entries —
+        25% of the served store — are outside every run's reach.
+
+        The API has no scope-enumeration route by design, so this cannot be
+        fixed by looking harder; the remedy is that the verdict says so. It has
+        to be ON the verdict rather than in a comment 200 lines away, because
+        the verdict is the line that gets pasted into a handoff.
+
+        Same rule the script already enforces one notch down, where a
+        zero-scope run exits 4 instead of passing trivially.
+        """
+        with running(store) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: COVERAGE —" in r.stdout, (
+            f"the verdict carries no coverage disclosure:\n{r.stdout}"
+        )
+        assert "scopes enumerated from the LOCAL store" in r.stdout, r.stdout
+        assert "ONE-DIRECTIONAL" in r.stdout, r.stdout
+        assert "NOT a claim that the two stores agree in full." in r.stdout, r.stdout
+
+    def test_the_disclosure_says_NARROWED_when_scopes_were_named(
+        self, store: Path, token_file: Path
+    ):
+        """🔴 THE TWO CASES ARE DIFFERENT AND MUST READ DIFFERENTLY.
+
+        `--scope X` is the operator deliberately narrowing the run; the default
+        is the script enumerating what happens to be on this disk. Printing the
+        same sentence for both would tell an operator who asked for one scope
+        that the LOCAL STORE was their limit, which is not what happened.
+
+        Without this pair, the assertion above is satisfied by hardcoding one
+        string — the guard would read as coverage while distinguishing nothing.
+        """
+        with running(store) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base,
+                "--token-file", str(token_file), "--scope", SCOPE,
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: scopes=1 " in r.stdout, r.stdout
+        assert "the 1 scope(s) named with --scope" in r.stdout, r.stdout
+        assert "scopes enumerated from the LOCAL store" not in r.stdout, r.stdout
+        # The one-directional warning stands either way: a named scope can
+        # still be one of several the pod holds.
+        assert "ONE-DIRECTIONAL" in r.stdout, r.stdout
+
+    def test_the_disclosure_survives_a_FAILING_run(
+        self, store: Path, tmp_path: Path, token_file: Path
+    ):
+        """A FAIL is exactly when someone reads the output closely, so the
+        coverage caveat must be there too — it sits after the loop, and a
+        `continue` that skipped it would drop it on the runs that matter."""
+        served = tmp_path / "served"
+        subprocess.run(
+            ["cp", "-a", str(store), str(served)], check=True, capture_output=True
+        )
+        path = served / SCOPE / "thing-alpha.md"
+        path.write_text(path.read_text().replace("40s", "41s"))
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1
+        assert "verify: COVERAGE —" in r.stdout, (
+            f"a failing run printed no coverage disclosure:\n{r.stdout}"
+        )
+
+    def test_the_HEADER_no_longer_claims_EVERY_scope(self):
+        """🔴 `--help` PRINTS THE HEADER, so its first sentence is the claim a
+        reader arrives at — and it said the check covers "EVERY scope".
+
+        That is the same overclaim as the verdict line, one level up, and it is
+        the one a new operator meets first. Pinned as a pair: the false phrasing
+        must be gone AND the true one present, because deleting the sentence
+        entirely would also satisfy a one-sided check.
+        """
+        header = VERIFY_PATH.read_text()[:4000]
+        assert "the pod's store is the local CLI's store, for\n# EVERY scope" not in header, (
+            "the header still claims coverage of EVERY scope"
+        )
+        assert "every scope THIS HOST HOLDS" in header, (
+            "the header does not say which side bounds the sweep"
+        )
+
+    # ------------------------------------------------------------------
+    # 🔴 THE PROSE CLAIM ITSELF, PINNED.
+    # ------------------------------------------------------------------
+
+    def test_the_MEASURED_EVIDENCE_block_is_pinned_as_a_WHOLE_NORMALISED_STRING(self):
+        """The verifier's account of its own motivating run, word for word.
+
+        See `_EXPECTED_EVIDENCE_BLOCK` for why this is a whole-string pin and
+        not a set of keyword assertions: both of the errors it replaced were
+        fluent sentences that any plausible substring check would have passed.
+        """
+        lines = VERIFY_PATH.read_text().splitlines()
+        starts = [n for n, l in enumerate(lines) if l.startswith(_EVIDENCE_BLOCK_START)]
+        ends = [n for n, l in enumerate(lines) if l.startswith(_EVIDENCE_BLOCK_END)]
+        # 🔴 EXACTLY ONE OF EACH. A missing anchor makes this test vacuous by
+        # construction; a duplicated one makes the slice below arbitrary.
+        assert len(starts) == 1, (
+            f"expected exactly one measured-evidence block opener in "
+            f"{VERIFY_PATH.name}, found {len(starts)}"
+        )
+        assert len(ends) == 1, (
+            f"expected exactly one closing anchor in {VERIFY_PATH.name}, "
+            f"found {len(ends)}"
+        )
+        assert starts[0] < ends[0], "the closing anchor precedes the opener"
+
+        body = [
+            line[1:].strip() if line.startswith("#") else line
+            for line in lines[starts[0]:ends[0]]
+        ]
+        assert _normalise_prose("\n".join(body)) == _normalise_prose(
+            _EXPECTED_EVIDENCE_BLOCK
+        ), (
+            "the measured-evidence block in verify-byte-identity.sh no longer "
+            "matches the pinned text. If you REWORDED it, update "
+            "`_EXPECTED_EVIDENCE_BLOCK` in the same commit. If a NUMBER moved, "
+            "RE-RUN THE MEASUREMENT — that block was wrong once already, and "
+            "editing the literal to match a changed comment is how it stays "
+            "wrong.\n\n"
+            f"in the script:\n{_normalise_prose(chr(10).join(body))}\n\n"
+            f"pinned here:\n{_normalise_prose(_EXPECTED_EVIDENCE_BLOCK)}"
+        )
+
+    def test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary(self):
+        """🔴 EVERY TRACKED `_SCAN_SUFFIXES` FILE, DERIVED — not a hand-written
+        site list. (952 of 1261 tracked files; see `_SCAN_SUFFIXES` for what the
+        other 309 are and why the gap is currently empty.)
+
+        The pin above holds ONE block, word for word. This is deliberately a
+        different KIND of check and neither subsumes the other: the pin fails
+        on any reword of that block, this fails when a specific retracted
+        sentence is ASSERTED anywhere in the repo. A correct rewrite of the
+        block passes this and fails the pin; a wrong claim newly added to a
+        handoff doc passes the pin and fails this.
+
+        ⚠ IT IS STILL A SPELLED GUARD, and that limit is real: a REWORDED
+        version of the same false claim walks straight past it. What it
+        prevents is one of these literal sentences being copied back — and the
+        place it would be copied back FROM is #1222's merged commit subject,
+        which permanently carries it.
+
+        What it no longer does is assert a COUNT of sites. That claim was wrong
+        once (see the block above `_SCAN_EXEMPT`), in the one way that mattered
+        — it missed the doc `/resume` opens. The enumeration is now derived, so
+        a site nobody remembered is covered by construction.
+
+        A retraction has to QUOTE the wrong sentence, so a bare occurrence is
+        not the finding — an occurrence with no retraction marker in the
+        preceding window is. `test_the_RETRACTION_MARKERS_do_not_exempt_a_bare_
+        assertion` is the negative control for that exemption, and
+        `test_the_SCAN_actually_reaches_the_repo` is the positive control for
+        the enumeration.
+        """
+        found = _unmarked_retractions(_tracked_text_files())
+        assert not found, (
+            "the retracted two-entry boundary is ASSERTED, unmarked, at:\n  "
+            + "\n  ".join(found)
+        )
+
+    def test_the_SCAN_actually_reaches_the_repo(self):
+        """🔴 POSITIVE CONTROL FOR THE ENUMERATION — a zero over nothing.
+
+        `_tracked_text_files()` returning an empty list would make the scan
+        above a permanent, meaningless green: `assert not []` passes whether
+        the repo is clean or was never read. `claude/RULES.md` — report the
+        pair, never the zero alone.
+
+        So: the enumeration is non-trivial, it REACHES the files the claim was
+        actually copied to (including the handoff doc a fixed list missed), and
+        it excludes exactly the one file that would match itself.
+        """
+        files = _tracked_text_files()
+        assert len(files) > 500, (
+            f"the scan enumerated only {len(files)} tracked text files — it is "
+            f"not reaching the repo, so its zero means nothing"
+        )
+        for must in (
+            "scripts/subsystem-store-api/verify-byte-identity.sh",
+            "scripts/subsystem-store-api/README.md",
+            "scripts/cairn-cutover.py",
+            # 🔴 THE SITE THE HAND-WRITTEN LEDGER MISSED.
+            "claudedocs/handoff-cairn-phase3.md",
+        ):
+            assert must in files, f"the scan does not reach {must}"
+        assert "scripts/tests/test_subsystem_store_api.py" not in files, (
+            "this file is in the scan set; its needles will match themselves"
+        )
+
+    def test_the_scan_ENUMERATES_in_a_tree_with_NO_git_dir(self, tmp_path: Path):
+        """🔴 THE TIER THE MERGE IS GATED ON HAS NO `.git`, AND THE FIRST CUT
+        OF THIS SCAN RAISED THERE.
+
+        `nix build .#checks.x86_64-linux.{pytests,nodetests}` builds from a
+        `cp -r ${./.}` store copy with no `.git` dir. A `git ls-files` with
+        `check=True` raises over that tree, so the sandbox leg would have
+        ERRORED while the dev-host leg — a real checkout — stayed green: one
+        tier structurally unable to see what the other reports, pointed at the
+        tier that actually blocks a merge.
+
+        `public_ip_scan.repo_files` falls back to a filesystem walk, so this
+        drives the fallback DIRECTLY rather than trusting that it exists.
+        """
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "doc.md").write_text(
+            "the run failed for every scope with more than two entries\n"
+        )
+        (tmp_path / "sub" / "binary.bin").write_bytes(b"\x00\x01")
+        assert not (tmp_path / ".git").exists(), "the fixture must have no .git"
+
+        files = public_ip_scan.repo_files(tmp_path)
+        assert any(p.name == "doc.md" for p in files), (
+            f"the walk fallback enumerated nothing usable: {files}"
+        )
+        # And the scanner runs over it and REPORTS — the positive control, so
+        # this is not "it did not crash" dressed up as coverage.
+        hits = _unmarked_retractions(("sub/doc.md",), root=tmp_path)
+        assert len(hits) == 1, (
+            f"the scan produced no finding in a no-git tree: {hits}"
+        )
+
+    def test_the_RETRACTION_MARKERS_do_not_exempt_a_bare_assertion(
+        self, tmp_path: Path
+    ):
+        """🔴 THE NEGATIVE CONTROL FOR THE SCANNER ABOVE.
+
+        The scanner exempts an occurrence with a retraction marker NEARBY —
+        within `_MARKER_WINDOW` characters, on either side — and an exemption
+        that swallowed the assertion it is meant to catch would make the whole
+        check a reassuring zero. So: feed it a file that ASSERTS the boundary
+        with no marker (must be reported) and one that RETRACTS it (must not
+        be), and read both answers — the non-zero is what proves the scanner
+        can observe anything at all.
+
+        ⚠ THIS DOCSTRING USED TO DESCRIBE A SAME-LINE RULE, which the scan
+        stopped using when it went whole-file. A stale description of a guard's
+        own rule is why nobody re-examined the window when it was widened to
+        260 — see `test_the_marker_window_is_TIGHT`. Both markers below are
+        deliberately close to their quotes, so this test says nothing about the
+        WIDTH; that is the other test's job.
+        """
+        asserted = tmp_path / "asserted.md"
+        asserted.write_text(
+            "the run failed for every scope with more than two entries\n"
+        )
+        retracted = tmp_path / "retracted.md"
+        retracted.write_text(
+            "this used to say it failed for every scope with more than two "
+            "entries, which was wrong\n"
+        )
+        hits = _unmarked_retractions(("asserted.md",), root=tmp_path)
+        assert len(hits) == 1, (
+            f"the scanner did not report a bare assertion — a zero from it "
+            f"would mean nothing: {hits}"
+        )
+        assert _unmarked_retractions(("retracted.md",), root=tmp_path) == [], (
+            "the scanner reported a line that explicitly retracts the claim, "
+            "which would make every correction permanently red"
+        )
+
+    def test_the_scanner_sees_through_EMPHASIS_and_LINE_WRAPS(self, tmp_path: Path):
+        """🔴 THE TWO EVASIONS THAT WERE DEMONSTRATED LIVE, AS CONTROLS.
+
+        The first version of this scanner matched raw substrings line by line,
+        and both of these walked past it — not hypothetically:
+
+          * `handoff-cairn-phase3.md` wrote `had **2** entries`, so markdown
+            emphasis alone defeated the match;
+          * `README.md` passed only because the phrase straddled a line wrap,
+            which is to say for a reason nobody chose and any reflow would undo.
+
+        Neither is a clever attack; both are ordinary prose formatting. A guard
+        that a `git commit` of reflowed text can silently disarm is not a guard.
+        """
+        emphasised = tmp_path / "emphasised.md"
+        emphasised.write_text(
+            "the run showed every **passing** scope had **2** entries\n"
+        )
+        assert _unmarked_retractions(("emphasised.md",), root=tmp_path), (
+            "markdown emphasis walked past the scanner"
+        )
+
+        wrapped = tmp_path / "wrapped.md"
+        wrapped.write_text(
+            "the comparator could not pass for any scope\nwith more than two\nentries\n"
+        )
+        assert _unmarked_retractions(("wrapped.md",), root=tmp_path), (
+            "a line wrap walked past the scanner"
+        )
+
+        # 🔴 AND THE NORMALISATION DID NOT BECOME A SLEDGEHAMMER. Collapsing
+        # everything would make unrelated prose match; a sentence that merely
+        # shares words must still not be reported.
+        innocent = tmp_path / "innocent.md"
+        innocent.write_text(
+            "every scope with more than two READMEs is unusual, and entries "
+            "are indexed per scope\n"
+        )
+        assert _unmarked_retractions(("innocent.md",), root=tmp_path) == [], (
+            "the normalisation is over-broad and matches unrelated prose"
+        )
+
+    def test_the_scanner_sees_through_WRAPPED_COMMENT_PREFIXES(self, tmp_path: Path):
+        """🔴 THE NORMAL CASE, NOT AN EDGE ONE — and the first normalisation
+        missed it entirely.
+
+        Collapsing whitespace across a wrapped `#` comment leaves the `#` inside
+        the sentence, so the needle never matches. Every prose comment in
+        `verify-byte-identity.sh` and `cairn-cutover.py` is wrapped exactly that
+        way, and the live occurrence at `verify-byte-identity.sh:38` is 76 chars
+        in a file whose comments run to 82 — one word of editing and the guard
+        would have gone silently green.
+
+        All three flavours, because all three were demonstrated to walk: a shell
+        `#` comment, a Python `#` comment, and a `> ` blockquote. The one-line
+        forms were already caught, so the wrap is the whole variable.
+        """
+        one_line = tmp_path / "oneline.sh"
+        one_line.write_text(
+            "# the comparator could not pass for any scope with more than two entries\n"
+        )
+        assert _unmarked_retractions(("oneline.sh",), root=tmp_path), (
+            "the one-line comment case regressed — the wrapped cases below "
+            "prove nothing if this one is not caught"
+        )
+
+        for name, body in (
+            ("wrapped.sh",
+             "# the comparator could not pass for any scope\n"
+             "# with more than two entries\n"),
+            ("wrapped.py",
+             "    # the comparator could not pass for any scope\n"
+             "    # with more than two entries\n"),
+            ("wrapped.md",
+             "> the comparator could not pass for any scope\n"
+             "> with more than two entries\n"),
+            ("slashes.js",
+             "// the comparator could not pass for any scope\n"
+             "// with more than two entries\n"),
+        ):
+            (tmp_path / name).write_text(body)
+            assert _unmarked_retractions((name,), root=tmp_path), (
+                f"a wrapped comment prefix walked past the scanner in {name}"
+            )
+
+    def test_the_marker_window_is_TIGHT(self, tmp_path: Path):
+        """🔴 NOTHING TESTED THE WINDOW, SO IT COULD TAKE ANY VALUE.
+
+        The existing marker test puts `"used to"` on the same line as its
+        quote, so it passes at a window of 20 or 2000 — the width was
+        unconstrained, and it had already been widened from same-line to 260
+        without anyone noticing that `"said"` then reached across whole
+        paragraphs.
+
+        Measured: an unrelated *"the operator said the rollout looked clean"*
+        155 characters earlier silently exempted a bare re-assertion. This pins
+        the width by exercising both sides of it.
+        """
+        far = tmp_path / "far.md"
+        far.write_text(
+            "the operator said the rollout looked clean. "
+            + "padding words to push the marker out of range. " * 3
+            + "the comparator could not pass for any scope with more than two entries\n"
+        )
+        assert _unmarked_retractions(("far.md",), root=tmp_path), (
+            "a distant, unrelated `said` exempted a bare re-assertion — the "
+            "marker window is too wide to mean anything"
+        )
+
+        near = tmp_path / "near.md"
+        near.write_text(
+            "this used to say the comparator could not pass for any scope "
+            "with more than two entries\n"
+        )
+        assert _unmarked_retractions(("near.md",), root=tmp_path) == [], (
+            "a genuine retraction was reported — the window is now too tight, "
+            "which would make every correction permanently red"
+        )
+
+        # 🔴 THE OTHER AXIS. Widening from same-line to a PRECEDING window also
+        # went narrower: a marker placed AFTER the quote used to be exempt and
+        # would now be reported. Both directions, same width.
+        after = tmp_path / "after.md"
+        after.write_text(
+            "the comparator could not pass for any scope with more than two "
+            "entries — RETRACTED, see the corrected boundary below\n"
+        )
+        assert _unmarked_retractions(("after.md",), root=tmp_path) == [], (
+            "a marker placed AFTER the quote was reported as an assertion"
+        )
 
     def test_every_permitted_difference_is_ACCOUNTED_FOR_not_merely_small(
         self, store: Path, tmp_path: Path, token_file: Path
@@ -4866,9 +5817,19 @@ class TestPhaseOneScope:
     # `len(parts) == arity` mutated to `>=` once survived 318 tests on the read
     # side, and the tail is the only thing that stops `POST entry/a/b/anything`
     # from dispatching as an append.
+    #
+    # ⚠ `PUT entry` MOVED FROM `_replace_entry` TO `_put_entry` (2026-09-03) and
+    # the route set did NOT grow. That is the point of the rename: PUT now
+    # carries TWO operations — replace behind `If-Match`, CREATE behind
+    # `If-None-Match: *` — and `_put_entry` is the arbitration between them.
+    # Adding a second ROW for the create would have meant two URLs for one noun;
+    # renaming the handler is what forces this ledger to be re-read anyway, which
+    # is the property the guard is for. The two halves are still separately
+    # bound methods (`_replace_entry`, `_create_entry`), and
+    # `TestPUTCreatesANewEntry` below is what proves the arbitration.
     WRITE_ROUTES: "dict[tuple[str, str], tuple[str, int, tuple[str, ...]]]" = {
         ("POST", "entry"): ("_append_bullet", 4, ("bullets",)),
-        ("PUT", "entry"): ("_replace_entry", 3, ()),
+        ("PUT", "entry"): ("_put_entry", 3, ()),
     }
 
     def test_the_write_route_ledger_is_the_whole_write_route_set(self):
@@ -9497,22 +10458,30 @@ def _build_store(root: Path, scopes: "dict[str, str]", *, malformed: str = "") -
 
 
 @pytest.fixture
-def scoped_store(tmp_path: Path) -> Path:
+def scoped_store(tmp_path: Path) -> Iterator[Path]:
     """Three populated scopes, and the malformed row lives in a DENIED one.
 
     The malformed placement is the point: `malformed_elsewhere` is rendered on
     EVERY status, so a reject sitting in a scope the caller cannot name is the
     channel that leaks without any miss ever happening.
+
+    🔴 SITED off the contended disk like `store` above, and it matters MORE than
+    that one: this fixture feeds ~110 `running(scoped_store, …)` sites, i.e. most
+    of the in-request-fsync population in this file, including the whole
+    concurrent-append and If-Match/revision blocks. It was missed when #1211 sited
+    `store` alone — the same "fixed one call site of N" error that PR was written
+    to correct, repeated one level down inside the file it had just fixed.
     """
-    return _build_store(
-        tmp_path / "store",
-        {
-            ALLOW_SCOPE: KELP_NUANCE,
-            DENY_SCOPE: QUARTZ_NUANCE,
-            THIRD_SCOPE: LANTERN_NUANCE,
-        },
-        malformed=DENY_SCOPE,
-    )
+    with store_siting.store_root(tmp_path) as root:
+        yield _build_store(
+            root,
+            {
+                ALLOW_SCOPE: KELP_NUANCE,
+                DENY_SCOPE: QUARTZ_NUANCE,
+                THIRD_SCOPE: LANTERN_NUANCE,
+            },
+            malformed=DENY_SCOPE,
+        )
 
 
 class TestScopedTokenRowGuards:
@@ -12846,6 +13815,409 @@ class TestIfMatchIsRequiredAndChecked:
             f"harness cannot see a lost update: {codes}"
         )
         assert path.read_bytes() == first_data
+
+
+# =============================================================================
+# CREATE — `PUT … If-None-Match: *`. New fixtures, pairwise distinct from every
+# constant above so an assertion cannot pass by agreeing with a neighbour.
+# =============================================================================
+
+# A slug that exists in NO scope of `scoped_store`.
+NEW_REF = "kelp-harvester"
+NEW_NUANCE = "- 2026-05-11: the rake arm jams when the swell tops two metres."
+# A scope the token MAY write and the store has no directory for. It is what
+# makes "a scope's first entry" reachable at all.
+FRESH_SCOPE = "tidal-flat"
+FRESH_REF = "sluice-gate"
+FRESH_NUANCE = "- 2026-05-12: the penstock seal weeps below four degrees."
+# 🔴 A ref that is a legal path component and normalizes to NOTHING. It is the
+# only input that reaches the empty-slug guard: every earlier check accepts it.
+EMPTY_SLUG_REF = "___"
+ZACH_PLUS = _scoped_record(ZACH_TOKEN, "zach", ALLOW_SCOPE, FRESH_SCOPE)
+
+
+def create_put(base: str, scope: str, ref: str, data: bytes, *, token=ZACH_TOKEN,
+               headers: "dict[str, str] | None" = None):
+    """One `PUT /entry/<scope>/<ref>` with `If-None-Match: *` unless overridden."""
+    return fetch(
+        entry_url(base, scope, ref), token=token, method="PUT", data=data,
+        extra_headers={"If-None-Match": "*"} if headers is None else headers,
+    )
+
+
+class TestPUTCreatesANewEntry:
+    """🔴 THE STORE HAD NO CREATE VERB, AND THE PROTOCOL ROUTED AROUND IT.
+
+    `POST .../bullets` and `PUT` with `If-Match` both resolve an EXISTING ref, so
+    a brand-new entry could only be made by `seed.sh` or by a host writing into
+    its own local tree — and once reads moved to the pod cache, a locally-created
+    entry was invisible to every reader on every host. Measured 2026-09-02: five
+    whole entries, one machine.
+
+    Every assertion here is on the BYTES on disk and on the exact wire tokens, in
+    the shape the sibling `TestIfMatchIsRequiredAndChecked` uses, because a
+    status code alone cannot tell a create that landed from one that did not.
+    """
+
+    def _body(self, ref: str, scope: str, nuance: str) -> bytes:
+        return _entry(ref, scope, nuance=nuance).encode()
+
+    def _path(self, root: Path, scope: str, ref: str) -> Path:
+        return root / scope / f"{ref}.md"
+
+    def test_a_NEW_ref_is_CREATED_and_the_bytes_land(self, scoped_store: Path):
+        """The positive control, first: every refusal below is only evidence if
+        the same request against an absent ref succeeds."""
+        target = self._path(scoped_store, ALLOW_SCOPE, NEW_REF)
+        assert not target.exists(), "the fixture already holds the ref under test"
+        data = self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = create_put(base, ALLOW_SCOPE, NEW_REF, data)
+            lines = await_audit(audit, 1)
+        assert code == 201, (code, headers, body)
+        assert headers["X-Store-Status"] == "created"
+        assert body == b"created\n"
+        assert target.read_bytes() == data
+        assert headers["ETag"] == f'"{api.entry_revision(data)}"'
+        assert any("result=201" in ln and "status=created" in ln for ln in lines), lines
+
+    def test_the_created_entry_is_SERVED_by_recall(self, scoped_store: Path):
+        """🔴 THE POINT OF THE WHOLE CHANGE, and it is a different claim from
+        "the file is on disk": the defect being fixed is content that exists and
+        reaches no reader. So the create is followed by a READ through the same
+        server, and the read must show it."""
+        data = self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            before = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )[2]
+            assert NEW_REF.encode() not in before, "the fixture already serves it"
+            assert create_put(base, ALLOW_SCOPE, NEW_REF, data)[0] == 201
+            after = fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN)[2]
+        assert NEW_REF.encode() in after
+
+    def test_an_EXISTING_ref_is_412_already_exists_and_the_bytes_are_UNTOUCHED(
+        self, scoped_store: Path
+    ):
+        """🔴 THE WHOLE REASON THE PRECONDITION IS `If-None-Match` RATHER THAN
+        NOTHING. A create that overwrites is a `PUT` with the guard removed."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        data = self._body(entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, NEW_NUANCE)
+        assert data != before
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = create_put(
+                base, ALLOW_SCOPE, entry_ref(ALLOW_SCOPE), data
+            )
+            lines = await_audit(audit, 1)
+        assert code == 412, (code, body)
+        assert headers["X-Store-Status"] == "already-exists"
+        assert path.read_bytes() == before, "a create OVERWROTE an existing entry"
+        assert any(
+            "result=412" in ln and "status=already-exists" in ln for ln in lines
+        ), lines
+
+    def test_the_already_exists_token_is_NOT_the_If_Match_412_token(
+        self, scoped_store: Path
+    ):
+        """🔴 TWO OUTCOMES, ONE STATUS CODE, OPPOSITE REMEDIES. A stale
+        `If-Match` means "re-sync and re-apply" and a retry is right; an
+        `If-None-Match: *` on an existing entry means "use put/append" and the
+        identical retry loops forever. The code cannot carry that, so the token
+        must — and the two tokens are asserted DIFFERENT here rather than each
+        asserted equal to itself somewhere else."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._body(entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, NEW_NUANCE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            _c1, exists_headers, _b1 = create_put(
+                base, ALLOW_SCOPE, entry_ref(ALLOW_SCOPE), data
+            )
+            _c2, stale_headers, _b2 = fetch(
+                entry_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="PUT",
+                data=data, extra_headers={"If-Match": '"0000000000000000"'},
+            )
+        assert _c1 == _c2 == 412, (_c1, _c2)
+        assert exists_headers["X-Store-Status"] == "already-exists"
+        assert stale_headers["X-Store-Status"] == "precondition-failed"
+        assert exists_headers["X-Store-Status"] != stale_headers["X-Store-Status"]
+        assert path.read_bytes() != data
+
+    def test_a_ref_answered_by_an_ALIAS_is_already_exists_too(self, scoped_store: Path):
+        """🔴 `If-None-Match: *` ASKS ABOUT THE TARGET RESOURCE, and the resource
+        `entry/<scope>/<ref>` names is whatever a READ of that ref returns.
+        Creating `<ref>.md` beside an entry that already answers `<ref>` through
+        `aliases:` would make that ref permanently AMBIGUOUS — the store's own
+        400 — for every later reader. A create that only checked the FILENAME
+        would sail past this."""
+        alias = "weed-cutter"
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        path.write_text(
+            path.read_text().replace(
+                f"scope: {ALLOW_SCOPE}\n",
+                f"scope: {ALLOW_SCOPE}\naliases: [{alias}]\n",
+            )
+        )
+        before = path.read_bytes()
+        data = self._body(alias, ALLOW_SCOPE, NEW_NUANCE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(base, ALLOW_SCOPE, alias, data)
+        assert code == 412, (code, body)
+        assert headers["X-Store-Status"] == "already-exists"
+        assert not (scoped_store / ALLOW_SCOPE / f"{alias}.md").exists()
+        assert path.read_bytes() == before
+
+    def test_a_MALFORMED_file_at_the_name_is_NOT_overwritten(self, scoped_store: Path):
+        """🔴 THE CASE ONLY THE FILESYSTEM CAN SEE. `load_store` collects a
+        malformed entry onto `index.malformed`, so `resolve_ref_tiered` returns
+        None for it — a create that trusted the index alone would decide the name
+        was free and destroy the file. `os.link` is what refuses."""
+        squatter = scoped_store / ALLOW_SCOPE / f"{NEW_REF}.md"
+        squatter.write_text("this file has no front matter and never parsed\n")
+        before = squatter.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(
+                base, ALLOW_SCOPE, NEW_REF,
+                self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE),
+            )
+        assert code == 412, (code, body)
+        assert headers["X-Store-Status"] == "already-exists"
+        assert squatter.read_bytes() == before, "a create destroyed a malformed entry"
+
+    def test_a_writer_that_never_took_the_LOCK_still_cannot_be_clobbered(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """🔴 THE RACE, DRIVEN THROUGH `_WRITE_INTERLEAVE` AT THE ONE POINT IT
+        MATTERS: after the temp file is written, before the name is claimed. The
+        interloper here writes DIRECTLY to disk and takes no `flock` — which is
+        `seed.sh`, an operator's editor, or a second pod. A `path.exists()` check
+        under the lock would have passed and the second write would have won.
+        """
+        target = self._path(scoped_store, ALLOW_SCOPE, NEW_REF)
+        interloper = b"the other writer got there first\n"
+
+        def land_first() -> None:
+            monkeypatch.setattr(api, "_WRITE_INTERLEAVE", lambda: None)
+            target.write_bytes(interloper)
+
+        monkeypatch.setattr(api, "_WRITE_INTERLEAVE", land_first)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(
+                base, ALLOW_SCOPE, NEW_REF,
+                self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE),
+            )
+        monkeypatch.undo()
+        assert code == 412, (code, body)
+        assert headers["X-Store-Status"] == "already-exists"
+        assert target.read_bytes() == interloper, "the create clobbered the winner"
+
+    def test_a_scopes_FIRST_entry_creates_the_directory(self, tmp_path: Path):
+        """🔴 THE GENUINE FIRST-ENTRY CASE. A scope the caller may write that the
+        store has no directory for is how this store gained EVERY scope it has;
+        refusing it would leave the create verb unable to do the one thing the
+        retired local protocol could."""
+        with store_siting.store_root(tmp_path) as root:
+            store = _build_store(root, {ALLOW_SCOPE: KELP_NUANCE})
+            assert not (store / FRESH_SCOPE).exists()
+            data = self._body(FRESH_REF, FRESH_SCOPE, FRESH_NUANCE)
+            with running(store, tokens=(ZACH_PLUS,)) as (base, _):
+                code, headers, body = create_put(base, FRESH_SCOPE, FRESH_REF, data)
+            assert code == 201, (code, body)
+            assert headers["X-Store-Status"] == "created"
+            assert (store / FRESH_SCOPE / f"{FRESH_REF}.md").read_bytes() == data
+
+    def test_a_scope_OUTSIDE_the_allowlist_is_the_SAME_404(self, scoped_store: Path):
+        """🔴 THE ENUMERATION PROPERTY SURVIVES THE NEW VERB. The create path
+        cannot reuse `_resolve_writable` (it has no existing entry to resolve),
+        so this is exactly where a second, chattier "is this scope yours" answer
+        would grow. A refusal distinguishable from an absence is an enumeration
+        API on a write verb just as on a read."""
+        before = sorted(p.name for p in (scoped_store / DENY_SCOPE).iterdir())
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            denied = create_put(
+                base, DENY_SCOPE, NEW_REF, self._body(NEW_REF, DENY_SCOPE, NEW_NUANCE)
+            )
+            absent = create_put(
+                base, "no-such-scope-anywhere", NEW_REF,
+                self._body(NEW_REF, "no-such-scope-anywhere", NEW_NUANCE),
+            )
+        assert denied[0] == absent[0] == 404, (denied[0], absent[0])
+        assert denied[1]["X-Store-Status"] == absent[1]["X-Store-Status"] == "not-found"
+        assert denied[2] == absent[2] == b"not found\n"
+        assert sorted(p.name for p in (scoped_store / DENY_SCOPE).iterdir()) == before
+        assert not (scoped_store / "no-such-scope-anywhere").exists()
+
+    def test_bytes_the_LOADER_would_reject_are_422_and_the_name_stays_FREE(
+        self, scoped_store: Path
+    ):
+        """🔴 VALIDATED THROUGH THE READER'S OWN MAPPING, and validated BEFORE
+        the name is claimed. A create that landed a MALFORMED file would be worse
+        than a replace that did: the ref keeps resolving to nothing while the
+        file occupies the name, so the next create gets a 412 for a file nobody
+        can read. The second half — the ref is still free — is what makes a fixed
+        body retryable."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(
+                base, ALLOW_SCOPE, NEW_REF, b"no front matter, not an entry\n"
+            )
+            assert code == 422, (code, body)
+            assert headers["X-Store-Status"] == "entry-shape"
+            assert not self._path(scoped_store, ALLOW_SCOPE, NEW_REF).exists()
+            good = self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE)
+            assert create_put(base, ALLOW_SCOPE, NEW_REF, good)[0] == 201
+        assert self._path(scoped_store, ALLOW_SCOPE, NEW_REF).read_bytes() == good
+
+    def test_a_body_whose_service_does_not_match_the_ref_is_422(
+        self, scoped_store: Path
+    ):
+        """The filename comes from the REF and never from the body, so a body
+        naming a different `service:` is the loader's own filename/slug
+        disagreement — and an entry no ref could reach is exactly what that check
+        exists to prevent."""
+        data = self._body("some-other-slug", ALLOW_SCOPE, NEW_NUANCE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(base, ALLOW_SCOPE, NEW_REF, data)
+        assert code == 422, (code, body)
+        assert headers["X-Store-Status"] == "entry-shape"
+        assert not self._path(scoped_store, ALLOW_SCOPE, NEW_REF).exists()
+        assert not self._path(scoped_store, ALLOW_SCOPE, "some-other-slug").exists()
+
+    def test_a_ref_that_normalizes_to_NOTHING_is_400(self, scoped_store: Path):
+        """`___` is a legal `SAFE_PATH_COMPONENT` and normalizes away entirely,
+        so it passes every earlier check and reaches the empty-slug guard. It
+        names no entry, and `.md` alone is a dotfile no walker would ever
+        report."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(
+                base, ALLOW_SCOPE, EMPTY_SLUG_REF,
+                self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE),
+            )
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"non-empty slug" in body
+        assert not (scoped_store / ALLOW_SCOPE / ".md").exists()
+
+    def test_no_TEMP_FILE_is_left_behind_by_a_refusal(self, scoped_store: Path):
+        """A `.cairn-*.tmp` is invisible to every walker, so nothing would ever
+        report one and nothing would clean it up."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            create_put(base, ALLOW_SCOPE, NEW_REF, b"not an entry\n")
+            create_put(
+                base, ALLOW_SCOPE, entry_ref(ALLOW_SCOPE),
+                self._body(entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, NEW_NUANCE),
+            )
+            create_put(
+                base, ALLOW_SCOPE, NEW_REF,
+                self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE),
+            )
+        leftovers = sorted(
+            p.name for p in (scoped_store / ALLOW_SCOPE).iterdir()
+            if p.name.startswith(".cairn-")
+        )
+        assert leftovers == [], leftovers
+        assert (scoped_store / ALLOW_SCOPE / f"{NEW_REF}.md").stat().st_nlink == 1
+
+
+class TestThePUTPreconditionLadder:
+    """🔴 ONE ROUTE NOW CARRIES TWO OPERATIONS, SO THE ARBITRATION IS ITS OWN
+    SURFACE. Each case below is reachable by a request every EARLIER case
+    accepts, which is the same ladder discipline `_bullet_request_problem`'s
+    guards are built to — a test that went red because a different clause fired
+    would still be green with the clause it names deleted.
+
+    The `428` case is the one that must not have been widened: adding a create
+    half is exactly how "a PUT with no precondition is refused" quietly becomes
+    "a PUT with no precondition creates".
+    """
+
+    def _data(self, scope: str) -> bytes:
+        return _entry(entry_ref(scope), scope, nuance=f"- 2026-05-13: {BULLET_C}").encode()
+
+    def _put(self, base: str, headers: "dict[str, str]", scope=ALLOW_SCOPE, ref=None):
+        return fetch(
+            entry_url(base, scope, ref), token=ZACH_TOKEN, method="PUT",
+            data=self._data(scope), extra_headers=headers,
+        )
+
+    def test_NEITHER_precondition_is_still_428_and_does_NOT_create(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, {})
+            fresh = self._put(base, {}, ref=NEW_REF)
+        assert code == 428, (code, body)
+        assert headers["X-Store-Status"] == "precondition-required"
+        assert b"If-None-Match: *" in body, (
+            "the 428 must name the create form too, or a caller cannot find it"
+        )
+        assert path.read_bytes() == before
+        assert fresh[0] == 428, fresh
+        assert not (scoped_store / ALLOW_SCOPE / f"{NEW_REF}.md").exists()
+
+    def test_BOTH_preconditions_together_is_400_and_neither_is_chosen(
+        self, scoped_store: Path
+    ):
+        """🔴 A CONTRADICTION IS REFUSED, NOT RESOLVED. `If-Match: <rev>` says it
+        exists and is exactly this; `If-None-Match: *` says it does not exist.
+        Picking one would be guessing which of two mutually exclusive intents the
+        caller meant, on the verb that can destroy content."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        revision = api.entry_revision(before)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(
+                base, {"If-Match": revision, "If-None-Match": "*"}
+            )
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"contradictory" in body
+        assert path.read_bytes() == before, (
+            "a contradictory PUT was resolved in favour of one header"
+        )
+
+    @pytest.mark.parametrize("value", ['"0000000000000000"', 'W/"abc", "def"', ""])
+    def test_an_If_None_Match_that_is_not_STAR_is_400(
+        self, scoped_store: Path, value: str
+    ):
+        """🔴 THE LIST FORM IS REFUSED RATHER THAN IMPLEMENTED. On a PUT,
+        "proceed only if the current representation matches none of these" means
+        "overwrite unless it is one of the revisions I name" — a blind overwrite
+        of every OTHER revision, which is the lost update `If-Match` exists to
+        refuse, spelled backwards."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, {"If-None-Match": value})
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert path.read_bytes() == before
+
+    def test_If_Match_STAR_stays_refused_and_the_refusal_NAMES_the_create_form(
+        self, scoped_store: Path
+    ):
+        """`*` on `If-Match` requires the entry to EXIST, so it is not a spelling
+        of the create case — but it is the header a caller reaching for one would
+        try first, so the refusal says where to go."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, {"If-Match": "*"})
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"If-None-Match: *" in body
+
+    def test_a_REPLACE_still_works_through_the_same_route(self, scoped_store: Path):
+        """The regression control for the rename: `_put_entry` is new code in
+        front of an unchanged `_replace_entry`, and a create half that broke the
+        replace half would be a strictly worse trade."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._data(ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(
+                base, {"If-Match": api.entry_revision(path.read_bytes())}
+            )
+        assert code == 200, (code, headers)
+        assert headers["X-Store-Status"] == "replaced"
+        assert path.read_bytes() == data
 
 
 class TestTheAppendRequestIsValidated:
@@ -16238,7 +17610,16 @@ _AUDITS_AFTER_RESPONDING = frozenset({"_backstop"})
 # `_respond(...)`/`_unauthorized()` they describe. A census, so DELETING a call
 # site is as loud as reordering one — a route that stops auditing is the failure
 # this whole section is about, and an offender list of zero cannot see it.
-_AUDIT_BEFORE_RESPOND_PAIRS = 33
+# 33 -> 42 on 2026-09-03, when `PUT` grew its create half. The nine NEW pairs are
+# all in `_put_entry`/`_create_entry`/`_entry_exists`: the both-preconditions 400,
+# the non-`*` `If-None-Match` 400, the empty-slug 400, the ambiguous-ref 400, the
+# `already-exists` 412, the `entry-shape` 422, two `store-unreachable` 503s and
+# the `created` 201. The three refusals that MOVED out of `_replace_entry` into
+# `_put_entry` (428, `If-Match: *`, empty `If-Match`) are the same pairs in a new
+# home and are not part of the delta. 🔴 EVERY REQUEST THAT CAN NOW BE ANSWERED
+# IS STILL AUDITED — the point of this census is that a route added without a
+# record fails here rather than going quiet in production.
+_AUDIT_BEFORE_RESPOND_PAIRS = 42
 
 
 def _respond_names() -> "frozenset[str]":
@@ -16831,16 +18212,16 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         # /dev/shm is tmpfs while /dev is devtmpfs, and both are prefixes of a
         # path under the former. A first-match-wins scan reports devtmpfs and the
         # store then silently lands on the wrong filesystem.
-        if _mount_fstype(Path("/dev")) is None:
+        if store_siting.mount_fstype(Path("/dev")) is None:
             pytest.skip("no /proc/mounts on this platform")
-        assert _mount_fstype(Path("/dev/shm")) == "tmpfs", (
+        assert store_siting.mount_fstype(Path("/dev/shm")) == "tmpfs", (
             "/dev/shm must resolve to its OWN mount, not to /dev's"
         )
 
     def test_a_disk_path_is_NOT_reported_as_tmpfs(self):
         # The negative control. Without it, a helper hardcoded to return "tmpfs"
         # would satisfy every other assertion here.
-        fstype = _mount_fstype(Path("/"))
+        fstype = store_siting.mount_fstype(Path("/"))
         assert fstype is not None and fstype != "tmpfs", (
             f"root filesystem reported as {fstype!r} — if this box really does run "
             "root on tmpfs the siting logic is untestable here, not wrong"
@@ -16854,7 +18235,7 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         # This is the case that makes `/dev/shm` being conventionally-tmpfs safe
         # to rely on — we do not rely on it.
         monkeypatch.setenv("DEVRC_TEST_TMPFS", str(tmp_path))
-        got = _tmpfs_dir()
+        got = store_siting.tmpfs_dir()
         assert got != tmp_path, (
             "a disk-backed directory was accepted as tmpfs — the type check is "
             "not doing the work its docstring claims"
@@ -16867,20 +18248,28 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         # current behaviour, never fail the suite.
         missing = tmp_path / "definitely-not-here"
         monkeypatch.setenv("DEVRC_TEST_TMPFS", str(missing))
-        got = _tmpfs_dir()
-        assert got is None or _mount_fstype(got) == "tmpfs"
+        got = store_siting.tmpfs_dir()
+        assert got is None or store_siting.mount_fstype(got) == "tmpfs"
 
     def test_the_store_fixture_ACTUALLY_lands_on_tmpfs_when_one_exists(
         self, store: Path
     ):
-        # 🔴 The positive control for the whole change. If `_tmpfs_dir()` finds a
+        # 🔴 The positive control for the whole change. If `store_siting.tmpfs_dir()` finds a
         # tmpfs, the store MUST be on it — otherwise the fixture fell back and the
         # fix is inert while this file stays green.
-        available = _tmpfs_dir()
+        available = store_siting.tmpfs_dir()
         if available is None:
-            pytest.skip("no tmpfs available here; the fallback path is exercised")
-        assert _mount_fstype(store) == "tmpfs", (
-            f"store landed on {_mount_fstype(store)!r} while a tmpfs at "
+            pytest.skip(
+                # 🔴 `tmpfs_dir()` returning None gained a SECOND cause when the
+                # free-space floor landed, and this message named only the first.
+                # In the environment that matters this skip is the only signal,
+                # so the whole fix going inert must not read as "no tmpfs here".
+                "no USABLE tmpfs: absent, not tmpfs, under _MIN_FREE_BYTES "
+                "free, or unwritable. The fallback path is exercised. Check "
+                "WHICH cause applies before reading this as a bare absence."
+            )
+        assert store_siting.mount_fstype(store) == "tmpfs", (
+            f"store landed on {store_siting.mount_fstype(store)!r} while a tmpfs at "
             f"{available} was available — the fix is inert"
         )
 
@@ -16894,4 +18283,208 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         assert (store / EMPTY_SCOPE).is_dir()
         assert (store / BROKEN_SCOPE / "thing-gamma.md").read_text().startswith(
             "no front matter"
+        )
+
+
+class TestTheSitingRULESThemselvesArePinned:
+    """🔴 THE THREE FIXES OF ROUND 2 ARE PINNED HERE — NOT every guard in the module.
+
+    An earlier header read "EVERY FIX IN THIS MODULE HAS A TEST" and that is
+    FALSE: dropping the write probe, the `is_dir()` check, or the tmpfs `rmtree`
+    cleanup each still SURVIVES. (That header also carried a passed-count, which
+    the very commit adding tests to this class falsified — a live count in a
+    docstring is stale the moment the class grows, so it is gone rather than
+    re-stated.) The header is what a reader takes away, which is the half that
+    stops anyone looking.
+
+    Audit round 2 ran a battery over the 105 tests that touch `store_siting` and
+    found `>=`→`>`, dropping the free-space floor, and dropping the `mkdtemp`
+    try/except ALL survived — 105 passed each time — while a positive control
+    (fstype check always true) was correctly KILLED. So the selected set could go
+    red on a defect in this module; these three simply were not pinned by anything.
+
+    They are the fixes most likely to be "simplified" back: `>=` reads like a typo
+    against a docstring that says "LONGEST matching mount point", and the floor
+    reads redundant beside the write probe. Each mutation lands the store back on
+    the contended disk with a fully green suite — the exact defect this module
+    exists to remove, arriving through the check meant to prevent it, and showing up
+    in CI as an unattributable flake on somebody else's PR.
+    """
+
+    def _mounts(self, tmp_path: Path, body: str) -> str:
+        table = tmp_path / "mounts"
+        table.write_text(body)
+        return str(table)
+
+    def test_a_SHADOWED_mount_point_reports_the_LAST_entry_not_the_first(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # /proc/mounts is LAST-WINS: when two mounts share a path the later line is
+        # the live filesystem. `depth > best[0]` kept the FIRST at equal depth, so a
+        # disk bind over a tmpfs reported `tmpfs` and the store landed on disk.
+        # This is the mutation that survived round 2; it dies here.
+        monkeypatch.setattr(
+            store_siting,
+            "_MOUNTS_PATH",
+            self._mounts(
+                tmp_path,
+                "tmpfs /dev/shm tmpfs rw 0 0\n"
+                "/dev/sda1 /dev/shm ext4 rw 0 0\n",
+            ),
+        )
+        assert store_siting.mount_fstype(Path("/dev/shm")) == "ext4", (
+            "the shadowing (last) entry must win — with `>` this returns 'tmpfs' "
+            "and a disk-backed bind is silently accepted as tmpfs"
+        )
+
+    def test_the_MIRROR_shadow_also_resolves_to_the_last_entry(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The opposite order must also follow last-wins, or the rule is just a
+        # coincidence that happens to favour one spelling.
+        monkeypatch.setattr(
+            store_siting,
+            "_MOUNTS_PATH",
+            self._mounts(
+                tmp_path,
+                "/dev/sda1 /dev/shm ext4 rw 0 0\ntmpfs /dev/shm tmpfs rw 0 0\n",
+            ),
+        )
+        assert store_siting.mount_fstype(Path("/dev/shm")) == "tmpfs"
+
+    def test_a_genuinely_NESTED_mount_still_resolves_to_the_deepest(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The `>=` change must not break real nesting: distinct paths at different
+        # depths still resolve to the longest match, not to whatever came last.
+        monkeypatch.setattr(
+            store_siting,
+            "_MOUNTS_PATH",
+            self._mounts(
+                tmp_path,
+                # 🔴 `/` LAST, deliberately. Ordered shallowest-first this
+                # fixture cannot tell "longest match" from "last match" —
+                # both rules give the same answer on every line, so a mutant
+                # that drops the depth comparison entirely SURVIVES here. It
+                # was killed only by the round-1 test that reads the real
+                # /proc/mounts, where `/` happens to come after /dev/shm on
+                # this host — and in the nix build sandbox the order is
+                # reversed, so the depth rule was unpinned in the tier the
+                # merge is gated on.
+                "devtmpfs /dev devtmpfs rw 0 0\n"
+                "tmpfs /dev/shm tmpfs rw 0 0\n"
+                "/dev/sda1 /home ext4 rw 0 0\n"
+                "/dev/sda1 / ext4 rw 0 0\n",
+            ),
+        )
+        assert store_siting.mount_fstype(Path("/dev/shm/inner/deeper")) == "tmpfs"
+        assert store_siting.mount_fstype(Path("/dev/null")) == "devtmpfs"
+        assert store_siting.mount_fstype(Path("/etc/passwd")) == "ext4"
+
+    def test_a_tmpfs_UNDER_the_free_space_floor_is_REFUSED(self, monkeypatch):
+        # A five-byte probe passes on a tmpfs with five bytes free; the caller's
+        # real writes then raise ENOSPC, turning a test that would have PASSED on
+        # disk into an error. Driving the floor above any real filesystem is the
+        # hermetic equivalent of filling one.
+        if store_siting.tmpfs_dir() is None:
+            pytest.skip("no usable tmpfs here, so the floor cannot be exercised")
+        monkeypatch.setattr(store_siting, "_MIN_FREE_BYTES", 1 << 60)
+        assert store_siting.tmpfs_dir() is None, (
+            "a tmpfs with less than _MIN_FREE_BYTES free must be refused; without "
+            "the floor this returns the path and the caller dies on ENOSPC"
+        )
+
+    def test_the_floor_is_not_so_high_that_it_refuses_EVERY_tmpfs(self, monkeypatch):
+        # The mirror. A floor that rejects everything is indistinguishable from
+        # having no tmpfs at all — the fix would go inert with the suite green.
+        if store_siting.mount_fstype(Path("/dev/shm")) != "tmpfs":
+            pytest.skip("no tmpfs at /dev/shm on this host")
+        monkeypatch.setattr(store_siting, "_MIN_FREE_BYTES", 0)
+        assert store_siting.tmpfs_dir() is not None
+
+    def test_mkdtemp_REFUSING_falls_back_instead_of_raising(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # mkdtemp sat outside the try, so its OSError propagated rather than
+        # falling back — the candidate can fill or go read-only between the probe
+        # and the call. Dropping the try/except survived round 2's battery.
+        if store_siting.tmpfs_dir() is None:
+            pytest.skip("no usable tmpfs here, so the mkdtemp path is not taken")
+
+        def raiser(*a, **k):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(store_siting.tempfile, "mkdtemp", raiser)
+        with store_siting.store_root(tmp_path) as root:
+            assert tmp_path in root.parents, (
+                f"expected the tmp_path fallback, got {root} — without the "
+                "try/except this raises OSError instead"
+            )
+
+    def test_the_fallback_honours_a_custom_store_NAME(self, tmp_path: Path, monkeypatch):
+        # test_cairn_cli.py passes name="src"; a fallback that hardcoded "store"
+        # would hand it the wrong directory only on hosts without a tmpfs.
+        def raiser(*a, **k):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(store_siting.tempfile, "mkdtemp", raiser)
+        with store_siting.store_root(tmp_path, "src") as root:
+            assert root.name == "src"
+
+    def test_scoped_store_is_ALSO_sited_off_the_disk(self, scoped_store: Path):
+        # The fixture round 2 fixed had no positive control of its own — only the
+        # ratchet, and only for one spelling. It feeds ~110 `running(...)` sites,
+        # i.e. most of the in-request-fsync population in this file.
+        available = store_siting.tmpfs_dir()
+        if available is None:
+            pytest.skip(
+                # 🔴 `tmpfs_dir()` returning None gained a SECOND cause when the
+                # free-space floor landed, and this message named only the first.
+                # In the environment that matters this skip is the only signal,
+                # so the whole fix going inert must not read as "no tmpfs here".
+                "no USABLE tmpfs: absent, not tmpfs, under _MIN_FREE_BYTES "
+                "free, or unwritable. The fallback path is exercised. Check "
+                "WHICH cause applies before reading this as a bare absence."
+            )
+        assert store_siting.mount_fstype(scoped_store) == "tmpfs", (
+            f"scoped_store landed on {store_siting.mount_fstype(scoped_store)!r} "
+            f"while a tmpfs at {available} was available"
+        )
+
+    def test_the_floor_CONSTANT_clears_the_largest_store_this_suite_builds(self):
+        """🔴 ASSERTS THE CONSTANT, NOT A CALL — because the call-based guards CANNOT
+        see a bad value, and a bad value shipped.
+
+        `_MIN_FREE_BYTES` was lowered to 1 MiB for one commit while the largest store
+        this suite builds page-allocates ~1.2 MiB (1,253,376 B), opening an ENOSPC window at
+        1 MiB <= free < ~1.3 MiB. The whole battery stayed green, because:
+
+          * `test_the_floor_is_not_so_high...` monkeypatches `_MIN_FREE_BYTES` to 0
+            before measuring — it overrides the exact variable it claims to bound, so
+            no value of that variable can ever fail it;
+          * `test_a_tmpfs_UNDER_the_free_space_floor_is_REFUSED` skips when
+            `tmpfs_dir()` is None, i.e. its assertion is unreachable precisely when
+            the fix has gone inert.
+
+        Measured: setting the floor to `1 << 60` (every store falls back to the
+        contended disk, the fix fully inert) gave 95 passed, 4 skipped, rc 0.
+
+        This test takes no fixture, monkeypatches nothing and cannot skip, so it holds
+        in the sandbox tier the merge is gated on.
+        """
+        assert store_siting._MIN_FREE_BYTES > store_siting._LARGEST_STORE_BYTES, (
+            f"_MIN_FREE_BYTES ({store_siting._MIN_FREE_BYTES:,}) must exceed the "
+            f"largest store this suite builds ({store_siting._LARGEST_STORE_BYTES:,} "
+            "page-allocated bytes) or a mount that passes the check can still run out "
+            "mid-test. Apparent file sizes understate tmpfs cost ~17x — measure "
+            "page allocation, not st_size."
+        )
+        # And an upper bound, because too HIGH silently disables the whole module.
+        # Generous: this only has to catch an order-of-magnitude mistake, not tune it.
+        # `<`, not `<=`: 64 MiB exactly is the value the message below calls
+        # fatal, and `f_bavail` is never the full mount size anyway.
+        assert store_siting._MIN_FREE_BYTES < 64 * 1024 * 1024, (
+            f"_MIN_FREE_BYTES ({store_siting._MIN_FREE_BYTES:,}) exceeds a container's "
+            "default 64Mi /dev/shm, so every store would fall back to disk and this "
+            "module would be inert with the suite green"
         )
