@@ -342,12 +342,16 @@ def test_a_CORRUPT_streak_file_cannot_make_the_guards_FALL_THROUGH(world):
 
 
 # (raw streak file content, the integer the sanitiser MUST read out of it)
-# 🔴 EVERY EXPECTED VALUE IS DISTINCT, AND NONE IS 0 EXCEPT WHERE 0 IS THE POINT.
-# A fixture whose expectation collides with the fall-through value cannot see the
-# mutant: an earlier version of this test asserted only `rc in (11, 12)`, and BOTH
-# the fixed and the broken script land on 11 (the broken one by aborting the
-# arithmetic and failing the `-ge` test), so removing the base-ten coercion
-# SURVIVED a fully green suite. The counter the run records is the discriminator.
+# 🔴 THE COUNTER ALONE IS NOT A SUFFICIENT DISCRIMINATOR, AND AN EARLIER COMMENT
+# HERE CLAIMED IT WAS. It asserted "every expected value is distinct" — false:
+# `1` appears three times, and `1` is EXACTLY what the broken path produces,
+# because an arithmetic abort inside `$(read_streak)` yields an empty string and
+# bash evaluates `$(( + 1 ))` as unary plus == 1 (measured). So deleting the
+# `case` sanitiser SURVIVED a fully green suite even with the counter asserted.
+# A corrupt value cannot expect anything BUT 1 (corrupt -> 0 -> 0+1), so the
+# second discriminator is STDERR: the broken path emits bash's own
+# `arithmetic syntax error` / `value too great for base`, the fixed path is
+# silent. That is the mechanism itself, not a proxy for it.
 CORRUPT_STREAKS = [
     ("1 2", 1),                      # internal space -> corrupt -> 0, so 0+1
     ("08", 9),                       # ALL DIGITS, but octal to bash -> must be 8
@@ -389,6 +393,10 @@ def test_a_CORRUPT_streak_cannot_make_the_guards_FALL_THROUGH(world, corrupt, ex
     assert "GREEN" not in r.stdout, (
         "streak %r produced a GREEN for a tree that was never fetched:\n%s"
         % (corrupt, r.stdout))
+    assert not re.search(r"arithmetic syntax error|value too great for base",
+                         r.stderr), (
+        "streak %r reached bash's arithmetic evaluator uncoerced — the sanitiser "
+        "did not run or did not cover this shape:\n%s" % (corrupt, r.stderr))
     got = (world["cache"] / "blind-streak").read_text().strip()
     assert got == str(expected), (
         "streak %r was read as %r, expected %r — the sanitiser did not coerce "
@@ -415,10 +423,72 @@ def test_repeated_CONTENTION_does_not_report_GREEN_forever(world):
         first = _run(world, stub, extra_env=env)
         second = _run(world, stub, extra_env=env)
     assert first.returncode == RC_GREEN, first.stdout
-    assert second.returncode in (RC_UNMEASURED, RC_BLIND), (
-        "a second consecutive contention still reported GREEN — the deadman can "
-        "be blind indefinitely behind a held lock:\n" + second.stdout)
+    # 🔴 EXACT, NOT `in (...)`. Claim 9 removed a loose `rc in (11, 12)` and this
+    # test reintroduced the same shape in the same commit: with it, a change
+    # making the SECOND contention fire the loud BLIND toast immediately —
+    # instead of laddering quietly through 11, which is the whole point of
+    # `SuccessExitStatus = 11` — was invisible.
+    assert second.returncode == RC_UNMEASURED, (
+        "expected the quiet ladder rung (11), got %d — contention must not jump "
+        "straight to the DND-defeating toast:\n%s"
+        % (second.returncode, second.stdout))
+    assert (world["cache"] / "contention-streak").read_text().strip() == "2"
     assert _calls(world) == [], "sanity: the gate never ran"
+
+
+def test_acquiring_the_lock_CLEARS_the_contention_counter(world):
+    """🔴 UNCOVERED until round 3: two mutants (delete the reset, or set it to 1)
+    both survived a fully green suite.
+
+    Without the reset the counter is cumulative over the process's whole life:
+    three overlaps MONTHS apart, each separated by dozens of clean measured runs,
+    reach the threshold and fire a BLIND toast about a deadman that has been
+    measuring `main` correctly the entire time. That is the permanently-red gate
+    this file's header argues against, arrived at by bookkeeping.
+    """
+    stub = _stub(world, 'echo "RESULT: PASS (exit=0)"; exit 0\n')
+    world["cache"].mkdir(parents=True, exist_ok=True)
+    (world["cache"] / "contention-streak").write_text("2")
+    r = _run(world, stub)
+    assert r.returncode == RC_GREEN, r.stdout + r.stderr
+    leftover = world["cache"] / "contention-streak"
+    assert not leftover.exists() or leftover.read_text().strip() in ("", "0"), (
+        "a run that ACQUIRED the lock left the contention counter standing at "
+        "%r — it accumulates across unrelated outages and eventually toasts"
+        % leftover.read_text())
+
+
+def test_help_prints_the_header_and_REFUSES_if_it_cannot_find_the_end(world):
+    """🔴 The computed range fixed truncation and introduced SILENCE-WITH-RC-0.
+
+    Reword the `set -uo pipefail` sentinel and `grep` matches nothing, `_hdr` is
+    empty, `$(( _hdr - 1 ))` is -1, and `sed -n "2,-1p"` errors to stderr while
+    --help prints ZERO lines and exits 0 — measured. The literal it replaced
+    merely truncated; this deleted the help and reported success, which is the
+    "a zero that means nothing" shape the file's own header condemns.
+
+    Also pins that --help exists at all: a mutant hardcoding `2,60p` — the exact
+    regression the computed range exists to prevent — survived a green suite.
+    """
+    stub = _stub(world, 'exit 0\n')
+    r = _run(world, stub, "--help")
+    assert r.returncode == RC_GREEN, r.stderr
+    assert len(r.stdout.splitlines()) > 80, (
+        "--help rendered %d lines; the header is longer than that, so the range "
+        "is truncating" % len(r.stdout.splitlines()))
+    for needed in ("OPTIONS", "--force", "--status", "BLIND", "COULD NOT MEASURE"):
+        assert needed in r.stdout, "--help no longer reaches %r" % needed
+    assert "set -uo pipefail" not in r.stdout, "the range leaked past the header"
+
+    broken = world["tmp"] / "broken.sh"
+    broken.write_text(SCRIPT.read_text().replace("set -uo pipefail",
+                                                 "set -o pipefail; set -u", 1))
+    b = subprocess.run(["bash", str(broken), "--help"], capture_output=True,
+                       text=True, timeout=60, env={**os.environ,
+                       "MAIN_GREEN_CACHE": str(world["tmp"] / "hc")})
+    assert b.returncode != RC_GREEN, (
+        "with the sentinel moved, --help printed %d lines and still exited 0"
+        % len(b.stdout.splitlines()))
 
 
 def test_status_works_while_a_run_holds_the_lock(world):
@@ -556,6 +626,22 @@ def test_the_shipped_blind_threshold_is_a_sane_default():
     m = re.search(r'BLIND_ESCALATE="\$\{MAIN_GREEN_BLIND_ESCALATE:-(\d+)\}"', src)
     assert m, "the blind-ladder default moved or lost its env override"
     assert 2 <= int(m.group(1)) <= 24, m.group(1)
+
+
+def test_the_shipped_contention_threshold_is_a_sane_default():
+    """The twin of the blind-threshold pin, and round 2 added the second ladder
+    without extending it: mutating the default to 99999 SURVIVED a green suite
+    while, in production, the contention ladder would never fire — the exact
+    "never fires, reads as clean forever" failure the other pin exists for."""
+    src = _code_only(SCRIPT.read_text())
+    m = re.search(r'CONTENTION_ESCALATE="\$\{MAIN_GREEN_CONTENTION_ESCALATE:-(\d+)\}"', src)
+    assert m, "the contention ladder default moved or lost its env override"
+    n = int(m.group(1))
+    assert 2 <= n <= 12, n
+    b = re.search(r'BLIND_ESCALATE="\$\{MAIN_GREEN_BLIND_ESCALATE:-(\d+)\}"', src)
+    assert b and n <= int(b.group(1)), (
+        "contention should escalate no later than blindness: %s vs %s"
+        % (n, b and b.group(1)))
 
 
 def test_the_three_outcomes_have_DISTINCT_exit_codes():

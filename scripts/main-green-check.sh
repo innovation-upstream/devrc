@@ -202,6 +202,13 @@ while [ $# -gt 0 ]; do
     # next edit. `set -uo pipefail` is the first line after the header.
     -h|--help)
       _hdr=$(grep -n '^set -uo pipefail' "${BASH_SOURCE[0]}" | head -1 | cut -d: -f1)
+      # 🔴 A ZERO THAT MEANS NOTHING IS THE FAILURE THIS FILE ARGUES AGAINST, and
+      # the computed range introduced one. Reword the sentinel and `grep` matches
+      # nothing, `_hdr` is empty, `$(( _hdr - 1 ))` is -1, and `sed -n "2,-1p"`
+      # errors to stderr while --help prints ZERO lines and exits 0. MEASURED.
+      # The literal it replaced merely TRUNCATED the help; this deleted it and
+      # reported success. Refuse instead.
+      [ -n "$_hdr" ] || die "cannot locate the end of the header (the 'set -uo pipefail' sentinel moved)"
       sed -n "2,$(( _hdr - 1 ))p" "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) die "unknown argument: $1" ;;
