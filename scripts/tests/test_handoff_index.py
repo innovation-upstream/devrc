@@ -5102,6 +5102,30 @@ class TestTheAllBadArmIsChosenByCOUNTNotByARenderedString:
         assert hi.rebuild_delete_labels(
             ds, (), scoped=True, prune=False) == ("",)
 
+    def test_the_empty_derivation_list_is_not_an_all_bad_run(self):
+        """🔴 THE `bool(derivations)` CONJUNCT, WHICH NOTHING GUARDED. A mutant
+        dropping it — `return not any(may_replace_stored_rows(d) for d in
+        derivations)` — SURVIVED a full 281-test run, because every fixture in
+        this file passes at least one derivation, so no test ever reached the
+        empty input.
+
+        `any()` over an empty sequence is False, so `not any(…)` is the vacuous
+        TRUE the conjunct exists to refuse. Without it
+        `nothing_was_read_completely([])` flips False→True and drags two
+        published surfaces with it, which is why all three are asserted here
+        rather than the predicate alone: the predicate is the cause, and the two
+        derived values are what a caller actually reads. All three are `__all__`
+        exports and `handoff_search` imports this module — `main` is insulated
+        only because it returns RC_USAGE on an empty config before it asks.
+
+        The docstring that let this through is retracted in the module: it cited
+        an `if not derivations: return None` in `rebuild_downgrade_reason` that
+        the same commit had deleted, so a reader checking the empty-input case
+        found a citation and stopped looking."""
+        assert hi.nothing_was_read_completely([]) is False
+        assert hi.rebuild_downgrade_reason([]) is None
+        assert hi.derivation_json([])["rebuild_would_be_downgraded"] is False
+
     def test_the_plan_distinguishes_an_EMPTY_label_from_an_EMPTY_bucket(
             self, tmp_path):
         """The pre-flight half. `', '.join(measured) or '(none)'` printed
@@ -5141,6 +5165,20 @@ class TestTheAllBadArmIsChosenByCOUNTNotByARenderedString:
         _break_doc_blob(other, "claudedocs/handoff-fandrelly-probe.md")
 
         empty = hi.derive_repo(good, label="")
+        # 🔴 THE FIXTURE ASSERTS ITSELF, for the reason `_empty_label_plus_broken`
+        # carries the same line: this is the ONLY case in the matrix below that
+        # is not built from a directory name, and it is the "disagreeing input"
+        # the docstring above says the matrix exists to include. Under a
+        # `derive_repo` revert (`label or root.name`) `empty.label` becomes
+        # `brindlemossrepo`, so `cases[0]` collapses into `cases[2]` and
+        # `cases[1]` into `cases[6]`: a 7-case matrix silently becomes 5, the
+        # disagreeing input is GONE, and the positive control below
+        # (`verdicts == {True, False}`) still passes — so nothing signals it.
+        # MEASURED: under that revert this test passes ALONE.
+        assert empty.label == "", (
+            "derive_repo discarded an explicitly empty label — the matrix below "
+            "has collapsed to duplicate cases and no longer contains the input "
+            "this seam test exists for")
         named = hi.derive_repo(good, label="brindlemossrepo")
         bad1 = hi.derive_repo(broken, label="varkelthornrepo")
         bad2 = hi.derive_repo(other, label="glimmerrepo")
@@ -5216,6 +5254,15 @@ class TestThePlanPlumbingThisRoundAddedIsGuarded:
       * M10 — the `kept` bucket reverted from the KIND to `d.unmeasured is not
         None`. Reverting the sibling `measured` bucket is caught by five tests;
         reverting `kept` was caught by none.
+        ⚠ M10's guard is an INVARIANT GUARD, not regression coverage, and is
+        labelled one here because `claude/RULES.md` requires the distinction to
+        be written down rather than inferred: no shipped bug ever violated it —
+        the two spellings agree on every state a real fixture can build, and the
+        third kind that parts them is monkeypatched into existence. It is
+        therefore correctly ABSENT from this PR's red-at-base matrix (it cannot
+        go red at the base; there is nothing at the base for it to catch), and
+        counting it as a regression test would overstate what this round
+        measured.
       * M11 — the downgrade message drops its stated cost. The `nix/home.nix`
         half was pinned; the sentence the RUN prints was not."""
 
@@ -5429,7 +5476,19 @@ class TestEveryGuardThisModuleNamesByNameActuallyExists:
 
     #: `Test[A-Z]…` avoids matching the ordinary word "Tests"; `test_…` catches
     #: the function form. Both are the shapes this repo names guards in.
-    NAME_RE = re.compile(r"\b(?:Test[A-Z][A-Za-z0-9_]*|test_[a-z0-9_]+)\b")
+    #:
+    #: 🔴 THE `test_` ARM'S CHARACTER CLASS IS `[A-Za-z0-9_]`, NOT `[a-z0-9_]`,
+    #: AND THAT ONE CHARACTER WAS THE WHOLE INSTRUMENT. A lowercase-only class
+    #: cannot cross an uppercase letter, and the trailing `\b` cannot fire
+    #: mid-identifier, so a cited name like
+    #: `test_the_gate_fires_in_DRY_RUN_too` matched NOTHING AT ALL — not a
+    #: truncated prefix this file could notice, no match. Three real citations
+    #: in `handoff_index.py` were invisible that way, TWO of them written by the
+    #: round that added this checker's blind-spot note; none dangled, so the
+    #: whole class stayed green and would have stayed green through a rename.
+    #: This repo names guards in SCREAMING_CASE fragments routinely — the
+    #: uppercase half is not an edge case here, it is the house style.
+    NAME_RE = re.compile(r"\b(?:Test[A-Z][A-Za-z0-9_]*|test_[A-Za-z0-9_]+)\b")
 
     def _dangling(self, source: str) -> list[str]:
         """Names `source` cites that no test file defines.
@@ -5447,7 +5506,18 @@ class TestEveryGuardThisModuleNamesByNameActuallyExists:
 
     def test_no_test_name_cited_in_handoff_index_is_dangling(self):
         source = (REPO_ROOT / "scripts" / "lib" / "handoff_index.py").read_text()
-        assert self._dangling(source) == []
+        dangling = self._dangling(source)
+        assert dangling == [], (
+            f"scripts/lib/handoff_index.py cites {len(dangling)} guard name(s) "
+            f"that nothing under scripts/tests/ defines: {dangling}\n"
+            f"This is a repo-WIDE coupling, so ANY rename or deletion of a "
+            f"guard turns it red from a diff that never touched this file — "
+            f"which is the point: the citation is a claim of coverage, and a "
+            f"reader who greps it and finds nothing concludes the invariant is "
+            f"unguarded. Fix by updating the citation in handoff_index.py (or "
+            f"restoring the name). Do NOT delete the sentence around it — the "
+            f"sentence is the claim; deleting it hides the gap instead of "
+            f"closing it. If the guard was renamed, cite the new name.")
 
     def test_the_checker_actually_finds_the_names_it_is_scanning(self):
         """🔴 THE POSITIVE CONTROL. A checker wired to nothing returns the same
@@ -5471,6 +5541,38 @@ class TestEveryGuardThisModuleNamesByNameActuallyExists:
         assert "test_next_steps_split_per_ranked_item_carrying_the_whole_block" \
             in found
         assert "TestARebuildWithNothingReadInFullIsDowngradedNotRefused" not in found
+
+    def test_a_cited_test_name_carrying_a_CAPITAL_is_scanned(self):
+        """🔴 THE REGRESSION. `NAME_RE`'s `test_` arm was `test_[a-z0-9_]+`,
+        which cannot cross an uppercase letter, and `\\b` cannot fire
+        mid-identifier — so a cited name containing a CAPITAL matched nothing at
+        all. Three such citations were live in `handoff_index.py` and this
+        checker could not see one of them.
+
+        None of them dangled, which is exactly why it was invisible: the class
+        was GREEN, and would have stayed green after any rename of the three.
+        The checker read as coverage over every citation in the module while
+        covering 10 of 13.
+
+        Asserted on the REAL citations rather than a synthetic string, so the
+        test fails if they are renamed to a shape the checker cannot see
+        again."""
+        source = (REPO_ROOT / "scripts" / "lib" / "handoff_index.py").read_text()
+        dewrapped = re.sub(r"_\n[ \t]*#?[ \t]*", "_", source)
+        found = set(self.NAME_RE.findall(dewrapped))
+        for name in (
+                "test_the_downgrade_and_the_bound_DELETE_SCOPE_cannot_disagree",
+                "test_the_downgrade_states_its_FULL_cost_not_just_a_section",
+                "test_the_gate_fires_in_DRY_RUN_too"):
+            assert name in found, (
+                f"{name} is cited in handoff_index.py but NAME_RE did not "
+                f"match it — the capital-carrying blind spot is back")
+        # 🔴 THE DISCRIMINATING HALF. The three above could pass on a regex that
+        # matched only their lowercase PREFIX, which would still leave the
+        # checker unable to report a capital-carrying name as dangling. So feed
+        # it one that does not exist and require the WHOLE name back.
+        bogus = "test_a_GUARD_that_never_EXISTED"
+        assert self._dangling(f"# pinned by `{bogus}` above") == [bogus]
 
     def test_the_checker_can_go_RED(self):
         """🔴 THE NEGATIVE CONTROL. Fed a citation of a guard that does not

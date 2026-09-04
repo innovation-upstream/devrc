@@ -1075,6 +1075,25 @@ def derive_repo(repo: str | Path, *, label: str | None = None) -> RepoDerivation
     # `partial_scope_warnings`' `if not ok:` and `rebuild_plan_lines`'
     # `or '(none)'` — one shape, three sites, `claude/RULES.md`'s "a predicate
     # open-coded at N sites is typically wrong at N−1 of them".
+    #
+    # ⚠ WHAT REMAINS, WITH THE SURFACE COUNT CORRECTED. Those three sites were
+    # DECISIONS, and they are fixed: no branch anywhere now turns on whether a
+    # label renders. What is left is DISPLAY, and it is wider than the two
+    # surfaces the empty-label tests exercise — an empty label prints as a blank
+    # on FOUR human-readable surfaces, MEASURED via `main --repo . --rebuild`
+    # run from a repo root:
+    #   1. `render_derivation`'s per-repo row (`f"  {d.label:<24} …"`) — 24
+    #      blanks, so the row reads as if the ref column were the label;
+    #   2. `rebuild_plan_lines`' DELETE / KEPT buckets;
+    #   3. `partial_scope_warnings`' `detail` and `ok` lists;
+    #   4. `rebuild_downgrade_reason`'s and the refusal arms' `detail`.
+    # 🔴 THE FIX DOES NOT BELONG IN ANY OF THEM. A `d.label or "(unnamed)"` in a
+    # renderer re-introduces the exact falsy-string shape this comment records
+    # being swept out of three decision sites, in the layer that is READ when
+    # those decisions are audited. The cheap correct fix is at `main`: reject or
+    # normalise an empty `--repo` label with RC_USAGE, once, where the label is
+    # minted. Left undone deliberately — it is a DISPLAY defect only, and every
+    # decision above is already rendering-independent.
     name = root.name if label is None else label
     out = RepoDerivation(repo=str(root), label=name)
     if not root.is_dir():
@@ -1664,9 +1683,19 @@ def import_maildb():
 #: this file and a third, a TRUNCATED real name, was found by the checker that
 #: replaced them: every `test_…`/`Test…` name cited anywhere in this module is
 #: now pinned to exist by `TestEveryGuardThisModuleNamesByNameActuallyExists`.
-#: ⚠ ITS BLIND SPOT, STATED: it recognises those two shapes only, so a guard
-#: cited under a bare snake_case name that matches neither is NOT checked — and
-#: one of the two dead citations was exactly that shape. Cite guards by their
+#: ⚠ ITS BLIND SPOT, STATED: it recognises those two PREFIXES only, so a guard
+#: cited under a bare name carrying neither — plain snake_case with no `test_`,
+#: which is exactly what one of the two dead citations was — is NOT checked.
+#: 🔴 AND THE SENTENCE ABOVE USED TO BE THE WHOLE DISCLOSURE, WHICH UNDERSTATED
+#: WHAT THE CODE MISSED. The `test_` arm was spelled `test_[a-z0-9_]+`: that
+#: class cannot cross an uppercase letter, and the trailing `\b` cannot fire
+#: mid-identifier, so a cited `test_…` name containing a CAPITAL matched
+#: NOTHING AT ALL — not a truncated match, no match. Three real citations in
+#: this file were invisible that way, TWO of them added by the very round that
+#: wrote this blind-spot note; none dangled, so the checker stayed green and
+#: would have stayed green through any rename of the three. The class is now
+#: `[A-Za-z0-9_]` and they are covered — see
+#: `test_a_cited_test_name_carrying_a_CAPITAL_is_scanned`. Cite guards by their
 #: real `test_`/`Test` name and the checker covers them.
 INCOMPLETE_UNMEASURED = "unmeasured"
 INCOMPLETE_UNREADABLE = "docs-unreadable"
@@ -1736,7 +1765,7 @@ def incomplete_kind(d: RepoDerivation) -> str | None:
     mis-explained — see that function's closing branch.
 
     PURE."""
-    if d.unmeasured:
+    if d.unmeasured is not None:
         return INCOMPLETE_UNMEASURED
     if d.unreadable:
         return INCOMPLETE_UNREADABLE
@@ -1875,9 +1904,28 @@ def nothing_was_read_completely(derivations: Sequence[RepoDerivation]) -> bool:
     ⚠ `not derivations` is FALSE here, deliberately: a run with no derivations at
     all never reaches a delete scope (`main` exits RC_USAGE on an empty config),
     and "nothing was read completely" over zero repos is the vacuous-truth shape
-    `claude/RULES.md` calls worse than no check. `rebuild_downgrade_reason`'s
-    `if not derivations: return None` is the same guard, kept there because its
-    return type is a REASON and there is no reason to give. PURE."""
+    `claude/RULES.md` calls worse than no check.
+
+    🔴 THE `bool(derivations)` CONJUNCT BELOW IS THE ONLY COPY OF THAT GUARD IN
+    THIS MODULE, AND THIS PARAGRAPH USED TO SAY THE OPPOSITE. It claimed
+    `rebuild_downgrade_reason` "kept" an `if not derivations: return None` of its
+    own — but the commit that consolidated the two spellings had just DELETED it,
+    so `grep -n "if not derivations"` over this file matched THIS SENTENCE and
+    nothing else: a comment asserting a guard lives one function over, where it
+    does not. That is `claude/RULES.md`'s "reads as coverage while providing
+    none", and it is why the conjunct went unguarded — a reader checking the
+    empty-input case found the citation and stopped.
+
+    So it is guarded here now, because everything downstream inherits it: drop
+    `bool(derivations) and` as a redundant simplification and
+    `nothing_was_read_completely([])` flips False→True, which drags
+    `rebuild_downgrade_reason([])` from `None` to a REASON and
+    `derivation_json([])["rebuild_would_be_downgraded"]` from False to True. All
+    three are `__all__` exports and `handoff_search` imports this module, so the
+    blast radius is not `main` — `main` is insulated only because it returns
+    RC_USAGE on an empty config before it ever asks. A mutant dropping the
+    conjunct SURVIVED a full 281-test run; it is now killed by
+    `test_the_empty_derivation_list_is_not_an_all_bad_run`. PURE."""
     return bool(derivations) and not any(
         may_replace_stored_rows(d) for d in derivations)
 
@@ -1910,7 +1958,7 @@ def authority_label_collisions(
     DELETE and KEPT in the pre-flight. A silent wrong is better than a stated
     wrong: a stated wrong is what stops the next reader looking."""
     ok = {d.label for d in derivations if may_replace_stored_rows(d)}
-    bad = {d.label for d in derivations if incomplete_reason(d)}
+    bad = {d.label for d in derivations if incomplete_reason(d) is not None}
     return tuple(sorted(ok & bad))
 
 
@@ -2058,8 +2106,20 @@ def rebuild_refusal(
     # sites. `unmeasured` is kept as its own list because two of the arms below
     # make claims that are true ONLY of that narrower class: "came back
     # UNMEASURED", and "the N repo(s) that resolved a mainline ref".
-    bad = [d for d in derivations if incomplete_reason(d)]
-    unmeasured = [d for d in derivations if d.unmeasured]
+    # 🔴 `is not None`, NOT TRUTHINESS — THE SAME FALSY-STRING SHAPE, SWEPT A
+    # FOURTH TIME. Both `incomplete_reason(d)` and `d.unmeasured` are `str |
+    # None`, and every consumer here used to branch on their truthiness while
+    # their OWNER spells the question `incomplete_reason(d) is None`. Those
+    # agree only while the string is never empty — which is precisely the
+    # "they agree only while X is non-empty" argument that held for
+    # `partial_scope_warnings`' `if not ok:` right up until `--repo .` made X
+    # empty. No producer emits `""` today (the three writers are the literals
+    # `no-such-directory`, `no-mainline-ref` and `ls-tree-failed`), so this
+    # changes no behaviour; it removes the site's ability to disagree with its
+    # owner the day one does. Same edit at `authority_label_collisions`,
+    # `partial_scope_warnings` and `incomplete_kind`.
+    bad = [d for d in derivations if incomplete_reason(d) is not None]
+    unmeasured = [d for d in derivations if d.unmeasured is not None]
     # 🔴 `--prune` NEEDS THE CONFIG TO BE AUTHORITATIVE ABOUT REPO IDENTITY, AND AN
     # UNMEASURED REPO IS EXACTLY WHERE IT IS NOT. Pruning means "delete every
     # stored label the config does not name" — a claim that the CONFIGURED
@@ -2221,7 +2281,7 @@ def partial_scope_warnings(derivations: Sequence[RepoDerivation]) -> tuple[str, 
     label (`~/a/proj` and `~/b/proj`), and a healthy twin then grants a DELETE
     over the broken twin's rows. See `authority_label_collisions`, which is the
     residual this qualification exists to stop MIS-STATING."""
-    bad = [d for d in derivations if incomplete_reason(d)]
+    bad = [d for d in derivations if incomplete_reason(d) is not None]
     if not bad:
         # A per-run "0 repos missing" buries the real ones — `untracked_warnings`'
         # reason. This is the ONLY suppression left.
