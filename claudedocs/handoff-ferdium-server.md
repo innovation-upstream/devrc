@@ -4,28 +4,75 @@
 Deploy Ferdium Server (self-hosted multi-messenger backend) on the homelab Talos cluster, exposed at `ferdium.zacx.dev` behind Authelia, so the Ferdium desktop client can sync without a cloud account.
 
 ## State now
-**DONE. Ferdium works end to end** — the desktop client logs in against the self-hosted server
-and syncs; operator-confirmed 2026-09-03. Nothing about this effort is in flight.
+**Ferdium itself: DONE, working, unchanged.** The desktop client logs in against the
+self-hosted server and syncs; operator-confirmed 2026-09-03. Nothing about Ferdium proper
+is in flight.
 
 | Merged | What |
 |---|---|
-| devrc **#1240**, **#1241**, **#1245**, **#1266** (`f972992e`) | client packages; handoff |
+| devrc **#1240**, **#1241**, **#1266** (`f972992e`), **#1278** (`a7dac5bd`) | client packages; handoff |
 | homelab-infra **#647** | manifests, both gateways, Authelia rule, relay firewall |
 | homelab-infra **#651** | incident fix — dead promptver upstreams crashing the gateway |
 | homelab-infra **#668** | registration closed + scoped Authelia bypass for the API |
 
-**Still open — the only one:** homelab-infra **#653**, gateway config `subPath` → directory
-mount. Unmerged on purpose; it rolls the gateway pod on each cluster.
+(devrc **#1245** is NOT in that list — it is an obsolete duplicate of this doc, still OPEN
+and CONFLICTING. See rank 15. The earlier version of this table listed it as merged; it
+never was.)
 
+Carried forward — measured previously, still the state of the deployment:
 - users = 1 (`zachlowden1@gmail.com`); `IS_REGISTRATION_ENABLED=false` and signup returns
   `{"message":"Registration is disabled on this server","status":401}`.
 - Login through the public edge: 200 + token; wrong-password control: 401. Both measured.
 - `GET /` still 302s to Authelia; `POST /v1/auth/signup` still 302s (excluded from the bypass).
   8117 still dropped from the internet.
 - Vaultwarden holds the PLAINTEXT — correct, because the client hashes before sending.
-- **Clawgate**: no task recorded. `clawgate_handoff.sh resolve` exited 5, and its own POSITIVE
-  CONTROL showed the same endpoint returning a link for a different session — so the endpoint
-  works and this session genuinely has zero tasks. Still no field written.
+
+**The gateway config-staleness follow-on moved.** homelab-infra **#653** (subPath →
+directory mount on both gateways) is **superseded, not merged**. Replaced by
+homelab-infra **#678** (`fix/prod-gateway-configmap-generator`), OPEN / MERGEABLE /
+CLEAN, commit `242c85b9c`, **not merged — needs a scheduled window**.
+
+Why it changed: `417a6386b` landed on trunk **2026-09-03 18:40 CDT**, a day after #653
+was opened and ~3h before this session. The prior handoff had no knowledge of it. It:
+- added `resolver 10.96.0.10 valid=30s ipv6=off` to the homelab nginx and converted all
+  39 name-targeted `proxy_pass` to `set $upstream` → **request-time resolution**. That is
+  the exact hazard #653 cited as its forcing reason, and it is gone.
+- made homelab `nginx.conf` a `configMapGenerator` input → hash-suffixed ConfigMap name →
+  **any edit now rolls the gateway by itself**. A stronger fix for "ConfigMap updates do
+  not reach the container" than a directory mount.
+- removed the dead promptver relays from the production side.
+- explicitly listed the production ConfigMap as **owed**. #678 is that owed half.
+
+**#678 verification (measured, both clusters read live):**
+- extracted `gateway/nginx.conf` is **byte-identical** (`sha256 970d4bbe…`) to the config
+  the production gateway is serving right now, read out of the running container.
+- production's running config, its live ConfigMap and `origin/trunk` were **all three
+  identical** beforehand → no pending config edit rides along with the roll.
+- `kubectl kustomize` base vs branch differ by **exactly 2 lines**: ConfigMap name and
+  DaemonSet volume ref, both gaining `-f27hbb48cg`. Name-reference transformer rewired
+  the mount correctly.
+- `scripts/kustomize-validate.sh clusters/production/apps/nebula` on the branch **and** on
+  a pristine `origin/trunk` worktree: **byte-identical output**, PASS both, 148 res / 119
+  valid / 0 invalid.
+- **negative control**: a `configMapGenerator` pointing at a missing file makes that same
+  command exit 1 naming the absent path — the gate can go red on this defect shape.
+- verified from the **commit**, not just the working tree.
+
+**Live gateway state as of 2026-09-04T02:40Z:**
+- homelab: resolver live (2 occurrences in the running config), **0** static `.svc`
+  `proxy_pass`, `nginx -t` passes, pod references hashed CM `…-97b4gbm584`. All **36**
+  non-comment `.svc` upstreams resolve to existing Services (positive control: a bogus
+  name correctly reported missing).
+- production: plain ConfigMap, `subPath: nginx.conf`, **42** `proxy_pass` directives, every
+  one an IP literal on `10.42.0.10:<port>` — **zero** hostname upstreams, so it cannot arm
+  a startup-resolution failure at all.
+- both gateway pods rolled ~170m ago, after `417a6386b` reconciled.
+
+**Clawgate**: still no task. `clawgate_handoff.sh resolve` exited **5** (0 tasks for this
+session) with its positive control confirming the board is reachable — a real reading, but
+it cannot distinguish "touched no task" from "wrong session id". No field written.
+
+**Deploy status**: nothing deployed this session. #678 is staged only; no cluster touched.
 
 ## Architecture (researched, not yet implemented)
 
@@ -42,17 +89,33 @@ Authelia runs on the production cluster. Cloudflare handles TLS termination. The
     forcing: none
 11. Commit or discard `nix/programs/alacritty/default.nix`, uncommitted in `~/workspace/devrc`
     and baked into the workbench's built generation, so the two hosts are not identical despite
-    reporting the same sha.
+    reporting the same sha. Tree is still dirty: `flake.lock`, that file,
+    `nix/system/apply-tmp-churn-retention.sh`, plus untracked `output.txt`,
+    `nix/system/check-nebula-relays.sh` and two `scripts/diagnose-*.sh`.
     forcing: regression
-12. A gate asserting every `proxy_pass … .svc.cluster.local` in both gateway configs resolves to
-    a Service defined in the repo. The promptver pair was found by checking all 37 by hand.
+12. A gate asserting every `proxy_pass … .svc.cluster.local` in both gateway configs resolves
+    to a Service defined in the repo. **Narrower than it was**: homelab now resolves at
+    request time so a missing Service degrades one route instead of refusing to boot, and
+    production has no hostname upstreams at all. Still worth having as a correctness check;
+    no longer an outage guard.
     forcing: none
-13. Merge homelab-infra **#653** during a window where a brief mesh interruption per cluster is
-    acceptable.
+13. **Merge homelab-infra #678** during a window where one brief production mesh interruption
+    is acceptable, then **close homelab-infra #653 as superseded**. Only the production
+    gateway rolls; nothing in #678 touches homelab. Leaving #653 open is the live risk — a
+    merge of it would roll BOTH clusters for a change that is redundant on one and
+    incomplete on the other. IN FLIGHT: ZacxDev/homelab-infra#678
     forcing: incident — the 2026-09-02 gateway CrashLoopBackOff
 14. Restart Brave on the `personal - other` profile — it runs a stale extension build
     (`b817ef1e88267a40` vs expected `66b98084daecd880`) and **cannot open tabs at all**, which
     silently degrades the `browser` skill on that profile.
+    forcing: none
+15. Close devrc **#1245** — obsolete duplicate of this handoff (branch
+    `docs/handoff-ferdium-shipped`, opened 2026-09-02, CONFLICTING), superseded by #1266 and
+    #1278 which already merged the richer 207-line doc.
+    forcing: none
+16. `relay-firewall.sh` is NOT Flux-reconciled, so `417a6386b`'s PORTS change reaches diffsona
+    only via `k0sctl apply` or a hand copy plus unit restart. Owed by that commit, not by this
+    session's work.
     forcing: none
 
 ## Ferdium Server config (reference)
@@ -168,40 +231,94 @@ Port: 3333 (container) → 8117 (nebula gateway) → homelab Service port 80.
   session — not by anything here. Check `git branch --show-current` before any write to it, and
   prefer a worktree off `origin/main`.
 
+- 🔴 **`resume-state.sh` MISATTRIBUTES a cross-repo PR written as `<repo> **#N**`.** This
+  handoff writes `homelab-infra **#653**`; the reconciler resolved all five homelab-infra
+  numbers (#646/#647/#651/#653/#668) against **devrc** and emitted two confident DRIFT lines
+  that were both false — `PR #653 MERGED but handoff frames it as open` (devrc #653 is an
+  unrelated conflict-marker fix) and `PR #651 CLOSED without merge`. Real state: homelab-infra
+  #653 OPEN, #651 MERGED. The qualifier regex expects `owner/repo#N` and markdown bold between
+  the repo name and the number defeats it; it should have printed `UNATTRIBUTED` rather than
+  resolving locally. **Write `ZacxDev/homelab-infra#653` in handoffs** until that is fixed —
+  and do not trust a bare `PR #N` line in the digest for cross-repo work.
+- 🔴 **A superseding commit can land between a PR being opened and being read, and the PR's
+  own risk analysis then reads as current forever.** #653's body was accurate, careful, and
+  wrong by the time anyone acted on it — `417a6386b` merged 26h after it was opened and
+  inverted its premise. `gh pr view --json mergeable` said CLEAN throughout, because the base
+  moved on files whose *text* did not collide. **Before acting on any PR older than a day,
+  `git log <base> -- <the files it touches>` since the PR's `createdAt`.**
+- 🔴 **`grep -c <pattern>` counts LINES CONTAINING the string, not directive INSTANCES.** Cost
+  a wrong number in a comment: 46 lines match `proxy_pass` in the production nginx config but
+  **4 are `proxy_pass_request_headers`**, a different directive — the real count is 42. The
+  tell was that a "total 46 / IP-literal 42 / non-IP 0" triple does not add up; a count that
+  is internally inconsistent is the signal, and the fix is to enumerate and read.
+- 🔴 **`git add <staged-deletion-path>` fails the WHOLE `add` invocation.** Passing an
+  already-`git rm`'d path alongside two real ones aborted on `pathspec did not match any
+  files` and staged **neither** of the others; the commit then captured only the deletion —
+  a commit that removed a ConfigMap without adding its replacement. `git status -s` right
+  before the commit is what caught it. Stage paths in separate `add` calls, or check status
+  between staging and committing.
+- **`origin/trunk` moved under this session mid-run** (`7ec3fef4c` → `5fdd770fa`, another
+  session pushing). Branched off the newer one and confirmed the two target files were
+  unchanged across the gap before proceeding.
+- **The homelab-infra worktree needs its toolchain supplied explicitly.** `kustomize-validate.sh`
+  failed twice for instrument reasons before producing a verdict — first `kustomize: command
+  not found`, then the script's own temp `strip-sops.py` failing on `ModuleNotFoundError: yaml`.
+  Working invocation:
+  `nix-shell -p kustomize kubeconform "python3.withPackages(ps: [ps.pyyaml])" --run "bash scripts/kustomize-validate.sh <root>"`.
+  Its root argument is an exact path from `--list-roots`; a trailing glob matches nothing.
+- **`$KC_NEBULA` does not exist — the production cluster handle is `$KC_PROD`**
+  (`~/workspace/homelab-talos/production-kubeconfig`). CLAUDE.md's handle list names
+  `KC_NEBULA`, which is stale; `env | grep ^KC_` is the arbiter.
+
 ## How to verify
 ```bash
-# 1. The account, and that registration is shut (the flag gates the API, not just the UI):
-KUBECONFIG=$KC_HOMELAB kubectl -n ferdium exec deploy/ferdium -- \
-  sh -c 'sqlite3 /data/ferdium.sqlite "select id,email from users;"'
-curl -sS -X POST -H 'Content-Type: application/json' \
-  -d '{"firstname":"a","lastname":"b","email":"probe@example.invalid","password":"abcdefgh12"}' \
-  http://10.42.0.10:8117/v1/auth/signup      # expect "Registration is disabled on this server"
+# ── Ferdium (unchanged; see the account/edge/firewall checks already recorded above) ──
 
-# 2. 🔴 Login through the PUBLIC EDGE, with the wrong-password control. Read BOTH lines —
-#    a 200 alone proves nothing, and the password here is the sha256_b64 the CLIENT sends:
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
-  -u "zachlowden1@gmail.com:$(printf %s '<plaintext>' | openssl dgst -sha256 -binary | base64)" \
-  https://ferdium.zacx.dev/v1/auth/login     # expect 200
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
-  -u 'zachlowden1@gmail.com:WRONG' https://ferdium.zacx.dev/v1/auth/login   # expect 401
+# ── homelab-infra #678, BEFORE merging ──
+# 1. The generated ConfigMap must carry the SAME bytes production is serving now.
+#    If these differ, a config edit is riding along with the roll — stop and read it.
+KUBECONFIG=$KC_PROD kubectl -n nebula exec nebula-gateway-6hjw7 -c nginx \
+  -- cat /etc/nginx/nginx.conf | sha256sum          # expect 970d4bbe…
+git -C /home/zach/workspace/homelab-cmgen show \
+  HEAD:clusters/production/apps/nebula/gateway/nginx.conf | sha256sum   # must match
 
-# 3. The edge is still gated where it should be:
-curl -sSI https://ferdium.zacx.dev/ | head -1                       # 302 -> login.zacx.dev
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST -d '{}' \
-  -H 'Content-Type: application/json' https://ferdium.zacx.dev/v1/auth/signup   # 303 (gated)
+# 2. The build must differ from base by exactly the two name lines.
+kubectl kustomize $HOMELAB/clusters/production/apps/nebula > /tmp/base.yaml
+kubectl kustomize /home/zach/workspace/homelab-cmgen/clusters/production/apps/nebula > /tmp/new.yaml
+diff /tmp/base.yaml /tmp/new.yaml    # expect 8 lines: CM name + volume ref, both -f27hbb48cg
 
-# 4. 8117 must stay dropped from the internet — read all three, one proves nothing.
-#    🔴 The relay's public IP is DERIVED here, never written down: this repo is
-#    PUBLIC and scripts/tests/test_no_public_ips.py fails the suite on a literal.
-#    Do not "simplify" this back to a hardcoded address — it caught exactly that.
-RELAY=$(awk '/ssh:/{f=1} f&&/address:/{print $2; exit}' "$HOMELAB/k0s/diffsona.yaml")
-nix-shell -p netcat-openbsd --run "for p in 8117 8114 8118; do nc -vz -w 6 $RELAY \$p; done"
-#   8117 timeout · 8114 timeout (guarded control) · 8118 refused (unguarded control)
+# 3. The repo gate, on the branch AND on a pristine base — expect byte-identical output.
+nix-shell -p kustomize kubeconform "python3.withPackages(ps: [ps.pyyaml])" \
+  --run "bash scripts/kustomize-validate.sh clusters/production/apps/nebula"
 
-# 5. The only thing that proves the GOAL: the desktop client logs in with the PLAINTEXT and syncs.
+# ── AFTER merging #678: the pod rolls. Confirm it came back on the SAME config. ──
+KUBECONFIG=$KC_PROD kubectl -n nebula rollout status ds/nebula-gateway --timeout=180s
+KUBECONFIG=$KC_PROD kubectl -n nebula get pod -l app=nebula-gateway \
+  -o jsonpath='{range .items[*].spec.volumes[*]}{.name}={.configMap.name}{"\n"}{end}' | grep nginx
+#   expect nebula-gateway-nginx-config-f27hbb48cg  (hashed — NOT the bare name)
+KUBECONFIG=$KC_PROD kubectl -n nebula exec <new-pod> -c nginx -- nginx -t
+KUBECONFIG=$KC_PROD kubectl -n nebula exec <new-pod> -c nginx \
+  -- cat /etc/nginx/nginx.conf | sha256sum          # still 970d4bbe…
+# Then prove the mesh actually carries traffic again — a Ready pod is not evidence:
+curl -sS -o /dev/null -w '%{http_code}\n' https://ferdium.zacx.dev/   # expect 302 -> login.zacx.dev
 ```
 ## Open investigations — live diagnosis state
 ### (CLOSED) Does the desktop client survive the Authelia forward-auth gate?
 - **Resolved 2026-09-03.** It did not, and could not: Authelia intercepted the whole `/v1/` API
   (`POST /v1/auth/signup` → 303, `GET /v1/auth/login` → 302, both to `login.zacx.dev`). Fixed by
   the scoped bypass in #668, which excludes signup. Verified working through the public edge.
+
+### (CLOSED) Is homelab-infra #653 still the right fix for gateway config staleness?
+- **Resolved 2026-09-04. No — superseded by `417a6386b` + #678.**
+- **Observed (with values):** trunk still carries `subPath: nginx.conf` on both gateway
+  DaemonSets, so the mount half of #653 was genuinely undone. But homelab's ConfigMap is now
+  `configMapGenerator`-produced (live pod references `nebula-gateway-nginx-config-97b4gbm584`),
+  so homelab already rolls on every config edit **while keeping subPath**.
+- **Ruled out:** "the directory mount is what fixes staleness" — homelab is correct today and
+  still mounts via subPath; the missing **roll** was the defect, not the mount. via: measurement
+- **Ruled out:** "#653's production half is sufficient" — a directory mount updates the file but
+  does not reload nginx, which re-reads only on SIGHUP, and production has no generator to roll
+  the pod. #653's own body states this. via: doc
+- **Ruled out:** "merging #653 is risky because a gateway restart re-runs startup resolution" —
+  false on both clusters today: homelab resolves at request time, production has 42 proxy_pass
+  directives and **zero** hostnames. via: measurement
