@@ -39,11 +39,12 @@ Live banner `token-ids=a8f329c534d7:zach`, no `UNRESTRICTED-SCOPE LEGACY MODE` �
 control: 6 historical banners in Loki, so that grep CAN match. Mapped credential → **200**;
 legacy credential → **401, dead**; **both hosts read 200**.
 
-🔴 **Claim state (updated 2026-09-04, later session):** `cairn-phase3-1` was taken, its rank
-closed by measurement, and is **released**. **`cairn-phase3-10` is HELD** — homelab-infra
-**#683** is open and that rank's closing condition is a MERGED PR, so the claim stays until it
-lands. `cairn-phase1-migration`, `cairn-phase3-11`, `cairn-phase3-16`, `cairn-phase3-25` and
-**`cairn-phase3-22`** were held for their ranks and are all **released**.
+🔴 **Claim state (updated 2026-09-04, later session):** `cairn-phase3-1` and
+**`cairn-phase3-10`** were taken, both ranks closed, and both are **released** — rank 1 by
+measurement (nothing to shred), rank 10 by homelab-infra **#683** merging as `93e15ee09`.
+`cairn-phase1-migration`, `cairn-phase3-11`, `cairn-phase3-16`, `cairn-phase3-25` and
+**`cairn-phase3-22`** were held for their ranks and are all **released**. **No claim in this
+family is held.**
 
 ⚠ **The pod counts above are the 2026-09-01 execution record and have MOVED** — **205 entries**
 as of 2026-09-03. Carried verbatim because it is the phase-1 evidence, not a current reading.
@@ -713,8 +714,18 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 9. **devrc #1045** — three pre-existing `seed.sh` gaps; the third (local-side `-type f`
    uncovered) mirrors what #998 fixed. ⚠ `#1045` is an **issue, not a PR**.
    forcing: none
-10. 🔴 **BUILT AND PR OPEN 2026-09-04 — homelab-infra #683, awaiting merge.** Branch
-    `fix/vaultwarden-prov-credential-window`, base `f085757c9`, 5 files.
+10. ✅ **DONE 2026-09-04 — homelab-infra #683 MERGED, squash `93e15ee09`.** 5 files.
+    **Verified by CONTENT, not ancestry** (a squash is never an ancestor of the base): the
+    script on `origin/trunk` is byte-identical to the branch, the new test is present, and
+    `mc ilm rule add` sits at line 326 against `mc admin user add` at 328. Base clone
+    re-synced (`0 0`), worktrees removed, claim released.
+    🔴 **Gated on the MERGED TREE, not the branch — and the base HAD moved** (4 commits,
+    `f085757c9` → `e6bb2b9ce`). Merged-tree run: `files_run=58 tests_ran=1654 failed=''`,
+    `broken=` the same three pre-existing CEL `rc=2` as the base control. `RESULT: error`
+    on base *and* merged, entirely from those three — inherited, not introduced.
+    ⚠ **`RESULT: error` is this suite's NORMAL state today** because of those three broken
+    files. Do not read a future `error` here as a finding without diffing the `broken=` set
+    against a base control first.
     🔴 **THIS ITEM'S CLOSING CONDITION AS WRITTEN WAS INSUFFICIENT, and the evidence was
     already in-tree.** It said "a merged PR moving `ilm rule add` above `user add`". The
     sibling `scripts/provision-subsystem-store-backup-bucket.sh` had ALREADY closed this
@@ -744,8 +755,7 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     ⚠ **`test-provision-heredoc.sh` was a guard whose DESCRIPTION claimed more than its body
     did** — header said "the heredoc", body hardcoded one of the two scripts, in a directory
     holding exactly the sibling it was blind to. Widened, with a two-way ledger.
-    **Closing condition (unchanged): a MERGED homelab-infra PR.** Claim `cairn-phase3-10`
-    stays HELD until #683 lands.
+    **Do not re-work.**
     forcing: security
 11. ✅ **DONE 2026-09-02 — `verify-byte-identity.sh` is order-independent.** #1222 `7d9da8f5` +
     #1228 `85257361`, four audit rounds to a clean round, live-verified against the pod.
