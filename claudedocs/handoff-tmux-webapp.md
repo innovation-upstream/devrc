@@ -20,16 +20,21 @@ siblings, NOT one item: different legs, different mechanisms, different closing 
 The live-refresh work (`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as 0.8.21**.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.**
-Last measured 2026-09-01 21:51Z: server **0.8.21**. It was 0.8.19 and 0.8.20 earlier that day,
-shipped by another session mid-work — which is why the number is derived from the live pin, never
-from a doc.
+Last measured 2026-09-04 02:28Z: server **0.8.23**. The previous session recorded 0.8.21 on
+09-01 (and 0.8.19/0.8.20 earlier that same day), so the number has now moved under this doc on
+two consecutive sessions, each time shipped by somebody else mid-work — which is why it is
+derived from the live pin, never from a doc. **0.8.23 does NOT carry #660 or #667** (measured
+below), so the version moving is not evidence that this feature's work deployed.
 
-✅ **RANK 8a — measured green 2026-09-01 21:52Z, and still RECURRING.** Server 0.8.21, both hosts'
-`clawgatectl` 0.8.21, and the cross-host round trip **moved a number**: `view create` on the laptop
-→ `view ls` on the workbench → `view rm`, `[] → 1 → []`. 🔴 **A matching label is NOT the check —
-the round trip is.** Two consecutive sessions have now REFUTED the doc's old "both clients are stale
-again by construction" prediction on test. It stays RECURRING because nothing converges
-`homelab-talos`: re-run the round trip, never read this paragraph.
+✅ **RANK 8a — measured green 2026-09-04 02:28Z, and still RECURRING.** Server 0.8.23, workbench
+`clawgatectl` 0.8.23, laptop `clawgatectl` 0.8.23, and the cross-host round trip **moved a
+number**: `view create` on the LAPTOP → `view ls` on the WORKBENCH → `view rm`,
+`[] → 1 (id 10) → []`. 🔴 **A matching label is NOT the check — the round trip is.** Four
+consecutive sessions have now REFUTED the doc's old "both clients are stale again by
+construction" prediction on test. It stays RECURRING because nothing converges `homelab-talos`:
+re-run the round trip, never read this paragraph.
+⚠ **The client version is `clawgatectl --version`, not `clawgatectl version`** — the bare
+subcommand is `unknown command "version" for "clawgatectl"`, which reads like a broken client.
 
 🔴 **THE LIVE-REFRESH GAP IS CLOSED AND DEPLOYED — `#611`, squash `5d11d9a7`, live as 0.8.21.**
 The server had broadcast `tmux.changed` on every snapshot ingest since #468 with **nothing
@@ -79,6 +84,72 @@ host-side feeder (`tmux-snapshot-push.timer` on the workbench, which collects BO
   Playwright suite (167 ran-ok / 2 skipped, corroborated three ways) were run on each PR's head.
   `internal/store` and `internal/tmux` report `ok` by SKIPPING without `CLAWGATE_TEST_DATABASE_URL`
   — that `ok` is not evidence. No nix sandbox tier exists for this repo.
+
+
+### Session 2026-09-04 (`/resume`) — ranks 21 and 22 opened and IN FLIGHT
+
+- **Branch:** this doc is authored from a clean worktree `~/workspace/devrc-ho2122` on
+  `docs/handoff-tmux-webapp-r21r22`, cut from `origin/main` at `a7dac5bd`.
+  🔴 **The base clone `~/workspace/devrc` was deliberately NOT used.** It sits on another
+  session's branch (`feat/mention-system-repos`) with 7 dirty paths, and its copy of THIS doc was
+  **2078 lines against `origin/main`'s 2202** — merging there would have resolved the wrong base
+  and replaced the committed document with a delta built on a 124-line-stale copy.
+  `resume-state.sh` printed `handoff-read: 🔴 origin/main copy` and handed over the authoritative
+  text; the working-tree copy was never read.
+- **No `clawgate-task:` field is recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks.
+  🔴 That is NOT a clean bill of health: an unknown `CLAUDE_CODE_SESSION_ID` also answers 200 with
+  an empty array, so this cannot distinguish "touched no task" from "wrong id".
+- **The ranked list is UNCHANGED by this session** — no item was closed, renumbered or added, so
+  every live claim slug still points where it did.
+- **Claims `tmux-webapp-21` and `tmux-webapp-22` were both TAKEN (rc 0) and were still HELD when
+  this was written.** Release them once the two agents below land. The unconditional open-PR sweep
+  found no duplicate: nothing open in `innovation-upstream/devrc` or `ZacxDev/homelab-infra`
+  touches `session-manager` or re-audits `#667`.
+- **Two agents were dispatched and both were still running when this doc was written:**
+
+  | rank | what | where it works |
+  |---|---|---|
+  | 21 | the `repo`-per-window producer | isolated devrc worktree → PR against `innovation-upstream/devrc` |
+  | 22 | `/audit-pr 667` round 1, post-merge | its own `refs/audit/pr667-r1` worktree off `homelab-talos` |
+
+  🔴 **NEITHER RESULT IS IN THIS DOC.** If the ranks below still read OPEN, that is this doc's
+  knowledge, not a measurement — run `gh pr list --state open` in BOTH repos before starting
+  either item, and check `claim-work --list` for the two slugs above.
+
+- 🔴 **RANK 21 IS SMALLER THAN ITS OWN ENTRY SAYS — THE CONSUMER HALF IS ALREADY MERGED.**
+  Rank 21 reads as a two-repo item ("the producer, consumed by `internal/api/tmux_ui.go` +
+  `projectOf()` in `homelab-infra`"). Measured on `homelab-talos` at `trunk`, 2026-09-04 — all
+  three parts present: `internal/api/tmux_ui.go:83` carries ``Repo string `json:"repo"` `` with a
+  comment naming itself the Phase-B seam, `:167` carries the passthrough `Repo: r.Repo`, and
+  `internal/ui/tmux.go:322` gives `Repo` first precedence in `projectOf`. **So rank 21 is a
+  devrc-only change and needs no lockstep two-repo ship.** The Go decoder is deliberately
+  permissive, so the producer emitting the key costs the consumer nothing.
+
+- 🔴 **`rev-parse --show-toplevel` IS THE WRONG CALL FOR RANK 21 — AND IT IS THE ONE A READER
+  REACHES FOR.** On a linked worktree it returns the WORKTREE, which is exactly the defect rank 21
+  exists to remove; a session using it ships a change that measurably does nothing.
+  `git -C <path> rev-parse --path-format=absolute --git-common-dir` resolves to the MAIN clone's
+  `.git`, whose parent directory is the repo. **Measured on the workbench 2026-09-04:**
+
+  | path | `--show-toplevel` | `--git-common-dir` | repo |
+  |---|---|---|---|
+  | `~/workspace/devrc-agentlock` | `devrc-agentlock` | `~/workspace/devrc/.git` | `devrc` |
+  | `~/workspace/devrc-ho` | `devrc-ho` | `~/workspace/devrc/.git` | `devrc` |
+  | `~/workspace/devrc/scripts` | `devrc` | `~/workspace/devrc/.git` | `devrc` |
+  | `/tmp` and `$HOME` | (empty, rc≠0) | (empty, rc≠0) | none |
+
+  Two distinct worktrees of one repo collapsing to one name IS rank 21's closing condition,
+  demonstrated at the resolution layer.
+
+- 🔴 **#660 AND #667 ARE MERGED AND STILL NOT DEPLOYED — measured on the live pod, not carried
+  over from the previous session's claim.** `GET http://192.168.50.250:30302/ui/tmux` returns
+  325,121 B containing **0 `<details>`, 0 group markers and 0 `localStorage`**; the running image
+  is `harbor.homelab.lan/library/clawgate:0.8.23`. So the version advancing 0.8.21 → 0.8.23 is
+  **not** evidence that this feature's work shipped — somebody else's change did.
+  🔴 **Consequence for rank 21:** its closing condition names the UI — *"two worktrees of one repo
+  group together in the UI"* — and that half is **unverifiable until clawgate is deployed with
+  #660**. The producer half is fully verifiable today. A green producer test is not the closing
+  condition met, and must not be reported as one.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -2051,6 +2122,26 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
   Worth checking anyway: the JS in `internal/ui/*.go` lives in Go raw string literals, where a
   backtick in a comment terminates the literal — a real near-miss this session, caught by the
   compiler.
+
+- 🔴 **THE STALE-DOC DRIFT THIS FILE KEEPS RE-CREATING FIRED AGAIN, IN A NEW SHAPE.** The previous
+  session recorded it as "identical to `origin/main` is not current when the update is in flight".
+  This time the working-tree copy was not identical at all — it was **124 lines behind** — because
+  the shared base clone sits on an unrelated feature branch that predates the last two handoff
+  merges. Both shapes have the same tell and the same fix: **read the copy `resume-state.sh`
+  names, and author from a worktree cut fresh off `origin/main`.** The failure mode is silent in
+  both directions — reading the stale copy loses ranks 19–23 entirely (they exist only on
+  `origin/main`), and *writing* from it makes `handoff_doc.py` merge into a 2078-line base and
+  replace the committed 2202-line document.
+- **`clawgatectl --version`, never `clawgatectl version`.** The bare subcommand errors with
+  `unknown command "version" for "clawgatectl"`, which reads like a broken or half-deployed
+  client and is not. Both hosts answered `0.8.23`.
+- **A matching version triple is still not rank 8a's check.** Server, workbench client and laptop
+  client all reading 0.8.23 says nothing on its own; the round trip that moves a number is the
+  check, and it is cheap: `view create` on the laptop, `view ls` on the workbench, `view rm`.
+- **The deployed-vs-merged split is now measurable in one command and worth keeping.** Probing the
+  live `/ui/tmux` for `<details>` discriminates "grouping deployed" from "grouping merged" without
+  reading a version at all — which matters because the version number moved twice for reasons
+  unrelated to this feature.
 
 ## How to verify
 
