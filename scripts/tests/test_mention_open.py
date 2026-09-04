@@ -605,15 +605,22 @@ def test_the_workspace_is_resolved_at_CALL_time_too(tmp_path, monkeypatch):
     bound its default at import exactly as `load_known_repos` did, so patching
     `MO.WORKSPACE` was inert — measured: a test believing it had an empty
     workspace ran 91 real `git remote` subprocesses against the real
-    `~/workspace` and read back 79 real repositories."""
+    `~/workspace` and read back 79 real repositories.
+
+    🔴 THIS ASSERTS A CHECKOUT IS FOUND, NOT THAT NONE IS. An earlier version
+    patched `WORKSPACE` to an EMPTY directory and asserted `== {}` — which is
+    exactly what the import-bound default ALSO produces in the SANDBOX tier,
+    where HOME is a fresh empty dir (`flake.nix` exports `HOME=$TMPDIR/home`).
+    Measured: that mutant died on the dev host and SURVIVED under an empty
+    HOME — the guard for this defect was inert in the tier the merge is gated
+    on, and green either way."""
     monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", tmp_path / "absent.json")
-    monkeypatch.setattr(MO, "WORKSPACE", tmp_path / "empty-workspace")
-    (tmp_path / "empty-workspace").mkdir()
-    called = []
-    monkeypatch.setattr(MO, "repo_of_checkout",
-                        lambda path: called.append(path) or "someone/else")
-    assert MO.discover_repos() == {}
-    assert called == [], "it probed a checkout outside the patched workspace"
+    ws = tmp_path / "elsewhere"
+    (ws / "plotwidget" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(MO, "WORKSPACE", ws)
+    monkeypatch.setattr(MO, "repo_of_checkout", lambda path: "gardenersguild/plotwidget")
+    # No argument: the default must be read NOW, from the patched attribute.
+    assert MO.discover_repos() == {"plotwidget": "gardenersguild/plotwidget"}
 
 
 # PASS 3 — an unusable picker, and an empty result that names its cause
@@ -699,6 +706,7 @@ def test_the_namesake_count_is_stated_as_a_FLOOR_not_a_total(spy, monkeypatch):
     "acme//widget",      # empty middle segment
     "acme/widget ",      # trailing space inside the URL path
     "acme/wid\nget",     # embedded newline
+    "acme/widget\n",     # TRAILING newline — `$` matches before it, `\\Z` does not
     "/acme/widget",      # leading slash
     "acme",              # one segment
 ])

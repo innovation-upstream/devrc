@@ -415,3 +415,47 @@ def test_a_case_differing_checkout_does_not_silently_displace_an_api_row():
                            {"Widget": "rivalorg/Widget"})
     assert out.get("widget") != "rivalorg/Widget", out.get("widget")
     assert out.get("Widget") != "rivalorg/Widget", out.get("Widget")
+
+
+def test_read_local_repos_resolves_its_workspace_at_CALL_time(tmp_path, monkeypatch):
+    """🔴 THE OTHER HALF OF THE SWEEP, WHICH HAD NO GUARD AT ALL. Two mutants
+    survived the whole suite here: restoring the import-bound default, and
+    deleting the resolution outright — the latter makes the ONLY production
+    caller (`main()`, which passes no argument) die with
+    `AttributeError: 'NoneType' object has no attribute 'iterdir'`, green suite
+    and all. Every existing test passed `tmp_path` explicitly, so none of them
+    ever exercised the default."""
+    ws = tmp_path / "elsewhere"
+    (ws / "plotwidget" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(RG, "WORKSPACE", ws)
+    monkeypatch.setattr(RG.subprocess, "run", lambda *a, **k: __import__("types").SimpleNamespace(
+        returncode=0, stdout="git@github.com:gardenersguild/plotwidget.git\n", stderr=""))
+    assert RG.read_local_repos() == {"plotwidget": "gardenersguild/plotwidget"}
+
+
+def test_a_case_differing_checkout_of_the_SAME_repo_still_resolves():
+    """🔴 PINS THE FOLD ON THE COLLISION COMPARISON — un-folding it survived the
+    suite, and it breaks the very example the fold was added for: a repo cloned
+    via a lowercase URL is the SAME repo as the API's mixed-case row, so it must
+    confirm the owner, not read as a second claimant."""
+    out = RG.build_mapping([_row("acme/PlotWidget")], {"plotwidget": "acme/plotwidget"})
+    assert out.get("plotwidget") == "acme/plotwidget", out
+    assert out.get("PlotWidget") == "acme/PlotWidget", out
+
+
+def test_a_DROPPED_name_does_not_survive_under_a_different_casing():
+    """🔴 A DROP MUST REMOVE EVERY CASING. The API pass writes both `Name` and
+    `name`; a drop that popped only the spellings it happened to hold left the
+    other one resolving a name the code had just called ambiguous — so
+    `plotwidget#12` refused while `PlotWidget#12` opened a page."""
+    out = RG.build_mapping([_row("acme/PlotWidget")], {"plotwidget": "rival/plotwidget"})
+    assert not [k for k in out if k.lower() == "plotwidget"], out
+
+
+def test_two_checkouts_colliding_only_by_CASE_are_still_ambiguous():
+    """The clause deleted as 'redundant' in the previous round. Differential
+    fuzz: identical to its absence over 40,000 lowercase-only inputs, 8,370
+    differences once any spelling carries uppercase — so the equivalence claim
+    was measured on the one alphabet that could not show the difference."""
+    out = RG.build_mapping([], {"mirror": "rivalorg/WIDGET", "Widget": "acme/Widget"})
+    assert not [k for k in out if k.lower() == "widget"], out

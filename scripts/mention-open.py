@@ -100,7 +100,9 @@ _PASS3_REPO_RE = re.compile(r"^(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]*)#(?P<num>\d+)
 PASS3_MAX_CHOICES = 8
 
 # What a mapping VALUE must look like: exactly two segments, nothing else.
-_OWNER_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+# 🔴 `\Z`, not `$` — `$` matches BEFORE a final newline, so `acme/widget\n`
+# passed and built `github.com/acme/widget\n/issues/12`.
+_OWNER_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 def parse_owner_repo(remote_url: str) -> str:

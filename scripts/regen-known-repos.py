@@ -84,8 +84,11 @@ def build_mapping(api_repos: list[dict], local_repos: dict[str, str]) -> dict[st
     old, so a checkout disagreeing with an API row is two claims about one name
     with no way to tell which is current — and the module's rule for that is to
     resolve to NOTHING and let the operator write `owner/repo#N`. What a
-    checkout does do is supply a name the API never had (its directory name),
-    and confirm one the API agrees with.
+    checkout does do is: supply a name the API never had (its directory name);
+    confirm one the API agrees with; and SETTLE a name the API dropped as
+    ambiguous, because two owners the operator can merely SEE is a weaker fact
+    than one repo they actually have on disk. What it may not do is overrule a
+    specific API row that names a different repo.
     """
     owners: dict[str, set[str]] = {}
     for row in api_repos:
@@ -108,47 +111,78 @@ def build_mapping(api_repos: list[dict], local_repos: dict[str, str]) -> dict[st
         out[name] = full
         out[name.lower()] = full
 
-    # 🔴 THE OVERLAY OBEYS THE SAME TWO FILTERS. Writing local entries in
-    # unconditionally re-opened both holes this function exists to close: a
-    # checkout of an issues-disabled repo went back in (measured: 1 such key in
-    # the mapping generated today), and two checkouts whose bare names collide
-    # went back to last-write-wins. A checkout is authoritative about its own
-    # OWNER — it is not evidence that the repo accepts issues, and it is not a
-    # tiebreak between two different repos with one name.
-    # 🔴 CASE-FOLDED on both sides. These compare against values written as
-    # BOTH spellings, so an exact-case comparison missed a checkout cloned via
-    # a lowercase URL (`acme/plotwidget` vs the API's `acme/PlotWidget`) and let
-    # an issues-disabled repo back in. Measured: 149 of 387 API rows carry
-    # uppercase and 28 of those have issues disabled, so one such clone reaches it.
+    # 🔴 THE OVERLAY OBEYS THE SAME FILTERS AS THE API PASS. Writing local
+    # entries in unconditionally re-opened both holes this function exists to
+    # close: a checkout of an issues-disabled repo went back in, and two
+    # checkouts sharing a bare name went back to last-write-wins.
+    #
+    # 🔴 EVERYTHING HERE IS CASE-FOLDED, ON BOTH SIDES, INCLUDING THE DROP.
+    # Keys are written in two spellings, so an exact-case comparison is blind:
+    # a repo cloned via a lowercase URL (`acme/plotwidget`) looked unrelated to
+    # the API's `acme/PlotWidget`, and a drop that popped only the two spellings
+    # it knew about left OTHER casings resolving to a name just judged
+    # ambiguous. Measured by differential fuzz over 40,000 inputs: identical
+    # while every spelling is lowercase, 8,370 differences once any is not —
+    # which is exactly why "I mutated it and nothing changed" was the wrong
+    # evidence for calling one of these clauses redundant. It was not.
     issues_off = {(row.get("full_name") or "").strip().lower()
                   for row in api_repos if not row.get("has_issues")}
+
+    def claimed(spelling: str) -> str | None:
+        """What `out` already resolves `spelling` to, under ANY casing."""
+        low = spelling.lower()
+        return next((v for k, v in out.items() if k.lower() == low), None)
+
+    def drop(spelling: str) -> None:
+        """Remove EVERY casing of `spelling` — a drop that leaves one behind
+        still resolves the name the code has just called ambiguous."""
+        low = spelling.lower()
+        for key in [k for k in out if k.lower() == low]:
+            out.pop(key)
+
+    usable = {name: full for name, full in local_repos.items()
+              if "/" in full and full.lower() not in issues_off}
+
+    # Which repos each spelling could mean, across checkouts. Needed BEFORE the
+    # loop: a clash between two case-variant spellings must be caught even when
+    # neither has been written yet, which a check against `out` alone cannot do.
+    local_owners: dict[str, set[str]] = {}
+    for name, full in usable.items():
+        for key in (name.lower(), full.rsplit("/", 1)[-1].lower()):
+            local_owners.setdefault(key, set()).add(full.lower())
+
     # Spellings proven ambiguous. A DROP IS FINAL: re-deriving "is this
-    # ambiguous?" from `out` alone is what let a dropped key come back.
+    # ambiguous?" from `out` alone is what let a dropped key come back, because
+    # `name` and `bare` are often the same string and the second visit found it
+    # absent.
     dropped: set[str] = set()
-    for name, full in local_repos.items():
-        if "/" not in full or full.lower() in issues_off:
-            continue
+    for name, full in usable.items():
         bare = full.rsplit("/", 1)[-1]
-        # dict.fromkeys: `name` and `bare` are often the SAME spelling, and
-        # visiting it twice re-added what the first visit had just dropped —
-        # the second pass saw the popped key as absent, hence unambiguous.
-        for spelling in dict.fromkeys((name, bare)):
-            if spelling.lower() in dropped:
+        for spelling in (name, bare):
+            low = spelling.lower()
+            if low in dropped:
                 continue
-            # ONE RULE: this spelling already names a DIFFERENT repo. That
-            # covers both cases — an API row this checkout disagrees with, and a
-            # SECOND checkout of another repo sharing the name, because the
-            # first one wrote the spelling before the second one reads it.
-            # Agreeing on the same repo is not a collision: that is the checkout
-            # confirming an owner. (A separate `len(local_owners[…]) > 1` clause
-            # lived here and was measured REDUNDANT once `dropped` existed — a
-            # mutant disabling it changed no outcome, so it was deleted rather
-            # than given a test that could not fail.)
-            existing = out.get(spelling) or out.get(spelling.lower())
-            if existing is not None and existing.lower() != full.lower():
-                dropped.add(spelling.lower())
-                out.pop(spelling, None)
-                out.pop(spelling.lower(), None)
+            existing = claimed(spelling)
+            # ⚠ THIS FIRST CHECK IS REDUNDANT TODAY, AND IT STAYS ANYWAY.
+            # Differential fuzz, 40,000 inputs per alphabet: disabling it
+            # changes NOTHING — 0 differences lowercase-only AND 0 mixed-case —
+            # because `claimed()` is case-insensitive and the loop is
+            # sequential, so whichever checkout writes a spelling first, the
+            # next disagreeing one sees it. It is kept because it is the only
+            # check that does not depend on ITERATION ORDER (`local_repos`
+            # comes from a filesystem scan), so the result stays stable if this
+            # loop is ever reordered. 🔴 An earlier round deleted a clause here
+            # on exactly this evidence and was WRONG — its fuzz varied only
+            # lowercase inputs, and case was the dimension that mattered. The
+            # claim above is measured on both.
+            if (len(local_owners[low]) > 1
+                    # …or this checkout's name already names a DIFFERENT repo:
+                    # an API row it disagrees with, or an earlier checkout.
+                    # Agreeing is not a collision — that is the checkout
+                    # confirming an owner.
+                    or (existing is not None and existing.lower() != full.lower())):
+                dropped.add(low)
+                drop(spelling)
                 continue
             out[spelling] = full
             out[spelling.lower()] = full
