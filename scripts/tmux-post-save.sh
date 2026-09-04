@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tmux-post-save.sh — tmux-resurrect @resurrect-hook-post-save callback.
+# tmux-post-save.sh — tmux-resurrect @resurrect-hook-post-save-all callback.
 #
 # Runs tmux-session-restore.py save in the background so the hook never blocks
 # continuum's own save cycle.  Captures the claude-session-to-window mapping

@@ -48,7 +48,19 @@ in
         # (15 min).  The hook script runs in the background so continuum's own
         # save is never blocked.  This keeps restore-plan.json fresh so a crash
         # recovery always has a recent plan.
-        set -g @resurrect-hook-post-save '~/.config/tmux/tmux-post-save.sh'
+        #
+        # 🔴 THE KIND IS `post-save-all`, NOT `post-save`.  resurrect only ever
+        # invokes five kinds (post-save-layout, post-save-all, pre-restore-all,
+        # pre-restore-pane-processes, post-restore-all); `execute_hook` looks up
+        # `@resurrect-hook-<kind>` and an option nobody invokes reads back as ""
+        # and is silently a no-op.  This line said `post-save` from the day it
+        # landed, so the callback NEVER ran: the log it writes on every run had
+        # never been created and tmux-session-restore.service failed on every
+        # boot with a plan >1400h stale.  `post-save-all` fires at the end of
+        # save.sh with no args, which is what this callback wants;
+        # `post-save-layout` fires earlier and is passed the state file path.
+        # Pinned by scripts/tests/test_tmux_resurrect_hook_names.py.
+        set -g @resurrect-hook-post-save-all '~/.config/tmux/tmux-post-save.sh'
       '';
     }
     {
