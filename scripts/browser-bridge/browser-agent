@@ -348,22 +348,6 @@ OCJSON
   return 1
 }
 
-_oc_ver="$(oc_warm_version)"
-if oc_is_warm "$_oc_ver" || oc_bootstrap "$_oc_ver"; then
-  OC_ISOLATED=1
-else
-  echo "browser-agent: WARNING: could not warm the isolated opencode config dir '$OC_CONFIG_DIR' (opencode $_oc_ver, timeout ${OC_WARM_TIMEOUT}s). Falling back to the GLOBAL opencode config — this run works but costs ~7.7k extra input tokens PER REQUEST (x\$STEPS) for an AGENTS.md this agent cannot act on. Fix: make '$OC_CONFIG_DIR' writable and re-run ONCE with network available (the warm step needs to npm-install @opencode-ai/plugin into it)." >&2
-fi
-
-# Fail loud if an instruction file ever appears here — that would silently
-# reintroduce the whole cost this isolation exists to remove.
-for _stray in "$OC_CONFIG_DIR/AGENTS.md" "$OC_CONFIG_DIR/CLAUDE.md"; do
-  [ -e "$_stray" ] && die "unexpected instruction file at '$_stray' — the isolated opencode config dir must stay free of AGENTS.md/CLAUDE.md (that is the entire point; see the comment above). Remove it."
-done
-
-if [ "$OC_ISOLATED" = 1 ]; then
-  export OPENCODE_CONFIG_DIR="$OC_CONFIG_DIR"
-fi
 
 # Emit a compact schema result on stdout and exit (0 for ok/partial, 1 for
 # blocked). NEVER prints raw page content — only the structured schema.
@@ -428,6 +412,42 @@ case "$TIMEOUT" in (*[!0-9]*|"") die "--timeout must be a positive integer of se
 [ -r "$TOOL_JS" ] || die "custom tool not found: $TOOL_JS"
 [ -r "$TOOL_IMPL" ] || die "custom tool impl not found: $TOOL_IMPL"
 [ -r "$PARSER" ] || die "parser not found: $PARSER"
+
+# --- opencode isolation bootstrap -------------------------------------------- #
+# 🔴 DELIBERATELY BELOW ARGV VALIDATION. This warms an isolated opencode config
+# dir by npm-installing @opencode-ai/plugin, which needs the NETWORK. It used to
+# run at script load, ABOVE the `--dry-run`/goal parsing, so EVERY invocation paid
+# it -- including ones that die two steps later at `a goal is required`, having
+# never used the dir.
+#
+# That is not just waste, it broke CI: the devrc-pytests nix build sandbox has NO
+# network, so the warm stalled to OC_WARM_TIMEOUT (90s) + OC_LOCK_BUDGET (+30s)
+# and the browser-bridge tests that invoke `agent` blew their 300s budget.
+# Measured 2026-09-04 under `unshare -rn`: 287.68s against a 300s ceiling, which
+# is why it failed intermittently and never reproduced for anyone with network.
+#
+# Moving it here changes NO behaviour for a run that proceeds -- every path that
+# reaches opencode still passes through this -- it only stops runs that are about
+# to `die` on their arguments from doing network I/O first. The `command -v
+# "$OPENCODE_BIN"` preflight noted above still runs BEFORE this, so the ordering
+# constraint it documents (preflight before the bootstrap can rm -rf the cache)
+# is preserved.
+_oc_ver="$(oc_warm_version)"
+if oc_is_warm "$_oc_ver" || oc_bootstrap "$_oc_ver"; then
+  OC_ISOLATED=1
+else
+  echo "browser-agent: WARNING: could not warm the isolated opencode config dir '$OC_CONFIG_DIR' (opencode $_oc_ver, timeout ${OC_WARM_TIMEOUT}s). Falling back to the GLOBAL opencode config — this run works but costs ~7.7k extra input tokens PER REQUEST (x\$STEPS) for an AGENTS.md this agent cannot act on. Fix: make '$OC_CONFIG_DIR' writable and re-run ONCE with network available (the warm step needs to npm-install @opencode-ai/plugin into it)." >&2
+fi
+
+# Fail loud if an instruction file ever appears here — that would silently
+# reintroduce the whole cost this isolation exists to remove.
+for _stray in "$OC_CONFIG_DIR/AGENTS.md" "$OC_CONFIG_DIR/CLAUDE.md"; do
+  [ -e "$_stray" ] && die "unexpected instruction file at '$_stray' — the isolated opencode config dir must stay free of AGENTS.md/CLAUDE.md (that is the entire point; see the comment above). Remove it."
+done
+
+if [ "$OC_ISOLATED" = 1 ]; then
+  export OPENCODE_CONFIG_DIR="$OC_CONFIG_DIR"
+fi
 
 # (The `command -v "$OPENCODE_BIN"` preflight that used to live here has been
 # HOISTED to just under `die()`, above the config-dir bootstrap — see the 🔴

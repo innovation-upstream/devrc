@@ -497,23 +497,55 @@ def test_POSITIVE_CONTROL_the_missing_goal_error_is_producible(bridge):
         f"assertions below are vacuous. stderr was: {r.stderr!r}")
 
 
-def test_the_free_text_list_covers_agent_too(bridge):
+def test_the_free_text_list_covers_agent_too(bridge, tmp_path):
     """A TRAILING bw:// is a GOAL for `agent`, not a route.
 
     Dropping `agent` from REF_FREE_TEXT_SUBCOMMANDS SURVIVED an audit's mutation
-    because nothing exercised it. The discriminator is deterministic and needs no
-    backend: with `agent` on the list the reference survives as the goal, so
-    `browser-agent` gets one; with `agent` dropped, the token is stripped out as
-    routing and the agent is left with NO goal at all — which it refuses by name,
-    before any network work.
+    because nothing exercised it. With `agent` on the list the reference survives
+    as the goal and reaches browser-agent; with `agent` dropped, the token is
+    stripped out as routing and the agent is handed NO goal at all.
+
+    🔴 Driven against a STUB browser-agent that echoes its argv, and that is a
+    correctness change as well as a speed one.
+
+    It used to assert the ABSENCE of two error strings from the REAL
+    browser-agent, which meant a unit test of argv routing spun up an entire
+    opencode agent session to find out. That cost ~10s with network and, in the
+    devrc-pytests nix sandbox which has NONE, stalled on the config-dir warm hard
+    enough to blow the 300s budget — measured 287.68s under `unshare -rn`, the
+    thin margin being why it failed intermittently and never reproduced locally.
+    (browser-agent no longer warms before argv validation, which fixes the
+    no-goal case above; this test passes a goal, so only a stub avoids the agent.)
+
+    Asserting the goal ARRIVED is also strictly stronger than asserting two
+    errors did not appear: an absence pair passes if the wording changes, if the
+    agent dies earlier for an unrelated reason, or if the stub never runs. The
+    mutation this exists to catch — `agent` off REF_FREE_TEXT_SUBCOMMANDS — still
+    fails it, because the reference would then never reach argv at all.
+
+    The real error strings stay covered by the positive control above, which runs
+    the REAL browser-agent and is cheap because it dies at goal validation.
     """
-    r = bridge.run("agent", "--dry-run", CANONICAL)
-    assert "a goal is required" not in r.stderr, (
-        "the trailing reference was consumed as a route, leaving no goal: "
-        + r.stderr)
-    assert "agent cannot honour" not in r.stderr, (
-        "a TRAILING reference must be text for `agent`, not a refused route: "
-        + r.stderr)
+    stub_dir = tmp_path / "stub-free-text"
+    stub_dir.mkdir()
+    (stub_dir / "browser").write_text(CLI.read_text(encoding="utf-8"),
+                                      encoding="utf-8")
+    # write_exec owns the shebang — see the note at the BB_* stubs below; a
+    # hand-written `#!/usr/bin/env bash` is ENOENT in the nix build sandbox.
+    mockbin.write_exec(stub_dir / "browser-agent",
+                       'printf "ARGV=[%s]\\n" "$*"\n')
+
+    r = subprocess.run(
+        ["bash", str(stub_dir / "browser"), "agent", "--dry-run", CANONICAL],
+        env=bridge.env_for_stub(),
+        capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
+
+    assert "ARGV=[" in r.stdout, (
+        f"the stub agent never ran, so this test proves nothing: "
+        f"{r.stdout!r} / {r.stderr!r}")
+    assert CANONICAL in r.stdout, (
+        "the trailing reference did not survive as the goal — it was consumed "
+        f"as routing, so browser-agent was handed none. stdout: {r.stdout!r}")
 
 
 # --------------------------------------------------------------------------- #
@@ -648,7 +680,7 @@ def test_agent_refuses_a_tab_from_ANY_source(bridge, argv, env, source):
     assert bridge.bodies == [], f"nothing may be dispatched: {bridge.bodies}"
 
 
-def test_agent_without_any_tab_is_untouched(bridge):
+def test_agent_without_any_tab_is_untouched(bridge, tmp_path):
     """INVARIANT GUARD: the refusal is scoped to a ROUTING VARIABLE, not to `agent`.
 
     A guard widened onto the subcommand rather than the state would break the
@@ -659,10 +691,34 @@ def test_agent_without_any_tab_is_untouched(bridge):
     This replaces a near-duplicate (`test_agent_still_works_with_an_explicit_
     instance`) that had identical input and the same two assertions, differing
     only in its failure text.
+
+    Driven against a STUB browser-agent, matching the routing-refusal tests
+    directly below, which is where this case belongs anyway. It previously ran the
+    REAL agent — a full opencode session — purely to observe that two error
+    strings were absent: 10.5s with network, and in the devrc-pytests nix sandbox
+    (no network) a 90s config-warm stall plus the global-config fallback. Reaching
+    the stub at all is the positive statement of the same invariant: if the guard
+    widened onto the subcommand, the CLI would refuse before exec and `ARGV=[`
+    would never appear.
     """
-    r = bridge.run("--instance", "main", "agent", "--dry-run", "do a thing")
-    assert "agent cannot honour" not in r.stderr, r.stderr
-    assert "a goal is required" not in r.stderr, r.stderr
+    stub_dir = tmp_path / "stub-untouched"
+    stub_dir.mkdir()
+    (stub_dir / "browser").write_text(CLI.read_text(encoding="utf-8"),
+                                      encoding="utf-8")
+    mockbin.write_exec(stub_dir / "browser-agent",
+                       'printf "ARGV=[%s]\\n" "$*"\n')
+
+    r = subprocess.run(
+        ["bash", str(stub_dir / "browser"), "--instance", "main",
+         "agent", "--dry-run", "do a thing"],
+        env=bridge.env_for_stub(),
+        capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
+
+    assert "ARGV=[" in r.stdout, (
+        "the agent was refused before exec, so a legitimate `--instance main "
+        f"agent` no longer works: {r.stdout!r} / {r.stderr!r}")
+    assert "do a thing" in r.stdout, (
+        f"the goal did not reach browser-agent. stdout: {r.stdout!r}")
 
 
 # --------------------------------------------------------------------------- #
