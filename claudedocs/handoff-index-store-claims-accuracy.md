@@ -22,38 +22,41 @@ reading, and per the protocol no field was written and no task was created.
 
 ## State now
 
-**DONE — rank 1 CLOSED: the writer is identified, the mechanism reproduced, and the
-bullet-level divergence reconciled onto the pod.**
+**RANK 1 CLOSED — writer identified, divergence reconciled, and the write path is now open.**
 
-- **The writer is Claude Code sessions themselves**, using the `Edit`/`Write` tools directly
-  on `~/.claude/analyze-service-index/`. The `0444` freeze is INERT against them: those tools
-  rewrite-and-rename, which needs only the containing directory's write bit (`0755`).
-  Reproduced live in a replica (`0444` file in a `0755` dir):
-  | path | result |
-  |---|---|
-  | shell `>>` | **EACCES** — the freeze works as designed |
-  | `Edit` tool | **writes through, leaves the file `0444`** (mode preserved from the source) |
-  | `Write` tool (new file) | creates at **`0644`** (umask; no source mode to preserve) |
-  That is the whole 0444-vs-0644 split seen in the tree — two tools, not two writers.
-  Attributed: session `aaa78f1b-0034-43e5-87c6-843d42ce2d0a` ran `Edit` on
-  `~/.claude/analyze-service-index/devrc/tests.md` at `2026-09-02T15:39:26Z` = the file's exact
-  `10:39:27` CDT mtime.
-- **Reconciled: 8 entries `cairn put`, 21 stranded bullets restored + 2 revisions applied.**
-  Verified at the CONSUMER, not the write: after `cairn sync` the two bullets measured dark
-  earlier (`devrc/tests.md` "A GUARD OVER TEXT…", `homelab-talos/devrc-ci.md` "DO NOT RETRY THE
-  NODE UNPIN") are now served by the pod. Residual local-only bullets = **6, none stranded**:
-  1 is this session's own hand-merge artifact, 5 are pod-newer stale remnants (below).
-- `devrc#1232` is **MERGED** — the old rank 2 is done, not pending.
+- **The writer was Claude Code sessions themselves**, using `Edit`/`Write` on
+  `~/.claude/analyze-service-index/`. The `0444` freeze is INERT against them: those tools
+  rewrite-and-rename, needing only the containing directory's `0755` bit. Reproduced in a
+  replica — shell `>>` gets EACCES; `Edit` writes through and leaves the file `0444`; `Write`
+  creates at `0644`. That is the whole 0444-vs-0644 split in the tree: two tools, not two
+  writers. Attributed: session `aaa78f1b…` ran `Edit` on `devrc/tests.md` at
+  `2026-09-02T15:39:26Z` = that file's exact `10:39:27` CDT mtime.
+- **Reconciled:** 21 stranded bullets + 2 revisions across 8 entries via `cairn put`, verified
+  at the CONSUMER (the two bullets measured dark now resolve through `cairn`).
+- **`devrc#1254` → squash `34d00d90`** — the CREATE verb (`PUT` + `If-None-Match: *`, 201,
+  `X-Store-Status: already-exists`, `os.link` for atomicity, `cairn create`, exit 9).
+- **DEPLOYED AND VERIFIED LIVE:** image `subsystem-store-api:0.7.0`
+  (`sha256:2f6d2f30…`), pinned in homelab-infra `trunk@42c6d9a`, pod up on 0.7.0 with 0
+  restarts. `cairn create` against an existing entry now returns **exit 9 / already-exists**
+  where it returned **405 read-only** before. That is the exact failing path, exercised.
+- **`devrc#1277` → squash `8e12ec3d`** — `browser-agent`'s warm-lock release trap, armed AT
+  ACQUISITION (the pre-existing `trap _cleanup_all` sits ~100 lines below the window and never
+  touched the lock). Verified by content on `origin/main`; gated green on the sandbox tier
+  (pytests 21353/0, nodetests 1449/0) at merged tree `b8380b89`.
+- **`devrc#1259` → squash `13775144`** — the session→task resolver's opencode blindness,
+  recorded in `handoff-cairn-task-linkage.md`.
+- `devrc#1232` was **already merged** when this effort re-checked it — that rank was stale.
 
-**IN FLIGHT:**
-- **A subagent is building the create verb** on an isolated worktree: a server-side create route
-  for `scripts/subsystem-store-api/server.py` (recommended shape `PUT` + `If-None-Match: *`),
-  a `cairn create` client verb, and the SKILL.md prescription fixes. **PR number not yet known
-  — the agent had not reported back when this doc was written.** Until it lands AND the store
-  image is rebuilt and the pod redeployed, the 5 local-only ENTRIES cannot be reconciled.
-
-**NOT DONE, by explicit operator decision:**
-- The hard-freeze (chmod scope dirs `0555`) was deferred — see ranked item 3.
+**BLOCKED, and it is a PERMISSION not a mechanism:**
+- Two entries remain local-only — `civitai-app-requests/app-requests.md` and
+  `civitai-developer-docs/apps.md`. `cairn create` answers `not-found` for both, and
+  `cairn doctor` confirms the cause: **neither scope is in this token's allowlist**. The 404 is
+  deliberately ambiguous so an error cannot enumerate the store. Widening the allowlist means
+  editing the k8s secret and deleting the pod (the token file is read ONCE at startup, no
+  reload) — an access-control change and a second outage window, left for the operator.
+- ⚠ The earlier framing "5 entries blocked by the missing verb" is **superseded**: another
+  session pushed 4 of the 5 via `seed.sh` while this work was in flight, and the 2 that remain
+  were never blocked by the verb at all.
 
 ## Open investigations — live diagnosis state
 
@@ -163,41 +166,51 @@ bullet-level divergence reconciled onto the pod.**
 
 ## Next steps (ranked)
 
-1. **Land the create verb, then reconcile the 5 local-only ENTRIES.** The subagent's PR (number
-   unknown at write time — find it with `gh pr list --repo innovation-upstream/devrc --search
-   'create verb in:title'` or by branch) must merge, then the store image must be REBUILT and
-   the pod REDEPLOYED before any client can create. Only then can these land:
-   `civitai/civitailink.md`, `civitai/model-retention.md`,
-   `civitai-app-starters/civitai-components.md`, `civitai-developer-docs/apps.md`,
-   `datapacket-talos/app-block-launch-metrics.md`. 🔴 Merged ≠ deployed: the pod runs a built
-   image, so `git merge` changes nothing about what the store accepts.
-   forcing: regression — those 5 entries are invisible to every reader today, and the count
-   grows: one landed at 23:23 mid-investigation.
-
-2. **Hard-guard `scripts/subsystem-store-api/seed.sh`** (devrc). Header still opens
-   `🔴 THE LOCAL STORE IS AUTHORITATIVE` (line 4); extract "adds and overwrites but never
-   deletes" (lines 322-323). Fix is an inversion of the `comm -23` containment set it already
-   computes, plus the header. 🔴 The blast radius is now MEASURED HIGHER than the previous
-   estimate: beyond the ~22 cairn-attributed bullets, it would revert the 5 pod-newer bullets
-   named in the open investigation above, including two `RESOLVED` closures.
+1. **Hard-guard `scripts/subsystem-store-api/seed.sh`.** Never started, and it is the largest
+   remaining hazard. `origin/main` still opens `🔴 THE LOCAL STORE IS AUTHORITATIVE` (line 4)
+   and its extract "adds and overwrites but never deletes" (lines 322-323). 🔴 The blast radius
+   is MEASURED HIGHER than when this doc was first written: beyond the cairn-attributed
+   bullets, it would revert the **5 pod-newer bullets** this effort found — including two
+   `OPEN:`→`RESOLVED` closures. Fix is an inversion of the `comm -23` containment set it
+   already computes, plus the header.
    forcing: regression — the cutover inverted the authority and the script was never updated;
-   a one-off footgun becomes a recurring data-loss job if anyone automates it.
+   a one-off footgun becomes a recurring data-loss job the moment anyone automates it.
 
-3. **Decide the unprescribed write path: hard-freeze the mirror or accept it.** Item 1 fixes
-   the PRESCRIBED route; it does not stop a session that edits the mirror out of habit, because
-   `Edit` silently succeeds there. `chmod 0555` on the scope directories would make it fail
-   loudly. 🔴 Check `analyze-service-index-commit.timer` and `backup.py` first — both walk that
-   tree and the commit service writes into it. Operator deferred this once, deliberately.
-   forcing: regression — content stranded on 5 separate days while the freeze read as effective.
+2. **Fix the opencode blindness in `scripts/lib/clawgate_handoff.sh`.** Diagnosed and recorded
+   (`13775144`), NOT fixed. It reads only `CLAUDE_CODE_SESSION_ID` — `grep -c OPENCODE_SESSION_ID`
+   is **0**. Detached opencode ⇒ exit 3 forever (a task can never be recorded); NESTED opencode
+   INHERITS the outer Claude session's id ⇒ exit 0 with **another session's tasks**, written into
+   an opencode-authored doc. The browser bridge already fails closed on exactly this
+   (`X-Session-Origin: opencode-inherited`); this flow never learned it.
+   forcing: regression — the nested path silently misattributes today.
 
-4. **Fix devrc#1170's 🟡5 and 🟡6** (`scripts/lib/subsystem_touch.py`,
-   `claude/skills/subsystem-index/SKILL.md`, `claude/skills/analyze-service/reference/index-store.md`).
-   🟡5: `SKILL.md:148` says read the policy the probe named on its `policy:` line, but the
-   `/analyze-service` door reaches the write half via `service_recon.py` + `--template`, neither
-   of which emits one. 🟡6: `--template` over an EXISTING entry prints the first-ever-file
-   template and exits 0 silently, destroying an `OPEN:` bullet. Fixes: emit `policy:` from the
-   existing `governing_policy()`; add a create mode using `os.open(..., O_CREAT|O_EXCL, 0o444)`.
+3. **Run `scripts/ship.sh`.** Never run in this effort. The workbench looked current (the
+   corrected `prune-index`/`subsystem-index` prose resolves in its nix-store copy) but the
+   **laptop is UNVERIFIED**, so a session there may still be told to write new entries into the
+   dead mirror. Read every per-host line, not the final verdict.
+   forcing: regression — a stale prescription on one host reintroduces the defect this whole
+   effort closed.
+
+4. **Decide the token allowlist for the 2 remaining entries** (`civitai-app-requests`,
+   `civitai-developer-docs`). Operator call: it widens a credential's scope and costs an outage
+   window. Until then those two are invisible to every reader.
    forcing: none
+
+5. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Never started. 🟡5: `subsystem-index/SKILL.md:148` says to
+   read the policy the probe named on its `policy:` line, but the `/analyze-service` door reaches
+   the write half via `service_recon.py` + `--template` — **re-measured 2026-09-04: 0 occurrences
+   of `policy:` in `service_recon.py` on `origin/main`**, so the caller is told to read a policy
+   nobody named. 🟡6: `--template` over an EXISTING entry prints the first-ever-file template and
+   exits 0 silently, destroying an `OPEN:` bullet. Fixes: emit `policy:` from the existing
+   `governing_policy()`; add a create mode using `os.open(..., O_CREAT|O_EXCL, 0o444)`.
+   forcing: none
+
+6. **`main` is RED on `scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py`**
+   (`test_a_body_file_written_by_a_heredoc_on_the_same_line_is_read`). Found while gating
+   #1277 and PROVEN inherited: it fails on `origin/main` with the PR's diff absent,
+   deterministically in 0.24s, on a quiet box. ⚠ The SANDBOX tier does NOT reproduce it — only
+   the dev-host tier — so it is invisible to the gate a merge is judged on. Unowned.
+   forcing: regression — a red dev-host tier trains everyone to merge through it.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The sweep needed THREE widenings and each read as complete.** `no off-machine backup` → 12;
@@ -306,6 +319,39 @@ bullet-level divergence reconciled onto the pod.**
 - ⚠ **Environment, unchanged:** the shared `devrc` clone still holds another session's
   uncommitted WIP (`nix/programs/alacritty/default.nix`, `nix/system/apply-tmp-churn-retention.sh`,
   `output.txt`, two `scripts/diagnose-*.sh`). Nothing here touched them.
+
+- 🔴 **A COMMIT MESSAGE WRITTEN FROM MEMORY SHIPPED A FALSE CLAIM, AND THE DEFECT IT SAID WAS
+  FIXED WENT WITH IT.** `3c8e37da` asserted a 🔴 fix; the pushed blob contained **none** of it
+  (`grep -c OC_LOCK_PID_FILE` = 6 where it should have been 0). Cause: the red-at-base check
+  restores with `git checkout HEAD -- <file>`, and it was run BEFORE committing, so `HEAD` was
+  the pre-fix commit and the "restore" reverted the uncommitted work. `git add` then staged a
+  file that no longer held the change. **Read the claim off the committed blob, never off what
+  you remember editing** — and commit before any checkout-based experiment.
+- 🔴 **A CONTROL THAT SHARES THE CONTAMINANT IS NOT A CONTROL.** A browser-bridge failure
+  reproduced on `origin/main`, which read as "inherited / main is broken" and was reported that
+  way. It was neither: a machine-global orphaned lock was failing both runs. The rule names this
+  shape exactly, and it was still walked into. The discriminator that worked was removing the
+  suspected cause and watching the test pass (165s), not a second sample.
+- 🔴 **THE PIPE TRAP FIRED FOUR TIMES IN ONE SESSION** — `… | tail; echo "rc=$?"` printed
+  `GATE_RC=0` over `GATE: RESULT=FAIL exit=1`, and `NIXBUILD_RC=0` over a failed derivation.
+  Reading the runners' own `RESULT:` line is the only thing that caught it each time.
+- 🔴 **A GUARD CAN PIN THE DEFECT.** `test_index_append_protocol.py` asserted that
+  `prune-index/SKILL.md` still contained "any editor write against one fails with `EACCES`" —
+  the exact falsehood the work existed to correct. Correcting the prose turned the suite red.
+  The same false sentence appeared in THREE places in that file family; two conflict markers
+  pointed at none of them.
+- 🔴 **A TEST CAN PASS FOR THE WRONG REASON IN THE DIRECTION THAT HIDES THE BUG.** #1277's
+  release test asserted `not lock.exists()` after a kill — which is also true when the run
+  simply completed. It only became meaningful once the kill was gated on a marker written
+  INSIDE the warm (0.03s → 3.12s), proving the lock was held at that moment.
+- **The gate's own tiers disagree, and the merge is judged on one of them.** The dev-host tier
+  is red on a test the sandbox tier passes. `gate.sh` never invokes `nix build`; the sandbox
+  builds from a store copy with no `.git`, so the whole repo-local guard class evaluates
+  differently. Run both, and name the tier in any claim.
+- ⚠ **Concurrent agents corrupt each other's test results on this box.** Load hit 62 on 24
+  cores; three separate failures this effort investigated were other sessions' suites, not
+  code. `browser-agent`'s machine-global lock was one mechanism; raw CPU contention was
+  another. Any red measured above ~load 20 needs a control before it means anything.
 
 ## How to verify
 
