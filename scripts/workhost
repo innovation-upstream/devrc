@@ -1,0 +1,766 @@
+#!/usr/bin/env python3
+"""workhost — reach a dev host over whichever network path is actually up.
+
+One machine is reachable by several addresses (LAN, nebula mesh, tailscale).
+Which of them works depends on where the client is sitting right now. This tool
+probes every path in parallel on every invocation, reports the state of all of
+them, and then connects over the best one available.
+
+Three states per path, never two:
+
+    ok              the path answered a real SSH auth handshake
+    unreachable     an address is known for this path, but it did not answer
+    not-configured  no address exists for this path at all (yet)
+
+Collapsing the last two is the defect this tool exists to avoid: "nothing
+happened" is the observable that the most causes share, so it identifies none
+of them. `tailscale` is wired up today and reports `not-configured` until a
+tailnet actually exists; it lights up with no code change once it does.
+
+Adding a host is a new entry in HOSTS below, not a code change.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Optional
+
+# ---------------------------------------------------------------------------
+# Exit codes
+# ---------------------------------------------------------------------------
+
+#: No usable path to the host. Distinct from any remote exit code so a script
+#: can tell "I could not reach the box" apart from "the command failed".
+EXIT_NO_PATH = 3
+
+# ---------------------------------------------------------------------------
+# Path states
+# ---------------------------------------------------------------------------
+
+OK = "ok"
+UNREACHABLE = "unreachable"
+NOT_CONFIGURED = "not-configured"
+
+#: Connection preference, best first. LAN is lowest-latency, nebula works from
+#: anywhere the mesh is up, tailscale is the future fallback.
+PATH_ORDER = ("lan", "nebula", "tailscale")
+
+
+# ---------------------------------------------------------------------------
+# Host table
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Host:
+    """A machine, plus every address that machine answers on.
+
+    ``lan`` and ``nebula`` are static literals. ``tailscale`` is deliberately
+    NOT a literal: it is resolved at runtime by asking the ``tailscale`` binary,
+    so the day a tailnet is deployed this table needs no edit.
+    """
+
+    name: str
+    lan: Optional[str] = None
+    nebula: Optional[str] = None
+    #: Node name to look for in `tailscale status`. Defaults to ``name``.
+    tailscale_name: Optional[str] = None
+    #: Port the host's apiserver listens on, on the host's own loopback.
+    kube_port: int = 6443
+
+    def static_addresses(self) -> list:
+        return [a for a in (self.lan, self.nebula) if a]
+
+
+#: Only `workbench` is fully specified today. `laptop` and `production` are not
+#: in here because inventing addresses for them would be a guess, and a guess in
+#: an address table is worse than an absence — it produces a confident wrong
+#: connection. `homelab` is Talos and has no SSH at all, so it is not a
+#: candidate for this tool by construction.
+HOSTS = {
+    "workbench": Host(
+        name="workbench",
+        lan="192.168.50.250",
+        nebula="10.42.0.30",
+        kube_port=6443,
+    ),
+}
+
+DEFAULT_HOST = "workbench"
+
+
+# ---------------------------------------------------------------------------
+# Probe results
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PathResult:
+    path: str
+    state: str
+    address: Optional[str] = None
+    #: Human-readable reason, always set for the two non-ok states so the
+    #: operator never has to guess which of them they are looking at.
+    detail: str = ""
+    elapsed_ms: int = 0
+
+    def as_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "state": self.state,
+            "address": self.address,
+            "detail": self.detail,
+            "elapsed_ms": self.elapsed_ms,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Am I already on the target host?
+# ---------------------------------------------------------------------------
+
+
+def local_ipv4_addresses() -> set:
+    """Every IPv4 address bound to a local interface.
+
+    Shells out to `ip -4 -o addr show` rather than using a Python-native
+    interface enumeration so the behaviour is fakeable on PATH in tests: the
+    tested code path and the production code path are then the same one.
+
+    If `ip` is unavailable we return an empty set, which degrades to "assume
+    not local" — i.e. connect over SSH. That is the safe direction: an
+    unnecessary SSH hop is a slow success, whereas a wrong "I am the target"
+    would run the operator's command on the wrong machine.
+    """
+    try:
+        proc = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return set()
+    if proc.returncode != 0:
+        return set()
+
+    addrs = set()
+    for line in proc.stdout.splitlines():
+        fields = line.split()
+        # `2: eth0    inet 192.168.50.250/24 brd ... scope global ...`
+        for i, tok in enumerate(fields):
+            if tok == "inet" and i + 1 < len(fields):
+                addrs.add(fields[i + 1].split("/")[0])
+    return addrs
+
+
+def is_local_host(host: Host) -> bool:
+    """True when this process is already running on ``host``.
+
+    Deliberately NOT based on `hostname`. Both NixOS hosts in this fleet report
+    the hostname `nixos` — that is measured, not assumed, and it is the same
+    finding `scripts/lib/host_identity.py` exists to encode. Keying on hostname
+    would make the laptop believe it is workbench and silently exec commands on
+    the wrong machine, which is the worst available failure: it succeeds.
+
+    An address bound to a local interface is a genuinely unique property. The
+    nebula mesh address is the stronger of the two signals, because mesh
+    addresses are unique across the whole mesh by construction, whereas a LAN
+    address is only unique within one subnet — two different homes could both
+    hand out 192.168.50.250. We accept the LAN address as a fallback so that a
+    host whose nebula interface is down still recognises itself.
+    """
+    local = local_ipv4_addresses()
+    if not local:
+        return False
+    if host.nebula and host.nebula in local:
+        return True
+    if host.lan and host.lan in local:
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Address resolution per path
+# ---------------------------------------------------------------------------
+
+
+def resolve_tailscale(host: Host) -> tuple:
+    """Resolve ``host``'s tailscale address.
+
+    Returns ``(address, detail)``. ``address`` is None when the path is
+    genuinely not configured, and ``detail`` then says which flavour of
+    not-configured it is — no binary at all, versus a tailnet that exists but
+    does not carry this host. Those are different problems with different
+    fixes, so they get different messages.
+    """
+    name = host.tailscale_name or host.name
+
+    if shutil.which("tailscale") is None:
+        return None, "no tailscale binary on PATH"
+
+    try:
+        proc = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, "tailscale status failed: %s" % exc
+
+    if proc.returncode != 0:
+        return None, "tailscale status exited %d" % proc.returncode
+
+    try:
+        status = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        return None, "tailscale status returned unparseable JSON"
+
+    peers = status.get("Peer") or {}
+    candidates = list(peers.values())
+    myself = status.get("Self")
+    if isinstance(myself, dict):
+        candidates.append(myself)
+
+    for peer in candidates:
+        if not isinstance(peer, dict):
+            continue
+        hostname = peer.get("HostName") or ""
+        dnsname = peer.get("DNSName") or ""
+        if hostname == name or dnsname.split(".")[0] == name:
+            ips = peer.get("TailscaleIPs") or []
+            for ip in ips:
+                if ":" not in ip:  # prefer IPv4
+                    return ip, ""
+            if ips:
+                return ips[0], ""
+            return None, "%s is in the tailnet but has no address" % name
+
+    return None, "%s is not in the tailnet" % name
+
+
+def resolve_path(host: Host, path: str) -> tuple:
+    """Return ``(address, detail)`` for ``path`` on ``host``."""
+    if path == "lan":
+        if host.lan:
+            return host.lan, ""
+        return None, "no LAN address in the host table"
+    if path == "nebula":
+        if host.nebula:
+            return host.nebula, ""
+        return None, "no nebula address in the host table"
+    if path == "tailscale":
+        return resolve_tailscale(host)
+    raise ValueError("unknown path: %s" % path)
+
+
+# ---------------------------------------------------------------------------
+# SSH command construction
+# ---------------------------------------------------------------------------
+
+
+def ssh_options(host: Host, connect_timeout: Optional[float] = None) -> list:
+    """The `-o` flags every ssh-family invocation must carry.
+
+    `HostKeyAlias` is the load-bearing one. Without it, one machine reached by
+    three different addresses accumulates three separate `known_hosts` entries,
+    and the day one of those addresses is reused for a different machine the
+    operator hits a host-key-mismatch wall with no obvious cause. Pinning the
+    alias to the host's NAME means all three paths share one entry — the
+    machine's identity is the machine, not the route you took to it.
+    """
+    opts = ["-o", "HostKeyAlias=%s" % host.name]
+    if connect_timeout is not None:
+        opts += ["-o", "ConnectTimeout=%d" % max(1, int(connect_timeout))]
+    return opts
+
+
+def probe_command(host: Host, address: str, timeout: float) -> list:
+    """The probe is a REAL auth handshake, not a TCP connect to port 22.
+
+    A port that accepts a connection is not a session you can open: measured on
+    this fleet, both addresses complete the TCP and SSH transport layers and
+    then fail auth with `Permission denied`, exiting 255. A port probe calls
+    that "ok" and the subsequent connect then fails in the operator's face.
+    Running `true` over a BatchMode session is the cheapest thing that proves
+    the whole stack, auth included.
+    """
+    return (
+        ["ssh", "-o", "BatchMode=yes"]
+        + ssh_options(host, connect_timeout=timeout)
+        + [address, "true"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Probing
+# ---------------------------------------------------------------------------
+
+
+def probe_path(host: Host, path: str, timeout: float) -> PathResult:
+    started = time.monotonic()
+
+    def elapsed():
+        return int((time.monotonic() - started) * 1000)
+
+    address, detail = resolve_path(host, path)
+    if address is None:
+        return PathResult(path, NOT_CONFIGURED, None, detail, elapsed())
+
+    cmd = probe_command(host, address, timeout)
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return PathResult(
+            path, UNREACHABLE, address, "probe timed out after %gs" % timeout, elapsed()
+        )
+    except (FileNotFoundError, OSError) as exc:
+        return PathResult(path, UNREACHABLE, address, "ssh failed: %s" % exc, elapsed())
+
+    if proc.returncode == 0:
+        return PathResult(path, OK, address, "", elapsed())
+
+    stderr = (proc.stderr or b"").decode("utf-8", "replace").strip()
+    last = stderr.splitlines()[-1] if stderr else "ssh exited %d" % proc.returncode
+    return PathResult(path, UNREACHABLE, address, last, elapsed())
+
+
+def probe_all(host: Host, timeout: float) -> list:
+    """Probe every path concurrently.
+
+    Concurrency is the point: three sequential probes against a host whose LAN
+    path is down would cost 3x the timeout on every single invocation, which
+    would make the tool too slow to put in front of `ssh`. Wall time is ~one
+    timeout, not three.
+    """
+    with ThreadPoolExecutor(max_workers=len(PATH_ORDER)) as pool:
+        futures = [pool.submit(probe_path, host, p, timeout) for p in PATH_ORDER]
+        return [f.result() for f in futures]
+
+
+def select_path(results: list, forced: Optional[str]) -> tuple:
+    """Pick the path to connect over. Returns ``(chosen, error_message)``."""
+    by_name = {r.path: r for r in results}
+
+    if forced:
+        result = by_name.get(forced)
+        if result is None:
+            return None, "unknown path %r" % forced
+        if result.state != OK:
+            # Forcing a path and silently using a different one would defeat
+            # the entire purpose of the flag, so this is a hard failure.
+            return None, "forced path %r is %s (%s)" % (
+                forced,
+                result.state,
+                result.detail or "no detail",
+            )
+        return result, ""
+
+    for name in PATH_ORDER:
+        result = by_name.get(name)
+        if result is not None and result.state == OK:
+            return result, ""
+
+    return None, "no path to the host is reachable"
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+
+def report_text(host: Host, results: list, chosen, stream, local: bool = False) -> None:
+    stream.write("workhost: %s%s\n" % (host.name, " (this machine)" if local else ""))
+    for result in results:
+        marker = "*" if chosen is not None and result.path == chosen.path else " "
+        stream.write(
+            "%s %-10s %-16s %-15s %s\n"
+            % (
+                marker,
+                result.path,
+                result.address or "-",
+                result.state,
+                result.detail,
+            )
+        )
+    stream.flush()
+
+
+def report_json(host: Host, results: list, chosen, stream, local: bool = False) -> None:
+    payload = {
+        "host": host.name,
+        "local": local,
+        "selected": chosen.path if chosen is not None else None,
+        "paths": [r.as_dict() for r in results],
+    }
+    stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    stream.flush()
+
+
+# ---------------------------------------------------------------------------
+# Verbs
+# ---------------------------------------------------------------------------
+
+
+def substitute_address(args: list, address: str) -> list:
+    """Rewrite a leading ``:`` in an argument into ``<address>:``.
+
+    So `workhost scp ./a.txt :/tmp/a.txt` targets the host over whichever path
+    won, without the caller ever having to name an address.
+    """
+    out = []
+    for arg in args:
+        if arg.startswith(":"):
+            out.append("%s%s" % (address, arg))
+        else:
+            out.append(arg)
+    return out
+
+
+def build_remote_command(host: Host, verb: str, address: str, args: list,
+                         timeout: float, kube_port: int = 0) -> list:
+    """The argv workhost would execute to reach ``host`` over ``address``."""
+    opts = ssh_options(host, connect_timeout=timeout)
+
+    if verb == "ssh":
+        return ["ssh"] + opts + [address] + list(args)
+
+    if verb == "run":
+        # Mirrors plain ssh semantics exactly: ssh joins its trailing arguments
+        # with spaces and hands the result to the remote login shell. That is
+        # what makes `workhost run 'exit 42'` exit 42 and `workhost run ls -la`
+        # also work, and it means anyone who already knows ssh knows this.
+        return ["ssh"] + opts + [address, "--"] + list(args)
+
+    if verb == "tmux":
+        # -t forces a PTY; without it tmux refuses to attach.
+        session = list(args) or []
+        remote = ["tmux", "new-session", "-A", "-s"] + (session or ["main"])
+        return ["ssh", "-t"] + opts + [address, "--"] + remote
+
+    if verb == "scp":
+        return ["scp"] + opts + substitute_address(list(args), address)
+
+    if verb == "rsync":
+        # rsync needs the ssh options threaded through -e, otherwise it opens
+        # its own ssh without HostKeyAlias and re-creates the very known_hosts
+        # sprawl this tool exists to prevent.
+        ssh_cmd = " ".join(["ssh"] + opts)
+        return ["rsync", "-e", ssh_cmd] + substitute_address(list(args), address)
+
+    if verb == "forward":
+        spec = list(args)
+        cmd = ["ssh", "-N"]
+        for item in spec:
+            cmd += ["-L", item]
+        return cmd + opts + [address]
+
+    if verb == "kubectl":
+        # See kubectl_command() — this is only the tunnel half.
+        return (
+            ["ssh", "-N", "-L", "%d:127.0.0.1:%d" % (kube_port, host.kube_port)]
+            + opts
+            + [address]
+        )
+
+    raise ValueError("unknown verb: %s" % verb)
+
+
+def build_local_command(host: Host, verb: str, args: list) -> list:
+    """The argv workhost would execute when already sitting on the target."""
+    if verb in ("ssh", "tmux"):
+        if verb == "tmux":
+            session = list(args) or ["main"]
+            return ["tmux", "new-session", "-A", "-s"] + session
+        # `workhost ssh` on the target is a shell on the target: that is the
+        # login shell, not an ssh connection to ourselves.
+        return [os.environ.get("SHELL", "/bin/sh")]
+
+    if verb == "run":
+        # Same joining rule as the remote branch, so `run 'exit 42'` exits 42
+        # identically whether or not you happen to be on the box.
+        return ["bash", "-c", " ".join(args)]
+
+    if verb == "kubectl":
+        return ["kubectl"] + list(args)
+
+    if verb in ("scp", "rsync"):
+        stripped = [a[1:] if a.startswith(":") else a for a in args]
+        return ([verb] if verb == "rsync" else ["cp"]) + stripped
+
+    if verb == "forward":
+        # Forwarding to yourself is a no-op, and pretending otherwise would
+        # hang the operator on an ssh that never returns.
+        raise ValueError("`forward` is meaningless on the target host itself")
+
+    raise ValueError("unknown verb: %s" % verb)
+
+
+def free_local_port() -> int:
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+    finally:
+        sock.close()
+
+
+def run_kubectl_via_tunnel(host: Host, address: str, args: list, timeout: float,
+                           verbose: bool) -> int:
+    """Run a LOCAL kubectl against the host's apiserver through an SSH tunnel.
+
+    Why a tunnel rather than rewriting the kubeconfig server address:
+
+    The k3s serving certificate on workbench carries SANs for `127.0.0.1` and
+    `192.168.50.250` but NOT for the nebula address `10.42.0.30` (measured from
+    the live cert). So a naive `--server=https://<address>:6443` rewrite is
+    TLS-valid over the LAN path and TLS-INVALID over nebula — it would work
+    until the day the LAN path is the one that is down, and then fail with a
+    certificate error that looks nothing like a routing problem.
+
+    Tunnelling to the host's own loopback sidesteps that entirely: kubectl
+    connects to `127.0.0.1`, which IS in the SANs, so the certificate verifies
+    over every path without ever disabling verification. It also uses the local
+    kubectl binary, which avoids depending on the remote non-login shell having
+    kubectl on PATH — on NixOS it frequently does not.
+    """
+    port = free_local_port()
+    tunnel_cmd = build_remote_command(host, "kubectl", address, [], timeout, kube_port=port)
+
+    if verbose:
+        sys.stderr.write("workhost: tunnel %s\n" % " ".join(tunnel_cmd))
+
+    tunnel = subprocess.Popen(
+        tunnel_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        deadline = time.monotonic() + timeout
+        ready = False
+        while time.monotonic() < deadline:
+            if tunnel.poll() is not None:
+                break
+            probe = socket.socket()
+            probe.settimeout(0.25)
+            try:
+                probe.connect(("127.0.0.1", port))
+                ready = True
+                break
+            except OSError:
+                time.sleep(0.05)
+            finally:
+                probe.close()
+
+        if not ready:
+            sys.stderr.write("workhost: kubectl tunnel to %s did not come up\n" % host.name)
+            return EXIT_NO_PATH
+
+        kube_cmd = ["kubectl", "--server", "https://127.0.0.1:%d" % port] + list(args)
+        if verbose:
+            sys.stderr.write("workhost: exec %s\n" % " ".join(kube_cmd))
+        return subprocess.run(kube_cmd).returncode
+    finally:
+        tunnel.terminate()
+        try:
+            tunnel.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            tunnel.kill()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+VERBS = ("ssh", "scp", "tmux", "run", "path", "check", "forward", "rsync", "kubectl")
+
+#: Verbs that only report and take no arguments of their own. Flags written
+#: after these are hoisted back to workhost, so `workhost path --json` works.
+REPORTING_VERBS = ("path", "check")
+
+#: Global options that consume a following token as their value.
+VALUE_OPTS = ("-H", "--host", "--path", "--timeout")
+
+
+def split_argv(argv: list) -> tuple:
+    """Split raw argv into ``(global_tokens, verb, verb_args)``.
+
+    The rule is positional and therefore unambiguous: **flags before the verb
+    belong to workhost, everything after the verb belongs to the verb.** That
+    matters because `ssh`, `run`, `rsync` and `kubectl` all forward arbitrary
+    flags of their own — `workhost run --json` must send `--json` to the remote
+    command, not switch workhost into JSON mode. argparse's own REMAINDER gets
+    this right by accident and wrong at the edges, so the split is explicit.
+
+    Reporting verbs are the one exception: they take no arguments, so flags
+    after them are hoisted back into the global set rather than silently
+    ignored.
+    """
+    globals_ = []
+    verb = None
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in VALUE_OPTS:
+            globals_ += argv[i : i + 2]
+            i += 2
+            continue
+        if tok.startswith("-"):
+            # Covers --host=x, -Hx and bare flags alike: one token, one append.
+            globals_.append(tok)
+            i += 1
+            continue
+        verb = tok
+        i += 1
+        break
+    verb_args = list(argv[i:])
+
+    if verb in REPORTING_VERBS:
+        globals_ += verb_args
+        verb_args = []
+
+    return globals_, verb, verb_args
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="workhost",
+        description="Reach a dev host over whichever network path is up.",
+        epilog=(
+            "verbs: %s\n"
+            "Global flags must come BEFORE the verb; everything after the verb "
+            "is passed to it." % ", ".join(VERBS)
+        ),
+    )
+    parser.add_argument(
+        "-H",
+        "--host",
+        default=os.environ.get("WORKHOST_HOST", DEFAULT_HOST),
+        help="target host name (default: %s, or $WORKHOST_HOST)" % DEFAULT_HOST,
+    )
+    parser.add_argument(
+        "--path",
+        choices=PATH_ORDER,
+        default=None,
+        help="force a specific path instead of picking the best available",
+    )
+    parser.add_argument("--json", action="store_true", help="emit the path report as JSON")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.environ.get("WORKHOST_TIMEOUT", "5")),
+        help="per-path probe timeout in seconds (default: 5)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the command that would run instead of running it",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="explain what is happening")
+    return parser
+
+
+def main(argv=None) -> int:
+    raw = list(sys.argv[1:]) if argv is None else list(argv)
+    global_tokens, verb, verb_args = split_argv(raw)
+
+    parser = build_parser()
+    opts = parser.parse_args(global_tokens)
+    opts.args = verb_args
+
+    if verb is None:
+        verb = "ssh"
+    if verb not in VERBS:
+        parser.error("unknown verb %r (expected one of: %s)" % (verb, ", ".join(VERBS)))
+    opts.verb = verb
+
+    host = HOSTS.get(opts.host)
+    if host is None:
+        sys.stderr.write(
+            "workhost: unknown host %r (known: %s)\n" % (opts.host, ", ".join(sorted(HOSTS)))
+        )
+        return 2
+
+    verb = "path" if opts.verb == "check" else opts.verb
+    reporting_verb = verb == "path"
+
+    # Answered BEFORE the path requirement: if we are already standing on the
+    # target, no network path is needed to run anything. Probing still happens
+    # and is still reported — the tool's promise is to tell you the state of
+    # every path on every invocation — but an all-unreachable report is not a
+    # failure when the destination is the machine you are typing on.
+    local = is_local_host(host)
+
+    results = probe_all(host, opts.timeout)
+    chosen, error = select_path(results, opts.path)
+
+    # The report goes to stderr for action verbs so piped stdout carries only
+    # the remote command's own output. For `path`/`check` the report IS the
+    # product, so it goes to stdout.
+    report_stream = sys.stdout if reporting_verb else sys.stderr
+    if opts.json:
+        report_json(host, results, chosen, report_stream, local)
+    elif reporting_verb or opts.verbose or (chosen is None and not local):
+        report_text(host, results, chosen, report_stream, local)
+
+    if reporting_verb:
+        return 0 if (chosen is not None or local) else EXIT_NO_PATH
+
+    # An explicitly forced path is a request to go over the wire, so it is
+    # honoured even on the target host: silently running locally instead would
+    # be exactly the "silent fallback" the flag exists to forbid.
+    if chosen is None and not (local and opts.path is None):
+        sys.stderr.write("workhost: %s\n" % error)
+        return EXIT_NO_PATH
+
+    if local and opts.path is None:
+        try:
+            cmd = build_local_command(host, verb, list(opts.args))
+        except ValueError as exc:
+            sys.stderr.write("workhost: %s\n" % exc)
+            return 2
+    elif verb == "kubectl":
+        if opts.dry_run:
+            cmd = build_remote_command(
+                host, verb, chosen.address, list(opts.args), opts.timeout, kube_port=0
+            )
+            sys.stdout.write(" ".join(cmd) + "\n")
+            return 0
+        return run_kubectl_via_tunnel(
+            host, chosen.address, list(opts.args), opts.timeout, opts.verbose
+        )
+    else:
+        cmd = build_remote_command(
+            host, verb, chosen.address, list(opts.args), opts.timeout
+        )
+
+    if opts.dry_run:
+        sys.stdout.write(" ".join(cmd) + "\n")
+        return 0
+
+    if opts.verbose:
+        sys.stderr.write("workhost: exec %s\n" % " ".join(cmd))
+
+    try:
+        return subprocess.run(cmd).returncode
+    except FileNotFoundError as exc:
+        sys.stderr.write("workhost: %s\n" % exc)
+        return 127
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

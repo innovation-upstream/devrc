@@ -84,6 +84,7 @@ Click actions for those blocks:
 |---|---|
 | `airvpn-updown` | tunnel PostUp/PostDown helper — the killswitch + split-tunnel |
 | `airvpn-sudo` | privileged helper for the AirVPN block (via a NOPASSWD sudo rule) |
+| `workhost` | reach a dev host over whichever path (LAN / nebula / tailscale) is up; probes all three in parallel every run and reports `ok` / `unreachable` / `not-configured` per path |
 
 ## Media
 

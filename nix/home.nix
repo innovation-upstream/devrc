@@ -1386,6 +1386,20 @@ in
   # `scripts/lib/` must not be deployed, same rule as opencode's `lib/`.
   home.file.".local/bin/cairn".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn";
+
+  # `workhost` — reach a dev host over whichever network path (LAN / nebula /
+  # tailscale) is actually up, reporting the state of all three every time. On
+  # PATH as a bare command because it is meant to stand in front of `ssh`, and
+  # is invoked from any cwd and from inside other repos.
+  #
+  # mkOutOfStoreSymlink, matching the CLIs above. It does not reach into
+  # `scripts/lib/` today, so the hard `__file__`-resolution reason that makes it
+  # mandatory for `cairn` does not yet apply — but the address table in it is
+  # operational state that gets corrected the moment a path moves, and a store
+  # copy would leave the tree edited and the command stale until the next
+  # `home-manager switch`. Symlinking keeps the checkout authoritative.
+  home.file.".local/bin/workhost".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/workhost";
   # Claude Code hooks managed here (the script only — the settings.json
   # registration is per-host/unmanaged, as for bash-guard.py above, whose script
   # is likewise managed now). audit-pr-nudge fires
