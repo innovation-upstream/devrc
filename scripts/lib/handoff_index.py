@@ -118,8 +118,11 @@ CONTRACT SUMMARY
     identity_collisions(rows)                 -> tuple[str, ...]        PURE
     unset_repo_handles(env=None)              -> tuple[str, ...]
     prune_config_refusal(unset)               -> str | None             PURE
+    incomplete_kind(derivation)               -> str | None             PURE
     incomplete_reason(derivation)             -> str | None             PURE
     may_replace_stored_rows(derivation)       -> bool                   PURE
+    authority_label_collisions(derivations)   -> tuple[str, ...]        PURE
+    rebuild_downgrade_reason(derivations)     -> str | None             PURE
     rebuild_refusal(derivations, rows, ..)    -> str | None             PURE
     partial_scope_warnings(derivations)       -> tuple[str, ...]        PURE
     rebuild_delete_labels(derivs, stored, ..) -> tuple[str, ...]        PURE
@@ -197,8 +200,14 @@ __all__ = [
     "identity_collisions",
     "unset_repo_handles",
     "prune_config_refusal",
+    "INCOMPLETE_KINDS",
+    "INCOMPLETE_UNMEASURED",
+    "INCOMPLETE_UNREADABLE",
+    "incomplete_kind",
     "incomplete_reason",
     "may_replace_stored_rows",
+    "authority_label_collisions",
+    "rebuild_downgrade_reason",
     "rebuild_refusal",
     "partial_scope_warnings",
     "rebuild_delete_labels",
@@ -1622,6 +1631,44 @@ def import_maildb():
 # --------------------------------------------------------------------------- #
 
 
+#: 🔴 THE ENUMERATED KINDS OF INCOMPLETENESS. They are constants rather than
+#: literals at each site because `rebuild_plan_lines` PARTITIONS the configured
+#: repos on this value, and a partition keyed on a string literal silently loses
+#: a repo the day a third kind is added: it matches no branch, appears in no
+#: bucket, and the operator counts the labels, finds one missing, and has no way
+#: to learn why. `incomplete_kinds_are_partitioned` is the check that says so
+#: instead.
+INCOMPLETE_UNMEASURED = "unmeasured"
+INCOMPLETE_UNREADABLE = "docs-unreadable"
+INCOMPLETE_KINDS = (INCOMPLETE_UNMEASURED, INCOMPLETE_UNREADABLE)
+
+
+def incomplete_kind(d: RepoDerivation) -> str | None:
+    """WHICH KIND of incompleteness withholds authority over `d.label` — or `None`.
+
+    🔴 THE KIND IS SPLIT OUT OF `incomplete_reason` BECAUSE ONE CONSUMER NEEDS TO
+    BRANCH ON IT AND WAS RE-DERIVING IT FROM THE RAW FIELDS. `rebuild_plan_lines`
+    sorts every configured repo into three buckets, and it read
+    `d.unmeasured is not None` for one and `d.unmeasured is None and d.unreadable`
+    for the other — the exact "predicate open-coded at N sites" shape
+    `incomplete_reason`'s own docstring says the four spellings came from, still
+    present at the one site that most needed it. Recovering the kind by matching
+    on the REASON STRING would be worse again: the reason for an unmeasured repo
+    is `d.unmeasured` itself, a free-form token, so any such match is a guard on
+    WORDS.
+
+    So the kind is the structural value and the reason is derived FROM it. A
+    third kind therefore has exactly one place to be added, and
+    `rebuild_plan_lines` reports an unenumerated one rather than dropping it.
+
+    PURE."""
+    if d.unmeasured:
+        return INCOMPLETE_UNMEASURED
+    if d.unreadable:
+        return INCOMPLETE_UNREADABLE
+    return None
+
+
 def incomplete_reason(d: RepoDerivation) -> str | None:
     """WHY this run cannot speak for `d.label`'s stored rows — `None` if it can.
 
@@ -1679,13 +1726,14 @@ def incomplete_reason(d: RepoDerivation) -> str | None:
     was read buys nothing the delete scope does not already buy.
 
     PURE, so the whole authority decision is testable without a database."""
-    if d.unmeasured:
+    kind = incomplete_kind(d)
+    if kind is None:
+        return None
+    if kind == INCOMPLETE_UNMEASURED:
         return d.unmeasured
-    if d.unreadable:
-        # The counts are in the reason because "1 of 40" and "40 of 40" are very
-        # different operator situations and the label alone cannot say which.
-        return f"docs-unreadable ({len(d.unreadable)} of {len(d.unreadable) + d.docs})"
-    return None
+    # The counts are in the reason because "1 of 40" and "40 of 40" are very
+    # different operator situations and the label alone cannot say which.
+    return f"docs-unreadable ({len(d.unreadable)} of {len(d.unreadable) + d.docs})"
 
 
 def may_replace_stored_rows(d: RepoDerivation) -> bool:
@@ -1695,6 +1743,104 @@ def may_replace_stored_rows(d: RepoDerivation) -> bool:
     question the DELETE actually asks. Never re-derive either of these from the
     underlying fields — see `incomplete_reason`'s note on the four spellings."""
     return incomplete_reason(d) is None
+
+
+def authority_label_collisions(
+    derivations: Sequence[RepoDerivation],
+) -> tuple[str, ...]:
+    """Labels claimed by BOTH a replaceable derivation and an incomplete one. PURE.
+
+    🔴 AUTHORITY IS DEMONSTRATED PER *DERIVATION* AND EXERCISED PER *LABEL*, AND
+    THOSE ARE NOT THE SAME KEY. `rebuild_delete_labels` returns LABELS and
+    `DELETE_SQL` binds LABELS, so when two derivations share one label — the
+    `~/a/proj` vs `~/b/proj` case `identity_collisions` names explicitly — a
+    single healthy twin grants authority over BOTH twins' rows.
+
+    MEASURED, two checkouts named `protorepo` under different parents, the right
+    one's doc blobs removed, `--rebuild --write`: `DELETE params
+    [[['protorepo']]]`, 21 INSERTs all from the healthy twin, rc 0 — the broken
+    twin's rows deleted with nothing to replace them. Identical before the
+    incomplete-read widening, so this is not a regression it introduced.
+    `identity_collisions` cannot see it either: unreadable docs produce no
+    sections, so nothing collides at the SECTION level.
+
+    ⚠ THIS FUNCTION DOES NOT FIX THAT. The structural fix — keying authority on
+    something a label cannot alias — moves the delete scope, the stored key and
+    `handoff_search`'s scoping together, and is its own round. What it fixes is
+    the REPORT: without it this run printed "Their existing rows are left
+    untouched … this run destroyed nothing it could not replace" and "kept their
+    old rows" ABOUT ROWS IT HAD JUST DELETED, and listed the label under both
+    DELETE and KEPT in the pre-flight. A silent wrong is better than a stated
+    wrong: a stated wrong is what stops the next reader looking."""
+    ok = {d.label for d in derivations if may_replace_stored_rows(d)}
+    bad = {d.label for d in derivations if incomplete_reason(d)}
+    return tuple(sorted(ok & bad))
+
+
+def rebuild_downgrade_reason(
+    derivations: Sequence[RepoDerivation],
+) -> str | None:
+    """WHY a `--rebuild` must drop its DELETE and write as a plain upsert. PURE.
+
+    🔴 A DOWNGRADE RATHER THAN A REFUSAL, AND THE DIFFERENCE IS A TOAST 4×/DAY
+    FOREVER. When not ONE configured repo was read in full the delete scope is
+    EMPTY, and `PostgresSectionStore.write` RAISES on an empty rebuild scope by
+    design — so this state has to be handled somewhere. The round that found it
+    made it `rebuild_refusal`'s fourth arm, rc 4. MEASURED on the TIMER's own
+    argv (`--rebuild --write`, unscoped) with 1 of 4 handles present and the
+    present repo carrying ONE corrupt blob of three docs, across three commits of
+    one file:
+
+        pre-widening : rc 0  DELETE ['<label>'] + 18 INSERTs
+        that arm     : rc 4  SQL kinds []        nothing written at all
+        here         : rc 0  no DELETE           + 18 INSERTs
+
+    Three absent checkouts is not a broken machine: `nix/home.nix` states in as
+    many words that a handle pointing at an absent checkout is SUPPORTED, and
+    that the price is a standing PARTIAL warning. `OnFailure=notify-failure@%n
+    .service` on a 6h timer then fires until a human repairs an object store, and
+    the index goes stale meanwhile — `claude/RULES.md`'s permanently-red gate,
+    which is the mistake `rebuild_refusal`'s own all-unmeasured arm had to unwind
+    once already.
+
+    🔴 AND THE FALLBACK IS NOT AN INVENTION — IT IS THE REMEDY THE REFUSAL ITSELF
+    NAMED. That arm's text ended "Re-running WITHOUT --rebuild is a real remedy
+    here: it upserts those N row(s) and deletes nothing." A remedy only a human
+    can type is not a remedy for a unit, so the run takes it: rebuild off,
+    delete scope empty, every row that DID read upserted. It is strictly
+    non-destructive — an ON CONFLICT insert refreshes without destroying — so
+    downgrading cannot lose a row the refusal would have kept.
+
+    ⚠ WHAT THE DOWNGRADE DOES NOT BUY, STATED RATHER THAN DISCOVERED: a section
+    REMOVED from a doc keeps its stale high-ordinal row, because that is exactly
+    what the DELETE is for (`PostgresSectionStore.write`'s closing note). The run
+    says so, and says it on the success line, because "wrote N section row(s)"
+    otherwise reads as a completed rebuild.
+
+    Returns `None` when the rebuild may keep its DELETE. It is `main`'s SINGLE
+    spelling of that decision — the scope is computed only when this returns
+    `None` — so an empty scope can never reach `write()` and the two cannot
+    drift. `TestARebuildWithNothingReadInFullIsDowngradedNotRefused` pins the
+    equivalence against `rebuild_delete_labels`' actual return."""
+    if not derivations:
+        return None
+    if any(may_replace_stored_rows(d) for d in derivations):
+        return None
+    detail = ", ".join(f"{d.label} ({incomplete_reason(d)})" for d in derivations)
+    return (
+        f"REBUILD DOWNGRADED TO AN UPSERT: not ONE of the {len(derivations)} "
+        f"repo(s) was read COMPLETELY — {detail}. A rebuild DELETES a repo's rows "
+        f"before re-deriving them, so it may only run for repos this run can "
+        f"REPLACE, and there are none: the delete scope would be EMPTY. This is "
+        f"NOT 'the corpus is empty' — the documents that DID read are still "
+        f"upserted, and an ON CONFLICT insert REFRESHES without destroying, so "
+        f"NOTHING was deleted and no stored row was lost. What the skipped DELETE "
+        f"would have bought and this run does not: a section REMOVED from a doc "
+        f"keeps its stale row until some repo reads in FULL again. Where the "
+        f"reason is a doc that would not read, `git ls-tree` lists a path `git "
+        f"show` cannot produce, which means an incomplete object store — try "
+        f"`git fsck` and re-fetch."
+    )
 
 
 def rebuild_refusal(
@@ -1784,6 +1930,27 @@ def rebuild_refusal(
     # in `bad` and this guard is structurally blind to it. The narrowest configs
     # yield zero unmeasured repos, i.e. this guard is weakest exactly where the
     # risk is highest. `main` runs the config-width guard first.
+    #
+    # 🔴 THE OPENER IS A DISJUNCTION ("UNMEASURED or INCOMPLETE") RATHER THAN A
+    # CONDITIONAL, so it is true in every state this arm fires in and there is no
+    # second spelling to drift. The per-repo `detail` carries which of the two it
+    # actually was, which is the fact the operator acts on.
+    #
+    # 🔴 AND THE TWO HALVES OF THE DISJUNCTION ARE REFUSED FOR TWO DIFFERENT
+    # REASONS, WHICH THE MESSAGE HAS TO SAY RATHER THAN COLLAPSE. The widening
+    # first shipped claiming an unreadable repo is "refused for the same reason it
+    # is kept out of the delete scope: this run has nothing to put back". That is
+    # false twice: `--prune` never puts back the disappeared labels' rows — it
+    # exists to delete them — and the incomplete repo is already outside
+    # `measured`, so its OWN rows are safe with or without this arm. The renamed
+    # -checkout ambiguity the arm was built for cannot arise from an unreadable
+    # doc either: the ref resolved, the directory is present, the label is
+    # unchanged. The real reason is narrower and is worth stating plainly — a run
+    # that could not read its own corpus in FULL cannot vouch for the corpus at
+    # all, and `--prune` is the one act whose scope is decided by what this run
+    # did NOT find. Being conservative on a destructive operator flag is cheap;
+    # `--prune` is typed by a human and is never in the unit's argv, so this arm
+    # cannot become the permanently-red gate the ALL-unmeasured arm nearly did.
     if prune and bad:
         detail = ", ".join(f"{d.label} ({incomplete_reason(d)})" for d in bad)
         return (
@@ -1793,15 +1960,14 @@ def rebuild_refusal(
             f"every repo is the table's spelling; an unmeasured repo (a renamed or "
             f"missing checkout) is precisely where those can differ, and the rows it "
             f"would collect may be that same repo under its old label. A repo whose "
-            f"docs would not READ is refused for the same reason it is kept out of the "
-            f"delete scope: this run has nothing to put back. Fix the handles and the "
-            f"object store so every repo reads in FULL, then re-run --prune — or drop "
-            f"--prune, which deletes only what this run read COMPLETELY."
+            f"docs would not READ is refused for a DIFFERENT reason, stated so it is "
+            f"not mistaken for that one: it raises no spelling ambiguity and its own "
+            f"rows are already safe, but --prune decides what to DESTROY from what "
+            f"this run did NOT find, and a run that could not read its corpus in FULL "
+            f"cannot vouch for the corpus at all. Fix the handles and the object store "
+            f"so every repo reads in FULL, then re-run --prune — or drop --prune, "
+            f"which deletes only what this run read COMPLETELY."
         )
-    # 🔴 THE OPENER IS A DISJUNCTION ("UNMEASURED or INCOMPLETE") RATHER THAN A
-    # CONDITIONAL, so it is true in every state this arm fires in and there is no
-    # second spelling to drift. The per-repo `detail` carries which of the two it
-    # actually was, which is the fact the operator acts on.
     if derivations and len(unmeasured) == len(derivations):
         detail = ", ".join(f"{d.label} ({d.unmeasured})" for d in unmeasured)
         return (
@@ -1821,36 +1987,17 @@ def rebuild_refusal(
             "corpus is empty' — it is a corpus that could not be read. Nothing is "
             "deleted and nothing is written."
         )
-    # 🔴 THE ARM THAT MAKES AN EMPTY DELETE SCOPE A REFUSAL RATHER THAN A CRASH.
-    # It fires when NOT ONE repo was read in full — the arms above have already
-    # taken the all-unmeasured and zero-rows cases, so reaching here means at
-    # least one repo resolved AND contributed rows AND still could not be
-    # replaced, i.e. every repo is partially readable. Before `incomplete_reason`
-    # widened the scope predicate, "not every repo is unmeasured" implied "at
-    # least one label is in the delete scope"; it no longer does, and
-    # `PostgresSectionStore.write` RAISES on an empty rebuild scope by design. A
-    # traceback out of the 6h timer is a worse report than a refusal that names
-    # the repos and a remedy.
-    #
-    # 🔴 THE REMEDY IS TRUE BECAUSE OF THE ORDERING, NOT BECAUSE IT WAS ASSERTED.
-    # "Re-run without --rebuild and it writes" is exactly the sentence the
-    # all-unmeasured arm above had to retract as FALSE in its own state. Here the
-    # zero-rows arm has already returned for every derivation with no rows, so
-    # `rows` is non-empty by construction and the row count is printed from it.
-    if derivations and len(bad) == len(derivations):
-        detail = ", ".join(f"{d.label} ({incomplete_reason(d)})" for d in bad)
-        return (
-            f"REFUSING --rebuild: not ONE of the {len(derivations)} repo(s) was read "
-            f"COMPLETELY — {detail}. A rebuild DELETES a repo's rows before "
-            f"re-deriving them, so it may only run for repos this run can REPLACE, "
-            f"and there are none: the delete scope would be EMPTY. This is NOT 'the "
-            f"corpus is empty' — {len(rows)} row(s) WERE derived, from the documents "
-            f"that did read. Where the reason is a doc that would not read, `git "
-            f"ls-tree` lists a path `git show` cannot produce, which means an "
-            f"incomplete object store — try `git fsck` and re-fetch. Re-running "
-            f"WITHOUT --rebuild is a real remedy here: it upserts those "
-            f"{len(rows)} row(s) and deletes nothing."
-        )
+    # 🔴 "NOT ONE REPO WAS READ IN FULL" IS DELIBERATELY *NOT* AN ARM HERE, AND IT
+    # WAS ONE FOR EXACTLY ONE COMMIT. Reaching this point means at least one repo
+    # resolved AND rows came back, but possibly no repo is REPLACEABLE — which
+    # makes the delete scope empty, and `PostgresSectionStore.write` RAISES on an
+    # empty rebuild scope by design. Refusing was the first answer and it was
+    # wrong for the TIMER: measured on the unit's own argv with three absent
+    # checkouts (a state `nix/home.nix` documents as SUPPORTED) plus one corrupt
+    # blob, it turned rc 0 + a written index into rc 4 + nothing written, i.e. a
+    # notify-failure toast every 6h until a human repairs an object store.
+    # `rebuild_downgrade_reason` takes the remedy this arm's own text named —
+    # write, but without the DELETE — and `main` reads it. See that function.
     return None
 
 
@@ -1879,7 +2026,7 @@ def partial_scope_warnings(derivations: Sequence[RepoDerivation]) -> tuple[str, 
 
     It is true now, and true STRUCTURALLY rather than by inspection: the
     disappeared-set is behind an explicit `--prune`, and `rebuild_refusal`
-    refuses any `--prune` run with an unmeasured repo. So whenever this warning
+    refuses any `--prune` run with an INCOMPLETE repo. So whenever this warning
     fires AND a write happens, the delete scope is exactly the MEASURED labels.
     `TestThePartialPromiseIsKept` pins that as a relationship between the two
     functions rather than trusting either one's own docstring.
@@ -1897,23 +2044,70 @@ def partial_scope_warnings(derivations: Sequence[RepoDerivation]) -> tuple[str, 
     one, which contributes every row it could read (an ON CONFLICT insert
     refreshes without destroying, so there is no reason to throw those away).
     Keeping the phrase would have made this warning false in exactly the state it
-    was widened to cover."""
+    was widened to cover.
+
+    🔴 THE ALL-BAD SHORT-CIRCUIT IS GONE, AND ITS REMOVAL IS A CORRECTION TO A
+    CLAIM MADE ONE COMMIT AGO. `rebuild_delete_labels` says this function "says so
+    on every output path"; it did not. It returned `()` when EVERY repo was
+    incomplete and deferred to `rebuild_refusal` — which `main` consults only
+    under `--rebuild`. MEASURED on HEAD, two repos each with one unreadable doc,
+    `--write` WITHOUT `--rebuild`: `partial_scope_warnings() == ()`, `wrote 24
+    section row(s)`, rc 0, and the word PARTIAL nowhere on stdout. The hole
+    pre-dated the widening; the CLAIM did not, and a false claim is the sentence
+    that stops the next person looking. It is now a WRITING state besides, since
+    `rebuild_downgrade_reason` proceeds where the fourth refusal arm stopped, so
+    silence there is not a deferral to anything.
+
+    The old worry — saying it twice in two voices is how one of them stops being
+    read — is answered by making the two say different things: this one is a
+    SCOPE statement ("no repo's rows were replaced"), the refusal is a REFUSAL
+    with a remedy, and the all-bad variant below cannot be mistaken for the mixed
+    one because it names no `ok` list at all.
+
+    🔴 THE "LEFT UNTOUCHED" PROMISE IS CONDITIONAL, BECAUSE AUTHORITY IS PER
+    DERIVATION AND THE DELETE IS PER LABEL. Two configured repos can share one
+    label (`~/a/proj` and `~/b/proj`), and a healthy twin then grants a DELETE
+    over the broken twin's rows. See `authority_label_collisions`, which is the
+    residual this qualification exists to stop MIS-STATING."""
     bad = [d for d in derivations if incomplete_reason(d)]
-    if not bad or len(bad) == len(derivations):
-        # All-bad is `rebuild_refusal`'s case, not this one; saying it twice in two
-        # voices is how one of them stops being read.
+    if not bad:
+        # A per-run "0 repos missing" buries the real ones — `untracked_warnings`'
+        # reason. This is the ONLY suppression left.
         return ()
     detail = ", ".join(f"{d.label} ({incomplete_reason(d)})" for d in bad)
     ok = ", ".join(d.label for d in derivations if may_replace_stored_rows(d))
+    shared = authority_label_collisions(derivations)
+    kept = (
+        "Their existing rows are left untouched (the rebuild delete is scoped to "
+        "what was read in FULL), so this run destroyed nothing it could not "
+        "replace."
+        if not shared else
+        f"🔴 EXCEPT WHERE A LABEL IS SHARED: {', '.join(shared)} is ALSO produced "
+        f"by a derivation that WAS read in full, and the delete binds LABELS, not "
+        f"derivations — so those rows ARE deleted and replaced by the other "
+        f"checkout's alone. Every OTHER named repo's rows are left untouched (the "
+        f"rebuild delete is scoped to what was read in FULL)."
+    )
+    if not ok:
+        return (
+            f"🔴 NOTHING WAS READ COMPLETELY — all {len(derivations)} configured "
+            f"repo(s) were incomplete, so this run speaks for none of them: "
+            f"{detail}. No repo's stored rows were replaced: with nothing read in "
+            f"FULL the delete scope is EMPTY, so a --rebuild is DOWNGRADED to a "
+            f"plain upsert and a plain run never deletes — every stored row is "
+            f"either refreshed by a document that DID read or left exactly as it "
+            f"was. An unscoped "
+            f"query's silence is NOT evidence these repos are silent, and a "
+            f"section REMOVED from a doc keeps its stale row until some repo "
+            f"reads in FULL again.",
+        )
     return (
         f"🔴 PARTIAL INDEX — {len(bad)} of {len(derivations)} configured repo(s) "
         f"were NOT read completely, so this run does not speak for them: {detail}. "
         f"Read in FULL, and therefore rebuilt, covers only: {ok}. A query scoped to "
         f"a repo that contributed nothing will return an EMPTY "
         f"SCOPE, and an unscoped query's silence is NOT evidence those repos are "
-        f"silent. Their existing rows are left untouched (the rebuild delete is "
-        f"scoped to what was read in FULL), so this run destroyed nothing it could "
-        f"not replace.",
+        f"silent. " + kept,
     )
 
 
@@ -1986,14 +2180,16 @@ def rebuild_delete_labels(
         `rebuild_refusal`'s
         partial-tolerance safe: the absent `$CIVITAI` keeps its rows.
       * `prune` — an operator act, never the timer's. `rebuild_refusal` refuses a
-        `--prune` run in which ANY repo came back unmeasured, which is what makes
-        the two-spellings collision above unreachable: it REQUIRES a
-        configured-but-unmeasured label.
+        `--prune` run in which ANY repo came back INCOMPLETE — unmeasured OR
+        holding a doc that would not read; the arm widened with the scope
+        predicate and this bullet said `unmeasured` for one commit after it did.
+        That is what makes the two-spellings collision above unreachable: it
+        REQUIRES a configured-but-unmeasured label.
 
     🔴 THE INVARIANT THAT MAKES `partial_scope_warnings` TRUE: whenever that
-    warning fires (some repos measured, some did not) and the run is allowed to
+    warning fires (some repos read in full, some not) and the run is allowed to
     write, the returned scope is exactly `measured`. Scoped and default runs
-    return `measured` outright; a `--prune` run with any unmeasured repo never
+    return `measured` outright; a `--prune` run with any INCOMPLETE repo never
     reaches a write. Pinned as a seam test, not left as prose.
 
     🔴 THE EXPOSURE THAT USED TO BE RECORDED HERE IS CLOSED, AND CLOSING IT MOVED
@@ -2026,7 +2222,32 @@ def rebuild_delete_labels(
     PRESERVED, not lost, every readable doc is still upserted, and
     `partial_scope_warnings` says so on every output path — which is strictly the
     conservative direction. `--prune` additionally refuses while any repo is
-    incomplete, for the reason `rebuild_refusal`'s prune arm gives.
+    incomplete, for the reason `rebuild_refusal`'s prune arm gives. When NO repo
+    is replaceable this returns `()` and `rebuild_downgrade_reason` turns the run
+    into an upsert rather than letting `write` raise on the empty scope.
+
+    ⚠ "SAYS SO ON EVERY OUTPUT PATH" IS TRUE NOW AND WAS NOT WHEN IT WAS FIRST
+    WRITTEN. `partial_scope_warnings` returned `()` when EVERY repo was
+    incomplete, so a `--write` run without `--rebuild` printed no PARTIAL notice
+    at all. The suppression is gone; the claim is kept because it is now the
+    property, not because it was asserted.
+
+    🔴 THE RESIDUAL, RECORDED HERE RATHER THAN ONLY IN A REVIEW THREAD: THIS SCOPE
+    IS A SET OF *LABELS*, AND TWO DERIVATIONS CAN SHARE ONE. `may_replace_stored_
+    rows` is evaluated per DERIVATION; `DELETE_SQL` binds per LABEL. So
+    `--repo ~/left/protorepo --repo ~/right/protorepo` with the right twin's doc
+    blob removed yields scope `('protorepo',)` from the healthy twin and deletes
+    BOTH twins' rows, re-inserting only the healthy one's — MEASURED, rc 0.
+    `identity_collisions` does not catch it, because unreadable docs produce no
+    sections to collide.
+
+    ⚠ DELIBERATELY NOT FIXED IN THIS ROUND, and the reason is scope, not doubt:
+    keying authority on something a label cannot alias moves this scope, the
+    stored key and `handoff_search`'s `--repo` scoping together. What this round
+    DID fix is the false REPORT it produced — see `authority_label_collisions`.
+    Until then this is the honest statement of what the scope covers: a label one
+    checkout read in FULL is a label this run will DELETE, even where a DIFFERENT
+    checkout spells itself the same and could not be read.
 
     PURE, so the whole decision is testable without a database."""
     measured = {d.label for d in derivations if may_replace_stored_rows(d)}
@@ -2131,7 +2352,8 @@ def orphan_label_warning(labels: Sequence[str]) -> tuple[str, ...]:
 
 
 def rebuild_plan_lines(
-    derivations: Sequence[RepoDerivation], *, scoped: bool, prune: bool, write: bool
+    derivations: Sequence[RepoDerivation], *, scoped: bool, prune: bool, write: bool,
+    downgraded: bool = False,
 ) -> tuple[str, ...]:
     """What a `--rebuild` would DELETE, as far as this run can know it. PURE.
 
@@ -2188,18 +2410,71 @@ def rebuild_plan_lines(
     # in neither list, so a reader counts the labels, finds one missing, and has
     # no way to learn why. The pre-flight is the operator's only view of what a
     # run destroys, so a repo it silently omits is the same defect one layer up.
-    measured = tuple(sorted(d.label for d in derivations if may_replace_stored_rows(d)))
-    kept = tuple(sorted(d.label for d in derivations if d.unmeasured is not None))
+    #
+    # 🔴 AND THE BUCKETS ARE A PARTITION ON `incomplete_kind`, NOT THREE HAND-ROLLED
+    # PREDICATES OVER THE RAW FIELDS. This was the one consolidated site that still
+    # re-derived: `measured` went through `may_replace_stored_rows` while `kept`
+    # read `d.unmeasured is not None` and `incomplete` read `d.unmeasured is None
+    # and d.unreadable`. Teach `incomplete_reason` a THIRD kind — the case its own
+    # docstring says the design exists for — and a repo drops out of all three
+    # buckets while `partial_scope_warnings` still names it, so the plan and the
+    # warning disagree about the same run. Bucketing on the kind makes that
+    # impossible to write; the `unenumerated` line makes it impossible to hide.
+    by_kind: dict[str | None, list[RepoDerivation]] = {}
+    for d in derivations:
+        by_kind.setdefault(incomplete_kind(d), []).append(d)
+    measured = tuple(sorted(d.label for d in by_kind.get(None, ())))
+    kept = tuple(sorted(d.label for d in by_kind.get(INCOMPLETE_UNMEASURED, ())))
     incomplete = tuple(sorted(
         f"{d.label} ({incomplete_reason(d)})"
-        for d in derivations if d.unmeasured is None and d.unreadable))
+        for d in by_kind.get(INCOMPLETE_UNREADABLE, ())))
+    unenumerated = tuple(sorted(
+        f"{d.label} ({incomplete_reason(d)})"
+        for kind, ds in by_kind.items() if kind not in (None, *INCOMPLETE_KINDS)
+        for d in ds))
+    # 🔴 `downgraded` IS `main`'s ACTUAL DECISION, PASSED IN, NOT RE-DERIVED HERE.
+    # `measured` being empty is the same condition, and computing it twice is how
+    # a plan comes to describe a run that did not happen — the defect the
+    # gate-ordering note above records. It is a flag rather than a second call to
+    # `rebuild_downgrade_reason` for the reason `orphan_labels` takes the BOUND
+    # SCOPE rather than an `args.prune` flag: one decision, one owner.
+    header = (
+        "## rebuild delete scope — SKIPPED (the --rebuild is DOWNGRADED to an "
+        "upsert; NOTHING is deleted)" if downgraded else "## rebuild delete scope"
+    )
     out = [
-        "## rebuild delete scope",
+        header,
         f"  DELETE (read in FULL, will be re-derived): {', '.join(measured) or '(none)'}",
         f"  KEPT (configured but UNMEASURED): {', '.join(kept) or '(none)'}",
         f"  KEPT (resolved, but a doc would not READ — this run cannot replace "
         f"their rows): {', '.join(incomplete) or '(none)'}",
     ]
+    if unenumerated:
+        # The partition, asserted where an operator can see it rather than in a
+        # comment: a kind this plan does not enumerate must be REPORTED, never
+        # silently dropped out of all three buckets above.
+        out.append(
+            f"  🔴 KEPT (UNCLASSIFIED — `incomplete_kind` returned a kind this "
+            f"plan does not enumerate; the buckets above are NOT a complete view "
+            f"of this run): {', '.join(unenumerated)}"
+        )
+    shared = authority_label_collisions(derivations)
+    if shared:
+        # 🔴 THE ONE PLACE A LABEL CAN HONESTLY APPEAR IN TWO BUCKETS. Authority is
+        # demonstrated per DERIVATION and the DELETE binds LABELS, so a label two
+        # checkouts share is BOTH deleted (on the healthy twin's authority) and
+        # listed as kept (on the broken twin's). Listing it twice with no comment
+        # is the false report; naming the collision is the true one. See
+        # `authority_label_collisions` for why the underlying defect is its own
+        # round.
+        out.append(
+            f"  🔴 SHARED LABEL — {', '.join(shared)} appears ABOVE IN TWO "
+            f"BUCKETS because more than one configured checkout derives it, and "
+            f"only some of them were read in FULL. The DELETE binds the LABEL, so "
+            f"the rows of the checkout(s) that were NOT read are deleted too and "
+            f"replaced by the other's alone. Give the checkouts distinct "
+            f"directory names, or run them in separate --repo invocations."
+        )
     if scoped:
         # 🔴 A SCOPED RUN REPORTS NO ORPHANS EITHER, and saying so here is what
         # keeps this branch distinguishable from the no-prune one below. A mutant
@@ -2386,6 +2661,10 @@ def derivation_json(derivations: Sequence[RepoDerivation]) -> dict:
                 # and the DELETE cannot disagree.
                 "rebuildable": may_replace_stored_rows(d),
                 "incomplete_reason": incomplete_reason(d),
+                # The KIND alongside the reason, for the same reason the reason is
+                # here: the reason for an unmeasured repo is a free-form token, so
+                # a consumer that needs to BRANCH would otherwise match on words.
+                "incomplete_kind": incomplete_kind(d),
                 "disk_scan_complete": d.disk.complete,
                 "disk_paths_seen": len(d.disk.paths),
                 "disk_scan_errors": list(d.disk.errors),
@@ -2652,10 +2931,23 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
     # that reaches this point proves the `--write` run reaches it too — so "The
     # --write run prints the full bound scope" is now true by construction rather
     # than by hope.
+    # 🔴 THE DOWNGRADE IS DECIDED ONCE, BEFORE THE PLAN PRINTS, AND `rebuild`
+    # MEANS THIS AND NOT `args.rebuild` FROM HERE DOWN. The pre-flight is the
+    # operator's only view of what the run destroys, so it has to describe the run
+    # that is going to happen — a plan headed "rebuild delete scope" above a run
+    # that takes no DELETE is the same defect the gate-ordering above fixed. And
+    # because the delete scope is computed ONLY when `rebuild` is true, an empty
+    # scope can never reach `store.write`, whose `ValueError` on one is the
+    # backstop rather than the mechanism.
+    downgrade = rebuild_downgrade_reason(derivations) if args.rebuild else None
+    rebuild = args.rebuild and downgrade is None
     if args.rebuild:
         say("")
+        if downgrade is not None:
+            say(f"🔴 {downgrade}")
+            say("")
         for line in rebuild_plan_lines(derivations, scoped=scoped, prune=args.prune,
-                                       write=args.write):
+                                       write=args.write, downgraded=downgrade is not None):
             say(line)
 
     if not args.write:
@@ -2676,12 +2968,14 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
         stored = tuple(store.repos())
         labels = (
             rebuild_delete_labels(derivations, stored, scoped=scoped, prune=args.prune)
-            if args.rebuild else ()
+            if rebuild else ()
         )
-        n = store.write(rows, rebuild=args.rebuild, rebuild_labels=labels)
+        n = store.write(rows, rebuild=rebuild, rebuild_labels=labels)
     scope_note = (
         f" (after DELETE of {len(labels)} repo label(s): {', '.join(labels)} — "
-        f"one transaction)" if args.rebuild else ""
+        f"one transaction)" if rebuild else
+        " (--rebuild DOWNGRADED to an upsert — nothing was deleted)"
+        if downgrade is not None else ""
     )
     partial = partial_scope_warnings(derivations)
     # 🔴 THE SUCCESS LINE ITSELF SAYS PARTIAL. It is the one line a scripted
@@ -2691,8 +2985,20 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
         # 🔴 NOT "contributed nothing", WHICH IS WHAT THIS SAID AND IS TRUE ONLY
         # OF THE UNMEASURED HALF. A repo kept out of the delete scope because one
         # of its docs would not read still contributes every doc that DID read.
-        + ("\n🔴 THIS INDEX IS PARTIAL — see the PARTIAL INDEX warning above; "
-           "some configured repos were not read COMPLETELY and kept their old rows."
+        #
+        # 🔴 AND NOT "and kept their old rows" EITHER, WHICH IS A CLAIM THIS LINE
+        # CANNOT MAKE. The delete binds LABELS and authority is per DERIVATION, so
+        # a repo that shares its label with a healthy checkout did NOT keep its old
+        # rows — see `authority_label_collisions`. The warning it points at knows
+        # which case this is; the one-liner does not, so it points rather than
+        # asserts.
+        # …and it points at "the warning above" rather than naming it PARTIAL
+        # INDEX: when NOTHING was read completely that warning opens with a
+        # different token, and a pointer at a heading that is not on the page is
+        # how a reader concludes there is no warning to find.
+        + ("\n🔴 THIS INDEX IS PARTIAL — see the 🔴 warning above; some configured "
+           "repos were not read COMPLETELY, and that warning says which of their "
+           "rows were kept."
            if partial else ""))
     for line in partial:
         print(line, file=sys.stderr)

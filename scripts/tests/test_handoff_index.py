@@ -32,6 +32,7 @@ hostname appears.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -4125,14 +4126,36 @@ class TestThePartialPromiseCoversTheUnreadableRepoToo:
 
 
 class TestNoRepoReadInFullIsRefusedNotCrashed:
-    """🔴 THE ARM THE WIDER SCOPE MADE NECESSARY. `PostgresSectionStore.write`
-    RAISES on an empty rebuild scope — deliberately, so a caller that forgets the
-    scope cannot get a whole-table wipe as the default — and until now
-    `rebuild_refusal` guaranteed the scope was non-empty: "not every repo is
-    unmeasured" implied "at least one repo is in the scope". With authority
-    withheld from partially-readable repos that implication is gone, and a
-    traceback out of a 6h timer is a worse report than a refusal naming the
-    repos and a remedy."""
+    """🔴 THE STATE THE WIDER SCOPE MADE REACHABLE, AND THE ANSWER IT GETS —
+    WHICH IS A DOWNGRADE, NOT A REFUSAL. `PostgresSectionStore.write` RAISES on an
+    empty rebuild scope, deliberately, so a caller that forgets the scope cannot
+    get a whole-table wipe as the default; and until the widening
+    `rebuild_refusal` guaranteed the scope was non-empty, because "not every repo
+    is unmeasured" implied "at least one repo is in the scope". That implication
+    is gone.
+
+    🔴 THE FIRST ANSWER WAS A FOURTH REFUSAL ARM AT rc 4, AND IT SHIPPED FOR ONE
+    COMMIT. MEASURED on the TIMER's own argv — `--rebuild --write`, unscoped, one
+    handle pointing at a real checkout with ONE corrupt blob and three pointing at
+    absent ones:
+
+        pre-widening : rc 0   DELETE + 18 INSERTs   index refreshed, PARTIAL
+        that arm     : rc 4   SQL kinds: []         nothing written at all
+        here         : rc 0   no DELETE, 18 INSERTs index refreshed, PARTIAL
+
+    (`test_the_TIMERS_OWN_ARGV_in_the_state_home_nix_calls_SUPPORTED` below is
+    that exact fixture, so the third row is asserted rather than quoted.)
+
+    Three absent checkouts is not a broken machine — `nix/home.nix` states in as
+    many words that it is SUPPORTED and that the price is a standing warning. So
+    the refusal turned a supported state into `OnFailure=notify-failure@%n
+    .service` every 6h until a human repaired an object store, with the index
+    frozen meanwhile: `claude/RULES.md`'s permanently-red gate, which is the
+    mistake this same function's all-unmeasured arm had to unwind once already.
+
+    The fallback is not an invention either — it is the sentence that refusal
+    printed as its own remedy ("Re-running WITHOUT --rebuild is a real remedy
+    here"). A remedy only a human can type is not a remedy for a unit."""
 
     def _all_partial(self, tmp_path):
         a = tmp_path / "glimmerrepo"
@@ -4142,39 +4165,118 @@ class TestNoRepoReadInFullIsRefusedNotCrashed:
             _break_doc_blob(root, "claudedocs/handoff-fandrelly-probe.md")
         return a, b
 
-    def test_a_rebuild_with_nothing_read_in_FULL_refuses_before_the_store_opens(
+    def test_a_rebuild_with_nothing_read_in_FULL_writes_and_deletes_NOTHING(
             self, tmp_path, capsys):
-        """`_refusing_store()` is the positive control: an assertion on the exit
-        code alone cannot tell a refusal from a write that happened and then
-        returned non-zero. It also proves the empty scope never reaches
-        `write()`, which is where the raise lives."""
-        a, b = self._all_partial(tmp_path)
-        rc = hi.main(["--repo", str(a), "--repo", str(b), "--rebuild", "--write"],
-                     open_store=_refusing_store())
-        err = capsys.readouterr().err
-        assert rc == hi.RC_REFUSED
-        assert "not ONE of the 2 repo(s) was read COMPLETELY" in err
-        assert "the delete scope would be EMPTY" in err
-        # It must NOT reach for the all-unmeasured arm's remedy: both repos
-        # resolved, so "fix the repo handles" would be a confident wrong step.
-        assert "came back UNMEASURED" not in err
-
-    def test_the_remedy_it_names_is_a_run_that_actually_writes(self, tmp_path, capsys):
-        """🔴 A REMEDY IS A CLAIM ABOUT THE STATE IT IS PRINTED IN, and the
-        all-unmeasured arm one screen up had to RETRACT this exact sentence for
-        being false in its own state ("re-run without --rebuild" writes 0 rows
-        when nothing measured). Here the zero-rows arm has already returned for
-        every derivation with no rows, so `rows` is non-empty by construction —
-        and the claim is measured rather than reasoned about."""
+        """🔴 THE REGRESSION, END TO END. At the parent commit this argv exited 4
+        with the store never opened; the recording connection is what proves the
+        write now HAPPENS rather than merely that the exit code moved, and
+        `"DELETE" not in kinds` is what proves the downgrade is a downgrade and
+        not a rebuild that got its scope from somewhere else."""
         a, b = self._all_partial(tmp_path)
         conn = StoredReposConn(("glimmerrepo", "quorlrepo"))
-        rc = hi.main(["--repo", str(a), "--repo", str(b), "--write"],
+        rc = hi.main(["--repo", str(a), "--repo", str(b), "--rebuild", "--write"],
                      open_store=_recording_store(conn))
-        out = capsys.readouterr().out
+        cap = capsys.readouterr()
         assert rc == hi.RC_OK
         assert conn.kinds().count("INSERT") > 0
         assert "DELETE" not in conn.kinds()
-        assert "wrote 0 section row(s)" not in out
+        assert "REBUILD DOWNGRADED TO AN UPSERT" in cap.out
+        assert "the delete scope would be EMPTY" in cap.out
+        # It must NOT reach for the all-unmeasured arm's language: both repos
+        # resolved, so "fix the repo handles" would be a confident wrong step.
+        assert "came back UNMEASURED" not in cap.out + cap.err
+        assert "REFUSING" not in cap.err
+        # …and the success line says the rebuild did not happen, because
+        # `wrote N section row(s)` otherwise reads as a completed rebuild.
+        assert "--rebuild DOWNGRADED to an upsert — nothing was deleted" in cap.out
+
+    def test_the_TIMERS_OWN_ARGV_in_the_state_home_nix_calls_SUPPORTED(
+            self, tmp_path, monkeypatch, capsys):
+        """🔴 THE MEASURED SHAPE, REPRODUCED WITH THE UNIT'S ARGV RATHER THAN
+        `--repo`. Scoped runs and unscoped runs take different branches of
+        `rebuild_delete_labels`, and it is the UNSCOPED one the timer takes — so
+        a regression test driven only by `--repo` would not have covered the run
+        that regressed.
+
+        One handle present (a real checkout, one corrupt blob), the rest absent:
+        exactly `nix/home.nix`'s SUPPORTED state plus a repairable object
+        store."""
+        handles = {}
+        present = tmp_path / "brindlemossrepo"
+        _write_repo(present, _TRIAD)
+        _break_doc_blob(present, "claudedocs/handoff-quorlbane-cache.md")
+        handles[hi.REPO_ENV_HANDLES[0]] = str(present)
+        for handle in hi.REPO_ENV_HANDLES[1:]:
+            handles[handle] = str(tmp_path / f"absent-{handle.lower()}")
+        _apply_handles(monkeypatch, handles)
+
+        conn = StoredReposConn(("brindlemossrepo",))
+        rc = hi.main(["--rebuild", "--write"], open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK, "a SUPPORTED state must not fire OnFailure 4x/day"
+        # 🔴 THE EXACT ROW COUNT, because "> 0" cannot tell "the two readable docs
+        # were indexed" from "one was". MEASURED at 18 here and at the commit
+        # BEFORE the widening; the refusing commit wrote 0.
+        assert conn.kinds().count("INSERT") == 18
+        assert "DELETE" not in conn.kinds()
+        assert "REBUILD DOWNGRADED TO AN UPSERT" in cap.out
+        # Both kinds of incompleteness are named, with their own reasons.
+        assert "brindlemossrepo (docs-unreadable (1 of 3))" in cap.out
+        assert f"absent-{hi.REPO_ENV_HANDLES[1].lower()} (no-such-directory)" in cap.out
+
+    def test_ONE_repo_read_in_FULL_anywhere_keeps_the_DELETE(self, tmp_path, capsys):
+        """🔴 THE NEGATIVE CONTROL, AND WITHOUT IT EVERY ASSERTION ABOVE IS
+        SATISFIED BY A RUN THAT NEVER DELETES ANYTHING — which would be a
+        permanently-DEAD rebuild rather than a permanently-red one. The same two
+        repos, one blob apart: the second is left intact."""
+        a, b = self._all_partial(tmp_path)
+        healthy = tmp_path / "brindlemossrepo"
+        _write_repo(healthy, _TRIAD)
+        conn = StoredReposConn(("glimmerrepo", "quorlrepo", "brindlemossrepo"))
+        rc = hi.main(["--repo", str(a), "--repo", str(b), "--repo", str(healthy),
+                      "--rebuild", "--write"], open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK
+        assert conn.params_for("DELETE") == [[["brindlemossrepo"]]]
+        assert "REBUILD DOWNGRADED" not in cap.out
+
+    def test_the_downgrade_and_the_bound_DELETE_SCOPE_cannot_disagree(self, tmp_path):
+        """🔴 THE SEAM. `main` computes the delete scope ONLY when the downgrade
+        does not fire, so an empty scope can never reach `write()` — and that is a
+        RELATIONSHIP between two functions, not a property of either. Pinned over
+        every (scoped, prune) combination a run can reach a write in, and over
+        BOTH fixtures, so a change that made one of them always-empty or
+        always-none fails here.
+
+        `write()`'s own `ValueError` is the backstop, and it is asserted as the
+        positive control: the thing the seam prevents must actually be fatal, or
+        preventing it proves nothing."""
+        a, b = self._all_partial(tmp_path)
+        healthy = tmp_path / "brindlemossrepo"
+        _write_repo(healthy, _TRIAD)
+        nothing = [hi.derive_repo(a, label="glimmerrepo"),
+                   hi.derive_repo(b, label="quorlrepo")]
+        something = [*nothing, hi.derive_repo(healthy, label="brindlemossrepo")]
+
+        assert hi.rebuild_downgrade_reason(nothing) is not None
+        assert hi.rebuild_downgrade_reason(something) is None
+        for ds in (nothing, something):
+            rows = [s for d in ds for s in d.sections]
+            for scoped in (True, False):
+                for prune in (True, False):
+                    if hi.rebuild_refusal(ds, rows, prune=prune) is not None:
+                        continue  # never reaches a write
+                    scope = hi.rebuild_delete_labels(
+                        ds, ("glimmerrepo", "quorlrepo", "brindlemossrepo"),
+                        scoped=scoped, prune=prune)
+                    downgraded = hi.rebuild_downgrade_reason(ds) is not None
+                    assert downgraded == (scope == ()), (scoped, prune, scope)
+
+        # The positive control for what the seam is FOR.
+        with pytest.raises(ValueError, match="EMPTY delete scope"):
+            hi.PostgresSectionStore(RecordingConn()).write(
+                [s for d in something for s in d.sections],
+                rebuild=True, rebuild_labels=())
 
     def test_the_all_UNMEASURED_arm_still_wins_where_it_applies(self, tmp_path, capsys):
         """The ladder's ordering, pinned. Both arms fire on "every repo is
@@ -4274,3 +4376,570 @@ class TestTheAuthorityPredicateIsREACHEDByTheDeleteScope:
         # …and with the SAME two derivations minus the unreadable path, both.
         ds[1] = self._d("thackrepo")
         assert hi.rebuild_delete_labels(ds, (), scoped=True) == ("thackrepo", "venlorepo")
+
+
+# --------------------------------------------------------------------------- #
+# Round 2 of the incomplete-read authority work — the audit's findings
+# --------------------------------------------------------------------------- #
+
+
+def _plan_bucket(lines, prefix: str) -> list[str]:
+    """The labels listed on the plan line starting with `prefix`.
+
+    🔴 IT PARSES THE OPERATOR'S LINE, NOT A FUNCTION'S RETURN. The whole point of
+    the seam tests below is that the pre-flight and the bound DELETE are two
+    different renderings of one decision, so a helper that re-called
+    `rebuild_delete_labels` would be asserting a value against itself."""
+    hit = [ln for ln in lines if ln.strip().startswith(prefix)]
+    assert len(hit) == 1, f"expected exactly one {prefix!r} line, got {hit}"
+    body = hit[0].split(":", 1)[1].strip()
+    if body == "(none)":
+        return []
+    # Each entry is `label` or `label (reason)` — the label is the first token.
+    return [e.strip().split(" ")[0] for e in body.split(", ")]
+
+
+class TestThePlanBucketsArePartitionOnTheKindNotOnTheRawFields:
+    """🔴 THE ONE CONSOLIDATED SITE THAT STILL RE-DERIVED. `incomplete_reason`
+    exists because the same predicate had been spelled four ways at four sites;
+    `rebuild_plan_lines` was made to read it for ONE of its three buckets and
+    left reading the raw fields for the other two — `d.unmeasured is not None`
+    and `d.unmeasured is None and d.unreadable`.
+
+    That is not a style nit. Those two spellings enumerate the kinds that existed
+    when they were written, and `incomplete_reason`'s own docstring says the
+    design exists so a THIRD kind can be added ("any incompleteness — of any
+    kind, including kinds not yet invented — withholds it"). On the day one is,
+    the repo falls out of all three buckets while `partial_scope_warnings` still
+    names it: the plan and the warning then disagree about the same run, and the
+    plan is the operator's only view of what the run destroys."""
+
+    def _mixed(self, tmp_path):
+        healthy = tmp_path / "brindlemossrepo"
+        broken = tmp_path / "varkelthornrepo"
+        _write_repo(healthy, _TRIAD)
+        _write_repo(broken, _TRIAD)
+        _break_doc_blob(broken, "claudedocs/handoff-quorlbane-cache.md")
+        return [hi.derive_repo(healthy, label="brindlemossrepo"),
+                hi.derive_repo(broken, label="varkelthornrepo"),
+                hi.derive_repo(tmp_path / "sundrellipexrepo",
+                               label="sundrellipexrepo")]
+
+    def test_every_configured_repo_lands_in_exactly_one_bucket(self, tmp_path):
+        """The partition itself, over all three kinds at once. Three labels, three
+        buckets, one each — and the union is the whole config, which is the claim
+        a reader makes when they count the plan's labels."""
+        ds = self._mixed(tmp_path)
+        lines = hi.rebuild_plan_lines(ds, scoped=True, prune=False, write=True)
+        delete = _plan_bucket(lines, "DELETE (read in FULL")
+        unmeasured = _plan_bucket(lines, "KEPT (configured but UNMEASURED)")
+        unreadable = _plan_bucket(lines, "KEPT (resolved, but a doc would not READ")
+        assert delete == ["brindlemossrepo"]
+        assert unmeasured == ["sundrellipexrepo"]
+        assert unreadable == ["varkelthornrepo"]
+        assert sorted(delete + unmeasured + unreadable) == sorted(
+            d.label for d in ds)
+
+    def test_a_THIRD_kind_of_incompleteness_is_REPORTED_not_dropped(
+            self, tmp_path, monkeypatch):
+        """🔴 THE MUTANT-SHAPED FUTURE, DRIVEN DIRECTLY. A new
+        `incomplete_kind` value is exactly the change the raw-field spellings
+        cannot survive, and no fixture built out of `derive_repo` can produce one
+        — so the kind is monkeypatched, which is a supported call on a PURE public
+        function rather than a contrivance.
+
+        Both the kind and the reason are patched together: `may_replace_stored_
+        rows` reads the reason, so patching only the kind would leave the repo in
+        the DELETE bucket and the test would pass for the wrong reason.
+
+        RED at the parent commit: the label appears NOWHERE in the plan."""
+        ds = self._mixed(tmp_path)
+        real_kind, real_reason = hi.incomplete_kind, hi.incomplete_reason
+        novel = "blob-checksum-mismatch"
+        assert novel not in hi.INCOMPLETE_KINDS
+        monkeypatch.setattr(hi, "incomplete_kind", lambda d: (
+            novel if d.label == "brindlemossrepo" else real_kind(d)))
+        monkeypatch.setattr(hi, "incomplete_reason", lambda d: (
+            f"{novel} (2 of 3)" if d.label == "brindlemossrepo" else real_reason(d)))
+
+        lines = hi.rebuild_plan_lines(ds, scoped=True, prune=False, write=True)
+        assert "brindlemossrepo" not in _plan_bucket(lines, "DELETE (read in FULL")
+        blob = "\n".join(lines)
+        assert "brindlemossrepo" in blob, (
+            "a kind the plan does not enumerate must still be REPORTED")
+        unclassified = [ln for ln in lines if "UNCLASSIFIED" in ln]
+        assert len(unclassified) == 1
+        assert "brindlemossrepo (blob-checksum-mismatch (2 of 3))" in unclassified[0]
+        # …and the plan says its own buckets are not a complete view, rather than
+        # letting a reader count three lines and believe them.
+        assert "NOT a complete view" in unclassified[0]
+
+    def test_no_UNCLASSIFIED_line_when_every_kind_is_enumerated(self, tmp_path):
+        """The negative control. Without it the assertion above is satisfied by a
+        plan that prints the unclassified line unconditionally, which would make
+        every healthy run look like it had hit an unknown failure mode."""
+        ds = self._mixed(tmp_path)
+        lines = hi.rebuild_plan_lines(ds, scoped=True, prune=False, write=True)
+        assert not [ln for ln in lines if "UNCLASSIFIED" in ln]
+
+    def test_the_reason_is_derived_FROM_the_kind_not_matched_out_of_it(self):
+        """🔴 THE REASON FOR AN UNMEASURED REPO IS A FREE-FORM TOKEN, so recovering
+        the kind by matching on the reason string would be a guard on WORDS. Pinned
+        as a differential: two derivations whose reasons share no substring, both
+        classified `unmeasured`."""
+        a = hi.RepoDerivation(repo="/x/pellinorerepo", label="pellinorerepo",
+                              unmeasured="no-such-directory")
+        b = hi.RepoDerivation(repo="/x/thistlegrimrepo", label="thistlegrimrepo",
+                              unmeasured="ls-tree-failed")
+        assert hi.incomplete_kind(a) == hi.incomplete_kind(b) == hi.INCOMPLETE_UNMEASURED
+        assert hi.incomplete_reason(a) == "no-such-directory"
+        assert hi.incomplete_reason(b) == "ls-tree-failed"
+        # …and the unreadable kind is the OTHER one, over a derivation whose
+        # `unmeasured` is clear — proving the first clause does not always win.
+        c = hi.RepoDerivation(repo="/x/mockwaitherepo", label="mockwaitherepo",
+                              ref="refs/heads/main", docs=4,
+                              unreadable=("claudedocs/handoff-mockwaithe-lane.md",))
+        assert hi.incomplete_kind(c) == hi.INCOMPLETE_UNREADABLE
+        assert hi.incomplete_reason(c) == "docs-unreadable (1 of 5)"
+
+
+class TestTheReportsAndTheBOUNDDeleteCannotDisagree:
+    """🔴 THREE MUTANTS THAT SURVIVED A FULL GREEN SUITE, AND THE SEAM THAT HELD
+    NONE OF THEM. Each is a revert of one changed expression back to
+    `d.unmeasured is None` — the spelling the widening replaced — and each
+    produces an operator report that CONTRADICTS ITSELF in the same sentence,
+    with 234 tests still passing:
+
+      * `partial_scope_warnings`' `ok` list: "…were NOT read completely…:
+        varkelthornrepo" beside "Read in FULL, and therefore rebuilt, covers only:
+        brindlemossrepo, varkelthornrepo".
+      * `rebuild_plan_lines`' `measured`: "DELETE …: brindlemossrepo,
+        varkelthornrepo" while the bound DELETE is `[['brindlemossrepo']]`, and
+        `varkelthornrepo` also under the mutually-exclusive KEPT bucket.
+      * `rebuild_refusal`'s zero-rows denominator: "ZERO rows from the 0 repo(s)
+        that resolved a mainline ref" when one did.
+
+    The only assertion the suite had on any of them drove the UNMEASURED state,
+    where both spellings agree — `claude/RULES.md`'s "verified in isolation" seam,
+    one function down: every existing test was scoped to a state in which the
+    difference cannot appear."""
+
+    def _mixed(self, tmp_path):
+        healthy = tmp_path / "brindlemossrepo"
+        broken = tmp_path / "varkelthornrepo"
+        _write_repo(healthy, _TRIAD)
+        _write_repo(broken, _TRIAD)
+        _break_doc_blob(broken, "claudedocs/handoff-quorlbane-cache.md")
+        return [hi.derive_repo(healthy, label="brindlemossrepo"),
+                hi.derive_repo(broken, label="varkelthornrepo")]
+
+    def test_the_PARTIAL_warnings_ok_list_names_only_repos_read_in_FULL(
+            self, tmp_path):
+        """MUTANT 1. The `ok` list is the half of the sentence a reader uses to
+        decide which repos the index now covers, and it read `d.unmeasured is
+        None` — so it named the repo the same sentence had just said the run does
+        not speak for."""
+        ds = self._mixed(tmp_path)
+        text = hi.partial_scope_warnings(ds)[0]
+        assert "were NOT read completely" in text and "varkelthornrepo" in text
+        covers = text.split("covers only: ")[1].split(".")[0]
+        assert covers == "brindlemossrepo", (
+            "the two halves of one sentence must not name the same repo")
+
+    def test_the_plan_DELETE_line_names_only_repos_read_in_FULL(self, tmp_path):
+        """MUTANT 2, at the pre-flight. A label in BOTH the DELETE bucket and a
+        mutually-exclusive KEPT bucket is a self-contradicting plan."""
+        ds = self._mixed(tmp_path)
+        lines = hi.rebuild_plan_lines(ds, scoped=True, prune=False, write=True)
+        delete = _plan_bucket(lines, "DELETE (read in FULL")
+        unreadable = _plan_bucket(lines, "KEPT (resolved, but a doc would not READ")
+        assert delete == ["brindlemossrepo"]
+        assert unreadable == ["varkelthornrepo"]
+        assert not set(delete) & set(unreadable)
+
+    def test_the_planned_DELETE_IS_the_scope_that_gets_BOUND(self, tmp_path, capsys):
+        """🔴 THE SEAM THE AUDIT ASKED FOR, AND IT BINDS TWO RENDERINGS RATHER
+        THAN RESTATING ONE. `rebuild_plan_lines`' own trailing sentence calls its
+        list "the COMPLETE delete scope"; nothing held it to the parameters
+        `DELETE_SQL` is actually executed with, which is why mutant 2 survived
+        while an end-to-end test asserting the bound scope was green.
+
+        Driven through `main` so the two values are produced by the run rather
+        than by the test, over a fixture where they CAN differ: one healthy repo,
+        one partially readable, one absent."""
+        healthy = tmp_path / "brindlemossrepo"
+        broken = tmp_path / "varkelthornrepo"
+        _write_repo(healthy, _TRIAD)
+        _write_repo(broken, _TRIAD)
+        _break_doc_blob(broken, "claudedocs/handoff-quorlbane-cache.md")
+        absent = tmp_path / "sundrellipexrepo"
+
+        conn = StoredReposConn(("brindlemossrepo", "varkelthornrepo",
+                                "sundrellipexrepo"))
+        rc = hi.main(["--repo", str(healthy), "--repo", str(broken),
+                      "--repo", str(absent), "--rebuild", "--write"],
+                     open_store=_recording_store(conn))
+        out = capsys.readouterr().out
+        assert rc == hi.RC_OK
+        planned = _plan_bucket(out.splitlines(), "DELETE (read in FULL")
+        bound = conn.params_for("DELETE")
+        assert bound == [[["brindlemossrepo"]]], bound
+        assert planned == sorted(bound[0][0]), (planned, bound)
+        # …and the run's own success line quotes the same scope back.
+        assert "after DELETE of 1 repo label(s): brindlemossrepo" in out
+
+    def test_the_zero_rows_arm_counts_repos_that_RESOLVED_a_ref(self, tmp_path):
+        """MUTANT 3. `measured` here is a count of repos that RESOLVED A MAINLINE
+        REF — that is what the sentence says — so it is `len(derivations) -
+        len(unmeasured)`, not `len(bad)`. Reverting it made the message read "ZERO
+        rows from the 0 repo(s) that resolved a mainline ref" for a run in which
+        one did.
+
+        The fixture is chosen so the three candidate numbers are pairwise
+        distinct: 2 derivations, 1 unmeasured, 2 incomplete — correct answer 1,
+        mutant's answer 0, `len(derivations)` 2."""
+        empty = tmp_path / "brindlemossrepo"
+        _write_repo(empty, {"handoff-varkelthorn-lane.md": DOC_FULL})
+        _break_every_doc_blob(empty)
+        ds = [hi.derive_repo(empty, label="brindlemossrepo"),
+              hi.derive_repo(tmp_path / "sundrellipexrepo",
+                             label="sundrellipexrepo")]
+        assert [d.label for d in ds if d.unmeasured] == ["sundrellipexrepo"]
+        assert [d.label for d in ds if hi.incomplete_reason(d)] == [
+            "brindlemossrepo", "sundrellipexrepo"]
+        refusal = hi.rebuild_refusal(ds, [])
+        assert refusal is not None
+        assert "ZERO rows from the 1 repo(s) that resolved a mainline ref" in refusal
+
+
+class TestThePruneRefusalStatesTheReasonThatActuallyApplies:
+    """🔴 A REMEDY OR A RATIONALE IS A CLAIM ABOUT THE STATE IT IS PRINTED IN.
+    When the `--prune` arm widened to INCOMPLETE repos it explained the new half
+    with the OLD half's reason: "refused for the same reason it is kept out of the
+    delete scope: this run has nothing to put back". That is false twice —
+    `--prune` never puts back the disappeared labels' rows (deleting them is what
+    it is for), and the incomplete repo's own rows are already outside `measured`,
+    so they are safe with or without this arm. The renamed-checkout ambiguity the
+    arm exists for cannot arise from an unreadable doc either: the ref resolved,
+    the directory is present, the label is unchanged.
+
+    The behaviour is kept — conservative on a destructive operator flag is cheap,
+    and `--prune` is never in the unit's argv — so what this pins is the SENTENCE.
+
+    ⚠ IT IS A WORD-LEVEL GUARD, DELIBERATELY AND WITH ITS LIMIT STATED: it pins
+    that one RETRACTED sentence cannot come back and that the true one is present.
+    It cannot tell you a third, differently-worded false rationale is false. What
+    makes that acceptable here is that the retracted sentence is the specific
+    thing an audit found and a reword would otherwise silently restore."""
+
+    def _prune_refusal(self, tmp_path):
+        healthy = tmp_path / "brindlemossrepo"
+        broken = tmp_path / "varkelthornrepo"
+        _write_repo(healthy, _TRIAD)
+        _write_repo(broken, _TRIAD)
+        _break_doc_blob(broken, "claudedocs/handoff-quorlbane-cache.md")
+        ds = [hi.derive_repo(healthy, label="brindlemossrepo"),
+              hi.derive_repo(broken, label="varkelthornrepo")]
+        rows = [s for d in ds for s in d.sections]
+        return hi.rebuild_refusal(ds, rows, prune=True), ds
+
+    def test_it_does_not_claim_the_incomplete_repo_has_nothing_to_put_back(
+            self, tmp_path):
+        refusal, ds = self._prune_refusal(tmp_path)
+        assert refusal is not None
+        text = _norm(refusal)
+        assert "for the same reason it is kept out of the delete scope" not in text
+        assert "this run has nothing to put back" not in text
+
+    def test_it_states_the_reason_that_DOES_apply(self, tmp_path):
+        refusal, _ = self._prune_refusal(tmp_path)
+        text = _norm(refusal)
+        assert "cannot vouch for the corpus at all" in text
+        assert "decides what to DESTROY from what this run did NOT find" in text
+        # …and it says the two halves are refused for DIFFERENT reasons, so the
+        # unmeasured half's spelling-ambiguity rationale is not read as covering
+        # both.
+        assert "refused for a DIFFERENT reason" in text
+
+    def test_the_claim_the_message_makes_about_the_repos_rows_is_TRUE(
+            self, tmp_path):
+        """The behavioural half, so this class is not purely a prose pin: the
+        message says the incomplete repo's own rows are already safe. They are —
+        the same derivations with `--prune` dropped bind a DELETE that excludes
+        it."""
+        _, ds = self._prune_refusal(tmp_path)
+        assert hi.rebuild_delete_labels(
+            ds, ("brindlemossrepo", "varkelthornrepo"),
+            scoped=False, prune=False) == ("brindlemossrepo",)
+
+    def test_a_config_with_every_doc_readable_still_prunes(self, tmp_path,
+                                                          monkeypatch, capsys):
+        """The negative control, one blob apart — without it the assertions above
+        are satisfied by an arm that refuses every `--prune` run."""
+        _apply_handles(monkeypatch, _every_handle_set(tmp_path))
+        labels = [f"{h.lower()}repo" for h in hi.REPO_ENV_HANDLES]
+        conn = StoredReposConn(tuple(labels))
+        rc = hi.main(["--rebuild", "--prune", "--write"],
+                     open_store=_recording_store(conn))
+        assert rc == hi.RC_OK
+        assert "REFUSING" not in capsys.readouterr().err
+
+
+class TestThePartialNoticeReachesEveryOutputPath:
+    """🔴 A CLAIM THAT WAS FALSE IN A REACHABLE STATE, AND IT IS THE SENTENCE THAT
+    STOPS THE NEXT PERSON LOOKING. `rebuild_delete_labels`' cost note says
+    `partial_scope_warnings` "says so on every output path". It did not:
+    `partial_scope_warnings` short-circuited to `()` when EVERY repo was
+    incomplete and deferred to `rebuild_refusal`, which `main` consults only under
+    `--rebuild`.
+
+    MEASURED at the parent commit, two repos each with one unreadable doc,
+    `--write` WITHOUT `--rebuild`: `partial_scope_warnings() == ()`, `wrote 24
+    section row(s)`, rc 0, and the word PARTIAL nowhere on stdout — the only
+    signal was two `⚠ UNREADABLE` lines. The hole pre-dated the widening; the
+    CLAIM did not."""
+
+    def _all_incomplete(self, tmp_path):
+        a = tmp_path / "brindlemossrepo"
+        b = tmp_path / "varkelthornrepo"
+        for root in (a, b):
+            _write_repo(root, _TRIAD)
+            _break_doc_blob(root, "claudedocs/handoff-fandrelly-probe.md")
+        return a, b
+
+    def test_a_plain_WRITE_over_an_all_incomplete_corpus_says_so(
+            self, tmp_path, capsys):
+        """The reproduced hole, through `main`, on the argv that has no
+        `--rebuild` — the one path `rebuild_refusal` never sees."""
+        a, b = self._all_incomplete(tmp_path)
+        conn = StoredReposConn(("brindlemossrepo", "varkelthornrepo"))
+        rc = hi.main(["--repo", str(a), "--repo", str(b), "--write"],
+                     open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK
+        assert conn.kinds().count("INSERT") > 0
+        assert "🔴 THIS INDEX IS PARTIAL" in cap.out
+        assert "🔴 NOTHING WAS READ COMPLETELY" in cap.err
+        assert "brindlemossrepo (docs-unreadable (1 of 3))" in cap.err
+
+    def test_the_pure_function_itself_no_longer_returns_empty(self, tmp_path):
+        """Directly, because `main` has three renderers and the defect lives one
+        function below all of them."""
+        a, b = self._all_incomplete(tmp_path)
+        ds = [hi.derive_repo(a, label="brindlemossrepo"),
+              hi.derive_repo(b, label="varkelthornrepo")]
+        assert all(hi.incomplete_reason(d) for d in ds)
+        warnings = hi.partial_scope_warnings(ds)
+        assert len(warnings) == 1
+        # It must not claim an `ok` list it does not have — the mixed sentence's
+        # "covers only: <labels>" would render as "covers only: " here.
+        assert "covers only" not in warnings[0]
+        assert "all 2 configured repo(s) were incomplete" in warnings[0]
+
+    def test_the_JSON_surface_carries_it_too(self, tmp_path, capsys):
+        """`--json` REPLACES the prose renderer, and it is the surface consumed
+        without a human reading it."""
+        a, b = self._all_incomplete(tmp_path)
+        rc = hi.main(["--repo", str(a), "--repo", str(b), "--json"],
+                     open_store=_refusing_store())
+        doc = json.loads(capsys.readouterr().out)
+        assert rc == hi.RC_OK
+        assert any("NOTHING WAS READ COMPLETELY" in w for w in doc["warnings"])
+
+    def test_an_ALL_HEALTHY_run_still_says_nothing(self, tmp_path, capsys):
+        """🔴 THE ONE SUPPRESSION THAT SURVIVES, AND THE CONTROL FOR THE WHOLE
+        CLASS. A per-run "0 repos missing" buries the real ones; removing the
+        all-bad short-circuit must not have removed the empty one."""
+        a = tmp_path / "brindlemossrepo"
+        b = tmp_path / "varkelthornrepo"
+        _write_repo(a, _TRIAD)
+        _write_repo(b, _TRIAD)
+        ds = [hi.derive_repo(a, label="brindlemossrepo"),
+              hi.derive_repo(b, label="varkelthornrepo")]
+        assert hi.partial_scope_warnings(ds) == ()
+        conn = StoredReposConn(("brindlemossrepo", "varkelthornrepo"))
+        rc = hi.main(["--repo", str(a), "--repo", str(b), "--write"],
+                     open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK
+        assert "PARTIAL" not in cap.out + cap.err
+        assert "NOTHING WAS READ COMPLETELY" not in cap.out + cap.err
+
+
+class TestASharedLABELIsNotReportedAsPreserved:
+    """🟢 THE DEFECT IS PRE-EXISTING AND STAYS; THE FALSE REPORT ABOUT IT DOES NOT.
+    Authority is demonstrated per DERIVATION and exercised per LABEL, and two
+    configured checkouts can derive one label (`main` uses `Path(raw).name`).
+
+    MEASURED, identical at the parent commit and at the commit before the whole
+    widening: `--repo <left>/protorepo --repo <right>/protorepo --rebuild --write`
+    with the right twin's doc blob removed gives `DELETE params
+    [[['protorepo']]]`, INSERTs only from the healthy twin, rc 0 — the broken
+    twin's rows deleted with nothing to replace them. `identity_collisions` cannot
+    see it: unreadable docs produce no sections, so nothing collides at the
+    section level.
+
+    🔴 WHAT THIS ROUND CHANGED IS THAT THE RUN STOPPED LYING ABOUT IT. The
+    widening newly printed, in that exact state, "Their existing rows are left
+    untouched … this run destroyed nothing it could not replace" and "kept their
+    old rows" — about rows it had just deleted — and listed the label under both
+    DELETE and KEPT with no comment. A silent wrong is recoverable by looking; a
+    stated wrong is what stops anyone looking."""
+
+    def _twins(self, tmp_path):
+        left = tmp_path / "left" / "protorepo"
+        right = tmp_path / "right" / "protorepo"
+        _write_repo(left, _TRIAD)
+        _write_repo(right, _TRIAD)
+        _break_every_doc_blob(right)
+        return left, right
+
+    def test_the_collision_is_detected_per_LABEL(self, tmp_path):
+        left, right = self._twins(tmp_path)
+        ds = [hi.derive_repo(left, label="protorepo"),
+              hi.derive_repo(right, label="protorepo")]
+        assert hi.authority_label_collisions(ds) == ("protorepo",)
+        # The negative control: the SAME two checkouts under distinct labels
+        # collide with nothing, so this is about the label and not about the
+        # broken blob.
+        distinct = [hi.derive_repo(left, label="brindlemossrepo"),
+                    hi.derive_repo(right, label="varkelthornrepo")]
+        assert hi.authority_label_collisions(distinct) == ()
+
+    def test_the_PARTIAL_warning_retracts_the_left_untouched_promise(self, tmp_path):
+        """The false sentence, pinned absent, and the true one pinned present."""
+        left, right = self._twins(tmp_path)
+        ds = [hi.derive_repo(left, label="protorepo"),
+              hi.derive_repo(right, label="protorepo")]
+        text = _norm(hi.partial_scope_warnings(ds)[0])
+        assert "destroyed nothing it could not replace" not in text
+        assert "EXCEPT WHERE A LABEL IS SHARED: protorepo" in text
+        assert "those rows ARE deleted" in text
+
+    def test_the_promise_is_still_made_where_it_is_TRUE(self, tmp_path):
+        """🔴 THE CONTROL THAT KEEPS THE QUALIFICATION FROM SWALLOWING THE CLAIM.
+        With distinct labels the delete really does spare the incomplete repo, and
+        the warning must still say so — otherwise the fix is "delete the promise",
+        which loses the fact an operator needs."""
+        left, right = self._twins(tmp_path)
+        ds = [hi.derive_repo(left, label="brindlemossrepo"),
+              hi.derive_repo(right, label="varkelthornrepo")]
+        text = _norm(hi.partial_scope_warnings(ds)[0])
+        assert "destroyed nothing it could not replace" in text
+        assert "EXCEPT WHERE A LABEL IS SHARED" not in text
+
+    def test_the_preflight_names_the_collision_rather_than_listing_it_twice(
+            self, tmp_path):
+        left, right = self._twins(tmp_path)
+        ds = [hi.derive_repo(left, label="protorepo"),
+              hi.derive_repo(right, label="protorepo")]
+        lines = hi.rebuild_plan_lines(ds, scoped=True, prune=False, write=True)
+        assert _plan_bucket(lines, "DELETE (read in FULL") == ["protorepo"]
+        assert _plan_bucket(
+            lines, "KEPT (resolved, but a doc would not READ") == ["protorepo"]
+        shared = [ln for ln in lines if "SHARED LABEL" in ln]
+        assert len(shared) == 1
+        assert "protorepo" in shared[0]
+        assert "the rows of the checkout(s) that were NOT read are deleted too" \
+            in shared[0]
+
+    def test_through_main_the_residual_is_recorded_and_the_report_is_true(
+            self, tmp_path, capsys):
+        """🔴 THE RESIDUAL IS ASSERTED, NOT WISHED AWAY. The DELETE really does
+        still bind `protorepo`; this test says so, so the day the structural fix
+        lands it fails and forces this class to be re-read rather than leaving a
+        stale 'known issue' comment behind."""
+        left, right = self._twins(tmp_path)
+        conn = StoredReposConn(("protorepo",))
+        rc = hi.main(["--repo", str(left), "--repo", str(right),
+                      "--rebuild", "--write"], open_store=_recording_store(conn))
+        cap = capsys.readouterr()
+        assert rc == hi.RC_OK
+        # THE UNFIXED DEFECT, pinned as-is.
+        assert conn.params_for("DELETE") == [[["protorepo"]]]
+        # …and every sentence the run prints about it is now true.
+        assert "kept their old rows" not in cap.out
+        assert "destroyed nothing it could not replace" not in cap.err
+        assert "🔴 SHARED LABEL" in cap.out
+        assert "EXCEPT WHERE A LABEL IS SHARED" in cap.err
+
+
+class TestTheCommentsSitWithTheCodeTheyDescribe:
+    """🔴 A COMMENT IS A CLAIM TOO, AND A MISPLACED ONE IS READ AS LICENCE. Two
+    strays the audit found, both pinned structurally rather than by eye — a
+    comment moves when someone edits around it, and nothing else in this suite
+    would notice."""
+
+    def test_the_disjunction_note_sits_above_the_arm_whose_opener_IS_one(self):
+        """`"THE OPENER IS A DISJUNCTION ('UNMEASURED or INCOMPLETE')"` describes
+        the `--prune` arm's message. It was left sitting immediately above the
+        ALL-UNMEASURED arm, whose opener is not a disjunction at all — so a
+        maintainer attaching it to the arm below it reads it as licence to widen
+        that arm from `unmeasured` to `bad`, which is precisely the change that
+        makes the timer refuse in a supported state."""
+        src = inspect.getsource(hi.rebuild_refusal)
+        note = src.index("THE OPENER IS A DISJUNCTION")
+        prune_arm = src.index("if prune and bad:")
+        unmeasured_arm = src.index("if derivations and len(unmeasured)")
+        assert note < prune_arm < unmeasured_arm, (
+            "the note must precede the arm it describes, not the next one")
+
+    def test_the_prune_bullet_names_the_condition_the_code_actually_checks(self):
+        """`rebuild_delete_labels`' `prune` bullet still said the refusal fires on
+        a repo that "came back unmeasured" after the arm had widened to
+        INCOMPLETE. The bullet directly above it was updated in the same diff;
+        this one was not.
+
+        Pinned as a behavioural cross-check as well as a word one: the state the
+        stale bullet describes as NOT refusing is driven, and it refuses."""
+        doc = _norm(hi.rebuild_delete_labels.__doc__)
+        assert "refuses a `--prune` run in which ANY repo came back unmeasured" \
+            not in doc
+        assert "refuses a `--prune` run in which ANY repo came back INCOMPLETE" in doc
+        # The behaviour the corrected bullet asserts.
+        d = hi.RepoDerivation(repo="/x/mockwaitherepo", label="mockwaitherepo",
+                              ref="refs/heads/main", docs=2,
+                              unreadable=("claudedocs/handoff-mockwaithe-lane.md",))
+        row = hi.Section("mockwaitherepo", "s", "p", None, None, "goal", 0, "h", "b")
+        assert d.unmeasured is None
+        assert hi.rebuild_refusal([d], [row], prune=True) is not None
+
+
+class TestHomeNixDescribesTheGuardTheModuleACTUALLYHAS:
+    """🔴 `nix/home.nix` IS WHERE AN OPERATOR LEARNS WHAT THE TIMER DOES, and it
+    enumerated the refusal conditions in prose that the module then outgrew. It
+    said the guard "refuses only when ALL repos are unmeasured, when the measured
+    subset yields zero rows, or when `--prune` … meets an unmeasured repo" — the
+    third condition had widened to INCOMPLETE, and a fourth state (nothing read in
+    full) had been added as a REFUSAL, in the same diff.
+
+    `claude/RULES.md`: when the artifact under test IS prose, a guard on WORDS is
+    walkable by rewording — so the enumeration sentence is pinned as a WHOLE
+    normalised string. A cosmetic reword fails this test. That is the price, and
+    it is worth paying for a sentence an operator uses to decide whether a toast
+    means their machine is broken."""
+
+    ENUMERATION = _norm(
+        "It now refuses only when ALL repos are unmeasured, when the measured "
+        "subset yields zero rows, or when `--prune` (never passed here) meets an "
+        "INCOMPLETE repo."
+    )
+
+    def _block(self) -> str:
+        return _norm(_handoff_unit_block().replace("#", " "))
+
+    def test_the_enumeration_sentence_is_exactly_this(self):
+        assert self.ENUMERATION in self._block()
+
+    def test_the_state_it_calls_SUPPORTED_is_documented_as_a_DOWNGRADE(self):
+        """The fourth state, named where the operator reads about the third. A
+        host with absent checkouts plus one corrupt blob does NOT get a refusal,
+        and the comment has to say so or the next reader re-adds one."""
+        block = self._block()
+        assert "REBUILD DOWNGRADED TO AN UPSERT" in block
+        assert "A FOURTH STATE EXISTS THAT IS *NOT* A REFUSAL" in block
+        # …and the cost of the downgrade is stated, not discovered.
+        assert "a section REMOVED from a doc keeps its stale row" in block
+
+    def test_the_retracted_wording_cannot_come_back(self):
+        assert "meets an unmeasured repo" not in self._block()

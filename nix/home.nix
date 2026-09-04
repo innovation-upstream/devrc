@@ -2997,7 +2997,25 @@ in
         # frozen — a permanently-red gate, which trains everyone to click
         # through. It now refuses only when ALL repos are unmeasured, when the
         # measured subset yields zero rows, or when `--prune` (never passed
-        # here) meets an unmeasured repo.
+        # here) meets an INCOMPLETE repo.
+        # 🔴 THE THIRD CONDITION SAYS *INCOMPLETE*, NOT *UNMEASURED*, AND THE
+        # WIDENING IS REAL: a repo whose mainline lists a doc `git show` cannot
+        # produce resolves fine and is not unmeasured, yet a run that could not
+        # read it in full may not delete its rows. This sentence read
+        # `unmeasured` for one commit after the code had moved.
+        # 🔴 AND A FOURTH STATE EXISTS THAT IS *NOT* A REFUSAL — the one this
+        # host is most likely to reach. When NOT ONE configured repo was read in
+        # full (say three absent checkouts plus one corrupt blob) the delete
+        # scope is EMPTY, so the run DOWNGRADES to a plain upsert: it writes
+        # every row that did read, deletes nothing, prints `🔴 REBUILD
+        # DOWNGRADED TO AN UPSERT` plus the PARTIAL warning, and exits 0. That
+        # is deliberate rather than lenient — it was a refusal for exactly one
+        # commit, and on this unit's own argv that refusal turned "index
+        # refreshed, standing warning" into "nothing written, toast every 6h
+        # until a human repairs an object store", i.e. the permanently-red gate
+        # again, in a state the paragraph above calls SUPPORTED. The cost it
+        # does buy: with no DELETE, a section REMOVED from a doc keeps its stale
+        # row until some repo reads in FULL again.
       ] ++ lib.mapAttrsToList (n: v: "${n}=${v}")
         (import ./agent-handles.nix { home = "%h"; }).repos;
       # nix-shell pulls psycopg2 (the _db.py write path). git/kubectl come from
