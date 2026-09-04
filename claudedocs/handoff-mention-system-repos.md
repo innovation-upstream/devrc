@@ -26,11 +26,15 @@ an instruction like that gets executed by a session that was not there for the i
 
 - **PR #1283 is CLOSED, not merged, and its branch is deleted.** `main` never carried the
   mapping (`raw.githubusercontent.com/.../main/scripts/collector/known_repos.py` → 404).
-- 🔴 **THE DISCLOSURE IS NOT CLOSED.** GitHub retains `refs/pull/1283/head`, so the file
-  is still served from the closed PR to anyone. Deleting the branch did not remove it and
-  no code change can. Remediation is a GitHub Support request to purge the PR; per
-  `SECRETS.md`'s adjudicated precedent for this shape, a history rewrite is NOT
-  recommended and the values should be treated as disclosed.
+- **THE DISCLOSURE IS AN OPERATOR-CLOSED DECISION, NOT AN OPEN ITEM.** GitHub
+  retains `refs/pull/1283/head`, so the leaked mapping is still served from the
+  closed PR to anyone; deleting the branch did not remove it and no code change
+  can. It was escalated with the measurement (232 private repos, 217 named
+  nowhere else in the tree, 167 a client's) and the operator's decision on
+  2026-09-04 was: **low severity, ignore — do not pursue a GitHub Support
+  purge.** 🔴 Do NOT re-raise this as a finding or re-rank it as work: it was
+  seen, priced and declined. What remains in force is the PREVENTION — the
+  mapping is untracked and a test fails if any tracked file parses as one.
 - **The rework lives on `fix/mention-open-namesakes`** (`scripts/regen-known-repos.py`,
   `scripts/mention-open.py`, `scripts/tests/test_regen_known_repos.py`). The mapping is
   now written to `~/.config/mention-open/known_repos.json`, mode 0600, per-host, outside
@@ -42,16 +46,9 @@ an instruction like that gets executed by a session that was not there for the i
 diagnosis in progress.)
 
 ## Next steps (ranked)
-1. Decide on the residual exposure: ask GitHub Support to purge `refs/pull/1283/head`, or
-   record the decision to treat the names as disclosed. Nothing in the repo can do this.
-   forcing: security
-2. Gate `fix/mention-open-namesakes` on the MERGED tree (both tiers, the two nix check
-   derivations built ONE AT A TIME), then PR it.
-   forcing: gate
-3. After it merges, `scripts/ship.sh` — `nix/programs/alacritty/default.nix` changed, so
-   `gh` only reaches the click handler's PATH after a `home-manager switch` on BOTH hosts.
-   Then run `scripts/regen-known-repos.py` once PER HOST: the mapping is per-host and
-   nothing generates it on a timer.
+1. Nothing outstanding. PR #1291 merged and shipped to both hosts; run
+   `scripts/regen-known-repos.py` on any host that has not generated its
+   mapping yet (it is per-host, and nothing generates it on a timer).
    forcing: none
 
 ## Gotchas / decisions / dead-ends
