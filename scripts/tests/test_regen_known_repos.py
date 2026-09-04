@@ -187,10 +187,17 @@ def test_a_local_checkout_settles_a_name_the_api_had_to_drop():
     assert out["trowelcast"] == "gardenersguild/trowelcast"
 
 
-def test_a_local_checkout_overrides_the_api_row_for_the_same_name():
+def test_a_checkout_DISAGREEING_with_the_api_row_resolves_to_nothing():
+    """🔴 THE GENERATOR IS NARROWER THAN THE HANDLER, ON PURPOSE — and these two
+    tests used to contradict each other, which is how the contradiction was
+    found. At click time `mention-open.py` has just MEASURED the remote, so a
+    checkout wins there. This file is a SNAPSHOT that can be months old, so a
+    checkout disagreeing with an API row is two claims about one name with no
+    way to tell which is current: the module's answer to that is NOTHING, and
+    the operator writes `owner/repo#N`."""
     out = RG.build_mapping([_row("hobbyist/sledgehorn")],
                            {"sledgehorn": "gardenersguild/sledgehorn"})
-    assert out["sledgehorn"] == "gardenersguild/sledgehorn"
+    assert "sledgehorn" not in out, out.get("sledgehorn")
 
 
 def test_a_checkout_directory_named_differently_maps_BOTH_spellings():
@@ -372,3 +379,39 @@ def test_a_checkout_AGREEING_with_the_api_row_is_not_a_collision():
     out = RG.build_mapping([_row("gardenersguild/plotwidget")],
                            {"plotwidget": "gardenersguild/plotwidget"})
     assert out["plotwidget"] == "gardenersguild/plotwidget"
+
+
+def test_THREE_checkouts_two_of_one_repo_and_a_namesake_still_refuse():
+    """Three checkouts, two of one repo plus a namesake — the shape that
+    exposed a redundant second clause: whichever entry writes the spelling
+    first, the next disagreeing one must drop it, and the DROP MUST BE FINAL so
+    the third entry cannot write it back. (The operator really does keep
+    duplicate checkouts of one repo.)"""
+    out = RG.build_mapping([], {"a-copy": "gardenersguild/plotwidget",
+                                "b-copy": "rivalorg/plotwidget",
+                                "c-copy": "gardenersguild/plotwidget"})
+    assert "plotwidget" not in out, out.get("plotwidget")
+
+
+def test_a_checkout_cloned_via_a_LOWERCASE_url_is_still_matched_to_its_api_row():
+    """🔴 CASE-FOLDED COMPARISON. GitHub URLs are case-insensitive, so
+    `git clone .../acme/plotwidget` yields a remote spelled differently from the
+    API's `acme/PlotWidget`. An exact-case comparison treated them as unrelated
+    and let an ISSUES-DISABLED repo back into the mapping."""
+    out = RG.build_mapping([_row("acme/PlotWidget", has_issues=False)],
+                           {"plotwidget": "acme/plotwidget"})
+    assert "plotwidget" not in out, out.get("plotwidget")
+    # The MIRROR spelling: the API row lowercase, the checkout's remote mixed.
+    # Without this case a mutant that drops the `.lower()` on the LEFT of the
+    # membership test survives, because `issues_off` is lowercased on the right
+    # and the fixture above happens to be lowercase on both sides.
+    out = RG.build_mapping([_row("acme/plotwidget", has_issues=False)],
+                           {"plotwidget": "acme/PlotWidget"})
+    assert "plotwidget" not in out, out.get("plotwidget")
+
+
+def test_a_case_differing_checkout_does_not_silently_displace_an_api_row():
+    out = RG.build_mapping([_row("gardenersguild/widget")],
+                           {"Widget": "rivalorg/Widget"})
+    assert out.get("widget") != "rivalorg/Widget", out.get("widget")
+    assert out.get("Widget") != "rivalorg/Widget", out.get("Widget")

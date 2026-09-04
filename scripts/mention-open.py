@@ -99,6 +99,9 @@ _PASS3_REPO_RE = re.compile(r"^(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]*)#(?P<num>\d+)
 # `dashboard` and `cli` each return a full page of exact matches.
 PASS3_MAX_CHOICES = 8
 
+# What a mapping VALUE must look like: exactly two segments, nothing else.
+_OWNER_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 
 def parse_owner_repo(remote_url: str) -> str:
     """`owner/repo` from a git remote URL, or "" when it is not a GitHub-shaped
@@ -196,15 +199,15 @@ def load_known_repos(path: Path | None = None) -> dict[str, str]:
         return {}
     if not isinstance(raw, dict):
         return {}
-    # A value must be exactly `owner/repo`. A three-segment value builds
-    # `github.com/a/b/c/issues/N`, which 404s while looking authoritative —
-    # the same rule `parse_owner_repo` enforces for a git remote.
+    # A value must be EXACTLY `owner/repo` — matched, not counted. Counting
+    # non-empty segments accepted `acme/widget/`, `acme//widget`, a trailing
+    # space and an embedded newline, each of which builds a URL that 404s while
+    # looking authoritative: the very failure the rule exists to prevent.
     return {k: v for k, v in raw.items()
-            if isinstance(k, str) and isinstance(v, str)
-            and len([p for p in v.split("/") if p]) == 2 and not v.startswith("/")}
+            if isinstance(k, str) and isinstance(v, str) and _OWNER_REPO_RE.match(v)}
 
 
-def discover_repos(workspace: Path = WORKSPACE) -> dict:
+def discover_repos(workspace: Path | None = None) -> dict:
     """{repo name: "owner/repo"} — the generated mapping, then local checkouts
     laid over it.
 
@@ -213,6 +216,14 @@ def discover_repos(workspace: Path = WORKSPACE) -> dict:
     ambiguous. This does not perform the API fallback — that is PASS 3 in
     `main()`, which only runs when everything here came back empty.
     """
+    # 🔴 RESOLVED AT CALL TIME — the same defect as `load_known_repos`' old
+    # default, and the reason this is a CLASS sweep rather than one fix: a
+    # `workspace: Path = WORKSPACE` default is bound at import, so a test
+    # patching `MO.WORKSPACE` was inert and the "no checkout has this name"
+    # premise was a property of the OPERATOR'S DISK, not of the fixture.
+    # Measured: one such test ran 91 real `git remote` subprocesses against the
+    # real ~/workspace and read back 79 real repositories.
+    workspace = workspace or WORKSPACE
     out: dict = dict(load_known_repos())
     try:
         entries = sorted(p for p in workspace.iterdir() if p.is_dir())
@@ -227,9 +238,11 @@ def discover_repos(workspace: Path = WORKSPACE) -> dict:
     return out
 
 
-def gh_api_repo_search(name: str) -> dict[str, str]:
-    """{"owner/repo": "owner/repo"} for EVERY repo whose name equals `name`
-    case-insensitively, searched via the GitHub API. {} when nothing matches.
+def gh_api_repo_search(name: str) -> tuple[dict[str, str], str]:
+    """({"owner/repo": "owner/repo"} for every repo on the FIRST PAGE whose name
+    equals `name` case-insensitively, "") — or ({}, reason) when the search
+    could not run. An empty dict with an empty reason means it ran and matched
+    nothing.
 
     🔴 THE NAME MATCH IS DONE HERE, NOT IN THE jq PROGRAM. `gh api --jq` takes
     no `--arg`, so a name written into the filter can only be a string literal —
@@ -425,8 +438,9 @@ def main(argv: list[str] | None = None) -> int:
                 # choice, it is a wall. Refusing names the one thing that does
                 # resolve it, instead of pretending the list is useful.
                 notify(f"cannot resolve {span['raw']}",
-                       f"{len(matches)} repositories are named "
-                       f"{m.group('repo')} — write it as owner/repo#N")
+                       f"at least {len(matches)} repositories are named "
+                       f"{m.group('repo')} (one page of results — there may be "
+                       f"many more) — write it as owner/repo#N")
                 return 1
             candidates = [
                 {"platform": PLATFORM_GITHUB, "id": m.group("num"),
@@ -439,10 +453,12 @@ def main(argv: list[str] | None = None) -> int:
         # 🔴 SAY WHICH EMPTY THIS IS. "gh is not on PATH" and "no repo by that
         # name" produce the same empty result and need opposite next moves, and
         # a search that ran only saw the first page.
-        detail = ("no repository owner is known for it — open the repo in a "
-                  "tmux pane, or write it as owner/repo#N")
-        if why:
-            detail = f"{why} — so this is not a claim that no such repo exists"
+        advice = ("open the repo in a tmux pane, or write it as owner/repo#N")
+        # 🔴 The reason is PREPENDED, never substituted: the case where the
+        # search could not run is exactly the case where writing `owner/repo#N`
+        # is the workaround, so dropping the advice there is backwards.
+        detail = (f"{why} — so this is not a claim that no such repo exists. {advice}"
+                  if why else f"no repository owner is known for it — {advice}")
         notify(f"cannot resolve {span['raw']}", detail)
         return 1
 

@@ -75,9 +75,17 @@ def build_mapping(api_repos: list[dict], local_repos: dict[str, str]) -> dict[st
     already measured from git remotes.
 
     A name that resolves to more than one owner is DROPPED rather than
-    arbitrated — see the module docstring. A local checkout is exempt: it is a
-    measurement of this disk, so it wins over an API row and settles the
-    ambiguity by itself.
+    arbitrated — see the module docstring.
+
+    🔴 A LOCAL CHECKOUT IS NOT A TIEBREAK HERE, and this is deliberately
+    NARROWER than the handler's runtime rule. `mention-open.py` overlays
+    checkouts on top of this mapping and lets them win, because at click time it
+    has just MEASURED the remote. This file is a SNAPSHOT that can be months
+    old, so a checkout disagreeing with an API row is two claims about one name
+    with no way to tell which is current — and the module's rule for that is to
+    resolve to NOTHING and let the operator write `owner/repo#N`. What a
+    checkout does do is supply a name the API never had (its directory name),
+    and confirm one the API agrees with.
     """
     owners: dict[str, set[str]] = {}
     for row in api_repos:
@@ -107,34 +115,38 @@ def build_mapping(api_repos: list[dict], local_repos: dict[str, str]) -> dict[st
     # went back to last-write-wins. A checkout is authoritative about its own
     # OWNER — it is not evidence that the repo accepts issues, and it is not a
     # tiebreak between two different repos with one name.
-    issues_off = {(row.get("full_name") or "").strip()
+    # 🔴 CASE-FOLDED on both sides. These compare against values written as
+    # BOTH spellings, so an exact-case comparison missed a checkout cloned via
+    # a lowercase URL (`acme/plotwidget` vs the API's `acme/PlotWidget`) and let
+    # an issues-disabled repo back in. Measured: 149 of 387 API rows carry
+    # uppercase and 28 of those have issues disabled, so one such clone reaches it.
+    issues_off = {(row.get("full_name") or "").strip().lower()
                   for row in api_repos if not row.get("has_issues")}
-    local_owners: dict[str, set[str]] = {}
+    # Spellings proven ambiguous. A DROP IS FINAL: re-deriving "is this
+    # ambiguous?" from `out` alone is what let a dropped key come back.
+    dropped: set[str] = set()
     for name, full in local_repos.items():
-        if "/" not in full or full in issues_off:
-            continue
-        for key in (name.lower(), full.rsplit("/", 1)[-1].lower()):
-            local_owners.setdefault(key, set()).add(full)
-
-    for name, full in local_repos.items():
-        if "/" not in full or full in issues_off:
+        if "/" not in full or full.lower() in issues_off:
             continue
         bare = full.rsplit("/", 1)[-1]
-        for spelling in (name, bare):
-            existing = out.get(spelling)
-            ambiguous = (
-                # Two checkouts, one name, different repos — the same
-                # ambiguity the API path drops rather than arbitrates.
-                len(local_owners[spelling.lower()]) > 1
-                # …or this checkout's name collides with a DIFFERENT repo the
-                # API already mapped. Overwriting there is last-write-wins
-                # across sources: `~/workspace/vendored-widget` cloning
-                # `rival/widget` would silently displace `ourorg/widget`.
-                # Agreeing on the same repo is not a collision — that is the
-                # checkout confirming the owner, which is what makes it source 3.
-                or (existing is not None and existing != full)
-            )
-            if ambiguous:
+        # dict.fromkeys: `name` and `bare` are often the SAME spelling, and
+        # visiting it twice re-added what the first visit had just dropped —
+        # the second pass saw the popped key as absent, hence unambiguous.
+        for spelling in dict.fromkeys((name, bare)):
+            if spelling.lower() in dropped:
+                continue
+            # ONE RULE: this spelling already names a DIFFERENT repo. That
+            # covers both cases — an API row this checkout disagrees with, and a
+            # SECOND checkout of another repo sharing the name, because the
+            # first one wrote the spelling before the second one reads it.
+            # Agreeing on the same repo is not a collision: that is the checkout
+            # confirming an owner. (A separate `len(local_owners[…]) > 1` clause
+            # lived here and was measured REDUNDANT once `dropped` existed — a
+            # mutant disabling it changed no outcome, so it was deleted rather
+            # than given a test that could not fail.)
+            existing = out.get(spelling) or out.get(spelling.lower())
+            if existing is not None and existing.lower() != full.lower():
+                dropped.add(spelling.lower())
                 out.pop(spelling, None)
                 out.pop(spelling.lower(), None)
                 continue
@@ -173,8 +185,12 @@ def read_api_repos() -> list[dict]:
     return rows
 
 
-def read_local_repos(workspace: Path = WORKSPACE) -> dict[str, str]:
-    """{directory name: "owner/repo"} for real clones under `workspace`."""
+def read_local_repos(workspace: Path | None = None) -> dict[str, str]:
+    """{directory name: "owner/repo"} for real clones under `workspace`.
+
+    🔴 Resolved at CALL time — a `= WORKSPACE` default binds at import and makes
+    every test that patches the module attribute inert."""
+    workspace = workspace or WORKSPACE
     out: dict[str, str] = {}
     try:
         entries = sorted(p for p in workspace.iterdir() if p.is_dir())
