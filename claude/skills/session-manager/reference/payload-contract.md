@@ -253,11 +253,11 @@ repo" without it:
 | `repo_status` | means |
 |---|---|
 | `ok` | resolved; `repo` names the main clone. The ONLY status carrying a name. |
-| `not_a_repo` | MEASURED: the owning host's `git` exited **128** for this path — it is not in a work tree (or its common dir cannot be honestly named: a bare repo, a submodule). 🔴 It requires that exit status. Until 2026-09-04 every OTHER failure — `git` timing out, `git` absent, an unknown flag — arrived here too, so a real repo could read as a measured absence. |
+| `not_a_repo` | MEASURED: `git` ANSWERED for this path and what it answered does not name a clone. 🔴 **TWO exit statuses reach it, not one** — **128** (git: not in a work tree) *and* **0 with a common dir whose parent is not a clone root** (empty, a bare repo `/srv/foo.git`, a submodule `<super>/.git/modules/<n>`); naming those would publish a confident wrong group, so they fail soft here. This cell used to say it "requires" 128, which contradicted its own parenthetical and was measured false. What it excludes is a **failure** to measure: until 2026-09-04 `git` timing out, `git` absent or an unknown flag arrived here too, so a real repo could read as a measured absence. |
 | `home` | MEASURED and deliberately withheld: the main clone IS the owning host's `$HOME`. `projectOf()` routes an unparented shell to `Other`, and `repo` is the branch it PREFERS, so a name here would override that guard. |
 | `no_path` | the pane reported no cwd. |
-| `missing` | the probe answered for this host but not for this path — a partial reply, or a record refused because it carried a character `str.splitlines()` would treat as a line break. |
-| `unmeasured` | **nobody looked.** TWO granularities, and both are real: the whole HOST's probe failed / timed out / came back without its sentinel, **or** THIS path's `git` exited non-zero for a reason that is not 128 (the per-path `timeout` fired, `git` is not installed, the flag is unsupported). NOT a measured absence either way. |
+| `missing` | the probe answered for this host but not for this path — a partial reply, or a record refused because it carried a character `str.splitlines()` would treat as a line break. 🔴 Such a record also **poisons every record after it**: once a non-`\n` line break is inside a record, no later boundary in that reply is knowable, so the rest of the host's paths are `missing` too. Honest and bounded — never a wrong name. |
+| `unmeasured` | **nobody looked.** TWO granularities, and both are real: the whole HOST's probe failed / timed out / came back without its sentinel, **or** THIS path's `git` exited non-zero for a reason that is not 128 — the per-path `timeout` fired (124), `git` is not installed (127), the flag is unsupported (129), or the probe itself **refused to transmit** a common dir containing a newline (**201**, `REPO_PROBE_RC_NEWLINE` — see `missing` for the sibling case the parser refuses). NOT a measured absence either way. |
 | `skipped` | `--no-repo`. |
 
 Per host, `repos_measured` / `repos_status` / `repos_error` / `repos_paths` /
@@ -276,10 +276,22 @@ timeouts.** `tmux-snapshot-push.sh` wraps the collector in `timeout 90`, and rc 
 is `exit 3` — no snapshot for EITHER host. Five reads per host plus the ClickHouse query
 sum past that, so a read with no budget left is **not attempted** and its host reports
 `unmeasured` with an error naming the budget. That is a read that did not happen, and it
-is published as one.
+is published as one. *(Both numbers above are pinned to `COLLECT_BUDGET` / `COLLECT_CAP` by
+`test_the_contract_docs_budget_numbers_are_PINNED_to_the_constants`; the count of five
+reads and their ORDER are pinned by
+`test_the_per_host_call_ORDER_puts_the_optional_probe_LAST`.)*
 
-Measured on the live fleet 2026-09-03: 90 of 92 windows resolved (laptop 31/32, workbench
-59/60); the two that did not are `/home/zach` and a non-repo directory, both `not_a_repo`.
+🔴 **ORDER MATTERS AND IT IS PART OF THE CONTRACT.** The reads share one deadline, so the
+LAST call on the LAST host is the one that starves. The **agent ledger is read before the
+repo probe**, because the probe is the optional one (`--no-repo`) while a starved ledger
+costs every row on that host `age_secs`, its `stale` bucket and `claude_session_id`. With
+both hosts at their bounds, the laptop's `repo` is the field that is dropped — deliberately.
+
+⚠ **There is no current fleet measurement of the resolve rate.** The only one taken (90 of
+92 windows, 2026-09-03) was measured under protocol **V1**, which collapsed every `git`
+failure into `not_a_repo` — i.e. under the exact bug the rc field was added to fix — so its
+`not_a_repo` counts are not comparable to what V2 publishes. It has been struck rather than
+carried forward; re-measure under V2 before quoting a rate.
 
 ## The caveats are in the OUTPUT, not just in this file
 

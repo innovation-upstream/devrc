@@ -504,17 +504,33 @@ TMUX_WINDOWS_ARGV = ("tmux", "list-windows", "-a", "-F", WINDOW_FORMAT)
 # and index 1 — a genuine repo — resolved to `WRONG`, with `unparseable: 0`. The
 # paths are the operator's own panes on his own hosts, so this is not a security
 # hole; it is a CONFIDENT WRONG ANSWER, which is worse than the honest split
-# this feature replaces. THREE independent defences now, because each closes a
-# different half:
+# this feature replaces. FOUR defences now — and they are LAYERED, NOT
+# INDEPENDENT. An earlier revision of this comment called them "three
+# independent defences … each closes a different half", which is false in the
+# way that matters: defence 1 is the ONLY cover for a bare `\n`, so a maintainer
+# who reads "independent" and drops it as redundant re-opens the whole hole
+# through the shipped path. Read the coverage, never the count:
 #   1. the script REFUSES a common dir containing a newline (`case $d in *"$NL"*`
 #      — POSIX, no `tr`, so it cannot be disarmed by a missing coreutils) and
-#      reports `REPO_PROBE_RC_NEWLINE` for that path instead;
+#      reports `REPO_PROBE_RC_NEWLINE` for that path instead.
+#      🔴 SOLE COVER for a bare `\n`, and nothing downstream can take it over:
+#      two well-formed records are two well-formed records to any parser;
 #   2. the parser splits on `"\n"` ONLY, never `str.splitlines()`, which also
 #      splits `\r`, `\x0b`, `\x0c`, `\x1c`-`\x1e`, `\x85`, `\u2028`, `\u2029` —
 #      a reader that splits on MORE characters than the writer joined with is a
-#      forging surface all by itself;
-#   3. a DUPLICATE index is counted `unparseable` and the FIRST answer stands,
-#      so even a forged record cannot overwrite a real one.
+#      forging surface all by itself. Covers a LONE break character;
+#   3. a record carrying any of those characters POISONS THE REMAINDER OF THE
+#      REPLY: it and every line after it are counted `unparseable`. This covers
+#      the TWO-character `<break><newline>` sequence, which defence 2 alone does
+#      NOT — measured with per-line refusal only, a reply whose first record
+#      ended `…/w/a/.git` + CR and was followed by `3<TAB>0<TAB>/w/forged/.git`
+#      had the CR fragment refused and the second fragment ACCEPTED, and `/w/c`
+#      resolved to `forged` with `unparseable: 2`. Adjacency-based narrowings of
+#      this rule ("refuse the NEXT line too") are walkable — CR, space, newline;
+#   4. a DUPLICATE index is counted `unparseable` and the FIRST answer stands,
+#      so a forged record cannot overwrite a real one that already landed. It
+#      does NOT cover a forged record for a LATER index — that one arrives
+#      first, which is exactly why 1-3 exist.
 #
 # 🔴 EVERY RECORD CARRIES `git`'s OWN EXIT STATUS, and that is what makes
 # `not_a_repo` a measurement. `d=$(git …) || d=""` collapsed exit 128 (git says:
@@ -638,6 +654,20 @@ REPO_PROBE_TIMEOUT = 15.0
 # its host reports `unmeasured` with a reason, which is the honest verdict and
 # the one this file already publishes for every other read that did not happen.
 # The sixth call is covered the day it is written, with no arithmetic.
+#
+# 🔴 `COLLECT_CH_RESERVE` IS ENFORCED, NOT ASSUMED — `_clamp_ch_timeout` applies
+# it to the client `gather` actually uses. It was a bare assumption until
+# 2026-09-04, and the assumption was reachable: the reserve and its guard both
+# read `chquery.CHConn.timeout`'s CLASS DEFAULT, while `CHConn.from_env` resolves
+# `CLICKHOUSE_HTTP_TIMEOUT` out of `~/.config/activity-collector/env` at RUNTIME.
+# A host setting it to 90 (a value this repo records having tried) passed every
+# test and would still have spent 90s after a 70s host loop, i.e. rc 124 in the
+# pusher and NO snapshot for either host. Measured: the key is not set on the
+# workbench today, so this closes a live gap rather than a live break.
+#
+# ⚠ RESIDUAL, STATED BECAUSE IT IS NOT CLOSED: `urlopen`'s timeout is per socket
+# operation, not a total for the request, so a pathological connect-then-stall
+# can still exceed the reserve. `COLLECT_MARGIN` is the only slack against that.
 COLLECT_CAP = 90.0          # `TMUX_PUSH_COLLECT_TIMEOUT` in tmux-snapshot-push.sh
 COLLECT_CH_RESERVE = 15.0   # chquery.CHConn.timeout, spent AFTER the host loop
 COLLECT_MARGIN = 5.0        # interpreter start, fuzzyclaw + cache reads, render
@@ -658,12 +688,22 @@ COLLECT_MIN_SLICE = 0.5
 # republishes the silent zero this whole file exists to refuse:
 #
 #   ok           — resolved; `repo` names the MAIN clone of the pane's cwd.
-#   not_a_repo   — MEASURED: the owning host says this path is not inside a git
-#                  work tree (or its common dir cannot honestly be named — a
-#                  bare repo, a submodule's `…/.git/modules/<n>`). A real
-#                  measured absence, and it now REQUIRES git to have said so:
-#                  the probe carries `git`'s exit status per path and only
-#                  `REPO_PROBE_RC_NOT_A_REPO` lands here.
+#   not_a_repo   — MEASURED: `git` ANSWERED for this path, and what it answered
+#                  does not name a clone. 🔴 TWO rc's reach it, not one, and an
+#                  earlier revision of this line said "only
+#                  `REPO_PROBE_RC_NOT_A_REPO` lands here" — false, and false in
+#                  the direction that gets code deleted as unreachable:
+#                    · rc `REPO_PROBE_RC_NOT_A_REPO` — git says this path is not
+#                      inside a work tree;
+#                    · rc 0 with a common dir whose parent is not a clone root —
+#                      an empty answer, a bare repo (`/srv/foo.git`), or a
+#                      submodule (`<super>/.git/modules/<n>`). Naming one would
+#                      publish a confident wrong group, so it fails soft here.
+#                      These are the three rc-0 returns in
+#                      `repo_from_common_dir`; they are REACHABLE.
+#                  What `not_a_repo` still excludes is the thing this branch
+#                  exists for: a FAILURE to measure. Every non-zero rc that is
+#                  not `REPO_PROBE_RC_NOT_A_REPO` is the per-path `unmeasured`.
 #   home         — MEASURED, and deliberately withheld. The resolved main clone
 #                  IS the owning host's `$HOME`. `projectOf()` in clawgate
 #                  routes `/home/zach` and `/root` to `Other` precisely so every
@@ -1721,6 +1761,18 @@ def repo_probe_argv(paths):
             *[str(p) for p in paths])
 
 
+def _is_ascii_int(s) -> bool:
+    """True exactly when `int(s.strip())` is a non-negative ASCII integer. PURE.
+
+    🔴 THE ONE WRITER OF "IS THIS FIELD AN INTEGER", because the alternative is
+    a validator and a converter that disagree. `str.isdigit()` alone is True for
+    `²` and `①`; `int()` rejects both. Anywhere those two predicates are
+    open-coded apart, the gap is an unhandled `ValueError` on a path a docstring
+    promised would be `unparseable`.
+    """
+    return isinstance(s, str) and s.strip().isascii() and s.strip().isdigit()
+
+
 def parse_repo_probe(raw, paths) -> dict:
     """Probe stdout -> `{"measured", "home", "answers", "seen", "unparseable"}`.
 
@@ -1750,18 +1802,30 @@ def parse_repo_probe(raw, paths) -> dict:
     sentinel is `measured: False` — the caller publishes `unmeasured`, and the
     guard downstream has no unreachable branch.
 
-    A record whose index or rc is not an integer, or whose index is outside the
-    input list, is counted `unparseable` and skipped.
+    A record whose index or rc is not an ASCII integer (`_is_ascii_int`), or
+    whose index is outside the input list, is counted `unparseable` and skipped.
 
     🔴 A DUPLICATE INDEX IS `unparseable` AND THE FIRST ANSWER STANDS. This
-    branch is not hygiene — it is the third of the three defences described at
+    branch is not hygiene — it is one layer of the defence described at
     `REPO_PROBE_SCRIPT` against a common dir forging a second record. A plain
     assignment here let the LAST record for an index win, so a forged one
     landing after the genuine one replaced a real repo with a confident wrong
     name while `unparseable` reported 0. First-wins alone is not sufficient
     either (a forged record for a LATER index arrives before its genuine one),
-    which is why the script refuses the newline at the source and the split
-    below is on `"\n"` and nothing else.
+    which is why the script refuses the newline at the source, the split below
+    is on `"\n"` and nothing else, and a record carrying any OTHER line-break
+    character poisons the remainder of the reply.
+
+    🔴 THIS PARSER IS NOT SELF-SUFFICIENT AGAINST A BARE `\\n`, AND SAYING SO IS
+    THE POINT. A common dir holding a plain newline splits into two well-formed
+    records here, and the second can claim any index. Nothing in this function
+    can tell that apart from two genuine records — only the SCRIPT can, because
+    only the script knows the string came back from one `git`. The script's
+    `case $d in *"$NL"*` guard (`REPO_PROBE_RC_NEWLINE`) is therefore
+    LOAD-BEARING, not belt-and-braces: delete it and this function is forgeable
+    through the shipped path. What this function does own is every OTHER
+    line-break character, which the script passes through as data because they
+    are not newlines and it is right not to touch them.
     """
     # 🔴 `.split("\n")`, NEVER `.splitlines()`. The writer joins records with
     # `\n`; `splitlines()` ALSO splits on `\r`, `\x0b`, `\x0c`, `\x1c`-`\x1e`,
@@ -1783,6 +1847,9 @@ def parse_repo_probe(raw, paths) -> dict:
     paths = list(paths)
     out, seen, unparseable = {}, 0, 0
     started = False
+    # Set the moment a record carries a character `str.splitlines()` would treat
+    # as a line break: from there on this reply's record boundaries are unknown.
+    poisoned = False
     for line in lines:
         if not started:
             started = line is head
@@ -1790,10 +1857,29 @@ def parse_repo_probe(raw, paths) -> dict:
         if not line.strip():
             continue
         seen += 1
-        if any(ch in line for ch in REPO_PROBE_RECORD_BREAKERS):
-            # A record whose extent depends on WHICH line splitter reads it.
-            # Refusing it costs that path its answer (`missing`) and cannot cost
-            # any OTHER path a wrong one. See REPO_PROBE_RECORD_BREAKERS.
+        if poisoned or any(ch in line for ch in REPO_PROBE_RECORD_BREAKERS):
+            # 🔴 A BREAKER POISONS THE REST OF THE REPLY, AND REFUSING ONLY THE
+            # LINE IT LANDED ON WAS MEASURED FORGEABLE. `\r\n` is TWO characters:
+            # the `\n` ends the line, so the breaker guard sees — and refuses —
+            # only the FIRST fragment, while the second is a well-formed record
+            # that can claim any index it likes and win on first-come. Measured
+            # against `SM_REPO_V2 /home/op\n1\t0\t/w/a/.git\r\n3\t0\t/w/forged/
+            # .git\n2\t0\t/w/b/.git\n3\t0\t/w/c/.git\n`: `/w/c` resolved to
+            # `forged` with `unparseable: 2`.
+            #
+            # 🔴 AND "REFUSE THE NEXT LINE TOO" IS WALKABLE — do not narrow this
+            # to that. A trailing byte after the breaker (`…\r \n…`) puts the
+            # breaker mid-line while the `\n` still starts an attacker-controlled
+            # record, so any rule keyed on ADJACENCY has a spelling that evades
+            # it. Once a character the writer never used as a separator is inside
+            # a record, NO later boundary in this reply is knowable, so every
+            # line after it is refused too.
+            #
+            # The cost is bounded and honest: this path and every path after it
+            # report `missing` — a measured host with unmeasured paths — and no
+            # path anywhere gets a WRONG answer. Each refused line is COUNTED, so
+            # `repos_unparseable` says how much was dropped.
+            poisoned = True
             unparseable += 1
             continue
         fields = line.split("\t", 2)
@@ -1801,7 +1887,16 @@ def parse_repo_probe(raw, paths) -> dict:
             unparseable += 1
             continue
         idx, code, common = fields
-        if not idx.strip().isdigit() or not code.strip().isdigit():
+        # 🔴 `.isascii()` FIRST, AND IT IS NOT A NICETY. `str.isdigit()` is True
+        # for `²`, `①` and every other Unicode digit-ish character, while `int()`
+        # accepts only a subset of them — so `"²".isdigit()` passes this guard
+        # and `int("²")` two lines down raises `ValueError`, where the docstring
+        # promises `unparseable`. The blast radius is what makes a one-word bug
+        # worth a comment: `gather` does not catch it, `tmux-snapshot-push.sh`
+        # turns any traceback into `exit 3`, and that is NO snapshot for EITHER
+        # host. `isascii() and isdigit()` is exactly the set `int()` accepts
+        # without a sign, so the guard and the conversion can no longer disagree.
+        if not _is_ascii_int(idx) or not _is_ascii_int(code):
             unparseable += 1
             continue
         i = int(idx.strip()) - 1
@@ -3470,6 +3565,27 @@ def make_ch_client(env_file=ACTIVITY_ENV, opener=None):
     return _chq.CHClient(_chq.CHConn.from_env(env), opener=opener)
 
 
+def _clamp_ch_timeout(client, reserve=COLLECT_CH_RESERVE):
+    """Hold the ClickHouse client to `COLLECT_CH_RESERVE`. Returns the timeout
+    in force, or None when this client carries none (an injected test double).
+
+    🔴 THE RESERVE IS PART OF THE BUDGET ARITHMETIC, SO IT HAS TO BE A BOUND AND
+    NOT A BELIEF. `COLLECT_BUDGET = COLLECT_CAP - COLLECT_CH_RESERVE -
+    COLLECT_MARGIN` is only true while the CH read really costs at most the
+    reserve, and `CHConn.from_env` reads `CLICKHOUSE_HTTP_TIMEOUT` from the
+    collector's env file — a per-HOST value no test in this repo can see. A
+    lowered value is left alone (it only buys headroom); only an over-run is
+    clamped.
+    """
+    conn = getattr(client, "conn", None)
+    t = getattr(conn, "timeout", None)
+    if not isinstance(t, (int, float)) or isinstance(t, bool):
+        return None
+    if t > reserve:
+        conn.timeout = float(reserve)
+    return conn.timeout
+
+
 def ch_query(client, sql) -> dict:
     """Run one query, returning a STATUS-DISCRIMINATED result.
 
@@ -3653,6 +3769,10 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     raw_panes, slot_ids = {}, {}
     captures, capture_status = {}, {}
     ledger_res = {}
+    # Parsed once in pass 1 and re-read by the repo probe in pass 2, rather than
+    # re-parsed there: `parse_panes` is pure, so a second call would be a second
+    # copy of the same derivation and a place for the two to drift.
+    host_panes_by = {}
     # 🔴 `None` is the DISCRIMINANT, exactly as it is for `captures`. `None` =
     # this host's probe did not answer or was not run; a dict = it answered.
     repo_index, repo_host_status, repo_stats = {}, {}, {}
@@ -3670,6 +3790,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         # answer; `{}` means it ran and this host had no Claude panes. The two
         # are different facts and `fold_windows` renders them differently.
         host_panes = parse_panes(panes_res["stdout"])
+        host_panes_by[host] = host_panes
         claude_ids = [p["pane_id"] for p in host_panes
                       if pane_is_claude(p) and p.get("pane_id")]
         if not use_capture:
@@ -3690,6 +3811,130 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             else:
                 captures[host], capture_status[host] = None, "error"
 
+        # --- 🔴 CALL ORDER IS PART OF THE BUDGET, NOT A STYLE CHOICE ---------
+        # Every read shares ONE deadline (`COLLECT_BUDGET`) spanning ALL hosts,
+        # so the LAST call issued is the one that starves. That makes the order
+        # a ranking of what this collector is willing to lose, and this loop
+        # holds only the reads it is NOT willing to lose. The repo probe is in a
+        # SECOND pass below — see the block comment there for the measurement.
+        #
+        # 🔴 A SIXTH READ ADDED HERE COMES OUT OF THE LEDGER'S BUDGET. The
+        # four below already spend 68s of the 70s at their bounds, so anything
+        # inserted ahead of the ledger starves it. That is a test failure, not a
+        # silent regression:
+        # `test_the_repo_probe_is_issued_AFTER_every_other_read_on_every_host`
+        # pins this sequence exactly.
+        #
+        # 🔴 The two calls are INDEPENDENT measurements. `reachable`/`error`
+        # describe list-panes; `windows_measured`/`windows_error` describe
+        # list-windows. Reading one off the other is how a failed list-windows
+        # became invisible.
+        windows_measured = bool(wins_res["reachable"])
+        live = parse_windows(wins_res["stdout"]) if windows_measured else None
+        slot_ids[host] = slots_to_window_ids(live) if live is not None else None
+        # The tmux SERVER identity, from the SAME rows list-windows already
+        # returned — see WINDOW_FORMAT for why it rides along instead of costing
+        # a fifth ssh call. Unmeasured when list-windows itself did not answer:
+        # deriving it from a failed call is how an unmeasured value becomes a
+        # confident one.
+        if windows_measured:
+            tmux_server_id, tmux_server_id_reason = parse_tmux_server_id(
+                wins_res["stdout"])
+        else:
+            tmux_server_id, tmux_server_id_reason = None, (
+                "list-windows did not answer on this host")
+
+        # --- the agent activity ledger, ONE `sh -c` per host -----------------
+        # 🔴 Read HERE, inside the per-host loop, and filtered against THIS
+        # host's `live` windows and THIS host's tmux server pid — the pid arrives
+        # on the ledger's own sentinel line, from the same instant as the records
+        # it validates. Reusing the local host's window set for a remote host
+        # would drop every remote record on a window-id space that has nothing to
+        # do with it, and would do so silently.
+        if not use_ledger:
+            ledger_res[host] = {"status": "skipped", "records": [],
+                                "error": None}
+        elif not (panes_res["reachable"] or wins_res["reachable"]):
+            # 🔴 NOT AN OPTIMISATION DRESSED AS A MEASUREMENT. This host answered
+            # NEITHER tmux call, so it is down; issuing a third command buys one
+            # more `ConnectTimeout=4` on every scan of an offline laptop and can
+            # only return the same failure. The status is still `error` — nothing
+            # was measured and no count is published — and the reason SAYS the
+            # read was never attempted rather than implying it was tried and
+            # failed, which are different facts about the host.
+            ledger_res[host] = _host_ledger(
+                {"reachable": False,
+                 "error": "host answered neither tmux call; the ledger read "
+                          "was not attempted"},
+                live, host)
+        else:
+            if ledger_outputs is not None:
+                raw_led = ledger_outputs.get(host)
+                led_read = {"reachable": raw_led is not None,
+                            "stdout": raw_led or "",
+                            "error": None if raw_led is not None
+                            else "no injected ledger output for this host"}
+            else:
+                led_read = _read(AL.read_argv(), host)
+            ledger_res[host] = _host_ledger(led_read, live, host)
+
+        report["hosts"][host] = {
+            "reachable": bool(panes_res["reachable"]),
+            "error": panes_res["error"],
+            "ssh_target": None if host == local_host else LAPTOP_SSH_TARGET,
+            "windows": [],
+            "windows_measured": windows_measured,
+            "windows_error": wins_res["error"],
+            # 🔴 THE STABILITY SENTINEL for anything that PERSISTS a window id.
+            # tmux hands out `@0` again after a server restart, so a stored
+            # `@41` silently designates a different window; a consumer may trust
+            # a stored id only while this token is unchanged. Opaque — compare
+            # it for equality, never render it as a time (WINDOW_FORMAT records
+            # a host that reported a start_time 5.6 years wrong).
+            # Exactly one of these two is non-None, always.
+            "tmux_server_id": tmux_server_id,
+            "tmux_server_id_reason": tmux_server_id_reason,
+            "live_window_ids": (sorted(live) if live is not None else None),
+            # A THIRD independent measurement, reported separately from the
+            # other two for the same reason they are separate from each other:
+            # `list-panes` succeeding says nothing about whether the capture
+            # batch answered.
+            "captures_measured": captures[host] is not None,
+            "captures_status": capture_status[host],
+            "captures_seen": (len(captures[host])
+                              if captures[host] is not None else None),
+        }
+
+        if host == local_host:
+            local_live_windows = live
+            local_windows_error = wins_res["error"]
+
+    # --- 🔴 SECOND PASS: the repo probe, AFTER every OTHER read --------------
+    # 🔴 A SEPARATE LOOP ON PURPOSE. Folding it back into the loop above is
+    # the regression it exists to prevent, and "just move it earlier within the
+    # host" was MEASURED INSUFFICIENT: with both hosts at their bounds the LOCAL
+    # host's own 15s probe alone pushed the remote host past the 70s deadline, so
+    # the laptop lost its ledger whether the probe ran fourth or fifth on the
+    # workbench. The reads share ONE deadline across ALL hosts, so the ranking has
+    # to be across all hosts too.
+    #
+    # THE RULE: every read that existed before `repo` did — panes, windows,
+    # capture, ledger — is issued for EVERY host before the probe is issued for
+    # ANY host. The probe is the one read a consumer can turn off (`--no-repo`)
+    # and the payload stays whole; a starved ledger silently costs every row on
+    # that host `age_secs`, its `stale` bucket and `claude_session_id`, which are
+    # the three fields `use_ledger=True` was made the default to restore. So when
+    # the budget runs out, the optional field is the one that loses — by
+    # construction, not by luck.
+    #
+    # Pinned as a RELATIONSHIP by
+    # `test_the_repo_probe_is_issued_AFTER_every_other_read_on_every_host` (the
+    # order) and `test_the_BUDGET_starves_the_repo_probe_and_never_the_ledger`
+    # (the consequence). Both fail if a SIXTH read is inserted ahead of the
+    # ledger, which is the shape this regression arrived in.
+    for host in hosts:
+        host_panes = host_panes_by[host]
+        panes_reachable = report["hosts"][host]["reachable"]
         # --- 🔴 the repo probe: ONE `sh -c` per host, EVERY unique pane path --
         # It runs on the host that OWNS the directories. `label_from_path`
         # states why that is not optional: `path` is a string from another
@@ -3712,7 +3957,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             repo_stats[host] = {"measured": False, "status": "skipped",
                                 "error": None, "paths": None, "resolved": None,
                                 "unparseable": None}
-        elif not panes_res["reachable"]:
+        elif not panes_reachable:
             # No paths were measured, so there is nothing to resolve and the
             # probe is not attempted — the same reasoning the ledger read uses
             # for a host that answered neither tmux call. `unmeasured`, and the
@@ -3786,100 +4031,26 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
                         "resolved": sum(1 for v in idx.values()
                                         if v.get("status") == "ok"),
                         "unparseable": parsed_repo["unparseable"]}
-        # 🔴 The two calls are INDEPENDENT measurements. `reachable`/`error`
-        # describe list-panes; `windows_measured`/`windows_error` describe
-        # list-windows. Reading one off the other is how a failed list-windows
-        # became invisible.
-        windows_measured = bool(wins_res["reachable"])
-        live = parse_windows(wins_res["stdout"]) if windows_measured else None
-        slot_ids[host] = slots_to_window_ids(live) if live is not None else None
-        # The tmux SERVER identity, from the SAME rows list-windows already
-        # returned — see WINDOW_FORMAT for why it rides along instead of costing
-        # a fifth ssh call. Unmeasured when list-windows itself did not answer:
-        # deriving it from a failed call is how an unmeasured value becomes a
-        # confident one.
-        if windows_measured:
-            tmux_server_id, tmux_server_id_reason = parse_tmux_server_id(
-                wins_res["stdout"])
-        else:
-            tmux_server_id, tmux_server_id_reason = None, (
-                "list-windows did not answer on this host")
-        report["hosts"][host] = {
-            "reachable": bool(panes_res["reachable"]),
-            "error": panes_res["error"],
-            "ssh_target": None if host == local_host else LAPTOP_SSH_TARGET,
-            "windows": [],
-            "windows_measured": windows_measured,
-            "windows_error": wins_res["error"],
-            # 🔴 THE STABILITY SENTINEL for anything that PERSISTS a window id.
-            # tmux hands out `@0` again after a server restart, so a stored
-            # `@41` silently designates a different window; a consumer may trust
-            # a stored id only while this token is unchanged. Opaque — compare
-            # it for equality, never render it as a time (WINDOW_FORMAT records
-            # a host that reported a start_time 5.6 years wrong).
-            # Exactly one of these two is non-None, always.
-            "tmux_server_id": tmux_server_id,
-            "tmux_server_id_reason": tmux_server_id_reason,
-            "live_window_ids": (sorted(live) if live is not None else None),
-            # A THIRD independent measurement, reported separately from the
-            # other two for the same reason they are separate from each other:
-            # `list-panes` succeeding says nothing about whether the capture
-            # batch answered.
-            "captures_measured": captures[host] is not None,
-            "captures_status": capture_status[host],
-            "captures_seen": (len(captures[host])
-                              if captures[host] is not None else None),
-            # A FOURTH independent measurement, reported separately for the
-            # same reason the other three are separate from each other. 🔴 THIS
-            # IS THE HOST-LEVEL DISCRIMINANT constraint that stops a failed repo
-            # probe from reading as "none of these panes is in a repo":
-            # `repos_measured: false` means no row on this host carries a repo
-            # BECAUSE NOBODY LOOKED, and `repos_status` names which of the four
-            # ways that happened (`skipped` / `unmeasured` / `error` /
-            # `no_sentinel`). `repos_resolved` is an integer ONLY when measured.
+        # A FOURTH independent measurement, reported separately for the same
+        # reason the other three are separate from each other. 🔴 THIS IS THE
+        # HOST-LEVEL DISCRIMINANT constraint that stops a failed repo probe from
+        # reading as "none of these panes is in a repo": `repos_measured: false`
+        # means no row on this host carries a repo BECAUSE NOBODY LOOKED, and
+        # `repos_status` names which of the four ways that happened (`skipped` /
+        # `unmeasured` / `error` / `no_sentinel`). `repos_resolved` is an integer
+        # ONLY when measured.
+        #
+        # `update`, not part of the literal above, because these six keys are the
+        # only ones this second pass owns — and the pass exists so the probe runs
+        # last. They stay LAST in the entry either way.
+        report["hosts"][host].update({
             "repos_measured": repo_stats[host]["measured"],
             "repos_status": repo_stats[host]["status"],
             "repos_error": repo_stats[host]["error"],
             "repos_paths": repo_stats[host]["paths"],
             "repos_resolved": repo_stats[host]["resolved"],
             "repos_unparseable": repo_stats[host]["unparseable"],
-        }
-        # --- the agent activity ledger, ONE `sh -c` per host -----------------
-        # 🔴 Read HERE, inside the per-host loop, and filtered against THIS
-        # host's `live` windows and THIS host's tmux server pid — the pid arrives
-        # on the ledger's own sentinel line, from the same instant as the records
-        # it validates. Reusing the local host's window set for a remote host
-        # would drop every remote record on a window-id space that has nothing to
-        # do with it, and would do so silently.
-        if not use_ledger:
-            ledger_res[host] = {"status": "skipped", "records": [],
-                                "error": None}
-        elif not (panes_res["reachable"] or wins_res["reachable"]):
-            # 🔴 NOT AN OPTIMISATION DRESSED AS A MEASUREMENT. This host answered
-            # NEITHER tmux call, so it is down; issuing a third command buys one
-            # more `ConnectTimeout=4` on every scan of an offline laptop and can
-            # only return the same failure. The status is still `error` — nothing
-            # was measured and no count is published — and the reason SAYS the
-            # read was never attempted rather than implying it was tried and
-            # failed, which are different facts about the host.
-            ledger_res[host] = _host_ledger(
-                {"reachable": False,
-                 "error": "host answered neither tmux call; the ledger read "
-                          "was not attempted"},
-                live, host)
-        else:
-            if ledger_outputs is not None:
-                raw_led = ledger_outputs.get(host)
-                led_read = {"reachable": raw_led is not None,
-                            "stdout": raw_led or "",
-                            "error": None if raw_led is not None
-                            else "no injected ledger output for this host"}
-            else:
-                led_read = _read(AL.read_argv(), host)
-            ledger_res[host] = _host_ledger(led_read, live, host)
-        if host == local_host:
-            local_live_windows = live
-            local_windows_error = wins_res["error"]
+        })
 
     # --- 🔴 the intersection guard, then the pane<->task join ----------------
     if use_fuzzyclaw:
@@ -4137,6 +4308,10 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
                                     "error": f"{type(e).__name__}: {e}",
                                     "code": None, "sql": ch_sql}
         if client is not None:
+            # 🔴 The reserve, ENFORCED on the client that spends it. See
+            # `_clamp_ch_timeout` — without this the budget arithmetic is a
+            # belief about a per-host env file this process never checks.
+            _clamp_ch_timeout(client)
             res = ch_query(client, ch_sql)
             res["sql"] = ch_sql
             report["clickhouse"] = res

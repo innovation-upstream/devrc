@@ -323,6 +323,38 @@ WORKBENCH_REPO_OUT = repo_out("", "/home/zach/workspace/repo-alpha/.git")
 LAPTOP_REPO_OUT = repo_out("/home/zach/workspace/naida/.git")
 
 
+def classify_call(argv):
+    """`argv` -> `(where, what)`; `where` is local/remote, `what` names the read.
+
+    🔴 ONE WRITER, because two consumers need the SAME answer: `make_runner`
+    decides which fixture output to hand back, and the call-ORDER guards decide
+    which read a recorded argv was. Open-coded twice, they would drift, and the
+    order guard would then be pinning a sequence of its own invention.
+
+    An argv it cannot name RAISES — never a fall-through to `panes`. That
+    default silently answered the repo probe, and later the ledger read, with
+    the panes output while the suite stayed green.
+    """
+    where = "remote" if (argv and argv[0] == "ssh") else "local"
+    joined = " ".join(argv)
+    if "list-windows" in joined:
+        what = "windows"
+    elif "capture-pane" in joined:
+        what = "capture"
+    elif sm.REPO_PROBE_SENTINEL in joined:
+        what = "repo"
+    elif sm.AL.SENTINEL in joined:
+        what = "ledger"
+    elif "list-panes" in joined:
+        what = "panes"
+    else:
+        raise AssertionError(
+            "make_runner cannot classify this argv, so it must not answer "
+            "it: %r. Add an arm to the table — do not let it fall through "
+            "to the panes output." % (list(argv),))
+    return where, what
+
+
 def make_runner(local_panes=WORKBENCH_PANES, local_windows=WORKBENCH_WINDOWS,
                 remote_panes=LAPTOP_PANES, remote_windows=LAPTOP_WINDOWS,
                 local_capture="local captured output\n",
@@ -404,27 +436,7 @@ def make_runner(local_panes=WORKBENCH_PANES, local_windows=WORKBENCH_WINDOWS,
     def runner(argv, timeout):
         calls.append(list(argv))
         budget.append((list(argv), timeout))
-        where = "remote" if (argv and argv[0] == "ssh") else "local"
-        joined = " ".join(argv)
-        if "list-windows" in joined:
-            what = "windows"
-        elif "capture-pane" in joined:
-            what = "capture"
-        elif sm.REPO_PROBE_SENTINEL in joined:
-            what = "repo"
-        elif sm.AL.SENTINEL in joined:
-            what = "ledger"
-        elif "list-panes" in joined:
-            what = "panes"
-        else:
-            # 🔴 NO `else: "panes"`. See the docstring — that fall-through is
-            # the fixture defect this whole harness exists to refuse, and it has
-            # now bitten twice (the repo probe, then the ledger read). A call
-            # this fixture cannot NAME is a call it cannot answer for.
-            raise AssertionError(
-                "make_runner cannot classify this argv, so it must not answer "
-                "it: %r. Add an arm to the table — do not let it fall through "
-                "to the panes output." % (list(argv),))
+        where, what = classify_call(argv)
         rc, out, err = table[(where, what)]
         return (rc, "", err) if rc != 0 else (0, out, "")
 
@@ -13051,46 +13063,185 @@ def test_a_DUPLICATE_index_is_unparseable_and_the_FIRST_answer_stands():
     assert out["answers"]["/w/b"] == {"rc": 0, "common": "/w/b/.git"}
 
 
-@pytest.mark.parametrize("sep,name", [
-    ("\r", "carriage return"), ("\x0b", "vertical tab"), ("\x0c", "form feed"),
-    ("\x1c", "file separator"), ("\x85", "next line"),
-    ("\u2028", "line separator"), ("\u2029", "paragraph separator"),
-])
-def test_the_parser_splits_on_NEWLINE_ONLY_never_str_splitlines(sep, name):
+@pytest.mark.parametrize("tail", ["", "\n"], ids=["lone", "then-newline"])
+@pytest.mark.parametrize("sep", sm.REPO_PROBE_RECORD_BREAKERS,
+                         ids=lambda c: "U+%04X" % ord(c))
+def test_the_parser_splits_on_NEWLINE_ONLY_never_str_splitlines(sep, tail):
     """🔴 A READER THAT SPLITS ON MORE CHARACTERS THAN THE WRITER JOINED WITH IS
     A FORGING SURFACE BY ITSELF. The script's record separator is `\\n`;
-    `str.splitlines()` also breaks on seven other characters, any of which can
-    appear in a directory name. With `splitlines()` the string below becomes TWO
-    records — and the forged index is a LATER one, which is the case the
-    duplicate-index guard cannot cover: a forged record for an index whose
-    genuine record has not arrived yet lands FIRST and wins, and the real one is
-    then rejected as the duplicate. Under `splitlines()` `/w/c` resolves to
-    `forged`.
+    `str.splitlines()` also breaks on every character in
+    `REPO_PROBE_RECORD_BREAKERS`, any of which can appear in a directory name.
+    With `splitlines()` the string below becomes TWO records — and the forged
+    index is a LATER one, which is the case the duplicate-index guard cannot
+    cover: a forged record for an index whose genuine record has not arrived yet
+    lands FIRST and wins, and the real one is then rejected as the duplicate.
 
-    Splitting on `"\\n"` alone is only HALF the answer, and measuring it is what
-    showed that: the injection then stays inside index 1's own field, where
-    `repo_from_common_dir` read a repo called `forged` out of it. So a record
-    carrying any of these characters is refused outright — it costs THAT path
-    its answer (`missing`) and cannot cost any other path a wrong one.
+    🔴 THE `sep` LIST IS DERIVED FROM THE CONSTANT, NOT TYPED. The hand-typed
+    version covered seven of the nine breakers — `\\x1d` and `\\x1e` were never
+    exercised — so the parametrisation claimed a coverage it did not have.
+    Adding a breaker to the constant now widens this test by itself.
+
+    🔴 AND `tail` IS THE HALF THIS TEST STRUCTURALLY COULD NOT SEE. It was
+    parametrised over SINGLE characters, so the two-character sequence
+    `<breaker>\\n` was outside its reach entirely — and that sequence was the
+    live hole: the `\\n` ends the line, so per-line refusal saw and refused only
+    the FIRST fragment while the SECOND was a well-formed record free to claim
+    any index. Measured before the fix with `sep="\\r"`, `tail="\\n"`: `/w/c`
+    resolved to `{'repo': 'forged', 'status': 'ok'}`.
+
+    Both arms now assert the same shape, because the fix is one rule for both: a
+    record carrying a breaker POISONS THE REMAINDER OF THE REPLY. ⚠ For the
+    `lone` arm that is a DELIBERATE WIDENING — before it, a lone breaker cost
+    only its own path and `/w/c` still resolved. The cost is bounded and honest
+    (`missing`: a measured host with unmeasured paths), and it is the only rule
+    with no evadable spelling — see the adjacency test below.
 
     The script's own newline guard cannot help here: these are not newlines, so
     it passes them through as data, exactly as it should.
     """
     paths = ["/w/a", "/w/b", "/w/c"]
-    raw = ("%s /home/op\n1\t0\t/w/a/.git%s3\t0\t/w/forged/.git\n"
-           "2\t0\t/w/b/.git\n3\t0\t/w/c/.git\n"
-           % (sm.REPO_PROBE_SENTINEL, sep))
+    # `/w/b` is answered BEFORE the corrupted record on purpose: it is the
+    # positive control, and a control placed after the poison would be dropped
+    # by the very rule under test and would prove nothing.
+    raw = ("%s /home/op\n"
+           "2\t0\t/w/b/.git\n"
+           "1\t0\t/w/a/.git%s%s3\t0\t/w/forged/.git\n"
+           "3\t0\t/w/c/.git\n"
+           % (sm.REPO_PROBE_SENTINEL, sep, tail))
     out = sm.parse_repo_probe(raw, paths)
     idx = sm.build_repo_index(out, paths)
-    assert idx["/w/c"] == {"repo": "c", "status": "ok"}, (
-        "%s forged another path's answer: %r" % (name, out["answers"]))
-    # POSITIVE CONTROL: the untouched record still lands, so this is a claim
-    # about the separator and not about the parser giving up on the reply.
-    assert out["answers"]["/w/b"] == {"rc": 0, "common": "/w/b/.git"}
-    # ...and index 1 pays for its own corrupted record. Nobody else does, and
-    # it does not get a CONFIDENT name out of it either.
+    assert idx["/w/c"] == {"repo": None, "status": "missing"}, (
+        "U+%04X (tail=%r) forged another path's answer: %r"
+        % (ord(sep), tail, out["answers"]))
+    # index 1 pays for its own corrupted record, and does NOT get a confident
+    # name out of it either.
     assert idx["/w/a"] == {"repo": None, "status": "missing"}
-    assert out["unparseable"] == 1
+    # POSITIVE CONTROL: the record that arrived BEFORE the corruption still
+    # lands, so this is a claim about the separator and not about the parser
+    # giving up on every reply that contains one.
+    assert out["answers"]["/w/b"] == {"rc": 0, "common": "/w/b/.git"}
+    assert idx["/w/b"] == {"repo": "b", "status": "ok"}
+    # ...and every refused line is COUNTED. `then-newline` splits the corrupted
+    # record across two lines, so it costs one more than `lone` — a pair of
+    # numbers no single hardcoded constant can satisfy.
+    assert out["unparseable"] == (2 if tail == "" else 3), out
+
+
+def test_a_CRLF_PAIR_cannot_forge_a_LATER_index():
+    """🔴 THE EXACT MEASURED FORGE, PINNED BY VALUE. The parametrised guard above
+    covers this shape, but this reply is the literal one that was measured
+    landing a wrong answer, so pinning it here means a future re-parametrisation
+    cannot quietly drop it.
+
+    Before the fix: `/w/c` -> `{'repo': 'forged', 'status': 'ok'}` with
+    `unparseable: 2`. `\\r\\n` is TWO characters — the `\\n` closes the line, so
+    the breaker guard rejected the `\\r` fragment and then ACCEPTED the next
+    line, a well-formed record claiming index 3 and winning on first-come over
+    the genuine index-3 record two lines later.
+    """
+    paths = ["/w/a", "/w/b", "/w/c"]
+    raw = ("%s /home/op\n1\t0\t/w/a/.git\r\n3\t0\t/w/forged/.git\n"
+           "2\t0\t/w/b/.git\n3\t0\t/w/c/.git\n" % sm.REPO_PROBE_SENTINEL)
+    out = sm.parse_repo_probe(raw, paths)
+    idx = sm.build_repo_index(out, paths)
+    assert "forged" not in repr(out["answers"]), out["answers"]
+    for p in paths:
+        assert idx[p] == {"repo": None, "status": "missing"}, (p, idx[p])
+    # POSITIVE CONTROL on the fixture: the SAME reply with the CR record removed
+    # is an ordinary one that resolves every path, so the verdict above is about
+    # the CR and not about a malformed test string.
+    clean = raw.replace("1\t0\t/w/a/.git\r\n3\t0\t/w/forged/.git\n",
+                        "1\t0\t/w/a/.git\n")
+    ok = sm.build_repo_index(sm.parse_repo_probe(clean, paths), paths)
+    assert ok["/w/a"] == {"repo": "a", "status": "ok"}
+    assert ok["/w/b"] == {"repo": "b", "status": "ok"}
+    assert ok["/w/c"] == {"repo": "c", "status": "ok"}
+
+
+def test_the_POISON_is_NOT_narrowed_to_ADJACENCY_because_that_is_WALKABLE():
+    """🔴 THE NARROWER FIX THAT WOULD HAVE LOOKED SUFFICIENT. "A breaker at the
+    END of a line means the writer's `\\n` followed it, so refuse the NEXT line
+    too" closes the plain `\\r\\n` case and is evaded by one space: with `\\r`,
+    space, `\\n` the breaker is mid-line, the line does not END with it, and the
+    following line is still attacker-controlled and well-formed.
+
+    So the rule is unconditional — ANY breaker poisons the remainder — and this
+    is the case that tells the two rules apart. It is red against the narrow one
+    and green against the shipped one.
+    """
+    paths = ["/w/a", "/w/b"]
+    raw = ("%s /home/op\n1\t0\t/w/a/.git\r \n2\t0\t/w/forged/.git\n"
+           % sm.REPO_PROBE_SENTINEL)
+    out = sm.parse_repo_probe(raw, paths)
+    idx = sm.build_repo_index(out, paths)
+    assert idx["/w/b"] == {"repo": None, "status": "missing"}, out["answers"]
+    assert idx["/w/a"] == {"repo": None, "status": "missing"}
+    assert out["unparseable"] == 2, out
+
+
+def test_a_UNICODE_DIGIT_index_or_rc_is_unparseable_NEVER_a_ValueError():
+    """🔴 ONE WORD, AND ITS FAILURE MODE IS THE WORST ONE THIS FILE HAS.
+    `str.isdigit()` is True for `²` and `①`; `int()` rejects both. With the guard
+    spelled `.isdigit()` alone, such a record passed validation and then raised
+    `ValueError` inside `parse_repo_probe`, where the docstring promises
+    `unparseable`.
+
+    Nothing catches it: `gather` does not, and `tmux-snapshot-push.sh` turns any
+    traceback into `exit 3` — NO snapshot for EITHER host, not a degraded field.
+    Unreachable through the shipped script today (git cannot emit a superscript
+    two as an index), but `parse_repo_probe` is a public pure function and the
+    `repo_outputs` seam feeds it directly.
+    """
+    for bad in ("²", "①", "１"):
+        for raw in (
+            "%s /home/op\n%s\t0\t/w/a/.git\n2\t0\t/w/b/.git\n"
+            % (sm.REPO_PROBE_SENTINEL, bad),
+            "%s /home/op\n1\t%s\t/w/a/.git\n2\t0\t/w/b/.git\n"
+            % (sm.REPO_PROBE_SENTINEL, bad),
+        ):
+            out = sm.parse_repo_probe(raw, ["/w/a", "/w/b"])   # must not raise
+            assert out["measured"] is True
+            assert out["unparseable"] == 1, (bad, out)
+            # POSITIVE CONTROL: the untouched record still lands, so the reply
+            # was really parsed rather than abandoned.
+            assert out["answers"]["/w/b"] == {"rc": 0, "common": "/w/b/.git"}
+    # ...and the ASCII spelling of the same digits is still ACCEPTED, so this is
+    # a claim about the character class and not about the guard rejecting
+    # everything.
+    good = ("%s /home/op\n1\t0\t/w/a/.git\n2\t0\t/w/b/.git\n"
+            % sm.REPO_PROBE_SENTINEL)
+    assert sm.parse_repo_probe(good, ["/w/a", "/w/b"])["unparseable"] == 0
+
+
+def test__is_ascii_int_is_exactly_the_set_int_accepts():
+    """The helper directly, in both directions — a validator and a converter
+    that disagree is the whole bug, so pin them against each other rather than
+    against a list someone typed."""
+    for s in ("0", "1", "128", " 7 ", "00"):
+        assert sm._is_ascii_int(s) is True, s
+        int(s.strip())                       # the converter agrees
+    for s in ("²", "①", "１", "", " ", "x", "-1", "1.0", None, 5):
+        assert sm._is_ascii_int(s) is False, s
+    # 🔴 THE SWEEP THE HAND-TYPED LIST CANNOT DO: every character Python calls a
+    # digit, checked against what `int()` actually accepts. A `.isdigit()`-only
+    # guard is red here on the first character the two disagree about.
+    disagreeing = []
+    for i in range(0x3000):
+        c = chr(i)
+        if not c.isdigit():
+            continue
+        try:
+            int(c)
+            converts = True
+        except ValueError:
+            converts = False
+        if sm._is_ascii_int(c) and not converts:
+            disagreeing.append(c)
+    assert disagreeing == [], (
+        "`_is_ascii_int` accepts %r, which `int()` rejects" % disagreeing)
+    # POSITIVE CONTROL on the sweep: it really did examine a character `int()`
+    # rejects, so an empty `disagreeing` is a measurement and not an empty loop.
+    assert "²".isdigit() and not sm._is_ascii_int("²")
 
 
 def test_the_refused_break_characters_are_DERIVED_from_str_splitlines():
@@ -13420,3 +13571,449 @@ def test_repos_unparseable_is_a_REAL_count_not_the_constant_zero():
     # the well-formed records still landed, so this is a claim about the COUNT
     # rather than about the parser giving up on the whole reply
     assert wb["repos_paths"] == 2 and wb["repos_resolved"] == 1
+
+
+
+# =========================================================================== #
+# §R.11 — the round-3 delta audit: call ORDER, the contract table, the reserve
+# =========================================================================== #
+#
+# Every guard below pins a RELATIONSHIP rather than a component, because every
+# finding in this round was a relationship that no component test could see: a
+# new call displacing an old one, a doc table drifting from the constant it
+# describes, a reserve read from a class default while the runtime resolved a
+# different number.
+
+# The reads that existed BEFORE this branch added `repo`. Written out rather
+# than derived from the observed calls, because deriving the expectation from
+# the run is exactly how an order guard certifies whatever the code does.
+PRE_EXISTING_READS = ("panes", "windows", "capture", "ledger")
+
+
+def _recorded_reads(**kw):
+    """Run a real two-host `gather` and return the calls it issued, in order, as
+    `[(where, what), ...]` — classified by the ONE classifier `make_runner`
+    itself uses, so the guard cannot be pinning a sequence of its own naming."""
+    calls = []
+    base_gather(runner=make_runner(calls=calls), use_ledger=True, **kw)
+    return [classify_call(a) for a in calls]
+
+
+def test_INSTRUMENT_recorded_reads_sees_every_call_and_can_tell_them_apart():
+    """🔴 THE POSITIVE CONTROL, BEFORE ANY ORDER IS READ OFF THIS. A recorder
+    wired to nothing returns `[]`, and `[] == []` would make every ordering
+    claim below vacuously true. So: the run really issues five distinct reads on
+    each of two hosts, and the recorder names all ten.
+
+    And the NEGATIVE control in the same test: with `--no-repo` the probe
+    disappears from the sequence, so the recorder is reading the actual calls
+    and not replaying a constant.
+    """
+    seq = _recorded_reads()
+    assert len(seq) == 10, seq
+    for where in ("local", "remote"):
+        got = [w for h, w in seq if h == where]
+        assert sorted(got) == sorted(PRE_EXISTING_READS + ("repo",)), (where, got)
+    without = _recorded_reads(use_repo=False)
+    assert [w for h, w in without if w == "repo"] == [], without
+    assert len(without) == 8, without
+
+
+def test_the_repo_probe_is_issued_AFTER_every_other_read_on_every_host():
+    """🔴 THE ORDER, AS A RELATIONSHIP — the shape the regression arrived in.
+
+    A guard that only checked "the ledger ran" passed at `be0e4d15` and would
+    pass again after any future reordering, because with a generous budget every
+    call runs. What has to be pinned is that the OPTIONAL read is issued LAST,
+    since one shared deadline means last-issued is first-starved.
+
+    TWO claims, and neither implies the other:
+
+      1. Within a host, the pre-existing reads keep their exact sequence. A
+         SIXTH read inserted ahead of the ledger fails here — and that matters
+         because those four already spend 68 s of the 70 s budget at their
+         bounds, so anything inserted before the ledger starves it.
+      2. ACROSS hosts, no `repo` call is issued before any non-`repo` call.
+         This is the half that "move the probe later within the host" does NOT
+         satisfy, and it was measured insufficient: the LOCAL host's own 15 s
+         probe alone pushed the remote host past the deadline, so the laptop
+         lost its ledger whether the probe ran fourth or fifth on the workbench.
+    """
+    seq = _recorded_reads()
+
+    # 1 — the per-host sequence of the pre-existing reads
+    for where in ("local", "remote"):
+        got = tuple(w for h, w in seq if h == where and w != "repo")
+        assert got == PRE_EXISTING_READS, (
+            "the pre-existing reads on the %s host are issued as %r, not %r. A "
+            "read inserted ahead of the ledger comes out of the LEDGER's "
+            "budget — see COLLECT_BUDGET." % (where, got, PRE_EXISTING_READS))
+
+    # 2 — the global partition: every other read before any probe
+    first_repo = min(i for i, (h, w) in enumerate(seq) if w == "repo")
+    last_other = max(i for i, (h, w) in enumerate(seq) if w != "repo")
+    assert first_repo > last_other, (
+        "a repo probe (index %d) is issued before another read (index %d). The "
+        "deadline spans ALL hosts, so the probe must be a SECOND PASS over the "
+        "hosts, not merely the last call within one host: %r"
+        % (first_repo, last_other, seq))
+
+
+def test_the_BUDGET_starves_the_repo_probe_and_NEVER_the_ledger():
+    """🔴 THE CONSEQUENCE OF THE ORDER, MEASURED THROUGH A REAL `gather`. The
+    order guard above is structural; this one is what the operator actually
+    loses when the clock runs out.
+
+    Measured at `be0e4d15` with both hosts at their bounds: 70.0 s spent, and
+    the laptop lost BOTH its repo field and its ledger — `age_secs`, the `stale`
+    bucket and `claude_session_id` for every row on that host, the three fields
+    `use_ledger=True` was made the default to restore after #419. The base
+    four-call shape fits (68 s of 70), so the new call displaced exactly one
+    pre-existing read.
+    """
+    calls = []
+    spent = [0.0]
+    inner = make_runner(calls=calls)
+
+    def burner(argv, timeout):
+        spent[0] += timeout
+        return inner(argv, timeout)
+
+    rep = base_gather(runner=burner, clock=lambda: spent[0], use_ledger=True)
+    seq = [classify_call(a) for a in calls]
+
+    # the ledger read was ISSUED on BOTH hosts, which is the regression
+    for where in ("local", "remote"):
+        issued = [w for h, w in seq if h == where]
+        assert "ledger" in issued, (
+            "the %s host's ledger read was never issued under the worst-case "
+            "clock — the optional repo probe took its budget. calls=%r"
+            % (where, seq))
+    for host in ("workbench", "laptop"):
+        assert rep["ledger"]["hosts"][host]["status"] != "error", (
+            host, rep["ledger"]["hosts"][host])
+
+    # POSITIVE CONTROL: the budget really did bind — something WAS starved, and
+    # it was the probe. Without this the test would pass against a collector
+    # whose calls simply all fit, and would say nothing about the ranking.
+    assert spent[0] >= sm.COLLECT_BUDGET - sm.COLLECT_MIN_SLICE, spent[0]
+    lt = rep["hosts"]["laptop"]
+    assert lt["repos_measured"] is False, lt
+    assert "budget" in (lt["repos_error"] or ""), lt["repos_error"]
+    assert [w for h, w in seq if h == "remote" and w == "repo"] == [], seq
+
+
+# --------------------------------------------------------------------------- #
+# The payload contract doc, pinned to the code it describes
+# --------------------------------------------------------------------------- #
+_PAYLOAD_CONTRACT = os.path.join(
+    _REPO_ROOT, "claude", "skills", "session-manager", "reference",
+    "payload-contract.md")
+
+
+def _contract_text():
+    with open(_PAYLOAD_CONTRACT, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _repo_status_table(text=None):
+    """The `repo_status` table's first column, as an ordered list of the names
+    it documents. Anchored on the table's own header row, so a second table in
+    this file cannot be read by accident."""
+    text = _contract_text() if text is None else text
+    lines = text.split("\n")
+    head = None
+    for i, ln in enumerate(lines):
+        if re.match(r"^\|\s*`repo_status`\s*\|", ln):
+            head = i
+            break
+    if head is None:
+        return []
+    out = []
+    for ln in lines[head + 2:]:                 # +2 skips the `|---|---|` rule
+        if not ln.startswith("|"):
+            break
+        m = re.match(r"^\|\s*`([^`]+)`\s*\|", ln)
+        if not m:
+            break
+        out.append(m.group(1))
+    return out
+
+
+def test_INSTRUMENT_the_repo_status_table_parser_can_SEE_a_row():
+    """🔴 VALIDATE THE PARSER BEFORE READING ITS VERDICT. An empty list compares
+    equal to nothing useful, and a regex that stopped matching would make the
+    two-way pin below green forever. Both directions are exercised against
+    synthetic text, so this cannot pass by accident of the real file.
+    """
+    real = _repo_status_table()
+    assert len(real) >= 5, real                       # it really found rows
+    good = "| `repo_status` | means |\n|---|---|\n| `aaa` | x |\n| `bbb` | y |\n"
+    assert _repo_status_table(good) == ["aaa", "bbb"]
+    # NEGATIVE CONTROL — it can go empty, so a non-empty answer is a measurement
+    assert _repo_status_table("no table here at all") == []
+    # ...and it stops at the end of the table rather than swallowing prose
+    stops = good + "\nsome following prose\n| `ccc` | z |\n"
+    assert _repo_status_table(stops) == ["aaa", "bbb"]
+
+
+def test_the_contract_repo_status_TABLE_is_pinned_TWO_WAY_to_REPO_STATUSES():
+    """🔴 THE GAP THAT BIT, CLOSED. Nothing pinned the contract's `repo_status`
+    table to `REPO_STATUSES`, and the round-2 audit filed that as not-done. The
+    round-3 finding IS that gap biting: the `not_a_repo` row asserted an
+    invariant the code does not hold ("it requires exit 128"), contradicting its
+    own parenthetical, and no test could see it.
+
+    A table row with no constant, or a constant with no row, is a failure —
+    BOTH directions, which is what makes this a pin rather than a subset check.
+    """
+    table = _repo_status_table()
+    assert table, "the `repo_status` table could not be read"
+    missing = [s for s in sm.REPO_STATUSES if s not in table]
+    extra = [s for s in table if s not in sm.REPO_STATUSES]
+    assert not missing and not extra, (
+        "payload-contract.md's `repo_status` table disagrees with "
+        "REPO_STATUSES: undocumented=%r documented-but-not-a-status=%r"
+        % (missing, extra))
+    # ORDER too: the table reads as the discriminant's enumeration, and a
+    # silently reordered one invites a reader to infer a precedence that is not
+    # there.
+    assert tuple(table) == tuple(sm.REPO_STATUSES), (table, sm.REPO_STATUSES)
+
+
+def test_INSTRUMENT_the_two_way_pin_FAILS_IN_BOTH_DIRECTIONS():
+    """🔴 A PIN NOBODY HAS WATCHED FAIL IS A CLAIM, NOT A GUARD — and this one
+    has to fail two different ways. Both are exercised here against synthetic
+    text, because the real pair is (and must stay) in agreement.
+    """
+    real = list(sm.REPO_STATUSES)
+    rows = "".join("| `%s` | x |\n" % s for s in real)
+    header = "| `repo_status` | means |\n|---|---|\n"
+    assert _repo_status_table(header + rows) == real          # control: agrees
+
+    # direction 1 — a row added to the table that names no constant
+    grown = header + rows + "| `probably_a_repo` | x |\n"
+    got = _repo_status_table(grown)
+    assert [s for s in got if s not in sm.REPO_STATUSES] == ["probably_a_repo"]
+
+    # direction 2 — a constant with no row
+    shrunk = header + "".join("| `%s` | x |\n" % s for s in real[:-1])
+    got = _repo_status_table(shrunk)
+    assert [s for s in sm.REPO_STATUSES if s not in got] == [real[-1]]
+
+
+def _repo_status_cell(name):
+    """The `means` column for one `repo_status` row, verbatim."""
+    for ln in _contract_text().split("\n"):
+        m = re.match(r"^\|\s*`%s`\s*\|(.*)\|\s*$" % re.escape(name), ln)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _rcs_that_produce(status):
+    """DERIVED FROM THE CODE: every probe exit status that can put a path into
+    `status`, measured through `build_repo_index` rather than read off a comment.
+
+    Both common-dir shapes are exercised for each rc, because the answer depends
+    on the pair — rc 0 is `ok` for a clone root and `not_a_repo` for a bare repo,
+    and a derivation that tried only one shape would report half the set.
+    """
+    shapes = ("/w/real/.git",          # a clone root
+              "/srv/bare.git",         # a bare repo — parent is not a root
+              "/sup/.git/modules/x",   # a submodule's git dir
+              "")                      # an empty answer
+    out = set()
+    for rc in (0, 1, 124, 127, sm.REPO_PROBE_RC_NOT_A_REPO, 129,
+               sm.REPO_PROBE_RC_NEWLINE):
+        for common in shapes:
+            raw = "%s /home/op\n1\t%d\t%s\n" % (
+                sm.REPO_PROBE_SENTINEL, rc, common)
+            idx = sm.build_repo_index(
+                sm.parse_repo_probe(raw, ["/p"]), ["/p"])
+            if idx["/p"]["status"] == status:
+                out.add(rc)
+    return out
+
+
+def test_the_contract_enumerates_EXACTLY_the_rcs_that_reach_not_a_repo():
+    """🔴 THE FALSE ROW, AND THE PIN THAT STOPS THE NEXT ONE. The contract cell
+    said `not_a_repo` "requires" exit **128** — while its own parenthetical named
+    a bare repo and a submodule, both of which answer rc **0**. A maintainer
+    reading "only 128" may delete those returns as unreachable; an agent reading
+    the contract infers an invariant the payload does not hold.
+
+    The expectation is DERIVED by exercising the real code, never typed, so the
+    cell cannot drift from the statuses it describes in either direction: an rc
+    the code adds must appear in the cell, and an rc the cell claims must be one
+    the code can actually produce.
+    """
+    derived = _rcs_that_produce("not_a_repo")
+    assert derived == {0, sm.REPO_PROBE_RC_NOT_A_REPO}, (
+        "INSTRUMENT: the derivation itself moved — %r" % sorted(derived))
+    cell = _repo_status_cell("not_a_repo")
+    assert cell, "the `not_a_repo` row is gone from payload-contract.md"
+    documented = {int(x) for x in re.findall(r"\*\*(\d+)\*?\*?", cell)}
+    assert documented == derived, (
+        "payload-contract.md's `not_a_repo` cell documents exit statuses %r; "
+        "the code reaches it from %r" % (sorted(documented), sorted(derived)))
+    # ...and the `unmeasured` cell carries the ones that are NOT it, including
+    # the newline refusal this branch added.
+    un = _repo_status_cell("unmeasured")
+    assert un and "**%d**" % sm.REPO_PROBE_RC_NEWLINE in un, un
+    assert sm.REPO_PROBE_RC_NEWLINE in _rcs_that_produce("unmeasured")
+
+
+def test_INSTRUMENT_the_rc_derivation_and_the_cell_reader_can_both_MOVE():
+    """POSITIVE + NEGATIVE controls for the pair above. A derivation that always
+    returned the same set, or a cell reader that always returned None, would make
+    that guard vacuous in a way its own assertion cannot show."""
+    assert _rcs_that_produce("ok") == {0}, _rcs_that_produce("ok")
+    assert _rcs_that_produce("unmeasured") == {
+        1, 124, 127, 129, sm.REPO_PROBE_RC_NEWLINE}
+    assert _rcs_that_produce("skipped") == set()      # unreachable from an rc
+    assert _repo_status_cell("ok"), "the cell reader found nothing for `ok`"
+    assert _repo_status_cell("no_such_status_row") is None
+
+
+def test_not_a_repo_is_REACHABLE_from_rc_ZERO():
+    """🔴 THE THREE rc-0 RETURNS IN `repo_from_common_dir`, EXERCISED. They were
+    described by two docstrings as unreachable ("only `REPO_PROBE_RC_NOT_A_REPO`
+    lands here"), which is how correct code gets deleted."""
+    home = "/home/op"
+    # 1 — a bare repo: the common dir's parent is not a clone root
+    assert sm.repo_from_common_dir("/srv/bare.git", home=home) == {
+        "repo": None, "status": "not_a_repo"}
+    # 2 — a submodule's git dir
+    assert sm.repo_from_common_dir("/sup/.git/modules/x", home=home) == {
+        "repo": None, "status": "not_a_repo"}
+    # 3 — an empty answer with rc 0
+    assert sm.repo_from_common_dir("", home=home) == {
+        "repo": None, "status": "not_a_repo"}
+    # ...and END TO END through the parser, so this is a claim about what the
+    # payload publishes and not only about one pure function.
+    paths = ["/srv/bare", "/sup/mod", "/w/real"]
+    raw = ("%s %s\n1\t0\t/srv/bare.git\n2\t0\t/sup/.git/modules/x\n"
+           "3\t0\t/w/real/.git\n" % (sm.REPO_PROBE_SENTINEL, home))
+    idx = sm.build_repo_index(sm.parse_repo_probe(raw, paths), paths)
+    assert idx["/srv/bare"]["status"] == "not_a_repo"
+    assert idx["/sup/mod"]["status"] == "not_a_repo"
+    # POSITIVE CONTROL: a real repo in the same reply still resolves, so the
+    # verdict is about these two paths and not about the reply being rejected.
+    assert idx["/w/real"] == {"repo": "real", "status": "ok"}
+
+
+def test_the_contract_docs_budget_numbers_are_PINNED_to_the_constants():
+    """🔴 A NUMBER RESTATED IN PROSE IS A CLAIM WITH NO OWNER. The contract said
+    "`COLLECT_BUDGET` (70 s)" and "`timeout 90`" with nothing checking either,
+    so the day a constant moves the doc is silently wrong — and it is the
+    document an agent reads INSTEAD of the source.
+
+    Parsed out of the sentence rather than grepped for the digits, so a `70`
+    appearing anywhere else in the file cannot satisfy it.
+    """
+    text = _contract_text()
+    m = re.search(r"`COLLECT_BUDGET` \((\d+(?:\.\d+)?) s\)", text)
+    assert m, "payload-contract.md no longer states COLLECT_BUDGET's value"
+    assert float(m.group(1)) == sm.COLLECT_BUDGET, (
+        "the contract says COLLECT_BUDGET is %s s; the constant is %s"
+        % (m.group(1), sm.COLLECT_BUDGET))
+    m = re.search(r"wraps the collector in `timeout (\d+(?:\.\d+)?)`", text)
+    assert m, "payload-contract.md no longer states the pusher's cap"
+    assert float(m.group(1)) == sm.COLLECT_CAP, (
+        "the contract says the pusher's cap is %s s; COLLECT_CAP is %s"
+        % (m.group(1), sm.COLLECT_CAP))
+
+
+def test_the_contract_carries_NO_V1_ERA_FLEET_MEASUREMENT_as_current():
+    """🔴 A MEASUREMENT TAKEN UNDER THE BUG IS NOT EVIDENCE ABOUT THE FIX. The
+    contract carried "Measured on the live fleet 2026-09-03: 90 of 92 windows
+    resolved … both `not_a_repo`" unchanged into this branch. That count was
+    taken under protocol V1, which collapsed EVERY git failure into
+    `not_a_repo` — the exact defect the rc field was added to fix — so its
+    `not_a_repo` figures are not comparable to what V2 publishes, and the line
+    read as current.
+
+    It was struck rather than re-measured, and this guard is what stops it (or
+    another like it) coming back without a protocol named beside it.
+    """
+    text = _contract_text()
+    assert "90 of 92 windows resolved" not in text, (
+        "the V1-era fleet measurement is back in the contract")
+    for m in re.finditer(r"Measured on the live fleet ([0-9-]+)", text):
+        window = text[m.start():m.start() + 400]
+        assert sm.REPO_PROBE_SENTINEL in window, (
+            "a live-fleet measurement is quoted without naming the protocol it "
+            "was taken under (`%s`): %r"
+            % (sm.REPO_PROBE_SENTINEL, window[:120]))
+
+
+# --------------------------------------------------------------------------- #
+# The ClickHouse reserve: enforced, not assumed
+# --------------------------------------------------------------------------- #
+class _FakeConn:
+    def __init__(self, timeout):
+        self.timeout = timeout
+
+
+class _FakeCHClient:
+    """Just enough of `chquery.CHClient` for the reserve guard: a `conn` with a
+    `timeout`, and a `rows` that reports what the timeout was WHEN THE QUERY
+    RAN — a clamp applied after the read would be indistinguishable from no
+    clamp at all if the test only inspected the object afterwards."""
+
+    def __init__(self, timeout):
+        self.conn = _FakeConn(timeout)
+        self.timeout_at_query = None
+
+    def rows(self, sql):
+        self.timeout_at_query = self.conn.timeout
+        return []
+
+
+def test_the_CH_RESERVE_is_ENFORCED_on_the_client_that_SPENDS_it():
+    """🔴 THE BUDGET ARITHMETIC WAS A BELIEF ABOUT A FILE THIS PROCESS NEVER
+    READ. `COLLECT_BUDGET = COLLECT_CAP - COLLECT_CH_RESERVE - COLLECT_MARGIN`
+    only holds while the ClickHouse read really costs at most the reserve — but
+    `COLLECT_CH_RESERVE` and the guard that checks it BOTH read
+    `chquery.CHConn.timeout`'s CLASS DEFAULT, while `CHConn.from_env` resolves
+    `CLICKHOUSE_HTTP_TIMEOUT` out of `~/.config/activity-collector/env` at
+    runtime. A host setting it to 90 — a value this repo records having tried —
+    passed every test in this file and would still have spent 90 s after a 70 s
+    host loop: rc 124 in the pusher, no snapshot for EITHER host.
+
+    Measured 2026-09-04: the key is not set on the workbench, so this closes a
+    live gap rather than a live break. The laptop was not checked, which is
+    precisely why the reserve is now a BOUND and not an assumption.
+    """
+    over = _FakeCHClient(90.0)
+    base_gather(use_ch=True, ch_client_factory=lambda: over)
+    assert over.timeout_at_query == sm.COLLECT_CH_RESERVE, (
+        "the ClickHouse read ran with a %s s timeout against a %s s reserve"
+        % (over.timeout_at_query, sm.COLLECT_CH_RESERVE))
+
+    # A LOWER value is left alone — it only buys headroom, and clamping UP would
+    # be this guard inventing a cost nobody asked for.
+    under = _FakeCHClient(3.0)
+    base_gather(use_ch=True, ch_client_factory=lambda: under)
+    assert under.timeout_at_query == 3.0, under.timeout_at_query
+
+    # POSITIVE CONTROL on the fixture: it really does observe the query, so
+    # `timeout_at_query` is a measurement and not a default that was never set.
+    assert over.timeout_at_query is not None
+
+
+def test__clamp_ch_timeout_never_raises_on_a_client_without_a_conn():
+    """The helper directly, including the shapes a test double can have. It runs
+    on the one path that reaches real ClickHouse, so a `AttributeError` here
+    would cost the whole report rather than the one field."""
+    assert sm._clamp_ch_timeout(object()) is None
+    assert sm._clamp_ch_timeout(_FakeCHClient(90.0)) == sm.COLLECT_CH_RESERVE
+    assert sm._clamp_ch_timeout(_FakeCHClient(1.0)) == 1.0
+    # a bool is an int in Python and is NOT a timeout — refused rather than
+    # silently compared
+    weird = _FakeCHClient(True)
+    assert sm._clamp_ch_timeout(weird) is None
+    assert weird.conn.timeout is True
+    # ...and the reserve is a parameter, so the guard is not pinned to one value
+    assert sm._clamp_ch_timeout(_FakeCHClient(90.0), reserve=7.0) == 7.0
