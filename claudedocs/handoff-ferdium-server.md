@@ -4,29 +4,28 @@
 Deploy Ferdium Server (self-hosted multi-messenger backend) on the homelab Talos cluster, exposed at `ferdium.zacx.dev` behind Authelia, so the Ferdium desktop client can sync without a cloud account.
 
 ## State now
-**WORKING END TO END.** The Ferdium desktop client logs in against the self-hosted server at
-`ferdium.zacx.dev` and syncs. Confirmed by the operator 2026-09-03.
+**DONE. Ferdium works end to end** — the desktop client logs in against the self-hosted server
+and syncs; operator-confirmed 2026-09-03. Nothing about this effort is in flight.
 
 | Merged | What |
 |---|---|
-| devrc **#1240**, **#1241**, **#1245** | client packages; handoff updates |
+| devrc **#1240**, **#1241**, **#1245**, **#1266** (`f972992e`) | client packages; handoff |
 | homelab-infra **#647** | manifests, both gateways, Authelia rule, relay firewall |
 | homelab-infra **#651** | incident fix — dead promptver upstreams crashing the gateway |
 | homelab-infra **#668** | registration closed + scoped Authelia bypass for the API |
 
-**Open:** homelab-infra **#653** — gateway config `subPath` → directory mount. Unmerged on
-purpose: it rolls the gateway pod on each cluster.
+**Still open — the only one:** homelab-infra **#653**, gateway config `subPath` → directory
+mount. Unmerged on purpose; it rolls the gateway pod on each cluster.
 
-### Final verified state
-- users = 1 (`zachlowden1@gmail.com`); `IS_REGISTRATION_ENABLED=false`, and signup returns
-  `{"message":"Registration is disabled on this server","status":401}` — the flag gates the API,
-  not just the dashboard.
-- Login through the **public edge** returns HTTP 200 + token; a deliberately wrong password
-  returns 401 `User credentials not valid`. Both measured — the wrong-password control is what
-  makes the 200 mean anything.
-- `GET /` still 302s to `login.zacx.dev`; `POST /v1/auth/signup` still 302s (excluded from the
-  bypass by rule negation). 8117 remains dropped from the public internet.
-- Vaultwarden holds the PLAINTEXT, which is correct: the client hashes it before sending.
+- users = 1 (`zachlowden1@gmail.com`); `IS_REGISTRATION_ENABLED=false` and signup returns
+  `{"message":"Registration is disabled on this server","status":401}`.
+- Login through the public edge: 200 + token; wrong-password control: 401. Both measured.
+- `GET /` still 302s to Authelia; `POST /v1/auth/signup` still 302s (excluded from the bypass).
+  8117 still dropped from the internet.
+- Vaultwarden holds the PLAINTEXT — correct, because the client hashes before sending.
+- **Clawgate**: no task recorded. `clawgate_handoff.sh resolve` exited 5, and its own POSITIVE
+  CONTROL showed the same endpoint returning a link for a different session — so the endpoint
+  works and this session genuinely has zero tasks. Still no field written.
 
 ## Architecture (researched, not yet implemented)
 
@@ -136,6 +135,38 @@ Port: 3333 (container) → 8117 (nebula gateway) → homelab Service port 80.
   image pull. A `connection refused` readiness probe in that window is expected.
 - **Stored password format is Adonis PHC scrypt** (`$scrypt$n=16384,r=8,p=…`), not bcrypt — do
   not hand-craft a replacement hash into SQLite.
+
+- 🔴 **A PUBLIC IP LITERAL IN A HANDOFF DOC IS THE EASIEST WAY TO LEAK ONE, AND THE GATE IS THE
+  ONLY THING THAT CATCHES IT.** `tekton/devrc-pytests` failed #1266 on
+  `test_no_unallowlisted_public_ip_literal_is_committed`: the verify section had the production
+  relay's routable IP hardcoded, in a PUBLIC repo. **A docs-only change is exactly where this
+  slips through** — there is no code review reflex on prose, and the line looked like helpful
+  precision. Derive it instead and say why in a comment, or the next person "simplifies" it
+  back: `RELAY=$(awk '/ssh:/{f=1} f&&/address:/{print $2; exit}' "$HOMELAB/k0s/diffsona.yaml")`.
+  🔴 And verify the derivation is not merely quiet — a substitution that yields an empty string
+  makes the whole check vacuous while still exiting 0.
+- 🔴 **A RED CHECK ON A FILE YOUR DIFF NEVER TOUCHED MEANS "MEASURE THE BASE", NOT "DEBUG YOUR
+  CHANGE" — this happened TWICE in one day.** #647's `scripts-tests` red was #646 landing on the
+  commit after its base; #1266's `test_recommend_terms_resolve_on_the_live_config` red was a
+  guard main had already RETIRED (`68d10b19`, "they re-break on every snippet edit") that the
+  branch was still carrying, 11 commits behind. Both fixed by `git rebase origin/trunk|main`
+  with ZERO code change. **The control that identifies it in one command:** run the failing test
+  on a pristine worktree of the base ref. Here pristine main selected 3 tests and passed while
+  the branch selected 4 and failed one — the differing COLLECTION COUNT was the tell, and a
+  same-count pass/fail comparison would have missed it entirely.
+- 🔴 **`gh pr checks` WILL HAND YOU A VERDICT ABOUT A DIFFERENT COMMIT.** After force-pushing a
+  rebase, it returned the PRE-rebase `fail` — for a test that could no longer even be collected.
+  The tell was that the numbers were byte-identical to the previous run
+  (`collected=21008 … failed=4`); a genuinely new run essentially never reproduces those exactly.
+  **Bind the read to the sha**:
+  `gh api /repos/<o>/<r>/commits/$(gh pr view <n> --json headRefOid --jq .headRefOid)/status`.
+  Same class as reading a verdict without checking what it is a verdict ABOUT — which also cost
+  a `⚠ WARN` this session, missed because the grep pattern did not match the warning's format.
+  **Read the whole tool output before quoting any part of it as clean.**
+- ⚠ **The devrc base clone is a SHARED checkout and it moves under you.** At this session's end
+  it sat on `feat/mention-system-repos` with a modified `flake.lock`, switched by another
+  session — not by anything here. Check `git branch --show-current` before any write to it, and
+  prefer a worktree off `origin/main`.
 
 ## How to verify
 ```bash
