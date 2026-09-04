@@ -261,3 +261,74 @@ def test_no_shipped_rule_matches_a_path_that_must_never_be_reaped(protected):
     globs = [r.strip('"').split()[1] for r in _python_rules()]
     hits = [g for g in globs if fnmatch.fnmatchcase(protected, g)]
     assert not hits, f"{protected} would be reaped by {hits}"
+
+
+# ------------------------------------------------------- the eviction block --
+# 🔴 These exist because an audit mutated the WHOLE eviction block away and all
+# 11 tests still passed: the PR's central new payload — code that DELETES LINES
+# FROM /etc/nixos — had no coverage at all. Each test below kills that mutant.
+
+
+def _seed(rules: list[str], *, user_list: str = "", trailing_comment: bool = False) -> str:
+    body = "".join(
+        f"    {r}" + ("  # added 2026-08-15\n" if trailing_comment else "\n") for r in rules
+    )
+    user = f"  systemd.user.tmpfiles.rules = [\n{user_list}  ];\n" if user_list else ""
+    return f"{{ ... }}:\n{{\n{user}{ANCHOR}{body}    \"d /var/tmp 1777 root root 30d\"\n  ];\n}}\n"
+
+
+def test_a_stale_variant_of_a_ledger_rule_is_evicted(tmp_path):
+    """Without eviction the old line stays ABOVE the new one, and systemd takes the
+    FIRST line for a path — so the corrected rule is inert while reading as applied."""
+    stale = '"e /tmp/nix-shell.* - - - m:7d"'
+    rc, out, err, text = _run_inserter(tmp_path, _seed([stale]))
+
+    assert rc == 0, err
+    assert stale not in text, "the stale m:7d line survived — the new rule is inert"
+    assert LATE_RULE in text
+    assert "evicted" in out
+
+
+def test_eviction_does_not_reach_outside_systemd_tmpfiles_rules(tmp_path):
+    """MEASURED defect: the regex ran over the whole file, so a rule for a ledger
+    path in `systemd.user.tmpfiles.rules` — a different unit's list this script has
+    nothing to do with — was deleted."""
+    user_rule = '    "e /tmp/go-build* - - - 30d"\n'
+    rc, _out, err, text = _run_inserter(
+        tmp_path, _seed(['"e /tmp/go-build* - - - m:7d"'], user_list=user_rule)
+    )
+
+    assert rc == 0, err
+    assert user_rule.strip() in text, (
+        "a rule in systemd.user.tmpfiles.rules was evicted — eviction is not scoped"
+    )
+    assert '"e /tmp/go-build* - - - m:7d"' not in text, "the system-list stale rule survived"
+
+
+def test_a_trailing_comment_does_not_defeat_eviction(tmp_path):
+    """The first regex ended `.*"\\n`, so a comment after the closing quote made the
+    line unmatchable and the config ended carrying BOTH spellings for one path."""
+    rc, _out, err, text = _run_inserter(
+        tmp_path, _seed(['"e /tmp/go-build* - - - m:7d"'], trailing_comment=True)
+    )
+
+    assert rc == 0, err
+    assert "m:7d" not in text.replace("mM:7d", ""), "a commented stale line survived eviction"
+
+
+def test_eviction_leaves_unrelated_rules_alone(tmp_path):
+    rc, _out, err, text = _run_inserter(tmp_path, _seed(['"e /tmp/nix-shell.* - - - m:7d"']))
+
+    assert rc == 0, err
+    assert '"d /var/tmp 1777 root root 30d"' in text, "an unrelated rule was evicted"
+
+
+def test_every_ledger_glob_names_a_directory_form(tmp_path):
+    """`e` acts on a directory's CONTENTS and silently ignores a plain file, so a
+    glob whose real matches are files is a DEAD RULE. `homelab-talos-prs-*` was one
+    for its whole life — 821 matches, 0 directories — and the coverage table hid it
+    by labelling a file count 'dirs'. This pins the withdrawal."""
+    globs = [r.strip('"').split()[1] for r in _python_rules()]
+    assert not any("homelab-talos-prs" in g for g in globs), (
+        "homelab-talos-prs-* is back in the ledger; it matches only plain files"
+    )
