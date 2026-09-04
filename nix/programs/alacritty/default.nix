@@ -15,7 +15,12 @@ let
   # picker on this desktop.
   mentionOpen = pkgs.writeShellScript "alacritty-mention-open" ''
     export PATH=${lib.makeBinPath [
-      pkgs.python312 pkgs.git pkgs.tmux pkgs.xdg-utils pkgs.libnotify
+      # `gh` is PASS 3's only tool, and its absence is SILENT: FileNotFoundError
+      # is caught as OSError and the search returns {}, so the fallback would be
+      # inert in production with a fully green suite. `~/.nix-profile` is also
+      # blanked for ~1s during every home-manager switch, so relying on the
+      # inherited PATH is not enough.
+      pkgs.python312 pkgs.git pkgs.tmux pkgs.xdg-utils pkgs.libnotify pkgs.gh
     ]}:$PATH
     exec ${pkgs.python312}/bin/python3 \
       ${config.home.homeDirectory}/workspace/devrc/scripts/mention-open.py "$@"

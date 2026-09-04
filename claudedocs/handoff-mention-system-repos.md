@@ -17,25 +17,38 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Expand the mention system (`mention-open.py`) so clicking `repo#N` in Alacritty resolves against ALL repos the operator contributes to, not just those checked out locally in `~/workspace/`.
 
 ## State now
-- Branch: `main`, behind `origin/main` by 1 commit
-- Uncommitted changes (this session):
-  - `scripts/mention-open.py` — 3 additions: imports `KNOWN_REPOS` + `GITHUB_ISSUE_URL`, rewrote `discover_repos()` to use static mapping as base + local overlay, added Pass 3 GitHub API fallback
-  - `scripts/collector/known_repos.py` — NEW, 457-line static `{repo_name: "owner/repo"}` mapping (386 repos from `gh api user/repos --paginate` + local checkout overrides + lowercase normalization)
-  - `scripts/regen-known-repos.sh` — NEW, regeneration script
-- Other uncommitted changes (NOT from this session): `flake.lock`, `nix/programs/alacritty/default.nix`, `nix/system/apply-tmp-churn-retention.sh`
-- Tests: all 107 pass (36 `test_mention_open.py` + 55 `test_mention_scan.py` + 16 `test_alacritty_hints.py`)
-- Deploy status: LIVE from checkout (both files read from repo, not nix store)
-- No PR open for this work
+🔴 **READ THIS BEFORE ACTING ON ANY OLDER COPY OF THIS DOC.** An earlier version of
+this file ranked *"commit and PR … `known_repos.py`"* as step 1. **DO NOT.** That file
+was a generated mapping built from `gh api user/repos`, which returns PRIVATE repos,
+and committing it published 232 of them — 217 named nowhere else in the tree — to this
+PUBLIC repository. `/resume` treats a ranked list as a work queue, which is exactly how
+an instruction like that gets executed by a session that was not there for the incident.
+
+- **PR #1283 is CLOSED, not merged, and its branch is deleted.** `main` never carried the
+  mapping (`raw.githubusercontent.com/.../main/scripts/collector/known_repos.py` → 404).
+- **THE DISCLOSURE IS AN OPERATOR-CLOSED DECISION, NOT AN OPEN ITEM.** GitHub
+  retains `refs/pull/1283/head`, so the leaked mapping is still served from the
+  closed PR to anyone; deleting the branch did not remove it and no code change
+  can. It was escalated with the measurement (232 private repos, 217 named
+  nowhere else in the tree, 167 a client's) and the operator's decision on
+  2026-09-04 was: **low severity, ignore — do not pursue a GitHub Support
+  purge.** 🔴 Do NOT re-raise this as a finding or re-rank it as work: it was
+  seen, priced and declined. What remains in force is the PREVENTION — the
+  mapping is untracked and a test fails if any tracked file parses as one.
+- **The rework lives on `fix/mention-open-namesakes`** (`scripts/regen-known-repos.py`,
+  `scripts/mention-open.py`, `scripts/tests/test_regen_known_repos.py`). The mapping is
+  now written to `~/.config/mention-open/known_repos.json`, mode 0600, per-host, outside
+  every checkout, and a test asserts no tracked file parses as one — in BOTH test tiers,
+  since the sandbox tier has no `.git` for `git ls-files`.
 
 ## Open investigations — live diagnosis state
-(none — this session implemented a feature, no bugs mid-investigation)
+(none — the disclosure is a known, measured state awaiting an operator decision, not a
+diagnosis in progress.)
 
 ## Next steps (ranked)
-1. Commit and PR the mention-system-repos changes (3 files: `mention-open.py`, `known_repos.py`, `regen-known-repos.sh`)
-   forcing: none
-2. Test live by clicking `repo#N` references in Alacritty across several repos (especially ones not previously resolved: `promptver#10`, `naida-ai#42`, `vetr-api#50`)
-   forcing: none
-3. Consider adding `known_repos.py` to the `test_no_captured_text.py` ledger or a freshness test that warns when the static list is stale (currently no automated refresh)
+1. Nothing outstanding. PR #1291 merged and shipped to both hosts; run
+   `scripts/regen-known-repos.py` on any host that has not generated its
+   mapping yet (it is per-host, and nothing generates it on a timer).
    forcing: none
 
 ## Gotchas / decisions / dead-ends
