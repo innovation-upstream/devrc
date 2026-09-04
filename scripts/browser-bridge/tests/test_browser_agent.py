@@ -1533,12 +1533,32 @@ def test_a_run_killed_mid_bootstrap_RELEASES_the_warm_lock(rig):
     rig.oc_config_dir.mkdir()
     lock = Path(str(rig.oc_config_dir) + ".lock")
 
-    proc = rig.spawn(["read the page"], mode="ok")
+    # 🔴 DETERMINISM, not a sleep-to-be-safe. `mode="slow"` makes the fake
+    # opencode sleep INSIDE the warm — which runs UNDER the lock — so the window
+    # in which the wrapper holds it is seconds wide instead of milliseconds. The
+    # first version of these tests raced it: green alone (33 s suite), and under
+    # the full gate (8 m 45 s) the TERM landed AFTER the release, where the
+    # pre-existing `_cleanup_all` trap absorbs it and the run completes rc 0.
+    # 🔴 For the RELEASE test that race was worse than a flake: a TERM after the
+    # release finds the lock already gone, so `not lock.exists()` passes for the
+    # WRONG REASON. The window is what makes either assertion mean anything.
+    #
+    # ⚠ THE SLEEP IS 5 s, NOT 30 s, AND THE BOUND IS BASH's, NOT TASTE. A trap
+    # handler does not run until the current FOREGROUND command returns, and the
+    # wrapper runs the warm's opencode under its own `setsid` — so `killpg` on
+    # OUR group never reaches it and the handler is deferred for the whole sleep.
+    # At 30 s that exceeded `proc.wait()` and read as "the handler never fired".
+    # 5 s is wide enough to make the window deterministic and short enough that
+    # the deferred handler is observed.
+    proc = rig.spawn(["read the page"], mode="slow",
+                     extra_env={"FAKE_OC_SLEEP": "5",
+                                "BROWSER_AGENT_WARM_TIMEOUT": "30"})
     try:
         _await(lambda: lock.is_dir(), what="the wrapper to take the warm lock",
-               slice_s=15.0, poll=0.02)
+               slice_s=20.0, poll=0.02)
+        assert lock.is_dir(), "precondition: the wrapper must HOLD the lock here"
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        proc.wait(timeout=30)
+        proc.wait(timeout=45)
     finally:
         if proc.poll() is None:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -1566,12 +1586,32 @@ def test_the_release_handler_EXITS_rather_than_resuming(rig):
     rig.oc_config_dir.mkdir()
     lock = Path(str(rig.oc_config_dir) + ".lock")
 
-    proc = rig.spawn(["read the page"], mode="ok")
+    # 🔴 DETERMINISM, not a sleep-to-be-safe. `mode="slow"` makes the fake
+    # opencode sleep INSIDE the warm — which runs UNDER the lock — so the window
+    # in which the wrapper holds it is seconds wide instead of milliseconds. The
+    # first version of these tests raced it: green alone (33 s suite), and under
+    # the full gate (8 m 45 s) the TERM landed AFTER the release, where the
+    # pre-existing `_cleanup_all` trap absorbs it and the run completes rc 0.
+    # 🔴 For the RELEASE test that race was worse than a flake: a TERM after the
+    # release finds the lock already gone, so `not lock.exists()` passes for the
+    # WRONG REASON. The window is what makes either assertion mean anything.
+    #
+    # ⚠ THE SLEEP IS 5 s, NOT 30 s, AND THE BOUND IS BASH's, NOT TASTE. A trap
+    # handler does not run until the current FOREGROUND command returns, and the
+    # wrapper runs the warm's opencode under its own `setsid` — so `killpg` on
+    # OUR group never reaches it and the handler is deferred for the whole sleep.
+    # At 30 s that exceeded `proc.wait()` and read as "the handler never fired".
+    # 5 s is wide enough to make the window deterministic and short enough that
+    # the deferred handler is observed.
+    proc = rig.spawn(["read the page"], mode="slow",
+                     extra_env={"FAKE_OC_SLEEP": "5",
+                                "BROWSER_AGENT_WARM_TIMEOUT": "30"})
     try:
         _await(lambda: lock.is_dir(), what="the wrapper to take the warm lock",
-               slice_s=15.0, poll=0.02)
+               slice_s=20.0, poll=0.02)
+        assert lock.is_dir(), "precondition: the wrapper must HOLD the lock here"
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        rc = proc.wait(timeout=30)
+        rc = proc.wait(timeout=45)
     finally:
         if proc.poll() is None:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)

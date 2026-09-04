@@ -230,62 +230,56 @@ _oc_lock_refuse() {   # <token> <detail>
   echo "browser-agent: warm-lock-refused:$1 — $2 Falling back to the GLOBAL opencode config." >&2
 }
 
-# 🔴 THE HOLDER'S PID, WRITTEN INSIDE THE LOCK. Without it an ORPHANED lock — one
-# whose holder was killed — is indistinguishable from a live one, so every later
-# run pays the FULL `OC_LOCK_BUDGET` (~120 s on defaults) before the blind steal
-# below can clear it. MEASURED 2026-09-03: a killed run left this directory
-# behind and the next `browser-agent --dry-run` was still stalled at 300 s, which
-# reads as a hang with no error and — because the orphan is machine-global — made
-# a CONCURRENT agent's unrelated branch look red. With the pid recorded, a dead
-# holder is detected on the FIRST pass and stolen immediately.
+# 🔴 WHY A RELEASE TRAP EXISTS HERE AND NOT AT THE SCRIPT'S `trap _cleanup_all`
+# LINE. That one is installed ~100 lines BELOW the call site that holds this
+# lock, so the ENTIRE bootstrap window ran with no handler — and `_cleanup_all`
+# never touched the lock anyway. A run killed in that window (the common case:
+# this script's own `--timeout` process-group kill, or a Ctrl-C) left the
+# directory behind, and every later run then paid the FULL `OC_LOCK_BUDGET`
+# (~120 s on defaults) before the blind steal below could clear it.
 #
-# 🔴 IT IS A FILE INSIDE THE LOCK DIRECTORY, WHICH MAKES THE LOCK NON-EMPTY, AND
-# THAT IS LOAD-BEARING FOR THE STEAL. `rmdir` refuses a non-empty directory, so
-# every steal path must remove THIS file explicitly and nothing else. That is
-# deliberate: a lock carrying any OTHER content was not written by us, so the
-# `rmdir` still fails and we still refuse rather than deleting a stranger's
-# state — the behaviour `test_a_lock_a_holder_never_frees_...` pins.
-OC_LOCK_PID_FILE="$OC_LOCK/pid"
+# 🔴 SCOPE, STATED HONESTLY: this closes the ORDINARY-KILL half only. A SIGKILL
+# runs no trap, so a hard-killed run still orphans the lock. Detecting THAT
+# needs the holder's identity in the lock, and the obvious version is UNSAFE —
+# an unowned delete-then-recreate steal lets two contenders that BOTH judge the
+# holder dead BOTH acquire (reproduced 2026-09-03; two concurrent
+# `rm -rf node_modules` on one tree is worse than the stall it removes). It
+# wants an atomic primitive (`flock`, whose lock the kernel drops on death),
+# never a pid file bolted onto `mkdir`. Deliberately NOT attempted here.
 OC_LOCK_HELD=0
 
-# Claim a lock we have just created: record the pid, then arm a release trap.
-# 🔴 THE TRAP IS ARMED HERE, NOT AT THE SCRIPT'S `trap _cleanup_all` LINE. That
-# one is installed ~100 lines BELOW the call site that holds this lock, so the
-# entire bootstrap window ran with NO handler and an INT/TERM there orphaned the
-# directory. `_cleanup_all` also never touched the lock. Arming it at the moment
-# of acquisition is what closes the ordinary-kill half; the pid check closes the
-# SIGKILL half, which no trap can reach.
+# Claim a lock we have just created, and arm its release.
+# 🔴 THE HANDLER MUST EXIT, NOT RETURN. A bash trap handler runs and execution
+# RESUMES — measured on 5.3.15. Returning would turn a TERM during the lock wait
+# or the warm into "released the lock and carried on bootstrapping
+# UNSERIALISED", the corruption this lock exists to prevent, and would make
+# `browser agent` un-interruptible there. Before this change no trap was armed
+# in that window at all, so INT/TERM killed the process by default; these
+# handlers preserve that while adding the release.
 _oc_lock_claim() {
   OC_LOCK_HELD=1
-  echo "$$" > "$OC_LOCK_PID_FILE" 2>/dev/null || true
-  trap '_oc_lock_release' EXIT INT TERM
+  trap '_oc_lock_release; exit 130' INT
+  trap '_oc_lock_release; exit 143' TERM
+  trap '_oc_lock_release' EXIT
   return 0
 }
 
-# Release a lock WE hold. Safe to call when we do not: it is a no-op then, so the
-# trap cannot delete a lock a later run legitimately took.
+# 🔴 IT DOES NOT DISARM THE TRAPS, AND THAT IS THE POINT OF THIS COMMENT. An
+# earlier version ended with `trap - EXIT INT TERM`, which looks like tidy
+# symmetry and SWALLOWS A PENDING SIGNAL: a TERM delivered while the warm's
+# opencode is the foreground command is DEFERRED (bash runs no handler until
+# that command returns), the normal-path release then resets the disposition,
+# and the queued TERM is discarded — the wrapper runs to completion and exits 0
+# having been asked to die. MEASURED by this change's own
+# `test_the_release_handler_EXITS_rather_than_resuming`: rc 0 after a TERM.
+# Leaving them armed is correct and cheaper — after release `OC_LOCK_HELD=0`
+# makes the release a no-op, so a later signal just takes the `exit 130`/`143`,
+# which IS the disposition a TERM should have. The script's own
+# `trap _cleanup_all EXIT INT TERM` overwrites them further down.
 _oc_lock_release() {
   [ "$OC_LOCK_HELD" = "1" ] || return 0
   OC_LOCK_HELD=0
-  rm -f "$OC_LOCK_PID_FILE" 2>/dev/null
   rmdir "$OC_LOCK" 2>/dev/null
-  trap - EXIT INT TERM
-  return 0
-}
-
-# Is the recorded holder gone? STRICT: only a pid file that EXISTS, parses as a
-# pid, and names a process that is not alive answers yes.
-# 🔴 A MISSING pid file is NOT staleness — it is the instant between another
-# run's `mkdir` and its `echo $$`, and stealing there would break the very
-# mutual exclusion this lock provides. Absent ⇒ wait, which is the old
-# behaviour and the safe one.
-_oc_lock_holder_is_dead() {
-  local pid
-  pid=$(cat "$OC_LOCK_PID_FILE" 2>/dev/null) || return 1
-  case "$pid" in (""|*[!0-9]*) return 1;; esac
-  # `kill -0` succeeds for a zombie, which is fine: a zombie's lock will be
-  # released by its parent's trap, and treating it as alive only costs a wait.
-  kill -0 "$pid" 2>/dev/null && return 1
   return 0
 }
 
@@ -309,18 +303,7 @@ _oc_lock() {  # -> 0 lock HELD, 1 the lock path is unusable (caller must not boo
   # this function is supposed to fall back to. Distinguish, and fail fast: the
   # caller's fallback path is correct and cheap, the wait is neither.
   local deadline=$(( SECONDS + OC_LOCK_BUDGET ))
-  if mkdir "$OC_LOCK" 2>/dev/null; then _oc_lock_claim; return 0; fi
   while ! mkdir "$OC_LOCK" 2>/dev/null; do
-    # 🔴 THE ORPHAN CHECK, BEFORE THE WAIT — not after it. A dead holder's lock
-    # is stolen on the first pass instead of costing the full budget. Ordering
-    # matters: this must come before the `SECONDS -ge deadline` arm, or the
-    # fast path is unreachable whenever the budget is short.
-    if _oc_lock_holder_is_dead; then
-      rm -f "$OC_LOCK_PID_FILE" 2>/dev/null
-      rmdir "$OC_LOCK" 2>/dev/null
-      if mkdir "$OC_LOCK" 2>/dev/null; then _oc_lock_claim; return 0; fi
-      # Someone else won the race to re-create it. Fall through and wait.
-    fi
     if [ ! -d "$OC_LOCK" ]; then
       # Not a directory ⇒ this was not contention. Retry ONCE — the holder may
       # have released it in the instant between the mkdir and this test — and if
@@ -336,12 +319,6 @@ _oc_lock() {  # -> 0 lock HELD, 1 the lock path is unusable (caller must not boo
     if [ "$SECONDS" -ge "$deadline" ]; then
       # Budget spent. Steal what must be a stale lock — but if even that fails,
       # we do NOT hold it, and the caller must not bootstrap as though we did.
-      # 🔴 Remove OUR pid file first, and ONLY that name: a lock we orphaned is
-      # non-empty because of it, so without this line `rmdir` fails and the
-      # blind steal that has always been the last resort here would have
-      # regressed into a refusal. A lock holding anything ELSE still fails the
-      # `rmdir` and still refuses — we do not delete a stranger's state.
-      rm -f "$OC_LOCK_PID_FILE" 2>/dev/null
       rmdir "$OC_LOCK" 2>/dev/null
       mkdir "$OC_LOCK" 2>/dev/null || {
         _oc_lock_refuse timeout "waited ${OC_LOCK_BUDGET}s for the warm lock '$OC_LOCK' and could not take or clear it."
