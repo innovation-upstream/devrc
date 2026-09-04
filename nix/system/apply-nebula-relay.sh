@@ -184,7 +184,18 @@ active=$(systemctl is-active "$UNIT" || true)
 [ "$active" = "active" ] || die "$UNIT is '$active' after the switch, not 'active'"
 echo "  unit      : active"
 
-"$CHECK" "$RELAY" || die "the verifier still does not see $RELAY advertised by the running unit"
+# The verifier reads the RUNNING process, not the unit file, so it returns 2 ("cannot
+# determine") if the switch landed a new config that nebula has not restarted onto.
+# `nixos-rebuild switch` normally restarts a changed unit; when it has not, restarting
+# it here is the expected completion of the change we just made, not an escalation.
+# One retry only -- a second failure is a real failure and rolls back.
+set +e; "$CHECK" "$RELAY"; check_rc=$?; set -e
+if [ "$check_rc" = "2" ]; then
+  echo "  retry     : the running process has not picked up the new config; restarting $UNIT once"
+  systemctl restart "$UNIT"
+  set +e; "$CHECK" "$RELAY"; check_rc=$?; set -e
+fi
+[ "$check_rc" = "0" ] || die "the verifier does not see $RELAY advertised by the running unit (rc=$check_rc)"
 
 OK=1
 echo
