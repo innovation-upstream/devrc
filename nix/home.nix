@@ -3371,10 +3371,19 @@ in
         # remote; `gnutar`/`gzip` are what nix shells out to while building.
         "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.openssh pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.util-linux pkgs.gnutar pkgs.gzip ]}"
         "HOME=%h"
-        # A user unit inherits none of the login shell's nix setup. `nix build
-        # <path>#<attr>` is flake syntax and fails without these two features,
-        # which would make every run COULD NOT MEASURE.
-        "NIX_CONFIG=experimental-features = nix-command flakes"
+        # 🔴 NO `NIX_CONFIG` HERE, DELIBERATELY. A user unit inherits none of the
+        # login shell's nix setup and `nix build <path>#<attr>` is flake syntax,
+        # so the features must come from somewhere — but NOT from this list.
+        # `Environment=` is WHITESPACE-SPLIT by systemd (the same hazard this
+        # file already documents for CPU_MON_IGNORE above), and MEASURED with
+        # `systemd-analyze verify`, `NIX_CONFIG=experimental-features =
+        # nix-command flakes` yields three "Invalid environment assignment,
+        # ignoring:" lines and sets NIX_CONFIG to the bare word
+        # `experimental-features` — which makes nix hard-error `syntax error in
+        # configuration line` on EVERY invocation. That is worse than omitting
+        # it, because this host's /etc/nix/nix.conf already enables both.
+        # The script passes `--extra-experimental-features` on the command line
+        # instead, where there is nothing for a unit file to re-parse.
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/main-green-check.sh";
       X-Restart-Triggers = [ "${../scripts/main-green-check.sh}" ];

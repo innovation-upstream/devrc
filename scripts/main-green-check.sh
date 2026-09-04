@@ -120,7 +120,21 @@ die() { say "$*"; exit "$RC_USAGE"; }
 # last real verdict. "I could not look today" and "main was red when I last
 # looked" are different facts and the second must survive the first.
 STREAK_FILE="$CACHE_ROOT/blind-streak"
-read_streak()  { [ -f "$STREAK_FILE" ] && cat "$STREAK_FILE" 2>/dev/null || echo 0; }
+# 🔴 SANITISED, AND THE BLAST RADIUS OF NOT DOING SO WAS NOT THE LADDER. An
+# unvalidated value reaches `$(( ... + 1 ))`; a non-integer makes that a bash
+# ARITHMETIC SYNTAX ERROR, which aborts `unmeasured_exit` WITHOUT exiting — and
+# every call site is inside an `if ... fi`, so the script CONTINUES past a guard
+# that just fired. Measured with a streak file of `1 2`: a failed clone was
+# announced and then ignored, the run gated an EMPTY sha, and it exited 10
+# reporting `RED, REPRODUCED — origin/main  failed BOTH attempts` with a blank
+# author. A corrupt counter turned a total failure to fetch into a DND-defeating
+# accusation about `main`.
+read_streak() {
+  local s=0
+  [ -f "$STREAK_FILE" ] && s="$(cat "$STREAK_FILE" 2>/dev/null || echo 0)"
+  case "$s" in ''|*[!0-9]*) s=0 ;; esac
+  echo "$s"
+}
 reset_streak() { echo 0 >"$STREAK_FILE" 2>/dev/null || true; }
 unmeasured_exit() {
   local n
@@ -143,7 +157,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --force)  FORCE=1 ;;   # ignore the memo and re-run even on an unchanged sha
     --status) STATUS_ONLY=1 ;;
-    -h|--help) sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # 🔴 The range is the WHOLE header, computed from where it ends. A literal
+    # `2,80p` silently truncated --help the moment the header grew past line 80,
+    # hiding --force, --status and half the exit-code ladder.
+    -h|--help) sed -n "2,95p" "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -159,8 +176,28 @@ mkdir -p "$CACHE_ROOT" "$LOGDIR" || die "cannot create $CACHE_ROOT"
 # CONCURRENT pair produced two FALSE failures that a sequential pair did not).
 exec 9>"$LOCK" || die "cannot open $LOCK"
 if ! flock -n 9; then
-  say "another run holds the lock — nothing to do"
-  exit "$RC_GREEN"
+  # 🔴 A FAILED `flock` IS NOT PROOF OF CONTENTION — VALIDATE THE INSTRUMENT.
+  # `flock -n` returns non-zero for ENOLCK (a filesystem without working locks:
+  # NFS without lockd, some overlay/9p mounts), a missing binary and EBADF, and
+  # none of those is another run holding the lock. This arm used to answer
+  # `exit 0` GREEN for all of them: silent, permanent, a systemd success, and it
+  # never touches the blind ladder — the "goes blind in silence" shape the
+  # ladder exists to close, reached through a different door.
+  #
+  # POSITIVE CONTROL: take a lock NOBODY holds. If that works, `flock` works
+  # here and the failure above really was contention. If it does not, we have
+  # measured nothing and must say so.
+  _probe="$CACHE_ROOT/.flock-probe.$$"
+  if ( exec 8>"$_probe" && flock -n 8 ) 2>/dev/null; then
+    rm -f "$_probe"
+    say "another run holds the lock — nothing to do"
+    exit "$RC_GREEN"
+  fi
+  rm -f "$_probe"
+  say "COULD NOT MEASURE — flock failed on a lock NOBODY holds, so 'another run"
+  say "  holds the lock' cannot be distinguished from a broken lock. Reporting"
+  say "  GREEN here would be a silent, permanent, systemd-success pass."
+  unmeasured_exit
 fi
 
 # ── where do we look? the remote the OPERATOR pushes to, read from their repo ──
@@ -248,7 +285,18 @@ run_tier() {
     "$MAIN_GREEN_GATE_CMD" "$CLONE" "$tier" >"$log" 2>&1
     return $?
   fi
-  nix build "$CLONE#checks.x86_64-linux.$tier" -L --no-link >"$log" 2>&1
+  # 🔴 THE FLAG LIVES HERE, NOT IN THE UNIT'S `Environment=`. The first draft
+  # passed it as `NIX_CONFIG=experimental-features = nix-command flakes`, and
+  # systemd WHITESPACE-SPLITS `Environment=` — a hazard nix/home.nix already
+  # documents ~1100 lines above that edit. Measured with `systemd-analyze
+  # verify`: three "Invalid environment assignment, ignoring:" lines, leaving
+  # NIX_CONFIG as the bare word `experimental-features`, which makes nix itself
+  # hard-error `syntax error in configuration line` on EVERY invocation — worse
+  # than omitting it, since this host's /etc/nix/nix.conf already enables both.
+  # On the command line there is nothing for a unit file to re-parse, and the
+  # script works identically by hand, from systemd, or from cron.
+  nix --extra-experimental-features "nix-command flakes" \
+      build "$CLONE#checks.x86_64-linux.$tier" -L --no-link >"$log" 2>&1
   return $?
 }
 
@@ -263,7 +311,32 @@ tier_verdict() {
     [ "$rc" -eq 0 ] && echo green || echo disagree
     return
   fi
-  [ "$rc" -eq 0 ] && echo noverdict || echo red
+
+  # ── no `RESULT:` line at all ────────────────────────────────────────────────
+  # 🔴 A NON-ZERO EXIT WITH NO VERDICT IS A BROKEN GATE, NOT A BROKEN `main`.
+  # This arm used to return `red`, and that is the worst answer this file can
+  # give: the red path names the commit's AUTHOR and fires a do-not-disturb-
+  # defeating toast saying "main is broken RIGHT NOW", with an EMPTY "Failing
+  # tests:" list. Measured — a `nix` that cannot start (see the NIX_CONFIG
+  # incident in nix/home.nix) exits 1 silently and produced exactly that
+  # accusation against an innocent commit, every 4h, memoized so it repeated.
+  # A genuinely failing suite cannot reach here: it exits non-zero AND prints
+  # `RESULT: FAIL`, which the first arm catches.
+  if [ "$rc" -ne 0 ]; then echo noverdict; return; fi
+
+  # ── rc 0 and no verdict — TWO DIFFERENT FACTS, and they must not be merged ──
+  # 🔴 EMPTY output is the CACHED case, and it is GREEN. `-L` streams a log only
+  # while a build RUNS; an already-realised derivation is not rebuilt, so nix
+  # prints nothing and exits 0. That is not an absence of evidence — a check
+  # derivation RUNS the suite, so nix exiting 0 means it built, which means the
+  # tests passed. Treating it as "no verdict" made the MODAL path report COULD
+  # NOT MEASURE: devrc/CLAUDE.md tells every merger to build these same two
+  # derivations on the merged tree before merging, so the tip this deadman
+  # checks is usually already realised — six such runs ladder to a BLIND toast
+  # about a perfectly green `main`, and `--force` was broken by construction.
+  #
+  # NON-EMPTY output with no verdict is a TRUNCATED run and stays unmeasured.
+  [ -s "$log" ] && echo noverdict || echo cached
 }
 
 # 🔴 SETS A GLOBAL; it does NOT echo its verdict.
@@ -280,11 +353,20 @@ attempt_all_tiers() {
     run_tier "$tier" "$attempt"; rc=$?
     v="$(tier_verdict "$LOGDIR/${tier}.attempt${attempt}.log" "$rc")"
     say "  attempt $attempt · $tier · rc=$rc · verdict=$v"
+    # 🔴 EVERY DOWNGRADE-TO-UNMEASURED IS GUARDED BY `overall = green`, AND THE
+    # MISSING GUARD ON `disagree` MADE THE VERDICT ORDER-DEPENDENT. Measured:
+    # pytests `RESULT: FAIL` + nodetests status/content disagreement resolved to
+    # rc 11 — a systemd SUCCESS, no toast — while the same two tiers in the
+    # other order resolved to rc 10. A genuinely red `main` was reported as
+    # nothing at all, which is the one outcome this whole file exists to
+    # prevent. `red` outranks `unmeasured`: not knowing about ONE tier cannot
+    # unlearn what another tier positively measured.
     case "$v" in
       red)       overall=red ;;
+      cached)    say "  ↳ $tier was already realised — nix rebuilt nothing, which for a check derivation IS a pass" ;;
       disagree)  say "  🔴 status/content DISAGREE on $tier — not resolving that in favour of the reassuring side"
-                 overall=unmeasured ;;
-      noverdict) say "  🔴 $tier exited 0 but printed no RESULT: line — a truncated run is not a pass"
+                 [ "$overall" = green ] && overall=unmeasured ;;
+      noverdict) say "  🔴 $tier printed no RESULT: line — a truncated or failed-to-start run is not a pass"
                  [ "$overall" = green ] && overall=unmeasured ;;
     esac
   done

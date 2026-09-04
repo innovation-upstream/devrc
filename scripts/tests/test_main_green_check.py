@@ -255,6 +255,133 @@ def test_an_unreachable_remote_is_UNMEASURED_and_says_it_is_not_a_pass(world):
     assert _calls(world) == [], "nothing may be gated when the tree could not be fetched"
 
 
+def test_a_gate_that_FAILS_with_no_verdict_is_UNMEASURED_not_a_RED_accusation(world):
+    """🔴 RED at 3033a22f. A gate that exits NON-ZERO having printed no `RESULT:`
+    line is a BROKEN GATE, not a broken `main` — a `nix` that cannot start, an
+    OOM, a missing binary. The header and `tier_verdict`'s own comment both said
+    so; the code classified it `red`.
+
+    Why it matters more here than anywhere else: the red arm names the commit's
+    AUTHOR and fires a do-not-disturb-defeating toast saying "main is broken
+    RIGHT NOW", with an empty "Failing tests:" list. Measured at 3033a22f with a
+    stub that exits 1 silently: rc 10, `author: Innocent Author`.
+
+    A genuinely failing suite cannot reach here — it exits non-zero AND prints
+    `RESULT: FAIL`, which the arm above catches.
+    """
+    stub = _stub(world, 'exit 1\n')
+    r = _run(world, stub)
+    assert r.returncode == RC_UNMEASURED, r.stdout + r.stderr
+    assert "RED, REPRODUCED" not in r.stdout, (
+        "a broken gate must not be reported as a broken main:\n" + r.stdout)
+
+
+def test_a_DISAGREEING_tier_cannot_ERASE_a_RED_from_another_tier(world):
+    """🔴 RED at 3033a22f, and it made the verdict ORDER-DEPENDENT.
+
+    `noverdict` was guarded so it could only downgrade a green; `disagree` was
+    not, so it overwrote `red` with `unmeasured`. Measured at 3033a22f: pytests
+    RESULT: FAIL + nodetests status/content disagreement -> rc 11, a systemd
+    SUCCESS, no toast — a genuinely red `main` reported as nothing at all, which
+    is the exact outcome this whole script exists to prevent.
+    """
+    stub = _stub(world, textwrap.dedent('''
+        if [ "$2" = pytests ]; then echo "RESULT: FAIL (exit=1)"; exit 1; fi
+        echo "RESULT: PASS (exit=0)"; exit 1
+    '''))
+    r = _run(world, stub)
+    assert r.returncode == RC_RED, (
+        "a red tier was erased by a disagreeing one:\n" + r.stdout)
+
+
+def test_a_CACHED_gate_run_is_GREEN_not_unmeasured(world):
+    """🔴 RED at 3033a22f — and it is the MODAL case, not an edge one.
+
+    `nix build -L` streams a log only while a build RUNS. An already-realised
+    derivation is not rebuilt, so nix prints NOTHING and exits 0. Since
+    `CLAUDE.md` tells every merger to build these same two derivations on the
+    merged tree before merging, the tip this deadman checks is USUALLY already
+    realised — so the normal path returned `noverdict` -> rc 11, and six of them
+    ladder to a BLIND toast about a perfectly green `main`. `--force` was broken
+    by construction for the same reason.
+
+    A realised check derivation IS the verdict: these derivations RUN the suite,
+    so nix exiting 0 means it built, which means the tests passed. Empty output
+    with rc 0 is therefore GREEN. (Non-empty output with rc 0 and no `RESULT:`
+    line stays UNMEASURED — that is a truncated run, a different fact, pinned by
+    the test above this one.)
+    """
+    stub = _stub(world, 'exit 0\n')          # silent + rc 0 == the cached shape
+    r = _run(world, stub)
+    assert r.returncode == RC_GREEN, r.stdout + r.stderr
+    assert "GREEN" in r.stdout
+
+
+def test_a_CORRUPT_streak_file_cannot_make_the_guards_FALL_THROUGH(world):
+    """🔴 RED at 3033a22f, and the blast radius was much wider than the ladder.
+
+    `read_streak` cat'd an unvalidated file into `$(( ... + 1 ))`. A non-integer
+    makes that a bash ARITHMETIC SYNTAX ERROR, which aborts `unmeasured_exit`
+    WITHOUT exiting — and every one of its call sites is inside an `if ... fi`,
+    so the script CONTINUES past a guard that just fired. Measured at 3033a22f
+    with a streak file of `1 2`: a failed clone was announced and then ignored,
+    the run gated an EMPTY sha, and it exited 10 reporting
+    `RED, REPRODUCED — origin/main  failed BOTH attempts` with a blank author.
+
+    So this is not a ladder nit: a corrupt counter turned a total failure to
+    even fetch into a do-not-disturb-defeating accusation about `main`.
+    """
+    world["cache"].mkdir(parents=True, exist_ok=True)
+    (world["cache"] / "blind-streak").write_text("1 2")
+    stub = _stub(world, 'echo "RESULT: PASS (exit=0)"; exit 0\n')
+    r = _run(world, stub, extra_env={"MAIN_GREEN_REMOTE": str(world["tmp"] / "gone")})
+    assert r.returncode == RC_UNMEASURED, (
+        "a corrupt streak file let the run continue past a failed clone:\n"
+        + r.stdout)
+    assert "RED, REPRODUCED" not in r.stdout
+
+
+def test_a_BROKEN_flock_is_not_reported_as_GREEN(world):
+    """🔴 RED at 3033a22f. `flock -n` returning non-zero for ANY reason — ENOLCK
+    on a filesystem without working locks, a missing binary, EBADF — was
+    indistinguishable from contention, and the answer was `exit 0` GREEN.
+
+    That is silent, permanent, a systemd success, and it never touches the blind
+    ladder — precisely the "goes blind in silence" shape the ladder exists to
+    close, reached by a different door. The fix is a POSITIVE CONTROL: if we
+    cannot take a lock NOBODY holds, we have measured nothing.
+    """
+    fake_bin = world["tmp"] / "fakebin"
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    write_exec(fake_bin / "flock", "exit 1\n")      # always fails, never contention
+    stub = _stub(world, 'echo "RESULT: FAIL (exit=1)"; exit 1\n')
+    r = _run(world, stub, extra_env={"PATH": f"{fake_bin}:{os.environ['PATH']}"})
+    assert r.returncode != RC_GREEN, (
+        "a broken flock reported GREEN and never ran the gate:\n" + r.stdout)
+    assert _calls(world) == [], "sanity: the gate must not have run"
+
+
+def test_single_flight_is_BEHAVIOURAL_not_just_the_word_flock(world):
+    """🔴 The guard this replaces asserted only `"flock" in src`, and a mutant
+    that kept the word while deleting the branch (`if false`) SURVIVED a fully
+    green suite. A guard satisfiable by spelling is not a guard.
+
+    This holds the real lock and asserts the observable consequence: the gate is
+    not invoked.
+    """
+    import fcntl
+    world["cache"].mkdir(parents=True, exist_ok=True)
+    lock = world["cache"] / "lock"
+    stub = _stub(world, 'echo "RESULT: PASS (exit=0)"; exit 0\n')
+    with open(lock, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        r = _run(world, stub)
+    assert r.returncode == RC_GREEN, r.stdout + r.stderr
+    assert _calls(world) == [], (
+        "the gate ran while another process held the lock — single-flight is "
+        "not in force:\n" + r.stdout)
+
+
 def test_repeated_could_not_measure_ESCALATES_to_BLIND(world):
     """🔴 The hole this closes: making rc 11 a systemd success stops a network
     blip from toasting, and on its own lets the deadman go blind FOREVER in
@@ -325,12 +452,17 @@ def test_the_production_path_builds_the_two_sandbox_derivations():
     derivations produced false failures a sequential pair did not.
     """
     src = _code_only(SCRIPT.read_text())
-    assert 'nix build "$CLONE#checks.x86_64-linux.$tier"' in src, (
+    assert 'build "$CLONE#checks.x86_64-linux.$tier"' in src, (
         "the production gate invocation moved; this seam no longer mirrors it")
+    assert '--extra-experimental-features "nix-command flakes"' in src, (
+        "the flake features flag left the COMMAND LINE. It must not move back "
+        "into the unit's Environment=, which systemd whitespace-splits — "
+        "measured to set NIX_CONFIG to the bare word `experimental-features` "
+        "and make every nix invocation hard-error.")
     tiers = re.search(r'for tier in ([a-z ]+); do', src)
     assert tiers and tiers.group(1).split() == ["pytests", "nodetests"], (
         "the tier list moved: %r" % (tiers.group(1) if tiers else None))
-    assert src.count('nix build "$CLONE') == 1, (
+    assert src.count('build "$CLONE') == 1, (
         "more than one nix build invocation — the one-at-a-time property is "
         "what stops the documented store-contention false failures")
 
@@ -361,6 +493,13 @@ def test_the_script_never_touches_the_operators_checkout():
             "scripts/main-green-check.sh runs `git -C $SRC_REPO %s` — the "
             "operator's checkout is READ-ONLY to this script, and the only "
             "permitted read is `remote get-url`." % verb)
+    assert not re.search(r'cd\s+"?\$(SRC_REPO|SCRIPT_DIR)', src), (
+        "the script `cd`s into the operator's checkout — a subsequent bare git "
+        "command then acts on THEIR tree, which the `git -C $SRC_REPO` scan "
+        "above cannot see.")
+    assert not re.search(r'git -C "\$SCRIPT_DIR"', src), (
+        "$SCRIPT_DIR is inside the operator's checkout too — same hazard, "
+        "different spelling.")
     assert "worktree add" not in src, (
         "`git worktree add` writes the COMMON git dir (refs, config, registry), "
         "so it is a repo-GLOBAL mutation of a checkout other sessions share. "
@@ -383,7 +522,9 @@ def test_it_single_flights():
 
 
 def test_the_script_is_executable_and_parses():
-    assert os.access(SCRIPT, os.X_OK), "must be chmod +x or the systemd unit cannot run it"
+    # NOT for systemd's sake — ExecStart is `${pkgs.bash}/bin/bash %h/...`, so
+    # the exec bit is irrelevant there. It is for a human running it directly.
+    assert os.access(SCRIPT, os.X_OK), "chmod +x so it can be run by hand"
     r = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
