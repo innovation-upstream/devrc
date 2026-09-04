@@ -20,6 +20,7 @@ Run: nix-shell -p python312Packages.pytest --run "pytest scripts/browser-bridge/
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -168,6 +169,17 @@ argv = sys.argv[1:]
 # FAKE_OC_ENV (those count/inspect only the real `run`). FAKE_OC_GATE_MODE drives
 # the shape so tests can prove the gate fails closed.
 if argv[:2] == ["debug", "agent"]:
+    # An OPT-IN hold, default 0 so no other test's behaviour moves. This is the
+    # branch the WARM takes (`opencode debug agent build`), and the warm runs
+    # UNDER the lock — so this is the only hook that can widen the window in
+    # which the wrapper holds it. `FAKE_OC_SLEEP`/`mode="slow"` cannot: they are
+    # read ~70 lines below, after this branch has already exited.
+    _dbg = float(os.environ.get("FAKE_OC_DEBUG_SLEEP", "0"))
+    if _dbg:
+        _mk = os.environ.get("FAKE_OC_DEBUG_MARKER")
+        if _mk:                       # announce that we are INSIDE the warm...
+            open(_mk, "w").write("in-warm")
+        time.sleep(_dbg)              # ...and hold it open
     import stat as _stat
     gate = os.environ.get("FAKE_OC_GATE_MODE", "ok")
     if gate == "fail":               # `debug agent` itself errors (bad/unsupported)
@@ -502,8 +514,11 @@ def rig(tmp_path):
     # degraded path deletes `rig.oc_config_dir` first.
     _prewarm_oc_config(oc_config_dir, focode)
 
-    def run(args, mode="ok", extra_env=None, timeout=RUN_TIMEOUT, open_fail=False,
-            tabid=TAB_ID, probe_fail=0, stall_cap=None):
+    def _rig_env(mode="ok", extra_env=None, open_fail=False,
+                 tabid=TAB_ID, probe_fail=0):
+        """The rig's environment, extracted so `run` and `spawn` cannot drift.
+        Behaviour-preserving: `run` called this exact block inline before.
+        """
         env = dict(os.environ)
         env.update(
             BROWSER_AGENT_OPENCODE=str(focode),
@@ -528,6 +543,28 @@ def rig(tmp_path):
             env["FRB_OPEN_FAIL"] = "1"
         if extra_env:
             env.update(extra_env)
+        return env
+
+    def spawn(args, mode="ok", extra_env=None, open_fail=False,
+              tabid=TAB_ID, probe_fail=0):
+        """Start the wrapper and hand back the Popen, still running.
+
+        🔴 `start_new_session=True` puts it in its OWN process group, so a
+        test can `killpg` it exactly the way this script's own `--timeout`
+        path does — and, critically, WITHOUT signalling pytest itself.
+        A bare TERM to the wrapper is DEFERRED while bash sits in a
+        foreground command, so the group kill is the only faithful one.
+        The caller owns the process and must reap it.
+        """
+        return subprocess.Popen(
+            [str(WRAPPER), *args],
+            env=_rig_env(mode, extra_env, open_fail, tabid, probe_fail),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True)
+
+    def run(args, mode="ok", extra_env=None, timeout=RUN_TIMEOUT, open_fail=False,
+            tabid=TAB_ID, probe_fail=0, stall_cap=None):
+        env = _rig_env(mode, extra_env, open_fail, tabid, probe_fail)
         # Wait on the DETERMINISTIC condition — the process exited — and use the
         # clock only to decide whether "still running" means "hung". `communicate`
         # (unlike `subprocess.run`) does NOT kill the child on expiry, so we can
@@ -576,6 +613,7 @@ def rig(tmp_path):
     rig.oc_config_dir = oc_config_dir
     rig.opencode_bin = focode
     rig.run = run
+    rig.spawn = spawn
     return rig
 
 
@@ -1518,3 +1556,143 @@ def test_the_condition_poll_also_extends_on_a_stalled_machine(monkeypatch):
     _await(lambda: time.monotonic() >= ready,
            what="a condition that resolves after several slices",
            slice_s=0.1, poll=0.01)
+
+
+# ---------------------------------------------------------------------------
+# The warm lock is RELEASED when a run is killed.
+#
+# 🔴 THE DEFECT. `_oc_lock` takes a machine-global `mkdir` mutex at
+# `~/.cache/browser-agent-opencode-config.lock` and released it only on the
+# normal path. The script's `trap _cleanup_all EXIT INT TERM` is installed ~100
+# lines BELOW the call site that holds it, so the whole bootstrap window ran
+# with NO handler — and `_cleanup_all` never touched the lock anyway. A run
+# killed there (the common case: this script's own `--timeout` process-group
+# kill, or a Ctrl-C) orphaned the directory, and every LATER run then paid the
+# full `OC_LOCK_BUDGET` (~120 s) before the blind steal could clear it.
+#
+# MEASURED 2026-09-03: an orphan left the next `browser-agent --dry-run` still
+# stalled at 300 s, presenting as a hang with no message — and because the lock
+# is machine-global it made a CONCURRENT agent's unrelated suite fail, which
+# reproduced on `origin/main` and read as "main is broken".
+#
+# ⚠ SCOPE: a SIGKILL runs no trap, so it still orphans the lock. Detecting that
+# needs the holder's identity in the lock, and the naive version is UNSAFE —
+# two contenders that both judge the holder dead BOTH acquire (reproduced).
+# Deliberately out of scope here; it wants an atomic primitive, not a pid file.
+# ---------------------------------------------------------------------------
+
+
+def test_a_run_killed_mid_bootstrap_RELEASES_the_warm_lock(rig):
+    """🔴 REGRESSION. Red at base: with no handler armed at acquisition, the
+    lock directory survives the kill and every later run pays the full budget.
+
+    The kill is a PROCESS-GROUP TERM because that is what this script's own
+    `--timeout` path sends, and because a bare TERM to the wrapper is DEFERRED
+    while bash sits in a foreground command — measured, and it is why an
+    earlier version of this test observed no release and looked like a code
+    defect when it was a signalling one."""
+    shutil.rmtree(rig.oc_config_dir)
+    rig.oc_config_dir.mkdir()
+    lock = Path(str(rig.oc_config_dir) + ".lock")
+
+    # 🔴 DETERMINISM, via the ONE hook that can provide it. The warm runs
+    # `opencode debug agent build` UNDER the lock, so holding THAT open is what
+    # widens the window in which the wrapper holds the lock.
+    # ⚠ `mode="slow"`/`FAKE_OC_SLEEP` CANNOT do it, and an earlier version of
+    # this comment claimed they did: the fake's `debug agent` branch exits ~70
+    # lines ABOVE where `mode` is read, so that invocation returned in 0.015 s
+    # and these tests completed in 0.03-0.09 s — a 5 s hold was arithmetically
+    # impossible. They passed anyway, on the ~100 ms of bootstrap left after the
+    # claim, which is a margin nobody chose.
+    # 🔴 The margin matters because the failure it guards is SILENT: for the
+    # RELEASE test, a TERM landing after the release finds the lock already gone,
+    # so `not lock.exists()` passes for the WRONG REASON. Measured under the full
+    # gate (8 m 45 s) the first version did exactly that.
+    in_warm = rig.scratch_root / f"in-warm-{os.getpid()}"
+    proc = rig.spawn(["read the page"],
+                     extra_env={"FAKE_OC_DEBUG_SLEEP": "3",
+                                "FAKE_OC_DEBUG_MARKER": str(in_warm),
+                                "BROWSER_AGENT_WARM_TIMEOUT": "30"})
+    try:
+        # 🔴 GATE ON BEING INSIDE THE WARM, NOT ON THE LOCK EXISTING. Waiting for
+        # the lock catches it ~20 ms after `mkdir`, which is BEFORE the warm
+        # starts — so the kill landed in whatever the bootstrap happened to be
+        # doing, on a margin of ~30 ms that nobody chose. The marker is written
+        # by the fake's `debug agent` branch, which IS the warm and DOES run
+        # under the lock, so this makes the window real rather than asserted.
+        _await(lambda: in_warm.exists(), what="the wrapper to enter the warm",
+               slice_s=20.0, poll=0.02)
+        assert lock.is_dir(), "precondition: the warm must run UNDER the lock"
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        proc.communicate(timeout=45)
+    finally:
+        if proc.poll() is None:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait(timeout=10)
+
+    assert not lock.exists(), (
+        "the warm lock survived a process-group TERM — every later run now pays "
+        "the full OC_LOCK_BUDGET before the blind steal can clear it, which is "
+        "the ~120 s stall this change removes")
+
+
+@pytest.mark.parametrize("sig,name", [(signal.SIGTERM, "TERM"), (signal.SIGINT, "INT")],
+                         ids=["TERM", "INT"])
+def test_the_release_handler_EXITS_rather_than_resuming(rig, sig, name):
+    """🔴 THE REGRESSION THE FIX ITSELF COULD INTRODUCE, and it is not
+    theoretical: a bash trap handler runs and then execution RESUMES (measured
+    on 5.3.15). A handler that only released the lock would turn a TERM during
+    the warm into "released the lock and carried on bootstrapping UNSERIALISED"
+    — the exact corruption the lock exists to prevent — and would also make
+    `browser agent` un-interruptible in that window.
+
+    INVARIANT GUARD, not regression coverage: at base there is no handler at
+    all, so TERM uses the default disposition and the process dies. Green both
+    sides. It is kept because it is the only thing that fails when the handler
+    stops exiting — dropping `exit 143` leaves every other test green."""
+    shutil.rmtree(rig.oc_config_dir)
+    rig.oc_config_dir.mkdir()
+    lock = Path(str(rig.oc_config_dir) + ".lock")
+
+    # 🔴 DETERMINISM, via the ONE hook that can provide it. The warm runs
+    # `opencode debug agent build` UNDER the lock, so holding THAT open is what
+    # widens the window in which the wrapper holds the lock.
+    # ⚠ `mode="slow"`/`FAKE_OC_SLEEP` CANNOT do it, and an earlier version of
+    # this comment claimed they did: the fake's `debug agent` branch exits ~70
+    # lines ABOVE where `mode` is read, so that invocation returned in 0.015 s
+    # and these tests completed in 0.03-0.09 s — a 5 s hold was arithmetically
+    # impossible. They passed anyway, on the ~100 ms of bootstrap left after the
+    # claim, which is a margin nobody chose.
+    # 🔴 The margin matters because the failure it guards is SILENT: for the
+    # RELEASE test, a TERM landing after the release finds the lock already gone,
+    # so `not lock.exists()` passes for the WRONG REASON. Measured under the full
+    # gate (8 m 45 s) the first version did exactly that.
+    in_warm = rig.scratch_root / f"in-warm-{os.getpid()}"
+    proc = rig.spawn(["read the page"],
+                     extra_env={"FAKE_OC_DEBUG_SLEEP": "3",
+                                "FAKE_OC_DEBUG_MARKER": str(in_warm),
+                                "BROWSER_AGENT_WARM_TIMEOUT": "30"})
+    try:
+        # 🔴 GATE ON BEING INSIDE THE WARM, NOT ON THE LOCK EXISTING. Waiting for
+        # the lock catches it ~20 ms after `mkdir`, which is BEFORE the warm
+        # starts — so the kill landed in whatever the bootstrap happened to be
+        # doing, on a margin of ~30 ms that nobody chose. The marker is written
+        # by the fake's `debug agent` branch, which IS the warm and DOES run
+        # under the lock, so this makes the window real rather than asserted.
+        _await(lambda: in_warm.exists(), what="the wrapper to enter the warm",
+               slice_s=20.0, poll=0.02)
+        assert lock.is_dir(), "precondition: the warm must run UNDER the lock"
+        os.killpg(os.getpgid(proc.pid), sig)
+        rc = proc.wait(timeout=45)
+        proc.communicate()
+    finally:
+        if proc.poll() is None:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait(timeout=10)
+
+    assert rc != 0, (
+        f"exited {rc} after a {name} — the handler released the lock and let the "
+        "run CONTINUE unserialised instead of terminating. 🔴 BOTH signals are "
+        "parametrised because guarding only TERM left `exit 130` free: a "
+        "mutation dropping it SURVIVED the whole suite, reintroducing exactly "
+        "the hazard the handler comment marks 🔴.")

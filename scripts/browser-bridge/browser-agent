@@ -304,7 +304,7 @@ oc_bootstrap() {  # <version> -> 0 warm, 1 could not warm
   # minutes first (see `_oc_lock`).
   _oc_lock || return 1
   _oc_bootstrap_locked "$ver"; rc=$?
-  rmdir "$OC_LOCK" 2>/dev/null
+  _oc_lock_release
   return $rc
 }
 
@@ -326,6 +326,59 @@ oc_bootstrap() {  # <version> -> 0 warm, 1 could not warm
 #                stale-lock steal also failed. We DID wait; that is legitimate.
 _oc_lock_refuse() {   # <token> <detail>
   echo "browser-agent: warm-lock-refused:$1 — $2 Falling back to the GLOBAL opencode config." >&2
+}
+
+# 🔴 WHY A RELEASE TRAP EXISTS HERE AND NOT AT THE SCRIPT'S `trap _cleanup_all`
+# LINE. That one is installed ~100 lines BELOW the call site that holds this
+# lock, so the ENTIRE bootstrap window ran with no handler — and `_cleanup_all`
+# never touched the lock anyway. A run killed in that window (the common case:
+# this script's own `--timeout` process-group kill, or a Ctrl-C) left the
+# directory behind, and every later run then paid the FULL `OC_LOCK_BUDGET`
+# (~120 s on defaults) before the blind steal below could clear it.
+#
+# 🔴 SCOPE, STATED HONESTLY: this closes the ORDINARY-KILL half only. A SIGKILL
+# runs no trap, so a hard-killed run still orphans the lock. Detecting THAT
+# needs the holder's identity in the lock, and the obvious version is UNSAFE —
+# an unowned delete-then-recreate steal lets two contenders that BOTH judge the
+# holder dead BOTH acquire (reproduced 2026-09-03; two concurrent
+# `rm -rf node_modules` on one tree is worse than the stall it removes). It
+# wants an atomic primitive (`flock`, whose lock the kernel drops on death),
+# never a pid file bolted onto `mkdir`. Deliberately NOT attempted here.
+OC_LOCK_HELD=0
+
+# Claim a lock we have just created, and arm its release.
+# 🔴 THE HANDLER MUST EXIT, NOT RETURN. A bash trap handler runs and execution
+# RESUMES — measured on 5.3.15. Returning would turn a TERM during the lock wait
+# or the warm into "released the lock and carried on bootstrapping
+# UNSERIALISED", the corruption this lock exists to prevent, and would make
+# `browser agent` un-interruptible there. Before this change no trap was armed
+# in that window at all, so INT/TERM killed the process by default; these
+# handlers preserve that while adding the release.
+_oc_lock_claim() {
+  OC_LOCK_HELD=1
+  trap '_oc_lock_release; exit 130' INT
+  trap '_oc_lock_release; exit 143' TERM
+  trap '_oc_lock_release' EXIT
+  return 0
+}
+
+# 🔴 IT DOES NOT DISARM THE TRAPS, AND THAT IS THE POINT OF THIS COMMENT. An
+# earlier version ended with `trap - EXIT INT TERM`, which looks like tidy
+# symmetry and SWALLOWS A PENDING SIGNAL: a TERM delivered while the warm's
+# opencode is the foreground command is DEFERRED (bash runs no handler until
+# that command returns), the normal-path release then resets the disposition,
+# and the queued TERM is discarded — the wrapper runs to completion and exits 0
+# having been asked to die. MEASURED by this change's own
+# `test_the_release_handler_EXITS_rather_than_resuming`: rc 0 after a TERM.
+# Leaving them armed is correct and cheaper — after release `OC_LOCK_HELD=0`
+# makes the release a no-op, so a later signal just takes the `exit 130`/`143`,
+# which IS the disposition a TERM should have. The script's own
+# `trap _cleanup_all EXIT INT TERM` overwrites them further down.
+_oc_lock_release() {
+  [ "$OC_LOCK_HELD" = "1" ] || return 0
+  OC_LOCK_HELD=0
+  rmdir "$OC_LOCK" 2>/dev/null
+  return 0
 }
 
 _oc_lock() {  # -> 0 lock HELD, 1 the lock path is unusable (caller must not bootstrap)
@@ -355,7 +408,7 @@ _oc_lock() {  # -> 0 lock HELD, 1 the lock path is unusable (caller must not boo
       # a third party grabbed it meanwhile, fall back into the wait loop. Only a
       # path that is STILL neither creatable nor a directory is the permanent
       # error, and that one we refuse instead of sleeping on it.
-      mkdir "$OC_LOCK" 2>/dev/null && return 0
+      mkdir "$OC_LOCK" 2>/dev/null && { _oc_lock_claim; return 0; }
       [ -d "$OC_LOCK" ] || {
         _oc_lock_refuse unwaitable "the warm lock path '$OC_LOCK' cannot be created and is not a directory (ENOSPC/EACCES/EIO, or a stray file at that path), so waiting cannot clear it."
         return 1
@@ -373,6 +426,7 @@ _oc_lock() {  # -> 0 lock HELD, 1 the lock path is unusable (caller must not boo
     fi
     sleep 0.5
   done
+  _oc_lock_claim
   return 0
 }
 
