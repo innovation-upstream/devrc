@@ -205,11 +205,63 @@ media = [
 ]
 ```
 
-An image's own `src` is often a **downscaled copy from a resizing proxy**, with
-the original on the wrapping `<a>`; a video's `src` already *is* the original.
-🔴 **Never reach the original by rewriting a proxy URL's host** — the two hosts
-carry different signature parameters, so the rewrite drops a signature belonging
-to the other host. The anchor's href is already signed for where it points.
+An image's own `src` is often a **downscaled copy from a resizing proxy**, which
+is why the anchor accessor goes FIRST in the list above: it is how this rule
+reaches the original. 🔴 **That accessor is a DESCENDANT query and it does not
+need a wrapping `<a>`.** `safeQuery` resolves each `element` with
+`container.querySelectorAll` (`player_buttons.js`), so the anchor only has to be
+a descendant of `container` — it does not have to be an ancestor of the image.
+⚠ **Confirm your `container` actually encloses it.** What was measured is the
+NEGATIVE half only (0 ancestor `<a>` of 3); the origin anchor was nine levels
+away from the image, and whether it falls inside any particular `container`
+selector has never been measured. Do not delete this accessor on the strength
+of the context-menu note below:
+🔴 **the player-button path does NOT rewrite anything.** `playerDownload` hands
+its `mediaUrl` straight to the download API and never calls
+`originalFromPreview()`, so for THIS path the anchor accessor is the only route
+to the original.
+
+### The "Save to library…" CONTEXT MENU is a different path with a different rule
+
+🔴 **Scoped to `info.linkUrl`, and it does NOT apply to the `media` list above.**
+A browser fills a context menu's `linkUrl` only from an ANCESTOR link, and on
+the chat site this was built for an image attachment has none. MEASURED
+2026-09-03 on the live client, 3 image attachments across 2 channels and 2
+message shapes: ancestor `<a>` elements between the image and its message,
+**0 of 3**. The origin anchor is a sibling — reachable by a descendant query,
+invisible to `linkUrl`. So the menu path cannot wait for a link and must
+rewrite instead.
+
+🔴 **For the menu path, rewriting the proxy URL's host IS the supported route,
+and this file used to say the opposite.** It claimed the two hosts carry
+different signature parameters; they do not. Measured for one asset: the proxy
+URL carries the signature parameters **plus** the resize knobs, with the
+signature **values byte-identical** to the origin anchor's, so the rewrite keeps
+a valid signature. Probed with both controls — the message's own origin anchor
+**206**, the rewritten URL **206**, the same URL with the signature stripped
+**fails**. `originalFromPreview()` in `route_core.js` is the one implementation
+**of the rewrite**; do not open-code a second.
+
+⚠ **A video's `src` is USUALLY the origin already, but that is not guaranteed
+and was measured at zero points** — every video in the live route log was
+already on the origin host, so the rewrite simply does not fire for them. It
+*will* fire on a proxy-host video src, and that shape is unverified.
+
+⚠ **The menu path has no PLAYER rules — but it is not rule-free.** It is
+governed by `[site_rules."<host>".context]`, which `content_capture.js` reads
+on the `contextmenu` event; those `subject`/`tags` selectors go in first as the
+most specific signal, and the sidecar's `/match` weighs them against the title,
+Open Graph, link text and the url-derived signals. So a context rule does not
+by itself *decide* the directory — it is the strongest lever a config author
+has. 🔴 **If menu downloads keep landing in the catch-all, that context rule is
+the first thing to add.**
+
+### Player button details — everything below is about the BUTTON, not the menu
+
+🔴 The heading above closes the context-menu subsection. Without it, this
+block, the troubleshooting list and the DEPLOY ORDER note all read as
+context-menu guidance — and the menu path has no player rules, no accessors and
+no buttons, so every word of it would be filed under a path it cannot apply to.
 
 **Important details**
 - The media URL is **signed and rotates** — `player_buttons.js` reads it **at
