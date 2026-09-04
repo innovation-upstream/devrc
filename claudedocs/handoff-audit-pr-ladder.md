@@ -234,7 +234,10 @@ retained as DONE markers; do not re-claim them.
 - 🔴 **The FIX WAS THE MECHANISM, NOT THE CONFIG.** Deleting the terms from `:dacq` had already
   been the response twice and was reverted by hand both times. `search_terms` serves two
   consumers that want opposite things — the PICKER wants recall (ambiguity there means *two
-  rows*, which `_PICKER_ROWS` exists to protect) and `_attribute` wants precision. So the config
+  rows*, which `_PICKER_ROWS` existed to protect — that table was DELETED 2026-09-03 with the
+  live-config guards; the property is now pinned only by
+  `test_naming_tiebreak_does_not_reach_the_picker` and
+  `test_declared_owner_does_not_reach_the_picker`) and `_attribute` wants precision. So the config
   keeps both spellings and `_AMBIGUOUS_TERM_OWNER` declares the owner, consulted ONLY on the
   already-ambiguous branch, after `_names_trigger`, and ONLY over snippets the term matches
   (`owner in matched`). An ambiguous term with no entry still returns `None`.

@@ -10,6 +10,8 @@ Source: `~/workspace/devrc/claude/skills/subsystem-index/reference/index-write.m
 
 ## 1. Concurrency — why the append uses `Edit`, and the retraction that forced a rewrite
 
+🔴 **THIS WHOLE SECTION DESCRIBES THE RETIRED LOCAL PROTOCOL. It is why the API's `flock` and `If-Match` exist — it is NOT an instruction to write locally.** Since the 2026-09-01 Cairn cutover every write goes to the pod (`cairn append` / `cairn put`), and since 2026-09-03 a **first-ever** entry does too (`cairn create`, `If-None-Match: *`). ⚠ **`Write` was carved out for a first-ever file right up until that verb existed, and that carve-out became a content-loss path** the moment reads moved to the pod cache: measured 2026-09-02, five whole entries and 24 dated bullets lived on one host only and were dark to every reader. ⚠ **The `0444` freeze on the mirror does not stop an editor either** — an `Edit` rewrites-and-renames (leaving the file `0444`) and a `Write` creates a fresh `0644` file; only a shell `>>` gets `EACCES`. The protection is the VERB you choose, never the permission bits.
+
 Two sessions appending to one store entry were simulated against a fixture (2026-08-12). What was measured:
 
 | protocol | what the second session does | result for the first session's bullet |
@@ -32,6 +34,8 @@ Measured: the store's hourly autocommit runs `add`/`commit` only and **rewrites 
 Measured twice, on two new scopes (2026-08-12): the store's hourly timer `git init`s a brand-new scope directory, seeds a local identity, and commits it — with **no remote**.
 
 That is the whole reason `SKILL.md` says not to create the repository yourself. Without the measurement, an agent that finds no `.git` beside a just-written entry cannot distinguish "waiting for the timer" from "silently not backed up" — which is the reading one session actually reached, at the cost of a round trip and a near-miss `git init` inside a client-confidential store.
+
+⚠ **Read that in the post-cutover shape: the directory the timer versions is the POD's, and `cairn create` is what makes it.** The scope directory the client's mirror grows appears on the next `cairn sync`, and it is not a git repo at all — so "no `.git` beside a just-synced entry" is the normal state of the mirror, not a backup gap. The hourly timer and the daily off-machine bundle both run against the authoritative copy.
 
 ## 3. What each path source is blind to, with the numbers
 

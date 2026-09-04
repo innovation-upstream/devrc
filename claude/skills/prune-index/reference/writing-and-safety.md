@@ -60,8 +60,12 @@ runs against them. Consequences:
 4. Present a **unified diff** against the current file — one compact block — and
    ask a single yes/no. Never batch a scope behind one prompt: a bad cut must be
    rejectable on its own.
-5. On confirm: land the scratch file with `cairn put`. The store's entry files
-   are `0444`, so a `Write` against one fails with `EACCES`; and the `If-Match`
+5. On confirm: land the scratch file with `cairn put`. The mirror's entry files
+   are `0444`, ⚠ **but that will NOT stop you writing there — measured
+   2026-09-02**: a shell `>>` gets `EACCES`, while `Edit` rewrites-and-renames
+   through it and `Write` makes a fresh `0644` file, and either one is then
+   invisible to every reader. The protection is that you use `cairn put`, never
+   the mode bits; and the `If-Match`
    the put derives from a live sync is what REPLACES the old "re-read the file
    first, a concurrent session may have appended" rule — a concurrent append now
    fails the put with exit 8 instead of being silently overwritten. On decline,
