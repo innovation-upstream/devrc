@@ -26,8 +26,14 @@ operation that can destroy another session's bullet.
 🔴 **Operator decision, 2026-08-31 — the fork is closed: the y/N is retired
 EVERYWHERE, and `subsystem-index/SKILL.md` is the single protocol.** A whole-file
 retype is MEASURED to lose a concurrent append silently, so `Edit` anchored on
-`## Nuance / work-history` is the mandated mechanism, and `Write` stays correct
-**only** for a first-ever file, which has no prior content to lose. **Do not
+`## Nuance / work-history` was the mandated mechanism. 🔴 **Both halves of that
+sentence are HISTORY now, and the second half became a DEFECT.** Since the
+2026-09-01 Cairn cutover every write goes to the pod, and since 2026-09-03 a
+first-ever file is `cairn create`. The retired carve-out said `Write` "stays
+correct **only** for a first-ever file, which has no prior content to lose" —
+true while the local tree WAS the store, and false the moment reads moved to the
+pod cache: a locally-created entry is then dark to every reader on every host
+(measured 2026-09-02, five of them). **Do not
 re-add a protocol paragraph to this file.** What belongs here is what is specific
 to `/analyze-service` — what counts as notable, the auto-discovered pointers, the
 bloat discipline — plus the two caller facts the shared protocol deliberately
@@ -42,9 +48,14 @@ on an append, leave whatever is there.
 never the tool's. `--census` reads that split back, which is the only reason the
 stamp exists.
 
-**Where the file goes:** `~/.claude/analyze-service-index/<scope>/<slug>.md`,
-creating the dir/file if first-ever. Use `<slug>.<kind>.md` **only** when a
-same-slug entry of another kind already exists, and say why in the diff.
+**Where the entry goes:** it is addressed as `<scope>/<slug>` **on the pod** —
+`cairn create --scope <scope> --ref <slug> --file <scratch>` for a first-ever
+entry, which makes the scope directory there too. 🔴 **Never write it into
+`~/.claude/analyze-service-index/`**: that tree is a read-only mirror, reads come
+from the synced cache, and a file written there reaches nobody. Use
+`<slug>.<kind>.md` **only** when a same-slug entry of another kind already
+exists, and say why in the diff — ⚠ note the write routes cannot address a
+kind-qualified ref today, so that case is still a `put` on an existing file.
 <!-- one-append-protocol:end -->
 
 ## Notable — append-worthy

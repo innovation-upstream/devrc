@@ -321,9 +321,11 @@ in
           # :acq owns "ask"/"clarify" for ATTRIBUTION while the picker keeps
           # listing both rows. 🔴 Adding a term here that another snippet also
           # spells is therefore fine for the picker but silently costs
-          # attribution unless that table names an owner — the live guard
-          # `test_live_existing_resolutions_not_made_ambiguous` is what tells
-          # you, and it is not optional to read.
+          # attribution unless that table names an owner. 🔴 The live guard that
+          # used to tell you (`test_live_existing_resolutions_not_made_ambiguous`)
+          # was REMOVED 2026-09-03 along with the other 9 live-config tests: they
+          # re-broke on every snippet edit. NOTHING enforces this coupling now —
+          # if attribution matters for a term, check it by hand.
           { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
           { trigger = ":acq"; replace = "ask clarifying questions and recommend improvements and anything useful to include"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this arc? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
@@ -2193,8 +2195,23 @@ in
       # PATH must be explicit: a user service does not inherit the login shell PATH.
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.gawk pkgs.procps pkgs.gnugrep pkgs.libnotify ]}"
-        # This laptop runs hot at idle (cooling needs attention); warn early.
-        "CPU_MON_TEMP_THRESHOLD=88"
+        # HOST-CONDITIONAL, deliberately. The laptop runs hot at idle (cooling
+        # needs attention) and toasted constantly at 88; the workbench does not,
+        # and keeps the earlier warning. This was a single shared `88` with that
+        # laptop-specific sentence attached to it, and the laptop consequently
+        # carried `88 -> 92` as an UNCOMMITTED local edit — which blocked EVERY
+        # `ship.sh` fast-forward to that host (rc 7), silently, until an
+        # unrelated ship happened to run. A shared value here regenerates that
+        # edit; expressing the difference is what stops it.
+        #
+        # `isLaptop` is this file's host discriminator (defined in the `let`
+        # block above). Its documented fail-OPEN is BENIGN here, unlike on the
+        # keylog-ptrace and backup-prefix uses that had to reject it: a host
+        # that is a laptop without an intel_backlight evaluates false and gets
+        # 88 — the LOWER, earlier-warning threshold, i.e. exactly today's
+        # shipped behaviour. The failure direction is more alerting, never a
+        # silently laxer one.
+        "CPU_MON_TEMP_THRESHOLD=${if isLaptop then "92" else "88"}"
         # Raise thresholds to reduce alert noise (2026-08-05).
         "CPU_MON_THRESHOLD=48"
         "CPU_MON_RUNAWAY_PCT=95"
