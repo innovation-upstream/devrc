@@ -16,43 +16,45 @@ advice turned out to be built on a false premise, make the correction enforceabl
 than written down.
 
 ## State now
-- 🔴 **CARRIED FORWARD (the REPLACE would otherwise drop it): THE ENFORCEABLE CORRECTION THIS
-  DOC'S GOAL ASKS FOR EXISTS — a LABEL edit can no longer shadow a snippet that DECLARES the
-  term.** Shipped by `#1247` (`b9b2493d`, the `_AMBIGUOUS_TERM_OWNER` patch) and `#1252`
-  (`de677683`, declared-interface precedence). 🔴 **That correction is CODE and SURVIVES #1265** —
-  what #1265 removes is only the LIVE-CONFIG tests over it; `_attribute`'s declared-interface,
-  name-tiebreak and owner-lookup branches all keep killing hermetic coverage (mutation-verified in
-  the #1265 round-1 audit: 5, 5 and 4 survivors go red respectively). ⚠ But note the live value is
-  now ZERO instances: `a451abc0` moved "recommend" out of `:acq`'s label, so the collision the
-  precedence rule was built for no longer exists on the real config. The rule is not wrong; it is
-  currently unexercised live, and nothing measures that any more.
+- 🔴 **CARRIED FORWARD (a REPLACE would drop it): THE ENFORCEABLE CORRECTION THIS DOC'S GOAL ASKS
+  FOR EXISTS — a LABEL edit can no longer shadow a snippet that DECLARES the term.** Shipped by
+  `#1247` (`b9b2493d`) and `#1252` (`de677683`). 🔴 **It is CODE and SURVIVED #1265** — only the
+  live-config TESTS over it were removed. ⚠ Its live instance count is now **ZERO**: `a451abc0`
+  moved "recommend" out of `:acq`'s label, so the collision it was built for no longer exists on the
+  real config. The rule is not wrong; it is unexercised live, and nothing measures that.
+- 🔴 **CARRIED FORWARD — the operator decision that authorised all of this, verbatim, because the
+  rationale outlives the PR:** *"intended, drop the espanso guards/tests. they keep getting in the
+  way."* (2026-09-03). The guards re-broke on every snippet edit; that is what was being bought off.
+- 🔴 **CARRIED FORWARD — the #1262 reconciliation, which a future reader will otherwise re-derive.**
+  `#1262` (`df02571f`, another session) retired ONE of the same guards ~3 minutes after this arc's
+  first fix commit, because `a451abc0` removed the collision it read. #1265 is a SUPERSET, not a
+  contradiction. The merge commit `b8ea45df` carries #1262's prose forward with its *"nothing was
+  lost — `_EXISTING_RESOLUTIONS` is still green"* accounting explicitly marked **SUPERSEDED**,
+  because #1265 deletes that table too. A clean textual merge would have imported that false claim.
 
-- 🔴 **THE LIVE-CONFIG GUARDS ARE BEING RETIRED — operator decision 2026-09-03, "drop the
-  espanso guards/tests, they keep getting in the way".** In flight as devrc **#1265**
-  (`fix/drop-espanso-live-guards`, head `a319056e`), NOT merged.
-  Removes all **10** live-config-coupled tests from `test_espanso_detect.py` (each read
-  `nix/home.nix` at test time), the dead `_live_base()`/`_live_det()` scrapers, `HOME_NIX`, and
-  four unconsumed tables. **KEEPS the 60 hermetic tests** + all 11 in `test_espanso_triggers.py`
-  + all 76 in `test_espanso_usage.py`. 180 pass.
-- 🔴 **#1262 (`df02571f`) RETIRED ONE OF THE SAME GUARDS INDEPENDENTLY, ~3 MINUTES AFTER this
-  branch's first fix commit** — `test_recommend_terms_resolve_on_the_live_config`, because
-  `a451abc0` removed the collision it read. #1265 is a SUPERSET, not a contradiction; the merge
-  commit `b8ea45df` reconciles them and carries #1262's prose forward with its "nothing was lost /
-  `_EXISTING_RESOLUTIONS` is still green" accounting explicitly marked SUPERSEDED — #1265 deletes
-  that table too.
-- ✅ **`main` IS GREEN.** Re-measured at `79338677`: `test_espanso_detect.py` **69 passed**. #1265's
-  original framing ("main is red and this unbreaks it") was true when written and is WITHDRAWN
-  publicly on the PR. There is no urgency left; the PR stands on whether dropping the remaining
-  nine guards is wanted.
-- 🔴 **WHAT IS LOST, stated rather than hidden.** Nothing enforces the live coupling after #1265:
-  a snippet edit that costs attribution ships silently. The `/espanso-audit` skill was still
-  naming the deleted pytest run as its backstop (the one documented as catching the 2026-08-19
-  `'dispatch'` case `--replay` missed) — corrected in the PR to say the backstop is GONE.
-- **Audit ladder on #1265: 3 rounds, all with findings, none clean yet.** Round 1: 141 dead lines
-  left behind + the skill backstop + 5 dangling refs + a drifted fixture. Round 2: the fix
-  re-mirrored ONE fixture and not its two siblings, and orphaned a pointer in payload code.
-  Round 3: the "these are synthetic" correction swept in `CIVIT_BASE`, which IS an exact mirror;
-  "4 of 7" is 4 of 10; a "no dangling pointer remains" claim that was false.
+- ✅ **THE LIVE-CONFIG GUARDS ARE GONE. `#1265` MERGED as `68d10b19`** (2026-09-04), verified by
+  content on `origin/main`. `test_espanso_detect.py` is **60 tests, 0 live-config guards**; the
+  dead `_live_base()`/`_live_det()` scrapers, `HOME_NIX` and four unconsumed tables went with them.
+  `test_espanso_triggers.py` (11) and `test_espanso_usage.py` (76) untouched. Merged through a RED
+  gate on an explicit operator decision — the discriminator and the unattributed second failure are
+  recorded in rank 6.
+- ✅ **`#1270` MERGED `1cc08ff8`** (this doc's previous update) and ✅ **`#1275` MERGED `aba48864`**
+  (the retraction below). Both content-verified.
+- 🔴 **WHAT IS NOW UNGUARDED, stated plainly:** nothing checks that a snippet edit preserves
+  attribution. A future label reword that costs a search route ships silently. The
+  `/espanso-audit` skill previously named the deleted pytest run as its backstop — corrected in
+  #1265 to say the backstop is GONE and attribution must be checked by hand.
+- 🔴 **THE DECIDING EVIDENCE, because it inverts the intuition and is worth not re-deriving:** the
+  live guards were **GREEN THROUGH the regression they existed to catch.**
+  `_AUDIT_2026_08_19_RESOLUTIONS` pins `rig`/`portable` — the words the rename INTRODUCED — so it
+  passed while `'ssh work nebula'` went from one picker row to zero. Cost: four reddenings of `main`
+  on legitimate config edits (#1060, #1247, #1252, `a451abc0`→#1262). Benefit: did not fire.
+- ⚠ **`_attribute`'s LOGIC keeps full hermetic coverage** — mutation-verified in #1265's round-1
+  audit: killing the declared-interface, name-tiebreak and owner-lookup branches reddens 5, 5 and 4
+  survivors respectively. What was dropped is config-data integrity only.
+- **This session's clawgate link: NONE.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks. An
+  unknown session id answers 200 with an EMPTY ARRAY, so that cannot distinguish "touched no task"
+  from "wrong id". No field written, no task created; not a clean bill of health.
 
 ## Open investigations — live diagnosis state
 None. Everything opened this session was closed or merged. The single unverified claim is the
@@ -144,6 +146,26 @@ re-derived it. Read this correction first; the block under it is kept as the ret
   `:sshwn`'s and `:sshln`'s `search_terms` in `nix/home.nix`, then re-run the probe above and
   confirm both terms resolve. OPERATOR'S CALL — it is snippet config, not code.
 
+### ✅ CLOSED 2026-09-04 — I merged a WRONG diagnosis, and the shape is the reusable part
+- **Symptom + exact repro:** this doc (merged via #1270) asserted a *"LIVE TELEMETRY GAP"* —
+  *"`nebula`/`mesh` are not in either snippet's `search_terms`"* — with a one-line fix. Retracted by
+  **#1275 (`aba48864`)**, which strikes the block through in place rather than deleting it.
+- **Observed (with values):** on `origin/main`, `:sshwn` and `:sshln` each declare
+  `['nebula','mesh','remote']`. `'nebula'` matches `[':sshln', ':sshwn']` → `_attribute` **None**;
+  same for `'mesh'`. So `None` is the CORRECT two-row outcome — the documented picker/attribution
+  split — not a defect, and the published fix was a **no-op**. What is real is smaller:
+  `'ssh work nebula'` matches **[]** and `'ssh work'` matches `[':sshwl']` alone, because the rename
+  dropped `ssh`/`workbench`/`wb`. Muscle memory, not telemetry.
+- **Ruled out:** *"the probe was wrong"* — the `None` values were correct on both instruments and
+  by two sessions; it was the SENTENCE EXPLAINING them that was never measured. via: measurement
+- **Ruled out:** *"the audit ladder should have caught it"* — three rounds re-derived those `None`
+  values and confirmed them; none re-derived the explanation, because it read as a restatement of
+  the measurement rather than a separate claim. via: measurement
+- 🔴 **The reusable shape: A MEASURED VALUE WITH AN UNMEASURED EXPLANATION ATTACHED.** It passed
+  three adversarial rounds built specifically to catch claims that certify rather than omit, and
+  then a merge. When a bullet reports a value AND says why, those are TWO claims — re-derive both.
+- **Next probe:** none — closed. The correction is on `main`.
+
 ## Next steps (ranked)
 🔴 Numbering is STABLE — `claim-work --slug-for <this doc> <rank>` derives from it.
 
@@ -172,7 +194,14 @@ re-derived it. Read this correction first; the block under it is kept as the ret
    assumption about the change — but "edited a fixture so the test passes" is the shape that
    earns a second reader.
    forcing: none — merged and green; this is discretionary assurance, not a live signal.
-6. **Decide #1265: merge or close.** 🔴 The urgency is GONE — `main` is green via #1262, so this
+6. ✅ **DONE 2026-09-04 — MERGED as `68d10b19`** (squash), verified by content on `origin/main`,
+   never by ancestry. `main` now has **60 tests and ZERO live-config guards**. Merged through a RED
+   `tekton/devrc-pytests` on an explicit operator decision, with the two-arm discriminator recorded
+   on the PR: the named failure `TestARefusedWriteIsIndistinguishableFromAnAbsentOne...` passed on
+   BOTH arms (2.47 s branch / 2.76 s main) and lives in `test_subsystem_store_api.py`, which an
+   espanso-test deletion cannot reach — the store-api contention family. 🔴 `failed=2` named ONE
+   test, so the second is unattributed (devrc#943); one of two accounted for is not the gate
+   accounted for. ~~Decide #1265: merge or close.~~ 🔴 The urgency is GONE — `main` is green via #1262, so this
    is now purely "do you want the remaining nine live guards dropped". Merging accepts that no
    automated check will ever again catch a snippet edit that costs attribution. Closing keeps the
    guards and accepts they will redden `main` on the next label reword. Files:
@@ -187,11 +216,32 @@ re-derived it. Read this correction first; the block under it is kept as the ret
    memory, and with it the `'ssh work'` ambiguity the rename removed), or leave it and use
    `rig`/`portable`. CLOSES WHEN: either is recorded here in writing.
    forcing: none — nothing external is broken; this is a preference about search words
-8. **Finish #1265's audit ladder or stop it on the stated criterion.** Three rounds, three sets of
+8. ✅ **DONE 2026-09-04 — ladder STOPPED DELIBERATELY at round 3, not because it went clean**, and
+   the rationale is on the PR so a reader can tell the two apart. Criterion met: no 🔴; no blast
+   radius past "a comment is inaccurate" (round 3 confirmed the PR changed **0 executable lines**);
+   recurring shape swept at every site found, including two my own sweeps missed by being scoped to
+   `scripts/` and to test NAMES. ~~Finish #1265's audit ladder or stop it on the stated criterion.~~ Three rounds, three sets of
    findings, all now comment-accuracy in scaffolding rather than behaviour. If round 4 returns only
    prose nits, stop on the criterion and record what is left open rather than grinding.
    CLOSES WHEN: a round returns no findings, or a stop is recorded on the PR with its rationale.
    forcing: none
+9. 🔴 **#1256 IS OPEN AND `main`'s SKILL-CHAIN DOC IS STALE — this is the arc's own defect, live.**
+   `claudedocs/handoff-skill-chain-usage-audit.md` on `origin/main` still says #1219 is
+   *"OPEN as of 2026-09-01"* (it merged 09-02) and still carries the pre-#1219 partition
+   (123 of 256 disk-backed; the truth is 25 of 270). The correction exists ONLY in unmerged
+   **devrc#1256** (head `10a01687`, branch `docs/handoff-skill-chain-post-1219`). Verify with
+   `git -C ~/workspace/devrc show origin/main:claudedocs/handoff-skill-chain-usage-audit.md | grep -c 'RE-MEASURED 2026-09-02'`
+   → **0** today. NEEDS: forward-merge `main` (it is well behind), re-read the gate — its red was
+   diagnosed as INHERITED from a then-red `main`, and since `main`'s espanso failure is fixed that
+   theory is now TESTABLE rather than assumed — and round 2 of its ladder, which never ran.
+   IN FLIGHT: devrc#1256. CLOSES WHEN: #1256 merges and that grep returns non-zero.
+   forcing: regression — a doc read as authoritative at session start asserts a superseded state
+10. **Decide the `:ssh*` search words** — the corrected version of old rank 7, kept separate because
+   it is a preference, not a repair. `'ssh work nebula'` matches NOTHING and `'ssh work'` yields the
+   LAN snippet alone, because the rename dropped `ssh`/`workbench`/`wb`. Re-adding them restores the
+   old muscle memory AND re-creates the `'ssh work'` two-row ambiguity the rename removed. File:
+   `nix/home.nix`, the four `:ssh*` records. CLOSES WHEN: either choice is recorded in this doc.
+   forcing: none — nothing external is broken
 
 ## Gotchas / decisions / dead-ends
 
