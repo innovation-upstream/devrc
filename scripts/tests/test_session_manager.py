@@ -12534,6 +12534,43 @@ def test_the_probe_is_ONE_batched_call_per_host_over_every_unique_path():
     assert rep["hosts"]["laptop"]["repos_paths"] == 1
 
 
+def test_the_probe_gets_its_OWN_timeout_budget_not_the_tmux_one():
+    """🔴 FOUND BY A MUTATION SWEEP, WHICH THIS GUARD DID NOT PREVIOUSLY COVER.
+    Replacing `timeout=REPO_PROBE_TIMEOUT` with `timeout=None` SURVIVED a fully
+    green suite: `run_tmux` then falls back to `SSH_TIMEOUT`/`LOCAL_TIMEOUT`, so
+    the probe is still bounded — by the budget sized for ONE `tmux list-panes`.
+
+    That is not a cosmetic difference. This call fans out over every unique path
+    on a host and each `git` is bounded at 3s by the script itself, so on a box
+    with ~93 windows the 5s local budget is reached long before the answer is.
+    The failure mode is silent in exactly the wrong direction: the host times
+    out, goes `repos_measured: false`, and every row loses its repo — a real
+    measurement replaced by an unmeasured one because of a constant.
+
+    Pinned as a RELATIONSHIP (`> SSH_TIMEOUT`), not as a literal, so tuning the
+    number does not require editing a test that would then pin nothing.
+    """
+    seen = []
+    inner = make_runner()
+
+    def recording(argv, timeout):
+        seen.append((list(argv), timeout))
+        return inner(argv, timeout)
+
+    base_gather(runner=recording)
+    probes = [(a, t) for a, t in seen
+              if any(sm.REPO_PROBE_SENTINEL in x for x in a)]
+    assert len(probes) == 2, [a[:2] for a, _ in seen]
+    for argv, timeout in probes:
+        assert timeout == sm.REPO_PROBE_TIMEOUT, argv[:2]
+    # ...and the two tmux calls still get the ORDINARY budget, so this is a
+    # claim about the probe rather than about every call growing one.
+    panes = [(a, t) for a, t in seen if "list-panes" in " ".join(a)]
+    assert panes and all(t != sm.REPO_PROBE_TIMEOUT for _, t in panes)
+    # the budget is BIGGER than a single tmux call's, which is the whole point
+    assert sm.REPO_PROBE_TIMEOUT > sm.SSH_TIMEOUT > sm.LOCAL_TIMEOUT
+
+
 def test_no_repo_makes_ZERO_probe_calls():
     """The flag is the cost control, so it must remove the round trip — not
     merely discard the answer."""
