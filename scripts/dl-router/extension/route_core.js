@@ -212,11 +212,72 @@ export function discordAliasKey(channelId) {
 
 // Discord serves one attachment from two hosts: the resizing proxy goes in the
 // <img src>, downscaled to whatever the client asked for and usually
-// re-encoded to webp, while the original sits on the wrapping <a href>. So
-// `info.srcUrl` on an image names A THUMBNAIL, not the file that was posted.
+// re-encoded to webp, while the original is what the message's own
+// cdn.discordapp.com anchor points at. So `info.srcUrl` on an image names A
+// THUMBNAIL, not the file that was posted.
 // (A <video> is unaffected -- its src is already the origin.)
+//
+// THAT ANCHOR IS A SIBLING, NOT AN ANCESTOR -- so Chrome never hands it to
+// us. MEASURED 2026-09-03 on 3 image attachments across 2 channels and 2
+// message shapes (single image, mosaic): the <img> sits under
+// `div[role=button].clickableWrapper`, and the number of ancestor <a> elements
+// between it and the message was 0 of 3, every time. The origin anchor exists
+// in the same message but nine levels away. `info.linkUrl` is populated ONLY
+// from an ancestor link, so on a Discord image right-click it is absent and
+// `preferOriginalUrl` can never reach its swap -- see the note there.
 const DISCORD_PREVIEW_HOST = "media.discordapp.net";
 const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
+
+// The proxy's resize knobs. Everything else on the URL -- notably the
+// `ex`/`is`/`hm` signature -- is carried across unchanged, because the
+// signature is what authorises the fetch.
+//
+// The empty-named key is real, not defensive: a live proxy URL carried one
+// (Discord emits a stray `&`), and it was in the rewrite that MEASURED 206.
+// Dropping it keeps this function's output byte-identical to what was probed.
+const DISCORD_PREVIEW_RESIZE_PARAMS = ["format", "width", "height", "quality", ""];
+
+/**
+ * The original-quality URL for a Discord PROXY attachment url, else the url
+ * unchanged.
+ *
+ * WHY A REWRITE AND NOT A DOM READ. The origin URL is present on the page, but
+ * only on a sibling anchor the context menu cannot see (above). Reaching it
+ * would need a content script on discord.com keyed to Discord's hashed class
+ * names, which rotate every deploy. Rewriting needs neither.
+ *
+ * THE SIGNATURE IS NOT HOST-BOUND -- this is the measurement the rewrite
+ * rests on, and an earlier session eliminated this whole approach by assuming
+ * the opposite. MEASURED 2026-09-03, from the page context of a live Discord
+ * tab, with both controls:
+ *
+ *   positive control  the message's own cdn anchor .............. 206
+ *   under test        proxy url, host swapped, resize dropped ... 206
+ *   negative control  the same url with `ex`/`is`/`hm` removed ... network error
+ *
+ * The `ex`/`is`/`hm` VALUES were byte-identical between the proxy url and the
+ * cdn anchor for the same asset, so the swap carries a signature that is still
+ * valid. The negative control failed at the network layer rather than with a
+ * readable 403 -- cross-origin, so a non-CORS response is opaque -- which is
+ * enough to discriminate, which is what a control has to do.
+ *
+ * NARROW ON PURPOSE, same discipline as `preferOriginalUrl`: an avatar or an
+ * emoji is served from the same proxy host and must come back untouched, so
+ * this rewrites only what `discordChannelId` recognises as an attachment.
+ */
+export function originalFromPreview(url) {
+  if (hostOf(url) !== DISCORD_PREVIEW_HOST) return url;
+  if (!discordChannelId(url)) return url;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  parsed.host = DISCORD_ORIGIN_HOST;
+  for (const key of DISCORD_PREVIEW_RESIZE_PARAMS) parsed.searchParams.delete(key);
+  return parsed.toString();
+}
 
 /**
  * The stable ledger identity of a Discord attachment, else "".
@@ -306,28 +367,43 @@ export function ledgerSourceKey(url) {
  * URL cannot be read for pixel size -- so the narrow rule stands until a real
  * instance turns up.
  *
- * NOT OBSERVABLE: nothing records whether this ever fires. The extension has
- * no logging facility and inventing one is out of scope here, so the next
- * reader cannot answer "is this a no-op in production?" from data. Say so
- * rather than implying it has been seen to work.
+ * THE `linkUrl` PATH IS DEAD ON DISCORD ITSELF, and the fallback is what
+ * actually runs. MEASURED 2026-09-03 (see DISCORD_PREVIEW_HOST above): a
+ * Discord image attachment has NO ancestor <a>, so `info.linkUrl` is absent
+ * and every real right-click lands on the `!linkUrl` branch. The swap is kept
+ * because it is still correct wherever a browser does supply a link -- but it
+ * is no longer what makes this function work, so nothing here should be read
+ * as evidence the swap has ever fired.
+ *
+ * Every no-swap exit therefore returns `originalFromPreview(srcUrl)` rather
+ * than `srcUrl`: on a proxy attachment that IS the original, and on anything
+ * else it is `srcUrl` unchanged. That includes the last line's mismatched-path
+ * case, which is the live mosaic shape -- a multi-image message, where the
+ * anchor the menu might offer belongs to a DIFFERENT image than the one
+ * clicked, and the rewrite of the clicked image is strictly better than
+ * handing back its thumbnail.
  */
 export function preferOriginalUrl(srcUrl, linkUrl) {
   if (!srcUrl) return linkUrl || "";
-  if (!linkUrl) return srcUrl;
+  if (!linkUrl) return originalFromPreview(srcUrl);
   if (hostOf(srcUrl) !== DISCORD_PREVIEW_HOST) return srcUrl;
-  if (hostOf(linkUrl) !== DISCORD_ORIGIN_HOST) return srcUrl;
+  if (hostOf(linkUrl) !== DISCORD_ORIGIN_HOST) return originalFromPreview(srcUrl);
   // Both must be attachments, not just Discord-hosted: an avatar or an emoji
   // shares the hosts and must never be swapped for something else.
-  if (!discordChannelId(srcUrl) || !discordChannelId(linkUrl)) return srcUrl;
+  // `originalFromPreview` enforces the same rule on its own input, so an
+  // avatar still comes back untouched here.
+  if (!discordChannelId(srcUrl) || !discordChannelId(linkUrl)) {
+    return originalFromPreview(srcUrl);
+  }
   let src;
   let link;
   try {
     src = new URL(srcUrl);
     link = new URL(linkUrl);
   } catch {
-    return srcUrl;
+    return originalFromPreview(srcUrl);
   }
-  return src.pathname === link.pathname ? linkUrl : srcUrl;
+  return src.pathname === link.pathname ? linkUrl : originalFromPreview(srcUrl);
 }
 
 /**

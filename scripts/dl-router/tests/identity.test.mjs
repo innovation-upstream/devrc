@@ -11,7 +11,8 @@ import {
   carryReferrer, discordAliasKey, discordChannelId, discordSourceKey, hostOf,
   identitySignals,
   kindOf,
-  localContext, localDecide, preferOriginalUrl, subjectPhrases, threadAliasKey,
+  localContext, localDecide, originalFromPreview, preferOriginalUrl,
+  subjectPhrases, threadAliasKey,
   threadSlug,
   titleSubject,
 } from "../extension/route_core.js";
@@ -169,9 +170,15 @@ test("a proxy thumbnail is swapped for the original behind it", () => {
 test("a link to a DIFFERENT asset is never substituted", () => {
   // The whole point of comparing paths: a link that merely wraps an image is
   // not evidence that it is the same thing.
+  //
+  // The result is the CLICKED image's own original, not the link's asset and
+  // not the clicked thumbnail either. This is the live mosaic shape -- a
+  // multi-image message, where the only anchor on offer belongs to a sibling
+  // image -- so `z.png` must not win, and `a.png`'s thumbnail is not the best
+  // answer available for `a.png`.
   const elsewhere
     = `https://cdn.discordapp.com/attachments/${CHANNEL}/222222222222222222/z.png`;
-  assert.equal(preferOriginalUrl(PREVIEW, elsewhere), PREVIEW);
+  assert.equal(preferOriginalUrl(PREVIEW, elsewhere), ORIGINAL);
 });
 
 test("a non-Discord pair is left exactly alone", () => {
@@ -193,8 +200,62 @@ test("a video's own src survives -- there is nothing better to swap to", () => {
 
 test("either URL missing degrades to the other, never to empty", () => {
   assert.equal(preferOriginalUrl("", ORIGINAL), ORIGINAL);
-  assert.equal(preferOriginalUrl(PREVIEW, ""), PREVIEW);
+  // No link: the rewrite is the whole answer, and it is the ORIGINAL. This
+  // assertion used to read `PREVIEW`, which was correct about the code and
+  // wrong about production -- see the next block.
+  assert.equal(preferOriginalUrl(PREVIEW, ""), ORIGINAL);
   assert.equal(preferOriginalUrl("", ""), "");
+});
+
+// --- the seam: Chrome never supplies `linkUrl` on a Discord image ----------- //
+// MEASURED 2026-09-03 against the live client, 3 attachments / 2 channels / 2
+// message shapes: an image attachment has ZERO ancestor <a> elements, so
+// `info.linkUrl` is absent on every real right-click and the swap above cannot
+// fire. These pin the branch that ACTUALLY runs. Red before the rewrite
+// landed: the pre-change function returned `srcUrl` here, i.e. the thumbnail.
+
+test("with no link at all, a proxy attachment still yields the original", () => {
+  assert.equal(
+    preferOriginalUrl(`${PREVIEW}?ex=1&is=2&hm=3&format=webp&width=550&height=733`
+      + "&quality=lossless", ""),
+    `${ORIGINAL}?ex=1&is=2&hm=3`);
+});
+
+test("the signature is carried across the host swap, the resize knobs are not",
+  () => {
+    // Not cosmetic: `ex`/`is`/`hm` authorise the fetch. Measured identical on
+    // both hosts for one asset; stripping them was the negative control and it
+    // failed to load.
+    const out = new URL(originalFromPreview(
+      `${PREVIEW}?ex=aa&is=bb&hm=cc&format=webp&width=550`));
+    assert.equal(out.host, "cdn.discordapp.com");
+    assert.deepEqual([...out.searchParams.keys()].sort(), ["ex", "hm", "is"]);
+    assert.equal(out.searchParams.get("hm"), "cc");
+  });
+
+test("a stray empty-named parameter is dropped too", () => {
+  // A live proxy URL carried one (Discord emits a bare `&`). The measured
+  // rewrite dropped it, so this keeps the output byte-identical to what was
+  // probed rather than merely equivalent.
+  assert.equal(originalFromPreview(`${PREVIEW}?&ex=1&width=550`),
+    `${ORIGINAL}?ex=1`);
+});
+
+test("an avatar with no link is left alone -- the guard is REACHABLE", () => {
+  // The rewrite must not fire on every proxy-host URL, and this case reaches
+  // the guard by a path no earlier check rejects: `linkUrl` absent, proxy
+  // host, but not an attachment.
+  const av = `https://media.discordapp.net/avatars/${CHANNEL}/a.png?size=128`;
+  assert.equal(preferOriginalUrl(av, ""), av);
+  assert.equal(originalFromPreview(av), av);
+});
+
+test("originalFromPreview passes through anything it does not own", () => {
+  assert.equal(originalFromPreview("https://example-site.test/a.png?width=1"),
+    "https://example-site.test/a.png?width=1");
+  assert.equal(originalFromPreview(ORIGINAL), ORIGINAL);
+  assert.equal(originalFromPreview("not a url"), "not a url");
+  assert.equal(originalFromPreview(""), "");
 });
 
 test("a Discord attachment yields a site-scoped channel identity", () => {

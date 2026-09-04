@@ -536,6 +536,31 @@ test("the menu saves the original, not the proxy thumbnail in the src", async ()
   assert.deepEqual(calls.downloads[0], { url: `${original}?ex=1&is=2&hm=3` });
 });
 
+test("the menu saves the original even when Chrome offers NO link", async () => {
+  // THE PRODUCTION PATH, and the one no test owned. MEASURED 2026-09-03: a
+  // Discord image attachment has no ancestor <a>, so `linkUrl` is absent on
+  // every real right-click -- the test above supplies one and therefore only
+  // ever exercised a branch the live client cannot reach. Both suites stayed
+  // green while the shipped feature was inert.
+  //
+  // Asserts the POSITIVE half (which url was downloaded), not merely that
+  // something happened: a menu test that only counts is vacuous, and this file
+  // has been bitten by that twice.
+  reset();
+  const ch = "119283746551234567";
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    mediaType: "image",
+    srcUrl: `https://media.discordapp.net/attachments/${ch}`
+      + "/998877665544332211/a.png?ex=1&is=2&hm=3&format=webp&width=550",
+    pageUrl: "https://discord.com/channels/1/2",
+  }, {});
+  assert.deepEqual(calls.downloads[0], {
+    url: `https://cdn.discordapp.com/attachments/${ch}`
+      + "/998877665544332211/a.png?ex=1&is=2&hm=3",
+  });
+});
+
 test("a Discord video is downloaded directly, never handed to yt-dlp", async () => {
   // `mediaType === "video"` exists for players whose src is a `blob:`. A CDN
   // attachment is a direct file, so that clause would send yt-dlp at
