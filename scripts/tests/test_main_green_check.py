@@ -349,9 +349,19 @@ def test_a_CORRUPT_streak_file_cannot_make_the_guards_FALL_THROUGH(world):
 # bash evaluates `$(( + 1 ))` as unary plus == 1 (measured). So deleting the
 # `case` sanitiser SURVIVED a fully green suite even with the counter asserted.
 # A corrupt value cannot expect anything BUT 1 (corrupt -> 0 -> 0+1), so the
-# second discriminator is STDERR: the broken path emits bash's own
-# `arithmetic syntax error` / `value too great for base`, the fixed path is
-# silent. That is the mechanism itself, not a proxy for it.
+# second discriminator is STDERR — but it is the SILENCE, not the wording.
+# 🔴 THE FIRST ATTEMPT MATCHED BASH'S MESSAGE TEXT, AND THAT IS A SPELLED GUARD.
+# `arithmetic syntax error` is bash 5.3's English phrasing: 5.2 says `syntax
+# error in expression` (no "arithmetic"), and the message is TRANSLATED —
+# `Arithmetischer Syntaxfehler`, `erreur de syntaxe arithmetique`. MEASURED: with
+# the sanitiser deleted, the suite went 1 failed / 39 passed under en_US and
+# **40 passed under LC_ALL=de_DE.UTF-8**, i.e. a nixpkgs bash bump or a
+# contributor's locale silently restores the exact hole this test exists to
+# close. It also matched only 1 of the 7 rows (`  5` emits a THIRD message,
+# `10#: invalid integer constant`).
+# The fixed path writes NOTHING to stderr for any corrupt shape — measured, 0
+# bytes on all of them — so asserting emptiness is language-independent,
+# version-independent, and strictly stronger. Assert the STATE, never a word.
 CORRUPT_STREAKS = [
     ("1 2", 1),                      # internal space -> corrupt -> 0, so 0+1
     ("08", 9),                       # ALL DIGITS, but octal to bash -> must be 8
@@ -393,10 +403,10 @@ def test_a_CORRUPT_streak_cannot_make_the_guards_FALL_THROUGH(world, corrupt, ex
     assert "GREEN" not in r.stdout, (
         "streak %r produced a GREEN for a tree that was never fetched:\n%s"
         % (corrupt, r.stdout))
-    assert not re.search(r"arithmetic syntax error|value too great for base",
-                         r.stderr), (
-        "streak %r reached bash's arithmetic evaluator uncoerced — the sanitiser "
-        "did not run or did not cover this shape:\n%s" % (corrupt, r.stderr))
+    assert r.stderr == "", (
+        "streak %r produced stderr output. The sanitised path is SILENT for every "
+        "corrupt shape, so anything here means the value reached bash's "
+        "arithmetic evaluator uncoerced:\n%s" % (corrupt, r.stderr))
     got = (world["cache"] / "blind-streak").read_text().strip()
     assert got == str(expected), (
         "streak %r was read as %r, expected %r — the sanitiser did not coerce "
@@ -432,7 +442,9 @@ def test_repeated_CONTENTION_does_not_report_GREEN_forever(world):
         "expected the quiet ladder rung (11), got %d — contention must not jump "
         "straight to the DND-defeating toast:\n%s"
         % (second.returncode, second.stdout))
-    assert (world["cache"] / "contention-streak").read_text().strip() == "2"
+    counter = world["cache"] / "contention-streak"
+    assert counter.exists(), "the contention counter was never written"
+    assert counter.read_text().strip() == "2"
     assert _calls(world) == [], "sanity: the gate never ran"
 
 
@@ -486,9 +498,9 @@ def test_help_prints_the_header_and_REFUSES_if_it_cannot_find_the_end(world):
     b = subprocess.run(["bash", str(broken), "--help"], capture_output=True,
                        text=True, timeout=60, env={**os.environ,
                        "MAIN_GREEN_CACHE": str(world["tmp"] / "hc")})
-    assert b.returncode != RC_GREEN, (
-        "with the sentinel moved, --help printed %d lines and still exited 0"
-        % len(b.stdout.splitlines()))
+    assert b.returncode == RC_USAGE, (
+        "with the sentinel moved, --help should REFUSE with rc %d; got %d and "
+        "%d lines of output" % (RC_USAGE, b.returncode, len(b.stdout.splitlines())))
 
 
 def test_status_works_while_a_run_holds_the_lock(world):
