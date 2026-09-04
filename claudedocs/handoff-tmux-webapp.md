@@ -10,10 +10,15 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 ## Status
 
 
-🔴 **RANK 24 IS DONE — THE CONVERSATION HAPPENED, AND IT PRODUCED SIX NEW RANKS (25–30).**
-Ranks **25, 26, 27, 28 are IN FLIGHT** (two agents dispatched 2026-09-04, claims held); ranks
-**29 and 30 are deliberately NOT dispatched** — 29 arms a remote write surface and the operator
-asked to design it in conversation first.
+🔴 **RANK 24 IS DONE — THE CONVERSATION HAPPENED, AND IT PRODUCED SEVEN NEW RANKS (25–31).**
+Ranks **25, 26, 27, 28 are IN FLIGHT** (two agents dispatched 2026-09-04, claims held). Ranks
+**29, 30, 31 are DESIGNED BUT NOT DISPATCHED** — they all depend on the same missing host-side
+write channel, and the operator settled its design in conversation on 2026-09-04 rather than
+having it inferred. **Read 29's decision block before building any of the three.**
+🔴 **RANK 27 CHANGED MID-FLIGHT AND THE AGENT WAS TOLD.** The operator answered a question about
+the WRITE path by redirecting it to the READ path: *"detect that and retire the question so there
+is never a stale question visible."* That is a display-correctness guarantee, and it moved work
+from 29 into 27. It does **not** eliminate 29's write-time race — see 29(b).
 🔴 **READ RANK 29 BEFORE TOUCHING ANYTHING THAT WRITES TO A PANE.** "Add a reply box" is not a UI
 item: `requireTerminalToken` guards **zero** routes, `CLAWGATE_TERMINAL_TOKEN` is **unset** (the pod
 says so at boot), and the host→pod channel is **push-only** — three missing layers, measured.
@@ -902,8 +907,24 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     **(b) The card body is clipped by `max-h-32 overflow-hidden` with no expand control** — long
     question bodies truncate with no affordance, which is exactly the "see the full context"
     complaint.
+    🔴 **THE OPERATOR RAISED THE BAR MID-FLIGHT, AND IT IS A DIFFERENT KIND OF REQUIREMENT.**
+    Verbatim: *"we need to detect that and retire the question so there is never a stale question
+    visible to the user."* That is a **display-correctness guarantee**, not a background tidy-up —
+    "it resolves eventually" does not satisfy it. Whoever closes this must state **which window of
+    staleness can still be visible**, because there will be one.
+    ⚠ **This answer arrived in response to a question about the WRITE path** (what should happen if
+    you reply to a pane that moved on) and the operator redirected it to the READ path instead —
+    retire the question rather than guard the write. That is the better fix and it relocates the
+    work from rank 29 to here. The write-time race does not vanish, it only shrinks; see rank 29.
+    **Two independent signals, and they cover each other's blind spot — measured, not assumed:**
+    (1) **the session unblocked** — `AskUserQuestion` BLOCKS the session, so any later hook event
+    from that session id proves it is no longer waiting; blind to a dead session. (2) **the pane
+    moved on** — the 2-minute snapshot already carries pane content, so a pane no longer showing
+    the pending prompt is not awaiting an answer; works when hooks never fire, but its cadence
+    means the guarantee can never be absolute. Use both; name what each cannot see.
     Closing condition: (a) a question answered in the terminal stops appearing as blocked, by a
-    named mechanism, with a regression test watched RED at `origin/trunk`; (b) the full body is
+    named mechanism, with a regression test watched RED at `origin/trunk` — the reproducible red is
+    the 2026-09-02T19:46:19Z entry still rendering `blocked` two days later; (b) the full body is
     reachable from the card.
     forcing: none
 28. **Structured options on an attention entry.** Repo: `ZacxDev/homelab-infra`. IN FLIGHT —
@@ -951,9 +972,36 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     the future route is pre-ledgered. It labels itself an invariant guard rather than regression
     coverage — an honest model worth copying. **The live lesson it encodes:** a fail-closed wrapper
     that wraps zero routes passes every test, which is exactly today's state.
+    **DESIGN SETTLED 2026-09-04 — four operator decisions, each recorded with what it costs:**
+    🔴 **(a) The reply SUBMITS — clawgate presses Enter.** Chosen over type-only with the tradeoff
+    stated: type-only is strictly safer (a misdirected write sits there visibly instead of running)
+    but makes remote answering pointless, since you would have to be at the machine anyway. **So a
+    misdirected write EXECUTES.** That is the cost, accepted deliberately, and it is why (b) matters.
+    🔴 **(b) Staleness is handled by RETIRING THE QUESTION, not by guarding the write — see rank
+    27.** The operator redirected this from the write path to the read path. ⚠ **It shrinks the
+    race, it does not remove it:** the pane signal has a 2-minute cadence, so a question can be
+    visible and answerable for up to one snapshot interval after the pane moved on. **Combined with
+    (a), that window is one in which a submitted reply executes into a pane that has moved on.**
+    A cheap write-time guard is therefore still warranted even though the operator's fix is
+    elsewhere — do not read "retire the question" as licence to skip it.
+    🔴 **(c) Full audit log INCLUDING the text sent.** Timestamp, target host/pane, originating
+    attention entry, exact text. Chosen over metadata-only so "what did that write actually do" is
+    answerable after the fact. ⚠ **Cost, stated at decision time:** replies you type may contain
+    secrets, so **this log is itself sensitive and needs credential-grade handling** — retention,
+    access, and never in a public repo, a fixture, or a PR body. Redaction-on-secret-shapes was
+    offered and declined, correctly: it fails silently and stores a missed secret believing it was
+    scrubbed.
+    🔴 **(d) Free text into ANY pane, unrestricted** — see the paragraph above. Unchanged.
+    ⚠ **Provisioning `CLAWGATE_TERMINAL_TOKEN` is the step that ARMS all of this, and it is
+    separable from building it.** The route can be built, merged and deployed while the surface
+    stays `DISABLED (fail-closed)`; arming is then one secret away and reversible by removing it.
+    Prefer that ordering — it lets the write path be reviewed and audited before it can execute
+    anything, and a boot log line states which state the server is in, unconditionally, in both
+    directions.
     Closing condition: a reply typed in the web UI appears in the target pane on the target host,
     verified end to end against the live pod — an API 200 is NOT the closing condition — with the
-    write route provably behind `requireTerminalToken` via the existing ledger.
+    write route provably behind `requireTerminalToken` via the existing ledger, and the write
+    recorded in the audit log.
     forcing: user — the operator asked for it; held only for a design conversation, not deprioritised.
 30. **The reply UI component + questions-only attention-first ordering.** Repo:
     `ZacxDev/homelab-infra`. **NOT STARTED** — depends on 28 (structured options) and 29 (the write
@@ -966,6 +1014,33 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     Closing condition: a question is answered from each of the three mounts and the entry resolves
     as a consequence, verified live.
     forcing: none
+31. **Start a new Claude Code session on a host, from clawgate.** Repo: `ZacxDev/homelab-infra`
+    (+ the host-side agent from rank 29). **NOT STARTED — opened by the operator 2026-09-04.**
+    🔴 **THIS IS THE SAME CHANNEL AS RANK 29, NOT A SECOND EFFORT — which is why it is cheap, and
+    also why it is not safe until 29 is.** Measured: clawgate spawns agents as **Kubernetes pods**
+    via an embedded kubeclaw Helm chart (`internal/agents/helm.go`, `embed.go`); **nothing in the
+    codebase touches a host tmux server.** The only tmux write anywhere is `internal/ui/
+    attention.go:196` assembling a `tmux switch-client` string for a CLIPBOARD button. So a host
+    tmux `new-window` needs the rank 29 transport and nothing else new at the transport layer —
+    the doc's auth section already groups `send-keys`, `kill-*` and `new-*` behind the same
+    fail-closed wrapper, and `terminalSurfacePrefixes` already covers the prefix.
+    🔴 **OPERATOR DECISION: it creates a window AND launches Claude Code with an initial prompt** —
+    pick host, project/cwd, type a prompt, get a working session. Chosen over a bare shell, which
+    was judged near-useless from a phone. **It composes with ranks 26 and 30:** a session started
+    this way is immediately watchable in the chat view and answerable through the reply component.
+    ⚠ **Do not confuse this with the agent-pod path.** clawgate already provisions agent pods, and
+    `MEMORY.md` records that task/agent dispatch defaults to deepseek via `CLAWGATE_AGENT_MODEL`.
+    This item is deliberately the OTHER thing — a real tmux session on a real host, because that is
+    where the operator works. Neither replaces the other.
+    ⚠ **Untouched questions, named so they are not silently decided by whoever builds it:** which
+    host and how it is chosen; new window in an existing session vs a brand-new tmux session; how
+    the cwd/project is picked and validated; what happens when the target path does not exist; and
+    whether a spawn is rate-limited (a spawn route on an unauthenticated LAN NodePort is a fork
+    bomb primitive if it is not).
+    Closing condition: a session started from the web UI appears on the chosen host, running Claude
+    Code on the given prompt, and is visible in the tmux read model and the chat view — verified
+    live on the pod, not from a green test.
+    forcing: user — the operator asked for it explicitly on 2026-09-04.
 
 ## Open investigations — live diagnosis state
 
