@@ -184,6 +184,44 @@ def bridge(tmp_path):
         srv.server_close()
 
 
+def _write_agent_stub(path):
+    """THE stub `browser-agent`, in ONE place.
+
+    🔴 Both callers must use this function, never a second copy: the drift-guard
+    `test_the_stub_agent_agrees_with_the_real_wrapper_on_what_it_refuses` is only
+    worth anything while it checks the SAME stub the forwarding tests run against.
+    Two copies and the guard certifies a stub nothing uses.
+
+    write_exec, NOT a hand-written shebang: `#!/usr/bin/env bash` does not exist
+    in the nix build sandbox, so such a stub is green here and ENOENT in the tier
+    the merge gates on.
+    """
+    mockbin.write_exec(path, r'''goal=""; seen=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --instance|--allow-domains|--deny-domains|--steps|--timeout)
+        f="$1"; shift
+        [ $# -ge 1 ] || { printf 'browser-agent: usage: %s <value>\n' "$f" >&2; exit 2; } ;;
+    --instance=*|--allow-domains=*|--deny-domains=*|--steps=*|--timeout=*) : ;;
+    --dry-run) : ;;
+    -h|--help) exit 0 ;;
+    --) shift
+        while [ $# -gt 0 ]; do
+          [ "$seen" -eq 0 ] || { printf 'browser-agent: only one goal is accepted (got extra: %s)\n' "$1" >&2; exit 2; }
+          goal="$1"; seen=1; shift
+        done
+        break ;;
+    -*) printf 'browser-agent: unknown flag: %s\n' "$1" >&2; exit 2 ;;
+    *) [ "$seen" -eq 0 ] || { printf 'browser-agent: only one goal is accepted (got extra: %s)\n' "$1" >&2; exit 2; }
+       goal="$1"; seen=1 ;;
+  esac
+  shift
+done
+[ -n "$goal" ] || { printf 'browser-agent: a goal is required: browser agent "<goal>"\n' >&2; exit 2; }
+printf 'STUB_GOAL=[%s]\n' "$goal"
+''')
+
+
 def _run_beside_stub_agent(bridge, tmp_path, tag, *args):
     """Run a COPY of the real CLI beside a STUB `browser-agent` that ECHOES the
     goal it was handed, and refuses exactly as the real one does when handed none.
@@ -217,36 +255,128 @@ def _run_beside_stub_agent(bridge, tmp_path, tag, *args):
                                       encoding="utf-8")
     # write_exec, NOT a hand-written shebang — see the note on the BB_* stubs below:
     # `#!/usr/bin/env bash` does not exist in the nix build sandbox.
-    # 🔴 The stub MIRRORS the real grammar's REFUSALS, it does not just find a
-    # positional. A stub that is more permissive than the wrapper masks exactly the
-    # regression this pair exists to catch: an argv the CLI forwards, the stub
-    # accepts, and the REAL wrapper rejects. The three divergences an audit found
-    # (2026-09-04) were `--*` swallowing unknown flags, `-h`/`-x` becoming goals,
-    # and a second positional silently last-winning — all now refusals, as in
-    # browser-agent's own parse loop.
-    mockbin.write_exec(stub_dir / "browser-agent", r'''goal=""; seen=0
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --instance|--allow-domains|--deny-domains|--steps|--timeout) shift ;;
-    --dry-run) : ;;
-    --) shift
-        while [ $# -gt 0 ]; do
-          [ "$seen" -eq 0 ] || { printf 'browser-agent: only one goal is accepted (got extra: %s)\n' "$1" >&2; exit 2; }
-          goal="$1"; seen=1; shift
-        done
-        break ;;
-    -*) printf 'browser-agent: unknown flag: %s\n' "$1" >&2; exit 2 ;;
-    *) [ "$seen" -eq 0 ] || { printf 'browser-agent: only one goal is accepted (got extra: %s)\n' "$1" >&2; exit 2; }
-       goal="$1"; seen=1 ;;
-  esac
-  shift
-done
-[ -n "$goal" ] || { printf 'browser-agent: a goal is required: browser agent "<goal>"\n' >&2; exit 2; }
-printf 'STUB_GOAL=[%s]\n' "$goal"
-''')
+    # 🔴 The stub mirrors the real grammar's REFUSAL DECISIONS (which argv is
+    # accepted vs rc-2'd) — NOT its message text, which no assertion here reads.
+    # A stub that disagrees either way is a hazard: MORE permissive masks the
+    # regression this pair exists to catch (an argv the CLI forwards, the stub
+    # accepts, the real wrapper rejects); MORE strict invents a CLI regression
+    # that is not there, failing with "stopped forwarding its goal" when the
+    # wrapper would have been perfectly happy.
+    # Both directions were found by audit and are closed here. MEASURED
+    # 2026-09-04 against the real wrapper over the matrix in
+    # test_the_stub_agent_agrees_with_the_real_wrapper_on_what_it_refuses:
+    #   was too permissive — a value-taking flag in FINAL position (`g --steps`)
+    #     shifted past the end and returned rc 0; the real wrapper rc-2s
+    #     `usage: --steps N`. Now guarded with `[ $# -ge 1 ]`.
+    #   was too strict — the `--flag=value` equals forms and `-h`/`--help`, all
+    #     of which the real wrapper accepts (`-h` prints help and exits 0, above
+    #     its own `-*` arm), were rc-2'd as `unknown flag`.
+    _write_agent_stub(stub_dir / "browser-agent")
     return subprocess.run(["bash", str(stub_dir / "browser"), *args],
                           env=bridge.env_for_stub(), capture_output=True,
                           text=True, timeout=CLI_TIMEOUT_S)
+
+
+# `_run_beside_stub_agent`'s stub re-implements the wrapper's argv grammar by hand.
+# This is the drift-guard that keeps the two honest — see the audit note on the stub.
+_PARSE_REFUSALS = ("a goal is required", "only one goal is accepted",
+                   "unknown flag:", "usage: --", "--steps must be",
+                   "--timeout must be")
+
+# argv -> the decision BOTH grammars must reach. "accept" means the wrapper gets
+# PAST its parse loop (it then dies at the tool-set gate, which is not a parse
+# refusal); "refuse" means an rc-2 parse error; "help" means `-h`/`--help`, rc 0.
+_GRAMMAR_MATRIX = [
+    (["goal"],                    "accept"),
+    (["--dry-run", "goal"],       "accept"),
+    (["goal", "--dry-run"],       "accept"),
+    (["--instance", "main", "g"], "accept"),
+    (["--instance=x", "g"],       "accept"),
+    (["--steps=3", "g"],          "accept"),
+    (["--timeout=5", "g"],        "accept"),
+    (["--allow-domains=a.b", "g"], "accept"),
+    (["--", "-dashgoal"],         "accept"),
+    (["goal", "--steps"],         "refuse"),
+    (["goal", "--timeout"],       "refuse"),
+    (["goal", "--instance"],      "refuse"),
+    (["goal", "--allow-domains"], "refuse"),
+    (["--bogus", "g"],            "refuse"),
+    (["-x"],                      "refuse"),
+    (["g1", "g2"],                "refuse"),
+    (["--", "g1", "g2"],          "refuse"),
+    ([],                          "refuse"),
+    ([""],                        "refuse"),
+    (["-h"],                      "help"),
+    (["--help"],                  "help"),
+]
+
+
+def _decide(rc, err):
+    if rc == 0:
+        return "help"
+    if rc == 2 and any(m in err for m in _PARSE_REFUSALS):
+        return "refuse"
+    return "accept"          # got past the parse loop and died later
+
+
+@pytest.mark.parametrize("argv, expected", _GRAMMAR_MATRIX,
+                         ids=[" ".join(a) or "<empty>" for a, _ in _GRAMMAR_MATRIX])
+def test_the_stub_agent_agrees_with_the_real_wrapper_on_what_it_refuses(
+        argv, expected, tmp_path):
+    """DRIFT-GUARD: the stub's hand-written grammar must reach the SAME accept /
+    refuse decision as the real `browser-agent` for every argv here.
+
+    🔴 WHY THIS EXISTS. `_run_beside_stub_agent` replaces the real wrapper so the
+    two forwarding tests do not each cost a 90 s warm plus a 120 s model run. A
+    stub is only safe while it decides the same way, and an audit found it wrong
+    in BOTH directions at once — `g --steps` accepted where the wrapper rc-2s
+    `usage: --steps N`, and `--instance=x` / `-h` refused where the wrapper is
+    happy. Neither showed up as a failure: no existing test used those forms, so
+    the divergence was latent and a comment asserted parity that nothing checked.
+
+    Decisions, not messages: no assertion in this file reads the wrapper's
+    wording, so pinning text here would only invent a second thing to rot.
+
+    The real wrapper is driven with a stub opencode and a stub browser binary, so
+    an ACCEPTED argv gets past the parse loop and dies at the tool-set gate in
+    ~50 ms instead of warming and running a model. That post-parse failure is
+    exactly what "accept" means here.
+    """
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    mockbin.write_exec(stub_bin / "oc", "exit 0\n")
+    mockbin.write_exec(stub_bin / "br", "exit 9\n")
+    env = dict(os.environ)
+    env.update(
+        HOME=str(tmp_path),
+        BROWSER_AGENT_OPENCODE=str(stub_bin / "oc"),
+        BROWSER_AGENT_BROWSER_BIN=str(stub_bin / "br"),
+        BROWSER_AGENT_OPENCODE_CONFIG_DIR=str(tmp_path / "occfg"),
+        BROWSER_AGENT_WARM_TIMEOUT="2",
+    )
+    for k in ("BB_INSTANCE", "BB_TAB", "BB_FRAME"):
+        env.pop(k, None)
+    real = subprocess.run(["bash", str(BB / "browser-agent"), *argv], env=env,
+                          capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
+    real_decision = _decide(real.returncode, real.stderr)
+    assert real_decision == expected, (
+        f"the MATRIX is wrong about the real wrapper for {argv!r}: got "
+        f"{real_decision} (rc={real.returncode}) stderr={real.stderr[:200]!r}")
+
+    stub_dir = tmp_path / "stub"
+    stub_dir.mkdir()
+    (stub_dir / "browser").write_text(CLI.read_text(encoding="utf-8"),
+                                      encoding="utf-8")
+    _write_agent_stub(stub_dir / "browser-agent")
+    stub = subprocess.run(["bash", str(stub_dir / "browser-agent"), *argv],
+                          env=env, capture_output=True, text=True,
+                          timeout=CLI_TIMEOUT_S)
+    stub_decision = ("help" if stub.returncode == 0 and "STUB_GOAL" not in stub.stdout
+                     else "accept" if stub.returncode == 0 else "refuse")
+    assert stub_decision == real_decision, (
+        f"stub and real wrapper DISAGREE on {argv!r}: real={real_decision} "
+        f"(rc={real.returncode}, {real.stderr[:120]!r}) vs stub={stub_decision} "
+        f"(rc={stub.returncode}, {stub.stderr[:120]!r})")
 
 
 # --------------------------------------------------------------------------- #
