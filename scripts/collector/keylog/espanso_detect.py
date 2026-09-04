@@ -55,8 +55,10 @@ ESPANSO_SEARCH_WM_CLASS = ".espanso-wrapped"
 # 🔴 SEARCH_TERMS SERVE TWO CONSUMERS THAT WANT OPPOSITE THINGS, and this table
 # is where the conflict is resolved instead of being fought out in the config.
 # The espanso PICKER wants recall — every word that should list a row, listed on
-# every snippet it should list (see `_PICKER_ROWS` in the tests: ambiguity there
-# means "two rows", which is the feature). `_attribute` wants precision — one
+# every snippet it should list (ambiguity there means "two rows", which is the
+# feature; see `test_naming_tiebreak_does_not_reach_the_picker` and
+# `test_declared_owner_does_not_reach_the_picker`. The `_PICKER_ROWS` table this
+# used to name was removed 2026-09-03 with the live-config guards). `_attribute` wants precision — one
 # snippet, or nothing, so telemetry can name it. A term deliberately spelled on
 # two snippets for the picker's sake therefore has NO unique answer to read off
 # the config, and before this table the only way to give attribution one was to
@@ -351,6 +353,8 @@ class EspansoDetector:
         # six declared `search_terms` — ambiguous and unattributable, reddening
         # `test_live_existing_resolutions_not_made_ambiguous` on `main`. A
         # cosmetic reword must not shadow another snippet's declared route.
+        # 🔴 That guard was REMOVED 2026-09-03 (it re-broke on every snippet
+        # edit); this logic stays, but nothing tests it against the live config.
         #
         # This can only ever SHRINK the candidate set, so it cannot invent a
         # resolution or re-point a term that already resolves uniquely (that
