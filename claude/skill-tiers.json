@@ -114,6 +114,10 @@
       "tier": "B",
       "why": "invoked BY `/handoff`, which names it in its own body; its own description says 'rarely run directly', so no symptom needs to route to it"
     },
+    "syshealth": {
+      "tier": "B",
+      "why": "the ledger's tie-break decides it: a mis-route DEGRADES the answer here, it does not take a wrong action -- syshealth is report-only and cannot signal a process, so the worst case is the ad-hoc `ps` sweep that was happening anyway. Genuinely close, and the argument for A is real: the phrasing that produced this skill ('check zombie procs, mem and cpu hogs', 'check load', 'check runaway procs') is symptom-shaped, and name-only cannot catch it. Revisit if a sweep is ever asked for and missed -- promoting it needs an eviction in the same commit"
+    },
     "tekton": { "tier": "A" },
     "ux-audit-loops": {
       "tier": "B",

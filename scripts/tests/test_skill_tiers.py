@@ -83,20 +83,30 @@ MIN_SKILLS = 30
 # 36-entry total quoted in a 37-entry tree, and one contradicted the number the
 # same change reported to its reviewer.
 # --------------------------------------------------------------------------- #
-MEASURED_ENTRIES = 40
+MEASURED_ENTRIES = 41
 MEASURED_TIER_A_ENTRIES = 24
-MEASURED_TIER_A_CHARS = 8_567
+MEASURED_TIER_A_CHARS = 7_674
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 8_796
-# ...and what the same 40 entries would cost with every skill tier A. The
-# difference is what the ledger buys: 4,295 chars.
-MEASURED_ALL_TIER_A_CHARS = 13_091
+MEASURED_UNDER_LEDGER_CHARS = 7_915
+# ...and what the same 41 entries would cost with every skill tier A. The
+# difference is what the ledger buys: 4,548 chars.
+MEASURED_ALL_TIER_A_CHARS = 12_463
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
 #
 # The ceiling sits 254 chars above MEASURED_TIER_A_CHARS — less than the MEAN
-# tier-A entry, which is 8,567 / 24 = 357.0.
+# tier-A entry, which is 7,674 / 24 = 319.8.
+#
+# 🔴 LOWERED 8_821 -> 7_928 on 2026-09-04. `syshealth` (tier B) was added and
+# paid for by shrinking three tier-A entries that had NEVER FIRED in the whole
+# retained transcript corpus on either host — `window-triage` 507->126,
+# `initiatives` 389->128, `standup` 367->116. They keep their bodies and stay
+# /-invocable; only the always-on listing entry shrank. See the sibling comment
+# in `test_skill_descriptions.py` for the measurement and, more importantly, for
+# why a zero in that sweep is EVIDENCE and never a verdict: the same counter
+# reads 0 for `adoption-scan` (20,494 tool events) and for `repo-cos` (a weekly
+# timer read as email).
 #
 # ⚠ IT WAS LOWERED FROM 9,200 -> 8,935 -> 8,821 WHEN `cairn` LANDED, and the
 # lowering is the point rather than paperwork: `cairn` is tier B and cost this
@@ -135,7 +145,7 @@ MEASURED_ALL_TIER_A_CHARS = 13_091
 # LOWER it when you cut; do NOT raise it to make a new description fit. Demoting
 # one skill to tier B in claude/skill-tiers.json is a ONE-LINE edit and is the
 # intended move. The playbook is printed by the failing assertion below.
-TIER_A_CEILING_CHARS = 8_821
+TIER_A_CEILING_CHARS = 7_928
 
 # 🔴 Skills that must NEVER be tier B, pinned as a RELATIONSHIP rather than left
 # to review. Each one fires from a SYMPTOM Zach describes rather than from its own

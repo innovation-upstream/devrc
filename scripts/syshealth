@@ -1,0 +1,781 @@
+#!/usr/bin/env python3
+"""On-demand deep system inspection: zombies, CPU/mem hogs, runaways, load, swap.
+
+The COMPLEMENT to `scripts/cpu-monitor.sh`, not a duplicate of it. cpu-monitor is
+the always-on daemon: it samples every 30s, requires a condition to persist
+across consecutive samples, and fires desktop toasts with cooldowns and a daily
+cap. It answers "is something wrong right now, tell me unprompted". This answers
+"I think something is wrong, show me everything, once" — parent-tracked zombies,
+process-tree grouping, ages, and the identity of each offender. Different jobs;
+this one sends no notifications and writes no state.
+
+🔴 WHY A MINIMUM AGE EXISTS (`--min-age`, default 10s) — the whole reason this
+script is not just the four `ps` one-liners it replaces.
+------------------------------------------------------------------------------
+`ps`'s %CPU is not an instantaneous reading. It is cumulative CPU time divided
+by process ELAPSED time, averaged over the process's whole life. For a process
+that has existed for a fraction of a second that divisor is ~0, so the quotient
+is meaningless and enormous. Measured on this box 2026-09-03, from a manual
+sweep whose output is preserved in `claudedocs/handoff-syshealth-skill.md`:
+
+    3733770  400%  00:00  ps -eo pid,ppid,user,%cpu,etime,stat,cmd
+    3733669  240%  00:00  pgrep -o -f find /nix -xdev
+    3250873 1100%  00:00  ps aux --sort=-%cpu
+
+All three are the measurement itself, or its sibling, caught mid-exec. The
+1100% one IS the `ps` that produced the report. A human reading that output
+concluded there was a "runaway nix store scan" at 240% — there was no such
+thing; it was a 20-millisecond `pgrep`. That is the failure mode this guard
+removes: anything younger than `--min-age` cannot be a hog or a runaway,
+because its %CPU is division noise rather than a measurement. Ages are also
+printed beside every flagged row so the reader can see the divisor.
+
+The same reasoning is why the runaway rule needs BOTH a percentage and an age
+(`--runaway-age`, default 600s): a lifetime-average of 90% is only meaningful
+once the lifetime is long enough to average over.
+
+SELF-EXCLUSION. This process, its `ps` child and its ancestors are dropped from
+every section for the same reason — a diagnostic that reports itself as the
+problem is worse than no diagnostic. See `self_pids()`.
+
+Exit codes:
+  0  clean
+  1  warnings   — zombies, high load, hogs, runaways, swap pressure, failed units
+  2  critical   — a sustained runaway, or memory availability near exhaustion
+  3  usage error / could not measure
+
+Usage:
+  syshealth                 human-readable report
+  syshealth --json          machine-readable, same verdict
+  syshealth --systemd       add the failed-user-units section
+  syshealth --fds           add the open-file-descriptor section (walks /proc)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Defaults. Every one is overridable by flag; the env names mirror
+# cpu-monitor.sh's so a host that has already tuned one is not surprised by the
+# other disagreeing with it.
+# ---------------------------------------------------------------------------
+DEF_CPU_THRESHOLD = 50.0     # %CPU at or above which a process is a "hog"
+DEF_MEM_THRESHOLD = 1.0      # RSS in GiB at or above which a process is a "hog"
+DEF_RUNAWAY_PCT = 80.0       # %CPU for the runaway rule (age-gated, see below)
+DEF_RUNAWAY_AGE = 600        # seconds a runaway must have been alive
+DEF_MIN_AGE = 10             # seconds below which %CPU is division noise
+DEF_SWAP_WARN_PCT = 50.0     # swap used% at or above which we warn
+DEF_AVAIL_CRIT_PCT = 5.0     # MemAvailable below this % of MemTotal is critical
+CRIT_RUNAWAY_PCT = 200.0     # a runaway this hot...
+CRIT_RUNAWAY_AGE = 1800      # ...for this long is exit 2
+
+# Commands never to flag — expected heavy hitters whose CPU is not a problem.
+# Case-insensitive SUBSTRING match against the command. Comma-separated, the
+# same shape and the same default as cpu-monitor.sh's CPU_MON_IGNORE, so the two
+# tools can share one value in a service Environment= line.
+DEF_IGNORE = "anno,logd"
+
+# A parent needs at least this many flagged children before we collapse them
+# into one grouped row. Three is the point where the list starts hiding the
+# culprit: two pytest workers read fine individually, eight do not.
+GROUP_MIN_CHILDREN = 3
+
+KIB = 1024
+GIB = 1024 * 1024 * 1024
+
+# `args` goes LAST and every field before it is space-free, so a single
+# maxsplit=8 parse is unambiguous. `comm` is deliberately NOT requested: it can
+# itself contain spaces, which would make the split position depend on the data.
+PS_FORMAT = "pid=,ppid=,user=,pcpu=,pmem=,rss=,etimes=,stat=,args="
+PS_FIELDS = 9
+
+
+@dataclass(frozen=True)
+class Proc:
+    pid: int
+    ppid: int
+    user: str
+    pcpu: float
+    pmem: float
+    rss_kb: int
+    etimes: int          # elapsed seconds since start
+    stat: str
+    args: str
+
+    @property
+    def is_zombie(self) -> bool:
+        # The state letter is always first; what follows are modifier flags
+        # (`s` session leader, `l` multi-threaded, `+` foreground). A zombie can
+        # be "Z" or "Zs" — matching the whole string would miss the latter, and
+        # a substring match would false-positive on a future flag letter.
+        return self.stat[:1] == "Z"
+
+    @property
+    def rss_gib(self) -> float:
+        return (self.rss_kb * KIB) / GIB
+
+    @property
+    def comm(self) -> str:
+        """Short command name derived from args.
+
+        Derived rather than asked of `ps` because requesting `comm=` would
+        reintroduce the split ambiguity PS_FORMAT exists to avoid. A defunct
+        process has no argv, so `ps` renders it `[find] <defunct>` — strip the
+        decoration so the ignore-list and the report both see `find`.
+        """
+        first = self.args.split(" ", 1)[0] if self.args else ""
+        if first.startswith("[") and first.endswith("]"):
+            first = first[1:-1]
+        return os.path.basename(first) or first
+
+
+# ---------------------------------------------------------------------------
+# Parsing — pure, so the tests can drive every rule below from a fixture list
+# without stubbing a single binary.
+# ---------------------------------------------------------------------------
+def parse_ps(text: str) -> list[Proc]:
+    """Parse `ps -eo <PS_FORMAT>` output. Unparseable lines are skipped."""
+    procs: list[Proc] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, PS_FIELDS - 1)
+        if len(parts) < PS_FIELDS - 1:
+            continue
+        if len(parts) == PS_FIELDS - 1:
+            parts.append("")  # a zombie can have an empty args column
+        try:
+            procs.append(
+                Proc(
+                    pid=int(parts[0]),
+                    ppid=int(parts[1]),
+                    user=parts[2],
+                    pcpu=float(parts[3]),
+                    pmem=float(parts[4]),
+                    rss_kb=int(parts[5]),
+                    etimes=int(parts[6]),
+                    stat=parts[7],
+                    args=parts[8],
+                )
+            )
+        except ValueError:
+            continue  # a header row or a torn read, not a process
+    return procs
+
+
+def read_loadavg(proc_root: str = "/proc") -> tuple[float, float, float]:
+    parts = Path(proc_root, "loadavg").read_text().split()
+    return (float(parts[0]), float(parts[1]), float(parts[2]))
+
+
+def read_meminfo(proc_root: str = "/proc") -> dict[str, int]:
+    """Return /proc/meminfo as a dict of KiB values."""
+    out: dict[str, int] = {}
+    for line in Path(proc_root, "meminfo").read_text().splitlines():
+        key, _, rest = line.partition(":")
+        fields = rest.split()
+        if fields:
+            try:
+                out[key] = int(fields[0])
+            except ValueError:
+                continue
+    return out
+
+
+def read_uptime(proc_root: str = "/proc") -> float:
+    return float(Path(proc_root, "uptime").read_text().split()[0])
+
+
+# ---------------------------------------------------------------------------
+# Rules
+# ---------------------------------------------------------------------------
+def parse_ignore(spec: str) -> list[str]:
+    """Comma- or space-separated, lowercased, blanks dropped."""
+    return [t for t in spec.replace(",", " ").lower().split() if t]
+
+
+def is_ignored(proc: Proc, ignore: list[str]) -> bool:
+    hay = f"{proc.comm} {proc.args}".lower()
+    return any(tok in hay for tok in ignore)
+
+
+def self_pids(procs: list[Proc], mypid: int | None = None) -> set[int]:
+    """This process, anything it spawned, and its ancestor chain.
+
+    Without this the report indicts its own `ps` — see the module docstring.
+    The ancestor walk is bounded by the number of processes so a cycle in a
+    torn `ps` read cannot hang it.
+    """
+    mypid = os.getpid() if mypid is None else mypid
+    by_pid = {p.pid: p for p in procs}
+    out = {mypid}
+    # Descendants: in practice just the `ps` child, but a shell wrapper may add
+    # one more level, so walk until the set stops growing.
+    changed = True
+    while changed:
+        changed = False
+        for p in procs:
+            if p.ppid in out and p.pid not in out:
+                out.add(p.pid)
+                changed = True
+    # Ancestors: the shell and the agent that invoked us are not findings.
+    cur = by_pid.get(mypid)
+    seen = 0
+    while cur is not None and cur.ppid > 1 and seen < len(procs) + 1:
+        out.add(cur.ppid)
+        cur = by_pid.get(cur.ppid)
+        seen += 1
+    return out
+
+
+def eligible(procs: list[Proc], ignore: list[str], min_age: int,
+             mypid: int | None = None) -> list[Proc]:
+    """Processes whose %CPU is old enough to mean anything and that we may flag.
+
+    🔴 The min_age filter is the point of this script; see the module docstring.
+    It applies to the CPU/mem/runaway rules only — zombies are found separately
+    and are never age-gated, because a fresh zombie is still a zombie.
+    """
+    skip = self_pids(procs, mypid)
+    return [
+        p for p in procs
+        if p.pid not in skip
+        and p.etimes >= min_age
+        and not p.is_zombie
+        and not is_ignored(p, ignore)
+    ]
+
+
+def find_zombies(procs: list[Proc], mypid: int | None = None) -> list[dict]:
+    """Zombies, each resolved to its parent — the part `ps aux | awk '/Z/'` omits.
+
+    A zombie is not itself the problem: it is a dead child its PARENT has not
+    reaped. So the actionable identity is the parent's, and whether that parent
+    is still alive decides whether anything can be done at all. A zombie
+    reparented to pid 1 (`parent_alive` true, `parent_comm` systemd) is inert —
+    its real parent already died and init will collect it. A zombie whose
+    parent is a live long-running service is a bug in that service.
+    """
+    skip = self_pids(procs, mypid)
+    by_pid = {p.pid: p for p in procs}
+    out = []
+    for z in procs:
+        if not z.is_zombie or z.pid in skip:
+            continue
+        parent = by_pid.get(z.ppid)
+        out.append({
+            "pid": z.pid,
+            "comm": z.comm,
+            "user": z.user,
+            "age_sec": z.etimes,
+            "ppid": z.ppid,
+            "parent_comm": parent.comm if parent else None,
+            "parent_alive": parent is not None,
+            "parent_is_zombie": bool(parent and parent.is_zombie),
+            "reparented_to_init": z.ppid == 1,
+        })
+    return sorted(out, key=lambda d: -d["age_sec"])
+
+
+def group_zombies(zombies: list[dict],
+                  min_children: int = GROUP_MIN_CHILDREN) -> tuple[list[dict], list[dict]]:
+    """Collapse zombies sharing one un-reaping parent into a single finding.
+
+    Measured on this box 2026-09-04: 21 zombies, 18 of them under pid 2273825
+    (`sleep infinity`, a container's PID 1) and 3 under one other. That is TWO
+    findings, and the ungrouped list of 21 buries them — an earlier manual sweep
+    of the same box read the flat list and concluded the zombies were "children
+    of already-dead services", which is the opposite of true: a dead parent's
+    zombies get reparented and reaped, so a zombie that persists for days proves
+    its parent is ALIVE and not reaping. Grouping puts that parent on one line.
+    """
+    buckets: dict[int, list[dict]] = {}
+    for z in zombies:
+        buckets.setdefault(z["ppid"], []).append(z)
+    groups, single = [], []
+    for ppid, kids in buckets.items():
+        if len(kids) >= min_children:
+            k0 = kids[0]
+            groups.append({
+                "ppid": ppid,
+                "parent_comm": k0["parent_comm"],
+                "parent_alive": k0["parent_alive"],
+                "reparented_to_init": k0["reparented_to_init"],
+                "count": len(kids),
+                "oldest_age_sec": max(z["age_sec"] for z in kids),
+                "comms": sorted({z["comm"] for z in kids}),
+                "pids": sorted(z["pid"] for z in kids),
+            })
+        else:
+            single.extend(kids)
+    groups.sort(key=lambda g: -g["count"])
+    single.sort(key=lambda z: -z["age_sec"])
+    return groups, single
+
+
+def find_cpu_hogs(elig: list[Proc], threshold: float) -> list[Proc]:
+    return sorted([p for p in elig if p.pcpu >= threshold],
+                  key=lambda p: -p.pcpu)
+
+
+def find_mem_hogs(elig: list[Proc], threshold_gib: float) -> list[Proc]:
+    return sorted([p for p in elig if p.rss_gib >= threshold_gib],
+                  key=lambda p: -p.rss_kb)
+
+
+def find_runaways(elig: list[Proc], pct: float, min_age: int) -> list[Proc]:
+    """Sustained high CPU. BOTH conditions are required — see the docstring."""
+    return sorted([p for p in elig if p.pcpu >= pct and p.etimes >= min_age],
+                  key=lambda p: -p.pcpu)
+
+
+def is_critical_runaway(p: Proc) -> bool:
+    return p.pcpu >= CRIT_RUNAWAY_PCT and p.etimes >= CRIT_RUNAWAY_AGE
+
+
+def group_by_parent(flagged: list[Proc], procs: list[Proc],
+                    min_children: int = GROUP_MIN_CHILDREN) -> tuple[list[dict], list[Proc]]:
+    """Collapse siblings under a shared parent into one row.
+
+    Returns (groups, ungrouped). Eight pytest workers under one parent are one
+    finding, not eight; listing them individually pushes the actual culprit off
+    the top of the report. A parent with fewer than `min_children` flagged
+    children is left alone — grouping two rows into one hides more than it
+    reveals.
+    """
+    by_pid = {p.pid: p for p in procs}
+    buckets: dict[int, list[Proc]] = {}
+    for p in flagged:
+        buckets.setdefault(p.ppid, []).append(p)
+
+    groups, ungrouped = [], []
+    for ppid, kids in buckets.items():
+        if len(kids) >= min_children:
+            parent = by_pid.get(ppid)
+            groups.append({
+                "ppid": ppid,
+                "parent_comm": parent.comm if parent else None,
+                "parent_args": parent.args if parent else None,
+                "parent_alive": parent is not None,
+                "count": len(kids),
+                "total_pcpu": round(sum(k.pcpu for k in kids), 1),
+                "total_rss_gib": round(sum(k.rss_gib for k in kids), 2),
+                "pids": sorted(k.pid for k in kids),
+                "sample_comm": kids[0].comm,
+            })
+        else:
+            ungrouped.extend(kids)
+    groups.sort(key=lambda g: -g["total_pcpu"])
+    ungrouped.sort(key=lambda p: -p.pcpu)
+    return groups, ungrouped
+
+
+# ---------------------------------------------------------------------------
+# Optional sections
+# ---------------------------------------------------------------------------
+def failed_units(runner=None) -> dict:
+    """Failed systemd USER units.
+
+    `standup` also reports local systemd health; this is here because a failed
+    unit is a routine cause of the symptoms the rest of the report measures, and
+    making the reader run a second tool to see it defeats the point of a sweep.
+
+    🔴 `list-units --state=failed`, NOT the shorter `--failed`. Identical output
+    (measured), but `list-units` is a POSITIONAL VERB on
+    `testlib/nolaunch.SYSTEMCTL_READ_VERBS` while `--failed` is a flag, and that
+    stub's safe-flag list is only `--version/--help/-h`. Unknown spellings fail
+    CLOSED there by design, so the short form would be blocked in the suite --
+    and, more to the point, the long form is the one whose read-only nature the
+    repo's own guard can actually verify. Do not "simplify" it back.
+    """
+    runner = runner or _run
+    rc, out, err = runner(["systemctl", "--user", "list-units",
+                           "--state=failed", "--no-legend", "--plain",
+                           "--no-pager"])
+    if rc != 0:
+        return {"measured": False, "reason": err.strip() or f"systemctl exit {rc}",
+                "units": []}
+    units = [line.split()[0] for line in out.splitlines() if line.strip()]
+    return {"measured": True, "reason": None, "units": units}
+
+
+def fd_counts(procs: list[Proc], proc_root: str = "/proc",
+              top: int = 10, mypid: int | None = None) -> dict:
+    """Open-FD count per process, descending.
+
+    🔴 Reports `unreadable` alongside the counts, and NEVER folds it into a
+    clean result. Most processes on this box are not ours, so /proc/<pid>/fd is
+    EACCES for them; a report that silently dropped those would show a small
+    tidy list that reads as "no process has many FDs" while never having looked
+    at the one that does. An unreadable count is an unmeasured process, and it
+    is printed as such.
+    """
+    skip = self_pids(procs, mypid)
+    rows, unreadable, vanished = [], 0, 0
+    for p in procs:
+        if p.pid in skip or p.is_zombie:
+            continue
+        try:
+            rows.append({"pid": p.pid, "comm": p.comm, "user": p.user,
+                         "fds": len(os.listdir(Path(proc_root, str(p.pid), "fd")))})
+        except PermissionError:
+            unreadable += 1
+        except (FileNotFoundError, NotADirectoryError):
+            vanished += 1  # exited between the ps read and now
+        except OSError:
+            unreadable += 1
+    rows.sort(key=lambda r: -r["fds"])
+    return {"top": rows[:top], "examined": len(rows),
+            "unreadable": unreadable, "vanished": vanished}
+
+
+def proc_cwd(pid: int, proc_root: str = "/proc") -> str | None:
+    """Resolve a process's cwd, for the sibling-agent check in the kill hint."""
+    try:
+        return os.readlink(Path(proc_root, str(pid), "cwd"))
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Collection
+# ---------------------------------------------------------------------------
+def _run(cmd: list[str]) -> tuple[int, str, str]:
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return r.returncode, r.stdout, r.stderr
+    except FileNotFoundError:
+        return 127, "", f"{cmd[0]}: not found"
+    except subprocess.TimeoutExpired:
+        return 124, "", f"{cmd[0]}: timed out"
+
+
+def collect_ps(runner=None) -> list[Proc]:
+    runner = runner or _run
+    rc, out, err = runner(["ps", "-eo", PS_FORMAT])
+    if rc != 0:
+        raise RuntimeError(f"ps failed (exit {rc}): {err.strip()}")
+    procs = parse_ps(out)
+    if not procs:
+        # A zero here is never a clean bill of health: this host has processes.
+        raise RuntimeError("ps returned no parseable processes — cannot measure")
+    return procs
+
+
+def build_report(args, procs: list[Proc], loadavg, meminfo, uptime_sec,
+                 proc_root: str = "/proc", mypid: int | None = None,
+                 runner=None) -> dict:
+    ignore = parse_ignore(args.ignore)
+    elig = eligible(procs, ignore, args.min_age, mypid)
+
+    zombies = find_zombies(procs, mypid)
+    zgroups, zsingle = group_zombies(zombies)
+    cpu_hogs = find_cpu_hogs(elig, args.cpu_threshold)
+    mem_hogs = find_mem_hogs(elig, args.mem_threshold)
+    runaways = find_runaways(elig, args.runaway_pct, args.runaway_age)
+
+    cpu_groups, cpu_single = group_by_parent(cpu_hogs, procs)
+    mem_groups, mem_single = group_by_parent(mem_hogs, procs)
+
+    total_kb = meminfo.get("MemTotal", 0)
+    avail_kb = meminfo.get("MemAvailable", 0)
+    swap_total = meminfo.get("SwapTotal", 0)
+    swap_free = meminfo.get("SwapFree", 0)
+    swap_used = swap_total - swap_free
+    swap_pct = (swap_used / swap_total * 100.0) if swap_total else 0.0
+    avail_pct = (avail_kb / total_kb * 100.0) if total_kb else 100.0
+
+    cores = os.cpu_count() or 1
+    load_threshold = args.load_threshold if args.load_threshold is not None else float(cores)
+
+    rep = {
+        "overview": {
+            "load1": loadavg[0], "load5": loadavg[1], "load15": loadavg[2],
+            "cores": cores, "load_threshold": load_threshold,
+            "load_high": loadavg[0] >= load_threshold,
+            "uptime_sec": int(uptime_sec),
+            "mem_total_gib": round(total_kb * KIB / GIB, 1),
+            "mem_avail_gib": round(avail_kb * KIB / GIB, 1),
+            "mem_avail_pct": round(avail_pct, 1),
+            "swap_total_gib": round(swap_total * KIB / GIB, 1),
+            "swap_used_gib": round(swap_used * KIB / GIB, 1),
+            "swap_used_pct": round(swap_pct, 1),
+            "swap_high": swap_pct >= args.swap_warn_pct,
+            "mem_critical": bool(total_kb) and avail_pct < args.avail_crit_pct,
+        },
+        "zombies": {"count": len(zombies), "groups": zgroups, "single": zsingle},
+        "cpu_hogs": {"groups": cpu_groups, "single": [_proc_row(p, proc_root) for p in cpu_single]},
+        "mem_hogs": {"groups": mem_groups, "single": [_proc_row(p, proc_root) for p in mem_single]},
+        "runaways": [
+            dict(_proc_row(p, proc_root), critical=is_critical_runaway(p))
+            for p in runaways
+        ],
+        "thresholds": {
+            "cpu": args.cpu_threshold, "mem_gib": args.mem_threshold,
+            "load": load_threshold, "runaway_pct": args.runaway_pct,
+            "runaway_age_sec": args.runaway_age, "min_age_sec": args.min_age,
+            "ignore": ignore,
+        },
+        "counts": {"processes": len(procs), "eligible": len(elig)},
+    }
+    if args.systemd:
+        rep["systemd"] = failed_units(runner)
+    if args.fds:
+        rep["fds"] = fd_counts(procs, proc_root, mypid=mypid)
+
+    rep["verdict"] = verdict(rep)
+    rep["exit_code"] = rep["verdict"]["exit_code"]
+    return rep
+
+
+def _proc_row(p: Proc, proc_root: str = "/proc") -> dict:
+    return {
+        "pid": p.pid, "ppid": p.ppid, "user": p.user, "comm": p.comm,
+        "pcpu": p.pcpu, "pmem": p.pmem, "rss_gib": round(p.rss_gib, 2),
+        "age_sec": p.etimes, "stat": p.stat, "args": p.args,
+        "cwd": proc_cwd(p.pid, proc_root),
+    }
+
+
+def verdict(rep: dict) -> dict:
+    """Fold the sections into one exit code, naming every reason.
+
+    The reasons are returned, not just the code — a bare 1 tells the reader
+    nothing about which of six conditions fired.
+    """
+    warn: list[str] = []
+    crit: list[str] = []
+    ov = rep["overview"]
+
+    if ov["load_high"]:
+        warn.append(f"load1 {ov['load1']} >= threshold {ov['load_threshold']}")
+    if ov["swap_high"]:
+        warn.append(f"swap {ov['swap_used_pct']}% used")
+    if ov["mem_critical"]:
+        crit.append(f"MemAvailable {ov['mem_avail_pct']}% of total")
+    if rep["zombies"]["count"]:
+        z = rep["zombies"]
+        under = len(z["groups"]) + len(z["single"])
+        warn.append(f"{z['count']} zombie process(es) under {under} parent(s)")
+    for key in ("cpu_hogs", "mem_hogs"):
+        n = len(rep[key]["single"]) + sum(g["count"] for g in rep[key]["groups"])
+        if n:
+            warn.append(f"{n} {key.replace('_', ' ')}")
+    if rep["runaways"]:
+        warn.append(f"{len(rep['runaways'])} runaway(s)")
+    for r in rep["runaways"]:
+        if r["critical"]:
+            crit.append(f"pid {r['pid']} ({r['comm']}) at {r['pcpu']}% "
+                        f"for {fmt_age(r['age_sec'])}")
+    sysd = rep.get("systemd")
+    if sysd and sysd["measured"] and sysd["units"]:
+        warn.append(f"{len(sysd['units'])} failed user unit(s)")
+
+    code = 2 if crit else (1 if warn else 0)
+    return {"exit_code": code, "critical": crit, "warnings": warn}
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+def fmt_age(sec: int) -> str:
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m{sec % 60:02d}s"
+    if sec < 86400:
+        return f"{sec // 3600}h{(sec % 3600) // 60:02d}m"
+    return f"{sec // 86400}d{(sec % 86400) // 3600:02d}h"
+
+
+def _trunc(s: str, n: int) -> str:
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def render(rep: dict, out=sys.stdout) -> None:
+    p = lambda *a: print(*a, file=out)  # noqa: E731
+    ov = rep["overview"]
+    th = rep["thresholds"]
+
+    p("OVERVIEW")
+    flag = "  ⚠" if ov["load_high"] else ""
+    p(f"  load    {ov['load1']:.2f} / {ov['load5']:.2f} / {ov['load15']:.2f}"
+      f"   ({ov['cores']} cores, threshold {ov['load_threshold']:.0f}){flag}")
+    p(f"  mem     {ov['mem_total_gib'] - ov['mem_avail_gib']:.1f}G / "
+      f"{ov['mem_total_gib']:.1f}G used   avail {ov['mem_avail_gib']:.1f}G "
+      f"({ov['mem_avail_pct']:.0f}%)" + ("  ⚠ CRITICAL" if ov["mem_critical"] else ""))
+    if ov["swap_total_gib"]:
+        p(f"  swap    {ov['swap_used_gib']:.1f}G / {ov['swap_total_gib']:.1f}G used "
+          f"({ov['swap_used_pct']:.0f}%)" + ("  ⚠" if ov["swap_high"] else ""))
+    else:
+        p("  swap    none configured")
+    p(f"  uptime  {fmt_age(ov['uptime_sec'])}")
+    p(f"  scanned {rep['counts']['processes']} processes, "
+      f"{rep['counts']['eligible']} eligible "
+      f"(younger than {th['min_age_sec']}s excluded — %CPU is a lifetime average)")
+
+    zs = rep["zombies"]
+    p("")
+    p(f"ZOMBIES ({zs['count']} under {len(zs['groups']) + len(zs['single'])} parent(s))")
+    if not zs["count"]:
+        p("  none")
+
+    def parent_note(ppid, comm, alive, to_init, indent="    "):
+        if to_init:
+            p(f"{indent}parent: pid 1 (init) — already reparented; init will reap. Inert.")
+        elif not alive:
+            p(f"{indent}parent: pid {ppid} GONE — will be reparented and reaped")
+        else:
+            p(f"{indent}parent: pid {ppid} {comm} — ALIVE and NOT reaping.")
+            p(f"{indent}        ^ this is the process to fix. A zombie whose parent had")
+            p(f"{indent}          died would already have been reaped, so a persistent")
+            p(f"{indent}          zombie always indicts a LIVE parent.")
+
+    for g in zs["groups"]:
+        p(f"  {g['count']}x zombie under pid {g['ppid']} "
+          f"{_trunc(g['parent_comm'] or '(gone)', 24)}"
+          f"   oldest {fmt_age(g['oldest_age_sec'])}")
+        p(f"    commands: {', '.join(g['comms'][:8])}"
+          + (" …" if len(g["comms"]) > 8 else ""))
+        p(f"    pids: {', '.join(str(i) for i in g['pids'][:10])}"
+          + (" …" if len(g["pids"]) > 10 else ""))
+        parent_note(g["ppid"], g["parent_comm"], g["parent_alive"],
+                    g["reparented_to_init"])
+    for z in zs["single"]:
+        p(f"  pid {z['pid']:<8} {_trunc(z['comm'], 20):<20} {fmt_age(z['age_sec']):>8}"
+          f"  user {z['user']}")
+        note = " (also a zombie)" if z["parent_is_zombie"] else ""
+        parent_note(z["ppid"], (z["parent_comm"] or "") + note, z["parent_alive"],
+                    z["reparented_to_init"])
+
+    for key, label, unit in (("cpu_hogs", "CPU HOGS", f">= {th['cpu']:.0f}%"),
+                             ("mem_hogs", "MEM HOGS", f">= {th['mem_gib']:.1f}G RSS")):
+        sec = rep[key]
+        total = len(sec["single"]) + sum(g["count"] for g in sec["groups"])
+        p("")
+        p(f"{label} ({total}, {unit})")
+        if not total:
+            p("  none")
+        for g in sec["groups"]:
+            parent = g["parent_comm"] or f"pid {g['ppid']} (gone)"
+            p(f"  {g['count']}x {_trunc(g['sample_comm'], 18):<18} under "
+              f"{_trunc(parent, 22):<22} {g['total_pcpu']:>6.1f}% "
+              f"{g['total_rss_gib']:>6.2f}G  combined")
+            p(f"    ppid {g['ppid']}  pids {', '.join(str(i) for i in g['pids'][:8])}"
+              + (" …" if len(g["pids"]) > 8 else ""))
+        for r in sec["single"]:
+            p(f"  pid {r['pid']:<8} {_trunc(r['comm'], 18):<18} {r['pcpu']:>6.1f}% "
+              f"{r['rss_gib']:>6.2f}G {fmt_age(r['age_sec']):>8}  {r['user']}")
+            p(f"    {_trunc(r['args'], 100)}")
+
+    p("")
+    p(f"RUNAWAYS ({len(rep['runaways'])}, >= {th['runaway_pct']:.0f}% for "
+      f">= {fmt_age(th['runaway_age_sec'])})")
+    if not rep["runaways"]:
+        p("  none")
+    for r in rep["runaways"]:
+        mark = "  ⚠ CRITICAL" if r["critical"] else ""
+        p(f"  pid {r['pid']:<8} {r['pcpu']:>6.1f}%  {fmt_age(r['age_sec']):>8}"
+          f"  {r['user']}{mark}")
+        p(f"    cmd:  {_trunc(r['args'], 100)}")
+        p(f"    cwd:  {r['cwd'] or '(unreadable)'}")
+        p(f"    ppid: {r['ppid']}")
+        # 🔴 A hint, never an action. This box runs many agents in parallel and
+        # their test workers look exactly like this; killing one reads as a code
+        # defect in whatever branch that agent was verifying. The cwd and ppid
+        # above are what tells them apart, so they are printed right beside it.
+        p(f"    to kill:  kill {r['pid']}")
+        p("      ^ check cwd/ppid is not a sibling agent's worktree first")
+
+    if "systemd" in rep:
+        s = rep["systemd"]
+        p("")
+        if not s["measured"]:
+            p(f"SYSTEMD — COULD NOT MEASURE: {s['reason']}")
+        else:
+            p(f"SYSTEMD ({len(s['units'])} failed user unit(s))")
+            for u in s["units"] or ["  none"]:
+                p(f"  {u}" if s["units"] else u)
+
+    if "fds" in rep:
+        f = rep["fds"]
+        p("")
+        p(f"OPEN FDS (top {len(f['top'])} of {f['examined']} examined; "
+          f"{f['unreadable']} unreadable, {f['vanished']} exited mid-scan)")
+        for r in f["top"]:
+            p(f"  pid {r['pid']:<8} {_trunc(r['comm'], 20):<20} {r['fds']:>6} fds"
+              f"  {r['user']}")
+        if f["unreadable"]:
+            p(f"  ⚠ {f['unreadable']} process(es) unreadable (not ours) — "
+              "UNMEASURED, not zero")
+
+    v = rep["verdict"]
+    p("")
+    p("VERDICT")
+    for c in v["critical"]:
+        p(f"  CRITICAL  {c}")
+    for w in v["warnings"]:
+        p(f"  warning   {w}")
+    if not v["critical"] and not v["warnings"]:
+        p("  clean")
+    p(f"  exit {v['exit_code']}")
+
+
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog="syshealth",
+        description="On-demand deep system inspection (report-only).")
+    ap.add_argument("--json", action="store_true", help="emit JSON instead of tables")
+    ap.add_argument("--cpu-threshold", type=float, default=DEF_CPU_THRESHOLD,
+                    metavar="PCT", help=f"%%CPU for a hog (default: {DEF_CPU_THRESHOLD:.0f})")
+    ap.add_argument("--mem-threshold", type=float, default=DEF_MEM_THRESHOLD,
+                    metavar="GIB", help=f"RSS GiB for a hog (default: {DEF_MEM_THRESHOLD})")
+    ap.add_argument("--load-threshold", type=float, default=None, metavar="N",
+                    help="load1 that counts as high (default: core count)")
+    ap.add_argument("--runaway-pct", type=float, default=DEF_RUNAWAY_PCT, metavar="PCT")
+    ap.add_argument("--runaway-age", type=int, default=DEF_RUNAWAY_AGE, metavar="SEC")
+    ap.add_argument("--min-age", type=int, default=DEF_MIN_AGE, metavar="SEC",
+                    help="ignore processes younger than this; their %%CPU is a "
+                         f"lifetime average over ~0 time (default: {DEF_MIN_AGE})")
+    ap.add_argument("--swap-warn-pct", type=float, default=DEF_SWAP_WARN_PCT, metavar="PCT")
+    ap.add_argument("--avail-crit-pct", type=float, default=DEF_AVAIL_CRIT_PCT, metavar="PCT")
+    ap.add_argument("--ignore", default=os.environ.get("SYSHEALTH_IGNORE", DEF_IGNORE),
+                    metavar="LIST",
+                    help=f"comma-separated substrings never to flag (default: {DEF_IGNORE})")
+    ap.add_argument("--systemd", action="store_true", help="add failed user units")
+    ap.add_argument("--fds", action="store_true", help="add open-FD counts (walks /proc)")
+    ap.add_argument("--proc-root", default="/proc", help=argparse.SUPPRESS)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        procs = collect_ps()
+        loadavg = read_loadavg(args.proc_root)
+        meminfo = read_meminfo(args.proc_root)
+        uptime = read_uptime(args.proc_root)
+    except (RuntimeError, OSError, ValueError, IndexError) as e:
+        print(f"syshealth: COULD NOT MEASURE: {e}", file=sys.stderr)
+        return 3
+
+    rep = build_report(args, procs, loadavg, meminfo, uptime, args.proc_root)
+    if args.json:
+        json.dump(rep, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        render(rep)
+    return rep["exit_code"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())
