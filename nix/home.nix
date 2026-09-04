@@ -3015,9 +3015,34 @@ in
         # commit, and on this unit's own argv that refusal turned "index
         # refreshed, standing warning" into "nothing written, toast every 6h
         # until a human repairs an object store", i.e. the permanently-red gate
-        # again, in a state the paragraph above calls SUPPORTED. The cost it
-        # does buy: with no DELETE, a section REMOVED from a doc keeps its stale
-        # row until some repo reads in FULL again.
+        # again, in a state the paragraph above calls SUPPORTED.
+        # 🔴 AND THE COST IT DOES BUY IS WHOLE DOCUMENTS, NOT A TRAILING
+        # ORDINAL. This paragraph used to describe the residue as one removed
+        # section's stale row (the dead wording is not repeated here — a test
+        # bans it), which reads as trailing-ordinal drift and understates the
+        # blast radius: the DELETE is per-repo-LABEL and the upsert key is
+        # (repo, slug, section, ordinal). Nothing is LOST — the stale half is
+        # simply a corpus queries still answer FROM. The next sentence is
+        # `handoff_index.DOWNGRADE_COST` VERBATIM: one constant, three surfaces
+        # (this comment and the module's two printers), pinned as a whole
+        # normalised string by
+        # test_the_home_nix_cost_paragraph_IS_the_sentence_the_run_prints. Do
+        # not re-word it here — edit the constant and this comment together, or
+        # the suite fails.
+        #
+        # EVERY row this run did not re-derive persists until some repo reads in
+        # FULL again — not just a section removed from a doc, but ALL rows of a
+        # doc DELETED from the repo, and for a RENAMED doc both the old and the
+        # new slug's rows, which a search returns side by side as two documents.
+        # ⚠ A DOWNGRADED RUN EXITS 0 AND THIS UNIT HAS NO `SuccessExitStatus` BY
+        # DESIGN. A distinct rc (drift-check's rc 16 idiom) was considered and
+        # rejected: this file is switch-delivered while `handoff_index.py` is
+        # git-delivered (the unit's start command below runs the WORKING TREE
+        # copy of it), so the two
+        # would skew on a pull-without-switch and put the unit back to a failure
+        # toast 4x/day in the state this very paragraph calls SUPPORTED. The
+        # machine-readable channel is `--json`'s `rebuild_would_be_downgraded`.
+        # See `main`'s note at the downgrade site.
       ] ++ lib.mapAttrsToList (n: v: "${n}=${v}")
         (import ./agent-handles.nix { home = "%h"; }).repos;
       # nix-shell pulls psycopg2 (the _db.py write path). git/kubectl come from
