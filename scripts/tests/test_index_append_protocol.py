@@ -124,7 +124,7 @@ MANDATE = "anchored on `## Nuance / work-history`"
 # see a second protocol written in the new mechanism — the old `MECHANISM` regex
 # knew only `Write`/`Edit`/`y/N`, so a fork phrased as `cairn put` would have
 # passed every layer in this module.
-WRITE_VERBS = ("cairn append", "cairn put")
+WRITE_VERBS = ("cairn append", "cairn put", "cairn create")
 
 # 🔴 IMPERATIVES, not the string `(y/N)`. Both doors legitimately QUOTE the
 # retired prompt while describing its retirement, so banning the spelling would
@@ -533,10 +533,23 @@ class TestTheOwnerCarriesTheProtocol:
             "🔴 the ORDER of the two writes — reversed, the caller's own append "
             "moves the entry out from under its own `If-Match`",
         ),
+        # 🔴 SUPERSEDES `("`Write` only for a first-ever file", "the carve-out —
+        # …the API has no create route, so it stays a LOCAL write")`. That
+        # carve-out was TRUE while the local tree was the store and became a
+        # CONTENT-LOSS PATH once reads moved to the pod cache: measured
+        # 2026-09-02, five whole entries and 24 dated bullets lived on one host
+        # and reached no reader. `PUT … If-None-Match: *` (2026-09-03) is the
+        # create route whose absence the carve-out existed for, so the pin is
+        # REPLACED by the mechanism that now carries the case — never dropped.
         (
-            "`Write` only for a first-ever file",
-            "🔴 the carve-out — a first-ever file has no prior content to lose, "
-            "and the API has no create route, so it stays a LOCAL write",
+            "cairn create --scope <scope> --ref <slug> --file <scratchpad>/new.md",
+            "🔴 the THIRD write: a brand-new entry is created ON THE POD, which "
+            "is the case that used to be a local write and used to strand content",
+        ),
+        (
+            "exit 9 means the entry is already there",
+            "🔴 create never overwrites, and its refusal is NOT the `put` "
+            "precondition code — the two remedies are opposites",
         ),
         # 🔴 SUPERSEDES `("re-read the file and re-apply to current bytes",
         # "the actual safeguard…")`. The re-read was a guess at concurrency with
@@ -560,11 +573,28 @@ class TestTheOwnerCarriesTheProtocol:
         # SURVIVED a mutation that deleted the write half's sentence outright —
         # the other occurrence satisfied it. `claude/RULES.md`: a guard on a word
         # another sentence can spell is walkable.
+        # 🔴 SUPERSEDES `("entry files are `0444` and an `Edit`/`Write` against
+        # one fails with `EACCES`", "…an editor write now fails EACCES")`. THAT
+        # SENTENCE WAS FALSE, and the pin was holding a false claim in place.
+        # MEASURED 2026-09-02 against a 0444 file in a 0755 directory: a shell
+        # `>>` gets EACCES, Claude Code's `Edit` WRITES THROUGH (rewrite-and-
+        # rename needs only the directory bit, and the result is still 0444) and
+        # `Write` creates a fresh 0644 file. A protocol that says the freeze
+        # stops you is the reason nobody looked for the stranded entries. The
+        # replacement pins the CORRECTED claim, whose spelling is unique to the
+        # write half — the header states the same fact in different words, and
+        # `claude/RULES.md` is explicit that a fragment another sentence can
+        # spell is walkable.
         (
-            "entry files are `0444` and an `Edit`/`Write` against one fails with "
-            "`EACCES`",
-            "🔴 WHY the local write is gone: an editor write now fails EACCES, "
-            "and that refusal is the design rather than a broken store",
+            "is never a write target — not even for a first-ever file",
+            "🔴 WHY the local write is gone: the mirror is not a write target "
+            "for ANY case, the first-ever one included",
+        ),
+        (
+            "an `Edit` rewrites-and-renames, so it needs only the directory's "
+            "write bit and succeeds",
+            "🔴 the MEASURED correction: the `0444` freeze does NOT stop an "
+            "editor, so the rule is the VERB you choose, never the mode bits",
         ),
         (
             "Still print the unified diff before writing",
@@ -636,7 +666,22 @@ class TestThePointerRegionIsPinnedWHOLE:
     """
 
     REGION = "one-append-protocol"
-    EXPECTED_SHA = "94cdbbcefea34dade95d16a328cdc2289427a2ae1e3234dd1d59f747f2ece5c4"
+    # Updated 2026-09-03 for the CREATE verb (`PUT … If-None-Match: *`). What
+    # moved inside the region: the retired `Write`-for-a-first-ever-file
+    # carve-out is now labelled HISTORY **and a defect** rather than a live
+    # exception, and "where the file goes" says the entry is addressed on the POD
+    # via `cairn create` instead of "creating the dir/file" under
+    # `~/.claude/analyze-service-index/`. Both were true while that tree WAS the
+    # store and became content loss once reads moved to the pod cache — measured
+    # 2026-09-02: five whole entries on one host, invisible to every reader.
+    #
+    # 🔴 Both doors re-read before this hash was pasted, which is what the
+    # failure message demands: the region still states NO protocol of its own —
+    # it routes to `subsystem-index/SKILL.md` at step 4, and what it keeps is the
+    # historical record of the 2026-08-31 fork plus the two caller facts. The
+    # owner states ONE protocol for both callers, and the create case is stated
+    # there for BOTH — there is no per-caller carve-out on either side.
+    EXPECTED_SHA = "92939ac197a058c9bf600aaac41140a0d8a39aaf49c342edc6101a40878401a7"
 
     def test_region_hash(self, pointer: str) -> None:
         body = _normalise(_region(pointer, self.REGION))
@@ -744,7 +789,14 @@ MECHANISM = re.compile(
     r"|\b(?:Write|Edit) tool\b"
     r"|\b(?:use|using|uses|with|then|via|plain)\s+(?:a\s+|the\s+)?\*{0,2}`?(?:Write|Edit)`?\*{0,2}\b"
     r"|\(y/N\)|\by/N\b|\byes/no\b|\byes-no\b"
-    r"|\bcairn\s+(?:append|put)\b"
+    # 🔴 `create` JOINED THIS ALTERNATION ON 2026-09-03, and leaving it out
+    # would have been the silent half of adding a verb: `cairn create` is a
+    # write mechanism for this store, so a document stating it is a CARRIER —
+    # and the ledger below is the thing that says which documents may be. The
+    # owner's own create paragraphs were invisible to the whole-region hash
+    # until this line named the verb, which is exactly the shape of a guard
+    # reading as coverage while providing none.
+    r"|\bcairn\s+(?:append|put|create)\b"
 )
 
 # …applied to THIS store. Without this half the predicate would fire on every
@@ -1048,7 +1100,25 @@ class TestTheOwnersMechanismProseIsPinnedWHOLE:
     # own region hash is untouched) — and the owner's five paragraphs describe
     # ONE protocol for both callers with NO per-caller carve-out. The `Edit`
     # anchor survives in the owner only as the sentence saying what replaced it.
-    EXPECTED_SHA = "0e359f317fefd7a2fc5b6e47b51c51b6562933f8592a06df8b7f5c97cda3c7f3"
+    #
+    # Updated 2026-09-03 for the CREATE verb. What moved: (a) the freeze
+    # paragraph's claim that an `Edit`/`Write` against a `0444` entry "fails with
+    # EACCES" was MEASURED FALSE — `Edit` rewrites-and-renames through it and
+    # `Write` makes a fresh 0644 file — so it is corrected rather than left
+    # standing, and the rule is restated as the VERB you choose; (b) a brand-new
+    # entry is `cairn create` on the pod, not a local `Write`; (c) the two-branch
+    # post-write validate collapsed to one, because "the pod has never seen it"
+    # is no longer true of any write. The selection grew 5 -> 7 paragraphs: the
+    # create command block, the corrected freeze paragraph, and the rewritten
+    # validate paragraph, against one that merged away.
+    #
+    # 🔴 Both doors re-read before this hash was pasted. `write-back.md` states
+    # no mechanism of its own (its own region hash moved only to relabel the
+    # retired carve-out as history and to point "where the entry goes" at
+    # `cairn create`), and these seven paragraphs describe ONE protocol for both
+    # callers with NO per-caller exception — the create case is the SAME verb for
+    # `/handoff` and `/analyze-service`, differing only in `--writer`.
+    EXPECTED_SHA = "738bef255e94a48b9459b80ee72325ce65fabb1842d57ec374d5d1702ac873d9"
 
     @staticmethod
     def _digest(owner: str) -> tuple[str, list[str]]:
@@ -1316,10 +1386,15 @@ class TestThePruneDoorMovedItsMechanismAndKeptItsGate:
         ),
         (
             "SKILL.md",
-            "the local entry files are `0444` and any editor write against one "
-            "fails with `EACCES`",
-            "WHY it moved, stated where the command is, so an EACCES is read as "
-            "the design and not as a broken store",
+            "that does NOT stop an editor: `Edit` rewrites-and-renames straight "
+            "through it and `Write` makes a fresh `0644` file",
+            "🔴 WHY it moved, stated where the command is. This pin USED to "
+            "require the sentence 'the local entry files are `0444` and any "
+            "editor write against one fails with `EACCES`', which was FALSE and "
+            "is the claim that let content strand: only a shell `>>` gets "
+            "EACCES. The mechanism claim is unchanged — a cut still lands via "
+            "`cairn put` — but its JUSTIFICATION flipped, from 'the mode stops "
+            "you' to 'nothing stops you, so the verb is the only protection'",
         ),
         (
             "SKILL.md",

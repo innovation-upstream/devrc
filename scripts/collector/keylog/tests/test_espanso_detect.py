@@ -716,11 +716,51 @@ def test_naming_a_trigger_still_beats_the_declared_owner(monkeypatch):
 # 🔴 WHICH OF THESE ARE REGRESSION COVERAGE, measured at 778dbd2d (the tree the
 # bug is live on) with these tests in place and only the two table entries
 # removed:
-#   RED at base  — test_precedence_resolves_the_recommend_terms,
-#                  test_recommend_terms_resolve_on_the_live_config
+#   RED at base  — test_precedence_resolves_the_recommend_terms
 #   GREEN at base — test_recommend_terms_still_reach_both_picker_rows (an
 #                  INVARIANT GUARD: the picker never consulted the table, so it
 #                  cannot fail on its own). Mutation-checked instead.
+#
+# 🔴 THE COLLISION IS GONE AT THE SOURCE, AND THAT RETIRED ONE TEST — read this
+# before re-adding a live-config guard here. `a451abc0` (2026-09-03, another
+# direct-to-main espanso commit) SWAPPED ':acq''s `label` and `replace`: the long
+# "…and recommend improvements…" text is now what the snippet EXPANDS to, and the
+# label is back to "ask clarifying questions". `_token_matches` reads the label,
+# not `replace`, so 'recom'/'recommend' stopped reaching ':acq' entirely — they
+# now match ':rna' ALONE and resolve by the plain uniqueness branch, before
+# precedence or the owner table is consulted.
+#
+# `test_recommend_terms_resolve_on_the_live_config` asserted the collision was
+# still THERE (`== [":acq", ":rna"]`) as its anti-vacuity check, and its own
+# comment named the exit condition: "if that stops being true this test is no
+# longer covering the reported bug". It stopped being true, the test went red on
+# plain `main`, and it has been DELETED rather than relaxed — a live guard whose
+# premise died is exactly the decoration `test_the_declared_owner_table_is_
+# actually_load_bearing` tells you to delete rather than keep.
+#
+# 🔴 NOTHING WAS LOST, and here is the accounting, because "delete the red test"
+# is also what the bad fix looks like:
+#   - the RESOLUTION ('recom'/'recommend' -> ':rna' on the LIVE config) is pinned
+#     by the `_EXISTING_RESOLUTIONS` rows of the same name, under its own >= 26
+#     anti-vacuity floor. Untouched, and green. That is the contract.
+#   - ':acq' declaring either term in `search_terms` would make both snippets
+#     DECLARE it, precedence would narrow nothing, `_attribute` would return None
+#     and that same guard goes RED. So the deleted "collision is label-sourced,
+#     not search_terms-sourced" assertion has a live owner.
+#   - ':acq' regaining the long text in its LABEL — the a720d30d shape, the one
+#     that WILL recur — is handled by FIX 7 precedence and is covered on the
+#     RNA_ACQ_BASE fixture below, which still carries that exact label. Those
+#     three tests are the mechanism's regression coverage and are deliberately
+#     hermetic, so they keep testing the RULE no matter what the live file does.
+#   - the "no owner entry for these terms" claim survives in the two fixture
+#     tests; it reads the module-level table, which no fixture can change.
+#
+# 🔴 THE LESSON THE DELETION DOES NOT RETIRE: a one-line edit to a snippet's
+# LABEL — or, here, a swap between `label` and `replace` — silently re-attributes
+# telemetry terms, in EITHER direction. a720d30d created a collision and reddened
+# the gate; a451abc0 removed one and reddened the gate again, by falsifying a
+# guard's premise. Both were direct-to-main espanso commits. The mechanism is
+# live; only this instance of it is settled.
 RNA_ACQ_BASE = {"matches": [
     {"trigger": ":acq", "replace": "...",
      "label": "ask clarifying questions and recommend improvements and "
@@ -748,9 +788,14 @@ def test_precedence_resolves_the_recommend_terms():
 
 
 def test_recommend_terms_still_reach_both_picker_rows():
-    # The point of the table: attribution gets one answer, the picker keeps BOTH
-    # rows. If this shrinks to one, the fix has become the label edit the
-    # operator declined.
+    # The point of the whole mechanism: attribution gets ONE answer while the
+    # picker keeps BOTH rows. If this shrinks to one, the fix has become the
+    # label edit the operator declined in #1247.
+    #
+    # 🔴 HERMETIC ON PURPOSE — do not re-point it at the live config. The live
+    # ':acq' no longer spells "recommend" at all (a451abc0), so against the real
+    # file this would assert a one-row picker and stop testing the rule. The
+    # fixture keeps the collision the rule exists for.
     d = _det_for(RNA_ACQ_BASE)
     for term in ("recom", "recommend"):
         assert {t for t in d.ts.triggers if d._term_matches(term, t)} == {
@@ -779,24 +824,11 @@ def test_the_recommend_terms_owe_nothing_to_the_owner_table(monkeypatch):
         assert d._attribute(term) == ":rna", term
 
 
-def test_recommend_terms_resolve_on_the_live_config():
-    # The hermetic fixture above can drift from nix/home.nix; this reads the
-    # real file. ANTI-VACUITY: an empty trigger set would pass vacuously, so
-    # assert both snippets are actually present and actually collide.
-    d = _live_det()
-    assert ":acq" in d.ts.triggers and ":rna" in d.ts.triggers
-    # ...and on the LIVE config too, no owner entry is doing this (FIX 7).
-    assert "recom" not in ED._AMBIGUOUS_TERM_OWNER
-    assert "recommend" not in ED._AMBIGUOUS_TERM_OWNER
-    for term in ("recom", "recommend"):
-        assert sorted(t for t in d.ts.triggers
-                      if d._term_matches(term, t)) == [":acq", ":rna"], term
-        assert d._attribute(term) == ":rna", term
-    # The collision comes from the LABEL, not from ':acq''s search_terms — if
-    # that stops being true this test is no longer covering the reported bug.
-    assert "recommend" in d.ts.meta[":acq"]["label"].lower()
-    assert not any("recom" in s.lower()
-                   for s in d.ts.meta[":acq"].get("search_terms") or [])
+# `test_recommend_terms_resolve_on_the_live_config` lived here until 2026-09-03.
+# It asserted the ':acq'/':rna' collision was still present on the live config;
+# `a451abc0` removed the collision, so the assertion became false and the test
+# red on plain `main`. Deleted, not relaxed — see the FIX 6 header above for the
+# full accounting of where each of its claims now lives.
 
 
 def test_every_declared_owner_names_a_real_live_trigger():
@@ -871,9 +903,11 @@ def test_the_declared_owner_table_is_actually_load_bearing():
 #   framing #1247's own matrix used:
 #     test_precedence_resolves_the_recommend_terms                None -> ':rna'
 #     test_recommend_terms_resolve_on_the_live_config             None -> ':rna'
+#       (RETIRED 2026-09-03 — the live collision it read is gone; see the FIX 6
+#        header. The measurement above stands as history, not as a live test.)
 #   With base's table intact they are GREEN at base — the entries produced the
 #   same answer. That is the point of deleting them: the answer now comes from
-#   the rule, and these two tests keep the ANSWER pinned either way.
+#   the rule, and the surviving test keeps the ANSWER pinned either way.
 #
 #   GREEN at base (INVARIANT GUARDS, labelled as such below; they pin behaviour
 #   precedence must NOT change, so by construction they cannot be regression

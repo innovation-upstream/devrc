@@ -13,12 +13,16 @@ are per-topic and get overwritten, this does not.
 `/analyze-service` BOTH.** There is one protocol and one document; there is no
 per-skill variant to look for.
 
-🔴 **Since the Cairn cutover the write is `cairn append` / `cairn put`, and the
-local store is FROZEN read-only (`0444`).** The pod is the authority; the local
-copy has none. An `Edit` or `Write` against an entry file now fails with
-`EACCES` — by design, because a local-only bullet lived on one host and the next
-seed replaced the served copy with a file that never had it. The full mechanism
-is in the write half at the end of this document.
+🔴 **Since the Cairn cutover EVERY write is `cairn append` / `cairn put` /
+`cairn create`, and the local store is a FROZEN read-only mirror (`0444`).** The
+pod is the authority; the local copy has none, and reads come from the synced
+cache — so anything written locally is dark to every reader on every host.
+🔴 **The `0444` is a marker, NOT an enforcement — do not rely on it to stop you.**
+Measured 2026-09-02: a shell `>>` gets `EACCES`, but Claude Code's `Edit`
+rewrites-and-renames (needing only the directory bit, and leaving the file
+`0444`) and `Write` creates a fresh `0644` file. Both succeed silently. Five
+whole entries and 24 dated bullets were stranded that way. The full mechanism is
+in the write half at the end of this document.
 
 ⚠ **The STORE itself is a different skill.** The pod, the client, `cairn doctor`,
 `cairn sync`/`search`/`ls-entries`/`who`, seeding and the two different exit 4s
@@ -150,16 +154,16 @@ Otherwise read `status=` and act on that case:
 
 **— the write half; everything above this line only reads —**
 
-🔴 **The entry lives at `~/.claude/analyze-service-index/<scope>/<slug>.md`** — an absolute path outside every repo, and since the Cairn cutover a **read-only** mirror of what the pod holds: entry files are `0444`, and the write verbs below go to the pod, never to this path. Never anywhere in the working tree: these entries carry client-identifying infrastructure detail and `devrc` is PUBLIC. **Read the policy file the probe named on its `policy:` line before writing there, and do not go looking for one it did not name.** A scope may have no README of its own — a *new* scope starts without one, so the gap recurs by construction — and the probe therefore resolves it deterministically and prints which of the three cases you are in: the scope's own README (`scope README`, authoritative for that scope), the store-root README (`this scope has none of its own`, so it is the store's general policy and not a statement by this scope), or neither. Do **not** create a scope README to fill the gap: each one is a human policy statement, and writing it yourself would be manufacturing authority.
+🔴 **The entry is ADDRESSED as `<scope>/<slug>` ON THE POD, and every write below goes there — including the creation of a brand-new entry.** `~/.claude/analyze-service-index/<scope>/<slug>.md` is the path it *appears* at locally, and since the Cairn cutover that tree is only a **read-only mirror** of what the pod holds: entry files are `0444`. 🔴 **Never write a new entry there.** Reads come from the synced cache, so a locally-created file is invisible to every reader on every host — measured 2026-09-02, five whole entries and 24 dated bullets existed only on one machine and reached nobody. ⚠ **The `0444` freeze does NOT stop you**: an `Edit` rewrites-and-renames (it needs only the directory bit and leaves the file `0444`), and a `Write` creates a fresh `0644` file. Both succeed, and both strand the content. `cairn create` is the verb — see below. Never anywhere in the working tree: these entries carry client-identifying infrastructure detail and `devrc` is PUBLIC. **Read the policy file the probe named on its `policy:` line before writing there, and do not go looking for one it did not name.** A scope may have no README of its own — a *new* scope starts without one, so the gap recurs by construction — and the probe therefore resolves it deterministically and prints which of the three cases you are in: the scope's own README (`scope README`, authoritative for that scope), the store-root README (`this scope has none of its own`, so it is the store's general policy and not a statement by this scope), or neither. Do **not** create a scope README to fill the gap: each one is a human policy statement, and writing it yourself would be manufacturing authority.
 
 🔴 **After writing an entry — new file or appended bullet — validate it in the SAME turn:**
 
 ```
-cairn sync && cairn validate --scope <scope>                     # after `cairn append` / `cairn put`
-python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --validate <path-you-just-wrote>   # a NEW file you created locally
+cairn sync && cairn validate --scope <scope>                     # after ANY write: append, put OR create
+python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --validate <a-file-on-disk>   # a scratch file BEFORE you send it
 ```
 
-🔴 **Which of the two depends on WHERE THE BYTES LANDED, and picking wrong reads a file the write never touched.** An API write lands on the pod; the local mirror is read-only and does not move, so `--validate <path-you-just-wrote>` after an append parses the *pre-append* bytes and reports a clean entry that is not the one you wrote — `cairn sync` first and validate the refreshed cache. A brand-new entry file is the mirror image: it exists only locally and the pod has never seen it, so the path you wrote is the only thing there is to validate.
+🔴 **There is now ONE post-write check, and it is the first line — every write lands on the pod, so the pod's copy is the only thing worth validating.** The local mirror is read-only and does not move, so validating a path under `~/.claude/analyze-service-index/` after a write parses the *pre-write* bytes and reports a clean entry that is not the one you wrote. ⚠ **The second line is no longer a post-write check and must not be used as one.** It used to be the branch for a brand-new entry, on the reasoning that *"it exists only locally and the pod has never seen it"* — that reasoning died with `cairn create` (2026-09-03), which makes the pod see it first. What the second line is still good for is parse-checking a **scratch** file before sending it, which turns a 422 from the store into a local answer.
 
 🔴 **READ THE `entry shape:` BLOCK, NOT ONLY THE EXIT CODE.** It is advisory and deliberately does **not** move the verdict — an entry whose spine is broken still parses, still loads, and still exits 0 — so branching on the exit code alone is how it goes unread. It reports the two headings a COUNT depends on (`## Pointers`, `## Nuance / work-history`) as ABSENT, RENAMED, DUPLICATED or present-and-EMPTY, and names what you wrote instead. `## What it is` is deliberately not among them — `subsystem_recall` does surface it, but it feeds no count and no badge, so the reader names a missing one under the entry's own body rather than as a validator finding. A RENAMED nuance heading is **silent data loss**: the entry's index row then shows `0 nuance` with no `🔴 N OPEN` badge while the bullets sit intact on disk, and `/resume` consumes exactly that row. Fix the heading in the same turn — it is one edit, and nothing else will tell you.
 
@@ -197,6 +201,16 @@ cairn put --scope <scope> --ref <entry> --file <scratchpad>/entry.md
 
 🔴 **`cairn put`'s `If-Match` is derived from a LIVE sync, and THAT IS WHAT REPLACES the two rules this step used to carry — it is a replacement, not an omission.** The retired pair, in one sentence: *re-read the entry and re-apply to its current bytes, then `Edit` anchored on `## Nuance / work-history` rather than `Write`.* Both halves existed because nothing arbitrated two concurrent writers: a whole-file retype was measured to lose a concurrent append, and a concurrent `Edit` on that anchor **succeeded silently**, so "no error" was never evidence you were alone. There is an arbiter now — the API appends under a per-entry `flock`, and a `put` whose base revision has moved is REFUSED with exit 8 instead of clobbering. 🔴 **So exit 8 IS the other writer, not a transient error:** `cairn sync`, re-read, re-apply your change to the NEW bytes, diff again, put again. Never retry the same file, and never pass `--if-match` by hand to make it go away — that is the clobber the precondition exists to stop.
 
-🔴 **The local mirror is READ-ONLY: entry files are `0444` and an `Edit`/`Write` against one fails with `EACCES`.** That refusal is the design, not a broken store. (`Write` only for a first-ever file, which has no prior content to lose — and which the API cannot create, since `POST` and `PUT` both resolve an *existing* ref. Scope directories stay writable so that still works. ⚠ Known follow-up, not a break: a locally-created entry is **local-only** until the next cutover run classifies it `ADD` and pushes it.)
+🔴 **A BRAND-NEW entry is `cairn create`, not a local file — the store has had a create verb since 2026-09-03:**
 
-Carry the store's invariants: **pointers, not copies**; **never persist live status** (no counts, no Ready/NotReady, no current version) — for anything with no live probe, persist the *derivation method and what a stale reading looks like*, never the reading. Never silent-mutate. 🔴 **Write the file and run no git command** — this is the first-ever-file case, the one write that is still local; the store is versioned by its own out-of-band autocommit. Never add a remote, never copy a line of it into a public repo. **This holds for a brand-new scope directory too: the hourly timer creates and commits its repository — do not create the repository yourself.** So a just-written entry in a new scope is **unversioned for up to an hour**; that is the normal window, not a failure, and not something to fix by hand.
+```
+python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --template <slug> --writer <caller> > <scratchpad>/new.md
+#   fill in <scratchpad>/new.md — a scratch path, never under ~/.claude/analyze-service-index/
+cairn create --scope <scope> --ref <slug> --file <scratchpad>/new.md
+```
+
+🔴 **`--ref` becomes the filename: `<scope>/<slug>.md` on the pod, and `service:` in the front matter must normalize to the same slug** — the store refuses the pair when they disagree (422), because a ref that reaches no file is an entry nobody can read. It answers `created` with the new revision. 🔴 **It CREATES ONLY IF ABSENT and never overwrites: exit 9 means the entry is already there**, and the remedy is `cairn append` (a bullet) or `cairn put` (a rewrite) — never the same `create` again. 6/7 mean the same as everywhere else, and every one of them wrote NOTHING.
+
+🔴 **The local mirror is READ-ONLY and is never a write target — not even for a first-ever file.** Its entry files are `0444`, and a shell `>>` against one fails with `EACCES`. ⚠ **But that freeze is NOT what stops you, and believing it is how content was lost:** an `Edit` rewrites-and-renames, so it needs only the directory's write bit and succeeds, leaving the file still `0444`; a `Write` creates a new file at `0644`. Both land, both are invisible to every reader, and neither reports anything wrong. The rule is the verb you choose, not the permission bits.
+
+Carry the store's invariants: **pointers, not copies**; **never persist live status** (no counts, no Ready/NotReady, no current version) — for anything with no live probe, persist the *derivation method and what a stale reading looks like*, never the reading. Never silent-mutate. 🔴 **Run no git command against the store** — it is versioned by its own out-of-band autocommit, and since every write now lands on the pod there is nothing local to commit anyway. Never add a remote, never copy a line of it into a public repo. **This holds for a brand-new scope directory too: `cairn create` makes the directory on the pod when the scope is new to it, and the hourly timer creates and commits its repository — do not create either yourself.** So a just-created entry in a new scope is **unversioned for up to an hour**; that is the normal window, not a failure, and not something to fix by hand.
