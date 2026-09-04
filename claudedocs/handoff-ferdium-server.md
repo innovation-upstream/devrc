@@ -159,8 +159,12 @@ curl -sSI https://ferdium.zacx.dev/ | head -1                       # 302 -> log
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST -d '{}' \
   -H 'Content-Type: application/json' https://ferdium.zacx.dev/v1/auth/signup   # 303 (gated)
 
-# 4. 8117 must stay dropped from the internet — read all three, one proves nothing:
-nix-shell -p netcat-openbsd --run 'for p in 8117 8114 8118; do nc -vz -w 6 5.161.118.55 $p; done'
+# 4. 8117 must stay dropped from the internet — read all three, one proves nothing.
+#    🔴 The relay's public IP is DERIVED here, never written down: this repo is
+#    PUBLIC and scripts/tests/test_no_public_ips.py fails the suite on a literal.
+#    Do not "simplify" this back to a hardcoded address — it caught exactly that.
+RELAY=$(awk '/ssh:/{f=1} f&&/address:/{print $2; exit}' "$HOMELAB/k0s/diffsona.yaml")
+nix-shell -p netcat-openbsd --run "for p in 8117 8114 8118; do nc -vz -w 6 $RELAY \$p; done"
 #   8117 timeout · 8114 timeout (guarded control) · 8118 refused (unguarded control)
 
 # 5. The only thing that proves the GOAL: the desktop client logs in with the PLAINTEXT and syncs.
