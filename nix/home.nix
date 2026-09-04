@@ -77,6 +77,14 @@ let
   # (2) is why this flag waited: a timer alerting into a paused queue is WORSE than no
   # timer, because it manufactures the appearance of coverage.
   enableDriftDeadman = true;
+
+  # Main-green deadman master switch (scripts/main-green-check.sh) — gates ONLY
+  # whether the TIMER is wired into timers.target. The unit file exists either
+  # way, so `systemctl --user start main-green-check` works by hand regardless.
+  # 🔴 Set this false to silence the new alert without reverting anything: it is
+  # a NEW source of `notify-failure@`, which is the one toast class deliberately
+  # wired to defeat do-not-disturb.
+  enableMainGreenDeadman = true;
   # tmux-snapshot pusher master switch (scripts/tmux-snapshot-push.sh) — feeds
   # clawgate's cross-host tmux read model. Gates ONLY whether the timer is wired into
   # timers.target; the SERVICE definition is always emitted, so
@@ -326,7 +334,7 @@ in
           # was REMOVED 2026-09-03 along with the other 9 live-config tests: they
           # re-broke on every snippet edit. NOTHING enforces this coupling now —
           # if attribution matters for a term, check it by hand.
-          { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
+          { trigger = ":dacq"; replace = "dispatch subagent to process feedback\ndo light recon and ask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
           { trigger = ":acq"; replace = "ask clarifying questions and recommend improvements and anything useful to include"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this arc? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
@@ -3358,6 +3366,93 @@ in
       # but is wired into nothing, so no routine `ship.sh` can silently start a
       # timer nobody has supervised once.
       WantedBy = lib.optionals (serverMode && enableDriftDeadman) [ "timers.target" ];
+    };
+  };
+
+  # ── IS origin/main ACTUALLY GREEN? (scripts/main-green-check.sh) ─────────────
+  # Branch protection on this repo is OFF by a live operator decision, so a
+  # commit can land straight on `main` with nothing running against it. MEASURED
+  # 2026-09-03: that happened TWICE IN ONE SESSION (`a720d30d`, `a451abc0`, both
+  # one-line direct pushes titled "espanso"), `main` was red for hours each time,
+  # and BOTH times the only detector was a human running the gate by hand,
+  # incidentally. drift-check answers "is a host still receiving changes?"; this
+  # answers the independent question "is what they are receiving any good?".
+  #
+  # 🔴 IT RUNS THE HERMETIC TIER, AND THAT IS A MEASUREMENT, NOT A PREFERENCE.
+  # On one tree (main + #1261) the dev-host tier reported 4 failures and the nix
+  # sandbox tier reported 0 — all four were `subprocess.TimeoutExpired` at a
+  # fixed 300s cap while the box sat at load 22-29, with an UNTOUCHED target
+  # inflating 4.49s -> 177.26s in the same window. Wiring a DND-bypassing toast
+  # to the tier that emits those would build the permanently-red gate
+  # `claude/RULES.md` calls worse than no gate.
+  systemd.user.services.main-green-check = {
+    Unit = {
+      Description = "Is the current tip of origin/main actually green?";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # 🔴 rc 11 (COULD NOT MEASURE) IS A SUCCESS TO systemd, AND rc 12 IS NOT.
+      # A network blip must not fire the DND-bypassing toast — but a deadman
+      # that can go blind in silence has the same shape as the bug it was built
+      # to catch, so the script ladders consecutive unmeasured runs and exits 12
+      # once it has been unable to look for ~24h. 11 is quiet and recorded; 12
+      # is loud. (drift-check's rc 18 is the precedent: "setting no code was
+      # right per run and wrong forever".)
+      # rc 10 = RED REPRODUCED and rc 12 = BLIND both fail the unit on purpose.
+      SuccessExitStatus = 11;
+      # Two attempts x two tiers. The pytests derivation alone ran 18 min on a
+      # loaded box, so a 420s budget like drift-check's would kill this mid-build
+      # and report a timeout as a failure — an alarm about the alarm.
+      TimeoutStartSec = 5400;
+      Environment = [
+        # 🔴 `nix` IS THE WHOLE JOB. Without it on PATH every run reports COULD
+        # NOT MEASURE, the ladder escalates to 12, and the toast fires about the
+        # unit rather than about main — from a unit that looks correct. That is
+        # the exact silent shape drift-check's iproute2/python3/gh notes record.
+        # `flock` (util-linux) is the single-flight; `openssh` is for a git+ssh
+        # remote; `gnutar`/`gzip` are what nix shells out to while building.
+        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.openssh pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.util-linux pkgs.gnutar pkgs.gzip ]}"
+        "HOME=%h"
+        # 🔴 NO `NIX_CONFIG` HERE, DELIBERATELY. A user unit inherits none of the
+        # login shell's nix setup and `nix build <path>#<attr>` is flake syntax,
+        # so the features must come from somewhere — but NOT from this list.
+        # `Environment=` is WHITESPACE-SPLIT by systemd (the same hazard this
+        # file already documents for CPU_MON_IGNORE above), and MEASURED with
+        # `systemd-analyze verify`, `NIX_CONFIG=experimental-features =
+        # nix-command flakes` yields three "Invalid environment assignment,
+        # ignoring:" lines and sets NIX_CONFIG to the bare word
+        # `experimental-features` — which makes nix hard-error `syntax error in
+        # configuration line` on EVERY invocation. That is worse than omitting
+        # it, because this host's /etc/nix/nix.conf already enables both.
+        # The script passes `--extra-experimental-features` on the command line
+        # instead, where there is nothing for a unit file to re-parse.
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/main-green-check.sh";
+      X-Restart-Triggers = [ "${../scripts/main-green-check.sh}" ];
+    };
+  };
+
+  # 4-hourly. Bounded by the incident it exists for: `main` was red "for hours"
+  # twice. The run is CHEAP when nothing landed — the verdict is memoized on the
+  # sha, so a fire against an unchanged `main` exits having built nothing — which
+  # is what makes a 4h cadence affordable when a real run costs ~20 min. It also
+  # sets the blind ladder's clock: 6 consecutive unmeasured runs is ~24h.
+  # No Persistent — it only applies to OnCalendar timers, not monotonic ones.
+  systemd.user.timers.main-green-check = {
+    Unit = {
+      Description = "Periodic timer for the origin/main green deadman";
+    };
+    Timer = {
+      OnStartupSec = "15min";
+      OnUnitActiveSec = "4h";
+    };
+    Install = {
+      # Same shape as drift-check: the master switch acts HERE and only here, so
+      # no routine `ship.sh` can silently start a timer nobody has supervised.
+      WantedBy = lib.optionals (serverMode && enableMainGreenDeadman) [ "timers.target" ];
     };
   };
 

@@ -23,58 +23,60 @@ block is deleted by every update that does not re-state it; it is the durable ev
 status.**
 
 🔴 **CRITERIA 8 AND 9 ARE COMPLETE. PHASE 1 IS CLOSED — the pod is canonical and both local
-stores are read-through caches.** Executed and verified 2026-09-01.
-
-| | result |
-|---|---|
-| pod | **201 entries / 23 scopes**, both hosts read the same snapshot `seeded=2026-09-01T20:38:36Z` |
-| workbench freeze | 153 files, **`P5 WATCHED EACCES: all 153 refused an append`** |
-| laptop freeze | 49 files, **`P5 WATCHED EACCES: all 49 refused an append`** |
-| idempotency | both hosts re-run → *"the freeze is already applied"* |
-| runbook §8 final check | `{'ADD': 0, 'SAME': 153, 'SUPERSEDES': 0, 'MERGED': 0, 'NEEDS_MERGE': 0}`, **0 entries would be pushed** |
-| rollback | mode ledgers on both hosts (`runs/20260901T203704Z/`, `runs/20260901T203951Z/`); `--unfreeze` refuses without one |
-
-**The proof that the per-host store is gone:** the workbench can `cairn recall` a
-**laptop-exclusive scope** (`status=recalled`). That was structurally impossible before.
+stores are read-through caches.** Executed and verified 2026-09-01. Pod **201 entries / 23
+scopes**, both hosts on snapshot `seeded=2026-09-01T20:38:36Z`; workbench freeze 153 files and
+laptop freeze 49, each **`P5 WATCHED EACCES: all N refused an append`**; both hosts re-run →
+*"the freeze is already applied"*; runbook §8 final check
+`{'ADD': 0, 'SAME': 153, 'SUPERSEDES': 0, 'MERGED': 0, 'NEEDS_MERGE': 0}`, **0 entries would be
+pushed**; rollback ledgers `runs/20260901T203704Z/` + `runs/20260901T203951Z/`, and
+`--unfreeze` refuses without one. **The proof the per-host store is gone:** the workbench can
+`cairn recall` a **laptop-exclusive scope** (`status=recalled`) — structurally impossible before.
 
 **Criterion 10 remains COMPLETE (execution record):** executed 2026-08-31, homelab-infra
-**`be3084f0`** on trunk, confirmed an ancestor of `origin/trunk`. The token file went
-**354 B → 295 B**, a pure line deletion: surviving mapped row `ecc11c1b5b6e` unchanged,
-`2481e4553f6c` absent. Live banner `token-ids=a8f329c534d7:zach`, no
-`UNRESTRICTED-SCOPE LEGACY MODE` — positive control: 6 historical banners in Loki, so that grep
-CAN match. Mapped credential → **200**; legacy credential → **401, dead**; **both hosts read
-200**. PR #1187 (`9-before-8` sequencing) merged 2026-09-01T03:17:40Z; that ordering is now
-history, since both ranks are done.
+**`be3084f0`** on trunk, confirmed an ancestor of `origin/trunk`. Token file **354 B → 295 B**,
+a pure line deletion: surviving mapped row `ecc11c1b5b6e` unchanged, `2481e4553f6c` absent.
+Live banner `token-ids=a8f329c534d7:zach`, no `UNRESTRICTED-SCOPE LEGACY MODE` — positive
+control: 6 historical banners in Loki, so that grep CAN match. Mapped credential → **200**;
+legacy credential → **401, dead**; **both hosts read 200**.
 
-🔴 **Claim state (carried forward, updated 2026-09-02):** `cairn-phase3-1` is **NOT held**
-(re-verified 2026-09-01). `cairn-phase1-migration` was held for the phase-1 work and was
-**released**. `cairn-phase3-11` was held for the rank-11 work and is **released**.
-`cairn-phase3-16` was held for the rank-16 work and is **now RELEASED** — merged, shipped
-and verified.
+🔴 **Claim state (updated 2026-09-04):** `cairn-phase3-1` is **NOT held**.
+`cairn-phase1-migration`, `cairn-phase3-11`, `cairn-phase3-16`, `cairn-phase3-25` and
+**`cairn-phase3-22`** were held for their ranks and are all **released**.
 
-⚠ **The pod counts above are the 2026-09-01 execution record and have MOVED** — 205 entries as of
-2026-09-03 after four orphaned entries were rescued onto it (rank 23). Carried verbatim because it
-is the phase-1 evidence, not a current reading.
+⚠ **The pod counts above are the 2026-09-01 execution record and have MOVED** — **205 entries**
+as of 2026-09-03. Carried verbatim because it is the phase-1 evidence, not a current reading.
+
+**2026-09-03 — ranks 16 / 20 / 18 closed, shipped and verified on both hosts:** `9519781f`
+(the prescribed READ path goes through the pod), `2c6b2ac9` (the third frozen read surface
+routed), `77dc3642` (`drift-check` fires on DISAGREEMENT — **rc 24 → 17 → 0**), plus `ac09c18`
+(the cairn skill + `cairn doctor`) and `b9b2493d` (espanso gate relaxed per operator ruling).
+🔴 **`drift-check` exiting 0 took BOTH halves** — the declared-expectation change cleared rc 24,
+and **fast-forwarding the laptop's `homelab-talos` (26 behind) cleared rc 17**; round 1's audit
+was right that the first alone would not stop the toasts.
 
 ---
 
-**2026-09-03 — THREE RANKS CLOSED, SHIPPED AND VERIFIED ON BOTH HOSTS.**
+**2026-09-03/04 — RANKS 25 AND 22 CLOSED. THREE PRs MERGED, ALL SHIPPED OR READY.**
 
 | rank | what | squash | verified by |
 |---|---|---|---|
-| **16** | the prescribed READ path goes through the pod | `9519781f` | `cairn append` → `cairn recall --repo` surfaces it in the same session, positive control on the grep |
-| **20** | the third frozen read surface routed | `2c6b2ac9` | constant DELETED (0 code-level definitions), resolver wired, by content |
-| **18** | `drift-check` fires on DISAGREEMENT, not on the bare state | `77dc3642` | **rc 24 → 17 → 0** |
-| — | cairn skill + `cairn doctor` + the store-root ledger | `ac09c18` | skill live in the listing; doctor found a real defect on run 1 |
-| — | espanso gate relaxed per operator ruling | `b9b2493d` | red at base, green at head, consumer suites 596 |
+| — | unbreak `main` (the espanso live guard) | **`df02571f`** (#1262) | red reproduced at `a36d3a40`, both tiers green on the merged tree |
+| **25** | `CPU_MON_TEMP_THRESHOLD` host-conditional | **`d544cdad`** (#1261) | **live consumer on both hosts**: workbench 88 (no backlight ⇒ isLaptop=false), laptop 92 (`intel_backlight` ⇒ true) |
+| **22** | the deadman that reports a RED `main` | **`454db6fd`** (#1274) | 5 audit rounds to a clean round; sandbox tier green on the merged tree |
 
-🔴 **`drift-check` now exits 0** — it took BOTH halves: the declared-expectation change cleared
-rc 24, and fast-forwarding the laptop's `homelab-talos` (26 behind) cleared rc 17. Round 1's
-audit was right that the first alone would not stop the toasts.
+🔴 **The rank-25 check measured the DISCRIMINATOR as well as the value on each host.** A
+conditional that had silently collapsed to one value is the failure mode #1261 exists to
+prevent, and in a diff it looks identical to success — reading only the two numbers would not
+have separated them.
 
-**IN FLIGHT, nothing else outstanding from this session:**
-- **devrc#1262** — unbreaks `main`, which is **RED right now** (`test_recommend_terms_resolve_on_the_live_config`, confirmed on plain `origin/main` with nothing merged). Merged-tree gate RUNNING at hand-off time. Diff is **one test file**; `espanso_detect.py`, `_AMBIGUOUS_TERM_OWNER`, `_EXISTING_RESOLUTIONS` and the `>= 26` floor have **0** changed lines.
-- **devrc#1261** — rank 25. Gated on the merged tree: **exactly 1 failure on both tiers, and it is the inherited espanso one; 0 cpu_monitor failures.** Blocked only by `main`. Merge after #1262, then **delete `laptop/cpu-mon-temp-92` (`44ebd9c6`)** — it sets the SHARED line to 92 and would reintroduce the value #1261 exists to remove.
+⚠ **The laptop precondition #1261 was written for was ALREADY GONE** — re-measured 2026-09-03:
+clean tree, `nix/home.nix:2197` back at the shared `88`. So the rc-7 block was not what the
+merge relieved. #1261 still earns its place: it stops the edit being re-made.
+
+⚠ **`ship.sh` flagged the workbench DIRTY-AND-IN-THE-ARTIFACT** — nix reads `flake.lock` and
+`nix/programs/alacritty/default.nix` at eval/build time and both were uncommitted, so that
+generation is `origin/main` **PLUS** them while the laptop is clean. **Both hosts at the same
+SHA are NOT running the same ARTIFACT.** Pre-existing WIP from another thread; untouched.
 
 ⚠ **The doc's Goal is met for READS and APPENDS, not for CREATES.** The store has no create
 route; that is rank 24 and **devrc#1254 (another session) owns it** — do not duplicate it.
@@ -544,6 +546,63 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 - **Leading hypothesis:** `claude/RULES.md`'s *"prefer deterministic/structural fixes over prose"* applied to me. I fixed the instance under a "relax the gate" ruling; the class needed the mechanism.
 - **Next probe:** none. Recorded so the pattern is visible, not to be re-derived.
 
+### RESOLVED BY MEASUREMENT — the 2 gate failures on the #1261 merged tree are a LOAD FLAKE, not the change
+- **Symptom + exact repro:** `nix develop <wt> --command bash <wt>/scripts/gate.sh --tier both <wt>`
+  on `main`+#1261 → `scripts/tests`: **`2 failed, 11999 passed, 3 warnings in 1091.38s`**. Both are
+  `subprocess.TimeoutExpired` at a **300 s** cap with `returncode: -9`, in
+  `scripts/tests/test_run_tests_floors.py::test_a_target_far_above_its_floor_is_named` and
+  `::test_a_non_pytest_target_that_leaks_is_named_and_red` — each spawns a **NESTED full
+  `run-tests.sh`**. Neither is an assertion failure.
+- **Observed (with values):** the discriminator is WHOSE time moved, per `claude/RULES.md`.
+  `scripts/collector/tests` (273 tests, touched by NEITHER PR) ran **4.49 s** in the #1262 gate
+  and **177.26 s** in the #1261 gate — **39×**. `collector/opencode` 9.43 → 14.61 s;
+  `collector/claude` 2.66 → 4.46 s. Load average **22–29** throughout, with `opencode` and
+  `npm exec` processes from OTHER sessions on the box. Load inflating every target is the
+  signature of contention; a failed assertion inflates exactly one.
+- **Ruled out:** that #1261 caused it — its diff is `nix/home.nix` plus one new test file, and
+  neither failing test reads either. via: code
+- **Ruled out:** that the two tests are broken — the same two passed in the #1262 run of the same
+  target, in **both** tiers (sandbox `collected=21007 failed=0`). via: measurement
+- **Ruled out:** that it is #1261's own new tests costing the time — they add 6 tests measured at
+  **0.22 s** for the whole file. via: measurement
+- **Leading hypothesis:** a **fixed 300 s subprocess cap wrapped around a nested full suite** is a
+  timing dependency that cannot survive a loaded box. `claude/RULES.md` says fix the timing
+  dependency rather than re-run, so re-running until green is the wrong close.
+- **Next probe:** run `scripts/tests/test_run_tests_floors.py` alone on a quiet box (load < 5). If
+  it passes, the durable fix is to scale that cap with load, or shrink the nested suite those two
+  tests build, rather than raising the number.
+
+### RESOLVED BY FIX — rank 22's deadman took FIVE audit rounds, and every round but the last found a defect the PREVIOUS round's fix introduced
+- **Symptom + exact repro:** none outstanding. Recorded because the SHAPE recurred four times and a round cap would have shipped a lying deadman.
+- **Observed (with values), the ladder:**
+  | round | findings | payload lines the fix changed |
+  |---|---|---|
+  | 1 | 4 🔴, 3 🟡, 2 nits | +90/−8 script, +13/−4 nix |
+  | 2 | 4 🟡, 3 🟢 — **4 were false claims in round 1's own commit message** | ~60 executable |
+  | 3 | 4 🟡, 1 🟢 — **6 mutants had survived round 2** | 1 executable (`\|\| die`) |
+  | 4 | 1 🟡 — a SPELLED guard, the third in this PR | **0** |
+  | 5 | **CLEAN — ladder ends** | — |
+- 🔴 **The worst defect was shipped-and-green twice.** Round 1's `Environment=NIX_CONFIG=experimental-features = nix-command flakes` is WHITESPACE-SPLIT by systemd (measured with `systemd-analyze verify`: 3 "Invalid environment assignment" lines, leaving the bare word `experimental-features`), so `nix` hard-errored on EVERY invocation — and `tier_verdict` classified a non-zero exit with no `RESULT:` line as **`red`**, so the unit would have named an innocent author on a DND-defeating toast every 4h. 🔴 **`nix/home.nix` ALREADY documented that whitespace hazard ~1100 lines above the edit.**
+- 🔴 **Three SPELLED guards, each fixed and the class recurring:** `"worktree add" not in src` matched its own explanatory comment; `"flock" in src` was satisfied by a mutant that kept the word and deleted the branch; and a stderr regex matched **bash's translated, version-specific** message text — MEASURED, with the sanitiser deleted: `en_US` 1 failed, **`de_DE` 40 passed (SURVIVED)**, bash 5.2 40 passed. Fixed structurally as `assert r.stderr == ""`, which kills it in en_US, de_DE and fr_FR. via: measurement
+- 🔴 **Twice, the fix for a vacuous test was itself vacuous.** Round 2 replaced `rc in (11,12)` with a counter assertion and wrote *"EVERY EXPECTED VALUE IS DISTINCT"* over a table where `1` appears three times — and `1` is exactly what the broken path yields, because an arithmetic abort makes `$(read_streak)` empty and bash evaluates `$(( + 1 ))` as **1**. Deleting the sanitiser SURVIVED a fully green suite. via: measurement
+- **Ruled out:** that a 2-3 round cap would have been adequate — round 3 found a corrupt `blind-streak` (`08`, all-digits but OCTAL) that made a failed clone AND a failed fetch print `✅ GREEN — origin/main  passed both sandbox tiers` and exit 0, on an EMPTY sha. via: measurement
+- **Next probe:** none. Ladder closed clean at round 5.
+
+### RESOLVED BY MEASUREMENT — the HERMETIC tier is load-flakeable too, and the retry is what covers it
+- **Symptom + exact repro:** `nix build <wt>#checks.x86_64-linux.pytests` on `dc856152` at box load 48 → **1 failed**, `test_live_cotenants_does_not_count_this_process` — a test in an already-flaky family, in a subsystem the branch does not touch.
+- **Observed (with values):** the discriminator was WALL TIME, not a re-run. Against the previous PASSING sandbox run of the same tree, five UNTOUCHED targets inflated 11×–20× (`task-spec-drafter` 4.4s→89.6s, `validation` 4.6s→81.3s, `repo-cos` 2.4s→39.6s, `session-analysis` 1.7s→22.9s, `mail-actions` 0.8s→8.6s) while the target that actually failed moved only **1.2×**.
+- **Ruled out:** that it was the change — the identical derivation re-executed at load 13 returned `collected=21082 passed=21079 failed=0`, and a failed derivation is not cached, so that was a real re-run. via: measurement
+- **Ruled out:** that the hermetic tier is immune to load — this is the counter-example; the earlier claim was "green under that load ONCE". via: measurement
+- **Leading hypothesis:** the sandbox shares the box, so it is much better than the dev-host tier here and not perfect. Recorded in `main-green-check.sh`'s header as the reason its single retry is load-bearing rather than belt-and-braces.
+- **Next probe:** none for the deadman. The underlying flaky family is rank 19.
+
+### 🔴 OPEN — a test depends on GLOBAL /tmp state and goes red for everyone on the host
+- **Symptom + exact repro:** `nix develop . -c python3 -m pytest scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py -k body_file_written_by_a_heredoc` fails on the DEV HOST whenever `/tmp/body.md` exists, and passes in the sandbox where `/tmp` is clean.
+- **Observed (with values):** 2026-09-03, `/tmp/body.md` existed — 21,181 bytes, mtime 19:41, written by ANOTHER session doing real clawgate work, content starting `## What and why` with no `## Acceptance criteria` heading. The test asserts a heredoc-written body is `allowed` using the hardcoded shared path `/tmp/body.md`; with the file present the guard reads the real file, finds no AC heading, and denies.
+- **Ruled out:** that `main` was red — the sandbox tier passed the same file on the same trees throughout. via: measurement
+- **Ruled out:** deleting `/tmp/body.md` as the fix — it is another session's live working file. via: doc
+- **Next probe:** none needed. **Closing condition:** a merged devrc PR switching that test to pytest's `tmp_path`.
+
 ## Next steps (ranked)
 
 🔴 **Numbering is UNCHANGED on purpose** — the rank is half a claim's identity
@@ -693,30 +752,23 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     that the loud refusal is the permanent answer, **or** a merged PR doing a reviewed (not
     mechanical) pass. Either closes it; do not leave it open as a vague cleanup.
     forcing: none
-22. 🔴 **A direct-to-main commit RED-ed `main` and nothing caught it.** Repo `devrc`.
-    `a720d30d` ("espanso", one line, no PR) changed `:acq`'s label so `recom`/`recommend`
-    matched two snippets and resolved to `None`, failing
-    `test_espanso_detect.py::test_live_existing_resolutions_not_made_ambiguous` on **both**
-    tiers. Fixed 2026-09-02 by **#1247** (squash `b9b2493d`) on the operator's ruling *"the gate
-    is overly strict, relax it"* — two `_AMBIGUOUS_TERM_OWNER` entries declaring `:rna` the
-    owner, which is the mechanism the detector already provides; `nix/home.nix` and
-    `_EXISTING_RESOLUTIONS` untouched. ⚠ **The residual is recorded and NOT closed:** the lookup
-    is exact-string, so `rec`, `reco` and `recomm` still resolve to `None`. **The durable item
-    is the detection gap, not the fix:** with branch protection off (a live operator decision),
-    a direct commit can red `main` and the only detector is whoever next runs the gate by hand —
-    here, this session, hours later. **Closing condition:** a recorded decision that manual
-    gating is accepted while protection is off, or a merged PR adding a cheap post-push check.
-    🔴 **RECURRED 2026-09-03, so the rate is measured rather than hypothetical: TWICE in one
-    session.** `a451abc0` ("espanso", direct to main, no PR) swapped `:acq`'s `label` and
-    `replace`, which red-ed `main` a second time — and BOTH times the only detector was a human
-    running the gate by hand, hours later, incidentally. ⚠ **The second break was a GUARD WHOSE
-    PREMISE DIED, not a regression** (the collision it asserted was gone at the source), so a
-    detector that only greps "did attribution regress" would have missed it — whatever is built
-    must run the REAL suite, not a distilled check. **Concrete cheap option, proposed with
-    evidence:** trigger `scripts/collector/keylog/tests/test_espanso_detect.py` (0.3 s, hermetic
-    apart from reading `nix/home.nix`) whenever `nix/home.nix`'s espanso `matches` block changes
-    — it would have caught both, at authoring time.
-    forcing: gate — `main` was red for hours, twice, and no mechanism reported it
+22. ✅ **DONE 2026-09-04 — the detector is BUILT, audited to a clean round, and merged.**
+    #1274 squash **`454db6fd`**; `scripts/main-green-check.sh` + 40 tests + a systemd
+    user service/timer. On a 4h timer it fetches and, only if the mainline tip MOVED since
+    the last recorded verdict, runs the real hermetic suite against it: rc 0 GREEN (passed /
+    already-verified / flake), **rc 10 RED REPRODUCED** (the toast), rc 11 COULD NOT MEASURE
+    (quiet, laddered), **rc 12 BLIND** (6 consecutive unmeasured, ~24h). Master switch
+    `enableMainGreenDeadman` gates only the `timers.target` wiring.
+    🔴 **It runs the HERMETIC tier, and that is a measurement not a preference:** on one tree
+    the dev-host tier reported 4 failures and the sandbox 0, all four `TimeoutExpired` at a
+    fixed 300s cap under load 22-29. Wiring a DND-defeating toast to that tier would have
+    built the permanently-red gate `RULES.md` forbids.
+    ⚠ **Rank 22's own proposed fix was VOID by the time it was built** — it proposed
+    triggering `test_espanso_detect.py` on a `nix/home.nix` change, which only works because
+    those tests read the file at test time; **#1265 deletes all nine live-config tests and
+    `_live_det()`**. The shipped design is independent of that.
+    **Do not re-work.** Full ladder in the open investigation below.
+    forcing: none
 
 23. 🔴 **THE FREEZE WAS INCOMPLETE AND SIX WRITES LANDED IN THE DEAD STORE — closed 2026-09-03,
     but the WRITER is not fixed.** Found by `cairn doctor` on its first live run (#1255).
@@ -791,17 +843,20 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     that seeding is permanently the only create path, with `subsystem-index` saying so).
     forcing: regression — the missing route is the upstream cause of rank 23
 
-25. 🔶 **IN FLIGHT: devrc#1261** — **`CPU_MON_TEMP_THRESHOLD` is host-specific pretending to be shared.** Repo `devrc`,
-    `nix/home.nix`. The laptop carried an UNCOMMITTED `88 → 92` edit that blocked EVERY
-    `ship.sh` fast-forward to it (rc 7) — the documented "skipped host silently stops receiving
-    changes while looking healthy" failure. Preserved as branch `laptop/cpu-mon-temp-92`
-    (`44ebd9c6`, pushed, content verified from the WORKBENCH rather than the machine that made
-    it) and upstream taken so the host could converge. It is one shared line whose own comment
-    says *"This laptop runs hot at idle"* — which is why it keeps coming back as a local edit.
-    **Operator decision 2026-09-03: split it host-conditional**, 92 laptop / 88 workbench.
-    **Closing condition:** a merged devrc PR doing that split, after which the preserved branch
-    is deleted.
-    forcing: gate — while it exists uncommitted, the laptop receives nothing
+25. ✅ **DONE 2026-09-03 — merged, shipped and VERIFIED LIVE ON BOTH HOSTS.** #1261 squash
+    `d544cdad`; `nix/home.nix` now carries the host-conditional expression, and `ship.sh`
+    returned **rc 0** with both hosts at `79338677`. 🔴 **Verified against the DEPLOYED
+    CONSUMER, not the source** — `systemctl --user show cpu-monitor -p Environment`:
+    workbench **88** with `/sys/class/backlight/` **ABSENT** (isLaptop=false); laptop **92**
+    with `intel_backlight` **PRESENT** (isLaptop=true). Both the value AND its discriminator
+    measured on each host, so a conditional that had silently collapsed to one value could
+    not have passed. Regression matrix: **4 RED at `df02571f`, 6/6 green at head**.
+    Preserved branch `laptop/cpu-mon-temp-92` **DELETED** — recovery sha
+    `44ebd9c63091412b3e5fef279ace6e6dafe2aa95`.
+    ⚠ **The uncommitted laptop edit this item was written for was ALREADY GONE** by the time
+    the work ran: re-measured 2026-09-03, clean tree, `nix/home.nix:2197` back at the shared
+    `88`. So the rc-7 block was not what the merge relieved. **Do not re-work.**
+    forcing: none
 
 26. **`present/measure.py` resolves the frozen mirror, and its provenance string is false.**
     Repo `devrc`. Found by #1255's ledger sweep — `Env.live()` resolves the mirror for the
@@ -1656,10 +1711,76 @@ on an unpinned one — then to widen that sweep past its own prescribed hunk whe
   in the shared scratchpad mid-session. Nothing in the repo was touched. Name scratch dirs
   per-agent.
 
+- 🔴 **`gate.sh` run OUTSIDE the dev shell is a FALSE RED, and it reads like a real one.**
+  Measured 2026-09-03: `bash scripts/gate.sh --tier both <worktree>` from a plain shell printed
+  `FAIL pytest exit=3` and `GATE: RESULT=FAIL exit=1` — but **no test ran at all**. The content
+  says so explicitly: `run-tests: FATAL — required tool(s) missing from PATH: logrotate` …
+  *"This is a MISSING ENVIRONMENT, not a code failure — nothing in the repo is broken."* The
+  node tier passed in the same run (1449/1449), which makes the pytest line look like a
+  targeted failure rather than a refusal to start. **Always invoke it as
+  `nix develop "<worktree>" --command bash "<worktree>/scripts/gate.sh" … "<worktree>"`.** The
+  script prints that exact command in its own error; read the content, never the verdict line
+  alone.
+- 🔴 **The base clone sits on `main` and CLAUDE.md forbids committing to `main` in either host
+  checkout — but `handoff_doc.py` commits wherever the checkout sits** (its own docs say so, and
+  no PreToolUse hook sees the commit because it runs git from inside Python). So this doc was
+  landed from a **worktree on `docs/handoff-cairn-phase3-rank25`**, not from
+  `~/workspace/devrc`. Check `git branch --show-current` before running the write gate here.
+- **`clawgate_handoff.sh resolve` returned exit 5 (nothing resolved) for this session**, with
+  its positive control confirming the board is reachable (2 links for a different session). Per
+  the skill that is **not** a clean bill of health — a wrong session id also answers 200 with an
+  empty array — so **no `clawgate-task:` field was written**. The doc's existing
+  `clawgate-task: 371` was already readable (`field` → exit 0) and is preserved by the merge.
+
+- 🔴 **`gate.sh` run OUTSIDE the dev shell is a FALSE RED, and it reads like a real one.**
+  Measured 2026-09-03: `bash scripts/gate.sh --tier both <worktree>` from a plain shell printed
+  `FAIL pytest exit=3` and `GATE: RESULT=FAIL exit=1` — but **no test ran at all**. The content
+  says so: `run-tests: FATAL — required tool(s) missing from PATH: logrotate` … *"This is a
+  MISSING ENVIRONMENT, not a code failure — nothing in the repo is broken."* The node tier
+  passed in the same run (1449/1449), which makes the pytest line look like a targeted failure
+  rather than a refusal to start. Always invoke it as
+  `nix develop "<worktree>" --command bash "<worktree>/scripts/gate.sh" … "<worktree>"`.
+- 🔴 **The base clone sits on `main`, CLAUDE.md forbids committing to `main` in either host
+  checkout, and `handoff_doc.py` commits wherever the checkout sits** — it runs git from inside
+  Python, so no PreToolUse hook sees the commit. Land the doc from a worktree on a branch.
+  Check `git branch --show-current` before running the write gate here.
+- **`clawgate_handoff.sh resolve` returned exit 5 (nothing resolved)** for this session, with its
+  positive control confirming the board is reachable (2 links for a different session). Per the
+  skill that is **not** a clean bill of health, so **no `clawgate-task:` field was written**; the
+  existing `clawgate-task: 371` was already readable and is preserved by the merge.
+
 ## How to verify
 
 ```bash
-# ---- ranks 16/18/20 are CLOSED. All three are verified BY CONTENT (a squash is never an ancestor).
+# 1. main is no longer red — the exact test that was failing, on real main
+cd /home/zach/workspace/devrc && git fetch origin
+nix develop . -c env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  scripts/collector/keylog/tests/test_espanso_detect.py -q -p no:randomly
+# expect: 69 passed (was: 1 failed, 69 passed at a36d3a40)
+
+# 2. #1262 landed by CONTENT, not by ancestry (a squash is never an ancestor)
+gh pr view 1262 --json state,mergedAt,mergeCommit
+git log --oneline -1 origin/main    # df02571f or later
+
+# 3. the two-tier gate, on the MERGED tree, one nix build at a time
+nix develop "<worktree>" --command bash "<worktree>/scripts/gate.sh" --tier both "<worktree>"
+nix build "<worktree>#checks.x86_64-linux.pytests"   -L --no-link
+nix build "<worktree>#checks.x86_64-linux.nodetests" -L --no-link
+
+# 4. after #1261 ships: the threshold really differs per host
+grep -n CPU_MON_TEMP_THRESHOLD /home/zach/workspace/devrc/nix/home.nix
+ssh zach@10.42.0.100 'systemctl --user show cpu-monitor -p Environment' | tr ' ' '\n' | grep TEMP
+# expect 92 on the laptop, 88 on the workbench
+
+# 5. the superseded branch is gone
+git ls-remote --heads origin laptop/cpu-mon-temp-92   # expect empty
+```
+
+🔴 **CARRIED FORWARD — the ranks 16/18/20/23 checks. `How to verify` is a REPLACE heading, so
+these are deleted by any update that does not re-state them.** All verified BY CONTENT (a
+squash is never an ancestor).
+
+```bash
 python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc --list | head -6
 #   expect `store: /home/zach/.cache/subsystem-store` PLUS `stamp:` lines. A store ending
 #   `.claude/analyze-service-index` means a host that never took #1233.
@@ -1678,8 +1799,4 @@ printf '' >> "$M/civitai/model-retention.md" && echo "🔴 STILL WRITABLE" || ec
 cairn ls-entries | wc -l                                          # 205 (was 201 before the rescue)
 ls ~/.local/share/cairn-orphans-2026-09-03/                       # the preserved copies — do NOT delete
 ls ~/.local/share/cairn-orphans-2026-09-03/shared-divergent/      # the 10 two-way divergent entries
-
-# ---- IN FLIGHT at hand-off: `main` is RED until #1262 lands. Confirm before blaming your branch:
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/collector/keylog/tests/test_espanso_detect.py -q -p no:cacheprovider
 ```
