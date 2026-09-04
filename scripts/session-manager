@@ -3929,7 +3929,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     #
     # Pinned as a RELATIONSHIP by
     # `test_the_repo_probe_is_issued_AFTER_every_other_read_on_every_host` (the
-    # order) and `test_the_BUDGET_starves_the_repo_probe_and_never_the_ledger`
+    # order) and `test_the_BUDGET_starves_the_repo_probe_and_NEVER_the_ledger`
     # (the consequence). Both fail if a SIXTH read is inserted ahead of the
     # ledger, which is the shape this regression arrived in.
     for host in hosts:

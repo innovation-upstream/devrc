@@ -13925,28 +13925,40 @@ def test_the_contract_docs_budget_numbers_are_PINNED_to_the_constants():
         % (m.group(1), sm.COLLECT_CAP))
 
 
-def test_every_TEST_NAME_the_contract_cites_actually_EXISTS():
-    """🔴 A DOC THAT NAMES A GUARD IS MAKING A CLAIM ABOUT COVERAGE, and a name
-    that resolves to nothing is the worst kind: it reads as "this is pinned" and
-    stops the next person looking. This guard was written because the round-3
-    fix introduced exactly that — the contract cited
-    `test_the_per_host_call_ORDER_puts_the_optional_probe_LAST`, a name that had
-    been changed during the same change and never existed in the suite.
+def test_every_TEST_NAME_the_docs_and_the_SCRIPT_cite_actually_EXISTS():
+    """🔴 A DOC OR COMMENT THAT NAMES A GUARD IS MAKING A CLAIM ABOUT COVERAGE,
+    and a name resolving to nothing is the worst kind: it reads as "this is
+    pinned" and stops the next person looking.
 
-    Resolved against the module's own symbol table, so a rename that misses the
-    doc fails here rather than rotting silently.
+    Written because the round-3 fix introduced exactly that TWICE in one change
+    — the contract cited `test_the_per_host_call_ORDER_puts_the_optional_probe_
+    LAST` (renamed mid-change, never in the suite) and the script's own
+    second-pass comment cited the budget guard with the wrong casing. 🔴 BOTH
+    SURFACES ARE CHECKED, because the first version of this guard read the doc
+    only and was blind to the comment two files away that had the same defect.
+
+    Resolved against the module's own symbol table, so a rename that misses
+    either surface fails here rather than rotting silently.
     """
-    cited = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", _contract_text()))
-    assert cited, "the contract cites no test names at all any more"
+    with open(_SCRIPT, encoding="utf-8") as fh:
+        script = fh.read()
     here = set(globals())
-    missing = sorted(n for n in cited if n not in here)
-    assert not missing, (
-        "payload-contract.md cites test(s) that do not exist in "
-        "test_session_manager.py: %r" % missing)
-    # POSITIVE CONTROL on the extraction: it really pulled real names out, and
-    # it can also SEE a name that is absent.
-    assert "test_the_contract_docs_budget_numbers_are_PINNED_to_the_constants" \
-        in cited, sorted(cited)
+    surfaces = {"payload-contract.md": _contract_text(),
+                "scripts/session-manager": script}
+    seen_total = 0
+    for label, text in surfaces.items():
+        cited = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", text))
+        assert cited, "%s cites no test names at all any more" % label
+        seen_total += len(cited)
+        missing = sorted(n for n in cited if n not in here)
+        assert not missing, (
+            "%s cites test(s) that do not exist in test_session_manager.py: %r"
+            % (label, missing))
+    # POSITIVE CONTROL on the extraction: it really pulled real names out of
+    # BOTH surfaces, and it can also see a name that is absent.
+    assert seen_total >= 4, seen_total
+    assert "test_the_repo_probe_is_issued_AFTER_every_other_read_on_every_host" \
+        in re.findall(r"`(test_[A-Za-z0-9_]+)`", script)
     assert "test_definitely_not_defined_anywhere" not in here
 
 
