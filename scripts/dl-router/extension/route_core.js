@@ -215,7 +215,16 @@ export function discordAliasKey(channelId) {
 // re-encoded to webp, while the original is what the message's own
 // cdn.discordapp.com anchor points at. So `info.srcUrl` on an image names A
 // THUMBNAIL, not the file that was posted.
-// (A <video> is unaffected -- its src is already the origin.)
+//
+// A <video> is usually unaffected -- every video in the live route log was
+// ALREADY on the origin host, so the rewrite below does not fire for one.
+// But "usually" is the whole claim: video was measured at ZERO points, this
+// file's own sibling extension treats a proxy-host video src as an ordinary
+// shape, and if one occurs the rewrite DOES fire on it. There is no fallback
+// if that is wrong -- `service_worker.js` hands the result straight to
+// `chrome.downloads.download` with no retry on the original src -- so a wrong
+// rewrite there fails the download rather than degrading. Measure before
+// widening anything here on the strength of the image result.
 //
 // THAT ANCHOR IS A SIBLING, NOT AN ANCESTOR -- so Chrome never hands it to
 // us. MEASURED 2026-09-03 on 3 image attachments across 2 channels and 2
@@ -232,9 +241,18 @@ const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
 // `ex`/`is`/`hm` signature -- is carried across unchanged, because the
 // signature is what authorises the fetch.
 //
-// The empty-named key is real, not defensive: a live proxy URL carried one
-// (Discord emits a stray `&`), and it was in the rewrite that MEASURED 206.
-// Dropping it keeps this function's output byte-identical to what was probed.
+// THE EMPTY-NAMED KEY DOES NOT DO WHAT AN EARLIER VERSION OF THIS COMMENT
+// CLAIMED, and the correction is the point. It said a live proxy URL carried a
+// stray `&` and that this entry is what removes it. MEASURED: it is not. The
+// urlencoded parser SKIPS empty sequences, so `?&ex=1` parses to `[[ex,1]]`
+// with no empty-named entry to delete -- the stray `&` disappears because
+// `searchParams.delete()` re-serialises the whole query, which happens with or
+// without this entry.
+//
+// It is kept because it DOES bite one shape the parser does keep: `?=value`
+// yields a genuine `["", "value"]` pair, which would otherwise ride onto the
+// origin URL. That shape has never been observed live; this is defensive, and
+// saying so is the difference between a guard and a guard nobody can price.
 const DISCORD_PREVIEW_RESIZE_PARAMS = ["format", "width", "height", "quality", ""];
 
 /**
@@ -359,13 +377,13 @@ export function ledgerSourceKey(url) {
  * preferring `linkUrl` in general would turn every linked thumbnail on every
  * site into a download of wherever the link pointed.
  *
- * KNOWN UNHANDLED VARIANT, stated rather than guessed at: if Discord ever
- * puts a FULL-SIZE PROXY url on the anchor (`media.discordapp.net?width=4096`)
- * instead of the origin, this returns `srcUrl` and the downscaled copy is still
- * what gets saved. Widening to "prefer the anchor whenever the paths match"
- * would cover it, but nothing in the live corpus shows that shape, and a
- * URL cannot be read for pixel size -- so the narrow rule stands until a real
- * instance turns up.
+ * THE VARIANT THIS USED TO CALL UNHANDLED IS NOW HANDLED -- do not widen the
+ * rule to "cover" it. If Discord puts a FULL-SIZE PROXY url on the anchor
+ * (`media.discordapp.net?width=4096`) instead of the origin, that `linkUrl`
+ * fails the origin-host test below, which no longer returns `srcUrl` but
+ * `originalFromPreview(srcUrl)` -- the full-quality origin, i.e. the right
+ * answer. Widening to "prefer the anchor whenever the paths match" would
+ * REPLACE that correct answer with a downscaled proxy copy.
  *
  * THE `linkUrl` PATH IS DEAD ON DISCORD ITSELF, and the fallback is what
  * actually runs. MEASURED 2026-09-03 (see DISCORD_PREVIEW_HOST above): a
@@ -754,7 +772,18 @@ export function correlateCapture(item, captures, opts = {}) {
   const urls = new Set([item?.url, item?.finalUrl].filter(Boolean));
   if (urls.size) {
     for (const c of list) {
-      if ((c.href && urls.has(c.href)) || (c.mediaSrc && urls.has(c.mediaSrc))) {
+      // `downloadUrl` is the THIRD field, and it exists because tier 1 is
+      // otherwise structurally impossible whenever the extension downloads a
+      // url the page never served. `preferOriginalUrl` rewrites a Discord
+      // proxy src to the origin host, so the DownloadItem's url matches
+      // neither `href` nor `mediaSrc` -- both of which hold what was on the
+      // element -- and every Discord attachment fell to tier 3, the tier this
+      // file documents as the fragile one. `onMenuClicked` stamps the url it
+      // actually hands to `chrome.downloads.download` here; the original two
+      // fields are left alone so nothing that reads them changes.
+      if ((c.href && urls.has(c.href))
+        || (c.mediaSrc && urls.has(c.mediaSrc))
+        || (c.downloadUrl && urls.has(c.downloadUrl))) {
         return { capture: c, tier: 1 };
       }
     }

@@ -561,6 +561,54 @@ test("the menu saves the original even when Chrome offers NO link", async () => 
   });
 });
 
+test("a rewritten menu download stamps the CLICKED capture, not the newest",
+  async () => {
+    // Pins the stamp's matching rule. Two images captured in one message; the
+    // OLDER one is right-clicked. Taking "the most recent capture" here would
+    // reproduce the exact tier-3 defect the stamp exists to remove, and would
+    // still leave every assertion about "a capture was stamped" green -- so
+    // this asserts WHICH capture carries the url.
+    reset();
+    const ch = "119283746551234567";
+    const proxyA = `https://media.discordapp.net/attachments/${ch}`
+      + "/998877665544332211/a.png?ex=1&is=2&hm=3&format=webp&width=550";
+    const proxyB = `https://media.discordapp.net/attachments/${ch}`
+      + "/998877665544332299/b.png?ex=1&is=2&hm=3&format=webp&width=550";
+    SW.state.captures = [
+      { href: proxyA, mediaSrc: proxyA, pageUrl: "msg-A", ts: 10 },
+      { href: proxyB, mediaSrc: proxyB, pageUrl: "msg-B", ts: 99 },
+    ];
+    await SW.onMenuClicked({
+      menuItemId: SW.MENU_ID,
+      mediaType: "image",
+      srcUrl: proxyA,
+      pageUrl: "https://discord.com/channels/1/2",
+    }, {});
+
+    const expected = `https://cdn.discordapp.com/attachments/${ch}`
+      + "/998877665544332211/a.png?ex=1&is=2&hm=3";
+    assert.deepEqual(calls.downloads[0], { url: expected });
+    // The clicked capture carries it...
+    assert.equal(SW.state.captures[0].downloadUrl, expected);
+    // ...and the newer, unrelated one is untouched.
+    assert.equal(SW.state.captures[1].downloadUrl, undefined);
+  });
+
+test("an UNREWRITTEN menu download stamps nothing", async () => {
+  // The stamp is gated on the url having actually changed. A plain link
+  // download already matches tier 1 on `href`; writing a redundant field
+  // would be silent state nobody asked for.
+  reset();
+  SW.state.captures = [{
+    href: "https://example-site.test/f.mp4",
+    mediaSrc: "https://example-site.test/f.mp4",
+    pageUrl: "p", ts: 10,
+  }];
+  await SW.onMenuClicked({ menuItemId: SW.MENU_ID,
+    srcUrl: "https://example-site.test/f.mp4" }, {});
+  assert.equal(SW.state.captures[0].downloadUrl, undefined);
+});
+
 test("a Discord video is downloaded directly, never handed to yt-dlp", async () => {
   // `mediaType === "video"` exists for players whose src is a `blob:`. A CDN
   // attachment is a direct file, so that clause would send yt-dlp at

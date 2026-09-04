@@ -205,11 +205,29 @@ media = [
 ]
 ```
 
-An image's own `src` is often a **downscaled copy from a resizing proxy**, with
-the original on the wrapping `<a>`; a video's `src` already *is* the original.
-🔴 **Never reach the original by rewriting a proxy URL's host** — the two hosts
-carry different signature parameters, so the rewrite drops a signature belonging
-to the other host. The anchor's href is already signed for where it points.
+An image's own `src` is often a **downscaled copy from a resizing proxy**.
+🔴 **Do NOT expect the original on a wrapping `<a>` — on the chat site this was
+built for there is no wrapping anchor at all.** MEASURED 2026-09-03 on the live
+client, 3 image attachments across 2 channels and 2 message shapes: the number
+of ancestor `<a>` elements between the image and its message was **0 of 3**. The
+origin anchor exists in the same message but as a **sibling**, and a browser
+fills the context menu's `linkUrl` only from an ANCESTOR link — so a rule that
+waits for one waits forever.
+
+🔴 **Rewriting the proxy URL's host IS the supported route, and the rule here
+used to say the opposite.** It claimed the two hosts carry different signature
+parameters; they do not. Measured for one asset: the proxy URL carries the
+signature parameters **plus** the resize knobs, with the signature **values
+byte-identical** to the origin anchor's, so the rewrite keeps a valid signature.
+Probed with both controls — the message's own origin anchor **206**, the
+rewritten URL **206**, the same URL with the signature stripped **fails**.
+`originalFromPreview()` in `route_core.js` is the one implementation; do not
+open-code a second.
+
+⚠ **A video's `src` is USUALLY the origin already, but that is not guaranteed
+and was measured at zero points** — every video in the live route log was
+already on the origin host, so the rewrite simply does not fire for them. It
+*will* fire on a proxy-host video src, and that shape is unverified.
 
 **Important details**
 - The media URL is **signed and rotates** — `player_buttons.js` reads it **at

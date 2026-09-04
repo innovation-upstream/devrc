@@ -233,13 +233,48 @@ test("the signature is carried across the host swap, the resize knobs are not",
     assert.equal(out.searchParams.get("hm"), "cc");
   });
 
-test("a stray empty-named parameter is dropped too", () => {
-  // A live proxy URL carried one (Discord emits a bare `&`). The measured
-  // rewrite dropped it, so this keeps the output byte-identical to what was
-  // probed rather than merely equivalent.
+test("a bare `&` is dropped -- by re-serialisation, NOT by the `\"\"` entry", () => {
+  // This test used to be named for the `""` entry in the resize list and was
+  // offered as that entry's coverage. It is not: the urlencoded parser SKIPS
+  // empty sequences, so `?&ex=1` never produces an empty-named pair and this
+  // passes with `""` removed from the list entirely. Kept, renamed to say what
+  // it actually pins -- that the rewrite re-serialises the query -- so nobody
+  // reads it as covering the line below.
   assert.equal(originalFromPreview(`${PREVIEW}?&ex=1&width=550`),
     `${ORIGINAL}?ex=1`);
 });
+
+test("an empty-NAMED parameter (`?=value`) is dropped -- the `\"\"` entry's own case",
+  () => {
+    // The shape the parser DOES keep: `?=v` yields a real ["", "v"] pair.
+    // Removing `""` from DISCORD_PREVIEW_RESIZE_PARAMS must fail HERE, which
+    // is what makes that entry mutation-visible; before this test it survived
+    // deletion against a fully green suite.
+    assert.equal(originalFromPreview(`${PREVIEW}?=junk&ex=1&width=550`),
+      `${ORIGINAL}?ex=1`);
+  });
+
+test("a proxy src with a link to a DIFFERENT SITE still yields the original", () => {
+  // The reachable exit that no test covered: srcUrl on the proxy host WITH a
+  // linkUrl that is not the origin host -- any page that hotlinks an
+  // attachment inside an anchor to somewhere else. Reverting that exit to a
+  // bare `srcUrl` passed the whole suite before this existed.
+  assert.equal(
+    preferOriginalUrl(`${PREVIEW}?ex=1&is=2&hm=3&width=550`,
+      "https://example-site.test/page"),
+    `${ORIGINAL}?ex=1&is=2&hm=3`);
+});
+
+test("a proxy src paired with a NON-ATTACHMENT discord link yields the original",
+  () => {
+    // The other uncovered exit: both hosts are right, but the link is not an
+    // attachment (an avatar), so the pair-guard rejects it. The clicked
+    // image's own original is still the best answer available.
+    assert.equal(
+      preferOriginalUrl(`${PREVIEW}?ex=1&width=550`,
+        `https://cdn.discordapp.com/avatars/${CHANNEL}/a.png`),
+      `${ORIGINAL}?ex=1`);
+  });
 
 test("an avatar with no link is left alone -- the guard is REACHABLE", () => {
   // The rewrite must not fire on every proxy-host URL, and this case reaches
