@@ -10,9 +10,14 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 ## Status
 
 
-🔴 **EVERY RANK IS CLOSED EXCEPT 18, AND 18 IS NOT OURS. THERE IS NO WORK IN THIS QUEUE.**
-Ranks 1–17 and 19–23 are ✅ CLOSED. **18 stays open only because its closing condition — a `go`-leg
-red being attributable without a re-run — is owned by the session that root-caused it to a node.**
+🔴 **RANK 24 IS THE ONLY WORK: ANOTHER UI/UX FEEDBACK PASS, AND IT NEEDS THE OPERATOR IN THE ROOM.**
+Everything else is closed — ranks 1–17 and 19–23 ✅ — and **18 is not ours**: it stays open only
+because its closing condition (a `go`-leg red being attributable without a re-run) is owned by the
+session that root-caused it to a node. 🔴 **Do not "get started" on 24 by inventing changes.** Every
+UI item this doc has shipped came from the operator naming a specific annoyance (ranks 19, 20 and
+23a all trace to that), and the one time a magnitude was guessed rather than measured the doc was
+wrong by an order of magnitude — see rank 21's REFUTED "most of the long tail". **Ask what is
+annoying, then measure the surface before changing it.**
 🔴 **Do not draw an item from this list without re-reading its entry: 17 and 23 were closed for
 reasons that are not "we did the work."** 17 is **being built right now by another session**
 (`ZacxDev/homelab-infra#685`) and was ALSO too narrow to have worked; two of 23's three parts were
@@ -223,6 +228,25 @@ said so. An audit scopes to a diff and will never suggest retiring the work.
 - **The new CI hardware is live and taking work:** `clawgate-ci-g4gcm` scheduled across
   `talos-xr6-r7p` **and `tekton-ci-1`** (the Hetzner ccx33 another session shipped the same day).
 - **Claim `tmux-webapp-23` taken and released.** No claim of this doc's is held.
+
+### Session close 2026-09-04 — queue emptied, one new item opened by the operator
+
+- **Nothing is in flight.** No branch of mine outstanding, no claim held, no worktree left, both base
+  clones re-synced (`devrc` was 1 behind, `homelab-talos` 2 — they are write-only and fall behind
+  silently).
+- **Five PRs merged this session, each content-verified on its mainline, never by ancestry:**
+  `devrc#1282` (`34ee2a376`, rank 21) · `homelab-infra#680` (`0c5b35bf1`, rank 22) ·
+  `homelab-infra#690` (`48d67f9af`, rank 23a) · `devrc#1279` (`610ba9b01`) · `devrc#1298`
+  (`0c352975c`).
+- 🔴 **NO `clawgate-task:` FIELD IS RECORDED, AND THAT IS A DELIBERATE DEVIATION, NOT AN OVERSIGHT.**
+  `clawgate_handoff.sh resolve` exited **0** with exactly one WORKED task — **#495**, the clock-skew
+  dismissal closed under rank 23c. It was not recorded because **#495 is `complete` and is one third
+  of one rank out of 24**: pinning it as this doc's thread would make every future `/resume` emit a
+  DRIFT line saying the doc is being resumed as open work the board calls complete — noise, and
+  misleading about the effort. A `worked` row is a candidate, not proof it is the work the doc
+  describes.
+- **Rank 24 opened** from the operator's closing instruction. It is a placeholder for a
+  conversation; read its entry before doing anything with it.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -772,6 +796,38 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     mattered — so it would trade a simple mutation-covered path for an uncovered case that has never
     fired. Criterion 1 stays written and ready if one is ever observed.
     forcing: none
+24. **Another UI/UX feedback pass on the clawgate web UI.** Repo: `ZacxDev/homelab-infra`,
+    `containers/clawgate/internal/ui/` (Go-built HTML + htmx; there are no template files), with
+    e2e in `containers/clawgate/e2e/tests/` and the visual walk in `e2e/ux-audit/`.
+    **Stated by the operator at the end of the 2026-09-04 session: "we'll do another UI/UX feedback
+    pass next session."** That is the whole brief so far — the specific items do not exist yet.
+    🔴 **START BY ASKING, NOT BY BUILDING.** This effort's UI items have all come from the operator
+    naming a concrete annoyance: rank 19 (group by project, not host), rank 20 (auto-approve into a
+    header control; one width from phone to ultrawide), rank 23a (two routes left at the old width).
+    None was discoverable from the code. An audit will not produce them either — it scopes to a
+    diff. **The first move is a conversation, and the second is a measurement.**
+    🔴 **MEASURE THE SURFACE BEFORE CHANGING IT — this doc has been burned twice.** Rank 21's
+    "a worktree pseudo-group is most of the long tail" was REFUTED on measurement (the live group
+    count moved 15 → 14, one collapse). And `#667`'s width table was wrong in **three** bands because
+    it quoted the `max-w-*` cap and ignored the `lg:pl-72` sidebar. **Probe the live page and read
+    the real numbers**; `/ui/tmux` is the tab PARTIAL (no header at all) and `/` is the shell — ask
+    which route renders the thing you are asking about.
+    **What is live to look at right now:** clawgate `0.8.25`-era on the workbench
+    (`clawgatectl health` is the only authority), carrying `#660`'s project grouping, `#667`'s header
+    auto-approve control, `#680`'s persist-failure notice and server-clock expiry, and `#690`'s
+    `contentWidth()` on the task routes. `http://192.168.50.250:30302` on the LAN (no human auth),
+    `https://clawgate.zacx.dev` behind Authelia.
+    ⚠ **Known-and-accepted, so they do not get re-reported as new findings:** the loud
+    "auto-approve ALL is ON" bar stays in page flow **by design** (folding it into the dropdown
+    would hide, behind a click, that every request is being auto-approved); a **pre-existing** shell
+    overflow of 4 px at 360 and 44 px at 320 that predates `#667` and is deliberately outside the
+    responsive spec's swept widths; and `agents_detail.go`/`operator.go` must NOT be widened —
+    their `max-w-xl` sits on the SAME element as `lg:pl-72`, unlike the task routes where the offset
+    is on a wrapper.
+    **Closing condition:** the operator names the annoyances, each becomes its own ranked item with
+    its own closing condition, and this item is retired once they are filed — it is a placeholder
+    for a conversation, not a unit of work to be graded.
+    forcing: user — the operator asked for it explicitly at the close of the 2026-09-04 session.
 
 ## Open investigations — live diagnosis state
 
@@ -2348,6 +2404,28 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
 - ⚠ **A red check is a claim about a (tree, base, node) TRIPLE here.** `clawgate-ci` now schedules
   across the homelab cluster AND the new Hetzner runner, so "which node" joins "which test moved"
   as a discriminator. Read the PipelineRun's `nodeName` before debugging a diff.
+
+- 🔴 **A PIPE EATS AN EXIT STATUS, AND IT ATE ONE IN THIS SESSION WHILE THE RULE WAS ON SCREEN.**
+  `clawgate_handoff.sh field <doc> | head -3; echo $?` printed **0** — `head`'s status — and was
+  read as "a task field is already recorded". The real answer was **rc 1, no field at all**. Capture
+  first (`out=$(cmd 2>&1); rc=$?`), then print. The failure is silent and reads as a clean answer,
+  which is why knowing the rule is not sufficient.
+- 🔴 **A RANKED QUEUE OUTLIVES ITS ITEMS, AND NEITHER THE DOC NOR THE LOCK CAN SAY SO.** Asked "do
+  we need 23 and 17?", the answer for three of four sub-items was no: 17 was **being built by
+  another session** (`homelab-infra#685`), 23b was **already fixed**, 23c was **dismissable under
+  its own stated criterion**. Only 23a was work, and it took ten minutes. `claim-work` cannot see an
+  unclaimed duplicate — nobody claims an item they are not working on — so the unconditional
+  `gh pr list --state open` sweep is the only instrument that covers it. **Ask "do we still need
+  this?" before drawing any item; an audit never will, because it scopes to a diff.**
+- 🔴 **AN INVERTED EXPECTATION IS EXACTLY WHEN NOT TO CLASSIFY A RED.** On `#690`, the leg this doc
+  had called broken all session (`ux-audit-clawgate`) **passed**, and the two expected to pass
+  failed. Reading them showed `clawgate-e2e`'s single failure was `tasks-mobile.spec.ts:531` dying
+  in FIXTURE SETUP with `clawgate health check did not pass on port <N> within 15000ms` on three
+  different ports — rank 17's signature, before the test body ran, on a diff that swapped two CSS
+  classes. **Read every red; do not sort them by prior.**
+- ⚠ **`clawgate-ci` now schedules across the homelab cluster AND the new Hetzner runner**
+  (`clawgate-ci-g4gcm` landed on `talos-xr6-r7p` *and* `tekton-ci-1`). "Which node" has joined
+  "which test moved" as a discriminator for a `go`-leg red — read the PipelineRun's `nodeName`.
 
 ## How to verify
 
