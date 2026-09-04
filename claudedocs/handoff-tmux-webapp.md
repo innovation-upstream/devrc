@@ -10,26 +10,39 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 ## Status
 
 
-**Ranks 1–8, 10–16, 19 and 20 are ✅ CLOSED. Ranks 17, 18, 21, 22 and 23 are OPEN.**
-🔴 **17 and 18 are CI infrastructure; 21, 22 and 23 are THIS FEATURE and were opened 2026-09-04** —
-21 is the Phase B repo field that rank 19 shipped a seam for and nobody filed, 22 is the audit
-`#667` never got, 23 is three loose follow-ups. The old claim that "not one item of this feature is
-outstanding" was true of ranks 1–18 and is no longer true. 🔴 **Rank 12 closed as REFUTED,
-not fixed** — read its entry before believing the word "complete" anywhere near it. 17 and 18 are
-siblings, NOT one item: different legs, different mechanisms, different closing conditions.
+**Ranks 1–8, 10–16 and 19–22 are ✅ CLOSED. Only ranks 17, 18 and 23 remain OPEN.**
+🔴 **17 and 18 are CI infrastructure owned elsewhere; 23 is three loose follow-ups. NOT ONE ITEM OF
+THE FEATURE ITSELF IS OUTSTANDING** — and that sentence has been wrong in this doc before, so:
+21 (the Phase B `repo` field) closed 2026-09-04 with its closing condition verified on the LIVE
+page, and 22 (the `#667` audit) closed the same day after a four-round delta ladder. 🔴 **Rank 12
+closed as REFUTED, not fixed** — read its entry before believing the word "complete" anywhere near
+it. 17 and 18 are siblings, NOT one item: different legs, different mechanisms, different closing
+conditions — and **18 has since been ROOT-CAUSED to a specific node by another session; read its
+entry before re-deriving the mechanism.**
 The live-refresh work (`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as 0.8.21**.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.**
-Last measured 2026-09-01 21:51Z: server **0.8.21**. It was 0.8.19 and 0.8.20 earlier that day,
-shipped by another session mid-work — which is why the number is derived from the live pin, never
-from a doc.
+Last measured 2026-09-04: server **0.8.24**, both hosts' clients 0.8.23 earlier the same day. It
+was 0.8.21 on 09-01 and 0.8.19/0.8.20 before that, so the number has moved under this doc on
+**three consecutive sessions**, every time shipped by somebody else mid-work — which is why it is
+derived from the live pin, never from a doc.
+🔴 **AND THE VERSION MOVING IS NOT EVIDENCE THAT THIS FEATURE'S WORK DEPLOYED — the two are
+independent, and reading one off the other was wrong here twice in one day.** 0.8.23 did NOT carry
+`#660`/`#667`; 0.8.24 DOES (both squashes are ancestors of the deploy commit, and `/` serves
+`auto-approve-toggle` ×3 and the `2xl:max-w-[96rem]` cap ×2). ⚠ **Probe the route that renders what
+you are asking about:** `/ui/tmux` is the tab PARTIAL and renders no header at all, so it is
+evidence about `#660`'s grouping and says nothing whatsoever about `#667` — a probe of it was
+over-read as covering both.
 
-✅ **RANK 8a — measured green 2026-09-01 21:52Z, and still RECURRING.** Server 0.8.21, both hosts'
-`clawgatectl` 0.8.21, and the cross-host round trip **moved a number**: `view create` on the laptop
-→ `view ls` on the workbench → `view rm`, `[] → 1 → []`. 🔴 **A matching label is NOT the check —
-the round trip is.** Two consecutive sessions have now REFUTED the doc's old "both clients are stale
-again by construction" prediction on test. It stays RECURRING because nothing converges
-`homelab-talos`: re-run the round trip, never read this paragraph.
+✅ **RANK 8a — measured green 2026-09-04 02:28Z, and still RECURRING.** Server 0.8.23, workbench
+`clawgatectl` 0.8.23, laptop `clawgatectl` 0.8.23, and the cross-host round trip **moved a
+number**: `view create` on the LAPTOP → `view ls` on the WORKBENCH → `view rm`,
+`[] → 1 (id 10) → []`. 🔴 **A matching label is NOT the check — the round trip is.** Four
+consecutive sessions have now REFUTED the doc's old "both clients are stale again by
+construction" prediction on test. It stays RECURRING because nothing converges `homelab-talos`:
+re-run the round trip, never read this paragraph.
+⚠ **The client version is `clawgatectl --version`, not `clawgatectl version`** — the bare
+subcommand is `unknown command "version" for "clawgatectl"`, which reads like a broken client.
 
 🔴 **THE LIVE-REFRESH GAP IS CLOSED AND DEPLOYED — `#611`, squash `5d11d9a7`, live as 0.8.21.**
 The server had broadcast `tmux.changed` on every snapshot ingest since #468 with **nothing
@@ -79,6 +92,101 @@ host-side feeder (`tmux-snapshot-push.timer` on the workbench, which collects BO
   Playwright suite (167 ran-ok / 2 skipped, corroborated three ways) were run on each PR's head.
   `internal/store` and `internal/tmux` report `ok` by SKIPPING without `CLAWGATE_TEST_DATABASE_URL`
   — that `ok` is not evidence. No nix sandbox tier exists for this repo.
+
+
+### Session 2026-09-04 (`/resume`) — ranks 21 and 22 opened and IN FLIGHT
+
+- **Branch:** this doc is authored from a clean worktree `~/workspace/devrc-ho2122` on
+  `docs/handoff-tmux-webapp-r21r22`, cut from `origin/main` at `a7dac5bd`.
+  🔴 **The base clone `~/workspace/devrc` was deliberately NOT used.** It sits on another
+  session's branch (`feat/mention-system-repos`) with 7 dirty paths, and its copy of THIS doc was
+  **2078 lines against `origin/main`'s 2202** — merging there would have resolved the wrong base
+  and replaced the committed document with a delta built on a 124-line-stale copy.
+  `resume-state.sh` printed `handoff-read: 🔴 origin/main copy` and handed over the authoritative
+  text; the working-tree copy was never read.
+- **No `clawgate-task:` field is recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks.
+  🔴 That is NOT a clean bill of health: an unknown `CLAUDE_CODE_SESSION_ID` also answers 200 with
+  an empty array, so this cannot distinguish "touched no task" from "wrong id".
+- **The ranked list is UNCHANGED by this session** — no item was closed, renumbered or added, so
+  every live claim slug still points where it did.
+- **Claims `tmux-webapp-21` and `tmux-webapp-22` were both TAKEN (rc 0) and were still HELD when
+  this was written.** Release them once the two agents below land. The unconditional open-PR sweep
+  found no duplicate: nothing open in `innovation-upstream/devrc` or `ZacxDev/homelab-infra`
+  touches `session-manager` or re-audits `#667`.
+- **Two agents were dispatched and both were still running when this doc was written:**
+
+  | rank | what | where it works |
+  |---|---|---|
+  | 21 | the `repo`-per-window producer | isolated devrc worktree → PR against `innovation-upstream/devrc` |
+  | 22 | `/audit-pr 667` round 1, post-merge | its own `refs/audit/pr667-r1` worktree off `homelab-talos` |
+
+  🔴 **NEITHER RESULT IS IN THIS DOC.** If the ranks below still read OPEN, that is this doc's
+  knowledge, not a measurement — run `gh pr list --state open` in BOTH repos before starting
+  either item, and check `claim-work --list` for the two slugs above.
+
+- 🔴 **RANK 21 IS SMALLER THAN ITS OWN ENTRY SAYS — THE CONSUMER HALF IS ALREADY MERGED.**
+  Rank 21 reads as a two-repo item ("the producer, consumed by `internal/api/tmux_ui.go` +
+  `projectOf()` in `homelab-infra`"). Measured on `homelab-talos` at `trunk`, 2026-09-04 — all
+  three parts present: `internal/api/tmux_ui.go:83` carries ``Repo string `json:"repo"` `` with a
+  comment naming itself the Phase-B seam, `:167` carries the passthrough `Repo: r.Repo`, and
+  `internal/ui/tmux.go:322` gives `Repo` first precedence in `projectOf`. **So rank 21 is a
+  devrc-only change and needs no lockstep two-repo ship.** The Go decoder is deliberately
+  permissive, so the producer emitting the key costs the consumer nothing.
+
+- 🔴 **`rev-parse --show-toplevel` IS THE WRONG CALL FOR RANK 21 — AND IT IS THE ONE A READER
+  REACHES FOR.** On a linked worktree it returns the WORKTREE, which is exactly the defect rank 21
+  exists to remove; a session using it ships a change that measurably does nothing.
+  `git -C <path> rev-parse --path-format=absolute --git-common-dir` resolves to the MAIN clone's
+  `.git`, whose parent directory is the repo. **Measured on the workbench 2026-09-04:**
+
+  | path | `--show-toplevel` | `--git-common-dir` | repo |
+  |---|---|---|---|
+  | `~/workspace/devrc-agentlock` | `devrc-agentlock` | `~/workspace/devrc/.git` | `devrc` |
+  | `~/workspace/devrc-ho` | `devrc-ho` | `~/workspace/devrc/.git` | `devrc` |
+  | `~/workspace/devrc/scripts` | `devrc` | `~/workspace/devrc/.git` | `devrc` |
+  | `/tmp` and `$HOME` | (empty, rc≠0) | (empty, rc≠0) | none |
+
+  Two distinct worktrees of one repo collapsing to one name IS rank 21's closing condition,
+  demonstrated at the resolution layer.
+
+- 🔴 **#660 AND #667 ARE MERGED AND STILL NOT DEPLOYED — measured on the live pod, not carried
+  over from the previous session's claim.** `GET http://192.168.50.250:30302/ui/tmux` returns
+  325,121 B containing **0 `<details>`, 0 group markers and 0 `localStorage`**; the running image
+  is `harbor.homelab.lan/library/clawgate:0.8.23`. So the version advancing 0.8.21 → 0.8.23 is
+  **not** evidence that this feature's work shipped — somebody else's change did.
+  🔴 **Consequence for rank 21:** its closing condition names the UI — *"two worktrees of one repo
+  group together in the UI"* — and that half is **unverifiable until clawgate is deployed with
+  #660**. The producer half is fully verifiable today. A green producer test is not the closing
+  condition met, and must not be reported as one.
+
+### Session 2026-09-04 (`/resume`) — ranks 21 and 22 both CLOSED; the feature has no open items
+
+- **Merged, content-verified on each mainline (never by ancestry — a squash is never an ancestor):**
+
+  | PR | what | squash |
+  |---|---|---|
+  | `devrc#1282` | rank 21 — the `repo`-per-window producer | `34ee2a376` |
+  | `ZacxDev/homelab-infra#680` | rank 22 — the four `#667` audit findings, over a 4-round ladder | `0c5b35bf1` |
+  | `devrc#1279` | this handoff | (see below) |
+
+- **Rank 21 is SHIPPED, not just merged.** `ship.sh` converged both hosts; workbench, laptop and
+  `origin/main` all at `c0d02676`. 🔴 **`ship.sh` reported `rc=11 VERIFY FAILED` on the workbench and
+  that was a RACE, not a skipped host** — `main` moved between its fast-forward and its verify, so it
+  compared HEAD against a stale `origin/main` snapshot. Confirmed by measuring after: all three shas
+  equal, 0 commits behind, markers present. **Read every per-host line and then go measure; the
+  final verdict alone would have sent a reader to re-ship.**
+- **Both claims (`tmux-webapp-21`, `-22`) RELEASED.** No claim of this doc's is held.
+- **Audit ladders, in full:** rank 21 ran 2 rounds (5 payload 🟡 → all fixed → 2 🟢, ended);
+  rank 22 ran 4 (5 payload 🟡 → 2 🟡 + 5 🟢 → 2 🟡 + 2 🟢 → 1 🟡 + 2 🟢, ended). Claims blocks on
+  both PRs. 🔴 **The ladder was ended DELIBERATELY on the last round rather than run to a clean
+  one**, because round 4's payload was 273 lines of which **187 were documentation and 86
+  executable**, against 1,004 lines of scaffolding — the attribution gate's shape. The nits round 4
+  declined to file are named in rank 22's entry so they read as open rather than absent.
+
+- 🔴 **NOT DONE, and named rather than left implicit:** rank 23 was never started; ranks 17 and 18
+  are untouched by this session except that 18 now carries another session's root cause. No image
+  was built or deployed by this session — `0.8.24` was deployed by somebody else mid-session, and it
+  is what made rank 21's UI closing condition checkable at all.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -492,6 +600,18 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     store tests get their own Postgres with a bounded startup, or the failure names the contended
     resource. Until then, read WHICH test failed and check whether it moved between runs before
     debugging the diff.
+    🔴 **ROOT-CAUSED 2026-09-04 BY ANOTHER SESSION — DEVICE-ISOLATED, NOT CONTENTION IN GENERAL.**
+    Landed on `homelab-infra` `trunk` as `eff01a8f0` + its follow-ups: `clawgate-ci` is
+    **0-pass / 14-fail on node `talos-uvh-gtj`** against 3-pass elsewhere, and that node's system
+    disk (a Crucial M500) does **~90 ms per 4 KB fsync against ~1.5 ms**, i.e. ~59× slower. So the
+    discriminator is now the NODE, not just "did the failing test move". **Read the PipelineRun's
+    node before debugging a `go`-leg red.** Corroborated independently here on 2026-09-04:
+    `#680`'s `clawgate-ci` red had `step-go` **exit 0** with only `cmd/clawgatectl` failing on
+    `canceling statement due to statement timeout` during migrate, on that same node, while
+    `internal/api` and `internal/ui` both reported `ok` in the same run.
+    ⚠ This does NOT close the item — the closing condition is about attribution being possible
+    without a re-run, and that work is owned by the session that did the diagnosis. It is recorded
+    here so the next reader stops re-deriving the mechanism.
     forcing: gate — with 17 this makes three of the four clawgate checks capable of reds that are
     not about the change, and this one is the worst of the three to dismiss: unlike 17 it can fail
     on a package a Go diff genuinely touches, so "it is just the flake" will eventually be wrong.
@@ -520,32 +640,47 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     legible without opening it. Do not "tidy" this later.
     It also fixed a PRE-EXISTING funnel-walk defect (see rank 23's history).
     forcing: none
-21. **Phase B — publish an authoritative `repo` per window from the OWNING host.** Repo: `devrc`,
-    `scripts/session-manager` (the producer), consumed by `internal/api/tmux_ui.go` +
-    `projectOf()` in `homelab-infra`. Rank 19 shipped the seam on the explicit understanding that
-    this follows; it has not been started, and nothing else records it.
-    🔴 **IT CANNOT BE DONE IN CLAWGATE OR IN SESSION-MANAGER'S AGGREGATION STEP.** `label_from_path`
-    already documents why: *"`path` is a STRING FROM ANOTHER MACHINE — half of these rows come off
-    the laptop over ssh — so a local `git rev-parse` would silently answer about whatever happens to
-    sit at that path on THIS host, or about nothing."* Only the per-host collection step can resolve
-    it; `scripts/tmux-autoname-session.sh` already does exactly that, on the machine that owns the
-    directory. Clawgate is a pod and cannot stat either host.
-    **Visible consequence until it lands:** a git worktree forms its own project group
-    (`ht-r11-930492` sits apart from `homelab-talos`), which on a worktree-heavy box is most of the
-    long tail. Do NOT paper over it with a path heuristic — `ht-r11-930492 → homelab-talos` is not
-    derivable from the string, and guessing is worse than the honest split.
-    **Closing condition:** a window carries `repo` on the wire, `projectOf()`'s first branch stops
-    being dead, and two worktrees of one repo group together in the UI.
-    forcing: user — the operator chose the two-phase split explicitly; this is the half that was
-    promised and not delivered.
-22. **Run `/audit-pr 667`.** Repo: `ZacxDev/homelab-infra`. It was merged on verification alone —
-    both tiers green, three-way e2e agreement, the safety property checked by reading — but never
-    adversarially audited. `#660` carries 3 `audit-claims` blocks; `#667` carries **0**. It is the
-    higher-risk of the two by surface: it rewrites the page shell every tab loads and ships JS that
-    owns persisted operator state, and it touches the auto-approve controls, which are a safety
-    surface. Post-merge, so a finding becomes a follow-up PR rather than a merge block.
-    **Closing condition:** a round returns no findings that need fixing, or the findings are fixed
-    or filed.
+21. ✅ **DONE 2026-09-04 — `devrc#1282`, squash `34ee2a376`. Merged, SHIPPED to both hosts, and the
+    closing condition verified on the LIVE page.** All three legs, measured:
+    **(a) on the wire** — `scripts/session-manager --json` against the real fleet: 92 rows, **90
+    carrying `repo`**, both hosts `repos_measured=true` / `repos_status=ok` / `unparseable=0`; the 2
+    without are honest `not_a_repo`.
+    **(b) `projectOf()`'s first branch is no longer dead** — the consumer half was ALREADY MERGED
+    when this started (`internal/api/tmux_ui.go:83` decoder, `:167` passthrough,
+    `internal/ui/tmux.go:322` precedence), so this was a **devrc-only** change, not the two-repo
+    lockstep the old entry described.
+    **(c) two worktrees of one repo group together in the UI** — `/ui/tmux` on live `0.8.24`:
+    `datapacket-talos` 39 windows, `devrc` 13, `homelab-talos` 11, **each spanning laptop AND
+    workbench**; group count 15 → 14; and `clawgate-extension` no longer appears anywhere on the
+    page — the laptop worktree that formed its own pseudo-group is filed under `homelab-talos`, on a
+    path that exists on only one of the two machines.
+    🔴 **`rev-parse --show-toplevel` IS THE WRONG CALL AND IS THE ONE A READER REACHES FOR** — on a
+    linked worktree it returns the WORKTREE, i.e. exactly the defect this rank existed to remove.
+    `--path-format=absolute --git-common-dir`, parent = the main clone, is the mechanism.
+    ⚠ **The old entry's "most of the long tail" was REFUTED on measurement** — the live group count
+    moved 15 → 14, one collapse, because almost every pane sits at a repo root where the leaf already
+    equals the repo name. The fix is correct; the magnitude was overstated.
+    Two audit rounds (5 payload 🟡 → 7 fixed → 2 🟢 → ended). Full history in the audit-claims blocks
+    on the PR.
+    forcing: none
+22. ✅ **DONE 2026-09-04 — `/audit-pr 667` ran, and its findings became `ZacxDev/homelab-infra#680`,
+    squash `0c5b35bf1`.** Round 1 on `#667` found no 🔴 and four 🟡; the fixes then took a
+    **four-round delta ladder** (5 payload 🟡 → 2 🟡 + 5 🟢 → 2 🟡 + 2 🟢 → 1 🟡 + 2 🟢 → closed).
+    Every round's claims block is on `#680`.
+    🔴 **The two findings worth remembering:** (i) the primary server-side fix was **largely inert in
+    production** — two lazy pruners still evicted silently, so on a 60 s sweep the broadcast fired
+    when the app was idle and was starved exactly when it was busy; and (ii) a later round put
+    **unbounded store I/O on the permission-decision path** (`autoApproveActive`, called from
+    `POST /api/request`), where a Postgres restart would stall an agent indefinitely.
+    🔴 **THE SAFETY PROPERTY IS MEASURED, NOT ARGUED:** a 48-row differential decision table (global ×
+    project × query, healthy vs wedged store) is **sha256-identical** across base and head, WITH a
+    positive control — a mutant that skips the in-memory delete moves 12 of 48 rows, 4 with a flipped
+    decision. A 48/48 without that control would not have been evidence.
+    ⚠ **Deliberately left unfixed, so they read as open rather than absent:** `aaOffScreen` only
+    understands `px` offsets; `aaEvictsIn`'s `maps` arm matches the literal package name so an
+    aliased import evades it; and `autoApprovePersistNotice` embeds `err.Error()` verbatim, which for
+    a pgx dial failure can carry host/port/user/database into the operator's browser (behind session
+    auth, and the actionable detail is the point).
     forcing: none
 23. **Three loose follow-ups from the tmux page work, none filed anywhere else.**
     (a) `task_detail.go:87,170` and `task_not_found.go:53` still carry the old `max-w-xl …
@@ -2051,6 +2186,68 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
   Worth checking anyway: the JS in `internal/ui/*.go` lives in Go raw string literals, where a
   backtick in a comment terminates the literal — a real near-miss this session, caught by the
   compiler.
+
+- 🔴 **THE STALE-DOC DRIFT THIS FILE KEEPS RE-CREATING FIRED AGAIN, IN A NEW SHAPE.** The previous
+  session recorded it as "identical to `origin/main` is not current when the update is in flight".
+  This time the working-tree copy was not identical at all — it was **124 lines behind** — because
+  the shared base clone sits on an unrelated feature branch that predates the last two handoff
+  merges. Both shapes have the same tell and the same fix: **read the copy `resume-state.sh`
+  names, and author from a worktree cut fresh off `origin/main`.** The failure mode is silent in
+  both directions — reading the stale copy loses ranks 19–23 entirely (they exist only on
+  `origin/main`), and *writing* from it makes `handoff_doc.py` merge into a 2078-line base and
+  replace the committed 2202-line document.
+- **`clawgatectl --version`, never `clawgatectl version`.** The bare subcommand errors with
+  `unknown command "version" for "clawgatectl"`, which reads like a broken or half-deployed
+  client and is not. Both hosts answered `0.8.23`.
+- **A matching version triple is still not rank 8a's check.** Server, workbench client and laptop
+  client all reading 0.8.23 says nothing on its own; the round trip that moves a number is the
+  check, and it is cheap: `view create` on the laptop, `view ls` on the workbench, `view rm`.
+- **The deployed-vs-merged split is now measurable in one command and worth keeping.** Probing the
+  live `/ui/tmux` for `<details>` discriminates "grouping deployed" from "grouping merged" without
+  reading a version at all — which matters because the version number moved twice for reasons
+  unrelated to this feature.
+
+- 🔴 **`rev-parse --show-toplevel` IS THE WRONG CALL FOR "WHICH REPO IS THIS PATH IN", AND IT IS THE
+  ONE EVERY READER REACHES FOR.** On a linked worktree it returns the WORKTREE, so a change built on
+  it measurably does nothing. `git -C <path> rev-parse --path-format=absolute --git-common-dir`
+  resolves to the MAIN clone's `.git`, whose parent is the repo. Measured: `devrc-agentlock` and
+  `devrc-ho` both → `devrc`; `/tmp` and `$HOME` → nothing, correctly.
+- 🔴 **THE BASE MOVES FASTER THAN A GATE RUNS HERE, SO A MERGED-TREE RESULT CANNOT BE BANKED.**
+  `origin/main` moved **five times** during one session (`a7dac5bd` → `1d2c4bd6` → `2882d2c7` →
+  `d86b4e45` → `fd68d48c` → `2b1d3552`), and `homelab-infra` `trunk` three times inside a single
+  audit. Chasing it is unsatisfiable and produces a permanently-unmergeable PR, which is its own
+  anti-pattern. **What worked:** gate the merged tree, then at the merge moment re-read the base and
+  reason about the SPECIFIC delta rather than re-running blind. On the one that mattered, main had
+  bumped a floor in `run-tests.sh` — the runner the gate itself uses — and the check was that the
+  bumped target (`browser-bridge`, 716→867, collecting 912) was one the diff adds no tests to.
+- 🔴 **A PROBE OF A PARTIAL ROUTE IS NOT EVIDENCE ABOUT THE WHOLE PAGE.** `/ui/tmux` renders the tab
+  partial with no header, so it can answer about the tmux grouping and is structurally blind to the
+  header controls. One probe of it was read as covering two PRs; it covered one. **Ask which route
+  renders the thing you are asking about before quoting a zero.**
+- 🔴 **`e2e/tests/helpers/server.ts` REBUILDS `web/static/app.css` ONLY WHEN MISSING — check its
+  SIZE, never its existence.** A stale stylesheet made a 390 px overflow read **0 for the wrong
+  reason** (the element was `display:none` at every width), and a wrong-cwd tailwind run emitted
+  **5,594 bytes instead of 43,173** and produced a confident 11-test RED including specs the diff
+  could not reach; the tell was a **143 ms** build against a normal ~1 s. Also: the repo pins
+  tailwind **v3** — `nix-shell -p tailwindcss` gives 43,173, `tailwindcss_4` gives ~20,5xx because
+  v4 ignores `tailwind.config.js`.
+- 🔴 **A FAILED FULL-MODE e2e FIXTURE LEAKS ITS `clawgate-e2e-pg-*` CONTAINER, AND IT IS
+  SELF-REINFORCING** — leaked containers starve `startPostgres`'s 30 s readiness deadline until
+  *every* full-mode spec fails in setup, and each timeout leaks another. 18 had accumulated (oldest
+  166 min) and clearing them is what produced the first complete 168-passing run. ⚠ `docker ps`
+  **omits `created`-state containers** — use `-a`, or a "0 containers" reading is a claim about the
+  view, not the box.
+- 🔴 **A DECISION TABLE WITHOUT A POSITIVE CONTROL IS NOT EVIDENCE.** The safety question for the
+  auto-approve work was "did the fix change a permission decision" — answered by a 48-row table
+  (global × project × query, healthy vs wedged store) being sha256-identical across base and head,
+  **and** by a deliberate mutant moving 12 of those 48 rows. Without the second half, an identical
+  table and a harness wired to nothing look the same.
+- ⚠ **Two agents in ONE worktree is a self-inflicted collision, and a cwd filter cannot separate
+  them.** A re-gate agent was pointed at a worktree while its previous occupant was still resumed;
+  no file was clobbered, but a later cleanup sweep filtering on "cwd is my worktree" killed a
+  sibling agent's live Playwright run. Worktree isolation does not help when both agents are IN the
+  same worktree — give each its own, and if no filter leaves a set you are confident in, kill
+  nothing.
 
 ## How to verify
 
