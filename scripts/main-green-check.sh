@@ -87,6 +87,12 @@
 #       copied rather than reinvented. A single measured run resets the streak.
 #    2  usage / precondition problem in this script.
 #
+# ── OPTIONS ───────────────────────────────────────────────────────────────────
+#   --force    ignore the memo and re-run even when the tip has not moved.
+#   --status   print the last recorded verdict and exit. Does not take the lock,
+#              so it works while a run is in flight.
+#   -h/--help  this header.
+#
 # TEST SEAM: MAIN_GREEN_GATE_CMD overrides the gate invocation (it is passed the
 # checkout path and the tier name). MAIN_GREEN_CACHE overrides the cache root.
 # MAIN_GREEN_REMOTE overrides which remote is cloned. All three exist so the
@@ -102,12 +108,20 @@ RC_BLIND=12
 RC_USAGE=2
 
 BLIND_ESCALATE="${MAIN_GREEN_BLIND_ESCALATE:-6}"
+# 🔴 CONTENTION IS ALSO A NON-MEASUREMENT, and round 1 left this door open while
+# its own comment condemned the whole class. A lock held by a hand-run that hung
+# makes every fire print "another run holds the lock" and exit 0 — silent, a
+# systemd success, touching no ladder — so the deadman can be blind indefinitely
+# with nothing saying so. Lower than BLIND_ESCALATE because a legitimately
+# overlapping run resolves within one or two intervals.
+CONTENTION_ESCALATE="${MAIN_GREEN_CONTENTION_ESCALATE:-3}"
 
 CACHE_ROOT="${MAIN_GREEN_CACHE:-$HOME/.cache/main-green}"
 CLONE="$CACHE_ROOT/repo"
 STATE="$CACHE_ROOT/state"
 LOCK="$CACHE_ROOT/lock"
 LOGDIR="$CACHE_ROOT/logs"
+CONTENTION_FILE="$CACHE_ROOT/contention-streak"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_REPO="$(dirname "$SCRIPT_DIR")"
@@ -129,12 +143,27 @@ STREAK_FILE="$CACHE_ROOT/blind-streak"
 # reporting `RED, REPRODUCED — origin/main  failed BOTH attempts` with a blank
 # author. A corrupt counter turned a total failure to fetch into a DND-defeating
 # accusation about `main`.
-read_streak() {
-  local s=0
-  [ -f "$STREAK_FILE" ] && s="$(cat "$STREAK_FILE" 2>/dev/null || echo 0)"
+read_count() {
+  local f="$1" s=0
+  [ -f "$f" ] && s="$(cat "$f" 2>/dev/null || echo 0)"
+  # 🔴 DO NOT STRIP INTERNAL WHITESPACE. An earlier draft did, and it turned the
+  # corrupt value `1 2` into a perfectly plausible `12` — making a garbage
+  # counter look like a real streak. `$(cat ...)` already drops trailing
+  # newlines; anything else containing a space is corrupt and reads as 0.
   case "$s" in ''|*[!0-9]*) s=0 ;; esac
+  # 🔴 A DIGITS-ONLY CHECK IS NARROWER THAN THE HAZARD. `08` and `09` ARE all
+  # digits and sail through the case above — and bash reads a leading zero as
+  # OCTAL, so `$(( 08 + 1 ))` is `value too great for base`: the SAME arithmetic
+  # abort the sanitiser exists to stop. MEASURED at 31864127 with a streak of
+  # `08`: the clone failed, the fetch failed, the sha was EMPTY, and the run
+  # printed `✅ GREEN — origin/main  passed both sandbox tiers` and exited 0.
+  # A deadman reporting a green it never measured is worse than no deadman.
+  # A length cap first, because a huge literal overflows the same arithmetic.
+  [ "${#s}" -gt 6 ] && s=0
+  s=$(( 10#$s ))          # force base ten; 10#08 == 8
   echo "$s"
 }
+read_streak() { read_count "$STREAK_FILE"; }
 reset_streak() { echo 0 >"$STREAK_FILE" 2>/dev/null || true; }
 unmeasured_exit() {
   local n
@@ -157,10 +186,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --force)  FORCE=1 ;;   # ignore the memo and re-run even on an unchanged sha
     --status) STATUS_ONLY=1 ;;
-    # 🔴 The range is the WHOLE header, computed from where it ends. A literal
-    # `2,80p` silently truncated --help the moment the header grew past line 80,
-    # hiding --force, --status and half the exit-code ladder.
-    -h|--help) sed -n "2,95p" "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # 🔴 COMPUTED FROM WHERE THE HEADER ENDS, not a literal. A hardcoded range
+    # silently truncates --help the moment the header grows past it — which had
+    # already happened once (`2,80p`), and "bump the constant" re-rots on the
+    # next edit. `set -uo pipefail` is the first line after the header.
+    -h|--help)
+      _hdr=$(grep -n '^set -uo pipefail' "${BASH_SOURCE[0]}" | head -1 | cut -d: -f1)
+      sed -n "2,$(( _hdr - 1 ))p" "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -174,6 +207,15 @@ mkdir -p "$CACHE_ROOT" "$LOGDIR" || die "cannot create $CACHE_ROOT"
 # runs would fight over the clone and over the state file, and two nix builds of
 # the same derivation contend in the store (devrc/CLAUDE.md records that a
 # CONCURRENT pair produced two FALSE failures that a sequential pair did not).
+# 🔴 BEFORE THE LOCK, DELIBERATELY. `--status` only READS the recorded
+# verdict, and the moment you most want it is while a 20-minute run is in
+# flight — which is precisely when taking the lock first would block it.
+if [ "$STATUS_ONLY" = "1" ]; then
+  if [ -f "$STATE" ]; then say "last verdict:"; sed 's/^/  /' "$STATE"
+  else say "no verdict recorded yet"; fi
+  exit "$RC_GREEN"
+fi
+
 exec 9>"$LOCK" || die "cannot open $LOCK"
 if ! flock -n 9; then
   # 🔴 A FAILED `flock` IS NOT PROOF OF CONTENTION — VALIDATE THE INSTRUMENT.
@@ -190,7 +232,16 @@ if ! flock -n 9; then
   _probe="$CACHE_ROOT/.flock-probe.$$"
   if ( exec 8>"$_probe" && flock -n 8 ) 2>/dev/null; then
     rm -f "$_probe"
-    say "another run holds the lock — nothing to do"
+    _cn=$(( $(read_count "$CONTENTION_FILE") + 1 ))
+    echo "$_cn" >"$CONTENTION_FILE" 2>/dev/null || true
+    if [ "$_cn" -ge "$CONTENTION_ESCALATE" ]; then
+      say "🔴 $_cn consecutive runs skipped for CONTENTION — a lock held that long"
+      say "  has made this deadman blind, and exiting 0 would keep it silent."
+      say "  Look for a hand-run or a wedged run holding $LOCK."
+      unmeasured_exit
+    fi
+    say "another run holds the lock — nothing to do" \
+        "($_cn consecutive; escalates at $CONTENTION_ESCALATE)"
     exit "$RC_GREEN"
   fi
   rm -f "$_probe"
@@ -199,6 +250,8 @@ if ! flock -n 9; then
   say "  GREEN here would be a silent, permanent, systemd-success pass."
   unmeasured_exit
 fi
+
+rm -f "$CONTENTION_FILE" 2>/dev/null || true   # we hold the lock: not contended
 
 # ── where do we look? the remote the OPERATOR pushes to, read from their repo ──
 # A read. Never a write. If this script is run from somewhere without a git
@@ -213,11 +266,6 @@ fi
 read_state() { [ -f "$STATE" ] && cat "$STATE" || echo ""; }
 state_field() { read_state | awk -v k="$1" '$1==k {print $2; exit}'; }
 
-if [ "$STATUS_ONLY" = "1" ]; then
-  if [ -f "$STATE" ]; then say "last verdict:"; sed 's/^/  /' "$STATE"
-  else say "no verdict recorded yet"; fi
-  exit "$RC_GREEN"
-fi
 
 # ── keep the private clone current ────────────────────────────────────────────
 if [ ! -d "$CLONE/.git" ]; then
@@ -295,8 +343,15 @@ run_tier() {
   # than omitting it, since this host's /etc/nix/nix.conf already enables both.
   # On the command line there is nothing for a unit file to re-parse, and the
   # script works identically by hand, from systemd, or from cron.
+  # 🔴 `--no-warn-dirty` IS LOAD-BEARING FOR THE CACHED ARM, not cosmetic. A
+  # dirty tree makes nix emit `warning: Git tree '...' is dirty` — measured at
+  # 141 bytes — which makes a CACHED build's output NON-empty, so it reads as a
+  # truncated run (UNMEASURED) and ladders to BLIND about a green `main`. The
+  # detached clone should never be dirty, and `--no-link` is what keeps it that
+  # way (a `result` symlink would dirty it); this makes the inference hold even
+  # if something does dirty it.
   nix --extra-experimental-features "nix-command flakes" \
-      build "$CLONE#checks.x86_64-linux.$tier" -L --no-link >"$log" 2>&1
+      build "$CLONE#checks.x86_64-linux.$tier" -L --no-link --no-warn-dirty >"$log" 2>&1
   return $?
 }
 

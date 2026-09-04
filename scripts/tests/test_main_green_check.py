@@ -341,6 +341,130 @@ def test_a_CORRUPT_streak_file_cannot_make_the_guards_FALL_THROUGH(world):
     assert "RED, REPRODUCED" not in r.stdout
 
 
+# (raw streak file content, the integer the sanitiser MUST read out of it)
+# 🔴 EVERY EXPECTED VALUE IS DISTINCT, AND NONE IS 0 EXCEPT WHERE 0 IS THE POINT.
+# A fixture whose expectation collides with the fall-through value cannot see the
+# mutant: an earlier version of this test asserted only `rc in (11, 12)`, and BOTH
+# the fixed and the broken script land on 11 (the broken one by aborting the
+# arithmetic and failing the `-ge` test), so removing the base-ten coercion
+# SURVIVED a fully green suite. The counter the run records is the discriminator.
+CORRUPT_STREAKS = [
+    ("1 2", 1),                      # internal space -> corrupt -> 0, so 0+1
+    ("08", 9),                       # ALL DIGITS, but octal to bash -> must be 8
+    ("09", 10),                      # the other octal-invalid digit
+    ("007", 8),                      # leading zeros, still base ten -> 7
+    ("  5", 1),                      # leading space -> corrupt -> 0
+    ("5\n\n", 6),                   # trailing newlines are not corruption
+    ("9" * 22, 1),                   # overflows the arithmetic -> corrupt -> 0
+]
+
+
+@pytest.mark.parametrize("corrupt,expected", CORRUPT_STREAKS)
+def test_a_CORRUPT_streak_cannot_make_the_guards_FALL_THROUGH(world, corrupt, expected):
+    """🔴 The round-1 sanitiser was NARROWER THAN THE HAZARD it described.
+
+    `case $s in ''|*[!0-9]*) s=0` rejects non-digits — but `08` and `09` ARE all
+    digits, and bash reads a leading zero as OCTAL: `08: value too great for
+    base`. That is the same arithmetic abort, so `unmeasured_exit` again died
+    without exiting and the run continued past a guard that had just fired.
+
+    🔴 REPRODUCED at 31864127, and it is the worst outcome this file can produce:
+    with the clone AND the fetch both failed and the sha EMPTY, it printed
+    `✅ GREEN — origin/main  passed both sandbox tiers` and exited 0. A deadman
+    reporting a green it never measured is strictly worse than no deadman.
+
+    The escalation threshold is pinned high so the RUN's exit code stays 11 for
+    every row; what is asserted is the COUNTER, which is the only thing that
+    separates "sanitised correctly" from "the arithmetic blew up and the guard
+    fell through".
+    """
+    world["cache"].mkdir(parents=True, exist_ok=True)
+    (world["cache"] / "blind-streak").write_text(corrupt)
+    stub = _stub(world, 'echo "RESULT: PASS (exit=0)"; exit 0\n')
+    r = _run(world, stub, extra_env={"MAIN_GREEN_REMOTE": str(world["tmp"] / "gone"),
+                                     "MAIN_GREEN_BLIND_ESCALATE": "99"})
+    assert r.returncode == RC_UNMEASURED, (
+        "streak %r let the run continue past a failed clone:\n%s"
+        % (corrupt, r.stdout))
+    assert "GREEN" not in r.stdout, (
+        "streak %r produced a GREEN for a tree that was never fetched:\n%s"
+        % (corrupt, r.stdout))
+    got = (world["cache"] / "blind-streak").read_text().strip()
+    assert got == str(expected), (
+        "streak %r was read as %r, expected %r — the sanitiser did not coerce "
+        "it to base ten, so the arithmetic aborted and the guard fell through"
+        % (corrupt, got, str(expected)))
+
+
+
+def test_repeated_CONTENTION_does_not_report_GREEN_forever(world):
+    """🔴 Round 1 closed the BROKEN-flock door and left the CONTENTION one open,
+    while its own comment condemned the whole class.
+
+    A held lock — you started a run by hand in a tmux pane and it is still going,
+    or wedged — makes every 4h fire print "another run holds the lock" and exit
+    0: silent, a systemd success, and touching no ladder. The deadman is blind
+    indefinitely and nothing says so. Contention must therefore ladder too.
+    """
+    import fcntl
+    world["cache"].mkdir(parents=True, exist_ok=True)
+    stub = _stub(world, 'echo "RESULT: PASS (exit=0)"; exit 0\n')
+    env = {"MAIN_GREEN_CONTENTION_ESCALATE": "2"}
+    with open(world["cache"] / "lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        first = _run(world, stub, extra_env=env)
+        second = _run(world, stub, extra_env=env)
+    assert first.returncode == RC_GREEN, first.stdout
+    assert second.returncode in (RC_UNMEASURED, RC_BLIND), (
+        "a second consecutive contention still reported GREEN — the deadman can "
+        "be blind indefinitely behind a held lock:\n" + second.stdout)
+    assert _calls(world) == [], "sanity: the gate never ran"
+
+
+def test_status_works_while_a_run_holds_the_lock(world):
+    """The OPTIONS block claims `--status` does not block on a run in flight, and
+    a claim in the header is a claim like any other. At round 2 it was FALSE —
+    the lock was taken before the STATUS_ONLY branch — so the moment you most
+    want the last verdict (during a 20-minute run) was the one moment you could
+    not read it. Fixed by ordering, pinned here."""
+    import fcntl
+    world["cache"].mkdir(parents=True, exist_ok=True)
+    (world["cache"] / "state").write_text("sha deadbeef\nverdict green\n")
+    stub = _stub(world, 'echo "RESULT: PASS (exit=0)"; exit 0\n')
+    with open(world["cache"] / "lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        r = _run(world, stub, "--status")
+    assert r.returncode == RC_GREEN, r.stdout + r.stderr
+    assert "deadbeef" in r.stdout, r.stdout
+    assert _calls(world) == []
+
+
+def test_the_unit_does_NOT_carry_NIX_CONFIG_in_its_Environment(world):
+    """🔴 The round-1 guard for this read the WRONG FILE.
+
+    Its message said "it must not move back into the unit's `Environment=`" and
+    its body asserted a string in `main-green-check.sh` — it never opened
+    `nix/home.nix`. Both facts could hold at once: the flag on the command line
+    AND `NIX_CONFIG=experimental-features = nix-command flakes` re-added to the
+    unit. The suite would stay fully green while systemd whitespace-split it,
+    nix hard-errored on every invocation, and the deadman laddered to BLIND.
+
+    A docstring naming a RELATIONSHIP whose body inspects ONE SIDE reads as
+    coverage while providing none, which stops anyone looking.
+    """
+    home_nix = (ROOT / "nix" / "home.nix").read_text()
+    block = re.search(r"systemd\.user\.services\.main-green-check = \{.*?\n  \};",
+                      home_nix, re.S)
+    assert block, "the main-green-check unit is gone from nix/home.nix"
+    code = _code_only(block.group(0))
+    assert "NIX_CONFIG" not in code, (
+        "NIX_CONFIG is back in the unit. systemd WHITESPACE-SPLITS Environment=, "
+        "so `experimental-features = nix-command flakes` becomes the bare word "
+        "`experimental-features` and nix hard-errors on every invocation — "
+        "measured with systemd-analyze verify. The flag belongs on the command "
+        "line in main-green-check.sh.")
+
+
 def test_a_BROKEN_flock_is_not_reported_as_GREEN(world):
     """🔴 RED at 3033a22f. `flock -n` returning non-zero for ANY reason — ENOLCK
     on a filesystem without working locks, a missing binary, EBADF — was
@@ -362,7 +486,7 @@ def test_a_BROKEN_flock_is_not_reported_as_GREEN(world):
 
 
 def test_single_flight_is_BEHAVIOURAL_not_just_the_word_flock(world):
-    """🔴 The guard this replaces asserted only `"flock" in src`, and a mutant
+    """🔴 The guard this REPLACED asserted only `"flock" in src`, and a mutant
     that kept the word while deleting the branch (`if false`) SURVIVED a fully
     green suite. A guard satisfiable by spelling is not a guard.
 
@@ -454,6 +578,13 @@ def test_the_production_path_builds_the_two_sandbox_derivations():
     src = _code_only(SCRIPT.read_text())
     assert 'build "$CLONE#checks.x86_64-linux.$tier"' in src, (
         "the production gate invocation moved; this seam no longer mirrors it")
+    for flag in ("-L", "--no-link", "--no-warn-dirty"):
+        assert flag in src, (
+            "%s left the production nix invocation. `--no-link` keeps $CLONE "
+            "clean (a `result` symlink would dirty it) and `--no-warn-dirty` "
+            "keeps a cached build's output EMPTY — a dirty tree emits a warning, "
+            "which makes the cached case non-empty and therefore UNMEASURED, "
+            "laddering to BLIND about a green main." % flag)
     assert '--extra-experimental-features "nix-command flakes"' in src, (
         "the flake features flag left the COMMAND LINE. It must not move back "
         "into the unit's Environment=, which systemd whitespace-splits — "
@@ -493,13 +624,25 @@ def test_the_script_never_touches_the_operators_checkout():
             "scripts/main-green-check.sh runs `git -C $SRC_REPO %s` — the "
             "operator's checkout is READ-ONLY to this script, and the only "
             "permitted read is `remote get-url`." % verb)
-    assert not re.search(r'cd\s+"?\$(SRC_REPO|SCRIPT_DIR)', src), (
-        "the script `cd`s into the operator's checkout — a subsequent bare git "
-        "command then acts on THEIR tree, which the `git -C $SRC_REPO` scan "
-        "above cannot see.")
-    assert not re.search(r'git -C "\$SCRIPT_DIR"', src), (
-        "$SCRIPT_DIR is inside the operator's checkout too — same hazard, "
-        "different spelling.")
+    # 🔴 AN ENUMERATED ALLOWLIST, NOT A PATTERN — a NEW use is a failure by
+    # DEFAULT. Round 1 answered "the guard is walkable" by adding the two
+    # spellings it had been walked with (`cd "$SRC_REPO"`, `git -C
+    # "$SCRIPT_DIR"`), which left `cd "${SRC_REPO}"`, `cd -- "$SRC_REPO"`,
+    # `pushd "$SRC_REPO"` and unquoted `git -C $SCRIPT_DIR` all still open.
+    # Chasing spellings cannot terminate; enumerating the legitimate uses can.
+    ALLOWED_USES = {
+        'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+        'SRC_REPO="$(dirname "$SCRIPT_DIR")"',
+        'REMOTE_URL="${MAIN_GREEN_REMOTE:-$(git -C "$SRC_REPO" remote get-url origin 2>/dev/null || true)}"',
+        'say "COULD NOT MEASURE — no \'origin\' remote on $SRC_REPO, so there is no"',
+    }
+    uses = [ln.strip() for ln in src.splitlines()
+            if "SRC_REPO" in ln or "SCRIPT_DIR" in ln]
+    unlisted = [u for u in uses if u not in ALLOWED_USES]
+    assert not unlisted, (
+        "new use(s) of the operator's checkout path — every one is a chance to "
+        "write to a tree this script must only observe. Add it here ONLY after "
+        "confirming it is read-only:\n  " + "\n  ".join(unlisted))
     assert "worktree add" not in src, (
         "`git worktree add` writes the COMMON git dir (refs, config, registry), "
         "so it is a repo-GLOBAL mutation of a checkout other sessions share. "
@@ -512,13 +655,6 @@ def test_it_derives_the_mainline_instead_of_hardcoding_main():
     src = SCRIPT.read_text()
     assert "symbolic-ref" in src and "refs/remotes/origin/HEAD" in src
 
-
-def test_it_single_flights():
-    """A run can outlast the timer interval; two concurrent runs would fight over
-    the clone AND contend in the nix store, which is a documented source of false
-    failures in this repo."""
-    src = SCRIPT.read_text()
-    assert "flock" in src
 
 
 def test_the_script_is_executable_and_parses():
