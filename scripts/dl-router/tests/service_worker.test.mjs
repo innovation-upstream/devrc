@@ -524,10 +524,16 @@ test("the menu saves the original, not the proxy thumbnail in the src", async ()
   //
   // This test SUPPLIES a `linkUrl`, which is why it kept passing while the
   // feature was inert: measured, a Discord image has no ancestor <a>, so a
-  // real right-click never carries one -- the case below this one. Keep both:
-  // these exercise the swap, which is still correct wherever a browser does
-  // supply a link. The comment here used to say the original sits "on the
-  // wrapping <a href>", which is false and is why the swap looked sufficient.
+  // real right-click never carries one -- the case below this one.
+  //
+  // Keep both, and keep them for DIFFERENT reasons: THIS test is the only one
+  // that reaches the swap at all, because the one below supplies no `linkUrl`
+  // and therefore cannot. Deleting this one as redundant would remove the
+  // swap branch's only coverage. The swap is still correct wherever a browser
+  // does supply a link, which is why it stays.
+  //
+  // The comment here used to say the original sits "on the wrapping
+  // <a href>", which is false and is why the swap looked sufficient.
   reset();
   const ch = "119283746551234567";
   const original

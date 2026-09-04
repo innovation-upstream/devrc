@@ -146,8 +146,8 @@ max_jobs = 4
 # # http(s) hit wins. That exists because `attr` is ONE name, so a single pair
 # # cannot cover a site that posts both an image and a video: the image's own
 # # `src` is often a downscaled copy from a resizing proxy, with the original on
-# # a sibling <a> INSIDE the container, while a video's `src` is usually the
-# # original already. Put the accessor that resolves the BEST copy first.
+# # a sibling <a>, while a video's `src` is usually the original already. Put
+# # the accessor that resolves the BEST copy first.
 # #
 # # This works because each `element` is resolved with
 # # container.querySelectorAll -- a DESCENDANT query -- so the anchor does not

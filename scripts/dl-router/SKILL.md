@@ -251,9 +251,12 @@ already on the origin host, so the rewrite simply does not fire for them. It
 
 🔴 The heading above closes the context-menu subsection. Without it, this
 block, the troubleshooting list and the DEPLOY ORDER note all read as
-context-menu guidance — and the context-menu path has no rules, no accessors
-and no buttons, so every word of it would be filed under a path it cannot
-apply to.
+context-menu guidance — and the context-menu path has no **player** rules, no
+accessors and no buttons, so every word of it would be filed under a path it
+cannot apply to. ⚠ It is not rule-free: the menu path IS governed by
+`[site_rules."<host>".context]`, which `content_capture.js` reads on the
+`contextmenu` event and which decides where a menu download files. If menu
+downloads keep landing in the catch-all, that context rule is the thing to add.
 
 **Important details**
 - The media URL is **signed and rotates** — `player_buttons.js` reads it **at

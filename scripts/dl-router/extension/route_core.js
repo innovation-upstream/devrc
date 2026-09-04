@@ -784,10 +784,18 @@ export function correlateCapture(item, captures, opts = {}) {
       //
       // Precisely, because "the url it downloads" is wider than the code: the
       // stamp runs BEFORE the streaming branch. On the ordinary path that url
-      // does go to `chrome.downloads.download`; for a manifest it goes to the
-      // sidecar's /fetch instead and no DownloadItem is ever created, so the
-      // stamp is inert there rather than wrong. Do not read this as "always a
-      // download".
+      // goes to `chrome.downloads.download`; for a manifest it goes to the
+      // sidecar's /fetch instead and no DownloadItem is ever created.
+      //
+      // THE STAMP IS DECISIVE ON THAT PATH TOO -- do not read "no
+      // DownloadItem" as "no effect". `startFetch` runs its OWN
+      // `correlateCapture` on the same url, and this clause is what binds it.
+      // A stamp also implies the rewrite fired, which implies a cdn attachment
+      // target, which implies `directFile` -- so `streaming` reduces to
+      // `manifest` there, and the fetch correlates at tier 1 against the
+      // capture just stamped. Moving the stamp below the streaming branch, or
+      // dropping this clause as download-only, silently demotes that fetch to
+      // tier 2/3.
       if ((c.href && urls.has(c.href))
         || (c.mediaSrc && urls.has(c.mediaSrc))
         || (c.downloadUrl && urls.has(c.downloadUrl))) {
