@@ -602,6 +602,18 @@ def test_a_refusal_never_pays_for_the_opencode_warm(rig, tmp_path):
         after fix    -> rc=2, dir ABSENT   (passes)
     The rig's own oc_config_dir is PRE-WARMED, which would skip the warm on either
     code path and make this vacuous — hence the deliberately cold override below.
+
+    🔴 WHAT THIS DOES NOT PIN, stated because the docstring above reads wider than
+    the assertion. It pins that the WARM/BOOTSTRAP does not run before a refusal —
+    the config dir is the observable, so only work that CREATES that dir is caught.
+    It puts NO budget on cost: an expensive step added between the `command -v
+    opencode` preflight and this parse block (a network probe, a lock acquisition,
+    a version query) would make every refusal slow again while `not cold.exists()`
+    stays true and this test still passes. A wall-clock budget was considered and
+    rejected: this suite's own CI flake was a wall-clock timeout under load, and
+    trading a silent gap for a flaky gate is the wrong side of that trade. If cost
+    regresses, the thing to add is a call-count on the rig's fake opencode, not a
+    stopwatch.
     """
     cold = tmp_path / "cold-oc-config"
     assert not cold.exists(), "the override must start cold or the guard is vacuous"

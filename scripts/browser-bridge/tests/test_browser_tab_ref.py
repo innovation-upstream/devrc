@@ -217,12 +217,27 @@ def _run_beside_stub_agent(bridge, tmp_path, tag, *args):
                                       encoding="utf-8")
     # write_exec, NOT a hand-written shebang — see the note on the BB_* stubs below:
     # `#!/usr/bin/env bash` does not exist in the nix build sandbox.
-    mockbin.write_exec(stub_dir / "browser-agent", r'''goal=""
+    # 🔴 The stub MIRRORS the real grammar's REFUSALS, it does not just find a
+    # positional. A stub that is more permissive than the wrapper masks exactly the
+    # regression this pair exists to catch: an argv the CLI forwards, the stub
+    # accepts, and the REAL wrapper rejects. The three divergences an audit found
+    # (2026-09-04) were `--*` swallowing unknown flags, `-h`/`-x` becoming goals,
+    # and a second positional silently last-winning — all now refusals, as in
+    # browser-agent's own parse loop.
+    mockbin.write_exec(stub_dir / "browser-agent", r'''goal=""; seen=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --instance|--allow-domains|--deny-domains|--steps|--timeout) shift ;;
-    --*) : ;;
-    *) goal="$1" ;;
+    --dry-run) : ;;
+    --) shift
+        while [ $# -gt 0 ]; do
+          [ "$seen" -eq 0 ] || { printf 'browser-agent: only one goal is accepted (got extra: %s)\n' "$1" >&2; exit 2; }
+          goal="$1"; seen=1; shift
+        done
+        break ;;
+    -*) printf 'browser-agent: unknown flag: %s\n' "$1" >&2; exit 2 ;;
+    *) [ "$seen" -eq 0 ] || { printf 'browser-agent: only one goal is accepted (got extra: %s)\n' "$1" >&2; exit 2; }
+       goal="$1"; seen=1 ;;
   esac
   shift
 done
@@ -532,14 +547,19 @@ def test_agent_REFUSES_a_reference_rather_than_honouring_half_of_it(bridge):
 
 
 def test_POSITIVE_CONTROL_the_missing_goal_error_is_producible(bridge):
-    """🔴 The two tests below assert an ABSENCE, which is worth nothing until
-    the string is shown to be producible HERE, in THIS environment.
+    """🔴 This drives the REAL `browser-agent`, and it is the ONLY case in this
+    file that still does. Everything it guards is stated here, narrowly.
 
-    Both read "`a goal is required` must not appear". A typo in that literal, a
-    reworded error in `browser-agent`, or an environment where the agent path
-    dies even earlier would make each of them pass while testing nothing — the
-    reassuring-zero shape. This case feeds an input that MUST produce it (an
-    `agent` invocation with no goal at all) and watches the string appear.
+    It watches `a goal is required` appear for an input that must produce it, so
+    the literal is shown reachable against the real wrapper in THIS environment.
+
+    🔴 WHAT IT NO LONGER CONTROLS FOR. It used to back the two absence assertions
+    below, on the reasoning that a reworded error would make them pass while
+    testing nothing. Those two now run beside a STUB (`_run_beside_stub_agent`),
+    so their stderr is the STUB's and this case cannot speak for it — reword the
+    stub's message and both absences go vacuous with this test still green. What
+    keeps them honest instead is their POSITIVE `STUB_GOAL=[…]` assertion, which
+    reads a value rather than the absence of one and cannot rot that way.
     """
     r = bridge.run("agent", "--dry-run")
     assert "a goal is required" in r.stderr, (
@@ -554,8 +574,16 @@ def test_the_free_text_list_covers_agent_too(bridge, tmp_path):
     because nothing exercised it. The discriminator is deterministic and needs no
     backend: with `agent` on the list the reference survives as the goal, so
     `browser-agent` gets one; with `agent` dropped, the token is stripped out as
-    routing and the agent is left with NO goal at all — which it refuses by name,
-    before any network work.
+    routing and the agent is left with NO goal at all.
+
+    🔴 MEASURED 2026-09-04, the mutant does NOT reach browser-agent: the CLI
+    refuses first, with `agent cannot honour a tab (the bw:// reference gave tab
+    12345)`, and the stub is never invoked (its stdout is empty). So the earlier
+    "which it refuses by name" was wrong about the mechanism. The mutant also
+    dies on the retained `agent cannot honour` absence below and on
+    test_SKILL_md_names_every_free_text_subcommand_the_CLI_exempts — so killing
+    it shows the STUB_GOAL assertion is not INERT, not that it adds
+    discrimination no other assertion has.
     """
     r = _run_beside_stub_agent(bridge, tmp_path, "free-text", "agent",
                                "--dry-run", CANONICAL)

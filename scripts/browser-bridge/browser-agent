@@ -94,6 +94,28 @@ command -v "$OPENCODE_BIN" >/dev/null 2>&1 || die "opencode not found on PATH ('
 # Nothing between here and the warm block reads a parsed variable (the only
 # `$STEPS` in it are prose and an ESCAPED `x\$STEPS` inside a warning string), and
 # nothing in the warm block reads a positional — every `$1` there is function-local.
+#
+# 🔴 THIS IS A REORDER, NOT A NO-OP: IT CHANGES WHICH `die` WINS A RACE. The block
+# is byte-identical and every input that reached the goal check before still gets
+# the same exit code and the same text — but an input that used to die EARLIER, in
+# the code this now precedes, is refused by THIS block instead. MEASURED 2026-09-04,
+# all three previously failing before argument validation and now after it:
+#   env -u HOME …              `HOME: unbound variable` rc 1  ->  `a goal is required` rc 2
+#   BROWSER_AGENT_WARM_TIMEOUT=abc  its own validation error  ->  `a goal is required`
+#   a stray AGENTS.md in the config dir  `unexpected instruction file` -> same
+# `OC_CONFIG_DIR` derives from `$HOME` under `set -u` (see its assignment below),
+# which is why the first one is an EXIT-CODE change and not merely a wording one —
+# reachable from exactly the contexts the preflight comment above names (systemd
+# user units, cron, `env -i`). All three are improvements: a missing goal is the
+# user's actual error and needs no environment at all. Stated because "no behaviour
+# change" is the claim someone will check, and for these three inputs it is false.
+#
+# 🔴 The ORDERING is gated OUTSIDE this directory: `scripts/tests/test_opencode_config.py`
+# §7 asserts over this file's comment-stripped source, including
+# `preflight < bootstrap_call` (a missing `command -v opencode` must not reach the
+# bootstrap's `rm -rf`). Moving this block ABOVE that preflight would break it, and
+# the `scripts/browser-bridge/tests` target does NOT collect that file — run
+# `pytest scripts/tests/test_opencode_config.py -k browser_agent` after any reorder.
 GOAL=""; GOAL_SEEN=0; INSTANCE=""; ALLOW=""; DENY=""; STEPS=12; TIMEOUT=120; DRYRUN=0
 _csv_to_ws() { printf '%s' "$1" | tr ',' ' '; }
 while [ $# -gt 0 ]; do
