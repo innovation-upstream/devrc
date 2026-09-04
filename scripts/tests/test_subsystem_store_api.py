@@ -18542,12 +18542,17 @@ class TestSeedRefusesToOverwriteANewerPodEntry:
 
         r = self._push(store, tmp_path, env)
 
-        assert r.returncode == 8, (
-            f"expected exit 8 (refused), got {r.returncode}.\n{r.stdout}\n{r.stderr}"
-        )
+        # 🔴 THE BYTES ASSERTION COMES FIRST, DELIBERATELY. Asserting the exit
+        # code first makes the red-at-base run fail on the CODE (0 vs 8) and
+        # never reach the bytes — so the matrix would prove the flag is absent,
+        # not that the content was destroyed. Ordered this way, red at base is
+        # red because THE POD WAS CLOBBERED, which is the defect.
         assert pod_file.read_text() == newer, (
             "THE POD'S BYTES WERE REPLACED. The guard must run BEFORE the extract; "
             "refusing afterwards is the data loss it exists to prevent."
+        )
+        assert r.returncode == 8, (
+            f"expected exit 8 (refused), got {r.returncode}.\n{r.stdout}\n{r.stderr}"
         )
         assert "NOTHING WAS PUSHED" in r.stderr, r.stderr
         assert f"{SCOPE}/thing-alpha.md" in r.stderr, (
@@ -18588,7 +18593,11 @@ class TestSeedRefusesToOverwriteANewerPodEntry:
     def test_allow_overwrite_proceeds_AND_names_what_it_replaced(
         self, store: Path, tmp_path: Path, fake_cluster
     ):
-        """The override is deliberate, not a silent bypass: it still prints which
+        """⚠ NOT REGRESSION COVERAGE. This is red at base only because
+        `--allow-overwrite` does not exist there ("unknown argument", exit 2) —
+        which pins that the flag is new, not that any defect was fixed.
+
+        The override is deliberate, not a silent bypass: it still prints which
         entries it replaced, because 'I chose this' and 'I did not notice' must
         not look the same in a log read afterwards."""
         env, dest = fake_cluster
