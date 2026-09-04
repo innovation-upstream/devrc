@@ -18,29 +18,44 @@ side was still wrong for it in three ways.
 
 ## State now
 
-All three earlier PRs (#1110, #1113, #1149) MERGED and shipped; both hosts converged.
+Two PRs open and gated, both awaiting review/merge. The earlier three (#1110, #1113,
+#1149) are merged and shipped.
 
-**NEW this session — PR [#1286](https://github.com/innovation-upstream/devrc/pull/1286), branch
-`fix/dl-router-discord-original-url`, commit `3bcb503b`, rebased onto `a7dac5bd`.** It fixes a
-defect this doc previously described as an open *question*: `preferOriginalUrl` is not merely
-unexercised, it is **structurally unable to fire**, and the resized-thumbnail bug #1110 targeted
-is still live for images. Details in the findings block below.
+| PR | branch | state |
+|---|---|---|
+| [#1286](https://github.com/innovation-upstream/devrc/pull/1286) | `fix/dl-router-discord-original-url` | 6 commits, MERGEABLE, **audit ladder closed at round 5** |
+| [#1290](https://github.com/innovation-upstream/devrc/pull/1290) | `feat/discord-embed-viewport-cap` | 2 commits, **audit round 1 closed** |
+| [#1236](https://github.com/innovation-upstream/devrc/pull/1236) | `docs/handoff-dl-router-discord-media` | this doc |
 
-Worktrees currently held by this effort: `devrc-ho-dlr` (this doc) and `devrc-dlr-orig` (#1286).
-Remove both once their PRs merge.
+**#1286 — `originalFromPreview`.** `preferOriginalUrl` was inert in production: it reads
+Chrome's `info.linkUrl`, which is populated only from an ANCESTOR `<a>`, and a Discord
+image attachment has none. Fixed by rewriting the proxy host to the origin host and
+dropping the resize knobs, carrying the signature. Also restores `correlateCapture`
+tier 1, which the rewrite had made structurally impossible.
 
-🔴 **STILL NOT verified at the consumer, and the numbers MOVED — re-measured 2026-09-03:**
+**#1290 — viewport cap.** `embed_enlarge.js` removed Discord's 400x300 cap and put
+nothing in its place (`max-height: none`), so enlarged media overflowed the window on
+every enlarge. Now `max-width: min(100%, 96vw)` / `max-height: 92vh`, declarative, **no
+resize listener** — the engine re-evaluates viewport units itself.
+
+🔴 **STILL NOT verified at the consumer, and this is now the gate on BOTH PRs.** One
+full restart confirms both: `brave://extensions` should read dl-router **0.3.3** and
+discord-embed-ext **0.3.1**. The evidence that the earlier reload did not take, carried
+forward because it is the whole reason this step is still open:
 
 | | |
 |---|---|
-| dl-router 0.3.2 bytes in the repo tree | written 2026-08-31 02:41 (carried forward) |
-| dl-router last reloaded (Brave's own `Preferences` record, Profile 2) | 2026-08-30 21:39 — unchanged, still ~5 h BEFORE those bytes |
-| Brave main process | up since **2026-08-26 16:20** (the earlier "08-28 23:53" reading was of a different process) |
+| dl-router 0.3.2 bytes in the repo tree | written 2026-08-31 02:41 |
+| dl-router last reloaded (Brave's own `Preferences`, Profile 2) | 2026-08-30 21:39 — ~5 h BEFORE those bytes |
+| Brave main process | up since **2026-08-26 16:20**, no restart (an earlier "08-28 23:53" reading was of a different process) |
 | Profile 2 `Preferences` last flushed | 2026-09-03 16:39 — so a reload that day WOULD have been recorded |
 
-Brave is still running dl-router **0.3.1**. #1286 bumps the manifest to **0.3.3** precisely
-because 0.3.2 was never actually loaded, so the restart check is now `brave://extensions` reads
-**0.3.3** — one restart confirms both changes.
+Both manifests have since been bumped again (0.3.2 -> 0.3.3, 0.3.0 -> 0.3.1), so the
+version on screen is now an unambiguous check rather than a guess.
+
+⚠ **Neither PR has been tested against the live Discord client.** Every rendering number
+in #1290 — mine and the audit's — comes from a synthetic page carrying the declaration
+set, driven headlessly over CDP. #1286's fake-DOM tests observe no layout at all.
 
 ## Open investigations — live diagnosis state
 
@@ -129,35 +144,95 @@ The previous entry asked "is this a no-op?" and answered *genuinely unknown*. It
   the DOM (no ancestor anchor) and follows from documented `contextMenus` semantics, but has
   never been observed from an actual right-click — that needs 0.3.3 running, i.e. the restart.
 
+### RESOLVED — the audit ladder on #1286, and what it cost
+
+Five rounds. Round 1 was a full audit; rounds 2-5 were delta rounds. **Every round after
+the first found a defect introduced by the PREVIOUS round's fix, and all of them were
+prose.** Worth reading before writing prose fixes in this repo.
+
+- **Round 1 (🔴):** `dl-router/SKILL.md` carried a 🔴 "never rewrite a proxy URL's host"
+  rule whose stated reason this PR had measured false. The skill ships via
+  `mkOutOfStoreSymlink`, so it is live off the working tree with **no `home-manager
+  switch`** — the next agent would have read a false NEVER and reverted the fix.
+  It also caught a regression: the rewrite made tier-1 correlation impossible.
+- **Round 2:** the round-1 fix landed in the WRONG SECTION — under `## Player buttons`,
+  whose TOML `media` list is resolved by `container.querySelectorAll` (a DESCENDANT
+  query) and whose path never calls `originalFromPreview`. It declared a working
+  accessor futile. Also found the refuted claim surviving at a second site
+  (`config.example.toml`); a wider grep found a **third** (a test comment).
+- **Round 3:** caught a FALSE CLAIM in round 2's own commit message — the F3 comment fix
+  had been destroyed by a `git checkout --` during the mutation battery and the reverted
+  file committed. Also: the round-2 `###` heading was never closed, so 45 lines of
+  player guidance sat under a context-menu heading.
+- **Round 4:** four false sentences, including one asserting the stamp is "inert" on the
+  streaming path when it is **decisive** there.
+- **Round 5:** verified round 4's chain link-by-link and found it correct, proving
+  unreachable the exception it was asked to hunt. Found one remaining false claim of
+  mine ("the only test that reaches the swap" — `identity.test.mjs` also does, and
+  predates this PR).
+
+🔴 **Both ladders were STOPPED on the escape hatch, not on convergence** — recorded on
+each PR. Criteria named each time: no 🔴, blast radius bounded by "the document contains
+a false sentence", the recurring shape swept at every site. The newest sentences in both
+PRs are **unaudited, not cleared**.
+
+- **Ruled out — that the ledger would split on the rewritten URL.**
+  via: measurement — `ledgerSourceKey(proxy)` and `ledgerSourceKey(rewritten)` are the
+  identical string, because `discordSourceKey` already folds host AND drops the query;
+  `server.py` prefers `ctx.source_key` for every Discord attachment.
+- **Ruled out — that the lightbox would inherit #1290's new inline caps.**
+  via: code — `lightbox.js` does not `cloneNode`; it builds a fresh element and copies
+  only `src` plus `<source>` children, so no inline style crosses over.
+- **Ruled out — that `min()` is a risk.**
+  via: measurement + code — `manifest_version: 3` implies Chrome >= 88 and `min()`
+  shipped in Chrome 79. The cliff is real in shape (an unparseable `setProperty` is a
+  silent no-op leaving the prior value, so a non-supporting engine would end with NO
+  `max-width` — worse than the `100%` it replaced) but unreachable here.
+- **Ruled out — that `object-fit: contain` is what preserves the aspect ratio.**
+  via: measurement — 58.88 x 588.80 with `contain`, with `fill`, and with the
+  declaration deleted. It IS load-bearing under `display:flex; flex-direction:column`
+  (614.39 x 588.80 box), where `fill` squashes. Keep it; do not credit it for the
+  block case.
+
+### OPEN — nothing has been seen working in the real client
+
+- **Symptom + exact repro:** not a failure — an unverified feature, twice over.
+- **Next probe, in order:** full Brave restart -> confirm `brave://extensions` reads
+  dl-router **0.3.3** and discord-embed-ext **0.3.1** -> right-click one Discord image
+  attachment and confirm the saved file is the posted original, not a resized webp ->
+  enlarge one tall image and confirm it no longer runs off the window.
+- 🔴 The extension still has NO logging facility, which is why "did this fire?" needs a
+  human at the browser rather than a query.
+
 ## Next steps (ranked)
 
-1. **Fully restart Brave and confirm `brave://extensions` reads `0.3.3`.**
-   forcing: user — the operator asked to ship; the reload is MEASURED not to have taken (Brave's
-   own record predates the bytes, and the process has not restarted since 2026-08-26). Nothing
-   below can be checked until this is done. A `↻` is documented as unreliable here — it often
-   leaves the OLD service worker alive. A FULL restart is the fix.
+1. **Fully restart Brave; confirm `brave://extensions` reads dl-router 0.3.3 and
+   discord-embed-ext 0.3.1.**
+   forcing: user — the operator asked to ship; the reload is MEASURED not to have taken
+   (no restart since 2026-08-26). Nothing below can be checked until this is done. A `↻`
+   is documented as unreliable here; a FULL restart is the fix.
 2. **Review and merge [#1286](https://github.com/innovation-upstream/devrc/pull/1286).**
-   IN FLIGHT: devrc#1286. Repo `devrc`, files `scripts/dl-router/extension/{route_core.js,manifest.json}`
-   and `scripts/dl-router/tests/{identity,service_worker}.test.mjs`.
-   forcing: regression — the shipped `preferOriginalUrl` is measurably inert, so image downloads
-   are silently saving resized thumbnails today.
-3. **After the restart, confirm the fix end-to-end with one real right-click** on a Discord image
-   attachment, and check the saved file is the original rather than a resized webp. This is the
-   only step that closes the `info.linkUrl` gap named above.
-   forcing: gate — #1286's own verification is incomplete without it; the unit tests pin the
-   pure function, not the browser's behaviour.
-4. **Merge [#1236](https://github.com/innovation-upstream/devrc/pull/1236)** (this doc) and remove
-   the `devrc-ho-dlr` / `devrc-dlr-orig` worktrees.
+   IN FLIGHT: devrc#1286. Both sandbox tiers green at base `473c1cdc`-era main;
+   re-gate on the merged tree if main has moved.
+   forcing: regression — the shipped `preferOriginalUrl` is measurably inert, so image
+   downloads silently save resized thumbnails today.
+3. **Review and merge [#1290](https://github.com/innovation-upstream/devrc/pull/1290).**
+   IN FLIGHT: devrc#1290.
+   forcing: regression — enlarged media overflows the window on every enlarge.
+4. **After the restart, confirm both end-to-end** (one right-click save, one enlarge).
+   This is the only step that closes the `info.linkUrl` gap and the live-render gap.
+   forcing: gate — both PRs' verification is incomplete without it.
+5. **Merge [#1236](https://github.com/innovation-upstream/devrc/pull/1236)** (this doc)
+   and remove the worktrees: `devrc-ho-dlr`, `devrc-dlr-orig`, and the agent worktrees
+   under `.claude/worktrees/`.
    forcing: none
-5. **Decide the Discord player rule** (unchanged from the previous version of this doc, and still
-   `~/.config/dl-router/config.toml`, NOT committed). The DOM premise it was waiting on is now
-   settled — a `media` accessor list keyed on `a[href^="https://cdn.discordapp.com/attachments"]`
-   would work for the anchor, but note the anchor is a SIBLING of the image, so an
-   `element`-based accessor must be scoped to the message, not the image.
-   🔴 Order still matters: switch the sidecar FIRST, write the rule SECOND.
+6. **Decide the Discord player rule** — `~/.config/dl-router/config.toml`, NOT committed.
+   The DOM premise is settled; note the anchor is a SIBLING of the image, so an
+   `element` accessor must be scoped so `container` encloses it — **and whether it does
+   was never measured.** 🔴 Order: switch the sidecar FIRST, write the rule SECOND.
    forcing: none
-6. **Give the extension a logging facility.** Still unstarted, and still the reason "is this a
-   no-op in production?" took a live browser probe to answer rather than a query.
+7. **Give the extension a logging facility.** Still the reason every "does this fire?"
+   question costs a live browser probe.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -232,22 +307,44 @@ The previous entry asked "is this a no-op?" and answered *genuinely unknown*. It
   `cdn.discordapp.com`, 100% video (12 mp4 / 9 mov), still zero images. So the log still cannot
   validate any image-path change — that has to come from the DOM or from a real download.
 
+- 🔴 **`nix build --rebuild` does NOT re-run a derivation whose build FAILED** — it exits
+  1 with `some outputs ... are not valid, so checking is not possible`, which reads
+  exactly like a test failure. Two "reproductions" of a red were this, and neither ran a
+  test. Plain `nix build` re-runs it.
+- 🔴 **`nix log <drv>` holds ONE log per derivation path, and the path is a function of
+  the source tree** — consecutive runs of the same tree read back the SAME log. The tell
+  was a duration identical to the decimal (390.53s) across supposedly separate runs.
+  Capture each run's stdout to its own file; bind a log to a tree by the drv path
+  differing, not by a string you hope appears in it (a source COMMENT never appears in
+  test output — that control is vacuous).
+- 🔴 **A red `pytests` on this box is a load flake until the WALL TIME says otherwise.**
+  `test_six_writers_with_a_tiny_busy_timeout...` went red once; the whole 1020-test
+  dl-router target took **391s** against **115s** at base. Load inflates every test, an
+  assertion inflates one — and that test is itself a 5ms busy-timeout load reproduction.
+- 🔴 **A `git checkout --` restore in a mutation battery will silently revert your
+  UNCOMMITTED edits.** That is how a fix was claimed in a commit message and absent from
+  the tree. Verify the edit is in the COMMIT (`git show HEAD`), not just the working
+  tree.
+- 🔴 **`dl-router/extension/*.js` is ASCII-only** (`source_hygiene.test.mjs`); emoji in a
+  comment fails the suite. `discord-embed-ext` has NO such rule and legitimately contains
+  emoji. Tripped twice in one ladder.
+- **`--hide-scrollbars=false` is parsed by Chromium as presence-only and therefore HIDES
+  scrollbars** — it produced a false refutation of the `100vw` gutter measurement before
+  being dropped.
+- **A PR can be auto-created on push** (authored as the repo owner) rather than by
+  `gh pr create`; check base/head/commits before assuming which one you are looking at.
+
 ## How to verify
 
-1. `nix-shell -p nodejs --run "node --test 'scripts/dl-router/tests/*.test.mjs'"` — **543** pass
-   (was 537; the glob MUST be quoted, an unquoted directory yields a bogus `# tests 1`).
-2. Both gate tiers for #1286, base `a7dac5bd`, built **one at a time**:
-   `nix build .#checks.x86_64-linux.nodetests` → rc 0, and
-   `nix build .#checks.x86_64-linux.pytests` → rc 0.
-   ⚠ The dev-host `gate.sh` pytest tier shows 3 failures on this box
-   (`test_a_body_file_written_by_a_heredoc_on_the_same_line_is_read`, and two
-   `test_browser_tab_ref.py` agent tests that time out after 300 s). All three were confirmed to
-   fail identically at base — pre-existing, not from this work.
-3. Content check on `main` after #1286 merges (never ancestry — squash merges break it):
-   `git show origin/main:scripts/dl-router/extension/manifest.json | grep version` → `0.3.3`, and
-   `originalFromPreview` present in `route_core.js`.
-4. 🔴 The consumer check that is STILL OUTSTANDING: full Brave restart →
-   `brave://extensions` reads **Media Download Router 0.3.3**. Still `0.3.1`/`0.3.2` ⇒ the
-   restart did not take.
-5. The end-to-end check that has never been run: one right-click "save" on a Discord image
-   attachment, then confirm the saved file is the posted original, not a resized webp.
+1. `nix-shell -p nodejs --run "node --test 'scripts/dl-router/tests/*.test.mjs'"` — **551**
+   pass. Same for `scripts/discord-embed-ext/tests/*.test.mjs` — **143** pass. The glob
+   MUST be quoted; an unquoted directory yields a bogus `# tests 1`.
+2. Both sandbox tiers, **one at a time**, on the MERGED tree:
+   `nix build .#checks.x86_64-linux.nodetests` and `... .pytests`. Read each runner's own
+   `RESULT:` line out of `nix log`, never the exit code — an already-realised derivation
+   prints nothing and exits 0.
+3. Content check on `main` after each merges (never ancestry — squash merges break it):
+   `originalFromPreview` present in `route_core.js`; `ENLARGED_MAX_WIDTH` present in
+   `embed_enlarge.js`; manifests read `0.3.3` and `0.3.1`.
+4. 🔴 The consumer checks that are STILL OUTSTANDING — full Brave restart, then one
+   right-click save on a Discord image, then one enlarge of a tall image.
