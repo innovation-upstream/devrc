@@ -1467,3 +1467,125 @@ def test_the_condition_poll_also_extends_on_a_stalled_machine(monkeypatch):
     _await(lambda: time.monotonic() >= ready,
            what="a condition that resolves after several slices",
            slice_s=0.1, poll=0.01)
+
+
+# ---------------------------------------------------------------------------
+# The ORPHANED warm lock — a holder that was KILLED, not one that is working.
+#
+# 🔴 WHY THESE EXIST. `_oc_lock` has always stolen a stale lock, but only after
+# spending the FULL `OC_LOCK_BUDGET` (default `OC_WARM_TIMEOUT + 30` = ~120 s),
+# because nothing recorded WHO held it: an orphan was indistinguishable from a
+# live holder. MEASURED 2026-09-03 on the workbench — a killed run left the
+# directory behind and the next `browser-agent --dry-run` was still stalled at
+# 300 s. Two costs, and the second is the one that wasted a day: the lock is
+# MACHINE-GLOBAL, so one orphan made a CONCURRENT agent's unrelated branch fail
+# its suite, and re-running the same test on `origin/main` reproduced it —
+# which reads as "main is broken" and is not.
+#
+# The fix records the holder's pid inside the lock and steals on the FIRST pass
+# when that pid is dead. These tests pin the DISCRIMINATION, not just the steal:
+# a fast steal that cannot tell a live holder from a dead one is a broken lock,
+# not a fixed one.
+# ---------------------------------------------------------------------------
+
+
+def _reaped_pid() -> int:
+    """A pid that is certainly dead AND reaped (so `kill -0` fails)."""
+    p = subprocess.Popen([sys.executable, "-c", ""])
+    p.wait()
+    return p.pid
+
+
+def test_an_orphaned_lock_with_a_dead_holder_is_stolen_without_waiting(rig):
+    """🔴 THE HEADLINE. Budget is set LONG (120 s) on purpose: with the old code
+    the run cannot finish until it expires, so the rig's own deadline fails the
+    test. Passing therefore proves the steal happened on the FAST path — no
+    clock assertion, no flake, and the two outcomes are separated by ~2 minutes
+    rather than by milliseconds.
+
+    Red at base: the run never completes inside the rig deadline."""
+    shutil.rmtree(rig.oc_config_dir)
+    rig.oc_config_dir.mkdir()
+    lock = Path(str(rig.oc_config_dir) + ".lock")
+    lock.mkdir()
+    (lock / "pid").write_text(f"{_reaped_pid()}\n")
+
+    r = rig.run(["read the page"], mode="ok",
+                extra_env={"BROWSER_AGENT_LOCK_BUDGET": "120"})
+
+    assert r.returncode == 0, r.stderr
+    assert (rig.oc_config_dir / "opencode.jsonc").exists(), (
+        "the dead holder's lock was not stolen, so the bootstrap never ran — "
+        "this is the ~120 s stall the pid file exists to remove")
+    assert "warm-lock-refused" not in r.stderr, (
+        f"a dead holder must not produce ANY refusal token: {r.stderr}")
+
+
+def test_a_lock_whose_holder_is_ALIVE_is_not_stolen_on_the_fast_path(rig):
+    """🔴 THE DISCRIMINATOR, and the reason the test above is not sufficient.
+    A steal that fires regardless of the pid would pass the headline test while
+    destroying the mutual exclusion the lock exists to provide — two runs would
+    `rm -rf` node_modules under each other, the exact corruption `_oc_lock`
+    was written to prevent.
+
+    A LIVE holder must fall through to the ordinary wait. The budget is short so
+    the run still finishes; what is asserted is that the blind end-of-budget
+    steal is what took it — the elapsed floor — never the pid fast path.
+
+    🔴 THE FLOOR IS DELIBERATELY BELOW THE BUDGET. bash's `SECONDS` is an
+    INTEGER that ticks on wall-clock second boundaries, so `deadline=$((SECONDS+N))`
+    can elapse in as little as N-1 seconds of real time. Asserting `>= budget`
+    is an expectation derived from READING the code rather than from what it can
+    do, and it fails ~1 run in 1 (measured: 2.7 s against a 3 s budget). The
+    floor only has to separate "waited" from "stole instantly" (~0.5 s), so a
+    5 s budget with a 3 s floor leaves ~2 s of margin on both sides.
+    """
+    shutil.rmtree(rig.oc_config_dir)
+    rig.oc_config_dir.mkdir()
+    lock = Path(str(rig.oc_config_dir) + ".lock")
+    lock.mkdir()
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        (lock / "pid").write_text(f"{holder.pid}\n")
+        started = time.monotonic()
+        r = rig.run(["read the page"], mode="ok",
+                    extra_env={"BROWSER_AGENT_LOCK_BUDGET": "5"})
+        elapsed = time.monotonic() - started
+    finally:
+        holder.kill()
+        holder.wait()
+
+    assert r.returncode == 0, r.stderr
+    assert elapsed >= 3.0, (
+        f"took {elapsed:.1f}s for a 5s budget — a LIVE holder's lock was stolen "
+        "on the fast path, so the pid check cannot tell live from dead")
+
+
+def test_a_lock_with_NO_pid_file_is_not_stolen_on_the_fast_path(rig):
+    """🔴 THE RACE THE FAST PATH MUST NOT WIN. Between another run's `mkdir` and
+    its `echo $$` the lock exists with no pid file. Reading "no pid" as "dead"
+    would steal a lock whose holder is moments from using it. Absent ⇒ wait,
+    which is the pre-existing behaviour and the safe one.
+
+    🔴 THE FLOOR IS DELIBERATELY BELOW THE BUDGET. bash's `SECONDS` is an
+    INTEGER that ticks on wall-clock second boundaries, so `deadline=$((SECONDS+N))`
+    can elapse in as little as N-1 seconds of real time. Asserting `>= budget`
+    is an expectation derived from READING the code rather than from what it can
+    do, and it fails ~1 run in 1 (measured: 2.7 s against a 3 s budget). The
+    floor only has to separate "waited" from "stole instantly" (~0.5 s), so a
+    5 s budget with a 3 s floor leaves ~2 s of margin on both sides.
+    """
+    shutil.rmtree(rig.oc_config_dir)
+    rig.oc_config_dir.mkdir()
+    lock = Path(str(rig.oc_config_dir) + ".lock")
+    lock.mkdir()  # no pid file — mid-acquisition by someone else
+
+    started = time.monotonic()
+    r = rig.run(["read the page"], mode="ok",
+                extra_env={"BROWSER_AGENT_LOCK_BUDGET": "5"})
+    elapsed = time.monotonic() - started
+
+    assert r.returncode == 0, r.stderr
+    assert elapsed >= 3.0, (
+        f"took {elapsed:.1f}s for a 5s budget — a lock with no pid file was "
+        "stolen immediately, which races a holder that has not written its pid yet")
