@@ -10,15 +10,23 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 ## Status
 
 
-**Ranks 1–8, 10–16 and 19–22 are ✅ CLOSED. Only ranks 17, 18 and 23 remain OPEN.**
-🔴 **17 and 18 are CI infrastructure owned elsewhere; 23 is three loose follow-ups. NOT ONE ITEM OF
-THE FEATURE ITSELF IS OUTSTANDING** — and that sentence has been wrong in this doc before, so:
-21 (the Phase B `repo` field) closed 2026-09-04 with its closing condition verified on the LIVE
-page, and 22 (the `#667` audit) closed the same day after a four-round delta ladder. 🔴 **Rank 12
-closed as REFUTED, not fixed** — read its entry before believing the word "complete" anywhere near
-it. 17 and 18 are siblings, NOT one item: different legs, different mechanisms, different closing
-conditions — and **18 has since been ROOT-CAUSED to a specific node by another session; read its
-entry before re-deriving the mechanism.**
+🔴 **EVERY RANK IS CLOSED EXCEPT 18, AND 18 IS NOT OURS. THERE IS NO WORK IN THIS QUEUE.**
+Ranks 1–17 and 19–23 are ✅ CLOSED. **18 stays open only because its closing condition — a `go`-leg
+red being attributable without a re-run — is owned by the session that root-caused it to a node.**
+🔴 **Do not draw an item from this list without re-reading its entry: 17 and 23 were closed for
+reasons that are not "we did the work."** 17 is **being built right now by another session**
+(`ZacxDev/homelab-infra#685`) and was ALSO too narrow to have worked; two of 23's three parts were
+**already done** when checked, and its third was **dismissed under its own stated criterion**. The
+list had been carrying four open items of which one was real work.
+🔴 **Rank 12 closed as REFUTED, not fixed** — read its entry before believing the word "complete"
+anywhere near it. 17 and 18 were siblings — different legs, different mechanisms, different closing
+conditions — and **18 is now ROOT-CAUSED to a specific node; read its entry before re-deriving the
+mechanism.**
+🔴 **A LESSON THIS LIST KEEPS TEACHING, IN A NEW SHAPE: a ranked queue outlives its items.** The
+previous failure was a stale STATUS line; this one was a stale QUEUE — items that were finished, or
+being finished elsewhere, still reading as work. `claim-work` cannot see either, because nobody
+claims an item they are not working on. **The unconditional `gh pr list --state open` sweep is what
+found #685, and it is the only thing that could have.**
 The live-refresh work (`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as 0.8.21**.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.**
@@ -187,6 +195,34 @@ host-side feeder (`tmux-snapshot-push.timer` on the workbench, which collects BO
   are untouched by this session except that 18 now carries another session's root cause. No image
   was built or deployed by this session — `0.8.24` was deployed by somebody else mid-session, and it
   is what made rank 21's UI closing condition checkable at all.
+
+### Session 2026-09-04 (cont.) — ranks 17 and 23 closed; the queue is empty
+
+Prompted by the operator asking **"do we need 23 and 17?"** — a question worth recording, because
+the answer for three of the four sub-items was **no**, and nothing in the doc or the lock would have
+said so. An audit scopes to a diff and will never suggest retiring the work.
+
+- **Merged and content-verified:** `ZacxDev/homelab-infra#690`, squash `48d67f9af` (rank 23a).
+- **What the check actually found, per item:** 17 → being built in `#685` right now, and too narrow
+  to have worked anyway (the degradation is platform-wide: `clawgate-ci` 3/18, `gitops-validate`
+  6/22, `devrc-ci` 9/20, `naida-ux-audit` 9/20, only `remix-ux-audit` 15/16 healthy — a constant in
+  clawgate's e2e helper cannot reach pipelines that never run it). 23(b) → already fixed, the doc
+  line was stale. 23(c) → dismissable under its own criterion 2, and dismissed in writing.
+  23(a) → real, ten minutes.
+- **`#690` merged with three red checks, every one attributed to a documented mechanism** and none
+  reachable from a two-class CSS swap: `clawgate-e2e` failed ONE test, `tasks-mobile.spec.ts:531`,
+  on all three attempts with `clawgate health check did not pass on port 39531/40037/41167 within
+  15000ms` — **rank 17's signature, in FIXTURE SETUP, before the test body ran**; `clawgate-ci`
+  failed six `internal/store` tests on `statement timeout (SQLSTATE 57014)` — rank 18's signature,
+  and the same tests pass locally against a dedicated Postgres (2200/0/0, **0 skipped**, with a
+  28-skip counterfactual proving the zero is a real run); `gitops-validate` failed on trunk's own
+  `test-provision-credential-window.sh` (#683), unreachable from an `internal/ui` diff.
+  🔴 **`ux-audit-clawgate` — the leg this doc has called broken all session — PASSED, and it is the
+  one that does the visual funnel walk, i.e. the leg most able to see a layout regression.** An
+  inverted expectation is exactly when not to assume; each red was read, not classified.
+- **The new CI hardware is live and taking work:** `clawgate-ci-g4gcm` scheduled across
+  `talos-xr6-r7p` **and `tekton-ci-1`** (the Hetzner ccx33 another session shipped the same day).
+- **Claim `tmux-webapp-23` taken and released.** No claim of this doc's is held.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -575,6 +611,27 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     Closing condition: a red on either check can be attributed to a diff without a re-run — e.g.
     the budget scales with load, or the harness retries, or the failure names the contended
     resource. Until then, re-run the PipelineRun from its own spec (recipe in "How to verify").
+    🔴 **CLOSED AS NOT-OURS 2026-09-04 — ANOTHER SESSION IS ALREADY BUILDING THIS. DO NOT START IT.**
+    `ZacxDev/homelab-infra#685` — *"make the health wait evidence-driven — fast-fail on a dead
+    server, patient with a slow one"* — is this item's closing condition, in flight. Siblings on the
+    same platform problem: **#684** (log lock waits on the clawgate-ci Postgres sidecar — rank 18's
+    instrumentation) and **#687** (stop blaming the commit for platform timeouts).
+    🔴 **NOTHING CLAIMED IT, so `claim-work` could not have seen it — only the unconditional
+    `gh pr list` sweep did.** That is the class the sweep exists for and the lock structurally
+    cannot cover.
+    ⚠ **AND THE ITEM AS WRITTEN WAS TOO NARROW TO HAVE WORKED.** It prescribes a budget fix in
+    clawgate's two e2e harnesses, but the degradation is platform-wide — measured 2026-09-04 from
+    PipelineRun history: `clawgate-ci` 3/18, `gitops-validate` 6/22, `clawgate-ux-audit` 5/18,
+    `devrc-ci` 9/20, `naida-ux-audit` 9/20, `clawgate-e2e` 11/18, and only `remix-ux-audit` (15/16)
+    healthy. A timeout constant in `containers/clawgate/e2e/tests/helpers/server.ts` cannot reach
+    `gitops-validate` or `naida-ux-audit`; they do not run that code. The real remedies are rank
+    18's node diagnosis and the dedicated CI hardware another session shipped the same day
+    (Hetzner ccx33 `tekton-ci-1`, 8c/32G) — **already observed taking work**: `clawgate-ci-g4gcm`
+    scheduled across `talos-xr6-r7p` and `tekton-ci-1`.
+    ⚠ **Its own signature is still live and still worth recognising** — measured on `#690`'s head
+    the same day: `tasks-mobile.spec.ts:531` failed all three attempts with
+    `clawgate health check did not pass on port 39531/40037/41167 within 15000ms`, i.e. in FIXTURE
+    SETUP, before the test body ran, on a diff that only swapped two CSS width classes.
     forcing: gate — two of the four checks on every clawgate PR produce reds that are not about the
     change, which is the permanently-red-gate shape: it trains readers to click through.
 18. **`clawgate-ci`'s `go` leg reds on POSTGRES-BACKED tests under contention — a SIBLING of 17,
@@ -682,16 +739,38 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     a pgx dial failure can carry host/port/user/database into the operator's browser (behind session
     auth, and the actionable detail is the point).
     forcing: none
-23. **Three loose follow-ups from the tmux page work, none filed anywhere else.**
-    (a) `task_detail.go:87,170` and `task_not_found.go:53` still carry the old `max-w-xl …
-    lg:max-w-5xl` — a one-line `contentWidth()` adoption each, deliberately scoped OUT of `#667`
-    because they are separate routes rather than tabs. `agents_detail.go`/`operator.go` must NOT be
-    touched: their `max-w-xl` pairs with `lg:pl-72`, a sidebar layout that breaks if widened.
-    (b) The funnel walk still skips `auto-approve-armed` — see Open investigations.
-    (c) Clawgate task **#495** (clock-skew freshness trade) is open with explicit accept-or-dismiss
-    criteria; it is deliberately NOT a defect.
-    **Closing condition:** (a) merged, (b) either root-caused or recorded as accepted, (c) #495
-    closed by either of its two criteria.
+23. ✅ **DONE 2026-09-04 — and TWO OF ITS THREE PARTS WERE ALREADY CLOSED WHEN CHECKED.** The item
+    was carrying them as open work; only (a) was real, and it took ten minutes.
+    **(a) MERGED — `ZacxDev/homelab-infra#690`, squash `48d67f9af`.** `task_detail.go` and
+    `task_not_found.go` now take `contentWidth()`; verified on `trunk` by content, including the
+    NEGATIVE half — `operator.go` and `agents_detail.go` are untouched (`contentWidth` 0, `max-w-xl`
+    2 and 3).
+    🔴 **THE OLD ENTRY'S SAFETY RULE WAS RIGHT AND THE CHECK DERIVED FROM IT WAS WRONG.** "Their
+    `max-w-xl` pairs with `lg:pl-72`" is the correct SAME-ELEMENT criterion — but a file-level
+    `grep -c lg:pl-72` cannot see which element carries it, and BOTH changed files contain the
+    string. Measured: `task_detail.go:76` puts `Class("lg:pl-72")` on a WRAPPER with `Main(` at `:86`
+    below it (safe, and identical to the shell's own shape at `components.go:141` since #667), while
+    `operator.go:72` puts the offset and `max-w-xl` on the SAME `Main(` element (unsafe). The guard
+    that shipped pins the relationship as an **iff** over all five documents — a column is sized by
+    `contentWidth()` ⟺ it does not itself carry the offset — comparing width TOKEN SETS rather than
+    grepping a class name, so a new off-shell route is classified by its own markup rather than an
+    allowlist. One mutant renames the offset utility and the guard fails LOUD (*"every branch in this
+    file is now vacuous"*) instead of silently reclassifying. It also corrected a false comment in
+    `task_detail.go` that claimed the offset sat on its `<header>` — the very misreading that
+    produced the wrong check.
+    **(b) WAS ALREADY FIXED; the "still skips" line was stale.** `clawgate-funnel.audit.ts:186`
+    carries a full `view("auto-approve-armed", …)` block that seeds a pending checkpoint, asserts it
+    visible BEFORE arming (so the later assertion is about the arming, not the seeding), arms via the
+    real control, and asserts the card survives beneath the banner — its own comment reads *"🔴 THE
+    ASSERTION THIS CHANGE EXISTS FOR. On pre-change code there is no card here at all."*
+    **(c) DISMISSED under its own criterion 2** — clawgate task #495 is `complete` with the written
+    dismissal recorded (comment 853), naming what was checked: `ReceivedAt` is stamped and read in
+    the SAME process so a negative age needs multi-replica skew or an NTP step-back (sub-second);
+    the task's own "nobody has observed a negative age in production" is still true; the failure is
+    bounded and self-correcting via the 2-minute push, so it cannot latch. Dismissed rather than
+    fixed because the remedy has **no observable trigger** — no counter or log would ever say it
+    mattered — so it would trade a simple mutation-covered path for an uncovered case that has never
+    fired. Criterion 1 stays written and ready if one is ever observed.
     forcing: none
 
 ## Open investigations — live diagnosis state
@@ -2248,6 +2327,27 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
   sibling agent's live Playwright run. Worktree isolation does not help when both agents are IN the
   same worktree — give each its own, and if no filter leaves a set you are confident in, kill
   nothing.
+
+- 🔴 **"DO WE NEED IT" IS A QUESTION THE DOC CANNOT ASK ITSELF, AND THE ANSWER WAS NO THREE TIMES
+  OUT OF FOUR.** Before working any ranked item, check whether it is already done, already being
+  done, or dismissable — the cost is minutes and the alternative is rebuilding finished work.
+  Measured here: 17 was in flight elsewhere, 23(b) was already fixed, 23(c) closed under a criterion
+  it had carried since it was filed. **An audit will never surface this** — it scopes to the diff.
+- 🔴 **`claim-work` CANNOT SEE AN UNCLAIMED DUPLICATE; ONLY THE `gh pr list` SWEEP CAN.** Nobody had
+  claimed rank 17, so the lock was silent while another session built it. The sweep is not a
+  fallback for a degraded run — it is the only instrument that covers this class, and it must be
+  run unconditionally.
+- 🔴 **A FILE-LEVEL `grep -c` CANNOT ANSWER A SAME-ELEMENT QUESTION, AND A STOP-CONDITION BUILT ON
+  ONE WILL HALT CORRECT WORK.** The safety rule "these routes must not be widened because their
+  width pairs with the sidebar offset" is right; the check derived from it — "stop if the file
+  contains `lg:pl-72`" — is wrong, because every one of the five documents contains it. What
+  separates them is whether the offset sits on the SAME element as the width (`operator.go:72`,
+  unsafe) or on a wrapper above it (`task_detail.go:76` with `Main(` at `:86`, safe — the shell's
+  own shape since #667). **State the criterion, then build the check to match the criterion, not
+  the prose.**
+- ⚠ **A red check is a claim about a (tree, base, node) TRIPLE here.** `clawgate-ci` now schedules
+  across the homelab cluster AND the new Hetzner runner, so "which node" joins "which test moved"
+  as a discriminator. Read the PipelineRun's `nodeName` before debugging a diff.
 
 ## How to verify
 
