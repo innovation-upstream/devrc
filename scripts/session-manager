@@ -1729,6 +1729,22 @@ def row_repo(path, repo_index, host_status="unmeasured") -> dict:
     `repo_index is None` means the host's probe did not answer (or was not run):
     every row gets `host_status` — `unmeasured` or `skipped` — and a null repo.
     A dict means it DID answer, so a null repo there carries a measured reason.
+
+    🔴 THE `missing` BRANCH HERE IS UNREACHABLE FROM `gather`, AND SAYING SO IS
+    THE POINT. `gather` feeds the probe EVERY pane path on the host and
+    `build_repo_index` fills an entry for every one it was given, so a row's
+    lead path is always a key. An unreachable guard reads as a defence and is
+    not one — see the same note in `label_from_path`, where a mutation sweep
+    caught exactly that.
+
+    It is kept rather than deleted because this is a PUBLIC pure function whose
+    contract is `{path: {...}}` -> a row pair, and a caller that hands it a
+    partial index must get `missing` rather than a `KeyError` or, far worse, a
+    silent `not_a_repo`. The status itself IS reachable in the pipeline — via
+    `build_repo_index`, when the probe's reply is SHORTER than its input, which
+    a truncated ssh read genuinely produces. So the STATUS is a real
+    measurement; only this second spelling of it is belt-and-braces. Do not
+    read the branch as evidence the row path is covered.
     """
     if not (path or "").strip():
         # Asked-or-not, there was nothing to resolve. This beats the host

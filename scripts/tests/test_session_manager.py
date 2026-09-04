@@ -12288,6 +12288,36 @@ def test_build_repo_index_gives_a_SHORT_reply_the_missing_status():
         "/w/c": {"repo": None, "status": "missing"}}
 
 
+def test_row_repos_missing_branch_is_UNREACHABLE_from_gather_and_says_so():
+    """🔴 A GUARD NOBODY CAN REACH IS NOT A DEFENCE — so this pins WHICH of the
+    two spellings of `missing` is live, rather than letting the row-level one
+    read as coverage it does not provide.
+
+    `gather` feeds the probe EVERY pane path on a host and `build_repo_index`
+    fills an entry for each one, so a row's lead path is always a key and
+    `row_repo`'s `missing` branch never executes in the pipeline. The STATUS is
+    still real — `build_repo_index` produces it whenever the reply is SHORTER
+    than its input, which a truncated ssh read genuinely does.
+    """
+    # (a) the row-level branch: reachable only by hand, and it is CORRECT there
+    assert sm.row_repo("/w/a", {}) == {"repo": None, "repo_status": "missing"}
+    # (b) ...and NOT reachable through gather: every lead path is probed. Feed a
+    # host three panes at three paths and assert none comes back `missing`.
+    panes = "\n".join([
+        "%1|1|s|1|w|/w/one|claude|t",
+        "%2|2|s|2|w|/w/two|zsh|t",
+        "%3|3|s|3|w|/w/three|zsh|t"])
+    rep = base_gather(runner=make_runner(
+        local_panes=panes,
+        local_repo=repo_out("/w/one/.git", "", "/w/three/.git")))
+    got = {r["repo_status"] for r in rep["hosts"]["workbench"]["windows"]}
+    assert "missing" not in got, got
+    assert got == {"ok", "not_a_repo"}
+    # (c) the docstring SAYS it is unreachable, so the claim travels with the
+    # code rather than living only here.
+    assert "UNREACHABLE FROM `gather`" in sm.row_repo.__doc__
+
+
 def test_build_repo_index_returns_NONE_for_an_unmeasured_probe():
     """🔴 NOT a dict of `not_a_repo` entries. That substitution — a failed probe
     rendered as a completed measurement — is the worst outcome available here,
