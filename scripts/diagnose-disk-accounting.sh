@@ -183,8 +183,9 @@ echo "=== 6c. /home breakdown — ROOT FILESYSTEM ONLY (top 15 by allocated size
 # narrower than its own comment. shellcheck SC2030/SC2031 flags exactly this; the
 # repo has no shellcheck gate, so nothing caught it.
 ROOT_DEV=$(stat -c '%D' / 2>/dev/null)
-ONROOT_LIST=$(mktemp) || exit 3
-FOREIGN_LIST=$(mktemp) || exit 3
+# Create BOTH before widening the trap: if the second mktemp failed while the trap
+# still named only $DENIED_LOG, the first temp file leaked on that exit path.
+ONROOT_LIST=$(mktemp) && FOREIGN_LIST=$(mktemp) || { rm -f "${ONROOT_LIST:-}"; exit 3; }
 trap 'rm -f "$DENIED_LOG" "$ONROOT_LIST" "$FOREIGN_LIST"' EXIT
 for p in /home/*/* /home/*/.*; do
   case "${p##*/}" in .|..) continue ;; esac

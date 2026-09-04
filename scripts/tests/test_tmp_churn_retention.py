@@ -111,7 +111,7 @@ def _run_inserter(tmp_path: Path, config_text: str) -> tuple[int, str, str, str]
     src = tmp_path / "inserter.py"
     src.write_text(_extract_inserter())
     proc = subprocess.run(
-        [sys.executable, str(src), str(cfg), *_bash_ledger()],
+        [sys.executable, str(src), str(cfg), "/tmp churn retention", *_bash_ledger()],
         capture_output=True,
         text=True,
     )
@@ -135,7 +135,7 @@ def test_the_inserter_and_the_verifier_read_ONE_ledger():
     assert ledger, "the TMPFILES_RULES ledger parsed empty — the extractor is broken"
 
     assert re.search(
-        r'^python3 - "\$CFG" "\$\{TMPFILES_RULES\[@\]\}" <<\'PY\'$',
+        r'^python3 - "\$CFG" "\$MARKER" "\$\{TMPFILES_RULES\[@\]\}" <<\'PY\'$',
         _script_text(),
         re.M,
     ), "the inserter is no longer handed TMPFILES_RULES on argv"
@@ -233,8 +233,14 @@ def test_an_already_applied_host_still_receives_a_newly_added_rule(tmp_path):
         "is keyed on the comment header again"
     )
     assert f"inserted 1 of {len(_python_rules())}" in out, out
-    assert text.count("/tmp churn retention (2026-08-15)") == 1, (
-        "the comment header was duplicated onto a config that already had it"
+    # 🔴 NOT `text.count("/tmp churn retention (2026-08-15)")`. That spelling — with
+    # a CLOSING PAREN — appears only in the header's original wording, so the moment
+    # the header was reworded the count went to 0 and this assertion stopped
+    # observing the duplication it exists to catch. Count header BLOCKS structurally
+    # instead, so any future reword leaves the guard intact.
+    headers = [ln for ln in text.splitlines() if ln.strip().startswith("# /tmp churn retention")]
+    assert len(headers) == 1, (
+        f"the comment header was duplicated onto a config that already had it: {headers}"
     )
 
 
@@ -331,4 +337,71 @@ def test_every_ledger_glob_names_a_directory_form(tmp_path):
     globs = [r.strip('"').split()[1] for r in _python_rules()]
     assert not any("homelab-talos-prs" in g for g in globs), (
         "homelab-talos-prs-* is back in the ledger; it matches only plain files"
+    )
+
+
+# --------------------------------------- regressions the FIX round introduced --
+# 🔴 Round 2 of the audit found these in code round 1 wrote. Both passed all 16
+# tests that existed at the time, in the module that had just been extended to
+# cover eviction — so "covered" meant covered against the defects we imagined.
+
+
+def test_eviction_never_splices_a_line_it_did_not_match(tmp_path):
+    """🔴 The removal loop re-found the STRIPPED rule text with `_block.find()` — an
+    unanchored substring search — and spliced to the next newline. Given a COMMENT
+    quoting the rule above a live rule, it cut inside the comment and swallowed the
+    following line: an unrelated `d /srv/critical` rule was silently commented out
+    and DISABLED, while the stale rule it claimed to evict survived. It printed
+    `evicted 1`, `inserted 7 of 7`, exited 0, and the post-write verifier passed."""
+    seeded = _seed(
+        [
+            '# was: "e /tmp/go-build* - - - m:7d"',
+            '"d /srv/critical 0755 root root -"',
+            '"e /tmp/go-build* - - - m:7d"',
+        ]
+    )
+    rc, _out, err, text = _run_inserter(tmp_path, seeded)
+
+    assert rc == 0, err
+    assert '"d /srv/critical 0755 root root -"' in text, (
+        "an unrelated live rule was destroyed — the splice is not anchored to the match"
+    )
+    assert '# was: "e /tmp/go-build* - - - m:7d"' in text, "the comment was mangled"
+    stale = [
+        ln for ln in text.splitlines()
+        if ln.strip() == '"e /tmp/go-build* - - - m:7d"'
+    ]
+    assert not stale, "the real stale rule survived while something else was cut"
+
+
+def test_a_bracket_in_a_comment_does_not_truncate_the_eviction_scope(tmp_path):
+    """🟡 `src.find("];")` took the first `];` ANYWHERE after the anchor, so a
+    comment mentioning nix list syntax ended the block early and eviction silently
+    found nothing — no `evicted` line, no error, stale rule left in place."""
+    seeded = _seed(
+        ["# nix list syntax is [ ]; keep that in mind", '"e /tmp/go-build* - - - m:7d"']
+    )
+    rc, out, err, text = _run_inserter(tmp_path, seeded)
+
+    assert rc == 0, err
+    assert "evicted" in out, "eviction reported nothing — the scope was truncated"
+    assert '"e /tmp/go-build* - - - m:7d"' not in text
+
+
+def test_an_already_applied_host_gets_exactly_one_comment_header(tmp_path):
+    """🟡 The anti-duplication guard tested `HEADER.splitlines()[0] not in src`, so
+    REWORDING the header made it read absent on every already-applied host and
+    prepend a SECOND block — leaving the stale `mtime-ONLY ageing (m:)` sentence
+    that the reword exists to delete. The old test could not see it: it counted
+    `(2026-08-15)` with a closing paren, which only the OLD wording contains."""
+    old_header = "    # /tmp churn retention (2026-08-15). mtime-ONLY ageing (`m:`), because\n"
+    seeded = FRESH_CONFIG.replace(ANCHOR, ANCHOR + old_header, 1)
+
+    rc, _out, err, text = _run_inserter(tmp_path, seeded)
+
+    assert rc == 0, err
+    headers = [ln for ln in text.splitlines() if ln.strip().startswith("# /tmp churn retention")]
+    assert len(headers) == 1, f"expected exactly one comment header, got {len(headers)}: {headers}"
+    assert "mtime-ONLY ageing" not in text, (
+        "the superseded header wording survived — the reword reached no applied host"
     )
