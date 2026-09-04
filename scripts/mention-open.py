@@ -21,10 +21,20 @@ RESOLUTION
   0                      -> a desktop notification saying why. Never a guess.
 
 🔴 NOTHING IS GUESSED. A GitHub reference needs an owner, and an owner that is
-wrong points confidently at a real-but-unrelated issue. Owners come from git
-remotes of real local checkouts (MEASURED) or from an explicit `owner/repo` in
-the text itself. When neither is available the candidate has no URL and simply
-does not appear in the picker.
+wrong points confidently at a real-but-unrelated issue. An owner is only ever
+accepted from a source that NAMES this exact repo:
+
+  1. an explicit `owner/repo` in the clicked text itself;
+  2. `scripts/collector/known_repos.py` — a generated mapping of every repo the
+     operator can see (`scripts/regen-known-repos.sh`; keys carry both the
+     canonical and the lowercased spelling, because the lookup is an exact dict
+     hit and GitHub names are case-insensitive);
+  3. the git remote of a real local checkout under `~/workspace` (MEASURED, and
+     it OVERRIDES 2 — the checkout is authoritative about its own owner);
+  4. last resort, a GitHub search restricted to an EXACT name match.
+
+When none of them answers, the candidate has no URL and simply does not appear
+in the picker. A near-miss is never promoted to an answer.
 """
 from __future__ import annotations
 
@@ -38,11 +48,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "collector"))
 
 from mention_scan import (  # noqa: E402
+    GITHUB_ISSUE_URL,
     PLATFORM_CLAWGATE,
     PLATFORM_CLICKUP,
     PLATFORM_GITHUB,
     scan_mention_spans,
 )
+from known_repos import KNOWN_REPOS  # noqa: E402
 
 # Where local checkouts live. Only used to READ git remotes — the mapping it
 # produces is measured, never invented.
@@ -137,13 +149,54 @@ def repo_of_checkout(path: Path) -> str:
     return parse_owner_repo(_git(["remote", "get-url", "origin"], cwd=str(path)))
 
 
-def discover_repos(workspace: Path = WORKSPACE) -> dict:
-    """{bare repo dir name: "owner/repo"} for every git checkout in `workspace`.
+_GITHUB_API_CACHE: dict[str, str] = {}
 
-    This is what lets `talos-infra#1065` resolve without a hardcoded owner table:
-    the answer is read off the checkout that is actually on this disk.
+
+def _gh_api_repo_search(name: str) -> dict[str, str]:
+    """{name: "owner/repo"} for the first repo whose NAME equals `name`
+    (case-insensitively), searched via the GitHub API. {} when nothing matches.
+
+    🔴 THE NAME MATCH IS DONE HERE, NOT IN THE jq PROGRAM. `gh api --jq` takes
+    no `--arg`, so a name written into the filter has to be interpolated as a
+    string literal — which is how the original filter came to compare against
+    the literal text `"$name"` and match NOTHING, ever, for any input. The jq
+    program is now a constant with no interpolation, and the whole class is gone.
+
+    The search is relevance-ordered, so the first row is frequently a
+    near-miss (`kubernetes` -> someone's `kubernetes-examples`): the exact-name
+    filter below is what stops a click opening a stranger's repo.
     """
-    out: dict = {}
+    if name in _GITHUB_API_CACHE:
+        return {name: _GITHUB_API_CACHE[name]}
+    try:
+        r = subprocess.run(
+            ["gh", "api", "search/repositories", "--method", "GET",
+             "-f", f"q={name} in:name", "--jq", ".items[].full_name"],
+            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if r.returncode != 0:
+        return {}
+    want = name.lower()
+    for line in r.stdout.splitlines():
+        full = line.strip()
+        if "/" in full and full.rsplit("/", 1)[-1].lower() == want:
+            _GITHUB_API_CACHE[name] = full
+            return {name: full}
+    return {}
+
+
+def discover_repos(workspace: Path = WORKSPACE) -> dict:
+    """{repo name: "owner/repo"} for resolution. Combines:
+    1. Static mapping of all repos the operator has access to (instant)
+    2. Local checkout remotes from ~/workspace/ (measured, overrides static)
+    3. GitHub API fallback for repos not in the static list (last resort)
+    """
+    # Start with the static mapping — covers all known repos instantly.
+    out: dict[str, str] = dict(KNOWN_REPOS)
+
+    # Overlay local checkout remotes. These take precedence: a local checkout
+    # is the most authoritative source for its own owner/repo.
     try:
         entries = sorted(p for p in workspace.iterdir() if p.is_dir())
     except OSError:
@@ -287,6 +340,23 @@ def main(argv: list[str] | None = None) -> int:
     if span is None:
         notify("no mention in the clicked text", repr(text))
         return 1
+
+    if not candidates and span and not args.no_discovery:
+        # PASS 3 — GitHub API fallback for repos not in the static mapping.
+        # Only for explicit repo#N (not bare #N, which has no repo name).
+        m = re.match(r"(?:[A-Za-z0-9][A-Za-z0-9-]*/)?([A-Za-z0-9][A-Za-z0-9_-]*)#(\d+)",
+                     span["raw"])
+        if m:
+            repo_name = m.group(1)
+            num = m.group(2)
+            api_repos = _gh_api_repo_search(repo_name)
+            if api_repos:
+                candidates = [
+                    {"platform": PLATFORM_GITHUB, "id": num,
+                     "url": GITHUB_ISSUE_URL.format(repo=full, id=num),
+                     "raw": span["raw"]}
+                    for full in api_repos.values()
+                ]
 
     if not candidates:
         notify(f"cannot resolve {span['raw']}",

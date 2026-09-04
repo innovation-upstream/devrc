@@ -19,8 +19,11 @@ The two things worth pinning:
 from __future__ import annotations
 
 import importlib.util
+import json
+import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -279,3 +282,146 @@ def test_a_short_form_repo_is_resolved_from_the_discovered_checkouts(spy):
 def test_a_non_mention_notifies_and_opens_nothing(spy):
     assert MO.main(['background = "#282828";']) == 1
     assert spy == [("notify", "no mention in the clicked text")]
+
+
+# --------------------------------------------------------------------------- #
+# PASS 3 — the GitHub API fallback
+#
+# 🔴 This path shipped INERT. Its jq program compared `.name` against the
+# LITERAL text `"$name"` (a Python string with no f-prefix), so it selected
+# nothing for any input, and the only symptom was the same "cannot resolve"
+# notification an unknown repo produces anyway. Nothing here mocks the
+# selection: the fake returns the rows `gh` would print and the assertions
+# pin WHICH row the resolver picks.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _clear_api_cache():
+    """The cache is module-global and would carry an answer between tests."""
+    MO._GITHUB_API_CACHE.clear()
+    yield
+    MO._GITHUB_API_CACHE.clear()
+
+
+# Bound BEFORE any test patches the module attribute, so a test that needs a
+# REAL subprocess while `gh` is faked still gets one.
+_REAL_RUN = subprocess.run
+
+
+def _fake_gh(rows, *, returncode=0):
+    """Stand in for `gh api search/repositories`, recording the argv it got.
+
+    The rows are RELEVANCE-ordered, exactly as the search endpoint returns
+    them — the exact-name match is deliberately NOT first."""
+    seen: dict = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        return types.SimpleNamespace(
+            returncode=returncode, stdout="".join(f"{r}\n" for r in rows), stderr="")
+
+    return run, seen
+
+
+# Fixture rows share no substring with any assertion constant: the owner that
+# must WIN (`gardenersguild`) appears in no other row, and every near-miss name
+# differs from the searched name by a suffix, so a mutant that returns the first
+# row, or that matches on a prefix, cannot land on the expected value.
+_SEARCH_ROWS = [
+    "hobbyist/trowelcast-examples",
+    "someoneelse/trowelcast-mirror",
+    "gardenersguild/trowelcast",
+    "thirdparty/trowelcast-fork",
+]
+
+
+def test_the_api_fallback_takes_the_EXACT_name_match_not_the_first_row(monkeypatch):
+    """🔴 Relevance order is not name order. Taking `splitlines()[0]` opens a
+    stranger's repo under the operator's own repo name."""
+    run, seen = _fake_gh(_SEARCH_ROWS)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO._gh_api_repo_search("trowelcast") == {"trowelcast": "gardenersguild/trowelcast"}
+    assert seen["cmd"][:3] == ["gh", "api", "search/repositories"]
+
+
+def test_the_api_fallback_matches_a_name_case_insensitively(monkeypatch):
+    """GitHub repo names are case-insensitive; the static mapping carries both
+    spellings for exactly this reason and the fallback must not regress it."""
+    run, _ = _fake_gh(["hobbyist/TrowelCast-ui", "gardenersguild/TrowelCast"])
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO._gh_api_repo_search("trowelcast") == {"trowelcast": "gardenersguild/TrowelCast"}
+
+
+def test_the_api_fallback_returns_NOTHING_when_no_row_names_the_repo(monkeypatch):
+    """🔴 NOTHING IS GUESSED (the module docstring's rule). A search that finds
+    only near-misses must resolve to no candidate at all — not to the closest
+    one."""
+    run, _ = _fake_gh(["hobbyist/trowelcast-examples", "thirdparty/trowelcast-fork"])
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO._gh_api_repo_search("trowelcast") == {}
+
+
+def test_the_api_fallback_returns_nothing_when_gh_fails(monkeypatch):
+    """A non-zero `gh` (no auth, rate limit, no network) prints its error on
+    stderr; treating stdout as an answer anyway would resolve to garbage.
+
+    ⚠ INVARIANT GUARD, not regression coverage — this is the one test in this
+    section that is GREEN on the pre-fix code (which checked `returncode == 0`
+    too). It pins the behaviour across the rewrite; it never caught the bug."""
+    run, _ = _fake_gh(_SEARCH_ROWS, returncode=1)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO._gh_api_repo_search("trowelcast") == {}
+
+
+def test_the_jq_program_is_a_CONSTANT_that_cannot_do_the_selection(monkeypatch):
+    """🔴 THE SEAM. Every test above stubs `gh`, so a filter that selects
+    nothing in production still passes them — which is precisely how the
+    original bug survived. `gh api --jq` accepts no `--arg`, so a name in the
+    filter can only be a string literal: assert the program carries neither the
+    searched name nor a `$`, i.e. that jq CANNOT be where the match happens."""
+    run, seen = _fake_gh(_SEARCH_ROWS)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    MO._gh_api_repo_search("trowelcast")
+    jq_program = seen["cmd"][seen["cmd"].index("--jq") + 1]
+    assert "$" not in jq_program
+    assert "trowelcast" not in jq_program
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq not on PATH")
+def test_the_jq_program_really_yields_the_rows_the_resolver_filters(monkeypatch):
+    """The other half of the seam: run the EMITTED program through the REAL jq
+    against a realistic search payload, and check the exact-name repo is among
+    the lines Python gets. The original filter passes every test above and
+    returns zero lines here."""
+    run, seen = _fake_gh(_SEARCH_ROWS)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    MO._gh_api_repo_search("trowelcast")
+    jq_program = seen["cmd"][seen["cmd"].index("--jq") + 1]
+
+    payload = json.dumps({"items": [
+        {"name": full.split("/")[1], "full_name": full} for full in _SEARCH_ROWS]})
+    # 🔴 _REAL_RUN, not subprocess.run: `MO.subprocess` IS the shared module, so
+    # the fake above is installed globally for the duration of the test. Calling
+    # subprocess.run here reaches the FAKE and this test passes on any filter
+    # whatsoever — measured, it passed against the inert original.
+    r = _REAL_RUN(["jq", "-r", jq_program], input=payload,
+                  capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "gardenersguild/trowelcast" in r.stdout.splitlines()
+
+
+def test_an_unknown_repo_falls_back_to_the_api_and_opens_the_match(spy, monkeypatch):
+    """End-to-end through main(): discovery knows only `talos-infra`, so a
+    click on a repo it has never heard of must reach PASS 3 and open the URL
+    the search resolved."""
+    run, _ = _fake_gh(_SEARCH_ROWS)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO.main(["trowelcast#77"]) == 0
+    assert spy[-1] == ("open", "https://github.com/gardenersguild/trowelcast/issues/77")
+
+
+def test_an_unknown_repo_with_no_exact_match_still_refuses(spy, monkeypatch):
+    """PASS 3 must not turn the honest refusal into a confident wrong page."""
+    run, _ = _fake_gh(["hobbyist/trowelcast-examples"])
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO.main(["trowelcast#77"]) == 1
+    assert spy[-1] == ("notify", "cannot resolve trowelcast#77")
