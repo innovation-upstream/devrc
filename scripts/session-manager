@@ -201,11 +201,32 @@ and the roll-ups a caller usually wants are:
                                         which skill owns each
 
 Each row carries: kind, host, session, window_index, window_id, window_name,
-codename, label, label_source, hotkey, hotkey_display, pane_id, path, command,
+codename, label, label_source, hotkey, hotkey_display, pane_id, path, repo,
+repo_status, command,
 task, claude, busy, age_secs, age_source, status, waiting_probable,
 waiting_signals, waiting_status, unsent_prompt, unsent_prompt_status,
 pane_preview, pane_preview_status, claude_session_id, runtime, ledger,
 fuzzyclaw, panes. The row ledger is pinned by a test.
+
+🔴 `repo` IS THE PROJECT KEY, AND IT IS RESOLVED ON THE HOST THAT OWNS THE
+DIRECTORY
+---------------------------------------------------------------------------
+`label` answers "where is this" for an operator: the LEAF of the pane's cwd, or
+a scratch-slot codename. `repo` answers "which project is this" for a consumer:
+the MAIN CLONE, via `git rev-parse --git-common-dir` — so every linked worktree
+of a repo carries ONE name and they group together. `--show-toplevel` cannot do
+this (it returns the worktree itself), and no string operation on `path` can
+either: `ht-r11-930492` is not derivable from `homelab-talos`.
+
+It is resolved by ONE batched `sh -c` per host over the same SSH transport as
+the tmux calls, because half these rows come off the laptop and a local
+`git rev-parse` would answer about whatever sits at that path HERE. `repo_status`
+carries the provenance — `ok`, `not_a_repo`, `home`, `no_path`, `missing`,
+`unmeasured`, `skipped` — so a null `repo` never reads as "not in a repo" when
+nothing was measured. `$HOME` is deliberately NOT a project (`home`): the
+consumer routes an unparented shell to `Other`, and `repo` is the branch it
+prefers, so emitting one here would override that guard. See `REPO_STATUSES`,
+`REPO_PROBE_SCRIPT` and per host `repos_measured` / `repos_status`.
 
 🔴 `waiting_probable` AND `unsent_prompt` ARE TWO SIGNALS, NOT ONE
 --------------------------------------------------------------------------
@@ -433,6 +454,107 @@ TMUX_PANES_ARGV = ("tmux", "list-panes", "-a", "-F", PANE_FORMAT)
 # across a reboot (the laptop's server sits at pid 2509).
 WINDOW_FORMAT = "#{window_id}|#{window_index}|#{pid}|#{start_time}|#{session_name}"
 TMUX_WINDOWS_ARGV = ("tmux", "list-windows", "-a", "-F", WINDOW_FORMAT)
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE REPO PROBE — ONE BATCHED CALL PER HOST, RUN ON THE HOST THAT OWNS THE
+# DIRECTORY.
+# --------------------------------------------------------------------------- #
+# `label_from_path` states the constraint this exists to honour: a pane's `path`
+# is A STRING FROM ANOTHER MACHINE, so a LOCAL `git rev-parse` against it would
+# answer about whatever happens to sit at that path on THIS host, or about
+# nothing. Half these rows come off the laptop. So the resolution travels over
+# the same `run_tmux` seam the tmux calls already use and runs where the
+# directory lives.
+#
+# 🔴 `--git-common-dir`, NOT `--show-toplevel`. Measured 2026-09-03 on the
+# workbench: for a LINKED WORKTREE, `--show-toplevel` returns the worktree
+# itself, so it does not resolve the very case this feature exists for — two
+# worktrees of one repo would still form two groups. `--git-common-dir` returns
+# the MAIN clone's git dir from every worktree of a repo:
+#   /home/zach/workspace/devrc-agentlock            -> /home/zach/workspace/devrc/.git
+#   <repo>/.claude/worktrees/agent-a9b63c26c9c44cd46 -> /home/zach/workspace/devrc/.git
+#   <repo>/scripts (a plain subdir)                  -> /home/zach/workspace/devrc/.git
+#   /tmp, /home/zach                                 -> exit 128, no output
+# `--path-format=absolute` is load-bearing: without it the answer is relative to
+# the queried directory and `os.path.dirname` names the wrong thing.
+#
+# 🔴 ONE INVOCATION FOR THE WHOLE HOST. `WINDOW_FORMAT`'s comment records that
+# `list-windows` was folded into an existing call rather than costing a fifth
+# SSH round trip, because the pusher already makes up to four per run with no
+# ControlMaster. This is that fifth call, so it is batched: every unique path on
+# a host goes into ONE `sh -c`. N round trips for N panes was never on the table.
+#
+# 🔴 PATHS ARRIVE AS POSITIONAL PARAMETERS, NEVER INTERPOLATED INTO THE SCRIPT.
+# `sh -c <script> <argv0> path...` puts them in `"$@"`, so the script TEXT is a
+# constant and a path containing `;`, `$(…)`, a backtick, a quote or a newline
+# is data. Verified 2026-09-03 through the real `ssh_wrap`/`shlex.join` path
+# against `/tmp/we ird;$(echo pwned)`id`` — empty result, nothing executed.
+#
+# 🔴 THE OUTPUT IS KEYED BY INPUT INDEX, NOT BY ECHOING THE PATH BACK. A path
+# holding a tab or a newline would corrupt a `path<TAB>repo` line format; a
+# 1-based sequence number cannot. A line whose first field is not an integer is
+# counted `unparseable` and the rest still align.
+#
+# 🔴 THE SENTINEL CARRIES THE HOST'S OWN `$HOME`, and that coupling is the same
+# one-call-one-instant argument `agent_ledger.read_command` makes for the tmux
+# pid. It is the POSITIVE CONTROL — without it, "the probe ran and no pane is in
+# a repo" and "something swallowed the output" are the same empty bytes — AND it
+# is the value `repo_from_common_dir` needs to refuse to name `$HOME` as a
+# project. It must be the OWNING host's `$HOME`, which is exactly what a local
+# `HOME` constant could not supply for a laptop row.
+REPO_PROBE_SENTINEL = "SM_REPO_V1"
+REPO_PROBE_SCRIPT = (
+    'echo "%s $HOME"\n'
+    # `timeout` is coreutils and present on both hosts, but a probe that dies
+    # on a host without it would take the whole host's repo field with it. The
+    # unquoted `$T` word-splits, which is the intent and is POSIX sh behaviour
+    # (this runs under `sh`, never zsh — see RULES.md on zsh not splitting).
+    'if command -v timeout >/dev/null 2>&1; then T="timeout 3"; else T=""; fi\n'
+    'n=0\n'
+    'for p do\n'
+    '  n=$((n+1))\n'
+    '  d=$($T git -C "$p" rev-parse --path-format=absolute '
+    '--git-common-dir 2>/dev/null) || d=""\n'
+    '  printf \'%%s\\t%%s\\n\' "$n" "$d"\n'
+    'done\n'
+    'exit 0\n' % REPO_PROBE_SENTINEL)
+# Its own budget, above SSH_TIMEOUT: this call fans out over every unique path
+# on the host and each `git` is bounded at 3s by the script itself, so the
+# worst realistic case is slower than a single `list-panes`. The pusher's own
+# 90s cap still bounds the whole run.
+REPO_PROBE_TIMEOUT = 25.0
+
+# 🔴 THE PER-ROW DISCRIMINANT, enumerated here so a consumer can branch on the
+# set and a test can assert it is exactly this — the same contract
+# `WAITING_STATUSES` / `UNSENT_STATUSES` / `PREVIEW_STATUSES` carry.
+#
+# `repo` is `None` on every status except `ok`. The four not-`ok`-not-`null`
+# reasons are NOT interchangeable, and collapsing any of them into "no repo"
+# republishes the silent zero this whole file exists to refuse:
+#
+#   ok           — resolved; `repo` names the MAIN clone of the pane's cwd.
+#   not_a_repo   — MEASURED: the owning host says this path is not inside a git
+#                  work tree (or its common dir cannot honestly be named — a
+#                  bare repo, a submodule's `…/.git/modules/<n>`). A real
+#                  measured absence.
+#   home         — MEASURED, and deliberately withheld. The resolved main clone
+#                  IS the owning host's `$HOME`. `projectOf()` in clawgate
+#                  routes `/home/zach` and `/root` to `Other` precisely so every
+#                  unparented shell does not form a project called `zach`;
+#                  publishing a `repo` here would OVERRIDE that guard from the
+#                  producer side, because `repo` is the branch it prefers.
+#   no_path      — the pane reported no cwd, so there was nothing to resolve.
+#   missing      — the probe answered for this host but not for THIS path (a
+#                  truncated or partial reply). Measured host, unmeasured path.
+#   unmeasured   — the probe did not answer on this host at all: it failed,
+#                  timed out, found no shell, or came back without its
+#                  sentinel. 🔴 THIS MUST NEVER RENDER AS `not_a_repo`. A failed
+#                  resolution that looked like a measurement would tell a reader
+#                  "none of these panes is in a repo" about a look that never
+#                  happened.
+#   skipped      — `--no-repo`. Nothing was asked.
+REPO_STATUSES = ("ok", "not_a_repo", "home", "no_path", "missing",
+                 "unmeasured", "skipped")
 
 FUZZYCLAW_DIR = os.path.join(HOME, ".tmux", "tasks")
 SCRATCH_SLOTS_DEPLOYED = os.path.join(HOME, ".config", "tmux", "scratch-slots.sh")
@@ -1451,6 +1573,174 @@ def label_from_path(path, home=None):
     return os.path.basename(p) or None
 
 
+# --------------------------------------------------------------------------- #
+# REPO RESOLUTION — pure; the impure half is one `run_tmux` call per host
+# --------------------------------------------------------------------------- #
+def repo_probe_argv(paths):
+    """The ONE argv that resolves every path on a host. PURE.
+
+    `("sh", "-c", REPO_PROBE_SCRIPT, "sm-repo-probe", *paths)` — the script text
+    is a CONSTANT and the paths are positional parameters, so nothing a path
+    contains can become shell syntax. `ssh_wrap`'s `shlex.join` then quotes the
+    whole argv for the remote hop, exactly as it does for the tmux format
+    string.
+
+    `"sm-repo-probe"` is `$0`: `sh -c` consumes the first operand as the shell's
+    own name, so omitting it would silently eat the FIRST PATH. It is spelled as
+    a recognisable name rather than `sh` so it is identifiable in a `ps` on
+    either host.
+    """
+    return ("sh", "-c", REPO_PROBE_SCRIPT, "sm-repo-probe", *[str(p) for p in paths])
+
+
+def parse_repo_probe(raw, paths) -> dict:
+    """Probe stdout -> `{"measured", "home", "common_dirs", "seen", "unparseable"}`.
+
+    `common_dirs` is `{path: common_dir_or_None}`, keyed back to the INPUT list
+    by the 1-based sequence number each line carries.
+
+    🔴 `measured` IS THE POSITIVE CONTROL and it comes off the sentinel, never
+    off the row count. A host whose panes are all outside a work tree and a host
+    whose probe was swallowed both produce output with no common dirs in it;
+    only the sentinel tells them apart. When `measured` is False, `home` is None
+    and `common_dirs` is empty — the caller must publish `unmeasured`, never
+    `not_a_repo`.
+
+    🔴 A SENTINEL WITH NO `$HOME` IS NOT A SENTINEL. The home is half the
+    protocol, not a bonus field: without it `repo_from_common_dir` cannot refuse
+    to name `$HOME` as a project, and the honest options are then "publish a
+    repo called `zach` for every unparented shell" or "carry a guard that can
+    never fire". Both are worse than declining the whole host, so a bare
+    sentinel is `measured: False` — the caller publishes `unmeasured`, and the
+    guard downstream has no unreachable branch.
+
+    A line whose first field is not an integer, or whose index is outside the
+    input list, is counted `unparseable` and skipped. That is the disposition a
+    common dir containing a newline lands in: it costs that one path its answer
+    and leaves every other index correct.
+    """
+    lines = (raw or "").splitlines()
+    head = next((ln for ln in lines
+                 if ln.strip().split(None, 1)[:1] == [REPO_PROBE_SENTINEL]),
+                None)
+    unmeasured = {"measured": False, "home": None, "common_dirs": {},
+                  "seen": None, "unparseable": None}
+    if head is None:
+        return unmeasured
+    parts = head.strip().split(None, 1)
+    home = parts[1] if len(parts) > 1 else ""
+    if not home:
+        return unmeasured
+    paths = list(paths)
+    out, seen, unparseable = {}, 0, 0
+    started = False
+    for line in lines:
+        if not started:
+            started = line is head
+            continue
+        if not line.strip():
+            continue
+        seen += 1
+        idx, sep, common = line.partition("\t")
+        if not sep or not idx.strip().isdigit():
+            unparseable += 1
+            continue
+        i = int(idx.strip()) - 1
+        if i < 0 or i >= len(paths):
+            unparseable += 1
+            continue
+        out[paths[i]] = common.strip() or None
+    return {"measured": True, "home": home, "common_dirs": out,
+            "seen": seen, "unparseable": unparseable}
+
+
+def repo_from_common_dir(common_dir, home) -> dict:
+    """`git rev-parse --git-common-dir` output -> `{"repo", "status"}`. PURE.
+
+    `status` is one of `REPO_STATUSES`; `repo` is a name only when `ok`.
+
+    🔴 THE MAIN CLONE IS THE PARENT OF THE COMMON DIR, and that is the whole
+    mechanism. Every linked worktree of a repo reports the SAME common dir —
+    the main clone's `.git` — so two worktrees resolve to one name, which is the
+    grouping this exists to fix. The leaf of the pane's own path cannot do that:
+    `ht-r11-930492` is not derivable from any string operation on
+    `homelab-talos`, and guessing is worse than the honest split.
+
+    🔴 IT ONLY NAMES A REPO WHEN THE COMMON DIR IS LITERALLY `.git`. A bare repo
+    (`/srv/foo.git`) and a submodule (`<super>/.git/modules/<name>`) both have a
+    common dir whose parent is NOT a clone root — `/srv` and `<super>/.git/modules`
+    — so naming one would publish a confident wrong group. `not_a_repo` instead:
+    fail soft, never guess.
+
+    🔴 `$HOME` IS NOT A PROJECT, and this is the producer-side half of a guard
+    that already exists in the consumer. `projectOf()` routes `/home/zach` and
+    `/root` to `Other` so an unparented shell does not form a project called
+    `zach` — but `repo` is the branch `projectOf()` prefers, so a `repo` emitted
+    here would OVERRIDE it. `home` must therefore be the OWNING host's `$HOME`
+    (it arrives on the probe's sentinel line), never this process's — and it is
+    REQUIRED, with no default, because `parse_repo_probe` refuses a sentinel
+    that carries none. A default of `None` would make this guard skippable, and
+    a guard that can be skipped by forgetting an argument is the one that gets
+    skipped.
+    """
+    d = (common_dir or "").strip()
+    if not d:
+        return {"repo": None, "status": "not_a_repo"}
+    d = d.rstrip("/") or "/"
+    if os.path.basename(d) != ".git":
+        return {"repo": None, "status": "not_a_repo"}
+    root = os.path.dirname(d)
+    if os.path.normpath(root) == os.path.normpath(home):
+        return {"repo": None, "status": "home"}
+    name = os.path.basename(root.rstrip("/"))
+    if not name:
+        return {"repo": None, "status": "not_a_repo"}
+    return {"repo": name, "status": "ok"}
+
+
+def build_repo_index(parsed, paths) -> dict:
+    """`{path: {"repo", "status"}}` for a host whose probe was MEASURED.
+
+    Returning `None` for an unmeasured host is the CALLER's job, and it is the
+    discriminant: `fold_windows` renders `repo_index=None` as `unmeasured` on
+    every row of that host. Handing back a dict of `not_a_repo` entries instead
+    would publish a failed probe as a measurement, which is the one substitution
+    this file exists to refuse.
+    """
+    if not parsed.get("measured"):
+        return None
+    home = parsed.get("home")
+    common = parsed.get("common_dirs") or {}
+    out = {}
+    for p in paths:
+        if p not in common:
+            # The probe answered for this host, and did not answer for this
+            # path. Its own status — not folded into `not_a_repo`.
+            out[p] = {"repo": None, "status": "missing"}
+        else:
+            out[p] = repo_from_common_dir(common[p], home=home)
+    return out
+
+
+def row_repo(path, repo_index, host_status="unmeasured") -> dict:
+    """One row's `{"repo", "repo_status"}`. PURE, and the ONE writer of the pair.
+
+    `repo_index is None` means the host's probe did not answer (or was not run):
+    every row gets `host_status` — `unmeasured` or `skipped` — and a null repo.
+    A dict means it DID answer, so a null repo there carries a measured reason.
+    """
+    if not (path or "").strip():
+        # Asked-or-not, there was nothing to resolve. This beats the host
+        # status because it is a fact about the PANE, not about the probe.
+        return {"repo": None, "repo_status": "no_path"}
+    if repo_index is None:
+        return {"repo": None, "repo_status": host_status}
+    hit = repo_index.get(path)
+    if hit is None:
+        return {"repo": None, "repo_status": "missing"}
+    return {"repo": hit.get("repo"), "repo_status": hit.get("status")}
+
+
 def resolve_label(session, path, slots=None, home=None) -> dict:
     """`{"label": str, "label_source": one of LABEL_SOURCES, "hotkey": str|None}`.
 
@@ -2174,7 +2464,8 @@ def fold_windows(panes, host, slots=None, task_index=None,
                  threshold=DEFAULT_STALE_THRESHOLD, now=None,
                  slot_window_ids=None, captures=None,
                  capture_status="skipped", ledger_index=None,
-                 pane_preview=False) -> list:
+                 pane_preview=False, repo_index=None,
+                 repo_status="unmeasured") -> list:
     """Collapse panes into one row per (session, window_index).
 
     A window is `claude` if ANY of its panes is; the row's task/busy/pane_id
@@ -2236,6 +2527,14 @@ def fold_windows(panes, host, slots=None, task_index=None,
     fact, not the host's. A non-Claude row is `not_claude`: only Claude panes are
     captured, so `waiting_probable: False` on a bare zsh would be a verdict
     about a pane nobody looked at.
+
+    🔴 `repo_index` IS `None`-VS-`{}` FOR THE SAME REASON, one signal over.
+    `None` means this host's repo probe did not answer (or was not run), so
+    every row is `repo_status: repo_status` (`unmeasured` / `skipped`) with a
+    null `repo`. A dict means it DID answer, so a null `repo` there is a
+    MEASUREMENT — `not_a_repo`, `home` or `no_path` — and says which. The
+    resolution itself happened on the host that OWNS the directory; see
+    `REPO_PROBE_SCRIPT` for why it cannot happen here.
     """
     now = time.time() if now is None else now
     slots = slots or {}
@@ -2274,6 +2573,8 @@ def fold_windows(panes, host, slots=None, task_index=None,
         busy = busy_from_title(lead.get("title", ""))
         is_claude = any(pane_is_claude(p) for p in members)
         lab = resolve_label(session, lead.get("path", ""), slots)
+        rep = row_repo(lead.get("path", ""), repo_index,
+                       host_status=repo_status)
         # 🔴 The waiting fields, resolved through the None-vs-{} distinction
         # above. `probable` is None on every path where nothing was scraped.
         #
@@ -2349,6 +2650,23 @@ def fold_windows(panes, host, slots=None, task_index=None,
             "hotkey_display": hotkey_display(lab["hotkey"]),
             "pane_id": lead.get("pane_id"),
             "path": lead.get("path", ""),
+            # 🔴 THE AUTHORITATIVE PROJECT KEY, RESOLVED ON THE OWNING HOST.
+            # `label` answers "where is this" for an OPERATOR and is the leaf of
+            # the cwd; `repo` answers "which project is this" for a CONSUMER and
+            # is the MAIN CLONE, so every worktree of one repo carries one name.
+            # They are different questions and neither replaces the other — a
+            # pane three directories deep gets a useless `label` and a correct
+            # `repo`, and a scratch slot's codename beats the cwd for `label`
+            # while never touching `repo`.
+            #
+            # 🔴 `repo_status` MAKES THE NULL READABLE, the same pair
+            # `unsent_prompt`/`unsent_prompt_status` is. `null` + `not_a_repo`
+            # is "the owning host looked and this path is not in a work tree";
+            # `null` + `unmeasured` is "nobody looked". A consumer that reads
+            # the first as the second — or the second as the first — is reading
+            # a fabricated measurement. See `REPO_STATUSES`.
+            "repo": rep["repo"],
+            "repo_status": rep["repo_status"],
             "command": lead.get("command", ""),
             "task": strip_status_glyph(lead.get("title", "")),
             "claude": is_claude,
@@ -2951,7 +3269,8 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
            claude_only=False, use_capture=True, capture_nonce=None,
            clawgate_reader=None, clawgate_path=None,
            use_ledger=True, ledger_outputs=None, pane_preview=False,
-           match=None, match_path=False, prefilter_index_map=False) -> dict:
+           match=None, match_path=False, prefilter_index_map=False,
+           use_repo=True, repo_outputs=None) -> dict:
     """Build the whole report. Every source is injectable, so this is the
     function the hermetic suite exercises end-to-end.
 
@@ -2984,6 +3303,14 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     SSH transport as the tmux calls, so a laptop row gets an age and a session id
     the same way a workbench row does. `ledger_outputs` injects that stdout per
     host for the hermetic suite.
+
+    🔴 `use_repo` DEFAULTS TO TRUE AND IS READ PER HOST FOR THE SAME REASON.
+    `repo` cannot be derived here at all — see `REPO_PROBE_SCRIPT`. It is a
+    FIFTH `sh -c` per host over the same SSH transport, batched into one call
+    for every unique pane path on that host, and `--no-repo` turns it off for a
+    caller that would rather have the round trip back. Off, every row is
+    `repo_status: skipped` with a null `repo` — never `not_a_repo`.
+    `repo_outputs` injects that stdout per host for the hermetic suite.
     """
     now = time.time() if now is None else now
     local_host = local_host or local_host_label()
@@ -3073,6 +3400,9 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     raw_panes, slot_ids = {}, {}
     captures, capture_status = {}, {}
     ledger_res = {}
+    # 🔴 `None` is the DISCRIMINANT, exactly as it is for `captures`. `None` =
+    # this host's probe did not answer or was not run; a dict = it answered.
+    repo_index, repo_host_status, repo_stats = {}, {}, {}
     for host in hosts:
         panes_res = run_tmux(TMUX_PANES_ARGV, host, local_host, runner=runner)
         wins_res = run_tmux(TMUX_WINDOWS_ARGV, host, local_host, runner=runner)
@@ -3107,6 +3437,87 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
                 capture_status[host] = "ok"
             else:
                 captures[host], capture_status[host] = None, "error"
+
+        # --- 🔴 the repo probe: ONE `sh -c` per host, EVERY unique pane path --
+        # It runs on the host that OWNS the directories. `label_from_path`
+        # states why that is not optional: `path` is a string from another
+        # machine, and resolving a laptop path here would answer about whatever
+        # happens to sit at that path on the workbench. See REPO_PROBE_SCRIPT.
+        #
+        # DEDUPED and SORTED before the call: ~93 live windows share far fewer
+        # distinct cwds, and the order is fixed so the argv is reproducible.
+        repo_paths = sorted({p.get("path", "").strip()
+                             for p in host_panes if (p.get("path") or "").strip()})
+        if not use_repo:
+            repo_index[host], repo_host_status[host] = None, "skipped"
+            repo_stats[host] = {"measured": False, "status": "skipped",
+                                "error": None, "paths": None, "resolved": None,
+                                "unparseable": None}
+        elif not panes_res["reachable"]:
+            # No paths were measured, so there is nothing to resolve and the
+            # probe is not attempted — the same reasoning the ledger read uses
+            # for a host that answered neither tmux call. `unmeasured`, and the
+            # reason says the read was never attempted rather than implying it
+            # was tried and failed.
+            repo_index[host], repo_host_status[host] = None, "unmeasured"
+            repo_stats[host] = {
+                "measured": False, "status": "unmeasured",
+                "error": "`tmux list-panes` did not answer on this host, so no "
+                         "pane path was measured and the repo probe was not "
+                         "attempted",
+                "paths": None, "resolved": None, "unparseable": None}
+        elif not repo_paths:
+            # 🔴 MEASURED AND GENUINELY EMPTY, `{}` and not None — the same
+            # distinction `captures` draws. We know every pane on this host and
+            # none of them reported a cwd, so there was nothing to ask about.
+            # Publishing `unmeasured` here would call a complete enumeration a
+            # failure.
+            repo_index[host], repo_host_status[host] = {}, "unmeasured"
+            repo_stats[host] = {"measured": True, "status": "ok", "error": None,
+                                "paths": 0, "resolved": 0, "unparseable": 0}
+        else:
+            if repo_outputs is not None:
+                raw_repo = repo_outputs.get(host)
+                repo_read = {"reachable": raw_repo is not None,
+                             "stdout": raw_repo or "",
+                             "error": None if raw_repo is not None
+                             else "no injected repo probe output for this host"}
+            else:
+                repo_read = run_tmux(repo_probe_argv(repo_paths), host,
+                                     local_host, runner=runner,
+                                     timeout=REPO_PROBE_TIMEOUT)
+            if not repo_read["reachable"]:
+                repo_index[host], repo_host_status[host] = None, "unmeasured"
+                repo_stats[host] = {
+                    "measured": False, "status": "error",
+                    "error": repo_read.get("error") or "unknown error",
+                    "paths": len(repo_paths), "resolved": None,
+                    "unparseable": None}
+            else:
+                parsed_repo = parse_repo_probe(repo_read["stdout"], repo_paths)
+                idx = build_repo_index(parsed_repo, repo_paths)
+                repo_index[host] = idx
+                repo_host_status[host] = "unmeasured"
+                if idx is None:
+                    # 🔴 IT ANSWERED WITHOUT ITS SENTINEL, so the output is not
+                    # evidence about this host's repos at all — the same verdict
+                    # `_host_ledger` reaches for a ledger read with no sentinel.
+                    # An empty stdout from a swallowed command and a host where
+                    # nothing resolved are the same bytes.
+                    repo_stats[host] = {
+                        "measured": False, "status": "no_sentinel",
+                        "error": "the repo probe answered without its "
+                                 f"`{REPO_PROBE_SENTINEL}` line on {host} — "
+                                 "output not trusted",
+                        "paths": len(repo_paths), "resolved": None,
+                        "unparseable": None}
+                else:
+                    repo_stats[host] = {
+                        "measured": True, "status": "ok", "error": None,
+                        "paths": len(repo_paths),
+                        "resolved": sum(1 for v in idx.values()
+                                        if v.get("status") == "ok"),
+                        "unparseable": parsed_repo["unparseable"]}
         # 🔴 The two calls are INDEPENDENT measurements. `reachable`/`error`
         # describe list-panes; `windows_measured`/`windows_error` describe
         # list-windows. Reading one off the other is how a failed list-windows
@@ -3150,6 +3561,20 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             "captures_status": capture_status[host],
             "captures_seen": (len(captures[host])
                               if captures[host] is not None else None),
+            # A FOURTH independent measurement, reported separately for the
+            # same reason the other three are separate from each other. 🔴 THIS
+            # IS THE HOST-LEVEL DISCRIMINANT constraint that stops a failed repo
+            # probe from reading as "none of these panes is in a repo":
+            # `repos_measured: false` means no row on this host carries a repo
+            # BECAUSE NOBODY LOOKED, and `repos_status` names which of the four
+            # ways that happened (`skipped` / `unmeasured` / `error` /
+            # `no_sentinel`). `repos_resolved` is an integer ONLY when measured.
+            "repos_measured": repo_stats[host]["measured"],
+            "repos_status": repo_stats[host]["status"],
+            "repos_error": repo_stats[host]["error"],
+            "repos_paths": repo_stats[host]["paths"],
+            "repos_resolved": repo_stats[host]["resolved"],
+            "repos_unparseable": repo_stats[host]["unparseable"],
         }
         # --- the agent activity ledger, ONE `sh -c` per host -----------------
         # 🔴 Read HERE, inside the per-host loop, and filtered against THIS
@@ -3258,7 +3683,11 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             capture_status=capture_status.get(host, "skipped"),
             # Per host, unlike fuzzyclaw's local-only index above.
             ledger_index=(ledger_res.get(host) or {}).get("index"),
-            pane_preview=pane_preview)
+            pane_preview=pane_preview,
+            # Per host, like the ledger — the resolution happened on the machine
+            # that owns these directories.
+            repo_index=repo_index.get(host),
+            repo_status=repo_host_status.get(host, "unmeasured"))
 
     # --- 🔴 --claude-only: drop the shells, and COUNT what was dropped -------
     # The summary then describes the RENDERED set, which is the safe direction:
@@ -4098,6 +4527,17 @@ LEAN_ROW_FIELDS = (
     # a confident answer sending the operator to the wrong live window.
     "hotkey_display",
     # what it is working on, and WHICH agent is doing it
+    # 🔴 `repo` IS THE PROJECT KEY AND IT IS NOT DUPLICATION OF `path` OR
+    # `label`. It is the MAIN CLONE, resolved on the owning host, so two
+    # worktrees of one repo carry one name — which no string operation on
+    # `path` can produce. Its consumer (clawgate's `projectOf()`) prefers it
+    # over the path leaf precisely because the leaf splits a worktree off into
+    # its own group. `repo_status` rides with it for the same reason
+    # `label_source` rides with `label` and `age_source` with `age_secs`: it is
+    # PROVENANCE, and this view's rule is that provenance never goes. Without
+    # it, `repo: null` from a probe that never ran and `repo: null` from a pane
+    # genuinely outside a work tree are one value.
+    "repo", "repo_status",
     "path", "task", "runtime",
     # what state it is in
     "claude", "busy", "status", "age_secs", "age_source",
@@ -4122,6 +4562,11 @@ LEAN_ROW_FIELDS = (
 LEAN_HOST_FIELDS = (
     "reachable", "error", "windows_measured", "windows_error",
     "captures_measured", "captures_status", "captures_seen",
+    # The repo probe's own provenance. `repos_measured` + `repos_status` are
+    # what make a host of `repo: null` rows readable; the two counts are what
+    # make "0 resolved" readable against how many paths were asked about.
+    "repos_measured", "repos_status", "repos_error",
+    "repos_paths", "repos_resolved", "repos_unparseable",
 )
 
 
@@ -4618,6 +5063,13 @@ def build_parser():
                    help="skip the per-host pane capture. Every row's "
                         "waiting_probable is then null (never false) and "
                         "summary.waiting.probable is null, never 0.")
+    p.add_argument("--no-repo", action="store_true",
+                   help="skip the per-host repo probe — one batched `sh -c` "
+                        "per host that resolves each pane's cwd to its MAIN "
+                        "clone (so worktrees of one repo share a name). Every "
+                        "row's `repo` is then null with `repo_status: "
+                        "skipped`, never `not_a_repo`, and the host reports "
+                        "`repos_measured: false`.")
     # 🔴 OPT-IN, and the flag is the whole cost control. See the comment block
     # at PREVIEW_STATUSES for the measurement: the text is already captured, so
     # this costs no extra tmux work, but it makes the document 2.63x larger and
@@ -4779,6 +5231,7 @@ def main(argv=None):
                     use_fuzzyclaw=use_fuzzyclaw,
                     use_ledger=not args.no_ledger,
                     use_capture=not args.no_capture,
+                    use_repo=not args.no_repo,
                     threshold=args.stale_threshold,
                     claude_only=args.claude_only,
                     pane_preview=args.pane_preview,

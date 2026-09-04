@@ -31,6 +31,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -274,15 +275,46 @@ SLOTS_FIXTURE = {
 }
 
 
+def repo_out(*common_dirs, home="/home/zach", sentinel=None):
+    """The bytes a host's repo probe actually returns.
+
+    The sentinel line carrying that host's OWN `$HOME`, then one
+    `<1-based index>\\t<common dir>` line per input path, in input order. The
+    paths are NOT echoed back — the index is the key, which is what makes a
+    path containing a tab or a newline harmless.
+
+    🔴 RENDERED, NOT TYPED, for the same reason the window fixtures are: a
+    hand-typed body encodes a reader's belief about the format instead of the
+    format itself.
+    """
+    head = "%s %s" % (sentinel or sm.REPO_PROBE_SENTINEL, home) if home \
+        else (sentinel or sm.REPO_PROBE_SENTINEL)
+    rows = ["%d\t%s" % (i, d or "")
+            for i, d in enumerate(common_dirs, start=1)]
+    return "\n".join([head] + rows) + "\n"
+
+
+# The DEFAULT probe answers, one per host, matching each host's sorted-unique
+# pane paths. Workbench: `/home/zach/tmp` (no repo), `/home/zach/workspace/
+# repo-alpha` (a repo). Laptop: `/home/zach/workspace/naida` (a repo, and its
+# common dir is the LAPTOP's — the workbench has no such checkout, which is the
+# whole point of resolving on the owning host).
+WORKBENCH_REPO_OUT = repo_out("", "/home/zach/workspace/repo-alpha/.git")
+LAPTOP_REPO_OUT = repo_out("/home/zach/workspace/naida/.git")
+
+
 def make_runner(local_panes=WORKBENCH_PANES, local_windows=WORKBENCH_WINDOWS,
                 remote_panes=LAPTOP_PANES, remote_windows=LAPTOP_WINDOWS,
                 local_capture="local captured output\n",
                 remote_capture="remote captured output\n",
+                local_repo=WORKBENCH_REPO_OUT, remote_repo=LAPTOP_REPO_OUT,
                 remote_rc=0, remote_err="", local_rc=0, local_err="",
                 local_windows_rc=None, local_windows_err=None,
                 remote_windows_rc=None, remote_windows_err=None,
                 local_capture_rc=None, local_capture_err=None,
                 remote_capture_rc=None, remote_capture_err=None,
+                local_repo_rc=None, local_repo_err=None,
+                remote_repo_rc=None, remote_repo_err=None,
                 calls=None):
     """A fake `_default_runner` that answers PER SUBCOMMAND. Records argv.
 
@@ -295,9 +327,19 @@ def make_runner(local_panes=WORKBENCH_PANES, local_windows=WORKBENCH_WINDOWS,
     cannot pin which one a fact came from — so it certifies nothing about that
     fact's provenance, however many tests are green.
 
-    `*_windows_rc` / `*_capture_rc` (and their `_err` twins) default to the
-    host-wide `*_rc` / `*_err`, so every existing call site keeps its exact
-    meaning. Pass them to fail EXACTLY ONE subcommand.
+    `*_windows_rc` / `*_capture_rc` / `*_repo_rc` (and their `_err` twins)
+    default to the host-wide `*_rc` / `*_err`, so every existing call site keeps
+    its exact meaning. Pass them to fail EXACTLY ONE subcommand.
+
+    🔴 THE REPO PROBE IS A FOURTH DISTINGUISHABLE CALL, NOT FOLDED INTO `panes`.
+    It was, briefly, and the fall-through was silent: the probe argv matched
+    neither `list-windows` nor `capture-pane`, so the fixture answered it with
+    the PANES output, `parse_repo_probe` found no sentinel, and every host
+    reported `repos_measured: false` while the suite stayed green. That is
+    exactly the blind spot the paragraph above was written about, one call
+    later. It is keyed on the probe's own sentinel, which is IN the script text
+    — so a rename of the sentinel breaks the fixture loudly rather than
+    silently re-creating the fall-through.
     """
     calls = calls if calls is not None else []
 
@@ -317,6 +359,10 @@ def make_runner(local_panes=WORKBENCH_PANES, local_windows=WORKBENCH_WINDOWS,
         ("remote", "capture"): (_or(remote_capture_rc, remote_rc),
                                 remote_capture,
                                 _or(remote_capture_err, remote_err)),
+        ("local", "repo"): (_or(local_repo_rc, local_rc), local_repo,
+                            _or(local_repo_err, local_err)),
+        ("remote", "repo"): (_or(remote_repo_rc, remote_rc), remote_repo,
+                             _or(remote_repo_err, remote_err)),
     }
 
     def runner(argv, timeout):
@@ -324,7 +370,8 @@ def make_runner(local_panes=WORKBENCH_PANES, local_windows=WORKBENCH_WINDOWS,
         where = "remote" if (argv and argv[0] == "ssh") else "local"
         joined = " ".join(argv)
         what = ("windows" if "list-windows" in joined else
-                "capture" if "capture-pane" in joined else "panes")
+                "capture" if "capture-pane" in joined else
+                "repo" if sm.REPO_PROBE_SENTINEL in joined else "panes")
         rc, out, err = table[(where, what)]
         return (rc, "", err) if rc != 0 else (0, out, "")
 
@@ -353,6 +400,17 @@ def test_make_runner_can_distinguish_the_two_subprocesses():
     # capture-pane is a THIRD distinguishable call, not folded into panes
     cap = make_runner(local_capture="scrollback\n")
     assert cap(sm.tail_argv("scratch7:3"), 5)[1] == "scrollback\n"
+    # 🔴 ...and the repo probe is a FOURTH. Both directions, on the SAME runner,
+    # so this cannot pass by the probe silently receiving the panes answer —
+    # which is what it did before this arm existed.
+    probe = sm.repo_probe_argv(["/home/zach/workspace/repo-alpha"])
+    rep = make_runner(local_repo="PROBE-OUT\n")
+    assert rep(list(probe), 5)[1] == "PROBE-OUT\n"
+    assert rep(list(sm.TMUX_PANES_ARGV), 5)[1] == WORKBENCH_PANES
+    # ...and it can fail ALONE, while panes on the same host stay green.
+    only = make_runner(local_repo_rc=1, local_repo_err="probe blew up")
+    assert only(list(probe), 5) == (1, "", "probe blew up")
+    assert only(list(sm.TMUX_PANES_ARGV), 5)[0] == 0
 
 
 # Captured BEFORE any test monkeypatches sm.gather — otherwise a test that
@@ -1907,7 +1965,9 @@ def test_json_golden_schema_and_values():
     assert set(wb) == {"reachable", "error", "ssh_target", "windows",
                        "live_window_ids", "windows_measured", "windows_error",
                        "tmux_server_id", "tmux_server_id_reason",
-                       "captures_measured", "captures_status", "captures_seen"}
+                       "captures_measured", "captures_status", "captures_seen",
+                       "repos_measured", "repos_status", "repos_error",
+                       "repos_paths", "repos_resolved", "repos_unparseable"}
     assert wb["ssh_target"] is None
     assert wb["live_window_ids"] == ["@41", "@52", "@63"]
     assert wb["windows_measured"] is True
@@ -1946,6 +2006,15 @@ def test_json_golden_schema_and_values():
         "hotkey_display": "Alt+Shift+S",
         "pane_id": "%11",
         "path": "/home/zach/workspace/repo-alpha",
+        # 🔴 THE PROJECT KEY, and it is NOT the label. This row's `label` is
+        # `Grove` (the slot table won tier 1) and its path leaf is
+        # `repo-alpha` — three different strings for three different
+        # questions, so a mutant that sourced `repo` from either of the other
+        # two cannot satisfy this golden. The value comes from the WORKBENCH's
+        # probe answer (`/home/zach/workspace/repo-alpha/.git`), so this
+        # asserts the common dir reached the row through the real parser.
+        "repo": "repo-alpha",
+        "repo_status": "ok",
         "command": "claude",
         "task": "Working on alpha",
         "claude": True,
@@ -6774,6 +6843,13 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
         # it wrong against a live fleet — see `sm.hotkey_display`.
         "hotkey_display",
         "pane_id", "path",
+        # 🔴 The PROJECT key and its provenance. `repo` is the MAIN CLONE,
+        # resolved on the host that owns the directory, so two worktrees of one
+        # repo share it — which `path`'s leaf structurally cannot do.
+        # `repo_status` rides with it because `repo: null` from a probe that
+        # never ran and `repo: null` from a pane outside a work tree are the
+        # same value and completely different facts. See `sm.REPO_STATUSES`.
+        "repo", "repo_status",
         "command",
         "task", "claude", "busy", "age_secs", "age_source", "status",
         "waiting_probable", "waiting_signals", "waiting_status",
@@ -7369,6 +7445,11 @@ def test_the_LEAN_row_field_ledger_fails_when_it_grows_or_shrinks():
         # `Alt+Shift+V`; dropping it here puts the derivation back where it
         # already failed.
         "hotkey_display",
+        # 🔴 The project key. This view's consumer is the one that GROUPS, and
+        # grouping on `label` yields codename pseudo-groups while grouping on
+        # the `path` leaf splits every worktree off on its own. `repo_status`
+        # is provenance, and provenance never goes from this view.
+        "repo", "repo_status",
         "path", "task", "runtime", "claude", "busy", "status", "age_secs",
         "age_source",
         "waiting_probable", "waiting_signals", "waiting_status",
@@ -7557,6 +7638,10 @@ def test_the_LEAN_HOST_field_ledger_fails_when_it_grows_or_shrinks():
     assert set(sm.LEAN_HOST_FIELDS) == {
         "reachable", "error", "windows_measured", "windows_error",
         "captures_measured", "captures_status", "captures_seen",
+        # The repo probe's own provenance — a FOURTH independent measurement,
+        # and the only thing that makes a host of `repo: null` rows readable.
+        "repos_measured", "repos_status", "repos_error",
+        "repos_paths", "repos_resolved", "repos_unparseable",
     }
     assert lean["lean_host_fields"] == list(sm.LEAN_HOST_FIELDS)
     for host, h in lean["hosts"].items():
@@ -11957,3 +12042,671 @@ def test_the_flag_reaches_gather_and_is_OFF_in_its_signature():
     p = sm.build_parser()
     assert p.parse_args(["scan", "--json"]).pane_preview is False
     assert p.parse_args(["scan", "--json", "--pane-preview"]).pane_preview is True
+
+
+# =========================================================================== #
+# §R — `repo`: THE PROJECT KEY, RESOLVED ON THE HOST THAT OWNS THE DIRECTORY
+#
+# 🔴 THE DEFECT THIS SECTION EXISTS FOR. clawgate's tmux page groups windows by
+# project through ONE seam, `projectOf()`: `repo` if non-empty -> the LEAF of
+# `path` -> `Other`. The producer published no `repo`, so the leaf won every
+# time and a git WORKTREE formed its own project group — `ht-r11-930492` sat
+# apart from `homelab-talos`, which on a worktree-heavy box is most of the long
+# tail. No string operation on `path` can fix that: `ht-r11-930492` is not
+# derivable from `homelab-talos`, and guessing is worse than the honest split.
+#
+# 🔴 AND IT CANNOT BE RESOLVED HERE. `label_from_path`'s docstring already
+# states why: `path` is A STRING FROM ANOTHER MACHINE — roughly half these rows
+# come off the laptop over ssh — so a local `git rev-parse` would answer about
+# whatever happens to sit at that path on THIS host, or about nothing. The
+# resolution therefore travels over the same per-host `run_tmux` seam the tmux
+# calls use, batched into ONE `sh -c` per host.
+# =========================================================================== #
+
+# 🔴 NOT a skipif, the same rule `test_git_repo_isolation.py` states for itself:
+# `git` is in run-tests.sh's REQUIRED_TOOLS and in the flake's pytests check, so
+# its absence is an ERROR. A skipped worktree test reports the closing condition
+# of this whole feature as met without ever measuring it.
+import shutil  # noqa: E402 — beside the guard it exists for
+
+if shutil.which("git") is None:  # pragma: no cover - the gate puts git on PATH
+    raise RuntimeError(
+        "git is not on PATH. Add it to REQUIRED_TOOLS in scripts/run-tests.sh "
+        "and to the pytests check in flake.nix rather than skipping §R.")
+
+_R_GIT_ENV = {
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_AUTHOR_NAME": "repo probe",
+    "GIT_AUTHOR_EMAIL": "repo-probe@example.invalid",
+    "GIT_COMMITTER_NAME": "repo probe",
+    "GIT_COMMITTER_EMAIL": "repo-probe@example.invalid",
+}
+
+
+def _r_env(**extra):
+    e = dict(os.environ)
+    e.update(_R_GIT_ENV)
+    e.update({k: str(v) for k, v in extra.items()})
+    return e
+
+
+def _r_mkrepo(path):
+    """A real committed repo at `path`."""
+    os.makedirs(str(path), exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)],
+                   check=True, capture_output=True, env=_r_env())
+    with open(os.path.join(str(path), "f.txt"), "w", encoding="utf-8") as fh:
+        fh.write("base\n")
+    subprocess.run(["git", "-C", str(path), "add", "f.txt"],
+                   check=True, capture_output=True, env=_r_env())
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "base"],
+                   check=True, capture_output=True, env=_r_env())
+    return str(path)
+
+
+def _r_probe(paths, home, cwd=None):
+    """Run the REAL `repo_probe_argv` through a REAL `sh`, parsed by the REAL
+    parser.
+
+    🔴 THE SHIPPING INSTRUMENT, NOT A COPY OF IT — the same argument
+    `agent_ledger._dir_expr` makes for its `abs_dir` hook: a hand-copied command
+    in a test validates the copy while the one that ships stays unexercised.
+    """
+    proc = subprocess.run(list(sm.repo_probe_argv(paths)),
+                          capture_output=True, text=True,
+                          env=_r_env(HOME=home), cwd=cwd, timeout=60)
+    return proc, sm.parse_repo_probe(proc.stdout, paths)
+
+
+# --------------------------------------------------------------------------- #
+# §R.1 — the pure resolution. Literal expectations, never derived from the impl.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("common_dir,home,repo,status", [
+    # the ordinary case: a clone at /w/devrc
+    ("/home/zach/workspace/devrc/.git", "/home/zach", "devrc", "ok"),
+    # trailing slash: `/w/devrc/.git/` and `/w/devrc/.git` are one directory
+    ("/home/zach/workspace/devrc/.git/", "/home/zach", "devrc", "ok"),
+    # surrounding whitespace is stripped — the probe prints a bare line, but a
+    # value arriving with a stray \r must not become a repo called `.git\r`
+    ("  /home/zach/workspace/devrc/.git  ", "/home/zach", "devrc", "ok"),
+    # 🔴 $HOME IS NOT A PROJECT. The consumer routes an unparented shell to
+    # `Other`; `repo` is the branch it PREFERS, so a name here overrides that.
+    ("/home/zach/.git", "/home/zach", None, "home"),
+    # ...and it is a NORMALISED comparison, not a string equality: a `$HOME`
+    # with a trailing slash is the same directory.
+    ("/home/zach/.git", "/home/zach/", None, "home"),
+    # ...and it is the OWNING host's home. `/root` is home on a host that says
+    # so, and an ordinary directory name on one that does not.
+    ("/root/.git", "/root", None, "home"),
+    ("/root/.git", "/home/zach", "root", "ok"),
+    # not in a work tree at all: the probe prints an empty field
+    ("", "/home/zach", None, "not_a_repo"),
+    (None, "/home/zach", None, "not_a_repo"),
+    ("   ", "/home/zach", None, "not_a_repo"),
+    # 🔴 A BARE REPO's common dir is the repo itself, so its parent is NOT a
+    # clone root. Naming `srv` here would publish a confident wrong group.
+    ("/srv/foo.git", "/home/zach", None, "not_a_repo"),
+    # 🔴 A SUBMODULE's common dir is <super>/.git/modules/<name>, whose parent
+    # is `modules`. Fail soft, never guess.
+    ("/home/zach/workspace/super/.git/modules/sub", "/home/zach", None,
+     "not_a_repo"),
+    # the filesystem root: dirname is `/`, whose basename is empty
+    ("/.git", "/home/zach", None, "not_a_repo"),
+])
+def test_repo_from_common_dir_pure_cases(common_dir, home, repo, status):
+    """🔴 LITERAL expectations, never derived from the implementation — the whole
+    point of a pure seam is that its contract can be written down before the
+    code and read against it afterwards."""
+    assert sm.repo_from_common_dir(common_dir, home) == {"repo": repo,
+                                                         "status": status}
+
+
+def test_repo_from_common_dir_takes_home_with_NO_DEFAULT():
+    """🔴 THE GUARD MUST NOT BE SKIPPABLE BY FORGETTING AN ARGUMENT.
+
+    An earlier draft had `home=None`, which made the `$HOME` branch silently
+    inert at any call site that omitted it — and the call site that matters is
+    inside a loop over every path on a host. A required parameter turns that
+    into a TypeError the suite catches, instead of a wrong group in production.
+    """
+    import inspect
+    p = inspect.signature(sm.repo_from_common_dir).parameters["home"]
+    assert p.default is inspect.Parameter.empty
+    with pytest.raises(TypeError):
+        sm.repo_from_common_dir("/home/zach/workspace/devrc/.git")
+
+
+def test_every_repo_status_a_row_can_carry_is_ENUMERATED():
+    """🔴 The set IS the contract, and `REPO_STATUSES` is where it is written.
+    Both directions: a status the code emits but the tuple does not name is a
+    value no consumer can branch on."""
+    assert set(sm.REPO_STATUSES) == {
+        "ok", "not_a_repo", "home", "no_path", "missing", "unmeasured",
+        "skipped"}
+    for cd, home in [("/home/zach/workspace/devrc/.git", "/home/zach"),
+                     ("/home/zach/.git", "/home/zach"),
+                     ("", "/home/zach"), ("/srv/foo.git", "/home/zach")]:
+        assert sm.repo_from_common_dir(cd, home)["status"] in sm.REPO_STATUSES
+    for path, idx, host_status in [
+            ("", None, "unmeasured"),
+            ("/p", None, "unmeasured"), ("/p", None, "skipped"),
+            ("/p", {}, "unmeasured"),
+            ("/p", {"/p": {"repo": "x", "status": "ok"}}, "unmeasured")]:
+        assert sm.row_repo(path, idx, host_status=host_status)["repo_status"] \
+            in sm.REPO_STATUSES
+
+
+# --------------------------------------------------------------------------- #
+# §R.2 — the batch parser
+# --------------------------------------------------------------------------- #
+def test_parse_repo_probe_reads_the_sentinel_the_home_and_every_row():
+    paths = ["/w/a", "/w/b", "/w/c"]
+    out = sm.parse_repo_probe(
+        repo_out("/w/a/.git", "", "/w/c/.git", home="/home/op"), paths)
+    assert out["measured"] is True
+    assert out["home"] == "/home/op"
+    assert out["common_dirs"] == {"/w/a": "/w/a/.git", "/w/b": None,
+                                  "/w/c": "/w/c/.git"}
+    assert out["seen"] == 3
+    assert out["unparseable"] == 0
+
+
+def test_parse_repo_probe_with_NO_sentinel_is_unmeasured_not_empty():
+    """🔴 THE POSITIVE CONTROL. A host where nothing resolved and a host whose
+    probe was swallowed produce output with no common dirs in it either way;
+    only the sentinel tells them apart. `measured: False` and EVERY count None,
+    never 0 — a 0 here is the fabricated measurement this file refuses."""
+    out = sm.parse_repo_probe("1\t/w/a/.git\n2\t\n", ["/w/a", "/w/b"])
+    assert out == {"measured": False, "home": None, "common_dirs": {},
+                   "seen": None, "unparseable": None}
+    assert sm.parse_repo_probe("", ["/w/a"])["measured"] is False
+    assert sm.parse_repo_probe(None, ["/w/a"])["measured"] is False
+
+
+def test_a_sentinel_carrying_NO_home_is_refused_as_unmeasured():
+    """🔴 THE HOME IS HALF THE PROTOCOL. Accepting a bare sentinel would leave
+    `repo_from_common_dir` no way to refuse `$HOME` as a project, so the choice
+    would be between publishing a repo called `zach` for every unparented shell
+    and carrying a guard that can never fire. Declining the host is the honest
+    third option."""
+    assert sm.parse_repo_probe(sm.REPO_PROBE_SENTINEL + "\n1\t/w/a/.git\n",
+                               ["/w/a"])["measured"] is False
+    assert sm.parse_repo_probe(sm.REPO_PROBE_SENTINEL + "   \n1\t/w/a/.git\n",
+                               ["/w/a"])["measured"] is False
+    # ...while the SAME bytes with a home ARE measured, so this is a claim about
+    # the home and not about the rest of the line.
+    assert sm.parse_repo_probe(sm.REPO_PROBE_SENTINEL + " /h\n1\t/w/a/.git\n",
+                               ["/w/a"])["measured"] is True
+
+
+@pytest.mark.parametrize("bad,why", [
+    ("no-tab-at-all", "a line with no tab separator"),
+    ("x\t/w/a/.git", "a non-integer index"),
+    ("\t/w/a/.git", "an empty index"),
+    ("99\t/w/a/.git", "an index past the end of the input list"),
+    ("0\t/w/a/.git", "a 0 index — the protocol is 1-based"),
+    ("-1\t/w/a/.git", "a negative index"),
+])
+def test_parse_repo_probe_counts_a_malformed_line_and_keeps_the_rest(bad, why):
+    """A partial or corrupted reply must cost exactly the lines it corrupts. The
+    1-based index is what buys that: nothing silently re-aligns."""
+    paths = ["/w/a", "/w/b"]
+    raw = "%s /home/op\n%s\n2\t/w/b/.git\n" % (sm.REPO_PROBE_SENTINEL, bad)
+    out = sm.parse_repo_probe(raw, paths)
+    assert out["measured"] is True, why
+    assert out["unparseable"] == 1, why
+    assert out["seen"] == 2, why
+    # the GOOD line still landed, on the RIGHT path
+    assert out["common_dirs"] == {"/w/b": "/w/b/.git"}, why
+
+
+def test_a_path_holding_a_TAB_or_a_NEWLINE_still_round_trips():
+    """🔴 THE PATH IS NEVER ECHOED BACK, and this is why. A `path<TAB>repo` line
+    format is corrupted by either character; a 1-based sequence number is not.
+    tmux hands us `pane_current_path` off a remote machine and nothing
+    validates it."""
+    paths = ["/w/tab\there", "/w/new\nline", "/w/plain"]
+    out = sm.parse_repo_probe(
+        repo_out("/w/x/.git", "/w/y/.git", "/w/z/.git", home="/home/op"), paths)
+    assert out["common_dirs"] == {"/w/tab\there": "/w/x/.git",
+                                  "/w/new\nline": "/w/y/.git",
+                                  "/w/plain": "/w/z/.git"}
+
+
+def test_build_repo_index_gives_a_SHORT_reply_the_missing_status():
+    """🔴 `missing` IS ITS OWN FACT. The host answered; this path did not. Folding
+    it into `not_a_repo` publishes "the owning host looked and this is not a work
+    tree" about a path the reply never mentioned."""
+    paths = ["/w/a", "/w/b", "/w/c"]
+    parsed = sm.parse_repo_probe(
+        repo_out("/w/a/.git", "", home="/home/op"), paths)  # two rows, three paths
+    assert sm.build_repo_index(parsed, paths) == {
+        "/w/a": {"repo": "a", "status": "ok"},
+        "/w/b": {"repo": None, "status": "not_a_repo"},
+        "/w/c": {"repo": None, "status": "missing"}}
+
+
+def test_build_repo_index_returns_NONE_for_an_unmeasured_probe():
+    """🔴 NOT a dict of `not_a_repo` entries. That substitution — a failed probe
+    rendered as a completed measurement — is the worst outcome available here,
+    because it reads as "none of these panes is in a repo"."""
+    parsed = sm.parse_repo_probe("garbage with no sentinel\n", ["/w/a"])
+    assert sm.build_repo_index(parsed, ["/w/a"]) is None
+
+
+# --------------------------------------------------------------------------- #
+# §R.3 — 🔴 THE CLOSING CONDITION: two worktrees of one repo carry ONE name.
+#        Against REAL git, through the REAL shipped probe command.
+# --------------------------------------------------------------------------- #
+def test_TWO_WORKTREES_OF_ONE_REPO_RESOLVE_TO_THE_SAME_REPO(tmp_path):
+    """🔴 THIS IS THE FEATURE. Everything else in §R is scaffolding around it.
+
+    A real clone plus two real linked worktrees, resolved by the real
+    `REPO_PROBE_SCRIPT` under a real `sh` and a real `git`. All must carry ONE
+    repo name — the MAIN clone's — though their own directory leaves are
+    different strings, which is exactly the split the operator sees today
+    (`ht-r11-930492` apart from `homelab-talos`).
+
+    🔴 AND THE CONTROL IS IN THE SAME TEST: `label_from_path` — the producer's
+    OTHER path-derived field, and what `projectOf()` falls back to without
+    `repo` — gives all four DIFFERENT answers on the same four paths. Without
+    that line this could pass against an implementation that grouped by nothing.
+    """
+    home = str(tmp_path / "home")
+    os.makedirs(home)
+    main = _r_mkrepo(tmp_path / "ws" / "homelab-talos")
+    wt1 = str(tmp_path / "ws" / "ht-r11-930492")
+    wt2 = str(tmp_path / "ws" / "ht-r19-114477")
+    for wt, br in ((wt1, "r11"), (wt2, "r19")):
+        subprocess.run(
+            ["git", "-C", main, "worktree", "add", "-q", "-b", br, wt],
+            check=True, capture_output=True, env=_r_env())
+    sub = os.path.join(main, "sub", "deeper")   # a plain subdirectory too
+    os.makedirs(sub)
+
+    paths = [main, wt1, wt2, sub]
+    proc, parsed = _r_probe(paths, home)
+    assert proc.returncode == 0, proc.stderr
+    assert parsed["measured"] is True, proc.stdout
+    assert parsed["home"] == home
+    idx = sm.build_repo_index(parsed, paths)
+
+    assert [idx[p]["repo"] for p in paths] == ["homelab-talos"] * 4, (
+        "two worktrees of one repo must carry ONE repo name — that IS the "
+        "closing condition of this feature.\nprobe stdout:\n" + proc.stdout)
+    assert [idx[p]["status"] for p in paths] == ["ok"] * 4
+    # 🔴 THE CONTROL. The field this REPLACES splits them four ways.
+    assert [sm.label_from_path(p, home=home) for p in paths] == [
+        "homelab-talos", "ht-r11-930492", "ht-r19-114477", "deeper"]
+
+
+def test_the_real_probe_answers_not_a_repo_OUTSIDE_any_repo(tmp_path):
+    """The measured-absence half, against real git. A path genuinely not in a
+    work tree comes back `not_a_repo` — and the probe still exits 0, because a
+    missing repo is an ANSWER, not a failure."""
+    home = str(tmp_path / "home")
+    os.makedirs(home)
+    loose = str(tmp_path / "loose")
+    os.makedirs(loose)
+    repo = _r_mkrepo(tmp_path / "ws" / "alpha")
+    paths = [loose, repo]
+    proc, parsed = _r_probe(paths, home, cwd=str(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    idx = sm.build_repo_index(parsed, paths)
+    assert idx[loose] == {"repo": None, "status": "not_a_repo"}
+    # 🔴 THE POSITIVE CONTROL IN THE SAME RUN: a real repo in the same batch
+    # resolves. A probe wired to nothing would answer `not_a_repo` for both.
+    assert idx[repo] == {"repo": "alpha", "status": "ok"}
+
+
+def test_the_real_probe_refuses_to_name_the_OWNING_HOSTS_HOME(tmp_path):
+    """🔴 END TO END, because this guard is what stops every unparented shell
+    from forming a project called `zach`. `$HOME` IS a real repo here and the
+    probe resolves it — the resolver still declines to name it."""
+    home = _r_mkrepo(tmp_path / "home")
+    paths = [home]
+    proc, parsed = _r_probe(paths, home)
+    assert proc.returncode == 0, proc.stderr
+    # the probe DID resolve it, so the refusal below is the resolver's rather
+    # than a failure to measure
+    assert parsed["common_dirs"][home] == os.path.join(home, ".git")
+    assert sm.build_repo_index(parsed, paths)[home] == {"repo": None,
+                                                        "status": "home"}
+    # ...and the mirror image: the SAME directory against a DIFFERENT home is an
+    # ordinary repo. So `home` is a comparison, not a name rule.
+    other = sm.build_repo_index(
+        sm.parse_repo_probe(repo_out(os.path.join(home, ".git"),
+                                     home="/somewhere/else"), paths), paths)
+    assert other[home] == {"repo": os.path.basename(home), "status": "ok"}
+
+
+def test_a_HOSTILE_path_cannot_become_shell_syntax(tmp_path):
+    """🔴 PANE PATHS COME FROM tmux ON A REMOTE MACHINE. They are interpolated
+    into nothing: `sh -c <constant script> <argv0> path...` puts them in `"$@"`.
+
+    The canary is a real file the injected command WOULD create. A probe built
+    by string concatenation creates it; this one must not — and the run must
+    still be a clean `exit 0` with well-formed rows.
+    """
+    home = str(tmp_path / "home")
+    os.makedirs(home)
+    canary = str(tmp_path / "PWNED")
+    hostile = ["/w/a;touch %s" % canary,
+               "/w/b$(touch %s)" % canary,
+               "/w/c`touch %s`" % canary,
+               "/w/d'\"; touch %s; #" % canary,
+               "/w/e\ntouch %s" % canary,
+               "/w/f | touch %s" % canary]
+    repo = _r_mkrepo(tmp_path / "ws" / "alpha")
+    paths = [*hostile, repo]
+    proc, parsed = _r_probe(paths, home, cwd=str(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    assert not os.path.exists(canary), (
+        "a pane path became shell syntax — the probe interpolated it into the "
+        "command instead of passing it as a positional parameter")
+    idx = sm.build_repo_index(parsed, paths)
+    for p in hostile:
+        assert idx[p] == {"repo": None, "status": "not_a_repo"}, p
+    # 🔴 THE POSITIVE CONTROL, IN THE SAME BATCH. Without it, a probe that had
+    # simply died on the first hostile path would satisfy every assertion above
+    # by answering `not_a_repo` for everything.
+    assert idx[repo] == {"repo": "alpha", "status": "ok"}
+
+
+def test_the_probe_script_TEXT_is_a_constant_and_never_holds_a_path():
+    """The structural half of the test above: paths are argv, and the script that
+    ships is the same bytes for every call."""
+    a = sm.repo_probe_argv(["/w/one", "/w/two"])
+    b = sm.repo_probe_argv(["/totally/different"])
+    assert a[:3] == ("sh", "-c", sm.REPO_PROBE_SCRIPT)
+    assert b[:3] == ("sh", "-c", sm.REPO_PROBE_SCRIPT)
+    assert "/w/one" not in sm.REPO_PROBE_SCRIPT
+    # 🔴 `$0` IS CONSUMED BY `sh -c`. Without an explicit argv0 the FIRST PATH
+    # becomes the shell's name and is silently dropped from `"$@"`.
+    assert a[3] == "sm-repo-probe"
+    assert list(a[4:]) == ["/w/one", "/w/two"]
+
+
+def test_the_probe_asks_git_for_the_COMMON_dir_not_the_TOPLEVEL():
+    """🔴 THE ONE FLAG THAT MAKES THIS WORK. `--show-toplevel` returns the
+    WORKTREE on a linked worktree, so it cannot group two worktrees at all —
+    the exact bug rank 21 exists to fix, silently reintroduced. And
+    `--path-format=absolute` is what makes `dirname` name the clone root rather
+    than a relative fragment."""
+    assert "--git-common-dir" in sm.REPO_PROBE_SCRIPT
+    assert "--path-format=absolute" in sm.REPO_PROBE_SCRIPT
+    assert "--show-toplevel" not in sm.REPO_PROBE_SCRIPT
+
+
+def test_ssh_wrap_QUOTES_a_hostile_path_for_the_remote_hop():
+    """The second quoting layer. `ssh_wrap`'s `shlex.join` is what stands between
+    a pane path and the REMOTE shell's parser."""
+    hostile = "/w/a;touch /tmp/PWNED"
+    remote = sm.ssh_wrap(sm.repo_probe_argv([hostile]))[-1]
+    # it round-trips: the remote shell re-splits it into exactly our argv
+    assert shlex.split(remote) == list(sm.repo_probe_argv([hostile]))
+
+
+# --------------------------------------------------------------------------- #
+# §R.4 — 🔴 IT RESOLVES ON THE OWNING HOST. The whole reason for the design.
+# --------------------------------------------------------------------------- #
+def test_the_SAME_path_on_TWO_HOSTS_resolves_from_EACH_HOSTS_OWN_answer():
+    """🔴 THE CONSTRAINT THIS FEATURE IS BUILT AROUND, pinned as a RELATIONSHIP.
+
+    One path string, two hosts, two different repos — because the two machines
+    genuinely have different things at that path. A local `git rev-parse` could
+    not produce this at all: it would give BOTH rows the workbench's answer, or
+    neither. So the assertion is that the two rows DISAGREE, which no
+    single-source implementation can satisfy.
+    """
+    shared = "/home/zach/workspace/thing"
+    panes = f"%1|1|s-wb|1|w|{shared}|claude|t"
+    rep = base_gather(runner=make_runner(
+        local_panes=panes, remote_panes=panes.replace("s-wb", "s-lt"),
+        local_repo=repo_out("/home/zach/workspace/thing/.git"),
+        remote_repo=repo_out("/home/zach/clones/other-name/.git")))
+    wb = rep["hosts"]["workbench"]["windows"][0]
+    lt = rep["hosts"]["laptop"]["windows"][0]
+    assert wb["path"] == lt["path"] == shared
+    assert wb["repo"] == "thing"
+    assert lt["repo"] == "other-name"
+    assert wb["repo"] != lt["repo"], (
+        "both hosts resolved to one name — the probe is not running per host")
+    assert wb["repo_status"] == lt["repo_status"] == "ok"
+
+
+def test_each_hosts_HOME_comes_from_ITS_OWN_sentinel():
+    """🔴 "THE OWNING HOST'S `$HOME`, NOT YOURS." A laptop whose home is
+    `/home/other` must have ITS home compared against ITS paths — using the
+    workbench's would let a laptop `$HOME` shell be published as a project."""
+    panes = "%1|1|s|1|w|/home/other|claude|t"
+    rep = base_gather(runner=make_runner(
+        local_panes="%9|9|s2|1|w|/home/zach|claude|t",
+        local_repo=repo_out("/home/zach/.git", home="/home/zach"),
+        remote_panes=panes,
+        remote_repo=repo_out("/home/other/.git", home="/home/other")))
+    wb = rep["hosts"]["workbench"]["windows"][0]
+    lt = rep["hosts"]["laptop"]["windows"][0]
+    assert (wb["repo"], wb["repo_status"]) == (None, "home")
+    assert (lt["repo"], lt["repo_status"]) == (None, "home")
+    # 🔴 THE MUTATION CONTROL: swap the two homes and both become ordinary
+    # repos. So the `home` verdicts above are a comparison against the sentinel
+    # — not a hardcoded `/home/zach`, and not a refusal to resolve.
+    swapped = base_gather(runner=make_runner(
+        local_panes="%9|9|s2|1|w|/home/zach|claude|t",
+        local_repo=repo_out("/home/zach/.git", home="/home/other"),
+        remote_panes=panes,
+        remote_repo=repo_out("/home/other/.git", home="/home/zach")))
+    assert swapped["hosts"]["workbench"]["windows"][0]["repo"] == "zach"
+    assert swapped["hosts"]["laptop"]["windows"][0]["repo"] == "other"
+
+
+# --------------------------------------------------------------------------- #
+# §R.5 — ONE CALL PER HOST. Not one per path.
+# --------------------------------------------------------------------------- #
+def test_the_probe_is_ONE_batched_call_per_host_over_every_unique_path():
+    """🔴 THE COST CONSTRAINT, MEASURED RATHER THAN ASSERTED. `WINDOW_FORMAT`'s
+    comment records that the pusher already makes up to four ssh calls per run
+    with no ControlMaster; this is the fifth. N round trips for N panes was
+    never acceptable — the box carries ~93 live windows.
+
+    Also asserts the argv is DEDUPED and SORTED: two panes of one window share a
+    cwd, and the workbench fixture has exactly that.
+    """
+    calls = []
+    rep = base_gather(runner=make_runner(calls=calls))
+    probes = [c for c in calls if any(sm.REPO_PROBE_SENTINEL in a for a in c)]
+    assert len(probes) == 2, [c[:2] for c in calls]
+    local = [c for c in probes if c[0] != "ssh"][0]
+    remote = [c for c in probes if c[0] == "ssh"][0]
+    # the local call's paths are the tail of the argv, after `sh -c <script> $0`
+    assert local[4:] == ["/home/zach/tmp", "/home/zach/workspace/repo-alpha"]
+    # 🔴 DEDUPED: WORKBENCH_PANES holds THREE panes, two of which share
+    # `/home/zach/workspace/repo-alpha`.
+    assert len(local[4:]) == len(set(local[4:])) == 2
+    assert len(sm.parse_panes(WORKBENCH_PANES)) == 3
+    # the remote call goes through ssh_wrap, so its paths live inside the joined
+    # command string
+    assert shlex.split(remote[-1])[4:] == ["/home/zach/workspace/naida"]
+    assert rep["hosts"]["workbench"]["repos_paths"] == 2
+    assert rep["hosts"]["laptop"]["repos_paths"] == 1
+
+
+def test_no_repo_makes_ZERO_probe_calls():
+    """The flag is the cost control, so it must remove the round trip — not
+    merely discard the answer."""
+    calls = []
+    base_gather(runner=make_runner(calls=calls), use_repo=False)
+    assert [c for c in calls
+            if any(sm.REPO_PROBE_SENTINEL in a for a in c)] == []
+
+
+def test_a_host_with_no_pane_paths_is_MEASURED_and_makes_no_call():
+    """`{}` and not `None`, the same distinction `captures` draws. We know every
+    pane on this host and none reported a cwd, so there was nothing to ask —
+    calling that `unmeasured` reports a complete enumeration as a failure. And
+    an empty probe would buy a round trip for no paths."""
+    calls = []
+    rep = base_gather(runner=make_runner(
+        calls=calls, remote_panes="%21|1|s|1|w||claude|t"))
+    lt = rep["hosts"]["laptop"]
+    assert lt["repos_measured"] is True
+    assert lt["repos_status"] == "ok"
+    assert (lt["repos_paths"], lt["repos_resolved"]) == (0, 0)
+    assert [c for c in calls
+            if c[0] == "ssh" and sm.REPO_PROBE_SENTINEL in c[-1]] == []
+    # the row still says WHY it has no repo, and it is a fact about the PANE
+    assert lt["windows"][0]["repo"] is None
+    assert lt["windows"][0]["repo_status"] == "no_path"
+
+
+# --------------------------------------------------------------------------- #
+# §R.6 — 🔴 UNMEASURED IS NOT EMPTY. A failed probe must never read as
+#        "these panes are not in repos".
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("kw,host_status", [
+    ({"remote_repo_rc": 1, "remote_repo_err": "ssh: connect timed out"},
+     "error"),
+    ({"remote_repo": "1\t/home/zach/workspace/naida/.git\n"}, "no_sentinel"),
+    ({"remote_repo": ""}, "no_sentinel"),
+    ({"remote_repo": "sh: git: not found\n"}, "no_sentinel"),
+])
+def test_a_failed_probe_is_UNMEASURED_on_every_row_never_not_a_repo(
+        kw, host_status):
+    """🔴 THE SUBSTITUTION THIS REFUSES. A probe that failed, timed out, or came
+    back without its sentinel produces the same empty answer a host of non-repo
+    panes would. Rendering the first as the second publishes "the owning host
+    looked and none of these panes is in a repo" about a look that never
+    happened.
+
+    Note the mirror in the same assertion: the WORKBENCH, whose probe DID
+    answer, still carries a real repo. So this is a per-host verdict, not the
+    run giving up.
+    """
+    rep = base_gather(runner=make_runner(**kw))
+    lt = rep["hosts"]["laptop"]
+    assert lt["repos_measured"] is False
+    assert lt["repos_status"] == host_status
+    assert lt["repos_error"], "an unmeasured host must say WHY"
+    # 🔴 EVERY COUNT IS None, NEVER 0 — a 0 here is a fabricated measurement.
+    assert lt["repos_resolved"] is None
+    assert lt["repos_unparseable"] is None
+    for row in lt["windows"]:
+        assert row["repo"] is None
+        assert row["repo_status"] == "unmeasured", (
+            "a failed probe rendered as a measurement")
+    wb = rep["hosts"]["workbench"]
+    assert wb["repos_measured"] is True
+    assert wb["windows"][0]["repo"] == "repo-alpha"
+
+
+def test_no_repo_reports_SKIPPED_on_the_row_and_the_host_never_not_a_repo():
+    """`--no-repo` means nothing was asked. `skipped` is its own status for the
+    same reason `--no-capture` gets one: "you did not ask" and "asked, found
+    nothing" are different facts."""
+    rep = base_gather(use_repo=False)
+    for host in ("workbench", "laptop"):
+        h = rep["hosts"][host]
+        assert h["repos_measured"] is False
+        assert h["repos_status"] == "skipped"
+        assert h["repos_paths"] is None and h["repos_resolved"] is None
+        assert h["windows"], host
+        for row in h["windows"]:
+            assert (row["repo"], row["repo_status"]) == (None, "skipped")
+
+
+def test_an_unreachable_host_says_the_probe_was_NEVER_ATTEMPTED():
+    """The same reasoning the ledger read uses: a host that did not answer
+    `list-panes` has no measured paths, so a probe could only buy another
+    ConnectTimeout. The reason must SAY the read was not attempted rather than
+    imply it was tried and failed — different facts about the host."""
+    calls = []
+    rep = base_gather(runner=make_runner(calls=calls, remote_rc=255,
+                                         remote_err="ssh: no route to host"))
+    lt = rep["hosts"]["laptop"]
+    assert lt["repos_measured"] is False
+    assert lt["repos_status"] == "unmeasured"
+    assert "not attempted" in lt["repos_error"]
+    assert [c for c in calls
+            if c[0] == "ssh" and sm.REPO_PROBE_SENTINEL in c[-1]] == []
+
+
+def test_a_MEASURED_host_publishes_real_counts():
+    """The other side of every None above. When it IS measured the integers are
+    real, and `repos_resolved` counts only the `ok` rows."""
+    wb = base_gather()["hosts"]["workbench"]
+    assert wb["repos_measured"] is True
+    assert wb["repos_status"] == "ok"
+    assert wb["repos_error"] is None
+    # two unique paths; one is `/home/zach/tmp`, which is not a repo
+    assert (wb["repos_paths"], wb["repos_resolved"]) == (2, 1)
+    assert wb["repos_unparseable"] == 0
+    by_path = {r["path"]: r for r in wb["windows"]}
+    assert by_path["/home/zach/tmp"]["repo"] is None
+    assert by_path["/home/zach/tmp"]["repo_status"] == "not_a_repo"
+    assert by_path["/home/zach/workspace/repo-alpha"]["repo"] == "repo-alpha"
+
+
+# --------------------------------------------------------------------------- #
+# §R.7 — the field reaches the WIRE, in both views, and the flag reaches gather
+# --------------------------------------------------------------------------- #
+def test_repo_and_repo_status_survive_the_LEAN_projection():
+    """🔴 THE PRODUCER'S FIELD LIST IS WHAT ACTUALLY SHIPS THE KEY. The Go
+    decoder is permissive — an absent `repo` decodes to `""` and `projectOf()`
+    silently falls back to the path leaf, which IS the pre-change behaviour. So
+    a `repo` computed and then dropped by the lean projection is an INERT
+    feature that looks shipped."""
+    assert "repo" in sm.LEAN_ROW_FIELDS
+    assert "repo_status" in sm.LEAN_ROW_FIELDS
+    lean = lean_of(base_gather())
+    row = lean["hosts"]["workbench"]["windows"][0]
+    assert row["repo"] == "repo-alpha"
+    assert row["repo_status"] == "ok"
+    assert "repo" in lean["lean_row_fields"]
+    # the host-level discriminant rides along, or a lean reader cannot tell a
+    # host of nulls from a host nobody probed
+    assert lean["hosts"]["workbench"]["repos_measured"] is True
+    assert lean["hosts"]["workbench"]["repos_status"] == "ok"
+
+
+def test_repo_is_JSON_SERIALISABLE_and_present_on_every_row():
+    """The wire, end to end: whatever `--json` writes is what clawgate ingests."""
+    blob = json.loads(json.dumps(base_gather(), default=str))
+    rows = [r for h in blob["hosts"].values() for r in h["windows"]]
+    assert rows, "fixture produced no rows"
+    for r in rows:
+        assert "repo" in r and "repo_status" in r
+        assert r["repo_status"] in sm.REPO_STATUSES
+        # `repo` is a name ONLY on `ok`; every other status carries a null
+        assert (r["repo"] is not None) == (r["repo_status"] == "ok"), r
+
+
+def test_the_flag_reaches_gather_and_the_probe_is_ON_by_default():
+    """🔴 A flag parsed and never passed is the shape that ships an inert
+    feature — the same wiring guard `--pane-preview` carries. And `use_repo`
+    must default to TRUE: the point of rank 21 is that the field IS published,
+    so an opt-in would ship the seam dead a second time."""
+    import inspect
+    assert inspect.signature(sm.gather).parameters["use_repo"].default is True
+    p = sm.build_parser()
+    assert p.parse_args(["scan", "--json"]).no_repo is False
+    assert p.parse_args(["scan", "--json", "--no-repo"]).no_repo is True
+    with open(_SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "use_repo=not args.no_repo" in src, (
+        "main() does not pass the flag through to gather()")
+
+
+def test_fold_windows_takes_the_index_PER_HOST_not_globally():
+    """The seam, pinned structurally. A single module-level index would be the
+    exact bug this feature exists to avoid — one host's answers applied to the
+    other host's paths."""
+    import inspect
+    params = inspect.signature(sm.fold_windows).parameters
+    assert params["repo_index"].default is None
+    assert params["repo_status"].default == "unmeasured"
+    with open(_SCRIPT, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "repo_index=repo_index.get(host)" in src
