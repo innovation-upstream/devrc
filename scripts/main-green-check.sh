@@ -45,9 +45,19 @@
 # A deadman wired to the tier that emits those would toast on them, and
 # `claude/RULES.md` is explicit that a permanently-red gate is WORSE than no gate
 # because it trains everyone to click through. So this uses the hermetic tier.
-# ⚠ HONESTLY SCOPED: the sandbox runs on the same box and is NOT proven immune to
-# load — it was green under that load ONCE. The retry below is what covers the
-# case where it is not, and a FLAKE verdict is reported rather than hidden.
+# ⚠ HONESTLY SCOPED, AND NOW MEASURED THE OTHER WAY TOO: the sandbox runs on the
+# same box and is NOT immune to load. On 2026-09-03 at load 48 a sandbox run of
+# this very branch failed `test_live_cotenants_does_not_count_this_process` — a
+# test in a family already recorded as flaky, in a subsystem this branch does not
+# touch. The discriminator was wall time, per claude/RULES.md: FIVE untouched
+# targets inflated 11x-20x against the previous passing run of the same tree
+# (task-spec-drafter 4.4s->89.6s, validation 4.6s->81.3s, repo-cos 2.4s->39.6s),
+# while the target that actually failed moved only 1.2x. Load inflates EVERY
+# target; a failed assertion inflates exactly one.
+# 🔴 SO THE RETRY BELOW IS LOAD-BEARING, NOT BELT-AND-BRACES. The hermetic tier
+# is much better than the dev-host one here, not perfect, and a deadman wired to
+# a single hermetic run WOULD have toasted on that. One retry plus a FLAKE
+# verdict that is reported rather than hidden is what makes it usable.
 #
 # ── HOW IT AVOIDS BEING EXPENSIVE ─────────────────────────────────────────────
 # MEMOIZED ON THE SHA. A verdict is recorded against the exact commit it was
