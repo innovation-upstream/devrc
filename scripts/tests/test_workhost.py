@@ -1000,10 +1000,36 @@ def test_workhost_is_deployed_by_home_manager():
 
 def test_workhost_is_tracked_by_git():
     """The flake silently omits an untracked file, so a green switch can still
-    ship nothing."""
-    r = subprocess.run(
-        ["git", "-C", str(REPO), "ls-files", "--error-unmatch", "scripts/workhost"],
-        capture_output=True,
-        text=True,
-    )
-    assert r.returncode == 0, "scripts/workhost is not git-tracked: %s" % r.stderr
+    ship nothing.
+
+    🔴 NOT a skipif, and NOT one assertion. This suite runs in TWO TIERS and they
+    are blind in opposite directions: the dev shell has the repo's `.git`, the
+    nix sandbox does not (its source is copied in, so `git -C REPO ls-files`
+    exits 128 `not a git repository`). An earlier version asserted only the git
+    form; it was green in the dev shell and RED in CI, which is precisely the
+    failure this file is supposed to be able to see rather than suffer.
+
+    So each tier asserts the strongest claim IT can make, and neither is vacuous:
+
+    * `.git` present  -> ask git directly whether the path is tracked.
+    * `.git` absent   -> we are inside the sandbox, whose source came from the
+      flake. The flake copies TRACKED files only, so the file being HERE AT ALL
+      is the tracked-ness proof for this tier. An untracked `scripts/workhost`
+      would simply not exist in the sandbox and this arm goes red.
+    """
+    has_git_metadata = (REPO / ".git").exists()
+
+    if has_git_metadata:
+        r = subprocess.run(
+            ["git", "-C", str(REPO), "ls-files", "--error-unmatch", "scripts/workhost"],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, (
+            "scripts/workhost is not git-tracked, so the flake will omit it and a "
+            "green `home-manager switch` would ship nothing: %s" % r.stderr)
+    else:
+        assert WORKHOST.is_file(), (
+            "scripts/workhost is absent from a checkout with no .git — i.e. from "
+            "the nix sandbox, whose source is the flake's TRACKED-files-only copy. "
+            "That means the file is untracked and the flake dropped it.")
