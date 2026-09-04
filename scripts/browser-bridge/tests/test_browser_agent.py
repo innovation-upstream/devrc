@@ -20,6 +20,7 @@ Run: nix-shell -p python312Packages.pytest --run "pytest scripts/browser-bridge/
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -502,8 +503,11 @@ def rig(tmp_path):
     # degraded path deletes `rig.oc_config_dir` first.
     _prewarm_oc_config(oc_config_dir, focode)
 
-    def run(args, mode="ok", extra_env=None, timeout=RUN_TIMEOUT, open_fail=False,
-            tabid=TAB_ID, probe_fail=0, stall_cap=None):
+    def _rig_env(mode="ok", extra_env=None, open_fail=False,
+                 tabid=TAB_ID, probe_fail=0):
+        """The rig's environment, extracted so `run` and `spawn` cannot drift.
+        Behaviour-preserving: `run` called this exact block inline before.
+        """
         env = dict(os.environ)
         env.update(
             BROWSER_AGENT_OPENCODE=str(focode),
@@ -528,6 +532,28 @@ def rig(tmp_path):
             env["FRB_OPEN_FAIL"] = "1"
         if extra_env:
             env.update(extra_env)
+        return env
+
+    def spawn(args, mode="ok", extra_env=None, open_fail=False,
+              tabid=TAB_ID, probe_fail=0):
+        """Start the wrapper and hand back the Popen, still running.
+
+        🔴 `start_new_session=True` puts it in its OWN process group, so a
+        test can `killpg` it exactly the way this script's own `--timeout`
+        path does — and, critically, WITHOUT signalling pytest itself.
+        A bare TERM to the wrapper is DEFERRED while bash sits in a
+        foreground command, so the group kill is the only faithful one.
+        The caller owns the process and must reap it.
+        """
+        return subprocess.Popen(
+            [str(WRAPPER), *args],
+            env=_rig_env(mode, extra_env, open_fail, tabid, probe_fail),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True)
+
+    def run(args, mode="ok", extra_env=None, timeout=RUN_TIMEOUT, open_fail=False,
+            tabid=TAB_ID, probe_fail=0, stall_cap=None):
+        env = _rig_env(mode, extra_env, open_fail, tabid, probe_fail)
         # Wait on the DETERMINISTIC condition — the process exited — and use the
         # clock only to decide whether "still running" means "hung". `communicate`
         # (unlike `subprocess.run`) does NOT kill the child on expiry, so we can
@@ -576,6 +602,7 @@ def rig(tmp_path):
     rig.oc_config_dir = oc_config_dir
     rig.opencode_bin = focode
     rig.run = run
+    rig.spawn = spawn
     return rig
 
 
@@ -1470,132 +1497,86 @@ def test_the_condition_poll_also_extends_on_a_stalled_machine(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The ORPHANED warm lock — a holder that was KILLED, not one that is working.
+# The warm lock is RELEASED when a run is killed.
 #
-# 🔴 WHY THESE EXIST. `_oc_lock` has always stolen a stale lock, but only after
-# spending the FULL `OC_LOCK_BUDGET` (default `OC_WARM_TIMEOUT + 30` = ~120 s),
-# because nothing recorded WHO held it: an orphan was indistinguishable from a
-# live holder. MEASURED 2026-09-03 on the workbench — a killed run left the
-# directory behind and the next `browser-agent --dry-run` was still stalled at
-# 300 s. Two costs, and the second is the one that wasted a day: the lock is
-# MACHINE-GLOBAL, so one orphan made a CONCURRENT agent's unrelated branch fail
-# its suite, and re-running the same test on `origin/main` reproduced it —
-# which reads as "main is broken" and is not.
+# 🔴 THE DEFECT. `_oc_lock` takes a machine-global `mkdir` mutex at
+# `~/.cache/browser-agent-opencode-config.lock` and released it only on the
+# normal path. The script's `trap _cleanup_all EXIT INT TERM` is installed ~100
+# lines BELOW the call site that holds it, so the whole bootstrap window ran
+# with NO handler — and `_cleanup_all` never touched the lock anyway. A run
+# killed there (the common case: this script's own `--timeout` process-group
+# kill, or a Ctrl-C) orphaned the directory, and every LATER run then paid the
+# full `OC_LOCK_BUDGET` (~120 s) before the blind steal could clear it.
 #
-# The fix records the holder's pid inside the lock and steals on the FIRST pass
-# when that pid is dead. These tests pin the DISCRIMINATION, not just the steal:
-# a fast steal that cannot tell a live holder from a dead one is a broken lock,
-# not a fixed one.
+# MEASURED 2026-09-03: an orphan left the next `browser-agent --dry-run` still
+# stalled at 300 s, presenting as a hang with no message — and because the lock
+# is machine-global it made a CONCURRENT agent's unrelated suite fail, which
+# reproduced on `origin/main` and read as "main is broken".
+#
+# ⚠ SCOPE: a SIGKILL runs no trap, so it still orphans the lock. Detecting that
+# needs the holder's identity in the lock, and the naive version is UNSAFE —
+# two contenders that both judge the holder dead BOTH acquire (reproduced).
+# Deliberately out of scope here; it wants an atomic primitive, not a pid file.
 # ---------------------------------------------------------------------------
 
 
-def _reaped_pid() -> int:
-    """A pid that is certainly dead AND reaped (so `kill -0` fails)."""
-    p = subprocess.Popen([sys.executable, "-c", ""])
-    p.wait()
-    return p.pid
+def test_a_run_killed_mid_bootstrap_RELEASES_the_warm_lock(rig):
+    """🔴 REGRESSION. Red at base: with no handler armed at acquisition, the
+    lock directory survives the kill and every later run pays the full budget.
 
-
-def test_an_orphaned_lock_with_a_dead_holder_is_stolen_without_waiting(rig):
-    """🔴 THE HEADLINE. Budget is set LONG (120 s) on purpose: with the old code
-    the run cannot finish until it expires, so the rig's own deadline fails the
-    test. Passing therefore proves the steal happened on the FAST path — no
-    clock assertion, no flake, and the two outcomes are separated by ~2 minutes
-    rather than by milliseconds.
-
-    Red at base: the run never completes inside the rig deadline."""
+    The kill is a PROCESS-GROUP TERM because that is what this script's own
+    `--timeout` path sends, and because a bare TERM to the wrapper is DEFERRED
+    while bash sits in a foreground command — measured, and it is why an
+    earlier version of this test observed no release and looked like a code
+    defect when it was a signalling one."""
     shutil.rmtree(rig.oc_config_dir)
     rig.oc_config_dir.mkdir()
     lock = Path(str(rig.oc_config_dir) + ".lock")
-    lock.mkdir()
-    (lock / "pid").write_text(f"{_reaped_pid()}\n")
 
-    r = rig.run(["read the page"], mode="ok",
-                extra_env={"BROWSER_AGENT_LOCK_BUDGET": "120"})
-
-    assert r.returncode == 0, r.stderr
-    assert (rig.oc_config_dir / "opencode.jsonc").exists(), (
-        "the dead holder's lock was not stolen, so the bootstrap never ran — "
-        "this is the ~120 s stall the pid file exists to remove")
-    assert "warm-lock-refused" not in r.stderr, (
-        f"a dead holder must not produce ANY refusal token: {r.stderr}")
-
-
-def test_a_lock_whose_holder_is_ALIVE_is_not_stolen_on_the_fast_path(rig):
-    """INVARIANT GUARD — it passes at base too, so it is NOT regression coverage.
-    Measured: green at `aba48864` (no pid check exists there, so a live holder is
-    waited for anyway) and green at HEAD. It is kept because it guards the FIX,
-    not the bug: mutating `_oc_lock_holder_is_dead` to `return 0` (always "dead")
-    turns it RED with this assertion, so it is reachable and non-vacuous.
-
-    🔴 THE DISCRIMINATOR, and the reason the test above is not sufficient.
-    A steal that fires regardless of the pid would pass the headline test while
-    destroying the mutual exclusion the lock exists to provide — two runs would
-    `rm -rf` node_modules under each other, the exact corruption `_oc_lock`
-    was written to prevent.
-
-    A LIVE holder must fall through to the ordinary wait. The budget is short so
-    the run still finishes; what is asserted is that the blind end-of-budget
-    steal is what took it — the elapsed floor — never the pid fast path.
-
-    🔴 THE FLOOR IS DELIBERATELY BELOW THE BUDGET. bash's `SECONDS` is an
-    INTEGER that ticks on wall-clock second boundaries, so `deadline=$((SECONDS+N))`
-    can elapse in as little as N-1 seconds of real time. Asserting `>= budget`
-    is an expectation derived from READING the code rather than from what it can
-    do, and it fails ~1 run in 1 (measured: 2.7 s against a 3 s budget). The
-    floor only has to separate "waited" from "stole instantly" (~0.5 s), so a
-    5 s budget with a 3 s floor leaves ~2 s of margin on both sides.
-    """
-    shutil.rmtree(rig.oc_config_dir)
-    rig.oc_config_dir.mkdir()
-    lock = Path(str(rig.oc_config_dir) + ".lock")
-    lock.mkdir()
-    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    proc = rig.spawn(["read the page"], mode="ok")
     try:
-        (lock / "pid").write_text(f"{holder.pid}\n")
-        started = time.monotonic()
-        r = rig.run(["read the page"], mode="ok",
-                    extra_env={"BROWSER_AGENT_LOCK_BUDGET": "5"})
-        elapsed = time.monotonic() - started
+        _await(lambda: lock.is_dir(), what="the wrapper to take the warm lock",
+               slice_s=15.0, poll=0.02)
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        proc.wait(timeout=30)
     finally:
-        holder.kill()
-        holder.wait()
+        if proc.poll() is None:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait(timeout=10)
 
-    assert r.returncode == 0, r.stderr
-    assert elapsed >= 3.0, (
-        f"took {elapsed:.1f}s for a 5s budget — a LIVE holder's lock was stolen "
-        "on the fast path, so the pid check cannot tell live from dead")
+    assert not lock.exists(), (
+        "the warm lock survived a process-group TERM — every later run now pays "
+        "the full OC_LOCK_BUDGET before the blind steal can clear it, which is "
+        "the ~120 s stall this change removes")
 
 
-def test_a_lock_with_NO_pid_file_is_not_stolen_on_the_fast_path(rig):
-    """INVARIANT GUARD — green at base `aba48864` and at HEAD, so not regression
-    coverage. Kept because it kills the same `_oc_lock_holder_is_dead -> return 0`
-    mutant with its own assertion.
+def test_the_release_handler_EXITS_rather_than_resuming(rig):
+    """🔴 THE REGRESSION THE FIX ITSELF COULD INTRODUCE, and it is not
+    theoretical: a bash trap handler runs and then execution RESUMES (measured
+    on 5.3.15). A handler that only released the lock would turn a TERM during
+    the warm into "released the lock and carried on bootstrapping UNSERIALISED"
+    — the exact corruption the lock exists to prevent — and would also make
+    `browser agent` un-interruptible in that window.
 
-    🔴 THE RACE THE FAST PATH MUST NOT WIN. Between another run's `mkdir` and
-    its `echo $$` the lock exists with no pid file. Reading "no pid" as "dead"
-    would steal a lock whose holder is moments from using it. Absent ⇒ wait,
-    which is the pre-existing behaviour and the safe one.
-
-    🔴 THE FLOOR IS DELIBERATELY BELOW THE BUDGET. bash's `SECONDS` is an
-    INTEGER that ticks on wall-clock second boundaries, so `deadline=$((SECONDS+N))`
-    can elapse in as little as N-1 seconds of real time. Asserting `>= budget`
-    is an expectation derived from READING the code rather than from what it can
-    do, and it fails ~1 run in 1 (measured: 2.7 s against a 3 s budget). The
-    floor only has to separate "waited" from "stole instantly" (~0.5 s), so a
-    5 s budget with a 3 s floor leaves ~2 s of margin on both sides.
-    """
+    INVARIANT GUARD, not regression coverage: at base there is no handler at
+    all, so TERM uses the default disposition and the process dies. Green both
+    sides. It is kept because it is the only thing that fails when the handler
+    stops exiting — dropping `exit 143` leaves every other test green."""
     shutil.rmtree(rig.oc_config_dir)
     rig.oc_config_dir.mkdir()
     lock = Path(str(rig.oc_config_dir) + ".lock")
-    lock.mkdir()  # no pid file — mid-acquisition by someone else
 
-    started = time.monotonic()
-    r = rig.run(["read the page"], mode="ok",
-                extra_env={"BROWSER_AGENT_LOCK_BUDGET": "5"})
-    elapsed = time.monotonic() - started
+    proc = rig.spawn(["read the page"], mode="ok")
+    try:
+        _await(lambda: lock.is_dir(), what="the wrapper to take the warm lock",
+               slice_s=15.0, poll=0.02)
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        rc = proc.wait(timeout=30)
+    finally:
+        if proc.poll() is None:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait(timeout=10)
 
-    assert r.returncode == 0, r.stderr
-    assert elapsed >= 3.0, (
-        f"took {elapsed:.1f}s for a 5s budget — a lock with no pid file was "
-        "stolen immediately, which races a holder that has not written its pid yet")
+    assert rc != 0, (
+        f"exited {rc} after a TERM — the handler released the lock and let the "
+        "run CONTINUE unserialised instead of terminating")
