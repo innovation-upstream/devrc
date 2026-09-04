@@ -184,6 +184,56 @@ def bridge(tmp_path):
         srv.server_close()
 
 
+def _run_beside_stub_agent(bridge, tmp_path, tag, *args):
+    """Run a COPY of the real CLI beside a STUB `browser-agent` that ECHOES the
+    goal it was handed, and refuses exactly as the real one does when handed none.
+
+    🔴 WHY A STUB, when these two cases used the real wrapper for a year: the real
+    `browser-agent` WARMS an isolated opencode config dir (bounded by
+    BROWSER_AGENT_WARM_TIMEOUT, default 90 s) and then runs a REAL model session
+    (bounded by its own --timeout, default 120 s). Under a pytest tmp_path HOME the
+    warm cache is cold on EVERY test, and the warm needs network to npm-install
+    @opencode-ai/plugin, so it burns the full 90 s every time. MEASURED 2026-09-04
+    via --durations: these two cases cost 155.98 s and 234.22 s while the other 51
+    in this file cost ~0.5 s each. Against this file's CLI_TIMEOUT_S of 300 s that
+    left a 66 s margin, and CI load erased it — `test_the_free_text_list_covers_
+    agent_too` died in the devrc-pytests gate as a bare subprocess.TimeoutExpired
+    with NO assertion ever executed, which reads as a code failure and is not one.
+
+    Nothing in either case is about browser-agent's BEHAVIOUR. Both ask what the
+    `browser` CLI FORWARDS — a question a stub answers exactly, and instantly.
+
+    🔴 The stub ECHOES the goal so the assertion can be POSITIVE. The original pair
+    asserted only that two error strings were ABSENT, which is the shape that needs
+    a separate positive control to be worth anything (see
+    test_POSITIVE_CONTROL_the_missing_goal_error_is_producible, which still drives
+    the REAL wrapper — it costs 9 ms now that argument validation runs before the
+    warm block). Asserting the goal ARRIVED tests the same discriminator directly
+    and cannot rot if the wrapper's wording changes.
+    """
+    stub_dir = tmp_path / f"stub-{tag}"
+    stub_dir.mkdir()
+    (stub_dir / "browser").write_text(CLI.read_text(encoding="utf-8"),
+                                      encoding="utf-8")
+    # write_exec, NOT a hand-written shebang — see the note on the BB_* stubs below:
+    # `#!/usr/bin/env bash` does not exist in the nix build sandbox.
+    mockbin.write_exec(stub_dir / "browser-agent", r'''goal=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --instance|--allow-domains|--deny-domains|--steps|--timeout) shift ;;
+    --*) : ;;
+    *) goal="$1" ;;
+  esac
+  shift
+done
+[ -n "$goal" ] || { printf 'browser-agent: a goal is required: browser agent "<goal>"\n' >&2; exit 2; }
+printf 'STUB_GOAL=[%s]\n' "$goal"
+''')
+    return subprocess.run(["bash", str(stub_dir / "browser"), *args],
+                          env=bridge.env_for_stub(), capture_output=True,
+                          text=True, timeout=CLI_TIMEOUT_S)
+
+
 # --------------------------------------------------------------------------- #
 # It routes — and routes to EXACTLY what it names
 # --------------------------------------------------------------------------- #
@@ -497,7 +547,7 @@ def test_POSITIVE_CONTROL_the_missing_goal_error_is_producible(bridge):
         f"assertions below are vacuous. stderr was: {r.stderr!r}")
 
 
-def test_the_free_text_list_covers_agent_too(bridge):
+def test_the_free_text_list_covers_agent_too(bridge, tmp_path):
     """A TRAILING bw:// is a GOAL for `agent`, not a route.
 
     Dropping `agent` from REF_FREE_TEXT_SUBCOMMANDS SURVIVED an audit's mutation
@@ -507,7 +557,14 @@ def test_the_free_text_list_covers_agent_too(bridge):
     routing and the agent is left with NO goal at all — which it refuses by name,
     before any network work.
     """
-    r = bridge.run("agent", "--dry-run", CANONICAL)
+    r = _run_beside_stub_agent(bridge, tmp_path, "free-text", "agent",
+                               "--dry-run", CANONICAL)
+    # POSITIVE: the reference must ARRIVE as the goal. This is the discriminator
+    # the docstring describes, asserted directly rather than via two absences.
+    assert f"STUB_GOAL=[{CANONICAL}]" in r.stdout, (
+        "the trailing reference did not reach browser-agent as the goal; "
+        f"stdout={r.stdout!r} stderr={r.stderr!r}")
+    # The original absence assertions are KEPT: they are what regressed before.
     assert "a goal is required" not in r.stderr, (
         "the trailing reference was consumed as a route, leaving no goal: "
         + r.stderr)
@@ -648,7 +705,7 @@ def test_agent_refuses_a_tab_from_ANY_source(bridge, argv, env, source):
     assert bridge.bodies == [], f"nothing may be dispatched: {bridge.bodies}"
 
 
-def test_agent_without_any_tab_is_untouched(bridge):
+def test_agent_without_any_tab_is_untouched(bridge, tmp_path):
     """INVARIANT GUARD: the refusal is scoped to a ROUTING VARIABLE, not to `agent`.
 
     A guard widened onto the subcommand rather than the state would break the
@@ -660,7 +717,11 @@ def test_agent_without_any_tab_is_untouched(bridge):
     instance`) that had identical input and the same two assertions, differing
     only in its failure text.
     """
-    r = bridge.run("--instance", "main", "agent", "--dry-run", "do a thing")
+    r = _run_beside_stub_agent(bridge, tmp_path, "no-tab", "--instance", "main",
+                               "agent", "--dry-run", "do a thing")
+    assert "STUB_GOAL=[do a thing]" in r.stdout, (
+        "the documented way to run the agent stopped forwarding its goal; "
+        f"stdout={r.stdout!r} stderr={r.stderr!r}")
     assert "agent cannot honour" not in r.stderr, r.stderr
     assert "a goal is required" not in r.stderr, r.stderr
 
