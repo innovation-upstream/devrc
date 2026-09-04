@@ -4,7 +4,8 @@
 about to act on civitai.com **as a particular user** · you need to know WHICH
 account a Brave profile holds · a `/apps` read looks empty, stale, or shows
 entries that 404 · you are about to conclude civitai "leaked scope" or "is
-broken" from a browser read.
+broken" from a browser read · you are checking whether a change that shipped in
+the last hour is live (read `buildId` — a negative read mid-rollout is worthless).
 
 Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
 Mechanism files stay authoritative for mechanism: throttling and `wake` →
@@ -179,6 +180,51 @@ Cards arrive via tRPC, and a hidden tab is throttled (mechanism:
 Use `document.body.innerText.length` as a **sanity floor** — about **221 chars**
 means the page shell rendered and the content did **not**. Assert the floor;
 never read an empty rail as "this account has no apps".
+
+## 🔴 Verifying a just-shipped change: read `buildId`, or a NEGATIVE read is worthless
+
+**Load this before concluding a newly-released feature "isn't live yet".**
+
+dp-prod rolls with `maxUnavailable: 0` and warmup-gated readiness, so for
+**minutes to tens of minutes** after a promotion the SSR pool serves BOTH images
+at once. Measured 2026-09-04: 159 → 35 pods still on the old image over the ~12
+min following promotion, and still not drained when the check ended.
+
+That window has an asymmetry which is easy to miss:
+
+- a **positive** read (the new behaviour is present) is conclusive the instant it
+  appears — only the new code can produce it;
+- a **negative** is NOT. *"The feature is correctly off for this input"* and
+  *"this request hit a still-serving old pod"* explain it equally well, and
+  nothing on the page distinguishes them.
+
+Measured harm: `/apps/run/sensei` returned a bare iframe `src` **twice** before
+returning the init fragment on the third try. Either of the first two, reported,
+is a false regression against a feature that was already working.
+
+**The discriminator is one field, read in the SAME expression as your
+measurement** — `window.__NEXT_DATA__.buildId`. Two different values across reads
+IS the mixed fleet, observed rather than inferred:
+
+```bash
+BB=~/workspace/devrc/scripts/browser-bridge/browser
+$BB --instance work --tab "$TAB" js '(function(){var f=document.querySelector("iframe");var s=f?f.getAttribute("src"):null;return JSON.stringify({build:(window.__NEXT_DATA__||{}).buildId,frag:s&&s.indexOf("civitai-block=v1")>-1,src:s})})()'
+```
+
+An absence carrying the **new** buildId is a fact about the feature; one carrying
+the **old** buildId is a fact about pod scheduling. Retry until the buildId is the
+new one, rather than waiting out the whole drain — that is what let three negative
+controls close while the roll was still less than half done.
+
+🔴 **And validate the instrument before believing any negative: find an input
+that is ALREADY live on the old image and assert your read sees it there.** For
+the App Blocks init fragment that was `app-requests` — allowlisted a release
+earlier, so it carries the fragment on *both* images, which proves the read
+technique works independently of the rollout under test. Without such a control,
+*"I saw nothing"* is indistinguishable from *"my selector was wrong"*.
+
+Generalises past App Blocks: it applies to any civitai.com read taken to confirm
+a change that shipped in the last hour.
 
 ## Selectors on civitai
 

@@ -1471,6 +1471,27 @@ PINNED_PATH_CLOBBERS = {
         "condition at all. 🔴 It removes python3 and everything else — the test "
         "asserts only the hook's exit status and that the message file is "
         "byte-identical, both of which are independent of what else is on PATH"),
+    "test_session_manager.py": (
+        '"PATH"' + ': binp, "HOME": home',
+        "session-manager's repo probe guards its own `git`/`timeout` absence, "
+        "and three §R tests measure what it does when one of them is genuinely "
+        "missing on the OWNING host: `git` gone (the record must carry rc 127 "
+        "and land in the per-path `unmeasured`, never the MEASURED "
+        "`not_a_repo`), `timeout` gone (the host must still resolve its repos "
+        "rather than lose the field), and a hung `git` WITH `timeout` present "
+        "(the per-path bound must hold). 🔴 REPLACING is required to reach any "
+        "of those: both binaries are present on the dev host AND inside the "
+        "sandbox, so no amount of PREPENDING can make one unfindable and a "
+        "prepending version would measure the environment instead of the "
+        "script. All three go through ONE helper, `_r_path_only`, so this "
+        "single needle covers every site rather than pinning whichever the "
+        "scan reaches first. The directory is CONSTRUCTED by `_r_only_bin` in "
+        "tmp_path — one symlink per NAMED tool, and it asserts its own "
+        "contents are exactly that set — so it holds at most {sh, timeout, "
+        "git} plus a fake `git` written by `testlib.mockbin.write_exec`. No "
+        "HAZARD_VOCABULARY name is reachable through it: no systemd-run, "
+        "systemctl, notify-send, rofi, yad, xdotool, i3-msg, openrgb, espanso, "
+        "home-manager or nixos-rebuild"),
     "test_rig_control.py": (
         '"PATH"' + ': "/usr/bin/false"',
         "deliberately makes yad unfindable; /usr/bin/false holds no binaries, so "

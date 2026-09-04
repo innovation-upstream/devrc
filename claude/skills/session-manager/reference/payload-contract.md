@@ -22,6 +22,7 @@ _Moved verbatim out of `SKILL.md` on 2026-08-21, when the body was cut from 23,2
 | `--pane-preview` | publish each Claude pane's **visible screen** as `pane_preview`. Costs no extra tmux work (the capture already runs — `waiting`/`unsent` are derived from it and it used to throw the screen away), but makes the document **2.63x** larger: measured live back to back, 122,731 B without / 322,204 B with. Off by default for that reason; `--lean` drops it, so do not pass both |
 | `--fuzzyclaw` / `--no-fuzzyclaw` | the task-file join is **OFF by default** (see below) |
 | `--no-ledger` | skip the per-host agent-ledger read. Rows then have **no age and no session id** — the #419 view, reproducible on demand |
+| `--no-repo` | skip the per-host repo probe (one batched `sh -c` per host, the FIFTH ssh call). Every row's `repo` becomes `null` with `repo_status: **skipped**` and every per-host `repos_*` count becomes `null` — never `not_a_repo`, never `0`. This is the cost control for the probe; the field is otherwise ON by default |
 | `--plain` | `tail` only: strip ANSI at the source instead of `sed`-ing it out |
 | `--stale-threshold <secs>` | default 3600; `age >= threshold` is stale |
 | `--lines N` | `tail` scrollback depth (default 100) |
@@ -226,6 +227,86 @@ a chord; run it through the rule above (or read `--json`) before quoting it to a
 repo resolve to the SAME label, so quote both. New non-scratch sessions get a real tmux name
 at creation from `scripts/tmux-autoname-session.sh`; `label` is what covers the ones that
 predate it.
+
+## 🔴 `repo` — the PROJECT key, and it is not `label`
+
+`label` answers "where is this" for an OPERATOR (the leaf of the cwd, or a codename).
+`repo` answers "which project is this" for a CONSUMER: the **MAIN CLONE** of the pane's
+cwd, so **every linked worktree of a repo carries ONE name**. That is a thing no string
+operation on `path` can produce — a worktree called `clawgate-extension` is a worktree of
+`homelab-talos`, and `ht-r11-930492` is not derivable from `homelab-talos` at all.
+
+Its consumer is clawgate's tmux page, whose `projectOf()` prefers `repo` when non-empty,
+falls back to the LEAF of `path`, then to `Other`. Before this field existed the leaf won
+every time, so each worktree formed its own project group.
+
+🔴 **IT IS RESOLVED ON THE HOST THAT OWNS THE DIRECTORY**, by one batched `sh -c` per host
+over the same SSH transport as the tmux calls — `git rev-parse --path-format=absolute
+--git-common-dir`, whose parent directory is the main clone. Roughly half these rows come
+off the laptop, and a LOCAL `git rev-parse` would answer about whatever happens to sit at
+that path on the workbench, or about nothing. `--show-toplevel` is the wrong flag: on a
+linked worktree it returns the worktree itself, so it cannot group two worktrees at all.
+
+🔴 **`repo_status` IS WHAT MAKES A NULL `repo` READABLE.** Never read a null as "not in a
+repo" without it:
+
+| `repo_status` | means |
+|---|---|
+| `ok` | resolved; `repo` names the main clone. The ONLY status carrying a name. |
+| `not_a_repo` | MEASURED: `git` ANSWERED for this path and what it answered does not name a clone. 🔴 **TWO exit statuses reach it, not one** — **128** (git: not in a work tree) *and* **0 with a common dir whose parent is not a clone root** (empty, a bare repo `/srv/foo.git`, a submodule `<super>/.git/modules/<n>`); naming those would publish a confident wrong group, so they fail soft here. This cell used to say it "requires" 128, which contradicted its own parenthetical and was measured false. What it excludes is a **failure** to measure: until 2026-09-04 `git` timing out, `git` absent or an unknown flag arrived here too, so a real repo could read as a measured absence. |
+| `home` | MEASURED and deliberately withheld: the main clone IS the owning host's `$HOME`. `projectOf()` routes an unparented shell to `Other`, and `repo` is the branch it PREFERS, so a name here would override that guard. |
+| `no_path` | the pane reported no cwd. |
+| `missing` | the probe answered for this host but not for this path — a partial reply, or a record refused because it carried a character `str.splitlines()` would treat as a line break. 🔴 Such a record also **poisons every record after it**: once a non-`\n` line break is inside a record, no later boundary in that reply is knowable, so the rest of the host's paths are `missing` too. Honest and bounded — never a wrong name. |
+| `unmeasured` | **nobody looked.** TWO granularities, and both are real: the whole HOST's probe failed / timed out / came back without its sentinel, **or** THIS path's `git` exited non-zero for a reason that is not 128 — the per-path `timeout` fired (124), `git` is not installed (127), the flag is unsupported (129), or the probe itself **refused to transmit** a common dir containing a newline (**201**, `REPO_PROBE_RC_NEWLINE` — see `missing` for the sibling case the parser refuses). NOT a measured absence either way. |
+| `skipped` | `--no-repo`. |
+
+Per host, `repos_measured` / `repos_status` / `repos_error` / `repos_paths` /
+`repos_resolved` / `repos_unparseable` are the FOURTH independent measurement beside
+`reachable`, `windows_measured` and `captures_measured`. The counts are integers only when
+`repos_measured` is true; otherwise they are null, never 0.
+
+🔴 **A host can be honestly `repos_measured: true` while one of its ROWS is `unmeasured`,
+and reading only the host block hides that.** The probe answering is a fact about the
+probe; each path's `git` exit status is a separate fact about that path.
+`repos_resolved` counts `ok` rows and nothing else, so a per-path `unmeasured` can never
+inflate it — but `repos_paths - repos_resolved` is **not** a count of non-repo panes.
+
+🔴 **The whole collection is bounded by `COLLECT_BUDGET` (70 s), not by the per-call
+timeouts.** `tmux-snapshot-push.sh` wraps the collector in `timeout 90`, and rc 124 there
+is `exit 3` — no snapshot for EITHER host. Five reads per host plus the ClickHouse query
+sum past that, so a read with no budget left is **not attempted** and its host reports
+`unmeasured` with an error naming the budget. That is a read that did not happen, and it
+is published as one. *(Both numbers above are pinned to `COLLECT_BUDGET` / `COLLECT_CAP` by
+`test_the_contract_docs_budget_numbers_are_PINNED_to_the_constants`; the count of five
+reads and their ORDER by
+`test_the_repo_probe_is_issued_AFTER_every_other_read_on_every_host`.)*
+
+🔴 **The ClickHouse read's own timeout is CLAMPED to `COLLECT_CH_RESERVE` (15 s), and the
+clamp is PUBLISHED.** `CHConn.from_env` resolves `CLICKHOUSE_HTTP_TIMEOUT` out of the
+collector's per-HOST env file, so an operator can configure a value the budget arithmetic
+cannot afford — and this is the one place in the collector that CHANGES a number instead of
+measuring one. `clickhouse.timeout_secs` is what the read actually ran with;
+`clickhouse.timeout_clamped_from` is the configured value it was reduced FROM, and is
+**`null` when nothing was reduced**. Both are `null` when no client carrying a timeout was
+built (`skipped`, `unavailable`, an injected double) — unmeasured, which is not the same
+claim as "not clamped". Without them a 60 s setting produced a 15 s read that read as an
+ordinary ClickHouse timeout, and the operator debugs ClickHouse.
+
+🔴 **ORDER MATTERS AND IT IS PART OF THE CONTRACT.** One deadline spans ALL hosts, so the
+LAST call issued is the one that starves. The repo probe is therefore a **second pass over
+the hosts**: every pre-existing read — panes, windows, capture, ledger — is issued for
+EVERY host before the probe is issued for ANY host. The probe is the read a consumer can
+turn off (`--no-repo`) with the payload still whole, while a starved ledger silently costs
+every row on that host `age_secs`, its `stale` bucket and `claude_session_id`. Moving the
+probe later *within* a host is not enough and was measured so: the local host's own 15 s
+probe alone pushed the remote host past the deadline. With both hosts at their bounds it is
+the laptop's `repo` that is dropped — deliberately.
+
+⚠ **There is no current fleet measurement of the resolve rate.** The only one taken (90 of
+92 windows, 2026-09-03) was measured under protocol **V1**, which collapsed every `git`
+failure into `not_a_repo` — i.e. under the exact bug the rc field was added to fix — so its
+`not_a_repo` counts are not comparable to what V2 publishes. It has been struck rather than
+carried forward; re-measure under V2 before quoting a rate.
 
 ## The caveats are in the OUTPUT, not just in this file
 

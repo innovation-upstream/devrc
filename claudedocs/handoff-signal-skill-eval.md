@@ -17,10 +17,12 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Evaluate the signal skill's performance, quality, and token efficiency using activity telemetry data from ClickHouse.
 
 ## State now
-- **devrc#1271 is MERGED** — squash `01551061f5b8`, `mergedAt=2026-09-04T02:26:59Z`, branch deleted. Verified BY CONTENT on `origin/main` (the `UNDERCOUNTS` bullet present = 1; the wrong `all 6 on the laptop` figure = 0), never by ancestry or exit code.
-- 🔴 **Merged on an explicit operator decision WITH `tekton/devrc-pytests` RED.** `devrc-nodetests` was SUCCESS. The red is now REPRODUCED as a non-deterministic wall-clock flake (below: 0, then 2, then 1 failures across three runs of the same target on identical code), so the merge is well-founded — but the PR itself was never observed green in CI. Say "merged on a diagnosed flake", not "verified green".
-- Handoff `093b279a` + `5faf248d` already on `main`.
-- What's IN FLIGHT: nothing. The abandoned second sample was `devrc-ci-wzm79` (commit `dc148dad`, an empty commit pushed only to obtain that sample; squashed away by the merge).
+- Branch: `main` (devrc), clone fast-forwarded. No code in flight.
+- Clawgate: `resolve` ⇒ **rc=5, 0 tasks** (positive control passed — the endpoint answered 2 links for another session). No `clawgate-task:` field written. The doc's existing `clawgate-task: none` is still UNREADABLE (`field` ⇒ rc=2); see ranked item 4.
+- **devrc#1285 MERGED** — squash `2b1d35526522`, `mergedAt=2026-09-04T17:07:22Z`, branch deleted, **both gates SUCCESS** (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) on head `2baebb1f`. Verified BY CONTENT on `origin/main` (squash ⇒ ancestry is meaningless): floor `867` present, drift-guard present, parse block relocated.
+- **Verified LIVE from `origin/main`, not from a branch:** `browser-agent --dry-run` with no goal and a fresh HOME ⇒ **rc=2 in 4 ms** with the correct error. Was 91,000 ms.
+- **devrc#1271 MERGED earlier** — squash `01551061f5b8` (the `activity` skill correction), merged on an explicit operator decision with `devrc-pytests` RED; that red is the flake #1285 has now fixed.
+- Issue **devrc#1284** OPEN by design (`--dry-run` cost), with a mechanical closing condition.
 
 ## Open investigations — live diagnosis state
 ### Signal skill token consumption patterns
@@ -83,16 +85,31 @@ Evaluate the signal skill's performance, quality, and token efficiency using act
 - **Leading hypothesis:** a host-environment dependency in the PreToolUse guard's heredoc parsing (this box vs the CI image). Not a flake — it is deterministic here.
 - **Next probe:** run that single test in the CI image, or bisect the guard's heredoc branch against `$SHELL`/env differences.
 
+### CLOSED — the CI flake was a 90 s warm timeout paid before argument validation
+- **Symptom:** `tekton/devrc-pytests` FAILURE with a `subprocess.TimeoutExpired` at `test_browser_tab_ref.py:510`, no assertion executed.
+- **Observed (with values):** `--durations` was BIMODAL, not load-shaped — `test_agent_without_any_tab_is_untouched` **234.22 s**, `test_the_free_text_list_covers_agent_too` **155.98 s**, `test_POSITIVE_CONTROL_…` **90.10 s**, the other 51 tests ~0.5 s each. Direct repro, fresh HOME, no goal: **91 s**, stderr `could not warm the isolated opencode config dir … timeout 90s … needs to npm-install @opencode-ai/plugin` THEN `a goal is required`. `browser-agent` parsed its args ~300 lines BELOW the warm/bootstrap block.
+- **Ruled out:** "load flake, fix with a `pytest-timeout` budget" (the pre-registered rank 1) — `cli_budget.py` prescribes that for preventing a CI Task-ceiling ABORT, not for this; it would fire on a starved-but-healthy test and mask the cause. via: code
+- **Ruled out:** "`main` is permanently red / inherited failure" — RETRACTED. `devrc-ci-v75hh` on `093b279a` SUCCEEDED. The earlier claim came from four `Failed` PipelineRun statuses with **no log read** (pods GC'd). via: measurement
+- **Resolution:** moved arg parsing above the warm block (91,000 ms → 4 ms on `origin/main`), and stubbed `browser-agent` for the two goal-supplying tests. `test_browser_tab_ref.py` 508.93 s → 28.76 s; `browser-bridge` target ~950 s → ~170 s; slowest single test 234.22 s → 0.51 s. Margin against `CLI_TIMEOUT_S=300`: 1.28× → 588×.
+
+### OPEN — `test_clawgate_task_interview_guard` fails on THIS HOST only, on every branch
+- **Symptom + exact repro:** `nix develop <wt> --command bash -c "cd <wt> && python3 -m pytest scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py::test_a_body_file_written_by_a_heredoc_on_the_same_line_is_read -q"` ⇒ `1 failed in ~0.2s`.
+- **Observed:** `assert allowed(cmd)` → `assert False` at line 429, for `cat > /tmp/body.md <<'EOF' … EOF` followed by `clawgatectl task create --body-file /tmp/body.md`. Full local gate: `TOTAL collected=21058 passed=21054 skipped=3 failed=1`.
+- **Ruled out:** "this session caused it" — reproduces identically on a detached worktree at `855c2ad7`, which predates every commit of this arc. via: measurement
+- **Ruled out:** "CI sees it too" — CI reports that file **PASS 310/310**, twice (runs `devrc-ci-9j6sc`, `devrc-ci-hc6np`). via: measurement
+- **Leading hypothesis:** a host-environment dependency in the PreToolUse guard's heredoc parsing (this box vs the CI nix image). Deterministic here, so not a flake.
+- **Next probe:** run that single test inside the CI image, or bisect the guard's heredoc branch against `$SHELL`/env differences between the two.
+
 ## Next steps (ranked)
-1. Add the per-test `pytest-timeout` budget that `cli_budget.py` prescribes for the systemic case — the flake is PROVEN (0/2/1 failures across three identical runs), so no further confirmation run is needed. Repo: `devrc`. Touches `scripts/browser-bridge/tests/`.
-   forcing: regression — a wall-clock flake in the only pre-merge gate is what made THIS merge proceed on a red check; left alone it will do so again.
-2. Explain the local-only `test_clawgate_task_interview_guard` failure — it makes the full local suite red on every branch on this host, which hides real failures. Repo: `devrc`. Touches `scripts/claude-hooks/`.
-   forcing: regression — a permanently-red local suite trains every session here to ignore it.
-3. Quantify the `skills_used` undercount beyond `signal`, then decide backfill vs the documented caveat (caveat already merged in #1271). Repo: `devrc`. Touches `scripts/collector/`.
+1. Explain the local-only `test_clawgate_task_interview_guard` failure. It makes the FULL local gate red on every branch on this host, so `RESULT: FAIL` is now background noise here — which is exactly how a real failure gets waved through. Repo: `devrc`. Touches `scripts/claude-hooks/`.
+   forcing: regression — a permanently-red local gate trains every session on this host to ignore it, and this session already had to special-case it twice to read its own results.
+2. Decide devrc#1284 (`browser agent --dry-run` runs a full model session: ~90 s warm + up to 120 s). Either make it cheap or document the cost in `--help`/README so the name stops implying validation. Repo: `devrc`. Touches `scripts/browser-bridge/`.
    forcing: none
-4. Sample ~5 of the heaviest sessions' transcripts and classify text-only assistant turns as removable vs necessary, to size the real saving. Repo: `devrc`. Touches `scripts/session-analysis/`.
+3. Quantify the `skills_used` ClickHouse undercount beyond `signal` (measured 40% low there: `find-session --skill signal` = 10, `skills_used` = 6), then decide backfill vs the documented caveat already merged in #1271. Repo: `devrc`. Touches `scripts/collector/`.
    forcing: none
-5. Repair this doc's `clawgate-task: none` front-matter field so `/resume` stops emitting a GAP line. Repo: `devrc`.
+4. Repair this doc's `clawgate-task: none` front-matter field so `/resume` stops emitting a GAP line every read. Repo: `devrc`.
+   forcing: none
+5. Sample ~5 of the heaviest sessions' transcripts and classify text-only assistant turns as removable vs necessary, to size the saving the token analysis implies. Repo: `devrc`. Touches `scripts/session-analysis/`.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -121,19 +138,34 @@ Evaluate the signal skill's performance, quality, and token efficiency using act
 - 🔴 **A `jq` error inside `cmd | jq ... || echo "none"` prints the FALLBACK, which reads as a clean negative.** A precedence bug (`... // "?" | .[0:8]` binding across later fields) produced `Cannot index string` and therefore "NO run for dc148dad yet" — while the run existed and was Running. Never let a parse failure share an exit path with a real zero.
 - Merge method here is SQUASH, so `git merge-base --is-ancestor` is false forever after. Verify by content (`git show origin/main:<path> | grep -c`) plus `gh pr view --json mergedAt,mergeCommit`.
 
+- 🔴 **A bare `pytest <target>` is NOT the gate — only `scripts/run-tests.sh` is.** CI went red on #1285 with `failed=0`: `FAIL scripts/browser-bridge/tests (collected=912 above drift ceiling 895, floor 716)`. Adding tests moves the per-target COUNT band, and bare pytest does not enforce it. The full gate HAD been run earlier in the session — before those tests existed — and then abandoned for the faster runner. **After adding tests, run the repo's own gate.** Re-pin by copying the number the failure prints (`867`), never by re-deriving; the rule is `collected - min(50, max(1, collected/20))`.
+- 🔴 **Three instrument failures this session, one shape: a check real about one thing and MUTE about the thing that mattered.** (a) A regression guard drafted against `_oc_calls()` would have been VACUOUS — the fake opencode deliberately never logs `debug agent`, so it passes on the old code too; switched the observable to the config dir and measured BOTH arms. (b) `find … | xargs command grep -l 'browser-agent'` returned NOTHING while a direct `command grep -c` on the same file returned **24** — a spelling check masquerading as a containment check, and it produced a false scope claim in a PR body. (c) The bare-pytest/gate gap above. **Prove a zero can go non-zero before quoting it.**
+- 🔴 **A `TimeoutExpired` reads as a test failure but no assertion ran.** Look at where the traceback ENDS — `communicate()` / `subprocess.py` means the harness's own net killed it, so the verdict is about wall-clock, not behaviour.
+- 🔴 **An audit round can introduce a false-coverage claim while fixing false-coverage claims.** #1285 round 1 added a 🔴 comment asserting `test_opencode_config.py` §7 gates the parse block's position. Round 2 built that mutant: **11 passed**, `browser-bridge` **891 passed** — §7 pins `preflight < bootstrap_call`, and moving the block reorders neither. Fixed by writing the guard that makes the claim true, not by rewording it.
+- 🔴 **Ladder stop:** #1285 stopped on the ATTRIBUTION gate — two consecutive rounds of **zero executable payload** (proved by `cmp` on comment-stripped source: 360 lines, identical) — **not** on a clean round. Round 2 found real defects. The two are indistinguishable in a findings list unless written down.
+- 🔴 **The devrc primary clone's branch is unpredictable** — it was on `feat/mention-system-repos` mid-session. `handoff_doc.py` commits to whatever branch the checkout sits on, so a handoff would have landed on a teammate's branch. **Check `git -C $DEVRC branch --show-current` immediately before any handoff write**, and use a worktree off `origin/main` when it is not on main.
+- 🔴 **`gh issue create` with `--body-file "$VAR/x.md"` is REFUSED** by the closing-condition gate — it cannot evaluate a shell variable, so it cannot read the body, and it blocks rather than failing open. Pass a literal path.
+- Never quote line numbers in a tracker: #1284's pointers were staled by #1285 within the hour. Name symbols instead.
+- A background command ending in `| tail -N` writes nothing until it exits (`tail` cannot flush) — a 25-minute run looked like a 0-byte dead job.
+- Verify a squash merge BY CONTENT (`git show origin/main:<path> | grep -c`), never by ancestry; `--is-ancestor` is false forever after a squash.
+
 ## How to verify
 ```bash
-# 1. The merge landed, by CONTENT (never ancestry — squash)
-gh pr view 1271 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
-git -C ~/workspace/devrc fetch origin main -q
-git -C ~/workspace/devrc show origin/main:claude/skills/activity/SKILL.md | grep -c UNDERCOUNTS      # 1
-git -C ~/workspace/devrc show origin/main:claude/skills/activity/SKILL.md | grep -c 'all 6 on the laptop'  # 0
+# 1. The shipped fix, from origin/main (not a branch) — expect rc=2 in single-digit ms
+V=$(mktemp -d); git -C ~/workspace/devrc worktree add --detach "$V" origin/main -q
+H=$(mktemp -d); time HOME="$H" bash "$V/scripts/browser-bridge/browser-agent" --dry-run
+git -C ~/workspace/devrc worktree remove --force "$V"
 
-# 2. The analysis findings (independent of CI)
-#   output share of all tokens, 30d: 0.293%   |  corr(turns,cache_read)=0.967  |  corr(duration,cache_read)=0.296
-#   tool calls per assistant turn: 0.46       |  cache-read per assistant turn: ~301K
+# 2. The gate — run THIS, not bare pytest, after any test-count change
+nix develop ~/workspace/devrc --command bash ~/workspace/devrc/scripts/run-tests.sh ~/workspace/devrc
+#   expect: PASS scripts/browser-bridge/tests (collected=912 passed=912 floor=867)
+#   the ONE expected red on this host is test_clawgate_task_interview_guard (ranked item 1)
 
-# 3. The authoritative skill-usage surface (NOT ClickHouse skills_used)
+# 3. The merges, by content
+gh pr view 1285 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
+git -C ~/workspace/devrc show origin/main:scripts/run-tests.sh | grep -c 'browser-bridge/tests|867'   # 1
+
+# 4. The authoritative skill-usage surface (ClickHouse skills_used undercounts by 40%)
 python3 ~/workspace/devrc/scripts/find-session.py --skill signal >/tmp/fs.out 2>/tmp/fs.err
-grep -c 'claude --resume' /tmp/fs.out   # 10 (9 laptop / 1 workbench); ClickHouse skills_used gives 6
+grep -c 'claude --resume' /tmp/fs.out   # 10 (9 laptop / 1 workbench)
 ```

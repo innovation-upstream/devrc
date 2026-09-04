@@ -19,8 +19,12 @@ The two things worth pinning:
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -279,3 +283,447 @@ def test_a_short_form_repo_is_resolved_from_the_discovered_checkouts(spy):
 def test_a_non_mention_notifies_and_opens_nothing(spy):
     assert MO.main(['background = "#282828";']) == 1
     assert spy == [("notify", "no mention in the clicked text")]
+
+
+# --------------------------------------------------------------------------- #
+# The generated mapping — an OPTIONAL accelerator that must never break a click
+# --------------------------------------------------------------------------- #
+def test_an_absent_mapping_file_is_an_empty_mapping_not_an_error(tmp_path):
+    """🔴 The mapping is optional by construction: `owner/repo#N`, a local
+    checkout and PASS 3 all resolve without it. An earlier version imported a
+    generated module at the TOP of the handler, so a checkout predating that
+    file killed EVERY click — including the ones needing no mapping at all —
+    with a traceback to a detached process's stderr that nobody ever sees."""
+    assert MO.load_known_repos(tmp_path / "nothing-here.json") == {}
+
+
+@pytest.mark.parametrize("body", [
+    "",                                   # empty file
+    "{not json at all",                   # truncated write
+    '["a", "b"]',                         # right syntax, wrong shape
+    '{"repo": 12}',                       # value not a string
+    '{"repo": "no-slash"}',               # value not owner/repo
+])
+def test_every_malformed_mapping_degrades_to_empty(tmp_path, body):
+    p = tmp_path / "known_repos.json"
+    p.write_text(body)
+    assert MO.load_known_repos(p) == {}
+
+
+def test_a_valid_mapping_is_read_and_bad_rows_are_dropped_individually(tmp_path):
+    """One bad row must not discard the good ones — the file is generated, and
+    a single odd entry is not a reason to lose 400 working ones."""
+    p = tmp_path / "known_repos.json"
+    p.write_text('{"trowelcast": "gardenersguild/trowelcast", "bad": "nope", '
+                 '"sledgehorn": "gardenersguild/sledgehorn"}')
+    assert MO.load_known_repos(p) == {
+        "trowelcast": "gardenersguild/trowelcast",
+        "sledgehorn": "gardenersguild/sledgehorn"}
+
+
+def test_a_local_checkout_overrides_the_mapping(tmp_path, monkeypatch):
+    """The checkout is a measurement of this disk; the mapping is a snapshot
+    that can predate a transfer or a rename."""
+    p = tmp_path / "known_repos.json"
+    p.write_text('{"trowelcast": "stale-owner/trowelcast"}')
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", p)
+    ws = tmp_path / "workspace"
+    (ws / "trowelcast" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(MO, "repo_of_checkout", lambda path: "gardenersguild/trowelcast")
+    assert MO.discover_repos(ws)["trowelcast"] == "gardenersguild/trowelcast"
+
+
+# --------------------------------------------------------------------------- #
+# PASS 3 — the GitHub API fallback
+#
+# 🔴 An earlier version of this path shipped INERT: its jq program compared
+# `.name` against the LITERAL text `"$name"` (a Python string with no f-prefix),
+# selecting nothing for any input, while every test that stubbed `gh` passed.
+# Nothing here mocks the selection — the fake returns the rows `gh` would print
+# and the assertions pin WHICH of them the resolver takes.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _clear_api_cache():
+    """The cache is module-global and would carry an answer between tests."""
+    MO._GITHUB_API_CACHE.clear()
+    yield
+    MO._GITHUB_API_CACHE.clear()
+
+
+# Bound BEFORE any test patches the module attribute, so a test that needs a
+# REAL subprocess while `gh` is faked still gets one.
+_REAL_RUN = subprocess.run
+
+
+def _fake_gh(rows, *, returncode=0):
+    """Stand in for `gh api search/repositories`, recording the argv it got.
+    Rows are RELEVANCE-ordered as the endpoint returns them — the exact-name
+    matches are deliberately NOT first."""
+    seen: dict = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        return types.SimpleNamespace(
+            returncode=returncode, stdout="".join(f"{r}\n" for r in rows), stderr="")
+
+    return run, seen
+
+
+# Fixture rows share no substring with any assertion constant, and the two
+# EXACT matches sit at positions 2 and 4 — so a mutant that takes the first row,
+# the last row, or matches on a prefix cannot land on the expected value.
+_SEARCH_ROWS = [
+    "hobbyist/trowelcast-examples",
+    "gardenersguild/trowelcast",
+    "someoneelse/trowelcast-mirror",
+    "rivalorg/trowelcast",
+    "thirdparty/trowelcast-fork",
+]
+
+
+def test_the_api_fallback_returns_EVERY_exact_name_match(monkeypatch):
+    """🔴 Relevance order is not name order, and an exact-name hit is not an
+    unambiguous one. Returning the first row silently picks a stranger's repo."""
+    run, seen = _fake_gh(_SEARCH_ROWS)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO.gh_api_repo_search("trowelcast") == ({
+        "gardenersguild/trowelcast": "gardenersguild/trowelcast",
+        "rivalorg/trowelcast": "rivalorg/trowelcast"}, "")
+    assert seen["cmd"][:3] == ["gh", "api", "search/repositories"]
+
+
+def test_the_api_fallback_matches_a_name_case_insensitively(monkeypatch):
+    run, _ = _fake_gh(["hobbyist/TrowelCast-ui", "gardenersguild/TrowelCast"])
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO.gh_api_repo_search("trowelcast") == (
+        {"gardenersguild/TrowelCast": "gardenersguild/TrowelCast"}, "")
+
+
+def test_the_api_fallback_returns_NOTHING_when_no_row_names_the_repo(monkeypatch):
+    """🔴 NOTHING IS GUESSED. Only near-misses ⇒ no candidate at all."""
+    run, _ = _fake_gh(["hobbyist/trowelcast-examples", "thirdparty/trowelcast-fork"])
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    # 🔴 The reason is EMPTY here: the search RAN and matched nothing. That is a
+    # different fact from a search that could not run, and the refusal differs.
+    assert MO.gh_api_repo_search("trowelcast") == ({}, "")
+
+
+def test_the_api_fallback_returns_nothing_when_gh_fails(monkeypatch):
+    """A non-zero `gh` (no auth, rate limit, no network, BINARY ABSENT) prints
+    its error on stderr; treating stdout as an answer would resolve to garbage.
+
+    ⚠ INVARIANT GUARD, not regression coverage — green on the pre-fix code too."""
+    run, _ = _fake_gh(_SEARCH_ROWS, returncode=1)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    matches, why = MO.gh_api_repo_search("trowelcast")
+    assert matches == {}
+    assert "gh exited 1" in why
+
+
+def test_the_jq_program_is_a_CONSTANT_that_cannot_do_the_selection(monkeypatch):
+    """🔴 THE SEAM. Every test above stubs `gh`, so a filter that selects
+    nothing in production still passes them — precisely how the original bug
+    survived. `gh api --jq` accepts no `--arg`, so a name in the filter can only
+    be a string literal: assert the program carries neither the searched name
+    nor a `$`, i.e. that jq CANNOT be where the match happens."""
+    run, seen = _fake_gh(_SEARCH_ROWS)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    MO.gh_api_repo_search("trowelcast")
+    jq_program = seen["cmd"][seen["cmd"].index("--jq") + 1]
+    assert "$" not in jq_program
+    assert "trowelcast" not in jq_program
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq not on PATH")
+def test_the_jq_program_really_yields_the_rows_the_resolver_filters(monkeypatch):
+    """The other half of the seam: run the EMITTED program through the REAL jq
+    against a realistic payload. The inert original returns zero lines here."""
+    run, seen = _fake_gh(_SEARCH_ROWS)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    MO.gh_api_repo_search("trowelcast")
+    jq_program = seen["cmd"][seen["cmd"].index("--jq") + 1]
+
+    payload = json.dumps({"items": [
+        {"name": full.split("/")[1], "full_name": full} for full in _SEARCH_ROWS]})
+    # 🔴 _REAL_RUN, not subprocess.run: `MO.subprocess` IS the shared module, so
+    # the fake above is installed globally for the duration of the test. Calling
+    # subprocess.run here reaches the FAKE and this test passes on any filter
+    # whatsoever — measured, it passed against the inert original.
+    r = _REAL_RUN(["jq", "-r", jq_program], input=payload,
+                  capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "gardenersguild/trowelcast" in r.stdout.splitlines()
+
+
+def test_one_exact_match_opens_directly(spy, monkeypatch):
+    run, _ = _fake_gh(["hobbyist/trowelcast-examples", "gardenersguild/trowelcast"])
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO.main(["trowelcast#77"]) == 0
+    assert ("pick", 2) not in spy
+    assert spy[-1] == ("open", "https://github.com/gardenersguild/trowelcast/issues/77")
+
+
+def test_TWO_owners_with_the_same_repo_name_go_to_the_PICKER(spy, monkeypatch):
+    """🔴 THE NAMESAKE RULE. `dashboard`, `cli`, `api` exist under dozens of
+    owners; measured on the first version, `dashboard#12` silently opened a
+    retired Kubernetes repo. Several owners is a CHOICE, not a ranking."""
+    run, _ = _fake_gh(_SEARCH_ROWS)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO.main(["trowelcast#77"]) == 0
+    assert ("pick", 2) in spy, spy
+    urls = MO.picker_rows([
+        {"platform": "github", "id": "77",
+         "url": "https://github.com/gardenersguild/trowelcast/issues/77"},
+        {"platform": "github", "id": "77",
+         "url": "https://github.com/rivalorg/trowelcast/issues/77"}])
+    assert "gardenersguild" in urls[0] and "rivalorg" in urls[1]
+
+
+def test_an_unknown_repo_with_no_exact_match_still_refuses(spy, monkeypatch):
+    """PASS 3 must not turn an honest refusal into a confident wrong page."""
+    run, _ = _fake_gh(["hobbyist/trowelcast-examples"])
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO.main(["trowelcast#77"]) == 1
+    assert spy[-1] == ("notify", "cannot resolve trowelcast#77")
+
+
+def test_PASS_3_never_second_guesses_an_owner_the_text_already_stated(monkeypatch):
+    """🔴 An explicit `owner/repo` is source 1 — the strongest there is. PASS 3's
+    subject pattern must not admit it, or a search by name could REPLACE a
+    stated owner with a guessed one."""
+    assert MO._PASS3_REPO_RE.match("trowelcast#77")
+    assert not MO._PASS3_REPO_RE.match("gardenersguild/trowelcast#77")
+    assert not MO._PASS3_REPO_RE.match("#77")
+    assert not MO._PASS3_REPO_RE.match("see trowelcast#77 today")
+
+
+def test_a_bare_number_never_reaches_the_api(spy, monkeypatch):
+    """A bare `#N` names no repo, so there is nothing to search for — and a
+    search on a number would return arbitrary repos."""
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    MO.main(["#370"])
+    assert not [c for c in calls if c[:1] == ["gh"]]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SEAM: the mapping actually reaching a resolution
+#
+# Every test above this point stubs `discover_repos` or `gh`, so NONE of them
+# notices if the mapping is never loaded at all. Measured: deleting the
+# `load_known_repos()` call from `discover_repos` left the entire file green,
+# and the override test below was inert because the loader bound its default
+# path at IMPORT — so patching the module attribute changed nothing.
+# --------------------------------------------------------------------------- #
+def _write_mapping(tmp_path, mapping):
+    p = tmp_path / "known_repos.json"
+    p.write_text(json.dumps(mapping))
+    return p
+
+
+def test_a_mapping_ONLY_name_resolves_end_to_end_through_main(tmp_path, monkeypatch):
+    """🔴 THE MUTATION THIS PINS: drop `load_known_repos()` from
+    `discover_repos` and this is the test that goes red. The name exists in no
+    checkout and `gh` is not reachable, so the mapping is the ONLY thing that
+    can produce this URL."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH",
+                        _write_mapping(tmp_path, {"plotwidget": "gardenersguild/plotwidget"}))
+    monkeypatch.setattr(MO, "WORKSPACE", tmp_path / "no-such-workspace")
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "gh_api_repo_search", lambda name: ({}, "gh disabled for this test"))
+    opened = []
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
+    assert MO.main(["plotwidget#42"]) == 0
+    assert opened == ["https://github.com/gardenersguild/plotwidget/issues/42"]
+
+
+def test_the_loader_reads_the_path_at_CALL_time_not_at_import(tmp_path, monkeypatch):
+    """A `path: Path = KNOWN_REPOS_PATH` default is evaluated once, at import,
+    so `monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", …)` would be inert and every
+    test using it would pass for the wrong reason."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH",
+                        _write_mapping(tmp_path, {"plotwidget": "gardenersguild/plotwidget"}))
+    assert MO.load_known_repos() == {"plotwidget": "gardenersguild/plotwidget"}
+
+
+def test_a_local_checkout_beats_the_mapping_for_the_same_name(tmp_path, monkeypatch):
+    """The precedence the module docstring asserts, exercised through
+    `discover_repos` rather than asserted in prose."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH",
+                        _write_mapping(tmp_path, {"plotwidget": "staleowner/plotwidget"}))
+    ws = tmp_path / "workspace"
+    (ws / "plotwidget" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(MO, "repo_of_checkout", lambda path: "gardenersguild/plotwidget")
+    out = MO.discover_repos(ws)
+    assert out["plotwidget"] == "gardenersguild/plotwidget"
+
+
+def test_a_three_segment_value_is_refused_rather_than_404ing(tmp_path, monkeypatch):
+    """`github.com/a/b/c/issues/12` 404s while looking authoritative — the same
+    rule `parse_owner_repo` enforces for a git remote."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", _write_mapping(
+        tmp_path, {"good": "gardenersguild/good", "bad": "gardenersguild/team/bad"}))
+    assert MO.load_known_repos() == {"good": "gardenersguild/good"}
+
+
+def test_the_reader_and_the_writer_agree_on_ONE_path(tmp_path, monkeypatch):
+    """🔴 TWO INDEPENDENT COPIES OF ONE RULE. The generator computes its default
+    output path and the handler computes where it reads from; they agree only by
+    coincidence. Move either and the generator reports success, every `repo#N`
+    silently behaves as if no mapping existed, and BOTH files' suites stay green.
+
+    🔴 BOTH MODULES ARE RE-IMPORTED under one environment and their CONSTANTS
+    compared. An earlier version re-implemented the reader's expression inline
+    here — which pinned the generator's side only: mutating the HANDLER's
+    filename to `repos.json` SURVIVED the whole suite, in the direction that
+    actually breaks resolution.
+    """
+    monkeypatch.delenv("MENTION_OPEN_KNOWN_REPOS", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    def _fresh(name, rel):
+        spec = importlib.util.spec_from_file_location(name, ROOT / rel)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    writer = _fresh("regen_for_seam", "scripts/regen-known-repos.py")
+    reader = _fresh("mention_open_for_seam", "scripts/mention-open.py")
+    assert writer.DEFAULT_PATH == reader.KNOWN_REPOS_PATH, (
+        f"the generator writes {writer.DEFAULT_PATH} but the handler reads "
+        f"{reader.KNOWN_REPOS_PATH} — the mapping would be generated into a "
+        f"file nothing ever loads, with both suites green")
+
+
+def test_the_workspace_is_resolved_at_CALL_time_too(tmp_path, monkeypatch):
+    """🔴 THE CLASS, NOT THE INSTANCE. `discover_repos(workspace=WORKSPACE)`
+    bound its default at import exactly as `load_known_repos` did, so patching
+    `MO.WORKSPACE` was inert — measured: a test believing it had an empty
+    workspace ran 91 real `git remote` subprocesses against the real
+    `~/workspace` and read back 79 real repositories.
+
+    🔴 THIS ASSERTS A CHECKOUT IS FOUND, NOT THAT NONE IS. An earlier version
+    patched `WORKSPACE` to an EMPTY directory and asserted `== {}` — which is
+    exactly what the import-bound default ALSO produces in the SANDBOX tier,
+    where HOME is a fresh empty dir (`flake.nix` exports `HOME=$TMPDIR/home`).
+    Measured: that mutant died on the dev host and SURVIVED under an empty
+    HOME — the guard for this defect was inert in the tier the merge is gated
+    on, and green either way."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", tmp_path / "absent.json")
+    ws = tmp_path / "elsewhere"
+    (ws / "plotwidget" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(MO, "WORKSPACE", ws)
+    monkeypatch.setattr(MO, "repo_of_checkout", lambda path: "gardenersguild/plotwidget")
+    # No argument: the default must be read NOW, from the patched attribute.
+    assert MO.discover_repos() == {"plotwidget": "gardenersguild/plotwidget"}
+
+
+# PASS 3 — an unusable picker, and an empty result that names its cause
+# --------------------------------------------------------------------------- #
+def test_too_many_namesakes_REFUSES_instead_of_showing_a_wall(spy, monkeypatch):
+    """Measured: `dashboard` and `cli` each return a full page of EXACT matches.
+    A 100-row list of URLs differing only by owner is not a choice."""
+    assert MO.PASS3_MAX_CHOICES == 8, "the fixtures below are literal on purpose"
+    rows = [f"owner{i}/trowelcast" for i in range(9)]
+    run, _ = _fake_gh(rows)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO.main(["trowelcast#77"]) == 1
+    assert spy[-1] == ("notify", "cannot resolve trowelcast#77")
+    assert not [c for c in spy if isinstance(c, tuple) and c[0] == "open"]
+
+
+def test_exactly_the_cap_still_offers_the_picker(spy, monkeypatch):
+    """The boundary, from the other side — a cap that also swallowed the
+    legitimate case would be a refusal dressed as a limit."""
+    rows = [f"owner{i}/trowelcast" for i in range(8)]
+    run, _ = _fake_gh(rows)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    assert MO.main(["trowelcast#77"]) == 0
+    assert ("pick", 8) in spy
+
+
+def test_a_search_that_COULD_NOT_RUN_says_so_instead_of_denying_the_repo(spy, monkeypatch):
+    """🔴 An empty result cannot distinguish `gh` missing from no such repo, and
+    the two need opposite next moves. The refusal must not assert the stronger
+    claim."""
+    def boom(cmd, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "gh")
+
+    monkeypatch.setattr(MO.subprocess, "run", boom)
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    assert MO.main(["trowelcast#77"]) == 1
+    assert "gh is not on PATH" in notices[-1][1]
+    assert "not a claim that no such repo exists" in notices[-1][1]
+
+
+def test_a_search_that_RAN_and_matched_nothing_keeps_the_ordinary_refusal(spy, monkeypatch):
+    run, _ = _fake_gh(["hobbyist/trowelcast-examples"])
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    assert MO.main(["trowelcast#77"]) == 1
+    assert "owner/repo#N" in notices[-1][1]
+    assert "not a claim" not in notices[-1][1]
+
+
+def test_the_refusal_keeps_the_ADVICE_when_it_also_names_a_cause(spy, monkeypatch):
+    """🔴 The case where the search could not run is exactly the case where
+    writing `owner/repo#N` is the workaround — so naming the cause must ADD to
+    the advice, never replace it. It replaced it once."""
+    def boom(cmd, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "gh")
+
+    monkeypatch.setattr(MO.subprocess, "run", boom)
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    assert MO.main(["trowelcast#77"]) == 1
+    body = notices[-1][1]
+    assert "gh is not on PATH" in body
+    assert "owner/repo#N" in body, "the actionable advice was dropped"
+
+
+def test_the_namesake_count_is_stated_as_a_FLOOR_not_a_total(spy, monkeypatch):
+    """The count comes from ONE page, so `per_page` caps it by construction.
+    Measured live: `cli` and `api` each report 100 exact matches out of
+    ~1.8M search hits. Stating that as a total is wrong by orders of magnitude."""
+    rows = [f"owner{i}/trowelcast" for i in range(9)]
+    run, _ = _fake_gh(rows)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    assert MO.main(["trowelcast#77"]) == 1
+    assert "at least 9 repositories" in notices[-1][1]
+
+
+@pytest.mark.parametrize("value", [
+    "acme/widget/",      # trailing slash -> .../acme/widget//issues/12
+    "acme//widget",      # empty middle segment
+    "acme/widget ",      # trailing space inside the URL path
+    "acme/wid\nget",     # embedded newline
+    "acme/widget\n",     # TRAILING newline — `$` matches before it, `\\Z` does not
+    "/acme/widget",      # leading slash
+    "acme",              # one segment
+])
+def test_a_value_that_is_not_EXACTLY_owner_slash_repo_is_refused(tmp_path, value):
+    """Counting non-empty segments accepted every one of these, and each builds
+    a URL that 404s while looking authoritative."""
+    p = tmp_path / "known_repos.json"
+    p.write_text(json.dumps({"widget": value}))
+    assert MO.load_known_repos(p) == {}
+
+
+def test_the_search_asks_for_a_FULL_page(monkeypatch):
+    """`per_page` defaults to 30. Removing it shrinks what the exact-name filter
+    can even see — and it is invisible to every other test here, because the
+    fake returns whatever rows the test hands it regardless of the request.
+    Measured: dropping `per_page=100` SURVIVED the whole suite."""
+    run, seen = _fake_gh(_SEARCH_ROWS)
+    monkeypatch.setattr(MO.subprocess, "run", run)
+    MO.gh_api_repo_search("trowelcast")
+    assert "per_page=100" in seen["cmd"], seen["cmd"]
