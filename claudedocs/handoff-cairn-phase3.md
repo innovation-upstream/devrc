@@ -39,9 +39,12 @@ Live banner `token-ids=a8f329c534d7:zach`, no `UNRESTRICTED-SCOPE LEGACY MODE` �
 control: 6 historical banners in Loki, so that grep CAN match. Mapped credential → **200**;
 legacy credential → **401, dead**; **both hosts read 200**.
 
-🔴 **Claim state (updated 2026-09-04):** `cairn-phase3-1` is **NOT held**.
+🔴 **Claim state (updated 2026-09-04, later session):** `cairn-phase3-1` and
+**`cairn-phase3-10`** were taken, both ranks closed, and both are **released** — rank 1 by
+measurement (nothing to shred), rank 10 by homelab-infra **#683** merging as `93e15ee09`.
 `cairn-phase1-migration`, `cairn-phase3-11`, `cairn-phase3-16`, `cairn-phase3-25` and
-**`cairn-phase3-22`** were held for their ranks and are all **released**.
+**`cairn-phase3-22`** were held for their ranks and are all **released**. **No claim in this
+family is held.**
 
 ⚠ **The pod counts above are the 2026-09-01 execution record and have MOVED** — **205 entries**
 as of 2026-09-03. Carried verbatim because it is the phase-1 evidence, not a current reading.
@@ -603,6 +606,53 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 - **Ruled out:** deleting `/tmp/body.md` as the fix — it is another session's live working file. via: doc
 - **Next probe:** none needed. **Closing condition:** a merged devrc PR switching that test to pytest's `tmp_path`.
 
+### RESOLVED BY MEASUREMENT — a rank's own CLOSING CONDITION was insufficient, and the counter-evidence was already in the repo
+
+- **Symptom + exact repro:** rank 10 said *"a merged homelab-infra PR moving `ilm rule add`
+  above `user add`"*. Open `scripts/provision-subsystem-store-backup-bucket.sh` and read its
+  header: it names `provision-vaultwarden-backup-bucket.sh` as the unfixed sibling **and
+  records the reordering theory as RETRACTED**, because two of the fallible steps after
+  `mc admin user add` are HOST-side (`kubectl exec`, and recording the secret) and no in-pod
+  ordering reaches them.
+- **Observed (with values):** the sibling carried the closed design — secret written to a
+  `0600` file BEFORE provisioning, four pre-flight refusals, in-pod cleanup as a trap. The
+  vaultwarden script had none of it and recorded the credential by **printing it to stdout**,
+  which is a live hazard the rank never mentioned: that script is run by agents, and this
+  doc's own record says a printed token forced a rotation on 2026-08-29. The rank named the
+  smaller of the two problems.
+- **Ruled out:** that satisfying the stated condition would have closed the hazard — the
+  sibling's header retracts exactly that theory, by name. via: doc
+- **Ruled out:** that the two scripts were unrelated instances — the vaultwarden one is the
+  original and the sibling says it "STARTED as a near-copy". via: doc
+- **Leading hypothesis:** `claude/RULES.md`'s *"consolidation is a BUG-FINDING instrument"*
+  in its cheapest form. The second site was not just wrong, it was wrong **in a way the first
+  site had already written down**. Reading the sibling before writing code was the whole
+  investigation.
+- **Next probe:** none. Shipped as homelab-infra #683. **The transferable rule: when a rank
+  names a one-line fix, grep for a sibling that already solved it and read its comments
+  BEFORE implementing — a retracted theory in-tree is cheaper than re-deriving it.**
+
+### 🔴 A TEST OF MINE WENT RED FOR THE WRONG REASON AND SILENTLY MEASURED HALF ITS SCOPE
+
+- **Symptom + exact repro:** the new `test-provision-credential-window.sh` loops over both
+  provisioning scripts. Run it against pre-change code: it printed the second script's header,
+  **nothing else**, no `✗`, no summary line, and exited **1**.
+- **Observed (with values):** the file is `set -uo pipefail` — errexit is **never** on. But
+  each stubbed run was wrapped `set +e … rc=$? … set -e`, and that "restore" **enabled** a flag
+  that had never been set. From the first such block onward errexit was live, so the next
+  iteration's first failing command (a `grep` that legitimately finds nothing) killed the whole
+  run. `✗` count was **0** while the exit code was 1.
+- 🔴 **This would have READ AS SUCCESS.** The base-vs-head matrix wants "red at base"; the run
+  was red at base. Had the failure count not been checked, a test that never executed a single
+  assertion against the old code would have been recorded as catching it.
+- **Ruled out:** that the assignment itself exits under `-uo pipefail` — probed directly:
+  `flags=huB`, assignment from a failing pipeline, `rc=0`. The exit needed errexit, which only
+  the restore could have supplied. via: measurement
+- **Next probe:** none. Fixed by deleting the restores, and the loop now **counts itself**
+  (`walked N of M`) so a run that stops early cannot pass. **The transferable rule: `set +e` /
+  `set -e` is not a symmetric save-and-restore — check what the flag WAS. And any test that
+  loops over a discovered set must assert it reached all of them.**
+
 ## Next steps (ranked)
 
 🔴 **Numbering is UNCHANGED on purpose** — the rank is half a claim's identity
@@ -612,11 +662,28 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 🔴 **Numbering is UNCHANGED on purpose** — the rank is half a claim's identity
 (`claim-work --slug-for <this doc> <rank>`). Items are marked done IN PLACE; new items APPEND.
 
-1. 🔴 **Criterion 10 step 2 — (a),(b),(c) DONE 2026-08-31. Only (d) is left:**
-   `shred -u ~/.config/subsystem-store/env.bak-legacy-2026-08-29` on **BOTH** hosts
-   (`ssh zach@192.168.50.155` for the laptop). Confirm `cairn sync` health on each host first —
-   this destroys the last local copy of the retired credential. Recovery afterwards is
-   `git log -p` on the secrets file or the backup CronJob, **not** these files.
+1. ✅ **CLOSED 2026-09-04 BY MEASUREMENT — there was nothing left to shred, and the
+   security claim is stronger than the action would have been.** No code, no PR.
+   `env.bak-legacy-2026-08-29` is **absent on BOTH hosts** — searched `/home/zach` to
+   depth 6 on each, with a positive control (`find` returns `~/.config/subsystem-store/env`,
+   so the search was not wired to nothing). Only `env` remains, and it is **byte-identical
+   across hosts** (`sha256[:16] fac86e8c04780785`).
+   🔴 **The empty result was DISCRIMINATED, not assumed** — an absence cannot by itself
+   separate "deleted" from "never there". The directory mtime does: workbench
+   `2026-08-31 18:07:32`, laptop `2026-08-31 18:08:14`, **42 s apart and both AFTER** the
+   `env` file's `2026-08-29 21:13`. A directory mtime moves when an entry is created or
+   removed; the last such event left `env` alone behind, on the exact date this doc records
+   criterion 10 step 2 (a),(b),(c) as executed. Step (d) was done then and the item went stale.
+   **The stronger claim, measured on the pod rather than inferred:** the token file holds
+   **exactly ONE row** — `fields=3 identity=zach allowlist_scopes=23` (the 23 cross-checks
+   this doc's own rank-5 note). There is no bare/legacy row for a retired credential to
+   match, so the credential is not merely dead-by-401, it has nothing to match against.
+   ⚠ **What was NOT re-verified, and cannot be:** the historical `401` control. The legacy
+   secret no longer exists on any disk here, so it cannot be replayed. The one-row reading
+   above is a *different and wider* claim (the pod rejects everything that is not that row),
+   not a re-run of the 2026-08-31 probe.
+   Precondition confirmed before concluding: `cairn sync` healthy on both hosts (208 entries,
+   same snapshot), token fingerprint `a8f329c534d7` on each. **Do not re-work.**
    forcing: security
 2. ~~**The backup CronJob.**~~ ✅ **CLOSED 2026-08-30** — homelab-infra#551, squash `c4e0f82b`.
    forcing: none
@@ -647,11 +714,48 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 9. **devrc #1045** — three pre-existing `seed.sh` gaps; the third (local-side `-type f`
    uncovered) mirrors what #998 fixed. ⚠ `#1045` is an **issue, not a PR**.
    forcing: none
-10. 🔴 **`scripts/provision-vaultwarden-backup-bucket.sh` has an orphaned-credential window.**
-    `mc ilm rule add` runs **LAST**, after `mc admin user add` + `policy attach`, with no
-    pre-flight refusals — an abort there leaves a live write-capable MinIO key whose secret was
-    never printed. **Closing condition:** a merged homelab-infra PR moving `ilm rule add` above
-    `user add`.
+10. ✅ **DONE 2026-09-04 — homelab-infra #683 MERGED, squash `93e15ee09`.** 5 files.
+    **Verified by CONTENT, not ancestry** (a squash is never an ancestor of the base): the
+    script on `origin/trunk` is byte-identical to the branch, the new test is present, and
+    `mc ilm rule add` sits at line 326 against `mc admin user add` at 328. Base clone
+    re-synced (`0 0`), worktrees removed, claim released.
+    🔴 **Gated on the MERGED TREE, not the branch — and the base HAD moved** (4 commits,
+    `f085757c9` → `e6bb2b9ce`). Merged-tree run: `files_run=58 tests_ran=1654 failed=''`,
+    `broken=` the same three pre-existing CEL `rc=2` as the base control. `RESULT: error`
+    on base *and* merged, entirely from those three — inherited, not introduced.
+    ⚠ **`RESULT: error` is this suite's NORMAL state today** because of those three broken
+    files. Do not read a future `error` here as a finding without diffing the `broken=` set
+    against a base control first.
+    🔴 **THIS ITEM'S CLOSING CONDITION AS WRITTEN WAS INSUFFICIENT, and the evidence was
+    already in-tree.** It said "a merged PR moving `ilm rule add` above `user add`". The
+    sibling `scripts/provision-subsystem-store-backup-bucket.sh` had ALREADY closed this
+    class, and its header names this script as the unfixed side **and records the reordering
+    theory as RETRACTED**: two of the fallible steps after `mc admin user add` are
+    **HOST-side** — the `kubectl exec` that runs the pod script, and the recording of the
+    secret itself — so no ordering *inside* the pod can reach them. What closes the class is
+    **the secret being on disk BEFORE anything can create the user.** Doing only what the
+    condition said would have satisfied the letter and left the hazard.
+    ⚠ **The bigger live hazard was not the one this item named:** the script recorded the
+    credential by **PRINTING IT TO STDOUT**, and it is run by agents — re-staging the
+    2026-08-29 token-in-a-transcript incident that forced a rotation, on every run.
+    **Shipped in #683:** credential written to a `0600` file before provisioning (path
+    printed, never the secret); four real pre-flight refusals replacing a header sentence
+    that claimed a refusal **no line implemented** (rc 4 / rc 3); `ilm rule add` moved above
+    `user add` as a secondary guard; in-pod cleanup made a trap so a failed run stops leaving
+    plaintext `prov.sh` in the tenant pod's `/tmp`.
+    **Matrix:** new test RED at base (`fail=1`, named) / GREEN at head (`pass=52`);
+    **7/7 mutants killed by their own assertion** with a green control confirmed to have
+    walked 2 of 2 scripts; full `scripts-tests` in the documented nix-shell — base
+    `files_run=57 tests_ran=1593 failed='' broken=3`, head `files_run=58 tests_ran=1654
+    failed='' broken=3`, **identical** broken set (three pre-existing CEL `rc=2`).
+    ⚠ **Deliberately NOT run against the live tenant** — `vaultwarden-backups` is already
+    provisioned (policy + ILM rule present, **exactly one** vaultwarden user, backups healthy
+    through 2026-09-04), so a real run now hits the new rc-3 refusal, which is correct. **No
+    orphan exists today; this is preventive.**
+    ⚠ **`test-provision-heredoc.sh` was a guard whose DESCRIPTION claimed more than its body
+    did** — header said "the heredoc", body hardcoded one of the two scripts, in a directory
+    holding exactly the sibling it was blind to. Widened, with a two-way ledger.
+    **Do not re-work.**
     forcing: security
 11. ✅ **DONE 2026-09-02 — `verify-byte-identity.sh` is order-independent.** #1222 `7d9da8f5` +
     #1228 `85257361`, four audit rounds to a clean round, live-verified against the pod.
