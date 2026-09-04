@@ -367,10 +367,21 @@ def test_notify_navigation_leaves_search_mode_intact():
 # search_term), so a term containing a space could never match ANY snippet — the
 # four :ssh* snippets and :cgf/:subk therefore read as dead when they are not.
 # Fix: tokenize on whitespace and require EVERY token to match by the old rules.
-# 🔴 THESE NO LONGER MIRROR nix/home.nix — CORRECTED 2026-09-03. They were
+# 🔴 SCOPE, corrected again 2026-09-03: the paragraph below is about SSH_BASE
+# ONLY. `CIVIT_BASE` further down IS still an exact live mirror — all five of
+# `:cc`, `:cdp`, `:cgf`, `:cpk`, `:subk` match `nix/home.nix` on label and
+# search_terms, re-verified today — and `test_multiword_civit_prod_attributes_
+# uniquely` depends on "prod" appearing in exactly ONE live label, so if you
+# rename one of those labels, RE-MIRROR IT. An earlier draft of this header said
+# "these fixtures" and swept CIVIT_BASE in with SSH_BASE, which was a false claim
+# in the opposite direction to the one it was fixing.
+#
+# 🔴 SSH_BASE NO LONGER MIRRORS nix/home.nix — CORRECTED 2026-09-03. It was
 # written from the live config and have DRIFTED; they are now synthetic
 # fixtures that pin the multiword RULE, which is what the tests below need.
-# Measured against the live file on 2026-09-03, 4 of 7 assertions below INVERT:
+# Measured against the live file on 2026-09-03, 4 of the 10 SSH_BASE assertions
+# INVERT (an earlier draft said "4 of 7" — the 7 counted only two of the three
+# tests, while the fourth inversion lives in the third):
 #   _term_matches('ssh work', ':sshwn')  here True   -> live False
 #   _term_matches('ssh lap',  ':sshln')  here True   -> live False
 #   _attribute('ssh work')               here None   -> live ':sshwl'
@@ -762,6 +773,12 @@ def test_precedence_resolves_the_recommend_terms():
     d = _det_for(RNA_ACQ_BASE)
     assert "recom" not in ED._AMBIGUOUS_TERM_OWNER
     assert "recommend" not in ED._AMBIGUOUS_TERM_OWNER
+    # 🔴 DRIFTED FIXTURE, same as its sibling below: live, `_term_matches('recom',
+    # ':acq')` is False and the candidate set is [':rna'] alone, so the ambiguity
+    # this test resolves DOES NOT EXIST on the real config and `_attribute`
+    # returns at the len(matched)==1 branch before precedence is consulted. This
+    # pins the RULE; nothing live exercises it. Do not read it as evidence that
+    # declared-interface precedence is currently load-bearing.
     assert d._term_matches("recom", ":acq") is True      # the incidental label
     assert d._term_matches("recom", ":rna") is True      # the real interface
     assert d._names_trigger("recom", ":rna") is False    # no outright naming
