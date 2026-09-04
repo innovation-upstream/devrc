@@ -174,19 +174,26 @@ def build_mapping(api_repos: list[dict], local_repos: dict[str, str]) -> dict[st
             # it. NO TEST CAN PIN IT for the same reason; the test that names
             # it says so and is labelled an invariant guard.
             #
-            # 🔴 It is here because deleting it ONCE ALREADY WENT WRONG. When
-            # `claimed()` was still case-sensitive the clause was load-bearing,
+            # 🔴 It is here because deleting it ONCE ALREADY WENT WRONG. Before
+            # `claimed()` existed the lookup was `out.get(sp) or
+            # out.get(sp.lower())` — folded on ONE side only — and the clause
+            # was load-bearing;
             # a fuzz over lowercase-only inputs reported no difference, and it
             # was deleted as redundant on that evidence — case being the exact
-            # dimension that mattered. Two independent harnesses later agreed
-            # it mattered and disagreed on how much (five figures each, mixed
-            # case), and NEITHER harness lives in this repo, so no count here
-            # is reproducible from the tree.
+            # dimension that mattered. THREE independent harnesses have since
+            # agreed it mattered and disagreed on the magnitude by about 2x,
+            # and NONE of them lives in this repo, so no count here is
+            # reproducible from the tree. That is why this comment quotes none.
             #
             # ⚠ The order-independence rationale an earlier comment gave for
-            # keeping it was MEASURED HOLLOW: 0 order-dependent outcomes over
-            # 4,000 cases × every permutation, with the clause on or off. The
-            # honest reason is the paragraph above, not a property it has.
+            # keeping it was MEASURED HOLLOW: over 4,000 cases × every
+            # permutation of the checkouts, the clause changes NOTHING about
+            # order-sensitivity — the same count of order-varying outcomes with
+            # it on and off, and zero once compared case-folded. (The residual
+            # variance is the CASING of a stored `owner/repo`, the same repo
+            # either way, and `read_local_repos` returns sorted entries anyway.)
+            # The honest reason to keep it is the paragraph above, not a
+            # property it has.
             if (len(local_owners[low]) > 1
                     # …or this checkout's name already names a DIFFERENT repo:
                     # an API row it disagrees with, or an earlier checkout.

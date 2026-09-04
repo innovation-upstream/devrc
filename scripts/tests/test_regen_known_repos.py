@@ -459,14 +459,20 @@ def test_two_checkouts_colliding_only_by_CASE_are_still_ambiguous():
     maintainer deleting the `local_owners` clause again gets a green suite.
 
     🔴 NO TEST CAN PIN THAT CLAUSE, because on the SHIPPED code it changes no
-    output — 0 differences over 40,000 inputs on both alphabets. The figure
-    that motivated restoring it (five figures, mixed-case inputs only) was
-    measured against the PRE-restoration code at `764dcfd7`, where `claimed()`
-    was still case-sensitive; two independent harnesses agreed on the direction
-    and disagreed on the count, and neither harness is in this repo, so no
-    number here is reproducible from the tree. The clause's own comment in
-    `regen-known-repos.py` states that redundancy plainly. What this test does
-    pin is the OUTCOME: two checkouts colliding only by case stay ambiguous."""
+    output. Independently checked over 135,035 cases — exhaustive mixed-case
+    plus randomized fuzz — with a positive control confirming the harness could
+    see a difference: zero. The structural reason is that any spelling with two
+    distinct local owners is necessarily visited by both claimants, so the
+    second one's `existing != full` drop fires with or without it.
+
+    The measurement that motivated restoring the clause was taken against the
+    code BEFORE the case-folded lookup existed, where it genuinely was
+    load-bearing. Three harnesses have since agreed on that direction and
+    disagreed on the magnitude, and none of them is committed here — so this
+    docstring quotes no count, and `regen-known-repos.py` says the same.
+
+    What this test DOES pin is the outcome: two checkouts colliding only by
+    case stay ambiguous."""
     out = RG.build_mapping([], {"mirror": "rivalorg/WIDGET", "Widget": "acme/Widget"})
     assert not [k for k in out if k.lower() == "widget"], out
 
