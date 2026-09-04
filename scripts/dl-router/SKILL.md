@@ -209,9 +209,13 @@ An image's own `src` is often a **downscaled copy from a resizing proxy**, which
 is why the anchor accessor goes FIRST in the list above: it is how this rule
 reaches the original. 🔴 **That accessor is a DESCENDANT query and it does not
 need a wrapping `<a>`.** `safeQuery` resolves each `element` with
-`container.querySelectorAll` (`player_buttons.js`), so an anchor that is merely
-somewhere inside `container` — a SIBLING of the image, which is the live shape —
-resolves fine. Do not delete it on the strength of the context-menu note below:
+`container.querySelectorAll` (`player_buttons.js`), so the anchor only has to be
+a descendant of `container` — it does not have to be an ancestor of the image.
+⚠ **Confirm your `container` actually encloses it.** What was measured is the
+NEGATIVE half only (0 ancestor `<a>` of 3); the origin anchor was nine levels
+away from the image, and whether it falls inside any particular `container`
+selector has never been measured. Do not delete this accessor on the strength
+of the context-menu note below:
 🔴 **the player-button path does NOT rewrite anything.** `playerDownload` hands
 its `mediaUrl` straight to the download API and never calls
 `originalFromPreview()`, so for THIS path the anchor accessor is the only route
@@ -242,6 +246,14 @@ a valid signature. Probed with both controls — the message's own origin anchor
 and was measured at zero points** — every video in the live route log was
 already on the origin host, so the rewrite simply does not fire for them. It
 *will* fire on a proxy-host video src, and that shape is unverified.
+
+### Player button details — everything below is about the BUTTON, not the menu
+
+🔴 The heading above closes the context-menu subsection. Without it, this
+block, the troubleshooting list and the DEPLOY ORDER note all read as
+context-menu guidance — and the context-menu path has no rules, no accessors
+and no buttons, so every word of it would be filed under a path it cannot
+apply to.
 
 **Important details**
 - The media URL is **signed and rotates** — `player_buttons.js` reads it **at

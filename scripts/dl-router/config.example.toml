@@ -149,10 +149,12 @@ max_jobs = 4
 # # a sibling <a> INSIDE the container, while a video's `src` is usually the
 # # original already. Put the accessor that resolves the BEST copy first.
 # #
-# # "sibling, inside the container" is exact, and it is why this works: each
-# # `element` is resolved with container.querySelectorAll, a DESCENDANT query,
-# # so the anchor does not have to wrap the image. On the chat site this was
-# # built for it never does -- measured, 0 ancestor <a> of 3 attachments.
+# # This works because each `element` is resolved with
+# # container.querySelectorAll -- a DESCENDANT query -- so the anchor does not
+# # have to wrap the image. On the chat site this was built for it never does:
+# # measured, 0 ancestor <a> of 3 attachments. What was NOT measured is whether
+# # that anchor falls inside any particular `container`; confirm yours encloses
+# # it.
 # #
 # # [site_rules."chat.example.test".player]
 # # container = "[class^=mediaWrapper]"

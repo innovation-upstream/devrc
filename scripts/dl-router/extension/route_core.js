@@ -779,8 +779,15 @@ export function correlateCapture(item, captures, opts = {}) {
       // neither `href` nor `mediaSrc` -- both of which hold what was on the
       // element -- and every Discord attachment fell to tier 3, the tier this
       // file documents as the fragile one. `onMenuClicked` stamps the url it
-      // actually hands to `chrome.downloads.download` here; the original two
-      // fields are left alone so nothing that reads them changes.
+      // resolved here; the original two fields are left alone so nothing that
+      // reads them changes.
+      //
+      // Precisely, because "the url it downloads" is wider than the code: the
+      // stamp runs BEFORE the streaming branch. On the ordinary path that url
+      // does go to `chrome.downloads.download`; for a manifest it goes to the
+      // sidecar's /fetch instead and no DownloadItem is ever created, so the
+      // stamp is inert there rather than wrong. Do not read this as "always a
+      // download".
       if ((c.href && urls.has(c.href))
         || (c.mediaSrc && urls.has(c.mediaSrc))
         || (c.downloadUrl && urls.has(c.downloadUrl))) {

@@ -525,7 +525,7 @@ test("the menu saves the original, not the proxy thumbnail in the src", async ()
   // This test SUPPLIES a `linkUrl`, which is why it kept passing while the
   // feature was inert: measured, a Discord image has no ancestor <a>, so a
   // real right-click never carries one -- the case below this one. Keep both:
-  // this exercise the swap, which is still correct wherever a browser does
+  // these exercise the swap, which is still correct wherever a browser does
   // supply a link. The comment here used to say the original sits "on the
   // wrapping <a href>", which is false and is why the swap looked sufficient.
   reset();
