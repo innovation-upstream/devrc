@@ -453,9 +453,50 @@ def test_a_DROPPED_name_does_not_survive_under_a_different_casing():
 
 
 def test_two_checkouts_colliding_only_by_CASE_are_still_ambiguous():
-    """The clause deleted as 'redundant' in the previous round. Differential
-    fuzz: identical to its absence over 40,000 lowercase-only inputs, 8,370
-    differences once any spelling carries uppercase — so the equivalence claim
-    was measured on the one alphabet that could not show the difference."""
+    """⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE FOR THE CLAUSE IT MENTIONS —
+    and this label is the finding, not a formality. It passes with EITHER
+    disjunct of that `if` removed, because it pins the disjunction, so a
+    maintainer deleting the `local_owners` clause again gets a green suite.
+
+    🔴 NO TEST CAN PIN THAT CLAUSE, because on the SHIPPED code it changes no
+    output — 0 differences over 40,000 inputs on both alphabets. The figure
+    that motivated restoring it (five figures, mixed-case inputs only) was
+    measured against the PRE-restoration code at `764dcfd7`, where `claimed()`
+    was still case-sensitive; two independent harnesses agreed on the direction
+    and disagreed on the count, and neither harness is in this repo, so no
+    number here is reproducible from the tree. The clause's own comment in
+    `regen-known-repos.py` states that redundancy plainly. What this test does
+    pin is the OUTCOME: two checkouts colliding only by case stay ambiguous."""
     out = RG.build_mapping([], {"mirror": "rivalorg/WIDGET", "Widget": "acme/Widget"})
     assert not [k for k in out if k.lower() == "widget"], out
+
+
+def test_an_ISSUES_DISABLED_checkout_does_not_make_its_NAMESAKE_unresolvable():
+    """🔴 `local_owners` is built from the FILTERED checkouts, and that choice
+    was unpinned: building it from the raw `local_repos` survived the suite and
+    is NOT equivalent — a repo excluded for having issues disabled would still
+    count as a second claimant and take the resolvable one down with it.
+
+    The real shape: a fork with issues disabled checked out beside the repo the
+    operator actually files issues against."""
+    out = RG.build_mapping(
+        [_row("acme/plotwidget", has_issues=False)],
+        # TWO checkouts sharing the bare name — one filtered out, one not. With
+        # only one, the excluded checkout never reaches the clause and the
+        # mutant is equivalent: the fixture has to make the FILTERED entry a
+        # potential second claimant for the choice of source to matter.
+        {"plotwidget-fork": "acme/plotwidget",
+         "plotwidget": "upstream/plotwidget"})
+    assert out.get("plotwidget") == "upstream/plotwidget", out
+
+
+def test_a_checkout_with_NO_api_row_is_written_in_BOTH_spellings():
+    """🔴 The local pass's dual-spelling write was unguarded — dropping the
+    lowercase half survived the suite while changing the majority of mixed-case
+    inputs. `mention_scan._resolve_repo` does an EXACT dict lookup, so a
+    canonical-case key alone means `plotwidget#12` silently stops resolving for
+    a checkout the operator has on disk. (The identical write in the API pass
+    was already guarded; this one was not.)"""
+    out = RG.build_mapping([], {"PlotWidget": "acme/PlotWidget"})
+    assert out.get("PlotWidget") == "acme/PlotWidget", out
+    assert out.get("plotwidget") == "acme/PlotWidget", out

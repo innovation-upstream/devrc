@@ -121,10 +121,13 @@ def build_mapping(api_repos: list[dict], local_repos: dict[str, str]) -> dict[st
     # a repo cloned via a lowercase URL (`acme/plotwidget`) looked unrelated to
     # the API's `acme/PlotWidget`, and a drop that popped only the two spellings
     # it knew about left OTHER casings resolving to a name just judged
-    # ambiguous. Measured by differential fuzz over 40,000 inputs: identical
-    # while every spelling is lowercase, 8,370 differences once any is not —
-    # which is exactly why "I mutated it and nothing changed" was the wrong
-    # evidence for calling one of these clauses redundant. It was not.
+    # ambiguous. Differential fuzz against the pre-fix code: IDENTICAL while
+    # every spelling is lowercase, differing in tens of percent of mixed-case
+    # inputs — which is exactly why "I mutated it and nothing changed" was the
+    # wrong evidence for calling one of these clauses redundant. ⚠ No exact
+    # count is quoted on purpose: two independent harnesses agreed on the
+    # direction and disagreed on the number, and neither is committed here, so
+    # a figure in this comment could not be re-derived from the tree.
     issues_off = {(row.get("full_name") or "").strip().lower()
                   for row in api_repos if not row.get("has_issues")}
 
@@ -163,18 +166,27 @@ def build_mapping(api_repos: list[dict], local_repos: dict[str, str]) -> dict[st
             if low in dropped:
                 continue
             existing = claimed(spelling)
-            # ⚠ THIS FIRST CHECK IS REDUNDANT TODAY, AND IT STAYS ANYWAY.
+            # ⚠ THIS FIRST CHECK IS REDUNDANT ON THIS CODE, AND STAYS ANYWAY.
             # Differential fuzz, 40,000 inputs per alphabet: disabling it
-            # changes NOTHING — 0 differences lowercase-only AND 0 mixed-case —
-            # because `claimed()` is case-insensitive and the loop is
-            # sequential, so whichever checkout writes a spelling first, the
-            # next disagreeing one sees it. It is kept because it is the only
-            # check that does not depend on ITERATION ORDER (`local_repos`
-            # comes from a filesystem scan), so the result stays stable if this
-            # loop is ever reordered. 🔴 An earlier round deleted a clause here
-            # on exactly this evidence and was WRONG — its fuzz varied only
-            # lowercase inputs, and case was the dimension that mattered. The
-            # claim above is measured on both.
+            # changes NOTHING — 0 differences on both — because `claimed()` is
+            # case-insensitive and the loop is sequential, so whichever
+            # checkout writes a spelling first, the next disagreeing one sees
+            # it. NO TEST CAN PIN IT for the same reason; the test that names
+            # it says so and is labelled an invariant guard.
+            #
+            # 🔴 It is here because deleting it ONCE ALREADY WENT WRONG. When
+            # `claimed()` was still case-sensitive the clause was load-bearing,
+            # a fuzz over lowercase-only inputs reported no difference, and it
+            # was deleted as redundant on that evidence — case being the exact
+            # dimension that mattered. Two independent harnesses later agreed
+            # it mattered and disagreed on how much (five figures each, mixed
+            # case), and NEITHER harness lives in this repo, so no count here
+            # is reproducible from the tree.
+            #
+            # ⚠ The order-independence rationale an earlier comment gave for
+            # keeping it was MEASURED HOLLOW: 0 order-dependent outcomes over
+            # 4,000 cases × every permutation, with the clause on or off. The
+            # honest reason is the paragraph above, not a property it has.
             if (len(local_owners[low]) > 1
                     # …or this checkout's name already names a DIFFERENT repo:
                     # an API row it disagrees with, or an earlier checkout.
