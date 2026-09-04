@@ -137,12 +137,21 @@ def test_the_resume_skill_is_where_it_is_expected():
 def test_the_skill_prescribes_the_offline_command_verbatim():
     """🔴 THE SHAPE PIN, and `--offline` is the load-bearing token in it.
 
-    Without `--offline` the tool falls through to the Postgres backend -- a path
-    NO test has ever exercised, whose sync timer ships disarmed
-    (`enableHandoffIndexSync = false`), and which would turn a working retrieval
-    step into a connection error at the worst moment in a session. A substring
-    check for `handoff_search.py` would not see that edit; a whole-string
-    comparison does.
+    Without `--offline` the tool falls through to the Postgres backend, and that
+    would turn a working retrieval step into a connection error at the worst
+    moment in a session. A substring check for `handoff_search.py` would not see
+    that edit; a whole-string comparison does.
+
+    🔴 THE REASON CHANGED ON 2026-09-04 AND IS NOW SHARPER, NOT WEAKER. The old
+    rationale was "no test has ever exercised that path, and its timer ships
+    disarmed (`enableHandoffIndexSync = false`)". The timer is now ARMED and the
+    live path HAS been exercised by hand (4647 rows written, `backend=postgres`
+    answering), so that half is retired. What replaces it is stronger, because it
+    does not depend on the index being empty: reaching Postgres needs a DSN read
+    via `kubectl`, and this repo leaves `KUBECONFIG` UNSET on purpose so a bare
+    `kubectl` cannot hit prod. A `/resume` session does not export it, so the
+    non-offline path raises `CalledProcessError` before it can answer -- measured,
+    not argued. `--offline` needs no cluster, no port-forward and no secret.
     """
     block = _block()
     normalised = _normalise(block)
