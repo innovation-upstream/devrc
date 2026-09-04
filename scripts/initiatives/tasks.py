@@ -417,9 +417,12 @@ def task_view(task: dict, base_url: str = "") -> dict:
     """One clawgate task → the small dict the board renders: `{id, title, status, open, url}`.
 
     `title` prefers the (newer) `title` field and falls back to `directory`, which is how
-    every current producer smuggles the title through (tag spec §9). `url` deep-links to the
-    task's card in clawgate (`{base}/tasks#task-<id>` — the card element carries
-    `id="task-<id>"`); it is "" when there's no id or no base. Pure, never raises."""
+    every current producer smuggles the title through (tag spec §9). `url` deep-links to
+    clawgate's server-rendered task page, `{base}/tasks/<id>` (`GET /tasks/{id}` →
+    `handleTaskDetail`) — a PATH, never a `#task-<id>` fragment: the fragment only resolved
+    for a card the board had already rendered, so a filtered, archived or collapsed task
+    landed at the top of /tasks. It is "" when there's no id or no base. Pure, never
+    raises."""
     t = task or {}
     tid = t.get("id")
     if isinstance(tid, bool) or not isinstance(tid, int):
@@ -431,7 +434,7 @@ def task_view(task: dict, base_url: str = "") -> dict:
         "title": title,
         "status": str(t.get("status") or ""),
         "open": is_open(t),
-        "url": f"{base}/tasks#task-{tid}" if (base and tid is not None) else "",
+        "url": f"{base}/tasks/{tid}" if (base and tid is not None) else "",
     }
 
 

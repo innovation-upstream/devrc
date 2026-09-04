@@ -117,9 +117,15 @@ prune anything from a run that printed one.
   trigger, every **label word**, and every `search_term`, so `'bench'` ⊂
   `'workbench'`, `'la'` ⊂ `'nebula'`, `'ask'` ⊂ `'task'`. A `:cgt` labelled
   "task" would have silently hijacked all 58 of `:acq`'s `'ask'` fires. Two
-  consequences: (a) when two snippets both spell the same word, **no**
-  `search_terms` edit makes a bare query resolve — one of them must stop
-  spelling it; (b) always gate with `--replay --config <candidate>` and **diff
+  consequences: (a) when two snippets both **DECLARE** the same word (in
+  `search_terms` or the trigger), **no** `search_terms` edit makes a bare query
+  resolve — one of them must stop spelling it, or the word needs an
+  `_AMBIGUOUS_TERM_OWNER` entry. 🔴 **But a snippet that spells the word only in
+  its LABEL no longer competes**: `_attribute` gives DECLARED matches precedence
+  over label-only ones, so the fix for that case IS a `search_terms` edit — add
+  the word to the snippet that should own it. The picker still lists both rows
+  either way; precedence is attribution-only. (b) always gate with
+  `--replay --config <candidate>` and **diff
   it against the deployed config for REGRESSIONS**, not just for new
   resolutions. Validate that diff with a planted mutant before believing a
   clean result.
@@ -128,11 +134,17 @@ prune anything from a run that printed one.
   invisible to it, so "0 regressions" from `--replay` is a claim about the
   observed stream, not about the config. On 2026-08-19 it reported 0 while a new
   `:pdt` label had taken `'dispatch'` away from `:acq`; the repo's own pinned
-  list caught it. **Always also run
-  `pytest scripts/collector/keylog/tests/test_espanso_detect.py`**, which pins
-  `_EXISTING_RESOLUTIONS` — and add the new snippet's own terms to it.
-  **Pin a term the snippet's LABEL does not spell**, or the guard passes with
-  every `search_terms` entry deleted (three such pins shipped on 2026-08-19).
+  list caught it. 🔴 **THAT BACKSTOP NO LONGER EXISTS.** The live-config guards
+  — `_EXISTING_RESOLUTIONS` and the other nine — were REMOVED 2026-09-03 because
+  they re-broke on every snippet edit. `pytest
+  scripts/collector/keylog/tests/test_espanso_detect.py` still passes and still
+  covers detector LOGIC, but it reads no config, so running it after a snippet
+  edit proves NOTHING about attribution, and there is no longer a list to add
+  the new snippet's terms to. **A 2026-08-19-class regression would now ship
+  silently past BOTH `--replay` and that pytest run.** Until something replaces
+  it, check attribution BY HAND for any term the new snippet's label or
+  `search_terms` spell — `--gate` (step 4) reports ambiguity but does not grade
+  it, so it is not a substitute either.
   🔴 **Neither sweeps the whole input space on its own — that is what
   `--gate` is for** (step 4). It replaced the hand-rolled prefix-universe
   diff this rule used to describe; do not re-derive it by hand.

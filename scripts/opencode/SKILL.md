@@ -101,6 +101,18 @@ three options, in order of preference:
 There is no override flag. The failure it prevents is a silent exit 0, which is
 the one shape nobody notices.
 
+🔴 **It scans the brief's PROSE, not only its instructions — so the sentence
+warning the agent OFF a path is itself a path, and gets refused.** Measured
+2026-09-03: a corrected brief opened with *"never write to `/tmp`"*, cited *"the
+previous attempt screenshotted to `/tmp`"*, and quoted `external_directory
+(/tmp/*)` as the evidence. Preflight counted three mentions and refused —
+`rc 3`, `paths examined: 2`, `[brief] /tmp`. It is a textual scan with no notion
+of *"this path is named in order to be forbidden"*, and the refusal reads as
+absurd until you see that. **Write the prohibition without writing the path** —
+"the system temp directory", "any absolute path". That is a fourth fix belonging
+beside the three above, and it is the only one that applies when nothing is
+actually being pointed at.
+
 Read the three verdict lines literally — they are different claims:
 
 - `external paths : none — all N examined resolve under --dir` — checked, clean.
@@ -136,6 +148,13 @@ gate people learn to click through.
   heredoc otherwise dispatches a run that does nothing and exits 0.
 - Assume no follow-up questions are possible. opencode is unattended; every
   `ask` is an auto-reject, not a prompt.
+- 🔴 **If the run will WRITE anything — a screenshot, a dump, a scratch file —
+  say WHERE, as a relative path under `--dir`, and pre-create the directory.**
+  This is the half preflight structurally cannot cover: failure mode 1 above
+  happened with a brief that named **no filesystem path at all**, so there was
+  nothing to refuse and the agent invented the temp path at runtime. `external
+  paths : NOT EXAMINED` is exactly what that brief scored. **Naming no path is
+  not the safe option — it is the unmeasured one.**
 
 ## Files
 

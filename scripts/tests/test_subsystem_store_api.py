@@ -5817,9 +5817,19 @@ class TestPhaseOneScope:
     # `len(parts) == arity` mutated to `>=` once survived 318 tests on the read
     # side, and the tail is the only thing that stops `POST entry/a/b/anything`
     # from dispatching as an append.
+    #
+    # ⚠ `PUT entry` MOVED FROM `_replace_entry` TO `_put_entry` (2026-09-03) and
+    # the route set did NOT grow. That is the point of the rename: PUT now
+    # carries TWO operations — replace behind `If-Match`, CREATE behind
+    # `If-None-Match: *` — and `_put_entry` is the arbitration between them.
+    # Adding a second ROW for the create would have meant two URLs for one noun;
+    # renaming the handler is what forces this ledger to be re-read anyway, which
+    # is the property the guard is for. The two halves are still separately
+    # bound methods (`_replace_entry`, `_create_entry`), and
+    # `TestPUTCreatesANewEntry` below is what proves the arbitration.
     WRITE_ROUTES: "dict[tuple[str, str], tuple[str, int, tuple[str, ...]]]" = {
         ("POST", "entry"): ("_append_bullet", 4, ("bullets",)),
-        ("PUT", "entry"): ("_replace_entry", 3, ()),
+        ("PUT", "entry"): ("_put_entry", 3, ()),
     }
 
     def test_the_write_route_ledger_is_the_whole_write_route_set(self):
@@ -13807,6 +13817,409 @@ class TestIfMatchIsRequiredAndChecked:
         assert path.read_bytes() == first_data
 
 
+# =============================================================================
+# CREATE — `PUT … If-None-Match: *`. New fixtures, pairwise distinct from every
+# constant above so an assertion cannot pass by agreeing with a neighbour.
+# =============================================================================
+
+# A slug that exists in NO scope of `scoped_store`.
+NEW_REF = "kelp-harvester"
+NEW_NUANCE = "- 2026-05-11: the rake arm jams when the swell tops two metres."
+# A scope the token MAY write and the store has no directory for. It is what
+# makes "a scope's first entry" reachable at all.
+FRESH_SCOPE = "tidal-flat"
+FRESH_REF = "sluice-gate"
+FRESH_NUANCE = "- 2026-05-12: the penstock seal weeps below four degrees."
+# 🔴 A ref that is a legal path component and normalizes to NOTHING. It is the
+# only input that reaches the empty-slug guard: every earlier check accepts it.
+EMPTY_SLUG_REF = "___"
+ZACH_PLUS = _scoped_record(ZACH_TOKEN, "zach", ALLOW_SCOPE, FRESH_SCOPE)
+
+
+def create_put(base: str, scope: str, ref: str, data: bytes, *, token=ZACH_TOKEN,
+               headers: "dict[str, str] | None" = None):
+    """One `PUT /entry/<scope>/<ref>` with `If-None-Match: *` unless overridden."""
+    return fetch(
+        entry_url(base, scope, ref), token=token, method="PUT", data=data,
+        extra_headers={"If-None-Match": "*"} if headers is None else headers,
+    )
+
+
+class TestPUTCreatesANewEntry:
+    """🔴 THE STORE HAD NO CREATE VERB, AND THE PROTOCOL ROUTED AROUND IT.
+
+    `POST .../bullets` and `PUT` with `If-Match` both resolve an EXISTING ref, so
+    a brand-new entry could only be made by `seed.sh` or by a host writing into
+    its own local tree — and once reads moved to the pod cache, a locally-created
+    entry was invisible to every reader on every host. Measured 2026-09-02: five
+    whole entries, one machine.
+
+    Every assertion here is on the BYTES on disk and on the exact wire tokens, in
+    the shape the sibling `TestIfMatchIsRequiredAndChecked` uses, because a
+    status code alone cannot tell a create that landed from one that did not.
+    """
+
+    def _body(self, ref: str, scope: str, nuance: str) -> bytes:
+        return _entry(ref, scope, nuance=nuance).encode()
+
+    def _path(self, root: Path, scope: str, ref: str) -> Path:
+        return root / scope / f"{ref}.md"
+
+    def test_a_NEW_ref_is_CREATED_and_the_bytes_land(self, scoped_store: Path):
+        """The positive control, first: every refusal below is only evidence if
+        the same request against an absent ref succeeds."""
+        target = self._path(scoped_store, ALLOW_SCOPE, NEW_REF)
+        assert not target.exists(), "the fixture already holds the ref under test"
+        data = self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = create_put(base, ALLOW_SCOPE, NEW_REF, data)
+            lines = await_audit(audit, 1)
+        assert code == 201, (code, headers, body)
+        assert headers["X-Store-Status"] == "created"
+        assert body == b"created\n"
+        assert target.read_bytes() == data
+        assert headers["ETag"] == f'"{api.entry_revision(data)}"'
+        assert any("result=201" in ln and "status=created" in ln for ln in lines), lines
+
+    def test_the_created_entry_is_SERVED_by_recall(self, scoped_store: Path):
+        """🔴 THE POINT OF THE WHOLE CHANGE, and it is a different claim from
+        "the file is on disk": the defect being fixed is content that exists and
+        reaches no reader. So the create is followed by a READ through the same
+        server, and the read must show it."""
+        data = self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            before = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )[2]
+            assert NEW_REF.encode() not in before, "the fixture already serves it"
+            assert create_put(base, ALLOW_SCOPE, NEW_REF, data)[0] == 201
+            after = fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN)[2]
+        assert NEW_REF.encode() in after
+
+    def test_an_EXISTING_ref_is_412_already_exists_and_the_bytes_are_UNTOUCHED(
+        self, scoped_store: Path
+    ):
+        """🔴 THE WHOLE REASON THE PRECONDITION IS `If-None-Match` RATHER THAN
+        NOTHING. A create that overwrites is a `PUT` with the guard removed."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        data = self._body(entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, NEW_NUANCE)
+        assert data != before
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = create_put(
+                base, ALLOW_SCOPE, entry_ref(ALLOW_SCOPE), data
+            )
+            lines = await_audit(audit, 1)
+        assert code == 412, (code, body)
+        assert headers["X-Store-Status"] == "already-exists"
+        assert path.read_bytes() == before, "a create OVERWROTE an existing entry"
+        assert any(
+            "result=412" in ln and "status=already-exists" in ln for ln in lines
+        ), lines
+
+    def test_the_already_exists_token_is_NOT_the_If_Match_412_token(
+        self, scoped_store: Path
+    ):
+        """🔴 TWO OUTCOMES, ONE STATUS CODE, OPPOSITE REMEDIES. A stale
+        `If-Match` means "re-sync and re-apply" and a retry is right; an
+        `If-None-Match: *` on an existing entry means "use put/append" and the
+        identical retry loops forever. The code cannot carry that, so the token
+        must — and the two tokens are asserted DIFFERENT here rather than each
+        asserted equal to itself somewhere else."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._body(entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, NEW_NUANCE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            _c1, exists_headers, _b1 = create_put(
+                base, ALLOW_SCOPE, entry_ref(ALLOW_SCOPE), data
+            )
+            _c2, stale_headers, _b2 = fetch(
+                entry_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="PUT",
+                data=data, extra_headers={"If-Match": '"0000000000000000"'},
+            )
+        assert _c1 == _c2 == 412, (_c1, _c2)
+        assert exists_headers["X-Store-Status"] == "already-exists"
+        assert stale_headers["X-Store-Status"] == "precondition-failed"
+        assert exists_headers["X-Store-Status"] != stale_headers["X-Store-Status"]
+        assert path.read_bytes() != data
+
+    def test_a_ref_answered_by_an_ALIAS_is_already_exists_too(self, scoped_store: Path):
+        """🔴 `If-None-Match: *` ASKS ABOUT THE TARGET RESOURCE, and the resource
+        `entry/<scope>/<ref>` names is whatever a READ of that ref returns.
+        Creating `<ref>.md` beside an entry that already answers `<ref>` through
+        `aliases:` would make that ref permanently AMBIGUOUS — the store's own
+        400 — for every later reader. A create that only checked the FILENAME
+        would sail past this."""
+        alias = "weed-cutter"
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        path.write_text(
+            path.read_text().replace(
+                f"scope: {ALLOW_SCOPE}\n",
+                f"scope: {ALLOW_SCOPE}\naliases: [{alias}]\n",
+            )
+        )
+        before = path.read_bytes()
+        data = self._body(alias, ALLOW_SCOPE, NEW_NUANCE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(base, ALLOW_SCOPE, alias, data)
+        assert code == 412, (code, body)
+        assert headers["X-Store-Status"] == "already-exists"
+        assert not (scoped_store / ALLOW_SCOPE / f"{alias}.md").exists()
+        assert path.read_bytes() == before
+
+    def test_a_MALFORMED_file_at_the_name_is_NOT_overwritten(self, scoped_store: Path):
+        """🔴 THE CASE ONLY THE FILESYSTEM CAN SEE. `load_store` collects a
+        malformed entry onto `index.malformed`, so `resolve_ref_tiered` returns
+        None for it — a create that trusted the index alone would decide the name
+        was free and destroy the file. `os.link` is what refuses."""
+        squatter = scoped_store / ALLOW_SCOPE / f"{NEW_REF}.md"
+        squatter.write_text("this file has no front matter and never parsed\n")
+        before = squatter.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(
+                base, ALLOW_SCOPE, NEW_REF,
+                self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE),
+            )
+        assert code == 412, (code, body)
+        assert headers["X-Store-Status"] == "already-exists"
+        assert squatter.read_bytes() == before, "a create destroyed a malformed entry"
+
+    def test_a_writer_that_never_took_the_LOCK_still_cannot_be_clobbered(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """🔴 THE RACE, DRIVEN THROUGH `_WRITE_INTERLEAVE` AT THE ONE POINT IT
+        MATTERS: after the temp file is written, before the name is claimed. The
+        interloper here writes DIRECTLY to disk and takes no `flock` — which is
+        `seed.sh`, an operator's editor, or a second pod. A `path.exists()` check
+        under the lock would have passed and the second write would have won.
+        """
+        target = self._path(scoped_store, ALLOW_SCOPE, NEW_REF)
+        interloper = b"the other writer got there first\n"
+
+        def land_first() -> None:
+            monkeypatch.setattr(api, "_WRITE_INTERLEAVE", lambda: None)
+            target.write_bytes(interloper)
+
+        monkeypatch.setattr(api, "_WRITE_INTERLEAVE", land_first)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(
+                base, ALLOW_SCOPE, NEW_REF,
+                self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE),
+            )
+        monkeypatch.undo()
+        assert code == 412, (code, body)
+        assert headers["X-Store-Status"] == "already-exists"
+        assert target.read_bytes() == interloper, "the create clobbered the winner"
+
+    def test_a_scopes_FIRST_entry_creates_the_directory(self, tmp_path: Path):
+        """🔴 THE GENUINE FIRST-ENTRY CASE. A scope the caller may write that the
+        store has no directory for is how this store gained EVERY scope it has;
+        refusing it would leave the create verb unable to do the one thing the
+        retired local protocol could."""
+        with store_siting.store_root(tmp_path) as root:
+            store = _build_store(root, {ALLOW_SCOPE: KELP_NUANCE})
+            assert not (store / FRESH_SCOPE).exists()
+            data = self._body(FRESH_REF, FRESH_SCOPE, FRESH_NUANCE)
+            with running(store, tokens=(ZACH_PLUS,)) as (base, _):
+                code, headers, body = create_put(base, FRESH_SCOPE, FRESH_REF, data)
+            assert code == 201, (code, body)
+            assert headers["X-Store-Status"] == "created"
+            assert (store / FRESH_SCOPE / f"{FRESH_REF}.md").read_bytes() == data
+
+    def test_a_scope_OUTSIDE_the_allowlist_is_the_SAME_404(self, scoped_store: Path):
+        """🔴 THE ENUMERATION PROPERTY SURVIVES THE NEW VERB. The create path
+        cannot reuse `_resolve_writable` (it has no existing entry to resolve),
+        so this is exactly where a second, chattier "is this scope yours" answer
+        would grow. A refusal distinguishable from an absence is an enumeration
+        API on a write verb just as on a read."""
+        before = sorted(p.name for p in (scoped_store / DENY_SCOPE).iterdir())
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            denied = create_put(
+                base, DENY_SCOPE, NEW_REF, self._body(NEW_REF, DENY_SCOPE, NEW_NUANCE)
+            )
+            absent = create_put(
+                base, "no-such-scope-anywhere", NEW_REF,
+                self._body(NEW_REF, "no-such-scope-anywhere", NEW_NUANCE),
+            )
+        assert denied[0] == absent[0] == 404, (denied[0], absent[0])
+        assert denied[1]["X-Store-Status"] == absent[1]["X-Store-Status"] == "not-found"
+        assert denied[2] == absent[2] == b"not found\n"
+        assert sorted(p.name for p in (scoped_store / DENY_SCOPE).iterdir()) == before
+        assert not (scoped_store / "no-such-scope-anywhere").exists()
+
+    def test_bytes_the_LOADER_would_reject_are_422_and_the_name_stays_FREE(
+        self, scoped_store: Path
+    ):
+        """🔴 VALIDATED THROUGH THE READER'S OWN MAPPING, and validated BEFORE
+        the name is claimed. A create that landed a MALFORMED file would be worse
+        than a replace that did: the ref keeps resolving to nothing while the
+        file occupies the name, so the next create gets a 412 for a file nobody
+        can read. The second half — the ref is still free — is what makes a fixed
+        body retryable."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(
+                base, ALLOW_SCOPE, NEW_REF, b"no front matter, not an entry\n"
+            )
+            assert code == 422, (code, body)
+            assert headers["X-Store-Status"] == "entry-shape"
+            assert not self._path(scoped_store, ALLOW_SCOPE, NEW_REF).exists()
+            good = self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE)
+            assert create_put(base, ALLOW_SCOPE, NEW_REF, good)[0] == 201
+        assert self._path(scoped_store, ALLOW_SCOPE, NEW_REF).read_bytes() == good
+
+    def test_a_body_whose_service_does_not_match_the_ref_is_422(
+        self, scoped_store: Path
+    ):
+        """The filename comes from the REF and never from the body, so a body
+        naming a different `service:` is the loader's own filename/slug
+        disagreement — and an entry no ref could reach is exactly what that check
+        exists to prevent."""
+        data = self._body("some-other-slug", ALLOW_SCOPE, NEW_NUANCE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(base, ALLOW_SCOPE, NEW_REF, data)
+        assert code == 422, (code, body)
+        assert headers["X-Store-Status"] == "entry-shape"
+        assert not self._path(scoped_store, ALLOW_SCOPE, NEW_REF).exists()
+        assert not self._path(scoped_store, ALLOW_SCOPE, "some-other-slug").exists()
+
+    def test_a_ref_that_normalizes_to_NOTHING_is_400(self, scoped_store: Path):
+        """`___` is a legal `SAFE_PATH_COMPONENT` and normalizes away entirely,
+        so it passes every earlier check and reaches the empty-slug guard. It
+        names no entry, and `.md` alone is a dotfile no walker would ever
+        report."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = create_put(
+                base, ALLOW_SCOPE, EMPTY_SLUG_REF,
+                self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE),
+            )
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"non-empty slug" in body
+        assert not (scoped_store / ALLOW_SCOPE / ".md").exists()
+
+    def test_no_TEMP_FILE_is_left_behind_by_a_refusal(self, scoped_store: Path):
+        """A `.cairn-*.tmp` is invisible to every walker, so nothing would ever
+        report one and nothing would clean it up."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            create_put(base, ALLOW_SCOPE, NEW_REF, b"not an entry\n")
+            create_put(
+                base, ALLOW_SCOPE, entry_ref(ALLOW_SCOPE),
+                self._body(entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, NEW_NUANCE),
+            )
+            create_put(
+                base, ALLOW_SCOPE, NEW_REF,
+                self._body(NEW_REF, ALLOW_SCOPE, NEW_NUANCE),
+            )
+        leftovers = sorted(
+            p.name for p in (scoped_store / ALLOW_SCOPE).iterdir()
+            if p.name.startswith(".cairn-")
+        )
+        assert leftovers == [], leftovers
+        assert (scoped_store / ALLOW_SCOPE / f"{NEW_REF}.md").stat().st_nlink == 1
+
+
+class TestThePUTPreconditionLadder:
+    """🔴 ONE ROUTE NOW CARRIES TWO OPERATIONS, SO THE ARBITRATION IS ITS OWN
+    SURFACE. Each case below is reachable by a request every EARLIER case
+    accepts, which is the same ladder discipline `_bullet_request_problem`'s
+    guards are built to — a test that went red because a different clause fired
+    would still be green with the clause it names deleted.
+
+    The `428` case is the one that must not have been widened: adding a create
+    half is exactly how "a PUT with no precondition is refused" quietly becomes
+    "a PUT with no precondition creates".
+    """
+
+    def _data(self, scope: str) -> bytes:
+        return _entry(entry_ref(scope), scope, nuance=f"- 2026-05-13: {BULLET_C}").encode()
+
+    def _put(self, base: str, headers: "dict[str, str]", scope=ALLOW_SCOPE, ref=None):
+        return fetch(
+            entry_url(base, scope, ref), token=ZACH_TOKEN, method="PUT",
+            data=self._data(scope), extra_headers=headers,
+        )
+
+    def test_NEITHER_precondition_is_still_428_and_does_NOT_create(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, {})
+            fresh = self._put(base, {}, ref=NEW_REF)
+        assert code == 428, (code, body)
+        assert headers["X-Store-Status"] == "precondition-required"
+        assert b"If-None-Match: *" in body, (
+            "the 428 must name the create form too, or a caller cannot find it"
+        )
+        assert path.read_bytes() == before
+        assert fresh[0] == 428, fresh
+        assert not (scoped_store / ALLOW_SCOPE / f"{NEW_REF}.md").exists()
+
+    def test_BOTH_preconditions_together_is_400_and_neither_is_chosen(
+        self, scoped_store: Path
+    ):
+        """🔴 A CONTRADICTION IS REFUSED, NOT RESOLVED. `If-Match: <rev>` says it
+        exists and is exactly this; `If-None-Match: *` says it does not exist.
+        Picking one would be guessing which of two mutually exclusive intents the
+        caller meant, on the verb that can destroy content."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        revision = api.entry_revision(before)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(
+                base, {"If-Match": revision, "If-None-Match": "*"}
+            )
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"contradictory" in body
+        assert path.read_bytes() == before, (
+            "a contradictory PUT was resolved in favour of one header"
+        )
+
+    @pytest.mark.parametrize("value", ['"0000000000000000"', 'W/"abc", "def"', ""])
+    def test_an_If_None_Match_that_is_not_STAR_is_400(
+        self, scoped_store: Path, value: str
+    ):
+        """🔴 THE LIST FORM IS REFUSED RATHER THAN IMPLEMENTED. On a PUT,
+        "proceed only if the current representation matches none of these" means
+        "overwrite unless it is one of the revisions I name" — a blind overwrite
+        of every OTHER revision, which is the lost update `If-Match` exists to
+        refuse, spelled backwards."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, {"If-None-Match": value})
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert path.read_bytes() == before
+
+    def test_If_Match_STAR_stays_refused_and_the_refusal_NAMES_the_create_form(
+        self, scoped_store: Path
+    ):
+        """`*` on `If-Match` requires the entry to EXIST, so it is not a spelling
+        of the create case — but it is the header a caller reaching for one would
+        try first, so the refusal says where to go."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, {"If-Match": "*"})
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"If-None-Match: *" in body
+
+    def test_a_REPLACE_still_works_through_the_same_route(self, scoped_store: Path):
+        """The regression control for the rename: `_put_entry` is new code in
+        front of an unchanged `_replace_entry`, and a create half that broke the
+        replace half would be a strictly worse trade."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._data(ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(
+                base, {"If-Match": api.entry_revision(path.read_bytes())}
+            )
+        assert code == 200, (code, headers)
+        assert headers["X-Store-Status"] == "replaced"
+        assert path.read_bytes() == data
+
+
 class TestTheAppendRequestIsValidated:
     """Every clause of `_bullet_request_problem` is reachable by an input every
     earlier clause accepts, and each is asserted on its OWN sentence — a test
@@ -17197,7 +17610,16 @@ _AUDITS_AFTER_RESPONDING = frozenset({"_backstop"})
 # `_respond(...)`/`_unauthorized()` they describe. A census, so DELETING a call
 # site is as loud as reordering one — a route that stops auditing is the failure
 # this whole section is about, and an offender list of zero cannot see it.
-_AUDIT_BEFORE_RESPOND_PAIRS = 33
+# 33 -> 42 on 2026-09-03, when `PUT` grew its create half. The nine NEW pairs are
+# all in `_put_entry`/`_create_entry`/`_entry_exists`: the both-preconditions 400,
+# the non-`*` `If-None-Match` 400, the empty-slug 400, the ambiguous-ref 400, the
+# `already-exists` 412, the `entry-shape` 422, two `store-unreachable` 503s and
+# the `created` 201. The three refusals that MOVED out of `_replace_entry` into
+# `_put_entry` (428, `If-Match: *`, empty `If-Match`) are the same pairs in a new
+# home and are not part of the delta. 🔴 EVERY REQUEST THAT CAN NOW BE ANSWERED
+# IS STILL AUDITED — the point of this census is that a route added without a
+# record fails here rather than going quiet in production.
+_AUDIT_BEFORE_RESPOND_PAIRS = 42
 
 
 def _respond_names() -> "frozenset[str]":

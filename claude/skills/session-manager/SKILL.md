@@ -1,6 +1,6 @@
 ---
 name: session-manager
-description: "Live cross-host view of every tmux window on workbench + laptop — which have Claude Code running, what each is doing, which ones are WAITING ON A HUMAN (asked a question / blocked on a modal / out of context), how stale it is, plus the clawgate approval queue, recent agent sessions, and UNSENT PROMPTS — text typed into a window and never sent. Use for: is anything waiting on me, active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy/blocked, did I leave anything half-typed / unsent."
+description: "Live cross-host view of every tmux window on workbench + laptop — which have Claude Code running, what each is doing, which ones are WAITING ON A HUMAN (asked a question / blocked on a modal / out of context), how stale it is, plus the clawgate approval queue, recent agent sessions, and UNSENT PROMPTS. Use for: is anything waiting on me, active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy/blocked, did I leave anything half-typed / unsent."
 ---
 
 # session-manager — cross-host tmux + agent activity
@@ -33,6 +33,7 @@ column — **how it is counted**) are different, and `caveats.kind_scope` carrie
 | `--no-ch` | skip ClickHouse — drops the **largest non-row block** (17.4 KB below), which answers a different question |
 | `--no-capture` | skip the pane scrape; **every** `waiting_probable` AND `unsent_prompt` becomes `null` (both roll-ups `null`, never `0`) |
 | `--no-ledger` | skip the ledger read → **no age, no session id** on any row |
+| `--no-repo` | skip the per-host repo probe; every `repo` becomes `null` with `repo_status: skipped` — never `not_a_repo` |
 | `--fuzzyclaw` | the task-file join, **OFF by default** (see below) |
 
 `--json`, `--no-fuzzyclaw`, `--plain`, `--stale-threshold`, `--lines`, and what each drops:

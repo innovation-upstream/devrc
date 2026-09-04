@@ -141,12 +141,41 @@ def test_bare_hash_number_returns_a_candidate_for_both_platforms():
     assert {c["end"] for c in cands} == {len("fixed in #370")}
 
 
-def test_the_clawgate_candidate_anchors_on_the_task_cards_own_dom_id():
-    """clawgate DOES have a browser UI (GET /tasks -> handleIndex) and each card
-    carries `id="task-<n>"` — internal/ui/notes.go, `ID("task-"+ids)`, pinned by
-    its own notes_test.go as a stable card id."""
+def test_the_clawgate_candidate_points_at_the_task_details_page():
+    """clawgate serves a real, server-rendered page per task at `GET /tasks/{id}`
+    (internal/api/server.go, `s.handleTaskDetail`), so the candidate is a PATH,
+    not a fragment on the board."""
     (clawgate, _github) = MS.scan_mentions("#370")
-    assert clawgate["url"] == "https://clawgate.zacx.dev/tasks#task-370"
+    assert clawgate["url"] == "https://clawgate.zacx.dev/tasks/370"
+
+
+def test_the_clawgate_url_carries_NO_fragment():
+    """🔴 The regression guard for a partial revert. `#task-<id>` was the old
+    pattern and it resolved only for a card the board had already rendered; the
+    details page has no such precondition. A `#` anywhere in the URL means some
+    caller is back on the fragment, so pin its ABSENCE rather than only pinning
+    the new string — a half-reverted `…/tasks/370#task-370` passes an `endswith`
+    check and fails this one."""
+    (clawgate, _github) = MS.scan_mentions("#370")
+    assert "#" not in clawgate["url"], clawgate["url"]
+    assert "#" not in MS.clawgate_url("370")
+    assert not MS.CLAWGATE_TASKS_URL.endswith("/")
+
+
+def test_the_clawgate_url_round_trips_a_multi_digit_id():
+    """The id is interpolated whole, never truncated or re-parsed. Distinct
+    digit-counts, and no digit repeated across the cases, so a mutation that
+    slices or reformats the id cannot land on the expected string by accident."""
+    for ident, expected in (
+        ("7", "https://clawgate.zacx.dev/tasks/7"),
+        ("42", "https://clawgate.zacx.dev/tasks/42"),
+        ("370", "https://clawgate.zacx.dev/tasks/370"),
+        ("10593", "https://clawgate.zacx.dev/tasks/10593"),
+    ):
+        assert MS.clawgate_url(ident) == expected
+        (clawgate, _github) = MS.scan_mentions(f"#{ident}")
+        assert clawgate["url"] == expected, ident
+        assert clawgate["id"] == ident
 
 
 def test_a_bare_number_gets_a_github_url_only_from_a_supplied_repo():

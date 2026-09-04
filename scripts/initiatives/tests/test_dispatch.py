@@ -426,4 +426,4 @@ def test_dispatched_task_joins_back_and_ARMS_the_guard_end_to_end():
     linked = tasks.group_by_slug([created], "http://cg.test:30302")
     assert list(linked) == ["initiative-task-links"] == [view["slug"]]
     assert tasks.open_task_count(linked[view["slug"]]) == 1      # → the guard arms
-    assert linked[view["slug"]][0]["url"] == "http://cg.test:30302/tasks#task-4242"
+    assert linked[view["slug"]][0]["url"] == "http://cg.test:30302/tasks/4242"

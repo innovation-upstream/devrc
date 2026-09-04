@@ -60,6 +60,12 @@ Topic argument (optional): `$ARGUMENTS`.
    ```
    A hit means read those commits before re-deriving anything. The cost is one command; the cost of skipping it is a whole session.
 
+   🔴 **And ask whether ANOTHER doc already ruled it out** — the `Ruled out:` bullets scattered across the whole handoff corpus are what stop you re-running a probe someone already ran, and they are why the index is section-grained (~2 s):
+   ```bash
+   python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "<the open item, in its own words>" --limit 3
+   ```
+   **Keep `--offline`** — it answers from git refs with **no database**; dropping it silently starts requiring one that no test has ever exercised. Every response carries a recall banner and the literal `indexed_docs=N indexed_sections=M`: a hit is a **POINTER TO VERIFY**, never a current reading, and it may describe a gotcha already fixed. 🔴 **A zero is not automatically an answer** — the tool names which zero it got and exits non-zero for the four that are not readings: **3** broken index (nothing was ever indexed) · **4** empty scope (your filter selected no rows) · **6** unmeasurable corpus (the repos did not resolve) · **7** the repos resolved and derived zero handoff docs. Only `NO MATCH` at rc **0** means the corpus was asked and is silent. **Non-blocking:** on any non-zero, print the stderr line, say retrieval was unavailable, and carry on with the item.
+
 4. **Surface what the subsystem index already records for this repo** (~1 command):
 
    ```bash

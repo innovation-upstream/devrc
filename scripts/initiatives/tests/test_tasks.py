@@ -127,7 +127,31 @@ def test_task_view_shape_and_clawgate_deep_link():
     v = tasks.task_view(_task(42, ["initiative:a"], status="in_progress", directory="do the thing"),
                         "http://cg.test:30302/")
     assert v == {"id": 42, "title": "do the thing", "status": "in_progress", "open": True,
-                 "url": "http://cg.test:30302/tasks#task-42"}
+                 "url": "http://cg.test:30302/tasks/42"}
+
+
+def test_task_view_url_is_a_page_path_with_NO_fragment():
+    """🔴 Regression guard against a partial revert to `{base}/tasks#task-<id>`.
+    The fragment only ever resolved for a card the board had already rendered
+    (filtered, archived or collapsed tasks landed at the top of /tasks); the
+    server-rendered `GET /tasks/{id}` page has no such precondition. Pinned as an
+    ABSENCE — `…/tasks/42#task-42` would satisfy an `endswith` check on the new
+    form — and the WHOLE string is pinned above, so a reword cannot walk it."""
+    v = tasks.task_view(_task(42), "http://cg.test:30302")
+    assert "#" not in v["url"], v["url"]
+    assert v["url"] == "http://cg.test:30302/tasks/42"
+
+
+def test_task_view_round_trips_a_multi_digit_id():
+    """Ids of four distinct digit-lengths, none a prefix or suffix of another, so
+    a mutant that slices or reformats the id cannot produce the expected string."""
+    for tid, expected in ((7, "http://cg.test:30302/tasks/7"),
+                          (42, "http://cg.test:30302/tasks/42"),
+                          (370, "http://cg.test:30302/tasks/370"),
+                          (10593, "http://cg.test:30302/tasks/10593")):
+        v = tasks.task_view(_task(tid), "http://cg.test:30302/")
+        assert v["url"] == expected, tid
+        assert v["id"] == tid
 
 
 def test_task_view_prefers_title_over_directory_when_present():
@@ -235,7 +259,7 @@ def test_linked_tasks_map_fetches_once_then_groups():
     assert len(calls) == 1                                # ONE read, not one per card
     assert list(got) == ["alpha"]
     assert [t["id"] for t in got["alpha"]] == [1, 2]
-    assert got["alpha"][0]["url"] == "http://cg.test:30302/tasks#task-1"
+    assert got["alpha"][0]["url"] == "http://cg.test:30302/tasks/1"
 
 
 def test_linked_tasks_map_returns_empty_map_on_any_failure():
