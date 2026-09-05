@@ -596,6 +596,9 @@ def plan_staleness_hours() -> tuple[float, str] | None:
       31d uptime, chain dead 1400h  gap 30s, live 753h -> REFUSES
       plan frozen, layout live      gap huge         -> REFUSES
       🔴 boot+45s, chain dead 1400h  gap 30s, live 45s -> PASSES  (NOT CLOSED)
+      🔴 chain dead 100h + a future mtime  gap 30s, skew -> PASSES  (see below:
+         liveness is genuinely unmeasurable there, and the bounded-damage
+         argument covers it — but a reader consults this list, so it is here)
 
     🔴 THE LIVENESS TERM IS ARITHMETICALLY INERT WHENEVER `uptime <= limit`, AND
     THAT INCLUDES THE BOOT THE UNIT RUNS ON. (The same is true of the SKEW
@@ -628,8 +631,11 @@ def plan_staleness_hours() -> tuple[float, str] | None:
     this because a restore looked wrong, check whether the chain is alive
     (`ls -t ~/.tmux/resurrect/*.txt | head`) before suspecting the plan.
 
-    Returns `(hours, basis)` where basis is `"layout"`, `"liveness"` or
-    `"wall"`. The wall fallback (no readable state file) still carries the
+    Returns `(hours, basis)` where basis is `"layout"`, `"liveness"`, `"skew"`
+    or `"wall"` — FOUR, and the `why` dict in `cmd_restore` is the only
+    consumer that knows it. A second consumer built from a three-arm contract
+    KeyErrors in the refusal path, which is the crash this line exists to
+    prevent. The wall fallback (no readable state file) still carries the
     powered-off flaw by construction, so the basis is part of the answer and
     the refusal message NAMES it — the same number means different things.
     """
@@ -711,8 +717,14 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
                     "wall": "older than (wall clock, no layout to compare)",
                     # Liveness was NOT evaluated; say so rather than let the
                     # reader assume both terms were checked.
+                    # NOT "the clock moved backwards": `since < 0` fires on
+                    # ANY future mtime — a restored backup, `touch -d`, an
+                    # rsync preserving a bad stamp — and this code cannot tell
+                    # those apart. Name the OBSERVATION, not a cause it never
+                    # measured; that is the principle this branch exists for.
                     "skew": ("out of step with the saved layout by (liveness "
-                             "NOT evaluated — the clock moved backwards) "),
+                             "NOT evaluated — an artefact's mtime is in the "
+                             "future)"),
                 }[basis]
                 print(f"restore plan is {why} {gap:.1f}h "
                       f"(limit {staleness_hours}h, basis={basis}) — too stale, "

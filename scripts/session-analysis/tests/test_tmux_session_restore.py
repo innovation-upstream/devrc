@@ -1072,6 +1072,12 @@ def test_backward_skew_still_refuses_when_the_LAYOUT_disagrees(tmp_path, monkeyp
     assert rc == 1, "skew must not bypass the contemporaneity check"
     assert "basis=skew" in err and "NOT evaluated" in err, (
         f"the skew refusal does not say liveness went unevaluated: {err!r}")
+    # `since < 0` fires on ANY future mtime — a restored backup, `touch -d`, an
+    # rsync preserving a bad stamp. Naming "the clock" asserts a cause this code
+    # never measured, which is the failure this whole branch exists to avoid.
+    assert "clock moved backwards" not in err, (
+        f"the skew refusal named a cause it never measured: {err!r}")
+    assert "mtime is in the future" in err, err
 
 
 def test_the_wall_basis_refusal_names_wall_clock_and_not_a_dead_chain(tmp_path, monkeypatch, capsys):
