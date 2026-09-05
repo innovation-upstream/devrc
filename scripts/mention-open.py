@@ -18,7 +18,8 @@ RESOLUTION
 ----------
   1 openable candidate   -> xdg-open it.
   2+ (a bare `#N`)       -> rofi picker, one row per platform, showing the URL.
-  0                      -> a desktop notification saying why. Never a guess.
+  0                      -> the FUZZY repo picker (below), and only if that
+                            cannot run, a desktop notification saying why.
 
 🔴 NOTHING IS GUESSED. A GitHub reference needs an owner, and an owner that is
 wrong points confidently at a real-but-unrelated issue. An owner is accepted
@@ -32,12 +33,33 @@ only from a source that names THIS repo unambiguously:
      it OVERRIDES 2 — the checkout is authoritative about its own owner);
   4. last resort, a GitHub search restricted to an EXACT name match.
 
-When none of them answers, the candidate has no URL and simply does not appear
-in the picker. 🔴 AND WHEN SEVERAL OWNERS ANSWER, THE OPERATOR CHOOSES: a name
-like `dashboard` or `cli` exists under dozens of owners, so an exact-name search
-hit is not the same as an unambiguous one. Several matches means a picker, never
-the first row — that is the same rule as "no owner means no URL", applied to the
-other end of the range.
+🔴 WHEN SEVERAL OWNERS ANSWER, THE OPERATOR CHOOSES: a name like `dashboard` or
+`cli` exists under dozens of owners, so an exact-name search hit is not the same
+as an unambiguous one. Several matches means a picker, never the first row —
+that is the same rule as "no owner means no URL", applied to the other end of
+the range.
+
+🔴 AND WHEN NONE OF THEM ANSWERS, THE OPERATOR STILL CHOOSES — the handler does
+not dead-end. Every repository this host knows about goes into the same rofi
+picker with `-matching fuzzy`, so `talos-inf#12` is four keystrokes from
+`talos-infra` and `kubernetes#1` is a typed narrowing rather than a refusal.
+🔴 THIS IS NOT A RELAXATION OF THE NO-GUESSING RULE, IT IS ITS EXTENSION. A
+picker is a CHOICE the operator makes; a guess is one this script makes for
+them. Nothing below ever opens a URL the operator did not select, and dismissing
+the picker still opens NOTHING.
+
+⚠ IT DEGRADES, IT DOES NOT DISAPPEAR. When the universe cannot be read at all —
+the mapping absent, unreadable or empty, or `--no-discovery` in force — the
+handler falls back to the ORIGINAL refusal, which still names WHICH empty this
+is ("gh is not on PATH" and "no repo by that name" need opposite next moves).
+A silent empty picker would be the same silent zero one layer up.
+
+🔴 THE UNIVERSE NAMES PRIVATE REPOSITORIES. It is built from
+`known_repos.json`, the file whose committed ancestor disclosed 232 private
+repos into this PUBLIC repository. It may go to the operator's own screen and
+NOWHERE ELSE: never to a log, never to activity.events, never to a test fixture,
+never to stderr. `notify()` prints, so the refusal paths below name only the
+clicked text — never a row from the universe.
 """
 from __future__ import annotations
 
@@ -56,6 +78,8 @@ from mention_scan import (  # noqa: E402
     PLATFORM_CLAWGATE,
     PLATFORM_CLICKUP,
     PLATFORM_GITHUB,
+    OWNER_REPO_VALUE_RE as _OWNER_REPO_RE,
+    clean_repo_map,
     scan_mention_spans,
 )
 
@@ -95,14 +119,25 @@ _HTTP_REMOTE = re.compile(r"^https?://[^/]+/(?P<path>.+?)(?:\.git)?/?$")
 # of a longer string.
 _PASS3_REPO_RE = re.compile(r"^(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]*)#(?P<num>\d+)$")
 
-# Above this many exact namesakes the picker stops being a choice. Measured:
-# `dashboard` and `cli` each return a full page of exact matches.
-PASS3_MAX_CHOICES = 8
+# 🔴 THERE IS NO LONGER A CAP ON HOW MANY NAMESAKES REACH THE PICKER, AND THIS
+# PARAGRAPH REPLACES ONE THAT ARGUED FOR IT. The old rule refused above 8, on the
+# reasoning that "a 100-row list of URLs differing only by owner is not a choice,
+# it is a wall". That reasoning was correct about a list you can only SCROLL and
+# wrong about one you can TYPE AT: `-matching fuzzy` turns the wall into a
+# narrowing, so `kubernetes#1` — which used to refuse outright, naming 65
+# namesakes — is now four keystrokes from the right owner.
+#
+# 🔴 DO NOT RE-ADD THE CAP WITHOUT ALSO REMOVING THE FUZZY MATCHER. A comment
+# left asserting a hazard the code has closed is exactly how the refusal would
+# come back: the next maintainer reads "not a choice, it is a wall", believes it,
+# and restores a limit that now only removes the operator's ability to choose.
+# The residual cost, stated rather than hidden: the picker can be long, and one
+# page of search results is still one page (see `gh_api_repo_search`).
 
-# What a mapping VALUE must look like: exactly two segments, nothing else.
-# 🔴 `\Z`, not `$` — `$` matches BEFORE a final newline, so `acme/widget\n`
-# passed and built `github.com/acme/widget\n/issues/12`.
-_OWNER_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+# `_OWNER_REPO_RE` is IMPORTED, not re-declared — see the import block. It used
+# to be a second copy of `mention_scan`'s rule, which is exactly the shape that
+# regenerates one bug at two sites; the `\Z`-not-`$` incident is recorded on the
+# surviving definition.
 
 
 def parse_owner_repo(remote_url: str) -> str:
@@ -144,6 +179,35 @@ def picker_rows(candidates: list[dict]) -> list[str]:
         label = PLATFORM_LABEL.get(c["platform"], c["platform"])
         rows.append(f"{label} {c['id']} — {c['url']}")
     return rows
+
+
+def repo_universe(repos: dict | None) -> list[str]:
+    """Every distinct `owner/repo` this host knows about, sorted.
+
+    The input is `discover_repos()`'s mapping — the generated file laid under the
+    real local checkouts — so this is a MEASUREMENT of the host, not a list of
+    plausible names. Values that are not exactly `owner/repo` are dropped for the
+    same reason they are dropped on load: they build a URL that 404s while
+    looking authoritative.
+
+    🔴 THE RETURN VALUE NAMES PRIVATE REPOSITORIES. It may reach the operator's
+    rofi window and nothing else — no log line, no notification body, no
+    telemetry row, no test fixture. See the module docstring.
+    """
+    return sorted({v for v in (repos or {}).values()
+                   if isinstance(v, str) and _OWNER_REPO_RE.match(v)})
+
+
+def universe_candidates(num: str, universe: list[str]) -> list[dict]:
+    """One openable GitHub candidate per repository in `universe`.
+
+    These are what turns a dead end into a choice: the operator types a few
+    characters of the repo name into the fuzzy picker instead of reading a
+    refusal. Nothing here is opened without a selection.
+    """
+    return [{"platform": PLATFORM_GITHUB, "id": num,
+             "url": GITHUB_ISSUE_URL.format(repo=full, id=num)}
+            for full in universe]
 
 
 def row_to_url(row: str, candidates: list[dict]) -> str:
@@ -199,14 +263,11 @@ def load_known_repos(path: Path | None = None) -> dict[str, str]:
         raw = json.loads(path.read_text())
     except (OSError, ValueError):
         return {}
-    if not isinstance(raw, dict):
-        return {}
-    # A value must be EXACTLY `owner/repo` — matched, not counted. Counting
-    # non-empty segments accepted `acme/widget/`, `acme//widget`, a trailing
-    # space and an embedded newline, each of which builds a URL that 404s while
-    # looking authoritative: the very failure the rule exists to prevent.
-    return {k: v for k, v in raw.items()
-            if isinstance(k, str) and isinstance(v, str) and _OWNER_REPO_RE.match(v)}
+    # A value must be EXACTLY `owner/repo` — matched, not counted. That rule now
+    # lives ONCE, in `mention_scan.clean_repo_map`, because the collector's
+    # tailer loads the same mapping and a predicate open-coded at two sites is
+    # wrong at one of them.
+    return clean_repo_map(raw)
 
 
 def discover_repos(workspace: Path | None = None) -> dict:
@@ -353,11 +414,23 @@ def open_url(url: str) -> int:
 
 def pick(candidates: list[dict]) -> str:
     """Ask rofi which candidate to open. Returns the chosen URL, or "" if the
-    operator dismissed the picker (which must open NOTHING)."""
+    operator dismissed the picker (which must open NOTHING).
+
+    🔴 `-matching fuzzy` IS LOAD-BEARING, not a nicety. It is the entire reason
+    the namesake cap could be removed and the reason a hundred-row universe is a
+    narrowing rather than a wall: the operator types `talos-inf` and the list
+    collapses. Removing this flag silently restores the wall the old cap existed
+    to prevent, with every test still green — so it is pinned by the suite.
+
+    🔴 `-no-custom` is equally load-bearing in the other direction: it stops rofi
+    returning free text the operator TYPED as if it were a selection, which
+    `row_to_url` would then fail to match — dismissal-shaped, but by accident.
+    """
     rows = picker_rows(candidates)
     try:
         r = subprocess.run(
-            ["rofi", "-dmenu", "-i", "-p", "mention", "-theme", ROFI_THEME,
+            ["rofi", "-dmenu", "-i", "-matching", "fuzzy",
+             "-p", "mention", "-theme", ROFI_THEME,
              "-format", "s", "-no-custom"],
             input="\n".join(rows), capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -394,7 +467,20 @@ def resolve(text: str, *, repos: dict | None = None,
 
     Alacritty's looser regex can hand over text with leading/trailing debris; the
     scanner finds the mention inside it. A text with no mention at all — which is
-    how `#282828` arrives here — returns (None, [])."""
+    how `#282828` arrives here — returns (None, []).
+
+    🔴 NO `profile=` ARGUMENT, AND THAT OMISSION IS THE CLICK SURFACE'S ONLY
+    DEFENCE. `mention_scan`'s default is `terminal` — the narrow, click-safe set
+    — and this is the single call site that decides which surface the operator's
+    terminal underlines. Passing `profile="telemetry"` here would put the WIDE
+    enumerated set (`gh pr view N`, `clawgate task N`, bare GitHub URLs, and the
+    telemetry-only attribution routes) behind a click, where a false positive is
+    a wrong page opening rather than a stray row. Pinned by
+    `test_mention_open.py::test_every_TELEMETRY_only_shape_is_invisible_to_the_
+    click_handler`, which drives each telemetry-only pattern's own ledger sample
+    through here and requires it to resolve to NOTHING — with a positive control
+    proving the same sample IS detected at the telemetry profile, so the test
+    cannot pass by scanning nothing."""
     spans = scan_mention_spans(text, repos=repos, default_repo=default_repo)
     if not spans:
         return (None, [])
@@ -416,10 +502,15 @@ def main(argv: list[str] | None = None) -> int:
     # of `git remote` calls plus a tmux round-trip, and paying that before
     # opening a link that needed neither is latency the operator feels on every
     # single click.
+    discovered: dict = {}
     needs_measuring = span is not None and (span["ambiguous"] or not candidates)
     if needs_measuring and not args.no_discovery:
         default_repo = args.default_repo or tmux_pane_repo()
-        span, candidates = resolve(text, repos=discover_repos(),
+        # Kept, not recomputed: PASS 4 offers the SAME measurement as a fuzzy
+        # universe, and calling `discover_repos()` twice would run the whole
+        # `git remote` fan-out again for an answer already in hand.
+        discovered = discover_repos()
+        span, candidates = resolve(text, repos=discovered,
                                    default_repo=default_repo or None)
 
     if span is None:
@@ -435,21 +526,79 @@ def main(argv: list[str] | None = None) -> int:
         m = _PASS3_REPO_RE.match(span["raw"])
         if m:
             matches, why = gh_api_repo_search(m.group("repo"))
-            if len(matches) > PASS3_MAX_CHOICES:
-                # A 100-row list of URLs differing only by owner is not a
-                # choice, it is a wall. Refusing names the one thing that does
-                # resolve it, instead of pretending the list is useful.
-                notify(f"cannot resolve {span['raw']}",
-                       f"at least {len(matches)} repositories are named "
-                       f"{m.group('repo')} (one page of results — there may be "
-                       f"many more) — write it as owner/repo#N")
-                return 1
+            # 🔴 EVERY match goes to the picker — there is no cap any more. See
+            # the note where `PASS3_MAX_CHOICES` used to be: a list you can type
+            # at is a choice, so refusing above an arbitrary count now removes
+            # the operator's ability to choose rather than protecting them from
+            # a wall.
+            #
+            # 🔴 AND THIS PASS IS REACHED IN `--print` MODE TOO — DELIBERATE, and
+            # stated because removing the cap CHANGED IT. `--print widget#12`
+            # with nine namesakes used to exit 1 with a named refusal ("more than
+            # 8 owners"); it now prints nine URLs and exits 0. That is the
+            # documented contract of the flag — "print every candidate when
+            # ambiguous" — and a namesake set IS ambiguity of exactly the kind
+            # the picker exists for: every row is an EXACT-name search hit, i.e.
+            # evidence about the name the operator typed. It is not the PASS 4
+            # universe, which is evidence about nothing and stays barred from
+            # `--print`. A consumer wanting a single answer must write
+            # `owner/repo#N`; one line of output was never promised here.
+            # Pinned by `test_print_mode_prints_EVERY_namesake_rather_than_
+            # refusing_above_a_cap`.
             candidates = [
                 {"platform": PLATFORM_GITHUB, "id": m.group("num"),
                  "url": GITHUB_ISSUE_URL.format(repo=full, id=m.group("num")),
                  "raw": span["raw"]}
                 for full in sorted(matches)
             ]
+
+    # PASS 4 — THE FUZZY UNIVERSE. Everything above has failed to name a
+    # repository, and the old behaviour here was a refusal. Offer every repo the
+    # host knows about instead and let the operator type at it.
+    #
+    # 🔴 NOT IN `--print` MODE, and not under `--no-discovery`. `--print` exists
+    # so a script can read the resolved URL; answering it with several hundred
+    # is not an answer, and `--no-discovery` means "resolve only what the text
+    # itself carries", which a host-wide mapping is not.
+    #
+    # ⚠ IT NEEDS A NUMBER. Only a numeric reference can be turned into an issue
+    # URL under a chosen repo; there is no such thing as "this ClickUp id, but in
+    # that repository". A ClickUp span always resolves anyway, so this is a guard
+    # rather than a branch anyone reaches.
+    #
+    # 🔴 A UNIVERSE ROW IS NEVER OPENED WITHOUT A SELECTION, EVEN WHEN IT IS THE
+    # ONLY ONE. `offered_universe` exists solely to suppress the "exactly one
+    # candidate → just open it" shortcut below. Without it, a host that knows
+    # exactly ONE repository would answer `trowelcast#77` by opening issue 77 in
+    # that unrelated repository — a confident wrong page, which is precisely the
+    # failure this whole handler is anchored against. A search hit is evidence
+    # ABOUT THE NAME; a universe row is not evidence about anything, only an
+    # option. Measured during development: the first version of PASS 4 did open
+    # it, and the test that caught it was the one asserting a picker appeared.
+    offered_universe = False
+    may_offer_universe = not args.print_only and not args.no_discovery
+    if may_offer_universe and span["id"].isdigit():
+        universe = universe_candidates(span["id"], repo_universe(discovered))
+        if not candidates and universe:
+            offered_universe = True
+            # Dead end 1 and 2 — a namesake wall, or a search that matched
+            # nothing. Either way the operator now gets a choice.
+            #
+            # 🔴 THE PICKER DOES NOT SWALLOW `why`. A search that could not RUN
+            # ("gh is not on PATH", rate-limited, timed out) is a fact about the
+            # operator's tooling that the picker cannot express, and the whole
+            # "say WHICH empty this is" discipline would be lost if offering a
+            # choice silently replaced it. So the cause is announced AND the
+            # choice is offered — they are answers to different questions.
+            if why:
+                notify("the repository search could not run", why)
+            candidates = universe
+        elif span["ambiguous"] and not any(
+                c["platform"] == PLATFORM_GITHUB for c in candidates):
+            # Dead end 3 — a bare `#N` nothing could attribute. The clawgate
+            # candidate STAYS FIRST so the common case is still one Enter away;
+            # the universe is appended as the way to say "no, GitHub, this repo".
+            candidates = candidates + universe
 
     if not candidates:
         # 🔴 SAY WHICH EMPTY THIS IS. "gh is not on PATH" and "no repo by that
@@ -469,7 +618,12 @@ def main(argv: list[str] | None = None) -> int:
             print(c["url"])
         return 0
 
-    if len(candidates) == 1:
+    # 🔴 `and not offered_universe`: see PASS 4. One candidate is enough to open
+    # only when that candidate is EVIDENCE about the reference — an explicit
+    # owner, a measured checkout, an exact-name search hit. A universe row is an
+    # OPTION, and a host that happens to know exactly one repository must not
+    # have that option opened for it.
+    if len(candidates) == 1 and not offered_universe:
         return open_url(candidates[0]["url"])
 
     url = pick(candidates)

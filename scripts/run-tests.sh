@@ -1681,7 +1681,24 @@ TARGET_FLOORS=(
   # HERMETIC_TARGETS entry because scripts/collector/claude/tests is already a
   # directory target, and movement on THIS line is the evidence the gate runs
   # the new file at all.
-  "scripts/collector/claude/tests|164"
+  #
+  # 2026-09-04, the mention-attribution fix round (devrc#1313): 223 -> 230
+  # collected, all seven in test_session_tailer.py — the dedupe key now carries
+  # the attribution (3), and the tailer gains its FIRST mapping-disclosure guard
+  # at the spool (2), plus the migration pins (2).
+  # 🔴 THE GATE FORCED THIS ONE — 230 is above the drift ceiling (floor 164 +
+  # max(60, 164/4) = 224), so the run went RED on the ceiling check with all 230
+  # PASSING, which is exactly what that check exists for: the floor had fallen
+  # 59 behind before this branch touched the target. Number copied VERBATIM from
+  # the line the gate printed on the MERGED tree (this branch merged with
+  # origin/main at f75c92d4):
+  #
+  #   Raise the TARGET_FLOORS entry to "scripts/collector/claude/tests|219"
+  #
+  # — that is the run's own count through the documented rule
+  # (230 - min(50, max(1, 230/20 = 11)) = 219), not arithmetic anyone did by
+  # hand. ⚠ ZERO new skips on this target.
+  "scripts/collector/claude/tests|219"
   "scripts/collector/i3/tests|12"
   "scripts/collector/browser-ext/tests|12"
   "scripts/collector/opencode/tests|162"

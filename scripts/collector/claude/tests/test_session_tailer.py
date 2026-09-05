@@ -31,6 +31,10 @@ _COLLECTOR_DIR = _CLAUDE_DIR.parent                            # scripts/collect
 sys.path.insert(0, str(_CLAUDE_DIR))
 sys.path.insert(0, str(_COLLECTOR_DIR))
 import collector as C   # noqa: E402
+# 🔴 THE SAME module object the tailer imports. Asserting the prefilter against a
+# SEPARATELY loaded copy of mention_scan would compare two independent readings
+# and could not see the tailer reading a stale or different one.
+import mention_scan as MS  # noqa: E402
 
 # session-tailer.py has a hyphen → load via importlib (like test_activity_scan.py).
 _spec = importlib.util.spec_from_file_location("session_tailer", _CLAUDE_DIR / "session-tailer.py")
@@ -313,7 +317,15 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_SUMMARY_STATE", str(state))
     monkeypatch.setenv("CLAUDE_SOURCE_EMIT", str(EMIT))
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(projects))
-    return {"spool": spool, "state": state, "projects": projects}
+    # 🔴 THE REPO MAPPING IS REDIRECTED TO A PATH THAT DOES NOT EXIST. Without
+    # this, `run()` reads the OPERATOR'S REAL ~/.config/mention-open/known_repos
+    # .json — which names PRIVATE repositories — so every attribution assertion
+    # would be a property of that host's disk, and the nix sandbox tier (HOME is
+    # a fresh empty dir) would evaluate it differently from the dev host. That is
+    # the same two-tier divergence `test_mention_open.py` records for WORKSPACE.
+    monkeypatch.setenv("MENTION_OPEN_KNOWN_REPOS", str(tmp_path / "no-mapping.json"))
+    return {"spool": spool, "state": state, "projects": projects,
+            "repos_path": tmp_path / "no-mapping.json"}
 
 
 def _spool_events(spool: Path) -> list[dict]:
@@ -1078,7 +1090,8 @@ def test_collect_mentions_dedupes_on_the_RAW_text_not_the_bare_id():
     the second for the life of the session."""
     objs = [assistant_text("devrc#7 and talos-infra#7 and devrc#7 again")]
     got = S.collect_mentions(objs)
-    assert [m["raw"] for m in got] == ["devrc#7", "talos-infra#7"]
+    assert [m["raw"] for m in got] == ["devrc#7", "talos-infra#7"], (
+        "keyed on the id, not the raw text")
 
 
 def test_collect_mentions_is_capped(monkeypatch):
@@ -1197,6 +1210,94 @@ def test_the_ledger_survives_a_restart_through_the_state_file(env):
     assert S.load_state(env["state"])[str(p)]["mentions"] == ["ambiguous:#370"]
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE DEDUPE IDENTITY INCLUDES THE ATTRIBUTION
+#
+# Keying on `platform:raw` alone discards the very thing this stream was widened
+# to compute: 92% of mentions are a bare `#N`, so the raw text is `#1291` for all
+# of them, and the FIRST occurrence in a session wins. Measured on real
+# transcripts before the fix: 34 rows/day shipped `repo=""` although an
+# attribution was available, and 6 rows/day dropped a second repository outright.
+# --------------------------------------------------------------------------- #
+def test_two_repositories_referencing_the_SAME_number_are_two_mentions():
+    """🔴 THE DROPPED-REFERENCE HALF. `mention_key`'s own docstring already
+    argued this class one level down for `devrc#370` vs `talos-infra#370`; the
+    bare form is the same collision with the repo one token to the left instead
+    of glued to the `#`."""
+    got = S.collect_mentions([
+        assistant_text("trowelcast PR #1291 is green"),
+        assistant_text("plotwidget PR #1291 is not"),
+    ], repos=FAKE_REPOS)
+    assert [m["repo"] for m in got] == ["gardenersguild/trowelcast",
+                                        "hobbyist/plotwidget"], (
+        "the dedupe key dropped a second repository's reference")
+    assert {m["raw"] for m in got} == {"#1291"}, (
+        "positive control: both really are the same raw text, so only the "
+        "attribution can be telling them apart")
+
+
+def test_an_ATTRIBUTED_repeat_of_an_unattributed_ref_is_not_swallowed():
+    """🔴 THE LOST-ATTRIBUTION HALF, and the ORDER is the point. The bare form
+    usually appears first, so under a `platform:raw` key the row that ships is
+    the one carrying NO repo and every later attributed occurrence is dropped —
+    a loss biased systematically downward."""
+    got = S.collect_mentions([
+        assistant_text("still looking at #1291"),
+        assistant_text("spadeworks PR #1291 landed"),
+    ], repos=FAKE_REPOS)
+    assert [m["repo"] for m in got] == ["", "rivalorg/spadeworks"]
+
+
+def test_the_same_reference_with_the_same_attribution_is_still_ONE_mention():
+    """The ledger must not become a no-op: adding the repo to the key widens the
+    identity, it does not disable deduplication."""
+    got = S.collect_mentions([
+        assistant_text("trowelcast PR #1291"),
+        assistant_text("trowelcast PR #1291 again"),
+    ], repos=FAKE_REPOS)
+    assert len(got) == 1, got
+
+
+def test_an_UNATTRIBUTED_mention_keys_EXACTLY_as_the_deployed_tailer_did():
+    """🔴 THE MIGRATION DECISION, PINNED — not a formatting preference.
+
+    Every key in every host's `session-summary-state.json` today was written by a
+    tailer whose `collect_mentions` took NO mapping, so all of them have
+    `repo == ""`. Keying unconditionally as `platform:repo:raw` would have
+    re-keyed the lot and re-emitted every already-shipped mention once on both
+    hosts. Suffixing ONLY when there is an attribution keeps those keys byte
+    identical, so the re-emit is confined to the rows whose content genuinely
+    changed. A mutant that "tidies" this into one unconditional format dies here.
+
+    The absent-key case is asserted too: `collect_mentions` always sets `repo`,
+    but `mention_key` is also fed straight from a ledger-shaped dict in `run()`,
+    and a missing key must degrade to the old spelling rather than raise."""
+    old = "ambiguous:#370"
+    assert S.mention_key({"platform": "ambiguous", "raw": "#370", "repo": ""}) == old, (
+        "the unattributed key format MOVED — every host's ledger would re-emit")
+    assert S.mention_key({"platform": "ambiguous", "raw": "#370"}) == old, (
+        "the unattributed key format MOVED — every host's ledger would re-emit")
+    assert S.mention_key({"platform": "ambiguous", "raw": "#370",
+                          "repo": "rivalorg/spadeworks"}) == (
+        "ambiguous:#370@rivalorg/spadeworks")
+
+
+def test_an_already_emitted_unattributed_mention_does_NOT_reemit_after_the_change(env):
+    """The migration claim, end to end rather than as a string assertion: a state
+    file written by the OLD code (the literal keys it produced) must still
+    suppress the same mention under the new one."""
+    p = _write(env["projects"], "-home-zach-workspace-devrc", "s-mig", [
+        user_typed("go"), assistant_text("see #370"),
+    ])
+    t0 = time.time()
+    S.save_state(env["state"], {str(p): {"sig": "nope", "emitted_at": None,
+                                         "mentions": ["ambiguous:#370"]}})
+    assert S.run(now=t0) == 0
+    assert _mentions(env["spool"]) == [], (
+        "a pre-change ledger entry must still match — this is the whole reason "
+        "the suffix is conditional")
+
+
 def test_a_corrupt_mention_ledger_degrades_instead_of_crashing():
     """A ledger we cannot read must never make a mention permanently
     unemittable, and must never crash the timer."""
@@ -1228,6 +1329,283 @@ def test_an_unreadable_transcript_emits_no_mentions_and_does_not_crash(env):
     assert S.run() == 0
     assert _mentions(env["spool"]) == []
     assert len(_summaries(env["spool"])) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE INERT-PREFILTER SEAM
+#
+# `_MENTION_HINTS` short-circuits BEFORE the regex pass and skipped 81% of
+# assistant text blocks in one measured 24h window. Every shape below contains
+# NEITHER '#' NOR '868' — the filter's former contents — so under the old value
+# the scanner would never have run on them and every module-level test calling
+# `scan_mentions()` DIRECTLY would still have passed. These are the only tests in
+# the repo that can see that, because they go through `collect_mentions`.
+# --------------------------------------------------------------------------- #
+# 🔴 EVERY FIXTURE NAME IS SYNTHETIC. This repo is public and the real repo
+# mapping names private repositories; nothing measured from this host may appear
+# here. Values are pairwise distinct AND distinct from every constant asserted.
+FAKE_REPOS = {
+    "trowelcast": "gardenersguild/trowelcast",
+    "plotwidget": "hobbyist/plotwidget",
+    "spadeworks": "rivalorg/spadeworks",
+}
+
+# (label, assistant text, expected (platform, id)) — one row per NEW shape.
+NEW_SHAPES = [
+    ("github pull URL", "merged https://github.com/gardenersguild/trowelcast/pull/7",
+     ("github", "7")),
+    ("github issues URL", "see https://github.com/hobbyist/plotwidget/issues/4213",
+     ("github", "4213")),
+    ("slash audit-pr", "next up: /audit-pr 1291", ("github", "1291")),
+    ("bare audit-pr", "next up: audit-pr 1291", ("github", "1291")),
+    ("gh pr subcommand", "ran gh pr view 1291 to check", ("github", "1291")),
+    ("gh issue subcommand", "ran gh issue close 42 after that", ("github", "42")),
+    ("clawgate task", "picked up clawgate task 370 today", ("clawgate", "370")),
+]
+
+
+@pytest.mark.parametrize("label,text,expected",
+                         NEW_SHAPES, ids=[s[0] for s in NEW_SHAPES])
+def test_each_new_shape_REACHES_the_tailer_through_the_prefilter(label, text, expected):
+    """🔴 THE REACHABILITY TEST. Adding the regex alone ships a dead feature: the
+    prefilter drops the block before `scan_mention_spans` is ever called."""
+    got = S.collect_mentions([assistant_text(text)])
+    assert [(m["platform"], m["id"]) for m in got] == [expected], label
+
+
+@pytest.mark.parametrize("label,text,_expected",
+                         NEW_SHAPES, ids=[s[0] for s in NEW_SHAPES])
+def test_every_new_shape_would_have_been_INVISIBLE_to_the_old_prefilter(
+        label, text, _expected):
+    """🔴 THE CONTROL FOR THE TEST ABOVE. If a shape happened to contain a '#' or
+    an '868' anyway, its reachability test would pass with a prefilter that was
+    never widened — green for the wrong reason, proving nothing. This asserts
+    each fixture really is invisible to the OLD value, so the test above can only
+    pass because the filter moved."""
+    assert not any(h in text for h in ("#", "868")), (
+        f"{label}: this fixture is not a witness to the widening")
+
+
+def test_the_prefilter_is_DERIVED_from_the_scanners_telemetry_ledger():
+    """One rule, one place: a pattern added to the ledger widens the filter in
+    the same commit because there is nowhere else to put the fact.
+
+    🔴 AND IT IS THE TELEMETRY PROFILE. `mention_hints()` with no argument
+    returns the terminal profile's two literals — the OLD value — which would
+    look derived, pass review, and skip every new shape."""
+    assert S._MENTION_HINTS == MS.mention_hints(MS.PROFILE_TELEMETRY)
+    assert S._MENTION_HINTS != MS.mention_hints(MS.PROFILE_TERMINAL)
+
+
+def test_the_prefilter_still_SKIPS_a_block_with_no_hint_at_all():
+    """The widening must not become "scan everything" — the short-circuit is the
+    reason this rides in the tailer instead of a per-tool-call hook."""
+    assert S.collect_mentions([assistant_text("nothing to see in this sentence")]) == []
+
+
+def test_the_tailer_scans_with_the_WIDER_profile_not_the_default():
+    """🔴 The second half of the same seam. A correct prefilter plus a default
+    (terminal) profile is also a dead feature, and the prefilter test above
+    cannot see it."""
+    got = S.collect_mentions([assistant_text("ran gh pr view 1291")])
+    assert [m["id"] for m in got] == ["1291"]
+
+
+# --------------------------------------------------------------------------- #
+# Attribution, end to end through the tailer
+# --------------------------------------------------------------------------- #
+def test_an_adjacent_repo_token_is_ATTRIBUTED_through_collect_mentions():
+    """A.2 — the primary defect. 92% of mentions in one measured 24h window were
+    a bare `#N`, and the repo name two words to its left was thrown away."""
+    (m,) = S.collect_mentions([assistant_text("trowelcast PR #1291 is green")],
+                              repos=FAKE_REPOS)
+    assert m["repo"] == "gardenersguild/trowelcast"
+    assert m["repo_source"] == "adjacent"
+
+
+def test_attribution_names_the_repo_ACTUALLY_written():
+    """Three distinct owners, three distinct expectations — a mutant returning a
+    single hardcoded literal dies on two of the three."""
+    for token, expected in (("trowelcast", "gardenersguild/trowelcast"),
+                            ("plotwidget", "hobbyist/plotwidget"),
+                            ("spadeworks", "rivalorg/spadeworks")):
+        (m,) = S.collect_mentions([assistant_text(f"{token} PR #7")],
+                                  repos=FAKE_REPOS)
+        assert m["repo"] == expected, token
+
+
+def test_a_repo_token_ABSENT_from_the_mapping_stays_unattributed():
+    """🔴 THE NO-GUESSING RULE at the tailer's end of the pipe."""
+    (m,) = S.collect_mentions([assistant_text("zzzunknown PR #1291")],
+                              repos=FAKE_REPOS)
+    assert m["repo"] == ""
+    assert m["repo_source"] == ""
+
+
+def test_collect_mentions_without_a_mapping_attributes_nothing_and_still_scans():
+    (m,) = S.collect_mentions([assistant_text("trowelcast PR #1291")])
+    assert m["id"] == "1291"
+    assert m["repo"] == ""
+
+
+def test_a_url_in_the_same_block_attributes_a_bare_ref_through_the_tailer():
+    """A.3, reachable only because `github.com/` is now a prefilter hint."""
+    got = S.collect_mentions([assistant_text(
+        "https://github.com/rivalorg/spadeworks/pull/8 then also #1291")])
+    bare = [m for m in got if m["id"] == "1291"]
+    assert bare and bare[0]["repo"] == "rivalorg/spadeworks"
+    assert bare[0]["repo_source"] == "url"
+
+
+def test_a_repo_flag_in_the_same_block_attributes_through_the_tailer():
+    """A.4 — the measured `gh pr <sub> N --repo owner/repo` case."""
+    (m,) = S.collect_mentions([assistant_text(
+        "gh pr view 1291 --repo hobbyist/plotwidget")])
+    assert m["repo"] == "hobbyist/plotwidget"
+    assert m["repo_source"] == "flag"
+
+
+def test_the_emitted_event_CARRIES_the_attribution(env):
+    """🔴 A FIELD THAT EXISTS IN A DICT IS NOT A COLUMN. The attribution is only
+    worth anything if it survives `build_mention_emit_args` and the spool
+    round-trip — asserting it on `collect_mentions`' return value alone would
+    pin a value nothing ever ships."""
+    p = env["repos_path"]
+    p.write_text(json.dumps(FAKE_REPOS), encoding="utf-8")
+    _write(env["projects"], "-home-zach-workspace-devrc", "sess-ATTR", [
+        user_typed("go"),
+        assistant_text("spadeworks PR #1291 is green",
+                       ts="2026-07-11T10:02:00.000Z"),
+    ])
+    assert S.run() == 0
+    (ev,) = _mentions(env["spool"])
+    payload = json.loads(ev["payload"])
+    assert payload["repo"] == "rivalorg/spadeworks"
+    assert payload["repo_source"] == "adjacent"
+
+
+def test_an_unattributed_mention_still_emits_with_EMPTY_attribution(env):
+    _write(env["projects"], "-home-zach-workspace-devrc", "sess-NOATTR", [
+        user_typed("go"), assistant_text("fixed in #370"),
+    ])
+    assert S.run() == 0
+    (ev,) = _mentions(env["spool"])
+    payload = json.loads(ev["payload"])
+    assert payload["repo"] == ""
+    assert payload["repo_source"] == ""
+
+
+def test_a_new_shape_reaches_the_SPOOL_not_only_collect_mentions(env):
+    """The whole path: transcript -> prefilter -> scanner -> emit -> spool."""
+    _write(env["projects"], "-home-zach-workspace-devrc", "sess-SHAPE", [
+        user_typed("go"), assistant_text("picked up clawgate task 370"),
+    ])
+    assert S.run() == 0
+    (ev,) = _mentions(env["spool"])
+    payload = json.loads(ev["payload"])
+    assert payload["platform"] == "clawgate"
+    assert payload["reference_id"] == "370"
+    assert payload["url"] == "https://clawgate.zacx.dev/tasks/370"
+
+
+# --------------------------------------------------------------------------- #
+# The repo mapping the tailer loads
+# --------------------------------------------------------------------------- #
+def test_the_repo_mapping_path_is_resolved_at_CALL_time(tmp_path, monkeypatch):
+    """🔴 A module CONSTANT is evaluated at import, so `monkeypatch.setenv` would
+    be inert and every test above would silently read the OPERATOR'S REAL
+    mapping — which names private repositories. `scripts/mention-open.py` records
+    this exact defect twice; this is the guard that stops it recurring here."""
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps({"plotwidget": "hobbyist/plotwidget"}), encoding="utf-8")
+    monkeypatch.setenv("MENTION_OPEN_KNOWN_REPOS", str(p))
+    assert S.mention_repos_path() == p
+    assert S.load_mention_repos() == {"plotwidget": "hobbyist/plotwidget"}
+
+
+@pytest.mark.parametrize("body", [
+    "not json", "[]", '"a string"', '{"widget": "acme/widget/"}',
+    '{"widget": 12}', '{"widget": "acme"}',
+])
+def test_an_unusable_mapping_costs_ATTRIBUTION_not_the_telemetry_pass(
+        tmp_path, body):
+    """Every failure is {} — this runs inside a timer-driven collector, and a
+    mapping it cannot read must never stop mentions being emitted."""
+    p = tmp_path / "m.json"
+    p.write_text(body, encoding="utf-8")
+    assert S.load_mention_repos(p) == {}
+
+
+def test_an_absent_mapping_is_an_empty_mapping(tmp_path):
+    assert S.load_mention_repos(tmp_path / "nope.json") == {}
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE DISCLOSURE GUARD FOR THE TELEMETRY HALF
+#
+# `scripts/mention-open.py` sends the operator's known-repo mapping to a rofi
+# window that closes, and carries a guard saying so. THIS reader sends it into a
+# durable ClickHouse table and, until now, carried none — the asymmetry is
+# backwards. `known_repos.json` is the file whose committed ancestor disclosed
+# 232 private repository names into this PUBLIC repo (#1283).
+#
+# THE RULE: exactly ONE value from the mapping may leave here per mention — the
+# repository that mention was ATTRIBUTED to. Never the mapping, never a second
+# entry, never a count of it.
+# --------------------------------------------------------------------------- #
+def _everything_the_run_wrote(env, capsys) -> str:
+    """Every sink a run can write to, decoded. The spool is read RAW as well as
+    parsed, because a leak that is base64-encoded and one that is not are the
+    same disclosure and only one of the two readings can see each."""
+    cur = env["spool"] / "current.log"
+    raw = cur.read_text(encoding="utf-8") if cur.exists() else ""
+    decoded = json.dumps(_spool_events(env["spool"]), ensure_ascii=False)
+    captured = capsys.readouterr()
+    return "\n".join([raw, decoded, captured.out, captured.err])
+
+
+def test_the_repo_mapping_never_reaches_the_SPOOL_beyond_the_ONE_repo_a_mention_was_attributed_to(
+        env, capsys):
+    """🔴 POSITIVE CONTROL FIRST. The attributed repository MUST be present —
+    otherwise every absence below is satisfied by a run that emitted nothing, and
+    the guard is the silent zero it exists to prevent."""
+    env["repos_path"].write_text(json.dumps(FAKE_REPOS), encoding="utf-8")
+    _write(env["projects"], "-home-zach-workspace-devrc", "sess-DISCLOSE", [
+        user_typed("go"),
+        assistant_text("trowelcast PR #1291 is green", ts="2026-07-11T10:02:00.000Z"),
+    ])
+    assert S.run() == 0
+    everywhere = _everything_the_run_wrote(env, capsys)
+    # POSITIVE CONTROL 1 — a mention really shipped, carrying its attribution.
+    assert "gardenersguild/trowelcast" in everywhere
+    # POSITIVE CONTROL 2 — the mapping the run held really had the other two in
+    # it, so their absence is a decision and not an empty fixture.
+    assert S.load_mention_repos(env["repos_path"]) == FAKE_REPOS
+    for name in ("hobbyist/plotwidget", "rivalorg/spadeworks",
+                 "plotwidget", "spadeworks"):
+        assert name not in everywhere, (
+            f"SPOOL DISCLOSURE (attributed run): {name!r} is in the operator's "
+            "mapping and was NOT the repository this mention was attributed "
+            "to — it must not reach the spool")
+
+
+def test_an_UNATTRIBUTED_mention_ships_NO_repository_name_at_all(env, capsys):
+    """The harder direction: with nothing to attribute, a run that consulted the
+    mapping must leave no trace of ANY entry in it. A leak on the unattributed
+    path has no legitimate value to hide behind, so the absence is total."""
+    env["repos_path"].write_text(json.dumps(FAKE_REPOS), encoding="utf-8")
+    _write(env["projects"], "-home-zach-workspace-devrc", "sess-BARE", [
+        user_typed("go"), assistant_text("fixed in #370"),
+    ])
+    assert S.run() == 0
+    everywhere = _everything_the_run_wrote(env, capsys)
+    # POSITIVE CONTROL — the run DID emit a mention and DID load the mapping.
+    assert "370" in everywhere
+    assert S.load_mention_repos(env["repos_path"]) == FAKE_REPOS
+    for name in FAKE_REPOS:
+        assert name not in everywhere, f"SPOOL DISCLOSURE (unattributed run): {name}"
+    for full in FAKE_REPOS.values():
+        assert full not in everywhere, f"SPOOL DISCLOSURE (unattributed run): {full}"
 
 
 def test_summarize_transcript_still_answers_from_the_shared_reader(tmp_path):
