@@ -18,7 +18,8 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- **`ZacxDev/cairn` EXISTS, is PRIVATE, `main` = `b25abb5`.** 6 commits. Suite **1647
+- **`ZacxDev/cairn` EXISTS, is PUBLIC as of 2026-09-05, `main` = `b25abb5`.** **7** commits,
+  not 6 — this line said 6, counted before the PR #1 squash landed. Suite **1647
   passed / 0 failed**; `tests/leakscan.py` rc 0 across 33 files with its own controls green.
 - **Phase A1 (extraction) DONE.** Server + client + shared libs + tests, MIT, fresh
   history (no imported commits), GitHub Actions CI (leakscan job runs BEFORE tests so a
@@ -31,9 +32,13 @@ is the PRIVATE proposal, not this doc.
   devrc #1294 (`b8107b5aa`) and homelab-infra #683 (`93e15ee09`). Both merged and verified.
 - 🔴 **NOT deployed anywhere.** No civitai instance exists; no image published; devrc does
   NOT yet consume cairn. The homelab pod still runs its own copy of the code.
-- 🔴 **`ZacxDev/cairn` is PRIVATE by deliberate choice** — publishing is irreversible and
-  was left as the operator's call. Everything else in A1/A2 was built so that flip is a
-  one-step decision, not a project.
+- ✅ **`ZacxDev/cairn` IS PUBLIC — flipped 2026-09-05 on the operator's explicit go-ahead.**
+  Verified by the ACTUAL public path, not by the command's exit code: unauthenticated
+  `api.github.com/repos/ZacxDev/cairn` → **200** and
+  `raw.githubusercontent.com/ZacxDev/cairn/main/LICENSE` → **200**, from a shell holding no
+  credential for the request. ⚠ `gh repo view --json licenseInfo` still reads **null**
+  despite a stock MIT `LICENSE`; GitHub's licence detection re-indexes on push, so re-read
+  it rather than editing the file.
 
 ### What the extraction actually cost, measured
 `subsystem_touch.py` (6,654 lines, the origin's local authoring tool) was NOT extracted.
@@ -95,18 +100,53 @@ so every `--help` printed them), and fixed **81 of 107** then-failing tests.
 🔴 **Numbering is stable and is half a claim's identity** (`claim-work --slug-for <this doc> <rank>`).
 Items are marked done IN PLACE; new items APPEND.
 
-1. **Decide whether `ZacxDev/cairn` goes PUBLIC.** It is private today. Everything in A1
-   was built for this flip — MIT licence, fresh history, a security-scoped leak gate with
-   four control classes, CI. Nothing else in the programme depends on it, so it can wait
-   indefinitely, but the OSS repo is the reason the image problem is solved.
-   forcing: user — the operator chose the OSS route explicitly; only they can publish
+1. ✅ **DONE 2026-09-05 — `ZacxDev/cairn` IS PUBLIC.** Operator said go; flipped with
+   `gh repo edit --visibility public`. **Verified by the actual public path** (anonymous API
+   200, anonymous raw `LICENSE` 200), never by the command's exit status.
+   🔴 **The pre-publication audit covered TWELVE commits, not the 7 on `main` — and the
+   extra 5 are the ones a tree-scan would have missed.** `refs/pull/1/head` (`b51fb349`)
+   is served by GitHub on a public repo, so PR #1's pre-squash history publishes too:
+   `90d30ab`, `0ee60a9`, `93fd486`, `d2ebdf2`, `b51fb34` — including the states BEFORE the
+   round-1 and round-2 credential-leak fixes. All 12 scanned **rc 0** under the CURRENT
+   `leakscan.py` (old trees, today's rules), controls green on every run.
+   🔴 **The first sweep of that was WRONG and looked right.** It checked out each commit
+   after `cp`ing the current scanner in, so `git checkout` aborted on the dirtied file from
+   commit 4 onward and **four commits silently re-scanned one stale tree** — seven plausible
+   green lines, three of them real. Caught by printing a per-commit `git ls-files` count and
+   noticing it did not move (5→5→7→24→34→35→35 once fixed with `checkout -f`). **Any
+   per-revision sweep must print a per-revision quantity that CHANGES, or it cannot tell you
+   it walked anything.**
+   ⚠ **Residual, accepted and not acted on:** the 7 `main` commit messages carry
+   `Claude-Session:` URLs (opaque session ids, not credentials); `licenseInfo` reads null.
+   forcing: none — done
 
-2. **Retire the now-false comment in `homelab-talos`
-   `clusters/homelab/apps/subsystem-store/deployment.yaml:269`.** It carries a 🔴 operational
-   instruction saying `load_tokens` runs once at startup and *"a secret edit is inert until
-   the pod is replaced"*. Cairn PR #1 makes that false. **Do it in the same commit that bumps
-   the image tag**, or the next operator reads it and replaces the pod anyway.
-   forcing: regression — a live operational instruction that is now wrong
+2. ⚠ **DONE 2026-09-05, BUT NOT AS WRITTEN — THIS ITEM'S OWN PREMISE WAS FALSE.**
+   `ZacxDev/homelab-infra` **#714**, branch `fix/subsystem-store-reload-comment`, OPEN.
+   🔴 **The comment is TRUE, and retiring it would have shipped the failure it prevents.**
+   "Cairn PR #1 makes that false" is a claim about cairn's SOURCE; the comment describes the
+   DEPLOYED artifact, and nothing builds an image from cairn. Measured against the running
+   pod on `0.7.0`, not inferred: `grep -rl SIGHUP /app` → **no matches**, with `grep -rn "def
+   load_tokens" /app` matching as the positive control that the search could see the tree at
+   all. `/app/scripts/subsystem-store-api/server.py` is byte-identical
+   (`sha256 917936db…`) to devrc `origin/main`'s copy, which holds **0** occurrences of
+   SIGHUP. Had this been done as written, the next operator would have edited the secret and
+   waited for a reload this image will never perform.
+   **What was actually wrong** is that the instruction read as a property of the STORE while
+   being a property of this IMAGE TAG. It now names its own scope, cites the measurement and
+   its control, names `b25abb5` as the successor, states the trigger (retire it in the same
+   commit that moves `image:` past that sha — not before, not after), and gives the
+   one-command check so nobody trusts the comment's age.
+   **Inertness verified, not assumed:** both YAML versions canonicalise to the same hash
+   (`019fc076…`) with a `replicas: 1`→`2` control proving the comparator can see a change;
+   `kustomize-validate.sh` PASS 7/7, its negative control (`replicas: "not-a-number"`) red
+   and naming `/spec/replicas`. ⚠ That script reports a missing `kustomize`/`kubeconform`/
+   pyyaml as **FAIL** — could-not-run, not a bad manifest. Run it under
+   `nix-shell -p kustomize kubeconform "(python3.withPackages(ps: [ps.pyyaml]))"`.
+   🔴 **The transferable lesson: "X makes Y false" needs to name WHICH ARTIFACT Y describes.**
+   A merged fix in a repo nothing deploys changes no operational fact. This is the same
+   stale-blocker class as the two below, inverted — a blocker written down as removed when it
+   was not.
+   forcing: none — the real forcing item is now rank 7
 
 3. **Phase A3 — devrc consumes cairn as a pinned flake input.** `nix/home.nix` currently
    deploys `scripts/cairn` as an out-of-store symlink (edits are live, no switch). A flake
@@ -125,6 +165,17 @@ Items are marked done IN PLACE; new items APPEND.
 6. **Get a RATE for the full-suite intermittent** (see the open investigation above), then
    either fix it or record that it does not reproduce.
    forcing: none
+
+7. **Retire `deployment.yaml`'s no-reload paragraph IN THE SAME COMMIT that moves the store's
+   `image:` tag to one built from cairn at or past `b25abb5`.** This is what rank 2 was
+   reaching for, correctly sequenced: the comment is true until that tag moves and false the
+   moment it does. The comment now states this trigger itself, so this item is a backstop, not
+   the only thing holding it.
+   **Closing condition:** a merged `ZacxDev/homelab-infra` PR in which the `image:` line and
+   that paragraph change together — mechanical, checkable from the diff alone.
+   ⚠ Blocked on there being a cairn-built image at all, which nothing schedules today; A3
+   (rank 3) is the nearest thing that would force one.
+   forcing: none — it cannot fire before the image exists
 
 ## Gotchas / decisions / dead-ends
 
