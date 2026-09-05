@@ -57,6 +57,15 @@ _SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
+# 🔴 EVERY symbol this file reads off the ledger module — a tuple, not one name,
+# because the half-borrow is the hazard. Both of these are the WRITER's rules (the
+# file key and the directory it writes into), so restating either here is the
+# duplicated predicate that makes this reader look somewhere nobody writes. Add a
+# name the moment this file reads a new attribute off `_AL`; a test pins this
+# tuple two-way against the source, because the loader guards only what it names.
+_BORROWED = ("pane_filename", "LEDGER_DIR")
+
+
 def _load_agent_ledger(path: Path | None = None):
     """`scripts/lib/agent_ledger.py`, imported by path — or None if unusable.
 
@@ -64,20 +73,27 @@ def _load_agent_ledger(path: Path | None = None):
     `tmux-post-save.sh` and by the `tmux-session-restore` user unit), so there is
     no package to import from; the ledger hook reaches its own copy the same way.
 
-    🔴 We borrow `pane_filename` rather than restating it. The file key is the
-    WRITER's rule, and a second spelling of it here is the duplicated predicate
-    that ends up making this reader look at a filename nobody writes. If the
-    module cannot be USED there is deliberately NO fallback spelling — the ledger
-    simply reports nothing and every pane falls through to the grep.
+    🔴 We borrow `_BORROWED` rather than restating any of it. If the module cannot
+    be USED there is deliberately NO fallback spelling — the ledger simply reports
+    nothing and every pane falls through to the grep.
 
-    🔴 "Cannot be used" is TWO cases, and the `hasattr` check is what makes the
+    🔴 "Cannot be used" is TWO cases, and the `_BORROWED` check is what makes the
     promise true for the second. An absent or syntactically broken file raises on
-    import and is caught; a module that imports fine while lacking the one symbol
-    this file borrows would be returned as usable, and the unguarded
-    `_AL.pane_filename(...)` in `ledger_binding` would then raise out of
-    `build_plan` and kill `cmd_save` — which runs unattended every ~15 min from
-    `tmux-post-save.sh` into a log nobody reads, silently freezing the restore
-    plan. Degrading is the whole point; half-degrading is worse than not trying.
+    import and is caught; a module that imports fine while lacking a borrowed
+    symbol would be returned as usable. The two names then fail DIFFERENTLY, and
+    the quieter failure is the one that made this check a tuple:
+
+      * without `pane_filename`, the unguarded `_AL.pane_filename(...)` in
+        `ledger_binding` raises out of `build_plan` and kills `cmd_save` — which
+        runs unattended every ~15 min from `tmux-post-save.sh` into a log nobody
+        reads, silently freezing the restore plan. Loud, once you read the log.
+      * without `LEDGER_DIR`, NOTHING raises. This reader would look in a
+        directory of its own invention, every pane would answer `no-record`, and
+        the `cmd_save` tally would announce a broken deploy using the one token
+        its own legend calls "nothing to fix". Rejecting the module instead makes
+        the tally say `no-ledger-module`, which is a token an operator acts on.
+
+    Degrading is the whole point; half-degrading is worse than not trying.
 
     `path` exists so a test can hand this loader a deliberately-broken module;
     production always takes the default.
@@ -90,14 +106,16 @@ def _load_agent_ledger(path: Path | None = None):
         spec.loader.exec_module(mod)
     except Exception:  # noqa: BLE001 — absent/broken lib: fall back to the grep
         return None
-    if not hasattr(mod, "pane_filename"):
+    if any(not hasattr(mod, sym) for sym in _BORROWED):
         return None
     return mod
 
 
 _AL = _load_agent_ledger()
-LEDGER_DIR = Path(getattr(_AL, "LEDGER_DIR",
-                          os.path.expanduser("~/.cache/agent-ledger")))
+# No `or "<literal>"` default here, deliberately: see `_BORROWED`. `_AL` is None
+# in exactly the cases where the directory cannot be borrowed, and `ledger_binding`
+# returns `no-ledger-module` before it ever reads this.
+LEDGER_DIR = Path(_AL.LEDGER_DIR) if _AL is not None else None
 
 
 def run(cmd: list[str]) -> str:
@@ -154,16 +172,19 @@ def ledger_binding(pane_id: str, cwd: str, server_pid: str,
         `%0` when the SERVER does, so yesterday's `%61` record and today's `%61`
         pane collide after exactly the reboot this tool exists for. `tmux_pid` is
         the server pid, constant across a server's windows, so equality rejects
-        every record written by a server that is not the one answering now.
-        ⚠ That is NOT the same as an exact generation check, and the gap sits in
-        the very event this guard exists for: pids are reused, a reboot resets the
-        counter, and both servers are started at login. MEASURED 2026-09-04 on the
-        workbench: live server pid `4025325` against `pid_max` `4194304` — i.e.
-        near the wrap, so the next boot's server draws a LOW pid, and so did the
-        previous boot's. A collision is unlikely, not astronomical, and a colliding
-        record for the same pane id in the same cwd would pass all four checks.
-        Closing it needs a value the WRITER does not record today (a boot id, or
-        the server's `/proc` start time), so the residual is ACCEPTED, not covered.
+        every record whose recorded pid differs from the live one — which is every
+        record EXCEPT those from a server that drew this same pid.
+        ⚠ That exception is the gap, and it sits in the very event this guard
+        exists for: pids are reused, and a restart resets the pane counter, so a
+        record left by a PREVIOUS server that happened to draw today's pid would
+        pass all four checks and resume the wrong conversation in a window that
+        looks right. How likely that is, is UNMEASURED — and the datum nearest to
+        hand does not answer it. (MEASURED 2026-09-04 on the workbench: the live
+        server's pid was `4025325` of a `pid_max` of `4194304`, but that server
+        started 21.2h AFTER boot, so its pid says nothing about what a server
+        started at login draws.) Closing the gap needs a value the WRITER does not
+        record today (a boot id, or the server's `/proc` start time), so the
+        residual is ACCEPTED — accepted without a rate, not shown to be small.
         🔴 An UNMEASURED live pid rejects too: being unable to check a generation
         is not the same as having checked it.
       * `project-mismatch` — 🔴 THE CROSS-REPO GUARD. The transcript's parent
@@ -182,8 +203,12 @@ def ledger_binding(pane_id: str, cwd: str, server_pid: str,
 
     🔴 But the WRITE side already applies one, so `no-record` has a permanent
     FLOOR rather than shrinking to nothing: `agent_ledger.DEFAULT_MAX_AGE` is 7
-    days and every write prunes, so a live pane idle longer than that has no
-    record at all and reports `no-record` forever. Prune keeps re-opening that set
+    days. `write_record` itself does NOT prune — both writers prune on their
+    SESSION BOUNDARIES only (`agent-ledger-hook.py`'s `PRUNE_EVENTS` is
+    `SessionStart`/`Stop`, a subset of the four events that write) — but a prune
+    sweeps the WHOLE directory, so it is OTHER sessions' boundaries that delete an
+    idle pane's record. Either way a live pane idle longer than that ends up with
+    no record at all and reports `no-record` forever. Prune keeps re-opening that set
     for exactly the long-idle windows a read-side age gate would also have thrown
     away — which is why the argument above still holds, and why "the unbound set
     shrinks on its own" is true only of the panes that predate the hook.
@@ -410,6 +435,16 @@ def cmd_save() -> int:
     # The counts above cannot tell `0 ledger` apart between a missing module, a
     # restarted server and simply no records — and the first two are what an
     # operator would act on. Sorted by token so the line's shape is stable.
+    #
+    # `unrecorded` is UNREACHABLE today and stays on purpose: `build_plan` assigns
+    # every index and `cmd_save` always builds the plan rather than reading one off
+    # disk, so a mutant deleting this default survives. Keeping it costs one `or`
+    # and buys the right failure shape — this runs unattended every ~15 min into a
+    # log nobody reads, so a future refactor that stops assigning reasons must
+    # degrade to a token that is VISIBLY none of `ledger_binding`'s own
+    # (`unrecorded=44` reads as broken) rather than raise a KeyError that freezes
+    # the restore plan, or print `None=44`. The same argument covers
+    # `reasons.get(i, "")` in `build_plan`.
     tally = Counter(e.get("ledger_reason") or "unrecorded" for e in plan)
     print("ledger reasons: "
           + ", ".join(f"{tok}={n}" for tok, n in sorted(tally.items())))

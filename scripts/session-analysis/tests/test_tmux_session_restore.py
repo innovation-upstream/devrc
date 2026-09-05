@@ -221,14 +221,81 @@ def test_a_ledger_module_without_pane_filename_loads_as_none(tmp_path):
         "`ledger_binding` will then raise AttributeError out of `cmd_save`")
 
 
+_USABLE_STUB = ("LEDGER_DIR = '/nonexistent-ledger'\n"
+                "def pane_filename(runtime, pane_id):\n"
+                "    return 'stub-%s-%s.json' % (runtime, pane_id)\n")
+
+
 def test_a_usable_ledger_module_still_loads(tmp_path):
-    """The positive control: the new guard must not reject a WORKING module."""
+    """The positive control: the guard must not reject a WORKING module.
+
+    Carries EVERY name in `_BORROWED`, so it is the case that proves the loader
+    still says yes — without it, a guard that rejected everything would look as
+    green as a correct one.
+    """
+    mod = _stub_ledger_module(tmp_path, _USABLE_STUB)
+    loaded = tsr._load_agent_ledger(mod)
+    assert loaded is not None, "the guard rejected a module that HAS every symbol"
+    assert loaded.pane_filename("claude", "%7") == "stub-claude-%7.json"
+
+
+def test_a_ledger_module_without_ledger_dir_loads_as_none(tmp_path):
+    """The MIRROR of the `pane_filename` case — `LEDGER_DIR` is borrowed too.
+
+    `pane_filename` is not "the one symbol this file borrows": the module-level
+    `LEDGER_DIR` comes from the same module, and a module carrying one name but
+    not the other is exactly as unusable as a module carrying neither.
+    """
     mod = _stub_ledger_module(
         tmp_path, "def pane_filename(runtime, pane_id):\n"
                   "    return 'stub-%s-%s.json' % (runtime, pane_id)\n")
-    loaded = tsr._load_agent_ledger(mod)
-    assert loaded is not None, "the guard rejected a module that HAS the symbol"
-    assert loaded.pane_filename("claude", "%7") == "stub-claude-%7.json"
+    assert tsr._load_agent_ledger(mod) is None, (
+        "a ledger module lacking `LEDGER_DIR` was returned as usable — this "
+        "reader then invents a directory the writer does not write to")
+
+
+def test_a_missing_ledger_dir_reports_the_deploy_token_not_no_record(tmp_path,
+                                                                     monkeypatch):
+    """🔴 THE POINT OF THE GUARD: a deploy break must not report as the benign case.
+
+    `cmd_save`'s legend reads `no-ledger-module` as a deploy problem and
+    `no-record` as "nothing to fix". If the reader accepted a module whose
+    directory contract it could not borrow, it would look in a directory of its
+    own invention, EVERY pane would answer `no-record`, and the tally would
+    announce a broken deploy with the one token that tells the operator to ignore
+    it. `LEDGER_DIR` is pointed at an empty scratch dir so the assertion measures
+    the guard rather than the state of the real ledger.
+    """
+    monkeypatch.setattr(
+        tsr, "_AL",
+        tsr._load_agent_ledger(_stub_ledger_module(
+            tmp_path, "def pane_filename(runtime, pane_id):\n"
+                      "    return 'stub-%s-%s.json' % (runtime, pane_id)\n")))
+    empty = tmp_path / "empty-ledger"
+    empty.mkdir()
+    monkeypatch.setattr(tsr, "LEDGER_DIR", empty)
+    got = tsr.ledger_binding("%7", CWD, SERVER_PID)
+    assert got == ("", "no-ledger-module"), (
+        f"a ledger module missing `LEDGER_DIR` reported {got[1]!r}; "
+        f"`no-record` is the token the legend calls 'nothing to fix', so a "
+        f"deploy break would be reported as the benign case")
+
+
+def test_borrowed_lists_every_symbol_this_file_reads_off_the_module():
+    """Two-way pin: `_BORROWED` == the attributes actually read off `_AL`.
+
+    An INVARIANT guard, not regression coverage — it fails when the set GROWS (a
+    third borrowed symbol added without listing it, which re-opens the exact hole
+    `LEDGER_DIR` was) or SHRINKS (a name listed that nothing reads). The check the
+    loader performs is only as wide as this tuple, so the tuple has to be checked
+    against the source rather than trusted.
+    """
+    import re
+    read = set(re.findall(r"\b_AL\.([A-Za-z_]\w*)", SCRIPT.read_text()))
+    assert read == set(tsr._BORROWED), (
+        f"`_BORROWED` is {sorted(tsr._BORROWED)} but this file reads "
+        f"{sorted(read)} off the ledger module — the loader guards only what "
+        f"`_BORROWED` names, so anything missing here loads unguarded")
 
 
 def test_a_ledger_module_missing_pane_filename_degrades_not_raises(tmp_path,

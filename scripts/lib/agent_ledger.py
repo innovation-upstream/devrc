@@ -134,9 +134,11 @@ LEDGER_DIR = os.path.join(HOME, LEDGER_SUBPATH)
 # indistinguishable from a host that did not answer.
 SENTINEL = "AGENT_LEDGER_V1"
 
-# fuzzyclaw reached 401 files, ~90% stale, because nothing ever pruned. Every write
-# prunes, so the ceiling is "records written in the last week" rather than "records
-# ever written".
+# fuzzyclaw reached 401 files, ~90% stale, because nothing ever pruned. `write_record`
+# does NOT prune; both writers call `prune` on their SESSION BOUNDARIES only, and a
+# prune sweeps the whole directory — so the ceiling is "records written in the last
+# week" rather than "records ever written", enforced by other sessions' boundaries
+# as much as by a record's own writer.
 DEFAULT_MAX_AGE = 7 * 86400
 
 # A write costs a stat + a small atomic replace. `PostToolUse` fires on every tool
