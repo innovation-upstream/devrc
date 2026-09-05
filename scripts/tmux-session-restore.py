@@ -45,6 +45,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -502,7 +503,16 @@ def resurrect_last_path() -> Path:
     """
     configured = run(["tmux", "show-options", "-gqv", "@resurrect-dir"]).strip()
     if configured:
-        return Path(os.path.expanduser(configured)) / "last"
+        # 🔴 Match the PLUGIN'S grammar, not Python's. `helpers.sh:resurrect_dir()`
+        # expands `$HOME`, `$HOSTNAME` and `~` ANYWHERE in the value via a global
+        # sed; `expanduser` handles only a LEADING `~`. `$HOME/state/$HOSTNAME/
+        # resurrect` is the documented multi-host idiom, and leaving it literal
+        # makes the path un-stat-able -> `wall` basis -> the powered-off flaw
+        # silently reintroduced, refusing a perfectly fresh plan at boot.
+        expanded = (configured
+                    .replace("$HOME", os.path.expanduser("~"))
+                    .replace("$HOSTNAME", platform.node()))
+        return Path(os.path.expanduser(expanded)) / "last"
     return RESURRECT_LAST
 
 
@@ -580,11 +590,41 @@ def plan_staleness_hours() -> tuple[float, str] | None:
         the newest artefact is from before shutdown, so the cap makes it 45s
         rather than the whole night.
 
-    Worked through the four cases:
+    Worked through the cases — INCLUDING the one this does not close:
       running normally   gap ~1min, live ~15min      -> passes
       boot+45s after 24h off  gap ~1min, live 45s    -> passes  (the bug fixed)
-      31d uptime, chain dead 1400h  gap 30s, live 744h -> REFUSES (this finding)
+      31d uptime, chain dead 1400h  gap 30s, live 753h -> REFUSES
       plan frozen, layout live      gap huge         -> REFUSES
+      🔴 boot+45s, chain dead 1400h  gap 30s, live 45s -> PASSES  (NOT CLOSED)
+
+    🔴 THE LIVENESS TERM IS ARITHMETICALLY INERT WHENEVER `uptime <= limit`, AND
+    THAT INCLUDES THE BOOT THE UNIT RUNS ON. `live = min(since, uptime) <=
+    uptime`, and refusing needs `> limit` — so at boot+45s with a 2h limit
+    (`nix/home.nix`), `live <= 0.0125h`, 160x under, and this degrades exactly
+    to the contemporaneity-only behaviour. A guard that is BREAKABLE at a
+    fixture constant (the test pins `uptime_h=753.0`, 376x the limit) is not
+    thereby REACHABLE at the call site's real value; those are different claims
+    and only the second one protects a boot.
+
+    WHY IT IS NOT CLOSED HERE RATHER THAN LEFT UNSAID. At boot, mtimes alone
+    cannot separate "chain healthy, host off 24h" from "chain dead 58d, host
+    off 24h" — after the cap both read `since ~= uptime`. The discriminator is
+    the PREVIOUS BOOT'S END (`prev_shutdown - max(state, mt)`), and it is not
+    reliably available: MEASURED on this host 2026-09-05, `journalctl
+    --list-boots` reports TWO boots whose ranges do not abut (boot -1 ends
+    2026-07-14, boot 0 begins 2026-08-18) while `uptime -s` says 2026-08-04 —
+    the journal had rotated the intervening boots away. A detector built on
+    that would be least trustworthy on exactly the long-lived host where a
+    frozen chain is most likely.
+
+    WHAT BOUNDS THE DAMAGE. A chain that froze froze BOTH artefacts, so
+    resurrect's layout is equally stale and continuum restores that old layout
+    whatever this gate decides. Resuming the conversations that match it is
+    coherent; the gate cannot prevent the stale workspace, only decide whether
+    to populate it. What IS lost is the diagnostic — the old wall-clock refusal
+    is how the 2026-08-05 freeze was noticed at all — so if you are reading
+    this because a restore looked wrong, check whether the chain is alive
+    (`ls -t ~/.tmux/resurrect/*.txt | head`) before suspecting the plan.
 
     Returns `(hours, basis)` where basis is `"layout"`, `"liveness"` or
     `"wall"`. The wall fallback (no readable state file) still carries the
@@ -603,7 +643,15 @@ def plan_staleness_hours() -> tuple[float, str] | None:
     # more than this boot has been up — powered-off time is the one interval in
     # which nothing can have gone stale.
     since = (time.time() - max(state, mt)) / 3600
-    live = min(since, uptime_hours()) if since > 0 else 0.0
+    if since < 0:
+        # 🔴 The clock moved BACKWARDS past an artefact's mtime — an anomalous
+        # measurement, not evidence of freshness. Early boot is exactly when
+        # this happens (RTC ahead, then timesyncd steps back), and it is also
+        # when this runs. Treat it like an unreadable cap and fail TOWARDS
+        # refusing, matching `uptime_hours`'s reasoning; the old `else 0.0`
+        # silently switched the liveness term off at the worst moment.
+        since = float("inf")
+    live = min(since, uptime_hours())
     return (gap, "layout") if gap >= live else (live, "liveness")
 
 
@@ -635,8 +683,15 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
                 # Name the BASIS: "8.0h" means two different things depending on
                 # which one produced it, and the wall fallback carries the
                 # powered-off flaw the layout basis exists to remove.
-                why = ("out of step with the saved layout by"
-                       if basis == "layout" else "older than (wall clock)")
+                why = {
+                    "layout": "out of step with the saved layout by",
+                    # NOT wall clock: this is uptime-capped running time since
+                    # the chain last produced anything. Saying "wall clock"
+                    # here points the reader at the powered-off bug, when the
+                    # cause is the opposite — the save chain stopped.
+                    "liveness": "produced by a chain that has been silent for",
+                    "wall": "older than (wall clock, no layout to compare)",
+                }[basis]
                 print(f"restore plan is {why} {gap:.1f}h "
                       f"(limit {staleness_hours}h, basis={basis}) — too stale, "
                       f"skipping. Run `save` first.", file=sys.stderr)

@@ -1002,3 +1002,61 @@ def test_resurrect_dir_unset_falls_back_to_the_module_default(tmp_path, monkeypa
     monkeypatch.setattr(tsr, "run", lambda cmd: "")
     monkeypatch.setattr(tsr, "RESURRECT_LAST", tmp_path / "default-last")
     assert tsr.resurrect_last_path() == tmp_path / "default-last"
+
+
+# ---------------------------------------------------------------------------
+# Round-2 audit: three guards that were mutation-SURVIVABLE, i.e. unpinned.
+# ---------------------------------------------------------------------------
+
+def test_a_liveness_refusal_does_not_call_itself_wall_clock(tmp_path, monkeypatch, capsys):
+    """🔴 The basis vocabulary grew to three; the message's if/else stayed binary.
+
+    A liveness refusal announced "older than (wall clock)" — the very measure
+    this change rejects. It lands in the worst place: a liveness refusal is
+    reachable ONLY when the save chain has stopped, so the wording sent the
+    operator hunting the powered-off bug instead of the dead chain.
+    """
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=1400 * HOUR,
+                       state_age_s=1400 * HOUR + 30, uptime_h=753.0)
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "basis=liveness" in err, err
+    assert "wall clock" not in err, (
+        f"a liveness refusal described itself as wall clock: {err!r}")
+    assert "silent" in err, f"the refusal does not say the chain stopped: {err!r}"
+
+
+def test_a_backwards_clock_does_not_switch_the_liveness_guard_off(tmp_path, monkeypatch):
+    """🔴 `since < 0` used to mean `live = 0.0` — the guard fully disabled.
+
+    Early boot is exactly when a backward step happens (RTC ahead, then
+    timesyncd corrects) and exactly when this runs. An anomalous measurement
+    must fail TOWARDS refusing, matching `uptime_hours`'s own reasoning.
+    """
+    # Artefacts dated in the FUTURE, chain otherwise long dead.
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=-2 * HOUR,
+                       state_age_s=-2 * HOUR - 30, uptime_h=753.0)
+    gap, basis = tsr.plan_staleness_hours()
+    assert basis == "liveness" and gap > 2, (
+        f"a backwards clock produced {gap:.4f}h basis={basis!r} — the liveness "
+        "term was switched off by the skew guard, which is the safe-looking "
+        "default that silently removes the protection")
+
+
+def test_resurrect_dir_expands_the_plugin_s_variables_not_just_a_leading_tilde(tmp_path, monkeypatch):
+    """🔴 `helpers.sh:resurrect_dir()` expands $HOME/$HOSTNAME/~ ANYWHERE.
+
+    `os.path.expanduser` handles only a leading `~`. `$HOME/state/$HOSTNAME/...`
+    is the documented multi-host idiom; leaving it literal makes the path
+    un-stat-able, which silently selects the `wall` basis and reintroduces the
+    powered-off flaw this change exists to remove.
+    """
+    import platform as _pf
+    monkeypatch.setattr(tsr, "run", lambda cmd: "$HOME/state/$HOSTNAME/resurrect\n")
+    got = tsr.resurrect_last_path()
+    assert "$HOME" not in str(got) and "$HOSTNAME" not in str(got), (
+        f"unexpanded variable survived into the path: {got}")
+    assert str(got).startswith(os.path.expanduser("~")), got
+    assert _pf.node() in str(got), got
+    assert got.name == "last"
