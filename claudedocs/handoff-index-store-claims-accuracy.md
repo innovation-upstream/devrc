@@ -22,41 +22,45 @@ reading, and per the protocol no field was written and no task was created.
 
 ## State now
 
-**RANK 1 CLOSED — writer identified, divergence reconciled, and the write path is now open.**
+**RANK 1 (the `seed.sh` hard-guard) IS IN FLIGHT AS `devrc#1304`, NOT MERGED.**
+Branch `fix/seed-refuse-pod-overwrite`, head `d7c4c266`. Two audit rounds done; **round 3
+is owed** (round 2 returned findings, so the ladder cannot stop there).
 
-- **The writer was Claude Code sessions themselves**, using `Edit`/`Write` on
-  `~/.claude/analyze-service-index/`. The `0444` freeze is INERT against them: those tools
-  rewrite-and-rename, needing only the containing directory's `0755` bit. Reproduced in a
-  replica — shell `>>` gets EACCES; `Edit` writes through and leaves the file `0444`; `Write`
-  creates at `0644`. That is the whole 0444-vs-0644 split in the tree: two tools, not two
-  writers. Attributed: session `aaa78f1b…` ran `Edit` on `devrc/tests.md` at
-  `2026-09-02T15:39:26Z` = that file's exact `10:39:27` CDT mtime.
-- **Reconciled:** 21 stranded bullets + 2 revisions across 8 entries via `cairn put`, verified
-  at the CONSUMER (the two bullets measured dark now resolve through `cairn`).
-- **`devrc#1254` → squash `34d00d90`** — the CREATE verb (`PUT` + `If-None-Match: *`, 201,
-  `X-Store-Status: already-exists`, `os.link` for atomicity, `cairn create`, exit 9).
-- **DEPLOYED AND VERIFIED LIVE:** image `subsystem-store-api:0.7.0`
-  (`sha256:2f6d2f30…`), pinned in homelab-infra `trunk@42c6d9a`, pod up on 0.7.0 with 0
-  restarts. `cairn create` against an existing entry now returns **exit 9 / already-exists**
-  where it returned **405 read-only** before. That is the exact failing path, exercised.
-- **`devrc#1277` → squash `8e12ec3d`** — `browser-agent`'s warm-lock release trap, armed AT
-  ACQUISITION (the pre-existing `trap _cleanup_all` sits ~100 lines below the window and never
-  touched the lock). Verified by content on `origin/main`; gated green on the sandbox tier
-  (pytests 21353/0, nodetests 1449/0) at merged tree `b8380b89`.
-- **`devrc#1259` → squash `13775144`** — the session→task resolver's opencode blindness,
-  recorded in `handoff-cairn-task-linkage.md`.
-- `devrc#1232` was **already merged** when this effort re-checked it — that rank was stale.
+- **What it does.** A PRE-FLIGHT before the tar: for exactly the paths in `$staged_list`, ask
+  the pod whether it holds different bytes; refuse **exit 8, pushing nothing**, and name them.
+  `--allow-overwrite` proceeds and still prints what it replaced. The header's
+  `🔴 THE LOCAL STORE IS AUTHORITATIVE` — false since the cutover — is corrected.
+- **Why bytes, not mtime:** two copies cannot be ordered (a local edit not yet pushed and a pod
+  edit not yet pulled both read as "different"). Post-cutover the pod is the authority, so ANY
+  difference means a derivative would overwrite it. No clock needed.
+- **Round 1 (audit) found a 🔴 IN THE GUARD ITSELF.** The pre-flight printed its count only on
+  failure and the probe emitted a line only for files the pod HAS — so "the pod holds none of
+  them" and "the probe never ran" were the same observation (zero lines, rc 0). Driven
+  end-to-end with a silenced probe, the push **destroyed the pod's newer bytes and printed
+  `seed: OK`**. Fixed: every path is answered (hash / `ABSENT` / `UNREADABLE`), a short reply is
+  exit 9, and the counts print on every path.
+- **Round 2 refuted a round-1 claim of mine, in both halves.** `-I{}` does NOT disable xargs's
+  input quote parsing (only `-d`/`-0` does), so a quoted path still aborted rc 1 with no
+  diagnostic — byte-identical to base. And the space case stopped aborting and started LYING:
+  `awk '{print $2" "$1}'` truncated the join key at the first blank, so two BYTE-IDENTICAL
+  entries collapsed to one key, the join became a cross-product, and the guard refused with
+  `differing=2` naming a path that does not exist. Fixed: `-d '\n'` on both sides, TAB-separated
+  key, `join -t <tab>`.
+- **Mutation matrix, all re-run rather than asserted:** local loses `-d` → killed; `awk`
+  truncates the key → killed; `LC_ALL=C join` → `join` → killed (it SURVIVED all 40 base tests
+  before round 1); drop the answered-count gate → killed.
 
-**BLOCKED, and it is a PERMISSION not a mechanism:**
-- Two entries remain local-only — `civitai-app-requests/app-requests.md` and
-  `civitai-developer-docs/apps.md`. `cairn create` answers `not-found` for both, and
-  `cairn doctor` confirms the cause: **neither scope is in this token's allowlist**. The 404 is
-  deliberately ambiguous so an error cannot enumerate the store. Widening the allowlist means
-  editing the k8s secret and deleting the pod (the token file is read ONCE at startup, no
-  reload) — an access-control change and a second outage window, left for the operator.
-- ⚠ The earlier framing "5 entries blocked by the missing verb" is **superseded**: another
-  session pushed 4 of the 5 via `seed.sh` while this work was in flight, and the 2 that remain
-  were never blocked by the verb at all.
+🔴 **NOT VERIFIED, and not claimed:**
+- **Neither gate tier has run on `d7c4c266`** — not `scripts/gate.sh --tier both`, not the two
+  sandbox derivations, not on the merged tree.
+- The full `test_subsystem_store_api.py` was last run green (**723 passed**) at the round-2 fix
+  commit; since then only targeted subsets (31 passed) have run.
+- **Nothing has touched the LIVE pod.** Every test drives a fake `kubectl` whose `exec` rewrites
+  `/data` to a temp dir and runs the command locally — a harness that structurally cannot tell
+  "works on the pod" from "works on this host". The round-1 auditor closed that gap with a
+  read-only live probe (pod `/bin/sh` = dash, GNU findutils 4.10, the literal command clean over
+  211 real entries); a later auditor's worktree guard refused `kubectl exec` entirely, so that
+  evidence has not been refreshed.
 
 ## Open investigations — live diagnosis state
 
@@ -164,52 +168,81 @@ reading, and per the protocol no field was written and no task was created.
 - **Next probe:** none for the diagnosis. Before ANY future local→pod bulk operation, run the
   per-bullet direction check rather than a file-level containment set.
 
+### `cairn-cutover.py` P3 is blocked by the new guard and cannot complete
+- **Symptom + exact repro:** `cairn-cutover.py` P3 invokes `bash seed.sh --store <delta_dir> …`
+  with **no `--allow-overwrite`** (`cairn-cutover.py:1379-1382`). Its `plan.shippable` is
+  `ADD + SUPERSEDES + MERGED` (`cairn-cutover.py:516`, `:494`).
+- **Observed (with values):** `SUPERSEDES` and `MERGED` are BY DEFINITION entries whose pod bytes
+  differ, which is exactly what the pre-flight refuses — so P3 exits 8 and pushes nothing the
+  moment anything supersedes. Measured on the real store while auditing: **52 of 157** shared
+  entries differ today, so this is the normal state, not an edge.
+- **Ruled out:** "the cutover tests would have caught it" — `test_cairn_cutover.py` only
+  re-extracts the `find` expression from `seed.sh`'s source (`:473-475`); **nothing exercises P3
+  against the real script**, so its 85 green tests say nothing about this. via: code
+- **Ruled out:** "the refusal predates this PR so the guidance is fine" — the exit-8 refusal does
+  predate round 2, but round 2 rewrote the message, and it now tells that caller the local tree
+  is "a FROZEN pre-cutover mirror" and to "send it entry-by-entry". Both are FALSE for a curated
+  delta that `_materialise` built and whose rollback set `_save_prepush` already wrote. via: code
+- **Leading hypothesis:** P3 either needs to pass `--allow-overwrite` (it IS a reviewed delta
+  with a rollback set already on disk) or is simply dead post-cutover and should say so. This is
+  a decision about the cutover's lifecycle, not a bug fix, which is why it was not taken
+  unilaterally.
+- **Next probe:** `python3 scripts/cairn-cutover.py --help` and read P3's own description, then
+  decide. If P3 is retained, the one-line change is `--allow-overwrite` at
+  `cairn-cutover.py:1379-1382` plus a test that exercises P3 against the real `seed.sh`.
+
 ## Next steps (ranked)
 
-1. **Hard-guard `scripts/subsystem-store-api/seed.sh`.** Never started, and it is the largest
-   remaining hazard. `origin/main` still opens `🔴 THE LOCAL STORE IS AUTHORITATIVE` (line 4)
-   and its extract "adds and overwrites but never deletes" (lines 322-323). 🔴 The blast radius
-   is MEASURED HIGHER than when this doc was first written: beyond the cairn-attributed
-   bullets, it would revert the **5 pod-newer bullets** this effort found — including two
-   `OPEN:`→`RESOLVED` closures. Fix is an inversion of the `comm -23` containment set it
-   already computes, plus the header.
-   forcing: regression — the cutover inverted the authority and the script was never updated;
-   a one-off footgun becomes a recurring data-loss job the moment anyone automates it.
+1. **Round 3 delta re-audit of `ec16cce8..d7c4c266`** (devrc#1304). Round 2 returned findings, so
+   the ladder cannot stop there — a clean round is the stop condition, not a verdict. Dispatch
+   BLIND: give the diff and round 2's claims block, never the reasoning for why they are correct.
+   forcing: gate — this repo's audit gate is the only pre-merge review, and two of two rounds so
+   far each found a real defect the previous round introduced.
 
-2. **Fix the opencode blindness in `scripts/lib/clawgate_handoff.sh`.** Diagnosed and recorded
-   (`13775144`), NOT fixed. It reads only `CLAUDE_CODE_SESSION_ID` — `grep -c OPENCODE_SESSION_ID`
-   is **0**. Detached opencode ⇒ exit 3 forever (a task can never be recorded); NESTED opencode
-   INHERITS the outer Claude session's id ⇒ exit 0 with **another session's tasks**, written into
-   an opencode-authored doc. The browser bridge already fails closed on exactly this
-   (`X-Session-Origin: opencode-inherited`); this flow never learned it.
+2. **Gate `devrc#1304` and merge.** `scripts/gate.sh --tier both` AND
+   `nix build .#checks.x86_64-linux.{pytests,nodetests}` ONE AT A TIME, on the MERGED tree, with
+   the base sha named in the claim. ⚠ Read the runners' `RESULT:` lines, never a piped exit
+   code — that trap fired four times in this effort. ⚠ Any red measured above ~load 20 on this
+   box needs a control before it means anything; three failures investigated here were other
+   agents' suites.
+   forcing: gate — nothing else gates a merge in this repo; `main` is protected in name only.
+
+3. **Decide `cairn-cutover.py` P3** (see the open investigation above). Either pass
+   `--allow-overwrite` or declare P3 dead post-cutover.
+   forcing: regression — a shipped code path that can never complete, made worse by guidance
+   that is false for its only programmatic caller.
+
+4. **Fix the opencode blindness in `scripts/lib/clawgate_handoff.sh`.** Diagnosed and recorded
+   (squash `13775144`), NOT fixed. It reads only `CLAUDE_CODE_SESSION_ID`;
+   `grep -c OPENCODE_SESSION_ID` is **0**. Detached opencode ⇒ exit 3 forever; NESTED opencode
+   inherits the outer Claude session's id ⇒ exit 0 with **another session's tasks**. The browser
+   bridge already fails closed on exactly this (`X-Session-Origin: opencode-inherited`).
    forcing: regression — the nested path silently misattributes today.
 
-3. **Run `scripts/ship.sh`.** Never run in this effort. The workbench looked current (the
-   corrected `prune-index`/`subsystem-index` prose resolves in its nix-store copy) but the
+5. **Run `scripts/ship.sh`.** Still never run in this effort. The workbench looked current; the
    **laptop is UNVERIFIED**, so a session there may still be told to write new entries into the
    dead mirror. Read every per-host line, not the final verdict.
-   forcing: regression — a stale prescription on one host reintroduces the defect this whole
-   effort closed.
+   forcing: regression — a stale prescription on one host reintroduces the defect this effort
+   closed.
 
-4. **Decide the token allowlist for the 2 remaining entries** (`civitai-app-requests`,
-   `civitai-developer-docs`). Operator call: it widens a credential's scope and costs an outage
-   window. Until then those two are invisible to every reader.
+6. **Decide the token allowlist for the 2 remaining local-only entries**
+   (`civitai-app-requests/app-requests.md`, `civitai-developer-docs/apps.md`). `cairn create`
+   answers `not-found`; `cairn doctor` confirms neither scope is in this token's allowlist.
+   Widening it means editing the k8s secret and deleting the pod (the token file is read ONCE at
+   startup) — an access-control change and a second outage window.
    forcing: none
 
-5. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Never started. 🟡5: `subsystem-index/SKILL.md:148` says to
-   read the policy the probe named on its `policy:` line, but the `/analyze-service` door reaches
-   the write half via `service_recon.py` + `--template` — **re-measured 2026-09-04: 0 occurrences
-   of `policy:` in `service_recon.py` on `origin/main`**, so the caller is told to read a policy
-   nobody named. 🟡6: `--template` over an EXISTING entry prints the first-ever-file template and
-   exits 0 silently, destroying an `OPEN:` bullet. Fixes: emit `policy:` from the existing
-   `governing_policy()`; add a create mode using `os.open(..., O_CREAT|O_EXCL, 0o444)`.
+7. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. Re-measured 2026-09-04: **0**
+   occurrences of `policy:` in `service_recon.py` on `origin/main`, so 🟡5 stands exactly as
+   written. 🟡6: `--template` over an EXISTING entry prints the first-ever-file template and
+   exits 0 silently, destroying an `OPEN:` bullet.
    forcing: none
 
-6. **`main` is RED on `scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py`**
-   (`test_a_body_file_written_by_a_heredoc_on_the_same_line_is_read`). Found while gating
-   #1277 and PROVEN inherited: it fails on `origin/main` with the PR's diff absent,
-   deterministically in 0.24s, on a quiet box. ⚠ The SANDBOX tier does NOT reproduce it — only
-   the dev-host tier — so it is invisible to the gate a merge is judged on. Unowned.
+8. **`main` is RED on `scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py`**
+   (`test_a_body_file_written_by_a_heredoc_on_the_same_line_is_read`). PROVEN inherited: fails on
+   `origin/main` with any PR diff absent, deterministically in 0.24s on a quiet box. ⚠ The
+   SANDBOX tier does NOT reproduce it — only the dev-host tier — so it is invisible to the gate a
+   merge is judged on. Unowned.
    forcing: regression — a red dev-host tier trains everyone to merge through it.
 
 ## Gotchas / decisions / dead-ends
@@ -352,6 +385,57 @@ reading, and per the protocol no field was written and no task was created.
   cores; three separate failures this effort investigated were other sessions' suites, not
   code. `browser-agent`'s machine-global lock was one mechanism; raw CPU contention was
   another. Any red measured above ~load 20 needs a control before it means anything.
+
+- **Carried forward from an earlier `State now` (a REPLACE section, so it would otherwise be
+  dropped):** the ORIGINAL rank 1 is CLOSED — the writer was Claude Code sessions themselves
+  using `Edit`/`Write` on `~/.claude/analyze-service-index/` (the `0444` freeze is inert against
+  them: those tools rewrite-and-rename and need only the containing directory's `0755` bit), 21
+  stranded bullets + 2 revisions were reconciled onto the pod and verified at the consumer, and
+  the write path was closed by the CREATE verb (`devrc#1254` → `34d00d90`, live as image
+  `subsystem-store-api:0.7.0`, verified with `cairn create` returning exit 9 / already-exists
+  where it returned 405 read-only before).
+- **Also carried forward:** `seed.sh`'s blast radius is MEASURED HIGHER than when this doc was
+  first written — beyond the cairn-attributed bullets it would revert the **5 pod-newer bullets**
+  found on 2026-09-02/03, two of them `OPEN:` → `RESOLVED` closures with ~20 lines of later
+  corrections, and report success.
+
+- 🔴 **`git checkout -- <file>` DESTROYED UNCOMMITTED WORK THREE TIMES IN THIS EFFORT**, twice
+  after a mutation run and once after a red-at-base check. It restores from the INDEX, so
+  mutating uncommitted work and "reverting" takes the work with it. The second time it also
+  shipped a FALSE COMMIT MESSAGE: `3c8e37da` asserted a 🔴 fix while
+  `git show 3c8e37da:…/browser-agent | grep -c OC_LOCK_PID_FILE` was **6**, and a PR comment
+  repeated the claim. **Commit before every mutation run, and read the claim off the committed
+  blob rather than off what you remember editing.**
+- 🔴 **A GUARD'S OWN CLEAN PATH CAN BE THE SILENT ZERO.** The `seed.sh` pre-flight printed its
+  count only on refusal, so a probe that never ran and a pod holding nothing were the same
+  observation. The fix that looks obvious — refuse when 0 are present — is WRONG: that is the
+  ordinary first-seed case and it failed **18 legitimate tests**. The answerable question was
+  "did it SEE the whole list", not "did it find anything".
+- 🔴 **`-I{}` DOES NOT DISABLE `xargs` QUOTE PARSING** — only `-d`/`-0` does. And rebuilding a
+  line from awk FIELDS (`{print $2" "$1}`) truncates any path at its first blank, which turned a
+  loud crash into a confident FALSE REFUSAL naming a nonexistent path. Both shipped as a claim
+  with no test; both were caught only by an audit re-running them.
+- 🔴 **A CONTROL THAT SHARES THE CONTAMINANT IS NOT A CONTROL.** A browser-bridge failure
+  reproduced on `origin/main` and was reported as "inherited / main is broken". It was neither —
+  a machine-global orphaned lock was failing both runs. What worked was removing the suspected
+  cause and watching the test pass, not a second sample.
+- 🔴 **THE PIPE TRAP FIRED FOUR TIMES** — `… | tail; echo "rc=$?"` printed `GATE_RC=0` over
+  `GATE: RESULT=FAIL exit=1`, and `NIXBUILD_RC=0` over a failed derivation. The runners' own
+  `RESULT:` line caught it every time.
+- 🔴 **A TEST CAN BE VACUOUS IN A WAY ONLY MUTATION SHOWS.** The first `LC_ALL=C join` guard
+  planted its sort-inversion on the POD — but the probe answers only STAGED paths, so a pod-only
+  file never reaches the join. It passed, and the mutant survived. Both sides of the inversion
+  must be staged.
+- **A `-k` FILTER CAN EXCLUDE THE KILLING TEST SILENTLY.** `-k "SILENTLY_SKIPPED"` matched
+  nothing against class `…SILENTLYSKIPPED` and reported `1 passed` — a green that proved nothing
+  about the two tests it had quietly dropped.
+- **Concurrent agents corrupt each other's results on this box.** Load hit 62 on 24 cores; three
+  failures investigated in this effort were other sessions' suites rather than code. Queue behind
+  them rather than killing them, and treat any red above ~load 20 as needing a control.
+- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **6** — one linked task
+  (`#477`, role=`read`, "Bot-account detection agent"), NONE worked. That task was read only to
+  verify another agent's claim about it and is definitively not this work, so per the flow no
+  field was written and none was created.
 
 ## How to verify
 
