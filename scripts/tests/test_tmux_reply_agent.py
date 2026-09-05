@@ -1101,7 +1101,11 @@ def test_the_text_gate_still_accepts_ordinary_text():
     """The positive control. Without it every case above is satisfied by a gate
     that refuses everything, which would make the feature inert rather than safe.
     """
-    for text in ("yes, go ahead", "café — naïve ünïcode ✓", "a\tb",
+    # ⚠ A TAB IS DELIBERATELY ABSENT from this list — the shared policy permits
+    # one, and THIS surface refuses it anyway because shell completion rewrites
+    # the buffer after the audit row is written. See
+    # test_the_host_refuses_a_tab_even_though_the_shared_policy_allows_one.
+    for text in ("yes, go ahead", "café — naïve ünïcode ✓",
                  "run `make test` && echo $HOME; then stop", "  spaced  "):
         assert AGENT.validate({"id": "w-abc123", "kind": "send-keys",
                                "pane": "%1", "text": text}) == "", text
@@ -1362,3 +1366,30 @@ def test_the_host_refuses_a_compound_tmux_target(server, tmux_stub, tmp_path, na
         f"the agent opened a window targeting {name!r}")
     body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
     assert body["state"] == "refused", body
+
+
+def test_the_host_refuses_a_tab_even_though_the_shared_policy_allows_one():
+    """🔴 A DELIBERATE DIVERGENCE FROM THE SHARED POLICY, IN THE SAFE DIRECTION.
+
+    `send-keys -l` delivers a tab literally and a bash/zsh pane runs COMPLETION on
+    it: `rm -rf ~/pro` + TAB becomes `rm -rf ~/projects/`, and the Enter this path
+    presses submits THAT — while clawgate's audit row still says `rm -rf ~/pro`.
+    That is the identical property the trailing-`;` refusal exists for.
+
+    `session-write` keeps the tab because it is invoked by the operator at their
+    own keyboard, where the buffer is visible before anything runs. Here the row
+    IS the compensating control, so a character that makes it lie costs more than
+    the typography is worth.
+
+    Both halves are asserted: the shared policy still permits it (so this is a
+    divergence, not a policy change that would surprise session-write), and this
+    surface refuses it anyway.
+    """
+    assert AGENT.TEXT_POLICY.TEXT_IS_ALLOWED("\t"), (
+        "the shared policy no longer allows a tab — this test is now asserting a divergence "
+        "that does not exist, and session-write's own guards would have moved too")
+    assert AGENT.validate({"id": "w-abc123", "kind": "send-keys", "pane": "%1",
+                           "text": "rm -rf ~/pro\t"}) != ""
+    # The control: the same text without the tab is ordinary and passes.
+    assert AGENT.validate({"id": "w-abc123", "kind": "send-keys", "pane": "%1",
+                           "text": "rm -rf ~/projects/"}) == ""

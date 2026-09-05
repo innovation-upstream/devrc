@@ -392,6 +392,24 @@ def validate(write: dict) -> str:
         return "the text is not a string"
     if len(text.encode("utf-8", "replace")) > MAX_TEXT_BYTES:
         return "the text is over the size limit"
+    # 🔴 TAB IS REFUSED ON THIS SURFACE, THOUGH THE SHARED POLICY PERMITS IT, and
+    # the divergence is deliberate rather than drift. `send-keys -l` delivers a
+    # tab literally and a bash/zsh pane runs COMPLETION on it: `rm -rf ~/pro` plus
+    # TAB becomes `rm -rf ~/projects/` in the buffer, and the Enter this path
+    # presses submits THAT — while the clawgate audit row still says
+    # `rm -rf ~/pro`. The server refuses it for the same reason; this is the
+    # host-side half, so a server that has not been upgraded cannot deliver one.
+    #
+    # `session-write` keeps the tab, and that asymmetry is the point: it is
+    # invoked by the operator AT THEIR OWN KEYBOARD, where the buffer is visible
+    # before anything runs. Here the audit row IS the compensating control — it is
+    # what answers "what did that write actually do" for a reply sent from a phone
+    # — so a character that makes the row lie costs more than the typography is
+    # worth. The shared policy stays as it is; this surface is stricter, which is
+    # the safe direction for a divergence.
+    if "\t" in text:
+        return ("the text carries a tab, which shell completion would expand after the audit "
+                "row was written")
     bad = TEXT_POLICY.first_disallowed(text)
     if bad is not None:
         return "the text carries " + TEXT_POLICY.describe_disallowed(*bad)
