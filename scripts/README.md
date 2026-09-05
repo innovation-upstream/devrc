@@ -84,7 +84,7 @@ Click actions for those blocks:
 |---|---|
 | `airvpn-updown` | tunnel PostUp/PostDown helper — the killswitch + split-tunnel |
 | `airvpn-sudo` | privileged helper for the AirVPN block (via a NOPASSWD sudo rule) |
-| `workhost` | reach a dev host over whichever path (LAN / nebula / tailscale) is up; probes all three in parallel every run and reports `ok` / `unreachable` / `not-configured` per path |
+| `workhost` | reach a dev host over whichever path (LAN / nebula / tailscale) is up; probes all three in parallel every run and reports `ok` / `unreachable` / `untrusted-key` / `not-configured` per path. `untrusted-key` means ssh refused the host key for the `HostKeyAlias`, not that the box is down — `workhost ssh --accept-key` trusts it once, interactively |
 
 ## Media
 

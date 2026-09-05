@@ -17,8 +17,11 @@ reason.
 """
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -115,8 +118,12 @@ SSH_STUB = (
     % REAL_DATE
     + """
 LSPEC=""
+BATCH=""
 for a in "$@"; do
-  case "$a" in *:127.0.0.1:*) LSPEC="$a" ;; esac
+  case "$a" in
+    *:127.0.0.1:*) LSPEC="$a" ;;
+    BatchMode=yes) BATCH=1 ;;
+  esac
 done
 
 while [ $# -gt 0 ]; do
@@ -135,7 +142,43 @@ ok=1
 for a in ${WH_OK_ADDRS:-}; do
   [ "$a" = "$ADDR" ] && ok=0
 done
-[ $ok -eq 0 ] || exit 255
+
+# Real ssh exits 255 for EVERY connection-level failure — auth, DNS, timeout
+# and host key alike. A stub that only ever exits 255 therefore cannot tell
+# those apart, and a suite built on it ASSERTS the conflation: `255` is all it
+# can ever see. So the three cases are separated the only way real ssh
+# separates them, by the MESSAGE, and each is reachable from a test.
+if [ $ok -ne 0 ]; then
+  # A key that CHANGED is refused whether or not there is a human at the
+  # keyboard: real ssh does not offer to accept it, it tells you to remove the
+  # offending known_hosts line.
+  for a in ${WH_HOSTKEY_CHANGED_ADDRS:-}; do
+    if [ "$a" = "$ADDR" ]; then
+      printf '@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\\n' >&2
+      printf 'IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!\\n' >&2
+      printf 'Host key verification failed.\\n' >&2
+      exit 255
+    fi
+  done
+  # A key never seen before is refused under BatchMode and ACCEPTED
+  # interactively — which is the whole mechanism --accept-key relies on, so the
+  # stub has to model the difference rather than exit 255 unconditionally.
+  for a in ${WH_HOSTKEY_MISSING_ADDRS:-}; do
+    if [ "$a" = "$ADDR" ]; then
+      if [ -n "$BATCH" ]; then
+        printf 'The authenticity of host %s cannot be established.\\n' "$ADDR" >&2
+        printf 'Host key verification failed.\\n' >&2
+        exit 255
+      fi
+      ok=0
+    fi
+  done
+fi
+
+if [ $ok -ne 0 ]; then
+  printf 'someone@%s: Permission denied (publickey,password).\\n' "$ADDR" >&2
+  exit 255
+fi
 
 if [ -n "$LSPEC" ] && [ -n "${WH_TUNNEL:-}" ]; then
   PORT="${LSPEC%%:*}"
@@ -177,14 +220,27 @@ def sandbox(
     ok_addrs=(),
     local_addrs=("10.9.9.9",),
     tailscale=None,
+    tailscale_raw=None,
     delay=None,
     tunnel=False,
+    hostkey_missing=(),
+    hostkey_changed=(),
+    ssh=True,
 ):
     """Build a stub-only PATH and the env that drives it.
 
     ``tailscale`` is None for "no tailscale binary exists at all", or a list of
     peer dicts for a tailnet that does exist. Those two are different states and
-    the tests below assert they stay different.
+    the tests below assert they stay different. ``tailscale_raw`` writes an
+    arbitrary JSON body instead, for the valid-but-not-an-object cases.
+
+    ``hostkey_missing`` / ``hostkey_changed`` list addresses for which the ssh
+    stub reproduces ssh's two host-key refusals. They are separate from
+    ``ok_addrs`` on purpose: an address in neither set gets an AUTH failure, so
+    the three ways of exiting 255 are all reachable and can be pinned apart.
+
+    ``ssh=False`` writes no ssh stub at all — the "no ssh binary on PATH" case,
+    which is the client-side mirror of `tailscale` being absent.
     """
     tmp_path.mkdir(parents=True, exist_ok=True)
     bindir = tmp_path / "bin"
@@ -194,12 +250,15 @@ def sandbox(
     timedir = tmp_path / "times.d"
     timedir.mkdir(exist_ok=True)
 
-    mockbin.write_exec(bindir / "ssh", SSH_STUB)
+    if ssh:
+        mockbin.write_exec(bindir / "ssh", SSH_STUB)
     for name in ("scp", "rsync", "tmux", "kubectl"):
         mockbin.write_exec(bindir / name, RECORDER_STUB)
     mockbin.write_exec(bindir / "ip", _ip_stub(local_addrs))
 
-    if tailscale is not None:
+    if tailscale_raw is not None:
+        mockbin.write_exec(bindir / "tailscale", _tailscale_stub(tailscale_raw))
+    elif tailscale is not None:
         status = {"Self": {"HostName": "someclient", "TailscaleIPs": ["100.64.0.2"]}}
         status["Peer"] = {"nodekey:%d" % i: p for i, p in enumerate(tailscale)}
         mockbin.write_exec(bindir / "tailscale", _tailscale_stub(json.dumps(status)))
@@ -217,6 +276,8 @@ def sandbox(
         "WH_LOGDIR": str(log),
         "WH_TIMEDIR": str(timedir),
         "WH_OK_ADDRS": " ".join(ok_addrs),
+        "WH_HOSTKEY_MISSING_ADDRS": " ".join(hostkey_missing),
+        "WH_HOSTKEY_CHANGED_ADDRS": " ".join(hostkey_changed),
         "WH_PYTHON": sys.executable,
     }
     if delay is not None:
@@ -263,6 +324,27 @@ def non_probe(log: Path):
 
 def peer(name, ip=TS):
     return {"HostName": name, "DNSName": "%s.example.test." % name, "TailscaleIPs": [ip]}
+
+
+def load_workhost():
+    """Import `scripts/workhost` as a module, freshly, for unit-level checks.
+
+    Used ONLY where the CLI cannot reach the branch — i.e. where the input is a
+    `Host` that deliberately does not exist in the shipped table. A fresh module
+    object each call so a test that rebinds a function cannot leak into another.
+    """
+    loader = importlib.machinery.SourceFileLoader("workhost_under_test", str(WORKHOST))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    # @dataclass resolves `cls.__module__` through sys.modules while the class
+    # body executes, so the module must be registered BEFORE exec_module or the
+    # decorator dies on a None lookup. Popped again so nothing leaks.
+    sys.modules[loader.name] = mod
+    try:
+        loader.exec_module(mod)
+    finally:
+        sys.modules.pop(loader.name, None)
+    return mod
 
 
 # ---------------------------------------------------------------------------
@@ -390,14 +472,63 @@ def test_run_false_exits_1(tmp_path):
     assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
 
 
-def test_exit_3_is_distinguishable_from_a_remote_failure(tmp_path):
-    """Both are non-zero; they must not be the same non-zero."""
+@pytest.mark.parametrize("code", [1, 2, 42])
+def test_exit_3_is_distinguishable_from_a_remote_failure(tmp_path, code):
+    """Both are non-zero; for these codes they are not the same non-zero.
+
+    Parametrised over more than one remote code on purpose. The single-value
+    version of this test carried a name — and backed a docstring — far wider
+    than what it proved: `[1]` alone says nothing about 3, which is exactly
+    where the claim breaks. See the two collision tests below, which pin the
+    boundary rather than let the name imply it does not exist.
+    """
     _, _, up = sandbox(tmp_path / "u", ok_addrs=(LAN,))
     (tmp_path / "u").mkdir(exist_ok=True)
     _, _, down = sandbox(tmp_path / "d", ok_addrs=())
     (tmp_path / "d").mkdir(exist_ok=True)
-    assert run(up, "run", "exit 1").returncode == 1
-    assert run(down, "run", "exit 1").returncode == 3
+    assert run(up, "run", "exit %d" % code).returncode == code
+    assert run(down, "run", "exit %d" % code).returncode == 3
+
+
+def test_exit_3_collides_with_a_remote_exit_3_and_json_disambiguates(tmp_path):
+    """🔴 The honest boundary of the exit-code contract.
+
+    `EXIT_NO_PATH = 3` is conventional, not reserved: a remote command that
+    chooses `exit 3` produces the same status as "no path to the box". The
+    docstring in `scripts/workhost` used to claim 3 was "distinct from any
+    remote exit code", which is wider than the code. This test is what stops
+    that claim regrowing, and names the channel that IS unambiguous — `--json`,
+    where `selected` is null exactly when no path was usable.
+    """
+    _, _, up = sandbox(tmp_path / "u", ok_addrs=(LAN,))
+    (tmp_path / "u").mkdir(exist_ok=True)
+    _, _, down = sandbox(tmp_path / "d", ok_addrs=())
+    (tmp_path / "d").mkdir(exist_ok=True)
+
+    a = run(up, "--json", "run", "exit 3")
+    b = run(down, "--json", "run", "exit 3")
+    assert a.returncode == 3 and b.returncode == 3, (a.returncode, b.returncode)
+
+    # The no-path run also writes a `workhost: …` line after the report, so the
+    # JSON is decoded off the front rather than from the whole stream.
+    decode = json.JSONDecoder().raw_decode
+    assert decode(a.stderr)[0]["selected"] == "lan", a.stderr
+    assert decode(b.stderr)[0]["selected"] is None, b.stderr
+
+
+def test_usage_exit_2_collides_with_a_remote_exit_2(tmp_path):
+    """The second collision the PR body used to gloss over.
+
+    Discriminated by the `workhost:` prefix on stderr, which a remote command's
+    own failure never produces.
+    """
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    remote = run(env, "run", "exit 2")
+    usage = run(env, "-H", "nosuchhost", "run", "exit 2")
+
+    assert remote.returncode == 2 and usage.returncode == 2
+    assert "workhost:" not in remote.stderr, remote.stderr
+    assert "workhost: unknown host" in usage.stderr, usage.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +568,10 @@ def test_rsync_threads_the_alias_through_dash_e(tmp_path):
     alias is silently lost for exactly this verb."""
     _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
     r = run(env, "--dry-run", "rsync", "-a", "./d/", ":/tmp/d/")
-    assert "-e ssh -o HostKeyAlias=workbench" in r.stdout, r.stdout
+    # `--dry-run` shlex-joins now, so the -e value is printed as ONE quoted
+    # argument — which is what it is. Asserting the quoted form rather than a
+    # bare substring keeps the guard honest about what actually gets exec'd.
+    assert "-e 'ssh -o HostKeyAlias=workbench" in r.stdout, r.stdout
 
 
 def test_the_probe_itself_carries_the_alias(tmp_path):
@@ -496,11 +630,49 @@ def test_runs_locally_when_the_nebula_address_is_ours(tmp_path):
     assert non_probe(log) == [], "should not have opened an ssh session to itself"
 
 
-def test_runs_locally_when_the_lan_address_is_ours(tmp_path):
+def test_the_lan_address_alone_does_not_prove_we_are_the_target(tmp_path):
+    """🔴 THE HAZARD, pinned — not merely that the fallback fires.
+
+    A LAN address is unique within ONE SUBNET, so a laptop on a network that
+    hands it 192.168.50.250 used to satisfy `is_local_host(workbench)`. Then
+    `workhost run 'kubectl delete ns prod'` executed on the LAPTOP, exited 0,
+    and in the quiet path printed nothing that said workbench was never
+    touched: the same silent wrong-machine execution the hostname check was
+    rejected to prevent, one layer down.
+
+    workbench HAS a nebula address in the table, so its LAN address is no
+    longer accepted as self-identification. The tool must go over the wire.
+    """
     _, log, env = sandbox(tmp_path, ok_addrs=(LAN,), local_addrs=(LAN,))
-    r = run(env, "run", "echo", "hello-local")
-    assert r.stdout.strip() == "hello-local", r.stdout
-    assert non_probe(log) == [], non_probe(log)
+    r = run(env, "run", "echo", "hello")
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    remote = non_probe(log)
+    assert remote, "ran LOCALLY on a bare LAN-address match — wrong machine"
+    assert remote[0][0] == "ssh", remote
+    assert LAN in remote[0], remote
+
+
+def test_the_lan_address_is_accepted_when_the_host_has_no_nebula_address(tmp_path):
+    """The tightening above is conditional, not a removal.
+
+    Driven through the module rather than the CLI because HOSTS deliberately
+    holds exactly one real host and that host HAS a nebula address — inventing a
+    second table entry to test with is the thing `test_only_real_hosts_are_in_
+    the_table` forbids. So the branch is exercised on a Host built in the test.
+    """
+    mod = load_workhost()
+    addrs = {LAN, "10.9.9.9"}
+    mod.local_ipv4_addresses = lambda: addrs
+
+    with_nebula = mod.Host(name="w", lan=LAN, nebula=NEBULA)
+    without_nebula = mod.Host(name="w", lan=LAN)
+
+    assert mod.is_local_host(with_nebula) is False
+    assert mod.is_local_host(without_nebula) is True
+
+    # And the nebula address alone still identifies us, table entry or not.
+    mod.local_ipv4_addresses = lambda: {NEBULA}
+    assert mod.is_local_host(with_nebula) is True
 
 
 def test_runs_remotely_when_no_address_is_ours(tmp_path):
@@ -780,9 +952,66 @@ def test_scp_substitutes_the_address_for_a_leading_colon(tmp_path):
 
 
 def test_forward_builds_a_dash_L_tunnel(tmp_path):
+    """The WHOLE argv, not just `-N` and `-L`.
+
+    The earlier version asserted only that those two tokens appeared. That is
+    satisfied by an ssh which binds nothing and stays alive anyway, because
+    `ExitOnForwardFailure` defaults to `no` — so `forward 8080:…` against an
+    already-bound 8080 blocked forever with no verdict while the operator
+    believed the tunnel was up. Pinning the exact argv is what makes the fix
+    un-droppable.
+    """
     _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
     r = run(env, "--dry-run", "forward", "8080:localhost:80")
-    assert "-N" in r.stdout and "-L 8080:localhost:80" in r.stdout, r.stdout
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert shlex.split(r.stdout) == [
+        "ssh",
+        "-N",
+        "-L", "8080:localhost:80",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "HostKeyAlias=workbench",
+        "-o", "ConnectTimeout=5",
+        LAN,
+    ], r.stdout
+
+
+def test_forward_with_no_spec_is_refused_rather_than_forwarding_nothing(tmp_path):
+    """`spec = list(args)` was never validated, so a bare `workhost forward`
+    built a fully authenticated `ssh -N` with ZERO `-L` flags and idled until
+    killed — success-shaped, and under `--dry-run` it printed a plausible
+    command. Nothing about that told the operator they had forwarded nothing."""
+    _, log, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "forward")
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "forwards nothing" in r.stderr, r.stderr
+    assert non_probe(log) == [], "opened a session despite forwarding nothing"
+
+
+@pytest.mark.parametrize("spec", ["8080", "8080:localhost", "http:localhost:80", ""])
+def test_forward_rejects_a_spec_that_is_not_a_port_forward(tmp_path, spec):
+    _, log, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "--dry-run", "forward", spec)
+    assert r.returncode == 2, (spec, r.returncode, r.stdout, r.stderr)
+    assert r.stdout == "", r.stdout
+    assert non_probe(log) == [], non_probe(log)
+
+
+def test_forward_accepts_an_explicit_bind_address(tmp_path):
+    """The narrow shape check must not reject the four-field form."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "--dry-run", "forward", "127.0.0.1:8080:localhost:80")
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "-L 127.0.0.1:8080:localhost:80" in r.stdout, r.stdout
+
+
+def test_the_kubectl_tunnel_also_exits_on_a_failed_bind(tmp_path):
+    """Same defect, and worse: `free_local_port()` picks a port and lets go of
+    it, so a thief can take it before ssh binds. Without this option ssh would
+    survive the failed bind, the readiness probe would connect to the THIEF, and
+    `kubectl --server` would be aimed at an unrelated local service."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "--dry-run", "kubectl", "get", "pods")
+    assert "-o ExitOnForwardFailure=yes" in r.stdout, r.stdout
 
 
 def test_tmux_requests_a_pty(tmp_path):
@@ -1033,3 +1262,327 @@ def test_workhost_is_tracked_by_git():
             "scripts/workhost is absent from a checkout with no .git — i.e. from "
             "the nix sandbox, whose source is the flake's TRACKED-files-only copy. "
             "That means the file is untracked and the flake dropped it.")
+
+
+# ---------------------------------------------------------------------------
+# 15. The fourth state: an untrusted host key is not an unreachable host
+# ---------------------------------------------------------------------------
+#
+# 🔴 Why this section exists at all. `-o HostKeyAlias=workbench` makes ssh look
+# up `workbench` in known_hosts and IGNORE the address entries, and the probe
+# runs `BatchMode=yes` while `StrictHostKeyChecking` defaults to `ask`. So on any
+# client that has never trusted that alias — the laptop, i.e. the ONLY machine
+# where this tool does anything, since on workbench it takes the local branch —
+# every path reported `unreachable` on a perfectly healthy network and every
+# verb refused with exit 3. The tool could not bootstrap itself, and said the
+# network was down.
+#
+# Reproduced live twice before the fix: a fresh client with an empty known_hosts
+# running the exact probe argv got `Host key verification failed.` and wrote
+# ZERO bytes to known_hosts; this dev host, with the alias present at line 369 of
+# 370, got `Permission denied (publickey,…)` instead. The only reason it looked
+# fine here is a known_hosts line appended during development.
+#
+# The stub can now produce all three ways of exiting 255 — auth, key-missing,
+# key-changed — so these are pinned APART rather than conflated, in BOTH
+# directions.
+
+
+def states(r):
+    return {p["path"]: p for p in json.loads(r.stdout)["paths"]}
+
+
+def test_a_host_key_refusal_is_untrusted_key_not_unreachable(tmp_path):
+    _, _, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN, NEBULA))
+    r = run(env, "--json", "path")
+    by_path = states(r)
+    assert by_path["lan"]["state"] == "untrusted-key", r.stdout
+    assert by_path["nebula"]["state"] == "untrusted-key", r.stdout
+    assert by_path["lan"]["address"] == LAN, r.stdout
+    assert "known_hosts" in by_path["lan"]["detail"], by_path["lan"]["detail"]
+
+
+def test_an_auth_failure_is_unreachable_not_untrusted_key(tmp_path):
+    """The other direction. ssh exits 255 for auth failure AND for a host-key
+    refusal, so a classifier keyed on the exit status would call both the same
+    thing — which is what the suite used to assert."""
+    _, _, env = sandbox(tmp_path, ok_addrs=())
+    r = run(env, "--json", "path")
+    by_path = states(r)
+    assert by_path["lan"]["state"] == "unreachable", r.stdout
+    assert by_path["nebula"]["state"] == "unreachable", r.stdout
+    assert "Permission denied" in by_path["lan"]["detail"], by_path["lan"]["detail"]
+
+
+def test_the_two_ssh_255_failures_are_told_apart_in_one_run(tmp_path):
+    """Both in the SAME invocation, so no ordering or environment difference can
+    be what separates them: LAN gets the host-key refusal, nebula the auth one.
+    """
+    _, _, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN,))
+    r = run(env, "--json", "path")
+    by_path = states(r)
+    assert by_path["lan"]["state"] == "untrusted-key", r.stdout
+    assert by_path["nebula"]["state"] == "unreachable", r.stdout
+
+
+def test_a_changed_host_key_is_untrusted_key_with_its_own_detail(tmp_path):
+    """Same state, different and more alarming cause: a key that CHANGED is a
+    reinstall or an interception, never a first contact."""
+    _, _, changed = sandbox(tmp_path / "c", ok_addrs=(), hostkey_changed=(LAN,))
+    (tmp_path / "c").mkdir(exist_ok=True)
+    _, _, missing = sandbox(tmp_path / "m", ok_addrs=(), hostkey_missing=(LAN,))
+    (tmp_path / "m").mkdir(exist_ok=True)
+
+    c = states(run(changed, "--json", "path"))["lan"]
+    m = states(run(missing, "--json", "path"))["lan"]
+
+    assert c["state"] == "untrusted-key" and m["state"] == "untrusted-key"
+    assert "CHANGED" in c["detail"], c["detail"]
+    assert c["detail"] != m["detail"], (c["detail"], m["detail"])
+
+
+def test_untrusted_key_is_its_own_json_value(tmp_path):
+    """Not folded into `unreachable`, and not invented as a detail string on an
+    existing state — a machine consumer must be able to branch on it."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN, NEBULA))
+    r = run(env, "--json", "path")
+    values = {p["state"] for p in json.loads(r.stdout)["paths"]}
+    assert "untrusted-key" in values, r.stdout
+    assert "unreachable" not in values, r.stdout
+
+
+def test_the_report_names_the_cause_and_the_way_out(tmp_path):
+    """A state name alone still leaves the operator to work out that ssh will
+    never prompt, because the PROBE is the thing running BatchMode."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN, NEBULA))
+    r = run(env, "path")
+    assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+    assert "untrusted-key" in r.stdout, r.stdout
+    assert "not in known_hosts" in r.stdout, r.stdout
+    assert "workhost ssh --accept-key" in r.stdout, r.stdout
+    assert "ssh -o HostKeyAlias=workbench %s" % LAN in r.stdout, r.stdout
+
+
+def test_a_changed_key_is_not_offered_the_accept_key_shortcut(tmp_path):
+    """`--accept-key` is the wrong answer to a key that changed — real ssh does
+    not offer to accept one, it tells you to remove the offending line."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(), hostkey_changed=(LAN, NEBULA))
+    r = run(env, "path")
+    assert "ssh-keygen -R workbench" in r.stdout, r.stdout
+    assert "--accept-key" not in r.stdout, r.stdout
+
+
+def test_no_advice_is_printed_when_a_path_is_actually_usable(tmp_path):
+    """The advice block must not fire on a run that worked."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(NEBULA,), hostkey_missing=(LAN,))
+    r = run(env, "path")
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "--accept-key" not in r.stdout, r.stdout
+
+
+def test_an_action_verb_refuses_and_says_why_when_only_the_key_blocks(tmp_path):
+    _, log, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN, NEBULA))
+    r = run(env, "run", "echo", "hi")
+    assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+    assert "host key is not trusted" in r.stderr, r.stderr
+    assert "--accept-key" in r.stderr, r.stderr
+    assert non_probe(log) == [], non_probe(log)
+
+
+# --- the bootstrap escape hatch --------------------------------------------
+
+
+def test_accept_key_lets_an_untrusted_path_be_used(tmp_path):
+    """The stub models the real mechanism rather than a canned success: under
+    `BatchMode=yes` it refuses the unknown key exactly as ssh does, and without
+    BatchMode it proceeds, as ssh does once a human answers the prompt. So this
+    test is only green if `--accept-key` actually causes an interactive (no
+    BatchMode) connection to be attempted."""
+    _, log, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN,))
+    r = run(env, "--accept-key", "run", "echo", "bootstrapped")
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout.strip() == "bootstrapped", r.stdout
+    remote = non_probe(log)
+    assert remote and LAN in remote[0], remote
+    assert "BatchMode=yes" not in remote[0], remote[0]
+
+
+def test_accept_key_does_not_make_an_unreachable_path_usable(tmp_path):
+    """It widens the acceptable set by exactly one state. A down path stays
+    down, or the flag would be a way to paper over a real outage."""
+    _, log, env = sandbox(tmp_path, ok_addrs=())
+    r = run(env, "--accept-key", "run", "echo", "nope")
+    assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+    assert non_probe(log) == [], non_probe(log)
+
+
+def test_accept_key_still_prefers_a_path_that_is_already_ok(tmp_path):
+    _, _, env = sandbox(tmp_path, ok_addrs=(NEBULA,), hostkey_missing=(LAN,))
+    r = run(env, "--accept-key", "--json", "path")
+    assert json.loads(r.stdout)["selected"] == "nebula", r.stdout
+
+
+def test_forcing_an_untrusted_path_needs_the_opt_in(tmp_path):
+    _, _, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN,))
+    refused = run(env, "--path", "lan", "run", "echo", "x")
+    assert refused.returncode == 3, (refused.returncode, refused.stderr)
+    assert "untrusted-key" in refused.stderr, refused.stderr
+
+    allowed = run(env, "--path", "lan", "--accept-key", "run", "echo", "x")
+    assert allowed.returncode == 0, (allowed.returncode, allowed.stderr)
+
+
+def test_the_probe_never_enables_tofu(tmp_path):
+    """TOFU was explicitly rejected: a probe that silently accepts a new host
+    key trusts the machine on the operator's behalf, every run, with no record
+    that a decision was made."""
+    _, log, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    run(env, "path")
+    probes = [a for a in invocations(log) if a[-1] == "true"]
+    assert probes, "no probe was recorded"
+    for argv in probes:
+        joined = " ".join(argv)
+        assert "StrictHostKeyChecking" not in joined, argv
+        assert "accept-new" not in joined, argv
+
+
+def test_accept_key_cannot_reach_the_probe(tmp_path):
+    """The opt-in must be structurally unable to leak into the probe: the probe
+    argv is byte-identical with and without the flag."""
+    _, plain_log, plain = sandbox(tmp_path / "p", ok_addrs=(), hostkey_missing=(LAN,))
+    (tmp_path / "p").mkdir(exist_ok=True)
+    _, opt_log, opted = sandbox(tmp_path / "o", ok_addrs=(), hostkey_missing=(LAN,))
+    (tmp_path / "o").mkdir(exist_ok=True)
+
+    run(plain, "path")
+    run(opted, "--accept-key", "path")
+
+    def probe_argvs(log):
+        return sorted(tuple(a) for a in invocations(log) if a[-1] == "true")
+
+    assert probe_argvs(plain_log) == probe_argvs(opt_log), (
+        probe_argvs(plain_log),
+        probe_argvs(opt_log),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 16. Failing loudly instead of crashing
+# ---------------------------------------------------------------------------
+
+
+def test_kubectl_without_a_local_kubectl_exits_127_not_a_traceback(tmp_path):
+    """The irony this guard preserves: `workhost kubectl` tunnels PRECISELY so
+    it can use the LOCAL kubectl, because the remote non-login shell on NixOS
+    frequently has none — and the newly-depended-on local binary was the one
+    unhandled case. `main`'s FileNotFoundError->127 guard sits on the other
+    branch, so this died with a bare traceback and exit 1."""
+    bindir, _, env = sandbox(tmp_path, ok_addrs=(LAN,), tunnel=True)
+    (bindir / "kubectl").unlink()
+    r = run(env, "--timeout", "8", "kubectl", "get", "nodes")
+    assert r.returncode == 127, (r.returncode, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "kubectl" in r.stderr and "LOCAL" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("body", ["null", "[]", '"nope"', "3"])
+def test_a_non_object_tailscale_status_is_not_configured_not_a_crash(tmp_path, body):
+    """`null` and `[]` are VALID JSON and have no `.get()`. The AttributeError
+    escaped as a traceback and exit 1 from every verb — `path` included, whose
+    whole job is to REPORT a broken path rather than crash on one."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,), tailscale_raw=body)
+    r = run(env, "--json", "path")
+    assert r.returncode == 0, (body, r.returncode, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    ts = states(r)["tailscale"]
+    assert ts["state"] == "not-configured", r.stdout
+    assert "non-object" in ts["detail"], ts["detail"]
+
+
+def test_no_ssh_binary_is_not_configured_not_unreachable(tmp_path):
+    """A missing ssh CLIENT is the same shape of problem as a missing
+    `tailscale` binary, which the tool already calls `not-configured`. Calling
+    it `unreachable` blamed the network for a missing package — and was
+    asymmetric with the tool's own argument that the two must never be folded
+    together."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,), ssh=False)
+    r = run(env, "--json", "path")
+    assert "Traceback" not in r.stderr, r.stderr
+    by_path = states(r)
+    assert by_path["lan"]["state"] == "not-configured", r.stdout
+    assert by_path["nebula"]["state"] == "not-configured", r.stdout
+    assert "no ssh binary" in by_path["lan"]["detail"], by_path["lan"]["detail"]
+
+
+def test_a_junk_workhost_timeout_warns_and_still_runs(tmp_path):
+    """`WORKHOST_TIMEOUT=10s` used to raise ValueError while BUILDING the
+    parser, so EVERY invocation of every verb crashed — `--help` included — and
+    nothing on screen named the variable."""
+    _, log, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    env["WORKHOST_TIMEOUT"] = "10s"
+    r = run(env, "path")
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "WORKHOST_TIMEOUT" in r.stderr, r.stderr
+    probes = [a for a in invocations(log) if a[-1] == "true"]
+    assert probes and "ConnectTimeout=5" in probes[0], probes
+
+
+@pytest.mark.parametrize("bad", ["", "-1", "0", "abc"])
+def test_every_unusable_workhost_timeout_degrades_to_the_default(tmp_path, bad):
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    env["WORKHOST_TIMEOUT"] = bad
+    r = run(env, "path")
+    assert r.returncode == 0, (bad, r.returncode, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+
+
+def test_a_valid_workhost_timeout_is_still_honoured(tmp_path):
+    """The guard degrades the unusable values only — it must not swallow the
+    variable's actual purpose."""
+    _, log, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    env["WORKHOST_TIMEOUT"] = "7"
+    run(env, "path")
+    probes = [a for a in invocations(log) if a[-1] == "true"]
+    assert probes and "ConnectTimeout=7" in probes[0], probes
+
+
+def test_the_timeout_flag_documents_the_env_var(tmp_path):
+    """`--host` names `$WORKHOST_HOST` in its help; `--timeout` did not name
+    `$WORKHOST_TIMEOUT`, so the variable that could break every run was
+    undiscoverable from the tool itself."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "--help")
+    assert "$WORKHOST_TIMEOUT" in r.stdout, r.stdout
+
+
+# ---------------------------------------------------------------------------
+# 17. --dry-run prints what actually runs
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_quotes_arguments_containing_spaces(tmp_path):
+    """A bare space-join prints a command that is NOT what runs the moment an
+    argument contains a space: `run 'a b'` printed `… -- a b`, which pastes as
+    two arguments. --dry-run's only value is that the printed line and the
+    executed argv are the same thing."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "--dry-run", "run", "echo a b")
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert shlex.split(r.stdout)[-1] == "echo a b", r.stdout
+
+
+def test_dry_run_round_trips_a_nasty_argument(tmp_path):
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "--dry-run", "ssh", NASTY)
+    assert shlex.split(r.stdout)[-1] == NASTY, r.stdout
+
+
+def test_the_kubectl_dry_run_admits_its_port_is_a_placeholder(tmp_path):
+    """`main` passes `kube_port=0` for the dry run because the real port comes
+    from `free_local_port()` at run time. `-L 0:…` reads as a command you could
+    paste; it is not one."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "--dry-run", "kubectl", "get", "pods")
+    assert "-L 0:127.0.0.1:6443" in r.stdout, r.stdout
+    assert "placeholder" in r.stderr, r.stderr

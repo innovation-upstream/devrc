@@ -52,23 +52,24 @@ restore() { cp -a "$T/script.orig" "$SCRIPT"; }
 
 FAILURES=0
 ROWS=0
-# 89 tests collect today; one is deselected below. The floor sits well under
-# that so it catches a suite that failed to collect, not routine growth.
-MIN_TESTS=80
+# 139 tests collect today, NONE deselected. The floor sits well under that so it
+# catches a suite that failed to collect, not routine growth. (This number is
+# re-derived, not remembered: `python3 -m pytest --collect-only -q` on the suite.)
+MIN_TESTS=125
 
-# `test_workhost_is_tracked_by_git` asserts about the REAL repository, so it
-# cannot pass against a .git-less copy. It is a delivery guard, not a behaviour
-# guard, and no mutant below targets it — excluding it cannot hide a killer.
-# Nodeids are reported RELATIVE to rootdir, so the deselect must be relative
-# too — an absolute one silently matches nothing and the row reads as a red
-# baseline rather than as a filter that failed to apply.
+# 🔴 No deselect. An earlier version of this file excluded
+# `test_workhost_is_tracked_by_git` and justified it with "it asserts about the
+# REAL repository, so it cannot pass against a .git-less copy". That stopped
+# being true at 041cd4db, which gave the test two arms — with `.git` it asks git,
+# without `.git` it asserts the file is present at all, which is the flake's
+# tracked-files-only copy proving the same thing. It passes here, so the
+# exclusion is gone rather than left carrying a stale reason.
 RELSUITE="scripts/tests/test_workhost.py"
-DESELECT="--deselect $RELSUITE::test_workhost_is_tracked_by_git"
 
 failing() {
   local out n f total
   out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$RELSUITE" \
-    $DESELECT -q --no-header --tb=no -p no:cacheprovider 2>/dev/null)"
+    -q --no-header --tb=no -p no:cacheprovider 2>/dev/null)"
   # Read the CONTENT, never an exit code: count the runner's own result lines.
   n="$(sed -n 's/^\([0-9]*\) passed.*/\1/p;s/^[0-9]* failed, \([0-9]*\) passed.*/\1/p' <<<"$out" | tail -1)"
   f="$(sed -n 's/^\([0-9]*\) failed.*/\1/p' <<<"$out" | tail -1)"
@@ -154,7 +155,7 @@ printf '\n== path selection and precedence ==\n'
 run 'precedence-reversed'       test_best_available_path_is_selected \
   's@^PATH_ORDER = ("lan", "nebula", "tailscale")@PATH_ORDER = ("tailscale", "nebula", "lan")@'
 run 'forced-path-falls-back'    test_forcing_a_down_path_fails_and_does_not_fall_back \
-  's@^        if result.state != OK:@        if False:@'
+  's@^        if result.state not in acceptable:@        if False:@'
 
 printf '\n== running ON the target must exec locally ==\n'
 run 'local-detection-disabled'  test_runs_locally_when_the_nebula_address_is_ours \
@@ -189,6 +190,72 @@ run 'report-pollutes-stdout'    test_the_report_goes_to_stderr_so_stdout_stays_p
   's@report_stream = sys.stdout if reporting_verb else sys.stderr@report_stream = sys.stdout@'
 run 'json-drops-local-field'    test_json_shape_field_by_field \
   's@^        "local": local,$@@'
+
+printf '\n== the fourth state: an untrusted host key is not an unreachable host ==\n'
+run 'untrusted-key-collapsed'   test_untrusted_key_is_its_own_json_value \
+  's@^UNTRUSTED_KEY = "untrusted-key"@UNTRUSTED_KEY = "unreachable"@'
+run 'hostkey-missing-unclassified' test_a_host_key_refusal_is_untrusted_key_not_unreachable \
+  's@^    if HOSTKEY_MISSING_MARKER in stderr:@    if False:@'
+# The OTHER direction: ssh exits 255 for auth failure too, so a classifier that
+# calls everything a host-key problem is just the old conflation reversed.
+run 'auth-called-a-key-problem'  test_an_auth_failure_is_unreachable_not_untrusted_key \
+  's@^    return UNREACHABLE, None, False@    return UNTRUSTED_KEY, "host key for alias %r not in known_hosts", False@'
+run 'changed-key-loses-its-detail' test_a_changed_host_key_is_untrusted_key_with_its_own_detail \
+  's@^            "host key for alias %r CHANGED since it was trusted",@            "host key for alias %r not in known_hosts",@'
+run 'probe-gains-tofu'          test_the_probe_never_enables_tofu \
+  's@\["ssh", "-o", "BatchMode=yes"\]@["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"]@'
+
+printf '\n== the report names the cause and the way out ==\n'
+run 'advice-block-silenced'     test_the_report_names_the_cause_and_the_way_out \
+  's@^    untrusted = \[r for r in results if r.state == UNTRUSTED_KEY\]@    untrusted = []@'
+run 'advice-fires-when-fine'    test_no_advice_is_printed_when_a_path_is_actually_usable \
+  's@^    if chosen is not None:@    if False:@'
+run 'changed-key-offered-tofu'  test_a_changed_key_is_not_offered_the_accept_key_shortcut \
+  's@^    unseen = \[r for r in untrusted if not r.key_changed\]@    unseen = list(untrusted)@'
+
+printf '\n== the bootstrap escape hatch, and its limits ==\n'
+run 'accept-key-inert'          test_accept_key_lets_an_untrusted_path_be_used \
+  's@^    acceptable = (OK, UNTRUSTED_KEY) if accept_key else (OK,)@    acceptable = (OK,)@'
+run 'accept-key-too-wide'       test_accept_key_does_not_make_an_unreachable_path_usable \
+  's@^    acceptable = (OK, UNTRUSTED_KEY) if accept_key else (OK,)@    acceptable = (OK, UNTRUSTED_KEY, UNREACHABLE) if accept_key else (OK,)@'
+
+printf '\n== a forward that reports success must actually forward ==\n'
+run 'forward-bind-failure-ok'   test_forward_builds_a_dash_L_tunnel \
+  's@return cmd + FORWARD_FAILURE_OPTS + opts + \[address\]@return cmd + opts + [address]@'
+run 'kubectl-bind-failure-ok'   test_the_kubectl_tunnel_also_exits_on_a_failed_bind \
+  's@^            + FORWARD_FAILURE_OPTS$@            + []@'
+run 'forward-spec-unvalidated'  test_forward_with_no_spec_is_refused_rather_than_forwarding_nothing \
+  's@^        validate_forward_spec(spec)@        pass@'
+run 'forward-shape-unchecked'   test_forward_rejects_a_spec_that_is_not_a_port_forward \
+  's@^        if len(parts) != 3 or not parts\[0\].isdigit() or not parts\[2\].isdigit():@        if False:@'
+run 'forward-rejects-bind-addr' test_forward_accepts_an_explicit_bind_address \
+  's@^        if len(parts) == 4:@        if False:@'
+
+printf '\n== the wrong machine is worse than no machine ==\n'
+run 'lan-fallback-unconditional' test_the_lan_address_alone_does_not_prove_we_are_the_target \
+  's@^    if host.lan and not host.nebula and host.lan in local:@    if host.lan and host.lan in local:@'
+run 'lan-fallback-removed'      test_the_lan_address_is_accepted_when_the_host_has_no_nebula_address \
+  's@^    if host.lan and not host.nebula and host.lan in local:@    if False:@'
+
+printf '\n== crashing is not reporting ==\n'
+run 'local-kubectl-crash'       test_kubectl_without_a_local_kubectl_exits_127_not_a_traceback \
+  's@^            return 127$@            raise@'
+run 'tailscale-non-object'      test_a_non_object_tailscale_status_is_not_configured_not_a_crash \
+  's@^    if not isinstance(status, dict):@    if False:@'
+run 'missing-ssh-blamed-on-net' test_no_ssh_binary_is_not_configured_not_unreachable \
+  's@^            path, NOT_CONFIGURED, address, "no ssh binary on PATH", elapsed()@            path, UNREACHABLE, address, "no ssh binary on PATH", elapsed()@'
+run 'env-timeout-unguarded'     test_a_junk_workhost_timeout_warns_and_still_runs \
+  's@^    except (TypeError, ValueError):@    except ():@'
+run 'env-timeout-always-default' test_a_valid_workhost_timeout_is_still_honoured \
+  's@^    return value$@    return default@'
+run 'timeout-help-hides-the-var' test_the_timeout_flag_documents_the_env_var \
+  's@(default: %g, or \$WORKHOST_TIMEOUT)@(default: %g)@'
+
+printf '\n== --dry-run prints what actually runs ==\n'
+run 'dry-run-space-joined'      test_dry_run_quotes_arguments_containing_spaces \
+  's@^        sys.stdout.write(shlex.join(cmd) + "\\n")$@        sys.stdout.write(" ".join(cmd) + "\\n")@'
+run 'kubectl-hides-placeholder' test_the_kubectl_dry_run_admits_its_port_is_a_placeholder \
+  's@is a placeholder@is chosen later@'
 
 printf '\n== the positive control: a mutant already known to be covered ==\n'
 run 'already-caught-control'    test_no_path_reachable_exits_3 \
