@@ -356,6 +356,12 @@ PANE_ID_RE = re.compile(r"^%[0-9]{1,12}$")
 #: server-supplied id from steering the request somewhere else (`../`, a query
 #: string, a scheme) or from being unbounded text in a log line.
 WRITE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+#: A tmux SESSION name, and deliberately narrower than tmux itself allows.
+#: 🔴 tmux TARGET SYNTAX IS COMPOUND (`session:window.pane`), so a name carrying
+#: `:` or `.` is a DIFFERENT ADDRESS and tmux resolves it somewhere the caller
+#: did not choose rather than failing — the wrong-place class the pane rule
+#: exists for, one level up: a whole WINDOW instead of a keystroke.
+TMUX_SESSION_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 MAX_TEXT_BYTES = 2048
 MAX_BATCH = 4
 # Bounds the response body this agent will read. urlopen().read() with no
@@ -410,6 +416,17 @@ def validate(write: dict) -> str:
             return "the working directory carries a character that is not printable"
         if any(seg == ".." for seg in cwd.split("/")):
             return "the working directory contains `..`"
+        # 🔴 RE-VALIDATED HERE, NOT TRUSTED. The server checks it too; this
+        # process is the one that hands the value to tmux as a target, and the
+        # two sides of the boundary fail independently. Absent is fine — it means
+        # "wherever this server considers current", which is the behaviour when
+        # nobody expressed a preference.
+        tmux_session = write.get("tmuxSessionName") or ""
+        if not isinstance(tmux_session, str):
+            return "the tmux session name is not a string"
+        if tmux_session and not TMUX_SESSION_RE.match(tmux_session):
+            return ("the tmux session name is not a bare session name — `:` and `.` make it "
+                    "a compound tmux target, which resolves somewhere nobody chose")
     return ""
 
 
@@ -425,8 +442,16 @@ KIND_NEW_SESSION = "new-session"
 NEW_SESSION_ALWAYS_SUBMITS = True
 
 
-def open_window(cwd: str) -> tuple[str, str]:
-    """Open a new tmux window at cwd. Returns (pane_id, error).
+def open_window(cwd: str, tmux_session: str = "") -> tuple[str, str]:
+    """Open a new tmux window at cwd, in tmux_session when one is named.
+
+    🔴 WITHOUT `-t` THE TARGET IS DECIDED BY tmux, NOT BY THE CALLER. `new-window`
+    with no target joins whatever session this server considers CURRENT — which
+    depends on what the operator last looked at — so a launched window lands
+    somewhere nobody chose. `-t "<name>:"` is the unambiguous spelling: the
+    trailing colon means "this session, next free index", and a session that does
+    not exist makes tmux FAIL rather than fall back to the current one, which is
+    the direction this whole surface prefers.
 
     🔴 A TRANSPORT PRIMITIVE, NOT A FEATURE. "Start a Claude Code session" is
     entirely a question of what the caller's TEXT says; this only makes a window
@@ -438,7 +463,12 @@ def open_window(cwd: str) -> tuple[str, str]:
     difference matters because between these two calls the operator may have
     switched windows, and a relative target would type into whatever they moved to.
     """
-    rc, out, err = run_tmux(["new-window", "-P", "-F", "#{pane_id}", "-c", cwd])
+    argv = ["new-window", "-P", "-F", "#{pane_id}", "-c", cwd]
+    if tmux_session:
+        # The name has already been through TMUX_SESSION_RE, so it cannot be a
+        # compound target; the trailing colon makes the intent explicit anyway.
+        argv += ["-t", tmux_session + ":"]
+    rc, out, err = run_tmux(argv)
     if rc != 0:
         return "", (err or f"tmux exited {rc}")
     pane = out.strip().splitlines()[0].strip() if out.strip() else ""
@@ -478,7 +508,7 @@ def deliver(write: dict) -> tuple[str, str]:
         # looking at a tmux server that has since restarted, and a window opened on
         # the new one is not the fleet state it was reasoning about.
         cwd = write.get("cwd") or ""
-        pane, err = open_window(cwd)
+        pane, err = open_window(cwd, write.get("tmuxSessionName") or "")
         if err:
             return "failed", redact(err, text)
         if not text:

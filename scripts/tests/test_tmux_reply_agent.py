@@ -232,6 +232,7 @@ def write(**kw):
         "id": "w-abc123",
         "kind": "send-keys",
         "cwd": "",
+        "tmuxSessionName": "",
         "host": "workbench",
         "pane": "%12",
         "text": "yes, go ahead",
@@ -1317,3 +1318,61 @@ def test_a_server_supplied_pane_cannot_forge_a_log_line(server, tmux_stub, tmp_p
     _rc, out = run_agent(server, tmux_stub, tmp_path)
     assert "delivered everything" not in out, out
     assert tmux_stub.send_keys_calls() == []
+
+
+# --------------------------------------------------------------------------- #
+# 12. The launched window goes where the CALLER said, not where tmux felt like.
+# --------------------------------------------------------------------------- #
+def test_a_named_tmux_session_is_passed_to_tmux_as_a_target(server, tmux_stub, tmp_path):
+    """🔴 WITHOUT `-t` THE TARGET IS DECIDED BY tmux, NOT BY THE CALLER.
+
+    `new-window` with no target joins whatever session this server considers
+    CURRENT — which depends on what the operator last looked at — so a launched
+    window lands somewhere nobody chose. That is the same wrong-place class the
+    pane rule exists for, one level up: a whole WINDOW rather than a keystroke.
+
+    The trailing colon is part of the contract: `-t "name:"` means "this session,
+    next free index", and a session that does not exist makes tmux FAIL rather
+    than silently fall back to the current one.
+    """
+    server.claim_batches = [[write(kind="new-session", pane="", cwd="/tmp/some/dir",
+                                   tmuxSessionName="scratch2", text="echo hi")]]
+    run_agent(server, tmux_stub, tmp_path)
+    new_windows = [c for c in tmux_stub.calls() if c and c[0] == "new-window"]
+    assert len(new_windows) == 1, tmux_stub.calls()
+    assert new_windows[0] == ["new-window", "-P", "-F", "#{pane_id}", "-c", "/tmp/some/dir",
+                              "-t", "scratch2:"], new_windows[0]
+
+
+def test_an_absent_tmux_session_leaves_the_target_to_tmux(server, tmux_stub, tmp_path):
+    """The control, and the back-compatible half: absent means "wherever this
+    server considers current", which is what happened before the field existed
+    and the only honest answer when nobody expressed a preference. A `-t` with an
+    empty value would be a target of its own."""
+    server.claim_batches = [[write(kind="new-session", pane="", cwd="/tmp/some/dir", text="echo hi")]]
+    run_agent(server, tmux_stub, tmp_path)
+    new_windows = [c for c in tmux_stub.calls() if c and c[0] == "new-window"]
+    assert len(new_windows) == 1
+    assert "-t" not in new_windows[0], new_windows[0]
+
+
+@pytest.mark.parametrize("name", [
+    "scratch:2",            # a window index inside another session
+    "scratch:2.0",          # ...and a pane inside it
+    "main.0",               # a pane address
+    "-t",                   # option-shaped
+    "has space",
+    "weirdname",      # a C1 control the old denylist would have passed
+    "a" * 65,
+])
+def test_the_host_refuses_a_compound_tmux_target(server, tmux_stub, tmp_path, name):
+    """🔴 RE-VALIDATED ON THE HOST, NOT TRUSTED. The server checks this too; this
+    process is the one that hands the value to tmux, and the two sides of the
+    boundary fail independently."""
+    server.claim_batches = [[write(kind="new-session", pane="", cwd="/tmp/d",
+                                   tmuxSessionName=name, text="echo hi")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert [c for c in tmux_stub.calls() if c and c[0] in ("new-window", "send-keys")] == [], (
+        f"the agent opened a window targeting {name!r}")
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "refused", body
