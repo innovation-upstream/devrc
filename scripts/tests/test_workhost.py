@@ -1655,34 +1655,57 @@ def _drop_kubectl(bindir):
 #: `workhost …` command. Enumerated by reading every emitted string literal in
 #: the script (the `sys.std*.write` / `ValueError` / `parser.error` call sites),
 #: not by memory. Add a row when you add such a string.
+#:
+#: 🔴 `expect` is what the command must parse **TO**, not merely that it parses.
+#: That distinction is load-bearing, and it was found by the mutation battery
+#: rather than by inspection: the first version of this ledger asserted only
+#: "it parses", and mutating the advice to `workhost ssh --accept-keys`
+#: SURVIVED it. `--accept-keys` is not a workhost option, so `split_argv` drops
+#: it into the VERB's arguments and the global half parses perfectly cleanly —
+#: which is the exact shape of the bug this whole section exists to catch,
+#: sailing through a guard written to catch it. A guard that reads as coverage
+#: while providing none is worse than no guard, because it stops anyone looking.
+#:
+#: `expect` keys:
+#:   "workhost_flags" — every `-`-prefixed token belongs to WORKHOST, so none may
+#:                      be left in verb_args, and the named opts must be set.
+#:   "verb_flags"     — the flags are meant for the verb's own tool; verb_args
+#:                      must equal this list exactly.
+#:   "verb"           — the verb the command must resolve to.
 ADVICE_SCENARIOS = [
-    # (id, sandbox kwargs, argv, prep)
+    # (id, sandbox kwargs, argv, prep, expect)
     ("untrusted-key-report",
-     dict(ok_addrs=(), hostkey_missing=(LAN, NEBULA)), ("path",), None),
+     dict(ok_addrs=(), hostkey_missing=(LAN, NEBULA)), ("path",), None,
+     {"verb": "ssh", "workhost_flags": {"accept_key": True}}),
     ("untrusted-key-action-verb",
-     dict(ok_addrs=(), hostkey_missing=(LAN, NEBULA)), ("run", "true"), None),
+     dict(ok_addrs=(), hostkey_missing=(LAN, NEBULA)), ("run", "true"), None,
+     {"verb": "ssh", "workhost_flags": {"accept_key": True}}),
     # --json suppresses the text advice block, so the ONLY backticked command
     # left on stderr is select_path's own error. Without this row that message
     # would be covered only in aggregate — i.e. not at all, because the advice
     # block would satisfy the assertion on its behalf.
     ("untrusted-key-json-only",
-     dict(ok_addrs=(), hostkey_missing=(LAN, NEBULA)), ("--json", "run", "true"), None),
-    ("forward-no-spec", dict(ok_addrs=(LAN,)), ("forward",), None),
-    ("forward-bad-spec", dict(ok_addrs=(LAN,)), ("forward", "8080"), None),
+     dict(ok_addrs=(), hostkey_missing=(LAN, NEBULA)), ("--json", "run", "true"), None,
+     {"verb": "ssh", "workhost_flags": {"accept_key": True}}),
+    ("forward-no-spec", dict(ok_addrs=(LAN,)), ("forward",), None,
+     {"verb": "forward", "verb_flags": ["8080:localhost:80"]}),
+    ("forward-bad-spec", dict(ok_addrs=(LAN,)), ("forward", "8080"), None,
+     {"verb": "ssh", "verb_flags": ["-N", "-L", "8080"]}),
     ("no-local-kubectl",
      dict(ok_addrs=(LAN,), tunnel=True), ("--timeout", "8", "kubectl", "get", "nodes"),
-     _drop_kubectl),
+     _drop_kubectl, {"verb": "kubectl", "verb_flags": []}),
 ]
 
 
 @pytest.mark.parametrize(
-    "kwargs,argv,prep", [(k, a, p) for _, k, a, p in ADVICE_SCENARIOS],
-    ids=[i for i, _, _, _ in ADVICE_SCENARIOS],
+    "kwargs,argv,prep,expect", [(k, a, p, e) for _, k, a, p, e in ADVICE_SCENARIOS],
+    ids=[i for i, _, _, _, _ in ADVICE_SCENARIOS],
 )
-def test_every_workhost_command_the_tool_prints_actually_parses(
-    tmp_path, kwargs, argv, prep
+def test_every_workhost_command_the_tool_prints_parses_as_intended(
+    tmp_path, kwargs, argv, prep, expect
 ):
-    """Not "contains a plausible string" — actually run it through the parser.
+    """Every printed command, fed back through the real pipeline and checked
+    against what it is SUPPOSED to mean.
 
     Positive control is built in: the assertion below fails if NO command was
     found, so a scenario whose message stops naming a command cannot pass by
@@ -1697,7 +1720,19 @@ def test_every_workhost_command_the_tool_prints_actually_parses(
 
     mod = load_workhost()
     for command in commands:
-        parse_as_workhost(mod, command)  # raises/asserts if it does not parse
+        verb, verb_args, opts = parse_as_workhost(mod, command)
+        assert verb == expect["verb"], (command, verb, expect["verb"])
+
+        if "workhost_flags" in expect:
+            for attr, value in expect["workhost_flags"].items():
+                assert getattr(opts, attr) is value, (command, attr, getattr(opts, attr))
+            leftover = [t for t in verb_args if t.startswith("-")]
+            assert leftover == [], (
+                "%r: %r was handed to the verb instead of being parsed by "
+                "workhost — that is the defect, not a detail" % (command, leftover))
+
+        if "verb_flags" in expect:
+            assert verb_args == expect["verb_flags"], (command, verb_args)
 
 
 def test_the_advice_names_a_command_the_parser_actually_accepts(tmp_path):

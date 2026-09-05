@@ -273,7 +273,7 @@ run 'hoist-notice-always-fires' test_nothing_is_said_when_no_flag_was_hoisted \
 # The advice string itself: name a command the parser cannot accept and the
 # "actually parses" guard must go red. A substring grep for `--accept-key`
 # would still be GREEN here, which is why that is not what the guard does.
-run 'advice-names-a-non-command' test_every_workhost_command_the_tool_prints_actually_parses \
+run 'advice-names-a-non-command' test_every_workhost_command_the_tool_prints_parses_as_intended \
   's@^ACCEPT_KEY_ADVICE_COMMAND = "workhost ssh --accept-key"@ACCEPT_KEY_ADVICE_COMMAND = "workhost ssh --accept-keys"@'
 run 'manual-line-loses-alias'   test_the_manual_ssh_line_uses_the_options_the_tool_itself_uses \
   's@^        manual = " ".join(\["ssh"\] + ssh_options(host) + \[unseen\[0\].address\])@        manual = " ".join(["ssh", unseen[0].address])@'
@@ -282,7 +282,7 @@ run 'ssh-keygen-names-address'  test_the_changed_key_advice_removes_the_alias_no
 run 'forward-example-invalid'   test_the_forward_example_is_a_spec_the_validator_itself_accepts \
   's@(e.g. `workhost forward 8080:localhost:80`); with none it would @(e.g. `workhost forward 8080`); with none it would @'
 
-run 'select-message-drops-cmd'  test_every_workhost_command_the_tool_prints_actually_parses \
+run 'select-message-drops-cmd'  test_every_workhost_command_the_tool_prints_parses_as_intended \
   's@"client (run `%s` once to trust it, interactively)"@"client (re-run with --accept-key)"@'
 
 printf '\n== the positive control: a mutant already known to be covered ==\n'
