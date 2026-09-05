@@ -31,7 +31,7 @@ Settled by the operator across two rounds of questions on 2026-09-05:
 | 2 | **Cairn-owned shipper, triggered per session** at handoff time — not the 5-minute timer | the operator controls what ships; volume collapses to sessions that produced a handoff |
 | 3 | **Pointer in cairn, bytes in the homelab MinIO tenant** | entries stay small and renderable; the store's third-party rule is satisfied |
 | 4 | **Ship raw** — no redaction; the storage boundary is the control | every credential ever echoed in a captured session lands in the bucket |
-| 5 | **Handoff ships, `SessionEnd` re-ships** | the only arrangement under which "always the whole transcript" is literally true |
+| 5 | **Handoff ships, `SessionEnd` re-ships** | the whole transcript on every CLEAN exit; the handoff-time floor on a crash or kill — see §5.1, and note `SessionEnd` is a PER-HOST operator act that is not wired on both hosts today |
 | 6 | **Pointer on every cairn entry the session touched** | one session fans out across N entries and M scopes |
 | 7 | **Push failure warns; handoff still succeeds** | a handoff can exist with no session attached, and must say so |
 | 8 | **Indefinite retention** | the bucket accumulates unredacted content permanently |
@@ -56,28 +56,54 @@ It is nonetheless **the wrong instrument here, and the reasons are structural, n
   object storage and only a pointer in the API.
 
 🔴 **This is a real duplication and it should be named rather than hidden.** Two shippers
-will hold two answers to "which sessions matter, and how much of each", and those answers
-will drift — the exact shape `claude/RULES.md` calls out as regenerating the same bug at
-every site. The mitigation is not to merge them (their triggers genuinely differ) but to
-**share the parts that are one rule**: transcript discovery, `project_of`, and the
-byte-boundary logic belong in one module both call. If that extraction is not done, expect
-the two to disagree about which file belongs to which project within a few months.
+will hold two answers to "which sessions matter", and those answers will drift — the exact
+shape `claude/RULES.md` calls out as regenerating the same bug at every site. The mitigation
+is not to merge them (their triggers genuinely differ) but to **share the parts that are one
+rule**: transcript discovery and `project_of`. **Not the byte-boundary logic** — it exists to
+drop the leading partial JSON record from a *tail*, and decision 1 ships whole files, so the
+new shipper has no caller for it. Extracting it would move dead surface for one of the two
+callers.
 
 ## 4. Volume — measured, not estimated
 
-Measured on the workbench, 2026-09-05:
+🔴 **AN EARLIER REVISION OF THIS SECTION MEASURED THE WRONG POPULATION AND ITS CONCLUSION
+WAS WRONG BY ~5×.** It reported a median of 739 KB and concluded "well under a megabyte per
+handoff". That median is real but it is the median of **all** `.jsonl` files, and **84% of
+those are `agent-*.jsonl` subagent transcripts** this design does not ship. The arithmetic
+was right; the population was wrong. Kept here rather than silently corrected, because the
+error is the instructive part: **a percentile is a claim about a population, so name the
+population or the number means nothing.**
+
+Measured on the workbench, 2026-09-05. All three populations, because they differ by 5×:
+
+| population | files | median | p90 | max | total |
+|---|---|---|---|---|---|
+| all `.jsonl` — **NOT what ships** | 5,864 | 0.74 MB | 2.53 MB | 23.48 MB | 6.73 GB |
+| real sessions (excluding `agent-*`) | 913 | **2.62 MB** | 4.97 MB | 23.48 MB | 2.45 GB |
+| **sessions that produced a handoff** — what decision 2 selects | 37 | **3.82 MB** | 5.22 MB | 10.59 MB | 148 MB |
+
+The third row is the population decision 2 actually selects. It was derived from the
+`Claude-Session-Id` trailer on commits touching `claudedocs/handoff-*.md` since 2026-07-01:
+37 distinct ids, **all 37** resolving to a transcript on disk, none of them an `agent-*`
+file.
+
+🔴 **The selection effect runs the WRONG WAY, and that is the point of the row.** Sessions
+that produce a handoff are the long ones, so the per-handoff filter picks the **large tail**,
+not the median — 3.82 MB against 2.62 MB against 0.74 MB. `SessionEnd` re-ship makes it
+larger still, so **3.82 MB is a floor, not an estimate.** Anyone sizing a bucket, a PUT
+timeout or a per-handoff cost must use that row.
+
+⚠ **Scope of the 37-session sample, stated rather than buried:** devrc handoffs only, and
+only commits carrying the trailer. Handoffs in other repos are not counted, so the true
+population is larger and the totals are floors.
 
 | | |
 |---|---|
-| Claude Code transcripts | **6.6 GB**, **5,840** `.jsonl` files |
-| median file | **739 KB** |
-| p90 | **2.5 MB** |
-| largest single file | **23 MB** |
 | opencode session data | **2.4 GB** — a SQLite DB plus `storage/`, `snapshot/`, `tool-output/` |
 
-The per-handoff trigger is what makes decision 1 affordable: the population that ships is
-sessions-that-produced-a-handoff, not all 5,840. At the median that is well under a
-megabyte per handoff.
+⚠ The `6.73 GB` above is the `.jsonl` population summed in decimal bytes. A `du -sh` of the
+directory reads `6.6 GB` because it is GiB and includes ~7,000 non-`.jsonl` files. Two
+different measurements; do not pair them.
 
 🔴 **opencode is a separate project, not a flag on this one.** It has no `.jsonl` — "the
 whole session" there means an exporter with its own fidelity question (which tables, what
@@ -86,45 +112,135 @@ open. **Name the front-matter field so it does not assume jsonl.**
 
 ## 5. The design
 
-### 5.1 Two triggers, one object
+### 5.0 🔴 "A session's transcript" is a SET, not a file — and this is OPEN
+
+**This is the first thing an implementer needs and the proposal does not yet answer it.**
+
+On this host a session writes **several** transcripts: the parent `<session-id>.jsonl` plus
+one `agent-<hash>.jsonl` per dispatched subagent. Measured: **4,951 of 5,864** files are
+`agent-*`, holding **4.28 GB of 6.73 GB — 64% of the bytes**.
+
+Those files are not addressable the way the parent is. `build_transcript_push.py` states the
+convention the whole join rests on — *"The session id IS the filename stem … the same id the
+attention queue and session-manager's `claude_session_id` carry, which is what makes the join
+work at all."* For an `agent-*.jsonl` the stem is `agent-<hash>`, which is **not** a session
+id. Sampled 6 subagent transcripts: in every one the stem is absent from the `sessionId`
+values inside the file, and the single `sessionId` present is the **parent's**.
+
+So "keyed on session id" (§5.1) has two readings and neither is safe by default:
+
+- key on the **in-record `sessionId`** → parent and all N subagent files collide on one
+  object key, each push overwriting the last. §8 control 4 ("assert the sha256 changed")
+  would pass while the object is simply the last writer;
+- key on the **filename stem** → subagent objects are keyed `agent-<hash>`, joinable to no
+  cairn entry, no attention-queue row and no `session-manager` view.
+
+🔴 **And this is where the goal in §1 is won or lost.** `CLAUDE.md` records that the operator
+works **entirely via agents**. The receipts — the tool calls, the files read, the commands
+run — are in the subagent transcripts. The parent carries only each subagent's final report.
+Shipping "the session's transcript" as one file therefore drops most of the evidence this
+proposal exists to preserve, while looking complete.
+
+**Decide before implementing (§9.6):** does a session ship as one object or a set; and if a
+set, what is the key that keeps the subagent objects joinable to the parent.
+
+### 5.1 Two triggers, one object per transcript
 
 Handoff ships the transcript as it stands. A `SessionEnd` hook overwrites it with the final
-bytes. (`SessionEnd` is already a wired hook event on this host — verified, not assumed.)
+bytes.
 
 - The handoff-time object is the **floor**. `SessionEnd` does not fire on a crash or a
-  kill, so without it a crashed session would attach nothing at all.
+  kill, so without it a crashed session would attach nothing at all. **So decision 5 buys
+  "the whole transcript on a clean exit", not "always"** — §2 records it that way.
 - The object is therefore **at least as complete as the handoff moment**. Write that down
   where a reader will see it: a short object is not corruption.
-- **Overwrite must be idempotent**, keyed on session id. Handoff can run several times in
-  one session — the skill's own docs warn that re-running appends findings twice — and each
-  run must land on the same key.
+- **Overwrite must be idempotent**, on whatever key §5.0 resolves to. Handoff can run
+  several times in one session — the skill's own docs warn that re-running appends findings
+  twice — and each run must land on the same key.
+
+🔴 **`SessionEnd` is a PER-HOST OPERATOR ACT, and it is wired on ONE host today.** Measured
+2026-09-05: the workbench's `~/.claude/settings.json` registers `SessionEnd`; the laptop's
+does not (`PermissionRequest`, `PostToolUse`, `PreToolUse`, `SessionStart`, `Stop`,
+`SubagentStop`, `UserPromptSubmit` — no `SessionEnd`). That file is per-host and **unmanaged
+by nix** by design, and `drift-check.sh` rc 15 compares only top-level key *names*, so this
+does not surface as drift. Consequence: on a host without the hook, **every** session attaches
+only the handoff-time floor, permanently and silently. Wiring it is an operator act per host,
+not a change this proposal can ship, and §8 control 4 must name the host it ran on.
 
 ### 5.2 Transport
 
-Host → object storage **directly over the mesh**. Not through the cairn pod: it is
-single-replica, `Recreate`, PVC-backed, and designed to render markdown. A 23 MB PUT
-through it is a category change, not a feature.
+Host → object storage **directly over the mesh**.
 
-### 5.3 What cairn holds — and the one change I recommend against the letter of decision 6
+🔴 **The binding constraint is the store's third-party rule, NOT the pod's capacity.** The
+store README: content *"must never transit a third party … A git remote, a sync target or an
+API endpoint is permitted only on infrastructure Zach owns and reaches over the nebula
+mesh."* Cairn's own public API already fronts through a CDN, so "not the pod" does **not**
+imply "over the mesh" — an implementer who accepts only the capacity argument and reaches
+MinIO through a public ingress satisfies it completely while putting unredacted multi-client
+transcripts through a third party. **Name the rule when writing this down.**
+
+The capacity point is true and secondary: the pod is single-replica, `Recreate`, PVC-backed
+and designed to render markdown (all three verified), so a 23 MB PUT through it is a category
+change. But that is a reason not to use the pod — it is not the reason the route must stay on
+the mesh.
+
+### 5.3 What cairn holds — and one recommendation no recorded decision covers
 
 Front-matter on each touched entry gains a session reference carrying `id`, `sha256`,
 `bytes`, `captured_at`, `host`.
 
-🔴 **RECOMMENDATION: the pointer is an OPAQUE ID, never a resolvable URL** — no bucket, no
-path, no endpoint in the entry. Resolving it requires the transcript credential, which is
-separate from the cairn read token by construction (decision 3 already put them apart).
+🔴 **THE FIELD SHAPE IS CONSTRAINED, AND THE OBVIOUS SPELLING IS SILENTLY DESTRUCTIVE.**
+Cairn front matter is parsed by `parse_front_matter` in `lib/subsystem_resolver.py`, which is
+hand-rolled and **line-based**. It handles `key: value`, an inline flow list `key: [a, b, c]`,
+and a block list of one-line `- item`s. **There is no case for a nested mapping**, and its own
+docstring records the measured result of feeding it one: the key comes back empty and every
+child is promoted to a phantom top-level key by its own internal colon.
 
-The reason is decision 6 meeting a decision the programme already took.
-`plan-cairn-integration.md` decision 5 reads: *"Cross-tenant reads — opt-in sharing per
-scope or entry — makes tenancy a security boundary, not a cache key."* A session routinely
-touches this repo's scope and a client scope in the same run. Fanning the pointer out means
-a `sensitivity: client-confidential` entry carries a reference to an object that also holds
-that session's work on **other** clients, retained forever. The moment entry-level sharing
-exists, sharing that entry shares that reference.
+Reproduced against the live parser while writing this, with the exact five fields above under
+a `session:` key:
+
+```
+{'service': …, 'scope': …, 'session': '',
+ 'id': '…', 'sha256': '…', 'bytes': '…', 'captured_at': '…', 'host': '…'}
+```
+
+The pointer is **gone**, `cairn recall` renders the entry as clean, and §5.4's digest ledger —
+the thing meant to make a bad pointer visible — was never written to be checked. So the field
+must be a **single scalar or an inline flow list**, or the parser must be widened first.
+⚠ Widening it is a **two-repo change**: `parse_front_matter` sits in `ZacxDev/cairn` too, at
+the same line, and §7 puts that repo out of scope. ⚠ Also unmeasured: the same docstring
+records that block-list lines are currently **zero across the live store** and says to re-take
+that count before relying on the shape. This field would be its first user.
+
+🔴 **RECOMMENDATION: the pointer is an OPAQUE ID, never a resolvable URL** — no bucket, no
+path, no endpoint in the entry.
+
+⚠ **This contradicts no recorded decision.** Decision 6 is *"pointer on every cairn entry the
+session touched"* and says nothing about the pointer's form, so this is a gap being filled,
+not a dissent. An earlier revision of this section called it "against the letter of decision
+6", which sent the reader looking for a conflict that does not exist — and inviting deference
+to a decision nobody made is a good way to lose a cheap recommendation.
+
+**The hazard, stated in the direction it actually runs.** `plan-cairn-integration.md`
+decision 11 already gates sharing on `sensitivity:` — *client-confidential can never be
+shared* — so the obvious scenario (a client entry leaking a pointer) **cannot fire**, and an
+earlier revision of this section argued exactly that already-closed case. What survives
+decision 11 is the mirror image, and it is worse: a **shareable** entry — this repo's own
+scope, marked `internal` — carries a pointer into an object that contains that same session's
+**client-confidential** work, because one session routinely touches both. Sharing the
+innocuous entry hands over a reference into multi-client content.
 
 An opaque id keeps decision 6 exactly as chosen while making the shared artifact an
-**identifier, not content**. It costs nothing and it is reversible; a URL baked into N
-entries is not.
+**identifier, not content**. It costs nothing and it is reversible; a URL baked into N entries
+is not.
+
+⚠ **What "separate credential" does and does not buy.** Resolving an id requires the
+transcript credential. That is **not** separation "by construction": decision 3 separates the
+*data*, not the *credentials*, and both would live in the same user's `~/.config`
+neighbourhood on the same box, readable by any process running as that user — including a
+shipper that holds one while running inside a session that holds the other. The separation is
+real only against an adversary holding exactly one credential and no host access. Say that,
+rather than implying more.
 
 🔴 **An unauthorized resolve must render as NOT AUTHORIZED, never as missing.** Those two
 are the same observable otherwise, and an empty result cannot distinguish two mechanisms —
@@ -156,14 +272,37 @@ depth now rests on storage. Concretely, the implementation must:
 
 - use its **own bucket and its own credential** — not the archive tenant's backup
   credential, which exists for a different blast radius;
-- **never print the credential.** Write it to a `0600` file and print the *path*.
-  `ZacxDev/homelab-infra#683` fixed exactly this defect in the sibling provisioning script:
-  it printed the secret to stdout, and it is run by agents, so every run re-staged a
-  transcript-capture incident that had already forced one rotation;
-- carry **no anonymous access policy**, proven by an **unauthenticated GET as a control**
-  rather than by reading the policy JSON;
-- keep the **cairn read token unable to reach the bucket**, and vice versa. Decision 3 puts
-  them apart; a test should pin it rather than a comment asserting it.
+- 🔴 **write the credential to a `0600` file BEFORE anything can create the user** — not
+  after, and never to stdout. Both halves are load-bearing and an earlier revision of this
+  bullet kept only the second. `ZacxDev/homelab-infra#683`'s own heading is *"the reordering
+  is not the fix"*: what closes the class is the secret existing on disk **before** the
+  provisioning step, because the fallible steps after user-creation are host-side and no
+  ordering inside the pod can reach them. Write-after-create leaves an orphaned live
+  write-capable key whose secret exists nowhere — the exact window #683 closed. The
+  stdout half matters too (these scripts are run by agents, so a printed secret lands in a
+  transcript), and with decision 8 it would land there **permanently**;
+- carry **no anonymous access policy** — see §8 control 6 for how to prove that, which is
+  harder than it looks;
+- keep the **cairn read token unable to reach the bucket**, and vice versa — pinned by a
+  test, not asserted by a comment. ⚠ Note the limit stated in §5.3: this separates
+  credentials, not the host they both sit on.
+- 🔴 **register the credential in `SECRETS.md` with a rotation coupling, in the same change
+  that mints it.** That file exists to make a new-host bootstrap deterministic instead of
+  manual archaeology, and every comparable entry carries one. A credential minted outside it
+  is invisible at bootstrap and at rotation.
+
+🔴 **The bucket has NO tenancy boundary, and the store it attaches to does.** Under
+`plan-cairn-integration.md` the store's future is multi-tenant with sharing gated on
+`sensitivity:`. This bucket is single-tenant by credential and multi-client by content, held
+forever — so the transcript credential is an **all-clients-at-once** credential. Nothing in
+this design changes that, and it should be understood before the credential is minted rather
+than discovered when the store gains a second tenant.
+
+⚠ **There is no retraction story, and decision 8 makes that permanent.** If a secret is found
+in a shipped object, deleting the object leaves the N fanned-out pointers dangling. §5.4 makes
+a dangling pointer *detectable*; nothing here makes it *retractable*, and nothing sweeps the
+entries that reference it. That is a real gap, not an oversight being papered over — it is
+listed in §9.
 
 🔴 **You currently have NO detector for a credential landing in a transcript.** Redaction
 was declined and that is settled — but a **report-only** scan over the bytes being shipped
@@ -176,7 +315,7 @@ v1; recommended as the first follow-on.**
 - **opencode capture** — §4. Different extraction, different fidelity question.
 - **Redaction of any kind** — decision 4.
 - **Anything in `ZacxDev/cairn`.** The OSS extraction deliberately removed `cairn who`
-  because session forensics on named hosts *"is not an operation on a store"*. Whole-session
+  because session forensics on named hosts is *"not an operation on a store"*. Whole-session
   capture sits further across that same line. This is devrc-side, private, and stays there.
 - **Retiring the clawgate feeder.** It serves a different consumer and keeps running.
 
@@ -193,26 +332,54 @@ does nothing:
    pointer per entry. Assert the set does not grow.
 4. **The `SessionEnd` overwrite actually overwrites.** Ship at handoff, append to the
    session, fire `SessionEnd`, assert the stored `sha256` **changed** and the pointer did
-   not duplicate.
+   not duplicate. **Name the host it ran on** — §5.1: the hook is wired on one host today.
+   ⚠ If §5.0 resolves to one-object-per-session, this control passes trivially for the wrong
+   reason whenever subagent files collide on the key; it is only meaningful once the key is
+   decided.
 5. **A crash path attaches the floor.** Kill a session without `SessionEnd`; the
    handoff-time object must still be there and its digest must match what was shipped.
-6. **Anonymous GET against the bucket → denied.** The control for §6, run against the real
-   bucket, not a fixture.
-7. **The cross-credential separation**, both directions.
+6. **Anonymous access denied — and the control must distinguish DENIED from ABSENT.**
+   🔴 The obvious version passes on a publicly-readable bucket: GET a key that was never
+   uploaded and an anonymous-download bucket answers `404 NoSuchKey` while a locked one
+   answers `403 AccessDenied`. Both are "not 200". So: **GET a key that EXISTS, and assert
+   `403` specifically** — not "denied", not "not 200". This is §5.3's own rule turned back on
+   §8: an empty result cannot distinguish two mechanisms. Cover anonymous **LIST** and **PUT**
+   as well; a public-read policy grants list alongside read, and a denied GET says nothing
+   about either. Run against the real bucket, not a fixture.
+7. **Cross-credential separation, both directions, each with a named observable:** the cairn
+   read token against a bucket key → `403`; the transcript credential against a cairn read
+   route → `401`. An earlier revision named neither operation nor expected result, which any
+   test satisfies — including one that type-checks past a wrong argument.
+8. **Decision 7's actual behaviour, which no earlier control covered.** Make the push fail
+   (unreachable endpoint) and assert **handoff exits 0** *and* the doc carries the
+   no-session-attached line. Control 2 asserts the *shipper* exits non-zero, which is the
+   opposite-signed observable and is equally satisfied by a handoff that fails hard — the
+   precise failure decision 7 exists to forbid.
 
 🔴 Every one of these must be watched to FAIL before it is trusted. A guard pinning an
 invariant the bug never violated is an invariant guard and must be labelled as one.
 
 ## 9. Open — decide before building
 
-1. **Does the pointer-shape recommendation in §5.3 stand?** It is the one place this
-   proposal argues against the letter of a settled decision, and it is cheap to accept and
-   expensive to retrofit.
-2. **What is the front-matter field called**, and does the subsystem-index skill or the
-   handoff tool own writing it? The handoff doc already carries `clawgate-task:` as
-   precedent for a linkage field.
+1. **Does the pointer-shape recommendation in §5.3 stand?** No recorded decision covers the
+   pointer's form, so this fills a gap rather than dissenting. Cheap to accept, expensive to
+   retrofit.
+2. **What is the front-matter field called and SHAPED?** Constrained by §5.3: a scalar or an
+   inline flow list, or `parse_front_matter` gets widened first in **two** repos. Also: does
+   the subsystem-index skill or the handoff tool own writing it? (`clawgate-task:` is
+   precedent for the *idea* of a linkage field, though it is a handoff-doc field rather than
+   a cairn-entry one.)
 3. **Which entries count as "touched"?** The handoff run knows what it wrote; whether that
    set is the right one, or too wide, has not been measured.
 4. **opencode** — schedule, or park indefinitely.
 5. **Does the shared-module extraction in §3 happen now or later?** Later is defensible;
-   never is how the two shippers drift.
+   never is how the two shippers drift. Scope it to discovery and `project_of` — not the
+   byte-boundary logic.
+6. 🔴 **Does a session ship as ONE object or a SET?** §5.0. This is the largest open
+   question, it decides the object key, and the goal in §1 depends on the answer — 64% of the
+   bytes are in subagent transcripts, and one-object-per-session drops them.
+7. **Is there a retraction path when a secret is found in a shipped object?** §6. Deleting
+   the object leaves N pointers dangling and nothing sweeps them. Under decision 8 this is
+   permanent, so "no path" is an answer — but it should be a chosen one.
+8. **Who wires `SessionEnd` on the second host, and what detects that it is missing?**
+   §5.1. It is unmanaged per-host state that `drift-check.sh` does not currently see.
