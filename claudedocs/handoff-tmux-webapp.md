@@ -11,10 +11,51 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 
 🔴 **RANK 24 IS DONE — THE CONVERSATION HAPPENED, AND IT PRODUCED SEVEN NEW RANKS (25–31).**
-Ranks **25, 26, 27, 28 are IN FLIGHT** (two agents dispatched 2026-09-04, claims held). Ranks
-**29, 30, 31 are DESIGNED BUT NOT DISPATCHED** — they all depend on the same missing host-side
-write channel, and the operator settled its design in conversation on 2026-09-04 rather than
-having it inferred. **Read 29's decision block before building any of the three.**
+✅ **Ranks 25, 26, 27, 28 are MERGED** (2026-09-05). Ranks **29, 30, 31 are DESIGNED BUT NOT
+DISPATCHED** — they all depend on the same missing host-side write channel, and the operator
+settled its design in conversation rather than having it inferred. **Read 29's decision block
+before building any of the three.**
+
+| PR | what | squash | verified |
+|---|---|---|---|
+| `ZacxDev/homelab-infra#695` | ranks 25+26 — transcript read model + chat view + `/session/{id}` | `8f6aa6d3a` | by content on trunk |
+| `ZacxDev/homelab-infra#696` | ranks 27+28 — stale-question retirement, unclipped body, structured options | `17cd8a839` | by content on trunk |
+
+🔴 **MERGED ≠ DEPLOYED. No image was built and no pin was moved** — the live pod does not carry
+either change. `clawgatectl health` is the only authority on what is live.
+
+🔴 **THE TWO PRs BOTH ADDED `0029_*.sql`, AND GIT MERGED THEM CLEANLY BY FILENAME.** Different
+names, no textual conflict, `merge-tree` rc 0 — and the second to land would have made clawgate
+**fail to start**. Resolved by sequencing: #695 merged first, #696 renumbered to `0030`, and the
+final set was verified on trunk as `0028, 0029_session_transcripts, 0030_attention_entry_options`
+with no duplicate version. The guard (`TestMigrationVersionsAreUniqueAndContiguous`) was validated
+in **both** directions before relying on it — a gap fails with *"migration version 30 is missing"*,
+a duplicate with *"version 29 is claimed by 2 files … clawgate then fails to START"*.
+**This is the canonical example of "a clean git merge is not a clean merge."**
+
+🔴 **#696 TOOK A SIX-ROUND AUDIT LADDER, AND EVERY ROUND BUT THE LAST FOUND SOMETHING REAL.**
+Executable payload per round: **56 → 45 → 22 → 17 → 3 → (clean)**. Round 6 returned no findings
+and ended it; no seventh was run to confirm it. What the ladder caught, all measured:
+1. A **live** question could be hidden and then permanently resolved, because staleness bounded the
+   snapshot's ABSOLUTE age and never its age RELATIVE to the entry — the inverse of the requirement,
+   and **every fixture in the suite pinned the bug as correct** (all raised at `now` with the
+   snapshot before it, so the only sound ordering was never built).
+2. The postdates-the-entry rule was applied to signal 1's SECONDARY delivery while the PR's own
+   comment named the OTHER one as the path that does the work.
+3. `stopped_at` became an unclamped **cross-host** clock reading driving a database predicate —
+   against `internal/tmux/tmux.go:160`, which already said the server clock is *"the only one a
+   wrong or skewed host clock cannot corrupt"*.
+4. The `%N` fallback was a **SPELLED guard**: it sniffed for the literal string `%N`, but
+   `bats/bats:1.11.1` — the image CI runs the hook suites in — drops `%N` *and the trailing `Z`*,
+   so the fallback never fired and the stamp became unparseable. **A regression**, and neither test
+   tier could see it.
+5. Emptying an unusable stamp removed the only log line that would say the stamp was unusable.
+⚠ **Two mutation-harness lies were caught by validating the instrument, not the code:** a `-run`
+filter naming a renamed test scored a mutant SURVIVED without ever running it, and a later
+zero-collect guard had a **dead clause** (`--- PASS:` is never printed without `-v`). Both were
+found by feeding the harness a case it MUST fail. The harness is now committed at
+`containers/clawgate/hack/mutation_sweep.py` and refuses to run without a DSN, because the
+PG-gated packages would otherwise skip and score every mutant in them as SURVIVED.
 🔴 **RANK 27 CHANGED MID-FLIGHT AND THE AGENT WAS TOLD.** The operator answered a question about
 the WRITE path by redirecting it to the READ path: *"detect that and retire the question so there
 is never a stale question visible."* That is a display-correctness guarantee, and it moved work
@@ -851,7 +892,8 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     forcing: user — the operator asked for it explicitly at the close of the 2026-09-04 session.
 25. **The transcript feeder — get Claude Code transcript content from both hosts into clawgate,
     read-only.** Repo: `ZacxDev/homelab-infra` (ingest) + `innovation-upstream/devrc` (the host-side
-    push). IN FLIGHT — dispatched 2026-09-04, claim `tmux-webapp-25`.
+    push). ✅ **DONE 2026-09-05 — `ZacxDev/homelab-infra#695`, squash `8f6aa6d3a`**, content-verified
+    on trunk. The devrc host-side half is `innovation-upstream/devrc#1310`. Claim released.
     🔴 **THIS DOC'S ATTENTION MODEL WAS STALE AND THE RECON REFUTED IT.** The "Attention queue"
     section above says `AskUserQuestion` is *"🔴 Silent today — `hook/clawgate-hook.sh:79`
     explicitly defers to the terminal without contacting the server"* and calls the hook change
@@ -876,7 +918,11 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     pod, and the path is read-only — no host-side execution of any kind is reachable through it.
     forcing: none — no deadline; it is the foundation rank 26 needs.
 26. **The chat view — one transcript-driven component, mounted twice.** Repo:
-    `ZacxDev/homelab-infra`, `containers/clawgate/internal/ui/`. IN FLIGHT — dispatched
+    `ZacxDev/homelab-infra`, `containers/clawgate/internal/ui/`. ✅ **DONE 2026-09-05 — shipped in
+    `#695`, squash `8f6aa6d3a`.** 🔴 The `/session/{claudeSessionId}` contract was verified against
+    the REAL binary, not asserted: the href read out of the card's own `AttentionSessionPath`
+    constant returned **200** with the session id in the body, and a bogus path returned **404** as
+    the negative control — so "not 404" is a measurement. Claim released. Originally dispatched
     2026-09-04, claim `tmux-webapp-26`. Renders a transcript as an app-native chat (user vs
     assistant turns), NOT a terminal dump. Two mounts: the tmux page, and a new standalone
     **`/session/{claudeSessionId}`** (shell) + **`/ui/session/{claudeSessionId}`** (partial).
@@ -892,7 +938,9 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     `/session/{id}` and from the tmux page, sourced from the transcript, verified on the live pod
     after deploy — not inferred from a green test.
     forcing: none
-27. **Two attention-queue accuracy defects.** Repo: `ZacxDev/homelab-infra`. IN FLIGHT —
+27. ✅ **DONE 2026-09-05 — `ZacxDev/homelab-infra#696`, squash `17cd8a839`**, content-verified on
+    trunk, after a six-round audit ladder (see the status block at the top). Claim released.
+    **Two attention-queue accuracy defects.** Repo: `ZacxDev/homelab-infra`. Originally —
     dispatched 2026-09-04, claim `tmux-webapp-27`.
     🔴 **(a) A `question` entry NEVER auto-resolves, so the queue overstates what is waiting on the
     operator — the one thing it exists to get right.** The reaper resolves only `idle`
@@ -927,7 +975,10 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     the 2026-09-02T19:46:19Z entry still rendering `blocked` two days later; (b) the full body is
     reachable from the card.
     forcing: none
-28. **Structured options on an attention entry.** Repo: `ZacxDev/homelab-infra`. IN FLIGHT —
+28. ✅ **DONE 2026-09-05 — shipped in `#696`, squash `17cd8a839`.** Options are structured end to
+    end and render as discrete rows; they are **display-only**, because the write path (rank 29)
+    does not exist. Claim released.
+    **Structured options on an attention entry.** Repo: `ZacxDev/homelab-infra`. Originally —
     dispatched 2026-09-04, claim `tmux-webapp-28`.
     🔴 **"Select a suggested option" has NO structured data behind it today.** Measured:
     `attentionRaiseRequest` is `Kind, Priority, Title, Body, Host, Project, SessionID, Cwd,
