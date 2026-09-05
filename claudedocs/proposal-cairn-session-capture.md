@@ -2,7 +2,8 @@
 
 **Status: PROPOSED, NOTHING BUILT.** No code, no bucket, no credential, no front-matter
 field. This is the argument and the shape; the decisions in §2 are settled and are not to
-be re-litigated, and everything in §9 is still open.
+be re-litigated. **Eight of §9's nine questions were answered on 2026-09-05 and are now
+in §2 as decisions 9-16;** only opencode remains open.
 
 🔴 **This repo is PUBLIC and the store is client-confidential.** No scope name, entry name,
 bucket name, endpoint or credential appears below. Scopes are referred to by role. The
@@ -35,6 +36,26 @@ Settled by the operator across two rounds of questions on 2026-09-05:
 | 6 | **Pointer on every cairn entry the session touched** | one session fans out across N entries and M scopes |
 | 7 | **Push failure warns; handoff still succeeds** | a handoff can exist with no session attached, and must say so |
 | 8 | **Indefinite retention** | the bucket accumulates unredacted content permanently |
+
+### Round 2 — answered 2026-09-05, after the audit ladder measured the consequences
+
+| # | decision | consequence accepted |
+|---|---|---|
+| 9 | **A session ships as a SET** — one object per transcript file, parent + subagents | ~7.8 objects per session and 2.3x the bytes (row 4, not row 3); forces decision 13 |
+| 10 | **The pointer is an OPAQUE ID**, never a resolvable URL | a reader needs the transcript credential to resolve anything; a shared entry leaks an identifier, not content |
+| 11 | **The expected fan-out set is RECORDED** | a partial N-way pointer write becomes detectable instead of indistinguishable from "not touched" |
+| 12 | **Front matter is a BLOCK LIST of ids**; digest/size/host live as object metadata | ships against today's parser with no change to either repo; checking a pointer costs a HEAD request |
+| 13 | **`transcript_search` is widened with an OPT-IN flag** | the existing feeder keeps its behaviour by default, and must be pinned by a test before the module is touched |
+| 14 | 🔴 **NO retraction path — rotate the leaked credential instead** | the bucket is append-only **by policy**; a secret's bytes persist deliberately and forever |
+| 15 | **`SessionEnd` wired per host, and `drift-check` extended to detect its absence** | the wiring stays an operator act; the gap stops being invisible |
+| 16 | **"Touched" = entries the handoff run WROTE or UPDATED** | mechanical, no inference; an entry only read deeply attaches no receipts |
+
+🔴 **Decision 14 is the one that diverged from the recommendation, and it changes what the
+other machinery is for.** With no deletion, a dangling pointer cannot arise from retraction —
+so §5.4's digest ledger is no longer a retraction-detector, it is purely an integrity check.
+And the report-only scan §6 suggests becomes *the* control rather than a nice-to-have: if the
+only response to a leaked credential is rotation, then **knowing** is the whole of the
+response, and nothing else in this design will tell you.
 
 Decisions 4 and 8 compound: the bucket is a permanent, unredacted secrets-grade asset.
 That is the operator's call, made explicitly. What follows from it is §6 — the boundary
@@ -76,7 +97,7 @@ was found.
 *tail*, and decision 1 ships whole files, so the new shipper has no caller for it.
 
 🔴 **AND TRANSCRIPT DISCOVERY IS ALREADY SHARED — REUSING IT IS A DECISION, NOT A FREEBIE,
-AND IT ANSWERS §9.6 IN THE OPPOSITE DIRECTION.** `scripts/lib/transcript_search.py` already
+AND IT ANSWERED WHAT IS NOW DECISION 9 IN THE OPPOSITE DIRECTION.** `scripts/lib/transcript_search.py` already
 exposes `iter_transcripts` / `is_corpus_member`; the existing feeder imports it, and
 `test_transcript_search.py`'s two-way site ledger scans the tree so a fourth hand-rolled walk
 cannot pass unseen — i.e. the repo actively rewards reuse. But that module carries
@@ -88,9 +109,14 @@ So an implementer who takes "share discovery" at face value, reuses `iter_transc
 correct-looking move, and the one the ledger test pushes toward — **silently ships parent
 transcripts only**, which is precisely the "drops most of the evidence this proposal exists to
 preserve, while looking complete" outcome §5.0 names. The ledger test stays green throughout,
-because reusing the shared walk is what it exists to reward. **If §9.6 resolves to "ship the
-set", the shared walk must be widened or deliberately bypassed, and that is a change to a
-module with an enforced site ledger — not a free adoption.**
+because reusing the shared walk is what it exists to reward.
+
+✅ **DECIDED (decisions 9 and 13): the set ships, so the walk is WIDENED with an opt-in
+flag** — not bypassed, which would add the fourth hand-rolled walk the site ledger exists to
+prevent, and not widened unconditionally, which would silently change what the live 5-minute
+feeder ships. 🔴 **Pin the existing feeder's behaviour with a test BEFORE touching the
+module**: it is a working pipeline with its own consumer, and the default path must be shown
+unchanged rather than assumed unchanged.
 
 ## 4. Volume — measured, not estimated
 
@@ -103,7 +129,8 @@ error is the instructive part: **a percentile is a claim about a population, so 
 population or the number means nothing.**
 
 Measured on the workbench, 2026-09-05. Four populations, because the answer spans ~12×
-between them — and which one applies is decided by a question §9 has not closed:
+between them. **Decision 9 selects row 4**; the others are kept because the retraction
+records below only mean something against the population they were wrong about:
 
 | row | population | files | median | p90 | max | total |
 |---|---|---|---|---|---|---|
@@ -149,10 +176,9 @@ a clone-dependent number that measures nothing shared.
 that produce a handoff are the long ones, so the per-handoff filter picks the **large tail**,
 not the median — 3.82 MB (row 3) against 2.62 MB (row 2) against 0.74 MB (row 1).
 
-🔴 **AND THE ROW YOU SIZE OFF DEPENDS ON AN ANSWER §9.6 HAS NOT GIVEN YET.** Row 3 is the
-parent transcript alone. If §9.6 resolves to "ship the set" (§5.0 frames it), row 4 is the
-real unit — **2.3× the median and 2.5× the total**, with a largest single session of
-**31.00 MB**.
+🔴 **DECISION 9 MAKES ROW 4 THE UNIT.** Row 3 is the parent transcript alone and is no
+longer what ships. Row 4 is **2.3× the median and 2.5× the total**, with a largest single
+session of **31.00 MB**.
 
 ⚠ **That 31.00 MB is a SESSION TOTAL, not an object size** — under "ship the set" it
 arrives as many PUTs (the 37 sessions hold 288 files, mean object ~1.3 MB), and the largest
@@ -200,9 +226,8 @@ is the more comfortable story, because it blames drift rather than the writing. 
 counts paragraphs before writing "two paragraphs below". **A NAME can be checked at the
 moment it is written; an ordinal is a measurement nobody takes.**
 
-**THE SIZING DIRECTIVE — size off row 4 unless and until §9.6 resolves to parent-only.** Sizing off row 3 while
-§9.6 is open is how a bucket, a PUT timeout or a per-handoff cost estimate comes out low by
-more than 2×.
+**THE SIZING DIRECTIVE — size off row 4.** Decision 9 settled this; sizing off row 3 is how a
+bucket, a PUT timeout or a per-handoff cost estimate comes out low by more than 2×.
 
 ⚠ **This table is a SNAPSHOT of a population that GROWS AS THE SYSTEM IS USED**, the same
 caveat §5.0 carries for the corpus counts — every new handoff adds a session to it. Only the
@@ -269,8 +294,13 @@ run — are in the subagent transcripts. The parent carries only each subagent's
 Shipping "the session's transcript" as one file therefore drops most of the evidence this
 proposal exists to preserve, while looking complete.
 
-**Decide before implementing (§9.6):** does a session ship as one object or a set; and if a
-set, what is the key that keeps the subagent objects joinable to the parent.
+✅ **DECIDED — decision 9: a session ships as a SET, one object per transcript file.**
+So the key cannot be the session id alone. 🔴 **The remaining implementation constraint,
+which decision 9 does not settle:** the subagent objects must stay joinable to the parent, and
+an `agent-<hash>` stem joins to nothing. The parent id is available — it is the `sessionId`
+INSIDE each subagent file, verified present and singular on every file sampled — so key each
+object by **(parent session id, transcript filename)** and neither collision nor an
+unjoinable object can arise.
 
 ### 5.1 Two triggers, one object per transcript
 
@@ -292,8 +322,12 @@ does not (`PermissionRequest`, `PostToolUse`, `PreToolUse`, `SessionStart`, `Sto
 `SubagentStop`, `UserPromptSubmit` — no `SessionEnd`). That file is per-host and **unmanaged
 by nix** by design, and `drift-check.sh` rc 15 compares only top-level key *names*, so this
 does not surface as drift. Consequence: on a host without the hook, **every** session attaches
-only the handoff-time floor, permanently and silently. Wiring it is an operator act per host,
-not a change this proposal can ship, and §8 control 4 must name the host it ran on.
+only the handoff-time floor, permanently and silently. ✅ **DECIDED — decision 15: wire it per host, and extend `drift-check.sh` to detect its
+absence.** The wiring stays an operator act because that file is per-host by design; what
+changes is that the gap stops being invisible. The detector compares the **hook-event set**
+across hosts — the same shape as the `skillOverrides` arm rc 22 already implements, and it
+closes exactly the class that let this hide: rc 15 compares top-level key NAMES, so a missing
+nested event is structurally unseeable. §8 control 4 must still name the host it ran on.
 
 ### 5.2 Transport
 
@@ -315,8 +349,14 @@ the mesh.
 
 ### 5.3 What cairn holds — and one recommendation no recorded decision covers
 
-Front-matter on each touched entry gains a session reference carrying `id`, `sha256`,
-`bytes`, `captured_at`, `host`.
+Front-matter on each touched entry gains a session reference.
+
+✅ **"Touched" is DEFINED — decision 16: the entries the handoff run WROTE or UPDATED.**
+Mechanical, because the run already knows; no inference, and no rule to get wrong. The
+accepted narrowness: an entry a session read deeply but did not change attaches no receipts.
+🔴 **This definition is also what makes decision 11 meaningful** — a recorded fan-out set is
+only as good as the rule that produced it, and "what the run wrote" is the one rule that can
+be compared against afterwards without re-deriving a judgement.
 
 🔴 **THE FIELD SHAPE IS CONSTRAINED, AND THE OBVIOUS SPELLING IS SILENTLY DESTRUCTIVE.**
 Cairn front matter is parsed by `parse_front_matter` in `lib/subsystem_resolver.py`, which is
@@ -342,14 +382,18 @@ a `session:` key:
 
 The pointer is **gone**, `cairn recall` renders the entry as clean, and §5.4's digest ledger —
 the thing meant to make a bad pointer visible — was never written to be checked. So the field
-must be a **single scalar or an inline flow list**, or the parser must be widened first.
+must be a shape the parser already handles. ✅ **DECIDED — decision 12: a BLOCK LIST of ids**
+(`sessions:` then one `- <id>` per line), which the parser handles today and which uuids
+cannot trip, since promotion needs a colon inside the item. **The digest, size and host move
+to the object's own metadata** — so no parser change lands in either repo, and checking a
+pointer costs a HEAD request rather than an entry read.
 ⚠ Widening it is a **two-repo change**: `parse_front_matter` sits in `ZacxDev/cairn` too, at
 the same line, and §7 puts that repo out of scope. ⚠ Also unmeasured: the same docstring
 records that block-list lines are currently **zero across the live store** and says to re-take
 that count before relying on the shape. This field would be its first user.
 
-🔴 **RECOMMENDATION: the pointer is an OPAQUE ID, never a resolvable URL** — no bucket, no
-path, no endpoint in the entry.
+✅ **DECIDED — decision 10: the pointer is an OPAQUE ID, never a resolvable URL** — no bucket,
+no path, no endpoint in the entry.
 
 ⚠ **This contradicts no recorded decision.** Decision 6 is *"pointer on every cairn entry the
 session touched"* and says nothing about the pointer's form, so this is a gap being filled,
@@ -384,7 +428,11 @@ a reader would read "this session was never captured" off a permission error.
 
 ### 5.4 The digest ledger is not optional
 
-`bytes` + `sha256` + `captured_at` + `host` alongside the id. Without them a pointer to a
+`bytes` + `sha256` + `captured_at` + `host` — **on the OBJECT, not in the entry** (decision
+12), so the entry stays a list of ids and the ledger is one HEAD request away.
+⚠ **And under decision 14 its job narrowed:** with no deletion there is no retraction, so a
+dangling pointer can only mean corruption or a failed write. It is an integrity check now,
+not a retraction-detector. Without them a pointer to a
 missing, truncated or superseded object reads **identically** to a healthy one. It is also
 the shipper's own positive control: a run that shipped and a run that shipped nothing must
 be distinguishable in its output, and a reassuring zero is otherwise indistinguishable from
@@ -438,17 +486,26 @@ forever — so the transcript credential is an **all-clients-at-once** credentia
 this design changes that, and it should be understood before the credential is minted rather
 than discovered when the store gains a second tenant.
 
-⚠ **There is no retraction story, and decision 8 makes that permanent.** If a secret is found
-in a shipped object, deleting the object leaves the N fanned-out pointers dangling. §5.4 makes
-a dangling pointer *detectable*; nothing here makes it *retractable*, and nothing sweeps the
-entries that reference it. That is a real gap, not an oversight being papered over — it is
-listed in §9.
+🔴 **DECIDED — decision 14: THERE IS NO RETRACTION PATH, BY POLICY. The bucket is
+append-only and a leaked credential is answered by ROTATION, not by deletion.**
+This is deliberate and it is the one decision that diverged from the recommendation, so its
+consequences are stated rather than left to be discovered:
 
-🔴 **You currently have NO detector for a credential landing in a transcript.** Redaction
-was declined and that is settled — but a **report-only** scan over the bytes being shipped
-blocks nothing, costs one pass over data already being read, and turns an invisible event
-into a number. With indefinite retention, a secret that lands there is there forever. **Not
-v1; recommended as the first follow-on.**
+- a secret that reaches the bucket **stays there permanently**, and rotation makes it dead
+  rather than absent;
+- rotation only works on credentials that CAN be rotated — a client's secret, a token you do
+  not own, or personal data in a transcript has no rotation, and for those this policy is the
+  whole of the response;
+- 🔴 **the report-only scan below is therefore promoted from a nice-to-have to THE control.**
+  If the only answer to a leak is to rotate, then *knowing a leak happened* is the entire
+  response, and nothing else in this design will tell you. Without it the policy reads as
+  "accept leaks" rather than "detect and rotate".
+
+🔴 **THE REPORT-ONLY SCAN IS NOW LOAD-BEARING, NOT A FOLLOW-ON.** Redaction was declined
+(decision 4) and deletion was declined (decision 14), which leaves detection as the only
+remaining control in the chain. A scan over the bytes being shipped blocks nothing, costs one
+pass over data already being read, and turns an invisible event into a number you can act on
+while the credential is still worth rotating. **Ship it with v1, not after.**
 
 ## 7. Explicitly out of scope
 
@@ -473,13 +530,15 @@ does nothing:
    one. ⚠ **Do not write this as "one object"** — that is only true under parent-only.
    Under "ship the set" one session yields many objects (288 files across 37 sessions,
    §4 row 4), so an assertion of `len(objects) == 1` fails a correct implementation.
-   Assert NO GROWTH between runs, which is true under both branches of §9.6.
+   Assert NO GROWTH between runs. ⚠ Under decision 9 one session yields MANY objects
+   (288 files across 37 sessions), so an assertion of `len(objects) == 1` fails a correct
+   implementation.
 4. **The `SessionEnd` overwrite actually overwrites.** Ship at handoff, append to the
    session, fire `SessionEnd`, assert the stored `sha256` **changed** and the pointer did
    not duplicate. **Name the host it ran on** — §5.1: the hook is wired on one host today.
-   ⚠ If §9.6 resolves to one-object-per-session, this control passes trivially for the wrong
-   reason whenever subagent files collide on the key; it is only meaningful once the key is
-   decided.
+   ⚠ Under decision 9 the key is (parent session id, filename), so this control must name
+   WHICH object it re-shipped — asserting "a sha256 changed" across a set is satisfied by any
+   one member moving.
 5. **A crash path attaches the floor.** Kill a session without `SessionEnd`; the
    handoff-time object must still be there and its digest must match what was shipped.
 6. **Anonymous access denied — and the control must distinguish DENIED from ABSENT.**
@@ -505,36 +564,28 @@ invariant the bug never violated is an invariant guard and must be labelled as o
 
 ## 9. Open — decide before building
 
-1. **Does the pointer-shape recommendation in §5.3 stand?** No recorded decision covers the
-   pointer's form, so this fills a gap rather than dissenting. Cheap to accept, expensive to
-   retrofit.
-2. **What is the front-matter field called and SHAPED?** Constrained by §5.3: a scalar or an
-   inline flow list, or `parse_front_matter` gets widened first in **two** repos. Also: does
-   the subsystem-index skill or the handoff tool own writing it? (`clawgate-task:` is
-   precedent for the *idea* of a linkage field, though it is a handoff-doc field rather than
-   a cairn-entry one.)
-3. **Which entries count as "touched"?** The handoff run knows what it wrote; whether that
-   set is the right one, or too wide, has not been measured.
-4. **opencode** — schedule, or park indefinitely.
-5. **What does the new shipper do about `transcript_search`, and does it share `project_of`?**
-   Not "does the extraction happen" — discovery is **already** a shared module with an
-   enforced site ledger, so the question is narrower: reuse it and inherit its `subagents/`
-   exclusion, widen it, or bypass it deliberately. That half is downstream of question 6.
-   `project_of` is the separate, unconditional half: it is one-site today and the second
-   shipper will want it. §3.
-6. 🔴 **Does a session ship as ONE object or a SET?** §5.0. This is the largest open
-   question, it decides the object key, and the goal in §1 depends on the answer — 64% of the
-   bytes are in subagent transcripts, and one-object-per-session drops them.
-7. 🔴 **What happens when the fan-out PARTIALLY succeeds?** Decision 6 writes a pointer to
-   every touched entry, so the write is N-way and can land on 3 of 5. §5.5's fail-open
-   covers the PUSH and §6 covers deletion; nothing covers a half-written fan-out. §5.4's
-   digest ledger cannot detect it either — it validates a pointer that EXISTS, and the
-   failure here is entries that silently have none, which is indistinguishable from
-   entries the session never touched. Nothing records the expected fan-out set, so
-   nothing can compare against it. Either record that set or accept silent partial
-   attachment, but choose deliberately.
-8. **Is there a retraction path when a secret is found in a shipped object?** §6. Deleting
-   the object leaves N pointers dangling and nothing sweeps them. Under decision 8 this is
-   permanent, so "no path" is an answer — but it should be a chosen one.
-9. **Who wires `SessionEnd` on the second host, and what detects that it is missing?**
-   §5.1. It is unmanaged per-host state that `drift-check.sh` does not currently see.
+🔴 **Eight of the nine questions this section carried were answered on 2026-09-05 and are now
+decisions 9-16 in §2.** They are not restated here; §2 is the single place they live, so there
+is one place to correct. What remains:
+
+1. **opencode.** Schedule, or park indefinitely. It has no `.jsonl` — 2.4 GB of SQLite plus
+   `storage/`, `snapshot/` and `tool-output/` — so "the whole session" means an exporter with
+   its own fidelity question (which tables; what about `tool-output/`; is a DB snapshot a
+   session). **Recommendation: park it.** Ship Claude capture first and let the front-matter
+   field name stay format-agnostic so opencode can join later without a migration.
+
+## 10. What implementation must decide that no decision above settles
+
+These are not open questions for the operator — they are the places an implementer will have
+to choose, called out so the choice is deliberate rather than accidental:
+
+- **The object key.** §5.0 fixes it as *(parent session id, transcript filename)*. Anything
+  keyed on the filename stem alone leaves `agent-<hash>` objects joinable to nothing.
+- **What "the expected fan-out set" is recorded IN** (decision 11) — object metadata or the
+  handoff doc. Either works; recording it nowhere is what decision 11 forbids.
+- **How a resolver renders an id it cannot resolve.** 🔴 It must read as NOT AUTHORISED or
+  NOT FOUND *distinctly* — never as one ambiguous failure — because under decision 14 nothing
+  is ever deleted, so "missing" now means something went wrong rather than something was
+  retracted.
+- **Whether the opt-in flag on `transcript_search` defaults to today's behaviour.** Decision 13
+  says it must; a test pinning the existing feeder's output is what proves it.
