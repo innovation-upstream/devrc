@@ -27,7 +27,8 @@ ClickUp task ids — and emits one event per distinct mention:
     source  = mentions
     kind    = mention-detected
     ts      = the assistant turn's own instant (not the session start)
-    payload = platform / reference_id / url / context / candidates
+    payload = platform / reference_id / url / repo / repo_source / context /
+              candidates
 
 It rides here rather than in a PostToolUse hook because this file ALREADY walks
 every transcript and ALREADY extracts assistant content blocks — a hook would
@@ -138,8 +139,10 @@ if _COLLECTOR_ROOT not in sys.path:
 
 import changed_paths as CP  # noqa: E402
 # The mention scanner lives at the collector ROOT for the same reason
-# changed_paths does: it is shared (this tailer emits the telemetry, and
-# scripts/mention-open.py resolves a click with the identical rules), and a
+# changed_paths does: it is IMPORTED by two consumers (this tailer emits the
+# telemetry; scripts/mention-open.py resolves a click). Sharing the MODULE is not
+# sharing the RULES — the two run different pattern sets, selected by `profile`
+# and assigned in `PATTERN_LEDGER`; see that module's docstring. And a
 # module beside `claude/` needs its OWN `home.file` entry in nix/home.nix —
 # `claude/` is a `recursive = true` directory source, a file next to it is not.
 # `scripts/tests/test_collector_deploy_declares.py` derives that requirement
