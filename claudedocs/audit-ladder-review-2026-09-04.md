@@ -1,6 +1,15 @@
 # How adversarial audit ladders actually ran, 2026-08-28 → 2026-09-04
 
-**Run date: 2026-09-04.** Every number here is a measurement with a timestamp, not a constant.
+**Run date: 2026-09-04. Corrected 2026-09-05** after an independent BLIND re-measurement of
+the three load-bearing numbers (it was not shown this report). It agreed on the headline —
+146 real blocks, and at most one ladder meeting the two-consecutive-zero-payload condition —
+and contradicted three claims, each corrected in place below and marked 🔴. Sections carrying
+a correction: **the ledger surface** (the `#1237` body block was a false positive and the
+`≥1286` drought is retracted), **the gate-firing finding** (now an open three-way
+disagreement), and **the empty-range read rule** (I discarded a real datum). The Q1 verdict
+and the volume confound are untouched by any of it.
+
+Every number here is a measurement with a timestamp, not a constant.
 The corpus accumulates and it moved *during this sweep*: the all-time control read **4,171
 dispatches / 245 ladder sessions** at the start of the run and **4,172 / 246** roughly twenty
 minutes later, mean deepest 4.45 → 4.44. Re-derive rather than quote.
@@ -179,13 +188,10 @@ the ladder continues).
 | #1219 | 6 | r2 196/0 · r3 281/0 · r4 156/0 · r5 202/0 · r6 196/0 — *deliverable IS test infra* |
 | #1220 | 6 | r1 92/0 · r2 56/0 · r3 67/0 · r4 48/0 · r5 17/0 · r6 33/0 — *prose PR, gate inert* |
 | #1233 | 4 | r1 123/291 · r2 36/160 · r4 24/177 — *round 3 posted no block* |
-| #1274 | 5 | r1 115/147 · r2 99/166 · r3 7/104 · **r4 0/34** · r5 UNMEASURABLE (empty range — no commit landed for r5) |
+| #1274 | 5 | r1 115/147 · r2 99/166 · r3 7/104 · **r4 0/34** · **r5 = a genuine NO-FIX clean round** (see below) |
 | #1286 | 5 (OPEN) | r1 220/227 · r2 69/25 · r3 39/2 · r4 29/14 · r5 17/16 |
 
 ### The answer
-
-**Across 102 measured rounds in 20 deep devrc ladders, exactly 4 rounds changed zero payload,
-and exactly ONE ladder reached the gate's two-consecutive-zero-payload firing condition.**
 
 **The `civitai/cli` #498 shape did not recur in devrc in this window.** #498 was seven
 consecutive rounds (4–10) at 1,051 test lines and zero payload, no round ever clean. Nothing
@@ -193,17 +199,99 @@ here resembles it. The characteristic in-window shape is the opposite: payload e
 **decaying** — #998 runs 53→116→76→73→54→28 payload lines over six rounds; #1286 runs
 220→69→39→29→17; #989 runs 428→286→132→16.
 
-**#1132 is the one gate-firing instance, and the ladder stopped exactly there.** Rounds 5 and
-6 changed zero payload (412 and 221 scaffolding lines), r6 was the last round, and the gate
-says stop after two such rounds. That is the gate's condition and the observed behaviour
-agreeing — but **correlation only**; nothing in the transcript record proves the gate is why
-it stopped.
+**Aggregate across all 144 measured rounds: 19,230 payload lines vs 32,393 scaffolding —
+a ratio of 1.68 : 1.** Scaffolding dominates, but nowhere near the ∞:1 that #498's rounds
+4–10 produced.
 
-🔴 **And that finding is sensitive to one classification call.** I classed
-`scripts/testlib/nix_units.py` as scaffolding. Counted as payload instead, #1132 r5 becomes
-19 payload lines and only ONE zero-payload round exists — the gate never fires, and the
-window contains zero firing instances. The skill's own "ambiguous is not zero" tie-break
-points at the second reading. **State this as a judgement, not a measurement.**
+#### Reconciling my count against the independent re-measurement — it is SCOPE, not conflict
+
+I reported **4 zero-payload rounds in 102 measured rounds**. A blind re-measurement reports
+**9 zero-payload rounds in 144 measured rounds**. These agree exactly:
+
+- **My 102 rounds** are the depth-≥4 subset (20 of the 44 carrier PRs); the 144 covers all
+  carriers, shallow ladders included.
+- Its 9 are #1002 r3, #1046 r6, #1132 r6, #1148 r3, #1149 r2, #1157 r2, #1233 r4, #1274 r4,
+  #1277 r1. **Restricted to my 20 deep ladders that is exactly {#1046 r6, #1132 r6, #1233 r4,
+  #1274 r4} = 4.** The five it adds are all shallow PRs outside my table.
+- The **only** genuine per-round disagreement in the overlap is **#1132 r5**, which is the
+  single-file classification dispute above.
+
+Full round population: **146 blocks → 144 measured, 1 EMPTY_RANGE, 1 UNMEASURABLE**
+(#958 round 1, whose header is a bare `audited=abc41024` with no `..to`).
+
+#### 🔴 A methodological correction: an EMPTY RANGE is not always an instrument failure
+
+I reported **#1274 r5 as UNMEASURABLE** on the "non-empty range" read rule. **That was
+wrong, and it discarded the single most informative datum in the corpus.** The range
+`434ab939..434ab939` is empty *because the round made no fix*, and the block says so itself:
+
+> 1. No fixes were made this round: the audit returned no findings. The head is unchanged
+>    from the tip round 5 read.
+
+The "non-empty range" rule in `measure_ledger` exists to catch a **broken measurement** — a
+missing ref, a git without `--remerge-diff`, commits not in this checkout. It is not a rule
+about a round that genuinely changed nothing. `measure_ledger` already draws that line
+(`anchor_is_head` ⇒ "empty BY CONSTRUCTION, a broken question" vs. a real "nothing has
+landed"), and I applied the rule more literally than its own source does. **A clean, no-fix
+terminal round is a zero you can trust — and it is precisely the observation that proves a
+stop rule fired.** Reading it as UNMEASURABLE deletes the evidence you are looking for.
+
+### The uncontested instance is #1274, and it stopped on the FINDINGS rule — not the gate
+
+**devrc #1274 (`feat(main-green)`) is the one ladder in the window that visibly ended on a
+stop-rule mechanism, and said so.** Round 5's comment reads:
+
+> ## Audit round 5 — **CLEAN. The ladder ends here.**
+> No 🔴, no 🟡, no 🟢. Round 4's fix produced no finding of its own — the first time that has
+> been true in this PR — so per the stop rule the ladder stops, **and I am not running a round
+> 6 to confirm it.**
+
+That is mechanism 1 (findings-keyed: a clean round ENDS the ladder, never re-confirmed),
+cited explicitly. **It is NOT the attribution gate**, and #1274's own round-4 ledger says so
+in as many words:
+
+> **Payload lines changed: 0.** Round 3's fix carried one executable payload line (the
+> `|| die` guard), so this is **the first zero-payload round, not two consecutive** — the
+> ladder continues under the findings rule.
+
+So the session reasoned about the gate, correctly declined to fire it, and then stopped one
+round later on findings. My own numbers agree with its ledger (my r4 = 0 payload / 34
+scaffolding, `test_main_green_check.py` only).
+
+### 🔴 #1132 is a THREE-WAY DISAGREEMENT, and I am not resolving it
+
+I originally wrote that #1132 was "the one gate-firing instance". Three readings exist and
+they do not agree:
+
+| reading | verdict on #1132 |
+|---|---|
+| **This review** (`scripts/testlib/**` = scaffolding) | rounds 5 and 6 changed zero payload ⇒ **gate fires** |
+| **An independent blind re-measurement** (`nix_units.py` substantively scaffolding but ~65/35 **ambiguous**; the skill's "ambiguous is not zero" tie-break then counts it PAYLOAD) | **gate does not fire**; #1132 r6 is a lone zero-payload round |
+| **#1132's own posted ledger** | *"Stopped on the payload-attribution gate, not on a clean round. Rounds 6 and 7 both changed zero payload lines."* ⇒ **gate fires** |
+
+**The PR's own ledger is internally inconsistent**, which is why its vote cannot simply be
+counted. Its per-round numbers are *"round 5: 31 payload lines, zero executable"* and
+*"round 6: 19 payload lines, ~4 executable"* — both non-zero — while its summary says those
+rounds "changed zero payload lines". It is silently using **zero *executable* payload** in
+the summary and **payload lines** in the ledgers. Those are different gates.
+
+🔴 **The finding that outranks all three verdicts: the ladder classified the SAME FILE both
+ways, one round apart.** Reconciling its ledgers against my file-level measurement (its round
+labels run one ahead of its block labels):
+
+- its **round 5** = 31 payload lines = md 7 + `flake.nix` 13 + `run-tests.sh` 11 — with
+  `nix_units.py`'s **64 lines EXCLUDED** as scaffolding;
+- its **round 6** = 19 payload lines — which are **`nix_units.py` ITSELF**, now counted as
+  payload.
+
+An arithmetic identity in both directions, one round apart. **The gate's unit is not stable
+even within a single ladder**, which is a stronger and more useful result than any verdict
+about whether #1132 fired. It also means #1132 ran to at least round 7 by its own numbering —
+beyond the 6 blocks I extracted, so my depth for it is a floor.
+
+**Recorded as an open disagreement with all three numbers rather than resolved.** What every
+reading agrees on: **the attribution gate is near-inert — at most one firing across 309
+merged PRs**, and on the reading I now find most defensible, zero.
 
 **The documented prose blind spot is not an edge case — it is 20% of deep ladders.** Four of
 the twenty (#1108, #1207, #1220 prose; #1219 test-infrastructure) ran 6, 5, 6 and 6 rounds
@@ -220,28 +308,70 @@ The dispatching session reported 0 `audit-claims` blocks across the last 12 merg
 
 **Re-run, and the method reproduces.** My block-counter (fence regex matching
 `audit-dispatch.py`'s own `_FENCE_OPEN`) reads **#958 = 9 blocks**, matching the brief's
-control exactly. Two corrections to the brief's own reads: **#1237 carries 1 block in the PR
-BODY** (reported as 0), and **#1304 carries 2 blocks** — it is OPEN, not merged, which is why
-a merged-only scan misses it.
+control exactly. One correction to the brief's own reads: **#1304 carries 2 blocks** — it is
+OPEN, not merged, which is why a merged-only scan misses it.
+
+🔴 **CORRECTED 2026-09-05 — I claimed "#1237 carries 1 block in the PR BODY". It does not,
+and the error was mixing two of my own instruments.** That number came from a LINE-grep for
+the string `audit-claims`; #1237's body matches only in prose — *"`audit-dispatch.py` anchors
+on the newest `audit-claims` block it can parse…"*. My own fenced-block scan never listed
+#1237, and I quoted the line-grep over it. **The body surface contributes ZERO real blocks
+across every in-window PR.** The single body "hit" my fenced scan did report is #958's, and
+that is a false positive too: an illustrative example nested inside a **four-backtick
+wrapper** (line 50 is ````` ```` `````, line 51 the inner `` ```audit-claims ``). Its range
+`997375ec..9f638fd4` RESOLVES and yields plausible churn, so "does the range resolve" cannot
+detect it — **counting unclosed fences before the match** can, and that is the check to use.
 
 **The generalisation does not hold.** Over the whole window:
 
-| measurement | value |
-|---|---|
-| devrc PRs merged 2026-08-28 → 2026-09-04 | **306** (`/search/issues`; the brief's "60" was a `gh pr list` cap artifact) |
-| merged PRs carrying ≥1 `audit-claims` block | **41** |
-| total blocks on merged PRs | **146** (145 issue-comment + 1 body; **0 review-comment**) |
-| PRs with blocks including OPEN ones | **44**, **154 parsed blocks**, 1 unparseable header |
+| measurement | value | as of |
+|---|---|---|
+| devrc PRs merged in window | **306** → **309** | 09-04 → 09-05 |
+| merged PRs carrying ≥1 block | **41** → **42** | 09-04 → 09-05 |
+| real blocks | **145** (all issue-comment) → **146** | 09-04 → 09-05 |
+| body surface | **0 real** (1 false positive, #958) | both |
+| review-comment surface | **0** | both |
+| PRs with blocks incl. OPEN | **44**, 154 parsed headers, 1 unparseable (#958 round 1, `audited=abc41024` with no `..to`) | 09-04 |
 
-So the ledger mechanism **is** in active use — including today, on open PR #1304. What is
-true is narrower and still worth acting on: **no merged devrc PR numbered ≥ 1286 carries a
-block** (0 of the 19 merged in that range), while #1286 and #1304, both open, do. That is
-either a genuine recent decline or an artifact of what merged in that stretch — mostly
-`docs(handoff)` PRs. **Not established which.**
+The brief's "60 merged PRs" was a `gh pr list` cap artifact. The 309/42 population is proven
+complete by `gh api --paginate` (1,227 closed + 42 open = 1,269 records reaching #1, max
+#1319; the 50 gaps in 1…1319 are issues sharing the number namespace).
 
-One structural note: **all 146 blocks are on issue comments or the body; zero are review
-comments.** `gh pr view --json comments` returns issue comments only, so it happens to see
-99.3% of them — but that is luck, not a safe method. Check all three surfaces.
+So the ledger mechanism **is** in active use — including on open PR #1304.
+
+### 🔴 RETRACTED: the "no merged PR ≥1286 carries a block" drought
+
+I wrote that **0 of the 19 merged PRs numbered ≥1286 carry a block**. That was true when
+measured on **2026-09-04** and is **false by 2026-09-05**: **#1313 carries a real block**
+(`audit-claims round=1 audited=316ccf74..7d94c568`).
+
+**The claim decayed in 21 hours, and the mechanism is exactly this report's own thesis.**
+#1313's block was posted **2026-09-05T06:03:38Z** and the PR merged **06:35:05Z** — both
+*after* my run. So this is not an instrument gap: the datum did not exist when I measured.
+(Note `merged: true` with `mergedAt: null` on the REST endpoint for a very fresh merge —
+`.mergedAt` alone would have mis-classified it.) A dated measurement of a moving window
+is not a property of the world, which is the claim this document opens with.
+
+**And the real driver is change TYPE, not PR number.** By conventional-commit type across the
+window:
+
+| type | carriers / PRs | rate |
+|---|---|---|
+| `docs` | 4 / 175 | **2.3%** |
+| `fix` | 19 / 71 | 26.8% |
+| `feat` | 16 / 46 | 34.8% |
+| `test` | 2 / 6 | 33.3% |
+
+`docs` is **57% of the window**, and **145 of those 175 are `docs(handoff)`**. The apparently
+carrier-free runs (#1003–#1043, #959–#987, #1084–#1107) each sit inside a single day and are
+made of handoff docs. So there is no dead range and no decline — it is **"a kind of change
+that never gets a ladder"**, which is a different and more actionable fact than "people
+stopped posting ledgers".
+
+One structural note that survives unchanged: **every real block is on an issue comment.**
+`gh pr view --json comments` returns issue comments only, so it happens to see 100% of them —
+but that is luck, not a safe method, and the body surface is where the false positives live.
+Check all three surfaces, and parse fences rather than grepping for the string.
 
 ---
 
@@ -298,8 +428,18 @@ Both directions, and they do not cancel.
   skill attribution.
 - **Subagent transcripts are excluded** by `transcript_search.py`. Since `/audit-pr` works by
   dispatching subagents, everything measured here is the *dispatching* side only.
-- **Only PRs that POSTED a claims block are in the waste audit.** 41 of 306 merged devrc PRs.
-  Ladders that ran without posting a ledger are unmeasured — not zero.
+- **Only PRs that POSTED a claims block are in the waste audit.** 42 of 309 merged devrc PRs.
+  Ladders that ran without posting a ledger are unmeasured — not zero. And per the
+  change-type table above, `docs(handoff)` PRs almost never post one, so the unmeasured
+  remainder is **not a random sample** of ladder work.
+- 🔴 **Churn that falls in NO block's range is invisible to this method — a structural hole,
+  not a sampling one.** Measuring each block's own `from..to` is correct per the header
+  semantics, but it only covers the churn the blocks *chain across*. **#1233 posted blocks for
+  rounds 1, 2 and 4** — its round-4 comment is titled "rounds 3 and 4", and round 3's fixes
+  sit in `1b5d2e43..eb947328`, which **no block's range contains**. That churn is in no column
+  of my table. #958 has the same shape (a 12-round ladder with 9 ranged blocks) but its ranges
+  still chain end-to-end, so nothing is lost there. #1108 and #1219 both start at round 2, so
+  their round-1 churn is likewise outside every range.
 - **The waste audit is devrc-only.** Ladders ran in homelab-talos, civit-datapacket-talos,
   vetr, auditloop, civitai-gpu-fleet and naida-ai; none were churn-measured.
 
@@ -315,11 +455,17 @@ Both directions, and they do not cancel.
 
 **Cannot see at all:**
 
-- **Why a ladder stopped.** Every stop-attribution here is correlation. Nothing in the
-  transcript or PR record states "the gate fired", so no causal claim is made.
-- **Whether a round was CLEAN.** The corrected measurement removed the fake "empty terminal
-  range" signal I had briefly read as a clean round. Cleanliness lives in the audit's prose
-  verdict and was not extracted at scale.
+- **Why a ladder stopped — NOT AT SCALE, though it is sometimes stated outright.** I first
+  wrote that nothing in the record states why a ladder stopped. That is **too strong**:
+  #1274 says *"per the stop rule the ladder stops, and I am not running a round 6 to confirm
+  it"*, and #1132 says *"Stopped on the payload-attribution gate, not on a clean round."* The
+  real limit is that this is **prose in a comment, extracted by hand for two PRs** — it was
+  not mined across all 42 carriers, so no rate is claimed. Note also that a self-report is a
+  claim by the session about itself: #1132's is internally inconsistent (above).
+- **Whether a round was CLEAN — only where a block says so.** The churn measurement alone
+  cannot distinguish a clean round from an uncommitted one; #1274 r5 is legible only because
+  its block states *"No fixes were made this round: the audit returned no findings."*
+  Cleanliness was not extracted at scale.
 - **Whether the escape hatch's stated rationale was actually written** (#1157's requirement).
   Not measured; it needs prose extraction from every terminal round's summary.
 - **Elapsed time and token cost per ladder.** The #498 case history's most damning figures
@@ -334,7 +480,16 @@ Both directions, and they do not cancel.
    the rule's effect from the volume tripling. *Closes when* a 9-day window with comparable
    session volume to W2 is available and the comparison is re-run.
 2. **Decide the `scripts/testlib/**` classification** — payload or scaffolding — and write it
-   into the reference file. It currently flips the window's only gate-firing instance.
-   *Closes when* the reference file states the call with its reason.
-3. **Establish whether the ≥1286 block drought is real.** *Closes when* the next 20 merged
-   devrc PRs are re-scanned on all three surfaces and the rate is compared against 41/306.
+   into the reference file. It is the whole of the #1132 three-way disagreement, and #1132's
+   own ladder called it both ways one round apart. *Closes when* the reference file states
+   the call with its reason.
+3. ~~Establish whether the ≥1286 block drought is real.~~ **CLOSED 2026-09-05** — it was not.
+   #1313 carries a block, and the real driver is change type (`docs` 2.3% vs `feat` 34.8%),
+   not PR number.
+4. **Mine the stop-rationale prose across all 42 carriers**, rather than the two read by
+   hand. This is the only route to a *rate* for "ladders that stopped on a stated mechanism",
+   and it is also how #1157's escape-hatch requirement gets checked. *Closes when* the
+   terminal round's summary is classified for every carrier and the rate is published.
+5. **Fix the range-coverage hole.** Blocks that skip a round (#1233) leave churn in no
+   range. *Closes when* the measurement additionally reports, per ladder, the churn between
+   the first block's `from` and the head that no block's range covers.
