@@ -358,6 +358,18 @@ declared_survivor "M-X-1-line-count-guard-off" apply 1 \
       calling it covered would be the F-F mistake again."
 
 # --- the patch itself ---------------------------------------------------------------
+mutant "M-X-3-temp-sibling-leaked" apply 1 \
+  '[ -n "$TMP" ] && rm -f "$TMP"; return 0' \
+  '[ -n "$TMP" ] && true; return 0' \
+  test_an_invalid_nix_result_aborts_before_the_backup_and_leaves_no_temp \
+  'temp sibling leaked'
+
+mutant "M-X-4-nix-parse-not-enforced" apply 1 \
+  'nix-instantiate --parse "$TMP" >/dev/null 2>&1 || die "the patched file is not valid Nix -- $CFG untouched"' \
+  'nix-instantiate --parse "$TMP" >/dev/null 2>&1 || true' \
+  test_an_invalid_nix_result_aborts_before_the_backup_and_leaves_no_temp \
+  'assert "not valid Nix" in r.stderr'
+
 mutant "M-X-2-backup-overwrite-allowed" apply 1 \
   'cp -p "$CFG" "$BAK"' \
   'true' \

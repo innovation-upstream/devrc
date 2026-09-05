@@ -806,6 +806,22 @@ def test_scratch_is_removed_on_failure(rig):
     r = rig.run()
     assert r.returncode != 0
     assert list(rig.tmpdir.iterdir()) == [], list(rig.tmpdir.iterdir())
+    assert not list(rig.etc.glob("configuration.nix.new.*"))
+
+
+def test_an_invalid_nix_result_aborts_before_the_backup_and_leaves_no_temp(rig):
+    """The temp lives NEXT TO $CFG so the final mv is atomic, which means a failure
+    between creating it and moving it must not leave it there. This is the only path
+    that fails while it still exists."""
+    rig.set("instantiate_rc", "1")
+    r = rig.run()
+    assert not list(rig.etc.glob("configuration.nix.new.*")), "temp sibling leaked"
+    assert "not valid Nix" in r.stderr
+    assert r.returncode == 1
+    assert rig.cfg.read_text() == rig.original_cfg_text
+    assert list(rig.etc.glob("configuration.nix.bak-nebula-relay-*")) == [], \
+        "the backup must not be taken before the parse check passes"
+    assert rig.log("rebuild") == []
 
 
 # ------------------------------------------------------------------------ F-G
