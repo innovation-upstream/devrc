@@ -207,7 +207,9 @@ def ledger_binding(pane_id: str, cwd: str, server_pid: str,
     on when they do: `agent-ledger-hook.py` prunes on SESSION BOUNDARIES only
     (`PRUNE_EVENTS` is `SessionStart`/`Stop`, a subset of the four events that
     write), while `opencode/plugin/ledger.js` has no boundary hook at all and
-    passes `--prune` on EVERY write, throttled to once per 30 s. But a prune
+    passes `--prune` on EVERY write, throttled to once per SESSION per 30 s
+    (`ledger.js`'s `lastWrite` is a Map keyed by sessionID, so N concurrent
+    sessions issue up to N prunes in a window, not one). But a prune
     sweeps the WHOLE directory whoever triggers it, so it is OTHER sessions'
     prunes that delete an idle pane's record. Either way a live pane idle
     longer than that ends up with
