@@ -68,8 +68,8 @@ discovery module, and its own docstring warns that it is *"a LABEL, NOT AN IDENT
 must not be un-slugified. A second shipper needing a project label for object metadata or a
 key prefix would hand-roll it in four lines, and the two copies would disagree the first time
 a directory name contains a literal `-`. ⚠ An earlier revision of this section deleted this
-sentence as collateral while rewriting the paragraph below, leaving the section with no
-positive advice at all — which reads as "nothing is safe to share" and is the opposite of what
+sentence as collateral while rewriting the shared-discovery paragraph that follows, leaving
+the section with no positive advice at all — which reads as "nothing is safe to share" and is the opposite of what
 was found.
 
 **Not the byte-boundary logic** — it exists to drop the leading partial JSON record from a
@@ -130,6 +130,7 @@ not the median — 3.82 MB (row 3) against 2.62 MB (row 2) against 0.74 MB (row 
 parent transcript alone. If §9.6 resolves to "ship the set" (§5.0 frames it), row 4 is the
 real unit — **2.3× the median and 2.5× the total**, with a largest single session of
 **31.00 MB**.
+
 ⚠ **That 31.00 MB is a SESSION TOTAL, not an object size** — under "ship the set" it
 arrives as many PUTs (the 37 sessions hold 288 files, mean object ~1.3 MB), and the largest
 single *file* on the host is 23.48 MB, row 1's max. So it does not describe a bigger PUT
@@ -146,12 +147,13 @@ and do not cross the two — but do not claim 23.48 MB is what ships today, beca
 33 of the 37 sessions have subagent bytes at all, and the worst **within those 37** is a
 3.82 MB parent with 19 subagent files totalling 26.56 MB — a 30.39 MB session of which
 shipping one object captures **12.6%**. Two further reasons both rows are floors:
-`SessionEnd` re-ship only grows them, and the coverage caveat two paragraphs below is real.
+`SessionEnd` re-ship only grows them, and the **COVERAGE CAVEAT** below (the ⚠ block headed
+*Scope of the 37-session sample*) is real.
 
 ⚠ **An earlier revision quoted a worse-looking example here — a 3.79 MB parent with 60
 subagent files, 8% captured — and that session is NOT one of the 37.** It is from the
-913-session population, and its 46.99 MB total contradicted the 31.00 MB row-4 max stated
-three lines above it. Recorded rather than quietly swapped, because the mistake is this
+913-session population, and its 46.99 MB total contradicted row 4's own 31.00 MB max.
+Recorded rather than quietly swapped, because the mistake is this
 section's own thesis: **a figure imported from a different population is wrong even when the
 figure itself is exact.**
 
@@ -160,10 +162,18 @@ It closed with *"the largest sessions on the whole host do reach ~47 MB"* — wh
 the total of the session being retracted, promoted from "an example that does not belong here"
 to "the host maximum". Measured: the host maximum is **94.02 MB** (an 11.72 MB parent plus
 82.30 MB across 29 subagent transcripts) and **9 sessions exceed 47 MB**. A reader sizing for
-the widened population §4's own caveat anticipates would have been **2× low**, from a sentence
-written to warn against exactly that. Recorded because three separate revisions of this one
-paragraph made the same mistake in three different places: **retracting a number is not the
-same as not using it.**
+the widened population the coverage caveat anticipates would have been **2× low**, from a
+sentence written to warn against exactly that.
+
+The same figure was therefore wrong **twice**: once as a within-the-37 worst case, and once —
+in the sentence retracting it — as a whole-host maximum. **Retracting a number is not the same
+as not using it.**
+
+🔴 **AND THE LESSON FOR THIS DOCUMENT'S OWN RECORDS: name things, do not count or locate
+them.** Two earlier revisions of these retraction records carried a paragraph COUNT and a
+paragraph DISTANCE; both were falsified by the next edit that inserted a block, and a wrong
+pointer sends a reader to the wrong population — the exact hazard §4 exists to prevent. A
+NAME survives insertion; an ordinal does not.
 
 **So: size off row 4 unless and until §9.6 resolves to parent-only.** Sizing off row 3 while
 §9.6 is open is how a bucket, a PUT timeout or a per-handoff cost estimate comes out low by
@@ -174,10 +184,14 @@ caveat §5.0 carries for the corpus counts — every new handoff adds a session 
 coverage caveat below was stated originally, and coverage and time are different limits.
 Re-measured 2026-09-05 after a day's work: still **37**, so no drift was observed — but the
 method is time-dependent by construction, and a later re-derivation returning a different `n`
-means the table is **stale, not wrong**. ⚠ One audit reading of this reported 43; it did not
-reproduce here under the stated method, which is itself the reason to state the method.
+means the table is **stale, not wrong**. ⚠ An audit reading reported 43. That is now **explained, not merely non-reproducing**:
+43 is what the trailer yields when the **pathspec is dropped** and every commit in the window
+is counted. The method must therefore name its ref as well — these figures are from
+`origin/main`; `--all` gives a larger number that varies by clone, so it is not a
+measurement of anything shared.
 
-⚠ **Scope of the 37-session sample, stated rather than buried:** devrc handoffs only, and
+⚠ **THE COVERAGE CAVEAT — scope of the 37-session sample, stated rather than buried:**
+devrc handoffs only, and
 only commits carrying the trailer. Handoffs in other repos are not counted, so the true
 population is larger and the totals are floors.
 
@@ -205,10 +219,10 @@ one `agent-<hash>.jsonl` per dispatched subagent. Measured: **4,951 of 5,864** f
 
 ⚠ **These counts are a SNAPSHOT of a live corpus and they drift within a session** — §3
 quotes 4,955 and this section 4,951, taken minutes apart on the same day, and a later
-reading gave 4,957. The durable claims are the **ratio** (~85% of files, ~64% of bytes) and
+reading gave 4,957. The durable claims are the **ratio** (84.4% of files, ~64% of bytes) and
 the **exact coincidence** in §3; the absolute counts are not, and nothing pins them.
-(The ratio is 84.4% of files — quoted as "84%" above; do not read the two as different
-measurements.)
+The file ratio is **84.4%** — the single measurement behind both the "84%" quoted above and
+the "~85%" an earlier revision left standing here; they were never three readings.
 
 Those files are not addressable the way the parent is. `build_transcript_push.py` states the
 convention the whole join rests on — *"The session id IS the filename stem … the same id the
