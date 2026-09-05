@@ -14,9 +14,10 @@ Binding a window to its EXACT session id has TWO sources, and they are not equal
      ground truth for that pane: one O(1) file read.
   2. PANE-CONTENT MATCHING (`unique_match_sids`) — an INFERENCE, and the fallback.
      It greps a pane's on-screen text across every transcript in that cwd's project
-     dir. Measured on the workbench 2026-09-04: 145 competing transcripts in one
-     project dir, and a 50-window `save` spent essentially all of its 2m15s in that
-     grep while still leaving ~10 of 44 live claude panes unbound.
+     dir. Measured on the workbench 2026-09-04 over ONE snapshot of 44 live claude
+     panes, against 145 competing transcripts in one project dir: the grep took
+     176.6s and bound 34; the ledger took 0.002s and bound 34, agreeing on all 27
+     panes both answered. They miss DIFFERENT panes, so together they bind 41.
 
 So the ledger is consulted FIRST and CLAIMS FIRST — a certain binding must never lose
 a session id to a guess — and the grep runs only for panes the ledger cannot answer.
