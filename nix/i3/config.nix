@@ -35,7 +35,32 @@ let
     else ''
 
       # Dual-monitor layout: 1080p (HDMI-0) left of the ultrawide (DP-0, primary)
-      exec --no-startup-id xrandr --output DP-0 --primary --mode 3440x1440 --rate 143.92 --pos 1920x0 --output HDMI-0 --mode 1920x1080 --pos 0x360'';
+      exec --no-startup-id xrandr --output DP-0 --primary --mode 3440x1440 --rate 143.92 --pos 1920x0 --output HDMI-0 --mode 1920x1080 --pos 0x360
+
+      # Pin workspaces to outputs.  WITHOUT this i3 places a workspace on
+      # whichever output it happens to pick, so the same workspace lands on a
+      # different physical screen run to run — and HDMI-0 is usually absent, so
+      # the mistake only surfaces when the second monitor is plugged in.
+      #
+      # This is deliberately NOT a layout snapshot.  It restores no windows and
+      # keeps no state: i3 re-evaluates these lines on every start, so there is
+      # nothing to go stale and nothing to refresh.  Window/pane state lives in
+      # tmux (resurrect + continuum + scripts/tmux-session-restore.py) and is
+      # already restored there; the i3 layer carries no state worth snapshotting
+      # (measured 2026-09-04: 2 workspaces, 6 windows, 5 of them one terminal).
+      #
+      # `workspace 3 output HDMI-0 DP-0` is a FALLBACK LIST, not a pair: i3 uses
+      # the first CONNECTED output, so workspace 3 lands on DP-0 when HDMI-0 is
+      # unplugged rather than vanishing.
+      #
+      # These live inside monitorLayout on purpose — it is already gated on
+      # `isLaptop`, and pinning to HDMI-0 on a host that has no HDMI-0 would be
+      # wrong.  An output name that matches no output is silently IGNORED by i3,
+      # which is why test_i3_workspace_output_pinning.py pins every name here to
+      # an output the xrandr line above actually configures.
+      workspace 1 output DP-0
+      workspace 2 output DP-0
+      workspace 3 output HDMI-0 DP-0'';
 in
 ''
 set $mod Mod1
