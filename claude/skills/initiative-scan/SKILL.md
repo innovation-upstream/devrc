@@ -56,12 +56,12 @@ skill instead. This skill is the ephemeral scan that feeds it.
 
 ## Session snapshot / restore (survive a reboot)
 
-If `$ARGUMENTS` is **`snapshot`** (or `save`), **`restore`** (optionally `restore --dry-run`), or **`show`**, run the workspace snapshot helper instead of the scan — it binds each live claude tmux window to its exact session id (by matching pane content) so you can bring the whole workspace back after a reboot. tmux-continuum already restores the sessions/windows/cwds; this relaunches the right `claude --resume <id>` in each.
+If `$ARGUMENTS` is **`snapshot`** (or `save`), **`restore`** (optionally `restore --dry-run`), or **`show`**, run the workspace snapshot helper instead of the scan — it binds each live claude tmux window to its exact session id (the per-pane agent ledger first — a RECORD; a pane-content grep only for what the ledger cannot answer — a GUESS) so you can bring the whole workspace back after a reboot. tmux-continuum already restores the sessions/windows/cwds; this relaunches the right `claude --resume <id>` in each.
 
 ```bash
 python3 ~/workspace/devrc/scripts/tmux-session-restore.py <snapshot|restore|show> [--dry-run]
 ```
-- **`snapshot`** — run BEFORE rebooting: writes `~/.config/initiatives/restore-plan.json` + a readable `restore-cheatsheet.md` (survives reboot). Present the cheat-sheet.
+- **`snapshot`** — run BEFORE rebooting: writes `~/.config/initiatives/restore-plan.json` + a readable `restore-cheatsheet.md` (survives reboot). Present the cheat-sheet. Each entry carries `bind_source` and the sheet prints it per line (`(ledger)` = certain, `(fuzzy)` = a content guess to eyeball); the summary's `bound: N ledger, M pane-content` + `ledger reasons:` tally say why anything is unbound.
 - **`restore`** — run AFTER reboot (once tmux-continuum has restored the shells): relaunches `claude --resume <id>` in each window; windows already running claude are skipped, and windows with no certain match fall back to the interactive picker. Use `--dry-run` first to preview.
 - **⚠ host-local:** run it on the host you're rebooting — it reads that host's live tmux + `~/.claude/projects`. The plan is per-host.
 

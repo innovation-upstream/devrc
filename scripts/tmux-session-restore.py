@@ -45,6 +45,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 STATE_DIR = Path(os.path.expanduser("~/.config/initiatives"))
@@ -56,8 +57,8 @@ _SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
-def _load_agent_ledger():
-    """`scripts/lib/agent_ledger.py`, imported by path — or None if unavailable.
+def _load_agent_ledger(path: Path | None = None):
+    """`scripts/lib/agent_ledger.py`, imported by path — or None if unusable.
 
     This file is a standalone script (run from the working tree by
     `tmux-post-save.sh` and by the `tmux-session-restore` user unit), so there is
@@ -66,17 +67,32 @@ def _load_agent_ledger():
     🔴 We borrow `pane_filename` rather than restating it. The file key is the
     WRITER's rule, and a second spelling of it here is the duplicated predicate
     that ends up making this reader look at a filename nobody writes. If the
-    module cannot be loaded there is deliberately NO fallback spelling — the
-    ledger simply reports nothing and every pane falls through to the grep.
+    module cannot be USED there is deliberately NO fallback spelling — the ledger
+    simply reports nothing and every pane falls through to the grep.
+
+    🔴 "Cannot be used" is TWO cases, and the `hasattr` check is what makes the
+    promise true for the second. An absent or syntactically broken file raises on
+    import and is caught; a module that imports fine while lacking the one symbol
+    this file borrows would be returned as usable, and the unguarded
+    `_AL.pane_filename(...)` in `ledger_binding` would then raise out of
+    `build_plan` and kill `cmd_save` — which runs unattended every ~15 min from
+    `tmux-post-save.sh` into a log nobody reads, silently freezing the restore
+    plan. Degrading is the whole point; half-degrading is worse than not trying.
+
+    `path` exists so a test can hand this loader a deliberately-broken module;
+    production always takes the default.
     """
-    path = Path(__file__).resolve().parent / "lib" / "agent_ledger.py"
+    p = Path(path) if path is not None else (
+        Path(__file__).resolve().parent / "lib" / "agent_ledger.py")
     try:
-        spec = importlib.util.spec_from_file_location("_tsr_agent_ledger", path)
+        spec = importlib.util.spec_from_file_location("_tsr_agent_ledger", p)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        return mod
     except Exception:  # noqa: BLE001 — absent/broken lib: fall back to the grep
         return None
+    if not hasattr(mod, "pane_filename"):
+        return None
+    return mod
 
 
 _AL = _load_agent_ledger()
@@ -122,7 +138,11 @@ def ledger_binding(pane_id: str, cwd: str, server_pid: str,
 
     `("", <reason>)` whenever no record survives validation, and the reason token
     names WHICH check rejected it — the tests assert on those tokens, so a broken
-    guard fails with its own name rather than with a generic empty string.
+    guard fails with its own name rather than with a generic empty string. The
+    token also LEAVES this function: `build_plan` records it per pane and
+    `cmd_save` prints the tally, because `0 ledger` alone cannot tell an operator
+    apart `no-ledger-module` (a deploy problem) from `generation-mismatch` (the
+    server restarted) from `no-record` (nothing to fix).
 
     THE FOUR VALIDATIONS, and what each one is for:
 
@@ -133,9 +153,19 @@ def ledger_binding(pane_id: str, cwd: str, server_pid: str,
       * `generation-mismatch` / `generation-unmeasured` — tmux pane ids restart at
         `%0` when the SERVER does, so yesterday's `%61` record and today's `%61`
         pane collide after exactly the reboot this tool exists for. `tmux_pid` is
-        the server pid, constant across a server's windows, so equality is an exact
-        generation check. 🔴 An UNMEASURED live pid rejects too: being unable to
-        check a generation is not the same as having checked it.
+        the server pid, constant across a server's windows, so equality rejects
+        every record written by a server that is not the one answering now.
+        ⚠ That is NOT the same as an exact generation check, and the gap sits in
+        the very event this guard exists for: pids are reused, a reboot resets the
+        counter, and both servers are started at login. MEASURED 2026-09-04 on the
+        workbench: live server pid `4025325` against `pid_max` `4194304` — i.e.
+        near the wrap, so the next boot's server draws a LOW pid, and so did the
+        previous boot's. A collision is unlikely, not astronomical, and a colliding
+        record for the same pane id in the same cwd would pass all four checks.
+        Closing it needs a value the WRITER does not record today (a boot id, or
+        the server's `/proc` start time), so the residual is ACCEPTED, not covered.
+        🔴 An UNMEASURED live pid rejects too: being unable to check a generation
+        is not the same as having checked it.
       * `project-mismatch` — 🔴 THE CROSS-REPO GUARD. The transcript's parent
         directory is the encoded cwd (`project_dir_for`). A record whose transcript
         lives under a DIFFERENT repo's project dir would resume the wrong
@@ -149,6 +179,14 @@ def ledger_binding(pane_id: str, cwd: str, server_pid: str,
     across servers the pid check already rejects. Any age threshold would
     therefore reject only CORRECT bindings — and it would reject them hardest for
     long-idle windows, which are precisely the ones worth restoring.
+
+    🔴 But the WRITE side already applies one, so `no-record` has a permanent
+    FLOOR rather than shrinking to nothing: `agent_ledger.DEFAULT_MAX_AGE` is 7
+    days and every write prunes, so a live pane idle longer than that has no
+    record at all and reports `no-record` forever. Prune keeps re-opening that set
+    for exactly the long-idle windows a read-side age gate would also have thrown
+    away — which is why the argument above still holds, and why "the unbound set
+    shrinks on its own" is true only of the panes that predate the hook.
     """
     if _AL is None:
         return "", "no-ledger-module"
@@ -290,11 +328,13 @@ def build_plan() -> list[dict]:
     panes = live_claude_panes()
     server_pid = tmux_server_pid()
     bound: dict[int, tuple[str, str]] = {}
+    reasons: dict[int, str] = {}
     claimed: set[str] = set()
 
     # Pass 1 — the ledger. Certain, so it claims first.
     for i, p in enumerate(panes):
-        sid, _reason = ledger_binding(p.get("pane_id", ""), p["cwd"], server_pid)
+        sid, reason = ledger_binding(p.get("pane_id", ""), p["cwd"], server_pid)
+        reasons[i] = reason
         if sid and sid not in claimed:
             claimed.add(sid)
             bound[i] = (sid, "ledger")
@@ -319,6 +359,11 @@ def build_plan() -> list[dict]:
             "cwd": p["cwd"],
             "session_id": sid,
             "bind_source": source,
+            # Why the LEDGER did or did not answer for this pane — carried out so
+            # `cmd_save` can print a tally an operator can act on. Independent of
+            # `bind_source`: a pane can read `ok` here and still be `fuzzy`/unbound
+            # if another pane claimed that session id first.
+            "ledger_reason": reasons.get(i, ""),
             "title": (p["title"] or "").strip(),
             "hint": first_user_line(sid, p["cwd"]) if sid else "",
         })
@@ -362,6 +407,12 @@ def cmd_save() -> int:
     print(f"saved {len(plan)} windows → {PLAN}")
     print(f"bound: {n_ledger} ledger, {n_fuzzy} pane-content, "
           f"{len(plan) - n_ledger - n_fuzzy} unbound (picker at restore)")
+    # The counts above cannot tell `0 ledger` apart between a missing module, a
+    # restarted server and simply no records — and the first two are what an
+    # operator would act on. Sorted by token so the line's shape is stable.
+    tally = Counter(e.get("ledger_reason") or "unrecorded" for e in plan)
+    print("ledger reasons: "
+          + ", ".join(f"{tok}={n}" for tok, n in sorted(tally.items())))
     print(f"cheat-sheet → {CHEAT}\n")
     print(cheat_sheet(plan))
     return 0

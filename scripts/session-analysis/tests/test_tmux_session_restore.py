@@ -8,9 +8,12 @@ Covers: scratch-slot codename parsing, project-dir encoding, display naming, the
 per-pane LEDGER binding and each of its four validations, the ledger-before-grep
 ordering (both the "the grep never runs" performance claim and the "a guess cannot
 steal a certain id" correctness claim), the claim-based unique-session assignment
-(no two windows share a session, uncertain -> picker), and cheat-sheet rendering.
+(no two windows share a session, uncertain -> picker), cheat-sheet rendering and
+its per-entry source badge, the loader's "an unusable module degrades to None"
+promise, and `cmd_save`'s two summary lines.
 tmux/grep/capture-pane I/O and the ledger directory are stubbed; nothing here reads
-the real `~/.cache/agent-ledger` or `~/.claude/projects`.
+or writes the real `~/.cache/agent-ledger`, `~/.claude/projects` or
+`~/.config/initiatives/restore-plan.json`.
 """
 import importlib.util
 import json
@@ -130,7 +133,7 @@ def test_ledger_binding_rejects_a_missing_record_file(tmp_path, monkeypatch):
 
 def test_ledger_binding_rejects_an_unparseable_record(tmp_path, monkeypatch):
     ledger, _ = _ledger_world(tmp_path, monkeypatch)
-    (ledger / "claude-p7.json").write_text("{not json\n")
+    (ledger / tsr._AL.pane_filename("claude", "%7")).write_text("{not json\n")
     assert tsr.ledger_binding("%7", CWD, SERVER_PID) == ("", "no-record")
 
 
@@ -175,6 +178,76 @@ def test_ledger_binding_rejects_a_transcript_from_another_repo(tmp_path, monkeyp
 def test_ledger_binding_needs_a_pane_id(tmp_path, monkeypatch):
     _ledger_world(tmp_path, monkeypatch)
     assert tsr.ledger_binding("", CWD, SERVER_PID) == ("", "no-pane-id")
+
+
+def test_ledger_binding_rejects_a_record_that_is_not_an_object(tmp_path, monkeypatch):
+    """A JSON ARRAY parses fine and has no `.get` — only `isinstance` stops it.
+
+    Reachable past every earlier check: the file exists and line 1 is well-formed
+    JSON, so `no-record`'s parse arm cannot fire. Without the type guard this is
+    an `AttributeError` propagating out of `cmd_save`, not a fallback to the grep.
+    """
+    _ledger, transcript = _ledger_world(tmp_path, monkeypatch)
+    (_ledger / tsr._AL.pane_filename("claude", "%7")).write_text(json.dumps(
+        [{"schema": 1, "runtime": "claude", "session_id": SID_A,
+          "tmux_pid": SERVER_PID, "transcript_path": str(transcript)}]) + "\n")
+    try:
+        got = tsr.ledger_binding("%7", CWD, SERVER_PID)
+    except Exception as exc:      # noqa: BLE001 — this IS the failure under test
+        pytest.fail(f"a non-object ledger record raised {exc!r} instead of "
+                    f"returning ('', 'no-record') — the isinstance guard is gone")
+    assert got == ("", "no-record")
+
+
+# --------------------------------------------------------------------------- #
+# the loader's "no fallback spelling" promise — including a module that IMPORTS
+# --------------------------------------------------------------------------- #
+def _stub_ledger_module(tmp_path, body: str) -> Path:
+    p = tmp_path / "stub_agent_ledger.py"
+    p.write_text(body)
+    return p
+
+
+def test_a_ledger_module_without_pane_filename_loads_as_none(tmp_path):
+    """`None` is the promise, not "imported and half-usable".
+
+    This reader borrows exactly one symbol. A module that imports cleanly while
+    lacking it is the SAME case as an absent file, and the loader must say so —
+    otherwise the `_AL is None` arm in `ledger_binding` never runs.
+    """
+    mod = _stub_ledger_module(tmp_path, "LEDGER_DIR = '/nonexistent'\n")
+    assert tsr._load_agent_ledger(mod) is None, (
+        "a ledger module lacking `pane_filename` was returned as usable — "
+        "`ledger_binding` will then raise AttributeError out of `cmd_save`")
+
+
+def test_a_usable_ledger_module_still_loads(tmp_path):
+    """The positive control: the new guard must not reject a WORKING module."""
+    mod = _stub_ledger_module(
+        tmp_path, "def pane_filename(runtime, pane_id):\n"
+                  "    return 'stub-%s-%s.json' % (runtime, pane_id)\n")
+    loaded = tsr._load_agent_ledger(mod)
+    assert loaded is not None, "the guard rejected a module that HAS the symbol"
+    assert loaded.pane_filename("claude", "%7") == "stub-claude-%7.json"
+
+
+def test_a_ledger_module_missing_pane_filename_degrades_not_raises(tmp_path,
+                                                                   monkeypatch):
+    """🔴 `cmd_save` runs unattended every ~15 min from `tmux-post-save.sh` into a
+    log nobody reads. A traceback here freezes the restore plan silently, which is
+    the exact "snapshot nothing refreshes" failure this tool has already had
+    twice — so an unusable module must produce `no-ledger-module`, never an
+    exception.
+    """
+    monkeypatch.setattr(
+        tsr, "_AL",
+        tsr._load_agent_ledger(_stub_ledger_module(tmp_path, "SCHEMA = 1\n")))
+    try:
+        got = tsr.ledger_binding("%7", CWD, SERVER_PID)
+    except Exception as exc:      # noqa: BLE001 — this IS the failure under test
+        pytest.fail(f"ledger_binding raised {exc!r} for a ledger module missing "
+                    f"`pane_filename`; it must degrade to ('', 'no-ledger-module')")
+    assert got == ("", "no-ledger-module")
 
 
 # --------------------------------------------------------------------------- #
@@ -272,7 +345,7 @@ def test_two_panes_cannot_share_one_ledger_session(tmp_path, monkeypatch):
     """Two ledger records naming one session: one binds, the other falls back."""
     ledger, transcript = _ledger_world(tmp_path, monkeypatch)
     (ledger / tsr._AL.pane_filename("claude", "%8")).write_text(
-        (ledger / "claude-p7.json").read_text())   # same session_id, other pane
+        (ledger / tsr._AL.pane_filename("claude", "%7")).read_text())   # same session_id, other pane
     _plan_env(monkeypatch,
               [{"pane_id": "%7", "session": "scratch4", "window": "2",
                 "cwd": CWD, "title": "faro"},
@@ -293,6 +366,26 @@ def test_neither_source_yields_the_picker_not_a_guess(tmp_path, monkeypatch):
               lambda target, cwd: [])
     plan = tsr.build_plan()
     assert plan[0]["session_id"] == "" and plan[0]["bind_source"] == ""
+
+
+def test_build_plan_records_the_ledger_reason_for_every_pane(tmp_path, monkeypatch):
+    """The reason tokens must LEAVE `build_plan`.
+
+    They justify themselves as the distinction between `no-ledger-module` (a
+    deploy problem), `generation-mismatch` (the server restarted) and `no-record`
+    (nothing to fix) — and `cmd_save` can only print what the plan carries. Two
+    panes with DIFFERENT outcomes, so a constant would not satisfy this.
+    """
+    _ledger_world(tmp_path, monkeypatch)          # a valid record for %7 only
+    _plan_env(monkeypatch,
+              [{"pane_id": "%7", "session": "scratch4", "window": "2",
+                "cwd": CWD, "title": "faro"},
+               {"pane_id": "%9", "session": "8", "window": "1",
+                "cwd": CWD, "title": "wedge"}],
+              lambda target, cwd: [])
+    by_win = {e["window"]: e for e in tsr.build_plan()}
+    assert by_win["2"].get("ledger_reason") == "ok"
+    assert by_win["1"].get("ledger_reason") == "no-record"
 
 
 def test_build_plan_assigns_unique_sessions(monkeypatch):
@@ -355,6 +448,84 @@ def test_cheat_sheet_shows_resume_command_and_picker_fallback():
     assert "claude --resume abc" in txt
     assert "Vapor:2" in txt and "main:8:1" in txt
     assert "pick from the list" in txt           # empty id -> picker guidance
+
+
+def test_cheat_sheet_labels_each_binding_with_its_own_source():
+    """The badge must follow the entry, not a single default for the whole sheet."""
+    txt = tsr.cheat_sheet([
+        {"codename": "Vapor", "window": "2", "cwd": "/r", "session_id": SID_A,
+         "bind_source": "ledger", "title": "t", "hint": ""},
+        {"codename": "main:8", "window": "1", "cwd": "/r", "session_id": SID_B,
+         "bind_source": "fuzzy", "title": "u", "hint": ""},
+    ])
+    assert f"claude --resume {SID_A}`  (ledger)" in txt
+    assert f"claude --resume {SID_B}`  (fuzzy)" in txt
+
+
+def test_cheat_sheet_labels_an_unrecorded_source_as_a_guess():
+    """🔴 A plan with NO `bind_source` is a PRE-LEDGER plan — every id in one came
+    from the pane-content grep, so the default has to be `fuzzy`.
+
+    Labelling it `(ledger)` would stamp this PR's certainty badge on exactly the
+    guesses the PR exists to distinguish, and the sheet is what an operator
+    eyeballs before letting `restore` resume 40 conversations. No field in the
+    fixture spells either label, so the rendered word can only come from the
+    default.
+    """
+    txt = tsr.cheat_sheet([{"codename": "Vapor", "window": "2", "cwd": "/r",
+                            "session_id": SID_A, "title": "t", "hint": ""}])
+    assert f"claude --resume {SID_A}`  (fuzzy)" in txt, (
+        "an entry with no recorded bind_source did not render as a guess")
+    assert "(ledger)" not in txt, (
+        "an entry with no recorded bind_source rendered as `(ledger)` — a guess "
+        "must never inherit the ledger's certainty")
+
+
+# --------------------------------------------------------------------------- #
+# cmd_save — the operator-facing summary
+# --------------------------------------------------------------------------- #
+def test_cmd_save_summary_counts_sources_and_ledger_reasons(tmp_path, monkeypatch,
+                                                            capsys):
+    """Both summary lines, on a plan whose three source counts are DISTINCT.
+
+    🔴 Distinctness is the point: at 1/1/1 a summary that counted `fuzzy` as
+    `ledger` would print exactly the correct line and survive. The reason tally is
+    what makes `0 ledger` actionable — `no-ledger-module` and
+    `generation-mismatch` are operator problems, `no-record` is not.
+
+    🔴 Every path is under `tmp_path`; this never touches the real
+    `~/.config/initiatives/restore-plan.json`.
+    """
+    state = tmp_path / "state"
+    monkeypatch.setattr(tsr, "STATE_DIR", state)
+    monkeypatch.setattr(tsr, "PLAN", state / "restore-plan.json")
+    monkeypatch.setattr(tsr, "CHEAT", state / "restore-cheatsheet.md")
+
+    def entry(win, sid, source, reason):
+        return {"session": "8", "window": str(win), "codename": "main:8",
+                "cwd": "/r", "session_id": sid, "bind_source": source,
+                "ledger_reason": reason, "title": f"w{win}", "hint": ""}
+
+    monkeypatch.setattr(tsr, "build_plan", lambda: [
+        entry(1, SID_A, "ledger", "ok"),
+        entry(2, SID_B, "ledger", "ok"),
+        entry(3, SID_C, "fuzzy", "no-record"),
+        entry(4, "", "", "no-record"),
+        entry(5, "", "", "generation-mismatch"),
+        entry(6, "", "", "project-mismatch"),
+    ])
+    rc = tsr.cmd_save()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "bound: 2 ledger, 1 pane-content, 3 unbound" in out, (
+        "the per-source counts do not match the plan — a source is being "
+        "counted under the wrong label")
+    assert ("ledger reasons: generation-mismatch=1, no-record=2, ok=2, "
+            "project-mismatch=1") in out, (
+        "the reason tally is missing or reshaped — `0 ledger` is then "
+        "indistinguishable between a missing module, a restarted server and "
+        "simply no records")
+    assert (state / "restore-plan.json").exists()
 
 
 # --------------------------------------------------------------------------- #
