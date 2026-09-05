@@ -3865,7 +3865,15 @@ in
         "TMUX_TMPDIR=%t"
       ];
       ExecStart = "${pkgs.python3}/bin/python3 %h/workspace/devrc/scripts/tmux-reply-agent";
-      X-Restart-Triggers = [ "${../scripts/tmux-reply-agent}" ];
+      # 🔴 THE POLICY MODULE IS A TRIGGER TOO. This is a RESIDENT service, not a
+      # timer: it imports scripts/lib/tmux_text_policy.py once at startup and then
+      # runs for weeks. Without this line, TIGHTENING the text allowlist would
+      # leave the running agent on the OLD predicate indefinitely -- a security
+      # change that appears deployed and is not, on the process that executes.
+      X-Restart-Triggers = [
+        "${../scripts/tmux-reply-agent}"
+        "${../scripts/lib/tmux_text_policy.py}"
+      ];
     };
     Install = {
       # 🔴 SHIPPED DISABLED — see enableTmuxReplyAgent. A `default.target` want,

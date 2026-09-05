@@ -53,7 +53,9 @@ import json
 import os
 import re
 import pathlib
+import shutil
 import subprocess
+import tempfile
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -173,6 +175,15 @@ def tmux_stub(tmp_path):
     err_file.write_text("")
     new_window_out = tmp_path / "tmux-new-window-out"
     new_window_out.write_text("%77\n")
+    # 🔴 A STUB THAT CAN LIE ABOUT WHERE THE WINDOW LANDED. The agent reads back
+    # the session and path tmux actually chose; without a stub that can report
+    # something OTHER than the request, that read-back is unpinned — measured, as
+    # two surviving mutants, because `=` and `isdir` each fire first in the
+    # ordinary case. These files override the derived values when non-empty.
+    landed_session = tmp_path / "tmux-landed-session"
+    landed_session.write_text("")
+    landed_path = tmp_path / "tmux-landed-path"
+    landed_path.write_text("")
 
     path = tmp_path / "bin" / "tmux"
     path.parent.mkdir(exist_ok=True)
@@ -184,7 +195,21 @@ def tmux_stub(tmp_path):
         f'''python3 -c 'import json,sys; open(sys.argv[1],"a").write(json.dumps(sys.argv[2:])+"\\n")' '''
         f'''{log} "$@"\n'''
         f'''if [ "$1" = "display-message" ]; then cat {server_id}; exit 0; fi\n'''
-        f'''if [ "$1" = "new-window" ]; then cat {new_window_out}; exit 0; fi\n'''
+        # 🔴 THE STUB NOW ECHOES WHAT THE AGENT READS BACK. The agent verifies the
+        # session and working directory tmux ACTUALLY chose, so a stub printing a
+        # bare pane id would fail every new-session test for the wrong reason.
+        # It derives both from its OWN argv, which is also what makes a
+        # deliberately mismatching stub expressible.
+        f'''if [ "$1" = "new-window" ]; then\n'''
+        f'''  python3 -c 'import sys;a=sys.argv[1:];\n'''
+        f'''c=a[a.index("-c")+1] if "-c" in a else "";\n'''
+        f'''c=open("{landed_path}").read().strip() or c;\n'''
+        f'''t=a[a.index("-t")+1].strip("=:") if "-t" in a else "keep";\n'''
+        f'''t=open("{landed_session}").read().strip() or t;\n'''
+        f'''p=open("{new_window_out}").read().strip();\n'''
+        f'''sys.stdout.write("" if p=="" else p+"\\t"+t+"\\t"+c+"\\n")' "$@"\n'''
+        f'''  exit 0\n'''
+        f'''fi\n'''
         f'''if [ "$1" = "send-keys" ]; then cat {err_file} >&2; exit "$(cat {rc_file})"; fi\n'''
         f'''exit 0\n'''
     ))
@@ -215,6 +240,14 @@ def tmux_stub(tmp_path):
             new_window_out.write_text(value)
 
         @staticmethod
+        def lie_about_landing(session=None, path=None):
+            """Make the stub report a landing that differs from the request."""
+            if session is not None:
+                landed_session.write_text(session)
+            if path is not None:
+                landed_path.write_text(path)
+
+        @staticmethod
         def new_pane_id():
             return new_window_out.read_text().strip()
 
@@ -240,6 +273,20 @@ def write(**kw):
     }
     out.update(kw)
     return out
+
+
+def real_dir(tmp_path, name="work"):
+    """A directory that EXISTS, for a new-session fixture.
+
+    🔴 `/tmp/some/dir` USED TO DO, AND THAT WAS THE HOLE. `new-window -c <missing
+    path>` returns rc 0 and opens the window in the HOME DIRECTORY — measured on
+    real tmux — so every stubbed fixture here was describing a delivery that, in
+    production, would have run the command somewhere else entirely. The agent
+    refuses a non-existent cwd now, so a fixture has to name a real one.
+    """
+    d = tmp_path / name
+    d.mkdir(exist_ok=True)
+    return str(d)
 
 
 def run_agent(server, tmux_stub, tmp_path, *, env_extra=None, conf_text=None,
@@ -888,14 +935,15 @@ def test_a_new_session_opens_a_window_at_the_cwd_and_types_into_THAT_pane(server
     target. So the agent asks tmux to PRINT the new pane's id (`-P -F
     '#{pane_id}'`) and sends to that id.
     """
-    server.claim_batches = [[write(kind="new-session", pane="", cwd="/tmp/some/dir",
+    server.claim_batches = [[write(kind="new-session", pane="", cwd=real_dir(tmp_path),
                                    text="claude 'do the thing'")]]
     run_agent(server, tmux_stub, tmp_path)
 
     calls = tmux_stub.calls()
     new_windows = [c for c in calls if c and c[0] == "new-window"]
     assert len(new_windows) == 1, f"expected one new-window, got {calls}"
-    assert new_windows[0] == ["new-window", "-P", "-F", "#{pane_id}", "-c", "/tmp/some/dir"], new_windows[0]
+    assert new_windows[0] == ["new-window", "-P", "-F", AGENT.NEW_WINDOW_FORMAT,
+                              "-c", real_dir(tmp_path)], new_windows[0]
 
     sends = tmux_stub.send_keys_calls()
     assert len(sends) == 2, f"expected the text send and the Enter send, got {sends}"
@@ -919,7 +967,7 @@ def test_a_new_session_that_cannot_report_a_pane_FAILS_rather_than_guessing(serv
     and it must produce NO send-keys at all.
     """
     tmux_stub.set_new_window_output("")
-    server.claim_batches = [[write(kind="new-session", pane="", cwd="/tmp/some/dir", text="echo hi")]]
+    server.claim_batches = [[write(kind="new-session", pane="", cwd=real_dir(tmp_path), text="echo hi")]]
     run_agent(server, tmux_stub, tmp_path)
     assert tmux_stub.send_keys_calls() == [], (
         "the agent sent keys without a pane id from tmux; that lands in whatever pane happens "
@@ -931,7 +979,7 @@ def test_a_new_session_that_cannot_report_a_pane_FAILS_rather_than_guessing(serv
 def test_a_new_session_with_no_text_just_opens_the_window(server, tmux_stub, tmp_path):
     """A bare window is a complete delivery — the caller asked for one, and
     typing nothing into it is the right amount of typing."""
-    server.claim_batches = [[write(kind="new-session", pane="", cwd="/tmp/some/dir", text="")]]
+    server.claim_batches = [[write(kind="new-session", pane="", cwd=real_dir(tmp_path), text="")]]
     run_agent(server, tmux_stub, tmp_path)
     assert [c for c in tmux_stub.calls() if c and c[0] == "new-window"]
     assert tmux_stub.send_keys_calls() == []
@@ -1291,7 +1339,7 @@ def test_a_new_session_ALWAYS_submits_whatever_the_row_says(server, tmux_stub, t
         tmux_stub.reset()
         AGENT._SEEN.clear()
         server.claim_batches = [[write(id=f"w-ns{int(submit)}", kind="new-session", pane="",
-                                       cwd="/tmp/some/dir", text="echo hi", submit=submit)]]
+                                       cwd=real_dir(tmp_path), text="echo hi", submit=submit)]]
         run_agent(server, tmux_stub, tmp_path)
         sends = tmux_stub.send_keys_calls()
         assert len(sends) == 2, (
@@ -1325,13 +1373,17 @@ def test_a_named_tmux_session_is_passed_to_tmux_as_a_target(server, tmux_stub, t
     next free index", and a session that does not exist makes tmux FAIL rather
     than silently fall back to the current one.
     """
-    server.claim_batches = [[write(kind="new-session", pane="", cwd="/tmp/some/dir",
+    server.claim_batches = [[write(kind="new-session", pane="", cwd=real_dir(tmp_path),
                                    tmuxSessionName="scratch2", text="echo hi")]]
     run_agent(server, tmux_stub, tmp_path)
     new_windows = [c for c in tmux_stub.calls() if c and c[0] == "new-window"]
     assert len(new_windows) == 1, tmux_stub.calls()
-    assert new_windows[0] == ["new-window", "-P", "-F", "#{pane_id}", "-c", "/tmp/some/dir",
-                              "-t", "scratch2:"], new_windows[0]
+    # 🔴 `=` FORCES AN EXACT SESSION MATCH. Without it tmux PREFIX-MATCHES:
+    # `-t scratch2:` with `scratch2` absent and `scratch20` live returns rc 0 and
+    # opens the window in `scratch20` — measured on 3.7c against the operator's
+    # own server, which holds exactly that pair.
+    assert new_windows[0] == ["new-window", "-P", "-F", AGENT.NEW_WINDOW_FORMAT,
+                              "-c", real_dir(tmp_path), "-t", "=scratch2:"], new_windows[0]
 
 
 def test_an_absent_tmux_session_leaves_the_target_to_tmux(server, tmux_stub, tmp_path):
@@ -1339,7 +1391,7 @@ def test_an_absent_tmux_session_leaves_the_target_to_tmux(server, tmux_stub, tmp
     server considers current", which is what happened before the field existed
     and the only honest answer when nobody expressed a preference. A `-t` with an
     empty value would be a target of its own."""
-    server.claim_batches = [[write(kind="new-session", pane="", cwd="/tmp/some/dir", text="echo hi")]]
+    server.claim_batches = [[write(kind="new-session", pane="", cwd=real_dir(tmp_path), text="echo hi")]]
     run_agent(server, tmux_stub, tmp_path)
     new_windows = [c for c in tmux_stub.calls() if c and c[0] == "new-window"]
     assert len(new_windows) == 1
@@ -1359,7 +1411,7 @@ def test_the_host_refuses_a_compound_tmux_target(server, tmux_stub, tmp_path, na
     """🔴 RE-VALIDATED ON THE HOST, NOT TRUSTED. The server checks this too; this
     process is the one that hands the value to tmux, and the two sides of the
     boundary fail independently."""
-    server.claim_batches = [[write(kind="new-session", pane="", cwd="/tmp/d",
+    server.claim_batches = [[write(kind="new-session", pane="", cwd=real_dir(tmp_path),
                                    tmuxSessionName=name, text="echo hi")]]
     run_agent(server, tmux_stub, tmp_path)
     assert [c for c in tmux_stub.calls() if c and c[0] in ("new-window", "send-keys")] == [], (
@@ -1393,3 +1445,294 @@ def test_the_host_refuses_a_tab_even_though_the_shared_policy_allows_one():
     # The control: the same text without the tab is ordinary and passes.
     assert AGENT.validate({"id": "w-abc123", "kind": "send-keys", "pane": "%1",
                            "text": "rm -rf ~/projects/"}) == ""
+
+
+# --------------------------------------------------------------------------- #
+# 13. REAL tmux. The stub cannot express either of these.
+# --------------------------------------------------------------------------- #
+#
+# 🔴 THE STUB ALWAYS EXITS 0, so it models neither of the two resolution rules
+# that shipped as defects: tmux PREFIX-MATCHES a session name, and `-c <missing
+# path>` falls back to the home directory. Both were measured live, both reported
+# `delivered`, and both were invisible to every stubbed test in this file. These
+# drive a REAL tmux on a private `-L` socket — never the operator's server — and
+# `tmux` is in REQUIRED_TOOLS and flake.nix's gateTools so they cannot silently
+# skip in the tier that gates.
+
+@pytest.fixture
+def real_tmux(tmp_path):
+    """A private tmux server with known sessions, torn down afterwards.
+
+    🔴 `-L <unique>` AND A PRIVATE TMUX_TMPDIR. This must never touch the
+    operator's live server: the thing under test CREATES WINDOWS.
+    """
+    sock = "rank29-" + os.path.basename(str(tmp_path))
+    sockdir = tempfile.mkdtemp(prefix="tmuxr29.")
+    env = dict(os.environ, TMUX_TMPDIR=sockdir)
+
+    def tmux(*args, check=True):
+        p = subprocess.run(["tmux", "-L", sock, *args], capture_output=True,
+                           text=True, env=env, timeout=30)
+        if check and p.returncode != 0:
+            raise AssertionError(f"tmux {args} failed: {p.stderr}")
+        return p
+
+    # The operator's real server holds `scratch`, `scratch2` … `scratch20` and
+    # `datapacket-talos`, `datapacket-talos-2`. This reproduces the SHAPE that
+    # makes a prefix match land somewhere else: a longer name present, the
+    # shorter one absent.
+    tmux("new-session", "-d", "-s", "scratch20")
+    tmux("new-session", "-d", "-s", "keep")
+    try:
+        yield {"sock": sock, "env": env, "tmux": tmux}
+    finally:
+        subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True,
+                       env=env, timeout=30)
+        shutil.rmtree(sockdir, ignore_errors=True)
+
+
+def _agent_with_real_tmux(monkeypatch, real_tmux):
+    """Point the agent's tmux seam at the private server."""
+    sock, env = real_tmux["sock"], real_tmux["env"]
+
+    def run(args):
+        p = subprocess.run(["tmux", "-L", sock, *args], capture_output=True,
+                           text=True, env=env, timeout=30)
+        return p.returncode, p.stdout, p.stderr
+
+    monkeypatch.setattr(AGENT, "run_tmux", run)
+
+
+def test_a_MISSING_session_is_refused_not_prefix_matched(monkeypatch, real_tmux):
+    """🔴 THE FIRST SHIPPED DEFECT, against real tmux.
+
+    tmux prefix-matches a session name. `-t scratch2:` with `scratch2` absent and
+    `scratch20` live returns rc 0 and opens the window in `scratch20` — measured
+    on 3.7c against the operator's own server, where `scratch2` … `scratch20`
+    both exist. End to end the agent typed the command, pressed Enter and
+    reported `delivered`.
+
+    `scratch2` is the literal this file's own fixtures use.
+    """
+    _agent_with_real_tmux(monkeypatch, real_tmux)
+    before = real_tmux["tmux"]("list-windows", "-a", "-F", "#{session_name}").stdout
+
+    pane, err = AGENT.open_window(str(pathlib.Path.home()), "scratch2")
+    assert err, ("open_window SUCCEEDED for a session that does not exist. tmux prefix-matched "
+                 "it to `scratch20` and the next step presses Enter.")
+    assert pane == ""
+    after = real_tmux["tmux"]("list-windows", "-a", "-F", "#{session_name}").stdout
+    assert after == before, f"a window was created anyway:\nbefore={before!r}\nafter={after!r}"
+
+
+def test_the_EXACT_session_still_works(monkeypatch, real_tmux):
+    """The control for the refusal above: the real name opens a real window, so
+    the refusal is the `=` prefix and not a gate that refuses everything."""
+    _agent_with_real_tmux(monkeypatch, real_tmux)
+    pane, err = AGENT.open_window(str(pathlib.Path.home()), "scratch20")
+    assert not err, err
+    assert pane.startswith("%")
+    landed = real_tmux["tmux"](
+        "display-message", "-p", "-t", pane, "#{session_name}").stdout.strip()
+    assert landed == "scratch20", landed
+
+
+def test_a_cwd_that_does_not_exist_is_REFUSED_not_opened_in_HOME(monkeypatch, real_tmux, tmp_path):
+    """🔴 THE SECOND SHIPPED DEFECT, against real tmux.
+
+    `new-window -c <absolute path that does not exist>` returns rc 0 and opens
+    the window in the home directory — measured. End to end the agent reported
+    `state='delivered' detail='opened %1'` while the command ran in $HOME, so a
+    build or a recursive delete would have run there.
+    """
+    _agent_with_real_tmux(monkeypatch, real_tmux)
+    missing = str(tmp_path / "definitely" / "not" / "here")
+    pane, err = AGENT.open_window(missing, "scratch20")
+    assert err, ("open_window SUCCEEDED for a directory that does not exist; tmux fell back to "
+                 "the home directory and the command would have run there")
+    assert pane == ""
+
+    # The control: a directory that DOES exist opens there, and the read-back
+    # agrees — so the refusal is the fallback and not an unconditional no.
+    real = tmp_path / "real"
+    real.mkdir()
+    pane, err = AGENT.open_window(str(real), "scratch20")
+    assert not err, err
+    landed = real_tmux["tmux"](
+        "display-message", "-p", "-t", pane, "#{pane_current_path}").stdout.strip()
+    assert AGENT.same_directory(landed, str(real)), f"landed={landed!r} want={real}"
+
+
+def test_a_trailing_separator_in_the_cwd_is_refused(tmp_path):
+    """tmux eats a trailing separator off the `-c` word exactly as it does off a
+    send-keys token, so the path becomes a DIFFERENT path — and if that does not
+    exist, the window opens in the home directory. The text path already refused
+    this character; the cwd path did not."""
+    real = tmp_path / "build"
+    real.mkdir()
+    ok = {"id": "w-abc123", "kind": "new-session", "pane": "", "text": "make"}
+    assert AGENT.validate({**ok, "cwd": str(real)}) == ""
+    for bad in (str(real) + ";", str(real) + " ", " " + str(real)):
+        assert AGENT.validate({**ok, "cwd": bad}) != "", bad
+
+
+def test_a_nonexistent_cwd_is_refused_before_tmux_is_reached(tmp_path):
+    """The early, legible refusal. open_window re-checks where tmux ACTUALLY
+    landed; this makes the common case a clear message rather than a fallback."""
+    ok = {"id": "w-abc123", "kind": "new-session", "pane": "", "text": "make"}
+    assert "does not exist" in AGENT.validate({**ok, "cwd": str(tmp_path / "nope")})
+    assert AGENT.validate({**ok, "cwd": str(tmp_path)}) == ""
+
+
+# --------------------------------------------------------------------------- #
+# 14. The guards that had no coverage.
+# --------------------------------------------------------------------------- #
+def test_the_shared_scan_sees_a_bad_character_at_OFFSET_ZERO():
+    """🟡 THE EXACT TRAP THE POLICY'S OWN DOCSTRING RECORDS, in the one caller.
+
+    `enumerate(text)` → `enumerate(text[1:], 1)` SURVIVED all 85 tests: every
+    fixture in this file puts the bad character LATER (`"echo hi" + ch`,
+    `"a" + ch + "b"`), so a scan blind at offset 0 refuses the same character at
+    the end and DELIVERS it at the start. session-write's own offset-zero test
+    cannot cover this — that file open-codes its own scan, and `first_disallowed`
+    has exactly one caller: this agent, the network-facing one.
+    """
+    policy = AGENT.TEXT_POLICY
+    for ch in ("\x0f", "\n", "\x1b", "\x00", "​", "\x85"):
+        got = policy.first_disallowed(ch + "echo hi")
+        assert got is not None, f"{ch!r} at offset 0 was not seen by the shared scan"
+        assert got[0] == 0, f"{ch!r} reported at offset {got[0]}, want 0"
+        # …and through the agent's own gate, which is what actually ships.
+        assert AGENT.validate({"id": "w-abc123", "kind": "send-keys", "pane": "%1",
+                               "text": ch + "echo hi"}) != "", ch
+    # The control: an allowed character at offset 0 is still allowed, so this is
+    # not a scan that refuses everything at the start.
+    assert policy.first_disallowed("echo hi") is None
+
+
+def test_the_response_read_is_BOUNDED(monkeypatch):
+    """🟡 `resp.read(MAX)` → `resp.read()` survived all 85 tests. A bare read
+    takes whatever the peer sends into a process on the operator's workstation."""
+    captured = {}
+
+    class FakeResp:
+        def read(self, *args):
+            captured["args"] = args
+            return b'{"writes":[]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(AGENT.urllib.request, "urlopen", lambda *a, **k: FakeResp())
+    AGENT.post_json("http://127.0.0.1:1/x", "tok", {})
+    assert captured["args"], "the response was read with NO limit argument"
+    assert captured["args"][0] == AGENT.MAX_RESPONSE_BYTES
+
+
+def test_a_write_that_makes_the_validator_RAISE_is_still_reported(server, tmux_stub, tmp_path):
+    """🟡 A non-string `kind` raised out of the whole round: no result was POSTed
+    for that row OR ANY LATER ROW in the batch, so they landed `abandoned` —
+    "delivery UNKNOWN" — when the truthful answer is `refused`, nothing ran.
+
+    An audit log that says UNKNOWN where it could say NO is exactly the failure
+    its design is trying to avoid.
+    """
+    AGENT._SEEN.clear()
+    server.claim_batches = [[write(id="w-bad", kind=123), write(id="w-later")]]
+    run_agent(server, tmux_stub, tmp_path, expect_requests=4)
+    results = {json.loads(r["body"])["state"]
+               for r in server.requests if r["path"].endswith("/result")}
+    posted = [r["path"] for r in server.requests if r["path"].endswith("/result")]
+    assert any("w-bad" in p for p in posted), (
+        f"the raising write was never reported, so it becomes `abandoned` — delivery UNKNOWN — "
+        f"when nothing ran. Reported: {posted}")
+    assert any("w-later" in p for p in posted), (
+        f"a LATER write in the same batch was never reported either: {posted}")
+    assert "refused" in results, results
+
+
+@pytest.mark.parametrize("field,value", [
+    ("kind", 123), ("kind", None), ("expectTmuxServerId", []),
+    ("expectTmuxServerId", 7), ("pane", 12), ("cwd", None), ("text", 5), ("id", 9),
+])
+def test_the_validator_never_raises_on_a_non_string_field(field, value):
+    """The sentence this test's predecessor made was wider than the test: it
+    claimed "non-string fields must not raise" and exercised only `pane` and
+    `cwd`. Every field a server can send is a string in the contract and none of
+    them is guaranteed to be one on the wire."""
+    w = {"id": "w-abc123", "kind": "send-keys", "pane": "%1", "text": "hi", field: value}
+    assert isinstance(AGENT.validate(w), str)
+
+
+def test_a_refusal_detail_is_CLAMPED_like_every_other(server, tmux_stub, tmp_path):
+    """🟡 A validate() refusal bypassed redact() entirely: an unbounded
+    server-supplied `kind` interpolated into the message produced a
+    100,021-character detail, into a journal line and into the audit-log column
+    — while the comment beside it asserted every interpolated field was bounded.
+    """
+    AGENT._SEEN.clear()
+    server.claim_batches = [[write(kind="x" * 100000)]]
+    _rc, out = run_agent(server, tmux_stub, tmp_path)
+    body = json.loads(
+        [r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert len(body["detail"]) <= 400, (
+        f"the reported detail is {len(body['detail'])} characters; every other path is clamped "
+        "to 400 and this one is stored in a retained column")
+    for line in out.splitlines():
+        assert len(line) < 1000, f"a journal line is {len(line)} characters"
+
+
+def test_a_window_that_LANDED_ELSEWHERE_is_refused_even_when_tmux_said_ok(
+        server, tmux_stub, tmp_path):
+    """🔴 THE READ-BACK, PINNED INDEPENDENTLY OF THE CHECKS THAT USUALLY FIRE FIRST.
+
+    `=` makes tmux fail for a session that does not exist, and `isdir` refuses a
+    cwd that does not exist — so in the ordinary case the read-back never
+    decides anything, and removing it left every test green (measured, as two
+    surviving mutants). It exists for the case those two cannot see: tmux
+    resolving the target to something else for a reason nobody here has thought
+    of. Only a stub that LIES about where the window landed can express that.
+
+    The assertion is that NO keys are sent, not merely that the outcome says
+    `refused`: the next step presses Enter, so a check that runs after the typing
+    is not a check.
+    """
+    AGENT._SEEN.clear()
+    tmux_stub.lie_about_landing(session="somewhere-else")
+    server.claim_batches = [[write(id="w-sess", kind="new-session", pane="",
+                                   cwd=real_dir(tmp_path), tmuxSessionName="scratch2",
+                                   text="echo hi")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [], (
+        "the agent typed into a window tmux placed in a DIFFERENT session than the one "
+        "requested, and the next step presses Enter")
+    body = json.loads(
+        [r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "failed", body
+    assert "not the requested" in body["detail"], body
+
+
+def test_a_window_that_landed_in_the_WRONG_DIRECTORY_is_refused(
+        server, tmux_stub, tmp_path):
+    """The same, for the working directory.
+
+    `isdir` refuses the common case up front; this is the one where the path
+    exists and tmux still put the window somewhere else. A build or a recursive
+    delete running one directory over is the whole reason the read-back is there.
+    """
+    AGENT._SEEN.clear()
+    tmux_stub.lie_about_landing(path=str(tmp_path / "elsewhere"))
+    (tmp_path / "elsewhere").mkdir(exist_ok=True)
+    server.claim_batches = [[write(id="w-path", kind="new-session", pane="",
+                                   cwd=real_dir(tmp_path), text="make")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [], (
+        "the agent typed a command into a window tmux opened in a directory OTHER than the "
+        "one requested")
+    body = json.loads(
+        [r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "failed", body
+    assert "not the requested" in body["detail"], body

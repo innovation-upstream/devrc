@@ -362,6 +362,11 @@ WRITE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 #: did not choose rather than failing — the wrong-place class the pane rule
 #: exists for, one level up: a whole WINDOW instead of a keystroke.
 TMUX_SESSION_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
+#: What `new-window -P -F` prints so the caller can check WHERE tmux actually
+#: put the window. Tab-separated: none of the three fields can contain a tab
+#: (a pane id is `%N`, a session name is checked against TMUX_SESSION_RE, and a
+#: path containing a tab is refused by validate()).
+NEW_WINDOW_FORMAT = "#{pane_id}\t#{session_name}\t#{pane_current_path}"
 MAX_TEXT_BYTES = 2048
 MAX_BATCH = 4
 # Bounds the response body this agent will read. urlopen().read() with no
@@ -377,7 +382,16 @@ def validate(write: dict) -> str:
     property of the OPERATOR'S shell config, which this process cannot read, so
     "is this character safe to deliver" is the only answerable question.
     """
-    kind = (write.get("kind") or KIND_SEND_KEYS).strip() or KIND_SEND_KEYS
+    kind = write.get("kind") or KIND_SEND_KEYS
+    # 🔴 TYPE BEFORE SHAPE, ON EVERY FIELD. Every value here comes off the wire
+    # and none is guaranteed to be a string. Calling .strip() first raised
+    # AttributeError out of validate -> out of deliver -> out of the whole round,
+    # so neither this write NOR ANY LATER ONE in the batch got a result POSTed and
+    # they all landed `abandoned` ("delivery UNKNOWN") when the truthful answer is
+    # `refused`, nothing ran.
+    if not isinstance(kind, str):
+        return "the write kind is not a string"
+    kind = kind.strip() or KIND_SEND_KEYS
     if kind not in (KIND_SEND_KEYS, KIND_NEW_SESSION):
         return f"unknown write kind {kind!r}"
 
@@ -387,6 +401,9 @@ def validate(write: dict) -> str:
         # could steer the request elsewhere.
         return "the write id is not the shape this agent will put in a URL"
 
+    expect = write.get("expectTmuxServerId") or ""
+    if not isinstance(expect, str):
+        return "the expected tmux server id is not a string"
     text = write.get("text") or ""
     if not isinstance(text, str):
         return "the text is not a string"
@@ -434,6 +451,24 @@ def validate(write: dict) -> str:
             return "the working directory carries a character that is not printable"
         if any(seg == ".." for seg in cwd.split("/")):
             return "the working directory contains `..`"
+        # 🔴 A TRAILING SEPARATOR IS REFUSED HERE TOO. tmux eats it off the `-c`
+        # word exactly as it does off a send-keys token, so a path ending in one
+        # becomes a different path -- and if that does not exist, the window opens
+        # in the home directory. The text path already refused this character; the
+        # cwd path did not, which was the same character getting opposite
+        # treatment in one file.
+        if TEXT_POLICY.ends_with_separator(cwd) or cwd != cwd.strip():
+            return ("the working directory ends with "
+                    f"{TEXT_POLICY.TMUX_ARGV_SEPARATOR!r} or whitespace, which tmux eats "
+                    "off the token")
+        # 🔴 IT MUST EXIST ON THIS HOST. `new-window -c <missing path>` does NOT
+        # fail -- measured rc 0, with the window opened in the home directory -- so
+        # a build or a recursive delete would run there and be reported
+        # `delivered`. The queue is host-keyed, so a path that exists on the
+        # workbench and not the laptop is an ordinary mistake. open_window
+        # re-checks where tmux ACTUALLY landed; this is the early, legible refusal.
+        if not os.path.isdir(cwd):
+            return "the working directory does not exist on this host"
         # 🔴 RE-VALIDATED HERE, NOT TRUSTED. The server checks it too; this
         # process is the one that hands the value to tmux as a target, and the
         # two sides of the boundary fail independently. Absent is fine — it means
@@ -466,10 +501,35 @@ def open_window(cwd: str, tmux_session: str = "") -> tuple[str, str]:
     🔴 WITHOUT `-t` THE TARGET IS DECIDED BY tmux, NOT BY THE CALLER. `new-window`
     with no target joins whatever session this server considers CURRENT — which
     depends on what the operator last looked at — so a launched window lands
-    somewhere nobody chose. `-t "<name>:"` is the unambiguous spelling: the
-    trailing colon means "this session, next free index", and a session that does
-    not exist makes tmux FAIL rather than fall back to the current one, which is
-    the direction this whole surface prefers.
+    somewhere nobody chose.
+
+    🔴 THE `=` PREFIX IS LOAD-BEARING: tmux PREFIX-MATCHES A SESSION NAME. An
+    earlier revision passed `-t "<name>:"` and this docstring asserted that a
+    missing session would make tmux FAIL. Measured on tmux 3.7c against the
+    operator's live server — which holds `scratch`, `scratch2` ... `scratch20`
+    and `datapacket-talos`, `datapacket-talos-2` — it does not fail. It
+    prefix-matches and returns rc 0:
+
+        -t scratch2:         (scratch2 absent, scratch20 live) -> rc 0, lands in scratch20
+        -t datapacket-talos: (only ...-2 live)                 -> rc 0, lands in ...-2
+        -t =scratch2:                                          -> rc 1, can't find session
+
+    End to end that opened a window in the WRONG session, typed the command,
+    pressed Enter and reported `delivered`. `=` forces an exact match, which is
+    the only spelling that makes the sentence above true.
+
+    🔴 AND WHERE IT LANDED IS READ BACK, NOT ASSUMED. `-c <path>` with a path that
+    does not exist does not fail either: measured rc 0 with
+    `pane_current_path=/home/zach`, i.e. the window silently opens in the home
+    directory and a build or a recursive delete runs there. Three shape-valid
+    inputs reach it — a path absent on THIS host (the queue is host-keyed, so a
+    workbench path can be enqueued for the laptop), a trailing space, and a
+    trailing separator, which tmux eats off the `-c` word.
+
+    So the single `-P -F` prints the session and the working directory tmux
+    ACTUALLY chose and the caller compares them. One call, no extra round trip,
+    and it catches both classes — including any resolution rule nobody here has
+    thought of.
 
     🔴 A TRANSPORT PRIMITIVE, NOT A FEATURE. "Start a Claude Code session" is
     entirely a question of what the caller's TEXT says; this only makes a window
@@ -481,18 +541,45 @@ def open_window(cwd: str, tmux_session: str = "") -> tuple[str, str]:
     difference matters because between these two calls the operator may have
     switched windows, and a relative target would type into whatever they moved to.
     """
-    argv = ["new-window", "-P", "-F", "#{pane_id}", "-c", cwd]
+    argv = ["new-window", "-P", "-F", NEW_WINDOW_FORMAT, "-c", cwd]
     if tmux_session:
-        # The name has already been through TMUX_SESSION_RE, so it cannot be a
-        # compound target; the trailing colon makes the intent explicit anyway.
-        argv += ["-t", tmux_session + ":"]
+        # `=` forces an EXACT session match; the trailing colon means "this
+        # session, next free index". Both are required — see the docstring.
+        argv += ["-t", "=" + tmux_session + ":"]
     rc, out, err = run_tmux(argv)
     if rc != 0:
         return "", (err or f"tmux exited {rc}")
-    pane = out.strip().splitlines()[0].strip() if out.strip() else ""
+
+    fields = (out.strip().splitlines() or [""])[0].split("\t")
+    if len(fields) != 3:
+        return "", f"tmux did not report the new window's identity (got {out.strip()!r})"
+    pane, landed_session, landed_path = (f.strip() for f in fields)
     if not pane.startswith("%"):
         return "", f"tmux did not report a pane id for the new window (got {pane!r})"
+
+    # 🔴 REFUSE ON A MISMATCH RATHER THAN TYPE INTO IT. Both checks are about one
+    # thing: tmux resolved the target to something other than what was asked for,
+    # and the next step presses Enter.
+    if tmux_session and landed_session != tmux_session:
+        return "", (f"tmux opened the window in session {landed_session!r}, not the requested "
+                    f"{tmux_session!r}")
+    if not same_directory(landed_path, cwd):
+        return "", (f"tmux opened the window in {landed_path!r}, not the requested {cwd!r} — "
+                    "the directory does not exist on this host, so tmux fell back")
     return pane, ""
+
+
+def same_directory(a: str, b: str) -> bool:
+    """Whether two paths name the same directory, resolving symlinks.
+
+    `realpath` BOTH sides: a trailing slash and a symlinked parent are ordinary,
+    and a raw string comparison would report a false mismatch and refuse a
+    legitimate write.
+    """
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except OSError:
+        return False
 
 
 def deliver(write: dict) -> tuple[str, str]:
@@ -502,11 +589,13 @@ def deliver(write: dict) -> tuple[str, str]:
     moved this row out of `pending` permanently, so a retry here would be the one
     place in the whole path that could deliver a command twice.
     """
-    kind = (write.get("kind") or KIND_SEND_KEYS).strip() or KIND_SEND_KEYS
+    kind = write.get("kind") or KIND_SEND_KEYS
+    kind = kind.strip() or KIND_SEND_KEYS if isinstance(kind, str) else KIND_SEND_KEYS
     pane = write.get("pane") or ""
     text = write.get("text") or ""
     submit = bool(write.get("submit"))
-    expected = (write.get("expectTmuxServerId") or "").strip()
+    expected = write.get("expectTmuxServerId") or ""
+    expected = expected.strip() if isinstance(expected, str) else ""
 
     # 🔴 THE TRUST BOUNDARY. See `validate`: this process executes, so this
     # process refuses — regardless of what the server accepted.
@@ -652,7 +741,16 @@ def one_round(api: str, token: str, host: str, agent: str) -> int:
             # dropping it. See _SEEN.
             state, detail = "refused", "this agent has already executed that write id"
         else:
-            state, detail = deliver(write)
+            # 🔴 AN UNEXPECTED ERROR IS REPORTED, NOT THROWN. A non-string `kind`
+            # or `expectTmuxServerId` used to raise out of the whole round: no
+            # result was POSTed for that row OR ANY LATER ROW in the batch, so
+            # they were relabelled `abandoned` -- "delivery UNKNOWN" -- when the
+            # truthful answer is `refused`, nothing ran. An audit log that says
+            # UNKNOWN where it could say NO is the failure its design avoids.
+            try:
+                state, detail = deliver(write)
+            except Exception as exc:  # noqa: BLE001 - one bad row must not eat the batch
+                state, detail = "refused", f"the agent could not process that write: {exc!r}"
         # 🔴 The log names the ROW and the OUTCOME, never the text. `detail` is
         # already redacted of the text by deliver().
         # 🔴 EVERY INTERPOLATED FIELD IS BOUNDED AND SHAPED. `wid` matched
@@ -662,6 +760,15 @@ def one_round(api: str, token: str, host: str, agent: str) -> int:
         # already redacted of the write's text and clamped by redact().
         pane = write.get("pane")
         pane = pane if isinstance(pane, str) and PANE_ID_RE.match(pane) else "-"
+        # 🔴 EVERY DETAIL IS CLAMPED HERE, ON ONE PATH. A validate() refusal used
+        # to bypass redact() entirely -- an unbounded server-supplied `kind`
+        # interpolated into a refusal produced a 100,021-character detail, into a
+        # journal line and into the audit-log column, while the comment below
+        # asserted every interpolated field was bounded. Clamping at the single
+        # point where a detail becomes output makes that true for paths nobody has
+        # written yet.
+        text = write.get("text") if isinstance(write.get("text"), str) else ""
+        detail = redact(detail, text)
         log(f"{state} {wid} (pane {pane})" + (f": {detail}" if detail else ""))
         try:
             post_json(f"{api}/api/term/send-keys/{wid}/result", token,

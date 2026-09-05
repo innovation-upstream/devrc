@@ -18,8 +18,10 @@ from the network — which is `claude/RULES.md`'s "a predicate open-coded at N
 sites is typically wrong at N−1 of them, in the same direction", measured.
 
 So the rule now lives here and both callers import it. There is no second copy
-to disagree with, and `test_tmux_text_policy_is_the_only_copy.py` fails if one
-appears.
+to disagree with: `test_tmux_reply_agent.py::test_neither_script_defines_a_SECOND_
+text_predicate` AST-scans both scripts and fails if one reappears, and
+`::test_the_agent_and_session_write_share_ONE_predicate` pins both consumers'
+predicates to THIS file by `__code__.co_filename`.
 
 🔴 IT IS AN ALLOWLIST, AND THE DIRECTION IS THE WHOLE POINT. The question asked
 is "is this character safe to deliver", never "is this one of the dangerous ones

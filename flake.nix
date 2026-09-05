@@ -119,6 +119,14 @@
         gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
         pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
         pkgs.rsync pkgs.zsh pkgs.age
+        # 🔴 tmux, because two of tmux-reply-agent's guards CANNOT be written
+        # against a stub. A stub tmux always exits 0, so it models neither the
+        # session PREFIX-MATCH (`-t scratch2:` opening a window in `scratch20`)
+        # nor the `-c <missing path>` fallback to the home directory -- both
+        # measured live, both shipped, both invisible to a stubbed suite. Those
+        # tests drive a REAL tmux on a private `-L` socket, and this entry is what
+        # stops them SKIPPING in the check sandbox, where a skip is an error.
+        pkgs.tmux
       ];
     in
     {
