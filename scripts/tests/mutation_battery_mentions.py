@@ -77,8 +77,10 @@ SUITES = (
 )
 
 # (id, shape, description, old, new[, expected]) — `old` must occur EXACTLY once
-# in that row's TARGETS file. Same contract as the two sibling batteries; the
-# only addition is that the file is per-row rather than module-wide.
+# in that row's TARGETS file. Same contract as the two sibling batteries: `old`
+# and `new` may be TUPLES of equal length, applied in order, each half still
+# required to occur exactly once. The only addition here is that the FILE is
+# per-row rather than module-wide (see `TARGETS` below the table).
 MUTANTS: list[tuple] = [
     # ---- POSITIVE CONTROL --------------------------------------------------
     ("P1", "control", "break a URL every suite reads — MUST be killed",
@@ -162,6 +164,24 @@ MUTANTS: list[tuple] = [
      "        f\"b64:context={m['context']} {sorted(load_mention_repos())}\",\n",
      "SPOOL DISCLOSURE (unattributed run)"),
 
+    # ---- F3, the TWO-SITE shape: one pattern, gated in two places -----------
+    #
+    # 🔴 `GITHUB_URL_RE` IS GATED TWICE — once as an ATTRIBUTION source and once
+    # as a DETECT pattern — and K8 removes only the first. A maintainer
+    # "simplifying the profile gating for this one pattern" removes both, and
+    # that is a strictly worse defect than either half: the URL shape becomes
+    # clickable AND starts attributing on the terminal profile. Expressing only
+    # one half would put a narrower label on the row than the hazard deserves.
+    # This is also the battery's multi-site row, which is what lets
+    # `test_the_PAIR_check_goes_RED_on_a_real_battery_COPY` run instead of skip.
+    ("K16", "widening", "BOTH `GITHUB_URL_RE` profile gates are removed, so the "
+                        "URL shape both attributes AND is clickable in terminal",
+     ('    url_repo = _sole_repo_named_by(GITHUB_URL_RE, text) if "GITHUB_URL_RE" in on else ""\n',
+      '    if "GITHUB_URL_RE" in on:\n'),
+     ("    url_repo = _sole_repo_named_by(GITHUB_URL_RE, text)\n",
+      "    if True:\n"),
+     "GITHUB_URL_RE: a telemetry-only shape reached the CLICK surface"),
+
     # ---- the nit list: live, reachable, previously untested ------------------
     ("K15", "deletion", "TASK_ANCHOR_RE loses its `(?<![&#])` left guard, so an "
                         "HTML entity and a `##` run both parse as the anchor",
@@ -176,7 +196,7 @@ TARGETS: dict[str, pathlib.Path] = {
     "K4": SCAN, "K5": SCAN, "K6": SCAN,
     "K7": SCAN, "K8": SCAN, "K9": SCAN, "K10": OPEN_,
     "K11": OPEN_, "K12": OPEN_, "K13": TAILER, "K14": TAILER,
-    "K15": SCAN,
+    "K15": SCAN, "K16": SCAN,
 }
 
 
@@ -229,13 +249,23 @@ def main() -> int:
             expected = row[5] if len(row) > 5 else None
             target = TARGETS[mid]
             text = orig[target]
-            n = text.count(old)
-            if n != 1:
-                print(f"{mid:4} {shape:12} !! PATTERN OCCURS {n}x in "
+            # One edit or several: a tuple means every pair is applied in order,
+            # and EACH is still required to occur exactly once. A multi-site
+            # mutant whose second half silently did not apply would be scored on
+            # the first half alone — a DIFFERENT mutation than the row names,
+            # reported under the row's id.
+            pairs = list(zip(old, new)) if isinstance(old, tuple) else [(old, new)]
+            counts = [text.count(o) for o, _ in pairs]
+            if any(n != 1 for n in counts):
+                shown_n = counts[0] if len(counts) == 1 else counts
+                print(f"{mid:4} {shape:12} !! PATTERN OCCURS {shown_n}x in "
                       f"{target.name} — NOT APPLIED — {desc}")
                 problems.append(mid)
                 continue
-            target.write_text(text.replace(old, new), encoding="utf-8")
+            mutated = text
+            for o, nw in pairs:
+                mutated = mutated.replace(o, nw)
+            target.write_text(mutated, encoding="utf-8")
             try:
                 nf, _np, killers, msgs = run_suite(messages=expected is not None)
             finally:
