@@ -877,7 +877,10 @@ MENTIONS_PER_SESSION_CAP = 200
 
 # Cheap pre-filter before the regex pass: a text block containing none of these
 # literals cannot match any pattern this tailer scans for, and does not need
-# scanning. Measured over one 24h window it skipped 81% of assistant text blocks.
+# scanning. Re-measured 2026-09-04 over the preceding 24h (10,118 assistant text
+# blocks): the OLD two literals skipped 81% of them, this derived telemetry set
+# skips 79%. ⚠ That percentage is a property of the WINDOW, not of the code —
+# `mention_scan.mention_hints`' docstring carries the same caveat and the numbers.
 #
 # 🔴 DERIVED FROM THE SCANNER'S OWN LEDGER, NEVER HAND-MAINTAINED. This used to
 # be the literal `("#", "868")`, and that made it the exact place a widening goes
@@ -926,6 +929,17 @@ def load_mention_repos(path: Path | None = None) -> dict:
     attribution, never the telemetry pass. The value SHAPE rule is
     `mention_scan.clean_repo_map`, shared with the hint handler so the two
     cannot disagree about what a usable entry is.
+
+    🔴 WHAT COMES BACK NAMES PRIVATE REPOSITORIES — the same file whose committed
+    ancestor disclosed 232 of them into this PUBLIC repo. `scripts/mention-open.py`
+    carries this warning for its rofi window; this reader is the one that matters
+    MORE, because its consumer is a durable ClickHouse table rather than a window
+    that closes. ONE value from this mapping may leave here per mention: the
+    repository that mention was ATTRIBUTED to. Never the mapping, never a second
+    entry, never a count of it. Pinned by
+    `test_session_tailer.py::test_the_repo_mapping_never_reaches_the_SPOOL_beyond_
+    the_ONE_repo_a_mention_was_attributed_to`, which asserts the attributed name
+    IS present (a positive control) before asserting the others are not.
     """
     p = path or mention_repos_path()
     try:
@@ -935,13 +949,43 @@ def load_mention_repos(path: Path | None = None) -> dict:
 
 
 def mention_key(m: dict) -> str:
-    """The dedupe identity of a mention: platform + the exact matched text.
+    """The dedupe identity of a mention: platform + the exact matched text + the
+    ATTRIBUTED repo.
 
     🔴 The RAW text, not the bare id. `devrc#370` and `talos-infra#370` are
     different references that share an id, and keying on the id alone would emit
     only the first of them and silently drop the second for the life of the
-    session."""
-    return f"{m['platform']}:{m['raw']}"
+    session.
+
+    🔴 AND THE REPO, for exactly the same reason one level up. 92% of mentions
+    are a bare `#N`, so the raw text is `#1291` for every one of them: without
+    the repo in the identity, `trowelcast PR #1291` and `plotwidget PR #1291`
+    collapse to ONE row, and the FIRST occurrence wins — which, because the bare
+    unattributed form usually appears first, systematically discards the
+    attribution this whole change exists to compute. Measured on real
+    transcripts before the fix: 34 rows/day shipped `repo=""` although an
+    attribution was available, and 6 rows/day dropped a second repository's
+    reference outright.
+
+    🔴 THE FORMAT IS VERSIONED BY OMISSION, AND THAT IS A DELIBERATE MIGRATION
+    CHOICE, NOT AN ACCIDENT OF STRING BUILDING. An unattributed mention keys
+    EXACTLY as before — `"<platform>:<raw>"`, byte for byte — and only an
+    attributed one takes the `@<owner>/<repo>` suffix. The alternative
+    (`"<platform>:<repo>:<raw>"` unconditionally) would have re-keyed EVERY
+    entry in every host's `session-summary-state.json`, re-emitting every
+    already-shipped mention once on both hosts. The deployed tailer passes NO
+    mapping at all (`collect_mentions(objects)`), so every key on disk today was
+    written with `repo == ""` and every one of them still matches. What DOES
+    re-emit once is precisely the set that newly gains an attribution — a row
+    whose content genuinely changed, which is the row this PR exists to ship.
+
+    ⚠ `@` IS SAFE AS THE SEPARATOR because no pattern in `mention_scan` can put
+    one in `raw`: `_OWNER`, `_REPO` and `_URL_REPO` are all alphanumerics plus
+    `-`, `_` and (for URLs) `.`, and the wordy forms are literal keywords. So a
+    key cannot be spelled two ways.
+    """
+    repo = m.get("repo") or ""
+    return f"{m['platform']}:{m['raw']}@{repo}" if repo else f"{m['platform']}:{m['raw']}"
 
 
 def collect_mentions(objects: list[dict], *, repos: dict | None = None) -> list[dict]:
@@ -1022,6 +1066,14 @@ def build_mention_emit_args(ev: dict, m: dict) -> list[str]:
     `repo_source` rides beside it so a consumer can tell a repo the text stated
     from one resolved through the operator's mapping — an analysis that cannot
     separate those is one measurement pretending to be two.
+
+    🔴 THAT SEPARATION IS `explicit` vs `mapped`, and it did not exist until it
+    was measured. `explicit` means an `owner/repo#N` the operator wrote out;
+    `mapped` means a bare `repo#N` whose OWNER came from
+    `~/.config/mention-open/known_repos.json`. Both used to report `explicit`,
+    so the field promised a distinction it did not carry. `adjacent`, `url`,
+    `flag` and `default` are the block-level routes — see the ATTRIBUTION block
+    in `mention_scan`'s module docstring, which owns the full ladder.
     """
     args = [
         "source=mentions",

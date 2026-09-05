@@ -467,7 +467,20 @@ def resolve(text: str, *, repos: dict | None = None,
 
     Alacritty's looser regex can hand over text with leading/trailing debris; the
     scanner finds the mention inside it. A text with no mention at all — which is
-    how `#282828` arrives here — returns (None, [])."""
+    how `#282828` arrives here — returns (None, []).
+
+    🔴 NO `profile=` ARGUMENT, AND THAT OMISSION IS THE CLICK SURFACE'S ONLY
+    DEFENCE. `mention_scan`'s default is `terminal` — the narrow, click-safe set
+    — and this is the single call site that decides which surface the operator's
+    terminal underlines. Passing `profile="telemetry"` here would put the WIDE
+    enumerated set (`gh pr view N`, `clawgate task N`, bare GitHub URLs, and the
+    telemetry-only attribution routes) behind a click, where a false positive is
+    a wrong page opening rather than a stray row. Pinned by
+    `test_mention_open.py::test_every_TELEMETRY_only_shape_is_invisible_to_the_
+    click_handler`, which drives each telemetry-only pattern's own ledger sample
+    through here and requires it to resolve to NOTHING — with a positive control
+    proving the same sample IS detected at the telemetry profile, so the test
+    cannot pass by scanning nothing."""
     spans = scan_mention_spans(text, repos=repos, default_repo=default_repo)
     if not spans:
         return (None, [])
@@ -518,6 +531,20 @@ def main(argv: list[str] | None = None) -> int:
             # at is a choice, so refusing above an arbitrary count now removes
             # the operator's ability to choose rather than protecting them from
             # a wall.
+            #
+            # 🔴 AND THIS PASS IS REACHED IN `--print` MODE TOO — DELIBERATE, and
+            # stated because removing the cap CHANGED IT. `--print widget#12`
+            # with nine namesakes used to exit 1 with a named refusal ("more than
+            # 8 owners"); it now prints nine URLs and exits 0. That is the
+            # documented contract of the flag — "print every candidate when
+            # ambiguous" — and a namesake set IS ambiguity of exactly the kind
+            # the picker exists for: every row is an EXACT-name search hit, i.e.
+            # evidence about the name the operator typed. It is not the PASS 4
+            # universe, which is evidence about nothing and stays barred from
+            # `--print`. A consumer wanting a single answer must write
+            # `owner/repo#N`; one line of output was never promised here.
+            # Pinned by `test_print_mode_prints_EVERY_namesake_rather_than_
+            # refusing_above_a_cap`.
             candidates = [
                 {"platform": PLATFORM_GITHUB, "id": m.group("num"),
                  "url": GITHUB_ISSUE_URL.format(repo=full, id=m.group("num")),

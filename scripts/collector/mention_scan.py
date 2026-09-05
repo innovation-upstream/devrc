@@ -62,6 +62,9 @@ every candidate and every span now carries `repo` (an `owner/repo`, or "") and
 `repo_source` naming HOW it was resolved, in this priority order:
 
   "explicit"  an `owner/repo#N` written out in the text            (both profiles)
+  "mapped"    a bare `repo#N` — the text named the REPO but not the OWNER, and
+              the owner came from the caller-measured `repos` mapping
+                                                                   (both profiles)
   "adjacent"  a repo token immediately before the ref — `devrc PR #1291` —
               looked up in the caller-measured `repos` mapping     (telemetry)
   "url"       a `github.com/owner/repo/(pull|issues)/N` URL in the same text
@@ -69,6 +72,13 @@ every candidate and every span now carries `repo` (an `owner/repo`, or "") and
   "flag"      a `--repo owner/repo` in the same text               (telemetry)
   "default"   the caller-supplied `default_repo`                   (both profiles)
   ""          not attributed
+
+🔴 `explicit` MEANS THE TEXT WROTE THE OWNER OUT, AND NOTHING ELSE. `repo#N` and
+`owner/repo#N` are different evidence: the first is a name the caller's mapping
+resolved, the second is a repository the operator stated. Reporting both as
+`explicit` — which this module did until the distinction was measured — makes an
+analysis that cannot separate "the text said so" from "our mapping said so", i.e.
+one measurement pretending to be two. `mapped` is the second of them.
 
 🔴 "url" and "flag" answer only when the text names EXACTLY ONE distinct
 `owner/repo` by that route. Two different repositories in one block is not a
@@ -394,8 +404,13 @@ def mention_hints(profile: str = PROFILE_TERMINAL) -> tuple[str, ...]:
     cannot match any detecting pattern enabled in `profile`.
 
     🔴 THIS EXISTS BECAUSE THE PRE-FILTER IS WHERE A WIDENING GOES TO DIE.
-    `session-tailer.py` short-circuits on these literals BEFORE the regex pass,
-    and it skipped 81% of assistant text blocks in a measured 24h window. Every
+    `session-tailer.py` short-circuits on these literals BEFORE the regex pass.
+    Re-measured 2026-09-04 over the preceding 24h (10,118 assistant text blocks,
+    312 transcripts): the OLD two literals skipped 8,169 of them = 81%; the
+    telemetry hint set skips 7,990 = 79%, so the short-circuit survives the
+    widening. ⚠ THE PERCENTAGE IS A PROPERTY OF THE WINDOW, NOT OF THE CODE — an
+    earlier window read 82%/80% on 6,052 blocks. Re-measure rather than quote
+    this; what is stable is that the filter still skips ~4 blocks in 5. Every
     telemetry-only shape above — `audit-pr 1291`, `gh pr view 1291`,
     `clawgate task 370` — contains neither `#` nor `868`, so adding the regex
     alone would have shipped a completely dead feature that still passed every
@@ -513,6 +528,10 @@ def clean_repo_map(raw) -> dict:
 # The ladder, in priority order. Exposed so a consumer can record HOW a mention
 # was attributed rather than only THAT it was.
 SOURCE_EXPLICIT = "explicit"
+# 🔴 NOT A SYNONYM FOR `explicit`. The text named the repo but NOT the owner, so
+# the owner is the caller's mapping speaking, not the operator. See the
+# ATTRIBUTION block in the module docstring for why the two must not collapse.
+SOURCE_MAPPED = "mapped"
 SOURCE_ADJACENT = "adjacent"
 SOURCE_URL = "url"
 SOURCE_FLAG = "flag"
@@ -575,6 +594,20 @@ def _sole_repo_named_by(pattern, text: str) -> str:
 # --------------------------------------------------------------------------- #
 def _github_candidate(num: str, raw: str, start: int, end: int,
                       repo: str, source: str, ambiguous: bool) -> dict:
+    # 🔴 `source if repo else SOURCE_NONE` IS A GUARD, NOT A TIDY-UP. The
+    # `repo#N` path passes `SOURCE_MAPPED` with `repo == ""` whenever the
+    # caller's mapping does not hold that name, and without the ternary the
+    # candidate reads `repo_source="mapped"` beside an empty `repo` — a claim
+    # that a resolution happened, next to the evidence that it did not. The
+    # `scan_mentions` docstring's "`""` exactly when `repo` is `""`" contract
+    # lives here and nowhere else.
+    #
+    # ⚠ HONEST SCOPE: it is observable on a CANDIDATE, not on a SPAN.
+    # `scan_mention_spans` takes its `repo_source` from a candidate that HAS a
+    # repo, so it reports "" for this case with or without the ternary — which
+    # is why a span-level test of it SURVIVED a mutation sweep. Both of this
+    # repo's consumers read spans, so the guard defends the public
+    # `scan_mentions` contract rather than a live row today.
     return {
         "platform": PLATFORM_GITHUB, "id": num, "raw": raw,
         "url": _github_url(repo, num), "repo": repo or "",
@@ -620,6 +653,14 @@ def scan_mentions(text, *, repos: dict | None = None,
 
     # Block-level attribution context, computed ONCE per text rather than per
     # match — it is a property of the block, not of the reference.
+    #
+    # 🔴 THE THREE `in on` GUARDS HERE AND IN `_ladder` ARE THE PROFILE SPLIT
+    # ITSELF, not a micro-optimisation. Each one is what keeps a TELEMETRY-only
+    # attribution route out of the terminal profile, and deleting any of them
+    # silently widens the click surface — the exact drift the "one pattern set"
+    # invariant used to prevent. All three are pinned behaviourally by
+    # `test_mention_scan.py::test_no_TELEMETRY_only_attribution_route_answers_in_
+    # the_terminal_profile`, each with its own case, so a deletion goes red.
     url_repo = _sole_repo_named_by(GITHUB_URL_RE, text) if "GITHUB_URL_RE" in on else ""
     flag_repo = _sole_repo_named_by(REPO_FLAG_RE, text) if "REPO_FLAG_RE" in on else ""
 
@@ -651,9 +692,16 @@ def scan_mentions(text, *, repos: dict | None = None,
             # An unknown `repo#N` stays unresolved rather than borrowing the
             # block's other repository — substituting a different repo for the
             # one the operator wrote is worse than admitting it is unknown.
-            full = _resolve_repo(m.group("owner"), m.group("repo"), repos)
+            owner = m.group("owner")
+            full = _resolve_repo(owner, m.group("repo"), repos)
+            # 🔴 THE SOURCE IS DECIDED BY WHETHER THE TEXT WROTE AN OWNER, never
+            # by whether an owner was FOUND. `_resolve_repo` falls through to the
+            # caller's mapping when none was written, and labelling that
+            # `explicit` reports the operator as the author of an owner our own
+            # mapping supplied.
+            source = SOURCE_EXPLICIT if owner else SOURCE_MAPPED
             out.append(_github_candidate(m.group("num"), m.group(0), m.start(),
-                                         m.end(), full, SOURCE_EXPLICIT, False))
+                                         m.end(), full, source, False))
 
     if "BARE_RE" in on:
         for m in BARE_RE.finditer(text):

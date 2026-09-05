@@ -36,6 +36,14 @@ _spec = importlib.util.spec_from_file_location("mention_open_under_test", HANDLE
 MO = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(MO)
 
+# 🔴 THE SAME MODULE OBJECT THE HANDLER IMPORTED, not a second reading of the
+# file. `mention-open.py` puts `scripts/collector` on `sys.path` and does
+# `from mention_scan import …`, so by the line above `mention_scan` is already in
+# `sys.modules`; importing it here binds THAT object. A separately-`exec_module`d
+# copy would let the profile-split assertions below compare two independent
+# readings and agree while the handler used a third.
+import mention_scan as MS  # noqa: E402
+
 
 # --------------------------------------------------------------------------- #
 # Remote URL -> owner/repo
@@ -986,13 +994,53 @@ def test_a_bare_hash_N_that_the_PANE_already_attributes_does_NOT_get_the_univers
     assert ("pick", 2) in spy, spy
 
 
+@pytest.fixture
+def real_notify(monkeypatch):
+    """Let the REAL `MO.notify` run, capturing what it hands `notify-send`.
+
+    🔴 THIS FIXTURE IS THE FIX FOR A GUARD THAT COULD NOT SEE ITS OWN SUBJECT.
+    The disclosure test below used to stub `MO.notify` to a no-op — and `notify`
+    is the ONLY function in the module that writes to stderr or to a desktop
+    notification. So "none of them reached stdout or stderr" was a claim about a
+    path the test had removed: adding the universe to any refusal's `notify` body
+    survived the whole suite. Stubbing `subprocess.run` instead keeps the real
+    formatting, the real `print(..., file=sys.stderr)` and the real argv, while
+    still launching nothing.
+    """
+    sent: list[list[str]] = []
+
+    def fake_run(argv, *a, **k):
+        sent.append(list(argv))
+        raise AssertionError(
+            f"no subprocess may launch from these tests: {argv!r}")
+
+    def capture(argv, *a, **k):
+        sent.append(list(argv))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(MO.subprocess, "run", capture)
+    monkeypatch.setattr(MO.subprocess, "Popen", fake_run)
+    return sent
+
+
+# The universe rows may reach the operator's rofi window and NOWHERE else, so
+# every sink the handler can write to is enumerated here rather than left to
+# whichever one a test happened to think of. A sink missing from this list is a
+# hole; adding one to the module means adding it here.
+def _every_sink(capsys, notify_argv: list[list[str]]) -> str:
+    captured = capsys.readouterr()
+    return "\n".join([captured.out, captured.err,
+                      *(" ".join(a) for a in notify_argv)])
+
+
 def test_the_universe_never_reaches_a_LOG_a_SPOOL_or_stderr(spy, universe,
-                                                            monkeypatch, capsys):
+                                                            monkeypatch, capsys,
+                                                            real_notify):
     """🔴 THE DISCLOSURE GUARD FOR PASS 4. The real universe names private
     repositories; the ONLY place it may go is the operator's rofi window. This
     asserts the rows exist (a positive control — a test that only checked for
     absence would pass against a picker wired to nothing) and that none of them
-    reached stdout or stderr."""
+    reached stdout, stderr or a desktop notification."""
     seen = {}
 
     def spy_pick(cands):
@@ -1000,10 +1048,87 @@ def test_the_universe_never_reaches_a_LOG_a_SPOOL_or_stderr(spy, universe,
         return ""
 
     monkeypatch.setattr(MO, "pick", spy_pick)
-    monkeypatch.setattr(MO, "notify", lambda *a, **k: None)
     assert MO.main(["zzznosuchrepo#12"]) == 0
     assert len(seen["rows"]) == 3, "positive control: the picker got real rows"
-    captured = capsys.readouterr()
+    everywhere = _every_sink(capsys, real_notify)
     for name in FAKE_UNIVERSE.values():
-        assert name not in captured.out, name
-        assert name not in captured.err, name
+        assert name not in everywhere, f"PICKER-PATH DISCLOSURE: {name}"
+
+
+def test_the_REFUSAL_path_names_the_clicked_text_and_never_the_universe(
+        universe, monkeypatch, capsys, real_notify):
+    """🔴 THE SECOND HALF OF THE SAME GUARD, on the path PASS 4 never reaches.
+
+    `--print` skips PASS 4 entirely, so the handler refuses — but `discovered`
+    was already populated by PASS 2 and holds the whole universe. That refusal
+    goes through `notify()`, which prints to stderr AND to `notify-send`. Adding
+    the universe to that body — "no repo by that name; did you mean one of
+    these?" is a natural-looking improvement — leaked every private name, with
+    the previous version of this file green.
+
+    The positive controls come FIRST: the refusal really happened, and the
+    handler really held the universe at that moment. Without them a stubbed-out
+    run that refused for some other reason would satisfy every absence below."""
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    assert MO.main(["--print", "zzznosuchrepo#77"]) == 1
+    everywhere = _every_sink(capsys, real_notify)
+    # POSITIVE CONTROL 1 — this IS the refusal path, and it named the click.
+    assert "cannot resolve zzznosuchrepo#77" in everywhere
+    # POSITIVE CONTROL 2 — the universe was in hand and NOT empty at that point,
+    # so its absence below is a decision rather than an accident of the fixture.
+    assert MO.repo_universe(dict(FAKE_UNIVERSE)) == sorted(FAKE_UNIVERSE.values())
+    for name in FAKE_UNIVERSE.values():
+        assert name not in everywhere, f"REFUSAL-PATH DISCLOSURE: {name}"
+
+
+def test_print_mode_prints_EVERY_namesake_rather_than_refusing_above_a_cap(
+        monkeypatch, capsys):
+    """🔴 A DECISION, RECORDED. Removing the namesake cap changed `--print` too:
+    `widget#12` with nine namesakes used to exit 1 with a named refusal and now
+    prints nine URLs and exits 0.
+
+    That is intended. `--print`'s documented contract is "print every candidate
+    when ambiguous", a namesake set IS that ambiguity, and every row is an
+    EXACT-name search hit — evidence about the name the operator typed. It is NOT
+    the PASS 4 universe, which is evidence about nothing and stays barred from
+    `--print` (see the test above). A consumer wanting one answer writes
+    `owner/repo#N`.
+
+    Nine, not eight: the retired cap was 8, so a fixture at or below it could not
+    tell "no cap" from "a cap nobody reached"."""
+    owners = [f"org{i}/widget" for i in range(9)]
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "gh_api_repo_search",
+                        lambda name: ({o: o for o in owners}, ""))
+    assert MO.main(["--print", "widget#12"]) == 0
+    printed = capsys.readouterr().out.split()
+    assert printed == [f"https://github.com/{o}/issues/12" for o in sorted(owners)]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PROFILE SPLIT, AT THE CONSUMER
+#
+# `mention_scan`'s default profile is `terminal`, and this handler's single
+# `scan_mention_spans` call passes no `profile=` — that omission is the entire
+# reason the wider telemetry surface never becomes clickable. It was pinned at
+# the module and NOWHERE here: an independent mutation sweep added
+# `profile="telemetry"` to `resolve()` and the whole suite stayed green.
+# --------------------------------------------------------------------------- #
+def test_every_TELEMETRY_only_shape_is_invisible_to_the_click_handler():
+    """Driven off `PATTERN_LEDGER`, not a hand-written list, so a telemetry-only
+    pattern added later is covered without anyone remembering this file.
+
+    Each sample carries its own positive control: the SAME text must produce a
+    span at the telemetry profile. Without that half, a sample the scanner had
+    stopped matching entirely would pass as "invisible to the click"."""
+    telemetry_only = {
+        name: pat for name, pat in MS.PATTERN_LEDGER.items()
+        if pat.role == "detect" and MS.PROFILE_TERMINAL not in pat.profiles}
+    assert telemetry_only, "positive control: there ARE telemetry-only patterns"
+    for name, pat in sorted(telemetry_only.items()):
+        assert MS.scan_mention_spans(pat.sample, profile=MS.PROFILE_TELEMETRY), (
+            f"{name}: the ledger sample must match at the telemetry profile")
+        assert MO.resolve(pat.sample) == (None, []), (
+            f"{name}: a telemetry-only shape reached the CLICK surface — "
+            f"resolve() is scanning at the wrong profile")

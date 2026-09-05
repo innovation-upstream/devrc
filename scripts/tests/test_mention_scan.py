@@ -746,12 +746,19 @@ def test_attribution_does_not_SETTLE_the_platform():
 
 
 def test_repo_source_is_EMPTY_exactly_when_repo_is():
+    """🔴 BOTH LAYERS. A span builds its `repo_source` from a candidate that has
+    a `repo`, so the span layer cannot observe a candidate that carries a source
+    with no repo — the `zzzunknown#1` row is invisible to a span-only sweep and
+    is the case the guard exists for."""
     for text, kw in (("fixed #1", {}),
                      ("trowelcast PR #1", {"repos": REPOS}),
                      ("gardenersguild/trowelcast#1", {}),
+                     ("zzzunknown#1", {"repos": REPOS}),
                      ("#1", {"default_repo": "rivalorg/spadeworks"})):
         for span in MS.scan_mention_spans(text, **kw, **TELEMETRY):
             assert bool(span["repo"]) == bool(span["repo_source"]), (text, span)
+        for cand in MS.scan_mentions(text, **kw, **TELEMETRY):
+            assert bool(cand["repo"]) == bool(cand["repo_source"]), (text, cand)
 
 
 def test_the_explicit_source_is_reported_for_an_owner_written_out():
@@ -760,6 +767,122 @@ def test_the_explicit_source_is_reported_for_an_owner_written_out():
     (span,) = MS.scan_mention_spans("#1065", default_repo="hobbyist/plotwidget",
                                     **TELEMETRY)
     assert span["repo_source"] == MS.SOURCE_DEFAULT
+
+
+def test_a_bare_repo_hash_N_resolved_through_the_MAPPING_is_not_called_explicit():
+    """🔴 `explicit` MUST MEAN THE TEXT WROTE THE OWNER OUT.
+
+    `trowelcast#591` and `gardenersguild/trowelcast#591` used to report the SAME
+    `repo_source`, because `_resolve_repo` falls through to the caller's mapping
+    when no owner was written and the caller labelled the result `explicit`
+    regardless. The field's whole stated purpose is telling "the text said so"
+    apart from "our mapping said so"; reporting both as `explicit` is one
+    measurement pretending to be two.
+
+    Both halves are asserted TOGETHER, and against the SAME repository, so the
+    only thing that can differ is the source — a mutant that collapses the two
+    dies here rather than on an unrelated fixture difference."""
+    (mapped,) = MS.scan_mention_spans("see trowelcast#591", repos=REPOS, **TELEMETRY)
+    (written,) = MS.scan_mention_spans("see gardenersguild/trowelcast#591",
+                                       repos=REPOS, **TELEMETRY)
+    assert mapped["repo"] == written["repo"] == "gardenersguild/trowelcast"
+    assert mapped["repo_source"] == MS.SOURCE_MAPPED, (
+        "a MAPPING-resolved repo is reported as if the text stated it")
+    assert written["repo_source"] == MS.SOURCE_EXPLICIT
+    assert MS.SOURCE_MAPPED != MS.SOURCE_EXPLICIT, (
+        "a MAPPING-resolved repo is reported as if the text stated it")
+
+
+def test_the_TERMINAL_profile_reports_the_mapped_source_too():
+    """The `repo#N` -> mapping route is in BOTH profiles (it is `GITHUB_RE`), so
+    the new value is not a telemetry-only vocabulary the click surface never
+    emits."""
+    (span,) = MS.scan_mention_spans("see plotwidget#42", repos=REPOS)
+    assert (span["repo"], span["repo_source"]) == ("hobbyist/plotwidget",
+                                                   MS.SOURCE_MAPPED)
+
+
+def test_a_repo_hash_N_the_MAPPING_CANNOT_resolve_reports_NO_source():
+    """🔴 THE `source if repo else SOURCE_NONE` GUARD, AT THE LAYER THAT CAN SEE
+    IT. `zzzunknown#12` takes the `mapped` branch — the text named a repo — but
+    the mapping does not hold it, so there is no owner. Without the guard the
+    CANDIDATE reads `repo="" repo_source="mapped"`: a claim that a resolution
+    happened, beside the evidence that it did not.
+
+    ⚠ ASSERTED ON `scan_mentions`, NOT ON A SPAN, and that is the whole point.
+    `scan_mention_spans` takes its `repo_source` from whichever candidate carries
+    a `repo`, so a span with none reports `""` no matter what its candidates say
+    — a span-level assertion is satisfied by the span builder and never
+    evaluates this guard at all. Measured: a mutant deleting the ternary
+    SURVIVED a span-level version of this test. The candidate layer is public,
+    documented API (`scan_mentions`' docstring pins `""` exactly when `repo` is
+    `""`), so the contract is real even though this repo's two consumers both
+    read spans."""
+    cands = MS.scan_mentions("see zzzunknown#12", repos=REPOS, **TELEMETRY)
+    assert [c["platform"] for c in cands] == ["github"], cands
+    assert cands[0]["repo"] == ""
+    assert cands[0]["repo_source"] == MS.SOURCE_NONE == "", (
+        "repo_source claims a resolution that did not happen")
+    assert cands[0]["url"] == ""
+    # And the span the consumers actually read agrees.
+    (span,) = MS.scan_mention_spans("see zzzunknown#12", repos=REPOS, **TELEMETRY)
+    assert (span["repo"], span["repo_source"], span["url"]) == ("", "", "")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PROFILE SPLIT, ENFORCED AT THE THREE ATTRIBUTION SITES
+#
+# The PR that introduced `profile` relaxed this module's "one set of regexes,
+# they can never drift apart" invariant on the argument that the DEFAULT stays
+# `terminal`. That default was pinned at the module (`patterns_in`) and nowhere
+# at the three places that CONSULT it, so an independent mutation sweep deleted
+# each `if "<NAME>" in on` in turn with the whole suite green. These are the
+# pins. Each case names ONE route and would still pass with the other two guards
+# deleted, so the file cannot lose coverage of a route by a fixture edit.
+# --------------------------------------------------------------------------- #
+def test_no_TELEMETRY_only_attribution_route_answers_in_the_terminal_profile():
+    cases = {
+        # `REPO_BEFORE_RE` — the adjacent-token route.
+        "adjacent": "trowelcast PR #1291",
+        # `GITHUB_URL_RE` as an ATTRIBUTION source (its DETECT role is guarded
+        # separately). The bare `#1291` is what must stay unattributed.
+        "url": "https://github.com/hobbyist/plotwidget/pull/8 and also #1291",
+        # `REPO_FLAG_RE` — the `--repo owner/repo` route.
+        "flag": "--repo rivalorg/spadeworks then #1291",
+    }
+    for route, text in cases.items():
+        terminal = MS.scan_mention_spans(text, repos=REPOS)
+        bare = [s for s in terminal if s["raw"] == "#1291"]
+        assert len(bare) == 1, (route, terminal)
+        assert bare[0]["repo"] == "", (
+            f"the {route} attribution route answered in the TERMINAL profile")
+        assert bare[0]["repo_source"] == "", (route, bare[0])
+        # POSITIVE CONTROL — the same text DOES attribute at the telemetry
+        # profile. Without this the assertions above would be satisfied by a
+        # fixture that attributes nowhere, which proves nothing about the guard.
+        telemetry = MS.scan_mention_spans(text, repos=REPOS, **TELEMETRY)
+        attributed = [s for s in telemetry if s["raw"] == "#1291"]
+        assert len(attributed) == 1 and attributed[0]["repo"], (route, telemetry)
+
+
+# --------------------------------------------------------------------------- #
+# TASK_ANCHOR_RE's relaxed-but-not-absent left guard
+# --------------------------------------------------------------------------- #
+def test_the_legacy_anchor_left_guard_still_rejects_an_entity_and_a_heading_run():
+    """🔴 `(?<![&#])` IS LIVE, and it was untested — a sweep deleting it survived.
+
+    The guard is deliberately LOOSER than `_BARE_BEFORE` (the real
+    `…/tasks#task-370` case is preceded by a letter), but it is not absent: `&`
+    excludes an HTML entity and `#` excludes a `##` run. The positive control is
+    the third assertion — without it a mutant that broke the pattern entirely
+    would also pass the two negatives."""
+    assert MS.scan_mentions("&#task-1", **TELEMETRY) == [], (
+        "the legacy-anchor left guard is gone")
+    assert MS.scan_mentions("##task-1", **TELEMETRY) == [], (
+        "the legacy-anchor left guard is gone")
+    assert [(m["platform"], m["id"]) for m in
+            MS.scan_mentions("https://clawgate.zacx.dev/tasks#task-370",
+                             **TELEMETRY)] == [("clawgate", "370")]
 
 
 # --------------------------------------------------------------------------- #
