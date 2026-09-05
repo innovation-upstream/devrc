@@ -13,8 +13,17 @@
 # What CHANGED is the direction of the risk. The push can no longer be reasoned
 # about as "authoritative source refreshing a derivative": it is a DERIVATIVE
 # overwriting the AUTHORITY, and the extract adds and overwrites but never
-# deletes. That is why the pre-flight before the tar refuses any staged entry
-# whose bytes differ from the pod's — measured 2026-09-02/03, a re-seed would
+# deletes. That is why the pre-flight before the tar refuses any staged ENTRY
+# FILE whose bytes differ from the pod's
+#
+# 🔴 AND THAT IS ~12% OF WHAT THE PUSH OVERWRITES — SAY SO. MEASURED on the live
+# pod 2026-09-04: 1,755 files under /data, of which 211 are the depth-2
+# `<scope>/<entry>.md` this guard compares. The tar members are whole scope
+# DIRECTORIES, so the push also carries every depth-3+ path — including FIFTEEN
+# per-scope `.git` repositories, one measurably divergent (pod
+# `devrc/.git/refs/heads/trunk` = 68aef530, this host = e2f21cf8). A push that
+# passes this guard still rewinds that ref. Widening the comparison is the real
+# fix; until then the limit is stated rather than left to read as a guarantee — measured 2026-09-02/03, a re-seed would
 # have reverted five pod-newer bullets, two of them `OPEN:` -> `RESOLVED`
 # closures, and reported success.
 #
@@ -39,6 +48,10 @@
 # Usage:
 #   seed.sh --store <src> --stage <dir>            # stage only (what tests drive)
 #   seed.sh --store <src> --stage <dir> --push <ns>/<deploy> [--dest /data]
+#   … --allow-overwrite   proceed even when staged entries differ from the pod's
+#                         copy. DELIBERATE override: the pre-flight refuses by
+#                         default because the pod is authoritative post-cutover.
+#                         It still PRINTS what it replaced.
 #
 # The two halves are split on purpose: staging is hermetic and testable, pushing
 # needs a cluster. A green stage says nothing about the push, so the script
@@ -306,7 +319,7 @@ fi
 pod=$(kubectl -n "$ns" get pod -l "app=$deploy" -o jsonpath='{.items[0].metadata.name}')
 [[ -n "$pod" ]] || { echo "seed: no pod for app=$deploy in ns=$ns" >&2; exit 6; }
 
-echo "seed: pushing $STAGE -> $ns/$pod:$DEST"
+echo "seed: preparing push $STAGE -> $ns/$pod:$DEST"
 # 🔴 THE MEMBER LIST IS THE SCOPE DIRECTORIES, NOT `.`, AND THE EXTRACT DROPS
 # OWNER AND MODE. MEASURED, not defensive: `tar -cf - .` puts a `./` member in
 # the archive, and the pod runs as UID 65532 against a PVC root the kubelet
@@ -355,38 +368,84 @@ echo "seed: pushing $STAGE -> $ns/$pod:$DEST"
 # `test -f` on the pod yields the INTERSECTION for free: a staged path the pod
 # does not have is a pure addition and cannot clobber anything.
 _clobber_f="$_seed_tmp/clobber"; : > "$_clobber_f"
+_n_present=0
+_n_answered=0
 if [[ -s "$staged_list" ]]; then
   _local_h="$_seed_tmp/local-h"; _remote_h="$_seed_tmp/remote-h"
-  ( cd "$STAGE" && xargs -r sha256sum ) < "$staged_list" \
+  _probe_raw="$_seed_tmp/probe-raw"
+  # 🔴 `-I{}` ON THE LOCAL SIDE TOO, MATCHING THE REMOTE. Bare `xargs sha256sum`
+  # word-splits and parses quotes: a staged `sc/two words.md` became two missing
+  # arguments (rc 123) and `sc/it's.md` an unmatched quote (rc 1) — both with NO
+  # `seed:` line, the failure shape the `|| :` note below exists to prevent,
+  # reintroduced on the other side. Base handled both at rc 0.
+  ( cd "$STAGE" && xargs -r -I{} sha256sum {} ) < "$staged_list" \
     | awk '{print $2" "$1}' | LC_ALL=C sort > "$_local_h"
-  # `test -f … && sha256sum …` per path: absent on the pod ⇒ no line ⇒ not in the
-  # join ⇒ a pure addition. `-r` so an empty list runs nothing.
-  # 🔴 `|| :` IS LOAD-BEARING, NOT DEFENSIVE. `xargs` exits 123 when ANY child
-  # exits non-zero, and a staged path the pod does not have is the ORDINARY case
-  # — the pure addition this whole script exists to perform. Without it the
-  # probe returns 123, `set -euo pipefail` aborts, and seeding a genuinely new
-  # entry dies with exit 123 and an EMPTY stderr. Measured: all four tests in
-  # this class failed that way, including the two that must pass.
-  # `_ {}` passes the path as "$1" rather than interpolating it into the inner
-  # script, so a path is never re-parsed as shell text.
+  # 🔴 EVERY PATH IS ANSWERED — a hash, ABSENT, or UNREADABLE. The probe used to
+  # emit a line only for files the pod HAS, so "the pod holds none of them" and
+  # "the probe never ran" were the same observation (zero lines, rc 0) and the
+  # guard read both as "nothing differs". MEASURED in review: with a silenced
+  # probe the push destroyed the pod's newer bytes and printed `seed: OK`. It is
+  # REACHABLE: this is the only command whose input reaches the pod over stdin,
+  # and `xargs -r` on a stream that closed early is silence at rc 0 BY DESIGN.
+  #
+  # 🔴 REFUSING ON "0 PRESENT" WAS THE WRONG FIX. A pod holding none of the
+  # staged entries is the ORDINARY first-seed case — measured, that rule failed
+  # 18 legitimate tests. The answerable question is whether the probe SAW the
+  # whole list, so ABSENT is an answer and a MISSING line is the fault.
+  #
+  # 🔴 `|| :` IS LOAD-BEARING: `xargs` exits 123 when any child does, and a path
+  # the pod lacks is ordinary. Dropping it kills 21 tests. ⚠ It also swallows a
+  # read error — hence UNREADABLE, which cannot equal a hex digest, so such an
+  # entry always lands in the clobber set and is refused rather than replaced.
+  # `_ {}` passes the path as "$1" so it is never re-parsed as shell text.
   kubectl -n "$ns" exec -i "$pod" -- \
-    sh -c "cd '$DEST' && xargs -r -I{} sh -c 'test -f \"\$1\" && sha256sum \"\$1\" || :' _ {}" \
+    sh -c "cd '$DEST' && xargs -r -I{} sh -c 'if [ -f \"\$1\" ]; then sha256sum \"\$1\" 2>/dev/null || echo \"UNREADABLE  \$1\"; else echo \"ABSENT  \$1\"; fi' _ {}" \
     < "$staged_list" \
-    | awk '{print $2" "$1}' | LC_ALL=C sort > "$_remote_h"
-  # 🔴 `LC_ALL=C` on the join too, for the reason spelled out at the `comm` below:
-  # GNU join order-checks in the AMBIENT locale, and C-sorted input is "not
-  # sorted" to a join running under en_US.UTF-8 — which is this host.
+    | awk '{print $2" "$1}' | LC_ALL=C sort > "$_probe_raw"
+  _n_answered=$(wc -l < "$_probe_raw" | tr -d ' ')
+  LC_ALL=C grep -v ' ABSENT$' "$_probe_raw" > "$_remote_h" || :
+  _n_present=$(wc -l < "$_remote_h" | tr -d ' ')
+  # 🔴 `LC_ALL=C` on the join too. GNU join order-checks in the AMBIENT locale,
+  # so C-sorted input is "not sorted" to a join under en_US.UTF-8 — this host.
+  # MEASURED: it MISSES the differing pair AND exits 1, which `set -e` turns
+  # into a run with no verdict. Needs an unpairable line plus a README/lowercase
+  # adjacency, which the real store is full of.
   LC_ALL=C join "$_local_h" "$_remote_h" | awk '$2 != $3 {print $1}' > "$_clobber_f"
 fi
 _n_clobber=$(wc -l < "$_clobber_f" | tr -d ' ')
+
+# 🔴 PRINTED ON EVERY PATH, NOT ONLY ON REFUSAL — this file's own silent-zero
+# rule ("a bare 0 from a run that walked nothing reads exactly like a genuinely
+# empty store"), applied to the guard itself.
+echo "seed: PRE-FLIGHT staged=$staged_entries answered=$_n_answered present_on_pod=$_n_present differing=$_n_clobber"
+if [[ "$_n_answered" -ne "$staged_entries" ]]; then
+  echo "seed: PRE-FLIGHT COULD NOT COMPARE — asked the pod about $staged_entries staged entries, got $_n_answered answers." >&2
+  echo "seed:   Every path is answered (a hash, ABSENT, or UNREADABLE), so a SHORT reply means the" >&2
+  echo "seed:   probe did not see the whole list — stdin is piped to the pod, and a stream that" >&2
+  echo "seed:   closes early is silence at rc 0, indistinguishable from 'nothing differs'." >&2
+  echo "seed: NOTHING WAS PUSHED." >&2
+  exit 9
+fi
 
 if [[ "$_n_clobber" -gt 0 && "$ALLOW_OVERWRITE" != "1" ]]; then
   echo "seed: REFUSING — $_n_clobber staged entry file(s) EXIST ON THE POD WITH DIFFERENT BYTES." >&2
   sed 's/^/  /' "$_clobber_f" >&2
   echo "seed: the pod is the authority since the Cairn cutover; this push would replace its copy" >&2
   echo "seed:   with this host's, and the verdict would still say OK because the NAME landed." >&2
-  echo "seed: reconcile first (\`cairn sync\`, then \`cairn put\` the merged bytes), or pass" >&2
-  echo "seed:   --allow-overwrite if you have decided this host's copy should win." >&2
+  # 🔴 THE REMEDY NAMED HERE MUST BE ONE THAT CAN CLEAR THE REFUSAL. This first
+  # read "reconcile first (`cairn sync`, then `cairn put` …)". MEASURED: neither
+  # touches what this guard compares — `cairn sync` refreshes
+  # ~/.cache/subsystem-store, NOT the --store tree, and `cairn put` writes the
+  # POD, moving it FURTHER from the mirror. The mirror is frozen read-only by
+  # cairn-cutover.py P5. A refusal whose prescribed fix cannot work is how
+  # --allow-overwrite becomes the habitual invocation.
+  echo "seed: 🔴 A PUSH IS PROBABLY NO LONGER THE RIGHT VERB FROM THIS HOST. The local tree is a" >&2
+  echo "seed:   FROZEN pre-cutover mirror; the pod has moved on via \`cairn append\`/\`cairn put\`." >&2
+  echo "seed:   No shipped tool refreshes the mirror FROM the pod, so this will not clear itself" >&2
+  echo "seed:   and re-running changes nothing." >&2
+  echo "seed:   To publish specific local content, send it entry-by-entry: \`cairn put\` (replace)" >&2
+  echo "seed:   or \`cairn create\` (new) — those go through the API and cannot silently revert." >&2
+  echo "seed:   --allow-overwrite is for a DELIBERATE decision that this host's staged copy wins." >&2
   echo "seed: NOTHING WAS PUSHED." >&2
   exit 8
 fi

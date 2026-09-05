@@ -2816,6 +2816,12 @@ case "$sub" in
     ;;
   exec)
     if [ "${1:-}" = "-i" ]; then shift; fi
+    # $FAKE_PROBE_SILENT makes the PRE-FLIGHT probe (the only exec that runs
+    # sha256sum) answer with silence at rc 0 — the shape a stdin stream that
+    # closes early produces. Default off: every other test is unaffected.
+    if [ -n "${FAKE_PROBE_SILENT:-}" ]; then
+      case "$*" in *sha256sum*) exit 0 ;; esac
+    fi
     if [ $# -gt 0 ]; then shift; fi
     if [ "${1:-}" = "--" ]; then shift; fi
     n=$#
@@ -18611,3 +18617,102 @@ class TestSeedRefusesToOverwriteANewerPodEntry:
         assert pod_file.read_text() == (store / SCOPE / "thing-alpha.md").read_text(), (
             "--allow-overwrite was given, so this host's copy must actually win"
         )
+
+
+class TestTheSeedPreFlightCannotBeSILENTLYSKIPPED:
+    """🔴 AN EMPTY PROBE RESULT MUST NOT READ AS "NOTHING DIFFERS".
+
+    The pre-flight asks the pod about the staged paths over STDIN
+    (`kubectl exec -i … < "$staged_list"`). `xargs -r` on a stream that closes
+    early is silence at rc 0 BY DESIGN — so a probe that never ran and a pod
+    that holds none of the entries were the same observation, and the guard read
+    both as "nothing to refuse".
+
+    MEASURED during review of this PR: with a probe returning silence, the push
+    overwrote the pod's newer bytes and printed `seed: OK`, rc 0 — the exact
+    defect the guard exists to prevent, with the guard installed.
+
+    The fix is not "refuse when 0 are present" — that is the ordinary first-seed
+    case and it failed 18 legitimate tests. The probe answers EVERY path (a hash,
+    `ABSENT`, or `UNREADABLE`), so the answerable question is whether it SAW the
+    whole list."""
+
+    def _push(self, store: Path, tmp_path: Path, env, *extra):
+        return run_seed(
+            "--store", str(store), "--stage", str(tmp_path / "stage"),
+            "--push", "ns/app", *extra, env=env,
+        )
+
+    def test_a_probe_that_answers_NOTHING_refuses_instead_of_pushing(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE REGRESSION. The pod holds a NEWER copy; the probe is silenced.
+        Before the self-verifying probe this pushed and printed OK."""
+        env, dest = fake_cluster
+        d = dest / SCOPE; d.mkdir(parents=True, exist_ok=True)
+        pod_file = d / "thing-alpha.md"
+        newer = "---\nservice: thing-alpha\n---\nPOD NEWER\n"
+        pod_file.write_text(newer)
+
+        r = self._push(store, tmp_path, {**env, "FAKE_PROBE_SILENT": "1"})
+
+        assert pod_file.read_text() == newer, (
+            "THE POD'S BYTES WERE REPLACED by a push whose pre-flight answered "
+            "nothing — silence was read as 'nothing differs'."
+        )
+        assert r.returncode == 9, f"{r.stdout}\n{r.stderr}"
+        assert "COULD NOT COMPARE" in r.stderr, r.stderr
+
+    def test_the_preflight_counts_are_printed_on_the_SUCCESS_path_too(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """A number printed only in the failure branch cannot be read as
+        evidence on a run that passed — the silent-zero rule this file already
+        states for `staged_scopes`, applied to the guard itself."""
+        env, dest = fake_cluster
+        r = self._push(store, tmp_path, env)
+        assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+        assert "seed: PRE-FLIGHT staged=" in r.stdout, (
+            f"the pre-flight said nothing on a clean run: {r.stdout}"
+        )
+        assert "answered=" in r.stdout and "present_on_pod=" in r.stdout, r.stdout
+
+
+class TestTheSeedPreFlightJoinIsLocaleSafe:
+    """🔴 `LC_ALL=C` ON THE `join`, GUARDED — the mutant SURVIVED all 40 seed tests.
+
+    GNU `join` order-checks in the AMBIENT locale, so C-sorted input is "not
+    sorted" to a join running under en_US.UTF-8 — which is this host. MEASURED:
+    it both MISSES the differing pair and exits 1, which `set -euo pipefail`
+    turns into a run with no verdict at all.
+
+    It needs two things at once, which is why the existing UTF-8 test could not
+    reach it: an UNPAIRABLE line (GNU join arms the order check only after one)
+    AND an adjacency where C and locale order disagree — `<scope>/README.md`
+    beside a lowercase sibling, which the real store is full of."""
+
+    def test_a_differing_entry_is_still_caught_under_a_UTF8_locale(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        env, dest = fake_cluster
+        d = dest / SCOPE; d.mkdir(parents=True, exist_ok=True)
+        # the adjacency that inverts between C and en_US
+        (d / "README.md").write_text("---\nservice: readme\n---\n")
+        # the DIFFERING entry the guard must still refuse
+        pod_alpha = d / "thing-alpha.md"
+        pod_alpha.write_text("---\nservice: thing-alpha\n---\nPOD NEWER\n")
+        # an unpairable line on the pod arms GNU join's order check
+        other = dest / "a-scope-only-the-laptop-has"; other.mkdir(exist_ok=True)
+        (other / "from-the-other-host.md").write_text("---\nservice: x\n---\n")
+
+        r = run_seed(
+            "--store", str(store), "--stage", str(tmp_path / "stage"),
+            "--push", "ns/app",
+            env={**env, "LC_ALL": "en_US.UTF-8", "LANG": "en_US.UTF-8"},
+        )
+
+        assert r.returncode == 8, (
+            "under a UTF-8 ambient locale the join either missed the differing "
+            f"pair or died on an order check: rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+        )
+        assert f"{SCOPE}/thing-alpha.md" in r.stderr, r.stderr
