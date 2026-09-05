@@ -43,6 +43,21 @@ in
       osc52 = "OnlyCopy";
     };
 
+    # Selection → clipboard on mouse release, so highlighting text alone copies
+    # it (no Ctrl+Shift+C needed). Tradeoff: every selection, even an accidental
+    # drag, replaces the system clipboard.
+    #
+    # This only matters while ALACRITTY owns the selection. It does today because
+    # tmux's mouse mode is off — but note WHY: `mouse` is off by tmux's OWN
+    # DEFAULT, and this repo does not set it anywhere (`git grep mouse -- '*tmux*'`
+    # finds nothing in `.tmux.conf` or `nix/programs/tmux/`). So the condition is
+    # inherited, not pinned. Turning tmux mouse mode ON hands the selection to
+    # tmux and this setting stops applying inside a tmux pane — which is most of
+    # this terminal's use. Measured 2026-09-05: `tmux show -gv mouse` → `off`.
+    selection = {
+      save_to_clipboard = true;
+    };
+
     # ----------------------------------------------------------------------- #
     # HINTS — clickable text in the terminal grid
     # ----------------------------------------------------------------------- #
