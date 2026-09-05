@@ -108,6 +108,42 @@ Ask the re-auditor to:
 round 1: Y) · elapsed: Z`. X is what the gate below reads; without it the flattening shows only in
 hindsight — on #498 the plateau was diagnosed six rounds late.
 
+### 🔴 THE FIX ROUND'S OWN PROSE IS THE LIKELIEST NEXT FINDING — a false claim replaced by a differently false one
+
+The delta bullet above says to hunt regressions the fix round introduced. **The one it actually
+produces, over and over, is not code — it is the SENTENCE the fix wrote to explain itself.** Measured
+on `homelab-infra` #702: six rounds, **zero 🔴**, the code correct from round 1, and **four of the six
+findings were a claim the previous round had written while fixing the round before it.** One guard's
+rationale went through FIVE drafts — each retracted by the next round, each composed in the commit
+that fixed the last.
+
+So, when a round's fix rewrites an explanation:
+
+- 🔴 **If a guard has lost its reason, WRITE THAT IT HAS NONE. Do not go looking for a better one.**
+  Reaching for a fresh justification is the thing that regenerates the error. That ladder ended only
+  when the comment said "nothing justifies this" and recorded all five dead drafts so nobody derived
+  a sixth. **"I could not find a purpose" is a finding; a purpose you found while under pressure to
+  supply one is a hypothesis.**
+- 🔴 **A sentence that NAMES its own missing variable and then asserts a value for it.** *"Which is
+  less wrong depends on the population, and the measured one favours X"* — the population was measured
+  nowhere, and where both sides were observable it **inverted**. **Delete the comparative; do not
+  reverse it.** An unestablished direction stated as established is worse than silence, and the
+  giveaway is a clause that concedes the uncertainty in its first half.
+- 🔴 **A sweep applied to ONE claim and not the others in the same commit.** One round grep-swept the
+  tree for a retracted string and hand-counted a second claim's sites in the same breath — only the
+  hand-counted one was wrong (2 of 5 sites). **Sweep every claim in the commit the way you swept the
+  hardest one**, and prove the sweep with a positive control, not a bare zero.
+- 🔴 **Sweep the surface a HUMAN reads FIRST.** The retracted claim survived longest in the
+  operator-facing doc and in the docstring of the test that PINNED the guard — so the code said "this
+  question is open" while the README said "this is deliberate" and the test said "it has a purpose".
+  **A cross-reference is a claim**: a comment quoting another file's wording goes stale when that
+  wording changes, and nothing will tell you.
+- ⚠ **A count in prose is a claim.** "FIVE *later* rationales" totals six when the retraction is
+  itself #1 — which sends the reader hunting for one nobody wrote. That is how the sixth gets invented.
+
+**Ask each round: what did this fix ASSERT, and is every assertion true?** — the same standard the
+round applies to the code. Full case history: reference file.
+
 ### 🔴 A clean round ENDS the ladder. Never run another round to confirm a clean round.
 
 Rounds continue **only** while the previous round produced a finding that required a fix. The first
