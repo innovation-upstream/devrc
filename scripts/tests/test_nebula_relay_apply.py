@@ -43,6 +43,13 @@ from pathlib import Path
 
 import pytest
 
+# 🔴 The shims are written at RUNTIME and then EXECED, so their shebang must exist in
+# BOTH tiers — `/usr/bin/env` is absent from the nix build sandbox. `write_exec` owns
+# that decision for the whole repo; `test_runtime_shebangs.py` enforces it, and caught
+# this file writing its own `#!/usr/bin/env bash` before it ever reached the sandbox.
+# Consequence: every shim body below is POSIX sh, not bash.
+from testlib.mockbin import write_exec  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # TEST SEAM. `scripts/tests/mutants-nebula-relay.sh` copies nix/system/ into a
@@ -286,20 +293,20 @@ class Rig:
         py = sys.executable
 
         def sh(name: str, body: str) -> None:
-            p = self.bin / name
-            p.write_text("#!/usr/bin/env bash\n" + body)
-            p.chmod(0o755)
+            write_exec(self.bin / name, body)
 
-        sh("id", f'''
-# `id -u` -> 0 so the root guard passes without sudo. Any other use falls through to
-# the real id, so an unrelated call is not silently answered wrong.
+        sh("id", '''
+# `id -u` -> 0 so the root guard passes without sudo. The script calls it exactly once,
+# with -u; anything else is a change worth failing on rather than guessing at.
 if [ "$1" = "-u" ]; then echo 0; exit 0; fi
-exec /usr/bin/env -i PATH=/run/current-system/sw/bin:/usr/bin:/bin id "$@"
+echo "id shim: unexpected args: $*" >&2
+exit 64
 ''')
 
         sh("ip", f'''
 # `ip -4 -o addr show <iface>` -> one line in real `-o` layout; $4 is the CIDR.
-iface="${{@: -1}}"
+# POSIX sh has no ${{@: -1}}, so the last argument is taken by walking "$@".
+for a in "$@"; do iface="$a"; done
 echo "3: $iface    inet $(cat {S}/mesh_ip)/24 scope global $iface\\\\       valid_lft forever preferred_lft forever"
 ''')
 
@@ -342,7 +349,6 @@ echo "$1" >> {S}/rebuild.log
 if [ "$(cat {S}/delete_backup_on_rebuild)" = "1" ]; then
   rm -f "$NEBULA_CFG".bak-nebula-relay-*
 fi
-rc=$(cat {S}/rebuild_{{test,switch}}_rc 2>/dev/null | head -1)
 case "$1" in
   test)   rc=$(cat {S}/rebuild_test_rc) ;;
   switch) rc=$(cat {S}/rebuild_switch_rc) ;;
@@ -726,16 +732,14 @@ def test_no_predictable_tmp_path_is_live_while_the_verifier_runs(rig, tmp_path):
     wrapper_dir = rig.root / "nixsys"
     apply_copy = wrapper_dir / "apply-nebula-relay.sh"
     shutil.copy(APPLY, apply_copy)
-    probe = wrapper_dir / "probe-check.sh"
-    probe.write_text(
-        "#!/usr/bin/env bash\n"
+    probe = write_exec(
+        wrapper_dir / "probe-check.sh",
         f"echo '=== TMP' >> {snap}\n"
         f"ls -A /tmp >> {snap} 2>/dev/null\n"
         f"echo '=== TMPDIR' >> {snap}\n"
         f'ls -la "${{TMPDIR:-/tmp}}" >> {snap} 2>/dev/null\n'
         f'exec bash {real_check} "$@"\n'
     )
-    probe.chmod(0o755)
 
     # 🔴 Only entries this run CREATES count. A previous mutation-battery run leaves
     # `/tmp/nebula-relay-pre.<pid>` behind (the mutant has no cleanup), and without this
