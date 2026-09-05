@@ -648,22 +648,29 @@ def test_cmd_restore_skips_window_already_running_claude(tmp_path, monkeypatch, 
 # --------------------------------------------------------------------------- #
 # staleness check
 # --------------------------------------------------------------------------- #
-def test_plan_age_hours_returns_none_when_no_plan(tmp_path, monkeypatch):
+def test_plan_staleness_returns_none_when_no_plan(tmp_path, monkeypatch):
     monkeypatch.setattr(tsr, "PLAN", tmp_path / "missing.json")
-    assert tsr.plan_age_hours() is None
+    assert tsr.plan_staleness_hours() is None
 
 
-def test_plan_age_hours_returns_age(tmp_path, monkeypatch):
+def test_plan_staleness_falls_back_to_wall_clock_without_a_state_file(tmp_path, monkeypatch):
+    """Migrated from `plan_age_hours`, which measured wall clock unconditionally.
+
+    Wall clock is now the FALLBACK, reached only when the resurrect state file
+    cannot be read — so this fixture must point `RESURRECT_LAST` at nothing.
+    Leaving it unset would read the operator's real `~/.tmux/resurrect/last`
+    and make the result depend on their live workspace.
+    """
     import time
     plan = tmp_path / "restore-plan.json"
     plan.write_text("[]")
-    # Set mtime to 3 hours ago
     old = time.time() - 3 * 3600
     os.utime(plan, (old, old))
     monkeypatch.setattr(tsr, "PLAN", plan)
-    age = tsr.plan_age_hours()
-    assert age is not None
-    assert 2.9 < age < 3.1
+    monkeypatch.setattr(tsr, "RESURRECT_LAST", tmp_path / "no-such-state")
+    gap, basis = tsr.plan_staleness_hours()
+    assert basis == "wall"
+    assert 2.9 < gap < 3.1
 
 
 def test_cmd_restore_rejects_stale_plan(tmp_path, monkeypatch, capsys):
@@ -675,6 +682,11 @@ def test_cmd_restore_rejects_stale_plan(tmp_path, monkeypatch, capsys):
     old = time.time() - 5 * 3600
     os.utime(plan, (old, old))
     monkeypatch.setattr(tsr, "PLAN", plan)
+    # 🔴 Hermeticity: without this the staleness measure reads the operator's
+    # real `~/.tmux/resurrect/last`, so the verdict would depend on their live
+    # workspace. Pointing it at nothing selects the wall-clock fallback, which
+    # is what this test's 5h-old plan is written against.
+    monkeypatch.setattr(tsr, "RESURRECT_LAST", tmp_path / "no-such-state")
     monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
     monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
     # Default staleness limit is 2h — should reject (no custom plan_path)
@@ -722,3 +734,116 @@ def test_staleness_check_cli_parsing(monkeypatch, capsys):
         assert rc == 0
     finally:
         os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Staleness is measured against the LAYOUT, not the wall clock.
+#
+# 🔴 The bug these pin: the wall-clock measure counted POWERED-OFF time against
+# the plan, so `restore --staleness-check 2` refused after any shutdown longer
+# than the limit — "plan is 8.0h old" for a plan written 0.02h before the
+# reboot, with nothing about it changed. Being switched off is the one interval
+# in which reality cannot diverge from the plan.
+#
+# The replacement compares the plan to the resurrect state file it is racing.
+# Both are written by one chain (resurrect save -> post-save-all ->
+# tmux-post-save.sh -> `save`), so their mtimes sit seconds apart under a
+# working autosave, however long the host is then off.
+# ---------------------------------------------------------------------------
+
+HOUR = 3600.0
+
+
+def _staleness_fixture(tmp_path, monkeypatch, *, plan_age_s, state_age_s=None):
+    """A plan and (optionally) a resurrect state file at chosen ages."""
+    import time
+    now = time.time()
+    plan = tmp_path / "restore-plan.json"
+    plan.write_text("[]")
+    os.utime(plan, (now - plan_age_s, now - plan_age_s))
+    monkeypatch.setattr(tsr, "PLAN", plan)
+
+    if state_age_s is None:
+        monkeypatch.setattr(tsr, "RESURRECT_LAST", tmp_path / "no-such-state")
+    else:
+        state = tmp_path / "tmux_resurrect_stub.txt"
+        state.write_text("stub")
+        os.utime(state, (now - state_age_s, now - state_age_s))
+        monkeypatch.setattr(tsr, "RESURRECT_LAST", state)
+    return plan
+
+
+def test_a_long_power_off_does_not_make_a_contemporaneous_plan_stale(tmp_path, monkeypatch):
+    """THE REGRESSION. Plan and layout saved together, then the host sat off for a day."""
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=24 * HOUR,
+                       state_age_s=24 * HOUR + 30)  # written 30s apart, both a day ago
+    gap, basis = tsr.plan_staleness_hours()
+    assert basis == "layout", f"expected the layout basis, got {basis!r}"
+    assert gap < 0.05, (
+        f"a plan written 30s from its layout measured {gap:.2f}h stale — the "
+        "powered-off interval is being counted against it again, which is the "
+        "exact bug this measure replaced (restore then exits 1 after any "
+        "overnight shutdown)")
+
+
+def test_a_plan_that_stopped_refreshing_while_the_layout_kept_saving_is_stale(tmp_path, monkeypatch):
+    """The REAL 2026-08-05 outage: plan frozen at Jul 5, resurrect running to Jul 29.
+
+    The guard has to keep catching this — it is how that outage was found.
+    """
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=600 * HOUR, state_age_s=1 * HOUR)
+    gap, basis = tsr.plan_staleness_hours()
+    assert basis == "layout"
+    assert gap > 2, (
+        f"a plan {gap:.1f}h out of step with the layout was not flagged — this "
+        "is the broken-autosave case; restoring it relaunches a stale workspace")
+
+
+def test_a_layout_older_than_the_plan_is_also_stale(tmp_path, monkeypatch):
+    """The mirror image — continuum stopped saving while `save` kept running.
+
+    Pinned separately because an implementation without `abs()` passes the case
+    above and silently accepts this one.
+    """
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=1 * HOUR, state_age_s=600 * HOUR)
+    gap, basis = tsr.plan_staleness_hours()
+    assert basis == "layout"
+    assert gap > 2, (
+        f"a layout {gap:.1f}h out of step with the plan was not flagged — the "
+        "workspace being restored is not the one the plan describes")
+
+
+def test_without_a_state_file_it_falls_back_to_wall_clock_and_says_so(tmp_path, monkeypatch):
+    """A fresh host, or `@resurrect-dir` pointed elsewhere.
+
+    The fallback carries the powered-off flaw by construction, so the BASIS is
+    part of the answer — a caller printing a bare number cannot be honest.
+    """
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=5 * HOUR, state_age_s=None)
+    gap, basis = tsr.plan_staleness_hours()
+    assert basis == "wall", f"expected the wall fallback, got {basis!r}"
+    assert 4.9 < gap < 5.1, gap
+
+
+def test_no_plan_measures_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(tsr, "PLAN", tmp_path / "absent.json")
+    assert tsr.plan_staleness_hours() is None
+
+
+def test_restore_names_the_basis_when_it_refuses(tmp_path, monkeypatch, capsys):
+    """A bare "8.0h" means different things per basis; the refusal must say which."""
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=600 * HOUR, state_age_s=1 * HOUR)
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    err = capsys.readouterr().err
+    assert rc == 1, "a plan out of step with its layout must refuse"
+    assert "basis=layout" in err, f"refusal did not name its basis: {err!r}"
+
+
+def test_restore_runs_on_a_contemporaneous_plan_after_a_long_power_off(tmp_path, monkeypatch, capsys):
+    """End of the regression: the same 24h-off plan must now RUN, not exit 1."""
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=24 * HOUR,
+                       state_age_s=24 * HOUR + 30)
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    err = capsys.readouterr().err
+    assert rc == 0, f"restore refused a contemporaneous plan after a power-off: {err!r}"
+    assert "too stale" not in err

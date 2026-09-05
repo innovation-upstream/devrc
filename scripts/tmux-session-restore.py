@@ -51,6 +51,10 @@ from pathlib import Path
 STATE_DIR = Path(os.path.expanduser("~/.config/initiatives"))
 PLAN = STATE_DIR / "restore-plan.json"
 CHEAT = STATE_DIR / "restore-cheatsheet.md"
+# The layout `restore` is racing: resurrect's newest state file, via its `last`
+# symlink. `plan_staleness_hours` measures the plan against THIS rather than
+# against the wall clock — see that docstring for why.
+RESURRECT_LAST = Path(os.path.expanduser("~/.tmux/resurrect/last"))
 PROJECTS = Path(os.path.expanduser("~/.claude/projects"))
 SLOTS_FILE = Path(__file__).resolve().parent / "tmux-scratch-slots.sh"
 _SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
@@ -477,12 +481,63 @@ def window_state(target: str) -> tuple[bool, str]:
     return (bool(out.strip()), out.strip())
 
 
-def plan_age_hours() -> float | None:
-    """Age of the current restore plan in hours, or None if no plan exists."""
+def resurrect_state_mtime() -> float | None:
+    """mtime of the resurrect state file `restore` is racing, or None if unreadable.
+
+    `~/.tmux/resurrect/last` is a symlink to the newest `tmux_resurrect_*.txt`;
+    `stat()` follows it, which is what we want — the target's mtime is when that
+    layout was captured.
+    """
+    try:
+        return RESURRECT_LAST.stat().st_mtime
+    except OSError:
+        return None
+
+
+def plan_staleness_hours() -> tuple[float, str] | None:
+    """How stale the plan is RELATIVE TO THE LAYOUT IT DESCRIBES. None if no plan.
+
+    🔴 NOT WALL-CLOCK AGE, AND THAT IS THE WHOLE POINT. The wall-clock measure
+    counted time the machine spent POWERED OFF against the plan, so the gate
+    refused in exactly the situation it exists to serve: shut down overnight,
+    boot, and `restore --staleness-check 2` exited 1 with "plan is 8.0h old"
+    — the identical rc 1 that the dead-hook outage produced (56c68cc7,
+    cc409f82), from a different cause. MEASURED 2026-09-05: a plan written
+    0.02h before a reboot reads as 8h/24h stale purely from being switched off,
+    while nothing about it changed. Being powered off cannot make a plan
+    diverge from reality; it is the one interval in which reality is frozen.
+
+    So compare two ARTEFACTS instead of comparing one to the clock. The plan and
+    the resurrect state file are written by the same chain — resurrect saves the
+    layout, its `post-save-all` hook runs `tmux-post-save.sh`, which runs `save`
+    — so under a working autosave their mtimes are seconds apart, forever,
+    however long the host is then switched off. The gap between them is
+    therefore a direct measure of the thing the gate actually guards: does this
+    plan describe the layout continuum is restoring?
+
+    It stays sharp in BOTH directions, which is why `abs()`:
+      * plan much OLDER than the layout — the plan stopped being refreshed while
+        the layout kept saving. This is the real 2026-08-05 outage: the plan sat
+        at Jul 5 while resurrect ran to Jul 29. Restoring it would relaunch a
+        month-old workspace. REFUSE.
+      * layout much older than the plan — continuum stopped saving while `save`
+        kept running, so the layout being restored is not the one the plan
+        describes. REFUSE.
+
+    Returns `(gap_hours, basis)`. `basis` is `"layout"` when the comparison was
+    made, or `"wall"` when the state file could not be read — a fresh host, or
+    `@resurrect-dir` pointed elsewhere. The wall-clock fallback carries the
+    powered-off flaw by construction, so callers must SAY which basis they used
+    rather than printing a bare number.
+    """
     if not PLAN.exists():
         return None
     import time
-    return (time.time() - PLAN.stat().st_mtime) / 3600
+    mt = PLAN.stat().st_mtime
+    state = resurrect_state_mtime()
+    if state is not None:
+        return (abs(state - mt) / 3600, "layout")
+    return ((time.time() - mt) / 3600, "wall")
 
 
 def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
@@ -492,11 +547,19 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
         print(f"no restore plan at {src} — run `save` before rebooting", file=sys.stderr)
         return 1
     if staleness_hours is not None and plan_path is None:
-        age = plan_age_hours()
-        if age is not None and age > staleness_hours:
-            print(f"restore plan is {age:.1f}h old (limit {staleness_hours}h) — "
-                  f"too stale, skipping. Run `save` first.", file=sys.stderr)
-            return 1
+        measured = plan_staleness_hours()
+        if measured is not None:
+            gap, basis = measured
+            if gap > staleness_hours:
+                # Name the BASIS: "8.0h" means two different things depending on
+                # which one produced it, and the wall fallback carries the
+                # powered-off flaw the layout basis exists to remove.
+                why = ("out of step with the saved layout by"
+                       if basis == "layout" else "older than (wall clock)")
+                print(f"restore plan is {why} {gap:.1f}h "
+                      f"(limit {staleness_hours}h, basis={basis}) — too stale, "
+                      f"skipping. Run `save` first.", file=sys.stderr)
+                return 1
     plan = json.loads(src.read_text())
     tag = "[dry-run] would " if dry_run else ""
     sent = skipped = 0
