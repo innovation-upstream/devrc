@@ -105,26 +105,39 @@ population or the number means nothing.**
 Measured on the workbench, 2026-09-05. Four populations, because the answer spans ~12×
 between them — and which one applies is decided by a question §9 has not closed:
 
-| population | files | median | p90 | max | total |
-|---|---|---|---|---|---|
-| all `.jsonl` — **NOT what ships** | 5,864 | 0.74 MB | 2.53 MB | 23.48 MB | 6.73 GB |
-| real sessions (excluding `agent-*`) | 913 | **2.62 MB** | 4.97 MB | 23.48 MB | 2.45 GB |
-| **sessions that produced a handoff** — what decision 2 selects, **parent file only** | 37 | **3.82 MB** | 5.22 MB | 10.59 MB | 148 MB |
-| the same 37 sessions, **parent + their subagent transcripts** | 288 files / 37 sessions | **8.68 MB** *(per session)* | 20.23 MB | 31.00 MB *(per session)* | 375 MB |
+| row | population | files | median | p90 | max | total |
+|---|---|---|---|---|---|---|
+| **1** | all `.jsonl` — **NOT what ships** | 5,864 | 0.74 MB | 2.53 MB | 23.48 MB | 6.73 GB |
+| **2** | real sessions (excluding `agent-*`) | 913 | **2.62 MB** | 4.97 MB | 23.48 MB | 2.45 GB |
+| **3** | **sessions that produced a handoff** — what decision 2 selects, **parent file only** | 37 | **3.82 MB** | 5.22 MB | 10.59 MB | 148 MB |
+| **4** | the same 37 sessions, **parent + their subagent transcripts** | 288 files / 37 sessions | **8.68 MB** *(per session)* | 20.23 MB | 31.00 MB *(per session)* | 375 MB |
+
+🔴 **The row numbers are IN the table on purpose.** Fourteen places in this document say
+"row 1"…"row 4"; without a number column each of those is an unwritten ordinal that a
+future inserted row silently falsifies — including THE SIZING DIRECTIVE itself, which would
+then point at the wrong population. Numbering them makes each reference an identifier that
+an insertion cannot move. If you add a row, append it; do not renumber.
 
 ⚠ Every percentile in this table uses one convention — the sorted value at `int(n × 0.9)`,
 no interpolation. Stated because a different convention gives a visibly different p90 for
 row 4 (16.65 MB rather than 20.23 MB) and nothing in the table would show which was used.
 
-Rows 3 and 4 are the population decision 2 selects, counted two ways; **THE SIZING
-DIRECTIVE** below says which to use. Both were derived by this exact command, stated in
+Rows 3 and 4 are the population decision 2 selects, counted two ways.
+**THE SIZING DIRECTIVE** below says which to use. Both were derived by this exact command, stated in
 full because two independent re-derivations from a prose description of it disagreed with
 each other and with this table:
 
 ```bash
 git log origin/main --since=2026-07-01 \
-  --format='%(trailers:key=Claude-Session-Id,valueonly)' -- 'claudedocs/handoff-*.md'
+  --format='%(trailers:key=Claude-Session-Id,valueonly)' -- 'claudedocs/handoff-*.md' \
+  | grep . | sort -u | wc -l
 ```
+
+🔴 **The `grep . | sort -u` is not decoration.** Raw it prints 407 lines; `sort -u` alone
+gives **38**, because commits without the trailer emit an empty line and the blank counts
+as a value. A re-derivation that drops the blank filter disagrees with this table by one
+and re-opens a question that is closed — which is why the counting half is in the block
+rather than in the prose around it.
 
 **37** distinct ids, **all 37** resolving to a transcript on disk, none of them an
 `agent-*` file. Reproduced at four refs (`origin/main` `4d249c0c`, `c4e76a10`, this
@@ -179,8 +192,9 @@ in the sentence retracting it — as a whole-host maximum. **Retracting a number
 as not using it.**
 
 🔴 **AND THE LESSON FOR THIS DOCUMENT'S OWN RECORDS: name things, do not count or locate
-them.** An earlier revision of these records carried a paragraph COUNT and a paragraph
-DISTANCE. 🔴 **Both were wrong AT THE REVISION THAT INTRODUCED THEM** — not falsified
+them.** An earlier revision of these records counted its own REVISIONS ("three separate
+revisions … in three different places" — it was two) and located a block by DISTANCE
+("two paragraphs below" — it was five). 🔴 **Both were wrong AT THE REVISION THAT INTRODUCED THEM** — not falsified
 later by an insertion, which is what an earlier draft of this very paragraph claimed and
 is the more comfortable story, because it blames drift rather than the writing. Nobody
 counts paragraphs before writing "two paragraphs below". **A NAME can be checked at the
@@ -195,11 +209,9 @@ caveat §5.0 carries for the corpus counts — every new handoff adds a session 
 coverage caveat below was stated originally, and coverage and time are different limits.
 Re-measured 2026-09-05 after a day's work: still **37**, so no drift was observed — but the
 method is time-dependent by construction, and a later re-derivation returning a different `n`
-means the table is **stale, not wrong**. ⚠ An audit reading reported 43. That is now **explained, not merely non-reproducing**:
-43 is what the trailer yields when the **pathspec is dropped** and every commit in the window
-is counted. The method must therefore name its ref as well — these figures are from
-`origin/main`; `--all` gives a larger number that varies by clone, so it is not a
-measurement of anything shared.
+means the table is **stale, not wrong**. ⚠ Two audit readings of this population disagreed with each other and with the table. Both
+are accounted for by the command block above — that is what the block is for, and the
+figures are not restated here so there is only ever one place to correct.
 
 ⚠ **THE COVERAGE CAVEAT — scope of the 37-session sample, stated rather than buried:**
 devrc handoffs only, and
@@ -456,8 +468,12 @@ does nothing:
    count move from 0 to 1 and report the pair, never the zero alone.
 2. **Negative control.** Point it at an unreachable endpoint and watch it warn and exit
    non-zero rather than reporting a successful no-op.
-3. **Idempotency, measured.** Two handoff runs in one session → **one** object, **one**
-   pointer per entry. Assert the set does not grow.
+3. **Idempotency, measured.** Two handoff runs in one session must not GROW either set:
+   the object count stays whatever one run produces, and the pointer count per entry stays
+   one. ⚠ **Do not write this as "one object"** — that is only true under parent-only.
+   Under "ship the set" one session yields many objects (288 files across 37 sessions,
+   §4 row 4), so an assertion of `len(objects) == 1` fails a correct implementation.
+   Assert NO GROWTH between runs, which is true under both branches of §9.6.
 4. **The `SessionEnd` overwrite actually overwrites.** Ship at handoff, append to the
    session, fire `SessionEnd`, assert the stored `sha256` **changed** and the pointer did
    not duplicate. **Name the host it ran on** — §5.1: the hook is wired on one host today.
@@ -509,8 +525,16 @@ invariant the bug never violated is an invariant guard and must be labelled as o
 6. 🔴 **Does a session ship as ONE object or a SET?** §5.0. This is the largest open
    question, it decides the object key, and the goal in §1 depends on the answer — 64% of the
    bytes are in subagent transcripts, and one-object-per-session drops them.
-7. **Is there a retraction path when a secret is found in a shipped object?** §6. Deleting
+7. 🔴 **What happens when the fan-out PARTIALLY succeeds?** Decision 6 writes a pointer to
+   every touched entry, so the write is N-way and can land on 3 of 5. §5.5's fail-open
+   covers the PUSH and §6 covers deletion; nothing covers a half-written fan-out. §5.4's
+   digest ledger cannot detect it either — it validates a pointer that EXISTS, and the
+   failure here is entries that silently have none, which is indistinguishable from
+   entries the session never touched. Nothing records the expected fan-out set, so
+   nothing can compare against it. Either record that set or accept silent partial
+   attachment, but choose deliberately.
+8. **Is there a retraction path when a secret is found in a shipped object?** §6. Deleting
    the object leaves N pointers dangling and nothing sweeps them. Under decision 8 this is
    permanent, so "no path" is an answer — but it should be a chosen one.
-8. **Who wires `SessionEnd` on the second host, and what detects that it is missing?**
+9. **Who wires `SessionEnd` on the second host, and what detects that it is missing?**
    §5.1. It is unmanaged per-host state that `drift-check.sh` does not currently see.
