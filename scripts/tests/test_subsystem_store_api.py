@@ -18679,31 +18679,38 @@ class TestTheSeedPreFlightCannotBeSILENTLYSKIPPED:
 
 
 class TestTheSeedPreFlightJoinIsLocaleSafe:
-    """🔴 `LC_ALL=C` ON THE `join`, GUARDED — the mutant SURVIVED all 40 seed tests.
+    """🔴 `LC_ALL=C` ON THE `join`, GUARDED — the mutant SURVIVED all 40 seed tests
+    when the auditor measured it, and survived my FIRST attempt at this test too.
 
     GNU `join` order-checks in the AMBIENT locale, so C-sorted input is "not
-    sorted" to a join running under en_US.UTF-8 — which is this host. MEASURED:
-    it both MISSES the differing pair and exits 1, which `set -euo pipefail`
-    turns into a run with no verdict at all.
+    sorted" to a join under en_US.UTF-8 — which is this host. It both MISSES the
+    differing pair and exits 1, which `set -euo pipefail` turns into a run with
+    no verdict at all.
 
-    It needs two things at once, which is why the existing UTF-8 test could not
-    reach it: an UNPAIRABLE line (GNU join arms the order check only after one)
-    AND an adjacency where C and locale order disagree — `<scope>/README.md`
-    beside a lowercase sibling, which the real store is full of."""
+    🔴 WHY THE FIRST VERSION OF THIS TEST WAS VACUOUS, recorded because the shape
+    is easy to repeat: it planted the `README.md`/lowercase adjacency on the POD.
+    But the probe answers exactly the STAGED paths, so `_remote_h` can only ever
+    contain staged entries — a pod-only file never reaches the join, and the
+    adjacency had no effect. The inversion must be between two STAGED paths.
+
+    Two conditions must hold at once, which is what makes this fiddly: an
+    UNPAIRABLE line (GNU join arms the order check only after one — here the
+    entry the pod does NOT have) and an adjacency where C and en_US disagree
+    (`README.md` sorts BEFORE `backblaze.md` under C, AFTER under en_US)."""
 
     def test_a_differing_entry_is_still_caught_under_a_UTF8_locale(
         self, store: Path, tmp_path: Path, fake_cluster
     ):
         env, dest = fake_cluster
+        # BOTH must be STAGED — that is what puts them on both sides of the join.
+        (store / SCOPE / "README.md").write_text(_entry("README", SCOPE))
+        (store / SCOPE / "backblaze.md").write_text(_entry("backblaze", SCOPE))
+
         d = dest / SCOPE; d.mkdir(parents=True, exist_ok=True)
-        # the adjacency that inverts between C and en_US
-        (d / "README.md").write_text("---\nservice: readme\n---\n")
-        # the DIFFERING entry the guard must still refuse
-        pod_alpha = d / "thing-alpha.md"
-        pod_alpha.write_text("---\nservice: thing-alpha\n---\nPOD NEWER\n")
-        # an unpairable line on the pod arms GNU join's order check
-        other = dest / "a-scope-only-the-laptop-has"; other.mkdir(exist_ok=True)
-        (other / "from-the-other-host.md").write_text("---\nservice: x\n---\n")
+        # `backblaze.md` DIFFERS on the pod -> must be refused.
+        (d / "backblaze.md").write_text("---\nservice: backblaze\n---\nPOD NEWER\n")
+        # `README.md` is ABSENT on the pod -> the unpairable line that arms the
+        # order check. `thing-alpha.md` absent too; harmless.
 
         r = run_seed(
             "--store", str(store), "--stage", str(tmp_path / "stage"),
@@ -18712,7 +18719,8 @@ class TestTheSeedPreFlightJoinIsLocaleSafe:
         )
 
         assert r.returncode == 8, (
-            "under a UTF-8 ambient locale the join either missed the differing "
-            f"pair or died on an order check: rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+            "under a UTF-8 ambient locale the join either MISSED the differing "
+            "pair or died on an order check — `LC_ALL=C` on the join is what "
+            f"stops both: rc={r.returncode}\n{r.stdout}\n{r.stderr}"
         )
-        assert f"{SCOPE}/thing-alpha.md" in r.stderr, r.stderr
+        assert f"{SCOPE}/backblaze.md" in r.stderr, r.stderr
