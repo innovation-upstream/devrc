@@ -28,6 +28,21 @@
 #       2 = cannot determine -- unit down, no config argument, unit/process disagree,
 #           parser failure, or the parser failed its own controls
 #
+# Every rc-2 path also prints ONE machine-readable line to stderr:
+#
+#       REASON: <token>
+#
+# with token one of: unit-not-loaded · unit-inactive · no-mainpid · no-config-arg ·
+# unit-process-disagree · self-test-failed · parse-failed. It exists because rc 2
+# alone lumps together outcomes that call for DIFFERENT responses, and a caller
+# that wants to distinguish them must not have to pattern-match English prose.
+# apply-nebula-relay.sh branches on `unit-process-disagree` and only that one.
+#
+# ⚠ Nothing here restarts anything -- but note for the caller: making a relay change
+# take effect requires restarting nebula@<net>, which drops every mesh session for a
+# few seconds. If you are connected to this host OVER the mesh, you will be
+# disconnected mid-command.
+#
 # 🔴 Do NOT verify this by grepping the rendered YAML for the relay's address. The
 # lighthouse list (`lighthouse.hosts`) contains the SAME mesh addresses, so a pattern
 # like `^\s+- 10\.42\.0\.2$` matches a config whose `relays:` is EMPTY -- measured; it
@@ -120,7 +135,6 @@ if not found:
 
     in_relays = False
     for line in block:
-        indent = len(line) - len(line.lstrip())
         s = line.strip()
         if in_relays:
             if s.startswith("- "):
@@ -191,10 +205,29 @@ _self_test() {
   printf '%srelay: {am_relay: false, relays: [10.42.0.2], use_relays: true}\n' "$head" >"$dir/4.yml"
   _t "one-line flow mapping                        " "false|true|10.42.0.2" "$dir/4.yml"
 
-  # 5. TERMINATOR: a top-level block AFTER relay that itself contains a list. Kills a
-  #    mutant that keeps scanning past the end of the relay block and swallows it.
+  # 5. A REAL following block: `static_host_map` after `relay`, carrying its own
+  #    `- ...` sequence. 🔴 THIS FIXTURE DOES NOT KILL THE TERMINATOR MUTANT and its
+  #    comment used to say it did. Measured: replace the terminator
+  #    `if not line.startswith((" ", "\t")):` with `if False:` and this fixture still
+  #    passes -- the swallowed lines are a `10.42.0.2:` key and a `- ` item, and by
+  #    then `in_relays` is False (`relays: []` is a flow list), so neither is read.
+  #    It is kept because it documents the real rendered shape, not as coverage.
   printf '%srelay:\n  am_relay: false\n  relays: []\n  use_relays: true\nstatic_host_map:\n  10.42.0.2:\n  - 198.51.100.7:4242\n' "$head" >"$dir/5.yml"
-  _t "terminator: following block with its own list" "false|true|" "$dir/5.yml"
+  _t "following block with its own list (shape only)" "false|true|" "$dir/5.yml"
+
+  # 5b. TERMINATOR, for real. A later TOP-LEVEL key the relay parser also reads
+  #     (`am_relay`). With the terminator present the block stops at
+  #     `static_host_map:` and am stays `false`; without it the scan runs on and the
+  #     trailing `am_relay: true` overwrites the real value, so the mutant above dies
+  #     here with THIS fixture's own message (got 'true|true|', want 'false|true|').
+  #
+  # 🔴 BE CLEAR WHAT THIS IS. `pkgs.formats.yaml` cannot emit a duplicate top-level
+  #     `am_relay:` -- it renders one mapping. So this fixture pins the PARSER's
+  #     structural correctness (the relay block must end where YAML says it ends), NOT
+  #     a config shape production can produce. It is a unit test of the terminator,
+  #     and claiming more than that is what the previous comment did wrong.
+  printf '%srelay:\n  am_relay: false\n  relays: []\n  use_relays: true\nstatic_host_map:\n  10.42.0.2:\n  - 198.51.100.7:4242\nam_relay: true\n' "$head" >"$dir/5b.yml"
+  _t "terminator: later top-level am_relay is OUTSIDE" "false|true|" "$dir/5b.yml"
 
   # 6. no relay key at all -> must be rc 2, NOT an empty list
   printf '%stun:\n  dev: nebula.mesh\n' "$head" >"$dir/6.yml"
@@ -205,7 +238,6 @@ _self_test() {
   fi
 
   # 7. the -config extractor, all four spellings Go's flag package accepts
-  local spellings="-config|/a.yml --config|/b.yml -config=/c.yml --config=/d.yml"
   got=$(printf '%s\n' "-config" "/a.yml" | _config_from_lines)
   [ "$got" = "/a.yml" ] || { echo "  [self-test] -config X FAILED: '$got'"; rc=1; }
   got=$(printf '%s\n' "--config" "/b.yml" | _config_from_lines)
@@ -236,25 +268,32 @@ fi
 # --- what the RUNNING process loaded ----------------------------------------------
 unit="nebula@${NET}.service"
 
-if ! systemctl cat "$unit" >/dev/null 2>&1; then
-  echo "CANNOT DETERMINE: $unit is not loaded on this host" >&2
+# Every rc-2 exit goes through this, so the REASON line can never be forgotten on a
+# new path: one writer, not seven copies of an echo.
+cannot_determine() {   # $1 = token, rest = human lines
+  local token="$1"; shift
+  local l
+  for l in "$@"; do echo "$l" >&2; done
+  echo "REASON: $token" >&2
   exit 2
+}
+
+if ! systemctl cat "$unit" >/dev/null 2>&1; then
+  cannot_determine unit-not-loaded "CANNOT DETERMINE: $unit is not loaded on this host"
 fi
 if ! systemctl is-active -q "$unit"; then
-  echo "CANNOT DETERMINE: $unit is '$(systemctl is-active "$unit" || true)', not active." >&2
-  echo "  A relay is only advertised while nebula is running. Start it, then re-run." >&2
-  exit 2
+  cannot_determine unit-inactive \
+    "CANNOT DETERMINE: $unit is '$(systemctl is-active "$unit" || true)', not active." \
+    "  A relay is only advertised while nebula is running. Start it, then re-run."
 fi
 pid=$(systemctl show "$unit" -p MainPID --value)
 if [ -z "$pid" ] || [ "$pid" = "0" ] || [ ! -r "/proc/$pid/cmdline" ]; then
-  echo "CANNOT DETERMINE: no readable MainPID for $unit (got '${pid:-<empty>}')" >&2
-  exit 2
+  cannot_determine no-mainpid "CANNOT DETERMINE: no readable MainPID for $unit (got '${pid:-<empty>}')"
 fi
 
 running=$(tr '\0' '\n' < "/proc/$pid/cmdline" | _config_from_lines)
 if [ -z "$running" ] || [ ! -r "$running" ]; then
-  echo "CANNOT DETERMINE: no readable -config argument on pid $pid (got '${running:-<empty>}')" >&2
-  exit 2
+  cannot_determine no-config-arg "CANNOT DETERMINE: no readable -config argument on pid $pid (got '${running:-<empty>}')"
 fi
 
 # The unit's own ExecStart, for the deferred-restart case below. Last ExecStart= line
@@ -265,22 +304,22 @@ echo "unit    : $unit (active, pid $pid)"
 echo "running : $running"
 
 if [ -n "$onunit" ] && [ "$onunit" != "$running" ]; then
-  echo "on-unit : $onunit" >&2
-  echo "CANNOT DETERMINE: the unit file and the running process disagree." >&2
-  echo "  A rebuild has landed a new config but nebula has not restarted onto it." >&2
-  echo "  \`sudo systemctl restart $unit\`, then re-run." >&2
-  exit 2
+  cannot_determine unit-process-disagree \
+    "on-unit : $onunit" \
+    "CANNOT DETERMINE: the unit file and the running process disagree." \
+    "  A rebuild has landed a new config but nebula has not restarted onto it." \
+    "  \`sudo systemctl restart $unit\`, then re-run. 🔴 That drops every mesh session" \
+    "  for a few seconds -- if you are connected OVER the mesh you will be cut off."
 fi
 
 echo "parser self-test:"
 if ! _self_test; then
-  echo "CANNOT DETERMINE: the parser failed its own controls -- its verdict would mean nothing" >&2
-  exit 2
+  cannot_determine self-test-failed \
+    "CANNOT DETERMINE: the parser failed its own controls -- its verdict would mean nothing"
 fi
 
 if ! parsed=$(_parse_relay "$running"); then
-  echo "CANNOT DETERMINE: could not parse a relay block out of $running" >&2
-  exit 2
+  cannot_determine parse-failed "CANNOT DETERMINE: could not parse a relay block out of $running"
 fi
 IFS='|' read -r am use relays <<<"$parsed"
 echo "relay   : am_relay=$am use_relays=$use relays=[${relays}]"
@@ -313,5 +352,9 @@ Anything listed must carry \`am_relay: true\` in ITS own config, and this host m
 able to reach it. 🔴 Relayed traffic EGRESSES THE RELAY in both directions, so choosing
 a billed host (a cloud lighthouse) puts every relayed byte on that bill. For peers that
 only ever fall back on-LAN, a lighthouse you already pay flat-rate for is cheaper.
+
+🔴 APPLYING THIS RESTARTS THE MESH. nebula@${NET} has to reload to pick the change up,
+which drops every session over nebula.${NET} for a few seconds. If your shell reaches
+this host over the mesh, run it from a console/LAN session instead.
 EOF
 exit 1
