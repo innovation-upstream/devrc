@@ -904,3 +904,43 @@ def test_the_script_and_builder_are_executable():
     the unit fails at exec time."""
     assert os.access(SCRIPT, os.X_OK), f"{SCRIPT} is not executable"
     assert os.access(BUILDER, os.X_OK), f"{BUILDER} is not executable"
+
+
+def test_a_SUBAGENT_transcript_is_never_pushed(projects, tmp_path):
+    """🔴 SUBAGENT TRANSCRIPTS ARE NOT RESUMABLE SESSIONS, and they are the BULK
+    of the corpus: measured on this host 2026-09-04, 4,884 of the 5,788 `.jsonl`
+    files under `~/.claude/projects` — 84% — live under a `subagents/` directory.
+
+    Nothing can ever join them to anything the chat view is reached from: no
+    attention entry carries a subagent id, and session-manager's
+    `claude_session_id` is the MAIN session's. Feeding them would fill the read
+    model with thousands of unreachable rows, each up to the tail cap, against a
+    retention sweep sized for real sessions.
+
+    The exclusion comes from `transcript_search.is_corpus_member`, which is the
+    ONE rule the whole repo's transcript readers share. This test exists because
+    the first version of the builder open-coded its own walk and got the right
+    answer BY ACCIDENT — it only descended one level, so it missed them without
+    any rule saying it should. A later "make this recursive" edit would have been
+    silently catastrophic.
+    """
+    d = projects.root / "-home-zach-workspace-devrc"
+    d.mkdir(parents=True, exist_ok=True)
+    sub = d / "subagents"
+    sub.mkdir(exist_ok=True)
+    (sub / "agent-deadbeef.jsonl").write_text(
+        transcript("agent-deadbeef", human_turn("subagent work", "agent-deadbeef"))
+    )
+    projects("sess-main", transcript("sess-main", human_turn("main work", "sess-main")))
+
+    proc = run_builder(projects.root, empty_digest(tmp_path), tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    ids = [s["sessionId"] for s in json.loads(proc.stdout)["sessions"]]
+
+    assert "agent-deadbeef" not in ids, (
+        "a subagent transcript was pushed — it is unreachable from every surface the chat "
+        f"view is linked from, and they are 84% of the corpus. Got: {ids}"
+    )
+    # POSITIVE CONTROL: the walk found the real one, so the absence above is not a
+    # fact about a walk that enumerated nothing.
+    assert ids == ["sess-main"], f"the main session was not picked up either: {ids}"

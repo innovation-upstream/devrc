@@ -33,10 +33,28 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sys
 import time
 from pathlib import Path
+
+# 🔴 THE SHARED ENUMERATOR, NOT A HAND-ROLLED WALK. The first version of this file
+# open-coded `projects_dir.iterdir()` + `d.glob("*.jsonl")`, and
+# `scripts/tests/test_transcript_search.py::test_the_jsonl_glob_site_ledger_is_
+# pinned_two_way` caught it — that ledger SCANS the tree for walk sites rather
+# than naming files, precisely so a fourth hand-rolled walk cannot pass unseen.
+#
+# 🔴 AND IT IS A CORRECTNESS FIX, NOT ONLY A HYGIENE ONE. `is_corpus_member`
+# excludes `subagents/`, which holds transcripts that are NOT resumable sessions.
+# Measured on this host 2026-09-04: 4,884 of the 5,788 `.jsonl` files under
+# `~/.claude/projects` — 84% — live there. My walk happened to miss them because
+# it only descended one level, i.e. it was right BY ACCIDENT of its depth rather
+# than by any rule; a later "let's make this recursive" edit would have started
+# feeding clawgate thousands of rows that no attention entry and no tmux window
+# can ever join to, and nothing would have gone red.
+#
+# This module's dir is on sys.path when the file is run as a script, so the
+# import needs no path juggling; `transcript_search` is pure stdlib.
+from transcript_search import iter_transcripts
 
 # 🔴 THE ONE PLACE THE STORED FORM IS DEFINED, and the server recomputes it
 # rather than trusting what we send (see internal/transcript.NormalizePush). Two
@@ -117,33 +135,27 @@ def candidates(projects_dir: Path, max_age_hours: float, limit: int) -> list[Pat
     session-manager collector, and that collector runs on ONE host while this
     runs on both. Worse, it would silently stop feeding a session the moment its
     window closed, which is exactly when someone wants to read what it did.
+
+    The WALK is `transcript_search.iter_transcripts`, never a local glob — see
+    the import for the ledger that enforces that and for the 84%-of-files
+    correctness reason.
     """
-    cutoff = time.time() - max_age_hours * 3600
-    found: list[tuple[float, Path]] = []
-    # 🔴 A BOUNDED WALK: the transcript tree is `<projects>/<slug>/<uuid>.jsonl`,
-    # one level deep, and globbing it recursively would follow whatever else has
-    # been dropped in there.
-    try:
-        project_dirs = [p for p in projects_dir.iterdir() if p.is_dir()]
-    except OSError as exc:
-        print(f"cannot list {projects_dir}: {exc}", file=sys.stderr)
+    if not projects_dir.exists():
+        print(f"cannot list {projects_dir}: no such directory", file=sys.stderr)
         raise SystemExit(1)
 
-    for d in project_dirs:
+    cutoff = time.time() - max_age_hours * 3600
+    found: list[tuple[float, Path]] = []
+    for f in iter_transcripts(projects_dir):
         try:
-            entries = list(d.glob("*.jsonl"))
+            st = f.stat()
         except OSError:
+            # A transcript can vanish between the walk and the stat (a session
+            # cleaned up mid-run). Skipping one file must never fail the push.
             continue
-        for f in entries:
-            try:
-                st = f.stat()
-            except OSError:
-                continue
-            if not os.path.isfile(f):
-                continue
-            if st.st_mtime < cutoff:
-                continue
-            found.append((st.st_mtime, f))
+        if st.st_mtime < cutoff:
+            continue
+        found.append((st.st_mtime, f))
 
     found.sort(key=lambda pair: pair[0], reverse=True)
     return [p for _, p in found[:limit]]
