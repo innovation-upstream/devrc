@@ -25,6 +25,58 @@ let
     + " -S 'fg=${s.color}' -T ' ${s.name} '"
     + " -E 'tmux attach-session -t ${s.sess} || tmux new-session -s ${s.sess}' }";
   scratchBindings = builtins.concatStringsSep "\n" (map (s: mkBind (parse s)) slotLines);
+
+  # 🔴 CONTINUUM'S 15-MINUTE AUTOSAVE IS A STATUS-LINE INTERPOLATION, AND
+  # NOTHING ELSE DRIVES IT.  `continuum.tmux:main()` calls
+  # `add_resurrect_save_interpolation`, which PREPENDS
+  # `#(<plugin>/scripts/continuum_save.sh)` to `status-right`; every status
+  # refresh then runs that script, which checks whether the save interval has
+  # elapsed and, if so, invokes resurrect's save.  There is no timer, no hook
+  # and no daemon — that interpolation IS the timer.
+  #
+  # WHY WE SET IT OURSELVES INSTEAD OF LETTING THE PLUGIN DO IT.  home-manager
+  # emits `run-shell <plugin>.tmux` for every plugin FIRST and `extraConfig`
+  # AFTER, and `extraConfig` begins with the whole of the repo-root
+  # `.tmux.conf` — which contains a plain `set -g status-right '…'`.  A plain
+  # `set` REPLACES the option, so continuum's prepend is silently discarded a
+  # few lines later.  MEASURED on the workbench 2026-09-04, on a server up
+  # since 2026-08-05: `status-right` held zero occurrences of `continuum_save`
+  # (and so did `status-left`), and `@continuum-save-last-timestamp` was
+  # 1785949443 — exactly `#{start_time}` + 1s, i.e. the value
+  # `delay_saving_environment_on_first_plugin_load` writes at plugin load and
+  # NOT one continuum_save.sh ever wrote.  That timestamp is the discriminating
+  # evidence: it is set inside the same `if ! another_tmux_server_running`
+  # block as the interpolation, so its presence proves the block RAN and
+  # refutes the rival "continuum short-circuited" explanation.  The
+  # interpolation was added and then clobbered.  Reproduced on a throwaway
+  # `-L` socket: `run-shell` that prepends, followed by a plain `set -g
+  # status-right`, yields zero occurrences.
+  #
+  # `set -ag` (append) is what makes this survive a reload rather than
+  # accumulate: each `source-file` re-runs the plain `set -g status-right`
+  # first, resetting the value, then this single append.  Verified on a
+  # throwaway socket — one occurrence after the initial load and still exactly
+  # one after two further reloads.  `continuum_save.sh` prints nothing, so the
+  # expanded status line is byte-identical with and without it (also measured);
+  # `status-right-length 70` is unaffected.
+  #
+  # 🔴 REFERENCED THROUGH THE PACKAGE, NEVER A LITERAL /nix/store PATH.  This
+  # makes the plugin a real dependency of the generation, so it is GC-rooted
+  # for as long as that generation lives.  A hardcoded hash is how the sibling
+  # outage in this area happened — the live server still pointed at a resurrect
+  # store path that had been garbage-collected.
+  #
+  # Pinned by scripts/tests/test_tmux_continuum_save_interpolation.py, which
+  # simulates tmux's own set/append semantics over the generated config and
+  # asserts the interpolation survives to the FINAL value.
+  continuumSave =
+    "${pkgs.tmuxPlugins.continuum}/share/tmux-plugins/continuum/scripts/continuum_save.sh";
+  continuumSaveInterpolation = ''
+
+    # --- continuum autosave driver (see nix/programs/tmux/default.nix) ---
+    # MUST stay after the last plain `set -g status-right` or it is clobbered.
+    set -ag status-right '#(${continuumSave})'
+  '';
 in
 {
   enable = true;
@@ -37,7 +89,8 @@ in
   focusEvents = true;
   extraConfig = builtins.readFile ../../../.tmux.conf
     + "\n# --- generated scratchpad popup toggles (see nix/programs/tmux/default.nix) ---\n"
-    + scratchBindings + "\n";
+    + scratchBindings + "\n"
+    + continuumSaveInterpolation;
   plugins = with pkgs.tmuxPlugins; [
     {
       plugin = resurrect;

@@ -16,15 +16,15 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Diagnose and resolve disk pressure on the workbench NixOS host (root partition `/dev/nvme0n1p2`, 1.8TB). The host was at 87% usage with ~228G free. The session freed ~200G through cleanup, then investigated why the filesystem reports 1.5TB used while only ~600GB of data is measurable.
 
 ## State now
-- **PR devrc#1227 OPEN**, branch `handoff-nix-disk-v3` head `750791b8`. Final gate running on merged tree `519894d8` (base `2882d2c7`), both tiers.
-- Claim held: `nix-disk-cleanup-1`. No clawgate task.
-- **The `/tmp` reclaim is DONE and measured** — see below. The remaining work is landing the PR and applying one hand patch per host.
-- 🔴 **`nix/system/apply-tmp-churn-retention.sh` is MODIFIED in the base clone `~/workspace/devrc` and must stay that way until #1227 merges.** The working copy is the fixed version; `main` still carries the broken `m:7d` ledger and no `--emit-rules`.
+- **BOTH PRs MERGED to `main`.** devrc#1227 → `d8fe0bce`; devrc#1301 → `46264622`. Verified by CONTENT, not ancestry (a squash is never an ancestor of its base). Base clone at `46264622`, worktrees removed, claim `nix-disk-cleanup-1` RELEASED.
+- No clawgate task: `clawgate_handoff.sh resolve` exited **5 — NOTHING RESOLVED**. An unknown session id answers 200 with an empty array, so that cannot distinguish "touched no task" from "wrong id". No `clawgate-task:` field recorded.
+- 🔴 **NOTHING IS LIVE.** `/etc/tmpfiles.d/00-nixos.conf` carries none of these rules. The 98 GB came from running the rules by hand with `systemd-tmpfiles --clean`, NOT from the config. Two operator actions remain (ranks 1–2).
 
 ### What's DONE
-1. Refuted the "ext4 metadata" diagnosis, measured the real answer, and took the reclaim.
-2. Three adversarial audit rounds on the fix; **the eviction feature was REMOVED rather than fixed** (rationale below).
-3. Staged `nix/system/patch-tmp-churn-stale-lines-2026-09-04.md` — the hand patch that replaces what eviction did.
+1. **Reclaim taken and measured** — inodes 96,135,443 → 84,836,132 (−11,299,311); available 308G → 406G; 83% → 77%.
+2. **`apply-tmp-churn-retention.sh` fixed** — `m:7d` → `mM:7d`, dead glob withdrawn, argument guards, ledger uniqueness. **Eviction REMOVED, not fixed** (below).
+3. **`scripts/diagnose-disk-accounting.sh`** shipped — root-required, hardlink-deduping, reports its own blind spots.
+4. **`nix/system/apply-tmp-churn-stale-lines-2026-09-04.sh`** + its `.md` — the hand patch, scripted.
 
 ## Open investigations — live diagnosis state
 
@@ -252,20 +252,43 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **The laptop's `/etc/nixos` is UNMEASURED** from here. The patch doc carries the five checks to run there.
     via: measurement
 
+### CLOSED — the whole effort, with the numbers
+- Started from a handoff asserting the ~900 GB gap was **SOLVED: ext4 metadata overhead**. Refuted: ext4 metadata consumes BLOCKS, never USED INODES, so 96.3M used inodes were 96.3M real files. Static metadata computed from the superblock with `Inode size: 256` measured = **~30 GiB, not 902**.
+- **The answer was `/tmp`**: 78,501,285 entries / 469 GiB, **81% of the filesystem's inodes**, on the root partition rather than tmpfs.
+- **Two mechanisms produced the wrong answer, and the second is the larger:** (a) an unprivileged `find … 2>/dev/null` skipping every root-only tree — `/var` read 980 inodes / 6.1 GiB with 32 denials against 2,785,594 / 535.9 GiB as root; (b) **truncated scans recorded as totals** — `/home` had ZERO denials and was still recorded at ~200 GB against 691 actual.
+    via: measurement
+- **The bug in the fix:** `tmpfiles.d(5)` age-by is case-sensitive — lower-case selects the timestamp for FILES, upper-case for DIRECTORIES. `m:7d` therefore aged no directory at all: it emptied every matched tree and removed none of them, on a filesystem whose problem is inodes.
+    via: measurement
+- 🔴 **`e` cleans a matched directory's CONTENTS and never removes the directory itself.** After the reclaim, `/tmp` top-level went UP (171,906 → 182,416) and **43,708 ledger-matched stubs remain**. Closing that needs a different mechanism than `e`; not attempted.
+    via: measurement
+
+### 🔴 THE EVICTION FEATURE WAS DELETED — do not rebuild it
+- It removed stale `m:7d` rule lines from `/etc/nixos` as root, by regex. Three adversarial audit rounds; removed rather than fixed.
+- **Its premise was FALSE.** It defended against a stale line ABOVE the corrected one winning. But insertion is `src.replace(anchor, anchor + block, 1)` — new rules always land at the TOP — so **the script cannot produce the ordering eviction defended against**. A survivor is cruft plus one log line, not a dead rule.
+    via: measurement
+- **Cost: two 🔴 regressions in three rounds, each introduced by the fix for the previous finding** — an unanchored splice that silently commented out an unrelated live `d /srv/critical` rule while leaving the stale one; a whole-line bracket scan that walked into a following `systemd.user.tmpfiles.rules` and deleted an entry there. Both printed success and passed their own post-write verifier.
+    via: measurement
+- The inserter is now **APPEND-ONLY**, with that reasoning written into the script so it outlives this doc.
+
+### Live host state — the workbench IS applied; the script long claimed otherwise
+- `/etc/nixos/configuration.nix` carries 8 `mM:7d` rules, the stale `mtime-ONLY ageing (m:)` header sentence, and the withdrawn `homelab-talos-prs-*` line. **Withdrawing a glob from the repo ledger does not remove it from an applied host** — that is what rank 1 fixes.
+- 🔴 **`nixos-rebuild switch` is BLOCKED** by a `switchInhibitors` pre-switch check on an unrelated `dbus-implementation : dbus -> broker` channel migration. Use `boot` + reboot. Do NOT use `NIXOS_NO_CHECK=1` on a k3s box. The printed rollback (`cp -a BAK CFG && nixos-rebuild switch`) is also unexecutable in that state — its own switch hits the same inhibitor.
+    via: measurement
+- **The laptop's `/etc/nixos` is UNMEASURED** from the workbench.
+- ⚠ **`/tmp` has already regrown**: available 406G → 367G (79%) within hours of the reclaim. Nothing throttles it until the rules are live.
+
 ## Next steps (ranked)
-1. **Merge #1227** once the gate lands. Both tiers on the merged tree, one nix derivation at a time. `main` is protected in NAME ONLY (`required_status_checks` absent, `enforce_admins: false`, deliberate) — the gate run is the only gate, so name the tier and base sha in the claim.
+1. **Run the patch script on the WORKBENCH** — `sudo bash ~/workspace/devrc/nix/system/apply-tmp-churn-stale-lines-2026-09-04.sh` (`--dry-run` first needs no root). Fixes the contradictory header and deletes the dead rule.
    forcing: none
-2. **Apply the hand patch** on the workbench, then run the five checks in `nix/system/patch-tmp-churn-stale-lines-2026-09-04.md`.
+2. **Run it on the LAPTOP.** `--dry-run` FIRST: if the header does not match byte-for-byte it refuses — safe but useless — and only a dry run tells you. Exit 3 = not in scope (that host may never have run the retention script, in which case it needs `apply-tmp-churn-retention.sh` instead).
    forcing: none
-3. **Run the same five checks on the LAPTOP** and apply the patch there if they fail; if the rules are absent entirely it never ran the script and needs `sudo bash nix/system/apply-tmp-churn-retention.sh`.
+3. **`sudo nixos-rebuild boot` + reboot.** Until this, nothing is live and `/tmp` keeps growing.
    forcing: none
-4. **`sudo nixos-rebuild boot` + reboot** to make the rules live. Nothing is active until then.
+4. **Decide whether `/var/lib/docker` is live** — 57 GB, 1,640,840 inodes, never examined. k3s uses containerd. `docker ps -a`, `docker system df`.
    forcing: none
-5. **Decide whether `/var/lib/docker` (57 GB, 1.64M inodes) is live** — k3s uses containerd.
+5. **Cover `scripts/diagnose-disk-accounting.sh`** — 282 lines of root-privileged shell with NO test file, in a repo with NO shellcheck gate. That combination is exactly why its root-command-injection and E2BIG defects were invisible to the merge gate. The lsof column resolution is a pure text transform and is cheap to pin.
    forcing: none
-6. **Release the claim** — `scripts/claim-work.sh --release nix-disk-cleanup-1`.
-   forcing: none
-7. **Not done, and worth knowing:** `diagnose-disk-accounting.sh` still has no test file and the repo has no shellcheck gate — which is why its root-command-injection and E2BIG defects were invisible to the merge gate. The lsof column resolution is the one piece that is cheap to cover, being a pure text transform.
+6. **The 43,708 `/tmp` directory stubs** — `e` never removes the matched directory, so they accumulate every cycle. Needs a different mechanism.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -317,9 +340,19 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **A guard keyed on prose dies when the prose is reworded.** The anti-duplication guard tested the header's first line; rewording the header made it read "absent" and prepend a second header. Key on a stable constant.
 - **`e` never removes the matched directory itself** — the reclaim empties trees and leaves the skeleton.
 
+- 🔴 **A fix round introduces the next defect — three consecutive times here**, all in root-privileged code, every one reporting success and passing its own verifier. The audit ladder caught all three; a two-round cap would have shipped the splice bug.
+- 🔴 **SIX times this session an instrument reported a result it had not measured.** Truncated output read as complete; a `2>/dev/null` zero read as clean when the tool writes to stderr; `pgrep -f` matching its own shell in a wait loop (hangs forever) and matching a SIBLING session's `nix build`; a `*pending*` case-fold miss declaring the gate settled while both checks ran; a mutation whose sed never matched scoring as SURVIVED; and a `--rebuild` flag error that looked exactly like a test failure. Direction varied — the constant is reading a verdict without confirming the instrument did any work.
+- 🔴 **Hand-verification is not coverage.** Two round-3 mutants survived because the behaviour had been checked by hand with fixtures and no test written. The tests came second; the mutants then died.
+- 🔴 **`tmpfiles` `e` ignores plain files silently** — a glob whose matches are files is a dead rule that reaps nothing and reports nothing. `homelab-talos-prs-*` was one for its whole life; the coverage table hid it by labelling a file count "dirs".
+- **A guard keyed on prose dies when the prose is reworded** — the anti-duplication guard tested the header's first line, so rewording it made the guard read "absent" and prepend a second header.
+- **`du -x` does not mean "only this filesystem"** — started ON a foreign mount it walks the whole mount. Compare `stat -c '%D'` per candidate.
+- **`/tmp/*` is a latent E2BIG abort here** — 171,906 entries = 4.5 MB argv against ARG_MAX 2,097,152; under `set -euo pipefail` it kills the script mid-run with the message swallowed.
+- **`main` is protected in NAME ONLY** (`required_status_checks` absent, `enforce_admins: false`, deliberate) — your own gate run is the only gate, so name the tier and base sha in any claim.
+- **Tekton posts `error` = "KILLED: the gate pod died … Not a code failure"** — infrastructure, not your diff.
+
 ## How to verify
 1. **The reclaim:** `df -i /` — used inodes ~84.8M against the 96.1M baseline.
-2. **The hand patch:** the five `grep -c` checks in `nix/system/patch-tmp-churn-stale-lines-2026-09-04.md`, then re-run the script and confirm `all 7 rules already present` with the file byte-identical.
-3. **Append-only:** `grep -n 'APPEND-ONLY' nix/system/apply-tmp-churn-retention.sh` — and no `_evicted`/`_spans` anywhere in the file.
-4. **The tests:** `nix develop ~/workspace/devrc -c python3 -m pytest scripts/tests/test_tmp_churn_retention.py -q` — 14 passed.
-5. **The rules are live** (only after a reboot): `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → 7, and `grep -c ' m:7d'` → 0.
+2. **The patch:** `sudo bash nix/system/apply-tmp-churn-stale-lines-2026-09-04.sh --dry-run`, then after applying: `grep -c 'mtime-ONLY ageing'` → 0, `'age-by corrected'` → 1, `'homelab-talos-prs'` → 0, `'mM:7d'` → 7.
+3. **Append-only:** `grep -c '_evicted\|_spans' nix/system/apply-tmp-churn-retention.sh` → 0.
+4. **Tests:** `nix develop ~/workspace/devrc -c python3 -m pytest scripts/tests/test_tmp_churn_retention.py -q` → 14 passed.
+5. **Rules live** (only after a reboot): `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → 7, and `grep -c ' m:7d'` → 0.

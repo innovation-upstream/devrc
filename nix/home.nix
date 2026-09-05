@@ -62,7 +62,21 @@ let
   # "the full bound scope is printed with the row count below" at rc 4, with the
   # store never opened). Absence of the block on a red run is therefore expected;
   # the exit code is still what you read.
-  enableHandoffIndexSync = false;
+  # ARMED 2026-09-04, after the live path was exercised by hand rather than argued:
+  #   `--rebuild` (dry-run, the default)  -> all 4 repos resolved, `warnings: none`,
+  #      delete scope = all 4 labels, no UNMEASURED and no unreadable.
+  #   `--rebuild --write`                 -> the FIRST time this DDL met a server:
+  #      "wrote 4647 section row(s) ... (after DELETE of 4 repo label(s) ... one
+  #      transaction)". The GENERATED `tsv` column was accepted and the GIN index
+  #      built — neither had ever been executed by Postgres, only pinned as text.
+  #   `handoff_search.py --query fsync`   -> `backend=postgres`, 4647 sections,
+  #      `ts_rank` ordering real hits. 🔴 `backend=` IS the discriminator: a silent
+  #      fall-back to `memory` renders identically otherwise.
+  # 🔴 A HAND-RUN NEEDS `KUBECONFIG=$KC_HOMELAB` — this repo leaves KUBECONFIG unset
+  # on purpose so a bare `kubectl` cannot hit prod, so the DSN read fails loudly
+  # (CalledProcessError on `kubectl -n mailbox get secret`) before touching the
+  # database. The UNIT sets KUBECONFIG itself; only the hand-run path lacks it.
+  enableHandoffIndexSync = true;
   # Drift-deadman master switch (scripts/drift-check.sh) — gates ONLY whether the
   # timer is wired into timers.target. The SERVICE definition is always emitted, so
   # `systemctl --user start drift-check` works by hand on either host regardless.
