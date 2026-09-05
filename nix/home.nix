@@ -119,6 +119,24 @@ let
   # SSHes to the laptop), so running it on the laptop too would have each host pushing
   # a full two-host document and the two would fight over every row.
   enableTmuxSnapshotPush = true;
+  # Claude Code TRANSCRIPT feeder master switch (scripts/transcript-push.sh) — feeds
+  # clawgate's chat view. Gates ONLY whether the timer is wired into timers.target; the
+  # SERVICE definition is always emitted, so `transcript-push` can be started by hand
+  # regardless.
+  #
+  # 🔴 NOT serverMode-GATED, AND THAT ASYMMETRY WITH enableTmuxSnapshotPush ABOVE IS THE
+  # WHOLE POINT. That one is workbench-only as a CORRECTNESS requirement: its collector
+  # already reaches both hosts over ssh, so a second reporter would have the two fighting
+  # over every row. Transcripts are ordinary files on each host's OWN filesystem, readable
+  # from nowhere else, so a workbench-only unit would feed exactly half the fleet and the
+  # laptop's sessions would render as "no transcript stored" for ever. The read model is
+  # keyed on a Claude Code session id, which is globally unique, so two hosts pushing
+  # disjoint session sets cannot collide.
+  #
+  # ON from the start: the write path is a latest-per-session upsert, a bad push is
+  # rejected outright (the server 4xx's and CHANGES NOTHING, leaving the previous tail in
+  # place), and the server sweeps rows older than 7 days.
+  enableTranscriptPush = true;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
@@ -3651,6 +3669,96 @@ in
       # correctness requirement, not scoping — two hosts each pushing a full
       # two-host document would fight over every row.
       WantedBy = lib.optionals (serverMode && enableTmuxSnapshotPush) [ "timers.target" ];
+    };
+  };
+
+  # ── CLAWGATE TRANSCRIPT READ-MODEL FEEDER (scripts/transcript-push.sh) ───────
+  # The chat view's supply. Claude Code writes one JSONL transcript per session
+  # under ~/.claude/projects/; clawgate's pod cannot see either host's filesystem
+  # (no hostPath, no hostNetwork, no nodeName), so delivery is outbound from the
+  # host exactly as the tmux read model's is.
+  #
+  # 🔴 ONE UNIT PER HOST — see enableTranscriptPush above for why this is the
+  # opposite of its sibling rather than an inconsistency with it.
+  systemd.user.services.transcript-push = {
+    Unit = {
+      Description = "Push this host's recent Claude Code transcript tails to clawgate";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      # 🔴 NO OnFailure, DELIBERATELY, and for the reason spelled out at
+      # tmux-snapshot-push: notify-failure@ toasts are wired to DEFEAT
+      # do-not-disturb, that bypass is justified by a measured ~1 firing in 9
+      # days, and a timer this frequent would fire one on EVERY tick through any
+      # sustained outage (clawgate mid-redeploy, the laptop asleep). A
+      # permanently-red alarm trains you to ignore the channel.
+      #
+      # What surfaces a dead feeder instead: this is Type=oneshot with distinct
+      # non-zero exit codes, so a persistent failure lands in the user manager's
+      # failed-unit list, which `/standup` reads. ⚠ That covers the CODES and not
+      # a unit that exits 0 while achieving nothing — which is why "nothing had
+      # changed" is a deliberate rc 0 and every other outcome is not.
+      #
+      # 🔴 AND UNLIKE ITS SIBLING, THIS ONE HAS A CONSUMER THAT SHOWS ITS OWN
+      # STALENESS. clawgate's chat view renders `fed <n> ago` from the server's
+      # received_at beside the session's own last activity, precisely so a dead
+      # feeder is visible on the page rather than only in a unit list.
+    };
+    Service = {
+      Type = "oneshot";
+      # Builder cap (120s) + two curl caps (30s each) + slack. All three inner
+      # bounds live in the script; this only has to exceed their sum, or the
+      # cgroup is killed mid-run and the failure reads as a hang rather than as
+      # whichever leg wedged.
+      TimeoutStartSec = 200;
+      Environment = [
+        # 🔴 EVERY ENTRY IS FOR THE CHILD — under systemd there is no login-shell
+        # PATH to fall back on. The script uses curl, sed (gnused), python3, and
+        # tr/cut/wc/mktemp/rm/readlink/dirname/uname/timeout (coreutils); the
+        # builder is pure stdlib Python.
+        #
+        # ⚠ DELIBERATELY SHORTER THAN THE SIBLING'S LIST. tmux-snapshot-push
+        # needs tmux/openssh/gawk because it runs a collector that reaches the
+        # other host; this reads local files and needs none of them. Copying that
+        # list wholesale would be the "trim a copied list without running the
+        # child" mistake in reverse — carrying binaries to justify later.
+        "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.curl pkgs.gnused pkgs.python3 ]}"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/transcript-push.sh";
+      X-Restart-Triggers = [
+        "${../scripts/transcript-push.sh}"
+        # The builder decides which sessions are sent and how much of each — a
+        # change there is a change to what this unit delivers, with no edit to
+        # the shell at all.
+        "${../scripts/lib/build_transcript_push.py}"
+      ];
+    };
+  };
+
+  # Every 5 minutes, which is deliberately SLOWER than the tmux feeder's 2.
+  # The tmux read model backs an at-a-glance "which pane needs me" view, where a
+  # quarter-hour of lag would answer a question nobody asked. A transcript is
+  # read after the fact — the use case is coming back to a session and reading
+  # what it did — so minutes of lag cost nothing, and the run does real work per
+  # tick (hashing up to MAX_CANDIDATES tails).
+  #
+  # The dedupe pre-flight is what makes the cadence affordable: a tick where
+  # nothing changed is one small GET and an exit 0, not a push.
+  #
+  # OnStartupSec gives one prompt run shortly after the user manager starts, so a
+  # rebooted host repopulates before anyone looks. No Persistent: that applies to
+  # OnCalendar timers, not monotonic ones.
+  systemd.user.timers.transcript-push = {
+    Unit = {
+      Description = "Periodic timer for the clawgate transcript read-model feeder";
+    };
+    Timer = {
+      OnStartupSec = "2min";
+      OnUnitActiveSec = "5min";
+    };
+    Install = {
+      # 🔴 NO serverMode GATE — both hosts, on purpose. See enableTranscriptPush.
+      WantedBy = lib.optionals enableTranscriptPush [ "timers.target" ];
     };
   };
 

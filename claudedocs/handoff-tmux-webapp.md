@@ -10,8 +10,64 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 ## Status
 
 
-🔴 **RANK 24 IS THE ONLY WORK: ANOTHER UI/UX FEEDBACK PASS, AND IT NEEDS THE OPERATOR IN THE ROOM.**
-Everything else is closed — ranks 1–17 and 19–23 ✅ — and **18 is not ours**: it stays open only
+🔴 **RANK 24 IS DONE — THE CONVERSATION HAPPENED, AND IT PRODUCED SEVEN NEW RANKS (25–31).**
+✅ **Ranks 25, 26, 27, 28 are MERGED** (2026-09-05). Ranks **29, 30, 31 are DESIGNED BUT NOT
+DISPATCHED** — they all depend on the same missing host-side write channel, and the operator
+settled its design in conversation rather than having it inferred. **Read 29's decision block
+before building any of the three.**
+
+| PR | what | squash | verified |
+|---|---|---|---|
+| `ZacxDev/homelab-infra#695` | ranks 25+26 — transcript read model + chat view + `/session/{id}` | `8f6aa6d3a` | by content on trunk |
+| `ZacxDev/homelab-infra#696` | ranks 27+28 — stale-question retirement, unclipped body, structured options | `17cd8a839` | by content on trunk |
+
+🔴 **MERGED ≠ DEPLOYED. No image was built and no pin was moved** — the live pod does not carry
+either change. `clawgatectl health` is the only authority on what is live.
+
+🔴 **THE TWO PRs BOTH ADDED `0029_*.sql`, AND GIT MERGED THEM CLEANLY BY FILENAME.** Different
+names, no textual conflict, `merge-tree` rc 0 — and the second to land would have made clawgate
+**fail to start**. Resolved by sequencing: #695 merged first, #696 renumbered to `0030`, and the
+final set was verified on trunk as `0028, 0029_session_transcripts, 0030_attention_entry_options`
+with no duplicate version. The guard (`TestMigrationVersionsAreUniqueAndContiguous`) was validated
+in **both** directions before relying on it — a gap fails with *"migration version 30 is missing"*,
+a duplicate with *"version 29 is claimed by 2 files … clawgate then fails to START"*.
+**This is the canonical example of "a clean git merge is not a clean merge."**
+
+🔴 **#696 TOOK A SIX-ROUND AUDIT LADDER, AND EVERY ROUND BUT THE LAST FOUND SOMETHING REAL.**
+Executable payload per round: **56 → 45 → 22 → 17 → 3 → (clean)**. Round 6 returned no findings
+and ended it; no seventh was run to confirm it. What the ladder caught, all measured:
+1. A **live** question could be hidden and then permanently resolved, because staleness bounded the
+   snapshot's ABSOLUTE age and never its age RELATIVE to the entry — the inverse of the requirement,
+   and **every fixture in the suite pinned the bug as correct** (all raised at `now` with the
+   snapshot before it, so the only sound ordering was never built).
+2. The postdates-the-entry rule was applied to signal 1's SECONDARY delivery while the PR's own
+   comment named the OTHER one as the path that does the work.
+3. `stopped_at` became an unclamped **cross-host** clock reading driving a database predicate —
+   against `internal/tmux/tmux.go:160`, which already said the server clock is *"the only one a
+   wrong or skewed host clock cannot corrupt"*.
+4. The `%N` fallback was a **SPELLED guard**: it sniffed for the literal string `%N`, but
+   `bats/bats:1.11.1` — the image CI runs the hook suites in — drops `%N` *and the trailing `Z`*,
+   so the fallback never fired and the stamp became unparseable. **A regression**, and neither test
+   tier could see it.
+5. Emptying an unusable stamp removed the only log line that would say the stamp was unusable.
+⚠ **Two mutation-harness lies were caught by validating the instrument, not the code:** a `-run`
+filter naming a renamed test scored a mutant SURVIVED without ever running it, and a later
+zero-collect guard had a **dead clause** (`--- PASS:` is never printed without `-v`). Both were
+found by feeding the harness a case it MUST fail. The harness is now committed at
+`containers/clawgate/hack/mutation_sweep.py` and refuses to run without a DSN, because the
+PG-gated packages would otherwise skip and score every mutant in them as SURVIVED.
+🔴 **RANK 27 CHANGED MID-FLIGHT AND THE AGENT WAS TOLD.** The operator answered a question about
+the WRITE path by redirecting it to the READ path: *"detect that and retire the question so there
+is never a stale question visible."* That is a display-correctness guarantee, and it moved work
+from 29 into 27. It does **not** eliminate 29's write-time race — see 29(b).
+🔴 **READ RANK 29 BEFORE TOUCHING ANYTHING THAT WRITES TO A PANE.** "Add a reply box" is not a UI
+item: `requireTerminalToken` guards **zero** routes, `CLAWGATE_TERMINAL_TOKEN` is **unset** (the pod
+says so at boot), and the host→pod channel is **push-only** — three missing layers, measured.
+🔴 **THE RECON REFUTED TWO OF THIS DOC'S OWN CLAIMS, WHICH IS THE POINT OF MEASURING FIRST.**
+The "Attention queue" section's *"`AskUserQuestion` is silent today"* is **false** (rank 25), and
+the seam guard rank 29 would have asked for **already exists** (`terminal_write_ledger_test.go`).
+Both had been true when written. Neither survived a probe.
+Everything else is closed — ranks 1–17 and 19–24 ✅ — and **18 is not ours**: it stays open only
 because its closing condition (a `go`-leg red being attributable without a re-run) is owned by the
 session that root-caused it to a node. 🔴 **Do not "get started" on 24 by inventing changes.** Every
 UI item this doc has shipped came from the operator naming a specific annoyance (ranks 19, 20 and
@@ -338,7 +394,7 @@ clawgatectl panel collapse <id>
 
 | Raiser | State today |
 |---|---|
-| **Agent asks a question** | 🔴 **Silent today.** `hook/clawgate-hook.sh:79` explicitly defers `AskUserQuestion` to the terminal **without contacting the server**, because a question is not allow/deny-routable. **This hook must change** — it is the primary use case. |
+| **Agent asks a question** | ✅ **LIVE — and this row said "🔴 Silent today" until 2026-09-04, when a probe refuted it.** `raise_attention_question` (`hook/clawgate-hook.sh:102`) fires on `AskUserQuestion` (`:201`) and files an entry; the terminal prompt is unaffected either way. The old text was true when written and outlived the fix. **Measured live: 36 open entries — 2 `question`, 34 `idle`.** What is still missing is not the RAISE but the ANSWER — see ranks 28–30. |
 | **Agent stopped, ready for next prompt** | Stop hook already fires (`/api/suggest`, writes `cc_sessions`). Route it into the queue as a lower-priority "idle, awaiting prompt" entry. ⚠ It was ~96% dead — 23,937 payload failures vs 921 successes since 2026-06-14 — and **both chokepoints are now fixed** (`--rawfile` + `--data-binary @file`). Do not re-derive that bug. |
 | **Explicit `clawgatectl` verb** | New. An agent deliberately raises with a reason. |
 
@@ -796,7 +852,13 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     mattered — so it would trade a simple mutation-covered path for an uncovered case that has never
     fired. Criterion 1 stays written and ready if one is ever observed.
     forcing: none
-24. **Another UI/UX feedback pass on the clawgate web UI.** Repo: `ZacxDev/homelab-infra`,
+24. ✅ **RETIRED 2026-09-04 — the conversation happened and the items are filed as ranks 25–30.**
+    It was a placeholder for a conversation, and its closing condition ("the operator names the
+    annoyances, each becomes its own ranked item") is met. The operator named five, and 🔴 **the
+    recon that followed refuted two of this doc's own standing claims** — see rank 25's entry for
+    the stale `AskUserQuestion` line and rank 29's for the ledger that already exists. Original
+    brief preserved below because the METHOD is the artifact: ask, then measure, then build.
+    **Another UI/UX feedback pass on the clawgate web UI.** Repo: `ZacxDev/homelab-infra`,
     `containers/clawgate/internal/ui/` (Go-built HTML + htmx; there are no template files), with
     e2e in `containers/clawgate/e2e/tests/` and the visual walk in `e2e/ux-audit/`.
     **Stated by the operator at the end of the 2026-09-04 session: "we'll do another UI/UX feedback
@@ -828,6 +890,208 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     its own closing condition, and this item is retired once they are filed — it is a placeholder
     for a conversation, not a unit of work to be graded.
     forcing: user — the operator asked for it explicitly at the close of the 2026-09-04 session.
+25. **The transcript feeder — get Claude Code transcript content from both hosts into clawgate,
+    read-only.** Repo: `ZacxDev/homelab-infra` (ingest) + `innovation-upstream/devrc` (the host-side
+    push). ✅ **DONE 2026-09-05 — `ZacxDev/homelab-infra#695`, squash `8f6aa6d3a`**, content-verified
+    on trunk. The devrc host-side half is `innovation-upstream/devrc#1310`. Claim released.
+    🔴 **THIS DOC'S ATTENTION MODEL WAS STALE AND THE RECON REFUTED IT.** The "Attention queue"
+    section above says `AskUserQuestion` is *"🔴 Silent today — `hook/clawgate-hook.sh:79`
+    explicitly defers to the terminal without contacting the server"* and calls the hook change
+    the primary use case. **That is false as of 2026-09-04.** `raise_attention_question` exists at
+    `hook/clawgate-hook.sh:102` and fires on `AskUserQuestion` at `:201`; questions ARE reaching
+    the queue, with their options. Measured live: **36 open entries — 2 `question`, 34 `idle`.**
+    Do not re-derive the old model from that section; fix the section when you next touch it.
+    **Why a transcript feeder at all:** the operator asked for a "pretty chat view" of session
+    content. The right source is the **Claude Code JSONL transcript**, not `capture-pane`.
+    Measured: transcripts sit at `~/.claude/projects/<slugified-cwd>/<session-uuid>.jsonl`, are
+    newline-delimited JSON with `type` in {`assistant`,`user`,`attachment`,`system`,`mode`,
+    `permission-mode`,`bridge-session`,`last-prompt`,`ai-title`} (one file: 133 records = 39
+    assistant, 38 attachment, 17 user), and **the join key already exists** — every attention entry
+    carries the Claude Code session id. `capture-pane` is an ANSI screen dump: lossy,
+    scrollback-bounded, turn boundaries guessable only from formatting. **Operator chose transcript
+    for BOTH surfaces**, with no capture-pane fallback.
+    🔴 **A write route under a ledgered prefix reds the build** — see rank 29.
+    🔴 **TRANSCRIPTS ARE CAPTURED TEXT AND THIS REPO IS PUBLIC.** No real message body, prompt,
+    model output, media path or third-party hostname in a fixture, golden, debug dump or PR body.
+    Fixtures must be SYNTHETIC and regenerated to the shape.
+    Closing condition: transcript content for a named session on EACH host is retrievable from the
+    pod, and the path is read-only — no host-side execution of any kind is reachable through it.
+    forcing: none — no deadline; it is the foundation rank 26 needs.
+26. **The chat view — one transcript-driven component, mounted twice.** Repo:
+    `ZacxDev/homelab-infra`, `containers/clawgate/internal/ui/`. ✅ **DONE 2026-09-05 — shipped in
+    `#695`, squash `8f6aa6d3a`.** 🔴 The `/session/{claudeSessionId}` contract was verified against
+    the REAL binary, not asserted: the href read out of the card's own `AttentionSessionPath`
+    constant returned **200** with the session id in the body, and a bogus path returned **404** as
+    the negative control — so "not 404" is a measurement. Claim released. Originally dispatched
+    2026-09-04, claim `tmux-webapp-26`. Renders a transcript as an app-native chat (user vs
+    assistant turns), NOT a terminal dump. Two mounts: the tmux page, and a new standalone
+    **`/session/{claudeSessionId}`** (shell) + **`/ui/session/{claudeSessionId}`** (partial).
+    🔴 **`/session/{id}` IS A CROSS-AGENT CONTRACT, NOT AN IMPLEMENTATION DETAIL.** Rank 27's agent
+    adds the attention card's "view session" link pointing at exactly that path, in a different
+    worktree, concurrently. Renaming the route silently breaks a link nobody will test together —
+    the isolation-seam shape. **Merge 26 before 27, or the link 404s.**
+    ⚠ **File ownership was split to keep the two agents off each other:** 26 owns
+    `internal/ui/tmux.go`, `internal/api/tmux.go` and the new chat/session files; 27+28 own
+    `internal/ui/attention.go`, `internal/api/attention.go`, `internal/attention/` and `hook/`.
+    🔴 **Disjoint files are NOT safety** — test-merge the two branches before merging the second.
+    Closing condition: a Claude Code session renders as a readable chat at
+    `/session/{id}` and from the tmux page, sourced from the transcript, verified on the live pod
+    after deploy — not inferred from a green test.
+    forcing: none
+27. ✅ **DONE 2026-09-05 — `ZacxDev/homelab-infra#696`, squash `17cd8a839`**, content-verified on
+    trunk, after a six-round audit ladder (see the status block at the top). Claim released.
+    **Two attention-queue accuracy defects.** Repo: `ZacxDev/homelab-infra`. Originally —
+    dispatched 2026-09-04, claim `tmux-webapp-27`.
+    🔴 **(a) A `question` entry NEVER auto-resolves, so the queue overstates what is waiting on the
+    operator — the one thing it exists to get right.** The reaper resolves only `idle`
+    (`ResolveOpenIdleNotSeenSince`, `internal/attention/attention.go:~448`, sweeping every 30m for
+    entries unseen 4h); **nothing** resolves a question, and no hook posts resolve for one.
+    Measured: a question raised **2026-09-02T19:46:19Z** was still rendering as `blocked` and
+    ranked first under "blocked first, then longest wait" **two days later**.
+    ⚠ **The fix has an EMPTY-RESULT trap written into its brief:** "no further events from that
+    session" is equally consistent with answered-and-quiet and with crashed-and-gone, so it
+    identifies neither. The agent was told to name the discriminating upstream signal or state
+    plainly that it could not and document the approximation's limits.
+    **(b) The card body is clipped by `max-h-32 overflow-hidden` with no expand control** — long
+    question bodies truncate with no affordance, which is exactly the "see the full context"
+    complaint.
+    🔴 **THE OPERATOR RAISED THE BAR MID-FLIGHT, AND IT IS A DIFFERENT KIND OF REQUIREMENT.**
+    Verbatim: *"we need to detect that and retire the question so there is never a stale question
+    visible to the user."* That is a **display-correctness guarantee**, not a background tidy-up —
+    "it resolves eventually" does not satisfy it. Whoever closes this must state **which window of
+    staleness can still be visible**, because there will be one.
+    ⚠ **This answer arrived in response to a question about the WRITE path** (what should happen if
+    you reply to a pane that moved on) and the operator redirected it to the READ path instead —
+    retire the question rather than guard the write. That is the better fix and it relocates the
+    work from rank 29 to here. The write-time race does not vanish, it only shrinks; see rank 29.
+    **Two independent signals, and they cover each other's blind spot — measured, not assumed:**
+    (1) **the session unblocked** — `AskUserQuestion` BLOCKS the session, so any later hook event
+    from that session id proves it is no longer waiting; blind to a dead session. (2) **the pane
+    moved on** — the 2-minute snapshot already carries pane content, so a pane no longer showing
+    the pending prompt is not awaiting an answer; works when hooks never fire, but its cadence
+    means the guarantee can never be absolute. Use both; name what each cannot see.
+    Closing condition: (a) a question answered in the terminal stops appearing as blocked, by a
+    named mechanism, with a regression test watched RED at `origin/trunk` — the reproducible red is
+    the 2026-09-02T19:46:19Z entry still rendering `blocked` two days later; (b) the full body is
+    reachable from the card.
+    forcing: none
+28. ✅ **DONE 2026-09-05 — shipped in `#696`, squash `17cd8a839`.** Options are structured end to
+    end and render as discrete rows; they are **display-only**, because the write path (rank 29)
+    does not exist. Claim released.
+    **Structured options on an attention entry.** Repo: `ZacxDev/homelab-infra`. Originally —
+    dispatched 2026-09-04, claim `tmux-webapp-28`.
+    🔴 **"Select a suggested option" has NO structured data behind it today.** Measured:
+    `attentionRaiseRequest` is `Kind, Priority, Title, Body, Host, Project, SessionID, Cwd,
+    TmuxPane` — **no options array anywhere in the payload, the store, or the render.** What the
+    card shows is the options flattened into `Body` as plain text inside a `whitespace-pre-wrap`
+    div. So this is a hook + payload + store + render change, not a UI tweak.
+    🔴 **RENDER ONLY — the options are deliberately NOT wired to an action in this rank**, because
+    answering needs the write path that rank 29 has to build first. Backwards compatibility is a
+    requirement, not a nicety: entries raised by an OLD hook carry no options and must still render.
+    Closing condition: an `AskUserQuestion` raise carries its options as structured data end to
+    end and they render as discrete options, with options-less entries still rendering correctly.
+    forcing: none
+29. **The reply channel — host-side short-poll agent + the `send-keys` route + token
+    provisioning.** Repo: `ZacxDev/homelab-infra` + `innovation-upstream/devrc`. **NOT STARTED,
+    NOT DISPATCHED — deliberately held for a design conversation with the operator.**
+    🔴 **THREE LAYERS ARE MISSING, NOT ONE. This is why "add a reply box" is not a UI item.**
+    | layer | measured state, 2026-09-04 |
+    |---|---|
+    | write route | `requireTerminalToken` guards **ZERO** routes — the only non-test, non-comment occurrence in the repo is its own definition at `internal/api/auth.go:140`. `POST /api/tmux/send-keys` → **404**. |
+    | token | Pod boot log, verbatim: `terminal write surface: DISABLED (fail-closed) — CLAWGATE_TERMINAL_TOKEN is not set`. Secret `clawgate-secrets` holds `CLAWGATE_AUTH_TOKEN`, `CLAWGATE_HOOK_TOKEN` (32 B), `CLAWGATE_SESSION_SECRET` — **no terminal key**. The deployment references it `optional: true`, so the pod boots healthy with it absent. |
+    | return channel | Host→pod is **push-only** (`tmux-snapshot-push.timer`, 2 min, running `devrc/scripts/tmux-snapshot-push.sh` → `POST /api/tmux/snapshot`). **Nothing on the host pulls commands down.** The "tmux-agent with outbound long-poll" in this doc's architecture section was designed but only its PUSH half was ever built (rank 4). |
+    **That is why today's "jump in" is a copy-to-clipboard of `tmux switch-client -t %N`** — it
+    does not jump, it hands you a command to paste. Not a stopgap anyone chose to leave; it is the
+    only thing possible without a return channel.
+    🔴 **THE SOPS BLOCKER IS REAL BUT SOLVABLE, AND THIS DOC HAD IT HALF-RIGHT.** Rank 5 says "the
+    SOPS age identity is on NEITHER host" — **re-measured true**: `~/.config/sops/age/keys.txt`
+    absent and `SOPS_AGE_KEY_FILE` unset on **both** workbench and laptop. **But the private key is
+    recoverable from the cluster**: `flux-system/sops-age`, key `age.agekey` — and its public half
+    was compared against the recipient in `.sops.yaml` and **matches exactly**, so it is the right
+    identity, not a stale one. Provisioning is therefore an operator step, not an impossibility.
+    🔴 **Neither half is reproduced here, and neither belongs in a doc, a log, a PR or a fixture —
+    this repo is PUBLIC.** Read it from the cluster at the moment you need it.
+    🔴 **OPERATOR DECISION, TAKEN WITH THE BLAST RADIUS STATED — free text into ANY pane,
+    unrestricted.** Offered and DECLINED: scoping free text to panes with an open attention entry.
+    So the route, once armed, is a general remote shell into any pane on either host, reachable
+    from a LAN NodePort that has **no human auth**, gated solely by `CLAWGATE_TERMINAL_TOKEN`.
+    That is recorded as a decision, not an oversight; do not silently narrow it, and do not widen
+    the exposure further without asking.
+    ⚠ **The seam guard I was about to recommend ALREADY EXISTS — do not rebuild it.**
+    `internal/api/terminal_write_ledger_test.go` is an AST-parsing (not grepping) invariant guard
+    with its own positive control, and `terminalSurfacePrefixes` already contains `/api/term`, so
+    the future route is pre-ledgered. It labels itself an invariant guard rather than regression
+    coverage — an honest model worth copying. **The live lesson it encodes:** a fail-closed wrapper
+    that wraps zero routes passes every test, which is exactly today's state.
+    **DESIGN SETTLED 2026-09-04 — four operator decisions, each recorded with what it costs:**
+    🔴 **(a) The reply SUBMITS — clawgate presses Enter.** Chosen over type-only with the tradeoff
+    stated: type-only is strictly safer (a misdirected write sits there visibly instead of running)
+    but makes remote answering pointless, since you would have to be at the machine anyway. **So a
+    misdirected write EXECUTES.** That is the cost, accepted deliberately, and it is why (b) matters.
+    🔴 **(b) Staleness is handled by RETIRING THE QUESTION, not by guarding the write — see rank
+    27.** The operator redirected this from the write path to the read path. ⚠ **It shrinks the
+    race, it does not remove it:** the pane signal has a 2-minute cadence, so a question can be
+    visible and answerable for up to one snapshot interval after the pane moved on. **Combined with
+    (a), that window is one in which a submitted reply executes into a pane that has moved on.**
+    A cheap write-time guard is therefore still warranted even though the operator's fix is
+    elsewhere — do not read "retire the question" as licence to skip it.
+    🔴 **(c) Full audit log INCLUDING the text sent.** Timestamp, target host/pane, originating
+    attention entry, exact text. Chosen over metadata-only so "what did that write actually do" is
+    answerable after the fact. ⚠ **Cost, stated at decision time:** replies you type may contain
+    secrets, so **this log is itself sensitive and needs credential-grade handling** — retention,
+    access, and never in a public repo, a fixture, or a PR body. Redaction-on-secret-shapes was
+    offered and declined, correctly: it fails silently and stores a missed secret believing it was
+    scrubbed.
+    🔴 **(d) Free text into ANY pane, unrestricted** — see the paragraph above. Unchanged.
+    ⚠ **Provisioning `CLAWGATE_TERMINAL_TOKEN` is the step that ARMS all of this, and it is
+    separable from building it.** The route can be built, merged and deployed while the surface
+    stays `DISABLED (fail-closed)`; arming is then one secret away and reversible by removing it.
+    Prefer that ordering — it lets the write path be reviewed and audited before it can execute
+    anything, and a boot log line states which state the server is in, unconditionally, in both
+    directions.
+    Closing condition: a reply typed in the web UI appears in the target pane on the target host,
+    verified end to end against the live pod — an API 200 is NOT the closing condition — with the
+    write route provably behind `requireTerminalToken` via the existing ledger, and the write
+    recorded in the audit log.
+    forcing: user — the operator asked for it; held only for a design conversation, not deprioritised.
+30. **The reply UI component + questions-only attention-first ordering.** Repo:
+    `ZacxDev/homelab-infra`. **NOT STARTED** — depends on 28 (structured options) and 29 (the write
+    path). The component mounts on `/attention`, on the tmux page, and inside the `/session/{id}`
+    view, so a question can be answered from any of the three.
+    🔴 **OPERATOR DECISION: the tmux page's needs-attention indicator is driven by QUESTIONS ONLY.**
+    Measured rationale: **34 of 36 open entries are `idle, awaiting prompt`**, so an indicator
+    keyed on "any open entry" lights up nearly every window and carries no signal. Idle entries
+    stay visible on `/attention`; they do not drive the tmux page.
+    Closing condition: a question is answered from each of the three mounts and the entry resolves
+    as a consequence, verified live.
+    forcing: none
+31. **Start a new Claude Code session on a host, from clawgate.** Repo: `ZacxDev/homelab-infra`
+    (+ the host-side agent from rank 29). **NOT STARTED — opened by the operator 2026-09-04.**
+    🔴 **THIS IS THE SAME CHANNEL AS RANK 29, NOT A SECOND EFFORT — which is why it is cheap, and
+    also why it is not safe until 29 is.** Measured: clawgate spawns agents as **Kubernetes pods**
+    via an embedded kubeclaw Helm chart (`internal/agents/helm.go`, `embed.go`); **nothing in the
+    codebase touches a host tmux server.** The only tmux write anywhere is `internal/ui/
+    attention.go:196` assembling a `tmux switch-client` string for a CLIPBOARD button. So a host
+    tmux `new-window` needs the rank 29 transport and nothing else new at the transport layer —
+    the doc's auth section already groups `send-keys`, `kill-*` and `new-*` behind the same
+    fail-closed wrapper, and `terminalSurfacePrefixes` already covers the prefix.
+    🔴 **OPERATOR DECISION: it creates a window AND launches Claude Code with an initial prompt** —
+    pick host, project/cwd, type a prompt, get a working session. Chosen over a bare shell, which
+    was judged near-useless from a phone. **It composes with ranks 26 and 30:** a session started
+    this way is immediately watchable in the chat view and answerable through the reply component.
+    ⚠ **Do not confuse this with the agent-pod path.** clawgate already provisions agent pods, and
+    `MEMORY.md` records that task/agent dispatch defaults to deepseek via `CLAWGATE_AGENT_MODEL`.
+    This item is deliberately the OTHER thing — a real tmux session on a real host, because that is
+    where the operator works. Neither replaces the other.
+    ⚠ **Untouched questions, named so they are not silently decided by whoever builds it:** which
+    host and how it is chosen; new window in an existing session vs a brand-new tmux session; how
+    the cwd/project is picked and validated; what happens when the target path does not exist; and
+    whether a spawn is rate-limited (a spawn route on an unauthenticated LAN NodePort is a fork
+    bomb primitive if it is not).
+    Closing condition: a session started from the web UI appears on the chosen host, running Claude
+    Code on the given prompt, and is visible in the tmux read model and the chat view — verified
+    live on the pod, not from a green test.
+    forcing: user — the operator asked for it explicitly on 2026-09-04.
 
 ## Open investigations — live diagnosis state
 

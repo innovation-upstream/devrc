@@ -68,6 +68,7 @@ HERE = Path(__file__).resolve().parent
 BATTERIES = (
     "mutation_battery_resume_state.py",
     "mutation_battery_resume_state_skill.py",
+    "mutation_battery_mentions.py",
 )
 
 # 🔴 PYTHON MUTATION INSTRUMENTS THIS MODULE CANNOT PIN, each with its reason.
@@ -104,7 +105,7 @@ def _load(filename: str | Path):
 def _anchors(mod):
     """`(mutant_id, pattern)` for every anchor in a battery's table.
 
-    `old` is the 4th field in BOTH tables (the skill battery adds a 6th
+    `old` is the 4th field in ALL tables (the skill battery adds a 6th
     `expected` field after it, and nothing before it). It may be a TUPLE of
     patterns applied in order — the skill battery's multi-site mutants — and
     each element is separately required to occur exactly once, which is the
@@ -117,11 +118,39 @@ def _anchors(mod):
             yield mid, pat
 
 
-def _offenders(text: str, mod) -> list[tuple[str, str, int]]:
-    """Anchors that do NOT occur exactly once in `text`."""
-    return [(mid, pat, text.count(pat))
-            for mid, pat in _anchors(mod)
-            if text.count(pat) != 1]
+def _target_of(mod, mid) -> Path:
+    """The file a row's anchor must occur exactly once in.
+
+    🔴 A BATTERY MAY SPAN SEVERAL FILES. `mutation_battery_mentions.py` does,
+    because the defects it exists for live at the SEAMS between the scanner, the
+    tailer and the click handler rather than inside any one of them — a battery
+    restricted to one `SCRIPT` structurally cannot express those. Such a battery
+    declares `TARGETS = {mutant_id: Path}`; a single-file battery declares only
+    `SCRIPT` and every row resolves to it, unchanged.
+    """
+    return getattr(mod, "TARGETS", {}).get(mid, mod.SCRIPT)
+
+
+def _offenders(mod, override: dict | None = None) -> list[tuple[str, str, int]]:
+    """Anchors that do NOT occur exactly once in their own target file.
+
+    `override` maps a Path to text to use INSTEAD of reading that file — the
+    negative control's mechanism, so it can exercise both failure shapes without
+    writing to a battery's target in the tree.
+    """
+    override = override or {}
+    cache: dict[Path, str] = {}
+    bad = []
+    for mid, pat in _anchors(mod):
+        path = _target_of(mod, mid)
+        if path in override:
+            text = override[path]
+        else:
+            text = cache.setdefault(path, path.read_text(encoding="utf-8"))
+        n = text.count(pat)
+        if n != 1:
+            bad.append((mid, pat, n))
+    return bad
 
 
 @pytest.mark.parametrize("battery", BATTERIES)
@@ -129,17 +158,19 @@ def test_every_mutation_anchor_occurs_exactly_once_in_its_target(battery):
     """🔴 THE GUARD. A 0x anchor is a row that tests nothing; a 2x anchor is a
     mutation applied at a site the row does not describe."""
     mod = _load(battery)
-    text = mod.SCRIPT.read_text(encoding="utf-8")
-    bad = _offenders(text, mod)
+    bad = _offenders(mod)
     assert not bad, (
-        f"{battery}: {len(bad)} anchor(s) do not occur EXACTLY ONCE in "
-        f"{mod.SCRIPT.relative_to(HERE.parents[1])}.\n"
+        f"{battery}: {len(bad)} anchor(s) do not occur EXACTLY ONCE in their "
+        "target file.\n"
         "An anchor at 0x makes its row report `!! PATTERN OCCURS 0x — NOT "
         "APPLIED` and score as a SURVIVOR without testing anything; an anchor "
         "at 2x mutates a second site the row's description does not name.\n"
         "FIX THE BATTERY ROW, not this test — re-anchor `old` on the line as it "
         "now reads, and re-run the battery to confirm the row still kills.\n"
-        + "\n".join(f"  {mid}: occurs {n}x — {pat!r}" for mid, pat, n in bad)
+        + "\n".join(
+            f"  {mid}: occurs {n}x in "
+            f"{_target_of(mod, mid).relative_to(HERE.parents[1])} — {pat!r}"
+            for mid, pat, n in bad)
     )
 
 
@@ -157,22 +188,54 @@ def test_the_anchor_check_can_go_RED_in_BOTH_directions(battery):
     Membership, not equality: removing or duplicating one pattern can move the
     count of another anchor that shares text with it, and that is not what this
     control is asserting.
+
+    The copy is fed in through `override` rather than written to disk, and it is
+    keyed on the FIRST ROW'S OWN target — which for a multi-file battery is not
+    necessarily `SCRIPT`.
     """
     mod = _load(battery)
-    text = mod.SCRIPT.read_text(encoding="utf-8")
     mid, pat = next(_anchors(mod))
+    target = _target_of(mod, mid)
+    text = target.read_text(encoding="utf-8")
 
-    gone = _offenders(text.replace(pat, "", 1), mod)
+    gone = _offenders(mod, {target: text.replace(pat, "", 1)})
     assert (mid, pat, 0) in gone, (
         f"deleting {mid}'s anchor did not report it at 0x — the checker cannot "
         f"see the failure it exists for. offenders={gone!r}"
     )
 
-    twice = _offenders(text + pat, mod)
+    twice = _offenders(mod, {target: text + pat})
     assert (mid, pat, 2) in twice, (
         f"duplicating {mid}'s anchor did not report it at 2x. "
         f"offenders={twice!r}"
     )
+
+
+@pytest.mark.parametrize("battery", BATTERIES)
+def test_every_declared_TARGET_exists_and_is_named_by_a_row(battery):
+    """🔴 A `TARGETS` MAP IS A LEDGER, AND AN UNPINNED ROW IS THE FAILURE IT
+    EXISTS TO PREVENT. Two ways it rots, both silent:
+
+      * a row with no entry falls back to `SCRIPT`, so its anchor is checked
+        against the WRONG FILE — where it occurs 0x, which this module would
+        then report as a battery bug rather than as the mapping bug it is;
+      * an entry naming a mutant id no row carries is a stale pointer that
+        reads as coverage.
+
+    A battery with no `TARGETS` is single-file and passes trivially — asserted
+    rather than skipped, so the two families run the same check.
+    """
+    mod = _load(battery)
+    targets = getattr(mod, "TARGETS", {})
+    ids = [row[0] for row in mod.MUTANTS]
+    assert len(ids) == len(set(ids)), f"{battery}: duplicate mutant ids"
+    if targets:
+        missing = [i for i in ids if i not in targets]
+        assert not missing, f"{battery}: rows with no TARGETS entry: {missing}"
+        stale = [k for k in targets if k not in ids]
+        assert not stale, f"{battery}: TARGETS names no such row: {stale}"
+    for path in ({*targets.values()} or {mod.SCRIPT}):
+        assert path.is_file(), f"{battery}: target does not exist: {path}"
 
 
 def test_the_anchor_check_is_not_vacuous_because_the_tables_are_NON_EMPTY():
@@ -182,9 +245,21 @@ def test_the_anchor_check_is_not_vacuous_because_the_tables_are_NON_EMPTY():
     for battery in BATTERIES:
         mod = _load(battery)
         pats = list(_anchors(mod))
-        assert len(pats) >= 20, (
-            f"{battery} yielded {len(pats)} anchors; the tables have dozens. "
-            "The reader is broken, not the batteries."
+        # 🔴 DERIVED FROM THE TABLE, NOT A LITERAL. This used to be `>= 20`,
+        # which is a claim about how big the two original batteries happened to
+        # be — a 16-row battery added later failed it while its reader worked
+        # perfectly. Every row contributes at least one anchor and a multi-site
+        # row contributes more, so `len(pats) >= len(MUTANTS)` is the real
+        # invariant; the small absolute floor only rejects an import that
+        # yielded a stub. What catches a reader pointed at the WRONG FIELD is
+        # the exactly-once check above, where a `new` pattern occurs 0x.
+        assert len(mod.MUTANTS) >= 5, (
+            f"{battery} has {len(mod.MUTANTS)} rows; that is a stub, not a "
+            "battery — or the import yielded the wrong object."
+        )
+        assert len(pats) >= len(mod.MUTANTS), (
+            f"{battery} yielded {len(pats)} anchors for {len(mod.MUTANTS)} "
+            "rows; the reader is broken, not the battery."
         )
         assert mod.SCRIPT.is_file(), f"{battery}: SCRIPT does not exist"
 
