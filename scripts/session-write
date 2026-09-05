@@ -356,6 +356,25 @@ def _load_session_resolve(path: str = SESSION_RESOLVE_PATH):
 
 
 sr = _load_session_resolve()
+def _load_tmux_text_policy(path: str = None):
+    """Load `scripts/lib/tmux_text_policy.py` by EXPLICIT PATH.
+
+    By path, like `_load_session_resolve` above and for the same reason: this
+    file is a SCRIPT with no package around it, so an ordinary import cannot
+    find a sibling directory, and a `sys.path` mutation would leak into every
+    module this process later loads.
+
+    🔴 IT RAISES RATHER THAN FALLING BACK. A missing policy module must stop
+    this program, not quietly leave it with a weaker check — the whole reason
+    the module exists is that a weaker check shipped once already.
+    """
+    path = path or os.path.join(_HERE, "lib", "tmux_text_policy.py")
+    loader = importlib.machinery.SourceFileLoader("_sw_tmux_text_policy", path)
+    spec = importlib.util.spec_from_loader("_sw_tmux_text_policy", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
 
 
 # --------------------------------------------------------------------------- #
@@ -396,58 +415,39 @@ LOG_ROOT = os.path.join(os.path.expanduser("~"), ".claude")
 DEFAULT_LOG_PATH = os.path.join(LOG_ROOT, "session-write.log")
 LOG_PATH_ENV = "SESSION_WRITE_LOG"
 
-#: The character whose trailing occurrence tmux EATS off an argv token — see the
-#: measurement in the docstring. Named so the refusal and the check cannot drift.
+#: 🔴 THE TEXT POLICY NOW LIVES IN ONE MODULE, AND THIS FILE IMPORTS IT.
+#: `scripts/lib/tmux_text_policy.py` holds the allowlist, its two diagnosis sets
+#: and the argv separator. The reason it moved is recorded there: a SECOND copy
+#: of this rule shipped at the network-facing site (`tmux-reply-agent`) as a
+#: DENYLIST — `ord(ch) < 0x20 or ord(ch) == 0x7F` — which passes every C1
+#: control and U+0085 NEL, i.e. exactly the bug whose fix `validate_text`'s
+#: docstring below describes. One rule, two sites, wrong at the one reachable
+#: from the network.
+#:
+#: The names are RE-EXPORTED under their existing spellings so nothing that
+#: reads them (this file's guards, and `test_session_write.py`, which asserts on
+#: `sw.TEXT_IS_ALLOWED` and `sw.TEXT_EXTRA_ALLOWED`) has to change. The behaviour
+#: is byte-for-byte the same predicate that was here.
+_tp = _load_tmux_text_policy()
+
+TEXT_EXTRA_ALLOWED = _tp.TEXT_EXTRA_ALLOWED
+TEXT_INVISIBLE_CATEGORIES = _tp.TEXT_INVISIBLE_CATEGORIES
+SUBMITTING_CHARS = _tp.SUBMITTING_CHARS
+TEXT_IS_ALLOWED = _tp.TEXT_IS_ALLOWED
+
+#: The character whose trailing occurrence tmux EATS off an argv token.
+#:
+#: 🔴 PINNED AGAINST session-resolve's OWN CONSTANT, not merely copied. The
+#: shared policy module spells the character itself (a daemon must not import a
+#: 3,000-line CLI to learn one character), so the two could drift — and this
+#: assertion is what makes that impossible rather than unlikely. It fires at
+#: import, before any caller can be given a wrong answer.
 TMUX_ARGV_SEPARATOR = sr.TMUX_SEPARATOR_CHAR
-
-#: Characters that `send-keys -l` delivers as a real Enter (measured).
-#: 🔴 NOT THE GATE — these two are non-printable, so `TEXT_IS_ALLOWED` already
-#: refuses them. This tuple exists only to give them a message that names the
-#: hazard. Deleting it weakens the DIAGNOSIS, never the refusal; that is the
-#: whole point of replacing the denylist, and a test pins it.
-SUBMITTING_CHARS = ("\n", "\r")
-
-#: 🔴 G13. The `--text` ALLOWLIST. Every codepoint not permitted here is refused
-#: by number — see measurement (c): a Ctrl-O executed a pane's buffer with no
-#: Enter sent, and the set of characters bound to an accept-line variant is a
-#: property of the OPERATOR'S shell config, which this process cannot read. So
-#: the question asked is "is this character safe to deliver", never "is this one
-#: of the dangerous ones we thought of".
-#:
-#: `str.isprintable()` is False for exactly the Unicode categories that make a
-#: byte a control or an invisible: Cc (NUL, `\n`, `\r`, `\x0f`, ESC, DEL), Cf,
-#: Cs, Co (private use — the U+E000 that once rendered a diff identical to an
-#: unedited line), Cn, Zl, Zp and Zs-except-ASCII-space. Tab is Cc and so must
-#: be re-permitted explicitly; it is the one control character with an ordinary
-#: typographic use and it cannot accept a line.
-TEXT_EXTRA_ALLOWED = ("\t",)
-
-#: 🔴 THE CATEGORIES THAT ARE REFUSED BUT ARE NOT CONTROL CHARACTERS — a
-#: DIAGNOSIS set, never a gate (`TEXT_IS_ALLOWED` has already rejected every
-#: member before this is consulted; a test pins that).
-#:
-#: Zs is every Unicode space EXCEPT the ASCII one (`" ".isprintable()` is True,
-#: so U+0020 never reaches here); Zl/Zp are the line and paragraph separators;
-#: Cf is the format characters — ZWSP, ZWJ, the soft hyphen, the bidi marks,
-#: the BOM. Measured against the shipped predicate: U+00A0, U+202F, U+2003,
-#: U+00AD, U+200B, U+200F, U+FEFF and every ZWJ emoji sequence land here.
-#:
-#: 🔴 THEY STAY REFUSED, AND THE ALLOWLIST IS NOT WIDENED. Two measurements say
-#: so. (a) In a real bash pane on a private `-L` server, `touch<U+00A0>/tmp/f`
-#: sent with `send-keys -l` was delivered verbatim and bash answered
-#: `bash: touch\xa0/tmp/f: No such file or directory` — the payload became ONE
-#: word and failed wearing a diagnosis about a PATH. That is the same class as
-#: the trailing `;` this file already refuses: a payload silently corrupted
-#: somewhere the caller will not look. (b) Normalising it to U+0020 behind the
-#: caller's back is the mutation this file refuses on principle everywhere else.
-#: So the fix is a REMEDY IN THE MESSAGE, not a wider gate.
-TEXT_INVISIBLE_CATEGORIES = ("Cf", "Zl", "Zp", "Zs")
-
-
-def TEXT_IS_ALLOWED(ch: str) -> bool:
-    """🔴 THE allowlist predicate, ONE place. Every `--text` codepoint passes
-    through exactly this function; there is no second copy to disagree with."""
-    return ch in TEXT_EXTRA_ALLOWED or ch.isprintable()
+assert TMUX_ARGV_SEPARATOR == _tp.TMUX_ARGV_SEPARATOR, (
+    "session-resolve says the tmux argv separator is "
+    f"{sr.TMUX_SEPARATOR_CHAR!r} and lib/tmux_text_policy.py says "
+    f"{_tp.TMUX_ARGV_SEPARATOR!r}. One of them is wrong and every refusal that "
+    "names the separator is now wrong with it.")
 
 
 # --------------------------------------------------------------------------- #

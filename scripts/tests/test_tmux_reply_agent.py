@@ -46,10 +46,14 @@ asserting anything about a running system.
 """
 from __future__ import annotations
 
+import ast
 import importlib.machinery
 import importlib.util
 import json
 import os
+import re
+import pathlib
+import shutil
 import subprocess
 import sys
 import threading
@@ -215,6 +219,10 @@ def tmux_stub(tmp_path):
         def new_pane_id():
             return new_window_out.read_text().strip()
 
+        @staticmethod
+        def reset():
+            log.write_text("")
+
     return Stub
 
 
@@ -235,7 +243,8 @@ def write(**kw):
 
 
 def run_agent(server, tmux_stub, tmp_path, *, env_extra=None, conf_text=None,
-              token="not-a-real-terminal-token-not-a-real-token", timeout=30):
+              token="not-a-real-terminal-token-not-a-real-token", timeout=30,
+              expect_requests=2):
     """Run the agent for ONE productive round and then let it stop.
 
     The loop is driven to completion by the stub server: the first claim returns
@@ -268,7 +277,7 @@ def run_agent(server, tmux_stub, tmp_path, *, env_extra=None, conf_text=None,
     for _ in range(int(timeout / 0.05)):
         if proc.poll() is not None:
             break
-        if len(server.requests) >= 2:
+        if len(server.requests) >= expect_requests:
             break
         deadline.wait(0.05)
     proc.terminate()
@@ -714,11 +723,106 @@ def test_the_agent_unit_is_declared_even_though_it_is_disabled():
     assert nix_units.declares("systemd.user.services.tmux-reply-agent", src)
     unit = nix_units.strip_nix_comments(
         nix_units.unit_source("systemd.user.services.tmux-reply-agent", src))
-    assert "enableTmuxReplyAgent" in unit and "default.target" in unit, unit
     # 🔴 A RESIDENT SERVICE, NOT A TIMER. A ~5s poll driven by a timer would fork
     # a process, an interpreter and a connection 17,280 times a day.
     assert nix_units.directive("Type", unit) == '"simple"', unit
     assert not nix_units.declares("systemd.user.timers.tmux-reply-agent", src)
+
+
+def _wanted_by_expr(nix_src: str) -> tuple:
+    """-> (flag_value, condition_source, target_list_source) lifted FROM home.nix.
+
+    🔴 THE PREVIOUS GUARD PINNED WORDS AND THE ONE MUTATION THAT MATTERS WALKED
+    THROUGH IT. It asserted that the unit's text CONTAINS "enableTmuxReplyAgent"
+    and "default.target"; the mutant
+
+        WantedBy = lib.optionals (!enableTmuxReplyAgent) [ "default.target" ];
+
+    keeps both substrings and SURVIVES — an inversion that would start the agent
+    on both hosts on the next switch, i.e. the single thing this whole change
+    claims cannot happen. `claude/RULES.md`: "a guard can be SPELLED rather than
+    STRUCTURAL — ask whether it can pass while the hazard exists in a different
+    shape."
+
+    So the CONDITION is extracted and pinned as a whole normalised string rather
+    than searched for. `!enableTmuxReplyAgent` is not `enableTmuxReplyAgent`, and
+    neither is `(enableTmuxReplyAgent || true)`.
+    """
+    flag = re.search(r"^  enableTmuxReplyAgent = (true|false);", nix_src, re.M)
+    assert flag, "the master switch declaration was not found in home.nix"
+    unit = nix_units.strip_nix_comments(
+        nix_units.unit_source("systemd.user.services.tmux-reply-agent", nix_src))
+    m = re.search(r"WantedBy\s*=\s*lib\.optionals\s+(.+?)\s*(\[[^\]]*\])\s*;", unit, re.S)
+    assert m, f"no `WantedBy = lib.optionals <cond> [ ... ];` in the unit:\n{unit}"
+    cond = " ".join(m.group(1).split())
+    targets = " ".join(m.group(2).split())
+    return flag.group(1), cond, targets
+
+
+def test_the_agent_unit_IS_WANTED_BY_NOTHING_as_shipped():
+    """🔴 THE CENTRAL CLAIM, PINNED AS AN EXPRESSION RATHER THAN AS SUBSTRINGS.
+
+    Two facts together determine that nothing wants this unit, and BOTH are
+    asserted: the condition is the BARE flag (not a negation, not a wider
+    expression), and the flag is `false`. A mutant that changes either is a
+    different string here.
+
+    Deterministic — no evaluator, so it runs identically on the dev host and in
+    the nix check sandbox, which has no recursive nix. The `nix eval`
+    confirmation below is a second, weaker instrument that skips when nix is
+    unavailable; this one is the coverage.
+    """
+    flag, cond, targets = _wanted_by_expr(home_nix())
+    assert cond == "enableTmuxReplyAgent", (
+        f"the WantedBy condition is `{cond}`, not the bare flag. Anything else — a negation, a "
+        "disjunction, a different flag — can want this unit while still mentioning the flag's "
+        "name, which is exactly how the previous guard was walked past.")
+    assert flag == "false", (
+        f"enableTmuxReplyAgent is `{flag}`. As shipped it must be false: starting this unit means "
+        "arbitrary command execution as the operator on this host, and arming it is a separate "
+        "operator act.")
+    assert targets == '[ "default.target" ]', targets
+
+
+def test_the_wanted_by_guard_can_SEE_an_inverted_flag():
+    """The positive control, and the whole reason the test above is shaped this
+    way. The previous, word-pinning guard passed over both of these mutants."""
+    src = home_nix()
+    inverted = src.replace(
+        'WantedBy = lib.optionals enableTmuxReplyAgent [ "default.target" ];',
+        'WantedBy = lib.optionals (!enableTmuxReplyAgent) [ "default.target" ];')
+    assert inverted != src, "the WantedBy line this control mutates was not found verbatim"
+    _flag, cond, _t = _wanted_by_expr(inverted)
+    assert cond != "enableTmuxReplyAgent", (
+        "the inverted-flag mutant reads identically to the shipped condition; this guard cannot "
+        "see the one mutation that would start the agent on both hosts")
+
+    flipped = src.replace("  enableTmuxReplyAgent = false;",
+                          "  enableTmuxReplyAgent = true;")
+    assert flipped != src
+    assert _wanted_by_expr(flipped)[0] == "true"
+
+
+def test_nix_agrees_that_nothing_wants_the_unit():
+    """CONFIRMATION, not coverage — and labelled so.
+
+    It evaluates the real expression through nix, which is the only thing that
+    can say what systemd will actually be given. It SKIPS where nix cannot run
+    (the check sandbox has no recursive nix), and a skipped test is not a passing
+    one — which is why the deterministic guard above exists and this does not
+    replace it.
+    """
+    if shutil.which("nix") is None:
+        pytest.skip("no nix on PATH; the deterministic guard above is the coverage")
+    flag, cond, targets = _wanted_by_expr(home_nix())
+    expr = (f"let lib = (import <nixpkgs> {{}}).lib; enableTmuxReplyAgent = {flag}; "
+            f"in lib.optionals {cond} {targets}")
+    out = subprocess.run(["nix", "eval", "--impure", "--json", "--expr", expr],
+                         capture_output=True, text=True, timeout=600)
+    if out.returncode != 0:
+        pytest.skip(f"nix eval unavailable here: {out.stderr.strip()[:200]}")
+    assert json.loads(out.stdout) == [], (
+        "nix says something WANTS this unit as shipped; a switch would start it")
 
 
 def test_the_unit_PATH_carries_tmux_and_python():
@@ -733,10 +837,22 @@ def test_the_unit_PATH_carries_tmux_and_python():
     """
     unit = nix_units.strip_nix_comments(
         nix_units.unit_source("systemd.user.services.tmux-reply-agent", home_nix()))
-    assert "pkgs.tmux" in unit, "without tmux every delivery fails"
-    assert "pkgs.python3" in unit, "the agent is a Python program"
-    assert "pkgs.openssh" not in unit and "pkgs.gawk" not in unit, (
-        "the agent never leaves this host; these are copied, not needed")
+    # 🔴 READ THE makeBinPath LIST, NOT THE WHOLE UNIT. The previous version
+    # asserted `"pkgs.python3" in unit`, which is satisfied by the ExecStart line
+    # (`${pkgs.python3}/bin/python3 …`) — so deleting python3 from the PATH list
+    # left it green while the CHILD lost its interpreter directory. A substring
+    # test over a block that mentions a package for another reason is not a test
+    # of the list; the list has to be extracted first.
+    m = re.search(r"PATH=\$\{lib\.makeBinPath \[([^\]]*)\]\}", unit)
+    assert m, f"no PATH=...makeBinPath[...] in the unit:\n{unit}"
+    entries = m.group(1).split()
+    assert "pkgs.tmux" in entries, f"without tmux every delivery fails; PATH list = {entries}"
+    assert "pkgs.python3" in entries, f"the agent is a Python program; PATH list = {entries}"
+    assert "pkgs.coreutils" in entries, entries
+    # Deliberately absent: the agent uses urllib and never leaves this host.
+    for copied in ("pkgs.openssh", "pkgs.gawk", "pkgs.curl"):
+        assert copied not in entries, (
+            f"{copied} is in the PATH list; the agent never uses it — carried, not needed")
 
 
 def test_the_unit_gives_tmux_its_SOCKET_directory():
@@ -884,8 +1000,12 @@ def test_an_absent_kind_still_means_send_keys(server, tmux_stub, tmp_path):
     ({"pane": ""}, "pane id"),
     ({"pane": "-t"}, "pane id"),
     # A newline makes ONE write into TWO submissions.
-    ({"text": "yes\nrm -rf /"}, "control character"),
-    ({"text": "yes\x1b[A"}, "control character"),
+    # 🔴 The message now DIAGNOSES the codepoint (offset + name + category)
+    # instead of saying "control character", because the gate is an allowlist and
+    # the refused set is far wider than the controls. The assertion follows the
+    # gate rather than the old wording.
+    ({"text": "yes\nrm -rf /"}, "a newline at offset"),
+    ({"text": "yes\x1b[A"}, "non-printable character U+001B"),
     ({"text": ""}, "no text"),
     ({"text": "x" * 4000}, "size limit"),
 ])
@@ -948,11 +1068,252 @@ def test_a_batch_at_the_cap_is_still_executed(server, tmux_stub, tmp_path):
 def test_the_validator_is_exercised_directly():
     """Every branch, including the accepting ones — without which the table above
     is satisfied by a validator that refuses everything."""
-    assert AGENT.validate({"kind": "send-keys", "pane": "%12", "text": "hi"}) == ""
-    assert AGENT.validate({"pane": "%12", "text": "hi"}) == ""  # absent kind
-    assert AGENT.validate({"kind": "new-session", "cwd": "/tmp", "text": "hi"}) == ""
-    assert AGENT.validate({"kind": "new-session", "cwd": "/tmp", "text": ""}) == ""  # bare window
-    assert "unknown write kind" in AGENT.validate({"kind": "exec", "pane": "%1", "text": "hi"})
+    ok = {"id": "w-abc123"}
+    assert AGENT.validate({**ok, "kind": "send-keys", "pane": "%12", "text": "hi"}) == ""
+    assert AGENT.validate({**ok, "pane": "%12", "text": "hi"}) == ""  # absent kind
+    assert AGENT.validate({**ok, "kind": "new-session", "cwd": "/tmp", "text": "hi"}) == ""
+    assert AGENT.validate({**ok, "kind": "new-session", "cwd": "/tmp", "text": ""}) == ""  # bare window
+    assert "unknown write kind" in AGENT.validate({**ok, "kind": "exec", "pane": "%1", "text": "hi"})
     # Non-string fields from a malformed payload must not raise.
-    assert AGENT.validate({"kind": "send-keys", "pane": 12, "text": "hi"}) != ""
-    assert AGENT.validate({"kind": "new-session", "cwd": None, "text": "hi"}) != ""
+    assert AGENT.validate({**ok, "kind": "send-keys", "pane": 12, "text": "hi"}) != ""
+    assert AGENT.validate({**ok, "kind": "new-session", "cwd": None, "text": "hi"}) != ""
+    # An id this agent will not put in a URL is refused before anything else.
+    assert "write id" in AGENT.validate({"kind": "send-keys", "pane": "%1", "text": "hi"})
+
+
+# --------------------------------------------------------------------------- #
+# 10. The text gate is an ALLOWLIST, and it is the SAME one session-write uses.
+# --------------------------------------------------------------------------- #
+#
+# 🔴 THE DENYLIST THIS REPLACED WAS WRONG IN THE MEASURED WAY. `ord(ch) < 0x20 or
+# ord(ch) == 0x7F` refuses NUL, \n, \r, ESC and DEL — and passes every C1 control
+# (U+0080–U+009F), U+0085 NEL, U+2028 and U+2029. `session-write` had already
+# fixed exactly this class, with a docstring recording that U+000F (Ctrl-O) got
+# through its own earlier denylist and executed a pane's buffer with no Enter
+# sent. Two sites, one rule, wrong at the one reachable from the network.
+
+@pytest.mark.parametrize("ch,why", [
+    ("\x0f", "Ctrl-O — the character session-write's docstring records as executing a pane's buffer"),
+    ("\x85", "U+0085 NEL — a line break to some terminals, and >= 0x20 so a denylist misses it"),
+    ("\x9b", "U+009B CSI — a C1 control that starts an escape sequence"),
+    (" ", "U+2028 LINE SEPARATOR"),
+    (" ", "U+2029 PARAGRAPH SEPARATOR"),
+    ("​", "U+200B ZERO WIDTH SPACE — invisible, so the audit row and the pane disagree"),
+    ("", "U+E000 private use — renders identical to its neighbour"),
+    ("\n", "a newline: one write becoming TWO submissions"),
+    ("\x00", "NUL"),
+    ("\x1b", "ESC"),
+])
+def test_the_text_gate_refuses_what_a_denylist_would_pass(ch, why):
+    reason = AGENT.validate({"id": "w-abc123", "kind": "send-keys", "pane": "%1",
+                             "text": "echo hi" + ch})
+    assert reason, f"the allowlist ACCEPTED {ch!r} — {why}"
+
+
+def test_the_text_gate_still_accepts_ordinary_text():
+    """The positive control. Without it every case above is satisfied by a gate
+    that refuses everything, which would make the feature inert rather than safe.
+    """
+    for text in ("yes, go ahead", "café — naïve ünïcode ✓", "a\tb",
+                 "run `make test` && echo $HOME; then stop", "  spaced  "):
+        assert AGENT.validate({"id": "w-abc123", "kind": "send-keys",
+                               "pane": "%1", "text": text}) == "", text
+
+
+def test_a_trailing_tmux_separator_is_refused():
+    """tmux EATS a trailing `;` off an argv token, so the pane would receive
+    something other than what the audit log records — a payload silently
+    corrupted somewhere nobody looks."""
+    assert AGENT.validate({"id": "w-abc123", "kind": "send-keys", "pane": "%1",
+                           "text": "echo hi;"}) != ""
+    # …but a `;` in the MIDDLE is ordinary shell and must pass.
+    assert AGENT.validate({"id": "w-abc123", "kind": "send-keys", "pane": "%1",
+                           "text": "echo hi; echo there"}) == ""
+
+
+def test_the_agent_and_session_write_share_ONE_predicate():
+    """🔴 ONE RULE, ONE PLACE — asserted as a RELATIONSHIP, not as two green suites.
+
+    Both programs deliver literal text to a tmux pane. Before this they each had
+    their own answer to "what may be delivered", and the network-facing one was
+    the weaker: a denylist that passed every C1 control. The rule now lives in
+    `scripts/lib/tmux_text_policy.py`.
+
+    🔴 THE ASSERTION IS ON `__code__.co_filename`, NOT ON OBJECT IDENTITY. Both
+    programs are SCRIPTS loaded by path, so each gets its own module instance of
+    the policy and the two function objects are legitimately different — an `is`
+    check fails while the rule is perfectly shared, which is a guard that cries
+    wolf until someone deletes it. What actually matters is the SOURCE both
+    predicates were compiled from, and that is what this reads.
+    """
+    sw = _load_session_write()
+    shared = str((REPO_ROOT / "scripts" / "lib" / "tmux_text_policy.py").resolve())
+    for name, fn in (("session-write", sw.TEXT_IS_ALLOWED),
+                     ("tmux-reply-agent", AGENT.TEXT_POLICY.TEXT_IS_ALLOWED)):
+        got = str(pathlib.Path(fn.__code__.co_filename).resolve())
+        assert got == shared, (
+            f"{name}'s TEXT_IS_ALLOWED was compiled from {got}, not the shared policy at "
+            f"{shared} — it has its own copy again, and a second copy of this rule has "
+            "already been wrong once")
+    assert sw.TEXT_EXTRA_ALLOWED == AGENT.TEXT_POLICY.TEXT_EXTRA_ALLOWED == ("\t",)
+    # The separator the two could have disagreed about is pinned at
+    # session-write's import against session-resolve's own constant.
+    assert sw.TMUX_ARGV_SEPARATOR == AGENT.TEXT_POLICY.TMUX_ARGV_SEPARATOR
+
+
+def test_neither_script_defines_a_SECOND_text_predicate():
+    """The other half: no third copy, and no resurrection of the denylist.
+
+    AST, not grep — this file's own prose names `has_control` repeatedly, and a
+    raw-text scan would fire on the comment explaining why it is gone. Only
+    function DEFINITIONS are examined.
+    """
+    for script in ("session-write", "tmux-reply-agent"):
+        tree = ast.parse((REPO_ROOT / "scripts" / script).read_text())
+        defined = {n.name for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for banned in ("TEXT_IS_ALLOWED", "has_control"):
+            assert banned not in defined, (
+                f"{script} defines its own {banned}(); the text policy has ONE home "
+                "(scripts/lib/tmux_text_policy.py) and a second copy of it has already "
+                "shipped wrong once")
+
+
+def test_the_shared_predicate_agrees_with_itself_across_the_whole_BMP():
+    """A behavioural sweep beside the structural check above.
+
+    The structural check says both callers import one file; this says the file's
+    answer is the one the callers' own gates actually produce, over a range no
+    hand-written fixture covers. It is what catches a consumer that imports the
+    predicate and then second-guesses it.
+    """
+    policy = AGENT.TEXT_POLICY
+    disagreements = []
+    for cp in range(0x20, 0x2100):
+        ch = chr(cp)
+        allowed = policy.TEXT_IS_ALLOWED(ch)
+        refused_by_agent = AGENT.validate(
+            {"id": "w-abc123", "kind": "send-keys", "pane": "%1", "text": "a" + ch + "b"}) != ""
+        if allowed == refused_by_agent:
+            disagreements.append(f"U+{cp:04X}")
+    assert not disagreements, (
+        "the agent's gate disagrees with the shared allowlist at: "
+        + ", ".join(disagreements[:20]))
+    # The positive control: the sweep must have seen BOTH answers, or it is a
+    # loop that proves nothing.
+    assert policy.TEXT_IS_ALLOWED("A") and not policy.TEXT_IS_ALLOWED("\u200b")
+
+
+def test_the_agent_REFUSES_TO_START_without_the_policy_module():
+    """🔴 NO FALLBACK. A missing policy module must stop the program, not leave
+    it with a weaker check — a silent fallback is how the denylist would come
+    back, and it would come back at the network-facing site."""
+    with pytest.raises(FileNotFoundError):
+        AGENT._load_tmux_text_policy("/nonexistent/tmux_text_policy.py")
+
+
+def _load_session_write():
+    """Import session-write by path.
+
+    🔴 REGISTERED IN sys.modules BEFORE exec_module. It defines dataclasses, and
+    `dataclasses` resolves a string annotation through `sys.modules[cls.__module__]`
+    — which is None for a module that is being executed but not registered, and
+    the failure is an AttributeError inside the stdlib rather than anything that
+    names the real cause.
+    """
+    name = "session_write_undertest"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = REPO_ROOT / "scripts" / "session-write"
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    try:
+        loader.exec_module(mod)
+    except Exception:
+        del sys.modules[name]
+        raise
+    return mod
+
+
+# --------------------------------------------------------------------------- #
+# 11. The host's OWN at-most-once, the id shape, and the new-session submit.
+# --------------------------------------------------------------------------- #
+def test_the_host_refuses_a_write_id_it_has_already_executed(server, tmux_stub, tmp_path):
+    """🔴 THE HOST'S OWN at-most-once, and it is not redundant with the server's.
+
+    The server's guarantee is a property of its claim predicate. This agent is
+    the thing that RUNS the command — so a server that is wrong, rolled back,
+    restored from a backup, or simply newer would re-execute a claimed row, and
+    the operator's decision that clawgate presses Enter makes that a second
+    command execution.
+    """
+    server.claim_batches = [[write()], [write()]]   # the SAME id, twice
+    run_agent(server, tmux_stub, tmp_path, expect_requests=4)
+    text_sends = [s for s in tmux_stub.send_keys_calls() if "-l" in s]
+    assert len(text_sends) == 1, (
+        f"the agent executed the same write id {len(text_sends)} times: {tmux_stub.send_keys_calls()}")
+    states = [json.loads(r["body"])["state"]
+              for r in server.requests if r["path"].endswith("/result")]
+    assert states[0] == "delivered", states
+    assert "refused" in states[1:], (
+        f"the duplicate was not reported as refused ({states}); a silently dropped duplicate is "
+        "indistinguishable in the audit log from one that never arrived")
+
+
+def test_the_dedupe_memory_is_bounded():
+    """An unbounded set in a process that runs for weeks is a slow leak."""
+    AGENT._SEEN.clear()
+    for i in range(AGENT.SEEN_LIMIT + 50):
+        assert not AGENT.already_executed(f"id{i}")
+    assert len(AGENT._SEEN) <= AGENT.SEEN_LIMIT
+    # Oldest-first eviction: the earliest ids are the ones forgotten.
+    assert "id0" not in AGENT._SEEN
+    assert f"id{AGENT.SEEN_LIMIT + 49}" in AGENT._SEEN
+    AGENT._SEEN.clear()
+
+
+@pytest.mark.parametrize("wid", ["", "../other", "a/b", "x" * 65, "a b", "a\nb", None, 7])
+def test_an_unusable_write_id_is_never_put_in_a_url(server, tmux_stub, tmp_path, wid):
+    """🔴 THE ID IS INTERPOLATED INTO A URL THIS AGENT CONSTRUCTS. A server-supplied
+    id it cannot vouch for could steer the request somewhere else, and it would
+    otherwise be unbounded text in a log line too."""
+    server.claim_batches = [[write(id=wid)]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [], "a write with an unusable id was executed"
+    for req in server.requests:
+        assert "/result" not in req["path"], f"a request was aimed at {req['path']!r}"
+
+
+def test_a_new_session_ALWAYS_submits_whatever_the_row_says(server, tmux_stub, tmp_path):
+    """🔴 BOTH DIRECTIONS, because neither was pinned before.
+
+    A new-session exists to produce a window that is DOING something; typing a
+    command into a fresh shell and not running it leaves the operator a window to
+    go and finish by hand. So `submit` on the row describes the send-keys case
+    and is not consulted here — and that has to be asserted against a row saying
+    `false`, or a mutant that starts honouring the field survives.
+    """
+    for submit in (True, False):
+        server.requests.clear()
+        tmux_stub.reset()
+        AGENT._SEEN.clear()
+        server.claim_batches = [[write(id=f"w-ns{int(submit)}", kind="new-session", pane="",
+                                       cwd="/tmp/some/dir", text="echo hi", submit=submit)]]
+        run_agent(server, tmux_stub, tmp_path)
+        sends = tmux_stub.send_keys_calls()
+        assert len(sends) == 2, (
+            f"submit={submit}: expected the text send AND the Enter send, got {sends}")
+        assert sends[1][-1] == "Enter", sends[1]
+    assert AGENT.NEW_SESSION_ALWAYS_SUBMITS is True
+
+
+def test_a_server_supplied_pane_cannot_forge_a_log_line(server, tmux_stub, tmp_path):
+    """Every field in a claim is server-controlled. A pane that failed the id
+    check must not be echoed verbatim into the journal — a newline in it would
+    forge a second, well-formed-looking log line."""
+    server.claim_batches = [[write(pane="%1\ntmux-reply-agent: delivered everything")]]
+    _rc, out = run_agent(server, tmux_stub, tmp_path)
+    assert "delivered everything" not in out, out
+    assert tmux_stub.send_keys_calls() == []

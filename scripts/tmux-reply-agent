@@ -54,6 +54,8 @@ its reason and its backoff.
 """
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
@@ -63,6 +65,30 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_tmux_text_policy(path: str = None):
+    """Load `scripts/lib/tmux_text_policy.py` by EXPLICIT PATH.
+
+    🔴 IT RAISES RATHER THAN FALLING BACK, and that is the whole point. A
+    fallback would leave this program with a weaker check — which is exactly
+    what shipped here before: a DENYLIST (`ord(ch) < 0x20 or ord(ch) == 0x7F`)
+    that passed every C1 control and U+0085 NEL. `session-write` had already
+    fixed that class and written down why; this file had its own copy and was
+    wrong at the one site reachable from the network. The rule now lives in one
+    module and a missing module stops the agent.
+    """
+    path = path or os.path.join(_HERE, "lib", "tmux_text_policy.py")
+    loader = importlib.machinery.SourceFileLoader("_tra_tmux_text_policy", path)
+    spec = importlib.util.spec_from_loader("_tra_tmux_text_policy", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+TEXT_POLICY = _load_tmux_text_policy()
 
 API_DEFAULT = "http://192.168.50.250:30302"
 CONF_FILE = os.environ.get("CLAWGATE_CONF_FILE") or os.path.expanduser("~/.claude/clawgate.env")
@@ -325,6 +351,11 @@ def post_json(url: str, token: str, payload: dict) -> dict:
 #     from a server that is wrong, compromised or simply newer is a thousand
 #     commands, and nothing downstream would stop them.
 PANE_ID_RE = re.compile(r"^%[0-9]{1,12}$")
+#: A write id is minted by the server as base64url of 16 random bytes, and this
+#: agent INTERPOLATES IT INTO A URL. Bounding and shaping it here is what stops a
+#: server-supplied id from steering the request somewhere else (`../`, a query
+#: string, a scheme) or from being unbounded text in a log line.
+WRITE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_TEXT_BYTES = 2048
 MAX_BATCH = 4
 # Bounds the response body this agent will read. urlopen().read() with no
@@ -332,20 +363,39 @@ MAX_BATCH = 4
 MAX_RESPONSE_BYTES = 1 << 20
 
 
-def has_control(value: str) -> bool:
-    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
-
-
 def validate(write: dict) -> str:
-    """Return a refusal reason, or "" when this write is safe to execute here."""
+    """Return a refusal reason, or "" when this write is safe to execute here.
+
+    🔴 THE TEXT GATE IS `tmux_text_policy`'s ALLOWLIST, NOT A LOCAL CHECK. See
+    that module: the set of characters bound to an accept-line variant is a
+    property of the OPERATOR'S shell config, which this process cannot read, so
+    "is this character safe to deliver" is the only answerable question.
+    """
     kind = (write.get("kind") or KIND_SEND_KEYS).strip() or KIND_SEND_KEYS
     if kind not in (KIND_SEND_KEYS, KIND_NEW_SESSION):
         return f"unknown write kind {kind!r}"
+
+    wid = write.get("id")
+    if not isinstance(wid, str) or not WRITE_ID_RE.match(wid):
+        # It goes into a URL this agent constructs; an id it cannot vouch for
+        # could steer the request elsewhere.
+        return "the write id is not the shape this agent will put in a URL"
+
     text = write.get("text") or ""
-    if not isinstance(text, str) or has_control(text):
-        return "the text contains a control character"
+    if not isinstance(text, str):
+        return "the text is not a string"
     if len(text.encode("utf-8", "replace")) > MAX_TEXT_BYTES:
         return "the text is over the size limit"
+    bad = TEXT_POLICY.first_disallowed(text)
+    if bad is not None:
+        return "the text carries " + TEXT_POLICY.describe_disallowed(*bad)
+    if TEXT_POLICY.ends_with_separator(text):
+        # tmux EATS a trailing separator off an argv token, so the pane would
+        # receive something other than what the audit log records.
+        return (f"the text ends with {TEXT_POLICY.TMUX_ARGV_SEPARATOR!r}, which tmux "
+                "eats off the token — the pane would get something other than what "
+                "the audit log records")
+
     if kind == KIND_SEND_KEYS:
         pane = write.get("pane") or ""
         if not isinstance(pane, str) or not PANE_ID_RE.match(pane):
@@ -354,8 +404,10 @@ def validate(write: dict) -> str:
             return "the write carries no text"
     else:
         cwd = write.get("cwd") or ""
-        if not isinstance(cwd, str) or not cwd.startswith("/") or has_control(cwd):
+        if not isinstance(cwd, str) or not cwd.startswith("/"):
             return "the working directory is not an absolute path"
+        if TEXT_POLICY.first_disallowed(cwd) is not None:
+            return "the working directory carries a character that is not printable"
         if any(seg == ".." for seg in cwd.split("/")):
             return "the working directory contains `..`"
     return ""
@@ -366,6 +418,11 @@ def validate(write: dict) -> str:
 # guessed kind is a command nobody reviewed running on this host.
 KIND_SEND_KEYS = "send-keys"
 KIND_NEW_SESSION = "new-session"
+
+#: See deliver(): a new-session's text is always submitted, whatever the row's
+#: `submit` field says. Named so the behaviour is assertable rather than implied
+#: by a bare literal in the middle of a function.
+NEW_SESSION_ALWAYS_SUBMITS = True
 
 
 def open_window(cwd: str) -> tuple[str, str]:
@@ -427,8 +484,16 @@ def deliver(write: dict) -> tuple[str, str]:
         if not text:
             # A bare window is a complete delivery: the caller asked for one.
             return "delivered", f"opened {pane}"
-        # Fall through and type the caller's text into the window just created.
-        submit = True
+        # 🔴 A new-session's text is ALWAYS SUBMITTED, and the constant says so
+        # rather than the assignment. The point of a new-session is a window that
+        # is DOING something; typing a command into a fresh shell and not running
+        # it produces a window the operator has to go and finish by hand, which is
+        # the thing this feature exists to avoid. `submit` on the row is therefore
+        # not consulted for this kind — it describes the send-keys case — and
+        # test_a_new_session_ALWAYS_submits_whatever_the_row_says pins BOTH
+        # directions so a mutant that drops this line, or that starts honouring
+        # the field, is caught.
+        submit = NEW_SESSION_ALWAYS_SUBMITS
 
     # 🔴 `-l` MAKES IT LITERAL, AND WITHOUT IT THIS IS A DIFFERENT COMMAND.
     # Un-flagged, `send-keys` interprets its arguments as KEY NAMES: a reply
@@ -480,6 +545,33 @@ def _on_signal(_signum, _frame):
     _STOP = True
 
 
+#: Ids this process has already executed. 🔴 THE HOST'S OWN at-most-once, and it
+#: is not redundant with the server's: the server's guarantee is a property of
+#: its claim predicate, and this agent is the thing that RUNS the command. If a
+#: server is wrong, rolled back, restored from a backup, or simply newer than
+#: this agent, re-offering a claimed row would re-execute it — and the operator's
+#: decision that clawgate presses Enter makes that a second command execution.
+#:
+#: Bounded, because an unbounded set in a process that runs for weeks is a slow
+#: leak. The bound is generous relative to the real rate (a handful of replies a
+#: day) and the eviction is oldest-first, so the only thing it can forget is a
+#: write from thousands of writes ago — which the server's own ladder has long
+#: since made unclaimable anyway.
+SEEN_LIMIT = 4096
+_SEEN: dict = {}
+
+
+def already_executed(wid: str) -> bool:
+    """Record wid and report whether this process had already run it."""
+    if wid in _SEEN:
+        return True
+    _SEEN[wid] = True
+    while len(_SEEN) > SEEN_LIMIT:
+        # dicts preserve insertion order, so this evicts the oldest.
+        _SEEN.pop(next(iter(_SEEN)))
+    return False
+
+
 def one_round(api: str, token: str, host: str, agent: str) -> int:
     """Claim, execute and report one batch. Returns the number of writes handled."""
     got = post_json(f"{api}/api/term/send-keys/claim", token,
@@ -497,14 +589,32 @@ def one_round(api: str, token: str, host: str, agent: str) -> int:
         raise Refused(f"the server returned {len(writes)} writes in one claim, over the "
                       f"{MAX_BATCH} this agent will execute")
     for write in writes:
-        wid = str(write.get("id") or "")
-        if not wid:
-            log("a claimed write carried no id and cannot be reported; skipping")
+        wid = write.get("id")
+        if not isinstance(wid, str) or not WRITE_ID_RE.match(wid):
+            # 🔴 NOT LOGGED VERBATIM. Every field here is server-controlled, and
+            # an id is the one that would otherwise be interpolated into both a
+            # log line and a URL. An unusable id cannot be reported either — there
+            # is nowhere to report it TO — so this counts it rather than echoing
+            # it, and the count is the signal.
+            log("a claimed write carried an unusable id and cannot be reported; skipping")
             continue
-        state, detail = deliver(write)
+        if already_executed(wid):
+            # 🔴 DO NOT RUN IT AGAIN, and report the refusal so the audit log
+            # records that this host saw a duplicate rather than silently
+            # dropping it. See _SEEN.
+            state, detail = "refused", "this agent has already executed that write id"
+        else:
+            state, detail = deliver(write)
         # 🔴 The log names the ROW and the OUTCOME, never the text. `detail` is
         # already redacted of the text by deliver().
-        log(f"{state} {wid} (pane {write.get('pane')})" + (f": {detail}" if detail else ""))
+        # 🔴 EVERY INTERPOLATED FIELD IS BOUNDED AND SHAPED. `wid` matched
+        # WRITE_ID_RE above; `pane` is re-derived through the same regex rather
+        # than echoed, so a server-supplied pane cannot put arbitrary text — or a
+        # newline that forges a second log line — into the journal. `detail` is
+        # already redacted of the write's text and clamped by redact().
+        pane = write.get("pane")
+        pane = pane if isinstance(pane, str) and PANE_ID_RE.match(pane) else "-"
+        log(f"{state} {wid} (pane {pane})" + (f": {detail}" if detail else ""))
         try:
             post_json(f"{api}/api/term/send-keys/{wid}/result", token,
                       {"agent": agent, "state": state, "detail": detail})
