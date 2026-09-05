@@ -132,10 +132,20 @@ the invocation signals.
 - Why is the per-session rollup non-monotonic (item 2 above)? One measured instance.
   Not chased. It matters only to whoever writes the next query — use `max()`.
 
+## Rank 1 (deadman) — CLOSED 2026-09-04, roster IS current
+`scripts/collector/deadman.py` (read-only; queries ClickHouse, writes stdout):
+
+    state: ok   rows=16215 evaluated=19 dead=0
+
+19 of 20 (host, source) pairs fresh across both hosts. The 20th is
+**`laptop` / `tool` → `skip:insufficient-baseline`** (baseline 18, silent 9.4 h):
+UNEVALUABLE, not dead — and it is the same scope the module's own docstring cites
+as having once had zero `kind=tool-call` rows for its entire existence. It is the
+one pair the deadman structurally cannot vouch for, so a clean `dead=0` is a
+statement about the other 19. Do not read it as "all 20 healthy".
+
 ## Next steps (ranked)
-1. Re-run `deadman.py` to confirm source roster is current
-   forcing: none
-2. Re-run this roster after ~30 days of full field coverage (i.e. on/after 2026-09-29)
+1. Re-run this roster after ~30 days of full field coverage (i.e. on/after 2026-09-29)
    before drawing any retirement conclusion about the 19 no-signal skills
    forcing: the window; nothing to do until then
    closing condition: a roster run over a >=30d full-coverage window, read by whoever
