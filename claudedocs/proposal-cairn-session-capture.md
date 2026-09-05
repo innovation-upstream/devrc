@@ -116,11 +116,21 @@ between them — and which one applies is decided by a question §9 has not clos
 no interpolation. Stated because a different convention gives a visibly different p90 for
 row 4 (16.65 MB rather than 20.23 MB) and nothing in the table would show which was used.
 
-Rows 3 and 4 are the population decision 2 selects, counted two ways — see the next
-paragraph but one for which of them to size off. Both were derived from the
-`Claude-Session-Id` trailer on commits touching `claudedocs/handoff-*.md` since 2026-07-01:
-37 distinct ids, **all 37** resolving to a transcript on disk, none of them an `agent-*`
-file.
+Rows 3 and 4 are the population decision 2 selects, counted two ways; **THE SIZING
+DIRECTIVE** below says which to use. Both were derived by this exact command, stated in
+full because two independent re-derivations from a prose description of it disagreed with
+each other and with this table:
+
+```bash
+git log origin/main --since=2026-07-01 \
+  --format='%(trailers:key=Claude-Session-Id,valueonly)' -- 'claudedocs/handoff-*.md'
+```
+
+**37** distinct ids, **all 37** resolving to a transcript on disk, none of them an
+`agent-*` file. Reproduced at four refs (`origin/main` `4d249c0c`, `c4e76a10`, this
+branch's head, and the base clone's HEAD) and with the pathspec both quoted and
+shell-expanded — the same 37 every time. Dropping the pathspec gives 42-43; `--all` gives
+a clone-dependent number that measures nothing shared.
 
 🔴 **The selection effect runs the WRONG WAY, and that is the point of the row.** Sessions
 that produce a handoff are the long ones, so the per-handoff filter picks the **large tail**,
@@ -147,8 +157,7 @@ and do not cross the two — but do not claim 23.48 MB is what ships today, beca
 33 of the 37 sessions have subagent bytes at all, and the worst **within those 37** is a
 3.82 MB parent with 19 subagent files totalling 26.56 MB — a 30.39 MB session of which
 shipping one object captures **12.6%**. Two further reasons both rows are floors:
-`SessionEnd` re-ship only grows them, and the **COVERAGE CAVEAT** below (the ⚠ block headed
-*Scope of the 37-session sample*) is real.
+`SessionEnd` re-ship only grows them, and **THE COVERAGE CAVEAT** below is real.
 
 ⚠ **An earlier revision quoted a worse-looking example here — a 3.79 MB parent with 60
 subagent files, 8% captured — and that session is NOT one of the 37.** It is from the
@@ -170,12 +179,14 @@ in the sentence retracting it — as a whole-host maximum. **Retracting a number
 as not using it.**
 
 🔴 **AND THE LESSON FOR THIS DOCUMENT'S OWN RECORDS: name things, do not count or locate
-them.** Two earlier revisions of these retraction records carried a paragraph COUNT and a
-paragraph DISTANCE; both were falsified by the next edit that inserted a block, and a wrong
-pointer sends a reader to the wrong population — the exact hazard §4 exists to prevent. A
-NAME survives insertion; an ordinal does not.
+them.** An earlier revision of these records carried a paragraph COUNT and a paragraph
+DISTANCE. 🔴 **Both were wrong AT THE REVISION THAT INTRODUCED THEM** — not falsified
+later by an insertion, which is what an earlier draft of this very paragraph claimed and
+is the more comfortable story, because it blames drift rather than the writing. Nobody
+counts paragraphs before writing "two paragraphs below". **A NAME can be checked at the
+moment it is written; an ordinal is a measurement nobody takes.**
 
-**So: size off row 4 unless and until §9.6 resolves to parent-only.** Sizing off row 3 while
+**THE SIZING DIRECTIVE — size off row 4 unless and until §9.6 resolves to parent-only.** Sizing off row 3 while
 §9.6 is open is how a bucket, a PUT timeout or a per-handoff cost estimate comes out low by
 more than 2×.
 
