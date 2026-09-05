@@ -203,11 +203,14 @@ def ledger_binding(pane_id: str, cwd: str, server_pid: str,
 
     🔴 But the WRITE side already applies one, so `no-record` has a permanent
     FLOOR rather than shrinking to nothing: `agent_ledger.DEFAULT_MAX_AGE` is 7
-    days. `write_record` itself does NOT prune — both writers prune on their
-    SESSION BOUNDARIES only (`agent-ledger-hook.py`'s `PRUNE_EVENTS` is
-    `SessionStart`/`Stop`, a subset of the four events that write) — but a prune
-    sweeps the WHOLE directory, so it is OTHER sessions' boundaries that delete an
-    idle pane's record. Either way a live pane idle longer than that ends up with
+    days. `write_record` itself does NOT prune, and the two writers do not agree
+    on when they do: `agent-ledger-hook.py` prunes on SESSION BOUNDARIES only
+    (`PRUNE_EVENTS` is `SessionStart`/`Stop`, a subset of the four events that
+    write), while `opencode/plugin/ledger.js` has no boundary hook at all and
+    passes `--prune` on EVERY write, throttled to once per 30 s. But a prune
+    sweeps the WHOLE directory whoever triggers it, so it is OTHER sessions'
+    prunes that delete an idle pane's record. Either way a live pane idle
+    longer than that ends up with
     no record at all and reports `no-record` forever. Prune keeps re-opening that set
     for exactly the long-idle windows a read-side age gate would also have thrown
     away — which is why the argument above still holds, and why "the unbound set

@@ -135,10 +135,19 @@ LEDGER_DIR = os.path.join(HOME, LEDGER_SUBPATH)
 SENTINEL = "AGENT_LEDGER_V1"
 
 # fuzzyclaw reached 401 files, ~90% stale, because nothing ever pruned. `write_record`
-# does NOT prune; both writers call `prune` on their SESSION BOUNDARIES only, and a
-# prune sweeps the whole directory — so the ceiling is "records written in the last
-# week" rather than "records ever written", enforced by other sessions' boundaries
-# as much as by a record's own writer.
+# itself does NOT prune, and THE TWO WRITERS DO NOT AGREE ON WHEN THEY DO — say which,
+# because a claim about "the writers" is false of one of them either way:
+#   * writer 1, `scripts/claude-hooks/agent-ledger-hook.py`, prunes on SESSION
+#     BOUNDARIES only — `PRUNE_EVENTS` is `SessionStart`/`Stop`, a subset of the four
+#     events in `WRITE_EVENTS`;
+#   * writer 2, `scripts/opencode/plugin/ledger.js`, has NO session-boundary hook at
+#     all — its one hook is `tool.execute.after`, and it passes `--prune` on EVERY
+#     write it performs, throttled to at most once per session per `THROTTLE_MS` (30 s).
+#     That is deliberate: an opencode-only host fires zero `SessionStart`/`Stop`, so
+#     without it the ledger would grow unbounded. Do not "simplify" it away.
+# A prune sweeps the WHOLE directory whoever triggers it, so the ceiling is "records
+# written in the last week" rather than "records ever written" — enforced by OTHER
+# sessions' prunes as much as by a record's own writer.
 DEFAULT_MAX_AGE = 7 * 86400
 
 # A write costs a stat + a small atomic replace. `PostToolUse` fires on every tool
@@ -786,8 +795,8 @@ def main(argv=None) -> int:
                         "RELIABLE rather than cheap — see DEFAULT_TMUX_TIMEOUT_S."
                         % (DEFAULT_TMUX_TIMEOUT_S, TMUX_TIMEOUT_ENV))
     p.add_argument("--prune", action="store_true",
-                   help="also reap records past the retention window; the "
-                        "caller does this on a session boundary, not per call")
+                   help="also reap records past the retention window; when a "
+                        "caller passes it is CALLER-SPECIFIC — see DEFAULT_MAX_AGE")
     p.add_argument("--directory", default=LEDGER_DIR)
     args = p.parse_args(sys.argv[1:] if argv is None else list(argv))
     # 🔴 FAIL CLOSED on a junk budget rather than falling back to the default.

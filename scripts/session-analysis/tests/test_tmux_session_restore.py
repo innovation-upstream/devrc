@@ -289,9 +289,34 @@ def test_borrowed_lists_every_symbol_this_file_reads_off_the_module():
     `LEDGER_DIR` was) or SHRINKS (a name listed that nothing reads). The check the
     loader performs is only as wide as this tuple, so the tuple has to be checked
     against the source rather than trusted.
+
+    🔴 READ THE AST, NOT THE TEXT — and the reason is this guard's own history.
+    The first version matched `\\b_AL\\.(\\w+)`, which sees `_AL.LEDGER_DIR` but is
+    BLIND to `getattr(_AL, "LEDGER_DIR", <default>)`. That is not a hypothetical
+    spelling: it is exactly how `LEDGER_DIR` was written at `2eb06a6d`, i.e. the
+    guard could not see the very hole it was introduced to close, while its
+    docstring claimed it could. Measured: a mutant borrowing a third symbol via
+    `getattr` SURVIVED a fully green run. Both spellings are collected here, so
+    the tuple is pinned against what the module actually reads. A comment merely
+    MENTIONING `_AL.SOMETHING` is also no longer counted — the text scan flagged
+    prose as a borrow.
     """
-    import re
-    read = set(re.findall(r"\b_AL\.([A-Za-z_]\w*)", SCRIPT.read_text()))
+    import ast
+
+    read: set[str] = set()
+    for node in ast.walk(ast.parse(SCRIPT.read_text())):
+        # `_AL.NAME`
+        if (isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name) and node.value.id == "_AL"):
+            read.add(node.attr)
+        # `getattr(_AL, "NAME"[, default])`
+        elif (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == "_AL"
+                and isinstance(node.args[1], ast.Constant)
+                and isinstance(node.args[1].value, str)):
+            read.add(node.args[1].value)
     assert read == set(tsr._BORROWED), (
         f"`_BORROWED` is {sorted(tsr._BORROWED)} but this file reads "
         f"{sorted(read)} off the ledger module — the loader guards only what "
