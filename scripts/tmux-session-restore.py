@@ -6,11 +6,22 @@ scratchpad session's windows + working dirs on reboot — but it relaunches a ba
 NOT the `claude` conversation that was in each window. This captures which claude session
 was where and, after reboot, relaunches `claude --resume <id>` in the right window.
 
-Binding a window to its EXACT session id is inherently fuzzy (claude appends-and-closes
-its jsonl, holding no fd; the session summary isn't stored) — so per repo we rank the
-session jsonls by recency and assign the newest ones (the live conversations) to that
-repo's live windows, in window order. The cheat-sheet prints each guess with its summary
-line so you can eyeball / correct before running restore.
+Binding a window to its EXACT session id has TWO sources, and they are not equals:
+
+  1. THE LEDGER (`~/.cache/agent-ledger/claude-p<N>.json`) — a RECORD. Claude Code's
+     `agent-ledger-hook.py` is handed the real `session_id` and `transcript_path` by
+     the harness and keys the file on its own `$TMUX_PANE`, so a validated record is
+     ground truth for that pane: one O(1) file read.
+  2. PANE-CONTENT MATCHING (`unique_match_sids`) — an INFERENCE, and the fallback.
+     It greps a pane's on-screen text across every transcript in that cwd's project
+     dir. Measured on the workbench 2026-09-04: 145 competing transcripts in one
+     project dir, and a 50-window `save` spent essentially all of its 2m15s in that
+     grep while still leaving ~10 of 44 live claude panes unbound.
+
+So the ledger is consulted FIRST and CLAIMS FIRST — a certain binding must never lose
+a session id to a guess — and the grep runs only for panes the ledger cannot answer.
+The cheat-sheet prints each binding with its source and summary line so you can
+eyeball / correct before running restore.
 
 Usage:
   tmux-session-restore.py save      # BEFORE reboot — writes the plan + cheat-sheet
@@ -27,6 +38,7 @@ Scratchpad codenames come from the canonical scripts/tmux-scratch-slots.sh.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -41,6 +53,34 @@ PROJECTS = Path(os.path.expanduser("~/.claude/projects"))
 SLOTS_FILE = Path(__file__).resolve().parent / "tmux-scratch-slots.sh"
 _SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _load_agent_ledger():
+    """`scripts/lib/agent_ledger.py`, imported by path — or None if unavailable.
+
+    This file is a standalone script (run from the working tree by
+    `tmux-post-save.sh` and by the `tmux-session-restore` user unit), so there is
+    no package to import from; the ledger hook reaches its own copy the same way.
+
+    🔴 We borrow `pane_filename` rather than restating it. The file key is the
+    WRITER's rule, and a second spelling of it here is the duplicated predicate
+    that ends up making this reader look at a filename nobody writes. If the
+    module cannot be loaded there is deliberately NO fallback spelling — the
+    ledger simply reports nothing and every pane falls through to the grep.
+    """
+    path = Path(__file__).resolve().parent / "lib" / "agent_ledger.py"
+    try:
+        spec = importlib.util.spec_from_file_location("_tsr_agent_ledger", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:  # noqa: BLE001 — absent/broken lib: fall back to the grep
+        return None
+
+
+_AL = _load_agent_ledger()
+LEDGER_DIR = Path(getattr(_AL, "LEDGER_DIR",
+                          os.path.expanduser("~/.cache/agent-ledger")))
 
 
 def run(cmd: list[str]) -> str:
@@ -68,6 +108,74 @@ def display_session(session: str, codes: dict[str, str]) -> str:
 def project_dir_for(cwd: str) -> Path:
     """~/.claude/projects encodes a cwd by replacing every '/' with '-'."""
     return PROJECTS / cwd.replace("/", "-")
+
+
+def tmux_server_pid() -> str:
+    """This tmux server's pid — the ledger's generation key. "" if unmeasured."""
+    return run(["tmux", "display-message", "-p", "#{pid}"]).strip()
+
+
+def ledger_binding(pane_id: str, cwd: str, server_pid: str,
+                   directory: Path | None = None) -> tuple[str, str]:
+    """The session id the LEDGER records for this pane: `(session_id, reason)`.
+
+    `("", <reason>)` whenever no record survives validation, and the reason token
+    names WHICH check rejected it — the tests assert on those tokens, so a broken
+    guard fails with its own name rather than with a generic empty string.
+
+    THE FOUR VALIDATIONS, and what each one is for:
+
+      * `no-session-id` — a record with an empty/absent `session_id` binds nothing.
+      * `transcript-missing` — the transcript named by the record must exist on
+        disk. `claude --resume <id>` against a deleted transcript fails, and a
+        failed resume in the right window is worse than the picker.
+      * `generation-mismatch` / `generation-unmeasured` — tmux pane ids restart at
+        `%0` when the SERVER does, so yesterday's `%61` record and today's `%61`
+        pane collide after exactly the reboot this tool exists for. `tmux_pid` is
+        the server pid, constant across a server's windows, so equality is an exact
+        generation check. 🔴 An UNMEASURED live pid rejects too: being unable to
+        check a generation is not the same as having checked it.
+      * `project-mismatch` — 🔴 THE CROSS-REPO GUARD. The transcript's parent
+        directory is the encoded cwd (`project_dir_for`). A record whose transcript
+        lives under a DIFFERENT repo's project dir would resume the wrong
+        conversation in a window that looks right, which is the single worst
+        outcome available here. Compared as the encoded NAME, because that is what
+        `project_dir_for` derives from the pane's cwd.
+
+    ⚠ `last_activity_ts` deliberately does NOT gate. Within one tmux server pane
+    ids are never reused, and the hook writes on `SessionStart`, so a live claude
+    pane's record names the session running in it however long ago it last spoke;
+    across servers the pid check already rejects. Any age threshold would
+    therefore reject only CORRECT bindings — and it would reject them hardest for
+    long-idle windows, which are precisely the ones worth restoring.
+    """
+    if _AL is None:
+        return "", "no-ledger-module"
+    if not pane_id:
+        return "", "no-pane-id"
+    d = Path(directory) if directory is not None else LEDGER_DIR
+    path = d / _AL.pane_filename("claude", pane_id)
+    try:
+        rec = json.loads(path.read_text().splitlines()[0])
+    except (OSError, ValueError, IndexError):
+        return "", "no-record"
+    if not isinstance(rec, dict):
+        return "", "no-record"
+    sid = str(rec.get("session_id") or "").strip()
+    if not sid:
+        return "", "no-session-id"
+    transcript = str(rec.get("transcript_path") or "").strip()
+    if not transcript or not Path(transcript).exists():
+        return "", "transcript-missing"
+    rec_pid = str(rec.get("tmux_pid") or "").strip()
+    live_pid = str(server_pid or "").strip()
+    if not rec_pid or not live_pid:
+        return "", "generation-unmeasured"
+    if rec_pid != live_pid:
+        return "", "generation-mismatch"
+    if Path(transcript).parent.name != project_dir_for(cwd).name:
+        return "", "project-mismatch"
+    return sid, "ok"
 
 
 def jsonls_by_recency(cwd: str) -> list[Path]:
@@ -139,42 +247,77 @@ def first_user_line(session_id: str, cwd: str) -> str:
 
 
 def live_claude_panes() -> list[dict]:
-    """Live claude panes: [{session, window, cwd, title}] in stable order."""
+    """Live claude panes: [{pane_id, session, window, cwd, title}], stable order.
+
+    `#{pane_id}` leads the format because it is the ledger's file key; `#{pane_title}`
+    stays last because it is the one field whose content is arbitrary.
+    """
     out = run(["tmux", "list-panes", "-a", "-F",
-               "#{session_name}\t#{window_index}\t#{pane_current_path}"
+               "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_current_path}"
                "\t#{pane_current_command}\t#{pane_title}"])
     panes = []
     for ln in out.splitlines():
         p = ln.split("\t")
-        if len(p) < 5 or p[3] != "claude":
+        if len(p) < 6 or p[4] != "claude":
             continue
-        panes.append({"session": p[0], "window": p[1], "cwd": p[2], "title": p[4]})
+        panes.append({"pane_id": p[0], "session": p[1], "window": p[2],
+                      "cwd": p[3], "title": p[5]})
     return panes
 
 
 def build_plan() -> list[dict]:
-    """Bind each live claude window to the EXACT session it runs (by pane content).
+    """Bind each live claude window to the EXACT session it runs.
 
-    Each pane's session is chosen from its uniquely-matched candidates, and a session
-    once claimed is never reused — so two windows can't collapse onto one conversation.
-    A window with no certain, unclaimed match gets an empty id (interactive picker).
+    TWO PASSES, AND THE ORDER IS THE POINT. Pass 1 takes each pane's ledger record
+    (a RECORD, see `ledger_binding`); pass 2 runs the pane-content grep only for the
+    panes pass 1 could not answer. That ordering buys two things at once:
+
+      * 🔴 CORRECTNESS — a certain binding claims its session id BEFORE any guess
+        can. Interleaved, a fuzzy match on pane B could claim the very id the ledger
+        knows belongs to pane A, and A would then fall through to the picker while B
+        resumed A's conversation. Ledger-first makes that unreachable.
+      * SPEED — the grep is never even called for a ledger-bound pane. That is the
+        whole performance claim, and it is pinned behaviourally by a test that
+        injects a matcher which raises.
+
+    Consequence: for one pane the ledger and the grep can never disagree, because on
+    a valid record the grep does not run. A session once claimed is never reused, so
+    two windows can't collapse onto one conversation; a window with no certain,
+    unclaimed binding gets an empty id and the interactive picker at restore time.
     """
     codes = codenames()
     panes = live_claude_panes()
-    cands = {i: unique_match_sids(f"{p['session']}:{p['window']}", p["cwd"])
-             for i, p in enumerate(panes)}
+    server_pid = tmux_server_pid()
+    bound: dict[int, tuple[str, str]] = {}
     claimed: set[str] = set()
-    plan = []
+
+    # Pass 1 — the ledger. Certain, so it claims first.
     for i, p in enumerate(panes):
-        sid = next((s for s in cands[i] if s not in claimed), "")
+        sid, _reason = ledger_binding(p.get("pane_id", ""), p["cwd"], server_pid)
+        if sid and sid not in claimed:
+            claimed.add(sid)
+            bound[i] = (sid, "ledger")
+
+    # Pass 2 — the grep, for whatever is left.
+    for i, p in enumerate(panes):
+        if i in bound:
+            continue
+        cands = unique_match_sids(f"{p['session']}:{p['window']}", p["cwd"])
+        sid = next((s for s in cands if s not in claimed), "")
         if sid:
             claimed.add(sid)
+            bound[i] = (sid, "fuzzy")
+
+    plan = []
+    for i, p in enumerate(panes):
+        sid, source = bound.get(i, ("", ""))
         plan.append({
             "session": p["session"],
             "window": p["window"],
             "codename": display_session(p["session"], codes),
             "cwd": p["cwd"],
             "session_id": sid,
+            "bind_source": source,
             "title": (p["title"] or "").strip(),
             "hint": first_user_line(sid, p["cwd"]) if sid else "",
         })
@@ -194,7 +337,9 @@ def cheat_sheet(plan: list[dict]) -> str:
         lines.append(f"## {loc}  —  {e['title'] or '(untitled)'}")
         lines.append(f"- cwd: `{e['cwd']}`")
         if e["session_id"]:
-            lines.append(f"- resume: `cd {e['cwd']} && claude --resume {e['session_id']}`")
+            src = e.get("bind_source") or "fuzzy"
+            lines.append(f"- resume: `cd {e['cwd']} && claude --resume {e['session_id']}`"
+                         f"  ({src})")
             if e["hint"]:
                 lines.append(f"- first msg: _{e['hint']}_")
         else:
@@ -211,7 +356,11 @@ def cmd_save() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     PLAN.write_text(json.dumps(plan, indent=2))
     CHEAT.write_text(cheat_sheet(plan))
+    n_ledger = sum(1 for e in plan if e.get("bind_source") == "ledger")
+    n_fuzzy = sum(1 for e in plan if e.get("bind_source") == "fuzzy")
     print(f"saved {len(plan)} windows → {PLAN}")
+    print(f"bound: {n_ledger} ledger, {n_fuzzy} pane-content, "
+          f"{len(plan) - n_ledger - n_fuzzy} unbound (picker at restore)")
     print(f"cheat-sheet → {CHEAT}\n")
     print(cheat_sheet(plan))
     return 0

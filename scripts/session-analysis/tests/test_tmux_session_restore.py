@@ -1,12 +1,16 @@
 """Unit tests for tmux-session-restore PURE logic (no live tmux / claude / grep).
 
 Run:
-  nix-shell -p 'python3.withPackages(p:[p.pytest])' \
-      --run 'python -m pytest scripts/session-analysis/tests/test_tmux_session_restore.py -q'
+  nix develop ~/workspace/devrc -c python3 -m pytest \
+      scripts/session-analysis/tests/test_tmux_session_restore.py -q
 
 Covers: scratch-slot codename parsing, project-dir encoding, display naming, the
-claim-based unique-session assignment (no two windows share a session, uncertain ->
-picker), and cheat-sheet rendering. tmux/grep/capture-pane I/O is stubbed.
+per-pane LEDGER binding and each of its four validations, the ledger-before-grep
+ordering (both the "the grep never runs" performance claim and the "a guess cannot
+steal a certain id" correctness claim), the claim-based unique-session assignment
+(no two windows share a session, uncertain -> picker), and cheat-sheet rendering.
+tmux/grep/capture-pane I/O and the ledger directory are stubbed; nothing here reads
+the real `~/.cache/agent-ledger` or `~/.claude/projects`.
 """
 import importlib.util
 import json
@@ -14,11 +18,19 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parent.parent / "tmux-session-restore.py"
 _spec = importlib.util.spec_from_file_location("tmux_session_restore", SCRIPT)
 tsr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(tsr)
+
+# Synthetic ids — this repo is public, so no fixture ever carries a real one.
+SID_A = "11111111-2222-4333-8444-555555555555"
+SID_B = "66666666-7777-4888-8999-aaaaaaaaaaaa"
+SID_C = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+SERVER_PID = "424242"
 
 
 # --------------------------------------------------------------------------- #
@@ -53,6 +65,119 @@ def test_project_dir_encoding(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# live_claude_panes — the pane_id the ledger is keyed on must survive parsing
+# --------------------------------------------------------------------------- #
+def test_live_claude_panes_carries_pane_id_and_drops_non_claude(monkeypatch):
+    rows = "\n".join([
+        "%7\tscratch4\t2\t/w/repo\tclaude\tfaro work",
+        "%8\tscratch4\t3\t/w/repo\tzsh\tjust a shell",
+        "%9\t8\t1\t/w/other\tclaude\t",           # empty title still parses
+        "%10\t8\t2\t/w/other",                     # short row: ignored
+    ])
+    monkeypatch.setattr(tsr, "run", lambda cmd: rows)
+    panes = tsr.live_claude_panes()
+    assert [p["pane_id"] for p in panes] == ["%7", "%9"]
+    assert panes[0] == {"pane_id": "%7", "session": "scratch4", "window": "2",
+                        "cwd": "/w/repo", "title": "faro work"}
+    assert panes[1]["cwd"] == "/w/other" and panes[1]["title"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# ledger_binding — the deterministic per-pane record and its four validations
+# --------------------------------------------------------------------------- #
+CWD = "/w/repo"
+OTHER_CWD = "/w/other-repo"
+
+
+def _ledger_world(tmp_path, monkeypatch, *, sid=SID_A, cwd=CWD,
+                  transcript_cwd=None, write_transcript=True,
+                  tmux_pid=SERVER_PID, pane="%7", record=True):
+    """A throwaway projects tree + ledger dir; returns (ledger_dir, transcript).
+
+    Every knob here is one of the validations, so a test flips exactly one field
+    and leaves the others in their valid state — that is what makes each guard
+    reachable by a case no EARLIER guard rejects.
+    """
+    projects = tmp_path / "projects"
+    monkeypatch.setattr(tsr, "PROJECTS", projects)
+    tdir = projects / (transcript_cwd or cwd).replace("/", "-")
+    tdir.mkdir(parents=True, exist_ok=True)
+    transcript = tdir / f"{sid or 'none'}.jsonl"
+    if write_transcript:
+        transcript.write_text("")
+    ledger = tmp_path / "agent-ledger"
+    ledger.mkdir(exist_ok=True)
+    if record:
+        (ledger / tsr._AL.pane_filename("claude", pane)).write_text(json.dumps({
+            "schema": 1, "runtime": "claude", "session_id": sid,
+            "last_activity_ts": "2026-09-04T23:47:01Z", "pane_id": pane,
+            "window_id": "@61", "tmux_pid": tmux_pid,
+            "transcript_path": str(transcript),
+        }) + "\n")
+    monkeypatch.setattr(tsr, "LEDGER_DIR", ledger)
+    return ledger, transcript
+
+
+def test_ledger_binding_accepts_a_valid_record(tmp_path, monkeypatch):
+    _ledger_world(tmp_path, monkeypatch)
+    assert tsr.ledger_binding("%7", CWD, SERVER_PID) == (SID_A, "ok")
+
+
+def test_ledger_binding_rejects_a_missing_record_file(tmp_path, monkeypatch):
+    _ledger_world(tmp_path, monkeypatch, record=False)
+    assert tsr.ledger_binding("%7", CWD, SERVER_PID) == ("", "no-record")
+
+
+def test_ledger_binding_rejects_an_unparseable_record(tmp_path, monkeypatch):
+    ledger, _ = _ledger_world(tmp_path, monkeypatch)
+    (ledger / "claude-p7.json").write_text("{not json\n")
+    assert tsr.ledger_binding("%7", CWD, SERVER_PID) == ("", "no-record")
+
+
+def test_ledger_binding_rejects_an_empty_session_id(tmp_path, monkeypatch):
+    # Everything else is valid, so this guard is the ONLY thing that can reject.
+    _ledger_world(tmp_path, monkeypatch, sid="")
+    assert tsr.ledger_binding("%7", CWD, SERVER_PID) == ("", "no-session-id")
+
+
+def test_ledger_binding_rejects_an_absent_transcript(tmp_path, monkeypatch):
+    # The path is spelled correctly (right project dir) — only the FILE is gone,
+    # so deleting this guard would make the record read `ok`, not another reason.
+    _ledger_world(tmp_path, monkeypatch, write_transcript=False)
+    assert tsr.ledger_binding("%7", CWD, SERVER_PID) == ("", "transcript-missing")
+
+
+def test_ledger_binding_rejects_a_different_tmux_generation(tmp_path, monkeypatch):
+    _ledger_world(tmp_path, monkeypatch, tmux_pid="999999")
+    assert tsr.ledger_binding("%7", CWD, SERVER_PID) == ("", "generation-mismatch")
+
+
+def test_ledger_binding_rejects_an_unmeasured_generation(tmp_path, monkeypatch):
+    """Unable to check a generation is NOT the same as having checked it."""
+    _ledger_world(tmp_path, monkeypatch)
+    assert tsr.ledger_binding("%7", CWD, "") == ("", "generation-unmeasured")
+    _ledger_world(tmp_path, monkeypatch, tmux_pid="")
+    assert tsr.ledger_binding("%7", CWD, SERVER_PID) == ("", "generation-unmeasured")
+
+
+def test_ledger_binding_rejects_a_transcript_from_another_repo(tmp_path, monkeypatch):
+    """🔴 The cross-repo mis-bind guard: right pane, right generation, WRONG repo.
+
+    The record is valid in every other respect — a live session id, a transcript
+    that exists on disk, this server's pid — so nothing upstream rejects it. Only
+    the encoded-cwd comparison stands between this pane and resuming another
+    repo's conversation in a window that looks correct.
+    """
+    _ledger_world(tmp_path, monkeypatch, transcript_cwd=OTHER_CWD)
+    assert tsr.ledger_binding("%7", CWD, SERVER_PID) == ("", "project-mismatch")
+
+
+def test_ledger_binding_needs_a_pane_id(tmp_path, monkeypatch):
+    _ledger_world(tmp_path, monkeypatch)
+    assert tsr.ledger_binding("", CWD, SERVER_PID) == ("", "no-pane-id")
+
+
+# --------------------------------------------------------------------------- #
 # build_plan — claim-based unique assignment
 # --------------------------------------------------------------------------- #
 def _panes():
@@ -63,10 +188,118 @@ def _panes():
     ]
 
 
+def _no_grep(target, cwd):
+    raise AssertionError(
+        "unique_match_sids was called for a ledger-bound pane — the whole point "
+        "of the ledger is that the 145-transcript grep never runs for it")
+
+
+def _plan_env(monkeypatch, panes, matcher, server_pid=SERVER_PID):
+    monkeypatch.setattr(tsr, "live_claude_panes", lambda: panes)
+    monkeypatch.setattr(tsr, "codenames", lambda: {"scratch4": "Vapor"})
+    monkeypatch.setattr(tsr, "first_user_line", lambda sid, cwd: "")
+    monkeypatch.setattr(tsr, "tmux_server_pid", lambda: server_pid)
+    monkeypatch.setattr(tsr, "unique_match_sids", matcher)
+
+
+def test_build_plan_binds_from_the_ledger_without_ever_grepping(tmp_path, monkeypatch):
+    """The performance claim, pinned behaviourally rather than asserted in prose."""
+    _ledger_world(tmp_path, monkeypatch)
+    _plan_env(monkeypatch,
+              [{"pane_id": "%7", "session": "scratch4", "window": "2",
+                "cwd": CWD, "title": "faro"}],
+              _no_grep)
+    plan = tsr.build_plan()
+    assert plan[0]["session_id"] == SID_A
+    assert plan[0]["bind_source"] == "ledger"
+
+
+@pytest.mark.parametrize("kw", [
+    {"record": False},                   # no record file
+    {"sid": ""},                         # empty session_id
+    {"write_transcript": False},         # transcript gone
+    {"tmux_pid": "999999"},              # different tmux server generation
+    {"transcript_cwd": OTHER_CWD},       # another repo's project dir
+])
+def test_each_rejected_record_falls_back_to_the_grep(tmp_path, monkeypatch, kw):
+    """Every validation failure independently hands the pane to the fallback."""
+    _ledger_world(tmp_path, monkeypatch, **kw)
+    _plan_env(monkeypatch,
+              [{"pane_id": "%7", "session": "scratch4", "window": "2",
+                "cwd": CWD, "title": "faro"}],
+              lambda target, cwd: [SID_B])
+    plan = tsr.build_plan()
+    assert plan[0]["session_id"] == SID_B
+    assert plan[0]["bind_source"] == "fuzzy"
+
+
+def test_ledger_wins_a_conflict_with_the_grep(tmp_path, monkeypatch):
+    """Same pane, two answers: the RECORD beats the INFERENCE (which never runs)."""
+    _ledger_world(tmp_path, monkeypatch)
+    _plan_env(monkeypatch,
+              [{"pane_id": "%7", "session": "scratch4", "window": "2",
+                "cwd": CWD, "title": "faro"}],
+              lambda target, cwd: [SID_B])   # the grep would say something else
+    plan = tsr.build_plan()
+    assert plan[0]["session_id"] == SID_A and plan[0]["bind_source"] == "ledger"
+
+
+def test_a_guess_cannot_steal_a_session_the_ledger_owns(tmp_path, monkeypatch):
+    """The mixed case: ledger pane and fuzzy pane both want SID_A.
+
+    Pane %7 has a record for SID_A. Pane %8 has none, and its top content match is
+    also SID_A. Ledger claims first, so %8 falls to its second candidate rather
+    than resuming %7's conversation.
+    """
+    _ledger_world(tmp_path, monkeypatch)
+    _plan_env(monkeypatch,
+              [{"pane_id": "%8", "session": "8", "window": "1",
+                "cwd": CWD, "title": "wedge"},         # listed FIRST on purpose
+               {"pane_id": "%7", "session": "scratch4", "window": "2",
+                "cwd": CWD, "title": "faro"}],
+              lambda target, cwd: [SID_A, SID_C])
+    plan = tsr.build_plan()
+    by_win = {(e["codename"], e["window"]): e for e in plan}
+    assert by_win[("Vapor", "2")]["session_id"] == SID_A
+    assert by_win[("Vapor", "2")]["bind_source"] == "ledger"
+    assert by_win[("main:8", "1")]["session_id"] == SID_C
+    assert by_win[("main:8", "1")]["bind_source"] == "fuzzy"
+    sids = [e["session_id"] for e in plan]
+    assert len(sids) == len(set(sids))    # never the same conversation twice
+
+
+def test_two_panes_cannot_share_one_ledger_session(tmp_path, monkeypatch):
+    """Two ledger records naming one session: one binds, the other falls back."""
+    ledger, transcript = _ledger_world(tmp_path, monkeypatch)
+    (ledger / tsr._AL.pane_filename("claude", "%8")).write_text(
+        (ledger / "claude-p7.json").read_text())   # same session_id, other pane
+    _plan_env(monkeypatch,
+              [{"pane_id": "%7", "session": "scratch4", "window": "2",
+                "cwd": CWD, "title": "faro"},
+               {"pane_id": "%8", "session": "8", "window": "1",
+                "cwd": CWD, "title": "wedge"}],
+              lambda target, cwd: [])
+    plan = tsr.build_plan()
+    sids = [e["session_id"] for e in plan if e["session_id"]]
+    assert sids == [SID_A]
+    assert [e["session_id"] for e in plan if not e["session_id"]] == [""]
+
+
+def test_neither_source_yields_the_picker_not_a_guess(tmp_path, monkeypatch):
+    _ledger_world(tmp_path, monkeypatch, record=False)
+    _plan_env(monkeypatch,
+              [{"pane_id": "%7", "session": "scratch4", "window": "2",
+                "cwd": CWD, "title": "faro"}],
+              lambda target, cwd: [])
+    plan = tsr.build_plan()
+    assert plan[0]["session_id"] == "" and plan[0]["bind_source"] == ""
+
+
 def test_build_plan_assigns_unique_sessions(monkeypatch):
     monkeypatch.setattr(tsr, "live_claude_panes", _panes)
     monkeypatch.setattr(tsr, "codenames", lambda: {"scratch4": "Vapor"})
     monkeypatch.setattr(tsr, "first_user_line", lambda sid, cwd: "")
+    monkeypatch.setattr(tsr, "tmux_server_pid", lambda: SERVER_PID)
     # Each pane content-matches its own distinct session.
     cand = {"8:1": ["sidA"], "8:3": ["sidB"], "scratch4:2": ["sidC"]}
     monkeypatch.setattr(tsr, "unique_match_sids", lambda target, cwd: cand[target])
@@ -85,6 +318,7 @@ def test_build_plan_never_double_assigns_a_session(monkeypatch):
     monkeypatch.setattr(tsr, "live_claude_panes", _panes)
     monkeypatch.setattr(tsr, "codenames", lambda: {"scratch4": "Vapor"})
     monkeypatch.setattr(tsr, "first_user_line", lambda sid, cwd: "")
+    monkeypatch.setattr(tsr, "tmux_server_pid", lambda: SERVER_PID)
     cand = {"8:1": ["dup"], "8:3": ["dup"], "scratch4:2": ["dup", "own"]}
     monkeypatch.setattr(tsr, "unique_match_sids", lambda target, cwd: cand[target])
 
@@ -101,6 +335,7 @@ def test_build_plan_empty_when_no_match(monkeypatch):
                         lambda: [{"session": "8", "window": "1", "cwd": "/r", "title": "x"}])
     monkeypatch.setattr(tsr, "codenames", lambda: {})
     monkeypatch.setattr(tsr, "first_user_line", lambda sid, cwd: "")
+    monkeypatch.setattr(tsr, "tmux_server_pid", lambda: SERVER_PID)
     monkeypatch.setattr(tsr, "unique_match_sids", lambda target, cwd: [])
     plan = tsr.build_plan()
     assert plan[0]["session_id"] == ""            # uncertain -> picker at restore
