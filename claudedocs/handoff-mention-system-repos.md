@@ -17,67 +17,74 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Expand the mention system (`mention-open.py`) so clicking `repo#N` in Alacritty resolves against ALL repos the operator contributes to, not just those checked out locally in `~/workspace/`.
 
 ## State now
-**The 2026-09-03 resolver work is still SHIPPED AND VERIFIED** (PR #1291, squash `fd68d48c`)
-— re-measured live 2026-09-04 and unchanged: mapping present on both hosts at
-`~/.config/mention-open/known_repos.json` (0600, 18063 B workbench / 18045 B laptop),
-`git ls-files | grep -c collector/known_repos` = 0, `talos-infra#1065` resolves,
-`zzz-no-such-repo#1` refuses naming its reason.
+**BOTH efforts are now SHIPPED.** The 2026-09-03 resolver (#1291, `fd68d48c`) and the
+2026-09-04/05 detection-widening + attribution work (#1313, squash `3c324156`).
 
-**A SECOND effort is now IN FLIGHT on the same subsystem: detection widening + attribution.**
-- A subagent is running in an isolated devrc worktree. **Its results were UNKNOWN when this
-  doc was written** — no PR number, no gate result, no test matrix. Check for its PR before
-  assuming anything about it.
-- Claim held: `devrc-mention-attribution` (`claim-work --release devrc-mention-attribution`
-  when its PR lands). It is ad-hoc, NOT derived from a rank in this doc's list.
-- Duplicate sweep at dispatch: 30 open devrc PRs, none touching mention detection.
+**#1313 — merged and VERIFIED ON THE DEPLOYED ARTIFACT, both hosts.**
+- Ladder: round-1 full audit → 5 findings → fix round → round-2 delta audit → **safe to
+  merge, no 🔴**. Round 2 re-ran the two claims that were self-reported rather than code (the
+  17/17 mutation sweep, independently re-run with its positive control killed and sources
+  restored to identical hashes; and the 219 floor, re-derived from a live 230-count through
+  the gate's own formula).
+- Gated sha `7d94c568` **was** the merged tree (`origin/main` `f887e958` an ancestor of it),
+  so what was audited is byte-identical to what merged. All four legs green: dev-host pytest
+  21,642 collected / 0 failed, dev-host node 1,449 / 0, plus both nix derivations built ONE
+  AT A TIME.
+- `ship.sh` converged both hosts at `3c324156` and **compared** them (not "NOT COMPARED").
+- Deployed-artifact checks (not a checkout): `mention_scan.py` → `644jij…` (was `arkxlc…`),
+  `session-tailer.py` → `cgxllq…` carrying the attributed dedupe key, and
+  `_MENTION_HINTS = MS.mention_hints(MS.PROFILE_TELEMETRY)` — the inert-prefilter fix at the
+  TELEMETRY profile (deriving at the default returns the old two literals and LOOKS correct).
+- **No consumer restart was needed, and that was checked not assumed**: the mention work runs
+  under `claude-activity-source.timer`, which is `oneshot` and fires ~5-minutely, so each run
+  is a fresh interpreter. `activity-collector.service` has been up 8 days and the switch did
+  not restart it — it is the spool shipper and this PR does not touch it.
 
-🔴 **`main` MOVED 5 commits mid-session** — `099771da` → `8ad0c3c1` (other sessions merging).
-The brief handed the agent `099771da` as its regression base; that is still a valid ancestor
-for a red-at-base matrix, but **the merged-tree gate must be run against current `main`**, not
-against the base named in the brief.
-
-⚠ Two hosts drifted apart: laptop is at `fd68d48c`, workbench + `origin/main` ahead of it.
-Docs-only so far, but it re-opens the divergence class `ship.sh` exists to close.
-
-### Operator decisions taken 2026-09-04 — settled, do not re-litigate
-1. **Telemetry-wider, terminal-narrow.** The widened detection surface is for
-   `session-tailer.py` only; the Alacritty hint keeps its narrow click-safe regex. This
-   DELIBERATELY relaxes the module's "one set of regexes, can never drift apart" invariant,
-   so the split must be explicit and pinned two-way by a test.
-2. **Attribution before detection.** 92% of detections are unattributed bare `#N`.
-3. **Enumerated allowlist only** for un-anchored wordy forms — following the module's own
-   precedent for ClickUp's `DEV-123` form. No generic `\w+ \d+` patterns.
-4. **On attribution failure, open the rofi TUI with fuzzy matching over all candidates**
-   rather than refusing (operator, mid-session). Applies to the click path; see gotchas.
+🔴 **THE HOSTS AGREE ON GIT AND NOT ON ARTIFACT.** `ship.sh` said so explicitly:
+`nix/programs/alacritty/default.nix` is dirty AND read at eval time, so the workbench's
+generation is `origin/main` PLUS the uncommitted `save_to_clipboard` WIP. The laptop's is
+not. Git parity is not host parity — see ranked item 3.
 
 ## Open investigations — live diagnosis state
 (none — the disclosure is a known, measured state awaiting an operator decision, not a
 diagnosis in progress.)
 
 ## Next steps (ranked)
-1. **Exercise the real Alacritty click path** — still never done end-to-end.
-   🔴 NEEDS A HUMAN (clicking raises windows — a `pkill`-class action for an agent).
-   ⚠ **Now a MOVING TARGET**: the in-flight agent is changing `mention-open.py`'s failure
-   paths (decision 4). Testing before that lands measures code about to be replaced — either
-   do it now as a pre-change baseline and say so, or wait for the PR.
-   Click `talos-infra#1065` (opens), `dashboard#12` (rofi picker), `#282828` (nothing).
-   Plain left-click — the hint is `mouse.enabled = true` with no mods; `Ctrl+Shift+M` is the
-   keyboard route.
+1. **Exercise the real Alacritty click path** — STILL the one thing never done end-to-end,
+   and now more valuable than before because #1313 changed it. Plain left-click (the hint is
+   `mouse.enabled = true` with no mods; `Ctrl+Shift+M` is the keyboard route):
+   `talos-infra#1065` (opens), `dashboard#12` (rofi picker), `#282828` (underlines, opens
+   nothing). 🔴 **The widest-blast-radius change to check deliberately:** a bare `#N` clicked
+   in a pane with NO resolvable repo now shows a ~370-row fuzzy picker with the clawgate task
+   first, where it previously opened the clawgate task directly. Type to narrow. If that is
+   wrong in practice it is a one-line ordering change.
+   🔴 NEEDS A HUMAN — clicking raises windows, a `pkill`-class action for an agent.
    forcing: none
 2. **Add a staleness signal for `~/.config/mention-open/known_repos.json`** (devrc;
    `scripts/regen-known-repos.py` + a test, or a systemd-user timer in `nix/home.nix`).
-   RE-MEASURED 2026-09-04: still zero timers reference it — the one `list-timers` hit is
-   `present-regen.timer`, which belongs to the `present` skill and is unrelated. Degrades to
-   the API fallback rather than breaking.
+   Re-measured 2026-09-04: still zero timers reference it (`present-regen.timer` belongs to
+   the `present` skill and is unrelated). Degrades to the API fallback rather than breaking.
    forcing: none
 3. **Commit the workbench's `save_to_clipboard` WIP** in
-   `nix/programs/alacritty/default.nix` (devrc, one file, 8 lines). Still uncommitted and
-   still live on the workbench only.
-   forcing: gate — `ship.sh` skipped the workbench with rc 7 over this exact file and will
-   skip it again on the next ship that touches it.
-4. **Review, gate and merge the in-flight detection/attribution PR**, then
-   `claim-work --release devrc-mention-attribution`. Gate BOTH tiers on the merged tree
-   against current `main` — nothing blocks a merge in this repo.
+   `nix/programs/alacritty/default.nix`. Now the ONLY substantive difference between the two
+   hosts' built generations. MEASURED 2026-09-05: it did NOT block this ship (workbench was
+   behind 1 / ahead 0, and the incoming commit does not touch that file), so `--ff-only`
+   succeeded — but it stays a latent rc 7 for the next ship whose incoming commits DO touch
+   it, and meanwhile the two hosts differ.
+   forcing: gate — `ship.sh` already skipped this host once with rc 7 over this exact file.
+4. ~~Review, gate and merge the in-flight detection/attribution PR~~ — **DONE** (#1313 merged
+   `3c324156`, claim `devrc-mention-attribution` released). Kept numbered so ranks 1-3 do not
+   re-point.
+   forcing: none
+5. **Fix `scripts/collector/README.md:66-69`** (devrc, one file) — round 2's only 🟡, left
+   unfixed ON PURPOSE so the merged artifact stayed byte-identical to the audited one. The
+   README still promises IN BOLD that "what the terminal underlines and what the telemetry
+   records cannot drift", and gives that as the reason for the module's location — the exact
+   invariant #1313 deliberately retired (`mention_scan.py:12` now opens "🔴 THE TWO CONSUMERS
+   NO LONGER SHARE ONE PATTERN SET"). Lines 59-60 of the same block also list the emitted
+   payload fields without `repo` / `repo_source`. Risk: a maintainer reads it, believes the
+   click surface is structurally protected, and adds a pattern as `_BOTH` — the thing the
+   split exists to make a deliberate act.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -170,6 +177,55 @@ diagnosis in progress.)
 - **This session resolved no clawgate task** — `clawgate_handoff.sh resolve` exited 5
   (0 tasks). An unknown session id answers 200 with an empty array, so that is NOT evidence
   this session touched no task; no `clawgate-task:` field was written either way.
+
+- 🔴 **Operator decisions taken 2026-09-04 — settled, do not re-litigate.** MOVED HERE from
+  `State now` 2026-09-05 because that is a REPLACE heading and a routine status update was
+  dropping the block; it is durable and belongs under an APPEND heading. (1) **Telemetry-wider,
+  terminal-narrow** — the widened detection surface is for `session-tailer.py` only; the
+  Alacritty hint keeps its narrow click-safe regex. This deliberately relaxes the "one set of
+  regexes, can never drift apart" invariant, so the split must stay explicit and pinned
+  two-way by a test. (2) **Attribution before detection** — 92% of detections were
+  unattributed bare `#N`. (3) **Enumerated allowlist only** for un-anchored wordy forms,
+  following the module's own precedent for ClickUp's `DEV-123` form; no generic `\w+ \d+`
+  patterns, and no git-sha pattern ever (a `[0-9a-f]{7,12}` probe returned 520,256 hits).
+  (4) **On attribution failure, open the rofi TUI with fuzzy matching** rather than refusing.
+  All four are implemented and shipped in #1313.
+- 🔴 **A "merged tree" that is the BRANCH HEAD is a no-op merge, and it hid a real red.**
+  #1313's first gate claimed merged-tree `316ccf74` — but that was the branch head and
+  `cc409f82` the merge base, so the gate never saw `main`. When the fix round built a TRUE
+  merge it went **RED**, and `main` moved to `f887e958` mid-run forcing a second merge whose
+  new `main` touched a test file the branch also modifies. That is the disjoint-file merge
+  hazard arriving in practice. **Check `merge-base --is-ancestor origin/main <head>` before
+  believing any "merged tree" claim.**
+- 🔴 **The migration cost of putting `repo` in the dedupe key turned out to be ZERO, and the
+  reasoning is the reusable part.** Rather than accepting a one-time re-emit of every
+  already-emitted mention, the fix read the DEPLOYED `collect_mentions` out of
+  `git show origin/main:` and established it takes no `repos` argument — so every key already
+  on disk was written unattributed and still matches under a CONDITIONAL suffix
+  (`platform:raw` unattributed, `platform:raw@owner/repo` attributed). Only rows that
+  genuinely gain an attribution re-emit. Collision-safety (`@` cannot occur in `raw`) was
+  verified by reading every character class AND by fuzzing 200,000 random strings over an
+  alphabet containing `@` — 0 counterexamples.
+- 🔴 **A ladder round can be ENDED on a stated criterion, and that must be WRITTEN DOWN.**
+  No round 3 was run. Round 2 found one 🟡 (the README) and six 🟢 — no defect in the
+  payload's BEHAVIOUR — and a round auditing prose fixes generates prose findings
+  indefinitely, which is the non-terminating shape. Recorded explicitly because "ended on
+  that reasoning" and "converged cleanly" are indistinguishable in a report otherwise.
+- **Private repo NAMES in this public tree: measured, and larger than the 3 that were
+  reported.** A tree-wide scan found **35 distinct private repo names across 2,364
+  occurrences**, all pre-existing and none introduced by #1313. Grouped by owner, 14 of them
+  belong to the account holding 167 private repos (the client's, per the #1283 write-up),
+  1,619 occurrences. Much of it is DELIBERATE — `CLAUDE.md` names client repos and env
+  handles so an agent can route to the right checkout. 🔴 **No gate covers this class**: all
+  four content gates read `git ls-files` and scan JSON/JSONL/HTML/TXT plus hostnames and IPs,
+  so a repo name in a markdown sentence matches none of them — the same structural blindness
+  that let #1283 through. **Suggested (not built): a RATCHET** pinning the current set and
+  failing when a NEW private name appears; that churns nothing and closes the actual hazard,
+  which is the next bulk dump rather than the names already present. ⚠ The scan's positive
+  control held (private list non-empty, 233/149); its negative control was near-vacuous.
+- **`--print` above the retired namesake cap now prints every namesake and exits 0** where it
+  used to refuse — declared intended, argued in code and body, pinned at nine rows. Nothing
+  in the repo consumes `--print`.
 
 ## How to verify
 ```bash
