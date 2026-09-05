@@ -32,7 +32,10 @@ Usage:
 Restore flags:
   --dry-run / -n          show what would happen without sending keys
   --plan PATH             use a custom plan file instead of the default
-  --staleness-check [H]   refuse to restore if plan is > H hours old (default: 2h)
+  --staleness-check [H]   refuse to restore unless the plan is BOTH in step with
+                          the saved layout AND produced within H hours of running
+                          time (default: 2h). NOT wall-clock age — powered-off
+                          time does not count. See `plan_staleness_hours`.
 
 State: ~/.config/initiatives/restore-plan.json  (+ restore-cheatsheet.md)
 Scratchpad codenames come from the canonical scripts/tmux-scratch-slots.sh.
@@ -481,15 +484,45 @@ def window_state(target: str) -> tuple[bool, str]:
     return (bool(out.strip()), out.strip())
 
 
+def resurrect_last_path() -> Path:
+    """`<resurrect-dir>/last`, asking tmux rather than assuming the default.
+
+    🔴 `@resurrect-dir` IS CONFIGURABLE and the plugin honours it —
+    `helpers.sh:resurrect_dir()` is `get_tmux_option @resurrect-dir
+    "$HOME/.tmux/resurrect"`. Hardcoding the default is not merely incomplete:
+    on a host that moved the directory, `~/.tmux/resurrect/last` FREEZES at the
+    switchover instant, so every later run compares against a layout nobody
+    writes, refuses permanently, and says `basis=layout` while doing it — a
+    confident claim about a file that is no longer the layout being restored.
+    Failing closed with a misdirecting message is worse than failing open.
+
+    Falls back to the module default when tmux cannot be reached (no server, or
+    `restore` running before one exists), which is also what the plugin's own
+    `get_tmux_option` default does.
+    """
+    configured = run(["tmux", "show-options", "-gqv", "@resurrect-dir"]).strip()
+    if configured:
+        return Path(os.path.expanduser(configured)) / "last"
+    return RESURRECT_LAST
+
+
 def resurrect_state_mtime() -> float | None:
     """mtime of the resurrect state file `restore` is racing, or None if unreadable.
 
-    `~/.tmux/resurrect/last` is a symlink to the newest `tmux_resurrect_*.txt`;
-    `stat()` follows it, which is what we want — the target's mtime is when that
-    layout was captured.
+    `<resurrect-dir>/last` is a symlink to the newest `tmux_resurrect_*.txt`.
+    🔴 `stat()` FOLLOWS IT AND `lstat()` MUST NOT BE SUBSTITUTED: the target's
+    mtime is when that layout was captured, while the symlink's own mtime is
+    when it was last repointed. They differ, and on a DANGLING `last` the
+    difference decides correctness — `stat` raises and we fall back to `wall`,
+    whereas `lstat` would happily report `basis=layout` for a layout that no
+    longer exists.
+
+    `OSError` and not `FileNotFoundError`: a `last` that exists but is
+    unreadable, or an ELOOP symlink chain, must degrade to the fallback rather
+    than escape and crash the systemd unit.
     """
     try:
-        return RESURRECT_LAST.stat().st_mtime
+        return resurrect_last_path().stat().st_mtime
     except OSError:
         return None
 
@@ -524,20 +557,68 @@ def plan_staleness_hours() -> tuple[float, str] | None:
         kept running, so the layout being restored is not the one the plan
         describes. REFUSE.
 
-    Returns `(gap_hours, basis)`. `basis` is `"layout"` when the comparison was
-    made, or `"wall"` when the state file could not be read — a fresh host, or
-    `@resurrect-dir` pointed elsewhere. The wall-clock fallback carries the
-    powered-off flaw by construction, so callers must SAY which basis they used
-    rather than printing a bare number.
+    🔴 CONTEMPORANEITY IS NOT LIVENESS, AND THE GATE NEEDS BOTH. The plan and
+    the layout are written by ONE driver, so when that driver dies they freeze
+    TOGETHER and their gap stays constant forever. A contemporaneity-only
+    measure then reports "fresh" for a plan of any age: MEASURED, a plan and
+    layout both frozen 1400h ago 30s apart returned a 0.008h gap and restored a
+    58-day-old workspace across 44 windows. That is not hypothetical — it is
+    the OTHER outage `nix/programs/tmux/default.nix` records: on 2026-08-05
+    continuum's `status-right` interpolation was clobbered and resurrect
+    stopped saving at all, freezing both artefacts at the same instant. The
+    wall-clock measure caught that mode as a side effect; dropping it without
+    replacement traded a LOUD failure for a silent, permissive one.
+
+    So two numbers are computed and the WORSE is returned:
+
+      * CONTEMPORANEITY `abs(state - plan)` — does this plan describe the
+        layout being restored? Catches a ONE-SIDED freeze in either direction
+        (the hook-name outage: plan stuck at Jul 5, resurrect live to Jul 29).
+      * LIVENESS `min(now - newest_artefact, uptime)` — has the chain produced
+        anything lately? Catches a TOTAL freeze, which contemporaneity cannot
+        see. Capping at uptime is what keeps powered-off time out: at boot+45s
+        the newest artefact is from before shutdown, so the cap makes it 45s
+        rather than the whole night.
+
+    Worked through the four cases:
+      running normally   gap ~1min, live ~15min      -> passes
+      boot+45s after 24h off  gap ~1min, live 45s    -> passes  (the bug fixed)
+      31d uptime, chain dead 1400h  gap 30s, live 744h -> REFUSES (this finding)
+      plan frozen, layout live      gap huge         -> REFUSES
+
+    Returns `(hours, basis)` where basis is `"layout"`, `"liveness"` or
+    `"wall"`. The wall fallback (no readable state file) still carries the
+    powered-off flaw by construction, so the basis is part of the answer and
+    the refusal message NAMES it — the same number means different things.
     """
     if not PLAN.exists():
         return None
     import time
     mt = PLAN.stat().st_mtime
     state = resurrect_state_mtime()
-    if state is not None:
-        return (abs(state - mt) / 3600, "layout")
-    return ((time.time() - mt) / 3600, "wall")
+    if state is None:
+        return ((time.time() - mt) / 3600, "wall")
+    gap = abs(state - mt) / 3600
+    # Liveness: time since the chain last produced ANYTHING, but never counting
+    # more than this boot has been up — powered-off time is the one interval in
+    # which nothing can have gone stale.
+    since = (time.time() - max(state, mt)) / 3600
+    live = min(since, uptime_hours()) if since > 0 else 0.0
+    return (gap, "layout") if gap >= live else (live, "liveness")
+
+
+def uptime_hours() -> float:
+    """Hours this boot has been up; +inf if unreadable, so the cap cannot HIDE staleness.
+
+    An unreadable `/proc/uptime` must not silently turn the liveness check off —
+    failing to the uncapped wall measure is the safe direction (it can only
+    refuse more, never less).
+    """
+    try:
+        with open("/proc/uptime") as fh:
+            return float(fh.read().split()[0]) / 3600
+    except (OSError, ValueError, IndexError):
+        return float("inf")
 
 
 def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,

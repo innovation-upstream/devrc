@@ -714,7 +714,13 @@ def test_cmd_restore_staleness_check_skips_when_no_plan(tmp_path, monkeypatch, c
     assert "no restore plan" in capsys.readouterr().err.lower()
 
 
-def test_staleness_check_cli_parsing(monkeypatch, capsys):
+def test_staleness_check_cli_parsing(monkeypatch, capsys, tmp_path):
+    # 🔴 Hermeticity: without this the staleness measure reads the operator's
+    # real `~/.tmux/resurrect/last`, so this test goes RED whenever production
+    # is broken — measured: a state file >2h old fails it. That is the same
+    # leak fixed in `test_cmd_restore_rejects_stale_plan`, one test below it.
+    monkeypatch.setattr(tsr, "RESURRECT_LAST", tmp_path / "no-such-state")
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "no-such-state")
     """--staleness-check without a number uses the 2h default."""
     import tempfile
     # Parse argv, not actually restoring — just verify the flag is consumed
@@ -754,7 +760,8 @@ def test_staleness_check_cli_parsing(monkeypatch, capsys):
 HOUR = 3600.0
 
 
-def _staleness_fixture(tmp_path, monkeypatch, *, plan_age_s, state_age_s=None):
+def _staleness_fixture(tmp_path, monkeypatch, *, plan_age_s, state_age_s=None,
+                       uptime_h=10_000.0):
     """A plan and (optionally) a resurrect state file at chosen ages."""
     import time
     now = time.time()
@@ -764,21 +771,29 @@ def _staleness_fixture(tmp_path, monkeypatch, *, plan_age_s, state_age_s=None):
     monkeypatch.setattr(tsr, "PLAN", plan)
 
     if state_age_s is None:
-        monkeypatch.setattr(tsr, "RESURRECT_LAST", tmp_path / "no-such-state")
+        target = tmp_path / "no-such-state"
     else:
-        state = tmp_path / "tmux_resurrect_stub.txt"
-        state.write_text("stub")
-        os.utime(state, (now - state_age_s, now - state_age_s))
-        monkeypatch.setattr(tsr, "RESURRECT_LAST", state)
+        target = tmp_path / "tmux_resurrect_stub.txt"
+        target.write_text("stub")
+        os.utime(target, (now - state_age_s, now - state_age_s))
+    monkeypatch.setattr(tsr, "RESURRECT_LAST", target)
+    # Route the tmux lookup too — otherwise these read the live `@resurrect-dir`.
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: target)
+    # 🔴 Uptime must be injected or every liveness case measures THIS host's
+    # uptime (753h here), which makes the boot-time cases untestable.
+    monkeypatch.setattr(tsr, "uptime_hours", lambda: uptime_h)
     return plan
 
 
 def test_a_long_power_off_does_not_make_a_contemporaneous_plan_stale(tmp_path, monkeypatch):
     """THE REGRESSION. Plan and layout saved together, then the host sat off for a day."""
+    # uptime 45s: this is a restore just after boot, which is the only moment
+    # the systemd unit runs. A 24h-old plan is fresh THEN and not later — the
+    # liveness term is what draws that distinction.
     _staleness_fixture(tmp_path, monkeypatch, plan_age_s=24 * HOUR,
-                       state_age_s=24 * HOUR + 30)  # written 30s apart, both a day ago
+                       state_age_s=24 * HOUR + 30,  # written 30s apart, both a day ago
+                       uptime_h=45 / 3600)
     gap, basis = tsr.plan_staleness_hours()
-    assert basis == "layout", f"expected the layout basis, got {basis!r}"
     assert gap < 0.05, (
         f"a plan written 30s from its layout measured {gap:.2f}h stale — the "
         "powered-off interval is being counted against it again, which is the "
@@ -842,8 +857,148 @@ def test_restore_names_the_basis_when_it_refuses(tmp_path, monkeypatch, capsys):
 def test_restore_runs_on_a_contemporaneous_plan_after_a_long_power_off(tmp_path, monkeypatch, capsys):
     """End of the regression: the same 24h-off plan must now RUN, not exit 1."""
     _staleness_fixture(tmp_path, monkeypatch, plan_age_s=24 * HOUR,
-                       state_age_s=24 * HOUR + 30)
+                       state_age_s=24 * HOUR + 30, uptime_h=45 / 3600)
     rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
     err = capsys.readouterr().err
     assert rc == 0, f"restore refused a contemporaneous plan after a power-off: {err!r}"
     assert "too stale" not in err
+
+
+# ---------------------------------------------------------------------------
+# 🔴 LIVENESS — contemporaneity alone is blind to the chain dying WHOLE.
+#
+# The plan and the layout have ONE writer, so when it dies they freeze together
+# and their gap stays constant forever. A contemporaneity-only gate then calls a
+# 1400h-old plan fresh. That is the 2026-08-05 outage shape (continuum's
+# interpolation clobbered -> resurrect stopped saving at all), and the
+# wall-clock measure this change replaced caught it as a side effect.
+# ---------------------------------------------------------------------------
+
+def test_a_totally_frozen_chain_is_stale_even_though_the_two_agree(tmp_path, monkeypatch):
+    """🔴 THE REGRESSION THIS SECTION EXISTS FOR.
+
+    Plan and layout 30s apart — perfectly contemporaneous — but both written
+    1400h ago on a host that has been up 753h. Contemporaneity says 0.008h.
+    Liveness says 753h. The gate must take the worse one.
+    """
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=1400 * HOUR,
+                       state_age_s=1400 * HOUR + 30, uptime_h=753.0)
+    gap, basis = tsr.plan_staleness_hours()
+    assert basis == "liveness", (
+        f"a chain frozen for 1400h reported basis={basis!r} — contemporaneity "
+        "cannot see a TOTAL freeze, so a liveness term must dominate here")
+    assert gap > 2, (
+        f"a 1400h-dead chain measured {gap:.3f}h — restore would relaunch a "
+        "58-day-old plan across every window")
+
+
+def test_liveness_is_capped_by_uptime_so_a_power_off_still_does_not_count(tmp_path, monkeypatch):
+    """The liveness term must not reintroduce the bug this PR fixes.
+
+    Same 24h-off plan, but 45s after boot: the newest artefact is 24h old by
+    wall clock and the cap must reduce it to the uptime.
+    """
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=24 * HOUR + 30,
+                       state_age_s=24 * HOUR, uptime_h=45 / 3600)
+    gap, _ = tsr.plan_staleness_hours()
+    assert gap < 0.1, (
+        f"measured {gap:.3f}h 45s after boot — the uptime cap is not being "
+        "applied, so powered-off time is counted again")
+
+
+def test_an_unreadable_uptime_fails_TOWARDS_refusing(monkeypatch):
+    """A cap that cannot be read must not silently switch the liveness check off.
+
+    +inf means the cap never binds, so the raw wall figure stands — which can
+    only refuse MORE, never less. The opposite default (0) would disable the
+    guard exactly when the system is in an unexpected state.
+    """
+    monkeypatch.setattr("builtins.open", _raise_oserror)
+    assert tsr.uptime_hours() == float("inf")
+
+
+def _raise_oserror(*a, **k):
+    raise OSError("simulated")
+
+
+def test_the_wall_basis_refusal_does_not_claim_a_layout_comparison(tmp_path, monkeypatch, capsys):
+    """A surviving mutant: the refusal prose was hardcoded to the layout wording.
+
+    On the wall fallback there IS no layout comparison, so saying "out of step
+    with the saved layout" would assert a check that never ran.
+    """
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=9 * HOUR, state_age_s=None)
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "basis=wall" in err, err
+    assert "out of step with the saved layout" not in err, (
+        f"the wall-basis refusal claimed a layout comparison it never made: {err!r}")
+
+
+def test_state_mtime_follows_the_symlink_rather_than_reading_the_link_itself(tmp_path, monkeypatch):
+    """A surviving mutant: `stat()` -> `lstat()`.
+
+    Every other fixture uses a regular file, so nothing held the code to
+    following `last`. The target's mtime is when the LAYOUT was captured; the
+    link's own is when it was repointed.
+    """
+    import time
+    target = tmp_path / "tmux_resurrect_real.txt"
+    target.write_text("layout")
+    old = time.time() - 500 * HOUR
+    os.utime(target, (old, old))
+    link = tmp_path / "last"
+    link.symlink_to(target)
+    monkeypatch.setattr(tsr, "RESURRECT_LAST", link)
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: link)
+    got = tsr.resurrect_state_mtime()
+    assert got is not None and abs(got - old) < 5, (
+        "resurrect_state_mtime read the SYMLINK's mtime, not the layout's — "
+        "`lstat` would report a fresh layout for a 500h-old capture")
+
+
+def test_a_dangling_last_degrades_to_the_wall_basis(tmp_path, monkeypatch):
+    """The case where stat-vs-lstat decides correctness.
+
+    `lstat` on a dangling link succeeds, and would report `basis=layout` for a
+    layout that no longer exists. `stat` raises, and we fall back honestly.
+    """
+    link = tmp_path / "last"
+    link.symlink_to(tmp_path / "gone.txt")
+    monkeypatch.setattr(tsr, "RESURRECT_LAST", link)
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: link)
+    assert tsr.resurrect_state_mtime() is None
+
+
+def test_an_unreadable_state_file_degrades_rather_than_raising(tmp_path, monkeypatch):
+    """A surviving mutant: `except OSError` -> `except FileNotFoundError`.
+
+    A `last` that exists but cannot be stat'd (permissions, ELOOP) must reach
+    the fallback, not escape and kill the systemd unit.
+    """
+    class _Boom:
+        def stat(self):
+            raise PermissionError("simulated")
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: _Boom())
+    assert tsr.resurrect_state_mtime() is None
+
+
+def test_resurrect_dir_is_read_from_tmux_not_hardcoded(tmp_path, monkeypatch):
+    """🔴 A moved `@resurrect-dir` must not leave us reading a frozen default.
+
+    Hardcoding it means the old path freezes at the switchover and every later
+    run refuses permanently while asserting `basis=layout` about a file nobody
+    writes.
+    """
+    moved = tmp_path / "xdg-resurrect"
+    moved.mkdir()
+    monkeypatch.setattr(tsr, "run", lambda cmd: str(moved) + "\n")
+    assert tsr.resurrect_last_path() == moved / "last"
+
+
+def test_resurrect_dir_unset_falls_back_to_the_module_default(tmp_path, monkeypatch):
+    """Positive control for the test above — an empty option must not win."""
+    monkeypatch.setattr(tsr, "run", lambda cmd: "")
+    monkeypatch.setattr(tsr, "RESURRECT_LAST", tmp_path / "default-last")
+    assert tsr.resurrect_last_path() == tmp_path / "default-last"
