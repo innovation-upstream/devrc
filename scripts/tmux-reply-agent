@@ -1,0 +1,518 @@
+#!/usr/bin/env python3
+"""tmux-reply-agent — the host half of clawgate's terminal WRITE surface.
+
+WHAT THIS IS
+------------
+clawgate runs in a pod on the workbench cluster. tmux sockets are unix sockets on
+the workbench and laptop HOSTS, and the deployment has no hostPath, no
+hostNetwork, no hostPID and no nodeName, so the pod structurally cannot see them.
+The read model solved that by PUSHING outbound (`tmux-snapshot-push.sh`); this is
+the other direction, and it solves it the same way rather than by opening a port:
+the agent holds an OUTBOUND short poll, claims work, executes it locally, and
+reports back. No inbound access to either machine, and no credential for either
+machine inside a pod on an unauthenticated LAN surface.
+
+🔴 WHAT ONE DELIVERY ACTUALLY DOES: `tmux send-keys` into a named pane, followed
+by Enter. That is arbitrary command execution as the operator on this host. The
+operator took that decision explicitly, with the blast radius stated — free text
+into ANY pane, and clawgate presses Enter, because type-only makes remote
+answering pointless. Everything defensive below exists because of that, not
+instead of it.
+
+🔴 IT IS INERT UNTIL SOMEONE ARMS IT, IN TWO INDEPENDENT PLACES. The server's
+write routes sit behind a FAIL-CLOSED wrapper that answers 503 until
+CLAWGATE_TERMINAL_TOKEN is set on the POD; and this unit is not wired into the
+user manager's default target until `enableTmuxReplyAgent` is set true in
+`nix/home.nix`. Neither implies the other, and both are deliberately off in the
+change that introduced them. A 503 is therefore this agent's NORMAL state, logged
+once and backed off from — never an error.
+
+🔴 AT MOST ONCE, NEVER AT LEAST ONCE. A retried `send-keys` runs a command twice.
+The server's claim moves a row out of `pending` permanently, so a write this agent
+claims and then fails to execute is LOST rather than repeated — and this agent
+never retries a send, never re-claims, and never replays. That direction is
+chosen: a lost reply is visible in the audit log (as `abandoned`, whose meaning is
+"delivery UNKNOWN"), a duplicated command is not undoable.
+
+🔴 THE REPLY TEXT IS CREDENTIAL-GRADE AND IS NEVER LOGGED HERE. A reply may
+contain a secret the operator typed. It is passed to tmux as a single argv
+element and reported to nobody; the audit log lives in the server's table, behind
+the terminal token. `tests/test_tmux_reply_agent.py` pins that behaviourally.
+
+Exit codes (distinct on purpose — "something went wrong" would not tell an
+operator whether to look at credentials, at tmux, or at the server):
+  0  clean shutdown on SIGTERM/SIGINT
+  2  no usable credentials — a configuration error that cannot self-heal
+  3  tmux is not usable on this host
+
+Everything else — an unreachable server, a 503, a 401, a malformed body — is
+BACKED OFF FROM RATHER THAN EXITED ON. This is a long-running unit, and a restart
+loop against a transient condition is worse than a quiet one: it would fill the
+journal and, once a failure toast is wired to it, defeat do-not-disturb 720 times
+a day. The compensating control is that every one of those states is logged with
+its reason and its backoff.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+API_DEFAULT = "http://192.168.50.250:30302"
+CONF_FILE = os.environ.get("CLAWGATE_CONF_FILE") or os.path.expanduser("~/.claude/clawgate.env")
+ACTIVITY_ENV = os.path.expanduser("~/.config/activity-collector/env")
+
+# The host vocabulary the read model and the queue both use. `hostname` is
+# "nixos" on BOTH machines, so it cannot be the source of truth; ACTIVITY_HOST is.
+HOST_NAMES = ("workbench", "laptop")
+DEFAULT_LOCAL_HOST = "workbench"
+
+# The poll cadence. The server's write TTL is 90s, so this is ~18 polls inside a
+# write's whole deliverable life: a reply typed on a phone lands within seconds,
+# and an agent that misses a few ticks still has plenty of margin. Tighter buys
+# nothing a human can perceive and multiplies the request count against a pod
+# that is idle almost all the time.
+POLL_SECONDS = float(os.environ.get("TMUX_REPLY_POLL_SECONDS", "5"))
+# The backoff for every state that is not "a healthy empty queue": unreachable,
+# 503 (not armed — the normal state today), 401, a malformed body. Long enough
+# that a pod being redeployed or a token being absent costs almost nothing.
+BACKOFF_SECONDS = float(os.environ.get("TMUX_REPLY_BACKOFF_SECONDS", "60"))
+HTTP_TIMEOUT = float(os.environ.get("TMUX_REPLY_HTTP_TIMEOUT", "20"))
+# Bounds one `tmux send-keys`. It is a local unix-socket call that returns in
+# milliseconds; anything near this means the tmux server is wedged.
+TMUX_TIMEOUT = float(os.environ.get("TMUX_REPLY_TMUX_TIMEOUT", "10"))
+
+# 🔴 THE TMUX SERVER IDENTITY, SPELLED THE SAME WAY THE COLLECTOR SPELLS IT.
+# `session-manager` builds its `tmux_server_id` as "<pid>:<start_time>" from
+# `#{pid}` and `#{start_time}` — both server-level tmux formats — and the enqueuer
+# takes the expectation it sends us from that read model. Two spellings of one
+# token would make this guard compare a value against a differently-shaped one
+# and refuse EVERY write, which reads exactly like "the feature does not work".
+# `test_tmux_reply_agent.py::test_the_server_id_format_matches_the_collectors`
+# pins the two together against the collector's own source.
+#
+# It answers ONE question: did the tmux server restart since the enqueuer looked?
+# It is NOT a timestamp — one host's start_time was measured 5.6 years wrong
+# because tmux started before NTP sync — so equality is the only operation.
+TMUX_SERVER_ID_FORMAT = "#{pid}:#{start_time}"
+
+
+def log(msg: str) -> None:
+    """One log line.
+
+    🔴 NOTHING PASSED HERE MAY CONTAIN A WRITE'S TEXT. See the module header:
+    the reply is credential-grade and the journal is not the audit log.
+    """
+    print(f"tmux-reply-agent: {msg}", flush=True)
+
+
+# ── credentials ──────────────────────────────────────────────────────────────
+def read_conf_key(key: str, path: str) -> str:
+    """Read one KEY= value out of a sourceable env file.
+
+    🔴 THE ANCHOR ACCEPTS THE TWO SPELLINGS A SOURCEABLE FILE ACTUALLY CARRIES —
+    a leading `export ` and leading whitespace — and takes the LAST assignment,
+    as sourcing would. `tmux-snapshot-push.sh` reads the same file and learned
+    this the hard way: it anchored on a bare `^KEY=` while claiming to match
+    shell sourcing, so adding `export ` to the file would have made that reader
+    return empty forever while the hooks kept working. One file, several readers,
+    silently disagreeing.
+
+    Deliberate divergence from sourcing, same as the sibling's: a value is taken
+    literally, so no `$VAR` expansion and no `#` comment stripping. Both would
+    need a real parser, and this file holds a URL and opaque tokens.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return ""
+    pattern = re.compile(r"^[ \t]*(?:export[ \t]+)?" + re.escape(key) + r"=(.*)$")
+    value = ""
+    for line in text.splitlines():
+        m = pattern.match(line)
+        if m:
+            value = m.group(1).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return value
+
+
+def resolve(key: str, conf_file: str, env=None) -> str:
+    """Environment first, then the file.
+
+    🔴 THE ENVIRONMENT WINS, and that direction is load-bearing.
+    `clawgate-stop-hook.sh` sources this same file with `set -a`, which makes the
+    FILE beat the environment — the opposite of the documented precedence. The
+    measured consequence over there: exporting CLAWGATE_API_URL to aim a probe
+    somewhere harmless did nothing and the probe silently POSTed to PRODUCTION.
+    On THIS surface the equivalent mistake would send a reply into a live pane.
+    """
+    e = os.environ if env is None else env
+    v = (e.get(key) or "").strip()
+    if v:
+        return v
+    return read_conf_key(key, conf_file)
+
+
+def local_host_label(env=None, env_file: str = ACTIVITY_ENV) -> str:
+    """This machine's ACTIVITY_HOST label.
+
+    Same rule as the collector's, and it has to be: the server's queue is keyed on
+    the host label the read model stores, so an agent that computed a different
+    label would poll for a host nobody enqueues to and deliver nothing, silently.
+    """
+    e = os.environ if env is None else env
+    v = (e.get("ACTIVITY_HOST") or "").strip().lower()
+    if v in HOST_NAMES:
+        return v
+    try:
+        with open(env_file, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("ACTIVITY_HOST="):
+            val = line[len("ACTIVITY_HOST="):].strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                val = val[1:-1]
+            val = val.strip().lower()
+            if val in HOST_NAMES:
+                return val
+    return DEFAULT_LOCAL_HOST
+
+
+# ── tmux ─────────────────────────────────────────────────────────────────────
+def tmux_bin() -> str:
+    return os.environ.get("TMUX_REPLY_TMUX_BIN", "tmux")
+
+
+def run_tmux(args: list[str]) -> tuple[int, str, str]:
+    """Run one tmux command with an ARGV LIST and no shell.
+
+    🔴 NO SHELL, EVER, AND THIS IS THE SINGLE MOST IMPORTANT LINE IN THE FILE.
+    The text being delivered is arbitrary operator input. Interpolating it into a
+    shell string — which is what `subprocess.run(..., shell=True)` or any
+    `f"tmux send-keys ... {text}"` would do — turns `$(…)`, backticks, `;` and
+    quotes into code that runs on THIS host with the operator's privileges,
+    before tmux ever sees them. An argv list is passed to execve verbatim: there
+    is no parser between this process and tmux.
+    """
+    try:
+        p = subprocess.run([tmux_bin()] + args, capture_output=True, text=True,
+                           timeout=TMUX_TIMEOUT, check=False)
+    except subprocess.TimeoutExpired:
+        return 124, "", f"tmux timed out after {TMUX_TIMEOUT}s"
+    except OSError as exc:
+        return 127, "", f"could not execute tmux: {exc}"
+    return p.returncode, p.stdout, p.stderr
+
+
+def tmux_server_id() -> str:
+    """This host's live tmux server identity, or "" if it cannot be measured.
+
+    An unmeasurable identity is NOT treated as a match — see should_refuse.
+    """
+    rc, out, _ = run_tmux(["display-message", "-p", TMUX_SERVER_ID_FORMAT])
+    if rc != 0:
+        return ""
+    out = out.strip()
+    # tmux renders an unknown format verbatim; a lone ":" means this tmux does
+    # not know one of the two fields, which is "cannot measure", not an identity.
+    return "" if out in ("", ":") else out
+
+
+def should_refuse(expected: str, live: str) -> tuple[bool, str]:
+    """The WRITE-TIME GUARD. Returns (refuse, reason).
+
+    🔴 WHAT IT CLOSES, EXACTLY. Within one tmux server a pane id `%N` is never
+    reused, so a stale one simply does not resolve and the send fails harmlessly.
+    The dangerous case is a tmux server RESTART: ids are minted again from %0, so
+    a `%12` the enqueuer saw an hour ago now names a completely different pane —
+    and a submitted reply would execute there. Comparing the server identity the
+    enqueuer recorded against the one running now refuses exactly that.
+
+    🔴 AN ABSENT EXPECTATION IS NOT A MATCH, IT IS "NOT CHECKED", AND THAT IS
+    DELIBERATE RATHER THAN LAX. The collector reports its `tmux_server_id` as
+    UNMEASURED in real conditions (an older tmux, rows that disagree), so
+    refusing every write that carries no expectation would make the feature fail
+    exactly when the read model is degraded — while protecting against nothing,
+    since a caller that cannot measure the id cannot supply a right one either.
+    The audit row records the empty expectation, so "was this write guarded" is
+    answerable after the fact rather than assumed.
+
+    ⚠ WHAT IT DOES NOT CLOSE, stated because it is the residual the operator was
+    told about: a pane that simply MOVED ON — same tmux server, same pane, the
+    question already answered or the prompt gone. Nothing here can see that. The
+    server's TTL bounds enqueue-to-delivery at 90s, and the attention queue
+    retires stale questions off a 2-minute snapshot, so the exposed window is one
+    snapshot interval of display staleness. Closing it would need either a
+    content fingerprint (brittle against animated status lines, and its failure
+    direction is refusing legitimate replies, which trains an operator to turn
+    the guard off) or type-only writes, which the operator declined.
+    """
+    if not expected:
+        return False, ""
+    if not live:
+        return True, "the tmux server identity could not be measured on this host"
+    if expected != live:
+        # 🔴 The reason names neither identity's provenance beyond the two opaque
+        # tokens, and carries no pane content — it goes into the audit log and
+        # into a log line.
+        return True, f"tmux server identity moved (expected {expected}, live {live})"
+    return False, ""
+
+
+# ── HTTP ─────────────────────────────────────────────────────────────────────
+class Refused(Exception):
+    """A server answer that means "back off", carrying its reason."""
+
+
+def post_json(url: str, token: str, payload: dict) -> dict:
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    # 🔴 The token goes in a HEADER, never in the URL or in argv. Everything on
+    # this box can read /proc/<pid>/cmdline, and a URL lands in access logs.
+    req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 503:
+            raise Refused("the terminal write surface is NOT ARMED on the server "
+                          "(HTTP 503) — CLAWGATE_TERMINAL_TOKEN is unset there. "
+                          "This is the shipped state, not a fault.") from exc
+        if exc.code == 401:
+            raise Refused("the server rejected this agent's terminal token (HTTP 401)") from exc
+        if exc.code == 404:
+            raise Refused("the server has no terminal write route (HTTP 404) — it "
+                          "predates the write surface, or has no database wired") from exc
+        raise Refused(f"the server answered HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise Refused(f"could not reach the server: {exc.reason}") from exc
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise Refused(f"the server's answer was not JSON: {exc}") from exc
+
+
+# ── delivery ─────────────────────────────────────────────────────────────────
+# The two things a write can ask for. Enumerated rather than pattern-matched: an
+# unknown kind arriving from the server must be REFUSED, not guessed at — a
+# guessed kind is a command nobody reviewed running on this host.
+KIND_SEND_KEYS = "send-keys"
+KIND_NEW_SESSION = "new-session"
+
+
+def open_window(cwd: str) -> tuple[str, str]:
+    """Open a new tmux window at cwd. Returns (pane_id, error).
+
+    🔴 A TRANSPORT PRIMITIVE, NOT A FEATURE. "Start a Claude Code session" is
+    entirely a question of what the caller's TEXT says; this only makes a window
+    in the right directory and hands back its pane so the text can be typed there.
+    Nothing about an agent session is encoded here, deliberately.
+
+    `-P -F '#{pane_id}'` makes tmux PRINT the new pane's id, which is what lets
+    the text be sent to THAT pane by id rather than to "the active pane" — the
+    difference matters because between these two calls the operator may have
+    switched windows, and a relative target would type into whatever they moved to.
+    """
+    rc, out, err = run_tmux(["new-window", "-P", "-F", "#{pane_id}", "-c", cwd])
+    if rc != 0:
+        return "", (err or f"tmux exited {rc}")
+    pane = out.strip().splitlines()[0].strip() if out.strip() else ""
+    if not pane.startswith("%"):
+        return "", f"tmux did not report a pane id for the new window (got {pane!r})"
+    return pane, ""
+
+
+def deliver(write: dict) -> tuple[str, str]:
+    """Execute ONE claimed write. Returns (state, detail).
+
+    🔴 ONE ATTEMPT. No retry at any layer, for any reason. The claim already
+    moved this row out of `pending` permanently, so a retry here would be the one
+    place in the whole path that could deliver a command twice.
+    """
+    kind = (write.get("kind") or KIND_SEND_KEYS).strip() or KIND_SEND_KEYS
+    pane = write.get("pane") or ""
+    text = write.get("text") or ""
+    submit = bool(write.get("submit"))
+    expected = (write.get("expectTmuxServerId") or "").strip()
+
+    if kind not in (KIND_SEND_KEYS, KIND_NEW_SESSION):
+        return "refused", f"unknown write kind {kind!r}"
+
+    refuse, reason = should_refuse(expected, tmux_server_id())
+    if refuse:
+        return "refused", reason
+
+    if kind == KIND_NEW_SESSION:
+        # 🔴 THE GUARD ABOVE STILL APPLIES, and it is not redundant here. A
+        # new-session has no pane to be stale about, but it DOES have a host and a
+        # tmux server: an expectation that no longer matches means the enqueuer was
+        # looking at a tmux server that has since restarted, and a window opened on
+        # the new one is not the fleet state it was reasoning about.
+        cwd = (write.get("cwd") or "").strip()
+        if not cwd:
+            return "failed", "a new-session write carried no cwd"
+        pane, err = open_window(cwd)
+        if err:
+            return "failed", redact(err, text)
+        if not text:
+            # A bare window is a complete delivery: the caller asked for one.
+            return "delivered", f"opened {pane}"
+        # Fall through and type the caller's text into the window just created.
+        submit = True
+
+    # 🔴 `-l` MAKES IT LITERAL, AND WITHOUT IT THIS IS A DIFFERENT COMMAND.
+    # Un-flagged, `send-keys` interprets its arguments as KEY NAMES: a reply
+    # containing "C-c" would interrupt whatever is running in the pane rather
+    # than typing three characters. `--` ends option parsing so text beginning
+    # with `-` is text and not a flag. The text is ONE argv element; see run_tmux.
+    rc, _, err = run_tmux(["send-keys", "-t", pane, "-l", "--", text])
+    if rc != 0:
+        return "failed", redact(err or f"tmux exited {rc}", text)
+
+    if submit:
+        # A SEPARATE, NON-LITERAL send: `Enter` here is a key name, which is
+        # exactly why the text above had to be sent literally and alone. The
+        # server rejects any text containing a newline, so this is the ONLY
+        # submission a delivery can produce.
+        rc, _, err = run_tmux(["send-keys", "-t", pane, "Enter"])
+        if rc != 0:
+            # 🔴 THE TEXT IS ALREADY IN THE PANE. Report `failed` so the audit log
+            # does not claim a completed delivery, but say which half failed — an
+            # operator seeing this needs to know a line is sitting there unsent,
+            # not that nothing happened.
+            return "failed", redact(
+                "the text was typed but Enter was not accepted: " + (err or f"tmux exited {rc}"), text)
+    return "delivered", (f"opened {pane}" if kind == KIND_NEW_SESSION else "")
+
+
+def redact(detail: str, text: str) -> str:
+    """Remove the write's text from a diagnostic before it leaves this process.
+
+    🔴 tmux QUOTES ITS ARGUMENTS IN ITS OWN ERRORS, so the most natural failure
+    diagnostic is also the one most likely to carry a secret the operator typed —
+    into a log line and into the audit log's `detail` column. The exact string is
+    known here, so this is an exact substitution rather than a pattern match: it
+    cannot miss for the reason a secret-shaped regex misses, and it cannot
+    silently claim to have scrubbed something it did not.
+    """
+    if text:
+        detail = detail.replace(text, "<text>")
+    detail = " ".join(detail.split())
+    return detail[:400]
+
+
+# ── main loop ────────────────────────────────────────────────────────────────
+_STOP = False
+
+
+def _on_signal(_signum, _frame):
+    global _STOP
+    _STOP = True
+
+
+def one_round(api: str, token: str, host: str, agent: str) -> int:
+    """Claim, execute and report one batch. Returns the number of writes handled."""
+    got = post_json(f"{api}/api/term/send-keys/claim", token,
+                    {"host": host, "agent": agent})
+    writes = got.get("writes") or []
+    if not isinstance(writes, list):
+        raise Refused("the server's claim answer had no `writes` array")
+    for write in writes:
+        wid = str(write.get("id") or "")
+        if not wid:
+            log("a claimed write carried no id and cannot be reported; skipping")
+            continue
+        state, detail = deliver(write)
+        # 🔴 The log names the ROW and the OUTCOME, never the text. `detail` is
+        # already redacted of the text by deliver().
+        log(f"{state} {wid} (pane {write.get('pane')})" + (f": {detail}" if detail else ""))
+        try:
+            post_json(f"{api}/api/term/send-keys/{wid}/result", token,
+                      {"agent": agent, "state": state, "detail": detail})
+        except Refused as exc:
+            # 🔴 DO NOT RE-EXECUTE. The write already ran (or already failed); a
+            # lost result leaves the row to be relabelled `abandoned`, which means
+            # "delivery UNKNOWN" and is the truthful record. Re-sending would be
+            # the second execution this whole design exists to prevent.
+            log(f"could not report the outcome of {wid} — the audit log will show it as "
+                f"abandoned, which means delivery is UNKNOWN, not that it did not run: {exc}")
+    return len(writes)
+
+
+def main(argv: list[str]) -> int:
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
+    api = (resolve("CLAWGATE_API_URL", CONF_FILE) or API_DEFAULT).rstrip("/")
+    token = resolve("CLAWGATE_TERMINAL_TOKEN", CONF_FILE)
+    if not token:
+        # 🔴 A CONFIGURATION ERROR THAT CANNOT SELF-HEAL, so this one exits rather
+        # than backing off. It is also the state this ships in: arming the
+        # surface means provisioning that secret on the pod AND handing this host
+        # a copy, and neither has been done. The unit is not wired into the user
+        # manager's default target until `enableTmuxReplyAgent` is true, so this
+        # exit is what an operator sees if they start it by hand before arming.
+        log(f"no CLAWGATE_TERMINAL_TOKEN in the environment or {CONF_FILE} — "
+            "the terminal write surface is not armed on this host; refusing to poll")
+        return 2
+
+    rc, _, _ = run_tmux(["-V"])
+    if rc != 0:
+        log("tmux is not usable on this host; a claimed write could not be delivered")
+        return 3
+
+    host = local_host_label()
+    # The agent identity the server records against a claim. It includes the pid
+    # so two agents on one host (a hand-started one beside the unit) are
+    # distinguishable in the audit log rather than indistinguishable.
+    agent = f"{host}:{os.getpid()}"
+    log(f"polling {api} every {POLL_SECONDS:g}s for writes addressed to `{host}` as `{agent}`")
+
+    backoff_reason = ""
+    while not _STOP:
+        try:
+            one_round(api, token, host, agent)
+            if backoff_reason:
+                log("the server is answering again; back to the normal poll")
+                backoff_reason = ""
+            delay = POLL_SECONDS
+        except Refused as exc:
+            reason = str(exc)
+            # 🔴 LOG A REPEATING CONDITION ONCE, NOT EVERY TICK. The 503 "not
+            # armed" state is PERMANENT until someone arms the surface, and this
+            # loop runs 17,280 times a day; a line per tick would bury every real
+            # event in the journal and make the unit's output worthless.
+            if reason != backoff_reason:
+                log(f"backing off {BACKOFF_SECONDS:g}s: {reason}")
+                backoff_reason = reason
+            delay = BACKOFF_SECONDS
+        except Exception as exc:  # noqa: BLE001 — a poll must not kill the unit
+            log(f"unexpected error in the poll; backing off {BACKOFF_SECONDS:g}s: {exc!r}")
+            delay = BACKOFF_SECONDS
+
+        # Sleep in short slices so a shutdown signal is honoured promptly rather
+        # than after a full backoff.
+        waited = 0.0
+        while waited < delay and not _STOP:
+            step = min(0.25, delay - waited)
+            time.sleep(step)
+            waited += step
+
+    log("stopping")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
