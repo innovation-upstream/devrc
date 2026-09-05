@@ -240,6 +240,39 @@ def heredoc_bodies(text):
     A body with no terminator line runs to end-of-text, which is bash's own
     behaviour and the direction that keeps the text visible.
     """
+    return [body for body, _ in _heredoc_spans(text)]
+
+
+# `cat > /tmp/body.md <<'EOF'` — the redirect sits on the operator's own line,
+# BEFORE the `<<`. Anchored at the end because that prefix is all we are handed.
+_REDIRECT_TARGET = re.compile(r">>?\s*(?P<path>[^\s;&|<>]+)\s*$")
+
+
+def heredoc_bodies_writing(text, path):
+    """Bodies of the heredocs on `text` whose own line redirects to `path`.
+
+    🔴 Pins a RELATIONSHIP — heredoc-writes-this-file — not either side alone.
+    `heredoc_bodies` answers "is there a body anywhere", which cannot distinguish
+    a heredoc writing the file under discussion from one writing a DIFFERENT file
+    on the same line. Only the former licenses ignoring what is on disk.
+    """
+    want = os.path.expanduser(path).strip("'\"")
+    out = []
+    for body, prefix in _heredoc_spans(text):
+        m = _REDIRECT_TARGET.search(prefix)
+        if not m:
+            continue
+        if os.path.expanduser(m.group("path").strip("'\"")) == want:
+            out.append(body)
+    return out
+
+
+def _heredoc_spans(text):
+    """[(body, the operator's own line up to the `<<`)] — the single parser.
+
+    Split out so the redirect-target reader above and `heredoc_bodies` cannot
+    drift apart: one rule, one place.
+    """
     bodies, n = [], len(text)
     # `cmd <<A <<B` opens TWO heredocs on ONE line, and bash reads their bodies
     # back to back in the order the operators appear — B's body starts where A's
@@ -285,7 +318,8 @@ def heredoc_bodies(text):
             i = nxt
         consumed.append((start, i))
         cursor = i
-        bodies.append("\n".join(lines))
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        bodies.append(("\n".join(lines), text[line_start:m.start()]))
     return bodies
 
 
@@ -527,6 +561,19 @@ def _resolve_file(value, text):
         return (inner, None) if inner else ([], UNRESOLVED_STDIN)
     if opaque_path(value):
         return [], UNRESOLVED_OPAQUE
+    # 🔴 A heredoc on this same command line that REDIRECTS TO THIS PATH is about
+    # to overwrite it, and PreToolUse runs BEFORE the command — so the bytes on
+    # disk right now are the stale previous occupant, and the heredoc is the body
+    # the task will actually carry. Reading the file whenever the read happens to
+    # succeed made the verdict a property of the HOST rather than of the command:
+    # an unrelated 21 KB leftover at the shared path `/tmp/body.md` made this gate
+    # DENY a command whose heredoc carried perfectly good criteria.
+    # Replacing rather than aggregating is what keeps it correct in BOTH
+    # directions — a stale file that DOES have the heading must not rescue a
+    # heredoc that lacks it, which is the false ALLOW this gate exists to prevent.
+    over = heredoc_bodies_writing(text, value)
+    if over:
+        return over, None
     try:
         return [_read_body_file(value)], None
     except Exception:

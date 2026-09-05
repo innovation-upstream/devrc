@@ -1,6 +1,6 @@
 ---
 name: standup
-description: "One-shot fleet-wide status sweep across every active repo and cluster — your approved-mergeable/red/conflicting PRs, in-flight deploys and rollouts, and firing alerts split per cluster, as an action-first roll-up. Use for \"standup\", \"fleet status\", \"what's in flight\", \"check everything\", \"what's the state of everything\", or \"merged, what's next\"."
+description: "One-shot fleet sweep: your PRs, in-flight deploys, and firing alerts per cluster, as an action-first roll-up."
 argument-hint: [all|repos|deploys|alerts|state|local|initiatives]
 allowed-tools: Bash, Read
 ---

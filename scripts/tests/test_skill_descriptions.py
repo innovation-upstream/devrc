@@ -232,31 +232,45 @@ MIN_LISTING_ENTRIES = 30
 # docstring; plus ux-audit-loops' now-dangling pointer at the first) took
 # it to 12,679 across 36 entries, which is where this ceiling was set.
 #
-# 🔴 THE MEASURE IS NOW 12,861 ACROSS 37 ENTRIES, SO HEADROOM IS 68 -- NOT ~250.
-# `subsystem-index` (#790) arrived at 182 chars as this module measures and slid
-# straight through, because 182 < 250. That is not a bug in this constant; it is
-# the constant's actual contract, and the sentence that used to sit here --
-# "so a NEW skill cannot be added without an eviction in the SAME commit" --
-# CLAIMED COVERAGE THIS CODE DOES NOT PROVIDE. `claude/RULES.md` calls that worse
-# than no guard, because reading as coverage is what stops anyone looking.
+# The 68-char-headroom era ENDED on 2026-09-04. It is recorded because the
+# reasoning still applies: headroom had been set below the MEAN entry (12,679 /
+# 36 = 352), so it forced the eviction conversation for a TYPICAL new skill and
+# let a small one through until the accumulated slack was gone. `subsystem-index`
+# (#790) slid straight through at 182 chars. By 12,861/37 the slack WAS gone and
+# the next addition of any size reddened this gate -- which is exactly what
+# happened when `syshealth` was added, and the conversation it forced is the one
+# below.
 #
-# What it really does: headroom is set below the MEAN entry (12,679 / 36 = 352 at
-# the time), so it forces the eviction conversation for a TYPICAL new skill and
-# lets a small one through until the accumulated slack is gone. At 68 chars the
-# slack IS gone: the next addition of ANY size reds this gate. Do not read that
-# as the guard having tightened -- it is the same guard, at the end of its rope.
+# 🔴 THE MEASURE IS NOW 12,259 ACROSS 38 ENTRIES, AND HEADROOM IS 0 BY CHOICE.
+# `syshealth` (+260) was paid for by shrinking the descriptions of three skills
+# that had NEVER FIRED -- `window-triage` 507->126, `initiatives` 389->128,
+# `standup` 367->116 -- for a net -602 against the old 12,861. Measured
+# 2026-09-04 over the whole retained transcript corpus on BOTH hosts (workbench
+# 900 sessions from 08-04, laptop 170 from 07-12), counting the three real
+# attribution channels `find-session --skill` reads. Zero recorded invocations
+# each: full routing prose was buying no routing. All three keep their bodies and
+# stay /-invocable; only the always-on listing entry shrank.
 #
-# 🔴 DO NOT "re-pin to the current measurement plus 250" -- that would RAISE this
-# number, which is the one thing the paragraph below forbids. Leave it at 12_929.
-# The structural answer to a listing that keeps regrowing is the tier ledger
-# (`claude/skill-tiers.json`, gated by `scripts/tests/test_skill_tiers.py`):
-# demote a skill to `name-only` and its entry stops being charged here at all.
+# 🔴 THE COUNTER CANNOT SEE SERVICE-DRIVEN USE, so it is EVIDENCE, NOT A VERDICT.
+# The same sweep read 0 for `adoption-scan` (20,494 tool-invocation events), 1 for
+# `dl-router` (a live systemd service) and 0 for `repo-cos` (a weekly timer whose
+# output is read as email). A zero here means "no skill invocation in a Claude
+# Code transcript", never "dead" -- shrink on a zero only after asking how else
+# the thing is driven, and never delete on one.
+#
+# 🔴 DO NOT "re-pin to the measurement plus slack" -- that RAISES this number,
+# which the paragraph below forbids. Pinned at exactly the measurement, so the
+# next addition of any size reds this gate on purpose.
+# ⚠ Demoting to tier B does NOT relieve this ceiling, and a comment here used to
+# imply it did. `listing_total_chars` sums EVERY entry and never reads
+# `claude/skill-tiers.json`; the ledger changes what a host is told, not what this
+# repo declares. Only shortening or removing description text moves this number.
 #
 # LOWER it when you cut; do NOT raise it to make a new description fit. A ceiling
 # left at the previous, larger number licenses exactly the regrowth this constant
 # exists to catch, so re-pinning it is part of the cut, not follow-up work. The
 # eviction playbook is printed by the failing assertion below.
-LISTING_TOTAL_CEILING_CHARS = 12_929
+LISTING_TOTAL_CEILING_CHARS = 12_259
 
 # The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
 # recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries

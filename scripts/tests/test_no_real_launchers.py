@@ -244,7 +244,8 @@ def test_the_stubbed_launcher_set_is_pinned():
 ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
         {"airvpn-menu", "keylog-spin-capture.sh",
-         "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py"},
+         "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py",
+         "syshealth"},
         "verb-split rather than record-only — see the systemctl tests below. "
         "run-tests.sh is a THIRD case, re-justified rather than absorbed: its "
         "only occurrences of the name are GUARD 7's accounting, which counts "
@@ -257,7 +258,20 @@ ACKNOWLEDGED_UNSTUBBED = {
         "table of permission RULES, and the script spawns no subprocess at all — "
         "it imports none of subprocess / os.system / os.exec* / os.popen, which "
         "test_sync_claude_permissions.py asserts STRUCTURALLY so this "
-        "justification cannot rot into a claim about a file that has changed"),
+        "justification cannot rot into a claim about a file that has changed. "
+        "syshealth (added 2026-09-04) is the ONLY one of the six that genuinely "
+        "INVOKES systemctl, and is acknowledged on a different ground from the "
+        "other five: not unreachability, but the VERB. Its single call site is "
+        "`systemctl --user list-units --state=failed --no-legend --plain "
+        "--no-pager`, and `list-units` is on nolaunch.SYSTEMCTL_READ_VERBS, so "
+        "the verb-splitting stub PASSES IT THROUGH as a read rather than "
+        "blocking it — the call cannot start, stop or restart anything. It was "
+        "written as `--failed` first; that is a FLAG, and the stub's safe-flag "
+        "list is only --version/--help/-h, so the short form would have failed "
+        "closed. `test_syshealth.py::test_failed_units_asks_systemctl_for_a_"
+        "read_verb` pins the argv against SYSTEMCTL_READ_VERBS itself rather "
+        "than against a copied literal, so this justification goes red if the "
+        "call site ever grows a mutating verb"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
          "notify-failure.sh", "playwright-nixos", "resume-state.sh",
