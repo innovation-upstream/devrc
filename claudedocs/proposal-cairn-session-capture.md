@@ -50,7 +50,8 @@ and a distinct exit code per failure condition.
 
 It is nonetheless **the wrong instrument here, and the reasons are structural, not stylistic**:
 
-- it ships a **192 KiB tail**; decision 1 wants whole files up to 23 MB;
+- it ships a **192 KiB tail**; decision 1 wants whole files, up to 23.48 MB — §4 row 1's max,
+  i.e. the largest single transcript FILE on the host;
 - it is **ambient and periodic**; decision 2 wants an explicit per-session act;
 - it posts the payload **inline in JSON** to an HTTP endpoint; decision 3 wants bytes in
   object storage and only a pointer in the API.
@@ -59,8 +60,20 @@ It is nonetheless **the wrong instrument here, and the reasons are structural, n
 will hold two answers to "which sessions matter", and those answers will drift — the exact
 shape `claude/RULES.md` calls out as regenerating the same bug at every site. The mitigation
 is not to merge them (their triggers genuinely differ) but to **share the parts that are one
-rule**. **Not the byte-boundary logic** — it exists to drop the leading partial JSON record
-from a *tail*, and decision 1 ships whole files, so the new shipper has no caller for it.
+rule**.
+
+**The one clearly-shareable surface is `project_of`** (`build_transcript_push.py`), which maps
+a transcript to its project label. It exists at exactly one site, is **not** in the shared
+discovery module, and its own docstring warns that it is *"a LABEL, NOT AN IDENTIFIER"* that
+must not be un-slugified. A second shipper needing a project label for object metadata or a
+key prefix would hand-roll it in four lines, and the two copies would disagree the first time
+a directory name contains a literal `-`. ⚠ An earlier revision of this section deleted this
+sentence as collateral while rewriting the paragraph below, leaving the section with no
+positive advice at all — which reads as "nothing is safe to share" and is the opposite of what
+was found.
+
+**Not the byte-boundary logic** — it exists to drop the leading partial JSON record from a
+*tail*, and decision 1 ships whole files, so the new shipper has no caller for it.
 
 🔴 **AND TRANSCRIPT DISCOVERY IS ALREADY SHARED — REUSING IT IS A DECISION, NOT A FREEBIE,
 AND IT ANSWERS §9.6 IN THE OPPOSITE DIRECTION.** `scripts/lib/transcript_search.py` already
@@ -89,14 +102,19 @@ was right; the population was wrong. Kept here rather than silently corrected, b
 error is the instructive part: **a percentile is a claim about a population, so name the
 population or the number means nothing.**
 
-Measured on the workbench, 2026-09-05. All three populations, because they differ by 5×:
+Measured on the workbench, 2026-09-05. Four populations, because the answer spans ~12×
+between them — and which one applies is decided by a question §9 has not closed:
 
 | population | files | median | p90 | max | total |
 |---|---|---|---|---|---|
 | all `.jsonl` — **NOT what ships** | 5,864 | 0.74 MB | 2.53 MB | 23.48 MB | 6.73 GB |
 | real sessions (excluding `agent-*`) | 913 | **2.62 MB** | 4.97 MB | 23.48 MB | 2.45 GB |
 | **sessions that produced a handoff** — what decision 2 selects, **parent file only** | 37 | **3.82 MB** | 5.22 MB | 10.59 MB | 148 MB |
-| the same 37 sessions, **parent + their subagent transcripts** | 37 | **8.68 MB** | — | 31.00 MB | 375 MB |
+| the same 37 sessions, **parent + their subagent transcripts** | 288 files / 37 sessions | **8.68 MB** *(per session)* | 20.23 MB | 31.00 MB *(per session)* | 375 MB |
+
+⚠ Every percentile in this table uses one convention — the sorted value at `int(n × 0.9)`,
+no interpolation. Stated because a different convention gives a visibly different p90 for
+row 4 (16.65 MB rather than 20.23 MB) and nothing in the table would show which was used.
 
 Rows 3 and 4 are the population decision 2 selects, counted two ways — see the next
 paragraph but one for which of them to size off. Both were derived from the
@@ -109,13 +127,27 @@ that produce a handoff are the long ones, so the per-handoff filter picks the **
 not the median — 3.82 MB against 2.62 MB against 0.74 MB.
 
 🔴 **AND THE ROW YOU SIZE OFF DEPENDS ON AN ANSWER §9.6 HAS NOT GIVEN YET.** Row 3 is the
-parent transcript alone. If §5.0 resolves to "ship the set", row 4 is the real unit: **2.3×
-the median and 2.5× the total**, with a largest single session of **31.00 MB** — which
-*exceeds* the 23 MB figure §5.2 uses as its worked example of a payload too big for the pod.
-33 of the 37 sessions have subagent bytes at all; the worst measured is a 3.79 MB parent with
-60 subagent files totalling 43.20 MB, where shipping one object captures **8%** of the
-session. Two further reasons both rows are floors: `SessionEnd` re-ship only grows them, and
-the sample below is partial.
+parent transcript alone. If §9.6 resolves to "ship the set" (§5.0 frames it), row 4 is the
+real unit: **2.3×
+the median and 2.5× the total**, with a largest single session of **31.00 MB**.
+⚠ **That 31.00 MB is a SESSION TOTAL, not an object size** — under "ship the set" it
+arrives as many PUTs (the 37 sessions hold 288 files, mean object ~1.3 MB), and the largest
+single *file* on the host is 23.48 MB, row 1's max. So it does not describe a bigger PUT
+than §5.2's worked example; it describes more of them. Size a per-object limit off row 1's
+max and a per-handoff cost off row 4's total, and do not cross the two.
+33 of the 37 sessions have subagent bytes at all, and the worst **within those 37** is a
+3.82 MB parent with 19 subagent files totalling 26.56 MB — a 30.39 MB session of which
+shipping one object captures **12.6%**. Two further reasons both rows are floors:
+`SessionEnd` re-ship only grows them, and the sample caveat below is real.
+
+⚠ **An earlier revision quoted a worse-looking example here — a 3.79 MB parent with 60
+subagent files, 8% captured — and that session is NOT one of the 37.** It is from the
+913-session population, and its 46.99 MB total contradicted the 31.00 MB row-4 max stated
+three lines above it. Recorded rather than quietly swapped, because the mistake is this
+section's own thesis: **a figure imported from a different population is wrong even when the
+figure itself is exact.** For scale, the largest sessions on the whole host do reach ~47 MB
+including subagents — but they are not what decision 2 selects, and they are not what row 4
+measures.
 
 **So: size off row 4 unless and until §9.6 resolves to parent-only.** Sizing off row 3 while
 §9.6 is open is how a bucket, a PUT timeout or a per-handoff cost estimate comes out low by
@@ -146,6 +178,11 @@ open. **Name the front-matter field so it does not assume jsonl.**
 On this host a session writes **several** transcripts: the parent `<session-id>.jsonl` plus
 one `agent-<hash>.jsonl` per dispatched subagent. Measured: **4,951 of 5,864** files are
 `agent-*`, holding **4.28 GB of 6.73 GB — 64% of the bytes**.
+
+⚠ **These counts are a SNAPSHOT of a live corpus and they drift within a session** — §3
+quotes 4,955 and this section 4,951, taken minutes apart on the same day, and a later
+reading gave 4,957. The durable claims are the **ratio** (~85% of files, ~64% of bytes) and
+the **exact coincidence** in §3; the absolute counts are not, and nothing pins them.
 
 Those files are not addressable the way the parent is. `build_transcript_push.py` states the
 convention the whole join rests on — *"The session id IS the filename stem … the same id the
@@ -208,8 +245,9 @@ MinIO through a public ingress satisfies it completely while putting unredacted 
 transcripts through a third party. **Name the rule when writing this down.**
 
 The capacity point is true and secondary: the pod is single-replica, `Recreate` and
-PVC-backed (all three verified) and is designed to render markdown, so a 23 MB PUT — or a
-31 MB one, per §4 row 4 — through it is a category
+PVC-backed (all three verified) and is designed to render markdown, so a 23.48 MB PUT — §4
+row 1's max, the largest single transcript FILE, which is the right population here because
+§5.1 ships one object per transcript — through it is a category
 change. But that is a reason not to use the pod — it is not the reason the route must stay on
 the mesh.
 
@@ -373,7 +411,7 @@ does nothing:
 4. **The `SessionEnd` overwrite actually overwrites.** Ship at handoff, append to the
    session, fire `SessionEnd`, assert the stored `sha256` **changed** and the pointer did
    not duplicate. **Name the host it ran on** — §5.1: the hook is wired on one host today.
-   ⚠ If §5.0 resolves to one-object-per-session, this control passes trivially for the wrong
+   ⚠ If §9.6 resolves to one-object-per-session, this control passes trivially for the wrong
    reason whenever subagent files collide on the key; it is only meaningful once the key is
    decided.
 5. **A crash path attaches the floor.** Kill a session without `SessionEnd`; the
@@ -412,10 +450,12 @@ invariant the bug never violated is an invariant guard and must be labelled as o
 3. **Which entries count as "touched"?** The handoff run knows what it wrote; whether that
    set is the right one, or too wide, has not been measured.
 4. **opencode** — schedule, or park indefinitely.
-5. **What does the new shipper do about `transcript_search`?** Not "does the extraction
-   happen" — discovery is **already** a shared module with an enforced site ledger. The
-   question is narrower and sharper: reuse it and inherit its `subagents/` exclusion, widen
-   it, or bypass it deliberately. §3. This is downstream of question 6, not independent of it.
+5. **What does the new shipper do about `transcript_search`, and does it share `project_of`?**
+   Not "does the extraction happen" — discovery is **already** a shared module with an
+   enforced site ledger, so the question is narrower: reuse it and inherit its `subagents/`
+   exclusion, widen it, or bypass it deliberately. That half is downstream of question 6.
+   `project_of` is the separate, unconditional half: it is one-site today and the second
+   shipper will want it. §3.
 6. 🔴 **Does a session ship as ONE object or a SET?** §5.0. This is the largest open
    question, it decides the object key, and the goal in §1 depends on the answer — 64% of the
    bytes are in subagent transcripts, and one-object-per-session drops them.
