@@ -284,7 +284,9 @@ def post_json(url: str, token: str, payload: dict) -> dict:
     req.add_header("Authorization", "Bearer " + token)
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-            raw = resp.read()
+            # 🔴 BOUNDED. A bare .read() takes whatever the peer sends, into the
+            # memory of a process running on the operator's workstation.
+            raw = resp.read(MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         if exc.code == 503:
             raise Refused("the terminal write surface is NOT ARMED on the server "
@@ -305,6 +307,60 @@ def post_json(url: str, token: str, payload: dict) -> dict:
 
 
 # ── delivery ─────────────────────────────────────────────────────────────────
+# 🔴 THE HOST RE-VALIDATES EVERYTHING THE SERVER ALREADY VALIDATED, AND THAT IS
+# NOT REDUNDANCY — IT IS THE TRUST BOUNDARY. The server is a pod on a cluster,
+# reachable from an unauthenticated LAN NodePort; THIS process is the thing that
+# actually runs commands as the operator. "One rule, one place" applies to two
+# copies of a rule on the same side of a boundary; here the two sides fail
+# independently, and the side that executes is the one that must refuse.
+#
+# The concrete cases, each of which the server also refuses:
+#   * a pane that is not `%N` — tmux resolves a name-shaped target FUZZILY, so a
+#     `scratch:1` would not fail, it would land in some other pane and run there.
+#   * a control character in the text — `send-keys -l` writes a newline as a
+#     newline, so one write becomes TWO submissions.
+#   * a relative cwd — resolves against THIS process's directory, which differs
+#     per host and per restart.
+#   * an over-long batch — the server caps a claim at 4; a batch of a thousand
+#     from a server that is wrong, compromised or simply newer is a thousand
+#     commands, and nothing downstream would stop them.
+PANE_ID_RE = re.compile(r"^%[0-9]{1,12}$")
+MAX_TEXT_BYTES = 2048
+MAX_BATCH = 4
+# Bounds the response body this agent will read. urlopen().read() with no
+# argument reads whatever the peer sends.
+MAX_RESPONSE_BYTES = 1 << 20
+
+
+def has_control(value: str) -> bool:
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
+def validate(write: dict) -> str:
+    """Return a refusal reason, or "" when this write is safe to execute here."""
+    kind = (write.get("kind") or KIND_SEND_KEYS).strip() or KIND_SEND_KEYS
+    if kind not in (KIND_SEND_KEYS, KIND_NEW_SESSION):
+        return f"unknown write kind {kind!r}"
+    text = write.get("text") or ""
+    if not isinstance(text, str) or has_control(text):
+        return "the text contains a control character"
+    if len(text.encode("utf-8", "replace")) > MAX_TEXT_BYTES:
+        return "the text is over the size limit"
+    if kind == KIND_SEND_KEYS:
+        pane = write.get("pane") or ""
+        if not isinstance(pane, str) or not PANE_ID_RE.match(pane):
+            return "the target is not a tmux pane id of the form %N"
+        if not text:
+            return "the write carries no text"
+    else:
+        cwd = write.get("cwd") or ""
+        if not isinstance(cwd, str) or not cwd.startswith("/") or has_control(cwd):
+            return "the working directory is not an absolute path"
+        if any(seg == ".." for seg in cwd.split("/")):
+            return "the working directory contains `..`"
+    return ""
+
+
 # The two things a write can ask for. Enumerated rather than pattern-matched: an
 # unknown kind arriving from the server must be REFUSED, not guessed at — a
 # guessed kind is a command nobody reviewed running on this host.
@@ -347,22 +403,24 @@ def deliver(write: dict) -> tuple[str, str]:
     submit = bool(write.get("submit"))
     expected = (write.get("expectTmuxServerId") or "").strip()
 
-    if kind not in (KIND_SEND_KEYS, KIND_NEW_SESSION):
-        return "refused", f"unknown write kind {kind!r}"
+    # 🔴 THE TRUST BOUNDARY. See `validate`: this process executes, so this
+    # process refuses — regardless of what the server accepted.
+    if reason := validate(write):
+        return "refused", reason
 
     refuse, reason = should_refuse(expected, tmux_server_id())
     if refuse:
         return "refused", reason
 
     if kind == KIND_NEW_SESSION:
+        # `validate` has already established this is an absolute, traversal-free
+        # path; the local read below is the value it checked.
         # 🔴 THE GUARD ABOVE STILL APPLIES, and it is not redundant here. A
         # new-session has no pane to be stale about, but it DOES have a host and a
         # tmux server: an expectation that no longer matches means the enqueuer was
         # looking at a tmux server that has since restarted, and a window opened on
         # the new one is not the fleet state it was reasoning about.
-        cwd = (write.get("cwd") or "").strip()
-        if not cwd:
-            return "failed", "a new-session write carried no cwd"
+        cwd = write.get("cwd") or ""
         pane, err = open_window(cwd)
         if err:
             return "failed", redact(err, text)
@@ -429,6 +487,15 @@ def one_round(api: str, token: str, host: str, agent: str) -> int:
     writes = got.get("writes") or []
     if not isinstance(writes, list):
         raise Refused("the server's claim answer had no `writes` array")
+    if len(writes) > MAX_BATCH:
+        # 🔴 REFUSE THE WHOLE BATCH RATHER THAN TRUNCATE IT. Executing the first
+        # four and dropping the rest would run commands the server believes are
+        # in flight while silently abandoning others — a partial delivery nobody
+        # can reason about. Refusing the round leaves every row to be relabelled
+        # `abandoned` (delivery UNKNOWN), which is the honest record, and the
+        # condition is loud rather than absorbed.
+        raise Refused(f"the server returned {len(writes)} writes in one claim, over the "
+                      f"{MAX_BATCH} this agent will execute")
     for write in writes:
         wid = str(write.get("id") or "")
         if not wid:

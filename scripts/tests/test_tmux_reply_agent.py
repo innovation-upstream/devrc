@@ -861,3 +861,98 @@ def test_an_absent_kind_still_means_send_keys(server, tmux_stub, tmp_path):
     server.claim_batches = [[w]]
     run_agent(server, tmux_stub, tmp_path)
     assert len(tmux_stub.send_keys_calls()) == 2
+
+
+# --------------------------------------------------------------------------- #
+# 9. The trust boundary: the host refuses what the server should never have sent.
+# --------------------------------------------------------------------------- #
+#
+# 🔴 THIS IS NOT DUPLICATED VALIDATION, IT IS A BOUNDARY. "One rule, one place"
+# governs two copies of a rule on the same side of a trust boundary. Here the
+# server is a pod reachable from an unauthenticated LAN NodePort and THIS process
+# is the thing that runs commands as the operator — the two sides fail
+# independently, and the side that executes is the one that must refuse.
+#
+# Every case below is something the server also rejects. The point is that the
+# host does not depend on that.
+
+@pytest.mark.parametrize("mutation,expect_in", [
+    # A name-shaped target does not FAIL in tmux — it resolves fuzzily and runs
+    # the command in some other pane.
+    ({"pane": "scratch:1"}, "pane id"),
+    ({"pane": "@41"}, "pane id"),
+    ({"pane": ""}, "pane id"),
+    ({"pane": "-t"}, "pane id"),
+    # A newline makes ONE write into TWO submissions.
+    ({"text": "yes\nrm -rf /"}, "control character"),
+    ({"text": "yes\x1b[A"}, "control character"),
+    ({"text": ""}, "no text"),
+    ({"text": "x" * 4000}, "size limit"),
+])
+def test_the_host_refuses_a_write_the_server_should_never_have_sent(
+        server, tmux_stub, tmp_path, mutation, expect_in):
+    server.claim_batches = [[write(**mutation)]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [], (
+        f"the agent EXECUTED a write with {mutation} — the host is trusting the server's "
+        "validation, and the host is where commands run")
+    results = [r for r in server.requests if r["path"].endswith("/result")]
+    assert results, "the refusal was not reported"
+    body = json.loads(results[0]["body"])
+    assert body["state"] == "refused", body
+    assert expect_in in body["detail"], body
+
+
+@pytest.mark.parametrize("cwd", ["workspace/devrc", "/home/../root", "/tmp/a\nb", ""])
+def test_the_host_refuses_a_new_session_with_an_unsafe_cwd(server, tmux_stub, tmp_path, cwd):
+    """A relative cwd resolves against THIS process's directory, which differs per
+    host and after every restart — the silent-wrong-place failure in its purest
+    form, on the one code path that creates its own target."""
+    server.claim_batches = [[write(kind="new-session", pane="", cwd=cwd, text="echo hi")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert [c for c in tmux_stub.calls() if c and c[0] in ("new-window", "send-keys")] == [], (
+        f"the agent opened a window at {cwd!r}")
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "refused", body
+
+
+def test_an_oversized_claim_batch_is_refused_WHOLE(server, tmux_stub, tmp_path):
+    """🔴 REFUSE THE ROUND, DO NOT TRUNCATE IT.
+
+    The server caps a claim at 4. A batch of a thousand — from a server that is
+    wrong, compromised, or simply newer than this agent — is a thousand commands,
+    and nothing downstream would stop them. Executing the first four and dropping
+    the rest would be worse than refusing: it runs commands the server believes
+    are in flight while silently abandoning others, a partial delivery nobody can
+    reason about. Refusing leaves every row to be relabelled `abandoned`
+    (delivery UNKNOWN), which is the honest record.
+    """
+    server.claim_batches = [[write(id=f"w-{i}") for i in range(40)]]
+    _rc, out = run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [], (
+        f"the agent executed part of an oversized batch: {tmux_stub.send_keys_calls()}")
+    assert [r for r in server.requests if r["path"].endswith("/result")] == [], (
+        "the agent reported outcomes for a batch it refused as a whole")
+    assert "over the" in out and "writes in one claim" in out, out
+
+
+def test_a_batch_at_the_cap_is_still_executed(server, tmux_stub, tmp_path):
+    """The control for the refusal above: exactly at the cap goes through, so the
+    refusal is the bound and not an unconditional no."""
+    server.claim_batches = [[write(id=f"w-{i}") for i in range(4)]]
+    run_agent(server, tmux_stub, tmp_path)
+    text_sends = [s for s in tmux_stub.send_keys_calls() if "-l" in s]
+    assert len(text_sends) == 4, f"expected 4 deliveries, got {text_sends}"
+
+
+def test_the_validator_is_exercised_directly():
+    """Every branch, including the accepting ones — without which the table above
+    is satisfied by a validator that refuses everything."""
+    assert AGENT.validate({"kind": "send-keys", "pane": "%12", "text": "hi"}) == ""
+    assert AGENT.validate({"pane": "%12", "text": "hi"}) == ""  # absent kind
+    assert AGENT.validate({"kind": "new-session", "cwd": "/tmp", "text": "hi"}) == ""
+    assert AGENT.validate({"kind": "new-session", "cwd": "/tmp", "text": ""}) == ""  # bare window
+    assert "unknown write kind" in AGENT.validate({"kind": "exec", "pane": "%1", "text": "hi"})
+    # Non-string fields from a malformed payload must not raise.
+    assert AGENT.validate({"kind": "send-keys", "pane": 12, "text": "hi"}) != ""
+    assert AGENT.validate({"kind": "new-session", "cwd": None, "text": "hi"}) != ""
