@@ -59,10 +59,25 @@ It is nonetheless **the wrong instrument here, and the reasons are structural, n
 will hold two answers to "which sessions matter", and those answers will drift — the exact
 shape `claude/RULES.md` calls out as regenerating the same bug at every site. The mitigation
 is not to merge them (their triggers genuinely differ) but to **share the parts that are one
-rule**: transcript discovery and `project_of`. **Not the byte-boundary logic** — it exists to
-drop the leading partial JSON record from a *tail*, and decision 1 ships whole files, so the
-new shipper has no caller for it. Extracting it would move dead surface for one of the two
-callers.
+rule**. **Not the byte-boundary logic** — it exists to drop the leading partial JSON record
+from a *tail*, and decision 1 ships whole files, so the new shipper has no caller for it.
+
+🔴 **AND TRANSCRIPT DISCOVERY IS ALREADY SHARED — REUSING IT IS A DECISION, NOT A FREEBIE,
+AND IT ANSWERS §9.6 IN THE OPPOSITE DIRECTION.** `scripts/lib/transcript_search.py` already
+exposes `iter_transcripts` / `is_corpus_member`; the existing feeder imports it, and
+`test_transcript_search.py`'s two-way site ledger scans the tree so a fourth hand-rolled walk
+cannot pass unseen — i.e. the repo actively rewards reuse. But that module carries
+`EXCLUDED_DIR_NAMES = ("subagents",)` and `is_corpus_member` rejects anything beneath it.
+Measured 2026-09-05: the exclusion and the `agent-*` prefix **coincide exactly** — 4,955 of
+4,955 `agent-*` files are under a `subagents/` directory and 0 of 913 real-session files are.
+
+So an implementer who takes "share discovery" at face value, reuses `iter_transcripts` — the
+correct-looking move, and the one the ledger test pushes toward — **silently ships parent
+transcripts only**, which is precisely the "drops most of the evidence this proposal exists to
+preserve, while looking complete" outcome §5.0 names. The ledger test stays green throughout,
+because reusing the shared walk is what it exists to reward. **If §9.6 resolves to "ship the
+set", the shared walk must be widened or deliberately bypassed, and that is a change to a
+module with an enforced site ledger — not a free adoption.**
 
 ## 4. Volume — measured, not estimated
 
@@ -80,28 +95,40 @@ Measured on the workbench, 2026-09-05. All three populations, because they diffe
 |---|---|---|---|---|---|
 | all `.jsonl` — **NOT what ships** | 5,864 | 0.74 MB | 2.53 MB | 23.48 MB | 6.73 GB |
 | real sessions (excluding `agent-*`) | 913 | **2.62 MB** | 4.97 MB | 23.48 MB | 2.45 GB |
-| **sessions that produced a handoff** — what decision 2 selects | 37 | **3.82 MB** | 5.22 MB | 10.59 MB | 148 MB |
+| **sessions that produced a handoff** — what decision 2 selects, **parent file only** | 37 | **3.82 MB** | 5.22 MB | 10.59 MB | 148 MB |
+| the same 37 sessions, **parent + their subagent transcripts** | 37 | **8.68 MB** | — | 31.00 MB | 375 MB |
 
-The third row is the population decision 2 actually selects. It was derived from the
+Rows 3 and 4 are the population decision 2 selects, counted two ways — see the next
+paragraph but one for which of them to size off. Both were derived from the
 `Claude-Session-Id` trailer on commits touching `claudedocs/handoff-*.md` since 2026-07-01:
 37 distinct ids, **all 37** resolving to a transcript on disk, none of them an `agent-*`
 file.
 
 🔴 **The selection effect runs the WRONG WAY, and that is the point of the row.** Sessions
 that produce a handoff are the long ones, so the per-handoff filter picks the **large tail**,
-not the median — 3.82 MB against 2.62 MB against 0.74 MB. `SessionEnd` re-ship makes it
-larger still, so **3.82 MB is a floor, not an estimate.** Anyone sizing a bucket, a PUT
-timeout or a per-handoff cost must use that row.
+not the median — 3.82 MB against 2.62 MB against 0.74 MB.
+
+🔴 **AND THE ROW YOU SIZE OFF DEPENDS ON AN ANSWER §9.6 HAS NOT GIVEN YET.** Row 3 is the
+parent transcript alone. If §5.0 resolves to "ship the set", row 4 is the real unit: **2.3×
+the median and 2.5× the total**, with a largest single session of **31.00 MB** — which
+*exceeds* the 23 MB figure §5.2 uses as its worked example of a payload too big for the pod.
+33 of the 37 sessions have subagent bytes at all; the worst measured is a 3.79 MB parent with
+60 subagent files totalling 43.20 MB, where shipping one object captures **8%** of the
+session. Two further reasons both rows are floors: `SessionEnd` re-ship only grows them, and
+the sample below is partial.
+
+**So: size off row 4 unless and until §9.6 resolves to parent-only.** Sizing off row 3 while
+§9.6 is open is how a bucket, a PUT timeout or a per-handoff cost estimate comes out low by
+more than 2×.
 
 ⚠ **Scope of the 37-session sample, stated rather than buried:** devrc handoffs only, and
 only commits carrying the trailer. Handoffs in other repos are not counted, so the true
 population is larger and the totals are floors.
 
-| | |
-|---|---|
-| opencode session data | **2.4 GB** — a SQLite DB plus `storage/`, `snapshot/`, `tool-output/` |
+**opencode**, for scale only: **2.4 GB** — a SQLite DB plus `storage/`, `snapshot/` and
+`tool-output/`. Not comparable to the rows above and not summed with them.
 
-⚠ The `6.73 GB` above is the `.jsonl` population summed in decimal bytes. A `du -sh` of the
+⚠ The `6.73 GB` in row 1 is the `.jsonl` population summed in decimal bytes. A `du -sh` of the
 directory reads `6.6 GB` because it is GiB and includes ~7,000 non-`.jsonl` files. Two
 different measurements; do not pair them.
 
@@ -127,7 +154,8 @@ work at all."* For an `agent-*.jsonl` the stem is `agent-<hash>`, which is **not
 id. Sampled 6 subagent transcripts: in every one the stem is absent from the `sessionId`
 values inside the file, and the single `sessionId` present is the **parent's**.
 
-So "keyed on session id" (§5.1) has two readings and neither is safe by default:
+So keying the object "on session id" — which is what §5.1 said before it was rewritten to
+defer to this section — has two readings, and neither is safe by default:
 
 - key on the **in-record `sessionId`** → parent and all N subagent files collide on one
   object key, each push overwriting the last. §8 control 4 ("assert the sha256 changed")
@@ -179,8 +207,9 @@ imply "over the mesh" — an implementer who accepts only the capacity argument 
 MinIO through a public ingress satisfies it completely while putting unredacted multi-client
 transcripts through a third party. **Name the rule when writing this down.**
 
-The capacity point is true and secondary: the pod is single-replica, `Recreate`, PVC-backed
-and designed to render markdown (all three verified), so a 23 MB PUT through it is a category
+The capacity point is true and secondary: the pod is single-replica, `Recreate` and
+PVC-backed (all three verified) and is designed to render markdown, so a 23 MB PUT — or a
+31 MB one, per §4 row 4 — through it is a category
 change. But that is a reason not to use the pod — it is not the reason the route must stay on
 the mesh.
 
@@ -192,9 +221,16 @@ Front-matter on each touched entry gains a session reference carrying `id`, `sha
 🔴 **THE FIELD SHAPE IS CONSTRAINED, AND THE OBVIOUS SPELLING IS SILENTLY DESTRUCTIVE.**
 Cairn front matter is parsed by `parse_front_matter` in `lib/subsystem_resolver.py`, which is
 hand-rolled and **line-based**. It handles `key: value`, an inline flow list `key: [a, b, c]`,
-and a block list of one-line `- item`s. **There is no case for a nested mapping**, and its own
-docstring records the measured result of feeding it one: the key comes back empty and every
-child is promoted to a phantom top-level key by its own internal colon.
+and a block list of one-line `- item`s. **There is no case for a nested mapping**: the key
+comes back empty and every child is promoted to a phantom top-level key by its own internal
+colon.
+
+⚠ **Do not read the parser's docstring as documenting this** — an earlier revision of this
+paragraph cited it, and the citation was wrong in a way that would close the case for a reader
+who checked it. The docstring records the same corruption for a **block list**, under the
+heading *"THE BLOCK FORM IS PARSED BECAUSE NOT PARSING IT CORRUPTED THE MAPPING"* — i.e. that
+shape was **fixed**. The nested-mapping case is unfixed and undocumented there; the evidence
+for it is the reproduction below and nothing else.
 
 Reproduced against the live parser while writing this, with the exact five fields above under
 a `session:` key:
@@ -281,15 +317,19 @@ depth now rests on storage. Concretely, the implementation must:
   write-capable key whose secret exists nowhere — the exact window #683 closed. The
   stdout half matters too (these scripts are run by agents, so a printed secret lands in a
   transcript), and with decision 8 it would land there **permanently**;
-- carry **no anonymous access policy** — see §8 control 6 for how to prove that, which is
-  harder than it looks;
+- carry **no anonymous access policy**, proven by probing it rather than by reading the
+  policy JSON — and see §8 control 6, because probing it correctly is harder than it looks;
 - keep the **cairn read token unable to reach the bucket**, and vice versa — pinned by a
   test, not asserted by a comment. ⚠ Note the limit stated in §5.3: this separates
   credentials, not the host they both sit on.
 - 🔴 **register the credential in `SECRETS.md` with a rotation coupling, in the same change
   that mints it.** That file exists to make a new-host bootstrap deterministic instead of
-  manual archaeology, and every comparable entry carries one. A credential minted outside it
-  is invisible at bootstrap and at rotation.
+  manual archaeology. ⚠ **Naming the population, since this document's own §4 is about not
+  doing that:** of `SECRETS.md`'s 8 host-file rows, 6 bear a secret and **2 of those 6** carry
+  a rotation-coupling clause — both of them hosted-service bearer tokens with a k8s source of
+  truth, which is exactly what this credential would be. So the precedent is strong for this
+  shape and is *not* a universal convention. A credential minted outside that file is
+  invisible at bootstrap and at rotation either way.
 
 🔴 **The bucket has NO tenancy boundary, and the store it attaches to does.** Under
 `plan-cairn-integration.md` the store's future is multi-tenant with sharing gated on
@@ -372,9 +412,10 @@ invariant the bug never violated is an invariant guard and must be labelled as o
 3. **Which entries count as "touched"?** The handoff run knows what it wrote; whether that
    set is the right one, or too wide, has not been measured.
 4. **opencode** — schedule, or park indefinitely.
-5. **Does the shared-module extraction in §3 happen now or later?** Later is defensible;
-   never is how the two shippers drift. Scope it to discovery and `project_of` — not the
-   byte-boundary logic.
+5. **What does the new shipper do about `transcript_search`?** Not "does the extraction
+   happen" — discovery is **already** a shared module with an enforced site ledger. The
+   question is narrower and sharper: reuse it and inherit its `subagents/` exclusion, widen
+   it, or bypass it deliberately. §3. This is downstream of question 6, not independent of it.
 6. 🔴 **Does a session ship as ONE object or a SET?** §5.0. This is the largest open
    question, it decides the object key, and the goal in §1 depends on the answer — 64% of the
    bytes are in subagent transcripts, and one-object-per-session drops them.
