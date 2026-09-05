@@ -23,9 +23,13 @@
 # per-scope `.git` repositories, one measurably divergent (pod
 # `devrc/.git/refs/heads/trunk` = 68aef530, this host = e2f21cf8). A push that
 # passes this guard still rewinds that ref. Widening the comparison is the real
-# fix; until then the limit is stated rather than left to read as a guarantee — measured 2026-09-02/03, a re-seed would
-# have reverted five pod-newer bullets, two of them `OPEN:` -> `RESOLVED`
-# closures, and reported success.
+# fix; until then the limit is stated rather than left to read as a guarantee
+# this guard does not make.
+#
+# WHAT THE GUARD DOES COVER, measured 2026-09-02/03 on the real store: a re-seed
+# would have reverted five pod-newer BULLETS, two of them `OPEN:` -> `RESOLVED`
+# closures, and reported success. Those live in entry files, which is the
+# population above.
 #
 # ⚠ This block used to open "THE LOCAL STORE IS THE ONLY COPY … has no
 # off-machine backup". Both halves are now false — daily age-encrypted bundles go
@@ -72,7 +76,15 @@ while [[ $# -gt 0 ]]; do
     --push)  PUSH="${2:?--push needs <namespace>/<deployment>}"; shift 2 ;;
     --dest)  DEST="${2:?--dest needs a path}"; shift 2 ;;
     --allow-overwrite) ALLOW_OVERWRITE=1; shift ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help)
+      # 🔴 PRINT THE WHOLE LEADING COMMENT BLOCK, NOT A LINE RANGE. It was
+      # `sed -n '2,26p'`, and a line range rots the moment the header grows:
+      # this round's additions pushed line 26 into the middle of a clause, so
+      # `--help` ended mid-sentence. And the Usage block has ALWAYS sat BELOW
+      # that window, so `--allow-overwrite` was "documented in Usage" in a place
+      # `--help` could not reach. Stopping at the first non-comment line cannot
+      # drift.
+      awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
     *) echo "seed: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
