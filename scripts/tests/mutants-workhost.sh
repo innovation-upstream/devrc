@@ -38,9 +38,11 @@ mkdir -p "$ROOT/scripts/tests" "$ROOT/nix"
 cp -a "$SRC/scripts/workhost"                "$ROOT/scripts/"     # cp -a keeps the exec bit
 cp -a "$SRC/scripts/testlib"                 "$ROOT/scripts/"
 cp -a "$SRC/scripts/tests/test_workhost.py"  "$ROOT/scripts/tests/"
-# The delivery test reads this file; copying it keeps the baseline green without
-# weakening the row set.
+# The delivery test reads nix/home.nix and the README-claims test reads
+# scripts/README.md; copying both keeps the baseline green without weakening the
+# row set. Neither is a mutation target — no row below touches them.
 cp -a "$SRC/nix/home.nix"                    "$ROOT/nix/"
+cp -a "$SRC/scripts/README.md"               "$ROOT/scripts/"
 [ -e "$ROOT/.git" ] && { echo "🔴 the copy carries a .git — refusing to run"; exit 2; }
 find "$ROOT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
 
@@ -52,10 +54,10 @@ restore() { cp -a "$T/script.orig" "$SCRIPT"; }
 
 FAILURES=0
 ROWS=0
-# 139 tests collect today, NONE deselected. The floor sits well under that so it
+# 158 tests collect today, NONE deselected. The floor sits well under that so it
 # catches a suite that failed to collect, not routine growth. (This number is
 # re-derived, not remembered: `python3 -m pytest --collect-only -q` on the suite.)
-MIN_TESTS=125
+MIN_TESTS=140
 
 # 🔴 No deselect. An earlier version of this file excluded
 # `test_workhost_is_tracked_by_git` and justified it with "it asserts about the
@@ -256,6 +258,32 @@ run 'dry-run-space-joined'      test_dry_run_quotes_arguments_containing_spaces 
   's@^        sys.stdout.write(shlex.join(cmd) + "\\n")$@        sys.stdout.write(" ".join(cmd) + "\\n")@'
 run 'kubectl-hides-placeholder' test_the_kubectl_dry_run_admits_its_port_is_a_placeholder \
   's@is a placeholder@is chosen later@'
+
+printf '\n== a string that names a command is a claim about the parser ==\n'
+run 'accept-key-not-hoisted'    test_the_advice_names_a_command_the_parser_actually_accepts \
+  's@^    hoisted = \[t for t in verb_args if t in HOISTED_FLAGS\]@    hoisted = []@'
+run 'hoist-too-wide'            test_only_declared_flags_are_hoisted \
+  's@^HOISTED_FLAGS = ("--accept-key",)@HOISTED_FLAGS = ("--accept-key", "--json", "--dry-run")@'
+run 'hoist-leaves-the-flag'     test_a_hoisted_flag_is_removed_from_the_remote_argv_and_said_so \
+  's@^    return \[t for t in verb_args if t not in HOISTED_FLAGS\], hoisted@    return list(verb_args), hoisted@'
+run 'hoist-is-silent'           test_a_hoisted_flag_is_removed_from_the_remote_argv_and_said_so \
+  's@^    if hoisted:@    if False:@'
+run 'hoist-notice-always-fires' test_nothing_is_said_when_no_flag_was_hoisted \
+  's@^    if hoisted:@    if True:@'
+# The advice string itself: name a command the parser cannot accept and the
+# "actually parses" guard must go red. A substring grep for `--accept-key`
+# would still be GREEN here, which is why that is not what the guard does.
+run 'advice-names-a-non-command' test_every_workhost_command_the_tool_prints_actually_parses \
+  's@^ACCEPT_KEY_ADVICE_COMMAND = "workhost ssh --accept-key"@ACCEPT_KEY_ADVICE_COMMAND = "workhost ssh --accept-keys"@'
+run 'manual-line-loses-alias'   test_the_manual_ssh_line_uses_the_options_the_tool_itself_uses \
+  's@^        manual = " ".join(\["ssh"\] + ssh_options(host) + \[unseen\[0\].address\])@        manual = " ".join(["ssh", unseen[0].address])@'
+run 'ssh-keygen-names-address'  test_the_changed_key_advice_removes_the_alias_not_an_address \
+  's@^            % (host.name, host.name, host.name)@            % (host.name, host.name, changed[0].address)@'
+run 'forward-example-invalid'   test_the_forward_example_is_a_spec_the_validator_itself_accepts \
+  's@(e.g. `workhost forward 8080:localhost:80`); with none it would @(e.g. `workhost forward 8080`); with none it would @'
+
+run 'select-message-drops-cmd'  test_every_workhost_command_the_tool_prints_actually_parses \
+  's@"client (run `%s` once to trust it, interactively)"@"client (re-run with --accept-key)"@'
 
 printf '\n== the positive control: a mutant already known to be covered ==\n'
 run 'already-caught-control'    test_no_path_reachable_exits_3 \

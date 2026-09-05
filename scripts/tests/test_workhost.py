@@ -21,6 +21,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -324,6 +325,41 @@ def non_probe(log: Path):
 
 def peer(name, ip=TS):
     return {"HostName": name, "DNSName": "%s.example.test." % name, "TailscaleIPs": [ip]}
+
+
+#: Every backticked `workhost …` command the tool prints. A string that names a
+#: command is a CLAIM ABOUT THE PARSER, and one of them was false — see
+#: test_every_workhost_command_the_tool_prints_actually_parses.
+WORKHOST_COMMAND_RE = re.compile(r"`(workhost [^`]*)`")
+
+
+def printed_workhost_commands(*streams):
+    out = []
+    for text in streams:
+        out += WORKHOST_COMMAND_RE.findall(text or "")
+    return out
+
+
+def parse_as_workhost(mod, command):
+    """Feed a printed command back through the REAL argument pipeline.
+
+    Returns ``(verb, verb_args, opts)``. This is the pin that a substring grep
+    cannot be: `--accept-key` was present in the advice text the whole time it
+    was being silently discarded by the parser, so any test that only looked
+    for the substring passed against the broken behaviour.
+    """
+    tokens = shlex.split(command)
+    assert tokens and tokens[0] == "workhost", command
+    # Indexed rather than unpacked so the arity of split_argv's return is not
+    # itself part of the assertion. Against the PRE-FIX source (a 3-tuple) this
+    # test must go red on the CLAIM — `accept_key` is False — not on a
+    # ValueError from unpacking, which would be red for a harness reason and
+    # would prove nothing about the guard.
+    parts = mod.split_argv(tokens[1:])
+    globals_, verb, verb_args = parts[0], parts[1], parts[2]
+    opts = mod.build_parser().parse_args(globals_)
+    assert verb in mod.VERBS, (command, verb)
+    return verb, verb_args, opts
 
 
 def load_workhost():
@@ -1586,3 +1622,256 @@ def test_the_kubectl_dry_run_admits_its_port_is_a_placeholder(tmp_path):
     r = run(env, "--dry-run", "kubectl", "get", "pods")
     assert "-L 0:127.0.0.1:6443" in r.stdout, r.stdout
     assert "placeholder" in r.stderr, r.stderr
+
+
+# ---------------------------------------------------------------------------
+# 18. A string that names a command is a claim about the parser
+# ---------------------------------------------------------------------------
+#
+# 🔴 Why this section exists. The advice added for the untrusted-key state read
+# "run `workhost ssh --accept-key` once to trust it" — and that exact command
+# DID NOT WORK. Flags after an action verb belong to the verb, so `--accept-key`
+# fell into ssh's pass-through args, was never parsed, and the run exited 3 with
+# "re-run with --accept-key to trust it once" — the flag the operator had just
+# passed. Measured on a fresh client with a real sshd:
+#
+#   workhost --accept-key ssh   -> reached real ssh, host-key prompt. WORKS.
+#   workhost ssh --accept-key   -> rc 3, "re-run with --accept-key". LOOPS.
+#
+# The same "cannot bootstrap itself" defect one layer up, hitting exactly when
+# the operator is most stuck and least able to guess the other word order.
+#
+# A test that grepped the advice for the substring `--accept-key` would have
+# been GREEN against that, because the substring was there the whole time. So
+# these tests pin the ADVICE and the PARSER to each other: the printed command
+# is extracted from real output and fed back through `split_argv` + the parser.
+
+
+def _drop_kubectl(bindir):
+    (bindir / "kubectl").unlink()
+
+
+#: The LEDGER of every situation in which workhost prints a backticked
+#: `workhost …` command. Enumerated by reading every emitted string literal in
+#: the script (the `sys.std*.write` / `ValueError` / `parser.error` call sites),
+#: not by memory. Add a row when you add such a string.
+ADVICE_SCENARIOS = [
+    # (id, sandbox kwargs, argv, prep)
+    ("untrusted-key-report",
+     dict(ok_addrs=(), hostkey_missing=(LAN, NEBULA)), ("path",), None),
+    ("untrusted-key-action-verb",
+     dict(ok_addrs=(), hostkey_missing=(LAN, NEBULA)), ("run", "true"), None),
+    # --json suppresses the text advice block, so the ONLY backticked command
+    # left on stderr is select_path's own error. Without this row that message
+    # would be covered only in aggregate — i.e. not at all, because the advice
+    # block would satisfy the assertion on its behalf.
+    ("untrusted-key-json-only",
+     dict(ok_addrs=(), hostkey_missing=(LAN, NEBULA)), ("--json", "run", "true"), None),
+    ("forward-no-spec", dict(ok_addrs=(LAN,)), ("forward",), None),
+    ("forward-bad-spec", dict(ok_addrs=(LAN,)), ("forward", "8080"), None),
+    ("no-local-kubectl",
+     dict(ok_addrs=(LAN,), tunnel=True), ("--timeout", "8", "kubectl", "get", "nodes"),
+     _drop_kubectl),
+]
+
+
+@pytest.mark.parametrize(
+    "kwargs,argv,prep", [(k, a, p) for _, k, a, p in ADVICE_SCENARIOS],
+    ids=[i for i, _, _, _ in ADVICE_SCENARIOS],
+)
+def test_every_workhost_command_the_tool_prints_actually_parses(
+    tmp_path, kwargs, argv, prep
+):
+    """Not "contains a plausible string" — actually run it through the parser.
+
+    Positive control is built in: the assertion below fails if NO command was
+    found, so a scenario whose message stops naming a command cannot pass by
+    matching nothing. That reassuring zero is exactly how this guard would rot.
+    """
+    bindir, _, env = sandbox(tmp_path, **kwargs)
+    if prep is not None:
+        prep(bindir)
+    r = run(env, *argv)
+    commands = printed_workhost_commands(r.stdout, r.stderr)
+    assert commands, (argv, r.stdout, r.stderr)
+
+    mod = load_workhost()
+    for command in commands:
+        parse_as_workhost(mod, command)  # raises/asserts if it does not parse
+
+
+def test_the_advice_names_a_command_the_parser_actually_accepts(tmp_path):
+    """🔴 THE pairing guard: the advice must yield `accept_key=True`.
+
+    Extracted from real output, parsed by the real pipeline. If the advice is
+    reworded into a form the parser drops, or the hoist is removed, this goes
+    red — neither side can move without the other.
+    """
+    _, _, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN, NEBULA))
+    r = run(env, "path")
+    commands = [c for c in printed_workhost_commands(r.stdout) if "--accept-key" in c]
+    assert commands, r.stdout
+
+    mod = load_workhost()
+    for command in commands:
+        verb, verb_args, opts = parse_as_workhost(mod, command)
+        assert opts.accept_key is True, (command, verb, verb_args)
+        # And it must not ALSO still be sitting in the verb's pass-through args,
+        # which would mean it reaches the remote command as a literal argument.
+        assert "--accept-key" not in verb_args, (command, verb_args)
+
+
+def test_following_the_printed_advice_actually_connects(tmp_path):
+    """End to end: take the command the tool printed and RUN it.
+
+    The stub refuses the unknown key under BatchMode and proceeds without it,
+    exactly as ssh does, so this is green only if the advised invocation really
+    reaches an interactive connection.
+    """
+    _, log, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN, NEBULA))
+    stuck = run(env, "path")
+    assert stuck.returncode == 3, (stuck.returncode, stuck.stdout)
+
+    commands = [c for c in printed_workhost_commands(stuck.stdout) if "--accept-key" in c]
+    assert commands, stuck.stdout
+    tokens = shlex.split(commands[0])[1:]  # drop the `workhost` argv[0]
+
+    followed = run(env, *tokens)
+    assert followed.returncode == 0, (tokens, followed.returncode, followed.stderr)
+    remote = non_probe(log)
+    assert remote and LAN in remote[0], remote
+    assert "BatchMode=yes" not in remote[0], remote[0]
+
+
+def test_every_workhost_command_in_the_readme_parses_and_means_what_it_says():
+    """The same class one file over. `scripts/README.md` also tells the reader
+    to run `workhost ssh --accept-key`, and that instruction was false for
+    exactly as long as the advice block's was — a doc is not exempt from being
+    a claim about the parser."""
+    readme = (REPO / "scripts" / "README.md").read_text(encoding="utf-8")
+    commands = printed_workhost_commands(readme)
+    assert commands, "scripts/README.md no longer names any workhost command"
+
+    mod = load_workhost()
+    for command in commands:
+        verb, verb_args, opts = parse_as_workhost(mod, command)
+        if "--accept-key" in command:
+            assert opts.accept_key is True, (command, verb, verb_args)
+            assert "--accept-key" not in verb_args, (command, verb_args)
+
+
+def test_the_forward_example_is_a_spec_the_validator_itself_accepts(tmp_path):
+    """The no-spec error names an example. An example the validator would
+    reject is the same class of false claim one step further in."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "forward")
+    commands = [c for c in printed_workhost_commands(r.stderr) if " forward " in c]
+    assert commands, r.stderr
+
+    mod = load_workhost()
+    for command in commands:
+        verb, verb_args, _ = parse_as_workhost(mod, command)
+        assert verb == "forward", command
+        mod.validate_forward_spec(verb_args)  # raises ValueError if it lied
+
+
+def test_the_manual_ssh_line_uses_the_options_the_tool_itself_uses(tmp_path):
+    """The `or: ssh …` fallback is derived from `ssh_options`, not spelled
+    beside it. Advice that omitted the alias would tell the operator to create
+    the second known_hosts entry this tool exists to prevent."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN, NEBULA))
+    r = run(env, "path")
+
+    mod = load_workhost()
+    expected = " ".join(
+        ["ssh"] + mod.ssh_options(mod.HOSTS["workbench"]) + [LAN]
+    )
+    assert expected in r.stdout, (expected, r.stdout)
+
+
+def test_the_changed_key_advice_removes_the_alias_not_an_address(tmp_path):
+    """`ssh-keygen -R` keyed on an address deletes the wrong line — or none —
+    because HostKeyAlias is what the offending entry is keyed on."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(), hostkey_changed=(LAN, NEBULA))
+    r = run(env, "path")
+
+    mod = load_workhost()
+    alias = [
+        o.split("=", 1)[1]
+        for o in mod.ssh_options(mod.HOSTS["workbench"])
+        if o.startswith("HostKeyAlias=")
+    ]
+    assert alias, mod.ssh_options(mod.HOSTS["workbench"])
+    assert "ssh-keygen -R %s" % alias[0] in r.stdout, r.stdout
+    assert "ssh-keygen -R %s" % LAN not in r.stdout, r.stdout
+    assert "ssh-keygen -R %s" % NEBULA not in r.stdout, r.stdout
+
+
+# ---------------------------------------------------------------------------
+# 19. --accept-key works in BOTH argument positions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("--accept-key", "run", "echo", "bootstrapped"),
+        ("run", "--accept-key", "echo", "bootstrapped"),
+        ("run", "echo", "bootstrapped", "--accept-key"),
+    ],
+    ids=["before-verb", "after-verb", "trailing"],
+)
+def test_accept_key_is_honoured_in_either_position(tmp_path, argv):
+    """Operators will type it AFTER the verb, because that is the form the tool
+    prints and because it reads naturally."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN,))
+    r = run(env, *argv)
+    assert r.returncode == 0, (argv, r.returncode, r.stdout, r.stderr)
+    assert r.stdout.strip() == "bootstrapped", (argv, r.stdout)
+
+
+def test_a_hoisted_flag_is_removed_from_the_remote_argv_and_said_so(tmp_path):
+    """Hoisting changes what the remote command receives, so it is audible.
+    Silently dropping it is the one behaviour that is not acceptable."""
+    _, log, env = sandbox(tmp_path, ok_addrs=(), hostkey_missing=(LAN,))
+    r = run(env, "run", "--accept-key", "echo", "hi")
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "taken as a workhost flag" in r.stderr, r.stderr
+
+    # The notice names the verb it was NOT passed to; that name is a claim too.
+    mod = load_workhost()
+    named = re.findall(r"not passed to `([^`]*)`", r.stderr)
+    assert named, r.stderr
+    for verb in named:
+        assert verb in mod.VERBS, (verb, mod.VERBS)
+
+    remote = non_probe(log)
+    assert remote, remote
+    assert "--accept-key" not in remote[0], remote[0]
+
+
+def test_nothing_is_said_when_no_flag_was_hoisted(tmp_path):
+    """The notice must not fire on an ordinary run, or it is noise that trains
+    people to ignore it."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "run", "echo", "hi")
+    assert "taken as a workhost flag" not in r.stderr, r.stderr
+
+
+def test_only_declared_flags_are_hoisted(tmp_path):
+    """The positional rule still holds for everything else: `workhost run
+    --json` must send `--json` to the REMOTE command, not switch workhost into
+    JSON mode. Hoisting is a narrow, enumerated exception."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "run", "echo", "--json", "--dry-run", "--verbose")
+    assert r.stdout.strip() == "--json --dry-run --verbose", r.stdout
+    assert "{" not in r.stdout, r.stdout
+
+
+def test_a_quoted_accept_key_still_reaches_the_remote_shell(tmp_path):
+    """The named escape for the one case hoisting costs: `run` joins its args
+    and hands them to the remote shell, so quoting keeps the flag as text."""
+    _, _, env = sandbox(tmp_path, ok_addrs=(LAN,))
+    r = run(env, "run", "echo one --accept-key two")
+    assert r.stdout.strip() == "one --accept-key two", r.stdout
+    assert "taken as a workhost flag" not in r.stderr, r.stderr
