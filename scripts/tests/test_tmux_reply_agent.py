@@ -53,7 +53,6 @@ import json
 import os
 import re
 import pathlib
-import shutil
 import subprocess
 import sys
 import threading
@@ -768,10 +767,19 @@ def test_the_agent_unit_IS_WANTED_BY_NOTHING_as_shipped():
     expression), and the flag is `false`. A mutant that changes either is a
     different string here.
 
-    Deterministic — no evaluator, so it runs identically on the dev host and in
-    the nix check sandbox, which has no recursive nix. The `nix eval`
-    confirmation below is a second, weaker instrument that skips when nix is
-    unavailable; this one is the coverage.
+    🔴 DETERMINISTIC, AND THERE IS DELIBERATELY NO `nix eval` BESIDE IT. A first
+    draft added one as "confirmation". It PASSED on the dev host and turned the
+    nix check sandbox RED — not by failing, but by SKIPPING: that sandbox has no
+    recursive nix, and this repo's runner treats an unpinned skip as an error,
+    because "a skip is a test that did not run". Pinning it would have bought a
+    permanent EXPECTED_SKIPS entry for a test that can never run in the tier that
+    gates, i.e. reading as coverage while providing none.
+
+    It was removed rather than pinned because it confirmed nothing this test does
+    not already determine: given `cond == "enableTmuxReplyAgent"` and the flag
+    `false`, `lib.optionals` yields `[]` by definition. And a change to a
+    DIFFERENT combinator (`lib.optional`, singular, with different semantics)
+    fails the regex above rather than slipping past it.
     """
     flag, cond, targets = _wanted_by_expr(home_nix())
     assert cond == "enableTmuxReplyAgent", (
@@ -802,28 +810,6 @@ def test_the_wanted_by_guard_can_SEE_an_inverted_flag():
                           "  enableTmuxReplyAgent = true;")
     assert flipped != src
     assert _wanted_by_expr(flipped)[0] == "true"
-
-
-def test_nix_agrees_that_nothing_wants_the_unit():
-    """CONFIRMATION, not coverage — and labelled so.
-
-    It evaluates the real expression through nix, which is the only thing that
-    can say what systemd will actually be given. It SKIPS where nix cannot run
-    (the check sandbox has no recursive nix), and a skipped test is not a passing
-    one — which is why the deterministic guard above exists and this does not
-    replace it.
-    """
-    if shutil.which("nix") is None:
-        pytest.skip("no nix on PATH; the deterministic guard above is the coverage")
-    flag, cond, targets = _wanted_by_expr(home_nix())
-    expr = (f"let lib = (import <nixpkgs> {{}}).lib; enableTmuxReplyAgent = {flag}; "
-            f"in lib.optionals {cond} {targets}")
-    out = subprocess.run(["nix", "eval", "--impure", "--json", "--expr", expr],
-                         capture_output=True, text=True, timeout=600)
-    if out.returncode != 0:
-        pytest.skip(f"nix eval unavailable here: {out.stderr.strip()[:200]}")
-    assert json.loads(out.stdout) == [], (
-        "nix says something WANTS this unit as shipped; a switch would start it")
 
 
 def test_the_unit_PATH_carries_tmux_and_python():
