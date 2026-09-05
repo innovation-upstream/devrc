@@ -124,34 +124,58 @@ file.
 
 🔴 **The selection effect runs the WRONG WAY, and that is the point of the row.** Sessions
 that produce a handoff are the long ones, so the per-handoff filter picks the **large tail**,
-not the median — 3.82 MB against 2.62 MB against 0.74 MB.
+not the median — 3.82 MB (row 3) against 2.62 MB (row 2) against 0.74 MB (row 1).
 
 🔴 **AND THE ROW YOU SIZE OFF DEPENDS ON AN ANSWER §9.6 HAS NOT GIVEN YET.** Row 3 is the
 parent transcript alone. If §9.6 resolves to "ship the set" (§5.0 frames it), row 4 is the
-real unit: **2.3×
-the median and 2.5× the total**, with a largest single session of **31.00 MB**.
+real unit — **2.3× the median and 2.5× the total**, with a largest single session of
+**31.00 MB**.
 ⚠ **That 31.00 MB is a SESSION TOTAL, not an object size** — under "ship the set" it
 arrives as many PUTs (the 37 sessions hold 288 files, mean object ~1.3 MB), and the largest
 single *file* on the host is 23.48 MB, row 1's max. So it does not describe a bigger PUT
-than §5.2's worked example; it describes more of them. Size a per-object limit off row 1's
-max and a per-handoff cost off row 4's total, and do not cross the two.
+than §5.2's worked example; it describes more of them.
+
+⚠ **Per-object sizing: row 1's 23.48 MB is a deliberate OVER-estimate, and here is why it is
+not simply the wrong row.** The largest single file among the 37 selected sessions is
+**10.59 MB** — 2.2× smaller — so nothing shippable today approaches 23.48 MB, and row 1 is
+the row labelled *NOT what ships*. The reason to size above the selected maximum anyway is
+§4's own coverage caveat below: the selection is devrc-only and **the true population is
+larger**, so a session with a 23 MB parent can enter it without anything else changing. Size
+a per-object limit off row 1's max for that headroom, a per-handoff cost off row 4's total,
+and do not cross the two — but do not claim 23.48 MB is what ships today, because it is not.
 33 of the 37 sessions have subagent bytes at all, and the worst **within those 37** is a
 3.82 MB parent with 19 subagent files totalling 26.56 MB — a 30.39 MB session of which
 shipping one object captures **12.6%**. Two further reasons both rows are floors:
-`SessionEnd` re-ship only grows them, and the sample caveat below is real.
+`SessionEnd` re-ship only grows them, and the coverage caveat two paragraphs below is real.
 
 ⚠ **An earlier revision quoted a worse-looking example here — a 3.79 MB parent with 60
 subagent files, 8% captured — and that session is NOT one of the 37.** It is from the
 913-session population, and its 46.99 MB total contradicted the 31.00 MB row-4 max stated
 three lines above it. Recorded rather than quietly swapped, because the mistake is this
 section's own thesis: **a figure imported from a different population is wrong even when the
-figure itself is exact.** For scale, the largest sessions on the whole host do reach ~47 MB
-including subagents — but they are not what decision 2 selects, and they are not what row 4
-measures.
+figure itself is exact.**
+
+🔴 **AND THE FIRST DRAFT OF THIS VERY RETRACTION RE-IMPORTED THE SAME NUMBER, ONE LEVEL UP.**
+It closed with *"the largest sessions on the whole host do reach ~47 MB"* — which is 46.99 MB,
+the total of the session being retracted, promoted from "an example that does not belong here"
+to "the host maximum". Measured: the host maximum is **94.02 MB** (an 11.72 MB parent plus
+82.30 MB across 29 subagent transcripts) and **9 sessions exceed 47 MB**. A reader sizing for
+the widened population §4's own caveat anticipates would have been **2× low**, from a sentence
+written to warn against exactly that. Recorded because three separate revisions of this one
+paragraph made the same mistake in three different places: **retracting a number is not the
+same as not using it.**
 
 **So: size off row 4 unless and until §9.6 resolves to parent-only.** Sizing off row 3 while
 §9.6 is open is how a bucket, a PUT timeout or a per-handoff cost estimate comes out low by
 more than 2×.
+
+⚠ **This table is a SNAPSHOT of a population that GROWS AS THE SYSTEM IS USED**, the same
+caveat §5.0 carries for the corpus counts — every new handoff adds a session to it. Only the
+coverage caveat below was stated originally, and coverage and time are different limits.
+Re-measured 2026-09-05 after a day's work: still **37**, so no drift was observed — but the
+method is time-dependent by construction, and a later re-derivation returning a different `n`
+means the table is **stale, not wrong**. ⚠ One audit reading of this reported 43; it did not
+reproduce here under the stated method, which is itself the reason to state the method.
 
 ⚠ **Scope of the 37-session sample, stated rather than buried:** devrc handoffs only, and
 only commits carrying the trailer. Handoffs in other repos are not counted, so the true
@@ -183,6 +207,8 @@ one `agent-<hash>.jsonl` per dispatched subagent. Measured: **4,951 of 5,864** f
 quotes 4,955 and this section 4,951, taken minutes apart on the same day, and a later
 reading gave 4,957. The durable claims are the **ratio** (~85% of files, ~64% of bytes) and
 the **exact coincidence** in §3; the absolute counts are not, and nothing pins them.
+(The ratio is 84.4% of files — quoted as "84%" above; do not read the two as different
+measurements.)
 
 Those files are not addressable the way the parent is. `build_transcript_push.py` states the
 convention the whole join rests on — *"The session id IS the filename stem … the same id the
@@ -246,8 +272,7 @@ transcripts through a third party. **Name the rule when writing this down.**
 
 The capacity point is true and secondary: the pod is single-replica, `Recreate` and
 PVC-backed (all three verified) and is designed to render markdown, so a 23.48 MB PUT — §4
-row 1's max, the largest single transcript FILE, which is the right population here because
-§5.1 ships one object per transcript — through it is a category
+row 1's max, the largest single transcript FILE on the host — through it is a category
 change. But that is a reason not to use the pod — it is not the reason the route must stay on
 the mesh.
 
