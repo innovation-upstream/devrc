@@ -18724,3 +18724,94 @@ class TestTheSeedPreFlightJoinIsLocaleSafe:
             f"stops both: rc={r.returncode}\n{r.stdout}\n{r.stderr}"
         )
         assert f"{SCOPE}/backblaze.md" in r.stderr, r.stderr
+
+
+class TestTheSeedPreFlightSurvivesAwkwardPaths:
+    """🔴 A ROUND-1 CLAIM SHIPPED UNVERIFIED, AND BOTH HALVES WERE WRONG.
+
+    It said `-I{}` made a path with a space or a quote survive. Measured by the
+    round-2 audit:
+
+    * QUOTE — `-I{}` stops WORD-SPLITTING but leaves xargs's INPUT QUOTE PARSING
+      on, so `sc/it's.md` still died `xargs: unmatched single quote`, rc 1, with
+      no `seed:` line — byte-identical to base. Only `-d` (or `-0`) disables it.
+    * SPACE — it stopped aborting and started LYING. `awk '{print $2" "$1}'`
+      rebuilt the line from FIELDS, truncating the key at the first blank, so two
+      BYTE-IDENTICAL entries collapsed to one key, the join degenerated into a
+      cross-product, and the guard refused with `differing=2`, naming a path that
+      does not exist. A confident false refusal whose only offered remedy is
+      `--allow-overwrite` is worse than the crash it replaced.
+
+    Neither had a test, which is how the claim survived being written down. The
+    real store's entry names are service slugs, so this is latent — but `seed.sh`
+    reads a directory an operator or agent writes into freely.
+    """
+
+    def _push(self, store: Path, tmp_path: Path, env, *extra):
+        return run_seed(
+            "--store", str(store), "--stage", str(tmp_path / "stage"),
+            "--push", "ns/app", *extra, env=env,
+        )
+
+    def test_a_path_with_a_SPACE_that_is_IDENTICAL_is_not_reported_as_differing(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE FALSE-REFUSAL REGRESSION. Two identical entries whose names
+        share a first word: before the tab-separated key these collapsed to one
+        join key and were both reported as differing."""
+        env, dest = fake_cluster
+        a = _entry("two-words", SCOPE)
+        b = _entry("two-other", SCOPE)
+        (store / SCOPE / "two words.md").write_text(a)
+        (store / SCOPE / "two other.md").write_text(b)
+        d = dest / SCOPE; d.mkdir(parents=True, exist_ok=True)
+        (d / "two words.md").write_text(a)      # byte-identical
+        (d / "two other.md").write_text(b)      # byte-identical
+
+        r = self._push(store, tmp_path, env)
+
+        assert "differing=0" in r.stdout, (
+            "identical entries were reported as differing — the join key was "
+            f"truncated at the first blank:\n{r.stdout}\n{r.stderr}"
+        )
+        assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+
+    def test_a_path_with_a_SPACE_that_DIFFERS_is_still_caught_and_named_in_full(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The other direction: the fix must not buy a clean `differing=0` by
+        losing the ability to see a real difference. The refusal must also name
+        the WHOLE path — a truncated name is not actionable."""
+        env, dest = fake_cluster
+        (store / SCOPE / "two words.md").write_text(_entry("two-words", SCOPE))
+        d = dest / SCOPE; d.mkdir(parents=True, exist_ok=True)
+        (d / "two words.md").write_text("---\nservice: two-words\n---\nPOD NEWER\n")
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 8, f"{r.stdout}\n{r.stderr}"
+        assert f"{SCOPE}/two words.md" in r.stderr, (
+            f"the refusal named a truncated path, which nobody can act on: {r.stderr}"
+        )
+
+    def test_a_path_with_a_QUOTE_does_not_abort_the_run(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 Red before `-d '\\n'`: `xargs: unmatched single quote`, rc 1, and NOT
+        one `seed:` line — the operator gets a bare failure with no diagnostic,
+        which is the shape this guard's comments claim to have removed."""
+        env, dest = fake_cluster
+        body = _entry("its", SCOPE)
+        (store / SCOPE / "it's.md").write_text(body)
+        d = dest / SCOPE; d.mkdir(parents=True, exist_ok=True)
+        (d / "it's.md").write_text(body)        # identical: must NOT refuse
+
+        r = self._push(store, tmp_path, env)
+
+        assert "unmatched single quote" not in r.stderr, (
+            f"xargs still parses quotes in its INPUT: {r.stderr}"
+        )
+        assert "seed: PRE-FLIGHT" in r.stdout, (
+            f"the run died before the pre-flight could say anything: {r.stdout}\n{r.stderr}"
+        )
+        assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"

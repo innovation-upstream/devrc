@@ -378,8 +378,23 @@ if [[ -s "$staged_list" ]]; then
   # arguments (rc 123) and `sc/it's.md` an unmatched quote (rc 1) — both with NO
   # `seed:` line, the failure shape the `|| :` note below exists to prevent,
   # reintroduced on the other side. Base handled both at rc 0.
-  ( cd "$STAGE" && xargs -r -I{} sha256sum {} ) < "$staged_list" \
-    | awk '{print $2" "$1}' | LC_ALL=C sort > "$_local_h"
+  # 🔴 `-d '\n'`, NOT JUST `-I{}`. `-I{}` stops WORD-SPLITTING but leaves
+  # `xargs`'s INPUT QUOTE PARSING on, so a staged `sc/it's.md` still died with
+  # `xargs: unmatched single quote`, rc 1, no `seed:` line — byte-identical to
+  # base. An earlier round claimed `-I{}` fixed the quote case; MEASURED, it did
+  # not, and the claim shipped without being re-run. Only `-d` (or `-0`) turns
+  # the quote parsing off.
+  #
+  # 🔴 AND THE KEY IS TAB-SEPARATED, because `awk '{print $2" "$1}'` rebuilt the
+  # line from FIELDS and so truncated any path at its first blank. MEASURED: two
+  # BYTE-IDENTICAL entries `sc/two words.md` and `sc/two other.md` both collapsed
+  # to key `sc/two`, the join degenerated into a cross-product, and the guard
+  # printed `differing=2` and refused — naming `sc/two` twice, a path that does
+  # not exist. A confident false refusal whose only offered remedy is
+  # `--allow-overwrite` is worse than the crash it replaced. `sub()` strips the
+  # digest and its separator and leaves the REST OF THE LINE intact.
+  ( cd "$STAGE" && xargs -r -d '\n' -I{} sha256sum {} ) < "$staged_list" \
+    | awk '{h=$1; sub(/^[^ ]+ +/,""); print $0"\t"h}' | LC_ALL=C sort > "$_local_h"
   # 🔴 EVERY PATH IS ANSWERED — a hash, ABSENT, or UNREADABLE. The probe used to
   # emit a line only for files the pod HAS, so "the pod holds none of them" and
   # "the probe never ran" were the same observation (zero lines, rc 0) and the
@@ -393,24 +408,35 @@ if [[ -s "$staged_list" ]]; then
   # 18 legitimate tests. The answerable question is whether the probe SAW the
   # whole list, so ABSENT is an answer and a MISSING line is the fault.
   #
-  # 🔴 `|| :` IS LOAD-BEARING: `xargs` exits 123 when any child does, and a path
-  # the pod lacks is ordinary. Dropping it kills 21 tests. ⚠ It also swallows a
-  # read error — hence UNREADABLE, which cannot equal a hex digest, so such an
-  # entry always lands in the clobber set and is refused rather than replaced.
+  # 🔴 THE INNER `sh` MUST EXIT 0 FOR EVERY PATH: `xargs` exits 123 when any child
+  # does, and a path the pod lacks is ordinary. The `if/else` is what guarantees
+  # that now — an earlier revision used a bare `|| :` and this comment still
+  # described it two rounds after it was replaced. UNREADABLE cannot equal a hex
+  # digest, so such an entry always lands in the clobber set rather than being
+  # silently treated as a pure addition.
   # `_ {}` passes the path as "$1" so it is never re-parsed as shell text.
   kubectl -n "$ns" exec -i "$pod" -- \
-    sh -c "cd '$DEST' && xargs -r -I{} sh -c 'if [ -f \"\$1\" ]; then sha256sum \"\$1\" 2>/dev/null || echo \"UNREADABLE  \$1\"; else echo \"ABSENT  \$1\"; fi' _ {}" \
+    sh -c "cd '$DEST' && xargs -r -d '\n' -I{} sh -c 'if [ -f \"\$1\" ]; then sha256sum \"\$1\" 2>/dev/null || echo \"UNREADABLE  \$1\"; else echo \"ABSENT  \$1\"; fi' _ {}" \
     < "$staged_list" \
-    | awk '{print $2" "$1}' | LC_ALL=C sort > "$_probe_raw"
+    | awk '{h=$1; sub(/^[^ ]+ +/,""); print $0"\t"h}' | LC_ALL=C sort > "$_probe_raw"
   _n_answered=$(wc -l < "$_probe_raw" | tr -d ' ')
-  LC_ALL=C grep -v ' ABSENT$' "$_probe_raw" > "$_remote_h" || :
+  # 🔴 `|| [ $? -eq 1 ]`, NOT `|| :`. `grep -v` exits 1 on NO MATCH (the ordinary
+  # first-seed case, so it must be tolerated) and 2 on an I/O ERROR. `|| :`
+  # swallowed both: an error left `_remote_h` empty, the join empty, `differing=0`
+  # and the push proceeding — the silent-zero shape this round exists to remove,
+  # one line below the gate that removes it.
+  LC_ALL=C grep -v "$(printf '\t')ABSENT$" "$_probe_raw" > "$_remote_h" || [ $? -eq 1 ]
   _n_present=$(wc -l < "$_remote_h" | tr -d ' ')
   # 🔴 `LC_ALL=C` on the join too. GNU join order-checks in the AMBIENT locale,
   # so C-sorted input is "not sorted" to a join under en_US.UTF-8 — this host.
   # MEASURED: it MISSES the differing pair AND exits 1, which `set -e` turns
   # into a run with no verdict. Needs an unpairable line plus a README/lowercase
   # adjacency, which the real store is full of.
-  LC_ALL=C join "$_local_h" "$_remote_h" | awk '$2 != $3 {print $1}' > "$_clobber_f"
+  # `-t` a literal TAB so the key is the whole path, spaces included — join's
+  # default whitespace splitting would re-introduce exactly the truncation the
+  # `awk` above was fixed to stop.
+  LC_ALL=C join -t "$(printf '\t')" "$_local_h" "$_remote_h" \
+    | awk -F'\t' '$2 != $3 {print $1}' > "$_clobber_f"
 fi
 _n_clobber=$(wc -l < "$_clobber_f" | tr -d ' ')
 
