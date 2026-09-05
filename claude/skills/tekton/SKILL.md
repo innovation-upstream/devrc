@@ -338,20 +338,45 @@ debugging, changing or copying a specific pipeline.
 ## What / where
 
 - **Tekton Operator v0.80.0** → Pipelines **1.12.2** / Triggers **0.36.0** / Dashboard
-  **0.68.0**. **Chains + Results OFF.** Pruner keep-**100**, daily. Dashboard **read-only**.
-  🔴 **`prune-per-resource: true`, so keep-100 is PER Pipeline/Task — NOT per namespace.**
-  With 6 pipelines the designed steady state is **~600 PipelineRuns**, and a raw namespace
-  count in the hundreds is the pruner WORKING, not falling behind. This was written up once
-  as a backlog item ("451 PipelineRuns against a keep:100 pruner") and re-investigated a day
-  later; both times the count was inside its envelope. **The positive control is a pipeline
-  sitting at EXACTLY 100** — `remix-ux-audit` did, on both measurements, which is what proves
-  the cron runs and hits its target. Measure per-pipeline before concluding anything:
+  **0.68.0**. **Chains + Results OFF.** Pruner keep-**20**, **hourly**. Dashboard **read-only**.
+  ⚠ **CORRECTED 2026-09-04: this line read "keep-**100**, daily" and both numbers were wrong.**
+  Live AND committed (`config/tektonconfig.yaml`) is
+  `{keep: 20, prune-per-resource: true, schedule: "0 * * * *", resources: [taskrun, pipelinerun]}`.
+  Read it off the CR, never off this line: `kubectl get tektonconfig config -o jsonpath='{.spec.pruner}'`.
+  🔴 **`prune-per-resource: true`, so keep-20 is PER Pipeline/Task — NOT per namespace.**
+  There are **14** pipelines now (not 6), so the designed steady state is **~280 PipelineRuns**,
+  and a raw namespace count in the hundreds is the pruner WORKING, not falling behind. This has
+  now been written up as a backlog item and refuted **three** times — twice at keep-100 ("451
+  PipelineRuns against a keep:100 pruner"), and again 2026-09-04 when a subagent reported the
+  pruner "accumulates unboundedly" off a raw count of 416 pods. Every time the count was inside
+  its envelope. **The positive control is a pipeline sitting at EXACTLY the keep value** —
+  measured 2026-09-04, **five** did (auditloop-ci, naida-ux-audit, remix-ux-audit,
+  vetr-api-main, vetr-api-pest), which is what proves the cron runs and hits its target; the
+  five above 20 (24–31) are accumulating between hourly prunes, which is the design.
+  🔴 **A count that EXCEEDS keep is therefore NOT evidence of a broken pruner** — it is the
+  expected state between runs. Before proposing any pruner change, produce a pipeline sitting
+  *above* keep immediately *after* a prune, or you are re-deriving a thrice-rejected conclusion.
+  Measure per-pipeline before concluding anything:
   `kubectl -n tekton-ci get pipelineruns -o jsonpath='{range .items[*]}{.spec.pipelineRef.name}{"\n"}{end}' | sort | uniq -c | sort -rn`
   🔴 **And terminal pods are NOT the pressure.** 2026-08-23: `talos-xr6-r7p` held **676**
   Completed/Error pods against **76** non-terminated. Terminal pods hold no CPU and no memory
   (`Allocated resources` counts non-terminated only) and do not count toward `max-pods`
   (110 → 34 free). Deleting them cuts apiserver/etcd load and makes `kubectl get pods`
   usable — it relieves **zero** scheduling pressure. Do not reach for it as remediation.
+  🔴 **The trap is quoting a RAW `kubectl get pods` count against `max-pods`** — that number
+  is ~80% terminal, so it reads as catastrophically over the limit when there is plenty of
+  headroom. Re-measured 2026-09-04, `talos-xr6-r7p`: **53 non-terminal against max-pods 110**,
+  plus 189 terminal. A session quoted "217 pods vs maxPods 110" from the raw count that same
+  day and concluded the node was 2× oversubscribed; it was at 48%. **Always split the count
+  by `.status.phase` before comparing it to anything.**
+  ⚠ **What terminal pods MIGHT still affect, and what is NOT established:** kubelet's PLEG
+  relists all pods on the node, so a large terminal population is a *plausible* contributor to
+  the `kubelet_pleg_relist_duration` p99 of 6.4–10s measured on the saturated nodes
+  (2026-09-04) — which is a different mechanism from scheduling pressure and is NOT refuted by
+  the paragraph above. It is also not demonstrated: on those nodes the disk was independently
+  90–95% busy. **Do not cite terminal-pod count as the cause of slow pod startup without
+  separating it from disk saturation first** — and note the fix would be pruning *pods*, which
+  the Tekton pruner does not do (it prunes TaskRuns/PipelineRuns; pods follow their owners).
 - Namespaces: **`tekton-pipelines`** (control plane) + **`tekton-ci`** (CI workloads,
   EventListener, PipelineRuns).
 - GitOps via **Flux**, repo **`ZacxDev/homelab-infra`** branch **`trunk`**, under
