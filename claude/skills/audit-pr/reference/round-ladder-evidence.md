@@ -392,3 +392,77 @@ independently of whether it caused those three declines; see that file's TOOLCHA
   `audit-fix-resets-gate`.
 - The retraction of the original "measured waste" justification: `~/.claude/RULES-ARCHIVE.md` →
   `audit-fix-resets-gate`, and pinned by `devrc/scripts/tests/test_audit_ladder_stop_rule.py`.
+
+---
+
+## The fix round's own prose — `homelab-infra` #702, six rounds, zero 🔴 (2026-09-05)
+
+The case behind the skill body's *"THE FIX ROUND'S OWN PROSE IS THE LIKELIEST NEXT FINDING"*. Worth
+reading because **nothing here was a code defect after round 1**, and no mechanical gate could see it.
+
+**The PR.** A ClickUp↔clawgate mirror was overwriting the `repo` field of tasks its own reverse-create
+leg had filed, so one-tap dispatch cloned the wrong repository (3 of the first 6 tickets). The fix —
+`repo` on a filed task is owned by the source system, the mirror does not write it — was correct in
+the first commit and never changed again.
+
+**The ladder.**
+
+| round | findings | payload lines in that round's fix |
+|---|---|---|
+| 1 | 5 🟡 / 5 🟢 | 75+/35- |
+| 2 | 3 🟡 / 2 🟢 | 74+/34- |
+| 3 | 2 | 38+/14- |
+| 4 | 3 🟡 | 63+/36- |
+| 5 | 2 🟡 | 27+/6- |
+| 6 | 1 🟡 | **0** |
+| 6's fix | — | **0** |
+
+Stopped on the attribution gate (two consecutive zero-payload fix rounds), not on a clean round and
+not on a verdict — every round returned findings, so the findings-keyed rule would never have fired.
+
+**The five rationales.** One arm-time guard refused to arm the leg against a list with no repo
+mapping. Its justification was rewritten in five successive commits, each retracted by the next round:
+
+1. *"filing REWRITES the task's repo"* — retracted by the fix itself (that is what the PR fixed).
+2. *"it protects INBOUND correctness for tickets colleagues create in that list"* — false: the scope
+   was assignee-wide, so every in-scope list was already mirrored inbound whether or not the leg was
+   armed at it. Arming did not begin it; refusing did not stop it.
+3. *"arming makes the list a TWO-WAY surface"* — false: the write-back leg selected on a correlation
+   tag with **no list filter**, so the list was already two-way. Arming added new cards, nothing else.
+4. *"a POLICY refusal rather than a protection"* — written only in the operator-facing README, so the
+   code's numbered list of three and the README's list of three **disagreed on one member** under an
+   assertion that they agreed.
+5. *"a backstop for the ownership rule FAILING OPEN"* — the mechanism was real, the comparative
+   backwards: 23 of 51 candidate tasks sat at the global default, so under fail-open an **unmapped**
+   list no-ops them while the **mapped** one rewrites them. And where both sides were observable it
+   inverted again — of the 6 tasks actually filed, mapped damaged 3, unmapped would have damaged 4.
+
+Each was written **in the commit that fixed the previous one**. The ladder ended not by finding a true
+rationale but by concluding there is none, recording all five so no one derives a sixth, and asking
+for a retire-or-accept decision from a human.
+
+**The four transferable shapes**, each measured here:
+
+- **Assert-a-value-for-a-variable-you-just-named-as-missing.** Round 4 caught round 3 doing it;
+  round 5 caught round 4 doing it *in the same sentence* — the clause conceded the dependency
+  ("depends on the population") and then supplied the answer ("the measured one favours X"). The fix
+  is to delete the comparative, not reverse it.
+- **A sweep applied to one claim and not the other, in one commit.** Round 3 grep-swept a retracted
+  string across the tree (correct — round 4 re-ran it and it held) and hand-enumerated a false number
+  in the same commit, reaching 2 of its 5 sites. Only the hand-counted claim was wrong.
+- **The unswept surface is the one a human reads.** The retracted framing survived longest in the
+  shipped operator README and in the docstring of the *test that pinned the guard* — the two documents
+  a maintainer opens to ask "why does this exist?". Rounds 3 and 4 rewrote the story in four places
+  and never opened the test file.
+- **A count in prose is a claim.** Round 5's fix wrote "FIVE *later* rationales" where the retraction
+  was itself #1 — six by arithmetic, against four other surfaces saying five. Round 6's only finding.
+
+**A cross-reference is a claim too.** Four stale ones accumulated: comments quoting another file's
+wording after that wording changed. Nothing tests a quotation.
+
+**Why no gate caught any of it.** The shipped config's README key was parsed by no test — only the
+JSON beside it was — so every prose defect shipped through a fully green suite, 219 mutation rows and
+a 9-leg CI gate. ⚠ **Do not over-read that into "write a test for the prose"**: a value cross-check
+(README's stated config values vs the shipped JSON) would have caught **1 of ~16** findings here; the
+rest were prose-vs-behaviour or rationale drift, which no assertion can reach. The control is the
+round's own question — *what did this fix assert, and is every assertion true?*
