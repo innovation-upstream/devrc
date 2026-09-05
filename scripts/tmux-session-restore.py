@@ -598,7 +598,9 @@ def plan_staleness_hours() -> tuple[float, str] | None:
       🔴 boot+45s, chain dead 1400h  gap 30s, live 45s -> PASSES  (NOT CLOSED)
 
     🔴 THE LIVENESS TERM IS ARITHMETICALLY INERT WHENEVER `uptime <= limit`, AND
-    THAT INCLUDES THE BOOT THE UNIT RUNS ON. `live = min(since, uptime) <=
+    THAT INCLUDES THE BOOT THE UNIT RUNS ON. (The same is true of the SKEW
+    branch below and of anything else routed through this cap — the ceiling
+    applies to the term, not to one reason for it.) `live = min(since, uptime) <=
     uptime`, and refusing needs `> limit` — so at boot+45s with a 2h limit
     (`nix/home.nix`), `live <= 0.0125h`, 160x under, and this degrades exactly
     to the contemporaneity-only behaviour. A guard that is BREAKABLE at a
@@ -637,20 +639,36 @@ def plan_staleness_hours() -> tuple[float, str] | None:
     mt = PLAN.stat().st_mtime
     state = resurrect_state_mtime()
     if state is None:
-        return ((time.time() - mt) / 3600, "wall")
+        # `max(0.0, …)`: under the same backward skew this goes negative, and a
+        # negative age both prints as nonsense and compares as fresh. There is
+        # no second measure to fall back to on this basis, so clamp and let the
+        # value stand at "not stale", which is what a negative already meant.
+        return (max(0.0, (time.time() - mt) / 3600), "wall")
     gap = abs(state - mt) / 3600
     # Liveness: time since the chain last produced ANYTHING, but never counting
     # more than this boot has been up — powered-off time is the one interval in
     # which nothing can have gone stale.
     since = (time.time() - max(state, mt)) / 3600
     if since < 0:
-        # 🔴 The clock moved BACKWARDS past an artefact's mtime — an anomalous
-        # measurement, not evidence of freshness. Early boot is exactly when
-        # this happens (RTC ahead, then timesyncd steps back), and it is also
-        # when this runs. Treat it like an unreadable cap and fail TOWARDS
-        # refusing, matching `uptime_hours`'s reasoning; the old `else 0.0`
-        # silently switched the liveness term off at the worst moment.
-        since = float("inf")
+        # 🔴 The clock moved BACKWARDS past an artefact's mtime, so LIVENESS IS
+        # UNMEASURABLE — and both obvious answers fabricate a number.
+        #
+        #   `since = 0`   claims the chain just wrote. Silently disables the
+        #                 F1 guard, which is what round 2 flagged.
+        #   `since = inf` claims it never did. Looks safe and is worse: `live =
+        #                 min(inf, uptime)` collapses to UPTIME, so a ONE-SECOND
+        #                 step back on a long-uptime host refuses a HEALTHY chain
+        #                 and reports it "silent for 753.0h". Measured. That is
+        #                 the misdirecting-refusal failure `resurrect_last_path`
+        #                 calls worse than failing open — and it was inert at
+        #                 early boot anyway, the very case its comment named,
+        #                 because the uptime cap neuters it there.
+        #
+        # CONTEMPORANEITY NEVER READS `now`, so it is immune to skew and stays
+        # valid. Fall back to it and NAME the fact that liveness was not
+        # evaluated, rather than inventing a liveness number in either
+        # direction. Reporting "unmeasured" is the honest third option.
+        return (gap, "skew")
     live = min(since, uptime_hours())
     return (gap, "layout") if gap >= live else (live, "liveness")
 
@@ -691,6 +709,10 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
                     # cause is the opposite — the save chain stopped.
                     "liveness": "produced by a chain that has been silent for",
                     "wall": "older than (wall clock, no layout to compare)",
+                    # Liveness was NOT evaluated; say so rather than let the
+                    # reader assume both terms were checked.
+                    "skew": ("out of step with the saved layout by (liveness "
+                             "NOT evaluated — the clock moved backwards) "),
                 }[basis]
                 print(f"restore plan is {why} {gap:.1f}h "
                       f"(limit {staleness_hours}h, basis={basis}) — too stale, "

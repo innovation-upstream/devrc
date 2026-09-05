@@ -1027,21 +1027,72 @@ def test_a_liveness_refusal_does_not_call_itself_wall_clock(tmp_path, monkeypatc
     assert "silent" in err, f"the refusal does not say the chain stopped: {err!r}"
 
 
-def test_a_backwards_clock_does_not_switch_the_liveness_guard_off(tmp_path, monkeypatch):
-    """🔴 `since < 0` used to mean `live = 0.0` — the guard fully disabled.
+def test_a_backwards_clock_reports_liveness_as_UNMEASURED_not_as_a_number(tmp_path, monkeypatch):
+    """🔴 Both obvious answers to clock skew FABRICATE a liveness value.
 
-    Early boot is exactly when a backward step happens (RTC ahead, then
-    timesyncd corrects) and exactly when this runs. An anomalous measurement
-    must fail TOWARDS refusing, matching `uptime_hours`'s own reasoning.
+    `since = 0` claims the chain just wrote (silently disables the guard).
+    `since = inf` claims it never did — and is worse, because
+    `min(inf, uptime)` collapses to UPTIME: a one-second step back on a
+    long-uptime host then REFUSES a healthy chain and calls it "silent for
+    753h". Contemporaneity never reads `now`, so it survives skew; the basis
+    must say liveness was not evaluated.
     """
-    # Artefacts dated in the FUTURE, chain otherwise long dead.
+    # Artefacts dated in the FUTURE; the chain is HEALTHY (30s apart).
     _staleness_fixture(tmp_path, monkeypatch, plan_age_s=-2 * HOUR,
                        state_age_s=-2 * HOUR - 30, uptime_h=753.0)
     gap, basis = tsr.plan_staleness_hours()
-    assert basis == "liveness" and gap > 2, (
-        f"a backwards clock produced {gap:.4f}h basis={basis!r} — the liveness "
-        "term was switched off by the skew guard, which is the safe-looking "
-        "default that silently removes the protection")
+    assert basis == "skew", (
+        f"backward skew reported basis={basis!r} — it must name liveness as "
+        "unmeasured rather than invent a value in either direction")
+    assert gap < 0.05, (
+        f"a healthy chain measured {gap:.4f}h under skew — this is the false "
+        "refusal that `since = inf` produced (it collapses to uptime)")
+
+
+def test_backward_skew_does_not_refuse_a_healthy_chain(tmp_path, monkeypatch, capsys):
+    """The regression `since = inf` introduced: rc 1 on a chain that just wrote."""
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=-1, state_age_s=-31,
+                       uptime_h=753.0)
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    err = capsys.readouterr().err
+    assert rc == 0, (
+        f"a one-second backward step refused a healthy chain: {err!r}")
+
+
+def test_backward_skew_still_refuses_when_the_LAYOUT_disagrees(tmp_path, monkeypatch, capsys):
+    """Skew must not become a bypass — contemporaneity is still enforced.
+
+    Reachability: this is the case a `return (gap, "skew")` could have made
+    unconditionally passing.
+    """
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=-1 * HOUR,
+                       state_age_s=600 * HOUR, uptime_h=753.0)
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    err = capsys.readouterr().err
+    assert rc == 1, "skew must not bypass the contemporaneity check"
+    assert "basis=skew" in err and "NOT evaluated" in err, (
+        f"the skew refusal does not say liveness went unevaluated: {err!r}")
+
+
+def test_the_wall_basis_refusal_names_wall_clock_and_not_a_dead_chain(tmp_path, monkeypatch, capsys):
+    """The sibling arm the previous round left unpinned in the POSITIVE direction.
+
+    A negative assertion alone let the `wall` value claim the liveness cause.
+    """
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=9 * HOUR, state_age_s=None)
+    rc = tsr.cmd_restore(dry_run=True, staleness_hours=2)
+    err = capsys.readouterr().err
+    assert rc == 1 and "basis=wall" in err
+    assert "wall clock" in err, f"the wall refusal does not name wall clock: {err!r}"
+    assert "silent" not in err, (
+        f"the wall refusal claimed a dead chain, which it never measured: {err!r}")
+
+
+def test_a_negative_wall_age_is_clamped_rather_than_printed(tmp_path, monkeypatch):
+    """No layout to fall back to on this basis, so a negative must not print."""
+    _staleness_fixture(tmp_path, monkeypatch, plan_age_s=-5 * HOUR, state_age_s=None)
+    gap, basis = tsr.plan_staleness_hours()
+    assert basis == "wall" and gap == 0.0, (gap, basis)
 
 
 def test_resurrect_dir_expands_the_plugin_s_variables_not_just_a_leading_tilde(tmp_path, monkeypatch):
