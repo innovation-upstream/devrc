@@ -912,6 +912,11 @@ def test_an_EMPTY_universe_degrades_to_the_NAMED_reason_refusal(spy, monkeypatch
     assert MO.main(["zzznosuchrepo#12"]) == 1
     assert "gh is not on PATH" in notices[-1][1]
     assert not [c for c in spy if isinstance(c, tuple) and c[0] == "pick"]
+    # 🔴 EXACTLY ONE NOTIFICATION. The refusal already names the cause, so PASS 4
+    # must not ALSO announce it on the way past — and this is the assertion that
+    # makes the `and universe` guard load-bearing rather than decorative.
+    # Measured: without it, dropping `and universe` SURVIVED the whole file.
+    assert len(notices) == 1, notices
 
 
 def test_an_UNREADABLE_mapping_degrades_the_same_way(tmp_path, monkeypatch):

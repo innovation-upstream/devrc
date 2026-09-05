@@ -620,15 +620,40 @@ def test_A2_does_not_fire_without_a_repos_mapping_at_all():
 
 
 def test_A2_does_not_attribute_across_a_LINE_BREAK():
-    """`\\Z` not `$`: a repo token ending the previous line is not adjacent."""
+    """`\\Z` not `$`: a repo token ending the previous line is not adjacent.
+
+    🔴 THE SECOND CASE IS THE ONE THAT DISCRIMINATES, and the first alone does
+    not. With no trailing space, `[ \\t]+$` cannot match either — so a `$`
+    mutant SURVIVED the first case, measured. `$` matches immediately BEFORE a
+    final newline, so a line ending in "<repo> " is exactly where the two spell
+    different behaviour."""
     (span,) = MS.scan_mention_spans("trowelcast\n#1291", repos=REPOS, **TELEMETRY)
     assert span["repo"] == ""
+    (span,) = MS.scan_mention_spans("trowelcast \n#1291", repos=REPOS, **TELEMETRY)
+    assert span["repo"] == "", "`$` matched before the trailing newline"
 
 
 def test_A2_a_common_english_word_before_a_ref_attributes_NOTHING():
     for text in ("fixed in #370", "PR #370", "see #370"):
         (span,) = MS.scan_mention_spans(text, repos=REPOS, **TELEMETRY)
         assert span["repo"] == "", text
+
+
+def test_A2_a_NON_connector_word_between_the_repo_and_the_ref_breaks_adjacency():
+    """🔴 WHAT THE ENUMERATED CONNECTOR LIST IS FOR, and the case that
+    discriminates it from `\\w+`. Under a generic word `trowelcast thing #370`
+    attributes to trowelcast — a repository the operator was not referring to.
+    Measured: without this case a `\\w+` mutant SURVIVED, because every other
+    negative here uses a token that is absent from the mapping anyway, so the
+    mapping killed the mutant rather than the enumeration."""
+    for text in ("trowelcast thing #370", "trowelcast unrelated #370",
+                 "trowelcast, #370"):
+        (span,) = MS.scan_mention_spans(text, repos=REPOS, **TELEMETRY)
+        assert span["repo"] == "", text
+    # ...while the enumerated connectors still work, so this is a rule and not
+    # simply a narrower pattern.
+    (span,) = MS.scan_mention_spans("trowelcast issue #370", repos=REPOS, **TELEMETRY)
+    assert span["repo"] == "gardenersguild/trowelcast"
 
 
 def test_A3_a_github_url_elsewhere_in_the_block_attributes_a_bare_ref():

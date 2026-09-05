@@ -542,6 +542,12 @@ def _adjacent_repo(text: str, start: int, repos: dict | None) -> str:
     caller-measured mapping is the entire guard, and a token it does not hold
     yields "". That is why this must never fall back to a default org: without
     the mapping there is no evidence here at all, only a word.
+
+    ⚠ THE GUARD IS `_resolve_repo`, NOT THE EARLY RETURN BELOW. Deleting that
+    return changes no behaviour — `_resolve_repo(None, …, None)` already answers
+    "" — and a mutation sweep scored it SURVIVED for exactly that reason. It is
+    an optimisation (it skips a regex search on the common no-mapping path) and
+    is labelled as one so nobody reads it as the thing that stops a guess.
     """
     if not repos:
         return ""
