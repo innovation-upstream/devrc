@@ -1,0 +1,1135 @@
+#!/usr/bin/env python3
+"""workhost — reach a dev host over whichever network path is actually up.
+
+One machine is reachable by several addresses (LAN, nebula mesh, tailscale).
+Which of them works depends on where the client is sitting right now. This tool
+probes every path in parallel on every invocation, reports the state of all of
+them, and then connects over the best one available.
+
+Four states per path, never two:
+
+    ok              the path answered a real SSH auth handshake
+    unreachable     an address is known for this path, but it did not answer
+    untrusted-key   the address answered, but ssh refused the HOST KEY
+    not-configured  no address (or no client binary) exists for this path yet
+
+Collapsing these is the defect this tool exists to avoid: "nothing happened" is
+the observable that the most causes share, so it identifies none of them.
+`tailscale` is wired up today and reports `not-configured` until a tailnet
+actually exists; it lights up with no code change once it does.
+
+`untrusted-key` was added because the tool could not bootstrap itself. The
+probe runs with `BatchMode=yes`, and `StrictHostKeyChecking` defaults to `ask`,
+so on a client whose `known_hosts` has no entry for the HostKeyAlias every path
+fails closed on a perfectly healthy network — and, folded into `unreachable`,
+it read as "the box is down" while every verb refused with exit 3. It is now
+its own state, with `--accept-key` as the one-shot way out (see below).
+
+Adding a host is a new entry in HOSTS below, not a code change.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Optional
+
+# ---------------------------------------------------------------------------
+# Exit codes
+# ---------------------------------------------------------------------------
+
+#: No usable path to the host.
+#:
+#: 🔴 This is a CONVENTIONAL sentinel, NOT a reserved one. An earlier version of
+#: this comment claimed it was "distinct from any remote exit code"; that claim
+#: was wider than the code and is retracted. `workhost run 'exit 3'` over a
+#: working path also exits 3, and the usage/unknown-host code 2 likewise
+#: collides with a remote `exit 2`. Nothing in the 0-255 range is safe from a
+#: remote command that chooses it, short of giving up passthrough entirely.
+#:
+#: So the exit code is a HINT, and `--json` is the machine-readable channel:
+#: `selected` is `null` exactly when no path was usable, whatever the remote
+#: command did. Tests `test_exit_3_collides_with_a_remote_exit_3_*` and
+#: `test_usage_exit_2_collides_with_a_remote_exit_2` pin both collisions so this
+#: comment cannot quietly get wider than the code again.
+EXIT_NO_PATH = 3
+
+# ---------------------------------------------------------------------------
+# Path states
+# ---------------------------------------------------------------------------
+
+OK = "ok"
+UNREACHABLE = "unreachable"
+UNTRUSTED_KEY = "untrusted-key"
+NOT_CONFIGURED = "not-configured"
+
+#: ssh's own wording for the two host-key refusals, matched against the probe's
+#: stderr. Matched on ssh's message rather than on the exit status because ssh
+#: exits 255 for EVERY connection-level failure — auth, DNS, timeout and host
+#: key alike — so the status cannot tell them apart and the suite used to
+#: ASSERT that conflation.
+HOSTKEY_MISSING_MARKER = "Host key verification failed"
+HOSTKEY_CHANGED_MARKER = "REMOTE HOST IDENTIFICATION HAS CHANGED"
+
+#: Connection preference, best first. LAN is lowest-latency, nebula works from
+#: anywhere the mesh is up, tailscale is the future fallback.
+PATH_ORDER = ("lan", "nebula", "tailscale")
+
+
+# ---------------------------------------------------------------------------
+# Host table
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Host:
+    """A machine, plus every address that machine answers on.
+
+    ``lan`` and ``nebula`` are static literals. ``tailscale`` is deliberately
+    NOT a literal: it is resolved at runtime by asking the ``tailscale`` binary,
+    so the day a tailnet is deployed this table needs no edit.
+    """
+
+    name: str
+    lan: Optional[str] = None
+    nebula: Optional[str] = None
+    #: Node name to look for in `tailscale status`. Defaults to ``name``.
+    tailscale_name: Optional[str] = None
+    #: Port the host's apiserver listens on, on the host's own loopback.
+    kube_port: int = 6443
+
+    def static_addresses(self) -> list:
+        return [a for a in (self.lan, self.nebula) if a]
+
+
+#: Only `workbench` is fully specified today. `laptop` and `production` are not
+#: in here because inventing addresses for them would be a guess, and a guess in
+#: an address table is worse than an absence — it produces a confident wrong
+#: connection. `homelab` is Talos and has no SSH at all, so it is not a
+#: candidate for this tool by construction.
+HOSTS = {
+    "workbench": Host(
+        name="workbench",
+        lan="192.168.50.250",
+        nebula="10.42.0.30",
+        kube_port=6443,
+    ),
+}
+
+DEFAULT_HOST = "workbench"
+
+
+# ---------------------------------------------------------------------------
+# Probe results
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PathResult:
+    path: str
+    state: str
+    address: Optional[str] = None
+    #: Human-readable reason, always set for the two non-ok states so the
+    #: operator never has to guess which of them they are looking at.
+    detail: str = ""
+    elapsed_ms: int = 0
+    #: Internal only, and deliberately NOT in as_dict(): a machine consumer gets
+    #: the state plus the detail text, which is enough. This flag exists so the
+    #: text report can offer the RIGHT way out — `--accept-key` trusts a key
+    #: that was never seen, and is the wrong advice for one that CHANGED.
+    key_changed: bool = field(default=False, repr=False, compare=False)
+
+    def as_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "state": self.state,
+            "address": self.address,
+            "detail": self.detail,
+            "elapsed_ms": self.elapsed_ms,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Am I already on the target host?
+# ---------------------------------------------------------------------------
+
+
+def local_ipv4_addresses() -> set:
+    """Every IPv4 address bound to a local interface.
+
+    Shells out to `ip -4 -o addr show` rather than using a Python-native
+    interface enumeration so the behaviour is fakeable on PATH in tests: the
+    tested code path and the production code path are then the same one.
+
+    If `ip` is unavailable we return an empty set, which degrades to "assume
+    not local" — i.e. connect over SSH. That is the safe direction: an
+    unnecessary SSH hop is a slow success, whereas a wrong "I am the target"
+    would run the operator's command on the wrong machine.
+    """
+    try:
+        proc = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return set()
+    if proc.returncode != 0:
+        return set()
+
+    addrs = set()
+    for line in proc.stdout.splitlines():
+        fields = line.split()
+        # `2: eth0    inet 192.168.50.250/24 brd ... scope global ...`
+        for i, tok in enumerate(fields):
+            if tok == "inet" and i + 1 < len(fields):
+                addrs.add(fields[i + 1].split("/")[0])
+    return addrs
+
+
+def is_local_host(host: Host) -> bool:
+    """True when this process is already running on ``host``.
+
+    Deliberately NOT based on `hostname`. Both NixOS hosts in this fleet report
+    the hostname `nixos` — that is measured, not assumed, and it is the same
+    finding `scripts/lib/host_identity.py` exists to encode. Keying on hostname
+    would make the laptop believe it is workbench and silently exec commands on
+    the wrong machine, which is the worst available failure: it succeeds.
+
+    An address bound to a local interface is a genuinely unique property. The
+    nebula mesh address is the stronger of the two signals, because mesh
+    addresses are unique across the whole mesh by construction, whereas a LAN
+    address is only unique within ONE SUBNET — two different homes could both
+    hand out 192.168.50.250.
+
+    🔴 So the LAN address is accepted ONLY when the host table names no nebula
+    address for this host. An unconditional LAN fallback re-created, one layer
+    down, exactly the hazard the hostname check was rejected to prevent: a
+    laptop on a network that happens to hand it 192.168.50.250 would run
+    `workhost run 'kubectl delete ns prod'` LOCALLY, exit 0, and print nothing
+    that says it never touched workbench. Silent, successful, wrong machine.
+
+    The cost of the tightening is named rather than hidden: a host that HAS a
+    nebula address but whose nebula interface is down no longer recognises
+    itself, and SSHes to itself over the LAN instead. That is a slow success —
+    the same safe direction `local_ipv4_addresses()` already degrades in.
+    """
+    local = local_ipv4_addresses()
+    if not local:
+        return False
+    if host.nebula and host.nebula in local:
+        return True
+    if host.lan and not host.nebula and host.lan in local:
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Address resolution per path
+# ---------------------------------------------------------------------------
+
+
+def resolve_tailscale(host: Host) -> tuple:
+    """Resolve ``host``'s tailscale address.
+
+    Returns ``(address, detail)``. ``address`` is None when the path is
+    genuinely not configured, and ``detail`` then says which flavour of
+    not-configured it is — no binary at all, versus a tailnet that exists but
+    does not carry this host. Those are different problems with different
+    fixes, so they get different messages.
+    """
+    name = host.tailscale_name or host.name
+
+    if shutil.which("tailscale") is None:
+        return None, "no tailscale binary on PATH"
+
+    try:
+        proc = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, "tailscale status failed: %s" % exc
+
+    if proc.returncode != 0:
+        return None, "tailscale status exited %d" % proc.returncode
+
+    try:
+        status = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        return None, "tailscale status returned unparseable JSON"
+
+    # `null`, `[]` and `"x"` are all VALID JSON and all lack .get(), so parsing
+    # successfully is not the same as getting an object. Without this the
+    # AttributeError escapes as a traceback and exit 1 from EVERY verb — `path`
+    # included, whose entire job is to report a broken path rather than crash.
+    if not isinstance(status, dict):
+        return None, "tailscale status returned non-object JSON"
+
+    peers = status.get("Peer") or {}
+    candidates = list(peers.values())
+    myself = status.get("Self")
+    if isinstance(myself, dict):
+        candidates.append(myself)
+
+    for peer in candidates:
+        if not isinstance(peer, dict):
+            continue
+        hostname = peer.get("HostName") or ""
+        dnsname = peer.get("DNSName") or ""
+        if hostname == name or dnsname.split(".")[0] == name:
+            ips = peer.get("TailscaleIPs") or []
+            for ip in ips:
+                if ":" not in ip:  # prefer IPv4
+                    return ip, ""
+            if ips:
+                return ips[0], ""
+            return None, "%s is in the tailnet but has no address" % name
+
+    return None, "%s is not in the tailnet" % name
+
+
+def resolve_path(host: Host, path: str) -> tuple:
+    """Return ``(address, detail)`` for ``path`` on ``host``."""
+    if path == "lan":
+        if host.lan:
+            return host.lan, ""
+        return None, "no LAN address in the host table"
+    if path == "nebula":
+        if host.nebula:
+            return host.nebula, ""
+        return None, "no nebula address in the host table"
+    if path == "tailscale":
+        return resolve_tailscale(host)
+    raise ValueError("unknown path: %s" % path)
+
+
+# ---------------------------------------------------------------------------
+# SSH command construction
+# ---------------------------------------------------------------------------
+
+
+def ssh_options(host: Host, connect_timeout: Optional[float] = None) -> list:
+    """The `-o` flags every ssh-family invocation must carry.
+
+    `HostKeyAlias` is the load-bearing one. Without it, one machine reached by
+    three different addresses accumulates three separate `known_hosts` entries,
+    and the day one of those addresses is reused for a different machine the
+    operator hits a host-key-mismatch wall with no obvious cause. Pinning the
+    alias to the host's NAME means all three paths share one entry — the
+    machine's identity is the machine, not the route you took to it.
+    """
+    opts = ["-o", "HostKeyAlias=%s" % host.name]
+    if connect_timeout is not None:
+        opts += ["-o", "ConnectTimeout=%d" % max(1, int(connect_timeout))]
+    return opts
+
+
+def probe_command(host: Host, address: str, timeout: float) -> list:
+    """The probe is a REAL auth handshake, not a TCP connect to port 22.
+
+    A port that accepts a connection is not a session you can open: measured on
+    this fleet, both addresses complete the TCP and SSH transport layers and
+    then fail auth with `Permission denied`, exiting 255. A port probe calls
+    that "ok" and the subsequent connect then fails in the operator's face.
+    Running `true` over a BatchMode session is the cheapest thing that proves
+    the whole stack, auth included.
+
+    🔴 The probe deliberately carries NO `StrictHostKeyChecking` override. TOFU
+    was considered and rejected: a probe that silently accepts a new host key
+    trusts the machine on the operator's behalf, every run, with no record that
+    a decision was made. `BatchMode=yes` therefore fails closed on an untrusted
+    key — which is correct, and is why `probe_path` classifies that failure as
+    its own state and `--accept-key` exists as an explicit, human-driven
+    escape. `--accept-key` never reaches this function: it changes only which
+    already-probed path `select_path` is allowed to return, so the probe argv
+    is byte-identical with and without it.
+    """
+    return (
+        ["ssh", "-o", "BatchMode=yes"]
+        + ssh_options(host, connect_timeout=timeout)
+        + [address, "true"]
+    )
+
+
+def classify_ssh_failure(stderr: str) -> tuple:
+    """Map a failed probe's stderr onto ``(state, detail_suffix, key_changed)``.
+
+    ``detail_suffix`` is None for anything that is not a host-key refusal, in
+    which case the caller keeps ssh's own last line as the detail.
+    """
+    if HOSTKEY_CHANGED_MARKER in stderr:
+        return (
+            UNTRUSTED_KEY,
+            "host key for alias %r CHANGED since it was trusted",
+            True,
+        )
+    if HOSTKEY_MISSING_MARKER in stderr:
+        return (
+            UNTRUSTED_KEY,
+            "host key for alias %r not in known_hosts",
+            False,
+        )
+    return UNREACHABLE, None, False
+
+
+# ---------------------------------------------------------------------------
+# Probing
+# ---------------------------------------------------------------------------
+
+
+def probe_path(host: Host, path: str, timeout: float) -> PathResult:
+    started = time.monotonic()
+
+    def elapsed():
+        return int((time.monotonic() - started) * 1000)
+
+    address, detail = resolve_path(host, path)
+    if address is None:
+        return PathResult(path, NOT_CONFIGURED, None, detail, elapsed())
+
+    cmd = probe_command(host, address, timeout)
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return PathResult(
+            path, UNREACHABLE, address, "probe timed out after %gs" % timeout, elapsed()
+        )
+    except FileNotFoundError:
+        # No ssh CLIENT at all is the same shape of problem as no `tailscale`
+        # binary, which resolve_tailscale() already calls not-configured. Calling
+        # it `unreachable` here would have blamed the network for a missing
+        # package, and would have been asymmetric with the tool's own argument
+        # that those two states must never be folded together.
+        return PathResult(
+            path, NOT_CONFIGURED, address, "no ssh binary on PATH", elapsed()
+        )
+    except OSError as exc:
+        return PathResult(path, UNREACHABLE, address, "ssh failed: %s" % exc, elapsed())
+
+    if proc.returncode == 0:
+        return PathResult(path, OK, address, "", elapsed())
+
+    stderr = (proc.stderr or b"").decode("utf-8", "replace").strip()
+    last = stderr.splitlines()[-1] if stderr else "ssh exited %d" % proc.returncode
+
+    # ssh exits 255 for auth failure AND for a host-key refusal, so the status
+    # cannot separate them; only the message can.
+    state, template, changed = classify_ssh_failure(stderr)
+    detail = template % host.name if template else last
+    return PathResult(path, state, address, detail, elapsed(), key_changed=changed)
+
+
+def probe_all(host: Host, timeout: float) -> list:
+    """Probe every path concurrently.
+
+    Concurrency is the point: three sequential probes against a host whose LAN
+    path is down would cost 3x the timeout on every single invocation, which
+    would make the tool too slow to put in front of `ssh`. Wall time is ~one
+    timeout, not three.
+    """
+    with ThreadPoolExecutor(max_workers=len(PATH_ORDER)) as pool:
+        futures = [pool.submit(probe_path, host, p, timeout) for p in PATH_ORDER]
+        return [f.result() for f in futures]
+
+
+def select_path(results: list, forced: Optional[str], accept_key: bool = False) -> tuple:
+    """Pick the path to connect over. Returns ``(chosen, error_message)``.
+
+    ``accept_key`` is the bootstrap escape hatch and widens the set of
+    ACCEPTABLE states by exactly one: `untrusted-key` becomes selectable. It
+    does nothing else — in particular it does not touch the probe (see
+    ``probe_command``) and it never makes an `unreachable` path selectable, so
+    it cannot be used to paper over a genuinely down path.
+
+    A selected `untrusted-key` path is then connected over by the ORDINARY
+    action command, which carries no `BatchMode`. Real ssh therefore does what
+    it always does with an unknown host key on an interactive terminal: it
+    prints the fingerprint and asks a human. That is the deliberate difference
+    from `StrictHostKeyChecking=accept-new`, which was rejected — this way the
+    trust decision is still made by a person, once, and `known_hosts` records
+    that it happened.
+    """
+    by_name = {r.path: r for r in results}
+    acceptable = (OK, UNTRUSTED_KEY) if accept_key else (OK,)
+
+    if forced:
+        result = by_name.get(forced)
+        if result is None:
+            return None, "unknown path %r" % forced
+        if result.state not in acceptable:
+            # Forcing a path and silently using a different one would defeat
+            # the entire purpose of the flag, so this is a hard failure.
+            return None, "forced path %r is %s (%s)" % (
+                forced,
+                result.state,
+                result.detail or "no detail",
+            )
+        return result, ""
+
+    for state in acceptable:
+        for name in PATH_ORDER:
+            result = by_name.get(name)
+            if result is not None and result.state == state:
+                return result, ""
+
+    if any(r.state == UNTRUSTED_KEY for r in results):
+        # Names the whole command, not just the flag. "re-run with --accept-key"
+        # was what an operator saw AFTER passing --accept-key (it sat in the
+        # verb's args, unparsed), so the message read as a contradiction. It is
+        # covered by the same parser pin as the report's advice block.
+        return None, (
+            "no path to the host is usable: its host key is not trusted by this "
+            "client (run `%s` once to trust it, interactively)"
+            % ACCEPT_KEY_ADVICE_COMMAND
+        )
+    return None, "no path to the host is reachable"
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+
+def report_text(host: Host, results: list, chosen, stream, local: bool = False) -> None:
+    stream.write("workhost: %s%s\n" % (host.name, " (this machine)" if local else ""))
+    for result in results:
+        marker = "*" if chosen is not None and result.path == chosen.path else " "
+        stream.write(
+            "%s %-10s %-16s %-15s %s\n"
+            % (
+                marker,
+                result.path,
+                result.address or "-",
+                result.state,
+                result.detail,
+            )
+        )
+    write_untrusted_key_advice(host, results, chosen, stream)
+    stream.flush()
+
+
+#: The EXACT command the advice tells a stuck operator to run.
+#:
+#: 🔴 A string that names a command is a claim about the parser, and this one
+#: was false: written after the verb, `--accept-key` fell into the verb's
+#: pass-through args and was never parsed, so following the printed instruction
+#: produced "re-run with --accept-key" — the flag just passed — forever. It is
+#: hoisted now (see HOISTED_FLAGS), and
+#: `test_the_advice_names_a_command_the_parser_actually_accepts` feeds THIS
+#: string back through `split_argv` + the parser and asserts it yields
+#: `accept_key=True`, so a reword of either side that breaks the pairing is red.
+#: Grepping the advice for the substring `--accept-key` would NOT have caught
+#: it — that passed against the broken behaviour.
+ACCEPT_KEY_ADVICE_COMMAND = "workhost ssh --accept-key"
+
+
+def write_untrusted_key_advice(host: Host, results: list, chosen, stream) -> None:
+    """Name the real cause and the way out, when a host key is what blocks.
+
+    Without this, the report reads `untrusted-key` and stops — which is better
+    than the `unreachable` it used to say, but still leaves the operator to
+    work out that ssh will never prompt because the PROBE runs BatchMode. The
+    two causes get different advice on purpose: a key that was never seen is
+    trusted with one interactive connection, whereas a key that CHANGED is
+    either a reinstall or an attack and `--accept-key` is the wrong answer to
+    both.
+    """
+    if chosen is not None:
+        return
+    untrusted = [r for r in results if r.state == UNTRUSTED_KEY]
+    if not untrusted:
+        return
+
+    changed = [r for r in untrusted if r.key_changed]
+    unseen = [r for r in untrusted if not r.key_changed]
+
+    if changed:
+        # `ssh-keygen -R` must name the ALIAS, not an address: HostKeyAlias is
+        # what the offending known_hosts entry is keyed on, so removing the
+        # address would delete the wrong line (or none) and leave the operator
+        # hitting the same wall. Pinned by a test against ssh_options().
+        stream.write(
+            "  -> the host key for alias '%s' CHANGED since it was trusted.\n"
+            "     if %s was reinstalled:  ssh-keygen -R %s   then re-run.\n"
+            "     if it was not, STOP — this is what an interception looks like.\n"
+            % (host.name, host.name, host.name)
+        )
+    if unseen:
+        # The manual line is DERIVED from the options the tool itself uses, not
+        # spelled out beside them, so it cannot drift into advice that omits the
+        # alias — which would create a second known_hosts entry keyed on the
+        # address and re-introduce the sprawl HostKeyAlias exists to prevent.
+        manual = " ".join(["ssh"] + ssh_options(host) + [unseen[0].address])
+        stream.write(
+            "  -> run `%s` once to trust it,\n"
+            "     or: %s\n" % (ACCEPT_KEY_ADVICE_COMMAND, manual)
+        )
+
+
+def report_json(host: Host, results: list, chosen, stream, local: bool = False) -> None:
+    payload = {
+        "host": host.name,
+        "local": local,
+        "selected": chosen.path if chosen is not None else None,
+        "paths": [r.as_dict() for r in results],
+    }
+    stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    stream.flush()
+
+
+# ---------------------------------------------------------------------------
+# Verbs
+# ---------------------------------------------------------------------------
+
+
+def substitute_address(args: list, address: str) -> list:
+    """Rewrite a leading ``:`` in an argument into ``<address>:``.
+
+    So `workhost scp ./a.txt :/tmp/a.txt` targets the host over whichever path
+    won, without the caller ever having to name an address.
+    """
+    out = []
+    for arg in args:
+        if arg.startswith(":"):
+            out.append("%s%s" % (address, arg))
+        else:
+            out.append(arg)
+    return out
+
+
+#: `-L` binds are best-effort by default: `ExitOnForwardFailure` defaults to
+#: `no` (measured from `man ssh_config` on this host), so ssh happily stays
+#: alive with ZERO working forwards. `workhost forward 8080:…` against an
+#: already-bound 8080 then blocks forever with no verdict, while the operator
+#: believes the tunnel is up and their connections reach whatever unrelated
+#: process owns the port. `yes` turns that into a loud, immediate exit.
+FORWARD_FAILURE_OPTS = ["-o", "ExitOnForwardFailure=yes"]
+
+
+def validate_forward_spec(spec: list) -> None:
+    """Reject a `forward` invocation that would forward nothing.
+
+    `spec = list(args)` was previously used unchecked, so `workhost forward`
+    with no arguments built a fully authenticated `ssh -N` with no `-L` at all
+    and idled until killed — a success-shaped no-op, and under `--dry-run` it
+    printed a command that looked plausible.
+
+    The shape check is deliberately narrow: `[bind:]port:host:hostport`, the
+    form this verb exists for. ssh's rarer `-L` spellings (unix sockets,
+    bracketed IPv6 literals) are not rejected as unsupported by ssh — they are
+    simply out of scope here, and the error says so and names the escape hatch,
+    because a wrong-but-plausible guess is worse than a refusal that points
+    somewhere.
+    """
+    if not spec:
+        raise ValueError(
+            "`forward` needs at least one FORWARD_SPEC "
+            "(e.g. `workhost forward 8080:localhost:80`); with none it would "
+            "open a session that forwards nothing and never returns"
+        )
+    for item in spec:
+        parts = item.split(":")
+        if len(parts) == 4:
+            parts = parts[1:]  # drop the optional bind address
+        if len(parts) != 3 or not parts[0].isdigit() or not parts[2].isdigit():
+            # The escape hatch is a claim about ssh's argument parser, so it was
+            # MEASURED rather than assumed. OpenSSH_10.2p1 permutes: flags
+            # written after the destination are still parsed as options, up to
+            # the first non-option token, which becomes the remote command.
+            # Controls: `-L bogusspec` before AND after the destination both
+            # give "Bad local forwarding specification"; putting a command
+            # first (`… host echo -L bogusspec`) does not; and with no `-L` the
+            # error does not appear at all. So `workhost ssh -N -L <spec>`,
+            # which builds `ssh <opts> <address> -N -L <spec>`, really does
+            # forward. Scope: that ssh version — an ancient ssh that does not
+            # permute would make this suggestion wrong.
+            raise ValueError(
+                "forward spec %r is not [bind:]port:host:hostport; for ssh's "
+                "other -L spellings use `workhost ssh -N -L %s`" % (item, item)
+            )
+
+
+def build_remote_command(host: Host, verb: str, address: str, args: list,
+                         timeout: float, kube_port: int = 0) -> list:
+    """The argv workhost would execute to reach ``host`` over ``address``."""
+    opts = ssh_options(host, connect_timeout=timeout)
+
+    if verb == "ssh":
+        return ["ssh"] + opts + [address] + list(args)
+
+    if verb == "run":
+        # Mirrors plain ssh semantics exactly: ssh joins its trailing arguments
+        # with spaces and hands the result to the remote login shell. That is
+        # what makes `workhost run 'exit 42'` exit 42 and `workhost run ls -la`
+        # also work, and it means anyone who already knows ssh knows this.
+        return ["ssh"] + opts + [address, "--"] + list(args)
+
+    if verb == "tmux":
+        # -t forces a PTY; without it tmux refuses to attach.
+        session = list(args) or []
+        remote = ["tmux", "new-session", "-A", "-s"] + (session or ["main"])
+        return ["ssh", "-t"] + opts + [address, "--"] + remote
+
+    if verb == "scp":
+        return ["scp"] + opts + substitute_address(list(args), address)
+
+    if verb == "rsync":
+        # rsync needs the ssh options threaded through -e, otherwise it opens
+        # its own ssh without HostKeyAlias and re-creates the very known_hosts
+        # sprawl this tool exists to prevent.
+        ssh_cmd = " ".join(["ssh"] + opts)
+        return ["rsync", "-e", ssh_cmd] + substitute_address(list(args), address)
+
+    if verb == "forward":
+        spec = list(args)
+        validate_forward_spec(spec)
+        cmd = ["ssh", "-N"]
+        for item in spec:
+            cmd += ["-L", item]
+        return cmd + FORWARD_FAILURE_OPTS + opts + [address]
+
+    if verb == "kubectl":
+        # See run_kubectl_via_tunnel() — this is only the tunnel half.
+        return (
+            ["ssh", "-N", "-L", "%d:127.0.0.1:%d" % (kube_port, host.kube_port)]
+            + FORWARD_FAILURE_OPTS
+            + opts
+            + [address]
+        )
+
+    raise ValueError("unknown verb: %s" % verb)
+
+
+def build_local_command(host: Host, verb: str, args: list) -> list:
+    """The argv workhost would execute when already sitting on the target."""
+    if verb in ("ssh", "tmux"):
+        if verb == "tmux":
+            session = list(args) or ["main"]
+            return ["tmux", "new-session", "-A", "-s"] + session
+        # `workhost ssh` on the target is a shell on the target: that is the
+        # login shell, not an ssh connection to ourselves.
+        return [os.environ.get("SHELL", "/bin/sh")]
+
+    if verb == "run":
+        # Same joining rule as the remote branch, so `run 'exit 42'` exits 42
+        # identically whether or not you happen to be on the box.
+        return ["bash", "-c", " ".join(args)]
+
+    if verb == "kubectl":
+        return ["kubectl"] + list(args)
+
+    if verb in ("scp", "rsync"):
+        stripped = [a[1:] if a.startswith(":") else a for a in args]
+        return ([verb] if verb == "rsync" else ["cp"]) + stripped
+
+    if verb == "forward":
+        # Forwarding to yourself is a no-op, and pretending otherwise would
+        # hang the operator on an ssh that never returns.
+        raise ValueError("`forward` is meaningless on the target host itself")
+
+    raise ValueError("unknown verb: %s" % verb)
+
+
+def free_local_port() -> int:
+    """Ask the kernel for an unused loopback port, then let go of it.
+
+    🔴 This is inherently racy — between the close here and ssh's bind, anything
+    on the box can take the port. The mitigation is not in this function: the
+    tunnel carries `ExitOnForwardFailure=yes`, so a thief makes ssh EXIT rather
+    than sit there forwarding nothing, and the readiness loop below re-checks
+    that the tunnel is still alive AFTER its connect succeeds. Without both, a
+    connect to the thief would satisfy the probe and `kubectl --server` would be
+    pointed at an unrelated local service.
+    """
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+    finally:
+        sock.close()
+
+
+def run_kubectl_via_tunnel(host: Host, address: str, args: list, timeout: float,
+                           verbose: bool) -> int:
+    """Run a LOCAL kubectl against the host's apiserver through an SSH tunnel.
+
+    Why a tunnel rather than rewriting the kubeconfig server address:
+
+    The k3s serving certificate on workbench carries SANs for `127.0.0.1` and
+    `192.168.50.250` but NOT for the nebula address `10.42.0.30` (measured from
+    the live cert). So a naive `--server=https://<address>:6443` rewrite is
+    TLS-valid over the LAN path and TLS-INVALID over nebula — it would work
+    until the day the LAN path is the one that is down, and then fail with a
+    certificate error that looks nothing like a routing problem.
+
+    Tunnelling to the host's own loopback sidesteps that entirely: kubectl
+    connects to `127.0.0.1`, which IS in the SANs, so the certificate verifies
+    over every path without ever disabling verification. It also uses the local
+    kubectl binary, which avoids depending on the remote non-login shell having
+    kubectl on PATH — on NixOS it frequently does not.
+    """
+    port = free_local_port()
+    tunnel_cmd = build_remote_command(host, "kubectl", address, [], timeout, kube_port=port)
+
+    if verbose:
+        sys.stderr.write("workhost: tunnel %s\n" % shlex.join(tunnel_cmd))
+
+    tunnel = subprocess.Popen(
+        tunnel_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        deadline = time.monotonic() + timeout
+        ready = False
+        while time.monotonic() < deadline:
+            if tunnel.poll() is not None:
+                break
+            probe = socket.socket()
+            probe.settimeout(0.25)
+            try:
+                probe.connect(("127.0.0.1", port))
+                ready = True
+                break
+            except OSError:
+                time.sleep(0.05)
+            finally:
+                probe.close()
+
+        # A successful connect proves SOMETHING is listening, not that it is
+        # ours. If ssh has exited by now, ExitOnForwardFailure says the bind
+        # lost the race and what answered belongs to somebody else.
+        if ready and tunnel.poll() is not None:
+            ready = False
+
+        if not ready:
+            sys.stderr.write("workhost: kubectl tunnel to %s did not come up\n" % host.name)
+            return EXIT_NO_PATH
+
+        kube_cmd = ["kubectl", "--server", "https://127.0.0.1:%d" % port] + list(args)
+        if verbose:
+            sys.stderr.write("workhost: exec %s\n" % shlex.join(kube_cmd))
+        try:
+            return subprocess.run(kube_cmd).returncode
+        except FileNotFoundError:
+            # The irony worth keeping visible: this verb tunnels precisely so it
+            # can use the LOCAL kubectl, because the remote non-login shell on
+            # NixOS frequently has none — and the newly-depended-on local binary
+            # was the one unhandled case, dying with a bare traceback and exit 1
+            # while `main`'s FileNotFoundError->127 guard sat on the other
+            # branch. 127 is the shell's own "command not found".
+            sys.stderr.write(
+                "workhost: no `kubectl` on the LOCAL PATH — `workhost kubectl` "
+                "tunnels to %s and runs kubectl HERE, so it needs one\n" % host.name
+            )
+            return 127
+    finally:
+        tunnel.terminate()
+        try:
+            tunnel.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            tunnel.kill()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+VERBS = ("ssh", "scp", "tmux", "run", "path", "check", "forward", "rsync", "kubectl")
+
+#: Verbs that only report and take no arguments of their own. Flags written
+#: after these are hoisted back to workhost, so `workhost path --json` works.
+REPORTING_VERBS = ("path", "check")
+
+#: Global options that consume a following token as their value.
+VALUE_OPTS = ("-H", "--host", "--path", "--timeout")
+
+#: 🔴 Flags hoisted back to workhost even when written AFTER an action verb.
+#:
+#: `--accept-key` is here because the tool PRINTS `workhost ssh --accept-key` as
+#: the way out of an untrusted host key, and under the plain positional rule
+#: that exact string was swallowed by the verb's pass-through args and never
+#: parsed: the operator followed the printed instruction, got told to "re-run
+#: with --accept-key" — the flag they had just passed — and looped. That is the
+#: "cannot bootstrap itself" defect one layer up, hitting at the moment the
+#: operator is most stuck. Measured on a fresh client: `workhost --accept-key
+#: ssh` reached real ssh and prompted; `workhost ssh --accept-key` exited 3.
+#:
+#: The cost is named rather than hidden: a remote command that genuinely wants
+#: a literal `--accept-key` argument no longer receives it as its own token.
+#: `hoist_bootstrap_flags` therefore RETURNS what it took so `main` can say so
+#: on stderr — silently dropping it is the one behaviour that is not
+#: acceptable. The escape is the ordinary one for `run`, which joins and hands
+#: to the remote shell: quote it, `workhost run 'tool --accept-key'`.
+HOISTED_FLAGS = ("--accept-key",)
+
+
+def hoist_bootstrap_flags(verb_args: list) -> tuple:
+    """Return ``(remaining_verb_args, hoisted)`` for HOISTED_FLAGS."""
+    hoisted = [t for t in verb_args if t in HOISTED_FLAGS]
+    if not hoisted:
+        return list(verb_args), []
+    return [t for t in verb_args if t not in HOISTED_FLAGS], hoisted
+
+
+def split_argv(argv: list) -> tuple:
+    """Split raw argv into ``(global_tokens, verb, verb_args, hoisted)``.
+
+    The rule is positional and therefore unambiguous: **flags before the verb
+    belong to workhost, everything after the verb belongs to the verb.** That
+    matters because `ssh`, `run`, `rsync` and `kubectl` all forward arbitrary
+    flags of their own — `workhost run --json` must send `--json` to the remote
+    command, not switch workhost into JSON mode. argparse's own REMAINDER gets
+    this right by accident and wrong at the edges, so the split is explicit.
+
+    Two exceptions, both narrow. Reporting verbs take no arguments, so flags
+    after them are hoisted back into the global set rather than silently
+    ignored. And `HOISTED_FLAGS` — today only `--accept-key` — are hoisted from
+    ANY verb's arguments, because the tool prints them in that position itself;
+    see the comment on that tuple. ``hoisted`` is returned rather than
+    swallowed so the caller can report what it took.
+    """
+    globals_ = []
+    verb = None
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in VALUE_OPTS:
+            globals_ += argv[i : i + 2]
+            i += 2
+            continue
+        if tok.startswith("-"):
+            # Covers --host=x, -Hx and bare flags alike: one token, one append.
+            globals_.append(tok)
+            i += 1
+            continue
+        verb = tok
+        i += 1
+        break
+    verb_args = list(argv[i:])
+
+    if verb in REPORTING_VERBS:
+        globals_ += verb_args
+        return globals_, verb, [], []
+
+    verb_args, hoisted = hoist_bootstrap_flags(verb_args)
+    globals_ += hoisted
+    return globals_, verb, verb_args, hoisted
+
+
+DEFAULT_TIMEOUT = 5.0
+
+
+def env_timeout(default: float = DEFAULT_TIMEOUT) -> float:
+    """`$WORKHOST_TIMEOUT`, or ``default`` if it is not a usable number.
+
+    This used to be `float(os.environ.get("WORKHOST_TIMEOUT", "5"))` evaluated
+    while BUILDING the parser, so a plausible `WORKHOST_TIMEOUT=10s` in a shell
+    profile raised ValueError before argparse existed: every invocation of every
+    verb crashed with a traceback, including `--help`, and nothing on screen
+    named the variable. Degrading to the default with one warning line is the
+    only behaviour that leaves the tool usable while still being audible.
+    """
+    raw = os.environ.get("WORKHOST_TIMEOUT")
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        sys.stderr.write(
+            "workhost: ignoring WORKHOST_TIMEOUT=%r (not a number of seconds); "
+            "using %g\n" % (raw, default)
+        )
+        return default
+    if value <= 0:
+        sys.stderr.write(
+            "workhost: ignoring WORKHOST_TIMEOUT=%r (must be > 0); using %g\n"
+            % (raw, default)
+        )
+        return default
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="workhost",
+        description="Reach a dev host over whichever network path is up.",
+        epilog=(
+            "verbs: %s\n"
+            "Global flags must come BEFORE the verb; everything after the verb "
+            "is passed to it." % ", ".join(VERBS)
+        ),
+    )
+    parser.add_argument(
+        "-H",
+        "--host",
+        default=os.environ.get("WORKHOST_HOST", DEFAULT_HOST),
+        help="target host name (default: %s, or $WORKHOST_HOST)" % DEFAULT_HOST,
+    )
+    parser.add_argument(
+        "--path",
+        choices=PATH_ORDER,
+        default=None,
+        help="force a specific path instead of picking the best available",
+    )
+    parser.add_argument("--json", action="store_true", help="emit the path report as JSON")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=env_timeout(),
+        help="per-path probe timeout in seconds (default: %g, or $WORKHOST_TIMEOUT)"
+        % DEFAULT_TIMEOUT,
+    )
+    parser.add_argument(
+        "--accept-key",
+        action="store_true",
+        help=(
+            "bootstrap: let an untrusted-key path be used, so ssh can ask you "
+            "about the host key interactively. Never affects the probe, and "
+            "never makes an unreachable path usable."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the command that would run instead of running it",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="explain what is happening")
+    return parser
+
+
+def main(argv=None) -> int:
+    raw = list(sys.argv[1:]) if argv is None else list(argv)
+    global_tokens, verb, verb_args, hoisted = split_argv(raw)
+
+    parser = build_parser()
+    opts = parser.parse_args(global_tokens)
+    opts.args = verb_args
+
+    if verb is None:
+        verb = "ssh"
+    if verb not in VERBS:
+        parser.error("unknown verb %r (expected one of: %s)" % (verb, ", ".join(VERBS)))
+    opts.verb = verb
+
+    if hoisted:
+        # Audible, because it changes what the remote command receives. Not a
+        # warning to be silenced: it fires only when the operator wrote one of
+        # these flags after the verb, which is the form the tool itself prints.
+        sys.stderr.write(
+            "workhost: %s taken as a workhost flag, not passed to `%s`\n"
+            % (" ".join(hoisted), verb)
+        )
+
+    host = HOSTS.get(opts.host)
+    if host is None:
+        sys.stderr.write(
+            "workhost: unknown host %r (known: %s)\n" % (opts.host, ", ".join(sorted(HOSTS)))
+        )
+        return 2
+
+    verb = "path" if opts.verb == "check" else opts.verb
+    reporting_verb = verb == "path"
+
+    # Answered BEFORE the path requirement: if we are already standing on the
+    # target, no network path is needed to run anything. Probing still happens
+    # and is still reported — the tool's promise is to tell you the state of
+    # every path on every invocation — but an all-unreachable report is not a
+    # failure when the destination is the machine you are typing on.
+    local = is_local_host(host)
+
+    results = probe_all(host, opts.timeout)
+    chosen, error = select_path(results, opts.path, accept_key=opts.accept_key)
+
+    # The report goes to stderr for action verbs so piped stdout carries only
+    # the remote command's own output. For `path`/`check` the report IS the
+    # product, so it goes to stdout.
+    report_stream = sys.stdout if reporting_verb else sys.stderr
+    if opts.json:
+        report_json(host, results, chosen, report_stream, local)
+    elif reporting_verb or opts.verbose or (chosen is None and not local):
+        report_text(host, results, chosen, report_stream, local)
+
+    if reporting_verb:
+        return 0 if (chosen is not None or local) else EXIT_NO_PATH
+
+    # An explicitly forced path is a request to go over the wire, so it is
+    # honoured even on the target host: silently running locally instead would
+    # be exactly the "silent fallback" the flag exists to forbid.
+    if chosen is None and not (local and opts.path is None):
+        sys.stderr.write("workhost: %s\n" % error)
+        return EXIT_NO_PATH
+
+    if local and opts.path is None:
+        try:
+            cmd = build_local_command(host, verb, list(opts.args))
+        except ValueError as exc:
+            sys.stderr.write("workhost: %s\n" % exc)
+            return 2
+    elif verb == "kubectl":
+        if opts.dry_run:
+            cmd = build_remote_command(
+                host, verb, chosen.address, list(opts.args), opts.timeout, kube_port=0
+            )
+            # The real local port comes from free_local_port() at run time, so
+            # there is no honest number to print here. Say so on stderr rather
+            # than let `-L 0:…` read as a command you could paste.
+            sys.stderr.write(
+                "workhost: (dry-run) the local port is chosen at run time; "
+                "the 0 in `-L 0:...` is a placeholder\n"
+            )
+            sys.stdout.write(shlex.join(cmd) + "\n")
+            return 0
+        return run_kubectl_via_tunnel(
+            host, chosen.address, list(opts.args), opts.timeout, opts.verbose
+        )
+    else:
+        try:
+            cmd = build_remote_command(
+                host, verb, chosen.address, list(opts.args), opts.timeout
+            )
+        except ValueError as exc:
+            # `forward` rejects a spec that would forward nothing. Same exit
+            # code and same shape as the local branch's refusal above, so the
+            # two do not have to be told apart by the caller.
+            sys.stderr.write("workhost: %s\n" % exc)
+            return 2
+
+    # shlex.join, not " ".join: a bare space-join prints a command that is NOT
+    # what runs the moment any argument contains a space — `run 'a b'` printed
+    # `ssh … -- a b`, which pastes as two arguments. --dry-run's whole value is
+    # that the printed line and the executed argv are the same thing.
+    if opts.dry_run:
+        sys.stdout.write(shlex.join(cmd) + "\n")
+        return 0
+
+    if opts.verbose:
+        sys.stderr.write("workhost: exec %s\n" % shlex.join(cmd))
+
+    try:
+        return subprocess.run(cmd).returncode
+    except FileNotFoundError as exc:
+        sys.stderr.write("workhost: %s\n" % exc)
+        return 127
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

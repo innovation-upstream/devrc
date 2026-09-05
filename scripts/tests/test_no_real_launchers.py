@@ -1548,6 +1548,27 @@ PINNED_PATH_CLOBBERS = {
         "unfindable. A prepending version measured a live call to the real "
         "board on this host while the nix sandbox (which has no clawgatectl) "
         "measured the intended case: two tiers, opposite blind spots"),
+    "test_workhost.py": (
+        '"PATH"' + ': str(bindir)',
+        "justified by ENUMERATION, like test_standup_local_health.py above, and "
+        "it is the first entry whose replacement directory deliberately "
+        "CONTAINS launcher names: ssh, scp, rsync, tmux and kubectl are all "
+        "present. They are STUBS the file itself writes via "
+        "testlib.mockbin.write_exec, never the real binaries, and that is the "
+        "whole point — workhost's job is to shell out to ssh, so the suite has "
+        "to answer those calls without a network. The invariant is LIVE, not "
+        "prose: test_the_stub_path_contains_only_declared_stubs asserts the "
+        "directory's contents are a subset of SANDBOX_BINARIES, that no "
+        "launcher-shaped entry is a symlink, and that each one's body contains "
+        "this suite's own WH_LOGDIR marker — so a real binary leaking in fails "
+        "a test rather than rotting a comment. 🔴 REPLACING is required, not "
+        "stylistic, in BOTH directions: the `not-configured` assertions depend "
+        "on `tailscale` being genuinely ABSENT and no amount of PREPENDING can "
+        "make a binary unfindable if one is later installed; and the real `ip` "
+        "on workbench reports the nebula address 10.42.0.30, so a prepended "
+        "PATH would let the host's true identity leak into the tests that must "
+        "believe they are remote, silently exercising the local-exec branch and "
+        "passing for the wrong reason"),
     "test_devshell_satisfies_required_tools.py": (
         '{"PATH"' + ': str(stub)',
         "a clobber justified by ENUMERATION rather than emptiness, and the "
