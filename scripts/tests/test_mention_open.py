@@ -21,7 +21,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
 import subprocess
 import sys
 import types
@@ -213,10 +212,27 @@ def test_an_ambiguous_click_prints_every_candidate():
 def test_a_non_mention_exits_non_zero_and_says_so():
     """🔴 A handler that fails SILENTLY is indistinguishable from one that was
     never wired up. The refusal is announced on stderr even when no desktop
-    notification is available."""
+    notification is available.
+
+    ⚠ `--no-discovery` is what makes this a refusal at all. Without it a
+    six-digit number now OPENS THE PICKER (see the six-digit tests below); the
+    flag bars the picker by contract, so the named refusal is what remains."""
     r = _run("--print", "--no-discovery", "#282828")
     assert r.returncode == 1
-    assert "no mention" in r.stderr
+    assert "cannot resolve" in r.stderr
+    assert "resolves only what the text itself carries" in r.stderr
+
+
+def test_text_with_no_NUMBER_at_all_still_gets_the_original_refusal():
+    """The one place `no mention in the clicked text` survives verbatim: there is
+    no number, so there is nothing a picker could even offer.
+
+    ⚠ UNREACHABLE FROM A CLICK. The Alacritty hint regex requires `#[0-9]{1,6}`
+    or a ClickUp id, so nothing digitless is ever underlined — this is the
+    command line only."""
+    r = _run("--print", "background = teal;")
+    assert r.returncode == 1
+    assert "no mention in the clicked text" in r.stderr
 
 
 def test_an_unresolvable_owner_exits_non_zero_and_explains():
@@ -288,9 +304,23 @@ def test_a_short_form_repo_is_resolved_from_the_discovered_checkouts(spy):
     assert spy[-1] == ("open", "https://github.com/civitai/talos-infra/issues/1065")
 
 
-def test_a_non_mention_notifies_and_opens_nothing(spy):
-    assert MO.main(['background = "#282828";']) == 1
-    assert spy == [("notify", "no mention in the clicked text")]
+def test_a_non_mention_OFFERS_THE_PICKER_instead_of_refusing(spy):
+    """🔴 THE REVERSAL THIS CHANGE EXISTS FOR. `#282828` used to produce the
+    toast `no mention in the clicked text`, which reads as the handler being
+    broken when it is the guard working correctly — and a guard that reads as a
+    bug is one the next maintainer deletes.
+
+    The picker is now offered instead. Nothing is opened without a selection, and
+    the number never becomes a reference: see
+    `test_a_SIX_DIGIT_number_is_OFFERED_but_NEVER_auto_opened`."""
+    # 🔴 THE MESSAGE IS ON THE EXIT CODE, which is what a reverted measurement
+    # pass turns to 1 — the picker assertion below never evaluates in that case.
+    assert MO.main(['background = "#282828";']) == 0, (
+        "a six-digit click DEAD-ENDED instead of offering the picker")
+    assert ("pick", 1) in spy, (
+        f"a six-digit click DEAD-ENDED instead of offering the picker: {spy}")
+    assert not [c for c in spy if isinstance(c, tuple) and c[0] == "notify"], (
+        "a six-digit click DEAD-ENDED instead of offering the picker")
 
 
 # --------------------------------------------------------------------------- #
@@ -342,187 +372,170 @@ def test_a_local_checkout_overrides_the_mapping(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# PASS 3 — the GitHub API fallback
+# 🔴 THE CLICK PATH MAKES NO NETWORK CALL
 #
-# 🔴 An earlier version of this path shipped INERT: its jq program compared
-# `.name` against the LITERAL text `"$name"` (a Python string with no f-prefix),
-# selecting nothing for any input, while every test that stubbed `gh` passed.
-# Nothing here mocks the selection — the fake returns the rows `gh` would print
-# and the assertions pin WHICH of them the resolver takes.
+# A GitHub-WIDE namesake search used to live between the local sources and the
+# picker: `gh api search/repositories`, consulted for any `repo#N` the mapping
+# and the checkouts could not name. MEASURED on the deployed copy, `dashboard#12`
+# cost 4.3s through `--print` and ~10s through the real hint path at 6% CPU —
+# all of it network wait — and returned `vzhong/dashboard`, `yorkie-team/
+# dashboard`, `zce/dashboard`: strangers' repositories the operator would never
+# pick. It searched a corpus that structurally could not hold the answer.
+#
+# It is DELETED. These tests exist so it cannot come back by accident, and so no
+# OTHER network call can take its place: the check is a LEDGER of every command
+# the resolution path may spawn, which fails when the set GROWS or SHRINKS, not a
+# ban on the single word `gh` that any other client would walk straight past.
 # --------------------------------------------------------------------------- #
-@pytest.fixture(autouse=True)
-def _clear_api_cache():
-    """The cache is module-global and would carry an answer between tests."""
-    MO._GITHUB_API_CACHE.clear()
-    yield
-    MO._GITHUB_API_CACHE.clear()
+
+# Every command the resolution path is allowed to spawn, as (argv[0], argv[1]).
+#
+# 🔴 THE SUBCOMMAND IS PART OF THE LEDGER, NOT DECORATION. `git` alone would
+# admit `git ls-remote` and `git fetch`, which are network calls wearing the name
+# of a local tool — the exact substitution a ban on `gh` invites. Both entries
+# here are local-only reads.
+RESOLUTION_PATH_COMMANDS = {
+    ("tmux", "display-message"),   # which pane the operator was last in
+    ("git", "rev-parse"),          # that pane's checkout root
+    ("git", "remote"),             # `remote get-url origin` — reads .git/config
+}
 
 
-# Bound BEFORE any test patches the module attribute, so a test that needs a
-# REAL subprocess while `gh` is faked still gets one.
-_REAL_RUN = subprocess.run
+def _assert_only_local_commands(seen: list[list[str]]) -> None:
+    """Fail unless `seen` is exactly the ledger above.
+
+    🔴 BOTH DIRECTIONS. A GROWN set is a new command nobody vetted — a network
+    call, most likely. A SHRUNK set means the path under test never ran the
+    measurement at all, which would make every absence below vacuous.
+    """
+    got = {(c[0], c[1]) for c in seen if len(c) >= 2}
+    assert got == RESOLUTION_PATH_COMMANDS, (
+        f"the resolution path's command ledger MOVED: {sorted(got)}")
 
 
-def _fake_gh(rows, *, returncode=0):
-    """Stand in for `gh api search/repositories`, recording the argv it got.
-    Rows are RELEVANCE-ordered as the endpoint returns them — the exact-name
-    matches are deliberately NOT first."""
-    seen: dict = {}
-
-    def run(cmd, **kwargs):
-        seen["cmd"] = list(cmd)
-        return types.SimpleNamespace(
-            returncode=returncode, stdout="".join(f"{r}\n" for r in rows), stderr="")
-
-    return run, seen
-
-
-# Fixture rows share no substring with any assertion constant, and the two
-# EXACT matches sit at positions 2 and 4 — so a mutant that takes the first row,
-# the last row, or matches on a prefix cannot land on the expected value.
-_SEARCH_ROWS = [
-    "hobbyist/trowelcast-examples",
-    "gardenersguild/trowelcast",
-    "someoneelse/trowelcast-mirror",
-    "rivalorg/trowelcast",
-    "thirdparty/trowelcast-fork",
-]
+def test_the_no_network_assertion_can_actually_FIRE():
+    """🔴 POSITIVE CONTROL ON THE ASSERTION ITSELF, not on the code it guards.
+    `_assert_only_local_commands` is the whole instrument; until it has been
+    watched to reject something, a green run from it is indistinguishable from a
+    check wired to nothing. Feed it the exact argv the deleted search used."""
+    with pytest.raises(AssertionError, match="ledger MOVED"):
+        _assert_only_local_commands([
+            ["tmux", "display-message", "-p"],
+            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "remote", "get-url", "origin"],
+            ["gh", "api", "search/repositories", "-f", "q=dashboard in:name"],
+        ])
+    # …and in the other direction: a path that measured nothing.
+    with pytest.raises(AssertionError, match="ledger MOVED"):
+        _assert_only_local_commands([])
 
 
-def test_the_api_fallback_returns_EVERY_exact_name_match(monkeypatch):
-    """🔴 Relevance order is not name order, and an exact-name hit is not an
-    unambiguous one. Returning the first row silently picks a stranger's repo."""
-    run, seen = _fake_gh(_SEARCH_ROWS)
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    assert MO.gh_api_repo_search("trowelcast") == ({
-        "gardenersguild/trowelcast": "gardenersguild/trowelcast",
-        "rivalorg/trowelcast": "rivalorg/trowelcast"}, "")
-    assert seen["cmd"][:3] == ["gh", "api", "search/repositories"]
+def test_the_resolution_path_spawns_ONLY_these_local_commands(tmp_path, monkeypatch):
+    """🔴 THE GUARD. Drives the FULL unresolvable path — the one that used to
+    reach the network — against a real mapping file and a real workspace, with
+    `subprocess.run` recording instead of executing, and asserts the ledger.
+
+    Nothing here stubs `discover_repos` or `tmux_pane_repo`: those ARE the
+    subject. A fixture that replaced them would leave this test green against a
+    handler that phoned home from either one.
+    """
+    # A real mapping and a real checkout, so both measurement legs do work.
+    mapping = tmp_path / "known_repos.json"
+    mapping.write_text(json.dumps({"plotwidget": "hobbyist/plotwidget"}))
+    ws = tmp_path / "workspace"
+    (ws / "spadeworks" / ".git").mkdir(parents=True)
+    pane = tmp_path / "pane"
+    pane.mkdir()
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", mapping)
+    monkeypatch.setattr(MO, "WORKSPACE", ws)
+
+    seen: list[list[str]] = []
+
+    def record(cmd, **kwargs):
+        seen.append(list(cmd))
+        # Answer each leg plausibly so the NEXT one runs. A fake that returns
+        # failure would truncate the path and shrink the ledger silently.
+        if cmd[:2] == ["tmux", "display-message"]:
+            out = str(pane)
+        elif cmd[:2] == ["git", "rev-parse"]:
+            out = str(pane)
+        else:
+            out = "git@github.com:rivalorg/spadeworks.git"
+        return types.SimpleNamespace(returncode=0, stdout=out + "\n", stderr="")
+
+    def no_launch(argv, *a, **k):
+        raise AssertionError(f"nothing may be launched: {argv!r}")
+
+    monkeypatch.setattr(MO.subprocess, "run", record)
+    monkeypatch.setattr(MO.subprocess, "Popen", no_launch)
+    monkeypatch.setattr(MO, "pick", lambda c: "")
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: None)
+
+    assert MO.main(["zzznosuchrepo#12"]) == 0
+    _assert_only_local_commands(seen)
+    # POSITIVE CONTROL: the fan-out really ran over the real workspace, so the
+    # ledger above is a fact about a path that did the work, not about a
+    # short-circuit. One checkout ⇒ one `git remote` call.
+    assert [c for c in seen if c[:2] == ["git", "remote"]], seen
 
 
-def test_the_api_fallback_matches_a_name_case_insensitively(monkeypatch):
-    run, _ = _fake_gh(["hobbyist/TrowelCast-ui", "gardenersguild/TrowelCast"])
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    assert MO.gh_api_repo_search("trowelcast") == (
-        {"gardenersguild/TrowelCast": "gardenersguild/TrowelCast"}, "")
+# Every executable the module may ever spawn, from ANY function. Wider than
+# `RESOLUTION_PATH_COMMANDS` because it also covers the ACTION half — opening a
+# browser, raising rofi, sending a notification — which no resolution runs.
+SPAWNABLE_EXECUTABLES = {"git", "tmux", "rofi", "xdg-open", "notify-send"}
 
 
-def test_the_api_fallback_returns_NOTHING_when_no_row_names_the_repo(monkeypatch):
-    """🔴 NOTHING IS GUESSED. Only near-misses ⇒ no candidate at all."""
-    run, _ = _fake_gh(["hobbyist/trowelcast-examples", "thirdparty/trowelcast-fork"])
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    # 🔴 The reason is EMPTY here: the search RAN and matched nothing. That is a
-    # different fact from a search that could not run, and the refusal differs.
-    assert MO.gh_api_repo_search("trowelcast") == ({}, "")
+def _spawned_executables(source: str) -> set[str]:
+    """argv[0] of every `subprocess.run`/`Popen` call in `source`, read from the
+    AST.
+
+    🔴 AST, NOT grep. The module's docstring NAMES `gh api search/repositories`
+    at length — that paragraph is the record of why the call was deleted, and it
+    is the single most valuable thing in the file for the next maintainer. A
+    substring check would either fail on that prose or force it to be softened
+    into uselessness, which is how a hazard note gets deleted to make a test
+    pass. The AST sees calls; it cannot see comments or docstrings at all.
+    """
+    import ast
+    out: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in ("run", "Popen") or not node.args:
+            continue
+        argv = node.args[0]
+        if isinstance(argv, (ast.List, ast.Tuple)) and argv.elts:
+            head = argv.elts[0]
+            out.add(head.value if isinstance(head, ast.Constant) else "<computed>")
+        else:
+            out.add("<computed>")
+    return out
 
 
-def test_the_api_fallback_returns_nothing_when_gh_fails(monkeypatch):
-    """A non-zero `gh` (no auth, rate limit, no network, BINARY ABSENT) prints
-    its error on stderr; treating stdout as an answer would resolve to garbage.
-
-    ⚠ INVARIANT GUARD, not regression coverage — green on the pre-fix code too."""
-    run, _ = _fake_gh(_SEARCH_ROWS, returncode=1)
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    matches, why = MO.gh_api_repo_search("trowelcast")
-    assert matches == {}
-    assert "gh exited 1" in why
+def test_the_spawned_executable_LEDGER_can_actually_fire():
+    """POSITIVE CONTROL on the reader, before its verdict is believed. An AST
+    walk that matched nothing would report a clean empty set forever."""
+    found = _spawned_executables(
+        "import subprocess\n"
+        "subprocess.run(['gh', 'api', 'search/repositories'])\n")
+    assert found == {"gh"}, found
+    assert _spawned_executables("import subprocess\nx = 1\n") == set()
 
 
-def test_the_jq_program_is_a_CONSTANT_that_cannot_do_the_selection(monkeypatch):
-    """🔴 THE SEAM. Every test above stubs `gh`, so a filter that selects
-    nothing in production still passes them — precisely how the original bug
-    survived. `gh api --jq` accepts no `--arg`, so a name in the filter can only
-    be a string literal: assert the program carries neither the searched name
-    nor a `$`, i.e. that jq CANNOT be where the match happens."""
-    run, seen = _fake_gh(_SEARCH_ROWS)
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    MO.gh_api_repo_search("trowelcast")
-    jq_program = seen["cmd"][seen["cmd"].index("--jq") + 1]
-    assert "$" not in jq_program
-    assert "trowelcast" not in jq_program
+def test_the_module_no_longer_carries_a_repository_SEARCH_at_all():
+    """🔴 STRUCTURAL, not behavioural — and deliberately both. The ledger test
+    above proves no search RAN on one path; this proves there is no search to run
+    on ANY path, including ones no test drives.
 
-
-@pytest.mark.skipif(shutil.which("jq") is None, reason="jq not on PATH")
-def test_the_jq_program_really_yields_the_rows_the_resolver_filters(monkeypatch):
-    """The other half of the seam: run the EMITTED program through the REAL jq
-    against a realistic payload. The inert original returns zero lines here."""
-    run, seen = _fake_gh(_SEARCH_ROWS)
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    MO.gh_api_repo_search("trowelcast")
-    jq_program = seen["cmd"][seen["cmd"].index("--jq") + 1]
-
-    payload = json.dumps({"items": [
-        {"name": full.split("/")[1], "full_name": full} for full in _SEARCH_ROWS]})
-    # 🔴 _REAL_RUN, not subprocess.run: `MO.subprocess` IS the shared module, so
-    # the fake above is installed globally for the duration of the test. Calling
-    # subprocess.run here reaches the FAKE and this test passes on any filter
-    # whatsoever — measured, it passed against the inert original.
-    r = _REAL_RUN(["jq", "-r", jq_program], input=payload,
-                  capture_output=True, text=True, timeout=30)
-    assert r.returncode == 0, r.stderr
-    assert "gardenersguild/trowelcast" in r.stdout.splitlines()
-
-
-def test_one_exact_match_opens_directly(spy, monkeypatch):
-    run, _ = _fake_gh(["hobbyist/trowelcast-examples", "gardenersguild/trowelcast"])
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    assert MO.main(["trowelcast#77"]) == 0
-    assert ("pick", 2) not in spy
-    assert spy[-1] == ("open", "https://github.com/gardenersguild/trowelcast/issues/77")
-
-
-def test_TWO_owners_with_the_same_repo_name_go_to_the_PICKER(spy, monkeypatch):
-    """🔴 THE NAMESAKE RULE. `dashboard`, `cli`, `api` exist under dozens of
-    owners; measured on the first version, `dashboard#12` silently opened a
-    retired Kubernetes repo. Several owners is a CHOICE, not a ranking."""
-    run, _ = _fake_gh(_SEARCH_ROWS)
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    assert MO.main(["trowelcast#77"]) == 0
-    assert ("pick", 2) in spy, spy
-    urls = MO.picker_rows([
-        {"platform": "github", "id": "77",
-         "url": "https://github.com/gardenersguild/trowelcast/issues/77"},
-        {"platform": "github", "id": "77",
-         "url": "https://github.com/rivalorg/trowelcast/issues/77"}])
-    assert "gardenersguild" in urls[0] and "rivalorg" in urls[1]
-
-
-def test_an_unknown_repo_with_no_exact_match_still_refuses_WHEN_THE_UNIVERSE_IS_EMPTY(
-        spy, monkeypatch):
-    """PASS 3 must not turn an honest refusal into a confident wrong page.
-
-    The refusal is now the LAST resort rather than the only one — it survives
-    exactly when PASS 4 has nothing to offer, which is what an empty
-    `discover_repos()` produces."""
-    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
-    run, _ = _fake_gh(["hobbyist/trowelcast-examples"])
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    assert MO.main(["trowelcast#77"]) == 1
-    assert spy[-1] == ("notify", "cannot resolve trowelcast#77")
-
-
-def test_PASS_3_never_second_guesses_an_owner_the_text_already_stated(monkeypatch):
-    """🔴 An explicit `owner/repo` is source 1 — the strongest there is. PASS 3's
-    subject pattern must not admit it, or a search by name could REPLACE a
-    stated owner with a guessed one."""
-    assert MO._PASS3_REPO_RE.match("trowelcast#77")
-    assert not MO._PASS3_REPO_RE.match("gardenersguild/trowelcast#77")
-    assert not MO._PASS3_REPO_RE.match("#77")
-    assert not MO._PASS3_REPO_RE.match("see trowelcast#77 today")
-
-
-def test_a_bare_number_never_reaches_the_api(spy, monkeypatch):
-    """A bare `#N` names no repo, so there is nothing to search for — and a
-    search on a number would return arbitrary repos."""
-    calls = []
-
-    def run(cmd, **kwargs):
-        calls.append(cmd)
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    MO.main(["#370"])
-    assert not [c for c in calls if c[:1] == ["gh"]]
+    It is a ledger rather than a ban on the word `gh`, for the reason
+    `RESOLUTION_PATH_COMMANDS` is: a `curl`, a `python -c`, or a second `gh`
+    subcommand would all walk straight past a check that only knows one name.
+    """
+    assert not hasattr(MO, "gh_api_repo_search")
+    found = _spawned_executables(HANDLER.read_text())
+    assert found, "positive control: the module DOES spawn things"
+    assert found <= SPAWNABLE_EXECUTABLES, (
+        f"mention-open.py spawns something new: {sorted(found - SPAWNABLE_EXECUTABLES)}")
 
 
 # --------------------------------------------------------------------------- #
@@ -543,13 +556,12 @@ def _write_mapping(tmp_path, mapping):
 def test_a_mapping_ONLY_name_resolves_end_to_end_through_main(tmp_path, monkeypatch):
     """🔴 THE MUTATION THIS PINS: drop `load_known_repos()` from
     `discover_repos` and this is the test that goes red. The name exists in no
-    checkout and `gh` is not reachable, so the mapping is the ONLY thing that
-    can produce this URL."""
+    checkout, and there is no network fallback left, so the mapping is the ONLY
+    thing that can produce this URL."""
     monkeypatch.setattr(MO, "KNOWN_REPOS_PATH",
                         _write_mapping(tmp_path, {"plotwidget": "gardenersguild/plotwidget"}))
     monkeypatch.setattr(MO, "WORKSPACE", tmp_path / "no-such-workspace")
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
-    monkeypatch.setattr(MO, "gh_api_repo_search", lambda name: ({}, "gh disabled for this test"))
     opened = []
     monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
     assert MO.main(["plotwidget#42"]) == 0
@@ -654,35 +666,37 @@ def test_the_workspace_is_resolved_at_CALL_time_too(tmp_path, monkeypatch):
     assert MO.discover_repos() == {"plotwidget": "gardenersguild/plotwidget"}
 
 
-# PASS 3 — an unusable picker, and an empty result that names its cause
+# The picker's size, and the empty results that must name their cause
 # --------------------------------------------------------------------------- #
-def test_a_WALL_of_namesakes_now_reaches_the_picker_because_it_can_be_TYPED_at(
+def test_a_WALL_of_repos_reaches_the_picker_because_it_can_be_TYPED_at(
         spy, monkeypatch):
-    """🔴 THE REVERSAL. This used to refuse above 8 namesakes, on the reasoning
-    that "a 100-row list of URLs differing only by owner is not a choice, it is
-    a wall". That is true of a list you can only SCROLL and false of one you can
-    TYPE AT, and `pick()` now runs rofi with `-matching fuzzy`. So the wall is a
-    narrowing, and refusing would remove the operator's ability to choose.
+    """🔴 THE REVERSAL, NOW OVER THE LOCAL UNIVERSE. This used to refuse above 8
+    candidates, on the reasoning that "a 100-row list of URLs differing only by
+    owner is not a choice, it is a wall". That is true of a list you can only
+    SCROLL and false of one you can TYPE AT, and `pick()` runs rofi with
+    `-matching fuzzy`. So the wall is a narrowing, and refusing would remove the
+    operator's ability to choose — which matters far more now that the universe
+    is the operator's own 369-repo mapping rather than a page of search results.
 
     17 rows, not 9: the old cap was 8, so a fixture of 9 would sit one step past
     a boundary that no longer exists and could not tell a re-added cap of 16
     from no cap at all."""
-    rows = [f"owner{i}/trowelcast" for i in range(17)]
-    run, _ = _fake_gh(rows)
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    assert MO.main(["trowelcast#77"]) == 0
+    monkeypatch.setattr(MO, "discover_repos",
+                        lambda *a, **k: {f"n{i}": f"owner{i}/trowelcast"
+                                         for i in range(17)})
+    assert MO.main(["zzznosuchrepo#77"]) == 0
     assert ("pick", 17) in spy, spy
     assert not [c for c in spy if isinstance(c, tuple) and c[0] == "notify"]
 
 
-def test_eight_namesakes_still_offer_the_picker(spy, monkeypatch):
+def test_eight_repos_still_offer_the_picker(spy, monkeypatch):
     """The case that worked under the old cap must keep working under no cap —
     a reversal that broke the legitimate side would be the same outage wearing
     the opposite hat."""
-    rows = [f"owner{i}/trowelcast" for i in range(8)]
-    run, _ = _fake_gh(rows)
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    assert MO.main(["trowelcast#77"]) == 0
+    monkeypatch.setattr(MO, "discover_repos",
+                        lambda *a, **k: {f"n{i}": f"owner{i}/trowelcast"
+                                         for i in range(8)})
+    assert MO.main(["zzznosuchrepo#77"]) == 0
     assert ("pick", 8) in spy
 
 
@@ -712,68 +726,61 @@ def test_the_picker_asks_rofi_for_FUZZY_matching(monkeypatch):
     assert "-no-custom" in seen["cmd"]
 
 
-def test_a_search_that_COULD_NOT_RUN_says_so_instead_of_denying_the_repo(spy, monkeypatch):
-    """🔴 An empty result cannot distinguish `gh` missing from no such repo, and
-    the two need opposite next moves. The refusal must not assert the stronger
-    claim. With an EMPTY universe there is nothing to offer, so this is still the
-    refusal path exactly as it was."""
+@pytest.mark.parametrize("state,write,expected", [
+    ("absent", None, "has no repo mapping"),
+    ("unreadable", "not json at all", "could not be read"),
+    ("no usable rows", json.dumps({"widget": "acme"}), "holds no usable rows"),
+])
+def test_universe_reason_names_WHICH_empty_it_is(tmp_path, state, write, expected):
+    """🔴 THREE STATES, ONE EMPTY DICT, THREE DIFFERENT NEXT MOVES. `{}` is what
+    `load_known_repos` returns for all of them by design, so the reason cannot be
+    recovered from its value — and reporting one sentence for all three is the
+    same silent zero as the deleted search's empty result, which could not tell
+    "no such repo" from "gh is missing".
+
+    The third row is a mapping that PARSED and yielded nothing usable
+    (`"acme"` is one segment, so `clean_repo_map` drops it) — a `gh auth`
+    problem, not a mention-open one, and structurally invisible to a check that
+    only asks whether the file exists."""
+    p = tmp_path / "known_repos.json"
+    if write is not None:
+        p.write_text(write)
+    reason = MO.universe_reason(p)
+    assert expected in reason, f"{state}: {reason!r}"
+    assert "regen-known-repos.py" in reason, "the reason names no next move"
+
+
+def test_universe_reason_is_EMPTY_when_the_mapping_is_fine(tmp_path):
+    """The positive control for the three rows above: a readable mapping with a
+    usable row must produce NO reason, or every one of them would pass against a
+    function that returns a complaint unconditionally."""
+    p = tmp_path / "known_repos.json"
+    p.write_text(json.dumps({"plotwidget": "hobbyist/plotwidget"}))
+    assert MO.universe_reason(p) == ""
+
+
+def test_universe_reason_never_names_a_ROW(tmp_path):
+    """🔴 IT IS A NOTIFY BODY, AND `notify()` WRITES TO stderr AND notify-send.
+    "the mapping holds only hobbyist/plotwidget" is a natural-looking
+    improvement that discloses a private repository name."""
+    p = tmp_path / "known_repos.json"
+    p.write_text(json.dumps({"widget": "acme"}))
+    reason = MO.universe_reason(p)
+    assert "acme" not in reason and "widget" not in reason, reason
+
+
+def test_the_refusal_keeps_the_ADVICE_when_it_also_names_a_cause(spy, monkeypatch,
+                                                                 tmp_path):
+    """🔴 The case that names a cause is exactly the case where writing
+    `owner/repo#N` is the workaround — so naming the cause must ADD to the
+    advice, never replace it. It replaced it once."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
-
-    def boom(cmd, **kwargs):
-        raise FileNotFoundError(2, "No such file or directory", "gh")
-
-    monkeypatch.setattr(MO.subprocess, "run", boom)
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", tmp_path / "nothing-here.json")
     notices = []
     monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
-    assert MO.main(["trowelcast#77"]) == 1
-    assert "gh is not on PATH" in notices[-1][1]
-    assert "not a claim that no such repo exists" in notices[-1][1]
-
-
-def test_the_picker_does_not_SWALLOW_the_reason_the_search_could_not_run(
-        spy, monkeypatch):
-    """🔴 THE NEW SHAPE OF AN OLD RULE. PASS 4 turns a refusal into a choice, and
-    the easiest way to write that is to drop the refusal entirely — which would
-    silently discard "gh is not on PATH", a fact about the operator's TOOLING
-    that no picker can express. The cause is announced AND the choice is offered:
-    they answer different questions."""
-    def boom(cmd, **kwargs):
-        raise FileNotFoundError(2, "No such file or directory", "gh")
-
-    monkeypatch.setattr(MO.subprocess, "run", boom)
-    notices = []
-    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
-    assert MO.main(["trowelcast#77"]) == 0
-    assert ("pick", 1) in spy, spy
-    assert any("gh is not on PATH" in n[1] for n in notices), notices
-
-
-def test_a_search_that_RAN_and_matched_nothing_keeps_the_ordinary_refusal(spy, monkeypatch):
-    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
-    run, _ = _fake_gh(["hobbyist/trowelcast-examples"])
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    notices = []
-    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
-    assert MO.main(["trowelcast#77"]) == 1
-    assert "owner/repo#N" in notices[-1][1]
-    assert "not a claim" not in notices[-1][1]
-
-
-def test_the_refusal_keeps_the_ADVICE_when_it_also_names_a_cause(spy, monkeypatch):
-    """🔴 The case where the search could not run is exactly the case where
-    writing `owner/repo#N` is the workaround — so naming the cause must ADD to
-    the advice, never replace it. It replaced it once."""
-    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
-
-    def boom(cmd, **kwargs):
-        raise FileNotFoundError(2, "No such file or directory", "gh")
-
-    monkeypatch.setattr(MO.subprocess, "run", boom)
-    notices = []
-    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
-    assert MO.main(["trowelcast#77"]) == 1
+    assert MO.main(["zzznosuchrepo#77"]) == 1
     body = notices[-1][1]
-    assert "gh is not on PATH" in body
+    assert "has no repo mapping" in body
     assert "owner/repo#N" in body, "the actionable advice was dropped"
 
 
@@ -794,19 +801,8 @@ def test_a_value_that_is_not_EXACTLY_owner_slash_repo_is_refused(tmp_path, value
     assert MO.load_known_repos(p) == {}
 
 
-def test_the_search_asks_for_a_FULL_page(monkeypatch):
-    """`per_page` defaults to 30. Removing it shrinks what the exact-name filter
-    can even see — and it is invisible to every other test here, because the
-    fake returns whatever rows the test hands it regardless of the request.
-    Measured: dropping `per_page=100` SURVIVED the whole suite."""
-    run, seen = _fake_gh(_SEARCH_ROWS)
-    monkeypatch.setattr(MO.subprocess, "run", run)
-    MO.gh_api_repo_search("trowelcast")
-    assert "per_page=100" in seen["cmd"], seen["cmd"]
-
-
 # --------------------------------------------------------------------------- #
-# PASS 4 — THE FUZZY UNIVERSE
+# PASS 3 — THE FUZZY LOCAL UNIVERSE
 #
 # 🔴 EVERY NAME BELOW IS SYNTHETIC. The real universe is built from
 # `known_repos.json`, the file whose committed ancestor disclosed 232 PRIVATE
@@ -826,14 +822,9 @@ FAKE_UNIVERSE = {
 
 @pytest.fixture
 def universe(monkeypatch):
-    """A three-entry synthetic universe, and NO gh — so anything that resolves
-    below did so through PASS 4 and nothing else."""
+    """A three-entry synthetic universe — so anything that resolves below did so
+    through the local universe and nothing else."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
-    # ("", not a reason): the search RAN and matched nothing. A reason here would
-    # make every test below also exercise the "could not run" notice, which has
-    # its own test — a fixture that bundles two conditions cannot tell you which
-    # one an assertion is about.
-    monkeypatch.setattr(MO, "gh_api_repo_search", lambda name: ({}, ""))
     return FAKE_UNIVERSE
 
 
@@ -888,10 +879,9 @@ def test_a_ONE_ENTRY_universe_is_still_a_CHOICE_and_never_auto_opens(
     `zzznosuchrepo#77` opened issue 77 in a completely unrelated repository — a
     confident wrong page, the exact failure this handler exists to prevent.
 
-    A search HIT is evidence about the name; a universe row is only an option."""
+    A mapping hit is evidence about the name; a universe row is only an option."""
     monkeypatch.setattr(MO, "discover_repos",
                         lambda *a, **k: {"spadeworks": "rivalorg/spadeworks"})
-    monkeypatch.setattr(MO, "gh_api_repo_search", lambda name: ({}, ""))
     assert MO.main(["zzznosuchrepo#77"]) == 0
     assert ("pick", 1) in spy, spy
 
@@ -905,25 +895,23 @@ def test_dismissing_the_universe_picker_opens_NOTHING(spy, universe, monkeypatch
     assert not [c for c in spy if isinstance(c, tuple) and c[0] == "open"]
 
 
-def test_an_EMPTY_universe_degrades_to_the_NAMED_reason_refusal(spy, monkeypatch):
+def test_an_EMPTY_universe_degrades_to_the_NAMED_reason_refusal(spy, monkeypatch,
+                                                                tmp_path):
     """🔴 NOT A SILENT EMPTY PICKER. A universe that cannot be read must fall
-    back to the refusal that says WHICH empty this is — "gh is not on PATH" and
-    "no repo by that name" need opposite next moves."""
+    back to the refusal that says WHICH empty this is — "no mapping on this host"
+    and "the mapping is corrupt" need opposite next moves."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", tmp_path / "nothing-here.json")
     notices = []
     monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
-
-    def boom(cmd, **kwargs):
-        raise FileNotFoundError(2, "No such file or directory", "gh")
-
-    monkeypatch.setattr(MO.subprocess, "run", boom)
     assert MO.main(["zzznosuchrepo#12"]) == 1
-    assert "gh is not on PATH" in notices[-1][1]
+    assert "has no repo mapping" in notices[-1][1]
     assert not [c for c in spy if isinstance(c, tuple) and c[0] == "pick"]
-    # 🔴 EXACTLY ONE NOTIFICATION. The refusal already names the cause, so PASS 4
-    # must not ALSO announce it on the way past — and this is the assertion that
-    # makes the `and universe` guard load-bearing rather than decorative.
-    # Measured: without it, dropping `and universe` SURVIVED the whole file.
+    # 🔴 EXACTLY ONE NOTIFICATION. The refusal already names the cause, so the
+    # universe pass must not ALSO announce something on the way past — and this
+    # is the assertion that makes the `and universe` guard load-bearing rather
+    # than decorative. Measured: without it, dropping `and universe` SURVIVED the
+    # whole file.
     assert len(notices) == 1, notices
 
 
@@ -939,23 +927,47 @@ def test_an_UNREADABLE_mapping_degrades_the_same_way(tmp_path, monkeypatch):
     monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", bad)
     monkeypatch.setattr(MO, "WORKSPACE", tmp_path / "no-such-workspace")
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
-    monkeypatch.setattr(MO, "gh_api_repo_search", lambda name: ({}, ""))
     picks, opens, notices = [], [], []
     monkeypatch.setattr(MO, "pick", lambda c: picks.append(len(c)) or "")
     monkeypatch.setattr(MO, "open_url", lambda url: opens.append(url) or 0)
     monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
     assert MO.main(["zzznosuchrepo#12"]) == 1
     assert notices[-1][0] == "cannot resolve zzznosuchrepo#12"
+    # 🔴 THE REASON DISTINGUISHES CORRUPT FROM ABSENT. Both produce `{}`, and the
+    # test above covers absent — asserting only "cannot resolve" here would pass
+    # against a handler that reported the wrong one.
+    assert "could not be read" in notices[-1][1], notices[-1]
     assert picks == [] and opens == []
 
 
 def test_no_discovery_still_means_resolve_only_what_the_TEXT_carries(spy, universe):
-    """🔴 The flag's meaning is unchanged by PASS 4. A host-wide mapping is not
-    something the clicked text carries."""
+    """🔴 The flag's meaning is unchanged by the universe pass. A host-wide
+    mapping is not something the clicked text carries."""
     assert MO.main(["--no-discovery", "zzznosuchrepo#12"]) == 1
     assert not [c for c in spy if isinstance(c, tuple) and c[0] == "pick"]
     assert [c for c in spy if isinstance(c, tuple) and c[0] == "notify"]
     assert not [c for c in spy if isinstance(c, tuple) and c[0] == "open"]
+
+
+@pytest.mark.parametrize("flag,expected", [
+    ("--no-discovery", "resolves only what the text itself carries"),
+    ("--print", "there is nobody to ask"),
+])
+def test_a_flag_that_BARS_the_picker_says_so_by_NAME(monkeypatch, universe,
+                                                     flag, expected):
+    """🔴 THE THIRD WAY THE PICKER CANNOT BE SHOWN, and it is not an empty
+    universe — the universe here is fine and non-empty. A refusal reporting "no
+    repo mapping on this host" would send the operator to run
+    `regen-known-repos.py` over a mapping that was never the problem.
+
+    Both flags are named in the body because they are the operator's own lever:
+    drop the flag and the picker appears."""
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    assert MO.main([flag, "zzznosuchrepo#12"]) == 1
+    assert expected in notices[-1][1], notices[-1]
+    assert "regen-known-repos" not in notices[-1][1], (
+        "blamed the mapping for a refusal the FLAG caused")
 
 
 def test_print_mode_never_invokes_the_picker_or_the_universe(spy, universe, capsys):
@@ -963,9 +975,11 @@ def test_print_mode_never_invokes_the_picker_or_the_universe(spy, universe, caps
     with several hundred is not an answer, and printing them would ALSO write
     private repository names to stdout."""
     assert MO.main(["--print", "zzznosuchrepo#12"]) == 1
-    assert not [c for c in spy if isinstance(c, tuple) and c[0] == "pick"]
+    assert not [c for c in spy if isinstance(c, tuple) and c[0] == "pick"], (
+        "--print raised the interactive picker")
     out = capsys.readouterr().out
-    assert "trowelcast" not in out and "spadeworks" not in out
+    assert "trowelcast" not in out and "spadeworks" not in out, (
+        "the UNIVERSE reached --print's stdout")
 
 
 def test_print_mode_still_prints_a_resolvable_url(spy, universe, capsys):
@@ -984,6 +998,86 @@ def test_a_bare_hash_N_with_NO_repo_context_offers_the_universe_BELOW_clawgate(
     assert ("pick", 4) in spy, spy
     assert spy[-1] == ("open", "https://clawgate.zacx.dev/tasks/370"), (
         "the clawgate row must still be the first, default-selected one")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SIX-DIGIT NUMBER: OFFERED, NEVER AUTO-OPENED
+#
+# `mention_scan._NUM` is `\d{1,5}` so a hex colour can never become a reference.
+# That guard is UNCHANGED and still decides what may be OPENED. What changed is
+# what may be SHOWN: the same click now opens a dismissible picker instead of a
+# toast that read like a failure. The two must stay distinguishable in the code,
+# and these tests are what keeps them so.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("text,expected", [
+    ("#282828", "282828"),                  # the hex colour that started this
+    ('background = "#282828";', "282828"),  # …as it actually arrives from a click
+    ("#7", "7"),
+    ("#1234567", "123456"),                 # bounded at 6, like the hint regex
+    ("no number here", ""),
+    ("", ""),
+])
+def test_offer_number_recovers_a_number_the_SCANNER_refused(text, expected):
+    assert MO.offer_number(text) == expected
+
+
+def test_offer_number_is_NOT_a_resolution(spy):
+    """🔴 THE DISTINCTION, ASSERTED. `offer_number` must not make the scanner
+    accept anything: `resolve()` still sees NO mention in a six-digit colour, so
+    the number cannot arrive as a span, a candidate, or an auto-open."""
+    assert MO.offer_number("#282828") == "282828"
+    assert MO.resolve("#282828") == (None, [])
+
+
+def test_a_SIX_DIGIT_number_is_OFFERED_but_NEVER_auto_opened(spy, monkeypatch):
+    """🔴 THE EXACT HAZARD `_NUM = \\d{1,5}` EXISTS FOR, on the new path. With a
+    ONE-entry universe the "exactly one candidate → just open it" shortcut is
+    live, and firing it here would open issue 282828 of an unrelated repository
+    from a click on a colour literal — a confident wrong page produced by the
+    very change meant to be friendlier.
+
+    A one-entry universe is the fixture on purpose: any larger one reaches the
+    picker through the plural branch and could not see this regression at all."""
+    monkeypatch.setattr(MO, "discover_repos",
+                        lambda *a, **k: {"spadeworks": "rivalorg/spadeworks"})
+    assert MO.main(["#282828"]) == 0
+    # 🔴 THE CLAIM IS ORDER, NOT ABSENCE. `spy`'s `pick` answers with row 0, so
+    # an `open` here is legitimate — it is what a SELECTION does. What must never
+    # happen is an open with no pick in front of it, which is the auto-open
+    # shortcut firing. Asserting "no open at all" would instead pass against a
+    # handler that had stopped working entirely.
+    kinds = [c[0] for c in spy if isinstance(c, tuple)]
+    # 🔴 THE MESSAGE IS ON THIS ASSERTION, NOT THE ORDERING ONE BELOW. When the
+    # auto-open shortcut fires there is no "pick" at all, so THIS is the line
+    # that goes red — and a mutation battery reports a kill for the wrong reason
+    # when the phrase it looks for sits on an assertion that never evaluates.
+    assert "pick" in kinds, (
+        f"a number the SCANNER REFUSED was auto-opened, bypassing the "
+        f"picker: {spy}")
+    assert kinds.index("pick") < kinds.index("open"), (
+        "a number the SCANNER REFUSED was auto-opened, bypassing the picker")
+
+
+def test_dismissing_the_SIX_DIGIT_picker_opens_nothing(spy, universe, monkeypatch):
+    monkeypatch.setattr(MO, "pick", lambda c: "")
+    assert MO.main(["#282828"]) == 0
+    assert not [c for c in spy if isinstance(c, tuple) and c[0] == "open"]
+
+
+def test_a_SELECTED_six_digit_row_opens_the_repo_the_operator_CHOSE(
+        spy, universe, monkeypatch):
+    """The other half: offering it must actually work. A picker that cannot open
+    what was selected is the refusal again, wearing a window.
+
+    `hobbyist/plotwidget` is the SECOND row of the sorted universe, not the
+    first — so a mutant that ignores the selection and takes row 0 cannot land on
+    this URL by accident."""
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c: "https://github.com/hobbyist/plotwidget/issues/282828")
+    assert MO.main(["#282828"]) == 0
+    assert spy[-1] == (
+        "open", "https://github.com/hobbyist/plotwidget/issues/282828")
 
 
 def test_a_bare_hash_N_that_the_PANE_already_attributes_does_NOT_get_the_universe(
@@ -1081,29 +1175,29 @@ def test_the_REFUSAL_path_names_the_clicked_text_and_never_the_universe(
         assert name not in everywhere, f"REFUSAL-PATH DISCLOSURE: {name}"
 
 
-def test_print_mode_prints_EVERY_namesake_rather_than_refusing_above_a_cap(
-        monkeypatch, capsys):
-    """🔴 A DECISION, RECORDED. Removing the namesake cap changed `--print` too:
-    `widget#12` with nine namesakes used to exit 1 with a named refusal and now
-    prints nine URLs and exits 0.
+def test_print_mode_REFUSES_an_unresolvable_reference_rather_than_listing_repos(
+        monkeypatch, universe, capsys):
+    """🔴 A DECISION, RECORDED, AND IT IS A BEHAVIOUR CHANGE. Deleting the
+    GitHub-wide search changed `--print` too: `dashboard#12` used to exit 0 and
+    print one URL per namesake, and now exits 1 with a named reason.
 
-    That is intended. `--print`'s documented contract is "print every candidate
-    when ambiguous", a namesake set IS that ambiguity, and every row is an
-    EXACT-name search hit — evidence about the name the operator typed. It is NOT
-    the PASS 4 universe, which is evidence about nothing and stays barred from
-    `--print` (see the test above). A consumer wanting one answer writes
-    `owner/repo#N`.
+    That is intended, and it is a correction rather than a loss. Those namesakes
+    were `vzhong/dashboard`, `yorkie-team/dashboard`, `zce/dashboard` — an exit 0
+    carrying strangers' repositories is a WRONG answer dressed as an answer, and
+    a consumer parsing it got a plausible URL into somebody else's issue tracker.
 
-    Nine, not eight: the retired cap was 8, so a fixture at or below it could not
-    tell "no cap" from "a cap nobody reached"."""
-    owners = [f"org{i}/widget" for i in range(9)]
-    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
-    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
-    monkeypatch.setattr(MO, "gh_api_repo_search",
-                        lambda name: ({o: o for o in owners}, ""))
-    assert MO.main(["--print", "widget#12"]) == 0
-    printed = capsys.readouterr().out.split()
-    assert printed == [f"https://github.com/{o}/issues/12" for o in sorted(owners)]
+    `--print` keeps its contract for real ambiguity — several candidates for a
+    reference the text or the host actually attributes still print, see
+    `test_an_ambiguous_click_prints_every_candidate`. What it will not do is ASK,
+    because it is non-interactive: the universe is a question, not an answer, and
+    printing 369 URLs is not one either. A consumer wanting one answer writes
+    `owner/repo#N`."""
+    # 🔴 THE MESSAGE IS ON THE EXIT CODE. If `--print` is allowed to offer the
+    # universe it exits 0 with URLs, so this is the line that goes red first and
+    # the stdout assertion below never runs.
+    assert MO.main(["--print", "zzznosuchrepo#12"]) == 1, (
+        "a refusal must print no URL at all — --print offered the universe")
+    assert capsys.readouterr().out == "", "a refusal must print no URL at all"
 
 
 # --------------------------------------------------------------------------- #

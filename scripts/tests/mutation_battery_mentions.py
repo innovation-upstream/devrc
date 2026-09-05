@@ -19,7 +19,9 @@ the reader cannot run is a claim, not evidence. This makes it evidence.
 The defect class it exists for is a SEAM: `mention_scan.py` decides what may be
 detected, `session-tailer.py` decides what is recorded, and `mention-open.py`
 decides what is clicked — and every round-1 survivor lived at one of those joins,
-not inside one file. So `TARGETS` names a file per mutant and
+not inside one file. A FOURTH surface, `nix/programs/alacritty/default.nix`, is
+not mutated but its suite IS collected: it decides what the terminal underlines,
+and the handler's offer bound mirrors it. So `TARGETS` names a file per mutant and
 `scripts/tests/test_mutation_battery_anchors.py` (which IS collected) reads it,
 so a row whose anchor stops occurring exactly once fails the push rather than
 scoring a silent SURVIVED for whoever next runs this by hand.
@@ -74,6 +76,14 @@ SUITES = (
     "scripts/tests/test_mention_scan.py",
     "scripts/tests/test_mention_open.py",
     "scripts/collector/claude/tests/test_session_tailer.py",
+    # 🔴 NOT A MUTATION TARGET — A SUITE, and it is here because a guard was
+    # scored KILLED-WRONG-REASON without it. The seam between the Alacritty hint
+    # regex's digit bound and the handler's `_OFFER_NUM_RE` is asserted in THIS
+    # file, so widening `_OFFER_NUM_RE` (K20) reddened only an incidental
+    # parametrized case while the test that names the hazard never ran. A battery
+    # that does not collect a guard's own suite reports on mutations that guard
+    # cannot see.
+    "scripts/tests/test_alacritty_hints.py",
 )
 
 # (id, shape, description, old, new[, expected]) — `old` must occur EXACTLY once
@@ -141,16 +151,16 @@ MUTANTS: list[tuple] = [
      "reached the CLICK surface"),
 
     # ---- F4: the disclosure guard's two blind paths -------------------------
-    ("K11", "disclosure", "the REFUSAL notify offers the universe as a hint — "
-                          "the path `--print` reaches and PASS 4 does not",
-     "        notify(f\"cannot resolve {span['raw']}\", detail)\n",
-     "        notify(f\"cannot resolve {span['raw']}\",\n"
-     '               detail + " known: " + ", ".join(repo_universe(discovered)))\n',
+    ("K11", "disclosure", "the REFUSAL path offers the universe as a hint — the "
+                          "path `--print` reaches and the picker does not",
+     "        return refuse(span, text, args)\n",
+     '        notify("cannot resolve it", ", ".join(repo_universe(discovered)))\n'
+     "        return refuse(span, text, args)\n",
      "REFUSAL-PATH DISCLOSURE"),
     ("K12", "disclosure", "the picker path logs the universe to stdout",
-     "            candidates = universe\n",
-     '            print("universe:", repo_universe(discovered))\n'
-     "            candidates = universe\n",
+     "        candidates = universe\n",
+     '        print("universe:", repo_universe(discovered))\n'
+     "        candidates = universe\n",
      "PICKER-PATH DISCLOSURE"),
     ("K13", "disclosure", "the emit line ships the WHOLE mapping beside the one "
                           "repo the mention was attributed to",
@@ -188,6 +198,60 @@ MUTANTS: list[tuple] = [
      'TASK_ANCHOR_RE = re.compile(rf"(?<![&#])#task-(?P<num>{_NUM})" + _NUM_END)\n',
      'TASK_ANCHOR_RE = re.compile(rf"#task-(?P<num>{_NUM})" + _NUM_END)\n',
      "the legacy-anchor left guard is gone"),
+
+    # ---- F5: the click path must make NO NETWORK CALL ----------------------
+    #
+    # 🔴 The rows below exist because a GitHub-WIDE namesake search used to live
+    # in this handler and cost 4.3s per click, answering with strangers' repos.
+    # It is deleted; these are what stop it — or any replacement — coming back.
+    ("K17", "widening", "a network call is re-added to the resolution path: the "
+                        "deleted GitHub-wide namesake search, verbatim",
+     "        discovered = discover_repos()\n",
+     '        subprocess.run(["gh", "api", "search/repositories", "--method",\n'
+     '                        "GET", "-f", "q=x in:name"],\n'
+     "                       capture_output=True, text=True, timeout=5)\n"
+     "        discovered = discover_repos()\n",
+     "the resolution path's command ledger MOVED"),
+    ("K18", "widening", "the same call wearing a DIFFERENT name, which a ban on "
+                        "the word `gh` alone would not see",
+     "    discovered: dict = {}\n",
+     "    discovered: dict = {}\n"
+     '    subprocess.run(["git", "ls-remote", "https://github.com/x/y"],\n'
+     "                   capture_output=True, text=True, timeout=5)\n",
+     "the resolution path's command ledger MOVED"),
+
+    # ---- F6: OFFERED is not RESOLVED ---------------------------------------
+    ("K19", "deletion", "a universe row becomes auto-openable again, so a click "
+                        "on a hex colour opens an unrelated repo's issue",
+     "        offered_universe = True\n", "        offered_universe = False\n",
+     "bypassing the picker"),
+    ("K20", "widening", "`_OFFER_NUM_RE` loses its bound and drifts away from "
+                        "the Alacritty hint regex it mirrors",
+     '_OFFER_NUM_RE = re.compile(r"#(?P<num>[0-9]{1,6})")\n',
+     '_OFFER_NUM_RE = re.compile(r"#(?P<num>[0-9]{1,9})")\n',
+     "the handler offers up to"),
+    ("K21", "deletion", "the `span is None` arm of the measurement pass is "
+                        "reverted, so a six-digit click dead-ends again",
+     '    unresolved = span is None or span["ambiguous"] or not candidates\n',
+     '    unresolved = span is not None and (span["ambiguous"] or not candidates)\n',
+     "DEAD-ENDED instead of offering the picker"),
+    ("K22", "deletion", "`--print` is allowed to offer the universe, so a "
+                        "non-interactive consumer is answered with a question — "
+                        "and private repo names reach stdout",
+     "    may_offer_universe = not args.print_only and not args.no_discovery\n",
+     "    may_offer_universe = not args.no_discovery\n",
+     "a refusal must print no URL at all"),
+
+    # ---- F7: the refusal must say WHICH empty it is ------------------------
+    ("K23", "deletion", "`universe_reason` stops distinguishing a mapping that "
+                        "PARSED but holds nothing usable from one that is fine",
+     "    if not clean_repo_map(raw):\n", "    if False:\n",
+     "no usable rows"),
+    ("K24", "operand swap", "the refusal SUBSTITUTES the cause for the advice — "
+                            "exactly the regression that happened once before",
+     '    notify(f"cannot resolve {subject}", f"{why} — {advice}")\n',
+     '    notify(f"cannot resolve {subject}", why)\n',
+     "the actionable advice was dropped"),
 ]
 
 TARGETS: dict[str, pathlib.Path] = {
@@ -197,6 +261,8 @@ TARGETS: dict[str, pathlib.Path] = {
     "K7": SCAN, "K8": SCAN, "K9": SCAN, "K10": OPEN_,
     "K11": OPEN_, "K12": OPEN_, "K13": TAILER, "K14": TAILER,
     "K15": SCAN, "K16": SCAN,
+    "K17": OPEN_, "K18": OPEN_, "K19": OPEN_, "K20": OPEN_,
+    "K21": OPEN_, "K22": OPEN_, "K23": OPEN_, "K24": OPEN_,
 }
 
 
