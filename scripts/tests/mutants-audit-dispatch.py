@@ -127,7 +127,11 @@ HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # 🔴 ROUND 16 RAISED IT AGAIN, 116 -> 120, at m = 126 — COUNTED from a green run
 # of the module (`126 passed`), `126 - min(50, max(1, 126 // 20))` = 126 - 6 =
 # 120, not derived by adding this round's four new tests to 116.
-MIN_TESTS = 120
+#
+# 🔴 ROUND 18 RAISED IT AGAIN, 120 -> 122, at m = 128 — COUNTED from a green run
+# of the module (`128 passed`), `128 - min(50, max(1, 128 // 20))` = 128 - 6 =
+# 122, not derived by adding this round's one new test to 120.
+MIN_TESTS = 122
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised

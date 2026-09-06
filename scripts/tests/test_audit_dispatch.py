@@ -9038,7 +9038,9 @@ FIX_MATRIX = (
 # rows to 77 — rounds 11-14 also added some), and 93 - max(1, 93 // 20) = 89.
 # Round 16: m = 99 (printed from an import again, NOT 93 plus this round's six),
 # and 99 - min(50, max(1, 99 // 20)) = 99 - 4 = 95.
-MIN_FIX_MATRIX_ROWS = 95
+# Round 18: m = 104 (printed from an import, NOT 99 plus this round's four),
+# and 104 - min(50, max(1, 104 // 20)) = 104 - 5 = 99.
+MIN_FIX_MATRIX_ROWS = 99
 
 # 🔴 THE MUTANTS COLUMN IS AN EVIDENCE CLAIM, AND IT WAS UNGRADED.
 # `fix_matrix_problems` took `_mutants` and threw it away, so rewriting a
