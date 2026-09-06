@@ -9,81 +9,73 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-🔴 **RANK 32 IS BUILT, GATED, AUDITED — AND STILL NOT DEPLOYED. MEASURED, BOTH
-HOSTS: `systemctl --user is-active tmux-reply-agent` → `inactive` / `inactive`.**
-The flag as DEPLOYED is still `false` (`~/workspace/devrc/nix/home.nix:170`); the
-`true` exists only on a branch. A reply typed in the web UI today still queues and
-is never executed. That is the single fact that decides what the next session does.
+🔴 **STILL NOT DEPLOYED. MEASURED, BOTH HOSTS: `systemctl --user is-active
+tmux-reply-agent` → `inactive` / `inactive`.** The deployed flag is still `false`
+(`~/workspace/devrc/nix/home.nix:170`). A reply typed in the web UI queues and is
+never executed. Rank 32 is NOT closed. That is the single fact that decides what
+the next session does.
 
-**IN FLIGHT — two open PRs, neither merged:**
+**IN FLIGHT — `innovation-upstream/devrc#1334`, head `3d470502`, branch
+`feat/arm-tmux-reply-agent`, worktree `/home/zach/workspace/devrc-rank32`.**
+`#1333` (the handoff doc) is open and docs-only. Claim `tmux-webapp-32` is HELD —
+release it when this lands or is abandoned.
 
-| PR | what | head |
-|---|---|---|
-| `innovation-upstream/devrc#1334` | rank 32 — the arming line + 4 audit-round fixes | `cc25c0fe` |
-| `innovation-upstream/devrc#1333` | the handoff doc (docs-only, mergeable now) | — |
+**The operator has authorised: merge both PRs, ship, verify.** The only thing
+holding the merge is a green gate on the merged tree.
 
-Claim `tmux-webapp-32` is HELD. Worktree `/home/zach/workspace/devrc-rank32`.
-PR body draft: `<scratchpad>/pr32.md`. Mutation battery: `<scratchpad>/mut32.sh`.
+**Gate status at write time — 1 of 4 legs green on head `3d470502` (base
+`580b4848`):** tier-1 pytest ✅ **21,936 / 21,939, 0 failed**. tier-1 node and
+both sandbox derivations NOT yet run on this tree. Drift since that leg started
+is exactly ONE file — `claudedocs/handoff-cairn-oss-multi-instance.md` — which
+cannot reach any of this PR's four files, so option (b) below applies and should
+be stated in the merge claim rather than silently relied on.
 
-**Gate — all four legs green on the merged tree at base `43f86a14`**, each read
-from the runner's own `RESULT:` line, sandbox derivations built ONE AT A TIME,
-zero `database is locked` / `is busy` in either log:
+### 🔴 THE GATE IS ON A TREADMILL AND THIS IS THE REAL BLOCKER
 
-| tier | leg | verdict |
-|---|---|---|
-| 1 | `run-tests.sh` | ✅ 21,867 / 21,870, 0 failed |
-| 1 | `run-node-tests.sh` | ✅ 1,449 / 1,449 |
-| 2 | `checks…pytests` | ✅ 21,867 / 21,870, 0 failed |
-| 2 | `checks…nodetests` | ✅ 1,449 / 1,449 |
+`main` moved **8 times** during this work: `f0b9c474 → c5a445d8 → 88f1bda4 →
+c25ef63c → 43f86a14 → f58d2df0 → 3ef2134b → 580b4848 → 527b51ef`. A full
+four-leg gate (tier-1 pytest ~20 min, tier-1 node, then the two sandbox
+derivations **one at a time**) takes over an hour. **`main` moves faster than the
+gate runs**, so every completed run is already against a superseded base.
 
-🔴 **THREE FOUR-LEG GREENS EXIST, AT THREE DIFFERENT BASES (`f0b9c474`,
-`88f1bda4`, `c25ef63c`), AND ONLY THE NEWEST IS EVIDENCE.** `main` moved four
-times during this work. Each superseded run was real; each was against a tree
-without the later audit fixes. Re-gate on whatever `main` is when you resume —
-do not quote a number from this table without re-checking the base.
+Five separate four-leg greens were produced during this session, at five
+different bases. Each was real; none is evidence for the current head. **Do not
+quote a gate number from this doc — re-measure, and name the base in the claim.**
 
-**The audit ladder — 4 rounds, and EVERY round found its headline defect in the
-PREVIOUS round's corrective prose.** That pattern is the story of this PR:
+🔴 **Do not solve this by gating a stale base and merging anyway.** The practical
+options, in preference order: (a) merge promptly after a green rather than
+re-anchoring first — the window is the problem, not the base; (b) accept a base
+one or two commits behind when the intervening commits provably cannot reach the
+diff (`git diff --name-only <base>..origin/main` disjoint from the PR's four
+files) and SAY SO in the merge claim; (c) ask the operator for a quiet window.
+Option (b) is the honest one but **"disjoint files are not safety"** — state it
+as the bounded claim it is.
 
-| round | headline |
+### What is DONE and verified
+
+| | |
 |---|---|
-| 1 | the arming commit's rollback sentence was FALSE — flipping the flag RESTARTS a running agent (`sd-switch` plans Stop/Start), it does not stop it |
-| 2 | round 1's *retraction* was false, and round 1's own fix caused it: a disarm example written into nix comments made a `str.replace` match a comment, recreating the vacuous green the retraction denied. Separately, round 1's ledger entry named a compensating control that did not exist — measurably blinding the guard it was filed under |
-| 3 | round 2's new AST pin was NARROWER than its own docstring: aliased imports and `os.posix_spawn` walked past it (4 measured survivors) |
-| 4 | in flight at write time |
+| the arming change | `enableTmuxReplyAgent = true`, plus the three guards that pinned the disabled state, flipped rather than deleted |
+| flag drives the install | MEASURED as a PAIR: `false` → `WantedBy = []`, `true` → `["default.target"]` |
+| disarm is TWO steps | `sd-switch --dry-run` on a RUNNING unit, both controls behaving: identical ⇒ `No action`, deleted ⇒ `Stop`, `[Install]` removed ⇒ **`Stop/Start`**. Flag+ship does NOT stop a running agent; follow with `systemctl --user stop tmux-reply-agent` on BOTH hosts |
+| audit ladder | **4 rounds, CLOSED on the attribution gate** (3 consecutive rounds changed 0 payload lines), not on a clean round |
+| the `out.strip()` defect | **FIXED** — see the resolved investigation below |
+| narrow audit of the fix | run; its one blocking finding fixed and mutation-verified |
 
-🔴 **NOT DONE, named rather than left implicit:**
-- **Nothing is merged and nothing is shipped.** No host has the change.
-- **Rank 33 is entirely untouched** and is the closing condition for the whole
-  effort. It needs the operator: it sends real keystrokes into real panes.
+### 🔴 NOT DONE
+
+- **Nothing merged, nothing shipped, no host has the change.**
+- **Rank 33 untouched** — the closing condition for the whole effort, and it needs
+  the operator: it puts real keystrokes into real panes.
 - **Rank 34 untouched** — the two residuals the audit ACCEPTED are now live.
-- The rank-32 closing condition is `is-active` = `active` on **BOTH** hosts,
-  which needs `scripts/ship.sh` after merge — **read every per-host line, never
-  the final verdict**.
+- No `clawgate-task:` field: `clawgate_handoff.sh resolve` exits **5** with its
+  positive control confirming the board answers for a different session. That is
+  an unresolvable read, **not** a clean bill of health.
 
-**MEASURED — the flag drives the install, as a PAIR rather than one reading:**
+### The SERVER half — unchanged by any of this, carried forward
 
-| tree | flag | `Install.WantedBy` |
-|---|---|---|
-| base clone `~/workspace/devrc` | `false` | `[]` |
-| the rank-32 branch | `true` | `["default.target"]` |
-
-Both from `nix eval` against the real flake. The negative half is what makes the
-positive half mean anything.
-
-🔴 **BUT THE FLAG IS NOT A LIVE KILL SWITCH — DISARMING IS TWO STEPS.** Flipping
-it `false` and shipping does NOT stop a RUNNING agent: the unit definition is
-emitted unconditionally, so the flag only drops `[Install]`, and `sd-switch`
-reads a CHANGED unit and plans **Stop/Start**. MEASURED with
-`sd-switch 0.6.4 --dry-run` against a RUNNING unit, both controls behaving —
-identical generations ⇒ `No action`; unit deleted ⇒ `Stop`; `[Install]` removed
-⇒ `Stop/Start`. So: flag false, merge, `ship.sh`, **then
-`systemctl --user stop tmux-reply-agent` on BOTH hosts.** Removing the pod's
-`CLAWGATE_TERMINAL_TOKEN` is the other lever — fleet-wide, but it takes effect on
-the pod's NEXT BOOT, not instantly.
-
-**The SERVER half, unchanged by any of this — all four PRs merged, each verified
-BY CONTENT on its mainline (never by ancestry — a squash is never an ancestor):**
+All four PRs merged, each verified BY CONTENT on its mainline (never by ancestry
+— a squash is never an ancestor):
 
 | PR | what | squash |
 |---|---|---|
@@ -94,13 +86,13 @@ BY CONTENT on its mainline (never by ancestry — a squash is never an ancestor)
 
 **Deployed and armed on the SERVER:** `0.8.26`, pin bumped in `92f591b4c`, armed
 in `2663d7265`. Both hosts hold `CLAWGATE_TERMINAL_TOKEN` in
-`~/.claude/clawgate.env` at mode 0600. Every tier was probed live including the
+`~/.claude/clawgate.env` at mode 0600. Every tier probed live including the
 refusals — `401` no credential, `401` wrong credential, `401` hook token (the two
 secrets are genuinely separate), `403` cross-site `Origin`, `403` unexpected
-`Host`, and `400` on expected host with an empty body. That trailing 400 is the
-control: a server refusing everything would also have produced five refusals.
+`Host`, `400` expected host with empty body. The trailing 400 is the control: a
+server refusing everything would also have produced five refusals.
 
-**Carried forward — still true, and not restated elsewhere:**
+**Still true, and not restated elsewhere:**
 - 🔴 **RANK 8a IS RECURRING, NOT CLOSED.** Nothing converges `homelab-talos`, so both hosts'
   `clawgatectl` can drift from the server. **Re-run the cross-host round trip** (`view create` on the
   laptop → `view ls` on the workbench → `view rm`, watching a number MOVE); a matching version label
@@ -112,12 +104,18 @@ control: a server refusing everything would also have produced five refusals.
 - 🔴 **NEVER READ A VERSION FROM THIS DOC** — `clawgatectl health` is the only authority. The number
   moved under this doc on three consecutive sessions before, every time shipped by somebody else.
 
-🔴 **No `clawgate-task:` field is recorded, and that is NOT a clean bill of
-health.** `clawgate_handoff.sh resolve` exits **5** — 0 tasks for this session,
-with its positive control confirming the board answered 5 links for a DIFFERENT
-session. So the board is reachable and the token accepted, but a wrong session id
-also answers 200 with an empty array; this cannot distinguish "touched no task"
-from "wrong id".
+### The sequence the next session should execute
+
+1. Re-gate on current `main` — all four legs, sandbox derivations **one at a time**.
+2. Merge `#1334`. Verify by **CONTENT** on `origin/main`, never by ancestry — a
+   squash is never an ancestor.
+3. Merge `#1333`.
+4. `git -C ~/workspace/devrc pull`, then `scripts/ship.sh` — **read every
+   per-host line, never the final verdict**; one skip hides among greens.
+5. `systemctl --user is-active tmux-reply-agent` on workbench AND laptop. **Both
+   must read `active`.** Merged ≠ deployed here: `git pull` changes nothing
+   home-manager owns.
+6. `claim-work --release tmux-webapp-32`.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -1562,6 +1560,74 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
   accept it explicitly for this unit, or point `ExecStart` at the store copy and
   confirm the agent still resolves its text policy.
 
+### ✅ RESOLVED — `open_window`'s read-back rejected a window it had already created
+
+Fixed in `e6770754` (parse) + `17ec867f` (the guard for it). Kept because the
+mechanism is worth not re-deriving.
+
+- **Observed (with values):** `NEW_WINDOW_FORMAT` is
+  `#{pane_id}\t#{session_name}\t#{pane_current_path}`; the read-back did
+  `out.strip().splitlines()[0].split("\t")`. `.strip()` removes a TRAILING TAB, so
+  a well-formed 3-field line with an empty last field became 2 fields and failed
+  the length check — rejecting a window tmux had already created, leaving a stray
+  window, and a retry would create a second. `'%2\tscratch20\t'.strip()` is
+  byte-identical to the observed failure string `'%2\tscratch20'`.
+- **Ruled out — load flake:** wall times of failing and control runs within 0.5 s;
+  other tests in the same run did not move. `via: measurement`
+- **Ruled out — caused by the arming change:** reproduced on an unmutated tree;
+  `scripts/tmux-reply-agent` had zero changed lines in the audit ranges. `via: measurement`
+- **Ruled out — tmux genuinely emitting two fields:** the trigger was FORCED —
+  11 empty third fields in ~310 warm-server `new-window` creations (~3.6%), 0 in
+  60 cold-server creations, and in 11/11 the immediate `display-message -p -t
+  <pane>` re-read returned the correct path. `via: measurement`
+- 🔴 **The second bug, which the first was hiding:** with the fields split
+  correctly `landed_path` is `""`, and `same_directory("", cwd)` does NOT compare
+  empty against cwd — `os.path.realpath("")` returns the AGENT'S OWN cwd
+  (verified), and the unit runs `WorkingDirectory=~`. "Not readable yet" and
+  "tmux fell back to the wrong directory" were sharing a code path.
+- **Fix:** split the line before stripping; re-read an empty path for that pane;
+  refuse if the re-read is also empty. Both halves pinned; the two previously
+  flaky real-tmux tests then ran **20/20 clean**.
+- **Residual, NOT fixed:** no refusal path kills the window it created (true of
+  the session-mismatch and directory-mismatch branches before this PR too), and
+  these branches report `state="failed"`, not `"refused"` — an audit query on
+  `state='refused'` will not see them.
+
+### `test_readiness_reopens_on_transient_tab_gone` hangs intermittently in the full-suite run
+
+- **Symptom + exact repro:** during `scripts/run-tests.sh` on the merged tree,
+  `scripts/browser-bridge/tests` reported `914 passed / 1 failed` with
+  `subprocess.TimeoutExpired: Command '[…/scripts/browser-bridge/browser-agent',
+  'read the page']' timed out after 60.0 seconds`.
+- **Observed (with values):** the test's own message says *"Spawning 10 trivial
+  processes on this machine just now took 0.24s (idle reference 0.10s; stall
+  threshold 0.80s), so the MACHINE is not the explanation and the wrapper
+  genuinely hung"*. ⚠ That control measures **process-spawn latency only** — not
+  lock contention and not I/O — so it does not exonerate a loaded box the way it
+  reads. At the time, four other sessions were running
+  `nix build …checks…pytests` concurrently, load ~36 on 24 cores, 45 GiB swap in use.
+- **Ruled out — caused by this PR:** the diff touches four files
+  (`nix/home.nix`, `scripts/tmux-reply-agent`, and two test files) and **zero**
+  browser-bridge lines; `git diff --stat origin/main...HEAD -- scripts/browser-bridge/`
+  is empty. `via: measurement`
+- **Ruled out — a deterministic break on this tree:** the same test at
+  `origin/main` passed 1/1 in 1.94 s, and on the PR branch in isolation **5/5**.
+  `via: command`
+- **Leading hypothesis:** a load-sensitive hang in `browser-agent`'s startup path.
+  A branch named `fix/browser-agent-warm-lock-stall` already exists in this repo,
+  so the class is known and owned elsewhere.
+- **Next probe:** if it recurs in the gate, run
+  `nix develop <repo> -c python3 -m pytest <repo>/scripts/browser-bridge/tests/ -k readiness -q`
+  under deliberate load and capture the wrapper state dir the failure names
+  (`…/popen-gw*/test_readiness_reopens_on_tran0/scratch`) rather than re-running.
+- 🔴 **Do NOT merge past a SECOND occurrence.** One red plus these controls is a
+  flake outside the diff; twice is a blocker, even outside the diff — a gate you
+  re-roll until green is not a gate.
+- **Re-run result:** on the next full tier-1 run (head `3d470502`) this test
+  PASSED and the suite was `21,936 / 21,939, 0 failed`. So: one hang, one clean
+  full run, 5/5 isolated on the branch, 1/1 at `origin/main`. Consistent with the
+  load-hang hypothesis; NOT a second occurrence.
+
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
   is a statement about the OLD leg.** A PipelineRun executes the **deployed Task object in the
@@ -2737,6 +2803,41 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
   it at one site makes two sites disagree.** A prose-mention tally was corrected
   in one dict entry and left stale in another entry of the SAME dict. The fix is
   to remove the running total, not to renumber a third time.
+
+- 🔴 **2026-09-06 — A GUARD CAN BE WALKED BY ITS OWN NEIGHBOUR'S ERROR MESSAGE.**
+  `test_an_UNREADABLE_pane_current_path_still_REFUSES` asserted `"directory" in
+  err.lower()`. That word appears in the refusal AND in the `same_directory`
+  MISMATCH message four lines below it, so **deleting the refusal branch outright
+  left the test green** — the fallthrough supplied a message containing the word.
+  ⚠ Worse, the mutant's verdict depended on an UNPINNED dimension: it died when
+  pytest ran from `/home/zach` and survived from `/tmp` or the repo root, and the
+  gate runs from the repo root. Pin the WHOLE normalised string, and assert the
+  neighbour's distinctive phrase is ABSENT.
+- 🔴 **2026-09-06 — THE ATTRIBUTION GATE IS WHAT ENDS AN AUDIT LADDER THAT KEEPS
+  FINDING REAL THINGS.** Four rounds, every headline a defect in the PREVIOUS
+  round's corrective prose. Rounds 2–4 each changed **0 payload lines**; the
+  findings were all in guards the ladder itself had just written. Round 5 would
+  have audited round 4's fix to round 3's fix. Measure
+  `git log --numstat --format= --remerge-diff <audited>..HEAD --not <base>` and
+  stop on two consecutive zero-payload rounds — do not stop on "safe to merge",
+  and do not keep going on "it keeps finding things".
+- 🔴 **2026-09-06 — A MUTATION BATTERY WHOSE SCRATCH ROOT DOES NOT EXIST SCORES
+  EVERY MUTANT "KILLED".** Measured: `$B` was never created, every `cp -a` failed,
+  pytest ran against nonexistent paths, and four known survivors "became" zero —
+  the exact shape of a working fix. The **negative control was also KILLED**, and
+  that was the only tell. Assert the copy exists, assert the file under test
+  exists, and require a real verdict line before scoring any mutant.
+- 🔴 **2026-09-06 — `scripts/tests/test_tmux_reply_agent.py` IS NOW ADVERSARIAL TO
+  NAIVE OUTPUT PARSING.** Its prose contains the literal string `1 passed` (in a
+  comment documenting a finding), and pytest ECHOES test source on failure — so a
+  battery that substring-matches `"1 passed"` scores a FAILING run as PASSED. An
+  auditor hit this mid-run and had to discard a pass. Anchor on
+  `^1 (passed|failed)` and use `--tb=no`.
+- ⚠ **2026-09-06 — a test's own load control can exonerate a machine it did not
+  measure.** browser-bridge's hang-net reports process-spawn latency and concludes
+  "the MACHINE is not the explanation". Spawn latency is not lock contention and
+  not I/O; on a box running four concurrent nix check derivations that conclusion
+  is not supported by what it measured.
 
 ## How to verify
 
