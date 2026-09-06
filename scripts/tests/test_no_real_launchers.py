@@ -1526,6 +1526,23 @@ PINNED_PATH_CLOBBERS = {
         'e["PATH"]' + ' = str(tmp_path / "empty-bin")',
         "an empty directory in tmp_path — the point of the test is that "
         "logrotate is absent; nothing else is present either"),
+    "test_i3_game_mode.py": (
+        'PATH' + '=str(REPO / "scripts" / "tests" / "no-such-bin-dir")',
+        "justified by NON-EXISTENCE, which is strictly stronger than the "
+        "emptiness cases above: the replacement directory is not created by "
+        "the test and is not in the tree, so it holds no binaries because it "
+        "holds nothing, and no HAZARD_VOCABULARY name — i3-msg least of all — "
+        "is reachable through it. 🔴 REPLACING is required to reach the case "
+        "at all. The two tests using it exercise the game-mode block's "
+        "documented fail-safe (`i3-msg` unreachable -> empty pill, exit 0, and "
+        "for `--toggle` NO stdout at all), and i3-msg is installed on the dev "
+        "host — this very workbench is running i3 — so no amount of PREPENDING "
+        "can make it unfindable, and a prepending version would query the LIVE "
+        "window manager and measure whatever mode the operator happens to be "
+        "in. Both call sites go through ONE helper, `_env_with_no_i3`, so this "
+        "single needle covers every site rather than pinning whichever the "
+        "scan reaches first. `sys.executable` is absolute, so the interpreter "
+        "still resolves with PATH gone"),
     "test_standup_local_health.py": (
         'env["PATH"]' + ' = str(self._restricted_bin())',
         "the FIRST pinned clobber whose replacement directory is not empty, so "
