@@ -53,17 +53,27 @@ diagnosis in progress.)
 1. **Exercise the real Alacritty click path** — STILL the one thing never done end-to-end,
    and now more valuable than before because #1313 changed it. Plain left-click (the hint is
    `mouse.enabled = true` with no mods; `Ctrl+Shift+M` is the keyboard route):
-   `talos-infra#1065` (opens), `dashboard#12` (rofi picker), `#282828` (underlines, opens
-   nothing). 🔴 **The widest-blast-radius change to check deliberately:** a bare `#N` clicked
+   `talos-infra#1065` (opens), `dashboard#12` (rofi picker, now with an explanatory line
+   above the list naming the clicked text, the row count and the mapping's age), `#282828`
+   (underlines; since #1328 it opens NO picker and shows a named toast saying it looks like a
+   colour literal). 🔴 **The widest-blast-radius change to check deliberately:** a bare `#N` clicked
    in a pane with NO resolvable repo now shows a ~370-row fuzzy picker with the clawgate task
    first, where it previously opened the clawgate task directly. Type to narrow. If that is
    wrong in practice it is a one-line ordering change.
    🔴 NEEDS A HUMAN — clicking raises windows, a `pkill`-class action for an agent.
    forcing: none
-2. **Add a staleness signal for `~/.config/mention-open/known_repos.json`** (devrc;
-   `scripts/regen-known-repos.py` + a test, or a systemd-user timer in `nix/home.nix`).
-   Re-measured 2026-09-04: still zero timers reference it (`present-regen.timer` belongs to
-   the `present` skill and is unrelated). Degrades to the API fallback rather than breaking.
+2. ~~**Add a staleness signal for `~/.config/mention-open/known_repos.json`**~~ — **DONE** in
+   PR #1328. `mention-open.py` now measures the mapping's age (`mapping_age_days`) and
+   surfaces it in BOTH places the operator can see it: the note above the fuzzy picker
+   (`universe_note`) and the refusal body (`staleness_note`, past `STALE_MAPPING_DAYS = 7`).
+   🔴 **A SIGNAL, NOT A REPAIR, AND THAT WAS THE CHOICE.** A systemd-user timer was the other
+   option and was rejected: `regen-known-repos.py` shells out to `gh api user/repos` and
+   REFUSES below its 25-repo floor with exit 3, so a host without `gh auth` would take a
+   failing unit plus a failure toast on every fire — a permanently-red timer, which trains
+   everyone to ignore it. The signal instead fires at the exact moment the staleness bites:
+   the click that did not resolve. Re-measured 2026-09-05: still zero timers reference the
+   generator. Pinned at four ages (0, 6, 8, 90 days) by `test_the_mapping_age_is_measured_at_
+   FOUR_points`, and mutation-verified (K32).
    forcing: none
 3. **Commit the workbench's `save_to_clipboard` WIP** in
    `nix/programs/alacritty/default.nix`. Now the ONLY substantive difference between the two
@@ -89,9 +99,9 @@ diagnosis in progress.)
 
 ## Gotchas / decisions / dead-ends
 - `--no-discovery` flag intentionally skips the static mapping (Pass 2 only). This is by design: the flag means "resolve only what the text itself carries."
-- `clawgate#50` does NOT resolve — `clawgate` is a container inside `homelab-talos`, not a standalone GitHub repo. The `GITHUB_RE` scanner treats it as a repo name, finds no match, and the API fallback also finds nothing. This is correct behavior.
+- `clawgate#50` does NOT auto-resolve — `clawgate` is a container inside `homelab-talos`, not a standalone GitHub repo. The `GITHUB_RE` scanner treats it as a repo name and finds no match. Since #1328 that is not a refusal: it opens the fuzzy repo picker over the local universe, with a note above the list naming the clicked text.
 - Case normalization was necessary: GitHub repo names are case-insensitive (`ComfyUI` vs `comfyui`), so all keys in `KNOWN_REPOS` are lowercased. Local checkout overlays also add lowercase entries.
-- The API fallback (`_gh_api_repo_search`) only fires for explicit `repo#N`, not bare `#N`. A bare `#N` needs context (tmux pane) to know which repo, and the API can't provide that.
+- 🔴 **THE API FALLBACK IS DELETED — do not reason from it.** `_gh_api_repo_search` / `gh api search/repositories` was removed in PR #1328: measured at **4.3s through `--print` and ~10s through the real hint path**, essentially all network wait, answering `dashboard#12` with strangers' repositories. `mention-open.py`'s docstring carries the full record. THE CLICK PATH NOW MAKES NO NETWORK CALL, pinned by a two-way ledger of every command the resolution path may spawn (`test_the_resolution_path_spawns_ONLY_these_local_commands`) — keyed on the VERB PATH, `("git", "remote", "get-url")`, because a two-word key admitted `git remote update`, which fetches.
 - `known_repos.py` does NOT need nix deployment — `session-tailer.py` (the telemetry consumer) calls `scan_mention_spans(text)` without repos (detection only, no resolution), so it doesn't need the mapping.
 
 - 🔴 **`gh api user/repos` RETURNS PRIVATE REPOS.** That one fact is the whole incident: a
@@ -153,12 +163,16 @@ diagnosis in progress.)
   a mutation test that removes a hint literal and watches a reachability test go red.
 - 🔴 **A git-sha pattern is catastrophic and was rejected outright** — a `[0-9a-f]{7,12}`
   probe returned **520,256** hits. Recorded so nobody re-proposes it.
-- **The click path has THREE distinct dead-ends, not one** (`mention-open.py` ~lines 430-465),
-  and decision 4 lands on each differently: (a) `len(matches) > PASS3_MAX_CHOICES` (8) refuses
-  outright — its comment argues "a 100-row list is not a choice, it is a wall", which is
-  exactly what fuzzy typing dissolves, so the cap moves AND that comment must move with it;
-  (b) search ran, found nothing — fuzzy over the ~370-entry universe rescues typos;
-  (c) bare `#N` with no `default_repo`.
+- ~~**The click path has THREE distinct dead-ends**~~ — **ALL THREE CLOSED in #1328, and the
+  furniture this bullet described is GONE.** `PASS3_MAX_CHOICES` (the cap of 8) no longer
+  exists: `pick()` runs rofi with `-matching fuzzy`, which turns the wall into a narrowing,
+  and the comment arguing for the cap was replaced by one forbidding its return. The
+  namesake SEARCH no longer exists either (see the API-fallback bullet above), so "search
+  ran, found nothing" is not a state. What remains: (a) an unresolvable `repo#N` → the fuzzy
+  universe picker with an explanatory note; (b) a bare `#N` with no `default_repo` → clawgate
+  FIRST with the universe appended below it; (c) a SIX-DIGIT `#N` → a named toast, not a
+  picker, because on this host six digits is always a colour literal and every offered row
+  would 404.
 - 🔴 **The fuzzy universe is `known_repos.json` — THE FILE FROM THE #1283 DISCLOSURE.** It
   holds private repo names. Displaying them in rofi on the operator's own screen is fine;
   they must never reach a log, a test fixture, an `activity.events` payload or a debug dump,
@@ -223,16 +237,26 @@ diagnosis in progress.)
   failing when a NEW private name appears; that churns nothing and closes the actual hazard,
   which is the next bulk dump rather than the names already present. ⚠ The scan's positive
   control held (private list non-empty, 233/149); its negative control was near-vacuous.
-- **`--print` above the retired namesake cap now prints every namesake and exits 0** where it
-  used to refuse — declared intended, argued in code and body, pinned at nine rows. Nothing
-  in the repo consumes `--print`.
+- 🔴 **`--print` NOW REFUSES an unresolvable reference, and that reverses the line this bullet
+  used to carry.** It read "`--print` above the retired namesake cap now prints every namesake
+  and exits 0"; #1328 deleted the namesake search, so there are no namesakes to print.
+  `--print dashboard#12` exits 1 with a named reason instead of exit 0 carrying strangers'
+  repository URLs — a wrong answer dressed as an answer. `--print` never offers the picker
+  (it is non-interactive, and printing several hundred private repo names to stdout would be
+  a disclosure), and its refusal now names BOTH causes: the flag AND the mapping's state,
+  because only the second is actionable. `--print` still prints every candidate for real
+  ambiguity. Nothing in the repo consumes `--print`.
 
 ## How to verify
 ```bash
 # The 2026-09-03 resolver work, on the deployed artifact (not a checkout)
 python3 ~/workspace/devrc/scripts/mention-open.py --print 'talos-infra#1065'   # civitai/talos-infra
-python3 ~/workspace/devrc/scripts/mention-open.py --print 'kubernetes#1'       # refuses: "at least N repositories are named"
-python3 ~/workspace/devrc/scripts/mention-open.py --print 'zzz-no-such-repo#1' # refuses, names the reason
+# 🔴 Since #1328 there is no namesake search, so an unresolvable name REFUSES (exit 1) and
+# names BOTH causes — the flag, and the mapping's state — rather than printing candidates.
+python3 ~/workspace/devrc/scripts/mention-open.py --print 'kubernetes#1'       # exit 1, named reason
+python3 ~/workspace/devrc/scripts/mention-open.py --print 'zzz-no-such-repo#1' # exit 1, named reason
+# The six-digit branch: a colour literal is answered, not asked about (exit 1, named toast).
+python3 ~/workspace/devrc/scripts/mention-open.py '#282828'
 
 # The premise correction — this MUST resolve, it is not a gap
 python3 ~/workspace/devrc/scripts/mention-open.py --print 'innovation-upstream/devrc#1291'

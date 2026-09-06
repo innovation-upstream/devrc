@@ -382,6 +382,48 @@ def test_the_mention_hint_swallows_a_six_digit_colour_whole(mention_hint):
     assert m and m.group(0) == "#282828"
 
 
+def test_the_handlers_OFFER_bound_matches_the_hints_own(mention_hint):
+    """🔴 A SEAM BETWEEN TWO FILES, OWNED BY NEITHER.
+
+    The hint decides what the terminal UNDERLINES; `mention-open.py`'s
+    `_OFFER_NUM_RE` decides what a dismissible picker may OFFER for text the
+    strict scanner refused. Those are two spellings of one fact — "how many
+    digits can arrive from a click" — and they live in different files, in
+    different languages, tested by different suites. Each is hermetically green
+    while they disagree, and the disagreement is silent in both directions: a
+    NARROWER handler bound turns a real click back into the dead-end toast this
+    whole path exists to remove, and a WIDER one offers a number no click can
+    produce.
+
+    ⚠ THIS IS NOT THE `_NUM = \\d{1,5}` GUARD and must not be confused with it.
+    That bound decides what may be OPENED and is deliberately narrower than both
+    of these; it is pinned in `test_mention_scan.py` and is not this test's
+    subject.
+    """
+    import importlib.util
+
+    handler = ROOT / "scripts" / "mention-open.py"
+    spec = importlib.util.spec_from_file_location("mention_open_bound", handler)
+    mo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mo)
+
+    hint_bound = re.search(r"#\[0-9\]\{1,(\d+)\}",
+                           _string_attr(mention_hint, "regex"))
+    assert hint_bound, "the mention hint no longer spells its digit bound as {1,N}"
+    offer_bound = re.search(r"\[0-9\]\{1,(\d+)\}", mo._OFFER_NUM_RE.pattern)
+    assert offer_bound, "_OFFER_NUM_RE no longer spells its digit bound as {1,N}"
+    assert offer_bound.group(1) == hint_bound.group(1), (
+        f"the handler offers up to {offer_bound.group(1)} digits while the "
+        f"terminal underlines up to {hint_bound.group(1)}")
+
+    # POSITIVE CONTROL, on the real objects rather than on the two integers: a
+    # number at the shared bound must be underlined by the hint AND recovered by
+    # the handler. Two constants can agree while both are wired to nothing.
+    at_bound = "#" + "8" * int(hint_bound.group(1))
+    assert re.compile(_string_attr(mention_hint, "regex")).search(at_bound)
+    assert mo.offer_number(at_bound) == "8" * int(hint_bound.group(1))
+
+
 def test_the_mention_hint_behaves_like_a_link(mention_hint):
     """Zach's requirement, verbatim: "for click i want it to function the same
     way link clicking already does". Same mouse semantics as the URL hint."""
