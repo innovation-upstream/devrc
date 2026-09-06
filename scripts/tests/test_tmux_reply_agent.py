@@ -38,11 +38,13 @@ nobody would notice:
      proves the stub tmux and the stub server can observe anything at all. Every
      "no send-keys happened" assertion below is meaningless without it.
 
-⚠ THE AGENT SHIPS DISABLED and cannot be exercised on a live host at all: the
-server's routes answer 503 until CLAWGATE_TERMINAL_TOKEN is provisioned, and the
-unit is not wired into `default.target` until `enableTmuxReplyAgent` is true.
-That is why these tests drive the script directly against stubs rather than
-asserting anything about a running system.
+⚠ THE AGENT SHIPPED DISABLED AND IS NOW ARMED — `enableTmuxReplyAgent` is true —
+but that changes NOTHING about how these tests are built. They still drive the
+script directly against stubs rather than asserting anything about a running
+system: a test that reached the live agent would be sending keystrokes into the
+operator's real panes. The two switches remain independent — the server's routes
+answer 503 until CLAWGATE_TERMINAL_TOKEN is provisioned on the POD, and the unit
+is wired into `default.target` only while `enableTmuxReplyAgent` is true.
 """
 from __future__ import annotations
 
@@ -194,6 +196,13 @@ def tmux_stub(tmp_path):
         f'''if [ "$1" = "-V" ]; then echo 'tmux 3.4'; exit 0; fi\n'''
         f'''python3 -c 'import json,sys; open(sys.argv[1],"a").write(json.dumps(sys.argv[2:])+"\\n")' '''
         f'''{log} "$@"\n'''
+        # ⚠ THIS BRANCH MATCHES **ANY** `display-message`, INCLUDING the
+        # `#{pane_current_path}` RE-READ `open_window` now makes when tmux returns
+        # an empty path. Unreachable today ONLY because this stub cannot express an
+        # empty third field. If you extend the stub to cover that path,
+        # DISCRIMINATE ON THE FORMAT ARGUMENT FIRST — otherwise the re-read is
+        # handed a server id (`1234:5678`) as its directory and the run refuses
+        # with the misleading "tmux fell back" message.
         f'''if [ "$1" = "display-message" ]; then cat {server_id}; exit 0; fi\n'''
         # 🔴 THE STUB NOW ECHOES WHAT THE AGENT READS BACK. The agent verifies the
         # session and working directory tmux ACTUALLY chose, so a stub printing a
@@ -735,18 +744,35 @@ def test_an_unmeasurable_server_id_reads_as_empty(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 7. The unit ships DISABLED, and carries what the child needs.
+# 7. The unit is ARMED (it shipped disabled), and carries what the child needs.
 # --------------------------------------------------------------------------- #
 def home_nix() -> str:
     return HOME_NIX.read_text()
 
 
-def test_the_agent_unit_SHIPS_DISABLED():
-    """🔴 THE CENTRAL CLAIM OF THIS CHANGE, ASSERTED AGAINST THE CONFIGURATION.
+def test_the_agent_unit_IS_ARMED():
+    """🔴 THE CENTRAL CLAIM OF THE ARMING CHANGE, ASSERTED AGAINST THE CONFIGURATION.
+
+    This guard used to pin the flag `false` and is now pinned `true`, and the
+    SYMMETRY is the point rather than a weakening: what it has always enforced is
+    that the armed state is a deliberate, reviewed edit in BOTH directions. While
+    it read `false`, arming meant editing this test; now that it reads `true`,
+    DISARMING means editing this test. An accidental revert to `false` would stop
+    every queued reply from ever executing while the server kept accepting them
+    and the UI kept looking healthy — a silent reopening of the loop rank 32
+    closed, which is exactly the shape a config guard exists to catch.
+
+    🔴 BUT THE FLAG IS NOT A LIVE KILL SWITCH, AND THIS GUARD MUST NOT BE READ AS
+    ONE. Flipping it `false` and shipping does NOT stop a RUNNING agent: the unit
+    definition is emitted unconditionally, so the flag only removes `[Install]`,
+    and `sd-switch` reads that as a CHANGED unit and plans Stop/Start. What this
+    pins is the DECLARED state at next login. Stopping it now is
+    `systemctl --user stop tmux-reply-agent`, on both hosts.
 
     What this agent delivers is arbitrary command execution as the operator on
     this host. Building it and ARMING it were deliberately separated so the write
-    path could be merged, deployed and audited before it could execute anything.
+    path could be merged, deployed and audited before it could execute anything;
+    that separation did its job across seven audit rounds and is now history.
 
     The flag is read through the comment-stripping reader, not a substring
     search: this file's blocks quote directives verbatim in prose, so a raw
@@ -754,18 +780,19 @@ def test_the_agent_unit_SHIPS_DISABLED():
     that exact failure once left a guard green over a deleted unit.
     """
     src = nix_units.strip_nix_comments(home_nix())
-    assert "enableTmuxReplyAgent = false;" in src, (
-        "the terminal-write agent's master switch is not false. Arming this is an "
-        "operator act, deliberately separate from shipping it: it needs "
-        "CLAWGATE_TERMINAL_TOKEN provisioned on the POD *and* this flag flipped, and "
-        "neither implies the other.")
-    assert "enableTmuxReplyAgent = true;" not in src
+    assert "enableTmuxReplyAgent = true;" in src, (
+        "the terminal-write agent's master switch is not true. Disarming is an operator "
+        "act and a reviewed edit, not a drive-by revert: with this false the unit is "
+        "wanted by nothing, every reply typed in the web UI queues for ever, and nothing "
+        "in the server or the UI says so.")
+    assert "enableTmuxReplyAgent = false;" not in src
 
 
-def test_the_agent_unit_is_declared_even_though_it_is_disabled():
-    """The SERVICE must exist on both hosts even while nothing wants it, so an
-    operator arming the surface can start it by hand and watch it before wiring
-    it into the target. The `Install.WantedBy` is what the flag gates."""
+def test_the_agent_unit_is_declared_independently_of_the_flag():
+    """The SERVICE definition is emitted unconditionally; only `Install.WantedBy`
+    is gated. That is what let an operator start it by hand and watch it before
+    it was wired into the target, and it is what makes disarming a matter of the
+    unit no longer being WANTED rather than no longer existing."""
     src = home_nix()
     assert nix_units.declares("systemd.user.services.tmux-reply-agent", src)
     unit = nix_units.strip_nix_comments(
@@ -806,13 +833,22 @@ def _wanted_by_expr(nix_src: str) -> tuple:
     return flag.group(1), cond, targets
 
 
-def test_the_agent_unit_IS_WANTED_BY_NOTHING_as_shipped():
+def test_default_target_wants_the_agent_and_ONLY_via_the_bare_flag():
     """🔴 THE CENTRAL CLAIM, PINNED AS AN EXPRESSION RATHER THAN AS SUBSTRINGS.
 
-    Two facts together determine that nothing wants this unit, and BOTH are
-    asserted: the condition is the BARE flag (not a negation, not a wider
-    expression), and the flag is `false`. A mutant that changes either is a
+    Two facts together determine that `default.target` wants this unit, and BOTH
+    are asserted: the condition is the BARE flag (not a negation, not a wider
+    expression), and the flag is `true`. A mutant that changes either is a
     different string here.
+
+    🔴 THE CONDITION ASSERTION IS THE HALF THAT DID NOT CHANGE MEANING WHEN THE
+    FLAG FLIPPED, AND IT IS THE MORE IMPORTANT HALF. Pinning the bare flag is
+    what keeps the flag the ONLY thing deciding whether the agent runs: a
+    disjunction like `(enableTmuxReplyAgent || isNixOS)` would want the unit on
+    every host regardless of the switch, so setting the flag `false` would no
+    longer disarm anything. That mutant mentions the flag's name and passes a
+    word-pinning guard, which is why the whole condition is normalised and
+    compared as one string.
 
     🔴 DETERMINISTIC, AND THERE IS DELIBERATELY NO `nix eval` BESIDE IT. A first
     draft added one as "confirmation". It PASSED on the dev host and turned the
@@ -833,10 +869,11 @@ def test_the_agent_unit_IS_WANTED_BY_NOTHING_as_shipped():
         f"the WantedBy condition is `{cond}`, not the bare flag. Anything else — a negation, a "
         "disjunction, a different flag — can want this unit while still mentioning the flag's "
         "name, which is exactly how the previous guard was walked past.")
-    assert flag == "false", (
-        f"enableTmuxReplyAgent is `{flag}`. As shipped it must be false: starting this unit means "
-        "arbitrary command execution as the operator on this host, and arming it is a separate "
-        "operator act.")
+    assert flag == "true", (
+        f"enableTmuxReplyAgent is `{flag}`. The agent is ARMED: with this false the unit is "
+        "wanted by nothing, and every reply typed in the web UI queues and is never executed "
+        "— silently, because the server still accepts the write. Disarming is a deliberate "
+        "operator act and edits this assertion with it.")
     assert targets == '[ "default.target" ]', targets
 
 
@@ -853,10 +890,56 @@ def test_the_wanted_by_guard_can_SEE_an_inverted_flag():
         "the inverted-flag mutant reads identically to the shipped condition; this guard cannot "
         "see the one mutation that would start the agent on both hosts")
 
-    flipped = src.replace("  enableTmuxReplyAgent = false;",
-                          "  enableTmuxReplyAgent = true;")
+    # 🔴 THE FLAG CONTROL MUTATES IN THE DIRECTION THAT IS NOW THE HAZARD.
+    # It used to flip false -> true (arming by accident); with the agent armed
+    # the accident to catch is the reverse — a revert to `false`, which disarms
+    # the host half while the server keeps accepting writes.
+    #
+    # ⚠ TWICE-CORRECTED, and the SECOND correction is the one worth reading,
+    # because a fix for the first one CREATED the hazard the first one denied.
+    #
+    # Round 1 of this change claimed the pre-flip direction would have gone
+    # "green and blind". An audit refuted it: `assert flipped != src` already
+    # existed, `enableTmuxReplyAgent = false` occurred ZERO times in the armed
+    # file, so the stale direction failed loudly. True — at that commit.
+    #
+    # 🔴 THEN THE FIX FOR THAT CLAIM MADE IT FALSE. The same round wrote a
+    # DISARM EXAMPLE into `nix/home.nix`'s comments:
+    #
+    #     #     enableTmuxReplyAgent = false;   # then merge + ship.sh, THEN:
+    #
+    # A comment — but `str.replace` cannot tell a declaration from a comment
+    # describing one, and that line's `  #     ` prefix ENDS IN SPACES, so the
+    # two-space-prefixed literal matches INSIDE it. MEASURED: reverting this
+    # control to its pre-flip direction on that tree gives `1 passed` — the
+    # replace hits the comment, `flipped != src` is satisfied, `_wanted_by_expr`
+    # reads the untouched real declaration, and the control passes about a file
+    # whose flag was never mutated. Exactly "green and blind", arrived at by
+    # fixing the claim that it could not happen.
+    #
+    # 🔴 SO THE MUTATION IS ANCHORED, NOT SUBSTRING-MATCHED. `^  <flag> = …;$`
+    # under re.M is the same shape `_wanted_by_expr` already uses, and it is why
+    # THAT function was never fooled by the comment. `subn`'s count is asserted
+    # to be exactly 1, so a SECOND DECLARATION fails loudly with `substituted 2`
+    # rather than silently taking an extra substitution.
+    #
+    # ⚠ Precisely, because an earlier draft of this sentence overstated it: a
+    # comment at COLUMN 0 (`#  enableTmuxReplyAgent = true;`) is INVISIBLE to the
+    # anchor, not a failure — MEASURED `1 passed`. That is the wanted behaviour
+    # (a comment must not be mutated), but it is not detection, and claiming
+    # detection would be the same overclaim this whole control exists to record.
+    #
+    # The documentation is NOT the thing to delete here: the disarm example is
+    # the only written rollback for a surface that executes commands. Fix the
+    # test, not the sentence.
+    flipped, n_flipped = re.subn(r"^  enableTmuxReplyAgent = true;$",
+                                 "  enableTmuxReplyAgent = false;", src, flags=re.M)
+    assert n_flipped == 1, (
+        f"expected exactly ONE anchored flag declaration to mutate, substituted {n_flipped}. "
+        "Zero means the declaration moved or changed spelling; more than one means there is a "
+        "second declaration and this control no longer names which one it tested.")
     assert flipped != src
-    assert _wanted_by_expr(flipped)[0] == "true"
+    assert _wanted_by_expr(flipped)[0] == "false"
 
 
 def test_the_unit_PATH_carries_tmux_and_python():
@@ -903,9 +986,9 @@ def test_the_unit_does_not_wire_the_DND_defeating_failure_toast():
     bypass is justified by a MEASURED rate of about one firing in nine days.
 
     This unit restarts on failure and polls every few seconds, so any sustained
-    condition — the surface not armed, which is the state it ships in — would
-    fire a DND-bypassing toast on every restart and burn down the one alert
-    channel that has to keep its meaning.
+    condition — the surface not armed, which since arming means the pod's secret
+    was REMOVED — would fire a DND-bypassing toast on every restart and burn down
+    the one alert channel that has to keep its meaning.
     """
     unit = nix_units.strip_nix_comments(
         nix_units.unit_source("systemd.user.services.tmux-reply-agent", home_nix()))
@@ -1736,3 +1819,264 @@ def test_a_window_that_landed_in_the_WRONG_DIRECTORY_is_refused(
         [r for r in server.requests if r["path"].endswith("/result")][0]["body"])
     assert body["state"] == "failed", body
     assert "not the requested" in body["detail"], body
+
+
+def test_the_agent_SHELLS_OUT_TO_TMUX_AND_NOTHING_ELSE():
+    """🔴 THE PIN `test_no_real_launchers.py`'s ACKNOWLEDGEMENT PROMISES, and it
+    did not exist until an audit went looking for it.
+
+    That ledger acknowledges this file as reaching `systemctl` in PROSE — one
+    line of module docstring giving the operator the second half of the disarm
+    procedure. The acknowledgement is only honest while the prose stays prose,
+    and its justification asserted that "test_tmux_reply_agent.py pins that the
+    agent shells out to nothing else". No such test existed; the sentence named
+    a compensating control that was never written.
+
+    🔴 THAT GAP WAS MEASURED, NOT INFERRED. `launcher_scan.hazard_hits` returns a
+    FILE SET, and the ledger asserts set equality — so once this file is IN the
+    set for `systemctl`, a genuine call site added to it changes the set by
+    nothing and the ledger stays green. Injecting
+
+        subprocess.run(["systemctl", "--user", "restart", "some-unit"], check=False)
+
+    into this agent left `test_no_real_launchers.py` at **77 passed**. The
+    acknowledgement had blinded the very guard it was filed under.
+
+    So the pin is written here, where it can see argv rather than file names:
+    a DIRECT spawn in the agent must take its argv from `tmux_bin()`. AST, not
+    grep — this file and the agent both NAME `systemctl` in prose, and a text
+    scan cannot tell a docstring from a call.
+
+    🔴 WHAT IT DOES NOT SEE, STATED RATHER THAN IMPLIED — an unqualified "every
+    spawn" is what made the two previous versions of this docstring false, and a
+    guard whose sentence is wider than its body reads as coverage while providing
+    none. MEASURED SURVIVORS at this revision: reflective lookup
+    (`getattr(subprocess, "run")`, `importlib.import_module`, `__import__`), a
+    star-import (`from subprocess import *`), an indirect binding
+    (`_m = subprocess` / `f = run`), and spawners in OTHER modules (`pty.spawn`,
+    `asyncio.create_subprocess_exec`). Those are residuals, not oversights: each
+    needs a deliberate indirection, whereas the verbs above are what ordinary
+    code reaches for. If this file ever grows one of them, this guard will not
+    say so — and neither will the launcher ledger.
+
+    🔴 IT RESOLVES IMPORT BINDINGS, BECAUSE ITS FIRST VERSION DID NOT AND WAS
+    NARROWER THAN THIS DOCSTRING. That draft matched only a literal
+    `subprocess.<verb>(...)` / `os.<verb>(...)` attribute call, so an ALIAS
+    walked straight past a guard whose sentence said "nothing else". MEASURED,
+    with every `__pycache__` purged and PYTHONDONTWRITEBYTECODE=1 (a `cp -a`
+    battery preserves pytest-rewritten bytecode and scores phantom survivors):
+
+        subprocess.run(["systemctl", ...])          KILLED
+        os.execv("/bin/systemctl", [...])           KILLED
+        subprocess.run(cmd)  # variable argv        KILLED
+        from subprocess import run as _r; _r([...]) SURVIVED
+        from subprocess import run;      run([...]) SURVIVED
+        import subprocess as _sp; _sp.run([...])    SURVIVED
+        os.posix_spawn("/.../systemctl", [...], {}) SURVIVED
+
+    Four survivors, and with one of them live the two files were 183 passed —
+    the round-2 defect exactly, one import spelling narrower. `claude/RULES.md`:
+    "a guard's DESCRIPTION claims COVERAGE — check the implementation is as wide
+    as the sentence."
+
+    So the binding map below is the guard, not a nicety: `import subprocess as X`
+    and `from subprocess import run as Y` are resolved to their real targets, and
+    `posix_spawn` is named explicitly rather than caught by a prefix.
+    """
+    import ast
+
+    src = SCRIPT.read_text()
+    tree = ast.parse(src)
+
+    # 🔴 `getoutput`/`getstatusoutput` ARE IN THIS SET BECAUSE THEY RUN A SHELL
+    # and were missing from the first five. Same module, same `subprocess.<verb>()`
+    # shape this walker already sees — no aliasing, no reflection — so
+    # `subprocess.getoutput(f"systemctl --user is-active {unit}")` SURVIVED a guard
+    # whose sentence said "nothing else", while the launcher ledger (which asserts
+    # a FILE set, and this file is already in it) is structurally blind to it too.
+    SUBPROCESS_VERBS = {"run", "Popen", "call", "check_call", "check_output",
+                        "getoutput", "getstatusoutput"}
+    # 🔴 NOT every `os.*` — an early draft took the whole module and matched
+    # `os.getpid()`, failing on a CLEAN tree. A negative control that goes red is
+    # a broken instrument, not a finding. Only verbs that can START a process.
+    def _os_spawns(a):
+        return a.startswith("exec") or a.startswith("spawn") or a in (
+            "system", "popen", "posix_spawn", "posix_spawnp", "forkpty", "fork")
+
+    # name -> "subprocess" | "os", following `as` aliases.
+    mod_alias = {}
+    # bare name -> the module it was imported OUT of, following `as` aliases.
+    # ⚠ SCOPE-BLIND, BOTH WAYS, AND LATENT TODAY. This walks the whole module, so
+    # a `from subprocess import ...` inside a function body registers globally
+    # (over-strict — fails loud, safe direction), and a LOCAL rebinding of the
+    # same name is read as the import (a FALSE POSITIVE: a parameter named `run`
+    # in `def _use(run, argv): return run(argv)` is flagged as a spawn). Latent
+    # because `scripts/tmux-reply-agent` imports `os` and `subprocess` as modules
+    # only, with no from-import, so this dict is EMPTY on the real tree. It goes
+    # live the first time anyone adds one; prefer renaming the local over
+    # loosening this map.
+    fn_alias = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in ("subprocess", "os"):
+                    mod_alias[a.asname or a.name] = a.name
+        elif isinstance(node, ast.ImportFrom):
+            if node.module in ("subprocess", "os"):
+                for a in node.names:
+                    fn_alias[a.asname or a.name] = (node.module, a.name)
+
+    argv0 = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        mod = attr = None
+        if isinstance(fn, ast.Attribute):
+            base = getattr(getattr(fn, "value", None), "id", None)
+            mod, attr = mod_alias.get(base), fn.attr
+        elif isinstance(fn, ast.Name) and fn.id in fn_alias:
+            mod, attr = fn_alias[fn.id]
+
+        if mod is None:
+            continue
+        spawns = (mod == "subprocess" and attr in SUBPROCESS_VERBS) or \
+                 (mod == "os" and _os_spawns(attr))
+        if not spawns:
+            continue
+        if not node.args:
+            argv0.append(f"<no-argv:{mod}.{attr}>")
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.BinOp) and isinstance(first.left, ast.List):
+            first = first.left
+        if isinstance(first, ast.List) and first.elts:
+            head = first.elts[0]
+        else:
+            head = first
+        if isinstance(head, ast.Call) and isinstance(head.func, ast.Name):
+            argv0.append(head.func.id)
+        elif isinstance(head, ast.Constant):
+            argv0.append(repr(head.value))
+        else:
+            argv0.append(ast.dump(head)[:60])
+
+    assert set(argv0) == {"tmux_bin"}, (
+        f"the agent's subprocess argv[0] set is {sorted(set(argv0))}, not {{'tmux_bin'}}. "
+        "This agent must shell out to tmux and nothing else (this check sees DIRECT spawns; "
+        "see the docstring for the reflective/star-import residuals it does not) — it runs "
+        "as the operator, is "
+        "driven by a network route, and `test_no_real_launchers.py` ACKNOWLEDGES its prose "
+        "mention of `systemctl` on exactly this basis. A new argv[0] here is invisible to "
+        "that ledger (it asserts a FILE set, and this file is already in it), so this is the "
+        "only place the addition can be seen. Do not relax it to make a call site pass.")
+
+
+def test_an_EMPTY_pane_current_path_does_not_collapse_the_readback(monkeypatch):
+    """🔴 A WINDOW TMUX ALREADY CREATED WAS BEING REJECTED BY A `.strip()`.
+
+    `NEW_WINDOW_FORMAT` is `#{pane_id}\\t#{session_name}\\t#{pane_current_path}`.
+    The read-back did `out.strip().splitlines()[0].split("\\t")` — and `.strip()`
+    removes a TRAILING TAB, so a well-formed three-field line whose last field is
+    empty arrives as TWO fields and fails the length check. The window exists by
+    then: the caller gets an error, a stray window is left behind, and a retry
+    would make a second one.
+
+    MEASURED as an intermittent real-tmux failure, 3 occurrences across ~12 runs
+    of `test_the_EXACT_session_still_works`, one on a completely unmutated tree,
+    with wall times within 0.5 s of the control — so not a load flake. The
+    observed string `'%2\\tscratch20'` is byte-identical to `'%2\\tscratch20\\t'`
+    after `.strip()`, which is what identified the mechanism.
+
+    🔴 AND THE TRIGGER HAS SINCE BEEN FORCED DIRECTLY, so this no longer rests on
+    byte-identity. On a private `-L` socket (tmux 3.7c), `new-window -P -F` with
+    this format produced an EMPTY third field **11 times in ~310 warm-server
+    creations (~3.6%)**, and **0 times in 60 cold-server creations** — so the race
+    is not server startup. In **11 of 11** the immediate
+    `display-message -p -t <pane>` re-read returned the correct populated path,
+    which is end-to-end evidence for the remedy below against REAL tmux rather
+    than against a stub. That also retires the rival mechanism byte-identity alone
+    could not exclude: tmux genuinely emitting two fields.
+
+    🔴 AND THE PARSE IS ONLY HALF OF IT. With the fields split correctly,
+    `landed_path` is `""`, and `same_directory("", cwd)` does NOT compare empty
+    against cwd — `os.path.realpath("")` returns the AGENT'S OWN cwd, so the
+    check would silently compare the wrong directory and usually refuse. An
+    unreadable path is "not readable yet", NOT "tmux fell back to the wrong
+    directory", and the two must not share a code path.
+
+    This drives `run_tmux` directly rather than through the tmux stub, because
+    the stub composes its own third field and cannot express an EMPTY one — the
+    exact value under test.
+    """
+    calls = []
+
+    def fake_run_tmux(args):
+        calls.append(args)
+        if args[0] == "new-window":
+            # Well-formed, three fields, last one EMPTY. Note the trailing tab.
+            return 0, "%2\tscratch20\t\n", ""
+        if args[0] == "display-message":
+            return 0, str(pathlib.Path.home()) + "\n", ""
+        raise AssertionError(f"unexpected tmux call: {args}")
+
+    monkeypatch.setattr(AGENT, "run_tmux", fake_run_tmux)
+    pane, err = AGENT.open_window(str(pathlib.Path.home()), "scratch20")
+
+    assert not err, (
+        f"a three-field read-back whose last field is empty was rejected: {err!r}. "
+        "The window already exists at this point, so this is a lost window plus a "
+        "misleading error, not a refusal.")
+    assert pane == "%2", pane
+    assert any(a[0] == "display-message" for a in calls), (
+        "an empty pane_current_path must be RE-READ for that pane, not treated as a "
+        "directory mismatch — `os.path.realpath('')` is the agent's own cwd, so the "
+        "same_directory check would compare something nobody asked about.")
+
+
+def test_an_UNREADABLE_pane_current_path_still_REFUSES(monkeypatch):
+    """The other half, so the fix above cannot become "accept anything".
+
+    If the re-read ALSO comes back empty the directory is genuinely unverifiable,
+    and this agent presses Enter — so it must refuse rather than type into a pane
+    whose location nothing confirmed.
+
+    🔴 IT PINS THE WHOLE NORMALISED STRING, BECAUSE THE FIRST VERSION OF THIS
+    TEST PINNED THE WORD "directory" AND WAS WALKABLE BY ITS OWN NEIGHBOUR.
+    That word appears in the unverifiable-path refusal AND in the `same_directory`
+    MISMATCH message four lines below it, so deleting the refusal outright left
+    this test GREEN — measured as a surviving mutant. The fallthrough then
+    produced:
+
+        tmux opened the window in '', not the requested '/home/zach' — the
+        directory does not exist on this host, so tmux fell back
+
+    which satisfied both of the old assertions while asserting the exact
+    confusion the fix exists to prevent, since `os.path.realpath("")` is the
+    AGENT'S OWN cwd (verified) and the unit runs with `WorkingDirectory=~`.
+    ⚠ Worse, the old test's verdict depended on an UNPINNED dimension: with
+    pytest's cwd at `/home/zach` the mutant died, from `/tmp` or the repo root it
+    survived — and the gate runs from the repo root.
+
+    `claude/RULES.md`: assert the STATE, never a word another branch can spell.
+    """
+    def fake_run_tmux(args):
+        if args[0] == "new-window":
+            return 0, "%2\tscratch20\t\n", ""
+        if args[0] == "display-message":
+            return 0, "\n", ""
+        raise AssertionError(f"unexpected tmux call: {args}")
+
+    monkeypatch.setattr(AGENT, "run_tmux", fake_run_tmux)
+    pane, err = AGENT.open_window(str(pathlib.Path.home()), "scratch20")
+    assert pane == "", pane
+    assert " ".join(err.split()) == (
+        "tmux did not report the new window's directory, so where it landed "
+        "could not be verified"), (
+        f"the refusal message is {err!r}. This asserts the WHOLE normalised string "
+        "on purpose: pinning a word lets the `same_directory` mismatch branch below "
+        "satisfy this test while the refusal is gone.")
+    assert "fell back" not in err, (
+        f"the unverifiable-path refusal must not be the FALLTHROUGH mismatch: {err!r}. "
+        "'could not read where it landed' and 'tmux landed somewhere else' are "
+        "different facts and must not share a code path.")
