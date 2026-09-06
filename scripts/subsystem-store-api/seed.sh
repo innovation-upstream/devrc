@@ -57,6 +57,18 @@
 #                         default because the pod is authoritative post-cutover.
 #                         It still PRINTS what it replaced.
 #
+# Exit codes that mean "nothing was pushed", and they are NOT interchangeable:
+#   8   a staged entry EXISTS ON THE POD WITH DIFFERENT BYTES. The pod is the
+#       authority; `--allow-overwrite` is the deliberate override.
+#   9   the pod's probe answered FEWER paths than were asked about, so the
+#       comparison could not be made. No override — an unanswered path is
+#       indistinguishable from one that matched.
+#   10  a staged path contains characters outside `[A-Za-z0-9._/-]`. No override
+#       either, and the pattern is not meant to be relaxed: the comparison that
+#       protects the pod moves paths as TEXT between two different shells, and a
+#       name outside that set can make a DIFFERING entry look brand-new. Rename
+#       the entry. Measured 2026-09-05: 0 of 348 live entries are affected.
+#
 # The two halves are split on purpose: staging is hermetic and testable, pushing
 # needs a cluster. A green stage says nothing about the push, so the script
 # prints them as separate lines and never one combined verdict.
@@ -79,12 +91,20 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       # 🔴 PRINT THE WHOLE LEADING COMMENT BLOCK, NOT A LINE RANGE. It was
       # `sed -n '2,26p'`, and a line range rots the moment the header grows:
-      # this round's additions pushed line 26 into the middle of a clause, so
+      # a later round's additions pushed line 26 into the middle of a clause, so
       # `--help` ended mid-sentence. And the Usage block has ALWAYS sat BELOW
       # that window, so `--allow-overwrite` was "documented in Usage" in a place
-      # `--help` could not reach. Stopping at the first non-comment line cannot
-      # drift.
-      awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
+      # `--help` could not reach.
+      #
+      # 🔴 A BLANK LINE IS PART OF THE HEADER, NOT THE END OF IT. The first
+      # version of this stopped at the first non-`#` line, which a blank line
+      # IS — so one blank inserted for readability silently cut `--help` from
+      # 61 lines to 31 and took `--allow-overwrite` with it (MEASURED
+      # 2026-09-05). That is the same defect the line range had, re-spelled, so
+      # "cannot drift" was false as written. Blank lines are now passed through
+      # and only a real non-comment line stops it. `test_seed_help_*` pins both
+      # halves, because this claim has now been wrong twice with no test.
+      awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} /^[[:space:]]*$/{print; next} {exit}' "$0"; exit 0 ;;
     *) echo "seed: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -321,6 +341,62 @@ if [[ -z "$PUSH" ]]; then
   exit 0
 fi
 
+# 🔴 BOUND THE DOMAIN — DO NOT HARDEN THE PARSER. Every path below travels as
+# TEXT through `xargs`, `sha256sum`, `awk`, `sort` and `join`, on TWO machines
+# whose tools do not agree on how text is escaped, and three audit rounds each
+# fixed one delimiter and re-broke the next:
+#
+#   round 1  bare `xargs`           a space split the args        -> rc 123
+#   round 2  `-I{}`                 a space TRUNCATED the join key at 0x20
+#   round 3  `-d '\n'` + TAB key    a TAB truncates it at 0x09, and the POD's
+#                                   `/bin/sh` is dash, whose `echo` turns the
+#                                   two characters `\t` in a NAME into a real
+#                                   TAB on one side only
+#
+# The last one is the dangerous shape: the two sides' keys diverge, the row
+# drops out of the join, and a pod entry that DIFFERS is pushed over as though
+# it were a pure addition — silently, which is the exact defect this pre-flight
+# exists to prevent. Escaping-symmetry across dash/bash/GNU-coreutils is not
+# something this script can establish, so it stops trying.
+#
+# MEASURED 2026-09-05 across BOTH live stores: 348 entry files, **0** whose path
+# leaves `[A-Za-z0-9._/-]`. Entry names are service slugs by construction, and
+# `cairn-cutover.py` — the only programmatic caller — builds its delta tree from
+# that same population. So this rejects nothing that exists and nothing any
+# caller produces; it removes the whole class from the comparison below.
+#
+# 🔴 REJECT, NEVER SANITISE. A rewritten name would push one entry's bytes over
+# a DIFFERENT entry's path. Refusing is the only safe direction.
+#
+# 🔴 ON THE PUSH HALF, DELIBERATELY — this sat above the `--push` early-return
+# first, and that was wrong twice over. The hazard is ENTIRELY in the pod
+# comparison: staging is hermetic, local, and never moves a name between two
+# shells. Refusing there would also have broken
+# `test_a_scope_name_containing_a_BACKSLASH_ESCAPE_counts_correctly`, a
+# STAGE-ONLY test pinning that the per-scope count survives a scope named
+# `a\tb` — coverage of a real awk-ENVIRON fix that has nothing to do with this
+# guard, and which a name check has no business deleting. There is no bypass:
+# `--push` re-stages from `--store` on every run, so the check runs before every
+# transfer that exists.
+_odd_f="$_seed_tmp/odd-names"
+LC_ALL=C grep -nvE '^[A-Za-z0-9._/-]+$' "$staged_list" > "$_odd_f" || [ $? -eq 1 ]
+_n_odd=$(wc -l < "$_odd_f" | tr -d ' ')
+# Printed on EVERY path, not only on rejection — this file's own silent-zero
+# rule: a bare 0 from a check that walked nothing reads exactly like a clean one.
+echo "seed: NAME-CHECK staged=$staged_entries rejected=$_n_odd"
+if [[ "$_n_odd" -gt 0 ]]; then
+  echo "seed: REFUSING — $_n_odd staged entry path(s) contain characters this push cannot" >&2
+  echo "seed:   compare safely. Allowed: A-Z a-z 0-9 . _ - /" >&2
+  sed 's/^/  /' "$_odd_f" >&2
+  echo "seed:   (each line is <line-number-in-staged-list>:<path>)" >&2
+  echo "seed: 🔴 THIS IS NOT A LIMIT YOU SHOULD WIDEN BY RELAXING THE PATTERN. The pre-flight" >&2
+  echo "seed:   that protects the pod's bytes compares paths as TEXT across two shells; a name" >&2
+  echo "seed:   outside this set can make an entry that DIFFERS look like a new one and be" >&2
+  echo "seed:   overwritten with no warning. Rename the entry instead." >&2
+  echo "seed: NOTHING WAS PUSHED." >&2
+  exit 10
+fi
+
 ns="${PUSH%%/*}"
 deploy="${PUSH##*/}"
 if [[ "$ns" == "$PUSH" || -z "$ns" || -z "$deploy" ]]; then
@@ -420,6 +496,19 @@ if [[ -s "$staged_list" ]]; then
   # 18 legitimate tests. The answerable question is whether the probe SAW the
   # whole list, so ABSENT is an answer and a MISSING line is the fault.
   #
+  # 🔴 `printf`, NEVER `echo`, FOR THE TWO HAND-WRITTEN ANSWERS. The pod's
+  # `/bin/sh` is dash (`Dockerfile`: `FROM python:3.12-slim` -> Debian), and
+  # dash's `echo` INTERPRETS backslash escapes while bash's does not. MEASURED
+  # 2026-09-05 on the same input: a name containing the two characters `\t` came
+  # back with a REAL TAB from dash and a literal `\t` from bash; `\n` split the
+  # answer across two lines; `\c` truncated it AND swallowed the NEXT path's
+  # answer. Every test in this repo drives a fake `kubectl` that runs this
+  # command under bash, so the suite is structurally blind to all three.
+  # `printf '%s'` does not interpret its argument, and reproduces bash's output
+  # under dash exactly. The NAME-CHECK above already makes these unreachable;
+  # this is the second lock, because that one is a policy and this is a fact
+  # about the two shells.
+  #
   # 🔴 THE INNER `sh` MUST EXIT 0 FOR EVERY PATH: `xargs` exits 123 when any child
   # does, and a path the pod lacks is ordinary. The `if/else` is what guarantees
   # that now — an earlier revision used a bare `|| :` and this comment still
@@ -428,7 +517,7 @@ if [[ -s "$staged_list" ]]; then
   # silently treated as a pure addition.
   # `_ {}` passes the path as "$1" so it is never re-parsed as shell text.
   kubectl -n "$ns" exec -i "$pod" -- \
-    sh -c "cd '$DEST' && xargs -r -d '\n' -I{} sh -c 'if [ -f \"\$1\" ]; then sha256sum \"\$1\" 2>/dev/null || echo \"UNREADABLE  \$1\"; else echo \"ABSENT  \$1\"; fi' _ {}" \
+    sh -c "cd '$DEST' && xargs -r -d '\n' -I{} sh -c 'if [ -f \"\$1\" ]; then sha256sum \"\$1\" 2>/dev/null || printf \"UNREADABLE  %s\\n\" \"\$1\"; else printf \"ABSENT  %s\\n\" \"\$1\"; fi' _ {}" \
     < "$staged_list" \
     | awk '{h=$1; sub(/^[^ ]+ +/,""); print $0"\t"h}' | LC_ALL=C sort > "$_probe_raw"
   _n_answered=$(wc -l < "$_probe_raw" | tr -d ' ')

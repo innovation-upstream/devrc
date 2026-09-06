@@ -18726,25 +18726,26 @@ class TestTheSeedPreFlightJoinIsLocaleSafe:
         assert f"{SCOPE}/backblaze.md" in r.stderr, r.stderr
 
 
-class TestTheSeedPreFlightSurvivesAwkwardPaths:
-    """🔴 A ROUND-1 CLAIM SHIPPED UNVERIFIED, AND BOTH HALVES WERE WRONG.
+class TestTheSeedNameCheckRejectsPathsItCannotCompareSafely:
+    """🔴 THREE ROUNDS EACH FIXED ONE DELIMITER AND RE-BROKE THE NEXT.
 
-    It said `-I{}` made a path with a space or a quote survive. Measured by the
-    round-2 audit:
+    Round 1 `xargs` bare (a space split the args, rc 123); round 2 `-I{}` (a
+    space TRUNCATED the join key at 0x20); round 3 `-d '\\n'` + a TAB-separated
+    key (a TAB truncates it at 0x09). Each fix was correct about the case it
+    named and moved the boundary rather than removing it.
 
-    * QUOTE — `-I{}` stops WORD-SPLITTING but leaves xargs's INPUT QUOTE PARSING
-      on, so `sc/it's.md` still died `xargs: unmatched single quote`, rc 1, with
-      no `seed:` line — byte-identical to base. Only `-d` (or `-0`) disables it.
-    * SPACE — it stopped aborting and started LYING. `awk '{print $2" "$1}'`
-      rebuilt the line from FIELDS, truncating the key at the first blank, so two
-      BYTE-IDENTICAL entries collapsed to one key, the join degenerated into a
-      cross-product, and the guard refused with `differing=2`, naming a path that
-      does not exist. A confident false refusal whose only offered remedy is
-      `--allow-overwrite` is worse than the crash it replaced.
+    The dangerous shape is not the false refusal — that is loud and fail-safe —
+    it is the SILENT one: the pod's `/bin/sh` is dash, whose `echo` turns the two
+    characters `\\t` in a NAME into a real TAB on the pod side only, while every
+    test here runs the probe under bash. The two sides' keys then diverge, the
+    row drops out of the join, and an entry the pod holds with DIFFERENT bytes is
+    pushed over as though it were a pure addition.
 
-    Neither had a test, which is how the claim survived being written down. The
-    real store's entry names are service slugs, so this is latent — but `seed.sh`
-    reads a directory an operator or agent writes into freely.
+    So the domain is bounded instead of the parser hardened. MEASURED 2026-09-05
+    across both live stores: 348 entry files, 0 outside `[A-Za-z0-9._/-]`. These
+    tests pin BOTH directions — that ordinary slugs still push (or the guard
+    would be switched off within a day), and that each awkward shape is refused
+    with nothing pushed.
     """
 
     def _push(self, store: Path, tmp_path: Path, env, *extra):
@@ -18753,65 +18754,257 @@ class TestTheSeedPreFlightSurvivesAwkwardPaths:
             "--push", "ns/app", *extra, env=env,
         )
 
-    def test_a_path_with_a_SPACE_that_is_IDENTICAL_is_not_reported_as_differing(
+    # ---- the guard must NOT over-fire: ordinary names still push -------------
+
+    def test_ordinary_slug_names_are_not_rejected_and_the_push_proceeds(
         self, store: Path, tmp_path: Path, fake_cluster
     ):
-        """🔴 THE FALSE-REFUSAL REGRESSION. Two identical entries whose names
-        share a first word: before the tab-separated key these collapsed to one
-        join key and were both reported as differing."""
+        """🔴 THE OVER-FIRING CONTROL. A name check that refused real entries
+        would be disabled immediately, so this is the assertion that makes the
+        rest of the class meaningful. It also pins `rejected=0` as a number
+        rather than a substring: a check that walked NOTHING also prints 0."""
         env, dest = fake_cluster
-        a = _entry("two-words", SCOPE)
-        b = _entry("two-other", SCOPE)
-        (store / SCOPE / "two words.md").write_text(a)
-        (store / SCOPE / "two other.md").write_text(b)
-        d = dest / SCOPE; d.mkdir(parents=True, exist_ok=True)
-        (d / "two words.md").write_text(a)      # byte-identical
-        (d / "two other.md").write_text(b)      # byte-identical
+        for slug in ("dl-router", "tests", "subsystem_store.api", "a.b-c_d"):
+            (store / SCOPE / f"{slug}.md").write_text(_entry(slug, SCOPE))
 
         r = self._push(store, tmp_path, env)
 
-        assert "differing=0" in r.stdout, (
-            "identical entries were reported as differing — the join key was "
-            f"truncated at the first blank:\n{r.stdout}\n{r.stderr}"
+        m = re.search(r"seed: NAME-CHECK staged=(\d+) rejected=(\d+)", r.stdout)
+        assert m, f"the name check printed no line at all:\n{r.stdout}"
+        staged, rejected = int(m.group(1)), int(m.group(2))
+        assert rejected == 0, (
+            f"ordinary slugs were rejected: {r.stdout}\n{r.stderr}"
+        )
+        # 🔴 POSITIVE CONTROL ON THE COUNT ITSELF. `rejected=0` is also what a
+        # check that walked NOTHING prints, so pin that it saw the entries — the
+        # four written here plus whatever the fixture provides.
+        assert staged >= 4, (
+            f"the name check reported {staged} staged entries but 4 were written "
+            f"here alone — it did not see the list:\n{r.stdout}"
         )
         assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+        assert (dest / SCOPE / "dl-router.md").exists(), "the push did not land"
 
-    def test_a_path_with_a_SPACE_that_DIFFERS_is_still_caught_and_named_in_full(
-        self, store: Path, tmp_path: Path, fake_cluster
+    # ---- each awkward shape is refused, and NOTHING is pushed ---------------
+
+    @pytest.mark.parametrize(
+        "name,label",
+        [
+            ("two words.md", "SPACE — truncated the key at 0x20 in round 2"),
+            ("ta\tbbed.md", "TAB — truncates it at 0x09 after round 3's fix"),
+            ("it's.md", "QUOTE — aborted xargs rc 1 with no diagnostic"),
+            ("back\\slash.md", "BACKSLASH — GNU sha256sum escapes the line, the "
+                               "hand-written answer does not, so the keys diverge"),
+            ("dash-eats\\there.md", "the two characters \\t — dash's echo emits a "
+                                    "REAL TAB, bash a literal; the SILENT case"),
+        ],
+    )
+    def test_an_unsafe_name_is_refused_with_nothing_pushed(
+        self, store: Path, tmp_path: Path, fake_cluster, name, label
     ):
-        """The other direction: the fix must not buy a clean `differing=0` by
-        losing the ability to see a real difference. The refusal must also name
-        the WHOLE path — a truncated name is not actionable."""
         env, dest = fake_cluster
-        (store / SCOPE / "two words.md").write_text(_entry("two-words", SCOPE))
-        d = dest / SCOPE; d.mkdir(parents=True, exist_ok=True)
-        (d / "two words.md").write_text("---\nservice: two-words\n---\nPOD NEWER\n")
+        (store / SCOPE / name).write_text(_entry("odd", SCOPE))
 
         r = self._push(store, tmp_path, env)
 
-        assert r.returncode == 8, f"{r.stdout}\n{r.stderr}"
+        assert r.returncode == 10, f"{label}\n{r.stdout}\n{r.stderr}"
+        m = re.search(r"seed: NAME-CHECK staged=(\d+) rejected=(\d+)", r.stdout)
+        assert m, f"{label}: the name check printed no line:\n{r.stdout}"
+        assert int(m.group(2)) == 1, (
+            f"{label}: expected exactly the one bad name to be rejected, got "
+            f"{m.group(2)}\n{r.stdout}"
+        )
+        assert int(m.group(1)) > 1, (
+            f"{label}: only the bad entry was staged, so this test would pass "
+            f"even against a check that rejects everything:\n{r.stdout}"
+        )
+        assert "NOTHING WAS PUSHED" in r.stderr, f"{label}\n{r.stderr}"
+        # 🔴 THE BYTES, NOT JUST THE EXIT CODE. Asserting rc alone would pass for
+        # a guard that refused AFTER the tar — which is the defect the pre-flight
+        # was built to fix, and it would look identical from the exit code.
+        assert not (dest / SCOPE).exists() or not any((dest / SCOPE).iterdir()), (
+            f"{label}: the refusal happened AFTER something reached the pod: "
+            f"{list((dest / SCOPE).iterdir())}"
+        )
+
+    def test_the_refusal_names_the_offending_path_in_full(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """A truncated name is not actionable — the whole point of the class of
+        bugs this replaces was refusals naming paths that do not exist."""
+        env, _ = fake_cluster
+        (store / SCOPE / "two words.md").write_text(_entry("odd", SCOPE))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 10, f"{r.stdout}\n{r.stderr}"
         assert f"{SCOPE}/two words.md" in r.stderr, (
-            f"the refusal named a truncated path, which nobody can act on: {r.stderr}"
+            f"the refusal did not name the full path: {r.stderr}"
         )
 
-    def test_a_path_with_a_QUOTE_does_not_abort_the_run(
+    def test_the_override_flag_does_NOT_bypass_the_name_check(
         self, store: Path, tmp_path: Path, fake_cluster
     ):
-        """🔴 Red before `-d '\\n'`: `xargs: unmatched single quote`, rc 1, and NOT
-        one `seed:` line — the operator gets a bare failure with no diagnostic,
-        which is the shape this guard's comments claim to have removed."""
+        """🔴 `--allow-overwrite` is an override for the BYTES question (exit 8),
+        where the operator can genuinely know better. It must not reach this one:
+        an unsafe name means the comparison cannot be TRUSTED, so proceeding
+        would push under exactly the ambiguity the flag pretends to resolve."""
         env, dest = fake_cluster
-        body = _entry("its", SCOPE)
-        (store / SCOPE / "it's.md").write_text(body)
-        d = dest / SCOPE; d.mkdir(parents=True, exist_ok=True)
-        (d / "it's.md").write_text(body)        # identical: must NOT refuse
+        (store / SCOPE / "two words.md").write_text(_entry("odd", SCOPE))
 
-        r = self._push(store, tmp_path, env)
+        r = self._push(store, tmp_path, env, "--allow-overwrite")
 
-        assert "unmatched single quote" not in r.stderr, (
-            f"xargs still parses quotes in its INPUT: {r.stderr}"
+        assert r.returncode == 10, (
+            f"--allow-overwrite bypassed the name check:\n{r.stdout}\n{r.stderr}"
         )
-        assert "seed: PRE-FLIGHT" in r.stdout, (
-            f"the run died before the pre-flight could say anything: {r.stdout}\n{r.stderr}"
+        assert not (dest / SCOPE).exists() or not any((dest / SCOPE).iterdir())
+
+
+def _require_dash() -> str:
+    """🔴 FAIL, NEVER SKIP. The pod's shell is dash and the harness's is bash;
+    a tier without dash is structurally blind to every defect that lives in the
+    difference, and a skip there reports safety it never measured. MEASURED
+    2026-09-05: all 5 tests in this class skipped silently before `dash` was
+    added to `REQUIRED_TOOLS` and `flake.nix`'s `gateTools`.
+    """
+    dash = shutil.which("dash")
+    assert dash is not None, (
+        "dash is not on PATH. It is in REQUIRED_TOOLS and gateTools precisely "
+        "so this cannot be skipped — the pod runs dash, the fake kubectl runs "
+        "bash, and the gap between them is a SILENT clobber."
+    )
+    return dash
+
+
+class TestTheSeedProbeAnswersSurviveTheRealPodShell:
+    """🔴 THE HARNESS RUNS THE POD'S COMMAND UNDER BASH; THE POD IS DASH.
+
+    `Dockerfile: FROM python:3.12-slim` -> Debian -> `/bin/sh` is dash, and
+    dash's `echo` INTERPRETS backslash escapes while bash's does not. Every test
+    in this file drives a fake `kubectl` that runs the probe locally, so the
+    suite is structurally blind to the difference. These tests exercise the two
+    hand-written answer lines under `dash` DIRECTLY, which is the only way to see
+    it without a cluster.
+    """
+
+    # 🔴 READ THE COMMAND OUT OF `seed.sh`, NEVER RESTATE IT. The first version
+    # of this class hardcoded a COPY of the probe, so it proved that `printf`
+    # behaves under dash — true no matter what the script does. MEASURED: with
+    # the copy, reverting `seed.sh` to `echo` left all 5 tests GREEN. Extracting
+    # the real inner script is what makes the mutant die.
+    @staticmethod
+    def _probe_script() -> str:
+        src = SEED_PATH.read_text()
+        m = re.search(r"-I\{\} sh -c '(.+?)' _ \{\}", src, re.S)
+        assert m, (
+            "could not find the pod probe's inner `sh -c` in seed.sh — this test "
+            "reads the real command, so a shape change must fail loudly rather "
+            "than silently test nothing"
         )
-        assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+        # the inner script is embedded in a double-quoted shell string, so its
+        # own quotes are backslash-escaped in the source
+        return m.group(1).replace('\\"', '"').replace("\\$", "$")
+
+    def test_the_probe_command_really_is_the_one_under_test(self):
+        """POSITIVE CONTROL on the extractor itself: an empty or wrong match
+        would make every test below vacuous."""
+        script = self._probe_script()
+        assert "ABSENT" in script and "UNREADABLE" in script, script
+        assert "sha256sum" in script, script
+
+    @pytest.mark.parametrize(
+        "name",
+        ["sc/tab\\there.md", "sc/new\\nline.md", "sc/cut\\chere.md", "sc/plain.md"],
+    )
+    def test_dash_and_bash_produce_BYTE_IDENTICAL_answers(self, name):
+        dash = _require_dash()
+
+        def run(shell):
+            return subprocess.run(
+                [shell, "-c", self._probe_script(), "_", name],
+                capture_output=True, text=True, timeout=30,
+            ).stdout
+
+        assert run(dash) == run("bash"), (
+            f"the pod's shell and the test harness's shell disagree on {name!r} — "
+            "this is the silent-clobber route: the two sides' join keys diverge "
+            "and a DIFFERING pod entry reads as a pure addition"
+        )
+
+    def test_the_control_shows_echo_WOULD_have_disagreed(self):
+        """🔴 POSITIVE CONTROL. Without it, the test above is indistinguishable
+        from one whose shells cannot disagree about anything — it would pass just
+        as happily against a name with no escapes in it."""
+        dash = _require_dash()
+        broken = 'echo "ABSENT  $1"'
+        name = "sc/tab\\there.md"
+
+        def run(shell):
+            return subprocess.run(
+                [shell, "-c", broken, "_", name],
+                capture_output=True, text=True, timeout=30,
+            ).stdout
+
+        assert run(dash) != run("bash"), (
+            "the control did not reproduce the `echo` asymmetry, so this test "
+            "file cannot see the defect it claims to guard"
+        )
+
+
+class TestSeedHelpIsCompleteAndCannotDrift:
+    """🔴 THE `--help` CLAIM HAS NOW BEEN WRONG TWICE, WITH NO TEST BOTH TIMES.
+
+    First `sed -n '2,26p'` — a line range over a header that grows, so additions
+    pushed the window into the middle of a clause and the Usage block had ALWAYS
+    sat below it. Then `awk … {exit}` on the first non-comment line — which a
+    BLANK line is, so one blank inserted for readability cut `--help` from 61
+    lines to 31 and took `--allow-overwrite` with it (MEASURED 2026-09-05).
+    """
+
+    def test_help_reaches_the_usage_block_and_ends_on_a_terminator(self):
+        r = run_seed("--help")
+
+        assert r.returncode == 0, r.stderr
+        assert "--allow-overwrite" in r.stdout, (
+            "`--help` does not reach the Usage block — the only place an "
+            f"operator looks:\n{r.stdout}"
+        )
+        assert "Usage:" in r.stdout, r.stdout
+        last = r.stdout.rstrip().splitlines()[-1].rstrip()
+        assert last.endswith((".", ":", "!")), (
+            f"`--help` ends mid-sentence on: {last!r}"
+        )
+
+    def test_help_documents_every_exit_code_the_script_can_refuse_with(self):
+        """A refusal code an operator cannot look up is a bare number."""
+        r = run_seed("--help")
+        for code in ("8", "9", "10"):
+            assert f"\n  {code} " in r.stdout or f"\n  {code}  " in r.stdout, (
+                f"exit {code} is not documented in --help:\n{r.stdout}"
+            )
+
+    def test_a_BLANK_LINE_in_the_header_does_not_truncate_help(self, tmp_path: Path):
+        """🔴 THE REGRESSION, as a mutation rather than an assertion about the
+        current text: inject a blank comment-free line into the header and the
+        output must not shrink."""
+        src = SEED_PATH.read_text().splitlines(keepends=True)
+        cut = next(i for i, l in enumerate(src) if l.startswith("# Usage:"))
+        mutated = tmp_path / "seed-with-blank.sh"
+        mutated.write_text("".join(src[:cut]) + "\n" + "".join(src[cut:]))
+
+        def help_of(path):
+            return subprocess.run(
+                ["bash", str(path), "--help"],
+                capture_output=True, text=True, timeout=120,
+            ).stdout
+
+        original, injected = help_of(SEED_PATH), help_of(mutated)
+
+        assert "--allow-overwrite" in injected, (
+            "one blank line in the header truncated `--help` and took the Usage "
+            f"block with it:\n{injected}"
+        )
+        assert len(injected.splitlines()) >= len(original.splitlines()), (
+            f"help shrank from {len(original.splitlines())} to "
+            f"{len(injected.splitlines())} lines"
+        )

@@ -118,7 +118,7 @@
       gateTools = [
         gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
         pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
-        pkgs.rsync pkgs.zsh pkgs.age
+        pkgs.rsync pkgs.zsh pkgs.age pkgs.dash
       ];
     in
     {
