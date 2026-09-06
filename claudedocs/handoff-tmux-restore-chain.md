@@ -116,9 +116,19 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
 
 ## Next steps (ranked)
 1. **Reboot and observe.** The only test that closes both open investigations above;
-   everything else is simulation. Right after login run
-   `journalctl --user -u tmux-session-restore.service -b` and compare
-   `tmux list-windows -a | wc -l` against the plan's entry count.
+   everything else is simulation. **The pre-reboot baseline is already on disk** —
+   captured 2026-09-06 16:14Z at `~/.cache/tmux-restore-observe/pre-latest.txt`
+   (`boot_time=2026-08-04 14:51:40`, layout 56 windows / 56 panes, plan 46 entries /
+   45 bound, live 22 sessions / 56 windows). After the reboot, run **one command**:
+   ```bash
+   ~/workspace/devrc/scripts/tmux-restore-observe.sh post   # rc 0 clean · 1 race · 3 could-not-decide · 4 windows missing
+   ```
+   It captures the live state plus the unit's journal for that boot and diffs it
+   against the baseline. 🔴 Its rc-0 wording says so itself: a clean boot is ONE
+   negative sample of an unguarded timing assumption, not a closure. A copy of the
+   script also sits at `~/.cache/tmux-restore-observe/tmux-restore-observe.sh` so a
+   branch switch cannot take it away. It is a READER — it adds no boot-path unit, on
+   purpose: three defects in this arc came from changing a boot path nobody had observed.
    forcing: none
 2. **Run bare `claude` windows inside tmux** so a closed window detaches instead of
    vanishing. Touches no repo file — an operator habit, or an i3 binding in
