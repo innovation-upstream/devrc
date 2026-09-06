@@ -1732,7 +1732,7 @@ TARGET_FLOORS=(
   "scripts/collector/claude/tests|219"
   "scripts/collector/i3/tests|12"
   "scripts/collector/browser-ext/tests|12"
-  "scripts/collector/opencode/tests|162"
+  "scripts/collector/opencode/tests|224"
   "scripts/dl-router/tests|942"
   # 2026-08-19, the DRIFT CEILING fired and #570 re-pinned this line to 622 as
   # part of the opencode-pin fix, landing the VALUE with no accounting. This is
