@@ -66,9 +66,15 @@
 #   10  a staged entry NAME this push cannot compare safely. No override either,
 #       and the rules are not meant to be relaxed: the comparison that protects
 #       the pod moves paths as TEXT between two different shells, so a name
-#       outside them can make a DIFFERING entry look brand-new. Three rules,
+#       outside them can make a DIFFERING entry look brand-new. Four rules,
 #       each closing a measured hole rather than a hypothetical one:
 #         * characters outside `[A-Za-z0-9._/-]`;
+#         * an entry named exactly `.md`. `find -name '*.md'` DOES emit
+#           `<scope>/.md`, and the `\.md$` anchor requires a non-empty stem
+#           before it — so this arm arrived WITH that anchor and is its only
+#           new refusal class (measured over 66,822 name pairs). It is listed
+#           because an operator hitting it violates none of the other three
+#           and would otherwise read a message that does not describe them;
 #         * a component STARTING with `-`. For the FIRST component this is
 #           measured: `-dashscope/thing.md` reached `sha256sum` as `-d…`
 #           (`invalid option -- 'd'`, rc 123, no `seed:` line). For the SECOND
@@ -81,7 +87,7 @@
 #           shape: a filename cannot contain `/`, so the second half of a split
 #           never has one and is always rejected.
 #       Rename the entry. Measured 2026-09-05 across both live stores: 373
-#       entry files, 0 affected by any of the three. 🔴 THAT COUNT MOVES — it
+#       entry files, 0 affected by any of the four. 🔴 THAT COUNT MOVES — it
 #       read 348 earlier the same day; re-measure rather than citing it.
 #
 # The two halves are split on purpose: staging is hermetic and testable, pushing
@@ -375,6 +381,8 @@ fi
 # something this script can establish, so it stops trying.
 #
 # MEASURED 2026-09-05 across BOTH live stores: 373 entry files, **0** whose path
+# (re-measured hours later: 374 — 🔴 THIS COUNT MOVES, re-take it rather than
+# citing this line)
 # leaves `[A-Za-z0-9._/-]`. Entry names are service slugs by construction, and
 # `cairn-cutover.py` — the only programmatic caller — builds its delta tree from
 # that same population. So this rejects nothing that exists and nothing any
@@ -424,7 +432,16 @@ _odd_f="$_seed_tmp/odd-names"
 # WAS WRONG. The reasoning was "`find` only emits `*.md`, so it can never change
 # a verdict". `-name '*.md'` constrains the BASENAME; this grep runs on LINES,
 # and the whole mechanism here is that a newline turns one path into two lines —
-# of which the one carrying the `/` is precisely the one NOT ending in `.md`.
+# and the one carrying the `/` USUALLY does not end in `.md`.
+#
+# 🔴 "USUALLY", NOT "ALWAYS" — this said "precisely" first, and that is false
+# whenever the stem ITSELF contains `.md`: for `widget-cfg/a.md<NL>b.md` the
+# leading half is well-formed, so the refusal names only `b.md` and the scope
+# goes unmentioned after all. MEASURED over the split-line model: shapes whose
+# scope-bearing half is NOT named fall from 60 without the anchor to 6 with it.
+# So the anchor is a 10x improvement in the DIAGNOSTIC, not a closure. The
+# REFUSAL is unaffected either way — 0 newline shapes are accepted, with or
+# without it — which is why this is a diagnostic argument and not a safety one.
 # MEASURED on `widget-cfg/na<NL>me.md`: without the anchor the refusal names
 # `2:me.md` ALONE — a path that is not in the store, with the scope never
 # mentioned; with it, `1:widget-cfg/na` AND `2:me.md`. Same exit code either
@@ -451,7 +468,9 @@ _n_odd=$(wc -l < "$_odd_f" | tr -d ' ')
 echo "seed: NAME-CHECK staged=$staged_entries rejected=$_n_odd"
 if [[ "$_n_odd" -gt 0 ]]; then
   echo "seed: REFUSING — $_n_odd staged entry path(s) contain characters this push cannot" >&2
-  echo "seed:   compare safely. Allowed: A-Z a-z 0-9 . _ - / and no component may START with -" >&2
+  echo "seed:   compare safely. A staged path must read <scope>/<entry>.md where both" >&2
+  echo "seed:   components use only [A-Za-z0-9._-], neither STARTS with -, and the entry" >&2
+  echo "seed:   has a non-empty stem before .md (a file named exactly '.md' is refused)." >&2
   sed 's/^/  /' "$_odd_f" >&2
   echo "seed:   (each line is <line-number-in-staged-list>:<path>)" >&2
   echo "seed: 🔴 THIS IS NOT A LIMIT YOU SHOULD WIDEN BY RELAXING THE PATTERN. The pre-flight" >&2

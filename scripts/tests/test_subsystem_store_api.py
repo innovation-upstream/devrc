@@ -18923,6 +18923,29 @@ class TestTheSeedNameCheckRejectsPathsItCannotCompareSafely:
         )
         assert (dest / SCOPE / "dl-router.md").exists()
 
+    def test_an_entry_named_exactly_dot_md_is_refused(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE FOURTH RULE, which arrived as a SIDE EFFECT of the `\\.md$`
+        anchor and which nothing stated. `find -name '*.md'` DOES emit
+        `<scope>/.md` (verified), and the anchor needs a non-empty stem before
+        it — so the base accepted this name and HEAD refuses it. Pinned because
+        an undocumented refusal class is how an operator ends up reading a
+        message that describes none of the rules they broke."""
+        env, dest = fake_cluster
+        (store / SCOPE / ".md").write_text(_entry("dotmd", SCOPE))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 10, f"{r.stdout}\n{r.stderr}"
+        assert f"{SCOPE}/.md" in r.stderr, r.stderr
+        # the message must actually describe THIS rule, not only the other three
+        assert "stem" in r.stderr, (
+            "the refusal does not mention the empty-stem rule, so the operator "
+            f"is told they broke a rule they did not break: {r.stderr}"
+        )
+        assert not (dest / SCOPE).exists() or not any((dest / SCOPE).iterdir())
+
     def test_the_refusal_names_the_offending_path_in_full(
         self, store: Path, tmp_path: Path, fake_cluster
     ):
@@ -18986,7 +19009,7 @@ class TestTheSeedProbeAnswersSurviveTheRealPodShell:
     # 🔴 READ THE COMMAND OUT OF `seed.sh`, NEVER RESTATE IT. The first version
     # of this class hardcoded a COPY of the probe, so it proved that `printf`
     # behaves under dash — true no matter what the script does. MEASURED: with
-    # the copy, reverting `seed.sh` to `echo` left all 5 tests GREEN. Extracting
+    # the copy, reverting `seed.sh` to `echo` left every test in this class GREEN. Extracting
     # the real inner script is what makes the mutant die.
     @staticmethod
     def _probe_script() -> str:
@@ -19047,6 +19070,25 @@ class TestTheSeedProbeAnswersSurviveTheRealPodShell:
         raw = re.search(r"-I\{\} sh -c '(.+?)' _ \{\}", SEED_PATH.read_text(), re.S)
         assert raw and ('\\"' in raw.group(1) or "\\\\" in raw.group(1)), (
             "the raw source carries no escapes, so this test proves nothing"
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        ["sc/tab\\there.md", "sc/new\\nline.md", "sc/cut\\chere.md", "sc/plain.md"],
+    )
+    def test_dash_and_bash_produce_BYTE_IDENTICAL_answers(self, name):
+        dash = _require_dash()
+
+        def run(shell):
+            return subprocess.run(
+                [shell, "-c", self._probe_script(), "_", name],
+                capture_output=True, text=True, timeout=30,
+            ).stdout
+
+        assert run(dash) == run("bash"), (
+            f"the pod's shell and the test harness's shell disagree on {name!r} — "
+            "this is the silent-clobber route: the two sides' join keys diverge "
+            "and a DIFFERING pod entry reads as a pure addition"
         )
 
     def test_the_UNREADABLE_arm_is_exercised_too(self, tmp_path: Path):
