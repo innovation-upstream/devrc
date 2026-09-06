@@ -17,84 +17,73 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Expand the mention system (`mention-open.py`) so clicking `repo#N` in Alacritty resolves against ALL repos the operator contributes to, not just those checked out locally in `~/workspace/`.
 
 ## State now
-**BOTH efforts are now SHIPPED.** The 2026-09-03 resolver (#1291, `fd68d48c`) and the
-2026-09-04/05 detection-widening + attribution work (#1313, squash `3c324156`).
+**The whole mention effort is SHIPPED.** Four PRs merged and deployed to both hosts:
+`#1291` (`fd68d48c`) resolver · `#1313` (`3c324156`) detection widening + attribution ·
+`#1322` (`a75ffc6a`) alacritty copy-on-select · `#1328` (`3f4d9c0f`) local-first click path.
+Both hosts converged and **compared** at `3f4d9c0f`; `ship.sh` reports
+`NO dirty path is read by nix`, so the artifacts genuinely match — the host divergence this
+doc used to record is CLOSED.
 
-**#1313 — merged and VERIFIED ON THE DEPLOYED ARTIFACT, both hosts.**
-- Ladder: round-1 full audit → 5 findings → fix round → round-2 delta audit → **safe to
-  merge, no 🔴**. Round 2 re-ran the two claims that were self-reported rather than code (the
-  17/17 mutation sweep, independently re-run with its positive control killed and sources
-  restored to identical hashes; and the 219 floor, re-derived from a live 230-count through
-  the gate's own formula).
-- Gated sha `7d94c568` **was** the merged tree (`origin/main` `f887e958` an ancestor of it),
-  so what was audited is byte-identical to what merged. All four legs green: dev-host pytest
-  21,642 collected / 0 failed, dev-host node 1,449 / 0, plus both nix derivations built ONE
-  AT A TIME.
-- `ship.sh` converged both hosts at `3c324156` and **compared** them (not "NOT COMPARED").
-- Deployed-artifact checks (not a checkout): `mention_scan.py` → `644jij…` (was `arkxlc…`),
-  `session-tailer.py` → `cgxllq…` carrying the attributed dedupe key, and
-  `_MENTION_HINTS = MS.mention_hints(MS.PROFILE_TELEMETRY)` — the inert-prefilter fix at the
-  TELEMETRY profile (deriving at the default returns the old two literals and LOOKS correct).
-- **No consumer restart was needed, and that was checked not assumed**: the mention work runs
-  under `claude-activity-source.timer`, which is `oneshot` and fires ~5-minutely, so each run
-  is a fresh interpreter. `activity-collector.service` has been up 8 days and the switch did
-  not restart it — it is the spool shipper and this PR does not touch it.
+**Operator click-test 2026-09-05 — the first end-to-end evidence this feature ever had.**
+`talos-infra#1065` opened correctly. Two defects came out of it, both now fixed:
+- `dashboard#12` took ~10 s. **Not a performance problem — a lookup-order one.** The click path
+  searched ALL of GitHub before ever consulting the operator's own 369-repo mapping, for a name
+  the mapping does not hold. Measured 4.26 s at 6% CPU (pure network wait), returning only
+  strangers' repos. **Fixed in #1328 by deleting the GitHub-wide search**: the candidate
+  universe is now the local allowlist only. **Measured on the deployed artifact: 4.26 s →
+  0.086 s.**
+- A bare `#N` appeared broken. **It was not** — `#1291`/`#370`/`#12` all resolved. The operator
+  had clicked `#282828`, the gruvbox background literal, which the six-digit guard correctly
+  rejects. The message (`no mention in the clicked text`) made correct behaviour read as a bug;
+  it now names the reason.
 
-🔴 **THE HOSTS AGREE ON GIT AND NOT ON ARTIFACT.** `ship.sh` said so explicitly:
-`nix/programs/alacritty/default.nix` is dirty AND read at eval time, so the workbench's
-generation is `origin/main` PLUS the uncommitted `save_to_clipboard` WIP. The laptop's is
-not. Git parity is not host parity — see ranked item 3.
+⚠ **The click path has changed materially since that test** (local-first, picker-on-failure,
+six-digit toast) — so ranked item 1 is worth ONE more pass, and it is still the only
+end-to-end evidence nobody can produce but the operator.
+
+🔴 **Tekton's `devrc-pytests` check is RED for reasons unrelated to any diff, and #1328 was
+merged past it.** It fails on `test_mjs_parses[attachments.mjs]`. Evidence it is inherited:
+the same leg is red on **#1326, which is a single markdown file** and cannot reach `.mjs`
+parsing; and the test passes on clean `main`, on the PR branch head, AND in the local nix
+sandbox tier — three environments. Per this repo's own rule a permanently-red gate trains
+everyone to click through, which is exactly what happened here. **Someone should fix or
+retire that leg**; it is not this effort's to own, and it is not evidence about this work.
 
 ## Open investigations — live diagnosis state
 (none — the disclosure is a known, measured state awaiting an operator decision, not a
 diagnosis in progress.)
 
 ## Next steps (ranked)
-1. **Exercise the real Alacritty click path** — STILL the one thing never done end-to-end,
-   and now more valuable than before because #1313 changed it. Plain left-click (the hint is
-   `mouse.enabled = true` with no mods; `Ctrl+Shift+M` is the keyboard route):
-   `talos-infra#1065` (opens), `dashboard#12` (rofi picker, now with an explanatory line
-   above the list naming the clicked text, the row count and the mapping's age), `#282828`
-   (underlines; since #1328 it opens NO picker and shows a named toast saying it looks like a
-   colour literal). 🔴 **The widest-blast-radius change to check deliberately:** a bare `#N` clicked
-   in a pane with NO resolvable repo now shows a ~370-row fuzzy picker with the clawgate task
-   first, where it previously opened the clawgate task directly. Type to narrow. If that is
-   wrong in practice it is a one-line ordering change.
+1. **Exercise the Alacritty click path once more** — the code changed after the 2026-09-05
+   test. Plain left-click (`mouse.enabled = true`, no mods; `Ctrl+Shift+M` for the keyboard
+   route). `talos-infra#1065` → opens. `dashboard#12` → picker in ~80 ms, from YOUR repos.
+   `#282828` → named toast, no window raised. A bare `#N` with no resolvable pane repo →
+   picker with the clawgate task first.
    🔴 NEEDS A HUMAN — clicking raises windows, a `pkill`-class action for an agent.
    forcing: none
-2. ~~**Add a staleness signal for `~/.config/mention-open/known_repos.json`**~~ — **DONE** in
-   PR #1328. `mention-open.py` now measures the mapping's age (`mapping_age_days`) and
-   surfaces it in BOTH places the operator can see it: the note above the fuzzy picker
-   (`universe_note`) and the refusal body (`staleness_note`, past `STALE_MAPPING_DAYS = 7`).
-   🔴 **A SIGNAL, NOT A REPAIR, AND THAT WAS THE CHOICE.** A systemd-user timer was the other
-   option and was rejected: `regen-known-repos.py` shells out to `gh api user/repos` and
-   REFUSES below its 25-repo floor with exit 3, so a host without `gh auth` would take a
-   failing unit plus a failure toast on every fire — a permanently-red timer, which trains
-   everyone to ignore it. The signal instead fires at the exact moment the staleness bites:
-   the click that did not resolve. Re-measured 2026-09-05: still zero timers reference the
-   generator. Pinned at four ages (0, 6, 8, 90 days) by `test_the_mapping_age_is_measured_at_
-   FOUR_points`, and mutation-verified (K32).
+2. ~~Staleness signal for `known_repos.json`~~ — **DONE in #1328**, and deliberately a SIGNAL,
+   not a timer: `regen-known-repos.py` exits 3 below its 25-repo floor, so a systemd timer
+   would be a permanently-red unit and a failure toast on any host without `gh auth`.
+   `mapping_age_days()` feeds the picker note and a `--print` refusal note past
+   `STALE_MAPPING_DAYS = 7`; `None` (absent) is never treated as fresh. Kept numbered so
+   ranks do not re-point.
    forcing: none
-3. **Commit the workbench's `save_to_clipboard` WIP** in
-   `nix/programs/alacritty/default.nix`. Now the ONLY substantive difference between the two
-   hosts' built generations. MEASURED 2026-09-05: it did NOT block this ship (workbench was
-   behind 1 / ahead 0, and the incoming commit does not touch that file), so `--ff-only`
-   succeeded — but it stays a latent rc 7 for the next ship whose incoming commits DO touch
-   it, and meanwhile the two hosts differ.
-   forcing: gate — `ship.sh` already skipped this host once with rc 7 over this exact file.
-4. ~~Review, gate and merge the in-flight detection/attribution PR~~ — **DONE** (#1313 merged
-   `3c324156`, claim `devrc-mention-attribution` released). Kept numbered so ranks 1-3 do not
-   re-point.
+3. ~~Commit the workbench's `save_to_clipboard` WIP~~ — **DONE in #1322** (`a75ffc6a`).
+   🔴 This item was STALE for hours and told the next session to redo merged work — a
+   round-2 audit caught it. The "latent rc 7 for the next ship that touches this file"
+   warning was false, and pointed at the very PR that had already fixed it.
    forcing: none
-5. **Fix `scripts/collector/README.md:66-69`** (devrc, one file) — round 2's only 🟡, left
-   unfixed ON PURPOSE so the merged artifact stayed byte-identical to the audited one. The
-   README still promises IN BOLD that "what the terminal underlines and what the telemetry
-   records cannot drift", and gives that as the reason for the module's location — the exact
-   invariant #1313 deliberately retired (`mention_scan.py:12` now opens "🔴 THE TWO CONSUMERS
-   NO LONGER SHARE ONE PATTERN SET"). Lines 59-60 of the same block also list the emitted
-   payload fields without `repo` / `repo_source`. Risk: a maintainer reads it, believes the
-   click surface is structurally protected, and adds a pattern as `_BOTH` — the thing the
-   split exists to make a deliberate act.
+4. ~~Review, gate and merge the detection/attribution PR~~ — **DONE** (#1313).
+   forcing: none
+5. ~~Fix `scripts/collector/README.md`~~ — **DONE in #1321**, which also fixed two
+   restatements of the retired invariant inside `session-tailer.py`.
+   forcing: none
+6. **Close the two guard gaps round 2 found** (devrc; `scripts/mention-open.py` +
+   `scripts/tests/test_mention_open.py` + the battery). IN FLIGHT: see the open PR.
+   (a) the staleness note is unreachable on the non-`--print` refusal path — measured 220
+   combinations, 110 refusals, **0 branch hits**; (b) the disclosure tripwire iterates
+   universe VALUES and never KEYS, so a "did you mean?" mutant leaking every private repo
+   NAME survives 127/127.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -247,36 +236,67 @@ diagnosis in progress.)
   because only the second is actionable. `--print` still prints every candidate for real
   ambiguity. Nothing in the repo consumes `--print`.
 
+- 🔴 **THE LOOKUP-ORDER LESSON, which generalises past this feature.** A 10-second click was
+  not slow code: it asked a remote, unbounded corpus first and a local, authoritative one
+  never. The fix was a DELETION. **When something is slow, ask what corpus it is searching
+  and whether a smaller authoritative one was already on disk** — before profiling, caching or
+  parallelising. Measured: 4.26 s → 0.086 s, and the deleted path could only ever return
+  repos the operator does not own.
+- 🔴 **"It's broken" and "it's correct but says so badly" are indistinguishable to the
+  operator.** The bare-`#N` report was the guard working exactly as designed; the wording made
+  it read as a failure, and it cost a full investigation to establish. **A refusal must name
+  its reason** — `no mention in the clicked text` says nothing; `#282828 is six digits — that
+  looks like a colour literal` ends the question.
+- 🔴 **DELETING A PASS WAS NOT ENOUGH — the fan-out was the other 60%.** `discover_repos` ran
+  **100 serial `git remote get-url` children (149-184 ms)**. Removing the network call alone
+  would have landed at ~170 ms and quietly missed the target. Only measurement found it.
+  Second-order: the fix's own top-level `import concurrent.futures` cost ~5 ms on EVERY click
+  including ones that never discover — caught only by an **interleaved** A/B (A,B,A,B), where a
+  plain before/after run had made it look like load. It is imported lazily now.
+- 🔴 **A ≥3-element fixture is NOT enough to kill a transposition mutant** — a 3-element
+  reversal leaves the middle element mapped to itself, so a third of the mutation is
+  invisible. Use four; four has no fixed point. ⚠ And the corollary the round-2 audit added:
+  the *reason* stated above is stronger than it needs to be — three would also have killed
+  that particular mutant, because the assertion is whole-dict equality. Four is still right;
+  the justification does not establish what it claims.
+- 🔴 **Two tests were reading the operator's REAL `known_repos.json`**, so they asserted
+  different things on the dev host and in the nix sandbox (empty `HOME`). A test that reads
+  live host state is structurally blind in one tier — and these were DISCLOSURE tests.
+- 🔴 **A guard can be one spelling short of the substitution its own docstring names.** The
+  no-network ledger keyed `(argv[0], argv[1])` and so admitted `git remote update` — which
+  runs `git fetch` per remote — while its docstring said the subcommand was in the key
+  *because* bare `git` would admit `git fetch`. Now keyed on the verb path.
+- 🔴 **The mutation instrument itself scored an UNIMPORTABLE handler as SURVIVED**, because its
+  sanity floor ran only on the control, not per mutant. Every mutation result this subsystem
+  produced rested on that. Fixed with a `NOT-OBSERVED` verdict arm.
+- **`notify-send` swallows a body that begins with `--`** — it parses it as an option, exits 1,
+  and shows NO toast. Both new refusal bodies started with `--`. Fix: `notify-send … -- SUMMARY
+  BODY`. A refusal that displays nothing is worse than the one it replaced.
+- **rofi cannot distinguish "typed a name, nothing matched, Escape" from "changed my mind"** —
+  `-no-custom` makes both a non-zero exit with no selection. So the diagnosis goes ABOVE the
+  list as `-mesg` rather than being toasted after every dismissal.
+
 ## How to verify
 ```bash
-# The 2026-09-03 resolver work, on the deployed artifact (not a checkout)
-python3 ~/workspace/devrc/scripts/mention-open.py --print 'talos-infra#1065'   # civitai/talos-infra
-# 🔴 Since #1328 there is no namesake search, so an unresolvable name REFUSES (exit 1) and
-# names BOTH causes — the flag, and the mapping's state — rather than printing candidates.
-python3 ~/workspace/devrc/scripts/mention-open.py --print 'kubernetes#1'       # exit 1, named reason
-python3 ~/workspace/devrc/scripts/mention-open.py --print 'zzz-no-such-repo#1' # exit 1, named reason
-# The six-digit branch: a colour literal is answered, not asked about (exit 1, named toast).
-python3 ~/workspace/devrc/scripts/mention-open.py '#282828'
+# The click path, on the deployed artifact (mention-open runs from the WORKING TREE,
+# so `git pull` alone changes it — only the telemetry half needs a switch)
+time python3 ~/workspace/devrc/scripts/mention-open.py --print 'dashboard#12'   # ~0.09s
+python3 ~/workspace/devrc/scripts/mention-open.py --print 'talos-infra#1065'    # civitai/talos-infra
+python3 ~/workspace/devrc/scripts/mention-open.py --print '#1291'               # clawgate task
+python3 ~/workspace/devrc/scripts/mention-open.py --print '#282828'             # names the colour reason
 
-# The premise correction — this MUST resolve, it is not a gap
-python3 ~/workspace/devrc/scripts/mention-open.py --print 'innovation-upstream/devrc#1291'
-
-# The prefilter that makes new patterns inert — read it before adding any
-grep -n '_MENTION_HINTS' ~/workspace/devrc/scripts/collector/claude/session-tailer.py
+# Which half needs a switch — readlink is the arbiter, never a diff
+readlink -f ~/.config/alacritty/alacritty.toml            # /nix/store/... -> needs a switch
+readlink -f ~/.config/activity-collector/mention_scan.py  # /nix/store/... -> needs a switch
 
 # The mapping is per-host, untracked, 0600
 ls -l ~/.config/mention-open/known_repos.json
 git -C ~/workspace/devrc ls-files | grep -c 'collector/known_repos'   # must be 0
 
-# The disclosure guard, including its own positive control
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_regen_known_repos.py -q -k "published or detector_FIRES"
+# The committed mutation battery (re-runnable, unlike round 1's)
+nix develop ~/workspace/devrc -c python3 ~/workspace/devrc/scripts/tests/mutation_battery_mentions.py
 
-# In-flight work: is the agent's PR up, and is the claim still held?
-gh pr list --repo innovation-upstream/devrc --state open --search 'mention in:title'
-claim-work --list | grep mention-attribution
-
-# Both hosts on the same sha (they were NOT at the time of writing)
+# Both hosts on the same sha
 git -C ~/workspace/devrc rev-parse --short HEAD
 ssh zach@192.168.50.155 'git -C ~/workspace/devrc rev-parse --short HEAD'
 ```
