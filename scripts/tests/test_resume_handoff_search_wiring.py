@@ -60,15 +60,23 @@ SEARCH_MODULE = REPO_ROOT / "scripts" / "lib" / "handoff_search.py"
 # for `cairn` and for `subsystem_recall.py`, in a completely different sense.
 # `claude/RULES.md`: "verified in isolation is the new vacuous green -- the
 # defect lives in the SEAM nobody owns."
-BLOCK_OPEN = "**And ask whether ANOTHER doc already ruled it out**"
+BLOCK_OPEN = "**Surface what past sessions already recorded — TWO recall surfaces"
 BLOCK_CLOSE = "carry on with the item."
 
 # 🔴 THE COMMAND, PINNED WHOLE. Normalised only for internal whitespace runs, so
 # a reflow across lines is tolerated and a changed flag is not.
+#
+# 🔴 THE QUERY IS THE TOPIC, NOT AN OPEN ITEM, AND THAT IS THE WHOLE POINT OF THE
+# 2026-09-06 MOVE. Keyed on an open item the step can only run when one exists,
+# which is the conditional that measured 1/14. Every resume has a topic.
 EXPECTED_COMMAND = (
     "python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline "
-    '--query "<the open item, in its own words>" --limit 3'
+    "--query \"<this handoff's topic, in plain words>\" --limit 3"
 )
+
+# The step that was MEASURED to fire 5/6, and whose company this command was
+# moved into. Pinned as the first command of that same numbered step.
+CO_LOCATED_COMMAND = "cairn recall --repo"
 
 
 def _load_search_module():
@@ -258,6 +266,78 @@ def test_the_block_carries_the_recall_posture_and_the_scope_LITERAL():
             "Do not drop it to save bytes -- claude/skills/resume/SKILL.md has "
             "no byte ceiling, and this is the honesty half of the wiring."
         )
+
+
+def numbered_steps(text: str) -> list[tuple[int, str]]:
+    """Split the skill body into its top-level numbered steps.
+
+    Returns [(step_number, body), ...]. A step starts at a line matching
+    `^<n>. ` at column 0 and runs to the next such line, so the body includes
+    every indented continuation and fenced block that belongs to it.
+    """
+    starts = [
+        (int(m.group(1)), m.start())
+        for m in re.finditer(r"(?m)^(\d+)\.\s", text)
+    ]
+    out = []
+    for i, (num, pos) in enumerate(starts):
+        end = starts[i + 1][1] if i + 1 < len(starts) else len(text)
+        out.append((num, text[pos:end]))
+    return out
+
+
+def test_the_query_is_UNCONDITIONAL__it_shares_a_numbered_step_with_cairn_recall():
+    """🔴 THE REGRESSION GUARD FOR THE 2026-09-06 MOVE — structural, not spelled.
+
+    MEASURED over the 34 h after `#1295` merged: the query lived as a
+    CONDITIONAL inside step 3 ("before working any open item…") and **1 of 14**
+    `/resume` runs across both hosts ever invoked it -- and that one was reading
+    `origin/main` off the staleness alarm, not firing the step. The trigger was
+    met: all six workbench non-firing runs ran `claim-work`, five made edits, and
+    five of six resumed a doc carrying an `## Open investigations` section. The
+    discriminator was PLACEMENT: step 3's sibling `git log --since` check -- same
+    trigger, same block, an ordinary command -- fired 0/6, while step 4
+    (`cairn recall`, numbered, unconditional, fenced) fired 5/6.
+
+    🔴 SO THIS PINS A RELATIONSHIP, NOT A WORD. `claude/RULES.md`: "a guard can be
+    SPELLED rather than STRUCTURAL -- ask: can it pass while the hazard exists in
+    a different shape?" A grep for "unconditional" would pass on a body that says
+    the word and still gates the command behind an open item. What cannot be
+    reworded around is WHICH numbered step the command physically sits in: the
+    hazard IS the command being in a step whose entry is conditional, so the
+    guard asserts it shares a step with the surface measured to fire.
+
+    ⚠ WHAT THIS DOES NOT CLAIM: that co-location reproduces 5/6. That is a
+    prediction, and the residual is stated in the skill -- the 5/6 was measured
+    with ONE command in the step. Re-measure; do not read this green as adoption.
+    """
+    steps = numbered_steps(_skill_text())
+    assert steps, "no numbered steps parsed out of the resume skill -- format moved?"
+
+    holding = [n for n, body in steps if _normalise(EXPECTED_COMMAND) in _normalise(body)]
+    assert len(holding) == 1, (
+        f"the prescribed query appears in {len(holding)} numbered step(s) "
+        f"{holding}, expected exactly 1. Two copies mean two contracts that can "
+        "drift apart; zero means the wiring left the numbered steps entirely."
+    )
+
+    co_located = [n for n, body in steps if CO_LOCATED_COMMAND in body]
+    assert len(co_located) == 1, (
+        f"`{CO_LOCATED_COMMAND}` appears in {len(co_located)} numbered step(s) "
+        f"{co_located}, expected exactly 1 -- the anchor this guard measures "
+        "against is itself ambiguous, so the assertion below would be meaningless."
+    )
+
+    assert holding[0] == co_located[0], (
+        f"the handoff-corpus query is in step {holding[0]} but `cairn recall` is "
+        f"in step {co_located[0]}.\n"
+        "🔴 The query was MOVED into `cairn recall`'s step on 2026-09-06 because, "
+        "as a conditional in step 3, it was invoked by 1 of 14 real /resume runs. "
+        "Moving it back out re-creates a step that only fires when a session "
+        "happens to be working an open item -- measured at ~7% of runs.\n"
+        "If you are deliberately restructuring, re-measure adoption FIRST and put "
+        "the number in the commit message."
+    )
 
 
 def test_the_sentinels_can_report_a_missing_block(tmp_path):
