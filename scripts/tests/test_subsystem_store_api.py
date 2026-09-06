@@ -2816,6 +2816,12 @@ case "$sub" in
     ;;
   exec)
     if [ "${1:-}" = "-i" ]; then shift; fi
+    # $FAKE_PROBE_SILENT makes the PRE-FLIGHT probe (the only exec that runs
+    # sha256sum) answer with silence at rc 0 — the shape a stdin stream that
+    # closes early produces. Default off: every other test is unaffected.
+    if [ -n "${FAKE_PROBE_SILENT:-}" ]; then
+      case "$*" in *sha256sum*) exit 0 ;; esac
+    fi
     if [ $# -gt 0 ]; then shift; fi
     if [ "${1:-}" = "--" ]; then shift; fi
     n=$#
@@ -18487,4 +18493,721 @@ class TestTheSitingRULESThemselvesArePinned:
             f"_MIN_FREE_BYTES ({store_siting._MIN_FREE_BYTES:,}) exceeds a container's "
             "default 64Mi /dev/shm, so every store would fall back to disk and this "
             "module would be inert with the suite green"
+        )
+
+
+class TestSeedRefusesToOverwriteANewerPodEntry:
+    """🔴 THE CUTOVER INVERTED THE AUTHORITY AND `seed.sh` WAS NEVER UPDATED.
+
+    The extract "adds and overwrites but never deletes" — safe while the LOCAL
+    store was authoritative, silent data loss now that the pod is. A shared entry
+    whose pod copy has moved on (a bullet appended via `cairn append`, an `OPEN:`
+    rewritten `RESOLVED <sha>:`) was replaced by this host's older copy, and the
+    verdict still printed OK because the NAME landed.
+
+    MEASURED 2026-09-02/03 on the real store: of 25 bullets present locally but
+    not on the pod, FIVE were the pod being NEWER — two of them `OPEN:` ->
+    `RESOLVED` closures with ~20 lines of later corrections. A re-seed would have
+    reverted all five and reported success.
+
+    🔴 The guard is a PRE-FLIGHT. The pre-existing containment check runs after
+    the extract, so by the time it can speak the bytes are gone.
+    """
+
+    def _push(self, store: Path, tmp_path: Path, env, *extra):
+        return run_seed(
+            "--store", str(store),
+            "--stage", str(tmp_path / "stage"),
+            "--push", "ns/app",
+            *extra,
+            env=env,
+        )
+
+    @staticmethod
+    def _pod_copy(dest: Path, body: str) -> Path:
+        """The pod's copy of the SAME entry the store fixture ships."""
+        d = dest / SCOPE
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "thing-alpha.md"
+        p.write_text(body)
+        return p
+
+    def test_a_pod_copy_with_DIFFERENT_bytes_refuses_and_pushes_NOTHING(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE REGRESSION. Red before this change: the push overwrote the pod
+        and exited 0 with `seed: OK`.
+
+        The assertion that matters is not the exit code — it is that the pod's
+        bytes are UNTOUCHED. A guard that refused after clobbering would satisfy
+        an exit-code-only test while losing exactly the content it exists to
+        protect."""
+        env, dest = fake_cluster
+        newer = "---\nservice: thing-alpha\n---\n\n## Nuance / work-history\n- 2026-09-03: RESOLVED abc1234: closed on the pod.\n"
+        pod_file = self._pod_copy(dest, newer)
+
+        r = self._push(store, tmp_path, env)
+
+        # 🔴 THE BYTES ASSERTION COMES FIRST, DELIBERATELY. Asserting the exit
+        # code first makes the red-at-base run fail on the CODE (0 vs 8) and
+        # never reach the bytes — so the matrix would prove the flag is absent,
+        # not that the content was destroyed. Ordered this way, red at base is
+        # red because THE POD WAS CLOBBERED, which is the defect.
+        assert pod_file.read_text() == newer, (
+            "THE POD'S BYTES WERE REPLACED. The guard must run BEFORE the extract; "
+            "refusing afterwards is the data loss it exists to prevent."
+        )
+        assert r.returncode == 8, (
+            f"expected exit 8 (refused), got {r.returncode}.\n{r.stdout}\n{r.stderr}"
+        )
+        assert "NOTHING WAS PUSHED" in r.stderr, r.stderr
+        assert f"{SCOPE}/thing-alpha.md" in r.stderr, (
+            "the refusal must NAME the entries it protected, or the operator "
+            f"cannot reconcile them: {r.stderr}"
+        )
+
+    def test_IDENTICAL_bytes_on_the_pod_are_not_a_clobber(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The discriminator. A guard that fired on mere PRESENCE would refuse
+        every ordinary re-seed and be turned off within a day."""
+        env, dest = fake_cluster
+        same = (store / SCOPE / "thing-alpha.md").read_text()
+        self._pod_copy(dest, same)
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, (
+            f"an identical pod copy is not an overwrite: {r.stdout}\n{r.stderr}"
+        )
+        assert "seed: OK" in r.stdout
+
+    def test_an_entry_ABSENT_from_the_pod_is_a_pure_addition(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The other half of the discriminator, and the case that makes seeding
+        useful at all. `test -f` on the pod yields the intersection for free: a
+        staged path the pod does not have cannot clobber anything."""
+        env, dest = fake_cluster
+        assert not (dest / SCOPE / "thing-alpha.md").exists()
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+        assert (dest / SCOPE / "thing-alpha.md").exists(), "the addition did not land"
+
+    def test_allow_overwrite_proceeds_AND_names_what_it_replaced(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """⚠ NOT REGRESSION COVERAGE. This is red at base only because
+        `--allow-overwrite` does not exist there ("unknown argument", exit 2) —
+        which pins that the flag is new, not that any defect was fixed.
+
+        The override is deliberate, not a silent bypass: it still prints which
+        entries it replaced, because 'I chose this' and 'I did not notice' must
+        not look the same in a log read afterwards."""
+        env, dest = fake_cluster
+        pod_file = self._pod_copy(dest, "---\nservice: thing-alpha\n---\nDIFFERENT\n")
+
+        r = self._push(store, tmp_path, env, "--allow-overwrite")
+
+        assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+        assert "WARNING --allow-overwrite" in r.stdout, r.stdout
+        assert f"{SCOPE}/thing-alpha.md" in r.stdout, r.stdout
+        assert pod_file.read_text() == (store / SCOPE / "thing-alpha.md").read_text(), (
+            "--allow-overwrite was given, so this host's copy must actually win"
+        )
+
+
+class TestTheSeedPreFlightCannotBeSILENTLYSKIPPED:
+    """🔴 AN EMPTY PROBE RESULT MUST NOT READ AS "NOTHING DIFFERS".
+
+    The pre-flight asks the pod about the staged paths over STDIN
+    (`kubectl exec -i … < "$staged_list"`). `xargs -r` on a stream that closes
+    early is silence at rc 0 BY DESIGN — so a probe that never ran and a pod
+    that holds none of the entries were the same observation, and the guard read
+    both as "nothing to refuse".
+
+    MEASURED during review of this PR: with a probe returning silence, the push
+    overwrote the pod's newer bytes and printed `seed: OK`, rc 0 — the exact
+    defect the guard exists to prevent, with the guard installed.
+
+    The fix is not "refuse when 0 are present" — that is the ordinary first-seed
+    case and it failed 18 legitimate tests. The probe answers EVERY path (a hash,
+    `ABSENT`, or `UNREADABLE`), so the answerable question is whether it SAW the
+    whole list."""
+
+    def _push(self, store: Path, tmp_path: Path, env, *extra):
+        return run_seed(
+            "--store", str(store), "--stage", str(tmp_path / "stage"),
+            "--push", "ns/app", *extra, env=env,
+        )
+
+    def test_a_probe_that_answers_NOTHING_refuses_instead_of_pushing(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE REGRESSION. The pod holds a NEWER copy; the probe is silenced.
+        Before the self-verifying probe this pushed and printed OK."""
+        env, dest = fake_cluster
+        d = dest / SCOPE; d.mkdir(parents=True, exist_ok=True)
+        pod_file = d / "thing-alpha.md"
+        newer = "---\nservice: thing-alpha\n---\nPOD NEWER\n"
+        pod_file.write_text(newer)
+
+        r = self._push(store, tmp_path, {**env, "FAKE_PROBE_SILENT": "1"})
+
+        assert pod_file.read_text() == newer, (
+            "THE POD'S BYTES WERE REPLACED by a push whose pre-flight answered "
+            "nothing — silence was read as 'nothing differs'."
+        )
+        assert r.returncode == 9, f"{r.stdout}\n{r.stderr}"
+        assert "COULD NOT COMPARE" in r.stderr, r.stderr
+
+    def test_the_preflight_counts_are_printed_on_the_SUCCESS_path_too(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """A number printed only in the failure branch cannot be read as
+        evidence on a run that passed — the silent-zero rule this file already
+        states for `staged_scopes`, applied to the guard itself."""
+        env, dest = fake_cluster
+        r = self._push(store, tmp_path, env)
+        assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+        assert "seed: PRE-FLIGHT staged=" in r.stdout, (
+            f"the pre-flight said nothing on a clean run: {r.stdout}"
+        )
+        assert "answered=" in r.stdout and "present_on_pod=" in r.stdout, r.stdout
+
+
+class TestTheSeedPreFlightJoinIsLocaleSafe:
+    """🔴 `LC_ALL=C` ON THE `join`, GUARDED — the mutant SURVIVED all 40 seed tests
+    when the auditor measured it, and survived my FIRST attempt at this test too.
+
+    GNU `join` order-checks in the AMBIENT locale, so C-sorted input is "not
+    sorted" to a join under en_US.UTF-8 — which is this host. It both MISSES the
+    differing pair and exits 1, which `set -euo pipefail` turns into a run with
+    no verdict at all.
+
+    🔴 WHY THE FIRST VERSION OF THIS TEST WAS VACUOUS, recorded because the shape
+    is easy to repeat: it planted the `README.md`/lowercase adjacency on the POD.
+    But the probe answers exactly the STAGED paths, so `_remote_h` can only ever
+    contain staged entries — a pod-only file never reaches the join, and the
+    adjacency had no effect. The inversion must be between two STAGED paths.
+
+    Two conditions must hold at once, which is what makes this fiddly: an
+    UNPAIRABLE line (GNU join arms the order check only after one — here the
+    entry the pod does NOT have) and an adjacency where C and en_US disagree
+    (`README.md` sorts BEFORE `backblaze.md` under C, AFTER under en_US)."""
+
+    def test_a_differing_entry_is_still_caught_under_a_UTF8_locale(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        env, dest = fake_cluster
+        # BOTH must be STAGED — that is what puts them on both sides of the join.
+        (store / SCOPE / "README.md").write_text(_entry("README", SCOPE))
+        (store / SCOPE / "backblaze.md").write_text(_entry("backblaze", SCOPE))
+
+        d = dest / SCOPE; d.mkdir(parents=True, exist_ok=True)
+        # `backblaze.md` DIFFERS on the pod -> must be refused.
+        (d / "backblaze.md").write_text("---\nservice: backblaze\n---\nPOD NEWER\n")
+        # `README.md` is ABSENT on the pod -> the unpairable line that arms the
+        # order check. `thing-alpha.md` absent too; harmless.
+
+        r = run_seed(
+            "--store", str(store), "--stage", str(tmp_path / "stage"),
+            "--push", "ns/app",
+            env={**env, "LC_ALL": "en_US.UTF-8", "LANG": "en_US.UTF-8"},
+        )
+
+        assert r.returncode == 8, (
+            "under a UTF-8 ambient locale the join either MISSED the differing "
+            "pair or died on an order check — `LC_ALL=C` on the join is what "
+            f"stops both: rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+        )
+        assert f"{SCOPE}/backblaze.md" in r.stderr, r.stderr
+
+
+class TestTheSeedNameCheckRejectsPathsItCannotCompareSafely:
+    """🔴 THREE ROUNDS EACH FIXED ONE DELIMITER AND RE-BROKE THE NEXT.
+
+    Round 1 `xargs` bare (a space split the args, rc 123); round 2 `-I{}` (a
+    space TRUNCATED the join key at 0x20); round 3 `-d '\\n'` + a TAB-separated
+    key (a TAB truncates it at 0x09). Each fix was correct about the case it
+    named and moved the boundary rather than removing it.
+
+    The dangerous shape is not the false refusal — that is loud and fail-safe —
+    it is the SILENT one: the pod's `/bin/sh` is dash, whose `echo` turns the two
+    characters `\\t` in a NAME into a real TAB on the pod side only, while every
+    test here runs the probe under bash. The two sides' keys then diverge, the
+    row drops out of the join, and an entry the pod holds with DIFFERENT bytes is
+    pushed over as though it were a pure addition.
+
+    So the domain is bounded instead of the parser hardened. MEASURED 2026-09-05
+    across both live stores: 373 entry files, 0 outside `[A-Za-z0-9._/-]` (the
+    count MOVES — it read 348 hours earlier the same day). These
+    tests pin BOTH directions — that ordinary slugs still push (or the guard
+    would be switched off within a day), and that each awkward shape is refused
+    with nothing pushed.
+    """
+
+    def _push(self, store: Path, tmp_path: Path, env, *extra):
+        return run_seed(
+            "--store", str(store), "--stage", str(tmp_path / "stage"),
+            "--push", "ns/app", *extra, env=env,
+        )
+
+    # ---- the guard must NOT over-fire: ordinary names still push -------------
+
+    def test_ordinary_slug_names_are_not_rejected_and_the_push_proceeds(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE OVER-FIRING CONTROL. A name check that refused real entries
+        would be disabled immediately, so this is the assertion that makes the
+        rest of the class meaningful. It also pins `rejected=0` as a number
+        rather than a substring: a check that walked NOTHING also prints 0."""
+        env, dest = fake_cluster
+        for slug in ("dl-router", "tests", "subsystem_store.api", "a.b-c_d"):
+            (store / SCOPE / f"{slug}.md").write_text(_entry(slug, SCOPE))
+
+        r = self._push(store, tmp_path, env)
+
+        m = re.search(r"seed: NAME-CHECK staged=(\d+) rejected=(\d+)", r.stdout)
+        assert m, f"the name check printed no line at all:\n{r.stdout}"
+        staged, rejected = int(m.group(1)), int(m.group(2))
+        assert rejected == 0, (
+            f"ordinary slugs were rejected: {r.stdout}\n{r.stderr}"
+        )
+        # 🔴 POSITIVE CONTROL ON THE COUNT ITSELF. `rejected=0` is also what a
+        # check that walked NOTHING prints, so pin that it saw the entries — the
+        # four written here plus whatever the fixture provides.
+        assert staged >= 4, (
+            f"the name check reported {staged} staged entries but 4 were written "
+            f"here alone — it did not see the list:\n{r.stdout}"
+        )
+        assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+        assert (dest / SCOPE / "dl-router.md").exists(), "the push did not land"
+
+    # ---- each awkward shape is refused, and NOTHING is pushed ---------------
+
+    @pytest.mark.parametrize(
+        "name,label",
+        [
+            ("two words.md", "SPACE — truncated the key at 0x20 in round 2"),
+            ("ta\tbbed.md", "TAB — truncates it at 0x09 after round 3's fix"),
+            ("it's.md", "QUOTE — aborted xargs rc 1 with no diagnostic"),
+            ("back\\slash.md", "BACKSLASH — GNU sha256sum escapes the line, the "
+                               "hand-written answer does not, so the keys diverge"),
+            ("dash-eats\\there.md", "the two characters \\t — dash's echo emits a "
+                                    "REAL TAB, bash a literal; the SILENT case"),
+        ],
+    )
+    def test_an_unsafe_name_is_refused_with_nothing_pushed(
+        self, store: Path, tmp_path: Path, fake_cluster, name, label
+    ):
+        env, dest = fake_cluster
+        (store / SCOPE / name).write_text(_entry("odd", SCOPE))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 10, f"{label}\n{r.stdout}\n{r.stderr}"
+        m = re.search(r"seed: NAME-CHECK staged=(\d+) rejected=(\d+)", r.stdout)
+        assert m, f"{label}: the name check printed no line:\n{r.stdout}"
+        assert int(m.group(2)) == 1, (
+            f"{label}: expected exactly the one bad name to be rejected, got "
+            f"{m.group(2)}\n{r.stdout}"
+        )
+        assert int(m.group(1)) > 1, (
+            f"{label}: only the bad entry was staged, so this test would pass "
+            f"even against a check that rejects everything:\n{r.stdout}"
+        )
+        assert "NOTHING WAS PUSHED" in r.stderr, f"{label}\n{r.stderr}"
+        # 🔴 THE BYTES, NOT JUST THE EXIT CODE. Asserting rc alone would pass for
+        # a guard that refused AFTER the tar — which is the defect the pre-flight
+        # was built to fix, and it would look identical from the exit code.
+        assert not (dest / SCOPE).exists() or not any((dest / SCOPE).iterdir()), (
+            f"{label}: the refusal happened AFTER something reached the pod: "
+            f"{list((dest / SCOPE).iterdir())}"
+        )
+
+    def test_a_NEWLINE_in_an_entry_name_is_refused_and_nothing_is_pushed(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE HOLE THE FIRST NAME-CHECK HAD, and it was the silent kind.
+        `$staged_list` is newline-delimited, so `na<NL>me.md` is written as TWO
+        lines and EACH HALF matches the allowed class — `rejected=0`. MEASURED
+        against that guard, with decoys making both halves resolve: the run
+        printed `rejected=0`, `differing=0`, `seed: OK`, rc 0, and REPLACED the
+        pod's newer copy. Caught now by matching the WHOLE shape `<scope>/<entry>.md`: a
+        filename cannot contain `/`, so the second half never has one."""
+        env, dest = fake_cluster
+        (store / SCOPE / "na\nme.md").write_text(_entry("odd", SCOPE))
+        # the decoys that made the silent version reachable — both halves of the
+        # split resolve to real files, so nothing downstream errors
+        (store / SCOPE / "na").write_text("decoy")   # a FILE: a directory makes it crash
+        (store / "me.md").write_text("x")
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 10, (
+            f"a newline in an entry name was not refused:\n{r.stdout}\n{r.stderr}"
+        )
+        assert "NOTHING WAS PUSHED" in r.stderr, r.stderr
+        # 🔴 NAME **BOTH** HALVES, and the scope-bearing one especially. An
+        # `or` here is what let me delete the `\.md$` anchor and see no test
+        # fail: without it the refusal says only `me.md` — not a path in the
+        # store, scope never mentioned — which is a correct refusal nobody can
+        # act on.
+        assert f"{SCOPE}/na" in r.stderr, (
+            "the refusal never named the SCOPE-bearing half, so the operator "
+            f"cannot tell which entry to rename: {r.stderr}"
+        )
+        assert "me.md" in r.stderr, (
+            f"the refusal did not name the trailing half either: {r.stderr}"
+        )
+        assert not (dest / SCOPE).exists() or not any((dest / SCOPE).iterdir()), (
+            "bytes reached the pod despite the refusal"
+        )
+
+    def test_a_component_STARTING_with_a_dash_is_refused(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 `-` IS INSIDE THE ALLOWED CLASS AND IS THE OPTION CHARACTER. A
+        scope named `-dashscope` passed the first name check and then reached
+        `sha256sum` as an option: `invalid option -- 'd'`, rc 123, and NOT one
+        `seed:` line — round 1's exact failure shape, re-reached through the
+        guard that claimed to have removed the class."""
+        env, dest = fake_cluster
+        odd = store / "-dashscope"
+        odd.mkdir()
+        (odd / "thing.md").write_text(_entry("thing", "dashscope"))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 10, (
+            f"a leading-dash scope was not refused (rc 123 = it reached "
+            f"sha256sum as an option):\n{r.stdout}\n{r.stderr}"
+        )
+        assert "-dashscope/thing.md" in r.stderr, r.stderr
+        assert not (dest / "-dashscope").exists()
+
+    def test_an_ENTRY_name_starting_with_a_dash_is_refused_too(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE SECOND COMPONENT'S HALF OF THE RULE, which had NO test — its
+        mutant survived the whole file. Unlike the scope case this one is
+        prophylactic (the argv word starts with the scope, so `sc/-x.md` can
+        never be read as an option); it is pinned so the rule stays ONE rule
+        instead of two with an asymmetry nobody remembers."""
+        env, dest = fake_cluster
+        (store / SCOPE / "-thing.md").write_text(_entry("thing", SCOPE))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 10, f"{r.stdout}\n{r.stderr}"
+        assert f"{SCOPE}/-thing.md" in r.stderr, r.stderr
+        assert not (dest / SCOPE).exists() or not any((dest / SCOPE).iterdir())
+
+    def test_a_dash_INSIDE_a_name_is_still_allowed(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The over-firing control for the rule above: `dl-router.md` is the
+        single most common shape in the real store. Rejecting an interior dash
+        would refuse most of it."""
+        env, dest = fake_cluster
+        (store / SCOPE / "dl-router.md").write_text(_entry("dl-router", SCOPE))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, (
+            f"an interior dash was refused — this rule is about the FIRST "
+            f"character only:\n{r.stdout}\n{r.stderr}"
+        )
+        assert (dest / SCOPE / "dl-router.md").exists()
+
+    def test_an_entry_named_exactly_dot_md_is_refused(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE FOURTH RULE, which arrived as a SIDE EFFECT of the `\\.md$`
+        anchor and which nothing stated. `find -name '*.md'` DOES emit
+        `<scope>/.md` (verified), and the anchor needs a non-empty stem before
+        it — so the base accepted this name and HEAD refuses it. Pinned because
+        an undocumented refusal class is how an operator ends up reading a
+        message that describes none of the rules they broke."""
+        env, dest = fake_cluster
+        (store / SCOPE / ".md").write_text(_entry("dotmd", SCOPE))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 10, f"{r.stdout}\n{r.stderr}"
+        assert f"{SCOPE}/.md" in r.stderr, r.stderr
+        # the message must actually describe THIS rule, not only the other three
+        assert "stem" in r.stderr, (
+            "the refusal does not mention the empty-stem rule, so the operator "
+            f"is told they broke a rule they did not break: {r.stderr}"
+        )
+        assert not (dest / SCOPE).exists() or not any((dest / SCOPE).iterdir())
+
+    def test_the_refusal_names_the_offending_path_in_full(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """A truncated name is not actionable — the whole point of the class of
+        bugs this replaces was refusals naming paths that do not exist."""
+        env, _ = fake_cluster
+        (store / SCOPE / "two words.md").write_text(_entry("odd", SCOPE))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 10, f"{r.stdout}\n{r.stderr}"
+        assert f"{SCOPE}/two words.md" in r.stderr, (
+            f"the refusal did not name the full path: {r.stderr}"
+        )
+
+    def test_the_override_flag_does_NOT_bypass_the_name_check(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 `--allow-overwrite` is an override for the BYTES question (exit 8),
+        where the operator can genuinely know better. It must not reach this one:
+        an unsafe name means the comparison cannot be TRUSTED, so proceeding
+        would push under exactly the ambiguity the flag pretends to resolve."""
+        env, dest = fake_cluster
+        (store / SCOPE / "two words.md").write_text(_entry("odd", SCOPE))
+
+        r = self._push(store, tmp_path, env, "--allow-overwrite")
+
+        assert r.returncode == 10, (
+            f"--allow-overwrite bypassed the name check:\n{r.stdout}\n{r.stderr}"
+        )
+        assert not (dest / SCOPE).exists() or not any((dest / SCOPE).iterdir())
+
+
+def _require_dash() -> str:
+    """🔴 FAIL, NEVER SKIP. The pod's shell is dash and the harness's is bash;
+    a tier without dash is structurally blind to every defect that lives in the
+    difference, and a skip there reports safety it never measured. MEASURED
+    2026-09-05: every test in this class skipped silently before `dash` was
+    added to `REQUIRED_TOOLS` and `flake.nix`'s `gateTools`.
+    """
+    dash = shutil.which("dash")
+    assert dash is not None, (
+        "dash is not on PATH. It is in REQUIRED_TOOLS and gateTools precisely "
+        "so this cannot be skipped — the pod runs dash, the fake kubectl runs "
+        "bash, and the gap between them is a SILENT clobber."
+    )
+    return dash
+
+
+class TestTheSeedProbeAnswersSurviveTheRealPodShell:
+    """🔴 THE HARNESS RUNS THE POD'S COMMAND UNDER BASH; THE POD IS DASH.
+
+    `Dockerfile: FROM python:3.12-slim` -> Debian -> `/bin/sh` is dash, and
+    dash's `echo` INTERPRETS backslash escapes while bash's does not. Every test
+    in this file drives a fake `kubectl` that runs the probe locally, so the
+    suite is structurally blind to the difference. These tests exercise the two
+    hand-written answer lines under `dash` DIRECTLY, which is the only way to see
+    it without a cluster.
+    """
+
+    # 🔴 READ THE COMMAND OUT OF `seed.sh`, NEVER RESTATE IT. The first version
+    # of this class hardcoded a COPY of the probe, so it proved that `printf`
+    # behaves under dash — true no matter what the script does. MEASURED: with
+    # the copy, reverting `seed.sh` to `echo` left every test in this class GREEN. Extracting
+    # the real inner script is what makes the mutant die.
+    @staticmethod
+    def _probe_script() -> str:
+        src = SEED_PATH.read_text()
+        m = re.search(r"-I\{\} sh -c '(.+?)' _ \{\}", src, re.S)
+        assert m, (
+            "could not find the pod probe's inner `sh -c` in seed.sh — this test "
+            "reads the real command, so a shape change must fail loudly rather "
+            "than silently test nothing"
+        )
+        # the inner script is embedded in a double-quoted shell string, so its
+        # own quotes are backslash-escaped in the source
+        # 🔴 `\\\\` FIRST, THEN THE REST. The inner script is embedded in a
+        # DOUBLE-QUOTED shell string, so `\\"` -> `"`, `\\$` -> `$` and
+        # `\\\\` -> `\\`. Omitting the last one left the extracted text
+        # `printf "…%s\\\\n"` where the pod's `sh` actually receives
+        # `printf "…%s\\n"` — the outputs happen to agree because the shell
+        # collapses it again, so nothing measured was wrong, but the class
+        # docstring claims this IS the command and it was not.
+        inner = m.group(1)
+        out, i = [], 0
+        while i < len(inner):
+            if inner[i] == "\\" and i + 1 < len(inner) and inner[i + 1] in '\\"$':
+                out.append(inner[i + 1]); i += 2
+            else:
+                out.append(inner[i]); i += 1
+        return "".join(out)
+
+    def test_the_probe_command_really_is_the_one_under_test(self):
+        """POSITIVE CONTROL on the extractor itself: an empty or wrong match
+        would make every test below vacuous."""
+        script = self._probe_script()
+        assert "ABSENT" in script and "UNREADABLE" in script, script
+        assert "sha256sum" in script, script
+
+    def test_the_extractor_LEAVES_NO_ESCAPES_BEHIND(self):
+        """🔴 GROUND TRUTH ON THE UNESCAPING, not substrings. The control above
+        is a SPELLED guard — three words — and is structurally blind to an
+        escaping error: reverting the `\\\\` unescape survived the whole file.
+
+        The inner script is embedded in a DOUBLE-QUOTED shell string, so by the
+        time the pod's `sh` sees it every `\\\\`, `\\"` and `\\$` has been
+        collapsed once. A correctly-extracted script therefore contains NO
+        double backslash and NO backslash-quote — if it does, the extractor
+        stopped early and every dash test above is measuring a command the pod
+        never runs.
+        """
+        script = self._probe_script()
+        assert "\\\\" not in script, (
+            "the extracted script still contains a DOUBLE backslash, so the "
+            f"unescaping is incomplete: {script!r}"
+        )
+        assert '\\"' not in script, (
+            f"the extracted script still contains an escaped quote: {script!r}"
+        )
+        # positive control: the RAW source span really does carry the escapes
+        # this test asserts are gone, so it cannot pass by matching nothing.
+        raw = re.search(r"-I\{\} sh -c '(.+?)' _ \{\}", SEED_PATH.read_text(), re.S)
+        assert raw and ('\\"' in raw.group(1) or "\\\\" in raw.group(1)), (
+            "the raw source carries no escapes, so this test proves nothing"
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        ["sc/tab\\there.md", "sc/new\\nline.md", "sc/cut\\chere.md", "sc/plain.md"],
+    )
+    def test_dash_and_bash_produce_BYTE_IDENTICAL_answers(self, name):
+        dash = _require_dash()
+
+        def run(shell):
+            return subprocess.run(
+                [shell, "-c", self._probe_script(), "_", name],
+                capture_output=True, text=True, timeout=30,
+            ).stdout
+
+        assert run(dash) == run("bash"), (
+            f"the pod's shell and the test harness's shell disagree on {name!r} — "
+            "this is the silent-clobber route: the two sides' join keys diverge "
+            "and a DIFFERING pod entry reads as a pure addition"
+        )
+
+    def test_the_UNREADABLE_arm_is_exercised_too(self, tmp_path: Path):
+        """🔴 THE OTHER ARM. Every fixture above names a path that does NOT
+        exist, so `[ -f "$1" ]` is always false and only the ABSENT branch ever
+        ran — a mutant confined to the UNREADABLE `printf` SURVIVED the whole
+        suite (measured). This reaches it: the file exists, so `[ -f ]` is true,
+        and it is unreadable, so `sha256sum` fails into the fallback."""
+        dash = _require_dash()
+        # 🔴 `chmod 000` DOES NOT BLOCK ROOT, so under uid 0 this arm cannot be
+        # constructed at all. Both tiers this repo gates on are non-root
+        # (dev host = uid 1000; the nix sandbox runs as nixbld) — MEASURED — so
+        # this says WHY rather than skipping, which would report coverage it
+        # never had.
+        assert os.geteuid() != 0, (
+            "this tier runs as root, so no file can be made unreadable and the "
+            "UNREADABLE arm of the pod probe cannot be exercised here. That is "
+            "a gap in the tier, not a passing test — do not convert this to a "
+            "skip."
+        )
+        d = tmp_path / "sc"; d.mkdir()
+        target = d / "unreadable\\there.md"
+        target.write_text("x")
+        target.chmod(0o000)
+        try:
+            name = str(target)
+
+            def run(shell):
+                return subprocess.run(
+                    [shell, "-c", self._probe_script(), "_", name],
+                    capture_output=True, text=True, timeout=30,
+                ).stdout
+
+            got_dash, got_bash = run(dash), run("bash")
+            assert "UNREADABLE" in got_dash, (
+                f"the UNREADABLE arm was never reached, so this test proves "
+                f"nothing about it: {got_dash!r}"
+            )
+            assert got_dash == got_bash, (
+                "the pod's shell and the harness's disagree on the UNREADABLE "
+                f"answer: {got_dash!r} vs {got_bash!r}"
+            )
+        finally:
+            target.chmod(0o644)
+
+    def test_the_control_shows_echo_WOULD_have_disagreed(self):
+        """🔴 POSITIVE CONTROL. Without it, the test above is indistinguishable
+        from one whose shells cannot disagree about anything — it would pass just
+        as happily against a name with no escapes in it."""
+        dash = _require_dash()
+        broken = 'echo "ABSENT  $1"'
+        name = "sc/tab\\there.md"
+
+        def run(shell):
+            return subprocess.run(
+                [shell, "-c", broken, "_", name],
+                capture_output=True, text=True, timeout=30,
+            ).stdout
+
+        assert run(dash) != run("bash"), (
+            "the control did not reproduce the `echo` asymmetry, so this test "
+            "file cannot see the defect it claims to guard"
+        )
+
+
+class TestSeedHelpIsCompleteAndCannotDrift:
+    """🔴 THE `--help` CLAIM HAS NOW BEEN WRONG TWICE, WITH NO TEST BOTH TIMES.
+
+    First `sed -n '2,26p'` — a line range over a header that grows, so additions
+    pushed the window into the middle of a clause and the Usage block had ALWAYS
+    sat below it. Then `awk … {exit}` on the first non-comment line — which a
+    BLANK line is, so one blank inserted for readability cut `--help` from 61
+    lines to 31 and took `--allow-overwrite` with it (MEASURED 2026-09-05).
+    """
+
+    def test_help_reaches_the_usage_block_and_ends_on_a_terminator(self):
+        r = run_seed("--help")
+
+        assert r.returncode == 0, r.stderr
+        assert "--allow-overwrite" in r.stdout, (
+            "`--help` does not reach the Usage block — the only place an "
+            f"operator looks:\n{r.stdout}"
+        )
+        assert "Usage:" in r.stdout, r.stdout
+        last = r.stdout.rstrip().splitlines()[-1].rstrip()
+        assert last.endswith((".", ":", "!")), (
+            f"`--help` ends mid-sentence on: {last!r}"
+        )
+
+    def test_help_documents_every_exit_code_the_script_can_refuse_with(self):
+        """A refusal code an operator cannot look up is a bare number."""
+        r = run_seed("--help")
+        for code in ("8", "9", "10"):
+            assert f"\n  {code} " in r.stdout or f"\n  {code}  " in r.stdout, (
+                f"exit {code} is not documented in --help:\n{r.stdout}"
+            )
+
+    def test_a_BLANK_LINE_in_the_header_does_not_truncate_help(self, tmp_path: Path):
+        """🔴 THE REGRESSION, as a mutation rather than an assertion about the
+        current text: inject a blank comment-free line into the header and the
+        output must not shrink."""
+        src = SEED_PATH.read_text().splitlines(keepends=True)
+        cut = next(i for i, l in enumerate(src) if l.startswith("# Usage:"))
+        mutated = tmp_path / "seed-with-blank.sh"
+        mutated.write_text("".join(src[:cut]) + "\n" + "".join(src[cut:]))
+
+        def help_of(path):
+            return subprocess.run(
+                ["bash", str(path), "--help"],
+                capture_output=True, text=True, timeout=120,
+            ).stdout
+
+        original, injected = help_of(SEED_PATH), help_of(mutated)
+
+        assert "--allow-overwrite" in injected, (
+            "one blank line in the header truncated `--help` and took the Usage "
+            f"block with it:\n{injected}"
+        )
+        assert len(injected.splitlines()) >= len(original.splitlines()), (
+            f"help shrank from {len(original.splitlines())} to "
+            f"{len(injected.splitlines())} lines"
         )

@@ -60,15 +60,28 @@ SEARCH_MODULE = REPO_ROOT / "scripts" / "lib" / "handoff_search.py"
 # for `cairn` and for `subsystem_recall.py`, in a completely different sense.
 # `claude/RULES.md`: "verified in isolation is the new vacuous green -- the
 # defect lives in the SEAM nobody owns."
-BLOCK_OPEN = "**And ask whether ANOTHER doc already ruled it out**"
+BLOCK_OPEN = "**Surface what past sessions already recorded — TWO recall surfaces"
 BLOCK_CLOSE = "carry on with the item."
 
 # 🔴 THE COMMAND, PINNED WHOLE. Normalised only for internal whitespace runs, so
 # a reflow across lines is tolerated and a changed flag is not.
+#
+# 🔴 THE QUERY IS THE TOPIC, NOT AN OPEN ITEM, AND THAT IS THE WHOLE POINT OF THE
+# 2026-09-06 MOVE. Keyed on an open item the step can only run when one exists,
+# which is the conditional that measured 1/14. Every resume has a topic.
 EXPECTED_COMMAND = (
     "python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline "
-    '--query "<the open item, in its own words>" --limit 3'
+    "--query \"<this handoff's topic, in plain words>\" --limit 3"
 )
+
+# The step that was MEASURED to fire 5/6, and whose company this command was
+# moved into. Pinned as the first command of that same numbered step.
+CO_LOCATED_COMMAND = "cairn recall --repo"
+
+# Opens the paragraph that warns the reader the corpus query is NOT repo-scoped.
+# The handle pin is scoped to THIS paragraph; widened to the whole block, its
+# `DEVRC` arm cannot fail (the prescribed command's own path contains "devrc").
+SCOPE_WARNING_SENTINEL = "THE TWO SURFACES ARE NOT SCOPED ALIKE"
 
 
 def _load_search_module():
@@ -237,9 +250,11 @@ def test_the_block_carries_the_recall_posture_and_the_scope_LITERAL():
 
     `indexed_docs=` is derived from the module, not restated: it is the literal
     the renderer emits beside every outcome, and it is what makes a zero
-    readable. The recall posture is the same claim `cairn recall` carries four
-    steps earlier -- one provenance rule, so a caller cannot learn it for one
-    surface and lose it for the other.
+    readable. The recall posture is the same claim `cairn recall` carries in the
+    SAME fence, a few lines above -- one provenance rule, so a caller cannot
+    learn it for one surface and lose it for the other. (It read "four steps
+    earlier" until 2026-09-06, which was wrong in both directions: `cairn recall`
+    was one step LATER before the move, and is co-located after it.)
     """
     source = SEARCH_MODULE.read_text(encoding="utf-8")
     assert "indexed_docs=" in source, (
@@ -258,6 +273,216 @@ def test_the_block_carries_the_recall_posture_and_the_scope_LITERAL():
             "Do not drop it to save bytes -- claude/skills/resume/SKILL.md has "
             "no byte ceiling, and this is the honesty half of the wiring."
         )
+
+
+def numbered_steps(text: str) -> list[tuple[int, str]]:
+    """Split the skill body into its top-level numbered steps.
+
+    Returns [(step_number, body), ...]. A step starts at a line matching
+    `^<n>. ` at column 0 and runs to the next such line, so the body includes
+    every indented continuation and fenced block that belongs to it.
+    """
+    starts = [
+        (int(m.group(1)), m.start())
+        for m in re.finditer(r"(?m)^(\d+)\.\s", text)
+    ]
+    out = []
+    for i, (num, pos) in enumerate(starts):
+        end = starts[i + 1][1] if i + 1 < len(starts) else len(text)
+        out.append((num, text[pos:end]))
+    return out
+
+
+def fenced_blocks(text: str) -> list[str]:
+    """Every ``` fenced block in the document, bodies only."""
+    return re.findall(r"(?ms)^\s*```[a-z]*\n(.*?)^\s*```", text)
+
+
+def test_the_query_shares_a_FENCE_with_cairn_recall():
+    """🔴 THE REGRESSION GUARD FOR THE 2026-09-06 MOVE — structural, not spelled.
+
+    🔴 READ WHAT THIS DOES **NOT** PROVE FIRST. It does not prove the command is
+    unconditional; it proves CO-LOCATION, which is a PROXY for it. An audit
+    (2026-09-06) built four isolated mutants against an earlier version of this
+    guard that asserted only a shared step DIGIT, and three survived a fully
+    green suite:
+
+      * M1  command moved back into step 3                     -> KILLED
+      * M2  a gating sentence inserted above the fence          -> SURVIVED
+      * M3  a "only when working an open item" comment INSIDE   -> SURVIVED
+      * M4  a SECOND list item also labelled `4.`, gated        -> SURVIVED
+
+    M4 is now killed too, by comparing the FENCE rather than the digit: a second
+    `4.` block is a different fence.
+
+    A round-2 audit then built a FIFTH mutant the round-1 residual list did not
+    anticipate, and it was strictly worse than M2/M3:
+
+      * M5  the command left in the fence but COMMENTED OUT     -> now KILLED
+
+    M5 mattered because every check here is a substring test, and a commented
+    `# python3 ...handoff_search.py ...` still CONTAINS the pinned string -- so
+    the string pin, the step check and the fence check all went green over DEAD
+    wiring, which is the exact failure this module was written to prevent. It is
+    killed below by requiring the fence line carrying the command to be live.
+
+    🔴 **M2 and M3 STILL SURVIVE and are covered by nothing.** They are
+    prose-shaped -- a sentence or comment that re-introduces a condition without
+    moving the command -- and no structural check here sees them.
+    ⚠ **THIS LIST IS NOT CLOSED.** M5 was found by an auditor after round 1 had
+    already called the residual settled; treat these five as the mutants somebody
+    happened to think of, never as the space of ways to break the wiring.
+    `claude/RULES.md`: a guard on WORDS is walkable by REWORDING, so this asserts
+    placement and states its own residual rather than claiming a coverage it does
+    not have.
+
+    MEASURED over the 34 h after `#1295` merged: the query lived as a
+    CONDITIONAL inside step 3 ("before working any open item…") and **1 of 14**
+    `/resume` runs across both hosts ever invoked it -- and that one was reading
+    `origin/main` off the staleness alarm, not firing the step. The trigger was
+    met. The workbench half was 8 runs = 1 that fired + 6 analysed as non-firing
+    + 1 that was the measuring session itself, excluded as the instrument; of
+    those 6, all ran `claim-work`, five made edits, and five resumed a doc
+    carrying an `## Open investigations` section. The discriminator was
+    PLACEMENT: step 3's sibling `git log --since` check -- same trigger, same
+    block, an ordinary command -- fired 0/6, while step 4 (`cairn recall`,
+    numbered, unconditional, fenced) fired 5/6.
+
+    ⚠ WHAT THIS DOES NOT CLAIM: that co-location reproduces 5/6. That is a
+    prediction, and the residual is stated in the skill -- the 5/6 was measured
+    with ONE command in the step. Re-measure; do not read this green as adoption.
+    """
+    steps = numbered_steps(_skill_text())
+    assert steps, "no numbered steps parsed out of the resume skill -- format moved?"
+
+    holding = [n for n, body in steps if _normalise(EXPECTED_COMMAND) in _normalise(body)]
+    assert len(holding) == 1, (
+        f"the prescribed query appears in {len(holding)} numbered step(s) "
+        f"{holding}, expected exactly 1. Two copies mean two contracts that can "
+        "drift apart; zero means the wiring left the numbered steps entirely."
+    )
+
+    co_located = [n for n, body in steps if CO_LOCATED_COMMAND in body]
+    assert len(co_located) == 1, (
+        f"`{CO_LOCATED_COMMAND}` appears in {len(co_located)} numbered step(s) "
+        f"{co_located}, expected exactly 1 -- the anchor this guard measures "
+        "against is itself ambiguous, so the assertion below would be meaningless."
+    )
+
+    assert holding[0] == co_located[0], (
+        f"the handoff-corpus query is in step {holding[0]} but `cairn recall` is "
+        f"in step {co_located[0]}.\n"
+        "🔴 The query was MOVED into `cairn recall`'s step on 2026-09-06 because, "
+        "as a conditional in step 3, it was invoked by 1 of 14 real /resume runs. "
+        "Moving it back out re-creates a step that only fires when a session "
+        "happens to be working an open item -- measured at ~7% of runs.\n"
+        "If you are deliberately restructuring, re-measure adoption FIRST and put "
+        "the number in the commit message.\n"
+        "🔴 A shared step DIGIT is not enough on its own -- see the fence check "
+        "below, which is what kills a second list item re-labelled `4.`."
+    )
+
+    # 🔴 THE FENCE CHECK -- this is the half that kills mutant M4. A second list
+    # item re-labelled `4.` shares the digit, so the assertion above passes while
+    # the query sits in its own separately-gated block. Sharing a FENCE cannot be
+    # faked that way: one ```bash block is one thing a reader runs together.
+    fences = fenced_blocks(_skill_text())
+    with_query = [f for f in fences if _normalise(EXPECTED_COMMAND) in _normalise(f)]
+    assert len(with_query) == 1, (
+        f"the prescribed query appears in {len(with_query)} fenced block(s), "
+        "expected exactly 1."
+    )
+    assert CO_LOCATED_COMMAND in with_query[0], (
+        "the handoff-corpus query is no longer in the SAME fenced block as "
+        f"`{CO_LOCATED_COMMAND}`.\n"
+        "🔴 Sharing a step NUMBER is not sharing a step: a second list item "
+        "re-labelled with the same digit passes the check above while gating the "
+        "query behind its own condition -- that exact mutant SURVIVED this guard "
+        "until 2026-09-06. The two commands must sit in one fence, so a reader "
+        "runs them together.\n"
+        f"  fence containing the query:\n{with_query[0].rstrip()}"
+    )
+
+    # 🔴 M5 -- THE COMMAND MUST BE LIVE, NOT COMMENTED. Every check above is a
+    # substring test, so `# python3 ...handoff_search.py ...` satisfies all of
+    # them while the wiring is DEAD. That is this module's founding failure (see
+    # the file docstring: the index shipped and nothing called it), so it must
+    # not be reachable through a one-character edit.
+    live = [
+        ln for ln in with_query[0].splitlines()
+        if "handoff_search.py" in ln and not ln.lstrip().startswith("#")
+    ]
+    assert live, (
+        "the prescribed query is present in the fence but every line carrying it "
+        "is COMMENTED OUT -- the wiring is dead and every substring check above "
+        "still passes.\n"
+        "🔴 This module exists because the index shipped with no caller at all. A "
+        "commented command is that same state, reached by one character, with a "
+        "green suite vouching for it.\n"
+        f"  fence:\n{with_query[0].rstrip()}"
+    )
+
+
+def test_the_corpus_SCOPE_warning_names_the_repos_the_TOOL_actually_searches():
+    """🔴 DERIVED FROM THE MODULE, because the sensitivity warning rests on it.
+
+    Step 4's block warns that the query is corpus-wide over four repos, two of
+    them client repos, while its co-located twin `cairn recall` is repo-scoped.
+    That warning is only true while the skill's list matches the tool's. Add a
+    fifth handle -- plausibly another client repo -- and the prose, and the "two
+    of which are client repos" count the warning rests on, go stale with nothing
+    red. The module's own docstring says every claim is derived from the tool
+    rather than restated; this is the missing derivation.
+
+    🔴 SCOPED TO THE WARNING PARAGRAPH, NOT THE WHOLE BLOCK -- and that is the
+    difference between a guard and a decoration. Searching the whole wiring block
+    made the `DEVRC` arm STRUCTURALLY UNREACHABLE: `EXPECTED_COMMAND` contains
+    `~/workspace/devrc/scripts/lib/handoff_search.py`, and the pin above requires
+    that exact string in the same block, so `"devrc" in block` was guaranteed true
+    on every green run. Deleting `devrc` from the warning left the suite at 8
+    passed. The round-2 sweep chose `DATAPACKET` -- a fixture that could only die
+    -- and read the kill as proof. `claude/RULES.md`: prove a guard REACHABLE, not
+    merely breakable, and pick fixtures that are distinct from any constant the
+    assertion already names. A whole-block search was also satisfied by a handle
+    mentioned in ANY unrelated sentence in the block.
+
+    ⚠ Scope: this pins the LABELS, not the client/non-client split, which is not
+    a fact any module here holds. If a handle is added, re-read the sentence --
+    the count in it is a human judgement and this test cannot check it.
+    """
+    mod = _load_search_module()
+    index = sys.modules.get("handoff_index")
+    handles = getattr(index, "REPO_ENV_HANDLES", None) or getattr(
+        mod, "REPO_ENV_HANDLES", None
+    )
+    assert handles, (
+        "could not read REPO_ENV_HANDLES off the tool -- if it moved or was "
+        "renamed, update this test and the skill's scope warning together."
+    )
+    paras = [p for p in _block().split("\n\n") if SCOPE_WARNING_SENTINEL in p]
+    assert len(paras) == 1, (
+        f"expected exactly 1 paragraph carrying {SCOPE_WARNING_SENTINEL!r} in the "
+        f"wiring block, found {len(paras)}. Without a unique paragraph this check "
+        "silently widens back to the whole block, where the DEVRC arm cannot fail."
+    )
+    # 🔴 MATCH BACKTICKED TOKENS, NOT THE PROSE. Narrowing to the paragraph was
+    # NOT enough: the paragraph itself says "a devrc-topic query" and "above the
+    # devrc ones", so a bare substring search still could not see `devrc` being
+    # deleted from the enumerated list. Only the list is backticked, so requiring
+    # a CODE-SPAN carrying the handle makes every arm reachable -- measured: with
+    # prose matching, dropping `devrc` left 8 passed; with this, it dies.
+    block = paras[0]
+    tokens = [t.lower() for t in re.findall(r"`([^`]+)`", block)]
+    missing = [h for h in handles if not any(h.lower() in t for t in tokens)]
+    assert not missing, (
+        f"the /resume step-4 scope warning does not name repo handle(s) {missing}.\n"
+        f"  the tool searches: {list(handles)}\n"
+        "🔴 That paragraph tells the reader the query is corpus-wide and that "
+        "hits may carry another client's content. A handle it does not name is a "
+        "repo the reader is not warned about. Name it in "
+        "claude/skills/resume/SKILL.md, and re-check the 'two of which are "
+        "client repos' count in the same edit -- this test cannot check that."
+    )
 
 
 def test_the_sentinels_can_report_a_missing_block(tmp_path):

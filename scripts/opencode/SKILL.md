@@ -68,7 +68,7 @@ dependency is worth taking only once this skill is proven to get used. For now:
 tail -n 60 <the log path printed on dispatch>
 ```
 
-## Why this exists — four measured failure modes, three success-shaped
+## Why this exists — five measured failure modes, four success-shaped
 
 1. 🔴 **`external_directory: "ask"` → headless auto-reject → exit 0, no work.**
    The brief named a path outside `--dir`. `opencode run` **auto-rejects** an
@@ -86,6 +86,35 @@ tail -n 60 <the log path printed on dispatch>
 4. **20% of opencode sessions exceed the Bash tool's hard 600,000 ms ceiling**
    (p90 2508s, p95 9119s); one died at exactly 600s with `Exit code 143`. Hence
    detached-always.
+5. 🔴 **A SKILL WHOSE `reference/` TREE DOES NOT SHIP KILLS THE RUN IN ~16 s, AND
+   THE CARVE-OUT CANNOT SAVE IT.** Measured 2026-09-05 on the `browser` skill:
+   `ls ~/.config/opencode/skills/browser/` holds **exactly two entries** —
+   `SKILL.md` and the `browser` CLI, both nix-store symlinks. **There is no
+   `reference/` directory there at all.** The agent loaded the skill, followed
+   that file's own `reference/<topic>.md` pointers, got three `File not found`,
+   retried under `~/.claude/skills/browser/reference/`, and was **auto-rejected**
+   as `external_directory`. Dead 16 s after dispatch, having done none of the task.
+   The `/home/zach/.config/opencode/skills/**: "allow"` rule in `opencode.jsonc`
+   exists for exactly this class and **matches nothing here, because the files are
+   not at the allowed path** — it grants access to a directory whose contents were
+   never deployed. This is failure mode 1 arriving from a source **preflight
+   cannot see**: the brief named no external path (`external paths : NOT EXAMINED`,
+   rc 0), and the offending path came from the skill the agent loaded.
+   🔴 **So a clean preflight is not evidence a run survives its own skills**, and
+   fixing the brief-side temp-dir trap does not immunise you — the same dispatch
+   died of mode 1 first, was corrected, and then died of *this*.
+   *Workaround, per dispatch:* name the real location in the brief as a path
+   **relative to `--dir`**, and widen `--dir` to contain it — for `browser` that is
+   `devrc/scripts/browser-bridge/reference/<topic>.md`, which `SKILL.md` states
+   explicitly and the agent never tried. *Durable fix:* ship the `reference/` tree
+   into the skill's opencode directory. **Check before you brief:**
+   ```bash
+   ls ~/.config/opencode/skills/<skill>/
+   ```
+   Two entries and no `reference/` on a skill whose body cites `reference/…` means
+   this trap is armed. It is **not** browser-specific — it hits every skill that
+   keeps detail in `reference/` or `flows/`, which is the shape `prune-skill`
+   actively pushes skills toward.
 
 ## When preflight refuses
 
