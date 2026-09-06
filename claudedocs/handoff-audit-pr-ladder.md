@@ -728,6 +728,30 @@ retained as DONE markers; do not re-claim them.
   tool, that is a real reading of the board and NOT proof this session's id is right — an
   unknown id also answers 200 with an empty array. No field written.
 
+- **Round 2's gate, measured (supersedes "sweep did not finish"):** full `scripts/tests` sweep at
+  `2eaa3c62`, dev-host tier — **2 failed, 11021 passed, 1 skipped in 3243.54s (54:03)**.
+  🔴 **Both failures are NOT attributable to the range**, established by control rather than
+  assertion: `test_activity_spool_isolation.py::test_a_non_pytest_target_that_leaks_is_named_and_red`
+  and `test_gate_exit_truthfulness.py::test_the_verdict_line_carries_the_exit_code` each **pass in
+  isolation at HEAD (70.4s) AND at BASE `90202ce5` (65.8s)** with no wall-time divergence, and
+  neither file mentions `audit-dispatch` (independently re-checked: **0 hits each**). The sweep's
+  traceback tail shows `SystemExit: 143` (SIGTERM) from `escrow-verify.py`'s own timeout reaper —
+  a load artefact of the 54-minute run, i.e. the documented load-flake shape, not an assertion
+  failure. **The sandbox tier (`nix build .#checks…`) was NOT run for #1185** — no claim either way.
+- 🔴 **AN EXTERNAL PROCESS REMOVES AGENT WORKTREES MID-RUN — it is a `git worktree remove`, not a
+  crash.** The round-2 auditor's worktree (`agent-ad35faf31a5c575d2`) vanished while it was still
+  working. It is **deregistered**, not merely deleted: `git worktree prune --dry-run -v` reports
+  **nothing stale**, so something ran a real remove against a live agent. The audit survived only
+  because it finished its base-tree control with `git archive` from the shared clone (a pure read).
+  **Consequence for dispatch: an agent's worktree is not a safe place to leave the only copy of
+  anything.** Have long-running agents report findings incrementally, or materialise trees with
+  `git archive` into the scratchpad instead of relying on the worktree persisting.
+- ⚠ **Worktree count is GROWING, not stable: 144 registered (2026-09-06), up from ~120 hours
+  earlier in the same session, and NONE are prunable.** The doc's older "137 registered worktrees"
+  note is the same condition, still unowned and still without a checkable closing condition — but
+  the number moves upward every session that dispatches agents. Several hold named branches
+  repo-globally at whatever commit they stopped on.
+
 ## How to verify
 ```bash
 # --- rank 5's audit actually ran against the range the doc names ---
