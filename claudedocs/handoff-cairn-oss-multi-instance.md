@@ -177,6 +177,36 @@ Items are marked done IN PLACE; new items APPEND.
    (rank 3) is the nearest thing that would force one.
    forcing: none — it cannot fire before the image exists
 
+8. **Session capture — DESIGNED AND DECIDED, NOT BUILT.** A whole new arm of this programme
+   that this doc's ranked list would otherwise not mention at all: ship a session's transcript
+   to object storage at handoff time and attach it to the cairn entries the session touched, so
+   an entry carries its receipts instead of only its conclusion.
+   **`claudedocs/proposal-cairn-session-capture.md`, merged 2026-09-06 as `e16f9609a` (#1326).**
+   Sixteen operator decisions are settled in its §2 and are NOT to be re-litigated — a session
+   ships as a SET of objects (subagent transcripts are 64% of the bytes), the pointer is an
+   opaque id, retention is indefinite with **no retraction path** by policy, and the entry
+   carries a block list of ids with the digest on the object.
+   🔴 **Read §10 before starting: four things are genuinely undecided**, led by *who READS* the
+   recorded fan-out sets — a recorded set nothing compares against detects nothing.
+   ⚠ **The audit ladder ended by operator instruction at round 9, NOT on a clean round.** Rounds
+   8 and 9 each found a real design defect in the immediately preceding fix, and round 9's own
+   fixes — §5.1's three ledger constraints, the rewritten control 8, the §5.3 cost correction —
+   were never audited. Treat those three as the likeliest wrong thing in the document.
+   **Closing condition:** none yet — this is a design, and the first implementation PR is what
+   would earn one. Do not treat "the proposal merged" as the work being done.
+   forcing: none
+
+9. **opencode session capture — clawgate task #511**, open, dispatchable, no gate.
+   🔴 **Pre-verification refuted the proposal's own framing**, which is the reusable part: the
+   opencode reader ALREADY EXISTS (`scripts/collector/opencode/_shared.py` — read-only SQLite,
+   normalised sessions → messages → parts, plus a tailer, backfill and tests), and
+   `find-session` already searches that corpus. The task is the DELTA — serialise a session to
+   one byte-deterministic artifact — not an exporter from scratch, and "do not add a second
+   reader" is one of its tested criteria because a fresh connection path would be the third.
+   **Closing condition:** task #511 reaches `complete` — it carries author-specified acceptance
+   criteria, so a pickup can close it rather than stopping at `ready_for_review`.
+   forcing: none
+
 ## Gotchas / decisions / dead-ends
 
 **Operator decisions this session, all acted on — do not re-litigate:**
