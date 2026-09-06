@@ -273,10 +273,12 @@ ACKNOWLEDGED_UNSTUBBED = {
         "than against a copied literal, so this justification goes red if the "
         "call site ever grows a mutating verb. "
         "tmux-reply-agent (added 2026-09-06 with the ARMING change) is the "
-        "PROSE-MENTION shape this table already carries three times under "
-        "`home-manager` (notify-failure.sh, session-manager, session-resolve) "
-        "and once here under session-write's entry, and it is re-justified the "
-        "same way rather than reworded to dodge the scanner. Its SINGLE "
+        "PROSE-MENTION shape this table already carries FIVE times under "
+        "`home-manager` (notify-failure.sh, session-manager, session-resolve, "
+        "tmux-scratch-slots.sh, resume-state.sh — that entry numbers the last "
+        "two itself) and once under `wmctrl` (session-write), and it is "
+        "re-justified the same way rather than reworded to dodge the scanner. "
+        "Its SINGLE "
         "occurrence of the name is one line of module-docstring prose giving "
         "the operator the second half of the DISARM procedure — "
         "`systemctl --user stop tmux-reply-agent` — which exists because "
@@ -290,8 +292,16 @@ ACKNOWLEDGED_UNSTUBBED = {
         "is arbitrary command execution as the operator. Verified by grep "
         "that the file carries no call site: its complete set of argv[0] "
         "literals is `tmux_bin()` alone, at the single `subprocess.run` in "
-        "run_tmux, and test_tmux_reply_agent.py pins that the agent shells "
-        "out to nothing else"),
+        "run_tmux. 🔴 THAT LAST CLAUSE NAMED A PIN THAT DID NOT EXIST until an "
+        "audit checked it, and the gap was MEASURED: hazard_hits returns a FILE "
+        "set and this file is now IN it, so injecting a real "
+        "`subprocess.run([\"systemctl\", ...])` here left THIS suite at 77 passed "
+        "— the acknowledgement had blinded the guard it is filed under. The pin "
+        "is now real: test_tmux_reply_agent.py::test_the_agent_SHELLS_OUT_TO_"
+        "TMUX_AND_NOTHING_ELSE walks the agent's AST and asserts its spawn "
+        "argv[0] set is exactly {tmux_bin}, with both controls watched (clean "
+        "tree passes; the injected call site fails with that test's own "
+        "message). Do not restore this entry without that pin"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
          "notify-failure.sh", "playwright-nixos", "resume-state.sh",

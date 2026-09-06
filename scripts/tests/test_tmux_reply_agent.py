@@ -888,23 +888,44 @@ def test_the_wanted_by_guard_can_SEE_an_inverted_flag():
     # the accident to catch is the reverse — a revert to `false`, which disarms
     # the host half while the server keeps accepting writes.
     #
-    # ⚠ RETRACTED, and left here because the retraction is the useful part. The
-    # commit that inverted this control claimed the OLD direction would have gone
-    # "green and blind" — asserting `"true" == "true"` about an unmutated file.
-    # That was FALSE, and an audit measured it: `assert flipped != src` was
-    # ALREADY on the line below before the flip, and `enableTmuxReplyAgent =
-    # false` occurs zero times in the armed file, so the stale direction failed
-    # LOUDLY on exactly that assertion. Reverting it and re-running gives
-    # `1 failed`, not a pass.
+    # ⚠ TWICE-CORRECTED, and the SECOND correction is the one worth reading,
+    # because a fix for the first one CREATED the hazard the first one denied.
     #
-    # So the inversion is still right — a control should mutate toward the live
-    # hazard, and the failure message here now names what actually broke — but it
-    # was never load-bearing against a silent pass. Do not re-derive the stronger
-    # claim: the `!= src` line is what makes a stale direction impossible, and it
-    # is the thing to preserve if this control is ever rewritten again.
-    flipped = src.replace("  enableTmuxReplyAgent = true;",
-                          "  enableTmuxReplyAgent = false;")
-    assert flipped != src, "the flag declaration this control mutates was not found verbatim"
+    # Round 1 of this change claimed the pre-flip direction would have gone
+    # "green and blind". An audit refuted it: `assert flipped != src` already
+    # existed, `enableTmuxReplyAgent = false` occurred ZERO times in the armed
+    # file, so the stale direction failed loudly. True — at that commit.
+    #
+    # 🔴 THEN THE FIX FOR THAT CLAIM MADE IT FALSE. The same round wrote a
+    # DISARM EXAMPLE into `nix/home.nix`'s comments:
+    #
+    #     #     enableTmuxReplyAgent = false;   # then merge + ship.sh, THEN:
+    #
+    # A comment — but `str.replace` cannot tell a declaration from a comment
+    # describing one, and that line's `  #     ` prefix ENDS IN SPACES, so the
+    # two-space-prefixed literal matches INSIDE it. MEASURED: reverting this
+    # control to its pre-flip direction on that tree gives `1 passed` — the
+    # replace hits the comment, `flipped != src` is satisfied, `_wanted_by_expr`
+    # reads the untouched real declaration, and the control passes about a file
+    # whose flag was never mutated. Exactly "green and blind", arrived at by
+    # fixing the claim that it could not happen.
+    #
+    # 🔴 SO THE MUTATION IS ANCHORED, NOT SUBSTRING-MATCHED. `^  <flag> = …;$`
+    # under re.M is the same shape `_wanted_by_expr` already uses, and it is why
+    # THAT function was never fooled by the comment. `subn`'s count is asserted
+    # to be exactly 1, so a second declaration — or a comment that starts at
+    # column 0 — is a failure rather than a silent extra substitution.
+    #
+    # The documentation is NOT the thing to delete here: the disarm example is
+    # the only written rollback for a surface that executes commands. Fix the
+    # test, not the sentence.
+    flipped, n_flipped = re.subn(r"^  enableTmuxReplyAgent = true;$",
+                                 "  enableTmuxReplyAgent = false;", src, flags=re.M)
+    assert n_flipped == 1, (
+        f"expected exactly ONE anchored flag declaration to mutate, substituted {n_flipped}. "
+        "Zero means the declaration moved or changed spelling; more than one means there is a "
+        "second declaration and this control no longer names which one it tested.")
+    assert flipped != src
     assert _wanted_by_expr(flipped)[0] == "false"
 
 
@@ -1785,3 +1806,76 @@ def test_a_window_that_landed_in_the_WRONG_DIRECTORY_is_refused(
         [r for r in server.requests if r["path"].endswith("/result")][0]["body"])
     assert body["state"] == "failed", body
     assert "not the requested" in body["detail"], body
+
+
+def test_the_agent_SHELLS_OUT_TO_TMUX_AND_NOTHING_ELSE():
+    """🔴 THE PIN `test_no_real_launchers.py`'s ACKNOWLEDGEMENT PROMISES, and it
+    did not exist until an audit went looking for it.
+
+    That ledger acknowledges this file as reaching `systemctl` in PROSE — one
+    line of module docstring giving the operator the second half of the disarm
+    procedure. The acknowledgement is only honest while the prose stays prose,
+    and its justification asserted that "test_tmux_reply_agent.py pins that the
+    agent shells out to nothing else". No such test existed; the sentence named
+    a compensating control that was never written.
+
+    🔴 THAT GAP WAS MEASURED, NOT INFERRED. `launcher_scan.hazard_hits` returns a
+    FILE SET, and the ledger asserts set equality — so once this file is IN the
+    set for `systemctl`, a genuine call site added to it changes the set by
+    nothing and the ledger stays green. Injecting
+
+        subprocess.run(["systemctl", "--user", "restart", "some-unit"], check=False)
+
+    into this agent left `test_no_real_launchers.py` at **77 passed**. The
+    acknowledgement had blinded the very guard it was filed under.
+
+    So the pin is written here, where it can see argv rather than file names:
+    every `subprocess` invocation in the agent must take its argv from
+    `tmux_bin()`. AST, not grep — this file and the agent both NAME `systemctl`
+    in prose, and a text scan cannot tell a docstring from a call.
+    """
+    import ast
+
+    tree = ast.parse(SCRIPT.read_text())
+    argv0 = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        # subprocess.run / .Popen / .check_output / .call, and bare os.exec*/os.system
+        mod = getattr(getattr(fn, "value", None), "id", None)
+        attr = getattr(fn, "attr", "")
+        # 🔴 NOT every `os.*` — the first draft of this walker took the whole
+        # module and matched `os.getpid()`, failing on a CLEAN tree. A negative
+        # control that goes red is a broken instrument, not a finding. Only the
+        # verbs that can START a process count.
+        spawns = (mod == "subprocess" and attr in (
+                      "run", "Popen", "call", "check_call", "check_output")) or \
+                 (mod == "os" and (attr.startswith("exec") or attr.startswith("spawn")
+                                   or attr in ("system", "popen")))
+        if not spawns:
+            continue
+        if not node.args:
+            argv0.append(f"<no-argv:{mod}.{attr}>")
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.BinOp) and isinstance(first.left, ast.List):
+            first = first.left
+        if isinstance(first, ast.List) and first.elts:
+            head = first.elts[0]
+        else:
+            head = first
+        if isinstance(head, ast.Call) and isinstance(head.func, ast.Name):
+            argv0.append(head.func.id)
+        elif isinstance(head, ast.Constant):
+            argv0.append(repr(head.value))
+        else:
+            argv0.append(ast.dump(head)[:60])
+
+    assert set(argv0) == {"tmux_bin"}, (
+        f"the agent's subprocess argv[0] set is {sorted(set(argv0))}, not {{'tmux_bin'}}. "
+        "This agent must shell out to tmux and nothing else — it runs as the operator, is "
+        "driven by a network route, and `test_no_real_launchers.py` ACKNOWLEDGES its prose "
+        "mention of `systemctl` on exactly this basis. A new argv[0] here is invisible to "
+        "that ledger (it asserts a FILE set, and this file is already in it), so this is the "
+        "only place the addition can be seen. Do not relax it to make a call site pass.")

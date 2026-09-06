@@ -165,8 +165,14 @@ let
   #     systemctl --user stop tmux-reply-agent          # on BOTH hosts
   #
   # The flag alone is a durable disarm (nothing wants the unit at next login);
-  # the `stop` is what makes it take effect NOW. Removing CLAWGATE_TERMINAL_TOKEN
-  # from the POD is the other lever and is immediate for every host at once.
+  # the `stop` is what makes it take effect NOW, on the host you run it on.
+  #
+  # Removing CLAWGATE_TERMINAL_TOKEN from the POD is the other lever. It is
+  # fleet-wide rather than per-host — but 🔴 NOT INSTANT: per the paragraph
+  # below and the pod's own boot line, it takes effect on the POD'S NEXT BOOT,
+  # so the route keeps answering until then. Neither lever is immediate on its
+  # own; `systemctl --user stop` on both hosts is the one that stops execution
+  # at the moment you run it.
   #
   # 🔴 TWO INDEPENDENT SWITCHES, AND NEITHER IMPLIES THE OTHER. Arming needs
   # (1) CLAWGATE_TERMINAL_TOKEN provisioned into the POD's secret — until then the
