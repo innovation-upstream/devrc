@@ -1117,3 +1117,88 @@ def test_resurrect_dir_expands_the_plugin_s_variables_not_just_a_leading_tilde(t
     assert str(got).startswith(os.path.expanduser("~")), got
     assert _pf.node() in str(got), got
     assert got.name == "last"
+
+
+# --------------------------------------------------------------------------- #
+# The boot race, MEASURED on the reboot of 2026-09-06
+#
+# The unit fired at boot+63s and sent 43 `claude --resume` lines; tmux-resurrect
+# created every pane shell at boot+87s. All 43 landed in panes that were not
+# ready and were DISCARDED — zero appeared even as unexecuted text in any pane's
+# scrollback. The unit exited 0 with Result=success and the operator found 54
+# windows sitting at bare shells.
+#
+# Two layers are pinned here, because either alone is insufficient:
+#   PREVENTION — wait for the pane set to stop changing instead of guessing a
+#   delay. A fixed 45s was wrong by 24s on that boot and cannot be right in
+#   general: the gap scales with pane count, disk speed and boot load.
+#   DETECTION  — `tmux send-keys` exits 0 for keystrokes that go nowhere, so
+#   "sent" is a claim about this process, never about the workspace. Without the
+#   verify pass the unit reports success having started nothing.
+# --------------------------------------------------------------------------- #
+
+def test_a_pane_set_that_holds_still_is_reported_as_settled():
+    fake = ["1 zsh\n2 zsh"] * 10
+    it = iter(fake)
+    tsr.pane_fingerprint = lambda: next(it)
+    ok, waited = tsr.wait_for_workspace_to_settle(settle=3, timeout=30, sleep=lambda s: None)
+    assert ok is True
+    assert waited == 3.0
+
+
+def test_a_pane_set_still_being_rebuilt_is_NOT_settled():
+    """The measured failure: resurrect is still creating and respawning panes,
+    so the fingerprint keeps moving. Sending here is what got discarded."""
+    seq = iter(range(10_000))
+    tsr.pane_fingerprint = lambda: f"{next(seq)} zsh"
+    ok, waited = tsr.wait_for_workspace_to_settle(settle=3, timeout=10, sleep=lambda s: None)
+    assert ok is False
+    assert waited == 10.0
+
+
+def test_no_tmux_server_is_not_a_vacuously_settled_workspace():
+    """🔴 An empty fingerprint is CONSTANT, so an equality-only check would call
+    a dead tmux server 'settled' and send into nothing."""
+    tsr.pane_fingerprint = lambda: ""
+    ok, _ = tsr.wait_for_workspace_to_settle(settle=2, timeout=6, sleep=lambda s: None)
+    assert ok is False
+
+
+def test_the_settle_wait_returns_rather_than_raising_so_a_restore_is_still_attempted():
+    seq = iter(range(10_000))
+    tsr.pane_fingerprint = lambda: f"{next(seq)} zsh"
+    result = tsr.wait_for_workspace_to_settle(settle=2, timeout=4, sleep=lambda s: None)
+    assert isinstance(result, tuple) and result[0] is False
+
+
+def test_verify_reports_a_send_that_never_started_claude(monkeypatch):
+    """🔴 THE REGRESSION. tmux accepted the keys and the pane discarded them."""
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
+    landed, lost = tsr._verify_sends([("Gold:2", "scratch2:2")], attempts=2,
+                                     sleep=lambda s: None)
+    assert landed == 0
+    assert [n for n, _ in lost] == ["Gold:2"]
+
+
+def test_verify_counts_a_send_that_did_start_claude(monkeypatch):
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "claude"))
+    landed, lost = tsr._verify_sends([("Gold:2", "scratch2:2")], attempts=2,
+                                     sleep=lambda s: None)
+    assert landed == 1
+    assert lost == []
+
+
+def test_verify_POLLS_so_a_slow_claude_is_not_mis_reported_as_lost(monkeypatch):
+    """claude's startup scales with the transcript it resumes; a single fixed
+    wait would call the slow ones lost."""
+    calls = {"n": 0}
+
+    def slow(_target):
+        calls["n"] += 1
+        return (True, "claude" if calls["n"] >= 4 else "zsh")
+
+    monkeypatch.setattr(tsr, "window_state", slow)
+    landed, lost = tsr._verify_sends([("Gold:2", "scratch2:2")], attempts=10,
+                                     sleep=lambda s: None)
+    assert landed == 1, f"gave up after {calls['n']} polls"
+    assert lost == []

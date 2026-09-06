@@ -31,43 +31,53 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
 - `@continuum-save-last-timestamp` moved for the first time since 2026-08-05.
 - The boot unit's exact invocation (`restore --dry-run --staleness-check 2`) exits **0**;
   it exited 1 on every boot from 2026-08-04 until #1297+#1309.
-- **NOT VERIFIED: no reboot has occurred.** `uptime -s` = 2026-08-04 14:51:40. Every
-  power-off scenario is fixture mtimes + an injected uptime, never an actual shutdown.
+- ✅ **THE REBOOT HAPPENED — 2026-09-06 18:01:46.** No longer a simulation. It answered
+  the first open investigation and REFUTED its predicted damage; see below.
 - #1311 took 4 audit rounds, #1317 took 4. In both, rounds 1–3 each found a real defect
   **introduced by the previous round's fix**. #1297/#1309/#1314 merged with no audit
   (operator's call, recorded).
 
 ## Open investigations — live diagnosis state
 
-### The boot unit races continuum, and on a cold boot the race is the guaranteed path
-- **Symptom + exact repro:** unverifiable without a reboot. On a cold boot the restore
-  unit and continuum build the tmux workspace concurrently; expected damage is duplicated
-  or misplaced windows, not data loss.
-- **Observed (with values):**
-  - `systemctl --user show tmux-session-restore.service -p After --value` →
-    `graphical-session.target tmux-session-restore.timer app.slice`. **Nothing
-    tmux-related, nothing continuum-related.**
-  - Timer is `OnActiveSec=45s`, `WantedBy=timers.target`.
-  - `tmux show-options -gqv @continuum-boot` → **empty (UNSET)**. So continuum does not
-    auto-start tmux at boot.
-  - i3 config: `grep -cE '^exec.*(alacritty|tmux)'` → **0**. `.zshenv` → 0. **Nothing
-    starts tmux on a cold boot.**
-  - `scripts/tmux-session-restore.py:740,743` — the script itself runs
-    `tmux new-session -d` / `new-window` for anything missing.
-  - Layout to replay: 50 `pane` lines / 50 `window` lines; `pane_contents.tar.gz` = 17 MB.
-- **Ruled out:** the 17 MB tarball is the bottleneck — `tar -xzf` of it measured
-  **0.25s wall, 50 files**. via: measurement
-- **Ruled out:** "continuum runs first, this unit runs after" (the unit's own
-  `Description` asserts it) — it cannot, because on a cold boot nothing else starts a
-  tmux server, so the script's own `new-session` is what starts it, which sources
-  `tmux.conf`, which loads `continuum.tmux`, which sees `just_started_tmux_server` and
-  fires its restore in the background. via: code
-- **Leading hypothesis:** 45s is *usually* enough for tmux to replay 50 panes, so this
-  has probably never bitten — but it is an unguarded timing assumption with no ordering,
-  and the trigger order is inverted from the design.
-- **Next probe:** reboot, then immediately:
-  `journalctl --user -u tmux-session-restore.service -b` and
-  `tmux list-windows -a | wc -l` — a count well above the plan's entry count is the race.
+### ✅ ANSWERED 2026-09-06 — the race is REAL but at a DIFFERENT SEAM than this doc predicted
+- **The reboot happened.** boot `2026-09-06 18:01:46`, from an uptime of 32 days.
+- 🔴 **The predicted damage did NOT occur.** continuum's window replay was *perfect*:
+  54/54 windows, correct `(session, index)` set, **zero extras, zero missing**. There is
+  no duplication race.
+- 🔴 **What DID happen: all 43 `claude --resume` sends were silently discarded.**
+
+| | |
+|---|---|
+| `18:01:46` | boot |
+| `18:02:48` | `tmux-session-restore.service` starts — boot+62s (`OnActiveSec=45s`) |
+| `18:02:49` | 43 × `claude --resume` sent — boot+63s |
+| `18:03:13`–`18:03:15` | **resurrect creates all 54 pane shells** — boot+87s |
+
+  A **24-second gap**. The journal names the mechanism outright:
+  `Started tmux child pane <pid> launched by process 25957`, ×54, in one batch, *after*
+  the sends. Keys delivered to a pane that is not ready are discarded — **zero
+  occurrences of the sent text in any pane's scrollback**, not even as unexecuted text.
+  The unit then exited **0** with `Result=success`, and the operator found 54 bare shells.
+- 🔴 **THIS DOC'S OWN PROPOSED PROBE WOULD HAVE MISSED IT.** It said "a count well above
+  the plan's entry count is the race". The count was **54 vs 54**. It reads clean.
+- **Proof it is timing and not logic:** re-running the identical `restore` 7 minutes
+  later, against the same plan, relaunched **42 of 43** (1 skipped as already running).
+- **The 5 windows reported as MISPLACED** (`/home/zach` instead of their recorded cwd)
+  are the same root cause — their cwd restore had not happened either.
+- **Ruled out:** that a fixed delay can be tuned to fix this — the gap scales with pane
+  count, disk speed and boot load. via: measurement (24s on a 54-pane workspace)
+- **FIXED** in `fix/tmux-restore-boot-race`, two layers, because either alone is
+  insufficient:
+  1. **PREVENTION** — `wait_for_workspace_to_settle()` blocks until the pane
+     fingerprint (`pane_pid` + `pane_current_command` for every pane) stops changing.
+     Waits for the *observable*, not a guessed duration. An empty fingerprint does NOT
+     count as settled, or a dead tmux server would read as ready.
+  2. **DETECTION** — `_verify_sends()` polls each target until it is running `claude`.
+     `tmux send-keys` exits 0 for keystrokes that go nowhere, so "sent" was only ever a
+     claim about the process. The unit now exits **1** when the resumes did not land.
+- **Also closed:** `tmux-restore-observe.sh` now captures `sends_logged` and
+  `claude_panes_live` and reports `🔴 THE RESUMES DID NOT LAND`. Verified against the
+  REAL post-capture from this boot (43 sends / 1 live → fires; 43/43 → quiet).
 
 ### The liveness term is inert at every boot (`uptime <= limit`) — documented, not closed
 - **Symptom + exact repro:** a chain frozen across a reboot restores a stale plan.
@@ -115,55 +125,33 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
   `~/.claude/projects`; the `opencode` skill owns that surface.
 
 ## Next steps (ranked)
-1. **Reboot and observe.** The only test that closes both open investigations above;
-   everything else is simulation. **The pre-reboot baseline is already on disk** at
-   `~/.cache/tmux-restore-observe/pre-latest.txt`. After the reboot, run **one command**:
+1. ✅ **DONE — rebooted 2026-09-06 18:01:46 and observed.** See the ANSWERED block above.
+   The fix is in `fix/tmux-restore-boot-race`. What remains of this item:
+   **ship that branch and reboot ONCE MORE to confirm the fix**, using the same command
+   (the baseline is written by `pre`, and `post` now reports whether the resumes landed):
    ```bash
-   ~/workspace/devrc/scripts/tmux-restore-observe.sh post
-   # rc 0 clean · 1 race/misplacement · 2 usage · 3 could-not-decide · 4 windows missing · 5 no workspace at all
+   ~/workspace/devrc/scripts/tmux-restore-observe.sh pre    # before
+   ~/workspace/devrc/scripts/tmux-restore-observe.sh post   # after
+   # rc 0 clean · 1 race/misplacement/resumes-lost · 2 usage · 3 could-not-decide · 4 windows missing · 5 no workspace
    ```
-   A copy of the script sits beside the baseline at
-   `~/.cache/tmux-restore-observe/tmux-restore-observe.sh` (written by `pre`) in case the branch is not merged yet. It is a READER — it adds no
-   boot-path unit, on purpose: three defects in this arc came from changing a boot
-   path nobody had observed.
+   🔴 The second reboot is not optional-in-spirit: the fix has been unit-tested and
+   mutation-swept, but the ONLY thing that has ever exercised this path for real is a
+   reboot, and the first one refuted the standing hypothesis outright.
 
-   🔴 **What it compares, and why not the obvious things.** The discriminator is
-   `(session, window_index)` against **the layout that was actually replayed** — the
-   newest `tmux_resurrect_*.txt` older than the boot, resolved at `post` time. Two
-   earlier designs were built and MEASURED WRONG on this host; both are recorded in
-   the script header so nobody re-derives them:
-   - **not duplicate window NAMES** — `automatic-rename-format` is the cwd basename,
-     so repeated `(session, name)` pairs are the designed steady state. Measured: 9
-     such groups in a healthy live workspace, and a name-keyed verdict returned
-     `RACE EVIDENCE` on a *perfect* restore.
-   - **not the baseline's window COUNT** — continuum autosaves every 15 min and the
-     reboot is unscheduled, so a count captured hours earlier describes a layout that
-     is not the one replayed. Measured: 56 → 55 within two hours of a baseline.
-
-   Because the expectation is derived from the replayed layout rather than the
-   baseline, **the baseline itself does not go stale** — it supplies only the previous
-   `boot_time` (to prove a reboot happened) and the host identity, neither of which
-   drifts. ⚠ **The cached SCRIPT copy is a different matter**: only `pre` writes it, so
-   after any change to the script it is stale until `pre` runs again. Re-run `pre` if
-   the branch has moved since the baseline was taken (`cmp` it against
-   `scripts/tmux-restore-observe.sh`); otherwise it is not required.
-
-   🔴 **Its refusals are the load-bearing part.** Same `boot_time` ⇒ INCONCLUSIVE, never
-   "no race". A baseline from the *other host* ⇒ INCONCLUSIVE. No tmux server at all ⇒
-   rc 5 `TOTAL RESTORE FAILURE`, not a shrug. And rc 0 says in its own output that a
-   clean boot is ONE negative sample of an unguarded timing assumption, not a closure.
-   forcing: none
 2. **Run bare `claude` windows inside tmux** so a closed window detaches instead of
    vanishing. Touches no repo file — an operator habit, or an i3 binding in
    `devrc/nix/i3/config.nix`.
    forcing: incident — 2026-09-06, the operator accidentally closed i3 windows; two live
    claude conversations survived only via transcript archaeology through ClickHouse, and
    one opencode window was never recovered.
-3. **Order the boot unit against continuum**, or set `@continuum-boot` so tmux starts
-   before the unit fires. `devrc/nix/home.nix` (the `tmux-session-restore` unit) and
-   `devrc/nix/programs/tmux/default.nix`. Do this only AFTER rank 1 — three defects in
-   this arc were introduced by fixing a boot path nobody had observed.
-   forcing: none
+3. 🔴 **SUPERSEDED — do NOT do this as written.** It said: order the unit against
+   continuum, or set `@continuum-boot`. The reboot showed ordering against continuum
+   is not the fix: continuum's window replay was already complete and correct when the
+   unit fired. What the unit races is resurrect's **pane-shell creation**, 24s later,
+   and no systemd ordering expresses "wait until every pane has a live shell". The fix
+   is in the script (settle-wait + send verification), not in the unit graph. Kept here
+   because this entry would otherwise send the next session to rebuild the wrong thing.
+
 4. **`--assume-empty` for `restore --dry-run`**, so a pre-reboot dry run exercises the
    send path instead of only the skip branch. `devrc/scripts/tmux-session-restore.py`.
    Reported as gap #4 at the start of this arc and never closed.

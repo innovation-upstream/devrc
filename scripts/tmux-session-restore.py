@@ -49,6 +49,7 @@ import platform
 import re
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -485,6 +486,55 @@ def window_state(target: str) -> tuple[bool, str]:
     return (bool(out.strip()), out.strip())
 
 
+def pane_fingerprint() -> str:
+    """A stable identity for every live pane: its pid and current command.
+
+    While tmux-resurrect is still restoring, panes are being created and
+    RESPAWNED, so this string keeps changing. Once it holds still, the
+    workspace has stopped moving underneath us.
+    """
+    return run(["tmux", "list-panes", "-a", "-F", "#{pane_pid} #{pane_current_command}"])
+
+
+def wait_for_workspace_to_settle(settle: float = 5.0, timeout: float = 120.0,
+                                 sleep=time.sleep) -> tuple[bool, float]:
+    """Block until the pane set stops changing. Returns (settled?, seconds waited).
+
+    🔴 THIS IS THE FIX FOR A MEASURED, SILENT, TOTAL FAILURE. On the reboot of
+    2026-09-06 this unit fired at boot+63s and sent 43 `claude --resume` lines;
+    tmux-resurrect created every pane shell at boot+87s. All 43 sends landed in
+    panes that were not ready and were DISCARDED — zero of them appeared even as
+    unexecuted text in any pane's scrollback. The unit then exited 0 with
+    `Result=success`, and the operator found 54 windows sitting at bare shells.
+
+    The old design was a fixed `OnActiveSec=45s` timer with no ordering — an
+    unguarded timing assumption, measured wrong by 24 seconds on that boot. A
+    fixed delay cannot be right: the gap depends on pane count, disk speed and
+    boot load. So this waits for the OBSERVABLE (the pane set holding still)
+    instead of guessing a duration.
+
+    Returns rather than raising: a workspace that never settles is still worth
+    a best-effort restore, but the caller must SAY the wait timed out rather
+    than reporting a clean run.
+    """
+    waited = 0.0
+    last = pane_fingerprint()
+    stable_for = 0.0
+    step = 1.0
+    while waited < timeout:
+        sleep(step)
+        waited += step
+        now = pane_fingerprint()
+        if now == last and now.strip():
+            stable_for += step
+            if stable_for >= settle:
+                return True, waited
+        else:
+            stable_for = 0.0
+        last = now
+    return False, waited
+
+
 def resurrect_last_path() -> Path:
     """`<resurrect-dir>/last`, asking tmux rather than assuming the default.
 
@@ -733,6 +783,16 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
     plan = json.loads(src.read_text())
     tag = "[dry-run] would " if dry_run else ""
     sent = skipped = 0
+    targets_sent: list[tuple[str, str]] = []
+    settled = True
+    if not dry_run:
+        settled, waited = wait_for_workspace_to_settle()
+        if settled:
+            print(f"workspace settled after {waited:.0f}s — sending now")
+        else:
+            print(f"🔴 workspace did NOT settle within {waited:.0f}s — sending anyway, "
+                  "but panes may still be respawning and sends can be DISCARDED. "
+                  "This run is best-effort, not a clean restore.", file=sys.stderr)
     for e in plan:
         sess, win, cwd, sid = e["session"], e["window"], e["cwd"], e["session_id"]
         target = f"{sess}:{win}"
@@ -754,11 +814,60 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
         else:
             run(["tmux", "send-keys", "-t", target, line, "Enter"])
             print(f"→ {e['codename']}:{win}  {resume}")
+            targets_sent.append((f"{e['codename']}:{win}", target))
         sent += 1
+
     verb = "would relaunch" if dry_run else "relaunched"
     print(f"\n{verb} {sent} windows, skipped {skipped}. "
           + ("(nothing changed — dry run)" if dry_run else "Attach with: tmux attach"))
+    if dry_run:
+        return 0
+
+    # 🔴 VERIFY THE SENDS LANDED. `tmux send-keys` returns 0 for keystrokes that
+    # go nowhere, so "sent" is a claim about THIS process, never about the
+    # workspace. On 2026-09-06 that gap let the unit report success having
+    # started nothing at all. A send is only real once the pane is running
+    # claude.
+    landed, lost = _verify_sends(targets_sent)
+    if lost:
+        print(f"🔴 {len(lost)} of {sent} send(s) did NOT start claude: "
+              + ", ".join(name for name, _ in lost[:8])
+              + ("…" if len(lost) > 8 else ""), file=sys.stderr)
+        print("  The keystrokes were accepted by tmux and discarded by the pane. "
+              "This is the boot-race signature; re-run once the workspace is idle.",
+              file=sys.stderr)
+        return 1
+    if not settled:
+        print(f"⚠ all {landed} send(s) landed, but the workspace never settled — "
+              "treat this run as lucky, not correct.", file=sys.stderr)
+        return 1
+    print(f"verified: {landed} of {sent} window(s) are running claude")
     return 0
+
+
+def _verify_sends(targets: list[tuple[str, str]], attempts: int = 15,
+                  sleep=time.sleep) -> tuple[int, list[tuple[str, str]]]:
+    """(count that reached `claude`, list of those that did not).
+
+    Polls rather than sleeping once: claude's startup time varies with the
+    transcript size being resumed, and a single fixed wait would mis-report the
+    slow ones as lost.
+    """
+    pending = list(targets)
+    landed = 0
+    for _ in range(attempts):
+        if not pending:
+            break
+        sleep(1.0)
+        still = []
+        for name, target in pending:
+            _, cmd = window_state(target)
+            if cmd == "claude":
+                landed += 1
+            else:
+                still.append((name, target))
+        pending = still
+    return landed, pending
 
 
 def main(argv: list[str]) -> int:

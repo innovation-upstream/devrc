@@ -356,6 +356,20 @@ capture() {
         echo "--- PLAN-CWD (session<TAB>index<TAB>cwd) ---"
         plan_cwds "$PLAN" | sort -u
       fi
+      # 🔴 THE FAILURE THE 2026-09-06 REBOOT ACTUALLY PRODUCED, and which every
+      # comparison in this file was blind to: the unit RAN, exited 0, sent 43
+      # `claude --resume` lines, and started NOTHING. Windows and ids were
+      # perfect, so an id-keyed verdict reads clean while the workspace is 54
+      # bare shells. The two numbers that separate those cases are the sends
+      # the unit logged and the panes actually running claude.
+      echo "sends_logged=$(journalctl --user -u "$UNIT" -b --no-pager 2>/dev/null \
+        | grep -c 'claude --resume' || true)"
+      if tmux has-session 2>/dev/null; then
+        echo "claude_panes_live=$(tmux list-panes -a -F '#{pane_current_command}' 2>/dev/null \
+          | grep -cx claude || true)"
+      else
+        echo "claude_panes_live=UNMEASURED reason=no-tmux-server-responding"
+      fi
       echo "--- JOURNAL ($UNIT, this boot) ---"
       journalctl --user -u "$UNIT" -b --no-pager 2>&1 || echo "(journal unavailable)"
       echo "--- RESTORE LOG (tail) ---"
@@ -563,6 +577,34 @@ verdict() {
 
   local rc=$RC_CLEAN
   if [ "${rc_incomplete:-0}" = 1 ]; then rc=$RC_INCONCLUSIVE; fi
+
+  # --- did the restore's OWN WORK land? ------------------------------------ #
+  # Windows coming back is continuum's job; resuming the conversations is this
+  # unit's. They fail independently, and on 2026-09-06 the second failed
+  # completely while the first was flawless.
+  local sends live
+  sends=$(get "$post" sends_logged)
+  live=$(get "$post" claude_panes_live)
+  if [ -n "$sends" ] && [ "$sends" != 0 ]; then
+    if [ -z "$live" ] || [ "$live" = UNMEASURED ]; then
+      echo
+      echo "⚠ the unit logged $sends resume(s) but the live claude-pane count is"
+      echo "   UNMEASURED, so whether any of them landed is UNKNOWN."
+      rc=$RC_INCONCLUSIVE
+    elif [ "$live" -lt "$sends" ]; then
+      echo
+      echo "🔴 THE RESUMES DID NOT LAND — the unit logged $sends send(s) and only"
+      echo "   $live pane(s) are running claude. tmux accepts keystrokes for a pane"
+      echo "   that is not ready and DISCARDS them, so the unit exits 0 having"
+      echo "   started nothing. MEASURED 2026-09-06: 43 sent at boot+63s, every"
+      echo "   pane shell created at boot+87s, 0 resumed, Result=success."
+      echo "   This is INDEPENDENT of the window comparison below: the windows"
+      echo "   can be perfect and the workspace still empty."
+      rc=$RC_RACE
+    else
+      echo "resumes: $live pane(s) running claude vs $sends send(s) logged"
+    fi
+  fi
   if [ -n "$extra" ]; then
     echo
     echo "🔴 RACE EVIDENCE — windows exist that the replayed layout does NOT contain"
