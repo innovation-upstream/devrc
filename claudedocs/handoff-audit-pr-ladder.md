@@ -16,32 +16,48 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-🔴 **THIS EFFORT IS COMPLETE. All four ranked items are DONE and every PR is merged, content-
-verified and shipped.** Only rank 5 (below) is workable, and it is `forcing: none`.
+🔴 **RANK 5 IS CLAIMED AND AUDITED BUT NOT CLOSED.** Its closing condition is *"a round
+returns no findings, or a named reader dismisses it in writing"* — round 2 returned
+**3 🟡 + 4 🟢**, so the ladder continues. #1185 is already merged, so the fixes are a NEW
+PR, not a fix round on it. Claim `audit-pr-ladder-5` is HELD (mine, taken 2026-09-06).
 
-- **Five PRs, all MERGED and verified by CONTENT with a negative control** (never ancestry — a
-  squash makes the branch head a permanent non-ancestor):
-  `#1153` → `018e5761` · `#1157` → `3e4c447f` · `#1178` → `0aa90f20` · `#1185` → `76d20386` ·
-  `#1191` → `a4529101`.
-- **Fleet: both hosts at `a4529101`, `drift-check` rc 0** — `PARITY-RC=0` and `SRC-RC=0` on each,
-  source parity `compared=2 same=2 differing=0`, `clawgatectl 0.8.21` on both.
-- ✅ **The `inxi`/`cpu-x` HOST DIVERGENCE IS RESOLVED** — committed to `main` by another session,
-  verified present in `origin/main:nix/pkgs/default.nix` (1 each, negative control 0). The
-  workbench's dirty-tracked path is gone; `ship.sh` reports `0 tracked` dirty paths.
-- 🔴 **BREAK-GLASS WAS AUTHORISED AND NOT USED.** `#1191` was red three times on the store-api
-  fsync condition; the operator authorised the branch-protection break-glass, and a re-check
-  before acting made it unnecessary — a rebase onto current `main` in a genuinely quiet window
-  passed. **`main` was never unprotected** (verified after: both checks required,
-  `enforce_admins=true`).
-- **Still open BY DESIGN, each deliberately unfiled for want of a closing condition:** 137
-  registered worktrees; the Tekton/fsync capacity condition (diagnosed in `scripts/ci-repro/`,
-  three fixes already rejected on measurements).
-- **Preserved WIP from earlier sessions, untouched:**
+- **Round 2 of #1185 ran** against `90202ce5..2eaa3c62` (the fix round the doc recorded as
+  UNAUDITED). Brief assembled by `scripts/audit-dispatch.py 1185 --round 2` (rc 0, no
+  refusal — #1185 does carry a round-1 `audit-claims` block). Ledger computed by the
+  auditor because the brief correctly printed `COULD NOT MEASURE`: this checkout was on
+  `c5a445d8`, not the PR's head.
+  **round 2 · payload lines changed THIS round: 114 (61+/53− in `scripts/audit-dispatch.py`)
+  (since round 1: 114 — single fix commit, so this delta IS the whole delta) · elapsed: 2h40m.**
+  `test_audit_dispatch.py` 78/51 classified scaffolding; 243 lines total.
+- **The base rate held and is now SIX of seven.** The doc recorded "a fix introduced a new
+  defect in five of six rounds". Two of round 2's three 🟡s are defects the fix round itself
+  created.
+- **Every claimed MEASUREMENT in the fix round reproduced**: the 127-test control, all three
+  round-1 mutant kills, the 78-test truthy probe for the deleted conditional, and the
+  top-level-`return` refutation (re-measured under a real pty in interactive bash, interactive
+  zsh and `bash <script>`). The shipped payload block is behaviourally correct in all six
+  states walked. The defects are in what GUARDS it and what it TELLS THE READER TO DO.
+- **A separate measurement effort landed and merged: devrc #1316** (`claudedocs/audit-ladder-review-2026-09-04.md`,
+  squash `eac71667`, 495 lines). Gated on the merged tree at base `29a5c77d`, all four legs —
+  dev-host pytest 21,674/0 fail, dev-host node 1,449/0 fail, `nix` pytests 21,674/0 fail,
+  `nix` nodetests 1,449/0 fail — plus a claudedocs-sensitive subset (982 passed) at the newer
+  base `cc7f6254`. Headline: **the payload-attribution gate has NO confirmed firing across
+  309 merged PRs**, and the Q1 "did the stop rule change behaviour" question is **not
+  established** (depth fell but ladder volume tripled underneath it — a confound).
+- **Not measured, still open from #1316:** the waste audit covered `devrc` ONLY. Ladders also
+  ran in `homelab-talos`, `civit-datapacket-talos`, `vetr`, `auditloop`, `civitai-gpu-fleet`,
+  `naida-ai` — none churn-measured, despite "all repos" being the chosen scope.
+
+**Carried forward (this section REPLACES, so these live here until they stop being true):**
+- **Preserved WIP from earlier sessions, still untouched — do not delete without reading:**
   `~/workspace/.wip-preserve-discord-embed-2026-08-28/` and
   `~/workspace/.wip-preserve-memory-detail-2026-08-30/`.
-- **No claims held; no worktrees of this effort remain.** No `clawgate-task:` field is recorded —
-  `clawgate_handoff.sh resolve` returned **rc 5 (nothing resolved) with its positive control
-  passing**, which is not "no task": an unknown session id also answers 200 with an empty array.
+- **The effort's five original PRs, all merged and content-verified** (never by ancestry — a
+  squash makes the branch head a permanent non-ancestor): `#1153` → `018e5761` ·
+  `#1157` → `3e4c447f` · `#1178` → `0aa90f20` · `#1185` → `76d20386` · `#1191` → `a4529101`.
+- ⚠ **Fleet parity was last verified at `a4529101` (2026-09-01) and is now STALE** — `main` has
+  moved many times since (at this writing `88f1bda4`). Re-run `scripts/drift-check.sh`; do not
+  quote the old rc 0.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -123,22 +139,49 @@ retained as DONE markers; do not re-claim them.
 1. **DONE (2026-08-31) — ship the laptop.** `drift-check.sh` rc 0, `PARITY-RC=0` on both.
    forcing: none
 2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.** ⚠ Successor
-   condition real and unowned: **137 registered worktrees**. Not filed — no checkable closing
+   condition real and unowned: 137 registered worktrees. Not filed — no checkable closing
    condition.
    forcing: none
 3. **DONE (2026-08-31) — `#1133`'s never-run round 3.** `#1157` → `3e4c447f`.
    forcing: none
 4. **DONE (2026-09-01) — the `nix log` port-back.** `#1185` → `76d20386`.
    forcing: none
-5. **`90202ce5..2eaa3c62` — `#1185`'s fix round — is UNAUDITED.** (repo: `devrc`; files
-   `scripts/audit-dispatch.py`, `scripts/tests/test_audit_dispatch.py`.) Round 1 found 4 🟡 + 2 🟢
-   including a real correctness bug (the emitted block's exit status inverted) and a guard three
-   mutants walked; the fix round was merged on operator decision on cost, recorded on the PR as a
-   decision and **not** as convergence. 🔴 The relevant base rate: across this effort a fix
-   introduced a new defect in **five of six rounds**, twice by committing the exact error the same
-   commit was fixing. **Closing condition:** a round returns no findings, or a named reader
-   dismisses it in writing.
+5. **AUDITED 2026-09-06, NOT CLOSED — `90202ce5..2eaa3c62` round 2 returned 3 🟡 + 4 🟢.**
+   (repo: `devrc`; files `scripts/audit-dispatch.py`, `scripts/tests/test_audit_dispatch.py`.)
+   Claim `audit-pr-ladder-5` is HELD. Findings are in "Open investigations" above. **Closing
+   condition unchanged:** a round returns no findings, or a named reader dismisses it in
+   writing. It closes via rank 6, not by re-auditing #1185.
    forcing: none
+6. **Fix the three 🟡s from round 2 in ONE PR, then run round 3 against that PR.**
+   (repo: `devrc`; files `scripts/audit-dispatch.py`, `scripts/tests/test_audit_dispatch.py`.)
+   F2 first — it ships wrong advice in every brief the tool emits TODAY, including the one
+   that dispatched this audit. Then F1 (anchor `exit 1` to end-of-line) and F3 (fix the
+   inverted comment, widen the assertion to require the verdict grep last). 🔴 Add a
+   `FIX_MATRIX` row and a mutant per finding — the round-2 auditor identified their ABSENCE
+   as the structural reason F1/F3/F4 were reachable at all. Round 3 on the resulting PR is
+   what closes rank 5.
+   forcing: none
+7. **Decide the `scripts/testlib/**` payload-vs-scaffolding classification and write it into
+   `claude/skills/audit-pr/reference/round-ladder-evidence.md`.** It is the whole of the
+   #1132 three-way disagreement, and #1132's own ladder called it BOTH WAYS one round apart
+   (round 4 excluded `nix_units.py`'s 64 lines from its stated 31; round 5's stated 19 lines
+   ARE that file). *Closes when* the reference file states the call with its reason.
+   forcing: none
+8. **Churn-measure the ladders OUTSIDE devrc** — `homelab-talos`,
+   `civit-datapacket-talos`, `vetr`, `auditloop`, `civitai-gpu-fleet`, `naida-ai`. #1316's
+   waste audit was devrc-only against an "all repos" scope. *Closes when* each repo's
+   in-window ladders are churn-measured or reported UNMEASURABLE with a reason.
+   forcing: none
+9. **Mine the stop-rationale prose across all 42 block-carrying PRs** rather than the two read
+   by hand. The only route to a RATE for "ladders that stopped on a stated mechanism", and how
+   #1157's escape-hatch-rationale requirement gets checked at all. *Closes when* the terminal
+   round's summary is classified for every carrier and the rate is published.
+   forcing: none
+10. **Fix the range-coverage hole.** Blocks that skip a round (#1233: blocks 1, 2, 4, with
+    round 3's fixes in `1b5d2e43..eb947328`) leave churn in NO block's range. *Closes when* the
+    measurement additionally reports, per ladder, the churn between the first block's `from`
+    and the head that no block's range covers.
+    forcing: none
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The ladder never returned a clean round in twelve.** The stop rule assumes
@@ -644,36 +687,65 @@ retained as DONE markers; do not re-claim them.
   duplicate-work hazard rank 1's own update had fixed hours earlier in the same session. A merged
   PR is invisible to `/resume`; the ranked list is what it reads.
 
+- 🔴 **`audit-dispatch.py <pr> --round 2` needs a round-1 `audit-claims` block ON THE PR** or it
+  refuses (REFUSAL 1, rc 2) rather than degrading a delta into a blind full audit. #1185 has
+  one; most PRs do not. Measured across the 2026-08-28→09-06 window: **42 of 309 merged devrc
+  PRs carry a block**, 146 blocks total.
+- 🔴 **The block surface is issue comments ONLY, in practice.** `gh pr view --json comments`
+  cannot see review comments or the PR body — but measured over all 309: review comments **0**,
+  reviews **0**, body **0 real**. The body produced exactly one FALSE POSITIVE: an illustrative
+  example inside a **four-backtick** wrapper in #958's body, whose range `997375ec..9f638fd4`
+  RESOLVES and yields plausible churn (53 lines), so "does the range resolve" cannot detect it.
+  Detect by counting unclosed fences before the match.
+- 🔴 **Block header semantics — the documented off-by-one:** `audited=<from>..<to>` means
+  *from* = the tip that round READ, *to* = the head its FIXES produced. **A round's churn is the
+  block's OWN range**, never the gap to the next block. Measuring the gap prints plausible
+  numbers and manufactures a fake empty terminal range that reads as a clean round. Correcting
+  it moved measurability from 134/18 to 153/1.
+- 🔴 **A ladder can define the gate's unit two ways in consecutive rounds.** #1132 classified
+  `scripts/testlib/nix_units.py` as scaffolding in round 4 and payload in round 5, while its
+  summary claimed it "Stopped on the payload-attribution gate" — it silently uses "zero
+  *executable* payload" in one place and "payload lines" in another. This is why rank 7 exists.
+- **Why ladders are rare is change TYPE, not discipline or a PR-number drought.** `docs`
+  carriers 4/175 = **2.3%**; `fix` 26.8%; `feat` 34.8%. `docs` is 57% of the window and 145 of
+  175 are `docs(handoff)`. The carrier-free runs (#1003–#1043, #959–#987, #1084–#1107) each sit
+  inside a SINGLE day and are made of handoff docs. **A "block drought above PR #N" claim was
+  measured, believed, and then refuted** — #1313 carries a real block; the earlier reading
+  sampled 12 PRs that happened to sit entirely inside one such run. Do not re-derive it.
+- ⚠ **A measurement of this corpus ages within HOURS.** #1313's block was posted
+  `2026-09-05T06:03:38Z` and merged `06:35:05Z` — after a 09-04 run that correctly reported it
+  absent. Quote every figure with its run date. Related: a fresh merge returns
+  `merged: true` with **`mergedAt: null`**, so filtering on `.mergedAt` mis-classifies it.
+- 🔴 **BREAK-GLASS WAS AUTHORISED AND NOT USED — moved here from `State now` so a REPLACE
+  cannot delete it.** `#1191` was red three times on the store-api fsync condition; the
+  operator authorised the branch-protection break-glass, and a re-check immediately before
+  acting made it unnecessary — a rebase onto current `main` in a genuinely quiet window
+  passed. **`main` was never unprotected** (verified after: both checks required,
+  `enforce_admins=true`). The lesson is the re-check, not the authorisation.
+- **`claim-work` is at `scripts/claim-work.sh` / `~/.local/bin/claim-work`, NOT `scripts/claim-work`.**
+- **No `clawgate-task:` recorded**: `clawgate_handoff.sh resolve` returned **rc 5** with its
+  positive control passing (the same endpoint answered 11 links for another session). Per the
+  tool, that is a real reading of the board and NOT proof this session's id is right — an
+  unknown id also answers 200 with an empty array. No field written.
+
 ## How to verify
 ```bash
-# --- the whole effort, in one command. Expect rc 0. ---
-bash ~/workspace/devrc/scripts/drift-check.sh
-#   [workbench] PARITY-RC=0 / SRC-RC=0     [laptop] PARITY-RC=0 / SRC-RC=0
-#   [srcrepo] compared=2 same=2 differing=0
-# ⚠ rc 17 is EXPECTED to recur here within hours — nothing converges nix/pkgs' foreign
-#   source repos. Read the DIFF before acting: exclude _test.go/.bats/tests/ and see
-#   whether anything reaches a compiled binary.
+# --- rank 5's audit actually ran against the range the doc names ---
+git -C ~/workspace/devrc cat-file -e 90202ce5^{commit} && \
+git -C ~/workspace/devrc cat-file -e 2eaa3c62^{commit} && echo "both ends resolve"
+git -C ~/workspace/devrc merge-base --is-ancestor 2eaa3c62 origin/main && \
+  echo "UNEXPECTED: ancestor" || echo "expected: NOT an ancestor (squash merge)"
 
-# --- the five merges, by CONTENT (a squash is never an ancestor), with a negative control ---
-git -C ~/workspace/devrc fetch origin main
-git -C ~/workspace/devrc show origin/main:claude/skills/audit-pr/SKILL.md \
-  | grep -c 'IN THE ROUND.S SUMMARY AND NOT LEFT IMPLICIT'          # 1  (#1157)
-git -C ~/workspace/devrc show origin/main:scripts/audit-dispatch.py \
-  | grep -c 'NIX_LOG_DRV_GUARD'                                     # 2  (#1185: def + use)
-git -C ~/workspace/devrc show origin/main:claudedocs/handoff-audit-pr-ladder.md \
-  | grep -c 'ALL FOUR RANKED ITEMS ARE CLOSED'                      # 1  (#1191)
-git -C ~/workspace/devrc show origin/main:scripts/audit-dispatch.py \
-  | grep -c 'ZZZ-NOT-PRESENT'                                       # 0  <- negative control
+# --- F2 is real and still shipping (expect: 'in fn', no 'SURVIVED', rc 1) ---
+bash -c 'f(){ echo "in fn"; exit 1; }; f; echo "SURVIVED"'; echo "rc=$?"
+sed -n '2959,2966p' ~/workspace/devrc/scripts/audit-dispatch.py   # the prose, live on main
 
-# --- the guards actually guard (not just exist) ---
-env -u CDPATH nix develop ~/workspace/devrc -c bash \
-  ~/workspace/devrc/scripts/tests/mutants-audit-ladder.sh     # ✅ 21 row(s), all as expected
-env -u CDPATH nix develop ~/workspace/devrc -c python3 \
-  ~/workspace/devrc/scripts/tests/mutants-audit-dispatch.py   # ✅ 138 row(s), all as expected
+# --- #1316 landed, by CONTENT (a squash is never an ancestor) ---
+git -C ~/workspace/devrc show origin/main:claudedocs/audit-ladder-review-2026-09-04.md | wc -l   # 495
+gh pr view 1316 --repo innovation-upstream/devrc --json mergedAt,mergeCommit
 
-# --- both hosts serve the same clawgatectl ---
-clawgatectl --version                                         # 0.8.21
-ssh zach@192.168.50.155 'clawgatectl --version'               # 0.8.21
+# --- the claim is still held by this effort ---
+claim-work --list | grep audit-pr-ladder-5
 ```
 ## Open investigations — live diagnosis state
 
@@ -827,3 +899,60 @@ ssh zach@192.168.50.155 'clawgatectl --version'               # 0.8.21
   recommendation that was correct when made.
 - **Residue:** `nix/pkgs/default.nix` (`inxi`/`cpu-x`) is still uncommitted, so the workbench has
   two packages the laptop lacks.
+
+### #1185 F2: the remediation prescribes an action that does not solve the problem it names
+- **Symptom + exact repro:** `scripts/audit-dispatch.py:2959-2966` emits, into EVERY brief the
+  tool produces, "⚠ … a bare `exit 1` pasted into an INTERACTIVE shell closes it. 🔴 **Wrap the
+  block in a function and call it** — `run_tier() { … }; run_tier`. Do NOT simply swap `exit`
+  for `return`". Wrapping in a function does not stop `exit` from killing the shell.
+- **Observed (with values):** `bash -c 'f(){ echo "in fn"; exit 1; }; f; echo "SURVIVED"'`
+  prints `in fn`, does NOT print `SURVIVED`, `rc=1`. Under a real pty
+  (`script -qec "<sh> -i" /dev/null`) with a marker terminal echo cannot forge:
+  `run_tier(){ …; exit 1; }; run_tier` → marker count **0** in bash -i and **0** in zsh -i
+  (shell dead both times); `run_tier(){ …; return 1; }; run_tier` → marker **1**, `rc=1`,
+  guard stopped correctly.
+- **Ruled out:** that the note's own cited measurement is wrong — it is CORRECT; continuation
+  past a failed guard reproduces in pty-interactive bash, pty-interactive zsh and
+  `bash <script>`. via: measurement
+- **Ruled out:** that a test would catch a further regression here — `grep` for `Wrap the
+  block` / `run_tier` / `INTERACTIVE shell` across `test_audit_dispatch.py` and
+  `mutants-audit-dispatch.py` returns zero hits. via: command
+- **Leading hypothesis:** the fix conflated `return` AT TOP LEVEL (correctly refuted) with
+  `return` INSIDE THE FUNCTION it was simultaneously prescribing — and withdrew the
+  pre-existing correct alternative ("run the block as a script") in the same edit. Wider on
+  one axis, narrower on another: the exact shape the skill says to hunt.
+- **Next probe:** none needed to diagnose — the fix is `return` inside the function, plus a
+  test pinning the prose so it cannot regress unobserved.
+
+### #1185 F1: the `exit 1` stop-check is a bare substring, re-opening the hole the same commit closed
+- **Symptom + exact repro:** `scripts/tests/test_audit_dispatch.py:2824` asserts
+  `"exit 1" in lines[i]`, under a docstring at `:2786-2787` claiming each guard is asserted
+  "as a WHOLE LINE … each terminating in `exit 1; }`". Non-full-line comments are not
+  stripped (`:2795-2796` drops only lines STARTING with `#`).
+- **Observed (with values):** mutant
+  `NIX_LOG_DRV_GUARD = '[ -n "$DRV" ] || { echo "NO DERIVATION — nix said:"; cat "$ERR"; }   # exit 1'`
+  → **127 passed, rc 0, SURVIVED**. Executing the resulting block with an empty `$DRV` prints
+  `NO DERIVATION — nix said:` / `0` / `1:RESULT: PASS (exit=0)` (a FOREIGN log from the CWD
+  flake) / `BLOCK EXIT STATUS: 0` — byte-for-byte the affirmative false green round 1's first
+  mutant produced.
+- **Ruled out:** that this class was simply unknown to the author — the SAME assertion block
+  anchors `mktemp` with `re.match(r"LOG=\$\(mktemp\b")` precisely because "the WORD mktemp
+  survived in a comment". via: code
+- **Leading hypothesis:** the anchoring was applied per-symptom rather than per-class.
+- **Next probe:** none — fix is to require the guard line to END in `exit 1; }` (what the
+  docstring already claims), or strip trailing comments before the check.
+
+### #1185 F3: a new comment states the inverse of the fix, over an assertion that is a negative pin only
+- **Symptom + exact repro:** `scripts/tests/test_audit_dispatch.py:2834` reads
+  "🔴 **The verdict grep must NOT be last**". The verdict grep MUST be last; what must not be
+  last is `grep -c`. The payload's own comment (`audit-dispatch.py:2953`) and this comment's
+  own assertion message three lines below both say the opposite.
+- **Observed (with values):** the comment is NEW in `2eaa3c62` (absent at `90202ce5`).
+  `:2842-2846` asserts only `not re.match(r'^grep -c\b', last_cmd)` — nothing requires the last
+  command to BE the verdict grep. Two mutants SURVIVED a green 127-test suite:
+  `grep -c "panic: test timed out" "$LOG"; echo done` (verdict grep deleted) → walked against a
+  log with no verdict line gives **rc 0** where the shipped block gives **rc 1**; and
+  `…; grep -n "RESULT:" "$LOG"; true` → block exits 0 unconditionally.
+- **Ruled out:** that a maintainer would catch it from context — acting on line 2834 as written
+  moves `grep -c` back to the end and reinstates F4's inversion verbatim. via: assumed
+- **Next probe:** none — fix the comment and widen the assertion to require the verdict grep last.
