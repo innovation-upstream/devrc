@@ -2785,6 +2785,20 @@ def _assert_the_cached_build_fallback_carries_its_guards(out: str) -> None:
     A guard that reads as coverage while providing none is worse than none, so
     this now slices the FENCE and asserts each guard as a WHOLE LINE, in order,
     each terminating in `exit 1; }`.
+
+    🔴 ROUND 18 — THAT LAST SENTENCE WAS A CLAIM THE CODE DID NOT MAKE. The
+    stop-check was `"exit 1" in lines[i]`, a bare SUBSTRING, while the line
+    filter drops only lines that START with `#`. So
+    `... ; cat "$ERR"; }   # exit 1` — the stop removed, the words kept in a
+    trailing comment — passed, MEASURED at 127 passed / rc 0, and the block it
+    renders prints `NO DERIVATION` and then a FOREIGN log's
+    `RESULT: PASS (exit=0)`: byte-for-byte the affirmative false green the
+    first mutant above produced. The tell that this was per-symptom rather
+    than per-class anchoring is three lines up — `mktemp` is anchored with
+    `re.match` for exactly this reason, in this same block. Both the stop-check
+    and the concurrency check are now anchored, and `$ERR` is pinned beside
+    `$LOG` because a fixed `ERR=` truncates across agents in the DIAGNOSTIC
+    path the way a fixed `LOG=` does in the verdict path.
     """
     fences = re.findall(r"```bash\n(.*?)```", out, re.S)
     blocks = [f for f in fences if "nix log" in f]
@@ -2802,6 +2816,18 @@ def _assert_the_cached_build_fallback_carries_its_guards(out: str) -> None:
         "the log path is not assigned from `$(mktemp ...)`. A FIXED path is "
         "truncated by every sibling agent; a comment mentioning mktemp is not "
         "the same as using it:\n  " + "\n  ".join(lines))
+    # 🔴 `$ERR` TOO, AND IT WAS UNPINNED. The check above covers `LOG=` alone,
+    # so `ERR=/tmp/audit-tier.err` with `LOG=` left as `mktemp` survived a
+    # green suite — reintroducing cross-agent truncation in the DIAGNOSTIC
+    # path, which is the one the $DRV guard `cat`s to say WHY it stopped. A
+    # sibling agent's stderr read back as this run's is worse than no
+    # diagnosis: it names a cause belonging to somebody else's tier.
+    # `re.search`, not `re.match`: `ERR=` is the second assignment on the line.
+    assert any(re.search(r"\bERR=\$\(mktemp\b", ln) for ln in lines), (
+        "the stderr path is not assigned from `$(mktemp ...)`. Two audit "
+        "agents run here by design and a FIXED path means each truncates the "
+        "other's file — so the $DRV guard `cat`s a diagnosis that belongs to "
+        "another run:\n  " + "\n  ".join(lines))
 
     # Each guard must be a whole executable line that STOPS. `exit 1` is what
     # makes a failed guard a stop rather than a note; without it the block
@@ -2821,19 +2847,32 @@ def _assert_the_cached_build_fallback_carries_its_guards(out: str) -> None:
             f"the fenced block has no line matching {pattern!r} — {why}.\n  "
             + "\n  ".join(lines))
         i = hit[0]
-        assert "exit 1" in lines[i], (
-            f"this guard does not STOP, so a failure becomes a note and the "
-            f"block continues into the very false green it exists to close:\n"
-            f"  {lines[i]}")
+        # 🔴 END IN IT, never merely CONTAIN it. `"exit 1" in line` is
+        # satisfied by a TRAILING COMMENT, and the line filter above drops only
+        # lines that START with `#` — see the docstring for the measurement.
+        assert lines[i].endswith("exit 1; }"), (
+            f"this guard does not END in `exit 1; }}`, so it does not STOP: a "
+            f"failure becomes a note and the block continues into the very "
+            f"false green it exists to close. The WORD `exit 1` surviving in a "
+            f"trailing comment is not the same as running it:\n  {lines[i]}")
         positions.append(i)
     assert positions == sorted(positions), (
         "the guards are out of order: $DRV must be checked before `nix log` "
         "runs, and the log's emptiness after it. Order:\n  "
         + "\n  ".join(lines))
 
-    # 🔴 The verdict grep must NOT be last: `grep -c` exits 1 when the count is
-    # 0, so ending on it INVERTS the block's status — measured, a healthy tier
-    # exited 1 and a timing-out one exited 0.
+    # 🔴 THE VERDICT GREP MUST BE LAST. What must NOT be last is `grep -c`: it
+    # exits 1 when the count is 0, so ending on it INVERTS the block's status —
+    # measured, a healthy tier exited 1 and a timing-out one exited 0.
+    #
+    # 🔴 THIS COMMENT USED TO STATE THE INVERSE — "The verdict grep must NOT be
+    # last" — over an assertion whose own failure message three lines below said
+    # "Put the `RESULT:` grep last", and beside a payload comment
+    # (`audit-dispatch.py`) saying the same. A maintainer acting on the comment
+    # as written moves `grep -c` back to the end and reinstates the inversion
+    # verbatim. Corrected here rather than appended to, because a comment is a
+    # claim and two contradicting ones are worse than one.
+    #
     # 🔴 The LAST COMMAND, not the last LINE. A line may chain several commands
     # with `;`, and only the final one sets `$?`. An earlier draft of this very
     # assertion matched the start of the line and failed on a block whose last
@@ -2844,6 +2883,19 @@ def _assert_the_cached_build_fallback_carries_its_guards(out: str) -> None:
         "the block's LAST COMMAND is `grep -c`, which exits 1 when the count is "
         "0 — so a HEALTHY tier reports failure and a timing-out one reports "
         f"success. Put the `RESULT:` grep last.\n  last command: {last_cmd}")
+    # 🔴 AND A NEGATIVE PIN IS HALF A CLAIM. The check above only says the last
+    # command is not `grep -c`; nothing required it to BE the verdict grep. Two
+    # mutants walked that gap on a green 127-test suite: deleting the verdict
+    # grep and ending on `echo done` (the block then exits 0 against a log with
+    # no `RESULT:` line, where the shipped block exits 1), and appending `true`
+    # after it (the block exits 0 unconditionally). "Not the wrong command" and
+    # "the right command" are different assertions; make the second one.
+    assert re.match(r'^grep -n "RESULT:"', last_cmd), (
+        "the block's LAST COMMAND is not the `RESULT:` grep, so the block's "
+        "exit status is set by something other than 'did this tier print a "
+        "verdict'. A trailing `true`, an `echo`, or a deleted verdict grep all "
+        "make the block exit 0 over a log that carries no verdict at all.\n"
+        f"  last command: {last_cmd}\n  block:\n    " + "\n    ".join(lines))
 
 
 def test_the_cached_build_fallback_is_emitted_with_its_guards():
@@ -2867,6 +2919,127 @@ def test_the_cached_build_fallback_is_emitted_with_its_guards():
         "auditor to read a `RESULT:` line, but offers no recovery when that build "
         "is CACHED and prints nothing at rc 0. Emit the `nix log <drv>` fallback.")
     _assert_the_cached_build_fallback_carries_its_guards(out)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE STOP-NOTE LEDGER — restated by hand, and the duplication is the point.
+# --------------------------------------------------------------------------- #
+# Same contract as `DIRECTIVE_LEDGER`: if this were `ad.NIX_LOG_STOP_NOTE` the
+# comparison would be a constant against itself and a reword would move both
+# sides together.
+#
+# 🔴 PINNED WHOLE, NOT BY KEYWORD, because the artifact under test is PROSE and
+# a guard on words is walkable by rewording (claude/RULES.md, spelled-guards).
+# NOTHING pinned this note before round 18 — `grep` for `Wrap the block`,
+# `run_tier` or `INTERACTIVE shell` across this module and
+# `mutants-audit-dispatch.py` returned ZERO hits — and in that gap a
+# prescription that does not work shipped in every brief the tool produced.
+#
+# 🔴 WHAT IT PRESCRIBED, AND WHY IT WAS A NO-OP: "Wrap the block in a function
+# and call it — `run_tier() { … }; run_tier`", with "Do NOT simply swap `exit`
+# for `return`" beside it. `exit` inside a function still exits the shell, so
+# wrapping alone changes NOTHING. MEASURED under a real pty
+# (`script -qec "<sh> -i" /dev/null`) with a marker file terminal echo cannot
+# forge: the `exit 1` form left NO marker in either `bash -i` or `zsh -i` (the
+# shell was dead), the `return 1` form left `rc=1` in both with the block
+# stopped at the failed guard, and a top-level `return` (no function) left
+# `rc=0` in both with the line AFTER the failed guard executed.
+#
+# The old note's own measurement was CORRECT and was about `return` AT TOP
+# LEVEL — not about `return` inside the function it prescribed in the same
+# sentence. Wider on one axis, narrower on another; and the same edit withdrew
+# "run the block as a script", which MEASURES as working (`bash <file>` and
+# `zsh <file>`: stops at the failed guard, exits 1, calling shell alive).
+#
+# Whitespace is normalised, so a RE-WRAP is free and only a REWORD fails. If
+# the reword is deliberate, update this constant in the SAME commit — and
+# re-run the pty measurement first, because this is the one place in the brief
+# that tells the auditor how to EXECUTE the guards.
+STOP_NOTE_LEDGER = (
+    "⚠ Each guard echoes its diagnosis before `exit 1`, so the reason "
+    "survives; but a bare `exit 1` pasted into an INTERACTIVE shell closes it. "
+    "🔴 **Two forms stop the block without closing your shell: run it AS A "
+    "SCRIPT (`bash <file>`), or wrap it in a function AND swap `exit` for "
+    "`return` — `run_tier() { … return 1; }; run_tier`.** Wrapping ALONE is "
+    "not one of them: `exit` inside a function still exits the shell, MEASURED "
+    "under a pty in interactive bash and interactive zsh — `run_tier() { … "
+    "exit 1; }; run_tier` killed both. 🔴 The swap works only INSIDE the "
+    "function: `return` AT TOP LEVEL is not a stop, and MEASURED in "
+    "interactive zsh, interactive bash and `bash <script>` the block then "
+    "CONTINUES past a failed guard and prints a foreign log's `RESULT: PASS` — "
+    "the exact false green this block exists to prevent."
+)
+
+
+def stop_note_in(brief: str) -> str:
+    """-> the paragraph the brief prints directly after the `nix log` fence.
+
+    🔴 FOUND STRUCTURALLY, not by its own words. Locating it with a substring
+    of the note would make the guard walkable by the very reword it exists to
+    catch: a rewritten note simply would not be found, and an extractor that
+    returns nothing passes any comparison it feeds. So the note is "whatever
+    paragraph follows the recovery block", and the block is identified by its
+    CONTENT (`nix log`), which the guards above already pin.
+    """
+    lines = brief.splitlines()
+    opens = [i for i, ln in enumerate(lines) if ln.strip() == "```bash"]
+    closes = []
+    for o in opens:
+        close = next(
+            (j for j in range(o + 1, len(lines)) if lines[j].strip() == "```"),
+            None,
+        )
+        if close is None:
+            continue
+        if any("nix log" in ln for ln in lines[o + 1:close]):
+            closes.append(close)
+    assert len(closes) == 1, (
+        f"expected exactly ONE fenced bash block containing `nix log`, found "
+        f"{len(closes)}. Without it there is nothing to read the stop-note "
+        "AFTER, and this helper would return an empty string that compares "
+        "equal to nothing and fails for the wrong reason.")
+    para = []
+    for ln in lines[closes[0] + 1:]:
+        if ln.strip():
+            para.append(ln.strip())
+        elif para:
+            break
+    assert para, (
+        "the `nix log` fence is the LAST thing in the brief — the note telling "
+        "the auditor how to run those guards without closing their shell is "
+        "gone entirely.")
+    return norm(" ".join(para))
+
+
+def test_the_stop_note_prescribes_something_that_actually_stops():
+    """🔴 REGRESSION. Red at `10d437c9`, where the prescription was a no-op.
+
+    The brief told the auditor to "Wrap the block in a function and call it",
+    which does not stop `exit` from killing an interactive shell, and to NOT
+    swap `exit` for `return`, which is the half that works — see the ledger
+    above for the pty measurements and for why the note was simultaneously
+    wider and narrower than its own evidence.
+
+    Pinned WHOLE and whitespace-normalised: a re-wrap is free, a reword fails.
+    """
+    rc, out, err = run_main(["900"])
+    assert rc == 0, err
+    # 🔴 SAME PRECONDITION as the guards test next door: the note is owed only
+    # where the recovery block is fenced. Unscoped, this would also fire on the
+    # mutants that delete the whole toolchain section, which own their own rows.
+    if "nix build <your worktree>#checks." not in out:
+        return
+    assert norm(STOP_NOTE_LEDGER) == stop_note_in(out), (
+        "\n\nthe note after the `nix log` block is not, word for word, what "
+        "this module pins.\n  pinned here :\n    "
+        f"{norm(STOP_NOTE_LEDGER)!r}\n  in the brief:\n    "
+        f"{stop_note_in(out)!r}\n"
+        "  🔴 This paragraph is the only place the brief says how to EXECUTE "
+        "the guards, and it shipped a prescription that does not work: "
+        "wrapping the block in a function does NOT stop `exit` from closing "
+        "an interactive shell. If the reword is deliberate, re-run the pty "
+        "measurement in the ledger above and update it in the SAME commit."
+    )
 
 
 def test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout():
@@ -8028,6 +8201,23 @@ RED_AT_BASE_R17: frozenset[str] = frozenset({
     "test_the_cached_build_fallback_is_emitted_with_its_guards",
 })
 
+# 🔴 Round 18's ONE regression. The brief's stop-note prescribed wrapping the
+# block in a function, which does not stop `exit` from closing an interactive
+# shell, and refused the swap to `return`, which is the half that works.
+# Watched RED at 10d437c9 by grafting the test onto that tree: 1 failed, on the
+# whole-string comparison, with the old prescription printed beside the new one.
+#
+# 🔴 THE OTHER THREE OF THIS ROUND'S FINDINGS ARE **NOT** HERE, and it is the
+# distinction every earlier round had to make: F1 (`exit 1` pinned as a bare
+# substring), F3 (a negative-only pin on the last command) and 🟢4 (`$ERR`
+# unpinned) are WIDTH findings against `..._is_emitted_with_its_guards`. That
+# test is not red at `10d437c9` — the payload it renders there is correct — so
+# their evidence is the mutants that walk the narrow version (V63-V66), the
+# same shape as r6/4 against r5/2's detector.
+RED_AT_BASE_R18: frozenset[str] = frozenset({
+    "test_the_stop_note_prescribes_something_that_actually_stops",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -8041,6 +8231,7 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "5bad0a0c": RED_AT_BASE_R15,
     "ba321c06": RED_AT_BASE_R16,
     "7de5b0bd": RED_AT_BASE_R17,
+    "10d437c9": RED_AT_BASE_R18,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
@@ -8762,6 +8953,66 @@ FIX_MATRIX = (
      "truncate under each other",
      "test_the_cached_build_fallback_is_emitted_with_its_guards",
      "RED@7de5b0bd", "V62"),
+
+    # ------------------------------------------------------------------ #
+    # 🔴 ROUND 18 — the round-2 DELTA audit of round 17's own PR. Every
+    # finding is in what round 17 ADDED, which is the pattern this ladder
+    # keeps reproducing: the fix round writes the next round's findings.
+    # ------------------------------------------------------------------ #
+    ("r18/F2 the brief's stop-note prescribed an action that does not stop — "
+     "'Wrap the block in a function and call it', beside 'Do NOT simply swap "
+     "`exit` for `return`'. `exit` inside a function still exits the shell, so "
+     "wrapping alone changes NOTHING. MEASURED under a pty with a marker file "
+     "terminal echo cannot forge: the `exit 1` form left no marker in either "
+     "bash -i or zsh -i (both shells dead), the `return 1` form left rc=1 in "
+     "both with the block stopped, and a top-level `return` left rc=0 with the "
+     "line after the failed guard executed. The note's own measurement was "
+     "CORRECT and was about `return` AT TOP LEVEL — a different thing from "
+     "`return` inside the function it prescribed in the same sentence — and "
+     "the same edit withdrew 'run the block as a script', which works. Wider "
+     "on one axis, narrower on another, and NOTHING pinned it: zero hits for "
+     "`Wrap the block` / `run_tier` / `INTERACTIVE shell` in this module or "
+     "the harness",
+     "test_the_stop_note_prescribes_something_that_actually_stops",
+     "RED@10d437c9", "V67"),
+    # 🔴 THE NEXT THREE SHARE r17/N1's DETECTOR AND ITS EVIDENCE LABEL,
+    # deliberately, and for r6/4's reason: the test really was watched red at
+    # `7de5b0bd` and that has not changed. What round 18 found is that its pins
+    # were NARROWER THAN ITS OWN DOCSTRING, and a width claim has no base ref —
+    # the payload at `10d437c9` is correct, so the strengthened test is GREEN
+    # there. Their evidence is the mutants that walk the narrow version, which
+    # is why V63-V66 are named here and not folded into r17/N1's column.
+    ("r18/F1 the `exit 1` stop-check was a bare SUBSTRING under a docstring "
+     "claiming each guard is asserted as a whole line 'terminating in `exit 1; "
+     "}`'. Non-full-line comments are not stripped, so "
+     "`...; cat \"$ERR\"; }   # exit 1` — the stop removed, the words kept — "
+     "passed at 127 passed / rc 0, and the block it renders prints "
+     "`NO DERIVATION` then a FOREIGN log's `RESULT: PASS (exit=0)`. The tell "
+     "that this was per-symptom rather than per-class anchoring is in the same "
+     "assertion block: `mktemp` is anchored with `re.match` for exactly this "
+     "reason. Now `endswith('exit 1; }')`",
+     "test_the_cached_build_fallback_is_emitted_with_its_guards",
+     "RED@7de5b0bd", "V63"),
+    ("r18/F3 the last-command pin was NEGATIVE ONLY — `not re.match(r'^grep "
+     "-c\\b', last_cmd)` — so nothing required the last command to BE the "
+     "verdict grep. Two mutants walked it green: deleting the verdict grep and "
+     "ending on `echo done` (exits 0 against a log with no `RESULT:` line "
+     "where the shipped block exits 1), and appending `true` after it (exits 0 "
+     "unconditionally). Compounding it, the comment above the assertion read "
+     "'The verdict grep must NOT be last' — the INVERSE of the fix, "
+     "contradicted by the payload's own comment and by this assertion's own "
+     "failure message three lines below; a maintainer acting on it reinstates "
+     "the exit-status inversion verbatim. Comment corrected, pin widened to "
+     "require the verdict grep last",
+     "test_the_cached_build_fallback_is_emitted_with_its_guards",
+     "RED@7de5b0bd", "V64 V65"),
+    ("r18/G4 `$ERR` was never pinned: the concurrency assertion read `LOG=` "
+     "alone, so `ERR=/tmp/audit-tier.err` with `LOG=` left as `mktemp` "
+     "survived — reintroducing cross-agent truncation in the DIAGNOSTIC path, "
+     "the one the $DRV guard `cat`s to say WHY it stopped, where a sibling's "
+     "stderr read back as this run's names a cause belonging to another tier",
+     "test_the_cached_build_fallback_is_emitted_with_its_guards",
+     "RED@7de5b0bd", "V66"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
