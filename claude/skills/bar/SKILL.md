@@ -112,13 +112,42 @@ X — your call"). Leave the setup a little more modern than you found it; never
 | media | `i3status-media` | 16 | n/a | qBit-POD AirVPN pill (net_down), **state-driven**: neutral=connected, **RED**=firewalled (tunnel/port-fwd broken), soft-yellow=stale. poller `parse_media`/`fetch_media` read creds from `~/.config/bar/media.env` (0600) — the same `media.env` also feeds `deep-search`, a media release search/grab CLI on PATH (workbench) after `home-manager switch`. **left → `media-menu`**; **right → qBit WebUI** |
 | telemetry deadman | `i3status-telemetry` | 17 | n/a | `tlm N` = N activity-telemetry (host, source) pairs have STOPPED emitting into ClickHouse. 🔴 **`tlm ?` now means ALL FOUR ways of not knowing**, not just one: the deadman evaluated and could not tell (grace-gated >30 min in `parse_telemetry`), OR the poller wrote a `stale`/`error` marker, OR the cache is missing/corrupt, OR the poller stopped refreshing it. They render alike on purpose — the operator's action is the same. `tlm N?` = N were dead as of the last readable poll and this is not current (Critical; a measurement outage never downgrades a known alarm). ⚠ On the MARKER path `stale()` zeroes the count, so that shape is a bare `tlm ?`. Measures BOTH hosts from the workbench poller (it reads the shared table). Logic + the per-source budget table: `scripts/collector/deadman.py` (run it bare for the table; left-click floats it). See the `activity` skill. |
 | airvpn (host) | `i3status-airvpn` | 10 | n/a | **HOST** AirVPN WireGuard pill (net_vpn), **state-driven**, default-OFF. **left → `airvpn-menu`**; **right → `airvpn-detail` float**. 🔴 Full detail + the killswitch re-test protocol: **`~/.claude/skills/bar/reference/airvpn.md`** |
+| game mode (BOTH hosts) | `i3status-gamemode` | 18 | n/a | 󰊗 toggle for i3's empty `mode "game"`. `󰊗 GAME` Critical in the mode, bare `󰊗` Idle otherwise, empty pill if i3-msg cannot answer. **left-click → the SAME script with `--toggle`**. See "Game mode" below |
 
 Bars differ by host (`isLaptop` in `graphical.nix`): laptop gets `batteryBlock` and **omits** GPU
 + all count blocks + poller (nebula-only, no LAN path to homelab endpoints); workbench gets GPU
 (RTX 5080), the count blocks, the state-driven `mediaBlock` (qBit/AirVPN), `claudeRunsBlock` (▦ —
 live Claude-in-tmux count, **indicator only**: its click launched the retired `agent-ops` TUI and
-went with it), `rigcontrolBlock` (⚙). `loadBlock` is one of the few CUSTOM blocks on **both** hosts
-(`/proc/loadavg` needs no poller).
+went with it), `rigcontrolBlock` (⚙). `loadBlock` and `gamemodeBlock` are the CUSTOM blocks on
+**both** hosts (`/proc/loadavg` and one `i3-msg` need no poller).
+
+## Game mode (the 󰊗 pill + `mode "game"`)
+🔴 **`set $mod Mod1` — `$mod` is ALT, not Super.** i3 therefore holds a global X11 grab on ~60
+Alt combos (Alt+Tab, Alt+1..0, Alt+Shift+1..0, Alt+Return, Alt+d/f/e/a/b/n/r/h/j/k/l/space/
+grave/minus/equal). **A grab means the focused window never receives the keypress at all** — a
+game is not merely interrupted by rofi, it is *deaf* to those keys.
+- **An EMPTY binding mode is the only native fix.** Entering a mode ungrabs every default-mode
+  binding and grabs only that mode's. A guard script on the `exec` does NOT work (i3 has already
+  eaten the key), and `bindsym` takes no `[class=…]` criteria, so a conditional grab is
+  impossible. **The emptiness of `mode "game"` is the mechanism — anything you add there is a
+  key the game goes back to not receiving** (pinned: no `$mod` binding may appear inside it).
+- **In:** left-click the 󰊗 pill. There is deliberately **no default-mode keybind to enter** —
+  that would be one more Alt grab, and getting in is the easy direction (the bar is visible).
+- **Out:** `Pause` **or** `Scroll_Lock` (bound *inside* the mode), or the pill again. Two escape
+  keys because not every keyboard has a Pause key and being stuck with no escape is the worst
+  failure this feature has. `test_i3_game_mode.py` fails if a future default-mode binding
+  silently claims either key.
+- 🔴 **RESCUE — stuck in game mode with the bar behind a fullscreen game:** from the laptop
+  (or any nebula peer), `ssh zach@10.42.0.30` then **`DISPLAY=:0 i3-msg mode default`**.
+  Nothing about that path depends on the pill or the script.
+- **i3bar renders the binding-mode indicator natively**, so the word `game` appears on the bar
+  for free whenever the bar is visible — the pill is the *toggle*, not the only indicator.
+- 🔴 **i3 OWNS THE MODE — there is no state file.** The block reads
+  `i3-msg -t get_binding_state`. Two writers exist (the click and the Pause key), so a shadow
+  file would desync the instant the operator escaped by keyboard.
+- Phase 2 — **auto-detect a game by focus (i3 IPC `window::focus` + a WM_CLASS list)** — is
+  deliberately NOT built: nobody has captured real Steam/Proton or Lutris WM_CLASS samples yet,
+  and a guessed list is a mode that engages on the wrong window.
 
 🔴 **Two ways a new block ships dead, both now gated.** (a) A block and its `home.file` must be
 gated the SAME way in BOTH places — an ungated block whose script is `mkIf (!isLaptop)` renders a
