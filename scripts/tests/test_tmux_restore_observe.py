@@ -384,16 +384,16 @@ def _stub_bin(tmp_path):
     """A PATH prefix where the host-touching readers all fail, so `capture` runs
     its real code path without reaching this machine's tmux, systemd or journal.
     Everything else (date, stat, grep, awk, python3) still resolves behind it."""
+    from testlib import mockbin  # noqa: PLC0415 — keep module import cheap
+
     b = tmp_path / "stubbin"
     b.mkdir(exist_ok=True)
     for name, body in (
-        ("tmux", "#!/usr/bin/env bash\nexit 1\n"),
-        ("systemctl", "#!/usr/bin/env bash\nexit 1\n"),
-        ("journalctl", "#!/usr/bin/env bash\nexit 0\n"),
+        ("tmux", "exit 1\n"),
+        ("systemctl", "exit 1\n"),
+        ("journalctl", "exit 0\n"),
     ):
-        f = b / name
-        f.write_text(body)
-        f.chmod(0o755)
+        mockbin.write_exec(b / name, body)
     return b
 
 
@@ -489,11 +489,11 @@ def test_a_broken_awk_degrades_to_INCONCLUSIVE_not_to_clean(tmp_path):
     render as agreement. Pinned as the REAL degradation path, which is why the
     `moved_rc` branch in the script is labelled unreachable rather than claimed
     as coverage."""
+    from testlib import mockbin  # noqa: PLC0415
+
     b = tmp_path / "brokenbin"
     b.mkdir()
-    f = b / "awk"
-    f.write_text("#!/usr/bin/env bash\nexit 2\n")
-    f.chmod(0o755)
+    mockbin.write_exec(b / "awk", "exit 2\n")
 
     env = dict(
         os.environ,
