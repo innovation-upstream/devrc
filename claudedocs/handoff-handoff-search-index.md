@@ -41,9 +41,14 @@ they are separate claims — the earlier "NOT deployed" status is still supersed
   merging and this measurement, **1 of 14 `/resume` runs across BOTH hosts** invoked
   `handoff_search.py`, and that one was not the step firing. Nothing calls the index. The
   diagnosis is placement, not motivation — full evidence in "Open investigations" below.
-  **No fix is built**; the proposed one is rank 1 and awaits operator direction on its shape.
-- **Claim held:** `handoff-search-index-1` (`claim-work --release handoff-search-index-1` when
-  the rank-1 fix lands or is abandoned).
+- 🔴 **THE RANK-1 FIX IS BUILT — `devrc#1332`, audited over two rounds.** The query moved out of
+  step 3's prose into step 4's fence, beside `cairn recall`, re-keyed from an open item to the
+  handoff's TOPIC (an item-keyed step can only run when an item exists — that was the
+  conditional). Guarded structurally by
+  `test_the_query_shares_a_FENCE_with_cairn_recall`. ⚠ **Built and merged is NOT adopted:** the
+  5/6 rate was measured with ONE command in that step, so co-locating a second is a PREDICTION.
+  Re-run check 1 below after ~10 more runs; until then nothing here says the fix worked.
+- **Claim:** `handoff-search-index-1`, released when `#1332` merged.
 
 ## Open investigations — live diagnosis state
 
@@ -164,15 +169,17 @@ they are separate claims — the earlier "NOT deployed" status is still supersed
   yield are separate questions and only the first is answered.
 
 ## Next steps (ranked)
-1. **Promote the index query out of step 3's prose into its own unconditional numbered step,
-   beside `cairn recall`** — `claude/skills/resume/SKILL.md` (devrc). The only change the
-   evidence supports, and `cairn recall` is the working control for it. 🔴 **AWAITING OPERATOR
-   DIRECTION ON THE SHAPE, and the cost is real:** unconditional means it runs on every resume
-   including ones with nothing open, so it needs a query the skill can form without an open item
-   — the handoff's own topic is the obvious candidate, but that is a choice, not a detail. Do NOT
-   "fix" this by making the step-3 prose louder; loudness is the variable that was already
-   falsified. ⚠ This is also an eviction question — `SKILL.md` is byte-capped, so promoting text
-   means evicting text in the same commit.
+1. **RE-MEASURE ADOPTION — the fix shipped as `#1332` and nothing yet shows it worked.** Run
+   check 1 under "How to verify" on BOTH hosts after ~10 further `/resume` runs. The prediction
+   is that the query tracks `cairn recall`'s 5/6, not step 3's 0/6; the residual is that the 5/6
+   was measured with ONE command in that step. ⚠ **A green test is not adoption** — the guard
+   pins WHERE the command sits, which is a claim about placement, never about firing.
+   🔴 Two mutants are known to survive every guard and are named in the test docstring: a gating
+   sentence above the fence, and a conditional comment inside it. Both re-create the hazard
+   without moving the command. ⚠ **Correction:** an earlier version of this item said
+   `SKILL.md` is byte-capped and an eviction was needed. **That was false** — the caps cover
+   `browser`, `handoff`, `prune-skill` and `RULES.md`, not `resume`; `#1332` added ~1.9 KB with
+   no eviction, correctly.
    forcing: none
 2. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
    `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire

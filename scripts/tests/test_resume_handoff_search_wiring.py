@@ -308,13 +308,29 @@ def test_the_query_shares_a_FENCE_with_cairn_recall():
       * M4  a SECOND list item also labelled `4.`, gated        -> SURVIVED
 
     M4 is now killed too, by comparing the FENCE rather than the digit: a second
-    `4.` block is a different fence. **M2 and M3 still survive and are not
-    covered by anything.** They are prose-shaped hazards -- a sentence or comment
-    that re-introduces a condition without moving the command -- and the honest
-    position is that no structural check here sees them, not that a better
-    keyword would. `claude/RULES.md`: a guard on WORDS is walkable by REWORDING,
-    so this asserts placement and states its own residual rather than pretending
-    to a coverage it does not have.
+    `4.` block is a different fence.
+
+    A round-2 audit then built a FIFTH mutant the round-1 residual list did not
+    anticipate, and it was strictly worse than M2/M3:
+
+      * M5  the command left in the fence but COMMENTED OUT     -> now KILLED
+
+    M5 mattered because every check here is a substring test, and a commented
+    `# python3 ...handoff_search.py ...` still CONTAINS the pinned string -- so
+    the string pin, the step check and the fence check all went green over DEAD
+    wiring, which is the exact failure this module was written to prevent. It is
+    killed below by requiring the fence line carrying the command to be live.
+
+    🔴 **M2 and M3 STILL SURVIVE and are covered by nothing.** They are
+    prose-shaped -- a sentence or comment that re-introduces a condition without
+    moving the command -- and no structural check here sees them.
+    ⚠ **THIS LIST IS NOT CLOSED.** M5 was found by an auditor after round 1 had
+    already called the residual settled; treat these five as the mutants somebody
+    happened to think of, never as the space of ways to break the wiring.
+    `claude/RULES.md`: a guard on WORDS is walkable by REWORDING, so this asserts
+    placement and states its own residual rather than claiming a coverage it does
+    not have.
+
     MEASURED over the 34 h after `#1295` merged: the query lived as a
     CONDITIONAL inside step 3 ("before working any open item…") and **1 of 14**
     `/resume` runs across both hosts ever invoked it -- and that one was reading
@@ -380,6 +396,62 @@ def test_the_query_shares_a_FENCE_with_cairn_recall():
         "until 2026-09-06. The two commands must sit in one fence, so a reader "
         "runs them together.\n"
         f"  fence containing the query:\n{with_query[0].rstrip()}"
+    )
+
+    # 🔴 M5 -- THE COMMAND MUST BE LIVE, NOT COMMENTED. Every check above is a
+    # substring test, so `# python3 ...handoff_search.py ...` satisfies all of
+    # them while the wiring is DEAD. That is this module's founding failure (see
+    # the file docstring: the index shipped and nothing called it), so it must
+    # not be reachable through a one-character edit.
+    live = [
+        ln for ln in with_query[0].splitlines()
+        if "handoff_search.py" in ln and not ln.lstrip().startswith("#")
+    ]
+    assert live, (
+        "the prescribed query is present in the fence but every line carrying it "
+        "is COMMENTED OUT -- the wiring is dead and every substring check above "
+        "still passes.\n"
+        "🔴 This module exists because the index shipped with no caller at all. A "
+        "commented command is that same state, reached by one character, with a "
+        "green suite vouching for it.\n"
+        f"  fence:\n{with_query[0].rstrip()}"
+    )
+
+
+def test_the_corpus_SCOPE_warning_names_the_repos_the_TOOL_actually_searches():
+    """🔴 DERIVED FROM THE MODULE, because the sensitivity warning rests on it.
+
+    Step 4's block warns that the query is corpus-wide over four repos, two of
+    them client repos, while its co-located twin `cairn recall` is repo-scoped.
+    That warning is only true while the skill's list matches the tool's. Add a
+    fifth handle -- plausibly another client repo -- and the prose, and the "two
+    of which are client repos" count the warning rests on, go stale with nothing
+    red. The module's own docstring says every claim is derived from the tool
+    rather than restated; this is the missing derivation.
+
+    ⚠ Scope: this pins the LABELS, not the client/non-client split, which is not
+    a fact any module here holds. If a handle is added, re-read the sentence --
+    the count in it is a human judgement and this test cannot check it.
+    """
+    mod = _load_search_module()
+    index = sys.modules.get("handoff_index")
+    handles = getattr(index, "REPO_ENV_HANDLES", None) or getattr(
+        mod, "REPO_ENV_HANDLES", None
+    )
+    assert handles, (
+        "could not read REPO_ENV_HANDLES off the tool -- if it moved or was "
+        "renamed, update this test and the skill's scope warning together."
+    )
+    block = _block()
+    missing = [h for h in handles if h.lower() not in block.lower()]
+    assert not missing, (
+        f"the /resume step-4 scope warning does not name repo handle(s) {missing}.\n"
+        f"  the tool searches: {list(handles)}\n"
+        "🔴 That paragraph tells the reader the query is corpus-wide and that "
+        "hits may carry another client's content. A handle it does not name is a "
+        "repo the reader is not warned about. Name it in "
+        "claude/skills/resume/SKILL.md, and re-check the 'two of which are "
+        "client repos' count in the same edit -- this test cannot check that."
     )
 
 
