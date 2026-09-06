@@ -264,6 +264,44 @@ def test_the_anchor_check_is_not_vacuous_because_the_tables_are_NON_EMPTY():
         assert mod.SCRIPT.is_file(), f"{battery}: SCRIPT does not exist"
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 A MUTANT THAT COLLECTED NOTHING MUST NOT SCORE `SURVIVED`
+#
+# `SURVIVED` is the strongest finding a battery can report: "no test in the
+# suite can see this change". A run that never RAN satisfies `failed == 0` just
+# as well, and the mentions battery used to read that as survival — its only
+# sanity check on the collected count ran on the CONTROL, once, not per mutant.
+# A mutant that makes a module unimportable produces `0 failed, 0 passed` and
+# pytest's summary says `N errors`, a word the `(\d+) failed` regex cannot see.
+#
+# The verdict is a PURE function so it can be pinned here, in a collected test,
+# rather than only by someone running the battery by hand for half an hour.
+# --------------------------------------------------------------------------- #
+def test_a_mutant_that_COLLECTED_NOTHING_is_not_a_survivor():
+    mod = _load("mutation_battery_mentions.py")
+    floor = 150
+
+    # The hole, verbatim: an unimportable module. Zero failures, zero passes,
+    # and pytest calls it an ERROR rather than a failure.
+    assert mod.classify(0, 0, 4, floor, None, "") == "NOT-OBSERVED"
+    # …and the same shape with no error line at all — a run that silently lost
+    # whole files still sits under the floor.
+    assert mod.classify(0, 3, 0, floor, None, "") == "NOT-OBSERVED"
+    # A kill that ALSO errored is not a clean kill either: the row's own
+    # assertion may never have been reached.
+    assert mod.classify(9, 200, 1, floor, None, "") == "NOT-OBSERVED"
+
+    # 🔴 NEGATIVE CONTROL — the ordinary verdicts must still be reachable, or
+    # the assertions above would hold for a classifier that answers
+    # NOT-OBSERVED to everything and reports a broken battery forever.
+    assert mod.classify(0, 300, 0, floor, None, "") == "SURVIVED"
+    assert mod.classify(2, 298, 0, floor, None, "") == "KILLED"
+    assert mod.classify(2, 298, 0, floor, "ledger MOVED",
+                        "E   ledger MOVED: …") == "KILLED(attributed)"
+    assert mod.classify(2, 298, 0, floor, "ledger MOVED",
+                        "E   something else") == "KILLED-WRONG-REASON"
+
+
 def _python_instruments() -> list[str]:
     """Every Python mutation instrument in `scripts/tests/`, under EITHER
     naming convention — `mutation_battery_*.py` and `mutants-*.py`."""

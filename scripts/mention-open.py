@@ -19,8 +19,11 @@ RESOLUTION
   1 openable candidate   -> xdg-open it.
   2+ (a bare `#N`)       -> rofi picker, one row per platform, showing the URL.
   0                      -> the FUZZY repo picker over the LOCAL universe, and
-                            only if that cannot be shown, a notification saying
-                            WHICH empty this is.
+                            only if that cannot or should not be shown, a
+                            notification saying WHICH empty this is.
+  0, and six digits      -> a NAMED toast. A six-digit `#N` is always a colour
+                            literal here, so every row a picker could offer
+                            would 404. See `colour_literal_offer`.
 
 🔴 THE CLICK PATH MAKES NO NETWORK CALL. This is a hard property, not a target,
 and it is pinned by `test_the_resolution_path_spawns_ONLY_these_local_commands`.
@@ -58,23 +61,30 @@ only from a source that names THIS repo unambiguously, in this order:
 
 🔴 AND WHEN NONE OF THEM ANSWERS, THE OPERATOR CHOOSES — THE HANDLER DOES NOT
 REFUSE. Every repository this host knows about goes into a rofi picker with
-`-matching fuzzy`, so `talos-inf#12` is four keystrokes from `talos-infra`, and
-`#282828` — which the strict scanner rejects, and which used to produce the
-toast `no mention in the clicked text` — opens a picker instead. That toast read
-as a failure when it was the guard working, and a guard that reads as a bug gets
-deleted by the next maintainer.
+`-matching fuzzy`, so `talos-inf#12` is four keystrokes from `talos-infra`. The
+old toast `no mention in the clicked text` read as a failure when it was the
+guard working, and a guard that reads as a bug gets deleted by the next
+maintainer — so every unresolvable shape now becomes a CHOICE.
+
+⚠ EVERY SHAPE EXCEPT ONE. A SIX-DIGIT `#N` gets a named toast rather than a
+picker, because on this host it is always a colour literal and every row a
+picker could offer names an issue no repository has. That is not the old dead
+end returning: the toast SAYS what it saw. See `colour_literal_offer`.
 
 🔴 THIS IS NOT A RELAXATION OF THE NO-GUESSING RULE, IT IS ITS EXTENSION. A
 picker is a CHOICE the operator makes; a guess is one this script makes for
 them. Nothing below ever opens a URL the operator did not select, and dismissing
-the picker still opens NOTHING. In particular a six-digit number is OFFERED and
-never AUTO-OPENED — see `offer_number` and `offered_universe`.
+the picker still opens NOTHING — a universe row is never auto-opened even when
+it is the only one, see `offered_universe`.
 
-⚠ IT DEGRADES, IT DOES NOT DISAPPEAR. A toast is correct in exactly one case:
-the picker cannot be shown. That is the universe being missing, unreadable or
-empty, or `--print`/`--no-discovery` barring it by contract — and the toast
-still names WHICH of those it is, because each needs a different next move. A
-silent empty picker would be the same silent zero one layer up.
+⚠ IT DEGRADES, IT DOES NOT DISAPPEAR. A toast is correct in exactly two cases:
+the picker cannot be shown, or it SHOULD not be. The first is the universe being
+missing, unreadable or empty, or `--print`/`--no-discovery` barring it by
+contract. The second is a SIX-DIGIT `#N`, which is always a false positive here
+(nothing this host references numbers past five digits) and whose every offered
+row would name an issue no repository has — see `colour_literal_offer`. Either
+way the toast names WHICH of those it is, because each needs a different next
+move. A silent empty picker would be the same silent zero one layer up.
 
 🔴 THE UNIVERSE NAMES PRIVATE REPOSITORIES. It is built from
 `known_repos.json`, the file whose committed ancestor disclosed 232 private
@@ -91,6 +101,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # 🔴 `concurrent.futures` IS IMPORTED LAZILY, INSIDE `discover_repos`, AND THAT
@@ -125,6 +136,27 @@ KNOWN_REPOS_PATH = Path(
     os.environ.get("MENTION_OPEN_KNOWN_REPOS")
     or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "mention-open" / "known_repos.json")
+
+# 🔴 THE MAPPING IS HAND-REGENERATED ONLY, AND NOTHING CONVERGES IT. There is no
+# timer anywhere in `nix/` that runs `scripts/regen-known-repos.py`, so a
+# repository created after the last run is INVISIBLE to every resolution path —
+# and the symptom is the picker appearing for a name that ought to have resolved,
+# which reads as "the picker is noisy" rather than as "my mapping is old".
+#
+# So the age is MEASURED and SURFACED, at both places the operator can see it:
+# the note above the picker (`universe_note`) and the refusal body
+# (`staleness_note`). It is a SIGNAL, not a repair — deliberately, and the
+# alternative was weighed: a systemd-user timer would run `gh api user/repos`
+# on a schedule, and `regen-known-repos.py` REFUSES below its 25-repo floor and
+# exits 3, so a host without `gh auth` would take a failing unit and a failure
+# toast on every fire. A permanently-red timer is worse than no timer. The
+# signal fires at the exact moment the staleness bites, which is the click that
+# did not resolve.
+#
+# Seven days is a week of repo-creating, not a tuned constant; it is pinned at
+# two points (fresh and stale) rather than at a boundary, and it is not
+# env-overridable because a run must not be able to excuse itself.
+STALE_MAPPING_DAYS = 7
 
 # rofi theme — the same one nix/i3/config.nix already uses for the app launcher,
 # so the picker looks like every other picker on this desktop.
@@ -220,9 +252,17 @@ def offer_number(text: str) -> str:
     toast `no mention in the clicked text`, which reads as the handler being
     broken rather than as the guard doing its job.
 
-    So a number recovered here reaches the picker and nowhere else. It is never
-    handed to `resolve()`, never used to build a candidate that could satisfy the
-    single-candidate auto-open, and never counted as a mention.
+    So a number recovered here reaches the picker or a NAMED toast, and nowhere
+    else. It is never handed to `resolve()`, never used to build a candidate
+    that could satisfy the single-candidate auto-open, and never counted as a
+    mention.
+
+    ⚠ IT STILL RETURNS SIX DIGITS, AND THAT IS ON PURPOSE. `colour_literal_offer`
+    is the caller that reads six digits as "a colour, not a reference" and routes
+    it to a toast instead of a picker — the classification lives THERE, at one
+    site, not in this recogniser. Narrowing this bound to `{1,5}` would break the
+    seam it is pinned against (the Alacritty hint's own `{1,6}`) and leave the
+    six-digit case with no number to name in its message.
 
     ⚠ IT RETURNS "" FOR TEXT WITH NO `#N` AT ALL, and that case cannot arrive
     from a click: the Alacritty hint regex requires `#[0-9]{1,6}` or a ClickUp
@@ -311,6 +351,28 @@ def repo_of_checkout(path: Path) -> str:
     return parse_owner_repo(_git(["remote", "get-url", "origin"], cwd=str(path)))
 
 
+def _fan_out(paths: list[Path]) -> list[str]:
+    """`repo_of_checkout` for every path, IN THE SAME ORDER, across a thread pool.
+
+    🔴 ORDER IS THE CONTRACT, not an implementation detail. The caller re-pairs
+    this list with `paths` positionally, so a result list that is reordered,
+    reversed or short by one maps every checkout onto its NEIGHBOUR's owner —
+    `~/workspace/devrc` would answer `devrc#1291` with issue 1291 of some other
+    organisation's repository. That is the confident-wrong-page failure this
+    whole module is anchored against, and it is invisible to any fixture holding
+    one checkout. Pinned by `test_the_fan_out_pairs_every_checkout_with_its_OWN`.
+
+    The measurement it parallelises is ~100% waiting on a child process, which
+    is why threads are the right tool and the GIL is not in the way: 100
+    checkouts cost 0.149-0.184s serially and 0.026s across 16 threads.
+    """
+    from concurrent.futures import ThreadPoolExecutor  # see the import block
+    with ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS) as pool:
+        # `list(...)` INSIDE the `with`: `pool.map` is lazy, so returning the
+        # iterator would hand the caller a generator over a shut-down pool.
+        return list(pool.map(repo_of_checkout, paths))
+
+
 def load_known_repos(path: Path | None = None) -> dict[str, str]:
     """{name: "owner/repo"} from the operator's generated mapping, or {}.
 
@@ -378,11 +440,28 @@ def discover_repos(workspace: Path | None = None) -> dict:
     # submodule gitdirs, `include`/`includeIf` and `url.<base>.insteadOf` to keep
     # agreeing. 26ms is already far inside the budget; reimplementing a slice of
     # git to save 18ms buys a whole class of divergence bugs for nothing.
-    from concurrent.futures import ThreadPoolExecutor  # see the import block
-    with ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS) as pool:
-        for entry, full in zip(entries, pool.map(repo_of_checkout, entries)):
-            if full:
-                out[entry.name] = full
+    #
+    # 🔴 AND IT DEGRADES TO SERIAL RATHER THAN VANISHING. `ThreadPoolExecutor`
+    # raises `RuntimeError: can't start new thread` when the process or the box
+    # is at its thread limit — this host routinely runs 100+ concurrent agent
+    # worktrees — and the lazy import can raise `ImportError` on a broken
+    # interpreter. Either one used to propagate out of `main()` into a DETACHED
+    # process with no terminal, so the click did nothing at all: no toast, no
+    # visible stderr, indistinguishable from a hint that was never wired up.
+    # Serially, 100 checkouts cost ~0.18s — slower, and an answer.
+    try:
+        resolved = _fan_out(entries)
+    except (ImportError, OSError, RuntimeError):
+        resolved = [repo_of_checkout(p) for p in entries]
+    for entry, full in zip(entries, resolved):
+        # 🔴 `if full:` IS A GUARD, NOT A TIDY-UP. `repo_of_checkout` answers ""
+        # for a checkout whose `git remote` failed or timed out; writing that ""
+        # over `out[entry.name]` would DELETE a good row the generated mapping
+        # had already supplied, silently un-resolving a name the host could
+        # answer a moment ago. Pinned by
+        # `test_an_UNREADABLE_checkout_does_not_ERASE_the_mappings_answer`.
+        if full:
+            out[entry.name] = full
     return out
 
 
@@ -423,10 +502,22 @@ def notify(summary: str, body: str = "") -> None:
     """Best-effort desktop notification. A handler that fails SILENTLY is
     indistinguishable from one that was never wired up, which is exactly the
     silent-zero shape this repo keeps paying for — so a refusal is always
-    announced somewhere."""
+    announced somewhere.
+
+    🔴 `--` IS LOAD-BEARING AND WAS MISSING. Several refusal bodies begin with a
+    flag NAME — "--print cannot show the repository picker", "--no-discovery
+    resolves only what the text itself carries" — because naming the operator's
+    own lever is the point. `notify-send` uses GNU getopt, which PERMUTES: an
+    argument starting with `--` is parsed as an option wherever it sits.
+    MEASURED with notify-send 0.8.8: `notify-send -a mention-open SUMMARY
+    "--no-discovery …"` prints `Unknown option` and exits 1 with NO toast, while
+    the same call with `--` exits 0 and shows one. And `check=False` swallows
+    that exit code, so the failure is silent — a refusal that shows nothing is
+    worse than the refusal it replaced. Pinned by
+    `test_notify_send_is_given_a_double_dash_before_the_MESSAGE`."""
     print(f"mention-open: {summary} {body}".strip(), file=sys.stderr)
     try:
-        subprocess.run(["notify-send", "-a", "mention-open", summary, body],
+        subprocess.run(["notify-send", "-a", "mention-open", "--", summary, body],
                        timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         pass
@@ -442,9 +533,20 @@ def open_url(url: str) -> int:
     return 0
 
 
-def pick(candidates: list[dict]) -> str:
+def pick(candidates: list[dict], mesg: str = "") -> str:
     """Ask rofi which candidate to open. Returns the chosen URL, or "" if the
     operator dismissed the picker (which must open NOTHING).
+
+    🔴 `mesg` IS WHERE THE DIAGNOSIS GOES, AND THE REASON IS THAT ROFI CANNOT
+    TELL THE TWO EXITS APART. With `-no-custom` a name that matches nothing
+    cannot be submitted, so "I typed `kubectl-neat` and the list went empty" and
+    "I changed my mind" BOTH arrive back here as rofi exiting non-zero with no
+    selection. There is no signal that separates them — not the exit code, not
+    stdout — so a toast fired after a dismissal would fire after every dismissal,
+    which is the noise this handler must not make. The diagnosis therefore goes
+    where it costs nothing and is read BEFORE the choice: a line above the list,
+    on the operator's own screen, which is the one surface the universe may
+    already reach. See `universe_note` for what it may say.
 
     🔴 `-matching fuzzy` IS LOAD-BEARING, not a nicety. It is the entire reason
     the namesake cap could be removed and the reason a hundred-row universe is a
@@ -457,11 +559,25 @@ def pick(candidates: list[dict]) -> str:
     `row_to_url` would then fail to match — dismissal-shaped, but by accident.
     """
     rows = picker_rows(candidates)
+    # `-mesg` renders as PANGO MARKUP, and the note embeds the clicked text. A
+    # stray `<` or `&` there would break the whole line's rendering, so the three
+    # markup-significant characters are escaped. Rows are NOT markup (there is no
+    # `-markup-rows`), so they need no such treatment.
+    #
+    # 🔴 SPLICED WITH `*`, NEVER CONCATENATED ONTO A NAME. The argv must stay a
+    # LIST LITERAL whose first element is the constant `"rofi"`, because
+    # `test_mention_open.py`'s AST ledger of spawnable executables reads exactly
+    # that; handing `subprocess.run` a variable reports `<computed>` and the
+    # ledger — the guard that stops a network call being re-added — goes red for
+    # a reason that has nothing to do with what is being spawned.
+    mesg_argv = ["-mesg", (mesg.replace("&", "&amp;")
+                               .replace("<", "&lt;")
+                               .replace(">", "&gt;"))] if mesg else []
     try:
         r = subprocess.run(
             ["rofi", "-dmenu", "-i", "-matching", "fuzzy",
              "-p", "mention", "-theme", ROFI_THEME,
-             "-format", "s", "-no-custom"],
+             "-format", "s", "-no-custom", *mesg_argv],
             input="\n".join(rows), capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
         notify("could not show the mention picker",
@@ -558,6 +674,101 @@ def universe_reason(path: Path | None = None) -> str:
     return ""
 
 
+def mapping_age_days(path: Path | None = None) -> float | None:
+    """How long ago the repo mapping was written, in days, or None.
+
+    🔴 ONE MEASUREMENT, TWO READERS. `staleness_note` puts it in a refusal body
+    and `universe_note` puts it above the picker; open-coding `st_mtime` at both
+    would be the same predicate at two sites, wrong at one of them. None means
+    "could not be measured" — absent, or a stat that failed — and every caller
+    must treat that as UNKNOWN, never as fresh.
+    """
+    path = path or KNOWN_REPOS_PATH
+    try:
+        return max(0.0, (time.time() - path.stat().st_mtime) / 86400.0)
+    except OSError:
+        return None
+
+
+def staleness_note(path: Path | None = None) -> str:
+    """"the repo mapping is N days old — …" when it is, else "".
+
+    🔴 IT IS A SIGNAL FOR A FILE NOTHING CONVERGES. See `STALE_MAPPING_DAYS`.
+    A repository created since the last `regen-known-repos.py` run cannot be
+    resolved by ANY path here, and the only symptom is a picker appearing where
+    a resolution used to — so the refusal says how old the mapping is and what
+    to run. It names a COUNT and a CONSTANT PATH, never a row.
+    """
+    age = mapping_age_days(path)
+    if age is None or age < STALE_MAPPING_DAYS:
+        return ""
+    return (f"the repo mapping is {age:.0f} days old and nothing regenerates it "
+            f"— a repository created since then cannot resolve; run "
+            f"scripts/regen-known-repos.py")
+
+
+def universe_note(subject: str, offered: int, path: Path | None = None) -> str:
+    """The line shown ABOVE the fuzzy picker when the universe is the last resort.
+
+    🔴 IT EXISTS BECAUSE A DISMISSED PICKER CANNOT BE READ. `pick()` explains
+    why: rofi with `-no-custom` reports "nothing matched what I typed" and "I
+    changed my mind" identically, so the only honest place to say "this host has
+    no repository called `kubectl-neat`" is BEFORE the choice, not after it. A
+    real dismissal still opens nothing and still says nothing.
+
+    🔴 IT NAMES THE CLICKED TEXT, A COUNT AND A DATE — NEVER A ROW. `subject` is
+    what the OPERATOR typed or clicked, which they already have; `offered` is a
+    cardinality; the date is the mapping file's mtime. None of the three is a
+    repository name from the universe, and this string reaches rofi only — it is
+    never handed to `notify()`, which would put it on stderr.
+    """
+    age = mapping_age_days(path)
+    if age is None:
+        when = "no mapping file on this host"
+    else:
+        # Derived from the SAME reading as the age, not a second `stat()`: the
+        # file can be regenerated between two calls, and a date that disagreed
+        # with the age beside it would read as a bug in the note.
+        stamp = time.strftime("%Y-%m-%d", time.localtime(time.time() - age * 86400))
+        when = f"mapping generated {stamp} ({age:.0f}d ago)"
+    return (f"nothing here knows {subject} — pick a repository, or dismiss. "
+            f"{offered} offered · {when} · refresh with "
+            f"scripts/regen-known-repos.py")
+
+
+def colour_literal_offer(span: dict | None, text: str) -> str:
+    """The SIX-DIGIT number in `text` that is a colour literal, not a reference —
+    or "" for everything else.
+
+    🔴 SIX DIGITS IS ALWAYS A FALSE POSITIVE ON THIS HOST, AND THAT IS A
+    MEASUREMENT RATHER THAN A HUNCH. `mention_scan`'s `_NUM` is `\\d{1,5}`
+    exactly because nothing here — no clawgate task, no GitHub issue in any repo
+    the operator touches — reaches six digits; devrc itself is in the 1300s. So
+    a six-digit `#N` that the scanner refused cannot be a reference, and every
+    row a universe picker would offer for it names an issue NO repository has.
+    Raising a several-hundred-row window to choose between hundreds of URLs that
+    all 404 is not a choice, it is a wall with no door.
+
+    ⚠ AND THE ORIGINAL CASE IS THE PROOF. `#282828` is the operator's own gruvbox
+    background literal — it is written in `nix/programs/alacritty/default.nix`,
+    the very file that configures this hint. The right answer to clicking it is
+    "that is a colour", said once, not a picker.
+
+    🔴 THIS DOES NOT WEAKEN THE AUTO-OPEN RULE, IT MAKES IT UNREACHABLE. Six
+    digits could never auto-open (`offered_universe` suppresses the shortcut for
+    every universe row, and that guard is UNCHANGED); now it is not offered at
+    all. Every OTHER unresolvable shape keeps the picker — `kubectl-neat#1`,
+    `talos-inf#12`, a bare `#N` nothing attributes. This is the six-digit case
+    and nothing else.
+
+    ⚠ IT ASKS FOR `span is None` FIRST. A number the scanner ACCEPTED is a
+    reference by definition, whatever its length, and must not be second-guessed
+    here.
+    """
+    num = offer_number(text) if span is None else ""
+    return num if len(num) == 6 else ""
+
+
 def refuse(span: dict | None, text: str, args: argparse.Namespace) -> int:
     """The last resort, and the ONLY case a toast is still correct in: the picker
     could not be shown. Always returns 1.
@@ -580,15 +791,44 @@ def refuse(span: dict | None, text: str, args: argparse.Namespace) -> int:
         notify("no mention in the clicked text", repr(text))
         return 1
     subject = span["raw"] if span is not None else repr(text)
+    colour = colour_literal_offer(span, text)
     if args.no_discovery:
+        # The flag is the whole cause and the operator's own lever. The mapping
+        # is never even READ under it, so blaming the mapping would send them to
+        # regenerate a file that was not involved.
         why = "--no-discovery resolves only what the text itself carries"
-    elif args.print_only:
-        # 🔴 A DECIDED CONTRACT, not an oversight. `--print` is non-interactive;
-        # the answer to "which of your 369 repositories did you mean?" is a
-        # question, and printing all of them is not an answer either.
-        why = "--print cannot show the repository picker — there is nobody to ask"
+    elif colour:
+        # 🔴 SIX DIGITS — see `colour_literal_offer`. This is a NAMED answer, not
+        # a dead end, and it is the reason the picker is not raised.
+        why = (f"#{colour} is six digits — that looks like a colour literal, "
+               f"not a reference; nothing here numbers past five digits")
+        advice = "if you did mean a reference, write it as owner/repo#N"
     else:
-        why = universe_reason() or "no repository owner is known for it"
+        # 🔴 BOTH CAUSES, NOT WHICHEVER ONE IS CHECKED FIRST. `--print` bars the
+        # picker by contract AND the mapping may be absent, and the flag used to
+        # win purely by being tested first — so `--print zzz#12` on a host with
+        # no mapping at all blamed the flag and never mentioned
+        # `regen-known-repos.py`. Both are true; only one is ACTIONABLE, and
+        # that is the one that was being dropped. In a handler whose stated
+        # discipline is "say WHICH empty this is", reporting the un-actionable
+        # half alone is the silent zero wearing a name.
+        reason = universe_reason()
+        if args.print_only:
+            # 🔴 A DECIDED CONTRACT, not an oversight. `--print` is
+            # non-interactive; the answer to "which of your 369 repositories did
+            # you mean?" is a question, and printing all of them is not an
+            # answer either.
+            why = ("--print cannot show the repository picker — there is nobody "
+                   "to ask")
+            if extra := (reason or staleness_note()):
+                why = f"{why}; also {extra}"
+        else:
+            why = reason or "no repository owner is known for it"
+            # A mapping that PARSED and holds rows can still be months old, and
+            # that is a different, ADDITIVE fact — appended, never substituted
+            # for the primary one, for the same reason the advice is.
+            if not reason and (stale := staleness_note()):
+                why = f"{why}; {stale}"
     notify(f"cannot resolve {subject}", f"{why} — {advice}")
     return 1
 
@@ -604,25 +844,44 @@ def main(argv: list[str] | None = None) -> int:
     span, candidates = resolve(text, default_repo=args.default_repo or None)
 
     # 🔴 THE NUMBER A PICKER COULD OFFER, computed from the RAW TEXT and kept
-    # strictly apart from anything `resolve()` produced. For `#282828` the
-    # scanner returns no span at all and this returns "282828" — which is what
-    # turns the old `no mention in the clicked text` toast into a choice. It is
+    # strictly apart from anything `resolve()` produced. For a text the scanner
+    # refuses outright — `&#123;`, `##370` — it recovers the number so the
+    # operator gets a choice instead of `no mention in the clicked text`. It is
     # never merged into `span` and never satisfies the auto-open below.
     offer_num = offer_number(text)
+
+    # 🔴 SIX DIGITS IS ANSWERED, NOT ASKED ABOUT — see `colour_literal_offer`.
+    # It is computed HERE, once, and read by both the measurement guard below
+    # and by `refuse()`, because a predicate open-coded at two sites is wrong at
+    # one of them. Skipping the measurement is the point as well as the window:
+    # building a several-hundred-row universe that will not be shown is latency
+    # the operator pays on a click that already has its answer.
+    colour = colour_literal_offer(span, text)
 
     # PASS 2 — the LOCAL measurement, only when the text did not answer it.
     # Discovery costs a concurrent `git remote` fan-out plus a tmux round-trip
     # (~30ms here), and paying that before opening a link that needed neither is
     # latency the operator feels on every single click.
     #
-    # 🔴 IT NOW RUNS FOR `span is None` TOO. It used to short-circuit straight to
-    # a refusal there, which is exactly why `#282828` dead-ended: the universe
-    # the picker needs is built by this pass. Guarded on `offer_num` so a text
-    # carrying no number at all — impossible from a click, see `offer_number` —
-    # still costs nothing.
+    # 🔴 IT RUNS FOR `span is None` TOO. It used to short-circuit straight to a
+    # refusal there, and the universe the picker needs is built by this pass.
+    # Guarded on `offer_num` so a text carrying no number at all — impossible
+    # from a click, see `offer_number` — still costs nothing, and on `colour` so
+    # the one shape that has its own answer does not pay for a universe nobody
+    # will see.
+    #
+    # ⚠ SCOPE OF THE `span is None` ARM, STATED HONESTLY BECAUSE IT NARROWED.
+    # The scanner refuses a `#N` for two reasons: six or more digits, and a
+    # forbidden character immediately before the `#` (`&#123;` an HTML entity,
+    # `##370` a heading run). `colour` now takes the first, so this arm covers
+    # the second — which the Alacritty hint CANNOT produce, because it matches
+    # from the `#` and hands over `#123` rather than `&#123;`. So it is a
+    # command-line surface now, not a click one. It is kept because that surface
+    # is real and the alternative is a dead end on it.
     discovered: dict = {}
     unresolved = span is None or span["ambiguous"] or not candidates
-    if unresolved and not args.no_discovery and (span is not None or offer_num):
+    if (unresolved and not args.no_discovery and not colour
+            and (span is not None or offer_num)):
         default_repo = args.default_repo or tmux_pane_repo()
         # Kept, not recomputed: PASS 3 offers the SAME measurement as a fuzzy
         # universe, and calling `discover_repos()` twice would run the whole
@@ -655,14 +914,19 @@ def main(argv: list[str] | None = None) -> int:
     # candidate → just open it" shortcut below. Without it, a host that knows
     # exactly ONE repository would answer `trowelcast#77` by opening issue 77 in
     # that unrelated repository — a confident wrong page, which is precisely the
-    # failure this whole handler is anchored against. It is ALSO what keeps
-    # `#282828` offered-but-never-auto-opened: a number the scanner refused
-    # reaches `candidates` only as universe rows, and universe rows never
-    # auto-open. Measured during development: the first version of this pass did
-    # open it, and the test that caught it was the one asserting a picker
-    # appeared.
+    # failure this whole handler is anchored against. Measured during
+    # development: the first version of this pass did open it, and the test that
+    # caught it was the one asserting a picker appeared.
+    #
+    # ⚠ IT IS NOT WHAT HANDLES `#282828` ANY MORE, AND THAT NOTE IS KEPT BECAUSE
+    # THIS PARAGRAPH USED TO SAY IT WAS. A six-digit number never reaches here
+    # now — `colour` bars it above — so this guard covers the case that remains:
+    # a host whose universe holds exactly ONE repository answering an
+    # unresolvable `repo#N`. Do not delete it on the reasoning that the
+    # six-digit path no longer needs it.
     offered_universe = False
-    may_offer_universe = not args.print_only and not args.no_discovery
+    may_offer_universe = (not args.print_only and not args.no_discovery
+                          and not colour)
     num = span["id"] if (span is not None and span["id"].isdigit()) else offer_num
     universe = (universe_candidates(num, repo_universe(discovered))
                 if (may_offer_universe and num) else [])
@@ -698,9 +962,44 @@ def main(argv: list[str] | None = None) -> int:
     if len(candidates) == 1 and not offered_universe:
         return open_url(candidates[0]["url"])
 
-    url = pick(candidates)
+    # 🔴 THE NOTE IS ATTACHED ONLY WHEN THE UNIVERSE IS THE ANSWER. A picker
+    # over real candidates — the clawgate/GitHub pair for a bare `#N` — is not a
+    # dead end and needs no explanation; adding one there would put a line of
+    # apology above the single most common interaction in this handler.
+    mesg = (universe_note(span["raw"] if span is not None else text,
+                          len(candidates))
+            if offered_universe else "")
+    url = pick(candidates, mesg=mesg)
     return open_url(url) if url else 0
 
 
+def guarded_main(argv: list[str] | None = None) -> int:
+    """`main()` with a last-resort reporter around it. Always the entry point.
+
+    🔴 AN UNCAUGHT EXCEPTION HERE IS A SILENT CLICK. Alacritty spawns this
+    DETACHED: there is no terminal, so a traceback goes to a stderr nobody will
+    ever read, and the operator sees a click that did nothing — the exact shape
+    `notify()`'s docstring exists to prevent, arriving one level above it.
+
+    The case that is not hypothetical: `ThreadPoolExecutor` raises
+    `RuntimeError: can't start new thread` when the box is at its thread limit,
+    and this host routinely runs 100+ concurrent agent worktrees.
+    `discover_repos` degrades to a serial fan-out for exactly that, but a guard
+    that only covers the failure somebody imagined is not a guard — argparse,
+    a malformed `known_repos.json` racing a regeneration, a `Path` that vanishes
+    mid-`stat`, all land here too.
+
+    ⚠ `except Exception`, DELIBERATELY BROAD AND DELIBERATELY NOT BARE:
+    `KeyboardInterrupt` and `SystemExit` derive from `BaseException` and must
+    still terminate. This returns 1 rather than re-raising, because a non-zero
+    exit that ALSO said something is the whole difference being closed here.
+    """
+    try:
+        return main(argv)
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        notify("mention-open failed", f"{type(exc).__name__}: {exc}")
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(guarded_main())

@@ -21,8 +21,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -255,7 +257,13 @@ def spy(monkeypatch):
     monkeypatch.setattr(MO, "tmux_pane_repo",
                         lambda: calls.append("tmux") or "civitai/talos-infra")
     monkeypatch.setattr(MO, "open_url", lambda url: calls.append(("open", url)) or 0)
-    monkeypatch.setattr(MO, "pick", lambda c: calls.append(("pick", len(c))) or c[0]["url"])
+    # `mesg=""` mirrors the real signature: `main()` hands the picker a note to
+    # show above the list when the universe is the answer. A stub that took only
+    # `candidates` would raise TypeError on that path — which is a kill, but for
+    # the wrong reason, and it would hide whatever the note actually said.
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c, mesg="": calls.append(("pick", len(c))) or c[0]["url"])
     monkeypatch.setattr(MO, "notify", lambda *a, **k: calls.append(("notify", a[0])))
     return calls
 
@@ -293,9 +301,56 @@ def test_a_multi_digit_clawgate_id_round_trips_to_the_click(spy):
 
 
 def test_a_dismissed_picker_opens_nothing_and_is_not_an_error(spy, monkeypatch):
-    monkeypatch.setattr(MO, "pick", lambda c: "")
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="": "")
     assert MO.main(["#370"]) == 0
     assert not [c for c in spy if isinstance(c, tuple) and c[0] == "open"]
+
+
+def test_an_UNEXPECTED_exception_is_REPORTED_rather_than_vanishing(monkeypatch):
+    """🔴 THE DETACHED-PROCESS SILENT CLICK. Alacritty spawns this handler with
+    no terminal, so an uncaught exception writes a traceback to a stderr nobody
+    will ever read and the operator sees a click that did nothing — the exact
+    shape `notify()` exists to prevent, arriving one level above it.
+
+    The case that is not hypothetical: `ThreadPoolExecutor` raises
+    `RuntimeError: can't start new thread` when the box is at its thread limit,
+    and this host routinely runs 100+ concurrent agent worktrees.
+
+    The message must carry the exception TYPE and TEXT — "something went wrong"
+    would be the silent zero with a face on it."""
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+
+    def boom(argv=None):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(MO, "main", boom)
+    assert MO.guarded_main(["#370"]) == 1
+    assert notices, (
+        "an exception escaped the handler: a DETACHED click then does nothing "
+        "at all — no toast, no readable stderr")
+    assert "RuntimeError" in notices[-1][1], notices[-1]
+    assert "can't start new thread" in notices[-1][1], notices[-1]
+
+
+def test_the_guard_does_not_swallow_a_NORMAL_run(spy):
+    """The negative control: `guarded_main` must be transparent when nothing
+    goes wrong, or every assertion above would hold for a wrapper that always
+    reported a failure."""
+    assert MO.guarded_main(["civitai/talos-infra#1065"]) == 0
+    assert spy == [("open", "https://github.com/civitai/talos-infra/issues/1065")]
+
+
+def test_the_ENTRY_POINT_is_the_guarded_one():
+    """🔴 A GUARD NOTHING CALLS IS NOT A GUARD. `guarded_main` is only reached if
+    `__main__` actually uses it; leaving `raise SystemExit(main())` in place
+    would keep every test above green while production kept vanishing. Read from
+    the SOURCE, because the `__main__` block never executes under pytest."""
+    src = HANDLER.read_text()
+    assert re.search(r'if __name__ == "__main__":\s*\n\s*raise SystemExit\('
+                     r"guarded_main\(\)\)", src), (
+        "scripts/mention-open.py's __main__ block does not call guarded_main() "
+        "— an unexpected exception is a silent click again")
 
 
 def test_a_short_form_repo_is_resolved_from_the_discovered_checkouts(spy):
@@ -304,23 +359,39 @@ def test_a_short_form_repo_is_resolved_from_the_discovered_checkouts(spy):
     assert spy[-1] == ("open", "https://github.com/civitai/talos-infra/issues/1065")
 
 
-def test_a_non_mention_OFFERS_THE_PICKER_instead_of_refusing(spy):
-    """🔴 THE REVERSAL THIS CHANGE EXISTS FOR. `#282828` used to produce the
-    toast `no mention in the clicked text`, which reads as the handler being
-    broken when it is the guard working correctly — and a guard that reads as a
-    bug is one the next maintainer deletes.
+def test_text_the_SCANNER_REFUSED_offers_the_picker_instead_of_refusing(spy):
+    """🔴 THE REVERSAL THIS CHANGE EXISTS FOR. Text the strict scanner rejects
+    used to produce the toast `no mention in the clicked text`, which reads as
+    the handler being broken when it is the guard working correctly — and a
+    guard that reads as a bug is one the next maintainer deletes.
 
-    The picker is now offered instead. Nothing is opened without a selection, and
-    the number never becomes a reference: see
-    `test_a_SIX_DIGIT_number_is_OFFERED_but_NEVER_auto_opened`."""
+    `##370` is such a text: `BARE_RE`'s left guard refuses a `#` run, so
+    `resolve()` returns no span, while `offer_number` still recovers `370`.
+
+    ⚠ NOT `#282828`, AND THE CHANGE OF FIXTURE IS THE POINT. A SIX-digit number
+    now gets a named toast rather than a picker — see
+    `test_a_SIX_DIGIT_click_gets_a_NAMED_toast_not_a_wall_of_repos`. This test is
+    about the `span is None` arm of the measurement pass, which the six-digit
+    branch no longer exercises, so it needs a non-six-digit refusal to stay a
+    guard rather than a duplicate."""
     # 🔴 THE MESSAGE IS ON THE EXIT CODE, which is what a reverted measurement
     # pass turns to 1 — the picker assertion below never evaluates in that case.
-    assert MO.main(['background = "#282828";']) == 0, (
-        "a six-digit click DEAD-ENDED instead of offering the picker")
+    assert MO.main(["##370"]) == 0, (
+        "a scanner-refused click DEAD-ENDED instead of offering the picker")
     assert ("pick", 1) in spy, (
-        f"a six-digit click DEAD-ENDED instead of offering the picker: {spy}")
+        f"a scanner-refused click DEAD-ENDED instead of offering the "
+        f"picker: {spy}")
     assert not [c for c in spy if isinstance(c, tuple) and c[0] == "notify"], (
-        "a six-digit click DEAD-ENDED instead of offering the picker")
+        "a scanner-refused click DEAD-ENDED instead of offering the picker")
+
+
+def test_the_span_is_None_fixture_really_IS_refused_by_the_scanner():
+    """POSITIVE CONTROL for the fixture above, on the scanner rather than on
+    `main()`. If `##370` ever started resolving, the test above would pass
+    through the ordinary bare-`#N` path and stop covering the `span is None`
+    arm entirely — green, and testing something else."""
+    assert MO.resolve("##370") == (None, [])
+    assert MO.offer_number("##370") == "370"
 
 
 # --------------------------------------------------------------------------- #
@@ -388,17 +459,41 @@ def test_a_local_checkout_overrides_the_mapping(tmp_path, monkeypatch):
 # ban on the single word `gh` that any other client would walk straight past.
 # --------------------------------------------------------------------------- #
 
-# Every command the resolution path is allowed to spawn, as (argv[0], argv[1]).
+# Every command the resolution path is allowed to spawn, as its VERB PATH — see
+# `_ledger_key`.
 #
 # 🔴 THE SUBCOMMAND IS PART OF THE LEDGER, NOT DECORATION. `git` alone would
 # admit `git ls-remote` and `git fetch`, which are network calls wearing the name
-# of a local tool — the exact substitution a ban on `gh` invites. Both entries
-# here are local-only reads.
+# of a local tool — the exact substitution a ban on `gh` invites.
+#
+# 🔴 AND TWO WORDS WERE NOT ENOUGH, WHICH IS A MEASUREMENT AND NOT A THEORY. The
+# ledger used to be `(argv[0], argv[1])`, so `("git", "remote")` admitted
+# `git remote update` — which runs `git fetch` against EVERY remote, i.e. the
+# network call this whole section exists to keep out, spelled with the same two
+# words as the local `git remote get-url`. Measured on this branch: adding
+# `_git(["remote", "update"], cwd=…)` to `repo_of_checkout` left all 352 tests
+# green, while `git fetch --all` and `curl` both died. The docstring above
+# already claimed the subcommand was in the ledger BECAUSE `git` alone admits a
+# fetch; the key was one level short of the claim.
 RESOLUTION_PATH_COMMANDS = {
-    ("tmux", "display-message"),   # which pane the operator was last in
-    ("git", "rev-parse"),          # that pane's checkout root
-    ("git", "remote"),             # `remote get-url origin` — reads .git/config
+    ("tmux", "display-message"),      # which pane the operator was last in
+    ("git", "rev-parse"),             # that pane's checkout root
+    ("git", "remote", "get-url"),     # reads .git/config — NOT `remote update`
 }
+
+
+def _ledger_key(argv: list[str]) -> tuple[str, ...]:
+    """A command's VERB PATH: `argv[0]`, `argv[1]`, and `argv[2]` when that third
+    word is a bare word rather than an option.
+
+    The third word is what separates `git remote get-url` (a local config read)
+    from `git remote update` (a fetch per remote). It is dropped when it starts
+    with `-`, so `tmux display-message -p -F …` still keys on its subcommand
+    rather than dragging a flag or a format string into the ledger.
+    """
+    key = tuple(argv[:2])
+    third = argv[2] if len(argv) > 2 else ""
+    return key + ((third,) if third and not third.startswith("-") else ())
 
 
 def _assert_only_local_commands(seen: list[list[str]]) -> None:
@@ -408,7 +503,7 @@ def _assert_only_local_commands(seen: list[list[str]]) -> None:
     call, most likely. A SHRUNK set means the path under test never ran the
     measurement at all, which would make every absence below vacuous.
     """
-    got = {(c[0], c[1]) for c in seen if len(c) >= 2}
+    got = {_ledger_key(c) for c in seen if len(c) >= 2}
     assert got == RESOLUTION_PATH_COMMANDS, (
         f"the resolution path's command ledger MOVED: {sorted(got)}")
 
@@ -428,6 +523,30 @@ def test_the_no_network_assertion_can_actually_FIRE():
     # …and in the other direction: a path that measured nothing.
     with pytest.raises(AssertionError, match="ledger MOVED"):
         _assert_only_local_commands([])
+
+
+def test_the_ledger_rejects_git_remote_UPDATE_which_is_a_fetch():
+    """🔴 THE SUBSTITUTION A TWO-WORD LEDGER ADMITTED, kept as its own control.
+
+    `git remote update` runs `git fetch` for every configured remote. Under the
+    old `(argv[0], argv[1])` key it was INDISTINGUISHABLE from
+    `git remote get-url origin`, so it passed — verified by adding it to
+    `repo_of_checkout` and watching all 352 tests stay green. This is the case
+    that must go red, and it is spelled out separately from the `gh`/`curl` row
+    above because those two never passed: a control built only from commands the
+    old key already caught proves nothing about the change that closed this."""
+    local = [["tmux", "display-message", "-p", "-F", "#{pane_current_path}"],
+             ["git", "rev-parse", "--show-toplevel"],
+             ["git", "remote", "get-url", "origin"]]
+    # NEGATIVE CONTROL FIRST: the REAL argv must still pass, or the assertions
+    # below would be satisfied by a key that rejects everything.
+    _assert_only_local_commands(local)
+    for network in (["git", "remote", "update"],
+                    ["git", "fetch", "--all"],
+                    ["git", "ls-remote", "https://github.com/x/y"],
+                    ["curl", "-s", "https://api.github.com/search/repositories"]):
+        with pytest.raises(AssertionError, match="ledger MOVED"):
+            _assert_only_local_commands(local + [network])
 
 
 def test_the_resolution_path_spawns_ONLY_these_local_commands(tmp_path, monkeypatch):
@@ -468,7 +587,7 @@ def test_the_resolution_path_spawns_ONLY_these_local_commands(tmp_path, monkeypa
 
     monkeypatch.setattr(MO.subprocess, "run", record)
     monkeypatch.setattr(MO.subprocess, "Popen", no_launch)
-    monkeypatch.setattr(MO, "pick", lambda c: "")
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="": "")
     monkeypatch.setattr(MO, "notify", lambda *a, **k: None)
 
     assert MO.main(["zzznosuchrepo#12"]) == 0
@@ -520,6 +639,63 @@ def test_the_spawned_executable_LEDGER_can_actually_fire():
         "subprocess.run(['gh', 'api', 'search/repositories'])\n")
     assert found == {"gh"}, found
     assert _spawned_executables("import subprocess\nx = 1\n") == set()
+
+
+def test_the_alacritty_wrapper_PATH_covers_every_executable_the_handler_spawns():
+    """🔴 A SEAM BETWEEN TWO FILES IN TWO LANGUAGES, OWNED BY NEITHER.
+    `nix/programs/alacritty/default.nix` pins a PATH for the hint wrapper because
+    Alacritty spawns it with the display manager's environment; `mention-open.py`
+    decides what it spawns. They agree only by coincidence, and BOTH failure
+    directions are silent:
+
+      * a spawn with no package — `FileNotFoundError` is caught as `OSError` and
+        answered with "", so the feature is INERT in production with a fully
+        green suite. That is exactly how the deleted `gh` search would have
+        behaved, and its own comment said so.
+      * a package with no spawn — dead weight in the wrapper's closure, and a
+        comment justifying a call site that no longer exists. `pkgs.gh` was
+        precisely this: its comment named "PASS 3", the branch DELETED that pass
+        and renumbered the rest, so a reader following the comment landed on the
+        fuzzy universe, which spawns nothing.
+
+    `rofi` is the one deliberate omission and it is enumerated, not inferred:
+    it is a SYSTEM package here (`nix/i3/config.nix` invokes it bare), and
+    pulling `pkgs.rofi` in would install a second copy whose theme drifts from
+    the launcher's.
+    """
+    # executable -> the nix attribute that must provide it.
+    PROVIDER = {"git": "pkgs.git", "tmux": "pkgs.tmux",
+                "xdg-open": "pkgs.xdg-utils", "notify-send": "pkgs.libnotify"}
+    # Not spawned by name from PATH: rofi is the system copy on purpose, and
+    # python312 is the interpreter the wrapper `exec`s by store path.
+    NOT_FROM_THE_WRAPPER_PATH = {"rofi"}
+    INTERPRETER = {"pkgs.python312"}
+
+    nix_src = (ROOT / "nix" / "programs" / "alacritty" / "default.nix").read_text()
+    m = re.search(r"makeBinPath\s*\[(.*?)\]", nix_src, re.S)
+    assert m, "the mentionOpen wrapper no longer calls lib.makeBinPath"
+    # Comments in that block are PROSE ABOUT the packages — `pkgs.gh` was named
+    # in one for months. Reading them as config is the mistake this strips.
+    body = re.sub(r"#[^\n]*", "", m.group(1))
+    listed = set(re.findall(r"pkgs\.[A-Za-z0-9_-]+", body))
+    assert listed, "positive control: the wrapper DOES pin a PATH"
+
+    spawned = _spawned_executables(HANDLER.read_text())
+    assert spawned, "positive control: the module DOES spawn things"
+    needed = {PROVIDER[e] for e in spawned - NOT_FROM_THE_WRAPPER_PATH
+              if e in PROVIDER}
+    unknown = spawned - NOT_FROM_THE_WRAPPER_PATH - set(PROVIDER)
+    assert not unknown, (
+        f"mention-open.py spawns {sorted(unknown)}, which this test cannot map "
+        f"to a nix package — add it to PROVIDER and to the wrapper's PATH")
+    assert needed <= listed, (
+        f"the wrapper's PATH is MISSING {sorted(needed - listed)}: the handler "
+        f"spawns it, FileNotFoundError is caught as OSError, and the feature is "
+        f"inert in production with a green suite")
+    assert listed <= needed | INTERPRETER, (
+        f"the wrapper's PATH carries {sorted(listed - needed - INTERPRETER)}, "
+        f"which nothing in mention-open.py spawns — dead weight in the closure, "
+        f"and a comment justifying a call site that no longer exists")
 
 
 def test_the_module_no_longer_carries_a_repository_SEARCH_at_all():
@@ -666,6 +842,115 @@ def test_the_workspace_is_resolved_at_CALL_time_too(tmp_path, monkeypatch):
     assert MO.discover_repos() == {"plotwidget": "gardenersguild/plotwidget"}
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE 16-THREAD FAN-OUT
+#
+# `discover_repos` runs one `git remote get-url` per checkout across a thread
+# pool and re-pairs the results with the checkouts POSITIONALLY. Every other
+# fixture in this file holds exactly ONE checkout, so none of them can see a
+# pairing bug at all: with one entry, `zip(entries, results)` and
+# `zip(entries, reversed(results))` are the same function.
+#
+# Two mutants survived the whole 352-test suite before these tests existed:
+#   * `pool.map(repo_of_checkout, entries[::-1])` — every checkout takes its
+#     NEIGHBOUR's owner. On the real host that maps `~/workspace/devrc` to
+#     another organisation's repository, so `devrc#1291` opens issue 1291
+#     somewhere unrelated: the confident wrong page.
+#   * dropping `if full:` — a child that failed or timed out answers "", and
+#     that "" is written OVER a good row the generated mapping supplied,
+#     silently un-resolving a name the host could answer a moment earlier.
+#
+# 🔴 FOUR CHECKOUTS, PAIRWISE-DISTINCT OWNERS AND REPOS, ALL SYNTHETIC. Four
+# rather than three because a 3-element reversal leaves the MIDDLE element on
+# itself; four has no fixed point. Distinct from `FAKE_UNIVERSE` and from every
+# constant these assertions name, so a mutant that transposes or hardcodes
+# cannot land on an expected value by accident.
+# --------------------------------------------------------------------------- #
+FAN_OUT_CHECKOUTS = {
+    "brambleway": "oxbowlabs/brambleway",
+    "cinderfell": "pitchpine/cinderfell",
+    "duskharrow": "quarrymill/duskharrow",
+    "quillmarsh": "northgate/quillmarsh",
+}
+
+
+def _workspace_of(tmp_path, names) -> Path:
+    ws = tmp_path / "workspace"
+    for name in names:
+        (ws / name / ".git").mkdir(parents=True)
+    return ws
+
+
+def test_the_fan_out_pairs_every_checkout_with_its_OWN_owner(tmp_path, monkeypatch):
+    """🔴 THE TRANSPOSITION GUARD. Every checkout must be paired with the owner
+    measured FOR IT, not with a neighbour's."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", tmp_path / "absent.json")
+    ws = _workspace_of(tmp_path, FAN_OUT_CHECKOUTS)
+    monkeypatch.setattr(MO, "repo_of_checkout",
+                        lambda path: FAN_OUT_CHECKOUTS[Path(path).name])
+    got = MO.discover_repos(ws)
+    # POSITIVE CONTROL: the fan-out really ran over four checkouts, so the
+    # equality below is a fact about work that happened.
+    assert len(got) == 4, got
+    assert got == dict(FAN_OUT_CHECKOUTS), (
+        f"the fan-out paired a checkout with a NEIGHBOUR's owner: {got}")
+
+
+def test_the_fan_out_DEGRADES_to_serial_rather_than_vanishing(tmp_path, monkeypatch):
+    """🔴 `RuntimeError: can't start new thread` IS NOT HYPOTHETICAL ON THIS BOX
+    — it routinely runs 100+ concurrent agent worktrees. It used to propagate
+    out of `main()` into a DETACHED process: no toast, no readable stderr, a
+    click that did nothing.
+
+    The serial path must produce the SAME pairing, not merely "an answer" — a
+    fallback that transposes is the confident wrong page again, reached only
+    under load, where nobody is watching."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", tmp_path / "absent.json")
+    ws = _workspace_of(tmp_path, FAN_OUT_CHECKOUTS)
+    monkeypatch.setattr(MO, "repo_of_checkout",
+                        lambda path: FAN_OUT_CHECKOUTS[Path(path).name])
+
+    def cannot_start_threads(paths):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(MO, "_fan_out", cannot_start_threads)
+    got = MO.discover_repos(ws)
+    assert got == dict(FAN_OUT_CHECKOUTS), (
+        f"discovery did not DEGRADE to a serial fan-out: {got}")
+
+
+def test_an_UNREADABLE_checkout_does_not_ERASE_the_mappings_answer(
+        tmp_path, monkeypatch):
+    """🔴 `if full:` IS A GUARD. `repo_of_checkout` answers "" for a checkout
+    whose `git remote` failed or timed out. Writing that "" into the result
+    DELETES the row the generated mapping already supplied for the same name —
+    a name that resolved a moment ago silently stops resolving, and the operator
+    sees a picker where they used to see a page.
+
+    Both directions are asserted: the mapping's row must SURVIVE, and a
+    checkout the mapping never knew about must be ABSENT rather than present
+    with an empty value (an empty value builds `https://github.com//issues/12`).
+    """
+    p = tmp_path / "known_repos.json"
+    p.write_text(json.dumps({"quillmarsh": "northgate/quillmarsh"}))
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", p)
+    ws = _workspace_of(tmp_path, ["brambleway", "cinderfell", "quillmarsh"])
+    unreadable = {"quillmarsh", "cinderfell"}
+    monkeypatch.setattr(
+        MO, "repo_of_checkout",
+        lambda path: "" if Path(path).name in unreadable
+        else FAN_OUT_CHECKOUTS[Path(path).name])
+    got = MO.discover_repos(ws)
+    # POSITIVE CONTROL: the readable checkout DID land, so the two claims below
+    # are about a run that measured something.
+    assert got.get("brambleway") == "oxbowlabs/brambleway", got
+    assert got.get("quillmarsh") == "northgate/quillmarsh", (
+        f"an unreadable checkout ERASED the mapping's answer: {got}")
+    assert "cinderfell" not in got, (
+        f"an unreadable checkout ERASED the mapping's answer by adding an "
+        f"empty row: {got}")
+
+
 # The picker's size, and the empty results that must name their cause
 # --------------------------------------------------------------------------- #
 def test_a_WALL_of_repos_reaches_the_picker_because_it_can_be_TYPED_at(
@@ -767,6 +1052,85 @@ def test_universe_reason_never_names_a_ROW(tmp_path):
     p.write_text(json.dumps({"widget": "acme"}))
     reason = MO.universe_reason(p)
     assert "acme" not in reason and "widget" not in reason, reason
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE MAPPING IS HAND-REGENERATED AND NOTHING CONVERGES IT
+#
+# `scripts/regen-known-repos.py` is run by hand: no timer in `nix/` references
+# it. So a repository created since the last run is invisible to EVERY
+# resolution path, and the only symptom is a picker appearing where a page used
+# to open — which reads as "the picker is noisy", not as "my mapping is old".
+# The age is therefore measured and surfaced. These pin that it is measured at
+# TWO points rather than at one, because a threshold checked on one side of
+# itself cannot tell a working guard from a constant.
+# --------------------------------------------------------------------------- #
+def _mapping_aged(tmp_path, days: float) -> Path:
+    p = tmp_path / "known_repos.json"
+    p.write_text(json.dumps({"plotwidget": "hobbyist/plotwidget"}))
+    when = time.time() - days * 86400
+    os.utime(p, (when, when))
+    return p
+
+
+@pytest.mark.parametrize("days,stale", [
+    (0.0, False),                            # just regenerated
+    (MO.STALE_MAPPING_DAYS - 1, False),      # inside the window
+    (MO.STALE_MAPPING_DAYS + 1, True),       # just outside it
+    (90.0, True),                            # long gone
+])
+def test_the_mapping_age_is_measured_at_FOUR_points(tmp_path, days, stale):
+    """Both sides of the threshold AND a middle. The note must name a COUNT and
+    the regenerator, and must never name a row."""
+    p = _mapping_aged(tmp_path, days)
+    measured = MO.mapping_age_days(p)
+    assert measured is not None and abs(measured - days) < 0.01, measured
+    note = MO.staleness_note(p)
+    assert bool(note) is stale, f"{days}d -> {note!r}"
+    if stale:
+        assert "regen-known-repos.py" in note, note
+        assert "plotwidget" not in note and "hobbyist" not in note, note
+
+
+def test_an_ABSENT_mapping_has_an_UNKNOWN_age_not_a_fresh_one(tmp_path):
+    """🔴 None MEANS UNMEASURED. Answering "0 days" for a file that does not
+    exist would report the staleness signal as clean on exactly the host it
+    cannot measure — the silent zero this module is written against. The absent
+    case has its OWN reason (`universe_reason`), so the staleness note stays
+    empty rather than inventing a second one."""
+    assert MO.mapping_age_days(tmp_path / "nothing-here.json") is None
+    assert MO.staleness_note(tmp_path / "nothing-here.json") == ""
+
+
+def test_a_STALE_mapping_is_NAMED_in_the_refusal_beside_the_primary_cause(
+        spy, monkeypatch, tmp_path):
+    """🔴 APPENDED, NOT SUBSTITUTED — the same rule the advice follows. "no
+    repository owner is known for it" is the primary fact and staleness is the
+    ACTIONABLE addition; reporting only one of them is how the operator ends up
+    regenerating nothing, or regenerating for the wrong reason."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH",
+                        _mapping_aged(tmp_path, MO.STALE_MAPPING_DAYS + 30))
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    # `--print` bars the picker, which is what routes this to a refusal at all.
+    assert MO.main(["--print", "zzznosuchrepo#77"]) == 1
+    body = notices[-1][1]
+    assert "days old" in body, f"the refusal never named the mapping's age: {body}"
+    assert "regen-known-repos.py" in body, body
+    assert "owner/repo#N" in body, "the actionable advice was dropped"
+
+
+def test_a_FRESH_mapping_adds_NO_staleness_noise_to_the_refusal(
+        spy, monkeypatch, tmp_path):
+    """The negative control for the test above. Without it, a `staleness_note`
+    that complained unconditionally would satisfy every assertion there."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", _mapping_aged(tmp_path, 0.0))
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    assert MO.main(["--print", "zzznosuchrepo#77"]) == 1
+    assert "days old" not in notices[-1][1], notices[-1]
 
 
 def test_the_refusal_keeps_the_ADVICE_when_it_also_names_a_cause(spy, monkeypatch,
@@ -879,18 +1243,32 @@ def test_a_ONE_ENTRY_universe_is_still_a_CHOICE_and_never_auto_opens(
     `zzznosuchrepo#77` opened issue 77 in a completely unrelated repository — a
     confident wrong page, the exact failure this handler exists to prevent.
 
-    A mapping hit is evidence about the name; a universe row is only an option."""
+    A mapping hit is evidence about the name; a universe row is only an option.
+
+    🔴 THIS TEST NOW CARRIES THE WHOLE `offered_universe` GUARD. It used to share
+    it with a six-digit case, and six digits no longer reaches the picker at all
+    — so if this one stopped exercising the one-entry shortcut, nothing would.
+    The message says what a failure MEANS rather than what was asserted, because
+    a mutation battery reads the `E ` line to decide whether the row it named is
+    the row that fired."""
     monkeypatch.setattr(MO, "discover_repos",
                         lambda *a, **k: {"spadeworks": "rivalorg/spadeworks"})
     assert MO.main(["zzznosuchrepo#77"]) == 0
-    assert ("pick", 1) in spy, spy
+    assert ("pick", 1) in spy, (
+        f"a universe row was AUTO-OPENED, bypassing the picker: {spy}")
+    # The claim is ORDER, not absence: `spy`'s `pick` answers with row 0, so an
+    # `open` AFTER a pick is what a selection legitimately does. What must never
+    # happen is an open with no pick in front of it.
+    kinds = [c[0] for c in spy if isinstance(c, tuple)]
+    assert kinds.index("pick") < kinds.index("open"), (
+        "a universe row was AUTO-OPENED, bypassing the picker")
 
 
 def test_dismissing_the_universe_picker_opens_NOTHING(spy, universe, monkeypatch):
     """`pick()`'s contract, preserved exactly: a dismissal is not an error and it
     must not open anything. Asserted on the OPENER, not only on the exit code —
     an exit code cannot tell you a browser was launched."""
-    monkeypatch.setattr(MO, "pick", lambda c: "")
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="": "")
     assert MO.main(["zzznosuchrepo#12"]) == 0
     assert not [c for c in spy if isinstance(c, tuple) and c[0] == "open"]
 
@@ -928,7 +1306,7 @@ def test_an_UNREADABLE_mapping_degrades_the_same_way(tmp_path, monkeypatch):
     monkeypatch.setattr(MO, "WORKSPACE", tmp_path / "no-such-workspace")
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
     picks, opens, notices = [], [], []
-    monkeypatch.setattr(MO, "pick", lambda c: picks.append(len(c)) or "")
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="": picks.append(len(c)) or "")
     monkeypatch.setattr(MO, "open_url", lambda url: opens.append(url) or 0)
     monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
     assert MO.main(["zzznosuchrepo#12"]) == 1
@@ -954,20 +1332,72 @@ def test_no_discovery_still_means_resolve_only_what_the_TEXT_carries(spy, univer
     ("--print", "there is nobody to ask"),
 ])
 def test_a_flag_that_BARS_the_picker_says_so_by_NAME(monkeypatch, universe,
-                                                     flag, expected):
+                                                     tmp_path, flag, expected):
     """🔴 THE THIRD WAY THE PICKER CANNOT BE SHOWN, and it is not an empty
     universe — the universe here is fine and non-empty. A refusal reporting "no
     repo mapping on this host" would send the operator to run
     `regen-known-repos.py` over a mapping that was never the problem.
 
     Both flags are named in the body because they are the operator's own lever:
-    drop the flag and the picker appears."""
+    drop the flag and the picker appears.
+
+    🔴 THE MAPPING IS PATCHED TO A HEALTHY TMP FILE, and that is not tidiness.
+    `refuse()` reads `KNOWN_REPOS_PATH`; without this the test would consult the
+    OPERATOR'S REAL mapping, so it asserted one thing on the dev host (file
+    present) and another in the nix sandbox tier (HOME is empty, so the file is
+    absent) — the config-blind shape, green for different reasons in the two
+    tiers. The healthy-mapping case is what this test is about; the ABSENT one
+    is the test below, which is the case that was reporting the wrong cause."""
+    p = tmp_path / "known_repos.json"
+    p.write_text(json.dumps({"plotwidget": "hobbyist/plotwidget"}))
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", p)
     notices = []
     monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
     assert MO.main([flag, "zzznosuchrepo#12"]) == 1
     assert expected in notices[-1][1], notices[-1]
     assert "regen-known-repos" not in notices[-1][1], (
         "blamed the mapping for a refusal the FLAG caused")
+
+
+def test_print_mode_on_a_host_with_NO_mapping_names_the_ACTIONABLE_cause(
+        monkeypatch, universe, tmp_path):
+    """🔴 BOTH CAUSES ARE TRUE; ONLY ONE IS ACTIONABLE, AND IT WAS THE ONE BEING
+    DROPPED. `--print zzz#12` on a host with no mapping at all used to answer
+    "--print cannot show the repository picker" and stop — because the flag was
+    tested BEFORE `universe_reason()`, not because the flag was the better
+    answer. The operator cannot act on "--print is non-interactive"; they can act
+    on "run scripts/regen-known-repos.py". A handler whose stated discipline is
+    "say WHICH empty this is" reported the un-actionable half.
+
+    Both are asserted, and the flag half is asserted FIRST so this cannot pass by
+    having quietly stopped naming the flag."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", tmp_path / "nothing-here.json")
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    assert MO.main(["--print", "zzznosuchrepo#12"]) == 1
+    body = notices[-1][1]
+    assert "there is nobody to ask" in body, body
+    assert "has no repo mapping" in body, (
+        f"--print blamed the FLAG and never named the mapping, which is the "
+        f"only cause the operator can act on: {body}")
+    assert "regen-known-repos.py" in body, body
+
+
+def test_no_discovery_still_does_NOT_blame_the_mapping_it_never_read(
+        monkeypatch, universe, tmp_path):
+    """The mirror of the test above, and the reason the two flags are handled
+    differently rather than uniformly. `--no-discovery` means the mapping is
+    never opened, so its state is not a cause of anything — naming it would send
+    the operator to regenerate a file that was not involved. `--print` DOES read
+    it (PASS 2 still runs), which is why it names both."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", tmp_path / "nothing-here.json")
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    assert MO.main(["--no-discovery", "zzznosuchrepo#12"]) == 1
+    body = notices[-1][1]
+    assert "resolves only what the text itself carries" in body, body
+    assert "regen-known-repos" not in body, (
+        f"blamed a mapping --no-discovery never read: {body}")
 
 
 def test_print_mode_never_invokes_the_picker_or_the_universe(spy, universe, capsys):
@@ -1029,55 +1459,186 @@ def test_offer_number_is_NOT_a_resolution(spy):
     assert MO.resolve("#282828") == (None, [])
 
 
-def test_a_SIX_DIGIT_number_is_OFFERED_but_NEVER_auto_opened(spy, monkeypatch):
-    """🔴 THE EXACT HAZARD `_NUM = \\d{1,5}` EXISTS FOR, on the new path. With a
-    ONE-entry universe the "exactly one candidate → just open it" shortcut is
-    live, and firing it here would open issue 282828 of an unrelated repository
-    from a click on a colour literal — a confident wrong page produced by the
-    very change meant to be friendlier.
+def test_a_SIX_DIGIT_click_gets_a_NAMED_toast_not_a_wall_of_repos(spy, universe,
+                                                                  monkeypatch):
+    """🔴 THE OPERATOR DECISION, RECORDED. `mention_scan`'s `_NUM` is `\\d{1,5}`
+    because nothing on this host — no clawgate task, no GitHub issue in any repo
+    the operator touches — reaches six digits; devrc itself is in the 1300s. So a
+    six-digit `#N` is ALWAYS a false positive, and every row a universe picker
+    could offer for it names an issue no repository has: several hundred URLs
+    that all 404 is not a choice, it is a wall with no door.
 
-    A one-entry universe is the fixture on purpose: any larger one reaches the
-    picker through the plural branch and could not see this regression at all."""
-    monkeypatch.setattr(MO, "discover_repos",
-                        lambda *a, **k: {"spadeworks": "rivalorg/spadeworks"})
-    assert MO.main(["#282828"]) == 0
-    # 🔴 THE CLAIM IS ORDER, NOT ABSENCE. `spy`'s `pick` answers with row 0, so
-    # an `open` here is legitimate — it is what a SELECTION does. What must never
-    # happen is an open with no pick in front of it, which is the auto-open
-    # shortcut firing. Asserting "no open at all" would instead pass against a
-    # handler that had stopped working entirely.
-    kinds = [c[0] for c in spy if isinstance(c, tuple)]
-    # 🔴 THE MESSAGE IS ON THIS ASSERTION, NOT THE ORDERING ONE BELOW. When the
-    # auto-open shortcut fires there is no "pick" at all, so THIS is the line
-    # that goes red — and a mutation battery reports a kill for the wrong reason
-    # when the phrase it looks for sits on an assertion that never evaluates.
-    assert "pick" in kinds, (
-        f"a number the SCANNER REFUSED was auto-opened, bypassing the "
-        f"picker: {spy}")
-    assert kinds.index("pick") < kinds.index("open"), (
-        "a number the SCANNER REFUSED was auto-opened, bypassing the picker")
+    `#282828` is the operator's own gruvbox background literal, written in the
+    very file that configures this hint. The right answer is "that is a colour",
+    said once.
 
-
-def test_dismissing_the_SIX_DIGIT_picker_opens_nothing(spy, universe, monkeypatch):
-    monkeypatch.setattr(MO, "pick", lambda c: "")
-    assert MO.main(["#282828"]) == 0
+    🔴 IT IS A TOAST, NOT A SILENCE. The dead end this branch replaced was the
+    complaint that started the whole change; answering with nothing would be that
+    dead end again. So the notification must NAME the number and say what it
+    looks like — asserted on the BODY, not merely on the exit code."""
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    # 🔴 THE MESSAGE IS ON THE EXIT CODE, and that placement is not cosmetic.
+    # When the six-digit branch is removed the picker fires and `main()` returns
+    # 0, so THIS is the assertion that goes red first — the picker assertion
+    # below never evaluates, and a battery matching on its phrase would report
+    # `KILLED-WRONG-REASON` for a row that killed exactly the right test.
+    assert MO.main(['background = "#282828";']) == 1, (
+        "a six-digit click raised the repository picker for a colour literal")
+    assert not [c for c in spy if isinstance(c, tuple) and c[0] == "pick"], (
+        f"a six-digit click raised the repository picker for a colour "
+        f"literal: {spy}")
     assert not [c for c in spy if isinstance(c, tuple) and c[0] == "open"]
+    assert notices, "a six-digit click said NOTHING — the old dead end is back"
+    body = notices[-1][1]
+    assert "282828" in body and "colour literal" in body, notices[-1]
 
 
-def test_a_SELECTED_six_digit_row_opens_the_repo_the_operator_CHOSE(
-        spy, universe, monkeypatch):
-    """The other half: offering it must actually work. A picker that cannot open
-    what was selected is the refusal again, wearing a window.
+def test_a_six_digit_literal_BESIDE_a_real_reference_does_not_suppress_it(spy):
+    """🔴 WHY `colour_literal_offer` ASKS FOR `span is None` FIRST.
 
-    `hobbyist/plotwidget` is the SECOND row of the sorted universe, not the
-    first — so a mutant that ignores the selection and takes row 0 cannot land on
-    this URL by accident."""
+    `offer_number` scans the WHOLE text for the first `#N`, and in
+    `background = "#282828"; fixed in talos-infra#1065` the first one is the
+    COLOUR — while the scanner's span is the reference. Classifying on the
+    number alone would call this click a colour literal, skip discovery, and
+    refuse a reference that resolves perfectly well.
+
+    A number the scanner ACCEPTED is a reference by definition, whatever else
+    the text contains; the six-digit rule may only speak for text the scanner
+    refused outright. This is a command-line surface rather than a click one —
+    Alacritty hands over the matched substring, not the whole line — but it is
+    the guard that keeps the two classifications from being confused, and it
+    survived the whole suite before this test existed."""
+    assert MO.main(['background = "#282828"; fixed in talos-infra#1065']) == 0, (
+        "a colour literal BESIDE a real reference suppressed the reference")
+    assert spy[-1] == ("open", "https://github.com/civitai/talos-infra/issues/1065"), (
+        f"a colour literal BESIDE a real reference suppressed the "
+        f"reference: {spy}")
+
+
+def test_a_SIX_DIGIT_click_does_not_pay_for_the_DISCOVERY_fan_out(spy):
+    """The universe it will not show costs a `git remote` fan-out plus a tmux
+    round-trip to build. A click that already has its answer must not pay for
+    one — the same latency argument that keeps `owner/repo#N` out of PASS 2,
+    applied at the other end of the path."""
+    assert MO.main(["#282828"]) == 1
+    assert "discover" not in spy, spy
+    assert "tmux" not in spy, spy
+
+
+def test_a_FIVE_digit_number_still_reaches_the_picker(spy, universe, monkeypatch):
+    """🔴 THE OTHER HALF OF THE DECISION, AND THE CONTROL FOR IT. Only SIX digits
+    is special-cased; every other unresolvable shape still becomes a choice. A
+    branch measured at one point cannot tell "six digits is refused" from "the
+    picker is gone", so the bound is measured on both sides of itself.
+
+    Five digits is the widest the scanner ACCEPTS, so this is also the boundary
+    case: `#28282` resolves to a clawgate task, is ambiguous, and gets the
+    universe appended below it."""
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    assert MO.main(["#28282"]) == 0
+    assert ("pick", 4) in spy, spy
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A DISMISSED PICKER CANNOT BE READ, SO THE DIAGNOSIS GOES ABOVE IT
+#
+# MEASURED: `kubectl-neat#1` resolved before this branch and now exits 1.
+# Interactively the operator gets the fuzzy picker, types the name, rofi
+# (`-no-custom`) matches nothing, presses Escape — and `pick()` returns "" for
+# BOTH that and a genuine "I changed my mind". rofi reports them identically;
+# there is no exit code, no stdout, nothing that separates them. So a toast
+# fired after a dismissal would fire after EVERY dismissal, which is noise the
+# handler must not make.
+#
+# The honest place for "this host has no repository called kubectl-neat" is
+# therefore BEFORE the choice, on the one surface the universe may already
+# reach: a `-mesg` line above the list.
+# --------------------------------------------------------------------------- #
+def test_the_universe_picker_EXPLAINS_ITSELF_above_the_list(universe, monkeypatch,
+                                                            tmp_path):
+    """It must name the repo the operator CLICKED — which they already typed —
+    plus how many rows are offered, when the mapping was generated, and the
+    remedy. Never a row from the universe."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", _mapping_aged(tmp_path, 3.0))
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
+    seen = {}
+
+    def note_pick(cands, mesg=""):
+        seen["mesg"] = mesg
+        seen["rows"] = len(cands)
+        return ""
+
+    monkeypatch.setattr(MO, "pick", note_pick)
+    assert MO.main(["kubectl-neat#1"]) == 0
+    # POSITIVE CONTROL: the picker really was raised over the real universe.
+    assert seen["rows"] == 3, seen
+    mesg = seen["mesg"]
+    assert mesg, (
+        "the universe picker was raised with NO explanation — a dismissal and "
+        "a no-match are then indistinguishable to the operator too")
+    assert "kubectl-neat#1" in mesg, mesg
+    assert "3 offered" in mesg, mesg
+    assert "regen-known-repos.py" in mesg, mesg
+    assert "3d ago" in mesg, mesg
+
+
+def test_the_picker_NOTE_never_names_a_universe_row(universe, monkeypatch,
+                                                    tmp_path):
+    """🔴 THE NOTE IS THE ONE NEW STRING BUILT WHILE THE WHOLE UNIVERSE IS IN
+    HAND, so it is exactly where "did you mean one of these?" would be written
+    next. The rows themselves may go to rofi; the note may say only what the
+    operator already knows plus two numbers."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", _mapping_aged(tmp_path, 1.0))
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(mesg=mesg) or "")
+    assert MO.main(["kubectl-neat#1"]) == 0
+    for name in FAKE_UNIVERSE.values():
+        assert name not in seen["mesg"], f"PICKER-NOTE DISCLOSURE: {name}"
+        assert name.split("/")[0] not in seen["mesg"], (
+            f"PICKER-NOTE DISCLOSURE: {name}")
+
+
+def test_the_ORDINARY_picker_gets_no_note(spy, monkeypatch):
+    """The bare `#N` picker — clawgate plus a pane-attributed GitHub row — is
+    not a dead end. Putting a line of apology above the single most common
+    interaction in this handler would be a regression dressed as a diagnosis."""
+    seen = {}
     monkeypatch.setattr(
         MO, "pick",
-        lambda c: "https://github.com/hobbyist/plotwidget/issues/282828")
-    assert MO.main(["#282828"]) == 0
-    assert spy[-1] == (
-        "open", "https://github.com/hobbyist/plotwidget/issues/282828")
+        lambda c, mesg="": seen.update(mesg=mesg) or c[0]["url"])
+    assert MO.main(["#370"]) == 0
+    assert seen["mesg"] == "", seen
+
+
+def test_the_picker_passes_its_NOTE_to_rofi_as_mesg(monkeypatch):
+    """🔴 THE SEAM BETWEEN THE DECISION AND THE TOOL, again. Every test above
+    stubs `pick`, so none of them notices if the note is computed and then
+    dropped on the floor. This is the only one that reads the argv rofi is
+    actually handed.
+
+    NOTHING IS LAUNCHED: `subprocess.run` is replaced."""
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(MO.subprocess, "run", fake_run)
+    cands = [{"platform": "github", "id": "7",
+              "url": "https://github.com/gardenersguild/trowelcast/issues/7"}]
+    MO.pick(cands, mesg="nothing here knows widget<1> & co")
+    assert "-mesg" in seen["cmd"], seen["cmd"]
+    body = seen["cmd"][seen["cmd"].index("-mesg") + 1]
+    # `-mesg` is rendered as PANGO MARKUP, so the three significant characters
+    # must arrive escaped or a stray `<` swallows the rest of the line.
+    assert body == "nothing here knows widget&lt;1&gt; &amp; co", body
+
+    # NEGATIVE CONTROL: no note, no flag. A `-mesg` with an empty argument
+    # renders an empty band above the list on every ordinary picker.
+    MO.pick(cands)
+    assert "-mesg" not in seen["cmd"], seen["cmd"]
 
 
 def test_a_bare_hash_N_that_the_PANE_already_attributes_does_NOT_get_the_universe(
@@ -1117,6 +1678,52 @@ def real_notify(monkeypatch):
     return sent
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 A REFUSAL THAT SHOWS NOTHING IS WORSE THAN THE REFUSAL IT REPLACED
+# --------------------------------------------------------------------------- #
+def test_notify_send_is_given_a_double_dash_before_the_MESSAGE(real_notify):
+    """🔴 MEASURED WITH notify-send 0.8.8, not reasoned about. Several refusal
+    bodies begin with a flag NAME — "--print cannot show the repository picker",
+    "--no-discovery resolves only what the text itself carries" — because naming
+    the operator's own lever is the point. `notify-send` uses GNU getopt, which
+    PERMUTES, so it parses that body as an OPTION wherever it sits:
+
+        $ notify-send -a mention-open S "--no-discovery resolves only …"
+        Unknown option --no-discovery resolves only …   ; exit 1, NO TOAST
+        $ notify-send -a mention-open -- S "--no-discovery resolves only …"
+        ; exit 0, one toast
+
+    And `notify()` runs with `check=False`, so that exit 1 is swallowed: the
+    handler reports the refusal to a stderr nobody reads and shows nothing at
+    all. The `--` is what stops it."""
+    MO.notify("cannot resolve zzz#12",
+              "--print cannot show the repository picker — there is nobody to ask")
+    argv = real_notify[-1]
+    assert argv[0] == "notify-send", argv
+    assert "--" in argv, (
+        f"notify-send got a body starting with `--` and NO `--` terminator, so "
+        f"it exits 1 and shows NOTHING: {argv}")
+    assert argv.index("--") < argv.index("cannot resolve zzz#12"), argv
+    assert argv[-1].startswith("--print"), argv
+
+
+def test_every_flag_refusal_the_handler_can_produce_survives_notify_send(
+        universe, monkeypatch, real_notify, tmp_path):
+    """The seam, not the unit: it is `main()`'s refusal bodies that begin with
+    `--`, and a `--` added to `notify()` is only useful if those bodies still
+    reach it. Both flags are driven through the REAL `notify`."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", tmp_path / "nothing-here.json")
+    for flag in ("--no-discovery", "--print"):
+        real_notify.clear()
+        assert MO.main([flag, "zzznosuchrepo#12"]) == 1
+        argv = real_notify[-1]
+        # POSITIVE CONTROL: this really is a body that starts with a flag name.
+        assert argv[-1].startswith("--"), argv
+        assert "--" in argv[:-1], (
+            f"{flag}: the refusal body starts with a flag name and notify-send "
+            f"got no `--`, so the toast never appears: {argv}")
+
+
 # The universe rows may reach the operator's rofi window and NOWHERE else, so
 # every sink the handler can write to is enumerated here rather than left to
 # whichever one a test happened to think of. A sink missing from this list is a
@@ -1137,8 +1744,9 @@ def test_the_universe_never_reaches_a_LOG_a_SPOOL_or_stderr(spy, universe,
     reached stdout, stderr or a desktop notification."""
     seen = {}
 
-    def spy_pick(cands):
+    def spy_pick(cands, mesg=""):
         seen["rows"] = MO.picker_rows(cands)
+        seen["mesg"] = mesg
         return ""
 
     monkeypatch.setattr(MO, "pick", spy_pick)
@@ -1150,7 +1758,7 @@ def test_the_universe_never_reaches_a_LOG_a_SPOOL_or_stderr(spy, universe,
 
 
 def test_the_REFUSAL_path_names_the_clicked_text_and_never_the_universe(
-        universe, monkeypatch, capsys, real_notify):
+        universe, monkeypatch, capsys, real_notify, tmp_path):
     """🔴 THE SECOND HALF OF THE SAME GUARD, on the path PASS 4 never reaches.
 
     `--print` skips PASS 4 entirely, so the handler refuses — but `discovered`
@@ -1162,7 +1770,13 @@ def test_the_REFUSAL_path_names_the_clicked_text_and_never_the_universe(
 
     The positive controls come FIRST: the refusal really happened, and the
     handler really held the universe at that moment. Without them a stubbed-out
-    run that refused for some other reason would satisfy every absence below."""
+    run that refused for some other reason would satisfy every absence below.
+
+    ⚠ THE MAPPING PATH IS PATCHED so the refusal's reason is a property of this
+    fixture rather than of the machine: `refuse()` reads `KNOWN_REPOS_PATH`, and
+    the nix sandbox tier runs under an empty HOME, so an unpatched run reports a
+    different cause there than on the dev host."""
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", _mapping_aged(tmp_path, 1.0))
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
     assert MO.main(["--print", "zzznosuchrepo#77"]) == 1
     everywhere = _every_sink(capsys, real_notify)
