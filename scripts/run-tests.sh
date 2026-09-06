@@ -479,10 +479,27 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 #           cannot occur in. Both hosts run zsh as the login shell, and
 #           flake.nix's `gateTools` carries it for the sandbox.
 #
+# tmux:     scripts/tests/test_tmux_reply_agent.py drives a REAL tmux on a
+#           private `-L` socket, because two of the reply agent's guards CANNOT
+#           be written against a stub. A stub tmux exits 0 for everything, so it
+#           models neither rule that shipped as a defect:
+#             * `-t <name>:` PREFIX-MATCHES a session. Measured on 3.7c against
+#               the operator's own server, which holds `scratch` … `scratch20`:
+#               `-t scratch2:` with scratch2 absent returned rc 0 and opened the
+#               window in scratch20, where the agent then typed a command and
+#               pressed Enter.
+#             * `-c <path that does not exist>` also returns rc 0, with the
+#               window in $HOME — so a build or a recursive delete ran there and
+#               was reported `delivered`.
+#           Both are on the path that always presses Enter, and both were
+#           invisible to a fully green stubbed suite. Those tests FAIL rather
+#           than skip when tmux is absent, and flake.nix's `gateTools` carries
+#           it for the sandbox.
+
 # 🔴 `python` is listed as well as `python3` because THIS SCRIPT invokes
 # `python -m pytest`, not `python3`. Asserting only `python3` checked a binary
 # the runner never calls.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh)
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
