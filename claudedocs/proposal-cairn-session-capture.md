@@ -43,15 +43,16 @@ Settled by the operator across two rounds of questions on 2026-09-05:
 |---|---|---|
 | 9 | **A session ships as a SET** — one object per transcript file, parent + subagents | ~7.8 objects per session and 2.3x the bytes (row 4, not row 3); forces decision 13 |
 | 10 | **The pointer is an OPAQUE ID**, never a resolvable URL | a reader needs the transcript credential to resolve anything; a shared entry leaks an identifier, not content |
-| 11 | **The expected fan-out set is RECORDED** | a partial N-way pointer write becomes detectable instead of indistinguishable from "not touched" |
-| 12 | **Front matter is a BLOCK LIST of ids**; digest/size/host live as object metadata | ships against today's parser with no change to either repo; checking a pointer costs a HEAD request |
+| 11 | **The expected fan-out set is RECORDED** | a partial N-way write becomes **checkable** — recording is not detecting, so something must compare against it (§10) |
+| 12 | **Front matter is a BLOCK LIST of ids**; digest/size/host live as object metadata | ships against today's parser with no change to either repo; checking a pointer costs a LIST plus one HEAD per object (see §5.4 — decision 9 made this N-way) |
 | 13 | **`transcript_search` is widened with an OPT-IN flag** | the existing feeder keeps its behaviour by default, and must be pinned by a test before the module is touched |
 | 14 | 🔴 **NO retraction path — rotate the leaked credential instead** | the bucket is append-only **by policy**; a secret's bytes persist deliberately and forever |
 | 15 | **`SessionEnd` wired per host, and `drift-check` extended to detect its absence** | the wiring stays an operator act; the gap stops being invisible |
 | 16 | **"Touched" = entries the handoff run WROTE or UPDATED** | mechanical, no inference; an entry only read deeply attaches no receipts |
 
-🔴 **Decision 14 is the one that diverged from the recommendation, and it changes what the
-other machinery is for.** With no deletion, a dangling pointer cannot arise from retraction —
+🔴 **Decision 14 went against the recommendation made during the interview — which is NOT in
+this document, and is named here so nobody hunts for it — and it changes what the other
+machinery is for.** With no deletion, a dangling pointer cannot arise from retraction —
 so §5.4's digest ledger is no longer a retraction-detector, it is purely an integrity check.
 And the report-only scan §6 suggests becomes *the* control rather than a nice-to-have: if the
 only response to a leaked credential is rotation, then **knowing** is the whole of the
@@ -139,9 +140,9 @@ records below only mean something against the population they were wrong about:
 | **3** | **sessions that produced a handoff** — what decision 2 selects, **parent file only** | 37 | **3.82 MB** | 5.22 MB | 10.59 MB | 148 MB |
 | **4** | the same 37 sessions, **parent + their subagent transcripts** | 288 files / 37 sessions | **8.68 MB** *(per session)* | 20.23 MB | 31.00 MB *(per session)* | 375 MB |
 
-🔴 **The row numbers are IN the table on purpose.** Fourteen places in this document say
-"row 1"…"row 4"; without a number column each of those is an unwritten ordinal that a
-future inserted row silently falsifies — including THE SIZING DIRECTIVE itself, which would
+🔴 **The row numbers are IN the table on purpose.** This document refers to "row 1"…"row 4"
+throughout; without a number column each of those is an unwritten ordinal that a future
+inserted row silently falsifies — including THE SIZING DIRECTIVE itself, which would
 then point at the wrong population. Numbering them makes each reference an identifier that
 an insertion cannot move. If you add a row, append it; do not renumber.
 
@@ -257,9 +258,11 @@ open. **Name the front-matter field so it does not assume jsonl.**
 
 ## 5. The design
 
-### 5.0 🔴 "A session's transcript" is a SET, not a file — and this is OPEN
+### 5.0 🔴 "A session's transcript" is a SET, not a file — DECIDED (decision 9)
 
-**This is the first thing an implementer needs and the proposal does not yet answer it.**
+**This is the first thing an implementer needs, and decision 9 answers it: a SET.** The
+measurement below is why, and it is kept because the object key and the sizing both fall out
+of it.
 
 On this host a session writes **several** transcripts: the parent `<session-id>.jsonl` plus
 one `agent-<hash>.jsonl` per dispatched subagent. Measured: **4,951 of 5,864** files are
@@ -324,10 +327,16 @@ by nix** by design, and `drift-check.sh` rc 15 compares only top-level key *name
 does not surface as drift. Consequence: on a host without the hook, **every** session attaches
 only the handoff-time floor, permanently and silently. ✅ **DECIDED — decision 15: wire it per host, and extend `drift-check.sh` to detect its
 absence.** The wiring stays an operator act because that file is per-host by design; what
-changes is that the gap stops being invisible. The detector compares the **hook-event set**
-across hosts — the same shape as the `skillOverrides` arm rc 22 already implements, and it
-closes exactly the class that let this hide: rc 15 compares top-level key NAMES, so a missing
-nested event is structurally unseeable. §8 control 4 must still name the host it ran on.
+changes is that the gap stops being invisible. 🔴 **The detector must compare each host against a GIT-TRACKED LEDGER of required hook
+events — NOT the two hosts against each other.** An earlier revision of this paragraph
+prescribed a cross-host set diff and cited rc 22 as precedent. That is backwards: rc 22
+compares each host to `claude/skill-tiers.json`, and `drift-check.sh` says so in capitals —
+*"THIS IS NOT A CROSS-HOST COMPARISON. Both hosts can agree perfectly and both be wrong; the
+reference is the ledger, not the other machine."* rc 15 is the cross-host arm, and it is the
+one this paragraph already calls too narrow. **A cross-host diff inherits the exact failure
+decision 15 exists to end**: drop `SessionEnd` from both hosts — a bootstrap, an upgrade, or
+an operator "fixing" the diff by deleting it from the other side — and the sets agree while
+every session on every host silently attaches only the floor. §8 control 4 must still name the host it ran on.
 
 ### 5.2 Transport
 
@@ -347,7 +356,7 @@ row 1's max, the largest single transcript FILE on the host — through it is a 
 change. But that is a reason not to use the pod — it is not the reason the route must stay on
 the mesh.
 
-### 5.3 What cairn holds — and one recommendation no recorded decision covers
+### 5.3 What cairn holds
 
 Front-matter on each touched entry gains a session reference.
 
@@ -383,8 +392,12 @@ a `session:` key:
 The pointer is **gone**, `cairn recall` renders the entry as clean, and §5.4's digest ledger —
 the thing meant to make a bad pointer visible — was never written to be checked. So the field
 must be a shape the parser already handles. ✅ **DECIDED — decision 12: a BLOCK LIST of ids**
-(`sessions:` then one `- <id>` per line), which the parser handles today and which uuids
-cannot trip, since promotion needs a colon inside the item. **The digest, size and host move
+(`sessions:` then one `- <id>` per line), which the parser handles today.
+⚠ **Not because uuids carry no colon** — an earlier revision said that, and it is a hazard
+that no longer exists. Measured against the live parser: `- clickup:868abc123` in a block
+list parses to a clean list member. Block-item promotion was FIXED, which is what the
+docstring quoted above is recording. The shape is safe because the parser handles it, not
+because uuids dodge a trap. **The digest, size and host move
 to the object's own metadata** — so no parser change lands in either repo, and checking a
 pointer costs a HEAD request rather than an entry read.
 ⚠ Widening it is a **two-repo change**: `parse_front_matter` sits in `ZacxDev/cairn` too, at
@@ -404,8 +417,10 @@ to a decision nobody made is a good way to lose a cheap recommendation.
 **The hazard, stated in the direction it actually runs.** `plan-cairn-integration.md`
 decision 11 already gates sharing on `sensitivity:` — *client-confidential can never be
 shared* — so the obvious scenario (a client entry leaking a pointer) **cannot fire**, and an
-earlier revision of this section argued exactly that already-closed case. What survives
-decision 11 is the mirror image, and it is worse: a **shareable** entry — this repo's own
+earlier revision of this section argued exactly that already-closed case. ⚠ That is
+`plan-cairn-integration.md`'s decision 11, not this document's — the numbers collide, and
+every other decision reference in this section is local. What survives **that** decision 11
+is the mirror image, and it is worse: a **shareable** entry — this repo's own
 scope, marked `internal` — carries a pointer into an object that contains that same session's
 **client-confidential** work, because one session routinely touches both. Sharing the
 innocuous entry hands over a reference into multi-client content.
@@ -429,7 +444,16 @@ a reader would read "this session was never captured" off a permission error.
 ### 5.4 The digest ledger is not optional
 
 `bytes` + `sha256` + `captured_at` + `host` — **on the OBJECT, not in the entry** (decision
-12), so the entry stays a list of ids and the ledger is one HEAD request away.
+12), so the entry stays a list of ids.
+
+🔴 **DECISION 9 MADE THIS N-WAY, AND THE OBJECT SET HAS THE HOLE DECISION 11 CLOSES FOR
+ENTRIES.** A session is ~7.8 objects, not one, so checking a pointer costs a LIST plus a HEAD
+per object — and more seriously, **a member that never landed is undetectable**. A `sha256`
+proves every object that EXISTS is intact; it says nothing about one that does not, because
+nothing records how many objects a session should have. That is precisely the gap decision 11
+closes for the entry fan-out, left open for the object fan-out decision 9 created.
+**So record the expected OBJECT set alongside the expected entry set** — same mechanism, same
+reason, and §10 says who must read it.
 ⚠ **And under decision 14 its job narrowed:** with no deletion there is no retraction, so a
 dangling pointer can only mean corruption or a failed write. It is an integrity check now,
 not a retraction-detector. Without them a pointer to a
@@ -488,14 +512,19 @@ than discovered when the store gains a second tenant.
 
 🔴 **DECIDED — decision 14: THERE IS NO RETRACTION PATH, BY POLICY. The bucket is
 append-only and a leaked credential is answered by ROTATION, not by deletion.**
-This is deliberate and it is the one decision that diverged from the recommendation, so its
-consequences are stated rather than left to be discovered:
+Deliberate, and chosen against the interview's recommendation (not recorded here — the
+document's own earlier text called a missing retraction path "a real gap" and said "'no path'
+is an answer, but it should be a chosen one", which is what this is). Its consequences are
+stated rather than left to be discovered:
 
 - a secret that reaches the bucket **stays there permanently**, and rotation makes it dead
   rather than absent;
-- rotation only works on credentials that CAN be rotated — a client's secret, a token you do
-  not own, or personal data in a transcript has no rotation, and for those this policy is the
-  whole of the response;
+- 🔴 rotation only works on credentials that CAN be rotated. A client's secret, a token you
+  do not own, or personal data in a transcript has no rotation — and deletion is declined —
+  so for that class **the response is nothing, and the exposure is permanent with no
+  remedy**. Say it that way rather than "the policy is the whole of the response", which
+  reads as though a response exists. It also bounds the scan's value: detection buys a
+  rotation window only where something can be rotated;
 - 🔴 **the report-only scan below is therefore promoted from a nice-to-have to THE control.**
   If the only answer to a leak is to rotate, then *knowing a leak happened* is the entire
   response, and nothing else in this design will tell you. Without it the policy reads as
@@ -503,7 +532,9 @@ consequences are stated rather than left to be discovered:
 
 🔴 **THE REPORT-ONLY SCAN IS NOW LOAD-BEARING, NOT A FOLLOW-ON.** Redaction was declined
 (decision 4) and deletion was declined (decision 14), which leaves detection as the only
-remaining control in the chain. A scan over the bytes being shipped blocks nothing, costs one
+**response available once bytes are already in the bucket**. ⚠ Not "the only control" —
+the storage boundary is a control and is the subject of this whole section; the narrower
+statement is the one that holds, and the conclusion survives it intact. A scan over the bytes being shipped blocks nothing, costs one
 pass over data already being read, and turns an invisible event into a number you can act on
 while the credential is still worth rotating. **Ship it with v1, not after.**
 
@@ -525,14 +556,13 @@ does nothing:
    count move from 0 to 1 and report the pair, never the zero alone.
 2. **Negative control.** Point it at an unreachable endpoint and watch it warn and exit
    non-zero rather than reporting a successful no-op.
-3. **Idempotency, measured.** Two handoff runs in one session must not GROW either set:
-   the object count stays whatever one run produces, and the pointer count per entry stays
-   one. ⚠ **Do not write this as "one object"** — that is only true under parent-only.
-   Under "ship the set" one session yields many objects (288 files across 37 sessions,
-   §4 row 4), so an assertion of `len(objects) == 1` fails a correct implementation.
-   Assert NO GROWTH between runs. ⚠ Under decision 9 one session yields MANY objects
-   (288 files across 37 sessions), so an assertion of `len(objects) == 1` fails a correct
-   implementation.
+3. **Idempotency, measured.** Two handoff runs in one session must produce **no NEW key for a
+   transcript already shipped**, and the pointer count per entry stays one.
+   ⚠ **Do not write this as "one object"**, and do not write it as "the set does not grow"
+   either. Under decision 9 a session is many objects, so `len(objects) == 1` fails a correct
+   implementation — and the set legitimately GROWS if a subagent is dispatched between the two
+   runs, so a no-growth assertion fails one too. The property that holds regardless is
+   per-key: nothing already shipped acquires a second key.
 4. **The `SessionEnd` overwrite actually overwrites.** Ship at handoff, append to the
    session, fire `SessionEnd`, assert the stored `sha256` **changed** and the pointer did
    not duplicate. **Name the host it ran on** — §5.1: the hook is wired on one host today.
@@ -553,7 +583,13 @@ does nothing:
    read token against a bucket key → `403`; the transcript credential against a cairn read
    route → `401`. An earlier revision named neither operation nor expected result, which any
    test satisfies — including one that type-checks past a wrong argument.
-8. **Decision 7's actual behaviour, which no earlier control covered.** Make the push fail
+8. **The report-only scan can actually SEE a credential** — the control decision 14 makes
+   load-bearing. Plant a synthetic credential in a fixture transcript, run the scan over the
+   bytes being shipped, and watch the count move **0 → 1**; report the pair, never the zero
+   alone. A scan wired to nothing reports `0 findings` and reads exactly like a clean run —
+   and under decision 14 that zero is the last thing standing between a leak and nobody
+   knowing.
+9. **Decision 7's actual behaviour, which no earlier control covered.** Make the push fail
    (unreachable endpoint) and assert **handoff exits 0** *and* the doc carries the
    no-session-attached line. Control 2 asserts the *shipper* exits non-zero, which is the
    opposite-signed observable and is equally satisfied by a handoff that fails hard — the
@@ -574,18 +610,36 @@ is one place to correct. What remains:
    session). **Recommendation: park it.** Ship Claude capture first and let the front-matter
    field name stay format-agnostic so opencode can join later without a migration.
 
-## 10. What implementation must decide that no decision above settles
+## 10. Still to settle, and where each one lives
 
-These are not open questions for the operator — they are the places an implementer will have
-to choose, called out so the choice is deliberate rather than accidental:
+🔴 **An earlier revision of this section listed three things that decisions 1-16 DO settle** —
+the object key, the unresolvable-id rendering, and the `transcript_search` flag default — which
+made it a second site for rules §9 had just said live in exactly one place. They are constraints,
+not choices, and they are stated where they belong: §5.0, §5.3 and decision 13.
 
-- **The object key.** §5.0 fixes it as *(parent session id, transcript filename)*. Anything
-  keyed on the filename stem alone leaves `agent-<hash>` objects joinable to nothing.
-- **What "the expected fan-out set" is recorded IN** (decision 11) — object metadata or the
-  handoff doc. Either works; recording it nowhere is what decision 11 forbids.
-- **How a resolver renders an id it cannot resolve.** 🔴 It must read as NOT AUTHORISED or
-  NOT FOUND *distinctly* — never as one ambiguous failure — because under decision 14 nothing
-  is ever deleted, so "missing" now means something went wrong rather than something was
-  retracted.
-- **Whether the opt-in flag on `transcript_search` defaults to today's behaviour.** Decision 13
-  says it must; a test pinning the existing feeder's output is what proves it.
+### Genuinely undecided — an implementer must choose
+
+- **Where the expected fan-out sets are RECORDED** (decision 11, and the object set §5.4 adds) —
+  object metadata, or the handoff doc. Either works; recording them nowhere is what decision 11
+  forbids.
+- 🔴 **WHO READS THEM.** Decision 11's value is not in the recording — a recorded set that
+  nothing compares against detects nothing, which is the same shape as a digest nobody checks.
+  Name the reader, or the decision is inert.
+- **Who owns WRITING the front-matter field** — the `subsystem-index` skill or the handoff tool.
+  Decision 12 settles the field's *shape* and says nothing about its writer. (The handoff doc's
+  `clawgate-task:` is precedent for the idea of a linkage field, though it is a handoff-doc field
+  rather than a cairn-entry one.)
+- **Whether `project_of` is shared** (`build_transcript_push.py`). Decision 13 covers
+  `transcript_search` only. §3 records why this is the one unconditionally-shareable surface and
+  what breaks if it is hand-rolled twice; nothing has decided it.
+
+⚠ The last two were sub-clauses of questions whose *other* halves became decisions 12 and 13.
+They were dropped when those questions were closed, and are restored here so they read as open
+rather than absent.
+
+### Owed work that follows from a decision rather than choosing anything
+
+- A test pinning the existing feeder's output **before** `transcript_search` is touched
+  (decision 13).
+- Wiring `SessionEnd` on the second host, and building the ledger-based detector §5.1 describes
+  (decision 15).
