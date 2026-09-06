@@ -542,13 +542,17 @@ verdict() {
     echo "   so those windows are OUTSIDE the misplacement check below. It covers"
     echo "   the rest, not all of them."
   fi
-  # ⚠ UNPINNED, AND BELIEVED UNREACHABLE TODAY — recorded rather than dressed up
-  # as coverage. `section()` above is also awk, so a broken or missing awk
-  # empties both id sections and the vacuity guard returns INCONCLUSIVE before
-  # control ever gets here. That degradation IS pinned, by
-  # `test_a_broken_awk_degrades_to_INCONCLUSIVE_not_to_clean`; this branch is a
-  # backstop for the day `section` stops being awk, and no fixture reaches it.
-  # A mutation that neuters it therefore SURVIVES, correctly and knowingly.
+  # ⚠ UNPINNED — recorded rather than dressed up as coverage. NO FIXTURE REACHES
+  # IT, and that is the honest extent of the claim: an earlier version of this
+  # comment said "unreachable today", which was an overclaim. It covers only
+  # awk-WIDE failure — `section()` is also awk, so a broken awk empties the id
+  # sections and the vacuity guard returns INCONCLUSIVE first (that path IS
+  # pinned, by `test_a_broken_awk_degrades_to_INCONCLUSIVE_not_to_clean`). It
+  # does NOT cover a failure specific to THIS invocation, which is the one shape
+  # that would land here: awk works, `section` works, and this pipeline alone
+  # dies on a signal or a ulimit. stderr is deliberately NOT discarded, so when
+  # that happens the operator gets the reason and not just a number.
+  # A mutation that neuters this branch therefore SURVIVES, knowingly.
   if [ "$moved_rc" != 0 ]; then
     echo
     echo "🔴 MISPLACEMENT CHECK COULD NOT RUN (awk exit $moved_rc) — this verdict"

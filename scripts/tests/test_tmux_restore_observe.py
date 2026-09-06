@@ -374,6 +374,38 @@ def test_post_without_a_baseline_refuses_rather_than_capturing_half_the_evidence
     assert "no baseline" in r.stderr
 
 
+def test_a_capture_that_wrote_NOTHING_is_refused_not_reported_as_written(tmp_path):
+    """🟢 Claim 9 asserted this behaviour and nothing pinned it — deleting the
+    guard left the suite green. An empty capture followed by `wrote <path>` is
+    the instrument lying about its own output, which is the one thing it must
+    never do. Driven by making the capture's destination unwritable."""
+    obs = tmp_path / "obs"
+    obs.mkdir()
+    res = tmp_path / "resurrect"
+    res.mkdir()
+
+    # A read-only obs dir: mkdir -p succeeds (it exists), the capture redirect
+    # fails, so the file is empty-or-absent and `pre` must refuse.
+    obs.chmod(0o555)
+    try:
+        env = dict(
+            os.environ,
+            PATH=f"{_stub_bin(tmp_path)}:{os.environ['PATH']}",
+            TMUX_RESTORE_OBSERVE_DIR=str(obs),
+            TMUX_RESURRECT_DIR=str(res),
+            TMUX_RESTORE_PLAN=str(tmp_path / "none.json"),
+            TMUX_RESTORE_LOG=str(tmp_path / "none.log"),
+        )
+        r = subprocess.run(["bash", str(SCRIPT), "pre"],
+                           capture_output=True, text=True, env=env, timeout=180)
+    finally:
+        obs.chmod(0o755)
+
+    assert r.returncode != RC_CLEAN, r.stdout + r.stderr
+    assert "wrote " not in r.stdout, (
+        f"reported a successful write for a capture that produced nothing:\n{r.stdout}")
+
+
 def test_an_unknown_subcommand_is_an_error_not_a_silent_success(tmp_path):
     r = _run(["observe-everything"], tmp_path)
     assert r.returncode == RC_USAGE, r.stdout + r.stderr
