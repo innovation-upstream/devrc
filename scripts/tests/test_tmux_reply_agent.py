@@ -737,7 +737,7 @@ def test_an_unmeasurable_server_id_reads_as_empty(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 7. The unit ships DISABLED, and carries what the child needs.
+# 7. The unit is ARMED (it shipped disabled), and carries what the child needs.
 # --------------------------------------------------------------------------- #
 def home_nix() -> str:
     return HOME_NIX.read_text()
@@ -754,6 +754,13 @@ def test_the_agent_unit_IS_ARMED():
     every queued reply from ever executing while the server kept accepting them
     and the UI kept looking healthy — a silent reopening of the loop rank 32
     closed, which is exactly the shape a config guard exists to catch.
+
+    🔴 BUT THE FLAG IS NOT A LIVE KILL SWITCH, AND THIS GUARD MUST NOT BE READ AS
+    ONE. Flipping it `false` and shipping does NOT stop a RUNNING agent: the unit
+    definition is emitted unconditionally, so the flag only removes `[Install]`,
+    and `sd-switch` reads that as a CHANGED unit and plans Stop/Start. What this
+    pins is the DECLARED state at next login. Stopping it now is
+    `systemctl --user stop tmux-reply-agent`, on both hosts.
 
     What this agent delivers is arbitrary command execution as the operator on
     this host. Building it and ARMING it were deliberately separated so the write
@@ -879,10 +886,22 @@ def test_the_wanted_by_guard_can_SEE_an_inverted_flag():
     # 🔴 THE FLAG CONTROL MUTATES IN THE DIRECTION THAT IS NOW THE HAZARD.
     # It used to flip false -> true (arming by accident); with the agent armed
     # the accident to catch is the reverse — a revert to `false`, which disarms
-    # the host half while the server keeps accepting writes. Left in its old
-    # direction this `replace` would match nothing, `flipped` would equal `src`,
-    # and the control would assert `"true" == "true"` about the UNMUTATED file:
-    # green, and blind. That is why the assertion below is `== "false"`.
+    # the host half while the server keeps accepting writes.
+    #
+    # ⚠ RETRACTED, and left here because the retraction is the useful part. The
+    # commit that inverted this control claimed the OLD direction would have gone
+    # "green and blind" — asserting `"true" == "true"` about an unmutated file.
+    # That was FALSE, and an audit measured it: `assert flipped != src` was
+    # ALREADY on the line below before the flip, and `enableTmuxReplyAgent =
+    # false` occurs zero times in the armed file, so the stale direction failed
+    # LOUDLY on exactly that assertion. Reverting it and re-running gives
+    # `1 failed`, not a pass.
+    #
+    # So the inversion is still right — a control should mutate toward the live
+    # hazard, and the failure message here now names what actually broke — but it
+    # was never load-bearing against a silent pass. Do not re-derive the stronger
+    # claim: the `!= src` line is what makes a stale direction impossible, and it
+    # is the thing to preserve if this control is ever rewritten again.
     flipped = src.replace("  enableTmuxReplyAgent = true;",
                           "  enableTmuxReplyAgent = false;")
     assert flipped != src, "the flag declaration this control mutates was not found verbatim"
@@ -933,9 +952,9 @@ def test_the_unit_does_not_wire_the_DND_defeating_failure_toast():
     bypass is justified by a MEASURED rate of about one firing in nine days.
 
     This unit restarts on failure and polls every few seconds, so any sustained
-    condition — the surface not armed, which is the state it ships in — would
-    fire a DND-bypassing toast on every restart and burn down the one alert
-    channel that has to keep its meaning.
+    condition — the surface not armed, which since arming means the pod's secret
+    was REMOVED — would fire a DND-bypassing toast on every restart and burn down
+    the one alert channel that has to keep its meaning.
     """
     unit = nix_units.strip_nix_comments(
         nix_units.unit_source("systemd.user.services.tmux-reply-agent", home_nix()))
