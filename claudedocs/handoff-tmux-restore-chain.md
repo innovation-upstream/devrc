@@ -116,9 +116,42 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
 
 ## Next steps (ranked)
 1. **Reboot and observe.** The only test that closes both open investigations above;
-   everything else is simulation. Right after login run
-   `journalctl --user -u tmux-session-restore.service -b` and compare
-   `tmux list-windows -a | wc -l` against the plan's entry count.
+   everything else is simulation. **The pre-reboot baseline is already on disk** at
+   `~/.cache/tmux-restore-observe/pre-latest.txt`. After the reboot, run **one command**:
+   ```bash
+   ~/workspace/devrc/scripts/tmux-restore-observe.sh post
+   # rc 0 clean · 1 race/misplacement · 2 usage · 3 could-not-decide · 4 windows missing · 5 no workspace at all
+   ```
+   A copy of the script sits beside the baseline at
+   `~/.cache/tmux-restore-observe/tmux-restore-observe.sh` (written by `pre`) in case the branch is not merged yet. It is a READER — it adds no
+   boot-path unit, on purpose: three defects in this arc came from changing a boot
+   path nobody had observed.
+
+   🔴 **What it compares, and why not the obvious things.** The discriminator is
+   `(session, window_index)` against **the layout that was actually replayed** — the
+   newest `tmux_resurrect_*.txt` older than the boot, resolved at `post` time. Two
+   earlier designs were built and MEASURED WRONG on this host; both are recorded in
+   the script header so nobody re-derives them:
+   - **not duplicate window NAMES** — `automatic-rename-format` is the cwd basename,
+     so repeated `(session, name)` pairs are the designed steady state. Measured: 9
+     such groups in a healthy live workspace, and a name-keyed verdict returned
+     `RACE EVIDENCE` on a *perfect* restore.
+   - **not the baseline's window COUNT** — continuum autosaves every 15 min and the
+     reboot is unscheduled, so a count captured hours earlier describes a layout that
+     is not the one replayed. Measured: 56 → 55 within two hours of a baseline.
+
+   Because the expectation is derived from the replayed layout rather than the
+   baseline, **the baseline itself does not go stale** — it supplies only the previous
+   `boot_time` (to prove a reboot happened) and the host identity, neither of which
+   drifts. ⚠ **The cached SCRIPT copy is a different matter**: only `pre` writes it, so
+   after any change to the script it is stale until `pre` runs again. Re-run `pre` if
+   the branch has moved since the baseline was taken (`cmp` it against
+   `scripts/tmux-restore-observe.sh`); otherwise it is not required.
+
+   🔴 **Its refusals are the load-bearing part.** Same `boot_time` ⇒ INCONCLUSIVE, never
+   "no race". A baseline from the *other host* ⇒ INCONCLUSIVE. No tmux server at all ⇒
+   rc 5 `TOTAL RESTORE FAILURE`, not a shrug. And rc 0 says in its own output that a
+   clean boot is ONE negative sample of an unguarded timing assumption, not a closure.
    forcing: none
 2. **Run bare `claude` windows inside tmux** so a closed window detaches instead of
    vanishing. Touches no repo file — an operator habit, or an i3 binding in

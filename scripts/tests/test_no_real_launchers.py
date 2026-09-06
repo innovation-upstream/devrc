@@ -245,7 +245,7 @@ ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
         {"airvpn-menu", "keylog-spin-capture.sh",
          "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py",
-         "syshealth", "tmux-reply-agent"},
+         "syshealth", "tmux-reply-agent", "tmux-restore-observe.sh"},
         "verb-split rather than record-only — see the systemctl tests below. "
         "run-tests.sh is a THIRD case, re-justified rather than absorbed: its "
         "only occurrences of the name are GUARD 7's accounting, which counts "
@@ -301,7 +301,19 @@ ACKNOWLEDGED_UNSTUBBED = {
         "TMUX_AND_NOTHING_ELSE walks the agent's AST and asserts its spawn "
         "argv[0] set is exactly {tmux_bin}, with both controls watched (clean "
         "tree passes; the injected call site fails with that test's own "
-        "message). Do not restore this entry without that pin"),
+        "message). Do not restore this entry without that pin. "
+        "tmux-restore-observe.sh (added 2026-09-06) is the SECOND on the VERB "
+        "ground and is justified separately rather than absorbed into "
+        "syshealth's sentence: its single call site is `systemctl --user show "
+        "tmux-session-restore.service -p …`, and `show` is on "
+        "nolaunch.SYSTEMCTL_READ_VERBS, so the verb-splitting stub passes it "
+        "through as a read. The whole script is a READER by construction — it "
+        "exists to observe the post-boot restore without perturbing it — and "
+        "`test_tmux_restore_observe.py::test_every_systemctl_call_site_in_the_"
+        "script_uses_a_READ_verb` pins EVERY occurrence's verb against "
+        "SYSTEMCTL_READ_VERBS itself, with a positive control proving the "
+        "extractor can see a mutating verb, so this justification goes red the "
+        "moment the script grows one"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
          "notify-failure.sh", "playwright-nixos", "resume-state.sh",
