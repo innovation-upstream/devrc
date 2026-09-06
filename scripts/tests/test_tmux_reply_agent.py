@@ -1963,3 +1963,75 @@ def test_the_agent_SHELLS_OUT_TO_TMUX_AND_NOTHING_ELSE():
         "mention of `systemctl` on exactly this basis. A new argv[0] here is invisible to "
         "that ledger (it asserts a FILE set, and this file is already in it), so this is the "
         "only place the addition can be seen. Do not relax it to make a call site pass.")
+
+
+def test_an_EMPTY_pane_current_path_does_not_collapse_the_readback(monkeypatch):
+    """🔴 A WINDOW TMUX ALREADY CREATED WAS BEING REJECTED BY A `.strip()`.
+
+    `NEW_WINDOW_FORMAT` is `#{pane_id}\\t#{session_name}\\t#{pane_current_path}`.
+    The read-back did `out.strip().splitlines()[0].split("\\t")` — and `.strip()`
+    removes a TRAILING TAB, so a well-formed three-field line whose last field is
+    empty arrives as TWO fields and fails the length check. The window exists by
+    then: the caller gets an error, a stray window is left behind, and a retry
+    would make a second one.
+
+    MEASURED as an intermittent real-tmux failure, 3 occurrences across ~12 runs
+    of `test_the_EXACT_session_still_works`, one on a completely unmutated tree,
+    with wall times within 0.5 s of the control — so not a load flake. The
+    observed string `'%2\\tscratch20'` is byte-identical to `'%2\\tscratch20\\t'`
+    after `.strip()`, which is what identified the mechanism.
+
+    🔴 AND THE PARSE IS ONLY HALF OF IT. With the fields split correctly,
+    `landed_path` is `""`, and `same_directory("", cwd)` does NOT compare empty
+    against cwd — `os.path.realpath("")` returns the AGENT'S OWN cwd, so the
+    check would silently compare the wrong directory and usually refuse. An
+    unreadable path is "not readable yet", NOT "tmux fell back to the wrong
+    directory", and the two must not share a code path.
+
+    This drives `run_tmux` directly rather than through the tmux stub, because
+    the stub composes its own third field and cannot express an EMPTY one — the
+    exact value under test.
+    """
+    calls = []
+
+    def fake_run_tmux(args):
+        calls.append(args)
+        if args[0] == "new-window":
+            # Well-formed, three fields, last one EMPTY. Note the trailing tab.
+            return 0, "%2\tscratch20\t\n", ""
+        if args[0] == "display-message":
+            return 0, str(pathlib.Path.home()) + "\n", ""
+        raise AssertionError(f"unexpected tmux call: {args}")
+
+    monkeypatch.setattr(AGENT, "run_tmux", fake_run_tmux)
+    pane, err = AGENT.open_window(str(pathlib.Path.home()), "scratch20")
+
+    assert not err, (
+        f"a three-field read-back whose last field is empty was rejected: {err!r}. "
+        "The window already exists at this point, so this is a lost window plus a "
+        "misleading error, not a refusal.")
+    assert pane == "%2", pane
+    assert any(a[0] == "display-message" for a in calls), (
+        "an empty pane_current_path must be RE-READ for that pane, not treated as a "
+        "directory mismatch — `os.path.realpath('')` is the agent's own cwd, so the "
+        "same_directory check would compare something nobody asked about.")
+
+
+def test_an_UNREADABLE_pane_current_path_still_REFUSES(monkeypatch):
+    """The other half, so the fix above cannot become "accept anything".
+
+    If the re-read ALSO comes back empty the directory is genuinely unverifiable,
+    and this agent presses Enter — so it must refuse rather than type into a pane
+    whose location nothing confirmed.
+    """
+    def fake_run_tmux(args):
+        if args[0] == "new-window":
+            return 0, "%2\tscratch20\t\n", ""
+        if args[0] == "display-message":
+            return 0, "\n", ""
+        raise AssertionError(f"unexpected tmux call: {args}")
+
+    monkeypatch.setattr(AGENT, "run_tmux", fake_run_tmux)
+    pane, err = AGENT.open_window(str(pathlib.Path.home()), "scratch20")
+    assert pane == "", pane
+    assert "directory" in err.lower(), err

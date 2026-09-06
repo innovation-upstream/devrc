@@ -570,12 +570,39 @@ def open_window(cwd: str, tmux_session: str = "") -> tuple[str, str]:
     if rc != 0:
         return "", (err or f"tmux exited {rc}")
 
-    fields = (out.strip().splitlines() or [""])[0].split("\t")
+    # 🔴 SPLIT THE LINE BEFORE STRIPPING IT. `out.strip()` removes a TRAILING
+    # TAB, so a well-formed three-field line whose last field is empty —
+    # `#{pane_current_path}` is empty until the pane's process cwd is readable —
+    # arrives here as TWO fields and fails the length check below. The window
+    # EXISTS by then: the caller got an error, a stray window was left behind,
+    # and a retry would have made a second one. Measured as an intermittent
+    # real-tmux failure, 3 occurrences in ~12 runs, the reported string
+    # byte-identical to the good line after `.strip()`. Strip only the line
+    # ending; strip the FIELDS individually afterwards.
+    lines = out.splitlines() or [""]
+    fields = lines[0].split("\t")
     if len(fields) != 3:
         return "", f"tmux did not report the new window's identity (got {out.strip()!r})"
     pane, landed_session, landed_path = (f.strip() for f in fields)
     if not pane.startswith("%"):
         return "", f"tmux did not report a pane id for the new window (got {pane!r})"
+
+    # 🔴 EMPTY IS "NOT READABLE YET", NOT "THE WRONG DIRECTORY" — and the two must
+    # not share a code path. `os.path.realpath("")` returns THIS PROCESS'S cwd, so
+    # handing an empty value to same_directory() below compares a directory nobody
+    # asked about and usually refuses, with a message naming a fallback that never
+    # happened. Re-read the path for this specific pane instead; one extra call, in
+    # the rare case only.
+    if not landed_path:
+        rc2, out2, _ = run_tmux(["display-message", "-p", "-t", pane,
+                                 "#{pane_current_path}"])
+        if rc2 == 0:
+            landed_path = (out2.splitlines() or [""])[0].strip()
+    if not landed_path:
+        # Still unreadable. This agent presses Enter, so an unverifiable location
+        # is a refusal, not a shrug.
+        return "", ("tmux did not report the new window's directory, so where it "
+                    "landed could not be verified")
 
     # 🔴 REFUSE ON A MISMATCH RATHER THAN TYPE INTO IT. Both checks are about one
     # thing: tmux resolved the target to something other than what was asked for,
