@@ -23,9 +23,12 @@ instead of it.
 write routes sit behind a FAIL-CLOSED wrapper that answers 503 until
 CLAWGATE_TERMINAL_TOKEN is set on the POD; and this unit is not wired into the
 user manager's default target until `enableTmuxReplyAgent` is set true in
-`nix/home.nix`. Neither implies the other, and both are deliberately off in the
-change that introduced them. A 503 is therefore this agent's NORMAL state, logged
-once and backed off from — never an error.
+`nix/home.nix`. Neither implies the other. Both were deliberately off in the
+change that introduced them, and BOTH ARE NOW ON — the secret is provisioned and
+the flag is true, so this agent is LIVE and does execute what the queue hands it.
+A 503 is still this agent's NORMAL state whenever the pod's secret is removed
+(that is how the surface is disarmed), logged once and backed off from — never
+an error.
 
 🔴 AT MOST ONCE, NEVER AT LEAST ONCE. A retried `send-keys` runs a command twice.
 The server's claim moves a row out of `pending` permanently, so a write this agent
@@ -791,11 +794,13 @@ def main(argv: list[str]) -> int:
     token = resolve("CLAWGATE_TERMINAL_TOKEN", CONF_FILE)
     if not token:
         # 🔴 A CONFIGURATION ERROR THAT CANNOT SELF-HEAL, so this one exits rather
-        # than backing off. It is also the state this ships in: arming the
-        # surface means provisioning that secret on the pod AND handing this host
-        # a copy, and neither has been done. The unit is not wired into the user
-        # manager's default target until `enableTmuxReplyAgent` is true, so this
-        # exit is what an operator sees if they start it by hand before arming.
+        # than backing off. It was the state this shipped in; arming meant
+        # provisioning that secret on the pod AND handing this host a copy, and
+        # both have since been done, so on an armed host reaching here means the
+        # host's copy has GONE — ~/.claude/clawgate.env rewritten, or the unit
+        # started under an environment that cannot read it — not that the feature
+        # is unbuilt. The unit is wired into the user manager's default target
+        # only while `enableTmuxReplyAgent` is true.
         log(f"no CLAWGATE_TERMINAL_TOKEN in the environment or {CONF_FILE} — "
             "the terminal write surface is not armed on this host; refusing to poll")
         return 2

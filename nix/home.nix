@@ -142,13 +142,16 @@ let
   # wired into `default.target`; the unit definition is always emitted, so it can
   # be started by hand regardless.
   #
-  # 🔴 IT SHIPS **false**, AND THAT IS THE POINT OF THE WHOLE SHAPE — not caution
-  # about an unfinished feature. What this agent delivers is `tmux send-keys`
-  # followed by Enter, i.e. arbitrary command execution as the operator on this
-  # host, driven by a route on a LAN NodePort that has no human auth. The operator
+  # 🔴 THIS IS NOW **true** — THE AGENT IS ARMED, AND WHAT IT DELIVERS IS ARBITRARY
+  # COMMAND EXECUTION AS THE OPERATOR ON THIS HOST. `tmux send-keys` followed by
+  # Enter, driven by a route on a LAN NodePort that has no human auth. The operator
   # took that decision deliberately, with the blast radius stated; what was ALSO
   # decided is that building it and ARMING it are separate acts, so the write path
-  # can be merged, deployed, read and audited before it can execute anything.
+  # was merged, deployed, read and audited across seven rounds while this flag was
+  # still false and it could execute nothing. It shipped `false` for exactly that
+  # reason — that ordering is history now, not a live guard, and the SHAPE it left
+  # behind is what still matters: setting this back to `false` is a one-line,
+  # reviewable disarm of the host half, independent of the pod's secret.
   #
   # 🔴 TWO INDEPENDENT SWITCHES, AND NEITHER IMPLIES THE OTHER. Arming needs
   # (1) CLAWGATE_TERMINAL_TOKEN provisioned into the POD's secret — until then the
@@ -167,7 +170,7 @@ let
   # ONLY from the machine it lives on, so a workbench-only agent would leave every
   # laptop pane permanently unanswerable. The queue is keyed on the host label, so
   # two agents claiming disjoint host scopes cannot collide.
-  enableTmuxReplyAgent = false;
+  enableTmuxReplyAgent = true;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
@@ -3801,10 +3804,11 @@ in
   # either host's tmux socket, and the alternative (an inbound port, or an ssh
   # credential inside a pod on an unauthenticated LAN surface) is strictly worse.
   #
-  # 🔴 SHIPPED DISABLED. `enableTmuxReplyAgent` is false — see its comment above
-  # for the two independent switches that arm this and why building it and arming
-  # it were deliberately separated. The unit below EXISTS on both hosts and is
-  # wired into nothing.
+  # 🔴 ARMED. `enableTmuxReplyAgent` is true — see its comment above for the two
+  # independent switches that arm this and why building it and arming it were
+  # deliberately separated. The unit below is wanted by `default.target` on both
+  # hosts and RUNS; it executes what the queue hands it. It shipped disabled and
+  # was armed only after the server half was deployed and audited.
   #
   # 🔴 Type = "simple", NOT the oneshot-plus-timer shape its two siblings use, and
   # the difference is the cadence. A ~5s poll cannot be a timer: the user manager
@@ -3876,8 +3880,8 @@ in
       ];
     };
     Install = {
-      # 🔴 SHIPPED DISABLED — see enableTmuxReplyAgent. A `default.target` want,
-      # not `timers.target`: this is a resident service, not a timer.
+      # 🔴 ARMED — see enableTmuxReplyAgent. A `default.target` want, not
+      # `timers.target`: this is a resident service, not a timer.
       WantedBy = lib.optionals enableTmuxReplyAgent [ "default.target" ];
     };
   };

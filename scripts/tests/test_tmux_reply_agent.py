@@ -38,11 +38,13 @@ nobody would notice:
      proves the stub tmux and the stub server can observe anything at all. Every
      "no send-keys happened" assertion below is meaningless without it.
 
-⚠ THE AGENT SHIPS DISABLED and cannot be exercised on a live host at all: the
-server's routes answer 503 until CLAWGATE_TERMINAL_TOKEN is provisioned, and the
-unit is not wired into `default.target` until `enableTmuxReplyAgent` is true.
-That is why these tests drive the script directly against stubs rather than
-asserting anything about a running system.
+⚠ THE AGENT SHIPPED DISABLED AND IS NOW ARMED — `enableTmuxReplyAgent` is true —
+but that changes NOTHING about how these tests are built. They still drive the
+script directly against stubs rather than asserting anything about a running
+system: a test that reached the live agent would be sending keystrokes into the
+operator's real panes. The two switches remain independent — the server's routes
+answer 503 until CLAWGATE_TERMINAL_TOKEN is provisioned on the POD, and the unit
+is wired into `default.target` only while `enableTmuxReplyAgent` is true.
 """
 from __future__ import annotations
 
@@ -741,12 +743,22 @@ def home_nix() -> str:
     return HOME_NIX.read_text()
 
 
-def test_the_agent_unit_SHIPS_DISABLED():
-    """🔴 THE CENTRAL CLAIM OF THIS CHANGE, ASSERTED AGAINST THE CONFIGURATION.
+def test_the_agent_unit_IS_ARMED():
+    """🔴 THE CENTRAL CLAIM OF THE ARMING CHANGE, ASSERTED AGAINST THE CONFIGURATION.
+
+    This guard used to pin the flag `false` and is now pinned `true`, and the
+    SYMMETRY is the point rather than a weakening: what it has always enforced is
+    that the armed state is a deliberate, reviewed edit in BOTH directions. While
+    it read `false`, arming meant editing this test; now that it reads `true`,
+    DISARMING means editing this test. An accidental revert to `false` would stop
+    every queued reply from ever executing while the server kept accepting them
+    and the UI kept looking healthy — a silent reopening of the loop rank 32
+    closed, which is exactly the shape a config guard exists to catch.
 
     What this agent delivers is arbitrary command execution as the operator on
     this host. Building it and ARMING it were deliberately separated so the write
-    path could be merged, deployed and audited before it could execute anything.
+    path could be merged, deployed and audited before it could execute anything;
+    that separation did its job across seven audit rounds and is now history.
 
     The flag is read through the comment-stripping reader, not a substring
     search: this file's blocks quote directives verbatim in prose, so a raw
@@ -754,18 +766,19 @@ def test_the_agent_unit_SHIPS_DISABLED():
     that exact failure once left a guard green over a deleted unit.
     """
     src = nix_units.strip_nix_comments(home_nix())
-    assert "enableTmuxReplyAgent = false;" in src, (
-        "the terminal-write agent's master switch is not false. Arming this is an "
-        "operator act, deliberately separate from shipping it: it needs "
-        "CLAWGATE_TERMINAL_TOKEN provisioned on the POD *and* this flag flipped, and "
-        "neither implies the other.")
-    assert "enableTmuxReplyAgent = true;" not in src
+    assert "enableTmuxReplyAgent = true;" in src, (
+        "the terminal-write agent's master switch is not true. Disarming is an operator "
+        "act and a reviewed edit, not a drive-by revert: with this false the unit is "
+        "wanted by nothing, every reply typed in the web UI queues for ever, and nothing "
+        "in the server or the UI says so.")
+    assert "enableTmuxReplyAgent = false;" not in src
 
 
-def test_the_agent_unit_is_declared_even_though_it_is_disabled():
-    """The SERVICE must exist on both hosts even while nothing wants it, so an
-    operator arming the surface can start it by hand and watch it before wiring
-    it into the target. The `Install.WantedBy` is what the flag gates."""
+def test_the_agent_unit_is_declared_independently_of_the_flag():
+    """The SERVICE definition is emitted unconditionally; only `Install.WantedBy`
+    is gated. That is what let an operator start it by hand and watch it before
+    it was wired into the target, and it is what makes disarming a matter of the
+    unit no longer being WANTED rather than no longer existing."""
     src = home_nix()
     assert nix_units.declares("systemd.user.services.tmux-reply-agent", src)
     unit = nix_units.strip_nix_comments(
@@ -806,13 +819,22 @@ def _wanted_by_expr(nix_src: str) -> tuple:
     return flag.group(1), cond, targets
 
 
-def test_the_agent_unit_IS_WANTED_BY_NOTHING_as_shipped():
+def test_default_target_wants_the_agent_and_ONLY_via_the_bare_flag():
     """🔴 THE CENTRAL CLAIM, PINNED AS AN EXPRESSION RATHER THAN AS SUBSTRINGS.
 
-    Two facts together determine that nothing wants this unit, and BOTH are
-    asserted: the condition is the BARE flag (not a negation, not a wider
-    expression), and the flag is `false`. A mutant that changes either is a
+    Two facts together determine that `default.target` wants this unit, and BOTH
+    are asserted: the condition is the BARE flag (not a negation, not a wider
+    expression), and the flag is `true`. A mutant that changes either is a
     different string here.
+
+    🔴 THE CONDITION ASSERTION IS THE HALF THAT DID NOT CHANGE MEANING WHEN THE
+    FLAG FLIPPED, AND IT IS THE MORE IMPORTANT HALF. Pinning the bare flag is
+    what keeps the flag the ONLY thing deciding whether the agent runs: a
+    disjunction like `(enableTmuxReplyAgent || isNixOS)` would want the unit on
+    every host regardless of the switch, so setting the flag `false` would no
+    longer disarm anything. That mutant mentions the flag's name and passes a
+    word-pinning guard, which is why the whole condition is normalised and
+    compared as one string.
 
     🔴 DETERMINISTIC, AND THERE IS DELIBERATELY NO `nix eval` BESIDE IT. A first
     draft added one as "confirmation". It PASSED on the dev host and turned the
@@ -833,10 +855,11 @@ def test_the_agent_unit_IS_WANTED_BY_NOTHING_as_shipped():
         f"the WantedBy condition is `{cond}`, not the bare flag. Anything else — a negation, a "
         "disjunction, a different flag — can want this unit while still mentioning the flag's "
         "name, which is exactly how the previous guard was walked past.")
-    assert flag == "false", (
-        f"enableTmuxReplyAgent is `{flag}`. As shipped it must be false: starting this unit means "
-        "arbitrary command execution as the operator on this host, and arming it is a separate "
-        "operator act.")
+    assert flag == "true", (
+        f"enableTmuxReplyAgent is `{flag}`. The agent is ARMED: with this false the unit is "
+        "wanted by nothing, and every reply typed in the web UI queues and is never executed "
+        "— silently, because the server still accepts the write. Disarming is a deliberate "
+        "operator act and edits this assertion with it.")
     assert targets == '[ "default.target" ]', targets
 
 
@@ -853,10 +876,17 @@ def test_the_wanted_by_guard_can_SEE_an_inverted_flag():
         "the inverted-flag mutant reads identically to the shipped condition; this guard cannot "
         "see the one mutation that would start the agent on both hosts")
 
-    flipped = src.replace("  enableTmuxReplyAgent = false;",
-                          "  enableTmuxReplyAgent = true;")
-    assert flipped != src
-    assert _wanted_by_expr(flipped)[0] == "true"
+    # 🔴 THE FLAG CONTROL MUTATES IN THE DIRECTION THAT IS NOW THE HAZARD.
+    # It used to flip false -> true (arming by accident); with the agent armed
+    # the accident to catch is the reverse — a revert to `false`, which disarms
+    # the host half while the server keeps accepting writes. Left in its old
+    # direction this `replace` would match nothing, `flipped` would equal `src`,
+    # and the control would assert `"true" == "true"` about the UNMUTATED file:
+    # green, and blind. That is why the assertion below is `== "false"`.
+    flipped = src.replace("  enableTmuxReplyAgent = true;",
+                          "  enableTmuxReplyAgent = false;")
+    assert flipped != src, "the flag declaration this control mutates was not found verbatim"
+    assert _wanted_by_expr(flipped)[0] == "false"
 
 
 def test_the_unit_PATH_carries_tmux_and_python():
