@@ -12,8 +12,8 @@ and any instruction it gave.** So after your delta lands, the document asserts B
 readings at once, and a reader meets whichever comes first in the file. That is
 almost always the OLD one, because appends go to the bottom.
 
-MEASURED, `datapacket-talos` `claudedocs/handoff-draft-reaper-bug.md`, 2026-09-03 →
-2026-09-06:
+MEASURED, in `<datapacket-talos>/claudedocs/handoff-draft-reaper-bug.md`, 2026-09-03
+→ 2026-09-06:
 
 - A block told the next session that a `Skipped …` log count should be **non-zero**
   and that non-zero was "the fence working". This was **backwards** — zero is the
