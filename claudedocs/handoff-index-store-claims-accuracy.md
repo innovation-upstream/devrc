@@ -22,71 +22,52 @@ reading, and per the protocol no field was written and no task was created.
 
 ## State now
 
-**RANK 1 (the `seed.sh` hard-guard) IS STILL IN FLIGHT AS `devrc#1304`, NOT MERGED.**
-Branch `fix/seed-refuse-pod-overwrite`, head `d7c4c266`. **Round 3 ran and was NOT CLEAN, so
-the ladder continues and a ROUND 4 delta audit is owed after the fixes below.** No gate tier
-has been run on this branch and no merge was attempted.
+🔴 **RANK 1 IS CLOSED. `devrc#1304` MERGED — squash `c5a445d8`**, verified by CONTENT on
+`origin/main` (the NAME-CHECK guard, `exit 10`, the `printf` probe arm, `dash` in both
+`gateTools` and `REQUIRED_TOOLS`, and main's `tmux` all present after the conflict
+resolution). Never by ancestry: a squash makes the branch head a non-ancestor forever.
 
-- **What it does** (unchanged). A PRE-FLIGHT before the tar: for exactly the paths in
-  `$staged_list`, ask the pod whether it holds different bytes; refuse **exit 8, pushing
-  nothing**, and name them. `--allow-overwrite` proceeds and still prints what it replaced.
-  The header's `🔴 THE LOCAL STORE IS AUTHORITATIVE` — false since the cutover — is corrected.
-- **Why bytes, not mtime** (unchanged): two copies cannot be ordered, so ANY difference means a
-  derivative would overwrite the authority. No clock needed.
-- **Round 1 found a 🔴 in the guard itself** — the probe emitted a line only for files the pod
-  HAS, so "the pod holds none of them" and "the probe never ran" were one observation. Fixed:
-  every path is answered (hash / `ABSENT` / `UNREADABLE`), a short reply is exit 9.
-- **Round 2 refuted a round-1 claim in both halves** — `-I{}` does NOT disable xargs's input
-  quote parsing, and `awk '{print $2" "$1}'` truncated the join key at the first blank, turning
-  the guard into a confident FALSE REFUSAL. Fixed: `-d '\n'` both sides, TAB-separated key,
-  `join -t <tab>`.
-- 🔴 **ROUND 3 (this session) IS NOT CLEAN — both lenses reported, both returned findings.**
-  Dispatched blind against `ec16cce8..d7c4c266`. Full evidence in the Open-investigations
-  blocks below.
-- **Lens 1 (shell semantics) — five findings.** Headline: the TAB key round 2 introduced is
-  itself undelimited, and the pod's `/bin/sh` is **dash**, whose `echo` interprets `\t`/`\n`/`\c`
-  while every test runs under bash.
-- 🔴 **Lens 2 (are the new tests real?) — round 2's own claims all held.** All four verified
-  TRUE and re-run, not asserted: all **three** new tests are RED at base (claim 1 *understated*
-  it — it called the DIFFERS test an anti-blindness assertion, and it is also a genuine
-  regression test); the mutation matrix (a)–(d) all **KILLED, each by the named guard's own
-  message**; **723 collected / 723 passed** across two independent runs (357s, 385s);
-  pre-existing coverage intact (7 tests, all four behaviours green). This is the first round
-  whose predecessor's claims survived scrutiny.
-- 🔴 **But lens 2 found TWO SURVIVING MUTANTS — new guards with no test.** `MUTANT F` (make the
-  local hash side silently drop quoted paths while still exiting 0, leaving `answered==staged`)
-  **survived all 46 seed tests**; the QUOTE test asserts only that the run did not crash, so
-  nothing pins that the quoted path was ever in the compared population. `MUTANT H` (revert this
-  delta's `|| [ $? -eq 1 ]` to the exact `|| :` its own comment condemns) **survived all 46**.
-- **Claims measured FALSE this round:** the commit's claim that the key survives any path
-  (false for TAB and for a leading space — reproduced INDEPENDENTLY by both lenses), that
-  `UNREADABLE` always lands in the clobber set (false), and that the `--help` `awk` "cannot
-  drift as the header changes" (false — one blank line truncates it).
+**Gated on the MERGED tree `7430701a`** (base `f0b9c474`), both tiers, all four legs:
+dev-host pytest 21874 collected / 21871 passed / **0 failed**; dev-host node 1449/1449;
+sandbox `pytests` 21867 / 21864 / **0 failed**; sandbox `nodetests` 1449/1449.
+⚠ The sandbox pytests leg is **1 red then 1 green on the byte-identical derivation** — see
+the flake block below. That is non-determinism, not an unqualified green, and it is stated
+that way on purpose.
 
-**Corrections to this doc, both measured 2026-09-05:**
-- 🔴 **Rank 8 is CLOSED, not open.** `test_a_body_file_written_by_a_heredoc_on_the_same_line_is_read`
-  **passes** on `origin/main` (`1 passed in 0.29s`). `8c27c5cf` (#1303) fixed it — "a stale file
-  at the `--body-file` path shadowed the heredoc about to overwrite it — the verdict was a
-  property of the HOST." The dev-host tier's known-red is gone; it is no longer a reason to
-  discount a red there.
-- **Both Tekton checks are GREEN on `d7c4c266`** — `/repos/.../commits/<sha>/status` reports
-  `state: success` for `tekton/devrc-pytests` and `tekton/devrc-nodetests`. ⚠ `strict` is false,
-  so that is a claim about the PR BRANCH and says nothing about the merged tree.
-- The base clone was **1 commit behind** `origin/main` at session start; fast-forwarded to
-  `f887e958` before any write. `main` has moved 2 commits past the PR's branch point
-  (`d9f0836c` tmux-restore, `f887e958` this doc), both touching files disjoint from the PR —
-  but `d9f0836c` adds a new test file, so the merged tree's per-target floors will move.
+**What shipped, in one line:** the pre-flight now REJECTS staged paths it cannot compare
+safely (exit 10, nothing pushed) rather than trying to survive them — because the
+comparison moves paths as TEXT between two shells that disagree about escaping.
 
-🔴 **NOT VERIFIED, and not claimed:**
-- **Neither gate tier has run on `d7c4c266`** — not `scripts/gate.sh --tier both`, not the two
-  sandbox derivations, not on the merged tree.
-- **Nothing has touched the LIVE pod.** Every test drives a fake `kubectl` whose `exec` rewrites
-  `/data` to a temp dir and runs the command locally under **bash** — a harness that
-  structurally cannot tell "works on the pod" from "works on this host", which is exactly the
-  gap round 3 fell into.
-- The round-3 lens-1 auditor measured the pod's toolchain by running `python:3.12-slim` (the
-  `Dockerfile`'s own `FROM`) under local docker. **It did NOT verify the deployed pod's image
-  matches that Dockerfile**; if the tag drifted, the `/bin/sh = dash` finding does not transfer.
+**Six audit rounds. Five returned findings. FOUR of those defects were introduced by the
+PREVIOUS round's fix, and THREE of the four were mine.** That is the headline, not the
+guard. Detail in the Gotchas section.
+
+- `d7c4c266` → round 3 (blind, two lenses) → `b878cd12` → round 4 → `40e8b361` → round 5 →
+  `d2ce8a7d` → round 6 → `ad1f1e12` → merge of main → `7430701a` → squash `c5a445d8`.
+- **Round 3** (two blind lenses, neither told what the other hunted): the pod's `/bin/sh` is
+  **dash**, whose `echo` interprets `\t`/`\n`/`\c`, while every test runs the probe under
+  bash — a SILENT clobber route. Both lenses independently reproduced a TAB false refusal.
+  Round 2's own claims all verified TRUE, and one was *understated*.
+- **Round 4**: the name check had the hole its own separator makes — a newline splits one
+  path into two lines that each pass. Measured: `rejected=0`, `differing=0`, `seed: OK`,
+  rc 0, pod's newer copy replaced.
+- **Round 5**: I had deleted the `\.md$` anchor on false reasoning; restored.
+- **Round 6**: I had DELETED a test while claiming to add one.
+- Round 6 found no silent clobber and no plausible false refusal — the agreed stop
+  condition — so the ladder ended there.
+
+**Knowingly shipped residue, labelled in the code, not papered over:**
+- 6 newline shapes still name only the trailing half of the split (DIAGNOSTIC only — the
+  refusal itself is correct in every case; 0 newline shapes are accepted).
+- `sha256sum --` on both sides is unreachable while the policy rule holds, so its mutants
+  SURVIVE by construction. Labelled as defence-in-depth, NOT counted as covered.
+
+🔴 **NOT VERIFIED, and not claimed:** nothing in six rounds touched the LIVE pod. Every test
+drives a fake `kubectl` that runs the probe on THIS host under bash. The dash measurements
+were made against the `Dockerfile`'s own base image (`python:3.12-slim`) under local docker,
+NOT against the deployed image — if the tag has drifted, the `/bin/sh = dash` premise does
+not transfer. The `~12%` coverage limit in seed.sh's header (depth-3+ paths, 15 per-scope
+`.git` repos) is likewise unre-measured.
 
 ## Open investigations — live diagnosis state
 
@@ -337,58 +318,82 @@ has been run on this branch and no merge was attempted.
 - **Next probe:** add the `FROM` pin; decide separately whether a docker-backed test is worth
   its cost.
 
+### `test_git_repo_isolation.py::test_live_cotenants_sees_another_process_in_the_repo` is LOAD-FLAKY on the sandbox tier
+- **Symptom + exact repro:** the sandbox `pytests` derivation goes red with `failed=1` while
+  the dev-host tier on the same tree is green. Re-running the identical derivation passes.
+  `nix build <repo>#checks.x86_64-linux.pytests --no-link --print-build-logs`
+- **Observed (with values):** `scripts/tests/test_git_repo_isolation.py:1496` —
+  `assert live_cotenants([git_dir]) == []` returned `['126220:git']` on a **brand-new tmp
+  repo**, i.e. a live `git` process whose cwd is inside a repo created microseconds earlier.
+  Run 1: `SANDBOX_PYTESTS_NIX_RC=1`, `RESULT: FAIL (exit=1)`, 21867 collected / 21863 passed
+  / **1 failed**. Run 2, byte-identical derivation: `RC=0`, `RESULT: PASS`, 21867 / 21864 /
+  **0 failed**.
+- **Ruled out:** "devrc#1304 caused it" — the file is **byte-identical to `origin/main`**
+  (`git diff --stat origin/main HEAD -- <file>` empty) and the PR touches four files, none
+  of them this one. via: command
+- **Ruled out:** "it is deterministic" — same derivation, 1 red / 1 green. via: measurement
+- **Ruled out:** "it reproduces on the dev host" — 10 consecutive runs of that single test,
+  unloaded, all passed in 0.63–1.34s. Absence at low load is NOT evidence of absence.
+  via: measurement
+- **Leading hypothesis, NOT confirmed:** `_mkrepo` (`:250-258`) runs `git init` / `add` /
+  `commit` via `subprocess.run`, which waits only for the PARENT. `git commit` can fork a
+  detached `git gc --auto` whose cwd is the new repo; the co-tenant scan then sees it. Load
+  widens the window, which would explain dev-host-green / sandbox-red. A theory that
+  explains the failure is not evidence for it — this was never reproduced.
+- **Next probe:** the discriminating one is to make `_mkrepo` deterministic rather than to
+  re-run: `git -c gc.auto=0 …` on all three commands (or `git init` with
+  `core.logAllRefUpdates=false` + an explicit `gc.auto=0` in `_env()`), then re-run the
+  sandbox tier under deliberate load. If the flake survives that, the gc theory is wrong and
+  the next suspect is the fsmonitor/credential helper. **Do not "fix" it by re-running** —
+  a flaky gate trains everyone to click through.
+
 ## Next steps (ranked)
 
-1. **Fix round 3's findings and run ROUND 4 on `devrc#1304`.** Both lenses reported; both
-   returned findings (blocks above). Round 2's own claims all HELD — the new work is (i) the
-   host/pod escaping divergence, (ii) the TAB/leading-space key, (iii) `--help` blank-line
-   drift, (iv) three missing tests for guards whose mutants survived. Fix once, as one batch,
-   then re-audit the DELTA — a round returning findings cannot end the ladder. Decide
-   minimal-vs-structural using the Leading hypothesis in the first block.
-   forcing: gate — this repo's audit gate is the only pre-merge review, and three of three
-   rounds have each found real defects.
+1. **Fix the `test_git_repo_isolation` load flake** (block above). It is inherited, not from
+   #1304, and it fails the tier a merge is judged on. `git -c gc.auto=0` in `_mkrepo` is the
+   one-line candidate; confirm by reproducing under load FIRST, since the mechanism is a
+   hypothesis.
+   forcing: gate — it reds the sandbox tier non-deterministically, and the only reason
+   #1304 merged is that a human re-ran it and read both results.
 
-2. **Gate `devrc#1304` and merge.** `scripts/gate.sh --tier both` AND
-   `nix build .#checks.x86_64-linux.{pytests,nodetests}` ONE AT A TIME, on the MERGED tree, with
-   the base sha named in the claim. ⚠ Read the runners' `RESULT:` lines, never a piped exit
-   code. ⚠ Any red measured above ~load 20 on this box needs a control first. Note the
-   dev-host tier's known-red is GONE (#1303), so a red there now means something.
-   forcing: gate — nothing else gates a merge in this repo; `main` is protected in name only.
+2. **Decide `cairn-cutover.py` P3.** It invokes `seed.sh` WITHOUT `--allow-overwrite`
+   (`cairn-cutover.py:1379-1382`) and its shippable set is ADD + SUPERSEDES + MERGED, where
+   SUPERSEDES/MERGED are BY DEFINITION entries whose pod bytes differ — so the pre-flight
+   refuses and P3 cannot complete. 🔴 **#1304 makes this WORSE, not better:** the new
+   NAME-CHECK is a second refusal P3 can hit. Either pass `--allow-overwrite` (it IS a
+   reviewed delta with a rollback set already on disk) or declare P3 dead post-cutover.
+   forcing: regression — a shipped code path that can never complete.
 
-3. **Decide `cairn-cutover.py` P3.** Either pass `--allow-overwrite` at
-   `cairn-cutover.py:1379-1382` or declare P3 dead post-cutover. Its shippable set is
-   ADD + SUPERSEDES + MERGED, and SUPERSEDES/MERGED are by definition entries whose pod bytes
-   differ — so the pre-flight refuses and P3 cannot complete.
-   forcing: regression — a shipped code path that can never complete, made worse by guidance
-   that is false for its only programmatic caller.
-
-4. **Fix the opencode blindness in `scripts/lib/clawgate_handoff.sh`.** Diagnosed and recorded
-   (squash `13775144`), NOT fixed. It reads only `CLAUDE_CODE_SESSION_ID`;
-   `grep -c OPENCODE_SESSION_ID` is **0**. Detached opencode ⇒ exit 3 forever; NESTED opencode
-   inherits the outer Claude session's id ⇒ exit 0 with **another session's tasks**.
+3. **Fix the opencode blindness in `scripts/lib/clawgate_handoff.sh`.** Diagnosed and
+   recorded (squash `13775144`), NOT fixed. It reads only `CLAUDE_CODE_SESSION_ID`;
+   `grep -c OPENCODE_SESSION_ID` is **0**. Detached opencode ⇒ exit 3 forever; NESTED
+   opencode inherits the outer Claude session's id ⇒ exit 0 with **another session's tasks**.
    forcing: regression — the nested path silently misattributes today.
 
-5. **Run `scripts/ship.sh`.** Still never run in this effort. The **laptop is UNVERIFIED**, so a
-   session there may still be told to write new entries into the dead mirror. Read every
-   per-host line, not the final verdict.
-   forcing: regression — a stale prescription on one host reintroduces the defect this effort
-   closed.
+4. **Run `scripts/ship.sh`.** Still never run in this effort, and #1304 changed
+   `flake.nix` + `run-tests.sh`, so both hosts are now behind on the gate toolchain
+   (`dash`). The **laptop is UNVERIFIED**. Read every per-host line, not the final verdict.
+   forcing: regression — a host without `dash` on PATH now FATALs the gate rather than
+   skipping, which is the intended behaviour and will look like a break.
+
+5. **Verify the dash premise against the DEPLOYED pod image**, read-only. Everything shipped
+   rests on `/bin/sh` being dash there; that was measured against the `Dockerfile`'s `FROM`
+   under local docker, never against the running pod.
+   forcing: none
 
 6. **Decide the token allowlist for the 2 remaining local-only entries**
-   (`civitai-app-requests/app-requests.md`, `civitai-developer-docs/apps.md`). Widening it means
-   editing the k8s secret and deleting the pod — an access-control change and an outage window.
+   (`civitai-app-requests`, `civitai-developer-docs`). `cairn create` answers `not-found`;
+   neither scope is in this token's allowlist. Widening it means editing the k8s secret and
+   deleting the pod.
    forcing: none
 
-7. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: **re-measured 2026-09-04, 0**
-   occurrences of `policy:` in `service_recon.py` on `origin/main`, so it stands exactly as
-   written — `subsystem-index/SKILL.md:148` tells the caller to read a policy nobody names.
-   🟡6: `--template` over an EXISTING entry prints the first-ever-file template and exits 0
-   silently, destroying an `OPEN:` bullet.
+7. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
+   **0** occurrences of `policy:` in `service_recon.py` on `origin/main`. 🟡6: `--template`
+   over an EXISTING entry prints the first-ever-file template and exits 0 silently.
    forcing: none
 
-8. **~~`main` is RED on `test_clawgate_task_interview_guard.py`~~ — CLOSED, do not re-open.**
-   Re-measured 2026-09-05: it PASSES on `origin/main` (`1 passed in 0.29s`). `8c27c5cf` (#1303)
-   fixed it. Kept as a numbered entry only so the ranks above keep their identity for
+8. **~~`main` is RED on `test_clawgate_task_interview_guard.py`~~ — CLOSED.** Re-measured
+   2026-09-05: passes. `8c27c5cf` (#1303) fixed it. Kept numbered so ranks stay stable for
    `claim-work --slug-for`.
    forcing: none
 
@@ -631,28 +636,91 @@ has been run on this branch and no merge was attempted.
   `scripts/diagnose-nix-disk.sh`). Nothing here touched them. This session worked on `main` for
   reads only and did every write in the worktree `~/workspace/devrc-ho-r3`.
 
+- **Two corrections to this doc, measured 2026-09-05, recorded HERE so a future `State now`
+  replace cannot drop them.** (1) The old rank 8 — *"`main` is RED on
+  `test_clawgate_task_interview_guard.py`"* — is **CLOSED**: it passes on `origin/main`
+  (`1 passed in 0.29s`), fixed by `8c27c5cf` (#1303), "a stale file at the `--body-file`
+  path shadowed the heredoc about to overwrite it — the verdict was a property of the HOST".
+  The dev-host tier has no known inherited red any more, so a red there now means something.
+  (2) Tekton posts on a PR head but `required_status_checks` is **null** and
+  `enforce_admins` **false** — re-measured at merge time. Nothing gates; the two-tier local
+  run IS the gate.
+
+- 🔴 **A SPLICE-BASED EDIT TO A TEST FILE IS A COVERAGE-DELETING OPERATION.** Replacing one
+  test by cutting between two string anchors silently removed a 4-param test that sat
+  between them. The suite went 741 → 739 while the commit message said it ADDED a test, and
+  the `printf`→`echo` mutant on the ABSENT arm — the actual silent-clobber route — then
+  survived the whole repo. **Check the COLLECTED COUNT across a test-file edit, never just
+  read the diff**; a deletion inside a large file looks like context.
+- 🔴 **FOUR OF SIX ROUNDS FOUND A DEFECT THE PREVIOUS ROUND'S FIX INTRODUCED.** Each fix
+  picked a delimiter and the next round's input contained it: space (0x20) → TAB (0x09) →
+  newline (the list's own separator). **The escape from that regress was BOUNDING THE INPUT
+  DOMAIN, not hardening the parser one more time.** When a fix is "handle this character
+  too", ask whether the domain can be constrained instead — 0 of 373 live entries needed any
+  of it.
+- 🔴 **MY OWN MUTATION TESTING MISSED TWO OF MY DEFECTS, AND THE TELL WAS AN `or`.** The
+  newline test asserted `SCOPE/na in stderr **or** "me.md" in stderr`; that `or` made
+  deleting the `\.md$` anchor invisible. **An assertion with an `or` across two observations
+  is one assertion weaker than it reads.**
+- 🔴 **A COMMENT THAT EXPLAINS WHY A CLAUSE IS REDUNDANT IS A CLAIM — AND MINE WAS WRONG.**
+  I deleted the `\.md$` anchor arguing "`find` only emits `*.md`". True of BASENAMES; the
+  grep runs on LINES, and a newline split produces a line that is not a basename. Measured
+  after restoring: the refusal names 2 halves instead of 1.
+- 🔴 **`gh pr view` IS THE AUTHORITY ON CONFLICTS, AND MY LOCAL CHECK LIED.** A local
+  test-merge came back clean because the integration branch ALREADY contained my resolution
+  — I was testing the resolved tree against main, not the PR branch against main. GitHub
+  said `CONFLICTING/DIRTY` and was right.
+- 🔴 **`rerere` auto-applied a resolution and I verified it by hand anyway** — union of both
+  sides, both justification comments present, both files parsing. main had added `tmux` to
+  `REQUIRED_TOOLS`/`gateTools` for EXACTLY the reason this PR added `dash`.
+- 🔴 **A TEST THAT SKIPS ITSELF IS WORSE THAN NO TEST, and 5 of mine did.** Without `dash`
+  on PATH the whole dash class skipped silently. Fixed by adding it to `REQUIRED_TOOLS` +
+  `gateTools` (same argument the `zsh` entry already carried, one layer out) and by making
+  the helper FAIL rather than skip.
+- 🔴 **THE PIPE TRAP FIRED TWICE MORE.** `gh pr merge … | tail` printed `MERGE_CMD_RC=0`
+  over a refusal, and a later `gh pr merge` returned **rc 1** for a failure that was ONLY
+  about deleting a local branch held by a worktree — the remote merge had succeeded.
+  **Read the message, then verify the outcome by content.**
+- ⚠ **A `grep` that finds nothing exits 1**, so a trailing `grep -c` in a verification
+  script makes the whole run "fail". Two of this session's background jobs reported failure
+  for exactly that reason while every underlying check was green.
+- **`--help` claimed "cannot drift" TWICE and was wrong both times** — first a `sed` line
+  range, then an `awk` stopping at the first non-comment line (which a BLANK line is: 61 →
+  31 lines, `--allow-overwrite` gone). Now tested, because a claim that has been wrong twice
+  with no test is a claim nobody is checking.
+- **Two independent blind lenses beat one auditor run twice over.** Round 3's lenses found
+  the same TAB defect by different routes without being told what the other sought; that
+  agreement was the round's strongest evidence.
+- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
+  this session, positive control confirming the board was reachable (2 links for a different
+  session). A wrong session id answers 200/empty exactly like a session that touched
+  nothing, so this is not a clean reading; no field written, none created.
+- ⚠ **Environment, unchanged:** the shared `devrc` clone still holds another session's
+  uncommitted WIP (`output.txt`, `nix/system/apply-nebula-relay.sh`,
+  `nix/system/check-nebula-relays.sh`, `scripts/diagnose-nix-disk.sh`). Untouched. All work
+  here was done in worktrees; both have been removed and the base clone fast-forwarded.
+
 ## How to verify
 
 ```bash
-# the pod is dash and its `echo` eats escapes — no cluster needed
-grep -n '^FROM' ~/workspace/devrc/scripts/subsystem-store-api/Dockerfile      # python:3.12-slim
-dash -c 'echo "ABSENT  $1"' _ 'sc/tab\there.md' | cat -A                      # real TAB
-bash -c 'echo "ABSENT  $1"' _ 'sc/tab\there.md' | cat -A                      # literal \t
-dash -c 'printf "ABSENT  %s\n" "$1"' _ 'sc/tab\there.md' | cat -A             # the fix
+# the guard is on origin/main (by CONTENT — a squash is never an ancestor)
+git -C ~/workspace/devrc show origin/main:scripts/subsystem-store-api/seed.sh \
+  | grep -c 'NAME-CHECK'                                      # 2
+git -C ~/workspace/devrc show origin/main:flake.nix | grep -c 'pkgs.dash'    # 1
+git -C ~/workspace/devrc show origin/main:flake.nix | grep -c 'pkgs.tmux'    # 1 (main's, kept)
+git -C ~/workspace/devrc show origin/main:scripts/run-tests.sh | grep -c 'zsh tmux dash'  # 1
 
-# --help drifts on a blank line
-S=$(mktemp); git -C ~/workspace/devrc show d7c4c266:scripts/subsystem-store-api/seed.sh > $S
-bash $S --help | wc -l                                     # 61
-awk 'NR==33{print ""} {print}' $S > $S.b
-bash $S.b --help | wc -l                                   # 31
-bash $S.b --help | grep -c 'allow-overwrite'               # 0
+# the dash asymmetry the guard exists for — no cluster needed
+grep -n '^FROM' ~/workspace/devrc/scripts/subsystem-store-api/Dockerfile   # python:3.12-slim
+dash -c 'echo "ABSENT  $1"' _ 'sc/tab\there.md' | cat -A                   # a REAL tab
+bash -c 'echo "ABSENT  $1"' _ 'sc/tab\there.md' | cat -A                   # literal \t
+dash -c 'printf "ABSENT  %s\n" "$1"' _ 'sc/tab\there.md' | cat -A          # the fix
 
-# rank 8 is closed, not open
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py -q \
-  -k test_a_body_file_written_by_a_heredoc_on_the_same_line_is_read   # 1 passed
+# --help states four rules and reaches Usage
+bash ~/workspace/devrc/scripts/subsystem-store-api/seed.sh --help | grep -c 'Four rules'  # 1
+bash ~/workspace/devrc/scripts/subsystem-store-api/seed.sh --help | grep -c 'allow-overwrite'  # 2
 
-# the PR head's checks, per-sha (never `gh pr checks`)
-gh api /repos/innovation-upstream/devrc/commits/d7c4c266a20a99ba5e33df08f1fcd34b32122874/status \
-  --jq '.state, [.statuses[].context]'
+# the flake: run it under load and watch for a red that a re-run clears
+nix build ~/workspace/devrc#checks.x86_64-linux.pytests --no-link --print-build-logs \
+  > /tmp/sb.log 2>&1; echo "rc=$?"; grep -E 'RESULT:|TOTAL collected' /tmp/sb.log
 ```
