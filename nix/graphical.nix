@@ -369,6 +369,49 @@ let
     json = true;
     interval = 15;
   };
+  # gamemode (BOTH hosts): the toggle for i3's empty `mode "game"` binding mode.
+  #   in game mode -> ` 󰊗 GAME `  Critical
+  #   otherwise    -> ` 󰊗 `       Idle, ALWAYS VISIBLE
+  #
+  # 🔴 WHY THIS PILL EXISTS AT ALL. `$mod` is Mod1 — ALT — so i3 holds a global
+  # X11 grab on ~60 Alt combos and a fullscreen game never receives any of them.
+  # An EMPTY binding mode is the only native way to make i3 release those grabs
+  # (a guard on the `exec` does not: i3 has already eaten the key), and i3 has no
+  # per-window `bindsym` criteria, so the mode has to be switched deliberately.
+  # The way IN is this pill; the way OUT is `Pause`/`Scroll_Lock` (bound INSIDE
+  # the mode) or this pill again. There is deliberately no default-mode keybind
+  # to enter — that would be one more Alt grab for no gain.
+  #
+  # NOT hide-at-zero, unlike every count pill: this block is the only entrance,
+  # so an invisible idle state would be a toggle with no off-state affordance —
+  # the same reason `notifsBlock` renders a bare bell at zero.
+  #
+  # signal 18: the next free real-time signal. 10-14, 16 and 17 belong to
+  # `SIGNALS` in bar-status-poll (airvpn/clawgate/mail/alerts/civitai/media/
+  # telemetry) and 15 to notifs, so 18 is the first unused. It is repainted by
+  # the script's own `pkill -RTMIN+18` on both paths — the click below, and the
+  # `mode "game"` escape bindings in nix/i3/config.nix. `interval` is a BACKSTOP
+  # only, for a mode change made by some other route (`i3-msg mode game` by hand,
+  # the SSH rescue path); the signal is what makes it feel instant.
+  #
+  # i3status-rust does NOT pass `$BLOCK_BUTTON` to custom block commands (see
+  # rigcontrolBlock above), so the toggle is a `[[block.click]]` handler. It
+  # re-invokes the SAME script with `--toggle` rather than open-coding the
+  # i3-msg dance in nix: one deployed file, and the flip logic lands somewhere a
+  # unit test can reach it.
+  #
+  # BOTH hosts — purely local (one i3-msg to the running WM), no poller, no
+  # cache, no network. The laptop's `$mod` is the same Alt.
+  gamemodeBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-gamemode";
+    json = true;
+    interval = 30;
+    signal = 18;
+    click = [
+      { button = "left"; cmd = "${scriptsDir}/i3status-gamemode --toggle"; }
+    ];
+  };
 
   blocks =
     [ memoryBlock diskBlock netBlock cpuBlock loadBlock temperatureBlock ]
@@ -378,7 +421,7 @@ let
     ++ lib.optionals (!isLaptop) [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock ]
     ++ [ timeBlock ]
     ++ lib.optionals (!isLaptop) [ claudeRunsBlock rigcontrolBlock ]
-    ++ [ notifsBlock ];
+    ++ [ gamemodeBlock notifsBlock ];
 in
 lib.mkIf isNixOS {
   programs.i3status-rust = {
@@ -473,6 +516,15 @@ lib.mkIf isNixOS {
   };
   home.file.".config/i3status-rust/scripts/i3status-claude-runs" = {
     source = ../scripts/i3status-claude-runs;
+    executable = true;
+  };
+  # gamemode: see `gamemodeBlock` above. UNCONDITIONAL, matching the block's
+  # presence in the unconditional half of `blocks`. It is ALSO the block's own
+  # left-click target (`… --toggle`), so a narrower gate here would ship a pill
+  # that renders on a host where clicking it does nothing — and unlike a broken
+  # `command`, a broken click is invisible until someone tries it mid-game.
+  home.file.".config/i3status-rust/scripts/i3status-gamemode" = {
+    source = ../scripts/i3status-gamemode;
     executable = true;
   };
   # load: see `loadBlock` above. UNCONDITIONAL, matching the block's presence in
