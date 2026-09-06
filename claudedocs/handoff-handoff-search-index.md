@@ -15,8 +15,9 @@ Give the handoff corpus a queryable index, because git gave it redundancy but no
 424+ docs / 8.6 MB across four repos were readable only by knowing the slug.
 
 ## State now
-🔴 **THE EFFORT IS COMPLETE AND LIVE. Everything below supersedes the earlier "NOT deployed"
-status, which was true when written and is now false.**
+🔴 **THE MACHINERY IS COMPLETE AND LIVE. THE CONSUMER IS INERT.** Both halves are true and
+they are separate claims — the earlier "NOT deployed" status is still superseded, and
+"live" was never the same as "used".
 
 - **Merged:** `devrc#1209` (`45930d644`) index · `#1244` (`1b769b64b`) cairn I/O-stall classifier ·
   `#1264` (`baa95854`) this doc · `#1267` (`d86b4e45`) incomplete-read delete authority ·
@@ -36,6 +37,13 @@ status, which was true when written and is now false.**
   handoff-index-sync.service`.
 - **Query path live:** `backend=postgres`, `indexed_sections=4651`. 🔴 `backend=` IS the
   discriminator; a silent fall-back to `memory` renders identically otherwise.
+- 🔴 **NEW 2026-09-06 — RANK 1 IS ANSWERED AND THE ANSWER IS NO.** In the 34 h between `#1295`
+  merging and this measurement, **1 of 14 `/resume` runs across BOTH hosts** invoked
+  `handoff_search.py`, and that one was not the step firing. Nothing calls the index. The
+  diagnosis is placement, not motivation — full evidence in "Open investigations" below.
+  **No fix is built**; the proposed one is rank 1 and awaits operator direction on its shape.
+- **Claim held:** `handoff-search-index-1` (`claim-work --release handoff-search-index-1` when
+  the rank-1 fix lands or is abandoned).
 
 ## Open investigations — live diagnosis state
 
@@ -101,14 +109,70 @@ status, which was true when written and is now false.**
   back" with "not everything came back" (the conflation this module was burned by three times)
   and would hide readable docs from `--offline` search over one bad blob. via: code
 
+### RESOLVED — does `/resume` actually query the index? 1 of 14 runs, and that one was not the step firing
+- **Answer:** no. The index is live, correct and unused. This was the effort's own rank-1 test —
+  *"the only real test of whether the effort was worth building; everything else is machinery"* —
+  and it fails at the call site, not in the machinery.
+- **Symptom + exact repro:** count `/resume` runs since `#1295` merged (2026-09-04T17:11:50Z)
+  against those that actually invoked the tool, on both hosts. 🔴 **A MENTION IS NOT AN
+  INVOCATION** — the deployed `SKILL.md` body *contains* the command string, so
+  `grep -l handoff_search` over transcripts matched **24** files and is entirely false. Only a
+  Bash `tool_use` whose `command` contains `handoff_search.py --` counts. See "How to verify".
+- **Observed (with values):**
+  - **14 `/resume` runs** (ran `resume-state.sh`): **8** workbench, **6** laptop.
+  - **1 invocation**, workbench session `e3dc23e9`. Laptop: 6 runs, **0** invocations — its one
+    `grep`-level match has 0 Bash invocations, verified.
+  - 🔴 **That one hit was driven by the staleness alarm, not by the step.** The `SKILL` block told
+    that session its loaded copy was 1 commit behind; it then read the step off `origin/main` and
+    stated it was following that text rather than the copy it had loaded. Its result — 3 hits,
+    best `rank=1.1667`, generic gotcha sections — it judged irrelevant, finding nothing any prior
+    session had ruled out. **Yield to date: 0.**
+  - **The 6 workbench non-firing runs all met the trigger.** All 6 ran `claim-work` (1–20×) and 5
+    made edits (2–52 `Edit`/`Write` calls) — actively working ranked items, not reporting and
+    waiting. (The six docs are client-repo topics and are deliberately not named here; this repo
+    is public. Re-derive them from the transcripts with the "How to verify" query.)
+  - **5 of those 6 handoffs carry an `## Open investigations` section** — precisely the case the
+    step exists for.
+  - 🔴 **THE DISCRIMINATOR:** step 3's *sibling* check `git log --since=<doc-date>` — same trigger,
+    same block, different tool — fired **0 of 6**. Step 4's `cairn recall` — a numbered,
+    unconditional step with a fenced command — fired **5 of 6**.
+- **Ruled out:** that the non-firing is correct restraint (the step is conditional on "before
+  working any open item", and a resume that reports and waits never reaches it). All six went
+  well past that: every one ran `claim-work`, five made edits. via: measurement
+- **Ruled out:** that the sessions lacked open items to work — 5 of 6 resumed a doc with an
+  `## Open investigations` section. via: measurement
+- **Ruled out:** that the deployed skill was stale in those runs, i.e. that they never saw the
+  step — the `SKILL` block reports CURRENT, and the one session that WAS behind is the only one
+  that fired. via: measurement
+- **Ruled out:** that it is specific to `handoff_search` (tool unfamiliarity, cost, output
+  distrust) — the co-located `git log --since` check, an ordinary command every session already
+  uses, fired 0/6 in the same block. via: measurement
+- **Leading hypothesis:** **placement and conditionality, not motivation.** An agent executing
+  this skill reliably performs numbered unconditional steps and reliably skips conditionals buried
+  in a step's narrative prose, however loud the 🔴. Two independent conditional checks in step 3:
+  0/6. One unconditional numbered step next door: 5/6.
+- **Next probe:** none needed to establish the finding. To validate the *fix*, promote the query
+  to its own numbered step and re-run "How to verify" after ~10 further runs; the prediction is
+  that it tracks `cairn recall`'s 5/6, not step 3's 0/6.
+- **Residual, NOT measured:** whether the index, once actually queried, *yields* anything. n=1
+  query returned nothing useful, which is no evidence either way about hit quality. Adoption and
+  yield are separate questions and only the first is answered.
+
 ## Next steps (ranked)
-1. **Watch whether `/resume` actually uses it.** The index is live and wired, but nothing yet
-   shows a session's behaviour changed. This is the only real test of whether the effort was
-   worth building; everything else is machinery. Re-read after a few `/resume` runs.
+1. **Promote the index query out of step 3's prose into its own unconditional numbered step,
+   beside `cairn recall`** — `claude/skills/resume/SKILL.md` (devrc). The only change the
+   evidence supports, and `cairn recall` is the working control for it. 🔴 **AWAITING OPERATOR
+   DIRECTION ON THE SHAPE, and the cost is real:** unconditional means it runs on every resume
+   including ones with nothing open, so it needs a query the skill can form without an open item
+   — the handoff's own topic is the obvious candidate, but that is a choice, not a detail. Do NOT
+   "fix" this by making the step-3 prose louder; loudness is the variable that was already
+   falsified. ⚠ This is also an eviction question — `SKILL.md` is byte-capped, so promoting text
+   means evicting text in the same commit.
    forcing: none
 2. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
    `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire
-   test above fails the day someone does it, which is the intended signal.
+   test `test_through_main_the_residual_is_recorded_and_the_report_is_true` fails the day someone
+   does it, which is the intended signal. ⚠ Ranks below 1: machinery on a consumer nothing calls.
    forcing: none
 3. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
    operator sees THAT rows were deleted, not WHICH. 🔴 The fix belongs at `main` as an input
@@ -167,21 +231,70 @@ status, which was true when written and is now false.**
   where a data field should be; handoff docs are prose throughout, so it would fire on every doc
   and be disabled.
 
+- 🔴 **MEASURING ADOPTION OF A SKILL STEP: A MENTION IS NOT AN INVOCATION, AND THE OVERCOUNT IS
+  ~24×.** The deployed `SKILL.md` body contains the very command string you are looking for, so
+  every session that merely LOADED the skill matches `grep -l`. Measured 2026-09-06: 24 transcript
+  files matched the string, **1** contained a real invocation. Match on a Bash `tool_use`
+  `command` field, and tighten the needle to `handoff_search.py --` — a bare `handoff_search`
+  also catches the `grep` you are running to do the measurement, which is how the first pass
+  reported 2 hits instead of 1. **Generalises to any "is this step being followed" question.**
+- 🔴 **AN UNCONDITIONAL NUMBERED STEP IS FOLLOWED; A CONDITIONAL BURIED IN PROSE IS NOT — AND
+  🔴 EMPHASIS DOES NOT CLOSE THE GAP.** Measured across 6 sessions in one skill on one day:
+  step 4 (`cairn recall`, numbered, unconditional, fenced) **5/6**; step 3's two embedded
+  conditional checks (`handoff_search`, `git log --since`, both fenced, both marked 🔴)
+  **0/6 each**. The variable is not the tool, not its cost and not how loudly it is marked — the
+  two step-3 checks differ from each other in every way except placement. **When a skill step is
+  not firing, move it before rewording it.**
+- 🔴 **"Live and verified" and "used" are different claims, and the gap between them is
+  invisible to every check this effort built.** Six merged PRs, both hosts converged, the timer's
+  own run green, the DB path exercised, `backend=postgres` confirmed — and 13 of 14 consumers
+  never called it. Deployment verification cannot see adoption; only reading real runs can.
+
 ## How to verify
 ```bash
-# 1. The timer's OWN run — the only thing that tests the unit's environment:
+# 1. ADOPTION — the rank-1 measurement, re-runnable. THIS HOST only; run on both.
+#    Controls, both watched to work 2026-09-06: positive = 1 hit at the real cutoff
+#    (the metric CAN be non-zero); negative = raise CUT past 2026-09-04T19:00 and it
+#    reports 0 hits with runs still 7 (it is not hardwired).
+python3 - <<'PY'
+import json, glob, os
+CUT = "2026-09-04T17:11:50"   # #1295 merge, UTC — raise this when re-measuring
+runs, hits = set(), set()
+for f in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
+    sid = os.path.basename(f)[:-6]
+    for line in open(f, errors="replace"):
+        if "resume-state.sh" not in line and "handoff_search.py --" not in line:
+            continue
+        try: r = json.loads(line)
+        except Exception: continue
+        if r.get("timestamp", "")[:19] < CUT: continue
+        c = (r.get("message") or {}).get("content")
+        if not isinstance(c, list): continue
+        for b in c:
+            if not isinstance(b, dict) or b.get("type") != "tool_use": continue
+            cmd = (b.get("input") or {}).get("command", "")
+            if not isinstance(cmd, str): continue
+            if "resume-state.sh" in cmd: runs.add(sid)
+            if "handoff_search.py --" in cmd: hits.add(sid)
+print(f"resume runs={len(runs)}  invoked handoff_search={len(hits & runs)}")
+PY
+#    2026-09-06 baseline: workbench 8/1, laptop 6/0.
+
+# 2. The timer's OWN run — the only thing that tests the unit's environment:
 systemctl --user show handoff-index-sync.service -p Result -p ExecMainStatus
 journalctl --user -u handoff-index-sync.service --no-pager -n 20
 #    expect Result=success, ExecMainStatus=0, "wrote N section row(s) … one transaction".
 
-# 2. The DB path answers (backend= is the discriminator, NOT the row count):
+# 3. The DB path answers (backend= is the discriminator, NOT the row count):
 KUBECONFIG=$KC_HOMELAB python3 ~/workspace/devrc/scripts/lib/handoff_search.py --query fsync --limit 3
 #    expect backend=postgres. backend=memory means it silently fell back and you verified nothing.
 
-# 3. The consumer is LIVE, not merely merged (readlink is the arbiter):
+# 4. The consumer is LIVE, not merely merged (readlink is the arbiter):
 readlink -f ~/.claude/skills/resume/SKILL.md          # must resolve into /nix/store
 grep -c 'handoff_search.py --offline' ~/.claude/skills/resume/SKILL.md   # must be 1
+#    🔴 This proves the text is DEPLOYED. It says NOTHING about whether it is FOLLOWED — that
+#    is check 1, and the two answered differently: deployed yes, followed 1 time in 14.
 
-# 4. No database needed for the offline path:
+# 5. No database needed for the offline path:
 python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "drift-check" --limit 2
 ```
