@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""i3status-rust custom block: the GAME MODE pill (render + its click toggle).
+
+Game mode is an EMPTY i3 binding mode (`mode "game"` in nix/i3/config.nix).
+`$mod` is Mod1 — ALT — so the default mode holds a global X11 grab on ~60 Alt
+combos and a game NEVER RECEIVES those keypresses at all. Entering an empty
+binding mode is the only native i3 mechanism that releases those grabs; see the
+long comment above `mode "game"` for the two alternatives that were rejected.
+
+  game mode active ->  ` 󰊗 GAME `  Critical (RED — unmissable, and the pill is
+                                    the way back out)
+  any other mode   ->  ` 󰊗 `       Idle (neutral, ALWAYS VISIBLE)
+  cannot measure   ->  empty block, exit 0
+
+🔴 WHY THE IDLE CASE IS NOT HIDE-AT-ZERO. Every count pill on this bar hides at
+a measured zero, and the CALM-bar rule says steady state is invisible. This
+block is the deliberate exception, for the same reason `i3status-notifs` renders
+a bare bell at zero: THE PILL IS THE ONLY WAY IN. There is deliberately no
+`bindsym … mode "game"` in the default mode (that would be one more Alt grab,
+and the operator asked for the toggle to live on the bar), so a pill that hid
+itself in the default mode would be a toggle with no off-state affordance.
+Neutral-and-visible, not invisible.
+
+🔴 SINGLE SOURCE OF TRUTH: i3 OWNS THE MODE. This block reads
+`i3-msg -t get_binding_state` and keeps NO state file. Two writers exist — the
+bar click here and the `Pause`/`Scroll_Lock` bindings inside the mode itself —
+so a shadow state file would desync the moment the operator escaped by keyboard,
+and the pill would then lie about a mode it cannot see. i3's answer is the only
+authority; there is nothing else to reconcile.
+
+FAIL-SAFE (same contract as `i3status-notifs`): any i3-msg error, timeout or
+malformed answer -> empty JSON, exit 0. A broken query must NEVER crash or wedge
+the bar. Losing the pill is survivable in a way losing the ESCAPE KEY would not
+be: `Pause` is grabbed by i3 itself and keeps working whether or not this script
+can talk to it, and `DISPLAY=:0 i3-msg mode default` over SSH is the last resort.
+An i3-msg that cannot answer also means `i3-msg mode …` could not act anyway, so
+there is no state in which a rendered pill would still be clickable.
+
+Unit-tested (pure halves only, no live i3) in scripts/tests/test_i3_game_mode.py.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+
+# nf-md-gamepad_variant (U+F0297) — verified present in JetBrainsMono Nerd Font,
+# the bar's font, by cmap lookup rather than by eyeballing a terminal.
+GLYPH = "\U000f0297"  # 󰊗
+
+#: The i3 binding mode this pill is about. Spelled ONCE here; the test derives
+#: the mode name from nix/i3/config.nix and pins it against this constant, so a
+#: rename in the i3 config cannot leave the pill watching a mode nobody enters.
+GAME_MODE = "game"
+
+#: Real-time signal that repaints this block: `pkill -RTMIN+18 i3status-rs`.
+#: MUST equal `gamemodeBlock.signal` in nix/graphical.nix and the number in the
+#: `mode "game"` escape bindings in nix/i3/config.nix — all three are pinned
+#: together by test_i3_game_mode.py, because a mismatch is silent (the mode
+#: still flips; the pill just keeps showing the old state until its interval).
+SIGNAL = 18
+
+_EMPTY = {"text": "", "state": "Idle"}
+
+
+# --------------------------------------------------------------------------- #
+# Pure / mockable logic (unit-tested against fixtures — NO i3-msg)
+# --------------------------------------------------------------------------- #
+def parse_binding_state(raw) -> str | None:
+    """`i3-msg -t get_binding_state` stdout -> the mode name, or None.
+
+    i3 4.24 answers `{"name":"default"}`. Anything else — empty output, invalid
+    JSON, a list, a missing/blank/non-string `name` — is NOT MEASURED and
+    returns None rather than being coerced into a mode name. Never raises.
+    """
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    name = obj.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return name.strip()
+
+
+def render(mode) -> dict:
+    """Pure: binding-mode name (or None) -> i3status-rust block dict.
+
+    Critical is spent ONLY on the active game mode. That is not decoration: it
+    is the state in which every Alt binding on this machine is deliberately
+    dead, so an operator who wandered away and came back needs to be able to
+    tell at a glance why nothing works.
+    """
+    if mode is None:
+        return dict(_EMPTY)
+    if mode == GAME_MODE:
+        return {"text": " %s GAME " % GLYPH,
+                "short_text": " %s " % GLYPH, "state": "Critical"}
+    return {"text": " %s " % GLYPH,
+            "short_text": " %s " % GLYPH, "state": "Idle"}
+
+
+def next_mode(mode):
+    """Pure: current binding mode -> the mode a click should switch to.
+
+    `game` -> `default`, ANY other measured mode -> `game`. None -> None, i.e.
+    a click does NOTHING when the current mode could not be read. That is the
+    honest branch: the read and the write go through the same `i3-msg`, so if
+    the read failed the write had no chance either, and guessing would let one
+    click enter game mode on a host that is already in it (a no-op) or leave it
+    on a host that is not (grabs restored mid-game, with the bar possibly hidden
+    behind a fullscreen window).
+    """
+    if mode is None:
+        return None
+    return "default" if mode == GAME_MODE else GAME_MODE
+
+
+# --------------------------------------------------------------------------- #
+# Side-effecting (i3-msg / pkill — not unit-tested directly)
+# --------------------------------------------------------------------------- #
+def _i3msg(*args, timeout=2):
+    return subprocess.run(["i3-msg", *args], capture_output=True,
+                          text=True, timeout=timeout)
+
+
+def current_mode():
+    """The live binding mode via i3-msg, or None on ANY failure."""
+    try:
+        return parse_binding_state(_i3msg("-t", "get_binding_state").stdout)
+    except Exception:
+        return None
+
+
+def refresh_bar():
+    """Repaint this block now instead of waiting for its interval."""
+    try:
+        subprocess.run(["pkill", "-RTMIN+%d" % SIGNAL, "i3status-rs"],
+                       capture_output=True, timeout=2)
+    except Exception:
+        pass
+
+
+def toggle() -> int:
+    """The bar pill's left-click: flip the binding mode, then repaint.
+
+    Returns 0 always — a click handler that errors gives the operator nothing
+    useful and i3status-rust has nowhere to show it.
+    """
+    target = next_mode(current_mode())
+    if target is None:
+        return 0
+    try:
+        _i3msg("mode", target)
+    except Exception:
+        return 0
+    refresh_bar()
+    return 0
+
+
+def main(argv) -> int:
+    if "--toggle" in argv:
+        return toggle()
+    sys.stdout.write(json.dumps(render(current_mode())) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Exception:   # a bar block must never crash loudly
+        sys.stdout.write(json.dumps(_EMPTY) + "\n")
+        sys.exit(0)

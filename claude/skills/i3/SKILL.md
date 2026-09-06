@@ -62,6 +62,16 @@ i3-msg -t get_tree | jq '.. | select(.focused? == true) | select(.window? | type
 i3-msg -t get_tree | jq '[recurse(.nodes[]?, .floating_nodes[]?) | select(.type == "workspace") | select(.name | startswith("__") | not) | {workspace: .name, windows: [recurse(.nodes[]?, .floating_nodes[]?) | select(.window | type == "number") | {class: .window_properties.class, title: (.name | if length > 60 then .[:57] + "..." else . end), focused: .focused}]}]'
 ```
 
+### Binding modes — and the `game` rescue
+`i3-msg -t get_binding_state` → `{"name":"default"}`. Two non-default modes exist:
+`resize` ($mod+r) and **`game`** — an intentionally EMPTY mode that makes i3 release its
+~60 **Alt** grabs so a fullscreen game actually receives those keys (`$mod` is `Mod1`).
+Entered by clicking the 󰊗 bar pill; left with `Pause` / `Scroll_Lock` / the pill.
+🔴 **Rescue when the bar is hidden behind a fullscreen game:** from another nebula peer,
+`ssh zach@10.42.0.30` then `DISPLAY=:0 i3-msg mode default`. Do NOT bind anything new to
+`Pause` or `Scroll_Lock` — a default-mode binding on either strands the operator (gated by
+`scripts/tests/test_i3_game_mode.py`). Design + the bar pill: the `bar` skill.
+
 ## 2. Act
 For `focus`, `move`, `workspace`, `layout`, `exec`, `mark`, `resize`, `scratch`:
 validate the target exists (query the tree first for focus/move), prefer criteria
