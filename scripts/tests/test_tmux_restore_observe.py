@@ -34,6 +34,7 @@ different: 0 clean, 1 race evidence, 3 could-not-decide, 4 windows missing.
 """
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -198,6 +199,65 @@ def test_post_without_a_baseline_refuses_rather_than_capturing_half_the_evidence
     )
     assert r.returncode == 2, r.stdout + r.stderr
     assert "no baseline" in r.stderr
+
+
+def _systemctl_verbs(text):
+    """Every `systemctl` occurrence's positional verb, in source order.
+
+    A verb is positional: the first token after the binary that is not a flag.
+    Line-based on purpose — the real call site wraps across three lines with
+    `\\`, and the verb sits on the first of them.
+
+    Only INVOCATION-shaped occurrences count: the name must be followed by
+    whitespace. The script's `reason=systemctl-show-returned-nothing` diagnostic
+    is not a call site, and the fix for it is a precise scanner rather than a
+    reworded message — rewording to dodge a scanner is how a justification stops
+    describing the tree it claims to.
+    """
+    verbs = []
+    for line in text.split("\n"):
+        for m in re.finditer(r"\bsystemctl(?=\s)", line):
+            rest = line[m.end():].split()
+            verb = next((t for t in rest if not t.startswith("-")), None)
+            verbs.append(verb)
+    return verbs
+
+
+def test_every_systemctl_call_site_in_the_script_uses_a_READ_verb():
+    """The acknowledgement in test_no_real_launchers.py rests on this.
+
+    `scripts/tmux-restore-observe.sh` is listed in ACKNOWLEDGED_UNSTUBBED for
+    `systemctl` on the VERB ground — `show` is on nolaunch.SYSTEMCTL_READ_VERBS,
+    so the verb-splitting stub passes it through as a read and it cannot start,
+    stop or restart anything. That justification becomes FALSE the moment the
+    script grows a mutating verb, and this is the test named there.
+
+    Pinned against SYSTEMCTL_READ_VERBS itself, never a copied literal.
+    """
+    from testlib import nolaunch  # noqa: PLC0415 — keep module import cheap
+
+    verbs = _systemctl_verbs(SCRIPT.read_text())
+    assert verbs, (
+        "positive control: the extractor found NO systemctl occurrence at all. "
+        "A zero here is indistinguishable from a scan wired to nothing — if the "
+        "call site was genuinely removed, drop the acknowledgement instead.")
+    # Reachability, not coverage: proves the REAL invocation is inside the
+    # scanned set, so the loop below is not passing over some other occurrence.
+    assert "show" in verbs, verbs
+    for verb in verbs:
+        assert verb in nolaunch.SYSTEMCTL_READ_VERBS, (
+            f"{verb!r} is not a read verb; the nolaunch stub blocks it and the "
+            "acknowledgement in test_no_real_launchers.py is no longer true")
+
+
+def test_the_systemctl_verb_extractor_can_SEE_a_mutating_verb():
+    """The control for the test above. Without it, a `verbs` list that silently
+    stopped resolving anything would pass the read-verb loop vacuously."""
+    from testlib import nolaunch  # noqa: PLC0415
+
+    bad = _systemctl_verbs('  raw=$(systemctl --user restart "$UNIT" 2>&1)\n')
+    assert bad == ["restart"], bad
+    assert bad[0] not in nolaunch.SYSTEMCTL_READ_VERBS
 
 
 def test_an_unknown_subcommand_is_an_error_not_a_silent_success(tmp_path):
