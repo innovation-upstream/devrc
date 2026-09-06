@@ -119,6 +119,55 @@ let
   # SSHes to the laptop), so running it on the laptop too would have each host pushing
   # a full two-host document and the two would fight over every row.
   enableTmuxSnapshotPush = true;
+  # Claude Code TRANSCRIPT feeder master switch (scripts/transcript-push.sh) — feeds
+  # clawgate's chat view. Gates ONLY whether the timer is wired into timers.target; the
+  # SERVICE definition is always emitted, so `transcript-push` can be started by hand
+  # regardless.
+  #
+  # 🔴 NOT serverMode-GATED, AND THAT ASYMMETRY WITH enableTmuxSnapshotPush ABOVE IS THE
+  # WHOLE POINT. That one is workbench-only as a CORRECTNESS requirement: its collector
+  # already reaches both hosts over ssh, so a second reporter would have the two fighting
+  # over every row. Transcripts are ordinary files on each host's OWN filesystem, readable
+  # from nowhere else, so a workbench-only unit would feed exactly half the fleet and the
+  # laptop's sessions would render as "no transcript stored" for ever. The read model is
+  # keyed on a Claude Code session id, which is globally unique, so two hosts pushing
+  # disjoint session sets cannot collide.
+  #
+  # ON from the start: the write path is a latest-per-session upsert, a bad push is
+  # rejected outright (the server 4xx's and CHANGES NOTHING, leaving the previous tail in
+  # place), and the server sweeps rows older than 7 days.
+  enableTranscriptPush = true;
+  # clawgate TERMINAL WRITE agent master switch (scripts/tmux-reply-agent) — the
+  # host half of the reply channel. Gates ONLY whether the long-running SERVICE is
+  # wired into `default.target`; the unit definition is always emitted, so it can
+  # be started by hand regardless.
+  #
+  # 🔴 IT SHIPS **false**, AND THAT IS THE POINT OF THE WHOLE SHAPE — not caution
+  # about an unfinished feature. What this agent delivers is `tmux send-keys`
+  # followed by Enter, i.e. arbitrary command execution as the operator on this
+  # host, driven by a route on a LAN NodePort that has no human auth. The operator
+  # took that decision deliberately, with the blast radius stated; what was ALSO
+  # decided is that building it and ARMING it are separate acts, so the write path
+  # can be merged, deployed, read and audited before it can execute anything.
+  #
+  # 🔴 TWO INDEPENDENT SWITCHES, AND NEITHER IMPLIES THE OTHER. Arming needs
+  # (1) CLAWGATE_TERMINAL_TOKEN provisioned into the POD's secret — until then the
+  # server's write routes answer 503 and the pod says so at boot, unconditionally
+  # and in both directions ("terminal write surface: DISABLED (fail-closed)") —
+  # and (2) this flag true, with the same secret readable on this host from
+  # ~/.claude/clawgate.env. Flipping only this one gets a unit that exits 2 saying
+  # the surface is not armed; provisioning only the secret gets a server with a
+  # live route and nobody polling it. Disarming is removing the secret, which is
+  # reversible and takes effect on the pod's next boot.
+  #
+  # 🔴 NOT serverMode-GATED, and the asymmetry with enableTmuxSnapshotPush is the
+  # same one transcript-push has. That feeder is workbench-only as a CORRECTNESS
+  # requirement (its collector already reaches both hosts over ssh, so a second
+  # reporter would fight over every row). A tmux socket, by contrast, is visible
+  # ONLY from the machine it lives on, so a workbench-only agent would leave every
+  # laptop pane permanently unanswerable. The queue is keyed on the host label, so
+  # two agents claiming disjoint host scopes cannot collide.
+  enableTmuxReplyAgent = false;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
@@ -3651,6 +3700,185 @@ in
       # correctness requirement, not scoping — two hosts each pushing a full
       # two-host document would fight over every row.
       WantedBy = lib.optionals (serverMode && enableTmuxSnapshotPush) [ "timers.target" ];
+    };
+  };
+
+  # ── CLAWGATE TRANSCRIPT READ-MODEL FEEDER (scripts/transcript-push.sh) ───────
+  # The chat view's supply. Claude Code writes one JSONL transcript per session
+  # under ~/.claude/projects/; clawgate's pod cannot see either host's filesystem
+  # (no hostPath, no hostNetwork, no nodeName), so delivery is outbound from the
+  # host exactly as the tmux read model's is.
+  #
+  # 🔴 ONE UNIT PER HOST — see enableTranscriptPush above for why this is the
+  # opposite of its sibling rather than an inconsistency with it.
+  systemd.user.services.transcript-push = {
+    Unit = {
+      Description = "Push this host's recent Claude Code transcript tails to clawgate";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      # 🔴 NO OnFailure, DELIBERATELY, and for the reason spelled out at
+      # tmux-snapshot-push: notify-failure@ toasts are wired to DEFEAT
+      # do-not-disturb, that bypass is justified by a measured ~1 firing in 9
+      # days, and a timer this frequent would fire one on EVERY tick through any
+      # sustained outage (clawgate mid-redeploy, the laptop asleep). A
+      # permanently-red alarm trains you to ignore the channel.
+      #
+      # What surfaces a dead feeder instead: this is Type=oneshot with distinct
+      # non-zero exit codes, so a persistent failure lands in the user manager's
+      # failed-unit list, which `/standup` reads. ⚠ That covers the CODES and not
+      # a unit that exits 0 while achieving nothing — which is why "nothing had
+      # changed" is a deliberate rc 0 and every other outcome is not.
+      #
+      # 🔴 AND UNLIKE ITS SIBLING, THIS ONE HAS A CONSUMER THAT SHOWS ITS OWN
+      # STALENESS. clawgate's chat view renders `fed <n> ago` from the server's
+      # received_at beside the session's own last activity, precisely so a dead
+      # feeder is visible on the page rather than only in a unit list.
+    };
+    Service = {
+      Type = "oneshot";
+      # Builder cap (120s) + two curl caps (30s each) + slack. All three inner
+      # bounds live in the script; this only has to exceed their sum, or the
+      # cgroup is killed mid-run and the failure reads as a hang rather than as
+      # whichever leg wedged.
+      TimeoutStartSec = 200;
+      Environment = [
+        # 🔴 EVERY ENTRY IS FOR THE CHILD — under systemd there is no login-shell
+        # PATH to fall back on. The script uses curl, sed (gnused), python3, and
+        # tr/cut/wc/mktemp/rm/readlink/dirname/uname/timeout (coreutils); the
+        # builder is pure stdlib Python.
+        #
+        # ⚠ DELIBERATELY SHORTER THAN THE SIBLING'S LIST. tmux-snapshot-push
+        # needs tmux/openssh/gawk because it runs a collector that reaches the
+        # other host; this reads local files and needs none of them. Copying that
+        # list wholesale would be the "trim a copied list without running the
+        # child" mistake in reverse — carrying binaries to justify later.
+        "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.curl pkgs.gnused pkgs.python3 ]}"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/transcript-push.sh";
+      X-Restart-Triggers = [
+        "${../scripts/transcript-push.sh}"
+        # The builder decides which sessions are sent and how much of each — a
+        # change there is a change to what this unit delivers, with no edit to
+        # the shell at all.
+        "${../scripts/lib/build_transcript_push.py}"
+      ];
+    };
+  };
+
+  # Every 5 minutes, which is deliberately SLOWER than the tmux feeder's 2.
+  # The tmux read model backs an at-a-glance "which pane needs me" view, where a
+  # quarter-hour of lag would answer a question nobody asked. A transcript is
+  # read after the fact — the use case is coming back to a session and reading
+  # what it did — so minutes of lag cost nothing, and the run does real work per
+  # tick (hashing up to MAX_CANDIDATES tails).
+  #
+  # The dedupe pre-flight is what makes the cadence affordable: a tick where
+  # nothing changed is one small GET and an exit 0, not a push.
+  #
+  # OnStartupSec gives one prompt run shortly after the user manager starts, so a
+  # rebooted host repopulates before anyone looks. No Persistent: that applies to
+  # OnCalendar timers, not monotonic ones.
+  systemd.user.timers.transcript-push = {
+    Unit = {
+      Description = "Periodic timer for the clawgate transcript read-model feeder";
+    };
+    Timer = {
+      OnStartupSec = "2min";
+      OnUnitActiveSec = "5min";
+    };
+    Install = {
+      # 🔴 NO serverMode GATE — both hosts, on purpose. See enableTranscriptPush.
+      WantedBy = lib.optionals enableTranscriptPush [ "timers.target" ];
+    };
+  };
+
+  # ── CLAWGATE TERMINAL WRITE AGENT (scripts/tmux-reply-agent) ────────────────
+  # The host half of clawgate's reply channel: a long-running OUTBOUND short poll
+  # that claims queued writes for this host, runs `tmux send-keys` locally, and
+  # reports the outcome. It is the return direction the two feeders above never
+  # had — and it is outbound for the same reason they are: the pod cannot see
+  # either host's tmux socket, and the alternative (an inbound port, or an ssh
+  # credential inside a pod on an unauthenticated LAN surface) is strictly worse.
+  #
+  # 🔴 SHIPPED DISABLED. `enableTmuxReplyAgent` is false — see its comment above
+  # for the two independent switches that arm this and why building it and arming
+  # it were deliberately separated. The unit below EXISTS on both hosts and is
+  # wired into nothing.
+  #
+  # 🔴 Type = "simple", NOT the oneshot-plus-timer shape its two siblings use, and
+  # the difference is the cadence. A ~5s poll cannot be a timer: the user manager
+  # would fork a process, a Python interpreter and a TCP connection 17,280 times a
+  # day for a queue that is empty almost always. A resident process holding one
+  # loop is the cheaper and simpler thing, and it is what lets a reply land within
+  # seconds of being typed — which is the entire point of the feature.
+  systemd.user.services.tmux-reply-agent = {
+    Unit = {
+      Description = "Deliver clawgate's queued terminal writes into this host's tmux panes";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      # 🔴 NO OnFailure, DELIBERATELY, and for the reason spelled out at
+      # tmux-snapshot-push: notify-failure@ toasts are wired to DEFEAT
+      # do-not-disturb, and that bypass is justified by a MEASURED rate of about
+      # one firing in nine days. This unit polls every few seconds, so any
+      # sustained condition — the surface not armed (which is the state it ships
+      # in), clawgate mid-redeploy, the laptop's network down — would fire a
+      # DND-bypassing toast on every restart and burn down the one alert channel
+      # that has to keep its meaning.
+      #
+      # What surfaces a genuinely broken agent instead: the two exit codes it can
+      # actually take (2 = no credentials, 3 = tmux unusable) are both permanent
+      # configuration faults, and StartLimit below turns a repeat of either into a
+      # FAILED unit, which `/standup` reads. Everything transient is backed off
+      # from inside the loop rather than exited on, precisely so a restart storm
+      # is not the failure mode.
+      StartLimitIntervalSec = 600;
+      StartLimitBurst = 5;
+    };
+    Service = {
+      Type = "simple";
+      Restart = "on-failure";
+      # Long enough that five restarts cannot happen inside the 600s window above
+      # unless the fault is permanent — which is what should mark the unit failed.
+      RestartSec = 60;
+      Environment = [
+        # 🔴 EVERY ENTRY IS FOR THE CHILD — under systemd there is no login-shell
+        # PATH to fall back on, and drift-check.service already paid for that
+        # lesson (it reported COULD NOT MEASURE on every run forever, from a unit
+        # that looked completely correct).
+        #
+        # The agent is pure stdlib Python plus `tmux`. It needs NEITHER curl (it
+        # uses urllib) NOR openssh/gawk (it never leaves this host) — copying
+        # tmux-snapshot-push's list would be carrying binaries to justify later.
+        # Pinned by `test_tmux_reply_agent.py::test_the_unit_PATH_carries_tmux_and_python`.
+        "PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.python3 pkgs.tmux ]}"
+        "HOME=%h"
+        # 🔴 THE SOCKET DIRECTORY, AND HERE IT IS LOAD-BEARING RATHER THAN
+        # DEFENSIVE. This host's tmux socket is at $XDG_RUNTIME_DIR/tmux-UID/,
+        # not tmux's compiled-in /tmp/tmux-UID/. tmux-snapshot-push sets this
+        # defensively — if IT cannot connect, a host is reported with an empty
+        # window list, which is silent and destructive. If THIS unit cannot
+        # connect, every delivery fails loudly and is recorded as `failed` in the
+        # audit log, which is the safe direction; the pin is here so the ordinary
+        # case works at all rather than to prevent a silent one. `%t` is the user
+        # runtime dir (/run/user/UID).
+        "TMUX_TMPDIR=%t"
+      ];
+      ExecStart = "${pkgs.python3}/bin/python3 %h/workspace/devrc/scripts/tmux-reply-agent";
+      # 🔴 THE POLICY MODULE IS A TRIGGER TOO. This is a RESIDENT service, not a
+      # timer: it imports scripts/lib/tmux_text_policy.py once at startup and then
+      # runs for weeks. Without this line, TIGHTENING the text allowlist would
+      # leave the running agent on the OLD predicate indefinitely -- a security
+      # change that appears deployed and is not, on the process that executes.
+      X-Restart-Triggers = [
+        "${../scripts/tmux-reply-agent}"
+        "${../scripts/lib/tmux_text_policy.py}"
+      ];
+    };
+    Install = {
+      # 🔴 SHIPPED DISABLED — see enableTmuxReplyAgent. A `default.target` want,
+      # not `timers.target`: this is a resident service, not a timer.
+      WantedBy = lib.optionals enableTmuxReplyAgent [ "default.target" ];
     };
   };
 

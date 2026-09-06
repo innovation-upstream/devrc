@@ -479,9 +479,26 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 #           cannot occur in. Both hosts run zsh as the login shell, and
 #           flake.nix's `gateTools` carries it for the sandbox.
 #
+# tmux:     scripts/tests/test_tmux_reply_agent.py drives a REAL tmux on a
+#           private `-L` socket, because two of the reply agent's guards CANNOT
+#           be written against a stub. A stub tmux exits 0 for everything, so it
+#           models neither rule that shipped as a defect:
+#             * `-t <name>:` PREFIX-MATCHES a session. Measured on 3.7c against
+#               the operator's own server, which holds `scratch` … `scratch20`:
+#               `-t scratch2:` with scratch2 absent returned rc 0 and opened the
+#               window in scratch20, where the agent then typed a command and
+#               pressed Enter.
+#             * `-c <path that does not exist>` also returns rc 0, with the
+#               window in $HOME — so a build or a recursive delete ran there and
+#               was reported `delivered`.
+#           Both are on the path that always presses Enter, and both were
+#           invisible to a fully green stubbed suite. Those tests FAIL rather
+#           than skip when tmux is absent, and flake.nix's `gateTools` carries
+#           it for the sandbox.
+
 # dash:     scripts/tests/test_subsystem_store_api.py
-#           (TestTheSeedProbeAnswersSurviveTheRealPodShell, 5 tests). The SAME
-#           shape as zsh above, one layer out. `seed.sh`'s pod probe runs in the
+#           (TestTheSeedProbeAnswersSurviveTheRealPodShell). The SAME shape as
+#           zsh above, one layer out. `seed.sh`'s pod probe runs in the
 #           store-api pod, whose `/bin/sh` is dash (`Dockerfile`:
 #           `FROM python:3.12-slim` -> Debian); dash's `echo` INTERPRETS
 #           backslash escapes and bash's does not. Every test in that file drives
@@ -489,14 +506,14 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 #           whole suite is structurally blind to the difference — and the
 #           difference is a SILENT one (the two sides' join keys diverge and a
 #           pod entry that DIFFERS is overwritten as though it were new).
-#           Measured 2026-09-05: without dash on PATH all 5 skipped, which is
-#           the "green having measured the one shell the defect cannot occur in"
-#           failure the zsh note describes. They FAIL rather than skip now.
+#           Measured 2026-09-05: without dash on PATH every test in that class
+#           skipped, which is the "green having measured the one shell the defect
+#           cannot occur in" failure the zsh note describes. They FAIL now.
 #
 # 🔴 `python` is listed as well as `python3` because THIS SCRIPT invokes
 # `python -m pytest`, not `python3`. Asserting only `python3` checked a binary
 # the runner never calls.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh dash)
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux dash)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
@@ -1695,7 +1712,24 @@ TARGET_FLOORS=(
   # HERMETIC_TARGETS entry because scripts/collector/claude/tests is already a
   # directory target, and movement on THIS line is the evidence the gate runs
   # the new file at all.
-  "scripts/collector/claude/tests|164"
+  #
+  # 2026-09-04, the mention-attribution fix round (devrc#1313): 223 -> 230
+  # collected, all seven in test_session_tailer.py — the dedupe key now carries
+  # the attribution (3), and the tailer gains its FIRST mapping-disclosure guard
+  # at the spool (2), plus the migration pins (2).
+  # 🔴 THE GATE FORCED THIS ONE — 230 is above the drift ceiling (floor 164 +
+  # max(60, 164/4) = 224), so the run went RED on the ceiling check with all 230
+  # PASSING, which is exactly what that check exists for: the floor had fallen
+  # 59 behind before this branch touched the target. Number copied VERBATIM from
+  # the line the gate printed on the MERGED tree (this branch merged with
+  # origin/main at f75c92d4):
+  #
+  #   Raise the TARGET_FLOORS entry to "scripts/collector/claude/tests|219"
+  #
+  # — that is the run's own count through the documented rule
+  # (230 - min(50, max(1, 230/20 = 11)) = 219), not arithmetic anyone did by
+  # hand. ⚠ ZERO new skips on this target.
+  "scripts/collector/claude/tests|219"
   "scripts/collector/i3/tests|12"
   "scripts/collector/browser-ext/tests|12"
   "scripts/collector/opencode/tests|162"

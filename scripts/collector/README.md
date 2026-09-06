@@ -52,23 +52,57 @@ tmux focus hooks   ─┼─► emit (pure shell, hot path) ─► spool/current
   Both tailers share `claude/_shared.py` (ts/project/emit/root/iter helpers) and run
   on the same 5-min `claude-activity-source` timer (both hosts).
   Layer B (`kind=session-insight`, qualitative goal/outcome/friction) is a later PR.
-- `mention_scan.py` — pure regex scanner for cross-platform **mentions** (clawgate
-  task ids, GitHub issues/PRs `owner/repo#N` / `repo#N`, ClickUp `868…` ids). No
+- `mention_scan.py` — pure regex scanner for cross-platform **mentions**. No
   I/O, no subprocess. `session-tailer.py` runs it over each session's **assistant
   text** in the same pass and emits one `source=mentions, kind=mention-detected`
-  event per distinct mention, with `platform` / `reference_id` / `url` /
-  `context` / `candidates` in the payload (unknown keys → `payload`, so **no
-  schema change**). A bare `#N` could be either a clawgate task or a GitHub
+  event per distinct mention, with `platform` / `reference_id` / `url` / `repo` /
+  `repo_source` / `context` / `candidates` in the payload (unknown keys →
+  `payload`, so **no schema change**).
+  🔴 **ITS TWO CONSUMERS DELIBERATELY SEE DIFFERENT PATTERN SETS**, selected by a
+  `profile` argument. They used to share exactly one set — the module's stated
+  guarantee was that "what the terminal underlines" and "what the telemetry
+  records" could not drift apart — and **that invariant was RETIRED on purpose**
+  (#1313). `profile="terminal"` is the **DEFAULT and the NARROW one**:
+  `scripts/mention-open.py` — the Alacritty click-to-open hint handler — passes no
+  profile at all, so the click surface, where a false positive is a wrong page
+  opening, can only widen if somebody types the word. `profile="telemetry"` is the
+  WIDER set and only this tailer asks for it, because a false positive there costs
+  one stray row in a private table. Which patterns a profile gets is assigned in
+  `PATTERN_LEDGER` — one row per compiled pattern naming its profiles, its role
+  (`detect` emits a mention, `attribute` only resolves a repo) and the literals the
+  tailer's cheap pre-filter is derived from — pinned **two-way** by
+  `scripts/tests/test_mention_scan.py`: a pattern with no entry fails, an entry
+  naming no pattern fails. 🔴 **So listing a new pattern under `_BOTH` widens what
+  the terminal underlines** — deliberately an explicit act, not a default. Read
+  `_KNOWN_FALSE_POSITIVES` first.
+  Both profiles detect `owner/repo#N` / `repo#N`, a bare `#N`, and ClickUp `868…`
+  ids; telemetry adds an ENUMERATED widening (github `pull`/`issues` URLs,
+  `/audit-pr N`, `gh (pr|issue) <enumerated-subcommand> N`, `clawgate task N`, and
+  the legacy `#task-N` anchor).
+  A bare `#N` could be either a clawgate task or a GitHub
   issue, so it is emitted as `platform=ambiguous` with **no** url — the row
   records the reference that was made, never a guess about which one it was.
+  **Which repository is a different question from which platform**, so an ambiguous
+  span still carries an attribution:
+  - `repo` — the `owner/repo` the reference was attributed to, or `""`. GitHub
+    references only; a clawgate/ClickUp row is always `""`.
+  - `repo_source` — HOW that repo was resolved, from a fixed vocabulary (the
+    `SOURCE_*` constants). `explicit` = the text wrote the owner out;
+    `mapped` = the text named only the repo and the owner came from the operator's
+    private per-host mapping; then the telemetry-only block routes `adjacent` /
+    `url` / `flag` / `default`; `""` (`SOURCE_NONE`) exactly when `repo` is `""`.
+  🔴 **No owner is ever guessed** — an unmapped name yields `url=""`, never a
+  plausible-looking URL, and a block naming two different repositories attributes
+  nothing.
   Mentions are deduped per session in `session-summary-state.json` (`mentions`
   key, capped) so the ~7 rollup re-emits a session makes per day do not
   re-ship them. It lives at the collector ROOT, not inside `claude/`, because
-  `scripts/mention-open.py` — the Alacritty click-to-open hint handler — resolves
-  a click with the **same** module, so what the terminal underlines and what the
-  telemetry records cannot drift. A root module needs its own `home.file` entry
-  in `nix/home.nix`; `scripts/tests/test_collector_deploy_declares.py` derives
-  that requirement from the tailer's import line.
+  **both consumers import it** — this tailer from `claude/`, `mention-open.py` from
+  `scripts/`. That is a fact about imports, not a guarantee that the two behave
+  alike; the paragraph above is what governs how far they may differ. A root module
+  needs its own `home.file` entry in `nix/home.nix`;
+  `scripts/tests/test_collector_deploy_declares.py` derives that requirement from
+  the tailer's import line.
   ⚠ No deadman change is needed: `deadman.py` measures the evaluated set from
   what is in ClickHouse rather than from a declared table, so `mentions` joins on
   its own once it clears the baseline and cannot alarm before then.

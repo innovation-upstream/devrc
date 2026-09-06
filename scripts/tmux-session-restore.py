@@ -6,11 +6,23 @@ scratchpad session's windows + working dirs on reboot — but it relaunches a ba
 NOT the `claude` conversation that was in each window. This captures which claude session
 was where and, after reboot, relaunches `claude --resume <id>` in the right window.
 
-Binding a window to its EXACT session id is inherently fuzzy (claude appends-and-closes
-its jsonl, holding no fd; the session summary isn't stored) — so per repo we rank the
-session jsonls by recency and assign the newest ones (the live conversations) to that
-repo's live windows, in window order. The cheat-sheet prints each guess with its summary
-line so you can eyeball / correct before running restore.
+Binding a window to its EXACT session id has TWO sources, and they are not equals:
+
+  1. THE LEDGER (`~/.cache/agent-ledger/claude-p<N>.json`) — a RECORD. Claude Code's
+     `agent-ledger-hook.py` is handed the real `session_id` and `transcript_path` by
+     the harness and keys the file on its own `$TMUX_PANE`, so a validated record is
+     ground truth for that pane: one O(1) file read.
+  2. PANE-CONTENT MATCHING (`unique_match_sids`) — an INFERENCE, and the fallback.
+     It greps a pane's on-screen text across every transcript in that cwd's project
+     dir. Measured on the workbench 2026-09-04 over ONE snapshot of 44 live claude
+     panes, against 145 competing transcripts in one project dir: the grep took
+     176.6s and bound 34; the ledger took 0.002s and bound 34, agreeing on all 27
+     panes both answered. They miss DIFFERENT panes, so together they bind 41.
+
+So the ledger is consulted FIRST and CLAIMS FIRST — a certain binding must never lose
+a session id to a guess — and the grep runs only for panes the ledger cannot answer.
+The cheat-sheet prints each binding with its source and summary line so you can
+eyeball / correct before running restore.
 
 Usage:
   tmux-session-restore.py save      # BEFORE reboot — writes the plan + cheat-sheet
@@ -20,27 +32,98 @@ Usage:
 Restore flags:
   --dry-run / -n          show what would happen without sending keys
   --plan PATH             use a custom plan file instead of the default
-  --staleness-check [H]   refuse to restore if plan is > H hours old (default: 2h)
+  --staleness-check [H]   refuse to restore unless the plan is BOTH in step with
+                          the saved layout AND produced within H hours of running
+                          time (default: 2h). NOT wall-clock age — powered-off
+                          time does not count. See `plan_staleness_hours`.
 
 State: ~/.config/initiatives/restore-plan.json  (+ restore-cheatsheet.md)
 Scratchpad codenames come from the canonical scripts/tmux-scratch-slots.sh.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 STATE_DIR = Path(os.path.expanduser("~/.config/initiatives"))
 PLAN = STATE_DIR / "restore-plan.json"
 CHEAT = STATE_DIR / "restore-cheatsheet.md"
+# The layout `restore` is racing: resurrect's newest state file, via its `last`
+# symlink. `plan_staleness_hours` measures the plan against THIS rather than
+# against the wall clock — see that docstring for why.
+RESURRECT_LAST = Path(os.path.expanduser("~/.tmux/resurrect/last"))
 PROJECTS = Path(os.path.expanduser("~/.claude/projects"))
 SLOTS_FILE = Path(__file__).resolve().parent / "tmux-scratch-slots.sh"
 _SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+# 🔴 EVERY symbol this file reads off the ledger module — a tuple, not one name,
+# because the half-borrow is the hazard. Both of these are the WRITER's rules (the
+# file key and the directory it writes into), so restating either here is the
+# duplicated predicate that makes this reader look somewhere nobody writes. Add a
+# name the moment this file reads a new attribute off `_AL`; a test pins this
+# tuple two-way against the source, because the loader guards only what it names.
+_BORROWED = ("pane_filename", "LEDGER_DIR")
+
+
+def _load_agent_ledger(path: Path | None = None):
+    """`scripts/lib/agent_ledger.py`, imported by path — or None if unusable.
+
+    This file is a standalone script (run from the working tree by
+    `tmux-post-save.sh` and by the `tmux-session-restore` user unit), so there is
+    no package to import from; the ledger hook reaches its own copy the same way.
+
+    🔴 We borrow `_BORROWED` rather than restating any of it. If the module cannot
+    be USED there is deliberately NO fallback spelling — the ledger simply reports
+    nothing and every pane falls through to the grep.
+
+    🔴 "Cannot be used" is TWO cases, and the `_BORROWED` check is what makes the
+    promise true for the second. An absent or syntactically broken file raises on
+    import and is caught; a module that imports fine while lacking a borrowed
+    symbol would be returned as usable. The two names then fail DIFFERENTLY, and
+    the quieter failure is the one that made this check a tuple:
+
+      * without `pane_filename`, the unguarded `_AL.pane_filename(...)` in
+        `ledger_binding` raises out of `build_plan` and kills `cmd_save` — which
+        runs unattended every ~15 min from `tmux-post-save.sh` into a log nobody
+        reads, silently freezing the restore plan. Loud, once you read the log.
+      * without `LEDGER_DIR`, NOTHING raises. This reader would look in a
+        directory of its own invention, every pane would answer `no-record`, and
+        the `cmd_save` tally would announce a broken deploy using the one token
+        its own legend calls "nothing to fix". Rejecting the module instead makes
+        the tally say `no-ledger-module`, which is a token an operator acts on.
+
+    Degrading is the whole point; half-degrading is worse than not trying.
+
+    `path` exists so a test can hand this loader a deliberately-broken module;
+    production always takes the default.
+    """
+    p = Path(path) if path is not None else (
+        Path(__file__).resolve().parent / "lib" / "agent_ledger.py")
+    try:
+        spec = importlib.util.spec_from_file_location("_tsr_agent_ledger", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception:  # noqa: BLE001 — absent/broken lib: fall back to the grep
+        return None
+    if any(not hasattr(mod, sym) for sym in _BORROWED):
+        return None
+    return mod
+
+
+_AL = _load_agent_ledger()
+# No `or "<literal>"` default here, deliberately: see `_BORROWED`. `_AL` is None
+# in exactly the cases where the directory cannot be borrowed, and `ledger_binding`
+# returns `no-ledger-module` before it ever reads this.
+LEDGER_DIR = Path(_AL.LEDGER_DIR) if _AL is not None else None
 
 
 def run(cmd: list[str]) -> str:
@@ -68,6 +151,108 @@ def display_session(session: str, codes: dict[str, str]) -> str:
 def project_dir_for(cwd: str) -> Path:
     """~/.claude/projects encodes a cwd by replacing every '/' with '-'."""
     return PROJECTS / cwd.replace("/", "-")
+
+
+def tmux_server_pid() -> str:
+    """This tmux server's pid — the ledger's generation key. "" if unmeasured."""
+    return run(["tmux", "display-message", "-p", "#{pid}"]).strip()
+
+
+def ledger_binding(pane_id: str, cwd: str, server_pid: str,
+                   directory: Path | None = None) -> tuple[str, str]:
+    """The session id the LEDGER records for this pane: `(session_id, reason)`.
+
+    `("", <reason>)` whenever no record survives validation, and the reason token
+    names WHICH check rejected it — the tests assert on those tokens, so a broken
+    guard fails with its own name rather than with a generic empty string. The
+    token also LEAVES this function: `build_plan` records it per pane and
+    `cmd_save` prints the tally, because `0 ledger` alone cannot tell an operator
+    apart `no-ledger-module` (a deploy problem) from `generation-mismatch` (the
+    server restarted) from `no-record` (nothing to fix).
+
+    THE FOUR VALIDATIONS, and what each one is for:
+
+      * `no-session-id` — a record with an empty/absent `session_id` binds nothing.
+      * `transcript-missing` — the transcript named by the record must exist on
+        disk. `claude --resume <id>` against a deleted transcript fails, and a
+        failed resume in the right window is worse than the picker.
+      * `generation-mismatch` / `generation-unmeasured` — tmux pane ids restart at
+        `%0` when the SERVER does, so yesterday's `%61` record and today's `%61`
+        pane collide after exactly the reboot this tool exists for. `tmux_pid` is
+        the server pid, constant across a server's windows, so equality rejects
+        every record whose recorded pid differs from the live one — which is every
+        record EXCEPT those from a server that drew this same pid.
+        ⚠ That exception is the gap, and it sits in the very event this guard
+        exists for: pids are reused, and a restart resets the pane counter, so a
+        record left by a PREVIOUS server that happened to draw today's pid would
+        pass all four checks and resume the wrong conversation in a window that
+        looks right. How likely that is, is UNMEASURED — and the datum nearest to
+        hand does not answer it. (MEASURED 2026-09-04 on the workbench: the live
+        server's pid was `4025325` of a `pid_max` of `4194304`, but that server
+        started 21.2h AFTER boot, so its pid says nothing about what a server
+        started at login draws.) Closing the gap needs a value the WRITER does not
+        record today (a boot id, or the server's `/proc` start time), so the
+        residual is ACCEPTED — accepted without a rate, not shown to be small.
+        🔴 An UNMEASURED live pid rejects too: being unable to check a generation
+        is not the same as having checked it.
+      * `project-mismatch` — 🔴 THE CROSS-REPO GUARD. The transcript's parent
+        directory is the encoded cwd (`project_dir_for`). A record whose transcript
+        lives under a DIFFERENT repo's project dir would resume the wrong
+        conversation in a window that looks right, which is the single worst
+        outcome available here. Compared as the encoded NAME, because that is what
+        `project_dir_for` derives from the pane's cwd.
+
+    ⚠ `last_activity_ts` deliberately does NOT gate. Within one tmux server pane
+    ids are never reused, and the hook writes on `SessionStart`, so a live claude
+    pane's record names the session running in it however long ago it last spoke;
+    across servers the pid check already rejects. Any age threshold would
+    therefore reject only CORRECT bindings — and it would reject them hardest for
+    long-idle windows, which are precisely the ones worth restoring.
+
+    🔴 But the WRITE side already applies one, so `no-record` has a permanent
+    FLOOR rather than shrinking to nothing: `agent_ledger.DEFAULT_MAX_AGE` is 7
+    days. `write_record` itself does NOT prune, and the two writers do not agree
+    on when they do: `agent-ledger-hook.py` prunes on SESSION BOUNDARIES only
+    (`PRUNE_EVENTS` is `SessionStart`/`Stop`, a subset of the four events that
+    write), while `opencode/plugin/ledger.js` has no boundary hook at all and
+    passes `--prune` on EVERY write, throttled to once per SESSION per 30 s
+    (`ledger.js`'s `lastWrite` is a Map keyed by sessionID, so N concurrent
+    sessions issue up to N prunes in a window, not one). But a prune
+    sweeps the WHOLE directory whoever triggers it, so it is OTHER sessions'
+    prunes that delete an idle pane's record. Either way a live pane idle
+    longer than that ends up with
+    no record at all and reports `no-record` forever. Prune keeps re-opening that set
+    for exactly the long-idle windows a read-side age gate would also have thrown
+    away — which is why the argument above still holds, and why "the unbound set
+    shrinks on its own" is true only of the panes that predate the hook.
+    """
+    if _AL is None:
+        return "", "no-ledger-module"
+    if not pane_id:
+        return "", "no-pane-id"
+    d = Path(directory) if directory is not None else LEDGER_DIR
+    path = d / _AL.pane_filename("claude", pane_id)
+    try:
+        rec = json.loads(path.read_text().splitlines()[0])
+    except (OSError, ValueError, IndexError):
+        return "", "no-record"
+    if not isinstance(rec, dict):
+        return "", "no-record"
+    sid = str(rec.get("session_id") or "").strip()
+    if not sid:
+        return "", "no-session-id"
+    transcript = str(rec.get("transcript_path") or "").strip()
+    if not transcript or not Path(transcript).exists():
+        return "", "transcript-missing"
+    rec_pid = str(rec.get("tmux_pid") or "").strip()
+    live_pid = str(server_pid or "").strip()
+    if not rec_pid or not live_pid:
+        return "", "generation-unmeasured"
+    if rec_pid != live_pid:
+        return "", "generation-mismatch"
+    if Path(transcript).parent.name != project_dir_for(cwd).name:
+        return "", "project-mismatch"
+    return sid, "ok"
 
 
 def jsonls_by_recency(cwd: str) -> list[Path]:
@@ -139,42 +324,84 @@ def first_user_line(session_id: str, cwd: str) -> str:
 
 
 def live_claude_panes() -> list[dict]:
-    """Live claude panes: [{session, window, cwd, title}] in stable order."""
+    """Live claude panes: [{pane_id, session, window, cwd, title}], stable order.
+
+    `#{pane_id}` leads the format because it is the ledger's file key; `#{pane_title}`
+    stays last because it is the one field whose content is arbitrary.
+    """
     out = run(["tmux", "list-panes", "-a", "-F",
-               "#{session_name}\t#{window_index}\t#{pane_current_path}"
+               "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_current_path}"
                "\t#{pane_current_command}\t#{pane_title}"])
     panes = []
     for ln in out.splitlines():
         p = ln.split("\t")
-        if len(p) < 5 or p[3] != "claude":
+        if len(p) < 6 or p[4] != "claude":
             continue
-        panes.append({"session": p[0], "window": p[1], "cwd": p[2], "title": p[4]})
+        panes.append({"pane_id": p[0], "session": p[1], "window": p[2],
+                      "cwd": p[3], "title": p[5]})
     return panes
 
 
 def build_plan() -> list[dict]:
-    """Bind each live claude window to the EXACT session it runs (by pane content).
+    """Bind each live claude window to the EXACT session it runs.
 
-    Each pane's session is chosen from its uniquely-matched candidates, and a session
-    once claimed is never reused — so two windows can't collapse onto one conversation.
-    A window with no certain, unclaimed match gets an empty id (interactive picker).
+    TWO PASSES, AND THE ORDER IS THE POINT. Pass 1 takes each pane's ledger record
+    (a RECORD, see `ledger_binding`); pass 2 runs the pane-content grep only for the
+    panes pass 1 could not answer. That ordering buys two things at once:
+
+      * 🔴 CORRECTNESS — a certain binding claims its session id BEFORE any guess
+        can. Interleaved, a fuzzy match on pane B could claim the very id the ledger
+        knows belongs to pane A, and A would then fall through to the picker while B
+        resumed A's conversation. Ledger-first makes that unreachable.
+      * SPEED — the grep is never even called for a ledger-bound pane. That is the
+        whole performance claim, and it is pinned behaviourally by a test that
+        injects a matcher which raises.
+
+    Consequence: for one pane the ledger and the grep can never disagree, because on
+    a valid record the grep does not run. A session once claimed is never reused, so
+    two windows can't collapse onto one conversation; a window with no certain,
+    unclaimed binding gets an empty id and the interactive picker at restore time.
     """
     codes = codenames()
     panes = live_claude_panes()
-    cands = {i: unique_match_sids(f"{p['session']}:{p['window']}", p["cwd"])
-             for i, p in enumerate(panes)}
+    server_pid = tmux_server_pid()
+    bound: dict[int, tuple[str, str]] = {}
+    reasons: dict[int, str] = {}
     claimed: set[str] = set()
-    plan = []
+
+    # Pass 1 — the ledger. Certain, so it claims first.
     for i, p in enumerate(panes):
-        sid = next((s for s in cands[i] if s not in claimed), "")
+        sid, reason = ledger_binding(p.get("pane_id", ""), p["cwd"], server_pid)
+        reasons[i] = reason
+        if sid and sid not in claimed:
+            claimed.add(sid)
+            bound[i] = (sid, "ledger")
+
+    # Pass 2 — the grep, for whatever is left.
+    for i, p in enumerate(panes):
+        if i in bound:
+            continue
+        cands = unique_match_sids(f"{p['session']}:{p['window']}", p["cwd"])
+        sid = next((s for s in cands if s not in claimed), "")
         if sid:
             claimed.add(sid)
+            bound[i] = (sid, "fuzzy")
+
+    plan = []
+    for i, p in enumerate(panes):
+        sid, source = bound.get(i, ("", ""))
         plan.append({
             "session": p["session"],
             "window": p["window"],
             "codename": display_session(p["session"], codes),
             "cwd": p["cwd"],
             "session_id": sid,
+            "bind_source": source,
+            # Why the LEDGER did or did not answer for this pane — carried out so
+            # `cmd_save` can print a tally an operator can act on. Independent of
+            # `bind_source`: a pane can read `ok` here and still be `fuzzy`/unbound
+            # if another pane claimed that session id first.
+            "ledger_reason": reasons.get(i, ""),
             "title": (p["title"] or "").strip(),
             "hint": first_user_line(sid, p["cwd"]) if sid else "",
         })
@@ -194,7 +421,9 @@ def cheat_sheet(plan: list[dict]) -> str:
         lines.append(f"## {loc}  —  {e['title'] or '(untitled)'}")
         lines.append(f"- cwd: `{e['cwd']}`")
         if e["session_id"]:
-            lines.append(f"- resume: `cd {e['cwd']} && claude --resume {e['session_id']}`")
+            src = e.get("bind_source") or "fuzzy"
+            lines.append(f"- resume: `cd {e['cwd']} && claude --resume {e['session_id']}`"
+                         f"  ({src})")
             if e["hint"]:
                 lines.append(f"- first msg: _{e['hint']}_")
         else:
@@ -211,7 +440,27 @@ def cmd_save() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     PLAN.write_text(json.dumps(plan, indent=2))
     CHEAT.write_text(cheat_sheet(plan))
+    n_ledger = sum(1 for e in plan if e.get("bind_source") == "ledger")
+    n_fuzzy = sum(1 for e in plan if e.get("bind_source") == "fuzzy")
     print(f"saved {len(plan)} windows → {PLAN}")
+    print(f"bound: {n_ledger} ledger, {n_fuzzy} pane-content, "
+          f"{len(plan) - n_ledger - n_fuzzy} unbound (picker at restore)")
+    # The counts above cannot tell `0 ledger` apart between a missing module, a
+    # restarted server and simply no records — and the first two are what an
+    # operator would act on. Sorted by token so the line's shape is stable.
+    #
+    # `unrecorded` is UNREACHABLE today and stays on purpose: `build_plan` assigns
+    # every index and `cmd_save` always builds the plan rather than reading one off
+    # disk, so a mutant deleting this default survives. Keeping it costs one `or`
+    # and buys the right failure shape — this runs unattended every ~15 min into a
+    # log nobody reads, so a future refactor that stops assigning reasons must
+    # degrade to a token that is VISIBLY none of `ledger_binding`'s own
+    # (`unrecorded=44` reads as broken) rather than raise a KeyError that freezes
+    # the restore plan, or print `None=44`. The same argument covers
+    # `reasons.get(i, "")` in `build_plan`.
+    tally = Counter(e.get("ledger_reason") or "unrecorded" for e in plan)
+    print("ledger reasons: "
+          + ", ".join(f"{tok}={n}" for tok, n in sorted(tally.items())))
     print(f"cheat-sheet → {CHEAT}\n")
     print(cheat_sheet(plan))
     return 0
@@ -236,12 +485,212 @@ def window_state(target: str) -> tuple[bool, str]:
     return (bool(out.strip()), out.strip())
 
 
-def plan_age_hours() -> float | None:
-    """Age of the current restore plan in hours, or None if no plan exists."""
+def resurrect_last_path() -> Path:
+    """`<resurrect-dir>/last`, asking tmux rather than assuming the default.
+
+    🔴 `@resurrect-dir` IS CONFIGURABLE and the plugin honours it —
+    `helpers.sh:resurrect_dir()` is `get_tmux_option @resurrect-dir
+    "$HOME/.tmux/resurrect"`. Hardcoding the default is not merely incomplete:
+    on a host that moved the directory, `~/.tmux/resurrect/last` FREEZES at the
+    switchover instant, so every later run compares against a layout nobody
+    writes, refuses permanently, and says `basis=layout` while doing it — a
+    confident claim about a file that is no longer the layout being restored.
+    Failing closed with a misdirecting message is worse than failing open.
+
+    Falls back to the module default when tmux cannot be reached (no server, or
+    `restore` running before one exists), which is also what the plugin's own
+    `get_tmux_option` default does.
+    """
+    configured = run(["tmux", "show-options", "-gqv", "@resurrect-dir"]).strip()
+    if configured:
+        # 🔴 Match the PLUGIN'S grammar, not Python's. `helpers.sh:resurrect_dir()`
+        # expands `$HOME`, `$HOSTNAME` and `~` ANYWHERE in the value via a global
+        # sed; `expanduser` handles only a LEADING `~`. `$HOME/state/$HOSTNAME/
+        # resurrect` is the documented multi-host idiom, and leaving it literal
+        # makes the path un-stat-able -> `wall` basis -> the powered-off flaw
+        # silently reintroduced, refusing a perfectly fresh plan at boot.
+        expanded = (configured
+                    .replace("$HOME", os.path.expanduser("~"))
+                    .replace("$HOSTNAME", platform.node()))
+        return Path(os.path.expanduser(expanded)) / "last"
+    return RESURRECT_LAST
+
+
+def resurrect_state_mtime() -> float | None:
+    """mtime of the resurrect state file `restore` is racing, or None if unreadable.
+
+    `<resurrect-dir>/last` is a symlink to the newest `tmux_resurrect_*.txt`.
+    🔴 `stat()` FOLLOWS IT AND `lstat()` MUST NOT BE SUBSTITUTED: the target's
+    mtime is when that layout was captured, while the symlink's own mtime is
+    when it was last repointed. They differ, and on a DANGLING `last` the
+    difference decides correctness — `stat` raises and we fall back to `wall`,
+    whereas `lstat` would happily report `basis=layout` for a layout that no
+    longer exists.
+
+    `OSError` and not `FileNotFoundError`: a `last` that exists but is
+    unreadable, or an ELOOP symlink chain, must degrade to the fallback rather
+    than escape and crash the systemd unit.
+    """
+    try:
+        return resurrect_last_path().stat().st_mtime
+    except OSError:
+        return None
+
+
+def plan_staleness_hours() -> tuple[float, str] | None:
+    """How stale the plan is RELATIVE TO THE LAYOUT IT DESCRIBES. None if no plan.
+
+    🔴 NOT WALL-CLOCK AGE, AND THAT IS THE WHOLE POINT. The wall-clock measure
+    counted time the machine spent POWERED OFF against the plan, so the gate
+    refused in exactly the situation it exists to serve: shut down overnight,
+    boot, and `restore --staleness-check 2` exited 1 with "plan is 8.0h old"
+    — the identical rc 1 that the dead-hook outage produced (56c68cc7,
+    cc409f82), from a different cause. MEASURED 2026-09-05: a plan written
+    0.02h before a reboot reads as 8h/24h stale purely from being switched off,
+    while nothing about it changed. Being powered off cannot make a plan
+    diverge from reality; it is the one interval in which reality is frozen.
+
+    So compare two ARTEFACTS instead of comparing one to the clock. The plan and
+    the resurrect state file are written by the same chain — resurrect saves the
+    layout, its `post-save-all` hook runs `tmux-post-save.sh`, which runs `save`
+    — so under a working autosave their mtimes are seconds apart, forever,
+    however long the host is then switched off. The gap between them is
+    therefore a direct measure of the thing the gate actually guards: does this
+    plan describe the layout continuum is restoring?
+
+    It stays sharp in BOTH directions, which is why `abs()`:
+      * plan much OLDER than the layout — the plan stopped being refreshed while
+        the layout kept saving. This is the real 2026-08-05 outage: the plan sat
+        at Jul 5 while resurrect ran to Jul 29. Restoring it would relaunch a
+        month-old workspace. REFUSE.
+      * layout much older than the plan — continuum stopped saving while `save`
+        kept running, so the layout being restored is not the one the plan
+        describes. REFUSE.
+
+    🔴 CONTEMPORANEITY IS NOT LIVENESS, AND THE GATE NEEDS BOTH. The plan and
+    the layout are written by ONE driver, so when that driver dies they freeze
+    TOGETHER and their gap stays constant forever. A contemporaneity-only
+    measure then reports "fresh" for a plan of any age: MEASURED, a plan and
+    layout both frozen 1400h ago 30s apart returned a 0.008h gap and restored a
+    58-day-old workspace across 44 windows. That is not hypothetical — it is
+    the OTHER outage `nix/programs/tmux/default.nix` records: on 2026-08-05
+    continuum's `status-right` interpolation was clobbered and resurrect
+    stopped saving at all, freezing both artefacts at the same instant. The
+    wall-clock measure caught that mode as a side effect; dropping it without
+    replacement traded a LOUD failure for a silent, permissive one.
+
+    So two numbers are computed and the WORSE is returned:
+
+      * CONTEMPORANEITY `abs(state - plan)` — does this plan describe the
+        layout being restored? Catches a ONE-SIDED freeze in either direction
+        (the hook-name outage: plan stuck at Jul 5, resurrect live to Jul 29).
+      * LIVENESS `min(now - newest_artefact, uptime)` — has the chain produced
+        anything lately? Catches a TOTAL freeze, which contemporaneity cannot
+        see. Capping at uptime is what keeps powered-off time out: at boot+45s
+        the newest artefact is from before shutdown, so the cap makes it 45s
+        rather than the whole night.
+
+    Worked through the cases — INCLUDING the one this does not close:
+      running normally   gap ~1min, live ~15min      -> passes
+      boot+45s after 24h off  gap ~1min, live 45s    -> passes  (the bug fixed)
+      31d uptime, chain dead 1400h  gap 30s, live 753h -> REFUSES
+      plan frozen, layout live      gap huge         -> REFUSES
+      🔴 boot+45s, chain dead 1400h  gap 30s, live 45s -> PASSES  (NOT CLOSED)
+      🔴 chain dead 100h + a future mtime  gap 30s, skew -> PASSES  (see below:
+         liveness is genuinely unmeasurable there, and the bounded-damage
+         argument covers it — but a reader consults this list, so it is here)
+
+    🔴 THE LIVENESS TERM IS ARITHMETICALLY INERT WHENEVER `uptime <= limit`, AND
+    THAT INCLUDES THE BOOT THE UNIT RUNS ON. (The same is true of the SKEW
+    branch below and of anything else routed through this cap — the ceiling
+    applies to the term, not to one reason for it.) `live = min(since, uptime) <=
+    uptime`, and refusing needs `> limit` — so at boot+45s with a 2h limit
+    (`nix/home.nix`), `live <= 0.0125h`, 160x under, and this degrades exactly
+    to the contemporaneity-only behaviour. A guard that is BREAKABLE at a
+    fixture constant (the test pins `uptime_h=753.0`, 376x the limit) is not
+    thereby REACHABLE at the call site's real value; those are different claims
+    and only the second one protects a boot.
+
+    WHY IT IS NOT CLOSED HERE RATHER THAN LEFT UNSAID. At boot, mtimes alone
+    cannot separate "chain healthy, host off 24h" from "chain dead 58d, host
+    off 24h" — after the cap both read `since ~= uptime`. The discriminator is
+    the PREVIOUS BOOT'S END (`prev_shutdown - max(state, mt)`), and it is not
+    reliably available: MEASURED on this host 2026-09-05, `journalctl
+    --list-boots` reports TWO boots whose ranges do not abut (boot -1 ends
+    2026-07-14, boot 0 begins 2026-08-18) while `uptime -s` says 2026-08-04 —
+    the journal had rotated the intervening boots away. A detector built on
+    that would be least trustworthy on exactly the long-lived host where a
+    frozen chain is most likely.
+
+    WHAT BOUNDS THE DAMAGE. A chain that froze froze BOTH artefacts, so
+    resurrect's layout is equally stale and continuum restores that old layout
+    whatever this gate decides. Resuming the conversations that match it is
+    coherent; the gate cannot prevent the stale workspace, only decide whether
+    to populate it. What IS lost is the diagnostic — the old wall-clock refusal
+    is how the 2026-08-05 freeze was noticed at all — so if you are reading
+    this because a restore looked wrong, check whether the chain is alive
+    (`ls -t ~/.tmux/resurrect/*.txt | head`) before suspecting the plan.
+
+    Returns `(hours, basis)` where basis is `"layout"`, `"liveness"`, `"skew"`
+    or `"wall"` — FOUR, and the `why` dict in `cmd_restore` is the only
+    consumer that knows it. A second consumer built from a three-arm contract
+    KeyErrors in the refusal path, which is the crash this line exists to
+    prevent. The wall fallback (no readable state file) still carries the
+    powered-off flaw by construction, so the basis is part of the answer and
+    the refusal message NAMES it — the same number means different things.
+    """
     if not PLAN.exists():
         return None
     import time
-    return (time.time() - PLAN.stat().st_mtime) / 3600
+    mt = PLAN.stat().st_mtime
+    state = resurrect_state_mtime()
+    if state is None:
+        # `max(0.0, …)`: under the same backward skew this goes negative, and a
+        # negative age both prints as nonsense and compares as fresh. There is
+        # no second measure to fall back to on this basis, so clamp and let the
+        # value stand at "not stale", which is what a negative already meant.
+        return (max(0.0, (time.time() - mt) / 3600), "wall")
+    gap = abs(state - mt) / 3600
+    # Liveness: time since the chain last produced ANYTHING, but never counting
+    # more than this boot has been up — powered-off time is the one interval in
+    # which nothing can have gone stale.
+    since = (time.time() - max(state, mt)) / 3600
+    if since < 0:
+        # 🔴 The clock moved BACKWARDS past an artefact's mtime, so LIVENESS IS
+        # UNMEASURABLE — and both obvious answers fabricate a number.
+        #
+        #   `since = 0`   claims the chain just wrote. Silently disables the
+        #                 F1 guard, which is what round 2 flagged.
+        #   `since = inf` claims it never did. Looks safe and is worse: `live =
+        #                 min(inf, uptime)` collapses to UPTIME, so a ONE-SECOND
+        #                 step back on a long-uptime host refuses a HEALTHY chain
+        #                 and reports it "silent for 753.0h". Measured. That is
+        #                 the misdirecting-refusal failure `resurrect_last_path`
+        #                 calls worse than failing open — and it was inert at
+        #                 early boot anyway, the very case its comment named,
+        #                 because the uptime cap neuters it there.
+        #
+        # CONTEMPORANEITY NEVER READS `now`, so it is immune to skew and stays
+        # valid. Fall back to it and NAME the fact that liveness was not
+        # evaluated, rather than inventing a liveness number in either
+        # direction. Reporting "unmeasured" is the honest third option.
+        return (gap, "skew")
+    live = min(since, uptime_hours())
+    return (gap, "layout") if gap >= live else (live, "liveness")
+
+
+def uptime_hours() -> float:
+    """Hours this boot has been up; +inf if unreadable, so the cap cannot HIDE staleness.
+
+    An unreadable `/proc/uptime` must not silently turn the liveness check off —
+    failing to the uncapped wall measure is the safe direction (it can only
+    refuse more, never less).
+    """
+    try:
+        with open("/proc/uptime") as fh:
+            return float(fh.read().split()[0]) / 3600
+    except (OSError, ValueError, IndexError):
+        return float("inf")
 
 
 def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
@@ -251,11 +700,36 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
         print(f"no restore plan at {src} — run `save` before rebooting", file=sys.stderr)
         return 1
     if staleness_hours is not None and plan_path is None:
-        age = plan_age_hours()
-        if age is not None and age > staleness_hours:
-            print(f"restore plan is {age:.1f}h old (limit {staleness_hours}h) — "
-                  f"too stale, skipping. Run `save` first.", file=sys.stderr)
-            return 1
+        measured = plan_staleness_hours()
+        if measured is not None:
+            gap, basis = measured
+            if gap > staleness_hours:
+                # Name the BASIS: "8.0h" means two different things depending on
+                # which one produced it, and the wall fallback carries the
+                # powered-off flaw the layout basis exists to remove.
+                why = {
+                    "layout": "out of step with the saved layout by",
+                    # NOT wall clock: this is uptime-capped running time since
+                    # the chain last produced anything. Saying "wall clock"
+                    # here points the reader at the powered-off bug, when the
+                    # cause is the opposite — the save chain stopped.
+                    "liveness": "produced by a chain that has been silent for",
+                    "wall": "older than (wall clock, no layout to compare)",
+                    # Liveness was NOT evaluated; say so rather than let the
+                    # reader assume both terms were checked.
+                    # NOT "the clock moved backwards": `since < 0` fires on
+                    # ANY future mtime — a restored backup, `touch -d`, an
+                    # rsync preserving a bad stamp — and this code cannot tell
+                    # those apart. Name the OBSERVATION, not a cause it never
+                    # measured; that is the principle this branch exists for.
+                    "skew": ("out of step with the saved layout by (liveness "
+                             "NOT evaluated — an artefact's mtime is in the "
+                             "future)"),
+                }[basis]
+                print(f"restore plan is {why} {gap:.1f}h "
+                      f"(limit {staleness_hours}h, basis={basis}) — too stale, "
+                      f"skipping. Run `save` first.", file=sys.stderr)
+                return 1
     plan = json.loads(src.read_text())
     tag = "[dry-run] would " if dry_run else ""
     sent = skipped = 0

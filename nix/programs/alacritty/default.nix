@@ -13,14 +13,27 @@ let
   # `pkgs.rofi` in would install a second, independently-versioned copy whose
   # theme could drift from the launcher's. The picker must look like every other
   # picker on this desktop.
+  # 🔴 THE LIST BELOW IS PINNED AGAINST THE HANDLER'S OWN AST by
+  # `scripts/tests/test_mention_open.py::test_the_alacritty_wrapper_PATH_covers_
+  # every_executable_the_handler_spawns`. Adding a spawn to `mention-open.py`
+  # without adding its package here produces a `FileNotFoundError` that the
+  # handler catches as `OSError` and answers with "" — inert in production,
+  # green in every suite. That test is what makes this list a claim rather than
+  # a hope, and it fails in BOTH directions, so a package nobody spawns is a
+  # finding too.
+  #
+  # ⚠ `pkgs.gh` USED TO BE HERE and is REMOVED. Its comment justified it as
+  # "PASS 3's only tool" — PASS 3 was the GitHub-wide namesake search, which is
+  # deleted (see `mention-open.py`'s docstring for the 4.3s it cost), and the
+  # passes were renumbered when it went, so the old comment pointed a reader at
+  # the fuzzy universe, which spawns nothing at all. Do not re-add it without a
+  # spawn to justify it.
   mentionOpen = pkgs.writeShellScript "alacritty-mention-open" ''
     export PATH=${lib.makeBinPath [
-      # `gh` is PASS 3's only tool, and its absence is SILENT: FileNotFoundError
-      # is caught as OSError and the search returns {}, so the fallback would be
-      # inert in production with a fully green suite. `~/.nix-profile` is also
-      # blanked for ~1s during every home-manager switch, so relying on the
-      # inherited PATH is not enough.
-      pkgs.python312 pkgs.git pkgs.tmux pkgs.xdg-utils pkgs.libnotify pkgs.gh
+      # `~/.nix-profile` is blanked for ~1s during every home-manager switch, so
+      # relying on the inherited PATH is not enough: a click landing in that
+      # window would find none of these by bare name.
+      pkgs.python312 pkgs.git pkgs.tmux pkgs.xdg-utils pkgs.libnotify
     ]}:$PATH
     exec ${pkgs.python312}/bin/python3 \
       ${config.home.homeDirectory}/workspace/devrc/scripts/mention-open.py "$@"
@@ -41,6 +54,21 @@ in
     # change; paste-via-OSC52 stays disabled (it's a security footgun).
     terminal = {
       osc52 = "OnlyCopy";
+    };
+
+    # Selection → clipboard on mouse release, so highlighting text alone copies
+    # it (no Ctrl+Shift+C needed). Tradeoff: every selection, even an accidental
+    # drag, replaces the system clipboard.
+    #
+    # This only matters while ALACRITTY owns the selection. It does today because
+    # tmux's mouse mode is off — but note WHY: `mouse` is off by tmux's OWN
+    # DEFAULT, and this repo does not set it anywhere (`git grep mouse -- '*tmux*'`
+    # finds nothing in `.tmux.conf` or `nix/programs/tmux/`). So the condition is
+    # inherited, not pinned. Turning tmux mouse mode ON hands the selection to
+    # tmux and this setting stops applying inside a tmux pane — which is most of
+    # this terminal's use. Measured 2026-09-05: `tmux show -gv mouse` → `off`.
+    selection = {
+      save_to_clipboard = true;
     };
 
     # ----------------------------------------------------------------------- #
