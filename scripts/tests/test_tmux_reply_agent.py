@@ -1836,9 +1836,21 @@ def test_the_agent_SHELLS_OUT_TO_TMUX_AND_NOTHING_ELSE():
     acknowledgement had blinded the very guard it was filed under.
 
     So the pin is written here, where it can see argv rather than file names:
-    every spawn in the agent must take its argv from `tmux_bin()`. AST, not grep
-    — this file and the agent both NAME `systemctl` in prose, and a text scan
-    cannot tell a docstring from a call.
+    a DIRECT spawn in the agent must take its argv from `tmux_bin()`. AST, not
+    grep — this file and the agent both NAME `systemctl` in prose, and a text
+    scan cannot tell a docstring from a call.
+
+    🔴 WHAT IT DOES NOT SEE, STATED RATHER THAN IMPLIED — an unqualified "every
+    spawn" is what made the two previous versions of this docstring false, and a
+    guard whose sentence is wider than its body reads as coverage while providing
+    none. MEASURED SURVIVORS at this revision: reflective lookup
+    (`getattr(subprocess, "run")`, `importlib.import_module`, `__import__`), a
+    star-import (`from subprocess import *`), an indirect binding
+    (`_m = subprocess` / `f = run`), and spawners in OTHER modules (`pty.spawn`,
+    `asyncio.create_subprocess_exec`). Those are residuals, not oversights: each
+    needs a deliberate indirection, whereas the verbs above are what ordinary
+    code reaches for. If this file ever grows one of them, this guard will not
+    say so — and neither will the launcher ledger.
 
     🔴 IT RESOLVES IMPORT BINDINGS, BECAUSE ITS FIRST VERSION DID NOT AND WAS
     NARROWER THAN THIS DOCSTRING. That draft matched only a literal
@@ -1869,7 +1881,14 @@ def test_the_agent_SHELLS_OUT_TO_TMUX_AND_NOTHING_ELSE():
     src = SCRIPT.read_text()
     tree = ast.parse(src)
 
-    SUBPROCESS_VERBS = {"run", "Popen", "call", "check_call", "check_output"}
+    # 🔴 `getoutput`/`getstatusoutput` ARE IN THIS SET BECAUSE THEY RUN A SHELL
+    # and were missing from the first five. Same module, same `subprocess.<verb>()`
+    # shape this walker already sees — no aliasing, no reflection — so
+    # `subprocess.getoutput(f"systemctl --user is-active {unit}")` SURVIVED a guard
+    # whose sentence said "nothing else", while the launcher ledger (which asserts
+    # a FILE set, and this file is already in it) is structurally blind to it too.
+    SUBPROCESS_VERBS = {"run", "Popen", "call", "check_call", "check_output",
+                        "getoutput", "getstatusoutput"}
     # 🔴 NOT every `os.*` — an early draft took the whole module and matched
     # `os.getpid()`, failing on a CLEAN tree. A negative control that goes red is
     # a broken instrument, not a finding. Only verbs that can START a process.
@@ -1880,6 +1899,15 @@ def test_the_agent_SHELLS_OUT_TO_TMUX_AND_NOTHING_ELSE():
     # name -> "subprocess" | "os", following `as` aliases.
     mod_alias = {}
     # bare name -> the module it was imported OUT of, following `as` aliases.
+    # ⚠ SCOPE-BLIND, BOTH WAYS, AND LATENT TODAY. This walks the whole module, so
+    # a `from subprocess import ...` inside a function body registers globally
+    # (over-strict — fails loud, safe direction), and a LOCAL rebinding of the
+    # same name is read as the import (a FALSE POSITIVE: a parameter named `run`
+    # in `def _use(run, argv): return run(argv)` is flagged as a spawn). Latent
+    # because `scripts/tmux-reply-agent` imports `os` and `subprocess` as modules
+    # only, with no from-import, so this dict is EMPTY on the real tree. It goes
+    # live the first time anyone adds one; prefer renaming the local over
+    # loosening this map.
     fn_alias = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -1928,7 +1956,9 @@ def test_the_agent_SHELLS_OUT_TO_TMUX_AND_NOTHING_ELSE():
 
     assert set(argv0) == {"tmux_bin"}, (
         f"the agent's subprocess argv[0] set is {sorted(set(argv0))}, not {{'tmux_bin'}}. "
-        "This agent must shell out to tmux and nothing else — it runs as the operator, is "
+        "This agent must shell out to tmux and nothing else (this check sees DIRECT spawns; "
+        "see the docstring for the reflective/star-import residuals it does not) — it runs "
+        "as the operator, is "
         "driven by a network route, and `test_no_real_launchers.py` ACKNOWLEDGES its prose "
         "mention of `systemctl` on exactly this basis. A new argv[0] here is invisible to "
         "that ledger (it asserts a FILE set, and this file is already in it), so this is the "
