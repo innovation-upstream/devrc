@@ -196,6 +196,13 @@ def tmux_stub(tmp_path):
         f'''if [ "$1" = "-V" ]; then echo 'tmux 3.4'; exit 0; fi\n'''
         f'''python3 -c 'import json,sys; open(sys.argv[1],"a").write(json.dumps(sys.argv[2:])+"\\n")' '''
         f'''{log} "$@"\n'''
+        # ⚠ THIS BRANCH MATCHES **ANY** `display-message`, INCLUDING the
+        # `#{pane_current_path}` RE-READ `open_window` now makes when tmux returns
+        # an empty path. Unreachable today ONLY because this stub cannot express an
+        # empty third field. If you extend the stub to cover that path,
+        # DISCRIMINATE ON THE FORMAT ARGUMENT FIRST — otherwise the re-read is
+        # handed a server id (`1234:5678`) as its directory and the run refuses
+        # with the misleading "tmux fell back" message.
         f'''if [ "$1" = "display-message" ]; then cat {server_id}; exit 0; fi\n'''
         # 🔴 THE STUB NOW ECHOES WHAT THE AGENT READS BACK. The agent verifies the
         # session and working directory tmux ACTUALLY chose, so a stub printing a
@@ -1981,6 +1988,16 @@ def test_an_EMPTY_pane_current_path_does_not_collapse_the_readback(monkeypatch):
     observed string `'%2\\tscratch20'` is byte-identical to `'%2\\tscratch20\\t'`
     after `.strip()`, which is what identified the mechanism.
 
+    🔴 AND THE TRIGGER HAS SINCE BEEN FORCED DIRECTLY, so this no longer rests on
+    byte-identity. On a private `-L` socket (tmux 3.7c), `new-window -P -F` with
+    this format produced an EMPTY third field **11 times in ~310 warm-server
+    creations (~3.6%)**, and **0 times in 60 cold-server creations** — so the race
+    is not server startup. In **11 of 11** the immediate
+    `display-message -p -t <pane>` re-read returned the correct populated path,
+    which is end-to-end evidence for the remedy below against REAL tmux rather
+    than against a stub. That also retires the rival mechanism byte-identity alone
+    could not exclude: tmux genuinely emitting two fields.
+
     🔴 AND THE PARSE IS ONLY HALF OF IT. With the fields split correctly,
     `landed_path` is `""`, and `same_directory("", cwd)` does NOT compare empty
     against cwd — `os.path.realpath("")` returns the AGENT'S OWN cwd, so the
@@ -2023,6 +2040,25 @@ def test_an_UNREADABLE_pane_current_path_still_REFUSES(monkeypatch):
     If the re-read ALSO comes back empty the directory is genuinely unverifiable,
     and this agent presses Enter — so it must refuse rather than type into a pane
     whose location nothing confirmed.
+
+    🔴 IT PINS THE WHOLE NORMALISED STRING, BECAUSE THE FIRST VERSION OF THIS
+    TEST PINNED THE WORD "directory" AND WAS WALKABLE BY ITS OWN NEIGHBOUR.
+    That word appears in the unverifiable-path refusal AND in the `same_directory`
+    MISMATCH message four lines below it, so deleting the refusal outright left
+    this test GREEN — measured as a surviving mutant. The fallthrough then
+    produced:
+
+        tmux opened the window in '', not the requested '/home/zach' — the
+        directory does not exist on this host, so tmux fell back
+
+    which satisfied both of the old assertions while asserting the exact
+    confusion the fix exists to prevent, since `os.path.realpath("")` is the
+    AGENT'S OWN cwd (verified) and the unit runs with `WorkingDirectory=~`.
+    ⚠ Worse, the old test's verdict depended on an UNPINNED dimension: with
+    pytest's cwd at `/home/zach` the mutant died, from `/tmp` or the repo root it
+    survived — and the gate runs from the repo root.
+
+    `claude/RULES.md`: assert the STATE, never a word another branch can spell.
     """
     def fake_run_tmux(args):
         if args[0] == "new-window":
@@ -2034,4 +2070,13 @@ def test_an_UNREADABLE_pane_current_path_still_REFUSES(monkeypatch):
     monkeypatch.setattr(AGENT, "run_tmux", fake_run_tmux)
     pane, err = AGENT.open_window(str(pathlib.Path.home()), "scratch20")
     assert pane == "", pane
-    assert "directory" in err.lower(), err
+    assert " ".join(err.split()) == (
+        "tmux did not report the new window's directory, so where it landed "
+        "could not be verified"), (
+        f"the refusal message is {err!r}. This asserts the WHOLE normalised string "
+        "on purpose: pinning a word lets the `same_directory` mismatch branch below "
+        "satisfy this test while the refusal is gone.")
+    assert "fell back" not in err, (
+        f"the unverifiable-path refusal must not be the FALLTHROUGH mismatch: {err!r}. "
+        "'could not read where it landed' and 'tmux landed somewhere else' are "
+        "different facts and must not share a code path.")
