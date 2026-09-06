@@ -3367,12 +3367,12 @@ _HOME_FILE = re.compile(
 #: scriptsDir-backed custom blocks, MEASURED. The floor exists so a regex that
 #: silently stops matching fails loudly instead of vacuously passing. Raise it
 #: when you add a block; the failure message prints the number it saw.
-_EXPECTED_SCRIPT_BLOCKS = 11
+_EXPECTED_SCRIPT_BLOCKS = 12
 #: ALL block definitions, MEASURED — including the ones with no scriptsDir
 #: command. Pins the `^  }` terminator: with `^  };`, `temperatureBlock`'s
 #: `} // (if isLaptop …)` idiom swallowed `gpuBlock` whole and only 19 were
 #: found. Nothing else notices, because the swallowed block has no command.
-_EXPECTED_BLOCK_DEFS = 20
+_EXPECTED_BLOCK_DEFS = 21
 #: Ungated/gated split, MEASURED. Guards `_block_gates` itself: if gate parsing
 #: collapses to all-True or all-False (a stray `isLaptop` in a comment, the list
 #: reflowed onto one line), `checked` stays correct while the gate assertion

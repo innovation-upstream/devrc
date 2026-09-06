@@ -209,6 +209,45 @@ mode "resize" {
 
 bindsym $mod+r mode "resize"
 
+# 🔴 GAME MODE — an EMPTY binding mode, and "empty" is the entire mechanism.
+#
+# `$mod` is Mod1 (line 66) — ALT, not Super. i3 therefore holds a global X11
+# grab on ~60 Alt combos: Alt+Tab, Alt+1..Alt+0, Alt+Shift+1..0, Alt+Return,
+# Alt+d/f/e/a/b/n/r/h/j/k/l/space/grave/minus/equal. A grab means the keypress
+# is delivered to i3 and NEVER reaches the focused window, so inside a game
+# every one of those keys is simply dead — this is not merely "rofi pops over
+# the game", the game does not see the key at all.
+#
+# Two fixes were considered and rejected:
+#   * a guard script on the exec (`bindsym $mod+d exec launcher-guard`) — i3
+#     still holds the grab and still swallows the key, so the game stays deaf.
+#     It only changes what i3 does AFTER eating the keypress.
+#   * a conditional grab (bind only when the focused window is not a game) —
+#     `bindsym` takes no `[class=…]` criteria; i3 has no such mechanism.
+# Switching binding mode is the ONLY native way to make i3 release the grabs:
+# entering a mode ungrabs every default-mode binding and grabs only this mode's.
+# So the emptiness below is load-bearing — anything added here is a key the
+# game goes back to not receiving.
+#
+# TWO escape keys on purpose, not redundancy: not every keyboard has a
+# dedicated Pause key, and the worst failure this feature can have is being
+# stuck in game mode with no way out. Both are UNBOUND in the default mode, and
+# `test_i3_game_mode.py` fails if a future binding silently takes either one.
+# Neither is a $mod combo — a mode that exists to release Alt must not need Alt
+# to leave. Rescue path if the bar is hidden behind a fullscreen game:
+# `DISPLAY=:0 i3-msg mode default` over SSH (see the `bar` skill).
+#
+# The `pkill -RTMIN+18` repaints the bar's game pill instantly. 18 must match
+# `gamemodeBlock.signal` in nix/graphical.nix and the pill's own click handler;
+# all three are pinned together by test_i3_game_mode.py. There is deliberately
+# NO `bindsym … mode "game"` in the default mode: the way IN is the bar pill
+# (getting in is the easy direction — the bar is visible and clickable then),
+# and a default-mode binding would be one more grab for no gain.
+mode "game" {
+        bindsym Pause       mode "default", exec --no-startup-id pkill -RTMIN+18 i3status-rs
+        bindsym Scroll_Lock mode "default", exec --no-startup-id pkill -RTMIN+18 i3status-rs
+}
+
 # Status bar (Gruvbox dark) — statusline is now i3status-rust (i3status-rs); the
 # i3bar workspace/background colors below stay as-is (i3status-rust replaces only
 # the statusline content, not the i3bar chrome).
