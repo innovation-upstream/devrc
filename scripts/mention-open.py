@@ -143,9 +143,14 @@ KNOWN_REPOS_PATH = Path(
 # and the symptom is the picker appearing for a name that ought to have resolved,
 # which reads as "the picker is noisy" rather than as "my mapping is old".
 #
-# So the age is MEASURED and SURFACED, at both places the operator can see it:
-# the note above the picker (`universe_note`) and the refusal body
-# (`staleness_note`). It is a SIGNAL, not a repair — deliberately, and the
+# So the age is MEASURED and SURFACED. Its PRIMARY home is the note above the
+# picker (`universe_note`), because that is the path a stale mapping actually
+# produces — the click that did not resolve. `staleness_note` covers the two
+# refusals: `--print`, which cannot show a picker at all, and the narrow
+# shadowed-mapping arm documented in `refuse()`. Stating that split here rather
+# than "the refusal body" is deliberate: the vaguer wording read as "every
+# refusal past 7 days", which is not what the code does.
+# It is a SIGNAL, not a repair — deliberately, and the
 # alternative was weighed: a systemd-user timer would run `gh api user/repos`
 # on a schedule, and `regen-known-repos.py` REFUSES below its 25-repo floor and
 # exits 3, so a host without `gh auth` would take a failing unit and a failure
@@ -828,6 +833,31 @@ def refuse(span: dict | None, text: str, args: argparse.Namespace) -> int:
             # A mapping that PARSED and holds rows can still be months old, and
             # that is a different, ADDITIVE fact — appended, never substituted
             # for the primary one, for the same reason the advice is.
+            #
+            # 🔴 THIS ARM IS NARROW, AND THE CONDITION THAT REACHES IT IS WRITTEN
+            # DOWN BECAUSE A ROUND-2 AUDIT READ IT AS DEAD CODE AND PROPOSED
+            # DELETING IT. The reasoning was: `reason == ""` means
+            # `clean_repo_map` kept a row, `repo_universe` filters on the SAME
+            # `OWNER_REPO_VALUE_RE`, and `discover_repos` only ADDS rows — so a
+            # non-empty mapping guarantees a non-empty universe, the picker is
+            # shown, and `refuse()` is never called. Every step of that is true
+            # except the last: `discover_repos` also OVERWRITES, and
+            # `parse_owner_repo` is LOOSER than `OWNER_REPO_VALUE_RE` — it asks
+            # only for two `/`-separated segments, so a remote like
+            # `https://github.com/-acme/widget.git` yields the non-empty
+            # `-acme/widget`, which the value regex rejects. A checkout whose
+            # DIRECTORY NAME shadows a mapping key therefore replaces a valid row
+            # with an invalid one, and a host where that happens to every valid
+            # row has `universe_reason() == ""` and an EMPTY universe at once.
+            # MEASURED end-to-end, not reasoned about — that exact state is what
+            # `test_a_NON_print_refusal_CAN_still_name_the_mapping_AGE` builds,
+            # and it was watched to fail with this branch deleted.
+            #
+            # ⚠ SO THE HONEST SCOPE OF THE SIGNAL IS: the picker note
+            # (`universe_note`) on every offered universe, the `--print` refusal
+            # above, and THIS arm on the shadowed-mapping host. It is not "every
+            # refusal past 7 days" — most refusals name a cause instead, and
+            # `reason` wins there by design.
             if not reason and (stale := staleness_note()):
                 why = f"{why}; {stale}"
     notify(f"cannot resolve {subject}", f"{why} — {advice}")

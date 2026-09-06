@@ -365,7 +365,25 @@ PATTERN_LEDGER: dict[str, _Pat] = {
     "BARE_RE": _Pat(_BOTH, "detect", ("#",), "fixed in #370"),
     "GITHUB_URL_RE": _Pat(_TELEMETRY_ONLY, "detect", ("github.com/",),
                           "https://github.com/gardenersguild/trowelcast/pull/7"),
-    "AUDIT_PR_RE": _Pat(_TELEMETRY_ONLY, "detect", ("audit-pr",), "/audit-pr 1291"),
+    # 🔴 THE ONE DELIBERATE EXCEPTION TO "TELEMETRY IS WIDER THAN TERMINAL", AND
+    # IT WAS CHOSEN RATHER THAN LEAKED. `audit-pr N` is a REFERENCE FORM — how
+    # this operator refers to a PR in prose — whereas `gh pr view N` and
+    # `clawgate task N` are COMMANDS they typed. Underlining a command line is
+    # noise on text where clicking is useless, so the other three telemetry-only
+    # detect patterns stay telemetry-only and this one does NOT. Do not widen the
+    # exception to its neighbours on the reasoning that it is inconsistent; the
+    # inconsistency is the decision.
+    #
+    # 🔴 AND THE LEDGER IS HALF OF THE FIX. Flipping this alone ships a feature
+    # that is 100% DEAD: alacritty's hint regex decides what is UNDERLINED, and
+    # unhighlighted text cannot be clicked whatever this module would do with it.
+    # The other half is the `/?audit-pr[ \t]+[0-9]{1,6}` alternation in
+    # `nix/programs/alacritty/default.nix`, pinned to this row by
+    # `test_alacritty_hints.py::test_every_TERMINAL_shape_the_scanner_detects_is_
+    # also_UNDERLINED`. That test is derived from this ledger, so the two halves
+    # cannot drift apart silently — which is the same trap `mention_hints()`
+    # exists for one layer down.
+    "AUDIT_PR_RE": _Pat(_BOTH, "detect", ("audit-pr",), "/audit-pr 1291"),
     "GH_CLI_RE": _Pat(_TELEMETRY_ONLY, "detect", ("gh pr", "gh issue"),
                       "gh pr view 1291"),
     "CLAWGATE_TASK_RE": _Pat(_TELEMETRY_ONLY, "detect", ("lawgate",),
@@ -435,6 +453,16 @@ _KNOWN_FALSE_POSITIVES = (
     # lands as AMBIGUOUS, so the click shows a picker rather than opening
     # anything wrong, and the telemetry row is one stray row. Accepted.
     "#123",
+    # 🔴 MOVED HERE FROM THE TELEMETRY SET WHEN `AUDIT_PR_RE` BECAME CLICKABLE,
+    # AND THE MOVE IS THE POINT. An instructional example is character-for-
+    # character a real reference: a runbook, a skill body or a code fence that
+    # TEACHES `/audit-pr 12` spells it exactly as prose that MEANS PR 12, and no
+    # rule separates them. On the telemetry surface the cost was a stray row in a
+    # private table. On the CLICK surface it is an underline over a line of
+    # documentation — visible, and the reason this residual is restated here
+    # rather than silently inherited. It opens the pane repo's PR 12, or a
+    # picker; it never opens something the operator did not choose.
+    "/audit-pr 12",
 )
 
 # The residuals the WIDER profile adds, kept separate because they are not the
@@ -445,8 +473,13 @@ _KNOWN_FALSE_POSITIVES_TELEMETRY = (
     # exactly as a session that RAN it, and no rule separates the two. Accepted:
     # the cost is a stray row in a private table, and the alternative — dropping
     # the shape — loses the 370 real occurrences measured alongside them.
+    #
+    # ⚠ `/audit-pr 12` USED TO BE HERE AND HAS MOVED UP to the click-surface set:
+    # `AUDIT_PR_RE` is no longer telemetry-only, so its residual is no longer one
+    # the WIDER profile adds. Leaving a copy here would have said the acceptance
+    # was still telemetry-scoped, which is exactly the claim that stopped being
+    # true.
     "gh pr view 12",
-    "/audit-pr 12",
     # A markdown anchor into a document that DOCUMENTS the legacy form. The
     # relaxed left guard on TASK_ANCHOR_RE is what makes the real
     # `…/tasks#task-370` case work at all, and it cannot tell the two apart.

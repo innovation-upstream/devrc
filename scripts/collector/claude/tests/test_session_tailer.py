@@ -1581,8 +1581,16 @@ def test_the_repo_mapping_never_reaches_the_SPOOL_beyond_the_ONE_repo_a_mention_
     # POSITIVE CONTROL 2 — the mapping the run held really had the other two in
     # it, so their absence is a decision and not an empty fixture.
     assert S.load_mention_repos(env["repos_path"]) == FAKE_REPOS
-    for name in ("hobbyist/plotwidget", "rivalorg/spadeworks",
-                 "plotwidget", "spadeworks"):
+    # 🔴 DERIVED, NOT HAND-LISTED — keys AND values, minus the one row this
+    # mention was legitimately attributed to (whose key is also in the assistant
+    # text above, so it is in the spool for a second, honest reason). The
+    # hand-written list this replaces silently covered nothing when a fourth
+    # entry was added to `FAKE_REPOS`.
+    attributed = {"trowelcast", "gardenersguild/trowelcast", "gardenersguild"}
+    forbidden = (set(FAKE_REPOS) | set(FAKE_REPOS.values())) - attributed
+    # POSITIVE CONTROL 3 — the derivation left something to check.
+    assert len(forbidden) == 4, forbidden
+    for name in sorted(forbidden):
         assert name not in everywhere, (
             f"SPOOL DISCLOSURE (attributed run): {name!r} is in the operator's "
             "mapping and was NOT the repository this mention was attributed "

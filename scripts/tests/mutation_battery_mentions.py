@@ -173,6 +173,28 @@ MUTANTS: list[tuple] = [
      '        print("universe:", repo_universe(discovered))\n'
      "        candidates = universe\n",
      "PICKER-PATH DISCLOSURE"),
+    # 🔴 K11/K12 LEAK `repo_universe(...)`, WHICH IS THE MAPPING'S *VALUES*. The
+    # mapping is `{checkout name: "owner/repo"}`, so a leak has TWO spellings and
+    # those two rows only ever exercised one — while `test_mention_open.py`
+    # iterated `FAKE_UNIVERSE.values()` and the fixture spelled every key as a
+    # substring of its own value, which made the omission invisible. The two rows
+    # below are the KEY half, on both paths. K37 is the round-2 audit's mutant
+    # VERBATIM: it survived all 127 tests, and `sorted(load_known_repos())` is
+    # every private repository NAME on the host, on stderr and in a desktop
+    # toast. See `FAKE_UNIVERSE`'s comment block.
+    ("K37", "disclosure", "the REFUSAL path appends a \"did you mean?\" line "
+                          "carrying every repo NAME — the mapping's KEYS, which "
+                          "no guard here used to read",
+     '    notify(f"cannot resolve {subject}", f"{why} — {advice}")\n',
+     '    notify(f"cannot resolve {subject}", f"{why} — {advice}")\n'
+     '    notify("did you mean?", ", ".join(sorted(load_known_repos())))\n',
+     "REFUSAL-PATH DISCLOSURE"),
+    ("K38", "disclosure", "the same KEY leak on the PICKER path, where it rides "
+                          "out on stdout instead of a toast",
+     "        offered_universe = True\n",
+     "        offered_universe = True\n"
+     '        print("did you mean:", ", ".join(sorted(load_known_repos())))\n',
+     "PICKER-PATH DISCLOSURE"),
     ("K13", "disclosure", "the emit line ships the WHOLE mapping beside the one "
                           "repo the mention was attributed to",
      "        f\"b64:repo={m.get('repo', '')}\",\n",
@@ -341,6 +363,21 @@ MUTANTS: list[tuple] = [
                         "a mapping nothing regenerates never reports as old",
      "STALE_MAPPING_DAYS = 7\n", "STALE_MAPPING_DAYS = 99999\n",
      "never named the mapping's age"),
+    # 🔴 THE SIBLING OF K32, AND THE ROW A ROUND-2 AUDIT ASKED FOR. K32 pushes
+    # the THRESHOLD out of reach, which every `--print` staleness test sees. This
+    # deletes the NON-`--print` arm, which nothing saw: the suite stayed green at
+    # 264/264 with it gone, because the only refusal test naming an age used
+    # `--print` and took the other branch. The arm is narrow but real — see
+    # `refuse()` for the shadowed-mapping state that reaches it, and
+    # `test_the_SHADOWED_mapping_state_is_the_one_the_branch_needs` for the
+    # premise asserted apart from the behaviour.
+    ("K39", "deletion", "the NON-`--print` refusal stops naming the mapping's "
+                        "age, so the one interactive refusal that could report "
+                        "a 400-day-old mapping reports only the symptom",
+     "            if not reason and (stale := staleness_note()):\n"
+     '                why = f"{why}; {stale}"\n',
+     "            pass\n",
+     "never named the age"),
     ("K35", "deletion", "`--print` goes back to blaming the FLAG alone on a host "
                         "with no mapping, dropping the only cause the operator "
                         "can act on",
@@ -348,6 +385,39 @@ MUTANTS: list[tuple] = [
      '                why = f"{why}; also {extra}"\n',
      "            pass\n",
      "blamed the FLAG and never named the mapping"),
+    # ---- F13: `audit-pr N` is clickable, and it takes TWO files to be so -----
+    #
+    # 🔴 THE DEFECT CLASS THESE TWO ROWS EXIST FOR IS "HALF A FIX". Making the
+    # shape clickable needs the LEDGER (what the handler resolves) and the HINT
+    # REGEX (what the terminal underlines), in two files, in two languages, with
+    # two suites neither of which reads the other. MEASURED before the change:
+    # both halves were missing, so fixing either one alone would have shipped a
+    # feature that was 100% dead AND unit-tested green. Each row below reverts
+    # ONE half and must die on the seam test that spans them.
+    ("K40", "deletion", "the alacritty hint regex loses its `audit-pr` "
+                        "alternation, so the terminal never underlines the "
+                        "shape and the click is dead — while the scanner half "
+                        "still resolves it perfectly in isolation",
+     "|868[a-z0-9]{6}|/?audit-pr[ \\\\t]+[0-9]{1,6}\";\n",
+     "|868[a-z0-9]{6}\";\n",
+     "the alacritty hint regex does not underline it"),
+    ("K41", "deletion", "the LEDGER half is reverted: `AUDIT_PR_RE` goes back to "
+                        "telemetry-only, so the terminal underlines a shape the "
+                        "handler re-scans to nothing — a click that does nothing",
+     '    "AUDIT_PR_RE": _Pat(_BOTH, "detect", ("audit-pr",), "/audit-pr 1291"),\n',
+     '    "AUDIT_PR_RE": _Pat(_TELEMETRY_ONLY, "detect", ("audit-pr",),\n'
+     '                        "/audit-pr 1291"),\n',
+     "AUDIT_PR_RE is no longer clickable"),
+    ("K42", "widening", "the hint's `audit-pr` bound narrows to `{1,5}`, so "
+                        "`audit-pr 123456` underlines only `audit-pr 12345` and "
+                        "the handler opens PR 12345 — a confident wrong page",
+     "/?audit-pr[ \\\\t]+[0-9]{1,6}\";\n",
+     "/?audit-pr[ \\\\t]+[0-9]{1,5}\";\n",
+     # The HINT is what this row mutates, so the killing assertion is the one
+     # about what the terminal underlines — not the one about what the handler
+     # resolves, which is the same test's second half and covers the mirror
+     # mutation (a widened scanner bound).
+     "a TRUNCATED audit-pr number reaches the handler"),
     ("K36", "deletion", "the alacritty wrapper drops `pkgs.git` from the hint's "
                         "PATH: `git` is then absent under the display manager's "
                         "environment, FileNotFoundError is caught as OSError, "
@@ -369,6 +439,8 @@ TARGETS: dict[str, pathlib.Path] = {
     "K25": OPEN_, "K26": OPEN_, "K27": OPEN_, "K28": OPEN_,
     "K29": OPEN_, "K30": OPEN_, "K31": OPEN_, "K32": OPEN_,
     "K33": OPEN_, "K34": OPEN_, "K35": OPEN_,
+    "K37": OPEN_, "K38": OPEN_, "K39": OPEN_,
+    "K40": ALACRITTY, "K41": SCAN, "K42": ALACRITTY,
     # 🔴 A FOURTH FILE, AND A NIX ONE. The wrapper's PATH is a seam between two
     # files in two languages that agree only by coincidence, and both directions
     # of disagreement are silent — see the test named in K36's `expected`. It is
