@@ -69,8 +69,12 @@
 #       outside them can make a DIFFERING entry look brand-new. Three rules,
 #       each closing a measured hole rather than a hypothetical one:
 #         * characters outside `[A-Za-z0-9._/-]`;
-#         * a component STARTING with `-`, which reaches `sha256sum` as an
-#           option (`invalid option -- 'd'`, rc 123, no `seed:` line);
+#         * a component STARTING with `-`. For the FIRST component this is
+#           measured: `-dashscope/thing.md` reached `sha256sum` as `-d…`
+#           (`invalid option -- 'd'`, rc 123, no `seed:` line). For the SECOND
+#           it is prophylactic — the argv word begins with the scope, so it can
+#           never be read as an option — and is kept only so the rule is one
+#           rule rather than two with an asymmetry nobody will remember;
 #         * a NEWLINE anywhere. It is this list's OWN record separator, so a
 #           looser check sees two halves that each look legitimate and reports
 #           `rejected=0`. Caught because the pattern REQUIRES a `<scope>/<entry>`
@@ -370,7 +374,7 @@ fi
 # exists to prevent. Escaping-symmetry across dash/bash/GNU-coreutils is not
 # something this script can establish, so it stops trying.
 #
-# MEASURED 2026-09-05 across BOTH live stores: 348 entry files, **0** whose path
+# MEASURED 2026-09-05 across BOTH live stores: 373 entry files, **0** whose path
 # leaves `[A-Za-z0-9._/-]`. Entry names are service slugs by construction, and
 # `cairn-cutover.py` — the only programmatic caller — builds its delta tree from
 # that same population. So this rejects nothing that exists and nothing any
@@ -395,8 +399,15 @@ _odd_f="$_seed_tmp/odd-names"
 # reaches `sha256sum` as `-d…` and the run dies `invalid option -- 'd'` at
 # rc 123 with no `seed:` line — round 1's exact failure shape, re-reached
 # through the guard that claimed to remove the class (MEASURED 2026-09-05).
-# `sha256sum --` below is the mechanism fix; this is the policy one, and both
-# are kept because the mechanism is one edit away from being lost again.
+# Two locks, and it is worth being exact about which does the work, because the
+# first version of this note had it BACKWARDS. The POLICY (this pattern) is
+# load-bearing: with `--` present but the policy reverted, `-dashscope/thing.md`
+# pushes at rc 0 printing `seed: OK` — MEASURED. The MECHANISM (`sha256sum --`)
+# is what keeps the failure LOUD if the policy is ever relaxed: without either,
+# the run dies rc 123 with no `seed:` line, which is at least fail-safe. So `--`
+# does not protect the bytes; it protects the diagnostic. Both are kept.
+# 🔴 `--` IS UNREACHABLE WHILE THE POLICY HOLDS, and its mutants SURVIVE the
+# suite by construction. Labelled, not counted as covered.
 # 🔴 THE REQUIRED `/` IS WHAT CATCHES A NEWLINE — and it does so WITHOUT a
 # third `find`. `$staged_list` is
 # newline-delimited, so a file named `na<NL>me.md` is written as TWO lines; a
@@ -409,12 +420,19 @@ _odd_f="$_seed_tmp/odd-names"
 # FILENAME CANNOT CONTAIN `/`, so the SECOND half of any split never has one and
 # is always rejected, whatever the first half looks like.
 #
-# 🔴 AN EARLIER VERSION ALSO ANCHORED `\.md$` and this comment credited THAT
-# with catching the newline. It did not, and the mutation matrix said so:
-# dropping the anchor killed no test, because the slash rule had already decided
-# every case. `find` only ever emits `*.md`, so the anchor could never change a
-# verdict — a redundant clause carrying a false explanation, which is worse than
-# no clause. Removed. The first attempt at this counted `-print0` records
+# 🔴 `\.md$` IS ALSO REQUIRED, AND IT IS NOT REDUNDANT — I REMOVED IT ONCE AND
+# WAS WRONG. The reasoning was "`find` only emits `*.md`, so it can never change
+# a verdict". `-name '*.md'` constrains the BASENAME; this grep runs on LINES,
+# and the whole mechanism here is that a newline turns one path into two lines —
+# of which the one carrying the `/` is precisely the one NOT ending in `.md`.
+# MEASURED on `widget-cfg/na<NL>me.md`: without the anchor the refusal names
+# `2:me.md` ALONE — a path that is not in the store, with the scope never
+# mentioned; with it, `1:widget-cfg/na` AND `2:me.md`. Same exit code either
+# way, so this is not a clobber; it is a correct refusal nobody can act on,
+# which is the shape `test_the_refusal_names_the_offending_path_in_full` exists
+# to forbid. The `/` decides WHETHER to refuse; the anchor decides whether the
+# refusal is USABLE. My mutation missed it because the test asserted only that
+# EITHER half was named — it now requires the scope-bearing one. The first attempt at this counted `-print0` records
 # instead and added a THIRD walk — which `test_the_two_find_expressions_are_
 # IDENTICAL` correctly failed, because two walks that disagree is the bug this
 # file already carries a scar from.
@@ -426,7 +444,7 @@ _odd_f="$_seed_tmp/odd-names"
 # Each of the two components must therefore START with a non-dash character and
 # continue in the class. `_shippable_entries` is `-mindepth 2 -maxdepth 2`, so
 # there is exactly one `/`.
-LC_ALL=C grep -nvE '^[A-Za-z0-9._][A-Za-z0-9._-]*/[A-Za-z0-9._][A-Za-z0-9._-]*$' "$staged_list" > "$_odd_f" || [ $? -eq 1 ]
+LC_ALL=C grep -nvE '^[A-Za-z0-9._][A-Za-z0-9._-]*/[A-Za-z0-9._][A-Za-z0-9._-]*\.md$' "$staged_list" > "$_odd_f" || [ $? -eq 1 ]
 _n_odd=$(wc -l < "$_odd_f" | tr -d ' ')
 # Printed on EVERY path, not only on rejection — this file's own silent-zero
 # rule: a bare 0 from a check that walked nothing reads exactly like a clean one.

@@ -18742,7 +18742,8 @@ class TestTheSeedNameCheckRejectsPathsItCannotCompareSafely:
     pushed over as though it were a pure addition.
 
     So the domain is bounded instead of the parser hardened. MEASURED 2026-09-05
-    across both live stores: 348 entry files, 0 outside `[A-Za-z0-9._/-]`. These
+    across both live stores: 373 entry files, 0 outside `[A-Za-z0-9._/-]` (the
+    count MOVES — it read 348 hours earlier the same day). These
     tests pin BOTH directions — that ordinary slugs still push (or the guard
     would be switched off within a day), and that each awkward shape is refused
     with nothing pushed.
@@ -18841,7 +18842,7 @@ class TestTheSeedNameCheckRejectsPathsItCannotCompareSafely:
         (store / SCOPE / "na\nme.md").write_text(_entry("odd", SCOPE))
         # the decoys that made the silent version reachable — both halves of the
         # split resolve to real files, so nothing downstream errors
-        (store / SCOPE / "na").mkdir(exist_ok=True)
+        (store / SCOPE / "na").write_text("decoy")   # a FILE: a directory makes it crash
         (store / "me.md").write_text("x")
 
         r = self._push(store, tmp_path, env)
@@ -18850,10 +18851,17 @@ class TestTheSeedNameCheckRejectsPathsItCannotCompareSafely:
             f"a newline in an entry name was not refused:\n{r.stdout}\n{r.stderr}"
         )
         assert "NOTHING WAS PUSHED" in r.stderr, r.stderr
-        # 🔴 NAME A HALF OF THE SPLIT. The whole defect was that both halves
-        # looked legitimate, so the refusal must demonstrably have SEEN one.
-        assert f"{SCOPE}/na" in r.stderr or "me.md" in r.stderr, (
-            f"the refusal did not name either half of the split: {r.stderr}"
+        # 🔴 NAME **BOTH** HALVES, and the scope-bearing one especially. An
+        # `or` here is what let me delete the `\.md$` anchor and see no test
+        # fail: without it the refusal says only `me.md` — not a path in the
+        # store, scope never mentioned — which is a correct refusal nobody can
+        # act on.
+        assert f"{SCOPE}/na" in r.stderr, (
+            "the refusal never named the SCOPE-bearing half, so the operator "
+            f"cannot tell which entry to rename: {r.stderr}"
+        )
+        assert "me.md" in r.stderr, (
+            f"the refusal did not name the trailing half either: {r.stderr}"
         )
         assert not (dest / SCOPE).exists() or not any((dest / SCOPE).iterdir()), (
             "bytes reached the pod despite the refusal"
@@ -18880,6 +18888,23 @@ class TestTheSeedNameCheckRejectsPathsItCannotCompareSafely:
         )
         assert "-dashscope/thing.md" in r.stderr, r.stderr
         assert not (dest / "-dashscope").exists()
+
+    def test_an_ENTRY_name_starting_with_a_dash_is_refused_too(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE SECOND COMPONENT'S HALF OF THE RULE, which had NO test — its
+        mutant survived the whole file. Unlike the scope case this one is
+        prophylactic (the argv word starts with the scope, so `sc/-x.md` can
+        never be read as an option); it is pinned so the rule stays ONE rule
+        instead of two with an asymmetry nobody remembers."""
+        env, dest = fake_cluster
+        (store / SCOPE / "-thing.md").write_text(_entry("thing", SCOPE))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 10, f"{r.stdout}\n{r.stderr}"
+        assert f"{SCOPE}/-thing.md" in r.stderr, r.stderr
+        assert not (dest / SCOPE).exists() or not any((dest / SCOPE).iterdir())
 
     def test_a_dash_INSIDE_a_name_is_still_allowed(
         self, store: Path, tmp_path: Path, fake_cluster
@@ -18935,7 +18960,7 @@ def _require_dash() -> str:
     """🔴 FAIL, NEVER SKIP. The pod's shell is dash and the harness's is bash;
     a tier without dash is structurally blind to every defect that lives in the
     difference, and a skip there reports safety it never measured. MEASURED
-    2026-09-05: all 5 tests in this class skipped silently before `dash` was
+    2026-09-05: every test in this class skipped silently before `dash` was
     added to `REQUIRED_TOOLS` and `flake.nix`'s `gateTools`.
     """
     dash = shutil.which("dash")
@@ -18997,23 +19022,31 @@ class TestTheSeedProbeAnswersSurviveTheRealPodShell:
         assert "ABSENT" in script and "UNREADABLE" in script, script
         assert "sha256sum" in script, script
 
-    @pytest.mark.parametrize(
-        "name",
-        ["sc/tab\\there.md", "sc/new\\nline.md", "sc/cut\\chere.md", "sc/plain.md"],
-    )
-    def test_dash_and_bash_produce_BYTE_IDENTICAL_answers(self, name):
-        dash = _require_dash()
+    def test_the_extractor_LEAVES_NO_ESCAPES_BEHIND(self):
+        """🔴 GROUND TRUTH ON THE UNESCAPING, not substrings. The control above
+        is a SPELLED guard — three words — and is structurally blind to an
+        escaping error: reverting the `\\\\` unescape survived the whole file.
 
-        def run(shell):
-            return subprocess.run(
-                [shell, "-c", self._probe_script(), "_", name],
-                capture_output=True, text=True, timeout=30,
-            ).stdout
-
-        assert run(dash) == run("bash"), (
-            f"the pod's shell and the test harness's shell disagree on {name!r} — "
-            "this is the silent-clobber route: the two sides' join keys diverge "
-            "and a DIFFERING pod entry reads as a pure addition"
+        The inner script is embedded in a DOUBLE-QUOTED shell string, so by the
+        time the pod's `sh` sees it every `\\\\`, `\\"` and `\\$` has been
+        collapsed once. A correctly-extracted script therefore contains NO
+        double backslash and NO backslash-quote — if it does, the extractor
+        stopped early and every dash test above is measuring a command the pod
+        never runs.
+        """
+        script = self._probe_script()
+        assert "\\\\" not in script, (
+            "the extracted script still contains a DOUBLE backslash, so the "
+            f"unescaping is incomplete: {script!r}"
+        )
+        assert '\\"' not in script, (
+            f"the extracted script still contains an escaped quote: {script!r}"
+        )
+        # positive control: the RAW source span really does carry the escapes
+        # this test asserts are gone, so it cannot pass by matching nothing.
+        raw = re.search(r"-I\{\} sh -c '(.+?)' _ \{\}", SEED_PATH.read_text(), re.S)
+        assert raw and ('\\"' in raw.group(1) or "\\\\" in raw.group(1)), (
+            "the raw source carries no escapes, so this test proves nothing"
         )
 
     def test_the_UNREADABLE_arm_is_exercised_too(self, tmp_path: Path):
@@ -19023,6 +19056,17 @@ class TestTheSeedProbeAnswersSurviveTheRealPodShell:
         suite (measured). This reaches it: the file exists, so `[ -f ]` is true,
         and it is unreadable, so `sha256sum` fails into the fallback."""
         dash = _require_dash()
+        # 🔴 `chmod 000` DOES NOT BLOCK ROOT, so under uid 0 this arm cannot be
+        # constructed at all. Both tiers this repo gates on are non-root
+        # (dev host = uid 1000; the nix sandbox runs as nixbld) — MEASURED — so
+        # this says WHY rather than skipping, which would report coverage it
+        # never had.
+        assert os.geteuid() != 0, (
+            "this tier runs as root, so no file can be made unreadable and the "
+            "UNREADABLE arm of the pod probe cannot be exercised here. That is "
+            "a gap in the tier, not a passing test — do not convert this to a "
+            "skip."
+        )
         d = tmp_path / "sc"; d.mkdir()
         target = d / "unreadable\\there.md"
         target.write_text("x")
