@@ -123,6 +123,17 @@ else means you **DERIVED** them, and that verdict is frozen at your first read.
 | DERIVED | yes | **`ready_for_review`** — you must not grade an exam you wrote |
 | either | **no** | **`ready_for_review`**, naming WHICH criterion and WHY it was not validatable |
 
+🔴 **READING that third row: `ready_for_review` is not evidence work remains.** The row's own output —
+a card whose work is finished, parked because ONE criterion was not validatable — is
+indistinguishable from an unfinished card on the board, so it ages there. **The tell is a criterion
+reality cannot satisfy**: a fixed number against a usage-based price, "the two numbers agree" against
+a per-token rate, "update the enumeration in its PR body" when the sentence is in an unamendable
+commit message. Grading those is minutes of reading and is the AUTHOR's call by construction — the
+worker was right to refuse. Measured 2026-09-06: three such cards sat complete-but-parked for over a
+week and two were auto-tagged `stale`. 🔴 **And the mirror, for the author: ask what makes a criterion
+FALSE before you write it** — one no correct implementation can meet is a trap for the next worker,
+not a bar.
+
 ## machine (hook-token) Task API
 🔴 **Authoring one? `flows/task-authoring.md` FIRST** — a hook denies a criteria-less create.
 Read/create with `clawgatectl task ls --summary [--status open --tag t --limit n]` · `task get <id>`
