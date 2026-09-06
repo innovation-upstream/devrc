@@ -369,12 +369,24 @@ def test_a_DISCOVERING_subprocess_resolves_through_the_FAKE_mapping(tmp_path,
     reaching a child. This one DISCOVERS, and answers from a name that exists
     only in `FAKE_UNIVERSE`.
 
-    `DEVRC_WORKSPACE` points at an empty directory so the only thing the child
-    can resolve `loamfield` from is the redirected mapping: a local checkout
-    WINS over the mapping, and this host's real `~/workspace` must not be able
-    to decide a test's answer either way."""
+    🔴 TWO REAL EDGES ARE CLOSED BY ARGUMENT RATHER THAN BY STUB, because a
+    child process cannot be monkeypatched and this is the only test that lets
+    one run the discovery pass:
+
+      * `DEVRC_WORKSPACE` -> an empty directory, so the `git remote` fan-out
+        walks nothing. A local checkout WINS over the mapping, so this host's
+        real `~/workspace` must not be able to decide a test's answer either
+        way — and it also keeps the test off ~100 concurrent agent worktrees.
+      * `--default-repo` -> set, which short-circuits `tmux_pane_repo()` in
+        `main()` (`args.default_repo or tmux_pane_repo()`). Without it the child
+        runs a REAL `tmux display-message` against the operator's live server —
+        a side effect in a suite that is supposed to have none, next door to
+        tests that drive real tmux sockets. The value is irrelevant to the
+        assertion: `loamfield#12` names its repo, so it resolves `mapped`, one
+        rung above `default`.
+    """
     monkeypatch.setenv("DEVRC_WORKSPACE", str(tmp_path / "no-checkouts-here"))
-    r = _run("--print", "loamfield#12")
+    r = _run("--print", "--default-repo", "unused/by-this-shape", "loamfield#12")
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "https://github.com/gardenersguild/trowelcast/issues/12", (
         "the child did not resolve through the redirected mapping — it either "
