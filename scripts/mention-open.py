@@ -360,7 +360,8 @@ def _fan_out(paths: list[Path]) -> list[str]:
     `~/workspace/devrc` would answer `devrc#1291` with issue 1291 of some other
     organisation's repository. That is the confident-wrong-page failure this
     whole module is anchored against, and it is invisible to any fixture holding
-    one checkout. Pinned by `test_the_fan_out_pairs_every_checkout_with_its_OWN`.
+    one checkout. Pinned by
+    `test_mention_open.py::test_the_fan_out_pairs_every_checkout_with_its_OWN_owner`.
 
     The measurement it parallelises is ~100% waiting on a child process, which
     is why threads are the right tool and the GIL is not in the way: 100
