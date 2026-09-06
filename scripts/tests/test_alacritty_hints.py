@@ -31,12 +31,42 @@ double-quoted strings define.
 """
 from __future__ import annotations
 
+import contextlib
+import importlib.util
 import re
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+@contextlib.contextmanager
+def _collector_on_path():
+    """`scripts/collector` on `sys.path` for the duration, then OFF again.
+
+    🔴 A TEST BODY MUST NOT LEAVE A GLOBAL BEHIND. This used to be a bare
+    `sys.path.insert(0, …)` inside one test, never undone — so every test that
+    ran after it in the same process (any file, any order) resolved imports
+    against a directory it never asked for, and the leak was invisible until a
+    name in `scripts/collector` happened to shadow one somewhere else.
+    Whichever test ran first would decide, and `-p no:randomly` is not a fix.
+    """
+    inserted = str(ROOT / "scripts" / "collector")
+    sys.path.insert(0, inserted)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ValueError):
+            sys.path.remove(inserted)
+
+
+def _mention_scan():
+    """The scanner module, imported without leaving `sys.path` modified."""
+    with _collector_on_path():
+        import mention_scan  # noqa: PLC0415 — see `_collector_on_path`
+    return mention_scan
 ALACRITTY_NIX = ROOT / "nix" / "programs" / "alacritty" / "default.nix"
 
 # alacritty 0.17.0's built-in URL-hint regex, as the regex engine receives it.
@@ -386,11 +416,7 @@ def test_every_TERMINAL_shape_the_scanner_detects_is_also_UNDERLINED(mention_hin
     engine is a syntax-compatible stand-in — what an edit breaks is whether the
     pattern still DESCRIBES the shape.
     """
-    import importlib.util
-    import sys
-
-    sys.path.insert(0, str(ROOT / "scripts" / "collector"))
-    import mention_scan as MS  # noqa: PLC0415
+    MS = _mention_scan()
 
     rx = re.compile(_string_attr(mention_hint, "regex"))
     terminal = {name: pat for name, pat in MS.PATTERN_LEDGER.items()

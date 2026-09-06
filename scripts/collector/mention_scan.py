@@ -429,12 +429,22 @@ def mention_hints(profile: str = PROFILE_TERMINAL) -> tuple[str, ...]:
     widening. ⚠ THE PERCENTAGE IS A PROPERTY OF THE WINDOW, NOT OF THE CODE — an
     earlier window read 82%/80% on 6,052 blocks. Re-measure rather than quote
     this; what is stable is that the filter still skips ~4 blocks in 5. Every
-    telemetry-only shape above — `audit-pr 1291`, `gh pr view 1291`,
-    `clawgate task 370` — contains neither `#` nor `868`, so adding the regex
-    alone would have shipped a completely dead feature that still passed every
-    unit test calling `scan_mentions()` directly. Deriving the list from the same
-    ledger the patterns are declared in is what makes that impossible: ONE rule,
-    ONE place.
+    shape the ledger learned — `gh pr view 1291` and `clawgate task 370`, which
+    stayed telemetry-only, and `audit-pr 1291`, which is in BOTH profiles
+    because it is also clickable — contains neither `#` nor `868`, so adding the
+    regex alone would have shipped a completely dead feature that still passed
+    every unit test calling `scan_mentions()` directly. Deriving the list from
+    the same ledger the patterns are declared in is what makes that impossible:
+    ONE rule, ONE place.
+
+    ⚠ SO THE TERMINAL PROFILE IS NO LONGER TWO LITERALS EITHER. Measured:
+    `mention_hints(PROFILE_TERMINAL)` is `('#', '868', 'audit-pr')` — three —
+    and `mention_hints(PROFILE_TELEMETRY)` is eight. `AUDIT_PR_RE`'s ledger row
+    is what put the third one there, which is the point of deriving them. The
+    terminal SET (not a count) is pinned by
+    `test_session_tailer.py::test_the_prefilter_is_DERIVED_from_the_scanners_
+    telemetry_ledger`, because two comments here already carried the stale
+    "two literals" for as long as nothing checked.
     """
     hints: set[str] = set()
     for name in patterns_in(profile):

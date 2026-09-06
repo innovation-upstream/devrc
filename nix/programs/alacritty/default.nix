@@ -155,14 +155,30 @@ in
       # swallows the whole run instead, and the handler's strict scanner then
       # rejects it and says so. Same loose-regex/strict-handler contract.
       #
-      # ⚠ RESIDUAL, STATED RATHER THAN HIDDEN: this engine has no lookbehind, so
-      # the scanner's `(?<![0-9A-Za-z_/&#.-])` left guard cannot be written here
-      # and `myaudit-pr 12` would underline `audit-pr 12`. The handler cannot
-      # recover the preceding character — the hint hands it the matched span
-      # only — so this one is genuinely looser than the scanner rather than
-      # merely noisier. It is accepted because the trigger string does not occur;
-      # the `#` alternation above has carried the identical residual since it
-      # shipped (`index.html#12` underlines `html#12`).
+      # ⚠ RESIDUAL, STATED RATHER THAN HIDDEN, AND THE LIKELIER HALF IS THE PATH
+      # FORM. This engine has no lookbehind, so the scanner's
+      # `(?<![0-9A-Za-z_/&#.-])` left guard cannot be written here. MEASURED
+      # against this exact pattern:
+      #
+      #   'scripts/audit-pr 12'        underlines '/audit-pr 12'   -> RESOLVES
+      #   'claude/skills/audit-pr 12'  underlines '/audit-pr 12'   -> RESOLVES
+      #   'myaudit-pr 12'              underlines 'audit-pr 12'    -> RESOLVES
+      #
+      # The `/?` that makes the deliberate `/audit-pr N` slash-command form
+      # clickable is what swallows a PATH separator, so any `…/audit-pr` followed
+      # by a number underlines — and this repo HAS a `claude/skills/audit-pr/`
+      # path, so unlike `myaudit-pr` the trigger string genuinely occurs here.
+      # The handler cannot recover the preceding character (the hint hands it the
+      # matched span only), so this is genuinely looser than the scanner rather
+      # than merely noisier.
+      #
+      # It is accepted, not overlooked: the damage is a stray underline on text
+      # a click resolves to a real PR number that WAS written on the line, and
+      # `main()` no longer auto-opens on a repository it guessed (see
+      # `mention-open.py`'s `repo_source == "default"` branch), so the worst case
+      # is a picker nobody asked for rather than a wrong page. The `#`
+      # alternation above has carried the identical residual since it shipped
+      # (`index.html#12` underlines `html#12`).
       #
       # 🔴 THIS REGEX IS DELIBERATELY LOOSER THAN THE SCANNER, AND THAT IS THE
       # DESIGN, NOT A BUG. Rust's regex crate has NO lookaround, so the
