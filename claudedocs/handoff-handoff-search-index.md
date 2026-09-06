@@ -127,6 +127,11 @@ they are separate claims — the earlier "NOT deployed" status is still supersed
     stated it was following that text rather than the copy it had loaded. Its result — 3 hits,
     best `rank=1.1667`, generic gotcha sections — it judged irrelevant, finding nothing any prior
     session had ruled out. **Yield to date: 0.**
+  - ⚠ **The denominators, stated so they reconcile** (an audit found 8 − 1 = 7, not 6): the
+    workbench **8** = **1** that fired + **6** analysed as non-firing + **1** that was the
+    measuring session itself, excluded as the instrument. All figures are as of
+    **2026-09-06T04:00Z**; the corpus grows, so a later re-run reports larger numbers rather
+    than contradicting these — a re-derivation ~1 h later measured 10/2 on the same needle.
   - **The 6 workbench non-firing runs all met the trigger.** All 6 ran `claim-work` (1–20×) and 5
     made edits (2–52 `Edit`/`Write` calls) — actively working ranked items, not reporting and
     waiting. (The six docs are client-repo topics and are deliberately not named here; this repo

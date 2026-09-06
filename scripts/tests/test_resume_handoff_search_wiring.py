@@ -245,9 +245,11 @@ def test_the_block_carries_the_recall_posture_and_the_scope_LITERAL():
 
     `indexed_docs=` is derived from the module, not restated: it is the literal
     the renderer emits beside every outcome, and it is what makes a zero
-    readable. The recall posture is the same claim `cairn recall` carries four
-    steps earlier -- one provenance rule, so a caller cannot learn it for one
-    surface and lose it for the other.
+    readable. The recall posture is the same claim `cairn recall` carries in the
+    SAME fence, a few lines above -- one provenance rule, so a caller cannot
+    learn it for one surface and lose it for the other. (It read "four steps
+    earlier" until 2026-09-06, which was wrong in both directions: `cairn recall`
+    was one step LATER before the move, and is co-located after it.)
     """
     source = SEARCH_MODULE.read_text(encoding="utf-8")
     assert "indexed_docs=" in source, (
@@ -286,26 +288,44 @@ def numbered_steps(text: str) -> list[tuple[int, str]]:
     return out
 
 
-def test_the_query_is_UNCONDITIONAL__it_shares_a_numbered_step_with_cairn_recall():
+def fenced_blocks(text: str) -> list[str]:
+    """Every ``` fenced block in the document, bodies only."""
+    return re.findall(r"(?ms)^\s*```[a-z]*\n(.*?)^\s*```", text)
+
+
+def test_the_query_shares_a_FENCE_with_cairn_recall():
     """🔴 THE REGRESSION GUARD FOR THE 2026-09-06 MOVE — structural, not spelled.
 
+    🔴 READ WHAT THIS DOES **NOT** PROVE FIRST. It does not prove the command is
+    unconditional; it proves CO-LOCATION, which is a PROXY for it. An audit
+    (2026-09-06) built four isolated mutants against an earlier version of this
+    guard that asserted only a shared step DIGIT, and three survived a fully
+    green suite:
+
+      * M1  command moved back into step 3                     -> KILLED
+      * M2  a gating sentence inserted above the fence          -> SURVIVED
+      * M3  a "only when working an open item" comment INSIDE   -> SURVIVED
+      * M4  a SECOND list item also labelled `4.`, gated        -> SURVIVED
+
+    M4 is now killed too, by comparing the FENCE rather than the digit: a second
+    `4.` block is a different fence. **M2 and M3 still survive and are not
+    covered by anything.** They are prose-shaped hazards -- a sentence or comment
+    that re-introduces a condition without moving the command -- and the honest
+    position is that no structural check here sees them, not that a better
+    keyword would. `claude/RULES.md`: a guard on WORDS is walkable by REWORDING,
+    so this asserts placement and states its own residual rather than pretending
+    to a coverage it does not have.
     MEASURED over the 34 h after `#1295` merged: the query lived as a
     CONDITIONAL inside step 3 ("before working any open item…") and **1 of 14**
     `/resume` runs across both hosts ever invoked it -- and that one was reading
     `origin/main` off the staleness alarm, not firing the step. The trigger was
-    met: all six workbench non-firing runs ran `claim-work`, five made edits, and
-    five of six resumed a doc carrying an `## Open investigations` section. The
-    discriminator was PLACEMENT: step 3's sibling `git log --since` check -- same
-    trigger, same block, an ordinary command -- fired 0/6, while step 4
-    (`cairn recall`, numbered, unconditional, fenced) fired 5/6.
-
-    🔴 SO THIS PINS A RELATIONSHIP, NOT A WORD. `claude/RULES.md`: "a guard can be
-    SPELLED rather than STRUCTURAL -- ask: can it pass while the hazard exists in
-    a different shape?" A grep for "unconditional" would pass on a body that says
-    the word and still gates the command behind an open item. What cannot be
-    reworded around is WHICH numbered step the command physically sits in: the
-    hazard IS the command being in a step whose entry is conditional, so the
-    guard asserts it shares a step with the surface measured to fire.
+    met. The workbench half was 8 runs = 1 that fired + 6 analysed as non-firing
+    + 1 that was the measuring session itself, excluded as the instrument; of
+    those 6, all ran `claim-work`, five made edits, and five resumed a doc
+    carrying an `## Open investigations` section. The discriminator was
+    PLACEMENT: step 3's sibling `git log --since` check -- same trigger, same
+    block, an ordinary command -- fired 0/6, while step 4 (`cairn recall`,
+    numbered, unconditional, fenced) fired 5/6.
 
     ⚠ WHAT THIS DOES NOT CLAIM: that co-location reproduces 5/6. That is a
     prediction, and the residual is stated in the skill -- the 5/6 was measured
@@ -336,7 +356,30 @@ def test_the_query_is_UNCONDITIONAL__it_shares_a_numbered_step_with_cairn_recall
         "Moving it back out re-creates a step that only fires when a session "
         "happens to be working an open item -- measured at ~7% of runs.\n"
         "If you are deliberately restructuring, re-measure adoption FIRST and put "
-        "the number in the commit message."
+        "the number in the commit message.\n"
+        "🔴 A shared step DIGIT is not enough on its own -- see the fence check "
+        "below, which is what kills a second list item re-labelled `4.`."
+    )
+
+    # 🔴 THE FENCE CHECK -- this is the half that kills mutant M4. A second list
+    # item re-labelled `4.` shares the digit, so the assertion above passes while
+    # the query sits in its own separately-gated block. Sharing a FENCE cannot be
+    # faked that way: one ```bash block is one thing a reader runs together.
+    fences = fenced_blocks(_skill_text())
+    with_query = [f for f in fences if _normalise(EXPECTED_COMMAND) in _normalise(f)]
+    assert len(with_query) == 1, (
+        f"the prescribed query appears in {len(with_query)} fenced block(s), "
+        "expected exactly 1."
+    )
+    assert CO_LOCATED_COMMAND in with_query[0], (
+        "the handoff-corpus query is no longer in the SAME fenced block as "
+        f"`{CO_LOCATED_COMMAND}`.\n"
+        "🔴 Sharing a step NUMBER is not sharing a step: a second list item "
+        "re-labelled with the same digit passes the check above while gating the "
+        "query behind its own condition -- that exact mutant SURVIVED this guard "
+        "until 2026-09-06. The two commands must sit in one fence, so a reader "
+        "runs them together.\n"
+        f"  fence containing the query:\n{with_query[0].rstrip()}"
     )
 
 
