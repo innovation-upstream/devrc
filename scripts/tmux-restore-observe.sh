@@ -28,8 +28,10 @@
 #
 #   * NOT duplicate window NAMES. `automatic-rename-format` is the basename of
 #     the pane's cwd, so every window of a session sitting in one repo shares a
-#     name BY CONFIGURATION. Measured 2026-09-06: 9 duplicate (session, name)
-#     groups in a healthy live workspace. A name-keyed check reports RACE on a
+#     name BY CONFIGURATION. Measured 2026-09-06 on a HEALTHY live workspace:
+#     10 duplicate (session, name) groups (it was 9 four hours earlier — the
+#     number drifts with the workspace and is not the claim). The claim is that
+#     the count is reliably NON-ZERO, so a name-keyed check reports RACE on a
 #     perfect restore.
 #   * NOT the baseline's window COUNT. continuum autosaves every 15 minutes and
 #     the reboot is unscheduled, so a count captured hours earlier describes a
@@ -193,10 +195,22 @@ emit_unit() {
 }
 
 # --------------------------------------------------------------------------- #
-# Sections. TAB-separated: tmux REFUSES a window name containing a tab or a
-# newline (measured — `invalid window name`), so a row cannot be split by its
-# own content. Every structured section precedes the free-text JOURNAL, so
-# journal content can never pollute one.
+# Sections. TAB-separated. tmux REFUSES a window name containing a tab or a
+# newline (measured — `invalid window name`), so an INVENTORY row cannot be
+# split by its own content.
+#
+# ⚠ That is a claim about window NAMES only, NOT about the layout file: measured
+# on one real save, 54 pane records occupied 58 physical lines, because a pane's
+# trailing command field can carry embedded newlines. Both pane readers key on
+# `$1=="pane"`, so a continuation line is skipped rather than misread — but the
+# cwd reader parses exactly these rows, so the property it relies on is the
+# `$1` key, not line-per-record.
+#
+# ⚠ And ORDERING DOES NOT PROTECT A PARSER. An earlier version of this comment
+# claimed journal content "can never pollute" a structured section because every
+# structured section precedes the JOURNAL. It could: `section()` re-opened its
+# block at any later matching header. That is fixed in `section()` itself, which
+# is what makes the property true — not the ordering.
 # --------------------------------------------------------------------------- #
 
 emit_inventory() {
@@ -229,6 +243,39 @@ emit_observed_cwd() {
 # whose NEXT field is the 0|1 pane_active flag. The successor test is what stops
 # a pane_title that happens to begin with `:/` from being taken as the cwd.
 layout_ids() { awk -F'\t' '$1=="window" {print $2"\t"$3}' "$1" | sort; }
+
+# 🔴 THE POST-BOOT WORKSPACE HAS TWO WRITERS, NOT ONE. continuum replays the
+# layout, and `tmux-session-restore.py` then runs `new-window -t <sess>:<idx>`
+# for anything in its plan that is missing (:743) and `send-keys "cd <plan cwd>
+# && claude --resume"` (:755). So a plan id absent from the layout is a window
+# the restore CREATED ON PURPOSE, and a cwd matching the PLAN's is the restore
+# working correctly — neither is the boot race.
+#
+# Measured on this host: at a plan/layout skew of 46 min the layout-only
+# expectation produced 1 false RACE id and 4 false MISPLACEMENT rows; at 91 min,
+# 1 and 5. Skew is normally ~40 s (the post-save hook refreshes the plan), but
+# the restore tolerates 2 h BY DESIGN (`--staleness-check 2`) and a silently
+# dead save chain is this instrument's own premise — so the false-positive
+# regime is exactly the degraded state it exists to observe.
+plan_ids() {
+  python3 - "$1" 2>/dev/null <<'PY' || true
+import json, pathlib, sys
+for e in json.loads(pathlib.Path(sys.argv[1]).read_text()):
+    s, w = e.get("session"), e.get("window")
+    if s and w is not None:
+        print(f"{s}\t{w}")
+PY
+}
+
+plan_cwds() {
+  python3 - "$1" 2>/dev/null <<'PY' || true
+import json, pathlib, sys
+for e in json.loads(pathlib.Path(sys.argv[1]).read_text()):
+    s, w, c = e.get("session"), e.get("window"), e.get("cwd")
+    if s and w is not None and c:
+        print(f"{s}\t{w}\t{c}")
+PY
+}
 
 _layout_cwd_awk='
   function cwd_of(   i) {
@@ -296,6 +343,18 @@ capture() {
         layout_ids "$replayed"
         echo "--- EXPECTED-CWD (session<TAB>index<TAB>cwd) ---"
         layout_cwds "$replayed"
+        # The skew between the two writers is what decides how many windows the
+        # restore legitimately adds. Printed so the reader can see it, and
+        # subtracted below so it cannot masquerade as the race.
+        if [ -f "$PLAN" ]; then
+          echo "plan_layout_skew_seconds=$((  $(stat -c '%Y' "$PLAN") - $(stat -c '%Y' "$replayed") ))"
+        fi
+      fi
+      if [ -f "$PLAN" ]; then
+        echo "--- PLAN-IDS (session<TAB>index) ---"
+        plan_ids "$PLAN" | sort
+        echo "--- PLAN-CWD (session<TAB>index<TAB>cwd) ---"
+        plan_cwds "$PLAN" | sort -u
       fi
       echo "--- JOURNAL ($UNIT, this boot) ---"
       journalctl --user -u "$UNIT" -b --no-pager 2>&1 || echo "(journal unavailable)"
@@ -310,8 +369,17 @@ get() { sed -n "s/^$2=//p" "$1" | head -1; }
 # Body of a named section, up to the next `--- ` header. Comment rows (`# …`)
 # are dropped: they are the UNMEASURED markers the emitters write.
 section() {
+  # 🔴 FIRST MATCHING BLOCK ONLY. An earlier version re-evaluated `inside` at
+  # every `--- ` line, so a LATER line reproducing a section header re-opened
+  # the block — demonstrated: a JOURNAL line spelling `--- OBSERVED-IDS ...`
+  # injected a row into the comparison and produced a false RACE EVIDENCE.
+  # Ordering does not protect a parser; `done` is what protects it.
   awk -v want="$2" '
-    /^--- / { inside = (index($0, "--- " want) == 1); next }
+    /^--- / { if (done) { inside = 0; next }
+              inside = (index($0, "--- " want) == 1)
+              if (inside) seen = 1
+              else if (seen) done = 1
+              next }
     inside && $0 !~ /^#/ && NF { print }
   ' "$1"
 }
@@ -370,8 +438,12 @@ verdict() {
   local lastlink
   lastlink=$(get "$post" resurrect_last_link)
   if [ -n "$lastlink" ] && [ "$lastlink" != "(none)" ] && [ "$lastlink" != "$replayed" ]; then
-    echo "  note: resurrect's 'last' link now points at $lastlink — a save landed"
-    echo "  after this boot. The pre-boot file above is still the one replayed."
+    # States the observation, not a cause. An `last` pointing at a NEWER file
+    # means a save landed after this boot; pointing at an OLDER one means a
+    # write/relink was interrupted. The script does not know which without
+    # comparing mtimes, so it does not claim one.
+    echo "  note: resurrect's 'last' link points at a DIFFERENT file: $lastlink"
+    echo "  The pre-boot file above is the one this verdict compares against."
   fi
   echo "observed: $obs_windows windows / $(get "$post" tmux_sessions) sessions"
   unit_ran_line "$post"
@@ -387,9 +459,25 @@ verdict() {
     return $RC_INCONCLUSIVE
   fi
 
-  local extra missing
+  local extra missing plan_f created
+  plan_f=$(mktemp)
+  section "$post" "PLAN-IDS" | sort > "$plan_f"
   extra=$(comm -13 "$exp_f" "$obs_f")
   missing=$(comm -23 "$exp_f" "$obs_f")
+
+  # Windows the RESTORE created on purpose (in its plan, absent from the layout)
+  # are not the race. Reported separately rather than dropped, because "the
+  # restore added 3 windows" is information, not noise.
+  if [ -s "$plan_f" ] && [ -n "$extra" ]; then
+    created=$(printf '%s\n' "$extra" | sort | comm -12 - "$plan_f")
+    extra=$(printf '%s\n' "$extra" | sort | comm -23 - "$plan_f")
+    [ -n "$created" ] && {
+      echo
+      echo "the restore itself created $(printf '%s\n' "$created" | grep -c .) window(s)"
+      echo "  present in its plan but not in the replayed layout — expected, not the race:"
+      printf '%s\n' "$created" | sed 's/^/  /'
+    }
+  fi
   rm -f "$exp_f" "$obs_f"
 
   # --- misplacement: right id, wrong working directory --------------------- #
@@ -398,16 +486,53 @@ verdict() {
   # emitted nothing, on stderr, and the verdict read NO RACE OBSERVED. A silent
   # false clean is exactly what this instrument must never produce, which is why
   # the awk status is checked below instead of trusting an empty result.
+  # 🔴 THE CWD PAIR NEEDS ITS OWN VACUITY GUARD. The id sections have one; these
+  # did not, so an empty OBSERVED-CWD produced an empty `moved` and rendered as
+  # "in the right place", rc 0. Measured on the shipped script: an emptied
+  # section AND the emitter's own `# UNMEASURED — no tmux server responding`
+  # marker (which `section()` strips as a comment) BOTH returned a clean
+  # verdict. Reachable because list-windows and list-panes are two separate tmux
+  # calls: the server dying between them leaves ids populated and cwds empty.
+  local obs_cwd_n exp_cwd_n
+  obs_cwd_n=$(section "$post" "OBSERVED-CWD" | grep -c . || true)
+  exp_cwd_n=$(section "$post" "EXPECTED-CWD" | grep -c . || true)
+  if [ "$obs_cwd_n" = 0 ] || [ "$exp_cwd_n" = 0 ]; then
+    echo
+    echo "🔴 MISPLACEMENT NOT MEASURED — a working-directory section is empty"
+    echo "   (expected=$exp_cwd_n observed=$obs_cwd_n). The ids below were still"
+    echo "   compared, but nothing here can tell you whether a window came back"
+    echo "   in the right PLACE. This is not a clean misplacement result."
+    rc_incomplete=1
+  fi
+
   local moved moved_rc
-  moved=$(awk -F'\t' '
-    NR==FNR { if (!(($1 SUBSEP $2 SUBSEP $3) in seen)) {
-                want[$1 SUBSEP $2] = want[$1 SUBSEP $2] "|" $3
-                seen[$1 SUBSEP $2 SUBSEP $3] = 1 }
-              next }
-    { got[$1 SUBSEP $2] = got[$1 SUBSEP $2] "|" $3 }
-    END { for (k in got) if ((k in want) && got[k] != want[k]) {
-            split(k, a, SUBSEP); print a[1] "\t" a[2] "\t" want[k] "  ->  " got[k] } }
-  ' <(section "$post" "EXPECTED-CWD" | sort) <(section "$post" "OBSERVED-CWD" | sort) 2>/dev/null)
+  # Three inputs, because a window has TWO legitimate destinations: the cwd the
+  # layout recorded, and the cwd the restore's own plan `cd`s to. Only a cwd
+  # matching NEITHER is a misplacement. stderr is kept — a bare `awk exit N`
+  # with the reason discarded is the same sin as a bare zero.
+  # 🔴 ONE TAGGED STREAM, not three file operands. Splitting on the file
+  # boundary (`FNR==1 {part++}`) MISALIGNS when an input is empty — FNR never
+  # reaches 1 for that file, so the next section is silently read as the
+  # previous one's role. The tag travels with the row and cannot shift.
+  moved=$(
+    { section "$post" "PLAN-CWD"     | sort -u | sed 's/^/P\t/'
+      section "$post" "EXPECTED-CWD" | sort    | sed 's/^/W\t/'
+      section "$post" "OBSERVED-CWD" | sort    | sed 's/^/G\t/'
+    } | awk -F'\t' '
+      NF < 4 { next }
+      $1=="P" { if (!(($2 SUBSEP $3 SUBSEP $4) in seenp)) {
+                  plan[$2 SUBSEP $3] = plan[$2 SUBSEP $3] "|" $4
+                  seenp[$2 SUBSEP $3 SUBSEP $4] = 1 } ; next }
+      $1=="W" { if (!(($2 SUBSEP $3 SUBSEP $4) in seenw)) {
+                  want[$2 SUBSEP $3] = want[$2 SUBSEP $3] "|" $4
+                  seenw[$2 SUBSEP $3 SUBSEP $4] = 1 } ; next }
+      $1=="G" { got[$2 SUBSEP $3] = got[$2 SUBSEP $3] "|" $4 }
+      END { for (k in got) {
+              if (!(k in want)) continue
+              if (got[k] == want[k]) continue
+              if ((k in plan) && got[k] == plan[k]) continue  # restore cd-ed here on purpose
+              split(k, a, SUBSEP)
+              print a[1] "\t" a[2] "\t" want[k] "  ->  " got[k] } }')
   moved_rc=$?
   local unparsed
   unparsed=$(get "$post" replayed_layout_cwd_unparsed)
@@ -480,15 +605,27 @@ verdict() {
 # (measured on a never-started user unit), so the run/no-run fact gets its own
 # line rather than being left to a reader who will assume the reassuring one.
 unit_ran_line() {
-  local started
+  local started rc_main
   started=$(get "$1" unit_InactiveExitTimestamp)
+  rc_main=$(get "$1" unit_ExecMainStatus)
   if [ -z "$started" ]; then
     echo "🔴 the boot unit has NOT RUN this boot (InactiveExitTimestamp empty)."
     echo "  Its timer is OnActiveSec=45s — if you ran this immediately after login,"
     echo "  wait and re-run. 'Result=success' says nothing here: it reads the same"
     echo "  for a unit that never started."
+  elif [ -n "$rc_main" ] && [ "$rc_main" != 0 ]; then
+    # 🔴 `Result` is systemd's verdict on the UNIT; `ExecMainStatus` is the
+    # PROCESS's exit code, and for a Type=oneshot they disagree routinely.
+    # Measured on this host at the time of writing: Result=success with
+    # ExecMainStatus=1 — and the handoff records this unit exiting 1 on EVERY
+    # boot from 2026-08-04 until #1297+#1309. Leaving that in a parenthetical
+    # is how the most common failure state reads as a success.
+    echo "🔴 the boot unit RAN AND FAILED — ExecMainStatus=$rc_main (ran at $started)."
+    echo "  'Result=$(get "$1" unit_Result)' is systemd's verdict on the UNIT, not on the"
+    echo "  process: for a Type=oneshot the two disagree routinely. Whatever the"
+    echo "  comparison below says, the restore did not complete its own work."
   else
-    echo "boot unit ran at $started (Result=$(get "$1" unit_Result), ExecMainStatus=$(get "$1" unit_ExecMainStatus))"
+    echo "boot unit ran at $started and its process exited 0 (Result=$(get "$1" unit_Result))"
   fi
 }
 

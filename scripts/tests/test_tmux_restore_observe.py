@@ -107,6 +107,10 @@ def _post(
     replayed="/h/.tmux/resurrect/tmux_resurrect_PRE.txt",
     unit_started="Sat 2026-09-06 14:00:45 CDT",
     unparsed="0",
+    plan_ids=None,
+    plan_cwd=None,
+    unit_status="0",
+    journal="(fixture)",
 ):
     ids = HEALTHY_IDS if ids is None else ids
     names = HEALTHY_NAMES if names is None else names
@@ -120,7 +124,7 @@ def _post(
         f"host_machine_id={host}",
         "host_name=hostA",
         "unit_Result=success",
-        "unit_ExecMainStatus=0",
+        f"unit_ExecMainStatus={unit_status}",
         f"unit_InactiveExitTimestamp={unit_started}",
         "tmux_sessions=2",
     ]
@@ -147,8 +151,14 @@ def _post(
     lines.append(_rows(expected_ids))
     lines.append("--- EXPECTED-CWD (session<TAB>index<TAB>cwd) ---")
     lines.append(_rows(exp_cwd))
+    if plan_ids is not None:
+        lines.append("--- PLAN-IDS (session<TAB>index) ---")
+        lines.append(_rows(plan_ids))
+    if plan_cwd is not None:
+        lines.append("--- PLAN-CWD (session<TAB>index<TAB>cwd) ---")
+        lines.append(_rows(plan_cwd))
     lines.append("--- JOURNAL ---")
-    lines.append("(fixture)")
+    lines.append(journal)
 
     p = tmp_path / name
     p.write_text("\n".join(x for x in lines if x != "") + "\n")
@@ -397,14 +407,103 @@ def _stub_bin(tmp_path):
     return b
 
 
+def _live_stub_bin(tmp_path):
+    """A PATH prefix where tmux and systemctl SUCCEED, so `capture` reaches the
+    emits that a failing stub leaves legitimately UNMEASURED.
+
+    🔴 This exists because the failing-stub seam test could NOT pin them:
+    mutants deleting the `--- OBSERVED-CWD` section, `tmux_windows` and the
+    `unit_*` block all SURVIVED against it. `tmux_windows` alone decides rc 5,
+    so its loss would turn every verdict into TOTAL RESTORE FAILURE."""
+    from testlib import mockbin  # noqa: PLC0415
+
+    b = tmp_path / "livestub"
+    b.mkdir(exist_ok=True)
+    mockbin.write_exec(b / "tmux", r'''
+case "$1" in
+  has-session) exit 0 ;;
+  list-sessions) printf 'alpha\n' ;;
+  list-windows)
+      case "$*" in
+        *window_name*) printf 'alpha\t1\tdevrc\n' ;;
+        *window_index*) printf 'alpha\t1\n' ;;
+        *) printf 'alpha\n' ;;
+      esac ;;
+  list-panes)
+      case "$*" in
+        *pane_current_path*) printf 'alpha\t1\t/home/u/devrc\n' ;;
+        *) printf '%%0\n' ;;
+      esac ;;
+  display-message) echo 1 ;;
+  show-options) echo "" ;;
+  *) exit 0 ;;
+esac
+''')
+    mockbin.write_exec(b / "systemctl", r'''
+printf 'Result=success\nExecMainStatus=0\nNRestarts=0\n'
+printf 'ActiveEnterTimestamp=Sat 2026-09-06 14:00:46 CDT\n'
+printf 'InactiveExitTimestamp=Sat 2026-09-06 14:00:45 CDT\nAfter=x\n'
+''')
+    mockbin.write_exec(b / "journalctl", "exit 0\n")
+    return b
+
+
+def test_capture_post_EMITS_the_verdict_DECIDING_fields_when_the_readers_SUCCEED(tmp_path):
+    """The other half of the seam. The failing-stub test below pins the fields
+    reachable when tmux/systemctl are down; this one pins the ones that only
+    exist when they answer — the fields that actually decide the verdict."""
+    obs = tmp_path / "obs"
+    obs.mkdir()
+    (obs / "pre-latest.txt").write_text("boot_time=OLD\ncaptured_at=T0\n")
+    res = tmp_path / "resurrect"
+    res.mkdir()
+    layout = res / "tmux_resurrect_20200101T000000.txt"
+    layout.write_text(
+        "window\talpha\t1\t:devrc\t1\t:*\tL\toff\n"
+        "pane\talpha\t1\t1\t:*\t1\tt\t:/home/u/devrc\t1\tzsh\t:\n"
+    )
+    os.utime(layout, (1, 1))
+    plan = tmp_path / "plan.json"
+    plan.write_text(
+        '[{"session":"alpha","window":"1","cwd":"/home/u/devrc","session_id":"x",'
+        '"bind_source":"ledger"}]'
+    )
+
+    env = dict(
+        os.environ,
+        PATH=f"{_live_stub_bin(tmp_path)}:{os.environ['PATH']}",
+        TMUX_RESTORE_OBSERVE_DIR=str(obs),
+        TMUX_RESURRECT_DIR=str(res),
+        TMUX_RESTORE_PLAN=str(plan),
+        TMUX_RESTORE_LOG=str(tmp_path / "none.log"),
+    )
+    subprocess.run(["bash", str(SCRIPT), "post"],
+                   capture_output=True, text=True, env=env, timeout=180)
+    text = sorted(obs.glob("post-*.txt"))[-1].read_text()
+
+    # Each of these was a SURVIVING mutant against the failing-stub fixture.
+    assert "tmux_windows=" in text, f"the field that decides rc 5 is absent:\n{text}"
+    assert "unit_Result=" in text and "unit_ExecMainStatus=" in text, text
+    for header in ("--- OBSERVED-CWD", "--- OBSERVED-IDS", "--- PLAN-IDS", "--- PLAN-CWD"):
+        assert header in text, f"{header} missing:\n{text}"
+    assert "alpha\t1\t/home/u/devrc" in text, text
+    assert "plan_layout_skew_seconds=" in text, text
+
+
 def test_capture_post_EMITS_the_fields_the_verdict_READS(tmp_path):
     """🔴 THE SEAM. `extract` computes the unparsed count and `verdict` prints
     it, and both were pinned — while nothing checked that `capture post` writes
     it at all. Measured: deleting the emit line from `capture` left the whole
     suite green, so the two hermetically-tested halves were joined by an
-    unguarded wire. This test asserts the WIRE: a real `post` capture, driven
-    against a fixture resurrect dir, must carry every key and section the
-    verdict consumes.
+    unguarded wire.
+
+    ⚠ SCOPE, stated because the earlier docstring overclaimed it: this fixture
+    stubs tmux and systemctl to FAIL, so it pins only the fields reachable with
+    those readers down — the layout-derived keys and sections. The fields that
+    exist only when they answer (`tmux_windows`, the `unit_*` block,
+    `--- OBSERVED-CWD`) are pinned by
+    `test_capture_post_EMITS_the_verdict_DECIDING_fields_when_the_readers_SUCCEED`
+    above; against THIS fixture alone, mutants deleting them SURVIVE.
     """
     obs = tmp_path / "obs"
     obs.mkdir()
@@ -452,6 +551,164 @@ def test_capture_post_EMITS_the_fields_the_verdict_READS(tmp_path):
     assert "alpha\t1\t/home/u/ok" in text, text
     # And the reader that could not run says UNMEASURED rather than reporting 0.
     assert "tmux=UNMEASURED" in text, text
+
+
+# --------------------------------------------------------------------------- #
+# Round 2: the post-boot workspace has TWO writers, not one
+# --------------------------------------------------------------------------- #
+
+def test_a_window_the_RESTORE_created_is_not_race_evidence(tmp_path):
+    """🔴 THE REGRESSION. `tmux-session-restore.py` runs `new-window -t
+    <sess>:<idx>` (:743) for any plan entry missing from the workspace, so a
+    plan id absent from the replayed layout is a window the restore created ON
+    PURPOSE. Measured against a layout-only expectation at a plan/layout skew of
+    46 min: 1 false RACE id and 4 false MISPLACEMENT rows; at 91 min, 1 and 5.
+    Skew is normally ~40 s, but the restore tolerates 2 h BY DESIGN
+    (`--staleness-check 2`), and a dead save chain is this instrument's own
+    premise — so the false-positive regime is the degraded state it exists to
+    observe."""
+    ids = HEALTHY_IDS + [("alpha", "5")]
+    cwd = HEALTHY_CWD + [("alpha", "5", "/home/u/workspace/talos")]
+    r = _verdict(
+        _pre(tmp_path),
+        _post(tmp_path, ids=ids, obs_cwd=cwd, windows="4",
+              plan_ids=[("alpha", "5")],
+              plan_cwd=[("alpha", "5", "/home/u/workspace/talos")]),
+        tmp_path,
+    )
+    assert r.returncode == RC_CLEAN, r.stdout + r.stderr
+    assert "the restore itself created 1 window(s)" in r.stdout
+    assert "RACE EVIDENCE" not in r.stdout
+
+
+def test_a_window_in_NEITHER_the_layout_nor_the_plan_is_still_race_evidence(tmp_path):
+    """The control for the exclusion above: subtracting the plan must not
+    subtract everything."""
+    ids = HEALTHY_IDS + [("ghost", "9")]
+    cwd = HEALTHY_CWD + [("ghost", "9", "/home/u/elsewhere")]
+    r = _verdict(
+        _pre(tmp_path),
+        _post(tmp_path, ids=ids, obs_cwd=cwd, windows="4",
+              plan_ids=[("alpha", "1")], plan_cwd=[("alpha", "1", "/home/u/workspace/devrc")]),
+        tmp_path,
+    )
+    assert r.returncode == RC_RACE, r.stdout + r.stderr
+    assert "RACE EVIDENCE" in r.stdout
+    assert "ghost" in r.stdout
+
+
+def test_a_cwd_matching_the_PLAN_is_not_misplacement(tmp_path):
+    """The restore `send-keys`es `cd <plan cwd> && claude --resume` (:755), so a
+    window sitting in the plan's cwd rather than the layout's is the restore
+    working correctly. Only a cwd matching NEITHER is a misplacement."""
+    moved_to_plan = [
+        ("alpha", "1", "/home/u/workspace/PLANNED"),
+        ("alpha", "2", "/home/u/workspace/devrc"),
+        ("beta", "1", "/home/u/workspace/devrc"),
+    ]
+    r = _verdict(
+        _pre(tmp_path),
+        _post(tmp_path, obs_cwd=moved_to_plan,
+              plan_ids=[("alpha", "1")],
+              plan_cwd=[("alpha", "1", "/home/u/workspace/PLANNED")]),
+        tmp_path,
+    )
+    assert r.returncode == RC_CLEAN, r.stdout + r.stderr
+    assert "MISPLACEMENT" not in r.stdout
+
+
+def test_a_cwd_matching_NEITHER_the_layout_nor_the_plan_is_misplacement(tmp_path):
+    """Control for the exclusion above."""
+    r = _verdict(
+        _pre(tmp_path),
+        _post(tmp_path,
+              obs_cwd=[("alpha", "1", "/home/u/NOWHERE")] + HEALTHY_CWD[1:],
+              plan_ids=[("alpha", "1")],
+              plan_cwd=[("alpha", "1", "/home/u/workspace/PLANNED")]),
+        tmp_path,
+    )
+    assert r.returncode == RC_RACE, r.stdout + r.stderr
+    assert "MISPLACEMENT" in r.stdout
+    assert "NOWHERE" in r.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Round 2: an unmeasured arm must not render as agreement
+# --------------------------------------------------------------------------- #
+
+def test_an_empty_cwd_section_is_NOT_reported_as_in_the_right_place(tmp_path):
+    """🔴 THE REGRESSION. The id sections had a vacuity guard and the cwd
+    sections did not, so an empty OBSERVED-CWD produced an empty `moved` and
+    rendered as `in the right place`, rc 0 — demonstrated on the shipped
+    script. Reachable because list-windows and list-panes are two separate tmux
+    calls: the server dying between them leaves ids populated, cwds empty."""
+    r = _verdict(_pre(tmp_path), _post(tmp_path, obs_cwd=[]), tmp_path)
+    assert r.returncode == RC_INCONCLUSIVE, r.stdout + r.stderr
+    assert "MISPLACEMENT NOT MEASURED" in r.stdout
+    assert "in the right place" not in r.stdout
+    assert "NO RACE OBSERVED" not in r.stdout
+
+
+def test_the_emitters_OWN_unmeasured_marker_does_not_render_as_clean(tmp_path):
+    """The sharpest form: `section()` strips `#` rows, so the emitter's explicit
+    `# UNMEASURED — no tmux server responding` became an EMPTY section and then
+    a clean verdict — the instrument converting its own admission of ignorance
+    into a reassuring answer."""
+    post = _post(tmp_path)
+    text = post.read_text().replace(
+        "\n".join("\t".join(t) for t in HEALTHY_CWD),
+        "# UNMEASURED — no tmux server responding",
+    )
+    post.write_text(text)
+    r = _verdict(_pre(tmp_path), post, tmp_path)
+    assert r.returncode == RC_INCONCLUSIVE, r.stdout + r.stderr
+    assert "MISPLACEMENT NOT MEASURED" in r.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Round 2: the unit's process status
+# --------------------------------------------------------------------------- #
+
+def test_a_unit_that_ran_and_FAILED_says_so(tmp_path):
+    """🔴 `Result` is systemd's verdict on the UNIT; `ExecMainStatus` is the
+    PROCESS's exit code, and for a Type=oneshot they disagree routinely.
+    Measured on this host: `Result=success` with `ExecMainStatus=1`. The handoff
+    records this unit exiting 1 on EVERY boot from 2026-08-04 until
+    #1297+#1309 — the historically most common failure state, and it used to be
+    a parenthetical beside the word 'success'."""
+    r = _verdict(_pre(tmp_path), _post(tmp_path, unit_status="1"), tmp_path)
+    assert "RAN AND FAILED" in r.stdout
+    assert "ExecMainStatus=1" in r.stdout
+    assert "did not complete its own work" in r.stdout
+
+
+def test_a_unit_that_ran_and_succeeded_does_not_cry_wolf(tmp_path):
+    r = _verdict(_pre(tmp_path), _post(tmp_path, unit_status="0"), tmp_path)
+    assert "RAN AND FAILED" not in r.stdout
+    assert "exited 0" in r.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Round 2: the section parser
+# --------------------------------------------------------------------------- #
+
+def test_a_later_line_reproducing_a_section_HEADER_cannot_reopen_it(tmp_path):
+    """🔴 `section()` re-evaluated `inside` at every `--- ` line, so a JOURNAL
+    line spelling a section header re-opened the block. Demonstrated on the
+    shipped script: an injected `GHOST 99` produced a false RACE EVIDENCE, rc 1.
+    The header comment claimed ordering made this impossible; ordering does not
+    protect a parser."""
+    r = _verdict(
+        _pre(tmp_path),
+        _post(tmp_path, journal=(
+            "restore log follows\n"
+            "--- OBSERVED-IDS (session<TAB>index) ---\n"
+            "GHOST\t99")),
+        tmp_path,
+    )
+    assert r.returncode == RC_CLEAN, r.stdout + r.stderr
+    assert "GHOST" not in r.stdout
+    assert "RACE EVIDENCE" not in r.stdout
 
 
 def test_a_save_whose_mtime_is_the_epoch_is_still_a_candidate(tmp_path):

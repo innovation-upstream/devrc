@@ -123,8 +123,7 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
    # rc 0 clean · 1 race/misplacement · 2 usage · 3 could-not-decide · 4 windows missing · 5 no workspace at all
    ```
    A copy of the script sits beside the baseline at
-   `~/.cache/tmux-restore-observe/tmux-restore-observe.sh` (written by `pre`, so it
-   cannot rot) in case the branch is not merged yet. It is a READER — it adds no
+   `~/.cache/tmux-restore-observe/tmux-restore-observe.sh` (written by `pre`) in case the branch is not merged yet. It is a READER — it adds no
    boot-path unit, on purpose: three defects in this arc came from changing a boot
    path nobody had observed.
 
@@ -142,9 +141,12 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
      is not the one replayed. Measured: 56 → 55 within two hours of a baseline.
 
    Because the expectation is derived from the replayed layout rather than the
-   baseline, **the baseline does not go stale** — it supplies only the previous
-   `boot_time` (to prove a reboot happened) and the host identity. Re-running `pre`
-   before rebooting is harmless but not required.
+   baseline, **the baseline itself does not go stale** — it supplies only the previous
+   `boot_time` (to prove a reboot happened) and the host identity, neither of which
+   drifts. ⚠ **The cached SCRIPT copy is a different matter**: only `pre` writes it, so
+   after any change to the script it is stale until `pre` runs again. Re-run `pre` if
+   the branch has moved since the baseline was taken (`cmp` it against
+   `scripts/tmux-restore-observe.sh`); otherwise it is not required.
 
    🔴 **Its refusals are the load-bearing part.** Same `boot_time` ⇒ INCONCLUSIVE, never
    "no race". A baseline from the *other host* ⇒ INCONCLUSIVE. No tmux server at all ⇒
