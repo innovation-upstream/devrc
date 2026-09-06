@@ -9,47 +9,71 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-🔴 **STILL NOT DEPLOYED. MEASURED, BOTH HOSTS: `systemctl --user is-active
-tmux-reply-agent` → `inactive` / `inactive`.** The deployed flag is still `false`
-(`~/workspace/devrc/nix/home.nix:170`). A reply typed in the web UI queues and is
-never executed. Rank 32 is NOT closed. That is the single fact that decides what
-the next session does.
+🔴 **RANK 32 IS CLOSED — THE HOST HALF IS MERGED, SHIPPED AND RUNNING ON BOTH
+HOSTS. `#1334` squash `5a8ec6ff` (2026-09-06 19:58Z).** Measured after
+`scripts/ship.sh`, on each host separately:
 
-**IN FLIGHT — `innovation-upstream/devrc#1334`, head `3d470502`, branch
-`feat/arm-tmux-reply-agent`, worktree `/home/zach/workspace/devrc-rank32`.**
-`#1333` (the handoff doc) is open and docs-only. Claim `tmux-webapp-32` is HELD —
-release it when this lands or is abandoned.
+| | workbench | laptop |
+|---|---|---|
+| `systemctl --user is-active tmux-reply-agent` | **active** | **active** |
+| unit-file state (was `linked`) | **enabled** | **enabled** |
+| `SubState` / `NRestarts` | `running` / **0** | `running` / **0** |
+| `MainPID` | 696125 | 470158 |
+| poll line in the journal | `polling http://192.168.50.250:30302 every 5s … as \`workbench:696125\`` | `polling http://10.42.0.10:8109 every 5s … as \`laptop:470158\`` |
 
-**The operator has authorised: merge both PRs, ship, verify.** The only thing
-holding the merge is a green gate on the merged tree.
+🔴 **NEITHER JOURNAL CARRIES A `backing off` LINE, AND THAT SILENCE IS THE
+EVIDENCE — not merely "the process is alive".** The poll loop logs a repeating
+failure condition EXACTLY ONCE on its first occurrence
+(`scripts/tmux-reply-agent`, the `if reason != backoff_reason` guard, written so
+17,280 ticks a day cannot bury a real event). So a 503 "not armed", a refused
+credential or an unreachable server would each have written one line. Both
+journals hold only the two startup lines ⇒ the polls are being **answered**.
+Without that guard, silence would have meant nothing.
 
-**Gate status at write time — 1 of 4 legs green on head `3d470502` (base
-`580b4848`):** tier-1 pytest ✅ **21,936 / 21,939, 0 failed**. tier-1 node and
-both sandbox derivations NOT yet run on this tree. Drift since that leg started
-is exactly ONE file — `claudedocs/handoff-cairn-oss-multi-instance.md` — which
-cannot reach any of this PR's four files, so option (b) below applies and should
-be stated in the merge claim rather than silently relied on.
+⚠ **This closes rank 32's closing condition and NOTHING WIDER.** `is-active` on
+both hosts is what rank 32 asked for. **No reply has yet been typed in the UI and
+observed landing in a pane** — that is rank 33, still open, and an API 200 is
+explicitly not its closing condition.
 
-### 🔴 THE GATE IS ON A TREADMILL AND THIS IS THE REAL BLOCKER
+**The gate that licensed the merge, stated with its base rather than as a
+property of the change:** all four legs re-run from scratch on the MERGED tree
+(`origin/main` `527b51ef` + `pr/1334` `3d470502`, merged in a throwaway
+worktree, `main` re-confirmed an ancestor afterwards).
 
-`main` moved **8 times** during this work: `f0b9c474 → c5a445d8 → 88f1bda4 →
-c25ef63c → 43f86a14 → f58d2df0 → 3ef2134b → 580b4848 → 527b51ef`. A full
-four-leg gate (tier-1 pytest ~20 min, tier-1 node, then the two sandbox
-derivations **one at a time**) takes over an hour. **`main` moves faster than the
-gate runs**, so every completed run is already against a superseded base.
+| tier | leg | verdict |
+|---|---|---|
+| 1 (dev host) | `run-tests.sh --set all` | ✅ `RESULT: PASS (exit=0)` — **21,943 / 21,946**, 3 skipped, **0 failed**, floor 18,678 across 31 targets |
+| 1 (dev host) | `run-node-tests.sh` | ✅ `RESULT: PASS (exit=0)` — 5 suites, 41 files, **1,449 / 1,449**, floor 1,367 |
+| 2 (nix sandbox) | `checks.x86_64-linux.pytests` | ✅ `RESULT: PASS (exit=0)` — **21,936 / 21,939**, 0 failed |
+| 2 (nix sandbox) | `checks.x86_64-linux.nodetests` | ✅ `RESULT: PASS (exit=0)` — **1,449 / 1,449** |
 
-Five separate four-leg greens were produced during this session, at five
-different bases. Each was real; none is evidence for the current head. **Do not
-quote a gate number from this doc — re-measure, and name the base in the claim.**
+### 🔴 THE GATE IS ON A TREADMILL — and this run beat it by ENUMERATING, not by asserting disjointness
 
-🔴 **Do not solve this by gating a stale base and merging anyway.** The practical
-options, in preference order: (a) merge promptly after a green rather than
-re-anchoring first — the window is the problem, not the base; (b) accept a base
-one or two commits behind when the intervening commits provably cannot reach the
-diff (`git diff --name-only <base>..origin/main` disjoint from the PR's four
-files) and SAY SO in the merge claim; (c) ask the operator for a quiet window.
-Option (b) is the honest one but **"disjoint files are not safety"** — state it
-as the bounded claim it is.
+`main` moved **9 times** during this work: `f0b9c474 → c5a445d8 → 88f1bda4 →
+c25ef63c → 43f86a14 → f58d2df0 → 3ef2134b → 580b4848 → 527b51ef → ec8e5286`. A
+full four-leg gate takes ~40 min, so **`main` moves faster than the gate runs**
+and every completed run is already against a superseded base. Six separate
+four-leg greens were produced across this effort at six different bases; each was
+real, none is evidence for any other head. **Do not quote a gate number from this
+doc — re-measure, and name the base in the claim.**
+
+🔴 **The drift at merge time was ONE commit (`ec8e5286`, #1347) touching
+`claude/skills/handoff/SKILL.md` and `claude/skills/handoff/reference/supersede.md`
+— and "disjoint files" was NOT the argument used, because disjoint files are not
+safety.** What was measured instead is that no test in either tier can READ those
+paths: `launcher_scan.hazard_hits` takes a `scripts_root` and never leaves
+`scripts/`; the only test target anywhere under `claude/skills/` is
+`claude/skills/clickup/test` (from `run-node-tests.sh`'s target list), not
+`handoff/`; `test_skill_size.py` resolves its target as
+`Path(__file__).parent.parent / "SKILL.md"`, i.e. browser-bridge's own; and a
+repo-wide sweep of every `test_*.py` for `SKILL.md`, `claude/skills` or `/claude/`
+returned **zero** files. That is a claim about the SCAN ROOTS, which is
+checkable — unlike a claim about which files happened to change.
+
+**Reusable recipe, since the treadmill is structural:** enumerate what the
+suite's scanners actually root themselves at, then ask whether the drift can
+reach any of them. It is the same cost as the disjointness grep and it is a
+different, much stronger claim.
 
 ### What is DONE and verified
 
@@ -64,9 +88,23 @@ as the bounded claim it is.
 
 ### 🔴 NOT DONE
 
-- **Nothing merged, nothing shipped, no host has the change.**
-- **Rank 33 untouched** — the closing condition for the whole effort, and it needs
-  the operator: it puts real keystrokes into real panes.
+- 🔴 **RANK 33 IS NOW THE ONLY THING BETWEEN THIS AND A WORKING LOOP, AND IT IS
+  UNTOUCHED.** Both halves are live — the server accepts writes, the host agents
+  execute them — but **no keystroke has ever been observed landing in a real
+  pane**. It needs the operator: it puts real keystrokes into real panes.
+  🔴 Exercise the `=` session-target prefix specifically (see rank 33): tmux
+  PREFIX-MATCHES, the live server has `scratch`…`scratch20` and
+  `datapacket-talos` beside `datapacket-talos-2`, and the `-t =name:` fix has
+  never run against real tmux outside a test.
+- 🔴 **THE SURFACE IS NOW LIVE IN BOTH DIRECTIONS, WHICH IS WHAT MAKES RANK 34
+  MATTER TODAY RATHER THAN IN PRINCIPLE.** `tmux send-keys` + Enter is arbitrary
+  command execution as the operator on both machines, reachable from a LAN
+  NodePort with no human auth, gated solely by `CLAWGATE_TERMINAL_TOKEN`.
+- 🔴 **DISARM IS TWO STEPS AND THE SECOND IS NOT OPTIONAL** — now that a process
+  is actually running, this is a live procedure rather than a note. Flipping
+  `enableTmuxReplyAgent = false` and shipping only drops `[Install]`; sd-switch
+  then plans **Stop/Start** and the agent keeps running. Follow with
+  `systemctl --user stop tmux-reply-agent` on **BOTH** hosts.
 - **Rank 34 untouched** — the two residuals the audit ACCEPTED are now live.
 - No `clawgate-task:` field: `clawgate_handoff.sh resolve` exits **5** with its
   positive control confirming the board answers for a different session. That is
@@ -911,18 +949,32 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     live on the pod, not from a green test.
     forcing: user — the operator asked for it explicitly on 2026-09-04.
 
-32. **CLOSE THE LOOP: commit the host-agent flag, merge it, ship both hosts.** Repo:
-    `innovation-upstream/devrc`, `nix/home.nix:170`. The one-line edit `enableTmuxReplyAgent = true`
-    already exists, **uncommitted**, in a worktree. 🔴 **Re-derive the path with
-    `git -C ~/workspace/devrc worktree list` rather than trusting this line** — if it is gone,
-    re-flip the flag off `origin/main`. `nix eval` already confirms the flag drives
-    `Install.WantedBy = ['default.target']`. Gate BOTH tiers on the merged tree
-    (`nix develop … run-tests.sh`, then `nix build .#checks.x86_64-linux.{pytests,nodetests}`
-    **one at a time**), PR, merge, then `scripts/ship.sh` and **read every per-host line, never the
-    final verdict**.
-    Closing condition: `systemctl --user is-active tmux-reply-agent` reads `active` on BOTH hosts.
-    forcing: user — the operator asked for arming and validation; the server half is live and this
-    is the half that makes it do anything.
+32. ✅ **DONE 2026-09-06 — `innovation-upstream/devrc#1334`, squash `5a8ec6ff`. MERGED, SHIPPED to
+    BOTH hosts, and the closing condition verified live.** Claim `tmux-webapp-32` released.
+    **Content-verified on `origin/main`, never by ancestry** (a squash is never an ancestor):
+    `enableTmuxReplyAgent = true;` at `nix/home.nix:194`; both new guards
+    (`test_the_agent_unit_IS_ARMED`, `test_the_agent_SHELLS_OUT_TO_TMUX_AND_NOTHING_ELSE`) present;
+    the superseded `test_the_agent_unit_SHIPS_DISABLED` **gone**; and a nonexistent-marker grep
+    returning **0** as the control that the check discriminates at all.
+    **Ship read per-host, never from the final verdict:** workbench `ec8e5286 → 5a8ec6ff`
+    fast-forwarded, 599 artifacts resolve / 0 dangling, `VERIFIED — on branch main at origin/main +
+    switched`; laptop `580b4848 → 5a8ec6ff`, 541 resolve / 0 dangling, `VERIFIED … (clean tree) +
+    switched`. The workbench's tree was DIRTY and ship classified all 5 dirty paths as untracked and
+    unread-by-nix against 168 nix-read paths — i.e. what was built IS `origin/main`.
+    **Closing condition met on both hosts**, with the full table in the Status section: `is-active`
+    **active** / **active**, unit-file state `linked` → **enabled**, `SubState=running`,
+    **`NRestarts=0`** on each, and each agent announcing a DISTINCT host scope
+    (`workbench:696125`, `laptop:470158`) — the disjoint-scope property the two-agent design needs.
+    🔴 **The load-bearing evidence is the ABSENCE of a `backing off` line, and it is only evidence
+    because the loop logs one.** `scripts/tmux-reply-agent` logs a repeating failure condition
+    exactly ONCE (`if reason != backoff_reason`), deliberately, so 17,280 ticks/day cannot bury a
+    real event. A 503 "not armed", a refused credential or an unreachable server would each have
+    written one line; both journals hold only their two startup lines ⇒ the polls are **answered**,
+    not merely attempted. Had that guard logged every tick, or nothing, the silence would have
+    carried no information at all.
+    ⚠ **This closes rank 32 and nothing wider — no keystroke has been observed landing in a pane.**
+    That is rank 33.
+    forcing: none — closed.
 33. **VALIDATE END TO END — the closing condition for the whole effort.** Raise a real
     `AskUserQuestion`, answer it from the web UI, confirm the keystroke **lands in the actual pane**.
     🔴 **An API 200 is NOT the closing condition.** 🔴 **Exercise the `=` session-target prefix
@@ -2857,11 +2909,24 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/ui/term/send-keys -H 'Origin
 curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/ui/term/send-keys \
      -H 'Content-Type: application/x-www-form-urlencoded' -d ''                                   # 400
 
-# 4. the host half — THE RANK-32 CLOSING CONDITION, and nothing else is
+# 4. the host half — MET 2026-09-06, both `active`. Re-read it rather than
+#    trusting that: a logout, a reboot before login, or a disarm changes it.
 systemctl --user is-active tmux-reply-agent          # workbench
 ssh zach@10.42.0.100 'systemctl --user is-active tmux-reply-agent'   # laptop
 #    BOTH must read `active`, and only after scripts/ship.sh has run post-merge.
 #    Read every per-host line of ship.sh, never its final verdict.
+#
+# 4b. 🔴 `active` ONLY SAYS THE PROCESS IS ALIVE. Whether its poll is being
+#     ANSWERED is a separate claim, and the journal can settle it because the
+#     loop logs a repeating failure condition exactly ONCE:
+journalctl --user -u tmux-reply-agent -n 20 --no-pager -o cat
+ssh zach@10.42.0.100 'journalctl --user -u tmux-reply-agent -n 20 --no-pager -o cat'
+#     Only the two startup lines (`Started …` + `polling <api> every 5s …`) ⇒ the
+#     server is answering. ANY `backing off <n>s: <reason>` line names the reason
+#     (503 not armed, refused credential, unreachable) and is the whole diagnosis.
+#     Also check `NRestarts` — a crash-looping unit reports `active` between
+#     restarts:
+systemctl --user show tmux-reply-agent -p NRestarts -p SubState -p MainPID
 
 # 5. the rank-32 branch: the flag drives the install — the PAIR, not one reading
 nix eval --impure --raw --expr 'let f = builtins.getFlake "path:/home/zach/workspace/devrc-rank32";
