@@ -22,52 +22,47 @@ reading, and per the protocol no field was written and no task was created.
 
 ## State now
 
-🔴 **RANK 1 IS CLOSED. `devrc#1304` MERGED — squash `c5a445d8`**, verified by CONTENT on
-`origin/main` (the NAME-CHECK guard, `exit 10`, the `printf` probe arm, `dash` in both
-`gateTools` and `REQUIRED_TOOLS`, and main's `tmux` all present after the conflict
-resolution). Never by ancestry: a squash makes the branch head a non-ancestor forever.
+**RANK 1 REMAINS CLOSED** (`devrc#1304` → squash `c5a445d8`). Since the last update this
+session closed the three items that were outstanding from it, and **refuted its own
+leading hypothesis about the flake**.
 
-**Gated on the MERGED tree `7430701a`** (base `f0b9c474`), both tiers, all four legs:
-dev-host pytest 21874 collected / 21871 passed / **0 failed**; dev-host node 1449/1449;
-sandbox `pytests` 21867 / 21864 / **0 failed**; sandbox `nodetests` 1449/1449.
-⚠ The sandbox pytests leg is **1 red then 1 green on the byte-identical derivation** — see
-the flake block below. That is non-determinism, not an unqualified green, and it is stated
-that way on purpose.
+- 🔴 **`devrc#1340` → squash `6ae9fef9`** — the co-tenant precondition now NAMES the
+  intruder (cwd + cmdline) when it fails. **This is a diagnostic, NOT a fix**: the
+  `gc --auto` theory this doc carried is REFUTED (see the block below), so no remedy was
+  shipped for a mechanism that does not exist. Gated both tiers on the merged tree
+  (`fe050a11`, base `88f1bda4`): dev-host 21876/21873/**0 failed** + node 1449/1449;
+  sandbox `pytests` 21869/21866/**0 failed** + `nodetests` 1449/1449. Verified on
+  `origin/main` by content. 116 tests in that file, was 114.
+- **`scripts/ship.sh` RUN — both hosts converged and VERIFIED at `88f1bda4`** (workbench
+  from `c5a445d8`, laptop from `3f4d9c0f`, closing its 5-commit gap). Read per-host, not
+  the verdict: no skips; artefacts 593/535 resolve with **0 dangling**, 409/394
+  repo-sourced with **0 stale**. This was the doc's old rank 4 and it is done.
+- **The subsystem index was written** — the `/handoff` step 4 that two earlier runs in this
+  session skipped. It also repaid the detour: it closed the PREVIOUS session's `OPEN:` for
+  #1304 (`RESOLVED c5a445d8`), closed one whose own stated condition — *"stays OPEN only
+  until #1222 merges"* — had been met **five days** earlier (`RESOLVED 7d9da8f5`, verified
+  by content on `main`, not by the merge alone), and repaired a bullet whose
+  `RESOLVED be3084f0 (homelab-infra):` marker carried a parenthetical that breaks the
+  grammar, so a real closure was declaring nothing and showing no badge.
+  `cairn validate --scope devrc`: **30 of 30 parse, 0 malformed**.
 
-**What shipped, in one line:** the pre-flight now REJECTS staged paths it cannot compare
-safely (exit 10, nothing pushed) rather than trying to survive them — because the
-comparison moves paths as TEXT between two shells that disagree about escaping.
+🔴 **NEW, and `ship.sh` structurally CANNOT fix it — `drift-check.sh` rc 17.** The laptop's
+`homelab-talos/containers/clawgate` **built-source subtree is 18 commits behind** its own
+upstream (repo-wide 223 behind). `nix/pkgs` builds `clawgatectl` from that TREE, so the
+laptop's binary is stale code whatever version string it reports. `ship.sh` is scoped to
+`~/workspace/devrc` and will never touch it. Now rank 2.
 
-**Six audit rounds. Five returned findings. FOUR of those defects were introduced by the
-PREVIOUS round's fix, and THREE of the four were mine.** That is the headline, not the
-guard. Detail in the Gotchas section.
-
-- `d7c4c266` → round 3 (blind, two lenses) → `b878cd12` → round 4 → `40e8b361` → round 5 →
-  `d2ce8a7d` → round 6 → `ad1f1e12` → merge of main → `7430701a` → squash `c5a445d8`.
-- **Round 3** (two blind lenses, neither told what the other hunted): the pod's `/bin/sh` is
-  **dash**, whose `echo` interprets `\t`/`\n`/`\c`, while every test runs the probe under
-  bash — a SILENT clobber route. Both lenses independently reproduced a TAB false refusal.
-  Round 2's own claims all verified TRUE, and one was *understated*.
-- **Round 4**: the name check had the hole its own separator makes — a newline splits one
-  path into two lines that each pass. Measured: `rejected=0`, `differing=0`, `seed: OK`,
-  rc 0, pod's newer copy replaced.
-- **Round 5**: I had deleted the `\.md$` anchor on false reasoning; restored.
-- **Round 6**: I had DELETED a test while claiming to add one.
-- Round 6 found no silent clobber and no plausible false refusal — the agreed stop
-  condition — so the ladder ended there.
-
-**Knowingly shipped residue, labelled in the code, not papered over:**
-- 6 newline shapes still name only the trailing half of the split (DIAGNOSTIC only — the
-  refusal itself is correct in every case; 0 newline shapes are accepted).
-- `sha256sum --` on both sides is unreachable while the policy rule holds, so its mutants
-  SURVIVE by construction. Labelled as defence-in-depth, NOT counted as covered.
-
-🔴 **NOT VERIFIED, and not claimed:** nothing in six rounds touched the LIVE pod. Every test
-drives a fake `kubectl` that runs the probe on THIS host under bash. The dash measurements
-were made against the `Dockerfile`'s own base image (`python:3.12-slim`) under local docker,
-NOT against the deployed image — if the tag has drifted, the `/bin/sh = dash` premise does
-not transfer. The `~12%` coverage limit in seed.sh's header (depth-3+ paths, 15 per-scope
-`.git` repos) is likewise unre-measured.
+🔴 **NOT VERIFIED, and not claimed:**
+- **The flake is NOT fixed.** #1340 makes the next occurrence diagnosable; it did not
+  recur on the one sandbox run after the change, and **one green run of a
+  non-deterministic failure is not evidence of a fix.**
+- **Nothing has touched the LIVE pod** across all six audit rounds and this follow-up. The
+  `/bin/sh = dash` premise the whole `seed.sh` guard rests on is measured against the
+  `Dockerfile`'s own base image under local docker, never the deployed one.
+- **`main` moved between gate and merge, twice.** #1304 gated at `f0b9c474`/merged at
+  `eb68d7c1`; #1340 gated at `88f1bda4`/merged at `e8143452`. Intervening commits touched
+  none of the changed files — but that is REASONED, not measured, and with `strict: false`
+  and `main` moving every few minutes it is not reachable to close.
 
 ## Open investigations — live diagnosis state
 
@@ -347,54 +342,80 @@ not transfer. The `~12%` coverage limit in seed.sh's header (depth-3+ paths, 15 
   the next suspect is the fsmonitor/credential helper. **Do not "fix" it by re-running** —
   a flaky gate trains everyone to click through.
 
+### 🔴 REFUTED — the `gc --auto` theory for the co-tenant flake (supersedes the block above)
+- **Symptom + exact repro:** unchanged — the sandbox `pytests` derivation reds with
+  `live_cotenants(...)` returning a `git` process on a brand-new tmp repo, and a re-run of
+  the byte-identical derivation passes.
+- **Observed (with values):** `gc.auto` is unset, i.e. the default **6700** loose objects;
+  `_mkrepo` leaves **3** (`git count-objects -v` → `count: 3 size: 12 in-pack: 0`). The
+  threshold is unreachable by construction, so the commit CANNOT fork a `gc --auto`.
+  Two-arm loop, 80 iterations each at load 31.6 — as-shipped and with `gc.auto=0` forced:
+  **0 hits in both arms**.
+- **Ruled out:** the `gc --auto` mechanism this doc previously named as the leading
+  hypothesis. Refuted twice over: arithmetically (3 objects vs a 6700 threshold) and
+  empirically (0/80 in the arm that should show it). via: measurement
+- **Ruled out:** "the 0/80 might be a probe wired to nothing" — a positive control ran
+  FIRST: spawning a process with cwd in the repo made `live_cotenants` return
+  `['<pid>:python3.12']`, and the same harness returned `[]` before the spawn. The probe
+  demonstrably sees a co-tenant, so the zero is a real reading. via: measurement
+- **Leading hypothesis:** NONE — and that is the honest state. The failure was observed
+  once, in the sandbox tier, under `pytest -n 4 --dist loadfile`. `live_cotenants` matches
+  on a process whose **cwd** is inside the work tree, and nothing yet explains how a `git`
+  process acquired a cwd inside a just-created per-test tmp repo.
+- **Next probe:** do NOT re-derive `gc --auto`. Wait for the next red and read the message
+  #1340 added — it prints the intruder's `cwd=` and `cmdline=`, which is what separates an
+  xdist sibling from a stray host process from one of our own children. `/proc` for a
+  transient process is gone by the time anyone reads the log, which is why the capture had
+  to move into the assertion.
+
 ## Next steps (ranked)
 
-1. **Fix the `test_git_repo_isolation` load flake** (block above). It is inherited, not from
-   #1304, and it fails the tier a merge is judged on. `git -c gc.auto=0` in `_mkrepo` is the
-   one-line candidate; confirm by reproducing under load FIRST, since the mechanism is a
-   hypothesis.
-   forcing: gate — it reds the sandbox tier non-deterministically, and the only reason
-   #1304 merged is that a human re-ran it and read both results.
+🔴 **Renumbered.** Old rank 4 (`ship.sh`) is DONE and old rank 8 was already closed, so the
+list is re-based. No `claim-work` claim was live against this doc when it was rewritten
+(`claim-work --list` showed none for this slug), so no claim was re-pointed.
 
-2. **Decide `cairn-cutover.py` P3.** It invokes `seed.sh` WITHOUT `--allow-overwrite`
-   (`cairn-cutover.py:1379-1382`) and its shippable set is ADD + SUPERSEDES + MERGED, where
-   SUPERSEDES/MERGED are BY DEFINITION entries whose pod bytes differ — so the pre-flight
-   refuses and P3 cannot complete. 🔴 **#1304 makes this WORSE, not better:** the new
-   NAME-CHECK is a second refusal P3 can hit. Either pass `--allow-overwrite` (it IS a
-   reviewed delta with a rollback set already on disk) or declare P3 dead post-cutover.
+1. **The co-tenant flake is still UNFIXED — diagnosable, not diagnosed.** `devrc`,
+   `scripts/tests/test_git_repo_isolation.py`. Do not close it by re-running; do not
+   re-derive `gc --auto`. Wait for the next sandbox red and read the `cwd=`/`cmdline=` the
+   assertion now prints.
+   forcing: gate — it reds the sandbox tier non-deterministically, and the only reason
+   #1304 merged through it was a human re-running and reading both results.
+
+2. **The laptop's `clawgatectl` is built from source 18 commits stale** (`drift-check.sh`
+   rc 17). Fix on that host: `git -C ~/workspace/homelab-talos pull --ff-only` then a
+   home-manager switch. 🔴 Not a devrc change and `ship.sh` will never do it.
+   forcing: regression — a deployed binary whose code is not the code its version string
+   implies, on a host that looks converged by every other measure.
+
+3. **Decide `cairn-cutover.py` P3.** It invokes `seed.sh` WITHOUT `--allow-overwrite`
+   (`cairn-cutover.py:1379-1382`) over an ADD + SUPERSEDES + MERGED set, where
+   SUPERSEDES/MERGED are BY DEFINITION entries whose pod bytes differ. 🔴 #1304 made this
+   WORSE: the new NAME-CHECK is a SECOND refusal P3 can hit. Either pass the flag or
+   declare P3 dead post-cutover.
    forcing: regression — a shipped code path that can never complete.
 
-3. **Fix the opencode blindness in `scripts/lib/clawgate_handoff.sh`.** Diagnosed and
-   recorded (squash `13775144`), NOT fixed. It reads only `CLAUDE_CODE_SESSION_ID`;
+4. **Fix the opencode blindness in `scripts/lib/clawgate_handoff.sh`.** Diagnosed (squash
+   `13775144`), NOT fixed. It reads only `CLAUDE_CODE_SESSION_ID`;
    `grep -c OPENCODE_SESSION_ID` is **0**. Detached opencode ⇒ exit 3 forever; NESTED
-   opencode inherits the outer Claude session's id ⇒ exit 0 with **another session's tasks**.
+   opencode inherits the outer Claude session's id ⇒ exit 0 with **another session's
+   tasks**.
    forcing: regression — the nested path silently misattributes today.
 
-4. **Run `scripts/ship.sh`.** Still never run in this effort, and #1304 changed
-   `flake.nix` + `run-tests.sh`, so both hosts are now behind on the gate toolchain
-   (`dash`). The **laptop is UNVERIFIED**. Read every per-host line, not the final verdict.
-   forcing: regression — a host without `dash` on PATH now FATALs the gate rather than
-   skipping, which is the intended behaviour and will look like a break.
-
-5. **Verify the dash premise against the DEPLOYED pod image**, read-only. Everything shipped
-   rests on `/bin/sh` being dash there; that was measured against the `Dockerfile`'s `FROM`
-   under local docker, never against the running pod.
+5. **Verify the dash premise against the DEPLOYED pod image**, read-only. The whole
+   `seed.sh` guard rests on `/bin/sh` being dash there; that was measured against the
+   `Dockerfile`'s `FROM`, never the running pod.
    forcing: none
 
 6. **Decide the token allowlist for the 2 remaining local-only entries**
    (`civitai-app-requests`, `civitai-developer-docs`). `cairn create` answers `not-found`;
-   neither scope is in this token's allowlist. Widening it means editing the k8s secret and
-   deleting the pod.
+   neither scope is in this token's allowlist. Widening it edits the k8s secret and needs a
+   pod delete (the token file is read ONCE at startup).
    forcing: none
 
 7. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
    **0** occurrences of `policy:` in `service_recon.py` on `origin/main`. 🟡6: `--template`
-   over an EXISTING entry prints the first-ever-file template and exits 0 silently.
-   forcing: none
-
-8. **~~`main` is RED on `test_clawgate_task_interview_guard.py`~~ — CLOSED.** Re-measured
-   2026-09-05: passes. `8c27c5cf` (#1303) fixed it. Kept numbered so ranks stay stable for
-   `claim-work --slug-for`.
+   over an EXISTING entry prints the first-ever-file template and exits 0 silently,
+   destroying an `OPEN:` bullet.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -700,27 +721,63 @@ not transfer. The `~12%` coverage limit in seed.sh's header (depth-3+ paths, 15 
   `nix/system/check-nebula-relays.sh`, `scripts/diagnose-nix-disk.sh`). Untouched. All work
   here was done in worktrees; both have been removed and the base clone fast-forwarded.
 
+- 🔴 **A THEORY THAT EXPLAINS THE FAILURE IS NOT EVIDENCE FOR IT — and this one was
+  arithmetically impossible the whole time.** `gc --auto` needs ~6700 loose objects;
+  `_mkrepo` leaves 3. One `git config --get gc.auto` plus one `count-objects -v` would
+  have killed it before any loop ran. **Cost the theory a round; cost the refutation two
+  commands.** Check whether a mechanism CAN fire before measuring whether it DID.
+- 🔴 **A 0/N ONLY MEANS SOMETHING AFTER A POSITIVE CONTROL.** The two-arm loop returned
+  0/80 in BOTH arms — which, without proving the probe could see anything at all, is
+  indistinguishable from a harness wired to nothing. The control (spawn a process in the
+  repo, watch `live_cotenants` return a pid) is what made the zero a reading.
+- 🔴 **WHEN THE MECHANISM IS UNKNOWN, SHIP THE DIAGNOSTIC, NOT A GUESS.** `gc.auto=0` was
+  one line and would have looked like a resolution while the real cause stayed open —
+  strictly worse than nothing, because it would have stopped anyone looking. Making the
+  failure self-describing is the honest move when you cannot name the cause.
+- 🔴 **A DIAGNOSTIC NOBODY TESTED IS WORTH NOTHING AT THE MOMENT IT FIRES** — it only ever
+  runs inside an already-failing assertion. Two tests plus a mutation matrix (drop
+  cwd+cmdline → KILLED 2; let a dead pid raise instead of degrading → KILLED 1), because a
+  helper that throws inside an assertion message REPLACES the real failure with its own.
+- 🔴 **A BULLET THAT NAMES ITS OWN CLOSING CONDITION STILL NEEDS SOMEBODY TO COME BACK.**
+  The index held `"stays OPEN only until #1222 merges"`; #1222 merged five days earlier and
+  the bullet still read OPEN. Nothing closes these automatically — the next writer is the
+  only moment anyone looks, which is exactly why the protocol makes you re-check before
+  appending.
+- 🔴 **A MARKER WITH A PARENTHETICAL DECLARES NOTHING.** `RESOLVED be3084f0
+  (homelab-infra):` fails the grammar, so a genuine closure showed no badge and read as
+  unfinished. `--validate` reports these as *attempted marker did not parse* — an advisory
+  that exits 0, so it is only seen by someone who reads past the verdict.
+- **`gh pr merge` rc is not the merge's verdict.** It returned **1** for a failure that was
+  only about deleting a LOCAL branch still held by a worktree — the remote merge had
+  already succeeded. Remove the worktree first, and verify by content either way.
+- ⚠ **Environment, unchanged:** the shared clone still holds another session's untracked
+  WIP (`output.txt`, `nix/system/apply-nebula-relay.sh`, `nix/system/check-nebula-relays.sh`,
+  `scripts/diagnose-nix-disk.sh`). Untouched. `drift-check` classifies all 4 as read by no
+  nix path, so what was deployed IS `origin/main`.
+- **No clawgate task recorded, third time.** `clawgate_handoff.sh resolve` exited **5** — 0
+  tasks for this session, positive control confirming the board was reachable (11 links for
+  a different session). A wrong session id answers 200/empty exactly like a session that
+  touched nothing, so this is not a clean reading; no field written, none created.
+
 ## How to verify
 
 ```bash
-# the guard is on origin/main (by CONTENT — a squash is never an ancestor)
-git -C ~/workspace/devrc show origin/main:scripts/subsystem-store-api/seed.sh \
-  | grep -c 'NAME-CHECK'                                      # 2
-git -C ~/workspace/devrc show origin/main:flake.nix | grep -c 'pkgs.dash'    # 1
-git -C ~/workspace/devrc show origin/main:flake.nix | grep -c 'pkgs.tmux'    # 1 (main's, kept)
-git -C ~/workspace/devrc show origin/main:scripts/run-tests.sh | grep -c 'zsh tmux dash'  # 1
+# both merges landed, by CONTENT (a squash is never an ancestor)
+git -C ~/workspace/devrc show origin/main:scripts/subsystem-store-api/seed.sh | grep -c 'NAME-CHECK'          # 2
+git -C ~/workspace/devrc show origin/main:scripts/tests/test_git_repo_isolation.py | grep -c '_describe_cotenants'  # 7
 
-# the dash asymmetry the guard exists for — no cluster needed
-grep -n '^FROM' ~/workspace/devrc/scripts/subsystem-store-api/Dockerfile   # python:3.12-slim
-dash -c 'echo "ABSENT  $1"' _ 'sc/tab\there.md' | cat -A                   # a REAL tab
-bash -c 'echo "ABSENT  $1"' _ 'sc/tab\there.md' | cat -A                   # literal \t
-dash -c 'printf "ABSENT  %s\n" "$1"' _ 'sc/tab\there.md' | cat -A          # the fix
+# the refutation is recorded in the test file itself, not only in a commit message
+git -C ~/workspace/devrc show origin/main:scripts/tests/test_git_repo_isolation.py \
+  | grep -c 'defaults to 6700 loose objects'                                        # 1
 
-# --help states four rules and reaches Usage
-bash ~/workspace/devrc/scripts/subsystem-store-api/seed.sh --help | grep -c 'Four rules'  # 1
-bash ~/workspace/devrc/scripts/subsystem-store-api/seed.sh --help | grep -c 'allow-overwrite'  # 2
+# the arithmetic that refuted it — two commands, no loop needed
+d=$(mktemp -d); git init -q "$d" && (cd "$d" && touch f && git add f && git -c user.email=a@b -c user.name=a commit -qm x)
+git -C "$d" config --get gc.auto || echo "(unset -> default 6700)"
+git -C "$d" count-objects -v | head -2                                              # count: 3
 
-# the flake: run it under load and watch for a red that a re-run clears
-nix build ~/workspace/devrc#checks.x86_64-linux.pytests --no-link --print-build-logs \
-  > /tmp/sb.log 2>&1; echo "rc=$?"; grep -E 'RESULT:|TOTAL collected' /tmp/sb.log
+# both hosts converged, and AGREEING on one sha is the claim that matters
+bash ~/workspace/devrc/scripts/drift-check.sh 2>&1 | grep -E '^\[(workbench|laptop)\].*(BEHIND|VERIFIED|DRIFT)'
+
+# the index is well-formed after this session's writes
+cairn sync && cairn validate --scope devrc 2>&1 | grep -E '^OK|malformed'           # OK — N of N parse
 ```
