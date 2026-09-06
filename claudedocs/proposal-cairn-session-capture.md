@@ -336,7 +336,30 @@ reference is the ledger, not the other machine."* rc 15 is the cross-host arm, a
 one this paragraph already calls too narrow. **A cross-host diff inherits the exact failure
 decision 15 exists to end**: drop `SessionEnd` from both hosts — a bootstrap, an upgrade, or
 an operator "fixing" the diff by deleting it from the other side — and the sets agree while
-every session on every host silently attaches only the floor. §8 control 4 must still name the host it ran on.
+every session on every host silently attaches only the floor.
+
+🔴 **BUT THE LEDGER SHAPE DOES NOT CARRY ACROSS INTACT, AND THE PART THAT DOES NOT IS THE
+PART THAT MAKES rc 22 WORK.** `test_skill_tiers.py` pins that ledger **two-way** — every
+shipped skill has exactly one entry and every entry names a shipped skill — and its own
+docstring calls that *"THE ONE PROPERTY THAT MAKES IT SCALE … without it the mechanism
+silently stops covering the tree the moment a skill is added"*. That pin is possible because
+skills **exist as files**, so the expected set can be GENERATED. **Required hook events have
+no generator** — nothing in the tree enumerates them (the only hook-event list,
+`register-nudge-hook.py`'s `MATCHER_EVENTS`, says which events accept a matcher, not which
+must be registered). So this ledger is a hand-written policy list, and a two-way pin cannot
+be written for it.
+
+**Three consequences the implementer must handle, because the gate cannot:**
+1. 🔴 **Do not seed the ledger from a host.** Seeding from the laptop — the host being fixed,
+   or a fresh one — omits `SessionEnd`, after which both hosts match the ledger, no rc fires,
+   and the run prints a clean tiers-style line forever. Author each entry from the
+   requirement, not from an observation.
+2. **Each entry states WHY that event is required**, so a reader can check the list against
+   something. That is the only review the absent generator leaves available.
+3. **A missing or empty ledger is COULD NOT MEASURE, never clean** — `drift-check.sh` already
+   states this hazard for rc 22 in terms (*"an empty expectation would make every host look
+   compliant, in silence"*) and defends it that way; this arm inherits the hazard without
+   inheriting the test. §8 control 4 must still name the host it ran on.
 
 ### 5.2 Transport
 
@@ -399,7 +422,8 @@ list parses to a clean list member. Block-item promotion was FIXED, which is wha
 docstring quoted above is recording. The shape is safe because the parser handles it, not
 because uuids dodge a trap. **The digest, size and host move
 to the object's own metadata** — so no parser change lands in either repo, and checking a
-pointer costs a HEAD request rather than an entry read.
+pointer costs a LIST plus one HEAD per object — see §5.4, because decision 9 made this
+N-way — rather than an entry read.
 ⚠ Widening it is a **two-repo change**: `parse_front_matter` sits in `ZacxDev/cairn` too, at
 the same line, and §7 puts that repo out of scope. ⚠ Also unmeasured: the same docstring
 records that block-list lines are currently **zero across the live store** and says to re-take
@@ -552,8 +576,10 @@ while the credential is still worth rotating. **Ship it with v1, not after.**
 Not "the tests pass" — these specific controls, because each names a way this silently
 does nothing:
 
-1. **Positive control on the shipper.** A session that MUST produce an object: watch the
-   count move from 0 to 1 and report the pair, never the zero alone.
+1. **Positive control on the shipper.** A session that MUST produce objects: watch the count
+   move from zero to non-zero and report the pair, never the zero alone.
+   ⚠ **Not "0 to 1"** — control 3 forbids exactly that spelling, because under decision 9 a
+   session produces ~7.8 objects and an assertion of `== 1` fails a correct implementation.
 2. **Negative control.** Point it at an unreachable endpoint and watch it warn and exit
    non-zero rather than reporting a successful no-op.
 3. **Idempotency, measured.** Two handoff runs in one session must produce **no NEW key for a
@@ -583,12 +609,19 @@ does nothing:
    read token against a bucket key → `403`; the transcript credential against a cairn read
    route → `401`. An earlier revision named neither operation nor expected result, which any
    test satisfies — including one that type-checks past a wrong argument.
-8. **The report-only scan can actually SEE a credential** — the control decision 14 makes
-   load-bearing. Plant a synthetic credential in a fixture transcript, run the scan over the
-   bytes being shipped, and watch the count move **0 → 1**; report the pair, never the zero
-   alone. A scan wired to nothing reports `0 findings` and reads exactly like a clean run —
-   and under decision 14 that zero is the last thing standing between a leak and nobody
-   knowing.
+8. **The report-only scan can actually SEE a credential, ON THE PATH THAT SHIPS** — the
+   control decision 14 makes load-bearing, so it gets the same N-way treatment as control 4.
+   🔴 **Run the SHIPPER, not the scanner.** A scanner unit-tested against a fixture and never
+   invoked on the real path reports `0 findings` forever — verbatim the failure this control
+   exists to prevent, and the seam nobody owns.
+   🔴 **Plant the credential in a SUBAGENT transcript, not the parent.** Under decision 9 the
+   shipped unit is ~7.8 files and `agent-*` files hold **64% of the bytes** (§5.0). §3 shows
+   the correct-looking implementation — reusing `iter_transcripts`, which the site-ledger test
+   rewards — silently ships parents only; wire the scan the same way, plant in the parent, and
+   the count moves 0 → 1 while the majority of bytes are never scanned. **A parent-only plant
+   is a control that passes on the case that was never in doubt.**
+   Then report the pair — a non-zero count on the planted case beside the count under test —
+   never the zero alone.
 9. **Decision 7's actual behaviour, which no earlier control covered.** Make the push fail
    (unreachable endpoint) and assert **handoff exits 0** *and* the doc carries the
    no-session-attached line. Control 2 asserts the *shipper* exits non-zero, which is the
@@ -642,4 +675,8 @@ rather than absent.
 - A test pinning the existing feeder's output **before** `transcript_search` is touched
   (decision 13).
 - Wiring `SessionEnd` on the second host, and building the ledger-based detector §5.1 describes
-  (decision 15).
+  (decision 15). 🔴 **Including the three things §5.1 says the gate cannot do for you** — the
+  ledger is authored from the requirement rather than seeded from a host, each entry says why
+  its event is required, and a missing or empty ledger reports COULD NOT MEASURE rather than
+  clean. There is no generator for required hook events, so no two-way pin can be written and
+  those three are the whole of the review.
