@@ -41,9 +41,17 @@ they are separate claims — the earlier "NOT deployed" status is still supersed
   merging and this measurement, **1 of 14 `/resume` runs across BOTH hosts** invoked
   `handoff_search.py`, and that one was not the step firing. Nothing calls the index. The
   diagnosis is placement, not motivation — full evidence in "Open investigations" below.
-  **No fix is built**; the proposed one is rank 1 and awaits operator direction on its shape.
-- **Claim held:** `handoff-search-index-1` (`claim-work --release handoff-search-index-1` when
-  the rank-1 fix lands or is abandoned).
+- 🔴 **THE RANK-1 FIX IS BUILT — `devrc#1332`, audited over two rounds.** The query moved out of
+  step 3's prose into step 4's fence, beside `cairn recall`, re-keyed from an open item to the
+  handoff's TOPIC (an item-keyed step can only run when an item exists — that was the
+  conditional). Guarded structurally by
+  `test_the_query_shares_a_FENCE_with_cairn_recall`. ⚠ **Built and merged is NOT adopted:** the
+  5/6 rate was measured with ONE command in that step, so co-locating a second is a PREDICTION.
+  Re-run check 1 below after ~10 more runs; until then nothing here says the fix worked.
+- **Claim STILL HELD:** `handoff-search-index-1`. 🔴 **Release it explicitly — merging `#1332`
+  does NOT release it:** `claim-work --release handoff-search-index-1`. The namespace is global,
+  so an unreleased claim reads as rc 10/11 "taken" to a later session under a different identity
+  and blocks the *new* rank 1 with a description of work that is already finished.
 
 ## Open investigations — live diagnosis state
 
@@ -127,6 +135,11 @@ they are separate claims — the earlier "NOT deployed" status is still supersed
     stated it was following that text rather than the copy it had loaded. Its result — 3 hits,
     best `rank=1.1667`, generic gotcha sections — it judged irrelevant, finding nothing any prior
     session had ruled out. **Yield to date: 0.**
+  - ⚠ **The denominators, stated so they reconcile** (an audit found 8 − 1 = 7, not 6): the
+    workbench **8** = **1** that fired + **6** analysed as non-firing + **1** that was the
+    measuring session itself, excluded as the instrument. All figures are as of
+    **2026-09-06T04:00Z**; the corpus grows, so a later re-run reports larger numbers rather
+    than contradicting these — a re-derivation ~1 h later measured 10/2 on the same needle.
   - **The 6 workbench non-firing runs all met the trigger.** All 6 ran `claim-work` (1–20×) and 5
     made edits (2–52 `Edit`/`Write` calls) — actively working ranked items, not reporting and
     waiting. (The six docs are client-repo topics and are deliberately not named here; this repo
@@ -151,23 +164,31 @@ they are separate claims — the earlier "NOT deployed" status is still supersed
   this skill reliably performs numbered unconditional steps and reliably skips conditionals buried
   in a step's narrative prose, however loud the 🔴. Two independent conditional checks in step 3:
   0/6. One unconditional numbered step next door: 5/6.
-- **Next probe:** none needed to establish the finding. To validate the *fix*, promote the query
-  to its own numbered step and re-run "How to verify" after ~10 further runs; the prediction is
-  that it tracks `cairn recall`'s 5/6, not step 3's 0/6.
+- **Next probe:** none needed to establish the finding. 🔴 **The promotion ALREADY LANDED in
+  `#1332`** — do not re-do it; what remains is the re-run. Re-run check 1 under "How to verify"
+  after ~10 further runs, **raising its `CUT` to `#1332`'s merge time first** (left at `#1295`'s
+  it counts the 14 pre-fix runs in the denominator, so a fully successful fix reports ~10/24 and
+  reads as a failure). The prediction is that it tracks `cairn recall`'s 5/6, not step 3's 0/6.
 - **Residual, NOT measured:** whether the index, once actually queried, *yields* anything. n=1
   query returned nothing useful, which is no evidence either way about hit quality. Adoption and
   yield are separate questions and only the first is answered.
 
 ## Next steps (ranked)
-1. **Promote the index query out of step 3's prose into its own unconditional numbered step,
-   beside `cairn recall`** — `claude/skills/resume/SKILL.md` (devrc). The only change the
-   evidence supports, and `cairn recall` is the working control for it. 🔴 **AWAITING OPERATOR
-   DIRECTION ON THE SHAPE, and the cost is real:** unconditional means it runs on every resume
-   including ones with nothing open, so it needs a query the skill can form without an open item
-   — the handoff's own topic is the obvious candidate, but that is a choice, not a detail. Do NOT
-   "fix" this by making the step-3 prose louder; loudness is the variable that was already
-   falsified. ⚠ This is also an eviction question — `SKILL.md` is byte-capped, so promoting text
-   means evicting text in the same commit.
+1. **RE-MEASURE ADOPTION — the fix shipped as `#1332` and nothing yet shows it worked.** Run
+   check 1 under "How to verify" on BOTH hosts after ~10 further `/resume` runs. The prediction
+   is that the query tracks `cairn recall`'s 5/6, not step 3's 0/6; the residual is that the 5/6
+   was measured with ONE command in that step. ⚠ **A green test is not adoption** — the guard
+   pins WHERE the command sits, which is a claim about placement, never about firing.
+   🔴 Two mutants are known to survive every guard and are named in the test docstring: a gating
+   sentence above the fence, and a conditional comment inside it. Both re-create the hazard
+   without moving the command. ⚠ **Correction:** an earlier version of this item said
+   `SKILL.md` is byte-capped and an eviction was needed. **That was false** — the caps cover
+   `browser`, `handoff`, `prune-skill` and `RULES.md`, not `resume`; `#1332` added **+3,688 B**
+   (41,852 → 45,540, measured by `git cat-file -s` at base `10d437c9` and head `00e803a2`) with
+   no eviction, correctly. ⚠ An earlier draft of this correction said "~1.9 KB", which was itself
+   wrong — that was one commit's delta, not the PR's.
+   🔴 **Raise check 1's `CUT` to `#1332`'s merge time before re-running it.** Left at `#1295`'s,
+   the 14 pre-fix runs stay in the denominator and a fully successful fix reads as a failure.
    forcing: none
 2. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
    `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire

@@ -88,6 +88,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1486,6 +1487,72 @@ def test_the_module_root_pin_does_not_depend_on_this_tree_being_a_checkout():
 # --------------------------------------------------------------------------- #
 # 4d. 🔴 THE CO-TENANT PROBE (finding A)
 # --------------------------------------------------------------------------- #
+def _describe_cotenants(cotenants: "list[str]") -> str:
+    """`pid:comm` is not enough to attribute an intruder — add cwd and cmdline.
+
+    `live_cotenants` returns a bounded `pid:comm` list by design (it is a
+    detector, not a debugger). When the PRECONDITION above fails we need the two
+    fields that actually identify the process, and we need them at failure time:
+    /proc entries for a transient process are gone before anyone reads the log.
+    Best-effort by construction — a process that exits between the scan and this
+    call yields `<gone>`, which is itself the useful answer.
+    """
+    out = []
+    for entry in cotenants:
+        pid = entry.split(":", 1)[0]
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            cwd = "<gone>"
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                cmdline = fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            cmdline = "<gone>"
+        out.append(f"{entry} cwd={cwd!r} cmdline={cmdline!r}")
+    return "; ".join(out) or "<none>"
+
+
+def test_describe_cotenants_names_cwd_and_cmdline(tmp_path):
+    """🔴 A DIAGNOSTIC NOBODY TESTED IS WORTH NOTHING AT THE MOMENT IT FIRES.
+    This helper only ever runs on a failing precondition, so without a test its
+    first execution would be inside an already-confusing failure."""
+    _require_proc()
+    repo = _mkrepo(tmp_path / "repo")
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                            cwd=str(repo), stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + 5
+        seen: "list[str]" = []
+        while time.time() < deadline and not seen:
+            seen = live_cotenants([resolve_git_dir(repo)])
+            if not seen:
+                time.sleep(0.05)
+        assert seen, "probe never saw the spawned process — nothing to describe"
+
+        described = _describe_cotenants(seen)
+
+        assert str(repo) in described, (
+            f"the description omits the intruder's cwd, which is the field that "
+            f"distinguishes an xdist sibling from a stray host process: {described}")
+        assert "cmdline=" in described and "time.sleep" in described, (
+            f"the description omits the cmdline: {described}")
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_describe_cotenants_degrades_rather_than_raising(tmp_path):
+    """It runs INSIDE an assertion message, so raising there would replace the
+    real failure with its own — the one place a helper must not throw."""
+    # a pid that cannot exist: /proc/sys/kernel/pid_max is well below this
+    assert _describe_cotenants(["999999999:ghost"]) == (
+        "999999999:ghost cwd='<gone>' cmdline='<gone>'")
+    # and an empty set must not render as something that reads like a finding
+    assert _describe_cotenants([]) == "<none>"
+
+
 def test_live_cotenants_sees_another_process_in_the_repo(tmp_path):
     """The POSITIVE control. Without it, an empty co-tenant list is
     indistinguishable from a probe wired to nothing — and an empty list is what
@@ -1493,7 +1560,29 @@ def test_live_cotenants_sees_another_process_in_the_repo(tmp_path):
     _require_proc()
     repo = _mkrepo(tmp_path / "repo")
     git_dir = resolve_git_dir(repo)
-    assert live_cotenants([git_dir]) == [], "a brand-new tmp repo already has tenants?"
+    # 🔴 THIS PRECONDITION HAS FAILED IN THE SANDBOX TIER AND THE FAILURE WAS
+    # UNATTRIBUTABLE. MEASURED 2026-09-06: `['126220:git']` on a brand-new tmp
+    # repo, dev-host tier green on the same tree, and a re-run of the identical
+    # derivation clean. The obvious mechanism is REFUTED, not merely
+    # unreproduced: `git commit` can fork a detached `gc --auto`, but `gc.auto`
+    # defaults to 6700 loose objects and `_mkrepo` leaves THREE, so it cannot
+    # fire — and 80 iterations at load 31, with a positive control proving the
+    # probe sees a spawned co-tenant, produced 0 hits.
+    #
+    # So the cause is still unknown, and a message that only says "already has
+    # tenants?" cannot advance it. Name the intruder instead: its cwd and
+    # cmdline are what distinguish an xdist sibling from a stray host process
+    # from one of our own children, and they are gone by the time anyone reads
+    # the log. This costs nothing on the passing path.
+    pre_existing = live_cotenants([git_dir])
+    assert pre_existing == [], (
+        "a brand-new tmp repo already has tenants: "
+        f"{_describe_cotenants(pre_existing)}\n"
+        f"repo={repo} git_dir={git_dir}\n"
+        "This is the flake recorded in devrc/tests.md (2026-09-06). The "
+        "`gc --auto` theory is refuted; capture the cwd/cmdline above and the "
+        "xdist worker id, then diagnose from those rather than re-running."
+    )
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
                             cwd=str(repo), stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
