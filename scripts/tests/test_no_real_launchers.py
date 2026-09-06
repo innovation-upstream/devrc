@@ -373,9 +373,14 @@ ACKNOWLEDGED_UNSTUBBED = {
         "behind sudo and neither script is executed by scripts/tests"),
     "wmctrl": (
         {"session-write"},
-        "The FOURTH occurrence of the prose-mention shape already justified "
-        "three times under `home-manager` above, and justified here rather "
-        "than reworded away — this scan is a TEXT scan "
+        "Another occurrence of the prose-mention shape justified under "
+        "`home-manager` above (that entry numbers its own), and justified here "
+        "rather than reworded away. 🔴 THIS SENTENCE DELIBERATELY CARRIES NO "
+        "RUNNING TOTAL: it said \"the FOURTH … three times\" and was still "
+        "saying it after the population reached five, so two entries in one "
+        "dict disagreed about the same figure. A count kept beside what it "
+        "counts drifts — number the list, not the prose. This scan is a TEXT "
+        "scan "
         "(launcher_scan.hazard_hits regexes the file body), so naming a binary "
         "in order to promise you never call it is indistinguishable from "
         "calling it. session-write (added 2026-08-19) names `wmctrl` in ONE "

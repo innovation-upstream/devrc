@@ -913,8 +913,14 @@ def test_the_wanted_by_guard_can_SEE_an_inverted_flag():
     # 🔴 SO THE MUTATION IS ANCHORED, NOT SUBSTRING-MATCHED. `^  <flag> = …;$`
     # under re.M is the same shape `_wanted_by_expr` already uses, and it is why
     # THAT function was never fooled by the comment. `subn`'s count is asserted
-    # to be exactly 1, so a second declaration — or a comment that starts at
-    # column 0 — is a failure rather than a silent extra substitution.
+    # to be exactly 1, so a SECOND DECLARATION fails loudly with `substituted 2`
+    # rather than silently taking an extra substitution.
+    #
+    # ⚠ Precisely, because an earlier draft of this sentence overstated it: a
+    # comment at COLUMN 0 (`#  enableTmuxReplyAgent = true;`) is INVISIBLE to the
+    # anchor, not a failure — MEASURED `1 passed`. That is the wanted behaviour
+    # (a comment must not be mutated), but it is not detection, and claiming
+    # detection would be the same overclaim this whole control exists to record.
     #
     # The documentation is NOT the thing to delete here: the disarm example is
     # the only written rollback for a surface that executes commands. Fix the
@@ -1830,29 +1836,77 @@ def test_the_agent_SHELLS_OUT_TO_TMUX_AND_NOTHING_ELSE():
     acknowledgement had blinded the very guard it was filed under.
 
     So the pin is written here, where it can see argv rather than file names:
-    every `subprocess` invocation in the agent must take its argv from
-    `tmux_bin()`. AST, not grep — this file and the agent both NAME `systemctl`
-    in prose, and a text scan cannot tell a docstring from a call.
+    every spawn in the agent must take its argv from `tmux_bin()`. AST, not grep
+    — this file and the agent both NAME `systemctl` in prose, and a text scan
+    cannot tell a docstring from a call.
+
+    🔴 IT RESOLVES IMPORT BINDINGS, BECAUSE ITS FIRST VERSION DID NOT AND WAS
+    NARROWER THAN THIS DOCSTRING. That draft matched only a literal
+    `subprocess.<verb>(...)` / `os.<verb>(...)` attribute call, so an ALIAS
+    walked straight past a guard whose sentence said "nothing else". MEASURED,
+    with every `__pycache__` purged and PYTHONDONTWRITEBYTECODE=1 (a `cp -a`
+    battery preserves pytest-rewritten bytecode and scores phantom survivors):
+
+        subprocess.run(["systemctl", ...])          KILLED
+        os.execv("/bin/systemctl", [...])           KILLED
+        subprocess.run(cmd)  # variable argv        KILLED
+        from subprocess import run as _r; _r([...]) SURVIVED
+        from subprocess import run;      run([...]) SURVIVED
+        import subprocess as _sp; _sp.run([...])    SURVIVED
+        os.posix_spawn("/.../systemctl", [...], {}) SURVIVED
+
+    Four survivors, and with one of them live the two files were 183 passed —
+    the round-2 defect exactly, one import spelling narrower. `claude/RULES.md`:
+    "a guard's DESCRIPTION claims COVERAGE — check the implementation is as wide
+    as the sentence."
+
+    So the binding map below is the guard, not a nicety: `import subprocess as X`
+    and `from subprocess import run as Y` are resolved to their real targets, and
+    `posix_spawn` is named explicitly rather than caught by a prefix.
     """
     import ast
 
-    tree = ast.parse(SCRIPT.read_text())
+    src = SCRIPT.read_text()
+    tree = ast.parse(src)
+
+    SUBPROCESS_VERBS = {"run", "Popen", "call", "check_call", "check_output"}
+    # 🔴 NOT every `os.*` — an early draft took the whole module and matched
+    # `os.getpid()`, failing on a CLEAN tree. A negative control that goes red is
+    # a broken instrument, not a finding. Only verbs that can START a process.
+    def _os_spawns(a):
+        return a.startswith("exec") or a.startswith("spawn") or a in (
+            "system", "popen", "posix_spawn", "posix_spawnp", "forkpty", "fork")
+
+    # name -> "subprocess" | "os", following `as` aliases.
+    mod_alias = {}
+    # bare name -> the module it was imported OUT of, following `as` aliases.
+    fn_alias = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in ("subprocess", "os"):
+                    mod_alias[a.asname or a.name] = a.name
+        elif isinstance(node, ast.ImportFrom):
+            if node.module in ("subprocess", "os"):
+                for a in node.names:
+                    fn_alias[a.asname or a.name] = (node.module, a.name)
+
     argv0 = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
-        # subprocess.run / .Popen / .check_output / .call, and bare os.exec*/os.system
-        mod = getattr(getattr(fn, "value", None), "id", None)
-        attr = getattr(fn, "attr", "")
-        # 🔴 NOT every `os.*` — the first draft of this walker took the whole
-        # module and matched `os.getpid()`, failing on a CLEAN tree. A negative
-        # control that goes red is a broken instrument, not a finding. Only the
-        # verbs that can START a process count.
-        spawns = (mod == "subprocess" and attr in (
-                      "run", "Popen", "call", "check_call", "check_output")) or \
-                 (mod == "os" and (attr.startswith("exec") or attr.startswith("spawn")
-                                   or attr in ("system", "popen")))
+        mod = attr = None
+        if isinstance(fn, ast.Attribute):
+            base = getattr(getattr(fn, "value", None), "id", None)
+            mod, attr = mod_alias.get(base), fn.attr
+        elif isinstance(fn, ast.Name) and fn.id in fn_alias:
+            mod, attr = fn_alias[fn.id]
+
+        if mod is None:
+            continue
+        spawns = (mod == "subprocess" and attr in SUBPROCESS_VERBS) or \
+                 (mod == "os" and _os_spawns(attr))
         if not spawns:
             continue
         if not node.args:
