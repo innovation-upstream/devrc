@@ -48,7 +48,10 @@ they are separate claims — the earlier "NOT deployed" status is still supersed
   `test_the_query_shares_a_FENCE_with_cairn_recall`. ⚠ **Built and merged is NOT adopted:** the
   5/6 rate was measured with ONE command in that step, so co-locating a second is a PREDICTION.
   Re-run check 1 below after ~10 more runs; until then nothing here says the fix worked.
-- **Claim:** `handoff-search-index-1`, released when `#1332` merged.
+- **Claim STILL HELD:** `handoff-search-index-1`. 🔴 **Release it explicitly — merging `#1332`
+  does NOT release it:** `claim-work --release handoff-search-index-1`. The namespace is global,
+  so an unreleased claim reads as rc 10/11 "taken" to a later session under a different identity
+  and blocks the *new* rank 1 with a description of work that is already finished.
 
 ## Open investigations — live diagnosis state
 
@@ -161,9 +164,11 @@ they are separate claims — the earlier "NOT deployed" status is still supersed
   this skill reliably performs numbered unconditional steps and reliably skips conditionals buried
   in a step's narrative prose, however loud the 🔴. Two independent conditional checks in step 3:
   0/6. One unconditional numbered step next door: 5/6.
-- **Next probe:** none needed to establish the finding. To validate the *fix*, promote the query
-  to its own numbered step and re-run "How to verify" after ~10 further runs; the prediction is
-  that it tracks `cairn recall`'s 5/6, not step 3's 0/6.
+- **Next probe:** none needed to establish the finding. 🔴 **The promotion ALREADY LANDED in
+  `#1332`** — do not re-do it; what remains is the re-run. Re-run check 1 under "How to verify"
+  after ~10 further runs, **raising its `CUT` to `#1332`'s merge time first** (left at `#1295`'s
+  it counts the 14 pre-fix runs in the denominator, so a fully successful fix reports ~10/24 and
+  reads as a failure). The prediction is that it tracks `cairn recall`'s 5/6, not step 3's 0/6.
 - **Residual, NOT measured:** whether the index, once actually queried, *yields* anything. n=1
   query returned nothing useful, which is no evidence either way about hit quality. Adoption and
   yield are separate questions and only the first is answered.
@@ -178,8 +183,12 @@ they are separate claims — the earlier "NOT deployed" status is still supersed
    sentence above the fence, and a conditional comment inside it. Both re-create the hazard
    without moving the command. ⚠ **Correction:** an earlier version of this item said
    `SKILL.md` is byte-capped and an eviction was needed. **That was false** — the caps cover
-   `browser`, `handoff`, `prune-skill` and `RULES.md`, not `resume`; `#1332` added ~1.9 KB with
-   no eviction, correctly.
+   `browser`, `handoff`, `prune-skill` and `RULES.md`, not `resume`; `#1332` added **+3,688 B**
+   (41,852 → 45,540, measured by `git cat-file -s` at base `10d437c9` and head `00e803a2`) with
+   no eviction, correctly. ⚠ An earlier draft of this correction said "~1.9 KB", which was itself
+   wrong — that was one commit's delta, not the PR's.
+   🔴 **Raise check 1's `CUT` to `#1332`'s merge time before re-running it.** Left at `#1295`'s,
+   the 14 pre-fix runs stay in the denominator and a fully successful fix reads as a failure.
    forcing: none
 2. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
    `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire

@@ -78,6 +78,11 @@ EXPECTED_COMMAND = (
 # moved into. Pinned as the first command of that same numbered step.
 CO_LOCATED_COMMAND = "cairn recall --repo"
 
+# Opens the paragraph that warns the reader the corpus query is NOT repo-scoped.
+# The handle pin is scoped to THIS paragraph; widened to the whole block, its
+# `DEVRC` arm cannot fail (the prescribed command's own path contains "devrc").
+SCOPE_WARNING_SENTINEL = "THE TWO SURFACES ARE NOT SCOPED ALIKE"
+
 
 def _load_search_module():
     """Import `handoff_search` by path -- `scripts/lib` is not a package."""
@@ -429,6 +434,18 @@ def test_the_corpus_SCOPE_warning_names_the_repos_the_TOOL_actually_searches():
     red. The module's own docstring says every claim is derived from the tool
     rather than restated; this is the missing derivation.
 
+    🔴 SCOPED TO THE WARNING PARAGRAPH, NOT THE WHOLE BLOCK -- and that is the
+    difference between a guard and a decoration. Searching the whole wiring block
+    made the `DEVRC` arm STRUCTURALLY UNREACHABLE: `EXPECTED_COMMAND` contains
+    `~/workspace/devrc/scripts/lib/handoff_search.py`, and the pin above requires
+    that exact string in the same block, so `"devrc" in block` was guaranteed true
+    on every green run. Deleting `devrc` from the warning left the suite at 8
+    passed. The round-2 sweep chose `DATAPACKET` -- a fixture that could only die
+    -- and read the kill as proof. `claude/RULES.md`: prove a guard REACHABLE, not
+    merely breakable, and pick fixtures that are distinct from any constant the
+    assertion already names. A whole-block search was also satisfied by a handle
+    mentioned in ANY unrelated sentence in the block.
+
     ⚠ Scope: this pins the LABELS, not the client/non-client split, which is not
     a fact any module here holds. If a handle is added, re-read the sentence --
     the count in it is a human judgement and this test cannot check it.
@@ -442,8 +459,21 @@ def test_the_corpus_SCOPE_warning_names_the_repos_the_TOOL_actually_searches():
         "could not read REPO_ENV_HANDLES off the tool -- if it moved or was "
         "renamed, update this test and the skill's scope warning together."
     )
-    block = _block()
-    missing = [h for h in handles if h.lower() not in block.lower()]
+    paras = [p for p in _block().split("\n\n") if SCOPE_WARNING_SENTINEL in p]
+    assert len(paras) == 1, (
+        f"expected exactly 1 paragraph carrying {SCOPE_WARNING_SENTINEL!r} in the "
+        f"wiring block, found {len(paras)}. Without a unique paragraph this check "
+        "silently widens back to the whole block, where the DEVRC arm cannot fail."
+    )
+    # 🔴 MATCH BACKTICKED TOKENS, NOT THE PROSE. Narrowing to the paragraph was
+    # NOT enough: the paragraph itself says "a devrc-topic query" and "above the
+    # devrc ones", so a bare substring search still could not see `devrc` being
+    # deleted from the enumerated list. Only the list is backticked, so requiring
+    # a CODE-SPAN carrying the handle makes every arm reachable -- measured: with
+    # prose matching, dropping `devrc` left 8 passed; with this, it dies.
+    block = paras[0]
+    tokens = [t.lower() for t in re.findall(r"`([^`]+)`", block)]
+    missing = [h for h in handles if not any(h.lower() in t for t in tokens)]
     assert not missing, (
         f"the /resume step-4 scope warning does not name repo handle(s) {missing}.\n"
         f"  the tool searches: {list(handles)}\n"
