@@ -245,7 +245,7 @@ ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
         {"airvpn-menu", "keylog-spin-capture.sh",
          "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py",
-         "syshealth"},
+         "syshealth", "tmux-reply-agent"},
         "verb-split rather than record-only — see the systemctl tests below. "
         "run-tests.sh is a THIRD case, re-justified rather than absorbed: its "
         "only occurrences of the name are GUARD 7's accounting, which counts "
@@ -271,7 +271,27 @@ ACKNOWLEDGED_UNSTUBBED = {
         "closed. `test_syshealth.py::test_failed_units_asks_systemctl_for_a_"
         "read_verb` pins the argv against SYSTEMCTL_READ_VERBS itself rather "
         "than against a copied literal, so this justification goes red if the "
-        "call site ever grows a mutating verb"),
+        "call site ever grows a mutating verb. "
+        "tmux-reply-agent (added 2026-09-06 with the ARMING change) is the "
+        "PROSE-MENTION shape this table already carries three times under "
+        "`home-manager` (notify-failure.sh, session-manager, session-resolve) "
+        "and once here under session-write's entry, and it is re-justified the "
+        "same way rather than reworded to dodge the scanner. Its SINGLE "
+        "occurrence of the name is one line of module-docstring prose giving "
+        "the operator the second half of the DISARM procedure — "
+        "`systemctl --user stop tmux-reply-agent` — which exists because "
+        "flipping enableTmuxReplyAgent false does NOT stop a running agent: "
+        "the unit definition is emitted unconditionally, so the flag only "
+        "drops [Install] and sd-switch then plans Stop/Start. MEASURED with "
+        "`sd-switch 0.6.4 --dry-run` against a RUNNING unit, both controls "
+        "passing (identical generations => No action; unit deleted => Stop; "
+        "[Install] removed => Stop/Start). Deleting the word to get green "
+        "would delete the only written rollback for a surface whose payload "
+        "is arbitrary command execution as the operator. Verified by grep "
+        "that the file carries no call site: its complete set of argv[0] "
+        "literals is `tmux_bin()` alone, at the single `subprocess.run` in "
+        "run_tmux, and test_tmux_reply_agent.py pins that the agent shells "
+        "out to nothing else"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
          "notify-failure.sh", "playwright-nixos", "resume-state.sh",
