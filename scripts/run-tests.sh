@@ -496,10 +496,24 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 #           than skip when tmux is absent, and flake.nix's `gateTools` carries
 #           it for the sandbox.
 
+# dash:     scripts/tests/test_subsystem_store_api.py
+#           (TestTheSeedProbeAnswersSurviveTheRealPodShell). The SAME shape as
+#           zsh above, one layer out. `seed.sh`'s pod probe runs in the
+#           store-api pod, whose `/bin/sh` is dash (`Dockerfile`:
+#           `FROM python:3.12-slim` -> Debian); dash's `echo` INTERPRETS
+#           backslash escapes and bash's does not. Every test in that file drives
+#           a fake `kubectl` that runs the probe under THIS host's shell, so the
+#           whole suite is structurally blind to the difference — and the
+#           difference is a SILENT one (the two sides' join keys diverge and a
+#           pod entry that DIFFERS is overwritten as though it were new).
+#           Measured 2026-09-05: without dash on PATH every test in that class
+#           skipped, which is the "green having measured the one shell the defect
+#           cannot occur in" failure the zsh note describes. They FAIL now.
+#
 # 🔴 `python` is listed as well as `python3` because THIS SCRIPT invokes
 # `python -m pytest`, not `python3`. Asserting only `python3` checked a binary
 # the runner never calls.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux)
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh tmux dash)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
