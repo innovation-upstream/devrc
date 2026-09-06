@@ -18827,6 +18827,77 @@ class TestTheSeedNameCheckRejectsPathsItCannotCompareSafely:
             f"{list((dest / SCOPE).iterdir())}"
         )
 
+    def test_a_NEWLINE_in_an_entry_name_is_refused_and_nothing_is_pushed(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE HOLE THE FIRST NAME-CHECK HAD, and it was the silent kind.
+        `$staged_list` is newline-delimited, so `na<NL>me.md` is written as TWO
+        lines and EACH HALF matches the allowed class — `rejected=0`. MEASURED
+        against that guard, with decoys making both halves resolve: the run
+        printed `rejected=0`, `differing=0`, `seed: OK`, rc 0, and REPLACED the
+        pod's newer copy. Caught now by matching the WHOLE shape `<scope>/<entry>.md`: a
+        filename cannot contain `/`, so the second half never has one."""
+        env, dest = fake_cluster
+        (store / SCOPE / "na\nme.md").write_text(_entry("odd", SCOPE))
+        # the decoys that made the silent version reachable — both halves of the
+        # split resolve to real files, so nothing downstream errors
+        (store / SCOPE / "na").mkdir(exist_ok=True)
+        (store / "me.md").write_text("x")
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 10, (
+            f"a newline in an entry name was not refused:\n{r.stdout}\n{r.stderr}"
+        )
+        assert "NOTHING WAS PUSHED" in r.stderr, r.stderr
+        # 🔴 NAME A HALF OF THE SPLIT. The whole defect was that both halves
+        # looked legitimate, so the refusal must demonstrably have SEEN one.
+        assert f"{SCOPE}/na" in r.stderr or "me.md" in r.stderr, (
+            f"the refusal did not name either half of the split: {r.stderr}"
+        )
+        assert not (dest / SCOPE).exists() or not any((dest / SCOPE).iterdir()), (
+            "bytes reached the pod despite the refusal"
+        )
+
+    def test_a_component_STARTING_with_a_dash_is_refused(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 `-` IS INSIDE THE ALLOWED CLASS AND IS THE OPTION CHARACTER. A
+        scope named `-dashscope` passed the first name check and then reached
+        `sha256sum` as an option: `invalid option -- 'd'`, rc 123, and NOT one
+        `seed:` line — round 1's exact failure shape, re-reached through the
+        guard that claimed to have removed the class."""
+        env, dest = fake_cluster
+        odd = store / "-dashscope"
+        odd.mkdir()
+        (odd / "thing.md").write_text(_entry("thing", "dashscope"))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 10, (
+            f"a leading-dash scope was not refused (rc 123 = it reached "
+            f"sha256sum as an option):\n{r.stdout}\n{r.stderr}"
+        )
+        assert "-dashscope/thing.md" in r.stderr, r.stderr
+        assert not (dest / "-dashscope").exists()
+
+    def test_a_dash_INSIDE_a_name_is_still_allowed(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The over-firing control for the rule above: `dl-router.md` is the
+        single most common shape in the real store. Rejecting an interior dash
+        would refuse most of it."""
+        env, dest = fake_cluster
+        (store / SCOPE / "dl-router.md").write_text(_entry("dl-router", SCOPE))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, (
+            f"an interior dash was refused — this rule is about the FIRST "
+            f"character only:\n{r.stdout}\n{r.stderr}"
+        )
+        assert (dest / SCOPE / "dl-router.md").exists()
+
     def test_the_refusal_names_the_offending_path_in_full(
         self, store: Path, tmp_path: Path, fake_cluster
     ):
@@ -18903,7 +18974,21 @@ class TestTheSeedProbeAnswersSurviveTheRealPodShell:
         )
         # the inner script is embedded in a double-quoted shell string, so its
         # own quotes are backslash-escaped in the source
-        return m.group(1).replace('\\"', '"').replace("\\$", "$")
+        # 🔴 `\\\\` FIRST, THEN THE REST. The inner script is embedded in a
+        # DOUBLE-QUOTED shell string, so `\\"` -> `"`, `\\$` -> `$` and
+        # `\\\\` -> `\\`. Omitting the last one left the extracted text
+        # `printf "…%s\\\\n"` where the pod's `sh` actually receives
+        # `printf "…%s\\n"` — the outputs happen to agree because the shell
+        # collapses it again, so nothing measured was wrong, but the class
+        # docstring claims this IS the command and it was not.
+        inner = m.group(1)
+        out, i = [], 0
+        while i < len(inner):
+            if inner[i] == "\\" and i + 1 < len(inner) and inner[i + 1] in '\\"$':
+                out.append(inner[i + 1]); i += 2
+            else:
+                out.append(inner[i]); i += 1
+        return "".join(out)
 
     def test_the_probe_command_really_is_the_one_under_test(self):
         """POSITIVE CONTROL on the extractor itself: an empty or wrong match
@@ -18930,6 +19015,38 @@ class TestTheSeedProbeAnswersSurviveTheRealPodShell:
             "this is the silent-clobber route: the two sides' join keys diverge "
             "and a DIFFERING pod entry reads as a pure addition"
         )
+
+    def test_the_UNREADABLE_arm_is_exercised_too(self, tmp_path: Path):
+        """🔴 THE OTHER ARM. Every fixture above names a path that does NOT
+        exist, so `[ -f "$1" ]` is always false and only the ABSENT branch ever
+        ran — a mutant confined to the UNREADABLE `printf` SURVIVED the whole
+        suite (measured). This reaches it: the file exists, so `[ -f ]` is true,
+        and it is unreadable, so `sha256sum` fails into the fallback."""
+        dash = _require_dash()
+        d = tmp_path / "sc"; d.mkdir()
+        target = d / "unreadable\\there.md"
+        target.write_text("x")
+        target.chmod(0o000)
+        try:
+            name = str(target)
+
+            def run(shell):
+                return subprocess.run(
+                    [shell, "-c", self._probe_script(), "_", name],
+                    capture_output=True, text=True, timeout=30,
+                ).stdout
+
+            got_dash, got_bash = run(dash), run("bash")
+            assert "UNREADABLE" in got_dash, (
+                f"the UNREADABLE arm was never reached, so this test proves "
+                f"nothing about it: {got_dash!r}"
+            )
+            assert got_dash == got_bash, (
+                "the pod's shell and the harness's disagree on the UNREADABLE "
+                f"answer: {got_dash!r} vs {got_bash!r}"
+            )
+        finally:
+            target.chmod(0o644)
 
     def test_the_control_shows_echo_WOULD_have_disagreed(self):
         """🔴 POSITIVE CONTROL. Without it, the test above is indistinguishable

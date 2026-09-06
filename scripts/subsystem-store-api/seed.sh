@@ -63,11 +63,22 @@
 #   9   the pod's probe answered FEWER paths than were asked about, so the
 #       comparison could not be made. No override — an unanswered path is
 #       indistinguishable from one that matched.
-#   10  a staged path contains characters outside `[A-Za-z0-9._/-]`. No override
-#       either, and the pattern is not meant to be relaxed: the comparison that
-#       protects the pod moves paths as TEXT between two different shells, and a
-#       name outside that set can make a DIFFERING entry look brand-new. Rename
-#       the entry. Measured 2026-09-05: 0 of 348 live entries are affected.
+#   10  a staged entry NAME this push cannot compare safely. No override either,
+#       and the rules are not meant to be relaxed: the comparison that protects
+#       the pod moves paths as TEXT between two different shells, so a name
+#       outside them can make a DIFFERING entry look brand-new. Three rules,
+#       each closing a measured hole rather than a hypothetical one:
+#         * characters outside `[A-Za-z0-9._/-]`;
+#         * a component STARTING with `-`, which reaches `sha256sum` as an
+#           option (`invalid option -- 'd'`, rc 123, no `seed:` line);
+#         * a NEWLINE anywhere. It is this list's OWN record separator, so a
+#           looser check sees two halves that each look legitimate and reports
+#           `rejected=0`. Caught because the pattern REQUIRES a `<scope>/<entry>`
+#           shape: a filename cannot contain `/`, so the second half of a split
+#           never has one and is always rejected.
+#       Rename the entry. Measured 2026-09-05 across both live stores: 373
+#       entry files, 0 affected by any of the three. 🔴 THAT COUNT MOVES — it
+#       read 348 earlier the same day; re-measure rather than citing it.
 #
 # The two halves are split on purpose: staging is hermetic and testable, pushing
 # needs a cluster. A green stage says nothing about the push, so the script
@@ -379,14 +390,50 @@ fi
 # `--push` re-stages from `--store` on every run, so the check runs before every
 # transfer that exists.
 _odd_f="$_seed_tmp/odd-names"
-LC_ALL=C grep -nvE '^[A-Za-z0-9._/-]+$' "$staged_list" > "$_odd_f" || [ $? -eq 1 ]
+# 🔴 `-` IS IN THE CLASS AND IS ALSO THE OPTION CHARACTER. A path is safe to
+# COMPARE with a leading dash but not safe to PASS: a scope named `-dashscope`
+# reaches `sha256sum` as `-d…` and the run dies `invalid option -- 'd'` at
+# rc 123 with no `seed:` line — round 1's exact failure shape, re-reached
+# through the guard that claimed to remove the class (MEASURED 2026-09-05).
+# `sha256sum --` below is the mechanism fix; this is the policy one, and both
+# are kept because the mechanism is one edit away from being lost again.
+# 🔴 THE REQUIRED `/` IS WHAT CATCHES A NEWLINE — and it does so WITHOUT a
+# third `find`. `$staged_list` is
+# newline-delimited, so a file named `na<NL>me.md` is written as TWO lines; a
+# looser pattern passes BOTH halves and reports `rejected=0` for the one
+# character that breaks every consumer downstream. MEASURED against the first
+# version of this guard, with decoys making both halves resolve: `rejected=0`,
+# `differing=0`, `seed: OK`, rc 0 — while REPLACING the pod's newer copy.
+#
+# Requiring a well-formed `<scope>/<entry>` closes it by construction: a
+# FILENAME CANNOT CONTAIN `/`, so the SECOND half of any split never has one and
+# is always rejected, whatever the first half looks like.
+#
+# 🔴 AN EARLIER VERSION ALSO ANCHORED `\.md$` and this comment credited THAT
+# with catching the newline. It did not, and the mutation matrix said so:
+# dropping the anchor killed no test, because the slash rule had already decided
+# every case. `find` only ever emits `*.md`, so the anchor could never change a
+# verdict — a redundant clause carrying a false explanation, which is worse than
+# no clause. Removed. The first attempt at this counted `-print0` records
+# instead and added a THIRD walk — which `test_the_two_find_expressions_are_
+# IDENTICAL` correctly failed, because two walks that disagree is the bug this
+# file already carries a scar from.
+#
+# 🔴 THE PATTERN MATCHES WHAT IS SAFE AND `-v` REJECTS THE REST, so it must
+# describe a WHOLE well-formed path, never an alternation of hazards: written as
+# `'…$|^-|/-'` an added `^-` arm makes a leading-dash path MATCH, which under
+# `-v` marks it SAFE — the guard inverted by the edit meant to strengthen it.
+# Each of the two components must therefore START with a non-dash character and
+# continue in the class. `_shippable_entries` is `-mindepth 2 -maxdepth 2`, so
+# there is exactly one `/`.
+LC_ALL=C grep -nvE '^[A-Za-z0-9._][A-Za-z0-9._-]*/[A-Za-z0-9._][A-Za-z0-9._-]*$' "$staged_list" > "$_odd_f" || [ $? -eq 1 ]
 _n_odd=$(wc -l < "$_odd_f" | tr -d ' ')
 # Printed on EVERY path, not only on rejection — this file's own silent-zero
 # rule: a bare 0 from a check that walked nothing reads exactly like a clean one.
 echo "seed: NAME-CHECK staged=$staged_entries rejected=$_n_odd"
 if [[ "$_n_odd" -gt 0 ]]; then
   echo "seed: REFUSING — $_n_odd staged entry path(s) contain characters this push cannot" >&2
-  echo "seed:   compare safely. Allowed: A-Z a-z 0-9 . _ - /" >&2
+  echo "seed:   compare safely. Allowed: A-Z a-z 0-9 . _ - / and no component may START with -" >&2
   sed 's/^/  /' "$_odd_f" >&2
   echo "seed:   (each line is <line-number-in-staged-list>:<path>)" >&2
   echo "seed: 🔴 THIS IS NOT A LIMIT YOU SHOULD WIDEN BY RELAXING THE PATTERN. The pre-flight" >&2
@@ -481,7 +528,7 @@ if [[ -s "$staged_list" ]]; then
   # not exist. A confident false refusal whose only offered remedy is
   # `--allow-overwrite` is worse than the crash it replaced. `sub()` strips the
   # digest and its separator and leaves the REST OF THE LINE intact.
-  ( cd "$STAGE" && xargs -r -d '\n' -I{} sha256sum {} ) < "$staged_list" \
+  ( cd "$STAGE" && xargs -r -d '\n' -I{} sha256sum -- {} ) < "$staged_list" \
     | awk '{h=$1; sub(/^[^ ]+ +/,""); print $0"\t"h}' | LC_ALL=C sort > "$_local_h"
   # 🔴 EVERY PATH IS ANSWERED — a hash, ABSENT, or UNREADABLE. The probe used to
   # emit a line only for files the pod HAS, so "the pod holds none of them" and
@@ -517,7 +564,7 @@ if [[ -s "$staged_list" ]]; then
   # silently treated as a pure addition.
   # `_ {}` passes the path as "$1" so it is never re-parsed as shell text.
   kubectl -n "$ns" exec -i "$pod" -- \
-    sh -c "cd '$DEST' && xargs -r -d '\n' -I{} sh -c 'if [ -f \"\$1\" ]; then sha256sum \"\$1\" 2>/dev/null || printf \"UNREADABLE  %s\\n\" \"\$1\"; else printf \"ABSENT  %s\\n\" \"\$1\"; fi' _ {}" \
+    sh -c "cd '$DEST' && xargs -r -d '\n' -I{} sh -c 'if [ -f \"\$1\" ]; then sha256sum -- \"\$1\" 2>/dev/null || printf \"UNREADABLE  %s\\n\" \"\$1\"; else printf \"ABSENT  %s\\n\" \"\$1\"; fi' _ {}" \
     < "$staged_list" \
     | awk '{h=$1; sub(/^[^ ]+ +/,""); print $0"\t"h}' | LC_ALL=C sort > "$_probe_raw"
   _n_answered=$(wc -l < "$_probe_raw" | tr -d ' ')
