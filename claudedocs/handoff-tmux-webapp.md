@@ -9,12 +9,95 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-🔴 **THE WRITE PATH IS BUILT, MERGED, DEPLOYED AND ARMED ON THE SERVER — AND THE LOOP IS NOT
-CLOSED. The host agent is NOT running, so a reply typed in the UI queues and is never executed.**
-That is the single fact that decides what the next session does.
+🔴 **RANK 32 IS BUILT, COMMITTED AND PUSHED — AND IS NOT MERGED, NOT SHIPPED, AND
+NOT CLOSED. THE TWO-TIER GATE WAS STILL RUNNING WHEN THIS DOC WAS WRITTEN.** The
+host agent is still `inactive` on both hosts; the loop rank 32 exists to close is
+still open. That is the single fact that decides what the next session does.
 
-**All four PRs merged, each verified BY CONTENT on its mainline (never by ancestry — a squash is
-never an ancestor):**
+**IN FLIGHT: `innovation-upstream/devrc` branch `feat/arm-tmux-reply-agent`, commit
+`b32a65a9`, pushed. NO PR OPENED YET.** Claim `tmux-webapp-32` is HELD by this
+session (`claim-work --release tmux-webapp-32` when it lands or is abandoned).
+
+| | |
+|---|---|
+| branch | `feat/arm-tmux-reply-agent`, off `origin/main` `f0b9c474` |
+| commit | `b32a65a9` — 3 files, +89/−50 |
+| worktree | `/home/zach/workspace/devrc-rank32` (`.envrc` copied and `direnv allow`ed) |
+| merged tree | `origin/main` is an **ancestor of HEAD**, re-checked after the commit — so the branch tree **is** the merged tree, and the gate below is a merged-tree run |
+| PR body | drafted, unposted: `<scratchpad>/pr32.md` |
+
+**What the commit does.** `nix/home.nix` `enableTmuxReplyAgent = false → true`, plus
+the three test guards and five comments that asserted the disabled state.
+
+🔴 **THE HANDOFF CALLED THIS "the one-line edit" AND IT IS NOT ONE — that is a
+finding, not a complaint.** The one line falsifies six other statements in the
+tree: three guards in `scripts/tests/test_tmux_reply_agent.py` pin the flag
+`false`, and five comments (three in `nix/home.nix`, two in
+`scripts/tmux-reply-agent`) describe the agent as SHIPPED DISABLED. A session that
+flipped only the flag would have merged a red suite; one that flipped the flag and
+deleted the guards would have removed the only structural check that the flag is
+what disarms the agent.
+
+**MEASURED — the flag drives the install, as a PAIR rather than one reading:**
+
+| tree | flag | `Install.WantedBy` |
+|---|---|---|
+| base clone `~/workspace/devrc` | `false` | `[]` |
+| `~/workspace/devrc-rank32` | `true` | `["default.target"]` |
+
+Both from `nix eval` against the real flake. The negative half is what makes the
+positive half mean anything.
+
+**MUTATION BATTERY — the flipped guards were watched to go RED for their OWN
+reasons.** `PYTHONDONTWRITEBYTECODE=1`; tree verified clean after each restore;
+script kept at `<scratchpad>/mut32.sh`.
+
+| mutant | result | assertion text it produced |
+|---|---|---|
+| control (unmutated) | **105 passed** | — |
+| flag `true` → `false` | **3 failed** | `the terminal-write agent's master switch is not true` · ``enableTmuxReplyAgent is `false` `` · `the flag declaration this control mutates was not found verbatim` |
+| cond → `(!enableTmuxReplyAgent)` | **2 failed** | ``the WantedBy condition is `(!enableTmuxReplyAgent)`, not the bare flag`` |
+| cond → `(enableTmuxReplyAgent \|\| true)` | **3 failed** | ``the WantedBy condition is `(enableTmuxReplyAgent \|\| true)`, not the bare flag`` |
+| post-restore control | **105 passed** | — |
+
+**GATE STATUS — read this before assuming anything passed:**
+
+| tier | leg | verdict |
+|---|---|---|
+| 1 (dev host) | `run-node-tests.sh` | ✅ **PASS** — 5 suites, 41 files, **1449 tests**, floor 1367 |
+| 1 (dev host) | `run-tests.sh` (pytest) | 🔴 **NOT YET KNOWN** — first attempt exited **3 = PRECONDITION**, re-running inside `nix develop`, unfinished at write time |
+| 2 (nix sandbox) | `checks.x86_64-linux.pytests` | ⬜ **NOT RUN** |
+| 2 (nix sandbox) | `checks.x86_64-linux.nodetests` | ⬜ **NOT RUN** |
+
+🔴 **NOT DONE, named rather than left implicit:**
+- **No PR exists.** The body is written and unposted.
+- **Three of the four gate legs have not returned.** Nothing here licenses a merge.
+- **`systemctl --user is-active tmux-reply-agent` still reads `inactive`** on the
+  workbench, and the laptop was never queried. The rank-32 closing condition is
+  `active` on **BOTH** hosts, which needs `scripts/ship.sh` **after** merge —
+  reading every per-host line, never the final verdict.
+- **Rank 33 is entirely untouched.** No reply has ever been typed in the UI and
+  observed landing in a pane.
+
+**Carried forward — the server half is unchanged by any of this.** `0.8.26` is
+deployed and ARMED; both hosts hold `CLAWGATE_TERMINAL_TOKEN` in
+`~/.claude/clawgate.env` at mode 0600. Arming needs BOTH switches and this branch
+is the second one.
+
+🔴 **The base clone's copy of THIS DOC was STALE when the session started** — 2841
+lines locally against 2585 on `origin/main` (`#1330` pruned it). `resume-state.sh`
+caught it and the session read the `origin/main` copy. Re-check the
+`handoff-read:` line rather than opening the working-tree file.
+
+🔴 **No `clawgate-task:` field is recorded, and that is NOT a clean bill of
+health.** `clawgate_handoff.sh resolve` exited **5**: 0 tasks for this session,
+with its positive control confirming the board answered 5 links for a different
+session — so the board is reachable and the token accepted, but a WRONG session id
+also answers 200 with an empty array. This cannot distinguish "touched no task"
+from "wrong id".
+
+**The SERVER half, carried forward verbatim in substance — all four PRs merged, each
+verified BY CONTENT on its mainline (never by ancestry — a squash is never an ancestor):**
 
 | PR | what | squash |
 |---|---|---|
@@ -23,8 +106,8 @@ never an ancestor):**
 | `ZacxDev/homelab-infra#712` | rank 31 — start a session on a host | `67d1fe4d0` |
 | `innovation-upstream/devrc#1324` | the host-side agent + systemd unit | `f4bdb83a7` |
 
-**Deployed and armed:** `0.8.26` built on the WORKBENCH and pushed to harbor; pin bumped in
-`92f591b4c`; armed in `2663d7265`. Live boot lines, read from the pod:
+**Deployed and armed:** `0.8.26`, pin bumped in `92f591b4c`, armed in `2663d7265`. Live boot
+lines read from the pod:
 ```
 terminal write surface: ENABLED — CLAWGATE_TERMINAL_TOKEN configured
 terminal write surface (BROWSER tier): ENABLED for [clawgate.zacx.dev 192.168.50.250 10.42.0.30]
@@ -42,19 +125,6 @@ produced five refusals, so the 400 is what makes the rest meaningful:
 | `/ui/term/send-keys` cross-site `Origin` | **403** |
 | same, unexpected `Host` | **403** |
 | same, expected host, empty body | **400** (past auth, into validation) |
-
-🔴 **NOT DONE, and named rather than left implicit:**
-- **The host agent is not running.** `enableTmuxReplyAgent = true` is an **uncommitted** edit in the
-  worktree `~/workspace/devrc-arm-<pid>` on branch `feat/enable-tmux-reply-agent`. `nix eval`
-  confirms the flag drives `Install.WantedBy = ['default.target']`, but nothing is committed,
-  no PR exists, and no `ship.sh` has run. `systemctl --user is-active tmux-reply-agent` → **inactive**.
-- **Nothing has been validated end to end.** No reply has ever been typed in the UI and observed
-  landing in a pane. The rank-30 closing condition is explicitly *not* an API 200.
-- **Both hosts DO hold the credential**: `CLAWGATE_TERMINAL_TOKEN` appended to
-  `~/.claude/clawgate.env` on workbench and laptop, mode 0600, value verified equal to the pod's.
-- **No `clawgate-task:` field is recorded.** `clawgate_handoff.sh resolve` exited **5**. 🔴 That is
-  NOT a clean bill of health — an unknown `CLAUDE_CODE_SESSION_ID` also answers 200 with an empty
-  array, so this cannot distinguish "touched no task" from "wrong id".
 
 **Carried forward from the previous Status — still true, and not restated elsewhere:**
 - 🔴 **RANK 8a IS RECURRING, NOT CLOSED.** Nothing converges `homelab-talos`, so both hosts'
@@ -2544,6 +2614,48 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
 </content>
 </invoke>
 
+- 🔴 **2026-09-06 — A POSITIVE CONTROL THAT MUTATES IN ONE DIRECTION GOES VACUOUS
+  THE MOMENT THE THING IT GUARDS FLIPS, AND IT GOES VACUOUS *GREEN*.**
+  `test_the_wanted_by_guard_can_SEE_an_inverted_flag` proved the guard could see a
+  flag flip by doing `src.replace("enableTmuxReplyAgent = false;", "… = true;")`
+  and asserting the result reads `true`. Arming the agent makes that `replace`
+  match **nothing**: `flipped` then equals `src`, and the control asserts
+  `"true" == "true"` about the **unmutated** file — it passes while observing
+  nothing, in a suite where every other test also passes. The `assert flipped !=
+  src` line two lines above it is the only thing that catches this, and only
+  because a previous session put it there for the *other* mutant. **General
+  shape: any control built as `replace(<current value>, <other value>)` is
+  silently disarmed by a change to `<current value>`** — the direction of the
+  mutation is a dependency on the state under test, and nothing re-derives it.
+  Fixed by inverting it to `true → false`, which is now the hazard direction, and
+  by asserting `!= src` on both arms.
+- 🔴 **2026-09-06 — FLIP A CONFIG GUARD, DO NOT DELETE IT; THE SYMMETRY IS THE
+  PRODUCT.** `test_the_agent_unit_SHIPS_DISABLED` pinned `false`. The tempting
+  read on arming is "the guard has served its purpose, drop it". What it actually
+  enforces is that the armed state is a **deliberate, reviewed edit in both
+  directions**: while it read `false`, arming meant editing the test; now it reads
+  `true`, disarming means editing the test. A drive-by revert to `false` would
+  stop every queued reply executing **while the server kept accepting writes and
+  the UI kept looking healthy** — silent, and exactly what a config guard is for.
+- 🔴 **2026-09-06 — WHEN A ONE-LINE FLAG FLIP LANDS, `git grep` THE FLAG NAME AND
+  THE PROSE THAT DESCRIBES ITS STATE, BOTH.** Grepping `enableTmuxReplyAgent`
+  finds the guards; it does **not** find `SHIPPED DISABLED`, which is the phrase
+  three of the five falsified comments are written in. Two greps, not one — the
+  second is for the words a human used to describe the state, not the identifier.
+- ⚠ **2026-09-06 — `scripts/gate.sh` run from a plain shell exits `3` on the
+  pytest leg, and 3 is a PRECONDITION failure, not a test failure.** The log says
+  so and prints the fix (`nix develop <repo> --command bash <repo>/scripts/run-tests.sh <repo>`).
+  Do not read that 3 as a red suite; the node leg in the same run passed 1449 tests.
+- ⚠ **2026-09-06 — the documented `| tail` trap fired again, unchanged.**
+  `bash scripts/gate.sh … 2>&1 | tail -35; echo "GATE_RC=$?"` printed
+  **`GATE_RC=0`** directly beneath the runner's own **`GATE: RESULT=FAIL exit=1`**.
+  The status belongs to `tail`. Read the `RESULT:` lines; never the piped code.
+- **`nix eval` of a worktree needs `path:<worktree>`, not the repo root.** The
+  first eval silently answered for `~/workspace/devrc` (flag still `false`) and
+  returned `{"WantedBy":[]}` — which looked like the change not working. It became
+  the negative control instead, but only because the second eval named the
+  worktree explicitly.
+
 ## How to verify
 
 ```bash
@@ -2562,14 +2674,36 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/ui/term/send-keys -H 'Origin
 curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/ui/term/send-keys \
      -H 'Content-Type: application/x-www-form-urlencoded' -d ''                                   # 400
 
-# 4. the host half
+# 4. the host half — THE RANK-32 CLOSING CONDITION, and nothing else is
 systemctl --user is-active tmux-reply-agent          # workbench
 ssh zach@10.42.0.100 'systemctl --user is-active tmux-reply-agent'   # laptop
+#    BOTH must read `active`, and only after scripts/ship.sh has run post-merge.
+#    Read every per-host line of ship.sh, never its final verdict.
 
-# 5. DISARM (either one is sufficient, and both are reversible)
+# 5. the rank-32 branch: the flag drives the install — the PAIR, not one reading
+nix eval --impure --raw --expr 'let f = builtins.getFlake "path:/home/zach/workspace/devrc-rank32";
+  in builtins.toJSON (f.homeConfigurations."zach".config.systemd.user.services."tmux-reply-agent").Install'
+#    expect {"WantedBy":["default.target"]}; the base clone answers {"WantedBy":[]} once it is
+#    behind this branch again — that negative half is what makes the positive half mean anything.
+
+# 6. the flipped guards can go RED, each for its OWN reason
+bash <scratchpad>/mut32.sh   # 3 mutants, own-assertion evidence, controls green either side
+
+# 7. BOTH tiers on the MERGED tree; the nix checks ONE AT A TIME (a combined RED is untrustworthy)
+nix develop /home/zach/workspace/devrc-rank32 --command bash \
+  /home/zach/workspace/devrc-rank32/scripts/run-tests.sh /home/zach/workspace/devrc-rank32
+bash /home/zach/workspace/devrc-rank32/scripts/gate.sh --tier node
+nix build /home/zach/workspace/devrc-rank32#checks.x86_64-linux.pytests
+nix build /home/zach/workspace/devrc-rank32#checks.x86_64-linux.nodetests
+#    Read each runner's own `RESULT:` line. NEVER a piped exit code — `| tail` printed
+#    GATE_RC=0 under `GATE: RESULT=FAIL exit=1` in this very session.
+
+# 8. DISARM (either one is sufficient, and both are reversible)
 #    remove CLAWGATE_TERMINAL_UI_WRITES or CLAWGATE_TERMINAL_UI_HOSTS from
 #    clusters/workbench/apps/clawgate/deployment.yaml, or drop CLAWGATE_TERMINAL_TOKEN
 #    from clusters/workbench/apps/clawgate/secrets.enc.yaml. Commit → Flux reconciles.
+#    The HOST half disarms independently: enableTmuxReplyAgent = false in nix/home.nix
+#    (which now also means editing test_tmux_reply_agent.py — deliberately).
 ```
 ## Run this first — the index, one read-only command
 ```bash
