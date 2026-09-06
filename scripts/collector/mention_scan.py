@@ -34,10 +34,11 @@ Both profiles:
   github    owner/repo#12             -> https://github.com/owner/repo/issues/12
   github    repo#12                   -> owner resolved by the CALLER (see below)
   ambiguous #12                       -> clawgate task 12 OR a GitHub issue 12
+  github    /audit-pr 12   audit-pr 12   (the ONE wordy form that is clickable —
+            see `AUDIT_PR_RE`'s ledger row for why it, and not its neighbours)
 
 profile="telemetry" only — an ENUMERATED widening, never a generic pattern:
   github    github.com/owner/repo/pull/12   (and /issues/12)
-  github    /audit-pr 12   audit-pr 12
   github    gh pr view 12  gh issue close 12   (enumerated subcommands)
   clawgate  clawgate task 12            (`task 12` ALONE is NOT detected)
   clawgate  #task-12                    (the legacy anchor form)
