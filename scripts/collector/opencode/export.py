@@ -19,6 +19,12 @@ session" is a claim about a population and an unnamed one is worthless:
   * 🔴 **a message with NO parts produces NO record at all**, because the unit is
     the part. Measured 2026-09-06: 38 of 17,679 messages store-wide. Such a
     message is invisible in the artifact — not empty, absent.
+  * 🔴 **17 of the store's 20 tables**, measured — `todo`, `session_input`,
+    `permission`, `session_share`, `session_message`, `session_context_epoch`,
+    `project` and the rest. Only `session`, `message` and `part` are read. An
+    earlier revision of this list carried this bullet as "any session-level file
+    outside the three tables" and a later one DELETED it, in the very docstring
+    whose thesis is that an unnamed omission is worthless.
   * whatever `_shared.iter_*` drops. Those functions project the `data` JSON blob
     onto named fields; this module carries `_data` (the whole parsed blob) so the
     projection is not additionally lossy, but a column `_shared` does not SELECT is
@@ -26,9 +32,10 @@ session" is a claim about a population and an unnamed one is worthless:
 
 🔴 THIS MODULE OPENS NO DATABASE OF ITS OWN. It takes a connection from
 `_shared.get_db()`, which opens `mode=ro`. Counting actual `sqlite3.connect` sites
-against this store there are exactly TWO — `_shared.py` (`mode=ro`) and
-`scripts/lib/opencode_search.py`, which is **not** read-only — so this would be a
-third. `tests/test_export.py::test_export_opens_no_connection_of_its_own` is what
+against this store there are THREE, in two files: `_shared.py` (`mode=ro`) and
+`scripts/lib/opencode_search.py` twice — once directly and once inside the remote
+script it ships to a peer host — **neither** of which is read-only. So this module
+would be a fourth. `tests/test_export.py::test_export_opens_no_connection_of_its_own` is what
 prevents it, over the AST rather than trusting this comment.
 
 🔴 DETERMINISM RESTS ON A TOTAL ORDER, AND THE READER DOES NOT PROVIDE ONE.
@@ -55,6 +62,7 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -130,8 +138,13 @@ def render(records: Iterator[dict]) -> str:
 
       * a **lone surrogate** in the stored blob — exactly what `JSON.stringify`
         emits when an emoji is split across streaming chunks — raises
-        `UnicodeEncodeError` at write time, AFTER the output file has been
-        truncated. The artifact it was asked to refresh is destroyed.
+        `UnicodeEncodeError` at write time, so the export FAILS OUTRIGHT.
+        ⚠ An earlier revision of this note added "…after the output file has been
+        truncated, destroying the artifact it was asked to refresh". That was true
+        of `Path.write_text` and is NOT true now: `write_artifact` writes to a temp
+        and the previous artifact survives — measured. The stale half mattered
+        because it credited the wrong mechanism, and a maintainer reading it would
+        conclude the temp-file writer is redundant.
       * **U+2028 / U+2029 / U+0085** pass through raw. The line stays valid NDJSON,
         but `str.splitlines()` — the idiom this module's own tests use — shatters
         one record into fragments, none of which parse.
@@ -150,37 +163,69 @@ def export_session(db: Any, session_id: str) -> str:
 
 
 def write_artifact(path: str | Path, text: str) -> None:
-    """Write atomically, 0600, refusing to follow a symlink.
+    """Write atomically and 0600, via a UNIQUE temp in the destination directory.
 
-    🔴 Three separate hazards, all measured on the naive `Path.write_text`:
-      * the source DB is **0600** and the artifact carries the same content, but
-        `write_text` created it **0644** (process umask) — widening the audience
-        for client-confidential session content;
+    🔴 Hazards this closes, each measured on the naive `Path.write_text`:
       * `-o` pointed at a symlink FOLLOWED it and overwrote the target;
-      * the write truncates first, so any failure mid-write leaves a 0-byte file
-        where a good artifact used to be.
+      * the write truncates first, so a failure mid-write left a 0-byte file where
+        a good artifact used to be;
+      * the artifact was created **0644** (process umask). ⚠ An earlier revision
+        justified 0600 as "narrower than the 0600 source DB" — **the source is
+        0644**, measured, and so is any sqlite file created under this umask. The
+        justification was false; the decision stands on its own feet: the artifact
+        carries client-confidential session content and 0600 is the right default
+        regardless of what the store happens to be.
+
+    🔴 THE TEMP NAME IS UNIQUE, NOT `<out>.tmp`, AND THAT IS THE SECURITY PROPERTY.
+    A fixed sibling name is predictable, so an unrelated file already at that path
+    was truncated and renamed away — measured: rc 0, the neighbour's content
+    destroyed, no warning — and a symlink planted there needed `O_NOFOLLOW` to
+    defend. `mkstemp` removes both by construction: it opens `O_EXCL` at 0600 on a
+    name nothing can have pre-placed. Preferring construction over a guard also
+    removes a flag no test could reach — deleting `O_NOFOLLOW` from the previous
+    version was a SURVIVING mutant.
+
+    `os.replace` is inside the `try` because its failure — `-o` naming a directory,
+    say — otherwise left the temp on disk holding the full session artifact.
     """
     path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    parent = path.parent if str(path.parent) else Path(".")
+    fd, tmpname = tempfile.mkstemp(dir=parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmpname)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
+        os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-    os.replace(tmp, path)
+
+
+#: The columns `_shared` filters or orders on. 🔴 A `SELECT 1 FROM <t> LIMIT 1`
+#: proves only that the TABLE NAME resolves — an earlier revision did exactly that
+#: and MISSED 5 of 12 single-column drifts, because SQLite raises on the missing
+#: column inside `_shared`'s own WHERE/ORDER BY, where `_shared` swallows it into an
+#: empty iterator and the caller sees "no parts" or even "no such session" — the
+#: precise wording this whole exit-code split exists to stop emitting.
+_REQUIRED_COLUMNS = {
+    S.SESSION_TABLE: ("id", "time_created"),
+    S.MESSAGE_TABLE: ("id", "session_id", "time_created", "data"),
+    S.PART_TABLE: ("id", "message_id", "session_id", "time_created", "data"),
+}
 
 
 def _store_is_readable(db: Any) -> bool:
-    """Can we actually read the three tables, as opposed to finding them empty?
+    """Can we actually read what the reader reads, as opposed to finding it empty?
 
     `_shared` returns empty iterators for a store it cannot read, so emptiness is
-    ambiguous until this has been asked separately.
+    ambiguous until this has been asked separately — and asking has to name the
+    same columns the reader does, or the answer is narrower than the question.
     """
     try:
-        for tbl in (S.SESSION_TABLE, S.MESSAGE_TABLE, S.PART_TABLE):
-            db.execute(f"SELECT 1 FROM {tbl} LIMIT 1").fetchone()
+        for tbl, cols in _REQUIRED_COLUMNS.items():
+            db.execute(
+                f"SELECT {', '.join(cols)} FROM {tbl} ORDER BY time_created LIMIT 1"
+            ).fetchone()
     except (sqlite3.DatabaseError, IndexError):
         return False
     return True

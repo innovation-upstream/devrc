@@ -242,24 +242,56 @@ def _connect_offenders(src: str) -> list[str]:
     """
     tree = ast.parse(src)
     bad = []
-    aliases = {"connect"}
+    #: Local names that resolve to a DB-opening callable. Seeded with the two
+    #: sqlite3 entry points; `from`-imports and plain assignments extend it.
+    aliases = {"connect", "Connection"}
+    sqlite_mods = {"sqlite3"}
+
     for node in ast.walk(tree):
-        # `from sqlite3 import connect as _c` — record the local name
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name == "sqlite3":
+                    sqlite_mods.add(a.asname or a.name)
         if isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
             for a in node.names:
-                if a.name == "connect":
+                if a.name in {"connect", "Connection"}:
                     aliases.add(a.asname or a.name)
-        # `getattr(sqlite3, "conn" + "ect")`
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
-                and node.func.id == "getattr":
-            bad.append("getattr on a module — could resolve connect dynamically")
+        # `_c = sqlite3.connect` / `_c = connect` — an alias by ASSIGNMENT, which
+        # the previous matcher missed entirely.
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Attribute) \
+                and node.value.attr in aliases:
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    aliases.add(tgt.id)
+        # `sqlite3.__dict__['connect']` — subscripting a module's dict.
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) \
+                and node.value.attr == "__dict__" \
+                and isinstance(node.value.value, ast.Name) \
+                and node.value.value.id in sqlite_mods:
+            bad.append("sqlite3.__dict__ lookup")
+
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            f = node.func
-            name = f.attr if isinstance(f, ast.Attribute) else (
-                f.id if isinstance(f, ast.Name) else None)
-            if name in aliases:
-                bad.append(f"call to {name}")
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        # 🔴 `getattr` is flagged ONLY when its first argument is a sqlite module.
+        # An earlier revision flagged EVERY getattr, so `getattr(args, "out", None)`
+        # failed the guard with "must take its connection from _shared" — a false
+        # and actively misleading verdict on an innocent refactor.
+        if isinstance(f, ast.Name) and f.id == "getattr" and node.args:
+            a0 = node.args[0]
+            if isinstance(a0, ast.Name) and a0.id in sqlite_mods:
+                bad.append("getattr on the sqlite3 module")
+        # `partial(sqlite3.connect)` and friends: any reference to the attribute,
+        # called or not, is enough — you cannot pass it around without having it.
+        if isinstance(f, ast.Name) and f.id in {"partial"} and node.args:
+            a0 = node.args[0]
+            if isinstance(a0, ast.Attribute) and a0.attr in aliases:
+                bad.append(f"partial over {a0.attr}")
+        name = f.attr if isinstance(f, ast.Attribute) else (
+            f.id if isinstance(f, ast.Name) else None)
+        if name in aliases:
+            bad.append(f"call to {name}")
     return bad
 
 
@@ -273,14 +305,28 @@ def test_export_opens_no_connection_of_its_own():
     "import sqlite3\ndb = sqlite3.connect('x')\n",
     "from sqlite3 import connect as _c\ndb = _c('x')\n",
     "import sqlite3\ndb = getattr(sqlite3, 'conn' + 'ect')('x')\n",
+    # ↓ all four SURVIVED the previous matcher, and all four open a database
+    "import sqlite3\n_c = sqlite3.connect\ndb = _c('x')\n",
+    "import sqlite3\ndb = sqlite3.Connection('x')\n",
+    "import sqlite3\ndb = sqlite3.__dict__['connect']('x')\n",
+    "import sqlite3 as s3\nfrom functools import partial\ndb = partial(s3.connect)('x')\n",
 ])
 def test_the_offender_detector_can_actually_fire(bad_src):
-    """Negative control, driven through the SAME function the guard uses.
-
-    All three shapes are refactors a maintainer could plausibly reach for; the
-    first was the only one an earlier revision caught.
-    """
+    """Negative control, driven through the SAME function the guard uses."""
     assert _connect_offenders(bad_src), f"must flag: {bad_src!r}"
+
+
+@pytest.mark.parametrize("ok_src", [
+    "import argparse\nx = getattr(args, 'out', None)\n",
+    "import sys\nx = getattr(sys, 'maxsize')\n",
+    "class X: pass\nx = getattr(X(), 'y', 1)\n",
+])
+def test_the_offender_detector_does_not_cry_wolf(ok_src):
+    """🔴 Over-broad is its own failure. An earlier revision flagged EVERY
+    `getattr`, so an innocent `getattr(args, "out", None)` in export.py would fail
+    the guard with "must take its connection from _shared" — a verdict that is
+    false, and that trains the next maintainer to delete the guard."""
+    assert not _connect_offenders(ok_src), f"must NOT flag: {ok_src!r}"
 
 
 # --------------------------------------------------------------------------- #
@@ -300,6 +346,12 @@ def test_unknown_session_and_empty_session_are_different_exit_codes(tmp_path):
     db = _build_db(dbp)
     db.execute("INSERT INTO session (id, project_id, directory, title, time_created, "
                "time_updated) VALUES (?,?,?,?,?,?)", ("s2", "p", "/d", "t", 1, 1))
+    # 🔴 s2 gets a MESSAGE with zero PARTS — the 38-of-17,679 case the docstring
+    # names. An earlier revision deleted this insert, leaving s2 with no messages
+    # at all: both reach rc 4, so the assertion still passed while the coverage
+    # silently shrank to a different scenario.
+    db.execute("INSERT INTO message VALUES (?,?,?,?,?)",
+               ("m2", "s2", 1, 1, json.dumps({"role": "user"})))
     db.commit()
     assert E.main(["nope", "--db", str(dbp)]) == E.EXIT_NO_SUCH_SESSION
     assert E.main(["s2", "--db", str(dbp)]) == E.EXIT_SESSION_EMPTY
@@ -361,6 +413,85 @@ def test_artifact_is_0600_and_refuses_to_follow_a_symlink(tmp_path):
     assert stat.S_IMODE(os.stat(link).st_mode) == 0o600
 
 
+def test_a_file_at_the_predictable_temp_path_is_not_destroyed(tmp_path):
+    """🔴 The old writer used a FIXED `<out>.tmp`, so an unrelated file there was
+    truncated and renamed away — rc 0, content gone, no warning. It also needed
+    `O_NOFOLLOW` to survive a symlink planted at that path, and deleting that flag
+    was a SURVIVING mutant because no fixture attacked the temp.
+
+    `mkstemp` removes both by construction, so this asserts the property rather
+    than the guard: a neighbour at the predictable name is left alone.
+    """
+    dbp = tmp_path / "tmpname.db"
+    _build_db(dbp)
+    out = tmp_path / "art.ndjson"
+    neighbour = tmp_path / "art.ndjson.tmp"
+    neighbour.write_text("AN UNRELATED FILE")
+    assert E.main(["s1", "-o", str(out), "--db", str(dbp)]) == 0
+    assert neighbour.read_text() == "AN UNRELATED FILE", (
+        "a file at the predictable temp path must survive")
+    assert len(out.read_text().splitlines()) == 2
+
+
+def test_a_failed_replace_leaves_no_artifact_behind(tmp_path):
+    """`os.replace` sat OUTSIDE the try, so `-o <a directory>` raised and left the
+    temp on disk holding the full session artifact at 0600."""
+    dbp = tmp_path / "dir.db"
+    _build_db(dbp)
+    target = tmp_path / "adir"
+    target.mkdir()
+    before = set(tmp_path.iterdir())
+    with pytest.raises(OSError):
+        E.main(["s1", "-o", str(target), "--db", str(dbp)])
+    leaked = [q for q in set(tmp_path.iterdir()) - before if q.is_file()]
+    assert not leaked, f"a failed replace must not leave the artifact behind: {leaked}"
+
+
+def test_column_level_schema_drift_is_rc_5_not_a_typo(tmp_path):
+    """🔴 `SELECT 1 FROM <t> LIMIT 1` proves only the TABLE NAME resolves.
+
+    Measured: 5 of 12 single-column drifts came back rc 4 ("has no parts") and one
+    came back rc 3 ("no such session") — the exact wording this exit-code split
+    exists to stop emitting. `_store_is_readable` must name the same columns the
+    reader filters and orders on.
+    """
+    for table, column in [("part", "message_id"), ("part", "time_created"),
+                          ("message", "session_id"), ("message", "time_created"),
+                          ("session", "time_created")]:
+        dbp = tmp_path / f"drift-{table}-{column}.db"
+        db = _build_db(dbp)
+        db.execute(f"ALTER TABLE {table} RENAME COLUMN {column} TO {column}_gone")
+        db.commit()
+        db.close()
+        rc = E.main(["s1", "--db", str(dbp)])
+        assert rc == E.EXIT_STORE_UNREADABLE, (
+            f"{table}.{column} drift reported rc {rc}, not STORE_UNREADABLE")
+
+
+def test_a_healthy_but_empty_store_is_not_reported_unreadable(tmp_path):
+    """The positive control for the test above: `_store_is_readable` must not
+    false-positive on a store that is simply empty."""
+    dbp = tmp_path / "empty.db"
+    db = _build_db(dbp)
+    db.execute("DELETE FROM part"); db.execute("DELETE FROM message")
+    db.commit(); db.close()
+    assert E.main(["s1", "--db", str(dbp)]) == E.EXIT_SESSION_EMPTY
+
+
+def test_the_boundary_except_is_load_bearing(tmp_path, monkeypatch):
+    """Mutating `except (sqlite3.DatabaseError, IndexError)` to something unrelated
+    left 20 passed — the boundary catch was guarded by nothing. This drives a raise
+    through `export_session` itself."""
+    dbp = tmp_path / "boom.db"
+    _build_db(dbp)
+
+    def _boom(*a, **k):
+        raise sqlite3.DatabaseError("simulated read failure")
+
+    monkeypatch.setattr(E, "export_session", _boom)
+    assert E.main(["s1", "--db", str(dbp)]) == E.EXIT_STORE_UNREADABLE
+
+
 # --------------------------------------------------------------------------- #
 # criterion 5 — the docstring names the omissions
 # --------------------------------------------------------------------------- #
@@ -371,3 +502,6 @@ def test_docstring_names_what_is_excluded():
     assert "NO parts produces NO record" in doc, (
         "a message with zero parts is invisible in the artifact — 38 of 17,679 "
         "live messages — and the docstring must say so")
+    assert "17 of the store's 20 tables" in doc, (
+        "the unread-tables omission was DROPPED by a revision of the docstring "
+        "whose own thesis is that an unnamed omission is worthless")
