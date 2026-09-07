@@ -817,3 +817,69 @@ def test_print_mode_writes_NOTHING_and_reports_the_universe(monkeypatch,
     assert RG.main(["--print", "--path", str(m), "--universe-path", str(u)]) == 0
     assert not m.exists() and not u.exists()
     assert "picker universe" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE FILE-WIDE SPAWN PIN — required by this script's entry in
+# `test_no_real_launchers.py::ACKNOWLEDGED_UNSTUBBED` under `home-manager`.
+#
+# This file names `home-manager` in ONE comment (why the picker universe is a
+# second FILE rather than a new shape inside `known_repos.json`).
+# `launcher_scan.hazard_hits` is a TEXTUAL scan, so that mention registers the
+# script as "reaching home-manager" and had to be acknowledged.
+#
+# 🔴 AN ACKNOWLEDGEMENT BLINDS THE GUARD IT IS FILED UNDER — MEASURED on this
+# very table, where `tmux-reply-agent`'s entry rested on a grep and an injected
+# real call site left the whole suite green. So the entry gets a pin, and the
+# pin is this.
+# --------------------------------------------------------------------------- #
+_SPAWN_FUNCS = {"run", "Popen", "call", "check_output", "check_call", "system",
+                "execv", "execvp", "execve", "spawnv", "spawnvp"}
+
+# gh  — `gh auth status` (readiness) and `gh api user/repos` (the rows)
+# git — `git remote get-url origin`, per local checkout
+EXPECTED_ARGV0 = {"gh", "git"}
+
+
+def _spawn_argv0_literals(path: Path) -> set[str]:
+    """Every literal argv[0] in a spawn-shaped call, from the SYNTAX TREE.
+
+    `<computed>` rather than a skip for a non-literal argv[0]: a command built
+    from a variable is how a literal-keyed ledger gets walked past, so it must
+    fail loudly instead of leaving the set."""
+    tree = ast.parse(path.read_text())
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name not in _SPAWN_FUNCS:
+            continue
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+            head = first.elts[0]
+            found.add(head.value if isinstance(head, ast.Constant)
+                      else "<computed>")
+        else:
+            found.add("<not-a-list>")
+    return found
+
+
+def test_regen_SPAWNS_these_argv0_AND_NOTHING_ELSE():
+    """GROWS-OR-SHRINKS. A new binary is the hazard the acknowledgement would
+    otherwise hide; a vanished one means the justification has stopped
+    describing the file."""
+    assert _spawn_argv0_literals(GENERATOR) == EXPECTED_ARGV0
+
+
+def test_home_manager_is_MENTIONED_but_never_SPAWNED():
+    """Both halves of the acknowledgement's claim, asserted rather than left to
+    a reader of prose: the mention must still EXIST (or the table entry has
+    outlived the sentence it describes), and it must remain a mention."""
+    text = GENERATOR.read_text()
+    assert re.search(r"(?<![\w-])home-manager(?![\w-])", text), (
+        "the ACKNOWLEDGED_UNSTUBBED entry for this file exists BECAUSE it names "
+        "home-manager; if that is gone, remove the acknowledgement too")
+    assert "home-manager" not in _spawn_argv0_literals(GENERATOR), (
+        "regen-known-repos.py now SPAWNS home-manager — the acknowledgement "
+        "covering it is an unreachability claim and is now FALSE")

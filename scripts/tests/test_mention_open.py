@@ -18,6 +18,7 @@ The two things worth pinning:
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -2545,3 +2546,94 @@ def test_the_universe_reaches_NO_sink_but_rofi(monkeypatch, capsys):
                   UNIVERSE_ONLY.split("/")[1]):
         assert token not in blob, (
             f"a universe row reached a sink that is not rofi: {token!r}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE FILE-WIDE SPAWN PIN — required by this handler's entry in
+# `test_no_real_launchers.py::ACKNOWLEDGED_UNSTUBBED`.
+#
+# `mention-open.py` names `systemctl` in ONE operator-facing string (the
+# staleness note tells you which unit to check). `launcher_scan.hazard_hits` is
+# a TEXTUAL scan — deliberately, since erring toward reporting is right for a
+# scan whose failure mode is a missed launch — so that mention registers this
+# file as "reaching systemctl" and it had to be acknowledged.
+#
+# 🔴 AN ACKNOWLEDGEMENT BLINDS THE GUARD IT IS FILED UNDER, AND THAT WAS
+# MEASURED ON THIS EXACT TABLE: `tmux-reply-agent`'s entry claimed by grep that
+# no call site existed, and injecting a real `subprocess.run(["systemctl", …])`
+# into it left that whole suite green — the acknowledgement had absorbed the
+# thing the guard exists to catch. Its remedy was an AST pin, and this is the
+# same remedy for the same reason.
+#
+# ⚠ THE EXISTING LEDGER DOES NOT COVER THIS, WHICH IS WHY A SECOND TEST EXISTS.
+# `test_the_resolution_path_spawns_ONLY_these_local_commands` records what the
+# RESOLUTION PATH actually spawns at runtime — a stronger claim on the path it
+# drives, and blind everywhere else: a `systemctl` call added to `notify()`, or
+# to any branch that run does not reach, would not appear in its ledger. This
+# one reads the whole FILE.
+# --------------------------------------------------------------------------- #
+_SPAWN_FUNCS = {"run", "Popen", "call", "check_output", "check_call", "system",
+                "execv", "execvp", "execve", "spawnv", "spawnvp"}
+
+# Every argv[0] this handler is allowed to spawn, and why each is here:
+#   git         — reading a checkout's remote (discovery)
+#   tmux        — asking the pane for its repo
+#   notify-send — the refusal toast
+#   xdg-open    — opening the chosen URL
+#   rofi        — the picker
+EXPECTED_ARGV0 = {"git", "tmux", "notify-send", "xdg-open", "rofi"}
+
+
+def _spawn_argv0_literals(path: Path) -> set[str]:
+    """Every literal argv[0] in a spawn-shaped call, read from the SYNTAX TREE.
+
+    A non-literal argv[0] is reported as `<computed>` rather than skipped: a
+    spawn whose command comes from a variable is exactly how a ledger keyed on
+    literals gets walked past, so it must fail this test loudly instead of
+    vanishing from the set. `pick()` already carries a comment requiring its
+    rofi argv to stay a list literal for this reason.
+    """
+    tree = ast.parse(path.read_text())
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name not in _SPAWN_FUNCS:
+            continue
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+            head = first.elts[0]
+            found.add(head.value if isinstance(head, ast.Constant)
+                      else "<computed>")
+        else:
+            found.add("<not-a-list>")
+    return found
+
+
+def test_mention_open_SPAWNS_these_argv0_AND_NOTHING_ELSE():
+    """🔴 GROWS-OR-SHRINKS, both directions asserted.
+
+    A NEW binary appearing here is the hazard the `ACKNOWLEDGED_UNSTUBBED`
+    entry would otherwise hide. A binary DISAPPEARING matters too: it means a
+    capability was removed and the acknowledgement's justification — which
+    names this set — has silently stopped describing the file.
+    """
+    assert _spawn_argv0_literals(HANDLER) == EXPECTED_ARGV0
+
+
+def test_systemctl_is_MENTIONED_but_never_SPAWNED():
+    """🔴 THE CLAIM THE ACKNOWLEDGEMENT ACTUALLY MAKES, asserted directly rather
+    than left to the reader of a prose justification.
+
+    Both halves are pinned. The mention must EXIST — delete the staleness note's
+    command and this test says so, because a justification describing a file
+    that no longer mentions the name is a stale entry in that table. And it must
+    remain a mention only."""
+    text = HANDLER.read_text()
+    assert re.search(r"(?<![\w-])systemctl(?![\w-])", text), (
+        "the acknowledgement in test_no_real_launchers.py exists BECAUSE this "
+        "file names systemctl; if that is gone, remove the acknowledgement too")
+    assert "systemctl" not in _spawn_argv0_literals(HANDLER), (
+        "mention-open.py now SPAWNS systemctl — the ACKNOWLEDGED_UNSTUBBED "
+        "entry covering it is an unreachability claim and is now FALSE")
