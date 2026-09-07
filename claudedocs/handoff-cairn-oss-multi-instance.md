@@ -18,42 +18,45 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- **`ZacxDev/cairn` is PUBLIC** (2026-09-05) with **two** merged PRs — #1 the SIGHUP
-  hot-reload, #2 the ledger narrowing (`c8aee7203`, 2026-09-06) — and **#3 OPEN**
-  (`fix/spawn-port-race`, rank 6: the spawn-port TOCTOU + startup diagnostics, suite
-  `1657 passed`). Suite at `main` **1651 passed**,
-  `leakscan.py` rc 0 with controls green. CI ran both jobs on #2 — leakscan 6s, tests 8m1s,
-  `mergeStateStatus: CLEAN` — so **cairn's GitHub Actions gate is now a demonstrated
-  instrument**, not an untested badge. That is worth knowing: a brand-new check in this
-  ecosystem has been red-on-arrival before.
+- **`ZacxDev/cairn` is PUBLIC** (2026-09-05) with **THREE** merged PRs — #1 the SIGHUP
+  hot-reload, #2 the ledger narrowing (`c8aee7203`), and **#3 `8e4ef84`** (2026-09-07, rank 6:
+  the spawn-port TOCTOU + startup diagnostics). Suite at `main` **1667 passed, 0 failed**;
+  `leakscan.py` 0 findings across 33 files with controls green. CI ran both jobs on #3 —
+  `mergeStateStatus: CLEAN`, both SUCCESS — so cairn's GitHub Actions gate stays a
+  demonstrated instrument.
+- **devrc #1349 merged** (`e5d45088`) — this doc's rank-6 close-out.
 - **Session capture is DESIGNED, DECIDED and MERGED as a proposal, and BUILT NOWHERE.**
   `claudedocs/proposal-cairn-session-capture.md`, devrc `e16f9609a` (#1326). Sixteen operator
   decisions in its §2. Rank 8 carries the detail.
 - **The opencode exporter SHIPPED** — devrc `f58d2df04` (#1338), clawgate #511 `complete`.
   `scripts/collector/opencode/export.py` + 32 tests. **It has NO CALLER**; it is a command,
   not a pipeline.
-- **`ZacxDev/homelab-infra` #714 merged** (`ed2c4a0db`) and Flux-applied — verified a no-op
-  (pod `…-59x6v` unchanged, `restarts=0`).
-- Branch: devrc `main`, clean but for five pre-existing untracked files that are not mine
+- **`ZacxDev/homelab-infra` #714 merged** (`ed2c4a0db`) and Flux-applied — verified a no-op.
+- Branches: devrc `main` clean but for four pre-existing untracked files that are not mine
   (`nix/system/apply-nebula-relay.sh`, `check-nebula-relays.sh`, `output.txt`,
-  `scripts/diagnose-nix-disk.sh`, `scripts/tmux-restore-observe.sh`).
-- **All worktrees from this session are removed**; devrc and cairn base clones re-synced.
-- 🔴 **STILL NOT DEPLOYED ANYWHERE — carried forward, and re-verified 2026-09-06.** No civitai
-  instance exists; **no cairn image is published**; devrc does **NOT** consume cairn (`flake.nix`
-  has zero cairn references, `scripts/cairn` is still an out-of-store symlink). The homelab pod
-  still runs its own copy of the code. Everything above is source and design, not deployment.
+  `scripts/diagnose-nix-disk.sh`); cairn `main` clean at `8e4ef84`.
+- **Both worktrees from this session are removed and both base clones re-synced**
+  (`git -C <repo> merge --ff-only origin/main`).
+- 🔴 **STILL NOT DEPLOYED ANYWHERE — carried forward, re-verified 2026-09-07.** No civitai
+  instance exists; **no cairn image is published**; devrc does **NOT** consume cairn
+  (`flake.nix` has zero cairn references, `scripts/cairn` is still an `mkOutOfStoreSymlink`).
+  The homelab pod still runs its own copy. Everything above is source and design, not
+  deployment.
+
+🔴 **NO `clawgate-task:` FIELD IS RECORDED, AND THAT IS NOT A CLEAN BILL OF HEALTH.**
+`clawgate_handoff.sh resolve` exited **5** — 0 tasks for this session. Its positive control
+answered 2 links for a different session, so the board is reachable and the token works; but a
+WRONG session id also answers `200` with an empty array, so this cannot distinguish "this
+session touched no task" from "the id is wrong". No task was created to fill the blank.
 
 🔴 **THE PROPOSAL'S AUDIT LADDER ENDED BY OPERATOR INSTRUCTION AT ROUND 9, NOT ON A CLEAN
-ROUND — and round 9's own fixes were never audited.** Rounds 8 and 9 each found a real design
-defect in the immediately preceding fix. The three unaudited prescriptions are §5.1's ledger
-constraints, §8's control 8, and §5.3's cost correction. Treat those as the likeliest wrong
-thing in the document; "merged after nine rounds" otherwise reads as "settled".
+ROUND — and round 9's own fixes were never audited.** (This is the SESSION-CAPTURE PROPOSAL's
+ladder, rank 8 — not cairn #3's, which is a separate nine-round ladder that ended on a stated
+criterion; see the investigation block below.) The three unaudited prescriptions are §5.1's
+ledger constraints, §8's control 8, and §5.3's cost correction.
 
-🔴 **`claim-work` WAS NOT USED FOR RANKS 1 AND 2** (it was used, correctly, for ranks 5
-and 6). The
-ranked list is a shared queue with no lock and the claim must be taken BEFORE acting. Nothing
-collided and there is no claim to release — but the protection was absent while 20 live claims
-from other sessions showed the mechanism in active use around this work.
+🔴 **`claim-work` WAS NOT USED FOR RANKS 1 AND 2** (it was used, correctly, for ranks 5 and 6,
+and rank 6's claim was released on merge). The ranked list is a shared queue with no lock.
 
 ## Open investigations — live diagnosis state
 
@@ -126,134 +129,117 @@ edit — do not resurrect them from git history and re-derive their "next probe"
 - **Next probe:** export one real session and read it. That is a human judgement over named
   evidence, not a command.
 
+### CLOSED 2026-09-07 — the cairn full-suite intermittent, and the nine-round ladder on its fix
+🔴 **This SUPERSEDES and RETIRES the block above titled "The full-suite intermittent in cairn
+— RATE MEASURED, DID NOT REPRODUCE; one live mechanism closed".** That block's "Next probe:
+none scheduled" still stands; everything else in it is now history. Do not re-run its probes.
+
+- **Outcome:** `ZacxDev/cairn` #3 merged as `8e4ef84`. The intermittent is recorded as
+  NOT REPRODUCING; it is **not** claimed fixed, and the PR says so.
+- **Observed (with values):** 18 CI runs / 0 failures (9 pre-existing + 9 reruns, `failed=0`,
+  **0 skipped in all 18**, collected 1593..1651), plus 5 local full runs across the fix
+  rounds. Combined ≈43 runs, 1 failure. via: measurement
+- 🔴 **Ruled out as recoverable — the one failure has no traceback and never will.** The run
+  was read through `pytest -q | tail -1`; the transcript (`a0759a10-…`) holds only the short
+  summary. Which of three branches fired is unknowable. **That, not the rate, is why 43 runs
+  closed nothing.** via: measurement
+- **Ruled out:** that reordering `poll()`/`terminate()` closes the signal window — it MOVES
+  it and inverts the error direction to over-credit. Delivery is now RECORDED
+  (`delivered_sigterm = was_running and proc.returncode is None`), exact in all three states.
+  via: measurement
+- **Left OPEN by decision, recorded in the code so it reads as open rather than absent:**
+  (a) the residual over-credit INSIDE `send_signal`, between its poll and its `os.kill` —
+  irreducible from outside CPython; (b) `was_running` is provably redundant and its mutant
+  survives — the simplification is available and the note says so; (c) the suite-level "no
+  stray race warnings" property, which no test inside the suite can assert about itself
+  (`filterwarnings = error` was weighed and REJECTED — it would redden every *successfully*
+  retried race); (d) several historical figures in comments (~100 µs, 0 flips in 500, 784
+  tests) that no future round can re-check, scoped as past measurements.
+- **Next probe:** none. If it recurs, the message is self-diagnosing — READ IT rather than
+  re-running. Re-running to a green is what trains everyone to click through.
+
 ## Next steps (ranked)
 
-🔴 **Numbering is STABLE and is half a claim's identity** (`claim-work --slug-for <this doc>
+🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
 <rank>`). Items are marked done IN PLACE; new items APPEND.
 
 1. ✅ **DONE 2026-09-05 — `ZacxDev/cairn` IS PUBLIC.** Verified by the ACTUAL public path
-   (anonymous API 200, anonymous raw `LICENSE` 200), never by the command's exit status.
-   🔴 The pre-publication audit covered **12** commits, not the 7 on `main` — GitHub serves
-   `refs/pull/1/head` on a public repo, so PR #1's five pre-squash commits publish too,
-   including the states BEFORE the round-1 and round-2 credential-leak fixes. All 12 scanned
-   rc 0 under the CURRENT `leakscan.py`.
-   🔴 **The first sweep of that was WRONG and looked right** — it `cp`'d the scanner in before
-   each checkout, so `git checkout` aborted on the dirtied file and four commits silently
-   re-scanned one stale tree. Caught by printing a per-commit `git ls-files` count and noticing
-   it did not move. **Any per-revision sweep must print a per-revision quantity that CHANGES.**
-   ⚠ Residual, accepted: the 7 `main` commit messages carry `Claude-Session:` URLs;
-   `licenseInfo` still reads null despite a stock MIT `LICENSE`.
+   (anonymous API 200, anonymous raw `LICENSE` 200). 🔴 The pre-publication audit covered
+   **12** commits, not the 7 on `main` — GitHub serves `refs/pull/1/head` on a public repo.
+   🔴 The first sweep of that was WRONG and looked right: it `cp`'d the scanner in before each
+   checkout, so `git checkout` aborted and four commits re-scanned one stale tree. **Any
+   per-revision sweep must print a per-revision quantity that CHANGES.**
    forcing: none — done
 
 2. ⚠ **DONE 2026-09-05, BUT NOT AS WRITTEN — THIS ITEM'S OWN PREMISE WAS FALSE.**
-   `ZacxDev/homelab-infra` **#714**, merged `ed2c4a0db`, Flux-applied and verified a no-op.
-   🔴 "Cairn PR #1 makes that false" is a claim about cairn's SOURCE; the comment describes the
-   DEPLOYED artifact, and nothing builds an image from cairn. Measured on the running pod:
-   `grep -rl SIGHUP /app` → no matches, with `grep -rn "def load_tokens" /app` matching as the
-   positive control. The image's `server.py` is byte-identical (`sha256 917936db…`) to devrc
-   `origin/main`'s copy, which holds **0** occurrences of SIGHUP. Doing it as written would
-   have told the next operator a secret edit takes effect on SIGHUP.
+   `ZacxDev/homelab-infra` **#714**, `ed2c4a0db`, Flux-applied, verified a no-op.
    **The transferable rule: "X makes Y false" must name WHICH ARTIFACT Y describes.**
    forcing: none — done
 
-3. **Phase A3 — devrc consumes cairn as a pinned flake input.** `nix/home.nix` currently
-   deploys `scripts/cairn` as an out-of-store symlink (edits are live, no switch). A flake
-   input changes that: client edits will need a `home-manager switch`. Real ergonomic trade,
-   decided deliberately, and `readlink -f` stays the only arbiter of which state a path is in.
-   ⚠ **Re-verified 2026-09-06 as NOT started:** `flake.nix` contains **zero** cairn
-   references and `scripts/cairn` is still an `mkOutOfStoreSymlink`.
+3. **Phase A3 — devrc consumes cairn as a pinned flake input.** `nix/home.nix` deploys
+   `scripts/cairn` as an `mkOutOfStoreSymlink` (edits are live, no switch). A flake input
+   changes that: client edits will need a `home-manager switch`. Real ergonomic trade, and
+   `readlink -f` stays the only arbiter of which state a path is in.
+   ⚠ **Re-verified 2026-09-07 as NOT started:** `flake.nix` contains zero cairn references.
+   **Closing condition:** a merged devrc PR in which `flake.nix` names cairn as an input and
+   `readlink -f ~/.claude/…/cairn` resolves into `/nix/store`.
    forcing: none
 
-4. **Merge or close `civitai/talos-infra` #1414** (the instance proposal). It has four open
-   questions in §11 — teammate count and identities, hostname, who else administers the token
-   file, and whether the OSS repo accepts outside contributions from day one. None blocks A3.
+4. **Merge or close `civitai/talos-infra` #1414** (the instance proposal). Four open questions
+   in §11 — teammate count and identities, hostname, who else administers the token file, and
+   whether the OSS repo accepts outside contributions from day one. None blocks A3.
    ⚠ **Re-verified 2026-09-06: still OPEN.**
    forcing: none
 
-5. ✅ **DONE 2026-09-06 — `ZacxDev/cairn` #2, squash `c8aee7203`.** Both ledger 🟢s closed,
-   each as its OWN docstring prescribed. Claimed via `claim-work` and released on merge.
-   🔴 **Neither is regression coverage, and the commit says so.** Guard A's live dropped-count
-   is **0**, so its assertion is an **INVARIANT GUARD, labelled one** — backed by a positive
-   control feeding the collector a source that MUST yield three shapes, so the zero is not the
-   reassuring kind. Guard B's narrowing is **behaviour-neutral today**: measured `checked=8`
-   and every one of the 8 is `print`/`emit` by bare NAME, so the attr arm contributes zero
-   matches; the only `.write` receivers in `server.py` are binary `fh.write` ×2 and
-   `self.wfile.write`. What it prevents is a future module-level writer making the ledger
-   demand `reload_safe` on BYTES.
-   Two-way control on the narrowing: `sys.stdout.write` → 1, binary `fh.write` → 0, and
-   `checked` still 8 on the real source. Mutants: reverting the narrowing (= the pre-fix code,
-   i.e. red at base) and disabling the bare-re-raise arm each killed exactly their own test.
+5. ✅ **DONE 2026-09-06 — `ZacxDev/cairn` #2, squash `c8aee7203`.** Both ledger 🟢s closed.
+   🔴 **Neither is regression coverage, and the commit says so** — guard A's live dropped-count
+   is 0 (an INVARIANT GUARD, labelled one, backed by a positive control); guard B's narrowing
+   is behaviour-neutral today.
    forcing: none — done
 
-6. ⚠ **DONE 2026-09-06 — RATE MEASURED, DID NOT REPRODUCE. Not "fixed", and the PR says so.**
-   `ZacxDev/cairn` **#3** (`fix/spawn-port-race`). Claimed via `claim-work` before acting.
-   **18 CI runs / 0 failures** (9 pre-existing + 9 reruns, `failed=0`, **0 skipped in all
-   18**, collected 1593..1651) plus 2 local full runs on the branch — combined ≈43 runs,
-   1 failure. Reruns cost ~10 min wall clock against the ~75 min the local loop would have,
-   and one rerun's log was read end-to-end to prove a rerun really re-executes the suite
-   rather than replaying a result.
-   🔴 **The blocker was never the rate — it is that the ONE failure has no traceback and
-   never will** (`pytest -q | tail -1` discarded it). So the deliverable is: one live
-   mechanism closed by construction (`_free_port` is a TOCTOU; the kernel recycles the port
-   8/60,000, control 0) and a failure message that can name which branch fired next time.
-   ⚠ **The mechanism is NOT asserted to be the cause** — nothing ties it to the observed
-   failure, and the PR is explicit about that.
-   ⚠ Writing the controls found two more things: the startup budget can expire INSIDE one
-   probe (so a child that dies then is never re-checked), and `_run_to_completion` is a
-   second caller that binds. Both fixed in the same PR. 7 mutants, 7 killed by the expected
-   test with its own text; suite `1657 passed`; leakscan 0/33.
-   **Closing condition:** #3 merged. Nothing else in this item is open.
+6. ✅ **DONE AND MERGED 2026-09-07 — `ZacxDev/cairn` #3, squash `8e4ef84`.** Rate measured, did
+   NOT reproduce; **not "fixed"**, and the PR says so. Claimed and released via `claim-work`.
+   Verified by CONTENT (11 new symbols present in `origin/main`), never by ancestry.
+   ⚠ **Nine audit rounds** — every one found something real, but none of the last four found a
+   defect in what the PR ships. Ended on the stated escape-hatch criterion, rationale posted
+   on the PR. Final: 1667 passed / 0 failed, leakscan 0/33, 37 mutants with 33 killed by the
+   expected test and its own text, 4 surviving by design.
    forcing: none — done
 
 7. **Retire `deployment.yaml`'s no-reload paragraph IN THE SAME COMMIT that moves the store's
-   `image:` tag to one built from cairn at or past `b25abb5`.** This is what rank 2 was
-   reaching for, correctly sequenced: the comment is true until that tag moves and false the
-   moment it does. The comment now states this trigger itself, so this item is a backstop, not
-   the only thing holding it.
+   `image:` tag to one built from cairn at or past `b25abb5`.** The comment is true until that
+   tag moves and false the moment it does; the comment now states this trigger itself.
    **Closing condition:** a merged `ZacxDev/homelab-infra` PR in which the `image:` line and
-   that paragraph change together — mechanical, checkable from the diff alone.
-   ⚠ Blocked on there being a cairn-built image at all, which nothing schedules today; A3
-   (rank 3) is the nearest thing that would force one.
+   that paragraph change together — checkable from the diff alone.
+   ⚠ Blocked on there being a cairn-built image at all, which nothing schedules today; rank 3
+   is the nearest thing that would force one.
    forcing: none — it cannot fire before the image exists
 
-8. **Session capture — DESIGNED AND DECIDED, NOT BUILT.** Ship a session's transcript to
-   object storage at handoff time and attach it to the cairn entries the session touched.
-   **`claudedocs/proposal-cairn-session-capture.md`, merged 2026-09-06 as `e16f9609a`
-   (#1326).** Sixteen operator decisions in §2, NOT to be re-litigated — a session ships as a
-   SET of objects (subagent transcripts are 64% of the bytes), the pointer is an opaque id,
-   retention is indefinite with **no retraction path** by policy, the entry carries a block
-   list of ids with the digest on the object.
+8. **Session capture — DESIGNED AND DECIDED, NOT BUILT.** Ship a session's transcript to object
+   storage at handoff time and attach it to the cairn entries the session touched.
+   `claudedocs/proposal-cairn-session-capture.md`, `e16f9609a` (#1326). Sixteen operator
+   decisions in §2, NOT to be re-litigated.
    🔴 **Read §10 first: four things are genuinely undecided**, led by *who READS* the recorded
    fan-out sets — a recorded set nothing compares against detects nothing.
-   ⚠ **The audit ladder ended by operator instruction at round 9, NOT on a clean round**, and
-   round 9's own fixes (§5.1's three ledger constraints, control 8, the §5.3 cost correction)
-   were never audited. Likeliest wrong thing in the document.
-   **Closing condition:** none yet — this is a design, and the first implementation PR is what
-   would earn one. Do not treat "the proposal merged" as the work being done.
+   ⚠ Its audit ladder ended by operator instruction at round 9, NOT on a clean round; round 9's
+   own fixes were never audited.
+   **Closing condition:** none yet — the first implementation PR is what would earn one. Do not
+   treat "the proposal merged" as the work being done.
    forcing: none
 
 9. ✅ **DONE 2026-09-06 — clawgate #511 `complete`, devrc `f58d2df04` (#1338).**
    `scripts/collector/opencode/export.py`, 32 tests, two audit rounds.
-   🔴 **Pre-verification refuted the proposal's framing** — the opencode reader ALREADY EXISTS
-   (`scripts/collector/opencode/_shared.py`), so the task was the DELTA and "do not add a
-   second reader" became a tested criterion.
-   🔴 **The task body's own ASSUMPTION was false and its stop condition is what caught it:**
-   `text` is populated on 25% of parts and on **NONE** of the 378 tool parts sampled (0 of
-   21,749 store-wide). An exporter built to its letter ships an artifact three-quarters empty
-   with zero tool calls, while looking correct.
-   🔴 **I MADE BOTH GATE TIERS RED AND FOUND IT BY TESTING INSTEAD OF GATING** — the suite
-   collected 223 against a floor of 162, above the drift ceiling. `pytest <dir>` said "223
-   passed"; the drift check lives ONLY in the runner. Floor set to **224**, copied verbatim
-   from the gate's own output.
+   🔴 The task body's own ASSUMPTION was false and its stop condition caught it: `text` is
+   populated on **0 of 21,749** tool parts store-wide.
    ⚠ **The module has NO CALLER.** Wiring it in is rank 8's work.
    forcing: none — done
 
 10. **Raise cairn's CI collected-test floor.** `.github/workflows/ci.yml` pins `FLOOR = 200`
-    against a suite that collects **1657** — it cannot see a suite that silently narrows to
-    300, which is the exact failure its own comment says it exists to prevent. devrc's
-    convention for the replacement number is `m - min(50, max(1, m/20))`.
-    **Closing condition:** a merged `ZacxDev/cairn` PR moving that literal — mechanical,
-    checkable from the diff alone.
+    against a suite that now collects **1667** — it cannot see a suite that silently narrows
+    to 300, the exact failure its own comment says it prevents. devrc's convention for the
+    replacement number is `m - min(50, max(1, m/20))`.
+    **Closing condition:** a merged `ZacxDev/cairn` PR moving that literal — checkable from
+    the diff alone.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -382,35 +368,78 @@ because #511 is *rank 9* of this effort, not the effort itself.
 Both cairn ledger 🟢s were closed exactly as their comments already specified — "count the
 dropped shapes and assert the count, not widen the phrase match". No design was needed.
 
+**🔴 NINE AUDIT ROUNDS ON A TEST-HARNESS CHANGE, AND THE SHAPE IS THE LESSON.** Every round
+found something real; **none of the last four found a defect in what the PR ships.** Rounds
+3–9 were about ONE diagnostic message, not the port race the PR exists to close, and each fix
+round wrote more prose for the next round to find. Payload was 2 executable lines in round 9
+and 62 across all nine. Stopped on the escape-hatch criterion — no 🔴, blast radius bounded by
+"a comment contains a false sentence", the recurring shape swept at every site — **with the
+rationale posted publicly**, because a report that ends on the escape hatch is otherwise
+indistinguishable from one that converged, and those are opposite meanings.
+
+**🔴 TWO OF MY COMMITS MADE FALSE STATEMENTS ABOUT THEIR OWN DIFFS.** One said a value was
+"READ BEFORE THE TERMINATE" while the read sat 23 lines below it; another claimed a locator
+fix that was byte-identical to base, because a `str.replace()` with no assert matched nothing
+and the commit message asserted otherwise. **Assert the match count of every scripted
+replacement** — it is the same vacuous-anchor failure the mutation battery keeps catching,
+committed in prose instead.
+
+**🔴 SIX ROUNDS RUNNING, MY OWN EDITS SILENTLY MOVED MUTANT ANCHORS.** A mutant whose pattern
+matches 0 times scores INVALID, not SURVIVED — and one that matches **2** times is worse,
+because it mutates a site nobody chose. The battery must refuse any pattern that does not
+apply exactly once, and an INVALID must never be read as a pass.
+
+**🔴 A KILLED BATTERY LEAVES A MUTANT IN THE WORKING TREE.** A SIGKILLed run died mid-mutant
+and the copy still held `verdict = None`. Caught only by diffing against the battery's own
+pristine snapshot BEFORE doing anything else. **Diff the tree against the snapshot whenever a
+battery finishes OR is interrupted** — and restore from the snapshot, never from git.
+
+**🔴 I TRUNCATED MY OWN BATTERY OUTPUT WITH `| tail`** — the trap this repo documents — and
+read 4 of 28 verdicts as the whole run. Redirect to a FILE and read the file.
+
+**🔴 AN UNFAITHFUL STUB NEARLY REFUTED A CORRECT RULE.** Verifying the delivery record, my
+first stub set `returncode` inside `terminate()`, which real `Popen.send_signal` does not do —
+making the delivered and not-delivered cases identical. The stub was wrong, not the rule. A
+control that is not faithful certifies nothing **in either direction**.
+
+**🔴 A FIGURE COPIED FROM AN AUDIT'S TABLE IS EXACTLY AS UNVERIFIED AS ONE FROM MEMORY.** I
+wrote "~0.227 s per attempt (the `max(0.25, …)` floor)" — a number below the floor it names in
+its own sentence. Re-measured: 0.351–0.359 s. Three separate rounds put a number in one
+parenthetical and none reproduced; the number is gone now.
+
+**🔴 ONE MEASUREMENT INVERTED BETWEEN LOAD POINTS.** "An unmeetably short budget yields ONE
+spawn attempt" was true at load 18–36 and FALSE at load ~6 (24/24 gave two), because a 0.25 s
+probe floor hands the child a quarter-second regardless. Measure at ≥2 points and name them —
+behaviour can invert, not merely shift.
+
+**`gh run rerun` IS A FREE DENOMINATOR, AND IT REALLY RE-EXECUTES.** Nine reruns ran
+concurrently in ~10 min against the ~75 min a local loop would cost. Verified rather than
+assumed: one rerun's log shows its own later timestamp with `collected=1651 failed=0`. Also
+read `skipped` — a green run that SKIPPED the test under investigation contributes nothing.
+
+**A RATE IS THE WRONG INSTRUMENT WHEN THE ONE OBSERVATION CARRIED NO EVIDENCE.** No achievable
+N distinguishes 2% from 0%. A one-in-N flake produces its evidence once; a pipe that keeps the
+count and throws the traceback away spends that occurrence for nothing.
+
 ## How to verify
 
 ```bash
-# cairn: the suite and the security gate, both from a clean checkout
+# cairn at main — the suite and the security gate
 cd ~/workspace/cairn && nix develop ~/workspace/devrc -c python3 -m pytest tests -q -p no:randomly
-cd ~/workspace/cairn && python3 tests/leakscan.py            # rc 0, controls green
+cd ~/workspace/cairn && python3 tests/leakscan.py            # 0 findings, controls green
 
-# the opencode exporter, end to end on a real session (no content printed)
-cd ~/workspace/devrc && nix develop . -c python3 - <<'PY'
-import sys, hashlib; sys.path.insert(0,'scripts/collector/opencode')
-import _shared as S, export as E
-db=S.get_db(); sid=list(S.iter_sessions(db))[3]["id"]
-a=E.export_session(db,sid); b=E.export_session(db,sid)
-print("lines",len(a.splitlines()),"identical",
-      hashlib.sha256(a.encode()).hexdigest()==hashlib.sha256(b.encode()).hexdigest(),
-      "ascii",a.isascii())
-PY
+# the merges landed — by CONTENT, never by ancestry (a squash is never an ancestor)
+git -C ~/workspace/cairn show origin/main:tests/test_subsystem_store_api.py | grep -c delivered_sigterm
+gh pr view 3 -R ZacxDev/cairn --json mergedAt,mergeCommit
+
+# the flake denominator, from CI rather than a local hour — read `failed=` AND `skipped`
+gh run list -R ZacxDev/cairn --limit 30
+gh run view <id> -R ZacxDev/cairn --log | grep -E "collected=[0-9]+ failed=|passed,"
 
 # the devrc gate — BOTH tiers, on the MERGED tree, never a test subset
 nix develop ~/workspace/devrc -c bash scripts/gate.sh --tier both
 nix build .#checks.x86_64-linux.pytests --no-link      # one at a time
 nix build .#checks.x86_64-linux.nodetests --no-link
 ```
-```bash
-# the flake denominator, from CI rather than a local hour — read `failed=` AND `skipped`
-gh run list -R ZacxDev/cairn --limit 30
-gh run view <id> -R ZacxDev/cairn --log | grep -E "collected=[0-9]+ failed=|passed,"
-```
-Expected: cairn `1651 passed` at `main` / `1657 passed` on #3, leakscan
-`0 findings across 33 files`; the exporter identical across runs and pure ASCII;
-`PASS scripts/collector/opencode/tests (collected=235 floor=224)`; every CI run
-`failed=0` with no `skipped` in its pytest summary line.
+Expected: cairn **1667 passed**, leakscan `0 findings across 33 files`, `delivered_sigterm`
+present in `origin/main`, `gate.sh` `GATE: RESULT=PASS`, both derivations rc 0.
