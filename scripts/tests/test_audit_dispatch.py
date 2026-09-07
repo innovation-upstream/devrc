@@ -2762,6 +2762,123 @@ def _assert_every_nix_build_prints_its_log(out: str) -> None:
         "`RESULT:` line cannot be followed:\n  " + "\n  ".join(offenders))
 
 
+def shell_code(line: str) -> str:
+    """-> `line` with a trailing shell COMMENT removed, quote-aware.
+
+    🔴 ONE RULE, ONE PLACE, AND IT IS ABOUT A CLASS. Round 18 fixed "the stop
+    removed, the words kept in a trailing comment" by requiring the guard line
+    to END in `exit 1; }` — and `endswith` anchors at the END of the line,
+    which is exactly where a comment lives. `…; cat "$ERR"; }   # exit 1; }`
+    walked it at 128 passed (mutant V68). Round 18 had pinned the SYMPTOM
+    SHAPE; the hazard is that a COMMENT IS NOT CODE, everywhere in the block.
+    So the comment is removed once, where the lines are built, and every
+    assertion below inherits it — including `ERR=$(mktemp` (round 18's own
+    `re.search`, which a comment satisfied just as happily).
+
+    🔴 WHY NOT `"#" not in line`, WHICH IS SHORTER AND WAS OFFERED: it is
+    narrower than the language and this very payload stands one line away from
+    proving it. `DRV=$(nix path-info --derivation <your worktree>#checks.
+    <system>.<name> …)` carries a `#` that is part of a FLAKE REF, and a guard
+    may legitimately echo a `#` inside a quoted diagnosis. Neither opens a
+    comment: `#` does that only at the START OF A WORD and only OUTSIDE quotes.
+    A blunt containment test buys the two mutants at the price of a false RED
+    on correct code — wider on one axis, narrower on another, which is the
+    shape this whole ladder keeps producing.
+
+    Known blind spot, stated rather than hidden: `$'…'` quoting and a `#`
+    inside an unquoted `${…}` expansion are not modelled. Neither appears in
+    this block, and both would fail CLOSED (the text is kept, not dropped).
+    """
+    out, quote, i = [], None, 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(line):
+                out.append(ch)
+                i += 1
+                out.append(line[i])
+                i += 1
+                continue
+            if ch == quote:
+                quote = None
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(line):
+            out.append(ch)
+            i += 1
+            out.append(line[i])
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        # A comment opens only at the START OF A WORD: `a#b` is one word.
+        if ch == "#" and (not out or out[-1].isspace()):
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out).rstrip()
+
+
+def last_command(line: str) -> str:
+    """-> the text after the final UNQUOTED command separator on `line`.
+
+    Only the LAST command sets `$?`, so this is what decides the block's exit
+    status.
+
+    🔴 WHY NOT `re.split(r'[;&|]+', line)`, WHICH IS SHORTER AND WAS OFFERED:
+    it overshoots in two measured ways, both on CORRECT code. (a) It splits
+    INSIDE QUOTES — `grep -nE "RESULT:|panic" "$LOG"` is an ordinary way to
+    spell this line and a character split hands back `panic" "$LOG"`, failing
+    a block that is right. (b) `&` is a REDIRECTION character: appending
+    `2>&1` makes it return `1`. Round 18's `split(";")` was too narrow and the
+    obvious repair is too wide; the actual rule is "an unquoted separator",
+    so this scans instead of splitting.
+
+    A bare `&` is deliberately NOT a separator here — it is the character in
+    `2>&1`, and a genuinely backgrounded verdict grep (`… "$LOG" &`) is caught
+    by the WHOLE-command pin at the call site rather than by this scanner.
+    """
+    code, quote, i, cut = shell_code(line), None, 0, 0
+    while i < len(code):
+        ch = code[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(code):
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(code):
+            i += 2
+            continue
+        if ch in "'\"":
+            quote = ch
+            i += 1
+            continue
+        if ch in ";|" or code[i:i + 2] == "&&":
+            run = ch if ch != "&" else "&"
+            while i < len(code) and code[i] == run:
+                i += 1
+            cut = i
+            continue
+        i += 1
+    return code[cut:].strip()
+
+
+# 🔴 RESTATED BY HAND, not imported — the duplication is what makes the pin
+# two-way, exactly as `DIRECTIVE_LEDGER` and `STOP_NOTE_LEDGER` above. Pinned
+# WHOLE rather than by prefix: `re.match(r'^grep -n "RESULT:"')` cannot see a
+# wrong FILE ARGUMENT (`"$ERR"` instead of `"$LOG"` reads a diagnosis as a
+# verdict) and cannot see a PIPELINE (`| head` makes `head`'s status the
+# block's). Both are the same hazard as the two mutants that were measured.
+VERDICT_LAST_COMMAND = 'grep -n "RESULT:" "$LOG"'
+
+
 def _assert_the_cached_build_fallback_carries_its_guards(out: str) -> None:
     """The `nix log` recovery block must be SAFE AS EXECUTED, not as spelled.
 
@@ -2795,10 +2912,27 @@ def _assert_the_cached_build_fallback_carries_its_guards(out: str) -> None:
     `RESULT: PASS (exit=0)`: byte-for-byte the affirmative false green the
     first mutant above produced. The tell that this was per-symptom rather
     than per-class anchoring is three lines up — `mktemp` is anchored with
-    `re.match` for exactly this reason, in this same block. Both the stop-check
-    and the concurrency check are now anchored, and `$ERR` is pinned beside
-    `$LOG` because a fixed `ERR=` truncates across agents in the DIAGNOSTIC
-    path the way a fixed `LOG=` does in the verdict path.
+    `re.match` for exactly this reason, in this same block. `$ERR` is pinned
+    beside `$LOG` because a fixed `ERR=` truncates across agents in the
+    DIAGNOSTIC path the way a fixed `LOG=` does in the verdict path.
+
+    🔴 ROUND 19 — AND ROUND 18'S REPAIR WAS PER-SYMPTOM TOO, TWICE. A blind
+    audit of the round-18 PR measured both, at 128 passed each:
+      * `…; cat "$ERR"; }   # exit 1; }` — `endswith("exit 1; }")` anchors at
+        the END of the line, which is where a comment lives. The check written
+        to refuse "the words kept in a comment" accepted the words kept in a
+        comment (V68).
+      * `…; grep -n "RESULT:" "$LOG" || true` — the last command was taken as
+        `split(";")[-1]`, so a command reached by `||` was invisible, under a
+        failure message that named a trailing `true` explicitly (V69).
+    Round 18 pinned the SYMPTOM SHAPE (a suffix, a `;`) where the hazard is a
+    CLASS. Fixed as the class: comments are removed once where `lines` is
+    built, so nothing below can be satisfied by a comment; the last command is
+    found by scanning for an UNQUOTED separator rather than splitting on
+    characters; and it is pinned WHOLE, which additionally closes a wrong FILE
+    argument and a pipeline — neither of which a prefix match could see.
+    The two obvious one-line repairs were REJECTED as overshooting, with
+    controls in the body: see `shell_code` and `last_command`.
     """
     fences = re.findall(r"```bash\n(.*?)```", out, re.S)
     blocks = [f for f in fences if "nix log" in f]
@@ -2806,8 +2940,33 @@ def _assert_the_cached_build_fallback_carries_its_guards(out: str) -> None:
         f"expected exactly ONE fenced bash block containing `nix log`, found "
         f"{len(blocks)}. The guards below are asserted INSIDE that fence; prose "
         "outside it is not executed by anyone.")
-    lines = [ln.strip() for ln in blocks[0].splitlines()
-             if ln.strip() and not ln.strip().startswith("#")]
+    # 🔴 COMMENTS ARE STRIPPED HERE, not checked for at each assertion. Round
+    # 18 dropped only lines that START with `#` and then asked each assertion
+    # to defend itself against a TRAILING one; two of the three defences were
+    # walkable (V68, and `ERR=$(mktemp` inside a comment). A comment is not
+    # code — say it once, at the source, and every assertion below inherits it.
+    lines = [c for ln in blocks[0].splitlines() if (c := shell_code(ln).strip())]
+
+    # 🔴 CONTROLS FOR BOTH DIRECTIONS OF OVERSHOOT, because the shorter fixes
+    # for V68/V69 each break CORRECT code and nothing else here would notice.
+    # These are the exact shapes that made `"#" not in line` and
+    # `re.split(r'[;&|]+', …)` the wrong rules.
+    assert shell_code('nix path-info --derivation <w>#checks.x.y   # gone') == (
+        'nix path-info --derivation <w>#checks.x.y'), (
+        "shell_code ate a `#` that is part of a flake ref, not a comment")
+    assert shell_code('echo "a # b"') == 'echo "a # b"', (
+        "shell_code ate a `#` inside a quoted diagnosis")
+    assert last_command('grep -nE "RESULT:|panic" "$LOG"') == (
+        'grep -nE "RESULT:|panic" "$LOG"'), (
+        "last_command split on a `|` inside a quoted regex")
+    assert last_command('grep -n "RESULT:" "$LOG" 2>&1') == (
+        'grep -n "RESULT:" "$LOG" 2>&1'), (
+        "last_command split on the `&` of a `2>&1` redirection")
+    # …and the four separators it MUST see, or the pin below is decorative.
+    for sep in ("; ", " || ", " | ", " && "):
+        assert last_command(f'grep -n "RESULT:" "$LOG"{sep}true') == "true", (
+            f"last_command cannot see a command reached by {sep.strip()!r}, so "
+            "a trailing `true` there would set the block's status invisibly")
 
     # The log path must come from a command substitution, never a literal: audit
     # agents run concurrently here by design, so a fixed path means each
@@ -2847,14 +3006,16 @@ def _assert_the_cached_build_fallback_carries_its_guards(out: str) -> None:
             f"the fenced block has no line matching {pattern!r} — {why}.\n  "
             + "\n  ".join(lines))
         i = hit[0]
-        # 🔴 END IN IT, never merely CONTAIN it. `"exit 1" in line` is
-        # satisfied by a TRAILING COMMENT, and the line filter above drops only
-        # lines that START with `#` — see the docstring for the measurement.
+        # 🔴 THE CODE MUST END IN IT — and `lines[i]` IS the code, because
+        # comments were removed where the list was built. Round 18 asserted
+        # this on the raw line and V68 walked it by ending the COMMENT in the
+        # required suffix; `endswith` anchors where a comment lives.
         assert lines[i].endswith("exit 1; }"), (
             f"this guard does not END in `exit 1; }}`, so it does not STOP: a "
             f"failure becomes a note and the block continues into the very "
             f"false green it exists to close. The WORD `exit 1` surviving in a "
-            f"trailing comment is not the same as running it:\n  {lines[i]}")
+            f"trailing comment is not the same as running it — this is the "
+            f"guard's CODE, with any comment already removed:\n  {lines[i]}")
         positions.append(i)
     assert positions == sorted(positions), (
         "the guards are out of order: $DRV must be checked before `nix log` "
@@ -2873,29 +3034,38 @@ def _assert_the_cached_build_fallback_carries_its_guards(out: str) -> None:
     # verbatim. Corrected here rather than appended to, because a comment is a
     # claim and two contradicting ones are worse than one.
     #
-    # 🔴 The LAST COMMAND, not the last LINE. A line may chain several commands
-    # with `;`, and only the final one sets `$?`. An earlier draft of this very
-    # assertion matched the start of the line and failed on a block whose last
-    # COMMAND was already correct — narrower than its own description, the shape
-    # this module exists to catch.
-    last_cmd = lines[-1].split(";")[-1].strip()
+    # 🔴 The LAST COMMAND, not the last LINE. A line may chain several commands,
+    # and only the final one sets `$?`. An earlier draft of this very assertion
+    # matched the start of the line and failed on a block whose last COMMAND was
+    # already correct — narrower than its own description, the shape this module
+    # exists to catch. Round 18 then took the last command as `split(";")[-1]`,
+    # which is the SAME error one level down: `… || true` is a command reached
+    # by a separator that split cannot see, and it survived at 128 passed
+    # (mutant V69) under a failure message that named `true` explicitly.
+    last_cmd = last_command(lines[-1])
     assert not re.match(r'^grep -c\b', last_cmd), (
         "the block's LAST COMMAND is `grep -c`, which exits 1 when the count is "
         "0 — so a HEALTHY tier reports failure and a timing-out one reports "
         f"success. Put the `RESULT:` grep last.\n  last command: {last_cmd}")
-    # 🔴 AND A NEGATIVE PIN IS HALF A CLAIM. The check above only says the last
-    # command is not `grep -c`; nothing required it to BE the verdict grep. Two
-    # mutants walked that gap on a green 127-test suite: deleting the verdict
-    # grep and ending on `echo done` (the block then exits 0 against a log with
-    # no `RESULT:` line, where the shipped block exits 1), and appending `true`
-    # after it (the block exits 0 unconditionally). "Not the wrong command" and
-    # "the right command" are different assertions; make the second one.
-    assert re.match(r'^grep -n "RESULT:"', last_cmd), (
-        "the block's LAST COMMAND is not the `RESULT:` grep, so the block's "
-        "exit status is set by something other than 'did this tier print a "
-        "verdict'. A trailing `true`, an `echo`, or a deleted verdict grep all "
-        "make the block exit 0 over a log that carries no verdict at all.\n"
-        f"  last command: {last_cmd}\n  block:\n    " + "\n    ".join(lines))
+    # 🔴 AND A NEGATIVE PIN IS HALF A CLAIM — then a PREFIX pin is three
+    # quarters of one. "Not `grep -c`" let `echo done` and `; true` through
+    # (V64, V65). `^grep -n "RESULT:"` closes those and still cannot see a
+    # wrong FILE ARGUMENT (`"$ERR"` is the stderr capture: greping it for
+    # `RESULT:` finds nothing and exits 1 on a HEALTHY tier) or a PIPELINE
+    # (`| head` makes head's status the block's). So the whole command is
+    # pinned against a restated constant, the way this module pins prose.
+    assert last_cmd == VERDICT_LAST_COMMAND, (
+        "the block's LAST COMMAND is not, character for character, the verdict "
+        "grep — so the block's exit status is set by something other than 'did "
+        "this tier print a verdict'. A trailing `true` (reached by `;`, `||` or "
+        "`&&`), a pipeline, an `echo`, a different FILE argument, or a deleted "
+        "verdict grep all make the block exit 0 over a log that carries no "
+        f"verdict at all.\n  pinned here : {VERDICT_LAST_COMMAND!r}\n"
+        f"  last command: {last_cmd!r}\n"
+        "  If the change is deliberate, update VERDICT_LAST_COMMAND in the "
+        "SAME commit — that is the moment to check the new spelling still "
+        "exits non-zero on a log with no `RESULT:` line.\n  block:\n    "
+        + "\n    ".join(lines))
 
 
 def test_the_cached_build_fallback_is_emitted_with_its_guards():
@@ -8990,7 +9160,12 @@ FIX_MATRIX = (
      "`NO DERIVATION` then a FOREIGN log's `RESULT: PASS (exit=0)`. The tell "
      "that this was per-symptom rather than per-class anchoring is in the same "
      "assertion block: `mktemp` is anchored with `re.match` for exactly this "
-     "reason. Now `endswith('exit 1; }')`",
+     "reason. 🔴 THIS ROW USED TO CLAIM 'Now endswith(exit 1; })' AND THAT "
+     "OVERSTATED WHAT IT CLOSED — `endswith` anchors at the END of the line, "
+     "which is where a comment lives, so it closed V63's exact spelling and "
+     "left the class open one character out (V68, r19/A1). What closes the "
+     "class is removing comments where `lines` is built, so the assertion "
+     "reads CODE",
      "test_the_cached_build_fallback_is_emitted_with_its_guards",
      "RED@7de5b0bd", "V63"),
     ("r18/F3 the last-command pin was NEGATIVE ONLY — `not re.match(r'^grep "
@@ -9003,7 +9178,8 @@ FIX_MATRIX = (
      "contradicted by the payload's own comment and by this assertion's own "
      "failure message three lines below; a maintainer acting on it reinstates "
      "the exit-status inversion verbatim. Comment corrected, pin widened to "
-     "require the verdict grep last",
+     "require the verdict grep last — but only its PREFIX, and only past a "
+     "`;`, which left the class open (V69, r19/A2)",
      "test_the_cached_build_fallback_is_emitted_with_its_guards",
      "RED@7de5b0bd", "V64 V65"),
     ("r18/G4 `$ERR` was never pinned: the concurrency assertion read `LOG=` "
@@ -9013,6 +9189,45 @@ FIX_MATRIX = (
      "stderr read back as this run's names a cause belonging to another tier",
      "test_the_cached_build_fallback_is_emitted_with_its_guards",
      "RED@7de5b0bd", "V66"),
+
+    # ------------------------------------------------------------------ #
+    # 🔴 ROUND 19 — the blind audit OF ROUND 18. Both findings are round
+    # 18's own repairs, re-spelled: it pinned the SYMPTOM SHAPE where the
+    # hazard was a CLASS, which is verbatim the criticism round 18 filed
+    # against round 17. Seven of eight rounds have now produced a fix that
+    # was wider on one axis and narrower on another; these two rows exist so
+    # the eighth cannot be told without them. Same detector and evidence
+    # label as r17/N1 for r6/4's reason — a WIDTH claim has no base ref.
+    # ------------------------------------------------------------------ #
+    ("r19/A1 `endswith('exit 1; }')` anchors at the END of the line, which is "
+     "exactly where a trailing comment lives — so the check written to refuse "
+     "'the stop removed, the words kept in a comment' ACCEPTED "
+     "`...; cat \"$ERR\"; }   # exit 1; }` at 128 passed, one character from "
+     "the mutant it does kill. The rendered guard carries no `exit` and the "
+     "block walks into `nix log \"\"`, the CWD flake's default-package log: "
+     "byte-for-byte V63's hazard. Fixed as the class, not the spelling — "
+     "comments are stripped where `lines` is built, quote-aware and only at a "
+     "word start, so every assertion in the block reads CODE. The offered "
+     "one-liner `\"#\" not in line` was REJECTED as narrower than the "
+     "language: this payload's own `nix path-info --derivation <w>#checks...` "
+     "carries a `#` in a flake ref, and a guard may echo one inside quotes",
+     "test_the_cached_build_fallback_is_emitted_with_its_guards",
+     "RED@7de5b0bd", "V68"),
+    ("r19/A2 the last command was `lines[-1].split(';')[-1]`, so a command "
+     "reached by `||` was invisible — `grep -n \"RESULT:\" \"$LOG\" || true` "
+     "survived at 128 passed under a failure message that named a trailing "
+     "`true` explicitly. Against a log with no `RESULT:` line the shipped "
+     "block exits 1, V65 (`; true`) exits 0 and this exits 0: identical "
+     "hazard, different separator. Fixed by scanning for an UNQUOTED "
+     "separator (`;`, `|`, `||`, `&&`) and pinning the WHOLE command against "
+     "a restated constant, which additionally closes a wrong FILE argument "
+     "(`\"$ERR\"` greps the stderr capture and exits 1 on a HEALTHY tier) and "
+     "a pipeline (`| head` donates its status) — neither visible to a prefix "
+     "match. The offered `re.split(r'[;&|]+', ...)` was REJECTED as "
+     "overshooting in two measured ways on CORRECT code: it splits inside a "
+     "quoted regex (`\"RESULT:|panic\"`) and on the `&` of a `2>&1`",
+     "test_the_cached_build_fallback_is_emitted_with_its_guards",
+     "RED@7de5b0bd", "V69"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
@@ -9040,7 +9255,9 @@ FIX_MATRIX = (
 # and 99 - min(50, max(1, 99 // 20)) = 99 - 4 = 95.
 # Round 18: m = 104 (printed from an import, NOT 99 plus this round's four),
 # and 104 - min(50, max(1, 104 // 20)) = 104 - 5 = 99.
-MIN_FIX_MATRIX_ROWS = 99
+# Round 19: m = 106 (printed from an import again, NOT 104 plus this round's
+# two), and 106 - min(50, max(1, 106 // 20)) = 106 - 5 = 101.
+MIN_FIX_MATRIX_ROWS = 101
 
 # 🔴 THE MUTANTS COLUMN IS AN EVIDENCE CLAIM, AND IT WAS UNGRADED.
 # `fix_matrix_problems` took `_mutants` and threw it away, so rewriting a
