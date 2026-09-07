@@ -1,4 +1,21 @@
 #!/usr/bin/env bash
+# 🔴 SUPERSEDED 2026-09-07 — DO NOT RUN. What this adds CANNOT WORK, and
+# `nix/system/apply-nebula-drop-443.sh` exists to undo it.
+#
+# Measured (clawgate #497): the prod nebula lighthouse listens on 4242 ONLY
+# (clusters/production/apps/nebula/lighthouse/lighthouse-config.yaml -> listen.port),
+# 443/udp on that host is WIREGUARD (k0s/host-firewall/relay-firewall.sh), and no
+# 443->4242 redirect exists anywhere in homelab-infra. So nebula handshakes a socket
+# that does not speak nebula and gets nothing back.
+#
+# The harm is not the wasted handshakes, it is that the entry READS AS A FALLBACK.
+# In the one situation it was written for -- a network blocking UDP 4242 -- there is
+# no fallback at all, while the config asserts there is one. Tailscale is the real
+# answer to blocked-UDP; see clawgate #497.
+#
+# Kept rather than deleted so the reasoning survives with the artefact.
+#
+# ---- original header below ----
 # Add UDP 443 fallback for prod lighthouse in nebula static host map
 #
 # This repo is PUBLIC, so the lighthouse's public IP is NOT committed. Supply it:
