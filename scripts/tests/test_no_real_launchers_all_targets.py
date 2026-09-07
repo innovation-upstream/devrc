@@ -209,11 +209,22 @@ def test_the_non_pytest_targets_are_covered_and_named():
     # such a mutant really deleted a file during the guard run. Corrected here
     # because a pinned entry's stated reason is the thing the pin rests on, and a
     # reader who believes the old wording stops looking.
+    # Fifth entry: `test_diagnose_disk_accounting.sh`, registered when it landed,
+    # like the third and fourth. It touches no launcher, no spool and no git: it
+    # sources `scripts/diagnose-disk-accounting.sh` (whose sourceable seam
+    # returns before the root check, so nothing is measured) and drives the pure
+    # transforms against fixtures under a mktemp dir — an lsof header in two
+    # column layouts, a planted directory name, and a large flat tree sized from
+    # the live ARG_MAX. The only binaries it reaches are find/du/stat/sort/awk/sh
+    # over that mktemp dir. It does execute the script itself ONCE, to assert the
+    # non-root refusal (rc 2), which exits before the script opens a temp file or
+    # touches the filesystem.
     assert shells == [
         "scripts/tests/test_release_wrapper.sh",
         "scripts/tests/test_resume_state.sh",
         "scripts/tests/test_base_clone_staleness.sh",
         "scripts/tests/test_cleanup_disk_gate.sh",
+        "scripts/tests/test_diagnose_disk_accounting.sh",
     ], shells
     for rel in hooks + shells:
         assert (REPO_ROOT / rel).is_file(), f"{rel} is listed but does not exist"

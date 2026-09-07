@@ -3939,6 +3939,19 @@ SHELL_TESTS=(
   # nothing. Watched red: mutating `APPLY=0` to `APPLY=1` fails it with
   # "the gate is bypassed".
   "scripts/tests/test_cleanup_disk_gate.sh"
+  # Registered in the SAME commit that adds it, for the reason the entries above
+  # exist. It covers `scripts/diagnose-disk-accounting.sh` — 282 lines of
+  # ROOT-PRIVILEGED bash that had no test file at all, in a repo with no
+  # shellcheck gate, which is precisely why a root COMMAND INJECTION (a planted
+  # /tmp directory name reaching `xargs -I{} sh -c`) and two silent
+  # whole-run aborts shipped invisibly. Nothing in it needs root: the script was
+  # given a sourceable seam (BASH_SOURCE[0] != $0 returns before the root check)
+  # and the suite drives the pure transforms against fixtures — an lsof header
+  # in two different column layouts, a directory literally named
+  # `evil";echo PWNED-AS-$(id -un) >&2;"x`, and a ~17,500-entry tree sized from
+  # the live ARG_MAX. It reaches no launcher, no network and no git.
+  # Watched red: `s += $col` -> `s += $8` fails it with "SIZE/OFF found at col 7".
+  "scripts/tests/test_diagnose_disk_accounting.sh"
 )
 # 🔴 THE SHELL TESTS ARE IN THE TIMING CENSUS TOO, and the reason is the census's
 # own honesty: it is presented as an accounting of the run, so a population it
