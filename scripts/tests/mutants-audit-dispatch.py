@@ -1964,6 +1964,45 @@ def the_stderr_path_is_fixed_while_the_log_path_is_not(t):
                  'ERR=/tmp/audit-tier.err')
 
 
+def the_drv_guards_stop_hides_in_a_comment_that_ends_in_the_suffix(t):
+    """V68 — round 19. V63's hazard, spelled to satisfy an `endswith` pin.
+
+    🔴 THE LADDER'S SIGNATURE FAILURE, IN THE COMMIT THAT FIXED V63. Round 18
+    replaced `"exit 1" in line` with `line.endswith("exit 1; }")` — and
+    `endswith` anchors at the END of the line, which is exactly where a
+    trailing comment lives. `re.match` excludes comments because it anchors at
+    the START; `endswith` cannot. So:
+
+        [ -n "$DRV" ] || { echo "…"; cat "$ERR"; }   # exit 1; }
+
+    ends in `exit 1; }`, carries no `exit` in its CODE, and measured **128
+    passed, rc 0** against round 18's own fix. The rendered block prints
+    `NO DERIVATION` and walks on into `nix log ""` — the CWD flake's
+    default-package log. Byte-for-byte V63's hazard, one character apart from
+    the mutation that IS killed.
+
+    The fix is not a wider suffix: it is to judge the CODE and not the LINE.
+    """
+    return _swap(t, 'cat "$ERR"; exit 1; }\'', 'cat "$ERR"; }   # exit 1; }\'')
+
+
+def a_true_is_reached_by_or_after_the_verdict_grep(t):
+    """V69 — round 19. V65's hazard, reached by `||` instead of `;`.
+
+    Round 18 took the last COMMAND as `lines[-1].split(";")[-1]` — a split on
+    `;` alone, so a trailing `true` reached by `||` is invisible to it while the
+    assertion's own failure message says "A trailing `true` … make[s] the block
+    exit 0". Measured **128 passed, rc 0**.
+
+    Walked against a log with NO `RESULT:` line: the shipped block exits 1,
+    V65 (`; true`, killed) exits 0, and this (`|| true`, survived) exits 0.
+    Identical hazard, different spelling — and the same root cause admits
+    `| head` and a wrong file argument, which is why the fix splits on every
+    unquoted separator and pins the WHOLE command rather than its prefix.
+    """
+    return _swap(t, '"RESULT:" "$LOG"\',', '"RESULT:" "$LOG" || true\',')
+
+
 def the_stop_note_prescribes_wrapping_alone_again(t):
     """V67 — round 18. The prescription that does not stop, restored verbatim.
 
@@ -3135,6 +3174,22 @@ ROWS = [
     ("V67 the stop-note prescribes wrapping ALONE again",
      {"test_the_stop_note_prescribes_something_that_actually_stops"},
      the_stop_note_prescribes_wrapping_alone_again),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 V68-V69 — round 19, from the blind audit OF ROUND 18. Both are round
+    # 18's own hazards re-spelled, and both survived round 18's fix at 128
+    # passed. The lesson is one line long: round 18 pinned the SYMPTOM SHAPE
+    # (a suffix, a `;`) where the hazard is a CLASS (code vs comment, a
+    # command vs a line). That is the same per-symptom-not-per-class error
+    # round 18 filed against round 17, reproduced inside the fix for it —
+    # seven of eight rounds now.
+    # --------------------------------------------------------------------- #
+    ("V68 the $DRV guard's stop hidden in a comment ENDING in the suffix",
+     {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
+     the_drv_guards_stop_hides_in_a_comment_that_ends_in_the_suffix),
+    ("V69 `true` reached by `||` after the verdict grep",
+     {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
+     a_true_is_reached_by_or_after_the_verdict_grep),
 ]
 
 
