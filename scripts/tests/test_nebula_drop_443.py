@@ -13,14 +13,24 @@ eats a `"a:4242" "b:4242"` row (two addresses, neither of them :443) or matches
 and the operator sees a successful run. Every such row below is asserted
 BYTE-IDENTICAL, not merely "still present".
 
-Three of these cases correspond to real audit findings on PR #1361:
-  * `test_unrelated_443_elsewhere_is_ignored` — a whole-file `:443` grep made
-    the script refuse on any config carrying an unrelated quoted `:443`
-    (an nginx proxyPass is the obvious one), blaming a substitution that worked.
-  * `test_already_removed_is_a_noop_even_with_unrelated_443` — the same bug made
-    the documented "re-running is a no-op" false.
-  * `test_unknown_argument_refuses` — `MODE="${1:-apply}"` compared only against
-    `--check`, so `--dry-run` ran the DESTRUCTIVE path.
+Cases corresponding to real audit findings on PR #1361, named exactly:
+  * `test_scoped_helper_ignores_an_unrelated_443` (round 1, #1) — a whole-file
+    `:443` grep made the script refuse on any config carrying an unrelated
+    quoted `:443` (an nginx proxyPass is the obvious one), blaming a
+    substitution that had worked.
+  * `test_wide_detector_catches_a_multiline_entry` (round 2, F2) — the round-1
+    fix narrowed BOTH searches, so the "refuse rather than guess" guard stopped
+    seeing a hand-wrapped list and reported `ALREADY GONE` with the entry still
+    present. Two searches, two different widths.
+  * `test_unknown_argument_refuses` (round 1, #3) — `MODE="${1:-apply}"` was
+    compared only against `--check`, so `--dry-run` ran the DESTRUCTIVE path.
+  * `test_verify_is_errexit_safe` (round 2, F1) — `check_one; check_rc=$?` is
+    dead code under `set -e`: the bare call exits the shell before the
+    assignment, so the whole three-outcome verification was unreachable.
+
+🔴 An earlier version of this docstring named two tests that did not exist. A
+docstring is a claim like any other; these names are asserted by
+`test_docstring_names_only_real_tests` below.
 """
 
 import re
@@ -125,17 +135,93 @@ def test_unknown_argument_refuses():
     assert "unknown argument" in r.stderr
 
 
-def test_scoped_443_search_is_not_whole_file():
-    """The `:443` searches must be scoped to staticHostMap-shaped lines.
+def _helper_re(name: str) -> str:
+    """Pull a helper's actual grep -E pattern out of the script.
 
-    Pins the absence of the whole-file grep that made the script refuse on any
-    config carrying an unrelated quoted `:443`. Structural: the helper must
-    exist and the bare whole-file forms must not.
+    🔴 BEHAVIOURAL, not spelled. The previous version of the guard below asserted
+    only that the string `hostmap_443()` was PRESENT — so a mutant that widened
+    the helper's BODY back to a whole-file `:443"` grep, reintroducing round-1
+    finding #1 verbatim, left the test green. Mutation-swept: that mutant now
+    dies here.
     """
-    text = SCRIPT.read_text()
-    assert "hostmap_443()" in text, "the scoping helper is gone"
-    assert 'grep -qE \':443"\' "$CFG"' not in text
-    assert 'grep -qE \':443"\' "$TMP"' not in text
+    m = re.search(rf"^{name}\(\)\s*{{ grep -nE '(?P<re>[^']+)'", SCRIPT.read_text(), re.M)
+    assert m, f"could not find {name}() — did it move or change shape?"
+    return m.group("re")
+
+
+def _matches(pattern: str, line: str) -> bool:
+    return subprocess.run(
+        ["grep", "-qE", pattern], input=line, text=True
+    ).returncode == 0
+
+
+NGINX_443 = '  services.nginx.virtualHosts."a".locations."/".proxyPass = "https://up:443";\n'
+
+
+def test_scoped_helper_ignores_an_unrelated_443():
+    """`hostmap_443` answers 'did a :443 survive MY patch?' — it must be scoped.
+
+    Round-1 finding #1: a whole-file grep here aborted the run on any config
+    containing an unrelated quoted `:443`, so the script could never succeed.
+    """
+    pat = _helper_re("hostmap_443")
+    assert not _matches(pat, NGINX_443), "scoped helper matched an nginx proxyPass"
+    assert _matches(pat, '      "10.42.0.2" = [ "1.2.3.4:4242" "1.2.3.4:443" ];\n')
+
+
+def test_wide_detector_catches_a_multiline_entry():
+    """`any_443_addr` answers 'might I be failing to see a :443?' — must be wide.
+
+    Round-2 finding F2: reusing the scoped helper here made the guard miss a
+    hand-wrapped list and report `ALREADY GONE` with the entry still present —
+    a refuse-rather-than-guess guard failing OPEN into a success-shaped message.
+    """
+    pat = _helper_re("any_443_addr")
+    assert _matches(pat, '        "203.0.113.9:443"\n'), "wide detector missed a list element"
+    assert _matches(pat, '      "10.42.0.2"= [ "1.2.3.4:4242" "1.2.3.4:443" ];\n')
+    # Still narrow enough not to fire on a hostname:port URL.
+    assert not _matches(pat, NGINX_443)
+
+
+def test_the_two_detectors_are_different():
+    """They answer different questions; collapsing them is what caused F2."""
+    assert _helper_re("hostmap_443") != _helper_re("any_443_addr")
+
+
+def test_verify_is_errexit_safe():
+    """`check_one` must never be called bare — round-2 finding F1.
+
+    Under `set -e` a bare `check_one; check_rc=$?` exits the shell on any
+    non-zero return, so the three-outcome block was dead code for rc 1 and rc 2
+    and a transient read failure silently rolled back a good change.
+    """
+    code = _code_lines()
+    assert "check_one; check_rc=$?" not in code, "bare call is errexit-unsafe"
+    assert code.count("check_one || check_rc=$?") >= 2, "both call sites must be guarded"
+
+
+def test_docstring_names_only_real_tests():
+    """Every `test_*` named in the module docstring must actually exist."""
+    doc = __doc__ or ""
+    named = set(re.findall(r"`(test_\w+)`", doc))
+    defined = set(re.findall(r"^def (test_\w+)", Path(__file__).read_text(), re.M))
+    missing = named - defined
+    assert not missing, f"docstring names tests that do not exist: {sorted(missing)}"
+
+
+def test_check_pattern_does_not_match_a_longer_port():
+    """`--check`'s :443 pattern must not fire on :4433 / :14443.
+
+    Round-2 mutation sweep found a loosened `':443$'` surviving. This pins the
+    boundary behaviourally: a bare `:443$` would miss a trailing-comment line,
+    and a bare `:443` would match `:4433`.
+    """
+    m = re.search(r"grep -qE ':443\(\[\^0-9\]\|\$\)'", SCRIPT.read_text())
+    pat = ":443([^0-9]|$)"
+    assert m, "the --check :443 pattern changed shape; re-check the boundary cases"
+    assert _matches(pat, "  - 203.0.113.9:443\n")
+    assert not _matches(pat, "  - 203.0.113.9:4433\n")
+    assert not _matches(pat, "  - 203.0.113.9:14443\n")
 
 
 def _code_lines() -> str:

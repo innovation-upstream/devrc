@@ -24,7 +24,7 @@
 #  the `server:` URL in $KC_PROD).
 set -euo pipefail
 
-# 🔴 HARD STOP, not just the banner above. 14 `claudedocs/handoff-*.md` files still name
+# 🔴 HARD STOP, not just the banner above. 9 `claudedocs/handoff-*.md` files still name
 # this script, so an operator or an agent resuming from one can reach it and re-add the
 # exact entry apply-nebula-drop-443.sh exists to remove. A comment does not stop an
 # execution; this does. The override exists so the file stays runnable for anyone who

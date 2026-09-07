@@ -31,18 +31,22 @@
 #
 # Overrides: NEBULA_NET=mesh  NEBULA_EXPECT_MESH_IP=10.42.0.100  NEBULA_CFG=/etc/nixos/configuration.nix
 #
-# SAFETY: nothing is written until every precondition passes -- including a dry-build of
-# the CURRENT, unpatched config, so that any later failure is attributable to this change.
-# Then, in order: patch a temp copy, parse it (and the pre-patch file, as a control), take
-# a uniquely-named backup (never overwriting one), move it into place, and only then
-# rebuild -- with a trap that restores the backup on ANY later failure. Re-running once
-# the address is gone is a no-op.
+# SAFETY: nothing is written until every precondition passes -- including an EVALUATION of
+# the current, unpatched /etc/nixos. Then, in order: patch a temp copy, parse it (and the
+# pre-patch file, as a control), take a uniquely-named backup (never overwriting one),
+# move it into place, and only then rebuild -- with a trap that restores the backup on ANY
+# later failure. Re-running once the address is gone is a no-op, and costs no evaluation.
 #
 # 🔴 WHAT THIS SCRIPT CANNOT UNDO: `nixos-rebuild switch` applies EVERY pending edit in
 # $CFG, not only the token removed here, and the rollback restores only that token. If
 # you have unrelated half-finished edits in configuration.nix, this switches them live.
-# The preflight dry-build tells you the file builds; it does not tell you that you meant
-# everything in it.
+#
+# 🔴 AND WHAT THE PREFLIGHT CONTROL DOES *NOT* BUY. It runs `dry-build`, which per
+# `man 8 nixos-rebuild` shows what would be built "but otherwise does nothing" -- it
+# EVALUATES. An unrelated pending edit whose derivation fails to COMPILE, or a fetch with
+# a stale hash, passes the control and fails during the real switch. So a later
+# EVALUATION error is attributable to this change; a later BUILD error may still be
+# someone else's. An earlier draft of this header claimed the stronger thing.
 set -euo pipefail
 
 NET="${NEBULA_NET:-mesh}"
@@ -133,23 +137,9 @@ echo "  host      : $IFACE = $have_ip  (matches the expected target)"
 
 [ -f "$CFG" ] && [ -w "$CFG" ] || die "$CFG is not a writable regular file"
 
-# 🔴 THE PRE-EXISTING TREE MUST ALREADY BE SWITCHABLE — this is the real stranding vector,
-# and it is not the :443 removal. `nixos-rebuild switch` applies EVERY pending edit in
-# $CFG, not just this one token, so a half-finished unrelated edit sitting in that file
-# gets switched into the running system by this script. The rollback below restores only
-# this script's token, leaving those live. Establishing that the CURRENT file already
-# builds means any later failure is attributable to this change.
-echo "  control   : dry-building the CURRENT (unpatched) config..."
-if ! nixos-rebuild dry-build >/dev/null 2>&1; then
-  die "$CFG does NOT dry-build as it stands, BEFORE this script changes anything.
-  Something else in that file is already broken. Fix that first: if this script ran now,
-  \`nixos-rebuild switch\` would try to apply those edits too, and the rollback only
-  restores the one token this script removes."
-fi
-echo "  control   : the unpatched config dry-builds, so a later failure is THIS change"
-
-# ⚠ Also true and worth knowing before you run it: a switch activates whatever else is
-# pending in $CFG. This script cannot un-apply those.
+# ⚠ Worth knowing before you run this: `nixos-rebuild switch` applies EVERY pending edit
+# in $CFG, not just the token removed here, and the rollback restores only that token. If
+# you have unrelated half-finished edits in configuration.nix, this switches them live.
 
 # The line, in the shape apply-nebula-443.sh leaves behind:
 #   "10.42.0.2" = [ "<ip>:4242" "<ip>:443" ];
@@ -163,14 +153,30 @@ echo "  control   : the unpatched config dry-builds, so a later failure is THIS 
 # and its "re-running once it is gone is a no-op" was false for the same reason. It
 # failed closed, so it was never dangerous; it was unusable, which on the one machine
 # this was written for is nearly as bad.
-hostmap_443() { grep -nE '^[^"]*"[0-9.]+" = \[[^]]*:443"' "$1" || true; }
+# TWO different questions, and conflating them is what the round-2 audit caught:
+#
+#   hostmap_443()  — "did a :443 SURVIVE my patch?"  Must be SCOPED, because a whole-file
+#                    grep here aborted on an unrelated nginx `:443`.
+#   any_443_addr() — "is there a :443 ADDRESS anywhere that I might be failing to see?"
+#                    Must be WIDE, because its job is to refuse rather than guess. Using
+#                    the scoped one here made the guard miss every shape but the one-liner
+#                    — a hand-wrapped multi-line list, or `"ip"= [` with no space — and
+#                    report `ALREADY GONE … Nothing to do` with the dead entry still
+#                    present. A guard whose stated job is "refuse rather than guess" must
+#                    never fail OPEN into a success-shaped message.
+#
+# any_443_addr matches a quoted `<ip>:443` ADDRESS in any position, which is narrow enough
+# to ignore an nginx `proxyPass = "https://host:443"` (no bare IP before the colon) while
+# catching a list element on its own line.
+hostmap_443()  { grep -nE '^[^"]*"[0-9.]+" = \[[^]]*:443"' "$1" || true; }
+any_443_addr() { grep -nE '"[0-9.]+:443"' "$1" || true; }
 
 matches=$(grep -cE '"[0-9.]+" = \[ "[0-9.]+:4242" "[0-9.]+:443" \];' "$CFG" || true)
 if [ "$matches" = "0" ]; then
-  stray=$(hostmap_443 "$CFG")
+  stray=$(any_443_addr "$CFG")
   if [ -n "$stray" ]; then
-    echo "  NOTE: a ':443' address is present in a staticHostMap entry, but not in the" >&2
-    echo "        expected one-line shape this script knows how to edit:" >&2
+    echo "  NOTE: a quoted ':443' ADDRESS is present, but not in the one-line" >&2
+    echo "        staticHostMap shape this script knows how to edit:" >&2
     printf '%s\n' "$stray" | sed 's/^/    /' >&2
     die "refusing to guess at a hand-edited staticHostMap -- remove the :443 address by hand"
   fi
@@ -186,6 +192,36 @@ ip443=$(printf  '%s' "$line" | grep -oE '"[0-9.]+:443"'  | tr -d '"' | cut -d: -
   That is not the entry this script removes; inspect it by hand."
 echo "  target    : dropping the :443 address beside the :4242 one for the same host"
 echo "  anchor    : exactly 1 match, line $(printf '%s' "$line" | cut -d: -f1)"
+
+# Attribution control — deliberately AFTER the no-op checks above, so a run with nothing
+# to do exits 0 without paying a full NixOS evaluation (and without dying on an unrelated
+# broken pending edit while having no work to do).
+#
+# 🔴 IT ESTABLISHES EVALUATION, NOT BUILDABILITY — the previous wording claimed more than
+# it bought. `nixos-rebuild dry-build` "shows what store paths WOULD be built … but
+# otherwise does nothing" (man 8 nixos-rebuild), so an unrelated pending edit whose
+# derivation fails to COMPILE, or a fetch with a stale hash, passes here and fails during
+# the real switch. `dry-activate` is the operation that actually builds; it is not used
+# because it costs a full build in a preflight. So: this catches an evaluation error in
+# the pending tree, and it does NOT make every later failure attributable to this change.
+#
+# 🔴 AND IT ONLY SPEAKS ABOUT /etc/nixos. `nixos-rebuild` with no --file reads
+# /etc/nixos/{configuration,flake,system}.nix and never $CFG, so with NEBULA_CFG pointed
+# elsewhere this would be a claim about a file the script is not patching. Skipped there
+# rather than asserted wrongly.
+if [ "$CFG" = "/etc/nixos/configuration.nix" ]; then
+  echo "  control   : evaluating the CURRENT (unpatched) /etc/nixos config..."
+  if ! nixos-rebuild dry-build >/dev/null 2>&1; then
+    die "/etc/nixos does NOT evaluate as it stands, BEFORE this script changes anything.
+  Something already in that tree is broken. Fix it first: a switch from here would try to
+  apply those edits too, and the rollback restores only the one token this script removes."
+  fi
+  echo "  control   : it evaluates (an evaluation error later is therefore THIS change;"
+  echo "              a BUILD error later may still be someone else's pending edit)"
+else
+  echo "  control   : SKIPPED -- NEBULA_CFG is not /etc/nixos/configuration.nix, and"
+  echo "              nixos-rebuild would evaluate /etc/nixos regardless, not \$CFG"
+fi
 echo
 
 # -------------------------------------------------------------------------- patch (temp)
@@ -248,8 +284,8 @@ mv "$TMP" "$CFG"; PATCHED=1; echo "  applied   : $CFG"
 echo
 
 echo "== nixos-rebuild switch =="
-# 🔴 SET BEFORE, NOT AFTER. `switch-to-configuration` restarts units and THEN runs
-# activation, so it can exit non-zero with services already cycled. Setting this only on
+# 🔴 SET BEFORE, NOT AFTER. `switch-to-configuration` stops units, activates, then starts
+# them, so it can exit non-zero with services already cycled. Setting this only on
 # success made the trap print "The system was never switched, so nothing is running the
 # change." for exactly the case where something IS -- and omit the instruction to switch
 # back. A false reassurance in the rollback path is worse than no message.
@@ -266,12 +302,21 @@ echo "  unit      : active"
 # into the failure branch rolled the change back while asserting ":443 is still
 # advertised" -- a claim the check never made -- and then offered a rollback command that
 # RE-ADDS the dead entry. Retry once (the unit may still be settling), then be honest.
+# 🔴 `check_rc=0; check_one || check_rc=$?` -- NOT `check_one; check_rc=$?`.
+# `check_one` re-enables `-e` before returning, and a bare simple command is subject to
+# errexit, so a non-zero return killed the shell BEFORE the assignment: the entire
+# three-outcome block below was dead code for rc 1 and rc 2. The EXIT trap then rolled
+# back a change that had actually applied -- re-adding the dead :443 entry to the file --
+# and printed only "ROLLED BACK … run nixos-rebuild switch to return it", which if
+# followed re-applies the dead address to the RUNNING system. Putting the call on the
+# left of `||` is what exempts it from errexit. (Measured: stub rc 1 and rc 2 both exited
+# the shell with the next line never reached.)
 check_one() { set +e; bash "${BASH_SOURCE[0]}" --check; local r=$?; set -e; return $r; }
-check_one; check_rc=$?
+check_rc=0; check_one || check_rc=$?
 if [ "$check_rc" = "2" ]; then
   echo "  (verifier could not read the running config; waiting 5s and retrying once)"
   sleep 5
-  check_one; check_rc=$?
+  check_rc=0; check_one || check_rc=$?   # same errexit rule as above — never bare
 fi
 case "$check_rc" in
   0) OK=1 ;;
@@ -287,7 +332,14 @@ esac
 # after one restart and not after another, while discovery worked throughout), so a failed
 # ping here is NOT evidence the mesh is down and must not roll back a good change.
 probe="${NEBULA_PROBE:-10.42.0.2}"
-if ping -c1 -W3 "$probe" >/dev/null 2>&1; then
+if ! command -v ping >/dev/null 2>&1; then
+  # Distinguished from a failed probe ON PURPOSE: `ping … >/dev/null 2>&1` returns 127
+  # with stderr swallowed when the binary is absent, which renders identically to "the
+  # lighthouse did not answer" and would be blamed on fleet ICMP flakiness. Not
+  # preflighted as a hard requirement, because the probe is advisory and its absence
+  # must not block a good change.
+  echo "  mesh      : SKIPPED -- no \`ping\` on PATH. This is NOT a reachability result."
+elif ping -c1 -W3 "$probe" >/dev/null 2>&1; then
   echo "  mesh      : $probe answers ICMP"
 else
   echo "  ⚠ mesh    : $probe did NOT answer ICMP. On this fleet that is flaky and is not"
