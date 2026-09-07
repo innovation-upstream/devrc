@@ -35,6 +35,18 @@ not a deploy check:
 | tool input disclosure | `<details data-tool-detail>` → `⚙ Bash` → `<pre>` | not `<details open>` |
 | free-form reply | `data-chat-freeform-reply`, `data-reply-state="ready"` | — |
 
+🔴 **UPDATE 2026-09-07 — THE SURFACE IS NOW AUTHENTICATED. Live version is
+`0.8.29` (`ZacxDev/homelab-infra#743`, squash `3f6ef8ae7`), and everything below
+about an unauthenticated LAN surface describes `0.8.28`, which is no longer
+running.** `requireSession` is no longer `return next`; both it and
+`requireArmedTerminalUI` require an HMAC-signed session cookie minted by
+`POST /login` against `CLAWGATE_UI_PASSWORD` (fail-closed: unset ⇒ refuse).
+Re-measured live: the uncredentialed `POST /ui/term/send-keys` that returned
+**200** now returns **401**, and anonymous `GET /` returns **303** to `/login`.
+🔴 **The free-form box and the tool-input disclosure are still ARMED — they are
+now behind a login rather than removed.** Full evidence, and the reason the gate
+had to land on TWO wrappers, is rank 39.
+
 🔴 **THE FREE-FORM SEND-KEYS BOX IS ARMED.** Live on a real session page:
 `data-reply-state="ready"`, `data-reply-host="laptop"`, `data-reply-pane="%31"`,
 `data-reply-entry="0"`, confirm text *"Send this reply to laptop %31 and press
@@ -916,7 +928,11 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     at all. `=` is used only by `new-window -t "=" + tmux_session + ":"` (line 568) — rank **31**'s
     start-a-session path, which remains unexercised.
     forcing: none — closed.
-34. **Decide the two residuals the audit recorded as ACCEPTED — NOW THE LOAD-BEARING ITEM.** The
+34. ✅ **DONE 2026-09-07 — closed by rank 39's PR (`ZacxDev/homelab-infra#743`, squash
+    `3f6ef8ae7`, live as `0.8.29`). Read rank 39 for the evidence; they were one item.**
+    The residual text is kept below because it is the accurate statement of what was
+    wrong, and the fix is only legible against it.
+    **Decide the two residuals the audit recorded as ACCEPTED — NOW THE LOAD-BEARING ITEM.** The
     browser tier **authenticates nobody** (`requireSession` is a literal `return next`), and the
     host agent sends an **execution-grade token over plain HTTP** to the LAN NodePort every ~5 s.
     🔴 **TWO CHANGES ON 2026-09-06 MADE THIS STOP BEING A RESIDUAL.** `#738` put tool INPUTS —
@@ -925,7 +941,9 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     added a free-form `send-keys` box to the same page. So the surface now both READS the contents
     of the operator's sessions and WRITES arbitrary commands into them, with no human auth.
     Closing condition: the browser tier authenticates somebody, or the surface is disarmed.
-    forcing: security — it is the only thing standing under two shipped features.
+    ✅ **MET by authenticating** (not by disarming): `requireSession` and
+    `requireArmedTerminalUI` both require an HMAC-signed session cookie as of 0.8.29.
+    forcing: none — closed.
 
 35. ✅ **DONE 2026-09-06 — `ZacxDev/homelab-infra#737`, squash `efa44e763`.** UI feedback round,
     PR 1 of 3: `internal/ui` only. Content-verified on `trunk`.
@@ -985,26 +1003,110 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     and the free-form box are observed live and rank 34 is re-read against them.
     forcing: user — it is the operator's call whether the LAN surface gets a command box today.
 
-39. **Rank 34 is the whole remaining risk, and it is now standing under two SHIPPED
-    features.** `requireSession` in `containers/clawgate/internal/api/auth.go` is a
-    literal `return next`, so the LAN NodePort authenticates nobody — and since
-    `0.8.28` that page both READS tool inputs (file paths, bash command lines, edit
-    bodies) and WRITES arbitrary commands into a live pane. Every earlier step was
-    recoverable; this one is not.
-    Closing condition: the browser tier authenticates somebody, or the surface is
-    disarmed (either flip `enableTmuxReplyAgent` false **and** `systemctl --user
-    stop tmux-reply-agent` on BOTH hosts, or drop `CLAWGATE_TERMINAL_TOKEN` from
-    the pod secret).
-    forcing: security
+39. ✅ **DONE 2026-09-07 — `ZacxDev/homelab-infra#743`, squash `3f6ef8ae7`, LIVE as `0.8.29`.**
+    Closes rank 34 as well; they were one item. The browser tier now authenticates.
+    **Verified by reproducing the ORIGINAL SYMPTOM against the live pod, not by
+    reading a rollout.** Before → after, same request each time:
+    | probe | 0.8.28 | 0.8.29 |
+    |---|---|---|
+    | uncredentialed `POST /ui/term/send-keys` | **200** `{"created":true,"tier":"browser"}`, host agent ran it ~3 s later | **401** `not signed in` |
+    | anonymous `GET /` | **200**, 147 KB dashboard | **303** → `/login` |
+    | anonymous `GET /session/<id>` | **200** with tool inputs + reply box | **303** → `/login?next=…` |
+    | correct password | — | 303 + cookie → dashboard **200**, 147,762 B, transcript renders |
+    | wrong password | — | **401**, no cookie issued |
+    | `/health`, `/metrics` | 200 | 200 (kubelet + Alloy untouched) |
+    🔴 **THE DESIGN POINT, AND THE ONE A REVIEWER WILL GET WRONG: THE GATE HAD TO
+    LAND ON TWO WRAPPERS.** `/ui/term/send-keys`, `/ui/term/new-session` and
+    `/ui/term/launch` are wrapped in `requireArmedTerminalUI` and **never pass
+    through `requireSession`**. Measured by removing ONLY the terminal-UI check:
+    the shell and transcript guards stayed **PASS** while send-keys returned
+    **200**. Gating `requireSession` alone ships a live remote shell behind a
+    green suite. `TestEveryBrowserSurfaceRequiresAHumanSession` reads the route
+    table from source and fails when the open-route ledger GROWS or SHRINKS.
+    **Fail-closed**, deliberately not the enforce-when-set shape
+    `requireHookToken` uses: unset or <12 chars ⇒ the browser tier refuses.
+    `optional: true` on the env is the *safer* failure (pod healthy, machine tiers
+    alive, `/login` names the missing var) rather than a
+    `CreateContainerConfigError` that takes `/health` down. Rotating
+    `CLAWGATE_UI_PASSWORD` invalidates every outstanding cookie — the signing key
+    is derived from it, and that is the only revocation this design has.
+    🔴 **THE MACHINE TIER IS UNTOUCHED AND THAT WAS PROVEN, NOT ASSUMED.** Both
+    host agents `active`, **0** `backing off` lines, and a bounded control write
+    enqueued through the token tier to pane `%999998` was claimed and attempted by
+    the workbench agent within seconds. "No log lines" alone would have been
+    equally consistent with a dead agent.
+    🔴 **CI FOUND 15 REAL BREAKS MY LOCAL GREEN DID NOT** — not flakes, and not
+    the rank-17 signature: 10 of 14 in one file, each naming the same cause.
+    **Node's global `fetch()` has no cookie jar**, so every helper arming
+    auto-approve through a raw fetch went anonymous; and `task-sse-regroup` builds
+    three of its OWN contexts, which the auto-use `signIn` fixture does not reach.
+    Fixed by sweep: `ServerHandle.uiFetch()`, and every `fetch(${baseURL}…)` path
+    in e2e classified against the Go route table by wrapper. Second round:
+    **193 tests, 0 failed**, all four checks green on `ad72a6bc9`.
+    ⚠ **Two build-path defects found that NOTHING errors on.** `tailwind.config.js`
+    scanned `internal/ui` only, so the login page (in `internal/api` by design)
+    would have shipped **unstyled** — control: `bg-emerald-600` in `app.css` went
+    **1 → 0 → 1**. And the Dockerfile's css stage copies only what it is told to
+    while Tailwind **exits 0 on a missing content path**, so the *image* would ship
+    unstyled while a dev box looked correct. A package-wide glob was tried and
+    rejected on measurement: it scans `_test.go` and shipped `.[project:foo-bar]`,
+    `.[logStart:logEnd]`, `.[project:clawgate]` into `app.css`.
+    ⚠ **Two tests asserted the hole and were rewritten**, not deleted:
+    `TestOpenRoutesNoAuth` listed `/` as open, and `login.spec.ts` was three specs
+    named *"open access (no human auth)"* including *"the removed /login route is
+    not registered (404)"*.
+    ⚠ **`signedIn()` masks the gate at 82 test sites ON PURPOSE**, so
+    `browser_auth_test.go` builds its handlers WITHOUT it — its first version used
+    the shared helper and **passed 200 against the very defect it was written to
+    catch**.
+    ⚠ **NOT DONE, and not live:** the boot line
+    `clawgate <ver> listening ... (auth: hook token only; UI open behind Authelia /
+    trusted LAN)` was FALSE from 0.8.29 and is fixed in `main.go` on trunk — but a
+    log string only changes with a new image, so **the running 0.8.29 still prints
+    it**. Harmless (the three authoritative tier lines print directly above it and
+    are correct), and it ships with the next build.
+    ⚠ **`/audit-pr` was offered twice and NOT run** — operator chose to merge on
+    the green re-run. Recorded, not hidden.
+    forcing: none — closed.
 40. **Merge the two open docs PRs.** `innovation-upstream/devrc#1350` (UI briefs)
     and `#1353` (pre-deploy handoff). `#1353`'s only red is the contention flake
     under "Open investigations"; confirm the re-run before merging.
     forcing: none
-41. **Rank 31's `=` session-target prefix has still never run against real tmux.**
-    Rank 33's brief conflated it with the reply path, which targets a pane id and
-    does no name matching. `=` is used only by `new-window -t "=" + tmux_session +
-    ":"` (devrc `scripts/tmux-reply-agent` line 568) — the start-a-session path.
-    The live server has `scratch2` beside `scratch20`, so the hazard is reachable.
+41. ✅ **DONE 2026-09-07 — EXERCISED AGAINST REAL tmux, and the control reproduced the
+    hazard on the live server the same minute.** No code change: the `=` prefix is
+    correct as written. What was missing was evidence, and it now exists.
+    🔴 **THE DISTINCTION THAT MADE THIS WORTH DOING — `open_window`'s docstring
+    already records measurements, and they are measurements of TMUX, not of the
+    AGENT.** They establish that `-t scratch2:` prefix-matches onto `scratch20`
+    and that `-t =scratch2:` does not. They say nothing about whether the agent's
+    own `open_window()` builds and uses that target correctly, which is the code
+    path the start-a-session feature actually takes. This drove that function.
+    | probe | result |
+    |---|---|
+    | raw `new-window -t <SHORT>:` (no `=`) | **rc 0, landed in `<LONG>`** — the wrong session |
+    | agent `open_window(cwd, <SHORT>)` | **refused**, `can't find session`, pane `''` |
+    | agent `open_window(cwd, <LONG>)` | pane `%61`, **`display-message` confirms it is in `<LONG>`** |
+    | windows in the probe session | 1 → **3** exactly, so the refusal created nothing |
+    | teardown | 22 sessions before, **22 after**, no strays |
+    **The first row is the load-bearing one.** Without it, "the agent refused" is
+    equally consistent with a tmux that would have failed anyway, and the `=`
+    prefix would be proven to do nothing. The unguarded spelling silently
+    succeeding into the wrong session is what makes the guarded one meaningful.
+    **The third row is the other control:** a refusal alone is equally consistent
+    with an `open_window()` that is broken for every input.
+    🔴 **THE PROBE BUILT ITS OWN AMBIGUOUS PAIR RATHER THAN USING `scratch2`/`scratch20`.**
+    Both of those now EXIST on the live server, so `-t scratch2:` resolves
+    exactly and the hazard is NOT reachable through them today — this item's own
+    text ("the live server has `scratch2` beside `scratch20`, so the hazard is
+    reachable") had gone stale. The hazard needs a name that is a strict PREFIX of
+    a live session and is itself ABSENT; the probe created `zzr41probe20` and
+    targeted the absent `zzr41probe2`. Detached throwaway sessions only, none of
+    the operator's targeted, nothing attached, so no window was raised.
+    ⚠ **One trap hit and worth recording:** the first run copied the agent to
+    `/tmp/tra.py` and it died on `FileNotFoundError: /tmp/lib/tmux_text_policy.py`
+    — the agent loads a sibling `scripts/lib/` module at import time. That is the
+    repo's own documented "a script pulled out of a ref arrives without its
+    sidecar" rule, walked into anyway. Run it from a worktree, not a copy.
     forcing: none
 42. **Three residuals the UI round left disclosed rather than fixed.** `aaOffScreen`
     understands only `px` offsets; `aaEvictsIn`'s `maps` arm matches the literal
