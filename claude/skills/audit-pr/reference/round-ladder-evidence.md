@@ -466,3 +466,42 @@ a 9-leg CI gate. ⚠ **Do not over-read that into "write a test for the prose"**
 (README's stated config values vs the shipped JSON) would have caught **1 of ~16** findings here; the
 rest were prose-vs-behaviour or rationale drift, which no assertion can reach. The control is the
 round's own question — *what did this fix assert, and is every assertion true?*
+
+
+## 2026-09-07 · `ZacxDev/cairn` #3 — the BATTERY's own failure modes, nine rounds
+
+Nine rounds, every one finding something real, **none of the last four finding a defect in what
+the PR shipped**. The findings themselves are the ordinary shape this file already documents. What
+was new is how often the *mutation battery* — the instrument, not the code — reported a pass it had
+not earned.
+
+**A KILLED OR INTERRUPTED BATTERY LEAVES A MUTANT IN THE WORKING TREE.** A run was SIGKILLed (the
+box rebooted) mid-mutant and the checkout still held `verdict = None`. Nothing announced it: the
+tree looked like ordinary uncommitted work, and the next command run against it would have measured
+a mutant. **Diff the tree against the battery's own pristine snapshot whenever a run finishes OR is
+interrupted, and restore FROM THE SNAPSHOT** — `git checkout --` restores the last commit, which is
+not what the battery was mutating if the round has uncommitted fixes in it.
+
+**YOUR OWN FIX ROUND MOVES THE ANCHORS — six rounds running.** Each round's fix edited the lines the
+previous round's mutants were anchored on, so mutants silently stopped applying. `RULES.md` already
+requires "pattern matches exactly once"; what this measured is *why it keeps firing* — the writer of
+the fix is the writer of the battery, and the anchors rot in the same commit that makes them stale.
+**Re-anchor every mutant after every fix round, and treat INVALID as a finding about the battery.**
+🔴 **0 matches is loud; 2 is worse** — it applies, to a site nobody chose, and scores a clean KILLED.
+Measured once here: an ambiguous anchor aborted the patch script on its own assert, wrote nothing,
+and a **stale** copy of the script was then re-run and its output read as current.
+
+**AN UNFAITHFUL STUB REFUTES A CORRECT RULE.** Verifying a proposed `delivered = returncode is None`
+record, the first stub set `returncode` inside `terminate()` — which real `Popen.send_signal` does
+not do — making the delivered and not-delivered cases identical and the rule look wrong. The stub
+was wrong. A control that is not faithful certifies nothing **in either direction**, and the failing
+direction is the one nobody double-checks.
+
+**TWO COMMITS MADE FALSE STATEMENTS ABOUT THEIR OWN DIFFS.** One said a value was "READ BEFORE THE
+TERMINATE" while the read sat 23 lines below; another claimed a fix that was byte-identical to base,
+because a scripted `str.replace()` matched nothing and the commit message asserted otherwise.
+**Assert the match count of every scripted replacement** — it is the vacuous-anchor failure above,
+committed in prose.
+
+**And the `| tail` trap, on the battery's own output.** 28 verdicts piped through `tail -8`; four
+were read as the whole run and the missing 24 as "did not run". Redirect to a file and read the file.
