@@ -1,4 +1,4 @@
-# Handoff: cairn-oss-multi-instance — 2026-09-05
+# Handoff: cairn-oss-multi-instance — 2026-09-06
 
 ## Run this first — the index, one command
 ```bash
@@ -18,8 +18,10 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- **`ZacxDev/cairn` is PUBLIC** (2026-09-05) and now has **two** merged PRs: #1 the SIGHUP
-  hot-reload, #2 the ledger narrowing (`c8aee7203`, 2026-09-06). Suite **1651 passed**,
+- **`ZacxDev/cairn` is PUBLIC** (2026-09-05) with **two** merged PRs — #1 the SIGHUP
+  hot-reload, #2 the ledger narrowing (`c8aee7203`, 2026-09-06) — and **#3 OPEN**
+  (`fix/spawn-port-race`, rank 6: the spawn-port TOCTOU + startup diagnostics, suite
+  `1657 passed`). Suite at `main` **1651 passed**,
   `leakscan.py` rc 0 with controls green. CI ran both jobs on #2 — leakscan 6s, tests 8m1s,
   `mergeStateStatus: CLEAN` — so **cairn's GitHub Actions gate is now a demonstrated
   instrument**, not an untested badge. That is worth knowing: a brand-new check in this
@@ -47,33 +49,13 @@ defect in the immediately preceding fix. The three unaudited prescriptions are �
 constraints, §8's control 8, and §5.3's cost correction. Treat those as the likeliest wrong
 thing in the document; "merged after nine rounds" otherwise reads as "settled".
 
-🔴 **`claim-work` WAS NOT USED FOR RANKS 1 AND 2** (it was used, correctly, for rank 5). The
+🔴 **`claim-work` WAS NOT USED FOR RANKS 1 AND 2** (it was used, correctly, for ranks 5
+and 6). The
 ranked list is a shared queue with no lock and the claim must be taken BEFORE acting. Nothing
 collided and there is no claim to release — but the protection was absent while 20 live claims
 from other sessions showed the mechanism in active use around this work.
 
 ## Open investigations — live diagnosis state
-
-### A full-suite-only intermittent in cairn's test suite, unattributed
-- **Symptom + exact repro:** no reliable repro.
-  `TestTheDeployedEntrypoint::test_a_TWO_LINE_token_file_authorises_BOTH_lines` failed
-  **once in ~25 full-suite runs**, only ever in a full run.
-- **Observed (with values):** first full run at PR head `90d30ab` → `1614 passed, 1 failed`.
-  Same test then passed **3/3 alone**, **735/735 in its own file**, **5/5 paired with the
-  new SIGHUP tests**, and the immediately following full run → `1615 passed, 0 failed`.
-  Every subsequent full run (rounds 2-4, five more) was clean.
-- **Ruled out:** that the SIGHUP work caused it — under `-p no:randomly` the new tests
-  execute ~11,400 lines AFTER it in the file, the only PR change ordered before it is a
-  `running()` → `serving()` extraction that this test does not use (it uses
-  `running_subprocess`), plus an autouse signal-disposition fixture. via: measurement
-- **Ruled out:** a load flake of the ordinary kind — wall time did not show the ~15×
-  inflation that marks contention; the failing run was 531 s against a 412-522 s band.
-  via: measurement
-- **Leading hypothesis:** genuinely pre-existing and order/timing dependent, inherited from
-  the origin repo rather than introduced here. Not confirmed.
-- **Next probe:** run the full suite N times on a quiet box and get a RATE, e.g.
-  `for i in $(seq 10); do cd ~/workspace/cairn && nix develop ~/workspace/devrc -c python3 -m pytest tests -q -p no:randomly 2>&1 | tail -1; done`
-  A rate is what turns this into either "fix it" or "it does not exist".
 
 ### Two ledger guards in cairn are narrower than their own sentences — left OPEN by decision
 - **Symptom + exact repro:** read `tests/test_subsystem_store_api.py:20239` and `:20271`
@@ -94,22 +76,42 @@ from other sessions showed the mechanism in active use around this work.
   and extend the fail-closed arm to non-`Call` raises, in one commit, when someone is next in
   that file.
 
-### The full-suite intermittent in cairn — STILL UNRESOLVED, and the population moved under it
-- **Symptom + exact repro:** no reliable repro.
-  `TestTheDeployedEntrypoint::test_a_TWO_LINE_token_file_authorises_BOTH_lines` failed once in
-  ~25 full-suite runs, only ever in a full run.
-- **Observed (with values):** this session ran the full cairn suite once more on the rank-5
-  branch — **1651 passed, 0 failed, 447.77s** — and CI ran it again on #2: **pass, 8m1s**. So
-  the denominator is now ~27 runs with 1 failure, and neither of this session's runs
-  reproduced it. via: measurement
-- **Ruled out:** that the +4 tests from #2 perturb it — they are pure AST/collector helpers
-  with no subprocess and no signal handling, and both post-#2 runs were clean. via: code
-- **Leading hypothesis:** unchanged — genuinely pre-existing and order/timing dependent,
-  inherited from the origin repo. Not confirmed.
-- **Next probe:** unchanged and still the right one, now cheaper because CI runs it for free —
-  `for i in $(seq 10); do cd ~/workspace/cairn && nix develop ~/workspace/devrc -c python3 -m pytest tests -q -p no:randomly 2>&1 | tail -1; done`
-  ~75 min wall clock at 7.5 min/run. A RATE is what turns this into either "fix it" or "it
-  does not exist".
+### The full-suite intermittent in cairn — RATE MEASURED, DID NOT REPRODUCE; one live mechanism closed
+🔴 This block SUPERSEDES the two earlier ones on the same subject (both retired in this
+edit — do not resurrect them from git history and re-derive their "next probe").
+- **Symptom + exact repro:** no reliable repro, and there never was one.
+  `TestTheDeployedEntrypoint::test_a_TWO_LINE_token_file_authorises_BOTH_lines` failed
+  **once**, in a full run, at PR #1 head `90d30ab`.
+- **Observed (with values), 2026-09-06:** **18 CI full-suite runs, 0 failures** — the 9 that
+  existed plus 9 reruns requested this session, `failed=0` at collected counts 1593..1651,
+  **0 skipped in every one**, so the test genuinely executed in all 18 rather than a green
+  run skipping it. Plus **2 local full runs** on the rank-6 branch: `1656 passed / 460.17s`
+  and `1657 passed / 473.85s`. Denominator ≈ **43 runs, 1 failure (≈2.3%)**; it did not
+  reproduce once. via: measurement
+- 🔴 **Ruled OUT as recoverable: the one failure carries no traceback and never will.** The
+  transcript that recorded it (`a0759a10-…`) holds only the `-q` short summary — the run was
+  read through `pytest -q | tail -1`. So which of three branches fired (`server exited N`,
+  `never became healthy`, or a 401 during the overlap) is unknown and unrecoverable. **That,
+  not the rate, is why ~43 runs of evidence closed nothing.** via: measurement
+- **Measured, and it is a LIVE mechanism, not a theory:** `_free_port()` binds port 0, reads
+  the number and CLOSES the socket; the child needs an interpreter startup (~0.2-0.4 s) to
+  `bind()` it. The kernel recycles a released ephemeral port inside that window — 3000 trials
+  × 20 subsequent `bind(("127.0.0.1", 0))` reused it **8 times**, while the control (same
+  loop, socket still OPEN) reused it **0 times**. The health probe itself `connect()`s in
+  that window and an outbound connect draws its local port from the same range, so the
+  racer is frequently the test process. On collision: rc 1,
+  `OSError: [Errno 98] Address already in use`. via: measurement
+- **NOT a diagnosis of the observed failure.** The mechanism is live and it fits every
+  observed property (full-suite-only, order/timing dependent, pre-existing), but nothing
+  ties it to the one failure — see the missing traceback above. Do not write it down as
+  the cause.
+- **Closed by construction:** `ZacxDev/cairn` **#3** — `_spawn_serving` re-picks and
+  respawns on EADDRINUSE only, bounded; `_run_to_completion`'s binding leg does the same;
+  and the never-healthy message now names the port, the budget, the last probe exception
+  verbatim, earlier lost races, and both drained streams.
+- **Next probe:** none scheduled. If it recurs, the message is now self-diagnosing — read
+  it rather than re-running. Re-running to a green is what the rules call training everyone
+  to click through.
 
 ### Whether the opencode exporter's artifact is USEFUL as receipts — never judged
 - **Symptom + exact repro:** not a bug; an unclosed question the shipped work deliberately
@@ -183,12 +185,25 @@ from other sessions showed the mechanism in active use around this work.
    i.e. red at base) and disabling the bare-re-raise arm each killed exactly their own test.
    forcing: none — done
 
-6. **Get a RATE for the full-suite intermittent** (see the open investigation above), then
-   either fix it or record that it does not reproduce. ⚠ The denominator moved this session:
-   ~27 runs, 1 failure, two clean runs added (one local at 447.77s, one in CI at 8m1s).
-   **~75 min wall clock**, and CI now runs the suite on every PR for free, so the cheapest
-   version of this is to read the next N CI runs rather than burn a local hour.
-   forcing: none
+6. ⚠ **DONE 2026-09-06 — RATE MEASURED, DID NOT REPRODUCE. Not "fixed", and the PR says so.**
+   `ZacxDev/cairn` **#3** (`fix/spawn-port-race`). Claimed via `claim-work` before acting.
+   **18 CI runs / 0 failures** (9 pre-existing + 9 reruns, `failed=0`, **0 skipped in all
+   18**, collected 1593..1651) plus 2 local full runs on the branch — combined ≈43 runs,
+   1 failure. Reruns cost ~10 min wall clock against the ~75 min the local loop would have,
+   and one rerun's log was read end-to-end to prove a rerun really re-executes the suite
+   rather than replaying a result.
+   🔴 **The blocker was never the rate — it is that the ONE failure has no traceback and
+   never will** (`pytest -q | tail -1` discarded it). So the deliverable is: one live
+   mechanism closed by construction (`_free_port` is a TOCTOU; the kernel recycles the port
+   8/60,000, control 0) and a failure message that can name which branch fired next time.
+   ⚠ **The mechanism is NOT asserted to be the cause** — nothing ties it to the observed
+   failure, and the PR is explicit about that.
+   ⚠ Writing the controls found two more things: the startup budget can expire INSIDE one
+   probe (so a child that dies then is never re-checked), and `_run_to_completion` is a
+   second caller that binds. Both fixed in the same PR. 7 mutants, 7 killed by the expected
+   test with its own text; suite `1657 passed`; leakscan 0/33.
+   **Closing condition:** #3 merged. Nothing else in this item is open.
+   forcing: none — done
 
 7. **Retire `deployment.yaml`'s no-reload paragraph IN THE SAME COMMIT that moves the store's
    `image:` tag to one built from cairn at or past `b25abb5`.** This is what rank 2 was
@@ -233,7 +248,50 @@ from other sessions showed the mechanism in active use around this work.
    ⚠ **The module has NO CALLER.** Wiring it in is rank 8's work.
    forcing: none — done
 
+10. **Raise cairn's CI collected-test floor.** `.github/workflows/ci.yml` pins `FLOOR = 200`
+    against a suite that collects **1657** — it cannot see a suite that silently narrows to
+    300, which is the exact failure its own comment says it exists to prevent. devrc's
+    convention for the replacement number is `m - min(50, max(1, m/20))`.
+    **Closing condition:** a merged `ZacxDev/cairn` PR moving that literal — mechanical,
+    checkable from the diff alone.
+    forcing: none
+
 ## Gotchas / decisions / dead-ends
+
+**🔴 A RATE IS THE WRONG INSTRUMENT WHEN THE ONE OBSERVATION CARRIED NO EVIDENCE.** Rank 6
+was written as "get a rate, then fix it or close it", and 43 runs at ≈2.3% cannot
+distinguish 2% from 0% — no achievable N would have. What actually blocked it is that the
+single failure was read through `pytest -q | tail -1`, so the traceback never existed
+anywhere, and *which branch fired* was unknowable. **A one-in-N flake produces its evidence
+once; a pipe that keeps the count and throws the traceback away spends that one occurrence
+for nothing.** Redirect to a file and keep it. The useful move on a rate that cannot
+converge is to make the NEXT occurrence self-diagnosing and close whatever mechanisms are
+demonstrably live — not to keep sampling.
+
+**🔴 `gh run rerun` IS A FREE DENOMINATOR, AND IT REALLY RE-EXECUTES.** Nine reruns
+requested at once ran concurrently and returned in ~10 min against the ~75 min a local loop
+would have cost. Verified rather than assumed: one rerun's log was read end to end and shows
+its own later timestamp with `collected=1651 failed=0` — a replayed result would have shown
+the original run's clock. Also read `skipped`: a green run that SKIPPED the test under
+investigation contributes nothing, and the summary line is where that shows.
+
+**🔴 CHECK WHETHER A MECHANISM *CAN* FIRE BEFORE MEASURING WHETHER IT DID — and give the
+probe a control.** `_free_port()`'s TOCTOU was a theory until 3000 trials × 20 binds showed
+the kernel recycling the released port 8 times, with the same loop holding the socket OPEN
+recycling it 0 times. The control is what makes the 8 a measurement instead of noise. It
+still does not make the mechanism the CAUSE of the observed failure, and the PR says so.
+
+**🔴 A FIXTURE THAT CANNOT REACH THE CODE PATH PASSES WITH THE GUARD DELETED.** The first
+draft of the `_run_to_completion` retry test used a MALFORMED token file — but the server
+returns `EXIT_CONFIG` before `build_server` ever binds, so the occupied port was invisible,
+the test made one spawn, and it would have been green with the retry removed. Only the leg
+that reaches `bind()` can lose the race. **Ask which line your fixture makes the code
+execute, not merely whether the test passes.**
+
+**A FIELD THAT CANNOT VARY IS NOT EVIDENCE.** The new failure message first reported
+`child_was_alive=`, and a mutant proved it structurally pinned to `True` — that site is only
+reached when the child is running. The assertion on it read as coverage while providing
+none, so the field was deleted rather than the assertion weakened.
 
 **Operator decisions this session, all acted on — do not re-litigate:**
 - Sanitisation is scoped to **security, not tidiness**. Project names and dates ship as-is.
@@ -347,5 +405,12 @@ nix develop ~/workspace/devrc -c bash scripts/gate.sh --tier both
 nix build .#checks.x86_64-linux.pytests --no-link      # one at a time
 nix build .#checks.x86_64-linux.nodetests --no-link
 ```
-Expected: cairn `1651 passed`, leakscan `0 findings across 33 files`; the exporter identical
-across runs and pure ASCII; `PASS scripts/collector/opencode/tests (collected=235 floor=224)`.
+```bash
+# the flake denominator, from CI rather than a local hour — read `failed=` AND `skipped`
+gh run list -R ZacxDev/cairn --limit 30
+gh run view <id> -R ZacxDev/cairn --log | grep -E "collected=[0-9]+ failed=|passed,"
+```
+Expected: cairn `1651 passed` at `main` / `1657 passed` on #3, leakscan
+`0 findings across 33 files`; the exporter identical across runs and pure ASCII;
+`PASS scripts/collector/opencode/tests (collected=235 floor=224)`; every CI run
+`failed=0` with no `skipped` in its pytest summary line.
