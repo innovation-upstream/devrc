@@ -18,10 +18,12 @@ Cases corresponding to real audit findings on PR #1361, named exactly:
     `:443` grep made the script refuse on any config carrying an unrelated
     quoted `:443` (an nginx proxyPass is the obvious one), blaming a
     substitution that had worked.
-  * `test_wide_detector_catches_any_shape_inside_the_block` (round 2 F2, round 3 R3-3) — the round-1
-    fix narrowed BOTH searches, so the "refuse rather than guess" guard stopped
-    seeing a hand-wrapped list and reported `ALREADY GONE` with the entry still
-    present. Two searches, two different widths.
+  * `test_the_guess_gate_is_gone` (rounds 2-4) — the "is a :443 present in some
+    OTHER shape?" detector was rewritten three times and broke a different way
+    each round (miss a wrapped list; fire on a WireGuard endpoint AND miss
+    DNS/IPv6; print block-relative line numbers as file lines; be defeated by a
+    comment). It was DELETED, not fixed a fourth time: `--check` reads the
+    running process and answers the same question without guessing at Nix.
   * `test_unknown_argument_refuses` (round 1, #3) — `MODE="${1:-apply}"` was
     compared only against `--check`, so `--dry-run` ran the DESTRUCTIVE path.
   * `test_verify_is_errexit_safe` (round 2, F1) — `check_one; check_rc=$?` is
@@ -135,56 +137,19 @@ def test_unknown_argument_refuses():
     assert "unknown argument" in r.stderr
 
 
-def _helpers_sh(tmp_path: Path) -> Path:
-    """Extract the shipped `:443` helpers into a sourceable fragment.
+def _hostmap_443_re() -> str:
+    """Lift `hostmap_443`'s real pattern out of the script.
 
-    🔴 RUNS THE SHIPPED CODE. Two weaker versions of these guards were caught by
-    audit rounds: one asserted merely that the string `hostmap_443()` was
-    PRESENT (so widening the helper's BODY left it green), and one re-typed the
-    pattern as a literal in the test (so it exercised grep, not the script).
-    Extracting the real definitions and calling them is what closes both.
+    Only ONE helper survives: the `any_443_addr` / `hostmap_block` pair that four
+    audit rounds kept re-breaking was DELETED rather than fixed a fifth time —
+    `--check`, which reads the running process, answers that question and cannot
+    be fooled by Nix layout. `hostmap_443` answers the narrow question "did a
+    :443 survive MY one-line substitution?" against a line this script just
+    wrote, and is unaffected by any of those findings.
     """
-    text = SCRIPT.read_text()
-    # 🔴 ANCHOR TO LINE START. The helper names also appear in the explanatory
-    # comment ABOVE the definitions, so a bare `.index("any_443_addr()")` finds
-    # the comment, lands BEFORE the start anchor, and yields an EMPTY fragment —
-    # every helper test then dies with `command not found` rather than telling
-    # you the extraction broke. Caught by running it; the assert below is what
-    # makes that loud if the shapes ever move again.
-    m_start = re.search(r"^hostmap_block\(\) \{", text, re.M)
-    m_def = re.search(r"^any_443_addr\(\)", text, re.M)
-    assert m_start and m_def and m_def.start() > m_start.start(), (
-        "could not extract the helper definitions — did they move or get renamed?"
-    )
-    # `any_443_addr` may be a one-liner or a multi-line body; take through its
-    # closing `}` at column 0 either way. Capturing only its first line silently
-    # truncated the fragment mid-function and every helper test failed on a
-    # shell syntax error rather than on the thing it was testing.
-    m_close = re.search(r"^\}$", text[m_def.start():], re.M)
-    end = (
-        m_def.start() + m_close.end()
-        if m_close and m_close.start() < text[m_def.start():].index("\n\n")
-        else text.index("\n", m_def.start())
-    )
-    frag = text[m_start.start():end] + "\n"
-    for fn in ("hostmap_block()", "hostmap_443()", "any_443_addr()"):
-        assert fn in frag, f"extracted fragment is missing {fn}"
-    p = tmp_path / "helpers.sh"
-    p.write_text(frag)
-    return p
-
-
-def _helper(tmp_path: Path, fn: str, content: str) -> str:
-    """Call one shipped helper against `content` and return its stdout."""
-    h = _helpers_sh(tmp_path)
-    cfg = tmp_path / "cfg.nix"
-    cfg.write_text(content)
-    r = subprocess.run(
-        ["bash", "-c", f'set -uo pipefail; source "{h}"; {fn} "{cfg}"'],
-        capture_output=True, text=True,
-    )
-    assert r.returncode == 0, r.stderr
-    return r.stdout.strip()
+    m = re.search(r"^hostmap_443\(\)\s*\{ grep -nE '(?P<re>[^']+)'", SCRIPT.read_text(), re.M)
+    assert m, "could not find hostmap_443() — did it move or get renamed?"
+    return m.group("re")
 
 
 def _matches(pattern: str, line: str) -> bool:
@@ -200,76 +165,30 @@ def _check_443_re() -> str:
     return m.group("re")
 
 
-# A realistic file: a WireGuard peer on :443 OUTSIDE the block (this fleet really
-# has one — 443/udp on the lighthouse host IS WireGuard), and a live :443 inside.
-WG_OUTSIDE = """\
-{
-  networking.wireguard.interfaces.wg0.peers = [
-    { publicKey = "x"; endpoint = "203.0.113.20:443"; allowedIPs = [ "0.0.0.0/0" ]; }
-  ];
-  services.nebula.networks.mesh = {
-    staticHostMap = {
-      "10.42.0.1" = [ "192.168.50.94:4242" ];
-    };
-  };
-}
-"""
-
-
 NGINX_443 = '  services.nginx.virtualHosts."a".locations."/".proxyPass = "https://up:443";\n'
 
 
-def test_scoped_helper_ignores_an_unrelated_443(tmp_path):
+def test_scoped_helper_ignores_an_unrelated_443():
     """`hostmap_443` answers 'did a :443 survive MY patch?' — it must be scoped.
 
     Round-1 finding #1: a whole-file grep here aborted the run on any config
     containing an unrelated quoted `:443`, so the script could never succeed.
     """
-    assert _helper(tmp_path, "hostmap_443", NGINX_443) == ""
-    assert _helper(
-        tmp_path, "hostmap_443", PAIR
-    ), "scoped helper missed a real one-line entry"
+    pat = _hostmap_443_re()
+    assert not _matches(pat, NGINX_443), "scoped helper matched an nginx proxyPass"
+    assert _matches(pat, PAIR), "scoped helper missed a real one-line entry"
 
 
-@pytest.mark.parametrize(
-    "inside",
-    [
-        # Hand-wrapped list (round-2 F2).
-        '        "203.0.113.9:443"',
-        # No space before `=`.
-        '      "10.42.0.2"= [ "203.0.113.9:4242" "203.0.113.9:443" ];',
-        # 🔴 DNS name and IPv6 — round-3 R3-3. The previous `[0-9.]+` shape made
-        # the "wide" detector NARROWER than the scoped one on these axes, so it
-        # failed OPEN into `ALREADY GONE` with the entry still live.
-        '      "10.42.0.9" = [ "lh.example.org:4242" "lh.example.org:443" ];',
-        '      "10.42.0.9" = [ "[2001:db8::1]:4242" "[2001:db8::1]:443" ];',
-    ],
-)
-def test_wide_detector_catches_any_shape_inside_the_block(tmp_path, inside):
-    """`any_443_addr` must never fail OPEN for a :443 inside the staticHostMap."""
-    cfg = (
-        "{\n  services.nebula.networks.mesh = {\n    staticHostMap = {\n"
-        + inside + "\n    };\n  };\n}\n"
-    )
-    assert _helper(tmp_path, "any_443_addr", cfg), "failed open on: " + inside
+def test_the_guess_gate_is_gone():
+    """The deleted detector must not come back without a fresh decision.
 
-
-def test_wide_detector_ignores_a_443_outside_the_block(tmp_path):
-    """Round-3 R3-2: it must not fire on a WireGuard peer or nginx upstream.
-
-    The previous shape aborted a perfectly good run and told the operator to
-    delete a `<ip>:443` line — on a fleet where 443/udp genuinely IS WireGuard,
-    so exactly the line that legitimately exists.
+    Four rounds of findings lived in `any_443_addr`/`hostmap_block`, each fix
+    moving the failure rather than removing it. Re-adding either is a choice
+    that should be made deliberately, not by copying an old draft back in.
     """
-    assert _helper(tmp_path, "any_443_addr", WG_OUTSIDE) == ""
-    assert _helper(tmp_path, "any_443_addr", NGINX_443) == ""
-
-
-def test_block_extractor_stops_at_the_closing_brace(tmp_path):
-    """The brace-matcher must not run past the staticHostMap block."""
-    out = _helper(tmp_path, "hostmap_block", WG_OUTSIDE)
-    assert "staticHostMap" in out
-    assert "wireguard" not in out and "203.0.113.20" not in out
+    code = _code_lines()
+    assert "any_443_addr" not in code
+    assert "hostmap_block" not in code
 
 
 def test_verify_is_errexit_safe():
@@ -282,6 +201,14 @@ def test_verify_is_errexit_safe():
     code = _code_lines()
     assert "check_one; check_rc=$?" not in code, "bare call is errexit-unsafe"
     assert code.count("check_one || check_rc=$?") >= 2, "both call sites must be guarded"
+    # 🔴 THE `rc=0` PRE-INIT IS LOAD-BEARING AND WAS UNGUARDED. Without it, under
+    # `set -u`, `check_one || check_rc=$?` is an unbound-variable crash on the
+    # SUCCESS path — so after a verification that PASSED, `OK` is still 0 and the
+    # EXIT trap rolls back a correctly-applied change, re-adding the dead entry.
+    # That is the exact disaster F1 was about, reached from the other side.
+    assert code.count("check_rc=0; check_one || check_rc=$?") >= 2, (
+        "the `check_rc=0;` pre-init is missing — set -u crashes on the SUCCESS path"
+    )
 
 
 def test_docstring_names_only_real_tests():
@@ -302,6 +229,11 @@ def test_check_pattern_does_not_match_a_longer_port():
     """
     pat = _check_443_re()
     assert _matches(pat, "  - 203.0.113.9:443\n")
+    # 🔴 THE DISCRIMINATING CASE. Round 3 replaced a shape assertion with three
+    # behavioural ones and lost the ability to see a `:443$` regression — all
+    # three behave identically under it. A trailing comment is what separates
+    # them, and the round-2 sweep had named this mutant without exercising it.
+    assert _matches(pat, "  - 203.0.113.9:443   # dead\n"), "a ':443$' regression would pass"
     assert not _matches(pat, "  - 203.0.113.9:4433\n")
     assert not _matches(pat, "  - 203.0.113.9:14443\n")
 

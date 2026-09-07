@@ -153,79 +153,40 @@ echo "  host      : $IFACE = $have_ip  (matches the expected target)"
 # and its "re-running once it is gone is a no-op" was false for the same reason. It
 # failed closed, so it was never dangerous; it was unusable, which on the one machine
 # this was written for is nearly as bad.
-# TWO different questions, and conflating them is what the round-2 audit caught:
+# 🔴 THE "IS IT PRESENT IN SOME OTHER SHAPE?" DETECTOR WAS DELETED, NOT FIXED AGAIN.
+# Four audit rounds landed on it and each fix moved the failure rather than removing it:
+# a whole-file grep aborted on an unrelated `:443` (r1 #1); scoping it to one-line entries
+# made it miss a hand-wrapped list and report ALREADY GONE (r2 F2); an address-shape widen
+# fired on a WireGuard `endpoint` AND still missed DNS/IPv6 (r3 R3-2/R3-3); brace-matching
+# the block re-opened the fail-open when the block could not be located, printed
+# block-relative line numbers as if they were file lines (r4 F1), and was defeated by a
+# comment mentioning `staticHostMap` or by a second nebula network (r4 F2).
 #
-#   hostmap_443()  — "did a :443 SURVIVE my patch?"  Must be SCOPED, because a whole-file
-#                    grep here aborted on an unrelated nginx `:443`.
-#   any_443_addr() — "is there a :443 ADDRESS anywhere that I might be failing to see?"
-#                    Must be WIDE, because its job is to refuse rather than guess. Using
-#                    the scoped one here made the guard miss every shape but the one-liner
-#                    — a hand-wrapped multi-line list, or `"ip"= [` with no space — and
-#                    report `ALREADY GONE … Nothing to do` with the dead entry still
-#                    present. A guard whose stated job is "refuse rather than guess" must
-#                    never fail OPEN into a success-shaped message.
+# The question it was trying to answer -- "is a dead :443 still live?" -- has an
+# AUTHORITATIVE answer that does not involve guessing at Nix syntax at all: `--check`
+# reads the config the RUNNING nebula process was started with. A static grep over the
+# source can only ever approximate that, and every approximation above was wrong in both
+# directions at once. So this branch now states plainly what it did and did not look at,
+# and points at the detector that cannot be fooled.
 #
-# 🔴 THE WIDE ONE SCOPES BY *CONTEXT*, NOT BY ADDRESS SHAPE. Two earlier drafts tried to
-# discriminate on what the address LOOKS like, and each was wrong in both directions at
-# once:
-#   `"[0-9.]+:443"` — fired on any unrelated bare `IP:443` in the file (a WireGuard peer
-#     `endpoint`, an nginx upstream), aborting a run with nothing wrong and telling the
-#     operator to delete that line — on a fleet where 443/udp genuinely IS WireGuard, so
-#     exactly the line that legitimately exists. AND it missed a DNS name or an IPv6
-#     literal in the staticHostMap, i.e. it was NARROWER than the scoped helper on the
-#     axis it was widened for, failing OPEN into `ALREADY GONE`.
-# Brace-matching the `staticHostMap = { … }` block answers the question actually being
-# asked — "is there a :443 in the thing I am editing?" — and is blind to everything
-# outside it by construction. Shape-matching cannot get there from either side.
-hostmap_block() {
-  awk '
-    !inb && /staticHostMap[[:space:]]*=[[:space:]]*\{/ { inb=1; depth=0 }
-    inb {
-      print
-      depth += gsub(/\{/, "{") - gsub(/\}/, "}")
-      if (depth <= 0) exit
-    }
-  ' "$1"
-}
+# hostmap_443() stays: it answers a different and much narrower question -- "did a :443
+# survive MY one-line substitution?" -- against a line this script just wrote.
 hostmap_443()  { grep -nE '^[^"]*"[0-9.]+" = \[[^]]*:443"' "$1" || true; }
 # A UNION of three scopes, because block-matching ALONE re-opened the very hole it was
 # meant to close: a file whose `staticHostMap = {` line cannot be located yields an empty
 # block, and an empty block rendered as "no :443 anywhere" -> `ALREADY GONE`. Caught by
-# re-running the round-2 regression drive after the rewrite, not by reading it.
-#   (a) anything inside a located staticHostMap block  — DNS names, IPv6, any layout;
-#   (b) a bare quoted address ALONE on its line        — a hand-wrapped list, no block;
-#   (c) a one-line `"host" = [ … :443" … ];` entry     — any host form.
-# None of the three matches a WireGuard peer `endpoint = "<ip>:443";` or an nginx
-# `proxyPass = "https://host:443"`: (b) requires the address to be the whole line, and
-# (c) requires `"…" = [` immediately before it.
-any_443_addr() {
-  {
-    hostmap_block "$1" | grep -nE ':443"'                          || true
-    grep -nE '^[[:space:]]*"[^"]+:443"[[:space:]]*$' "$1"          || true
-    grep -nE '^[^"]*"[^"]+" = \[.*:443"' "$1"                      || true
-  } | sort -u
-}
-
 matches=$(grep -cE '"[0-9.]+" = \[ "[0-9.]+:4242" "[0-9.]+:443" \];' "$CFG" || true)
 if [ "$matches" = "0" ]; then
-  # 🔴 POSITIVE CONTROL on the extractor itself. If the file mentions staticHostMap but
-  # the brace-matcher yields nothing, the block is in a shape this cannot read -- and a
-  # silent empty result would render as "no :443 anywhere", i.e. the fail-open that both
-  # previous drafts of this guard were caught doing. Say so instead of passing.
-  if grep -q 'staticHostMap' "$CFG" && [ -z "$(hostmap_block "$CFG")" ]; then
-    die "\$CFG mentions staticHostMap but its block could not be brace-matched, so this
-  script cannot tell whether a ':443' is present. Refusing rather than reporting a clean
-  file it did not actually read."
-  fi
-
-  stray=$(any_443_addr "$CFG")
-  if [ -n "$stray" ]; then
-    echo "  NOTE: a quoted ':443' ADDRESS is present, but not in the one-line" >&2
-    echo "        staticHostMap shape this script knows how to edit:" >&2
-    printf '%s\n' "$stray" | sed 's/^/    /' >&2
-    die "refusing to guess at a hand-edited staticHostMap -- remove the :443 address by hand"
-  fi
-  echo "  state     : ALREADY GONE -- no :4242/:443 pair in $CFG. Nothing to do."
+  echo "  state     : no one-line ':4242'+':443' pair in $CFG."
+  echo "              This script edits ONLY that exact shape, and it did not look for a"
+  echo "              :443 in any other layout -- every attempt to do so was wrong in"
+  echo "              both directions (see the note above the helpers)."
+  echo
+  echo "              To find out whether a dead :443 is actually still live, ask the"
+  echo "              RUNNING process, which cannot be fooled by Nix layout:"
+  echo "                bash ${BASH_SOURCE[0]} --check"
+  echo "              To see every :443 in the source, by hand:"
+  echo "                grep -n ':443' $CFG"
   exit 0
 fi
 [ "$matches" = "1" ] || die "expected exactly 1 ':4242'+':443' pair, found $matches -- edit by hand"
