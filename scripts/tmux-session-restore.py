@@ -49,6 +49,7 @@ import platform
 import re
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -485,6 +486,112 @@ def window_state(target: str) -> tuple[bool, str]:
     return (bool(out.strip()), out.strip())
 
 
+def no_tmux_server_to_restore_into() -> bool:
+    """True when there is no tmux server this process may safely restore into.
+
+    🔴 THIS IS THE GUARD FOR THE MEASURED, SILENT, TOTAL LOSS OF 2026-09-06.
+    The mechanism, confirmed from the journal and then by an isolated
+    experiment — NOT inferred from the empty scrollback, which cannot tell the
+    two candidate stories apart:
+
+      On a cold boot nothing else has started tmux. `cmd_restore` below would
+      call `tmux new-session -d` itself, so the server was born INSIDE this
+      unit's cgroup. The 43 sends were delivered *successfully* into it. Then
+      ExecStart returned, and with `Type=oneshot`, `RemainAfterExit=no` and
+      `KillMode=control-group` systemd tore the cgroup down, taking the server
+      and every claude process with it. The unit reported `Result=success`.
+
+    The journal is what separates the stories: `Started tmux child pane N
+    launched by process <pid>` arrived in TWO cohorts — 17 lines at the unit's
+    own timestamp naming the pid the unit started, then 56 lines 24s later
+    naming a DIFFERENT pid. Two servers, not one unready one. The isolated
+    experiment (private `-L` socket, `systemd-run --user -p Type=oneshot`)
+    confirmed it: without `RemainAfterExit` the server is gone once ExecStart
+    returns; with it, the server survives.
+
+    So the fix is not to wait longer and not to tune the timer — a duration was
+    never the variable. It is to REFUSE, because a server this process creates
+    cannot outlive it, and starting one is what destroys the workspace it was
+    meant to restore.
+
+    Uses `tmux has-session` with no target: it succeeds only when a server is
+    running AND holds at least one session. A server with zero sessions reads
+    as "no server" here, deliberately — that is the conservative direction, and
+    it is a state the operator's workspace never sits in.
+    """
+    return subprocess.run(["tmux", "has-session"],
+                          capture_output=True).returncode != 0
+
+
+def pane_fingerprint() -> str:
+    """A stable identity for every live pane: its pid and current command.
+
+    While tmux-resurrect is still restoring, panes are being created and
+    RESPAWNED, so this string keeps changing. Once it holds still, the
+    workspace has stopped moving underneath us.
+    """
+    return run(["tmux", "list-panes", "-a", "-F", "#{pane_pid} #{pane_current_command}"])
+
+
+def wait_for_workspace_to_settle(settle: float = 5.0, timeout: float = 120.0,
+                                 no_server_after: float = 10.0,
+                                 sleep=time.sleep) -> tuple[bool, float]:
+    """Block until the pane set stops changing. Returns (settled?, seconds waited).
+
+    A SECONDARY guard, not the fix for the 2026-09-06 loss. That failure was
+    `no_tmux_server_to_restore_into()` below — the unit manufactured its own
+    tmux server and systemd killed it — and waiting longer could never have
+    helped. Do not re-describe this function as the boot-race fix; an earlier
+    revision of it did, and the claim was refuted by the journal (see that
+    function's docstring for the discriminating evidence).
+
+    What it IS for: once a server DOES exist, tmux-resurrect may still be
+    replaying into it, creating and RESPAWNING panes. Sending into a pane that
+    is mid-respawn is a real (if unmeasured here) way to lose a keystroke, so
+    this waits for the OBSERVABLE — the pane set holding still — rather than
+    guessing a duration.
+
+    Returns rather than raising: a workspace that never settles is still worth
+    a best-effort restore, but the caller must SAY the wait timed out rather
+    than reporting a clean run.
+    """
+    waited = 0.0
+    last = pane_fingerprint()
+    stable_for = 0.0
+    empty_for = 0.0
+    step = 1.0
+    while waited < timeout:
+        sleep(step)
+        waited += step
+        now = pane_fingerprint()
+        if not now.strip():
+            # NO PANES AT ALL is not "not settled yet" — there is no workspace
+            # to wait for, and burning the whole timeout would block a boot for
+            # two minutes to learn nothing. Bail early, still UNSETTLED, so the
+            # caller reports honestly rather than waiting.
+            #
+            # DEFENCE IN DEPTH, not the primary path: `cmd_restore` now refuses
+            # outright when no server is running, so in production this branch
+            # is only reachable if the server DIES mid-wait. It also keeps the
+            # function honest when called directly (tests, and the nix build
+            # sandbox, which has no tmux server at all).
+            empty_for += step
+            if empty_for >= no_server_after:
+                return False, waited
+            stable_for = 0.0
+            last = now
+            continue
+        empty_for = 0.0
+        if now == last:
+            stable_for += step
+            if stable_for >= settle:
+                return True, waited
+        else:
+            stable_for = 0.0
+        last = now
+    return False, waited
+
+
 def resurrect_last_path() -> Path:
     """`<resurrect-dir>/last`, asking tmux rather than assuming the default.
 
@@ -733,6 +840,40 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
     plan = json.loads(src.read_text())
     tag = "[dry-run] would " if dry_run else ""
     sent = skipped = 0
+    targets_sent: list[tuple[str, str]] = []
+    settled = True
+    # 🔴 REFUSE RATHER THAN MANUFACTURE A SERVER THAT CANNOT SURVIVE US.
+    # See `no_tmux_server_to_restore_into` for the confirmed mechanism. This
+    # must run BEFORE the settle wait and before the send loop: the loop's own
+    # `tmux new-session` is the destructive step.
+    if not dry_run and plan and no_tmux_server_to_restore_into():
+        # 🔴 EXIT 0, NOT 1, AND THAT IS A DELIBERATE CHOICE — NOT AN OVERSIGHT.
+        # The unit is `OnFailure=notify-failure@%n`, and that toast bypasses
+        # DND (`nix/home.nix` — "any unit that can fail on a STANDING condition
+        # breaches it again"). Until the unit is triggered on the tmux socket
+        # appearing rather than a fixed `OnActiveSec=45s`, NO SERVER IS THE
+        # NORMAL COLD-BOOT STATE — a standing condition, firing on every boot
+        # forever. A skip the operator can read in the log is the honest
+        # report; a nightly alarm for an expected state is not.
+        print("no tmux server is running — REFUSING to restore.", file=sys.stderr)
+        print("  Starting one here would put it inside this unit's cgroup, and "
+              "systemd would kill it the moment this process exits, taking every "
+              "resumed conversation with it (measured 2026-09-06: 43 lost).",
+              file=sys.stderr)
+        print("  Nothing was changed. Once you have a tmux server, re-run: "
+              "tmux-session-restore.py restore", file=sys.stderr)
+        return 0
+    # 🔴 NOTHING TO SEND => NOTHING TO WAIT FOR, AND NOTHING THAT CAN BE LOST.
+    # Waiting here made an EMPTY plan take the full settle timeout and then
+    # return 1 — a restore that had no work to do reported as a failure.
+    if not dry_run and plan:
+        settled, waited = wait_for_workspace_to_settle()
+        if settled:
+            print(f"workspace settled after {waited:.0f}s — sending now")
+        else:
+            print(f"🔴 workspace did NOT settle within {waited:.0f}s — sending anyway, "
+                  "but panes may still be respawning and sends can be DISCARDED. "
+                  "This run is best-effort, not a clean restore.", file=sys.stderr)
     for e in plan:
         sess, win, cwd, sid = e["session"], e["window"], e["cwd"], e["session_id"]
         target = f"{sess}:{win}"
@@ -754,11 +895,64 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
         else:
             run(["tmux", "send-keys", "-t", target, line, "Enter"])
             print(f"→ {e['codename']}:{win}  {resume}")
+            targets_sent.append((f"{e['codename']}:{win}", target))
         sent += 1
+
     verb = "would relaunch" if dry_run else "relaunched"
     print(f"\n{verb} {sent} windows, skipped {skipped}. "
           + ("(nothing changed — dry run)" if dry_run else "Attach with: tmux attach"))
+    if dry_run:
+        return 0
+
+    # 🔴 VERIFY THE SENDS LANDED. `tmux send-keys` returns 0 for keystrokes that
+    # go nowhere, so "sent" is a claim about THIS process, never about the
+    # workspace. On 2026-09-06 that gap let the unit report success having
+    # started nothing at all. A send is only real once the pane is running
+    # claude.
+    landed, lost = _verify_sends(targets_sent)
+    if lost:
+        print(f"🔴 {len(lost)} of {sent} send(s) did NOT start claude: "
+              + ", ".join(name for name, _ in lost[:8])
+              + ("…" if len(lost) > 8 else ""), file=sys.stderr)
+        # NOT "discarded by the pane" — that was this arc's first diagnosis and
+        # it was refuted. tmux accepted the keystrokes; where they went is
+        # exactly what this branch cannot determine. Name the OBSERVATION.
+        print("  tmux accepted the keystrokes and these panes are not running "
+              "claude. Re-run once the workspace is idle; if it recurs, check "
+              "whether the server is still the one the sends went to "
+              "(`tmux display-message -p '#{pid}'`).", file=sys.stderr)
+        return 1
+    if not settled and sent:
+        print(f"⚠ all {landed} send(s) landed, but the workspace never settled — "
+              "treat this run as lucky, not correct.", file=sys.stderr)
+        return 1
+    print(f"verified: {landed} of {sent} window(s) are running claude")
     return 0
+
+
+def _verify_sends(targets: list[tuple[str, str]], attempts: int = 15,
+                  sleep=time.sleep) -> tuple[int, list[tuple[str, str]]]:
+    """(count that reached `claude`, list of those that did not).
+
+    Polls rather than sleeping once: claude's startup time varies with the
+    transcript size being resumed, and a single fixed wait would mis-report the
+    slow ones as lost.
+    """
+    pending = list(targets)
+    landed = 0
+    for _ in range(attempts):
+        if not pending:
+            break
+        sleep(1.0)
+        still = []
+        for name, target in pending:
+            _, cmd = window_state(target)
+            if cmd == "claude":
+                landed += 1
+            else:
+                still.append((name, target))
+        pending = still
+    return landed, pending
 
 
 def main(argv: list[str]) -> int:
