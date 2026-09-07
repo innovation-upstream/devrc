@@ -358,7 +358,7 @@ let
   #
   # 🔴 IT HAS NO CLICK ANY MORE, deliberately. This block used to double as the
   # launcher for the `agent-ops` mission-control TUI, which is RETIRED (its
-  # panels all had homes elsewhere — session-manager, standup, /initiative-scan
+  # panels all had homes elsewhere — session-manager, /initiative-scan
   # and the bar's own pills — and its one irreplaceable part, the /proc-walking
   # Claude detector, was extracted to scripts/lib/claude_sessions.py). A click
   # exec'ing a path home-manager no longer deploys fails silently, so the click

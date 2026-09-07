@@ -499,8 +499,8 @@ def m_skill_listing(env: Env) -> dict:
         #: THREE IS NOT FIXED. `costliest tier-A entry: <skill>` interpolates a
         #: skill name into an otherwise-static label, so this column leaks
         #: whenever the costliest entries happen to be the client-named skills.
-        #: Today they are not — measured `clickup`, `session-manager`,
-        #: `window-triage` — which is exactly why declaring it only when the
+        #: Today they are not — measured `clickup` and `session-manager` —
+        #: which is exactly why declaring it only when the
         #: leak is visible would be wrong: the cell contents are a ranking that
         #: moves on its own, with no commit to notice it.
         column_kinds=("name", ""),

@@ -258,6 +258,13 @@ MIN_LISTING_ENTRIES = 30
 # Code transcript", never "dead" -- shrink on a zero only after asking how else
 # the thing is driven, and never delete on one.
 #
+# 🔴 LOWERED 12,259 -> 11,265 ACROSS 33 ENTRIES on 2026-09-07, re-based after
+# retiring five skills (`quiesce-workload`, `close-the-loop`, `sglang`,
+# `window-triage`, `standup`). Nothing was cut from a surviving description --
+# the whole -994 is the five removed entries. Still pinned at exactly the
+# measurement: leaving it at 12,259 would have licensed 994 chars of regrowth,
+# more than three average entries.
+#
 # 🔴 DO NOT "re-pin to the measurement plus slack" -- that RAISES this number,
 # which the paragraph below forbids. Pinned at exactly the measurement, so the
 # next addition of any size reds this gate on purpose.
@@ -270,7 +277,7 @@ MIN_LISTING_ENTRIES = 30
 # left at the previous, larger number licenses exactly the regrowth this constant
 # exists to catch, so re-pinning it is part of the cut, not follow-up work. The
 # eviction playbook is printed by the failing assertion below.
-LISTING_TOTAL_CEILING_CHARS = 12_259
+LISTING_TOTAL_CEILING_CHARS = 11_265
 
 # The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
 # recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries

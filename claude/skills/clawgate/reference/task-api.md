@@ -228,7 +228,7 @@ silently.** (4 is exempt — it reads clawgate's own secret rather than holding 
    token from homelab secret **`task-drafter-agent-secrets`** (ns `devpod-task-drafter`), key
    `CLAWGATE_HOOK_TOKEN` — **miss this on a rotation and the daily digest 401s silently.** A daily
    `Task-spec drafter` card is the drafter, NOT a real CC permission prompt. See the
-   `close-the-loop` skill's STATE.md.
+   loop ledger at `claudedocs/close-the-loop/STATE.md`.
 3. **repo-cos** (`devrc/scripts/repo-cos/clawgate.py`) — on an "approve" reply it POSTs the proposal
    as a durable Task via `POST /api/tasks`. Reads the token from **`~/.claude/clawgate.env`** on the
    workbench (NOT a k8s secret). See the `repo-cos` skill.

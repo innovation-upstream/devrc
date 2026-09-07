@@ -85,7 +85,7 @@ scratch needs attention; the counter tells you the *magnitude* of work in flight
 from i3 as a floating alacritty, from tmux `prefix+A`, and from the ▦ bar button.
 All three launchers are gone and the script is deleted. Where its panels went:
 live runs + the clawgate queue → `session-manager`; PRs, cluster alerts and **local
-systemd health** → `standup`; momentum → `/initiative-scan`; the counts → bar
+systemd health** → `syshealth --systemd`; momentum → `/initiative-scan`; the counts → bar
 pills. Its `/proc` Claude-session detector — the one piece with no equivalent
 elsewhere — is now `scripts/lib/claude_sessions.py`, feeding the ▦ pill
 (`i3status-claude-runs`), which stays as an indicator with no click.

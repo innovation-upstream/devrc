@@ -387,8 +387,8 @@ debugging, changing or copying a specific pipeline.
   path that does not exist on disk. `kubectl` then falls back to `localhost:8080` and every
   read dies with `connection refused` — an error that names a port appearing nowhere in the
   skill, so it reads as a cluster outage rather than a bad path. Measured 2026-08-23 while
-  debugging the devrc gate. Six sibling skills (`signal`, `activity`, `mailbox`, `sglang`,
-  `standup`) all spell `homelab-talos`; this was the only file that did not.
+  debugging the devrc gate. Its sibling skills (`signal`, `activity`, `mailbox`) all
+  spell `homelab-talos`; this was the only file that did not.
 
 ## GitHub App — `tekton-homelab`
 

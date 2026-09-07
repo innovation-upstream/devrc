@@ -622,7 +622,7 @@ def test_tail_of_a_SINGLE_match_shells_out_with_that_ROWS_HOST(monkeypatch):
 
 
 def test_tail_REFUSES_an_AMBIGUOUS_match_and_lists_the_candidates(monkeypatch):
-    """🔴 `window-triage` §7: ambiguity is refused, not guessed. A scrollback
+    """🔴 Ambiguity is refused, not guessed. A scrollback
     printed from the wrong window is an answer that READS as correct, which is
     strictly worse than no answer."""
     run = make_run({("zzkiwi",): (0, live_report([ROW_VIOLET, ROW_VAPOR],
