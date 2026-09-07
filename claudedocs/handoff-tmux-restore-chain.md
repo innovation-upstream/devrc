@@ -299,6 +299,45 @@ ledger has been writing to it all along.
 - **Next probe:** none. `opencode --session <id>` was VERIFIED on a private `-L` socket
   (see the gotcha below); the chain is proven end to end.
 
+### 🔴 THE LAPTOP'S RECOVERY CHAIN IS DEAD, and the fix is deployed-but-inert — measured 2026-09-07
+- **Symptom + exact repro:** on the laptop (`ssh zach@192.168.50.155`), the chain produces
+  nothing. It would have lost every conversation on its next reboot, exactly as the
+  workbench did on 2026-09-06.
+- **Observed (with values):**
+
+  | | workbench | laptop |
+  |---|---|---|
+  | `status-right` carries `continuum_save.sh` | YES | **NO** |
+  | tmux server started | Sep 6 22:31 (after #1309) | **Aug 28 18:39** (before #1309) |
+  | `~/.tmux/resurrect/last` | today 18:47 | **Aug 14** — 24 days stale |
+  | `~/.config/initiatives/restore-plan.json` | today 18:47 | **DOES NOT EXIST** |
+  | live claude panes at risk | 45 | **9** |
+
+  - Laptop unit is `Type=oneshot` / `RemainAfterExit=no` / `KillMode=control-group` —
+    **identical** to the workbench, so #1351 and the socket trigger apply there unchanged.
+  - `@continuum-save-interval=15`, `@continuum-restore=on`, `@continuum-boot` empty —
+    the settings are right; the interpolation is missing.
+  - The CORRECTED config IS on disk: `~/.config/tmux/tmux.conf` →
+    `/nix/store/…-home-manager-files/…` → `/nix/store/7v2b1lbdxbwhd39g6a9fk2a9kvzsgqav-hm_tmuxtmux.conf`,
+    symlink stamped Sep 7 18:01, containing 9 `continuum` references.
+- **Ruled out:** that the laptop is missing the deploy — the unit is `linked`, the timer is
+  `enabled`, and the fixed tmux config is on disk. This is NOT a `ship.sh` gap. via: measurement
+- **Ruled out:** that `~/.tmux.conf` is the config — it **does not exist** on the laptop, so
+  an earlier grep against it returned empty. 🔴 That empty result meant "wrong file", not
+  "fix absent" — the documented grep trap, hit live. The real path is
+  `~/.config/tmux/tmux.conf`. via: measurement
+- **ROOT CAUSE (single, explains both symptoms):** tmux reads its config **only at server
+  start**. The laptop's server predates #1309, so it still runs the CLOBBERED `status-right`
+  → continuum never autosaves → the resurrect post-save hook never fires → no plan is ever
+  written. The fix is deployed and inert. This is CLAUDE.md's own sequence failing at its
+  last step — *merge → pull → switch → **restart the consumer*** — where the consumer is the
+  tmux server, and restarting it is precisely what must not be done.
+- **Next probe:** none for the diagnosis. The REMEDY is the open question, and the naive one
+  is destructive: restarting the laptop's tmux server would kill 9 live conversations, the
+  same harm this arc already caused once. The safe move is a surgical live re-arm —
+  append the `continuum_save.sh` interpolation back onto the running server's `status-right`
+  (no restart). Awaiting operator direction as of this writing.
+
 ## Next steps (ranked)
 1. **Finish gating the reworked #1351 and push it.** Dev tier PASSED on `3b348542`; BOTH
    sandbox derivations PASSED on the merged tree `83697d30` (read out of `nix log`, not the
@@ -492,6 +531,23 @@ was claimed at the time (`tmux-restore-chain-1`), so no live claim was re-pointe
 - **A green `nix build` prints NO test output to stdout** — the log goes to the daemon. A
   derivation that ran zero tests exits 0 identically. Read `nix log <drv>` and count the
   runners' own `RESULT:`/`TOTAL` lines; never quote the build's exit code as a test result.
+
+- 🔴 **A HOST CAN BE BYTE-IDENTICAL TO `origin/main` WITH A COMPLETELY DEAD RECOVERY CHAIN,
+  AND NOTHING DETECTS IT.** `drift-check.sh` checks git parity, dangling managed symlinks,
+  package source currency and `settings.json` key drift — none of which sees a tmux server
+  running a config from before a fix. The laptop sat 24 days in that state looking healthy.
+  🔴 **The general shape: a fix that lands in a CONFIG FILE is inert until its CONSUMER
+  restarts, and "deployed" checks the file, not the consumer.** Same family as the
+  `home-manager switch` → restart-the-service rule, but the consumer here is a long-lived
+  process nobody restarts on purpose. A drift arm asserting *"a plan exists and is fresh, and
+  the live `status-right` carries the autosave hook"* would have caught this on day one.
+- **`tmux-session-restore.py` RUNS FROM THE WORKING TREE**, so `git merge --ff-only` on the
+  base clone IS the deploy for it — no `home-manager switch`. Confirmed after #1351 merged:
+  the refusal is live on the workbench immediately. The inverse of the usual trap, and it
+  cuts both ways — a host that has not pulled is running the OLD script.
+- 🔴 **zsh does not word-split**, so `L="ssh -o … host"; timeout 30 $L 'cmd'` passes the whole
+  string as ONE command name and dies `No such file or directory` — it does not run ssh with
+  arguments. Write the command out, or use `${=L}`. Hit live this session.
 
 ## How to verify
 ```bash
