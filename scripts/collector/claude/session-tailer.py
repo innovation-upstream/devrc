@@ -887,17 +887,21 @@ MENTIONS_PER_SESSION_CAP = 200
 #
 # 🔴 DERIVED FROM THE SCANNER'S OWN LEDGER, NEVER HAND-MAINTAINED. This used to
 # be the literal `("#", "868")`, and that made it the exact place a widening goes
-# to die: every telemetry-only shape the scanner learned — `audit-pr 1291`,
-# `gh pr view 1291`, `clawgate task 370` — contains neither literal, so the
-# regexes would have been reachable in a unit test calling `scan_mentions()`
+# to die: every shape the scanner learned — `gh pr view 1291` and
+# `clawgate task 370`, which stayed telemetry-only, and `audit-pr 1291`, which is
+# in BOTH profiles because it is also clickable — contains neither literal, so
+# the regexes would have been reachable in a unit test calling `scan_mentions()`
 # directly and DEAD in production, with the whole suite green. Deriving it means
 # a pattern added to `PATTERN_LEDGER` widens the filter in the same commit,
 # because there is nowhere else to put the fact.
 #
 # 🔴 AND IT IS THE TELEMETRY PROFILE, not the default. `mention_hints()` with no
-# argument returns the TERMINAL profile's two literals — the old value — which
-# would look correct, pass a "derived from the ledger" review, and still skip
-# every new shape.
+# argument returns the TERMINAL profile — the narrow one — which would look
+# correct, pass a "derived from the ledger" review, and still skip every
+# telemetry-only shape. ⚠ Measured: TERMINAL is now THREE literals,
+# `('#', '868', 'audit-pr')`, not the two it was when this comment was written —
+# `AUDIT_PR_RE` joined both profiles. The distinction is the PROFILE, never the
+# count, and nothing here should carry a count that has already moved once.
 _MENTION_HINTS = MS.mention_hints(MS.PROFILE_TELEMETRY)
 
 # Where the operator's generated repo mapping lives — the same per-host file

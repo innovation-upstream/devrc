@@ -121,6 +121,11 @@ from mention_scan import (  # noqa: E402
     PLATFORM_CLICKUP,
     PLATFORM_GITHUB,
     OWNER_REPO_VALUE_RE as _OWNER_REPO_RE,
+    # 🔴 IMPORTED, NOT SPELLED. `main()` branches on the attribution ladder's
+    # weakest rung, and a hand-written "default" here would be a second copy of
+    # a vocabulary `mention_scan` owns — silently inert the day that module
+    # renames it, with every suite green because the branch simply stops firing.
+    SOURCE_DEFAULT,
     clean_repo_map,
     scan_mention_spans,
 )
@@ -143,9 +148,14 @@ KNOWN_REPOS_PATH = Path(
 # and the symptom is the picker appearing for a name that ought to have resolved,
 # which reads as "the picker is noisy" rather than as "my mapping is old".
 #
-# So the age is MEASURED and SURFACED, at both places the operator can see it:
-# the note above the picker (`universe_note`) and the refusal body
-# (`staleness_note`). It is a SIGNAL, not a repair — deliberately, and the
+# So the age is MEASURED and SURFACED. Its PRIMARY home is the note above the
+# picker (`universe_note`), because that is the path a stale mapping actually
+# produces — the click that did not resolve. `staleness_note` covers the two
+# refusals: `--print`, which cannot show a picker at all, and the narrow
+# shadowed-mapping arm documented in `refuse()`. Stating that split here rather
+# than "the refusal body" is deliberate: the vaguer wording read as "every
+# refusal past 7 days", which is not what the code does.
+# It is a SIGNAL, not a repair — deliberately, and the
 # alternative was weighed: a systemd-user timer would run `gh api user/repos`
 # on a schedule, and `regen-known-repos.py` REFUSES below its 25-repo floor and
 # exits 3, so a host without `gh auth` would take a failing unit and a failure
@@ -476,10 +486,25 @@ def tmux_pane_repo() -> str:
     text was clicked — a second Alacritty window, or a pane switched since the
     text scrolled past, both make it wrong.
 
-    So this is used ONLY to give a bare `#N` a GitHub candidate it would
-    otherwise not have. It never overrides an explicit `owner/repo` in the text,
-    and it never suppresses the clawgate candidate: a wrong guess here shows up
-    as an extra row in the picker, never as the wrong page opening.
+    So this is used ONLY to give a reference that names NO repository a GitHub
+    candidate it would otherwise not have. It never overrides an explicit
+    `owner/repo` in the text, and it never suppresses the clawgate candidate: a
+    wrong guess here shows up as a row in the picker, never as the wrong page
+    opening.
+
+    🔴 THAT LAST SENTENCE WAS FALSE FOR ONE SHAPE, AND IT IS THE REASON `main()`
+    NOW BRANCHES ON `repo_source`. Making `audit-pr N` clickable added the first
+    reference with no clawgate reading, so it produced exactly ONE candidate and
+    `main()`'s "one candidate → just open it" shortcut fired on a repository
+    THIS FUNCTION guessed: measured with the pane forced to a repo the text
+    never named, `audit-pr 1291` opened
+    `github.com/WRONGORG/wrongrepo/issues/1291`. A bare `#N` was protected only
+    incidentally, by having a clawgate sibling to be ambiguous with. The
+    guarantee is now enforced where it is decided — `main()` suppresses the
+    shortcut for every `repo_source == "default"` candidate — rather than
+    promised here, and
+    `test_mention_open.py::test_a_GUESSED_repo_is_never_auto_opened_whatever_the_
+    shape` fails if the shortcut ever fires on this rung again.
     """
     path = ""
     try:
@@ -737,6 +762,27 @@ def universe_note(subject: str, offered: int, path: Path | None = None) -> str:
             f"scripts/regen-known-repos.py")
 
 
+def guessed_note(subject: str) -> str:
+    """The line shown ABOVE the picker when the ONLY repository on offer was
+    GUESSED — `repo_source == "default"`, i.e. the tmux pane rather than
+    anything the clicked text said.
+
+    🔴 A ONE-ROW PICKER WITH NO EXPLANATION READS AS A BUG. Suppressing the
+    auto-open is the safety property; saying WHY is what stops the operator
+    concluding the handler is broken and going back to typing the URL. It is
+    the same argument as `universe_note`: rofi cannot report a reason after the
+    fact, so the reason goes above the choice.
+
+    🔴 IT NAMES THE CLICKED TEXT AND NOTHING ELSE — never the repository, never
+    the mapping. The candidate ROW already shows the repo, which is the whole
+    point of asking; the note must not become a second place a name can leak
+    from, and `_every_sink`'s guards would not see this one (it goes to rofi).
+    """
+    return (f"{subject} names no repository — the one offered was measured from "
+            "the tmux pane, which may not be the pane you clicked in. Confirm, "
+            "or dismiss.")
+
+
 def colour_literal_offer(span: dict | None, text: str) -> str:
     """The SIX-DIGIT number in `text` that is a colour literal, not a reference —
     or "" for everything else.
@@ -828,6 +874,31 @@ def refuse(span: dict | None, text: str, args: argparse.Namespace) -> int:
             # A mapping that PARSED and holds rows can still be months old, and
             # that is a different, ADDITIVE fact — appended, never substituted
             # for the primary one, for the same reason the advice is.
+            #
+            # 🔴 THIS ARM IS NARROW, AND THE CONDITION THAT REACHES IT IS WRITTEN
+            # DOWN BECAUSE A ROUND-2 AUDIT READ IT AS DEAD CODE AND PROPOSED
+            # DELETING IT. The reasoning was: `reason == ""` means
+            # `clean_repo_map` kept a row, `repo_universe` filters on the SAME
+            # `OWNER_REPO_VALUE_RE`, and `discover_repos` only ADDS rows — so a
+            # non-empty mapping guarantees a non-empty universe, the picker is
+            # shown, and `refuse()` is never called. Every step of that is true
+            # except the last: `discover_repos` also OVERWRITES, and
+            # `parse_owner_repo` is LOOSER than `OWNER_REPO_VALUE_RE` — it asks
+            # only for two `/`-separated segments, so a remote like
+            # `https://github.com/-acme/widget.git` yields the non-empty
+            # `-acme/widget`, which the value regex rejects. A checkout whose
+            # DIRECTORY NAME shadows a mapping key therefore replaces a valid row
+            # with an invalid one, and a host where that happens to every valid
+            # row has `universe_reason() == ""` and an EMPTY universe at once.
+            # MEASURED end-to-end, not reasoned about — that exact state is what
+            # `test_a_NON_print_refusal_CAN_still_name_the_mapping_AGE` builds,
+            # and it was watched to fail with this branch deleted.
+            #
+            # ⚠ SO THE HONEST SCOPE OF THE SIGNAL IS: the picker note
+            # (`universe_note`) on every offered universe, the `--print` refusal
+            # above, and THIS arm on the shadowed-mapping host. It is not "every
+            # refusal past 7 days" — most refusals name a cause instead, and
+            # `reason` wins there by design.
             if not reason and (stale := staleness_note()):
                 why = f"{why}; {stale}"
     notify(f"cannot resolve {subject}", f"{why} — {advice}")
@@ -955,21 +1026,58 @@ def main(argv: list[str] | None = None) -> int:
             print(c["url"])
         return 0
 
+    # 🔴 A GUESSED REPOSITORY IS OFFERED, NEVER OPENED — AND THAT IS DECIDED BY
+    # `repo_source`, NOT BY THE SHAPE OF THE TEXT.
+    #
+    # `default` is the weakest rung of `mention_scan`'s attribution ladder: the
+    # text named no repository at all and the answer came from the caller —
+    # here, `tmux_pane_repo()`, which is explicitly best-effort (see its
+    # docstring: it answers for the most recently active CLIENT, which is not
+    # guaranteed to be the pane whose text was clicked). Every rung above it is
+    # evidence ABOUT the reference — an owner the operator wrote, a name the
+    # mapping resolved, a repo the same block named. `default` is evidence about
+    # the WINDOW.
+    #
+    # MEASURED with the pane forced to `WRONGORG/wrongrepo`, base vs merged:
+    # `audit-pr 1291` went from REFUSE to OPEN-DIRECTLY on
+    # `github.com/WRONGORG/wrongrepo/issues/1291` — the first shape in this
+    # handler that could open a page on a repository guessed from the pane
+    # alone. A bare `#1291` escaped only by ACCIDENT: it happens to have a
+    # clawgate sibling, so it was two candidates and got a picker. Nothing was
+    # protecting it, and nothing would have protected the next shape either.
+    #
+    # 🔴 SO THE RULE IS AT THE `repo_source` LEVEL, not on `audit-pr`. Suppress
+    # the shortcut and the pane's repo becomes a ROW TO CONFIRM — one keystroke
+    # instead of zero, against a confident wrong page. Any future no-owner shape
+    # inherits it for free.
+    #
+    # ⚠ IT ALSO COVERS `--default-repo`, because that is the same rung. No
+    # caller passes it interactively (the Alacritty wrapper forwards the matched
+    # text and nothing else) and `--print` returns above this line, so today
+    # that costs nothing; if a script ever needs the old behaviour the answer is
+    # `--print`, which is what it is for.
+    guessed = span is not None and span["repo_source"] == SOURCE_DEFAULT
+
     # 🔴 `and not offered_universe`: see PASS 3. One candidate is enough to open
     # only when that candidate is EVIDENCE about the reference — an explicit
-    # owner, a measured checkout, a mapping hit, the pane's repo. A universe row
-    # is an OPTION, and a host that happens to know exactly one repository must
-    # not have that option opened for it.
-    if len(candidates) == 1 and not offered_universe:
+    # owner, a measured checkout, a mapping hit. A universe row is an OPTION,
+    # and a host that happens to know exactly one repository must not have that
+    # option opened for it.
+    if len(candidates) == 1 and not offered_universe and not guessed:
         return open_url(candidates[0]["url"])
 
-    # 🔴 THE NOTE IS ATTACHED ONLY WHEN THE UNIVERSE IS THE ANSWER. A picker
-    # over real candidates — the clawgate/GitHub pair for a bare `#N` — is not a
-    # dead end and needs no explanation; adding one there would put a line of
-    # apology above the single most common interaction in this handler.
+    # 🔴 THE NOTE IS ATTACHED ONLY WHEN THE PICKER WOULD OTHERWISE BE
+    # UNEXPLAINED. A picker over real candidates — the clawgate/GitHub pair for
+    # a bare `#N` — is not a dead end and needs no explanation; adding one there
+    # would put a line of apology above the single most common interaction in
+    # this handler. So the guessed note rides on the ONE case the branch above
+    # created: a single row, which without a reason reads as a broken handler
+    # asking the operator to confirm the obvious.
     mesg = (universe_note(span["raw"] if span is not None else text,
                           len(candidates))
-            if offered_universe else "")
+            if offered_universe else
+            guessed_note(span["raw"]) if (guessed and len(candidates) == 1)
+            else "")
     url = pick(candidates, mesg=mesg)
     return open_url(url) if url else 0
 

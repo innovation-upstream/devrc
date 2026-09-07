@@ -34,10 +34,11 @@ Both profiles:
   github    owner/repo#12             -> https://github.com/owner/repo/issues/12
   github    repo#12                   -> owner resolved by the CALLER (see below)
   ambiguous #12                       -> clawgate task 12 OR a GitHub issue 12
+  github    /audit-pr 12   audit-pr 12   (the ONE wordy form that is clickable —
+            see `AUDIT_PR_RE`'s ledger row for why it, and not its neighbours)
 
 profile="telemetry" only — an ENUMERATED widening, never a generic pattern:
   github    github.com/owner/repo/pull/12   (and /issues/12)
-  github    /audit-pr 12   audit-pr 12
   github    gh pr view 12  gh issue close 12   (enumerated subcommands)
   clawgate  clawgate task 12            (`task 12` ALONE is NOT detected)
   clawgate  #task-12                    (the legacy anchor form)
@@ -365,7 +366,25 @@ PATTERN_LEDGER: dict[str, _Pat] = {
     "BARE_RE": _Pat(_BOTH, "detect", ("#",), "fixed in #370"),
     "GITHUB_URL_RE": _Pat(_TELEMETRY_ONLY, "detect", ("github.com/",),
                           "https://github.com/gardenersguild/trowelcast/pull/7"),
-    "AUDIT_PR_RE": _Pat(_TELEMETRY_ONLY, "detect", ("audit-pr",), "/audit-pr 1291"),
+    # 🔴 THE ONE DELIBERATE EXCEPTION TO "TELEMETRY IS WIDER THAN TERMINAL", AND
+    # IT WAS CHOSEN RATHER THAN LEAKED. `audit-pr N` is a REFERENCE FORM — how
+    # this operator refers to a PR in prose — whereas `gh pr view N` and
+    # `clawgate task N` are COMMANDS they typed. Underlining a command line is
+    # noise on text where clicking is useless, so the other three telemetry-only
+    # detect patterns stay telemetry-only and this one does NOT. Do not widen the
+    # exception to its neighbours on the reasoning that it is inconsistent; the
+    # inconsistency is the decision.
+    #
+    # 🔴 AND THE LEDGER IS HALF OF THE FIX. Flipping this alone ships a feature
+    # that is 100% DEAD: alacritty's hint regex decides what is UNDERLINED, and
+    # unhighlighted text cannot be clicked whatever this module would do with it.
+    # The other half is the `/?audit-pr[ \t]+[0-9]{1,6}` alternation in
+    # `nix/programs/alacritty/default.nix`, pinned to this row by
+    # `test_alacritty_hints.py::test_every_TERMINAL_shape_the_scanner_detects_is_
+    # also_UNDERLINED`. That test is derived from this ledger, so the two halves
+    # cannot drift apart silently — which is the same trap `mention_hints()`
+    # exists for one layer down.
+    "AUDIT_PR_RE": _Pat(_BOTH, "detect", ("audit-pr",), "/audit-pr 1291"),
     "GH_CLI_RE": _Pat(_TELEMETRY_ONLY, "detect", ("gh pr", "gh issue"),
                       "gh pr view 1291"),
     "CLAWGATE_TASK_RE": _Pat(_TELEMETRY_ONLY, "detect", ("lawgate",),
@@ -411,12 +430,22 @@ def mention_hints(profile: str = PROFILE_TERMINAL) -> tuple[str, ...]:
     widening. ⚠ THE PERCENTAGE IS A PROPERTY OF THE WINDOW, NOT OF THE CODE — an
     earlier window read 82%/80% on 6,052 blocks. Re-measure rather than quote
     this; what is stable is that the filter still skips ~4 blocks in 5. Every
-    telemetry-only shape above — `audit-pr 1291`, `gh pr view 1291`,
-    `clawgate task 370` — contains neither `#` nor `868`, so adding the regex
-    alone would have shipped a completely dead feature that still passed every
-    unit test calling `scan_mentions()` directly. Deriving the list from the same
-    ledger the patterns are declared in is what makes that impossible: ONE rule,
-    ONE place.
+    shape the ledger learned — `gh pr view 1291` and `clawgate task 370`, which
+    stayed telemetry-only, and `audit-pr 1291`, which is in BOTH profiles
+    because it is also clickable — contains neither `#` nor `868`, so adding the
+    regex alone would have shipped a completely dead feature that still passed
+    every unit test calling `scan_mentions()` directly. Deriving the list from
+    the same ledger the patterns are declared in is what makes that impossible:
+    ONE rule, ONE place.
+
+    ⚠ SO THE TERMINAL PROFILE IS NO LONGER TWO LITERALS EITHER. Measured:
+    `mention_hints(PROFILE_TERMINAL)` is `('#', '868', 'audit-pr')` — three —
+    and `mention_hints(PROFILE_TELEMETRY)` is eight. `AUDIT_PR_RE`'s ledger row
+    is what put the third one there, which is the point of deriving them. The
+    terminal SET (not a count) is pinned by
+    `test_session_tailer.py::test_the_prefilter_is_DERIVED_from_the_scanners_
+    telemetry_ledger`, because two comments here already carried the stale
+    "two literals" for as long as nothing checked.
     """
     hints: set[str] = set()
     for name in patterns_in(profile):
@@ -435,6 +464,16 @@ _KNOWN_FALSE_POSITIVES = (
     # lands as AMBIGUOUS, so the click shows a picker rather than opening
     # anything wrong, and the telemetry row is one stray row. Accepted.
     "#123",
+    # 🔴 MOVED HERE FROM THE TELEMETRY SET WHEN `AUDIT_PR_RE` BECAME CLICKABLE,
+    # AND THE MOVE IS THE POINT. An instructional example is character-for-
+    # character a real reference: a runbook, a skill body or a code fence that
+    # TEACHES `/audit-pr 12` spells it exactly as prose that MEANS PR 12, and no
+    # rule separates them. On the telemetry surface the cost was a stray row in a
+    # private table. On the CLICK surface it is an underline over a line of
+    # documentation — visible, and the reason this residual is restated here
+    # rather than silently inherited. It opens the pane repo's PR 12, or a
+    # picker; it never opens something the operator did not choose.
+    "/audit-pr 12",
 )
 
 # The residuals the WIDER profile adds, kept separate because they are not the
@@ -445,8 +484,13 @@ _KNOWN_FALSE_POSITIVES_TELEMETRY = (
     # exactly as a session that RAN it, and no rule separates the two. Accepted:
     # the cost is a stray row in a private table, and the alternative — dropping
     # the shape — loses the 370 real occurrences measured alongside them.
+    #
+    # ⚠ `/audit-pr 12` USED TO BE HERE AND HAS MOVED UP to the click-surface set:
+    # `AUDIT_PR_RE` is no longer telemetry-only, so its residual is no longer one
+    # the WIDER profile adds. Leaving a copy here would have said the acceptance
+    # was still telemetry-scoped, which is exactly the claim that stopped being
+    # true.
     "gh pr view 12",
-    "/audit-pr 12",
     # A markdown anchor into a document that DOCUMENTS the legacy form. The
     # relaxed left guard on TASK_ANCHOR_RE is what makes the real
     # `…/tasks#task-370` case work at all, and it cannot tell the two apart.

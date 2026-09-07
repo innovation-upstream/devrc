@@ -1225,8 +1225,8 @@ def test_two_repositories_referencing_the_SAME_number_are_two_mentions():
     bare form is the same collision with the repo one token to the left instead
     of glued to the `#`."""
     got = S.collect_mentions([
-        assistant_text("trowelcast PR #1291 is green"),
-        assistant_text("plotwidget PR #1291 is not"),
+        assistant_text("loamfield PR #1291 is green"),
+        assistant_text("pegboard PR #1291 is not"),
     ], repos=FAKE_REPOS)
     assert [m["repo"] for m in got] == ["gardenersguild/trowelcast",
                                         "hobbyist/plotwidget"], (
@@ -1243,7 +1243,7 @@ def test_an_ATTRIBUTED_repeat_of_an_unattributed_ref_is_not_swallowed():
     a loss biased systematically downward."""
     got = S.collect_mentions([
         assistant_text("still looking at #1291"),
-        assistant_text("spadeworks PR #1291 landed"),
+        assistant_text("quarryside PR #1291 landed"),
     ], repos=FAKE_REPOS)
     assert [m["repo"] for m in got] == ["", "rivalorg/spadeworks"]
 
@@ -1252,8 +1252,8 @@ def test_the_same_reference_with_the_same_attribution_is_still_ONE_mention():
     """The ledger must not become a no-op: adding the repo to the key widens the
     identity, it does not disable deduplication."""
     got = S.collect_mentions([
-        assistant_text("trowelcast PR #1291"),
-        assistant_text("trowelcast PR #1291 again"),
+        assistant_text("loamfield PR #1291"),
+        assistant_text("loamfield PR #1291 again"),
     ], repos=FAKE_REPOS)
     assert len(got) == 1, got
 
@@ -1343,12 +1343,65 @@ def test_an_unreadable_transcript_emits_no_mentions_and_does_not_crash(env):
 # --------------------------------------------------------------------------- #
 # 🔴 EVERY FIXTURE NAME IS SYNTHETIC. This repo is public and the real repo
 # mapping names private repositories; nothing measured from this host may appear
-# here. Values are pairwise distinct AND distinct from every constant asserted.
+# here.
+#
+# 🔴 THE KEYS ARE NOT SUBSTRINGS OF THE VALUES, AND THAT IS THE WHOLE FIXTURE.
+# This mapping used to be spelled `trowelcast -> gardenersguild/trowelcast`, so
+# a disclosure guard iterating keys AND values could LOOK total while covering
+# two of the four spellings a leak can take: `"gardenersguild/trowelcast" not in
+# output` says nothing about an output containing only `gardenersguild`, and the
+# key half was hidden behind the value half by the substring. A round-1 audit's
+# OWNERS mutant — leaking `{v.split('/')[0] for v in load_mention_repos()
+# .values()}` from the emit line — SURVIVED the whole suite for exactly that
+# reason, and the owner half is the half that names a CLIENT: the 2026 incident
+# disclosed 232 private repository names, 167 of them one client's.
+#
+# Keys, owners and repo-halves are now pairwise distinct, and distinct from every
+# constant these assertions name (`1291`, `370`, `zzzunknown`, `clawgate`,
+# `devrc`), so no guard can pass by coincidence. The distinctness is not a
+# comment — `test_the_fixtures_KEYS_OWNERS_and_REPOS_are_pairwise_distinct`
+# below fails if it ever stops holding.
 FAKE_REPOS = {
-    "trowelcast": "gardenersguild/trowelcast",
-    "plotwidget": "hobbyist/plotwidget",
-    "spadeworks": "rivalorg/spadeworks",
+    "loamfield": "gardenersguild/trowelcast",
+    "pegboard": "hobbyist/plotwidget",
+    "quarryside": "rivalorg/spadeworks",
 }
+
+
+def _repo_tokens(mapping: dict) -> set[str]:
+    """Every spelling a leak of `mapping` can take: KEYS, full `owner/repo`
+    VALUES, bare OWNERS and bare repo-halves.
+
+    🔴 THE OWNER HALF IS NOT AN EXTRA — IT IS THE HALF THAT NAMES THE CLIENT.
+    A guard built from `set(m) | set(m.values())` is blind to a mutant leaking
+    owners alone, which is the single most natural shape a "group the mapping by
+    org" line takes. Measured: that mutant survived; the KEYS one it was written
+    beside died.
+    """
+    return (set(mapping)
+            | set(mapping.values())
+            | {v.split("/")[0] for v in mapping.values()}
+            | {v.split("/")[1] for v in mapping.values()})
+
+
+# The flat ledger. THE thing no sink may name beyond the one attributed row.
+FAKE_REPO_TOKENS = _repo_tokens(FAKE_REPOS)
+
+
+def test_the_fixtures_KEYS_OWNERS_and_REPOS_are_pairwise_distinct():
+    """🔴 THE GUARD ON THE GUARDS. Every disclosure assertion in this file is
+    only as wide as this fixture: if a key were a substring of its value, a
+    keys-and-values check would appear to cover the owner half and an owner-only
+    leak would walk straight through — which is precisely what happened. Twelve
+    distinct tokens over three rows is what makes `FAKE_REPO_TOKENS` a real
+    ledger rather than three names spelled twice."""
+    assert len(FAKE_REPO_TOKENS) == 4 * len(FAKE_REPOS), FAKE_REPO_TOKENS
+    for a in FAKE_REPO_TOKENS:
+        for b in FAKE_REPO_TOKENS:
+            if a != b and "/" not in a and "/" not in b:
+                assert a not in b, (
+                    f"{a!r} is a substring of {b!r} — a leak of the first would "
+                    f"be indistinguishable from a leak of the second")
 
 # (label, assistant text, expected (platform, id)) — one row per NEW shape.
 NEW_SHAPES = [
@@ -1391,10 +1444,20 @@ def test_the_prefilter_is_DERIVED_from_the_scanners_telemetry_ledger():
     the same commit because there is nowhere else to put the fact.
 
     🔴 AND IT IS THE TELEMETRY PROFILE. `mention_hints()` with no argument
-    returns the terminal profile's two literals — the OLD value — which would
-    look derived, pass review, and skip every new shape."""
+    returns the TERMINAL profile — the narrow one — which would look derived,
+    pass review, and skip every telemetry-only shape.
+
+    ⚠ THE CLAIM IS THE PROFILE, NEVER A COUNT. This docstring used to say
+    "the terminal profile's two literals"; `AUDIT_PR_RE` joined both profiles
+    and made it three (`'#'`, `'868'`, `'audit-pr'`), which is asserted below so
+    the sentence cannot rot again without the suite saying so."""
     assert S._MENTION_HINTS == MS.mention_hints(MS.PROFILE_TELEMETRY)
     assert S._MENTION_HINTS != MS.mention_hints(MS.PROFILE_TERMINAL)
+    # The terminal profile is a strict SUBSET of the telemetry one — a shape that
+    # is clickable is necessarily also recorded — and `audit-pr` is in both.
+    terminal = set(MS.mention_hints(MS.PROFILE_TERMINAL))
+    assert terminal == {"#", "868", "audit-pr"}, terminal
+    assert terminal < set(S._MENTION_HINTS), (terminal, S._MENTION_HINTS)
 
 
 def test_the_prefilter_still_SKIPS_a_block_with_no_hint_at_all():
@@ -1417,7 +1480,7 @@ def test_the_tailer_scans_with_the_WIDER_profile_not_the_default():
 def test_an_adjacent_repo_token_is_ATTRIBUTED_through_collect_mentions():
     """A.2 — the primary defect. 92% of mentions in one measured 24h window were
     a bare `#N`, and the repo name two words to its left was thrown away."""
-    (m,) = S.collect_mentions([assistant_text("trowelcast PR #1291 is green")],
+    (m,) = S.collect_mentions([assistant_text("loamfield PR #1291 is green")],
                               repos=FAKE_REPOS)
     assert m["repo"] == "gardenersguild/trowelcast"
     assert m["repo_source"] == "adjacent"
@@ -1426,9 +1489,9 @@ def test_an_adjacent_repo_token_is_ATTRIBUTED_through_collect_mentions():
 def test_attribution_names_the_repo_ACTUALLY_written():
     """Three distinct owners, three distinct expectations — a mutant returning a
     single hardcoded literal dies on two of the three."""
-    for token, expected in (("trowelcast", "gardenersguild/trowelcast"),
-                            ("plotwidget", "hobbyist/plotwidget"),
-                            ("spadeworks", "rivalorg/spadeworks")):
+    for token, expected in (("loamfield", "gardenersguild/trowelcast"),
+                            ("pegboard", "hobbyist/plotwidget"),
+                            ("quarryside", "rivalorg/spadeworks")):
         (m,) = S.collect_mentions([assistant_text(f"{token} PR #7")],
                                   repos=FAKE_REPOS)
         assert m["repo"] == expected, token
@@ -1443,7 +1506,7 @@ def test_a_repo_token_ABSENT_from_the_mapping_stays_unattributed():
 
 
 def test_collect_mentions_without_a_mapping_attributes_nothing_and_still_scans():
-    (m,) = S.collect_mentions([assistant_text("trowelcast PR #1291")])
+    (m,) = S.collect_mentions([assistant_text("loamfield PR #1291")])
     assert m["id"] == "1291"
     assert m["repo"] == ""
 
@@ -1474,7 +1537,7 @@ def test_the_emitted_event_CARRIES_the_attribution(env):
     p.write_text(json.dumps(FAKE_REPOS), encoding="utf-8")
     _write(env["projects"], "-home-zach-workspace-devrc", "sess-ATTR", [
         user_typed("go"),
-        assistant_text("spadeworks PR #1291 is green",
+        assistant_text("quarryside PR #1291 is green",
                        ts="2026-07-11T10:02:00.000Z"),
     ])
     assert S.run() == 0
@@ -1517,10 +1580,10 @@ def test_the_repo_mapping_path_is_resolved_at_CALL_time(tmp_path, monkeypatch):
     mapping — which names private repositories. `scripts/mention-open.py` records
     this exact defect twice; this is the guard that stops it recurring here."""
     p = tmp_path / "m.json"
-    p.write_text(json.dumps({"plotwidget": "hobbyist/plotwidget"}), encoding="utf-8")
+    p.write_text(json.dumps({"pegboard": "hobbyist/plotwidget"}), encoding="utf-8")
     monkeypatch.setenv("MENTION_OPEN_KNOWN_REPOS", str(p))
     assert S.mention_repos_path() == p
-    assert S.load_mention_repos() == {"plotwidget": "hobbyist/plotwidget"}
+    assert S.load_mention_repos() == {"pegboard": "hobbyist/plotwidget"}
 
 
 @pytest.mark.parametrize("body", [
@@ -1572,7 +1635,7 @@ def test_the_repo_mapping_never_reaches_the_SPOOL_beyond_the_ONE_repo_a_mention_
     env["repos_path"].write_text(json.dumps(FAKE_REPOS), encoding="utf-8")
     _write(env["projects"], "-home-zach-workspace-devrc", "sess-DISCLOSE", [
         user_typed("go"),
-        assistant_text("trowelcast PR #1291 is green", ts="2026-07-11T10:02:00.000Z"),
+        assistant_text("loamfield PR #1291 is green", ts="2026-07-11T10:02:00.000Z"),
     ])
     assert S.run() == 0
     everywhere = _everything_the_run_wrote(env, capsys)
@@ -1581,8 +1644,23 @@ def test_the_repo_mapping_never_reaches_the_SPOOL_beyond_the_ONE_repo_a_mention_
     # POSITIVE CONTROL 2 — the mapping the run held really had the other two in
     # it, so their absence is a decision and not an empty fixture.
     assert S.load_mention_repos(env["repos_path"]) == FAKE_REPOS
-    for name in ("hobbyist/plotwidget", "rivalorg/spadeworks",
-                 "plotwidget", "spadeworks"):
+    # 🔴 DERIVED, NOT HAND-LISTED, AND ALL FOUR SPELLINGS — keys, full values,
+    # bare OWNERS and bare repo-halves — minus the one row this mention was
+    # legitimately attributed to (whose key is also in the assistant text above,
+    # so it is in the spool for a second, honest reason).
+    #
+    # 🔴 THE OWNER HALF WAS THE HOLE. This read `set(FAKE_REPOS) |
+    # set(FAKE_REPOS.values())` and a round-1 audit's mutant leaking
+    # `{v.split('/')[0] for v in load_mention_repos().values()}` from the emit
+    # line SURVIVED — one passed — while the KEYS mutant written beside it died.
+    # The owner is the half that names a CLIENT, and this sink is a durable
+    # ClickHouse table rather than a window that closes.
+    attributed = _repo_tokens({"loamfield": FAKE_REPOS["loamfield"]})
+    forbidden = FAKE_REPO_TOKENS - attributed
+    # POSITIVE CONTROL 3 — the derivation left something to check, and it is
+    # WIDER than the row count: two rows times four spellings.
+    assert len(forbidden) == 8, forbidden
+    for name in sorted(forbidden):
         assert name not in everywhere, (
             f"SPOOL DISCLOSURE (attributed run): {name!r} is in the operator's "
             "mapping and was NOT the repository this mention was attributed "
@@ -1602,10 +1680,11 @@ def test_an_UNATTRIBUTED_mention_ships_NO_repository_name_at_all(env, capsys):
     # POSITIVE CONTROL — the run DID emit a mention and DID load the mapping.
     assert "370" in everywhere
     assert S.load_mention_repos(env["repos_path"]) == FAKE_REPOS
-    for name in FAKE_REPOS:
+    # 🔴 ALL FOUR SPELLINGS, not just keys and values — see the attributed guard
+    # above for the mutant that walked through the two-spelling version.
+    assert len(FAKE_REPO_TOKENS) == 12, FAKE_REPO_TOKENS
+    for name in sorted(FAKE_REPO_TOKENS):
         assert name not in everywhere, f"SPOOL DISCLOSURE (unattributed run): {name}"
-    for full in FAKE_REPOS.values():
-        assert full not in everywhere, f"SPOOL DISCLOSURE (unattributed run): {full}"
 
 
 def test_summarize_transcript_still_answers_from_the_shared_reader(tmp_path):

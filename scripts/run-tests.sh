@@ -1675,7 +1675,16 @@ TARGET_FLOORS=(
   #     the branch lands under its own new floor and its required checks go red —
   #     trading a merge-time failure for a branch-time one. A floor is a claim
   #     about a measured tree; pin it on the tree you measured.
-  "scripts/tests|10269"
+  # 2026-09-06, the mention-open disclosure/audit-pr work: the SAME shape as the
+  # 2026-08 case above, one merge later and caught the same way. `origin/main`
+  # alone collected 12818 and the PR head alone 12806 — BOTH under the 12836
+  # ceiling — while the MERGE collected 12843 and crossed it. Neither side is
+  # over on its own, so only a merged-tree gate can see it; a round-2 delta audit
+  # found it in both tiers before it could land a red main. 12793 is this run's
+  # own count put through the gate's formula and printed BY the gate, not
+  # arithmetic on the two sides. Pinned AFTER merging main into the branch, per
+  # the ORDER note above.
+  "scripts/tests|12793"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
