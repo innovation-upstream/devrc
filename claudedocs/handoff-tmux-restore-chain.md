@@ -15,27 +15,36 @@ Make the post-reboot restore of the tmux/claude workspace actually work. It had 
 worked: every link in the save→plan→restore chain was broken, silently, for ~30 days.
 
 ## State now
-- Branch/PR: `main`, clean. Five PRs merged, shipped to both hosts, live-verified.
-
+### Merged in this arc (durable — carried forward across updates)
 | PR | merge sha | what was broken |
 |---|---|---|
 | #1297 | `56c68cc7` | `@resurrect-hook-post-save` is not a valid resurrect hook kind — the save side had **never** run |
 | #1309 | `cc409f82` | continuum's `status-right` autosave interpolation clobbered by a later `set -g status-right` — no save in 30 days |
 | #1314 | `dcaeb408` | zero `workspace … output` directives against a declared dual-head layout |
-| #1311 | `d9f0836c` | window→conversation binding by 145-file grep instead of the deterministic per-pane ledger that already existed |
+| #1311 | `d9f0836c` | window→conversation binding by 145-file grep instead of the deterministic per-pane ledger |
 | #1317 | `946d9038` | the staleness gate counted POWERED-OFF time against the plan |
+| #1344 | `1ecc03c1` | no instrument existed to read a reboot; adds `tmux-restore-observe.sh` |
 
-- **Live, measured 2026-09-06 10:47** (chain healthy, unattended): layout `10:46:45` →
-  plan `10:47:23` (38s later); `plan_staleness_hours()` = `0.1646h basis=liveness`
-  (limit 2.0h); plan 46 entries, **45 bound** (`ledger 39 · fuzzy 6 · unbound 1`).
-- `@continuum-save-last-timestamp` moved for the first time since 2026-08-05.
-- The boot unit's exact invocation (`restore --dry-run --staleness-check 2`) exits **0**;
-  it exited 1 on every boot from 2026-08-04 until #1297+#1309.
-- **NOT VERIFIED: no reboot has occurred.** `uptime -s` = 2026-08-04 14:51:40. Every
-  power-off scenario is fixture mtimes + an injected uptime, never an actual shutdown.
-- #1311 took 4 audit rounds, #1317 took 4. In both, rounds 1–3 each found a real defect
-  **introduced by the previous round's fix**. #1297/#1309/#1314 merged with no audit
-  (operator's call, recorded).
+- Branch/PR: `main` clean. **#1344 MERGED** (`1ecc03c1`) and shipped+verified on both hosts.
+  **#1351 OPEN — DO NOT MERGE AS WRITTEN** (`fix/tmux-restore-boot-race`, head `151a334f`).
+- 🔴 **THE REBOOT HAPPENED — 2026-09-06 18:01:46**, from 32 days of uptime. It answered the
+  first open investigation and **REFUTED the hypothesis this whole arc was built on.**
+- 🔴 **AND THE FIRST DIAGNOSIS OF THAT REBOOT WAS ALSO WRONG.** #1351 was built on it. A
+  round-1 audit caught it; the mechanism was then re-derived from the journal and confirmed
+  by an isolated experiment. See the ANSWERED block below — read it before touching #1351.
+- **#1344 shipped:** `scripts/tmux-restore-observe.sh` (`pre`/`post`/`verdict`/`extract`),
+  36 tests. Its baseline lives at `~/.cache/tmux-restore-observe/pre-latest.txt` with a copy
+  of the script beside it.
+- **#1351 contains:** `wait_for_workspace_to_settle()` + `_verify_sends()` in
+  `scripts/tmux-session-restore.py`, a `sends_logged`/`claude_panes_live` arm in
+  `tmux-restore-observe.sh`, a `run-tests.sh` floor raise (session-analysis 440→525), and a
+  handoff rewrite **whose mechanism prose is WRONG**. Both gate tiers pass on the merged tree.
+- 🔴 **OPERATOR IMPACT THIS SESSION, caused by me, not by any bug:** I ran
+  `tmux kill-server 2>/dev/null` believing `TMUX_TMPDIR` scoped it to a probe socket. It did
+  not. **The real server died — 22 sessions / 54 windows / 43 running claude panes.**
+  Continuum rebuilt the windows automatically (`@continuum-restore on`) and
+  `tmux-session-restore.py restore` brought 44 conversations back; in-memory pane state is
+  gone for good. `TMUX_TMPDIR` does NOT isolate a tmux client — **only `-L <socket>` does.**
 
 ## Open investigations — live diagnosis state
 
@@ -114,59 +123,108 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
   session handoff/kickoff` was NOT recovered — opencode does not write to
   `~/.claude/projects`; the `opencode` skill owns that surface.
 
+### ✅ ANSWERED 2026-09-06 — supersedes "The boot unit races continuum…" above, which is RETIRED
+🔴 **The retired block's `Next probe` ("a count well above the plan's entry count is the
+race") is WRONG and must not be run — the count was 54 vs 54 and reads CLEAN.** Its
+`Ruled out` note ("continuum runs first, this unit runs after — it cannot, because on a cold
+boot nothing else starts a tmux server, so the script's own `new-session` is what starts it")
+was **CORRECT and is the actual answer**; #1351's doc rewrite deletes it — do not let that land.
+
+- **Symptom + exact repro:** reboot. Windows come back; **conversations do not.** Operator
+  sees ~54 bare shells. Reproduced twice on 2026-09-06 (the real reboot, and again when the
+  server was killed at 22:31).
+- **Observed (with values):**
+  - boot `18:01:46`; unit `Starting` `18:02:48.681` → `Finished` `18:02:49.031` — **0.35s wall**.
+  - 43 × `→ … claude --resume` logged at `18:02:49.015`.
+  - `Started tmux child pane N launched by process 22781` — **17 lines**, all `18:02:48`.
+    The unit's own python was `22749`, so **22781 is a tmux server the UNIT ITSELF started**
+    via `scripts/tmux-session-restore.py:817` `tmux new-session -d`.
+  - `Started tmux child pane N launched by process 25957` — **56 lines**, `18:03:13` … `22:07`.
+    A **different, later server**.
+  - `systemctl --user show tmux-session-restore.service` → `Type=oneshot`,
+    **`RemainAfterExit=no`**, `KillMode=control-group` (`nix/home.nix:4868-4877`).
+  - Post-restore pane census after the reboot: **53 zsh, 1 claude** against 43 sends.
+  - Zero occurrences of the sent text in any pane's scrollback.
+- **Ruled out:** the predicted duplication race against continuum — continuum's replay was
+  *perfect*: 54/54 windows, correct `(session, index)` set, zero extras, zero missing.
+  via: measurement
+- **Ruled out:** 🔴 **"the sends landed in panes that had no shell yet and were discarded"** —
+  this was the session's FIRST diagnosis and **#1351 IS BUILT ON IT.** It is wrong. The keys
+  were delivered *successfully* into server 22781; that server was then destroyed. The
+  scrollback-is-empty evidence is consistent with BOTH stories and cannot separate them.
+  via: measurement
+- **Ruled out:** that a fixed timer can be tuned to fix this — the unit does not race a
+  duration, it manufactures a server that cannot outlive it. via: measurement
+- **Leading hypothesis — CONFIRMED BY EXPERIMENT, not inference:** on a cold boot no tmux
+  server exists; the script's own `new-session` starts one **inside the unit's cgroup**; the
+  sends land in it; ExecStart returns; systemd tears the cgroup down and takes the server and
+  every claude process with it. Isolated proof, private `-L` socket, real server untouched:
+
+  | unit config | server after ExecStart returns |
+  |---|---|
+  | `Type=oneshot`, no `RemainAfterExit` | **gone** — `no server running on …` |
+  | `Type=oneshot` + `RemainAfterExit=yes` | **survives** — `probeB: 1 windows` |
+
+- **Next probe:** none needed for the diagnosis — it is closed. The open question is the
+  REMEDY. Candidates, none yet implemented: (a) **refuse when `tmux has-session` fails** so
+  the unit never manufactures a server it cannot keep; (b) trigger on the tmux **socket
+  appearing** rather than `OnActiveSec=45s`; (c) `RemainAfterExit=yes` — measured to work,
+  but with `KillMode=control-group` the unit would then own the operator's server and
+  stopping it would kill the workspace. **(a)+(b) is the direction the evidence supports.**
+
+### 🔴 #1351 does not fix the defect it names — audit round 1, unresolved
+- **Symptom + exact repro:** trace `cmd_restore` against the confirmed mechanism above.
+- **Observed (with values):** with no server, `wait_for_workspace_to_settle` bails at 10s
+  `(False, 10.0)`; `cmd_restore` **sends anyway**, creating the same doomed server;
+  `_verify_sends` polls *that* server and reports **all 43 landed**; `not settled and sent`
+  → **exit 1** → `OnFailure=notify-failure@%n` toast; unit exits; systemd kills the server.
+  Operator still finds bare shells.
+- **Observed:** `nix/home.nix:712-714` — "any unit that can fail on a STANDING condition
+  breaches [the DND bypass] again". Exit 1 here is a standing condition under this host's
+  actual boot pattern. via: code
+- **Ruled out:** that the PR is worthless — the settle-wait and verification are sound in
+  isolation and the observe arm is a real improvement; it converts a *silent* total failure
+  into a *loud* one. via: measurement
+- **Leading hypothesis:** #1351 needs rework, not merging: make "no tmux server" a REFUSAL
+  rather than a proceed, correct the mechanism prose in the three comments that assert
+  "discarded by the pane" (`tmux-session-restore.py:507`, `:855`,
+  `tmux-restore-observe.sh:598`), and restore rank 3 instead of superseding it.
+- **Open 🟡 from the same audit, unfixed:** `tmux-restore-observe.sh:589` tests
+  `[ "$live" = UNMEASURED ]` but production emits `UNMEASURED reason=…`, so the arm reads
+  CLEAN with an integer-expected error (fix: `case "$live" in UNMEASURED*)`); both new
+  exit-1 branches in `cmd_restore` are **untested — mutants SURVIVE**;
+  `claude_panes_live` is a whole-host count that includes hand-started and skipped panes;
+  four tests assign `tsr.pane_fingerprint` without `monkeypatch` teardown.
+
 ## Next steps (ranked)
-1. **Reboot and observe.** The only test that closes both open investigations above;
-   everything else is simulation. **The pre-reboot baseline is already on disk** at
-   `~/.cache/tmux-restore-observe/pre-latest.txt`. After the reboot, run **one command**:
-   ```bash
-   ~/workspace/devrc/scripts/tmux-restore-observe.sh post
-   # rc 0 clean · 1 race/misplacement · 2 usage · 3 could-not-decide · 4 windows missing · 5 no workspace at all
-   ```
-   A copy of the script sits beside the baseline at
-   `~/.cache/tmux-restore-observe/tmux-restore-observe.sh` (written by `pre`) in case the branch is not merged yet. It is a READER — it adds no
-   boot-path unit, on purpose: three defects in this arc came from changing a boot
-   path nobody had observed.
-
-   🔴 **What it compares, and why not the obvious things.** The discriminator is
-   `(session, window_index)` against **the layout that was actually replayed** — the
-   newest `tmux_resurrect_*.txt` older than the boot, resolved at `post` time. Two
-   earlier designs were built and MEASURED WRONG on this host; both are recorded in
-   the script header so nobody re-derives them:
-   - **not duplicate window NAMES** — `automatic-rename-format` is the cwd basename,
-     so repeated `(session, name)` pairs are the designed steady state. Measured: 9
-     such groups in a healthy live workspace, and a name-keyed verdict returned
-     `RACE EVIDENCE` on a *perfect* restore.
-   - **not the baseline's window COUNT** — continuum autosaves every 15 min and the
-     reboot is unscheduled, so a count captured hours earlier describes a layout that
-     is not the one replayed. Measured: 56 → 55 within two hours of a baseline.
-
-   Because the expectation is derived from the replayed layout rather than the
-   baseline, **the baseline itself does not go stale** — it supplies only the previous
-   `boot_time` (to prove a reboot happened) and the host identity, neither of which
-   drifts. ⚠ **The cached SCRIPT copy is a different matter**: only `pre` writes it, so
-   after any change to the script it is stale until `pre` runs again. Re-run `pre` if
-   the branch has moved since the baseline was taken (`cmp` it against
-   `scripts/tmux-restore-observe.sh`); otherwise it is not required.
-
-   🔴 **Its refusals are the load-bearing part.** Same `boot_time` ⇒ INCONCLUSIVE, never
-   "no race". A baseline from the *other host* ⇒ INCONCLUSIVE. No tmux server at all ⇒
-   rc 5 `TOTAL RESTORE FAILURE`, not a shrug. And rc 0 says in its own output that a
-   clean boot is ONE negative sample of an unguarded timing assumption, not a closure.
+1. **Decide #1351's fate before anything else touches the boot path.** It is OPEN, gate-green,
+   and built on a refuted mechanism. Options: rework in place (refusal + corrected prose +
+   restored rank 3 + the four 🟡s), or close it and re-cut from the confirmed mechanism.
+   Files: `devrc/scripts/tmux-session-restore.py`, `devrc/scripts/tmux-restore-observe.sh`,
+   `devrc/claudedocs/handoff-tmux-restore-chain.md`. IN FLIGHT: innovation-upstream/devrc#1351
+   forcing: regression — merging it as written adds a DND-bypassing toast on a standing
+   condition (`nix/home.nix:712-714`) while leaving the defect open.
+2. **Implement the real fix:** refuse when `tmux has-session` fails, and trigger on the tmux
+   socket rather than `OnActiveSec=45s`. `devrc/scripts/tmux-session-restore.py` (the
+   `new-session` at `:817`) and `devrc/nix/home.nix` (`tmux-session-restore` unit + timer).
+   🔴 Do NOT reach for `RemainAfterExit=yes` alone — measured to work, but `KillMode=control-group`
+   then makes the unit own the operator's server.
+   forcing: incident — 2026-09-06, a reboot left 43 conversations dead and the unit reported
+   `Result=success`.
+3. **Pin `TMUX_TMPDIR=%t` on the unit.** Measured: with it unset the unit's tmux resolves
+   `/tmp/tmux-1000/default`, not `/run/user/1000/tmux-1000/default` where the workspace lives.
+   Its two siblings already pin it (`nix/home.nix:3678`, `:3891`) and both have tests.
+   forcing: regression — the unit works today only because the user-manager environment
+   happens to carry the variable; `nix/home.nix:3654-3660` already flags the fresh-boot case as open.
+4. **Reboot again to confirm whatever fix lands.** Nothing but a real reboot has ever
+   exercised this path, and it has now overturned two successive hypotheses.
+   `~/workspace/devrc/scripts/tmux-restore-observe.sh pre` → reboot → `… post`.
    forcing: none
-2. **Run bare `claude` windows inside tmux** so a closed window detaches instead of
-   vanishing. Touches no repo file — an operator habit, or an i3 binding in
-   `devrc/nix/i3/config.nix`.
-   forcing: incident — 2026-09-06, the operator accidentally closed i3 windows; two live
-   claude conversations survived only via transcript archaeology through ClickHouse, and
-   one opencode window was never recovered.
-3. **Order the boot unit against continuum**, or set `@continuum-boot` so tmux starts
-   before the unit fires. `devrc/nix/home.nix` (the `tmux-session-restore` unit) and
-   `devrc/nix/programs/tmux/default.nix`. Do this only AFTER rank 1 — three defects in
-   this arc were introduced by fixing a boot path nobody had observed.
-   forcing: none
-4. **`--assume-empty` for `restore --dry-run`**, so a pre-reboot dry run exercises the
-   send path instead of only the skip branch. `devrc/scripts/tmux-session-restore.py`.
-   Reported as gap #4 at the start of this arc and never closed.
+5. **Run bare `claude` windows inside tmux** so a closed window detaches instead of vanishing.
+   forcing: incident — 2026-09-06, the operator closed i3 windows; two conversations survived
+   only via transcript archaeology and one opencode window was never recovered.
+6. **`--assume-empty` for `restore --dry-run`** so a pre-reboot dry run exercises the send
+   path instead of only the skip branch. `devrc/scripts/tmux-session-restore.py`.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -194,35 +252,75 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
   lines. Verifying #1317's merged message required *executing* the module and reading the
   rendered string, not grepping the file.
 
+- **This arc's audit ladders keep finding defects the previous round's fix introduced** —
+  #1311 took 4 rounds, #1317 took 4, and in both, rounds 1–3 each found a real defect
+  **introduced by the previous round's fix**. #1344 took 3 (round 1 refuted its whole
+  discriminator; round 2 found two 🔴 and three survivors in its own mutation sweep).
+  #1297/#1309/#1314 merged with no audit (operator's call, recorded). **Budget for several.**
+- 🔴 **`TMUX_TMPDIR` DOES NOT ISOLATE A TMUX CLIENT. Only `-L <socket>` does.** I set
+  `TMUX_TMPDIR` to a temp dir, ran two probes, and both reported the operator's REAL session —
+  the contradiction was in my own output and I ran `tmux kill-server 2>/dev/null` anyway,
+  destroying 22 sessions / 54 windows / 43 live claude panes. The `2>/dev/null` hid it.
+  **Every tmux command in a probe must carry `-L <unique-socket>`, and never redirect the
+  error stream of a destructive one.** The re-run with `-L` was clean and the real server was
+  provably untouched throughout.
+- 🔴 **An empty result cannot distinguish two mechanisms.** "Zero occurrences of the sent text
+  in any pane's scrollback" is equally consistent with *keys discarded by an unready pane* and
+  *keys delivered into a server that was then destroyed*. I picked the one I already believed
+  and built a PR on it. The discriminator was in the journal all along — two distinct
+  `launched by process` cohorts.
+- 🔴 **A `count=1` text replace hits an occurrence you did not picture — twice in one session.**
+  A mutation aimed at `_verify_sends` hit the identically-spelled skip-guard in `cmd_restore`
+  and died to two unrelated tests (scored INVALID, redone). A floor edit aimed at the
+  `TARGET_FLOORS` entry would have rewritten the *comment recording the previous raise*;
+  asserting the occurrence COUNT first is what caught both.
+- **The two gate tiers disagree structurally here** — the dev host has a live tmux server, the
+  nix build sandbox has none. That difference alone produced two defects in #1351 (a 120s
+  full-timeout block and an empty plan returning 1). **Run both tiers.**
+- **`tmux-session-restore.py` runs from the WORKING TREE**, so editing it in the base clone is
+  a live, unreviewed change to the deployed script. Work in a worktree.
+- **`rerere` recorded this branch's resolution** of the `ACKNOWLEDGED_UNSTUBBED["systemctl"]`
+  conflict (both #1334 and #1344 append to the same set literal and the same justification
+  string). It will replay automatically — check it if that ledger conflicts again.
+- **The unit's exit code is currently meaningless**: `tmux send-keys` exits 0 for keystrokes
+  that go nowhere, and the unit exited 0 having started nothing.
+- **Durable history, carried forward:** the boot unit **exited 1 on every boot from 2026-08-04
+  until #1297+#1309** landed. Relevant because `Result` is systemd's verdict on the UNIT while
+  `ExecMainStatus` is the PROCESS's exit code, and for a `Type=oneshot` they disagree
+  routinely — measured on this host mid-session: `Result=success` with `ExecMainStatus=1`.
+
 ## How to verify
 ```bash
-# 1. the chain is alive (layout, then plan seconds later, then the hook log)
+# 1. the chain is alive (layout, then plan seconds later)
 ls -t ~/.tmux/resurrect/*.txt | head -3 | xargs -I{} stat -c '%y {}' {}
-stat -c '%y' ~/.config/initiatives/restore-plan.json ~/.cache/tmux-session-restore.log
+stat -c '%y' ~/.config/initiatives/restore-plan.json
 
-# 2. the boot unit's exact invocation exits 0
+# 2. the boot unit's staleness gate
 python3 ~/workspace/devrc/scripts/tmux-session-restore.py restore --dry-run --staleness-check 2
 
-# 3. the send path actually fires (a plain dry run only exercises the skip branch)
+# 3. the send path (a plain dry run only reaches the skip branch)
 python3 - <<'PY'
-import json,os,pathlib
-p=pathlib.Path(os.path.expanduser('~/.config/initiatives/restore-plan.json'))
-plan=json.loads(p.read_text())
-for e in plan: e['session']='POSTBOOT-'+e['session']
+import json, os, pathlib
+p = pathlib.Path(os.path.expanduser('~/.config/initiatives/restore-plan.json'))
+plan = json.loads(p.read_text())
+for e in plan: e['session'] = 'POSTBOOT-' + e['session']
 pathlib.Path('/tmp/sim-plan.json').write_text(json.dumps(plan))
 PY
 python3 ~/workspace/devrc/scripts/tmux-session-restore.py restore --dry-run --plan /tmp/sim-plan.json | tail -1
-# expect "would relaunch N windows, skipped 0"; then confirm nothing was created:
 tmux list-sessions -F '#{session_name}' | grep -c POSTBOOT   # must be 0
 
-# 4. binding quality
-python3 -c "
-import json,os,pathlib,collections
-p=json.loads(pathlib.Path(os.path.expanduser('~/.config/initiatives/restore-plan.json')).read_text())
-print(len(p),'entries,',sum(1 for e in p if e['session_id']),'bound',
-      dict(collections.Counter(e.get('bind_source','') for e in p)))"
+# 4. 🔴 THE MECHANISM — does a oneshot unit's tmux server survive? Use -L, never TMUX_TMPDIR.
+SOCK="probe-$$"
+systemd-run --user --quiet -p Type=oneshot --unit="zz-$SOCK" tmux -L "$SOCK" new-session -d -s p
+sleep 3; tmux -L "$SOCK" list-sessions        # expect: no server running  <-- the defect
+tmux -L "$SOCK" kill-server; systemctl --user reset-failed "zz-$SOCK"
 
-# 5. the unit tests
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/session-analysis/tests/test_tmux_session_restore.py -q -p no:cacheprovider
+# 5. the post-reboot verdict
+~/workspace/devrc/scripts/tmux-restore-observe.sh post
+# rc 0 clean · 1 race/misplacement/resumes-lost · 2 usage · 3 could-not-decide · 4 missing · 5 no workspace
+
+# 6. both gate tiers (they are structurally blind to different things)
+nix develop ~/workspace/devrc -c bash scripts/gate.sh --tier both
+nix build ~/workspace/devrc#checks.x86_64-linux.pytests --no-link    # ONE AT A TIME
+nix build ~/workspace/devrc#checks.x86_64-linux.nodetests --no-link
 ```
