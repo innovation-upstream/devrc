@@ -521,6 +521,26 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     ⚠ This does NOT close the item — the closing condition is about attribution being possible
     without a re-run, and that work is owned by the session that did the diagnosis. It is recorded
     here so the next reader stops re-deriving the mechanism.
+    🔴 **THIRD INSTANCE, 2026-09-07, AND IT IS THE CLEANEST PAIR YET — SAME REVISION, OPPOSITE
+    VERDICTS.** On `#747`, a **9-line log-string diff** touching only `containers/clawgate/main.go`:
+    | run | revision | verdict |
+    |---|---|---|
+    | `clawgate-ci-b6ql9` | `020e28a1ee9ea…` | **Failed** |
+    | `clawgate-ci-rerun-6j6m5` | `020e28a1ee9ea…` — *byte-identical* | **Succeeded** |
+    Failing set was `TestFlagIdleWritesOnceUnderConcurrency` (14.23s),
+    `TestRequestHistorySurvivesDelete` (13.86s), `TestSweepArchivesExpiredRequests` (14.59s), plus
+    the `hook` leg's `not ok 39` — a bats case that timed out after **5s waiting on a detached
+    child**. Node was `talos-xr6-r7p`, i.e. **NOT** the known-bad `talos-uvh-gtj`, so the
+    device-isolated reading does not cover this one.
+    🔴 **THE DISCRIMINATOR THAT WORKED WAS WALL TIME, AND SPECIFICALLY *WHOSE* TIME MOVED.** The
+    whole run inflated — `internal/notes` **92.8s** and `internal/store` **48.0s** against
+    sub-second locally, top figure 111s — which is load, because a failed assertion inflates
+    exactly one test. Reading that before touching the diff is what turned a scary red on a
+    security-adjacent PR into a 90-second question.
+    **The re-run recipe, since it is now used often enough to be routine:** take the failed
+    PipelineRun's own `spec` (it carries `params.revision`), strip `tekton.dev/*` labels, give it
+    `generateName: clawgate-ci-rerun-`, and `kubectl create` it. A green re-run on the IDENTICAL
+    revision completes the attribution; a red one on the SAME tests refutes the contention reading.
     forcing: gate — with 17 this makes three of the four clawgate checks capable of reds that are
     not about the change, and this one is the worst of the three to dismiss: unlike 17 it can fail
     on a package a Go diff genuinely touches, so "it is just the flake" will eventually be wrong.
@@ -987,8 +1007,21 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     that was never broken. Add a field to `ChatView` ⇒ add it to that literal.
     forcing: none
 
-38. 🔴 **NONE OF RANKS 35–37 IS LIVE. `clawgate` SHIPS FROM A HARDCODED IMAGE PIN, NOT AUTOMATION.**
-    Measured 2026-09-06 after all three merged: `clawgatectl health` reads **0.8.27**, while
+38. ✅ **DONE — SHIPPED 2026-09-06 as `0.8.28` (deploy commit `ae534d56f`), and the closing
+    condition was met on 2026-09-07 when rank 34 was re-read against the live surface.**
+    🔴 **THE HEADLINE BELOW IS NO LONGER TRUE AND IS KEPT ONLY AS THE RECORD OF WHY THIS ITEM
+    EXISTED.** "NONE OF RANKS 35–37 IS LIVE" was correct on 2026-09-06 and FALSE from the deploy
+    that same evening; it sat in this doc as an unqualified 🔴 for a day, which is exactly the
+    rot this file warns about everywhere else. Re-measured 2026-09-07 against the running pod:
+    the wider shell, the auto-fit tmux grid, the collapsed `<details data-tool-detail>` and
+    `data-chat-freeform-reply` are all present, each with its pre-change marker at **0** as the
+    negative control. **The mechanism it documents is still true and still load-bearing** — see
+    the next paragraph — so read the paragraph, not the headline.
+    ⚠ **THE MECHANISM, WHICH HAS NOT CHANGED: a merge to `trunk` deploys NOTHING here.** clawgate
+    has no ImagePolicy/ImageUpdateAutomation; shipping is four deliberate steps — build the image,
+    push to harbor, bump the pin, commit for Flux. Confirmed again on 2026-09-07 shipping `0.8.29`,
+    and it is why `#747` (a log-string fix, merged with no pin bump) is on `trunk` and NOT running.
+    **Measured 2026-09-06 after all three merged:** `clawgatectl health` read **0.8.27**, while
     `clusters/workbench/apps/clawgate/deployment.yaml` pins
     `harbor.homelab.lan/library/clawgate:0.8.27`. There is no ImagePolicy/ImageUpdateAutomation for
     clawgate — a merge to `trunk` changes NOTHING about what is running. Shipping is four deliberate
@@ -1001,7 +1034,12 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     that YOUR change shipped; verify by CONTENT against the running pod.
     Closing condition: the operator decides to ship or not; if shipped, the tool-detail disclosure
     and the free-form box are observed live and rank 34 is re-read against them.
-    forcing: user — it is the operator's call whether the LAN surface gets a command box today.
+    ✅ **MET, both halves.** Shipped: `0.8.28`, pin `ae534d56f`. Observed live 2026-09-07:
+    `data-tool-detail` and `data-chat-freeform-reply` present on real session pages, with
+    `data-reply-state="ready"`. Rank 34 re-read against them and CLOSED the same day by
+    authenticating the tier (`ZacxDev/homelab-infra#743`, `0.8.29`) rather than disarming — the
+    operator's explicit call, made with the measured exposure in front of them.
+    forcing: none — closed.
 
 39. ✅ **DONE 2026-09-07 — `ZacxDev/homelab-infra#743`, squash `3f6ef8ae7`, LIVE as `0.8.29`.**
     Closes rank 34 as well; they were one item. The browser tier now authenticates.
@@ -1068,9 +1106,17 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     ⚠ **`/audit-pr` was offered twice and NOT run** — operator chose to merge on
     the green re-run. Recorded, not hidden.
     forcing: none — closed.
-40. **Merge the two open docs PRs.** `innovation-upstream/devrc#1350` (UI briefs)
-    and `#1353` (pre-deploy handoff). `#1353`'s only red is the contention flake
-    under "Open investigations"; confirm the re-run before merging.
+40. ✅ **DONE 2026-09-07 — both merged.** `#1353` (pre-deploy handoff) landed as
+    `5cc8d32f`; `#1350` (UI briefs) landed as `413d9bb87`, both devrc gates green
+    (nodetests 1449/1449, pytests 21973 passed), content-verified on `main`
+    (`claudedocs/briefs-clawgate-ui-2026-09-06.md` present).
+    ⚠ **THIS ITEM WAS SILENTLY SKIPPED FOR MOST OF A SESSION, AND THAT IS THE
+    REUSABLE PART.** The 2026-09-07 session took rank 34/39, then 41, and never
+    touched 40 or said it was skipping it — the ranked list was read for the item
+    being worked, not swept for what else was already actionable. `#1350` had been
+    sitting green and mergeable the whole time. **Taking the lowest-numbered OPEN
+    item is the rule; noticing that a cheap one is ALSO open costs one
+    `gh pr list`.**
     forcing: none
 41. ✅ **DONE 2026-09-07 — EXERCISED AGAINST REAL tmux, and the control reproduced the
     hazard on the live server the same minute.** No code change: the `=` prefix is
