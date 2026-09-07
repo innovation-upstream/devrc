@@ -11,8 +11,9 @@ So the literal is pinned by a test asserting equality (`host == "10.42.0.100"`),
 substring check — `"10.42.0.10" not in target` is satisfied by the correct value too and
 would be a guard that cannot fail.
 
-Precedent for the address: `claude/skills/standup/standup.sh:26` (`LAP="zach@10.42.0.100"`),
-the repo's only pre-existing one.
+The address had one pre-existing precedent, `standup.sh:26`
+(`LAP="zach@10.42.0.100"`); that skill was retired 2026-09-07, so
+`scripts/session-manager` is now the only place it is written down.
 
 The LAN address `192.168.50.155` reaches the laptop **only when both hosts are on the same
 network**, which they usually are not. A LAN-first probe therefore buys a connect timeout on

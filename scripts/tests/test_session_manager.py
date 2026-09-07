@@ -10440,9 +10440,9 @@ _GATHER_REPORT_KEYS = {
 # control for it is mechanical: state the expected values somewhere the constant
 # cannot reach, and watch a deletion move them.
 _EXPECTED_NOT_MEASURED = {
-    "pull_requests": ("pull_requests", "standup"),
+    "pull_requests": ("pull_requests", "initiative-scan"),
     "mail_queue": ("mail_queue", "mailbox"),
-    "cluster_alerts": ("cluster_alerts", "standup"),
+    "cluster_alerts": ("cluster_alerts", "obs-read"),
     "initiative_board": ("initiative_board", "initiatives"),
     "gui_windows_outside_tmux": ("gui_windows", "i3"),
 }
@@ -10609,7 +10609,7 @@ def test_not_measured_is_DERIVED_where_derived_DIFFERS_from_the_constant():
     """
     ledger = {
         "zulu_population": {"report_key": "zulu_key",
-                            "owner_skill": "standup", "note": "n1"},
+                            "owner_skill": "initiative-scan", "note": "n1"},
         "yankee_population": {"report_key": "yankee_key",
                               "owner_skill": "mailbox", "note": "n2"},
     }
@@ -10657,10 +10657,10 @@ def test_ADDING_a_measurement_REMOVES_the_claim_that_it_is_unmeasured():
 
 
 def test_the_not_measured_key_is_in_the_report_and_names_the_two_required_ones():
-    """The brief's floor: `pull_requests` -> standup and `mail_queue` ->
-    mailbox, both present in a real scan's payload with their owners."""
+    """The brief's floor: `pull_requests` -> initiative-scan and `mail_queue`
+    -> mailbox, both present in a real scan's payload with their owners."""
     pops = {p["population"]: p for p in base_gather()["not_measured"]}
-    assert pops["pull_requests"]["owner_skill"] == "standup"
+    assert pops["pull_requests"]["owner_skill"] == "initiative-scan"
     assert pops["mail_queue"]["owner_skill"] == "mailbox"
     # 🔴 the note carries the EVIDENCE, not just the label — a reader deciding
     # whether to spend a hop needs to know what is at stake behind the name
@@ -10685,11 +10685,11 @@ def test_the_NOT_MEASURED_section_is_pinned_as_a_WHOLE_normalised_string():
     # deleted entry stayed green: the two nobody spelled were the two free to
     # vanish. Equality, not `in` — an `in` per row cannot see one go missing.
     assert _block_after(lines, heading) == [
-        "cluster_alerts             -> /standup",
+        "cluster_alerts             -> /obs-read",
         "gui_windows_outside_tmux   -> /i3",
         "initiative_board           -> /initiatives",
         "mail_queue                 -> /mailbox",
-        "pull_requests              -> /standup",
+        "pull_requests              -> /initiative-scan",
     ]
 
 

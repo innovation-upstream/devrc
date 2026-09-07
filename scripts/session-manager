@@ -402,8 +402,9 @@ ACTIVITY_ENV = os.path.join(HOME, ".config", "activity-collector", "env")
 # 🔴 The laptop's SSH target. `10.42.0.100` is the LAPTOP on nebula;
 # `10.42.0.10` is the homelab GATEWAY. Getting this wrong does not fail loudly —
 # SSH succeeds against a real host and reports the gateway's tmux state as the
-# laptop's. Matches `claude/skills/standup/standup.sh:26`, the repo's only
-# existing precedent. The LAN address is same-network-only, so a LAN-first probe
+# laptop's. It matched `claude/skills/standup/standup.sh:26`, the repo's only
+# other precedent, until that skill was retired (2026-09-07); this constant is
+# now the precedent. The LAN address is same-network-only, so a LAN-first probe
 # buys a timeout on every scan of a laptop that usually is not on this network.
 # Pinned by a test.
 # --------------------------------------------------------------------------- #
@@ -1370,13 +1371,17 @@ CAVEATS = {
 NOT_MEASURED_POPULATIONS = {
     "pull_requests": {
         "report_key": "pull_requests",
-        "owner_skill": "standup",
+        "owner_skill": "initiative-scan",
         "note": ("Open PRs, their review state and whether they CONFLICT are "
                  "not read here at all. Measured 2026-08-15: 60 open, one "
                  "conflicting for eleven days and one open since February, "
                  "none of them visible in any number this tool prints. A "
                  "window that is idle because its PR is blocked looks exactly "
-                 "like a window that is idle because the work is done."),
+                 "like a window that is idle because the work is done. \u26a0 "
+                 "The FLEET-WIDE sweep retired with `standup` (2026-09-07); "
+                 "what `initiative-scan` answers is the initiative-scoped "
+                 "slice, so a PR belonging to no tracked initiative is "
+                 "unowned by any skill today."),
     },
     "mail_queue": {
         "report_key": "mail_queue",
@@ -1389,7 +1394,7 @@ NOT_MEASURED_POPULATIONS = {
     },
     "cluster_alerts": {
         "report_key": "cluster_alerts",
-        "owner_skill": "standup",
+        "owner_skill": "obs-read",
         "note": ("Firing alerts, in-flight deploys and rollout state on any "
                  "cluster. A tmux pane scan cannot see work that is failing "
                  "with nobody sitting in front of it, which is the failure "

@@ -428,9 +428,6 @@ SECTIONS: tuple[Section, ...] = (
                  "Cross-host: which panes have an agent, what each is doing, and &mdash; the "
                  "one that pays &mdash; which are <i>waiting on a human</i>. That got its own "
                  "tool after two windows were measured unanswered for days."),
-                ("One window &mdash; <code>/window-triage</code>",
-                 "By codename, hotkey or address, plus a ranking of the windows stranded "
-                 "past a threshold."),
                 ("A past session &mdash; <code>/find-session</code>",
                  "Keyword search across every transcript: project, branch, resume command."),
                 ("The scripts underneath",

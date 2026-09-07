@@ -1324,28 +1324,11 @@ in
     recursive = true;
     force = true;
   };
-  # 🔴 close-the-loop's LEDGER — a deliberate mkOutOfStoreSymlink exception, for
-  # CORRECTNESS, not convenience. The skill's contract is "read STATE.md first,
-  # UPDATE it last, every run" and its `allowed-tools` grants Write/Edit — but while
-  # the two files lived under `claude/skills/close-the-loop/` the `recursive = true`
-  # mapping above landed them as read-only /nix/store symlinks, so every write
-  # silently failed and the skill's central mechanism was INERT (measured 2026-08-10:
-  # `test -w ~/.claude/skills/close-the-loop/STATE.md` -> false).
-  #
-  # The SOURCE therefore moved OUT of the skill tree to `claudedocs/close-the-loop/`
-  # — it has to, because a path cannot be both a recursive store symlink and an
-  # out-of-store one; the two `home.file` entries would collide. From there these
-  # two links put them back at the deployed path the skill expects, pointing at the
-  # live checkout, so a write lands in the working tree where it is version
-  # controlled and applies with no switch. Side benefit: 116 KB of ledger (35 KB
-  # STATE + 81 KB ARCHIVE) no longer enters the nix store on every switch.
-  #
-  # ⚠ A write here is UNCOMMITTED WORK in devrc — commit it in the SAME session
-  # (RULES.md -> "Docs/notes written into a working tree are UNSAVED WORK").
-  home.file.".claude/skills/close-the-loop/STATE.md".source =
-    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/claudedocs/close-the-loop/STATE.md";
-  home.file.".claude/skills/close-the-loop/ARCHIVE.md".source =
-    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/claudedocs/close-the-loop/ARCHIVE.md";
+  # (The `close-the-loop` skill and its two mkOutOfStoreSymlink'd ledger files
+  # were RETIRED 2026-09-07. The LEDGER ITSELF IS KEPT, as a historical record, at
+  # `claudedocs/close-the-loop/{STATE,ARCHIVE}.md` — it is simply no longer deployed
+  # into ~/.claude/. Nothing writes to it any more, so the writability problem the
+  # exception existed for no longer applies.)
   # bash-guard — MANAGED (was per-host/unmanaged, so the deterministic
   # enforcement of the 🔴 Git Workflow rules in RULES.md DRIFTED between hosts:
   # workbench had 6 checks, the laptop a Jun-23 copy with 4). Edit
@@ -2137,13 +2120,6 @@ in
     recursive = true;
     force = true;
   };
-  # Same close-the-loop ledger exception as ~/.claude/skills/ above — the two files
-  # are sourced from claudedocs/close-the-loop/ and must be WRITABLE.
-  home.file.".config/opencode/skills/close-the-loop/STATE.md".source =
-    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/claudedocs/close-the-loop/STATE.md";
-  home.file.".config/opencode/skills/close-the-loop/ARCHIVE.md".source =
-    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/claudedocs/close-the-loop/ARCHIVE.md";
-
   # direnvrc — deploy the managed direnv config with layout opencode.
   home.file.".config/direnv/direnvrc" = {
     source = ../scripts/direnv/direnvrc;
@@ -3568,7 +3544,8 @@ in
       # burn down the one alert channel that has to keep its meaning. That is the
       # "permanently-red gate trains you to click through" hazard, at 720/day.
       #
-      # 🔴 WHAT ACTUALLY SURFACES A DEAD FEEDER TODAY IS `/standup`, NOT the
+      # 🔴 WHAT ACTUALLY SURFACES A DEAD FEEDER TODAY IS `/syshealth
+      # --systemd`, NOT the
       # read model. An earlier version of this comment claimed the compensating
       # control was the server's `receivedAt` stamp showing up as a stale
       # timestamp. That is not observable by anyone: NOTHING reads
@@ -3577,8 +3554,9 @@ in
       #
       # The real control is that this unit is `Type = "oneshot"` with distinct
       # non-zero exit codes, so a persistent failure lands in
-      # `systemctl --user --failed`, which `claude/skills/standup/standup.sh`
-      # reads. ⚠ That covers the codes (2/3/4/5/6) and NOT a unit that exits 0
+      # `systemctl --user --failed`, which `scripts/syshealth --systemd` reads
+      # (`standup`, the previous reader, was retired 2026-09-07).
+      # ⚠ That covers the codes (2/3/4/5/6) and NOT a unit that exits 0
       # while achieving nothing — which is why the two audit findings in that
       # class (a 3xx read as success, an unmeasured zero pushed as real) were
       # fixed in the script rather than left to monitoring.
@@ -3749,7 +3727,7 @@ in
       #
       # What surfaces a dead feeder instead: this is Type=oneshot with distinct
       # non-zero exit codes, so a persistent failure lands in the user manager's
-      # failed-unit list, which `/standup` reads. ⚠ That covers the CODES and not
+      # failed-unit list, which `/syshealth --systemd` reads. ⚠ That covers the CODES and not
       # a unit that exits 0 while achieving nothing — which is why "nothing had
       # changed" is a deliberate rc 0 and every other outcome is not.
       #
@@ -3855,7 +3833,7 @@ in
       # What surfaces a genuinely broken agent instead: the two exit codes it can
       # actually take (2 = no credentials, 3 = tmux unusable) are both permanent
       # configuration faults, and StartLimit below turns a repeat of either into a
-      # FAILED unit, which `/standup` reads. Everything transient is backed off
+      # FAILED unit, which `/syshealth --systemd` reads. Everything transient is backed off
       # from inside the loop rather than exited on, precisely so a restart storm
       # is not the failure mode.
       StartLimitIntervalSec = 600;
@@ -4494,8 +4472,9 @@ in
   # 🔴 WHY A TIMER RATHER THAN A LINE IN THE WRITE-BACK PROTOCOL. The store is
   # written by an agent's Write tool mid-recon, so no git operation happens
   # naturally, and "remember to commit afterwards" is precisely the mechanism
-  # MEASURED not to stick here — claude/skills/close-the-loop/STATE.md records
-  # opt-in prose steps failing and the pivot to autonomous loops. A backup that
+  # MEASURED not to stick here — claudedocs/close-the-loop/STATE.md records
+  # opt-in prose steps failing and the pivot to autonomous loops (the skill that
+  # read that ledger was retired 2026-09-07; the ledger itself is kept). A backup that
   # depends on an agent remembering is not a backup. PRINCIPLES.md: prefer the
   # deterministic fix over the prose one.
   #
