@@ -301,29 +301,58 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **Fix:** parse both reads positionally from plain `df` (`df -i / | awk 'NR==2{print $3}'`), and run a **positive control** printing both values before trusting an hour of collection.
 - **Generalisation:** this is the same family as this doc's `NR-1` → −1 and `grep -c` → `"0\n0"` findings — an instrument recording a field it never measured, failing toward a value that reads as data.
 
+### ANSWERED — the churn curve ran to completion, and it INVERTS this effort's framing
+- **Symptom + exact repro:** whether the daily 18:16 CDT reap can outpace `/tmp` regrowth. Sampled `df -i /`, `df -k /` and `ls -U /tmp | wc -l` every 5 minutes for 55 minutes, 12 points, terminator line present (`SAMPLER-DONE`) so the run is readable as complete rather than truncated.
+- **Observed (with values), 2026-09-07 19:43:25Z → 20:38:26Z:**
+
+  | metric | start | end | delta | extrapolated | headroom | time to wall |
+  |---|---:|---:|---:|---:|---:|---:|
+  | inodes used | 67,693,096 | 68,404,278 | +711,182 | **+18.6M/day** | 54.7M free | ~2.9 days |
+  | avail (KB) | 482,245,348 | 460,816,188 | −21,429,160 | **−490 GiB/day** | 439 GiB | **<1 day** |
+  | `/tmp` top-level | 263,976 | 264,281 | +305 | **+8k/day** | — | — |
+
+  - The inode series **OSCILLATES** — peak 68,495,522 at 20:08, trough 67,343,314 at 19:53, i.e. a 1.15M swing inside the window. Net drift is upward but a single interval is worthless: an early two-point read of this same series gave `+365,085 in 5 min` (≈105M/day) and the very next point was **−714,867**. Transient build churn is released, not accumulated.
+  - The **avail** series is the near-monotonic one. That is the signal to watch, not inodes.
+- 🔴 **The finding that matters: under load, BYTES are ~3x tighter than INODES — the opposite of this effort's premise.** The whole investigation was framed as an inode problem, correctly, for the ACCUMULATED state (`/tmp` held 81% of this filesystem's inodes). For the RATE the ranking inverts: the daily reap comfortably covers inodes (it cleared ~17M in one pass against +18.6M/day), while the byte side has under a day of margin at this rate. **A capacity alarm built on `df -i` alone would not have seen this.**
+- **Ruled out — that the daily cadence is insufficient for INODES.** +18.6M/day against a reap measured at ~17M/pass plus `nix-gc` deleting 11,263 store paths / 29.1 GiB nightly. Roughly balanced, with ~2.9 days of headroom as the buffer.
+    via: measurement
+- **Ruled out — that the top-level stub count is a growth driver.** +305 entries in 55 minutes (~8k/day) against +711,182 inodes over the same window. This independently confirms rank 6 as non-urgent.
+    via: measurement
+- 🔴 **SCOPE, stated because the number is meaningless without it: the entire window ran under a heavy build.** This session's own subagent ran for 3,764 s — essentially exactly this window — executing a full `nix build` of both sandbox checks plus a 22,003-test suite. **Every rate above is a PEAK-LOAD figure and none of them is a baseline.** Two earlier readings of this same series were wrong in opposite directions (one extrapolated a spike as a trend, one read the rebound as a refutation); this one is right only because it names the load it was taken under.
+- **Next probe, if anyone wants the baseline:** re-run the same 12-point sampler across a known-idle hour and compare. The two rates are the whole remaining question, and nothing else about this effort depends on the answer.
+  ```bash
+  for i in $(seq 1 12); do
+    printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$(df -i / | awk 'NR==2{print $3}')" \
+      "$(df -k / | awk 'NR==2{print $4}')" "$(ls -U /tmp | wc -l)"
+    [ "$i" -lt 12 ] && sleep 300
+  done; echo SAMPLER-DONE
+  ```
+
 ## Next steps (ranked)
 🔴 **Ranks 1–6 keep their original meaning and numbering** — the rank is half a `claim-work` slug's identity, so renumbering would silently re-point live claims. Status is marked in place.
 
-1. **DONE — patch script run on the WORKBENCH.** Verified live; see `State now`.
+1. **DONE — patch script run on the WORKBENCH.** Verified live.
    forcing: none
 2. **Run it on the LAPTOP (`zach@10.42.0.100`) — the only unfinished operator step.** Needs the operator; Claude cannot `sudo`.
    ```bash
    sudo bash ~/workspace/devrc/nix/system/apply-tmp-churn-stale-lines-2026-09-04.sh --dry-run
    ```
-   devrc is checked out there at `38bd8edd`, clean and in sync with `origin/main`; the script is present. **Expect exit 3 (not in scope)** — the laptop's `/etc/nixos/configuration.nix` has mtime **Aug 24**, i.e. it was never patched, so it needs `apply-tmp-churn-retention.sh` instead. 🔴 **`--dry-run` DOES need sudo there** despite the script's own message — see Gotchas.
+   **Expect exit 3 (not in scope)** — the laptop's `/etc/nixos/configuration.nix` has mtime **Aug 24**, so it was never patched and needs `apply-tmp-churn-retention.sh` instead. 🔴 **`--dry-run` DOES need sudo there** (that file is `-rw-------` on the laptop, `-rw-r--r--` on the workbench). The laptop is under no pressure — 56% disk, 23% inodes — so this is correctness, not urgency.
    forcing: none
-3. **DONE — `nixos-rebuild` + reboot.** And `switch` is no longer blocked; see Gotchas.
+3. **DONE — `nixos-rebuild` + reboot**, and `switch` is no longer blocked on either host.
    forcing: none
-4. **ANSWERED — `/var/lib/docker` is LIVE and in use.** `docker ps -a` shows `clawgate-e2e-pg-45759` up 13h (the clawgate e2e harness) plus the `civitai-local` stack (`flipt`, `minio/mc`). The 57 GB is legitimate. Reclaimable residue is small: **13 exited containers, 8 dangling images**. `docker system df` produced no output as non-root — re-run with sudo if the exact figure matters.
+4. **ANSWERED — `/var/lib/docker` is LIVE and in use.** Residue is small: 13 exited containers, 8 dangling images.
    forcing: none
-5. **IN FLIGHT — cover `scripts/diagnose-disk-accounting.sh`.** Branch `test/diagnose-disk-accounting-coverage` pushed; subagent building. Claim `nix-disk-cleanup-5` HELD. Repo `innovation-upstream/devrc`; files `scripts/diagnose-disk-accounting.sh`, `scripts/tests/`. **Release the claim when the PR lands.**
-   forcing: gate — 282 lines of root-privileged shell with no test file, in a repo with no shellcheck gate; that combination is what let the root-command-injection and E2BIG defects reach the merge gate invisibly.
-6. **DEFLATED BY MEASUREMENT — recommend WON'T-FIX.** The ledger-matched stubs `e` never removes are now **52,049** (up from this doc's 43,708, as predicted): `nix-develop-` 24,548 · `nix-shell.*` 23,447 · `nix-shell-*` 1,056 · `nix-[0-9]*` 1,391 · `run3.*` 1,266 · `go-build*` 183 · `chromedp-runner*` 158; oldest **144 days**. But that is **0.08% of this filesystem's 67.2M inodes**, and the churn measurement above shows the stub count is not what grows under load (+22 vs +365,085). Against this effort's record — three consecutive root-privileged fix rounds each shipping a regression — a new mechanism is not worth its blast radius.
+5. **IN REVIEW — `innovation-upstream/devrc#1366`**, branch `test/diagnose-disk-accounting-coverage`, `MERGEABLE`, Tekton `pending` at time of writing. +1044/−100 over 5 files; the script itself changed +232/−100. Claim `nix-disk-cleanup-5` is **still HELD — release it when the PR merges.**
+   forcing: gate — root-privileged shell with no test file in a repo with no shellcheck gate; that is what let the injection and E2BIG defects reach the merge gate invisibly.
+6. **DEFLATED BY MEASUREMENT — recommend WON'T-FIX.** 52,049 ledger-matched stubs, but 0.08% of inodes and growing at only ~8k/day (measured, above). Against this effort's record of three consecutive root-privileged fix rounds each shipping a regression, a new mechanism is not worth its blast radius.
    forcing: none
-7. **Read the completed churn curve and decide whether the daily cadence holds.** See the open investigation above. This is the one genuinely open technical question left.
+7. **ANSWERED — see the churn block above.** The daily cadence holds for inodes; **bytes are the tighter constraint under load**, and a `df -i`-only alarm would miss it.
    forcing: none
-8. **Prune the `devrc/diagnose-disk-accounting` index entry.** It serves a bullet reading `OPEN: the script has never been run as root` alongside a later `RESOLVED 9ef89fa7` bullet recording that the root run happened — stale-in-place, and it reads as outstanding. Also now closeable: `/mnt/rootcheck` is **no longer mounted**.
+8. **Prune the `devrc/diagnose-disk-accounting` index entry** — it serves `OPEN: the script has never been run as root` beside a later `RESOLVED 9ef89fa7` recording that the root run happened. Partly done this session: `/mnt/rootcheck` recorded as no longer mounted.
    forcing: none
+9. 🔴 **AUDIT `#1366` BEFORE MERGING — this is the highest-value open item.** It changes **root-privileged code by +232/−100** and four of those changes are behavioural fixes to paths that **cannot be exercised without root**. That is precisely the profile that burned this effort three times: every one of three fix rounds introduced the next defect, all in root-privileged code, all reporting success and passing their own verifier. The mutation battery is strong evidence about the guards; it is **not** evidence about the seven unguardable root-only sections. Run `/audit-pr 1366` and budget for several rounds, re-auditing the DELTA each time; stop on the first round that returns no finding.
+   forcing: regression — three prior fix rounds in this same file each shipped a regression that its own verifier passed.
 
 ## Gotchas / decisions / dead-ends
 - **RO mount hypothesis was WRONG.** A prior session hypothesized that data written to `/nix/store` before the RO mount was applied was "hidden" by the mount. This was disproved: NixOS populates the store during boot, then mounts it RO. The RO mount shows current filesystem state; `nix-collect-garbage` operates through the underlying RW filesystem. The 75M "missing" inodes were not hidden — they are ext4 metadata overhead.
@@ -394,6 +423,15 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - 🔴 **zsh does not word-split, and it cost a silent wrong answer here.** `for f in $s` over a multi-word capture loops ONCE on the whole string, so a per-file `stat` loop printed `ERR` for every prefix and looked like a permissions problem. `while read -r f` gave the right answer immediately. This repo's RULES name this exact trap; knowing it did not prevent it — the sixth instance of that pattern in this effort.
 - **`pgrep -f` matched this session's own shell**, as the RULES predict, when checking whether the sampler was alive. The sampler's real pid was distinguishable only by reading the command lines. Never let such a pattern reach `pkill`.
 - **Coordination, checked and clean:** PR `innovation-upstream/devrc#1361` and claim `nebula-pre-departure-hardening-2` also target the laptop's nix config, so it was worth checking for collision. `#1361` touches only repo-tracked `nix/system/apply-nebula-*.sh` — **no shared file** with the tmpfiles patch. Host-level ordering on the laptop is still worth sequencing, but there is no merge hazard.
+
+- 🔴 **Rank 5 SHIPPED as `innovation-upstream/devrc#1366`, and building it found FOUR defects this doc never named — including a shipped fix that was INERT.** Independently re-verified in a separate worktree off the branch, not taken on the subagent's report: suite 71 assertions green, and the 19-mutant battery reproduced **19/19 KILLED by their own guard**, baseline 71 ok / 0 FAIL, negative control **red at 6 FAIL**, and a behaviour-free `comment-reword` control correctly killing nothing. Both controls watched, which is what makes the battery evidence rather than a claim.
+  - 🔴 **`LSOF_OUT=$(lsof +L1 2>/dev/null); LSOF_RC=$?` is `set -e`-FATAL, so the fix recorded in this doc for the `count=-1` defect could NEVER EXECUTE.** An assignment from a command substitution is a *checked* command, and `lsof` exits 1 when it finds nothing — the ordinary case. The no-rows message written specifically to stop a zero being read as a measurement was unreachable, and sections 7–8 never printed at all. `|| rc=$?` fixes it. **This is the same family as this doc's own `NR-1` → −1 finding, shipped by the fix for it.**
+  - 🔴 **A THIRD abort route this doc's list of eight never names: `<producer> | sort | head -N` under `pipefail` is SIZE-DEPENDENT.** Measured: **40 entries survive rc 0, 20,000 die rc 141**, silently. Real `/tmp` had 171,886 at the time. Nine sites. Fixed with `head_n() { awk -v n="$1" 'NR<=n'; }` — read to EOF instead of closing the pipe.
+  - **A second E2BIG instance:** `du -sh --exclude=/mnt /var/lib/rancher/k3s/storage/*` in section 5.
+  - **The `xargs -I{}` injection mechanism is NOT what the index entry implies.** GNU `xargs -I` **strips double quotes from its input**, so with `"{}"` the `;` never becomes a statement separator — the leak is **command substitution** (`$(id -un)` expanding inside the surviving quotes) and it lands on **stdout, in the printed path**, not stderr. Unquoted `{}` gives the full statement injection on stderr. Arbitrary root command execution either way, and the "grep for the EXPANSION, never the word" rule is doubly load-bearing because the expansion appears in the stdout path too.
+  - **Two `set -e`-fatal `dumpe2fs` lines are REPORTED, NOT FIXED** — they execute only under root, and a change to them cannot be verified from here. Sections 1, 2, 3, 5, 6, 6b and 8 remain unguarded for the same reason; the suite header says so rather than letting a reader assume coverage it does not have.
+- 🔴 **The subagent found a race in its OWN harness, which is worth more than any single guard.** `printf "$CODE" | grep -q` lets `grep -q` win and SIGPIPE the `printf`, so under `pipefail` a SUCCESSFUL MATCH is reported as "not found" — the same unmodified tree gave 71 ok on one run and a spurious `FAIL: … the script no longer contains …` on the next. Both scans now read from a file. **A mutation battery whose scanner is nondeterministic scores mutants at random**; validate the instrument before reading its verdict.
+- **Four mutants first scored `WRONG-KILLER` and were FIXED, not waved through** — the battery had named each guard's *pass* wording as the killer rather than its *fail* wording. That is the "a mutant killed by a different guard's error is not a kill" rule catching a real scoring bug.
 
 ## How to verify
 1. **The rules are live** (workbench): `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → **7**, `grep -c ' m:7d'` → **0**, `grep -c 'homelab-talos-prs'` → **0**.
