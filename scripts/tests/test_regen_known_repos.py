@@ -348,12 +348,52 @@ def test_a_SHORT_result_is_refused_even_though_gh_exited_zero(monkeypatch):
 
 
 def test_main_exits_nonzero_and_writes_NOTHING_when_gh_fails(monkeypatch, tmp_path, capsys):
+    """🔴 THE READINESS CHECK IS STUBBED, AND WITHOUT THAT LINE THIS TEST READ
+    THE HOST INSTEAD OF THE CODE — measured, in the tier that gates the merge.
+
+    `main()` asks `require_gh_ready()` before it reaches `read_api_repos`, so
+    stubbing only the latter makes the outcome depend on whether the MACHINE has
+    `gh`: the dev host does (readiness passes, the stub throws, exit 3 — green),
+    the nix sandbox does not (readiness fails first, exit 4 — red). It passed on
+    the dev host and failed in the sandbox for that reason alone, which is the
+    two-tier blindness `CLAUDE.md` names: each tier's environment silently
+    decides what executes, so greening one while the other is unobservable moves
+    the bug rather than removing it.
+
+    The arm under test is the AUTHENTICATED-BUT-BROKEN one — gh is present and
+    logged in, and the API call still failed. That is exit 3 and it must toast.
+    Pinning readiness explicitly is what makes the assertion about the code.
+    """
     out = tmp_path / "known_repos.json"
+    monkeypatch.setattr(RG, "require_gh_ready", lambda: None)
     monkeypatch.setattr(RG, "read_api_repos",
                         lambda: (_ for _ in ()).throw(RuntimeError("gh exited 4: no auth")))
-    assert RG.main(["--path", str(out)]) == 3
+    assert RG.main(["--path", str(out)]) == RG.EXIT_FAILED == 3
     assert not out.exists()
     assert "no auth" in capsys.readouterr().err
+
+
+def test_this_suite_never_asks_the_HOST_whether_gh_is_installed(monkeypatch,
+                                                                tmp_path):
+    """🔴 THE GUARD ON THE GUARD ABOVE, because the defect it fixes is invisible
+    on the machine anyone develops on.
+
+    Every `main()` path now runs `require_gh_ready()`, which shells out to
+    `gh auth status`. A test that neither stubs `subprocess.run` nor patches
+    `require_gh_ready` therefore reads the DEVELOPER'S MACHINE, and will keep
+    passing here while failing in the sandbox — a whole class, not one test.
+
+    This asserts the class is closed by construction: with the real readiness
+    check in force and `gh` made unreachable, `main()` returns NOT_CONFIGURED.
+    Any future test that forgets to stub gets that 4 rather than a plausible
+    wrong answer, and this test says why."""
+    def no_gh(cmd, *a, **k):
+        if cmd[:3] == ["gh", "auth", "status"]:
+            raise FileNotFoundError("gh")
+        raise AssertionError(f"nothing may run after readiness fails: {cmd}")
+    monkeypatch.setattr(RG.subprocess, "run", no_gh)
+    assert RG.main(["--path", str(tmp_path / "m.json"),
+                    "--universe-path", str(tmp_path / "u.json")]) == 4
 
 
 # --------------------------------------------------------------------------- #
