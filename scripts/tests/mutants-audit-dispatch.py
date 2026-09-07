@@ -127,7 +127,11 @@ HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # 🔴 ROUND 16 RAISED IT AGAIN, 116 -> 120, at m = 126 — COUNTED from a green run
 # of the module (`126 passed`), `126 - min(50, max(1, 126 // 20))` = 126 - 6 =
 # 120, not derived by adding this round's four new tests to 116.
-MIN_TESTS = 120
+#
+# 🔴 ROUND 18 RAISED IT AGAIN, 120 -> 122, at m = 128 — COUNTED from a green run
+# of the module (`128 passed`), `128 - min(50, max(1, 128 // 20))` = 128 - 6 =
+# 122, not derived by adding this round's one new test to 120.
+MIN_TESTS = 122
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -1901,6 +1905,133 @@ def the_cached_build_fallback_loses_its_empty_drv_guard(t):
     return _swap(t, "        NIX_LOG_DRV_GUARD,\n", "")
 
 
+def the_drv_guards_stop_becomes_a_trailing_comment(t):
+    """V63 — round 18. The stop REMOVED while every word of it survives.
+
+    V62 deletes the guard wholesale, which any presence check sees. This is the
+    shape a presence check CANNOT see: `... cat "$ERR"; }   # exit 1`. The
+    braces close with no `exit`, so the guard echoes its diagnosis and the block
+    walks on into `nix log ""` — the CWD flake's default package log, which may
+    read `RESULT: PASS (exit=0)`. Measured SURVIVED at 127 passed against the
+    pre-round-18 test module, whose check was `"exit 1" in line`; the line
+    filter there drops only lines that START with `#`, so the comment rode
+    along inside the asserted line.
+
+    🔴 NARROWEST EXPRESSION THAT CAN BE WRONG. Nothing else on the line moves —
+    same guard, same diagnosis, same `$ERR` — so a kill is attributable to the
+    stop and to nothing else.
+    """
+    return _swap(t, 'cat "$ERR"; exit 1; }\'', 'cat "$ERR"; }   # exit 1\'')
+
+
+def the_verdict_grep_is_deleted_from_the_last_line(t):
+    """V64 — round 18. The block stops asking whether a verdict was printed.
+
+    The last line becomes `grep -c "panic: test timed out" "$LOG"; echo done`.
+    Walked against a log with NO `RESULT:` line this exits 0 where the shipped
+    block exits 1 — the auditor is told nothing is wrong by a block that no
+    longer looks. Measured SURVIVED: the pre-round-18 assertion only refused a
+    LAST COMMAND matching `^grep -c`, and `echo done` is not one.
+    """
+    return _swap(t, '"$LOG"; grep -n "RESULT:" "$LOG"\',',
+                 '"$LOG"; echo done\',')
+
+
+def a_true_is_appended_after_the_verdict_grep(t):
+    """V65 — round 18. The verdict grep is still there and sets nothing.
+
+    `...; grep -n "RESULT:" "$LOG"; true` — the grep runs, prints, and then
+    `true` overwrites `$?`, so the block exits 0 whatever the log says. The
+    other direction of V64's gap: V64 removes the right command, this one keeps
+    it and takes away its status. Both survived the negative-only pin.
+    """
+    return _swap(t, '"RESULT:" "$LOG"\',', '"RESULT:" "$LOG"; true\',')
+
+
+def the_stderr_path_is_fixed_while_the_log_path_is_not(t):
+    """V66 — round 18. Cross-agent truncation, in the DIAGNOSTIC path.
+
+    `LOG=` keeps its `mktemp` — so the concurrency pin, which read `LOG=`
+    alone, stays green — while `ERR=` becomes a fixed `/tmp` path that every
+    sibling agent truncates. The `$DRV` guard then `cat`s a diagnosis that may
+    belong to another run's tier, which is worse than no diagnosis: it names a
+    cause.
+
+    🔴 THE HALF THE PIN COULD NOT SEE, mutated ALONE on purpose. Moving both
+    assignments would die to the `LOG=` check and prove nothing about `ERR=`.
+    """
+    return _swap(t, 'ERR=$(mktemp -t audit-tier-XXXXXXXX.err)',
+                 'ERR=/tmp/audit-tier.err')
+
+
+def the_drv_guards_stop_hides_in_a_comment_that_ends_in_the_suffix(t):
+    """V68 — round 19. V63's hazard, spelled to satisfy an `endswith` pin.
+
+    🔴 THE LADDER'S SIGNATURE FAILURE, IN THE COMMIT THAT FIXED V63. Round 18
+    replaced `"exit 1" in line` with `line.endswith("exit 1; }")` — and
+    `endswith` anchors at the END of the line, which is exactly where a
+    trailing comment lives. `re.match` excludes comments because it anchors at
+    the START; `endswith` cannot. So:
+
+        [ -n "$DRV" ] || { echo "…"; cat "$ERR"; }   # exit 1; }
+
+    ends in `exit 1; }`, carries no `exit` in its CODE, and measured **128
+    passed, rc 0** against round 18's own fix. The rendered block prints
+    `NO DERIVATION` and walks on into `nix log ""` — the CWD flake's
+    default-package log. Byte-for-byte V63's hazard, one character apart from
+    the mutation that IS killed.
+
+    The fix is not a wider suffix: it is to judge the CODE and not the LINE.
+    """
+    return _swap(t, 'cat "$ERR"; exit 1; }\'', 'cat "$ERR"; }   # exit 1; }\'')
+
+
+def a_true_is_reached_by_or_after_the_verdict_grep(t):
+    """V69 — round 19. V65's hazard, reached by `||` instead of `;`.
+
+    Round 18 took the last COMMAND as `lines[-1].split(";")[-1]` — a split on
+    `;` alone, so a trailing `true` reached by `||` is invisible to it while the
+    assertion's own failure message says "A trailing `true` … make[s] the block
+    exit 0". Measured **128 passed, rc 0**.
+
+    Walked against a log with NO `RESULT:` line: the shipped block exits 1,
+    V65 (`; true`, killed) exits 0, and this (`|| true`, survived) exits 0.
+    Identical hazard, different spelling — and the same root cause admits
+    `| head` and a wrong file argument, which is why the fix splits on every
+    unquoted separator and pins the WHOLE command rather than its prefix.
+    """
+    return _swap(t, '"RESULT:" "$LOG"\',', '"RESULT:" "$LOG" || true\',')
+
+
+def the_stop_note_prescribes_wrapping_alone_again(t):
+    """V67 — round 18. The prescription that does not stop, restored verbatim.
+
+    This is what shipped: "Wrap the block in a function and call it", with "Do
+    NOT simply swap `exit` for `return`" beside it. `exit` inside a function
+    still exits the shell, so wrapping alone changes nothing — measured under a
+    pty, `run_tier(){ …; exit 1; }; run_tier` kills both `bash -i` and
+    `zsh -i`. The note was NOT pinned by anything at the time: `grep` for `Wrap
+    the block`, `run_tier` or `INTERACTIVE shell` across the test module and
+    this harness returned zero hits.
+
+    The mutation is scoped to the PRESCRIPTION sentence; the surrounding
+    measurement prose is untouched, so a kill is attributable to the advice.
+    """
+    return _swap(
+        t,
+        '    "🔴 **Two forms stop the block without closing your shell: run it AS A "\n'
+        '    "SCRIPT (`bash <file>`), or wrap it in a function AND swap `exit` for "\n'
+        '    "`return` — `run_tier() { … return 1; }; run_tier`.** Wrapping ALONE is "\n'
+        '    "not one of them: `exit` inside a function still exits the shell, MEASURED "\n'
+        '    "under a pty in interactive bash and interactive zsh — `run_tier() { … "\n'
+        '    "exit 1; }; run_tier` killed both. 🔴 The swap works only INSIDE the "\n'
+        '    "function: `return` AT TOP LEVEL is not a stop, and MEASURED in "\n',
+        '    "🔴 **Wrap the block in a function and call it** — `run_tier() { … }; "\n'
+        '    "run_tier`. Do NOT simply swap `exit` for `return`: at top level "\n'
+        '    "`return` is not a stop, and MEASURED in "\n',
+    )
+
+
 def the_absence_bar_points_at_a_bar_that_is_never_above_it(t):
     """V61 — round 16. The dangling cross-reference, restored.
 
@@ -3017,6 +3148,48 @@ ROWS = [
     ("V62 the cached-build fallback loses its empty-$DRV guard",
      {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
      the_cached_build_fallback_loses_its_empty_drv_guard),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 V63-V67 — round 18. Base `10d437c9`. Round 17 shipped the recovery
+    # block WITH a guard test, and the round-2 delta audit found the test's
+    # pins narrower than their own docstring at three separate points. Every
+    # row here was measured SURVIVING a green 127-test suite BEFORE the fix —
+    # which is the point: round 17 added no mutant for any of them, and V62
+    # (delete the guard wholesale) is the only thing that reached this block at
+    # all, so nothing could have caught a pin that reads as coverage while
+    # providing none.
+    # --------------------------------------------------------------------- #
+    ("V63 the $DRV guard's stop demoted to a trailing comment",
+     {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
+     the_drv_guards_stop_becomes_a_trailing_comment),
+    ("V64 the verdict grep deleted, the block ending on `echo done`",
+     {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
+     the_verdict_grep_is_deleted_from_the_last_line),
+    ("V65 `true` appended after the verdict grep",
+     {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
+     a_true_is_appended_after_the_verdict_grep),
+    ("V66 a FIXED $ERR path while $LOG keeps its mktemp",
+     {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
+     the_stderr_path_is_fixed_while_the_log_path_is_not),
+    ("V67 the stop-note prescribes wrapping ALONE again",
+     {"test_the_stop_note_prescribes_something_that_actually_stops"},
+     the_stop_note_prescribes_wrapping_alone_again),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 V68-V69 — round 19, from the blind audit OF ROUND 18. Both are round
+    # 18's own hazards re-spelled, and both survived round 18's fix at 128
+    # passed. The lesson is one line long: round 18 pinned the SYMPTOM SHAPE
+    # (a suffix, a `;`) where the hazard is a CLASS (code vs comment, a
+    # command vs a line). That is the same per-symptom-not-per-class error
+    # round 18 filed against round 17, reproduced inside the fix for it —
+    # seven of eight rounds now.
+    # --------------------------------------------------------------------- #
+    ("V68 the $DRV guard's stop hidden in a comment ENDING in the suffix",
+     {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
+     the_drv_guards_stop_hides_in_a_comment_that_ends_in_the_suffix),
+    ("V69 `true` reached by `||` after the verdict grep",
+     {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
+     a_true_is_reached_by_or_after_the_verdict_grep),
 ]
 
 
