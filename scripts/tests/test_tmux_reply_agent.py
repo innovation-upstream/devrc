@@ -103,6 +103,26 @@ def load_agent():
 AGENT = load_agent()
 
 
+def _load_collector():
+    """Import `scripts/session-manager` so its VALUES can be read.
+
+    🔴 THE VALUE, NOT THE SOURCE TEXT. A seam guard that greps the collector's
+    source for an exact literal fails on every legitimate edit to that literal
+    and passes anything spelled the same way — see
+    `test_the_server_id_format_matches_the_collectors` for the instance that
+    made this necessary. Loading it costs nothing: the module has no import-time
+    side effects (its own suite loads it exactly this way, autouse fixtures and
+    all), and it is the same by-path loader `load_agent` uses because
+    `session-manager` likewise has no `.py` extension.
+    """
+    loader = importlib.machinery.SourceFileLoader("session_manager_seamcheck", str(COLLECTOR))
+    spec = importlib.util.spec_from_file_location("session_manager_seamcheck", str(COLLECTOR),
+                                                  loader=loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
 # --------------------------------------------------------------------------- #
 # The stub server: hands out a fixed claim batch, records every request.
 # --------------------------------------------------------------------------- #
@@ -712,17 +732,51 @@ def test_the_server_id_format_matches_the_collectors():
     refuse everything — which reads exactly like "the feature does not work",
     with no error naming the cause.
 
-    The check reads the COLLECTOR'S OWN SOURCE rather than restating the format,
+    The check reads the COLLECTOR'S OWN VALUE rather than restating the format,
     so a change there fails here instead of drifting silently.
+
+    🔴 IT ASSERTS THE RELATIONSHIP, NOT THE WHOLE LITERAL — AND THAT IS A FIX,
+    NOT A WEAKENING. This used to compare the collector's `WINDOW_FORMAT` SOURCE
+    LINE against one exact string, which made it fail on any legitimate
+    ADDITION to that format while proving nothing extra about the seam it
+    guards. It went red the first time a field was appended (`#{window_activity}`,
+    a per-window activity time that has nothing to do with the server id) even
+    though both tokens this test actually cares about were still there, still
+    server-level, and still joined the same way. A guard that fails on changes
+    it does not care about, and would pass a reordering it does, is pinned to a
+    SPELLING rather than to the invariant.
+
+    What the seam needs is exactly two things: the collector's format still asks
+    tmux for BOTH `#{pid}` and `#{start_time}`, and it still joins them with a
+    single `:` in that order. Both are asserted against the collector's loaded
+    VALUE and its joiner, so a rename, a removal or a re-ordering fails here,
+    and an unrelated new field does not.
     """
     src = COLLECTOR.read_text()
-    assert 'WINDOW_FORMAT = "#{window_id}|#{window_index}|#{pid}|#{start_time}|#{session_name}"' in src, (
-        "the collector's window format changed; re-derive TMUX_SERVER_ID_FORMAT from it")
+    collector = _load_collector()
+    fmt = collector.WINDOW_FORMAT
+    for token in ("#{pid}", "#{start_time}"):
+        assert token in fmt, (
+            f"the collector's WINDOW_FORMAT no longer asks tmux for {token} "
+            f"(it is {fmt!r}); re-derive TMUX_SERVER_ID_FORMAT from it")
+    # ORDER, not mere presence: the id is built `<pid>:<start_time>`, so a
+    # collector that swapped the two fields would store the halves the other way
+    # round and every expectation this agent sends would be refused.
+    assert fmt.index("#{pid}") < fmt.index("#{start_time}"), (
+        f"the collector's WINDOW_FORMAT puts #{{start_time}} before #{{pid}} ({fmt!r}); "
+        "the server id is built pid-first and the two would be transposed")
     assert 'return f"{pid}:{started}", None' in src, (
         "the collector no longer joins the server id as `<pid>:<start_time>`")
     assert AGENT.TMUX_SERVER_ID_FORMAT == "#{pid}:#{start_time}", (
         f"the agent asks tmux for {AGENT.TMUX_SERVER_ID_FORMAT!r}, which is not the shape the "
         "collector stores; every write carrying an expectation would be refused")
+    # And the two spellings are DERIVED from one another rather than merely both
+    # correct today: the agent's format is exactly the collector's two tokens
+    # joined by the collector's separator.
+    assert AGENT.TMUX_SERVER_ID_FORMAT == "#{pid}:#{start_time}" and all(
+        t in fmt for t in AGENT.TMUX_SERVER_ID_FORMAT.split(":")), (
+        "the agent's server-id format is built from tokens the collector's window "
+        f"format does not carry: agent={AGENT.TMUX_SERVER_ID_FORMAT!r} collector={fmt!r}")
 
 
 def test_an_unmeasurable_server_id_reads_as_empty(tmp_path, monkeypatch):
