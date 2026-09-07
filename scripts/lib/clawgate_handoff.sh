@@ -834,6 +834,20 @@ clawgate_zero_probe(){
 # into `/api/sessions/<id>/tasks`, where the board stores the raw id — and the
 # validation below would reject a tag's colon anyway.
 #
+# 🔴 THE WRITER HAS NO OPENCODE TIER, SO A CORRECT READ CAN STILL ANSWER ZERO.
+# MEASURED 2026-09-07 against homelab-talos `b3ad3d8cb`: `clawgatectl`'s
+# `sessionIDEnvNames` (cmd/clawgatectl/task.go) lists the two CLAUDE spellings
+# and no opencode one — `grep -rl OPENCODE containers/` returns ZERO files,
+# against FIVE for `CLAUDE_CODE_SESSION_ID`.
+# The link a task pickup writes is therefore always keyed by a claude id, so an
+# opencode session asking about its OWN id gets `200 {"tasks":[]}` -> exit 5.
+# That is HONEST — exit 5 says "asked, got nothing, and that cannot be
+# distinguished from a wrong id" — and it is strictly better than the exit 0
+# carrying an ancestor's tasks that it replaces. But it means this tier buys
+# CORRECTNESS, not capability: opencode sessions resolve nothing until
+# `clawgatectl` grows the same tier. Re-measure before repeating this; it is a
+# claim about another repository's source on a given day.
+#
 # 🔴 AN UNKNOWN SESSION ANSWERS `200 {"tasks":[]}`, NOT 404. So an empty array
 # cannot distinguish "this session touched no task" from "the id is wrong" —
 # exit 5 says exactly that rather than reporting a clean resolution of nothing.
@@ -845,6 +859,29 @@ clawgate_resolve(){
   if [ -n "${OPENCODE_SESSION_ID:-}" ]; then
     sid="${OPENCODE_SESSION_ID}"; sid_src="OPENCODE_SESSION_ID"
   elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    # 🔴 THE INHERITED-ID REFUSAL — the SECOND half of the design, and porting
+    # only the ordering above left the dangerous case wide open. `OPENCODE=1` is
+    # set by opencode's CLI in a yargs TOP-LEVEL `.middleware()`, so it is
+    # present for every subcommand and rides down into its tool shells. If it is
+    # set while `OPENCODE_SESSION_ID` is absent-or-empty, then the only id in
+    # reach is a `CLAUDE_CODE_SESSION_ID` INHERITED from an ancestor Claude Code
+    # session — asking the board about it returns ANOTHER SESSION'S TASKS with
+    # exit 0, which is the exact silent misattribution this function exists to
+    # stop. Refuse instead.
+    #
+    # 🔴 THIS IS NOT A THEORETICAL STATE. `scripts/opencode/plugin/session-env.js`
+    # sets `OPENCODE_SESSION_ID=""` deliberately on the PTY path (the hook fires
+    # with `{cwd}` only, no sessionID), and its comment states that empty
+    # "degrades to the same fail-closed path as no plugin at all". That was true
+    # of `browser` — which pairs the same ordering with an `OPENCODE` check at
+    # `scripts/browser-bridge/browser:769`, tagging the id `opencode-inherited`
+    # so `server.py` refuses it as a session key — and FALSE here until this arm
+    # existed. A sibling's fail-closed guarantee is not inherited by copying its
+    # precedence; port the refusal too.
+    if [ -n "${OPENCODE:-}" ]; then
+      echo "clawgate: REFUSED — \$OPENCODE is set (this is an opencode run) but \$OPENCODE_SESSION_ID is unset or empty, so the only id available is a \$CLAUDE_CODE_SESSION_ID INHERITED from an ancestor session. Asking about it would return ANOTHER session's tasks. The board was never asked. This is NOT 'no task'."
+      return 3
+    fi
     sid="${CLAUDE_CODE_SESSION_ID}"; sid_src="CLAUDE_CODE_SESSION_ID"
   fi
   if [ -z "$sid" ]; then

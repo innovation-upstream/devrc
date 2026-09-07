@@ -161,8 +161,15 @@ def shell_fn_body(src: str, name: str) -> str:
     Scoping every scan below to one function is what makes them STATE
     assertions rather than file-wide word searches: a `jq` call that moves out
     of `clawgate_rank_rows` leaves the ledger, and one that moves in joins it.
+
+    🔴 `\\s*` before the brace, because the two files this is used on differ:
+    `clawgate_handoff.sh` writes `name(){` and `browser` writes `name() {`. The
+    seam test below open-coded a SECOND extractor to cope with that, which meant
+    one concept had two implementations in one file — and a cosmetic
+    `clawgate_resolve() {` would have broken this one's five call sites while
+    the copy passed. Widened here instead.
     """
-    m = re.search(rf"^{re.escape(name)}\(\)\{{\n(.*?)^\}}\s*$", src, re.M | re.S)
+    m = re.search(rf"^{re.escape(name)}\(\)\s*\{{\n(.*?)^\}}\s*$", src, re.M | re.S)
     assert m, f"{name}() is no longer a top-level `name(){{ … }}` block"
     return m.group(1)
 
@@ -2370,14 +2377,71 @@ class TestOpencodeSessionIdIsTierZero:
         assert r.returncode == 0, r.stdout
         assert self._main_url_ids(resolver) == [self.CC], urls(resolver)
 
-    def test_an_empty_opencode_var_falls_through_to_claude(self, resolver):
-        """Set-but-EMPTY must not shadow the claude tier. `-n` rather than
-        `-v`/`${x+set}` is what makes that true, and an exported-empty variable
-        is the ordinary state of a var a hook cleared."""
+    def test_an_empty_opencode_var_falls_through_to_claude_OUTSIDE_opencode(self, resolver):
+        """Set-but-EMPTY must not shadow the claude tier in an ordinary Claude
+        Code session. `-n` rather than `-v`/`${x+set}` is what makes that true.
+
+        ⚠ NOTE THE `OUTSIDE` IN THE NAME. An earlier draft of this test asserted
+        the fallthrough with NO opencode marker in the environment either way,
+        which pinned the hazard below as intended behaviour. The two cases are
+        distinguished by `$OPENCODE`, not by the empty id.
+        """
         r = resolver(ONE, session=SESSION_VAR, session_id=self.CC,
                      extra_env={OPENCODE_SESSION_VAR: ""})
         assert r.returncode == 0, r.stdout
         assert self._main_url_ids(resolver) == [self.CC], urls(resolver)
+
+    @pytest.mark.parametrize("oc_id", ["", None], ids=["empty", "absent"])
+    def test_INSIDE_opencode_an_inherited_claude_id_is_REFUSED(self, resolver, oc_id):
+        """🔴 THE DANGEROUS HALF. `$OPENCODE=1` with no usable opencode id means
+        the `CLAUDE_CODE_SESSION_ID` in scope was INHERITED from an ancestor, so
+        using it returns another session's tasks with exit 0 — the exact silent
+        misattribution this class exists to stop.
+
+        Both spellings are driven because they arise differently: EMPTY is what
+        `scripts/opencode/plugin/session-env.js` deliberately writes on the PTY
+        path, ABSENT is a run with no plugin at all. Nothing may be asked in
+        either.
+        """
+        extra = {"OPENCODE": "1"}
+        if oc_id is not None:
+            extra[OPENCODE_SESSION_VAR] = oc_id
+        r = resolver(ONE, session=SESSION_VAR, session_id=self.CC,
+                     extra_env=extra)
+        assert r.returncode == 3, (
+            f"an inherited claude id inside opencode must be REFUSED, not used.\n"
+            f"rc={r.returncode}\nstdout={r.stdout}"
+        )
+        assert not urls(resolver), (
+            f"the board was asked with an INHERITED id: {urls(resolver)}"
+        )
+        assert self.CC not in r.stdout, (
+            f"the refusal leaked the ancestor's id.\n{r.stdout}"
+        )
+
+    def test_a_real_opencode_id_still_wins_INSIDE_opencode(self, resolver):
+        """The refusal above must not swallow the working case: with `$OPENCODE`
+        set AND a real opencode id, tier 0 resolves normally. Without this, a
+        guard that refused unconditionally inside opencode would pass every
+        assertion in the test above."""
+        r = resolver(ONE, session=OPENCODE_SESSION_VAR, session_id=self.OC,
+                     extra_env={"OPENCODE": "1", SESSION_VAR: self.CC})
+        assert r.returncode == 0, r.stdout
+        assert self._main_url_ids(resolver) == [self.OC], urls(resolver)
+
+    def test_the_claude_tier_refusal_names_the_CLAUDE_variable(self, resolver):
+        """🔴 THE MIRROR OF `..._CAME_FROM`, and its absence let a mutant live:
+        hardcoding `$OPENCODE_SESSION_ID` into the refusal message passed the
+        whole file, because the only assertion on WHICH variable a refusal names
+        was on the opencode tier. A one-directional pair cannot see a message
+        that always names tier 0."""
+        r = resolver(ONE, session=SESSION_VAR, session_id="has/a/slash")
+        assert r.returncode == 3, r.stdout
+        assert SESSION_VAR in r.stdout, r.stdout
+        assert OPENCODE_SESSION_VAR not in r.stdout, (
+            f"named the opencode variable for an id that came from the claude "
+            f"tier — `sid_src` is not being used.\n{r.stdout}"
+        )
 
     def test_neither_variable_set_exits_3_and_names_BOTH(self, resolver):
         r = resolver(ONE, session=None)
@@ -2427,11 +2491,9 @@ class TestOpencodeSessionIdIsTierZero:
         """
         for path, fn in ((LIB, "clawgate_resolve"), (BROWSER, "derive_session_id")):
             src = path.read_text(encoding="utf-8")
-            # tolerant of both `name(){` and `name() {` — the two files differ.
-            m = re.search(rf"^{re.escape(fn)}\(\)\s*\{{\n(.*?)^\}}\s*$",
-                          src, re.M | re.S)
-            assert m, f"{path.name}: {fn}() is no longer a top-level block"
-            body = _decommented(m.group(1))
+            # `shell_fn_body` (widened to accept `name() {`) rather than a
+            # second extractor — one concept, one implementation.
+            body = _decommented(shell_fn_body(src, fn))
             oc = body.find(OPENCODE_SESSION_VAR)
             cc = body.find(SESSION_VAR)
             assert oc != -1, f"{path.name}:{fn} does not READ {OPENCODE_SESSION_VAR}"
@@ -2733,6 +2795,9 @@ class TestZeroPositiveControl:
 HANDOFF_PINS: list[tuple[str, str]] = [
     ("scripts/lib/clawgate_handoff.sh", "the step invokes the tool that owns the resolution"),
     (SESSION_VAR, "🔴 the EXACT session variable reaches the executor"),
+    (OPENCODE_SESSION_VAR, "🔴 TIER 0 reaches the executor — the doc named only "
+                           "the claude var while the code read this one first"),
+    ("$OPENCODE", "🔴 the inherited-id REFUSAL is stated, not just the ordering"),
     ("clawgate-task: 193", "the front-matter SHAPE is shown, not described"),
     ("NEVER create a task", "🔴 a task is never minted to fill a blank field"),
     ("ASK the user which one", "several resolved => a question, not a guess"),
