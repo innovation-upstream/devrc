@@ -805,20 +805,50 @@ clawgate_zero_probe(){
 
 # `clawgate_resolve` — which clawgate task(s) does THIS session own?
 #
-# 🔴 THE SESSION ID COMES FROM `CLAUDE_CODE_SESSION_ID` — there is no `CLAUDE_SESSION_ID`.
-# Reading a name that does not exist is how a feature ships INERT, because an
-# unset variable and a session that touched nothing produce the same empty
-# result and neither raises anything. Hence the explicit exit 3 below: "the
-# variable was not set" is reported as its own outcome and never folded into
-# "no tasks".
+# 🔴 THE SESSION ID COMES FROM `OPENCODE_SESSION_ID` THEN `CLAUDE_CODE_SESSION_ID`
+# — there is no `CLAUDE_SESSION_ID`. Reading a name that does not exist is how a
+# feature ships INERT, because an unset variable and a session that touched
+# nothing produce the same empty result and neither raises anything. Hence the
+# explicit exit 3 below: "the variable was not set" is reported as its own
+# outcome and never folded into "no tasks".
+#
+# 🔴 OPENCODE IS TIER 0, AND THE ORDER IS THE WHOLE FIX. opencode INHERITS the
+# outer Claude Code session's `CLAUDE_CODE_SESSION_ID` and hands it to its tool
+# shells verbatim (see `nix/home.nix`, the `shell.env` hook that exports
+# `OPENCODE_SESSION_ID` per call). So reading the claude var first gave the two
+# failures this replaces:
+#   * DETACHED opencode — no claude var in the environment at all, so `resolve`
+#     returned exit 3 forever and the board was never asked;
+#   * NESTED opencode — the claude var IS set, inherited from the parent, so
+#     `resolve` returned exit 0 carrying ANOTHER SESSION'S TASKS. That one is
+#     the dangerous half: it is silent, and it reads exactly like a clean
+#     resolution.
+# The precedence is NOT invented here. It is the same order, for the same
+# stated reason, as `derive_session_id` in `scripts/browser-bridge/browser`:
+# opencode's id is the only one REWRITTEN ON EVERY TOOL CALL, while the claude
+# vars can be a stale value inherited from an ancestor process. If you change
+# one, change both — a divergence between them is a misattribution nobody sees.
+#
+# ⚠ The id is sent BARE, not namespaced. `browser` tags its ids (`opencode:<id>`)
+# because it multiplexes tab ownership across sources; this function interpolates
+# into `/api/sessions/<id>/tasks`, where the board stores the raw id — and the
+# validation below would reject a tag's colon anyway.
 #
 # 🔴 AN UNKNOWN SESSION ANSWERS `200 {"tasks":[]}`, NOT 404. So an empty array
 # cannot distinguish "this session touched no task" from "the id is wrong" —
 # exit 5 says exactly that rather than reporting a clean resolution of nothing.
 clawgate_resolve(){
-  local sid="${CLAUDE_CODE_SESSION_ID:-}"
+  # `sid_src` names the variable the id CAME FROM, so every refusal below can say
+  # which one it read. A message hardcoding one name while the code reads another
+  # is the same inert-feature class the header warns about, one layer out.
+  local sid="" sid_src=""
+  if [ -n "${OPENCODE_SESSION_ID:-}" ]; then
+    sid="${OPENCODE_SESSION_ID}"; sid_src="OPENCODE_SESSION_ID"
+  elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    sid="${CLAUDE_CODE_SESSION_ID}"; sid_src="CLAUDE_CODE_SESSION_ID"
+  fi
   if [ -z "$sid" ]; then
-    echo "clawgate: NO SESSION ID — \$CLAUDE_CODE_SESSION_ID is unset or empty, so the board was never asked. This is NOT 'no task'."
+    echo "clawgate: NO SESSION ID — neither \$OPENCODE_SESSION_ID nor \$CLAUDE_CODE_SESSION_ID is set, so the board was never asked. This is NOT 'no task'."
     return 3
   fi
   # The id is interpolated into a URL PATH. Refuse anything that could steer it
@@ -827,7 +857,7 @@ clawgate_resolve(){
   # parameters for.
   case "$sid" in
     *[!A-Za-z0-9._-]*)
-      echo "clawgate: REFUSED — \$CLAUDE_CODE_SESSION_ID is not a plain session id, so nothing was asked."
+      echo "clawgate: REFUSED — \$$sid_src is not a plain session id, so nothing was asked."
       return 3
       ;;
   esac

@@ -19,11 +19,19 @@ suite is built around, and each is the same disease this repo keeps meeting:
      wrong" (claude/RULES.md: an empty result cannot distinguish two
      mechanisms). `resolve` must say so rather than report a clean resolution.
   3. 🔴 A CONSTANT THAT IS NEVER UNDER TEST. The session id comes from
-     `CLAUDE_CODE_SESSION_ID`; there is no `CLAUDE_SESSION_ID`, and reading the
-     name that does not exist ships a feature that is INERT and indistinguishable
-     from a working one. Both names are written as LITERALS in this file and
-     never imported from the subject, and the negative control sets the wrong
-     one and watches the tool refuse.
+     `OPENCODE_SESSION_ID` first and `CLAUDE_CODE_SESSION_ID` second; there is
+     no `CLAUDE_SESSION_ID`, and reading the name that does not exist ships a
+     feature that is INERT and indistinguishable from a working one. All three
+     names are written as LITERALS in this file and never imported from the
+     subject, and the negative control sets the wrong one and watches the tool
+     refuse.
+
+     🔴 THE ORDER IS ITSELF A CONTRACT, not a detail. opencode INHERITS the
+     outer session's `CLAUDE_CODE_SESSION_ID`, so reading claude-first returned
+     a clean exit 0 carrying ANOTHER SESSION'S TASKS from inside a nested
+     opencode run. `TestOpencodeSessionIdIsTierZero` asserts on the URL that was
+     actually requested, since stdout cannot distinguish "picked the right id"
+     from "picked the wrong one and described the right one".
 
      ⚠ THE HARNESS ITSELF NEARLY WALKED THAT CONTROL. `CLAUDE_CODE_SESSION_ID`
      is set in the environment of any real Claude Code session, so a subprocess
@@ -70,6 +78,12 @@ HANDOFF_DOC_TOOL = REPO_ROOT / "scripts" / "lib" / "handoff_doc.py"
 # inert. `WRONG_SESSION_VAR` is a real, plausible spelling that does not exist.
 SESSION_VAR = "CLAUDE_CODE_SESSION_ID"
 WRONG_SESSION_VAR = "CLAUDE_SESSION_ID"
+#: 🔴 opencode's own per-tool-call id, and TIER 0 — it outranks `SESSION_VAR`.
+#: Also a literal, for the same reason as the two above: this suite must be able
+#: to see the subject reading a name that does not exist. It is exported by the
+#: `shell.env` hook in `scripts/opencode/plugin/session-env.js` (wired in
+#: `nix/home.nix`), so it is present ONLY inside an opencode tool shell.
+OPENCODE_SESSION_VAR = "OPENCODE_SESSION_ID"
 
 # The four task states, taken from THIS REPO'S SINGLE DEFINITION rather than
 # spelled again here — `test_clawgate_predicate_single_source.py` walks every
@@ -203,10 +217,19 @@ def _base_env() -> dict:
     🔴 Both session-id spellings are popped. See the module docstring: the real
     one is present in every Claude Code session, and inheriting it made the
     negative control pass while the code read the wrong name.
+
+    🔴 `OPENCODE_SESSION_VAR` is popped for the SAME reason, and it is the more
+    dangerous of the three to leave in: it is TIER 0, so an inherited value does
+    not merely answer a question the subject should have failed — it OUTRANKS
+    the variable the test is setting. Run this suite from inside an opencode
+    tool shell without this pop and every claude-tier assertion resolves
+    opencode's id instead, silently. Pinned by
+    `test_the_harness_carries_no_session_variable_at_all`.
     """
     env = dict(os.environ)
     env.pop(SESSION_VAR, None)
     env.pop(WRONG_SESSION_VAR, None)
+    env.pop(OPENCODE_SESSION_VAR, None)
     return env
 
 
@@ -1375,7 +1398,7 @@ def resolver(tmp_path):
            code="200", rc="0", env_file: str | None = None,
            jq_fail_on: int | None = None, jq_fail_out: str = "",
            tasklist=None, control=None, ctl_code="200", ctl_rc="0",
-           ctl2_code="200", ctl2_rc="0"):
+           ctl2_code="200", ctl2_rc="0", extra_env: dict | None = None):
         env = _base_env()
         env["HOME"] = str(home)
         env["PATH"] = f"{binp}{os.pathsep}{env['PATH']}"
@@ -1417,6 +1440,12 @@ def resolver(tmp_path):
             env["STUB_BODY"] = str(body)
         if session is not None:
             env[session] = session_id
+        # AFTER the `session` assignment on purpose: the nested-opencode tests
+        # need BOTH variables set at once, and which one wins is the behaviour
+        # under test — so this must be able to add the second, never be
+        # overwritten by the first.
+        if extra_env:
+            env.update(extra_env)
         if env_file is not None:
             (home / ".claude" / "clawgate.env").write_text(env_file, encoding="utf-8")
         return subprocess.run(["bash", str(LIB), "resolve"], capture_output=True,
@@ -2278,6 +2307,140 @@ def control_links(sid: str = CTL_SID, n: int = CTL_LINKS) -> dict:
 def urls(resolver) -> list[str]:
     log = resolver.url_log  # type: ignore[attr-defined]
     return log.read_text().split() if log.exists() else []
+
+
+BROWSER = REPO_ROOT / "scripts" / "browser-bridge" / "browser"
+
+
+class TestOpencodeSessionIdIsTierZero:
+    """`resolve` must read opencode's own id BEFORE Claude Code's.
+
+    🔴 THE TWO FAILURES THIS PINS ARE NOT THE SAME SHAPE, and only one is loud.
+    A DETACHED opencode run has no claude variable at all, so the old code
+    returned exit 3 forever — annoying, but self-announcing. A NESTED opencode
+    run INHERITS `CLAUDE_CODE_SESSION_ID` from its parent and hands it to its
+    tool shells verbatim, so the old code returned exit 0 carrying the PARENT
+    SESSION'S TASKS. That one is silent and reads exactly like a clean
+    resolution — it is the reason the order, not merely the presence of a second
+    variable, is what is under test here.
+
+    Every assertion below is on the URL the subject actually requested, because
+    that is the only place the chosen id becomes observable. Asserting on the
+    stdout wording instead would pass for a subject that picked the wrong id and
+    described the right one.
+    """
+
+    OC = "oc-sess-777"
+    CC = "claude-parent-111"
+
+    def _main_url_ids(self, resolver) -> list[str]:
+        """The session id out of every `/api/sessions/<id>/tasks` URL requested."""
+        return [m.group(1) for u in urls(resolver)
+                if (m := re.search(r"/api/sessions/([^/]+)/tasks", u))]
+
+    def test_detached_opencode_resolves_instead_of_refusing(self, resolver):
+        """Only the opencode var set — the old code exited 3 without asking."""
+        r = resolver(ONE, session=OPENCODE_SESSION_VAR, session_id=self.OC)
+        assert r.returncode == 0, (
+            f"a detached opencode run must reach the board.\n"
+            f"rc={r.returncode}\nstdout={r.stdout}\nstderr={r.stderr}"
+        )
+        assert recorded(r.stdout) == ["193"], r.stdout
+        assert self._main_url_ids(resolver) == [self.OC], urls(resolver)
+
+    def test_nested_opencode_never_resolves_the_parent_claude_session(self, resolver):
+        """BOTH set, different ids. The opencode id must win — and the parent's
+        must not appear in ANY request. Two directions, because a subject that
+        asked for neither would satisfy the absence half alone."""
+        r = resolver(ONE, session=OPENCODE_SESSION_VAR, session_id=self.OC,
+                     extra_env={SESSION_VAR: self.CC})
+        assert self._main_url_ids(resolver) == [self.OC], (
+            f"nested opencode asked the board about the WRONG session — this is "
+            f"the silent misattribution.\nurls={urls(resolver)}"
+        )
+        joined = "\n".join(urls(resolver))
+        assert self.CC not in joined, (
+            f"the parent Claude session's id reached the wire.\n{joined}"
+        )
+        assert r.returncode == 0, r.stdout
+
+    def test_claude_only_is_unchanged(self, resolver):
+        """The pre-existing path, pinned so the new tier cannot capture it."""
+        r = resolver(ONE, session=SESSION_VAR, session_id=self.CC)
+        assert r.returncode == 0, r.stdout
+        assert self._main_url_ids(resolver) == [self.CC], urls(resolver)
+
+    def test_an_empty_opencode_var_falls_through_to_claude(self, resolver):
+        """Set-but-EMPTY must not shadow the claude tier. `-n` rather than
+        `-v`/`${x+set}` is what makes that true, and an exported-empty variable
+        is the ordinary state of a var a hook cleared."""
+        r = resolver(ONE, session=SESSION_VAR, session_id=self.CC,
+                     extra_env={OPENCODE_SESSION_VAR: ""})
+        assert r.returncode == 0, r.stdout
+        assert self._main_url_ids(resolver) == [self.CC], urls(resolver)
+
+    def test_neither_variable_set_exits_3_and_names_BOTH(self, resolver):
+        r = resolver(ONE, session=None)
+        assert r.returncode == 3, r.stdout
+        assert OPENCODE_SESSION_VAR in r.stdout and SESSION_VAR in r.stdout, (
+            f"the refusal must name both variables it consulted, or the reader "
+            f"cannot tell which one to set.\n{r.stdout}"
+        )
+        assert not urls(resolver), f"nothing may be asked: {urls(resolver)}"
+
+    def test_the_refusal_names_the_variable_the_id_CAME_FROM(self, resolver):
+        """A bad opencode id must not be reported against the claude variable.
+        This is the message-hardcoding class the lib's own header warns about:
+        a refusal naming a variable the code did not read sends the reader to
+        fix the wrong thing."""
+        r = resolver(ONE, session=OPENCODE_SESSION_VAR, session_id="has/a/slash")
+        assert r.returncode == 3, r.stdout
+        assert OPENCODE_SESSION_VAR in r.stdout, r.stdout
+        assert SESSION_VAR not in r.stdout, (
+            f"named the claude variable for an id that came from opencode.\n"
+            f"{r.stdout}"
+        )
+
+    def test_the_harness_carries_no_session_variable_at_all(self):
+        """The control that keeps every test above honest. An inherited
+        `OPENCODE_SESSION_ID` OUTRANKS the variable each test sets, so without
+        this pop the claude-tier assertions would silently measure opencode's
+        id — the same way an inherited `CLAUDE_CODE_SESSION_ID` once made the
+        original negative control pass against code reading the wrong name."""
+        env = _base_env()
+        for var in (SESSION_VAR, WRONG_SESSION_VAR, OPENCODE_SESSION_VAR):
+            assert var not in env, f"{var} leaked into the harness environment"
+
+    def test_precedence_agrees_with_browser_derive_session_id(self):
+        """🔴 A SEAM, NOT A STYLE POINT. Two independent resolvers now decide
+        'which session am I' from the same two variables. If they disagree,
+        `browser` attributes a run to opencode while `resolve` attributes the
+        SAME run to the parent — and nothing fails, because each is internally
+        consistent. Pin the RELATIONSHIP: opencode must be READ first in both.
+
+        🔴 SCOPED TO THE FUNCTION BODY AND DECOMMENTED, and the first draft of
+        this test was neither. A whole-file `find` measures the order the two
+        names are first MENTIONED — which in `browser` is its header prose, 26 KB
+        above the code — so it failed against an implementation that was already
+        correct. A guard on where a word appears is walkable by rewording; this
+        one reads the branches.
+        """
+        for path, fn in ((LIB, "clawgate_resolve"), (BROWSER, "derive_session_id")):
+            src = path.read_text(encoding="utf-8")
+            # tolerant of both `name(){` and `name() {` — the two files differ.
+            m = re.search(rf"^{re.escape(fn)}\(\)\s*\{{\n(.*?)^\}}\s*$",
+                          src, re.M | re.S)
+            assert m, f"{path.name}: {fn}() is no longer a top-level block"
+            body = _decommented(m.group(1))
+            oc = body.find(OPENCODE_SESSION_VAR)
+            cc = body.find(SESSION_VAR)
+            assert oc != -1, f"{path.name}:{fn} does not READ {OPENCODE_SESSION_VAR}"
+            assert cc != -1, f"{path.name}:{fn} does not READ {SESSION_VAR}"
+            assert oc < cc, (
+                f"{path.name}:{fn} reads {SESSION_VAR} before "
+                f"{OPENCODE_SESSION_VAR}; the two resolvers would attribute the "
+                f"same run differently, and neither would fail."
+            )
 
 
 class TestZeroPositiveControl:
