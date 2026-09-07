@@ -9,8 +9,27 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-🔴 **RANK 32 IS CLOSED — THE HOST HALF IS MERGED, SHIPPED AND RUNNING ON BOTH
-HOSTS. `#1334` squash `5a8ec6ff` (2026-09-06 19:58Z).** Measured after
+🔴 **THE LOOP IS CLOSED AND PROVEN. A REPLY TYPED IN THE WEB UI LANDS IN A REAL
+PANE — observed 2026-09-06, twice, the second time through the UI path end to
+end.** Ranks 32 and 33 are both done. What rank 33 found on the way is the thing
+to carry forward: the loop was broken by ONE MISMATCHED LABEL, on both halves of
+a seam that each side tested correctly in isolation. See rank 33.
+
+🔴 **AND THE THREE UI PRs ARE MERGED BUT NOT LIVE — see rank 38.** `clawgate`
+ships from a HARDCODED IMAGE PIN with no ImagePolicy, so merging to `trunk`
+changes nothing about what is running. `clawgatectl health` read **0.8.27** both
+before and after all three merged, which is exactly why the version is not a
+deploy check for them.
+
+🔴 **THE STANDING SECURITY ITEM IS RANK 34, AND IT STOPPED BEING A RESIDUAL.**
+Two shipped changes now rest on it: the page READS tool inputs (file paths, bash
+command lines, edit bodies) and WRITES arbitrary commands via a free-form
+send-keys box — on a surface where `requireSession` is a literal `return next`.
+Deploying is what arms the second one.
+
+### Rank 32 — the host half, merged and shipped
+
+**`#1334` squash `5a8ec6ff` (2026-09-06 19:58Z). `#1334` squash `5a8ec6ff` (2026-09-06 19:58Z).** Measured after
 `scripts/ship.sh`, on each host separately:
 
 | | workbench | laptop |
@@ -975,20 +994,106 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     ⚠ **This closes rank 32 and nothing wider — no keystroke has been observed landing in a pane.**
     That is rank 33.
     forcing: none — closed.
-33. **VALIDATE END TO END — the closing condition for the whole effort.** Raise a real
-    `AskUserQuestion`, answer it from the web UI, confirm the keystroke **lands in the actual pane**.
-    🔴 **An API 200 is NOT the closing condition.** 🔴 **Exercise the `=` session-target prefix
-    specifically:** tmux PREFIX-MATCHES, and the operator's live server has `scratch`…`scratch20`
-    and `datapacket-talos` beside `datapacket-talos-2`, so `-t scratch2:` opening a window in
-    `scratch20` is reachable today. The fix (`-t =name:`) plus a post-hoc read-back is merged and
-    has never run against real tmux outside a test.
-    forcing: user
-34. **Decide the two residuals the audit recorded as ACCEPTED, now that the surface is live.** The
-    browser tier **authenticates nobody** (the drive-by class is closed, the on-the-LAN class is
-    not, and nothing in that tier closes it), and the host agent sends an **execution-grade token
-    over plain HTTP** to the LAN NodePort every ~5 s. Both are stated in the PR bodies so arming was
-    taken with them visible.
-    forcing: security — the surface is armed, which is the condition under which both matter.
+33. ✅ **DONE 2026-09-06 — DRIVEN END TO END, AND IT FOUND A REAL DEFECT THAT BROKE EVERY REPLY.**
+    A real `AskUserQuestion` was raised from a throwaway Claude Code session in a disposable tmux
+    session (`r33`, pane `%477`) and answered by clicking in the web UI. The click was trusted, the
+    confirm fired naming the target — but the write **expired undelivered**.
+    🔴 **THE HOST LABEL DID NOT MATCH ON EITHER SIDE OF THE QUEUE.** The UI enqueued
+    `{"host":"nixos","pane":"%477"}`; `tmux-reply-agent` polls `for writes addressed to workbench`.
+    The row sat `pending` for 90 s and expired: no UI error, no agent journal line, no failed
+    request. **It was not probe-specific — every reply mount on the live page emitted `nixos`,
+    including a real open question of the operator's, so NO reply from ANY surface was deliverable
+    on this host.**
+    **Root cause:** the hook labelled the host `HOST="${CLAUDE_HOST:-$(hostname)}"` and *both
+    machines are hostname `nixos`*. The laptop was unaffected only because its `settings.json`
+    happens to pass `CLAUDE_HOST=laptop` — an unmanaged per-host file. The agent's own
+    `local_host_label()` docstring had predicted it verbatim: *"an agent that computed a different
+    label would poll for a host nobody enqueues to and deliver nothing, silently."* Both halves were
+    individually correct and individually tested; only the SEAM was wrong.
+    🔴 **IT CANNOT BE REPAIRED DOWNSTREAM** — `nixos` is ambiguous by construction, so no
+    server-side normalisation can recover which machine meant it.
+    **Fixed:** `ZacxDev/homelab-infra#735`, squash `0d553fcd`. The hook now derives the canonical
+    label (`CLAUDE_HOST` → `$ACTIVITY_HOST` → `~/.config/activity-collector/env`), and falls back to
+    `hostname` **deliberately** — an unresolvable label is UNDELIVERABLE, where guessing `workbench`
+    would run the operator's keystrokes on the WRONG machine. `host_source` is now logged beside
+    `host`. The hook runs from the clone's working tree, so a `git pull` there IS the deploy.
+    **Re-verified after the fix:** `host=workbench host_source=activity-env-file`, UI enqueued
+    `ui-reply:9417:workbench:%480`, agent logged `delivered s0FeuWTUOkuN0Lu5mCEsfg (pane %480)`, and
+    the pane showed `● User answered Claude's questions: · rank33 verify — pick one → gamma`.
+    Negative control: sibling session `r330` byte-identical before and after.
+    ⚠ **A CORRECTION TO THIS ITEM'S OWN BRIEF: the `=` prefix clause belongs to a DIFFERENT PATH.**
+    The reply path targets a PANE ID (`send-keys -t %480`, agent line 687) and does no name matching
+    at all. `=` is used only by `new-window -t "=" + tmux_session + ":"` (line 568) — rank **31**'s
+    start-a-session path, which remains unexercised.
+    forcing: none — closed.
+34. **Decide the two residuals the audit recorded as ACCEPTED — NOW THE LOAD-BEARING ITEM.** The
+    browser tier **authenticates nobody** (`requireSession` is a literal `return next`), and the
+    host agent sends an **execution-grade token over plain HTTP** to the LAN NodePort every ~5 s.
+    🔴 **TWO CHANGES ON 2026-09-06 MADE THIS STOP BEING A RESIDUAL.** `#738` put tool INPUTS —
+    file paths, bash command lines, edit bodies — on that page, reversing a written refusal whose
+    stated reason was "this view is rendered to a page on an unauthenticated LAN surface". `#741`
+    added a free-form `send-keys` box to the same page. So the surface now both READS the contents
+    of the operator's sessions and WRITES arbitrary commands into them, with no human auth.
+    Closing condition: the browser tier authenticates somebody, or the surface is disarmed.
+    forcing: security — it is the only thing standing under two shipped features.
+
+35. ✅ **DONE 2026-09-06 — `ZacxDev/homelab-infra#737`, squash `efa44e763`.** UI feedback round,
+    PR 1 of 3: `internal/ui` only. Content-verified on `trunk`.
+    Wider shell (`2xl` 96→110rem plus a new `min-[2560px]` 2400px step) with the old cap
+    **RELOCATED, not deleted** — `proseWidth()` caps sentences at 70ch on their own element, and
+    `TestProseBlocksAreCappedIndependentlyOfTheColumn` asserts the column does NOT carry it. tmux
+    cards became an auto-fit grid with a 32rem minimum track (1 column on a laptop, 4 on the 3440).
+    Chat prose routes through the pre-existing `renderMarkdown`; the truncation notice now explains
+    itself and is pinned as a WHOLE normalised string.
+    🔴 **THE AUTO-APPROVE FOLD REVERSED RANK 20 KNOWINGLY, ON ONE CONDITION.** The loud
+    "auto-approve ALL is ON" bar moved into the header dropdown; what pays for it is a THIRD header
+    face (`aaToneGlobal`, rose) distinct from the amber project-armed face, wired server AND client.
+    The coupling that made this dangerous was in the `all` chip's own comment — it justified hiding
+    on phones *because the loud in-flow bar was on screen*. That assertion now checks the rose face
+    and asserts amber is ABSENT, because `data-aa-active` is equally true of one armed project.
+    Three guards FLIPPED in place, keeping the old `aaHidingIdioms` predicate wholesale.
+    forcing: none
+36. ✅ **DONE 2026-09-06 — `ZacxDev/homelab-infra#738`, squash `a74f312f7`.** PR 2 of 3: a tool's
+    input, collapsed. The payload was dropped at PARSE time by a written refusal, quoted verbatim in
+    the code that reverses it; the guard `TestAToolCallNeverCarriesItsInput` was INVERTED in place.
+    Tool RESULTS are still refused — the input is what the agent ASKED for, the result is a machine
+    answering in the operator's voice.
+    ⚠ **A PREMISE IN THE BRIEF WAS WRONG AND IS CORRECTED IN THE PR:** the per-record cap does NOT
+    protect the stored tail. `MaxTailBytes` is enforced on INGEST against the raw JSONL, upstream of
+    the parser, so an oversized record has already spent that session's tail whether or not it is
+    displayed. The cap (`maxToolInputChars = 4000`) is a PAGE-WEIGHT bound.
+    forcing: none
+37. ✅ **DONE 2026-09-06 — `ZacxDev/homelab-infra#741`, squash `9d4b6900`.** PR 3 of 3: a free-form
+    reply on the session page, EntryID 0. Mostly a MOUNT — `ReplyView.EntryID` was written
+    zero-safe for it, and the target line, `hx-confirm`, idempotency key and a browser-tier rate
+    limiter all already existed.
+    🔴 **`pane_id` WAS ALWAYS ON THE WIRE AND WAS NEVER DECODED** — the pusher is "deliberately a
+    dumb pipe" posting `session-manager --json` verbatim. ⚠ `LEAN_ROW_FIELDS` does not list it, nor
+    `pane_preview` which has rendered for months: LEAN is a different VIEW, not the wire contract.
+    Host and pane come from ONE row and ambiguity resolves to NOTHING, because a pane id is unique
+    per tmux SERVER.
+    🔴 **THE BUG THE UNIT TESTS COULD NOT SEE:** `chatViewFor` returns a FRESH `ChatView` literal on
+    the success path, so fields must be copied by name. `Question` was, `Reply` was not — the
+    control rendered only for sessions with NO stored transcript. The seam test passed over it
+    because its server had no transcript store, i.e. it exercised the early return, the one path
+    that was never broken. Add a field to `ChatView` ⇒ add it to that literal.
+    forcing: none
+
+38. 🔴 **NONE OF RANKS 35–37 IS LIVE. `clawgate` SHIPS FROM A HARDCODED IMAGE PIN, NOT AUTOMATION.**
+    Measured 2026-09-06 after all three merged: `clawgatectl health` reads **0.8.27**, while
+    `clusters/workbench/apps/clawgate/deployment.yaml` pins
+    `harbor.homelab.lan/library/clawgate:0.8.27`. There is no ImagePolicy/ImageUpdateAutomation for
+    clawgate — a merge to `trunk` changes NOTHING about what is running. Shipping is four deliberate
+    steps: build the image, push to harbor, bump the pin, commit for Flux.
+    🔴 **THE DEPLOY IS WHAT ARMS #741** — a free-form `send-keys` box on an unauthenticated page. It
+    is therefore a separate decision from the merges, and rank 34 is the thing that would make it
+    safe rather than merely authorised.
+    ⚠ **Do not read `clawgatectl health` as a deploy check for these** — the version moved to 0.8.27
+    for unrelated reasons while all three PRs sat unmerged. A version that CHANGED is not evidence
+    that YOUR change shipped; verify by CONTENT against the running pod.
+    Closing condition: the operator decides to ship or not; if shipped, the tool-detail disclosure
+    and the free-form box are observed live and rank 34 is re-read against them.
+    forcing: user — it is the operator's call whether the LAN surface gets a command box today.
 
 ## Open investigations — live diagnosis state
 
