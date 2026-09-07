@@ -907,12 +907,47 @@ def test_resumes_that_landed_are_reported_without_alarm(tmp_path):
 
 
 def test_an_unmeasured_pane_count_is_not_read_as_zero_resumes(tmp_path):
-    """A missing count must not become a confident failure report, nor a pass."""
+    """A missing count must not become a confident failure report, nor a pass.
+
+    ⚠ This fixture uses the BARE token, which production never emits — see the
+    test below, which is the one that pins the real shape. Kept because the
+    bare form is still a legal reading of "unmeasured" and costs nothing."""
     r = _verdict(_pre(tmp_path), _post(tmp_path, sends="43", live_claude="UNMEASURED"),
                  tmp_path)
     assert r.returncode == RC_INCONCLUSIVE, r.stdout + r.stderr
     assert "UNKNOWN" in r.stdout
     assert "THE RESUMES DID NOT LAND" not in r.stdout
+
+
+def test_the_unmeasured_marker_AS_PRODUCTION_SPELLS_IT_is_not_an_integer_comparison(tmp_path):
+    """🔴 THE FIXTURE ABOVE COULD NOT SEE THIS BUG. The emitter writes
+    `claude_panes_live=UNMEASURED reason=no-tmux-server-responding` and `get`
+    returns everything after `key=`, so the arm's `[ "$live" = UNMEASURED ]`
+    was never true in production. It fell through to `[ "$live" -lt "$sends" ]`
+    — an integer comparison against a sentence — on the one path whose entire
+    job is to say "I do not know".
+
+    Pins the value the emitter ACTUALLY writes, not a tidier one."""
+    r = _verdict(_pre(tmp_path),
+                 _post(tmp_path, sends="43",
+                       live_claude="UNMEASURED reason=no-tmux-server-responding"),
+                 tmp_path)
+    assert r.returncode == RC_INCONCLUSIVE, r.stdout + r.stderr
+    assert "UNKNOWN" in r.stdout
+    assert "THE RESUMES DID NOT LAND" not in r.stdout
+    # The shell must not have errored on an integer comparison.
+    combined = r.stdout + r.stderr
+    assert "integer expression expected" not in combined, combined
+    assert "integer expected" not in combined, combined
+
+
+def test_the_verdict_says_the_live_pane_count_is_WHOLE_HOST(tmp_path):
+    """`claude_panes_live` counts every claude pane on the box — including ones
+    started by hand and ones the unit SKIPPED as already running. Without that
+    caveat printed, `live >= sends` reads as "every send landed", which it does
+    not establish."""
+    r = _verdict(_pre(tmp_path), _post(tmp_path, sends="43", live_claude="43"), tmp_path)
+    assert "WHOLE-HOST" in r.stdout, r.stdout
 
 
 def test_a_boot_where_the_unit_sent_nothing_does_not_trip_the_arm(tmp_path):

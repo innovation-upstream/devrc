@@ -1120,59 +1120,83 @@ def test_resurrect_dir_expands_the_plugin_s_variables_not_just_a_leading_tilde(t
 
 
 # --------------------------------------------------------------------------- #
-# The boot race, MEASURED on the reboot of 2026-09-06
+# The cold-boot loss, MEASURED on the reboot of 2026-09-06
 #
-# The unit fired at boot+63s and sent 43 `claude --resume` lines; tmux-resurrect
-# created every pane shell at boot+87s. All 43 landed in panes that were not
-# ready and were DISCARDED — zero appeared even as unexecuted text in any pane's
-# scrollback. The unit exited 0 with Result=success and the operator found 54
-# windows sitting at bare shells.
+# The unit sent 43 `claude --resume` lines and the operator found 54 windows
+# sitting at bare shells; the unit exited 0 with Result=success.
 #
-# Two layers are pinned here, because either alone is insufficient:
-#   PREVENTION — wait for the pane set to stop changing instead of guessing a
-#   delay. A fixed 45s was wrong by 24s on that boot and cannot be right in
-#   general: the gap scales with pane count, disk speed and boot load.
+# 🔴 THE FIRST DIAGNOSIS WAS WRONG AND IS PINNED HERE SO IT IS NOT RE-DERIVED.
+# It read "the sends landed in panes that were not ready and were DISCARDED",
+# from the observation that the sent text appears nowhere in any scrollback.
+# That observation is an ABSENCE, and it is equally consistent with a second
+# story, so it cannot choose between them.
+#
+# What actually happened, from the journal and then confirmed by experiment:
+# `Started tmux child pane N launched by process <pid>` arrived in TWO cohorts —
+# 17 lines naming the pid the UNIT itself started, then 56 lines 24s later
+# naming a different pid. On a cold boot nothing else starts tmux, so the
+# script's own `new-session` created the server, INSIDE the unit's cgroup. The
+# sends were delivered successfully. Then ExecStart returned and systemd tore
+# the cgroup down (`Type=oneshot`, `RemainAfterExit=no`,
+# `KillMode=control-group`), taking the server and all 43 claude processes.
+#
+# Three layers are pinned below, in the order they fire:
+#   REFUSAL    — the fix. With no server to restore into, do not manufacture
+#   one; a server this process creates cannot outlive it. Exits 0 (a skip, not
+#   a failure) because until the unit triggers on the tmux socket instead of a
+#   fixed timer, "no server" is the STANDING cold-boot state and a non-zero
+#   exit would fire the DND-bypassing OnFailure toast on every boot.
+#   SETTLE     — secondary. Once a server DOES exist, resurrect may still be
+#   replaying into it; wait for the pane set to hold still rather than guess.
 #   DETECTION  — `tmux send-keys` exits 0 for keystrokes that go nowhere, so
 #   "sent" is a claim about this process, never about the workspace. Without the
 #   verify pass the unit reports success having started nothing.
 # --------------------------------------------------------------------------- #
 
-def test_a_pane_set_that_holds_still_is_reported_as_settled():
+def test_a_pane_set_that_holds_still_is_reported_as_settled(monkeypatch):
     fake = ["1 zsh\n2 zsh"] * 10
     it = iter(fake)
-    tsr.pane_fingerprint = lambda: next(it)
+    # monkeypatch, NOT a bare `tsr.pane_fingerprint = …`: a bare assignment has
+    # no teardown, so it leaks into every test that runs after it in the same
+    # process and the leak is invisible until ordering changes.
+    monkeypatch.setattr(tsr, "pane_fingerprint", lambda: next(it))
     ok, waited = tsr.wait_for_workspace_to_settle(settle=3, timeout=30, sleep=lambda s: None)
     assert ok is True
     assert waited == 3.0
 
 
-def test_a_pane_set_still_being_rebuilt_is_NOT_settled():
-    """The measured failure: resurrect is still creating and respawning panes,
-    so the fingerprint keeps moving. Sending here is what got discarded."""
+def test_a_pane_set_still_being_rebuilt_is_NOT_settled(monkeypatch):
+    """Resurrect is still creating and respawning panes, so the fingerprint
+    keeps moving. This is the SECONDARY guard — sending into a mid-respawn pane
+    is a plausible way to lose a keystroke, but it is NOT what happened on
+    2026-09-06; see `test_a_restore_with_no_tmux_server_REFUSES` for that."""
     seq = iter(range(10_000))
-    tsr.pane_fingerprint = lambda: f"{next(seq)} zsh"
+    monkeypatch.setattr(tsr, "pane_fingerprint", lambda: f"{next(seq)} zsh")
     ok, waited = tsr.wait_for_workspace_to_settle(settle=3, timeout=10, sleep=lambda s: None)
     assert ok is False
     assert waited == 10.0
 
 
-def test_no_tmux_server_is_not_a_vacuously_settled_workspace():
+def test_no_tmux_server_is_not_a_vacuously_settled_workspace(monkeypatch):
     """🔴 An empty fingerprint is CONSTANT, so an equality-only check would call
     a dead tmux server 'settled' and send into nothing."""
-    tsr.pane_fingerprint = lambda: ""
+    monkeypatch.setattr(tsr, "pane_fingerprint", lambda: "")
     ok, _ = tsr.wait_for_workspace_to_settle(settle=2, timeout=6, sleep=lambda s: None)
     assert ok is False
 
 
-def test_the_settle_wait_returns_rather_than_raising_so_a_restore_is_still_attempted():
+def test_the_settle_wait_returns_rather_than_raising_so_a_restore_is_still_attempted(monkeypatch):
     seq = iter(range(10_000))
-    tsr.pane_fingerprint = lambda: f"{next(seq)} zsh"
+    monkeypatch.setattr(tsr, "pane_fingerprint", lambda: f"{next(seq)} zsh")
     result = tsr.wait_for_workspace_to_settle(settle=2, timeout=4, sleep=lambda s: None)
     assert isinstance(result, tuple) and result[0] is False
 
 
 def test_verify_reports_a_send_that_never_started_claude(monkeypatch):
-    """🔴 THE REGRESSION. tmux accepted the keys and the pane discarded them."""
+    """tmux accepted the keys and the pane is not running claude. Deliberately
+    does NOT assert WHY — an empty pane cannot distinguish 'discarded by an
+    unready pane' from 'delivered into a server that was then destroyed', and
+    asserting the first is the error this arc actually made."""
     monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
     landed, lost = tsr._verify_sends([("Gold:2", "scratch2:2")], attempts=2,
                                      sleep=lambda s: None)
@@ -1234,3 +1258,171 @@ def test_an_empty_plan_neither_waits_nor_fails(monkeypatch, tmp_path, capsys):
     rc = tsr.cmd_restore(dry_run=False, plan_path=plan)
     assert rc == 0, capsys.readouterr().err
     assert called["waited"] is False, "waited for a workspace with nothing to send"
+
+
+# --- the REFUSAL: the actual fix for 2026-09-06 ---------------------------- #
+#
+# 🔴 Every test below monkeypatches `no_tmux_server_to_restore_into` rather
+# than depending on whether a tmux server happens to exist. That is not
+# fastidiousness: the dev-host tier HAS a live server and the nix sandbox tier
+# has NONE, so a test that reads the real thing asserts a different branch in
+# each tier and is structurally incapable of failing in one of them. This arc
+# has already shipped two defects through exactly that gap.
+
+def _plan_of(tmp_path, n=2):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([
+        {"session": f"s{i}", "window": i, "cwd": str(tmp_path),
+         "session_id": f"id{i}", "codename": f"Gold{i}"} for i in range(n)]))
+    return plan
+
+
+def test_a_restore_with_no_tmux_server_REFUSES(tmp_path, monkeypatch, capsys):
+    """🔴 THE REGRESSION TEST FOR THE MEASURED LOSS. With no server, the old
+    code ran `tmux new-session` itself, sent into the server it had just
+    created inside its own cgroup, and systemd killed it on exit. Nothing may
+    be sent, and no session may be created."""
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: True)
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(tsr, "run", lambda cmd: ran.append(cmd) or "")
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: False)
+
+    def must_not_wait(*a, **k):
+        raise AssertionError("waited instead of refusing")
+
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", must_not_wait)
+
+    rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+
+    assert rc == 0, "a standing cold-boot state must not fire the OnFailure toast"
+    assert ran == [], f"ran tmux commands while refusing: {ran}"
+    assert not any("new-session" in c for cmd in ran for c in cmd)
+    assert not any("send-keys" in c for cmd in ran for c in cmd)
+    err = capsys.readouterr().err
+    assert "REFUSING" in err
+    assert "cgroup" in err, "the log must say WHY, or the operator retries forever"
+
+
+def test_the_refusal_does_NOT_fire_when_a_server_exists(tmp_path, monkeypatch, capsys):
+    """The positive control. Without this, a guard hardcoded to refuse always
+    would pass the test above while disabling restore entirely."""
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: False)
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", lambda *a, **k: (True, 5.0))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
+    sent: list[list[str]] = []
+    monkeypatch.setattr(tsr, "run", lambda cmd: sent.append(cmd) or "")
+    monkeypatch.setattr(tsr, "_verify_sends", lambda t, **k: (len(t), []))
+
+    rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+
+    assert rc == 0, capsys.readouterr().err
+    assert any("send-keys" in c for cmd in sent for c in cmd), \
+        "the guard refused a workspace that HAD a server"
+
+
+def test_the_refusal_is_checked_BEFORE_the_send_loop_creates_anything(tmp_path, monkeypatch):
+    """Ordering is the whole fix. A refusal evaluated after the loop's own
+    `tmux new-session` would report correctly and still have destroyed the
+    workspace."""
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    order: list[str] = []
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into",
+                        lambda: order.append("guard") or True)
+    monkeypatch.setattr(tsr, "tmux_session_exists",
+                        lambda n: order.append("session-exists") or False)
+    monkeypatch.setattr(tsr, "run", lambda cmd: order.append(" ".join(cmd)) or "")
+
+    tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+
+    assert order == ["guard"], f"something ran after/before the guard: {order}"
+
+
+def test_a_dry_run_is_never_refused(tmp_path, monkeypatch, capsys):
+    """A dry run sends nothing, so it cannot manufacture a server — and it is
+    the operator's pre-reboot check. Refusing it would remove the only way to
+    inspect the plan from a machine with no server."""
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: True)
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "window_state", lambda t: (False, ""))
+    rc = tsr.cmd_restore(dry_run=True, plan_path=_plan_of(tmp_path))
+    assert rc == 0
+    assert "REFUSING" not in capsys.readouterr().err
+
+
+def test_the_server_guard_reads_has_session_and_treats_failure_as_absent(monkeypatch):
+    """Pins the predicate itself, in both directions — the tests above stub it
+    out, so without this nothing checks that it reads tmux at all."""
+    seen: list[list[str]] = []
+    rc = {"v": 1}
+
+    class _R:
+        def __init__(self, code): self.returncode = code
+
+    def fake(cmd, **kw):
+        seen.append(cmd)
+        return _R(rc["v"])
+
+    monkeypatch.setattr(tsr.subprocess, "run", fake)
+    assert tsr.no_tmux_server_to_restore_into() is True
+    rc["v"] = 0
+    assert tsr.no_tmux_server_to_restore_into() is False
+    assert seen and seen[0][:2] == ["tmux", "has-session"], seen
+
+
+# --- the two exit-1 branches, previously unpinned (mutants SURVIVED) ------- #
+
+def test_a_send_that_never_reached_claude_exits_1(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: False)
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", lambda *a, **k: (True, 5.0))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
+    monkeypatch.setattr(tsr, "run", lambda cmd: "")
+    monkeypatch.setattr(tsr, "_verify_sends", lambda t, **k: (0, list(t)))
+
+    rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+
+    err = capsys.readouterr().err
+    assert rc == 1, err
+    assert "did NOT start claude" in err
+    # 🔴 The message must NOT re-assert the refuted mechanism.
+    assert "discarded by the pane" not in err
+
+
+def test_an_unsettled_workspace_exits_1_even_when_every_send_landed(tmp_path, monkeypatch, capsys):
+    """'All landed' is measured against a workspace that was still moving, so
+    it is luck rather than correctness — and the operator must be told."""
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: False)
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", lambda *a, **k: (False, 120.0))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
+    monkeypatch.setattr(tsr, "run", lambda cmd: "")
+    monkeypatch.setattr(tsr, "_verify_sends", lambda t, **k: (len(t), []))
+
+    rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+
+    err = capsys.readouterr().err
+    assert rc == 1, err
+    assert "never settled" in err
+
+
+def test_a_settled_workspace_with_every_send_landed_exits_0(tmp_path, monkeypatch, capsys):
+    """The discriminating control for the two tests above: without it, a
+    mutant returning 1 unconditionally passes both."""
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: False)
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", lambda *a, **k: (True, 5.0))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
+    monkeypatch.setattr(tsr, "run", lambda cmd: "")
+    monkeypatch.setattr(tsr, "_verify_sends", lambda t, **k: (len(t), []))
+
+    rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    assert "verified: 2 of 2" in out.out, out.out

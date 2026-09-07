@@ -586,24 +586,41 @@ verdict() {
   sends=$(get "$post" sends_logged)
   live=$(get "$post" claude_panes_live)
   if [ -n "$sends" ] && [ "$sends" != 0 ]; then
-    if [ -z "$live" ] || [ "$live" = UNMEASURED ]; then
+    # 🔴 PREFIX match, not equality. The emitters write `key=UNMEASURED
+    # reason=...` (see the `claude_panes_live` reader above), and `get` returns
+    # everything after `key=`, so `[ "$live" = UNMEASURED ]` was NEVER true in
+    # production. It fell through to the `-lt` arm, which is an INTEGER
+    # comparison against `UNMEASURED reason=no-tmux-server-responding` — a
+    # shell error, on the one path whose whole job is to say "I do not know".
+    case "$live" in
+      ''|UNMEASURED*)
       echo
       echo "⚠ the unit logged $sends resume(s) but the live claude-pane count is"
       echo "   UNMEASURED, so whether any of them landed is UNKNOWN."
       rc=$RC_INCONCLUSIVE
-    elif [ "$live" -lt "$sends" ]; then
+      ;;
+      *)
+    if [ "$live" -lt "$sends" ]; then
       echo
       echo "🔴 THE RESUMES DID NOT LAND — the unit logged $sends send(s) and only"
-      echo "   $live pane(s) are running claude. tmux accepts keystrokes for a pane"
-      echo "   that is not ready and DISCARDS them, so the unit exits 0 having"
-      echo "   started nothing. MEASURED 2026-09-06: 43 sent at boot+63s, every"
-      echo "   pane shell created at boot+87s, 0 resumed, Result=success."
+      echo "   $live pane(s) are running claude."
+      echo "   MEASURED 2026-09-06: 43 sent, 0 resumed, unit Result=success. The"
+      echo "   cause was NOT keystrokes discarded by an unready pane — that was"
+      echo "   the first diagnosis and the journal refuted it. The unit had"
+      echo "   STARTED ITS OWN tmux server (no other existed on a cold boot);"
+      echo "   the sends landed in it, then systemd tore down the unit's cgroup"
+      echo "   and took the server with it."
       echo "   This is INDEPENDENT of the window comparison below: the windows"
       echo "   can be perfect and the workspace still empty."
       rc=$RC_RACE
     else
       echo "resumes: $live pane(s) running claude vs $sends send(s) logged"
+      echo "   ⚠ claude_panes_live is a WHOLE-HOST count: it includes panes you"
+      echo "      started by hand and panes the unit SKIPPED as already running,"
+      echo "      so it can exceed \$sends without every send having landed."
     fi
+      ;;
+    esac
   fi
   if [ -n "$extra" ]; then
     echo
