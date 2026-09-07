@@ -70,6 +70,30 @@ so **the LAN NodePort is fully unauthenticated** — including `DELETE /tasks/{i
 
 ---
 
+## prior work — has this been fought before? (run FIRST)
+```bash
+if command -v cairn >/dev/null; then cairn search 'clawgate' --scope homelab-talos; else echo "skipped: cairn unavailable"; fi
+```
+The `homelab-talos` scope holds four clawgate entries — `clawgate.md`, `clawgate-agents.md`,
+`clawgate-e2e.md`, `clawgatectl.md` — dated bullets of what a past session MEASURED, which no
+live query can give you. ⚠ They are `client-confidential`: read them, never paste them into a
+public repo (this one included).
+🔴 **Search the term a future reader would use, not only the file you happen to stand in.**
+Measured 2026-09-07 against this scope: `clawgate` · `clawgatectl` · `clawgate-agents` · `e2e` ·
+`task api` · `deploy` each return the 10-hunk cap (~10–13 KB); `agent dispatch` 5, `runbook` 3.
+One query on the subsystem you are about to touch is normally enough — add a second term only
+when the first misses. `cairn search` **syncs itself** (a `cairn sync;` prefix fetches the whole
+store twice); an unreachable pod degrades to cache and says so in its banner.
+⚠ Keep `--scope homelab-talos`: `--all-scopes` still derives a scope from the **cwd's git repo**,
+so from a non-git cwd it returns 0 hunks and **rc 2** (measured from `/tmp`) — it does name the
+reason, so read the banner rather than treating the empty result as "nothing recorded".
+Everything returned is `RECALL, NOT LIVE OBSERVATION` — a fix that has since landed reads exactly
+like one that has not; verify against the live pin before acting.
+🔴 **Keep the `if …; then …; fi` guard; do not rewrite it to `&&`.** `&&` exits non-zero when
+cairn is absent (1 in bash/zsh, **127 in dash**), which a caller can only read as this step
+failing — and a bare `if` with no `else` would skip in silence, which for an autonomous run is
+the failure the guard exists to prevent. The `else` echo is load-bearing.
+
 ## status
 ```bash
 KC=$(ls /home/zach/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)  # PER-HOST
