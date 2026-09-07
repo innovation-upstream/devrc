@@ -25,44 +25,48 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
 | #1317 | `946d9038` | the staleness gate counted POWERED-OFF time against the plan |
 | #1344 | `1ecc03c1` | no instrument existed to read a reboot; adds `tmux-restore-observe.sh` |
 
-- 🔴 **THE REBOOT HAPPENED — 2026-09-06 18:01:46**, from 32 days of uptime. It is
-  what answered this arc and refuted the hypothesis the arc was built on; the
-  ANSWERED block below carries its values. Carried forward because it is the only
-  real exercise this path has ever had.
-- **#1344 shipped:** `scripts/tmux-restore-observe.sh` (`pre`/`post`/`verdict`/
-  `extract`), 36 tests. Its baseline lives at
-  `~/.cache/tmux-restore-observe/pre-latest.txt` with a copy of the script beside
-  it — that baseline is what a post-reboot `post` run compares against, so do not
-  clear it before rank 4.
-- 🔴 **#1351 HAS BEEN REWORKED onto the confirmed mechanism — it is no longer
-  the PR the previous handoff said not to merge.** Branch
-  `fix/tmux-restore-boot-race`, worktree `/home/zach/workspace/devrc-bootrace`,
-  **13 commits ahead of `origin/fix/tmux-restore-boot-race` and NOT PUSHED.**
-  Head `3b348542`. The two rework commits are `7056a0fa` (the refusal + prose +
-  three of the four 🟡s) and `3b348542` (the UNMEASURED consequence correction).
-- **Merge conflict with `main` RESOLVED** (`3c5cda1f`), by taking main's copy of
-  `claudedocs/handoff-tmux-restore-chain.md` **wholesale**. The PR no longer
-  touches the handoff doc at all, so main's corrected ANSWERED block survives.
-  This is what the previous handoff meant by "do not let that land".
-- **What the rework contains:**
-  - `no_tmux_server_to_restore_into()` in `scripts/tmux-session-restore.py`,
-    checked **before** the send loop — the loop's own `tmux new-session` is the
-    destructive step.
-  - The refusal **exits 0**, deliberately. See the Gotchas entry.
-  - `wait_for_workspace_to_settle` and `_verify_sends` are **kept**, re-described
-    as a secondary guard and a detector rather than as the fix.
-  - Refuted-mechanism prose corrected at **four** sites (the previous handoff
-    said three): `tmux-session-restore.py` settle docstring + `_verify_sends`
-    stderr, and `tmux-restore-observe.sh` arm comment + `RC_RACE` message.
-  - All four round-1 🟡s fixed (see the retired investigation block below).
-- 🔴 **NEITHER GATE TIER HAS COMPLETED — this is UNVERIFIED.** The dev-host tier
-  (`scripts/gate.sh --tier both`) was still running in the pytest leg when this
-  doc was written; the nix sandbox tier was **never started**. No merge decision
-  may be taken on this branch until both are green on the MERGED tree, and the
-  claim must name the tier and the base sha.
-- **Deploy status:** nothing deployed. Note `tmux-session-restore.py` runs from
-  the WORKING TREE, so this branch's edits are live **in the worktree only**;
-  the base clone `~/workspace/devrc` is untouched and still runs main's copy.
+- 🔴 **THE REBOOT HAPPENED — 2026-09-06 18:01:46**, from 32 days of uptime. It is what
+  answered this arc and refuted the hypothesis the arc was built on; the ANSWERED block
+  below carries its values. Carried forward because it is the only real exercise this path
+  has ever had.
+- **#1344 shipped:** `scripts/tmux-restore-observe.sh` (`pre`/`post`/`verdict`/`extract`),
+  36 tests. Baseline at `~/.cache/tmux-restore-observe/pre-latest.txt` with a copy of the
+  script beside it — that baseline is what a post-reboot `post` run compares against, so do
+  not clear it before the reboot rank.
+- ✅ **#1351 IS REWORKED, PUSHED, GATED AND RETITLED — it is no longer the PR the earlier
+  handoff said not to merge.** Head **`83697d30`**, `mergeable: MERGEABLE` (was
+  `CONFLICTING`). Worktree `/home/zach/workspace/devrc-bootrace`.
+  - The rework commits: `7056a0fa` (refusal + prose + three 🟡s), `3b348542` (the
+    UNMEASURED-consequence correction), plus merges `3c5cda1f` and `83697d30`.
+  - **The main conflict was resolved by taking main's copy of this doc wholesale**, so the
+    branch no longer touches it and the corrected ANSWERED block survives.
+  - Title now names the real mechanism; the old one ("the resumes were sent 24s before the
+    panes existed") stated the refuted one. Body replaced. Verification comment posted with
+    the tier, base sha and the mutation table.
+- ✅ **GATED — all four tier/tree combinations green on `83697d30`:**
+
+  | tier | verdict |
+  |---|---|
+  | nix sandbox `pytests` | PASS — 22026 collected / 22023 passed / 0 failed |
+  | nix sandbox `nodetests` | PASS — 5 suites / 41 files / 1449 tests / 0 fail |
+  | dev host `gate.sh --tier both` | PASS — `GATE: RESULT=PASS`, same counts |
+  | (earlier dev run on `3b348542`) | PASS |
+
+  Read out of `nix log`, not exit codes. `session-analysis` collected 562 vs the floor of
+  525 this PR raises. The two nix derivations were built ONE AT A TIME.
+- ⚠ **`main` HAS MOVED PAST `83697d30`, with real test changes, not just docs.** A
+  merged-tree gate is a claim about the tree it ran on — **re-gate the tree the merge
+  actually creates** before merging. Said so in the PR comment too.
+- ⚠ Tekton was re-running on the new head at time of writing (both checks `PENDING`).
+  Neither gates: branch protection here is declared off, so the local two-tier run is the
+  only real evidence. 🔴 A run that hits `timeouts.tasks` posts NOTHING and the checks stay
+  `pending` forever — only a fresh push clears that.
+- **Deploy status:** nothing deployed, and nothing needs to be. `tmux-session-restore.py`
+  runs from the WORKING TREE, so the change is live in the worktree only; the base clone
+  `~/workspace/devrc` still runs main's copy until this merges.
+- 🔴 **#1351 STOPS THE DESTRUCTION; IT DOES NOT MAKE COLD-BOOT RESTORE WORK.** After it
+  lands, a cold boot REFUSES and the operator re-runs by hand once attached. Restoring on
+  boot is the socket trigger — the next rank.
 
 ## Open investigations — live diagnosis state
 
@@ -259,47 +263,95 @@ is exactly the kind of sentence a resuming session actions again.
   90 = could-not-vouch, read the log), then the two `nix build` derivations
   **one at a time**.
 
+### ✅ ANSWERED 2026-09-07 — opencode session restore is ~80% already built; one hardcoded string blocks it
+Recon done this session. **The previous handoff's note — "opencode does not write to
+`~/.claude/projects`; the `opencode` skill owns that surface" — is TRUE but led to the
+wrong conclusion.** Opencode does not need that surface: it has its own, and the devrc
+ledger has been writing to it all along.
+
+- **Symptom + exact repro:** after a reboot, opencode TUI windows come back as bare
+  shells. `OC | Run opencode session handoff/kickoff` was never recovered on 2026-09-06.
+- **Observed (with values):**
+  - `pane_current_command` for an opencode pane is literally `opencode` — the pane
+    detector extends with one token.
+  - **25 `~/.cache/agent-ledger/opencode-p<N>.json` records already exist**, written by
+    `scripts/opencode/plugin/ledger.js` (writer 2). Schema is IDENTICAL to claude's, with
+    `runtime: "opencode"` already discriminating; `transcript_path` is `null` (correct —
+    opencode has no JSONL).
+  - `agent_ledger.py` already declares `RUNTIMES = ("claude", "opencode", "clawgate")` and
+    `pane_filename(runtime, pane_id)` is already parameterised.
+  - 🔴 **`tmux-session-restore.py:235` hardcodes `_AL.pane_filename("claude", pane_id)`** —
+    so those 25 records are written and never read. That one string is the blocker.
+  - Sessions live in SQLite `~/.local/share/opencode/opencode-stable.db` (2.4 GB). The
+    `session` table carries `id`, `directory`, `title`, `parent_id`.
+  - All 25 ledger ids resolve in the DB; **0 have a `parent_id`; 0 lack a `directory`.**
+  - End-to-end: live pane `%41` (scratch20:5, cwd `~/workspace/devrc`) → ledger
+    `ses_f835f662…` → DB row `directory=/home/zach/workspace/devrc`, `parent_id` empty.
+  - Resume verb is `opencode --session <id>` (also `-c/--continue`).
+- **Ruled out:** that opencode needs a transcript-file surface like claude's — it does not;
+  `session.directory` is a DIRECT cwd comparison, stronger than claude's encoded-name
+  match. via: measurement
+- **Ruled out:** a pass-2 content-grep fallback for opencode — claude's greps JSONL; the
+  analogue is content-searching a 2.4 GB DB, and with "send nothing when unbound" chosen it
+  buys nothing. via: code
+- **Leading hypothesis:** none outstanding — the mechanism is measured. What remains is the
+  build, and it is gated on #1351 merging (same four functions).
+- **Next probe:** none. `opencode --session <id>` was VERIFIED on a private `-L` socket
+  (see the gotcha below); the chain is proven end to end.
+
 ## Next steps (ranked)
-1. **Finish gating the reworked #1351 and push it.** Both tiers on the merged
-   tree, one `nix build` at a time; then `git push` (the branch is 13 commits
-   ahead and unpushed, so nothing is visible to anyone yet) and update the PR
-   title+body — the current title, "the resumes were sent 24s before the panes
-   existed", still states the refuted mechanism. Body drafted at
-   `/tmp/claude-1000/-home-zach-workspace-devrc/5542cd95-4967-4463-8fe2-0f0a75194e9d/scratchpad/pr-body.md`
-   (scratch — copy it somewhere durable before relying on it).
+1. **Finish gating the reworked #1351 and push it.** Dev tier PASSED on `3b348542`; BOTH
+   sandbox derivations PASSED on the merged tree `83697d30` (read out of `nix log`, not the
+   exit code). Dev tier is re-running on `83697d30` so the claim names one sha. Then
+   `git push` (13+ commits ahead, unpushed) and retitle — the published title, "the resumes
+   were sent 24s before the panes existed", still states the refuted mechanism. Body drafted
+   at `scratchpad/pr-body.md` (scratch — copy it somewhere durable).
    IN FLIGHT: innovation-upstream/devrc#1351
-   forcing: gate — an unpushed 13-commit branch is invisible, and the PR as
-   published still asserts a refuted mechanism.
-2. **Implement the socket trigger — the half that actually restores.** 🔴 The
-   rework STOPS THE DESTRUCTION; it does NOT make cold-boot restore work. After
-   it lands, a cold boot refuses and the operator re-runs by hand. Trigger the
-   unit on the tmux socket appearing rather than `OnActiveSec=45s`:
-   `devrc/nix/home.nix` (`tmux-session-restore` unit + timer). 🔴 Do NOT reach
-   for `RemainAfterExit=yes` alone — measured to work, but with
-   `KillMode=control-group` the unit would then own the operator's server.
-   🔴 When this lands, revisit the refusal's exit-0: it is exit 0 **because**
-   no-server is a standing cold-boot state, and the socket trigger is what stops
-   it being one.
-   forcing: incident — 2026-09-06, a reboot left 43 conversations dead and the
-   unit reported `Result=success`.
-3. **Pin `TMUX_TMPDIR=%t` on the unit.** Re-confirmed live this session: the
-   unit's `Environment=` carries `PATH` and `HOME` only. Its two siblings already
-   pin it (`nix/home.nix:3678`, `:3891`) and both have tests.
-   forcing: regression — the unit works today only because the user-manager
-   environment happens to carry the variable.
-4. **Reboot again to confirm whatever fix lands.** Nothing but a real reboot has
-   ever exercised this path, and it has now overturned two successive hypotheses.
+   forcing: gate — an unpushed branch is invisible, and the PR as published asserts a
+   refuted mechanism.
+2. **Implement the socket trigger — the half that actually restores.** 🔴 The rework STOPS
+   THE DESTRUCTION; it does NOT make cold-boot restore work. Trigger the unit on the tmux
+   socket appearing rather than `OnActiveSec=45s`: `devrc/nix/home.nix`. 🔴 Do NOT reach for
+   `RemainAfterExit=yes` alone — with `KillMode=control-group` the unit would own the
+   operator's server. 🔴 When this lands, revisit the refusal's exit-0: it is exit 0
+   BECAUSE no-server is a standing cold-boot state, and this is what stops it being one.
+   forcing: incident — 2026-09-06, a reboot left 43 conversations dead and the unit
+   reported `Result=success`.
+3. **Restore opencode sessions too — separate PR, AFTER #1351 merges.** Recon and decisions
+   are recorded above and in the `devrc/tmux-session-restore` cairn entry. Operator
+   decisions 2026-09-07: **full auto-resume parity**; an UNBOUND opencode pane **sends
+   nothing** and is listed in the cheat-sheet; **separate PR after #1351**, because it
+   touches `live_claude_panes`, `ledger_binding`, `cmd_restore` and `_verify_sends` — the
+   same four #1351 rewrites. Work: runtime-aware pane filter; plan entries gain `runtime`
+   (absent ⇒ `claude`, so a plan written before the change still restores across the reboot
+   that follows it — needs its own test); pass runtime to `pane_filename`; replace the two
+   claude-shaped validations (`transcript-missing` ⇒ does a `session` row exist;
+   `project-mismatch` ⇒ `session.directory == pane cwd`) reading the DB with stdlib
+   `sqlite3` in `mode=ro`; reject a row with a non-empty `parent_id`; `_verify_sends` and
+   `tmux-restore-observe.sh` become runtime-aware; `session.title` replaces the
+   `first_user_line` grep. 🔴 The save-side tally MUST distinguish "no opencode panes
+   existed" from "opencode panes existed and I bound zero" — see the rot gotcha below.
+   forcing: user — operator asked for opencode restore parity on 2026-09-07 and chose the
+   design; one opencode window was already lost unrecovered on 2026-09-06.
+4. **Pin `TMUX_TMPDIR=%t` on the unit.** Re-confirmed live this session: the unit's
+   `Environment=` carries `PATH` and `HOME` only. Its two siblings already pin it
+   (`nix/home.nix:3678`, `:3891`) and both have tests.
+   forcing: regression — the unit works today only because the user-manager environment
+   happens to carry the variable.
+5. **Reboot again to confirm whatever fix lands.** Nothing but a real reboot has ever
+   exercised this path, and it has now overturned two successive hypotheses.
    `~/workspace/devrc/scripts/tmux-restore-observe.sh pre` → reboot → `… post`.
    forcing: none
-5. **Run bare `claude` windows inside tmux** so a closed window detaches instead
-   of vanishing.
-   forcing: incident — 2026-09-06, the operator closed i3 windows; two
-   conversations survived only via transcript archaeology and one opencode window
-   was never recovered.
-6. **`--assume-empty` for `restore --dry-run`** so a pre-reboot dry run exercises
-   the send path instead of only the skip branch.
-   `devrc/scripts/tmux-session-restore.py`.
+6. **Run bare `claude` windows inside tmux** so a closed window detaches instead of
+   vanishing.
+   forcing: incident — 2026-09-06, the operator closed i3 windows; two conversations
+   survived only via transcript archaeology and one opencode window was never recovered.
+7. **`--assume-empty` for `restore --dry-run`** so a pre-reboot dry run exercises the send
+   path instead of only the skip branch. `devrc/scripts/tmux-session-restore.py`.
    forcing: none
+
+⚠ Ranks 4–7 were 3–6 before this update; opencode restore was inserted at 3. Only rank 1
+was claimed at the time (`tmux-restore-chain-1`), so no live claim was re-pointed.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The handoff this arc started from never existed.** `/resume` was given
@@ -406,11 +458,46 @@ is exactly the kind of sentence a resuming session actions again.
   `rc=0` for a run that had just failed — the documented `| tail` trap, hit
   again.
 
+- 🔴 **`opencode --session <id>` IGNORES THE LAUNCH CWD AND USES THE SESSION'S OWN
+  RECORDED `directory`.** MEASURED 2026-09-07 on a private `-L` socket: launched with
+  `cd ~/workspace/devrc && opencode --session <id>` for a session whose DB row reads
+  `directory=/home/zach/workspace/homelab-talos`, and the TUI came up IN homelab-talos.
+  (a) The `cd <cwd> &&` prefix the claude path uses is **inert** for opencode. (b) 🔴 The
+  cross-repo guard is therefore STRICTLY MORE important here than for claude: a mis-bound
+  claude session resumes the wrong conversation in the PANE's cwd, but a mis-bound opencode
+  session **silently relocates the agent into another repo** while the window, title and
+  cwd all still look right. `session.directory == pane cwd` is MANDATORY, and an unreadable
+  DB must leave the pane UNBOUND rather than bind on an unverified claim.
+- 🔴 **`tmux -t =<name>` IS NOT THE EXACT-MATCH FORM — it matches nothing.** The `=` prefix
+  wants `=<session>:` WITH the colon; a bare `=p` gives `can't find pane: =p`. My first
+  opencode probe sent into nothing and polled `pane_current_command` back EMPTY twelve
+  times — an observable **identical** to "opencode failed to start". The only discriminator
+  was the `can't find pane` line printed BEFORE the send, which survived only because the
+  destructive-probe rule forbids `2>/dev/null` on tmux calls. 🔴 Fix the CLASS: capture the
+  pane id at creation (`new-session -P -F '#{pane_id}'`) and address `-t "$PANE"` — a pane
+  id cannot be prefix-matched. 🔴 And give a probe its OWN positive control (send `sleep 4`,
+  watch the command become `sleep`) — without it a wrong target is indistinguishable from
+  the negative result you are measuring. This is the SAME empty-observable error this arc
+  already made once, reproduced inside the instrument built to avoid it.
+- 🔴 **A feature that BINDS NOTHING MOST OF THE TIME is the shape that rots undetected.**
+  Measured ratio on the workbench: **1 opencode pane against 45 claude panes**, and the
+  operator confirms that is typical. This chain was already silently broken for ~30 days
+  with every link looking healthy. So the opencode work must make the save-side tally say
+  "no opencode panes existed" versus "opencode panes existed and I bound zero of them" — a
+  bare `0` is indistinguishable from the reader being wired to nothing.
+- **`nix build path:<worktree>` copies the worktree's `.git` FILE** (a pointer to the real
+  git dir), which defeats the sandbox's git-config isolation and fails `exit=2` BEFORE any
+  test runs. Extract with `git archive HEAD | tar -x -C <dir>` and build from there. Used
+  successfully this session; verified the extract had no `.git` and did contain the fix.
+- **A green `nix build` prints NO test output to stdout** — the log goes to the daemon. A
+  derivation that ran zero tests exits 0 identically. Read `nix log <drv>` and count the
+  runners' own `RESULT:`/`TOTAL` lines; never quote the build's exit code as a test result.
+
 ## How to verify
 ```bash
-# 0. WHERE THE WORK IS — the branch is unpushed; the base clone does NOT have it
-git -C /home/zach/workspace/devrc-bootrace log --oneline -3
-git -C /home/zach/workspace/devrc-bootrace status -sb    # expect: ahead 13
+# 0. the PR
+gh pr view 1351 --repo innovation-upstream/devrc \
+  --json state,mergeable,mergeStateStatus,headRefOid,title
 
 # 1. the refusal, in both directions (this is the fix)
 nix develop ~/workspace/devrc -c python3 -m pytest \
@@ -422,11 +509,18 @@ nix develop ~/workspace/devrc -c python3 -m pytest \
 systemctl --user show tmux-session-restore.service \
   -p Type -p RemainAfterExit -p KillMode -p Environment
 # expect: Type=oneshot  RemainAfterExit=no  KillMode=control-group
-#         Environment has NO TMUX_TMPDIR  (that is rank 3)
+#         Environment has NO TMUX_TMPDIR  (that is the TMUX_TMPDIR rank)
 
-# 3. 🔴 BOTH GATE TIERS, on the MERGED tree — NEITHER HAS RUN YET
-nix develop ~/workspace/devrc -c bash /home/zach/workspace/devrc-bootrace/scripts/gate.sh --tier both
-nix build ~/workspace/devrc#checks.x86_64-linux.pytests  --no-link   # ONE AT A TIME
-nix build ~/workspace/devrc#checks.x86_64-linux.nodetests --no-link
-# gate.sh's exit status is authoritative; 90 = could-not-vouch, read the log.
+# 3. BOTH tiers on the tree the MERGE creates — `main` has moved past 83697d30.
+#    🔴 `nix build path:<worktree>` fails exit=2 before any test runs (the worktree's
+#    `.git` is a FILE); extract first, and read `nix log`, never the exit code.
+git -C <worktree> archive HEAD | tar -x -C /tmp/mt
+nix develop ~/workspace/devrc -c bash <worktree>/scripts/gate.sh --tier both
+nix build "path:/tmp/mt#checks.x86_64-linux.pytests"  --no-link   # ONE AT A TIME
+nix build "path:/tmp/mt#checks.x86_64-linux.nodetests" --no-link
+nix log <drv>   # count the runners' own RESULT:/TOTAL lines
+
+# 4. opencode restore recon — the chain is proven; see rank 3
+tmux list-panes -a -F '#{pane_current_command}' | sort | uniq -c   # opencode appears as `opencode`
+ls ~/.cache/agent-ledger/opencode-p*.json | wc -l                  # records already written
 ```

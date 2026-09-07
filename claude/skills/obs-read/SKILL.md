@@ -23,6 +23,41 @@ genuinely 0 renders normally.
 - Read-only (query APIs only). Bounded timeouts; the port-forward is torn down on
   success, error, and signal.
 
+## Prior work first — the store is keyed the way your query is
+Before an incident/perf dig (not before a one-off number read), ask what a past
+session already diagnosed. The subsystem store is keyed by **metric / service /
+namespace** — exactly what `--preset` and `--query` name — so obs-read's own
+arguments ARE the retrieval keys. Scope is a **function of `--cluster`**, never a
+judgement call:
+
+```bash
+CLUSTER=dpprod                          # the same --cluster you are about to pass
+Q='node_network_receive_drop_total'     # the metric / service / namespace you are about to query
+case "$CLUSTER" in
+  dpprod)                    SCOPE=datapacket-talos ;;
+  homelab|workbench|nebula)  SCOPE=homelab-talos ;;
+esac
+if command -v cairn >/dev/null; then cairn search "$Q" --scope "$SCOPE"; else echo "skipped: cairn unavailable"; fi
+```
+
+- 🔴 **Keep the `if … then … else … fi` form.** `command -v cairn && …` exits
+  non-zero when cairn is absent (1 in bash/zsh, **127 in dash**) and reads as the
+  observability step failing; a bare `if` with no `else` skips SILENTLY. The `else`
+  echo is load-bearing.
+- **No `cairn sync` prefix** — `cairn search` syncs itself; a prefix fetches the
+  whole store twice.
+- 🔴 **Explicit `--scope`, never `--all-scopes`.** `--all-scopes` derives a scope
+  from the cwd's git repo and exits **rc 2** outside one (obs-read is documented to
+  run from any cwd), and it would answer a homelab question out of a CLIENT
+  cluster's scope — §Safety's wrong-cluster trap through a new door. `--scope`
+  needs no git cwd.
+- An empty result is a fact about the QUERY before it is a fact about the store:
+  try the metric, then the service/namespace, then the subsystem (`monitoring`,
+  `prom-stack`, `pyroscope`, `prometheus-stack`) before concluding nothing is recorded.
+- Everything returned is `RECALL, NOT LIVE OBSERVATION` — a remedy that has since
+  landed reads exactly like one that has not. It is a pointer to verify with the
+  query you were going to run anyway, not a substitute for it.
+
 ## Usage
 
 🔴 **Use the ABSOLUTE path — `obs-read` is NOT on `$PATH`, and it lives in the
@@ -67,6 +102,23 @@ $OBS --cluster homelab --backend loki --query '{namespace="monitoring"}' --since
   to a Loki `count_over_time`. Same trap in the time axis: `count_over_time[1h]`
   evaluated at instant T covers **T-1h → T**, so a bucket labelled `16:00` can be
   reporting a 15:31 incident.
+- 🔴 **FOURTH CASE, and it INFLATES rather than empties: `--kind instant` still issues a
+  RANGE query, so a `count by (<label>)` UNIONS that label across every evaluation
+  instant.** Each instant carries its own `[window]` lookback, so the series set you get
+  back spans `--since` **plus** the window, not the window. Measured 2026-09-07 asking for
+  distinct taskrun pods in 24h: **3,787** returned — a 48h union — against a true
+  **1,591**. Nothing errors and the number is entirely plausible, which is what makes it
+  expensive. **For a distinct-count, use the scalar form** — `count(count by (pod) (…))` —
+  **and read it at ONE instant** (`--since 10m` with the real lookback inside the range
+  selector). **The tell is the `POINTS` column**: a value beside `POINTS 251` is a matrix
+  row, not an instant reading. Same shape whenever a `by (…)` label is high-cardinality
+  and short-lived — pods, taskruns, request ids.
+- ⚠ **A high-cardinality `by (…)` over a long window can also just be REFUSED**: Loki caps
+  a single query at `maximum number of series (5000)`. Chunking the window is the obvious
+  workaround and the dangerous one — if your extractor scores a failed chunk as empty, a
+  partial scan prints as a confident total. **Narrow with a stream selector instead**
+  (`{ns="x", pod=~"<prefix>-.*"}`), which keeps each query under the cap and usually scopes
+  it to the question you were actually asking.
 
 ## Presets
 Seeded from **real** queries surveyed out of the datapacket skills
