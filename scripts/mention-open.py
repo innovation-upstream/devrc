@@ -142,30 +142,59 @@ KNOWN_REPOS_PATH = Path(
     or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "mention-open" / "known_repos.json")
 
-# 🔴 THE MAPPING IS HAND-REGENERATED ONLY, AND NOTHING CONVERGES IT. There is no
-# timer anywhere in `nix/` that runs `scripts/regen-known-repos.py`, so a
-# repository created after the last run is INVISIBLE to every resolution path —
-# and the symptom is the picker appearing for a name that ought to have resolved,
-# which reads as "the picker is noisy" rather than as "my mapping is old".
+# The generated PICKER UNIVERSE — a JSON list of `owner/repo`, same directory,
+# same 0600, same disclosure rules. It answers a DIFFERENT question from the
+# mapping beside it: the mapping says what a bare name MEANS, this says what the
+# operator might want OFFERED. `regen-known-repos.py`'s docstring carries the
+# full argument and the measurement.
 #
-# So the age is MEASURED and SURFACED. Its PRIMARY home is the note above the
-# picker (`universe_note`), because that is the path a stale mapping actually
-# produces — the click that did not resolve. `staleness_note` covers the two
-# refusals: `--print`, which cannot show a picker at all, and the narrow
-# shadowed-mapping arm documented in `refuse()`. Stating that split here rather
-# than "the refusal body" is deliberate: the vaguer wording read as "every
-# refusal past 7 days", which is not what the code does.
-# It is a SIGNAL, not a repair — deliberately, and the
-# alternative was weighed: a systemd-user timer would run `gh api user/repos`
-# on a schedule, and `regen-known-repos.py` REFUSES below its 25-repo floor and
-# exits 3, so a host without `gh auth` would take a failing unit and a failure
-# toast on every fire. A permanently-red timer is worse than no timer. The
-# signal fires at the exact moment the staleness bites, which is the click that
-# did not resolve.
+# 🔴 THE ENV OVERRIDE IS NOT A CONVENIENCE — IT IS WHAT LETS TESTS REDIRECT A
+# SUBPROCESS. `MENTION_OPEN_KNOWN_REPOS` exists for exactly that reason (nine
+# tests were measured reading the operator's real mapping, two of them
+# DISCLOSURE tests, and a `monkeypatch.setattr` on the module constant is
+# invisible to a child process that re-imports this file). A new host-state file
+# without the same door would re-open the same hole for the universe.
+KNOWN_UNIVERSE_PATH = Path(
+    os.environ.get("MENTION_OPEN_KNOWN_UNIVERSE")
+    or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    / "mention-open" / "known_universe.json")
+
+# 🔴 A TIMER NOW CONVERGES THE MAPPING, AND THIS PARAGRAPH USED TO SAY THE
+# OPPOSITE — do not re-derive the old reasoning from a stale copy of it. It read
+# "THE MAPPING IS HAND-REGENERATED ONLY … There is no timer anywhere in `nix/`",
+# and it argued a timer would be WORSE than the signal: `regen-known-repos.py`
+# had one failure code, so a host without `gh auth` would take a failing unit
+# and a failure toast on every fire, and a permanently-red timer is worse than
+# no timer. That objection was correct, and it was answered rather than
+# overruled — the generator now exits 4 for "not configured on this host" and 3
+# only for a real failure, and `mention-known-repos-refresh.service` sets
+# `SuccessExitStatus=4`. An unauthenticated host is quiet; a broken run toasts.
+#
+# `nix/home.nix` → `systemd.user.timers.mention-known-repos-refresh`, daily.
+#
+# 🔴 THE SIGNAL BELOW STAYS, AND IS NOW A DEADMAN RATHER THAN A REMINDER. Its
+# job changed: it used to say "you never ran the generator", which the operator
+# could act on directly. It now says "the timer has not landed a fresh file in
+# a week", whose causes are a unit that is failing, a host that was off, or a
+# token that expired — none of which the operator would otherwise see, because
+# a stale mapping's only symptom is the picker appearing where a resolution used
+# to. A converged file makes the note unreachable in the ordinary case, which is
+# the point; it is NOT dead code, and the tests reach it by ageing the file.
+#
+# Its PRIMARY home is the note above the picker (`universe_note`), because that
+# is the path a stale mapping actually produces — the click that did not
+# resolve. `staleness_note` covers the two refusals: `--print`, which cannot
+# show a picker at all, and the narrow shadowed-mapping arm documented in
+# `refuse()`. Stating that split here rather than "the refusal body" is
+# deliberate: the vaguer wording read as "every refusal past 7 days", which is
+# not what the code does.
 #
 # Seven days is a week of repo-creating, not a tuned constant; it is pinned at
 # two points (fresh and stale) rather than at a boundary, and it is not
-# env-overridable because a run must not be able to excuse itself.
+# env-overridable because a run must not be able to excuse itself. ⚠ It is
+# deliberately NOT re-tuned to the timer's daily period: a 2-day threshold would
+# fire on one missed run, and a laptop that spends a weekend closed is not a
+# fault. Seven days means "several consecutive runs did not happen".
 STALE_MAPPING_DAYS = 7
 
 # rofi theme — the same one nix/i3/config.nix already uses for the app launcher,
@@ -302,21 +331,51 @@ def picker_rows(candidates: list[dict]) -> list[str]:
     return rows
 
 
-def repo_universe(repos: dict | None) -> list[str]:
-    """Every distinct `owner/repo` this host knows about, sorted.
+def repo_universe(repos: dict | None,
+                  universe: list[str] | None = None) -> list[str]:
+    """Every distinct `owner/repo` worth offering, sorted — the picker's rows.
 
-    The input is `discover_repos()`'s mapping — the generated file laid under the
-    real local checkouts — so this is a MEASUREMENT of the host, not a list of
-    plausible names. Values that are not exactly `owner/repo` are dropped for the
-    same reason they are dropped on load: they build a URL that 404s while
-    looking authoritative.
+    TWO SOURCES, UNIONED, AND THE UNION IS THE WHOLE FIX:
+      * `universe` — the generated `known_universe.json`, which is every repo the
+        operator owns or collaborates on, unfiltered.
+      * `repos` — `discover_repos()`'s mapping: the generated resolution mapping
+        laid under the real local checkouts.
+
+    🔴 THIS USED TO READ `repos.values()` ALONE, AND THAT SILENTLY INHERITED THE
+    MAPPING'S FILTERS. The mapping exists to answer "what does the bare name
+    `foo` mean?", so it drops a repo whose issues are disabled and drops a name
+    two owners share — both correct for resolution, both wrong for a picker
+    whose rows are fully-qualified and where nothing opens without a selection.
+    MEASURED 2026-09-07: 388 repos on this host, 339 offered, **53 unreachable**
+    by typing at the picker. Reading a display list out of a lookup table is the
+    general shape; the two questions differ and so must the filters.
+
+    ⚠ THE UNION IS STRICTLY WIDENING, NEVER NARROWING, and that is deliberate.
+    A local checkout can name a repo the API never returned (a clone of somebody
+    else's repository), and the generated universe can name one that is not on
+    this disk. Neither source can REMOVE a row the other contributed — there is
+    no precedence rule here because there is no conflict to resolve: this is a
+    list of things to offer, not a mapping from a name to one answer.
+
+    Rows that are not exactly `owner/repo` are dropped from BOTH sources — they
+    build a URL that 404s while looking authoritative — and the result is deduped
+    case-insensitively, because `acme/Widget` and `acme/widget` are one
+    repository on GitHub and two identical-looking rows in rofi.
 
     🔴 THE RETURN VALUE NAMES PRIVATE REPOSITORIES. It may reach the operator's
     rofi window and nothing else — no log line, no notification body, no
     telemetry row, no test fixture. See the module docstring.
     """
-    return sorted({v for v in (repos or {}).values()
-                   if isinstance(v, str) and _OWNER_REPO_RE.match(v)})
+    by_key: dict[str, str] = {}
+    # Mapping values first, so a name this host has ON DISK keeps the spelling
+    # its remote uses; the generated universe then adds everything else.
+    for v in (repos or {}).values():
+        if isinstance(v, str) and _OWNER_REPO_RE.match(v):
+            by_key.setdefault(v.lower(), v)
+    for v in (universe or []):
+        if isinstance(v, str) and _OWNER_REPO_RE.match(v):
+            by_key.setdefault(v.lower(), v)
+    return sorted(by_key.values(), key=str.lower)
 
 
 def universe_candidates(num: str, universe: list[str]) -> list[dict]:
@@ -409,6 +468,35 @@ def load_known_repos(path: Path | None = None) -> dict[str, str]:
     # tailer loads the same mapping and a predicate open-coded at two sites is
     # wrong at one of them.
     return clean_repo_map(raw)
+
+
+def load_known_universe(path: Path | None = None) -> list[str]:
+    """`["owner/repo", …]` from the operator's generated universe file, or [].
+
+    🔴 EVERY failure is `[]` — absent, unreadable, malformed, wrong shape, wrong
+    element type. Identical posture to `load_known_repos`, for the identical
+    reason: this runs on a detached click handler with nowhere to print a
+    traceback, and the file is an OPTIONAL widener. Without it the picker still
+    offers everything `discover_repos()` found, which is exactly the behaviour
+    that shipped before this file existed — so a host that has never run the
+    generator, or is mid-write, degrades to the old universe rather than to none.
+
+    ⚠ A LIST, NOT A DICT, and the shape check is not a formality: `json.loads`
+    of the mapping file beside it returns a dict, and a `--path`/`--universe-path`
+    mix-up at generation time would otherwise silently produce a universe of
+    single characters (iterating a dict yields its keys). A non-list is [].
+    """
+    # 🔴 RESOLVED AT CALL TIME, NOT BOUND AS A DEFAULT — the same defect that
+    # made `load_known_repos`' override test inert and left the whole suite
+    # green with the call deleted. See that function's comment.
+    path = path or KNOWN_UNIVERSE_PATH
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [v for v in raw if isinstance(v, str) and _OWNER_REPO_RE.match(v)]
 
 
 def discover_repos(workspace: Path | None = None) -> dict:
@@ -719,18 +807,24 @@ def mapping_age_days(path: Path | None = None) -> float | None:
 def staleness_note(path: Path | None = None) -> str:
     """"the repo mapping is N days old — …" when it is, else "".
 
-    🔴 IT IS A SIGNAL FOR A FILE NOTHING CONVERGES. See `STALE_MAPPING_DAYS`.
-    A repository created since the last `regen-known-repos.py` run cannot be
-    resolved by ANY path here, and the only symptom is a picker appearing where
-    a resolution used to — so the refusal says how old the mapping is and what
-    to run. It names a COUNT and a CONSTANT PATH, never a row.
+    🔴 IT IS THE TIMER'S DEADMAN. See `STALE_MAPPING_DAYS`. A daily unit
+    regenerates this file, so past seven days SEVERAL consecutive runs did not
+    land — the unit is failing, the token expired, or the host was off — and
+    none of those is visible anywhere else, because a stale mapping's only
+    symptom is a picker appearing where a resolution used to.
+
+    ⚠ THE TEXT USED TO SAY "nothing regenerates it", WHICH IS NOW FALSE and
+    would send the operator to re-run a generator by hand instead of looking at
+    the unit that is silently failing. It names a COUNT, a CONSTANT PATH and a
+    UNIT NAME — never a row.
     """
     age = mapping_age_days(path)
     if age is None or age < STALE_MAPPING_DAYS:
         return ""
-    return (f"the repo mapping is {age:.0f} days old and nothing regenerates it "
-            f"— a repository created since then cannot resolve; run "
-            f"scripts/regen-known-repos.py")
+    return (f"the repo mapping is {age:.0f} days old — the daily refresh has "
+            f"not landed, so a repository created since then cannot resolve; "
+            f"check `systemctl --user status mention-known-repos-refresh` "
+            f"or run scripts/regen-known-repos.py")
 
 
 def universe_note(subject: str, offered: int, path: Path | None = None) -> str:
@@ -1000,7 +1094,14 @@ def main(argv: list[str] | None = None) -> int:
     may_offer_universe = (not args.print_only and not args.no_discovery
                           and not colour)
     num = span["id"] if (span is not None and span["id"].isdigit()) else offer_num
-    universe = (universe_candidates(num, repo_universe(discovered))
+    # 🔴 `load_known_universe()` IS INSIDE THE CONDITIONAL EXPRESSION ON PURPOSE
+    # — Python does not evaluate the true-branch when the condition is false, so
+    # the file read costs NOTHING on the clicks that never show a picker, which
+    # are the common ones. Hoisting it to its own statement above would put a
+    # `stat` + `read` + `json.loads` on every `owner/repo#N` click, the exact
+    # class of tax the lazy `concurrent.futures` import was moved to avoid.
+    universe = (universe_candidates(
+                    num, repo_universe(discovered, load_known_universe()))
                 if (may_offer_universe and num) else [])
     if not candidates and universe:
         # Dead end 1 — an unresolvable `repo#N`, or text the scanner refused
