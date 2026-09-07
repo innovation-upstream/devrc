@@ -102,6 +102,23 @@ $OBS --cluster homelab --backend loki --query '{namespace="monitoring"}' --since
   to a Loki `count_over_time`. Same trap in the time axis: `count_over_time[1h]`
   evaluated at instant T covers **T-1h → T**, so a bucket labelled `16:00` can be
   reporting a 15:31 incident.
+- 🔴 **FOURTH CASE, and it INFLATES rather than empties: `--kind instant` still issues a
+  RANGE query, so a `count by (<label>)` UNIONS that label across every evaluation
+  instant.** Each instant carries its own `[window]` lookback, so the series set you get
+  back spans `--since` **plus** the window, not the window. Measured 2026-09-07 asking for
+  distinct taskrun pods in 24h: **3,787** returned — a 48h union — against a true
+  **1,591**. Nothing errors and the number is entirely plausible, which is what makes it
+  expensive. **For a distinct-count, use the scalar form** — `count(count by (pod) (…))` —
+  **and read it at ONE instant** (`--since 10m` with the real lookback inside the range
+  selector). **The tell is the `POINTS` column**: a value beside `POINTS 251` is a matrix
+  row, not an instant reading. Same shape whenever a `by (…)` label is high-cardinality
+  and short-lived — pods, taskruns, request ids.
+- ⚠ **A high-cardinality `by (…)` over a long window can also just be REFUSED**: Loki caps
+  a single query at `maximum number of series (5000)`. Chunking the window is the obvious
+  workaround and the dangerous one — if your extractor scores a failed chunk as empty, a
+  partial scan prints as a confident total. **Narrow with a stream selector instead**
+  (`{ns="x", pod=~"<prefix>-.*"}`), which keeps each query under the cap and usually scopes
+  it to the question you were actually asking.
 
 ## Presets
 Seeded from **real** queries surveyed out of the datapacket skills
