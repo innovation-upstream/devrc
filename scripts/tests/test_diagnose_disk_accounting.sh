@@ -225,9 +225,14 @@ lacks "inode_breakdown does not execute the planted name" "$inj_out" "$EXPANSION
 has "the planted directory is still listed, byte-for-byte" "$inj_out" "$INJ/$EVIL"
 has "the benign directory's inodes are counted" "$inj_out" "$INJ/benign"
 
-# The size half of section 6d walks the same attacker-writable directory.
+# The size half of section 6d walks the same attacker-writable directory. Its
+# 🔴 INVARIANT GUARD, labelled as one and NOT counted as regression coverage:
+# `du` never starts a shell, so no mutation of `size_breakdown` short of adding
+# `sh -c` could make this go red. It pins that the pipeline stays shell-free —
+# real, but it is not a test of a bug that existed. The line below it IS a
+# regression guard: a `du` fed a mangled name reports the wrong directory.
 size_out="$(size_breakdown "$INJ" 2>&1)"
-lacks "size_breakdown does not execute the planted name" "$size_out" "$EXPANSION"
+lacks "INVARIANT: size_breakdown starts no shell for the planted name" "$size_out" "$EXPANSION"
 has "size_breakdown lists the planted directory verbatim" "$size_out" "$INJ/$EVIL"
 
 # --------------------------------------------------------------------------- #
