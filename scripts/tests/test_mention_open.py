@@ -245,6 +245,155 @@ def test_an_unresolvable_owner_exits_non_zero_and_explains():
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 NO TEST MAY READ THE OPERATOR'S REAL `known_repos.json`
+#
+# `KNOWN_REPOS_PATH` is a module CONSTANT pointing at
+# `~/.config/mention-open/known_repos.json` — the file whose committed ancestor
+# disclosed 232 private repository names into this PUBLIC repo. Every route into
+# it (`load_known_repos`, `universe_reason`, `mapping_age_days`) resolves that
+# constant AT CALL TIME, so redirecting it here closes the whole class rather
+# than one test at a time.
+#
+# 🔴 THIS IS A MEASURED HOLE, NOT A PRECAUTION. Before this fixture, NINE tests
+# in this file touched the real file — seven `stat()`ing it for the mapping age
+# and two `read_text()`ing it — which is why they asserted different things on
+# the dev host (a real 369-row mapping) than in the nix sandbox tier (an empty
+# HOME, so no file at all). The disclosure guards below are the sharp end: a
+# mutant that leaks `load_known_repos()` would, unredirected, leak the
+# OPERATOR'S OWN private names while the guard checked for `FAKE_UNIVERSE`'s
+# synthetic ones — a leak the tripwire is structurally unable to see.
+#
+# The redirect writes `FAKE_UNIVERSE` itself, FRESH, so a leaking mutant leaks
+# exactly the names the guards assert on. A test needing another mapping state —
+# absent, unreadable, stale, holding one row — re-patches the constant, and
+# every one that does still does.
+#
+# 🔴 IT TAKES TWO REDIRECTS, BECAUSE HALF THIS FILE RUNS IN A SUBPROCESS.
+# `monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", p)` rebinds an attribute on THIS
+# process's module object. `_run()` spawns `mention-open.py` as a REAL child,
+# which imports itself from scratch and resolves the constant from
+# `MENTION_OPEN_KNOWN_REPOS`/`XDG_CONFIG_HOME` at its own import time — the
+# setattr is invisible to it. MEASURED with inotify at the PR head: all four
+# mention suites made ZERO opens of the operator's real mapping, but that was an
+# accident of which flags the four `_run` tests happened to pass — take
+# `--no-discovery` off one existing test and the child made 2 OPEN + 2 ACCESS on
+# the real 369-row file while the suite reported 138 passed and the in-process
+# control below stayed green, because it inspects an attribute the child never
+# consults. The `setenv` is what a subprocess actually inherits, and
+# `test_the_autouse_redirect_REACHES_A_SUBPROCESS` is what can see it missing.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _mapping_is_never_the_operators(monkeypatch, tmp_path):
+    p = tmp_path / "autouse-known-repos.json"
+    # `FAKE_UNIVERSE` is defined further down; module globals resolve at call
+    # time, so the ordering is not a problem and the constant stays beside the
+    # comment block that explains it.
+    p.write_text(json.dumps(FAKE_UNIVERSE))
+    when = time.time() - 1.0 * 86400  # fresh: inside STALE_MAPPING_DAYS
+    os.utime(p, (when, when))
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", p)
+    # 🔴 THE SUBPROCESS HALF. `mention-open.py:135` already reads this variable,
+    # and a child inherits the environment — so this closes the class for every
+    # `_run()` test, present and future, rather than depending on each one
+    # remembering to pass `--no-discovery`.
+    monkeypatch.setenv("MENTION_OPEN_KNOWN_REPOS", str(p))
+    return p
+
+
+def test_the_autouse_redirect_is_IN_FORCE(tmp_path):
+    """The positive control for the fixture above — the IN-PROCESS half only.
+    Without it, a redirect that silently stopped applying — a renamed constant,
+    a fixture shadowed by a later definition — would leave every in-process test
+    in this file reading the operator's real mapping again, and nothing would
+    say so.
+
+    ⚠ IT IS BLIND TO THE SUBPROCESS HALF, AND SAYING SO IS THE POINT: it reads a
+    module attribute a child process never consults, so it stayed green through
+    the whole gap the test below now covers."""
+    assert MO.KNOWN_REPOS_PATH.name == "autouse-known-repos.json", (
+        f"the autouse redirect is not in force: {MO.KNOWN_REPOS_PATH}")
+    assert MO.KNOWN_REPOS_PATH.is_relative_to(tmp_path), MO.KNOWN_REPOS_PATH
+    assert MO.KNOWN_REPOS_PATH != Path.home() / ".config/mention-open/known_repos.json"
+    # And it really is loadable — an unreadable redirect would make every
+    # mapping-state assertion below pass for the wrong reason.
+    assert MO.load_known_repos() == FAKE_UNIVERSE
+
+
+# What a child prints: the path IT resolved, from its own import, with no help
+# from this process. `argv[1]` is the handler; the filename has a hyphen so it
+# cannot simply be imported by name.
+_CHILD_REPORTS_ITS_MAPPING_PATH = (
+    "import importlib.util,sys;"
+    "spec=importlib.util.spec_from_file_location('mo', sys.argv[1]);"
+    "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);"
+    "print(m.KNOWN_REPOS_PATH);print(sorted(m.load_known_repos()))"
+)
+
+
+def test_the_autouse_redirect_REACHES_A_SUBPROCESS(tmp_path):
+    """🔴 THE HALF THE CONTROL ABOVE STRUCTURALLY CANNOT SEE, and the reason the
+    gap survived a round of review: a control that cannot observe the failure it
+    names is not a control.
+
+    Four tests in this file drive the handler through `_run()` — a real child
+    process. It re-resolves `KNOWN_REPOS_PATH` at ITS import, so the
+    `monkeypatch.setattr` never reached it; those four passed only because each
+    happened to carry `--no-discovery` (under which the mapping is never read)
+    or no digits. Nothing enforced that, and dropping the flag from one of them
+    put 2 OPEN + 2 ACCESS on the operator's real 369-row mapping — measured with
+    inotify, positive control fired at 1 — with the suite reporting 138 passed.
+
+    This asserts what the CHILD resolved, so deleting the `setenv` from the
+    fixture makes it red rather than leaving the hole invisible."""
+    r = subprocess.run([sys.executable, "-c", _CHILD_REPORTS_ITS_MAPPING_PATH,
+                        str(HANDLER)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    resolved, loaded = r.stdout.splitlines()[:2]
+    child_path = Path(resolved.strip())
+    real = Path.home() / ".config/mention-open/known_repos.json"
+    assert child_path != real, (
+        f"a CHILD of this suite resolves the operator's real mapping: {child_path}")
+    assert child_path.is_relative_to(tmp_path), child_path
+    assert child_path == MO.KNOWN_REPOS_PATH, (child_path, MO.KNOWN_REPOS_PATH)
+    # POSITIVE CONTROL — the child did not merely resolve a path, it READ the
+    # fake mapping. A redirect pointing somewhere unreadable would satisfy every
+    # absence above while the child fell back to nothing.
+    assert loaded.strip() == str(sorted(FAKE_UNIVERSE)), loaded
+
+
+def test_a_DISCOVERING_subprocess_resolves_through_the_FAKE_mapping(tmp_path,
+                                                                    monkeypatch):
+    """🔴 THE BEHAVIOURAL HALF, on the exact flag combination that was unguarded.
+    Every other `_run()` test passes `--no-discovery`, under which the mapping is
+    never read at all — so none of them could have caught the redirect not
+    reaching a child. This one DISCOVERS, and answers from a name that exists
+    only in `FAKE_UNIVERSE`.
+
+    🔴 TWO REAL EDGES ARE CLOSED BY ARGUMENT RATHER THAN BY STUB, because a
+    child process cannot be monkeypatched and this is the only test that lets
+    one run the discovery pass:
+
+      * `DEVRC_WORKSPACE` -> an empty directory, so the `git remote` fan-out
+        walks nothing. A local checkout WINS over the mapping, so this host's
+        real `~/workspace` must not be able to decide a test's answer either
+        way — and it also keeps the test off ~100 concurrent agent worktrees.
+      * `--default-repo` -> set, which short-circuits `tmux_pane_repo()` in
+        `main()` (`args.default_repo or tmux_pane_repo()`). Without it the child
+        runs a REAL `tmux display-message` against the operator's live server —
+        a side effect in a suite that is supposed to have none, next door to
+        tests that drive real tmux sockets. The value is irrelevant to the
+        assertion: `loamfield#12` names its repo, so it resolves `mapped`, one
+        rung above `default`.
+    """
+    monkeypatch.setenv("DEVRC_WORKSPACE", str(tmp_path / "no-checkouts-here"))
+    r = _run("--print", "--default-repo", "unused/by-this-shape", "loamfield#12")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "https://github.com/gardenersguild/trowelcast/issues/12", (
+        "the child did not resolve through the redirected mapping — it either "
+        f"read the operator's real one or nothing at all: {r.stdout!r} {r.stderr!r}")
+
+
+# --------------------------------------------------------------------------- #
 # main() — the decision, with every impure edge stubbed
 # --------------------------------------------------------------------------- #
 @pytest.fixture
@@ -1066,8 +1215,13 @@ def test_universe_reason_never_names_a_ROW(tmp_path):
 # itself cannot tell a working guard from a constant.
 # --------------------------------------------------------------------------- #
 def _mapping_aged(tmp_path, days: float) -> Path:
+    """A mapping of a chosen age holding `FAKE_UNIVERSE` — the SAME rows the
+    disclosure guards assert are absent. It used to hold one unrelated row, which
+    made those guards' KEY half vacuous on every path that re-reads the file:
+    `refuse()` calls `load_known_repos()` afresh, so a mutant leaking it leaked
+    names no assertion was looking for."""
     p = tmp_path / "known_repos.json"
-    p.write_text(json.dumps({"plotwidget": "hobbyist/plotwidget"}))
+    p.write_text(json.dumps(FAKE_UNIVERSE))
     when = time.time() - days * 86400
     os.utime(p, (when, when))
     return p
@@ -1089,7 +1243,7 @@ def test_the_mapping_age_is_measured_at_FOUR_points(tmp_path, days, stale):
     assert bool(note) is stale, f"{days}d -> {note!r}"
     if stale:
         assert "regen-known-repos.py" in note, note
-        assert "plotwidget" not in note and "hobbyist" not in note, note
+        _no_universe_token_anywhere(note, "STALENESS-NOTE DISCLOSURE")
 
 
 def test_an_ABSENT_mapping_has_an_UNKNOWN_age_not_a_fresh_one(tmp_path):
@@ -1119,6 +1273,95 @@ def test_a_STALE_mapping_is_NAMED_in_the_refusal_beside_the_primary_cause(
     assert "days old" in body, f"the refusal never named the mapping's age: {body}"
     assert "regen-known-repos.py" in body, body
     assert "owner/repo#N" in body, "the actionable advice was dropped"
+
+
+def _shadowed_mapping_host(monkeypatch, tmp_path, days: float):
+    """The one state in which a NON-`--print` refusal can name the mapping's age,
+    built end-to-end rather than by stubbing the branch's own inputs.
+
+    🔴 WHY IT LOOKS ABSURD AND IS NOT. A round-2 audit read the branch as dead
+    code: `universe_reason()` returns "" only when `clean_repo_map` kept a row,
+    `repo_universe` filters on the SAME regex, and `discover_repos` only ADDS —
+    so a non-empty mapping was said to guarantee a non-empty universe and hence a
+    picker. The missing step is that `discover_repos` also OVERWRITES, and
+    `parse_owner_repo` is LOOSER than `OWNER_REPO_VALUE_RE`: it asks only for two
+    `/`-separated segments, so `https://github.com/-acme/widget.git` yields the
+    non-empty `-acme/widget`, which the value regex rejects. A checkout whose
+    DIRECTORY NAME shadows the mapping's key therefore replaces a valid row with
+    an invalid one — reason "", universe empty, refusal reached.
+    """
+    mapping = tmp_path / "shadowed.json"
+    mapping.write_text(json.dumps({"widget": "acme/widget"}))
+    when = time.time() - days * 86400
+    os.utime(mapping, (when, when))
+    monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", mapping)
+    ws = tmp_path / "workspace"
+    (ws / "widget" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(MO, "WORKSPACE", ws)
+    # Two path segments, so `parse_owner_repo` accepts it; a leading `-`, so
+    # `OWNER_REPO_VALUE_RE` does not.
+    monkeypatch.setattr(MO, "repo_of_checkout", lambda p: "-acme/widget")
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    return mapping
+
+
+def test_the_SHADOWED_mapping_state_is_the_one_the_branch_needs(monkeypatch,
+                                                                tmp_path):
+    """The premise, asserted separately from the behaviour. If any of these three
+    stopped holding, the test below would still pass — for the wrong reason, or
+    by never reaching the branch at all."""
+    _shadowed_mapping_host(monkeypatch, tmp_path, MO.STALE_MAPPING_DAYS + 30)
+    assert MO.parse_owner_repo("https://github.com/-acme/widget.git") == "-acme/widget"
+    assert MO.load_known_repos() == {"widget": "acme/widget"}
+    assert MO.universe_reason() == "", (
+        "the mapping must PARSE and hold a row, or `reason` wins and the "
+        "staleness branch is not the code under test")
+    assert MO.repo_universe(MO.discover_repos()) == [], (
+        "the universe must be EMPTY, or the picker is shown and no refusal "
+        "happens at all")
+
+
+def test_a_NON_print_refusal_CAN_still_name_the_mapping_AGE(monkeypatch,
+                                                            tmp_path):
+    """🔴 THE REGRESSION TEST FOR A BRANCH AN AUDIT CALLED UNREACHABLE. Deleting
+    it left the whole suite green — 264/264 — because the only refusal test that
+    named an age used `--print`, which takes the OTHER arm. Watched to fail with
+    the branch removed; see `refuse()` for the reachability argument.
+
+    Not `--print`: this is the interactive path, refusing because there is
+    nothing to put in a picker."""
+    _shadowed_mapping_host(monkeypatch, tmp_path, MO.STALE_MAPPING_DAYS + 393)
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    monkeypatch.setattr(MO, "pick", lambda *a, **k: pytest.fail(
+        "a picker was raised — the universe was not empty and this test is "
+        "no longer exercising the refusal path"))
+    assert MO.main(["zzznosuchrepo#77"]) == 1
+    body = notices[-1][1]
+    # The PRIMARY fact, un-substituted.
+    assert "no repository owner is known for it" in body, body
+    # The ADDITIVE one — the branch under test.
+    assert "days old" in body, (
+        f"a non-`--print` refusal on a host whose mapping is 400 days old "
+        f"never named the age: {body}")
+    assert "regen-known-repos.py" in body, body
+    # And the advice is still appended, not replaced.
+    assert "owner/repo#N" in body, body
+
+
+def test_a_NON_print_refusal_on_a_FRESH_mapping_adds_no_age(monkeypatch,
+                                                            tmp_path):
+    """The negative control for the test above, on the SAME state. Without it a
+    `staleness_note` that complained unconditionally would satisfy every
+    assertion there, and the branch would be pinned as noise rather than as a
+    signal."""
+    _shadowed_mapping_host(monkeypatch, tmp_path, 0.0)
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(a))
+    assert MO.main(["zzznosuchrepo#77"]) == 1
+    body = notices[-1][1]
+    assert "no repository owner is known for it" in body, body
+    assert "days old" not in body, body
 
 
 def test_a_FRESH_mapping_adds_NO_staleness_noise_to_the_refusal(
@@ -1171,17 +1414,68 @@ def test_a_value_that_is_not_EXACTLY_owner_slash_repo_is_refused(tmp_path, value
 # 🔴 EVERY NAME BELOW IS SYNTHETIC. The real universe is built from
 # `known_repos.json`, the file whose committed ancestor disclosed 232 PRIVATE
 # repositories into this PUBLIC repo. No test may read that file, and no row
-# from it may ever be written to a fixture, a log or a spool. Values are
-# pairwise distinct and distinct from every constant these assertions name.
+# from it may ever be written to a fixture, a log or a spool.
+#
+# 🔴 THE KEYS ARE NOT SUBSTRINGS OF THE VALUES, AND THAT IS THE WHOLE FIXTURE.
+# A mapping is `{checkout directory name: "owner/repo"}` and the two halves are
+# genuinely independent — `regen-known-repos.py` handles `vendored-plotwidget ->
+# rivalorg/plotwidget` on purpose. This fixture used to spell them
+# `trowelcast -> gardenersguild/trowelcast`, so every disclosure guard could
+# iterate `.values()` and LOOK total while being blind to a KEY leak: asserting
+# `"gardenersguild/trowelcast" not in output` says nothing about an output
+# containing only `trowelcast`. A round-2 audit's mutant — a "did you mean?"
+# line carrying `", ".join(sorted(load_known_repos()))`, i.e. every private repo
+# NAME — reached `notify()` (stderr AND `notify-send`) and survived all 127
+# tests. Keys, values and owners are now pairwise distinct, and distinct from
+# every constant these assertions name (`kubectl-neat`, `zzznosuchrepo`,
+# `regen-known-repos.py`, `offered`), so no guard can pass by coincidence.
 #
 # 🔴 NOTHING HERE LAUNCHES ROFI. `pick` is stubbed by the `spy` fixture, or
 # `subprocess.run` is replaced. Raising a window takes the operator's screen.
 # --------------------------------------------------------------------------- #
 FAKE_UNIVERSE = {
-    "trowelcast": "gardenersguild/trowelcast",
-    "plotwidget": "hobbyist/plotwidget",
-    "spadeworks": "rivalorg/spadeworks",
+    "loamfield": "gardenersguild/trowelcast",
+    "pegboard": "hobbyist/plotwidget",
+    "quarryside": "rivalorg/spadeworks",
 }
+
+# Keys, owners and full names, as one flat set. THE thing no sink may name.
+FAKE_UNIVERSE_TOKENS = (
+    set(FAKE_UNIVERSE)
+    | set(FAKE_UNIVERSE.values())
+    | {v.split("/")[0] for v in FAKE_UNIVERSE.values()}
+    | {v.split("/")[1] for v in FAKE_UNIVERSE.values()}
+)
+
+
+def test_the_fixtures_KEYS_and_VALUES_are_pairwise_distinct():
+    """🔴 THE GUARD ON THE GUARDS. Every disclosure assertion below is only as
+    wide as this fixture: if a key were a substring of its value, a `.values()`
+    check would appear to cover the key half and a key-only leak would walk
+    straight through. TWELVE distinct tokens over three rows — key, full
+    `owner/repo`, bare owner, bare repo-half — is what makes
+    `FAKE_UNIVERSE_TOKENS` a real ledger rather than three names spelled twice.
+    (Nine of the twelve carry no slash; that count belongs to the substring
+    sweep below, not to the ledger, and this docstring used to attach it to the
+    wrong object.)
+    """
+    assert len(FAKE_UNIVERSE_TOKENS) == 4 * len(FAKE_UNIVERSE), FAKE_UNIVERSE_TOKENS
+    for a in FAKE_UNIVERSE_TOKENS:
+        for b in FAKE_UNIVERSE_TOKENS:
+            if a != b and "/" not in a and "/" not in b:
+                assert a not in b, (
+                    f"{a!r} is a substring of {b!r} — a leak of the first would "
+                    f"be indistinguishable from a leak of the second")
+
+
+def _no_universe_token_anywhere(everywhere: str, label: str) -> None:
+    """🔴 KEYS *AND* VALUES *AND* OWNERS. The guards this replaces iterated
+    `FAKE_UNIVERSE.values()` alone, which pins one of the three spellings a leak
+    can take. `load_known_repos()` returns a dict, so the single most natural
+    "did you mean?" mutant — `", ".join(sorted(load_known_repos()))` — leaks the
+    KEYS, and nothing in this file could see it."""
+    for token in sorted(FAKE_UNIVERSE_TOKENS):
+        assert token not in everywhere, f"{label}: {token}"
 
 
 @pytest.fixture
@@ -1225,6 +1519,167 @@ def test_an_UNRESOLVABLE_repo_now_reaches_the_fuzzy_picker(spy, universe):
     assert MO.main(["zzznosuchrepo#12"]) == 0
     assert ("pick", 3) in spy, spy
     assert not [c for c in spy if isinstance(c, tuple) and c[0] == "notify"]
+
+
+@pytest.mark.parametrize("text", ["audit-pr 1291", "/audit-pr 1291"])
+def test_an_audit_pr_REFERENCE_resolves_through_the_PANE_repo(spy, text):
+    """🔴 THE CLICK PATH FOR THE ONE WORDY SHAPE THAT IS CLICKABLE. `audit-pr N`
+    names a number and NO repository, so it resolves exactly the way a bare `#N`
+    does: the tmux pane's repo when there is one. It is the same ladder every
+    other no-owner reference walks.
+
+    🔴 AND IT IS OFFERED, NOT OPENED. This test used to assert an `open` — one
+    candidate, so `main()`'s shortcut fired — which made this the FIRST shape in
+    the handler that could open a page on a repository guessed from the pane
+    alone. `repo_source == "default"` now suppresses the shortcut, so the pane's
+    repo arrives as a row to confirm. See
+    `test_a_GUESSED_repo_is_never_auto_opened_whatever_the_shape` for the rule
+    stated where it is decided."""
+    assert MO.main([text]) == 0
+    # It really did walk the measurement pass — the URL came from the pane, not
+    # from something the text carried. ONE row, and the `spy` picker selects it,
+    # so the open still happens — after a keystroke, which is the whole
+    # difference. The exact SEQUENCE is asserted, not a set: the pane must be
+    # measured before the picker is raised, and the picker before the open.
+    assert spy == ["tmux", "discover", ("pick", 1),
+                   ("open", "https://github.com/civitai/talos-infra/issues/1291")], spy
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A GUESSED REPOSITORY IS OFFERED, NEVER OPENED
+#
+# `repo_source == "default"` is the bottom rung of `mention_scan`'s attribution
+# ladder: the text named no repository and the answer came from `tmux_pane_repo`
+# — which answers for the most recently ACTIVE tmux client, not necessarily the
+# pane whose text was clicked. Every rung above it is evidence ABOUT the
+# reference; this one is evidence about the WINDOW.
+#
+# MEASURED with the pane forced to `WRONGORG/wrongrepo`, base vs merged:
+#
+#   text             base                 merged (before this rule)
+#   audit-pr 1291    REFUSE               OPEN-DIRECTLY WRONGORG/wrongrepo#1291
+#   #1291            picker (2 rows)      picker (2 rows)
+#
+# The bare `#N` was protected only INCIDENTALLY — it has a clawgate sibling, so
+# it was two candidates. Nothing suppressed the shortcut for a `default`-sourced
+# row, so the next single-candidate shape would have inherited the defect.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("text", ["audit-pr 1291", "/audit-pr 1291", "#1291"])
+def test_a_GUESSED_repo_is_never_auto_opened_whatever_the_shape(monkeypatch, text):
+    """🔴 THE RULE, PINNED AT THE `repo_source` LEVEL RATHER THAN ON `audit-pr`.
+
+    The pane names a repository the text never mentions. Nothing may open
+    without a selection — for the wordy shape that has ONE candidate, for the
+    bare `#N` that has two, and for whatever is added next."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    monkeypatch.setattr(MO, "open_url",
+                        lambda url: pytest.fail(f"AUTO-OPENED a guessed repo: {url}"))
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(
+                            urls=[x["url"] for x in c], mesg=mesg) or "")
+    assert MO.main([text]) == 0
+    # POSITIVE CONTROL — the pane's repo really WAS offered. A run that resolved
+    # nothing would satisfy "did not auto-open" while proving nothing.
+    assert "https://github.com/wrongorg/wrongrepo/issues/1291" in seen["urls"], seen
+
+
+def test_the_one_row_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
+    """A single-row picker with no explanation reads as a broken handler asking
+    the operator to confirm the obvious. rofi cannot report a reason after a
+    dismissal (see `pick`), so the reason goes above the choice.
+
+    🔴 AND THE NOTE NAMES THE CLICKED TEXT, NEVER A REPOSITORY OR THE MAPPING —
+    the ROW already carries the repo, and `_every_sink`'s disclosure guards
+    cannot see a string that goes to rofi."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(n=len(c), mesg=mesg) or "")
+    assert MO.main(["audit-pr 1291"]) == 0
+    assert seen["n"] == 1, seen
+    assert "audit-pr 1291" in seen["mesg"], seen
+    assert "tmux pane" in seen["mesg"], seen
+    _no_universe_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
+
+
+def test_the_note_is_NOT_attached_to_the_ordinary_bare_hash_N_picker(monkeypatch):
+    """🔴 THE NEGATIVE CONTROL FOR THE NOTE, and it guards the most common
+    interaction in this handler. A bare `#N` with a pane repo has been a
+    two-row picker since before any of this; putting a line of apology above it
+    would tax every single click. The note rides ONLY on the one-row picker the
+    suppression created."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(n=len(c), mesg=mesg) or "")
+    assert MO.main(["#1291"]) == 0
+    assert seen["n"] == 2, seen
+    assert seen["mesg"] == "", seen
+
+
+@pytest.mark.parametrize("text,expected", [
+    # `mapped` — the mapping resolved the owner for a repo the TEXT named.
+    ("loamfield#12", "https://github.com/gardenersguild/trowelcast/issues/12"),
+    # `explicit` — the operator wrote the owner out.
+    ("civitai/talos-infra#1065",
+     "https://github.com/civitai/talos-infra/issues/1065"),
+])
+def test_a_repo_the_TEXT_named_still_opens_with_no_picker(monkeypatch, text,
+                                                          expected):
+    """🔴 THE NEGATIVE CONTROL FOR THE SUPPRESSION ITSELF. A rule that turned
+    EVERY single candidate into a picker would satisfy every assertion above
+    and put a keystroke in front of the two shapes that carry their own
+    evidence. `mapped` and `explicit` are rungs above `default` and must still
+    open directly."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": pytest.fail(f"asked about {text}"))
+    opened = []
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
+    assert MO.main([text]) == 0
+    assert opened == [expected], opened
+
+
+def test_the_suppression_reads_mention_scans_OWN_source_constant():
+    """One rule, one place: `main()` branches on the ladder's weakest rung, and
+    a hand-spelled `"default"` here would silently stop firing the day
+    `mention_scan` renamed the constant — with every suite green, because the
+    branch would simply never be taken."""
+    import mention_scan as MS  # noqa: PLC0415 — see `_load_handler`'s sys.path
+
+    assert MO.SOURCE_DEFAULT is MS.SOURCE_DEFAULT
+    assert MO.SOURCE_DEFAULT == "default"
+
+
+@pytest.mark.parametrize("text", ["audit-pr 1291", "/audit-pr 1291"])
+def test_an_audit_pr_reference_with_NO_pane_repo_offers_the_PICKER(
+        universe, monkeypatch, text):
+    """The other half of the ladder. With nothing to attribute it to, the
+    reference becomes a CHOICE over the local universe — never a guess, and never
+    the dead-end toast."""
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "open_url", lambda url: pytest.fail(f"opened {url}"))
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(rows=len(c), mesg=mesg) or "")
+    assert MO.main([text]) == 0
+    assert seen["rows"] == 3, seen
+    assert seen["mesg"], "the universe picker was raised with no explanation"
+
+
+def test_an_OVER_LONG_audit_pr_number_is_REFUSED_not_truncated(spy):
+    """🔴 THE `{1,6}` CONTRACT AT THE HANDLER END. The alacritty hint underlines
+    six digits so the whole run arrives here; the strict scanner's `\\d{1,5}`
+    plus its trailing-digit guard then refuses it. If this ever opened PR 12345
+    the loose-hint/strict-handler contract would be broken in the direction that
+    opens a confident wrong page."""
+    assert MO.main(["audit-pr 123456"]) == 1
+    assert not [c for c in spy if isinstance(c, tuple) and c[0] == "open"], spy
 
 
 def test_the_picker_rows_carry_the_REPO_so_fuzzy_typing_can_narrow():
@@ -1588,16 +2043,20 @@ def test_the_picker_NOTE_never_names_a_universe_row(universe, monkeypatch,
     """🔴 THE NOTE IS THE ONE NEW STRING BUILT WHILE THE WHOLE UNIVERSE IS IN
     HAND, so it is exactly where "did you mean one of these?" would be written
     next. The rows themselves may go to rofi; the note may say only what the
-    operator already knows plus two numbers."""
+    operator already knows plus two numbers.
+
+    ⚠ IT USED TO CHECK THE VALUE AND THE OWNER AND NOT THE KEY — two spellings
+    of three, on a note built beside a dict whose KEYS are the repo names. Every
+    token is checked now."""
     monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", _mapping_aged(tmp_path, 1.0))
     seen = {}
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": seen.update(mesg=mesg) or "")
     assert MO.main(["kubectl-neat#1"]) == 0
-    for name in FAKE_UNIVERSE.values():
-        assert name not in seen["mesg"], f"PICKER-NOTE DISCLOSURE: {name}"
-        assert name.split("/")[0] not in seen["mesg"], (
-            f"PICKER-NOTE DISCLOSURE: {name}")
+    # POSITIVE CONTROL — a note was really built, over a real universe.
+    assert "3 offered" in seen["mesg"], seen
+    assert MO.load_known_repos() == FAKE_UNIVERSE
+    _no_universe_token_anywhere(seen["mesg"], "PICKER-NOTE DISCLOSURE")
 
 
 def test_the_ORDINARY_picker_gets_no_note(spy, monkeypatch):
@@ -1728,15 +2187,24 @@ def test_every_flag_refusal_the_handler_can_produce_survives_notify_send(
 # every sink the handler can write to is enumerated here rather than left to
 # whichever one a test happened to think of. A sink missing from this list is a
 # hole; adding one to the module means adding it here.
+#
+# 🔴 THE THREE SINKS ARE STDOUT, STDERR AND THE `notify-send` ARGV — and that is
+# the WHOLE list, because those are the only places `mention-open.py` writes.
+# It has no log file and no spool: it is a detached one-shot click handler. The
+# guard below used to be named `..._a_LOG_a_SPOOL_or_stderr`, which promised
+# coverage of two sinks that do not exist and understated the one that does (a
+# desktop toast is more public than either). A guard whose NAME is wider than
+# its body reads as coverage while providing none, which is worse than none —
+# it stops anyone looking. The tailer is the module with a spool, and its own
+# disclosure guards are in `test_session_tailer.py`.
 def _every_sink(capsys, notify_argv: list[list[str]]) -> str:
     captured = capsys.readouterr()
     return "\n".join([captured.out, captured.err,
                       *(" ".join(a) for a in notify_argv)])
 
 
-def test_the_universe_never_reaches_a_LOG_a_SPOOL_or_stderr(spy, universe,
-                                                            monkeypatch, capsys,
-                                                            real_notify):
+def test_the_universe_never_reaches_STDOUT_STDERR_or_a_desktop_TOAST(
+        spy, universe, monkeypatch, capsys, real_notify):
     """🔴 THE DISCLOSURE GUARD FOR PASS 4. The real universe names private
     repositories; the ONLY place it may go is the operator's rofi window. This
     asserts the rows exist (a positive control — a test that only checked for
@@ -1752,9 +2220,13 @@ def test_the_universe_never_reaches_a_LOG_a_SPOOL_or_stderr(spy, universe,
     monkeypatch.setattr(MO, "pick", spy_pick)
     assert MO.main(["zzznosuchrepo#12"]) == 0
     assert len(seen["rows"]) == 3, "positive control: the picker got real rows"
+    # POSITIVE CONTROL 2 — the mapping the handler could reach really held these
+    # names, so their absence below is a decision and not an empty fixture. This
+    # is what makes a KEY leak visible: the redirected mapping holds the same
+    # rows the stubbed `discover_repos` does.
+    assert MO.load_known_repos() == FAKE_UNIVERSE
     everywhere = _every_sink(capsys, real_notify)
-    for name in FAKE_UNIVERSE.values():
-        assert name not in everywhere, f"PICKER-PATH DISCLOSURE: {name}"
+    _no_universe_token_anywhere(everywhere, "PICKER-PATH DISCLOSURE")
 
 
 def test_the_REFUSAL_path_names_the_clicked_text_and_never_the_universe(
@@ -1785,8 +2257,12 @@ def test_the_REFUSAL_path_names_the_clicked_text_and_never_the_universe(
     # POSITIVE CONTROL 2 — the universe was in hand and NOT empty at that point,
     # so its absence below is a decision rather than an accident of the fixture.
     assert MO.repo_universe(dict(FAKE_UNIVERSE)) == sorted(FAKE_UNIVERSE.values())
-    for name in FAKE_UNIVERSE.values():
-        assert name not in everywhere, f"REFUSAL-PATH DISCLOSURE: {name}"
+    # POSITIVE CONTROL 3 — and the MAPPING `refuse()` itself re-reads holds the
+    # same rows. Without this the KEY half of the guard below is vacuous: the
+    # `load_known_repos()` a "did you mean?" mutant would call must return the
+    # names the assertion looks for, or it leaks something the guard cannot see.
+    assert MO.load_known_repos() == FAKE_UNIVERSE
+    _no_universe_token_anywhere(everywhere, "REFUSAL-PATH DISCLOSURE")
 
 
 def test_print_mode_REFUSES_an_unresolvable_reference_rather_than_listing_repos(
