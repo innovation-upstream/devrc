@@ -1072,11 +1072,41 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     and `#1353` (pre-deploy handoff). `#1353`'s only red is the contention flake
     under "Open investigations"; confirm the re-run before merging.
     forcing: none
-41. **Rank 31's `=` session-target prefix has still never run against real tmux.**
-    Rank 33's brief conflated it with the reply path, which targets a pane id and
-    does no name matching. `=` is used only by `new-window -t "=" + tmux_session +
-    ":"` (devrc `scripts/tmux-reply-agent` line 568) — the start-a-session path.
-    The live server has `scratch2` beside `scratch20`, so the hazard is reachable.
+41. ✅ **DONE 2026-09-07 — EXERCISED AGAINST REAL tmux, and the control reproduced the
+    hazard on the live server the same minute.** No code change: the `=` prefix is
+    correct as written. What was missing was evidence, and it now exists.
+    🔴 **THE DISTINCTION THAT MADE THIS WORTH DOING — `open_window`'s docstring
+    already records measurements, and they are measurements of TMUX, not of the
+    AGENT.** They establish that `-t scratch2:` prefix-matches onto `scratch20`
+    and that `-t =scratch2:` does not. They say nothing about whether the agent's
+    own `open_window()` builds and uses that target correctly, which is the code
+    path the start-a-session feature actually takes. This drove that function.
+    | probe | result |
+    |---|---|
+    | raw `new-window -t <SHORT>:` (no `=`) | **rc 0, landed in `<LONG>`** — the wrong session |
+    | agent `open_window(cwd, <SHORT>)` | **refused**, `can't find session`, pane `''` |
+    | agent `open_window(cwd, <LONG>)` | pane `%61`, **`display-message` confirms it is in `<LONG>`** |
+    | windows in the probe session | 1 → **3** exactly, so the refusal created nothing |
+    | teardown | 22 sessions before, **22 after**, no strays |
+    **The first row is the load-bearing one.** Without it, "the agent refused" is
+    equally consistent with a tmux that would have failed anyway, and the `=`
+    prefix would be proven to do nothing. The unguarded spelling silently
+    succeeding into the wrong session is what makes the guarded one meaningful.
+    **The third row is the other control:** a refusal alone is equally consistent
+    with an `open_window()` that is broken for every input.
+    🔴 **THE PROBE BUILT ITS OWN AMBIGUOUS PAIR RATHER THAN USING `scratch2`/`scratch20`.**
+    Both of those now EXIST on the live server, so `-t scratch2:` resolves
+    exactly and the hazard is NOT reachable through them today — this item's own
+    text ("the live server has `scratch2` beside `scratch20`, so the hazard is
+    reachable") had gone stale. The hazard needs a name that is a strict PREFIX of
+    a live session and is itself ABSENT; the probe created `zzr41probe20` and
+    targeted the absent `zzr41probe2`. Detached throwaway sessions only, none of
+    the operator's targeted, nothing attached, so no window was raised.
+    ⚠ **One trap hit and worth recording:** the first run copied the agent to
+    `/tmp/tra.py` and it died on `FileNotFoundError: /tmp/lib/tmux_text_policy.py`
+    — the agent loads a sibling `scripts/lib/` module at import time. That is the
+    repo's own documented "a script pulled out of a ref arrives without its
+    sidecar" rule, walked into anyway. Run it from a worktree, not a copy.
     forcing: none
 42. **Three residuals the UI round left disclosed rather than fixed.** `aaOffScreen`
     understands only `px` offsets; `aaEvictsIn`'s `maps` arm matches the literal
