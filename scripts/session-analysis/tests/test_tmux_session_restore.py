@@ -1202,3 +1202,35 @@ def test_verify_POLLS_so_a_slow_claude_is_not_mis_reported_as_lost(monkeypatch):
                                      sleep=lambda s: None)
     assert landed == 1, f"gave up after {calls['n']} polls"
     assert lost == []
+
+
+def test_no_tmux_server_bails_EARLY_instead_of_burning_the_whole_timeout(monkeypatch):
+    """🔴 MEASURED IN THE SANDBOX TIER, where there is no tmux server: the wait
+    ran its full 120s and the target took 121.25s. No panes at all is not
+    'not settled yet' — there is no workspace to wait for, and blocking a boot
+    for two minutes to learn that is a defect, not caution."""
+    monkeypatch.setattr(tsr, "pane_fingerprint", lambda: "")
+    ok, waited = tsr.wait_for_workspace_to_settle(
+        settle=5, timeout=120, no_server_after=10, sleep=lambda s: None)
+    assert ok is False
+    assert waited == 10.0, f"burned {waited}s of a 120s timeout"
+
+
+def test_an_empty_plan_neither_waits_nor_fails(monkeypatch, tmp_path, capsys):
+    """🔴 THE SANDBOX-ONLY REGRESSION. With no work to do there is nothing to
+    wait for and nothing that can be lost, but the settle wait ran anyway,
+    timed out, and the unsettled penalty turned rc 0 into rc 1."""
+    plan = tmp_path / "empty.json"
+    plan.write_text("[]")
+    called = {"waited": False}
+
+    def must_not_run(*a, **k):
+        called["waited"] = True
+        return (False, 120.0)
+
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", must_not_run)
+    monkeypatch.setattr(tsr, "RESURRECT_LAST", tmp_path / "nope")
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    rc = tsr.cmd_restore(dry_run=False, plan_path=plan)
+    assert rc == 0, capsys.readouterr().err
+    assert called["waited"] is False, "waited for a workspace with nothing to send"

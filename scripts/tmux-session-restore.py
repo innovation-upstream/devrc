@@ -497,6 +497,7 @@ def pane_fingerprint() -> str:
 
 
 def wait_for_workspace_to_settle(settle: float = 5.0, timeout: float = 120.0,
+                                 no_server_after: float = 10.0,
                                  sleep=time.sleep) -> tuple[bool, float]:
     """Block until the pane set stops changing. Returns (settled?, seconds waited).
 
@@ -520,12 +521,27 @@ def wait_for_workspace_to_settle(settle: float = 5.0, timeout: float = 120.0,
     waited = 0.0
     last = pane_fingerprint()
     stable_for = 0.0
+    empty_for = 0.0
     step = 1.0
     while waited < timeout:
         sleep(step)
         waited += step
         now = pane_fingerprint()
-        if now == last and now.strip():
+        if not now.strip():
+            # 🔴 NO PANES AT ALL is not "not settled yet" — there is no
+            # workspace to wait for, and burning the whole timeout would block
+            # a boot for two minutes to learn nothing. MEASURED: the nix build
+            # sandbox has no tmux server, so this path took the full 120s and
+            # turned an empty-plan restore into a failure. Bail early, still
+            # UNSETTLED, so the caller reports honestly rather than waiting.
+            empty_for += step
+            if empty_for >= no_server_after:
+                return False, waited
+            stable_for = 0.0
+            last = now
+            continue
+        empty_for = 0.0
+        if now == last:
             stable_for += step
             if stable_for >= settle:
                 return True, waited
@@ -785,7 +801,10 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
     sent = skipped = 0
     targets_sent: list[tuple[str, str]] = []
     settled = True
-    if not dry_run:
+    # 🔴 NOTHING TO SEND => NOTHING TO WAIT FOR, AND NOTHING THAT CAN BE LOST.
+    # Waiting here made an EMPTY plan take the full settle timeout and then
+    # return 1 — a restore that had no work to do reported as a failure.
+    if not dry_run and plan:
         settled, waited = wait_for_workspace_to_settle()
         if settled:
             print(f"workspace settled after {waited:.0f}s — sending now")
@@ -837,7 +856,7 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
               "This is the boot-race signature; re-run once the workspace is idle.",
               file=sys.stderr)
         return 1
-    if not settled:
+    if not settled and sent:
         print(f"⚠ all {landed} send(s) landed, but the workspace never settled — "
               "treat this run as lucky, not correct.", file=sys.stderr)
         return 1
