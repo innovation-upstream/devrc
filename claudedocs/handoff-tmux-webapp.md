@@ -3118,32 +3118,195 @@ mechanism is worth not re-deriving.
 - **The CSS cwd trap is real and has a cheap tell:** `app.css` built from inside
   `containers/clawgate/` came to **44,975 bytes**; ~5 KB means the trap fired.
 
-## How to verify
+### 🔴 THE WEB UI NEEDS A LOGIN NOW — you will hit a form, not the dashboard
+
+From `0.8.29` (2026-09-07, rank 34/39) every browser route requires an
+HMAC-signed session cookie. A fresh `curl` or a fresh browser profile against
+`http://<lan-nodeport>` gets **303 → `/login`**, not the app. That is correct, not
+a fault.
+
+**The operator password lives in the SOPS secret**, and reading it is one command:
 
 ```bash
-# 1. what is actually live (never read a version from this doc)
-clawgatectl health          # expect 0.8.28
+sops -d clusters/workbench/apps/clawgate/secrets.enc.yaml | grep CLAWGATE_UI_PASSWORD
+```
 
-# 2. 🔴 THE VERSION IS NOT THE CHECK — verify the FEATURES by content
+(from a `homelab-infra` checkout; `sops --config <repo>/.sops.yaml` if you are not
+running inside it — `sops` resolves creation rules from the CWD, so a decrypt
+launched from another repo fails with `no matching creation rules found` and that
+error is about your CWD, not the file.)
+
+🔴 **DO NOT PASTE THAT VALUE INTO A TRANSCRIPT, A COMMIT MESSAGE OR A PR BODY, and
+the reason is specific to THIS app rather than general secret hygiene.** Since
+`#738` the session page renders **tool inputs** — `<details data-tool-detail>`
+blocks carrying file paths, bash command lines and edit bodies. Agent transcripts
+are fed into clawgate and rendered back out on that page. So a password echoed in
+a shell command lands in the web UI it protects. Read it into a variable and use
+`${#PW}` to prove you have it, as the arming session did.
+
+**Rotation is the revocation story, and it is the ONLY one:** the cookie-signing
+key is derived from the password (`AuthConfig.uiSessionSecret`, a SHA-256 over a
+domain separator plus the value), so changing it invalidates every outstanding
+cookie at once. There is no session store to delete from. `sops --set`, then
+restart the pod.
+
+⚠ **Fail-closed, so a missing secret does not mean "open" — it means the UI
+refuses.** Unset or under 12 characters ⇒ every browser route answers **503** and
+`/login` names the missing variable. The boot log states which state it is in,
+unconditionally and in both directions:
+
+```
+web UI login: ENABLED — CLAWGATE_UI_PASSWORD configured, browser requests need a signed session cookie
+web UI login: DISABLED (fail-closed) — <reason>. The web UI will refuse every request until ...
+```
+
+**The machine tiers are unaffected by all of this** — the hook token, the terminal
+token, the operator token and the agent token are separate doors. `clawgatectl`,
+the hooks and both host `tmux-reply-agent`s never touch the human tier.
+
+### 🔴 A NEW e2e SPEC MUST CARRY A SESSION — and node's `fetch()` has no cookie jar
+
+The auto-use `signIn` fixture seeds the server's real cookie into the test's
+**default** browser context. Two shapes escape it, and both shipped as CI reds
+before they were caught:
+
+- **A raw `fetch()` to a `requireSession` route.** Node's global `fetch` carries no
+  cookies, so `POST /api/auto-approve{,-all}` and `GET /ui/auto-approve-banner`
+  went anonymous the moment the tier armed — 13 spec failures across three files
+  plus the ux-audit funnel walk. **Use `server.uiFetch(path, init)`**, which
+  attaches the cookie. Machine-tier routes (`/api/send`, `/api/response`,
+  `/api/tasks`, `/api/suggest`) pass a bearer and are unaffected — which is
+  exactly why only the browser-tier ones broke.
+- **A spec that builds its OWN `browser.newContext()`.** `task-sse-regroup.spec.ts`
+  makes three; the fixture reaches none of them. Seed each with
+  `ctx.addCookies([{name: SESSION_COOKIE, value: server.sessionCookie, url: server.baseURL}])`.
+  The two `ux-audit` walks create their own contexts too and are seeded in
+  `ux-audit/_lib/driver.ts` and `settle-budget.audit.ts`.
+
+**To sweep for the class rather than fix one instance:** extract every
+`fetch(${baseURL}…)` path in `e2e/` and classify each against the Go route table
+by wrapper. After the fix the only cookie-less fetches left target
+`requireHookToken` routes plus `/login`, which is deliberately open.
+
+⚠ **`signedIn()` in the Go tests masks the gate ON PURPOSE** — it wraps the 82
+`srv.Handler()` sites so ~200 rendering tests keep rendering. `browser_auth_test.go`
+therefore builds its handlers WITHOUT it. **Its first version used the shared
+helper and passed 200 against the very defect it was written to catch.** If you add
+an auth assertion, build the handler yourself.
+
+### ⚠ Tailwind only emits classes it FINDS, and it exits 0 on a path that is absent
+
+Two places must agree or a page ships unstyled with nothing failing:
+`tailwind.config.js`'s `content` list, and the **Dockerfile's css stage**, which
+copies only what it is told to. `internal/api/login.go` is the one document
+rendered outside `internal/ui`, so both name it explicitly.
+
+🔴 **Do NOT "tidy" that into `./internal/api/**/*.go`.** Measured: the package-wide
+glob scans `_test.go` too, and Tailwind read fixture strings there as
+arbitrary-value classes — `.[project:foo-bar]`, `.[logStart:logEnd]` and
+`.[project:clawgate]` all landed in the shipped stylesheet, caught by
+`internal/ui`'s `TestTheStylesheetCarriesNoNewTestOnlyClasses`. Both halves are
+pinned (`TestEveryDocumentRenderedFromApiIsInTailwindsScanPath`,
+`TestTheCSSStageCopiesEveryTailwindContentPath`), and the image build carries its
+own `grep -q 'bg-emerald-600' web/static/app.css` so a broken stage fails the
+build rather than shipping.
+
+### ⚠ `web/static/app.css` is a gitignored BUILD ARTIFACT — three tests fail without it
+
+In a fresh worktree `TestStaticAssetsServed`, `TestOpenRoutesNoAuth` and
+`TestTheStylesheetCarriesNoNewTestOnlyClasses` fail on a missing
+`web/static/app.css`. **That is not your change** — confirmed identical at
+unmodified `origin/trunk`. Run `make css` (or
+`nix-shell -p tailwindcss --run 'tailwindcss -i web/css/input.css -o web/static/app.css --minify'`)
+from `containers/clawgate`. Repo-pinned Tailwind **v3** gives ~45 KB;
+`tailwindcss_4` gives ~20 KB and is wrong.
+
+## How to verify
+
+🔴 **EVERY `curl` IN THIS SECTION NEEDS A SESSION COOKIE SINCE `0.8.29`, AND THAT IS
+THE TRAP THIS REWRITE EXISTS FOR.** The previous version of this section ran bare
+`curl "$B/" | grep -c '<marker>'` checks. Those now fetch the **login page**, so
+every one of them returns **0** — which reads as *"the feature is gone"* rather
+than *"you are not signed in"*. Sign in first; the rest is unchanged.
+
+```bash
 B=http://192.168.50.250:30302
-curl -s "$B/"        | grep -c 'min-\[2560px\]:max-w-\[150rem\]'   # 1  wider shell
-curl -s "$B/"        | grep -c '2xl:max-w-\[96rem\]'               # 0  the old cap is gone
-curl -s "$B/ui/tmux" | grep -c 'auto-fit,minmax(32rem,1fr)'        # >0 adaptive card grid
+CJ=$(mktemp)
+PW=$(sops -d clusters/workbench/apps/clawgate/secrets.enc.yaml \
+     | python3 -c 'import sys,yaml;print(yaml.safe_load(sys.stdin)["stringData"]["CLAWGATE_UI_PASSWORD"])')
+curl -s -c "$CJ" -o /dev/null -w 'login=%{http_code}\n' -X POST "$B/login" \
+  --data-urlencode "password=$PW"                                    # want 303
+```
 
-# 3. the two that need a session with the right content
-SID=$(curl -s "$B/ui/tmux" | grep -oE '/session/[0-9a-f-]{36}' | head -1 | cut -d/ -f3)
-curl -s "$B/session/$SID" | grep -c 'data-chat-freeform-reply'     # 1 when a pane resolves
-curl -s "$B/session/$SID" | grep -c 'data-tool-detail'             # >0 only if that tail HAS tool calls
-#    ⚠ a 0 on the last one is absence of TOOL RECORDS, not absence of the feature —
-#    scan several sessions before concluding anything.
+**1. What is live — and the version is NOT the check.** `clawgatectl health` is the
+only authority on the number; never read one from this doc. Then verify FEATURES
+by content, each with its pre-change marker as the negative control:
 
-# 4. the host half (rank 32's closing condition), both hosts
+```bash
+curl -s -b "$CJ" "$B/"        | grep -c 'min-\[2560px\]:max-w-\[150rem\]'   # 1  wider shell
+curl -s -b "$CJ" "$B/"        | grep -c '2xl:max-w-\[96rem\]'               # 0  old cap gone
+curl -s -b "$CJ" "$B/ui/tmux" | grep -c 'auto-fit,minmax(32rem,1fr)'        # >0 adaptive grid
+
+SID=$(curl -s -b "$CJ" "$B/ui/tmux" | grep -oE '/session/[0-9a-f-]{36}' | head -1 | cut -d/ -f3)
+curl -s -b "$CJ" "$B/session/$SID" | grep -c 'data-chat-freeform-reply'     # 1 when a pane resolves
+curl -s -b "$CJ" "$B/session/$SID" | grep -c 'data-tool-detail'             # see the caveat
+```
+
+⚠ **A 0 on `data-tool-detail` is absence of TOOL RECORDS in that session's tail,
+not absence of the feature** — scan several sessions before concluding anything.
+
+**2. The browser tier — reproduce the SYMPTOM, not the rollout.** The check that
+matters is the exact request that used to succeed. `%999999` exists nowhere, so
+nothing can execute even if the gate is broken:
+
+```bash
+curl -s -o /dev/null -w 'anon-sendkeys=%{http_code}\n' -X POST "$B/ui/term/send-keys" \
+  --data-urlencode 'host=workbench' --data-urlencode 'pane=%999999' \
+  --data-urlencode 'attentionEntryId=0' --data-urlencode 'text=probe'   # want 401
+curl -s -o /dev/null -w 'anon-shell=%{http_code} %{redirect_url}\n' "$B/" \
+  -H 'Sec-Fetch-Dest: document'                                        # want 303 -> /login
+curl -s -b "$CJ" -o /dev/null -w 'signed-in-shell=%{http_code}\n' "$B/"   # want 200 (positive control)
+curl -s -o /dev/null -w 'wrong-pw=%{http_code}\n' -X POST "$B/login" \
+  --data-urlencode 'password=wrong'                                    # want 401, no cookie
+rm -f "$CJ"
+```
+
+🔴 **The signed-in line is not optional.** Without it, a 401/303 pair is equally
+consistent with a server that refuses everything — i.e. with the dashboard being
+broken rather than protected.
+
+**3. The host half, both hosts** (rank 32's closing condition):
+
+```bash
 systemctl --user is-active tmux-reply-agent
 ssh zach@10.42.0.100 'systemctl --user is-active tmux-reply-agent'
-# 5. 🔴 `active` only says the process is alive. A repeating failure is logged ONCE,
-#    so ONLY the two startup lines means the poll is being ANSWERED:
 journalctl --user -u tmux-reply-agent -n 20 --no-pager -o cat
 ```
+
+🔴 **`active` only says the process is alive, and ONLY the two startup lines means
+the poll is being ANSWERED** — the loop logs a repeating failure exactly once on
+first occurrence, so silence is evidence only in that specific sense. It is
+equally consistent with a DEAD agent, so the positive control is a bounded write
+through the MACHINE tier to a pane that exists nowhere; the agent should claim it
+and log a failure within seconds:
+
+```bash
+TT=$(sops -d clusters/workbench/apps/clawgate/secrets.enc.yaml \
+     | python3 -c 'import sys,yaml;print(yaml.safe_load(sys.stdin)["stringData"]["CLAWGATE_TERMINAL_TOKEN"])')
+curl -s -X POST "$B/api/term/send-keys" -H "Authorization: Bearer $TT" \
+  -H 'Content-Type: application/json' \
+  -d '{"host":"workbench","pane":"%999998","text":"loop-control","submit":true}'
+journalctl --user -u tmux-reply-agent --since '2 min ago' | grep "can't find pane: %999998"
+```
+
+**4. Deploying clawgate is four manual steps — a merge to `trunk` deploys NOTHING.**
+There is no ImagePolicy/ImageUpdateAutomation. Build the image, push to harbor,
+bump the pin in `clusters/workbench/apps/clawgate/deployment.yaml`, commit for
+Flux. `TestDeployPinMatchesClientBuildVersion` enforces that the pin and
+`cmd/clawgatectl/client.go`'s literal move together, so the image must exist in
+harbor before the pin lands. **Verify a deploy by CONTENT against the running
+pod, never by the version string** — it has moved for unrelated reasons while the
+change in question sat unmerged.
 ## Run this first — the index, one read-only command
 ```bash
 python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc
