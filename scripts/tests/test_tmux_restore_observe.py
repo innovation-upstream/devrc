@@ -939,6 +939,11 @@ def test_the_unmeasured_marker_AS_PRODUCTION_SPELLS_IT_is_not_an_integer_compari
     combined = r.stdout + r.stderr
     assert "integer expression expected" not in combined, combined
     assert "integer expected" not in combined, combined
+    # 🔴 And the specific regression: the failed `-lt` did not abort, it fell
+    # into the `else` and printed the reason string AS A PANE COUNT, returning
+    # RC_CLEAN. Pin that shape, not just the rc.
+    assert "reason=no-tmux-server-responding pane(s) running claude" not in r.stdout, \
+        r.stdout
 
 
 def test_the_verdict_says_the_live_pane_count_is_WHOLE_HOST(tmp_path):

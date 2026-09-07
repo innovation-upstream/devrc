@@ -589,9 +589,13 @@ verdict() {
     # 🔴 PREFIX match, not equality. The emitters write `key=UNMEASURED
     # reason=...` (see the `claude_panes_live` reader above), and `get` returns
     # everything after `key=`, so `[ "$live" = UNMEASURED ]` was NEVER true in
-    # production. It fell through to the `-lt` arm, which is an INTEGER
-    # comparison against `UNMEASURED reason=no-tmux-server-responding` — a
-    # shell error, on the one path whose whole job is to say "I do not know".
+    # production. MEASURED by reverting this line: it fell through to the `-lt`
+    # arm, an INTEGER comparison against a sentence. That does NOT abort — the
+    # shell prints `integer expected`, the test evaluates FALSE, and control
+    # lands in the `else`, which reports
+    #   resumes: UNMEASURED reason=... pane(s) running claude vs 43 send(s)
+    # and returns RC_CLEAN. So the one path whose whole job is to say "I do not
+    # know" instead returned a confident PASS.
     case "$live" in
       ''|UNMEASURED*)
       echo
