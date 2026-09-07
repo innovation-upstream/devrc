@@ -21,10 +21,10 @@ with Phase 2 disabled.
   - **Tasks as the durable ADJUDICATION QUEUE (0.7.39–0.7.42):** the homelab **task-spec drafter**
     (daily cron, DeepSeek) posts verified specs as **durable Task cards** via `POST /api/tasks`
     (`internal/api/notes.go` `handleAPITaskCreate`). This replaced an ephemeral `/api/send` digest
-    that evicted at the 5-min permission TTL (close-the-loop Loop #1). Each card has one-tap
+    that evicted at the 5-min permission TTL (`claudedocs/close-the-loop/` Loop #1). Each card has one-tap
     Dispatch, markdown bodies, and is a collapsed `<details>` disclosure. The drafter card body is
     clean (goal/recommendation + safety + Done/Verifier/Agent + Source-ticket link — no raw JSON,
-    no id). See the `close-the-loop` skill's STATE.md loop ledger.
+    no id). See the loop ledger at `claudedocs/close-the-loop/STATE.md`.
 - **Repos tab** — GitHub connection. **No OAuth App**: a **static token** path —
   `CLAWGATE_GITHUB_TOKEN` (the broad `gh` token; kept as-is by operator decision) auto-connects the
   account at startup. The token reaches agents as a **Secret env** (`devpod-secrets` → container

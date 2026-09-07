@@ -60,10 +60,6 @@
     "check-clickup-addressed": { "tier": "A" },
     "clawgate": { "tier": "A" },
     "clickup": { "tier": "A" },
-    "close-the-loop": {
-      "tier": "B",
-      "why": "a deliberate ritual Zach opens by name; nothing he says by accident should start it"
-    },
     "devrc-dx": { "tier": "A" },
     "dl-router": { "tier": "A" },
     "espanso-audit": {
@@ -86,10 +82,6 @@
       "tier": "B",
       "why": "'prune the analyze-service index' -- named, not described; and the three prune-* siblings spend most of their prose disambiguating each other, which name-only makes moot"
     },
-    "quiesce-workload": {
-      "tier": "B",
-      "why": "called by name ('quiesce stash-sense', 'resume prometheus'); no symptom routes here -- you already know the workload"
-    },
     "prune-memory": {
       "tier": "B",
       "why": "'prune memory' / MEMORY.md is named explicitly whenever this is wanted"
@@ -104,12 +96,7 @@
     },
     "resume": { "tier": "A" },
     "session-manager": { "tier": "A" },
-    "sglang": {
-      "tier": "B",
-      "why": "named by the thing it operates (sglang / sglang-server); GPU-contention symptoms route to obs-read first anyway"
-    },
     "signal": { "tier": "A" },
-    "standup": { "tier": "A" },
     "subsystem-index": {
       "tier": "B",
       "why": "invoked BY `/handoff`, which names it in its own body; its own description says 'rarely run directly', so no symptom needs to route to it"
@@ -127,7 +114,6 @@
       "tier": "B",
       "why": "CLOSE CALL -- run as a gate immediately after an agent reports done, and named when it is; flip to A if a 'done' claim ever gets believed because this did not fire"
     },
-    "vetr-mailbox": { "tier": "A" },
-    "window-triage": { "tier": "A" }
+    "vetr-mailbox": { "tier": "A" }
   }
 }

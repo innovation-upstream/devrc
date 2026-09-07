@@ -222,8 +222,6 @@ BARE_REF_MARKER = "<bare-ref-unopenable-write-the-deployed-~-.claude-path>"
 #
 #   ~/.claude/skills/browser/      <- scripts/browser-bridge/
 #   ~/.claude/skills/dl-router/    <- scripts/dl-router/
-#   ~/.claude/skills/close-the-loop/{STATE,ARCHIVE}.md
-#                                  <- claudedocs/close-the-loop/
 #   ~/.claude/hooks/agent_ledger.py <- scripts/lib/agent_ledger.py
 #
 # This table is NOT trusted prose: `test_deployed_map_matches_home_nix` parses
@@ -235,8 +233,6 @@ BARE_REF_MARKER = "<bare-ref-unopenable-write-the-deployed-~-.claude-path>"
 DEPLOYED_MAP: tuple[tuple[str, Path], ...] = (
     ("~/.claude/skills/browser/", REPO_ROOT / "scripts/browser-bridge"),
     ("~/.claude/skills/dl-router/", REPO_ROOT / "scripts/dl-router"),
-    ("~/.claude/skills/close-the-loop/STATE.md", REPO_ROOT / "claudedocs/close-the-loop/STATE.md"),
-    ("~/.claude/skills/close-the-loop/ARCHIVE.md", REPO_ROOT / "claudedocs/close-the-loop/ARCHIVE.md"),
     ("~/.claude/hooks/agent_ledger.py", REPO_ROOT / "scripts/lib/agent_ledger.py"),
     ("~/.claude/hooks/", REPO_ROOT / "scripts/claude-hooks"),
     ("~/.claude/skills/", REPO_ROOT / "claude/skills"),
@@ -963,7 +959,6 @@ def test_rule_1c_is_spelling_not_doc_relative_resolution():
         "`~/.claude/RULES.md`",
         "`~/.claude/skills/prune-skill/SKILL.md`",
         "`~/.claude/skills/browser/SKILL.md`",          # mkOutOfStoreSymlink exception
-        "`~/.claude/skills/close-the-loop/STATE.md`",   # ledger exception
         "`~/.claude/hooks/bash-guard.py`",              # hooks -> scripts/claude-hooks
         "`~/.claude/hooks/agent_ledger.py`",            # hooks exception -> scripts/lib
         "`~/workspace/devrc/CLAUDE.md`",

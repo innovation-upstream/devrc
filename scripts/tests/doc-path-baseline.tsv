@@ -77,10 +77,11 @@
 #       still symlinked by home.nix" — both files are gone.
 #
 #   (B) PROSE THAT DELIBERATELY NAMES AN ABSENT FILE, and says so in the same
-#       sentence. FOUR entries. `CLAUDE.md` says "🔴 `claude/commands/` NO
+#       sentence. THREE entries. `CLAUDE.md` says "🔴 `claude/commands/` NO
 #       LONGER EXISTS"; two docs say `scripts/agent-ops` "is RETIRED … the
-#       script is deleted"; `claude/skills/sglang/SKILL.md` says "⚠ There is no
-#       toggle script" about `./scripts/toggle-homelab-sglang.sh`. The gate
+#       script is deleted". (A fourth, `claude/skills/sglang/SKILL.md` on
+#       `./scripts/toggle-homelab-sglang.sh`, went with that skill's
+#       retirement on 2026-09-07.) The gate
 #       cannot read "this does not exist" out of prose, so it flags a doc for
 #       being CORRECT. That is a false red — kept HERE rather than in
 #       doc-path-ignore.list on purpose: a baseline entry is scoped to the
@@ -108,4 +109,3 @@ claude/skills/auditloop/reference/ui-and-meta-run.md	claudedocs/meta-run-ux-find
 claude/skills/devrc-dx/reference/config-stack.md	scripts/agent-ops
 claude/skills/devrc-dx/reference/config-stack.md	scripts/tmux-claude-counters.sh
 claude/skills/devrc-dx/reference/config-stack.md	scripts/tmux-task-dashboard.sh
-claude/skills/sglang/SKILL.md	scripts/toggle-homelab-sglang.sh

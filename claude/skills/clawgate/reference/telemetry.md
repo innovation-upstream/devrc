@@ -114,7 +114,7 @@ clawgate is a high-volume auto-approve firehose (~4k prompts/day, ~97% auto-appr
 ≈ none; **Suggestions = 0 engagement** (trending toward removal like decision-labeling). Web vitals
 are excellent.
 
-**Decision (close-the-loop):** do **not** invest more in standalone 💡 Suggestions polish
+**Decision (`claudedocs/close-the-loop/`):** do **not** invest more in standalone 💡 Suggestions polish
 (full-transcript scroll-back / Web Push). The plan is to **fold it into the Tasks adjudication
 queue as a generative source** (candidate #3, not yet built) rather than iterate it standalone.
 Memory `clawgate-loop-validation`.

@@ -25,44 +25,48 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
 | #1317 | `946d9038` | the staleness gate counted POWERED-OFF time against the plan |
 | #1344 | `1ecc03c1` | no instrument existed to read a reboot; adds `tmux-restore-observe.sh` |
 
-- 🔴 **THE REBOOT HAPPENED — 2026-09-06 18:01:46**, from 32 days of uptime. It is
-  what answered this arc and refuted the hypothesis the arc was built on; the
-  ANSWERED block below carries its values. Carried forward because it is the only
-  real exercise this path has ever had.
-- **#1344 shipped:** `scripts/tmux-restore-observe.sh` (`pre`/`post`/`verdict`/
-  `extract`), 36 tests. Its baseline lives at
-  `~/.cache/tmux-restore-observe/pre-latest.txt` with a copy of the script beside
-  it — that baseline is what a post-reboot `post` run compares against, so do not
-  clear it before rank 4.
-- 🔴 **#1351 HAS BEEN REWORKED onto the confirmed mechanism — it is no longer
-  the PR the previous handoff said not to merge.** Branch
-  `fix/tmux-restore-boot-race`, worktree `/home/zach/workspace/devrc-bootrace`,
-  **13 commits ahead of `origin/fix/tmux-restore-boot-race` and NOT PUSHED.**
-  Head `3b348542`. The two rework commits are `7056a0fa` (the refusal + prose +
-  three of the four 🟡s) and `3b348542` (the UNMEASURED consequence correction).
-- **Merge conflict with `main` RESOLVED** (`3c5cda1f`), by taking main's copy of
-  `claudedocs/handoff-tmux-restore-chain.md` **wholesale**. The PR no longer
-  touches the handoff doc at all, so main's corrected ANSWERED block survives.
-  This is what the previous handoff meant by "do not let that land".
-- **What the rework contains:**
-  - `no_tmux_server_to_restore_into()` in `scripts/tmux-session-restore.py`,
-    checked **before** the send loop — the loop's own `tmux new-session` is the
-    destructive step.
-  - The refusal **exits 0**, deliberately. See the Gotchas entry.
-  - `wait_for_workspace_to_settle` and `_verify_sends` are **kept**, re-described
-    as a secondary guard and a detector rather than as the fix.
-  - Refuted-mechanism prose corrected at **four** sites (the previous handoff
-    said three): `tmux-session-restore.py` settle docstring + `_verify_sends`
-    stderr, and `tmux-restore-observe.sh` arm comment + `RC_RACE` message.
-  - All four round-1 🟡s fixed (see the retired investigation block below).
-- 🔴 **NEITHER GATE TIER HAS COMPLETED — this is UNVERIFIED.** The dev-host tier
-  (`scripts/gate.sh --tier both`) was still running in the pytest leg when this
-  doc was written; the nix sandbox tier was **never started**. No merge decision
-  may be taken on this branch until both are green on the MERGED tree, and the
-  claim must name the tier and the base sha.
-- **Deploy status:** nothing deployed. Note `tmux-session-restore.py` runs from
-  the WORKING TREE, so this branch's edits are live **in the worktree only**;
-  the base clone `~/workspace/devrc` is untouched and still runs main's copy.
+- 🔴 **THE REBOOT HAPPENED — 2026-09-06 18:01:46**, from 32 days of uptime. It is what
+  answered this arc and refuted the hypothesis the arc was built on; the ANSWERED block
+  below carries its values. Carried forward because it is the only real exercise this path
+  has ever had.
+- **#1344 shipped:** `scripts/tmux-restore-observe.sh` (`pre`/`post`/`verdict`/`extract`),
+  36 tests. Baseline at `~/.cache/tmux-restore-observe/pre-latest.txt` with a copy of the
+  script beside it — that baseline is what a post-reboot `post` run compares against, so do
+  not clear it before the reboot rank.
+- ✅ **#1351 IS REWORKED, PUSHED, GATED AND RETITLED — it is no longer the PR the earlier
+  handoff said not to merge.** Head **`83697d30`**, `mergeable: MERGEABLE` (was
+  `CONFLICTING`). Worktree `/home/zach/workspace/devrc-bootrace`.
+  - The rework commits: `7056a0fa` (refusal + prose + three 🟡s), `3b348542` (the
+    UNMEASURED-consequence correction), plus merges `3c5cda1f` and `83697d30`.
+  - **The main conflict was resolved by taking main's copy of this doc wholesale**, so the
+    branch no longer touches it and the corrected ANSWERED block survives.
+  - Title now names the real mechanism; the old one ("the resumes were sent 24s before the
+    panes existed") stated the refuted one. Body replaced. Verification comment posted with
+    the tier, base sha and the mutation table.
+- ✅ **GATED — all four tier/tree combinations green on `83697d30`:**
+
+  | tier | verdict |
+  |---|---|
+  | nix sandbox `pytests` | PASS — 22026 collected / 22023 passed / 0 failed |
+  | nix sandbox `nodetests` | PASS — 5 suites / 41 files / 1449 tests / 0 fail |
+  | dev host `gate.sh --tier both` | PASS — `GATE: RESULT=PASS`, same counts |
+  | (earlier dev run on `3b348542`) | PASS |
+
+  Read out of `nix log`, not exit codes. `session-analysis` collected 562 vs the floor of
+  525 this PR raises. The two nix derivations were built ONE AT A TIME.
+- ⚠ **`main` HAS MOVED PAST `83697d30`, with real test changes, not just docs.** A
+  merged-tree gate is a claim about the tree it ran on — **re-gate the tree the merge
+  actually creates** before merging. Said so in the PR comment too.
+- ⚠ Tekton was re-running on the new head at time of writing (both checks `PENDING`).
+  Neither gates: branch protection here is declared off, so the local two-tier run is the
+  only real evidence. 🔴 A run that hits `timeouts.tasks` posts NOTHING and the checks stay
+  `pending` forever — only a fresh push clears that.
+- **Deploy status:** nothing deployed, and nothing needs to be. `tmux-session-restore.py`
+  runs from the WORKING TREE, so the change is live in the worktree only; the base clone
+  `~/workspace/devrc` still runs main's copy until this merges.
+- 🔴 **#1351 STOPS THE DESTRUCTION; IT DOES NOT MAKE COLD-BOOT RESTORE WORK.** After it
+  lands, a cold boot REFUSES and the operator re-runs by hand once attached. Restoring on
+  boot is the socket trigger — the next rank.
 
 ## Open investigations — live diagnosis state
 
@@ -491,9 +495,9 @@ was claimed at the time (`tmux-restore-chain-1`), so no live claim was re-pointe
 
 ## How to verify
 ```bash
-# 0. WHERE THE WORK IS — the branch is unpushed; the base clone does NOT have it
-git -C /home/zach/workspace/devrc-bootrace log --oneline -3
-git -C /home/zach/workspace/devrc-bootrace status -sb    # expect: ahead 13
+# 0. the PR
+gh pr view 1351 --repo innovation-upstream/devrc \
+  --json state,mergeable,mergeStateStatus,headRefOid,title
 
 # 1. the refusal, in both directions (this is the fix)
 nix develop ~/workspace/devrc -c python3 -m pytest \
@@ -505,11 +509,18 @@ nix develop ~/workspace/devrc -c python3 -m pytest \
 systemctl --user show tmux-session-restore.service \
   -p Type -p RemainAfterExit -p KillMode -p Environment
 # expect: Type=oneshot  RemainAfterExit=no  KillMode=control-group
-#         Environment has NO TMUX_TMPDIR  (that is rank 3)
+#         Environment has NO TMUX_TMPDIR  (that is the TMUX_TMPDIR rank)
 
-# 3. 🔴 BOTH GATE TIERS, on the MERGED tree — NEITHER HAS RUN YET
-nix develop ~/workspace/devrc -c bash /home/zach/workspace/devrc-bootrace/scripts/gate.sh --tier both
-nix build ~/workspace/devrc#checks.x86_64-linux.pytests  --no-link   # ONE AT A TIME
-nix build ~/workspace/devrc#checks.x86_64-linux.nodetests --no-link
-# gate.sh's exit status is authoritative; 90 = could-not-vouch, read the log.
+# 3. BOTH tiers on the tree the MERGE creates — `main` has moved past 83697d30.
+#    🔴 `nix build path:<worktree>` fails exit=2 before any test runs (the worktree's
+#    `.git` is a FILE); extract first, and read `nix log`, never the exit code.
+git -C <worktree> archive HEAD | tar -x -C /tmp/mt
+nix develop ~/workspace/devrc -c bash <worktree>/scripts/gate.sh --tier both
+nix build "path:/tmp/mt#checks.x86_64-linux.pytests"  --no-link   # ONE AT A TIME
+nix build "path:/tmp/mt#checks.x86_64-linux.nodetests" --no-link
+nix log <drv>   # count the runners' own RESULT:/TOTAL lines
+
+# 4. opencode restore recon — the chain is proven; see rank 3
+tmux list-panes -a -F '#{pane_current_command}' | sort | uniq -c   # opencode appears as `opencode`
+ls ~/.cache/agent-ledger/opencode-p*.json | wc -l                  # records already written
 ```

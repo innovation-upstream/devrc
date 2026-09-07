@@ -38,7 +38,7 @@
 #
 # 🔴 A non-zero exit is the ONLY alarm this unit has, by design: it deliberately
 # wires no OnFailure toast (see nix/home.nix), so a persistent failure surfaces
-# only through the user manager's failed-unit list, which `/standup` reads. Keep
+# only through the user manager's failed-unit list, which `/syshealth --systemd` reads. Keep
 # these distinct and keep them non-zero.
 #
 # ⚠ DO NOT NAME THE SERVICE-MANAGER CLI IN THIS FILE, not even in a comment.
@@ -47,7 +47,7 @@
 # script as reaching a hazardous launcher and reds `test_no_real_launchers.py`
 # on BOTH tiers. An earlier revision of this very comment did exactly that and
 # broke the merge gate on a pure prose change. This script does not invoke it;
-# the reader that does is `claude/skills/standup/standup.sh`.
+# the reader that does is `claude/skills/syshealth/SKILL.md` (`--systemd`).
 
 set -euo pipefail
 

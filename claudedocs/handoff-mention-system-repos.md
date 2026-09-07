@@ -17,39 +17,40 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Expand the mention system (`mention-open.py`) so clicking `repo#N` in Alacritty resolves against ALL repos the operator contributes to, not just those checked out locally in `~/workspace/`.
 
 ## State now
-**The mention effort is COMPLETE and SHIPPED — six PRs.** `#1291` (`fd68d48c`) resolver ·
+**The mention effort is COMPLETE and SHIPPED — seven PRs.** `#1291` (`fd68d48c`) resolver ·
 `#1313` (`3c324156`) detection widening + attribution · `#1322` (`a75ffc6a`) alacritty
 copy-on-select · `#1328` (`3f4d9c0f`) local-first click path · `#1336` (`d790786a`)
-disclosure guard on KEYS + `audit-pr N` clickable · `#1331` (`8b173b05`) handoff.
+disclosure guard on KEYS + `audit-pr N` clickable · `#1331` (`8b173b05`) handoff ·
+**`#1369` (`156b4927`) the picker universe + daily refresh timer**.
 
-**IN FLIGHT — rank 9, the picker universe (2026-09-07).** Branch `feat/picker-universe`,
-commit `41590742`, pushed, merged tree on `969f0581` (`merge-base --is-ancestor` CONFIRMED,
-not assumed). **No PR opened yet.** Claim `mention-system-repos-9` is HELD — release it
-when the PR lands. Operator asked for "all repos i contribute to (cached list +
-periodically query for new ones) so i can fuzzy search"; breadth and cadence were chosen by
-the operator (full 388 incl. archived+forks; daily).
+**Rank 9 is DONE — merged, shipped and verified live on BOTH hosts (2026-09-07).**
+Claim `mention-system-repos-9` RELEASED. Worktree removed.
 
-⚠ **GATE NOT FINISHED — do not read this as verified.** `scripts/gate.sh --tier both` was
-still running in the background when the session ended; the **nix sandbox tier has not been
-run at all**. Both tiers must be green on the merged tree before merge. First attempt
-failed `exit=3` = MISSING ENVIRONMENT (not a code failure) because the worktree's `.envrc`
-is `use opencode`; re-run inside `nix develop <worktree>`.
+**Verified end-to-end by DRIVING THE REAL UNIT on each host**, not by reading config:
+`systemctl --user start mention-known-repos-refresh.service` → `Result=success
+ExecMainStatus=0` on both. Workbench wrote **392 universe rows, 52 picker-only**;
+laptop **391 / 52**. ⚠ The 1-row difference is CORRECT, not drift: the universe unions
+LOCAL CHECKOUTS, and the two hosts hold different ones — it is a per-host measurement.
+Timer `active/waiting` on both, next fire 07:04 (workbench) / 07:14 (laptop) — the
+`RandomizedDelaySec` spread. `SuccessExitStatus=4` present in both rendered units.
 
-**Measured live on the workbench 2026-09-07:**
-picker universe **392 rows, 52 reachable ONLY via the picker** (was 339 of 388).
-Mapping unchanged at 370 keys. `regen-known-repos.py --print` on a PATH with no `gh` → **rc 4**.
+`ship.sh`: converged + **compared**, 2 hosts both at `71ba922b`, 0 dangling / 0 stale
+managed artifacts on each. Every per-host line read, not just the verdict.
 
-**Earlier, still true:** `dashboard#12` 4.26 s → 0.086 s; `talos-infra#1065` opens;
-bare `#1291` → clawgate task; `#282828` names the colour reason.
+**Gates, on the exact final merged tree `a556d78c`** (`merge-base --is-ancestor` CONFIRMED):
+dev-host `gate.sh --tier both` **PASS** (22,036 pytest + 1,449 node, 0 failed, all 30
+floors met); sandbox tier built ONE DERIVATION AT A TIME from a `git archive` extract —
+`pytests` **PASS** (22,036 passed, 0 failed), `nodetests` **PASS** (1,449).
+⚠ `main` moved **2 commits** between that gate run and the merge (other sessions), so the
+tree now on `main` is not byte-identical to the one proved green. `strict:false` is
+deliberate here; stated rather than glossed.
 
-⚠ **What is NOT verified**: the `repo_source == "default"` picker suppression, unchanged
-here — `--print` prints candidates and never shows a picker, so it cannot distinguish
-auto-open from a one-row picker. Needs a human click.
+⚠ **Still NOT verified: the Alacritty click path.** `--print` cannot distinguish
+auto-open from a one-row picker. Rank 1 below is unchanged and still needs a human.
 
-**This session resolved no clawgate task** — `clawgate_handoff.sh resolve` exited 5 with its
-positive control passing (11 links for another session, so the board IS reachable). 🔴 That
-is NOT evidence this session touched no task: a wrong session id also answers 200 with an
-empty array. No `clawgate-task:` field was written.
+**This session resolved no clawgate task** — `clawgate_handoff.sh resolve` exited 5 with
+its positive control passing (11 links for another session). 🔴 NOT evidence this session
+touched no task: a wrong session id also answers 200 with an empty array.
 
 ## Open investigations — live diagnosis state
 (none — the disclosure is a known, measured state awaiting an operator decision, not a
@@ -57,16 +58,18 @@ diagnosis in progress.)
 
 ## Next steps (ranked)
 1. **Exercise the Alacritty click path** — the ONLY end-to-end evidence still missing, and
-   the code has changed twice since the last operator test. Plain left-click.
+   the code has changed three times since the last operator test. Plain left-click.
    `talos-infra#1065` → opens. `dashboard#12` → picker in ~80 ms from YOUR repos.
    `#282828` → named toast, no window. Bare `#N` with no pane repo → picker, clawgate first.
    🔴 **`audit-pr 1291` → a ONE-ROW PICKER, not a direct open** — this is the change most
    worth eyeballing: it trades a keystroke for the "never a confident wrong page" invariant.
+   ⚠ NEW since #1369: the picker now offers **392 rows instead of 339**, so a repo that
+   used to be absent should now be typeable — that is the other thing worth eyeballing.
    🔴 NEEDS A HUMAN — clicking raises windows, a `pkill`-class action for an agent.
    forcing: none
-2. ~~Staleness signal for `known_repos.json`~~ — **DONE in #1328**, as a SIGNAL not a timer.
-   ⚠ Rank 9 CHANGED its meaning: a daily timer now converges the file, so the note is a
-   DEADMAN for that timer rather than a reminder to run the generator.
+2. ~~Staleness signal for `known_repos.json`~~ — **DONE in #1328**; **REPURPOSED in #1369**:
+   a daily timer now converges the file, so the note is that timer's DEADMAN rather than a
+   reminder to run the generator by hand, and it names the unit.
    forcing: none
 3. ~~Commit the `save_to_clipboard` WIP~~ — **DONE in #1322** (`a75ffc6a`).
    forcing: none
@@ -74,43 +77,37 @@ diagnosis in progress.)
    forcing: none
 5. ~~Fix `scripts/collector/README.md`~~ — **DONE in #1321**.
    forcing: none
-6. ~~Close the two guard gaps round 2 found~~ — **DONE in #1336** (`d790786a`), and the
-   audit was WRONG about one of them; see gotchas.
+6. ~~Close the two guard gaps round 2 found~~ — **DONE in #1336** (`d790786a`).
    forcing: none
-7. **Clear the four 🟢 left by #1336's round-2 audit** (devrc; `scripts/tests/
-   test_mention_open.py`, `scripts/collector/mention_scan.py`, `test_session_tailer.py`).
-   RE-VERIFIED 2026-09-07: all four still open. ⚠ **(d) is now CLOSED by rank 9** — the
-   autouse fixture pins `DEVRC_WORKSPACE` as well as the two mapping paths. (b) is
-   PARTLY closed: the `mention-open.py:135` citation is fixed (it pointed at a DIFFERENT
-   variable, `WORKSPACE`, while reading as precise), the `_load_handler` reference at
-   `:1653` and the "four tests drive `_run()`" count are NOT.
+7. **Clear the remaining 🟢 from #1336's round-2 audit** (devrc; `scripts/tests/
+   test_mention_open.py`). ⚠ **(d) CLOSED by #1369** — the autouse fixture now pins
+   `DEVRC_WORKSPACE` as well as both mapping paths. **(b) PARTLY closed** — the
+   `mention-open.py:135` citation is fixed (it named a DIFFERENT variable, `WORKSPACE`,
+   while reading as precise); the `_load_handler` reference and the "four tests drive
+   `_run()`" count are NOT. **(a) and (c) still open**: the `SAYS_WHY` docstring claims the
+   note "NEVER names a repository" but only checks universe tokens, so a mutant naming the
+   PANE-GUESSED repo passes; and a comment calls three sinks "the WHOLE list" thirty lines
+   after another says the note "goes to rofi".
    forcing: none
 8. **Fix or retire Tekton's `devrc-pytests` leg** (not this effort's; needs an owner).
    MEASURED 2026-09-05: red on `test_mjs_parses[attachments.mjs]` for PR #1328 **and** for
-   #1326, which is a single markdown file and cannot reach `.mjs` parsing. The same test
-   passes on clean `main`, on the PR branch head, and in the local nix sandbox tier — three
-   environments. #1328 was merged past it.
-   forcing: gate — a check red for every PR trains everyone to click through, which this
+   #1326, a single markdown file that cannot reach `.mjs` parsing. Passes on clean `main`,
+   on the PR branch head, and in the local nix sandbox tier — three environments.
+   forcing: gate — a check red for every PR trains everyone to click through, which a
    session then did; `claude/RULES.md` calls a permanently-red gate worse than none.
-9. **Finish and land the picker-universe PR** — `feat/picker-universe` @ `41590742`,
-   IN FLIGHT, claim `mention-system-repos-9` HELD. Remaining, in order: (a) finish
-   `nix develop <worktree> -c bash scripts/gate.sh --tier both`; (b) run the sandbox tier
-   `nix build .#checks.x86_64-linux.pytests` and `.nodetests` **ONE AT A TIME** (a combined
-   invocation produces FALSE failures); (c) `gh pr create`, re-sweeping `gh pr list` first;
-   (d) merge, `ship.sh`, then `systemctl --user list-timers mention-known-repos-refresh` on
-   BOTH hosts. 🔴 The timer only exists after a `home-manager switch` — `git pull` changes
-   nothing nix manages.
-   forcing: gate — nothing blocks a merge in this repo, so the two-tier local run IS the gate.
+9. ~~Finish and land the picker-universe PR~~ — **DONE**: #1369, `156b4927`, merged,
+   shipped, verified live on both hosts. Claim released.
+   forcing: none
 10. **Make the disclosure guard's own threshold non-fragile** (devrc;
    `scripts/tests/test_regen_known_repos.py`). MEASURED 2026-09-07: the file sat at **19
    distinct keys against its own threshold of 20**, so ONE new fixture key reddened a
    DISCLOSURE guard. Worked around by reusing an existing key (`mirror`); the next person
    adding a fixture hits it again, and the tempting fix under pressure — raise the
-   threshold, or exclude the file — guts the guard. The structural fix is the one already
-   used for the universe arm: count a single dict/list LITERAL, not distinct pairs
-   scattered across a 700-line file. 🔴 Deliberately NOT done inside the feature PR:
-   the text detector catches shapes the structural one would not, and narrowing a
-   disclosure guard as a side effect of a feature is how the original incident happened.
+   threshold, or exclude the file — guts the guard. The structural fix is the one #1369
+   already used for the universe arm: count a single dict/list LITERAL, not distinct pairs
+   scattered across a 700-line file. 🔴 Deliberately NOT done inside #1369: the text
+   detector catches shapes the structural one would not, and narrowing a disclosure guard
+   as a side effect of a feature is how the #1283 incident happened.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -433,6 +430,27 @@ diagnosis in progress.)
 - **zsh does not word-split, and it bit a `for` loop over `find` output** (`for f in $S`
   ran once on the whole newline-joined string). Documented in CLAUDE.md; still hit it.
 
+- 🔴 **A GREP THAT MATCHES ITS OWN TOOLING IS A FALSE ALARM WAITING TO HAPPEN, AND I
+  SHIPPED ONE INTO THIS DOC'S OWN VERIFY BLOCK.** `git ls-files | grep -c 'known_repos'`
+  was written with `# must be 0`; it returns **1** on a perfectly clean tree, because
+  `scripts/tests/test_regen_known_repos.py` contains the string. Caught by reading WHAT
+  matched instead of the count — the same discipline the rules demand for any tool
+  verdict. Two failure modes, and the second is worse: a reader either chases a phantom
+  disclosure, or learns that this particular check "always says 1" and stops reading it.
+  **Ask for the ARTIFACT (`(known_repos|known_universe)\.json$`), and prefer the
+  content-based test over any name-based grep.**
+- 🔴 **A HOST-SPECIFIC COUNT IS NOT DRIFT — SAY WHICH IT IS BEFORE SOMEONE "FIXES" IT.**
+  The universe is 392 rows on the workbench and 391 on the laptop. That is correct: it
+  unions LOCAL CHECKOUTS, which differ per host, so the file is a per-host MEASUREMENT and
+  not a replicated artifact. Both report the same 52 picker-only repos. A future reader
+  comparing the two numbers and concluding a host is stale would be wrong.
+- **A timer being SCHEDULED is not a timer that WORKS.** `list-timers` showing
+  `active/waiting` says systemd parsed the unit, nothing more — it does not exercise the
+  unit's PATH, its `HOME`, or whether `gh` is reachable from inside it. Both hosts were
+  verified by `systemctl --user start` and reading `Result=success ExecMainStatus=0` plus
+  the unit's own journal line, which is the only thing that tests the environment the
+  timer will actually run in.
+
 ## How to verify
 ```bash
 # The click path, on the deployed artifact (mention-open runs from the WORKING TREE,
@@ -445,22 +463,31 @@ python3 ~/workspace/devrc/scripts/mention-open.py --print '#282828'             
 # The picker universe — counts only, NEVER paste the rows anywhere
 python3 ~/workspace/devrc/scripts/regen-known-repos.py --print   # "N repo(s) in the picker universe"
 ls -l ~/.config/mention-open/known_repos.json ~/.config/mention-open/known_universe.json  # both 0600
-git -C ~/workspace/devrc ls-files | grep -cE 'known_repos|known_universe'   # must be 0
+
+# 🔴 THAT THE GENERATED FILES ARE UNTRACKED — and the OBVIOUS grep is WRONG.
+# `git ls-files | grep -c 'known_repos'` returns 1 on a CLEAN tree, because
+# `scripts/tests/test_regen_known_repos.py` matches its own name. An earlier version of
+# this block said "must be 0" and would have sent the reader chasing a phantom — or,
+# worse, taught them to ignore a disclosure check. Ask for the ARTIFACT, not the string:
+git -C ~/workspace/devrc ls-files | grep -E '(known_repos|known_universe)\.json$'   # must print NOTHING
+# The authoritative check is content-based, not name-based, and it is a test:
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc/scripts/tests/test_regen_known_repos.py -k NOT_published -q
 
 # The not-configured arm — the whole reason the timer is safe. Want rc 4, NOT 3.
 PY=$(dirname $(readlink -f $(command -v python3)))
 env PATH="$PY" python3 ~/workspace/devrc/scripts/regen-known-repos.py --print; echo "rc=$?"
 
-# The timer, AFTER a home-manager switch (it does not exist before one)
+# The timer — DRIVE IT, do not just read that it is scheduled
 systemctl --user list-timers mention-known-repos-refresh
 systemctl --user cat mention-known-repos-refresh.service | grep SuccessExitStatus  # =4
+systemctl --user start mention-known-repos-refresh.service
+systemctl --user show mention-known-repos-refresh.service -p Result -p ExecMainStatus
+journalctl --user -u mention-known-repos-refresh.service -n 3 --no-pager -o cat
 
 # Which half needs a switch — readlink is the arbiter, never a diff
 readlink -f ~/.config/alacritty/alacritty.toml            # /nix/store/... -> needs a switch
 readlink -f ~/.config/activity-collector/mention_scan.py  # /nix/store/... -> needs a switch
-
-# The committed mutation battery (re-runnable, unlike round 1's)
-nix develop ~/workspace/devrc -c python3 ~/workspace/devrc/scripts/tests/mutation_battery_mentions.py
 
 # Both hosts on the same sha
 git -C ~/workspace/devrc rev-parse --short HEAD

@@ -384,7 +384,8 @@ def group_by_parent(flagged: list[Proc], procs: list[Proc],
 def failed_units(runner=None) -> dict:
     """Failed systemd USER units.
 
-    `standup` also reports local systemd health; this is here because a failed
+    This is the reader for local systemd health (it inherited the job when
+    `standup` was retired, 2026-09-07); it is here because a failed
     unit is a routine cause of the symptoms the rest of the report measures, and
     making the reader run a second tool to see it defeats the point of a sweep.
 
