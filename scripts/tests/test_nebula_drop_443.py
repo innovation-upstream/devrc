@@ -18,7 +18,7 @@ Cases corresponding to real audit findings on PR #1361, named exactly:
     `:443` grep made the script refuse on any config carrying an unrelated
     quoted `:443` (an nginx proxyPass is the obvious one), blaming a
     substitution that had worked.
-  * `test_wide_detector_catches_a_multiline_entry` (round 2, F2) — the round-1
+  * `test_wide_detector_catches_any_shape_inside_the_block` (round 2 F2, round 3 R3-3) — the round-1
     fix narrowed BOTH searches, so the "refuse rather than guess" guard stopped
     seeing a hand-wrapped list and reported `ALREADY GONE` with the entry still
     present. Two searches, two different widths.
@@ -135,18 +135,56 @@ def test_unknown_argument_refuses():
     assert "unknown argument" in r.stderr
 
 
-def _helper_re(name: str) -> str:
-    """Pull a helper's actual grep -E pattern out of the script.
+def _helpers_sh(tmp_path: Path) -> Path:
+    """Extract the shipped `:443` helpers into a sourceable fragment.
 
-    🔴 BEHAVIOURAL, not spelled. The previous version of the guard below asserted
-    only that the string `hostmap_443()` was PRESENT — so a mutant that widened
-    the helper's BODY back to a whole-file `:443"` grep, reintroducing round-1
-    finding #1 verbatim, left the test green. Mutation-swept: that mutant now
-    dies here.
+    🔴 RUNS THE SHIPPED CODE. Two weaker versions of these guards were caught by
+    audit rounds: one asserted merely that the string `hostmap_443()` was
+    PRESENT (so widening the helper's BODY left it green), and one re-typed the
+    pattern as a literal in the test (so it exercised grep, not the script).
+    Extracting the real definitions and calling them is what closes both.
     """
-    m = re.search(rf"^{name}\(\)\s*{{ grep -nE '(?P<re>[^']+)'", SCRIPT.read_text(), re.M)
-    assert m, f"could not find {name}() — did it move or change shape?"
-    return m.group("re")
+    text = SCRIPT.read_text()
+    # 🔴 ANCHOR TO LINE START. The helper names also appear in the explanatory
+    # comment ABOVE the definitions, so a bare `.index("any_443_addr()")` finds
+    # the comment, lands BEFORE the start anchor, and yields an EMPTY fragment —
+    # every helper test then dies with `command not found` rather than telling
+    # you the extraction broke. Caught by running it; the assert below is what
+    # makes that loud if the shapes ever move again.
+    m_start = re.search(r"^hostmap_block\(\) \{", text, re.M)
+    m_def = re.search(r"^any_443_addr\(\)", text, re.M)
+    assert m_start and m_def and m_def.start() > m_start.start(), (
+        "could not extract the helper definitions — did they move or get renamed?"
+    )
+    # `any_443_addr` may be a one-liner or a multi-line body; take through its
+    # closing `}` at column 0 either way. Capturing only its first line silently
+    # truncated the fragment mid-function and every helper test failed on a
+    # shell syntax error rather than on the thing it was testing.
+    m_close = re.search(r"^\}$", text[m_def.start():], re.M)
+    end = (
+        m_def.start() + m_close.end()
+        if m_close and m_close.start() < text[m_def.start():].index("\n\n")
+        else text.index("\n", m_def.start())
+    )
+    frag = text[m_start.start():end] + "\n"
+    for fn in ("hostmap_block()", "hostmap_443()", "any_443_addr()"):
+        assert fn in frag, f"extracted fragment is missing {fn}"
+    p = tmp_path / "helpers.sh"
+    p.write_text(frag)
+    return p
+
+
+def _helper(tmp_path: Path, fn: str, content: str) -> str:
+    """Call one shipped helper against `content` and return its stdout."""
+    h = _helpers_sh(tmp_path)
+    cfg = tmp_path / "cfg.nix"
+    cfg.write_text(content)
+    r = subprocess.run(
+        ["bash", "-c", f'set -uo pipefail; source "{h}"; {fn} "{cfg}"'],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
 
 
 def _matches(pattern: str, line: str) -> bool:
@@ -155,37 +193,83 @@ def _matches(pattern: str, line: str) -> bool:
     ).returncode == 0
 
 
+def _check_443_re() -> str:
+    """The `--check` :443 pattern, lifted from the script rather than retyped."""
+    m = re.search(r"grep -qE '(?P<re>:443[^']*)'", SCRIPT.read_text())
+    assert m, "could not find the --check :443 pattern — did it move?"
+    return m.group("re")
+
+
+# A realistic file: a WireGuard peer on :443 OUTSIDE the block (this fleet really
+# has one — 443/udp on the lighthouse host IS WireGuard), and a live :443 inside.
+WG_OUTSIDE = """\
+{
+  networking.wireguard.interfaces.wg0.peers = [
+    { publicKey = "x"; endpoint = "203.0.113.20:443"; allowedIPs = [ "0.0.0.0/0" ]; }
+  ];
+  services.nebula.networks.mesh = {
+    staticHostMap = {
+      "10.42.0.1" = [ "192.168.50.94:4242" ];
+    };
+  };
+}
+"""
+
+
 NGINX_443 = '  services.nginx.virtualHosts."a".locations."/".proxyPass = "https://up:443";\n'
 
 
-def test_scoped_helper_ignores_an_unrelated_443():
+def test_scoped_helper_ignores_an_unrelated_443(tmp_path):
     """`hostmap_443` answers 'did a :443 survive MY patch?' — it must be scoped.
 
     Round-1 finding #1: a whole-file grep here aborted the run on any config
     containing an unrelated quoted `:443`, so the script could never succeed.
     """
-    pat = _helper_re("hostmap_443")
-    assert not _matches(pat, NGINX_443), "scoped helper matched an nginx proxyPass"
-    assert _matches(pat, '      "10.42.0.2" = [ "1.2.3.4:4242" "1.2.3.4:443" ];\n')
+    assert _helper(tmp_path, "hostmap_443", NGINX_443) == ""
+    assert _helper(
+        tmp_path, "hostmap_443", PAIR
+    ), "scoped helper missed a real one-line entry"
 
 
-def test_wide_detector_catches_a_multiline_entry():
-    """`any_443_addr` answers 'might I be failing to see a :443?' — must be wide.
+@pytest.mark.parametrize(
+    "inside",
+    [
+        # Hand-wrapped list (round-2 F2).
+        '        "203.0.113.9:443"',
+        # No space before `=`.
+        '      "10.42.0.2"= [ "203.0.113.9:4242" "203.0.113.9:443" ];',
+        # 🔴 DNS name and IPv6 — round-3 R3-3. The previous `[0-9.]+` shape made
+        # the "wide" detector NARROWER than the scoped one on these axes, so it
+        # failed OPEN into `ALREADY GONE` with the entry still live.
+        '      "10.42.0.9" = [ "lh.example.org:4242" "lh.example.org:443" ];',
+        '      "10.42.0.9" = [ "[2001:db8::1]:4242" "[2001:db8::1]:443" ];',
+    ],
+)
+def test_wide_detector_catches_any_shape_inside_the_block(tmp_path, inside):
+    """`any_443_addr` must never fail OPEN for a :443 inside the staticHostMap."""
+    cfg = (
+        "{\n  services.nebula.networks.mesh = {\n    staticHostMap = {\n"
+        + inside + "\n    };\n  };\n}\n"
+    )
+    assert _helper(tmp_path, "any_443_addr", cfg), "failed open on: " + inside
 
-    Round-2 finding F2: reusing the scoped helper here made the guard miss a
-    hand-wrapped list and report `ALREADY GONE` with the entry still present —
-    a refuse-rather-than-guess guard failing OPEN into a success-shaped message.
+
+def test_wide_detector_ignores_a_443_outside_the_block(tmp_path):
+    """Round-3 R3-2: it must not fire on a WireGuard peer or nginx upstream.
+
+    The previous shape aborted a perfectly good run and told the operator to
+    delete a `<ip>:443` line — on a fleet where 443/udp genuinely IS WireGuard,
+    so exactly the line that legitimately exists.
     """
-    pat = _helper_re("any_443_addr")
-    assert _matches(pat, '        "203.0.113.9:443"\n'), "wide detector missed a list element"
-    assert _matches(pat, '      "10.42.0.2"= [ "1.2.3.4:4242" "1.2.3.4:443" ];\n')
-    # Still narrow enough not to fire on a hostname:port URL.
-    assert not _matches(pat, NGINX_443)
+    assert _helper(tmp_path, "any_443_addr", WG_OUTSIDE) == ""
+    assert _helper(tmp_path, "any_443_addr", NGINX_443) == ""
 
 
-def test_the_two_detectors_are_different():
-    """They answer different questions; collapsing them is what caused F2."""
-    assert _helper_re("hostmap_443") != _helper_re("any_443_addr")
+def test_block_extractor_stops_at_the_closing_brace(tmp_path):
+    """The brace-matcher must not run past the staticHostMap block."""
+    out = _helper(tmp_path, "hostmap_block", WG_OUTSIDE)
+    assert "staticHostMap" in out
+    assert "wireguard" not in out and "203.0.113.20" not in out
 
 
 def test_verify_is_errexit_safe():
@@ -216,9 +300,7 @@ def test_check_pattern_does_not_match_a_longer_port():
     boundary behaviourally: a bare `:443$` would miss a trailing-comment line,
     and a bare `:443` would match `:4433`.
     """
-    m = re.search(r"grep -qE ':443\(\[\^0-9\]\|\$\)'", SCRIPT.read_text())
-    pat = ":443([^0-9]|$)"
-    assert m, "the --check :443 pattern changed shape; re-check the boundary cases"
+    pat = _check_443_re()
     assert _matches(pat, "  - 203.0.113.9:443\n")
     assert not _matches(pat, "  - 203.0.113.9:4433\n")
     assert not _matches(pat, "  - 203.0.113.9:14443\n")

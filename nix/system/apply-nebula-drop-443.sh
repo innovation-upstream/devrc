@@ -165,14 +165,59 @@ echo "  host      : $IFACE = $have_ip  (matches the expected target)"
 #                    present. A guard whose stated job is "refuse rather than guess" must
 #                    never fail OPEN into a success-shaped message.
 #
-# any_443_addr matches a quoted `<ip>:443` ADDRESS in any position, which is narrow enough
-# to ignore an nginx `proxyPass = "https://host:443"` (no bare IP before the colon) while
-# catching a list element on its own line.
+# 🔴 THE WIDE ONE SCOPES BY *CONTEXT*, NOT BY ADDRESS SHAPE. Two earlier drafts tried to
+# discriminate on what the address LOOKS like, and each was wrong in both directions at
+# once:
+#   `"[0-9.]+:443"` — fired on any unrelated bare `IP:443` in the file (a WireGuard peer
+#     `endpoint`, an nginx upstream), aborting a run with nothing wrong and telling the
+#     operator to delete that line — on a fleet where 443/udp genuinely IS WireGuard, so
+#     exactly the line that legitimately exists. AND it missed a DNS name or an IPv6
+#     literal in the staticHostMap, i.e. it was NARROWER than the scoped helper on the
+#     axis it was widened for, failing OPEN into `ALREADY GONE`.
+# Brace-matching the `staticHostMap = { … }` block answers the question actually being
+# asked — "is there a :443 in the thing I am editing?" — and is blind to everything
+# outside it by construction. Shape-matching cannot get there from either side.
+hostmap_block() {
+  awk '
+    !inb && /staticHostMap[[:space:]]*=[[:space:]]*\{/ { inb=1; depth=0 }
+    inb {
+      print
+      depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+      if (depth <= 0) exit
+    }
+  ' "$1"
+}
 hostmap_443()  { grep -nE '^[^"]*"[0-9.]+" = \[[^]]*:443"' "$1" || true; }
-any_443_addr() { grep -nE '"[0-9.]+:443"' "$1" || true; }
+# A UNION of three scopes, because block-matching ALONE re-opened the very hole it was
+# meant to close: a file whose `staticHostMap = {` line cannot be located yields an empty
+# block, and an empty block rendered as "no :443 anywhere" -> `ALREADY GONE`. Caught by
+# re-running the round-2 regression drive after the rewrite, not by reading it.
+#   (a) anything inside a located staticHostMap block  — DNS names, IPv6, any layout;
+#   (b) a bare quoted address ALONE on its line        — a hand-wrapped list, no block;
+#   (c) a one-line `"host" = [ … :443" … ];` entry     — any host form.
+# None of the three matches a WireGuard peer `endpoint = "<ip>:443";` or an nginx
+# `proxyPass = "https://host:443"`: (b) requires the address to be the whole line, and
+# (c) requires `"…" = [` immediately before it.
+any_443_addr() {
+  {
+    hostmap_block "$1" | grep -nE ':443"'                          || true
+    grep -nE '^[[:space:]]*"[^"]+:443"[[:space:]]*$' "$1"          || true
+    grep -nE '^[^"]*"[^"]+" = \[.*:443"' "$1"                      || true
+  } | sort -u
+}
 
 matches=$(grep -cE '"[0-9.]+" = \[ "[0-9.]+:4242" "[0-9.]+:443" \];' "$CFG" || true)
 if [ "$matches" = "0" ]; then
+  # 🔴 POSITIVE CONTROL on the extractor itself. If the file mentions staticHostMap but
+  # the brace-matcher yields nothing, the block is in a shape this cannot read -- and a
+  # silent empty result would render as "no :443 anywhere", i.e. the fail-open that both
+  # previous drafts of this guard were caught doing. Say so instead of passing.
+  if grep -q 'staticHostMap' "$CFG" && [ -z "$(hostmap_block "$CFG")" ]; then
+    die "\$CFG mentions staticHostMap but its block could not be brace-matched, so this
+  script cannot tell whether a ':443' is present. Refusing rather than reporting a clean
+  file it did not actually read."
+  fi
+
   stray=$(any_443_addr "$CFG")
   if [ -n "$stray" ]; then
     echo "  NOTE: a quoted ':443' ADDRESS is present, but not in the one-line" >&2
@@ -205,22 +250,26 @@ echo "  anchor    : exactly 1 match, line $(printf '%s' "$line" | cut -d: -f1)"
 # because it costs a full build in a preflight. So: this catches an evaluation error in
 # the pending tree, and it does NOT make every later failure attributable to this change.
 #
-# 🔴 AND IT ONLY SPEAKS ABOUT /etc/nixos. `nixos-rebuild` with no --file reads
-# /etc/nixos/{configuration,flake,system}.nix and never $CFG, so with NEBULA_CFG pointed
-# elsewhere this would be a claim about a file the script is not patching. Skipped there
-# rather than asserted wrongly.
-if [ "$CFG" = "/etc/nixos/configuration.nix" ]; then
-  echo "  control   : evaluating the CURRENT (unpatched) /etc/nixos config..."
-  if ! nixos-rebuild dry-build >/dev/null 2>&1; then
-    die "/etc/nixos does NOT evaluate as it stands, BEFORE this script changes anything.
+# 🔴 IT EVALUATES /etc/nixos — WHICH MAY OR MAY NOT INCLUDE $CFG, and an earlier draft got
+# this backwards. `nixos-rebuild` with no --file takes its ENTRYPOINT from
+# /etc/nixos/{configuration,flake,system}.nix, so it "never reads $CFG" is true only of
+# the entrypoint: a $CFG that is `imports`ed by configuration.nix — the usual reason to
+# put a nebula block in its own module, and so the likeliest reason to set NEBULA_CFG at
+# all — IS evaluated, transitively. The old draft skipped the control exactly there, and
+# printed a reason that was false. It now always runs, because the thing it checks (the
+# tree the switch will evaluate) is always the thing that matters.
+echo "  control   : evaluating the CURRENT (unpatched) /etc/nixos tree..."
+if ! nixos-rebuild dry-build >/dev/null 2>&1; then
+  die "/etc/nixos does NOT evaluate as it stands, BEFORE this script changes anything.
   Something already in that tree is broken. Fix it first: a switch from here would try to
   apply those edits too, and the rollback restores only the one token this script removes."
-  fi
-  echo "  control   : it evaluates (an evaluation error later is therefore THIS change;"
-  echo "              a BUILD error later may still be someone else's pending edit)"
-else
-  echo "  control   : SKIPPED -- NEBULA_CFG is not /etc/nixos/configuration.nix, and"
-  echo "              nixos-rebuild would evaluate /etc/nixos regardless, not \$CFG"
+fi
+echo "  control   : it evaluates (an evaluation error later is therefore THIS change;"
+echo "              a BUILD error later may still be someone else's pending edit)"
+if [ "$CFG" != "/etc/nixos/configuration.nix" ]; then
+  echo "  ⚠ NOTE    : \$CFG is $CFG, not the entrypoint. The switch below evaluates"
+  echo "              /etc/nixos; if that tree does not import \$CFG, this script will"
+  echo "              patch one file and switch a different configuration."
 fi
 echo
 
