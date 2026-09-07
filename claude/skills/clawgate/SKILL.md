@@ -34,6 +34,7 @@ the feature.
 | `hooks.md` | `PermissionRequest` semantics; the defer gates; installing hooks elsewhere; Stop / 💡 |
 | `agent-hardening.md` | locking down a **homelab** kubeclaw devpod (netpol needs Cilium) |
 | `element-references.md` | a task body carries extension-picked element refs |
+| `prior-work-recall.md` | the `prior work` step: per-term hit counts, flags, why the guard is an `if` |
 
 ## Flow files
 `flows/` = PROCEDURES you execute (`reference/` = FACTS you verify against). A flow does not
@@ -74,25 +75,10 @@ so **the LAN NodePort is fully unauthenticated** — including `DELETE /tasks/{i
 ```bash
 if command -v cairn >/dev/null; then cairn search 'clawgate' --scope homelab-talos; else echo "skipped: cairn unavailable"; fi
 ```
-The `homelab-talos` scope holds four clawgate entries — `clawgate.md`, `clawgate-agents.md`,
-`clawgate-e2e.md`, `clawgatectl.md` — dated bullets of what a past session MEASURED, which no
-live query can give you. ⚠ They are `client-confidential`: read them, never paste them into a
-public repo (this one included).
-🔴 **Search the term a future reader would use, not only the file you happen to stand in.**
-Measured 2026-09-07 against this scope: `clawgate` · `clawgatectl` · `clawgate-agents` · `e2e` ·
-`task api` · `deploy` each return the 10-hunk cap (~10–13 KB); `agent dispatch` 5, `runbook` 3.
-One query on the subsystem you are about to touch is normally enough — add a second term only
-when the first misses. `cairn search` **syncs itself** (a `cairn sync;` prefix fetches the whole
-store twice); an unreachable pod degrades to cache and says so in its banner.
-⚠ Keep `--scope homelab-talos`: `--all-scopes` still derives a scope from the **cwd's git repo**,
-so from a non-git cwd it returns 0 hunks and **rc 2** (measured from `/tmp`) — it does name the
-reason, so read the banner rather than treating the empty result as "nothing recorded".
-Everything returned is `RECALL, NOT LIVE OBSERVATION` — a fix that has since landed reads exactly
-like one that has not; verify against the live pin before acting.
-🔴 **Keep the `if …; then …; fi` guard; do not rewrite it to `&&`.** `&&` exits non-zero when
-cairn is absent (1 in bash/zsh, **127 in dash**), which a caller can only read as this step
-failing — and a bare `if` with no `else` would skip in silence, which for an autonomous run is
-the failure the guard exists to prevent. The `else` echo is load-bearing.
+Past sessions' MEASUREMENTS — `RECALL, NOT LIVE OBSERVATION`, verify before acting. Also search
+`clawgatectl` · `e2e` · `task api` · `deploy`: what a READER types, not the file you stand in. No
+`cairn sync;` prefix (`search` syncs). 🔴 **Guard stays an `if`/`else`, never `&&`** (rc≠0 when
+cairn is absent reads as this step FAILING; a bare `if` skips SILENTLY). `prior-work-recall.md`
 
 ## status
 ```bash
@@ -121,9 +107,8 @@ kubectl --kubeconfig $KC -n clawgate logs -f deploy/clawgate | grep --line-buffe
 
 ## deploy a new version
 🔴 **GitOps from `trunk`: committing deploys the MANIFEST, not container CODE — silently.** The pin
-is an immutable literal tag with **no Flux image automation**, so a commit under
-`containers/clawgate/**` reconciles cleanly and **changes nothing that is running**. `git log` is NOT
-evidence the code is live; the live pin and `clawgatectl health` are. **Load `deploy.md` first** —
+is a literal tag with no image automation, so `git log` is NOT evidence the code is live; the live
+pin and `clawgatectl health` are. **Load `deploy.md` first** —
 version-from-the-live-pin, the ONE commit path (worktree off `origin/trunk`; never `git add -A`),
 test gate, build/push, pin bump, the CSS-cwd trap that fakes ~25 e2e failures, chart sync.
 

@@ -1161,12 +1161,33 @@ def test_the_skill_did_not_grow():
     The ceiling is the size measured at the commit that last SHRANK the file, not
     a round number above it — so this fails on a regrowth rather than merely on a
     doubling. 🔴 RE-PIN IT WHENEVER THE FILE SHRINKS: a ceiling left at an old,
-    larger size silently licenses the regrowth it was installed to catch."""
-    assert SKILL.stat().st_size <= 15088, (
+    larger size silently licenses the regrowth it was installed to catch.
+
+    🔴 RAISED ONCE, DELIBERATELY, AND THE JUSTIFICATION IS PART OF THE PIN.
+    15088 → 15665 for the `prior work` recall step. CLAUDE.md allows a raise only
+    when the commit says WHICH INSTRUCTION WOULD NOT FIT, so: the step is a
+    RUNNABLE command, and a command only fires from the always-loaded surface — a
+    `reference/` file cannot execute and, per this repo's own rule, does not
+    auto-fire because something must NAME it. The file had 2 bytes of headroom, so
+    the addition could not be free.
+
+    What was paid rather than waived: all the detail went to
+    `reference/prior-work-recall.md` (0 cost until read), leaving a 4-line block;
+    and the `deploy a new version` paragraph's second sentence was EVICTED — it
+    restated its own headline, is carried in full at `reference/deploy.md:8`, and
+    was the source of all 5 client-confidential store-phrase overlaps this file
+    had under `test_store_content_not_copied.py` (measured 5 → 0).
+
+    Every remaining candidate eviction was a measured incident warning (the nginx
+    `.svc` crash, the unpacked-extension deploy, the CI-vs-e2e distinction). The
+    trade taken was 577 bytes of ceiling over deleting one of those. If you are
+    adding to this file, that argument does NOT extend to you: evict."""
+    assert SKILL.stat().st_size <= 15665, (
         "claude/skills/clawgate/SKILL.md is %d bytes. History: 18868 before the "
         "task-authoring flow, 18858 after, 15088 after the task-pickup ritual "
-        "moved out to flows/task-pickup.md. Any addition needs an eviction in the "
-        "SAME commit." % SKILL.stat().st_size)
+        "moved out to flows/task-pickup.md, 15665 after the prior-work recall "
+        "step (see the docstring — raised with a stated justification, once). "
+        "Any addition needs an eviction in the SAME commit." % SKILL.stat().st_size)
 
 
 def test_the_flow_carries_the_body_template_with_the_required_heading():
