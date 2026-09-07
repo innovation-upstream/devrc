@@ -15,43 +15,47 @@ Give the handoff corpus a queryable index, because git gave it redundancy but no
 424+ docs / 8.6 MB across four repos were readable only by knowing the slug.
 
 ## State now
-🔴 **THE MACHINERY IS COMPLETE AND LIVE. THE CONSUMER IS INERT.** Both halves are true and
-they are separate claims — the earlier "NOT deployed" status is still superseded, and
-"live" was never the same as "used".
+🔴 **THE MACHINERY IS LIVE, THE FIX IS SHIPPED, AND ADOPTION HAS MOVED — 4 of 4 post-fix runs
+query the index, against ~1 in 8 before.** All three are separate claims and each was measured
+on its own. What is STILL unmeasured is whether a hit ever changes what a session does.
 
 - **Merged:** `devrc#1209` (`45930d644`) index · `#1244` (`1b769b64b`) cairn I/O-stall classifier ·
   `#1264` (`baa95854`) this doc · `#1267` (`d86b4e45`) incomplete-read delete authority ·
-  `#1295` (`3e7d79a4`) the `/resume` consumer · `#1307` (`bb6e46ee`) ARM the timer.
+  `#1295` (`3e7d79a4`) the `/resume` consumer · `#1307` (`bb6e46ee`) ARM the timer ·
+  `#1329` (`4ffb0cc6`) the adoption measurement · `#1332` (`8e9428ef`) the rank-1 fix.
   Plus `homelab-infra` `d2c9c49a` — the rescued untracked handoff doc.
-- **Deployed and verified, 2026-09-04.** `ship.sh` converged BOTH hosts at `bb6e46ee`
-  ("converged + verified — 2 hosts compared"). `readlink -f ~/.claude/skills/resume/SKILL.md`
-  resolves into a NEW store path carrying the wiring — merged AND live are separate claims and
-  both were checked.
-- 🔴 **The live-Postgres path is EXERCISED — the gap that stood from the first commit is closed.**
-  `--rebuild --write` → `wrote 4647 section row(s) … (after DELETE of 4 repo label(s) — one
-  transaction)`. The `GENERATED … STORED` `tsv` column was accepted and the GIN index built for
-  the first time; both had only ever been pinned as SQL text.
+- **Deployed and verified 2026-09-06 (`#1332`).** `ship.sh`: "converged + verified — 2 hosts
+  compared, both at `8e9428ef`". Both hosts' `readlink -f ~/.claude/skills/resume/SKILL.md`
+  resolve to the SAME new store path
+  (`/nix/store/sv3b3ylby1dc3wy8arhp0xmgg3dwpsva-devrc-claude-skills/resume/SKILL.md`) and the
+  deployed copy carries the query and the scope warning. Merged, deployed and live are three
+  claims; all three were checked. Supersedes the 2026-09-04 convergence at `bb6e46ee` (`#1307`),
+  which was verified the same way and is simply older.
+- 🔴 **The live-Postgres path is EXERCISED.** `--rebuild --write` → `wrote 4647 section row(s) …
+  (after DELETE of 4 repo label(s) — one transaction)`. The `GENERATED … STORED` `tsv` column was
+  accepted and the GIN index built for the first time; both had only ever been pinned as SQL text.
 - 🔴 **The TIMER has run on its own**, which is the only thing that tests the unit's environment:
-  `Result=success ExecMainStatus=0`, `wrote 4651 section row(s)`, `warnings: none`, 21 s,
-  next fire ~6 h. Not inferred from the flag — read from `journalctl --user -u
-  handoff-index-sync.service`.
+  `Result=success ExecMainStatus=0`, `wrote 4651 section row(s)`, `warnings: none`, 21 s. Read
+  from `journalctl --user -u handoff-index-sync.service`, not inferred from the flag.
 - **Query path live:** `backend=postgres`, `indexed_sections=4651`. 🔴 `backend=` IS the
   discriminator; a silent fall-back to `memory` renders identically otherwise.
-- 🔴 **NEW 2026-09-06 — RANK 1 IS ANSWERED AND THE ANSWER IS NO.** In the 34 h between `#1295`
-  merging and this measurement, **1 of 14 `/resume` runs across BOTH hosts** invoked
-  `handoff_search.py`, and that one was not the step firing. Nothing calls the index. The
-  diagnosis is placement, not motivation — full evidence in "Open investigations" below.
-- 🔴 **THE RANK-1 FIX IS BUILT — `devrc#1332`, audited over two rounds.** The query moved out of
-  step 3's prose into step 4's fence, beside `cairn recall`, re-keyed from an open item to the
-  handoff's TOPIC (an item-keyed step can only run when an item exists — that was the
-  conditional). Guarded structurally by
-  `test_the_query_shares_a_FENCE_with_cairn_recall`. ⚠ **Built and merged is NOT adopted:** the
-  5/6 rate was measured with ONE command in that step, so co-locating a second is a PREDICTION.
-  Re-run check 1 below after ~10 more runs; until then nothing here says the fix worked.
-- **Claim STILL HELD:** `handoff-search-index-1`. 🔴 **Release it explicitly — merging `#1332`
-  does NOT release it:** `claim-work --release handoff-search-index-1`. The namespace is global,
-  so an unreleased claim reads as rc 10/11 "taken" to a later session under a different identity
-  and blocks the *new* rank 1 with a description of work that is already finished.
+- 🔴 **ADOPTION MEASURED POST-FIX, 2026-09-07T02:25Z — 8.6 h after `#1332` merged.**
+  **Workbench: 4 of 4** `/resume` runs invoked `handoff_search.py` (100%), matching the
+  co-located `cairn recall` control at 4/4. Pre-fix on the same host: **2 of 11 (18%)**.
+  🔴 **The pre-fix headline this replaces, kept because it is the baseline: 1 of 14 runs across
+  BOTH hosts, and that one fired off the staleness alarm rather than the step** — full evidence
+  in "Open investigations". The 2/11 here is a wider window on ONE host and includes the
+  measuring session, so treat 18% as an upper bound on the old rate, not a restatement of 1/14.
+  All four are INDEPENDENT sessions in `datapacket-talos`; none is the measuring session — that
+  contamination was checked for, because it distorted the first measurement.
+  All four queried a TOPIC, which is what the re-keying was for.
+  ⚠ **n=4, not the ~10 this doc asked for**, and the **laptop ran 0 resumes**, so this is a
+  workbench-only reading over a third of the pre-fix window.
+- 🔴 **YIELD IS STILL ZERO-EVIDENCE, AND IT IS THE QUESTION THAT MATTERS.** Adoption says the
+  command RAN. The only pre-fix invocation returned 3 weak hits its session judged irrelevant.
+  Nothing yet shows a hit changing a decision — see rank 1.
+- **Claim `handoff-search-index-1`: RELEASED** (`claim-work: RELEASED refs/heads/claim/…`), after
+  `#1332` merged. Merging does not release a claim; this one was released by hand.
 
 ## Open investigations — live diagnosis state
 
@@ -173,27 +177,50 @@ they are separate claims — the earlier "NOT deployed" status is still supersed
   query returned nothing useful, which is no evidence either way about hit quality. Adoption and
   yield are separate questions and only the first is answered.
 
+### RESOLVED (preliminary, n=4) — does the fix actually change what a session does? Adoption yes; yield unknown
+- **Answer:** adoption moved from ~1-in-8 to 4-of-4. This supersedes the earlier block's
+  "Next probe", which asked for exactly this re-run — that probe has now been run ONCE, at a
+  smaller n than it specified, and its instruction to raise `CUT` was followed.
+- **Symptom + exact repro:** re-run check 1 under "How to verify" with `CUT` raised to `#1332`'s
+  merge time (`2026-09-06T17:51:19Z`). Left at `#1295`'s the 14 pre-fix runs stay in the
+  denominator and a fully successful fix reads as ~10/24, i.e. as a failure.
+- **Observed (with values):**
+  - workbench, `#1332`..now (8.6 h): **resume runs=4, handoff_search=4 (100%), cairn recall=4/4**.
+  - workbench, `#1295`..`#1332`: **resume runs=11, handoff_search=2 (18%), cairn recall=10 (91%)**.
+  - laptop, `#1332`..now: **resume runs=0** — contributed nothing.
+  - The four post-fix sessions and their queries: `d1a30b84` (a storage-reclaim sweep),
+    `c07a10b6` (a PWA caching problem), `9c7cf8e5` (an app-block card issue), `6b4118f0`
+    (an SSR CPU regression). All four are TOPIC-shaped, none is an open-item restatement.
+- **Ruled out:** that the 4/4 is the measuring session inflating its own numerator — the four
+  session ids are distinct from this session's and all sit in a different repo. via: measurement
+- **Ruled out:** that the pre-fix rate was as high as post-fix, i.e. that nothing changed — the
+  same needle over the immediately preceding window on the same host gives 2/11. via: measurement
+- **Ruled out:** that the co-located control is itself broken (which would make 4/4 meaningless) —
+  `cairn recall` fired 4/4 post-fix and 10/11 pre-fix, i.e. it behaved as the stable surface the
+  prediction was keyed to. via: measurement
+- **Leading hypothesis:** the placement fix worked as designed. 4/4 is unlikely under the old
+  rate (≈0.001 at 18%, crude binomial), but n=4 is small and the four runs are one repo and
+  possibly one operator workflow, so this is a strong direction, not a settled rate.
+- **Next probe:** read those four sessions' transcripts around the `handoff_search` call and ask,
+  per session: did the output get REPORTED, and did it change a decision, a probe or a plan? That
+  is the yield question, and it needs no new data — the transcripts already exist.
+- **Residual, NOT measured:** yield, the laptop, and any repo other than `datapacket-talos`.
+
 ## Next steps (ranked)
-1. **RE-MEASURE ADOPTION — the fix shipped as `#1332` and nothing yet shows it worked.** Run
-   check 1 under "How to verify" on BOTH hosts after ~10 further `/resume` runs. The prediction
-   is that the query tracks `cairn recall`'s 5/6, not step 3's 0/6; the residual is that the 5/6
-   was measured with ONE command in that step. ⚠ **A green test is not adoption** — the guard
-   pins WHERE the command sits, which is a claim about placement, never about firing.
-   🔴 Two mutants are known to survive every guard and are named in the test docstring: a gating
-   sentence above the fence, and a conditional comment inside it. Both re-create the hazard
-   without moving the command. ⚠ **Correction:** an earlier version of this item said
-   `SKILL.md` is byte-capped and an eviction was needed. **That was false** — the caps cover
-   `browser`, `handoff`, `prune-skill` and `RULES.md`, not `resume`; `#1332` added **+3,688 B**
-   (41,852 → 45,540, measured by `git cat-file -s` at base `10d437c9` and head `00e803a2`) with
-   no eviction, correctly. ⚠ An earlier draft of this correction said "~1.9 KB", which was itself
-   wrong — that was one commit's delta, not the PR's.
-   🔴 **Raise check 1's `CUT` to `#1332`'s merge time before re-running it.** Left at `#1295`'s,
-   the 14 pre-fix runs stay in the denominator and a fully successful fix reads as a failure.
+1. **ANSWER YIELD — does a hit change what a session does?** The four post-fix transcripts already
+   contain the evidence; no waiting required. For each of `d1a30b84`, `c07a10b6`, `9c7cf8e5`,
+   `6b4118f0` in `~/.claude/projects/*/`, read the turns around the `handoff_search.py` call and
+   record whether the result was reported to the operator and whether it changed a decision, a
+   probe or a plan. 🔴 **This is the question the whole effort rides on** — an index that is
+   queried by every session and never useful is a cost, not a capability, and adoption cannot
+   distinguish the two. Fold in a re-run of check 1 at that point, which by then will have a
+   larger n and may have laptop runs. ⚠ Expect a real possibility that yield is LOW: the corpus
+   is ~4,900 sections and the one pre-fix hit scored `rank=1.1667` and was judged irrelevant.
    forcing: none
 2. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
    `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire
    test `test_through_main_the_residual_is_recorded_and_the_report_is_true` fails the day someone
-   does it, which is the intended signal. ⚠ Ranks below 1: machinery on a consumer nothing calls.
+   does it, which is the intended signal.
    forcing: none
 3. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
    operator sees THAT rows were deleted, not WHICH. 🔴 The fix belongs at `main` as an input
@@ -271,20 +298,66 @@ they are separate claims — the earlier "NOT deployed" status is still supersed
   own run green, the DB path exercised, `backend=postgres` confirmed — and 13 of 14 consumers
   never called it. Deployment verification cannot see adoption; only reading real runs can.
 
+- 🔴 **AN UNCONDITIONAL NUMBERED STEP IS FOLLOWED; A CONDITIONAL IN PROSE IS NOT — AND THE FIX
+  IS NOW CONFIRMED FROM BOTH ENDS.** Predicted 5/6 from the `cairn recall` control, measured
+  **4/4** post-fix against **2/11** pre-fix on the same host with the same needle. The variable
+  was placement, never the tool, its cost, or how loudly it was marked. **When a skill step is
+  not firing, MOVE it before rewording it.**
+- 🔴 **RE-KEYING WAS HALF THE FIX, AND IT IS THE HALF THAT IS EASY TO MISS.** Moving the command
+  to an unconditional step is useless if the query still needs an open item — a session with no
+  open item has nothing to type, so the step is conditional in substance while looking
+  unconditional. Keying on the handoff's TOPIC is what made it runnable every time; all four
+  post-fix queries are topic-shaped. **Ask what INPUT a step needs, not just where it sits.**
+- 🔴 **A MEASUREMENT'S DENOMINATOR MUST NAME ITS OWN INSTRUMENT.** The first adoption reading
+  had the measuring session inside the denominator, giving `8 − 1 = 7` where the analysis used
+  6; an audit caught it. Every reading since states the accounting (`8 = 1 fired + 6 analysed +
+  1 instrument`) and carries an as-of timestamp, because the corpus grows and a later re-run
+  reports LARGER numbers rather than contradicting the earlier ones.
+- 🔴 **A GUARD'S FIXTURE CAN BE ONE THAT CANNOT FAIL.** `#1332`'s scope pin searched the whole
+  wiring block while `EXPECTED_COMMAND` contains `~/workspace/devrc/…`, so its `DEVRC` arm was
+  true on every green run; the sweep had picked `DATAPACKET`, the fixture that could only die.
+  Narrowing to the paragraph was measured INSUFFICIENT (the paragraph says "a devrc-topic
+  query"). Fixed by matching BACKTICKED tokens. **Pick a fixture distinct from every constant
+  the assertion already names, and mutate the arm you think is safest.**
+- 🔴 **THE STATUS HEADER IS THE PART THAT GOES STALE AND THE PART NOBODY SWEEPS.** Three separate
+  sites in THIS doc said "no fix is built" while the PR shipping it was open; two audit rounds
+  fixed one site each and a third round found the one they both missed, in `Open investigations
+  → Next probe` — exactly the section `/resume` step 3 reads. **When a status changes, grep the
+  whole doc for the old claim; fixing the obvious site is not the job.**
+- 🔴 **MEASURING ADOPTION OF A SKILL STEP: A MENTION IS NOT AN INVOCATION (~24× overcount).** The
+  deployed `SKILL.md` body contains the command string, so every session that merely LOADED the
+  skill matches `grep -l`. Match a Bash `tool_use` `command` field and needle on
+  `handoff_search.py --` — a bare `handoff_search` also catches the grep doing the measurement.
+- **"Live and verified" and "used" are different claims, and the gap is invisible to every check
+  this effort built.** Six merged PRs, both hosts converged, the timer green, `backend=postgres`
+  confirmed — and 13 of 14 consumers never called it. Deployment verification cannot see
+  adoption; only reading real runs can.
+- **The audit ladder stopped on the ATTRIBUTION GATE, not on a clean round.** Rounds 2 and 3 both
+  changed **zero** payload lines (`claude/skills/resume/SKILL.md` untouched since round 1) — the
+  rounds were auditing the guard and the notes they had themselves written. Two consecutive
+  zero-payload rounds is the documented stop. Every round-3 finding was fixed first.
+- ⚠ **Two mutants remain UNCOVERED by the wiring guard and are named in its docstring:** a gating
+  sentence above the fence, and a conditional comment inside it. Both re-create the hazard
+  without moving the command. The docstring also says the mutant list is NOT closed — M5 (the
+  command commented out) was found only after round 1 called the residual settled.
+
 ## How to verify
 ```bash
-# 1. ADOPTION — the rank-1 measurement, re-runnable. THIS HOST only; run on both.
-#    Controls, both watched to work 2026-09-06: positive = 1 hit at the real cutoff
-#    (the metric CAN be non-zero); negative = raise CUT past 2026-09-04T19:00 and it
-#    reports 0 hits with runs still 7 (it is not hardwired).
+# 1. ADOPTION — the live question. THIS HOST only; run on both.
+#    🔴 CUT is now #1332's merge, NOT #1295's. Left at #1295's, the 14 pre-fix runs stay in the
+#    denominator and a fully successful fix reports ~10/24 and reads as a FAILURE.
+#    Controls watched to work: a MENTION is not an invocation (needle on `handoff_search.py --`,
+#    which also excludes the grep doing the measuring); the measuring session is excluded from
+#    the numerator by checking the session ids are distinct.
 python3 - <<'PY'
 import json, glob, os
-CUT = "2026-09-04T17:11:50"   # #1295 merge, UTC — raise this when re-measuring
-runs, hits = set(), set()
+CUT = "2026-09-06T17:51:19"   # #1332 merged — raise again after the next such change
+runs, hits, cairn = set(), set(), set()
 for f in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
     sid = os.path.basename(f)[:-6]
     for line in open(f, errors="replace"):
-        if "resume-state.sh" not in line and "handoff_search.py --" not in line:
+        if ("resume-state.sh" not in line and "handoff_search.py --" not in line
+                and "cairn recall" not in line):
             continue
         try: r = json.loads(line)
         except Exception: continue
@@ -297,14 +370,15 @@ for f in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
             if not isinstance(cmd, str): continue
             if "resume-state.sh" in cmd: runs.add(sid)
             if "handoff_search.py --" in cmd: hits.add(sid)
-print(f"resume runs={len(runs)}  invoked handoff_search={len(hits & runs)}")
+            if "cairn recall" in cmd: cairn.add(sid)
+print(f"runs={len(runs)} queried={len(hits & runs)} cairn(control)={len(cairn & runs)}")
 PY
-#    2026-09-06 baseline: workbench 8/1, laptop 6/0.
+#    2026-09-07T02:25Z baseline: workbench 4/4 (control 4/4); laptop 0 runs.
+#    Pre-fix same host, #1295..#1332: 11 runs, 2 queried, control 10.
 
 # 2. The timer's OWN run — the only thing that tests the unit's environment:
 systemctl --user show handoff-index-sync.service -p Result -p ExecMainStatus
 journalctl --user -u handoff-index-sync.service --no-pager -n 20
-#    expect Result=success, ExecMainStatus=0, "wrote N section row(s) … one transaction".
 
 # 3. The DB path answers (backend= is the discriminator, NOT the row count):
 KUBECONFIG=$KC_HOMELAB python3 ~/workspace/devrc/scripts/lib/handoff_search.py --query fsync --limit 3
@@ -312,10 +386,10 @@ KUBECONFIG=$KC_HOMELAB python3 ~/workspace/devrc/scripts/lib/handoff_search.py -
 
 # 4. The consumer is LIVE, not merely merged (readlink is the arbiter):
 readlink -f ~/.claude/skills/resume/SKILL.md          # must resolve into /nix/store
-grep -c 'handoff_search.py --offline' ~/.claude/skills/resume/SKILL.md   # must be 1
-#    🔴 This proves the text is DEPLOYED. It says NOTHING about whether it is FOLLOWED — that
-#    is check 1, and the two answered differently: deployed yes, followed 1 time in 14.
+grep -c 'handoff_search.py --offline' ~/.claude/skills/resume/SKILL.md   # must be >=1
+#    🔴 Proves the text is DEPLOYED. Says NOTHING about whether it is FOLLOWED — that is check 1.
 
-# 5. No database needed for the offline path:
-python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "drift-check" --limit 2
+# 5. The guard still holds (and its own mutants still die):
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc/scripts/tests/test_resume_handoff_search_wiring.py -q -p no:cacheprovider
 ```

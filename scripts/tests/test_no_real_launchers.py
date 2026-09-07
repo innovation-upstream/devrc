@@ -243,7 +243,7 @@ def test_the_stubbed_launcher_set_is_pinned():
 # seven scripts named it.
 ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
-        {"airvpn-menu", "keylog-spin-capture.sh",
+        {"airvpn-menu", "keylog-spin-capture.sh", "mention-open.py",
          "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py",
          "syshealth", "tmux-reply-agent", "tmux-restore-observe.sh"},
         "verb-split rather than record-only — see the systemctl tests below. "
@@ -302,6 +302,36 @@ ACKNOWLEDGED_UNSTUBBED = {
         "argv[0] set is exactly {tmux_bin}, with both controls watched (clean "
         "tree passes; the injected call site fails with that test's own "
         "message). Do not restore this entry without that pin. "
+        "mention-open.py (added 2026-09-07 with the refresh timer) is the "
+        "PROSE-MENTION shape again, and it arrives WITH its pin rather than "
+        "acquiring one after an audit — which is the only lesson the "
+        "tmux-reply-agent paragraph above is asking anyone to carry. Its SINGLE "
+        "occurrence of the name is inside `staleness_note()`'s operator-facing "
+        "body: `check systemctl --user status mention-known-repos-refresh`. That "
+        "sentence is the whole point of the note — a mapping older than "
+        "STALE_MAPPING_DAYS now means the DAILY UNIT has not landed for a week, "
+        "so the actionable thing is the unit, and the previous wording ('nothing "
+        "regenerates it') sent the operator to re-run a generator by hand while a "
+        "failing unit stayed invisible. Rewording it to dodge the scanner would "
+        "delete the only pointer from the symptom to its cause. "
+        "🔴 THE PIN, because this entry would otherwise blind the guard exactly "
+        "as the one above did: "
+        "test_mention_open.py::test_mention_open_SPAWNS_these_argv0_AND_NOTHING_"
+        "ELSE walks the handler's AST and asserts its spawn argv[0] set is "
+        "exactly {git, tmux, notify-send, xdg-open, rofi}, grows-or-shrinks, "
+        "with a `<computed>` sentinel so a spawn built from a variable fails "
+        "loudly instead of leaving the set. "
+        "test_systemctl_is_MENTIONED_but_never_SPAWNED asserts both halves of "
+        "this justification directly — that the mention still EXISTS (so this "
+        "entry cannot outlive the sentence it describes) and that systemctl is "
+        "not in the spawn set. ⚠ The neighbouring runtime ledger "
+        "(test_the_resolution_path_spawns_ONLY_these_local_commands) does NOT "
+        "cover this and must not be cited for it: it records what the RESOLUTION "
+        "PATH spawns, so a systemctl call added to notify() or to any branch it "
+        "does not drive would never enter its ledger. Both controls were "
+        "WATCHED: clean tree passes, and an injected "
+        "`subprocess.run([\"systemctl\", \"restart\", …])` fails with that "
+        "test's own message. "
         "tmux-restore-observe.sh (added 2026-09-06) is the SECOND on the VERB "
         "ground and is justified separately rather than absorbed into "
         "syshealth's sentence: its single call site is `systemctl --user show "
@@ -316,7 +346,8 @@ ACKNOWLEDGED_UNSTUBBED = {
         "moment the script grows one"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
-         "notify-failure.sh", "playwright-nixos", "resume-state.sh",
+         "notify-failure.sh", "playwright-nixos", "regen-known-repos.py",
+         "resume-state.sh",
          "session-manager", "session-resolve", "ship.sh", "tmux-post-save.sh",
          "tmux-scratch-slots.sh"},
         "MEASURED unreachable: a whole-tier run under a recording interceptor "
@@ -341,6 +372,22 @@ ACKNOWLEDGED_UNSTUBBED = {
         "that raises on anything else — test_session_resolve.py pins that "
         "allowlist in both directions, so this justification cannot rot into "
         "a claim about a file that has grown a launcher. "
+        "regen-known-repos.py (added 2026-09-07 with the picker universe) is "
+        "the same PROSE-MENTION shape and is re-justified, not reworded. Its "
+        "single occurrence is one clause of a comment explaining why the picker "
+        "universe is a SECOND FILE rather than a new shape inside "
+        "known_repos.json: the collector's session-tailer.py reads that mapping "
+        "from a nix `home.file` COPY, which only changes on a `home-manager "
+        "switch`, so the two readers could not change together and a reshaped "
+        "file would have a flag day. Deleting the word would delete the reason "
+        "the design is what it is. It is not a call site: the complete set of "
+        "argv[0] literals this script can spawn is `gh` and `git`, pinned in "
+        "BOTH directions by test_regen_known_repos.py::test_regen_SPAWNS_these_"
+        "argv0_AND_NOTHING_ELSE — an AST walk with a `<computed>` sentinel, so "
+        "a spawn built from a variable fails rather than silently leaving the "
+        "set. Both controls watched: clean tree passes, an injected "
+        "`subprocess.run([\"home-manager\", \"switch\"])` fails with that "
+        "test's own message. "
         "tmux-scratch-slots.sh (added 2026-08-19) is the FOURTH of this shape "
         "and carries the STRONGEST form of the justification: the other three "
         "merely lack a call site, whereas this file has no executable "

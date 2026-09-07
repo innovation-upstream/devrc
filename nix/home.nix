@@ -4132,6 +4132,85 @@ in
     };
   };
 
+  # ------------------------------------------------------------------------ #
+  # mention-open's repo mapping + picker universe — the thing that makes
+  # clicking `repo#N` in Alacritty resolve, and makes the fuzzy picker offer
+  # every repo the operator contributes to.
+  #
+  # 🔴 NOT GATED ON serverMode OR graphical, AND THAT IS DELIBERATE. The
+  # consumer is a terminal click handler, which is every host with a terminal —
+  # both of them. Gating this the way `present-regen` is gated would converge
+  # the workbench and leave the laptop's mapping frozen at whenever someone last
+  # ran the generator by hand, which is the exact failure the timer exists to
+  # remove and would be invisible (a stale mapping's only symptom is the picker
+  # appearing where a resolution used to).
+  #
+  # 🔴 THIS TIMER WAS ONCE ARGUED AGAINST IN `scripts/mention-open.py`, AND THE
+  # OBJECTION WAS ANSWERED RATHER THAN OVERRULED — read it before removing the
+  # `SuccessExitStatus` below. The note beside `STALE_MAPPING_DAYS` reasoned
+  # that a scheduled `gh api user/repos` would fail on any host without
+  # `gh auth`, so the unit would be permanently red and toast on every fire, and
+  # that a permanently-red timer is worse than no timer. That was true of a
+  # generator with ONE failure code. It now exits 4 for "not configured on this
+  # host" and 3 only for a genuine failure.
+  systemd.user.services.mention-known-repos-refresh = {
+    Unit = {
+      Description = "Refresh the mention-open repo mapping and picker universe";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # 🔴 4 IS A SUCCESS TO systemd AND A FAILURE TO NOBODY. It means `gh` is
+      # absent or not logged in on this host — a legitimate state the click
+      # handler degrades cleanly to (`owner/repo#N` and local checkouts still
+      # resolve). Without this line the unit goes red on such a host and the
+      # DND-defeating failure toast fires daily, forever, which is precisely the
+      # objection that kept this timer from being written for months. A REAL
+      # failure — gh authenticated but the API errored, or returned fewer repos
+      # than the generator's floor — is still exit 3 and still toasts.
+      SuccessExitStatus = [ 4 ];
+      # A cold paginated run over ~400 repos is a few seconds; the `gh api` call
+      # carries its own 120s timeout and `gh auth status` 30s. 300 is a ceiling
+      # for a wedged network, not a budget.
+      TimeoutStartSec = 300;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python3 pkgs.git pkgs.gh pkgs.coreutils ]}"
+        # `gh` reads its token from ~/.config/gh, and the generator writes to
+        # ~/.config/mention-open — both need HOME under a user unit.
+        "HOME=%h"
+      ];
+      # 🔴 AN ABSOLUTE STORE PATH FOR THE INTERPRETER, A WORKING-TREE PATH FOR
+      # THE SCRIPT. The interpreter must not be a bare name: a `home-manager
+      # switch` writes two profile generations and the intermediate one drops
+      # every `home.packages` binary for ~1s, so anything invoked by bare name
+      # during a switch dies "command not found". The SCRIPT is read from the
+      # checkout on purpose — it is the same copy `mention-open.py` runs from,
+      # so a `git pull` updates both together and neither needs a switch.
+      ExecStart = "${pkgs.python3}/bin/python3 %h/workspace/devrc/scripts/regen-known-repos.py";
+      X-Restart-Triggers = [ "${../scripts/regen-known-repos.py}" ];
+    };
+  };
+
+  # Daily. RandomizedDelaySec keeps it off the 04:00/05:00 cluster the other
+  # units sit on; Persistent catches up a single missed run after a reboot,
+  # which matters on the laptop — a host that is closed at the boundary would
+  # otherwise skip a day silently, and the only symptom is an age.
+  systemd.user.timers.mention-known-repos-refresh = {
+    Unit = {
+      Description = "Daily timer for the mention-open repo mapping refresh";
+    };
+    Timer = {
+      OnCalendar = "*-*-* 07:00:00";
+      Persistent = true;
+      RandomizedDelaySec = 900;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   # The server. STATIC on purpose, and that is the whole design: no refresh
   # button, no subprocess, no credential, no sops, no gh — none of what
   # `initiatives-viewer` needs for its ↻ button. It answers two artefact routes

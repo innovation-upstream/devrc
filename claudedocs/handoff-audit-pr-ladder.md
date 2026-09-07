@@ -128,44 +128,38 @@ it correct. Nine rounds across three PRs produced roughly a dozen lines of corre
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-🔴 **Numbering is STABLE — the rank is half a `claim-work` slug's identity.** Items 1–4 are
+🔴 **Numbering is STABLE — the rank is half a `claim-work` slug's identity.** Items 1–6 are
 retained as DONE markers; do not re-claim them.
 
 1. **DONE (2026-08-31) — ship the laptop.** `drift-check.sh` rc 0, `PARITY-RC=0` on both.
    forcing: none
 2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.** ⚠ Successor
-   condition real and unowned: 137 registered worktrees. Not filed — no checkable closing
-   condition.
+   condition real and unowned: now **144** registered worktrees, none prunable. Not filed — no
+   checkable closing condition.
    forcing: none
 3. **DONE (2026-08-31) — `#1133`'s never-run round 3.** `#1157` → `3e4c447f`.
    forcing: none
 4. **DONE (2026-09-01) — the `nix log` port-back.** `#1185` → `76d20386`.
    forcing: none
-5. **AUDITED 2026-09-06, NOT CLOSED — `90202ce5..2eaa3c62` round 2 returned 3 🟡 + 4 🟢.**
-   (repo: `devrc`; files `scripts/audit-dispatch.py`, `scripts/tests/test_audit_dispatch.py`.)
-   Claim `audit-pr-ladder-5` is HELD. Findings are in "Open investigations" above. **Closing
-   condition unchanged:** a round returns no findings, or a named reader dismisses it in
-   writing. It closes via rank 6, not by re-auditing #1185.
+5. **DONE (2026-09-07) — `90202ce5..2eaa3c62` audited (round 2: 3 🟡 + 4 🟢), and the findings
+   fixed and shipped via rank 6.** Claim `audit-pr-ladder-5` RELEASED. Closing condition met.
    forcing: none
-6. **Fix the three 🟡s from round 2 in ONE PR, then run round 3 against that PR.**
-   (repo: `devrc`; files `scripts/audit-dispatch.py`, `scripts/tests/test_audit_dispatch.py`.)
-   F2 first — it ships wrong advice in every brief the tool emits TODAY, including the one
-   that dispatched this audit. Then F1 (anchor `exit 1` to end-of-line) and F3 (fix the
-   inverted comment, widen the assertion to require the verdict grep last). 🔴 Add a
-   `FIX_MATRIX` row and a mutant per finding — the round-2 auditor identified their ABSENCE
-   as the structural reason F1/F3/F4 were reachable at all. Round 3 on the resulting PR is
-   what closes rank 5.
+6. **DONE (2026-09-07) — the three 🟡s fixed, then a blind audit of the fix PR found 2 more,
+   which were also fixed.** `#1342` → squash **`08ef1d5a`**, four-leg gate green on the merged
+   tree at base `3f8c81bb`. Claim `audit-pr-ladder-6` RELEASED. ⚠ One item deliberately left
+   open rather than chased — see "UNVERIFIED at merge" under Open investigations: whether
+   #1342's six new control assertions are reachable. The fix round before the merge changed
+   ZERO payload lines, so one more round would have fired the attribution gate.
    forcing: none
 7. **Decide the `scripts/testlib/**` payload-vs-scaffolding classification and write it into
-   `claude/skills/audit-pr/reference/round-ladder-evidence.md`.** It is the whole of the
-   #1132 three-way disagreement, and #1132's own ladder called it BOTH WAYS one round apart
-   (round 4 excluded `nix_units.py`'s 64 lines from its stated 31; round 5's stated 19 lines
-   ARE that file). *Closes when* the reference file states the call with its reason.
+   `claude/skills/audit-pr/reference/round-ladder-evidence.md`.** It is the whole of the #1132
+   three-way disagreement, and #1132's own ladder called it BOTH WAYS one round apart.
+   *Closes when* the reference file states the call with its reason.
    forcing: none
-8. **Churn-measure the ladders OUTSIDE devrc** — `homelab-talos`,
-   `civit-datapacket-talos`, `vetr`, `auditloop`, `civitai-gpu-fleet`, `naida-ai`. #1316's
-   waste audit was devrc-only against an "all repos" scope. *Closes when* each repo's
-   in-window ladders are churn-measured or reported UNMEASURABLE with a reason.
+8. **Churn-measure the ladders OUTSIDE devrc** — `homelab-talos`, `civit-datapacket-talos`,
+   `vetr`, `auditloop`, `civitai-gpu-fleet`, `naida-ai`. #1316's waste audit was devrc-only
+   against an "all repos" scope. *Closes when* each repo's in-window ladders are churn-measured
+   or reported UNMEASURABLE with a reason.
    forcing: none
 9. **Mine the stop-rationale prose across all 42 block-carrying PRs** rather than the two read
    by hand. The only route to a RATE for "ladders that stopped on a stated mechanism", and how
@@ -176,6 +170,17 @@ retained as DONE markers; do not re-claim them.
     round 3's fixes in `1b5d2e43..eb947328`) leave churn in NO block's range. *Closes when* the
     measurement additionally reports, per ladder, the churn between the first block's `from`
     and the head that no block's range covers.
+    forcing: none
+11. **Verify #1342's six control assertions are reachable** (the item rank 6 left open).
+    Mutate each individually under `PYTHONDONTWRITEBYTECODE=1`; each must fail with its OWN
+    message, not a neighbour's; keep a known-caught mutant as positive control and report the
+    pair. *Closes when* all six are shown to fail for their own reason, or one is shown vacuous
+    and fixed.
+    forcing: none
+12. **Ship #1316 and #1342 to both hosts and re-verify fleet parity.** Neither has been
+    shipped; parity was last verified at `a4529101` on 2026-09-01 and is stale. *Closes when*
+    `scripts/ship.sh` reports both hosts at the same sha and `scripts/drift-check.sh` is read
+    per-host line (not just its final verdict).
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -774,6 +779,14 @@ retained as DONE markers; do not re-claim them.
   this ladder's signature shape — wider on one axis, narrower on another. **Handing an agent a
   validated patch and asking it to apply it is how round N+1 gets manufactured; ask it to
   re-derive.** Fixing the class instead closed three further latent holes nobody had found.
+
+- 🔴 **A `/handoff` delta that OMITS `## Next steps (ranked)` leaves the stale queue in place —
+  and that queue is the ONLY thing `/resume` reads.** Measured here: the State-now section was
+  updated to say ranks 5 and 6 were closed while the ranked list still said "NOT CLOSED" and
+  "Fix the three 🟡s … then run round 3", i.e. it instructed the next session to redo merged
+  work. The durable-drop warning cannot catch this — omitting a REPLACE section is *by design*
+  "leave it alone", so the run is silent. **When an item closes, update the RANKED LIST in the
+  same delta, not just the status header.**
 
 ## How to verify
 ```bash
