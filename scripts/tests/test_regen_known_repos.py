@@ -9,6 +9,7 @@ that keep a wrong answer out of the mapping.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -43,6 +44,68 @@ def looks_like_a_repo_mapping(text: str) -> int:
     return len({k for k, _ in _PAIR_RE.findall(text)})
 
 
+# 🔴 A SECOND SHAPE, BECAUSE THE GENERATOR NOW EMITS A SECOND FILE — AND THE
+# DETECTOR ABOVE IS STRUCTURALLY BLIND TO IT. `known_universe.json` is a JSON
+# LIST of `owner/repo` strings: it carries no `key: value` pairs at all, so
+# `_PAIR_RE` finds nothing and `looks_like_a_repo_mapping` returns 0 for a file
+# that is a WIDER disclosure than the mapping (it is deliberately unfiltered, so
+# it names MORE private repositories). Committing one would have sailed past the
+# guard that exists precisely to stop that — the same structural blindness that
+# let the original incident through, in a new shape.
+_FULL_NAME_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+def _owner_repo_count(items) -> int:
+    return len({s for s in items
+                if isinstance(s, str) and _FULL_NAME_RE.match(s)})
+
+
+def looks_like_a_repo_universe(text: str) -> int:
+    """How many DISTINCT `owner/repo` strings sit in a LIST LITERAL in `text`.
+
+    🔴 STRUCTURAL, NOT TEXTUAL, AND THE FIRST VERSION WAS TEXTUAL AND USELESS.
+    It counted every quoted `a/b` anywhere in the file and produced NINE false
+    accusations on the first run — `claude/skills/clickup/package-lock.json` (46,
+    every one an npm `node_modules/...` path) plus eight test files whose
+    synthetic fixtures merely mention repos in passing. A guard that fires on
+    ordinary files is a guard everyone learns to override.
+
+    So the question asked here is the one that actually matters: is this file a
+    LIST OF REPOSITORIES? That is the artefact `write_universe` emits, and it is
+    a shape no lockfile and no docstring has. Both spellings are covered — a
+    JSON document (the file itself, committed by accident) and a Python list
+    literal (the shape the ORIGINAL incident took, in which a generator wrote
+    its output into a `.py` module that was then committed).
+
+    ⚠ RESIDUAL, STATED RATHER THAN PAPERED OVER: a universe split across several
+    smaller literals, or built by a comprehension, is NOT counted. This detects
+    the dump, which is the way this has actually gone wrong twice; it is not a
+    general private-name scanner, and `claude/RULES.md` already records that no
+    gate in this repo covers repo names in prose.
+    """
+    best = 0
+    stripped = text.strip()
+    if stripped.startswith("["):
+        try:
+            doc = json.loads(stripped)
+        except ValueError:
+            doc = None
+        if isinstance(doc, list):
+            best = max(best, _owner_repo_count(doc))
+    # The Python-literal spelling. `ast.parse` rather than a regex, so a list is
+    # recognised as a list rather than as "some quoted strings near brackets".
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return best
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            best = max(best, _owner_repo_count(
+                [e.value for e in node.elts if isinstance(e, ast.Constant)]))
+    return best
+
+
 def test_the_mapping_detector_FIRES_on_a_realistic_mapping():
     """🔴 THE NEGATIVE CONTROL — without it, the sweep below is a zero that may
     be indistinguishable from a detector wired to nothing. Built from realistic
@@ -56,6 +119,31 @@ def test_the_mapping_detector_FIRES_on_a_realistic_mapping():
     # …and it does NOT fire on an ordinary small dict of the same shape.
     assert looks_like_a_repo_mapping(
         "{'a': 'o/a', 'b': 'o/b', 'c': 'o/c'}") < MAPPING_KEY_THRESHOLD
+
+
+def test_the_UNIVERSE_detector_FIRES_and_the_mapping_one_is_BLIND_to_it():
+    """🔴 THE NEGATIVE CONTROL FOR THE SECOND SHAPE — and it asserts the BLIND
+    SPOT explicitly, because that is the finding rather than a side note.
+
+    Built from a REALISTIC artefact: the exact JSON `write_universe` emits, not
+    a textbook fixture. `looks_like_a_repo_mapping` returns 0 on it — a list has
+    no `key: value` pairs — so before this detector existed, committing the
+    picker universe to this public repo would have passed the incident guard
+    that exists to prevent exactly that.
+    """
+    universe = json.dumps(sorted(
+        f"gardenersguild/{n}{i}"
+        for i, n in enumerate(["Trowelcast", "SledgeHorn", "PloughShare"] * 9)
+    ), indent=1)
+    assert looks_like_a_repo_universe(universe) >= MAPPING_KEY_THRESHOLD
+    assert looks_like_a_repo_mapping(universe) == 0, (
+        "the pair matcher must be shown BLIND to this shape — if it ever fires "
+        "here, the second detector's justification has changed and this test "
+        "is the one that should say so")
+    # …and it does NOT fire on a file that merely mentions a few repos, which is
+    # every docstring and comment in this tree.
+    assert looks_like_a_repo_universe(
+        "see 'civitai/talos-infra' and 'acme/widget'") < MAPPING_KEY_THRESHOLD
 
 
 # Directories that exist only in a working checkout and are gitignored there.
@@ -111,10 +199,20 @@ def test_the_generated_mapping_is_NOT_published_anywhere_in_this_repo():
         keys = looks_like_a_repo_mapping(text)
         if keys >= MAPPING_KEY_THRESHOLD:
             offenders.append(f"{path.relative_to(ROOT)} ({keys} distinct repo keys)")
+            continue
+        # 🔴 THE UNIVERSE SHAPE, CHECKED ON THE SAME SWEEP RATHER THAN IN A
+        # SECOND TEST — one walk, one `len(files) > 100` floor, one place for a
+        # future third shape. A separate test would need its own floor and would
+        # be the one nobody notices has stopped walking anything.
+        fulls = looks_like_a_repo_universe(text)
+        if fulls >= MAPPING_KEY_THRESHOLD:
+            offenders.append(
+                f"{path.relative_to(ROOT)} ({fulls} distinct owner/repo names)")
     assert offenders == [], (
-        f"file(s) look like a repo mapping (via {how}): {offenders}. "
-        f"The mapping names PRIVATE repositories and this repo is PUBLIC — it "
-        f"belongs at {RG.DEFAULT_PATH}, outside every checkout.")
+        f"file(s) look like a repo mapping or picker universe (via {how}): "
+        f"{offenders}. Both name PRIVATE repositories and this repo is PUBLIC — "
+        f"they belong at {RG.DEFAULT_PATH} and {RG.DEFAULT_UNIVERSE_PATH}, "
+        f"outside every checkout.")
 
 
 def test_the_default_output_path_is_outside_every_checkout():
@@ -507,3 +605,215 @@ def test_a_checkout_with_NO_api_row_is_written_in_BOTH_spellings():
     out = RG.build_mapping([], {"PlotWidget": "acme/PlotWidget"})
     assert out.get("PlotWidget") == "acme/PlotWidget", out
     assert out.get("plotwidget") == "acme/PlotWidget", out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PICKER UNIVERSE — WIDER THAN THE MAPPING, ON PURPOSE
+#
+# `build_mapping` answers "what does the bare name `foo` mean?" and must drop an
+# issues-disabled repo and a bare name two owners share. `build_universe`
+# answers "which repos might be worth offering?", its rows are fully-qualified,
+# and nothing opens without a selection — so it applies NEITHER filter.
+#
+# MEASURED on the operator's host 2026-09-07: 388 repos from `gh api
+# user/repos`, 339 in the mapping, so 53 were unreachable from the picker.
+# --------------------------------------------------------------------------- #
+def _api(*rows) -> list[dict]:
+    """`{full_name, has_issues}` rows in the shape `gh api user/repos` returns."""
+    return [{"full_name": f, "has_issues": h} for f, h in rows]
+
+
+def test_the_universe_KEEPS_a_repo_whose_issues_are_disabled():
+    """🔴 THE 48-REPO HALF, and the assumption that hid it was in a comment.
+
+    The mapping drops these, and the ORIGINAL justification said a bare `repo#N`
+    "404s for EVERY N". That is false for PULL REQUESTS: measured 2026-09-07
+    against the API with a positive control (2 issues-ENABLED repos first, both
+    `PULL`), **6 of 6** issues-disabled repos resolved `/issues/<pr>` to the pull
+    request. An earlier probe that saw 3 of 4 return 404 was confounded — an
+    unauthenticated request 404s on a PRIVATE repo whatever the redirect does.
+
+    The mapping still drops them, on the narrower true reason (no ISSUES exist,
+    so a bare `#N` naming an issue is a wrong answer). The universe must not."""
+    api = _api(("acme/widget", True), ("acme/noissues", False))
+    assert RG.build_universe(api, {}) == ["acme/noissues", "acme/widget"]
+    # THE CONTRAST IS THE POINT — pinned here so the two functions can never
+    # quietly converge on one filter policy.
+    assert "acme/noissues" not in RG.build_mapping(api, {}).values()
+
+
+def test_the_universe_KEEPS_BOTH_SIDES_of_an_ambiguous_bare_name():
+    """🔴 THE 7-COLLISION HALF. `build_mapping` drops `bitdex` entirely, because
+    resolving it would mean guessing between two owners — measured once picking
+    a third party's fork over the client's repo.
+
+    A picker row is `owner/repo`, so there is no ambiguity left to arbitrate:
+    offering both and letting the operator choose is exactly the question they
+    are being asked. Dropping them makes a repo unreachable to protect against
+    a guess nobody is making."""
+    api = _api(("alice/bitdex", True), ("bob/bitdex", True))
+    assert RG.build_universe(api, {}) == ["alice/bitdex", "bob/bitdex"]
+    # The mapping's silence on the shared bare name is UNCHANGED.
+    assert "bitdex" not in RG.build_mapping(api, {})
+
+
+def test_the_universe_unions_local_checkouts_the_API_never_returned():
+    """A clone of somebody else's repository is on this disk and not in
+    `user/repos`. It cannot CONTRADICT an API row — this is a list, not a
+    lookup — so it is simply added."""
+    api = _api(("acme/widget", True))
+    out = RG.build_universe(api, {"mirror": "elsewhere/stranger"})
+    assert out == ["acme/widget", "elsewhere/stranger"]
+
+
+def test_the_universe_dedupes_case_insensitively_keeping_the_API_spelling():
+    """GitHub repo names are case-insensitive, so these are ONE repository. The
+    API row wins because it is canonical; a remote URL preserves whatever the
+    person who cloned happened to type, which is why the mapping has to write
+    two spellings of every key in the first place."""
+    api = _api(("civitai/ComfyUI", True))
+    out = RG.build_universe(api, {"mirror": "civitai/comfyui"})
+    assert out == ["civitai/ComfyUI"], out
+
+
+def test_the_universe_drops_rows_that_are_not_owner_slash_repo():
+    """Same predicate as the mapping's, and IMPORTED from `mention_scan` rather
+    than re-spelled here — a row that is not exactly `owner/repo` builds a URL
+    that 404s while looking authoritative."""
+    api = _api(("acme/widget/", True), ("acme//widget", True), ("noslash", True),
+               ("", True), ("acme/widget", True))
+    assert RG.build_universe(api, {"mirror": "also/bad/three"}) == ["acme/widget"]
+
+
+def test_the_universe_is_SORTED_case_insensitively():
+    """The picker shows this list in order; sorting by raw codepoint puts every
+    capitalised name in a block ahead of the lowercase ones, which reads as
+    random to someone scanning for a name."""
+    api = _api(("acme/zebra", True), ("acme/Apple", True), ("acme/mango", True))
+    assert RG.build_universe(api, {}) == ["acme/Apple", "acme/mango", "acme/zebra"]
+
+
+def test_write_universe_is_0600_because_it_names_private_repositories(tmp_path):
+    """Identical posture to `write_mapping`. This file holds MORE private names
+    than the mapping does — it is deliberately unfiltered — so a weaker mode
+    here would be a wider disclosure than the one that started all of this."""
+    out = tmp_path / "sub" / "known_universe.json"
+    RG.write_universe(["acme/widget"], out)
+    assert json.loads(out.read_text()) == ["acme/widget"]
+    assert oct(out.stat().st_mode)[-3:] == "600", oct(out.stat().st_mode)
+    assert oct(out.parent.stat().st_mode)[-3:] == "700"
+    assert not list(out.parent.glob("*.tmp")), "the temp file must not survive"
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 TWO KINDS OF FAILURE — THE SPLIT THAT MAKES THE TIMER POSSIBLE
+#
+# `mention-open.py` once argued AGAINST a scheduled run: with a single failure
+# code, a host without `gh auth` would take a failing unit and a failure toast
+# on every fire, and a permanently-red timer is worse than no timer. That was
+# correct. It is answered by exit 4 ("not configured here" — which the unit
+# declares a success) versus exit 3 ("configured and broken" — which toasts).
+# --------------------------------------------------------------------------- #
+def _stub_run(monkeypatch, *, auth_rc=0, auth_raises=None, api_rc=0, api_out=""):
+    """Replace `subprocess.run` INSIDE the generator only, keyed on argv."""
+    def fake(cmd, *a, **k):
+        if cmd[:3] == ["gh", "auth", "status"]:
+            if auth_raises is not None:
+                raise auth_raises
+            return subprocess.CompletedProcess(cmd, auth_rc, "", "")
+        if cmd[:2] == ["gh", "api"]:
+            return subprocess.CompletedProcess(cmd, api_rc, api_out, "boom")
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+    monkeypatch.setattr(RG.subprocess, "run", fake)
+
+
+def _enough_repos() -> str:
+    return "".join(
+        json.dumps({"full_name": f"acme/plot{i}", "has_issues": True}) + "\n"
+        for i in range(RG.MIN_API_REPOS + 5))
+
+
+def test_a_host_with_no_gh_exits_NOT_CONFIGURED_not_FAILED(monkeypatch, tmp_path):
+    """🔴 THE WHOLE REASON THE TIMER CAN EXIST. `gh` absent is a legitimate host
+    state — the click handler degrades to `owner/repo#N` plus local checkouts —
+    so it must not be the code that toasts daily forever."""
+    _stub_run(monkeypatch, auth_raises=FileNotFoundError("no gh"))
+    rc = RG.main(["--path", str(tmp_path / "m.json"),
+                  "--universe-path", str(tmp_path / "u.json")])
+    assert rc == RG.EXIT_NOT_CONFIGURED == 4, rc
+    assert not (tmp_path / "m.json").exists(), "nothing may be written"
+    assert not (tmp_path / "u.json").exists()
+
+
+def test_gh_present_but_LOGGED_OUT_is_also_NOT_CONFIGURED(monkeypatch, tmp_path):
+    """The second spelling of the same host state, and the one a real host
+    reaches by having a token expire rather than by lacking the binary."""
+    _stub_run(monkeypatch, auth_rc=1)
+    assert RG.main(["--path", str(tmp_path / "m.json"),
+                    "--universe-path", str(tmp_path / "u.json")]) == 4
+
+
+def test_an_AUTHENTICATED_host_whose_API_call_fails_is_a_REAL_failure(
+        monkeypatch, tmp_path):
+    """🔴 THE OTHER ARM, AND WITHOUT IT THE SPLIT IS WORTHLESS. If everything
+    returned 4 the unit would be permanently green and a genuinely broken
+    refresh would be silent — which is the same failure as a permanently-red
+    gate, wearing the other colour."""
+    _stub_run(monkeypatch, auth_rc=0, api_rc=1)
+    rc = RG.main(["--path", str(tmp_path / "m.json"),
+                  "--universe-path", str(tmp_path / "u.json")])
+    assert rc == RG.EXIT_FAILED == 3, rc
+
+
+def test_an_AUTHENTICATED_host_returning_TOO_FEW_repos_is_a_REAL_failure(
+        monkeypatch, tmp_path):
+    """The floor is a truncation detector: a short list is indistinguishable
+    from a fine one once written. Authenticated + short is broken, not
+    unconfigured — so it must toast."""
+    _stub_run(monkeypatch, auth_rc=0, api_out=json.dumps(
+        {"full_name": "acme/widget", "has_issues": True}) + "\n")
+    assert RG.main(["--path", str(tmp_path / "m.json"),
+                    "--universe-path", str(tmp_path / "u.json")]) == 3
+
+
+def test_NotConfigured_is_caught_BEFORE_the_generic_RuntimeError(monkeypatch,
+                                                                 tmp_path):
+    """🔴 AN ORDERING GUARD, AND THE BUG IT PINS IS INVISIBLE BY INSPECTION.
+    `NotConfigured` SUBCLASSES `RuntimeError`. Swap the two `except` clauses in
+    `main()` and an unconfigured host reports exit 3 — a red unit and a daily
+    toast, the exact outcome the split exists to prevent — while every other
+    test in this file still passes, because they never exercise the ordering.
+
+    So this asserts the CODE, not just a message: 4, and nothing written."""
+    _stub_run(monkeypatch, auth_rc=1)
+    assert RG.main(["--path", str(tmp_path / "m.json"),
+                    "--universe-path", str(tmp_path / "u.json")]) == 4
+    assert RG.EXIT_NOT_CONFIGURED != RG.EXIT_FAILED, (
+        "the two codes must stay distinct or the unit cannot tell them apart")
+
+
+def test_a_HEALTHY_run_writes_BOTH_files(monkeypatch, tmp_path):
+    """🔴 THE POSITIVE CONTROL FOR EVERY REFUSAL ABOVE. Five tests assert that
+    nothing is written; a generator that never wrote anything would pass all
+    five. This is the one that proves the happy path still lands — and that the
+    universe is written at all, which a `write_mapping`-only regression would
+    otherwise leave to the reader's graceful `[]` fallback and hide completely."""
+    _stub_run(monkeypatch, auth_rc=0, api_out=_enough_repos())
+    m, u = tmp_path / "m.json", tmp_path / "u.json"
+    assert RG.main(["--path", str(m), "--universe-path", str(u)]) == 0
+    assert json.loads(m.read_text()), "the mapping must be written"
+    universe = json.loads(u.read_text())
+    assert isinstance(universe, list) and len(universe) == RG.MIN_API_REPOS + 5
+    assert oct(u.stat().st_mode)[-3:] == "600"
+
+
+def test_print_mode_writes_NOTHING_and_reports_the_universe(monkeypatch,
+                                                            tmp_path, capsys):
+    """`--print` must stay a read. It also reports how many repos are reachable
+    ONLY through the picker — the number this whole change is about, and one
+    nobody would check if it were never printed."""
+    _stub_run(monkeypatch, auth_rc=0, api_out=_enough_repos())
+    m, u = tmp_path / "m.json", tmp_path / "u.json"
+    assert RG.main(["--print", "--path", str(m), "--universe-path", str(u)]) == 0
+    assert not m.exists() and not u.exists()
+    assert "picker universe" in capsys.readouterr().out
