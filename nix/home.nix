@@ -142,13 +142,37 @@ let
   # wired into `default.target`; the unit definition is always emitted, so it can
   # be started by hand regardless.
   #
-  # 🔴 IT SHIPS **false**, AND THAT IS THE POINT OF THE WHOLE SHAPE — not caution
-  # about an unfinished feature. What this agent delivers is `tmux send-keys`
-  # followed by Enter, i.e. arbitrary command execution as the operator on this
-  # host, driven by a route on a LAN NodePort that has no human auth. The operator
+  # 🔴 THIS IS NOW **true** — THE AGENT IS ARMED, AND WHAT IT DELIVERS IS ARBITRARY
+  # COMMAND EXECUTION AS THE OPERATOR ON THIS HOST. `tmux send-keys` followed by
+  # Enter, driven by a route on a LAN NodePort that has no human auth. The operator
   # took that decision deliberately, with the blast radius stated; what was ALSO
   # decided is that building it and ARMING it are separate acts, so the write path
-  # can be merged, deployed, read and audited before it can execute anything.
+  # was merged, deployed, read and audited across seven rounds while this flag was
+  # still false and it could execute nothing. It shipped `false` for exactly that
+  # reason — that ordering is history now, not a live guard.
+  #
+  # 🔴 DISARMING IS TWO STEPS, NOT ONE, AND THE SECOND IS NOT OPTIONAL. Setting
+  # this back to `false` and shipping does NOT stop a RUNNING agent. The unit
+  # DEFINITION is emitted unconditionally, so the flag only removes the
+  # `[Install]` block — home-manager's `sd-switch` then sees a CHANGED unit and
+  # plans **Stop/Start**, restarting the very process you meant to stop. It goes
+  # on polling and executing until logout, reboot, or an explicit stop. MEASURED
+  # with `sd-switch --dry-run` against three fixtures: identical generations =>
+  # `No action`; unit deleted outright => `Stop`; `[Install]` removed with the
+  # unit still present => `Stop/Start (SwitchMethod(StopStart))`.
+  #
+  #     enableTmuxReplyAgent = false;   # then merge + scripts/ship.sh, THEN:
+  #     systemctl --user stop tmux-reply-agent          # on BOTH hosts
+  #
+  # The flag alone is a durable disarm (nothing wants the unit at next login);
+  # the `stop` is what makes it take effect NOW, on the host you run it on.
+  #
+  # Removing CLAWGATE_TERMINAL_TOKEN from the POD is the other lever. It is
+  # fleet-wide rather than per-host — but 🔴 NOT INSTANT: per the paragraph
+  # below and the pod's own boot line, it takes effect on the POD'S NEXT BOOT,
+  # so the route keeps answering until then. Neither lever is immediate on its
+  # own; `systemctl --user stop` on both hosts is the one that stops execution
+  # at the moment you run it.
   #
   # 🔴 TWO INDEPENDENT SWITCHES, AND NEITHER IMPLIES THE OTHER. Arming needs
   # (1) CLAWGATE_TERMINAL_TOKEN provisioned into the POD's secret — until then the
@@ -167,7 +191,7 @@ let
   # ONLY from the machine it lives on, so a workbench-only agent would leave every
   # laptop pane permanently unanswerable. The queue is keyed on the host label, so
   # two agents claiming disjoint host scopes cannot collide.
-  enableTmuxReplyAgent = false;
+  enableTmuxReplyAgent = true;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
@@ -3801,10 +3825,11 @@ in
   # either host's tmux socket, and the alternative (an inbound port, or an ssh
   # credential inside a pod on an unauthenticated LAN surface) is strictly worse.
   #
-  # 🔴 SHIPPED DISABLED. `enableTmuxReplyAgent` is false — see its comment above
-  # for the two independent switches that arm this and why building it and arming
-  # it were deliberately separated. The unit below EXISTS on both hosts and is
-  # wired into nothing.
+  # 🔴 ARMED. `enableTmuxReplyAgent` is true — see its comment above for the two
+  # independent switches that arm this and why building it and arming it were
+  # deliberately separated. The unit below is wanted by `default.target` on both
+  # hosts and RUNS; it executes what the queue hands it. It shipped disabled and
+  # was armed only after the server half was deployed and audited.
   #
   # 🔴 Type = "simple", NOT the oneshot-plus-timer shape its two siblings use, and
   # the difference is the cadence. A ~5s poll cannot be a timer: the user manager
@@ -3821,8 +3846,9 @@ in
       # tmux-snapshot-push: notify-failure@ toasts are wired to DEFEAT
       # do-not-disturb, and that bypass is justified by a MEASURED rate of about
       # one firing in nine days. This unit polls every few seconds, so any
-      # sustained condition — the surface not armed (which is the state it ships
-      # in), clawgate mid-redeploy, the laptop's network down — would fire a
+      # sustained condition — the surface not armed (which since arming means the
+      # pod's secret was REMOVED), clawgate mid-redeploy, the laptop's network
+      # down — would fire a
       # DND-bypassing toast on every restart and burn down the one alert channel
       # that has to keep its meaning.
       #
@@ -3876,8 +3902,8 @@ in
       ];
     };
     Install = {
-      # 🔴 SHIPPED DISABLED — see enableTmuxReplyAgent. A `default.target` want,
-      # not `timers.target`: this is a resident service, not a timer.
+      # 🔴 ARMED — see enableTmuxReplyAgent. A `default.target` want, not
+      # `timers.target`: this is a resident service, not a timer.
       WantedBy = lib.optionals enableTmuxReplyAgent [ "default.target" ];
     };
   };

@@ -245,7 +245,7 @@ ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
         {"airvpn-menu", "keylog-spin-capture.sh",
          "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py",
-         "syshealth"},
+         "syshealth", "tmux-reply-agent", "tmux-restore-observe.sh"},
         "verb-split rather than record-only — see the systemctl tests below. "
         "run-tests.sh is a THIRD case, re-justified rather than absorbed: its "
         "only occurrences of the name are GUARD 7's accounting, which counts "
@@ -271,7 +271,49 @@ ACKNOWLEDGED_UNSTUBBED = {
         "closed. `test_syshealth.py::test_failed_units_asks_systemctl_for_a_"
         "read_verb` pins the argv against SYSTEMCTL_READ_VERBS itself rather "
         "than against a copied literal, so this justification goes red if the "
-        "call site ever grows a mutating verb"),
+        "call site ever grows a mutating verb. "
+        "tmux-reply-agent (added 2026-09-06 with the ARMING change) is the "
+        "PROSE-MENTION shape this table already carries FIVE times under "
+        "`home-manager` (notify-failure.sh, session-manager, session-resolve, "
+        "tmux-scratch-slots.sh, resume-state.sh — that entry numbers the last "
+        "two itself) and once under `wmctrl` (session-write), and it is "
+        "re-justified the same way rather than reworded to dodge the scanner. "
+        "Its SINGLE "
+        "occurrence of the name is one line of module-docstring prose giving "
+        "the operator the second half of the DISARM procedure — "
+        "`systemctl --user stop tmux-reply-agent` — which exists because "
+        "flipping enableTmuxReplyAgent false does NOT stop a running agent: "
+        "the unit definition is emitted unconditionally, so the flag only "
+        "drops [Install] and sd-switch then plans Stop/Start. MEASURED with "
+        "`sd-switch 0.6.4 --dry-run` against a RUNNING unit, both controls "
+        "passing (identical generations => No action; unit deleted => Stop; "
+        "[Install] removed => Stop/Start). Deleting the word to get green "
+        "would delete the only written rollback for a surface whose payload "
+        "is arbitrary command execution as the operator. Verified by grep "
+        "that the file carries no call site: its complete set of argv[0] "
+        "literals is `tmux_bin()` alone, at the single `subprocess.run` in "
+        "run_tmux. 🔴 THAT LAST CLAUSE NAMED A PIN THAT DID NOT EXIST until an "
+        "audit checked it, and the gap was MEASURED: hazard_hits returns a FILE "
+        "set and this file is now IN it, so injecting a real "
+        "`subprocess.run([\"systemctl\", ...])` here left THIS suite at 77 passed "
+        "— the acknowledgement had blinded the guard it is filed under. The pin "
+        "is now real: test_tmux_reply_agent.py::test_the_agent_SHELLS_OUT_TO_"
+        "TMUX_AND_NOTHING_ELSE walks the agent's AST and asserts its spawn "
+        "argv[0] set is exactly {tmux_bin}, with both controls watched (clean "
+        "tree passes; the injected call site fails with that test's own "
+        "message). Do not restore this entry without that pin. "
+        "tmux-restore-observe.sh (added 2026-09-06) is the SECOND on the VERB "
+        "ground and is justified separately rather than absorbed into "
+        "syshealth's sentence: its single call site is `systemctl --user show "
+        "tmux-session-restore.service -p …`, and `show` is on "
+        "nolaunch.SYSTEMCTL_READ_VERBS, so the verb-splitting stub passes it "
+        "through as a read. The whole script is a READER by construction — it "
+        "exists to observe the post-boot restore without perturbing it — and "
+        "`test_tmux_restore_observe.py::test_every_systemctl_call_site_in_the_"
+        "script_uses_a_READ_verb` pins EVERY occurrence's verb against "
+        "SYSTEMCTL_READ_VERBS itself, with a positive control proving the "
+        "extractor can see a mutating verb, so this justification goes red the "
+        "moment the script grows one"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
          "notify-failure.sh", "playwright-nixos", "resume-state.sh",
@@ -343,9 +385,14 @@ ACKNOWLEDGED_UNSTUBBED = {
         "behind sudo and neither script is executed by scripts/tests"),
     "wmctrl": (
         {"session-write"},
-        "The FOURTH occurrence of the prose-mention shape already justified "
-        "three times under `home-manager` above, and justified here rather "
-        "than reworded away — this scan is a TEXT scan "
+        "Another occurrence of the prose-mention shape justified under "
+        "`home-manager` above (that entry numbers its own), and justified here "
+        "rather than reworded away. 🔴 THIS SENTENCE DELIBERATELY CARRIES NO "
+        "RUNNING TOTAL: it said \"the FOURTH … three times\" and was still "
+        "saying it after the population reached five, so two entries in one "
+        "dict disagreed about the same figure. A count kept beside what it "
+        "counts drifts — number the list, not the prose. This scan is a TEXT "
+        "scan "
         "(launcher_scan.hazard_hits regexes the file body), so naming a binary "
         "in order to promise you never call it is indistinguishable from "
         "calling it. session-write (added 2026-08-19) names `wmctrl` in ONE "

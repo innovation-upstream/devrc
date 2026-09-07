@@ -302,6 +302,72 @@ def test_a_mutant_that_COLLECTED_NOTHING_is_not_a_survivor():
                         "E   something else") == "KILLED-WRONG-REASON"
 
 
+def test_the_counts_come_from_PYTESTS_OWN_summary_line_not_from_captured_output():
+    """🔴 THE SECOND WAY THIS BATTERY REPORTED A FALSE `SURVIVED`, and it was
+    MEASURED rather than imagined. The counts used to be
+    `re.search(r"(\\d+) failed", out)` over the WHOLE output, which takes the
+    first match anywhere — and the tailer under test prints its own progress
+    line, `session-tailer: scanned=1 emitted=1 failed=0 mentions=1 …`, which
+    pytest echoes inside a captured-output block. `emitted=1 failed=0` contains
+    the substring `1 failed`.
+
+    On mutant K43 the real summary was `2 failed, 389 passed` and the battery
+    read `nfail=1`. Harmless there — a wrong non-zero is still a kill — but the
+    same line with `emitted=0` reads `nfail=0` over a RED suite and reports
+    `SURVIVED` for a mutant every guard caught. That is the case pinned below,
+    because it is the one nothing else in this file could see.
+    """
+    mod = _load("mutation_battery_mentions.py")
+    tailer_line = ("E       session-tailer: scanned=1 emitted=0 failed=0 "
+                   "mentions=1 [first-seen=1] settle=20m interim=4h")
+
+    # 🔴 THE HOLE, VERBATIM: a red run whose captured output claims `0 failed`.
+    red = f"{tailer_line}\n2 failed, 389 passed in 12.25s\n"
+    assert mod.counts_from(red) == (2, 389, 0)
+
+    # The exact shape measured on K43 — `emitted=1 failed=0` — read as 1.
+    k43 = ("E       session-tailer: scanned=1 emitted=1 failed=0 mentions=1\n"
+           "2 failed, 389 passed in 12.25s\n")
+    assert mod.counts_from(k43) == (2, 389, 0)
+
+    # 🔴 NEGATIVE CONTROL — the ordinary readings must still work, or the
+    # assertions above would hold for a parser wired to a constant.
+    assert mod.counts_from("391 passed in 2.60s\n") == (0, 391, 0)
+    assert mod.counts_from("4 errors in 1.10s\n") == (0, 0, 4)
+    assert mod.counts_from("1 error in 1.10s\n") == (0, 0, 1)
+    assert mod.counts_from("2 failed, 3 passed, 1 skipped in 0.50s\n") == (2, 3, 0)
+
+    # 🔴 NO SUMMARY LINE AT ALL -> zeros -> `NOT-OBSERVED`, never `SURVIVED`.
+    # A run this cannot read (a timeout, a crash) must not be scored as one no
+    # test could see.
+    assert mod.counts_from("Killed\n") == (0, 0, 0)
+    assert mod.classify(*mod.counts_from("Killed\n"), 150, None, "") == "NOT-OBSERVED"
+
+
+def test_the_only_filter_never_drops_the_POSITIVE_CONTROL():
+    """`--only` exists so one row can be re-checked without a ~25-minute sweep.
+    A filtered run that dropped `P1` would report `1/1 killed` from an
+    instrument nothing had shown could observe anything at all."""
+    mod = _load("mutation_battery_mentions.py")
+    rows, banner = mod.selected(["--only", "K43"])
+    ids = [r[0] for r in rows]
+    assert ids == ["P1", "K43"], ids
+    assert "FILTERED" in banner, banner
+
+    # 🔴 NEGATIVE CONTROL — an unfiltered call really does return everything and
+    # says nothing about being filtered, or the assertion above is vacuous.
+    everything, no_banner = mod.selected([])
+    assert len(everything) == len(mod.MUTANTS) > 2
+    assert no_banner == ""
+
+    # An id nobody declared is a typo that would otherwise run only P1 and
+    # report a clean sweep.
+    with pytest.raises(SystemExit):
+        mod.selected(["--only", "K999"])
+    with pytest.raises(SystemExit):
+        mod.selected(["--only", ""])
+
+
 def _python_instruments() -> list[str]:
     """Every Python mutation instrument in `scripts/tests/`, under EITHER
     naming convention — `mutation_battery_*.py` and `mutants-*.py`."""

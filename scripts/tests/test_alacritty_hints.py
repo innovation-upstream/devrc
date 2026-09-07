@@ -31,12 +31,42 @@ double-quoted strings define.
 """
 from __future__ import annotations
 
+import contextlib
+import importlib.util
 import re
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+@contextlib.contextmanager
+def _collector_on_path():
+    """`scripts/collector` on `sys.path` for the duration, then OFF again.
+
+    🔴 A TEST BODY MUST NOT LEAVE A GLOBAL BEHIND. This used to be a bare
+    `sys.path.insert(0, …)` inside one test, never undone — so every test that
+    ran after it in the same process (any file, any order) resolved imports
+    against a directory it never asked for, and the leak was invisible until a
+    name in `scripts/collector` happened to shadow one somewhere else.
+    Whichever test ran first would decide, and `-p no:randomly` is not a fix.
+    """
+    inserted = str(ROOT / "scripts" / "collector")
+    sys.path.insert(0, inserted)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ValueError):
+            sys.path.remove(inserted)
+
+
+def _mention_scan():
+    """The scanner module, imported without leaving `sys.path` modified."""
+    with _collector_on_path():
+        import mention_scan  # noqa: PLC0415 — see `_collector_on_path`
+    return mention_scan
 ALACRITTY_NIX = ROOT / "nix" / "programs" / "alacritty" / "default.nix"
 
 # alacritty 0.17.0's built-in URL-hint regex, as the regex engine receives it.
@@ -366,6 +396,105 @@ def test_the_mention_hint_matches_every_supported_shape(mention_hint):
     rx = re.compile(pattern)
     for text in ("#370", "devrc#591", "civitai/talos-infra#1065", "868abc123"):
         assert rx.search(text), f"the mention hint no longer matches {text!r}"
+
+
+def test_every_TERMINAL_shape_the_scanner_detects_is_also_UNDERLINED(mention_hint):
+    """🔴 THE SEAM THAT SHIPPED A DEAD FEATURE, PINNED IN THE DIRECTION THAT
+    FAILED. `mention_scan.PATTERN_LEDGER` decides what the handler will RESOLVE;
+    this regex decides what the terminal UNDERLINES. Unhighlighted text cannot be
+    clicked, so a shape enabled in the ledger's TERMINAL profile and absent from
+    this regex is a feature that is 100% dead — and both files stay hermetically
+    green, because neither suite reads the other.
+
+    MEASURED: that is exactly what `audit-pr 1291` was. The ledger flip alone
+    left the scanner returning a span for text the terminal never underlined.
+
+    Driven off the LEDGER, not a hand-written list, so a pattern moved into the
+    terminal profile later is covered without anyone remembering this file.
+
+    ⚠ IT IS A CLAIM ABOUT THE PATTERN, NOT ABOUT THE RUST ENGINE. Python's
+    engine is a syntax-compatible stand-in — what an edit breaks is whether the
+    pattern still DESCRIBES the shape.
+    """
+    MS = _mention_scan()
+
+    rx = re.compile(_string_attr(mention_hint, "regex"))
+    terminal = {name: pat for name, pat in MS.PATTERN_LEDGER.items()
+                if pat.role == "detect" and MS.PROFILE_TERMINAL in pat.profiles}
+    # 🔴 THE NAMED CLAIM COMES FIRST, AND THE ORDER IS NOT COSMETIC. A mutation
+    # run scored this row KILLED-WRONG-REASON when the count was asserted first:
+    # reverting the ledger drops `terminal` to three entries, so `len >= 4` fired
+    # with a message that named no hazard, and the assertion that DOES name it
+    # never ran. A guard's own error text is the thing being verified.
+    assert "AUDIT_PR_RE" in terminal, (
+        "AUDIT_PR_RE is no longer clickable — if that reversal was intended, "
+        "drop the `audit-pr` alternation from the hint regex in the SAME "
+        "change, or the terminal underlines a shape nothing resolves")
+    # POSITIVE CONTROL — there ARE terminal-profile detect patterns, so the loop
+    # below is not vacuous on a ledger that lost every terminal row.
+    assert len(terminal) >= 4, sorted(terminal)
+
+    spec = importlib.util.spec_from_file_location(
+        "mention_open_seam", ROOT / "scripts" / "mention-open.py")
+    mo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mo)
+
+    for name, pat in sorted(terminal.items()):
+        m = rx.search(pat.sample)
+        assert m, (
+            f"{name}: the scanner detects {pat.sample!r} on the CLICK profile "
+            f"but the alacritty hint regex does not underline it — the shape is "
+            f"unclickable, and both suites stay green while it is")
+        # 🔴 AND THE SPAN THE TERMINAL HANDS OVER MUST BE RESOLVABLE ON ITS OWN.
+        # Alacritty passes the MATCHED SUBSTRING verbatim as the last argument,
+        # not the line it came from — so a regex that matches a fragment the
+        # handler cannot re-scan is underlined and inert.
+        span, _ = mo.resolve(m.group(0))
+        assert span is not None, (
+            f"{name}: the hint underlines {m.group(0)!r} but the handler "
+            f"re-scans that span to NOTHING — a click on it does nothing")
+
+
+def test_the_hint_underlines_BOTH_spellings_of_an_audit_pr_reference(mention_hint):
+    """`/audit-pr 1291` is how it appears in prose; `audit-pr 1291` is how it is
+    said. Both must underline, and the match must stop at the number rather than
+    running on into the next word."""
+    rx = re.compile(_string_attr(mention_hint, "regex"))
+    assert rx.search("see audit-pr 1291 for the diff").group(0) == "audit-pr 1291"
+    assert rx.search("see /audit-pr 1291 for the diff").group(0) == "/audit-pr 1291"
+    # NEGATIVE CONTROLS — the alternation must not fire without a number, and
+    # must not swallow a neighbouring word.
+    assert not rx.search("audit-pr the thing")
+    assert rx.search("audit-pr 12 and more").group(0) == "audit-pr 12"
+
+
+def test_the_hint_swallows_an_OVER_LONG_audit_pr_number_whole(mention_hint):
+    """🔴 THE SAME `{1,6}` CONTRACT THE `#` ALTERNATION CARRIES, and the reason
+    it is not `{1,5}`. The scanner accepts `\\d{1,5}` guarded by a trailing-digit
+    lookahead this engine cannot express. Under `{1,5}` the terminal would
+    underline `audit-pr 12345` inside `audit-pr 123456` and the handler would
+    open PR 12345 — a confident wrong page. `{1,6}` captures the whole run, and
+    the strict scanner then refuses it."""
+    import importlib.util
+
+    rx = re.compile(_string_attr(mention_hint, "regex"))
+    m = rx.search("audit-pr 123456")
+    # 🔴 THIS MESSAGE NAMES THE HAZARD BECAUSE THIS IS THE ASSERTION THAT FIRES.
+    # A mutation run scored the `{1,5}` mutant KILLED-WRONG-REASON while this
+    # line read `assert ..., m`: the right test failed, on the right subject,
+    # with an error message that said only `<re.Match object …>`.
+    assert m and m.group(0) == "audit-pr 123456", (
+        f"the hint underlines only {(m.group(0) if m else None)!r} of "
+        f"'audit-pr 123456' — a TRUNCATED audit-pr number reaches the handler, "
+        f"which resolves it and opens a confident wrong page")
+
+    spec = importlib.util.spec_from_file_location(
+        "mention_open_overlong", ROOT / "scripts" / "mention-open.py")
+    mo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mo)
+    span, candidates = mo.resolve(m.group(0))
+    assert (span, candidates) == (None, []), (
+        f"the handler RESOLVED an over-long audit-pr number: {span}")
 
 
 def test_the_mention_hint_swallows_a_six_digit_colour_whole(mention_hint):

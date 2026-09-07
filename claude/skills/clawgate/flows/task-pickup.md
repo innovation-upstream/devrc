@@ -83,6 +83,17 @@ completion report.
 AUTHOR-SPECIFIED/DERIVED × validated table that decides `complete` vs `ready_for_review`. Read it
 there; it is deliberately not duplicated here.
 
+🔴 **READING a card the gate's third row produced: `ready_for_review` is NOT evidence work
+remains.** That row — *not every criterion validated ⇒ `ready_for_review`, naming which and why* —
+is also what a FINISHED card looks like when one criterion turned out to be unvalidatable. On the
+board the two are indistinguishable, so it sits there and ages. **The tell is a criterion reality
+cannot satisfy** (see `flows/task-authoring.md` → "ask what would make each one FALSE"): grading it
+is minutes of reading, and it is the AUTHOR's call by construction — the worker who refused was
+right, and re-picking the card up as *work* re-does something already done. Measured 2026-09-06:
+three such cards, complete for over a week, two auto-tagged `stale` by the retention sweep; all
+three closed on a read. **Before working a `ready_for_review` card, read its last comment** — a
+refusal-to-self-grade says so in as many words.
+
 🔴 **That gate is LOCAL-pickup only, structurally.** The in-devpod agent route
 `PATCH /agent/task/status` **forbids `complete`** (`notes.StatusAllowedForAgent`), so a dispatched
 devpod agent ends at `ready_for_review` regardless of what this skill says. Only the machine route

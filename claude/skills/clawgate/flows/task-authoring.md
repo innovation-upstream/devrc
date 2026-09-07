@@ -163,6 +163,18 @@ be a gate that reports safety it did not deliver.
 criterion. "The bar feels better" is not. Each one should map to something in the
 Verifier section.
 
+🔴 **AND ASK WHAT WOULD MAKE EACH ONE FALSE — a criterion reality cannot satisfy is a
+trap for the next worker, not a bar.** Settle-able is not enough: a criterion can be
+perfectly machine-checkable and still be unmeetable by any correct implementation,
+because it pins a number or an artefact that was never going to hold. Measured
+2026-09-06 on three cards, all parked for over a week and two auto-tagged `stale`:
+*"`buzz-balance` decrements by exactly 1"* against a price the orchestrator re-quotes
+per token; *"the two numbers agree"* where one side is a live rate and the other a
+constant; *"update the enumeration in its PR body"* when the sentence lives in an
+unamendable merge-commit message. Each cost a correct, finished implementation its
+`complete`. **A criterion quoting a CONSTANT is the shape to re-read** — ask where the
+constant comes from and whether anything guarantees it stays true.
+
 ## Phase 4 — CONFIRM
 
 **Render the full body and get approval before POSTing.** `create` returns only

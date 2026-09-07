@@ -19,13 +19,24 @@ into ANY pane, and clawgate presses Enter, because type-only makes remote
 answering pointless. Everything defensive below exists because of that, not
 instead of it.
 
-🔴 IT IS INERT UNTIL SOMEONE ARMS IT, IN TWO INDEPENDENT PLACES. The server's
-write routes sit behind a FAIL-CLOSED wrapper that answers 503 until
-CLAWGATE_TERMINAL_TOKEN is set on the POD; and this unit is not wired into the
-user manager's default target until `enableTmuxReplyAgent` is set true in
-`nix/home.nix`. Neither implies the other, and both are deliberately off in the
-change that introduced them. A 503 is therefore this agent's NORMAL state, logged
-once and backed off from — never an error.
+🔴 IT IS ARMED, AND IT DOES EXECUTE WHAT THE QUEUE HANDS IT. It was inert until
+BOTH of two independent switches were set, and both now are: the server's write
+routes sit behind a FAIL-CLOSED wrapper that answers 503 until
+CLAWGATE_TERMINAL_TOKEN is set on the POD (provisioned), and this unit is wired
+into the user manager's default target only while `enableTmuxReplyAgent` is true
+in `nix/home.nix` (true). Neither implies the other; both were deliberately off
+in the change that introduced them.
+
+🔴 DISARMING THE HOST HALF IS TWO STEPS. Flipping `enableTmuxReplyAgent` false
+and shipping does NOT stop a running agent: the unit definition is emitted
+unconditionally, so the flag only drops the `[Install]` block, and `sd-switch`
+reads a CHANGED unit and plans Stop/Start — it restarts the process. Follow the
+ship with `systemctl --user stop tmux-reply-agent` on BOTH hosts. Removing the
+pod's secret is the other lever, and that one is immediate for every host.
+
+A 503 is therefore no longer this agent's ordinary state. Since arming it means
+the pod's secret was REMOVED — a change on the server, not the shipped state —
+and it is logged once and backed off from rather than exited on.
 
 🔴 AT MOST ONCE, NEVER AT LEAST ONCE. A retried `send-keys` runs a command twice.
 The server's claim moves a row out of `pending` permanently, so a write this agent
@@ -106,8 +117,9 @@ DEFAULT_LOCAL_HOST = "workbench"
 # that is idle almost all the time.
 POLL_SECONDS = float(os.environ.get("TMUX_REPLY_POLL_SECONDS", "5"))
 # The backoff for every state that is not "a healthy empty queue": unreachable,
-# 503 (not armed — the normal state today), 401, a malformed body. Long enough
-# that a pod being redeployed or a token being absent costs almost nothing.
+# 503 (the server's surface not armed — since arming, that means the pod's
+# secret was REMOVED, i.e. somebody disarmed it), 401, a malformed body. Long
+# enough that a pod being redeployed costs almost nothing.
 BACKOFF_SECONDS = float(os.environ.get("TMUX_REPLY_BACKOFF_SECONDS", "60"))
 HTTP_TIMEOUT = float(os.environ.get("TMUX_REPLY_HTTP_TIMEOUT", "20"))
 # Bounds one `tmux send-keys`. It is a local unix-socket call that returns in
@@ -315,9 +327,17 @@ def post_json(url: str, token: str, payload: dict) -> dict:
             raw = resp.read(MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         if exc.code == 503:
+            # 🔴 THIS TEXT CHANGED MEANING WHEN THE SURFACE WAS ARMED. While the
+            # feature shipped disabled a 503 was the ordinary state and the message
+            # said so. It is now a STATE CHANGE: the pod's secret has been removed,
+            # which is exactly how the server half is disarmed. Do not restore the
+            # reassuring wording — an operator reading "normal" over a disarm is the
+            # failure this line exists to prevent.
             raise Refused("the terminal write surface is NOT ARMED on the server "
                           "(HTTP 503) — CLAWGATE_TERMINAL_TOKEN is unset there. "
-                          "This is the shipped state, not a fault.") from exc
+                          "This host IS armed, so that is a CHANGE on the server, "
+                          "not the shipped state: the pod's secret was removed or "
+                          "the deployment lost it.") from exc
         if exc.code == 401:
             raise Refused("the server rejected this agent's terminal token (HTTP 401)") from exc
         if exc.code == 404:
@@ -550,12 +570,39 @@ def open_window(cwd: str, tmux_session: str = "") -> tuple[str, str]:
     if rc != 0:
         return "", (err or f"tmux exited {rc}")
 
-    fields = (out.strip().splitlines() or [""])[0].split("\t")
+    # 🔴 SPLIT THE LINE BEFORE STRIPPING IT. `out.strip()` removes a TRAILING
+    # TAB, so a well-formed three-field line whose last field is empty —
+    # `#{pane_current_path}` is empty until the pane's process cwd is readable —
+    # arrives here as TWO fields and fails the length check below. The window
+    # EXISTS by then: the caller got an error, a stray window was left behind,
+    # and a retry would have made a second one. Measured as an intermittent
+    # real-tmux failure, 3 occurrences in ~12 runs, the reported string
+    # byte-identical to the good line after `.strip()`. Strip only the line
+    # ending; strip the FIELDS individually afterwards.
+    lines = out.splitlines() or [""]
+    fields = lines[0].split("\t")
     if len(fields) != 3:
         return "", f"tmux did not report the new window's identity (got {out.strip()!r})"
     pane, landed_session, landed_path = (f.strip() for f in fields)
     if not pane.startswith("%"):
         return "", f"tmux did not report a pane id for the new window (got {pane!r})"
+
+    # 🔴 EMPTY IS "NOT READABLE YET", NOT "THE WRONG DIRECTORY" — and the two must
+    # not share a code path. `os.path.realpath("")` returns THIS PROCESS'S cwd, so
+    # handing an empty value to same_directory() below compares a directory nobody
+    # asked about and usually refuses, with a message naming a fallback that never
+    # happened. Re-read the path for this specific pane instead; one extra call, in
+    # the rare case only.
+    if not landed_path:
+        rc2, out2, _ = run_tmux(["display-message", "-p", "-t", pane,
+                                 "#{pane_current_path}"])
+        if rc2 == 0:
+            landed_path = (out2.splitlines() or [""])[0].strip()
+    if not landed_path:
+        # Still unreadable. This agent presses Enter, so an unverifiable location
+        # is a refusal, not a shrug.
+        return "", ("tmux did not report the new window's directory, so where it "
+                    "landed could not be verified")
 
     # 🔴 REFUSE ON A MISMATCH RATHER THAN TYPE INTO IT. Both checks are about one
     # thing: tmux resolved the target to something other than what was asked for,
@@ -791,11 +838,13 @@ def main(argv: list[str]) -> int:
     token = resolve("CLAWGATE_TERMINAL_TOKEN", CONF_FILE)
     if not token:
         # 🔴 A CONFIGURATION ERROR THAT CANNOT SELF-HEAL, so this one exits rather
-        # than backing off. It is also the state this ships in: arming the
-        # surface means provisioning that secret on the pod AND handing this host
-        # a copy, and neither has been done. The unit is not wired into the user
-        # manager's default target until `enableTmuxReplyAgent` is true, so this
-        # exit is what an operator sees if they start it by hand before arming.
+        # than backing off. It was the state this shipped in; arming meant
+        # provisioning that secret on the pod AND handing this host a copy, and
+        # both have since been done, so on an armed host reaching here means the
+        # host's copy has GONE — ~/.claude/clawgate.env rewritten, or the unit
+        # started under an environment that cannot read it — not that the feature
+        # is unbuilt. The unit is wired into the user manager's default target
+        # only while `enableTmuxReplyAgent` is true.
         log(f"no CLAWGATE_TERMINAL_TOKEN in the environment or {CONF_FILE} — "
             "the terminal write surface is not armed on this host; refusing to poll")
         return 2

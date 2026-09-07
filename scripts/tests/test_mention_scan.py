@@ -261,15 +261,28 @@ def test_six_digit_hex_cannot_match_by_backtracking_to_five_digits():
     assert [m["id"] for m in MS.scan_mentions("#28282")] == ["28282", "28282"]
 
 
-def test_the_documented_residual_false_positive_is_still_the_only_one():
+def test_the_documented_residual_false_positives_still_match_as_documented():
     """A three-digit numeric CSS colour is character-for-character an issue
-    number and no rule separates them. It is accepted, documented in the module,
-    and pinned here so the acceptance stays a DECISION rather than becoming a
-    surprise."""
+    number, and an instructional `/audit-pr 12` is character-for-character a real
+    reference. Neither has a rule that separates it from the real thing. Both are
+    accepted, documented in the module, and pinned here so the acceptance stays a
+    DECISION rather than becoming a surprise.
+
+    🔴 THE PLATFORM IS PINNED PER SHAPE, not asserted in common. The set used to
+    hold one entry and the test said "ambiguous" for all of it; `/audit-pr 12`
+    resolves to a single GitHub candidate, so a blanket claim would have had to
+    be weakened to `len(spans) == 1` — which passes for a shape that matched as
+    something else entirely."""
+    expected = {"#123": "ambiguous", "/audit-pr 12": "github"}
+    assert set(expected) == set(MS._KNOWN_FALSE_POSITIVES), (
+        "a residual was added to the module without a platform here")
     for shape in MS._KNOWN_FALSE_POSITIVES:
         spans = MS.scan_mention_spans(shape)
-        assert len(spans) == 1 and spans[0]["platform"] == "ambiguous", (
-            f"{shape!r} was expected to still match as an ambiguous span")
+        assert len(spans) == 1, (
+            f"{shape!r} was expected to still match on the CLICK profile")
+        assert spans[0]["platform"] == expected[shape], (
+            f"{shape!r} matched as {spans[0]['platform']!r}, "
+            f"expected {expected[shape]!r}")
 
 
 # --------------------------------------------------------------------------- #
@@ -393,17 +406,37 @@ def test_attribution_patterns_contribute_NO_hints():
             assert entry.hints == (), f"{name} widened the filter for nothing"
 
 
-def test_the_terminal_profiles_hints_are_still_the_original_two():
-    """🔴 THE CLICK SURFACE DID NOT MOVE. This is the value the tailer used to
-    hardcode, and it is the value `scripts/mention-open.py` still implies."""
-    assert MS.mention_hints() == ("#", "868")
-    assert MS.mention_hints(MS.PROFILE_TERMINAL) == ("#", "868")
+def test_the_terminal_profiles_hints_are_EXACTLY_the_clickable_shapes():
+    """🔴 THE CLICK SURFACE MOVED ONCE, ON PURPOSE, AND THIS IS WHERE THAT IS
+    RECORDED. It was `("#", "868")` for as long as every wordy shape was
+    telemetry-only; `audit-pr` joined it when `AUDIT_PR_RE` became clickable (see
+    that ledger row). Pinned as the WHOLE tuple, so the next widening has to come
+    here and say so rather than arriving as a side effect."""
+    assert MS.mention_hints() == ("#", "868", "audit-pr")
+    assert MS.mention_hints(MS.PROFILE_TERMINAL) == ("#", "868", "audit-pr")
+    # The three shapes that stayed telemetry-only, asserted by their absence:
+    # they are COMMANDS, not references. See the AUDIT_PR_RE ledger comment.
+    for absent in ("gh pr", "gh issue", "lawgate", "#task-", "github.com/"):
+        assert absent not in MS.mention_hints(MS.PROFILE_TERMINAL), (
+            f"{absent!r} reached the CLICK surface — the audit-pr exception was "
+            "widened to its neighbours")
 
 
 def test_the_telemetry_profiles_hints_cover_every_new_shape():
     """🔴 THE INERT-PREFILTER GUARD, at the module end of the seam. Each of these
-    shapes contains NEITHER '#' NOR '868', so under the terminal hints the
-    tailer's short-circuit would skip the block and the regex would never run."""
+    shapes contains NEITHER '#' NOR '868', so under the ORIGINAL two hints the
+    tailer's short-circuit would skip the block and the regex would never run.
+
+    ⚠ THE SECOND ASSERTION IS AGAINST THE ORIGINAL PAIR, SPELLED OUT, NOT
+    AGAINST `mention_hints(TERMINAL)`. It used to read the live terminal tuple,
+    which made it a moving target: the day `audit-pr` joined the click surface,
+    the two `audit-pr` rows below started failing a check about a widening that
+    happened years-of-commits earlier. The claim being made is "these shapes were
+    invisible to the ORIGINAL prefilter", and that is a fact about `("#", "868")`
+    — a constant — not about whatever the terminal profile holds today."""
+    original = ("#", "868")
+    assert set(original) <= set(MS.mention_hints(MS.PROFILE_TERMINAL)), (
+        "positive control: the original two hints are still terminal hints")
     hints = MS.mention_hints(MS.PROFILE_TELEMETRY)
     for text in ("https://github.com/gardenersguild/trowelcast/pull/7",
                  "/audit-pr 1291",
@@ -412,7 +445,7 @@ def test_the_telemetry_profiles_hints_cover_every_new_shape():
                  "gh issue close 42",
                  "clawgate task 370"):
         assert any(h in text for h in hints), f"{text!r} would be pre-filtered away"
-        assert not any(h in text for h in MS.mention_hints(MS.PROFILE_TERMINAL)), (
+        assert not any(h in text for h in original), (
             f"{text!r} was expected to be invisible to the OLD hints — if it is "
             "not, this test proves nothing about the widening")
 
@@ -422,17 +455,36 @@ def test_an_unknown_profile_falls_back_to_the_NARROW_one():
     would be the same defect in the direction nobody notices."""
     assert MS.patterns_in("teleemtry") == MS.patterns_in(MS.PROFILE_TERMINAL)
     assert MS.scan_mentions("gh pr view 1291", profile="teleemtry") == []
-    assert MS.mention_hints("nonsense") == ("#", "868")
+    # DERIVED, not a literal: the terminal set is allowed to change (it did, for
+    # `audit-pr`), and what this test is about is that a typo lands on the NARROW
+    # profile — which a literal would stop asserting the moment either set moved.
+    assert MS.mention_hints("nonsense") == MS.mention_hints(MS.PROFILE_TERMINAL)
+    assert MS.mention_hints("nonsense") != MS.mention_hints(MS.PROFILE_TELEMETRY), (
+        "positive control: the two profiles' hints still DIFFER, so landing on "
+        "the narrow one is an observable outcome rather than a tautology")
 
 
 def test_the_terminal_profile_is_the_DEFAULT():
     """Pinned as a behaviour, not only as a default argument: this is what keeps
     `scripts/mention-open.py` unchanged without it having to say anything."""
+    # ⚠ `/audit-pr 1291` USED TO BE ON THIS LIST and has been REMOVED, because it
+    # is now a terminal-profile shape on purpose (see the AUDIT_PR_RE ledger
+    # row). It moves to the positive control below rather than being deleted: a
+    # list of shapes that must NOT match proves the default is terminal only for
+    # as long as something proves the default matches ANYTHING at all.
     for text in ("https://github.com/gardenersguild/trowelcast/pull/7",
-                 "/audit-pr 1291", "gh pr view 1291", "clawgate task 370",
+                 "gh pr view 1291", "clawgate task 370",
                  "https://clawgate.zacx.dev/tasks#task-370"):
         assert MS.scan_mentions(text) == [], f"the DEFAULT profile matched {text!r}"
         assert MS.scan_mention_spans(text) == []
+    # POSITIVE CONTROL — the default profile is TERMINAL, not "nothing at all".
+    # Both a terminal-only shape and the newly-clickable one must match with no
+    # `profile=` argument, or every absence above is satisfied by a dead scanner.
+    for text in ("fixed in #370", "/audit-pr 1291", "audit-pr 1291"):
+        assert MS.scan_mentions(text), (
+            f"the DEFAULT profile matched NOTHING in {text!r} — the assertions "
+            "above prove nothing")
+        assert MS.scan_mention_spans(text), text
 
 
 # --------------------------------------------------------------------------- #
@@ -893,16 +945,33 @@ def test_the_telemetry_residual_false_positives_are_pinned_as_a_set():
     DECISION rather than becoming a surprise. Each of these DOES match, and each
     is documented in the module."""
     assert set(MS._KNOWN_FALSE_POSITIVES_TELEMETRY) == {
-        "gh pr view 12", "/audit-pr 12", "[the old anchor](#task-1)"}
+        "gh pr view 12", "[the old anchor](#task-1)"}
     for shape in MS._KNOWN_FALSE_POSITIVES_TELEMETRY:
         assert MS.scan_mentions(shape, **TELEMETRY), (
             f"{shape!r} was expected to still match in the wider profile")
+    # 🔴 THE TWO SETS MUST NOT OVERLAP, and that is what caught the move. This
+    # set is "residuals the WIDER profile ADDS"; a shape in both is a shape the
+    # narrow profile already carries, so listing it here says the acceptance is
+    # telemetry-scoped when it is not. `/audit-pr 12` left this set for
+    # `_KNOWN_FALSE_POSITIVES` the day `AUDIT_PR_RE` became clickable.
+    assert not (set(MS._KNOWN_FALSE_POSITIVES_TELEMETRY)
+                & set(MS._KNOWN_FALSE_POSITIVES)), (
+        "a residual is listed as both click-surface and telemetry-only")
+    for shape in MS._KNOWN_FALSE_POSITIVES_TELEMETRY:
+        assert MS.scan_mentions(shape) == [], (
+            f"{shape!r} is documented as telemetry-only noise but matches on "
+            "the CLICK profile — it belongs in _KNOWN_FALSE_POSITIVES")
 
 
-def test_the_original_residual_set_is_UNCHANGED():
-    """The click surface's accepted noise did not move — pinned separately so a
-    telemetry-only addition cannot quietly land on it."""
-    assert set(MS._KNOWN_FALSE_POSITIVES) == {"#123"}
+def test_the_click_surfaces_residual_set_is_PINNED():
+    """The click surface's accepted noise, pinned separately so a telemetry-only
+    addition cannot quietly land on it.
+
+    ⚠ IT DID MOVE ONCE, DELIBERATELY. `/audit-pr 12` joined it when
+    `AUDIT_PR_RE` became clickable — an instructional example in a runbook now
+    gets underlined. That is a cost of the feature, recorded rather than
+    discovered."""
+    assert set(MS._KNOWN_FALSE_POSITIVES) == {"#123", "/audit-pr 12"}
 
 
 # --------------------------------------------------------------------------- #

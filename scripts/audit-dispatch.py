@@ -2835,14 +2835,56 @@ CHECKS_DISCRIMINATOR = (
 
 
 # 🔴 The cached-build fallback's guard lines, each a SINGLE named constant so a
-# mutation can remove exactly one and the harness can name which. Each closes a
-# DIFFERENT measured false green; the number of them is deliberately not
-# asserted in the emitted prose (`test -s` speaks to emptiness only and claims
-# nothing about truncation).
+# mutation can remove exactly one and the harness can name which. They do NOT
+# each close an independent false green — the reason each one is here is stated
+# once, at the emission site below, and deliberately not restated here: this
+# comment used to say "Each closes a DIFFERENT measured false green", which the
+# ledger 90 lines down had already refuted ("dropping the run guard alone still
+# leaves `test -s` catching the empty file"). Two comments about the same three
+# constants, disagreeing. The number of them is deliberately not asserted in the
+# emitted prose either.
 NIX_LOG_TMPFILE = 'LOG=$(mktemp -t audit-tier-XXXXXXXX.log); ERR=$(mktemp -t audit-tier-XXXXXXXX.err)   # per-agent: a FIXED path is truncated by every sibling agent'
 NIX_LOG_DRV_GUARD = '[ -n "$DRV" ] || { echo "NO DERIVATION — nix said:"; cat "$ERR"; exit 1; }'
 NIX_LOG_RUN_GUARD = 'nix log "$DRV" > "$LOG" 2>/dev/null || { echo "NO LOG — never built HERE (nix log is per-machine)"; exit 1; }'
 NIX_LOG_EMPTY_GUARD = '[ -s "$LOG" ] || { echo "EMPTY LOG — cannot vouch"; exit 1; }'
+
+# 🔴 HOW TO RUN THE BLOCK WITHOUT CLOSING YOUR SHELL. Pinned WHOLE by
+# `test_the_stop_note_prescribes_something_that_actually_stops`, because a
+# guard on WORDS here is walkable by rewording (claude/RULES.md, spelled-guards)
+# and this note has already shipped one prescription that does not work.
+#
+# 🔴 THE PRESCRIPTION IT REPLACES WAS "Wrap the block in a function and call it"
+# ALONE, with "Do NOT simply swap `exit` for `return`" beside it. `exit` inside
+# a function still exits the shell, so wrapping alone changes NOTHING. MEASURED
+# under a real pty (`script -qec "<sh> -i" /dev/null`) with a survival marker
+# terminal echo cannot forge — a FILE the surviving shell writes:
+#     run_tier(){ …; exit 1;   }; run_tier  -> no marker file:  bash -i DEAD,
+#                                             zsh -i DEAD; guard did stop
+#     run_tier(){ …; return 1; }; run_tier  -> marker file rc=1 in BOTH; the
+#                                             block stopped at the failed guard
+#     top-level `return 1`, no function     -> marker file rc=0 in BOTH, and the
+#                                             line AFTER the failed guard ran
+# The old note's own measurement was CORRECT and was about `return` AT TOP
+# LEVEL — a different thing from `return` inside the function it prescribed in
+# the same breath. Wider on one axis, narrower on another. The top-level
+# refutation is kept, scoped to top level; "run the block as a script", which
+# that edit withdrew, is restored as the other working option (MEASURED:
+# `bash <file>` and `zsh <file>` both stop at the failed guard, exit 1, and
+# leave the calling shell alive).
+NIX_LOG_STOP_NOTE = (
+    "⚠ Each guard echoes its diagnosis before `exit 1`, so the reason "
+    "survives; but a bare `exit 1` pasted into an INTERACTIVE shell closes it. "
+    "🔴 **Two forms stop the block without closing your shell: run it AS A "
+    "SCRIPT (`bash <file>`), or wrap it in a function AND swap `exit` for "
+    "`return` — `run_tier() { … return 1; }; run_tier`.** Wrapping ALONE is "
+    "not one of them: `exit` inside a function still exits the shell, MEASURED "
+    "under a pty in interactive bash and interactive zsh — `run_tier() { … "
+    "exit 1; }; run_tier` killed both. 🔴 The swap works only INSIDE the "
+    "function: `return` AT TOP LEVEL is not a stop, and MEASURED in "
+    "interactive zsh, interactive bash and `bash <script>` the block then "
+    "CONTINUES past a failed guard and prints a foreign log's `RESULT: PASS` — "
+    "the exact false green this block exists to prevent."
+)
 
 def _toolchain_checks_lines(tc):
     """The sandbox tier — only when the flake really declares one."""
@@ -2956,14 +2998,7 @@ def _toolchain_checks_lines(tc):
         'grep -c "panic: test timed out" "$LOG"; grep -n "RESULT:" "$LOG"',
         "```",
         "",
-        "⚠ Each guard echoes its diagnosis before `exit 1`, so the reason "
-        "survives; but a bare `exit 1` pasted into an INTERACTIVE shell closes "
-        "it. 🔴 **Wrap the block in a function and call it** — `run_tier() { … }; "
-        "run_tier`. Do NOT simply swap `exit` for `return`: at top level "
-        "`return` is not a stop, and MEASURED in interactive zsh, interactive "
-        "bash and `bash <script>` the block then CONTINUES past a failed guard "
-        "and prints a foreign log's `RESULT: PASS` — the exact false green this "
-        "block exists to prevent.",
+        NIX_LOG_STOP_NOTE,
         "",
     ]
 

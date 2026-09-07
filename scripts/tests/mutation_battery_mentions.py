@@ -173,6 +173,28 @@ MUTANTS: list[tuple] = [
      '        print("universe:", repo_universe(discovered))\n'
      "        candidates = universe\n",
      "PICKER-PATH DISCLOSURE"),
+    # 🔴 K11/K12 LEAK `repo_universe(...)`, WHICH IS THE MAPPING'S *VALUES*. The
+    # mapping is `{checkout name: "owner/repo"}`, so a leak has TWO spellings and
+    # those two rows only ever exercised one — while `test_mention_open.py`
+    # iterated `FAKE_UNIVERSE.values()` and the fixture spelled every key as a
+    # substring of its own value, which made the omission invisible. The two rows
+    # below are the KEY half, on both paths. K37 is the round-2 audit's mutant
+    # VERBATIM: it survived all 127 tests, and `sorted(load_known_repos())` is
+    # every private repository NAME on the host, on stderr and in a desktop
+    # toast. See `FAKE_UNIVERSE`'s comment block.
+    ("K37", "disclosure", "the REFUSAL path appends a \"did you mean?\" line "
+                          "carrying every repo NAME — the mapping's KEYS, which "
+                          "no guard here used to read",
+     '    notify(f"cannot resolve {subject}", f"{why} — {advice}")\n',
+     '    notify(f"cannot resolve {subject}", f"{why} — {advice}")\n'
+     '    notify("did you mean?", ", ".join(sorted(load_known_repos())))\n',
+     "REFUSAL-PATH DISCLOSURE"),
+    ("K38", "disclosure", "the same KEY leak on the PICKER path, where it rides "
+                          "out on stdout instead of a toast",
+     "        offered_universe = True\n",
+     "        offered_universe = True\n"
+     '        print("did you mean:", ", ".join(sorted(load_known_repos())))\n',
+     "PICKER-PATH DISCLOSURE"),
     ("K13", "disclosure", "the emit line ships the WHOLE mapping beside the one "
                           "repo the mention was attributed to",
      "        f\"b64:repo={m.get('repo', '')}\",\n",
@@ -183,6 +205,36 @@ MUTANTS: list[tuple] = [
                           "with NO attribution at all",
      "        f\"b64:context={m['context']}\",\n",
      "        f\"b64:context={m['context']} {sorted(load_mention_repos())}\",\n",
+     "SPOOL DISCLOSURE (unattributed run)"),
+    # 🔴 K43/K44 ARE THE OWNER HALF, AND THEY ARE THE ROUND-1 AUDIT'S FINDING.
+    # K13 leaks the mapping's VALUES and K14 its KEYS; the tailer's guard read
+    # `set(FAKE_REPOS) | set(FAKE_REPOS.values())`, so both died — and the audit's
+    # third mutant, `{v.split('/')[0] for v in load_mention_repos().values()}`,
+    # SURVIVED with one test passing. The owner is the half that names a CLIENT:
+    # the 2026 incident disclosed 232 private repository names, 167 of them one
+    # client's. The fixture also spelled every key as a substring of its own
+    # value (`trowelcast -> gardenersguild/trowelcast`), which is what made a
+    # keys-and-values check LOOK total; `FAKE_REPO_TOKENS` and the pairwise
+    # distinctness guard beside it are the fix, and these two rows are what
+    # prove it. K43 is the audit's mutant VERBATIM.
+    ("K43", "disclosure", "the emit line ships every OWNER in the mapping — the "
+                          "half that names the CLIENT — beside the one repo the "
+                          "mention was attributed to",
+     "        f\"b64:url={m['url']}\",\n",
+     "        f\"b64:url={m['url']}\",\n"
+     "        f\"b64:orgs={sorted({v.split('/')[0] for v in load_mention_repos().values()})}\",\n",
+     "SPOOL DISCLOSURE (attributed run)"),
+    # K44 is the FOURTH spelling — the bare repo-half. Together with K13
+    # (values), K14 (keys) and K43 (owners) the four rows exercise every arm of
+    # `_repo_tokens`, which is the point: a guard built from any THREE of them
+    # looks total and is blind to the fourth, and that is exactly how the owner
+    # arm came to be missing.
+    ("K44", "disclosure", "the emit line ships every bare REPO-HALF in the "
+                          "mapping — the fourth spelling, and the one a "
+                          "`{k: v.split('/')[1]}` normaliser produces",
+     "        f\"platform={m['platform']}\",\n",
+     "        f\"platform={m['platform']}\",\n"
+     "        f\"b64:names={sorted({v.split('/')[1] for v in load_mention_repos().values()})}\",\n",
      "SPOOL DISCLOSURE (unattributed run)"),
 
     # ---- F3, the TWO-SITE shape: one pattern, gated in two places -----------
@@ -341,6 +393,21 @@ MUTANTS: list[tuple] = [
                         "a mapping nothing regenerates never reports as old",
      "STALE_MAPPING_DAYS = 7\n", "STALE_MAPPING_DAYS = 99999\n",
      "never named the mapping's age"),
+    # 🔴 THE SIBLING OF K32, AND THE ROW A ROUND-2 AUDIT ASKED FOR. K32 pushes
+    # the THRESHOLD out of reach, which every `--print` staleness test sees. This
+    # deletes the NON-`--print` arm, which nothing saw: the suite stayed green at
+    # 264/264 with it gone, because the only refusal test naming an age used
+    # `--print` and took the other branch. The arm is narrow but real — see
+    # `refuse()` for the shadowed-mapping state that reaches it, and
+    # `test_the_SHADOWED_mapping_state_is_the_one_the_branch_needs` for the
+    # premise asserted apart from the behaviour.
+    ("K39", "deletion", "the NON-`--print` refusal stops naming the mapping's "
+                        "age, so the one interactive refusal that could report "
+                        "a 400-day-old mapping reports only the symptom",
+     "            if not reason and (stale := staleness_note()):\n"
+     '                why = f"{why}; {stale}"\n',
+     "            pass\n",
+     "never named the age"),
     ("K35", "deletion", "`--print` goes back to blaming the FLAG alone on a host "
                         "with no mapping, dropping the only cause the operator "
                         "can act on",
@@ -348,6 +415,39 @@ MUTANTS: list[tuple] = [
      '                why = f"{why}; also {extra}"\n',
      "            pass\n",
      "blamed the FLAG and never named the mapping"),
+    # ---- F13: `audit-pr N` is clickable, and it takes TWO files to be so -----
+    #
+    # 🔴 THE DEFECT CLASS THESE TWO ROWS EXIST FOR IS "HALF A FIX". Making the
+    # shape clickable needs the LEDGER (what the handler resolves) and the HINT
+    # REGEX (what the terminal underlines), in two files, in two languages, with
+    # two suites neither of which reads the other. MEASURED before the change:
+    # both halves were missing, so fixing either one alone would have shipped a
+    # feature that was 100% dead AND unit-tested green. Each row below reverts
+    # ONE half and must die on the seam test that spans them.
+    ("K40", "deletion", "the alacritty hint regex loses its `audit-pr` "
+                        "alternation, so the terminal never underlines the "
+                        "shape and the click is dead — while the scanner half "
+                        "still resolves it perfectly in isolation",
+     "|868[a-z0-9]{6}|/?audit-pr[ \\\\t]+[0-9]{1,6}\";\n",
+     "|868[a-z0-9]{6}\";\n",
+     "the alacritty hint regex does not underline it"),
+    ("K41", "deletion", "the LEDGER half is reverted: `AUDIT_PR_RE` goes back to "
+                        "telemetry-only, so the terminal underlines a shape the "
+                        "handler re-scans to nothing — a click that does nothing",
+     '    "AUDIT_PR_RE": _Pat(_BOTH, "detect", ("audit-pr",), "/audit-pr 1291"),\n',
+     '    "AUDIT_PR_RE": _Pat(_TELEMETRY_ONLY, "detect", ("audit-pr",),\n'
+     '                        "/audit-pr 1291"),\n',
+     "AUDIT_PR_RE is no longer clickable"),
+    ("K42", "widening", "the hint's `audit-pr` bound narrows to `{1,5}`, so "
+                        "`audit-pr 123456` underlines only `audit-pr 12345` and "
+                        "the handler opens PR 12345 — a confident wrong page",
+     "/?audit-pr[ \\\\t]+[0-9]{1,6}\";\n",
+     "/?audit-pr[ \\\\t]+[0-9]{1,5}\";\n",
+     # The HINT is what this row mutates, so the killing assertion is the one
+     # about what the terminal underlines — not the one about what the handler
+     # resolves, which is the same test's second half and covers the mirror
+     # mutation (a widened scanner bound).
+     "a TRUNCATED audit-pr number reaches the handler"),
     ("K36", "deletion", "the alacritty wrapper drops `pkgs.git` from the hint's "
                         "PATH: `git` is then absent under the display manager's "
                         "environment, FileNotFoundError is caught as OSError, "
@@ -359,7 +459,7 @@ MUTANTS: list[tuple] = [
 
 TARGETS: dict[str, pathlib.Path] = {
     "P1": SCAN,
-    "K1": TAILER, "K2": TAILER, "K3": TAILER,
+    "K1": TAILER, "K2": TAILER, "K3": TAILER, "K43": TAILER, "K44": TAILER,
     "K4": SCAN, "K5": SCAN, "K6": SCAN,
     "K7": SCAN, "K8": SCAN, "K9": SCAN, "K10": OPEN_,
     "K11": OPEN_, "K12": OPEN_, "K13": TAILER, "K14": TAILER,
@@ -369,6 +469,8 @@ TARGETS: dict[str, pathlib.Path] = {
     "K25": OPEN_, "K26": OPEN_, "K27": OPEN_, "K28": OPEN_,
     "K29": OPEN_, "K30": OPEN_, "K31": OPEN_, "K32": OPEN_,
     "K33": OPEN_, "K34": OPEN_, "K35": OPEN_,
+    "K37": OPEN_, "K38": OPEN_, "K39": OPEN_,
+    "K40": ALACRITTY, "K41": SCAN, "K42": ALACRITTY,
     # 🔴 A FOURTH FILE, AND A NIX ONE. The wrapper's PATH is a seam between two
     # files in two languages that agree only by coincidence, and both directions
     # of disagreement are silent — see the test named in K36's `expected`. It is
@@ -411,6 +513,46 @@ def classify(nfail: int, npass: int, nerror: int, floor: int,
     return "KILLED(attributed)" if expected in msgs else "KILLED-WRONG-REASON"
 
 
+_TIMING_RE = re.compile(r"\bin \d+(?:\.\d+)?s\b")
+_COUNT_RE = re.compile(r"(\d+) (failed|passed|errors?|skipped|xfailed|xpassed)\b")
+
+
+def summary_line(out: str) -> str:
+    """Pytest's OWN final counts line, or "" when it printed none.
+
+    🔴 THE PARSER USED TO READ THE WHOLE OUTPUT, AND THAT IS A FALSE-`SURVIVED`
+    PATH IN THIS INSTRUMENT. `re.search(r"(\\d+) failed", out)` takes the FIRST
+    match anywhere, and the tailer under test prints its own progress line —
+    `session-tailer: scanned=1 emitted=1 failed=0 mentions=1 …` — which pytest
+    echoes into a captured-output block. `emitted=1 failed=0` CONTAINS
+    `1 failed`. MEASURED on mutant K43: pytest's real summary said
+    `2 failed, 389 passed`, and the battery read `nfail=1`.
+    ⚠ That direction was harmless — a wrong non-zero is still a kill. The one
+    that is not: a run whose captured line reads `emitted=0 failed=0` yields
+    `nfail=0` over a RED suite, i.e. `SURVIVED` reported for a mutant every
+    guard caught. Nothing about the leak being scored made that visible; the
+    counts simply have to come from pytest's line and no other.
+
+    So: the LAST line that both names counts and carries pytest's `in <n>s`
+    timing. No summary line at all -> "" -> zero counts -> `NOT-OBSERVED`, which
+    is the safe direction: a run this cannot read is never a survival.
+    """
+    for ln in reversed(out.splitlines()):
+        if _TIMING_RE.search(ln) and _COUNT_RE.search(ln):
+            return ln
+    return ""
+
+
+def counts_from(out: str) -> tuple[int, int, int]:
+    """(failed, passed, errors) read from `summary_line` alone. Pure, so
+    `test_mutation_battery_anchors.py` can feed it the real line that broke it.
+    """
+    line = summary_line(out)
+    got = {kind: int(n) for n, kind in _COUNT_RE.findall(line)}
+    return (got.get("failed", 0), got.get("passed", 0),
+            got.get("error", 0) + got.get("errors", 0))
+
+
 def run_suite(messages: bool = False) -> tuple[int, int, int, list[str], str]:
     """Run the mention suites once. Returns (failed, passed, errors, killers, msgs).
 
@@ -430,17 +572,44 @@ def run_suite(messages: bool = False) -> tuple[int, int, int, list[str], str]:
     killers = sorted({ln.split("::")[1].split("[")[0]
                       for ln in out.splitlines()
                       if ln.startswith("FAILED") and "::" in ln})
-    nfail = int(m.group(1)) if (m := re.search(r"(\d+) failed", out)) else 0
-    npass = int(m.group(1)) if (m := re.search(r"(\d+) passed", out)) else 0
     # 🔴 `error` IS NOT `failed`, AND PYTEST SAYS SO IN A DIFFERENT WORD. A
-    # mutant that breaks an import produces `N errors` and ZERO of both counts
-    # above — which read as a clean survival until this line existed.
-    nerr = int(m.group(1)) if (m := re.search(r"(\d+) errors?\b", out)) else 0
+    # mutant that breaks an import produces `N errors` and ZERO of the other two
+    # counts — which read as a clean survival until `counts_from` read it.
+    # 🔴 AND THE COUNTS COME FROM PYTEST'S OWN SUMMARY LINE ONLY — see
+    # `summary_line` for the captured `failed=0` that used to be read instead.
+    nfail, npass, nerr = counts_from(out)
     msgs = "\n".join(ln for ln in out.splitlines() if ln.startswith("E "))
     return nfail, npass, nerr, killers, msgs
 
 
-def main() -> int:
+def selected(argv: list[str]) -> tuple[list[tuple], str]:
+    """(rows to run, a banner). `--only K43,K44` runs those rows AND `P1`.
+
+    🔴 THE POSITIVE CONTROL IS NEVER FILTERED OUT, and a filtered run says so on
+    every line it prints. A full sweep is ~25 minutes, so re-checking one row
+    after a fix used to mean either paying that or scoring the row by hand —
+    and a hand-scored row is exactly the "mutation result the reader cannot
+    re-run" this whole instrument exists to replace. The banner is the guard on
+    the affordance: a FILTERED run is evidence about the rows it names and about
+    NOTHING else, and a `42/42 killed` line printed from four rows would be the
+    silent zero one level up.
+    """
+    if "--only" not in argv:
+        return list(MUTANTS), ""
+    i = argv.index("--only")
+    wanted = {s.strip() for s in argv[i + 1].split(",") if s.strip()} if i + 1 < len(argv) else set()
+    unknown = wanted - {r[0] for r in MUTANTS}
+    if not wanted or unknown:
+        raise SystemExit(f"--only: unknown or empty mutant id(s): {sorted(unknown) or '(none given)'}")
+    rows = [r for r in MUTANTS if r[0] in wanted or r[0] == "P1"]
+    return rows, (f"🔴 FILTERED RUN — {sorted(wanted)} plus the P1 control ONLY. "
+                  f"This is evidence about those rows and nothing else.")
+
+
+def main(argv: list[str] | None = None) -> int:
+    rows_to_run, banner = selected(list(sys.argv[1:] if argv is None else argv))
+    if banner:
+        print(banner)
     files = sorted({p for p in TARGETS.values()}, key=str)
     orig = {p: p.read_text(encoding="utf-8") for p in files}
     before = {p: _digest(p) for p in files}
@@ -463,7 +632,7 @@ def main() -> int:
         print(f"observation floor for each mutant: {floor} tests must RUN")
 
         problems: list[str] = []
-        for row in MUTANTS:
+        for row in rows_to_run:
             mid, shape, desc, old, new = row[:5]
             expected = row[5] if len(row) > 5 else None
             target = TARGETS[mid]
@@ -511,8 +680,12 @@ def main() -> int:
         # which P1 survives observed nothing, whatever the other rows say.
         pc_ok = "P1" not in problems
         print(f"\npositive control P1: {'KILLED — the battery can observe' if pc_ok else 'SURVIVED — THIS BATTERY IS BROKEN'}")
-        print(f"{len(MUTANTS) - len(problems)}/{len(MUTANTS)} killed for the "
-              f"stated reason; problems: {problems or 'none'}")
+        print(f"{len(rows_to_run) - len(problems)}/{len(rows_to_run)} killed for "
+              f"the stated reason; problems: {problems or 'none'}")
+        # 🔴 REPEATED AT THE BOTTOM ON PURPOSE. The count above reads like a
+        # verdict on the battery; on a filtered run it is a verdict on four rows.
+        if banner:
+            print(banner)
         return 0 if (pc_ok and not problems) else 1
     finally:
         for p in files:

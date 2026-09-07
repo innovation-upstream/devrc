@@ -9,64 +9,60 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-🔴 **THE WRITE PATH IS BUILT, MERGED, DEPLOYED AND ARMED ON THE SERVER — AND THE LOOP IS NOT
-CLOSED. The host agent is NOT running, so a reply typed in the UI queues and is never executed.**
-That is the single fact that decides what the next session does.
+🔴 **SHIPPED AND VERIFIED LIVE — clawgate `0.8.28`, pod `clawgate-c8f7c4f6f-qhkqr`,
+0 restarts.** The whole arc is done: rank 32 armed the host agent, rank 33 drove
+the loop end to end and found the defect that broke every reply, and the three UI
+PRs are merged **and now running**.
 
-**All four PRs merged, each verified BY CONTENT on its mainline (never by ancestry — a squash is
-never an ancestor):**
+🔴 **THE LOOP ITSELF IS CLOSED AND PROVEN — a reply typed in the web UI lands in a
+REAL pane. Observed 2026-09-06 TWICE:** once via a token-API control that isolated
+the fault, and once end to end through the UI path after the fix. Rank 33 carries
+the evidence and the defect it found.
+
+Deploy commit `ae534d56f` on `ZacxDev/homelab-infra` `trunk`; image digest
+`sha256:17d0a26da6bddfa24d7d34577370aeabc2a53d3786d868ab9c75a8d0329bab32`,
+pushed to harbor as both `0.8.28` and `latest`.
+
+**Verified BY CONTENT against the live pod, never by version string** — the
+version was already 0.8.27 before any of this merged, which is exactly why it is
+not a deploy check:
+
+| feature | live evidence | negative control |
+|---|---|---|
+| wider shell | `min-[2560px]:max-w-[150rem]`, `2xl:max-w-[110rem]` on `/` | old `2xl:max-w-[96rem]` = **0** |
+| auto-fit tmux grid | 8 instances on `/ui/tmux` | old `lg:grid-cols-2` = **0** |
+| chat markdown | `<p class="my-1">` in a rendered turn | — |
+| tool input disclosure | `<details data-tool-detail>` → `⚙ Bash` → `<pre>` | not `<details open>` |
+| free-form reply | `data-chat-freeform-reply`, `data-reply-state="ready"` | — |
+
+🔴 **THE FREE-FORM SEND-KEYS BOX IS ARMED.** Live on a real session page:
+`data-reply-state="ready"`, `data-reply-host="laptop"`, `data-reply-pane="%31"`,
+`data-reply-entry="0"`, confirm text *"Send this reply to laptop %31 and press
+Enter?"*. Before this deploy `#741` was merged and INERT; from this pin the
+session page both READS tool inputs and WRITES arbitrary commands into a live
+pane.
+
+**Merged this session** (all content-verified on their mainline, never by
+ancestry — a squash is never an ancestor):
 
 | PR | what | squash |
 |---|---|---|
-| `ZacxDev/homelab-infra#711` | rank 29 — queue, audit log, fail-closed routes, migration `0031` | `2d326d987` |
-| `ZacxDev/homelab-infra#715` | rank 30 — reply component, three mounts | `2d4d5cf5c` |
-| `ZacxDev/homelab-infra#712` | rank 31 — start a session on a host | `67d1fe4d0` |
-| `innovation-upstream/devrc#1324` | the host-side agent + systemd unit | `f4bdb83a7` |
+| `innovation-upstream/devrc#1334` | rank 32 — `enableTmuxReplyAgent = true` | `5a8ec6ff` |
+| `innovation-upstream/devrc#1333` | rank 32 handoff | `c19fb289` |
+| `ZacxDev/homelab-infra#735` | the host-label defect rank 33 found | `0d553fcd` |
+| `ZacxDev/homelab-infra#737` | UI PR 1 — layout, markdown, auto-approve fold | `efa44e763` |
+| `ZacxDev/homelab-infra#738` | UI PR 2 — tool inputs, collapsed | `a74f312f7` |
+| `ZacxDev/homelab-infra#741` | UI PR 3 — free-form reply | `9d4b6900` |
+| `ZacxDev/homelab-infra` | deploy pin 0.8.28 | `ae534d56f` |
 
-**Deployed and armed:** `0.8.26` built on the WORKBENCH and pushed to harbor; pin bumped in
-`92f591b4c`; armed in `2663d7265`. Live boot lines, read from the pod:
-```
-terminal write surface: ENABLED — CLAWGATE_TERMINAL_TOKEN configured
-terminal write surface (BROWSER tier): ENABLED for [clawgate.zacx.dev 192.168.50.250 10.42.0.30]
-  — anyone who can reach this server at one of those names can send text to any pane on either host.
-```
+**In flight:** `innovation-upstream/devrc#1350` (the UI briefs) and `#1353` (the
+pre-deploy handoff update) are both OPEN and docs-only.
 
-**Every tier probed live, including the refusals** — a server refusing everything would also have
-produced five refusals, so the 400 is what makes the rest meaningful:
-
-| probe | result |
-|---|---|
-| `/api/term/send-keys` no credential | **401** |
-| same, wrong credential | **401** |
-| same, **hook** token | **401** (the two secrets are genuinely separate) |
-| `/ui/term/send-keys` cross-site `Origin` | **403** |
-| same, unexpected `Host` | **403** |
-| same, expected host, empty body | **400** (past auth, into validation) |
-
-🔴 **NOT DONE, and named rather than left implicit:**
-- **The host agent is not running.** `enableTmuxReplyAgent = true` is an **uncommitted** edit in the
-  worktree `~/workspace/devrc-arm-<pid>` on branch `feat/enable-tmux-reply-agent`. `nix eval`
-  confirms the flag drives `Install.WantedBy = ['default.target']`, but nothing is committed,
-  no PR exists, and no `ship.sh` has run. `systemctl --user is-active tmux-reply-agent` → **inactive**.
-- **Nothing has been validated end to end.** No reply has ever been typed in the UI and observed
-  landing in a pane. The rank-30 closing condition is explicitly *not* an API 200.
-- **Both hosts DO hold the credential**: `CLAWGATE_TERMINAL_TOKEN` appended to
-  `~/.claude/clawgate.env` on workbench and laptop, mode 0600, value verified equal to the pod's.
-- **No `clawgate-task:` field is recorded.** `clawgate_handoff.sh resolve` exited **5**. 🔴 That is
-  NOT a clean bill of health — an unknown `CLAUDE_CODE_SESSION_ID` also answers 200 with an empty
-  array, so this cannot distinguish "touched no task" from "wrong id".
-
-**Carried forward from the previous Status — still true, and not restated elsewhere:**
-- 🔴 **RANK 8a IS RECURRING, NOT CLOSED.** Nothing converges `homelab-talos`, so both hosts'
-  `clawgatectl` can drift from the server. **Re-run the cross-host round trip** (`view create` on the
-  laptop → `view ls` on the workbench → `view rm`, watching a number MOVE); a matching version label
-  is NOT the check. ⚠ The client version is `clawgatectl --version` — the bare `version` subcommand
-  is `unknown command`, which reads like a broken client.
-- ✅ **The live-refresh gap stays closed** (`#611`, squash `5d11d9a7`): both panels carry
-  `sse:tmux.changed` with the 60 s poll retained as a deadman, because SSE drops silently.
-- ✅ **Rank 6 stays closed** — `GET /api/tmux/snapshot` returns `tmuxServerId` non-null for both hosts.
-- 🔴 **NEVER READ A VERSION FROM THIS DOC** — `clawgatectl health` is the only authority. The number
-  moved under this doc on three consecutive sessions before, every time shipped by somebody else.
+**No `clawgate-task:` field is recorded.** `clawgate_handoff.sh resolve` exited
+**5** with its positive control confirming the board answered 1 link for a
+*different* session — so the board is reachable and this 0 is a real reading, but
+a wrong session id also answers 200 with an empty array. That is an unresolvable
+read, **not** a clean bill of health.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -862,32 +858,160 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     live on the pod, not from a green test.
     forcing: user — the operator asked for it explicitly on 2026-09-04.
 
-32. **CLOSE THE LOOP: commit the host-agent flag, merge it, ship both hosts.** Repo:
-    `innovation-upstream/devrc`, `nix/home.nix:170`. The one-line edit `enableTmuxReplyAgent = true`
-    already exists, **uncommitted**, in a worktree. 🔴 **Re-derive the path with
-    `git -C ~/workspace/devrc worktree list` rather than trusting this line** — if it is gone,
-    re-flip the flag off `origin/main`. `nix eval` already confirms the flag drives
-    `Install.WantedBy = ['default.target']`. Gate BOTH tiers on the merged tree
-    (`nix develop … run-tests.sh`, then `nix build .#checks.x86_64-linux.{pytests,nodetests}`
-    **one at a time**), PR, merge, then `scripts/ship.sh` and **read every per-host line, never the
-    final verdict**.
-    Closing condition: `systemctl --user is-active tmux-reply-agent` reads `active` on BOTH hosts.
-    forcing: user — the operator asked for arming and validation; the server half is live and this
-    is the half that makes it do anything.
-33. **VALIDATE END TO END — the closing condition for the whole effort.** Raise a real
-    `AskUserQuestion`, answer it from the web UI, confirm the keystroke **lands in the actual pane**.
-    🔴 **An API 200 is NOT the closing condition.** 🔴 **Exercise the `=` session-target prefix
-    specifically:** tmux PREFIX-MATCHES, and the operator's live server has `scratch`…`scratch20`
-    and `datapacket-talos` beside `datapacket-talos-2`, so `-t scratch2:` opening a window in
-    `scratch20` is reachable today. The fix (`-t =name:`) plus a post-hoc read-back is merged and
-    has never run against real tmux outside a test.
-    forcing: user
-34. **Decide the two residuals the audit recorded as ACCEPTED, now that the surface is live.** The
-    browser tier **authenticates nobody** (the drive-by class is closed, the on-the-LAN class is
-    not, and nothing in that tier closes it), and the host agent sends an **execution-grade token
-    over plain HTTP** to the LAN NodePort every ~5 s. Both are stated in the PR bodies so arming was
-    taken with them visible.
-    forcing: security — the surface is armed, which is the condition under which both matter.
+32. ✅ **DONE 2026-09-06 — `innovation-upstream/devrc#1334`, squash `5a8ec6ff`. MERGED, SHIPPED to
+    BOTH hosts, and the closing condition verified live.** Claim `tmux-webapp-32` released.
+    **Content-verified on `origin/main`, never by ancestry** (a squash is never an ancestor):
+    `enableTmuxReplyAgent = true;` at `nix/home.nix:194`; both new guards
+    (`test_the_agent_unit_IS_ARMED`, `test_the_agent_SHELLS_OUT_TO_TMUX_AND_NOTHING_ELSE`) present;
+    the superseded `test_the_agent_unit_SHIPS_DISABLED` **gone**; and a nonexistent-marker grep
+    returning **0** as the control that the check discriminates at all.
+    **Ship read per-host, never from the final verdict:** workbench `ec8e5286 → 5a8ec6ff`
+    fast-forwarded, 599 artifacts resolve / 0 dangling, `VERIFIED — on branch main at origin/main +
+    switched`; laptop `580b4848 → 5a8ec6ff`, 541 resolve / 0 dangling, `VERIFIED … (clean tree) +
+    switched`. The workbench's tree was DIRTY and ship classified all 5 dirty paths as untracked and
+    unread-by-nix against 168 nix-read paths — i.e. what was built IS `origin/main`.
+    **Closing condition met on both hosts**, with the full table in the Status section: `is-active`
+    **active** / **active**, unit-file state `linked` → **enabled**, `SubState=running`,
+    **`NRestarts=0`** on each, and each agent announcing a DISTINCT host scope
+    (`workbench:696125`, `laptop:470158`) — the disjoint-scope property the two-agent design needs.
+    🔴 **The load-bearing evidence is the ABSENCE of a `backing off` line, and it is only evidence
+    because the loop logs one.** `scripts/tmux-reply-agent` logs a repeating failure condition
+    exactly ONCE (`if reason != backoff_reason`), deliberately, so 17,280 ticks/day cannot bury a
+    real event. A 503 "not armed", a refused credential or an unreachable server would each have
+    written one line; both journals hold only their two startup lines ⇒ the polls are **answered**,
+    not merely attempted. Had that guard logged every tick, or nothing, the silence would have
+    carried no information at all.
+    ⚠ **This closes rank 32 and nothing wider — no keystroke has been observed landing in a pane.**
+    That is rank 33.
+    forcing: none — closed.
+33. ✅ **DONE 2026-09-06 — DRIVEN END TO END, AND IT FOUND A REAL DEFECT THAT BROKE EVERY REPLY.**
+    A real `AskUserQuestion` was raised from a throwaway Claude Code session in a disposable tmux
+    session (`r33`, pane `%477`) and answered by clicking in the web UI. The click was trusted, the
+    confirm fired naming the target — but the write **expired undelivered**.
+    🔴 **THE HOST LABEL DID NOT MATCH ON EITHER SIDE OF THE QUEUE.** The UI enqueued
+    `{"host":"nixos","pane":"%477"}`; `tmux-reply-agent` polls `for writes addressed to workbench`.
+    The row sat `pending` for 90 s and expired: no UI error, no agent journal line, no failed
+    request. **It was not probe-specific — every reply mount on the live page emitted `nixos`,
+    including a real open question of the operator's, so NO reply from ANY surface was deliverable
+    on this host.**
+    **Root cause:** the hook labelled the host `HOST="${CLAUDE_HOST:-$(hostname)}"` and *both
+    machines are hostname `nixos`*. The laptop was unaffected only because its `settings.json`
+    happens to pass `CLAUDE_HOST=laptop` — an unmanaged per-host file. The agent's own
+    `local_host_label()` docstring had predicted it verbatim: *"an agent that computed a different
+    label would poll for a host nobody enqueues to and deliver nothing, silently."* Both halves were
+    individually correct and individually tested; only the SEAM was wrong.
+    🔴 **IT CANNOT BE REPAIRED DOWNSTREAM** — `nixos` is ambiguous by construction, so no
+    server-side normalisation can recover which machine meant it.
+    **Fixed:** `ZacxDev/homelab-infra#735`, squash `0d553fcd`. The hook now derives the canonical
+    label (`CLAUDE_HOST` → `$ACTIVITY_HOST` → `~/.config/activity-collector/env`), and falls back to
+    `hostname` **deliberately** — an unresolvable label is UNDELIVERABLE, where guessing `workbench`
+    would run the operator's keystrokes on the WRONG machine. `host_source` is now logged beside
+    `host`. The hook runs from the clone's working tree, so a `git pull` there IS the deploy.
+    **Re-verified after the fix:** `host=workbench host_source=activity-env-file`, UI enqueued
+    `ui-reply:9417:workbench:%480`, agent logged `delivered s0FeuWTUOkuN0Lu5mCEsfg (pane %480)`, and
+    the pane showed `● User answered Claude's questions: · rank33 verify — pick one → gamma`.
+    Negative control: sibling session `r330` byte-identical before and after.
+    ⚠ **A CORRECTION TO THIS ITEM'S OWN BRIEF: the `=` prefix clause belongs to a DIFFERENT PATH.**
+    The reply path targets a PANE ID (`send-keys -t %480`, agent line 687) and does no name matching
+    at all. `=` is used only by `new-window -t "=" + tmux_session + ":"` (line 568) — rank **31**'s
+    start-a-session path, which remains unexercised.
+    forcing: none — closed.
+34. **Decide the two residuals the audit recorded as ACCEPTED — NOW THE LOAD-BEARING ITEM.** The
+    browser tier **authenticates nobody** (`requireSession` is a literal `return next`), and the
+    host agent sends an **execution-grade token over plain HTTP** to the LAN NodePort every ~5 s.
+    🔴 **TWO CHANGES ON 2026-09-06 MADE THIS STOP BEING A RESIDUAL.** `#738` put tool INPUTS —
+    file paths, bash command lines, edit bodies — on that page, reversing a written refusal whose
+    stated reason was "this view is rendered to a page on an unauthenticated LAN surface". `#741`
+    added a free-form `send-keys` box to the same page. So the surface now both READS the contents
+    of the operator's sessions and WRITES arbitrary commands into them, with no human auth.
+    Closing condition: the browser tier authenticates somebody, or the surface is disarmed.
+    forcing: security — it is the only thing standing under two shipped features.
+
+35. ✅ **DONE 2026-09-06 — `ZacxDev/homelab-infra#737`, squash `efa44e763`.** UI feedback round,
+    PR 1 of 3: `internal/ui` only. Content-verified on `trunk`.
+    Wider shell (`2xl` 96→110rem plus a new `min-[2560px]` 2400px step) with the old cap
+    **RELOCATED, not deleted** — `proseWidth()` caps sentences at 70ch on their own element, and
+    `TestProseBlocksAreCappedIndependentlyOfTheColumn` asserts the column does NOT carry it. tmux
+    cards became an auto-fit grid with a 32rem minimum track (1 column on a laptop, 4 on the 3440).
+    Chat prose routes through the pre-existing `renderMarkdown`; the truncation notice now explains
+    itself and is pinned as a WHOLE normalised string.
+    🔴 **THE AUTO-APPROVE FOLD REVERSED RANK 20 KNOWINGLY, ON ONE CONDITION.** The loud
+    "auto-approve ALL is ON" bar moved into the header dropdown; what pays for it is a THIRD header
+    face (`aaToneGlobal`, rose) distinct from the amber project-armed face, wired server AND client.
+    The coupling that made this dangerous was in the `all` chip's own comment — it justified hiding
+    on phones *because the loud in-flow bar was on screen*. That assertion now checks the rose face
+    and asserts amber is ABSENT, because `data-aa-active` is equally true of one armed project.
+    Three guards FLIPPED in place, keeping the old `aaHidingIdioms` predicate wholesale.
+    forcing: none
+36. ✅ **DONE 2026-09-06 — `ZacxDev/homelab-infra#738`, squash `a74f312f7`.** PR 2 of 3: a tool's
+    input, collapsed. The payload was dropped at PARSE time by a written refusal, quoted verbatim in
+    the code that reverses it; the guard `TestAToolCallNeverCarriesItsInput` was INVERTED in place.
+    Tool RESULTS are still refused — the input is what the agent ASKED for, the result is a machine
+    answering in the operator's voice.
+    ⚠ **A PREMISE IN THE BRIEF WAS WRONG AND IS CORRECTED IN THE PR:** the per-record cap does NOT
+    protect the stored tail. `MaxTailBytes` is enforced on INGEST against the raw JSONL, upstream of
+    the parser, so an oversized record has already spent that session's tail whether or not it is
+    displayed. The cap (`maxToolInputChars = 4000`) is a PAGE-WEIGHT bound.
+    forcing: none
+37. ✅ **DONE 2026-09-06 — `ZacxDev/homelab-infra#741`, squash `9d4b6900`.** PR 3 of 3: a free-form
+    reply on the session page, EntryID 0. Mostly a MOUNT — `ReplyView.EntryID` was written
+    zero-safe for it, and the target line, `hx-confirm`, idempotency key and a browser-tier rate
+    limiter all already existed.
+    🔴 **`pane_id` WAS ALWAYS ON THE WIRE AND WAS NEVER DECODED** — the pusher is "deliberately a
+    dumb pipe" posting `session-manager --json` verbatim. ⚠ `LEAN_ROW_FIELDS` does not list it, nor
+    `pane_preview` which has rendered for months: LEAN is a different VIEW, not the wire contract.
+    Host and pane come from ONE row and ambiguity resolves to NOTHING, because a pane id is unique
+    per tmux SERVER.
+    🔴 **THE BUG THE UNIT TESTS COULD NOT SEE:** `chatViewFor` returns a FRESH `ChatView` literal on
+    the success path, so fields must be copied by name. `Question` was, `Reply` was not — the
+    control rendered only for sessions with NO stored transcript. The seam test passed over it
+    because its server had no transcript store, i.e. it exercised the early return, the one path
+    that was never broken. Add a field to `ChatView` ⇒ add it to that literal.
+    forcing: none
+
+38. 🔴 **NONE OF RANKS 35–37 IS LIVE. `clawgate` SHIPS FROM A HARDCODED IMAGE PIN, NOT AUTOMATION.**
+    Measured 2026-09-06 after all three merged: `clawgatectl health` reads **0.8.27**, while
+    `clusters/workbench/apps/clawgate/deployment.yaml` pins
+    `harbor.homelab.lan/library/clawgate:0.8.27`. There is no ImagePolicy/ImageUpdateAutomation for
+    clawgate — a merge to `trunk` changes NOTHING about what is running. Shipping is four deliberate
+    steps: build the image, push to harbor, bump the pin, commit for Flux.
+    🔴 **THE DEPLOY IS WHAT ARMS #741** — a free-form `send-keys` box on an unauthenticated page. It
+    is therefore a separate decision from the merges, and rank 34 is the thing that would make it
+    safe rather than merely authorised.
+    ⚠ **Do not read `clawgatectl health` as a deploy check for these** — the version moved to 0.8.27
+    for unrelated reasons while all three PRs sat unmerged. A version that CHANGED is not evidence
+    that YOUR change shipped; verify by CONTENT against the running pod.
+    Closing condition: the operator decides to ship or not; if shipped, the tool-detail disclosure
+    and the free-form box are observed live and rank 34 is re-read against them.
+    forcing: user — it is the operator's call whether the LAN surface gets a command box today.
+
+39. **Rank 34 is the whole remaining risk, and it is now standing under two SHIPPED
+    features.** `requireSession` in `containers/clawgate/internal/api/auth.go` is a
+    literal `return next`, so the LAN NodePort authenticates nobody — and since
+    `0.8.28` that page both READS tool inputs (file paths, bash command lines, edit
+    bodies) and WRITES arbitrary commands into a live pane. Every earlier step was
+    recoverable; this one is not.
+    Closing condition: the browser tier authenticates somebody, or the surface is
+    disarmed (either flip `enableTmuxReplyAgent` false **and** `systemctl --user
+    stop tmux-reply-agent` on BOTH hosts, or drop `CLAWGATE_TERMINAL_TOKEN` from
+    the pod secret).
+    forcing: security
+40. **Merge the two open docs PRs.** `innovation-upstream/devrc#1350` (UI briefs)
+    and `#1353` (pre-deploy handoff). `#1353`'s only red is the contention flake
+    under "Open investigations"; confirm the re-run before merging.
+    forcing: none
+41. **Rank 31's `=` session-target prefix has still never run against real tmux.**
+    Rank 33's brief conflated it with the reply path, which targets a pane id and
+    does no name matching. `=` is used only by `new-window -t "=" + tmux_session +
+    ":"` (devrc `scripts/tmux-reply-agent` line 568) — the start-a-session path.
+    The live server has `scratch2` beside `scratch20`, so the hazard is reachable.
+    forcing: none
+42. **Three residuals the UI round left disclosed rather than fixed.** `aaOffScreen`
+    understands only `px` offsets; `aaEvictsIn`'s `maps` arm matches the literal
+    package name so an aliased import evades it; `autoApprovePersistNotice` embeds
+    `err.Error()` verbatim, which for a pgx dial failure can carry
+    host/port/user/database into the browser.
+    forcing: none
 
 ## Open investigations — live diagnosis state
 
@@ -1449,6 +1573,158 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
   answer (`GET /ui/auto-approve-banner`) beside the walk's DOM-derived one, immediately after the
   duration click, and compare. The disarm probe shape is already in
   `e2e/ux-audit/clawgate-funnel.audit.ts`; reuse it rather than inventing one.
+
+### `open_window`'s read-back rejects a window it already created — intermittent, mechanism identified
+
+- **Symptom + exact repro:** `test_the_EXACT_session_still_works` and
+  `test_a_cwd_that_does_not_exist_is_REFUSED_not_opened_in_HOME` fail
+  intermittently against REAL tmux with
+  `AssertionError: tmux did not report the new window's identity (got '%2\tscratch20')`.
+  **Measured 2 failures in 10 runs**, one of them on a completely UNMUTATED tree,
+  so it is independent of the arming change. Wall time on the failing run was
+  37.69 s against a 37.23 s control — **not a load flake by the wall-time test.**
+- **Observed (with values):** `NEW_WINDOW_FORMAT` is
+  `"#{pane_id}\t#{session_name}\t#{pane_current_path}"` (`scripts/tmux-reply-agent:389`).
+  `scripts/tmux-reply-agent:573` does `out.strip().splitlines()[0].split("\t")`
+  and rejects anything that is not 3 fields. `'%2\tscratch20\t'.strip()` is
+  `'%2\tscratch20'` — **2 fields** — and that is byte-identical to the observed
+  failure string. So an empty trailing `#{pane_current_path}` collapses a
+  well-formed response and the window is rejected AFTER tmux already created it:
+  the caller gets an error and a stray window is left behind, and a retry would
+  make a second one.
+- **Ruled out:** load flake — wall times of the failing and control runs are
+  within 0.5 s of each other, and the whole-suite times did not move. `via: measurement`
+- **Ruled out:** caused by the rank-32 arming change — it reproduces on an
+  unmutated tree, and `scripts/tmux-reply-agent` has zero changed lines in the
+  later audit ranges. `via: measurement`
+- **Ruled out:** a malformed format string — 8/8 direct probes of
+  `tmux new-window -P -F '#{pane_id}\t#{window_id}\t#{session_name}' -t '=scratch20:'`
+  against a private `-L` socket returned a well-formed 3-field line. `via: command`
+- **Leading hypothesis:** `pane_current_path` is transiently empty immediately
+  after `new-window`, before the pane's process cwd is readable. ⚠ **INFERRED,
+  NOT FORCED** — I could not make tmux produce an empty field on demand. The
+  byte-exact match is strong; the trigger condition is not reproduced.
+- **Next probe:** run
+  `tmux -L <probe> new-window -P -F '#{pane_id}\t#{session_name}\t#{pane_current_path}' -c <dir>`
+  in a tight loop under load and count empty third fields; or instrument
+  `run_tmux` to log the raw bytes on the 3-field check failing. The fix is
+  one line either way — split BEFORE stripping, or `out.strip("\n")` — but
+  **do not fix it blind**: pin the empty-field case in a test first, because a
+  stub tmux that always succeeds is exactly what hid this class before.
+- **Scope:** PRE-EXISTING, from `#1324`. Lives in `open_window`, which is rank
+  31's "start a session" path — **not** the `send-keys` reply path — so it does
+  not block arming. It IS in a now-live surface.
+- **Closing condition:** the empty-`pane_current_path` case is pinned by a test
+  that fails on today's code, the fix merged, and the two named tests run 20×
+  without a failure.
+
+### `ExecStart` runs the working tree, not the audited store copy
+
+- **Observed:** `nix/home.nix:3871` — `ExecStart = … %h/workspace/devrc/scripts/tmux-reply-agent`;
+  `_load_tmux_text_policy()` resolves `scripts/lib/tmux_text_policy.py` relative
+  to `__file__`. `X-Restart-Triggers` pin the STORE copies, so the trigger fires
+  only on a switch — but the process execs the checkout.
+- **Why it matters now:** arming is what makes it live. Any session's
+  `git checkout` in `~/workspace/devrc`, plus any restart (crash, reboot, the
+  `sd-switch` Stop/Start above), silently swaps the text-policy validator on the
+  running process with no review and no `home-manager switch`.
+- **Ruled out:** introduced by this PR — it is the repo's house pattern (~20 units
+  use `%h/workspace/devrc/…`) and the comment-stripped nix diff for the whole PR
+  is 0 lines. `via: measurement`
+- **Closing condition:** a decision recorded on the PR or in this doc — either
+  accept it explicitly for this unit, or point `ExecStart` at the store copy and
+  confirm the agent still resolves its text policy.
+
+### ✅ RESOLVED — `open_window`'s read-back rejected a window it had already created
+
+Fixed in `e6770754` (parse) + `17ec867f` (the guard for it). Kept because the
+mechanism is worth not re-deriving.
+
+- **Observed (with values):** `NEW_WINDOW_FORMAT` is
+  `#{pane_id}\t#{session_name}\t#{pane_current_path}`; the read-back did
+  `out.strip().splitlines()[0].split("\t")`. `.strip()` removes a TRAILING TAB, so
+  a well-formed 3-field line with an empty last field became 2 fields and failed
+  the length check — rejecting a window tmux had already created, leaving a stray
+  window, and a retry would create a second. `'%2\tscratch20\t'.strip()` is
+  byte-identical to the observed failure string `'%2\tscratch20'`.
+- **Ruled out — load flake:** wall times of failing and control runs within 0.5 s;
+  other tests in the same run did not move. `via: measurement`
+- **Ruled out — caused by the arming change:** reproduced on an unmutated tree;
+  `scripts/tmux-reply-agent` had zero changed lines in the audit ranges. `via: measurement`
+- **Ruled out — tmux genuinely emitting two fields:** the trigger was FORCED —
+  11 empty third fields in ~310 warm-server `new-window` creations (~3.6%), 0 in
+  60 cold-server creations, and in 11/11 the immediate `display-message -p -t
+  <pane>` re-read returned the correct path. `via: measurement`
+- 🔴 **The second bug, which the first was hiding:** with the fields split
+  correctly `landed_path` is `""`, and `same_directory("", cwd)` does NOT compare
+  empty against cwd — `os.path.realpath("")` returns the AGENT'S OWN cwd
+  (verified), and the unit runs `WorkingDirectory=~`. "Not readable yet" and
+  "tmux fell back to the wrong directory" were sharing a code path.
+- **Fix:** split the line before stripping; re-read an empty path for that pane;
+  refuse if the re-read is also empty. Both halves pinned; the two previously
+  flaky real-tmux tests then ran **20/20 clean**.
+- **Residual, NOT fixed:** no refusal path kills the window it created (true of
+  the session-mismatch and directory-mismatch branches before this PR too), and
+  these branches report `state="failed"`, not `"refused"` — an audit query on
+  `state='refused'` will not see them.
+
+### `test_readiness_reopens_on_transient_tab_gone` hangs intermittently in the full-suite run
+
+- **Symptom + exact repro:** during `scripts/run-tests.sh` on the merged tree,
+  `scripts/browser-bridge/tests` reported `914 passed / 1 failed` with
+  `subprocess.TimeoutExpired: Command '[…/scripts/browser-bridge/browser-agent',
+  'read the page']' timed out after 60.0 seconds`.
+- **Observed (with values):** the test's own message says *"Spawning 10 trivial
+  processes on this machine just now took 0.24s (idle reference 0.10s; stall
+  threshold 0.80s), so the MACHINE is not the explanation and the wrapper
+  genuinely hung"*. ⚠ That control measures **process-spawn latency only** — not
+  lock contention and not I/O — so it does not exonerate a loaded box the way it
+  reads. At the time, four other sessions were running
+  `nix build …checks…pytests` concurrently, load ~36 on 24 cores, 45 GiB swap in use.
+- **Ruled out — caused by this PR:** the diff touches four files
+  (`nix/home.nix`, `scripts/tmux-reply-agent`, and two test files) and **zero**
+  browser-bridge lines; `git diff --stat origin/main...HEAD -- scripts/browser-bridge/`
+  is empty. `via: measurement`
+- **Ruled out — a deterministic break on this tree:** the same test at
+  `origin/main` passed 1/1 in 1.94 s, and on the PR branch in isolation **5/5**.
+  `via: command`
+- **Leading hypothesis:** a load-sensitive hang in `browser-agent`'s startup path.
+  A branch named `fix/browser-agent-warm-lock-stall` already exists in this repo,
+  so the class is known and owned elsewhere.
+- **Next probe:** if it recurs in the gate, run
+  `nix develop <repo> -c python3 -m pytest <repo>/scripts/browser-bridge/tests/ -k readiness -q`
+  under deliberate load and capture the wrapper state dir the failure names
+  (`…/popen-gw*/test_readiness_reopens_on_tran0/scratch`) rather than re-running.
+- 🔴 **Do NOT merge past a SECOND occurrence.** One red plus these controls is a
+  flake outside the diff; twice is a blocker, even outside the diff — a gate you
+  re-roll until green is not a gate.
+- **Re-run result:** on the next full tier-1 run (head `3d470502`) this test
+  PASSED and the suite was `21,936 / 21,939, 0 failed`. So: one hang, one clean
+  full run, 5/5 isolated on the branch, 1/1 at `origin/main`. Consistent with the
+  load-hang hypothesis; NOT a second occurrence.
+
+### `devrc-ci` pytests red on `test_mjs_parses[attachments.mjs]` — CONTENTION, not a parse error
+- **Symptom + exact repro:** `tekton/devrc-pytests` on `devrc#1353` (a ONE-markdown-file
+  diff) reports `FAILING: test_mjs_parses[attachments.mjs]`, 2 failed of 22,002.
+- **Observed (with values):** the failure is `subprocess.TimeoutExpired`, not a
+  `SyntaxError` — `["node", "--check", ".../claude/skills/clickup/api/attachments.mjs"]`
+  did not return within `orig_timeout = 30`, with `stdout_seq = []` and
+  `stderr_seq = []`. Node produced NOTHING; it never got to parse the file.
+- **Ruled out:** a real syntax error in `attachments.mjs` — the same test on plain
+  `origin/main` in a clean worktree gives `34 passed in 1.24s`. via: command
+- **Ruled out:** caused by this PR — the diff is `claudedocs/handoff-tmux-webapp.md`
+  alone, the branch is **0 commits behind `origin/main`**, and `attachments.mjs`
+  was last touched by an unrelated commit (`9004af88`). via: measurement
+- **Leading hypothesis:** the same node-contention class as the `clawgate-e2e`
+  health-check reds seen repeatedly today — a 30s budget for `node --check` on a
+  small file is only exceeded when the box cannot schedule node at all. This
+  session was concurrently running a docker build, an image push and several
+  playwright suites.
+- **Next probe:** `devrc-ci-rerun-qrcm5` was created from `devrc-ci-92rmf`'s own
+  spec on the identical revision `e85b1aecb`; read its verdict. A green re-run on
+  the same revision completes the attribution. If it reds again on the SAME test,
+  the contention reading is wrong and the 30s timeout in
+  `scripts/tests/test_skill_mjs_parses.py:70` is the thing to look at.
 
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
@@ -2544,32 +2820,181 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
 </content>
 </invoke>
 
+- 🔴 **2026-09-06 — A POSITIVE CONTROL THAT MUTATES IN ONE DIRECTION GOES VACUOUS
+  THE MOMENT THE THING IT GUARDS FLIPS, AND IT GOES VACUOUS *GREEN*.**
+  `test_the_wanted_by_guard_can_SEE_an_inverted_flag` proved the guard could see a
+  flag flip by doing `src.replace("enableTmuxReplyAgent = false;", "… = true;")`
+  and asserting the result reads `true`. Arming the agent makes that `replace`
+  match **nothing**: `flipped` then equals `src`, and the control asserts
+  `"true" == "true"` about the **unmutated** file — it passes while observing
+  nothing, in a suite where every other test also passes. The `assert flipped !=
+  src` line two lines above it is the only thing that catches this, and only
+  because a previous session put it there for the *other* mutant. **General
+  shape: any control built as `replace(<current value>, <other value>)` is
+  silently disarmed by a change to `<current value>`** — the direction of the
+  mutation is a dependency on the state under test, and nothing re-derives it.
+  Fixed by inverting it to `true → false`, which is now the hazard direction, and
+  by asserting `!= src` on both arms.
+- 🔴 **2026-09-06 — FLIP A CONFIG GUARD, DO NOT DELETE IT; THE SYMMETRY IS THE
+  PRODUCT.** `test_the_agent_unit_SHIPS_DISABLED` pinned `false`. The tempting
+  read on arming is "the guard has served its purpose, drop it". What it actually
+  enforces is that the armed state is a **deliberate, reviewed edit in both
+  directions**: while it read `false`, arming meant editing the test; now it reads
+  `true`, disarming means editing the test. A drive-by revert to `false` would
+  stop every queued reply executing **while the server kept accepting writes and
+  the UI kept looking healthy** — silent, and exactly what a config guard is for.
+- 🔴 **2026-09-06 — WHEN A ONE-LINE FLAG FLIP LANDS, `git grep` THE FLAG NAME AND
+  THE PROSE THAT DESCRIBES ITS STATE, BOTH.** Grepping `enableTmuxReplyAgent`
+  finds the guards; it does **not** find `SHIPPED DISABLED`, which is the phrase
+  three of the five falsified comments are written in. Two greps, not one — the
+  second is for the words a human used to describe the state, not the identifier.
+- ⚠ **2026-09-06 — `scripts/gate.sh` run from a plain shell exits `3` on the
+  pytest leg, and 3 is a PRECONDITION failure, not a test failure.** The log says
+  so and prints the fix (`nix develop <repo> --command bash <repo>/scripts/run-tests.sh <repo>`).
+  Do not read that 3 as a red suite; the node leg in the same run passed 1449 tests.
+- ⚠ **2026-09-06 — the documented `| tail` trap fired again, unchanged.**
+  `bash scripts/gate.sh … 2>&1 | tail -35; echo "GATE_RC=$?"` printed
+  **`GATE_RC=0`** directly beneath the runner's own **`GATE: RESULT=FAIL exit=1`**.
+  The status belongs to `tail`. Read the `RESULT:` lines; never the piped code.
+- **`nix eval` of a worktree needs `path:<worktree>`, not the repo root.** The
+  first eval silently answered for `~/workspace/devrc` (flag still `false`) and
+  returned `{"WantedBy":[]}` — which looked like the change not working. It became
+  the negative control instead, but only because the second eval named the
+  worktree explicitly.
+
+- 🔴 **2026-09-06 — A MUTATION BATTERY WHOSE SCRATCH ROOT DOES NOT EXIST SCORES
+  EVERY MUTANT "KILLED", AND THAT LOOKS EXACTLY LIKE A WORKING FIX.** Measured:
+  a battery re-run to confirm a widened AST guard never created its `$B` root, so
+  every `cp -a` failed, pytest ran against nonexistent paths, and all seven
+  injections scored KILLED — **four known survivors becoming zero survivors**,
+  the precise shape of success. The ONLY thing that distinguished it was that the
+  **negative control was also KILLED** when a healthy control must pass. A battery
+  reporting a clean sweep with no passing control has measured nothing. Assert the
+  copy exists, assert the file under test exists, and require a real verdict line
+  before scoring any mutant.
+- 🔴 **2026-09-06 — A FIX THAT DOCUMENTS A HAZARD CAN CREATE IT.** Round 1 wrote a
+  disarm example into `nix/home.nix`'s comments —
+  `#     enableTmuxReplyAgent = false;` — while retracting a claim that a
+  substring-matching control could go vacuously green. That comment's `  #     `
+  prefix ENDS IN SPACES, so the two-space-prefixed literal matches inside it, and
+  the control then passes about a file whose flag was never mutated. The
+  retraction and the thing it denied shipped in one commit. **When a fix adds
+  prose QUOTING the code it guards, re-run the guard against the new prose.**
+- 🔴 **2026-09-06 — A GUARD'S DESCRIPTION IS A COVERAGE CLAIM; CHECK THE BODY IS
+  AS WIDE AS THE SENTENCE.** An AST pin whose docstring said "every spawn must
+  take its argv from `tmux_bin()`" matched only literal `subprocess.<verb>(…)`
+  attribute calls. Measured survivors: `from subprocess import run as _r`,
+  `from subprocess import run`, `import subprocess as _sp`, `os.posix_spawn`.
+  With one live the suite was 183 passed. Resolve import bindings, or narrow the
+  sentence.
+- 🔴 **2026-09-06 — DELETING A WORD TO GREEN A TEXT SCAN CAN DELETE A GUARANTEE.**
+  Adding `systemctl --user stop tmux-reply-agent` to a docstring made
+  `test_no_real_launchers.py` see a new file reaching an acknowledged binary. The
+  tempting fix is to reword. That ledger's own `session-write` entry forbids it —
+  and here the word was the ONLY written rollback for a surface that executes
+  commands. Acknowledge with evidence, or write the pin; do not reword.
+  ⚠ **And an acknowledgement can BLIND the guard it is filed under**: `hazard_hits`
+  returns a FILE set, so once a file is in it, a real call site added to that file
+  changes nothing. Measured: injecting a genuine
+  `subprocess.run(["systemctl", …])` left the suite at 77 passed.
+- ⚠ **2026-09-06 — a count kept in prose beside what it counts DRIFTS, and fixing
+  it at one site makes two sites disagree.** A prose-mention tally was corrected
+  in one dict entry and left stale in another entry of the SAME dict. The fix is
+  to remove the running total, not to renumber a third time.
+
+- 🔴 **2026-09-06 — A GUARD CAN BE WALKED BY ITS OWN NEIGHBOUR'S ERROR MESSAGE.**
+  `test_an_UNREADABLE_pane_current_path_still_REFUSES` asserted `"directory" in
+  err.lower()`. That word appears in the refusal AND in the `same_directory`
+  MISMATCH message four lines below it, so **deleting the refusal branch outright
+  left the test green** — the fallthrough supplied a message containing the word.
+  ⚠ Worse, the mutant's verdict depended on an UNPINNED dimension: it died when
+  pytest ran from `/home/zach` and survived from `/tmp` or the repo root, and the
+  gate runs from the repo root. Pin the WHOLE normalised string, and assert the
+  neighbour's distinctive phrase is ABSENT.
+- 🔴 **2026-09-06 — THE ATTRIBUTION GATE IS WHAT ENDS AN AUDIT LADDER THAT KEEPS
+  FINDING REAL THINGS.** Four rounds, every headline a defect in the PREVIOUS
+  round's corrective prose. Rounds 2–4 each changed **0 payload lines**; the
+  findings were all in guards the ladder itself had just written. Round 5 would
+  have audited round 4's fix to round 3's fix. Measure
+  `git log --numstat --format= --remerge-diff <audited>..HEAD --not <base>` and
+  stop on two consecutive zero-payload rounds — do not stop on "safe to merge",
+  and do not keep going on "it keeps finding things".
+- 🔴 **2026-09-06 — A MUTATION BATTERY WHOSE SCRATCH ROOT DOES NOT EXIST SCORES
+  EVERY MUTANT "KILLED".** Measured: `$B` was never created, every `cp -a` failed,
+  pytest ran against nonexistent paths, and four known survivors "became" zero —
+  the exact shape of a working fix. The **negative control was also KILLED**, and
+  that was the only tell. Assert the copy exists, assert the file under test
+  exists, and require a real verdict line before scoring any mutant.
+- 🔴 **2026-09-06 — `scripts/tests/test_tmux_reply_agent.py` IS NOW ADVERSARIAL TO
+  NAIVE OUTPUT PARSING.** Its prose contains the literal string `1 passed` (in a
+  comment documenting a finding), and pytest ECHOES test source on failure — so a
+  battery that substring-matches `"1 passed"` scores a FAILING run as PASSED. An
+  auditor hit this mid-run and had to discard a pass. Anchor on
+  `^1 (passed|failed)` and use `--tb=no`.
+- ⚠ **2026-09-06 — a test's own load control can exonerate a machine it did not
+  measure.** browser-bridge's hang-net reports process-spawn latency and concludes
+  "the MACHINE is not the explanation". Spawn latency is not lock contention and
+  not I/O; on a box running four concurrent nix check derivations that conclusion
+  is not supported by what it measured.
+
+- 🔴 **`clawgatectl health` IS NOT A DEPLOY CHECK FOR A MERGE.** It read `0.8.27`
+  both before and after all three UI PRs merged — the version had moved for an
+  unrelated reason while they sat unmerged. A version that CHANGED is not evidence
+  that YOUR change shipped. Verify by CONTENT against the running pod.
+- 🔴 **`clawgate` has NO Flux image automation** — the pin is an immutable literal
+  tag, so merging to `trunk` reconciles cleanly and changes NOTHING that is
+  running. Shipping is four deliberate steps (build, push, bump BOTH pins, commit).
+- ⚠ **The "workbench cannot pull from `docker.io` — build on the LAPTOP" note is
+  STALE.** Measured 2026-09-07: `docker build` on the workbench succeeded on the
+  first attempt, rc 0. Following that note would have moved the build to the
+  laptop for nothing. The note dates from 2026-08-29; re-measure before routing
+  around it.
+- **Both version pins must move together.** `deployment.yaml` and
+  `cmd/clawgatectl/client.go`'s `buildVersion`; `TestDeployPinMatchesClientBuildVersion`
+  was watched to genuinely `=== RUN` and `--- PASS`, not merely report `ok`.
+- 🔴 **CARRIED FORWARD FROM THE REPLACED STATUS BLOCK — the write gate flagged
+  these as durable lines a `Status` replace would delete, and it was right.**
+  - 🔴 **RANK 8a IS RECURRING, NOT CLOSED.** Nothing converges `homelab-talos`, so
+    both hosts' `clawgatectl` can drift from the server. Re-run the cross-host round
+    trip (`view create` on the laptop → `view ls` on the workbench → `view rm`,
+    watching a number MOVE); a matching version label is NOT the check. ⚠ The client
+    version is `clawgatectl --version` — the bare `version` subcommand is
+    `unknown command`, which reads like a broken client.
+  - **Rank 32's flag was measured as a PAIR, in both directions:** `false` →
+    `Install.WantedBy = []`, `true` → `["default.target"]`, both from `nix eval` on
+    the real flake. One reading asserted twice is not the same claim.
+  - **Rank 32's audit ladder closed on the ATTRIBUTION GATE, not on a clean round** —
+    4 rounds, the last 3 changing 0 payload lines. Worth knowing before anyone reads
+    "4 rounds" as "4 rounds of findings".
+
+- **The CSS cwd trap is real and has a cheap tell:** `app.css` built from inside
+  `containers/clawgate/` came to **44,975 bytes**; ~5 KB means the trap fired.
+
 ## How to verify
 
 ```bash
 # 1. what is actually live (never read a version from this doc)
-clawgatectl health
+clawgatectl health          # expect 0.8.28
 
-# 2. the two boot lines — the load-bearing claim, announced unconditionally in BOTH directions
-kubectl --kubeconfig=$KC_WORKBENCH -n clawgate logs deploy/clawgate | grep -i "terminal write"
-
-# 3. the tiers, including the refusals. A server refusing EVERYTHING also yields five refusals,
-#    so the trailing 400 is the control that makes the others mean something.
+# 2. 🔴 THE VERSION IS NOT THE CHECK — verify the FEATURES by content
 B=http://192.168.50.250:30302
-curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/api/term/send-keys -d '{}'                    # 401
-curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/ui/term/send-keys -H 'Origin: https://evil.example' \
-     -H 'Content-Type: application/x-www-form-urlencoded' -d 'host=workbench&pane=%251&text=x'    # 403
-curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/ui/term/send-keys \
-     -H 'Content-Type: application/x-www-form-urlencoded' -d ''                                   # 400
+curl -s "$B/"        | grep -c 'min-\[2560px\]:max-w-\[150rem\]'   # 1  wider shell
+curl -s "$B/"        | grep -c '2xl:max-w-\[96rem\]'               # 0  the old cap is gone
+curl -s "$B/ui/tmux" | grep -c 'auto-fit,minmax(32rem,1fr)'        # >0 adaptive card grid
 
-# 4. the host half
-systemctl --user is-active tmux-reply-agent          # workbench
-ssh zach@10.42.0.100 'systemctl --user is-active tmux-reply-agent'   # laptop
+# 3. the two that need a session with the right content
+SID=$(curl -s "$B/ui/tmux" | grep -oE '/session/[0-9a-f-]{36}' | head -1 | cut -d/ -f3)
+curl -s "$B/session/$SID" | grep -c 'data-chat-freeform-reply'     # 1 when a pane resolves
+curl -s "$B/session/$SID" | grep -c 'data-tool-detail'             # >0 only if that tail HAS tool calls
+#    ⚠ a 0 on the last one is absence of TOOL RECORDS, not absence of the feature —
+#    scan several sessions before concluding anything.
 
-# 5. DISARM (either one is sufficient, and both are reversible)
-#    remove CLAWGATE_TERMINAL_UI_WRITES or CLAWGATE_TERMINAL_UI_HOSTS from
-#    clusters/workbench/apps/clawgate/deployment.yaml, or drop CLAWGATE_TERMINAL_TOKEN
-#    from clusters/workbench/apps/clawgate/secrets.enc.yaml. Commit → Flux reconciles.
+# 4. the host half (rank 32's closing condition), both hosts
+systemctl --user is-active tmux-reply-agent
+ssh zach@10.42.0.100 'systemctl --user is-active tmux-reply-agent'
+# 5. 🔴 `active` only says the process is alive. A repeating failure is logged ONCE,
+#    so ONLY the two startup lines means the poll is being ANSWERED:
+journalctl --user -u tmux-reply-agent -n 20 --no-pager -o cat
 ```
 ## Run this first — the index, one read-only command
 ```bash

@@ -17,85 +17,70 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Expand the mention system (`mention-open.py`) so clicking `repo#N` in Alacritty resolves against ALL repos the operator contributes to, not just those checked out locally in `~/workspace/`.
 
 ## State now
-**BOTH efforts are now SHIPPED.** The 2026-09-03 resolver (#1291, `fd68d48c`) and the
-2026-09-04/05 detection-widening + attribution work (#1313, squash `3c324156`).
+**The mention effort is COMPLETE and SHIPPED — six PRs.** `#1291` (`fd68d48c`) resolver ·
+`#1313` (`3c324156`) detection widening + attribution · `#1322` (`a75ffc6a`) alacritty
+copy-on-select · `#1328` (`3f4d9c0f`) local-first click path · `#1336` (`d790786a`)
+disclosure guard on KEYS + `audit-pr N` clickable · `#1331` (`8b173b05`) handoff.
 
-**#1313 — merged and VERIFIED ON THE DEPLOYED ARTIFACT, both hosts.**
-- Ladder: round-1 full audit → 5 findings → fix round → round-2 delta audit → **safe to
-  merge, no 🔴**. Round 2 re-ran the two claims that were self-reported rather than code (the
-  17/17 mutation sweep, independently re-run with its positive control killed and sources
-  restored to identical hashes; and the 219 floor, re-derived from a live 230-count through
-  the gate's own formula).
-- Gated sha `7d94c568` **was** the merged tree (`origin/main` `f887e958` an ancestor of it),
-  so what was audited is byte-identical to what merged. All four legs green: dev-host pytest
-  21,642 collected / 0 failed, dev-host node 1,449 / 0, plus both nix derivations built ONE
-  AT A TIME.
-- `ship.sh` converged both hosts at `3c324156` and **compared** them (not "NOT COMPARED").
-- Deployed-artifact checks (not a checkout): `mention_scan.py` → `644jij…` (was `arkxlc…`),
-  `session-tailer.py` → `cgxllq…` carrying the attributed dedupe key, and
-  `_MENTION_HINTS = MS.mention_hints(MS.PROFILE_TELEMETRY)` — the inert-prefilter fix at the
-  TELEMETRY profile (deriving at the default returns the old two literals and LOOKS correct).
-- **No consumer restart was needed, and that was checked not assumed**: the mention work runs
-  under `claude-activity-source.timer`, which is `oneshot` and fires ~5-minutely, so each run
-  is a fresh interpreter. `activity-collector.service` has been up 8 days and the switch did
-  not restart it — it is the spool shipper and this PR does not touch it.
+Both hosts converged and **compared** at `8b173b05`; `ship.sh` reported `NO dirty path is
+read by nix`. ⚠ `main` has since moved to `3f8c81bb` via OTHER sessions' work — that is not
+this effort's and needs no action here.
 
-🔴 **THE HOSTS AGREE ON GIT AND NOT ON ARTIFACT.** `ship.sh` said so explicitly:
-`nix/programs/alacritty/default.nix` is dirty AND read at eval time, so the workbench's
-generation is `origin/main` PLUS the uncommitted `save_to_clipboard` WIP. The laptop's is
-not. Git parity is not host parity — see ranked item 3.
+**Two full audit ladders ran, each to a clean stop.** #1313: round 1 → 5 findings → fix →
+round 2 safe-to-merge. #1328/#1336: round 1 → 3 findings → fix → round 2 found one 🔴 (below)
+→ fixed → merged.
+
+**Measured on the deployed artifact:** `dashboard#12` **4.26 s → 0.086 s**.
+`talos-infra#1065` opens; bare `#1291` → clawgate task; `#282828` names the colour reason.
+
+⚠ **What is NOT verified**: the `repo_source == "default"` picker suppression could not be
+confirmed on the deployed copy, because `--print` prints candidates and never shows a
+picker — it cannot distinguish auto-open from one-row-picker. It was verified by the fix
+round and independently by the round-2 auditor, but not end-to-end by a human click.
 
 ## Open investigations — live diagnosis state
 (none — the disclosure is a known, measured state awaiting an operator decision, not a
 diagnosis in progress.)
 
 ## Next steps (ranked)
-1. **Exercise the real Alacritty click path** — STILL the one thing never done end-to-end,
-   and now more valuable than before because #1313 changed it. Plain left-click (the hint is
-   `mouse.enabled = true` with no mods; `Ctrl+Shift+M` is the keyboard route):
-   `talos-infra#1065` (opens), `dashboard#12` (rofi picker, now with an explanatory line
-   above the list naming the clicked text, the row count and the mapping's age), `#282828`
-   (underlines; since #1328 it opens NO picker and shows a named toast saying it looks like a
-   colour literal). 🔴 **The widest-blast-radius change to check deliberately:** a bare `#N` clicked
-   in a pane with NO resolvable repo now shows a ~370-row fuzzy picker with the clawgate task
-   first, where it previously opened the clawgate task directly. Type to narrow. If that is
-   wrong in practice it is a one-line ordering change.
+1. **Exercise the Alacritty click path** — the ONLY end-to-end evidence still missing, and
+   the code has changed twice since the last operator test. Plain left-click.
+   `talos-infra#1065` → opens. `dashboard#12` → picker in ~80 ms from YOUR repos.
+   `#282828` → named toast, no window. Bare `#N` with no pane repo → picker, clawgate first.
+   🔴 **`audit-pr 1291` → a ONE-ROW PICKER, not a direct open** — this is the change most
+   worth eyeballing: it trades a keystroke for the "never a confident wrong page" invariant.
    🔴 NEEDS A HUMAN — clicking raises windows, a `pkill`-class action for an agent.
    forcing: none
-2. ~~**Add a staleness signal for `~/.config/mention-open/known_repos.json`**~~ — **DONE** in
-   PR #1328. `mention-open.py` now measures the mapping's age (`mapping_age_days`) and
-   surfaces it in BOTH places the operator can see it: the note above the fuzzy picker
-   (`universe_note`) and the refusal body (`staleness_note`, past `STALE_MAPPING_DAYS = 7`).
-   🔴 **A SIGNAL, NOT A REPAIR, AND THAT WAS THE CHOICE.** A systemd-user timer was the other
-   option and was rejected: `regen-known-repos.py` shells out to `gh api user/repos` and
-   REFUSES below its 25-repo floor with exit 3, so a host without `gh auth` would take a
-   failing unit plus a failure toast on every fire — a permanently-red timer, which trains
-   everyone to ignore it. The signal instead fires at the exact moment the staleness bites:
-   the click that did not resolve. Re-measured 2026-09-05: still zero timers reference the
-   generator. Pinned at four ages (0, 6, 8, 90 days) by `test_the_mapping_age_is_measured_at_
-   FOUR_points`, and mutation-verified (K32).
+2. ~~Staleness signal for `known_repos.json`~~ — **DONE in #1328**, as a SIGNAL not a timer.
    forcing: none
-3. **Commit the workbench's `save_to_clipboard` WIP** in
-   `nix/programs/alacritty/default.nix`. Now the ONLY substantive difference between the two
-   hosts' built generations. MEASURED 2026-09-05: it did NOT block this ship (workbench was
-   behind 1 / ahead 0, and the incoming commit does not touch that file), so `--ff-only`
-   succeeded — but it stays a latent rc 7 for the next ship whose incoming commits DO touch
-   it, and meanwhile the two hosts differ.
-   forcing: gate — `ship.sh` already skipped this host once with rc 7 over this exact file.
-4. ~~Review, gate and merge the in-flight detection/attribution PR~~ — **DONE** (#1313 merged
-   `3c324156`, claim `devrc-mention-attribution` released). Kept numbered so ranks 1-3 do not
-   re-point.
+3. ~~Commit the `save_to_clipboard` WIP~~ — **DONE in #1322** (`a75ffc6a`).
    forcing: none
-5. **Fix `scripts/collector/README.md:66-69`** (devrc, one file) — round 2's only 🟡, left
-   unfixed ON PURPOSE so the merged artifact stayed byte-identical to the audited one. The
-   README still promises IN BOLD that "what the terminal underlines and what the telemetry
-   records cannot drift", and gives that as the reason for the module's location — the exact
-   invariant #1313 deliberately retired (`mention_scan.py:12` now opens "🔴 THE TWO CONSUMERS
-   NO LONGER SHARE ONE PATTERN SET"). Lines 59-60 of the same block also list the emitted
-   payload fields without `repo` / `repo_source`. Risk: a maintainer reads it, believes the
-   click surface is structurally protected, and adds a pattern as `_BOTH` — the thing the
-   split exists to make a deliberate act.
+4. ~~Review, gate and merge the detection/attribution PR~~ — **DONE** (#1313).
    forcing: none
+5. ~~Fix `scripts/collector/README.md`~~ — **DONE in #1321**.
+   forcing: none
+6. ~~Close the two guard gaps round 2 found~~ — **DONE in #1336** (`d790786a`), and the
+   audit was WRONG about one of them; see gotchas.
+   forcing: none
+7. **Clear the four 🟢 left by #1336's round-2 audit** (devrc; `scripts/tests/
+   test_mention_open.py`, `scripts/collector/mention_scan.py`, `test_session_tailer.py`).
+   All prose/coverage-claim, no behaviour: (a) `test_the_one_row_picker_..._SAYS_WHY`
+   claims the note "NEVER names a repository" but only checks universe tokens — a mutant
+   naming the *pane-guessed* repo leaves all 401 tests green; (b) counts that do not
+   resolve — "Four tests drive `_run()`" is five then seven, a `mention-open.py:135`
+   reference that is now 141, and a `` `_load_handler` `` that does not exist anywhere;
+   (c) a comment claiming three sinks are "the WHOLE list" thirty lines after another says
+   the note "goes to rofi"; (d) the autouse fixture closes `MENTION_OPEN_KNOWN_REPOS` for
+   subprocesses but `DEVRC_WORKSPACE` is still per-test — the next `_run()` test with digits
+   and no `--no-discovery` fans out over the real `~/workspace`.
+   forcing: none
+8. **Fix or retire Tekton's `devrc-pytests` leg** (not this effort's; needs an owner).
+   MEASURED 2026-09-05: red on `test_mjs_parses[attachments.mjs]` for PR #1328 **and** for
+   #1326, which is a single markdown file and cannot reach `.mjs` parsing. The same test
+   passes on clean `main`, on the PR branch head, and in the local nix sandbox tier — three
+   environments. #1328 was merged past it.
+   forcing: gate — a check red for every PR trains everyone to click through, which this
+   session then did; `claude/RULES.md` calls a permanently-red gate worse than none.
 
 ## Gotchas / decisions / dead-ends
 - `--no-discovery` flag intentionally skips the static mapping (Pass 2 only). This is by design: the flag means "resolve only what the text itself carries."
@@ -247,36 +232,123 @@ diagnosis in progress.)
   because only the second is actionable. `--print` still prints every candidate for real
   ambiguity. Nothing in the repo consumes `--print`.
 
+- 🔴 **THE LOOKUP-ORDER LESSON, which generalises past this feature.** A 10-second click was
+  not slow code: it asked a remote, unbounded corpus first and a local, authoritative one
+  never. The fix was a DELETION. **When something is slow, ask what corpus it is searching
+  and whether a smaller authoritative one was already on disk** — before profiling, caching or
+  parallelising. Measured: 4.26 s → 0.086 s, and the deleted path could only ever return
+  repos the operator does not own.
+- 🔴 **"It's broken" and "it's correct but says so badly" are indistinguishable to the
+  operator.** The bare-`#N` report was the guard working exactly as designed; the wording made
+  it read as a failure, and it cost a full investigation to establish. **A refusal must name
+  its reason** — `no mention in the clicked text` says nothing; `#282828 is six digits — that
+  looks like a colour literal` ends the question.
+- 🔴 **DELETING A PASS WAS NOT ENOUGH — the fan-out was the other 60%.** `discover_repos` ran
+  **100 serial `git remote get-url` children (149-184 ms)**. Removing the network call alone
+  would have landed at ~170 ms and quietly missed the target. Only measurement found it.
+  Second-order: the fix's own top-level `import concurrent.futures` cost ~5 ms on EVERY click
+  including ones that never discover — caught only by an **interleaved** A/B (A,B,A,B), where a
+  plain before/after run had made it look like load. It is imported lazily now.
+- 🔴 **A ≥3-element fixture is NOT enough to kill a transposition mutant** — a 3-element
+  reversal leaves the middle element mapped to itself, so a third of the mutation is
+  invisible. Use four; four has no fixed point. ⚠ And the corollary the round-2 audit added:
+  the *reason* stated above is stronger than it needs to be — three would also have killed
+  that particular mutant, because the assertion is whole-dict equality. Four is still right;
+  the justification does not establish what it claims.
+- 🔴 **Two tests were reading the operator's REAL `known_repos.json`**, so they asserted
+  different things on the dev host and in the nix sandbox (empty `HOME`). A test that reads
+  live host state is structurally blind in one tier — and these were DISCLOSURE tests.
+- 🔴 **A guard can be one spelling short of the substitution its own docstring names.** The
+  no-network ledger keyed `(argv[0], argv[1])` and so admitted `git remote update` — which
+  runs `git fetch` per remote — while its docstring said the subcommand was in the key
+  *because* bare `git` would admit `git fetch`. Now keyed on the verb path.
+- 🔴 **The mutation instrument itself scored an UNIMPORTABLE handler as SURVIVED**, because its
+  sanity floor ran only on the control, not per mutant. Every mutation result this subsystem
+  produced rested on that. Fixed with a `NOT-OBSERVED` verdict arm.
+- **`notify-send` swallows a body that begins with `--`** — it parses it as an option, exits 1,
+  and shows NO toast. Both new refusal bodies started with `--`. Fix: `notify-send … -- SUMMARY
+  BODY`. A refusal that displays nothing is worse than the one it replaced.
+- **rofi cannot distinguish "typed a name, nothing matched, Escape" from "changed my mind"** —
+  `-no-custom` makes both a non-zero exit with no selection. So the diagnosis goes ABOVE the
+  list as `-mesg` rather than being toasted after every dismissal.
+
+- 🔴 **THE MERGED-TREE GATE CAUGHT A RED `main` NEITHER BRANCH COULD SEE.** `origin/main`
+  collected **12818** and the PR head **12806** — both under the 12836 `scripts/tests` drift
+  ceiling — while the MERGE collected **12843** and crossed it. Both tiers agreed; 12843
+  passed, 0 failed. This is the same shape as the 2026-08 case recorded beside the floor
+  entry (`alone (10137 and 10112); the SUM crossed it`), one merge later. **Neither side is
+  over alone, so only a merged-tree gate can see it.** Fixed by raising the floor to
+  `"scripts/tests|12793"` — **the number the gate printed itself**, and pinned AFTER merging
+  `main` into the branch, per the ORDER note beside it (pinning first lands the branch under
+  its own new floor and trades a merge-time failure for a branch-time one).
+- 🔴 **`nix build path:<a worktree>` DEFEATS THE SANDBOX'S GIT-CONFIG ISOLATION.** MEASURED:
+  the sandbox pytest leg failed `RESULT: FAIL (exit=2)` on
+  `run-tests: FATAL — 'git config --global' does NOT write to this run's isolated file`,
+  **before any test ran**, and it reproduced. Cause was the METHOD, not the tree: `path:`
+  copies the worktree's `.git`, which is a **FILE** pointing at the real git dir, not a
+  directory. The identical commit content extracted with `git archive` (no `.git`) passes.
+  The rules document this hazard for `cp -a` copies of worktrees; **`nix build path:` is a
+  second door to it.** Gate a worktree by extracting it first.
+- 🔴 **AN "0 HITS OVER 220 COMBINATIONS" MEASUREMENT SUPPORTED A FALSE CONCLUSION.** A round-2
+  audit called the `refuse()` staleness arm dead code, citing 220 mapping-state × text × flag
+  combinations producing 110 refusals and **0 branch hits**, and deleting it left the suite
+  green. It was relayed here as fact and was WRONG. The branch is reachable: `discover_repos`
+  **overwrites**, and `parse_owner_repo` is looser than `OWNER_REPO_VALUE_RE`, so a checkout
+  whose directory name shadows a mapping key writes an invalid row. Independently reproduced
+  with a real `git init` + real remote, and the realistic case is **sourcehut's own
+  `~user/repo` form** — `https://git.sr.ht/~sircmpwn/aerc` → `~sircmpwn/aerc`; six of seven
+  remote URL forms tested reach it. **A sweep measures the shapes it CONSTRUCTS**; zero hits
+  cannot distinguish unreachable from not-constructed.
+- 🔴 **A DISCLOSURE GUARD WAS BLIND TO THE OWNER HALF — THE HALF THAT NAMES THE CLIENT.**
+  `session-tailer.py`'s spool guard covered keys and full `owner/repo`, not bare owners.
+  Measured: a keys-leak mutant **KILLED**, an owners-leak mutant **SURVIVED** with the suite
+  reporting clean, and a positive control confirmed the owner names really reached the spool.
+  Its sink is a **durable ClickHouse table**. Of the 232 names in the #1283 disclosure, 167
+  were a client's — client identity IS the owner half. Fixed with a derived four-spelling
+  ledger; K43 re-run at BOTH trees shows SURVIVED → KILLED.
+- 🔴 **THE MUTATION INSTRUMENT HAD THREE SEPARATE DEFECTS, ALL FOUND THIS EFFORT.** (a) a
+  mutant that made the handler UNIMPORTABLE scored SURVIVED, because the sanity floor ran
+  only on the CONTROL; (b) the failure count came from the first `N failed` match anywhere,
+  and the tailer's own `emitted=1 failed=0` output contains `1 failed` — so `emitted=0
+  failed=0` would read `nfail=0` over a RED suite and score SURVIVED for a mutant every guard
+  caught; (c) rows scored `KILLED-WRONG-REASON` because an earlier assertion fired with a
+  message naming no hazard. **Every mutation result this subsystem produced rested on that
+  instrument.** All three fixed; the battery is committed and re-runnable.
+- 🔴 **A FIXTURE WHOSE KEYS ARE SUBSTRINGS OF ITS VALUES MAKES A VALUES-ONLY GUARD LOOK
+  TOTAL.** `FAKE_UNIVERSE` and `FAKE_REPOS` both spelled every key inside its own value, so
+  `.values()` guards appeared to cover keys. Both now pairwise-distinct and pinned.
+  ⚠ And a ≥3-element fixture cannot kill a transposition mutant — a 3-element reversal leaves
+  the middle element mapped to itself. Four has no fixed point.
+- 🔴 **NINE tests were reading the operator's REAL `known_repos.json`** (7 `stat`,
+  2 `read_text`, measured with an instrumented `Path`) — not the two first reported. Closed
+  with an autouse redirect; ⚠ its first version was **in-process only**, so a subprocess
+  walked straight through and the control could not see it, because it inspected a module
+  attribute the child never consults. Fixed with `monkeypatch.setenv`.
+- **`--print` CANNOT VERIFY PICKER-VS-OPEN.** It prints candidates and never shows a picker,
+  so a single URL is consistent with BOTH auto-open and a one-row picker. Any claim about
+  that distinction needs the interactive path, which raises a window.
+
 ## How to verify
 ```bash
-# The 2026-09-03 resolver work, on the deployed artifact (not a checkout)
-python3 ~/workspace/devrc/scripts/mention-open.py --print 'talos-infra#1065'   # civitai/talos-infra
-# 🔴 Since #1328 there is no namesake search, so an unresolvable name REFUSES (exit 1) and
-# names BOTH causes — the flag, and the mapping's state — rather than printing candidates.
-python3 ~/workspace/devrc/scripts/mention-open.py --print 'kubernetes#1'       # exit 1, named reason
-python3 ~/workspace/devrc/scripts/mention-open.py --print 'zzz-no-such-repo#1' # exit 1, named reason
-# The six-digit branch: a colour literal is answered, not asked about (exit 1, named toast).
-python3 ~/workspace/devrc/scripts/mention-open.py '#282828'
+# The click path, on the deployed artifact (mention-open runs from the WORKING TREE,
+# so `git pull` alone changes it — only the telemetry half needs a switch)
+time python3 ~/workspace/devrc/scripts/mention-open.py --print 'dashboard#12'   # ~0.09s
+python3 ~/workspace/devrc/scripts/mention-open.py --print 'talos-infra#1065'    # civitai/talos-infra
+python3 ~/workspace/devrc/scripts/mention-open.py --print '#1291'               # clawgate task
+python3 ~/workspace/devrc/scripts/mention-open.py --print '#282828'             # names the colour reason
 
-# The premise correction — this MUST resolve, it is not a gap
-python3 ~/workspace/devrc/scripts/mention-open.py --print 'innovation-upstream/devrc#1291'
-
-# The prefilter that makes new patterns inert — read it before adding any
-grep -n '_MENTION_HINTS' ~/workspace/devrc/scripts/collector/claude/session-tailer.py
+# Which half needs a switch — readlink is the arbiter, never a diff
+readlink -f ~/.config/alacritty/alacritty.toml            # /nix/store/... -> needs a switch
+readlink -f ~/.config/activity-collector/mention_scan.py  # /nix/store/... -> needs a switch
 
 # The mapping is per-host, untracked, 0600
 ls -l ~/.config/mention-open/known_repos.json
 git -C ~/workspace/devrc ls-files | grep -c 'collector/known_repos'   # must be 0
 
-# The disclosure guard, including its own positive control
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_regen_known_repos.py -q -k "published or detector_FIRES"
+# The committed mutation battery (re-runnable, unlike round 1's)
+nix develop ~/workspace/devrc -c python3 ~/workspace/devrc/scripts/tests/mutation_battery_mentions.py
 
-# In-flight work: is the agent's PR up, and is the claim still held?
-gh pr list --repo innovation-upstream/devrc --state open --search 'mention in:title'
-claim-work --list | grep mention-attribution
-
-# Both hosts on the same sha (they were NOT at the time of writing)
+# Both hosts on the same sha
 git -C ~/workspace/devrc rev-parse --short HEAD
 ssh zach@192.168.50.155 'git -C ~/workspace/devrc rev-parse --short HEAD'
 ```

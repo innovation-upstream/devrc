@@ -126,7 +126,59 @@ in
       # ------------------------------------------------------------------- #
       # 2. MENTIONS — clawgate tasks, GitHub issues/PRs, ClickUp task ids
       # ------------------------------------------------------------------- #
-      # Matches `#370`, `devrc#591`, `civitai/talos-infra#1065`, `868abc123`.
+      # Matches `#370`, `devrc#591`, `civitai/talos-infra#1065`, `868abc123`,
+      # `audit-pr 1291` and `/audit-pr 1291`.
+      #
+      # 🔴 THE `audit-pr` ALTERNATION IS HALF OF A TWO-FILE FIX, AND EITHER HALF
+      # ALONE IS INERT. `mention_scan.py`'s PATTERN_LEDGER decides whether the
+      # handler will RESOLVE the shape; this regex decides whether the terminal
+      # UNDERLINES it, and unhighlighted text cannot be clicked no matter what
+      # the handler would do. MEASURED before the change: the scanner returned
+      # `[]` for `audit-pr 1291` at the terminal profile AND this regex matched
+      # nothing in it — two independent blockers, so fixing one would have
+      # shipped a feature that was 100% dead and tested green at the unit level.
+      # `test_alacritty_hints.py::test_every_TERMINAL_shape_the_scanner_detects_
+      # is_also_UNDERLINED` drives every ledger sample through THIS regex, so the
+      # two halves cannot drift apart again.
+      #
+      # ⚠ ONLY `audit-pr N`. Not `gh pr view N`, not `gh issue close N`, not
+      # `clawgate task N`, not `#task-N` — those stay telemetry-only on purpose:
+      # they are COMMANDS the operator typed, and underlining a command line is
+      # noise on text where clicking is useless. `audit-pr N` is a REFERENCE
+      # FORM. The reasoning lives once, on the ledger row.
+      #
+      # ⚠ `{1,6}` HERE MIRRORS THE `#[0-9]{1,6}` BOUND ABOVE, FOR THE SAME
+      # REASON. The scanner accepts `\d{1,5}` with a trailing-digit guard that
+      # this engine cannot express. A `{1,5}` bound would underline the first
+      # FIVE digits of `audit-pr 123456` and hand `audit-pr 12345` to the
+      # handler, which would open PR 12345 — a confident wrong page. `{1,6}`
+      # swallows the whole run instead, and the handler's strict scanner then
+      # rejects it and says so. Same loose-regex/strict-handler contract.
+      #
+      # ⚠ RESIDUAL, STATED RATHER THAN HIDDEN, AND THE LIKELIER HALF IS THE PATH
+      # FORM. This engine has no lookbehind, so the scanner's
+      # `(?<![0-9A-Za-z_/&#.-])` left guard cannot be written here. MEASURED
+      # against this exact pattern:
+      #
+      #   'scripts/audit-pr 12'        underlines '/audit-pr 12'   -> RESOLVES
+      #   'claude/skills/audit-pr 12'  underlines '/audit-pr 12'   -> RESOLVES
+      #   'myaudit-pr 12'              underlines 'audit-pr 12'    -> RESOLVES
+      #
+      # The `/?` that makes the deliberate `/audit-pr N` slash-command form
+      # clickable is what swallows a PATH separator, so any `…/audit-pr` followed
+      # by a number underlines — and this repo HAS a `claude/skills/audit-pr/`
+      # path, so unlike `myaudit-pr` the trigger string genuinely occurs here.
+      # The handler cannot recover the preceding character (the hint hands it the
+      # matched span only), so this is genuinely looser than the scanner rather
+      # than merely noisier.
+      #
+      # It is accepted, not overlooked: the damage is a stray underline on text
+      # a click resolves to a real PR number that WAS written on the line, and
+      # `main()` no longer auto-opens on a repository it guessed (see
+      # `mention-open.py`'s `repo_source == "default"` branch), so the worst case
+      # is a picker nobody asked for rather than a wrong page. The `#`
+      # alternation above has carried the identical residual since it shipped
+      # (`index.html#12` underlines `html#12`).
       #
       # 🔴 THIS REGEX IS DELIBERATELY LOOSER THAN THE SCANNER, AND THAT IS THE
       # DESIGN, NOT A BUG. Rust's regex crate has NO lookaround, so the
@@ -150,7 +202,7 @@ in
       # `hyperlinks = false` — an OSC-8 escape hyperlink is a URL; matching
       # mentions against them would route a URL into the mention handler.
       {
-        regex = "(?:[A-Za-z0-9][A-Za-z0-9-]*/)?(?:[A-Za-z0-9][A-Za-z0-9_-]*)?#[0-9]{1,6}|868[a-z0-9]{6}";
+        regex = "(?:[A-Za-z0-9][A-Za-z0-9-]*/)?(?:[A-Za-z0-9][A-Za-z0-9_-]*)?#[0-9]{1,6}|868[a-z0-9]{6}|/?audit-pr[ \\t]+[0-9]{1,6}";
         command = "${mentionOpen}";
         hyperlinks = false;
         post_processing = false;
