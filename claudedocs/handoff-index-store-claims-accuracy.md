@@ -46,11 +46,46 @@ leading hypothesis about the flake**.
   grammar, so a real closure was declaring nothing and showing no badge.
   `cairn validate --scope devrc`: **30 of 30 parse, 0 malformed**.
 
-🔴 **NEW, and `ship.sh` structurally CANNOT fix it — `drift-check.sh` rc 17.** The laptop's
-`homelab-talos/containers/clawgate` **built-source subtree is 18 commits behind** its own
-upstream (repo-wide 223 behind). `nix/pkgs` builds `clawgatectl` from that TREE, so the
-laptop's binary is stale code whatever version string it reports. `ship.sh` is scoped to
-`~/workspace/devrc` and will never touch it. Now rank 2.
+✅ **CLOSED 2026-09-06 — the old rank 2, `drift-check.sh` rc 17.** Both hosts pulled
+`homelab-talos` and switched; `drift-check.sh` now reports `stale=0 / SRC-RC=0` on BOTH,
+and the cross-host comparison went `differing=1` → **`same=2 differing=0`** (both hosts
+now on subtree tree OID `b91ee22de0a3`). The run exits **16**, which is `ACTIONABLE (not
+drift)` — the fuzzyclaw phase-2 gate, the least severe code, so it can only be the verdict
+on an otherwise-clean run.
+
+🔴 **TWO CORRECTIONS TO WHAT THIS DOC RECORDED — found by re-measuring before acting, and
+both would have left the defect half-fixed.**
+- **The WORKBENCH was stale too.** This doc named only the laptop; at 2026-09-06 the
+  workbench's `containers/clawgate` subtree was **2 behind** and its `homelab-talos` tree
+  DIRTY (11 paths, all untracked, none under `containers/clawgate`). Fixing only the
+  ranked host would have cleared nothing — rc 17 is set per-host and the workbench arm
+  would still have fired.
+- **The laptop had drifted further:** **24** behind on the subtree (repo-wide **245**), not
+  the 18 / 223 recorded here on 09-01. The number in a handoff ages; re-read it.
+
+🔴 **MEASURED: the version string is NOT a currency signal, and the workbench proves it.**
+`clawgatectl.nix` derives `version` from the compiled source's own `var buildVersion`, which
+is exactly what makes a version label look authoritative. On the workbench the label did
+**not move** — `0.8.27` before and after — while the store path changed
+`m9f7lv7gnry112rys3vlm8xg7dach09h` → `pmj808bsn79my8w47gqj0mhahm0hsi2r`. So the workbench had
+been running **different code under an identical version label**, and any check comparing
+version strings across hosts would have called it converged. The laptop moved visibly
+(`0r1g23jm…-0.8.23` → `l1yqi1vi…-0.8.27`) only because a version bump happened to fall inside
+its 24-commit gap. **The store path is the discriminating evidence; the version string is
+not.**
+
+**Verified at the CONSUMER, not at the deploy** (a switch reporting success is a claim about
+the switch): on both hosts the resolved store path changed, `task --help` works (the exact
+capability whose absence was the 0.7.95 incident), and a live API round-trip returns
+**rc 0 with stderr 0 bytes** — no version-skew notice, so both binaries match the server's
+`/health` version by the exact equality `client.go` enforces. Both hosts' stdout was
+byte-identical in size (4,224,053). ⚠ The first skew reading was taken from a merged
+`2>&1 >/dev/null` capture and was **not evidence** — JSON appeared in the supposed stderr.
+Redone with each stream to its own file, which is the only reading quoted above.
+
+⚠ **The workbench's 11 untracked paths were preserved** (`git status --porcelain | wc -l`
+= 11 before and after the pull). The 4 incoming commits were checked against them first;
+`containers/comic-flex-pwa/go.mod` is a different path from the untracked root `go.mod`.
 
 🔴 **NOT VERIFIED, and not claimed:**
 - **The flake is NOT fixed.** #1340 makes the next occurrence diagnosable; it did not
@@ -93,38 +128,6 @@ laptop's binary is stale code whatever version string it reports. `ship.sh` is s
 - **Next probe:** none needed for this thread. If it recurs, read the `verdict` step first —
   `pytests exit 0` + `verdict exit 1` means a test FAILED; a step that emitted no `RESULT:` line
   was KILLED, which is a different problem.
-
-### Entries are still being WRITTEN to the local mirror while the pod is canonical
-- **Symptom + exact repro:** post-Cairn-cutover the pod is the authority and every skill
-  routes writes through `cairn append`/`cairn put`, yet the local mirror keeps changing.
-  `find ~/.claude/analyze-service-index -name '*.md' ! -name README.md -newermt '-1 day'`
-- **Observed (with values):** `~/.claude/analyze-service-index/devrc/tests.md` — mode
-  `-r--r--r--`, mtime **2026-09-02 10:39:27**, carrying a new `- 2026-09-02:` bullet;
-  autocommitted at **2026-09-02T11:04:10 `e2f21cf`**; working copy == HEAD. The
-  `analyze-service-index-commit.timer` is **active** (ran 10:07, next 11:04). All **16 of
-  16** scopes are still git repos with commits through `2026-09-02T03:01`. Entry-file mode
-  census: **141/141 at 0444** — the single 0644 `.md` in the tree is the store-root
-  `README.md`, not an entry.
-- **Ruled out:** "the local mirror is frozen / inert / no longer a git repo" — the store
-  ROOT has no `.git`, but all 16 scopes do, the commit timer is live, and content changed
-  today.
-  via: measurement
-- **Ruled out:** "the 0444 freeze prevents local writes" — a file at 0444 gained a bullet
-  today and is still 0444.
-  via: measurement
-- **Ruled out:** "it is the naive temp-file-and-rename bypass" — measured in a replica
-  (0755 dir, 0444 file): rename succeeds and leaves the file **0644**. The live file is
-  still 0444, so whatever wrote it preserves or restores the mode.
-  via: measurement
-- **Leading hypothesis:** a local writer that handles the mode deliberately — either it
-  chmods around the freeze, or something syncs pod→local. Not yet identified. The
-  consequence is the part that matters: two authorities are accumulating divergent content,
-  which is a stronger reason not to run `seed.sh` than the staleness the previous doc
-  assumed.
-- **Next probe:** identify the writer, not the mechanism:
-  `git -C ~/.claude/analyze-service-index/devrc show e2f21cf -- tests.md` for what landed,
-  then `inotifywait -m -e close_write,moved_to ~/.claude/analyze-service-index/devrc/`
-  across one write to catch the process.
 
 ### RESOLVED — "entries are still being WRITTEN to the local mirror while the pod is canonical"
 - **Symptom + exact repro:** entries kept changing under `~/.claude/analyze-service-index/`
@@ -370,9 +373,12 @@ laptop's binary is stale code whatever version string it reports. `ship.sh` is s
 
 ## Next steps (ranked)
 
-🔴 **Renumbered.** Old rank 4 (`ship.sh`) is DONE and old rank 8 was already closed, so the
-list is re-based. No `claim-work` claim was live against this doc when it was rewritten
-(`claim-work --list` showed none for this slug), so no claim was re-pointed.
+🔴 **Renumbered TWICE — check a rank against the item's TEXT, never against a number you
+remember.** First pass: old rank 4 (`ship.sh`) DONE and old rank 8 already closed. Second
+pass (2026-09-06): old rank 2 (`clawgatectl` built-source drift, rc 17) is CLOSED on both
+hosts, so 3–7 became 2–6. The claim `index-store-claims-accuracy-2` was taken for that work
+and released on completion; a future session claiming rank 2 gets the **cairn-cutover P3**
+item, not the drift one.
 
 1. **The co-tenant flake is still UNFIXED — diagnosable, not diagnosed.** `devrc`,
    `scripts/tests/test_git_repo_isolation.py`. Do not close it by re-running; do not
@@ -381,44 +387,54 @@ list is re-based. No `claim-work` claim was live against this doc when it was re
    forcing: gate — it reds the sandbox tier non-deterministically, and the only reason
    #1304 merged through it was a human re-running and reading both results.
 
-2. **The laptop's `clawgatectl` is built from source 18 commits stale** (`drift-check.sh`
-   rc 17). Fix on that host: `git -C ~/workspace/homelab-talos pull --ff-only` then a
-   home-manager switch. 🔴 Not a devrc change and `ship.sh` will never do it.
-   forcing: regression — a deployed binary whose code is not the code its version string
-   implies, on a host that looks converged by every other measure.
-
-3. **Decide `cairn-cutover.py` P3.** It invokes `seed.sh` WITHOUT `--allow-overwrite`
+2. **Decide `cairn-cutover.py` P3.** It invokes `seed.sh` WITHOUT `--allow-overwrite`
    (`cairn-cutover.py:1379-1382`) over an ADD + SUPERSEDES + MERGED set, where
    SUPERSEDES/MERGED are BY DEFINITION entries whose pod bytes differ. 🔴 #1304 made this
    WORSE: the new NAME-CHECK is a SECOND refusal P3 can hit. Either pass the flag or
    declare P3 dead post-cutover.
    forcing: regression — a shipped code path that can never complete.
 
-4. **Fix the opencode blindness in `scripts/lib/clawgate_handoff.sh`.** Diagnosed (squash
+3. **Fix the opencode blindness in `scripts/lib/clawgate_handoff.sh`.** Diagnosed (squash
    `13775144`), NOT fixed. It reads only `CLAUDE_CODE_SESSION_ID`;
    `grep -c OPENCODE_SESSION_ID` is **0**. Detached opencode ⇒ exit 3 forever; NESTED
    opencode inherits the outer Claude session's id ⇒ exit 0 with **another session's
    tasks**.
    forcing: regression — the nested path silently misattributes today.
 
-5. **Verify the dash premise against the DEPLOYED pod image**, read-only. The whole
+4. **Verify the dash premise against the DEPLOYED pod image**, read-only. The whole
    `seed.sh` guard rests on `/bin/sh` being dash there; that was measured against the
    `Dockerfile`'s `FROM`, never the running pod.
    forcing: none
 
-6. **Decide the token allowlist for the 2 remaining local-only entries**
+5. **Decide the token allowlist for the 2 remaining local-only entries**
    (`civitai-app-requests`, `civitai-developer-docs`). `cairn create` answers `not-found`;
    neither scope is in this token's allowlist. Widening it edits the k8s secret and needs a
    pod delete (the token file is read ONCE at startup).
    forcing: none
 
-7. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
+6. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
    **0** occurrences of `policy:` in `service_recon.py` on `origin/main`. 🟡6: `--template`
    over an EXISTING entry prints the first-ever-file template and exits 0 silently,
    destroying an `OPEN:` bullet.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
+- 🔴 **A VERSION STRING DERIVED FROM THE COMPILED SOURCE IS STILL NOT A CURRENCY SIGNAL.**
+  `clawgatectl.nix` reads `version` out of the very `client.go` it compiles — the design that
+  exists so a label cannot lie about its code — and the workbench STILL sat 2 commits stale at
+  a label identical to current (`0.8.27` both sides), because the incoming commits changed
+  `internal/ui/*` without bumping `buildVersion`. Derivation-from-source guarantees the label
+  is not FABRICATED; it guarantees nothing about being CURRENT. Compare the resolved
+  `/nix/store` path, or the subtree tree OID — both moved when the label did not.
+- 🔴 **A PER-HOST CONDITION NAMED FOR ONE HOST IS A SCOPE CLAIM, AND IT AGED WRONG.** This
+  doc's rank 2 said "the laptop"; five days later the workbench was stale too and the laptop's
+  gap had grown 18 → 24. Fixing exactly what the ranked item named would have left rc 17
+  firing and read as a failed fix. **Re-run the detector and fix what IT names**, not the host
+  the doc remembers — the detector reports per-host and the doc does not.
+- ⚠ **A merged `2>&1 >/dev/null` capture is not a stderr reading** — hit here checking for a
+  version-skew notice, and JSON appeared in the "stderr" half. Each stream to its own file is
+  what turned it into evidence (`stderr bytes: 0`). The rules name this exact shape; it was
+  walked into anyway, which is the argument for the file-per-stream habit over care.
 - 🔴 **The sweep needed THREE widenings and each read as complete.** `no off-machine backup` → 12;
   `unbacked-up` → 19 more, **10 in files the first pass had already edited** (incl. a section
   HEADING 32 lines below a bullet it had just corrected, and a live `RuntimeError` string);
@@ -777,6 +793,16 @@ git -C "$d" count-objects -v | head -2                                          
 
 # both hosts converged, and AGREEING on one sha is the claim that matters
 bash ~/workspace/devrc/scripts/drift-check.sh 2>&1 | grep -E '^\[(workbench|laptop)\].*(BEHIND|VERIFIED|DRIFT)'
+
+# the closed rank 2: built-source currency. Expect stale=0 on BOTH hosts and same=2 differing=0.
+# rc 16 (fuzzyclaw phase-2) is ACTIONABLE-not-drift and is the least severe code, so seeing it
+# means the run was otherwise clean. rc 17 here would mean a host regressed.
+bash ~/workspace/devrc/scripts/drift-check.sh 2>&1 | grep -E 'source repos:|^\[srcrepo\] compared='
+
+# the binary is the code, NOT the label — the label did not move on the workbench.
+# Compare the resolved store path, and require an empty stderr (a skew note would appear there).
+P=$(readlink -f ~/.nix-profile/bin/clawgatectl); echo "$P"                          # …-clawgatectl-0.8.27
+"$P" task ls > /tmp/cg.out 2> /tmp/cg.err; echo "rc=$? stderr=$(wc -c < /tmp/cg.err)"   # rc=0 stderr=0
 
 # the index is well-formed after this session's writes
 cairn sync && cairn validate --scope devrc 2>&1 | grep -E '^OK|malformed'           # OK — N of N parse
