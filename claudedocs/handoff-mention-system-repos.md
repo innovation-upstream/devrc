@@ -17,74 +17,70 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Expand the mention system (`mention-open.py`) so clicking `repo#N` in Alacritty resolves against ALL repos the operator contributes to, not just those checked out locally in `~/workspace/`.
 
 ## State now
-**The whole mention effort is SHIPPED.** Four PRs merged and deployed to both hosts:
-`#1291` (`fd68d48c`) resolver · `#1313` (`3c324156`) detection widening + attribution ·
-`#1322` (`a75ffc6a`) alacritty copy-on-select · `#1328` (`3f4d9c0f`) local-first click path.
-Both hosts converged and **compared** at `3f4d9c0f`; `ship.sh` reports
-`NO dirty path is read by nix`, so the artifacts genuinely match — the host divergence this
-doc used to record is CLOSED.
+**The mention effort is COMPLETE and SHIPPED — six PRs.** `#1291` (`fd68d48c`) resolver ·
+`#1313` (`3c324156`) detection widening + attribution · `#1322` (`a75ffc6a`) alacritty
+copy-on-select · `#1328` (`3f4d9c0f`) local-first click path · `#1336` (`d790786a`)
+disclosure guard on KEYS + `audit-pr N` clickable · `#1331` (`8b173b05`) handoff.
 
-**Operator click-test 2026-09-05 — the first end-to-end evidence this feature ever had.**
-`talos-infra#1065` opened correctly. Two defects came out of it, both now fixed:
-- `dashboard#12` took ~10 s. **Not a performance problem — a lookup-order one.** The click path
-  searched ALL of GitHub before ever consulting the operator's own 369-repo mapping, for a name
-  the mapping does not hold. Measured 4.26 s at 6% CPU (pure network wait), returning only
-  strangers' repos. **Fixed in #1328 by deleting the GitHub-wide search**: the candidate
-  universe is now the local allowlist only. **Measured on the deployed artifact: 4.26 s →
-  0.086 s.**
-- A bare `#N` appeared broken. **It was not** — `#1291`/`#370`/`#12` all resolved. The operator
-  had clicked `#282828`, the gruvbox background literal, which the six-digit guard correctly
-  rejects. The message (`no mention in the clicked text`) made correct behaviour read as a bug;
-  it now names the reason.
+Both hosts converged and **compared** at `8b173b05`; `ship.sh` reported `NO dirty path is
+read by nix`. ⚠ `main` has since moved to `3f8c81bb` via OTHER sessions' work — that is not
+this effort's and needs no action here.
 
-⚠ **The click path has changed materially since that test** (local-first, picker-on-failure,
-six-digit toast) — so ranked item 1 is worth ONE more pass, and it is still the only
-end-to-end evidence nobody can produce but the operator.
+**Two full audit ladders ran, each to a clean stop.** #1313: round 1 → 5 findings → fix →
+round 2 safe-to-merge. #1328/#1336: round 1 → 3 findings → fix → round 2 found one 🔴 (below)
+→ fixed → merged.
 
-🔴 **Tekton's `devrc-pytests` check is RED for reasons unrelated to any diff, and #1328 was
-merged past it.** It fails on `test_mjs_parses[attachments.mjs]`. Evidence it is inherited:
-the same leg is red on **#1326, which is a single markdown file** and cannot reach `.mjs`
-parsing; and the test passes on clean `main`, on the PR branch head, AND in the local nix
-sandbox tier — three environments. Per this repo's own rule a permanently-red gate trains
-everyone to click through, which is exactly what happened here. **Someone should fix or
-retire that leg**; it is not this effort's to own, and it is not evidence about this work.
+**Measured on the deployed artifact:** `dashboard#12` **4.26 s → 0.086 s**.
+`talos-infra#1065` opens; bare `#1291` → clawgate task; `#282828` names the colour reason.
+
+⚠ **What is NOT verified**: the `repo_source == "default"` picker suppression could not be
+confirmed on the deployed copy, because `--print` prints candidates and never shows a
+picker — it cannot distinguish auto-open from one-row-picker. It was verified by the fix
+round and independently by the round-2 auditor, but not end-to-end by a human click.
 
 ## Open investigations — live diagnosis state
 (none — the disclosure is a known, measured state awaiting an operator decision, not a
 diagnosis in progress.)
 
 ## Next steps (ranked)
-1. **Exercise the Alacritty click path once more** — the code changed after the 2026-09-05
-   test. Plain left-click (`mouse.enabled = true`, no mods; `Ctrl+Shift+M` for the keyboard
-   route). `talos-infra#1065` → opens. `dashboard#12` → picker in ~80 ms, from YOUR repos.
-   `#282828` → named toast, no window raised. A bare `#N` with no resolvable pane repo →
-   picker with the clawgate task first.
+1. **Exercise the Alacritty click path** — the ONLY end-to-end evidence still missing, and
+   the code has changed twice since the last operator test. Plain left-click.
+   `talos-infra#1065` → opens. `dashboard#12` → picker in ~80 ms from YOUR repos.
+   `#282828` → named toast, no window. Bare `#N` with no pane repo → picker, clawgate first.
+   🔴 **`audit-pr 1291` → a ONE-ROW PICKER, not a direct open** — this is the change most
+   worth eyeballing: it trades a keystroke for the "never a confident wrong page" invariant.
    🔴 NEEDS A HUMAN — clicking raises windows, a `pkill`-class action for an agent.
    forcing: none
-2. ~~Staleness signal for `known_repos.json`~~ — **DONE in #1328**, and deliberately a SIGNAL,
-   not a timer: `regen-known-repos.py` exits 3 below its 25-repo floor, so a systemd timer
-   would be a permanently-red unit and a failure toast on any host without `gh auth`.
-   `mapping_age_days()` feeds the picker note and a `--print` refusal note past
-   `STALE_MAPPING_DAYS = 7`; `None` (absent) is never treated as fresh. Kept numbered so
-   ranks do not re-point.
+2. ~~Staleness signal for `known_repos.json`~~ — **DONE in #1328**, as a SIGNAL not a timer.
    forcing: none
-3. ~~Commit the workbench's `save_to_clipboard` WIP~~ — **DONE in #1322** (`a75ffc6a`).
-   🔴 This item was STALE for hours and told the next session to redo merged work — a
-   round-2 audit caught it. The "latent rc 7 for the next ship that touches this file"
-   warning was false, and pointed at the very PR that had already fixed it.
+3. ~~Commit the `save_to_clipboard` WIP~~ — **DONE in #1322** (`a75ffc6a`).
    forcing: none
 4. ~~Review, gate and merge the detection/attribution PR~~ — **DONE** (#1313).
    forcing: none
-5. ~~Fix `scripts/collector/README.md`~~ — **DONE in #1321**, which also fixed two
-   restatements of the retired invariant inside `session-tailer.py`.
+5. ~~Fix `scripts/collector/README.md`~~ — **DONE in #1321**.
    forcing: none
-6. **Close the two guard gaps round 2 found** (devrc; `scripts/mention-open.py` +
-   `scripts/tests/test_mention_open.py` + the battery). IN FLIGHT: see the open PR.
-   (a) the staleness note is unreachable on the non-`--print` refusal path — measured 220
-   combinations, 110 refusals, **0 branch hits**; (b) the disclosure tripwire iterates
-   universe VALUES and never KEYS, so a "did you mean?" mutant leaking every private repo
-   NAME survives 127/127.
+6. ~~Close the two guard gaps round 2 found~~ — **DONE in #1336** (`d790786a`), and the
+   audit was WRONG about one of them; see gotchas.
    forcing: none
+7. **Clear the four 🟢 left by #1336's round-2 audit** (devrc; `scripts/tests/
+   test_mention_open.py`, `scripts/collector/mention_scan.py`, `test_session_tailer.py`).
+   All prose/coverage-claim, no behaviour: (a) `test_the_one_row_picker_..._SAYS_WHY`
+   claims the note "NEVER names a repository" but only checks universe tokens — a mutant
+   naming the *pane-guessed* repo leaves all 401 tests green; (b) counts that do not
+   resolve — "Four tests drive `_run()`" is five then seven, a `mention-open.py:135`
+   reference that is now 141, and a `` `_load_handler` `` that does not exist anywhere;
+   (c) a comment claiming three sinks are "the WHOLE list" thirty lines after another says
+   the note "goes to rofi"; (d) the autouse fixture closes `MENTION_OPEN_KNOWN_REPOS` for
+   subprocesses but `DEVRC_WORKSPACE` is still per-test — the next `_run()` test with digits
+   and no `--no-discovery` fans out over the real `~/workspace`.
+   forcing: none
+8. **Fix or retire Tekton's `devrc-pytests` leg** (not this effort's; needs an owner).
+   MEASURED 2026-09-05: red on `test_mjs_parses[attachments.mjs]` for PR #1328 **and** for
+   #1326, which is a single markdown file and cannot reach `.mjs` parsing. The same test
+   passes on clean `main`, on the PR branch head, and in the local nix sandbox tier — three
+   environments. #1328 was merged past it.
+   forcing: gate — a check red for every PR trains everyone to click through, which this
+   session then did; `claude/RULES.md` calls a permanently-red gate worse than none.
 
 ## Gotchas / decisions / dead-ends
 - `--no-discovery` flag intentionally skips the static mapping (Pass 2 only). This is by design: the flag means "resolve only what the text itself carries."
@@ -275,6 +271,62 @@ diagnosis in progress.)
 - **rofi cannot distinguish "typed a name, nothing matched, Escape" from "changed my mind"** —
   `-no-custom` makes both a non-zero exit with no selection. So the diagnosis goes ABOVE the
   list as `-mesg` rather than being toasted after every dismissal.
+
+- 🔴 **THE MERGED-TREE GATE CAUGHT A RED `main` NEITHER BRANCH COULD SEE.** `origin/main`
+  collected **12818** and the PR head **12806** — both under the 12836 `scripts/tests` drift
+  ceiling — while the MERGE collected **12843** and crossed it. Both tiers agreed; 12843
+  passed, 0 failed. This is the same shape as the 2026-08 case recorded beside the floor
+  entry (`alone (10137 and 10112); the SUM crossed it`), one merge later. **Neither side is
+  over alone, so only a merged-tree gate can see it.** Fixed by raising the floor to
+  `"scripts/tests|12793"` — **the number the gate printed itself**, and pinned AFTER merging
+  `main` into the branch, per the ORDER note beside it (pinning first lands the branch under
+  its own new floor and trades a merge-time failure for a branch-time one).
+- 🔴 **`nix build path:<a worktree>` DEFEATS THE SANDBOX'S GIT-CONFIG ISOLATION.** MEASURED:
+  the sandbox pytest leg failed `RESULT: FAIL (exit=2)` on
+  `run-tests: FATAL — 'git config --global' does NOT write to this run's isolated file`,
+  **before any test ran**, and it reproduced. Cause was the METHOD, not the tree: `path:`
+  copies the worktree's `.git`, which is a **FILE** pointing at the real git dir, not a
+  directory. The identical commit content extracted with `git archive` (no `.git`) passes.
+  The rules document this hazard for `cp -a` copies of worktrees; **`nix build path:` is a
+  second door to it.** Gate a worktree by extracting it first.
+- 🔴 **AN "0 HITS OVER 220 COMBINATIONS" MEASUREMENT SUPPORTED A FALSE CONCLUSION.** A round-2
+  audit called the `refuse()` staleness arm dead code, citing 220 mapping-state × text × flag
+  combinations producing 110 refusals and **0 branch hits**, and deleting it left the suite
+  green. It was relayed here as fact and was WRONG. The branch is reachable: `discover_repos`
+  **overwrites**, and `parse_owner_repo` is looser than `OWNER_REPO_VALUE_RE`, so a checkout
+  whose directory name shadows a mapping key writes an invalid row. Independently reproduced
+  with a real `git init` + real remote, and the realistic case is **sourcehut's own
+  `~user/repo` form** — `https://git.sr.ht/~sircmpwn/aerc` → `~sircmpwn/aerc`; six of seven
+  remote URL forms tested reach it. **A sweep measures the shapes it CONSTRUCTS**; zero hits
+  cannot distinguish unreachable from not-constructed.
+- 🔴 **A DISCLOSURE GUARD WAS BLIND TO THE OWNER HALF — THE HALF THAT NAMES THE CLIENT.**
+  `session-tailer.py`'s spool guard covered keys and full `owner/repo`, not bare owners.
+  Measured: a keys-leak mutant **KILLED**, an owners-leak mutant **SURVIVED** with the suite
+  reporting clean, and a positive control confirmed the owner names really reached the spool.
+  Its sink is a **durable ClickHouse table**. Of the 232 names in the #1283 disclosure, 167
+  were a client's — client identity IS the owner half. Fixed with a derived four-spelling
+  ledger; K43 re-run at BOTH trees shows SURVIVED → KILLED.
+- 🔴 **THE MUTATION INSTRUMENT HAD THREE SEPARATE DEFECTS, ALL FOUND THIS EFFORT.** (a) a
+  mutant that made the handler UNIMPORTABLE scored SURVIVED, because the sanity floor ran
+  only on the CONTROL; (b) the failure count came from the first `N failed` match anywhere,
+  and the tailer's own `emitted=1 failed=0` output contains `1 failed` — so `emitted=0
+  failed=0` would read `nfail=0` over a RED suite and score SURVIVED for a mutant every guard
+  caught; (c) rows scored `KILLED-WRONG-REASON` because an earlier assertion fired with a
+  message naming no hazard. **Every mutation result this subsystem produced rested on that
+  instrument.** All three fixed; the battery is committed and re-runnable.
+- 🔴 **A FIXTURE WHOSE KEYS ARE SUBSTRINGS OF ITS VALUES MAKES A VALUES-ONLY GUARD LOOK
+  TOTAL.** `FAKE_UNIVERSE` and `FAKE_REPOS` both spelled every key inside its own value, so
+  `.values()` guards appeared to cover keys. Both now pairwise-distinct and pinned.
+  ⚠ And a ≥3-element fixture cannot kill a transposition mutant — a 3-element reversal leaves
+  the middle element mapped to itself. Four has no fixed point.
+- 🔴 **NINE tests were reading the operator's REAL `known_repos.json`** (7 `stat`,
+  2 `read_text`, measured with an instrumented `Path`) — not the two first reported. Closed
+  with an autouse redirect; ⚠ its first version was **in-process only**, so a subprocess
+  walked straight through and the control could not see it, because it inspected a module
+  attribute the child never consults. Fixed with `monkeypatch.setenv`.
+- **`--print` CANNOT VERIFY PICKER-VS-OPEN.** It prints candidates and never shows a picker,
+  so a single URL is consistent with BOTH auto-open and a one-row picker. Any claim about
+  that distinction needs the interactive path, which raises a window.
 
 ## How to verify
 ```bash
