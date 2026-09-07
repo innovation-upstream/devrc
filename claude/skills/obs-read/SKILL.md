@@ -23,6 +23,41 @@ genuinely 0 renders normally.
 - Read-only (query APIs only). Bounded timeouts; the port-forward is torn down on
   success, error, and signal.
 
+## Prior work first — the store is keyed the way your query is
+Before an incident/perf dig (not before a one-off number read), ask what a past
+session already diagnosed. The subsystem store is keyed by **metric / service /
+namespace** — exactly what `--preset` and `--query` name — so obs-read's own
+arguments ARE the retrieval keys. Scope is a **function of `--cluster`**, never a
+judgement call:
+
+```bash
+CLUSTER=dpprod                          # the same --cluster you are about to pass
+Q='node_network_receive_drop_total'     # the metric / service / namespace you are about to query
+case "$CLUSTER" in
+  dpprod)                    SCOPE=datapacket-talos ;;
+  homelab|workbench|nebula)  SCOPE=homelab-talos ;;
+esac
+if command -v cairn >/dev/null; then cairn search "$Q" --scope "$SCOPE"; else echo "skipped: cairn unavailable"; fi
+```
+
+- 🔴 **Keep the `if … then … else … fi` form.** `command -v cairn && …` exits
+  non-zero when cairn is absent (1 in bash/zsh, **127 in dash**) and reads as the
+  observability step failing; a bare `if` with no `else` skips SILENTLY. The `else`
+  echo is load-bearing.
+- **No `cairn sync` prefix** — `cairn search` syncs itself; a prefix fetches the
+  whole store twice.
+- 🔴 **Explicit `--scope`, never `--all-scopes`.** `--all-scopes` derives a scope
+  from the cwd's git repo and exits **rc 2** outside one (obs-read is documented to
+  run from any cwd), and it would answer a homelab question out of a CLIENT
+  cluster's scope — §Safety's wrong-cluster trap through a new door. `--scope`
+  needs no git cwd.
+- An empty result is a fact about the QUERY before it is a fact about the store:
+  try the metric, then the service/namespace, then the subsystem (`monitoring`,
+  `prom-stack`, `pyroscope`, `prometheus-stack`) before concluding nothing is recorded.
+- Everything returned is `RECALL, NOT LIVE OBSERVATION` — a remedy that has since
+  landed reads exactly like one that has not. It is a pointer to verify with the
+  query you were going to run anyway, not a substitute for it.
+
 ## Usage
 
 🔴 **Use the ABSOLUTE path — `obs-read` is NOT on `$PATH`, and it lives in the
