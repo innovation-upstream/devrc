@@ -16,48 +16,43 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-🔴 **RANK 5 IS CLAIMED AND AUDITED BUT NOT CLOSED.** Its closing condition is *"a round
-returns no findings, or a named reader dismisses it in writing"* — round 2 returned
-**3 🟡 + 4 🟢**, so the ladder continues. #1185 is already merged, so the fixes are a NEW
-PR, not a fix round on it. Claim `audit-pr-ladder-5` is HELD (mine, taken 2026-09-06).
+🔴 **RANKS 5 AND 6 ARE BOTH CLOSED. Claims `audit-pr-ladder-5` and `-6` are RELEASED.** The
+ladder that began with #1185's unaudited fix round ran to termination and shipped as
+**devrc #1342, squash `08ef1d5a`** (+707/−29 across `scripts/audit-dispatch.py`,
+`scripts/tests/test_audit_dispatch.py`, `scripts/tests/mutants-audit-dispatch.py`).
 
-- **Round 2 of #1185 ran** against `90202ce5..2eaa3c62` (the fix round the doc recorded as
-  UNAUDITED). Brief assembled by `scripts/audit-dispatch.py 1185 --round 2` (rc 0, no
-  refusal — #1185 does carry a round-1 `audit-claims` block). Ledger computed by the
-  auditor because the brief correctly printed `COULD NOT MEASURE`: this checkout was on
-  `c5a445d8`, not the PR's head.
-  **round 2 · payload lines changed THIS round: 114 (61+/53− in `scripts/audit-dispatch.py`)
-  (since round 1: 114 — single fix commit, so this delta IS the whole delta) · elapsed: 2h40m.**
-  `test_audit_dispatch.py` 78/51 classified scaffolding; 243 lines total.
-- **The base rate held and is now SIX of seven.** The doc recorded "a fix introduced a new
-  defect in five of six rounds". Two of round 2's three 🟡s are defects the fix round itself
-  created.
-- **Every claimed MEASUREMENT in the fix round reproduced**: the 127-test control, all three
-  round-1 mutant kills, the 78-test truthy probe for the deleted conditional, and the
-  top-level-`return` refutation (re-measured under a real pty in interactive bash, interactive
-  zsh and `bash <script>`). The shipped payload block is behaviourally correct in all six
-  states walked. The defects are in what GUARDS it and what it TELLS THE READER TO DO.
-- **A separate measurement effort landed and merged: devrc #1316** (`claudedocs/audit-ladder-review-2026-09-04.md`,
-  squash `eac71667`, 495 lines). Gated on the merged tree at base `29a5c77d`, all four legs —
-  dev-host pytest 21,674/0 fail, dev-host node 1,449/0 fail, `nix` pytests 21,674/0 fail,
-  `nix` nodetests 1,449/0 fail — plus a claudedocs-sensitive subset (982 passed) at the newer
-  base `cc7f6254`. Headline: **the payload-attribution gate has NO confirmed firing across
-  309 merged PRs**, and the Q1 "did the stop rule change behaviour" question is **not
-  established** (depth fell but ladder volume tripled underneath it — a confound).
-- **Not measured, still open from #1316:** the waste audit covered `devrc` ONLY. Ladders also
-  ran in `homelab-talos`, `civit-datapacket-talos`, `vetr`, `auditloop`, `civitai-gpu-fleet`,
-  `naida-ai` — none churn-measured, despite "all repos" being the chosen scope.
+- **Rank 5** — #1185's fix round `90202ce5..2eaa3c62` was audited (round 2): **3 🟡 + 4 🟢, no
+  🔴**. Its closing condition ("a round returns no findings, or a named reader dismisses it in
+  writing") was met by way of rank 6 landing the fixes and a further round clearing them.
+- **Rank 6** — #1342 fixed all three 🟡. Then a BLIND first-full audit of #1342 found **2 more
+  🟡**, both measured; those were fixed too, and the fix round after them changed **zero
+  payload lines**.
+- **Gate on the MERGED tree at base `3f8c81bb`, all four legs, and `origin/main` had not moved
+  when they finished:** dev-host pytest 22,003 collected / 22,000 passed / 3 skipped / **0
+  failed** (floor 21,196) · dev-host node 1,449/0 · `nix` pytests 22,003/0, 0 timeout panics ·
+  `nix` nodetests 1,449/0, 0 timeout panics. `nix` derivations built ONE AT A TIME.
+- **Verified by CONTENT, never ancestry** (a squash makes the head a permanent non-ancestor):
+  `shell_code`/`last_command` both present on `origin/main`, both `r19/*` FIX_MATRIX rows
+  present. Base clone re-synced to `08ef1d5a`.
+
+**What actually shipped, and the ratio worth remembering:** the PR's payload — the brief text
+`audit-dispatch.py` emits — is **~13 of 707 lines**. Everything else is the apparatus proving
+it correct. Nine rounds across three PRs produced roughly a dozen lines of corrected prose.
 
 **Carried forward (this section REPLACES, so these live here until they stop being true):**
 - **Preserved WIP from earlier sessions, still untouched — do not delete without reading:**
   `~/workspace/.wip-preserve-discord-embed-2026-08-28/` and
   `~/workspace/.wip-preserve-memory-detail-2026-08-30/`.
-- **The effort's five original PRs, all merged and content-verified** (never by ancestry — a
-  squash makes the branch head a permanent non-ancestor): `#1153` → `018e5761` ·
-  `#1157` → `3e4c447f` · `#1178` → `0aa90f20` · `#1185` → `76d20386` · `#1191` → `a4529101`.
-- ⚠ **Fleet parity was last verified at `a4529101` (2026-09-01) and is now STALE** — `main` has
-  moved many times since (at this writing `88f1bda4`). Re-run `scripts/drift-check.sh`; do not
-  quote the old rc 0.
+- **The effort's original five PRs, merged and content-verified** (never by ancestry):
+  `#1153` → `018e5761` · `#1157` → `3e4c447f` · `#1178` → `0aa90f20` · `#1185` → `76d20386` ·
+  `#1191` → `a4529101`. Then `#1342` → `08ef1d5a`.
+- ⚠ **Fleet parity was last verified at `a4529101` (2026-09-01) and is STALE** — `main` has
+  moved many times since (`08ef1d5a` at this writing). Re-run `scripts/drift-check.sh`; do not
+  quote the old rc 0. **Neither #1316 nor #1342 has been shipped to either host** — both are
+  `claudedocs`/`scripts` changes that `home-manager` does not deploy, but `ship.sh` has not run.
+- ⚠ **Worktree count keeps climbing: 144 registered (2026-09-06), none prunable**, and an
+  external process has now run a real `git worktree remove` against **two** live agents
+  mid-run. Still unowned, still no checkable closing condition.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -752,6 +747,34 @@ retained as DONE markers; do not re-claim them.
   the number moves upward every session that dispatches agents. Several hold named branches
   repo-globally at whatever commit they stopped on.
 
+- 🔴 **`git show $REF:path` in zsh SILENTLY RETURNS THE WRONG BLOB — `:s` is a history
+  substitute modifier.** Hit twice in one session while verifying #1342: `git show
+  $B:scripts/tests/test_audit_dispatch.py` returned a **24 KB patch** instead of the **509 KB**
+  test module, well-formed and with no error. `grep -c '^def test_'` on it read **0** where the
+  truth was 119. **Brace it: `git show "${B}:path"`.** The literal-sha spelling is unaffected,
+  which is what made the two reads disagree and exposed it. This is the documented zsh trap in
+  `claude/RULES.md`, met in the wild.
+- 🔴 **A verification that re-uses numbers from the report it is checking is not a check.** In
+  the same session a "floors verified OK" was computed by running the repo's formula against
+  figures typed out of the agent's own report — arithmetic that could only ever agree with
+  itself. The real check reads `m` FROM THE FILE (106 rows) and then applies the formula.
+- 🔴 **Choose a negative control that CANNOT appear for a legitimate reason.** Post-merge,
+  `grep -c 'Now endswith'` was used to prove the overstated `r18/F1` claim was gone; it returned
+  **1**. Not a failed correction — the corrected row *quotes* the old claim inside an explicit
+  retraction ("THIS ROW USED TO CLAIM … AND THAT OVERSTATED WHAT IT CLOSED"), which is the
+  repo's own convention. A control whose string survives inside the fix is no control.
+- **The `audit-claims` ledger mechanism works and is worth using.** A round-1 block was posted
+  to #1342 by hand (`audit-dispatch.py 1342 --round 1 --emit-claims --audited <sha>`), and
+  `--round 2` then parsed it back and assembled the correct delta range with no refusal. #1316
+  measured this mechanism in use on only **42 of 309** merged PRs.
+- ⚠ **The fix agent REJECTED two pre-validated one-line fixes, with counter-examples from the
+  payload itself** — `"#" not in line` false-REDs on a flake ref (`nix path-info --derivation
+  <w>#checks.<system>.<name>`, one line away in the same file) and on `#` inside quotes;
+  `re.split(r'[;&|]+', …)` splits inside quotes and on the `&` of `2>&1`. Both would have been
+  this ladder's signature shape — wider on one axis, narrower on another. **Handing an agent a
+  validated patch and asking it to apply it is how round N+1 gets manufactured; ask it to
+  re-derive.** Fixing the class instead closed three further latent holes nobody had found.
+
 ## How to verify
 ```bash
 # --- rank 5's audit actually ran against the range the doc names ---
@@ -980,3 +1003,24 @@ claim-work --list | grep audit-pr-ladder-5
 - **Ruled out:** that a maintainer would catch it from context — acting on line 2834 as written
   moves `grep -c` back to the end and reinstates F4's inversion verbatim. via: assumed
 - **Next probe:** none — fix the comment and widen the assertion to require the verdict grep last.
+
+### UNVERIFIED at merge: are #1342's six new control assertions reachable?
+- **Symptom + exact repro:** #1342 added six control assertions pinning both overshoot
+  directions of the new `shell_code()` / `last_command()` parsers, plus the four separators the
+  scanner must recognise. **Nobody checked they are REACHABLE and fail for their OWN reason.**
+  The round-2 delta audit of #1342 was stopped by the operator after clearing items 1–3 and
+  before reaching this one.
+- **Observed (with values):** items 5 and 6 WERE closed by hand against `origin/main`:
+  FIX_MATRIX = **106 rows** read from the file, `MIN_FIX_MATRIX_ROWS = 101`, and the repo
+  formula `106 − min(50, max(1, 106//20)) = 101` agrees. All four rows present (`r18/F1`,
+  `r18/F3` corrected; `r19/A1`, `r19/A2` new).
+- **Ruled out:** that this blocks the merge — the ladder's own attribution gate says otherwise:
+  the fix round preceding the merge changed **zero payload lines** (`scripts/audit-dispatch.py`
+  untouched; `74cb7409..ee201067` = `test_audit_dispatch.py` 249/32, `mutants-audit-dispatch.py`
+  55/0; rc 0, silent stderr), so one further round would have fired the gate. via: measurement
+- **Leading hypothesis:** the assertions are fine — they were written alongside measured
+  attacks — but "a control that passes vacuously is worse than none", so this is genuinely
+  open, not dismissed.
+- **Next probe:** mutate each of the six control assertions individually, under
+  `PYTHONDONTWRITEBYTECODE=1`, and confirm each fails with its OWN message rather than a
+  neighbour's; keep a known-caught mutant as positive control and report the pair.
