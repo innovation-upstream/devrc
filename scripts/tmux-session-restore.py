@@ -981,8 +981,11 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
         # rare race: a stale socket from a SIGKILLed server, or a server with
         # zero sessions", and the FREQUENCY half of that was false: EVERY tmux
         # server has zero sessions for its first ~100ms, and that is precisely
-        # the window `PathChanged=` fires in. So the "exotic" framing described
-        # the single most common way this branch was reached.
+        # the window `PathChanged=` fires in. So the two examples it gave as
+        # exotic were preceded by a state every tmux server passes through, in
+        # the exact window the trigger fires in. (Which of the reachable states
+        # was the MOST common was never measured either — do not add that claim
+        # back in a different spelling.)
         #
         # WHAT IS TRUE, stated at the scope it was measured:
         #   * `PathChanged=` fires on the watched socket being DELETED as well
@@ -1004,8 +1007,9 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
         # 🔴 THE CONCLUSION DOES NOT DEPEND ON THE FREQUENCY, which is why it
         # survives the correction. `OnFailure=` here bypasses DND. A branch that
         # can be reached by a race must not raise an alarm indistinguishable
-        # from a real failure, however often the race happens — one such toast
-        # at 4am trains the operator to ignore the channel. A skip the operator
+        # from a real failure, however often the race happens — an alarm the
+        # operator cannot tell from a real one is an alarm they learn to
+        # dismiss, and this one bypasses DND to reach them. A skip the operator
         # can read in the log is the honest report. Do NOT replace this with a
         # third plausible-sounding reason; if you need the frequency, measure it.
         #
