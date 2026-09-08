@@ -152,10 +152,16 @@ retained as DONE markers; do not re-claim them.
    The fix round before the merge changed ZERO payload lines, so one more round would have
    fired the attribution gate.
    forcing: none
-7. **Decide the `scripts/testlib/**` payload-vs-scaffolding classification and write it into
-   `claude/skills/audit-pr/reference/round-ladder-evidence.md`.** It is the whole of the #1132
-   three-way disagreement, and #1132's own ladder called it BOTH WAYS one round apart.
-   *Closes when* the reference file states the call with its reason.
+7. **DONE (2026-09-08) — the call is SCAFFOLDING, decided once at round 1, by the REVERT TEST.**
+   `#1396` → squash **`e9b665bd`**. The reference file states the call, its reason, the worked
+   case (`nix_units.py` +225 — revert it and all 15 corrected claims still ship) and the named
+   exception (a testlib scanner that IS a repo gate, on a PR whose deliverable is that gate); the
+   rule itself is in the skill body, where rules live. Claim `audit-pr-ladder-7` RELEASED.
+   ⚠ **A finding fell out that is NOT about testlib and is worth more than the call itself:**
+   #1132's ledger printed TWO differently-named numbers ("payload lines" / "executable payload"),
+   so its rounds read as zero *or* non-zero at will — the class never had to flip for the gate to
+   be disarmed. Shipped as **ONE NUMBER, ONE NAME**. The churn for #1132's rounds 6 and 7 was
+   deliberately NOT recomputed, so nothing claims that stop was wrong.
    forcing: none
 8. **Churn-measure the ladders OUTSIDE devrc** — `homelab-talos`, `civit-datapacket-talos`,
    `vetr`, `auditloop`, `civitai-gpu-fleet`, `naida-ai`. #1316's waste audit was devrc-only
@@ -819,6 +825,37 @@ retained as DONE markers; do not re-claim them.
   distinguish a reachable control from one sitting behind an early `return`. The mutation has to
   land on the PARSER, arranged so exactly one control's claim breaks and it is the FIRST to
   fail; the control's own message is then the evidence.
+
+- 🔴 **THE BASE MOVING IS WHAT FOUND THE TWO THINGS A FILE-OVERLAP CHECK COULD NOT.** Gating ranks
+  7+11 took three bases in one session (`57319960` → `65d8bfba` → `b508b684`, then `c59752b8`
+  before the merge). Re-running because the base moved — not because a file overlapped — is what
+  surfaced (a) `94f82796`, which FIXED the `failed=7` I had spent six readings characterising as
+  an inherited red, and (b) open PR #1050 editing the SAME `audit-pr/SKILL.md` my rank-7 change
+  edits. Neither was findable from my own diff. ⚠ **And the treadmill is real**: `main` moved
+  again between the last green and the merge, so the honest close was to gate at a NAMED base,
+  state the delta, merge, and then gate real `main` — not to chase a moving tip forever.
+- 🔴 **SIX READINGS OF AN INHERITED RED, AND THE ANSWER WAS THAT SOMEONE ELSE FIXED IT.** The
+  seven failures reproduced identically on four trees (rank-11 alone dev-host + sandbox,
+  integration dev-host + sandbox) AND on a pristine detached worktree at the unmodified base —
+  which is exactly the control that made "not mine" checkable rather than asserted, and it was
+  worth running. But the *resolution* came from re-fetching, not from more measurement of my own
+  tree. **When a red reproduces at an unmodified base, the next move is to look upstream for a
+  fix in flight, not to characterise it further.** #1389 already had it in CI with a
+  main-without-their-commit control.
+- 🔴 **A `--ff-only` BASE-CLONE SYNC THAT REFUSES IS A FINDING, NOT AN OBSTACLE — and the tell was
+  UNTRACKED files, not a diverged branch.** `~/workspace/devrc` refused to fast-forward because it
+  held **untracked** `nix/system/apply-nebula-relay.sh` and `check-nebula-relays.sh` that
+  `#1272`/`01956bf0` had just landed upstream. Measured before touching anything: both local
+  copies are strictly SMALLER than the merged ones (205 vs 480, 317 vs 360 lines) with older
+  mtimes, and upstream is a structural superset — stale earlier drafts, not newer WIP. **Preserved
+  byte-exact to `~/workspace/.wip-preserve-nebula-basclone-2026-09-08/` and NOT deleted**; the
+  base clone is left 6 commits behind rather than removing another session's files unilaterally.
+  The generalisable half: `--ff-only` refusing on *untracked* paths means upstream now ships a file
+  someone was drafting locally — compare the two before assuming either is the good one.
+- ⚠ **A PR-body trailer appended after the body is already written lands MID-DOCUMENT.** Appending
+  a gate table to a body file that already ended in the `🤖 Generated with` trailer put the
+  trailer in the middle. Caught before `gh pr create`; noted because the same shape applies to any
+  append onto a file with a footer.
 
 ## How to verify
 ```bash
