@@ -1081,7 +1081,10 @@ fi
 #
 # 🔴 WHAT THIS CAN NO LONGER CATCH, stated plainly rather than left to be
 # discovered: deleting up to `min(50, m/20)` tests from a SINGLE target is now
-# silent — up to 50 of scripts/tests' ~1900, 1 of the 13-test i3 suite. The old
+# silent — up to 50 of scripts/tests' 12870 (⚠ this figure read "~1900" and
+# undated until 2026-09-08; it was 6.8x stale, which understates the target and
+# so OVERSTATES the proportion this blind spot covers), 1 of the 13-test i3
+# suite. Re-derive it rather than trusting it — nothing asserts on it. The old
 # exact total went red on a one-test deletion. That precision is what cost
 # eleven reconciliations in a day, and it has never once caught a real deletion;
 # the collapses it exists for — a suite emptied, renamed, dropped from

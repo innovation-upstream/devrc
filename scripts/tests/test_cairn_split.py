@@ -188,16 +188,36 @@ def test_BOTH_sides_import_the_predicate_from_the_module_that_owns_it():
     # reddens on a correct tree reports a problem the tree does not have, and
     # the next author's fix is to weaken the guard. What must hold is that the
     # name resolves to THIS module, not how it was spelled.
+    # 🔴 PARSED, NOT GREPPED — a substring check here was satisfied by PROSE.
+    # MEASURED: replacing `cairn_who.py`'s real import with a locally
+    # re-open-coded predicate plus the comment "this used to import timeouts
+    # and call timeouts.unbounded_timeout_reason(...)" left the substring
+    # version GREEN on a file that no longer imports the predicate at all.
+    import ast
+
     for path in (CAIRN, LIB / "cairn_who.py"):
-        src = path.read_text(encoding="utf-8")
-        from_form = "from timeouts import unbounded_timeout_reason" in src
-        module_form = "import timeouts" in src and (
-            "timeouts.unbounded_timeout_reason(" in src)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        from_form = module_form = calls = False
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.ImportFrom) and node.module == "timeouts"
+                    and any(a.name == "unbounded_timeout_reason"
+                            for a in node.names)):
+                from_form = True
+            elif (isinstance(node, ast.Import)
+                    and any(a.name == "timeouts" for a in node.names)):
+                module_form = True
+            elif isinstance(node, ast.Call):
+                fn = node.func
+                if isinstance(fn, ast.Name) and fn.id == "unbounded_timeout_reason":
+                    calls = True
+                elif (isinstance(fn, ast.Attribute)
+                        and fn.attr == "unbounded_timeout_reason"):
+                    calls = True
         assert from_form or module_form, (
-            f"{path.name} does not take the shared predicate from `timeouts` — "
-            f"neither `from timeouts import unbounded_timeout_reason` nor "
-            f"`import timeouts` + `timeouts.unbounded_timeout_reason(...)`")
-        assert "unbounded_timeout_reason(" in src, (
+            f"{path.name} does not import `timeouts` — neither "
+            f"`from timeouts import unbounded_timeout_reason` nor "
+            f"`import timeouts`")
+        assert calls, (
             f"{path.name} imports the predicate but never calls it — a dead "
             "import is not a guard")
 
@@ -313,18 +333,50 @@ def test_cairn_who_is_deployed_OUT_OF_STORE_like_its_sibling():
         f"`cairn-who` points somewhere unexpected: {assignment.strip()!r}")
 
 
-def test_the_nix_deploy_comment_still_states_why_the_MODE_is_required():
+#: The `cairn` deploy comment's WHY paragraph, whitespace-normalised. Pinned
+#: WHOLE and verbatim: this artifact is PROSE, and every partial predicate tried
+#: against it was walkable by rewording (the withdrawn drafts are listed in the
+#: test below). A cosmetic edit to the comment now fails this test — that cost is
+#: the price of a machine-readable claim, and updating this string is the fix.
+def _normalised_why(block):
+    """The WHY paragraph out of a `#` comment block, or None if it is absent.
+
+    The paragraph runs from the `mkOutOfStoreSymlink is NOT a preference` line
+    to the next bare `#`, with comment markers stripped and whitespace
+    collapsed — so re-wrapping the comment is not a failure, but changing a
+    word is.
+    """
+    lines = block.splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines)
+         if "mkOutOfStoreSymlink is NOT a preference" in ln), None)
+    if start is None:
+        return None
+    para = []
+    for ln in lines[start:]:
+        stripped = ln.strip()
+        if stripped == "#":
+            break
+        para.append(stripped.lstrip("#").strip())
+    return " ".join(" ".join(para).split())
+
+
+NIX_DEPLOY_WHY = (
+    "🔴 mkOutOfStoreSymlink is NOT a preference here — it is REQUIRED. "
+    "`scripts/cairn` reaches its siblings through "
+    '`Path(__file__).resolve().parent / "lib"`, exactly like the opencode CLI '
+    "above. `.resolve()` follows the symlink back to the checkout, so `lib/` is "
+    "found in the repo. A store copy would resolve `__file__` into /nix/store, "
+    "where `lib/` is NOT deployed — the import would fail outright. Only these "
+    "launcher paths are symlinked; `scripts/lib/` must not be deployed, same "
+    "rule as opencode's `lib/`."
+)
+
+
+def test_the_nix_deploy_comment_pins_its_WHY_paragraph_verbatim():
     """The `cairn` deploy comment must keep saying why `mkOutOfStoreSymlink` is
     REQUIRED — a store copy resolves `__file__` into /nix/store, where
     `scripts/lib/` is not deployed, and the client dies on import.
-
-    ⚠ RENAMED, AND NARROWER THAN THE NAME IT HAD. It was
-    `test_the_nix_comment_no_longer_claims_cairn_reaches_cairn_who`, which
-    described an invariant three drafts failed to express — the body now checks
-    something strictly weaker, and the old name would have read as coverage
-    this does not provide. The full account of what is and is not pinned, and
-    why the stronger versions were withdrawn, is in the comment block below;
-    read it before widening this docstring back.
     """
     nix = NIX_HOME.read_text(encoding="utf-8")
     lines = nix.splitlines()
@@ -345,38 +397,38 @@ def test_the_nix_deploy_comment_still_states_why_the_MODE_is_required():
         "requirement it documents is load-bearing, so its disappearance is "
         "the same defect as its going stale")
 
-    # 🔴 WHAT THIS GUARD DOES NOT COVER — stated because reading it as wider
-    # than it is would stop the next person looking, which is worse than no
-    # guard at all.
+    # 🔴 THREE PARTIAL PREDICATES WERE TRIED AND ALL THREE WERE WALKABLE. They
+    # are listed so a fourth is not derived:
     #
-    # The invariant worth pinning is "the comment does not JUSTIFY the deploy
-    # mode by a coupling that no longer exists". Two drafts failed to express
-    # it, and both failures are recorded here so a third is not derived:
+    #   1. a SPELLING check (`"for `cairn_who`" not in block`) — the shipped
+    #      comment says "for the `cairn_who` importers" and passed on the
+    #      inserted "the" alone.
+    #   2. "does the code actually reach it", by substring — satisfied by the
+    #      script's OWN PROSE (`_store_timeout`'s docstring names
+    #      `cairn_who._run`), so the assertion was unreachable. MEASURED: the
+    #      reworded justification left it GREEN.
+    #   3. the same by AST — accurate about the code, still wrong here, because
+    #      it forbids the RETRACTION this comment legitimately carries. A live
+    #      justification and a record of one being removed are the same tokens
+    #      in a different mood.
+    #   4. `"mkOutOfStoreSymlink" in block or "REQUIRED" in block` — MEASURED:
+    #      deleting the whole 473-byte WHY paragraph and leaving
+    #      "# Deployed with mkOutOfStoreSymlink, same as claim-work above."
+    #      kept it GREEN, while the test's NAME claimed the reason was pinned.
     #
-    #   1. a SPELLING check (`"for `cairn_who`" not in block`). Walkable by
-    #      rewording — the shipped comment says "for the `cairn_who` importers"
-    #      and passed on the inserted "the" alone.
-    #   2. deriving "does the code actually reach it" and permitting the
-    #      mention only then. First by substring, which the script's OWN PROSE
-    #      satisfies (`_store_timeout`'s docstring names `cairn_who._run`), so
-    #      the assertion was unreachable — MEASURED: the reworded justification
-    #      left it GREEN. Then by AST, which is accurate about the code and
-    #      still WRONG here, because it forbids the RETRACTION: this comment
-    #      legitimately records that it "used to cite ... for the `cairn_who`
-    #      importers ... all four stale". A live justification and a record of
-    #      one being removed are the same tokens in a different mood, and no
-    #      text predicate available here separates them.
-    #
-    # So this guard asserts only that the comment BLOCK IS STILL THERE. Its
-    # disappearance is a real defect — the requirement it documents is
-    # load-bearing and a store copy silently breaks the lib lookup — and that
-    # much is checkable. Whether its CONTENT still tells the truth is not
-    # pinned by anything, and a human review is what covers it.
-    assert "mkOutOfStoreSymlink" in block or "REQUIRED" in block, (
-        "the `cairn` deploy comment no longer states why the deploy MODE is "
-        "required. A store copy resolves `__file__` into /nix/store, where "
-        "scripts/lib/ is not deployed, and the client dies on import — that "
-        "reason must survive in the comment even when the rest is rewritten.")
+    # So the paragraph is pinned WHOLE, per "when the artifact under test IS
+    # prose, pin the whole normalised string".
+    why = _normalised_why(block)
+    assert why is not None, (
+        "the `cairn` deploy comment no longer contains its WHY paragraph — the "
+        "line beginning `mkOutOfStoreSymlink is NOT a preference here` is gone. "
+        "A store copy resolves `__file__` into /nix/store, where scripts/lib/ "
+        "is not deployed, and the client dies on import.")
+    assert why == NIX_DEPLOY_WHY, (
+        "the `cairn` deploy comment's WHY paragraph changed. If the edit was "
+        "deliberate, update NIX_DEPLOY_WHY in this file to match — the "
+        "paragraph is pinned whole because every partial check of it was "
+        f"walkable by rewording.\n\ngot:      {why!r}\nexpected: {NIX_DEPLOY_WHY!r}")
 
 
 def test_the_SKILL_routes_to_the_binary_not_the_dead_subcommand():

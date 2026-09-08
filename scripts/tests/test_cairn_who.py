@@ -1261,6 +1261,9 @@ def test_the_timeout_predicate_has_exactly_ONE_implementation():
                  REPO_ROOT / "scripts" / "lib" / "cairn_who.py"):
         opencoded = opencoded_sites(path)
         assert opencoded == 0, (
-            f"{path.name} open-codes the timeout predicate at {opencoded} "
-            "site(s) — import `unbounded_timeout_reason` instead so the "
-            "copies cannot drift")
+            f"{path.name} has {opencoded} `isinstance(_, int)` call(s). If any "
+            f"is a timeout check, import `unbounded_timeout_reason` instead so "
+            f"the copies cannot drift. ⚠ This guard cannot tell a timeout check "
+            f"from an unrelated int check — it counts the CONSTRUCT, not the "
+            f"intent — so an unrelated one reddens here too, and the fix for "
+            f"that case is to widen this guard, not to work around it.")
