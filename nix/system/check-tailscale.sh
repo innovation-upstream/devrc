@@ -42,14 +42,36 @@
 # remaining are reported, and expiry being ENABLED AT ALL is treated as an outstanding
 # action, not as a pass.
 #
+# 🔴 AN ABSENT `KeyExpiry` IS AMBIGUOUS AND IS NOT RESOLVED TO "DISABLED". The field is
+# missing in three different situations -- expiry genuinely disabled, the node never
+# authenticated so no node key exists at all, and a build that does not emit it -- and
+# only the first is reassuring. Resolving absence to the reassuring branch printed
+# `PASS keyexpiry : disabled` on a node that had never logged in, for the single item
+# most likely to kill this path silently mid-trip. "Disabled" is now claimed ONLY when
+# the node IS authenticated; otherwise the claim is UNKNOWN (see rc 4).
+#
+# 🔴 AUTHENTICATED IS A FIRST-CLASS STATE, NOT A FAILURE. `apply-tailscale.sh` installs
+# the service and switches; it deliberately does NOT run `tailscale up`, which needs a
+# browser. So immediately after a successful apply the node is configured, running, and
+# has no tailnet identity at all -- backend `NeedsLogin`, no address, nothing
+# advertised, no key. Reporting that as a node-side FAIL made the apply script roll back
+# the config it had just installed. It is rc 4.
+#
 # Exit: 0 = every claim holds, including admin-console approval and disabled key expiry
 #       3 = everything THIS HOST controls is correct, but an ADMIN-CONSOLE action is
 #           still outstanding (route not approved, and/or key expiry still enabled).
 #           Split out from 1 on purpose: it is not a defect on the node, it is a human
 #           step that cannot be scripted, and apply-tailscale.sh must not roll back a
 #           correct switch because a browser tab has not been clicked yet.
-#       1 = a definitive node-side FAIL (not running, not authenticated, not
-#           advertising, forwarding off, no LAN route)
+#       4 = INCOMPLETE. No defect was found, but one or more claims could not be
+#           evaluated. Overwhelmingly the common cause is that the node has not
+#           authenticated yet -- the EXPECTED state straight after apply-tailscale.sh --
+#           in which case advertisement, route approval and key expiry are all
+#           unknowable rather than wrong. Also covers unreadable prefs. Like 3, this is
+#           NOT a reason to roll back a switch.
+#       1 = a definitive node-side FAIL: the node HAS a tailnet identity and something
+#           about it is wrong (backend not Running, not Online, not advertising,
+#           forwarding off, no LAN route).
 #       2 = cannot determine -- tailscale absent, daemon unreachable, role ambiguous,
 #           parser failure, or the parser failed its own controls
 set -euo pipefail
@@ -60,12 +82,23 @@ MESH_CLIENT="${TS_EXPECT_MESH_IP_CLIENT:-10.42.0.100}"
 ROLE="${TS_ROLE:-}"
 SELFTEST=0
 
+# 🔴 The help text is the comment header, printed to WHEREVER IT ENDS -- deliberately not
+# a hardcoded line range. `sed -n '2,56p'` overshot by two lines and printed the literal
+# `set -euo pipefail` as if it were documentation, and apply-tailscale.sh's equivalent
+# UNDERSHOT and silently dropped its whole rollback/idempotency paragraph. A range is a
+# second copy of a fact the file already states; this reads the fact.
+_print_help() { awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "${BASH_SOURCE[0]}"; }
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --self-test) SELFTEST=1; shift ;;
-    --role)      ROLE="${2:-}"; shift 2 ;;
+    # 🔴 `--role` AS THE FINAL ARGUMENT. `shift 2` with one argument left fails, and
+    # under `set -e` that killed the script with exit 1 and NOTHING printed -- the
+    # operator sees a bare failure and no hint of what is wrong. Checked explicitly.
+    --role)      [ $# -ge 2 ] || { echo "CANNOT DETERMINE: --role needs a value ('server' or 'client'); it was given as the last argument with nothing after it." >&2; exit 2; }
+                 ROLE="$2"; shift 2 ;;
     --role=*)    ROLE="${1#--role=}"; shift ;;
-    -h|--help)   sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)   _print_help; exit 0 ;;
     *)           echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -86,6 +119,26 @@ esac
 _in_csv() {  # $1 = needle, $2 = csv
   case ",${2}," in *,"${1}",*) return 0 ;; esac
   return 1
+}
+
+# --- has this node ever authenticated to a tailnet? -----------------------------------
+# 🔴 THE STATE apply-tailscale.sh LANDS IN, and the reason this predicate exists rather
+# than being inlined: the apply script installs the service and switches, then asks this
+# checker whether to keep the change. Straight after that switch the node has NEVER run
+# `tailscale up` (it needs a browser), so backend is `NeedsLogin`, there is no address,
+# nothing is advertised and there is no node key. Reporting that as a node-side FAIL is
+# what made the apply script roll back a config it had just installed correctly.
+#
+# TWO signals, and they must AGREE -- disagreement means NOT authenticated, because the
+# reassuring answer is the one that has to carry more evidence:
+#   * an address in 100.64.0.0/10 is the DURABLE signal. A node that has completed
+#     `tailscale up` keeps it even when the backend is `Stopped` (WantRunning=false).
+#   * `BackendState` is the daemon saying it in words. `NeedsLogin` / `NoState` mean
+#     there is no tailnet identity, whatever else is in the document.
+_authenticated() {   # $1 = BackendState, $2 = comma-separated TailscaleIPs
+  [ -n "$2" ] || return 1
+  case "$1" in NeedsLogin|NoState|"") return 1 ;; esac
+  return 0
 }
 
 # --- the parser -------------------------------------------------------------------
@@ -340,6 +393,31 @@ J
   else
     echo "  [self-test] _in_csv rejects a different mask (/16 != /24) -> ok"
   fi
+
+  # --- _authenticated, driven in BOTH directions -------------------------------------
+  # 🔴 The whole rc-4 split, and the key-expiry claim, hang off this one predicate. A
+  # version that answered "yes" to everything would make rc 4 unreachable and put the
+  # post-switch FAIL back; one that answered "no" to everything would make rc 0
+  # unreachable and permanently report a working node as not-yet-set-up. Both directions
+  # are driven, on the exact states the daemon emits.
+  local a_case
+  for a_case in \
+      "Running:100.100.10.5:yes:a logged-in node" \
+      "Stopped:100.100.10.5:yes:logged in but WantRunning=false -- the key still exists" \
+      "NeedsLogin::no:the state straight after apply-tailscale.sh" \
+      "NoState::no:the daemon has no state at all" \
+      "NeedsLogin:100.100.10.5:no:signals DISAGREE -- must not resolve to authenticated" \
+      "Running::no:Running with no address is not an identity" \
+      ":100.100.10.5:no:an empty BackendState is not evidence of anything"; do
+    local a_backend a_ips a_want a_why a_got
+    IFS=':' read -r a_backend a_ips a_want a_why <<<"$a_case"
+    if _authenticated "$a_backend" "$a_ips"; then a_got=yes; else a_got=no; fi
+    if [ "$a_got" = "$a_want" ]; then
+      echo "  [self-test] _authenticated '${a_backend:-<empty>}' / '${a_ips:-<none>}' -> $a_got  ($a_why) -> ok"
+    else
+      echo "  [self-test] _authenticated '${a_backend:-<empty>}' / '${a_ips:-<none>}' FAILED: got $a_got, want $a_want"; rc=1
+    fi
+  done
   return $rc
 }
 
@@ -449,10 +527,22 @@ IFS='|' read -r backend online ips advertised primary expiry days route_all pref
 # and `is-active` says nothing about whether the node is authenticated or routing.
 unit_state=$(systemctl is-active tailscaled.service 2>/dev/null || true)
 
+# 🔴 `--accept-dns=false` ON BOTH ROLES, and the symmetry is the point. The reasoning is
+# the same on either machine: MagicDNS makes tailscale take over the host resolver, and
+# on this fleet the resolver is already owned by dnsmasq and the `.lan` names. Giving the
+# server the flag and not the client would hand the laptop's resolver to tailscale --
+# the ONE machine the operator travels with, and the one whose name resolution nobody
+# can fix from the far side. The cost is stated out loud in apply-tailscale.sh's next
+# steps: MagicDNS names do not resolve, so address the workbench by its tailnet address.
+#
+# 🔴 These two strings are duplicated in apply-tailscale.sh's next-step text, and
+# `scripts/tests/test_tailscale_scripts.py` pins them EQUAL across the two files -- an
+# operator who follows the apply script's instructions and then runs this checker must
+# not be told to run a different command from the one they were told to run.
 if [ "$ROLE" = "server" ]; then
   UP_CMD="sudo tailscale up --advertise-routes=${SUBNET} --accept-dns=false"
 else
-  UP_CMD="sudo tailscale up --accept-routes"
+  UP_CMD="sudo tailscale up --accept-routes --accept-dns=false"
 fi
 
 echo
@@ -465,31 +555,54 @@ echo "primary : ${primary:-<none>}   (source: control plane -- what is APPROVED)
 if [ -n "$expiry" ]; then
   echo "keyexp  : $expiry  (${days} days from now)"
 else
-  echo "keyexp  : DISABLED -- this node key does not expire"
+  echo "keyexp  : <no KeyExpiry field>  (that means 'disabled' ONLY on an authenticated"
+  echo "                                 node -- see the verdict below)"
 fi
 echo
 
 # --- verdicts ------------------------------------------------------------------------
+# THREE buckets, deliberately not two. `fails` is a defect on this node; `actions` is a
+# human step in the admin console; `unknowns` is a claim this run COULD NOT EVALUATE.
+# Folding the third into the first is what made a freshly-switched, perfectly correct
+# host report a node-side FAILURE.
 rc=0
 fails=()
 actions=()
+unknowns=()
 
-if [ "$backend" != "Running" ]; then
-  fails+=("tailscaled backend is '$backend', not 'Running' -- this node carries no traffic.
-    If it is NeedsLogin or Stopped, bring it up:  $UP_CMD")
-fi
-if [ "$online" != "true" ]; then
-  fails+=("the control plane does not consider this node Online; it cannot be reached.")
-fi
-if [ -z "$ips" ]; then
-  fails+=("this node has no Tailscale address -- it has never authenticated to a tailnet.
-    Authenticate it:  $UP_CMD")
+authed=0
+if _authenticated "$backend" "$ips"; then authed=1; fi
+
+if [ "$authed" = "1" ]; then
+  echo "PASS  authed    : this node holds a tailnet identity ($ips)"
+  # These two are verdicts ONLY once there is an identity to have a verdict about.
+  if [ "$backend" != "Running" ]; then
+    fails+=("tailscaled backend is '$backend', not 'Running' -- this node carries no
+    traffic even though it IS logged in (it holds $ips). Bring it up:  $UP_CMD")
+  fi
+  if [ "$online" != "true" ]; then
+    fails+=("the control plane does not consider this node Online; it cannot be reached.")
+  fi
+else
+  unknowns+=("THIS NODE HAS NEVER AUTHENTICATED to a tailnet (backend '$backend',
+    addresses: ${ips:-<none>}). That is the EXPECTED state immediately after
+    \`apply-tailscale.sh\`, which installs and starts the service but deliberately does
+    NOT log in -- \`tailscale up\` needs a browser. It is NOT a node-side defect, and
+    every claim below that depends on a tailnet identity is reported UNKNOWN rather than
+    guessed at. Authenticate it, then re-run this check:
+      $UP_CMD")
 fi
 
+# --- what this node ADVERTISES (its own prefs) ---------------------------------------
 if [ "$prefs_src" = "none" ]; then
-  fails+=("could not read \`tailscale debug prefs\`, so what this node ADVERTISES is
+  unknowns+=("could not read \`tailscale debug prefs\`, so what this node ADVERTISES is
     UNKNOWN. Deliberately not reported as 'advertises nothing' -- that would be a
-    definitive claim derived from a file that was never read.")
+    definitive claim derived from a file that was never read. It is equally not reported
+    as a node-side FAIL: a file this script could not read is not evidence of a defect.")
+elif [ "$authed" != "1" ]; then
+  unknowns+=("what this node advertises cannot be judged before it authenticates:
+    \`AdvertiseRoutes\` is set BY \`tailscale up\`, which has never run here.
+    (prefs currently say: ${advertised:-<none>})")
 elif [ "$ROLE" = "server" ]; then
   if _in_csv "$SUBNET" "$advertised"; then
     echo "PASS  advertise : this node advertises $SUBNET"
@@ -507,7 +620,12 @@ fi
 if [ "$ROLE" = "server" ]; then
   # 🔴 THE SECOND, DIFFERENT CLAIM. An advertised-but-unapproved route looks IDENTICAL
   # to success from this node and carries no traffic at all.
-  if _in_csv "$SUBNET" "$primary"; then
+  if [ "$authed" != "1" ]; then
+    unknowns+=("whether $SUBNET is APPROVED in the admin console cannot be known before
+    this node authenticates -- the control plane has no machine here yet, so there is
+    nothing to approve and \`PrimaryRoutes\` is empty for a reason that is not refusal.
+    Re-run after \`tailscale up\`.")
+  elif _in_csv "$SUBNET" "$primary"; then
     echo "PASS  approved  : $SUBNET is APPROVED in the admin console; this node is its primary router"
   else
     actions+=("$SUBNET is advertised but NOT APPROVED. It carries NO traffic until a
@@ -551,7 +669,11 @@ if [ "$ROLE" = "server" ]; then
     a subnet it is not on; traffic arriving over tailscale would have nowhere to go.")
   fi
 else
-  if [ "$route_all" = "true" ]; then
+  if [ "$authed" != "1" ]; then
+    unknowns+=("whether this client accepts subnet routes cannot be judged before it
+    authenticates: \`RouteAll\` is the \`--accept-routes\` pref and is set BY
+    \`tailscale up\`. (prefs currently say RouteAll=$route_all)")
+  elif [ "$route_all" = "true" ]; then
     echo "PASS  acceptrt  : this client accepts subnet routes (RouteAll / --accept-routes)"
   elif [ "$prefs_src" = "prefs" ]; then
     actions+=("this client does not accept subnet routes (RouteAll=$route_all), so the
@@ -559,6 +681,9 @@ else
   fi
   if ip -4 -o route show 2>/dev/null | awk -v s="$SUBNET" '$1==s' | grep -q 'dev tailscale'; then
     echo "PASS  lanroute  : $SUBNET is installed here via a tailscale interface"
+  elif [ "$authed" != "1" ]; then
+    unknowns+=("$SUBNET is not installed here via tailscale, but this node has not
+    authenticated, so no route COULD have been installed. Not a finding yet.")
   else
     actions+=("$SUBNET is not in this host's routing table via tailscale. Either the
     route is not approved in the admin console, or --accept-routes is off here, or the
@@ -566,17 +691,31 @@ else
   fi
 fi
 
-# 🔴 KEY EXPIRY. Enabled at all is an outstanding action, because the 180-day default is
-# SHORTER than the trip and the lapse is silent.
-if [ -z "$expiry" ]; then
-  echo "PASS  keyexpiry : disabled -- this node key will not expire mid-trip"
-else
+# 🔴 KEY EXPIRY -- and the ABSENT case is the one that matters. `Self.KeyExpiry` missing
+# is ambiguous between (a) expiry genuinely disabled, (b) the node has no node key at
+# all because it never authenticated, and (c) a build that does not emit the field.
+# Resolving that absence to (a) is how this printed `PASS keyexpiry : disabled` for a
+# node that had never logged in -- the reassuring branch, on the single item most likely
+# to kill this path silently mid-trip. "Disabled" is claimed ONLY when there IS a node
+# key for expiry to have been disabled on.
+if [ -n "$expiry" ]; then
   actions+=("node key expiry is ENABLED: it expires $expiry, in $days days.
     Tailscale's default is 180 days, shorter than a months-long trip, and when it lapses
     this backup path goes dark with no local error. Disabling it is an ADMIN-CONSOLE
     action that cannot be scripted:
       https://login.tailscale.com/admin/machines -> this machine -> ... ->
       Disable key expiry")
+elif [ "$authed" != "1" ]; then
+  unknowns+=("NODE KEY EXPIRY IS UNKNOWN, not disabled. \`Self.KeyExpiry\` is absent, and
+    on a node that has never authenticated that means the control plane has never issued
+    a node key -- there is nothing yet for expiry to be on or off for. Absence is
+    ambiguous, and this is the one claim where guessing the reassuring answer is most
+    expensive: the default is 180 days, shorter than the trip, and the lapse is silent.
+    Re-run after \`tailscale up\` -- and expect it to say ENABLED, because that is the
+    default a new node gets.")
+else
+  echo "PASS  keyexpiry : disabled -- this node IS authenticated and the daemon reports no"
+  echo "                  KeyExpiry, so this node key will not expire mid-trip"
 fi
 
 echo
@@ -584,6 +723,15 @@ if [ ${#fails[@]} -gt 0 ]; then
   echo "FAIL: this host is NOT carrying a usable tailscale path."
   for f in "${fails[@]}"; do printf '  - %s\n' "$f"; done
   rc=1
+fi
+# 🔴 UNKNOWN OUTRANKS ACTION-REQUIRED and is outranked by FAIL. A run that could not
+# evaluate half its claims must not be reported as "everything on this host is correct,
+# just go click a button" -- rc 3 says the node side is DONE, and rc 4 says it is not
+# yet knowable. Both are equally not a reason to roll back a switch.
+if [ ${#unknowns[@]} -gt 0 ]; then
+  echo "NOT YET DETERMINABLE (no defect found -- these claims cannot be evaluated yet):"
+  for u in "${unknowns[@]}"; do printf '  - %s\n' "$u"; done
+  if [ "$rc" = "0" ]; then rc=4; fi
 fi
 if [ ${#actions[@]} -gt 0 ]; then
   echo "ACTION REQUIRED (admin console / human -- cannot be scripted):"

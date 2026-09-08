@@ -21,7 +21,10 @@
 #   TS_EXPECT_MESH_IP_CLIENT=10.42.0.100
 #   TS_MAX_PENDING_BUILDS=10         see THE CLOSURE PREFLIGHT
 #   TS_MAX_TOTAL_BUILDS=25
+#   TS_MAX_PENDING_MIB=64            download volume, gated separately from build count
+#   TS_MAX_TOTAL_MIB=128
 #   TS_MAX_CHANGED_PATHS=250
+#   TS_LIST_MAX=200                  how many pending derivation names a refusal prints
 #
 # Flags:
 #   --dry-run                stop after the closure preflight; never writes the config
@@ -57,32 +60,49 @@
 # THE DEFAULT THRESHOLDS ARE CALIBRATED FROM MEASUREMENT, not guessed. On the same host,
 # the same day, the SAME dry-build run against a config carrying the server block was
 # **47 derivations to build, 25 to fetch (177.0 MiB)**. So tailscale's own true cost is
-# **+7 derivations and +1 fetched path** -- `tailscale-1.102.3` plus six regenerated
-# unit/etc/activation derivations. That is the scale a "add tailscale" change should be,
-# and it is why TS_MAX_PENDING_BUILDS defaults to 10 and TS_MAX_TOTAL_BUILDS to 25.
-# On this host today the pending gate therefore REFUSES, which is the correct answer:
-# 40 queued derivations are not what you asked for.
+# **+7 derivations, +1 fetched path and +17.6 MiB** -- `tailscale-1.102.3` plus six
+# regenerated unit/etc/activation derivations. That is the scale a "add tailscale" change
+# should be, and it is why TS_MAX_PENDING_BUILDS defaults to 10, TS_MAX_TOTAL_BUILDS to
+# 25, TS_MAX_PENDING_MIB to 64 and TS_MAX_TOTAL_MIB to 128. On this host today the
+# pending gates therefore REFUSE, which is the correct answer: 40 queued derivations and
+# 159.4 MiB of queued downloads are not what you asked for.
 #
-# So, BEFORE switching, this script measures the change in three independent ways and
-# REFUSES by default when the answer is "you are about to rebuild the world":
+# So, BEFORE switching, this script measures the change in FOUR ways and REFUSES by
+# default when the answer is "you are about to rebuild the world". Each is listed with
+# what it CANNOT see, because a gate's blind spot is the part worth knowing:
 #
-#   1. BASELINE vs CANDIDATE, not just the total. `nixos-rebuild dry-build` is run TWICE
-#      -- once against the CURRENT config and once against the patched one. The
-#      difference is what tailscale actually costs; the baseline is what `switch` would
-#      drag in whether or not you ran this script. Reporting only the total would blame
-#      tailscale for a channel bump, and reporting only the delta would hide it.
+#   1. BUILD COUNTS, BASELINE vs CANDIDATE -- not just the total. `nixos-rebuild
+#      dry-build` is run TWICE, once against the CURRENT config and once against the
+#      patched one. The difference is what tailscale actually costs; the baseline is what
+#      `switch` would drag in whether or not you ran this script. Reporting only the
+#      total would blame tailscale for a channel bump, and reporting only the delta would
+#      hide it.
+#      BLIND TO: a change that is entirely SUBSTITUTABLE. Zero derivations to build and
+#      thousands of paths to fetch is a world-sized change with a build count of 0 --
+#      which is why (2) exists as a separate gate rather than a printed column.
 #
-#   2. THE NIXPKGS RELEASE STRING. Extracted with ONE implementation from the store-path
+#   2. DOWNLOAD VOLUME, baseline and total, in MiB. Same two dry-builds, the other number
+#      they report. Gated in its OWN right: a build count and a download volume are
+#      independent axes and either can be world-sized while the other is tiny. This was
+#      once a decorative column in the summary table that no gate read.
+#
+#   3. THE NIXPKGS RELEASE STRING. Extracted with ONE implementation from the store-path
 #      basename of both the running system and the candidate derivation, so the two can
 #      never drift apart, and cross-checked against /run/current-system/nixos-version so
 #      a broken extractor cannot silently agree with itself. A release change is refused
 #      unconditionally -- it is an OS upgrade wearing a feature's clothes.
+#      🔴 BLIND TO A REVISION BUMP WITHIN ONE RELEASE, BY CONSTRUCTION. The release is
+#      the leading major.minor, so `26.11pre1066106` -> `26.11pre1066425` -- which is
+#      exactly the pending state of this host today -- reads as NO release change and
+#      this gate does not fire. That is deliberate (every channel tick would otherwise
+#      refuse), and it is why gates 1 and 2 are the ones that actually stop a same-release
+#      world rebuild. When the releases match but the revisions differ, the preflight
+#      says so out loud instead of printing a bare, reassuring "26.11 -> 26.11".
 #
-#   3. THE CLOSURE SET. After a build that the two gates above have already approved,
-#      the running and candidate closures are compared as SETS
-#      (`nix-store -qR | comm -3`), which cannot silently return a reassuring zero the
-#      way a parsed diff can, plus `nix store diff-closures` for a human-readable
-#      package-level report.
+#   4. THE CLOSURE SET. After a build that the gates above have already approved, the
+#      running and candidate closures are compared as SETS (`nix-store -qR | comm -3`),
+#      which cannot silently return a reassuring zero the way a parsed diff can, plus
+#      `nix store diff-closures` for a human-readable package-level report.
 #
 # 🔴 `readlink -f` IS USED ON BOTH SIDES, ALWAYS. `/nix/var/nix/profiles/system` is a
 # symlink TO ANOTHER SYMLINK (measured: it reads `system-389-link`, a bare NAME), while
@@ -96,7 +116,26 @@
 # preflight pass -- the candidate is built from a temp file via `--include
 # nixos-config=`, so a refusal leaves /etc/nixos untouched and there is nothing to roll
 # back. Once the file IS moved into place a trap restores the backup on ANY failure.
-# Re-running once tailscale is configured is a no-op that exits 0.
+# Re-running once tailscale is DECLARED (an actual setting, not a mention in a comment)
+# is a no-op that exits 0.
+#
+# 🔴 WHAT SUCCESS LOOKS LIKE, AND WHY IT IS NOT rc 0 FROM THE VERIFIER. This script does
+# not run `tailscale up` -- that needs a browser. So the state it lands in is: service
+# installed, daemon running, node NOT authenticated. `check-tailscale.sh` calls that
+# rc 4 (INCOMPLETE, no defect), and rc 4 is a SUCCESSFUL apply. An earlier version
+# treated anything other than rc 0/2/3 as a node-side failure and rolled back the config
+# it had just installed -- on the very first run, every time, guaranteed.
+#
+# 🔴 KILLSWITCH INTERACTION -- READ THIS BEFORE TRUSTING THE REDUNDANCY STORY.
+# `scripts/airvpn-updown`'s degraded/fallback rulesets allow egress on a LITERAL
+# interface list -- `lo`, the airvpn tun, `nebula.mesh`, `cni0`, `flannel.1`, `docker0`
+# -- and then `drop`. `tailscale0` is NOT on that list and there is no DERP/control-plane
+# carve-out, while nebula has three. So IF the AirVPN killswitch ever arms fail-closed,
+# NEBULA SURVIVES AND TAILSCALE DIES -- the exact inverse of the independence this whole
+# change is for. AirVPN is default-OFF on these hosts, so this is a latent interaction
+# and not a live defect, and `airvpn-updown` is deliberately NOT touched here (changing
+# a killswitch to widen egress is its own change, with its own review). Recorded so the
+# next person does not discover it from the far side of an outage.
 set -euo pipefail
 
 SUBNET="${TS_SUBNET:-192.168.50.0/24}"
@@ -105,7 +144,10 @@ MESH_SERVER="${TS_EXPECT_MESH_IP_SERVER:-10.42.0.30}"
 MESH_CLIENT="${TS_EXPECT_MESH_IP_CLIENT:-10.42.0.100}"
 MAX_PENDING_BUILDS="${TS_MAX_PENDING_BUILDS:-10}"
 MAX_TOTAL_BUILDS="${TS_MAX_TOTAL_BUILDS:-25}"
+MAX_PENDING_MIB="${TS_MAX_PENDING_MIB:-64}"
+MAX_TOTAL_MIB="${TS_MAX_TOTAL_MIB:-128}"
 MAX_CHANGED_PATHS="${TS_MAX_CHANGED_PATHS:-250}"
+LIST_MAX="${TS_LIST_MAX:-200}"
 
 DRYRUN=0
 ALLOW_WORLD=0
@@ -115,14 +157,27 @@ SELFTEST=0
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK="${HERE}/check-tailscale.sh"
 
+# 🔴 The help text is the comment header, printed to WHEREVER IT ENDS -- deliberately not
+# a hardcoded line range. `sed -n '2,95p'` cut this file's SAFETY paragraph off in the
+# middle of its second sentence, silently dropping the rollback and idempotency
+# guarantees from `--help`; check-tailscale.sh's equivalent OVERSHOT and printed the
+# literal `set -euo pipefail` as documentation. A line range is a second copy of a fact
+# the file already states, and it goes stale on the first edit. This reads the fact.
+_print_help() { awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "${BASH_SOURCE[0]}"; }
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)             DRYRUN=1; shift ;;
     --allow-world-rebuild) ALLOW_WORLD=1; shift ;;
-    --role)                ROLE="${2:-}"; shift 2 ;;
+    # 🔴 `--role` AS THE FINAL ARGUMENT. `shift 2` with one argument left fails, and
+    # under `set -e` that killed the script with exit 1 and NOTHING printed at all --
+    # a bare failure with no hint of what was wrong, on a script that is run under sudo
+    # by an operator with three days left. Checked explicitly.
+    --role)                [ $# -ge 2 ] || { echo "ABORT: --role needs a value ('server' or 'client'); it was given as the last argument with nothing after it." >&2; exit 1; }
+                           ROLE="$2"; shift 2 ;;
     --role=*)              ROLE="${1#--role=}"; shift ;;
     --self-test)           SELFTEST=1; shift ;;
-    -h|--help)             sed -n '2,95p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)             _print_help; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -196,6 +251,45 @@ _store_path() {
     /nix/store/*) printf '%s' "$p"; return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Is tailscale actually DECLARED in this config, or merely mentioned?
+#
+# 🔴 `grep -q 'services\.tailscale'` WAS THE WHOLE IDEMPOTENCY TEST, and a file whose
+# only occurrence was `# TODO: consider services.tailscale one day` made this script
+# print "Nothing to do. Exiting 0" on a host where nothing had been applied -- the most
+# expensive possible lie, because it tells the operator the backup path is DONE.
+# Measured; that exact one-line fixture reproduced it.
+#
+# So: strip Nix comments FIRST (`#` to end of line, and `/* ... */` blocks, both replaced
+# with spaces so line numbers survive), then require an actual SETTING -- the attribute
+# followed by `=`, `{` or a further `.`, which is every way Nix can spell one and no way
+# it can spell a mention. Prints `lineno:text` per declaration, nothing at all when
+# there is none, so the caller branches on emptiness.
+#
+# Direction of error is deliberate: a declaration this misses means the script proceeds
+# and adds a SECOND block, which `nix-instantiate '<nixpkgs/nixos>' -A system` then
+# refuses as a duplicate definition BEFORE anything is written. A mention it wrongly
+# accepted would exit 0 and leave the host unprotected with no further check at all.
+_cfg_tailscale_decls() {   # $1 = config path; prints "lineno:line" per declaration
+  python3 - "$1" <<'PY'
+import re, sys
+try:
+    src = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except Exception as e:
+    sys.stderr.write("read: %s\n" % e); sys.exit(2)
+
+# Blank out comments, preserving every newline so line numbers still line up.
+def blank(m):
+    return re.sub(r"[^\n]", " ", m.group(0))
+stripped = re.sub(r"/\*.*?\*/", blank, src, flags=re.S)
+stripped = re.sub(r"#[^\n]*", blank, stripped)
+
+orig = src.splitlines()
+for i, line in enumerate(stripped.splitlines()):
+    if re.search(r"services\s*\.\s*tailscale\s*[.={]", line):
+        print("%d:%s" % (i + 1, orig[i].strip()))
+PY
 }
 
 _self_test() {
@@ -394,18 +488,144 @@ T
   else
     echo "  [self-test] gate FAILED: 900 builds allowed. got: '$got'"; rc=1
   fi
+
+  # --- _over_mib, the FRACTIONAL comparison ------------------------------------------
+  # `-gt` cannot compare "159.4" at all: it aborts the shell. Driven in both directions,
+  # and across the boundary with a fraction on BOTH sides so a mutant that truncates to
+  # an integer (159.4 -> 159, 64.5 -> 64) is visible.
+  if _over_mib "159.4" "64";   then echo "  [self-test] _over_mib 159.4 > 64 -> ok"; else echo "  [self-test] _over_mib FAILED: 159.4 not > 64"; rc=1; fi
+  if _over_mib "17.6" "64";    then echo "  [self-test] _over_mib FAILED: 17.6 > 64"; rc=1; else echo "  [self-test] _over_mib 17.6 < 64 -> not over -> ok"; fi
+  if _over_mib "64.5" "64.4";  then echo "  [self-test] _over_mib 64.5 > 64.4 (fraction decides) -> ok"; else echo "  [self-test] _over_mib FAILED: 64.5 not > 64.4 -- truncating to int?"; rc=1; fi
+  if _over_mib "64.0" "64.0";  then echo "  [self-test] _over_mib FAILED: equal read as over"; rc=1; else echo "  [self-test] _over_mib 64.0 == 64.0 -> not over -> ok"; fi
+  if _over_mib "0.0" "0";      then echo "  [self-test] _over_mib FAILED: 0 > 0"; rc=1; else echo "  [self-test] _over_mib 0.0 == 0 -> not over -> ok"; fi
+
+  # 🔴 THE SUBSTITUTABLE WORLD REBUILD -- the case the download gate exists for, and the
+  # one that walked straight through a gate that read only build counts. 0 to build,
+  # 4 GiB to fetch. Both build gates are silent here BY CONSTRUCTION, so if this passes
+  # the download gate is genuinely the only thing that saw it.
+  got=$(_gate_reasons 26.11 26.11 0 0 4096.0 4096.0)
+  if printf '%s' "$got" | grep -q 'PENDING DOWNLOAD VOLUME'; then
+    echo "  [self-test] gate REFUSES 4096 MiB of pending downloads at ZERO builds -> ok"
+  else
+    echo "  [self-test] gate FAILED: a 4 GiB substitutable change passed. got: '$got'"; rc=1
+  fi
+  if printf '%s' "$got" | grep -qE 'BUILD SIZE|PENDING WORK'; then
+    echo "  [self-test] the build gates FAILED: they claim to have seen a 0-build change"; rc=1
+  else
+    echo "  [self-test] ...and neither BUILD gate fired on it -- so it was the download gate -> ok"
+  fi
+  # The download gates must ALLOW tailscale's own measured cost, or the script can never
+  # succeed and the gate becomes a permanent red light everyone learns to override.
+  got=$(_gate_reasons 26.11 26.11 0 7 0.0 17.6)
+  if [ -z "$got" ]; then
+    echo "  [self-test] gate ALLOWS tailscale's own measured 7 builds / 17.6 MiB -> ok"
+  else
+    echo "  [self-test] gate FAILED: refused the measured tailscale-only delta: '$got'"; rc=1
+  fi
+  # And the TOTAL download gate on its own, from a clean baseline.
+  got=$(_gate_reasons 26.11 26.11 0 0 0.0 900.0)
+  if printf '%s' "$got" | grep -q 'TOTAL DOWNLOAD VOLUME'; then
+    echo "  [self-test] gate REFUSES 900 MiB total from a clean baseline -> ok"
+  else
+    echo "  [self-test] gate FAILED: 900 MiB total allowed. got: '$got'"; rc=1
+  fi
+  # 🔴 THE NEGATIVE DELTA. The two dry-builds are separate evaluations and CAN disagree;
+  # the old phrasing rendered "Only -3 of the 37 are tailscale's" -- nonsense stated as
+  # a measurement, inside the one message the operator reads to make a judgement call.
+  got=$(_gate_reasons 26.11 26.11 40 37)
+  if printf '%s' "$got" | grep -q 'Only -'; then
+    echo "  [self-test] negative-delta phrasing FAILED: still says 'Only -N of the M'"; rc=1
+  elif printf '%s' "$got" | grep -q 'FEWER builds'; then
+    echo "  [self-test] a negative delta is reported as a DISAGREEMENT, not 'Only -3' -> ok"
+  else
+    echo "  [self-test] negative-delta phrasing FAILED: got '$got'"; rc=1
+  fi
+  got=$(_gate_reasons 26.11 26.11 40 47)
+  if printf '%s' "$got" | grep -q "Only 7 of the 47 are tailscale's"; then
+    echo "  [self-test] a POSITIVE delta still reads 'Only 7 of the 47' -> ok"
+  else
+    echo "  [self-test] positive-delta phrasing FAILED: got '$got'"; rc=1
+  fi
+
+  # --- _cfg_tailscale_decls: a MENTION is not a DECLARATION ---------------------------
+  # 🔴 The idempotency test used to be `grep -q 'services\.tailscale'`, so the first
+  # fixture below made this script print "Nothing to do. Exiting 0" on a host where
+  # nothing had been applied. Both directions are driven, and the comment cases are the
+  # point -- a checker that only ever sees real declarations cannot fail this way.
+  local decl_case name body want n_got
+  # Fixture bodies carry a leading marker so the loop can hold them on one line.
+  printf '%s\n' '{' '  # TODO: consider services.tailscale one day' '}' >"$dir/c-mention.nix"
+  printf '%s\n' '{' '  /* services.tailscale = { enable = true; }; */' '}' >"$dir/c-block.nix"
+  printf '%s\n' '{' '  services.tailscale.enable = true;' '}' >"$dir/c-dotted.nix"
+  printf '%s\n' '{' '  services.tailscale = {' '    enable = true;' '  };' '}' >"$dir/c-attrset.nix"
+  printf '%s\n' '{' '  environment.systemPackages = [ pkgs.tailscale ];' '}' >"$dir/c-pkgonly.nix"
+  # 🔴 THE FIXTURE THAT DISCRIMINATES THE `[.={]` ANCHOR. `services.tailscale` in live
+  # code that is NOT a setting. Without this case a match on the bare attribute path
+  # passes every other fixture here, so the anchor is untested and a config that merely
+  # NAMES the option in a warning string reports the host as already done.
+  printf '%s\n' '{' '  warnings = [ "services.tailscale is not enabled here" ];' '}' >"$dir/c-string.nix"
+  printf '%s\n' '{' '  # services.tailscale = { enable = true; };' '  services.tailscale.enable = true;' '}' >"$dir/c-both.nix"
+  for decl_case in "c-mention:0:a bare mention inside a # comment" \
+                   "c-block:0:a declaration inside a /* */ block comment" \
+                   "c-pkgonly:0:pkgs.tailscale in systemPackages is not a service" \
+                   "c-string:0:the option NAMED in a warning string is not a setting" \
+                   "c-dotted:1:services.tailscale.enable = true" \
+                   "c-attrset:1:services.tailscale = { ... }" \
+                   "c-both:1:a commented-out copy PLUS a real one"; do
+    name="${decl_case%%:*}"; body="${decl_case#*:}"; want="${body%%:*}"; body="${body#*:}"
+    n_got=$(_cfg_tailscale_decls "$dir/${name}.nix" | wc -l)
+    if [ "$n_got" = "$want" ]; then
+      echo "  [self-test] declared? $body -> $n_got -> ok"
+    else
+      echo "  [self-test] declared? $body FAILED: got $n_got, want $want"; rc=1
+    fi
+  done
+  # The line number must survive the comment blanking, or the "already configured"
+  # report points the operator at the wrong line of their own config.
+  got=$(_cfg_tailscale_decls "$dir/c-both.nix")
+  if [ "$got" = "3:services.tailscale.enable = true;" ]; then
+    echo "  [self-test] a declaration keeps its ORIGINAL line number (3) -> ok"
+  else
+    echo "  [self-test] declaration line number FAILED: got '$got'"; rc=1
+  fi
   return $rc
 }
 
 _over() { [ "$1" -gt "$2" ]; }
 
-# THE GATE, as a pure function of the four numbers, so both of its branches can be
-# driven from fixtures. A refusal that has only ever been reasoned about is not a
-# guard; the self-test below watches this one both refuse and allow, using the numbers
-# MEASURED on this host rather than invented ones.
+# The MiB figures are FRACTIONAL ("159.4"), so `-gt` cannot compare them: bash would
+# abort with "integer expression expected" inside a gate, under `set -e`, which is the
+# gate failing OPEN dressed as a crash. awk does the comparison in floating point.
+_over_mib() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 > b + 0) }'; }
+
+# THE GATE, as a pure function of the six numbers, so every branch can be driven from
+# fixtures. A refusal that has only ever been reasoned about is not a guard; the
+# self-test below watches this one both refuse and allow, using the numbers MEASURED on
+# this host rather than invented ones.
+#
+# 🔴 THE DOWNLOAD ARGUMENTS ARE NOT DECORATION. An earlier version took only the two
+# release strings and the two BUILD counts, while the summary table printed fetch counts
+# and MiB that no gate ever read -- so a pending change that was entirely SUBSTITUTABLE
+# (0 derivations to build, thousands of paths, several GiB to download) passed the gate
+# untouched. Build count and download volume are independent axes and either can be
+# world-sized alone.
+#
 # Prints one reason per paragraph; empty output means "allow".
 _gate_reasons() {   # $1 run_rel  $2 cand_rel  $3 pending_builds  $4 total_builds
-  local run_rel="$1" cand_rel="$2" b_built="$3" c_built="$4" d_built=$(( $4 - $3 ))
+                    # $5 pending_mib  $6 total_mib   (both optional; default 0)
+  local run_rel="$1" cand_rel="$2" b_built="$3" c_built="$4"
+  local b_mib="${5:-0}" c_mib="${6:-0}" d_built=$(( $4 - $3 )) delta_note
+  # 🔴 A NEGATIVE DELTA IS A REAL OBSERVED STATE, not an impossible one: the two
+  # dry-builds are separate evaluations and the store can gain paths between them, so the
+  # candidate can legitimately report FEWER builds than the baseline. Phrased as
+  # "Only -3 of the 37 are tailscale's", which is nonsense presented as a measurement.
+  if [ "$d_built" -ge 0 ]; then
+    delta_note="Only $d_built of the $c_built are tailscale's."
+  else
+    delta_note="The candidate reports FEWER builds ($c_built) than the current config
+    ($b_built), so the two dry-builds disagree and NO delta can be attributed to
+    tailscale -- most likely the store gained paths between the two evaluations."
+  fi
   if [ "$run_rel" != "$cand_rel" ]; then
     printf '%s\n' "NIXPKGS RELEASE CHANGE: $run_rel -> $cand_rel.
     This is an OS UPGRADE, not a feature. The last time this happened here a 4-line
@@ -414,7 +634,7 @@ _gate_reasons() {   # $1 run_rel  $2 cand_rel  $3 pending_builds  $4 total_build
   if _over "$b_built" "$MAX_PENDING_BUILDS"; then
     printf '%s\n' "PENDING WORK UNRELATED TO TAILSCALE: $b_built derivations are already
     queued by the CURRENT config (limit $MAX_PENDING_BUILDS), and \`switch\` applies
-    them too. Only $d_built of the $c_built are tailscale's.
+    them too. $delta_note
     THE CLEAN FIX IS TO SEPARATE THE TWO OPERATIONS: run \`sudo nixos-rebuild switch\`
     on its own, at a time you choose, watch it land, then re-run this script -- the
     delta will then be just tailscale. Or accept it with --allow-world-rebuild."
@@ -422,6 +642,17 @@ _gate_reasons() {   # $1 run_rel  $2 cand_rel  $3 pending_builds  $4 total_build
   if _over "$c_built" "$MAX_TOTAL_BUILDS"; then
     printf '%s\n' "TOTAL BUILD SIZE: $c_built derivations would be built (limit
     $MAX_TOTAL_BUILDS). Adding tailscale should be a handful of substituted paths."
+  fi
+  if _over_mib "$b_mib" "$MAX_PENDING_MIB"; then
+    printf '%s\n' "PENDING DOWNLOAD VOLUME: the CURRENT config already wants to fetch
+    $b_mib MiB (limit $MAX_PENDING_MIB MiB), and \`switch\` fetches it too. A change with
+    NOTHING to build can still be world-sized -- a fully substitutable channel bump is
+    thousands of paths and gigabytes of download at a build count of zero. Same clean
+    fix: land the pending change on its own first, or --allow-world-rebuild."
+  fi
+  if _over_mib "$c_mib" "$MAX_TOTAL_MIB"; then
+    printf '%s\n' "TOTAL DOWNLOAD VOLUME: $c_mib MiB would be fetched (limit
+    $MAX_TOTAL_MIB MiB). Tailscale's own measured cost on this host is ~17.6 MiB."
   fi
 }
 
@@ -496,14 +727,25 @@ fi
 # Asked of the FILE here because this is a question about what the file will contain.
 # Whether it is RUNNING is a different question, and check-tailscale.sh is the only
 # thing that answers it -- it reads the live daemon, never the config.
-if grep -q 'services\.tailscale' "$CFG"; then
-  echo "  state     : $CFG already mentions services.tailscale:"
-  grep -n 'services\.tailscale' "$CFG" | sed 's/^/    | /'
+ts_decls=$(_cfg_tailscale_decls "$CFG") \
+  || die "could not read $CFG to decide whether tailscale is already declared"
+if [ -n "$ts_decls" ]; then
+  echo "  state     : $CFG already DECLARES services.tailscale:"
+  printf '%s\n' "$ts_decls" | sed 's/^/    | /'
   echo
   echo "Nothing to do. Exiting 0 without touching $CFG."
   echo "Whether it is actually WORKING is a different question -- ask the verifier:"
   echo "    bash ${CHECK} --role ${ROLE}"
   exit 0
+fi
+# A MENTION is not a declaration, and saying so out loud matters: the operator who wrote
+# that comment is exactly the one who might read a bare "proceeding" as "it ignored my
+# config". This branch is the reason `_cfg_tailscale_decls` strips comments at all.
+if grep -q 'services\.tailscale' "$CFG"; then
+  echo "  state     : $CFG MENTIONS services.tailscale but does not DECLARE it --"
+  grep -n 'services\.tailscale' "$CFG" | sed 's/^/    | /'
+  echo "              every occurrence is inside a comment, so nothing is applied."
+  echo "              Proceeding to add the real block."
 fi
 
 # --- a sysctl key defined twice is a Nix evaluation error --------------------------------
@@ -554,6 +796,7 @@ TMP="${CFG%.nix}.tailscale-candidate.$$.nix"
 BAK="${CFG}.bak-tailscale-$(date +%Y%m%d-%H%M%S)-$$"
 WORK=$(mktemp -d)
 PATCHED=0
+SWITCH_ATTEMPTED=0
 SWITCHED=0
 OK=0
 
@@ -566,11 +809,27 @@ finish() {
     cp -p "$BAK" "$CFG"
     echo >&2
     echo "ROLLED BACK: $CFG restored from $BAK" >&2
+    # 🔴 THREE STATES, NOT TWO, AND ONLY ONE OF THEM IS ESTABLISHED. This used to branch
+    # on SWITCHED and assert, when it was 0, "The system was never switched, so nothing
+    # is running the change." That is a claim about the RUNNING system derived from a
+    # flag that only records whether `nixos-rebuild switch` RETURNED ZERO. A switch can
+    # exit non-zero AFTER activating -- a unit that fails to start is the ordinary case
+    # -- and it writes the bootloader entry before that, so the assertion is false in
+    # exactly the situation it gets printed in. State what is known.
     if [ "$SWITCHED" = "1" ]; then
       echo "🔴 The system had ALREADY been switched. The FILE is restored but the RUNNING" >&2
       echo "   system is not -- run \`sudo nixos-rebuild switch\` to return it." >&2
+    elif [ "$SWITCH_ATTEMPTED" = "1" ]; then
+      echo "🔴 \`nixos-rebuild switch\` WAS STARTED and did not complete. Whether the" >&2
+      echo "   RUNNING system changed is NOT established by this script: a switch can" >&2
+      echo "   activate and still exit non-zero (e.g. a unit fails to start), and it" >&2
+      echo "   writes the bootloader entry before that. The FILE is restored; the" >&2
+      echo "   running system may or may not carry the change. Check, then decide:" >&2
+      echo "       readlink -f /run/current-system" >&2
+      echo "       sudo nixos-rebuild list-generations | tail -3" >&2
+      echo "   \`sudo nixos-rebuild switch\` returns the running system to $CFG." >&2
     else
-      echo "   The system was never switched, so nothing is running the change." >&2
+      echo "   \`nixos-rebuild switch\` was never started, so nothing activated." >&2
     fi
   fi
   exit $rc
@@ -584,6 +843,16 @@ if [ "$ROLE" = "server" ]; then
   # Added by nix/system/apply-tailscale.sh. Nebula is the primary remote path; this
   # exists so that a nebula outage while off-LAN is not a total loss of access. It
   # shares no component with nebula: different control plane, different relays.
+  #
+  # 🔴 ONE SHARED COMPONENT DOES EXIST, AND IT IS NOT SYMMETRIC: the AirVPN killswitch.
+  # \`scripts/airvpn-updown\`'s degraded and fallback rulesets allow egress on a LITERAL
+  # interface list -- lo, the airvpn tun, nebula.mesh, cni0, flannel.1, docker0 -- and
+  # then \`drop\`. \`tailscale0\` is not on it, and unlike nebula (three carve-outs)
+  # tailscale has no DERP/control-plane bypass. So if that killswitch ever arms
+  # fail-closed, NEBULA SURVIVES AND TAILSCALE DIES -- the inverse of the redundancy this
+  # block is for. AirVPN is default-OFF on these hosts, so it is a latent interaction,
+  # not a live defect; it is NOT fixed here because widening a killswitch is its own
+  # change with its own review.
   #
   # THIS HOST IS THE SUBNET ROUTER. Advertising ${SUBNET} makes the whole LAN
   # reachable over the tailnet, not just this machine.
@@ -626,6 +895,16 @@ else
   #
   # 🔴 It does NOT log the node in, and it does not set --accept-routes. Both are
   # runtime state owned by \`tailscale up\`. See check-tailscale.sh.
+  #
+  # 🔴 ONE SHARED COMPONENT DOES EXIST, AND IT IS NOT SYMMETRIC: the AirVPN killswitch.
+  # \`scripts/airvpn-updown\`'s degraded and fallback rulesets allow egress on a LITERAL
+  # interface list -- lo, the airvpn tun, nebula.mesh, cni0, flannel.1, docker0 -- and
+  # then \`drop\`. \`tailscale0\` is not on it, and unlike nebula (three carve-outs)
+  # tailscale has no DERP/control-plane bypass. So if that killswitch ever arms
+  # fail-closed, NEBULA SURVIVES AND TAILSCALE DIES -- the inverse of the redundancy this
+  # block is for. AirVPN is default-OFF on these hosts, so it is a latent interaction,
+  # not a live defect; it is NOT fixed here because widening a killswitch is its own
+  # change with its own review.
   services.tailscale = {
     enable = true;
     useRoutingFeatures = "client";
@@ -640,7 +919,13 @@ awk -v blk="$BLOCK" -v anchor="$anchor_line" '
   { print }
 ' "$CFG" > "$TMP"
 
-added=$(( $(wc -l < "$TMP") - $(wc -l < "$CFG") ))
+# 🔴 `awk END{print NR}`, NOT `wc -l`. `wc -l` counts NEWLINES, so a config whose last
+# line has no trailing newline is undercounted by one -- while awk's output always ends
+# with one. The difference then came out as "expected the patch to add exactly 32 lines,
+# it added 33", a message naming the wrong problem entirely and sending the operator to
+# look for a bug in the block. awk counts RECORDS, and a final line without a newline is
+# still a record, so both sides are measured the same way.
+added=$(( $(awk 'END{print NR}' "$TMP") - $(awk 'END{print NR}' "$CFG") ))
 expected=$(printf '%s\n' "$BLOCK" | wc -l)
 [ "$added" = "$expected" ] || die "expected the patch to add exactly $expected lines, it added $added"
 echo "  temp file : $TMP  (+$added lines)"
@@ -719,25 +1004,61 @@ printf '  %-28s %8s %8s %9s M\n' "TOTAL if you switch"    "$c_built" "$c_fetch" 
 printf '  %-28s %8s %8s\n'       "DELTA (tailscale only)" "$d_built" "$d_fetch"
 echo
 echo "  release   : running $run_rel  ->  candidate $cand_rel"
+# 🔴 SAY WHAT THE RELEASE GATE CANNOT SEE, RIGHT WHERE IT REPORTS. `_release_of` reduces
+# to major.minor, so this host's pending `26.11pre1066106` -> `26.11pre1066425` prints
+# `26.11 -> 26.11` and the release gate does NOT fire on it. A bare matching pair reads
+# as "nothing is moving"; it means "nothing is moving THAT THIS GATE MEASURES". The
+# build-count and download-volume gates are what cover a same-release channel tick.
+if [ "$run_rel" = "$cand_rel" ] && [ "$running_version" != "$cand_version" ]; then
+  echo "              same RELEASE, but the revisions DIFFER:"
+  echo "                $running_version"
+  echo "                $cand_version"
+  echo "              The release gate compares major.minor only, so it does NOT fire on"
+  echo "              this. The build-count and download gates are what cover it."
+fi
 echo
 
 # --- the gate ---------------------------------------------------------------------------
 # One implementation, exercised in both directions by --self-test above.
-refuse=$(_gate_reasons "$run_rel" "$cand_rel" "$b_built" "$c_built")
+refuse=$(_gate_reasons "$run_rel" "$cand_rel" "$b_built" "$c_built" "$b_mib" "$c_mib")
 
 if [ -n "$refuse" ] && [ "$ALLOW_WORLD" != "1" ]; then
   echo "REFUSING to switch:" >&2
   printf '  - %s\n' "$refuse" >&2
   echo >&2
   echo "  $CFG was NOT modified. Nothing to roll back." >&2
-  echo "  Largest pending items, so you can judge the cost yourself:" >&2
   # 🔴 `|| true` is load-bearing, twice over: `grep` exits 1 when it matches nothing,
   # and `head` closing the pipe early SIGPIPEs everything upstream. With `set -e` plus
   # `pipefail` either would abort HERE -- inside the refusal path, one line before
   # `exit 4` -- so the script would exit 1 and never print the override the operator
   # needs. A cosmetic listing must not be able to change the exit code.
-  { grep -oE '/nix/store/[a-z0-9]+-[^ ]+\.drv' "$WORK/base.err" | sed 's#.*/[a-z0-9]*-##' \
-      | sort -u | head -15 | sed 's/^/      /'; } >&2 || true
+  #
+  # 🔴 THIS LISTING IS THE ONLY DIAGNOSTIC FOR THE --allow-world-rebuild DECISION, AND IT
+  # USED TO HIDE THE ANSWER. It was headed "Largest pending items" and cut at `head -15`
+  # of an ALPHABETICAL list -- so on the real 38-derivation queue on this host everything
+  # from `s` onward was invisible, including every `steam-*` derivation, the only heavy
+  # builds present; `wine-wow-11.0`, the culprit in the 2h16m incident this whole script
+  # exists because of, sorts last of all. "Largest" was also a false claim: nothing here
+  # is sorted by size, and a .drv name carries no size. So: it is named for what it is,
+  # it shows EVERY item up to a generous cap, and when it does cap it says how many were
+  # omitted rather than trailing off.
+  drvnames=$( { grep -oE '/nix/store/[a-z0-9]+-[^ ]+\.drv' "$WORK/base.err" \
+      | sed -e 's#.*/[a-z0-9]*-##' -e 's/\.drv$//' | sort -u; } || true )
+  n_drv=0
+  [ -z "$drvnames" ] || n_drv=$(printf '%s\n' "$drvnames" | wc -l)
+  echo "  All $n_drv pending derivations, so you can judge the cost yourself" >&2
+  echo "  (alphabetical -- this is a NAME list, not a size ranking):" >&2
+  if [ "$n_drv" -gt "$LIST_MAX" ]; then
+    printf '%s\n' "$drvnames" | head -n "$LIST_MAX" | sed 's/^/      /' >&2 || true
+    echo "      ... and $(( n_drv - LIST_MAX )) more NOT shown (alphabetically after the" >&2
+    echo "      last line above -- the heavy ones may well be among them). Raise the cap" >&2
+    echo "      with TS_LIST_MAX=$n_drv to see every one." >&2
+  elif [ "$n_drv" -gt 0 ]; then
+    printf '%s\n' "$drvnames" | sed 's/^/      /' >&2
+  else
+    echo "      (none -- the refusal above is about downloads or the release string," >&2
+    echo "       not about derivations to build)" >&2
+  fi
   echo >&2
   echo "  To proceed anyway, exactly as written:" >&2
   echo "      sudo env \"PATH=\$PATH\" bash ${BASH_SOURCE[0]} --allow-world-rebuild" >&2
@@ -798,13 +1119,58 @@ echo "== apply =="
 [ -e "$BAK" ] && die "backup path $BAK already exists; refusing to overwrite it"
 cp -p "$CFG" "$BAK"
 echo "  backup    : $BAK"
-cp -p "$TMP" "$CFG"
+# 🔴 PATCHED IS SET **BEFORE** THE COPY, AND THE ORDER IS THE WHOLE POINT. `cp` is not
+# atomic -- it truncates the destination and then writes -- so a failure PART WAY
+# THROUGH (ENOSPC, an I/O error; `/` on this host sits at 77%) leaves $CFG half
+# overwritten. With the flag set after the copy, `set -e` would abort with PATCHED=0,
+# the trap's rollback branch would be skipped, and the operator would be left with a
+# corrupt configuration.nix, an unused good backup sitting beside it, and NOTHING
+# PRINTED. Setting it first costs nothing in the other direction: a `cp` that fails
+# before writing a single byte simply restores a byte-identical file.
+# The flag therefore means "$CFG MAY have been modified", not "it was".
 PATCHED=1
+cp -p "$TMP" "$CFG"
 echo "  applied   : $CFG"
 echo
 
 echo "== nixos-rebuild switch =="
-nixos-rebuild switch
+# 🔴 THE STATUS IS CAPTURED, NOT ASSUMED. This rebuild can run for hours, which is
+# exactly when it gets interrupted or killed, and the line after it used to be a bare
+# `SWITCHED=1` -- a variable that says "the switch succeeded" set without anyone having
+# asked whether it did.
+#
+# MEASURED on bash 5.3.15 here, with the signal confirmed to have landed (the killed
+# child's own wall time is the control -- a `kill` that returns 0 against a process with
+# SIGINT ignored looks identical to "the shell continued"):
+#   * SIGINT, to the child alone AND to the whole process group (the tty Ctrl-C shape):
+#     bash propagates the child's SIGINT death and TERMINATES the script at this line,
+#     exit 130. The EXIT trap fires and rolls back. So the Ctrl-C case never reaches the
+#     check below -- it is already handled, and the claim that a SIGINT-killed child
+#     silently continues did NOT reproduce.
+#   * SIGTERM and SIGHUP: no such propagation. The child exits 143 / 129 and execution
+#     CONTINUES here. Under the old `nixos-rebuild switch` + `SWITCHED=1` those exits
+#     did trip errexit, but they aborted the script with no statement of what happened;
+#     with the capture the operator is told which signal killed the rebuild.
+# So the check below is reachable and it is the SIGTERM/SIGHUP/SIGKILL path -- driven
+# with `kill -TERM` and `kill -HUP` against the real script, both watched to print the
+# message and roll back.
+#
+# `rc=0` FIRST, then `cmd || rc=$?`: `cmd; rc=$?` is dead code under `set -e`, and
+# `cmd || rc=$?` without the seed dies under `set -u` on the SUCCESS path.
+switch_rc=0
+SWITCH_ATTEMPTED=1
+nixos-rebuild switch || switch_rc=$?
+if [ "$switch_rc" -ge 128 ]; then
+  die "\`nixos-rebuild switch\` was KILLED BY SIGNAL $(( switch_rc - 128 )) (exit
+  $switch_rc). It did NOT complete. Signal 15 is a \`kill\`/timeout, 9 an out-of-memory
+  or hard kill, 1 a lost terminal; a Ctrl-C (signal 2) normally kills this script
+  outright instead of arriving here. Whether the switch ACTIVATED before it died is not
+  established -- see the rollback note below."
+elif [ "$switch_rc" != "0" ]; then
+  die "\`nixos-rebuild switch\` exited $switch_rc. It did not complete successfully.
+  Note that a non-zero exit does NOT mean nothing was activated -- see the rollback note
+  below. Its own output is above."
+fi
 SWITCHED=1
 echo
 
@@ -819,16 +1185,65 @@ command -v tailscale >/dev/null 2>&1 || die "the \`tailscale\` CLI is still not 
   after the switch. Open a new shell and re-check before assuming this failed."
 echo "  cli       : $(tailscale version 2>&1 | head -1)"
 
-# The verifier is the authority on whether this is a working path. rc 3 means the node
-# is correct and an ADMIN-CONSOLE action is outstanding -- that is the EXPECTED state
-# straight after a switch, and rolling back a correct config because a human has not
-# opened a browser yet would be absurd.
+# =====================================================================================
+# 🔴 WHAT COUNTS AS SUCCESS -- and the assumption that used to make the FIRST RUN ROLL
+# BACK, EVERY TIME, GUARANTEED.
+#
+# This block used to accept rc 0/2/3 and treat everything else as a node-side failure,
+# on the stated premise that "rc 3 is the EXPECTED state straight after a switch". That
+# premise was false, and this script is the reason: it deliberately does NOT run
+# `tailscale up` (see the next steps below), so straight after a switch the node has
+# never authenticated -- BackendState `NeedsLogin`, `Online` false, no TailscaleIPs,
+# nothing advertised. Under the old verifier that was four separate FAIL entries and rc
+# **1**, not 3, so `die` fired, the EXIT trap restored the backup, and the run ended
+# "ABORT ... ROLLED BACK" having deleted the very thing it had just installed.
+#
+# So the states are now enumerated with what each one MEANS, and the verifier reports
+# "configured but not yet authenticated" as its own code rather than as a defect.
+# Rollback is for a GENUINE failure only.
+#
+# `bash "$CHECK"`, not `"$CHECK"`: the file is guaranteed READABLE by the preflight
+# (`[ -r "$CHECK" ]`), not executable -- a checkout copied without its mode bits, or
+# read off a noexec mount, would fail with "permission denied" here, one line after a
+# successful switch, and be rolled back for it. Running it under an explicit interpreter
+# makes `-r` the right precondition and makes it sufficient.
 chk_rc=0
-"$CHECK" --role "$ROLE" || chk_rc=$?
+bash "$CHECK" --role "$ROLE" || chk_rc=$?
 case "$chk_rc" in
-  0) echo "  verifier  : PASS -- nothing outstanding" ;;
-  2|3) echo "  verifier  : rc $chk_rc -- the node still needs the manual steps below" ;;
-  *) die "the verifier reports a node-side FAILURE (rc=$chk_rc) after the switch" ;;
+  0)
+    echo "  verifier  : rc 0 -- PASS. Authenticated, approved, key expiry disabled."
+    echo "              Nothing outstanding; the steps below are already done."
+    ;;
+  4)
+    echo "  verifier  : rc 4 -- EXPECTED. The switch succeeded and the node is NOT YET"
+    echo "              AUTHENTICATED, because this script does not run \`tailscale up\`"
+    echo "              (it needs a browser). No defect was found. KEEPING the config."
+    ;;
+  3)
+    echo "  verifier  : rc 3 -- the node side is correct; an ADMIN-CONSOLE action is"
+    echo "              outstanding (route approval and/or key expiry). KEEPING the"
+    echo "              config -- a browser tab nobody has clicked is not a defect."
+    ;;
+  2)
+    echo "  verifier  : 🔴 rc 2 -- CANNOT DETERMINE. The switch succeeded and tailscaled" >&2
+    echo "              is active, but the verifier could not read the daemon's state," >&2
+    echo "              so this run has NOT established that the path works. The config" >&2
+    echo "              is KEPT (nothing was shown to be wrong with it). Re-run the" >&2
+    echo "              verifier by hand and read its reason:" >&2
+    echo "                  bash ${CHECK} --role ${ROLE}" >&2
+    ;;
+  1)
+    die "the verifier reports a definitive node-side FAILURE (rc 1) after the switch.
+  That is NOT the not-yet-authenticated state -- rc 4 is, and this is not it. Something
+  the node itself controls is wrong: forwarding off, no LAN route, or a node that HAS a
+  tailnet identity and is nevertheless not Running/Online/advertising. Its output is
+  immediately above. Rolling back."
+    ;;
+  *)
+    die "the verifier exited $chk_rc, which is not one of its documented codes
+  (0 pass, 1 node-side fail, 2 cannot determine, 3 admin action, 4 not yet
+  authenticated). An unrecognised code is not evidence of success. Rolling back."
+    ;;
 esac
 
 OK=1
@@ -842,11 +1257,19 @@ echo
 echo "1. AUTHENTICATE THIS NODE (needs a browser; prints a login URL):"
 if [ "$ROLE" = "server" ]; then
   echo "       sudo tailscale up --advertise-routes=${SUBNET} --accept-dns=false"
-  echo "   (--accept-dns=false keeps tailscale out of this host's resolver, which"
-  echo "    dnsmasq and the .lan names already own.)"
 else
-  echo "       sudo tailscale up --accept-routes"
+  echo "       sudo tailscale up --accept-routes --accept-dns=false"
 fi
+# 🔴 `--accept-dns=false` ON BOTH ROLES. The reasoning is identical on the two machines
+# -- MagicDNS makes tailscale take over the host resolver, and on this fleet dnsmasq and
+# the `.lan` names already own it -- so giving the server the flag and not the client
+# would hand the resolver of the ONE machine the operator travels with to tailscale,
+# months from anyone who could fix it. The cost is real and is stated rather than hidden.
+echo "   (--accept-dns=false keeps tailscale out of this host's resolver, which dnsmasq"
+echo "    and the .lan names already own. It applies to BOTH hosts for the same reason."
+echo "    THE COST: MagicDNS names will not resolve here, so address the other machine by"
+echo "    its tailnet address -- \`tailscale status\` prints it. Drop the flag on a host"
+echo "    where you would rather have MagicDNS than keep its current resolver.)"
 echo
 if [ "$ROLE" = "server" ]; then
   echo "2. APPROVE THE SUBNET ROUTE -- admin console only. Until this is done the route"
@@ -862,4 +1285,7 @@ echo "       https://login.tailscale.com/admin/machines"
 echo "       -> this machine -> ... -> Disable key expiry"
 echo
 echo "Then confirm all of it, from live runtime state:"
-echo "       bash ${CHECK} --role ${ROLE}      # 0 = done, 3 = a step above is outstanding"
+echo "       bash ${CHECK} --role ${ROLE}"
+echo "         0 = done   3 = a step above is outstanding"
+echo "         4 = step 1 has not been done yet (what it says RIGHT NOW)"
+echo "         1 = a node-side defect   2 = it could not read the daemon"
