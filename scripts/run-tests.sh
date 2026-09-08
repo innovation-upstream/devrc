@@ -1081,7 +1081,10 @@ fi
 #
 # 🔴 WHAT THIS CAN NO LONGER CATCH, stated plainly rather than left to be
 # discovered: deleting up to `min(50, m/20)` tests from a SINGLE target is now
-# silent — up to 50 of scripts/tests' ~1900, 1 of the 13-test i3 suite. The old
+# silent — up to 50 of scripts/tests' 12870 (⚠ this figure read "~1900" and
+# undated until 2026-09-08; it was 6.8x stale, which understates the target and
+# so OVERSTATES the proportion this blind spot covers), 1 of the 13-test i3
+# suite. Re-derive it rather than trusting it — nothing asserts on it. The old
 # exact total went red on a one-test deletion. That precision is what cost
 # eleven reconciliations in a day, and it has never once caught a real deletion;
 # the collapses it exists for — a suite emptied, renamed, dropped from
@@ -1684,7 +1687,21 @@ TARGET_FLOORS=(
   # own count put through the gate's formula and printed BY the gate, not
   # arithmetic on the two sides. Pinned AFTER merging main into the branch, per
   # the ORDER note above.
-  "scripts/tests|12793"
+  # 2026-09-07, the `cairn-who` split: 12870 collected, so 12793 carried 77 of
+  # SLACK — the "three PRs landed without bumping it" drift the header calls
+  # out. 12870 - min(50, max(1, 12870/20)) = 12870 - 50 = 12820, the gate's own
+  # printed count put through the rule. Pinned AFTER rebasing onto origin/main
+  # (c5e425c7), per the ORDER note above — the count is from the rebased tree,
+  # not from either side alone.
+  # ⚠ WHAT THIS DOES NOT CLOSE, because an audit round read the sentence above
+  # as if it did: the ratchet removes the ACCUMULATED drift (77 -> 50), not the
+  # per-target slack, and 50 is what the rule deliberately leaves. This
+  # branch's own 20-test suite is still INSIDE that band, so deleting
+  # `test_cairn_split.py` wholesale would not redden this floor. That is the
+  # documented trade at line 1083, not a defect here — but the floor is not
+  # the thing standing between that file and silent deletion, and nothing in
+  # this entry should be read as claiming otherwise.
+  "scripts/tests|12820"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

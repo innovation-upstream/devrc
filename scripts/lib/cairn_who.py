@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
-"""`cairn who <task>` — resolve a TASK to the sessions that worked it, the tmux
+"""`cairn-who <task>` — resolve a TASK to the sessions that worked it, the tmux
 windows hosting them, and the transcripts they wrote.
+
+🔴 IT IS ITS OWN BINARY, AND THE COMMENT THAT SAID OTHERWISE IS RETRACTED. This
+shipped as a `cairn who` SUBCOMMAND, whose parser carried the claim that it
+belonged there "because `cairn` is the name for the whole three-noun layer, and
+a second CLI would be the second place to look". That was wrong on the noun: the
+store client is about ENTRIES in a hosted store, and this is about SESSIONS on
+named hosts — it touches no store, no cache and no network of the store's, takes
+none of the store flags, and needed its own timeout default precisely because
+nothing about the store's bound applies to it. The seam is also the one the OSS
+extraction independently chose: `github.com/ZacxDev/cairn` ships the store client
+and deliberately excludes this, because the hosts it reports cannot go in a
+public repo. One noun per binary; the shared piece is `timeouts.py`, imported.
 
 WHY THIS IS A COMMAND AND NOT A RECIPE. Every hop already resolved before this
 existed; none of them joined. Answering "who is working task 360, and where do I
@@ -45,6 +57,24 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
+
+# 🔴 THE TIMEOUT PREDICATE IS IMPORTED, NEVER RESTATED — and after the `who`
+# split it is the ONLY thing still binding this module to the store client.
+# `who` used to live inside `scripts/cairn`, which let the store path reach this
+# rule by importing this module; now that they are two binaries, `timeouts.py`
+# is what keeps the two copies from drifting apart again. See its docstring for
+# the disagreement that consolidating them found.
+# ⚠ GUARDED, like every other `sys.path` insert in this file (`find_transcript`)
+# and like the `_cairn_who` shim this replaced. Unconditional, it moved
+# `scripts/lib` to `sys.path[0]` for the WHOLE process on every import of this
+# module — a side effect on the importer, not on us. No collision is measured
+# today (nothing in `scripts/lib/` shadows a stdlib or site-packages name, and
+# `timeouts` resolves nowhere else), so this is consistency and blast-radius
+# hygiene, not a fix for an observed break.
+_LIB = str(Path(__file__).resolve().parent)
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+from timeouts import unbounded_timeout_reason  # noqa: E402
 
 #: How long to wait on each external tool. `session-manager` shells into tmux on
 #: two hosts and a full cross-host scan measured ~5s; the laptop being asleep is
@@ -230,35 +260,6 @@ class WhoReport:
 # --------------------------------------------------------------------------- #
 
 
-def unbounded_timeout_reason(value) -> str | None:
-    """Why `value` is not a usable timeout, or `None` if it is fine.
-
-    🔴 ONE PREDICATE, ONE PLACE — AND CONSOLIDATING IT IS WHAT FOUND THE BUG.
-    This rule was open-coded at two sites (`_run` here, `fetch_snapshot` in
-    `scripts/cairn`) and the copies DISAGREED: only one excluded `bool`. A
-    comment claiming the two mirrored each other was therefore false, and the
-    weaker copy was measured running `_run(cmd, True)` with a ONE-SECOND bound
-    and reporting `did not answer within Trues` — verbatim the "nobody notices"
-    failure `_run`'s own docstring describes.
-
-    `bool` is the trap: it subclasses `int`, so `isinstance(x, int)` accepts
-    `True` and silently yields a 1s timeout. `None` is the other: it means NO
-    timeout to both `subprocess` and `urlopen`, an unbounded wait rather than a
-    default. Both callers raise their OWN exception type from this reason, so
-    the rule is shared without coupling the store path to `who`'s error class.
-    """
-    if isinstance(value, bool):
-        return (f"timeout={value!r} is a bool — it subclasses int, so this "
-                "would silently run with a 1-second bound")
-    if not isinstance(value, int):
-        return (f"timeout={value!r} is not an int — a missing bound is an "
-                "UNBOUNDED wait, not a default")
-    if value <= 0:
-        return (f"timeout={value!r} is not positive — a non-positive bound is "
-                "an UNBOUNDED wait, not a default")
-    return None
-
-
 def _one_line(text: str) -> str:
     """Collapse a diagnostic to one line.
 
@@ -280,7 +281,7 @@ def _run(cmd: Sequence[str], timeout: int) -> tuple[int, str, str]:
     that depends on it.
     """
     # 🔴 `timeout=None` MEANS NO TIMEOUT AT ALL, so a None here does not
-    # "fall back to a default" — it removes the bound entirely and `cairn who`
+    # "fall back to a default" — it removes the bound entirely and `cairn-who`
     # waits forever on a host that will never answer. Measured: a None timeout
     # let a 2s sleep run to completion unbounded. The expiry message would also
     # have read "within Nones", which is how nobody notices. Refuse it.
@@ -613,10 +614,31 @@ def render(report: WhoReport) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """`cairn-who`'s whole command line. `scripts/cairn-who` delegates here.
+
+    🔴 THERE IS EXACTLY ONE `--timeout`, AND THAT IS THE POINT OF THE SPLIT.
+    As a subcommand this needed a `_who_timeout` precedence helper and a distinct
+    argparse `dest`, because argparse copies the subparser's namespace over the
+    parent's: a top-level `cairn --timeout N who …` silently VANISHED. The first
+    fix printed a notice instead, driven by hand-parsing `sys.argv`, and that
+    scanner returned the WRONG answer for two reachable spellings —
+    `--cache <val> --timeout 5 who 42` (it stopped at `--cache`'s value) and
+    `--time 5 who 42` (argparse accepts long-option abbreviations, which a
+    literal `== "--timeout"` cannot see). Re-implementing argparse's parsing to
+    describe argparse's behaviour was the mistake. A standalone binary has no
+    parent parser to be clobbered by, so the whole class is gone rather than
+    handled — do NOT reintroduce a second timeout flag or a precedence rule.
+
+    🔴 AND THE DEFAULT IS THIS MODULE'S OWN, NOT THE STORE'S. `cairn`'s bound is
+    20s, tuned for an HTTP snapshot fetch; `DEFAULT_TIMEOUT` here is 60s because
+    this shells into tmux on two hosts and the laptop may be asleep. The help
+    string READS the constant rather than restating it, so the advertised
+    default cannot drift from the one that ships.
+    """
     import argparse
 
     ap = argparse.ArgumentParser(
-        prog="cairn who",
+        prog="cairn-who",
         description="Resolve a task to its sessions, tmux windows and transcripts.",
     )
     ap.add_argument("task")
@@ -624,7 +646,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--host", default=None, choices=["workbench", "laptop"])
     ap.add_argument("--no-windows", action="store_true",
                     help="skip the tmux scan; report only the durable transcripts")
-    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
+                    metavar="SECONDS",
+                    help=f"seconds per external tool (default {DEFAULT_TIMEOUT})")
     args = ap.parse_args(argv)
 
     report = resolve(args.task, timeout=args.timeout, host=args.host,
