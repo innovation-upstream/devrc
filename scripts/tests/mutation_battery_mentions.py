@@ -453,6 +453,32 @@ MUTANTS: list[tuple] = [
      # resolves, which is the same test's second half and covers the mirror
      # mutation (a widened scanner bound).
      "a TRUNCATED audit-pr number reaches the handler"),
+    # ---- F9: A GUESS THE OPERATOR CANNOT OVERRIDE --------------------------
+    # #1380 fixed the shape where the guess was ALONE; the bare `#N` the pane
+    # attributes was left on purpose and the operator asked for it on
+    # 2026-09-08. These three rows are the ways that widening can be undone or
+    # mis-worded while every OTHER mention test stays green.
+    ("K45", "deletion", "the guessed-repo offer narrows back to the guess that "
+                        "is ALONE, so a bare `#N` the pane mis-attributes is "
+                        "again a two-row picker with no way to say 'not that "
+                        "repo'",
+     "    guessed_offer = guessed and not offered_universe\n",
+     "    guessed_offer = (guessed and not offered_universe\n"
+     "                     and len(candidates) == 1)\n",
+     "the two-row picker is unchanged"),
+    ("K46", "deletion", "the guessed row's POSITION stops being measured and is "
+                        "hardcoded to 1, so a bare `#N` tells the operator the "
+                        "clawgate task is the guess and the guess is the task",
+     '    guess_rank = next((i for i, c in enumerate(candidates, 1)\n'
+     '                       if c["platform"] == PLATFORM_GITHUB), 1) if guessed else 1\n',
+     "    guess_rank = 1\n",
+     "#1291 names no repository. Row 1"),
+    ("K47", "widening", "the universe is PREPENDED rather than appended, so the "
+                        "common case opens on a fuzzy-matched stranger instead "
+                        "of the clawgate task",
+     "            candidates = candidates + extra\n",
+     "            candidates = extra + candidates\n",
+     "the MEASURED rows must stay on top"),
     ("K36", "deletion", "the alacritty wrapper drops `pkgs.git` from the hint's "
                         "PATH: `git` is then absent under the display manager's "
                         "environment, FileNotFoundError is caught as OSError, "
@@ -475,6 +501,7 @@ TARGETS: dict[str, pathlib.Path] = {
     "K29": OPEN_, "K30": OPEN_, "K31": OPEN_, "K32": OPEN_,
     "K33": OPEN_, "K34": OPEN_, "K35": OPEN_,
     "K37": OPEN_, "K38": OPEN_, "K39": OPEN_,
+    "K45": OPEN_, "K46": OPEN_, "K47": OPEN_,
     "K40": ALACRITTY, "K41": SCAN, "K42": ALACRITTY,
     # 🔴 A FOURTH FILE, AND A NIX ONE. The wrapper's PATH is a seam between two
     # files in two languages that agree only by coincidence, and both directions
