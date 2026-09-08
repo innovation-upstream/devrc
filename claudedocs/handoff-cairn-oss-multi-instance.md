@@ -275,11 +275,13 @@ countable.
      DEAD spelling once #1381 merges, and exits 2. They are left as written because they
      record what was true when written; do not copy a command out of them.
    🔴 `nix/home.nix` deploys `scripts/cairn` as an `mkOutOfStoreSymlink` and the comment above
-   that entry says it is REQUIRED, not preferred, because `.resolve()` must land beside `lib/`.
-   (⚠ This bullet cited `:1474` and `:1467`; both were already wrong at `c5e425c7`, landing on
-   unrelated `shell-env-nudge` comments — so no line numbers. Grep for
-   `mkOutOfStoreSymlink is NOT a preference`.) **#4 solves exactly that** by installing script
-   and `lib/` together under `libexec`. Client edits will then need a `home-manager switch`.
+   that entry says it is REQUIRED, not preferred, because `.resolve()` must land beside
+   `lib/`. (⚠ This bullet cited `:1474` and `:1467`; both were already wrong at the merge base
+   `c5e425c7` — they land on unrelated `shell-env-nudge` comments — so no line numbers here.
+   The comment they pointed at says a line number is a claim that rots silently, which is
+   exactly what these two did. Grep for `mkOutOfStoreSymlink is NOT a preference`.)
+   **#4 solves exactly that** by installing script and `lib/` together under
+   `libexec`. Client edits will then need a `home-manager switch`.
    **Closing condition:** a merged devrc PR in which `flake.nix` names cairn as an input and
    `readlink -f ~/.local/bin/cairn` resolves into `/nix/store`. Re-verified NOT met 2026-09-08.
    forcing: none

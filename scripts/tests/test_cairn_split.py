@@ -195,9 +195,19 @@ def test_BOTH_sides_import_the_predicate_from_the_module_that_owns_it():
     # version GREEN on a file that no longer imports the predicate at all.
     import ast
 
+    # 🔴 THE CALL MUST COME FROM THE IMPORT — and the previous AST version did
+    # not require that, which made it WEAKER than the substring check it
+    # replaced even though it was wider against prose. Wider on one axis,
+    # narrower on another. MEASURED: keep `import timeouts`, add a local
+    # `def unbounded_timeout_reason(value)` with byte-identical messages spelled
+    # `type(value) is int` so the sibling `isinstance(_, int)` scan sees
+    # nothing, and the suite was 103 passed / 0 failed — two copies free to
+    # drift, the exact state `timeouts.py` exists to prevent. The substring
+    # version this replaced went RED on that same file.
     for path in (CAIRN, LIB / "cairn_who.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        from_form = module_form = calls = False
+        from_form = module_form = False
+        bare_calls = attr_calls = local_def = False
         for node in ast.walk(tree):
             if (isinstance(node, ast.ImportFrom) and node.module == "timeouts"
                     and any(a.name == "unbounded_timeout_reason"
@@ -206,20 +216,32 @@ def test_BOTH_sides_import_the_predicate_from_the_module_that_owns_it():
             elif (isinstance(node, ast.Import)
                     and any(a.name == "timeouts" for a in node.names)):
                 module_form = True
+            elif (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == "unbounded_timeout_reason"):
+                local_def = True
             elif isinstance(node, ast.Call):
                 fn = node.func
                 if isinstance(fn, ast.Name) and fn.id == "unbounded_timeout_reason":
-                    calls = True
+                    bare_calls = True
                 elif (isinstance(fn, ast.Attribute)
-                        and fn.attr == "unbounded_timeout_reason"):
-                    calls = True
+                        and fn.attr == "unbounded_timeout_reason"
+                        and isinstance(fn.value, ast.Name)
+                        and fn.value.id == "timeouts"):
+                    attr_calls = True
+        assert not local_def, (
+            f"{path.name} DEFINES its own `unbounded_timeout_reason` — that is "
+            f"the second copy, whatever it also imports. Delete it and use "
+            f"`timeouts`.")
         assert from_form or module_form, (
             f"{path.name} does not import `timeouts` — neither "
             f"`from timeouts import unbounded_timeout_reason` nor "
             f"`import timeouts`")
-        assert calls, (
-            f"{path.name} imports the predicate but never calls it — a dead "
-            "import is not a guard")
+        assert (from_form and bare_calls) or (module_form and attr_calls), (
+            f"{path.name} imports `timeouts` but its call to "
+            f"`unbounded_timeout_reason` does not come from that import — a "
+            f"dead import beside a locally-resolved call is not a guard "
+            f"(from-import={from_form}, module-import={module_form}, "
+            f"bare call={bare_calls}, `timeouts.`-qualified call={attr_calls})")
 
 
 #: Values that must be refused as a timeout. Kept in step with
@@ -397,24 +419,37 @@ def test_the_nix_deploy_comment_pins_its_WHY_paragraph_verbatim():
         "requirement it documents is load-bearing, so its disappearance is "
         "the same defect as its going stale")
 
-    # 🔴 THREE PARTIAL PREDICATES WERE TRIED AND ALL THREE WERE WALKABLE. They
-    # are listed so a fourth is not derived:
+    # 🔴 FOUR PARTIAL PREDICATES WERE TRIED AND NONE HELD. Count the numbered
+    # items rather than trusting this sentence — an earlier draft said THREE
+    # above a list of four, in the very commit whose subject was "four
+    # self-descriptions disagreeing".
     #
-    #   1. a SPELLING check (`"for `cairn_who`" not in block`) — the shipped
-    #      comment says "for the `cairn_who` importers" and passed on the
-    #      inserted "the" alone.
-    #   2. "does the code actually reach it", by substring — satisfied by the
-    #      script's OWN PROSE (`_store_timeout`'s docstring names
+    # 🔴 AND THEY FAILED IN TWO OPPOSITE DIRECTIONS. Reading them as a single
+    # "all too weak" set is what invites the next author to re-derive #3 as a
+    # tightened version — so the direction is named per item:
+    #
+    #   1. TOO WEAK — a SPELLING check (`"for `cairn_who`" not in block`). The
+    #      shipped comment says "for the `cairn_who` importers" and passed on
+    #      the inserted "the" alone.
+    #   2. TOO WEAK — "does the code actually reach it", by substring, satisfied
+    #      by the script's OWN PROSE (`_store_timeout`'s docstring names
     #      `cairn_who._run`), so the assertion was unreachable. MEASURED: the
     #      reworded justification left it GREEN.
-    #   3. the same by AST — accurate about the code, still wrong here, because
-    #      it forbids the RETRACTION this comment legitimately carries. A live
-    #      justification and a record of one being removed are the same tokens
-    #      in a different mood.
-    #   4. `"mkOutOfStoreSymlink" in block or "REQUIRED" in block` — MEASURED:
-    #      deleting the whole 473-byte WHY paragraph and leaving
+    #   3. TOO STRICT — the same by AST. Accurate about the code, and wrong
+    #      here anyway: it forbids the RETRACTION this comment legitimately
+    #      carries, so it went RED on a correct tree. A live justification and
+    #      a record of one being removed are the same tokens in a different
+    #      mood. Do NOT re-derive this one as a tighter AST check; the problem
+    #      was never its precision.
+    #   4. TOO WEAK — `"mkOutOfStoreSymlink" in block or "REQUIRED" in block`. MEASURED:
+    #      deleting the whole WHY paragraph and leaving
     #      "# Deployed with mkOutOfStoreSymlink, same as claim-work above."
     #      kept it GREEN, while the test's NAME claimed the reason was pinned.
+    #      ⚠ UNITS: that is a net delete of 468 CHARACTERS / 475 bytes (the
+    #      paragraph is 532 chars / 539 bytes). Earlier receipts said "473-byte"
+    #      and "468 B"; the first matched nothing and the second was `len(str)`
+    #      labelled as bytes. `len()` on a str is characters — the em-dashes in
+    #      this paragraph are 3 bytes each, so the two never agree here.
     #
     # So the paragraph is pinned WHOLE, per "when the artifact under test IS
     # prose, pin the whole normalised string".

@@ -1265,5 +1265,7 @@ def test_the_timeout_predicate_has_exactly_ONE_implementation():
             f"is a timeout check, import `unbounded_timeout_reason` instead so "
             f"the copies cannot drift. ⚠ This guard cannot tell a timeout check "
             f"from an unrelated int check — it counts the CONSTRUCT, not the "
-            f"intent — so an unrelated one reddens here too, and the fix for "
-            f"that case is to widen this guard, not to work around it.")
+            f"intent — so an unrelated one reddens here too. In that case make "
+            f"this guard DISCRIMINATE (exempt the specific site, or match on "
+            f"the timeout parameter as well); do not widen it, which makes a "
+            f"false positive worse, and do not work around it.")
