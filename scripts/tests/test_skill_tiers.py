@@ -85,12 +85,12 @@ MIN_SKILLS = 30
 # --------------------------------------------------------------------------- #
 MEASURED_ENTRIES = 35
 MEASURED_TIER_A_ENTRIES = 22
-MEASURED_TIER_A_CHARS = 7_639
+MEASURED_TIER_A_CHARS = 7_617
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_824
+MEASURED_UNDER_LEDGER_CHARS = 7_802
 # ...and what the same 35 entries would cost with every skill tier A. The
 # difference is what the ledger buys: 3,542 chars.
-MEASURED_ALL_TIER_A_CHARS = 11_366
+MEASURED_ALL_TIER_A_CHARS = 11_344
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
@@ -181,7 +181,7 @@ MEASURED_ALL_TIER_A_CHARS = 11_366
 # the one this raise was taken for. Headroom is pinned back to 0, so the next
 # addition of any size reds this gate — and if a third raise is proposed, the
 # right answer is almost certainly a demotion instead.
-TIER_A_CEILING_CHARS = 7_639
+TIER_A_CEILING_CHARS = 7_617
 
 # 🔴 Skills that must NEVER be tier B, pinned as a RELATIONSHIP rather than left
 # to review. Each one fires from a SYMPTOM Zach describes rather than from its own

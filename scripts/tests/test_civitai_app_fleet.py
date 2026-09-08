@@ -1,4 +1,4 @@
-"""Guards for the civitai-app-release skill's two scripts.
+"""Guards for the civitai-app-fleet skill's two scripts.
 
 🔴 EVERY CASE BELOW IS A DEFECT THAT ACTUALLY OCCURRED on 2026-09-07, not an
 imagined one. Both scripts exist because prose telling the reader to be careful
@@ -28,7 +28,7 @@ SKILL_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "claude",
     "skills",
-    "civitai-app-release",
+    "civitai-app-fleet",
 )
 
 
@@ -111,6 +111,38 @@ def test_unknown_review_state_raises():
     bad = STATUS.replace("0.4.1    approved", "0.4.1    marinated")
     with pytest.raises(app_state.UnknownState):
         app_state.parse_rows(bad)
+
+
+def test_preview_live_is_a_known_state():
+    """🔴 REGRESSION. `preview-live` is real — it is the deploy state of
+    `w6-ui-dogfood` in the live listing — and the first draft of DEPLOY_STATES
+    omitted it, so `app_state.py` raised on the ACTUAL `civitai app status`
+    output. Found by `fleet.py`'s first real run, one hour after the file
+    merged: the guard firing on its own author. Every other member is exercised
+    by the STATUS fixture; this one needs its own row because no repo in the
+    fleet is currently in preview.
+    """
+    row = "w6-ui-dogfood               0.2.0    withdrawn  preview-live  -        2026-08-29  -\n"
+    rows_with_preview = app_state.parse_rows(STATUS + row)
+    got = app_state.resolve(rows_with_preview, "w6-ui-dogfood", "0.2.0")
+    assert got["deploy"] == "preview-live", got
+
+
+def test_deploy_states_contains_no_invented_members():
+    """The mirror of the bug above, and the other half of the same mistake: the
+    first draft also contained `queued`, which appears NOWHERE in the platform's
+    output. A set that is too WIDE fails silently — it accepts a renamed or
+    typo'd state as valid — so membership is pinned to what was actually
+    observed, and widening it stays a deliberate edit with provenance.
+    """
+    assert app_state.DEPLOY_STATES == {
+        "-",
+        "building",
+        "deploying",
+        "live",
+        "failed",
+        "preview-live",
+    }
 
 
 def test_prose_and_header_lines_are_skipped_not_raised():

@@ -55,7 +55,19 @@ REVIEW_STATES = {"pending", "approved", "rejected", "withdrawn"}
 # 🔴 ORDERED WORST-TO-BEST IS NOT THE POINT — completeness is. Adding a state
 # the platform introduced is a one-line change here; the alternative (a
 # fall-through default) is what silently mis-reported `deploying` for an hour.
-DEPLOY_STATES = {"-", "queued", "building", "deploying", "live", "failed"}
+#
+# 🔴 EVERY MEMBER WAS OBSERVED, none guessed — and that distinction is not
+# pedantry. The first draft of this set was wrong in BOTH directions: it omitted
+# `preview-live` (live on `w6-ui-dogfood`) and included `queued`, which occurs
+# nowhere in the listing. The omission surfaced on `fleet.py`'s first real run,
+# via this guard raising, within an hour of the file being merged — the guard
+# working exactly as designed, on its author. Re-derive with
+#     civitai app status | awk 'NF>=4 && $2 ~ /^[0-9]/ {print $4}' | sort -u
+# rather than from memory, and add a member only after seeing it.
+#
+# Provenance: `-`, `live`, `failed`, `preview-live` from the live listing
+# 2026-09-08; `building` and `deploying` observed on submissions the same day.
+DEPLOY_STATES = {"-", "building", "deploying", "live", "failed", "preview-live"}
 
 # A row is authoritative for a version unless it was withdrawn. A withdrawn row
 # is a real event, but it never describes what the OTHER submission of the same

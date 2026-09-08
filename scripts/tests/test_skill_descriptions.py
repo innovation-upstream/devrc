@@ -286,7 +286,10 @@ MIN_LISTING_ENTRIES = 30
 # eviction playbook is printed by the failing assertion below.
 #
 # 🔴 RAISED ONCE, DELIBERATELY, 2026-09-08: 10,800 -> 11,192, to admit
-# `civitai-app-release` (392 chars). THE RULE ABOVE STILL STANDS — this is the
+# `civitai-app-release` (392 chars), then LOWERED to 11,170 the same day when
+# the skill was reframed as `civitai-app-fleet` and its description got 22 chars
+# shorter — re-pinning on a cut is the rule this file states, and it pays part
+# of the raise back. THE RULE ABOVE STILL STANDS — this is the
 # exception, not a precedent, and it was taken by Zach with the "do NOT raise"
 # sentence quoted back to him first. What was weighed:
 #   - Both playbook remedies were available and both were declined: demoting an
@@ -300,7 +303,7 @@ MIN_LISTING_ENTRIES = 30
 # HEADROOM IS STILL 0 BY CHOICE: pinned to the exact new measure, so the NEXT
 # addition of any size reddens this gate and forces the same conversation.
 # If you are reading this while adding a skill: you do not get to raise it too.
-LISTING_TOTAL_CEILING_CHARS = 11_192
+LISTING_TOTAL_CEILING_CHARS = 11_170
 
 # The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
 # recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries
