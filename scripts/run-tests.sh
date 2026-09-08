@@ -1695,7 +1695,7 @@ TARGET_FLOORS=(
   # than it does: the ratchet removes ACCUMULATED drift, not the per-target
   # slack, and ~50 is what the rule deliberately leaves. A suite inside that
   # band is not protected from silent deletion by this floor.
-  "scripts/tests|12916"
+  "scripts/tests|12927"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
