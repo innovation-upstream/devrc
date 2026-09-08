@@ -1164,7 +1164,7 @@ else
     actions+=("this client does not accept subnet routes (RouteAll=$route_all), so the
     workbench's $SUBNET advertisement will not be installed here. Fix:  $UP_CMD")
   fi
-  if ip -4 -o route show 2>/dev/null | awk -v s="$SUBNET" '$1==s' | grep -q 'dev tailscale'; then
+  if ip -4 -o route show table all 2>/dev/null | awk -v s="$SUBNET" '$1==s' | grep -q 'dev tailscale'; then
     echo "PASS  lanroute  : $SUBNET is installed here via a tailscale interface"
   elif [ "$authed" != "1" ]; then
     unknowns+=("$SUBNET is not installed here via tailscale, and $noid_reason, so no
