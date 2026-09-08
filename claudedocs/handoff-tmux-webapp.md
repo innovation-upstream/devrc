@@ -1912,7 +1912,38 @@ mechanism is worth not re-deriving.
   EMPTY conclusion as busy, not as settled. On a red, read WHICH test failed and
   which NODE the PipelineRun landed on before debugging the diff (ranks 17, 18).
 
-### 🔴 `devrc-ci`'s pytests leg is RED ON `main` ITSELF — it will block every devrc PR
+### ✅ RESOLVED — `devrc-ci`'s pytests leg was RED ON `main` ITSELF, from a nixpkgs lockfile bump
+
+🔴 **Root cause: the flake lockfile bump `cb86343d` (#1382, 2026-09-07 22:55) moved two
+nix-provided tools out from under pins the repo asserts on.** No PR caused any of the 7
+failures. Fixed by **#1392** (`fix/toolchain-drift-2026-09`), squash `94f82796`, merged
+2026-09-08T18:26:46Z — verified on `origin/main` **by content, not ancestry**:
+`PINNED_VERSION = "1.18.29"` in `scripts/tests/test_opencode_engine.py` and
+`classify_age_refusal` present ×2 in `scripts/analyze-service-index/restore-verify.py`.
+
+| tool | flake.lock before | after (dev shell **and** nix sandbox) | what it broke |
+|---|---|---|---|
+| `opencode` | 1.18.21 | 1.18.29 | 1 failure — the version pin |
+| `age` / `age-keygen` | 1.3.1 | 1.3.2 | 6 failures — escrow/backup guards keyed to 1.3.1's behaviour |
+
+**Both are working gates, not bad tests.** The version assertion's own docstring already
+carried the remedy: *"If flake.lock genuinely moved opencode, do NOT just bump
+PINNED_VERSION: re-derive the header's measurements against the new binary first."*
+#1392 did exactly that.
+
+**Verified on the MERGED tree, because #1392's own green ran on a branch 2 commits behind
+`main`** and that is a claim about the branch, not about what merging produces. Built the
+integration tree (`f8641223` + `origin/main`, clean merge) and ran the authoritative tier
+`nix build .#checks.x86_64-linux.pytests`:
+`PASS scripts/tests (collected=12923 passed=12923 skipped=0 failed=0)` — the exact target
+that was `FAIL … failed=7` — and `TOTAL collected=20968 passed=20966 skipped=2 failed=0`,
+28/28 per-target floors, `RESULT: PASS (exit=0)`. 🔴 **The anti-vacuity check is the
+collected COUNT: 20948 → 20968.** A merged tree that still collected 20948 would have been
+the branch tree again, and the pass would have meant nothing.
+
+The evidence below is preserved as recorded — the three-way control and its ruling-out are
+sound and are what made this attributable. Only the two bullets that guessed at a mechanism
+are corrected in place.
 
 - **Symptom + exact repro:** the `tekton/devrc-pytests` check fails on any devrc PR.
   The gate's own summary line reads
@@ -1938,27 +1969,32 @@ mechanism is worth not re-deriving.
   `via: measurement`
 - **Ruled out — a flake.** The same commit re-run from its own spec produced the
   identical failure counts. Deterministic, not timing. `via: measurement`
-- 🔴 **NOT EXPLAINED, and my first theory was WRONG.** I reasoned the local pass was
-  because this host had an older opencode. Measured afterwards: `opencode --version`
-  here is **1.18.29 — the same version CI reports** — and
-  `python3 -m pytest scripts/tests/test_opencode_config.py` still passes **640/640**
-  on both `main` and my branch. So the local/CI divergence is **not** a version
-  difference and I did not identify what it is. Do not carry my discarded theory
-  forward.
-- **Leading hypothesis:** the failing assertions live in a target CI runs
-  differently from a bare `pytest <file>` — the gate runs `scripts/tests` as one
-  target with its own floor and its own nix shell, so the binaries on PATH inside
-  that shell are the thing to read, not the ones in an interactive shell.
-- **Next probe:** read the failing target's own invocation out of the gate script
-  and reproduce it verbatim rather than running the test file directly:
-  ```bash
-  KUBECONFIG=$KC_HOMELAB kubectl logs -n tekton-ci devrc-ci-ctrl-main-gate-pod \
-    --all-containers --tail=-1 | grep -a -B5 "1.18.29' == '1.18.21"
-  ```
-  then compare `command -v opencode age-keygen` inside that shell against an
-  interactive one. ⚠ `devrc-ci-ctrl-main` and `devrc-ci-rerun-ho` are hand-created
-  PipelineRuns I made for the control; they are evidence, not scheduled work, and
-  can be deleted once read.
+- ⚠ **CORRECTED — the "NOT EXPLAINED" above was a WRONG-FILE error, not a real
+  local/CI divergence.** The bullet reasoned from `python3 -m pytest
+  scripts/tests/test_opencode_config.py` passing **640/640** locally. That file was
+  never the one failing: the assertion lives in
+  **`scripts/tests/test_opencode_engine.py::test_engine_is_the_version_every_measurement_is_keyed_to`**,
+  a different module. Run the right one and it reproduces on the dev host in under a
+  second — `assert '1.18.29' == '1.18.21'`, byte-identical to CI's text. There was no
+  divergence to explain. `via: measurement`
+- ⚠ **The "leading hypothesis" it produced is therefore REFUTED, and it was the
+  expensive kind: plausible, self-consistent, and pointing at the wrong layer.** It
+  proposed that the gate's nix shell put different binaries on PATH than an
+  interactive shell. False for opencode — both are **1.18.29** — and the nix-shell
+  difference is real only for `age` (login shell 1.3.1, dev shell 1.3.2), which is a
+  *second* cause, not the explanation for the first.
+  🔴 **The reusable tell: a failure text quotes a MODULE, and the doc quoted a
+  FILENAME the reader supplied from memory.** Read the failing test's fully-qualified
+  node id out of the gate output and run *that*, before theorising about the
+  environment. An environment theory built on a wrong-file control is a second sample
+  of nothing.
+- 🔴 **Both hand-created control PipelineRuns have served their purpose and can be
+  deleted:** `devrc-ci-ctrl-main` and `devrc-ci-rerun-ho` in ns `tekton-ci`. They are
+  evidence, not scheduled work.
+- **What actually generalises, and is worth carrying:** a lockfile bump in this repo
+  is a **behaviour change to every version-pinned guard**, and those guards are
+  deliberately environment-dependent. When `devrc-pytests` goes red across unrelated
+  PRs at once, check `git log -1 flake.lock` before reading any diff.
 
 ### ⚠ Task 524's closing condition is blocked on an interactive prompt, not on a defect
 
