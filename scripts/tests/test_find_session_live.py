@@ -1994,12 +1994,13 @@ def test_the_window_stamp_is_the_SAME_FUNCTION_the_JSON_field_uses(monkeypatch):
         "the field and the sentence describe different windows in one object")
 
 
-@pytest.mark.parametrize("argv,expect_absent", [
-    (["zzterm"], ()),
-    (["zzterm", "--claude-only"], ("the opencode corpus",)),
-    (["zzterm", "--opencode-only"], ("the peer hosts",)),
+@pytest.mark.parametrize("argv,expect_present,expect_absent", [
+    (["zzterm"], ("the peer hosts", "the opencode corpus"), ()),
+    (["zzterm", "--claude-only"], ("the peer hosts",), ("the opencode corpus",)),
+    (["zzterm", "--opencode-only"], ("the opencode corpus",), ("the peer hosts",)),
 ], ids=["default", "claude-only", "opencode-only"])
-def test_the_scope_clause_names_only_legs_that_actually_RAN(argv, expect_absent):
+def test_the_scope_clause_names_only_legs_that_actually_RAN(
+        argv, expect_present, expect_absent):
     """🔴 A LEG THAT DID NOT RUN IS NOT AN UNCOUNTED LEG. The flat sentence told
     an `--opencode-only` caller that the opencode corpus was excluded from the
     run that searched nothing else, and told a `--claude-only` caller about an
@@ -2010,6 +2011,16 @@ def test_the_scope_clause_names_only_legs_that_actually_RAN(argv, expect_absent)
     line = fs.window_notice(datetime.datetime(2026, 8, 27), fs.WINDOW_DEFAULT,
                             skipped=5, examined=5, legs=legs,
                             claude_leg_ran=not a.opencode_only)
+    # 🔴 PRESENCE FIRST — an absence-only guard is satisfied by deleting the
+    # disclosure entirely. MEASURED: `unmeasured_legs` -> `return ()` left this
+    # test green in both find-session files while the live tool stopped naming
+    # the uncounted legs at all, which is the very cut the code comment calls
+    # "both the larger fraction and the longer reach". The `default` case was
+    # worse than one-sided: with no absences to check it asserted NOTHING.
+    for phrase in expect_present:
+        assert phrase in line, (
+            f"{argv} does not name {phrase!r}, a leg it DID window and does "
+            f"not count: {line!r}")
     for phrase in expect_absent:
         assert phrase not in line, (
             f"{argv} names {phrase!r}, which this run never searched: {line!r}")

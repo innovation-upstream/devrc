@@ -92,7 +92,8 @@ ROOT = DEFAULT_ROOT
 # that can drift away from what was actually searched.
 SESSION_MANAGER = str(Path(__file__).resolve().parent / "session-manager")
 
-# The live scan measured 1.82 s. The ceiling is generous because it makes an
+# The live scan measures ~1.1 s (2026-09-08; it was 1.82 s on 2026-08-28 —
+# the figure this file's docstring retires). The ceiling is generous because it makes an
 # ssh round trip to the peer host; a timeout is reported as a FAILED scan, never
 # as an empty fleet.
 LIVE_TIMEOUT_SECS = 90
@@ -105,7 +106,10 @@ LIVE_TIMEOUT_SECS = 90
 # opened. It was opt-in, so the default walk read the whole corpus to EOF on
 # every query.
 #
-# 🔴 THE DENOMINATOR IS 924, NOT 5,954, AND AN EARLIER DRAFT OF THIS COMMENT GOT
+# ⚠ EVERY COUNT BELOW IS A DATED SNAPSHOT OF A GROWING CORPUS — re-measure
+# rather than quoting it. The walked set was 924 on 2026-09-08 and passed 930
+# within hours; the RATIOS are what the argument rests on, not the totals.
+# 🔴 THE DENOMINATOR IS THE WALKED SET, NOT 5,954, AND AN EARLIER DRAFT GOT
 # IT WRONG. `find ~/.claude/projects -name '*.jsonl'` counts 5,954 — but ~5,030
 # of those are `<project>/<id>/subagents/agent-*.jsonl`, which `iter_transcripts`
 # excludes BY NAME (a subagent transcript is not a resumable session). The walked
@@ -199,10 +203,12 @@ EXIT_CONTRACT = (
                  "windows), `--live` with no search terms (it matches a "
                  "window's task/label/codename, so `--skill` alone is an "
                  "ARCHIVE query), a query that names nothing (no terms and no "
-                 "`--skill`, or a `--skill` that canonicalises to empty), or "
-                 "`--skill` with `--opencode-only` — that corpus carries no "
-                 "skill attribution, so the combination has no answer rather "
-                 "than an empty one."),
+                 "`--skill`, or a `--skill` that canonicalises to empty), "
+                 "`--claude-only` with `--opencode-only` (between them they "
+                 "search no corpus at all), or `--skill` with "
+                 "`--opencode-only` — that corpus carries no skill "
+                 "attribution, so the combination has no answer rather than an "
+                 "empty one."),
     (EXIT_AMBIGUOUS, "`--tail` ONLY: it could not resolve to exactly one live "
                      "window — several matched, or none did on a fleet where "
                      "every host answered. It carries NO claim about coverage; "
@@ -325,7 +331,8 @@ def window_notice(since, source, skipped=None, examined=None, legs=(),
     # 🔴 THE COUNT IS ONE LEG OF THREE, AND IT MUST SAY SO. `ARCHIVE_STATS` is
     # filled only by the LOCAL Claude walk; `search_peers` and `search_opencode`
     # are windowed by the same `since` and counted by nothing. Measured
-    # 2026-09-08 on the live stores: the local Claude corpus loses 466 of 926
+    # 2026-09-08 on the live stores (a snapshot; the denominator grows hourly):
+#           the local Claude corpus loses 466 of ~926
     # (50%) to the 12-day default, while the local OPENCODE corpus loses 487 of
     # 707 (69%) and appears in no number here — that store reaches back to
     # 2026-07-02, far deeper than the Claude corpus, whose oldest transcript is
@@ -1090,6 +1097,23 @@ def main(argv=None):
         print("nothing to search for: give at least one term, or --skill NAME",
               file=sys.stderr)
         return EXIT_USAGE
+    # 🔴 TWO CORPUS SELECTORS THAT BETWEEN THEM SELECT NOTHING. `archive_search`
+    # skips opencode under `--claude-only` and skips the local Claude walk AND
+    # `search_peers` under `--opencode-only`, so the pair searches NO corpus and
+    # returns a clean "No sessions matched" at exit 0 — a false corpus-wide
+    # absence, for a term with hundreds of real hits. That half PRE-DATES this
+    # change; what this change added was a notice that then described the
+    # unsearched opencode corpus as "windowed too and NOT in this count", i.e.
+    # as searched. Refused rather than half-disclosed, the same call `--since`
+    # with `--all-time` gets: the caller asked for two things that cannot both
+    # hold. It also makes the `[--claude-only | --opencode-only]` in this file's
+    # usage synopsis true — argparse never enforced it.
+    if a.claude_only and a.opencode_only:
+        print("--claude-only and --opencode-only select opposite corpora; "
+              "between them they search NOTHING, so the run would report "
+              "'no sessions matched' for a query it never ran. Pass one.",
+              file=sys.stderr)
+        return EXIT_USAGE
     if a.skill and a.opencode_only:
         print("--skill cannot be answered from the opencode corpus (no "
               "per-record skill attribution there); drop --opencode-only",
@@ -1183,7 +1207,7 @@ def main(argv=None):
         return EXIT_OK
 
     # ------------------------------------------------------------------ #
-    # 🔴 LIVE FIRST. 1.8 s against the archive walk's much larger cost, and the live rows
+    # 🔴 LIVE FIRST. ~1.1 s against the archive walk's much larger cost, and the live rows
     # carry the fields the question is actually about.
     # ------------------------------------------------------------------ #
     live = live_scan(a.terms)

@@ -484,6 +484,9 @@ EXIT_2_CAUSES = (
     ("a query that names nothing (no terms and no `--skill`, or a `--skill` "
      "that canonicalises to empty)",
      ([], ["--skill", "/"])),
+    ("`--claude-only` with `--opencode-only` (between them they search no "
+     "corpus at all)",
+     (["zzterm", "--claude-only", "--opencode-only"],)),
     ("`--skill` with `--opencode-only` — that corpus carries no skill "
      "attribution, so the combination has no answer rather than an empty one.",
      (["--skill", "browser", "--opencode-only"],)),
@@ -586,11 +589,19 @@ def test_the_bare_literal_scan_CAN_fire():
 # COUNT is ratcheted instead: a tenth site cannot appear without someone
 # editing this number, and the failure message tells them what to do. A
 # tripwire, not a proof, and labelled as one so nobody reads it as more.
-EXIT_USAGE_SITE_COUNT = 9
+EXIT_USAGE_SITE_COUNT = 10
 
 
 def _exit_usage_sites(tree):
-    """Every line in the MODULE that can hand `EXIT_USAGE` back to the shell.
+    """The FOUR spellings of an `EXIT_USAGE` exit that this collector knows.
+
+    🔴 READ THAT AS THE LIMIT IT IS. An earlier draft opened "every line in the
+    MODULE that can hand `EXIT_USAGE` back to the shell" — a completeness claim
+    the body does not deliver, and a delta round walked through it with a
+    reachable `raise SystemExit(EXIT_USAGE)` while the suite stayed green AND
+    the ratchet still read the old count (it uses this same collector, so a
+    blind spot here blinds both gates at once). The enumeration is the claim;
+    there is no "every".
 
     🔴 THREE SPELLINGS, because a delta audit walked through two of them with
     the whole suite green (the third is covered by `EXIT_USAGE_SITE_COUNT`):
@@ -603,7 +614,14 @@ def _exit_usage_sites(tree):
         site USED to be spelled `sys.exit(2)` — so this is a live path, not a
         hypothetical one;
       * `return EXIT_USAGE` in a module-level HELPER that `main` returns
-        through — lexical scoping to `main` made it invisible.
+        through — lexical scoping to `main` made it invisible;
+      * `raise SystemExit(EXIT_USAGE)`, which reaches the shell identically and
+        was measured reachable (`--limit 5000` exiting 2) with both gates green.
+
+    Still NOT seen, and named so nobody reads silence as coverage:
+    `sys.exit(<alias>)`, a bare `exit(EXIT_USAGE)` imported via `from sys import
+    exit`, and `return EXIT_USAGE if … else …`. Each is a spelling nothing in
+    this repo uses; the count ratchet is the backstop if one appears.
 
     Scanning the whole module rather than one function is what makes the last
     two impossible to reintroduce, and costs nothing: the contract table itself
@@ -619,6 +637,11 @@ def _exit_usage_sites(tree):
                 and getattr(n.func.value, "id", "") == "sys"
                 and any(isinstance(x, ast.Name) and x.id == "EXIT_USAGE"
                         for x in n.args)):
+            sites.add(n.lineno)
+        elif (isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
+                and getattr(n.exc.func, "id", "") == "SystemExit"
+                and any(isinstance(x, ast.Name) and x.id == "EXIT_USAGE"
+                        for x in n.exc.args)):
             sites.add(n.lineno)
     return sites
 
@@ -636,7 +659,7 @@ def test_the_EXIT_USAGE_SITE_COUNT_ratchet_is_current():
     """
     got = len(_exit_usage_sites(ast.parse(inspect.getsource(fs))))
     assert got == EXIT_USAGE_SITE_COUNT, (
-        f"`main` can now exit {fs.EXIT_USAGE} in {got} places, not "
+        f"the module can now exit {fs.EXIT_USAGE} in {got} places, not "
         f"{EXIT_USAGE_SITE_COUNT}. If you ADDED a usage error: give it its OWN "
         "cause in `EXIT_CONTRACT` and `EXIT_2_CAUSES` (do NOT append its argv "
         "to an existing cause — the traced gate cannot tell the difference, "
@@ -687,7 +710,8 @@ def test_every_EXIT_USAGE_SITE_is_a_cause_the_sentence_NAMES():
     """
     tree = ast.parse(inspect.getsource(fs))
     sites = _exit_usage_return_lines(tree)
-    assert sites, "no `return EXIT_USAGE` found in main() — gate wired to nothing"
+    assert sites, ("no EXIT_USAGE exit found anywhere in the module — "
+                   "gate wired to nothing")
     covered = set()
     for _, argv in _EXIT_2_PROBES:
         rc, lines = _traced_exit_usage_line(argv)
@@ -900,3 +924,57 @@ def test_the_doc_does_not_carry_a_FLAG_COUNT_that_nothing_enforces(body):
                          line, re.I), (
         f"the archive-only bullet states a flag COUNT: {line!r}. A count drifts "
         "the moment a flag is added; name the flags, or derive the number.")
+
+
+# =========================================================================== #
+# 🔴 THE NUMBER THE CHANGE IS NAMED AFTER WAS THE ONE NOTHING PINNED
+# =========================================================================== #
+# Measured by a delta audit: `DEFAULT_SINCE_DAYS = 12 -> 9` left the whole suite
+# green while the tool printed "the last 9 days" and the shipped doc went on
+# saying "the last 12 days" in four places — including a literal sample notice
+# an agent may pattern-match. In a file that already pins the exit-code table
+# verbatim and the archive-only flag list, the window was the unpinned one.
+# 🔴 THE DEFAULT'S OWN PHRASING ONLY — and the first draft of this gate was WIDE
+# ENOUGH TO BE PERMANENTLY RED. `\d+-day` also matches the measurement table's
+# COMPARISON points ("a 3-day window", "a 30-day default would be a NO-OP"),
+# which are deliberately NOT the default and must never equal it; the gate went
+# red on correct prose the moment it was written. Two shapes are matched: "the
+# last N days", how the doc states the default, and "N-day window (the
+# default)", how the table marks which row IS it. A comparison row is
+# untouched, and a new mention in either shape is covered without anyone
+# remembering this gate exists.
+_WINDOW_LITERAL_RE = re.compile(
+    r"(?:last\s+(\d+)\s+days|\b(\d+)-day\s+window\s+\(the default\))", re.I)
+
+
+def test_every_WINDOW_LENGTH_in_the_doc_is_DEFAULT_SINCE_DAYS(body):
+    """Every "last N days" / "N-day" in the shipped body must BE the constant.
+
+    Deliberately a scan for the SHAPE rather than a count: a fifth mention added
+    tomorrow is covered without anyone remembering this gate exists.
+    """
+    found = [int(a or b) for a, b in _WINDOW_LITERAL_RE.findall(body)]
+    assert found, (
+        "no window length found in the shipped body — either the doc stopped "
+        "documenting the default window, or this pattern has rotted; a gate "
+        "that matches nothing passes vacuously")
+    wrong = sorted({n for n in found if n != fs.DEFAULT_SINCE_DAYS})
+    assert not wrong, (
+        f"the shipped skill body states window length(s) {wrong} while "
+        f"`DEFAULT_SINCE_DAYS` is {fs.DEFAULT_SINCE_DAYS}. An agent reads the "
+        "doc and reports the wrong bound. Update both together.")
+
+
+def test_the_window_literal_gate_can_SEE_a_wrong_number():
+    """POSITIVE CONTROL. A regex that matched nothing would pass the gate above
+    on any document at all; feed it a body that MUST fail."""
+    bad = ("The archive is windowed to the last 999 days by default, and a "
+           "998-day window (the default) is what the table marks.")
+    found = [int(a or b) for a, b in _WINDOW_LITERAL_RE.findall(bad)]
+    assert found == [999, 998], f"the pattern cannot see a window length: {found}"
+    # ...and the NEGATIVE control: a comparison row must NOT be picked up, or
+    # the gate is red on prose that is correct by design.
+    ok = "a 3-day window 2.40 s; a 30-day default would be a NO-OP"
+    assert not _WINDOW_LITERAL_RE.findall(ok), (
+        "the pattern matched a COMPARISON window; it would fail on correct "
+        f"prose: {_WINDOW_LITERAL_RE.findall(ok)}")
