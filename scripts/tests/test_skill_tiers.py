@@ -83,20 +83,35 @@ MIN_SKILLS = 30
 # 36-entry total quoted in a 37-entry tree, and one contradicted the number the
 # same change reported to its reviewer.
 # --------------------------------------------------------------------------- #
-MEASURED_ENTRIES = 41
-MEASURED_TIER_A_ENTRIES = 24
-MEASURED_TIER_A_CHARS = 7_674
+MEASURED_ENTRIES = 35
+MEASURED_TIER_A_ENTRIES = 22
+MEASURED_TIER_A_CHARS = 7_639
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_915
-# ...and what the same 41 entries would cost with every skill tier A. The
-# difference is what the ledger buys: 4,548 chars.
-MEASURED_ALL_TIER_A_CHARS = 12_463
+MEASURED_UNDER_LEDGER_CHARS = 7_824
+# ...and what the same 35 entries would cost with every skill tier A. The
+# difference is what the ledger buys: 3,542 chars.
+MEASURED_ALL_TIER_A_CHARS = 11_366
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
 #
 # The ceiling sits 254 chars above MEASURED_TIER_A_CHARS — less than the MEAN
-# tier-A entry, which is 7,674 / 24 = 319.8.
+# tier-A entry, which is 7,242 / 21 = 344.9.
+#
+# 🔴 LOWERED 7_676 -> 7_496 later the SAME DAY, re-based again after retiring the
+# `initiatives` (tier A) and `repo-cos` (tier B) skills with their subsystems. The
+# block fell 7,422 -> 7,242; the control reported 434 chars of slack against a
+# 344.9 mean, so leaving it would have banked more than one whole average entry.
+# The 254-char headroom is carried across unchanged.
+#
+# 🔴 LOWERED 7_928 -> 7_676 on 2026-09-07, re-based after retiring five skills
+# (`quiesce-workload`, `close-the-loop`, `sglang`, `window-triage`, `standup`).
+# Two of them were tier A, so the block fell 7,674 -> 7,422 with nothing cut from
+# a surviving description. Re-pinning is part of the retirement, not follow-up:
+# leaving the ceiling at 7,928 would have banked 506 chars of slack — more than
+# one whole average entry — which is exactly the regrowth this constant refuses.
+# The 254-char headroom is carried across unchanged, so the property the comment
+# above states (headroom below the mean) still holds against the new mean.
 #
 # 🔴 LOWERED 8_821 -> 7_928 on 2026-09-04. `syshealth` (tier B) was added and
 # paid for by shrinking three tier-A entries that had NEVER FIRED in the whole
@@ -145,7 +160,28 @@ MEASURED_ALL_TIER_A_CHARS = 12_463
 # LOWER it when you cut; do NOT raise it to make a new description fit. Demoting
 # one skill to tier B in claude/skill-tiers.json is a ONE-LINE edit and is the
 # intended move. The playbook is printed by the failing assertion below.
-TIER_A_CEILING_CHARS = 7_928
+#
+# 🔴 RAISED ONCE, DELIBERATELY, 2026-09-08: 7,496 -> 7,639 (+143), to keep
+# `civitai-app-release` at tier A. THE RULE ABOVE STILL STANDS. This is the
+# SECOND ratchet raised for that one skill in this commit — the other is
+# LISTING_TOTAL_CEILING_CHARS in test_skill_descriptions.py — and both were
+# taken by Zach with the "do NOT raise" text quoted to him first.
+#
+# Why tier A rather than the one-line demotion this comment recommends: the
+# skill's routing surface IS the app names (`sensei`, `gen-matrix`, ...) and the
+# symptom phrasings ("why was my submit refused"). Trimming 143 chars to fit
+# could only come out of that list, and the eviction playbook forbids dropping a
+# trigger phrase to fit — it trades a silent overflow for a silent mis-route.
+# Tier B would have removed the same surface wholesale.
+#
+# 🔴 THE HONEST COST: this is the budget that actually overflows, and on overflow
+# Claude Code drops descriptions starting with the LEAST-invoked skills, taking
+# their trigger keywords with them and reporting nothing. A brand-new skill is by
+# definition the least invoked, so the first thing at risk of being dropped is
+# the one this raise was taken for. Headroom is pinned back to 0, so the next
+# addition of any size reds this gate — and if a third raise is proposed, the
+# right answer is almost certainly a demotion instead.
+TIER_A_CEILING_CHARS = 7_639
 
 # 🔴 Skills that must NEVER be tier B, pinned as a RELATIONSHIP rather than left
 # to review. Each one fires from a SYMPTOM Zach describes rather than from its own

@@ -371,12 +371,33 @@ EXIT_CODES: dict[str, int] = {
     # five-way version reported a TAMPERED or TRUNCATED artifact as
     # `ARTIFACT-EMPTY` — "THE ESCROW IS FINE … a valid encryption of an empty
     # payload" — because it read file PRESENCE as "age reported success". It does
-    # not: age writes output before authenticating the payload. Detecting
+    # not: on age v1.3.1 the output file appeared as soon as the HEADER
+    # authenticated, before the payload was checked. Detecting
     # tampering is the single most important thing a backup verifier does, and
     # that spelling reported it as nothing to worry about.
+    # ⚠ THAT SENTENCE IS ABOUT v1.3.1 AND STOPPED BEING GENERAL AT v1.3.2, which
+    # creates the output lazily on the first successful WRITE. The verdict split
+    # survives on a different signal — see the `_decrypt_phase_probe` block and
+    # `AGE_REFUSED_*` in restore-verify.py — but do not carry this sentence
+    # forward as a present-tense fact about age.
     "AGE-MISSING": 29,          # precondition: the tool is not installed
     "ARTIFACT-UNREADABLE": 30,  # the pipeline failed BEFORE decrypt was reached
-    "DECRYPT-FAILED": 25,       # age wrote NOTHING: wrong key OR damaged header
+    # 🔴 age REFUSED BEFORE THE PAYLOAD — *OR* refused in a way this tool could
+    # not read. ONE CODE, TWO MESSAGES, and that is the table's own doctrine
+    # ("split by REMEDY"), not a shortcut: both say "the cause is NOT asserted,
+    # do not rotate, go try another artifact with the same escrowed copy", which
+    # is the same action. What differs is how many causes remain open — two when
+    # age NAMED its refusal, three when it said something
+    # `restore_verify.classify_age_refusal` does not know — and that belongs in
+    # the sentence an operator reads, not in a number a timer branches on.
+    #
+    # ⚠ The second message is DEFENSIVE, NOT OBSERVED — the same status as
+    # `PUBKEY-DERIVATION-EMPTY` below and labelled for the same reason. On both
+    # measured age versions every refusal classifies. It exists because the
+    # discriminator now rests on an upstream tool's PROSE (see `AGE_REFUSED_*`
+    # in restore-verify.py): if age rewords, this admits it instead of picking
+    # whichever of the three answers the fall-through happened to reach.
+    "DECRYPT-FAILED": 25,
     # 🔴 RAISED BEFORE ANY `bw` CALL — see `preflight_decrypt_imports`. Its own
     # code because the remedy is unlike every other one here: nothing is wrong
     # with the escrow, the artifact or the vault; the INTERPRETER is missing a
@@ -808,15 +829,26 @@ def _rv():
 #     "corrupt payload" — both are PRESENT at size 0. So the rc==0 / rc!=0 split
 #     has to come from the module that knows, and it does:
 #     `restore_verify.DECRYPT_*` causes, published as values.
-#  2. Within a NON-ZERO age exit, file presence IS meaningful and is the only
-#     thing that separates a KEY fault from a DATA fault:
-#       * PLAIN ABSENT  -> age never wrote anything: the identity did not match
-#                          the recipients, OR the header is damaged. NOT
-#                          separable from outside, so neither is asserted.
+#  2. Within a NON-ZERO age exit, file presence USED TO BE the only thing that
+#     separated a KEY fault from a DATA fault. 🔴 IT NO LONGER IS, AND THE
+#     SENTENCE THAT SAID SO IS THE ONE A TOOLCHAIN BUMP MADE FALSE:
+#       * PLAIN ABSENT  -> on age v1.3.1 this meant age never wrote anything:
+#                          the identity did not match, OR the header is damaged.
+#                          🔴 ON v1.3.2 IT ALSO COVERS A TAMPERED PAYLOAD, because
+#                          v1.3.2 creates `--output` lazily on the first
+#                          successful WRITE — measured 2026-09-08, every payload
+#                          up to and including 64 KiB leaves NO file on a
+#                          tampered artifact.
 #       * PLAIN PRESENT -> age AUTHENTICATED THE HEADER, which requires the
 #                          identity to match, and then failed on a payload chunk
-#                          or ran out of input. The escrowed key WORKED; the
-#                          artifact is tampered, corrupt or truncated.
+#                          or ran out of input. STILL TRUE on both versions —
+#                          presence is SUFFICIENT evidence, it just stopped
+#                          being NECESSARY.
+#     So the primary discriminator moved to `restore_verify.classify_age_refusal`
+#     — age's own three refusal messages, which are byte-identical on v1.3.1 and
+#     v1.3.2. Read the `AGE_REFUSED_*` block there before touching this: it says
+#     plainly that substring-matching another tool's prose is WEAKER than the
+#     phase observation it replaces, and why it was taken anyway.
 @contextlib.contextmanager
 def _decrypt_phase_probe(RV):
     """Observe HOW FAR restore-verify's decrypt step got. Yields a state dict.
@@ -834,7 +866,7 @@ def _decrypt_phase_probe(RV):
     `finally`.
     """
     state = {"reached": False, "returned": False, "plain_present": None,
-             "cause": None}
+             "cause": None, "age_refusal": None}
     real = RV.decrypt
 
     def probe(cipher, plain, identity):
@@ -871,6 +903,12 @@ def _decrypt_phase_probe(RV):
             # owns it. `getattr` because a non-RestoreVerifyError has no cause;
             # None then means "no published cause", never a default one.
             state["cause"] = getattr(exc, "cause", None)
+            # 🔴 THE SECOND PUBLISHED VALUE, and the one that now carries the
+            # KEY-vs-DATA distinction (see `AGE_REFUSED_*` in restore-verify).
+            # `getattr` with None for the same reason as `cause` above: None
+            # means "this failure published no classification", and the
+            # classifier below must treat that as UNKNOWN, never as a default.
+            state["age_refusal"] = getattr(exc, "age_refusal", None)
             raise
         state["returned"] = True
 
@@ -1437,8 +1475,38 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                                 f"strength of this. Run `restore-verify.py` to "
                                 f"diagnose the artifact.",
                                 detail=str(exc))
-                        if (phase["cause"] == RV.DECRYPT_AGE_REFUSED
-                                and phase["plain_present"]):
+                        # 🔴 THE DISCRIMINATOR, RE-KEYED 2026-09-08 AFTER A
+                        # TOOLCHAIN BUMP TOOK THE OLD ONE AWAY.
+                        #
+                        # It used to be `plain_present` alone-with-cause. age
+                        # v1.3.2 creates `--output` LAZILY on the first
+                        # successful write, so on every artifact this subsystem
+                        # actually produces a TAMPERED payload now leaves no
+                        # file — and the branch fell through to DECRYPT-FAILED,
+                        # i.e. "your escrowed key may be wrong". That is the
+                        # verdict that gets a good disaster-recovery key
+                        # rotated while the real fault is a corrupt backup.
+                        #
+                        # TWO SIGNALS, OR-ed, and the OR is the point — neither
+                        # is sufficient alone across both versions:
+                        #   * `plain_present` — age flushed plaintext, which it
+                        #     can only do after authenticating the header. True
+                        #     on v1.3.1 for every tamper, and on v1.3.2 only
+                        #     once a whole 64 KiB chunk has gone out. Still
+                        #     SUFFICIENT; no longer NECESSARY.
+                        #   * `age_refusal == payload-auth-failed` — age itself
+                        #     saying it got to the payload. Byte-identical on
+                        #     v1.3.1 and v1.3.2, and the only signal that
+                        #     survives the lazy-create change.
+                        # An UNRECOGNISED refusal reaches NEITHER of the two
+                        # strong verdicts below — it gets DECRYPT-FAILED's
+                        # SECOND message, which names all three open causes.
+                        _corrupt = (
+                            phase["cause"] == RV.DECRYPT_AGE_REFUSED
+                            and (bool(phase["plain_present"])
+                                 or phase["age_refusal"]
+                                 == RV.AGE_REFUSED_PAYLOAD))
+                        if _corrupt:
                             # 🔴 THE CAUSE IS PART OF THE CONDITION, not decoration.
                             # This branch makes the strongest claim in the file —
                             # "the key worked, the BACKUP is tampered" — and it was
@@ -1461,38 +1529,74 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                             # the one that stops the strongest claim in the file
                             # being made about it by default.
                             #
-                            # age exited NON-ZERO having already written output.
-                            # Measured across 8 offsets x 4 sizes plus 3
-                            # truncations: reaching the payload at all means age
-                            # authenticated the HEADER, which requires the
+                            # age exited NON-ZERO after reaching the PAYLOAD —
+                            # witnessed either by output it had already flushed
+                            # or by its own "failed to decrypt and authenticate
+                            # payload chunk". Reaching the payload at all means
+                            # age authenticated the HEADER, which requires the
                             # identity to match. So the key worked and the bytes
                             # did not.
+                            #
+                            # 🔴 THE SENTENCE BELOW LOST THE WORDS "began
+                            # writing plaintext", and that is a CORRECTION, not
+                            # a reword: on age v1.3.2 a tampered artifact under
+                            # 64 KiB writes NO plaintext, so the old wording
+                            # asserted an act this branch can no longer observe.
+                            # What it CAN still assert — the header
+                            # authenticated with the escrowed key — is what it
+                            # now says, and nothing more.
                             raise EscrowError(
                                 "ARTIFACT-CORRUPT",
                                 f"🔴 {key} is TAMPERED, CORRUPT or TRUNCATED. age "
                                 f"authenticated the header with the ESCROWED key "
-                                f"— which a non-matching identity cannot do — "
-                                f"began writing plaintext, and then FAILED on the "
-                                f"payload. THE ESCROW IS FINE; THE BACKUP IS NOT. "
+                                f"— which a non-matching identity cannot do — and "
+                                f"then FAILED on the payload. THE ESCROW IS FINE; "
+                                f"THE BACKUP IS NOT. "
                                 f"This is the finding a backup verifier exists to "
                                 f"make: treat the artifact as unusable, check the "
                                 f"other retained objects for this scope, and do "
                                 f"NOT rotate the key.",
                                 detail=str(exc))
+                        # 🔴 NAMED REFUSALS ONLY. This verdict asserts that age
+                        # never reached the payload, and after the v1.3.2 change
+                        # the ABSENCE of plaintext no longer supports that — only
+                        # age's own message does. So it is reached only when age
+                        # SAID which of the two it was, and an unrecognised
+                        # refusal falls to the second DECRYPT-FAILED message
+                        # below instead of borrowing this one's claim.
+                        if phase["age_refusal"] in (RV.AGE_REFUSED_NO_IDENTITY,
+                                                    RV.AGE_REFUSED_HEADER):
+                            raise EscrowError(
+                                "DECRYPT-FAILED",
+                                f"age REFUSED {key} before reaching the payload at "
+                                f"all. TWO CAUSES PRODUCE THIS AND THEY ARE NOT "
+                                f"SEPARABLE FROM HERE: the escrowed identity does not "
+                                f"match this artifact's recipients, or the artifact's "
+                                f"HEADER is damaged. Neither is asserted. To tell them "
+                                f"apart, try a DIFFERENT artifact with this same "
+                                f"escrowed copy — `--scope <another scope>`, or "
+                                f"`restore-verify.py --all` for an older stamp: if "
+                                f"another artifact OPENS, the escrowed key is fine and "
+                                f"THIS object's header is damaged; if none open, the "
+                                f"key is the likely cause. Do NOT rotate the key "
+                                f"before running that.",
+                                detail=str(exc))
                         raise EscrowError(
                             "DECRYPT-FAILED",
-                            f"age REFUSED {key} without writing any plaintext at "
-                            f"all. TWO CAUSES PRODUCE THIS AND THEY ARE NOT "
-                            f"SEPARABLE FROM HERE: the escrowed identity does not "
-                            f"match this artifact's recipients, or the artifact's "
-                            f"HEADER is damaged. Neither is asserted. To tell them "
-                            f"apart, try a DIFFERENT artifact with this same "
-                            f"escrowed copy — `--scope <another scope>`, or "
-                            f"`restore-verify.py --all` for an older stamp: if "
-                            f"another artifact OPENS, the escrowed key is fine and "
-                            f"THIS object's header is damaged; if none open, the "
-                            f"key is the likely cause. Do NOT rotate the key "
-                            f"before running that.",
+                            f"age REFUSED {key} and this verifier CANNOT SAY WHY. "
+                            f"age exited non-zero without leaving plaintext, and "
+                            f"its message matched none of the three refusals this "
+                            f"tool knows how to read. THREE THINGS ARE NOW EQUALLY "
+                            f"CONSISTENT with what was seen and NONE is asserted: "
+                            f"the escrowed identity does not match, the artifact's "
+                            f"HEADER is damaged, or the PAYLOAD is tampered. "
+                            f"🔴 DO NOT ROTATE OR RE-ESCROW ON THIS. Read age's own "
+                            f"message in the detail below, then re-run "
+                            f"`restore-verify.py` by hand. If age has simply "
+                            f"reworded, teach `classify_age_refusal` the new "
+                            f"string — this refusal exists so that a reword "
+                            f"produces an ADMISSION rather than a confident wrong "
+                            f"answer.",
                             detail=str(exc))
                     raise EscrowError(
                         "RESTORE-FAILED",

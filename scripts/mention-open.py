@@ -16,8 +16,12 @@ authority, and a match the scanner rejects opens nothing.
 
 RESOLUTION
 ----------
-  1 openable candidate   -> xdg-open it.
+  1 openable candidate   -> xdg-open it, UNLESS the repository was guessed from
+                            the tmux pane — see `repo_source` in `main()`.
   2+ (a bare `#N`)       -> rofi picker, one row per platform, showing the URL.
+  any of the above whose repository was GUESSED
+                         -> the same rows, FIRST, with the fuzzy universe
+                            appended beneath them so the guess is overridable.
   0                      -> the FUZZY repo picker over the LOCAL universe, and
                             only if that cannot or should not be shown, a
                             notification saying WHICH empty this is.
@@ -856,25 +860,57 @@ def universe_note(subject: str, offered: int, path: Path | None = None) -> str:
             f"scripts/regen-known-repos.py")
 
 
-def guessed_note(subject: str) -> str:
-    """The line shown ABOVE the picker when the ONLY repository on offer was
-    GUESSED — `repo_source == "default"`, i.e. the tmux pane rather than
-    anything the clicked text said.
+def guessed_note(subject: str, below: int = 0, rank: int = 1) -> str:
+    """The line shown ABOVE the picker when one of the rows on offer was GUESSED
+    — `repo_source == "default"`, i.e. the tmux pane rather than anything the
+    clicked text said.
 
-    🔴 A ONE-ROW PICKER WITH NO EXPLANATION READS AS A BUG. Suppressing the
-    auto-open is the safety property; saying WHY is what stops the operator
-    concluding the handler is broken and going back to typing the URL. It is
-    the same argument as `universe_note`: rofi cannot report a reason after the
-    fact, so the reason goes above the choice.
+    `rank` is that row's 1-based position, and `below` is how many SEARCHABLE
+    repository rows sit UNDER it. Both are measured by `main()` from the list it
+    is about to hand `pick()`; neither is inferred from the shape of the text.
 
-    🔴 IT NAMES THE CLICKED TEXT AND NOTHING ELSE — never the repository, never
-    the mapping. The candidate ROW already shows the repo, which is the whole
-    point of asking; the note must not become a second place a name can leak
-    from, and `_every_sink`'s guards would not see this one (it goes to rofi).
+    🔴 A PICKER WITH NO EXPLANATION READS AS A BUG. Suppressing the auto-open is
+    the safety property; saying WHY is what stops the operator concluding the
+    handler is broken and going back to typing the URL. It is the same argument
+    as `universe_note`: rofi cannot report a reason after the fact, so the
+    reason goes above the choice.
+
+    🔴 TWO WORDINGS, KEYED ON `below` RATHER THAN ON A ROW COUNT, AND THE KEY IS
+    THE FIX. `below` is the only thing that decides which INSTRUCTION is true:
+    "type to search" is nonsense with nothing to search, and "confirm, or
+    dismiss" is a dead end when there are alternatives. A row count cannot tell
+    those apart — a bare `#N` on a host whose universe holds only the pane's own
+    repo offers TWO rows (the clawgate task and the guess) with nothing
+    searchable under either, and keying on the count claimed 392 rows that were
+    not there.
+
+    🔴 `rank` EXISTS BECAUSE THE GUESS IS NOT ALWAYS FIRST. `audit-pr N` offers
+    it at row 1; a bare `#N` puts the clawgate task above it, at row 2. The
+    previous wording said "The FIRST row is a guess" unconditionally, which was
+    true of the only shape that then reached this note and became false the
+    moment the bare-`#N` shape did (2026-09-08). Naming the row NUMBER is the
+    one claim that stays true for both without this function having to know
+    which platforms are above it.
+
+    ⚠ The `below <= 0` wording is KEPT rather than deleted: the universe can be
+    empty (no mapping file yet, or an unreadable one), and a guessed row is
+    still reachable then. It is no longer the common path, and the `below`
+    default stays 0 so the narrower claim is what a caller gets by omission.
+
+    🔴 IT NAMES THE CLICKED TEXT AND TWO COUNTS, NOTHING ELSE — never the
+    repository, never the mapping. The candidate ROW already shows the repo,
+    which is the whole point of asking; the note must not become a second place
+    a name can leak from, and `_every_sink`'s guards would not see this one (it
+    goes to rofi).
     """
-    return (f"{subject} names no repository — the one offered was measured from "
-            "the tmux pane, which may not be the pane you clicked in. Confirm, "
-            "or dismiss.")
+    if below <= 0:
+        return (f"{subject} names no repository — the GitHub row offered was "
+                "measured from the tmux pane, which may not be the pane you "
+                "clicked in. Confirm, or dismiss.")
+    return (f"{subject} names no repository. Row {rank} is a guess from the "
+            f"tmux pane, which may not be the pane you clicked in — the {below} "
+            f"rows below it are every repository this host knows. Type to "
+            f"search, or dismiss.")
 
 
 def colour_literal_offer(span: dict | None, text: str) -> str:
@@ -1159,6 +1195,75 @@ def main(argv: list[str] | None = None) -> int:
     # `--print`, which is what it is for.
     guessed = span is not None and span["repo_source"] == SOURCE_DEFAULT
 
+    # 🔴 A GUESS THE OPERATOR CANNOT OVERRIDE IS NOT AN OFFER — IT IS A PROMPT
+    # WITH ONE WRONG ANSWER. Reported from the real click path 2026-09-07:
+    # `audit-pr 1291` produced a ONE-ROW picker holding the pane's repo and the
+    # note "names no repository". The row happened to be right that time, and
+    # the operator's point stands — in practice the pane guess is often wrong,
+    # and when it is, the picker offers no way to say so. Confirm the wrong
+    # repo, or dismiss and type the URL by hand. Both are worse than the
+    # refusal this branch replaced.
+    #
+    # The suppression above is still exactly right: a `default`-sourced repo is
+    # evidence about the WINDOW, not about the reference, so it must never open
+    # unconfirmed. What was missing is the other half — having declined to act
+    # on the guess, offer the alternatives. The universe is already built and
+    # already the answer everywhere else a repository cannot be named, and it is
+    # fuzzy-matched, so 392 rows cost the operator a few keystrokes rather than
+    # a scroll.
+    #
+    # 🔴 THE MEASURED ROWS STAY ON TOP, and that is the whole reason this is an
+    # APPEND rather than a replace. The guess is the most likely answer and it
+    # stays one or two Enters away, so the common case does not get slower; the
+    # universe below it is what makes the uncommon case possible at all. Same
+    # shape as the bare-`#N` arm in PASS 3, which keeps the clawgate candidate
+    # first for the same reason.
+    #
+    # 🔴 IT IS NOT SCOPED TO THE GUESS THAT IS *ALONE* ANY MORE, AND THE
+    # WIDENING IS THE OPERATOR'S CALL (2026-09-08: "fix the bare-#N and any
+    # other cases left unfixed"). #1380 shipped this arm as `guessed_alone`,
+    # reasoning that a bare `#N` the pane attributes already offers TWO good
+    # rows and that burying them under several hundred was "a regression dressed
+    # as a feature" — `test_a_bare_hash_N_that_the_PANE_already_attributes_does_
+    # NOT_get_the_universe` pinned exactly that. The same commit wrote down the
+    # complaint against its own narrowing: if the pane guess is wrong in the
+    # two-row case, the right repo is still unreachable. It is the SAME defect
+    # one rung along, the operator hit it, and the trade has now been made in
+    # their favour. The cost is bounded by the ordering: rows 1 and 2 are
+    # unchanged and `rofi` opens on row 1, so the common case is still one Enter.
+    #
+    # 🔴 THE PREDICATE IS `repo_source == default`, NOT A SHAPE. `guessed` is
+    # computed above from `mention_scan`'s own constant, so `--default-repo`
+    # rides the same rung as the tmux pane and any future no-owner shape
+    # inherits this for free.
+    guessed_offer = guessed and not offered_universe
+
+    # The guess's 1-based row, measured BEFORE the append so a universe row —
+    # which is also a GitHub row — cannot be mistaken for it. In the terminal
+    # profile a span carries at most one GitHub candidate: `audit-pr N` puts it
+    # at row 1, a bare `#N` puts the clawgate task above it at row 2.
+    guess_rank = next((i for i, c in enumerate(candidates, 1)
+                       if c["platform"] == PLATFORM_GITHUB), 1) if guessed else 1
+
+    # How many SEARCHABLE repository rows end up under the guess. 0 means the
+    # append added nothing, and `guessed_note` needs that rather than a row
+    # count — see its docstring.
+    below = 0
+    if guessed_offer and universe:
+        seen = {c["url"] for c in candidates}
+        # Deduped: the pane's repo is usually IN the universe too, and offering
+        # it twice makes the recommended row look like a rendering bug rather
+        # than a recommendation.
+        extra = [c for c in universe if c["url"] not in seen]
+        # 🔴 GUARDED ON `extra`, NOT ON `universe`. A host whose whole universe
+        # is the pane's own repo dedupes to nothing, and setting
+        # `offered_universe` there would claim rows that are not in the list —
+        # both to the auto-open guard below and to the note.
+        if extra:
+            candidates = candidates + extra
+            offered_universe = True
+            below = len(extra)
+
     # 🔴 `and not offered_universe`: see PASS 3. One candidate is enough to open
     # only when that candidate is EVIDENCE about the reference — an explicit
     # owner, a measured checkout, a mapping hit. A universe row is an OPTION,
@@ -1168,16 +1273,33 @@ def main(argv: list[str] | None = None) -> int:
         return open_url(candidates[0]["url"])
 
     # 🔴 THE NOTE IS ATTACHED ONLY WHEN THE PICKER WOULD OTHERWISE BE
-    # UNEXPLAINED. A picker over real candidates — the clawgate/GitHub pair for
-    # a bare `#N` — is not a dead end and needs no explanation; adding one there
-    # would put a line of apology above the single most common interaction in
-    # this handler. So the guessed note rides on the ONE case the branch above
-    # created: a single row, which without a reason reads as a broken handler
-    # asking the operator to confirm the obvious.
-    mesg = (universe_note(span["raw"] if span is not None else text,
-                          len(candidates))
-            if offered_universe else
-            guessed_note(span["raw"]) if (guessed and len(candidates) == 1)
+    # UNEXPLAINED, and there are exactly two such pickers: one carrying a GUESS
+    # the operator is being asked to confirm or override, and one that is the
+    # universe as a last resort. A picker over rows that are all evidence —
+    # the clawgate/GitHub pair for a bare `#N` on a host with nothing else to
+    # offer — is not a dead end and needs no explanation, so it still gets none.
+    #
+    # ⚠ `below or len(candidates) == 1` IS THE "WOULD OTHERWISE BE UNEXPLAINED"
+    # TEST, WRITTEN OUT. `below` covers the picker whose bottom is a searchable
+    # universe; `len(candidates) == 1` covers the lone guessed row, which
+    # without a reason reads as a broken handler asking the operator to confirm
+    # the obvious. The remaining case — a guess beside a clawgate row and
+    # nothing under either — is the ordinary two-row picker and keeps `""`.
+    #
+    # 🔴 `guessed` IS TESTED FIRST, AND THE ORDER IS THE WHOLE POINT. Both
+    # conditions are now true on the common path — the guessed arm above sets
+    # `offered_universe` — and the two notes make OPPOSITE claims about the
+    # rows. `universe_note` opens "nothing here knows X", which is false when
+    # the top rows are a task and a recommendation the handler is asking about;
+    # putting it first would have described the fix as a dead end. Swap these
+    # two branches and the picker still works, so no behavioural test catches
+    # it: the guard is
+    # `test_a_guessed_picker_is_NOT_described_as_nothing_here_knows`.
+    mesg = (guessed_note(span["raw"], below, guess_rank)
+            if guessed_offer and span is not None
+               and (below or len(candidates) == 1)
+            else universe_note(span["raw"] if span is not None else text,
+                               len(candidates)) if offered_universe
             else "")
     url = pick(candidates, mesg=mesg)
     return open_url(url) if url else 0

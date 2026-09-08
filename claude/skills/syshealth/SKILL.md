@@ -47,7 +47,7 @@ and its ancestors for the same reason.
 | flag | effect |
 |---|---|
 | `--json` | same verdict, machine-readable; `exit_code` is in the document |
-| `--systemd` | adds failed **user** units (`standup` also covers this) |
+| `--systemd` | adds failed **user** units — the only reader of these since `standup` was retired |
 | `--fds` | adds open-FD counts; prints `unreadable` separately — most processes are not ours, and an unmeasured process is never folded into a clean count |
 | `--ignore` | comma-separated substrings never to flag; shares `cpu-monitor.sh`'s default (`anno,logd`) so one `Environment=` value can serve both |
 | `--cpu-threshold` `--mem-threshold` `--load-threshold` `--runaway-pct` `--runaway-age` `--min-age` | retune per host; the values used are echoed into the report |
@@ -57,4 +57,4 @@ and its ancestors for the same reason.
 - **Always-on alerting** → `scripts/cpu-monitor.sh` (sampling daemon, dunst toasts,
   cooldowns, daily cap). syshealth sends no notifications and writes no state.
 - **Disk / nix-store / host drift** → `scripts/drift-check.sh`.
-- **Cluster or service health** → `standup`, `obs-read`.
+- **Cluster or service health** → `obs-read`.

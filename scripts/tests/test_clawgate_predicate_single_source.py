@@ -73,20 +73,17 @@ ALLOWLIST = {
     # for the constant is the one legitimate second spelling. Two: the contract
     # assertion, and one fixture that builds the same pair by hand.
     "scripts/tests/test_clawgate_tasks.py": 2,
-    # 🔴 A DIFFERENT RULE that this scanner's superset test legitimately catches,
-    # found by writing it. `initiatives/tasks.OPEN_STATUSES` is
+    # 🔴 THE ONE DELIBERATE DUPLICATE THIS LEDGER CARRIED IS GONE, and the
+    # distinction it recorded is worth keeping even though its files are not.
+    # `scripts/initiatives/tasks.OPEN_STATUSES` was
     # ("open", "in_progress", "ready_for_review") — the initiatives viewer's
     # DUPLICATE-DISPATCH guard ("is there already live work for this
-    # initiative?"), which deliberately INCLUDES `in_progress` and deliberately
-    # fails open on an unknown status. It answers "is this task still live?",
-    # not "does this need the operator?", so folding the two together would give
-    # the bar an in_progress task it must not count and give the dispatch guard
-    # a stuck-agent notion it has no use for. Kept separate ON PURPOSE.
-    "scripts/initiatives/tasks.py": 1,
-    # The same rule re-spelled in that suite's `_tv` fixture (it builds the
-    # `open` flag by hand rather than importing OPEN_STATUSES). Pre-existing and
-    # out of scope here; noted so the next reader does not think it is this one.
-    "scripts/initiatives/tests/test_viewer.py": 1,
+    # initiative?"), which deliberately INCLUDED `in_progress` and deliberately
+    # failed open on an unknown status. It answered "is this task still live?",
+    # not "does this need the operator?", so folding the two together would have
+    # given the bar an in_progress task it must not count. It was kept separate
+    # on purpose; both it and its `test_viewer.py` re-spelling were deleted with
+    # the initiatives board on 2026-09-07, so the two entries went with them.
 }
 
 #: 🔴 The importer ledger. Exactly these files load the shared module.

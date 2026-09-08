@@ -105,6 +105,16 @@ ALLOWLIST = [
     ("scripts/tests/test_handoff_index.py", "assert first.startswith(",
      "ASSERTS a module's shebang shape to justify its executable bit; writes no "
      "stub and execs nothing"),
+    # Shape (b) once more, and the same needle-without-the-prefix rule as the
+    # entry above: `scripts/cairn-who` goes on PATH as a bare command via
+    # `mkOutOfStoreSymlink`, so a file there without a shebang is a
+    # `command not found` that reads as a broken deploy. The test READS the
+    # launcher off disk and asserts the first line's two-character prefix; it
+    # writes no stub and execs nothing, so `testlib.mockbin.write_exec` has
+    # nothing to own here.
+    ("scripts/tests/test_cairn_split.py", "assert first.startswith(",
+     "ASSERTS the cairn-who launcher's shebang shape to justify its executable "
+     "bit; writes no stub and execs nothing"),
     ("scripts/tests/test_playwright_nixos.py", "/bin/sh",
      "writes /bin/sh directly — absolute, present in the sandbox"),
     ("scripts/tests/test_notify_failure.py", "_bash",

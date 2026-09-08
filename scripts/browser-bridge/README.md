@@ -2213,17 +2213,25 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   Because the gate runs **before** the tab is opened, a gate failure leaks no tab.
 
   *Prerequisite:* an opencode whose `debug agent` reports a browser-only tool set.
-  **Both hosts run 1.18.21** — verified at the consumer 2026-08-29, both
-  `readlink -f $(command -v opencode)` resolving to the same
-  `…-opencode-1.18.21` store path, so the pin and the deploy agree. There is no
-  version-skew caveat here any more; the hosts CONVERGED on 2026-08-15.
-  🔴 **But the browser-only RESOLUTION is last verified on 1.18.18**, not on
-  1.18.21 (2026-08-19: the gate replicated ON EACH HOST parses to exactly one
-  enabled tool, `browser`, with every host tool present and `false`; measured
-  identical on 1.18.4 and 1.18.16 before that). It was NOT re-derived at the
-  current pin, and nothing in CI would notice if it changed: `browser-agent` is
-  absent from the engine tests' `ENGINE_AGENTS`, and this repo's own
-  browser-agent tests drive a FAKE opencode stub rather than the real binary.
+  **The workbench runs 1.18.29** — verified at the consumer 2026-09-08,
+  `readlink -f $(command -v opencode)` in a login shell resolving to the store
+  path `flake.lock` pins, so the pin and the deploy agree there.
+  🔴 **The LAPTOP is UNVERIFIED at this pin.** It was unreachable when the pin
+  moved (ssh to its nebula address refused), so it was last checked at the
+  consumer on 2026-08-29, at the version this pin superseded. "Both hosts run
+  the same opencode" is therefore a claim nobody has re-checked — do not repeat
+  it until you have.
+  ✅ **The browser-only RESOLUTION *was* re-derived at the pin** (2026-09-08),
+  which the two bumps before this one had declined: the gate's scratch project
+  rebuilt exactly as the wrapper builds it and run against the REAL pinned
+  binary — and against the superseded one as a control — parses to exactly one
+  enabled tool, `browser`, out of 13, with every host tool present and `false`,
+  on both. It measured identical on 1.18.4, 1.18.16 and 1.18.18 before those two.
+  🔴 **But that was ON THE WORKBENCH ONLY, BY HAND, and nothing in CI observes
+  it**: `browser-agent` is absent from the engine tests' `ENGINE_AGENTS`, and
+  this repo's own browser-agent tests drive a FAKE opencode stub rather than the
+  real binary. A by-hand measurement is evidence, not a gate — the next bump
+  gets no red here if the resolution changes.
   🔴 **Do not read the version on the deploy as a measurement of the
   resolution** — this sentence used to conjoin the two, and a pin re-key then
   relabelled the unmeasured half along with the measured one. 🔴 The RAW dump is NOT byte-stable, on either binary: the
@@ -2318,13 +2326,16 @@ ln -sf ~/workspace/devrc/scripts/browser-bridge/opencode/tools/browser_tool_impl
 (The global def keeps the `__STEPS__`/`__MODEL__` placeholders — inert on its own;
 the wrapper substitutes them per run.)
 
-**opencode version.** Both hosts run 1.18.21 and that is what `flake.lock` pins.
+**opencode version.** `flake.lock` pins 1.18.29; the workbench consumer was
+verified at it on 2026-09-08 and the laptop was NOT (unreachable — see the
+runtime tool-set gate section above).
 The custom-tool mechanism (`.opencode/tools/*.js`, `permission: {"*": deny, …}`)
-is **last verified on 1.18.18** — not re-derived at 1.18.21, since the check
-below needs the real binary (measured identical on 1.18.4 before that) — `opencode debug agent
-browser-agent` resolves to `bash:false … browser:true`
-(exactly one enabled tool) on each, plus an end-to-end `opencode debug agent …
---tool browser` run against a fake bridge. The wrapper still writes the tool to
+**was re-derived at the pin** on 2026-09-08, on the workbench, by hand:
+`opencode debug agent browser-agent` resolves to `bash:false … browser:true`
+(exactly one enabled tool out of 13) against the pinned binary and against the
+superseded one alike. It was verified the same way on 1.18.4, 1.18.16 and
+1.18.18 in earlier passes, plus an end-to-end `opencode debug agent …
+--tool browser` run against a fake bridge on the first of those. The wrapper still writes the tool to
 BOTH `.opencode/tools/` and `.opencode/tool/` as cheap insurance against a future
 tool-dir rename. If you upgrade opencode and it stops resolving browser-only, the
 runtime tool-set gate refuses the run — that is the intended, safe outcome; fix

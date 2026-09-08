@@ -897,7 +897,7 @@ def test_the_unit_does_not_wire_the_DND_defeating_failure_toast():
     own tests — no UI, no page, no script — so that staleness is recorded and
     unread. The real control is this unit being `Type=oneshot` with distinct
     non-zero exit codes, which land in the user manager's failed-unit list that
-    `claude/skills/standup/standup.sh` reads. That covers the exit codes and NOT
+    `scripts/syshealth --systemd` reads. That covers the exit codes and NOT
     a run that exits 0 having achieved nothing, which is why the redirect and
     unmeasured-zero cases are handled in the script instead.
     """

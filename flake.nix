@@ -243,7 +243,9 @@
         pytests =
         pkgs.runCommandLocal "devrc-pytests"
           {
-            # ripgrep: one repo-cos prescan test skipif's without it on PATH.
+            # ripgrep: repo-cos (its only consumer) retired 2026-09-07. Kept because
+            # gateTools and run-tests.sh's REQUIRED_TOOLS are pinned two-way, so
+            # dropping it is a separate, deliberate change with its own re-measure.
             # git: verify-agent-work tests drive real temp git repos in-sandbox.
             # util-linux: the browser-agent wrapper uses `setsid` for its
             # process-group timeout kill (test_browser_agent.py exercises it).
@@ -266,12 +268,14 @@
             # skipped AND five failed. Adding curl here (with the --help/token fix
             # in the CLI) is what takes it green and makes those 41 actually run.
             #
-            # nodejs: MEASURED 2026-08-02 — scripts/initiatives/tests/{test_viewer,
-            # test_streaming}.py extract the viewer's inline JS and run it under
-            # `node`; without node on PATH they `pytest.skip("node not on PATH")`.
-            # That was 123 of this check's 125 skips (`660 passed, 123 skipped` in
-            # the initiatives suite vs `783 passed, 0 skipped` on a host with node).
-            # Adding it recovers all 123. This does grow the pytest gate's closure
+            # nodejs: MEASURED 2026-08-02 against the initiatives viewer suite, which
+            # extracted the viewer's inline JS and ran it under `node`; without node on
+            # PATH 123 of this check's 125 skips came from there. That suite RETIRED with
+            # the initiatives board (2026-09-07), so the measurement no longer describes
+            # the closure — but node is STILL required, by
+            # scripts/tests/test_opencode_session_env_plugin.py and
+            # scripts/tests/test_skill_mjs_parses.py, which skip without it. Re-measure
+            # before quoting a skip count. This does grow the pytest gate's closure
             # by a node toolchain — accepted deliberately: 123 silently-unrun tests
             # cost more than a cache invalidation on a nodejs bump. The `nodetests`
             # check below stays separate for its OWN reasons (distinct failure
@@ -328,11 +332,14 @@
             # 🔴 This ALSO makes the sandbox the tier that pins the VERSION.
             # `pkgs.opencode` here and in nix/pkgs/tools/default.nix resolve from
             # the same flake.lock, so CI tests the exact binary the hosts deploy
-            # (1.18.21 at rev c27cdad491a9). Cost, stated as deliberately as the
+            # (1.18.29 — derive the rev with `nix flake metadata --json | jq -r
+            # .locks.nodes.nixpkgs.locked.rev`; a rev spelled here would be an
+            # unguarded claim, since the version scanner sees only the version).
+            # Cost, stated as deliberately as the
             # nodejs and nix entries above: this check's closure grows by
             # opencode, and a nixpkgs bump that moves it invalidates the cache
             # AND turns the version assertion red. That red is the point — the
-            # config header's "measured on v1.18.21 — do not re-derive" claims are
+            # config header's "measured on v1.18.29 — do not re-derive" claims are
             # otherwise pinned to nothing.
             #
             # logrotate: scripts/tests/test_claude_log_rotate.py drives the REAL

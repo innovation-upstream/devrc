@@ -34,6 +34,7 @@ the feature.
 | `hooks.md` | `PermissionRequest` semantics; the defer gates; installing hooks elsewhere; Stop / 💡 |
 | `agent-hardening.md` | locking down a **homelab** kubeclaw devpod (netpol needs Cilium) |
 | `element-references.md` | a task body carries extension-picked element refs |
+| `prior-work-recall.md` | the `prior work` step: per-term hit counts, flags, why the guard is an `if` |
 
 ## Flow files
 `flows/` = PROCEDURES you execute (`reference/` = FACTS you verify against). A flow does not
@@ -70,6 +71,15 @@ so **the LAN NodePort is fully unauthenticated** — including `DELETE /tasks/{i
 
 ---
 
+## prior work — has this been fought before? (run FIRST)
+```bash
+if command -v cairn >/dev/null; then cairn search 'clawgate' --scope homelab-talos; else echo "skipped: cairn unavailable"; fi
+```
+Past sessions' MEASUREMENTS — `RECALL, NOT LIVE OBSERVATION`, verify before acting. Also search
+`clawgatectl` · `e2e` · `task api` · `deploy`: what a READER types, not the file you stand in. No
+`cairn sync;` prefix (`search` syncs). 🔴 **Guard stays an `if`/`else`, never `&&`** (rc≠0 when
+cairn is absent reads as this step FAILING; a bare `if` skips SILENTLY). `prior-work-recall.md`
+
 ## status
 ```bash
 KC=$(ls /home/zach/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)  # PER-HOST
@@ -97,9 +107,8 @@ kubectl --kubeconfig $KC -n clawgate logs -f deploy/clawgate | grep --line-buffe
 
 ## deploy a new version
 🔴 **GitOps from `trunk`: committing deploys the MANIFEST, not container CODE — silently.** The pin
-is an immutable literal tag with **no Flux image automation**, so a commit under
-`containers/clawgate/**` reconciles cleanly and **changes nothing that is running**. `git log` is NOT
-evidence the code is live; the live pin and `clawgatectl health` are. **Load `deploy.md` first** —
+is a literal tag with no image automation, so `git log` is NOT evidence the code is live; the live
+pin and `clawgatectl health` are. **Load `deploy.md` first** —
 version-from-the-live-pin, the ONE commit path (worktree off `origin/trunk`; never `git add -A`),
 test gate, build/push, pin bump, the CSS-cwd trap that fakes ~25 e2e failures, chart sync.
 

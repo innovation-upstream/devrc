@@ -245,15 +245,36 @@ LAPTOP_PANES = (
 #
 # pid/start_time default to one fixed pair because most tests do not care; the
 # ones that DO care (the server-identity tests) pass their own.
-def window_rows(*rows, pid="4025325", start_time="1785949442"):
-    """Render `list-windows -F WINDOW_FORMAT` output for (id, index, session)."""
+#
+# 🔴 THE ACTIVITY DEFAULT IS DISTINCT FROM THE start_time DEFAULT, ON PURPOSE.
+# They are adjacent integer fields in the same format string, so a fixture that
+# spelled them the same would let a parser reading the WRONG SLOT pass every
+# test in this file. Distinct constants make a slot mix-up a failure.
+DEFAULT_WINDOW_ACTIVITY = "1788313131"
+
+
+def window_rows(*rows, pid="4025325", start_time="1785949442",
+                activity=DEFAULT_WINDOW_ACTIVITY):
+    """Render `list-windows -F WINDOW_FORMAT` output for (id, index, session).
+
+    A row may be `(id, index, session)` or `(id, index, session, activity)`;
+    the 4-tuple form is how a test gives two windows DIFFERENT activity times,
+    and `None` renders the field empty the way an older tmux that does not know
+    `#{window_activity}` would.
+    """
     out = []
-    for wid, idx, sess in rows:
+    for row in rows:
+        if len(row) == 4:
+            wid, idx, sess, act = row
+        else:
+            wid, idx, sess = row
+            act = activity
         out.append(sm.WINDOW_FORMAT
                    .replace("#{window_id}", wid)
                    .replace("#{window_index}", idx)
                    .replace("#{pid}", pid)
                    .replace("#{start_time}", start_time)
+                   .replace("#{window_activity}", "" if act is None else act)
                    .replace("#{session_name}", sess))
     return "".join(line + "\n" for line in out)
 
@@ -592,7 +613,7 @@ def test_parse_panes_drops_junk_without_raising(junk):
 # measured, wrong zero. Typed here independently of the implementation.
 # --------------------------------------------------------------------------- #
 EXPECTED_WINDOW_FORMAT = ("#{window_id}|#{window_index}|#{pid}|#{start_time}"
-                          "|#{session_name}")
+                          "|#{window_activity}|#{session_name}")
 
 
 def test_the_server_identity_fields_come_BEFORE_session_name():
@@ -600,7 +621,7 @@ def test_the_server_identity_fields_come_BEFORE_session_name():
     maxsplit stops absorbing pipes in a session name, silently corrupting any
     window whose session contains one. Appending the new fields after it would
     satisfy a presence check and break exactly that."""
-    for field in ("#{pid}", "#{start_time}"):
+    for field in ("#{pid}", "#{start_time}", "#{window_activity}"):
         assert field in sm.WINDOW_FORMAT, f"{field} missing from the format"
         assert sm.WINDOW_FORMAT.index(field) < sm.WINDOW_FORMAT.index(
             "#{session_name}"), (
@@ -608,8 +629,13 @@ def test_the_server_identity_fields_come_BEFORE_session_name():
     # And the property it protects, exercised rather than asserted about.
     rendered = sm.WINDOW_FORMAT.replace("#{window_id}", "@4") \
         .replace("#{window_index}", "2").replace("#{pid}", "1") \
-        .replace("#{start_time}", "2").replace("#{session_name}", "weird|name")
+        .replace("#{start_time}", "2").replace("#{window_activity}", "3") \
+        .replace("#{session_name}", "weird|name")
     assert sm.parse_windows(rendered) == {"@4": ("weird|name", "2")}
+    # …and the new field survives the same pipe-bearing session name, from the
+    # SAME rendered row. A parser reading one slot too far left would return the
+    # start_time here, which is why the two constants differ.
+    assert sm.parse_window_activity(rendered) == {"@4": 3}
 
 
 def test_window_format_is_the_pinned_contract_with_tmux():
@@ -833,6 +859,71 @@ def test_slots_to_window_ids_inverts_the_mapping():
     assert sm.slots_to_window_ids(None) == {}
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 PER-WINDOW LAST ACTIVITY — `#{window_activity}`, read off the SAME rows.
+#
+# The failure this exists to prevent is a consumer rendering ONE age for every
+# window under a host, because the only timestamp on the wire was per-host. So
+# the property that matters is that two windows measured in one call come back
+# with DIFFERENT values, not merely that a value comes back.
+# --------------------------------------------------------------------------- #
+def test_window_activity_is_read_PER_WINDOW_not_per_host():
+    """🔴 THE ANTI-VACUITY CASE. Three windows, three PAIRWISE DISTINCT times,
+    none of them equal to the fixture's pid or start_time. A parser that read a
+    server-level field, or that hard-coded any single constant, cannot produce
+    this mapping."""
+    raw = window_rows(("@41", "3", "scratch7", "1788300001"),
+                      ("@52", "5", "misc", "1788300002"),
+                      ("@63", "1", "other", "1788300003"))
+    assert sm.parse_window_activity(raw) == {
+        "@41": 1788300001, "@52": 1788300002, "@63": 1788300003}
+
+
+def test_window_activity_is_ABSENT_not_zero_when_tmux_rendered_nothing():
+    """🔴 An older tmux that does not know `#{window_activity}` renders it
+    EMPTY. That window must vanish from the mapping, not arrive as 0 — epoch 0
+    renders as "56 years ago", a fabricated measurement in the costume of a real
+    one. The measured sibling in the same output proves the parser still ran."""
+    raw = window_rows(("@41", "3", "scratch7", None),
+                      ("@52", "5", "misc", "1788300002"))
+    got = sm.parse_window_activity(raw)
+    assert "@41" not in got, "an unrenderable activity became a value"
+    assert got == {"@52": 1788300002}
+
+
+@pytest.mark.parametrize("bad", ["not-a-number", "17.5", "0", "-1", "1e9"])
+def test_window_activity_drops_a_value_it_cannot_trust(bad):
+    """Malformed, zero and negative all mean the same thing here: nothing was
+    measured for this window. `1e9` is included because `int()` rejects it while
+    `float()` would not — a parser reaching for the looser conversion would
+    publish 1000000000 (2001) as a real activity time."""
+    raw = window_rows(("@41", "3", "scratch7", bad),
+                      ("@52", "5", "misc", "1788300002"))
+    got = sm.parse_window_activity(raw)
+    assert "@41" not in got, f"{bad!r} was accepted as an activity time"
+    assert got == {"@52": 1788300002}, "the good row stopped being parsed"
+
+
+def test_window_activity_and_the_server_sentinel_come_off_THE_SAME_ROWS():
+    """The two adjacent integer fields are read by two different functions, and
+    each must take its OWN slot. Pinned together so a slot mix-up — the failure
+    a shared `split_window_line` exists to make impossible — fails here rather
+    than shipping a start_time as an activity time."""
+    raw = window_rows(("@41", "3", "scratch7", "1788300007"),
+                      pid="4025325", start_time="1785949442")
+    assert sm.parse_tmux_server_id(raw) == ("4025325:1785949442", None)
+    assert sm.parse_window_activity(raw) == {"@41": 1788300007}
+    assert sm.parse_windows(raw) == {"@41": ("scratch7", "3")}
+
+
+def test_window_activity_of_an_unparseable_row_is_dropped_like_every_other():
+    """A row `split_window_line` refuses is refused HERE too, so all three
+    readers drop the same rows for the same reasons."""
+    assert sm.parse_window_activity("") == {}
+    assert sm.parse_window_activity("garbage\n") == {}
+    assert sm.parse_window_activity("1|2|3|4|5|6\n") == {}  # id is not `@n`
+
+
 # =========================================================================== #
 # §3.2 — codename resolution via _SLOT_RE
 # =========================================================================== #
@@ -1046,6 +1137,140 @@ def test_TWO_SESSIONS_IN_ONE_REPO_share_a_label_and_stay_addressable():
     assert any(re.search(r"\b0\b.*\b1\b", ln) for ln in body)
     assert any(re.search(r"\b8\b.*\b1\b", ln) for ln in body)
     assert body[0] != body[1], "two rows rendered identically — unaddressable"
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 `window_activity` ON THE ROW — the field a consumer renders as "30m ago".
+#
+# The bug being closed is a card showing the HOST's age on every window under
+# it, so the assertions below are about two windows on ONE host DISAGREEING.
+# A fixture where both carry the same time would pass with the bug intact.
+# --------------------------------------------------------------------------- #
+def test_two_windows_on_one_host_carry_DIFFERENT_activity_times():
+    """🔴 THE ANTI-VACUITY ASSERTION. Two rows, one host, one fold, two
+    pairwise-distinct values — and both distinct from `NOW` and from each other,
+    so neither a per-host constant nor a hard-coded literal can satisfy it."""
+    panes = sm.parse_panes("\n".join([
+        "%1|1|scratch7|3|w-alpha|/w/synth-hotel|claude|first",
+        "%2|2|misc|5|w-charlie|/w/synth-golf|zsh|second",
+    ]))
+    rows = sm.fold_windows(
+        panes, "workbench", slots={}, now=NOW,
+        slot_window_ids={("scratch7", "3"): "@41", ("misc", "5"): "@52"},
+        window_activity={"@41": 1788300001, "@52": 1788300222})
+    got = {(r["session"], r["window_index"]): r["window_activity"]
+           for r in rows}
+    assert got == {("scratch7", "3"): 1788300001, ("misc", "5"): 1788300222}
+    assert len(set(got.values())) == 2, (
+        "both windows carry ONE activity time — a per-host value would look "
+        "exactly like this, which is the defect this field exists to remove")
+
+
+def test_a_window_with_no_measured_activity_carries_NO_KEY_not_a_zero():
+    """🔴 ABSENT, NEVER ZERO — and the measured sibling in the same fold is the
+    positive control proving the field is being written at all."""
+    panes = sm.parse_panes("\n".join([
+        "%1|1|scratch7|3|w-alpha|/w/synth-hotel|claude|first",
+        "%2|2|misc|5|w-charlie|/w/synth-golf|zsh|second",
+    ]))
+    rows = sm.fold_windows(
+        panes, "workbench", slots={}, now=NOW,
+        slot_window_ids={("scratch7", "3"): "@41", ("misc", "5"): "@52"},
+        window_activity={"@52": 1788300222})
+    by_slot = {(r["session"], r["window_index"]): r for r in rows}
+    unmeasured = by_slot[("scratch7", "3")]
+    assert "window_activity" not in unmeasured, (
+        "an unmeasured window carries the key; a consumer cannot tell that "
+        "from a measured value")
+    assert unmeasured.get("window_activity", 0) == 0  # …and .get is the tell
+    assert by_slot[("misc", "5")]["window_activity"] == 1788300222
+
+
+def test_a_host_whose_window_list_did_not_answer_carries_NO_activity_at_all():
+    """`window_activity=None` is the host-level unmeasured case — every row
+    loses the key rather than gaining a fabricated one. It must not raise
+    either: `fold_windows` is called with None on every unreachable host."""
+    panes = sm.parse_panes(
+        "%1|1|scratch7|3|w-alpha|/w/synth-hotel|claude|first")
+    rows = sm.fold_windows(panes, "workbench", slots={}, now=NOW,
+                           window_activity=None)
+    assert rows and all("window_activity" not in r for r in rows)
+
+
+def test_window_activity_is_NOT_age_secs_and_does_not_overwrite_it():
+    """Two different quantities that both sound like "how old is this". A fold
+    carrying an activity time must leave `age_secs`/`age_source` untouched —
+    conflating them would source an AGENT age from terminal output."""
+    panes = sm.parse_panes(
+        "%1|1|scratch7|3|w-alpha|/w/synth-hotel|claude|first")
+    rows = sm.fold_windows(
+        panes, "workbench", slots={}, now=NOW,
+        slot_window_ids={("scratch7", "3"): "@41"},
+        window_activity={"@41": 1788300001})
+    assert rows[0]["window_activity"] == 1788300001
+    assert rows[0]["age_secs"] is None
+    assert rows[0]["age_source"] is None
+
+
+def test_the_activity_time_reaches_the_REPORT_per_window_end_to_end():
+    """🔴 THE SEAM, not the parser and not the fold. `list-windows` output ->
+    `parse_window_activity` -> per-host wiring -> `fold_windows` -> the JSON a
+    consumer reads. Each of those was verified alone; this is the one assertion
+    that fails if any pair of them is not connected."""
+    windows = window_rows(("@41", "3", "scratch7", "1788300001"),
+                          ("@52", "5", "misc", "1788300222"),
+                          ("@63", "1", "other", "1788300333"))
+    report = base_gather(runner=make_runner(local_windows=windows))
+    rows = report["hosts"]["workbench"]["windows"]
+    got = {(r["session"], r["window_index"]): r.get("window_activity")
+           for r in rows}
+    assert got == {("scratch7", "3"): 1788300001, ("misc", "5"): 1788300222}
+    assert len(set(got.values())) == 2, "one time for every window on the host"
+
+
+def test_a_host_whose_list_windows_FAILED_reports_no_activity_end_to_end():
+    """The host-level unmeasured path, through the real wiring. `windows_measured`
+    is already false here; the new field must go ABSENT rather than 0."""
+    report = base_gather(runner=make_runner(
+        local_windows_rc=1, local_windows_err="windows blew up"))
+    host = report["hosts"]["workbench"]
+    assert host["windows_measured"] is False
+    assert host["windows"], "no rows at all — the fixture stopped exercising this"
+    assert all("window_activity" not in r for r in host["windows"])
+
+
+def test_a_PARTIAL_list_windows_read_publishes_no_activity():
+    """🔴 THE HARDER HALF OF THE SAME RULE, and the reason the previous test is
+    not sufficient: a FAILED read whose stdout is EMPTY produces no activity for
+    a trivial reason (there is nothing to parse). This one fails the call while
+    still handing back perfectly parseable rows — a timeout that got partway —
+    so refusing them is a real decision rather than an empty-string artefact.
+
+    ⚠ IT PINS THE OUTCOME, NOT ONE EXPRESSION. Two gates key on
+    `windows_measured` here: the activity parse and `slot_ids`, and the second
+    alone is enough to produce this result (no `window_id` on the row means
+    nothing to look up). A mutant deleting either one individually therefore
+    SURVIVES — measured, and recorded at the parse site. What must never regress
+    is the outcome asserted below, which is what this pins.
+    """
+    partial = window_rows(("@41", "3", "scratch7", "1788300001"),
+                          ("@52", "5", "misc", "1788300222"))
+    report = base_gather(runner=make_runner(
+        local_windows=partial, local_windows_rc=1,
+        local_windows_err="timed out after two rows"))
+    host = report["hosts"]["workbench"]
+    assert host["windows_measured"] is False
+    assert host["windows"], "no rows at all — the fixture stopped exercising this"
+    # POSITIVE CONTROL: the very same rows DO produce activity times when the
+    # call succeeds, so the assertion below is about the FAILURE and not about a
+    # fixture that could never yield a value.
+    ok = base_gather(runner=make_runner(local_windows=partial))
+    assert any(r.get("window_activity") for r in
+               ok["hosts"]["workbench"]["windows"]), (
+        "POSITIVE CONTROL FAILED: these rows yield no activity even on a "
+        "SUCCESSFUL read, so the negative below proves nothing")
+    assert all("window_activity" not in r for r in host["windows"]), (
+        "a FAILED list-windows published activity times off its partial output")
 
 
 # =========================================================================== #
@@ -2177,6 +2402,15 @@ def test_json_golden_schema_and_values():
                 "/home/zach/.claude/projects/proj-alpha/alpha.jsonl",
         },
         "panes": 2,
+        # 🔴 The per-window activity time, in EPOCH SECONDS off tmux's
+        # `#{window_activity}`. The literal is the fixture's own
+        # `DEFAULT_WINDOW_ACTIVITY` and is deliberately unlike the fixture's
+        # `start_time` (1785949442) — the two are adjacent integer fields in one
+        # format string, so a parser off by one slot would land on the other and
+        # a shared constant would hide it. This key is ABSENT, never 0, when
+        # tmux did not measure it; both states are pinned by
+        # `test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks`.
+        "window_activity": 1788313131,
     }
 
     second = wb["windows"][1]
@@ -6971,7 +7205,20 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
         "claude_session_id", "runtime", "ledger", "fuzzyclaw",
         "panes",
     }
-    assert set(row) == expected
+    # 🔴 THE ONE OPTIONAL KEY, AND IT IS PINNED IN BOTH DIRECTIONS RATHER THAN
+    # EXCUSED. `window_activity` is present when tmux measured it and absent
+    # when it did not — so a set equality against a single fixture would either
+    # forbid the field or require it, and both readings are wrong. The two arms
+    # below assert each state against a fixture that produces it, which is what
+    # keeps this a ledger and not a hole in one.
+    optional = {"window_activity"}
+    assert set(row) == expected | optional, (
+        "the default fixture measures activity, so the row must carry the key")
+    unmeasured = base_gather(runner=make_runner(
+        local_windows_rc=1, local_windows_err="windows blew up",
+    ))["hosts"]["workbench"]["windows"][0]
+    assert set(unmeasured) == expected, (
+        "a window whose activity was not measured must carry NO key for it")
     # 🔴 THE ROW-ENUMERATION BLOCK, NOT THE WHOLE `__doc__` (#1031 item 2).
     # This used to be `assert field in sm.__doc__` — a substring test across a
     # 275-line docstring. MEASURED: 24 of the 32 row names also occur elsewhere
@@ -10440,10 +10687,9 @@ _GATHER_REPORT_KEYS = {
 # control for it is mechanical: state the expected values somewhere the constant
 # cannot reach, and watch a deletion move them.
 _EXPECTED_NOT_MEASURED = {
-    "pull_requests": ("pull_requests", "standup"),
+    "pull_requests": ("pull_requests", "initiative-scan"),
     "mail_queue": ("mail_queue", "mailbox"),
-    "cluster_alerts": ("cluster_alerts", "standup"),
-    "initiative_board": ("initiative_board", "initiatives"),
+    "cluster_alerts": ("cluster_alerts", "obs-read"),
     "gui_windows_outside_tmux": ("gui_windows", "i3"),
 }
 
@@ -10571,8 +10817,8 @@ def test_the_not_measured_POPULATION_SET_cannot_silently_SHRINK():
     # 🔴 AND THE DERIVED OUTPUT MOVES WITH IT, against a LITERAL count. `5` is a
     # number the constant cannot supply; `len(NOT_MEASURED_POPULATIONS)` is the
     # trap this test exists to close, so it must not appear on this line.
-    assert len(base_gather()["not_measured"]) == 5
-    assert len(sm.render_not_measured(base_gather())) == 6  # heading + 5 rows
+    assert len(base_gather()["not_measured"]) == 4
+    assert len(sm.render_not_measured(base_gather())) == 5  # heading + 4 rows
 
 
 def test_every_not_measured_population_names_a_skill_that_EXISTS():
@@ -10609,7 +10855,7 @@ def test_not_measured_is_DERIVED_where_derived_DIFFERS_from_the_constant():
     """
     ledger = {
         "zulu_population": {"report_key": "zulu_key",
-                            "owner_skill": "standup", "note": "n1"},
+                            "owner_skill": "initiative-scan", "note": "n1"},
         "yankee_population": {"report_key": "yankee_key",
                               "owner_skill": "mailbox", "note": "n2"},
     }
@@ -10657,10 +10903,10 @@ def test_ADDING_a_measurement_REMOVES_the_claim_that_it_is_unmeasured():
 
 
 def test_the_not_measured_key_is_in_the_report_and_names_the_two_required_ones():
-    """The brief's floor: `pull_requests` -> standup and `mail_queue` ->
-    mailbox, both present in a real scan's payload with their owners."""
+    """The brief's floor: `pull_requests` -> initiative-scan and `mail_queue`
+    -> mailbox, both present in a real scan's payload with their owners."""
     pops = {p["population"]: p for p in base_gather()["not_measured"]}
-    assert pops["pull_requests"]["owner_skill"] == "standup"
+    assert pops["pull_requests"]["owner_skill"] == "initiative-scan"
     assert pops["mail_queue"]["owner_skill"] == "mailbox"
     # 🔴 the note carries the EVIDENCE, not just the label — a reader deciding
     # whether to spend a hop needs to know what is at stake behind the name
@@ -10685,11 +10931,10 @@ def test_the_NOT_MEASURED_section_is_pinned_as_a_WHOLE_normalised_string():
     # deleted entry stayed green: the two nobody spelled were the two free to
     # vanish. Equality, not `in` — an `in` per row cannot see one go missing.
     assert _block_after(lines, heading) == [
-        "cluster_alerts             -> /standup",
+        "cluster_alerts             -> /obs-read",
         "gui_windows_outside_tmux   -> /i3",
-        "initiative_board           -> /initiatives",
         "mail_queue                 -> /mailbox",
-        "pull_requests              -> /standup",
+        "pull_requests              -> /initiative-scan",
     ]
 
 
@@ -10713,7 +10958,10 @@ def test_render_not_measured_tells_an_ABSENT_key_from_an_EMPTY_list():
     # was this assertion for the whole PR, and it is the reason deleting an
     # entry stayed green: both sides shrank together. See
     # `test_the_not_measured_POPULATION_SET_cannot_silently_SHRINK`.
-    assert len(populated) == 6
+    # 6 -> 5 on 2026-09-07: `initiative_board` was dropped when the board it
+    # named was retired. That is the mechanism WORKING — the literal is what
+    # made a deliberate removal announce itself in three places at once.
+    assert len(populated) == 5
 
 
 def test_the_not_measured_section_is_printed_in_EVERY_state_including_empty():
