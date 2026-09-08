@@ -593,7 +593,7 @@ EXIT_USAGE_SITE_COUNT = 10
 
 
 def _exit_usage_sites(tree):
-    """The FOUR spellings of an `EXIT_USAGE` exit that this collector knows.
+    """The spellings of an `EXIT_USAGE` exit that this collector knows.
 
     🔴 READ THAT AS THE LIMIT IT IS. An earlier draft opened "every line in the
     MODULE that can hand `EXIT_USAGE` back to the shell" — a completeness claim
@@ -603,8 +603,8 @@ def _exit_usage_sites(tree):
     blind spot here blinds both gates at once). The enumeration is the claim;
     there is no "every".
 
-    🔴 THREE SPELLINGS, because a delta audit walked through two of them with
-    the whole suite green (the third is covered by `EXIT_USAGE_SITE_COUNT`):
+    Each arrived because a delta audit walked through it with the whole
+    suite green:
 
       * `return EXIT_USAGE` inside `main` — the only shape the first draft saw;
       * `sys.exit(EXIT_USAGE)` ANYWHERE — measured reachable on a mutant
@@ -617,11 +617,25 @@ def _exit_usage_sites(tree):
         through — lexical scoping to `main` made it invisible;
       * `raise SystemExit(EXIT_USAGE)`, which reaches the shell identically and
         was measured reachable (`--limit 5000` exiting 2) with both gates green.
+        (Kept even though the gate below now forbids it — a collector that
+        stops seeing a shape the moment another gate bans it is one revert away
+        from blind.)
 
-    Still NOT seen, and named so nobody reads silence as coverage:
-    `sys.exit(<alias>)`, a bare `exit(EXIT_USAGE)` imported via `from sys import
-    exit`, and `return EXIT_USAGE if … else …`. Each is a spelling nothing in
-    this repo uses; the count ratchet is the backstop if one appears.
+    🔴 AN ENUMERATION CANNOT BE COMPLETE — SO A SECOND GATE MAKES IT SUFFICIENT.
+    Spellings this collector does NOT see: `sys.exit(<alias>)`, a bare
+    `exit(EXIT_USAGE)` imported via `from sys import exit`, and
+    `return EXIT_USAGE if … else …`. The previous round wrote "the count ratchet
+    is the backstop if one appears" — FALSE, and false in a way that round had
+    already measured four lines up: the ratchet reads THIS collector, so a blind
+    spot here blinds both at once. Planting `_USAGE_ALIAS = EXIT_USAGE` plus
+    `sys.exit(_USAGE_ALIAS)` gave a reachable exit 2, named nowhere, with all
+    180 tests passing.
+
+    Rather than invent a third justification, the hazard is REMOVED:
+    `test_the_module_EXITS_ONLY_BY_RETURNING_from_main` forbids `sys.exit` and
+    `raise SystemExit` anywhere but the `__main__` guard, so `return
+    EXIT_USAGE` is the only spelling that can reach the shell — and enumerating
+    it is then complete, not merely wide.
 
     Scanning the whole module rather than one function is what makes the last
     two impossible to reintroduce, and costs nothing: the contract table itself
@@ -943,8 +957,24 @@ def test_the_doc_does_not_carry_a_FLAG_COUNT_that_nothing_enforces(body):
 # default)", how the table marks which row IS it. A comparison row is
 # untouched, and a new mention in either shape is covered without anyone
 # remembering this gate exists.
-_WINDOW_LITERAL_RE = re.compile(
-    r"(?:last\s+(\d+)\s+days|\b(\d+)-day\s+window\s+\(the default\))", re.I)
+# 🔴 WIDE PATTERN + AN ENUMERATED ALLOWLIST, because the narrow one was
+# WALKABLE BY AN INNOCENT REWORD. Measured: rewriting two of the doc's four
+# mentions into an equally natural third shape ("a 12-day default", "not within
+# the 12-day default") left the gate GREEN — and then moving the constant to 9
+# and updating only the two mentions the old regex could see left 180 passing
+# while the shipped headline still read "a 12-day default" and the tool printed
+# 9. A guard on WORDS is walkable by REWORDING; this one matches every window
+# length in the body and names the exceptions instead.
+#
+# The allowlist is the measurement table's COMPARISON rows. It is an
+# ENUMERATION, not a pattern: a new number is drift by default, and adding one
+# means saying here why it is not the default.
+_WINDOW_LITERAL_RE = re.compile(r"\b(\d+)[-\s]day\b|last\s+(\d+)\s+days", re.I)
+WINDOW_COMPARISON_DAYS = {
+    3: "the narrow end of the measurement table",
+    30: "the no-op point — Claude Code's retention floor, and the whole reason "
+        "the default is not 30",
+}
 
 
 def test_every_WINDOW_LENGTH_in_the_doc_is_DEFAULT_SINCE_DAYS(body):
@@ -958,11 +988,20 @@ def test_every_WINDOW_LENGTH_in_the_doc_is_DEFAULT_SINCE_DAYS(body):
         "no window length found in the shipped body — either the doc stopped "
         "documenting the default window, or this pattern has rotted; a gate "
         "that matches nothing passes vacuously")
-    wrong = sorted({n for n in found if n != fs.DEFAULT_SINCE_DAYS})
+    assert fs.DEFAULT_SINCE_DAYS in found, (
+        f"the shipped body never states the actual default "
+        f"({fs.DEFAULT_SINCE_DAYS} days) as a window length. Every mention was "
+        "reworded away or moved to a comparison; an agent reading it cannot "
+        "learn the bound.")
+    wrong = sorted({n for n in found
+                    if n != fs.DEFAULT_SINCE_DAYS
+                    and n not in WINDOW_COMPARISON_DAYS})
     assert not wrong, (
         f"the shipped skill body states window length(s) {wrong} while "
-        f"`DEFAULT_SINCE_DAYS` is {fs.DEFAULT_SINCE_DAYS}. An agent reads the "
-        "doc and reports the wrong bound. Update both together.")
+        f"`DEFAULT_SINCE_DAYS` is {fs.DEFAULT_SINCE_DAYS}, and they are not in "
+        f"`WINDOW_COMPARISON_DAYS` ({sorted(WINDOW_COMPARISON_DAYS)}). Either "
+        "update both together, or add the number here with the reason it is "
+        "NOT the default.")
 
 
 def test_the_window_literal_gate_can_SEE_a_wrong_number():
@@ -974,7 +1013,73 @@ def test_the_window_literal_gate_can_SEE_a_wrong_number():
     assert found == [999, 998], f"the pattern cannot see a window length: {found}"
     # ...and the NEGATIVE control: a comparison row must NOT be picked up, or
     # the gate is red on prose that is correct by design.
+    # ...and the NEGATIVE control now lives in the ALLOWLIST, not the pattern:
+    # the comparison rows ARE matched, and must be excused by name.
     ok = "a 3-day window 2.40 s; a 30-day default would be a NO-OP"
-    assert not _WINDOW_LITERAL_RE.findall(ok), (
-        "the pattern matched a COMPARISON window; it would fail on correct "
-        f"prose: {_WINDOW_LITERAL_RE.findall(ok)}")
+    seen = {int(a or b) for a, b in _WINDOW_LITERAL_RE.findall(ok)}
+    assert seen == {3, 30}, f"the pattern no longer sees comparison rows: {seen}"
+    assert seen <= set(WINDOW_COMPARISON_DAYS), (
+        "a comparison row is not excused by name, so the gate is red on prose "
+        "that is correct by design")
+
+
+def test_the_module_EXITS_ONLY_BY_RETURNING_from_main():
+    """🔴 THE GATE THAT MAKES THE SPELLING ENUMERATION SUFFICIENT.
+
+    `_exit_usage_sites` recognises named spellings and therefore can never be
+    complete — measured twice, two rounds running, each time by a spelling
+    nobody had thought of. The fix is not a wider enumeration (the next
+    spelling is always outside it) but a NARROWER MODULE: if the only way out
+    is `return`, then enumerating `return EXIT_USAGE` covers everything.
+
+    `sys.exit(main())` in the `__main__` guard is the one permitted call — it
+    is the process boundary itself, and it exits with whatever `main` RETURNED,
+    so it adds no unnamed cause.
+    """
+    tree = ast.parse(inspect.getsource(fs))
+    guard_spans = [
+        (n.lineno, n.end_lineno) for n in ast.walk(tree)
+        if isinstance(n, ast.If) and ast.dump(n.test).find("__main__") != -1]
+
+    def in_guard(lineno):
+        return any(a <= lineno <= b for a, b in guard_spans)
+
+    stray = []
+    for n in ast.walk(tree):
+        bad = (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+               and n.func.attr == "exit"
+               and getattr(n.func.value, "id", "") == "sys")
+        bad = bad or (isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
+                      and getattr(n.exc.func, "id", "") == "SystemExit")
+        bad = bad or (isinstance(n, ast.Call)
+                      and getattr(n.func, "id", "") == "exit")
+        if bad and not in_guard(n.lineno):
+            stray.append(n.lineno)
+    assert guard_spans, (
+        "no `if __name__ == '__main__'` block found — this gate's allowance "
+        "resolves to nothing and it would reject the module's own entry point")
+    assert not stray, (
+        f"line(s) {sorted(stray)} leave the process by `sys.exit` / "
+        "`raise SystemExit` / `exit`. Spell an exit as `return <EXIT_*>` from "
+        "`main` instead: the exit-2 enumeration gates read RETURNS, and every "
+        "other spelling has now twice slipped them silently. If a raise is "
+        "genuinely required, widen `_exit_usage_sites` AND "
+        "`EXIT_USAGE_SITE_COUNT` in the same change and say so here.")
+
+
+def test_the_EXIT_SPELLING_gate_can_SEE_a_stray_exit():
+    """POSITIVE CONTROL: the gate must reject the shape it exists to reject,
+    and must NOT reject the `__main__` guard that legitimately carries one."""
+    mod = ast.parse("import sys\n"
+                    "def main():\n"
+                    "    sys.exit(2)\n"
+                    "if __name__ == '__main__':\n"
+                    "    sys.exit(main())\n")
+    spans = [(n.lineno, n.end_lineno) for n in ast.walk(mod)
+             if isinstance(n, ast.If) and ast.dump(n.test).find("__main__") != -1]
+    stray = [n.lineno for n in ast.walk(mod)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "exit" and getattr(n.func.value, "id", "") == "sys"
+             and not any(a <= n.lineno <= b for a, b in spans)]
+    assert stray == [3], (
+        f"the detector missed a stray sys.exit or flagged the guard: {stray}")

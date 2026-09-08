@@ -2098,3 +2098,53 @@ def test_a_MULTI_BAD_hosts_report_names_EVERY_offenders_type():
     err = res["error"] or ""
     assert "'lt'=list" in err and "'wb'=str" in err, (
         f"the error must name each offender's own type; got {err!r}")
+
+
+# =========================================================================== #
+# ROUND 6 — THE SEAM. "Verified in isolation" is the new vacuous green.
+# =========================================================================== #
+# 🔴 MEASURED: change `legs=unmeasured_legs(a)` to `legs=()` at the ONE
+# production call site and ALL 283 tests across six files pass, while every
+# real archive run silently stops naming the peer-host and opencode legs as
+# windowed-but-uncounted — the disclosure the code comment itself calls "both
+# the larger fraction and the longer reach". Round 5 hardened the CALLEE
+# (`unmeasured_legs`) and asserted on `window_notice` DIRECTLY, so no test ever
+# built the combined state: `main` -> `_window_line` -> `unmeasured_legs` ->
+# `window_notice` -> the printed line. Both components were mutation-clean and
+# the feature was still one edit from deletion.
+#
+# These cases drive `main` and read what a caller actually SEES.
+
+@pytest.mark.parametrize("argv,expect_present,expect_absent", [
+    (["zzterm"], ("the peer hosts", "the opencode corpus"), ()),
+    (["zzterm", "--claude-only"], ("the peer hosts",), ("the opencode corpus",)),
+], ids=["default", "claude-only"])
+def test_the_LEGS_reach_the_PRINTED_LINE_through_main(
+        monkeypatch, argv, expect_present, expect_absent):
+    """🔴 THE SEAM, not the component. Pins `main` -> printed notice."""
+    run = make_run()
+    got = run_main(monkeypatch, argv, run, archive=[])
+    window = [l for l in got["out"].splitlines() if "ARCHIVE window:" in l]
+    assert window, f"no window line on stdout: {got['out']!r}"
+    for phrase in expect_present:
+        assert phrase in window[0], (
+            f"{argv}: the printed notice does not name {phrase!r}, a leg it "
+            f"windowed and does not count: {window[0]!r}")
+    for phrase in expect_absent:
+        assert phrase not in window[0], (
+            f"{argv}: the printed notice names {phrase!r}, never searched: "
+            f"{window[0]!r}")
+
+
+def test_the_LEGS_reach_the_JSON_message_through_main(monkeypatch):
+    """The same seam on the machine-readable side — `archive.window.message`
+    is what a `--live --json` consumer reads, and it is produced by a different
+    call than the human line."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([])),
+                             (): (0, live_report([]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json"], run,
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    msg = json.loads(got["out"])["archive"]["window"]["message"]
+    for phrase in ("the peer hosts", "the opencode corpus"):
+        assert phrase in msg, (
+            f"the JSON window message does not name {phrase!r}: {msg!r}")

@@ -189,7 +189,13 @@ EXIT_CONTRACT = (
               "caller ACTS on — read `tail.coverage_complete` before treating "
               "the resolution as unique."),
     # 🔴 THE ENUMERATION IS THE CLAIM, AND IT WENT STALE THE FIRST TIME ANYONE
-    # ADDED A USAGE ERROR. `main` has nine `return EXIT_USAGE` sites; this
+    # ADDED A USAGE ERROR. `main` had NINE `return EXIT_USAGE` sites when this
+    # block was written and has more now — the live number is
+    # `EXIT_USAGE_SITE_COUNT` in the contract test, which is asserted, and the
+    # collector behind it is module-wide rather than `main`-scoped. Do not
+    # restate either here: this very comment shipped a stale count one round
+    # after the round that added the ratchet, inside a block whose whole
+    # subject is enumerations going stale. This
     # sentence named five causes covering six of them, and the gate that
     # rebuilds it from a ledger only checks sentence -> code ("every cause named
     # is really an exit 2"), never code -> sentence. Its own comment says so.

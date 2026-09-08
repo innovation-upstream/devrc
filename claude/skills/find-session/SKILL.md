@@ -47,8 +47,11 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   3-day window 2.40 s / skipped 780 of 924, **a 12-day window (the default) 7.35 s / skipped 467
   of 924**, a 30-day window 13.35 s / skipped **0** of 924, `--all-time` 13.09 s. 🔴 **A 30-day default would be a NO-OP** — it skips
   zero files, because nothing in this corpus is older than that; it would cap the answer and
-  buy nothing. ⚠ The walked set is **924 session transcripts**, not the 5,954 `*.jsonl` a
-  bare `find` reports — ~5,030 of those are `subagents/agent-*.jsonl`, excluded by name.
+  buy nothing. ⚠ **Every count here is a DATED SNAPSHOT of a growing corpus — re-measure rather than
+  quoting it.** The walked set was **924 session transcripts** on 2026-09-08 and passed 940
+  within a day; it is not the 5,954 `*.jsonl` a bare `find` reports, since ~5,030 of those
+  are `subagents/agent-*.jsonl`, excluded by name. The RATIOS are what the argument rests
+  on, not the totals.
   🔴 **`--skill` is EXEMPT and stays corpus-wide.** "Has skill X ever been used" is a
   historical question and `adoption-scan` routes it here by name; windowing it would turn a
   corpus-wide "no recorded use" into "not in the last 12 days" with nothing on screen to say
