@@ -18,44 +18,29 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- **`ZacxDev/cairn` is PUBLIC** with three merged PRs — #1 SIGHUP hot-reload, #2 the ledger
-  narrowing (`c8aee7203`), #3 `8e4ef84` (the spawn-port TOCTOU + startup diagnostics).
-- 🔴 **`ZacxDev/cairn` #4 IS OPEN — `feat/flake`, commit `0e6c7cb`. THE FIRST HALF OF RANK 3.**
-  cairn had **no `flake.nix` at all**, so rank 3 as written could not start: there was nothing
-  for devrc to pin. #4 adds `packages.cairn`, `packages.server-image` (Linux only),
-  `apps.cairn`, `checks.client-resolves-its-lib`, a dev shell, and a `nix` CI job.
-  Suite **1678 passed / 0 failed** (was 1667); leakscan **0 findings across 36 files**, both
-  controls green. `mergeable=MERGEABLE`, `mergeStateStatus=UNSTABLE` (checks still running at
-  write time). **NOT merged, NOT audited** — `/audit-pr 4` was offered and not yet run.
-- ✅ **THE `nix` CI JOB PASSED ON ITS FIRST-EVER RUN** (PR #4, run `34160233941`), alongside
-  `leakscan: pass`. Per the rules a brand-new check is not an instrument until it has passed
-  once — `devrc-ci` was red on its first 5 of 5 runs for a reason unrelated to any diff — so
-  this is that one pass, and no more: **one green run on one PR**, not a track record. If it
-  goes red later, read the step log before believing the verdict.
-- 🔴 **STILL NOT DEPLOYED ANYWHERE — carried forward, re-verified 2026-09-07.** No civitai
-  instance exists, and **no cairn image is PUBLISHED** — #4 makes one buildable for the first
-  time, which is not the same as one existing in a registry. The homelab pod still runs its own
-  copy. Everything below is source, design and a PR, not deployment.
-- **devrc consumes NOTHING yet.** `flake.nix` still has zero cairn references and
-  `scripts/cairn` is still an `mkOutOfStoreSymlink`. Rank 3's stated closing condition is
-  **not** met. devrc `main` is clean but for the same four pre-existing untracked files that
-  are not mine (`nix/system/apply-nebula-relay.sh`, `check-nebula-relays.sh`, `output.txt`,
-  `scripts/diagnose-nix-disk.sh`).
-- **Session capture** remains DESIGNED, DECIDED, MERGED as a proposal, and BUILT NOWHERE
-  (`claudedocs/proposal-cairn-session-capture.md`, `e16f9609a`). Rank 8.
+- **`ZacxDev/cairn` has FOUR merged PRs.** #1 SIGHUP hot-reload, #2 the ledger narrowing
+  (`c8aee7203`), #3 `8e4ef84` (spawn-port TOCTOU), and **#4 `218b6c1` (2026-09-08) — THE
+  FLAKE.** `packages.cairn`, `packages.server-image` (Linux only), `apps.cairn`,
+  `checks.client-resolves-its-lib`, a dev shell, and a `nix` CI job.
+  Verified by CONTENT, never ancestry (a squash is never an ancestor): `flake.nix`,
+  `flake.lock` and both new test files exist on `origin/main`, and `serverTools` (12),
+  `serverPath` (14), `flake_image_block` (2) and `PYTHONDONTWRITEBYTECODE` (3) all resolve
+  there. Final suite **1698 passed / 0 failed**; leakscan 0 findings across 38 files.
+- **Rank 3's FIRST HALF is done. The second half — the devrc side — is NOT STARTED**, and
+  devrc still consumes nothing: `flake.nix` has zero cairn references and `scripts/cairn` is
+  still an `mkOutOfStoreSymlink`. Rank 3's closing condition is **not** met.
+- 🔴 **A cairn-built image is now BUILDABLE for the first time, and is still not PUBLISHED.**
+  #4 produces a loadable tarball; nothing pushes it to a registry. Rank 7 remains blocked on
+  publication, not on buildability.
+- **No civitai instance exists.** The homelab pod still runs its own copy.
+- **Session capture** remains DESIGNED, DECIDED and MERGED as a proposal, and BUILT
+  NOWHERE (`claudedocs/proposal-cairn-session-capture.md`, `e16f9609a`). Rank 8.
 - **The opencode exporter** shipped (`f58d2df04`, #1338) and still has **no caller**.
-- Worktree `~/workspace/cairn-flake` (branch `feat/flake`) is **still present** — it holds the
-  PR branch. Remove it after #4 merges: `git -C ~/workspace/cairn worktree remove
-  ~/workspace/cairn-flake`, then re-sync the base clone with `merge --ff-only`.
-- 🔴 **`claim-work` slug `cairn-oss-multi-instance-3` IS HELD by this session** and is NOT
-  released — rank 3 is only half done. Release it when the devrc side lands, or steal it
-  deliberately if you are picking rank 3 up fresh.
-
-🔴 **NO `clawgate-task:` FIELD IS RECORDED, AND THAT IS NOT A CLEAN BILL OF HEALTH.**
-`clawgate_handoff.sh resolve` exited **5** — 0 tasks for this session. Its positive control
-answered 11 links for a different session, so the board is reachable and the token works; but a
-WRONG session id also answers `200` with an empty array, so this cannot distinguish "this
-session touched no task" from "the id is wrong". No task was created to fill the blank.
+- **Cleanup done:** worktree `~/workspace/cairn-flake` removed, base clone fast-forwarded to
+  `218b6c1`, branch `feat/flake` deleted locally and on origin, `claim-work` slug
+  `cairn-oss-multi-instance-3` RELEASED. devrc `main` still carries only the four pre-existing
+  untracked files that are not mine.
+- **devrc PR #1367** carries this handoff doc.
 
 ## Open investigations — live diagnosis state
 
@@ -196,17 +181,21 @@ and re-deriving it costs a session an hour. **Do not re-measure it; verify it st
 Unchanged this session. `tests/test_subsystem_store_api.py:20239` and `:20271`. Neither ships
 a defect; recorded on cairn PR #1 as open-by-decision. Fix when someone is next in that file.
 
+### The devrc/OSS cairn client fork — UNCHANGED, and it is rank 3's second half
+The measurement in the block above still stands and was not re-run this session. Nothing in
+#4 touched `cairn` or `lib/`, so the fork is exactly as measured. **The operator fork inside
+it is still unanswered:** whether devrc DELETES its five duplicated `lib/` modules in favour
+of the pinned ones, or keeps them. Put that question before building.
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
 <rank>`). Items are marked done IN PLACE; new items APPEND.
 
-1. ✅ **DONE 2026-09-05 — `ZacxDev/cairn` IS PUBLIC.** Verified by the ACTUAL public path
-   (anonymous API 200, anonymous raw `LICENSE` 200). 🔴 The pre-publication audit covered
-   **12** commits, not the 7 on `main` — GitHub serves `refs/pull/1/head` on a public repo.
-   🔴 The first sweep of that was WRONG and looked right: it `cp`'d the scanner in before each
-   checkout, so `git checkout` aborted and four commits re-scanned one stale tree. **Any
-   per-revision sweep must print a per-revision quantity that CHANGES.**
+1. ✅ **DONE 2026-09-05 — `ZacxDev/cairn` IS PUBLIC.** Verified by the ACTUAL public path.
+   🔴 The pre-publication audit covered **12** commits, not the 7 on `main` — GitHub serves
+   `refs/pull/1/head` on a public repo. **Any per-revision sweep must print a per-revision
+   quantity that CHANGES.**
    forcing: none — done
 
 2. ⚠ **DONE 2026-09-05, BUT NOT AS WRITTEN — THIS ITEM'S OWN PREMISE WAS FALSE.**
@@ -214,111 +203,98 @@ a defect; recorded on cairn PR #1 as open-by-decision. Fix when someone is next 
    **The transferable rule: "X makes Y false" must name WHICH ARTIFACT Y describes.**
    forcing: none — done
 
-3. 🔨 **IN FLIGHT: `ZacxDev/cairn`#4 — Phase A3, devrc consumes cairn as a pinned flake input.**
-   🔴 **THIS ITEM'S PREMISE WAS INCOMPLETE AND THE WORK SPLIT IN TWO.** cairn had **no
-   `flake.nix`**, so there was nothing for devrc to pin; the first half is a PR to the PUBLIC
-   repo, not to devrc.
-   - **Half 1 — IN FLIGHT: `ZacxDev/cairn`#4** (`feat/flake`, `0e6c7cb`). Open, unaudited,
-     unmerged. Worktree at `~/workspace/cairn-flake`.
-   - **Half 2 — NOT STARTED: the devrc side.** Pin the input in `nix/../flake.nix`, move
+3. 🔨 **HALF DONE — Phase A3, devrc consumes cairn as a pinned flake input.**
+   🔴 **THIS ITEM'S PREMISE WAS INCOMPLETE AND THE WORK SPLIT IN TWO.** cairn had no
+   `flake.nix`, so there was nothing for devrc to pin.
+   - **Half 1 — ✅ MERGED 2026-09-08: `ZacxDev/cairn`#4, squash `218b6c1`.** Four audit
+     rounds; ladder ended on the attribution gate, rationale posted on the PR.
+   - **Half 2 — NOT STARTED: the devrc side.** Pin the input in `flake.nix`, move
      `~/.local/bin/cairn` into `/nix/store`, re-home `cairn who` as its own `cairn-who`
-     binary, point the writer at the pinned `entry_shape`, and decide the fate of devrc's five
-     duplicated `lib/` modules (see the fork investigation above — **put that fork to the
-     operator before building**).
-   🔴 **The ergonomic trade is real and unchanged:** `nix/home.nix:1474` deploys `scripts/cairn`
-   as an `mkOutOfStoreSymlink` *deliberately* — its comment at `:1467` says it is REQUIRED, not
-   preferred, because `.resolve()` must land beside `lib/`. **#4 solves exactly that** by
-   installing script and `lib/` together under `libexec`. But client edits will then need a
-   `home-manager switch`, and `readlink -f` stays the only arbiter of which state a path is in.
-   **Closing condition (unchanged):** a merged devrc PR in which `flake.nix` names cairn as an
-   input and `readlink -f ~/.local/bin/cairn` resolves into `/nix/store`.
-   ⚠ Note the original condition said `~/.claude/…/cairn`; the actual deploy path is
-   `~/.local/bin/cairn`.
+     binary, point the writer at the pinned `entry_shape`, and decide the fate of devrc's
+     five duplicated `lib/` modules. 🔴 **Put that fork to the operator BEFORE building** —
+     see the fork investigation above.
+   🔴 `nix/home.nix:1474` deploys `scripts/cairn` as an `mkOutOfStoreSymlink` and its comment
+   at `:1467` says that is REQUIRED, not preferred, because `.resolve()` must land beside
+   `lib/`. **#4 solves exactly that** by installing script and `lib/` together under
+   `libexec`. Client edits will then need a `home-manager switch`.
+   **Closing condition:** a merged devrc PR in which `flake.nix` names cairn as an input and
+   `readlink -f ~/.local/bin/cairn` resolves into `/nix/store`. (The original wording said
+   `~/.claude/…/cairn`; the actual deploy path is `~/.local/bin/cairn`.)
    forcing: none
 
 4. **Merge or close `civitai/talos-infra` #1414** (the instance proposal). Four open questions
-   in §11 — teammate count and identities, hostname, who else administers the token file, and
-   whether the OSS repo accepts outside contributions from day one. None blocks A3.
-   ⚠ **Not re-verified this session** — last checked 2026-09-06, still OPEN then.
+   in §11. None blocks A3.
+   ⚠ **Not re-verified since 2026-09-06**, still OPEN then.
    forcing: none
 
 5. ✅ **DONE 2026-09-06 — `ZacxDev/cairn` #2, squash `c8aee7203`.** Both ledger 🟢s closed.
-   🔴 **Neither is regression coverage, and the commit says so** — guard A's live dropped-count
-   is 0 (an INVARIANT GUARD, labelled one, backed by a positive control); guard B's narrowing
-   is behaviour-neutral today.
+   🔴 Neither is regression coverage, and the commit says so.
    forcing: none — done
 
-6. ✅ **DONE AND MERGED 2026-09-07 — `ZacxDev/cairn` #3, squash `8e4ef84`.** Rate measured, did
-   NOT reproduce; **not "fixed"**, and the PR says so. Claimed and released via `claim-work`.
-   Verified by CONTENT (11 new symbols present in `origin/main`), never by ancestry.
-   ⚠ **Nine audit rounds** — every one found something real, but none of the last four found a
-   defect in what the PR ships. Ended on the stated escape-hatch criterion, rationale posted
-   on the PR.
+6. ✅ **DONE AND MERGED 2026-09-07 — `ZacxDev/cairn` #3, squash `8e4ef84`.** Rate measured,
+   did NOT reproduce; **not "fixed"**, and the PR says so. Nine audit rounds.
    forcing: none — done
 
 7. **Retire `deployment.yaml`'s no-reload paragraph IN THE SAME COMMIT that moves the store's
-   `image:` tag to one built from cairn at or past `b25abb5`.** The comment is true until that
-   tag moves and false the moment it does; the comment now states this trigger itself.
+   `image:` tag to one built from cairn at or past `b25abb5`.**
    **Closing condition:** a merged `ZacxDev/homelab-infra` PR in which the `image:` line and
    that paragraph change together — checkable from the diff alone.
-   🔴 **THE BLOCKER IS NARROWER THAN RECORDED, AND #4 ADDRESSES IT.** This said "blocked on
-   there being a cairn-built image at all, which nothing schedules today". The concrete reason
-   was that **`build-push.sh` was never extracted** — `server/Dockerfile`'s comment points at a
-   file that does not exist in the OSS repo, so cairn could not build its own image by any
-   route. #4 adds `packages.server-image`, which was **built, loaded and RUN** (see gotchas).
-   ⚠ Still blocked until #4 merges AND somebody publishes a tag to a registry — #4 produces a
-   loadable tarball, it does not push anything anywhere.
+   🔴 **THE BLOCKER IS NOW NARROWER AND NAMED.** It was "no cairn-built image exists"; the
+   concrete cause was that `build-push.sh` was never extracted, so cairn could not build its
+   own image by any route. **#4 closes that** — `packages.server-image` builds, and was RUN
+   (seeded via `kubectl exec`-shaped `tar`, rotated via `kill -HUP 1`, served a 200 with two
+   401 controls). ⚠ **Still blocked on PUBLICATION**: #4 produces a loadable tarball and
+   nothing pushes it to a registry. That is the remaining step, and nothing schedules it.
    forcing: none — it cannot fire before a published image exists
 
-8. **Session capture — DESIGNED AND DECIDED, NOT BUILT.** Ship a session's transcript to object
-   storage at handoff time and attach it to the cairn entries the session touched.
+8. **Session capture — DESIGNED AND DECIDED, NOT BUILT.**
    `claudedocs/proposal-cairn-session-capture.md`, `e16f9609a` (#1326). Sixteen operator
    decisions in §2, NOT to be re-litigated.
    🔴 **Read §10 first: four things are genuinely undecided**, led by *who READS* the recorded
-   fan-out sets — a recorded set nothing compares against detects nothing.
-   ⚠ Its audit ladder ended by operator instruction at round 9, NOT on a clean round; round 9's
-   own fixes were never audited.
-   **Closing condition:** none yet — the first implementation PR is what would earn one. Do not
-   treat "the proposal merged" as the work being done.
+   fan-out sets.
+   ⚠ Its audit ladder ended by operator instruction at round 9, NOT on a clean round.
+   **Closing condition:** none yet — the first implementation PR would earn one.
    forcing: none
 
 9. ✅ **DONE 2026-09-06 — clawgate #511 `complete`, devrc `f58d2df04` (#1338).**
-   `scripts/collector/opencode/export.py`, 32 tests, two audit rounds.
-   🔴 The task body's own ASSUMPTION was false and its stop condition caught it: `text` is
-   populated on **0 of 21,749** tool parts store-wide.
    ⚠ **The module has NO CALLER.** Wiring it in is rank 8's work.
    forcing: none — done
 
 10. **Raise cairn's CI collected-test floor.** `.github/workflows/ci.yml` pins `FLOOR = 200`
-    against a suite that now collects **1678** (was 1667; #4 adds 11) — it cannot see a suite
-    that silently narrows to 300, the exact failure its own comment says it prevents. devrc's
-    convention for the replacement number is `m - min(50, max(1, m/20))`.
-    ⚠ **Rebase on #4 before computing it** — the number moved this session and will move again.
-    **Closing condition:** a merged `ZacxDev/cairn` PR moving that literal — checkable from
-    the diff alone.
+    against a suite that now collects **1698** — it cannot see a suite that silently narrows
+    to 300, the exact failure its own comment says it prevents. devrc's convention for the
+    replacement is `m - min(50, max(1, m/20))`.
+    ⚠ Re-read the current count before computing it; it moved four times in one session.
+    **Closing condition:** a merged `ZacxDev/cairn` PR moving that literal.
     forcing: none
 
 11. 🔴 **OPERATOR ACTION — add a `cairn` scope to the store token's allowlist.** Work in
-    `~/workspace/cairn` cannot be recorded in the subsystem store at all today: `cairn create
-    --scope cairn` is refused `[not-found]`, exit 6. **Measured, not inferred** — the token
-    allowlist holds 23 scopes and `cairn` is not among them:
+    `~/workspace/cairn` cannot be recorded in the subsystem store: `cairn create --scope cairn`
+    is refused `[not-found]`, exit 6. **Measured** — the token allowlist holds 23 scopes and
+    `cairn` is not among them:
     `KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec deploy/subsystem-store-api --
     cut -d' ' -f2,3 /run/secrets/subsystem-store/token` (fields 2,3 only; field 1 is the
-    secret). This session's cairn-repo lesson was routed to the `devrc/cairn` entry instead,
-    which works but files repo-specific knowledge under the wrong scope.
-    ⚠ Adding a scope is an edit to the pod's token file — an operator act, not a client one.
-    **Closing condition:** `cairn create --scope cairn --ref <slug> --file <f>` exits 0.
+    secret). This session's cairn-repo lessons went to `devrc/cairn` instead.
+    **Closing condition:** `cairn create --scope cairn …` exits 0.
     forcing: none
 
-12. **Derive `leakscan.py`'s file coverage instead of enumerating it.** #4 closed the
-    immediate hole (`.nix`/`.lock` added to `TEXT_SUFFIXES`) but not the class: coverage is
-    still a hand-written suffix list, so the NEXT new file type in this public repo is
-    unscanned while the run prints a confident `0 findings`. The fix is to derive the scanned
-    set from `git ls-files` and refuse — or at minimum report — a tracked file the scan did
-    not read.
-    **Closing condition:** a merged `ZacxDev/cairn` PR in which a tracked, non-binary file
-    that the scan skips causes a non-zero exit or an explicit `SKIPPED` line naming it.
+12. **Derive `leakscan.py`'s file coverage instead of enumerating it.** #4 closed two holes
+    (`.nix`, then `.dockerignore` — the second found by the guard written for the first) and
+    added a guard pinning the set against `git ls-files`. The CLASS is open: coverage is still
+    a hand-written suffix list, so the next new file type in this PUBLIC repo is unscanned
+    while the run prints a confident `0 findings`.
+    **Closing condition:** a merged `ZacxDev/cairn` PR in which a tracked, non-binary file the
+    scan skips causes a non-zero exit or an explicit `SKIPPED` line naming it.
     forcing: security — the repo is public and the gate is the reason it can be
+
+13. **Publish a cairn-built image to a registry.** Rank 7 is blocked on this and nothing
+    schedules it. `packages.server-image` produces a loadable tarball; something must push it
+    under a tag `homelab-infra` can pin. ⚠ Decide FIRST whether the deployed pod should be the
+    nix image or keep the Dockerfile build — `CLAUDE.md` in cairn records a measured
+    difference table and explicitly does not settle it.
+    **Closing condition:** a tag in the registry built from cairn at or past `b25abb5`, and
+    `homelab-infra`'s `image:` line able to name it.
+    forcing: none
 
 ## Gotchas / decisions / dead-ends
 
@@ -596,32 +572,106 @@ the three x86_64-linux outputs explicitly, **one `nix build` per step** — a co
 is the contention hazard devrc's own CLAUDE.md records, and separate steps make the checks list
 name which output broke instead of "the nix job is red".
 
+**🔴 A FOUR-ROUND AUDIT LADDER, ENDED ON THE ATTRIBUTION GATE — NOT ON A CLEAN ROUND, AND THE
+DISTINCTION IS THE POINT.** Rounds 3 and 4 both changed **ZERO payload lines** (`flake.nix`,
+`flake.lock`, `lib/`, `server/`, `cairn` untouched; diffs entirely test files and doc prose).
+Two consecutive zero-payload rounds means the ladder is auditing the scaffolding it wrote
+rather than the change under review. **Every round found something real** — this is a claim
+about where the rounds had MOVED, not that they were wasted. The round-4 auditor reached the
+same conclusion independently. Rationale posted publicly on the PR, because a report ending on
+the gate is otherwise indistinguishable from one that converged.
+
+**🔴 THE ONE DEFECT CLASS THAT RECURRED IN ALL FOUR ROUNDS: A GUARD THAT CLAIMS TO OWN A VALUE
+AND READS A DIFFERENT SITE.** Not one bug — four instances, each found only after the previous
+was fixed:
+- the image had no `PATH` and no `sh`/`tar` while env/uid/port/entrypoint all agreed — a pod
+  that starts, serves, and can be neither seeded nor rotated;
+- the guard for that pinned `serverTools` and `serverPath` as BINDINGS and never checked
+  `serverTools` reached `contents`, so two mutants restored the 🔴 behind a green test;
+- `test_the_pod_does_not_run_as_root` read the `serverUid` let binding; NOTHING read the
+  image's `config.User`. `User = "0:0"` with `serverUid = 65532` → 15 passed, image runs as
+  root;
+- counting `contents` bindings caught a decoy but not MOVING the real one into the `let` —
+  built image had an empty `/app` and would not start at all.
+**The fix that finally held was structural: brace-match the `buildLayeredImage { … }` block
+and read arguments from INSIDE it**, so a binding of the right name in the wrong place is
+unrepresentable rather than merely counted. Ask of every guard: *what does it READ, and is
+that the thing that SHIPS?*
+
+**🔴 I MADE THREE FALSE STATEMENTS ABOUT MY OWN DIFFS IN ONE PR, AND EACH WAS A DIFFERENT
+SHAPE.** (a) A measured negative control that my own LATER commit staled — the control needed
+`doInstallCheck = false`, which the PR body never said. (b) A claim that a false comment was
+"deleted rather than reworded" when it was still there verbatim, twelve lines below a block
+calling it false. (c) `nix flake show` cited as confirming the outputs, when it exited **1**
+the whole time — I had read it through `2>/dev/null | sed`, which ate the error AND the exit
+status. **All three were corrected publicly on the PR rather than by editing the body**, since
+a reviewer may already have read the wrong version.
+
+**🔴 FIXING A NIT DROPPED A GUARD, AND THE SUITE STAYED GREEN.** Changing a uid assertion to
+count-only — correct about the misleading message — DROPPED the `65532` literal instead of
+MOVING it. For one commit no test in the repo asserted a non-root pod; measured, `USER 0:0`
+plus `serverUid = 0` ran the full suite to 1695 passed, on a pod that mounts a PVC and a
+bearer token. **When a fix removes an assertion to improve a message, ask what that assertion
+was the only one checking.**
+
+**🔴 I RE-COMMITTED THE FIRST-WINS BUG INSIDE THE FIX FOR IT.** Having just fixed the
+Dockerfile extractors to read the LAST `USER`/`CMD`, I wrote an unanchored
+`re.search(r'serverPath\s*=\s*"([^"]+)"')` — which matched my own COMMENT quoting the mutant,
+so the guard read a value out of prose and failed on a correct tree. Caught by the battery's
+control, not by review. **A guard matching a WORD another line can spell is not structural.**
+
+**🔴 A WRONG REMEDY IS WORSE THAN A MISSING ONE.** My coverage guard copied leakscan's flags
+but not its `-z`, so an untracked `café.md` made one test say "add `.md\"` to TEXT_SUFFIXES"
+and another say "the flags have diverged" — the flags were identical; the OUTPUT ENCODING was
+not. Both messages would have sent a maintainer to change something already correct.
+
+**🔴 A SANDBOX PINS DIMENSIONS, AND MY CHECK WAS BLIND ON TWO OF THEM.**
+`checks.client-resolves-its-lib` runs `doctor` in a nix sandbox whose HOME has no cache root —
+which is exactly why it did not notice that `cairn doctor` CRASHED on any host that had one
+(`AttributeError: 'NoneType' object has no attribute 'iterdir'`, zero stdout, exit 1, whenever
+`CAIRN_MIRROR_ROOT` was unset — the default). Pre-existing on `main` since the mirror became
+optional; fixed in #4 because #4 is what advertises the command. Separately, the quoted-path
+test's premise depended on `core.quotePath`, which it inherited rather than set — with it
+false, the `-z` mutant SURVIVED. **Ask which dimension your fixture leaves free.**
+
+**🔴 `leakscan`'s COVERAGE IS AN ENUMERATION, AND IT WAS BLIND TO THE FILE BEING ADDED.**
+`.nix` was absent from `TEXT_SUFFIXES`, so #4's own `flake.nix` — hand-written prose in a
+public repo — would have been unscanned while the run printed `0 findings across 34 files`.
+The guard written for it then found a SECOND gap nobody had spotted:
+`server/Dockerfile.dockerignore` was unscanned on `main`. The class is still open — rank 12.
+
+**A `[not-found]` FROM `cairn create` DOES NOT MEAN THE SCOPE IS UNSEEDED** — the API refuses
+to distinguish, deliberately. See the `devrc/cairn` store entry (revision `4f3cb4da30f648e4`)
+and rank 11.
+
 ## How to verify
 
 ```bash
-# cairn PR #4 — the flake, on the PR branch
-git -C ~/workspace/cairn-flake log --oneline -1          # 0e6c7cb
-cd ~/workspace/cairn-flake && nix build .#packages.x86_64-linux.cairn --no-link
-cd ~/workspace/cairn-flake && nix build .#checks.x86_64-linux.client-resolves-its-lib --no-link
-cd ~/workspace/cairn-flake && nix build .#packages.x86_64-linux.server-image --no-link
+# #4 landed — by CONTENT, never ancestry (a squash is never an ancestor)
+gh pr view 4 -R ZacxDev/cairn --json state,mergedAt,mergeCommit   # MERGED, 218b6c1
+git -C ~/workspace/cairn cat-file -e origin/main:flake.nix && echo present
+git -C ~/workspace/cairn grep -c serverTools origin/main -- flake.nix
+
+# the flake works, from the merged base clone
+cd ~/workspace/cairn && nix build .#packages.x86_64-linux.cairn --no-link
+cd ~/workspace/cairn && nix build .#checks.x86_64-linux.client-resolves-its-lib --no-link
+cd ~/workspace/cairn && nix build .#packages.x86_64-linux.server-image --no-link
 # ^ ONE AT A TIME. A combined invocation contends on the store and can report a FALSE red.
+cd ~/workspace/cairn && nix flake check --all-systems --no-build   # rc 0
 
-# the packaged client resolves lib/ from /nix/store — the mechanism, not --help
-P=$(cd ~/workspace/cairn-flake && nix build .#cairn --no-link --print-out-paths)
-HOME=$(mktemp -d) $P/bin/cairn doctor | head -3     # a real report; exit 9 here is CORRECT
+# the packaged client resolves lib/ from /nix/store, and doctor no longer crashes
+P=$(cd ~/workspace/cairn && nix build .#cairn --no-link --print-out-paths)
+$P/bin/cairn doctor | head -3        # a real report; exit 9 is a VERDICT, exit 1 was the crash
 
-# the suite and the leak gate
-cd ~/workspace/cairn-flake && nix develop ~/workspace/devrc -c python3 -m pytest tests -q -p no:randomly
-cd ~/workspace/cairn-flake && python3 tests/leakscan.py --self-test && python3 tests/leakscan.py
-
-# CI — read the nix job's step log, not just the verdict; it had never run before #4
-gh pr checks 4 -R ZacxDev/cairn
-gh pr view 4 -R ZacxDev/cairn --json mergeable,mergeStateStatus
+# suite + leak gate
+cd ~/workspace/cairn && nix develop ~/workspace/devrc -c python3 -m pytest tests -q -p no:randomly
+cd ~/workspace/cairn && python3 tests/leakscan.py --self-test && python3 tests/leakscan.py
 
 # rank 3 is NOT done until this resolves into /nix/store (it does not today)
 readlink -f ~/.local/bin/cairn
 grep -c cairn ~/workspace/devrc/flake.nix            # 0 today
 ```
-Expected today: cairn **1678 passed**, leakscan `0 findings across 36 files` with both controls
-green, all three nix outputs build, `readlink -f ~/.local/bin/cairn` resolves into
-`~/workspace/devrc/scripts/cairn` (**not** `/nix/store` — that is rank 3's second half).
+Expected: PR #4 MERGED at `218b6c1`; cairn **1698 passed**; leakscan `0 findings across 38
+files` with both controls green; all three nix outputs build; `nix flake check --all-systems`
+rc 0; `readlink -f ~/.local/bin/cairn` resolves into `~/workspace/devrc/scripts/cairn`
+(**not** `/nix/store` — that is rank 3's second half).
