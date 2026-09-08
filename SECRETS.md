@@ -283,10 +283,39 @@ no commit; this flag is it, upstreamed. What remains unexercised is only a
 unchanged.** `age-keygen -y` prints only the `age1…` recipient (measured, age
 v1.3.1: exactly 63 bytes, `age1…` + one `\n`), which is why the pin above is
 committed in a public repo. The secret half is never printed, never hashed into a
-message, and never passed in argv. ⚠ **age-keygen's stderr is NOT safe** — a file
-it cannot parse comes back as `unknown identity type: "<the offending line>"`,
-i.e. it echoes its input, which on a mangled identity is the secret key. The tool
-quotes no stream at all on that path.
+message, and never passed in argv. ⚠ **age-keygen's stderr is NOT safe** — on
+**age ≤ 1.3.1** a file it cannot parse comes back as
+`unknown identity type: "<the offending line>"`, i.e. it echoes its input, which
+on a mangled identity is the secret key. The tool quotes no stream at all on that
+path.
+
+🔴 **age 1.3.2 removed that echo — and the redaction STAYS. Do not delete it as
+dead code.** Upstream dropped the offending argument from the error deliberately
+(`parse.go`: *"Don't include arg in the error: it may contain private key
+material, and callers print these errors"*). Measured 2026-09-08 on this host,
+same fixtures against both binaries — 8 realistic manglings (leading/trailing
+space, case-folded, CRLF, prefix typo, quoted, truncated, trailing NUL):
+
+| binary | manglings echoing secret material into stderr |
+|---|---|
+| `age-1.3.1` (positive control — the sweep CAN see a leak) | **4 / 8** |
+| `age-1.3.2` (currently on PATH) | **0 / 8** |
+
+The `0` is reportable only because the same sweep scored `4` against 1.3.1; a
+bare zero here would be indistinguishable from a sweep wired to nothing.
+
+The guard is kept regardless, for two independent reasons: `age-keygen` is
+**whatever is on PATH** and this repo does not pin the operator's binary, so a
+defence that is only correct on the newest release is not a defence; and a
+recovery is exactly the situation where someone reaches for an older `age` on a
+machine that is not this one. Its non-vacuity no longer depends on upstream
+keeping the bug. Two tests in
+`scripts/tests/test_analyze_service_index_escrow_verify.py` hold it up:
+`test_the_redaction_is_pinned_against_a_STUB_that_echoes_like_age_v1_3_1` puts a
+stub on PATH that echoes the way 1.3.1 did, so the guard is exercised whatever
+age is installed, and
+`test_which_age_keygen_ECHO_REGIME_is_installed_is_OBSERVED_not_assumed` reads
+the installed regime rather than assuming one.
 
 ##### Verifying a hand-pasted note (the browser-clipboard leg)
 

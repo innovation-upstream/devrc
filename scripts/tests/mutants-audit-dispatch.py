@@ -3193,12 +3193,128 @@ ROWS = [
 ]
 
 
-def failing(root: Path):
-    """-> (killer test names, raw output). Reads the CONTENT, never an exit code."""
+# --------------------------------------------------------------------------- #
+# TESTLIB_ROWS — the CONTROLS that guard this suite's own parsers.
+# --------------------------------------------------------------------------- #
+# 🔴 A SECOND TABLE, BECAUSE A KILLER SET CANNOT SEE THESE. V68 and V69 above
+# forced `shell_code` and `last_command` into existence, and the fix landed
+# EIGHT control assertions beside them pinning that the new parsers do not
+# OVERSHOOT — the two one-line repairs that were offered (`"#" not in line`,
+# `re.split(r'[;&|]+', …)`) each break correct code, and nothing else in the
+# module would notice. All eight live inside the body of ONE test, so `ROWS`'
+# name-based expectation would report the same single killer for every one of
+# them: eight rows reading as coverage while measuring one. These rows match
+# the failing assertion's own MESSAGE instead, and a row fails if ANOTHER
+# row's message shows up — that is the in-test spelling of EXTRA-KILLER.
+#
+# 🔴 THEY MUTATE `TEST_REL`, NOT `SCRIPT_REL`. The thing under test here is
+# the suite's own parser, so the payload/scaffolding line falls the other way
+# round from every row above. Stated rather than left to be inferred, because
+# a reader who assumes one target file will mis-read every verdict below.
+#
+# 🔴 WHY THESE EXIST AT ALL: #1342 merged with the eight assertions UNVERIFIED
+# — nobody had shown they were REACHABLE. They sit after an early `return` in
+# `test_the_cached_build_fallback_is_emitted_with_its_guards` (the test bails
+# when the brief fences no sandbox tier) and after a `len(blocks) == 1`
+# assert, either of which would have made all eight vacuous while the suite
+# stayed green. Measured 2026-09-08: the precondition holds, exactly one
+# `nix log` block is emitted, and each row below kills its own control.
+# The last row is the harness's own negative control — see `T9`.
+
+def _testlib_swap(old: str, new: str, what: str):
+    """A UNIQUE literal substring of the TEST module, replaced once."""
+    def f(t: str) -> str:
+        _require_unique(t.count(old), what)
+        return t.replace(old, new, 1)
+    return f
+
+
+_HASH_BRANCH = '        if ch == "#" and (not out or out[-1].isspace()):\n'
+_SHELL_QUOTE = ('        if ch in "\'\\"":\n            quote = ch\n'
+                '            out.append(ch)\n')
+_LASTC_QUOTE = ('        if ch in "\'\\"":\n            quote = ch\n'
+                '            i += 1\n')
+_SEP_SCAN = '        if ch in ";|" or code[i:i + 2] == "&&":\n'
+_SHELL_ESCAPE = ('            if ch == "\\\\" and quote == \'"\' and '
+                 'i + 1 < len(line):\n')
+
+TESTLIB_ROWS = [
+    # (label, the failing assertion's own message, mutation)
+    ("T1  shell_code: any `#` opens a comment",
+     "part of a flake ref",
+     _testlib_swap(_HASH_BRANCH, '        if ch == "#":\n',
+                   "shell_code's start-of-word comment test")),
+    ("T2  shell_code: quote-blind",
+     "inside a quoted diagnosis",
+     _testlib_swap(_SHELL_QUOTE,
+                   '        if False:\n            quote = ch\n'
+                   '            out.append(ch)\n',
+                   "shell_code's quote-open branch")),
+    ("T3  last_command: quote-blind",
+     "inside a quoted regex",
+     _testlib_swap(_LASTC_QUOTE,
+                   '        if False:\n            quote = ch\n'
+                   '            i += 1\n',
+                   "last_command's quote-open branch")),
+    ("T4  last_command: a bare `&` separates",
+     "of a `2>&1` redirection",
+     _testlib_swap(_SEP_SCAN, '        if ch in ";|&":\n',
+                   "last_command's separator scan")),
+    # The four separators, each made invisible ON ITS OWN. The loop runs them
+    # in the order `;`, `||`, `|`, `&&`, so a mutation must leave every EARLIER
+    # separator working or the message names that one instead — which is
+    # exactly what the message check would then report.
+    ("T5  last_command: `;` not a separator",
+     "reached by ';'",
+     _testlib_swap(_SEP_SCAN,
+                   '        if ch in "|" or code[i:i + 2] == "&&":\n',
+                   "last_command's separator scan")),
+    ("T6  last_command: `||` not a separator",
+     "reached by '||'",
+     _testlib_swap(_SEP_SCAN,
+                   '        if ch == ";" or code[i:i + 2] == "&&" or (\n'
+                   '                ch == "|" and code[i-1:i] != "|"\n'
+                   '                and code[i+1:i+2] != "|"):\n',
+                   "last_command's separator scan")),
+    ("T7  last_command: a lone `|` not a separator",
+     "reached by '|'",
+     _testlib_swap(_SEP_SCAN,
+                   '        if ch == ";" or code[i:i + 2] in ("||", "&&"):\n',
+                   "last_command's separator scan")),
+    ("T8  last_command: `&&` not a separator",
+     "reached by '&&'",
+     _testlib_swap(_SEP_SCAN, '        if ch in ";|":\n',
+                   "last_command's separator scan")),
+    # 🔴 T9 IS THE HARNESS'S NEGATIVE CONTROL, and it is the row that makes the
+    # eight above readable. Without it, a sub-battery wired to nothing — a
+    # mutation that never lands, a pytest that never selects the test — reports
+    # nine KILLEDs and is indistinguishable from nine real ones. This mutates a
+    # branch of `shell_code` that NO control fixture and no line of the emitted
+    # block reaches (a backslash escape inside double quotes), so it MUST
+    # survive. A red here means the rows above are reacting to the EDIT rather
+    # than to the semantics, and every verdict beside it is uninterpretable.
+    ("T9  (control) an unreached shell_code branch",
+     SURVIVES,
+     _testlib_swap(_SHELL_ESCAPE, '            if False:\n',
+                   "shell_code's backslash-in-double-quotes branch")),
+]
+
+
+def failing(root: Path, tb: str = "no"):
+    """-> (killer test names, raw output). Reads the CONTENT, never an exit code.
+
+    🔴 `tb` IS NOT COSMETIC — it decides what the caller can DISCRIMINATE.
+    `--tb=no` yields test NAMES only, which is all `ROWS` needs and all it can
+    use. `TESTLIB_ROWS` below mutates parsers whose eight controls live inside
+    ONE test, so a killer SET cannot tell them apart: every row would report
+    the same single name and eight rows would read as coverage while measuring
+    one. Those rows ask for `--tb=short` and match the failing assertion's own
+    MESSAGE instead.
+    """
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     p = subprocess.run(
         [sys.executable, "-m", "pytest", str(root / TEST_REL),
-         "-q", "--no-header", "--tb=no", "-p", "no:cacheprovider"],
+         "-q", "--no-header", f"--tb={tb}", "-p", "no:cacheprovider"],
         capture_output=True, text=True, env=env, cwd=str(root), check=False,
     )
     # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran"
@@ -3309,11 +3425,70 @@ def main() -> int:
             print(f"  ok {label:44s} killed by exactly {len(got)}: "
                   + ", ".join(sorted(got)))
 
+        # ------------------------------------------------------------------ #
+        # The suite's own parser controls. Different target file, different
+        # discrimination — see the TESTLIB_ROWS banner.
+        # ------------------------------------------------------------------ #
         print()
+        print("TESTLIB (mutating scripts/tests/test_audit_dispatch.py itself)")
+        original_test = (root / TEST_REL).read_text(encoding="utf-8")
+        all_msgs = [m for _, m, _ in TESTLIB_ROWS if m is not SURVIVES]
+        for label, want, mutate in TESTLIB_ROWS:
+            try:
+                mutated = mutate(original_test)
+            except AssertionError as e:
+                print(f"  🔴 {label:44s} MUTATION DID NOT APPLY — {e}")
+                bad += 1
+                continue
+            if mutated == original_test:
+                print(f"  🔴 {label:44s} MUTATION DID NOT APPLY (no change)")
+                bad += 1
+                continue
+            (root / TEST_REL).write_text(mutated, encoding="utf-8")
+            got, raw2 = failing(root, tb="short")
+            (root / TEST_REL).write_text(original_test, encoding="utf-8")
+
+            if got is None:
+                print(f"  🔴 {label:44s} HARNESS BROKE — {raw2}")
+                bad += 1
+                continue
+            if want is SURVIVES:
+                if got:
+                    print(f"  🔴 {label:44s} KILLED by {sorted(got)} — this row "
+                          "must SURVIVE. The rows above are then reacting to "
+                          "the EDIT, not the semantics, and none of their "
+                          "verdicts can be read.")
+                    bad += 1
+                else:
+                    print(f"  ok {label:44s} SURVIVED as required (control)")
+                continue
+            if not got:
+                print(f"  🔴 {label:44s} SURVIVED — the control it targets is "
+                      "UNREACHABLE or vacuous")
+                bad += 1
+                continue
+            # 🔴 THE MESSAGE, NOT THE TEST NAME. All eight controls share one
+            # test, so a name proves only that SOMETHING in it fired.
+            others = [m for m in all_msgs if m != want and m in raw2]
+            if want not in raw2:
+                print(f"  🔴 {label:44s} KILLED FOR THE WRONG REASON: the "
+                      f"failure does not carry {want!r}"
+                      + (f"; it carries {others!r}" if others else ""))
+                bad += 1
+                continue
+            if others:
+                print(f"  🔴 {label:44s} EXTRA-KILLER: {others!r} also fired — "
+                      "the row no longer isolates the control it names")
+                bad += 1
+                continue
+            print(f"  ok {label:44s} killed by its OWN control ({want!r})")
+
+        print()
+        total = len(ROWS) + len(TESTLIB_ROWS)
         if bad:
-            print(f"🔴 {bad} of {len(ROWS)} row(s) not as expected")
+            print(f"🔴 {bad} of {total} row(s) not as expected")
             return 1
-        print(f"✅ {len(ROWS)} row(s), all as expected")
+        print(f"✅ {total} row(s), all as expected")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

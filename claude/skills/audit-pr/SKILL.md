@@ -201,6 +201,21 @@ file type reads every round of those as zero and stops a ladder that is working.
 directions on ordinary names (reference file). A round's fix touches a handful of files — read the list and name each one
 payload or scaffolding. **Ambiguous is not zero**: the gate does not fire, and the ladder continues.
 
+🔴 **DECIDE ONCE, AT ROUND 1, AND WRITE IT IN THE CLAIMS BLOCK.** A class that can be re-decided
+each round disarms the gate without anyone choosing to — measured on devrc #1132, where a shared
+test library was named scaffolding early and payload later, in a ladder whose summary claimed it
+stopped on this gate. The tie-breaker for a shared helper is the **REVERT TEST**: if this file's
+diff were reverted, would the PR's stated deliverable still ship? Yes ⇒ scaffolding — however big
+and however reusable the helper is. No ⇒ payload — however deep under `tests/` it sits. Standing
+call for devrc: **`scripts/testlib/**` is SCAFFOLDING**, except a scanner that IS a repo gate on a
+PR whose deliverable is that gate. Reasons and the worked case: reference file.
+
+🔴 **ONE NUMBER, ONE NAME.** Report exactly one payload count per round and call it the same thing
+every time. #1132's ledger carried *"payload lines"* and *"executable payload"* on the same line
+with different values, so its rounds could be read as zero or non-zero at will and the stop needed
+no reclassification to become unfalsifiable. A second count is fine — under a different name, and
+the summary must say which one the stop was taken on.
+
 🔴 **Per-round, and every commit the round actually made.** Anchored at round 1 the count stays
 non-zero forever once an early round touched payload — on #498 that prints the same number for
 rounds 4 through 10 and never fires. Every flag earns its place, measured across four ladder shapes
