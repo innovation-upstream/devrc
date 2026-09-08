@@ -933,8 +933,21 @@ def test_reason_token_ledger_is_pinned_and_apply_branches_on_a_real_one():
 
 
 def test_apply_declares_every_tool_it_execs():
-    """The preflight's job is to abort BEFORE the first write. A tool missing from its
-    list fails half-way through instead."""
+    """The preflight's job is to abort BEFORE the first write.
+
+    ⚠ READ WHAT THIS ACTUALLY CHECKS. It asserts a hard-coded list is a SUBSET of what
+    the script declares — it inspects one side of the relationship its name implies. It
+    therefore CANNOT catch a tool the script execs but does not declare, which is the
+    failure the preflight exists to prevent.
+
+    MEASURED 2026-09-08: `head`, `id` and `rm` are exec'd and undeclared right now, and
+    this test is green. (`$BASH` is a fourth omission but a CORRECT one — the
+    interpreter is by definition already running, so it needs no `command -v`.)
+
+    Closing it means deriving the exec'd set from the source, which is a real piece of
+    work and not this test's current claim. Until then the docstring says what the body
+    does, rather than what the name suggests — a guard that reads as coverage while
+    providing none is worse than no guard, because it stops anyone looking."""
     src = APPLY.read_text()
     m = re.search(r"^for t in (.*?); do$", src, re.M | re.S)
     assert m, "the preflight tool loop moved"

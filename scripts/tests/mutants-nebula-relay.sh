@@ -324,7 +324,7 @@ mutant "M-FH-1-verifier-execed-via-shebang" apply 1 \
   'run_check() { "$BASH" "$CHECK" "$@"; }' \
   'run_check() { "$CHECK" "$@"; }' \
   test_the_verifier_is_never_execed_via_its_own_shebang \
-  'must be invoked through'
+  'no longer invokes the verifier through'
 
 # The verifier's exit codes and apply's `verifier_answered` are ONE fact in two files.
 # A new code on either side, unmatched on the other, silently reclassifies a verdict as
