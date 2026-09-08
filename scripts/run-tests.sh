@@ -1806,7 +1806,14 @@ TARGET_FLOORS=(
   #   "scripts/session-analysis/tests|440"
   # 440 is copied verbatim from that message, which is this run's own count put
   # through the documented rule — never arithmetic done by hand here.
-  "scripts/session-analysis/tests|440"
+  # 2026-09-06: 440 -> 525, and the gate FORCED it. +7 tests in
+  # test_tmux_session_restore.py pinning the boot-race fix (settle-wait +
+  # send verification) took the target to 552, which is ABOVE the drift
+  # ceiling: a floor of 440 would let a whole suite vanish underneath it
+  # with the gate still green. 525 is copied verbatim from the gate's own
+  # message — this run's count through the documented rule, never
+  # arithmetic done by hand here.
+  "scripts/session-analysis/tests|525"
   "scripts/session-analysis/session_insight/tests|55"
   "scripts/mail-actions/tests|129"
   # 2026-08-16, the Signal chat pipeline arrives as a NEW target: 387 collected

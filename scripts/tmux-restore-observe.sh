@@ -356,6 +356,20 @@ capture() {
         echo "--- PLAN-CWD (session<TAB>index<TAB>cwd) ---"
         plan_cwds "$PLAN" | sort -u
       fi
+      # 🔴 THE FAILURE THE 2026-09-06 REBOOT ACTUALLY PRODUCED, and which every
+      # comparison in this file was blind to: the unit RAN, exited 0, sent 43
+      # `claude --resume` lines, and started NOTHING. Windows and ids were
+      # perfect, so an id-keyed verdict reads clean while the workspace is 54
+      # bare shells. The two numbers that separate those cases are the sends
+      # the unit logged and the panes actually running claude.
+      echo "sends_logged=$(journalctl --user -u "$UNIT" -b --no-pager 2>/dev/null \
+        | grep -c 'claude --resume' || true)"
+      if tmux has-session 2>/dev/null; then
+        echo "claude_panes_live=$(tmux list-panes -a -F '#{pane_current_command}' 2>/dev/null \
+          | grep -cx claude || true)"
+      else
+        echo "claude_panes_live=UNMEASURED reason=no-tmux-server-responding"
+      fi
       echo "--- JOURNAL ($UNIT, this boot) ---"
       journalctl --user -u "$UNIT" -b --no-pager 2>&1 || echo "(journal unavailable)"
       echo "--- RESTORE LOG (tail) ---"
@@ -563,6 +577,55 @@ verdict() {
 
   local rc=$RC_CLEAN
   if [ "${rc_incomplete:-0}" = 1 ]; then rc=$RC_INCONCLUSIVE; fi
+
+  # --- did the restore's OWN WORK land? ------------------------------------ #
+  # Windows coming back is continuum's job; resuming the conversations is this
+  # unit's. They fail independently, and on 2026-09-06 the second failed
+  # completely while the first was flawless.
+  local sends live
+  sends=$(get "$post" sends_logged)
+  live=$(get "$post" claude_panes_live)
+  if [ -n "$sends" ] && [ "$sends" != 0 ]; then
+    # 🔴 PREFIX match, not equality. The emitters write `key=UNMEASURED
+    # reason=...` (see the `claude_panes_live` reader above), and `get` returns
+    # everything after `key=`, so `[ "$live" = UNMEASURED ]` was NEVER true in
+    # production. MEASURED by reverting this line: it fell through to the `-lt`
+    # arm, an INTEGER comparison against a sentence. That does NOT abort — the
+    # shell prints `integer expected`, the test evaluates FALSE, and control
+    # lands in the `else`, which reports
+    #   resumes: UNMEASURED reason=... pane(s) running claude vs 43 send(s)
+    # and returns RC_CLEAN. So the one path whose whole job is to say "I do not
+    # know" instead returned a confident PASS.
+    case "$live" in
+      ''|UNMEASURED*)
+      echo
+      echo "⚠ the unit logged $sends resume(s) but the live claude-pane count is"
+      echo "   UNMEASURED, so whether any of them landed is UNKNOWN."
+      rc=$RC_INCONCLUSIVE
+      ;;
+      *)
+    if [ "$live" -lt "$sends" ]; then
+      echo
+      echo "🔴 THE RESUMES DID NOT LAND — the unit logged $sends send(s) and only"
+      echo "   $live pane(s) are running claude."
+      echo "   MEASURED 2026-09-06: 43 sent, 0 resumed, unit Result=success. The"
+      echo "   cause was NOT keystrokes discarded by an unready pane — that was"
+      echo "   the first diagnosis and the journal refuted it. The unit had"
+      echo "   STARTED ITS OWN tmux server (no other existed on a cold boot);"
+      echo "   the sends landed in it, then systemd tore down the unit's cgroup"
+      echo "   and took the server with it."
+      echo "   This is INDEPENDENT of the window comparison below: the windows"
+      echo "   can be perfect and the workspace still empty."
+      rc=$RC_RACE
+    else
+      echo "resumes: $live pane(s) running claude vs $sends send(s) logged"
+      echo "   ⚠ claude_panes_live is a WHOLE-HOST count: it includes panes you"
+      echo "      started by hand and panes the unit SKIPPED as already running,"
+      echo "      so it can exceed \$sends without every send having landed."
+    fi
+      ;;
+    esac
+  fi
   if [ -n "$extra" ]; then
     echo
     echo "🔴 RACE EVIDENCE — windows exist that the replayed layout does NOT contain"
