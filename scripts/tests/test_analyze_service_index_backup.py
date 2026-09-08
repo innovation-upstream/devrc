@@ -58,7 +58,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import backup as B  # noqa: E402
 from testlib.mockbin import write_exec  # noqa: E402
-from testlib import hermetic_git  # noqa: E402
+from testlib import hermetic_git, mockbin  # noqa: E402
 
 
 def _require(tool: str, why: str) -> str:
@@ -1157,7 +1157,19 @@ def test_a_valid_recipient_override_is_accepted(tmp_path, identity):
         os.environ.pop("ASIB_AGE_RECIPIENT", None)
 
 
-def test_resolve_recipient_NEVER_quotes_age_keygens_INPUT_ECHOING_stderr(tmp_path):
+# The v1.3.1 stderr, reproduced EXACTLY. Taken from a real run (`age-keygen -y`
+# on an identity with a leading space on the secret line) rather than
+# paraphrased, so a reader can diff it against the binary if they doubt it.
+_AGE_KEYGEN_V131_ECHO = (
+    'age-keygen: error: failed to parse input: error at line 3: '
+    'unknown identity type: "%s"\n'
+    'age-keygen: report unexpected or unhelpful errors at '
+    'https://filippo.io/age/report\n'
+)
+
+
+def test_resolve_recipient_NEVER_quotes_age_keygens_INPUT_ECHOING_stderr(
+        tmp_path, monkeypatch):
     """🔴 age-keygen's STDERR ECHOES THE LINE IT COULD NOT PARSE, and on a
     mangled identity that line is the SECRET KEY.
 
@@ -1172,6 +1184,37 @@ def test_resolve_recipient_NEVER_quotes_age_keygens_INPUT_ECHOING_stderr(tmp_pat
     putting `p.stderr` back into the `BackupError` — SURVIVED the entire suite,
     even though `escrow-verify.py`'s half of the same fix was covered.
 
+    🔴 THE LEAK NOW COMES FROM A STUB, NOT FROM THE INSTALLED BINARY (changed
+    2026-09-08). age-keygen v1.3.2 dropped the quoted line entirely — measured
+    over 17 manglings, 0 echo the secret and 0 echo ANY 12-byte run of the input,
+    against 6 of 17 on v1.3.1. That is an upstream FIX, and it silently made this
+    test's positive control impossible: the guard would have gone green while
+    proving nothing about our redaction.
+
+    THE UPSTREAM FIX, NAMED: age v1.3.2, commit `c45ccfd2` ("avoid echoing
+    private keys in errors", reported by Trail of Bits), released 2026-08-29.
+    ⚠ The `error at line N` prefix is NOT new — only the echo was removed.
+
+    🔴 THE RISK IS LIVE, NOT HISTORICAL — BUT THE REASON GIVEN HERE WAS FALSE
+    AND IS RETRACTED. It read "Both versions are installed on this host right
+    now (login shell v1.3.1, dev shell v1.3.2)". They are not. MEASURED
+    2026-09-08: non-interactive zsh, login zsh, login bash and the flake
+    devShell all resolve v1.3.2 on the workbench, and the laptop does too — no
+    shell on either host resolves v1.3.1. (v1.3.1 derivations remain in the
+    store; nothing puts one on a PATH.) A claim about which binary answers rots
+    the moment a pin moves, and this one did.
+
+    The real reason, which is stronger: **v1.3.2 did not close every echo
+    path.** MEASURED 2026-09-08 with a synthetic key — `age -r
+    "<AGE-SECRET-KEY-1…>"` still prints the whole key, because
+    `cmd/age/parse.go` keeps `unknown recipient type: %q`. A message that quoted
+    stderr would still print a key today, against the CURRENT pin.
+
+    A guard whose sensitivity depends on which binary answers is not a guard —
+    so the leak is supplied deterministically instead. `backup.py` invokes
+    `age-keygen` as a bare literal (see `age_public_key_bytes`), so PATH is the
+    whole injection surface and nothing in production changes.
+
     ⚠ CASE-INSENSITIVE, against the FIXTURE'S OWN secret: a case-sensitive check
     reads clean on the lowercased-prefix case while the whole key body is in the
     message.
@@ -1184,6 +1227,19 @@ def test_resolve_recipient_NEVER_quotes_age_keygens_INPUT_ECHOING_stderr(tmp_pat
               if ln.startswith("AGE-SECRET-KEY-")][0]
     body = secret.split("AGE-SECRET-KEY-", 1)[-1]
 
+    binx = tmp_path / "stubbin"
+    binx.mkdir()
+    # Echoes the OFFENDING LINE of whatever file it is handed, exactly as v1.3.1
+    # did — not hardcoded to this fixture, so it stays faithful if the fixture
+    # changes.
+    mockbin.write_exec(binx / "age-keygen", f"""
+line=$(sed -n '3p' "$2" 2>/dev/null)
+printf '{_AGE_KEYGEN_V131_ECHO}' "$line" >&2
+exit 1
+""")
+    monkeypatch.setenv("PATH", f"{binx}:{os.environ['PATH']}")
+    monkeypatch.delenv("ASIB_AGE_RECIPIENT", raising=False)
+
     for label, mangled in (
             ("a LEADING SPACE on the secret line",
              text.replace(secret, " " + secret)),
@@ -1195,14 +1251,14 @@ def test_resolve_recipient_NEVER_quotes_age_keygens_INPUT_ECHOING_stderr(tmp_pat
 
         # POSITIVE CONTROL: this input really does put the secret in stderr, so
         # the assertion below is about redaction and not about an empty stream.
-        probe = subprocess.run([AGE_KEYGEN, "-y", str(bad)], capture_output=True)
+        probe = subprocess.run(["age-keygen", "-y", str(bad)], capture_output=True)
         assert probe.returncode != 0, label
         assert secret.lower() in probe.stderr.decode("utf-8", "replace").lower(), (
-            f"{label}: age-keygen did not echo the secret, so this test cannot "
-            f"see a leak. Re-measure — the redaction it guards may now be "
-            f"untested rather than unnecessary.")
+            f"{label}: the STUB did not echo the secret, so this test cannot "
+            f"see a leak and the redaction assertion below is vacuous. Fix the "
+            f"stub — do NOT re-point this at the installed age-keygen, which "
+            f"stopped echoing at v1.3.2.")
 
-        os.environ.pop("ASIB_AGE_RECIPIENT", None)
         with pytest.raises(B.BackupError) as exc:
             B.resolve_recipient(bad)
         rendered = str(exc.value).lower()

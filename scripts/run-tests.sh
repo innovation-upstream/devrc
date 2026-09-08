@@ -1687,21 +1687,15 @@ TARGET_FLOORS=(
   # own count put through the gate's formula and printed BY the gate, not
   # arithmetic on the two sides. Pinned AFTER merging main into the branch, per
   # the ORDER note above.
-  # 2026-09-07, the `cairn-who` split: 12870 collected, so 12793 carried 77 of
-  # SLACK — the "three PRs landed without bumping it" drift the header calls
-  # out. 12870 - min(50, max(1, 12870/20)) = 12870 - 50 = 12820, the gate's own
-  # printed count put through the rule. Pinned AFTER rebasing onto origin/main
-  # (c5e425c7), per the ORDER note above — the count is from the rebased tree,
-  # not from either side alone.
-  # ⚠ WHAT THIS DOES NOT CLOSE, because an audit round read the sentence above
-  # as if it did: the ratchet removes the ACCUMULATED drift (77 -> 50), not the
-  # per-target slack, and 50 is what the rule deliberately leaves. This
-  # branch's own 20-test suite is still INSIDE that band, so deleting
-  # `test_cairn_split.py` wholesale would not redden this floor. That is the
-  # documented trade at line 1083, not a defect here — but the floor is not
-  # the thing standing between that file and silent deletion, and nothing in
-  # this entry should be read as claiming otherwise.
-  "scripts/tests|12820"
+  # 2026-09-08, MERGED: main's `cairn-who` split (12870) plus #1370's 54-test
+  # preflight harness. Neither side's number survives the merge — this one was
+  # re-derived by running the gate on the MERGED tree and putting its own
+  # printed count through `_suggested_floor`, per the note both sides carried.
+  # ⚠ Carried forward from main, because an audit round read it as closing more
+  # than it does: the ratchet removes ACCUMULATED drift, not the per-target
+  # slack, and ~50 is what the rule deliberately leaves. A suite inside that
+  # band is not protected from silent deletion by this floor.
+  "scripts/tests|12927"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -3962,6 +3956,34 @@ SHELL_TESTS=(
   # nothing. Watched red: mutating `APPLY=0` to `APPLY=1` fails it with
   # "the gate is bypassed".
   "scripts/tests/test_cleanup_disk_gate.sh"
+  # Registered in the SAME commit that adds it, for the reason the entries above
+  # exist. It covers `scripts/diagnose-disk-accounting.sh` — ROOT-PRIVILEGED
+  # bash that had no test file at all, in a repo with no shellcheck gate, which
+  # is precisely why a root COMMAND INJECTION (a planted /tmp directory name
+  # reaching `xargs -I{} sh -c`) and two silent whole-run aborts shipped
+  # invisibly. Nothing in it needs root: the script has a sourceable seam that
+  # returns before the root check, and the suite drives the pure transforms
+  # against fixtures — an lsof header in two different column layouts, a
+  # directory literally named `evil";echo PWNED-AS-$(id -un) >&2;"x`, and a
+  # ~17,500-entry tree sized from the live ARG_MAX. It reaches no launcher, no
+  # network and no git.
+  # 🔴 THIS COMMENT HAS NOW CARRIED A WRONG LINE COUNT TWICE, in the commit
+  # correcting the previous wrong one each time. It said "282 lines"; round 2
+  # replaced that with "282 at the merge base (567 after round 1, 730 after
+  # round 2)" — and 730 was false the moment it was typed (the file was 766).
+  # A count of a file that changes every round cannot be maintained in a comment
+  # in a different file, so none is stated here: run
+  # `wc -l scripts/diagnose-disk-accounting.sh`. The only figure that cannot go
+  # stale is anchored to a sha, and one is enough — the file entered this PR's
+  # history at 282 lines (`git show c1169e3b:scripts/diagnose-disk-accounting.sh
+  # | wc -l`) and has grown with each audit round since.
+  # The other half of the old stale claim: the seam was described as
+  # `BASH_SOURCE[0] != $0 returns before the root check`. That expression was
+  # MEASURED reachable from the environment, removed, and is now a banned
+  # pattern in the suite's own scanner — which only reads
+  # `diagnose-disk-accounting.sh`, so this copy survived it.
+  # Watched red: `s += $col` -> `s += $8` fails it with "SIZE/OFF found at col 7".
+  "scripts/tests/test_diagnose_disk_accounting.sh"
 )
 # 🔴 THE SHELL TESTS ARE IN THE TIMING CENSUS TOO, and the reason is the census's
 # own honesty: it is presented as an accounting of the run, so a population it

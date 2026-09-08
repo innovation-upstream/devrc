@@ -150,6 +150,67 @@ directions, on directory names any repo might have. `':!*_test.*'` is entirely s
 
 ---
 
+## 2026-09-08 · THE CALL ON A SHARED TEST LIBRARY — devrc `scripts/testlib/**`
+
+The classifier above says the unit is a JUDGEMENT and tells you to name each file. This section
+makes the standing call for the one directory that has been named both ways inside a single
+ladder, and gives the procedure that decides the next one.
+
+🔴 **THE CALL: `scripts/testlib/**` is SCAFFOLDING. It is PAYLOAD only when the PR's own stated
+deliverable is that module's behaviour — and the call is made ONCE, at round 1, written into the
+claims block, and does not move for the rest of the ladder.**
+
+**The procedure, because "read the list and name each one" needs a tie-breaker for a shared
+library — the REVERT TEST.** Ask: *if this file's diff were reverted, would the PR's stated
+deliverable still ship?* Yes ⇒ scaffolding. No ⇒ payload. It is the same question the gate turns
+on ("what does the PR exist to ship"), asked per file, and it survives the two shapes a pathspec
+gets wrong: a new 200-line helper written only so a new test can run is scaffolding however big
+and however reusable, and a scanner that IS the repo's content gate is payload however deep under
+`tests/` it sits.
+
+**The worked case, from devrc #1132** (*"the store HAS an off-machine backup — 15 places said it
+did not"*, 19 files). `scripts/testlib/nix_units.py` was **+225 new lines** — a nix parser created
+so `test_index_store_backup_claim.py` could assert something about `flake.nix`. Revert it and all
+15 corrected claims still ship; only the new test stops running. **Scaffolding.** That ratifies
+what the PR's own round-2 ledger said in as many words — *"63 payload lines, the rest scaffolding
+(`nix_units.py` +94, six test files)"* — and it is the reading a later round moved away from.
+
+**Why the DEFAULT falls this way, and it is an argument about which error is worse, not about
+what a testlib file "really is".** The documented failure mode of the ladder is that it does not
+terminate: #498 ran ten rounds with zero clean, devrc #958 twelve with zero clean, and in both the
+rounds after the last source change were spent auditing guards the ladder itself had written.
+Classifying shared test infrastructure as payload makes every one of those rounds read as *"the
+ladder is on the PR"* — the gate never fires, in exactly the regime it exists to detect. The
+opposite error costs a round the operator can still choose to run: the gate is a **signal to a
+human**, not an automatic merge, and the skill's own stop rule is a stated criterion, not this
+count alone. **A gate that cannot fire in its own target regime is worse than one that fires a
+round early.**
+
+**The named exception, so the rule is not read wider than it is.** `scripts/testlib/` holds two
+different kinds of thing. Fixtures and plugins (`mockbin.py`, `hermetic_git.py`, `runner_patch.py`,
+the `*_plugin.py` files) are apparatus, always scaffolding. The **scanners that ARE repo gates**
+(`captured_text_scan.py`, `public_ip_scan.py`, `client_host_scan.py`, `shebang_scan.py`) enforce
+policy that devrc's `CLAUDE.md` treats as load-bearing — for a PR whose stated deliverable is
+*"close this leak class"*, that scanner is the payload, and the revert test says so directly.
+
+🔴 **AND THE DEEPER FINDING, WHICH IS NOT ABOUT `testlib` AT ALL: #1132's ledger reported TWO
+DIFFERENTLY-NAMED NUMBERS AND THE STOP WAS TAKEN ON ONE OF THEM.** Verbatim from the PR's own
+comments — round 5: *"31 payload lines, **zero executable** (166 since round 1)"*; round 6: *"19
+payload lines (391 since round 1), **~4 executable**"*; and the closing summary: *"Stopped on the
+payload-attribution gate… Rounds 6 and 7 both changed zero payload lines."* Two units share one
+word. A ladder that prints both can be read as having stopped correctly *or* as having stopped
+with payload still moving, and nobody has to decide which — the classification never needs to
+flip for the gate to be disarmed. **One number, one name.** If a ladder wants an "executable
+payload" count, it is a SECOND, differently-named line, and the summary must say which one the
+stop was taken on.
+
+⚠ **Residual, stated rather than papered over:** the churn for #1132's rounds 6 and 7 was **not
+recomputed here**, so this section does not claim the stop was wrong. It claims the ledger cannot
+be checked as written — and note the documented off-by-one, that round N's ledger reports round
+N−1's range, which is exactly what makes reconciling those three sentences by eye unsafe.
+
+---
+
 ## 2026-08-26 · which range form counts a ROUND's payload — measured across four shapes
 
 The measurement behind the gate's command. Each shape is a throwaway repo (git 2.55.0); the numbers

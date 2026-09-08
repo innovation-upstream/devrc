@@ -9273,13 +9273,21 @@ def _known_mutant_ids():
 
     Imported, not restated: a ledger of mutant ids kept here by hand would go
     stale in exactly the direction that makes a false claim pass.
+
+    🔴 BOTH TABLES, AND THE SECOND ONE WAS ADDED WITH THIS SENTENCE. The
+    harness grew `TESTLIB_ROWS` — mutants of THIS module's own parsers, which
+    a killer-set expectation cannot discriminate — and reading `ROWS` alone
+    would have made every `T…` id "a mutant the harness does not carry", i.e.
+    a false RED on a row citing evidence that exists. `known_mutants` is a
+    membership set only, so widening it can never turn a passing row red.
     """
     spec = importlib.util.spec_from_file_location(
         "mutants_audit_dispatch", MUTANT_HARNESS
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return {label.split()[0] for label, _want, _mutate in mod.ROWS}
+    return {label.split()[0]
+            for label, _want, _mutate in (*mod.ROWS, *mod.TESTLIB_ROWS)}
 
 
 KNOWN_MUTANT_IDS = _known_mutant_ids()

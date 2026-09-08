@@ -209,11 +209,42 @@ def test_the_non_pytest_targets_are_covered_and_named():
     # such a mutant really deleted a file during the guard run. Corrected here
     # because a pinned entry's stated reason is the thing the pin rests on, and a
     # reader who believes the old wording stops looking.
+    # Fifth entry: `test_diagnose_disk_accounting.sh`, registered when it landed,
+    # like the third and fourth. It touches no launcher, no spool and no git: it
+    # sources `scripts/diagnose-disk-accounting.sh` (whose sourceable seam
+    # returns before the root check, so nothing is measured) and drives the pure
+    # transforms against fixtures under a mktemp dir — an lsof header in two
+    # column layouts, a planted directory name, and a large flat tree sized from
+    # the live ARG_MAX. The only binaries it reaches are find/du/stat/sort/awk/sh
+    # over that mktemp dir. (That list used to read "find/du/stat/sort/awk/sh",
+    # which was already short of mkdir/touch/chmod/tr/grep/sed/wc; what the
+    # entry actually rests on is the negative — nothing it reaches launches an
+    # agent, opens the network, or runs git.)
+    # 🔴 THIS SENTENCE HAS NOW BEEN WRONG TWICE, each time in the commit that
+    # corrected the previous version. It said "It does execute the script itself
+    # ONCE"; round 2 replaced that with a count that named "the four probe
+    # scripts" while the same commit added a FIFTH (`nodev-probe.sh`, joining
+    # `lsof-`, `sigpipe-`, `sigpipe-inode-` and `finderr-`). So no count is
+    # stated here any more, and no grep recipe is offered either: the obvious
+    # ones are wrong in opposite directions (`grep -c 'source "$SCRIPT"'`
+    # misses the `bash -c "source '$SCRIPT'"` spellings; `grep -c '"$BASH_BIN"'`
+    # counts probe scripts as if they were the script). Read the suite.
+    #
+    # What holds regardless of the numbers, and is the only thing this entry
+    # rests on: the suite reaches the script by two routes and NEITHER measures
+    # anything. It SOURCES it — directly, and once more inside each probe script
+    # it writes — which takes the seam's no-op branch. And it EXECUTES it on the
+    # non-root refusal path (the plain refusal check, the seam-reachability
+    # cases in §1b, and §2c's `bash -x` xtrace read), where every run exits 2 at
+    # the root check before the script opens a temp file or touches the
+    # filesystem. The suite now ABORTS if it is itself running as root, so the
+    # root check is always the branch the executing runs reach.
     assert shells == [
         "scripts/tests/test_release_wrapper.sh",
         "scripts/tests/test_resume_state.sh",
         "scripts/tests/test_base_clone_staleness.sh",
         "scripts/tests/test_cleanup_disk_gate.sh",
+        "scripts/tests/test_diagnose_disk_accounting.sh",
     ], shells
     for rel in hooks + shells:
         assert (REPO_ROOT / rel).is_file(), f"{rel} is listed but does not exist"

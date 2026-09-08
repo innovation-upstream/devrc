@@ -146,10 +146,11 @@ retained as DONE markers; do not re-claim them.
    forcing: none
 6. **DONE (2026-09-07) — the three 🟡s fixed, then a blind audit of the fix PR found 2 more,
    which were also fixed.** `#1342` → squash **`08ef1d5a`**, four-leg gate green on the merged
-   tree at base `3f8c81bb`. Claim `audit-pr-ladder-6` RELEASED. ⚠ One item deliberately left
-   open rather than chased — see "UNVERIFIED at merge" under Open investigations: whether
-   #1342's six new control assertions are reachable. The fix round before the merge changed
-   ZERO payload lines, so one more round would have fired the attribution gate.
+   tree at base `3f8c81bb`. Claim `audit-pr-ladder-6` RELEASED. ⚠ One item was deliberately left
+   open rather than chased — whether #1342's new control assertions are reachable. **That is
+   now CLOSED by rank 11 (2026-09-08): eight controls, not six, all reachable, none vacuous.**
+   The fix round before the merge changed ZERO payload lines, so one more round would have
+   fired the attribution gate.
    forcing: none
 7. **Decide the `scripts/testlib/**` payload-vs-scaffolding classification and write it into
    `claude/skills/audit-pr/reference/round-ladder-evidence.md`.** It is the whole of the #1132
@@ -171,11 +172,12 @@ retained as DONE markers; do not re-claim them.
     measurement additionally reports, per ladder, the churn between the first block's `from`
     and the head that no block's range covers.
     forcing: none
-11. **Verify #1342's six control assertions are reachable** (the item rank 6 left open).
-    Mutate each individually under `PYTHONDONTWRITEBYTECODE=1`; each must fail with its OWN
-    message, not a neighbour's; keep a known-caught mutant as positive control and report the
-    pair. *Closes when* all six are shown to fail for their own reason, or one is shown vacuous
-    and fixed.
+11. **DONE (2026-09-08) — #1342's control assertions are REACHABLE, and there are EIGHT of
+    them, not six.** Every one kills its own mutant and fails with its own message; nothing is
+    vacuous. Landed as `TESTLIB_ROWS` in `scripts/tests/mutants-audit-dispatch.py` so the claim
+    is re-derivable rather than believed. Claim `audit-pr-ladder-11` RELEASED. Closing condition
+    met — see "RESOLVED — #1342's controls" under Open investigations for the numbers and the
+    two harness controls.
     forcing: none
 12. **Ship #1316 and #1342 to both hosts and re-verify fleet parity.** Neither has been
     shipped; parity was last verified at `a4529101` on 2026-09-01 and is stale. *Closes when*
@@ -788,6 +790,36 @@ retained as DONE markers; do not re-claim them.
   "leave it alone", so the run is silent. **When an item closes, update the RANKED LIST in the
   same delta, not just the status header.**
 
+- 🔴 **A MUTATION BATTERY KEYED ON *WHICH TEST* FAILED IS BLIND TO EVERY CONTROL THAT SHARES A
+  TEST — and it reports that blindness as coverage.** `mutants-audit-dispatch.py` grades a row
+  by the SET OF TEST NAMES that must kill it, which is the right unit for a payload mutation and
+  the wrong one for #1342's eight parser controls: all eight live in the body of ONE test, so
+  eight rows would each report `killed by exactly 1: test_the_cached_build_fallback_…` and be
+  indistinguishable from one another *and* from any other assertion in that test firing. The
+  battery's own docstring already names this hazard ("a mutant can die to a DIFFERENT test's
+  error and be scored as covered while its own assertion is unreachable") — it just could not
+  express the finer unit. **Ask what unit your battery discriminates BEFORE reading its greens**:
+  a second table matching the failing assertion's own MESSAGE is what these needed.
+- 🔴 **A NEGATIVE CONTROL FOR THE HARNESS IS NOT THE SAME AS A POSITIVE CONTROL FOR THE MUTANTS,
+  AND ONLY THE FIRST TELLS YOU "ALL KILLED" MEANS ANYTHING.** Nine rows all reporting KILLED is
+  exactly what a battery wired to nothing prints if every mutation makes the module fail to
+  import. The row that made the other eight readable was one that had to SURVIVE: mutating a
+  `shell_code` branch no fixture reaches. It is `T9` in the committed table for that reason —
+  a control that is not committed is a control nobody re-runs.
+- 🔴 **THE MISCOUNT AGAIN, AND THIS TIME IN THE ITEM DESCRIBING WHAT TO VERIFY.** The ranked item
+  and the investigation block both said "six control assertions"; the block holds **5 `assert`
+  statements** carrying **8 distinct claims** (a 4-iteration loop is 4 controls, not one). Six
+  reconciles with neither reading. That is the fourth instance in this thread of a number this
+  effort produced and then re-quoted instead of re-deriving — and the first where the wrong
+  number was the *specification of the verification*, which means a session that verified
+  exactly six would have stopped two controls short and reported the item closed.
+- 🔴 **VERIFY A CONTROL BY MUTATING WHAT IT WATCHES, NEVER THE CONTROL ITSELF.** The item's own
+  "Next probe" said to *"mutate each of the six control assertions individually"*. Doing that
+  literally proves only that the assertion exists and that pytest runs the file — it cannot
+  distinguish a reachable control from one sitting behind an early `return`. The mutation has to
+  land on the PARSER, arranged so exactly one control's claim breaks and it is the FIRST to
+  fail; the control's own message is then the evidence.
+
 ## How to verify
 ```bash
 # --- rank 5's audit actually ran against the range the doc names ---
@@ -806,6 +838,17 @@ gh pr view 1316 --repo innovation-upstream/devrc --json mergedAt,mergeCommit
 
 # --- the claim is still held by this effort ---
 claim-work --list | grep audit-pr-ladder-5
+
+# --- rank 11: the eight controls, re-derived rather than believed ---
+# Expect the TESTLIB block to print 8 rows `killed by its OWN control` plus
+# `T9 ... SURVIVED as required (control)`. 🔴 If T9 says KILLED, the other eight
+# are uninterpretable — the battery is reacting to the edit, not the semantics.
+nix develop ~/workspace/devrc -c python3 \
+  ~/workspace/devrc/scripts/tests/mutants-audit-dispatch.py | sed -n '/^TESTLIB/,$p'
+
+# The count, re-derived from the file instead of quoted (expect 5 asserts / 8 claims:
+# 4 explicit + a 4-iteration loop). Read the block, do not grep a number out of prose.
+sed -n '2950,2970p' ~/workspace/devrc/scripts/tests/test_audit_dispatch.py
 ```
 ## Open investigations — live diagnosis state
 
@@ -1017,12 +1060,60 @@ claim-work --list | grep audit-pr-ladder-5
   moves `grep -c` back to the end and reinstates F4's inversion verbatim. via: assumed
 - **Next probe:** none — fix the comment and widen the assertion to require the verdict grep last.
 
-### UNVERIFIED at merge: are #1342's six new control assertions reachable?
-- **Symptom + exact repro:** #1342 added six control assertions pinning both overshoot
+### RESOLVED — #1342's controls are reachable, and there are EIGHT of them, not six
+🔴 **This block was EDITED IN PLACE, not appended to.** `Open investigations` is an append-only
+section under `handoff_doc.py`, and this doc already records that a correction appended to a
+different section leaves the original still making its claim ~140 lines above. The heading and
+the count below are corrections to text that was wrong; the original wording is quoted where it
+is load-bearing rather than left standing as a live claim.
+
+- **The count in the original entry was WRONG, and it is the shape this thread keeps finding.**
+  It read "six control assertions … plus the four separators", which reconciles with nothing:
+  the block is **5 `assert` statements** carrying **8 distinct control claims** (2 `shell_code`
+  overshoot directions + 2 `last_command` overshoot directions + a 4-iteration loop over the
+  separators `;`, `||`, `|`, `&&`). Re-derived by reading the block, not by re-quoting the
+  handoff — the same rule this doc already carries three times over.
+- **REACHABILITY, measured first, because it was the live risk.** The controls sit after an
+  early `return` in `test_the_cached_build_fallback_is_emitted_with_its_guards` (line ~3085:
+  the test bails when the brief fences no sandbox tier) **and** after a `len(blocks) == 1`
+  assert. Either would have made all eight vacuous while the suite stayed green. Measured at
+  `39c31521`: `run_main(["900"])` → rc 0, the precondition string IS present, and exactly
+  **one** `nix log` fenced block is emitted. So the block executes.
+- **OWN-REASON, measured per control.** Each of the eight was isolated by mutating the PARSER —
+  never the assertion, which would only prove the assertion exists — so that exactly one
+  control's claim breaks and it is the FIRST to fail. All eight: **KILLED, carrying their own
+  message.** The four separator iterations are discriminated by the sep token their message
+  names (`';'` / `'||'` / `'|'` / `'&&'`); `"reached by '|'"` is not a substring of
+  `"reached by '||'"`, checked, which is what makes those two rows different measurements.
+- 🔴 **BOTH HARNESS CONTROLS RUN, and the second is the one that makes the first readable.**
+  Positive: `shell_code` stubbed to `return ""` is KILLED (the batch's known-caught mutant, so
+  a stale `.pyc` scoring SURVIVED would show). Negative: mutating `shell_code`'s
+  backslash-inside-double-quotes branch — which no fixture and no line of the emitted block
+  reaches — **SURVIVED**, proving the harness can report SURVIVED at all. Run under
+  `PYTHONDONTWRITEBYTECODE=1` with `-p no:cacheprovider`, each mutation asserted to have landed
+  on disk before the run, and the file restored from a `cp -a` copy (never `git checkout --`,
+  per this doc's own incident).
+- 🔴 **A KILLER SET CANNOT SEE THESE, AND THAT IS A SEAM, NOT A DETAIL.**
+  `mutants-audit-dispatch.py` expects each row to name the TESTS that must kill it; all eight
+  controls live inside ONE test, so eight rows would report the same single name and read as
+  coverage while measuring one. They landed as a second table, `TESTLIB_ROWS`, which mutates
+  `scripts/tests/test_audit_dispatch.py` (not `audit-dispatch.py`) and matches the failing
+  assertion's own MESSAGE, failing a row when ANOTHER row's message appears.
+- **And the ledger that grades the fix matrix could not see them either** —
+  `_known_mutant_ids()` read `mod.ROWS` alone, so a future matrix row citing `T5` would have
+  been rejected as "a mutant the harness does not carry". Widened to both tables; it is a
+  membership set, so widening cannot turn a passing row red, and deleting `TESTLIB_ROWS` now
+  breaks the suite at import rather than silently.
+- **Ruled out:** that the mutants could be scored without executing — the negative control
+  above is what rules it out, not the `PYTHONDONTWRITEBYTECODE=1` flag on its own.
+
+### (historical) UNVERIFIED at merge: are #1342's new control assertions reachable?
+- **Symptom + exact repro:** #1342 added control assertions pinning both overshoot
   directions of the new `shell_code()` / `last_command()` parsers, plus the four separators the
   scanner must recognise. **Nobody checked they are REACHABLE and fail for their OWN reason.**
   The round-2 delta audit of #1342 was stopped by the operator after clearing items 1–3 and
-  before reaching this one.
+  before reaching this one. 🔴 **CLOSED — see the RESOLVED block directly above.** The original
+  wording said "six"; there are eight.
 - **Observed (with values):** items 5 and 6 WERE closed by hand against `origin/main`:
   FIX_MATRIX = **106 rows** read from the file, `MIN_FIX_MATRIX_ROWS = 101`, and the repo
   formula `106 − min(50, max(1, 106//20)) = 101` agrees. All four rows present (`r18/F1`,
