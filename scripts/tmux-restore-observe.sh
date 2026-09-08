@@ -131,7 +131,15 @@ emit_plan() {
     return
   fi
   echo "plan_file=$PLAN"
-  echo "plan_mtime=$(stat -c '%y' "$PLAN")"
+  # 🔴 `-L` (dereference) IS LOAD-BEARING, NOT TIDINESS. `$PLAN` is a symlink
+  # onto `restore-plans/restore-plan_<ts>.json` (tmux-session-restore.py
+  # `cmd_save`), and GNU `stat` uses **lstat** by default — MEASURED: on a
+  # symlink whose target was stamped 12:00:00, bare `stat -c '%y'` reported
+  # 22:41:47, the moment the LINK was repointed. Without `-L` this reports when
+  # the pointer moved rather than when the plan was written, which is a
+  # different fact wearing the same name. `[ -f ]` above needs no flag — `test`
+  # dereferences already.
+  echo "plan_mtime=$(stat -Lc '%y' "$PLAN")"
   # One writer: python emits the whole block or none of it, so a partial parse
   # cannot leave a value AND an UNMEASURED marker for the same key.
   local out
@@ -347,7 +355,12 @@ capture() {
         # restore legitimately adds. Printed so the reader can see it, and
         # subtracted below so it cannot masquerade as the race.
         if [ -f "$PLAN" ]; then
-          echo "plan_layout_skew_seconds=$((  $(stat -c '%Y' "$PLAN") - $(stat -c '%Y' "$replayed") ))"
+          # `-L` on the PLAN only: it is a symlink (see `emit_plan`), while
+          # `$replayed` is always a real `tmux_resurrect_*.txt` off the glob in
+          # `replayed_layout`. Without it the skew measures the moment the
+          # pointer was repointed against the layout's write time — two writers
+          # that are no longer the two this line claims to compare.
+          echo "plan_layout_skew_seconds=$((  $(stat -Lc '%Y' "$PLAN") - $(stat -c '%Y' "$replayed") ))"
         fi
       fi
       if [ -f "$PLAN" ]; then
