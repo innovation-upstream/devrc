@@ -32,15 +32,20 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   skipped entirely and the output says so. `--deep` runs both.
 - 🔴 **THE ARCHIVE LEG IS WINDOWED BY DEFAULT — the last 12 days.** A result set is a count
   UNDER A WINDOW, so **never report "no sessions matched" as a corpus-wide absence**: the run
-  prints its window on stderr (`ARCHIVE window: the last 12 days (since …) — DEFAULT`) with
-  the number of transcripts it skipped unopened, and `--json --live` carries the same facts as
-  `archive.window`. Pass **`--all-time`** for the whole corpus (~15 s warm, ~43 s cold) or `--since YYYY-MM-DD`
+  prints its window (`ARCHIVE window: the last 12 days (since …) — DEFAULT`) with the number of
+  transcripts it skipped unopened. 🔴 **The window follows the READER, so do not go looking on
+  one stream:** stdout when a human is reading (both the classic and the `--live` paths), stderr
+  under `--json` without `--live`, and inside the document as `archive.window` under
+  `--live --json`. ⚠ The printed count covers the **local Claude walk only** — the notice names
+  the other windowed legs (peer hosts, the opencode corpus) as uncounted, and they can be the
+  larger cut. Pass **`--all-time`** for the whole corpus (~15 s warm, ~43 s cold) or `--since YYYY-MM-DD`
   for a different one; naming both is a usage error. ⚠ **Under `--json` WITHOUT `--live` the
   window is on STDERR only** — that path emits the bare array every caller parses, so there is
   no machine-readable window there; `--live --json` carries `archive.window`. Measured 2026-09-08 `--claude-only`,
-  warm, back to back, quoting the walk's OWN skip counter: `--since 3d` 2.40 s / skipped 780
-  of 924, **`--since 12d` 7.35 s / skipped 467 of 924**, `--since 30d` 13.35 s / skipped
-  **0** of 924, `--all-time` 13.09 s. 🔴 **A 30-day default would be a NO-OP** — it skips
+  warm, back to back, quoting the walk's OWN skip counter — ⚠ **windows written as `Nd` here are
+  DURATIONS, not spellings: `--since` takes `YYYY-MM-DD` only and `--since 3d` exits 2** — a
+  3-day window 2.40 s / skipped 780 of 924, **a 12-day window (the default) 7.35 s / skipped 467
+  of 924**, a 30-day window 13.35 s / skipped **0** of 924, `--all-time` 13.09 s. 🔴 **A 30-day default would be a NO-OP** — it skips
   zero files, because nothing in this corpus is older than that; it would cap the answer and
   buy nothing. ⚠ The walked set is **924 session transcripts**, not the 5,954 `*.jsonl` a
   bare `find` reports — ~5,030 of those are `subagents/agent-*.jsonl`, excluded by name.

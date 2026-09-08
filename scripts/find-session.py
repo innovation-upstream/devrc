@@ -191,7 +191,7 @@ EXIT_CONTRACT = (
     # is really an exit 2"), never code -> sentence. Its own comment says so.
     # So the two errors THIS change added and one that predates it were absent
     # from the table an agent is told to branch on, and the suite stayed green.
-    # `test_every_EXIT_USAGE_site_is_a_cause_the_sentence_NAMES` closes the
+    # `test_every_EXIT_USAGE_SITE_is_a_cause_the_sentence_NAMES` closes the
     # other direction by TRACING each probe to the line it returns from.
     (EXIT_USAGE, "bad arguments: `--tail` without `--live`, `--tail` below 1, "
                  "`--limit` below 1, an unparseable `--since`, `--since` "
@@ -221,7 +221,7 @@ EXIT_CONTRACT = (
 # THE WINDOW, RESOLVED IN ONE PLACE AND DESCRIBED FROM THE SAME VALUE
 # --------------------------------------------------------------------------- #
 # 🔴 The cutoff and the sentence describing it are produced by ONE function, so
-# the printed window can never name a date the search did not use. That is the
+# the printed window can never name a cutoff the search did not use — DATE *and* time-of-day, via `window_stamp`. That is the
 # whole failure mode of a silent cap: not that the bound exists, but that the
 # output describes a wider search than the one that ran.
 WINDOW_DEFAULT = "default"        # nothing asked; DEFAULT_SINCE_DAYS applied
@@ -254,7 +254,49 @@ def resolve_window(a, now=None):
     return cutoff, WINDOW_DEFAULT
 
 
-def window_notice(since, source, skipped=None, examined=None):
+def window_stamp(since):
+    """The ONE spelling of a cutoff — human notice and JSON field alike.
+
+    🔴 FIXED IN TWO PLACES AND THEN ONLY ONE. A `--since` carrying a time
+    (`--since 2026-09-01T18:30:00`) parses, and the walk uses the whole
+    timestamp; both the notice and `archive.window.since` printed the bare
+    DATE, naming a window up to a day WIDER than the one that ran — the single
+    direction a disclosure must never err in. The previous round fixed the
+    human string and left the machine-readable field behind, so one object then
+    carried `since: "2026-09-01"` beside `message: "… since 2026-09-01
+    18:30:00"`: two fields of one window disagreeing, which is worse than the
+    bug it half-fixed. There is now one function and both call it.
+    """
+    if since is None:
+        return None
+    return (since.date().isoformat() if since.time() == time.min
+            else since.isoformat(sep=" "))
+
+
+def unmeasured_legs(a):
+    """The windowed legs the printed count does NOT cover — and only those.
+
+    🔴 A LEG THAT DID NOT RUN IS NOT AN UNCOUNTED LEG. The previous round
+    appended "the opencode corpus and the peer hosts were windowed too" to
+    every notice unconditionally, which is false exactly where it is loudest:
+    under `--opencode-only` the opencode corpus is the ONLY thing searched and
+    no peer is contacted, so the run told the operator that the corpus it just
+    searched was excluded from the run. Under `--claude-only` it asserted an
+    unreported cut in a corpus nobody opened. Derived from the same conditions
+    `archive_search` branches on, so the two cannot drift.
+    """
+    legs = []
+    if not a.opencode_only:
+        legs.append("the peer hosts")
+    if not a.claude_only and not a.opencode_only and not a.skill:
+        legs.append("the opencode corpus")
+    if a.opencode_only:
+        legs.append("the opencode corpus")
+    return tuple(legs)
+
+
+def window_notice(since, source, skipped=None, examined=None, legs=(),
+                  claude_leg_ran=True):
     """The line that stops a BOUNDED archive search reading as an exhaustive one.
 
     🔴 It states the cap AND its measured size. `skipped`/`examined` come from
@@ -271,14 +313,7 @@ def window_notice(since, source, skipped=None, examined=None):
                 f"{DEFAULT_SINCE_DAYS}-day default is NOT applied to --skill, "
                 "because 'has skill X ever been used' is a historical question "
                 "and adoption-scan reads this answer. Pass --since to narrow.")
-    # 🔴 A `--since` CARRYING A TIME WAS DISCLOSED AS A BARE DATE. `--since
-    # 2026-08-01T12:34:56` parses and the walk uses the full timestamp, but this
-    # printed "since 2026-08-01" — naming a WIDER window than ran, which is the
-    # one direction a disclosure must never err in. The comment above
-    # `resolve_window` claimed the printed window "can never name a date the
-    # search did not use"; that was true of the DATE and false of the WINDOW.
-    stamp = (since.date().isoformat() if since.time() == time.min
-             else since.isoformat(sep=" "))
+    stamp = window_stamp(since)
     if source == WINDOW_EXPLICIT:
         head = f"ARCHIVE window: since {stamp} (--since)."
     else:
@@ -304,15 +339,23 @@ def window_notice(since, source, skipped=None, examined=None):
     # separately, and naming what is excluded, is the same correction this
     # change already made once to the DENOMINATOR: a partial measurement
     # presented without its scope reads as the whole thing.
-    excluded = (" — the opencode corpus and the peer hosts were windowed too "
-                "and are NOT in this count")
-    if skipped is None:
-        return head + (" (Claude transcripts on THIS host skipped by the "
-                       "window: NOT MEASURED" + excluded + ")")
-    total = skipped + examined if examined is not None else None
-    return head + (f" (Claude transcripts on THIS host skipped unopened: "
-                   f"{skipped}" + (f" of {total}" if total is not None else "")
-                   + excluded + ")")
+    if not claude_leg_ran:
+        counted = "the Claude corpus was NOT SEARCHED on this run"
+    elif skipped is None:
+        counted = ("Claude transcripts on THIS host skipped by the window: "
+                   "NOT MEASURED")
+    else:
+        total = skipped + examined if examined is not None else None
+        counted = ("Claude transcripts on THIS host skipped unopened: "
+                   f"{skipped}" + (f" of {total}" if total is not None else ""))
+    if legs:
+        # 🔴 NO SUBJECT-VERB AGREEMENT TO GET WRONG. The first draft picked the
+        # verb from the NUMBER OF LEGS rather than the grammatical number of the
+        # phrase, and printed "the peer hosts was windowed too" whenever exactly
+        # one leg was excluded — a sentence that reads as a bug in the tool. A
+        # colon list agrees with nothing and cannot drift as legs are added.
+        counted += " — also windowed, and NOT in this count: " + ", ".join(legs)
+    return head + f" ({counted})"
 
 
 def _default_run(argv, timeout=LIVE_TIMEOUT_SECS):
@@ -422,7 +465,7 @@ def live_scan(terms=()):
             f"entr{'y' if len(bad) == 1 else 'ies'} "
             f"{', '.join(repr(k) for k in bad)} "
             f"{'is' if len(bad) == 1 else 'are'} not an object (got "
-            f"{type(hosts[bad[0]]).__name__})"))
+            + ", ".join(f"{k!r}={type(hosts[k]).__name__}" for k in bad) + ")"))
     out["hosts_reachable"] = sorted(k for k, v in hosts.items() if v.get("reachable"))
     out["hosts_unreachable"] = sorted(k for k, v in hosts.items()
                                       if not v.get("reachable"))
@@ -772,9 +815,10 @@ def build_parser():
                    help="search only opencode sessions (skip Claude Code)")
     p.add_argument("--json", action="store_true", help="emit JSON instead of human text")
     p.add_argument("--live", action="store_true",
-                   help="scan the LIVE cross-host tmux fleet FIRST (1.8s) and "
-                        "only fall back to the 30s transcript walk when nothing "
-                        "live matched. Matches task/label/codename — NOT path.")
+                   help="scan the LIVE cross-host tmux fleet FIRST (~1s) and "
+                        "only fall back to the much slower transcript walk "
+                        "when nothing live matched. Matches "
+                        "task/label/codename — NOT path.")
     p.add_argument("--deep", action="store_true",
                    help="with --live: run the transcript walk TOO, even when "
                         "live windows matched")
@@ -987,11 +1031,14 @@ def _tail_outcome(a, live):
     return None, EXIT_AMBIGUOUS, lines
 
 
-def _window_line(source, since):
-    """`window_notice` fed from the counters the walk that JUST ran published."""
+def _window_line(a, source, since):
+    """`window_notice` fed from the counters the walk that JUST ran published,
+    and from the legs that run under THESE flags."""
     return window_notice(since, source,
                          skipped=ARCHIVE_STATS.get("skipped_stale"),
-                         examined=ARCHIVE_STATS.get("sessions_examined"))
+                         examined=ARCHIVE_STATS.get("sessions_examined"),
+                         legs=unmeasured_legs(a),
+                         claude_leg_ran=not a.opencode_only)
 
 
 def main(argv=None):
@@ -1119,7 +1166,7 @@ def main(argv=None):
         # window on that path. Adding a key would change a shape callers parse;
         # `--live --json` carries `archive.window`. Said out loud in SKILL.md
         # rather than left for a consumer to discover.
-        print(_window_line(window_source, since),
+        print(_window_line(a, window_source, since),
               file=sys.stderr if a.json else sys.stdout)
         shown = results[: a.limit]
         if a.json:
@@ -1136,7 +1183,7 @@ def main(argv=None):
         return EXIT_OK
 
     # ------------------------------------------------------------------ #
-    # 🔴 LIVE FIRST. 1.8 s against the archive walk's 30.1 s, and the live rows
+    # 🔴 LIVE FIRST. 1.8 s against the archive walk's much larger cost, and the live rows
     # carry the fields the question is actually about.
     # ------------------------------------------------------------------ #
     live = live_scan(a.terms)
@@ -1237,13 +1284,13 @@ def main(argv=None):
                 # `skipped_stale` is null when nothing measured it — never 0.
                 "window": {
                     "source": window_source,
-                    "since": since.date().isoformat() if since else None,
+                    "since": window_stamp(since),
                     "default_days": DEFAULT_SINCE_DAYS,
                     "skipped_stale": (ARCHIVE_STATS.get("skipped_stale")
                                       if run_archive else None),
                     "sessions_examined": (ARCHIVE_STATS.get("sessions_examined")
                                           if run_archive else None),
-                    "message": _window_line(window_source, since),
+                    "message": _window_line(a, window_source, since),
                 },
                 # `live_state` is UNMEASURED, not CLOSED, when no live scan
                 # could supply the id set — OR when the scan that supplied it
@@ -1314,7 +1361,7 @@ def main(argv=None):
               f"search the {len(a.terms)}-term transcript walk too{hint}.")
     else:
         print(f"ARCHIVE ({len(results)} matched; ran because: {archive_reason})")
-        print("  " + _window_line(window_source, since))
+        print("  " + _window_line(a, window_source, since))
         if live_ids is None:
             print("  ⚠ live/closed state is UNMEASURED — the live scan did not "
                   "answer, so no hit below can be called CLOSED.")

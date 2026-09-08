@@ -54,6 +54,7 @@ real media path or third-party hostname may appear here.
 from __future__ import annotations
 
 import argparse
+import datetime
 import ast
 import importlib.machinery
 import importlib.util
@@ -1946,3 +1947,143 @@ def test_all_time_is_CLASSIFIED_and_gets_the_archive_only_notice(monkeypatch):
     assert "--all-time" in got["err"]
     assert "ARCHIVE-ONLY flags" in got["err"]
     assert "pass --deep to actually search the corpus you selected" not in got["err"]
+
+
+# =========================================================================== #
+# ROUND 5 — the fixes round 4's audit found SHIPPED WITH NO GUARD
+# =========================================================================== #
+# 🔴 A delta audit mutation-swept the previous round's nine fixes and found
+# FIVE that survived with the whole suite green: the scope clause, the `--since`
+# time stamp, the hoisted `ARCHIVE_STATS.clear()`, the conditional `--all-time`
+# hint and the `--live --deep` de-duplication. A fix nothing pins is a fix the
+# next refactor silently reverts — and the commit reported a mutation sweep for
+# ONE change without saying it covered only that one. These are those guards.
+
+def test_the_window_stamp_carries_a_TIME_when_the_cutoff_has_one():
+    """🔴 A cutoff with a time was disclosed as the bare DATE — a window up to a
+    day WIDER than the one that ran, the single direction a disclosure must not
+    err in. Both the human notice and `archive.window.since` go through
+    `window_stamp`, so they cannot disagree again."""
+    a = fs.parse_args(["zzterm", "--since", "2026-09-01T18:30:00"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert fs.window_stamp(since) == "2026-09-01 18:30:00"
+    assert fs.window_notice(since, source).startswith(
+        "ARCHIVE window: since 2026-09-01 18:30:00")
+
+
+def test_a_MIDNIGHT_cutoff_still_prints_as_a_bare_DATE():
+    """Boundary control: the time is added only when there IS one, or every
+    ordinary `--since 2026-09-01` grows a noisy ` 00:00:00`."""
+    a = fs.parse_args(["zzterm", "--since", "2026-09-01"])
+    since, _ = fs.resolve_window(a, now=NOW)
+    assert fs.window_stamp(since) == "2026-09-01"
+
+
+def test_the_window_stamp_is_the_SAME_FUNCTION_the_JSON_field_uses(monkeypatch):
+    """🔴 THE SEAM, not the two spellings. Round 4 fixed the human string and
+    left the JSON field on its own `.date()` call, so one object published
+    `since: "2026-09-01"` beside a message naming 18:30:00."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([])),
+                             (): (0, live_report([]))})
+    got = run_main(monkeypatch,
+                   ["zzterm", "--live", "--json", "--since", "2026-09-01T18:30:00"],
+                   run, archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    win = json.loads(got["out"])["archive"]["window"]
+    assert win["since"] == "2026-09-01 18:30:00", win
+    assert win["since"] in win["message"], (
+        "the field and the sentence describe different windows in one object")
+
+
+@pytest.mark.parametrize("argv,expect_absent", [
+    (["zzterm"], ()),
+    (["zzterm", "--claude-only"], ("the opencode corpus",)),
+    (["zzterm", "--opencode-only"], ("the peer hosts",)),
+], ids=["default", "claude-only", "opencode-only"])
+def test_the_scope_clause_names_only_legs_that_actually_RAN(argv, expect_absent):
+    """🔴 A LEG THAT DID NOT RUN IS NOT AN UNCOUNTED LEG. The flat sentence told
+    an `--opencode-only` caller that the opencode corpus was excluded from the
+    run that searched nothing else, and told a `--claude-only` caller about an
+    unreported cut in a corpus nobody opened."""
+    a = fs.parse_args(argv)
+    a.skill = ""
+    legs = fs.unmeasured_legs(a)
+    line = fs.window_notice(datetime.datetime(2026, 8, 27), fs.WINDOW_DEFAULT,
+                            skipped=5, examined=5, legs=legs,
+                            claude_leg_ran=not a.opencode_only)
+    for phrase in expect_absent:
+        assert phrase not in line, (
+            f"{argv} names {phrase!r}, which this run never searched: {line!r}")
+    if a.opencode_only:
+        assert "NOT SEARCHED" in line, (
+            "under --opencode-only the Claude count is not merely unmeasured — "
+            f"that corpus was never opened: {line!r}")
+
+
+def test_the_scope_clause_has_NO_subject_verb_to_get_WRONG():
+    """Boundary control on the fix's own first draft, which picked the verb from
+    the NUMBER OF LEGS and printed 'the peer hosts was windowed too'."""
+    one = fs.window_notice(datetime.datetime(2026, 8, 27), fs.WINDOW_DEFAULT,
+                           skipped=1, examined=1, legs=("the peer hosts",))
+    assert "hosts was" not in one and "hosts is" not in one, one
+
+
+def test_ARCHIVE_STATS_is_reset_even_when_the_ARCHIVE_NEVER_RAN(monkeypatch):
+    """🔴 The reset sat inside `if run_archive:`, so a stale count from a prior
+    call could publish beside `archive.ran: false`. Two `main()` calls in one
+    process is the only way to see it."""
+    # 🔴 ASSERT THE STATE, NOT A DIGIT. The first draft of this test asserted
+    # `"7" not in message` and failed against CORRECT code, because the notice
+    # names a cutoff date — `2026-08-27` contains a 7. A guard spelled as a
+    # character search is satisfied, or defeated, by text that has nothing to do
+    # with the hazard; `claude/RULES.md` calls this the spelled-guard trap, and
+    # this is its second sighting inside this one change.
+    fs.ARCHIVE_STATS.update({"skipped_stale": 7, "sessions_examined": 3})
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json"], run)
+    win = json.loads(got["out"])["archive"]["window"]
+    assert "NOT MEASURED" in (win["message"] or ""), (
+        "a run whose archive never executed published a measured-looking "
+        f"count from a PREVIOUS call: {win['message']!r}")
+    assert "skipped unopened" not in (win["message"] or ""), win["message"]
+    assert win["skipped_stale"] is None and win["sessions_examined"] is None
+    assert json.loads(got["out"])["archive"]["ran"] is False
+
+
+def test_the_all_time_HINT_is_not_offered_to_someone_who_PASSED_it(monkeypatch):
+    """Telling a caller to add the flag they already passed, on a run where it
+    did nothing, is the noise that trains a reader to skip the line."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--all-time"], run)
+    skipped = [l for l in got["out"].splitlines() if l.startswith("ARCHIVE: skipped")]
+    assert skipped, got["out"]
+    assert "add --all-time" not in skipped[0], skipped[0]
+    assert "all-time" in skipped[0], (
+        f"it should still say WHICH window was in force: {skipped[0]!r}")
+
+
+def test_the_window_is_announced_ONCE_under_deep_not_once_per_STREAM(monkeypatch):
+    """🔴 `--live --deep` printed it to stderr AND stdout. A disclosure repeated
+    per stream reads as two different windows to anyone merging the two."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([])),
+                             (): (0, live_report([]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--deep"], run,
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    total = got["out"].count("ARCHIVE window:") + got["err"].count("ARCHIVE window:")
+    assert total == 1, (
+        f"the window was announced {total} times across the two streams; "
+        f"stdout={got['out'].count('ARCHIVE window:')} "
+        f"stderr={got['err'].count('ARCHIVE window:')}")
+
+
+def test_a_MULTI_BAD_hosts_report_names_EVERY_offenders_type():
+    """🔴 The wrong-operand class, one shape over: the message named only the
+    alphabetically-first offender's type, so it was wrong about the others."""
+    body = '{"hosts": {"wb": "up", "lt": []}}'
+    saved, fs.RUN = fs.RUN, (lambda argv, timeout=None: (0, body, ""))
+    try:
+        res = fs.live_scan(("zzterm",))
+    finally:
+        fs.RUN = saved
+    err = res["error"] or ""
+    assert "'lt'=list" in err and "'wb'=str" in err, (
+        f"the error must name each offender's own type; got {err!r}")

@@ -577,19 +577,71 @@ def test_the_bare_literal_scan_CAN_fire():
     assert found, "the offender shape this scan looks for is unmatchable"
 
 
-def _exit_usage_return_lines(tree):
-    """Every `return EXIT_USAGE` line lexically inside `main`.
+# 🔴 HOW MANY WAYS THE MODULE CAN PRODUCE EXIT 2, PINNED. The site COLLECTOR
+# below closes two measured bypasses; it cannot close the third, which is
+# subtler: add a new site and file its argv under an EXISTING cause, and the
+# traced union covers the new line while the sentence never names the new
+# reason. Nothing structural distinguishes that from a cause legitimately
+# spanning two sites — the "names nothing" cause really does span two. So the
+# COUNT is ratcheted instead: a tenth site cannot appear without someone
+# editing this number, and the failure message tells them what to do. A
+# tripwire, not a proof, and labelled as one so nobody reads it as more.
+EXIT_USAGE_SITE_COUNT = 9
 
-    By NAME only: `test_no_exit_path_uses_a_BARE_LITERAL_instead_of_the_constant`
-    already forbids the literal spelling, so a bare `return 2` cannot hide here
-    without failing that gate first.
+
+def _exit_usage_sites(tree):
+    """Every line in the MODULE that can hand `EXIT_USAGE` back to the shell.
+
+    🔴 THREE SPELLINGS, because a delta audit walked through two of them with
+    the whole suite green (the third is covered by `EXIT_USAGE_SITE_COUNT`):
+
+      * `return EXIT_USAGE` inside `main` — the only shape the first draft saw;
+      * `sys.exit(EXIT_USAGE)` ANYWHERE — measured reachable on a mutant
+        (`--limit 5000` exiting 2 with the cause named nowhere). It also slips
+        `test_no_exit_path_uses_a_BARE_LITERAL_instead_of_the_constant`, which
+        matches `ast.Constant` only, and `find-session.py` documents that one
+        site USED to be spelled `sys.exit(2)` — so this is a live path, not a
+        hypothetical one;
+      * `return EXIT_USAGE` in a module-level HELPER that `main` returns
+        through — lexical scoping to `main` made it invisible.
+
+    Scanning the whole module rather than one function is what makes the last
+    two impossible to reintroduce, and costs nothing: the contract table itself
+    holds no return statements.
     """
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "main")
-    return {n.lineno for n in ast.walk(fn)
-            if isinstance(n, ast.Return)
-            and isinstance(n.value, ast.Name)
-            and n.value.id == "EXIT_USAGE"}
+    sites = set()
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Return) and isinstance(n.value, ast.Name)
+                and n.value.id == "EXIT_USAGE"):
+            sites.add(n.lineno)
+        elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "exit"
+                and getattr(n.func.value, "id", "") == "sys"
+                and any(isinstance(x, ast.Name) and x.id == "EXIT_USAGE"
+                        for x in n.args)):
+            sites.add(n.lineno)
+    return sites
+
+
+def _exit_usage_return_lines(tree):
+    """Kept as the name the round-1 gate used; now module-wide (see above)."""
+    return _exit_usage_sites(tree)
+
+
+def test_the_EXIT_USAGE_SITE_COUNT_ratchet_is_current():
+    """🔴 THE THIRD BYPASS, and the only lever that closes it. A new usage
+    error whose argv is filed under an EXISTING cause leaves the traced union
+    complete and the sentence silent. Adding a site must therefore cost a
+    deliberate edit here.
+    """
+    got = len(_exit_usage_sites(ast.parse(inspect.getsource(fs))))
+    assert got == EXIT_USAGE_SITE_COUNT, (
+        f"`main` can now exit {fs.EXIT_USAGE} in {got} places, not "
+        f"{EXIT_USAGE_SITE_COUNT}. If you ADDED a usage error: give it its OWN "
+        "cause in `EXIT_CONTRACT` and `EXIT_2_CAUSES` (do NOT append its argv "
+        "to an existing cause — the traced gate cannot tell the difference, "
+        "which is why this counter exists), add it to the shipped doc, then "
+        "update this number. If you REMOVED one, drop its cause too.")
 
 
 def _traced_exit_usage_line(argv):
