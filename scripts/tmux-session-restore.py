@@ -31,13 +31,18 @@ Usage:
 
 Restore flags:
   --dry-run / -n          show what would happen without sending keys
-  --plan PATH             use a custom plan file instead of the default
+  --plan PATH             use a custom plan file instead of the default. THIS IS
+                          THE RECOVERY PATH: point it at any file in
+                          ~/.config/initiatives/restore-plans/ to resume from an
+                          older generation after a bad save. `save` prints the
+                          exact command whenever a save drops bound session ids.
   --staleness-check [H]   refuse to restore unless the plan is BOTH in step with
                           the saved layout AND produced within H hours of running
                           time (default: 2h). NOT wall-clock age — powered-off
                           time does not count. See `plan_staleness_hours`.
 
-State: ~/.config/initiatives/restore-plan.json  (+ restore-cheatsheet.md)
+State: ~/.config/initiatives/restore-plan.json  (+ restore-cheatsheet.md), each a
+symlink onto the newest file in restore-plans/ — see `cmd_save`.
 Scratchpad codenames come from the canonical scripts/tmux-scratch-slots.sh.
 """
 from __future__ import annotations
@@ -56,6 +61,49 @@ from pathlib import Path
 STATE_DIR = Path(os.path.expanduser("~/.config/initiatives"))
 PLAN = STATE_DIR / "restore-plan.json"
 CHEAT = STATE_DIR / "restore-cheatsheet.md"
+# Where the immutable per-save generations live, and how many are kept.
+#
+# 🔴 THE NAME IS A CONSTANT; THE DIRECTORY IS DERIVED FROM `PLAN.parent`, NOT
+# FROM `STATE_DIR`, and never bound at import time. Two reasons, both measured
+# rather than stylistic:
+#   * the generations dir MUST sit beside the pointer, because the pointer is a
+#     RELATIVE symlink into it. A module-level `STATE_DIR / …` would keep
+#     pointing at the real `~/.config/initiatives` in any test that repoints
+#     only `PLAN`, and that test would then write into the operator's LIVE
+#     recovery state — the exact thing this change exists to protect.
+#   * one derivation means the two can never disagree.
+GENERATIONS_DIRNAME = "restore-plans"
+# 🔴 RETENTION IS A COUNT, NOT AN AGE, and 192 is 48h at continuum's 15-minute
+# save interval (`nix/programs/tmux/default.nix` -> `tmux-post-save.sh`).
+#
+# WHY A COUNT. The writer is hook-driven, so an age bound gives NO bound on disk
+# at all — turn the save interval down and an "keep 48h" rule keeps unboundedly
+# many files. A count bounds disk deterministically whatever the cadence does.
+# The price is that the SPAN is cadence-dependent, and that is stated rather
+# than hidden: at 15 min it is 48h, at 1 min it is 3.2h, and on a host where
+# tmux is rarely up it is weeks.
+#
+# WHY 48h AND NOT LESS. The recovery window has to outlast the interval between
+# a bad save and a human NOTICING it. The 2026-09-06 incident was noticed in
+# ~20 minutes; a crash at 22:00 noticed the following evening is ~20h, and a
+# Friday-night crash noticed Sunday is ~40h. 48h covers the realistic worst case
+# with headroom, and the failure mode of being too small is total loss of the
+# thing this file exists to preserve.
+#
+# WHY NOT MORE. Disk. MEASURED 2026-09-07 on the live 10-entry plan: 3,820 B of
+# JSON + 3,267 B of cheat-sheet = 382/327 B per entry. Extrapolated to the
+# 47-entry workspace of the incident that is ~18 KB + ~15 KB = ~33 KB per
+# generation, so 192 generations is ~6.3 MB. Ten times the retention would still
+# be small, but 48h is where the RECOVERY argument stops paying for itself: a
+# plan older than the last two days describes a workspace the operator no longer
+# wants back.
+KEEP_GENERATIONS = 192
+# `restore-plan_20260907T221535.json` — resurrect's own stamp format, so the two
+# sets of generations sort and read alike. Lexicographic order IS chronological
+# order for this format, which is what lets pruning sort on the NAME rather than
+# on an mtime any `cp`/`rsync` could rewrite.
+_GEN_STAMP_FMT = "%Y%m%dT%H%M%S"
+_GEN_PLAN_RE = re.compile(r"^restore-plan_(\d{8}T\d{6})\.json$")
 # The layout `restore` is racing: resurrect's newest state file, via its `last`
 # symlink. `plan_staleness_hours` measures the plan against THIS rather than
 # against the wall clock — see that docstring for why.
@@ -433,19 +481,288 @@ def cheat_sheet(plan: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def generations_dir() -> Path:
+    """The directory holding the immutable per-save generations.
+
+    Derived from `PLAN.parent` on every call — see `GENERATIONS_DIRNAME`.
+    """
+    return PLAN.parent / GENERATIONS_DIRNAME
+
+
+def generation_stamp(when: float | None = None) -> str:
+    """`20260907T221535` for a POSIX timestamp (now, if none)."""
+    return time.strftime(_GEN_STAMP_FMT,
+                         time.localtime(time.time() if when is None else when))
+
+
+def generation_paths(stamp: str) -> tuple[Path, Path]:
+    """(plan, cheat-sheet) paths for one generation stamp."""
+    d = generations_dir()
+    return (d / f"restore-plan_{stamp}.json",
+            d / f"restore-cheatsheet_{stamp}.md")
+
+
+def free_generation_stamp(when: float | None = None, limit: int = 60) -> str:
+    """A stamp that is FREE and STRICTLY NEWER than every generation present.
+
+    🔴 THE STAMP HAS ONE-SECOND RESOLUTION AND THE INCIDENT WAS A SAME-SECOND
+    WRITE. Two saves inside one second — a manual `save` racing the 15-minute
+    continuum hook — would otherwise land on the SAME stamp, and the second
+    would overwrite the first: the mutable-file defect, reintroduced inside the
+    mechanism built to remove it, and worse than the original because the shrink
+    report would then name a "previous generation" that is the file just
+    clobbered.
+
+    🔴 FREE IS NOT ENOUGH — IT MUST ALSO BE THE NEWEST, AND THAT IS A MEASURED
+    BUG, NOT A HYPOTHETICAL. A first draft returned the first UNOCCUPIED stamp,
+    and `test_pruning_keeps_exactly_the_newest_generations` went red: pruning
+    had just freed the oldest slot, this function handed that freed slot back,
+    the fresh generation therefore sorted OLDEST, `prune_generations` selected
+    it as doomed and `protect` (rightly) refused — so the run reported `4 kept
+    (max 3), 0 pruned` and the retention cap silently stopped being enforced.
+    Any backwards clock step reproduces it without the same-second race. A
+    strictly-increasing name is the invariant `list_generations`'s name-sort and
+    all of pruning rest on, so it is established HERE rather than repaired
+    downstream.
+
+    Cost of stepping forward: the generation is misdated by at most `limit`
+    seconds. Past `limit` the caller gets the last candidate and one save
+    overwrites another — a bounded, visible loss, versus a save loop that never
+    returns.
+    """
+    base = time.time() if when is None else when
+    present = list_generations()
+    newest = present[-1] if present else ""
+    # 🔴 ANCHOR ON THE NEWEST GENERATION, DO NOT STEP TOWARDS IT. Stepping alone
+    # covers a base that is a few seconds behind and NOTHING else: a clock five
+    # months behind (a battery-flat RTC, a restored backup, a container without
+    # NTP) exhausts `limit` and falls through still older than the newest
+    # generation. Measured — `test_a_new_stamp_is_never_older_than_an_existing_
+    # generation` caught exactly that with a step-only implementation. Jumping
+    # the base past `newest` makes the invariant independent of how far behind
+    # the clock is; the loop below then only has to resolve occupancy.
+    if newest:
+        try:
+            base = max(base, time.mktime(time.strptime(newest, _GEN_STAMP_FMT)) + 1)
+        except ValueError:
+            # An unparseable name cannot have come from `generation_stamp`, and
+            # `_GEN_PLAN_RE` already rejects the wrong SHAPE — so this is a
+            # well-shaped impossible date. Leave the base alone and let the
+            # step loop do what it can rather than crash the save.
+            pass
+    stamp = generation_stamp(base)
+    for i in range(1, limit + 1):
+        if stamp > newest and not generation_paths(stamp)[0].exists():
+            return stamp
+        stamp = generation_stamp(base + i)
+    return stamp
+
+
+def list_generations() -> list[str]:
+    """Every generation stamp present, OLDEST FIRST.
+
+    Sorted on the NAME, which for `_GEN_STAMP_FMT` is chronological — an mtime
+    sort would reorder the whole set after any `cp`/`rsync` that did not
+    preserve stamps, and pruning would then delete the wrong end.
+
+    Keyed on the PLAN file only. A cheat-sheet with no plan beside it is not a
+    generation you can restore from, so it is not counted as one; `prune_
+    generations` still unlinks it when its stamp is pruned.
+    """
+    try:
+        names = os.listdir(generations_dir())
+    except OSError:
+        return []
+    return sorted(m.group(1) for m in
+                  (_GEN_PLAN_RE.match(n) for n in names) if m)
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write `text` to `path` via a temp file + rename.
+
+    🔴 `write_text` TRUNCATES FIRST. A save killed between the truncate and the
+    write leaves a zero-byte plan — a second, smaller shape of the same
+    data-loss defect this file's generations exist to close, and one that would
+    otherwise apply to every generation as it is created. `os.replace` is atomic
+    within a directory, so a reader sees either the old file or the whole new
+    one, never a half.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def _point_at(link: Path, target: Path) -> None:
+    """Atomically make `link` a RELATIVE symlink to `target`.
+
+    Relative so the whole state dir can be copied or moved as a unit.
+
+    `os.replace` onto the link path is what makes this survive interruption AND
+    what performs the one-time migration: the destination may be a symlink (the
+    ordinary case) or a REGULAR FILE (a host that last saved with the
+    pre-generations writer), and rename replaces either without a window in
+    which the pointer is missing.
+    """
+    tmp = link.with_name(link.name + ".new")
+    if os.path.lexists(tmp):        # lexists: a DANGLING leftover link is still there
+        os.unlink(tmp)
+    os.symlink(os.path.relpath(target, link.parent), tmp)
+    os.replace(tmp, link)
+
+
+def adopt_pre_generation_files() -> Path | None:
+    """Preserve a REGULAR-FILE plan/cheat-sheet as a generation. Returns its plan path.
+
+    🔴 THE DEPLOY OF THIS CHANGE MUST NOT ITSELF BE THE BAD SAVE. On a host that
+    has been running the old writer, `restore-plan.json` is a real file holding
+    the last plan — possibly the only good one. The first `cmd_save` under the
+    new writer would repoint that path at a fresh generation and unlink the old
+    inode, losing exactly what generations exist to keep. So copy it in first,
+    stamped from its OWN mtime so it sorts into place chronologically.
+
+    A no-op once the pointer is a symlink, so it is safe to call every save.
+    """
+    if os.path.islink(PLAN) or not PLAN.exists():
+        return None
+    generations_dir().mkdir(parents=True, exist_ok=True)
+    stamp = free_generation_stamp(PLAN.stat().st_mtime)
+    gplan, gcheat = generation_paths(stamp)
+    _write_atomic(gplan, PLAN.read_text())
+    # The cheat-sheet is the SAME defect with the same writer — carry it too, but
+    # only if it is likewise a real file, and never invent one from a plan whose
+    # cheat-sheet is already gone.
+    if not os.path.islink(CHEAT) and CHEAT.exists():
+        _write_atomic(gcheat, CHEAT.read_text())
+    return gplan
+
+
+def prune_generations(keep: int | None = None,
+                      protect: tuple[str, ...] = ()) -> list[str]:
+    """Delete all but the newest `keep` generations. Returns the stamps removed.
+
+    🔴 `protect` NAMES THE GENERATION THE POINTER IS ON. Pruning is the only
+    code here that deletes, so it is the only code that can recreate the defect:
+    a `keep` of 0, a clock that jumped backwards so the new stamp sorts oldest,
+    or a future caller reordering the write and the prune would each unlink the
+    file `restore-plan.json` points at, leaving a DANGLING pointer and no
+    current plan. Refusing to delete a protected stamp makes that unreachable
+    regardless of how the ordering argument is disturbed.
+    """
+    keep = KEEP_GENERATIONS if keep is None else keep
+    stamps = list_generations()
+    doomed = stamps[:max(0, len(stamps) - keep)]
+    removed = []
+    for stamp in doomed:
+        if stamp in protect:
+            continue
+        for p in generation_paths(stamp):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        removed.append(stamp)
+    return removed
+
+
+def read_plan(path: Path) -> list[dict] | None:
+    """A saved plan as a list, or None if it is absent / unreadable / not a list.
+
+    Used to compare a new save against the one it replaces. Every failure is one
+    answer — "there is nothing to compare against" — because the comparison is
+    advisory: an unreadable previous plan must never stop the new one being
+    written.
+    """
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+def bound_ids(plan: list[dict]) -> set[str]:
+    """The session ids a plan can actually resume — empty ids are not bindings."""
+    return {e.get("session_id") for e in plan if e.get("session_id")}
+
+
 def cmd_save() -> int:
+    """Write a NEW generation and repoint `restore-plan.json` at it.
+
+    🔴 THIS IS THE FIX FOR THE MEASURED LOSS OF 2026-09-06. The old writer
+    overwrote one mutable file in place:
+
+        21:47:17  a good plan — 47 entries, 46 carrying a bound session id
+        21:54:21  the tmux server died, taking 47 claude conversations
+        22:09:40  a continuum autosave fired on the DEGRADED post-crash
+                  workspace and this function overwrote the plan with 10
+                  entries. The cheat-sheet went in the same second.
+                  NO BACKUP EXISTED.
+
+    The conversations were recovered only because tmux-resurrect keeps its saves
+    TIMESTAMPED and each pane line happens to carry a full `claude --resume
+    <id>`. THAT ASYMMETRY WAS THE BUG: a bad save cost the layout nothing and
+    the bindings everything. This mirrors resurrect — an immutable, timestamped
+    generation per save plus a pointer at the path every reader already knows.
+
+    🔴 WHAT THIS DELIBERATELY DOES **NOT** DO: refuse a shrinking save. The
+    operator closing windows, or genuinely working in fewer, is ordinary use, so
+    a guard that refused on a falling entry count would fire on ordinary use and
+    train everyone to bypass it. The degraded save of 22:09:40 is written here
+    too — it is simply no longer the only copy. What the shrink gets is a
+    WARNING naming the previous generation and the exact command to restore from
+    it, which is the thing the operator had to reconstruct by hand.
+    """
     plan = build_plan()
     if not plan:
+        # An empty plan was already never written, and that stays: a save with
+        # no live panes must not become a generation, or a single tmux-less
+        # moment would push the real ones toward the retention cliff.
         print("no live claude panes found — nothing to snapshot", file=sys.stderr)
         return 1
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    PLAN.write_text(json.dumps(plan, indent=2))
-    CHEAT.write_text(cheat_sheet(plan))
+    generations_dir().mkdir(parents=True, exist_ok=True)
+
+    # Read BOTH facts about the outgoing plan before anything moves.
+    previous = read_plan(PLAN)
+    previous_gen = Path(os.path.realpath(PLAN)) if PLAN.exists() else None
+    adopted = adopt_pre_generation_files()
+    if adopted is not None:
+        # `realpath` of a regular file is the file itself, and that inode is
+        # about to be replaced by the pointer — name the copy instead.
+        previous_gen = adopted
+
+    stamp = free_generation_stamp()
+    gplan, gcheat = generation_paths(stamp)
+    _write_atomic(gplan, json.dumps(plan, indent=2))
+    _write_atomic(gcheat, cheat_sheet(plan))
+    _point_at(PLAN, gplan)
+    _point_at(CHEAT, gcheat)
+    pruned = prune_generations(protect=(stamp,))
+
     n_ledger = sum(1 for e in plan if e.get("bind_source") == "ledger")
     n_fuzzy = sum(1 for e in plan if e.get("bind_source") == "fuzzy")
-    print(f"saved {len(plan)} windows → {PLAN}")
+    print(f"saved {len(plan)} windows → {gplan}")
+    print(f"current → {PLAN} (→ {gplan.name})")
+    print(f"generations: {len(list_generations())} kept "
+          f"(max {KEEP_GENERATIONS}), {len(pruned)} pruned")
     print(f"bound: {n_ledger} ledger, {n_fuzzy} pane-content, "
           f"{len(plan) - n_ledger - n_fuzzy} unbound (picker at restore)")
+    # 🔴 THE SHRINK REPORT — A WARNING, NEVER A REFUSAL. The plan is already
+    # written by the time this runs, on purpose; see this function's docstring
+    # for why refusing a shrink is the wrong shape. Keyed on BOUND SESSION IDS
+    # rather than on the entry count, because ids are the payload a bad save
+    # actually costs you: a save that drops five UNBOUND windows lost nothing
+    # resumable and must stay quiet, or the line becomes noise and stops being
+    # read. The recovery command is spelled out because reconstructing it by
+    # hand under pressure is exactly what the 2026-09-06 incident cost.
+    dropped = bound_ids(previous or []) - bound_ids(plan)
+    if dropped and previous_gen is not None:
+        print(f"🔴 this save DROPS {len(dropped)} bound session id(s) the previous "
+              f"plan carried ({len(previous)} entries → {len(plan)}).",
+              file=sys.stderr)
+        print("   NOTHING IS LOST — the previous generation is retained. "
+              "To resume from it instead:", file=sys.stderr)
+        print(f"     tmux-session-restore.py restore --plan {previous_gen}",
+              file=sys.stderr)
     # The counts above cannot tell `0 ledger` apart between a missing module, a
     # restarted server and simply no records — and the first two are what an
     # operator would act on. Sorted by token so the line's shape is stable.

@@ -18,7 +18,9 @@ or writes the real `~/.cache/agent-ledger`, `~/.claude/projects` or
 import importlib.util
 import json
 import os
+import re
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -1426,3 +1428,425 @@ def test_a_settled_workspace_with_every_send_landed_exits_0(tmp_path, monkeypatc
     out = capsys.readouterr()
     assert rc == 0, out.err
     assert "verified: 2 of 2" in out.out, out.out
+
+
+# --------------------------------------------------------------------------- #
+# cmd_save GENERATIONS — the 2026-09-06 data-loss defect
+#
+# 🔴 WHAT THESE PIN, AND WHY THEY ARE PHRASED THE WAY THEY ARE.
+#
+# MEASURED on the workbench 2026-09-06:
+#   21:47:17  a good plan — 47 entries, 46 carrying a bound session id
+#   21:54:21  the tmux server died, taking 47 claude conversations
+#   22:09:40  a continuum autosave fired on the DEGRADED post-crash workspace
+#             and `cmd_save` overwrote the plan with 10 entries. The cheat-sheet
+#             went in the same second. NO BACKUP EXISTED.
+# The conversations were recovered only from tmux-resurrect's TIMESTAMPED saves.
+#
+# The regression tests below therefore assert the OPERATOR'S OBSERVABLE — "after
+# a shrinking save the previous bindings are still recoverable from the state
+# directory" — and NOT "a file named restore-plan_<stamp>.json exists". Written
+# the second way they would go red at base with an AttributeError, which proves
+# only that a new function was added; written this way they go red at base on
+# the data loss itself.
+#
+# 🔴 Every fixture here repoints STATE_DIR/PLAN/CHEAT into `tmp_path`. Nothing
+# under this heading may touch `~/.config/initiatives` — that is the operator's
+# live recovery state, and writing to it is the very failure under test.
+# --------------------------------------------------------------------------- #
+def _gen_entry(win, sid):
+    return {"session": "main", "window": str(win), "codename": "Vapor",
+            "cwd": "/r", "session_id": sid, "bind_source": "ledger" if sid else "",
+            "ledger_reason": "ok" if sid else "no-record",
+            "title": f"w{win}", "hint": ""}
+
+
+def _plan_with(n_entries, n_bound, first=0):
+    """A plan of `n_entries`, the first `n_bound` of which carry a session id.
+
+    Ids are distinct per (index, offset) so two plans built with different
+    `first` share no bindings — a fixture whose ids collided could not see a
+    mutant that ignored the previous plan entirely.
+    """
+    return [_gen_entry(i, f"{first + i:08d}-2222-4333-8444-555555555555"
+                          if i < n_bound else "")
+            for i in range(n_entries)]
+
+
+@pytest.fixture
+def state(tmp_path, monkeypatch):
+    """Repoint every state path into tmp_path and hand back the directory."""
+    d = tmp_path / "initiatives"
+    monkeypatch.setattr(tsr, "STATE_DIR", d)
+    monkeypatch.setattr(tsr, "PLAN", d / "restore-plan.json")
+    monkeypatch.setattr(tsr, "CHEAT", d / "restore-cheatsheet.md")
+    return d
+
+
+def _save(monkeypatch, plan):
+    monkeypatch.setattr(tsr, "build_plan", lambda: plan)
+    return tsr.cmd_save()
+
+
+def _bound_ids(plan):
+    """The test's OWN copy of `bound_ids`, and deliberately not the module's.
+
+    🔴 The regression tests below must go red at base ON THE DATA LOSS. Calling
+    `tsr.bound_ids` there makes them red at base with an `AttributeError`
+    instead, which proves only that a new function was added and says nothing
+    about whether the bindings survived. Measured: with `tsr.bound_ids` in the
+    assertion, two of the three fell to AttributeError before reaching it.
+    """
+    return {e["session_id"] for e in plan if e.get("session_id")}
+
+
+def _recoverable_ids(state_dir):
+    """Every session id recoverable from ANY plan-shaped JSON under `state_dir`.
+
+    Deliberately implementation-blind: it walks the directory rather than
+    knowing where generations live, so it measures "is the binding still on
+    disk" and not "was it filed the way I expected".
+    """
+    ids = set()
+    for p in state_dir.rglob("*.json"):
+        try:
+            data = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, list):
+            ids |= {e.get("session_id") for e in data
+                    if isinstance(e, dict) and e.get("session_id")}
+    return ids
+
+
+def test_generations_live_beside_the_pointer_never_in_the_real_state_dir(state):
+    """🔴 The safety property every other test here depends on.
+
+    `generations_dir()` must derive from `PLAN.parent`. Bound to the module's
+    own `STATE_DIR` at import time instead, every test below would write into
+    the operator's LIVE `~/.config/initiatives` while still passing.
+    """
+    assert tsr.generations_dir().parent == tsr.PLAN.parent, (
+        "the generations directory is not derived from PLAN.parent — a test "
+        "that repoints PLAN would write generations into the real "
+        "~/.config/initiatives, which is live recovery state")
+    assert str(tsr.generations_dir()).startswith(str(state)), (
+        f"generations_dir() escaped the test state dir: {tsr.generations_dir()}")
+
+
+def test_a_shrinking_save_does_not_destroy_the_previous_bindings(state, monkeypatch,
+                                                                 capsys):
+    """🔴 THE REGRESSION. RED AT BASE — this is the 2026-09-06 loss.
+
+    47 entries / 46 bound, then a degraded 10-entry save. Under the old
+    single-mutable-file writer the 46 ids were gone from disk the instant the
+    second save returned; here they must still be recoverable.
+    """
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+
+    degraded = _plan_with(10, 10, first=900)
+    assert _save(monkeypatch, degraded) == 0
+    capsys.readouterr()
+
+    survived = _recoverable_ids(state)
+    lost = _bound_ids(good) - survived
+    assert not lost, (
+        f"{len(lost)} of the previous save's 46 bound session ids are no longer "
+        f"recoverable from anywhere under {state} — a degraded save destroyed "
+        "the good plan, which is exactly the 2026-09-06 defect")
+
+
+def test_a_shrinking_save_does_not_destroy_the_previous_cheat_sheet(state,
+                                                                    monkeypatch,
+                                                                    capsys):
+    """🔴 RED AT BASE. Same writer, same second, same loss — the cheat-sheet.
+
+    Asserted on a resume COMMAND, not on the file's name: the cheat-sheet's
+    whole value is that each entry carries a runnable `claude --resume <id>`,
+    and that is what the operator rebuilt 24 conversations from.
+    """
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+    wanted = f"claude --resume {good[0]['session_id']}"
+
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    capsys.readouterr()
+
+    found = [p for p in state.rglob("*.md") if wanted in p.read_text()]
+    assert found, (
+        f"no file under {state} still carries `{wanted}` — the previous "
+        "cheat-sheet was overwritten by the degraded save, so the resume "
+        "commands for the dropped conversations are gone")
+
+
+def test_a_pre_generations_plan_is_preserved_by_the_first_new_save(state,
+                                                                   monkeypatch,
+                                                                   capsys):
+    """🔴 RED AT BASE. The DEPLOY of this change must not be the bad save.
+
+    A host upgrading has a REGULAR FILE at the pointer path holding the last
+    plan the old writer wrote — possibly the only good one. Repointing that path
+    without copying it in first unlinks it.
+    """
+    state.mkdir(parents=True)
+    good = _plan_with(47, 46, first=100)
+    tsr.PLAN.write_text(json.dumps(good))
+    tsr.CHEAT.write_text(tsr.cheat_sheet(good))
+    assert not tsr.PLAN.is_symlink(), "fixture must start as a real file"
+
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    capsys.readouterr()
+
+    lost = _bound_ids(good) - _recoverable_ids(state)
+    assert not lost, (
+        f"{len(lost)} bound ids from the pre-existing regular-file plan were "
+        "lost when the pointer was first swapped — the migration must adopt it "
+        "as a generation before moving the pointer")
+
+
+def test_the_pointer_still_reads_as_the_current_plan(state, monkeypatch, capsys):
+    """Reader compatibility: `cmd_restore`, `plan_staleness_hours`,
+    `tmux-restore-observe.sh` and `cmd_show` all read the two fixed paths."""
+    plan = _plan_with(4, 3, first=500)
+    assert _save(monkeypatch, plan) == 0
+    capsys.readouterr()
+
+    assert tsr.PLAN.exists(), "restore-plan.json does not resolve after a save"
+    assert json.loads(tsr.PLAN.read_text()) == plan, (
+        "restore-plan.json does not read back as the plan just saved — every "
+        "existing reader goes through this path")
+    assert tsr.CHEAT.exists() and "claude --resume" in tsr.CHEAT.read_text(), (
+        "restore-cheatsheet.md does not resolve to the current cheat-sheet")
+    assert tsr.cmd_show() == 0
+    assert "claude --resume" in capsys.readouterr().out
+
+
+def test_a_shrinking_save_is_written_not_refused(state, monkeypatch, capsys):
+    """🔴 AN INVARIANT GUARD, NOT A REGRESSION TEST — green at base by design.
+
+    It exists because the tempting fix is a guard that REFUSES to write a
+    smaller plan, and that guard would fire on the operator closing windows,
+    i.e. on ordinary use. A refusal here would leave the current pointer on a
+    workspace that no longer exists. Labelled so nobody counts it as coverage of
+    the loss.
+    """
+    assert _save(monkeypatch, _plan_with(47, 46, first=100)) == 0
+    capsys.readouterr()
+    small = _plan_with(3, 1, first=900)
+    rc = _save(monkeypatch, small)
+    capsys.readouterr()
+
+    assert rc == 0, "a legitimately smaller save was refused"
+    assert json.loads(tsr.PLAN.read_text()) == small, (
+        "the pointer was not advanced to the smaller plan — a shrink must be "
+        "WARNED about, never blocked")
+
+
+def test_a_save_dropping_bound_ids_names_the_recovery_command(state, monkeypatch,
+                                                              capsys):
+    """🔴 RED AT BASE. The warning must hand over a command that WORKS.
+
+    Not just "something was dropped": the path it names is opened and checked to
+    carry the dropped ids, because a warning pointing at the wrong file is worse
+    than none.
+    """
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    err = capsys.readouterr().err
+
+    assert "DROPS 46 bound session id(s)" in err, (
+        f"the shrink report did not name the 46 dropped bindings:\n{err}")
+    assert "47 entries → 10" in err, (
+        f"the shrink report did not name both entry counts:\n{err}")
+    m = re.search(r"restore --plan (\S+)", err)
+    assert m, f"the shrink report named no recovery command:\n{err}"
+    named = Path(m.group(1))
+    assert named.exists(), f"the recovery command names a path that does not exist: {named}"
+    assert tsr.bound_ids(json.loads(named.read_text())) >= tsr.bound_ids(good), (
+        f"the plan the recovery command names ({named}) does not carry the "
+        "dropped bindings — it points at the wrong generation")
+
+
+def test_a_shrink_that_drops_no_bindings_stays_quiet(state, monkeypatch, capsys):
+    """The DISCRIMINATING CONTROL for the report above.
+
+    Without it, a report keyed on the ENTRY COUNT instead of on bound ids passes
+    the previous test exactly. Closing five unbound windows loses nothing
+    resumable, and a line that fires there becomes noise and stops being read.
+    """
+    assert _save(monkeypatch, _plan_with(8, 3, first=100)) == 0
+    capsys.readouterr()
+    # Same three bindings, five unbound windows closed: entries 8 -> 3.
+    assert _save(monkeypatch, _plan_with(3, 3, first=100)) == 0
+    err = capsys.readouterr().err
+
+    assert "DROPS" not in err, (
+        "a shrink that dropped NO bound session id was reported as dropping "
+        f"bindings — the report is keyed on the entry count, not on ids:\n{err}")
+
+
+def test_pruning_keeps_exactly_the_newest_generations(state, monkeypatch, capsys):
+    """🔴 THE POSITIVE CONTROL for retention: the count must MOVE.
+
+    Five saves under a keep of 3 must leave 3, and they must be the NEWEST 3 —
+    a mutant pruning the wrong end leaves the right count. `1 pruned` is
+    asserted on the run that first exceeds the cap, so a pruner wired to nothing
+    (which would leave 5 and report 0) cannot pass.
+    """
+    monkeypatch.setattr(tsr, "KEEP_GENERATIONS", 3)
+    seen = []
+    for i in range(5):
+        assert _save(monkeypatch, _plan_with(2, 2, first=100 * (i + 1))) == 0
+        out = capsys.readouterr().out
+        seen.append(tsr.list_generations()[-1])
+        if i < 3:
+            assert "0 pruned" in out, f"pruned below the cap on save {i}:\n{out}"
+        else:
+            assert "1 pruned" in out, f"did not prune above the cap on save {i}:\n{out}"
+
+    kept = tsr.list_generations()
+    assert len(kept) == 3, f"kept {len(kept)} generations under a cap of 3: {kept}"
+    assert kept == seen[-3:], (
+        f"retention kept the wrong end — kept {kept}, newest three were {seen[-3:]}")
+
+
+def test_pruning_never_deletes_the_generation_the_pointer_is_on(state, monkeypatch,
+                                                                capsys):
+    """🔴 The guard that makes pruning unable to recreate the defect.
+
+    At `keep=0` every stamp is doomed, so only `protect` can save the one the
+    pointer was just aimed at. Without it the save returns 0 having left
+    `restore-plan.json` DANGLING and no current plan on disk — a bad save
+    destroying the plan, from inside the mechanism built to stop that.
+    """
+    assert _save(monkeypatch, _plan_with(4, 4, first=100)) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(tsr, "KEEP_GENERATIONS", 0)
+    plan = _plan_with(4, 4, first=200)
+    assert _save(monkeypatch, plan) == 0
+    capsys.readouterr()
+
+    assert tsr.PLAN.exists(), (
+        "restore-plan.json is dangling after a save — pruning deleted the "
+        "generation the pointer had just been aimed at")
+    assert json.loads(tsr.PLAN.read_text()) == plan
+    assert tsr.list_generations(), "pruning removed the current generation"
+
+
+def test_prune_generations_returns_what_it_removed(state, monkeypatch):
+    """`prune_generations` in isolation, incl. the `protect` refusal it reports.
+
+    The removed list is what `cmd_save` prints, so a pruner that deleted files
+    and reported nothing would make the summary line silently false.
+    """
+    d = tsr.generations_dir()
+    d.mkdir(parents=True)
+    stamps = ["20260101T000001", "20260101T000002", "20260101T000003"]
+    for s in stamps:
+        for p in tsr.generation_paths(s):
+            p.write_text("[]")
+
+    removed = tsr.prune_generations(keep=1, protect=(stamps[0],))
+    assert removed == [stamps[1]], (
+        f"expected only the middle stamp removed, got {removed}")
+    assert tsr.list_generations() == [stamps[0], stamps[2]], (
+        "a protected stamp was deleted, or the newest was not kept")
+    assert not tsr.generation_paths(stamps[1])[1].exists(), (
+        "the cheat-sheet of a pruned generation was left behind — retention "
+        "would then be unbounded in the .md half")
+
+
+def test_two_saves_in_one_second_do_not_share_a_generation(state, monkeypatch,
+                                                           capsys):
+    """🔴 The stamp has one-second resolution; the incident was a same-second write.
+
+    A manual `save` racing the 15-minute continuum hook lands in the same
+    second. Sharing a stamp would overwrite the previous generation — the
+    mutable-file defect reintroduced inside its own fix.
+
+    The clock is frozen on `tsr`'s OWN `time` reference, never on the real
+    module — patching that would hand a frozen clock to pytest itself.
+    """
+    import time as _real_time
+    monkeypatch.setattr(tsr, "time", types.SimpleNamespace(
+        time=lambda: 1757282857.0,
+        localtime=_real_time.localtime,
+        strftime=_real_time.strftime,
+        strptime=_real_time.strptime,
+        mktime=_real_time.mktime))
+
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    capsys.readouterr()
+
+    assert len(tsr.list_generations()) == 2, (
+        f"two saves in one second produced {len(tsr.list_generations())} "
+        "generation(s) — the second overwrote the first")
+    assert not (tsr.bound_ids(good) - _recoverable_ids(state)), (
+        "the same-second save destroyed the previous generation's bindings")
+
+
+def test_a_new_stamp_is_never_older_than_an_existing_generation(state):
+    """🔴 The invariant `list_generations`'s name-sort and all of pruning rest on.
+
+    A FREED slot must not be handed back. Measured while writing these tests:
+    pruning frees the oldest stamp, a same-second save is handed that slot, the
+    new generation sorts OLDEST, pruning selects it as doomed, and the cap stops
+    being enforced (`4 kept (max 3), 0 pruned`). A backwards clock step
+    reproduces it with no race at all — which is why this asks for a stamp from
+    a time BEFORE everything on disk, a case no timing can excuse.
+    """
+    tsr.generations_dir().mkdir(parents=True)
+    for p in tsr.generation_paths("20260601T120000"):
+        p.write_text("[]")
+
+    # 2026-01-01, i.e. five months older than the generation already present.
+    stamp = tsr.free_generation_stamp(when=1767268800.0)
+    assert stamp > "20260601T120000", (
+        f"free_generation_stamp returned {stamp}, which sorts BEFORE an "
+        "existing generation — pruning would then treat the newest save as the "
+        "oldest and the retention cap would stop being enforced")
+
+
+def test_a_failed_write_leaves_the_previous_file_whole(state, monkeypatch):
+    """🔴 `write_text` truncates first; `_write_atomic` must not.
+
+    A save killed mid-write would otherwise leave a zero-byte plan — the same
+    loss in a smaller shape. Simulated by failing the rename, which is the only
+    step that can touch the destination.
+    """
+    state.mkdir(parents=True)
+    target = state / "gen.json"
+    target.write_text('["intact"]')
+
+    def boom(*a, **k):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(tsr.os, "replace", boom)
+    with pytest.raises(OSError):
+        tsr._write_atomic(target, "x" * 5)
+    assert target.read_text() == '["intact"]', (
+        "a failed write truncated or damaged the destination — the write is "
+        "not going through a temp file + rename")
+
+
+def test_an_empty_plan_still_writes_no_generation(state, monkeypatch, capsys):
+    """Pre-existing behaviour, now load-bearing for retention.
+
+    A tmux-less moment must not spend a generation slot: at the cap, empty saves
+    would push real plans off the oldest end.
+    """
+    assert _save(monkeypatch, _plan_with(4, 4, first=100)) == 0
+    capsys.readouterr()
+    before = tsr.list_generations()
+    assert _save(monkeypatch, []) == 1
+    capsys.readouterr()
+    assert tsr.list_generations() == before, (
+        "an empty plan created a generation — repeated, that evicts real ones")
