@@ -29,11 +29,16 @@ WHAT EACH TEST IS FOR — the audit findings the script was fixed for:
   F-D  a missing backup fails LOUDLY instead of silently skipping the rollback
   F-E  a symlinked $CFG is refused instead of being replaced by a regular file
   F-G  the verifier's FAIL text (with its egress-cost warning) reaches the operator
+  F-H  the verifier is invoked through an explicit interpreter, and an rc that is
+       NOT one of its own {0,1,2} is reported as "it did not run" rather than as a
+       fact about the config -- structural + behavioural, because the structural
+       half is the only one visible on the dev-host tier
 """
 from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -412,7 +417,12 @@ if open(os.path.join(STATE, "break_config")).read().strip() == "1":
 
     # ---- running it
     def run(self, net: str = "mesh", cfg: Path | None = None,
-            extra_env: dict | None = None, timeout: int = 120):
+            extra_env: dict | None = None, timeout: int = 120,
+            apply: Path | None = None):
+        """`apply` runs a COPY of the script from another directory. The script derives
+        CHECK from its own location (`HERE`), so a copy sited next to a stub verifier
+        exercises the real rc-handling against a chosen exit code -- which is the only
+        way to reach codes the real verifier cannot produce."""
         env = dict(os.environ)
         env["PATH"] = f"{self.bin}:{env.get('PATH', '')}"
         env["TMPDIR"] = str(self.tmpdir)
@@ -423,9 +433,49 @@ if open(os.path.join(STATE, "break_config")).read().strip() == "1":
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
-            ["bash", str(APPLY)], env=env, capture_output=True, text=True,
+            ["bash", str(apply or APPLY)], env=env, capture_output=True, text=True,
             timeout=timeout, cwd=str(self.root),
         )
+
+    def apply_beside_stub_verifier(self, rc: int, out: str = "stub verifier output"):
+        """A copy of the real apply script in a fresh dir, next to a verifier stub that
+        exits `rc`. Returns the path to the copy.
+
+        🔴 The stub goes through `write_exec` like every other shim in this file, NOT a
+        hand-written shebang. A `#!/usr/bin/env bash` stub execs fine on the dev host
+        and ENOENTs in the sandbox — which would make this test fabricate rc 126 from
+        its own stub rather than from the code under test, and pass for the wrong
+        reason on one tier while failing on the other. That is the very fault F-H
+        exists to pin, so writing it here would be circular."""
+        d = self.root / f"sysstub{rc}"
+        d.mkdir(exist_ok=True)
+        shutil.copy2(APPLY, d / APPLY.name)
+        write_exec(d / CHECK.name, f"printf '%s\\n' {shlex.quote(out)}\nexit {rc}\n")
+        return d / APPLY.name
+
+    def apply_beside_sequenced_verifier(self, first_rc: int, then_rc: int):
+        """Like the above, but the stub answers `first_rc` on its FIRST call and
+        `then_rc` on every later one.
+
+        This is the only way to reach the POST-REBUILD verify site. A stub that fails
+        at the preflight aborts there and never gets past it — so a single-code stub
+        cannot exercise the second call site at all, and the two sites classify their
+        rc independently. The post-rebuild one is the consequential half: it runs after
+        `nixos-rebuild test` has activated, so what it dies with is what the EXIT trap
+        rolls back and what the operator is told the rollback was for."""
+        d = self.root / f"sysseq{first_rc}_{then_rc}"
+        d.mkdir(exist_ok=True)
+        shutil.copy2(APPLY, d / APPLY.name)
+        counter = d / "calls"
+        write_exec(d / CHECK.name, (
+            f'n=$(cat {counter} 2>/dev/null || echo 0)\n'
+            f'n=$((n+1)); echo "$n" > {counter}\n'
+            f'if [ "$n" = "1" ]; then\n'
+            f'  echo "relay not advertised (stub call 1)"; exit {first_rc}\n'
+            f'fi\n'
+            f'echo "stub call $n"; exit {then_rc}\n'
+        ))
+        return d / APPLY.name
 
 
 @pytest.fixture()
@@ -909,6 +959,104 @@ def test_no_predictable_tmp_literal_survives_in_the_source():
     src = APPLY.read_text()
     assert not re.search(r">\s*/tmp/", src), src
     assert "mktemp -d" in src
+
+
+def test_the_verifier_is_never_execed_via_its_own_shebang():
+    """F-H, structural half. The verifier MUST be invoked through an explicit
+    interpreter, never by executing it and letting its `#!/usr/bin/env bash` shebang
+    dispatch -- that makes /usr/bin/env a runtime dependency of this script, and the
+    nix build sandbox has no /usr at all.
+
+    🔴 THIS GUARD EXISTS BECAUSE THE BEHAVIOURAL EVIDENCE IS INVISIBLE ON ONE TIER.
+    The dev host HAS /usr/bin/env, so with the fix reverted every behavioural test in
+    this file still passes there -- measured: 30 passed. Only the sandbox tier
+    (`nix build .#checks.x86_64-linux.pytests`) goes red. A source assertion is tier
+    -independent, so a revert fails wherever the suite runs, including in the tier
+    most sessions actually run.
+
+    Pinned as a PAIR on purpose: presence alone passes if someone adds a second, direct
+    call site beside the helper, and absence alone passes if the helper is deleted
+    outright."""
+    src = APPLY.read_text()
+    assert re.search(r'^run_check\(\)\s*\{\s*"\$BASH"\s+"\$CHECK"', src, re.M), (
+        "the run_check helper is gone or no longer invokes the verifier through "
+        '"$BASH" -- it must not be executed directly, or /usr/bin/env becomes a '
+        "runtime dependency and the sandbox tier goes red")
+    stray = re.findall(r'^[^#\n]*(?<!run_)"\$CHECK"\s+"\$RELAY"', src, re.M)
+    assert not stray, (
+        f"a direct execution of the verifier is back at {len(stray)} site(s): {stray}. "
+        "It must go through run_check().")
+
+
+def test_the_verifiers_exit_codes_are_a_closed_set():
+    """F-H's load-bearing precondition. `verifier_answered` in apply-nebula-relay.sh
+    treats {0,1,2} as verdicts and EVERYTHING else as "it did not run". If the verifier
+    ever grows an `exit 3`, that new verdict would be misreported as an exec fault --
+    silently, and in the direction that reads as reassuring ("nothing was determined")
+    when something WAS.
+
+    So the two must move together. This fails the moment they diverge."""
+    codes = set(re.findall(r'^\s*(?:\|\|\s*)?exit\s+([0-9]+)', CHECK.read_text(), re.M))
+    codes |= set(re.findall(r'\|\|\s*exit\s+([0-9]+)', CHECK.read_text()))
+    assert codes <= {"0", "1", "2"}, (
+        f"check-nebula-relays.sh can now exit {sorted(codes)}, but apply-nebula-relay.sh's "
+        "`verifier_answered` still treats only 0/1/2 as answers -- a new code would be "
+        "reported as 'the verifier did NOT RUN'. Update both.")
+    m = re.search(r'verifier_answered\(\)\s*\{\s*case\s+"\$1"\s+in\s+([0-9|]+)\)',
+                  APPLY.read_text())
+    assert m, "verifier_answered() moved or was reworded"
+    assert set(m.group(1).split("|")) == {"0", "1", "2"}, m.group(1)
+
+
+@pytest.mark.parametrize("rc,label", [(126, "not executable / interpreter missing"),
+                                      (127, "vanished"),
+                                      (137, "SIGKILL/OOM")])
+def test_a_verifier_that_did_not_RUN_is_not_reported_as_a_config_fault(rig, rc, label):
+    """F-H, behavioural half. rc outside {0,1,2} is not a verdict -- the verifier never
+    reached one. Reporting it as "could not read the current config" asserts something
+    about $CFG that is false, and is precisely how the /usr/bin/env fault (rc 126) read
+    as a config problem instead of an exec one."""
+    r = rig.run(apply=rig.apply_beside_stub_verifier(rc))
+    combined = r.stdout + r.stderr
+    assert r.returncode != 0, combined
+    assert "did NOT RUN" in combined, f"{label}: {combined}"
+    assert f"rc={rc}" in combined, combined
+    assert "could not read the current config" not in combined, (
+        f"{label}: an exec/signal fault is still being blamed on $CFG:\n{combined}")
+
+
+@pytest.mark.parametrize("rc", [126, 137])
+def test_a_POST_REBUILD_verifier_that_did_not_RUN_does_not_blame_the_mesh(rig, rc):
+    """F-H, the consequential half — and the site the PREFLIGHT tests cannot reach.
+
+    The preflight answers 1 (not advertised), so the script patches, runs
+    `nixos-rebuild test`, and only THEN gets a non-verifier rc. That `die` is what the
+    EXIT trap rolls back, so blaming it on the mesh undoes a change that worked and
+    sends the operator to debug a mesh that is very possibly fine.
+
+    🔴 This test exists because a mutation sweep found the gap: widening
+    `verifier_answered` to accept 126 was caught only by the STRUCTURAL closed-set
+    test, because every behavioural case aborted at the preflight and never executed
+    `verifier_answered` at all. A guard that is never reached is not a guard."""
+    r = rig.run(apply=rig.apply_beside_sequenced_verifier(first_rc=1, then_rc=rc))
+    combined = r.stdout + r.stderr
+    assert r.returncode != 0, combined
+    assert "did NOT RUN" in combined, combined
+    assert f"rc={rc}" in combined, combined
+    assert "does not see" not in combined, (
+        f"an exec/signal fault at the post-rebuild verify is still reported as the "
+        f"relay not being advertised:\n{combined}")
+
+
+def test_a_REAL_verifier_refusal_still_blames_the_config(rig):
+    """The other side of the split, so the fix cannot be "call everything an exec
+    fault". rc 2 IS one of the verifier's own verdicts -- it really could not read the
+    config -- and must keep saying so."""
+    r = rig.run(apply=rig.apply_beside_stub_verifier(2))
+    combined = r.stdout + r.stderr
+    assert r.returncode != 0, combined
+    assert "could not read the current config" in combined, combined
+    assert "did NOT RUN" not in combined, combined
 
 
 def test_scripts_are_executable_and_pass_bash_n():

@@ -101,6 +101,45 @@ run_check() { "$BASH" "$CHECK" "$@"; }
 
 die() { echo "ABORT: $*" >&2; exit 1; }
 
+# 🔴 THE VERIFIER ONLY EVER EXITS 0, 1 OR 2. ANY OTHER CODE MEANS IT DID NOT RUN.
+#
+# check-nebula-relays.sh's exit codes are a CLOSED set, stated in its header and
+# checked by test_the_verifiers_exit_codes_are_a_closed_set: 0 = advertised,
+# 1 = not advertised, 2 = it could not answer (unit not loaded/inactive, no
+# MainPID, unreadable -config, parser failure, its own self-test failing, or the
+# unit and the process disagreeing).
+#
+# So an rc outside {0,1,2} is not a verdict at all -- the verifier never got far
+# enough to have one. Before this classifier existed, every such code fell into
+# the same `*)` arm as a genuine rc 2 and was reported as
+#
+#     ABORT: the verifier could not read the current config (rc=126); fix that first
+#
+# which asserts a fact about $CFG that is false in every one of those cases. That
+# is not hypothetical: it is exactly how the /usr/bin/env fault this script was
+# just fixed for presented (126 = found, but its interpreter is missing), and the
+# misdirection is what made it read as a config problem rather than an exec one.
+#
+# 🔴 The consequential site is the POST-REBUILD verify, not this one. There, a
+# non-verifier rc reaches `die` AFTER `nixos-rebuild test` has activated, so the
+# EXIT trap rolls back a change that actually WORKED and prints the PERSISTED /
+# "the profile may have moved" paragraphs for what was really a signal or an exec
+# fault. Failing with the right diagnosis is the difference between "re-run it"
+# and "go debug your mesh".
+verifier_answered() { case "$1" in 0|1|2) return 0 ;; *) return 1 ;; esac; }
+
+die_verifier_did_not_run() {
+  die "the verifier did NOT RUN (rc=$1) -- an exec, interpreter or signal fault, NOT
+  an answer about the config or the mesh. \`$CHECK\` only ever exits 0, 1 or 2 (see
+  its header), so nothing about $RELAY has been determined and nothing here should be
+  read as a finding about $CFG.
+    126  found, but not executable -- or ITS INTERPRETER is missing
+    127  it disappeared between the preflight's [ -r ] check and this call
+    128+ killed by a signal (130 = SIGINT, 137 = SIGKILL/OOM, 143 = SIGTERM)
+  Fix the invocation, then re-run: this script is idempotent and has changed nothing
+  it cannot repeat."
+}
+
 # Scratch dir for everything this script writes outside $CFG.
 #
 # 🔴 NOT `/tmp/<fixed-name>.$$`. /tmp is 1777, `>` follows symlinks, and this runs as
@@ -164,8 +203,10 @@ case "$pre_rc" in
      echo "  the verifier's finding, in full -- read the cost note before continuing:"
      sed 's/^/    | /' "$PRE"
      echo ;;
+  2) sed 's/^/    | /' "$PRE"
+     die "the verifier could not read the current config (rc=2); fix that first" ;;
   *) sed 's/^/    | /' "$PRE"
-     die "the verifier could not read the current config (rc=$pre_rc); fix that first" ;;
+     die_verifier_did_not_run "$pre_rc" ;;
 esac
 
 # 🔴 SYMLINKS ARE REFUSED, NOT FOLLOWED -- and that is a deliberate choice between the
@@ -478,6 +519,12 @@ verify_now() {   # dies on failure; retries exactly once, on ONE narrow conditio
     set +e; run_check "$RELAY" >"$out" 2>&1; rc=$?; set -e
     sed 's/^/    | /' "$out"
   fi
+  # 🔴 CLASSIFY BEFORE BLAMING THE MESH. This runs after `nixos-rebuild test` has
+  # activated, so whatever this `die`s with is what the EXIT trap rolls back and what
+  # the operator is told the rollback was FOR. An exec/interpreter/signal fault here
+  # is not "the relay is not advertised" -- reporting it as one sends them to debug a
+  # mesh that is very possibly fine, having just undone a change that worked.
+  verifier_answered "$rc" || die_verifier_did_not_run "$rc"
   [ "$rc" = "0" ] || die "the verifier does not see $RELAY advertised by the running unit (rc=$rc)"
 }
 verify_now
