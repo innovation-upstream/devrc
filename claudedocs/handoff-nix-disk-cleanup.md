@@ -16,12 +16,14 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Diagnose and resolve disk pressure on the workbench NixOS host (root partition `/dev/nvme0n1p2`, 1.8TB). The host was at 87% usage with ~228G free. The session freed ~200G through cleanup, then investigated why the filesystem reports 1.5TB used while only ~600GB of data is measurable.
 
 ## State now
-- 🔴 **BOTH TMPFILES HOSTS ARE LIVE, AND TWO OF THIS EFFORT'S THREE PRs ARE MERGED.**
-  - **`innovation-upstream/devrc#1366` MERGED** — squash `ffac18f8`. Rank 5's test coverage for `scripts/diagnose-disk-accounting.sh`. **Four audit rounds, 21 findings (3 🔴), all fixed.** 202 assertions, 64 mutants each killed by its own guard, red at every earlier tip (96 → 55 → 23 → 3 → 0). Verified by CONTENT after merge, not ancestry. Claim `nix-disk-cleanup-5` RELEASED.
-  - **`innovation-upstream/devrc#1392` MERGED** — squash `94f82796`. The nixpkgs toolchain drift that had `main` red for everyone. Verified by content: `classify_age_refusal` live in `scripts/analyze-service-index/{escrow,restore}-verify.py`, `PINNED_VERSION = "1.18.29"`.
-  - **`innovation-upstream/devrc#1370` OPEN** at `2fe861d4` — the preflight/`--init` tool. One audit round (**3 🔴 + 9 🟡**), all fixed, first-ever test suite (54 tests). **Tekton PENDING at handoff time — merge it once green.**
-- **Workbench + laptop both applied and live**: 7 `mM:7d` rules, 0 stale, on each. Workbench has been live since the **2026-09-06 18:01 reboot**; its reclaim held at **67.2M inodes against the 96.1M baseline**, 74% disk. The laptop went live 2026-09-07 17:54 via `preflight-tmp-churn-host.sh --init` (generation 247), verified independently of the script.
-- **No clawgate task.** `clawgate_handoff.sh resolve` → **rc 5, NOTHING RESOLVED**, with its positive control confirming the board is reachable. A wrong session id also answers 200 with an empty array, so this is not a clean bill of health and no `clawgate-task:` field is recorded.
+- 🔴 **ALL THREE PRs OF THIS EFFORT ARE MERGED. Both tmpfiles hosts are live. Nothing is in flight.**
+  - **`#1366` MERGED** — squash `ffac18f8`. Rank 5's test coverage for `scripts/diagnose-disk-accounting.sh`, after **four audit rounds, 21 findings (3 🔴)**. 202 assertions, 64 mutants each killed by its own guard, red at every earlier tip (96 → 55 → 23 → 3 → 0).
+  - **`#1392` MERGED** — squash `94f82796`. The nixpkgs toolchain drift that had `main` red for everyone, and the disaster-recovery verdict inversion inside it.
+  - **`#1370` MERGED** — squash `b29cde5e`. The preflight/`--init` tool, after one audit round (**3 🔴 + 9 🟡**) and its first-ever test suite (54 tests). Tekton green on `2fe861d4`: pytests `collected=21022 passed=21020 skipped=2 failed=0`, nodetests `1449/1449`.
+  - All three verified **by CONTENT** on `origin/main` after merge, never by ancestry — a squash is never an ancestor of its base. `#1370`'s check: `nix/system/preflight-tmp-churn-host.sh` and `scripts/tests/test_preflight_tmp_churn_host.py` present, `INIT=yes` present, and the re-derived drift floor `"scripts/tests|12927"` landed intact.
+- **Workbench + laptop both applied and live**: 7 `mM:7d` rules, 0 stale, on each. Workbench live since the **2026-09-06 18:01 reboot**, reclaim held at **67.2M inodes against the 96.1M baseline** (74% disk). Laptop live since **2026-09-07 17:54** via `preflight-tmp-churn-host.sh --init` (generation 247).
+- **Claim `nix-disk-cleanup-5` RELEASED.** No claims held.
+- **No clawgate task** — `clawgate_handoff.sh resolve` → rc 5 with its positive control green; a wrong session id also answers 200 with an empty array, so that is not a clean bill of health and no field is recorded.
 
 ## Open investigations — live diagnosis state
 
@@ -349,34 +351,34 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **Next probe:** change it to `cp -aL` (or refuse on `[[ -L "$CFG" ]]`) plus a fixture test asserting the backup is not a symlink. `#1370` mitigated the reachable path from its own side and deliberately did not touch that file.
 
 ## Next steps (ranked)
-🔴 **Ranks 1–10 keep their original meaning and numbering — including rank 10, which is the laptop reap check and NOT the #1370 merge; an earlier draft of this delta reused it and would have re-pointed any live claim** — the rank is half a `claim-work` slug's identity, so renumbering silently re-points live claims. Status is marked in place.
+🔴 **Ranks 1–14 keep their original meaning and numbering** — the rank is half a `claim-work` slug's identity, so renumbering silently re-points live claims. Status is marked in place. **Ranks 1–7, 9 and 11 are closed; 8, 10, 12, 13, 14 remain.**
 
 1. **DONE — workbench patched and verified live.**
    forcing: none
-2. **DONE — laptop applied and verified live 2026-09-07**, via `preflight-tmp-churn-host.sh --init`.
+2. **DONE — laptop applied and verified live 2026-09-07.**
    forcing: none
-3. **DONE — rebuild/reboot**; `nixos-rebuild switch` is unblocked on both hosts.
+3. **DONE — rebuild/reboot**; `nixos-rebuild switch` unblocked on both hosts.
    forcing: none
 4. **ANSWERED — `/var/lib/docker` is live and in use.**
    forcing: none
 5. **DONE — `#1366` MERGED** (`ffac18f8`). Claim released.
    forcing: none
-6. **WON'T-FIX — the `/tmp` directory stubs.** 52,049 = 0.08% of inodes, growing ~8k/day.
+6. **WON'T-FIX — the `/tmp` directory stubs.** 52,049 = 0.08% of inodes, ~8k/day.
    forcing: none
 7. **ANSWERED — the churn curve ran.** Daily cadence holds for inodes; bytes are the tighter constraint under load.
    forcing: none
 8. **Prune the `devrc/diagnose-disk-accounting` index entry** — a stale `OPEN:` bullet sits beside its own `RESOLVED`. Partly done: `/mnt/rootcheck` recorded as no longer mounted.
    forcing: none
-9. **DONE — `#1366` audited (4 rounds) and `#1370` audited (1 round).** `#1392` was merged WITHOUT an adversarial audit, on the operator's explicit "go".
+9. **DONE — `#1366` audited (4 rounds), `#1370` audited (1 round).** `#1392` merged WITHOUT an adversarial audit, on the operator's explicit "go" — see rank 13.
    forcing: none
-10. **Confirm the laptop's first reap actually happened** — the timer was armed for 2026-09-07 18:54 CDT, its `NextElapseUSecRealtime` read EMPTY, and this session never went back to check. `ssh zach@192.168.50.155 'systemctl status systemd-tmpfiles-clean.service; df -i /'` — expect `status=0/SUCCESS` and inodes below the 24,749,866 / 117,236-top-level baseline recorded at apply time.
+10. **Confirm the laptop's first reap actually happened** — the timer was armed for 2026-09-07 18:54 CDT, its `NextElapseUSecRealtime` read EMPTY, and no session has gone back to check. `ssh zach@192.168.50.155 'systemctl status systemd-tmpfiles-clean.service; df -i /'` — expect `status=0/SUCCESS` and inodes below the 24,749,866 / 117,236-top-level baseline recorded at apply time.
     forcing: none
-11. 🔴 **MERGE `#1370` once Tekton goes green** — it was `pending` at handoff. Repo `innovation-upstream/devrc`, branch `feat/preflight-tmp-churn-host` @ `2fe861d4`. Local evidence: merged tree collects 12977 / passes 12977 / fails 0, and its own suite is 54/54. Verify by CONTENT after merging.
-    forcing: gate — the PR is open and CI-gated; nothing else advances until it settles.
-12. **Fix `apply-tmp-churn-retention.sh:276` (`cp -a` → `cp -aL`)** — see the open investigation. Repo `innovation-upstream/devrc`, one file plus a fixture test. Closing condition: that PR merged.
+11. **DONE — `#1370` MERGED** (`b29cde5e`), Tekton green, verified by content.
     forcing: none
-13. **Consider an adversarial audit of the merged `#1392`.** It rewrites the logic deciding whether a corrupt backup means "rotate your escrow key", and it merged unaudited. `/audit-pr` works on a merged PR by ref. **This is the highest-risk unaudited thing this effort shipped.**
-    forcing: security — the change governs disaster-recovery key-rotation verdicts, and its own author recorded that the new keying rests on substring matches of another tool's prose.
+12. **Fix `apply-tmp-churn-retention.sh:276` (`cp -a` → `cp -aL`)** — its documented rollback is a no-op on a symlinked config; measured live during the `#1370` audit. Repo `innovation-upstream/devrc`, one file plus a fixture test asserting the backup is not a symlink. Closing condition: that PR merged.
+    forcing: none
+13. 🔴 **Adversarial audit of the merged `#1392` — the highest-risk unaudited thing this effort shipped.** It rewrites the logic deciding whether a corrupt backup means "rotate your escrow key", and its own author recorded that the new keying rests on substring matches of another tool's prose. `/audit-pr` works on a merged PR by ref.
+    forcing: security — the change governs disaster-recovery key-rotation verdicts and merged without an adversarial pass.
 14. **Delete the stale `/tmp/disk-accounting-*` leftovers** — 19 seen, **2 non-empty** (84 B / 203 B of captured scan stderr). Resolve by ownership and mtime, never a blanket `rm`, and not while a battery may be running.
     forcing: none
 
@@ -489,23 +491,28 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **The laptop's live `--init` run was SAFE, but on two axes by luck rather than by check.** The `#1370` audit later found three 🔴; each was checked against what actually ran: 🔴1 (read-only mode can edit `/etc/nixos` via an old retention script) did not fire because the laptop's devrc `38bd8edd` **contains** `d8fe0bce` — confirmed twice, since no `bak-tmp-churn-*` exists either; 🔴3 (symlinked config) missed because that config is a regular file; 🟡12 (mode downgrade) changed nothing because it was already 0600.
 - **The laptop's config was edited by ANOTHER SESSION 22 minutes after mine**, and the coordination check I ran earlier predicted it: `configuration.nix.bak-drop443-20260907-181625` is the nebula drop-443 work (generation 248). My rules survived it — 7 `mM:7d` still live. Git-level overlap was nil; the host-level sequencing worked out.
 
+- ⚠ **`grep … | head -1` READ THE WRONG LINE TWICE IN ONE SESSION, and both times the wrong answer looked plausible.** Verifying `#1370`'s merge, `grep -oE '"scripts/tests\|[0-9]+"' | head -1` returned **`"scripts/tests|4976"`** — a figure from a *comment example* at `run-tests.sh:1481`, not the live `TARGET_FLOORS` entry at `:1698` (`12927`). Four lines in that file mention `scripts/tests|`. Earlier the same shape produced a bare `0` from a **guessed path** while verifying `#1392`, which reads exactly like "the merge did not land". **Anchor the pattern (`^  "scripts/tests\|`), and print how many candidates matched** — a first-match on an unanchored pattern is a claim about ordering, not about content.
+- **Merge order mattered and was derived, not guessed.** `#1370` was red on Tekton with 7 failures it did not cause; `#1392` was green and was the fix for exactly those. Merging `#1392` first turned `#1370` green without touching it — confirmed on the merged tree before either merge (`scripts/tests` 12977 collected / 12977 passed / **0 failed**, where the same tree had shown the 7 drift failures an hour earlier).
+
 ## How to verify
-1. **Both tmpfiles hosts live:** `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → **7**; `grep -c ' m:7d'` → **0**. Works without root on both. For the laptop wrap in `ssh -t zach@192.168.50.155 '...'`.
-2. **One command that classifies either host** (workbench is the known-good control — expect `applied-and-live — 7`):
-   ```bash
-   cd ~/workspace/devrc && git fetch -q origin feat/preflight-tmp-churn-host && \
-     git show FETCH_HEAD:nix/system/preflight-tmp-churn-host.sh > /tmp/pf.sh && sudo bash /tmp/pf.sh
-   ```
-3. **`#1366` and `#1392` really landed** (by CONTENT — a squash is never an ancestor of its base):
+1. **Both tmpfiles hosts live:** `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → **7**; `grep -c ' m:7d'` → **0**. No root needed on either. Laptop: wrap in `ssh -t zach@192.168.50.155 '...'`.
+2. **All three PRs really landed** (by CONTENT — a squash is never an ancestor of its base):
    ```bash
    git -C /home/zach/workspace/devrc fetch origin main -q
-   git -C /home/zach/workspace/devrc cat-file -e origin/main:scripts/tests/test_diagnose_disk_accounting.sh && echo 1366-ok
-   git -C /home/zach/workspace/devrc grep -c classify_age_refusal origin/main -- '*.py' | head -3   # 1392
+   git -C /home/zach/workspace/devrc cat-file -e origin/main:scripts/tests/test_diagnose_disk_accounting.sh   # 1366
+   git -C /home/zach/workspace/devrc cat-file -e origin/main:scripts/tests/test_preflight_tmp_churn_host.py   # 1370
+   git -C /home/zach/workspace/devrc grep -c classify_age_refusal origin/main -- '*.py'                       # 1392
    ```
-4. **The age inversion is real** (run it before trusting any re-derivation of it): encrypt a 4 KiB payload, flip a byte near the end, decrypt with `--output` under both `age` builds — 1.3.1 leaves the file present, 1.3.2 leaves none. Interactive shell is 1.3.1; `nix develop` is 1.3.2.
-5. **The workbench reclaim held:** `df -i /` → used inodes materially below the 96.1M baseline (67.2M on 2026-09-07); `df -h /` → Use% ≤ 77%.
-6. **The drift floor matches the tree it is in** — never carry one across a merge:
+3. **The drift floor on main matches its tree** — ANCHOR the pattern, an unanchored first match reads a comment example:
    ```bash
-   nix develop /home/zach/workspace/devrc -c bash -c \
-     'eval "$(sed -n "/^_suggested_floor()/,/^}/p" scripts/run-tests.sh)"; _suggested_floor <measured-count>'
+   git -C /home/zach/workspace/devrc show origin/main:scripts/run-tests.sh | grep -nE '^  "scripts/tests\|[0-9]+"'
+   ```
+   → `12927`. Re-derive with the gate's own function if the tree moves:
+   `nix develop /home/zach/workspace/devrc -c bash -c 'eval "$(sed -n "/^_suggested_floor()/,/^}/p" scripts/run-tests.sh)"; _suggested_floor <measured-count>'`
+4. **The age inversion is real** (run it before trusting any re-derivation): encrypt a 4 KiB payload, flip a byte near the end, decrypt with `--output` under both builds — 1.3.1 leaves the file present, 1.3.2 leaves none. Interactive shell is 1.3.1; `nix develop` is 1.3.2.
+5. **The workbench reclaim held:** `df -i /` → used inodes materially below the 96.1M baseline (67.2M on 2026-09-07); `df -h /` → Use% ≤ 77%.
+6. **One command classifies either host** (workbench is the known-good control — expect `applied-and-live — 7`), now that the tool is on `main`:
+   ```bash
+   cd ~/workspace/devrc && git fetch -q origin main && \
+     git show origin/main:nix/system/preflight-tmp-churn-host.sh > /tmp/pf.sh && sudo bash /tmp/pf.sh
    ```
