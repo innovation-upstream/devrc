@@ -23,11 +23,27 @@ set -euo pipefail
 # were all shipped once and were invisible to the merge gate because this file
 # had no test and this repo has no shellcheck gate.
 #
-# `source`ing this file defines the helpers and RUNS NOTHING: BASH_SOURCE[0] is
-# always this file, while $0 is the sourcing shell's own name, so they differ
-# only when sourced. Executing it (`bash …`/`./…`) makes them equal and the
-# script proceeds exactly as before — the guard is not reachable from the
-# environment, so no stray variable can silently turn a real run into a no-op.
+# `source`ing this file defines the helpers and RUNS NOTHING. The seam test is
+# `(return 0 2>/dev/null)`: at the top level of a subshell, `return` SUCCEEDS
+# when the enclosing shell is executing a sourced file and FAILS otherwise, and
+# the diagnostic is discarded, so neither branch prints anything.
+#
+# 🔴 IT USED TO READ `[ "${BASH_SOURCE[0]}" != "$0" ]`, and the sentence that
+# stood here — "the guard is not reachable from the environment" — was FALSE.
+# bash imports BASH_SOURCE from the environment as an ordinary scalar, so
+# `env 'BASH_SOURCE=(nope)' bash scripts/diagnose-disk-accounting.sh` took the
+# SOURCED branch and hit `return` at top level: rc 2 and no report at all — and
+# rc 2 is this script's own "you forgot sudo" status, so two unrelated causes
+# shared one exit code. `bash < script` / `bash -s` was the mirror image:
+# BASH_SOURCE unset, `set -u`, dead on the guard's own line.
+#
+# MEASURED for the replacement (2026-09-07, bash 5.3 on this host): `bash FILE`,
+# `./FILE`, `bash < FILE`, `bash -s < FILE` and `env 'BASH_SOURCE=(nope)' bash
+# FILE` all take the EXECUTE branch; `source FILE` and `bash -c 'source FILE'`
+# take the sourced branch, with or without a poisoned BASH_SOURCE. `return`
+# reads no variable, so there is no variable left to poison. What is NOT
+# claimed: a caller that deliberately `source`s this file gets the no-op branch
+# — that is the seam doing its job, not a bypass.
 #
 # 🔴 `set -euo pipefail` above executes at SOURCE time and leaks into the
 # sourcing shell. The test suite re-asserts its own options immediately after
@@ -97,7 +113,14 @@ lsof_deleted_summary() {
 # carries — the one written specifically to stop a zero being mistaken for a
 # non-measurement — could never actually be reached. `|| rc=$?` keeps the status
 # without arming `set -e`.
-LSOF_BIN=${LSOF_BIN:-lsof}
+#
+# 🔴 `LSOF_BIN` IS SET AT THE SEAM, AND ONLY THE SOURCED BRANCH HONOURS AN
+# OVERRIDE. It used to be `LSOF_BIN=${LSOF_BIN:-lsof}` here, ABOVE the seam,
+# which is on the execute path: an inherited `LSOF_BIN=/anything` was then what
+# a ROOT run executed. In a script whose entire premise is that a local
+# unprivileged process must not be able to influence a root run, a test seam
+# that widens what root executes is backwards. The execute branch now pins
+# `LSOF_BIN=lsof` unconditionally and discards whatever the environment said.
 report_deleted_open_files() {
   local out rc=0
   if ! command -v "$LSOF_BIN" >/dev/null 2>&1; then
@@ -112,7 +135,40 @@ report_deleted_open_files() {
   fi
 }
 
-# Top-level entries of $1, largest first.
+# Device id of $1 IN DECIMAL, or empty. Its own function so the suite can
+# substitute a fixture-controlled device map without needing two real
+# filesystems.
+#
+# 🔴 DECIMAL (`%d`), NOT `%D`. `stat -c '%D'` is HEX; `find -printf '%D'` is
+# DECIMAL. The two breakdowns below compare a `stat` reading of the base against
+# find's per-entry reading, so a hex/decimal mismatch would silently classify
+# EVERY entry as foreign and print an empty section — the reassuring reading of
+# a broken instrument. One format, one helper, every comparison.
+_dev_of() { stat -c '%d' "$1" 2>/dev/null; }
+
+# Is $1 a usable device id? ONE place, because three callers below need the same
+# test — `size_breakdown`, `inode_breakdown` and `foreign_entries` — and a
+# predicate open-coded at three sites is typically wrong at two of them.
+#
+# 🔴 DIGITS, not merely non-empty. The value is interpolated into a `sed` script
+# by `_on_device` below, so a `/` or a `*` would silently change the expression
+# rather than fail. `stat -c '%d'` cannot produce one today — which is an
+# argument for checking it in one place, not for trusting it at three.
+_dev_is_valid() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+# Read a NUL-separated `<device>\t<path>` stream (find -printf '%D\t%p\0') on
+# stdin and emit, NUL-separated, only the paths whose device is $1.
+#
+# `sed -z` because the whole point of the NUL stream is names containing
+# newlines; a `while read` loop would be a `stat` fork per entry, and /tmp had
+# 171,886 top-level entries.
+_on_device() { sed -z -n "s/^$1\t//p"; }
+
+# The mirror image, for the blind-spot report: the depth-1 entries of the same
+# stream that are NOT on device $1.
+_not_on_device() { sed -z -n "/^$1\t/!{s/^[0-9]*\t//;p;}"; }
+
+# Top-level entries of $1 that are ON $1's OWN FILESYSTEM, largest first.
 #
 # 🔴 NOT `du -sh -x "$1"/*`. MEASURED 2026-09-02: /tmp held 171,886 top-level
 # entries = ~4.32 MiB of argv against an ARG_MAX of 2,097,152, so the glob dies
@@ -120,32 +176,113 @@ report_deleted_open_files() {
 # the WHOLE SCRIPT mid-section — sections 6d-inodes, 7 and 8 never run, and the
 # report ends with no error. That is the "truncated scan reported as a total"
 # failure this very script exists to prevent.
+#
+# 🔴 `-xdev` DOES LIST FOREIGN MOUNTPOINTS AT DEPTH 1 — it only stops find
+# DESCENDING past them. So a mount under /tmp arrives here as a starting point
+# for `du -sh -x`, which is the one case `du -x` cannot handle (see
+# `split_by_device` below: started ON a foreign mount, du walks all of it), and
+# its whole size lands in a figure an operator reads as root-fs /tmp usage.
+# Defect 7 was fixed for /home in section 6c and left standing here. Same fix:
+# compare each candidate's device against the base's and drop the foreign ones.
+# `-x` is KEPT as well — belt and braces for anything mounted BELOW depth 1.
+#
+# 🔴 BOTH STAGES ARE `|| true`, AND THEY ARE TWO DIFFERENT ABORTS.
+#   (a) `find` exits 1 when an entry disappears between readdir and stat. On the
+#       host this was written for /tmp holds ~270,000 churning entries, and
+#       section 4's own counter calls those ENOENTs "benign, transient".
+#   (b) `xargs` exits 123 when ANY `du` it ran exited 1 — which is what happens
+#       when the entry vanishes a moment later, or is simply unreadable.
+# Either one is eaten by `2>/dev/null`, promoted by `pipefail` and fatal under
+# `set -e`: sections 6d-inodes, 7 and 8 never print and the report ends with no
+# error. MEASURED 2026-09-07: (a) rc 1, (b) rc 123, each reproducible on its own.
+# That is the same truncated-scan failure as E2BIG and SIGPIPE, reached by a
+# third and a fourth route. What is tolerated is per-ENTRY failure; a total
+# failure is still visible, as an empty section.
 size_breakdown() {
-  find "$1" -xdev -mindepth 1 -maxdepth 1 -print0 2>/dev/null \
-    | xargs -0 -r du -sh -x 2>/dev/null | sort -rh | head_n 15
+  local base="$1" dev
+  dev=$(_dev_of "$base")
+  if ! _dev_is_valid "$dev"; then
+    echo "COULD NOT MEASURE: no device id for $base — NOT an empty directory"
+    return 0
+  fi
+  { find "$base" -xdev -mindepth 1 -maxdepth 1 -printf '%D\t%p\0' 2>/dev/null || true; } \
+    | _on_device "$dev" \
+    | { xargs -0 -r du -sh -x 2>/dev/null || true; } \
+    | sort -rh | head_n 15
 }
 
-# Inode count per top-level DIRECTORY of $1, largest first.
+# Inode count per top-level DIRECTORY of $1 that is on $1's OWN filesystem,
+# largest first.
 #
 # 🔴 NOT `xargs -I{} sh -c '… "{}" …'`. That substitutes the directory NAME into
 # a shell string, and /tmp is mode 1777, and this script demands sudo — so any
 # local process could plant a directory whose name is a command and get it run
 # AS ROOT. VERIFIED 2026-09-02: a dir named `evil";echo PWNED-AS-$(id -un) >&2;"x`
-# made the old pipeline print PWNED-AS-zach. -exec with "$1" passes the name as
-# an ARGUMENT, never as text to parse.
+# made the old pipeline print PWNED-AS-zach.
+#
+# `xargs -0 -r -n1 sh -c '…' _` is the SAFE xargs form and `-I{}` is the unsafe
+# one; the difference is not cosmetic. `-n1 … _` appends the name to sh's argv,
+# where it lands in "$1" and is never parsed as text. `-I{}` splices it into the
+# script STRING before sh ever sees it. This used to be `find … -exec sh -c '…'
+# _ {} \;`, which is equally safe; it changed only because the device filter has
+# to sit between the enumeration and the per-directory walk.
+#
+# 🔴 NO `2>/dev/null` ON THE xargs STAGE, deliberately. The inner `find` already
+# has its own; a blanket one here would swallow whatever the per-directory shell
+# writes to stderr — and the historical defect's own proof of execution was a
+# planted name printing `PWNED-AS-root` to STDERR. MEASURED: with `2>/dev/null`
+# added back, the injection mutant in the battery is scored WRONG-KILLER,
+# because the guard that watches for the expansion can no longer see it. A
+# `2>/dev/null` that hides the evidence for the guard above it is not tidiness.
+#
+# The device filter and the two `|| true`s are the same two defects as
+# `size_breakdown` above; read its comment.
 inode_breakdown() {
-  find "$1" -xdev -mindepth 1 -maxdepth 1 -type d \
-    -exec sh -c 'printf "%12d  %s\n" "$(find "$1" -xdev -printf . 2>/dev/null | wc -c)" "$1"' _ {} \; 2>/dev/null \
+  local base="$1" dev
+  dev=$(_dev_of "$base")
+  if ! _dev_is_valid "$dev"; then
+    echo "COULD NOT MEASURE: no device id for $base — NOT an empty directory"
+    return 0
+  fi
+  { find "$base" -xdev -mindepth 1 -maxdepth 1 -type d -printf '%D\t%p\0' 2>/dev/null || true; } \
+    | _on_device "$dev" \
+    | { xargs -0 -r -n1 sh -c 'printf "%12d  %s\n" "$(find "$1" -xdev -printf . 2>/dev/null | wc -c)" "$1"' _ || true; } \
     | sort -rn | head_n 15
 }
 
-# Device id of $1, or empty. Its own function so the suite can substitute a
-# fixture-controlled device map without needing two real filesystems.
-_dev_of() { stat -c '%D' "$1" 2>/dev/null; }
+# The depth-1 entries of $1 that the two breakdowns above SKIPPED, because they
+# are on another filesystem.
+#
+# 🔴 THIS EXISTS BECAUSE THE DEVICE FILTER CREATED A BLIND SPOT. Excluding a
+# foreign mount is right — its size is not root-fs usage — but excluding it
+# SILENTLY is the exact failure this whole file catalogues: a floor presented as
+# a total. Section 6c already prints the same listing for /home, and its "none
+# found" branch is deliberately loud for the same reason. A section that drops
+# what it could not count without saying so is worse than one that never tried.
+foreign_entries() {
+  local base="$1" dev out
+  dev=$(_dev_of "$base")
+  if ! _dev_is_valid "$dev"; then
+    echo "  COULD NOT MEASURE: no device id for $base — NOT an absence of foreign mounts"
+    return 0
+  fi
+  out=$({ find "$base" -xdev -mindepth 1 -maxdepth 1 -printf '%D\t%p\0' 2>/dev/null || true; } \
+        | _not_on_device "$dev" | tr '\0' '\n' | head_n 15)
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out" | sed 's/^/  /'
+  else
+    echo "  none — every depth-1 entry is on the same filesystem as $base"
+  fi
+}
 
-# Partition the directories under $1 by filesystem: on-root candidates into $2
-# (NUL-separated, ready for `xargs -0`), foreign ones into $3 (one per line).
-# $4 is the root device id.
+# Partition the directories under $1 by filesystem: on-root candidates into $2,
+# foreign ones into $3. BOTH are NUL-separated — $2 because it is fed to
+# `xargs -0`, $3 because it used to be one-per-line and a directory named with
+# an embedded newline then split into two garbled rows in the report. Wrong
+# report line rather than wrong execution, but /home is user-writable and this
+# script is run under sudo, so "the operator reads a line I chose" is not a
+# property worth leaving to chance. `report_foreign_mounts` reads it with
+# `read -r -d ''`. $4 is the root device id.
 #
 # 🔴 `du -x` only stops du CROSSING AWAY from its starting point. When the
 # starting point IS a foreign mount, du walks the whole thing: the 2026-09-01
@@ -172,7 +309,7 @@ split_by_device() {
     d=$(_dev_of "$p") || continue
     [ -n "$d" ] || continue
     if [ "$d" = "$root_dev" ]; then printf '%s\0' "$p" >> "$onroot"
-    else printf '%s\n' "$p" >> "$foreign"; fi
+    else printf '%s\0' "$p" >> "$foreign"; fi
   done
 }
 
@@ -182,7 +319,7 @@ split_by_device() {
 report_foreign_mounts() {
   local p
   if [ -s "$1" ]; then
-    while IFS= read -r p; do
+    while IFS= read -r -d '' p; do
       printf '  %-40s %s\n' "$p" "$(findmnt -n -o SOURCE,FSTYPE,SIZE,USED --target "$p" 2>/dev/null | head_n 1)"
     done < "$1"
   else
@@ -226,9 +363,14 @@ report_denials() {
 }
 
 # --- end of the sourceable seam ---------------------------------------------
-if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+# See the header for why this is `(return …)` and not `${BASH_SOURCE[0]}`, and
+# for what was measured. The `LSOF_BIN` override is deliberately INSIDE this
+# branch: only a sourced run may choose the binary.
+if (return 0 2>/dev/null); then
+  LSOF_BIN=${LSOF_BIN:-lsof}
   return 0
 fi
+LSOF_BIN=lsof
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "FATAL: must run as root — an unprivileged run silently skips the trees" >&2
@@ -333,9 +475,15 @@ echo "=== 5. k3s local-path PVCs (unreadable without root; the prior '1.7GB' cla
 if [ -d /var/lib/rancher/k3s/storage ]; then
   # Same NUL-safe enumeration as size_breakdown, for the same reason: a glob
   # expanded into `du` is an E2BIG waiting for the directory to grow, and this
-  # one is bounded only by how many PVCs the node happens to hold.
-  find /var/lib/rancher/k3s/storage -xdev -mindepth 1 -maxdepth 1 -print0 2>/dev/null \
-    | xargs -0 -r du -sh --exclude=/mnt 2>/dev/null | sort -rh | head_n 30
+  # one is bounded only by how many PVCs the node happens to hold. Same two
+  # `|| true`s too — find exits 1 on a PVC directory that is unlinked mid-scan,
+  # xargs exits 123 when a `du` under it does, and either kills the report.
+  #
+  # No device filter here, unlike section 6d: these are k3s local-path PVC
+  # directories, which are by construction on the node's own filesystem. If that
+  # ever stops being true this needs the same treatment.
+  { find /var/lib/rancher/k3s/storage -xdev -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true; } \
+    | { xargs -0 -r du -sh --exclude=/mnt 2>/dev/null || true; } | sort -rh | head_n 30
   echo "--- total ---"
   du -sh /var/lib/rancher/k3s/storage 2>/dev/null
   echo "--- inodes per PVC (top 15) ---"
@@ -377,7 +525,10 @@ ROOT_DEV=$(_dev_of /)
 ONROOT_LIST=$(mktemp) && FOREIGN_LIST=$(mktemp) || { rm -f "${ONROOT_LIST:-}"; exit 3; }
 trap 'rm -f "$DENIED_LOG" "$ONROOT_LIST" "$FOREIGN_LIST"' EXIT
 split_by_device /home "$ONROOT_LIST" "$FOREIGN_LIST" "$ROOT_DEV"
-xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>/dev/null | sort -rh | head_n 15
+# `|| true` for the same reason as section 6d: xargs exits 123 when any `du` it
+# ran exited 1, which is what a /home directory unlinked mid-scan produces, and
+# `pipefail` + `set -e` would take the whole report with it.
+{ xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>/dev/null || true; } | sort -rh | head_n 15
 echo "--- NOT on the root filesystem, so NOT part of this accounting ---"
 report_foreign_mounts "$FOREIGN_LIST"
 
@@ -390,6 +541,8 @@ echo "--- top 15 by allocated size ---"
 size_breakdown /tmp
 echo "--- top 15 by inode count ---"
 inode_breakdown /tmp
+echo "--- NOT on the root filesystem, so EXCLUDED from the two lists above ---"
+foreign_entries /tmp
 echo "--- entry-name families (what is generating them) ---"
 ls -A /tmp 2>/dev/null | sed -E 's/[0-9]{3,}.*$//; s/[A-Za-z0-9]{8,}$//' \
   | sort | uniq -c | sort -rn | head_n 20

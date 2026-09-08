@@ -40,7 +40,12 @@ fail() { echo "  FAIL: $*"; FAILED=1; }
 pass() { echo "  ok: $*"; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# 🔴 `chmod -R u+rwX` BEFORE the `rm -rf`. Section 4b deliberately builds
+# unreadable fixture directories (mode 0400 / 000) so that `find` and `du` fail
+# for real, and `rm -rf` cannot unlink through them. Without this the temp tree
+# survives every run that dies before the fixture is chmodded back — a leak that
+# looks like nothing and accumulates.
+trap 'chmod -R u+rwX "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 
 # 🔴 Resolve the interpreter ONCE, absolutely, from the RUNNING shell. `$BASH`
 # is what is executing this file; `command -v bash` would resolve through the
@@ -89,7 +94,8 @@ set +e
 set -uo pipefail
 
 for fn in lsof_deleted_summary report_deleted_open_files size_breakdown \
-          inode_breakdown _dev_of split_by_device report_foreign_mounts \
+          inode_breakdown _dev_of _dev_is_valid _on_device _not_on_device \
+          foreign_entries split_by_device report_foreign_mounts \
           report_denials; do
   if declare -F "$fn" >/dev/null; then pass "helper $fn is sourceable"
   else fail "helper $fn is NOT defined after sourcing"; fi
@@ -106,6 +112,47 @@ else
   [ "$refuse_rc" -eq 2 ] && pass "non-root execution exits 2" \
     || fail "non-root execution exited $refuse_rc, expected 2"
   has "refusal names root on stderr" "$refuse_err" "must run as root"
+
+  # ------------------------------------------------------------------------- #
+  echo "== 1b. THE SEAM IS NOT REACHABLE FROM THE ENVIRONMENT =="
+  # 🔴 THE DEFECT: the seam used to be `[ "${BASH_SOURCE[0]}" != "$0" ]`, and the
+  # script's own header asserted that "the guard is not reachable from the
+  # environment". MEASURED FALSE. bash imports BASH_SOURCE from the environment
+  # as an ordinary scalar, so a stray `BASH_SOURCE` in the env made an EXECUTED
+  # run take the sourced branch and `return` at top level — rc 2, no report.
+  # rc 2 is also this script's "you forgot sudo" status, so the two causes were
+  # indistinguishable to the operator. `bash < script` was the mirror image:
+  # BASH_SOURCE unset under `set -u`, dead on the guard's own line, rc 1.
+  #
+  # 🔴 EACH CASE ASSERTS THE STATUS **AND** THE MESSAGE. rc 2 alone cannot tell
+  # "refused because not root" from "returned at top level", which is the whole
+  # reason this defect was invisible — so the refusal text is what discriminates.
+  env_err="$(env 'BASH_SOURCE=(nope)' "$BASH_BIN" "$SCRIPT" 2>&1 >/dev/null)"; env_rc=$?
+  [ "$env_rc" -eq 2 ] && pass "a poisoned BASH_SOURCE still reaches the root refusal (rc 2)" \
+    || fail "env BASH_SOURCE=... execution exited $env_rc, expected 2"
+  has "the poisoned run refuses for the RIGHT reason" "$env_err" "must run as root"
+  lacks "the poisoned run does not 'return' at top level" "$env_err" "can only 'return'"
+
+  # `bash < FILE` and `bash -s < FILE`: BASH_SOURCE is UNSET, so the old guard
+  # died on `set -u` before printing anything. Base ran fine this way, which
+  # makes this a genuine (narrow) regression the old form introduced.
+  stdin_err="$("$BASH_BIN" < "$SCRIPT" 2>&1 >/dev/null)"; stdin_rc=$?
+  [ "$stdin_rc" -eq 2 ] && pass "bash < script reaches the root refusal (rc 2)" \
+    || fail "bash < script exited $stdin_rc, expected 2"
+  has "the stdin run refuses for the RIGHT reason" "$stdin_err" "must run as root"
+  lacks "the stdin run does not die on an unbound BASH_SOURCE" "$stdin_err" "unbound variable"
+
+  dash_s_err="$("$BASH_BIN" -s < "$SCRIPT" 2>&1 >/dev/null)"; dash_s_rc=$?
+  [ "$dash_s_rc" -eq 2 ] && pass "bash -s < script reaches the root refusal (rc 2)" \
+    || fail "bash -s < script exited $dash_s_rc, expected 2"
+
+  # 🔴 THE OTHER HALF, or the fix above would be satisfied by a seam that never
+  # takes the sourced branch at all — which would silently make every helper
+  # assertion in this file a claim about a script that had already run the whole
+  # report. A poisoned BASH_SOURCE must NOT stop a genuine `source` working.
+  poisoned_src="$(env 'BASH_SOURCE=(nope)' "$BASH_BIN" -c "source '$SCRIPT' 2>&1; echo STILL-SOURCES")"
+  eq "a genuine source still no-ops, poisoned environment and all" \
+     "$poisoned_src" "STILL-SOURCES"
 fi
 
 # --------------------------------------------------------------------------- #
@@ -193,6 +240,31 @@ has "no-rows message is REACHABLE" "$probe_out" \
 has "the report continues past section 7" "$probe_out" "SECTION-8-WAS-REACHED"
 
 # --------------------------------------------------------------------------- #
+echo "== 2c. LSOF_BIN is a SOURCED-ONLY seam; a root run must not inherit it =="
+# 🔴 THE DEFECT: `LSOF_BIN=${LSOF_BIN:-lsof}` sat ABOVE the seam, so it was
+# honoured on the EXECUTE path too — an inherited `LSOF_BIN=/anything` was what
+# a ROOT run would then execute. Base hardcoded `lsof`. In a script whose whole
+# premise is that a local unprivileged process must not be able to influence a
+# root run, a TEST seam that widens what root executes is backwards.
+#
+# 🔴 OBSERVED THROUGH `bash -x`, because the execute path exits 2 at the root
+# check before it prints anything of its own. xtrace shows the assignment as it
+# is evaluated, so this is the REAL script executed exactly as an operator would
+# (minus sudo) — not a copy, not a stub.
+PWNED_LSOF="/pwned-lsof-$$"
+xt="$(env "LSOF_BIN=$PWNED_LSOF" "$BASH_BIN" -x "$SCRIPT" 2>&1 >/dev/null)"
+has "the execute path pins LSOF_BIN=lsof" "$xt" "LSOF_BIN=lsof"
+lacks "the execute path DISCARDS an inherited LSOF_BIN" "$xt" "$PWNED_LSOF"
+
+# 🔴 POSITIVE CONTROL. Without it, "the override is ignored" would also be
+# satisfied by a seam that ignores it EVERYWHERE — which would quietly make
+# section 2b's fake-lsof probe untestable rather than fixed.
+srcd_lsof="$(env "LSOF_BIN=$PWNED_LSOF" "$BASH_BIN" -c "source '$SCRIPT'; printf '%s' \"\${LSOF_BIN}\"")"
+eq "POSITIVE CONTROL: the SOURCED path still honours LSOF_BIN" "$srcd_lsof" "$PWNED_LSOF"
+srcd_default="$("$BASH_BIN" -c "unset LSOF_BIN; source '$SCRIPT'; printf '%s' \"\${LSOF_BIN}\"")"
+eq "the sourced path defaults to lsof when nothing overrides it" "$srcd_default" "lsof"
+
+# --------------------------------------------------------------------------- #
 echo "== 3. ROOT COMMAND INJECTION via a planted directory name =="
 # 🔴 THE DEFECT: `xargs -I{} sh -c '… "{}" …'` substitutes the filename into a
 # SHELL STRING. /tmp is mode 1777 and this script's header mandates sudo, so any
@@ -257,9 +329,24 @@ if [ "$NEED" -gt 60000 ]; then
   fail "COULD NOT MEASURE: ARG_MAX=$ARGMAX would need $NEED fixture files; refusing to build them. This guard did NOT run."
 else
   seq 1 "$NEED" | awk -v d="$BIG" -v p="$PAD" '{printf "%s/%s%06d\n", d, p, $1}' | xargs -d'\n' touch
+  # 🔴 THE FIXTURE MUST CONTAIN DIRECTORIES, and it used not to. It was
+  # `touch`ed FILES only, and `inode_breakdown` filters `-type d` — so it
+  # returned ZERO rows over this fixture, the `inode_breakdown "$BIG"` call in
+  # the SIGPIPE probe below measured nothing, and the whole battery row was
+  # killed by `size_breakdown` alone. Vacuous, and it read as coverage.
+  #
+  # 600 is not arbitrary: each row is ~12 + 2 + ~220 bytes, so 600 rows is
+  # ~140 KiB of `sort` output against a 64 KiB pipe buffer. Under 258 rows the
+  # whole output fits one write that completes before `head` exits and the
+  # SIGPIPE abort does NOT fire — the same size-dependence measured for
+  # `size_breakdown` at 40 vs 20,000 entries. A fixture under the buffer would
+  # certify the defect absent.
+  NDIRS=600
+  seq 1 "$NDIRS" | awk -v d="$BIG" -v p="$PAD" '{printf "%s/%sd%05d\n", d, p, $1}' | xargs -d'\n' mkdir -p
   made="$(find "$BIG" -mindepth 1 -maxdepth 1 | wc -l)"
-  [ "$made" -eq "$NEED" ] && pass "fixture built: $made top-level entries (ARG_MAX=$ARGMAX)" \
-    || fail "fixture build produced $made entries, wanted $NEED"
+  want=$(( NEED + NDIRS ))
+  [ "$made" -eq "$want" ] && pass "fixture built: $made top-level entries, $NDIRS of them directories (ARG_MAX=$ARGMAX)" \
+    || fail "fixture build produced $made entries, wanted $want"
 
   # 🔴 POSITIVE CONTROL. If the glob does NOT die here, the fixture is under the
   # limit and the assertion below proves nothing about E2BIG.
@@ -275,6 +362,16 @@ else
   [ "$big_lines" -eq 15 ] && pass "size_breakdown still returns its top-15 rows" \
     || fail "size_breakdown returned $big_lines rows, expected 15"
 
+  # 🔴 NON-VACUITY CHECK FOR THE FIXTURE ITSELF, not for the code. If this ever
+  # reads 0, every `inode_breakdown "$BIG"` in this file is measuring an empty
+  # pipeline and says nothing about `inode_breakdown`.
+  ino_out="$(inode_breakdown "$BIG" 2>&1)"; ino_rc=$?
+  [ "$ino_rc" -eq 0 ] && pass "inode_breakdown survives $made entries (rc 0)" \
+    || fail "inode_breakdown exited $ino_rc on $made entries"
+  ino_lines="$(printf '%s\n' "$ino_out" | grep -c . )"
+  [ "$ino_lines" -eq 15 ] && pass "inode_breakdown returns its top-15 rows over the big fixture" \
+    || fail "inode_breakdown returned $ino_lines rows, expected 15 — the fixture has no directories, so every inode_breakdown call over it is VACUOUS"
+
   # 🔴 THE SECOND ROUTE TO THE SAME FAILURE, and it is LIVE, not historical.
   # `<producer> | sort | head -N` under `pipefail` is a SIZE-DEPENDENT abort:
   # head exits after N lines, the producer blocks on its next write, takes
@@ -284,18 +381,97 @@ else
   # so a small-fixture test would have certified the defect as absent. The real
   # /tmp had 171,886 entries. This probe runs the script's own `set -euo
   # pipefail` over the big fixture and demands the marker AFTER it.
+  # 🔴 TWO PROBES, ONE PER BREAKDOWN. A single probe calling both would let
+  # `size_breakdown` kill every mutant on its own and leave `inode_breakdown`'s
+  # own truncation unguarded — which is exactly what the combined probe did
+  # while the fixture held no directories.
   cat > "$TMP/sigpipe-probe.sh" <<PROBE
 set -euo pipefail
 source "$SCRIPT"
 size_breakdown "$BIG" >/dev/null
-inode_breakdown "$BIG" >/dev/null
 echo "NEXT-SECTION-WAS-REACHED"
 PROBE
   sp_out="$("$BASH_BIN" "$TMP/sigpipe-probe.sh" 2>&1)"; sp_rc=$?
-  [ "$sp_rc" -eq 0 ] && pass "the breakdowns do not SIGPIPE the run away (rc 0 at $made entries)" \
+  [ "$sp_rc" -eq 0 ] && pass "the size breakdown does not SIGPIPE the run away (rc 0 at $made entries)" \
     || fail "the run died rc $sp_rc walking $made entries — a truncated scan with no message"
-  has "the report continues past the /tmp breakdown" "$sp_out" "NEXT-SECTION-WAS-REACHED"
+  has "the report continues past the /tmp size breakdown" "$sp_out" "NEXT-SECTION-WAS-REACHED"
+
+  cat > "$TMP/sigpipe-inode-probe.sh" <<PROBE
+set -euo pipefail
+source "$SCRIPT"
+inode_breakdown "$BIG" >/dev/null
+echo "INODE-SECTION-WAS-REACHED"
+PROBE
+  ip_out="$("$BASH_BIN" "$TMP/sigpipe-inode-probe.sh" 2>&1)"; ip_rc=$?
+  [ "$ip_rc" -eq 0 ] && pass "the inode breakdown does not SIGPIPE the run away (rc 0 over $NDIRS directories)" \
+    || fail "the inode breakdown died rc $ip_rc over $NDIRS directories — a truncated scan with no message"
+  has "the report continues past the /tmp inode breakdown" "$ip_out" "INODE-SECTION-WAS-REACHED"
 fi
+
+# --------------------------------------------------------------------------- #
+echo "== 4b. a find or a du that FAILS mid-scan must not kill the run =="
+# 🔴 THE THIRD AND FOURTH ROUTES to the same truncated-scan failure, and both
+# are LIVE on the host this script targets, where /tmp holds ~270,000 churning
+# top-level entries and section 4's own counter already calls the resulting
+# ENOENTs "vanished mid-scan (benign, transient)".
+#   (a) GNU `find` exits 1 when an entry disappears between readdir and stat.
+#   (b) `xargs` exits 123 when ANY command it ran exited 1-125 — the same
+#       vanished entry, one step later, reached through `du`.
+# `2>/dev/null` eats the message, `pipefail` promotes the status and `set -e`
+# kills the run: sections 6d-inodes, 7 and 8 never print and the report ends
+# with NO error. Same failure as E2BIG and SIGPIPE, two more ways in.
+#
+# 🔴 DETERMINISTIC FIXTURES — no background deleter, so no flake:
+#   ERRDIR is mode 0400. readdir succeeds (r) but stat of each entry needs x, so
+#   `find` errors per entry and exits 1. Isolates route (a).
+#   LOCKDIR holds a mode-000 subdirectory. `find` stats it fine and exits 0;
+#   `du` cannot read it and exits 1, so `xargs` exits 123 — while the readable
+#   sibling still produces a row. Isolates route (b), WITH partial output.
+# Both depend on not being root, which section 1 already refuses to paper over,
+# and each carries its own positive control below.
+ERRDIR="$TMP/find-errors"
+mkdir -p "$ERRDIR/sub-a" "$ERRDIR/sub-b"; touch "$ERRDIR/f"
+chmod 400 "$ERRDIR"
+LOCKDIR="$TMP/du-errors"
+mkdir -p "$LOCKDIR/locked" "$LOCKDIR/open"; touch "$LOCKDIR/open/f"
+chmod 000 "$LOCKDIR/locked"
+
+find "$ERRDIR" -xdev -mindepth 1 -maxdepth 1 -printf '%D\t%p\0' >/dev/null 2>&1; a_rc=$?
+[ "$a_rc" -ne 0 ] && pass "POSITIVE CONTROL (a): find really exits $a_rc on the 0400 fixture" \
+  || fail "POSITIVE CONTROL (a) FAILED: find exited 0 over the 0400 fixture — every route-(a) assertion below is vacuous"
+du -sh -x "$LOCKDIR/locked" >/dev/null 2>&1; b_rc=$?
+[ "$b_rc" -ne 0 ] && pass "POSITIVE CONTROL (b): du really exits $b_rc on the mode-000 subdirectory" \
+  || fail "POSITIVE CONTROL (b) FAILED: du exited 0 on an unreadable directory — every route-(b) assertion below is vacuous"
+
+cat > "$TMP/finderr-probe.sh" <<PROBE
+set -euo pipefail
+source "$SCRIPT"
+size_breakdown "$ERRDIR" >/dev/null
+echo "PAST-SIZE-OVER-A-FAILING-FIND"
+inode_breakdown "$ERRDIR" >/dev/null
+echo "PAST-INODE-OVER-A-FAILING-FIND"
+size_breakdown "$LOCKDIR" >/dev/null
+echo "PAST-SIZE-OVER-A-FAILING-DU"
+inode_breakdown "$LOCKDIR" >/dev/null
+echo "PAST-INODE-OVER-A-FAILING-DU"
+PROBE
+fe_out="$("$BASH_BIN" "$TMP/finderr-probe.sh" 2>&1)"; fe_rc=$?
+# 🔴 The FAIL text must not share a prefix with section 4's SIGPIPE probe
+# ("the run died rc …"): the mutation battery scores each row on whether ITS OWN
+# guard's FAIL line appeared, matched as a fixed-string prefix, so two guards
+# with one prefix would let a mutant be credited to the wrong one.
+[ "$fe_rc" -eq 0 ] && pass "a failing find/du does not abort the run (rc 0)" \
+  || fail "a failing find/du aborted the run, rc $fe_rc — a truncated scan with no message"
+has "route (a): the report continues past a failing find in size_breakdown" "$fe_out" "PAST-SIZE-OVER-A-FAILING-FIND"
+has "route (a): the report continues past a failing find in inode_breakdown" "$fe_out" "PAST-INODE-OVER-A-FAILING-FIND"
+has "route (b): the report continues past a failing du in size_breakdown" "$fe_out" "PAST-SIZE-OVER-A-FAILING-DU"
+has "route (b): the report continues past a failing du in inode_breakdown" "$fe_out" "PAST-INODE-OVER-A-FAILING-DU"
+
+# 🔴 SURVIVING IS NOT ENOUGH — the readable entries must still be REPORTED, or
+# the tolerance would have turned one truncated scan into another.
+lock_out="$(size_breakdown "$LOCKDIR" 2>/dev/null)"
+has "route (b): the readable sibling still produces a row" "$lock_out" "$LOCKDIR/open"
+chmod 700 "$ERRDIR"; chmod 700 "$LOCKDIR/locked"
 
 # --------------------------------------------------------------------------- #
 echo "== 5. /home split by DEVICE, and the foreign list must survive the loop =="
@@ -313,28 +489,39 @@ echo "== 5. /home split by DEVICE, and the foreign list must survive the loop ==
 # The real-`stat` check runs FIRST, on purpose: the fixture cases below replace
 # `_dev_of`, and if that replacement came first this suite would be asserting
 # against its own stub and would pass with the script's implementation deleted.
-real_dev="$(stat -c '%D' / 2>/dev/null)"
-eq "_dev_of / agrees with stat -c %D /" "$(_dev_of /)" "$real_dev"
+#
+# 🔴 DECIMAL, NOT HEX. `_dev_of` is `stat -c '%d'` and the /tmp breakdowns
+# compare it against `find -printf '%D'`, which is decimal. `stat -c '%D'` is
+# HEX: had the helper kept it, every candidate would compare unequal and both
+# breakdowns would print an EMPTY section — the reassuring reading of a broken
+# instrument. So this checks the FORMAT, not just that the helper answers.
+real_dev="$(stat -c '%d' / 2>/dev/null)"
+eq "_dev_of / agrees with stat -c %d / (decimal)" "$(_dev_of /)" "$real_dev"
+eq "_dev_of agrees with find's own %D for the same path" \
+   "$(_dev_of "$TMP")" "$(find "$TMP" -maxdepth 0 -printf '%D')"
 mkdir -p "$TMP/sibling"
 eq "_dev_of is stable for two paths on one filesystem" \
-   "$(_dev_of "$TMP/sibling")" "$(stat -c '%D' "$TMP")"
+   "$(_dev_of "$TMP/sibling")" "$(stat -c '%d' "$TMP")"
 
 HOMEFIX="$TMP/homefix"
 mkdir -p "$HOMEFIX/zach/onroot-a" "$HOMEFIX/zach/foreign-b" \
          "$HOMEFIX/zach/.onroot-hidden" "$HOMEFIX/other/foreign-c"
 touch "$HOMEFIX/zach/a-plain-file"
-# Fixture device map. `801` is the real device id of /dev/sda1 on the host this
-# defect was measured on; `10308` is root's. Distinct from each other and from
-# any value `stat` could return for these paths, so a mutant that dropped the
-# comparison and kept everything (or dropped everything) is visibly wrong.
+# Fixture device map, in the DECIMAL form `_dev_of` really returns. The two
+# values are distinct from each other and far outside the range `stat` could
+# return for a real path here, so a mutant that dropped the comparison and kept
+# everything (or dropped everything) is visibly wrong. `999000001` is the
+# stand-in for a foreign disk, `999000002` for root.
+FOREIGN_DEV=999000001
+ROOTISH_DEV=999000002
 _dev_of() {
   case "$1" in
-    */foreign-b|*/foreign-c) printf '801\n' ;;
-    *) printf '10308\n' ;;
+    */foreign-b|*/foreign-c) printf '%s\n' "$FOREIGN_DEV" ;;
+    *) printf '%s\n' "$ROOTISH_DEV" ;;
   esac
 }
 ON="$TMP/onroot.lst"; FG="$TMP/foreign.lst"
-split_by_device "$HOMEFIX" "$ON" "$FG" "10308"
+split_by_device "$HOMEFIX" "$ON" "$FG" "$ROOTISH_DEV"
 
 # 🔴 `LC_ALL=C`. Under the host's en_US.UTF-8 collation `sort` ignores leading
 # punctuation, so `.onroot-hidden` sorts AFTER `onroot-a`; under the C locale
@@ -342,7 +529,7 @@ split_by_device "$HOMEFIX" "$ON" "$FG" "10308"
 # comparison passes on one tier and fails on the other — the config-blind-suite
 # failure, in the harness rather than the subject.
 on_list="$(tr '\0' '\n' < "$ON" | LC_ALL=C sort)"
-fg_list="$(LC_ALL=C sort < "$FG")"
+fg_list="$(tr '\0' '\n' < "$FG" | LC_ALL=C sort)"
 eq "on-root list holds exactly the root-device dirs (hidden included)" "$on_list" \
    "$(printf '%s\n%s\n' "$HOMEFIX/zach/.onroot-hidden" "$HOMEFIX/zach/onroot-a")"
 eq "foreign list holds exactly the foreign-device dirs" "$fg_list" \
@@ -355,6 +542,9 @@ lacks "a plain FILE is not treated as a directory" "$on_list$fg_list" "a-plain-f
 nul_count="$(tr -dc '\0' < "$ON" | wc -c)"
 [ "$nul_count" -eq 2 ] && pass "on-root list is NUL-separated (2 records)" \
   || fail "on-root list has $nul_count NUL separators, expected 2"
+fg_nul_count="$(tr -dc '\0' < "$FG" | wc -c)"
+[ "$fg_nul_count" -eq 2 ] && pass "foreign list is NUL-separated too (2 records)" \
+  || fail "foreign list has $fg_nul_count NUL separators, expected 2"
 
 # 🔴 THE ACCUMULATOR GUARD, stated behaviourally: with foreign mounts present the
 # report must NAME them. "none found" here was the subshell bug, and it is the
@@ -370,6 +560,122 @@ lacks "foreign report does NOT claim 'none found'" "$fm_out" "none found"
 none_out="$(report_foreign_mounts "$TMP/empty.lst" 2>/dev/null)"
 has "POSITIVE CONTROL: an empty list does print the loud 'none' line" \
     "$none_out" "none found — on a host with foreign mounts under /home this is a BUG"
+
+# --------------------------------------------------------------------------- #
+echo "== 5b. a directory name with a NEWLINE is ONE foreign record, not two =="
+# 🔴 THE DEFECT: `split_by_device` wrote the on-root list NUL-separated (it is
+# fed to `xargs -0`) but the FOREIGN list one-per-line, read back with
+# `while IFS= read -r`. A directory named with an embedded newline therefore
+# split into two rows in the report — and the second row is a fragment that
+# reads as a real path. /home is user-writable and this script runs under sudo,
+# so which lines the operator reads is not a thing to leave to chance.
+NLFIX="$TMP/nlfix"
+NLNAME="$(printf 'two\nlines')"
+mkdir -p "$NLFIX/u/$NLNAME"
+_dev_of() { case "$1" in "$NLFIX"/u/*) printf '%s\n' "$FOREIGN_DEV" ;; *) printf '%s\n' "$ROOTISH_DEV" ;; esac; }
+split_by_device "$NLFIX" "$TMP/nl-on.lst" "$TMP/nl-fg.lst" "$ROOTISH_DEV"
+nl_records="$(tr -dc '\0' < "$TMP/nl-fg.lst" | wc -c)"
+[ "$nl_records" -eq 1 ] && pass "one directory with a newline in its name is ONE record" \
+  || fail "the foreign list holds $nl_records records for a single directory — the name was split"
+nl_out="$(report_foreign_mounts "$TMP/nl-fg.lst" 2>/dev/null)"
+has "the foreign report prints the whole name, not a fragment" "$nl_out" "$NLFIX/u/$NLNAME"
+
+# --------------------------------------------------------------------------- #
+echo "== 5c. section 6d must DROP a foreign mount listed at depth 1 =="
+# 🔴 DEFECT 7, THE HALF THAT WAS LEFT STANDING. `-xdev` only stops find
+# DESCENDING past a mount; it still LISTS the mountpoint itself at depth 1. So a
+# mount under /tmp arrived as a STARTING POINT for `du -sh -x` — precisely the
+# case `du -x` cannot handle (see section 5(a)) — and its entire size landed in
+# a figure the report labels as root-fs /tmp usage. Section 6c fixed this for
+# /home; 6d, the section an operator actually acts on, did not.
+#
+# 🔴 A SECOND FILESYSTEM NEEDS ROOT, so what is stubbed is the device READING,
+# not the filesystem: `_dev_of` is the same seam section 5 uses, while
+# `find -printf '%D'` inside the helper still reports the fixture's REAL device.
+# Pointing `_dev_of` at a value no entry can have is therefore behaviourally
+# identical to every entry being a foreign mount — and pointing it at the real
+# `stat` reading is the on-root case. Both directions are asserted, so a mutant
+# that drops the filter AND a mutant that drops everything are both visible.
+DEVFIX="$TMP/devfix"
+mkdir -p "$DEVFIX/one" "$DEVFIX/two" "$DEVFIX/three"
+touch "$DEVFIX/one/f" "$DEVFIX/two/f" "$DEVFIX/three/f"
+UNREACHABLE_DEV=999000003
+
+# The redefinitions live inside the command substitutions, which are subshells,
+# so neither leaks into the rest of this file.
+kept_sz="$( _dev_of() { stat -c '%d' "$1" 2>/dev/null; }; size_breakdown "$DEVFIX" 2>/dev/null )"
+drop_sz="$( _dev_of() { printf '%s\n' "$UNREACHABLE_DEV"; }; size_breakdown "$DEVFIX" 2>/dev/null )"
+has "size_breakdown KEEPS an entry on the base's own device" "$kept_sz" "$DEVFIX/one"
+eq  "size_breakdown DROPS every entry on a foreign device" "$drop_sz" ""
+
+kept_ino="$( _dev_of() { stat -c '%d' "$1" 2>/dev/null; }; inode_breakdown "$DEVFIX" 2>/dev/null )"
+drop_ino="$( _dev_of() { printf '%s\n' "$UNREACHABLE_DEV"; }; inode_breakdown "$DEVFIX" 2>/dev/null )"
+has "inode_breakdown KEEPS a directory on the base's own device" "$kept_ino" "$DEVFIX/one"
+eq  "inode_breakdown DROPS every directory on a foreign device" "$drop_ino" ""
+
+# 🔴 AND A MISSING DEVICE READING MUST REFUSE, not print an empty section. With
+# the filter in place, "no rows" is the same output for "everything is foreign"
+# and "I could not read the base at all" — and the second is a non-measurement.
+nodev_sz="$( _dev_of() { stat -c '%d' "$1" 2>/dev/null; }; size_breakdown "$TMP/absent-$$" 2>/dev/null )"
+has "an unreadable base REFUSES rather than printing an empty size section" \
+    "$nodev_sz" "COULD NOT MEASURE: no device id for"
+nodev_ino="$( _dev_of() { stat -c '%d' "$1" 2>/dev/null; }; inode_breakdown "$TMP/absent-$$" 2>/dev/null )"
+has "an unreadable base REFUSES rather than printing an empty inode section" \
+    "$nodev_ino" "COULD NOT MEASURE: no device id for"
+
+# 🔴 EXCLUDING SILENTLY IS ITSELF A DEFECT. The device filter is right to drop a
+# foreign mount — its size is not root-fs usage — but a section that drops what
+# it could not count without saying so is the floor-presented-as-a-total failure
+# this whole file catalogues. 6c prints the same listing for /home, with a
+# deliberately loud "none" branch; 6d now does too.
+fe_foreign="$( _dev_of() { printf '%s\n' "$UNREACHABLE_DEV"; }; foreign_entries "$DEVFIX" 2>/dev/null )"
+has "6d NAMES the entries it excluded (first)" "$fe_foreign" "$DEVFIX/one"
+has "6d NAMES the entries it excluded (second)" "$fe_foreign" "$DEVFIX/two"
+lacks "6d does not claim 'none' while it is excluding things" "$fe_foreign" "none — every depth-1 entry"
+# POSITIVE CONTROL for the branch above: the "none" line CAN fire, so the
+# `lacks` is not an assertion about dead code.
+fe_none="$( _dev_of() { stat -c '%d' "$1" 2>/dev/null; }; foreign_entries "$DEVFIX" 2>/dev/null )"
+has "POSITIVE CONTROL: an all-on-device base prints the explicit 'none' line" \
+    "$fe_none" "none — every depth-1 entry is on the same filesystem as $DEVFIX"
+lacks "the 'none' case names no entry" "$fe_none" "$DEVFIX/one"
+fe_nodev="$( _dev_of() { stat -c '%d' "$1" 2>/dev/null; }; foreign_entries "$TMP/absent-$$" 2>/dev/null )"
+has "an unreadable base REFUSES rather than claiming no foreign mounts" \
+    "$fe_nodev" "NOT an absence of foreign mounts"
+
+# 🔴 THE DEVICE ID IS INTERPOLATED INTO A sed SCRIPT, so it must be digits, not
+# merely non-empty. `stat -c '%d'` cannot produce a `/` today; the predicate is
+# in one place so that stays true for all three callers rather than at two of
+# them.
+_dev_is_valid 12345 && pass "_dev_is_valid accepts a decimal device id" \
+  || fail "_dev_is_valid rejected a plain decimal device id"
+dev_bad_ok=1
+for bad in '' '/etc/passwd' '12*3' '12 3' 'abc' '0x8040'; do
+  if _dev_is_valid "$bad"; then fail "_dev_is_valid accepted [$bad]"; dev_bad_ok=0; fi
+done
+# 🔴 Conditional, not an unconditional `pass` after a loop that can fail — an
+# `ok:` line printed next to its own `FAIL:` reads as coverage while providing
+# none, which is the failure mode this whole suite is written against.
+[ "$dev_bad_ok" -eq 1 ] && pass "_dev_is_valid rejects empty, hex, and every sed-metacharacter shape tried"
+
+# The filter itself, driven directly: a NUL-separated `<device>\t<path>` stream.
+# Hand-built, so the assertion does not depend on find's behaviour at all.
+# 🔴 `printf '%s\t%s\0' a b …`, NEVER a single format string with `\0` in it.
+# `printf '111\t/a/keep\0222\t…'` reads `\0222` as the OCTAL escape 0o222, so
+# the record separator silently becomes byte 0x92 and the fixture stops being a
+# NUL stream at all — which is how this assertion was red on its first run.
+printf '%s\t%s\0' 111 /a/keep 222 /a/drop 111 '/a/keep two' > "$TMP/ondev.in"
+on_dev_out="$(_on_device 111 < "$TMP/ondev.in" | tr '\0' '\n')"
+eq "_on_device keeps exactly the wanted device, stripping the prefix" "$on_dev_out" \
+   "$(printf '/a/keep\n/a/keep two\n')"
+printf '%s\t%s\0' 111 "$NLNAME" 222 /b/x > "$TMP/ondev2.in"
+on_dev_nul="$(_on_device 111 < "$TMP/ondev2.in" | tr -dc '\0' | wc -c)"
+[ "$on_dev_nul" -eq 1 ] && pass "_on_device emits one NUL record for a path containing a newline" \
+  || fail "_on_device emitted $on_dev_nul records for one path with a newline"
+
+# The inverse, over the SAME stream: the two must partition it, so a mutant that
+# made one of them match everything is visible from either side.
+not_dev_out="$(_not_on_device 111 < "$TMP/ondev.in" | tr '\0' '\n')"
+eq "_not_on_device is the exact complement of _on_device" "$not_dev_out" "/a/drop"
 
 # --------------------------------------------------------------------------- #
 echo "== 6. denial accounting — a count with no denial figure is a FLOOR =="
@@ -438,7 +744,7 @@ grep -v '^[[:space:]]*#' "$SCRIPT" > "$CODE_FILE"
 # match is indistinguishable from a clean file, and both print "ok". Feed it a
 # line that MUST match every banned pattern before trusting a single zero.
 CANARY_FILE="$TMP/canary.txt"
-printf '%s\n' 'du -sh -x /tmp/* | xargs -I{} awk "{ s += $8 } END { print NR - 1 }" | head -15; X=$(lsof +L1); Y=$(grep -c foo bar || echo 0)' > "$CANARY_FILE"
+printf '%s\n' 'du -sh -x /tmp/* | xargs -I{} awk "{ s += $8 } END { print NR - 1 }" | head -n 20; X=$(lsof +L1); Y=$(grep -c foo bar || echo 0); if [ "${BASH_SOURCE[0]}" != "$0" ]; then :; fi' > "$CANARY_FILE"
 
 banned() { # name  BRE  why
   local name="$1" pat="$2" why="$3"
@@ -461,6 +767,20 @@ required() { # name  fixed-string  why
 # a `||` alternation guard and splitting on `|` shredded it into three fields on
 # this table's first run, which made the pattern a prefix that matched nothing
 # and reported the check as ok.
+#
+# 🔴 THE `head` PATTERN IS SPELLING-INSENSITIVE ON PURPOSE, and it used not to
+# be. It read `| *head -[0-9]`, which demands a DIGIT immediately after `head -`
+# — so `head -n 20`, the POSIX-preferred spelling, walked straight through.
+# MEASURED: `head -n 20`, `head -n 30` and `head -n 15` all SURVIVED the
+# mutation battery while `head -15` was caught. `| *head  *-` (BRE: `|`,
+# optional spaces, `head`, one-or-more spaces, `-`) matches every spelling and
+# still does not match `head_n`, which is the sanctioned helper. The canary line
+# above deliberately spells it `head -n 20`, so narrowing this pattern back
+# trips the SCANNER-BROKEN branch instead of silently reporting ok.
+#
+# 🔴 `BASH_SOURCE` is banned outright rather than pinned to a shape. A guard on
+# a specific expression is walkable by rewriting the expression; the hazard is
+# that the seam consults an environment-importable VARIABLE at all.
 while IFS='@' read -r name pat why; do
   [ -n "${name:-}" ] || continue
   banned "$name" "$pat" "$why"
@@ -471,7 +791,8 @@ no fixed column index summed out of lsof@s *+= *\$[0-9]@$8 under +L1 is NLINK, 0
 no NR-1 header strip (goes to -1 on empty input)@NR *- *1@NR is 0 with no output at all, and a negative count hides 'did not run'
 no 'grep -c ... || echo 0' (emits a two-line zero)@grep -c[^|]*|| *echo@grep -c prints 0 AND exits 1; the fallback then appends a second line
 no unchecked assignment from lsof under set -e@=\$(lsof@a command substitution in an assignment is CHECKED; lsof exits 1 when it finds nothing
-no bare '| head -N' truncating a pipeline (SIGPIPE 141)@| *head -[0-9]@head exits after N lines and the producer takes SIGPIPE; pipefail promotes 141 and set -e kills the run silently. Use head_n.
+no bare '| head -N' truncating a pipeline (SIGPIPE 141)@| *head  *-@head exits after N lines and the producer takes SIGPIPE; pipefail promotes 141 and set -e kills the run silently. Use head_n.
+no BASH_SOURCE seam test (reachable from the environment)@BASH_SOURCE@bash imports BASH_SOURCE from the env as a scalar, so an EXECUTED run took the sourced branch and returned at top level: rc 2, no report, indistinguishable from the not-root refusal
 BANNED
 
 while IFS='@' read -r name lit why; do
@@ -481,10 +802,16 @@ done <<'REQUIRED'
 section 2 keeps find's stderr instead of discarding it@2>>"$DENIED_LOG"@a scan reporting a number with no denial count is a floor presented as a total
 lsof column is resolved by NAME from the header@if ($i == "SIZE/OFF") col=i@the index is not stable: +L1 puts it at 7, plain -n -P at 9
 an absent SIZE/OFF column REFUSES rather than reporting a zero@COULD NOT MEASURE: no SIZE/OFF column in lsof header@a zero here is the reassuring reading of a broken instrument
-the /tmp inode walk passes the name as an ARGUMENT@-exec sh -c 'printf "%12d  %s\n" "$(find "$1" -xdev -printf . 2>/dev/null | wc -c)" "$1"' _ {} \;@"$1" is an argv slot; "{}" is text the shell parses
-top-level enumeration is NUL-safe find|xargs, not a glob@find "$1" -xdev -mindepth 1 -maxdepth 1 -print0@the glob form dies E2BIG and set -euo pipefail takes the whole run with it
-candidates are compared by DEVICE, because du -x cannot do it@d=$(_dev_of "$p") || continue@du -x only stops du crossing AWAY from its start; started ON a foreign mount it walks all of it
+the /tmp inode walk passes the name as an ARGUMENT@xargs -0 -r -n1 sh -c 'printf "%12d  %s\n" "$(find "$1" -xdev -printf . 2>/dev/null | wc -c)" "$1"' _@"$1" is an argv slot; "{}" under xargs -I is text the shell parses
+top-level enumeration is NUL-safe find|xargs, not a glob@find "$base" -xdev -mindepth 1 -maxdepth 1 -printf '%D\t%p\0'@the glob form dies E2BIG and set -euo pipefail takes the whole run with it
+/home candidates are compared by DEVICE, because du -x cannot do it@d=$(_dev_of "$p") || continue@du -x only stops du crossing AWAY from its start; started ON a foreign mount it walks all of it
+/tmp candidates are compared by DEVICE too (defect 7, section 6d)@| _on_device "$dev"@-xdev still LISTS a mountpoint at depth 1, so it reaches du as a starting point — the one case du -x cannot handle
+du keeps -x in the /tmp size breakdown@xargs -0 -r du -sh -x 2>/dev/null || true@INVARIANT PIN, not a regression guard: a second filesystem needs root, so -x cannot be checked behaviourally here. A mutant dropping it SURVIVED.
+du keeps -x in the /home size breakdown@xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>/dev/null || true@same invariant pin for section 6c's call site
 truncation reads to EOF instead of closing the pipe@head_n() { awk -v n="$1" 'NR<=n'; }@awk consumes all input, so the upstream sort never takes SIGPIPE
+the seam reads no variable at all@if (return 0 2>/dev/null); then@`return` cannot be poisoned from the environment; ${BASH_SOURCE[0]} could
+section 6d reports what its device filter EXCLUDED@foreign_entries /tmp@dropping a foreign mount silently is the floor-presented-as-a-total failure this file exists to prevent
+the device id is validated as digits before it reaches sed@_dev_is_valid "$dev"@the value is interpolated into a sed script; a / or a * would change the expression rather than fail
 REQUIRED
 
 # --------------------------------------------------------------------------- #
