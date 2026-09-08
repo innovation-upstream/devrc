@@ -169,6 +169,22 @@ live and serving. The skill is NOT live — global skills are home-manager
 - **Decision: `gen-matrix` is deliberately unsubmitted.** Its manifest and source
   are unchanged by this work, so a bump would rebuild a byte-identical bundle.
 
+- 🔴 **THIS DOC LANDS VIA devrc#1402 AND IS NOT ON `main` UNTIL THAT MERGES.**
+  The kickoff block points at
+  `/home/zach/workspace/devrc/claudedocs/handoff-civitai-app-fleet.md`, and that
+  path **does not exist in the primary clone** while the PR is open — the doc
+  lives only on branch `docs/handoff-civitai-app-fleet` (commit `c3124df6`). If
+  `/resume` cannot find it, read it from the ref instead:
+  `git -C ~/workspace/devrc show origin/docs/handoff-civitai-app-fleet:claudedocs/handoff-civitai-app-fleet.md`
+  — or merge #1402 first, which is the cheaper fix.
+- **Why a PR rather than a direct commit:** `handoff_doc.py` refused with
+  `status=behind` because the primary devrc clone was 6 commits behind `origin/main`
+  AND dirty with 5 uncommitted paths belonging to another session. Fast-forwarding
+  would have refused or overwritten that work, so the doc was written from a
+  throwaway worktree off `origin/main` and pushed as its own branch. The primary
+  clone was left byte-identical — verify with
+  `git -C ~/workspace/devrc status -sb`.
+
 ## How to verify
 
 ```bash
