@@ -40,8 +40,22 @@ And, as before, what the verdict REFUSES to say:
   6. AN ARM THAT COULD NOT RUN IS NOT A CLEAN ARM. An empty result from a failed
      comparison must not be reported as agreement.
 
+  7. 🔴 A RUN THAT REFUSED IS NOT A CLEAN BOOT. `tmux-session-restore.py` exits
+     0 when it finds no tmux server, deliberately, so it cannot fire the
+     DND-bypassing `OnFailure` toast — which makes `Result`, `ExecMainStatus`
+     and `InactiveExitTimestamp` byte-identical to a successful restore. A
+     refused run also logs ZERO `claude --resume` lines, and the resume
+     comparison is gated on `sends != 0`, so the whole block was SKIPPED and the
+     verdict returned RC_CLEAN. Round 2 of the audit measured that: on a boot
+     where nothing was resumed, this instrument reported a clean boot, while
+     `tmux-session-restore.py` asserted in a comment that this file "is the
+     instrument that surfaces this deliberately-quiet path". It was not.
+     `test_a_refused_run_is_NOT_a_clean_boot` and its positive control are that
+     regression.
+
 Exit codes are asserted per condition: 0 clean, 1 race/misplacement, 2 usage,
-3 could-not-decide, 4 windows missing, 5 no workspace at all.
+3 could-not-decide, 4 windows missing, 5 no workspace at all, 6 the unit ran
+and REFUSED.
 """
 
 import os
@@ -57,6 +71,7 @@ RC_USAGE = 2
 RC_INCONCLUSIVE = 3
 RC_MISSING = 4
 RC_NO_WORKSPACE = 5
+RC_REFUSED = 6
 
 HOST_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 HOST_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -113,6 +128,7 @@ def _post(
     journal="(fixture)",
     sends=None,
     live_claude=None,
+    refusals=None,
 ):
     ids = HEALTHY_IDS if ids is None else ids
     names = HEALTHY_NAMES if names is None else names
@@ -136,6 +152,8 @@ def _post(
         lines.append(f"sends_logged={sends}")
     if live_claude is not None:
         lines.append(f"claude_panes_live={live_claude}")
+    if refusals is not None:
+        lines.append(f"refusals_logged={refusals}")
     if replayed is not None:
         lines += [
             f"replayed_layout_file={replayed}",
@@ -426,14 +444,92 @@ def test_no_fixed_delay_advice_survives_ANYWHERE_in_the_report(tmp_path):
     """A separate, WIDER claim than the pinned block above: the stale
     "wait for the timer" advice must not reappear anywhere in the report, not
     merely in the one block. These are different scopes, which is why both
-    exist — the pin above would not notice a second copy elsewhere."""
+    exist — the pin above would not notice a second copy elsewhere.
+
+    🔴 THE BAN IS ON THE STALE ADVICE, NOT ON A DURATION. The first version of
+    this list held the bare substring `"45s"`, which bans a string this report
+    has every right to print for an unrelated reason — a settle wait, an elapsed
+    time, a timeout the script legitimately grows later. That is a guard that
+    fails a future change for a reason its own message would misdescribe. Each
+    entry below is a phrase that can only mean "the trigger is a fixed delay":
+    the retired directive by name, the sentence that named it, and the advice it
+    licensed.
+    """
     r = _verdict(_pre(tmp_path), _post(tmp_path, unit_started=""), tmp_path)
-    for stale in ("OnActiveSec", "45s", "wait and re-run"):
+    for stale in ("OnActiveSec", "Its timer is", "wait and re-run"):
         assert stale not in r.stdout, (
             f"{stale!r} appears in the report — the trigger is no longer a "
             "fixed delay, so telling the operator to wait sends them to a "
             "state that will never arrive"
         )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A REFUSED RUN IS NOT A CLEAN BOOT
+#
+# The refusal exits 0 by design, so every systemd-side field reads like success,
+# and it logs zero sends, so the resume comparison (gated on `sends != 0`) never
+# runs. Before round 2 the verdict therefore returned RC_CLEAN on a boot where
+# NOTHING was resumed — while `tmux-session-restore.py` claimed in a comment
+# that this script surfaces exactly that path.
+# --------------------------------------------------------------------------- #
+
+def test_a_refused_run_is_NOT_a_clean_boot(tmp_path):
+    """The regression. Everything else about this fixture is healthy: the
+    windows all came back at the right ids with the right cwds, the unit started
+    and exited 0. The ONLY difference from a clean boot is the journal line —
+    which is the whole point, because that is all a refused run leaves behind."""
+    r = _verdict(_pre(tmp_path), _post(tmp_path, sends="0", refusals="1"), tmp_path)
+    assert r.returncode == RC_REFUSED, (
+        "a boot where the unit ran and resumed NOTHING reported as clean.\n" + r.stdout
+    )
+    assert "REFUSED" in r.stdout
+    assert "NO RACE OBSERVED" not in r.stdout, (
+        "the clean-boot banner was printed over a boot that restored nothing"
+    )
+
+
+def test_the_refused_arm_does_NOT_fire_on_an_ordinary_boot(tmp_path):
+    """🔴 THE POSITIVE CONTROL FOR THE ARM ABOVE — without it, an arm hardcoded
+    to fire would pass that test while making every verdict RC_REFUSED. Same
+    fixture, `refusals_logged=0`."""
+    r = _verdict(_pre(tmp_path), _post(tmp_path, sends="0", refusals="0"), tmp_path)
+    assert r.returncode == RC_CLEAN, r.stdout + r.stderr
+    assert "REFUSED" not in r.stdout
+
+
+def test_a_capture_with_NO_refusal_field_is_not_read_as_a_refusal(tmp_path):
+    """A capture written before this field existed has no `refusals_logged=` at
+    all, and `get` returns "". An integer comparison against "" would print
+    `integer expected` and evaluate FALSE — the exact shape that made
+    `claude_panes_live=UNMEASURED` return a confident PASS (see the comment at
+    the resume arm). The `-n` guard is what keeps absence an ordinary answer."""
+    r = _verdict(_pre(tmp_path), _post(tmp_path, sends="0"), tmp_path)
+    assert r.returncode == RC_CLEAN, r.stdout + r.stderr
+    assert "integer expression expected" not in r.stderr, r.stderr
+    assert "REFUSED" not in r.stdout
+
+
+def test_the_refusal_field_is_actually_EMITTED_by_the_post_capture(tmp_path):
+    """🔴 THE VERDICT ARM IS INERT IF NOTHING WRITES THE FIELD, and every test
+    above feeds it a hand-built fixture — so all four would pass over a `post`
+    that never emits `refusals_logged=`. This reads the real emitter.
+
+    `post` is run for its capture only; the verdict it prints afterwards is not
+    what is asserted here.
+    """
+    env = dict(os.environ, TMUX_RESTORE_OBSERVE_DIR=str(tmp_path / "obs"))
+    subprocess.run(["bash", str(SCRIPT), "pre"], capture_output=True, text=True,
+                   env=env, timeout=120)
+    subprocess.run(["bash", str(SCRIPT), "post"], capture_output=True, text=True,
+                   env=env, timeout=120)
+    captures = sorted((tmp_path / "obs").glob("post-*.txt"))
+    assert captures, "the post subcommand wrote no capture at all"
+    body = captures[-1].read_text()
+    assert re.search(r"^refusals_logged=", body, re.M), (
+        "the post capture does not emit refusals_logged=, so the verdict arm "
+        "that reads it can never fire on real data:\n" + body[:2000]
+    )
 
 
 def test_a_clean_boot_says_so_AND_says_it_is_only_one_sample(tmp_path):

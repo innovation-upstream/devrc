@@ -34,11 +34,13 @@ WHAT EACH GROUP PINS
     ran the oneshot 5 times in 8 seconds and left BOTH units
     `Result=start-limit-hit`/`failed` — which under this unit's `OnFailure=`
     is a DND-bypassing toast on every boot, strictly worse than the bug.
-  * `TestTheTriggerAndTheQueryNameOneServer` — a SEAM guard. The path unit
-    watches a directory; `tmux` finds its socket via `$TMUX_TMPDIR`, whose
-    compiled-in default is /tmp and NOT `%t`. If those two disagree the unit is
-    triggered by one server and talks to another. This pins the RELATIONSHIP,
-    not either side.
+  * `TestTheTriggerAndTheQueryNameOneServer` — a SEAM guard, and the one whose
+    description round 1 found WIDER THAN ITS BODY. It said it pinned "the
+    trigger and the query", but both operands came from `nix/home.nix`: the
+    unit's own `PathChanged=` against the unit's own `Environment=`, two halves
+    of one declaration. It now carries a third side that lives in the SCRIPT
+    (`tmux_socket_path()`), which is the only operand editing `nix/home.nix`
+    cannot move. Its own docstring states what remains uncovered.
   * `TestTheUnitCannotOwnTheOperatorsServer` — an INVARIANT GUARD, labelled as
     one: the 2026-09-06 bug never violated it. `RemainAfterExit=yes` is
     measured to keep a unit-spawned tmux server alive and is the WRONG fix,
@@ -53,6 +55,7 @@ recorded here as the REASON for each assertion, not re-measured by it.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -70,6 +73,14 @@ from testlib.nix_units import (  # noqa: E402
 )
 
 HOME_NIX = REPO / "nix" / "home.nix"
+
+# 🔴 THE THIRD SIDE OF THE SEAM GUARD BELOW LIVES IN ANOTHER ARTIFACT, which is
+# the whole reason it can see anything the two nix-side assertions cannot. The
+# script's filename is hyphenated, so it is loaded by path rather than imported.
+_TSR_PATH = REPO / "scripts" / "tmux-session-restore.py"
+_spec = importlib.util.spec_from_file_location("tmux_session_restore", _TSR_PATH)
+tsr = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(tsr)
 
 SERVICE = "systemd.user.services.tmux-session-restore"
 TIMER = "systemd.user.timers.tmux-session-restore"
@@ -259,14 +270,34 @@ class TestTheWatchIsAnEventNotAState:
 # --- the trigger and the query must name ONE server ----------------------------
 
 class TestTheTriggerAndTheQueryNameOneServer:
-    """🔴 A SEAM GUARD: it pins a RELATIONSHIP, not either component.
+    """🔴 A SEAM GUARD — AND ROUND 1 MEASURED IT NARROWER THAN ITS DESCRIPTION.
 
-    The path unit watches a socket under some directory. The restore script
-    shells out to `tmux`, which resolves its socket from `$TMUX_TMPDIR` — whose
-    COMPILED-IN DEFAULT IS /tmp, not `%t`. Each side can be individually
-    correct while together they describe two different tmux servers: the unit
-    fires on a socket appearing in one place and then asks about a server in
-    another. No test scoped to one unit can see that.
+    It claimed to pin "the trigger and the query name ONE server". Two of its
+    three assertions compare the unit's `PathChanged=` against the unit's own
+    `Environment=TMUX_TMPDIR=` — two halves of the SAME declaration, a few lines
+    apart in `nix/home.nix`. Edit both consistently and the guard stays green
+    while both are wrong together. It could not see a seam because both its
+    operands came from one artifact.
+
+    So there are now THREE sides, and the third is in another artifact:
+
+      1. what the path unit WATCHES        (`PathChanged=`, nix)
+      2. what the service TELLS TMUX       (`Environment=TMUX_TMPDIR=`, nix)
+      3. where the SCRIPT computes the socket to be
+         (`tmux_session_restore.tmux_socket_path()`, python) — which is what the
+         restore's own poll checks before it decides there is no server coming.
+
+    3 vs 1 is a genuine cross-artifact comparison: nothing about editing
+    `nix/home.nix` also edits the script, and vice versa. `tmux`'s compiled-in
+    default is /tmp, NOT `%t`, so each side is individually plausible while
+    together they describe two different tmux servers.
+
+    ⚠ What NONE of these can see, stated so it is not mistaken for covered: the
+    interactive tmux server's own socket location depends on `TMUX_TMPDIR` in
+    the LOGIN environment, which is undeclared runtime state — see the comment
+    on the path unit in `nix/home.nix`. That is a real gap; it is documented
+    there rather than asserted here, because no test of these files can measure
+    a variable none of them sets.
     """
 
     def test_the_service_pins_TMUX_TMPDIR_at_all(self, service_block: str):
@@ -302,6 +333,55 @@ class TestTheTriggerAndTheQueryNameOneServer:
             "query a server in another — the trigger and the query must name "
             "ONE server."
         )
+
+    def test_the_SCRIPT_computes_the_same_socket_the_unit_watches(
+        self, path_block: str, monkeypatch
+    ):
+        """🔴 THE THIRD SIDE — the one that crosses artifacts.
+
+        `tmux_socket_path()` is what the restore's own bounded poll stats before
+        concluding no server is coming. If it disagrees with the watched path,
+        the unit is triggered by a socket the script then declares absent, and
+        the restore refuses on every boot — silently, exit 0.
+
+        The comparison substitutes the systemd specifiers the same way systemd
+        does: `%t` -> the user runtime dir, `%U` -> the uid. Both are read from
+        the environment rather than hardcoded, so this test does not itself
+        assume the arrangement it is checking.
+        """
+        watched = _unquote(directive("PathChanged", path_block))
+        assert watched is not None, "the path unit sets no PathChanged="
+
+        runtime_dir = "/run/user/4242"
+        monkeypatch.setattr(tsr.os, "getuid", lambda: 4242)
+        monkeypatch.setenv("TMUX_TMPDIR", runtime_dir)
+
+        expanded = watched.replace("%t", runtime_dir).replace("%U", "4242")
+        assert str(tsr.tmux_socket_path()) == expanded, (
+            f"the path unit watches {watched!r} (= {expanded!r} once systemd "
+            f"expands its specifiers), but tmux_session_restore.py computes "
+            f"{tsr.tmux_socket_path()!r} for the same server. The unit would be "
+            "triggered by a socket the script then reports as absent, and the "
+            "restore would refuse on every boot — exit 0, no toast, no retry."
+        )
+
+    def test_the_script_socket_path_HONOURS_TMUX_TMPDIR(self, monkeypatch):
+        """The positive control for the assertion above.
+
+        Without it, a `tmux_socket_path()` hardcoded to the very string the unit
+        watches would satisfy that test while being blind to `TMUX_TMPDIR` —
+        i.e. wrong on any host whose socket is at tmux's compiled-in /tmp
+        default, which is the LAPTOP's arrangement today (recorded at the
+        tmux-snapshot-push unit in `nix/home.nix`).
+        """
+        monkeypatch.setattr(tsr.os, "getuid", lambda: 4242)
+        monkeypatch.delenv("TMUX_TMPDIR", raising=False)
+        assert str(tsr.tmux_socket_path()) == "/tmp/tmux-4242/default", (
+            "with TMUX_TMPDIR unset the script must fall back to tmux's "
+            "compiled-in /tmp, which is what tmux itself does"
+        )
+        monkeypatch.setenv("TMUX_TMPDIR", "/somewhere/else")
+        assert str(tsr.tmux_socket_path()) == "/somewhere/else/tmux-4242/default"
 
     def test_the_socket_directory_is_named_for_the_UID(self, path_block: str):
         """tmux namespaces its socket directory by uid (`tmux-1000`). A watch

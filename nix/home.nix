@@ -4913,8 +4913,15 @@ in
   };
 
   # Post-reboot claude session restore — resumes the `claude` conversation in
-  # each window after tmux-continuum has restored the layout.  Idempotent:
-  # skips windows already running claude.
+  # each window of the workspace tmux-continuum restores.  Idempotent: skips
+  # windows already running claude.
+  #
+  # ⚠ "after continuum has restored the layout" is the SCRIPT's doing, not this
+  # unit's ordering, and the distinction matters because the unit's Description
+  # used to claim the latter.  The unit starts when the SOCKET appears —
+  # measured at t_sock+0.065s and +0.288s in two runs, i.e. BEFORE continuum has
+  # replayed anything.  `wait_for_workspace_to_settle()` inside the script is
+  # what waits for the replay to stop moving; nothing in systemd orders it.
   #
   # 🔴 TRIGGERED BY THE TMUX SOCKET APPEARING, NOT BY A FIXED DELAY.  The timer
   # this replaced was `OnActiveSec=45s`, and a duration was never the variable.
@@ -4933,7 +4940,14 @@ in
   # server that this unit did not create, and therefore cannot destroy.
   systemd.user.services.tmux-session-restore = {
     Unit = {
-      Description = "Resume claude conversations after tmux-continuum restores sessions";
+      # 🔴 THIS STRING IS WHAT `systemctl --user status` SHOWS, so it is read far
+      # more often than the comments around it. It used to say "after
+      # tmux-continuum restores sessions", and that is now FALSE: the unit
+      # starts when the SOCKET appears, measured at t_sock+0.065s and +0.288s in
+      # two runs — i.e. BEFORE continuum has restored anything. The script's own
+      # `wait_for_workspace_to_settle` is what waits for the replay; the unit's
+      # start is not ordered against it.
+      Description = "Resume claude conversations when the tmux server's socket appears";
       # 🔴 NO `Wants=/After=graphical-session.target` ANY MORE.  Those ordered a
       # TIMER-driven unit against the desktop coming up; the socket existing is
       # a strictly stronger precondition than the desktop existing, and `Wants=`
@@ -4961,7 +4975,20 @@ in
       # `systemctl --user stop tmux-session-restore` would kill the operator's
       # entire workspace.  The trigger change removes the need for it — the
       # server pre-exists in someone else's cgroup, so there is nothing here to
-      # keep alive.  See the PR body for the full argument.
+      # keep alive.
+      #
+      # The full argument, so a reader with a checkout and no network does not
+      # have to find a PR body: `RemainAfterExit=yes` IS measured to keep a
+      # unit-spawned tmux server alive past ExecStart returning (isolated
+      # experiment, private `-L` socket, `systemd-run --user -p Type=oneshot`:
+      # without it the server dies with the cgroup, with it the server
+      # survives).  That is exactly why it is tempting and exactly why it is
+      # wrong — it does not stop the unit owning the server, it makes the
+      # ownership PERMANENT.  The unit would then hold the operator's entire
+      # workspace in its cgroup for the rest of the session, and any ordinary
+      # `systemctl --user stop`/`restart`, or a `home-manager switch` that
+      # restarts the unit, would take all of it down.  Refusing to create a
+      # server is what makes the ownership question moot.
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.tmux pkgs.coreutils ]}"
         "HOME=%h"
@@ -5011,6 +5038,48 @@ in
   # never fires and the restore does not run.  `default.target` is reached
   # within a second of login, long before any terminal, so this is not the boot
   # ordering — but it is why the unit is not claimed to be unconditional.
+  #
+  # 🔴 SECOND GAP, AND IT IS A DEPENDENCY ON UNDECLARED RUNTIME STATE.  The
+  # watched path is `%t/tmux-%U/default`.  `tmux` puts its socket at
+  # `$TMUX_TMPDIR/tmux-$UID/default` and its COMPILED-IN DEFAULT IS /tmp, so
+  # this watch is correct only because the INTERACTIVE session has
+  # `TMUX_TMPDIR=/run/user/1000` — and that value appears in no /etc/nixos file,
+  # no /etc/environment.d (which does not exist here), and not in home-manager's
+  # own ~/.config/environment.d/10-home-manager.conf.  Something imports it at
+  # login and nobody has written down what (the same finding is recorded at the
+  # tmux-snapshot-push unit above, where it decided only where that unit
+  # LOOKED).
+  #
+  # 🔴 THE CONSEQUENCE IS STRICTLY WORSE HERE THAN THERE.  For the collector it
+  # decided where to look.  For this unit it decides whether the unit RUNS AT
+  # ALL: if the interactive session ever loses that variable, tmux's socket goes
+  # to /tmp/tmux-$UID/ instead, this path unit's inotify watch never fires, and
+  # NO restore happens.  Silently — there is no failed unit, no toast, and the
+  # only trace is a boot where the unit simply never started.
+  #
+  # ⚠ DETECTABLE, NOT PREVENTED.  `scripts/tmux-restore-observe.sh` prints
+  # "the boot unit has NOT RUN this boot (InactiveExitTimestamp empty)" and
+  # names this path unit as the thing to check, which is exactly the symptom
+  # this produces.  That is a reader an operator has to run, not an alarm.
+  #
+  # 🔴 A FALLBACK WATCH ON /tmp WAS CONSIDERED AND DELIBERATELY NOT ADDED.
+  # `Paths=` accepts several entries, so watching BOTH is one line.  What is not
+  # one line is the consequence: the service pins `TMUX_TMPDIR=%t`, so a unit
+  # fired by a /tmp socket would still query the %t server — the trigger and the
+  # query naming two different servers, which is precisely the seam
+  # `TestTheTriggerAndTheQueryNameOneServer` exists to close, reintroduced by the
+  # fix.  Closing it would mean the service resolving WHICH socket fired.
+  # systemd does pass `$TRIGGER_PATH` (systemd.exec(5), read on this host under
+  # systemd 261), but its own documentation says the information "is provided in
+  # a best-effort way", that simultaneous triggers "will be coalesced and only
+  # one will be reported, with no guarantee as to which one", and that it
+  # "should not be relied upon".  Branching on it is therefore not a fix; it is
+  # a second race.  The alternative — unpinning `TMUX_TMPDIR` so the service
+  # inherits it — puts the unit back on the undeclared runtime state this
+  # comment is about.  So: one watch, one pin, one server, and the dependency
+  # written down.  If TMUX_TMPDIR is ever DECLARED somewhere (an
+  # `environment.d` drop-in, or home-manager's `home.sessionVariables`), that is
+  # the real fix, and it makes this whole paragraph obsolete.
   systemd.user.paths.tmux-session-restore = {
     Unit = {
       Description = "Run tmux-session-restore when the tmux server's socket appears";

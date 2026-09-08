@@ -516,11 +516,130 @@ def no_tmux_server_to_restore_into() -> bool:
 
     Uses `tmux has-session` with no target: it succeeds only when a server is
     running AND holds at least one session. A server with zero sessions reads
-    as "no server" here, deliberately — that is the conservative direction, and
-    it is a state the operator's workspace never sits in.
+    as "no server" here, deliberately — that is the conservative direction,
+    because a server with no sessions is one this process could still end up
+    populating and owning.
+
+    🔴 BUT "A STATE THE OPERATOR'S WORKSPACE NEVER SITS IN" — which this
+    docstring asserted until round 2 of the audit — IS FALSE, and it was the
+    same mistake as the one at the refusal in `cmd_restore`. EVERY tmux server
+    has zero sessions between `server_start()` creating the socket and the
+    first session being created after the config is sourced: MEASURED
+    2026-09-07 at 0.098–0.112s with continuum EXCLUDED. That window is not
+    exotic; it is precisely when `tmux-session-restore.path` fires, because the
+    path unit triggers on the socket. `wait_for_tmux_server()` exists because
+    of it. The predicate is unchanged and still correct — what was wrong was
+    the claim about how often it answers "absent".
     """
     return subprocess.run(["tmux", "has-session"],
                           capture_output=True).returncode != 0
+
+
+# 🔴 HOW LONG TO WAIT FOR THE SESSION THE TRIGGER DOES NOT PROMISE.
+#
+# The path unit fires on the SOCKET FILE appearing. `no_tmux_server_to_restore_into`
+# asks `tmux has-session`, which needs a SESSION. tmux creates the socket in
+# `server_start()` BEFORE it sources its config, and the first session is queued
+# behind the whole config — three blocking `run-shell` plugin loads and
+# continuum's replay. So the trigger's observable is strictly EARLIER than this
+# script's precondition, and the gap is real, not theoretical.
+#
+# MEASURED 2026-09-07 on this host, with continuum EXCLUDED (so every number is
+# a LOWER BOUND — production is slower, with a colder page cache and ~45 panes
+# to replay):
+#   * socket appears at t0+0.009s;
+#   * `has-session` returns rc=1 in 8ms, so it does NOT block behind the config
+#     queue — the refusal is reached, it does not hang;
+#   * the first session exists at t_sock+0.098–0.112s;
+#   * the path-triggered ExecStart reached `has-session` at t_sock+0.065s in one
+#     run and t_sock+0.288s in another.
+# The outcome FLIPPED between those two runs. On a cold boot both variables move
+# the wrong way at once: an idler box makes ExecStart faster, a colder cache and
+# a full workspace make the config slower.
+#
+# 🔴 WHY 30s, AND NOT A NUMBER CLOSER TO THE MEASUREMENT. The two errors are not
+# symmetric. Waiting too long costs LATENCY on a path that then does nothing.
+# Waiting too little costs a SILENT NO-RESTORE — refusal, exit 0,
+# `Result=success`, no `OnFailure`, and no retry, because the socket is created
+# once and no second event ever comes. That is the exact outcome this unit
+# exists to prevent, so the bound is biased long on purpose.
+#
+# 30s is ~270x the measured 0.11s lower bound, which leaves room for the
+# continuum-replay term that measurement deliberately excluded and never
+# quantified. As an upper anchor: the retired `OnActiveSec=45s` timer is evidence
+# that a delay of that ORDER was tolerable on this host's boot path, and 30s
+# stays inside it. That is an anchor, not a derivation — the replay term is
+# unmeasured, and if a future boot is observed refusing after a full 30s wait the
+# right response is to raise this number, not to shorten it.
+#
+# WHEN THE BOUND IS EXCEEDED: control falls through to the refusal in
+# `cmd_restore`, which exits 0 and says how long it waited. The wait is reported
+# so an operator can tell "no server ever came" apart from "a socket was there
+# and nothing answered for the whole bound" — two different faults that the bare
+# refusal reads identically for.
+TMUX_SERVER_WAIT_SECONDS = 30.0
+
+
+def tmux_socket_path() -> Path:
+    """Where `tmux` will look for its socket, by tmux's own rule.
+
+    `$TMUX_TMPDIR/tmux-$UID/default`, falling back to tmux's compiled-in `/tmp`
+    when the variable is unset. This is the SAME formula the path unit's
+    `PathChanged=%t/tmux-%U/default` spells in systemd specifiers, and
+    `scripts/tests/test_tmux_restore_trigger.py` compares the two — that
+    cross-artifact comparison is the only thing that can see the trigger and the
+    query drifting apart, because each side is individually plausible.
+    """
+    root = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    return Path(root) / f"tmux-{os.getuid()}" / "default"
+
+
+def wait_for_tmux_server(timeout: float = TMUX_SERVER_WAIT_SECONDS,
+                         step: float = 0.25,
+                         sleep=time.sleep,
+                         socket: Path | None = None) -> tuple[bool, float, str]:
+    """Poll until a tmux server holds a session. Returns (found?, waited, why).
+
+    🔴 THIS CLOSES THE GAP BETWEEN THE TRIGGER'S OBSERVABLE AND THIS SCRIPT'S
+    PRECONDITION — see `TMUX_SERVER_WAIT_SECONDS` above for the measurements and
+    for why the bound is what it is.
+
+    🔴 IT MUST NOT TURN "THERE IS GENUINELY NO SERVER" INTO A 30-SECOND HANG,
+    and the discriminator is free: the SOCKET FILE. It is the thing the path
+    unit triggers on, so its presence is exactly the evidence that a server is
+    starting. No socket => nothing is coming => return at once. That is the same
+    shape as `wait_for_workspace_to_settle`'s `no_server_after` bail, and it
+    exists for the same reason: #1351 shipped a revision that burned a full
+    120s timeout in the nix build sandbox — which has no tmux server and no
+    socket — and turned an empty-plan restore into a failure.
+
+    `why` is one of:
+      * `already-running` — a session existed on the first probe, no wait at all;
+      * `appeared`        — a session appeared during the wait;
+      * `no-socket`       — bailed immediately; nothing is starting;
+      * `timeout`         — the socket is there and nothing answered in `timeout`.
+
+    `sleep` and `socket` are injected so tests never sleep and never depend on
+    the host having a tmux server. The probe is looked up on the MODULE at call
+    time (not bound at import) so `monkeypatch.setattr(tsr,
+    "no_tmux_server_to_restore_into", …)` reaches it — every existing test in
+    this area patches exactly that name.
+    """
+    def _absent() -> bool:
+        return globals()["no_tmux_server_to_restore_into"]()
+
+    if not _absent():
+        return True, 0.0, "already-running"
+    sock = tmux_socket_path() if socket is None else socket
+    if not sock.exists():
+        return False, 0.0, "no-socket"
+    waited = 0.0
+    while waited < timeout:
+        sleep(step)
+        waited += step
+        if not _absent():
+            return True, waited, "appeared"
+    return False, waited, "timeout"
 
 
 def pane_fingerprint() -> str:
@@ -846,37 +965,63 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
     # See `no_tmux_server_to_restore_into` for the confirmed mechanism. This
     # must run BEFORE the settle wait and before the send loop: the loop's own
     # `tmux new-session` is the destructive step.
-    if not dry_run and plan and no_tmux_server_to_restore_into():
+    if not dry_run and plan:
+        found, server_waited, why = wait_for_tmux_server()
+    else:
+        found, server_waited, why = True, 0.0, "not-checked"
+    if not dry_run and plan and not found:
         # 🔴 EXIT 0, NOT 1, AND THAT IS A DELIBERATE CHOICE — NOT AN OVERSIGHT.
         # The unit is `OnFailure=notify-failure@%n`, and that toast bypasses
         # DND (`nix/home.nix` — "any unit that can fail on a STANDING condition
         # breaches it again").
         #
-        # 🔴 THE ORIGINAL REASON HAS EXPIRED; THIS IS THE REPLACEMENT. This
-        # comment used to say "until the unit is triggered on the tmux socket
-        # appearing rather than a fixed OnActiveSec=45s, no server is the normal
-        # COLD-BOOT state". That trigger change has now landed — the unit is
-        # started by `tmux-session-restore.path` — so "every boot forever" is no
-        # longer why. RE-DERIVED against the new trigger, and the answer is the
-        # same:
+        # 🔴 THIS REASON HAS NOW BEEN WRONG TWICE. Round 1 said "no server is
+        # the normal COLD-BOOT state, because the unit fires on OnActiveSec=45s"
+        # — that trigger is gone. Round 2 replaced it with "what is left is a
+        # rare race: a stale socket from a SIGKILLed server, or a server with
+        # zero sessions", and the FREQUENCY half of that was false: EVERY tmux
+        # server has zero sessions for its first ~100ms, and that is precisely
+        # the window `PathChanged=` fires in. So the "exotic" framing described
+        # the single most common way this branch was reached.
         #
+        # WHAT IS TRUE, stated at the scope it was measured:
         #   * `PathChanged=` fires on the watched socket being DELETED as well
         #     as created (MEASURED). Socket deletion is the operator's tmux
-        #     server exiting — routine. So "no server" moved from *every boot*
-        #     to *every server shutdown*; it did not become rare.
-        #   * The unit's `ConditionPathExists=` catches the ordinary shape of
-        #     that before ExecStart, so this branch is not even reached for it.
-        #   * What is left is a RACE: the socket existed when systemd checked
-        #     the condition and no server answers by the time this runs — a
-        #     stale socket from a SIGKILLed server, or a server with zero
-        #     sessions. A race is precisely the thing that must not raise a
-        #     DND-bypassing alarm, because the alarm would be indistinguishable
-        #     from a real failure and would train the operator to ignore it.
+        #     server exiting — routine. The unit's `ConditionPathExists=`
+        #     catches the ordinary shape of that before ExecStart.
+        #   * The socket-appears case used to reach here whenever ExecStart won
+        #     the race against tmux's config queue — MEASURED at 2 of 2 sampled
+        #     runs landing on OPPOSITE sides of it. `wait_for_tmux_server()`
+        #     above is what now covers that window.
+        #   * 🔴 THE POST-FIX FREQUENCY IS UNMEASURED, and saying otherwise is
+        #     how this comment got it wrong twice. Establishing it needs reboots
+        #     this change has not had. What is left after the poll is: no socket
+        #     at all (`why=no-socket` — the server went away between systemd's
+        #     condition check and this process starting), or a socket with
+        #     nothing answering for the full bound (`why=timeout`). Neither
+        #     frequency is known.
         #
-        # A skip the operator can read in the log is the honest report; a
-        # nightly alarm for an expected state is not. `tmux-restore-observe.sh`
-        # is the instrument that surfaces this deliberately-quiet path.
+        # 🔴 THE CONCLUSION DOES NOT DEPEND ON THE FREQUENCY, which is why it
+        # survives the correction. `OnFailure=` here bypasses DND. A branch that
+        # can be reached by a race must not raise an alarm indistinguishable
+        # from a real failure, however often the race happens — one such toast
+        # at 4am trains the operator to ignore the channel. A skip the operator
+        # can read in the log is the honest report. Do NOT replace this with a
+        # third plausible-sounding reason; if you need the frequency, measure it.
+        #
+        # It is READABLE, not merely logged: `tmux-restore-observe.sh` counts
+        # `REFUSING to restore` in this unit's journal and reports a refused
+        # boot as its own verdict (RC_REFUSED). That arm exists because the
+        # resume comparison is gated on `sends != 0`, and a refused run logs
+        # ZERO sends — so before it, a boot where nothing was resumed read CLEAN.
+        why_line = {
+            "no-socket": ("no socket at %s either — the server was gone before "
+                          "this process started" % tmux_socket_path()),
+            "timeout": ("the socket at %s exists but no server answered in "
+                        "%.1fs" % (tmux_socket_path(), server_waited)),
+        }.get(why, "reason=%s" % why)
         print("no tmux server is running — REFUSING to restore.", file=sys.stderr)
+        print(f"  waited {server_waited:.1f}s for one ({why_line}).", file=sys.stderr)
         print("  Starting one here would put it inside this unit's cgroup, and "
               "systemd would kill it the moment this process exits, taking every "
               "resumed conversation with it (measured 2026-09-06: 43 lost).",
@@ -884,6 +1029,10 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
         print("  Nothing was changed. Once you have a tmux server, re-run: "
               "tmux-session-restore.py restore", file=sys.stderr)
         return 0
+    if not dry_run and plan and server_waited > 0:
+        print(f"waited {server_waited:.1f}s for a tmux server to hold a session "
+              f"({why}) — the path unit triggers on the SOCKET, which tmux "
+              "creates before it sources its config")
     # 🔴 NOTHING TO SEND => NOTHING TO WAIT FOR, AND NOTHING THAT CAN BE LOST.
     # Waiting here made an EMPTY plan take the full settle timeout and then
     # return 1 — a restore that had no work to do reported as a failure.

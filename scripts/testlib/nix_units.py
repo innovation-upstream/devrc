@@ -193,6 +193,30 @@ def section(name: str, block: str) -> str | None:
     the reason `directive()` gives: a truncation a caller would act on is worse
     than a refusal. Returns None when the section is simply not present, which
     is an ordinary answer (a unit with no `[Install]`).
+
+    🔴 TWO PRECONDITIONS THE BRACE SCAN DOES NOT ENFORCE, AND CANNOT DETECT.
+    Both make it return a WRONG body rather than raising, so a caller cannot
+    tell from the result that they were violated:
+
+      1. **The input must already be comment-stripped.** The scan counts every
+         `{`/`}` outside a double-quoted string, and a `#` comment is not a
+         string. A comment containing one unbalanced brace — `# BindPaths = [ …
+         "-%h" ];` style prose, or `# `Environment = { … }` is one refactor
+         away` — shifts the depth and the section ends at the wrong place. An
+         ODD number of `"` in a comment is worse: it flips `in_str` for the rest
+         of the block, so braces after it stop counting entirely. `unit_source()`
+         strips comments before returning, which is why every caller in this
+         repo is safe today; a caller that hands `section()` raw file text is
+         not, and nothing here will tell it so.
+      2. **Nix indented strings (`''…''`) are not handled** — the same gap
+         `strip_nix_comments` documents. A `{` inside one is counted as
+         structure. No unit in `nix/home.nix` currently puts a brace inside an
+         indented string, so this is a live precondition rather than a live bug;
+         `directive()` at least REFUSES the multi-line `''…''` shape, whereas
+         this function would silently miscount it.
+
+    Detecting either would mean a real nix parser. Stating them is what a reader
+    can act on: strip first, and do not use this on a block containing `''`.
     """
     m = re.search(rf"(?m)^\s*{re.escape(name)}\s*=\s*\{{", block)
     if not m:
