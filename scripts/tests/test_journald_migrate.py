@@ -135,8 +135,11 @@ def test_a_backslash_value_does_not_become_a_tab():  # audit R1 #10
     """
     src = BLOCK.replace("SystemMaxUse=2G", r"SyncIntervalSec=5m\t")
     new, _ = jm.rewrite(src)
-    assert r'"5m\\t"' in new
-    assert "\t" not in _settings_body(new)
+    body = _settings_body(new)
+    assert body.strip(), "the helper found no settings body — the assertions below would be vacuous"
+    assert r'"5m\\t"' in new, "the backslash was not doubled for the \"-string"
+    # The negative half, and it CAN fail: an unescaped implementation emits exactly this.
+    assert r'"5m\t"' not in new, "emitted an unescaped backslash — Nix reads it as a TAB"
 
 
 def test_a_backslash_in_a_value_is_not_eaten_as_a_regex_group_reference():
@@ -165,6 +168,42 @@ def test_a_backslash_in_a_value_is_not_eaten_as_a_regex_group_reference():
 def test_refuses_rather_than_guessing(src, because):
     with pytest.raises(jm.Refused):
         jm.rewrite(src)
+
+
+@pytest.mark.parametrize(
+    ("value", "what"),
+    [
+        ("${cap}", "a bare antiquotation"),
+        ("2G${suffix}", "an antiquotation with a literal prefix"),
+        ("''${literal}", "a ''-escaped antiquotation"),
+    ],
+)
+def test_a_value_that_depends_on_EVALUATION_is_refused(value, what):  # audit R2 NEW-5
+    """`${x}` in the source is evaluated by Nix; escaping it freezes the literal text.
+
+    Nothing downstream catches that substitution: `nix-instantiate --parse` accepts both
+    spellings, and the apply script's post-switch check compares against the same
+    un-evaluated text it printed, so it MATCHES and reports success. Measured with
+    `nix-instantiate --eval`: source `''SystemMaxUse=${cap}''` with cap="9G" evaluates to
+    `SystemMaxUse=9G`, while the escaped rewrite evaluates to the literal `${cap}`.
+    """
+    src = BLOCK.replace("SystemMaxUse=2G", f"SystemMaxUse={value}")
+    with pytest.raises(jm.Refused, match="antiquotation"):
+        jm.rewrite(src)
+
+
+def test_the_inline_form_refuses_an_antiquotation_too():  # audit R2 NEW-5
+    """Same hazard, other spelling: `${` antiquotes inside a "-string as well."""
+    src = INLINE.replace("SyncIntervalSec=30s", "SyncIntervalSec=${interval}")
+    with pytest.raises(jm.Refused, match="antiquotation"):
+        jm.rewrite(src)
+
+
+def test_a_plain_dollar_sign_is_still_allowed():
+    """Only `${` antiquotes — a lone `$` is an ordinary character and must not refuse."""
+    src = BLOCK.replace("SystemMaxUse=2G", "SystemMaxUse=2G$")
+    _, pairs = jm.rewrite(src)
+    assert pairs == [("SystemMaxUse", "2G$")]
 
 
 def test_two_assignments_in_DIFFERENT_forms_are_also_refused():

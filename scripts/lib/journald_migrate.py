@@ -54,13 +54,19 @@ class Refused(Exception):
 
 
 def to_nix_string(value: str) -> str:
-    r"""Quote a value as a Nix double-quoted string.
+    r"""Quote a LITERAL value as a Nix double-quoted string.
 
     The escapes are not cosmetic. The source is a `''`-string (or a `"`-string), and we
     are emitting into a `"`-string, where the rules differ: a literal backslash in a
     `''`-body means a backslash, but in a `"`-body it starts an escape — so `5m\t` would
-    silently become a TAB rather than the four characters it was. `${` likewise starts
-    an antiquotation and would be evaluated as a variable reference.
+    silently become a TAB rather than the four characters it was.
+
+    `${` is escaped here for the same reason — but that is only correct for a value we
+    have already established is a LITERAL. In the SOURCE, `${...}` is an antiquotation
+    that Nix evaluates, so escaping it would silently change the value from "whatever
+    `cap` holds" to the six characters `${cap}`. `parse_settings` therefore refuses any
+    value containing `${` rather than letting it reach this function — see the comment
+    there. This escape is the belt to that braces.
     """
     out = value.replace("\\", "\\\\").replace('"', '\\"').replace("${", "\\${")
     return f'"{out}"'
@@ -89,6 +95,20 @@ def parse_settings(body: str) -> list[tuple[str, str]]:
         key, value = key.strip(), value.strip()
         if not _KEY.match(key):
             raise Refused(f"unexpected journald.conf key: {key!r}")
+        # 🔴 The one place this could silently change what the config MEANS rather than
+        # how it is spelled. `${x}` in the source is a Nix antiquotation that evaluates
+        # to whatever `x` holds; emitting it escaped would freeze the literal six
+        # characters instead, and NOTHING downstream would catch it — `nix-instantiate
+        # --parse` accepts both, and the caller's post-switch check compares against the
+        # same un-evaluated text it printed, so it matches and reports success. Likewise
+        # `''`-escapes (`''${`, `''\`) mean something inside a ''-string and nothing in a
+        # "-string. Refuse; a human can hand-migrate a config that interpolates.
+        if "${" in value or "''" in value:
+            raise Refused(
+                f"value for {key!r} contains a Nix antiquotation or ''-escape "
+                f"({value!r}) — its VALUE depends on evaluation, so a literal rewrite "
+                "would change it. Migrate this one by hand."
+            )
         pairs.append((key, value))
     if not pairs:
         raise Refused("the extraConfig block contained no settings")

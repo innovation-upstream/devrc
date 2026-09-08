@@ -5,6 +5,13 @@
 #     bash scripts/diagnose-nix-disk.sh          # some sections need root for full data
 #     sudo bash scripts/diagnose-nix-disk.sh
 #
+# 🔴 THIS TAKES TENS OF MINUTES. Sections 3 and 4 each walk /nix recursively, and
+# section 4 additionally stats every regular file. MEASURED on the workbench:
+# `df -i /` reports ~80M inodes in use, and section 3 alone had not finished after
+# 13 minutes. Each section pipes through `sort`, which buffers, so NOTHING prints
+# between the start of a walk and its end — a run that looks hung is normal. Start it
+# in a background shell, or under tmux, rather than waiting on it.
+#
 # 🔴 NO `set -e`, ON PURPOSE. Nearly every command here is allowed to fail: `find`
 # exits non-zero on a permission-denied entry, `lsof` is not installed on either host,
 # and a device or path may not exist. Under `set -euo pipefail` this script aborted at
@@ -23,6 +30,15 @@ ROOT_USED="$(df -h --output=used / 2>/dev/null | tail -1 | tr -d ' ')"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 skip() { echo "  (unavailable: $*)"; }
+
+# Under `sudo` with env_reset (the default, and NixOS does not build sudo with
+# --with-always-set-home), HOME is the TARGET user's — i.e. /root — so a bare $HOME
+# would make section 8 walk root's home and print almost nothing. SUDO_USER names who
+# actually invoked us; fall back to HOME when not under sudo.
+if [ -n "${SUDO_USER:-}" ]; then
+  TARGET_HOME="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+fi
+TARGET_HOME="${TARGET_HOME:-$HOME}"
 
 echo "============================================"
 echo "  NixOS Root Partition Diagnosis"
@@ -55,17 +71,21 @@ echo ""
 
 # 3. Inode usage per top-level dir
 echo "=== 3. Inode count per top-level directory ==="
+echo "  (walking /nix and friends — several minutes, no output until it completes)"
 for d in /nix /home /var /tmp /etc /usr /root /srv /opt /boot /mnt /run; do
   if [ -d "$d" ]; then
     count=$(find "$d" 2>/dev/null | wc -l)
     printf "%12d  %s\n" "$count" "$d"
   fi
 done | sort -rn
-echo "  (counts are a FLOOR as non-root: unreadable dirs are skipped by find)"
+if [ "$(id -u)" != "0" ]; then
+  echo "  (counts are a FLOOR: as non-root, find skips unreadable dirs)"
+fi
 echo ""
 
 # 4. Actual file sizes per top-level dir (apparent size)
 echo "=== 4. Apparent file size per top-level directory ==="
+echo "  (a second full walk, statting every file — slower than section 3)"
 for d in /nix /home /var /tmp /etc /usr /root /srv /opt /boot /mnt; do
   if [ -d "$d" ]; then
     size=$(find "$d" -type f -printf '%s\n' 2>/dev/null | awk '{s+=$1} END {printf "%.1f", s/1073741824}')
@@ -78,7 +98,9 @@ echo ""
 echo "=== 5. Deleted files still holding space ==="
 if have lsof; then
   lsof +L1 2>/dev/null | head -20
-  echo "Count: $(lsof +L1 2>/dev/null | wc -l)"
+  # -1 for lsof's own header row; clamp so an empty result reads 0, not -1.
+  n=$(lsof +L1 2>/dev/null | wc -l)
+  echo "Count: $(( n > 0 ? n - 1 : 0 ))"
 else
   skip "lsof not installed — try: nix-shell -p lsof --run 'lsof +L1'"
 fi
@@ -113,14 +135,21 @@ fi
 echo ""
 
 # 8. /home breakdown
-echo "=== 8. /home breakdown ==="
-for d in "$HOME"/.local/share/Steam "$HOME"/.ollama "$HOME"/.cache "$HOME"/.config \
-         "$HOME"/workspace "$HOME"/go "$HOME"/Downloads "$HOME"/hetzner-volumes; do
+echo "=== 8. home breakdown ==="
+echo "  (home: ${TARGET_HOME}${SUDO_USER:+  — resolved from SUDO_USER=$SUDO_USER, not \$HOME})"
+found8=0
+for d in "$TARGET_HOME"/.local/share/Steam "$TARGET_HOME"/.ollama "$TARGET_HOME"/.cache \
+         "$TARGET_HOME"/.config "$TARGET_HOME"/workspace "$TARGET_HOME"/go \
+         "$TARGET_HOME"/Downloads "$TARGET_HOME"/hetzner-volumes; do
   if [ -d "$d" ]; then
     size=$(du -sh "$d" 2>/dev/null | awk '{print $1}')
     printf "%8s  %s\n" "${size:-?}" "$d"
+    found8=1
   fi
 done
+# Section 8 was the one section with no fallback, so a wrong home read as an empty
+# section rather than as a reason — the exact failure the rest of this script avoids.
+[ "$found8" = "1" ] || skip "none of the expected directories exist under ${TARGET_HOME}"
 echo ""
 
 # 9. Swapfile

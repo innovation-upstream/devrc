@@ -52,11 +52,15 @@ workbench working tree where a `git checkout` would have deleted them unreported
 - No claims held (`claim-work`).
 
 ## Next steps (ranked)
-1. **Read the gate verdict for `b8tu5owud`** (`<scratchpad>/gate-rebased.txt`) and post it to
-   PR #1412. If merging, also run `nix build .#checks.x86_64-linux.pytests` and
-   `…nodetests` ONE AT A TIME — that tier has not been run on this branch, and it is the one
-   Tekton gates on. `IN FLIGHT: devrc#1412`. forcing: gate — `main` is protected in name only
-   (`required_status_checks` absent, measured 2026-09-02), so nothing else blocks this merge.
+1. **Re-run BOTH gate tiers against the CURRENT head and post the verdict to PR #1412.**
+   Do not reuse an older run: the first (`b8tu5owud`, base `85710f1a`) is superseded — it
+   FAILED on `test_no_client_subdomain_literal_is_committed`, which audit round 1 then fixed —
+   and every audit round since has changed payload. Name the run's base sha in the claim.
+   Then `nix build .#checks.x86_64-linux.pytests` and `…nodetests` ONE AT A TIME (concurrent
+   nested-`nix` contention produces measured FALSE failures); that sandbox tier is the one
+   Tekton gates on and has not been run on this branch. `IN FLIGHT: devrc#1412`.
+   forcing: gate — `main` is protected in name only (`required_status_checks` absent,
+   measured 2026-09-02), so nothing else blocks this merge.
 2. **RESOLVED — no action.** This list previously ranked "unblock the base clone", predicting
    `merge --ff-only` would refuse there because two untracked nebula scripts sat at paths
    `main` now tracks. MEASURED afterwards: the base clone is at `origin/main`, `--ff-only`
@@ -112,7 +116,7 @@ grep -A2 'services\.journald' /etc/nixos/configuration.nix
 cat /etc/systemd/journald.conf                 # expect SystemMaxUse=2G
 readlink -f /run/current-system                # expect nixos-system-nixos-26.11pre…
 
-# the PR carries only the two intended files
+# the PR's file list (five: two ops scripts, the rewriter, its tests, this doc)
 gh pr diff 1412 --name-only
 
 # the rewriter's own suite (25 tests, incl. every audit-found edge case)

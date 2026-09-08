@@ -24,10 +24,16 @@
 #
 # SAFETY. Nothing is written until the rewrite has been produced AND parsed as
 # valid Nix. Then, in order: a uniquely-named backup is taken (an existing one is
-# never overwritten), the new file is moved into place, and from that moment a
-# trap restores the backup on ANY failure or interrupt. `nixos-rebuild test`
-# runs before `switch` so an ACTIVATION failure does not leave a registered
-# generation and a rewritten bootloader behind.
+# never overwritten), the new file is moved into place, and from that moment an
+# EXIT trap restores the backup on any failure. MEASURED: bash runs that trap on
+# SIGTERM. Ctrl-C (SIGINT) was NOT established either way — do not read the trap
+# as a guarantee there.
+#
+# `nixos-rebuild test` runs before `switch`, so an ACTIVATION failure does not
+# leave a registered generation and a rewritten bootloader behind. 🔴 But `test`
+# ACTIVATES: between it and `switch` the change IS running, so a rollback in that
+# window restores the FILE while the system keeps running the change until a
+# reboot. The trap says so explicitly rather than claiming nothing is running.
 #
 # Idempotent: a config that is already migrated exits 0 without touching anything.
 #
@@ -77,22 +83,40 @@ TMP="${CFG}.new.$$"
 KEYS="$(mktemp -t journald-keys-XXXXXXXX)"
 BAK="${CFG}.bak-journald-$(date +%Y%m%d-%H%M%S)-$$"
 PATCHED=0
-SWITCHED=0
+ACTIVATED=0   # `nixos-rebuild test` has activated the config (not persisted)
+SWITCHED=0    # `nixos-rebuild switch` has returned (activated AND persisted)
 OK=0
 
 finish() {
   local rc=$?
-  rm -f "$TMP" "$KEYS"
+  rm -f "$TMP" "$KEYS" "${MERGED:-}"
   if [ "$OK" = "1" ]; then return; fi
   if [ "$PATCHED" = "1" ] && [ -f "$BAK" ]; then
-    cp -p "$BAK" "$CFG"
     echo >&2
-    echo "ROLLED BACK: $CFG restored from $BAK" >&2
+    # Without `|| { … }` a failing cp aborts the trap under the inherited `set -e`, so
+    # neither the rollback line NOR the running-state advisory below would be printed —
+    # a silently failed rollback, which is worse than a loud one.
+    if cp -p "$BAK" "$CFG"; then
+      echo "ROLLED BACK: $CFG restored from $BAK" >&2
+    else
+      echo "🔴 ROLLBACK FAILED: could not restore $CFG from $BAK." >&2
+      echo "   Do it by hand:  sudo cp $BAK $CFG" >&2
+    fi
+    # 🔴 Three states, not two. `nixos-rebuild test` ACTIVATES the configuration (it
+    # only skips the boot menu), so the window between `test` returning and `switch`
+    # returning is one where the file is restored while the change IS running. Saying
+    # "nothing is running the change" there is false, and it is said at exactly the
+    # moment the operator is deciding what to do next.
     if [ "$SWITCHED" = "1" ]; then
       echo "🔴 The system had ALREADY been switched. The FILE is restored but the RUNNING" >&2
       echo "   system is not — run \`sudo nixos-rebuild switch\` to return it." >&2
+    elif [ "$ACTIVATED" = "1" ]; then
+      echo "🔴 \`nixos-rebuild test\` had ALREADY ACTIVATED the change, so it IS running now," >&2
+      echo "   even though the file is restored. It was never added to the boot menu, so a" >&2
+      echo "   REBOOT reverts it — or run \`sudo nixos-rebuild switch\` to activate the" >&2
+      echo "   restored config immediately." >&2
     else
-      echo "   The system was never switched, so nothing is running the change." >&2
+      echo "   The system was never activated, so nothing is running the change." >&2
     fi
   fi
   exit $rc
@@ -104,7 +128,16 @@ trap finish EXIT
 python3 "$MIGRATE" "$CFG" --out "$TMP" --print-keys 2>"$KEYS" \
   || { sed 's/^/    | /' "$KEYS" >&2; die "the rewriter refused — $CFG is untouched"; }
 
-mapfile -t MIGRATED < "$KEYS"
+# Filter to well-formed KEY=VALUE lines. --print-keys shares stderr with anything else
+# python writes there (a DeprecationWarning, PYTHONWARNINGS, a sitecustomize), and a
+# stray line would become a phantom key that the post-switch check then cannot find —
+# rolling back a migration that actually worked.
+mapfile -t MIGRATED < <(grep -E '^[A-Za-z][A-Za-z0-9]*=' "$KEYS" || true)
+noise=$(grep -cvE '^[A-Za-z][A-Za-z0-9]*=' "$KEYS" || true)
+[ "${noise:-0}" = "0" ] || {
+  echo "  note      : ignored $noise non-key line(s) on the rewriter's stderr:" >&2
+  grep -vE '^[A-Za-z][A-Za-z0-9]*=' "$KEYS" | sed 's/^/    | /' >&2
+}
 [ "${#MIGRATED[@]}" -gt 0 ] || die "the rewriter reported no migrated keys — refusing to continue"
 echo "  migrating : ${MIGRATED[*]}"
 
@@ -120,8 +153,11 @@ diff -u "$CFG" "$TMP" | sed 's/^/    /' || true
 cp -p "$CFG" "$BAK"
 echo "  backup    : $BAK"
 
-mv "$TMP" "$CFG"
+# PATCHED is armed BEFORE the mv: a fatal signal landing between the two would
+# otherwise leave the file patched with the trap declining to restore it. The trap
+# also gates on `[ -f "$BAK" ]`, so an unnecessary restore is a harmless no-op.
 PATCHED=1
+mv "$TMP" "$CFG"
 echo "  applied   : $CFG"
 echo
 
@@ -133,6 +169,7 @@ nixos-rebuild dry-build
 # activation failure here is recoverable; `switch` does both BEFORE activating.
 echo "== nixos-rebuild test =="
 nixos-rebuild test
+ACTIVATED=1
 
 echo "== nixos-rebuild switch =="
 nixos-rebuild switch
@@ -144,23 +181,33 @@ echo
 # journald.conf(5) key, and a hardcoded check reports a false alarm on any host whose
 # config carried a different setting.
 echo "== verify =="
-JCONF=/etc/systemd/journald.conf
-[ -r "$JCONF" ] || die "$JCONF is not readable after the switch"
+# Read the MERGED configuration, not just /etc/systemd/journald.conf: a drop-in under
+# /etc/systemd/journald.conf.d/ or /run/systemd/journald.conf.d/ overrides that file, so
+# checking it alone would report `ok` for a setting something else has made inert.
+MERGED="$(mktemp -t journald-merged-XXXXXXXX)"
+if systemd-analyze cat-config systemd/journald.conf > "$MERGED" 2>/dev/null && [ -s "$MERGED" ]; then
+  echo "  reading   : systemd-analyze cat-config systemd/journald.conf (merged, incl. drop-ins)"
+else
+  echo "  reading   : /etc/systemd/journald.conf (systemd-analyze unavailable — DROP-INS NOT CHECKED)" >&2
+  cat /etc/systemd/journald.conf > "$MERGED" 2>/dev/null \
+    || die "neither systemd-analyze nor /etc/systemd/journald.conf could be read"
+
+fi
 
 missing=0
 for kv in "${MIGRATED[@]}"; do
-  if grep -qxF "$kv" "$JCONF"; then
+  if grep -qxF "$kv" "$MERGED"; then
     echo "  ok        : $kv"
   else
-    echo "  MISSING   : $kv — not present in $JCONF as written" >&2
+    echo "  MISSING   : $kv — not present in the merged journald config as written" >&2
     missing=$((missing + 1))
   fi
 done
-[ "$missing" = "0" ] || die "$missing migrated setting(s) did not reach $JCONF"
+[ "$missing" = "0" ] || die "$missing migrated setting(s) did not reach the merged config"
 
 echo
-echo "--- $JCONF ---"
-cat "$JCONF"
+echo "--- merged journald config ---"
+cat "$MERGED"
 echo "--- journal disk usage ---"
 journalctl --disk-usage || true
 
