@@ -2415,9 +2415,12 @@ class TestOpencodeSessionIdIsTierZero:
     @pytest.mark.parametrize("oc_id", ["", None], ids=["empty", "absent"])
     def test_INSIDE_opencode_an_inherited_claude_id_is_REFUSED(self, resolver, oc_id):
         """🔴 THE DANGEROUS HALF. `$OPENCODE=1` with no usable opencode id means
-        the `CLAUDE_CODE_SESSION_ID` in scope was INHERITED from an ancestor, so
-        using it returns another session's tasks with exit 0 — the exact silent
-        misattribution this class exists to stop.
+        the `CLAUDE_CODE_SESSION_ID` in scope MAY have been INHERITED from an
+        ancestor — and nothing distinguishes that from the mirror nesting, where
+        a Claude Code session launched FROM an opencode tool exports its own id.
+        Using an inherited one returns another session's tasks with exit 0, the
+        silent misattribution this class exists to stop, so both refuse: a
+        missing field beats a wrong one.
 
         Both spellings are driven because they arise differently: EMPTY is what
         `scripts/opencode/plugin/session-env.js` deliberately writes on the PTY
@@ -2561,10 +2564,21 @@ class TestOpencodeSessionIdIsTierZero:
             # `server.py` refuse it. Ordering is a within-function property;
             # consulting the marker is not. Asserting otherwise measured a
             # layout difference and called it a defect.
-            file_code = _decommented(src)
-            assert re.search(rf"\b{re.escape(OPENCODE_MARKER_VAR)}\b(?!_)", file_code), (
+            # 🔴 THE EXPANSION FORM, AND ONLY BEFORE AN INLINE `#`. `_decommented`
+            # blanks WHOLE-LINE comments only — deliberately, because these files
+            # carry `#` inside quoted strings — so a bare-token search was
+            # satisfiable by a trailing `# was gated on OPENCODE` with the arm
+            # deleted. MEASURED: browser's arm removed plus that comment left the
+            # file 246 passed. Requiring `${OPENCODE:-}` (what both files actually
+            # write) in the code half of some line closes the reachable walk.
+            marker_expansion = "${%s:-}" % OPENCODE_MARKER_VAR
+            consulted = any(
+                marker_expansion in ln.split("#", 1)[0]
+                for ln in _decommented(src).splitlines()
+            )
+            assert consulted, (
                 f"{path.name} orders the two ids but never consults "
-                f"${OPENCODE_MARKER_VAR} anywhere, so an id reached through the "
+                f"`{marker_expansion}` in code, so an id reached through the "
                 f"claude tier is used unconditionally — the exact shape that "
                 f"shipped when only the precedence was ported."
             )

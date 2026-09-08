@@ -843,7 +843,7 @@ clawgate_zero_probe(){
 # opencode session asking about its OWN id gets `200 {"tasks":[]}` -> exit 5.
 # That is HONEST — exit 5 says "asked, got nothing, and that cannot be
 # distinguished from a wrong id" — and it is strictly better than the exit 0
-# carrying an ancestor's tasks that it replaces. But it means this tier buys
+# carrying ANOTHER SESSION'S tasks that it replaces. But it means this tier buys
 # CORRECTNESS, not capability: opencode sessions resolve nothing until
 # `clawgatectl` grows the same tier. Re-measure before repeating this; it is a
 # claim about another repository's source on a given day.
@@ -892,7 +892,13 @@ clawgate_resolve(){
     # existed. A sibling's fail-closed guarantee is not inherited by copying its
     # precedence; port the refusal too.
     if [ -n "${OPENCODE:-}" ]; then
-      echo "clawgate: REFUSED — \$OPENCODE is set (this is an opencode run) but \$OPENCODE_SESSION_ID is unset or empty, so the only id available is a \$CLAUDE_CODE_SESSION_ID INHERITED from an ancestor session. Asking about it would return ANOTHER session's tasks. The board was never asked. This is NOT 'no task'."
+      # 🔴 THE MESSAGE CARRIES THE SAME QUALIFICATION AS THE COMMENT ABOVE, and
+      # for two rounds it did not. The retraction was applied to the comment and
+      # to `claude/skills/handoff/SKILL.md` and NOT here — the one surface an
+      # operator actually reads, and the one `SKILL.md`'s step copies into a
+      # durable handoff doc that the next `/resume` treats as fact. Sweep every
+      # copy of a claim, starting with the human-facing one.
+      echo "clawgate: REFUSED — \$OPENCODE is set (this is an opencode run) but \$OPENCODE_SESSION_ID is unset or empty, so any \$CLAUDE_CODE_SESSION_ID in scope MAY be one INHERITED from an ancestor session — nothing here can tell the two apart — and asking about an inherited id returns ANOTHER session's tasks. The board was never asked. This is NOT 'no task'."
       return 3
     fi
     sid="${CLAUDE_CODE_SESSION_ID}"; sid_src="CLAUDE_CODE_SESSION_ID"
