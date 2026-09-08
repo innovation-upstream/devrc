@@ -1573,8 +1573,21 @@ class TestSkillDocsArePinned:
         # local write in the first place. The claim it pinned — the writer finds
         # its own defect rather than a different tool in a later session —
         # survives at the post-write check, which is now the single one.
+        # 🔴 MOVED 2026-09-08, AND THIS GUARD GOING RED IS WHY THE MOVE IS SAFE.
+        # It pinned `cairn sync && cairn validate --scope <scope>` until
+        # `~/.local/bin/cairn` became the PINNED OSS package, which reimplements
+        # `validate` on the reader's resolver instead of shelling THIS module.
+        # MEASURED on the built package against the live cache: 76 B of output
+        # and exit 0, against this writer's 5,765 B carrying `entry shape:`,
+        # `marker reachability:` and `dropped lines:` — the last meaning content
+        # is ALREADY LOST. Both "green"; only one looked. So the CLAIM below
+        # stopped being true of the old spelling: the writer no longer finds its
+        # own defect when the skill says `cairn validate`, because the writer is
+        # no longer what runs. The pin moves to the writer's own invocation,
+        # which is precisely what this ledger exists to force — the module and
+        # its only caller move together, or the suite goes red. It went red.
         (
-            "cairn sync && cairn validate --scope <scope>",
+            "--store ~/.cache/subsystem-store --validate --scope <scope>",
             "🔴 the write-time parse check — the writer finds its own defect, "
             "not a different tool in a later session",
         ),

@@ -32,9 +32,22 @@ staleness it was run to measure.
 | this repo's digest | `cairn recall` (`--scope X` / `--repo PATH`) |
 | find a hunk by text | `cairn search '<query>'` (`--all-scopes` to search every scope) |
 | what does the cache actually hold | `cairn ls-entries` |
-| parse-check the cached entries | `cairn validate` |
+| parse-check the cached entries | `cairn validate` — ⚠ see below, it is NOT the write-protocol check |
 | which sessions/windows/transcripts worked a task | `cairn-who <task>` (`--json`, `--host`, `--no-windows`) — a SEPARATE binary |
 | diagnose anything above going wrong | `cairn doctor` |
+
+🔴 **`cairn validate` IS NOT THE WRITE-PROTOCOL CHECK — it stopped being it on
+2026-09-08, silently and at exit 0.** The client on PATH is now the pinned OSS
+package, which reimplements `validate` on the reader's resolver instead of
+shelling the writer. MEASURED on the built package against the live cache: **76
+bytes** of output (its state banner) and exit 0, where the writer prints **5,765
+bytes** with `entry shape:`, `marker reachability:` and `dropped lines:` — the
+last meaning content is ALREADY LOST. Both are "green", and only one of them
+looked. For the mandated post-write check use the writer, which `subsystem-index`
+now names:
+`subsystem_touch.py --store ~/.cache/subsystem-store --validate --scope <scope>`.
+⚠ Exit codes differ too: the writer exits **3** on a malformed entry, the packaged
+client **5** (`EXIT_CORRUPT`; `3` is `EXIT_UNREACHABLE_NO_CACHE` for the client).
 
 🔴 **`cairn-who` is a separate command, not a `cairn` subcommand.** It is about a
 **task**, not a store entry: it touches no store and never syncs, takes none of

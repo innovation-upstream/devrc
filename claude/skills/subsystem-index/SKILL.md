@@ -159,9 +159,25 @@ Otherwise read `status=` and act on that case:
 🔴 **After writing an entry — new file or appended bullet — validate it in the SAME turn:**
 
 ```
-cairn sync && cairn validate --scope <scope>                     # after ANY write: append, put OR create
+cairn sync && python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py \
+    --store ~/.cache/subsystem-store --validate --scope <scope>   # after ANY write: append, put OR create
 python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --validate <a-file-on-disk>   # a scratch file BEFORE you send it
 ```
+
+🔴 **THE FIRST LINE IS THE WRITER, NOT `cairn validate` — DELIBERATE SINCE 2026-09-08.**
+`~/.local/bin/cairn` is now the PINNED OSS package, which reimplements `validate` on the
+reader's resolver instead of shelling this writer. MEASURED on the built package against the
+live cache: the packaged client prints **76 bytes** — its state banner, nothing else — and
+exits **0**, while this writer prints **5,765 bytes** with all three blocks below and
+`OK — 31 of 31`. Both are "green". Left as `cairn validate`, every rule under this line
+would have told you to read blocks that no longer exist, and the `dropped lines:` advisory —
+the one that means content is ALREADY LOST — would have stopped running silently at exit 0.
+A check that was PASSING becoming a check that is not RUN is exactly what the
+`CAIRN_MIRROR_ROOT` export in `nix/sessionVariables.nix` exists to prevent; it was caught
+there and missed here.
+⚠ The exit code moved too: this writer still exits **3** on a malformed entry, but the
+packaged `cairn validate` exits **5** (`EXIT_CORRUPT`) — `3` is `EXIT_UNREACHABLE_NO_CACHE`
+in the client's own table. Do not read a `5` from the client as this contract's `3`.
 
 🔴 **There is now ONE post-write check, and it is the first line — every write lands on the pod, so the pod's copy is the only thing worth validating.** The local mirror is read-only and does not move, so validating a path under `~/.claude/analyze-service-index/` after a write parses the *pre-write* bytes and reports a clean entry that is not the one you wrote. ⚠ **The second line is no longer a post-write check and must not be used as one.** It used to be the branch for a brand-new entry, on the reasoning that *"it exists only locally and the pod has never seen it"* — that reasoning died with `cairn create` (2026-09-03), which makes the pod see it first. What the second line is still good for is parse-checking a **scratch** file before sending it, which turns a 422 from the store into a local answer.
 

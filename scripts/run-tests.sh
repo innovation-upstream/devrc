@@ -1706,10 +1706,19 @@ TARGET_FLOORS=(
   # printed collected=13068; the branch printed 13076. The delta is exactly
   # `scripts/tests/test_cairn_flake_pin.py`'s 8 tests, and all 8 pass.
   # ⚠ Both runs also reported failed=20, every one in `test_nebula_relay_apply.py`
-  # (arrived with #1272). Identical on both sides, so main is red on its own and
-  # this branch adds no failure — which is why the count above is trustworthy
-  # despite a red gate. The `age`/`opencode` 7 that were red earlier today are
-  # GONE; main fixed them. Re-derive this baseline rather than quoting it.
+  # (arrived with #1272) — IDENTICAL on both sides, which is what makes the
+  # collected count above trustworthy despite a red gate: whatever those are,
+  # they are not this branch.
+  # 🔴 BUT "main is red on its own" IS NOT A DURABLE PROPERTY, AND AN AUDIT ROUND
+  # MEASURED THE OPPOSITE AT THE SAME COMMIT: 30 passed / 0 failed in that file
+  # at `01956bf0`, hours later. Both readings are real. That suite reads LIVE
+  # HOST STATE (`/etc/nebula/ca.crt`, `/etc/nixos/configuration.nix`) and #1272
+  # shipped "a read-only check and the sudo apply beside it" — so applying the
+  # relay flips it from red to green with no commit involved. Its result is
+  # keyed to the HOST, not to the tree.
+  # ⚠ The `age`/`opencode` 7 that were red the same morning are GONE; main fixed
+  # them. This baseline has now gone stale twice in one day and once by host
+  # state alone: RE-DERIVE it with a control run, never quote these numbers.
   "scripts/tests|13026"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared

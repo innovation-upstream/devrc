@@ -241,11 +241,29 @@ def test_the_package_is_passed_to_the_home_module_through_extraSpecialArgs():
     assert f"{THREADED_NAME} =" in args, (
         f"`extraSpecialArgs` does not export `{THREADED_NAME}`, so nix/home.nix "
         f"cannot see the package.\ngot: {args.strip()!r}")
+    # 🔴 BIND THE REGEX TO THIS NAME'S OWN RIGHT-HAND SIDE. An earlier version
+    # ran the two checks INDEPENDENTLY over the whole region, so a decoy
+    # satisfied both while the deploy pointed elsewhere. MEASURED SURVIVED:
+    #     cairnPackage = pkgs.hello;
+    #     cairnUnused  = cairn.packages.${system}.cairn;
+    # all 8 tests passed, and `home.file.".local/bin/cairn".source` became
+    # `${pkgs.hello}/bin/cairn` — home-manager's `insertFileEntry` does an
+    # unconditional `ln -s`, so that BUILDS and deploys a DANGLING symlink,
+    # which is the outcome the required-argument design claims to prevent.
+    # ⚠ `cairnPackage = pkgs.hello;` ALONE was KILLED, so the guard was narrower
+    # than its own docstring rather than inert — the failure only appears when a
+    # decoy carries the string the second assertion looks for.
+    count = len(re.findall(rf"(?m)^\s*{re.escape(THREADED_NAME)}\s*=", args))
+    assert count == 1, (
+        f"expected exactly one `{THREADED_NAME} =` binding in "
+        f"`extraSpecialArgs`, found {count}. A second one lets the asserted "
+        f"binding and the threaded one be different lines.\ngot: {args.strip()!r}")
+    rhs = _assignment(args, f"{THREADED_NAME} =")
     assert re.search(
-        r"cairn\s*\.\s*packages\s*\.\s*\$\{system\}\s*\.\s*cairn", args), (
-        "`extraSpecialArgs` exports a name but not the cairn input's package — "
-        "a binding of the right name pointing at the wrong thing is the exact "
-        f"failure this file exists for.\ngot: {args.strip()!r}")
+        r"cairn\s*\.\s*packages\s*\.\s*\$\{system\}\s*\.\s*cairn", rhs), (
+        f"`{THREADED_NAME}` is bound to something other than the cairn input's "
+        "package — a binding of the right name pointing at the wrong thing is "
+        f"the exact failure this file exists for.\ngot: {rhs.strip()!r}")
 
 
 def test_home_nix_REQUIRES_the_package_argument_with_no_default():
@@ -257,9 +275,23 @@ def test_home_nix_REQUIRES_the_package_argument_with_no_default():
     the thread breaking is loud.
     """
     text = _home()
-    header = text.split("\n", 1)[0]
+    # ⚠ NOT `split("\n", 1)[0]`. A nix module header may legally span lines, and
+    # reading only the first would fail with "does not accept `cairnPackage`" on
+    # a CORRECT tree — a red that names a cause the tree does not have, which is
+    # the false-diagnosis failure this file's own helpers were written to avoid.
+    # The header is everything up to the `:` that closes the argument set.
+    depth = 0
+    header = text
+    for i, ch in enumerate(text):
+        if ch in "{[(":
+            depth += 1
+        elif ch in "}])":
+            depth -= 1
+            if depth == 0:
+                header = text[:text.index(":", i) + 1] if ":" in text[i:] else text[:i + 1]
+                break
     assert header.lstrip().startswith("{"), (
-        f"nix/home.nix does not open with a module argument set: {header!r}")
+        f"nix/home.nix does not open with a module argument set: {header[:120]!r}")
     assert THREADED_NAME in header, (
         f"nix/home.nix does not accept `{THREADED_NAME}`, so the package the "
         f"flake exports is dropped on the floor.\ngot: {header!r}")
