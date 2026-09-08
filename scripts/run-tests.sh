@@ -1081,7 +1081,10 @@ fi
 #
 # 🔴 WHAT THIS CAN NO LONGER CATCH, stated plainly rather than left to be
 # discovered: deleting up to `min(50, m/20)` tests from a SINGLE target is now
-# silent — up to 50 of scripts/tests' ~1900, 1 of the 13-test i3 suite. The old
+# silent — up to 50 of scripts/tests' 12870 (⚠ this figure read "~1900" and
+# undated until 2026-09-08; it was 6.8x stale, which understates the target and
+# so OVERSTATES the proportion this blind spot covers), 1 of the 13-test i3
+# suite. Re-derive it rather than trusting it — nothing asserts on it. The old
 # exact total went red on a one-test deletion. That precision is what cost
 # eleven reconciliations in a day, and it has never once caught a real deletion;
 # the collapses it exists for — a suite emptied, renamed, dropped from
@@ -1684,7 +1687,15 @@ TARGET_FLOORS=(
   # own count put through the gate's formula and printed BY the gate, not
   # arithmetic on the two sides. Pinned AFTER merging main into the branch, per
   # the ORDER note above.
-  "scripts/tests|12793"
+  # 2026-09-08, MERGED: main's `cairn-who` split (12870) plus #1370's 54-test
+  # preflight harness. Neither side's number survives the merge — this one was
+  # re-derived by running the gate on the MERGED tree and putting its own
+  # printed count through `_suggested_floor`, per the note both sides carried.
+  # ⚠ Carried forward from main, because an audit round read it as closing more
+  # than it does: the ratchet removes ACCUMULATED drift, not the per-target
+  # slack, and ~50 is what the rule deliberately leaves. A suite inside that
+  # band is not protected from silent deletion by this floor.
+  "scripts/tests|12927"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -3945,6 +3956,34 @@ SHELL_TESTS=(
   # nothing. Watched red: mutating `APPLY=0` to `APPLY=1` fails it with
   # "the gate is bypassed".
   "scripts/tests/test_cleanup_disk_gate.sh"
+  # Registered in the SAME commit that adds it, for the reason the entries above
+  # exist. It covers `scripts/diagnose-disk-accounting.sh` — ROOT-PRIVILEGED
+  # bash that had no test file at all, in a repo with no shellcheck gate, which
+  # is precisely why a root COMMAND INJECTION (a planted /tmp directory name
+  # reaching `xargs -I{} sh -c`) and two silent whole-run aborts shipped
+  # invisibly. Nothing in it needs root: the script has a sourceable seam that
+  # returns before the root check, and the suite drives the pure transforms
+  # against fixtures — an lsof header in two different column layouts, a
+  # directory literally named `evil";echo PWNED-AS-$(id -un) >&2;"x`, and a
+  # ~17,500-entry tree sized from the live ARG_MAX. It reaches no launcher, no
+  # network and no git.
+  # 🔴 THIS COMMENT HAS NOW CARRIED A WRONG LINE COUNT TWICE, in the commit
+  # correcting the previous wrong one each time. It said "282 lines"; round 2
+  # replaced that with "282 at the merge base (567 after round 1, 730 after
+  # round 2)" — and 730 was false the moment it was typed (the file was 766).
+  # A count of a file that changes every round cannot be maintained in a comment
+  # in a different file, so none is stated here: run
+  # `wc -l scripts/diagnose-disk-accounting.sh`. The only figure that cannot go
+  # stale is anchored to a sha, and one is enough — the file entered this PR's
+  # history at 282 lines (`git show c1169e3b:scripts/diagnose-disk-accounting.sh
+  # | wc -l`) and has grown with each audit round since.
+  # The other half of the old stale claim: the seam was described as
+  # `BASH_SOURCE[0] != $0 returns before the root check`. That expression was
+  # MEASURED reachable from the environment, removed, and is now a banned
+  # pattern in the suite's own scanner — which only reads
+  # `diagnose-disk-accounting.sh`, so this copy survived it.
+  # Watched red: `s += $col` -> `s += $8` fails it with "SIZE/OFF found at col 7".
+  "scripts/tests/test_diagnose_disk_accounting.sh"
 )
 # 🔴 THE SHELL TESTS ARE IN THE TIMING CENSUS TOO, and the reason is the census's
 # own honesty: it is presented as an accounting of the run, so a population it

@@ -283,10 +283,39 @@ no commit; this flag is it, upstreamed. What remains unexercised is only a
 unchanged.** `age-keygen -y` prints only the `age1…` recipient (measured, age
 v1.3.1: exactly 63 bytes, `age1…` + one `\n`), which is why the pin above is
 committed in a public repo. The secret half is never printed, never hashed into a
-message, and never passed in argv. ⚠ **age-keygen's stderr is NOT safe** — a file
-it cannot parse comes back as `unknown identity type: "<the offending line>"`,
-i.e. it echoes its input, which on a mangled identity is the secret key. The tool
-quotes no stream at all on that path.
+message, and never passed in argv. ⚠ **age-keygen's stderr is NOT safe** — on
+**age ≤ 1.3.1** a file it cannot parse comes back as
+`unknown identity type: "<the offending line>"`, i.e. it echoes its input, which
+on a mangled identity is the secret key. The tool quotes no stream at all on that
+path.
+
+🔴 **age 1.3.2 removed that echo — and the redaction STAYS. Do not delete it as
+dead code.** Upstream dropped the offending argument from the error deliberately
+(`parse.go`: *"Don't include arg in the error: it may contain private key
+material, and callers print these errors"*). Measured 2026-09-08 on this host,
+same fixtures against both binaries — 8 realistic manglings (leading/trailing
+space, case-folded, CRLF, prefix typo, quoted, truncated, trailing NUL):
+
+| binary | manglings echoing secret material into stderr |
+|---|---|
+| `age-1.3.1` (positive control — the sweep CAN see a leak) | **4 / 8** |
+| `age-1.3.2` (currently on PATH) | **0 / 8** |
+
+The `0` is reportable only because the same sweep scored `4` against 1.3.1; a
+bare zero here would be indistinguishable from a sweep wired to nothing.
+
+The guard is kept regardless, for two independent reasons: `age-keygen` is
+**whatever is on PATH** and this repo does not pin the operator's binary, so a
+defence that is only correct on the newest release is not a defence; and a
+recovery is exactly the situation where someone reaches for an older `age` on a
+machine that is not this one. Its non-vacuity no longer depends on upstream
+keeping the bug. Two tests in
+`scripts/tests/test_analyze_service_index_escrow_verify.py` hold it up:
+`test_the_redaction_is_pinned_against_a_STUB_that_echoes_like_age_v1_3_1` puts a
+stub on PATH that echoes the way 1.3.1 did, so the guard is exercised whatever
+age is installed, and
+`test_which_age_keygen_ECHO_REGIME_is_installed_is_OBSERVED_not_assumed` reads
+the installed regime rather than assuming one.
 
 ##### Verifying a hand-pasted note (the browser-clipboard leg)
 
@@ -359,7 +388,7 @@ disaster-recovery key gets rotated, or a tampered backup gets waved through:
 | `28` `NO-ARTIFACT` | zero objects under the prefix | wrong `--host`/prefix, or the backups are gone — `restore-verify.py` diagnoses which |
 | `29` `AGE-MISSING` | `age` is not on PATH | environment fault; says nothing about the escrow |
 | `30` `ARTIFACT-UNREADABLE` | failed before the key was used | diagnose the object, not the key |
-| `25` `DECRYPT-FAILED` | age wrote **nothing**: wrong key **or** damaged header — **not separable** | try a **different** artifact (`--scope <other>`) with the same escrowed copy: if another opens, the key is fine and this object's header is damaged. **Do not rotate first.** |
+| `25` `DECRYPT-FAILED` | age refused **before the payload**: wrong key **or** damaged header — **not separable**. ⚠ The same code also carries a second message, *"CANNOT SAY WHY"*, when age refuses in a way this tool cannot read — then **three** causes stay open, corruption included. Read the sentence, not just the number. | try a **different** artifact (`--scope <other>`) with the same escrowed copy: if another opens, the key is fine and this object's header is damaged. **Do not rotate first.** |
 | `33` `ARTIFACT-CORRUPT` | age authenticated the header (**the key worked**) then failed the payload | 🔴 **the backup is TAMPERED/CORRUPT/TRUNCATED.** Check the other retained objects. Do not rotate. |
 | `31` `ARTIFACT-EMPTY` | age exited **zero** on an empty payload (**the key worked**) | the artifact holds nothing; do not rotate |
 | `26` `RESTORE-FAILED` | decrypted fine, the git bundle is bad | artifact fault; do not rotate |
@@ -368,11 +397,35 @@ disaster-recovery key gets rotated, or a tampered backup gets waved through:
 the `--host` prefix trap `restore-verify.py` documents), and neither is a verdict
 on the escrow.
 
-Measured (age v1.3.1, many offsets and sizes): a wrong key or a damaged header
-leaves **no** plaintext file, while payload corruption and truncation leave one —
-because age writes output *before* authenticating the payload. That, plus a
-machine-readable cause published by `restore-verify.py`, is what separates the
-rows; none of it is parsed out of age's stderr.
+🔴 **HOW `25` AND `33` ARE TOLD APART — AND HOW THAT GOT WEAKER (2026-09-08).**
+
+Originally: measured on age **v1.3.1**, a wrong key or a damaged header left
+**no** plaintext file, while payload corruption and truncation left one, because
+age created its `--output` as soon as it had authenticated the header. File
+presence therefore *was* the discriminator, and none of it was parsed out of
+age's stderr.
+
+**age v1.3.2 took that away.** It creates `--output` **lazily**, on the first
+successful write — re-measured 2026-09-08 across 7 payload sizes × 5 manglings
+on both versions. So a tampered artifact **under 64 KiB leaves no file at all**,
+which is every artifact this subsystem produces. Left alone, that reported a
+TAMPERED backup as `25` — the row that points at your key.
+
+The distinction **survives**, but on weaker footing: it is now taken primarily
+from age's own refusal message (`failed to decrypt and authenticate payload
+chunk` vs `no identity matched any of the recipients` vs `failed to read
+header`), which is byte-identical on v1.3.1 and v1.3.2. File presence is kept as
+a second signal — still **sufficient**, no longer **necessary**. Both are
+combined in `escrow-verify.py`; the classification itself is
+`restore-verify.py::classify_age_refusal`.
+
+⚠ **Say plainly what that costs:** a substring match on another tool's prose is
+weaker than the phase observation it replaced, and this subsystem's own design
+notes argue against exactly that shape. The mitigation is that an
+**unrecognised** message is its own outcome — the verifier then says it *cannot
+say why* and names all three causes, rather than picking one. If you ever see
+that sentence, age has reworded: teach `classify_age_refusal` the new string
+rather than acting on a guess.
 
 ⚠ It cannot unlock the vault and will not try: every `bw` call runs with stdin on
 `/dev/null`, `--nointeraction`, and a timeout, so an unattended run **fails fast
