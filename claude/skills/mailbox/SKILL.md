@@ -35,7 +35,7 @@ touching the image, DNS, the gateway ConfigMap, or forwarding.
 | App manifests | `clusters/homelab/apps/mailbox/` — `namespace`, `postgres.yaml`, `receiver.yaml`, `configmap-schema.yaml`, `secrets.enc.yaml`, `nodeport.yaml`, `kustomization.yaml`, `src/receiver.py` + `src/receiver_test.py`. Flux Kustomization `mailbox` (`root-kustomizations/system/mailbox.yaml`), parent ks `homelab` |
 | Receiver image | `harbor.homelab.lan/library/mail-receiver:0.1.2` (BAKED aiosmtpd+asyncpg, runs uid 10001 — NOT runtime-pip). Built from `src/receiver.py` |
 | Receiver | ns `mailbox`, Deployment `mail-receiver`, ClusterIP `mail-receiver.mailbox.svc:2525`, NodePort **30026**. Env: `PG_DSN` (secretKeyRef), `MAILPIT_HOST` (empty = onward relay OFF) |
-| Postgres | ns `mailbox`, `mailbox-postgres-0` (StatefulSet), ClusterIP `mailbox-postgres:5432`, db/user `mailbox`, PVC `openebs-nvme-1tb`. Password in secret `mailbox-postgres-auth` (key `pg-dsn`). **Also hosts the `initiatives` schema** — same instance, `_db.py` and port-forward; see the `initiatives` skill |
+| Postgres | ns `mailbox`, `mailbox-postgres-0` (StatefulSet), ClusterIP `mailbox-postgres:5432`, db/user `mailbox`, PVC `openebs-nvme-1tb`. Password in secret `mailbox-postgres-auth` (key `pg-dsn`). **Also hosts the `initiatives` schema**, whose one live table is `initiatives.handoff_section` (the handoff search index, written by `scripts/lib/handoff_index.py` and read by `resume`) — same instance, `_db.py` and port-forward |
 | `mail` schema | `id, message_id (UNIQUE), received_at, date_header, from_addr, to_addrs[], cc_addrs[], subject, headers jsonb, text_body, html_body, raw bytea, size_bytes, labels text[], processed_at, search tsvector (GIN)` |
 | Cluster access | mailbox app + receiver: `KUBECONFIG=~/workspace/homelab-talos/homelab-kubeconfig`. Gateway :25 + CF DNS + postfix test-send: `~/workspace/homelab-talos/production-kubeconfig`. **From the laptop** (nebula-only): `KUBECONFIG=~/.kube/homelab-nebula.yaml` (proxy-url SOCKS via the `homelab-kube-tunnel` service → workbench `10.42.0.30`); the rebuild step still needs the workbench (Harbor is LAN) |
 | Gateway configs | homelab: `clusters/homelab/apps/nebula/gateway/gateway-nginx-config.yaml` (ConfigMap `nebula-gateway-nginx-config`, the `:2525 → mail-receiver.mailbox.svc` line). Hetzner: `clusters/production/apps/nebula/gateway/gateway-nginx-config.yaml` (`listen 0.0.0.0:25`). Both are the `nebula-gateway` DaemonSet (ns `nebula`, container `nginx-proxy`) |
@@ -77,7 +77,7 @@ only LLM/$ is the extractor's Stage 2 (OpenRouter, survivors only — sub-cent/r
 `mail_sync_state(folder,uidvalidity,last_uid)`.
 **`mail.labels` values:** `bulk|fyi|action-required|invoice|superseded|dismissed|sent|invoice-archived`.
 
-**`_db.py` (`MailDB`) — the shared DB access layer** (also used by repo-cos + initiatives).
+**`_db.py` (`MailDB`) — the shared DB access layer** (also used by `scripts/lib/handoff_index.py`).
 Default = kubectl **port-forward** on an ephemeral local port (off-cluster workbench tools).
 Opt-in in-cluster DIRECT-DB mode: set **`MAILBOX_PG_HOST`** (e.g.
 `mailbox-postgres.mailbox.svc.cluster.local`, + optional `MAILBOX_PG_PORT`) **OR**
@@ -117,11 +117,11 @@ kubectl -n mailbox exec mailbox-postgres-0 -- psql -U mailbox -d mailbox -c \
 The SAME Gmail app-password the sent-poller uses for IMAP **read** also authenticates SMTP
 **send** for that account — so an agent can send mail **as `zachlowden1@gmail.com` to
 anyone** (real Gmail deliverability; NOT the `@mail.zacx.dev` postfix-relay test-send).
-Proven live by `repo-cos` (its weekly digest emails through this path).
+Proven live by the retired `repo-cos` weekly digest, and still used by the task-spec drafter's daily digest.
 
 - **Credential:** SOPS secret `mailbox-gmail-imap` in homelab-talos trunk — key
   `IMAP_APP_PASSWORD`, user `IMAP_USER` (= `zachlowden1@gmail.com`).
-- **Reusable code (don't re-implement):** `~/workspace/devrc/scripts/repo-cos/email_send.py`
+- **Reusable code (don't re-implement):** `~/workspace/devrc/scripts/task-spec-drafter/email_send.py`
   — `load_credentials()` (does the SOPS decrypt), `build_message(subject,body,from_addr,to_addr)`,
   and `_smtp_send()` (Gmail `smtp.gmail.com:587`, STARTTLS with a **verifying** TLS context).
   For a one-off, import it or copy the pattern; override recipient via `send_digest(to_addr=…)`
@@ -130,7 +130,7 @@ Proven live by `repo-cos` (its weekly digest emails through this path).
 # minimal send-as-Zach (workbench; needs the SOPS age key on PATH via nix-shell)
 export SOPS_AGE_KEY_FILE=~/workspace/homelab-talos/.secrets/age.key
 nix-shell -p 'python3.withPackages(p:[p.requests])' sops --run 'python3 - <<PY
-import sys; sys.path.insert(0, "/home/zach/workspace/devrc/scripts/repo-cos")
+import sys; sys.path.insert(0, "/home/zach/workspace/devrc/scripts/task-spec-drafter")
 import email_send
 user, pw = email_send.load_credentials()          # SOPS-decrypts IMAP_USER/IMAP_APP_PASSWORD
 msg = email_send.build_message(subject="hi", body="test", from_addr=user, to_addr="someone@example.com")

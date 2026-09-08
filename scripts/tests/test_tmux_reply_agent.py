@@ -58,6 +58,14 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+
+# 🔴 RESOLVED AT IMPORT, BEFORE ANY FIXTURE CAN RUN. Several suites in this tree
+# legitimately clobber os.environ["PATH"] (see
+# test_no_real_launchers.PINNED_PATH_CLOBBERS), so a `shutil.which("tmux")` call
+# inside a test body reports on the run order rather than on the host. Measured:
+# the two task-524 tests passed alone and in every pair, and failed only in the
+# full four-suite sweep, for exactly this reason.
+_TMUX_EXE_AT_IMPORT = __import__("shutil").which("tmux")
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -1630,11 +1638,17 @@ def real_tmux(tmp_path):
 
 def _agent_with_real_tmux(monkeypatch, real_tmux):
     """Point the agent's tmux seam at the private server."""
-    sock, env = real_tmux["sock"], real_tmux["env"]
+    sock, base_env = real_tmux["sock"], real_tmux["env"]
 
-    def run(args):
+    def run(args, env=None):
+        # `env_override` models the real seam: open_window hands tmux a corrected
+        # PATH so a launched pane can find `claude` (task 524). Keep the private
+        # socket pinned whichever environment is used, or the call escapes to the
+        # operator's server — which this fixture exists to prevent.
+        e = dict(env if env is not None else base_env)
+        e["TMUX_TMPDIR"] = base_env["TMUX_TMPDIR"]
         p = subprocess.run(["tmux", "-L", sock, *args], capture_output=True,
-                           text=True, env=env, timeout=30)
+                           text=True, env=e, timeout=30)
         return p.returncode, p.stdout, p.stderr
 
     monkeypatch.setattr(AGENT, "run_tmux", run)
@@ -2065,8 +2079,14 @@ def test_an_EMPTY_pane_current_path_does_not_collapse_the_readback(monkeypatch):
     """
     calls = []
 
-    def fake_run_tmux(args):
+    def fake_run_tmux(args, env=None):
         calls.append(args)
+        # task 524: open_window asks the SERVER for the PATH a launched pane
+        # should get. Answering "unset" here (tmux's `-PATH`) keeps this test
+        # about the READ-BACK parse it was written for — open_window then passes
+        # no env, exactly as it did before that change.
+        if args[0] == "show-environment":
+            return 0, "-PATH\n", ""
         if args[0] == "new-window":
             # Well-formed, three fields, last one EMPTY. Note the trailing tab.
             return 0, "%2\tscratch20\t\n", ""
@@ -2114,7 +2134,13 @@ def test_an_UNREADABLE_pane_current_path_still_REFUSES(monkeypatch):
 
     `claude/RULES.md`: assert the STATE, never a word another branch can spell.
     """
-    def fake_run_tmux(args):
+    def fake_run_tmux(args, env=None):
+        # task 524: open_window now asks the SERVER what PATH a launched pane
+        # should get. "-PATH" is tmux's spelling for an unset variable, so
+        # open_window passes no environment and this test stays about the
+        # unreadable-path refusal it was written for.
+        if args[0] == "show-environment":
+            return 0, "-PATH\n", ""
         if args[0] == "new-window":
             return 0, "%2\tscratch20\t\n", ""
         if args[0] == "display-message":
@@ -2134,3 +2160,198 @@ def test_an_UNREADABLE_pane_current_path_still_REFUSES(monkeypatch):
         f"the unverifiable-path refusal must not be the FALLTHROUGH mismatch: {err!r}. "
         "'could not read where it landed' and 'tmux landed somewhere else' are "
         "different facts and must not share a code path.")
+
+
+# ---------------------------------------------------------------------------
+# task 524: a LAUNCHED PANE must get a PATH that can find `claude`.
+#
+# 🔴 THE EXISTING real_tmux TESTS ARE STRUCTURALLY BLIND TO THIS.
+# `_agent_with_real_tmux` runs tmux with `dict(os.environ, …)` — a FULL
+# developer PATH — so the pane it creates inherits a working PATH by accident of
+# the harness. Under systemd the agent's own PATH is the unit's deliberately
+# minimal `Environment=PATH=` (coreutils + python3 + tmux, 3 entries), and
+# `new-window` with no `-e` hands THAT to the new pane. Measured on workbench
+# 2026-09-07: the launched pane ran `claude` and got `command not found`, while
+# the tmux SERVER's own global PATH was complete — i.e. tmux was never the
+# source, the caller's environment was.
+#
+# So this test supplies the stripped parent environment the unit really has.
+# Without it the assertion cannot fail, which is the whole point.
+# ---------------------------------------------------------------------------
+
+def _pane_environ_path(real_tmux, pane: str) -> str:
+    """The PATH of the pane's own process, read from /proc — not from a shell.
+
+    Reading `/proc/<pid>/environ` is deterministic: it needs no prompt to be
+    ready, no command to be typed and no capture-pane timing. A shell-based read
+    would be racing the pane's own startup.
+    """
+    p = real_tmux["tmux"]("display-message", "-p", "-t", pane, "#{pane_pid}")
+    pid = p.stdout.strip()
+    assert pid.isdigit(), f"no pane pid for {pane!r}: {p.stdout!r}"
+    raw = pathlib.Path(f"/proc/{pid}/environ").read_bytes().decode("utf-8", "replace")
+    for entry in raw.split("\0"):
+        if entry.startswith("PATH="):
+            return entry[5:]
+    return ""
+
+
+def test_a_launched_pane_gets_a_PATH_THAT_CAN_FIND_claude(monkeypatch, tmp_path):
+    """task 524, criterion 3 — RED before the fix, GREEN after.
+
+    🔴 HERMETIC ON PURPOSE: its own tmux server, its own socket dir, and an
+    environment built from scratch rather than from os.environ. It does NOT use
+    the shared `real_tmux` fixture. Measured while writing it: run inside a
+    four-suite sweep it failed while passing alone, because `pane_path_env`
+    came back with another test's tmp_path — some session-scoped fixture in that
+    sweep mutates the ambient environment these helpers capture. A test that
+    depends on ambient state reports on the run order, not on the code.
+
+    The fake `claude` sits in a directory ABSENT from the agent's own PATH and
+    PRESENT in the tmux server's global PATH. That is the live shape, and it is
+    what makes the two outcomes distinguishable: a pane built from the caller's
+    environment cannot see it, one built from the server's can.
+    """
+    tmux_exe = _TMUX_EXE_AT_IMPORT
+    assert tmux_exe, "tmux is in REQUIRED_TOOLS; it must be on PATH here"
+
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    # POSIX-sh body, no shebang — write_exec owns that, and
+    # test_runtime_shebangs.py fails any test that writes its own.
+    write_exec(bindir / "claude", "exit 0\n")
+
+    sockdir = tempfile.mkdtemp(prefix="t524.")
+    sock = "t524-" + os.path.basename(str(tmp_path))
+    # A complete environment we OWN, so nothing ambient can reach this test.
+    server_env = {
+        "PATH": f"{bindir}:{os.path.dirname(tmux_exe)}:/usr/bin:/bin",
+        "TMUX_TMPDIR": sockdir,
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "TERM": "xterm",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
+
+    def tmux(*args, env=None):
+        return subprocess.run([tmux_exe, "-L", sock, *args], capture_output=True,
+                              text=True, env=(env or server_env), timeout=30)
+
+    try:
+        tmux("new-session", "-d", "-s", "scratch20")
+        # POSITIVE CONTROL on the fixture: prove the server really holds a PATH
+        # carrying `claude` BEFORE asserting anything about a pane, so a failure
+        # below is about the pane and never about the setup.
+        seen = tmux("show-environment", "-g", "PATH").stdout.strip()
+        assert str(bindir) in seen, f"fixture did not take; server PATH = {seen!r}"
+
+        # 🔴 THE AGENT'S OWN ENVIRONMENT, as systemd really gives it: PATH
+        # OVERRIDDEN and nothing else, which is exactly what `Environment=PATH=`
+        # does. No `claude` on it.
+        agent_env = dict(server_env, PATH=os.path.dirname(tmux_exe))
+
+        def run(args, env=None):
+            # env=None means "the agent passed nothing" — the defect. A stub that
+            # ignored the argument would pass with or without the fix.
+            e = dict(env if env is not None else agent_env)
+            e["TMUX_TMPDIR"] = sockdir          # pin the private socket only
+            return (lambda p: (p.returncode, p.stdout, p.stderr))(
+                subprocess.run([tmux_exe, "-L", sock, *args], capture_output=True,
+                               text=True, env=e, timeout=30))
+
+        monkeypatch.setattr(AGENT, "run_tmux", run)
+
+        pane, err = AGENT.open_window(str(tmp_path), "scratch20")
+        assert not err, f"open_window failed: {err}"
+        assert pane.startswith("%"), f"no pane id: {pane!r}"
+
+        pid = tmux("display-message", "-p", "-t", pane, "#{pane_pid}").stdout.strip()
+        assert pid.isdigit(), f"no pane pid for {pane!r}"
+        raw = pathlib.Path(f"/proc/{pid}/environ").read_bytes().decode("utf-8", "replace")
+        pane_path = ""
+        for entry in raw.split("\0"):
+            if entry.startswith("PATH="):
+                pane_path = entry[5:]
+                break
+
+        assert pane_path, f"could not read the pane's PATH at all (pane {pane})"
+        assert str(bindir) in pane_path.split(":"), (
+            "the launched pane cannot find `claude`: its PATH is "
+            f"{pane_path!r}, which does not contain {str(bindir)!r}. The pane "
+            "inherited the AGENT's environment instead of the tmux server's. "
+            "This is task 524: on workbench the launched window sat on "
+            "`claude: command not found`."
+        )
+    finally:
+        subprocess.run([tmux_exe, "-L", sock, "kill-server"], capture_output=True,
+                       env=server_env, timeout=30)
+        shutil.rmtree(sockdir, ignore_errors=True)
+
+
+def test_the_launch_env_KEEPS_tmux_reachable_when_the_server_PATH_lacks_it(monkeypatch, tmp_path):
+    """The corrected PATH must PREPEND, never REPLACE — task 524.
+
+    🔴 THE MUTANT THIS EXISTS FOR. `launch_env = dict(os.environ, PATH=pane_path)`
+    reads as the obvious implementation and passes the sibling test above, because
+    there the server's PATH happens to contain tmux. It is wrong: this process
+    re-execs tmux WITH that environment, so an operator PATH that does not carry
+    tmux would leave the agent unable to run tmux at all — the launch fails
+    outright instead of landing a diagnosable window. Measured: without this case
+    that mutant SURVIVES.
+
+    So the server PATH here deliberately does NOT contain tmux. Only the
+    append-our-own behaviour can make this pass.
+    """
+    tmux_exe = _TMUX_EXE_AT_IMPORT
+    assert tmux_exe, "tmux is in REQUIRED_TOOLS; it must be on PATH here"
+
+    bindir = tmp_path / "onlybin"
+    bindir.mkdir()
+
+    sockdir = tempfile.mkdtemp(prefix="t524b.")
+    sock = "t524b-" + os.path.basename(str(tmp_path))
+    server_env = {
+        "PATH": f"{os.path.dirname(tmux_exe)}:/usr/bin:/bin",
+        "TMUX_TMPDIR": sockdir,
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "TERM": "xterm",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
+
+    def tmux(*args):
+        return subprocess.run([tmux_exe, "-L", sock, *args], capture_output=True,
+                              text=True, env=server_env, timeout=30)
+
+    try:
+        tmux("new-session", "-d", "-s", "scratch20")
+        # 🔴 A server PATH WITHOUT tmux on it. This is the whole fixture.
+        tmux("set-environment", "-g", "PATH", str(bindir))
+        seen = tmux("show-environment", "-g", "PATH").stdout.strip()
+        assert seen == f"PATH={bindir}", f"fixture did not take: {seen!r}"
+
+        agent_env = dict(server_env, PATH=os.path.dirname(tmux_exe))
+
+        def run(args, env=None):
+            e = dict(env if env is not None else agent_env)
+            e["TMUX_TMPDIR"] = sockdir
+            # 🔴 BY NAME, NOT BY ABSOLUTE PATH — the real agent runs
+            # `tmux_bin()`, which defaults to the bare name "tmux", so PATH is
+            # what decides whether tmux can be executed at all. A stub using an
+            # absolute path makes this test unable to fail: measured, the
+            # replace-PATH mutant SURVIVED until this line changed.
+            return (lambda p: (p.returncode, p.stdout, p.stderr))(
+                subprocess.run(["tmux", "-L", sock, *args], capture_output=True,
+                               text=True, env=e, timeout=30))
+
+        monkeypatch.setattr(AGENT, "run_tmux", run)
+
+        pane, err = AGENT.open_window(str(tmp_path), "scratch20")
+        assert not err, (
+            "open_window failed with a server PATH that does not carry tmux: "
+            f"{err!r}. The launch environment REPLACED this unit's PATH instead "
+            "of prepending to it, so tmux itself became unreachable."
+        )
+        assert pane.startswith("%"), f"no pane id: {pane!r}"
+    finally:
+        subprocess.run([tmux_exe, "-L", sock, "kill-server"], capture_output=True,
+                       env=server_env, timeout=30)
+        shutil.rmtree(sockdir, ignore_errors=True)

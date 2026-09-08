@@ -258,6 +258,13 @@ MIN_LISTING_ENTRIES = 30
 # Code transcript", never "dead" -- shrink on a zero only after asking how else
 # the thing is driven, and never delete on one.
 #
+# 🔴 LOWERED 11,265 -> 10,800 ACROSS 31 ENTRIES later the SAME DAY, re-based again
+# after retiring `initiatives` and `repo-cos` with their subsystems. -465, of which
+# the two removed entries are most; the rest is one CUT: `clickup`'s description no
+# longer disambiguates itself from `initiatives`, because there is no longer an
+# `initiatives` to be confused with. No other trigger phrase was touched. Still
+# pinned at exactly the measurement.
+#
 # 🔴 LOWERED 12,259 -> 11,265 ACROSS 33 ENTRIES on 2026-09-07, re-based after
 # retiring five skills (`quiesce-workload`, `close-the-loop`, `sglang`,
 # `window-triage`, `standup`). Nothing was cut from a surviving description --
@@ -277,7 +284,23 @@ MIN_LISTING_ENTRIES = 30
 # left at the previous, larger number licenses exactly the regrowth this constant
 # exists to catch, so re-pinning it is part of the cut, not follow-up work. The
 # eviction playbook is printed by the failing assertion below.
-LISTING_TOTAL_CEILING_CHARS = 11_265
+#
+# 🔴 RAISED ONCE, DELIBERATELY, 2026-09-08: 10,800 -> 11,192, to admit
+# `civitai-app-release` (392 chars). THE RULE ABOVE STILL STANDS — this is the
+# exception, not a precedent, and it was taken by Zach with the "do NOT raise"
+# sentence quoted back to him first. What was weighed:
+#   - Both playbook remedies were available and both were declined: demoting an
+#     existing skill to tier B (steps 0/3), or shipping the new skill at tier B
+#     for 21 chars instead of 392.
+#   - This is a ratchet on devrc's own growth, not the real overflow point —
+#     this module's docstring records the whole listing at ~0.67x of the actual
+#     budget on a 1M window, so nothing was at risk of being dropped.
+#   - The new skill is symptom-routed on purpose ("why was my submit refused"),
+#     which is exactly the surface tier B would have removed.
+# HEADROOM IS STILL 0 BY CHOICE: pinned to the exact new measure, so the NEXT
+# addition of any size reddens this gate and forces the same conversation.
+# If you are reading this while adding a skill: you do not get to raise it too.
+LISTING_TOTAL_CEILING_CHARS = 11_192
 
 # The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
 # recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries
@@ -311,7 +334,10 @@ HOME_NIX_SKILL_SOURCE = re.compile(
 # always-on listing.
 CLICKUP_SIBLINGS = {
     "clawgate": "the self-hosted approval UI, which has its own Tasks",
-    "initiatives": "the durable cross-repo initiative board",
+    # `initiatives` (the durable cross-repo board) was a sibling here until it was
+    # RETIRED 2026-09-07. Dropping the entry is the point of the two-way pin below:
+    # a disambiguation that keeps routing readers at a skill which no longer exists
+    # is worse than no disambiguation, because it costs a hop to discover.
     "mailbox": "the email action-items queue",
     "check-clickup-addressed": (
         "verifies from session transcripts whether work on a ClickUp task was "
@@ -326,14 +352,16 @@ CLICKUP_SIBLINGS = {
 # the WHOLE normalised string." A description could name EVERY sibling in
 # passing ("see also clawgate, initiatives, mailbox and check-clickup-addressed")
 # and satisfy a word check while telling the router nothing about which one owns
-# which case -- that exact walk is a control below. The stated
+# which case -- that exact walk is a control below. That is also why RETIRING a
+# sibling edits this constant: the sentence is the artifact, so a name leaving it
+# is a deliberate re-pin, never a silent drift. The stated
 # cost, accepted: a cosmetic reword of this ONE sentence fails this test. The
 # routing keywords in the rest of the description are deliberately left free to
 # change -- rigidifying those would make the gate fight the very tuning it exists
 # to protect.
 CLICKUP_DISAMBIGUATION = (
     "This is the EXTERNAL ClickUp workspace — the self-hosted approval UI and "
-    "ITS Tasks are `clawgate`, the durable cross-repo board is `initiatives`, "
+    "ITS Tasks are `clawgate`, "
     "the email action-items queue is `mailbox`, and verifying from session "
     "transcripts whether work on a task was actually done is "
     "`check-clickup-addressed`."

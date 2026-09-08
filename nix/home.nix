@@ -1,30 +1,24 @@
 { config, pkgs, lib, isNixOS ? false, ... }:
-
 let
   home = config.home.homeDirectory;
   workspace = "${home}/workspace";
   # Server mode: `touch ~/.server-mode`. Historically this ALSO gated the graphical
   # services (dunst, espanso) off — but the workbench carries the marker to enable
-  # its server-side tasks (mail-actions-archive, repo-cos) while STILL running a full
-  # X/i3 desktop, so gating the desktop bits on serverMode wrongly disabled them
-  # there (same trap the i3 bar hit — see graphical.nix). serverMode now gates ONLY
-  # server-side task enablement; graphical services key off `graphical` below.
+  # its server-side tasks (mail-actions-archive, handoff-index-sync) while STILL
+  # running a full X/i3 desktop, so gating the desktop bits on serverMode wrongly
+  # disabled them there (same trap the i3 bar hit — see graphical.nix). serverMode
+  # now gates ONLY server-side task enablement; graphical services key off
+  # `graphical` below.
   serverMode = builtins.pathExists "${home}/.server-mode";
-  # Initiatives-sync (Phase 1) master switch — gates only whether the TIMER is wired
-  # into timers.target; the service definition is always emitted (so it can be started
-  # by hand). Kept OFF through the initial supervised validation so a routine deploy
-  # (ship.sh / home-manager switch) could never silently enable an unvalidated
-  # prod-write timer. ENABLED now: the first supervised live write validated the
-  # DDL/insert path (snapshot #1 wrote 23 rows to prod, telemetry-on, and the DSN role
-  # is confirmed to have CREATE SCHEMA). The timer runs hourly (see the timer below).
-  enableInitiativesSync = true;
+
   # handoff-index-sync (P1) master switch — gates ONLY whether the TIMER is wired
   # into timers.target; the service definition is always emitted, so
   # `systemctl --user start handoff-index-sync` works by hand.
   #
   # 🔴 OFF, and it must stay off until a supervised live run has validated the
-  # write path. This is exactly `enableInitiativesSync`'s original posture and for
-  # the same reason: `handoff_index.py` creates a NEW schema object
+  # write path. This was exactly the posture of `enableInitiativesSync` (the
+  # retired initiatives-sync timer's flag, removed 2026-09-07) and for the same
+  # reason: `handoff_index.py` creates a NEW schema object
   # (`initiatives.handoff_section`, with a GENERATED tsvector column and a GIN
   # index) in a PROD database, and NOTHING in the test suite can exercise that —
   # the gate runs in a nix sandbox with no cluster and no Postgres, so the DDL has
@@ -104,9 +98,9 @@ let
   # timers.target; the SERVICE definition is always emitted, so
   # `systemctl --user start tmux-snapshot-push` works by hand regardless.
   #
-  # ON from the start, deliberately, and the asymmetry with enableInitiativesSync above
-  # is the point: that flag waited because its first write created SCHEMA in a prod
-  # database. This one appends to a read model whose rows are latest-per-host upserts —
+  # ON from the start, deliberately, and the asymmetry with `handoff-index-sync`
+  # below is the point: that flag waits because its first write creates SCHEMA in a
+  # prod database. This one appends to a read model whose rows are latest-per-host upserts —
   # a bad push is rejected outright (the server 400s and CHANGES NOTHING, leaving the
   # previous snapshot in place), and a wrong push is overwritten 2 minutes later. The
   # write path was also validated by hand before this landed: a real
@@ -216,7 +210,7 @@ let
   # ACPI-only (`acpi_video0`) backlight — or none — evaluates `isLaptop=false` and
   # would inherit PR_SET_PTRACER_ANY on its keylogger with no error and no signal.
   # `serverMode` is the same explicit marker every workbench-only server task keys
-  # off (mail-actions-archive, initiatives-sync, repo-cos, task-spec-drafter): the
+  # off (mail-actions-archive, handoff-index-sync, task-spec-drafter): the
   # workbench carries it, the laptop does not, and a brand-new host does not until
   # the operator deliberately `touch ~/.server-mode`. (There is no per-host
   # hostName/osConfig to allowlist on here: this is a STANDALONE home-manager
@@ -1448,14 +1442,32 @@ in
   # devrc path. Bare command on `home.sessionPath` resolves from any cwd.
   #
   # 🔴 mkOutOfStoreSymlink is NOT a preference here — it is REQUIRED. `scripts/cairn`
-  # reaches its siblings through `Path(__file__).resolve().parent / "lib"` (:68, and
-  # again at :756/:808/:818 for `cairn_who`), exactly like the opencode CLI above.
-  # `.resolve()` follows the symlink back to the checkout, so `lib/` is found in the
-  # repo. A store copy would resolve `__file__` into /nix/store, where `lib/` is NOT
-  # deployed — the import would fail outright. Only this one path is symlinked;
-  # `scripts/lib/` must not be deployed, same rule as opencode's `lib/`.
+  # reaches its siblings through `Path(__file__).resolve().parent / "lib"`, exactly
+  # like the opencode CLI above. `.resolve()` follows the symlink back to the
+  # checkout, so `lib/` is found in the repo. A store copy would resolve `__file__`
+  # into /nix/store, where `lib/` is NOT deployed — the import would fail outright.
+  # Only these launcher paths are symlinked; `scripts/lib/` must not be deployed,
+  # same rule as opencode's `lib/`.
+  #
+  # ⚠ NO LINE NUMBERS, AND THE OLD ONES WERE MEASURED WRONG BEFORE THIS CHANGE EVEN
+  # TOUCHED THEM. This comment used to cite `scripts/cairn:68` for the lib lookup and
+  # `:756/:808/:818` for the `cairn_who` importers. Checked at the commit this branch
+  # forked from: `:68` was BLANK and the other three were unrelated comment lines in
+  # the recall/validate section — all four stale, with nothing to signal it. A line
+  # number is a claim that rots silently. The imports are named by EXPRESSION above;
+  # grep for it.
   home.file.".local/bin/cairn".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn";
+  # 🔴 `cairn-who` — the task -> sessions -> windows -> transcripts resolver, split
+  # out of `cairn` because it is a different noun: it touches no store, no cache and
+  # none of the store's flags. Same deploy mode, and for the SAME REASON, not merely
+  # by analogy: `scripts/cairn-who` resolves `lib/cairn_who.py` (and, through it,
+  # `lib/timeouts.py`) through its own `Path(__file__).resolve().parent / "lib"`.
+  # As a `home.file` copy it would resolve into /nix/store and fail on import before
+  # printing anything. Deploying `cairn` out-of-store and this one in-store would
+  # leave HALF the split working, which is why both lines are here together.
+  home.file.".local/bin/cairn-who".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn-who";
   # Claude Code hooks managed here (the script only — the settings.json
   # registration is per-host/unmanaged, as for bash-guard.py above, whose script
   # is likewise managed now). audit-pr-nudge fires
@@ -2867,104 +2879,15 @@ in
     };
   };
 
-  # Initiatives consolidation (PHASE 1) — periodic sync of the on-demand
-  # initiative-scan into the homelab `mailbox` Postgres (initiatives schema), so
-  # later apps (a live viewer + a router) query a durable, live store instead of
-  # re-running the expensive scan. The wrapper (scripts/initiatives/run-sync.sh)
-  # shells out to initiative-scan.py --json and writes one append-only snapshot via
-  # a kubectl port-forward — SAME cluster-access shape as mail-actions-archive.
-  #
-  # WORKBENCH-ONLY (gated on serverMode), identical rationale to the archiver: the
-  # homelab kubeconfig points at 192.168.50.94:6443 (direct LAN, no proxy), which
-  # only this host has; the laptop is nebula-only and its run would just fail noisily.
-  #
-  # CLICKHOUSE_* creds are provisioned by the wrapper at RUN TIME via a sops decrypt
-  # (NO plaintext secret at rest — same recipe as the /initiative-scan skill), so
-  # the scan runs TELEMETRY-ON. The decrypt is fully best-effort and degrades to
-  # telemetry-off if the age key / homelab repo / sops / decrypt is unavailable, so it
-  # can never fail the sync. `sops` is put on the unit PATH below for exactly this.
-  #
-  # Minimal user-unit env, so PATH is explicit: nix (nix-shell) + git + gh (the
-  # scan's branch/PR reads) + kubectl (the port-forward) + sops (the run-time reader
-  # cred decrypt) + coreutils/sed/grep, and NIX_PATH so `nix-shell -p` resolves
-  # <nixpkgs>. The wrapper's nix-shell adds psycopg2 (the DB write) + requests (the
-  # scan's ClickHouse read).
-  systemd.user.services.initiatives-sync = lib.mkIf serverMode {
-    Unit = {
-      Description = "Initiatives sync — initiative-scan → homelab mailbox Postgres (initiatives schema)";
-      After = [ "network-online.target" ];
-      Wants = [ "network-online.target" ];
-      OnFailure = [ "notify-failure@%n.service" ];
-    };
-    Service = {
-      Type = "oneshot";
-      # Hard ceiling so a half-hung kubectl / scan can't wedge the timer; the
-      # cgroup is killed and the timer re-arms on the next OnUnitActiveSec.
-      # 600s (not 300) gives the ONE-TIME cold-recap batch headroom after the
-      # 14d window widen surfaced ~60+ newly-stalled cards (2 vLLM recaps each,
-      # committed at batch end BEFORE write_snapshot) — warm runs stay ~6-15s and
-      # the 15-min OnUnitActiveSec interval is untouched, so a 10-min ceiling can't
-      # overlap. (Proper hardening — recap after snapshot / per-card commit — is a
-      # follow-up; this removes the first-run snapshot-loss risk the audit flagged.)
-      TimeoutStartSec = 600;
-      Environment = [
-        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.gh pkgs.kubectl pkgs.sops pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
-        "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
-        "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
-        # Explicit host tag — user units do NOT source .zshenv, so resolve_host()
-        # would otherwise only land on "workbench" by falling through
-        # gethostname()=="nixos". Explicit here so a future laptop copy can't mis-tag.
-        "ACTIVITY_HOST=workbench"
-        # Phase B — LLM recap generation (best-effort; the sync NEVER fails if the model
-        # is down/slow — cards fall back to the deterministic summary). Points at the
-        # homelab vLLM (ns vllm-recap, svc/vllm-recap:8000, served model "recap"); the
-        # generator kubectl-port-forwards to it on an ephemeral local port.
-        "INITIATIVES_RECAP_ENABLED=1"
-        "RECAP_NAMESPACE=vllm-recap"
-        "RECAP_SERVICE=svc/vllm-recap"
-        "RECAP_SERVICE_PORT=8000"
-        "RECAP_MODEL=recap"
-        "HOME=%h"
-      ];
-      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/initiatives/run-sync.sh";
-      # Re-run the unit when the wrapper changes (cf. X-Restart-Triggers above).
-      X-Restart-Triggers = [ "${../scripts/initiatives/run-sync.sh}" ];
-    };
-  };
-
-  # Timer: fire the sync ~every 15min so the store is "realtime enough" (the live tmux
-  # overlay is already render-time live; this keeps momentum/PRs/next-step fresh). The
-  # scan is EXPENSIVE (git-log across all repos + transcript parse + ClickHouse +
-  # `gh pr list` open+merged per repo + a kubectl port-forward), but 4×/hr keeps `gh`
-  # well under the 5000/hr rate limit. OnUnitActiveSec re-arms after each run so a slow
-  # sync never overlaps itself; OnStartupSec gives one prompt run after login. (No
-  # Persistent — it only applies to OnCalendar timers, not monotonic ones.) The ↻ button
-  # in the viewer forces an out-of-band sync on demand (single-flighted + debounced).
-  #
-  # DOUBLE-GATED: serverMode (workbench-only, LAN access) AND enableInitiativesSync
-  # (the OFF-by-default master switch in the let-block above). With the switch false
-  # the timer unit is not emitted at all, so NO deploy can wire it into timers.target
-  # until the first supervised live write validates the write path.
-  systemd.user.timers.initiatives-sync = lib.mkIf (serverMode && enableInitiativesSync) {
-    Unit = {
-      Description = "Periodic timer for the initiatives → Postgres sync";
-    };
-    Timer = {
-      OnStartupSec = "2min";
-      OnUnitActiveSec = "15min";
-    };
-    Install = {
-      WantedBy = [ "timers.target" ];
-    };
-  };
-
   # ── HANDOFF-DOC SECTION INDEX (scripts/lib/handoff_index.py) ─────────────────
   # Derives a SECTION-grained full-text index of the handoff corpus into
   # `initiatives.handoff_section` (re-measured 2026-09-01: devrc 94 docs / 968
   # sections off origin/main, homelab-talos 54 / 512 off origin/trunk), so `/resume` and
   # subagents can query what past sessions ALREADY wrote down instead of
-  # re-deriving it. Sibling of initiatives-sync: same database, same schema, same
-  # MailDB connection path (kubectl port-forward + psycopg2 + DSN-from-secret).
+  # re-deriving it. It shares the `initiatives` SCHEMA NAME with the retired
+  # initiatives board (removed 2026-09-07) and nothing else: this table is the
+  # handoff search index, it has its own writer, and it long outlived the board.
+  # Connection path is mail-actions': kubectl port-forward + psycopg2 + DSN-from-secret.
   #
   # 🔴 THE CORPUS IS READ FROM GIT REFS, NOT THE WORKING TREE. This box carries
   # many worktrees per repo; a working-tree scan would index mid-edit branches, the same doc
@@ -3887,113 +3810,8 @@ in
   };
 
   # Initiatives consolidation (PHASE 3) — the LIVE WEB VIEWER over the Phase-1 store.
-  # A long-running stdlib-http.server (scripts/initiatives/viewer.py, launched by
-  # run-viewer.sh) that renders the current initiatives from `initiatives.latest`
-  # (ghost-free: newest snapshot only) grouped by repo, with momentum badges,
-  # next-step, open PRs, and a LIVE tmux overlay read from THIS host at render time.
-  # It is the durable, browser-viewable successor to the retired agent-ops TUI.
-  #
-  # WORKBENCH-ONLY (gated on serverMode), same rationale as the sync: the homelab
-  # kubeconfig is direct-LAN only here, AND the viewer must run on the host whose
-  # tmux server it reads (the live overlay). It binds the workbench's OWN LAN address
-  # (192.168.50.250:8899, eth0 — NOT 192.168.50.94, which is a homelab node hosting the
-  # kube-apiserver/NodePorts and is not assignable here) — internal work data, deliberately
-  # NOT wired into the public homelab gateway. Public exposure would be a later, explicit choice.
-  #
-  # For READS it needs NO ClickHouse/sops creds (it only reads the already-synced store).
-  # BUT the ↻ refresh button shells out to run-sync.sh (POST /refresh → a subprocess),
-  # which re-runs the FULL sync — so the viewer unit's PATH now also carries `sops` (the
-  # run-time ClickHouse reader-cred decrypt → telemetry-on) and `gh` (the scan's PR reads);
-  # KUBECONFIG + NIX_PATH are already set. Without sops/gh a refresh still works but the
-  # produced snapshot degrades to telemetry-off / no-PR (best-effort, never fails).
-  # It's enabled directly under serverMode with no off-by-default master switch: reads are
-  # low-risk and the refresh is single-flighted + debounced (~60s) in the code. Crash-loop
-  # safety is in the CODE, not the unit — every store read is per-request and a DB outage
-  # renders an error page while the process keeps serving, so Restart=on-failure only ever
-  # fires on a genuine process crash (e.g. the port already bound), backed off by RestartSec.
-  #
-  # Minimal user-unit env, so PATH is explicit: nix (nix-shell) + kubectl (the
-  # port-forward) + git (repo/worktree discovery + the sops-decrypt's git show) + tmux (the
-  # live pane read) + sops + gh (the refresh subprocess's sync) + bash/coreutils/sed/grep,
-  # and NIX_PATH so `nix-shell -p` resolves <nixpkgs>. The wrapper's nix-shell adds
-  # psycopg2 (the DB read) + requests (the scan import).
-  systemd.user.services.initiatives-viewer = lib.mkIf serverMode {
-    Unit = {
-      Description = "Initiatives live web viewer — initiatives.latest + live tmux overlay";
-      After = [ "network-online.target" ];
-      Wants = [ "network-online.target" ];
-      OnFailure = [ "notify-failure@%n.service" ];
-    };
-    Service = {
-      Type = "simple";
-      Environment = [
-        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.kubectl pkgs.git pkgs.tmux pkgs.sops pkgs.gh pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
-        "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
-        "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
-        "ACTIVITY_HOST=workbench"
-        "INITIATIVES_VIEWER_HOST=192.168.50.250"
-        "INITIATIVES_VIEWER_PORT=8899"
-        # PRIMARY /api/ask path (Phase 1 initiatives agent): the model-driven OpenClaw devpod
-        # (homelab ns devpod-initiatives, svc/initiatives-devpod:18789, openclaw/initiatives,
-        # DeepSeek V4 Pro). The MODEL selects which deterministic skill-tool(s) to run (incl.
-        # multiple for compound questions); the viewer reaches it via a kubectl port-forward
-        # (same homelab reach as the store) + a gateway token derived from the in-cluster
-        # HOOKS_TOKEN secret. On ANY failure it FALLS BACK to the deterministic assistant
-        # below — so the sidebar always answers.
-        "INITIATIVES_AGENT_ENABLED=1"
-        "AGENT_NAMESPACE=devpod-initiatives"
-        "AGENT_SERVICE=svc/initiatives-devpod"
-        "AGENT_PORT=18789"
-        "AGENT_MODEL=openclaw/initiatives"
-        "AGENT_SECRET=initiatives-agent-secrets"
-        # FALLBACK model for /api/ask when the agent is unreachable: the deterministic regex
-        # assistant phrases over the SAME homelab vLLM the recap generator uses (ns vllm-recap,
-        # svc/vllm-recap:8000, served model "recap"). Best-effort; a model outage degrades to
-        # the plain deterministic renderer.
-        "INITIATIVES_RECAP_ENABLED=1"
-        "RECAP_NAMESPACE=vllm-recap"
-        "RECAP_SERVICE=svc/vllm-recap"
-        "RECAP_SERVICE_PORT=8000"
-        "RECAP_MODEL=recap"
-        "HOME=%h"
-      ];
-      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/initiatives/run-viewer.sh";
-      # Only ever restarts on a real crash (see the crash-loop note above); back off so a
-      # persistently-unbindable port doesn't spin.
-      Restart = "on-failure";
-      RestartSec = "10s";
-      # Every file the LONG-RUNNING viewer process holds in memory. The siblings are loaded
-      # ONCE by explicit importlib path at first use and then cached for the life of the
-      # process, so a change to any of them is invisible until the unit restarts — listing
-      # only viewer.py meant a tasks.py-only (or dispatch/archive/nextstep-only) change
-      # switched cleanly and then silently did nothing.
-      # ⚠ `initiative-scan.py` is in the same boat (attach_tmux caches the scan module) but is
-      # NOT listed: it belongs to the sync unit too, and a scan change already requires an
-      # explicit `systemctl --user restart initiatives-viewer.service` (see the skill's gotchas).
-      X-Restart-Triggers = [
-        "${../scripts/initiatives/run-viewer.sh}"
-        "${../scripts/initiatives/viewer.py}"
-        "${../scripts/initiatives/agent_client.py}"
-        "${../scripts/initiatives/tasks.py}"
-        "${../scripts/initiatives/dispatch.py}"
-        "${../scripts/initiatives/archive.py}"
-        "${../scripts/initiatives/nextstep.py}"
-      ];
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
-
-  # ── THE AGENT-LAYER EXPLAINER PAGE (scripts/present/) ────────────────────────
-  # `scripts/present/generate.py` builds ONE self-contained HTML file that
-  # MEASURES this host — the index store, the systemd timers, the git hooks, the
-  # gate config, branch protection — and stamps every figure with the moment it
-  # was taken. It has to run ON the host; a container would measure a machine
-  # nobody uses. Until now the only way to read it was to generate it by hand,
-  # which means in practice nobody read it.
-  #
-  # Three units, all serverMode-gated for the same reason `initiatives-viewer`
+  # Three units, all serverMode-gated for the same reason the retired
+  # `initiatives-viewer`
   # is: this is the workbench's own LAN surface, and the laptop is nebula-only.
   #
   #   present-regen.service   oneshot — build BOTH variants into ~/.local/share/present
@@ -4007,7 +3825,8 @@ in
   # A same-host `curl http://192.168.50.250:8900/` returns 200 because it takes
   # the `lo` path, which the firewall accepts unconditionally; that says nothing
   # about a second machine. Measured from the laptop 2026-08-25: 22 OPEN, 443
-  # OPEN, 8899 CLOSED, 8900 CLOSED. 8899 is `initiatives-viewer`, listening on
+  # OPEN, 8899 CLOSED, 8900 CLOSED. 8899 was `initiatives-viewer` (retired
+  # 2026-09-07 — the port is free now), which listened on
   # the identical address with the identical gap — which is exactly why copying
   # its shape did not warn anyone.
   #
@@ -4023,11 +3842,12 @@ in
   # every earlier copy of this comment said eth1 and there is no eth1 here). NOT
   # 192.168.50.94 — that is a homelab node hosting the kube-apiserver and the
   # NodePorts, it is not assignable here, and binding it CRASH-LOOPS the unit.
-  # It already cost `initiatives-viewer` an outage; see the block above it.
+  # It already cost `initiatives-viewer` an outage before that unit was retired;
+  # see the block above it.
   #
   # 🔴 PORT 8900. Measured free on the workbench 2026-08-25 (`ss -lptn`): the
   # occupied neighbours are 8787 activity-receiver, 8788 browser-bridge, 8791
-  # dl-router, 8793, 8899 initiatives-viewer, 8931.
+  # dl-router, 8793, 8899 (was initiatives-viewer, now free), 8931.
   # `scripts/tests/test_present_units.py` pins it against the ports DECLARED IN
   # CODE under nix/ — a live `ss` reading is a fact about one moment, and what
   # two units actually fight over across a reboot is the declared set. Read that
@@ -4213,7 +4033,7 @@ in
 
   # The server. STATIC on purpose, and that is the whole design: no refresh
   # button, no subprocess, no credential, no sops, no gh — none of what
-  # `initiatives-viewer` needs for its ↻ button. It answers two artefact routes
+  # the retired `initiatives-viewer` needed for its ↻ button. It answers two artefact routes
   # out of an explicit table and 404s everything else, so there is no directory
   # handler and therefore no path-traversal surface to reason about.
   #
@@ -4259,61 +4079,6 @@ in
     };
     Install = {
       WantedBy = [ "default.target" ];
-    };
-  };
-
-  # Repo chief-of-staff — WEEKLY: deterministic scan of Zach's repos for improvement
-  # signals (TODO/FIXME, skipped tests, `latest` tags, churn, large files) → cheap LLM
-  # synthesis (OpenRouter) → ranked proposal digest EMAILED. The "agents bring me ideas"
-  # experiment (scripts/repo-cos/, `run-weekly.sh` wrapper).
-  #
-  # SELF-HOSTED MAIL (default): the digest is SENT via Zach's postfix relay in the
-  # PRODUCTION cluster (From: repo-cos@mail.zacx.dev, DKIM-signed; Reply-To:
-  # repo-cos@inbox.zacx.dev) and his REPLY is READ back from the HOMELAB Postgres `mail`
-  # table (his reply routes Gmail→his MX→mail-receiver→Postgres). BOTH go through a
-  # `kubectl port-forward` — so the weekly send now depends on the production cluster
-  # (relay) + the homelab cluster (postgres) + TWO port-forwards. Both are BEST-EFFORT:
-  # a hiccup logs + skips (send fails loudly, feedback returns None) rather than wedging.
-  # The two kubeconfigs (production for relay, homelab for postgres) are exported by the
-  # wrapper; the Python resolves each per operation. The Gmail SMTP/IMAP fallback
-  # (REPO_COS_SEND=gmail / REPO_COS_REPLY_SRC=imap) still exists behind those toggles and
-  # is the only path needing the SOPS app-password.
-  #
-  # WORKBENCH-ONLY (serverMode): the full repo set (incl. the civitai client repos) lives
-  # here, the OpenRouter key + SOPS age key + both kubeconfigs are here, and this host has
-  # direct LAN access to both cluster APIs. Minimal user-unit env, so PATH needs nix
-  # (nix-shell) + git + rg + kubectl (the two port-forwards) + coreutils, and NIX_PATH so
-  # `nix-shell -p` resolves <nixpkgs>. The wrapper's nix-shell adds psycopg2 (Postgres read)
-  # + kubectl + sops; creds are loaded by the wrapper, never in the nix store.
-  systemd.user.services.repo-cos = lib.mkIf serverMode {
-    Unit = {
-      Description = "Repo chief-of-staff — weekly repo-scan → LLM proposals → email digest";
-      After = [ "network-online.target" ];
-      Wants = [ "network-online.target" ];
-      OnFailure = [ "notify-failure@%n.service" ];
-    };
-    Service = {
-      Type = "oneshot";
-      Environment = [
-        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.ripgrep pkgs.kubectl pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
-        "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
-        "HOME=%h"
-      ];
-      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/repo-cos/run-weekly.sh";
-      X-Restart-Triggers = [ "${../scripts/repo-cos/run-weekly.sh}" ];
-    };
-  };
-
-  systemd.user.timers.repo-cos = lib.mkIf serverMode {
-    Unit = {
-      Description = "Weekly timer for the repo chief-of-staff proposal digest";
-    };
-    Timer = {
-      OnCalendar = "Mon *-*-* 08:00:00";
-      Persistent = true;
-    };
-    Install = {
-      WantedBy = [ "timers.target" ];
     };
   };
 
@@ -4479,7 +4244,7 @@ in
   # deterministic fix over the prose one.
   #
   # 🔴 DELIBERATELY **NOT** GATED ON serverMode, unlike mail-actions-archive /
-  # initiatives-sync / ch-regrowth-check above. Those are gated because they need
+  # handoff-index-sync / ch-regrowth-check above. Those are gated because they need
   # the homelab kubeconfig, the LAN API or a server role. This needs nothing but a
   # local disk and git. It follows claude-log-rotate instead — the other unit that
   # maintains ~/.claude and runs everywhere. Gating it would be actively harmful:
@@ -4826,7 +4591,7 @@ in
   # rather than a clean-looking zero.
   #
   # WORKBENCH-ONLY (gated on serverMode), same discriminator and same rationale
-  # as mail-actions-archive / initiatives-sync above: the committed homelab
+  # as mail-actions-archive / handoff-index-sync above: the committed homelab
   # kubeconfig points at the LAN API (192.168.50.94:6443) and the `kubectl exec
   # ... du` reading needs it. The laptop is nebula-only AND has an open,
   # unresolved nebula fault that makes these ClickHouse queries intermittently

@@ -19,54 +19,36 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
 | PR | merge sha | what was broken |
 |---|---|---|
 | #1297 | `56c68cc7` | `@resurrect-hook-post-save` is not a valid resurrect hook kind — the save side had **never** run |
-| #1309 | `cc409f82` | continuum's `status-right` autosave interpolation clobbered by a later `set -g status-right` — no save in 30 days |
+| #1309 | `cc409f82` | continuum's `status-right` autosave interpolation clobbered by a later `set -g status-right` |
 | #1314 | `dcaeb408` | zero `workspace … output` directives against a declared dual-head layout |
-| #1311 | `d9f0836c` | window→conversation binding by 145-file grep instead of the deterministic per-pane ledger |
+| #1311 | `d9f0836c` | window→conversation binding by 145-file grep instead of the per-pane ledger |
 | #1317 | `946d9038` | the staleness gate counted POWERED-OFF time against the plan |
 | #1344 | `1ecc03c1` | no instrument existed to read a reboot; adds `tmux-restore-observe.sh` |
+| #1351 | `9353d958` | the unit MANUFACTURED a tmux server systemd then killed; adds the no-server REFUSAL |
 
 - 🔴 **THE REBOOT HAPPENED — 2026-09-06 18:01:46**, from 32 days of uptime. It is what
-  answered this arc and refuted the hypothesis the arc was built on; the ANSWERED block
-  below carries its values. Carried forward because it is the only real exercise this path
-  has ever had.
-- **#1344 shipped:** `scripts/tmux-restore-observe.sh` (`pre`/`post`/`verdict`/`extract`),
-  36 tests. Baseline at `~/.cache/tmux-restore-observe/pre-latest.txt` with a copy of the
-  script beside it — that baseline is what a post-reboot `post` run compares against, so do
-  not clear it before the reboot rank.
-- ✅ **#1351 IS REWORKED, PUSHED, GATED AND RETITLED — it is no longer the PR the earlier
-  handoff said not to merge.** Head **`83697d30`**, `mergeable: MERGEABLE` (was
-  `CONFLICTING`). Worktree `/home/zach/workspace/devrc-bootrace`.
-  - The rework commits: `7056a0fa` (refusal + prose + three 🟡s), `3b348542` (the
-    UNMEASURED-consequence correction), plus merges `3c5cda1f` and `83697d30`.
-  - **The main conflict was resolved by taking main's copy of this doc wholesale**, so the
-    branch no longer touches it and the corrected ANSWERED block survives.
-  - Title now names the real mechanism; the old one ("the resumes were sent 24s before the
-    panes existed") stated the refuted one. Body replaced. Verification comment posted with
-    the tier, base sha and the mutation table.
-- ✅ **GATED — all four tier/tree combinations green on `83697d30`:**
-
-  | tier | verdict |
-  |---|---|
-  | nix sandbox `pytests` | PASS — 22026 collected / 22023 passed / 0 failed |
-  | nix sandbox `nodetests` | PASS — 5 suites / 41 files / 1449 tests / 0 fail |
-  | dev host `gate.sh --tier both` | PASS — `GATE: RESULT=PASS`, same counts |
-  | (earlier dev run on `3b348542`) | PASS |
-
-  Read out of `nix log`, not exit codes. `session-analysis` collected 562 vs the floor of
-  525 this PR raises. The two nix derivations were built ONE AT A TIME.
-- ⚠ **`main` HAS MOVED PAST `83697d30`, with real test changes, not just docs.** A
-  merged-tree gate is a claim about the tree it ran on — **re-gate the tree the merge
-  actually creates** before merging. Said so in the PR comment too.
-- ⚠ Tekton was re-running on the new head at time of writing (both checks `PENDING`).
-  Neither gates: branch protection here is declared off, so the local two-tier run is the
-  only real evidence. 🔴 A run that hits `timeouts.tasks` posts NOTHING and the checks stay
-  `pending` forever — only a fresh push clears that.
-- **Deploy status:** nothing deployed, and nothing needs to be. `tmux-session-restore.py`
-  runs from the WORKING TREE, so the change is live in the worktree only; the base clone
-  `~/workspace/devrc` still runs main's copy until this merges.
-- 🔴 **#1351 STOPS THE DESTRUCTION; IT DOES NOT MAKE COLD-BOOT RESTORE WORK.** After it
-  lands, a cold boot REFUSES and the operator re-runs by hand once attached. Restoring on
-  boot is the socket trigger — the next rank.
+  answered this arc and refuted the hypothesis the arc was built on. Carried forward
+  because it remains the only time the BOOT path has ever been exercised — the
+  2026-09-07 incident below was a server kill mid-session, which is a different path.
+- 🔴 **AN INCIDENT HAPPENED AND IT WAS CAUSED BY THIS SESSION'S OWN SUBAGENT.** See the
+  ANSWERED block below. 47 live claude conversations were destroyed; 46 panes recovered,
+  20 of them only by manual identification. **The workbench tmux server pid changed to
+  `1111077`; the pre-crash server was `627687`.**
+- **OPEN, gated, NOT merged — blocked on a red main, not on themselves:**
+  - **#1376** `feat/tmux-restore-socket-activation` — the socket trigger (rank 1's other half).
+  - **#1383** `fix/tmux-restore-plan-generations` — timestamped plan generations.
+  - A THIRD is pending: the tmux-kill guard + staged OOM script, agent still gating.
+- ✅ **Integration branch `integ/tmux-restore-2026-09-08` (worktree
+  `/home/zach/workspace/devrc-integ-merge`)** — both PRs merge CLEANLY into current main
+  and were gated together, because both touch `tmux-session-restore.py` and a clean git
+  merge is not a clean merge.
+- 🔴 **MERGES ARE BLOCKED BY A CONTENT-GATE BREACH ON MAIN THAT NEITHER PR CAUSED.**
+  `claudedocs/handoff-civitai-app-fleet.md:204` commits a **client subdomain to this PUBLIC
+  repo**. Read straight out of `origin/main`; landed in `6d488a1b` (#1402). Neither PR
+  touches that file (verified: 0 and 0). The gate's own remedy is an `*.example.test` host.
+  🔴 **The deeper finding: the content gate did NOT stop #1402 from landing** — nothing
+  blocks a merge here, so the privacy guard is advisory in practice. That is adjacent to
+  clawgate task 525.
 
 ## Open investigations — live diagnosis state
 
@@ -373,6 +355,68 @@ its remedy.** Both settings were applied to the laptop's LIVE server; no restart
   destroyed 9 live conversations, the exact harm this arc already caused once on the
   workbench. via: code
 
+### ✅ ANSWERED 2026-09-08 — the crash was MY OWN SUBAGENT, not OOM
+🔴 **The OOM hypothesis is REFUTED. Do not re-derive it.** I told the operator memory
+exhaustion was the leading candidate; that was wrong and I retracted it.
+
+- **Cause, from the transcripts:** at `02:54:15.802Z` = **21:54:15.802 CDT**, subagent
+  `agent-a178eec65278c1fe6` (dispatched by THIS session to fix #1376's audit findings) ran:
+  ```
+  TMUX_TMPDIR=$SCRATCH/run tmux kill-server
+  ```
+  42 `tmux-spawn-*.scope` units tore down 1.2s later. `TMUX_TMPDIR` does not isolate a
+  client — a run inside a pane reads `$TMUX`, whose socket path wins.
+  🔴 **That agent had MEASURED the non-isolation 72 seconds earlier** (empty TMUX_TMPDIR
+  dir, no socket, yet `tmux list-sessions` listed the operator's real sessions `(attached)`)
+  and did not read its own output as the warning it was. Its brief warned about this exact
+  hazard in capitals. **A written warning did not hold; a structural guard is the fix.**
+- **Ruled out — kernel OOM kill.** ZERO `oom-kill:`/`Killed process` lines for the incident
+  boot, with a **positive control**: the same grep matches real kernel OOM kills from
+  2026-08-28. The pattern can fire and did not. via: measurement
+- **Ruled out — systemd-oomd.** Not installed at all, so `ManagedOOMPreference` would have
+  been decoration. via: measurement
+- **Ruled out — tmux crashed.** Core limit `unlimited`, `core_pattern` pipes to
+  systemd-coredump, no tmux core exists. via: measurement
+- 🔴 **Ruled out — the scary memory numbers.** I cited peaks of 57.7G/38.2G/29.8G as
+  evidence. **Those are systemd per-scope LIFETIME high-water marks printed at teardown,
+  over 7–23h wall clocks** — not concurrent usage and not summable. I read a teardown
+  accounting line as a snapshot. via: measurement
+- **Ruled out — the V8 `FatalProcessOutOfMemory`.** It was `tsserver.js` hitting its own
+  per-process heap cap in a different scope **24ms** after the real cause. Coincidence —
+  a different process, a different cgroup, and it postdates the kill-server by 24ms rather
+  than preceding it. via: measurement
+- **Next probe:** none. The guard PR is the remedy.
+
+### ✅ ANSWERED 2026-09-08 — how 46 of 47 conversations were recovered
+Recorded because the METHOD is reusable and the next incident will need it.
+
+- 🔴 **The plan was destroyed by the save side before recovery began.** A continuum
+  autosave at 22:09:40 overwrote the 47-entry plan with the degraded 10-entry post-crash
+  workspace, cheat-sheet included, no backup. **#1383 exists to fix exactly this.**
+- **THE JOIN THAT WORKED, and it is deterministic, not a guess:** tmux-resurrect's `window`
+  lines carry the tmux LAYOUT STRING, and every cell ends with that pane's numeric id
+  (`b7fd,312x62,0,0,0` → pane `%0`). The agent-ledger writes one record PER PANE keyed on
+  `pane_id`, carrying `session_id`, and records from the pre-crash server are identified by
+  `tmux_pid` (`627687`). **Join on the pane id.**
+- 🔴 **It carried its own POSITIVE CONTROL:** 24 windows had independently recorded their
+  own `claude --resume <id>` in the resurrect pane line. The join reproduced **21 of 21
+  where both sources spoke, zero disagreements**. (The other 3 had no ledger record — a
+  coverage gap, not a contradiction. An early version of the check conflated the two and
+  printed "METHOD NOT PROVEN" wrongly.)
+- **For panes the ledger could not answer:** resurrect restores pane CONTENTS, so the old
+  conversation text is in the window's scrollback. Extract the `❯ ` prompts, match with
+  `find-session.py`, and disambiguate by grepping candidate transcripts for a line unique to
+  one — **always with a positive control that the term exists somewhere**, so a zero means
+  "not this session" rather than "my grep is broken".
+- **Ruled out — ranking candidates by transcript mtime.** Worthless here: the restore run
+  touched all 474 transcripts, so recency measured MY OWN recovery, not the operator's work.
+  Transcripts carry no summary field either (0 of 474). via: measurement
+- **Evidence preserved:** `~/.cache/restore-rescue-2026-09-07/` — both pre-crash resurrect
+  saves, the degraded plan, and a 264-record ledger snapshot.
+- **Residual:** ONE window unrecovered — `scratch6:2`, which was `claude · resume` in
+  `~/workspace/homelab-talos`, i.e. itself mid-resume when the crash hit, so it never had a
+  session bound. No ledger record, no distinctive scrollback. Not guessable.
+
 ## Next steps (ranked)
 1. **Socket-activation trigger for the boot unit — the half that actually restores.** 🔴
    #1351 (MERGED, squash `9353d958`) STOPS THE DESTRUCTION; it does NOT make cold-boot
@@ -585,34 +629,40 @@ being released). Re-derive a slug before claiming — do not assume an old rank 
   string as ONE command name and dies `No such file or directory` — it does not run ssh with
   arguments. Write the command out, or use `${=L}`. Hit live this session.
 
+- 🔴 **`pane_current_command` CANNOT distinguish a picker from a live session** — the picker
+  IS the claude process, so the field reads `claude` either way. I built a safety guard on
+  that field and it could never have worked. It failed SAFE (typed nothing), but it was
+  answering a question the observable cannot answer. **Read `capture-pane` content.**
+- 🔴 **`C-c` does NOT dismiss Claude Code's resume picker — `Escape` does** (its own footer
+  says so). Verified on one window before touching eleven others.
+- 🔴 **A picker-detection grep over `capture-pane` output matches STALE SCROLLBACK.** Four
+  windows were flagged as stuck at a picker; all four were live sessions. `"Esc to cancel"`
+  persists in history after a picker is dismissed. Limit the check to the visible tail, and
+  read the screen before acting.
+- 🔴 **`git log` ordering is TOPOLOGICAL, not causal — do not infer "came before" from it.**
+  I nearly reported the integration gate as a false green because `#1272` listed *below*
+  `#1392`, which reads as earlier and is not. `merge-base --is-ancestor` is the answer.
+- **A red main can make attribution EASIER**, not harder: with a measured baseline of known
+  failures, any ADDITIONAL failure is attributable. Record the baseline explicitly.
+- 🔴 **`main` moved ~10 commits during one merge attempt**, including a toolchain fix that
+  changed test outcomes (#1392 re-keyed the age tamper verdict that nixpkgs' age 1.3.2
+  broke). **Re-check for movement immediately before merging, and re-gate if anything
+  material landed** — a merged-tree gate is a claim about the tree it ran on.
+
 ## How to verify
 ```bash
-# 0. the PR
-gh pr view 1351 --repo innovation-upstream/devrc \
-  --json state,mergeable,mergeStateStatus,headRefOid,title
+# 0. the three PRs
+gh pr view 1376 --repo innovation-upstream/devrc --json state,mergeable,mergeStateStatus
+gh pr view 1383 --repo innovation-upstream/devrc --json state,mergeable,mergeStateStatus
 
-# 1. the refusal, in both directions (this is the fix)
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  /home/zach/workspace/devrc-bootrace/scripts/session-analysis/tests/test_tmux_session_restore.py \
-  /home/zach/workspace/devrc-bootrace/scripts/tests/test_tmux_restore_observe.py -q
-# expect: 130+ passed
+# 1. 🔴 THE BLOCKER — is the client subdomain still on main?
+git -C ~/workspace/devrc show origin/main:claudedocs/handoff-civitai-app-fleet.md | sed -n '204p'
+#    empty or an *.example.test host => fixed; a real client host => merges stay blocked
 
-# 2. the mechanism is unchanged on this host (re-measure; do not trust the doc)
-systemctl --user show tmux-session-restore.service \
-  -p Type -p RemainAfterExit -p KillMode -p Environment
-# expect: Type=oneshot  RemainAfterExit=no  KillMode=control-group
-#         Environment has NO TMUX_TMPDIR  (that is the TMUX_TMPDIR rank)
+# 2. the integration tree (both PRs together, off current main)
+git -C /home/zach/workspace/devrc-integ-merge log --oneline -3
+nix develop ~/workspace/devrc -c bash /home/zach/workspace/devrc-integ-merge/scripts/gate.sh --tier both
 
-# 3. BOTH tiers on the tree the MERGE creates — `main` has moved past 83697d30.
-#    🔴 `nix build path:<worktree>` fails exit=2 before any test runs (the worktree's
-#    `.git` is a FILE); extract first, and read `nix log`, never the exit code.
-git -C <worktree> archive HEAD | tar -x -C /tmp/mt
-nix develop ~/workspace/devrc -c bash <worktree>/scripts/gate.sh --tier both
-nix build "path:/tmp/mt#checks.x86_64-linux.pytests"  --no-link   # ONE AT A TIME
-nix build "path:/tmp/mt#checks.x86_64-linux.nodetests" --no-link
-nix log <drv>   # count the runners' own RESULT:/TOTAL lines
-
-# 4. opencode restore recon — the chain is proven; see rank 3
-tmux list-panes -a -F '#{pane_current_command}' | sort | uniq -c   # opencode appears as `opencode`
-ls ~/.cache/agent-ledger/opencode-p*.json | wc -l                  # records already written
+# 3. the recovery evidence, if another incident needs the method
+ls ~/.cache/restore-rescue-2026-09-07/
 ```

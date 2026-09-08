@@ -130,9 +130,7 @@ Each is a self-contained application with its own tests. Counts are tracked file
 | `dl-router/` | 75 | download-routing sidecar — files downloads by page context, not filename |
 | `browser-bridge/` | 66 | loopback rendezvous server + MV3 extension for driving live Brave |
 | `collector/` | 59 | per-host activity-telemetry daemon and its sources (keylog, i3, tmux, Claude, OpenCode) |
-| `initiatives/` | 41 | durable cross-repo initiative ledger — sync, web viewer, Q&A assistant |
-| `session-analysis/` | 28 | scans over Claude transcripts — activity, adoption, initiatives, insights |
-| `repo-cos/` | 22 | weekly "repo chief-of-staff" — scan repos, synthesize proposals, email them |
+| `session-analysis/` | 28 | scans over Claude transcripts — activity, adoption, initiative-scan, insights |
 | `mail-actions/` | 21 | action-required extraction over the self-hosted inbox + invoice archiver |
 | `validation/` | 19 | activity-telemetry validation harness (replay, invariants, reconciliation) |
 | `tests/` | 19 | cross-cutting tests for the top-level scripts above |
