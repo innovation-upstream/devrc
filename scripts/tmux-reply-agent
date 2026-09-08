@@ -1027,7 +1027,12 @@ def main(argv: list[str]) -> int:
 
     # 🔴 LOG A REPEATING STREAM CONDITION ONCE, NOT EVERY POLL, for the same
     # reason the write loop does: 17,280 polls a day would bury every real event.
+    # Two conditions, two memories: a stream FAILURE (the request did not
+    # complete) and a stream SKIP (the request was fine, some session could not be
+    # read). They are different facts and a single variable would let one mask the
+    # other.
     stream_problem = ""
+    stream_skips: dict = {}
 
     backoff_reason = ""
     while not _STOP:
@@ -1038,18 +1043,33 @@ def main(argv: list[str]) -> int:
         # The write surface is the capability with a person waiting on it.
         if stream_state is not None:
             try:
-                # 🔴 THE RESULT IS DELIBERATELY NOT INSPECTED FOR REFUSALS. A
-                # refusal is the NORMAL way a host that fell out of step learns
-                # where the server got to — it happens on every redeploy and after
-                # every bulk push — so logging or counting it as a fault would fire
-                # the one signal this loop has at exactly the moments the design
-                # is working. An earlier revision had a `if counts["refused"]:`
-                # branch here that assigned the empty string it had just been
-                # assigned: dead code that read as a decision.
-                transcript_round(api, hook_token, host, stream_state)
+                # 🔴 REFUSALS ARE DELIBERATELY NOT REPORTED. A refusal is the
+                # NORMAL way a host that fell out of step learns where the server
+                # got to — it happens on every redeploy and after every bulk push
+                # — so logging one as a fault would fire the one signal this loop
+                # has at exactly the moments the design is working.
+                #
+                # 🔴 BUT THE `skipped` COUNTERS ARE, AND AN EARLIER REVISION THREW
+                # THEM AWAY. `unchanged` is the steady state and says nothing; the
+                # others are the only observable a stalled or corrupt session
+                # has. Two liveness bugs in the tailer were found by reading the
+                # code rather than by reading a log, because nothing printed
+                # these — and one of them re-read 48 KiB every five seconds, for
+                # ever, in silence. Rate-limited exactly like the failure line
+                # below: this runs 17,280 times a day.
+                counts = transcript_round(api, hook_token, host, stream_state)
                 if stream_problem:
                     log("transcript streaming is working again")
                     stream_problem = ""
+                notable = {k: v for k, v in (counts.get("skipped") or {}).items()
+                           if k != "unchanged"}
+                if notable != stream_skips:
+                    if notable:
+                        log("transcript streaming skipped some sessions "
+                            f"(the 5-minute bulk push still covers them): {notable}")
+                    elif stream_skips:
+                        log("transcript streaming is no longer skipping any session")
+                    stream_skips = notable
             except Exception as exc:  # noqa: BLE001 — must never affect the write path
                 reason = f"{exc!r}"
                 if reason != stream_problem:

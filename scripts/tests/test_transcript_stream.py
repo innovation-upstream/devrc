@@ -381,6 +381,22 @@ def test_a_null_offset_is_adopted_as_unknown_rather_than_ignored():
     assert state.cursors["s"] is None
 
 
+def test_any_refusal_carrying_a_NULL_offset_makes_the_host_reseed():
+    """🔴 THE HOST BRANCHES ON THE OFFSET, NOT ON THE REASON STRING, AND THAT IS
+    WHAT MAKES A NEW SERVER-SIDE REASON SAFE. The server grew `host-changed` (a
+    session that moved between machines: its stored offset is a position in the
+    OTHER machine's file). This side needs no new branch — a null offset already
+    means "reseed" — but that has to be ASSERTED, or the next reason added on the
+    server passes unhandled and the host retries against a number that means
+    nothing here.
+    """
+    for reason in ("unknown-offset", "host-changed", "some-reason-invented-later"):
+        state = ts.StreamState()
+        state.cursors["s"] = 500
+        ts.adopt_cursors(state, [{"sessionId": "s", "offset": None, "reason": reason}])
+        assert state.cursors["s"] is None, f"a null offset with reason {reason!r} was not adopted"
+
+
 @pytest.mark.parametrize("bad", [-1, "12", 1.5, True, {"a": 1}])
 def test_a_malformed_offset_is_treated_as_unknown_not_adopted(bad):
     """Adopting a wrong number would splice. Unknown reseeds, which is correct."""
@@ -533,3 +549,289 @@ def test_the_client_bounds_stay_under_the_servers(tmp_path):
     # of the module had RESEED_TAIL_BYTES at 192 KiB, which the server would have
     # rejected on every rotation.
     assert ts.RESEED_TAIL_BYTES <= ts.MAX_DELTA_BYTES
+
+
+# ---------------------------------------------------------------------------
+# Records larger than one delta — the two liveness stalls an adversarial audit
+# proved on the first revision of this module. Both were SILENT: the suite was
+# green, the agent logged nothing, and the affected sessions simply fell back to
+# the 5-minute feed for ever.
+# ---------------------------------------------------------------------------
+
+
+def _huge_record(nbytes: int, tag: str = "big") -> str:
+    """One JSONL record whose payload alone exceeds `nbytes`."""
+    return '{"type":"user","tag":"%s","message":{"role":"user","content":"%s"}}\n' % (
+        tag, "x" * nbytes)
+
+
+def test_a_record_LARGER_than_one_delta_streams_in_pieces_rather_than_stalling(tmp_path):
+    """🔴 PROVED STALL, FIXED. `_read_append` used to require a newline inside the
+    48 KiB window; a record longer than that never has one, so the append path
+    declined EVERY POLL, FOR EVER — re-reading 48 KiB every 5s (~830 MB/day) with
+    nothing logged. The lag escape could not save it either: a record between
+    MAX_DELTA_BYTES and MAX_LAG_BYTES never reaches that threshold.
+
+    It is not an edge case. The server's own trimToTail records the fleet
+    measurement: a single tool-result record here has been measured well past
+    256 KiB. So the sessions with the biggest tool output — the ones most worth
+    streaming — were exactly the ones that silently did not.
+    """
+    p = write_session(tmp_path, "proj", "sess-1", line(1))
+    state = ts.StreamState()
+    deltas, _ = plan(tmp_path, state)
+    state.cursors["sess-1"] = deltas[0]["offset"] + len(deltas[0]["data"].encode())
+
+    big = _huge_record(100 * 1024)
+    assert len(big.encode()) > ts.MAX_DELTA_BYTES, "the fixture is not bigger than one delta"
+    append(p, big)
+
+    # It must make progress on EVERY poll, and finish.
+    got = b""
+    for i in range(12):
+        deltas, skipped = plan(tmp_path, state)
+        if not deltas:
+            assert got, (
+                f"poll {i}: nothing sent and nothing had been sent — the append path is "
+                f"STALLED on a record larger than one delta; skipped={skipped}")
+            break
+        d = deltas[0]
+        assert d["reset"] is False, "a large record should stream, not reseed"
+        assert d["offset"] == state.cursors["sess-1"], "the piece did not start at the cursor"
+        chunk = d["data"].encode()
+        assert chunk, "an empty delta was produced"
+        got += chunk
+        state.cursors["sess-1"] += len(chunk)
+    assert got.decode() == big, (
+        "the reassembled pieces do not equal the record:\n"
+        f"got {len(got)} bytes, want {len(big.encode())}")
+
+
+def test_every_piece_of_a_split_record_is_valid_UTF8(tmp_path):
+    """🔴 A BYTE CUT INSIDE A MULTI-BYTE RUNE IS THE WHOLE REASON THE NORMAL PATH
+    CUTS ON A NEWLINE. With no newline to cut on, the rune-boundary walk is what
+    keeps `_decode_exact` from rejecting a perfectly good chunk — and, downstream,
+    what keeps the two sides' byte counts equal.
+
+    The fixture is 3-byte runes, so a naive byte cut lands mid-rune 2 times in 3
+    rather than by luck.
+    """
+    p = write_session(tmp_path, "proj", "sess-1", line(1))
+    state = ts.StreamState()
+    deltas, _ = plan(tmp_path, state)
+    state.cursors["sess-1"] = deltas[0]["offset"] + len(deltas[0]["data"].encode())
+
+    huge = '{"type":"user","t":"' + ("あ" * 60000) + '"}\n'
+    assert len(huge.encode()) > 3 * ts.MAX_DELTA_BYTES, (
+        f"the fixture is {len(huge.encode())} bytes; it must span several deltas "
+        f"({ts.MAX_DELTA_BYTES} each) or the split is never exercised")
+    append(p, huge)
+
+    got = b""
+    for _ in range(20):
+        deltas, _ = plan(tmp_path, state)
+        if not deltas:
+            break
+        d = deltas[0]
+        assert d["reset"] is False, "an APPEND was expected; a reseed means the cursor was lost"
+        piece = d["data"]
+        # A round trip is the claim: had the module cut mid-rune, _decode_exact
+        # would have refused the chunk and the session would be SKIPPED instead.
+        assert piece.encode().decode("utf-8") == piece
+        assert d["offset"] == state.cursors["sess-1"], "a piece did not start at the cursor"
+        got += piece.encode()
+        state.cursors["sess-1"] += len(piece.encode())
+    assert got == huge.encode(), f"reassembled {len(got)} of {len(huge.encode())} bytes"
+
+
+def test_a_file_whose_LAST_record_exceeds_the_window_can_still_reseed(tmp_path):
+    """🔴 THE SECOND PROVED STALL, AND THE WORSE ONE. `_read_reseed` required a
+    newline both before and after its cut, so a file ending in a record bigger
+    than the 48 KiB window returned SKIP — and because `plan_frame` only leaves
+    the reseed branch once a cursor is adopted, and no cursor can be adopted while
+    the reseed declines, it was a PERMANENT RESEED LOOP.
+
+    ⚠ The asymmetry that hid it: `build_transcript_push.read_tail` uses a 192 KiB
+    window, so for last-records between the two sizes the 5-minute push worked
+    perfectly while the stream looped.
+    """
+    body = line(1) + _huge_record(100 * 1024)
+    d = tmp_path / "proj"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "sess-1.jsonl").write_text(body, encoding="utf-8")
+
+    state = ts.StreamState()
+    deltas, skipped = plan(tmp_path, state)
+    assert len(deltas) == 1, (
+        f"a file ending in an over-window record produced NO reseed — this is the "
+        f"permanent loop: skipped={skipped}")
+    assert deltas[0]["reset"] is True
+    assert deltas[0]["data"], "the reseed carried no data"
+    # The reseed starts inside the record, so it is truncated by construction —
+    # the server marks it and the parser counts a leading partial.
+    assert deltas[0]["offset"] > 0
+
+
+def test_a_partial_line_still_being_WRITTEN_waits_rather_than_being_split(tmp_path):
+    """🔴 THE CONTROL FOR THE TWO TESTS ABOVE, AND IT IS NOT THE SAME CASE. The
+    fix must distinguish "this record is bigger than the window" (stream it) from
+    "this line is still being written" (wait one poll). Reaching EOF inside the
+    window is what tells them apart; without that check, every ordinary in-flight
+    line would be shipped as a fragment.
+    """
+    p = write_session(tmp_path, "proj", "sess-1", line(1))
+    state = ts.StreamState()
+    deltas, _ = plan(tmp_path, state)
+    state.cursors["sess-1"] = deltas[0]["offset"] + len(deltas[0]["data"].encode())
+
+    append(p, '{"type":"user","partial":tr')  # short, no newline, at EOF
+    deltas, skipped = plan(tmp_path, state)
+    assert deltas == [], "a short in-flight line was shipped as a fragment"
+    assert skipped.get(ts.SKIP_NO_BOUNDARY) == 1
+
+
+def test_two_files_with_ONE_session_id_do_not_kill_the_whole_frame(tmp_path):
+    """🔴 THE SERVER REJECTS THE WHOLE FRAME ON A DUPLICATE ID, AND THE AGENT
+    RESENDS THE SAME FRAME. Nothing in the loop removes the offending session, so
+    one duplicate would kill this host's stream permanently — not degrade it.
+
+    Two routes, both covered: the same `<uuid>.jsonl` under two project
+    directories, and — because the SERVER trims the id and this side must too —
+    a name with trailing whitespace.
+    """
+    write_session(tmp_path, "projA", "dup-sess", line(1))
+    write_session(tmp_path, "projB", "dup-sess", line(2))
+    write_session(tmp_path, "projA", "dup-sess ", line(3))
+    write_session(tmp_path, "projA", "unique", line(4))
+
+    state = ts.StreamState()
+    deltas, skipped = plan(tmp_path, state)
+    ids = [d["sessionId"] for d in deltas]
+    assert len(ids) == len(set(ids)), f"a frame carried a duplicate session id: {ids}"
+    assert "unique" in ids, "the innocent session was dropped too"
+    assert skipped.get(ts.SKIP_DUPLICATE_ID, 0) >= 2, (
+        f"the duplicates were not counted under their own reason: {skipped}")
+
+
+def test_the_candidate_limit_bounds_how_many_files_are_stat_ed(tmp_path):
+    """A declared bound with no test is a claim. This one keeps a host with
+    thousands of recent transcripts from stat'ing all of them every 5 seconds."""
+    for i in range(40):
+        write_session(tmp_path, "proj", f"sess-{i:04d}", line(i))
+    state = ts.StreamState()
+    deltas, _ = plan(tmp_path, state, max_candidates=7)
+    assert len(deltas) == 7, f"max_candidates=7 produced {len(deltas)} deltas"
+
+
+def test_the_inode_memory_is_BOUNDED(tmp_path):
+    """`cursors` is wholesale-replaced on every re-hydration; `inodes` is not, so
+    in a process that runs for weeks it is the one that leaks. Eviction costs the
+    evicted session exactly one reseed."""
+    state = ts.StreamState()
+    for i in range(state.INODE_LIMIT + 50):
+        state.note_inode(f"s{i}", i)
+    assert len(state.inodes) <= state.INODE_LIMIT
+    # Oldest-first, so the NEWEST is the one that survives.
+    assert f"s{state.INODE_LIMIT + 49}" in state.inodes
+    assert "s0" not in state.inodes
+
+
+def test_a_huge_record_converges_END_TO_END_against_the_protocol(tmp_path):
+    """🔴 THE PIECES MUST REASSEMBLE ON THE SERVER, NOT MERELY LEAVE THIS HOST.
+    Splitting a record mid-way is only safe because the server concatenates by
+    OFFSET; a rune-alignment that moved the data without moving the offset by the
+    same number of bytes would produce a tail that is subtly wrong and reads as
+    fine. This drives the real `run_round` against the protocol and compares the
+    stored tail with the file.
+    """
+    p = write_session(tmp_path, "proj", "sess-1", line(1))
+    srv = FakeServer()
+    state = ts.StreamState()
+    ts.run_round(srv.post, srv.get, "workbench", state, tmp_path)
+
+    append(p, '{"type":"user","t":"' + ("あ" * 60000) + '"}\n')
+    for _ in range(20):
+        counts = ts.run_round(srv.post, srv.get, "workbench", state, tmp_path)
+        if counts["sent"] == 0:
+            break
+    assert srv.tails["sess-1"] == p.read_text(), (
+        "a record split across deltas did not reassemble on the server\n"
+        f"stored {len(srv.tails['sess-1'])} chars, file {len(p.read_text())} chars")
+    assert srv.offsets["sess-1"] == len(p.read_bytes()), (
+        f"cursor {srv.offsets['sess-1']} != file size {len(p.read_bytes())} — the offset and "
+        "the data disagree, so the NEXT delta would splice")
+
+
+def _cjk_body(pad: int) -> str:
+    """One huge CJK record, with `pad` filler bytes AFTER the runes so the rune
+    grid moves relative to the reseed window."""
+    return '{"t":"' + ("あ" * 60000) + '"' + ("z" * pad) + "}\n"
+
+
+@pytest.mark.parametrize("pad", [0, 1, 2])
+def test_a_RESEED_that_starts_mid_rune_moves_its_OFFSET_by_the_bytes_it_dropped(tmp_path, pad):
+    """🔴 A RESEED SEEKS TO `size - window`, WHICH LANDS INSIDE A RUNE TWO TIMES
+    IN THREE ON CJK TEXT — the one place in this module a read begins at an
+    arbitrary byte offset. Aligning forward to a rune boundary is necessary (a
+    strict decode would otherwise reject the whole window and the session would
+    reseed for ever), but aligning the DATA without moving the OFFSET by the same
+    number of bytes is worse than not aligning at all: the cursor would then name
+    a position the data does not start at, and the next append would splice.
+
+    🔴 THE PADDING IS THE POINT AND THE FIRST VERSION OF THIS TEST DID NOT HAVE
+    IT. With a fixed prefix, `size - window` landed EXACTLY on a rune boundary by
+    arithmetic accident (20 ASCII bytes + 3-byte runes, against a window that is a
+    multiple of 3), so the alignment never ran and deleting it SURVIVED. Three
+    paddings guarantee at least two land mid-rune, and the assertion below proves
+    which case each one reached rather than assuming.
+
+    The claim is the RELATIONSHIP, not the alignment: the bytes at the reported
+    offset in the file must BE the bytes that were sent.
+    """
+    # 🔴 THE PADDING GOES AFTER THE RUNES, NOT BEFORE THEM. A prefix pad shifts
+    # the file length AND the rune grid by the same amount, so `size - window`
+    # stays exactly as aligned as it was — which is how the first version of this
+    # test managed three paddings that all landed on a boundary.
+    body = _cjk_body(pad)
+    d = tmp_path / "proj"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "sess-1.jsonl"
+    p.write_text(body, encoding="utf-8")
+    raw = p.read_bytes()
+    assert len(raw) > 3 * ts.RESEED_TAIL_BYTES, "the fixture must be far larger than the window"
+
+    naive = len(raw) - ts.RESEED_TAIL_BYTES
+    mid_rune = raw[naive] & 0xC0 == 0x80
+
+    state = ts.StreamState()
+    deltas, skipped = plan(tmp_path, state)
+    assert len(deltas) == 1, f"no reseed was produced: {skipped}"
+    d0 = deltas[0]
+    assert d0["reset"] is True
+    sent = d0["data"].encode("utf-8")
+    off = d0["offset"]
+    assert off > 0, "the fixture did not exercise a mid-file reseed"
+    assert raw[off:off + len(sent)] == sent, (
+        f"the reseed says it starts at byte {off}, but the file's bytes there are not the "
+        f"bytes it sent — the cursor and the data disagree, so the next append would splice "
+        f"(pad={pad}, the naive seek landed mid-rune: {mid_rune})")
+    if mid_rune:
+        assert off > naive, (
+            f"the naive seek at {naive} is INSIDE a rune and the reseed still reports {off} — "
+            "the data was aligned but the offset was not moved with it")
+
+
+def test_at_least_one_reseed_padding_actually_lands_MID_RUNE(tmp_path):
+    """🔴 THE POSITIVE CONTROL FOR THE PARAMETRISED TEST ABOVE. If every padding
+    happened to land on a boundary, all three cases would pass while exercising
+    nothing — which is exactly what the unpadded version did.
+    """
+    hits = 0
+    for pad in (0, 1, 2):
+        raw = _cjk_body(pad).encode("utf-8")
+        naive = len(raw) - ts.RESEED_TAIL_BYTES
+        if raw[naive] & 0xC0 == 0x80:
+            hits += 1
+    assert hits >= 1, (
+        "no padding makes the reseed seek land inside a rune, so the alignment path is never "
+        "reached and its test is vacuous")

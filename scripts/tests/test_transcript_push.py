@@ -1070,3 +1070,200 @@ def test_a_SUBAGENT_transcript_is_never_pushed(projects, tmp_path):
     # POSITIVE CONTROL: the walk found the real one, so the absence above is not a
     # fact about a walk that enumerated nothing.
     assert ids == ["sess-main"], f"the main session was not picked up either: {ids}"
+
+
+def _reply_agent_unit_block() -> str:
+    """The tmux-reply-agent SERVICE block from nix/home.nix."""
+    text = HOME_NIX.read_text()
+    idx = text.index("systemd.user.services.tmux-reply-agent")
+    end = text.index("systemd.user.services", idx + 10)
+    return text[idx:end]
+
+
+def test_the_RESIDENT_agent_restart_triggers_name_EVERY_module_it_imports():
+    """🔴 THE COVERAGE USED TO SIT WHERE IT MATTERED LEAST. This file already pins
+    that the transcript-push TIMER names both its halves — where a stale copy
+    costs at most five minutes, because the next tick execs fresh code.
+
+    `tmux-reply-agent` is a RESIDENT service: it imports each module ONCE and then
+    runs for weeks. A fix to `transcript_stream.py` (or to `transcript_search.py`,
+    which it loads in turn) would land on disk and the running agent would keep
+    executing the old code indefinitely — a correctness change to what the
+    operator reads about a session that appears deployed and is not. The unit's
+    own comment states the rule for `tmux_text_policy.py`; the two transcript
+    modules were added afterwards and did not inherit it.
+
+    ⚠ ASSERTED AS A SET, NOT AS A LIST OF `in` CHECKS. A membership test grows
+    silently: the next module loaded at startup passes without anyone noticing,
+    which is exactly how this gap opened.
+    """
+    import re
+
+    block = _reply_agent_unit_block()
+    m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
+    assert m, "the reply-agent unit declares no X-Restart-Triggers at all"
+    declared = set(re.findall(r"\$\{\.\./([^}]+)\}", m.group(1)))
+
+    want = {
+        "scripts/tmux-reply-agent",
+        "scripts/lib/tmux_text_policy.py",
+        "scripts/lib/transcript_stream.py",
+        "scripts/lib/transcript_search.py",
+    }
+    assert declared == want, (
+        f"the reply-agent's restart triggers are {sorted(declared)}, want {sorted(want)}. "
+        "A module this RESIDENT unit imports at startup but does not trigger on stays on "
+        "the OLD code until something else restarts the process."
+    )
+
+
+def test_every_module_the_agent_loads_by_path_IS_a_restart_trigger():
+    """🔴 THE RELATIONSHIP, NOT THE LIST. The test above pins a set someone typed;
+    this one derives the set from the AGENT'S OWN SOURCE, so a module added to the
+    agent tomorrow fails here rather than passing unseen.
+
+    It scans for the loader idiom the agent actually uses — `os.path.join(_HERE,
+    "lib", "<name>")` — plus the one transitive hop `transcript_stream` makes.
+    """
+    import re
+
+    agent = (REPO_ROOT / "scripts" / "tmux-reply-agent").read_text()
+    loaded = set(re.findall(r'os\.path\.join\(_HERE,\s*"lib",\s*"([^"]+)"\)', agent))
+    assert loaded, "the scanner found no path-loaded modules — it is measuring nothing"
+
+    stream = (REPO_ROOT / "scripts" / "lib" / "transcript_stream.py").read_text()
+    loaded |= set(re.findall(r'os\.path\.join\(_HERE,\s*"([^"]+\.py)"\)', stream))
+
+    block = _reply_agent_unit_block()
+    m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
+    declared = set(re.findall(r"\$\{\.\./scripts/lib/([^}]+)\}", m.group(1)))
+    missing = loaded - declared
+    assert not missing, (
+        f"the agent loads {sorted(missing)} at startup but the unit does not trigger on "
+        "them — a resident service would keep running the old copy indefinitely"
+    )
+
+
+def test_an_UNDECODABLE_byte_makes_fileBytes_UNKNOWN_instead_of_400ing_the_WHOLE_push(
+    server, projects, tmp_path
+):
+    """🔴 ONE BAD BYTE IN ONE SMALL TRANSCRIPT WOULD 400 THE ENTIRE HOST'S FEED.
+
+    `read_tail` decodes with `errors="replace"`, which turns one bad byte into a
+    three-byte U+FFFD — so a small corrupt file produces a TAIL LARGER THAN THE
+    FILE IT CAME FROM. The server rejects a `fileBytes` smaller than the tail
+    beside it (a cursor pointing before the start of the stored tail is a splice
+    waiting to happen) and a rejection is atomic, so that one session would take
+    every other session in the request down with it — on every tick, for the whole
+    24-hour candidate window.
+
+    Reporting UNKNOWN instead costs that session a stream reseed and nothing else.
+
+    Measured on the guard and its absence:
+        shipped   file=29 tail_bytes=31 fileBytes=0   -> push accepted
+        no guard  file=29 tail_bytes=31 fileBytes=29  -> whole push REJECTED
+    """
+    d = projects.root / "-home-zach-workspace-devrc"
+    d.mkdir(exist_ok=True)
+    (d / "corrupt.jsonl").write_bytes(b'{"type":"user","t":"\xff"}\n')
+    projects("healthy", transcript("healthy", human_turn("fine", "healthy")))
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sent = {s["sessionId"]: s for s in json.loads(pushes(server)[0]["body"])["sessions"]}
+    assert "healthy" in sent, "the innocent session was lost"
+    bad = sent.get("corrupt")
+    assert bad is not None, "the corrupt session was dropped entirely"
+    assert len(bad["tail"].encode("utf-8")) > bad["fileBytes"] or bad["fileBytes"] == 0
+    assert bad["fileBytes"] == 0, (
+        f"fileBytes={bad['fileBytes']} for a {len(bad['tail'].encode())}-byte tail taken from a "
+        "smaller file — the server rejects that, atomically, taking every other session with it"
+    )
+
+
+def test_fileBytes_is_derived_from_what_was_READ_not_from_the_stat(tmp_path):
+    """🔴 THE FILE IS BEING APPENDED TO WHILE IT IS READ — that is the normal case
+    here, not an edge one, because the sessions worth feeding are the live ones.
+    `size` is a stat taken BEFORE the read, so bytes that arrive in between come
+    back in `raw` and the tail ends past `size`. Reporting `size` would put the
+    cursor BEHIND the stored tail's true end, and the next delta would duplicate
+    the bytes in between.
+
+    Driven directly rather than through the script: reproducing the race with a
+    real concurrent writer would be a timing test for a property that is decidable
+    by construction. The fixture instead makes `stat` under-report by patching it,
+    which is exactly the observable the race produces.
+    """
+    import importlib.util
+
+    # The builder imports `transcript_search` as a bare name, which works because
+    # it is normally RUN as a script from scripts/lib. Loading it as a module here
+    # needs that directory on the path — the same arrangement, spelled out.
+    sys.path.insert(0, str(BUILDER.parent))
+    try:
+        spec = importlib.util.spec_from_file_location("btp_under_test", BUILDER)
+        btp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(btp)
+    finally:
+        sys.path.remove(str(BUILDER.parent))
+
+    body = transcript("s", *[human_turn(f"turn {i}", "s") for i in range(20)])
+    f = tmp_path / "s.jsonl"
+    f.write_text(body)
+    real_size = f.stat().st_size
+
+    class _Stat:
+        st_size = real_size - 40  # the stat that a concurrent append raced
+
+    class _Path(type(f)):
+        def stat(self, *a, **kw):
+            return _Stat()
+
+    text, truncated, file_bytes = btp.read_tail(_Path(f), 1 << 20)
+    assert not truncated
+    assert file_bytes == real_size, (
+        f"fileBytes={file_bytes} but the read returned {real_size} bytes — the cursor would "
+        "sit BEHIND the end of the stored tail and the next delta would duplicate"
+    )
+
+
+def test_ONE_oversized_session_alone_is_still_sent_rather_than_dropped_for_ever(
+    server, projects, tmp_path
+):
+    """🔴 THE `and sessions` EXEMPTION, whose comment promises "deferred to the
+    next tick rather than dropped for ever". Without it, a session whose tail
+    alone exceeds the aggregate budget is skipped on EVERY tick — and since it is
+    also the newest, it is skipped first, every time. The exemption admits it when
+    the push is otherwise empty.
+    """
+    body = transcript("big", *[human_turn("y" * 400, "big") for _ in range(40)])
+    projects("big", body)
+    per = len(body.encode())
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={
+            "CLAWGATE_API_URL": base_url(server),
+            "CLAWGATE_HOOK_TOKEN": "t",
+            "TRANSCRIPT_PUSH_MAX_BYTES": str(per // 4),  # far under one session
+        },
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # 🔴 THE ABSENCE IS THE DEFECT, SO NAME IT. Without the exemption the builder
+    # produces an EMPTY payload and exits 10 ("nothing to push") — the script then
+    # exits 0 having POSTed nothing, and a test that indexed straight into the
+    # request list would die with an IndexError that names no mechanism at all.
+    assert pushes(server), (
+        "a session larger than the whole budget was dropped rather than sent alone: NOTHING "
+        "was pushed. It is the newest file, so it would be dropped first on every tick, for "
+        f"ever. Script said: {proc.stdout.strip()[:200]}")
+    sent = json.loads(pushes(server)[0]["body"])["sessions"]
+    assert [s["sessionId"] for s in sent] == ["big"], (
+        "a session larger than the whole budget was dropped rather than sent alone — it is "
+        "the newest file, so it would be dropped first on every tick, for ever"
+    )

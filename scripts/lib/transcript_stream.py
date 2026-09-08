@@ -29,11 +29,20 @@ is back in step having neither duplicated nor skipped a line. Computing the
 cursor locally would be right until the one time it was not, and then the two
 sides would be permanently spliced with nothing saying so.
 
-🔴 A DELTA IS ALWAYS WHOLE RECORDS. Every read is cut at a NEWLINE, which does
-two jobs at once: the server never stores a leading JSON fragment, and a
-multi-byte rune can never be split across two frames (a newline is ASCII, so a
-cut there is always a rune boundary). The trailing partial line waits for the
-next poll.
+🔴 A DELTA IS WHOLE RECORDS WHEREVER THERE IS A RECORD BOUNDARY TO CUT ON. Every
+read is cut at a NEWLINE, which does two jobs at once: the server never stores a
+leading JSON fragment, and a multi-byte rune can never be split across two frames
+(a newline is ASCII, so a cut there is always a rune boundary). The trailing
+partial line waits for the next poll.
+
+⚠ AND WHERE THERE IS NO BOUNDARY IN THE WINDOW, IT CUTS ON A RUNE BOUNDARY
+INSTEAD RATHER THAN DECLINING. A single tool-result record on this fleet has been
+measured well past 256 KiB — far beyond one delta — so "wait for a newline" is not
+a delay there, it is a PERMANENT STALL: every poll re-reads the same window, finds
+no newline, and declines. That is what an earlier revision did, on both the append
+and the reseed path, and it silently confined the biggest sessions to the
+five-minute feed. Streaming such a record in pieces leaves the stored tail ending
+mid-record for a few seconds, which the parser already tolerates.
 
 🔴 THE BYTE COUNTS ON BOTH SIDES MUST AGREE EXACTLY, so this decodes STRICTLY.
 The server advances its cursor by the byte length of the text it received; this
@@ -125,6 +134,7 @@ MAX_CANDIDATES = 200
 # logged per session: this runs every 5 seconds and a per-session line would bury
 # every real event in the journal.
 SKIP_UNCHANGED = "unchanged"
+SKIP_DUPLICATE_ID = "duplicate-session-id"
 SKIP_NO_BOUNDARY = "no-record-boundary"
 SKIP_UNDECODABLE = "undecodable"
 SKIP_UNREADABLE = "unreadable"
@@ -146,14 +156,27 @@ class StreamState:
     server is correct in both directions and needs no state on this machine.
     """
 
+    #: Bounds `inodes`, which — unlike `cursors` — is never wholesale-replaced by
+    #: a re-hydration, so in a process that runs for weeks it would otherwise grow
+    #: one entry per session ever seen. Eviction is oldest-first and costs the
+    #: evicted session exactly one reseed, because a missing inode is a first
+    #: sighting. The bound is generous against the measured rate (~1,465 sessions
+    #: a week fleet-wide) and against the 24h candidate window, so in practice
+    #: nothing is ever evicted; it exists so that "in practice" is not the only
+    #: thing standing between this and a slow leak.
+    INODE_LIMIT = 8192
+
     def __init__(self) -> None:
         self.cursors: dict[str, int | None] = {}
         self.inodes: dict[str, int] = {}
         self.hydrated = False
 
-    def forget(self, session_id: str) -> None:
-        self.cursors.pop(session_id, None)
-        self.inodes.pop(session_id, None)
+    def note_inode(self, session_id: str, inode: int) -> None:
+        """Record a file identity, bounded."""
+        self.inodes[session_id] = inode
+        while len(self.inodes) > self.INODE_LIMIT:
+            # dicts preserve insertion order, so this evicts the oldest.
+            self.inodes.pop(next(iter(self.inodes)))
 
 
 def iter_candidates(projects_dir, max_age_hours=MAX_AGE_HOURS, limit=MAX_CANDIDATES, now=None):
@@ -221,11 +244,36 @@ def _read_append(path: str, offset: int, budget: int):
     except OSError:
         return SKIP_UNREADABLE
     nl = raw.rfind(b"\n")
-    if nl < 0:
-        # Only a partial line so far. Sending it would put a fragment in the
-        # stored tail AND risk splitting a rune; it costs one poll to wait.
+    if nl >= 0:
+        raw = raw[: nl + 1]
+    elif len(raw) < budget:
+        # The read reached EOF without a newline: this is just a line still being
+        # written. Sending it would put a fragment in the stored tail; it costs
+        # one poll to wait.
         return SKIP_NO_BOUNDARY
-    raw = raw[: nl + 1]
+    else:
+        # 🔴 THE WINDOW IS FULL AND HOLDS NO BOUNDARY, SO THIS RECORD IS LONGER
+        # THAN ONE DELTA AND WAITING CAN NEVER HELP. An earlier revision returned
+        # SKIP_NO_BOUNDARY here, which STALLED that session's append path FOR
+        # EVER: every poll re-read the same 48 KiB, found no newline, and declined
+        # — silently, at ~830 MB/day of wasted reads, with the bulk reconciler as
+        # the only feed. The lag escape could not save it either, because a record
+        # between MAX_DELTA_BYTES and MAX_LAG_BYTES never reaches that threshold.
+        #
+        # 🔴 AND IT IS NOT AN EDGE CASE ON THIS FLEET. stream.go's own trimToTail
+        # records the measurement: "a single tool-result record on this fleet has
+        # been measured well past 256 KiB". So the sessions with the biggest tool
+        # output — the ones an operator most wants seconds-fresh — were exactly
+        # the ones that fell back to the five-minute path.
+        #
+        # Cutting on a RUNE boundary instead streams the record in pieces. The
+        # stored tail then ends mid-record for a few seconds, which the parser
+        # already tolerates (it counts a partial record rather than failing), and
+        # the next delta completes it. A transient partial record beats a
+        # permanent stall.
+        raw = _cut_at_rune_boundary(raw)
+        if not raw:
+            return SKIP_NO_BOUNDARY
     text = _decode_exact(raw)
     if text is None:
         return SKIP_UNDECODABLE
@@ -236,8 +284,22 @@ def _read_reseed(path: str, size: int, window: int):
     """The tail of a file as a reseed: (start_offset, byte_length, text), or a
     SKIP_* reason string.
 
-    The leading partial record is DROPPED and the trailing one is left for the
-    next poll, so a reseed is whole records exactly like an append is.
+    The leading partial record is DROPPED where there is one to drop to, and the
+    trailing one is left for the next poll, so a reseed is normally whole records
+    exactly like an append is.
+
+    🔴 "NORMALLY". WHERE THE WINDOW HOLDS NO BOUNDARY AT ALL IT SENDS THE BYTES
+    ANYWAY, cut on a rune boundary. Returning SKIP here — which an earlier
+    revision did, on both the leading and the trailing cut — made a file whose
+    last record exceeds the window a PERMANENT RESEED LOOP: plan_frame only
+    leaves the reseed branch once a cursor is adopted, and no cursor can be
+    adopted while the reseed declines. Measured: three identical rounds, zero
+    deltas, forever.
+
+    ⚠ Note the asymmetry it created with the reconciler, which is why the bug was
+    invisible: build_transcript_push.read_tail uses a 192 KiB window against this
+    48 KiB one, so for last-records between those two sizes the five-minute push
+    worked perfectly while the stream looped.
     """
     start = max(0, size - window)
     try:
@@ -248,20 +310,91 @@ def _read_reseed(path: str, size: int, window: int):
         return SKIP_UNREADABLE
     if start > 0:
         nl = raw.find(b"\n")
-        if nl < 0:
-            # One record longer than the whole window: there is no boundary to
-            # cut on. The bulk reconciler makes the same call for the same reason.
-            return SKIP_NO_BOUNDARY
-        start += nl + 1
-        raw = raw[nl + 1 :]
+        if 0 <= nl < len(raw) - 1:
+            start += nl + 1
+            raw = raw[nl + 1 :]
+        else:
+            # 🔴 EITHER THERE IS NO BOUNDARY IN THE WINDOW, OR THE ONLY ONE IS ITS
+            # LAST BYTE — AND DROPPING TO THAT WOULD LEAVE NOTHING. Both happen
+            # for the same fleet-real reason: a record larger than the window,
+            # whose terminating newline is the file's last byte. An earlier
+            # revision dropped unconditionally, produced an EMPTY reseed, returned
+            # SKIP, and looped for ever.
+            #
+            # So the reseed starts MID-RECORD. The server marks the tail truncated
+            # and the parser counts a leading partial, which is exactly what both
+            # are for — but the start must still be a RUNE boundary, or
+            # _decode_exact rejects the whole window and the loop comes back by
+            # another door.
+            skipped_bytes, raw = _align_to_rune_start(raw)
+            start += skipped_bytes
     nl = raw.rfind(b"\n")
-    if nl < 0:
+    if nl >= 0:
+        raw = raw[: nl + 1]
+    else:
+        raw = _cut_at_rune_boundary(raw)
+    if not raw:
         return SKIP_NO_BOUNDARY
-    raw = raw[: nl + 1]
     text = _decode_exact(raw)
     if text is None:
         return SKIP_UNDECODABLE
     return start, len(raw), text
+
+
+def _align_to_rune_start(raw: bytes) -> tuple[int, bytes]:
+    """Drop LEADING UTF-8 continuation bytes; return (how many, the rest).
+
+    The mirror of `_cut_at_rune_boundary`, for the one place a read can begin at
+    an arbitrary byte offset: a reseed seeks to `size - window`, which lands
+    inside a rune two times in three on CJK text. The count is returned because
+    the caller must move its `offset` by exactly the bytes it dropped — the
+    cursor is a FILE position, and an offset that does not match the data sent is
+    the splice this whole protocol exists to prevent.
+    """
+    i = 0
+    while i < len(raw) and raw[i] & 0xC0 == 0x80:
+        i += 1
+    return i, raw[i:]
+
+
+def _cut_at_rune_boundary(raw: bytes) -> bytes:
+    """Drop a trailing INCOMPLETE UTF-8 sequence, and nothing else.
+
+    🔴 THE CUT POINT IS A BYTE OFFSET, SO IT CAN LAND INSIDE A MULTI-BYTE RUNE.
+    That is the whole reason the normal path cuts on a newline (an ASCII byte is
+    always a rune boundary). Where there is no newline to cut on, this is what
+    keeps `_decode_exact` from failing on a perfectly good chunk whose last three
+    bytes are half a character — and, downstream, what keeps the two sides' byte
+    counts equal, since a lossy decode would diverge them for ever.
+
+    ⚠ IT REMOVES AT MOST 3 BYTES, and it removes them only when the final
+    sequence is genuinely incomplete. A complete trailing rune is left alone; an
+    invalid lead byte is left alone too, so `_decode_exact` still rejects real
+    corruption rather than having it silently trimmed away.
+    """
+    n = len(raw)
+    for back in range(1, 5):
+        if back > n:
+            return raw
+        b = raw[n - back]
+        if b & 0xC0 == 0x80:
+            continue  # a continuation byte; keep walking back to the lead
+        if b < 0x80:
+            need = 1
+        elif b & 0xE0 == 0xC0:
+            need = 2
+        elif b & 0xF0 == 0xE0:
+            need = 3
+        elif b & 0xF8 == 0xF0:
+            need = 4
+        else:
+            # Not a legal lead byte. Leave it: this is corruption, and
+            # _decode_exact must be the thing that says so.
+            return raw
+        if back == need:
+            return raw  # the last sequence is complete
+        return raw[: n - back]
+    return raw
 
 
 def session_id_of(path: str) -> str:
@@ -303,9 +436,30 @@ def plan_frame(
     """
     deltas: list[dict] = []
     skipped: dict[str, int] = {}
+    claimed: set[str] = set()
 
     def skip(reason: str) -> None:
         skipped[reason] = skipped.get(reason, 0) + 1
+
+    # 🔴 ONE PLACE APPENDS A DELTA AND SPENDS THE BUDGET, because the accumulator
+    # used to be written out in BOTH arms and only one of them was reachable by a
+    # test. Deleting `budget -= nbytes` from the APPEND arm survived the whole
+    # suite: the aggregate test exercises reseeds, so the reseed copy was pinned
+    # and the append copy was not. With the append arm unbounded, 48 appending
+    # sessions could build a 2.25 MiB frame against a 512 KiB server bound — a
+    # 413 on every poll, permanently. The single-expression `per_session` below
+    # closed half of this class; this closes the other half.
+    def emit(sid, path, st, start, nbytes, text, reset):
+        nonlocal budget
+        deltas.append({
+            "sessionId": sid,
+            "project": project_of(path),
+            "updatedAt": _rfc3339(st.st_mtime),
+            "offset": start,
+            "data": text,
+            "reset": reset,
+        })
+        budget -= nbytes
 
     budget = max_frame_bytes
     for path in iter_candidates(projects_dir, max_age_hours, max_candidates, now=now):
@@ -324,6 +478,27 @@ def plan_frame(
         sid = session_id_of(path)
         if not sid:
             continue
+        # 🔴 ONE DUPLICATE ID WOULD KILL THIS HOST'S STREAM PERMANENTLY. The
+        # server REJECTS THE WHOLE FRAME with a 400 when a session appears twice
+        # (NormalizeDeltas, and rightly — the deltas would have to be applied in
+        # an order nobody declared, on a protocol whose correctness rests on
+        # offsets matching exactly). The agent then logs once, clears `hydrated`,
+        # and sends THE SAME FRAME on the next poll: nothing in the loop removes
+        # the offending session, so the stream is dead for this host until
+        # somebody deletes a file.
+        #
+        # Two ways two files produce one id, and neither is exotic: the same
+        # <uuid>.jsonl under two project directories, and — because the server
+        # TrimSpaces the id and this side did not — "abc.jsonl" beside
+        # "abc .jsonl". Measured on this host: 0 duplicates in 949 files, so it
+        # is not live; the cost of it becoming live is total, and the fix is
+        # this branch. Candidates arrive newest-first, so the survivor is the
+        # freshest file.
+        sid = sid.strip()
+        if not sid or sid in claimed:
+            skip(SKIP_DUPLICATE_ID)
+            continue
+        claimed.add(sid)
         try:
             st = os.stat(path)
         except OSError:
@@ -354,23 +529,14 @@ def plan_frame(
             # fine only because the remedy is genuinely identical: send the end of
             # the file and let the server replace what it has.
             got = _read_reseed(path, st.st_size, min(reseed_tail_bytes, per_session))
-            state.inodes[sid] = st.st_ino
+            state.note_inode(sid, st.st_ino)
             if isinstance(got, str):
                 skip(got)
                 continue
-            start, nbytes, text = got
-            deltas.append({
-                "sessionId": sid,
-                "project": project_of(path),
-                "updatedAt": _rfc3339(st.st_mtime),
-                "offset": start,
-                "data": text,
-                "reset": True,
-            })
-            budget -= nbytes
+            emit(sid, path, st, *got, reset=True)
             continue
 
-        state.inodes[sid] = st.st_ino
+        state.note_inode(sid, st.st_ino)
         if st.st_size == offset:
             skip(SKIP_UNCHANGED)
             continue
@@ -379,16 +545,7 @@ def plan_frame(
         if isinstance(got, str):
             skip(got)
             continue
-        start, nbytes, text = got
-        deltas.append({
-            "sessionId": sid,
-            "project": project_of(path),
-            "updatedAt": _rfc3339(st.st_mtime),
-            "offset": start,
-            "data": text,
-            "reset": False,
-        })
-        budget -= nbytes
+        emit(sid, path, st, *got, reset=False)
 
     return deltas, skipped
 
