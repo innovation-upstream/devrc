@@ -28,8 +28,18 @@
 # daemon's own answer), from /proc/sys (the kernel's own answer), and from `ip route`.
 # `systemctl cat tailscaled` exits 0 for a unit that is dead or was never started, so a
 # config that BUILT but never ACTIVATED reads as applied -- that exact bug is why
-# check-nebula-relays.sh was rewritten, and this script does not repeat it. The unit's
-# state is printed as CONTEXT only; no verdict is keyed on it.
+# check-nebula-relays.sh was rewritten, and this script does not repeat it.
+#
+# 🔴 THE UNIT'S STATE CARRIES EXACTLY ONE VERDICT, AND NO OTHERS. `is-active` says
+# nothing about whether the node is authenticated or routing -- so nothing about
+# identity, advertisement, approval or forwarding is keyed on it -- but it says
+# something decisive about LIVENESS. A `tailscaled` that is `inactive` or `failed` is a
+# dead backup path right now, and it used to be reported as rc 4, "no defect found":
+# with the daemon down there is no status and no prefs to read, so every claim comes out
+# merely unevaluated. That is now a FAIL. It is gated on the unit EXISTING
+# (`LoadState=loaded`), because on a host where tailscale was never installed
+# `is-active` prints `inactive` too, and failing there would make every first run roll
+# back its own switch. See the exit-code notes below.
 #
 # 🔴 ADVERTISED AND APPROVED ARE TWO DIFFERENT CLAIMS AND BOTH ARE PRINTED.
 #   * ADVERTISED lives on this node -- `AdvertiseRoutes` in the daemon's prefs. It is
@@ -128,6 +138,9 @@
 #       1 = a definitive node-side FAIL: the node HAS or HAD a tailnet identity and
 #           something about it is wrong -- an EXPIRED or REVOKED node key, a backend that
 #           is not Running, not Online, not advertising, forwarding off, or no LAN route.
+#           ALSO, independently of any identity: an installed `tailscaled` unit that is
+#           not running (see the unit paragraph above). A unit that does not exist on
+#           this host at all is NOT this -- that is the never-applied state and stays 4.
 #       2 = cannot determine -- tailscale absent, daemon unreachable, role ambiguous,
 #           parser failure, or the parser failed its own controls
 set -euo pipefail
@@ -823,9 +836,24 @@ if [ "$(_identity_state "$backend" "$ips" "$expired" "$persisted")" = "incoheren
   _read_live_state
 fi
 
-# CONTEXT ONLY -- deliberately not a verdict. `systemctl cat` exits 0 for a dead unit
-# and `is-active` says nothing about whether the node is authenticated or routing.
+# 🔴 TWO READS, AND THE SECOND ONE IS WHAT MAKES THE FIRST SAFE TO ACT ON.
+# `is-active` says nothing about whether the node is authenticated or routing -- no
+# verdict below about identity, advertisement, approval or forwarding is keyed on it --
+# but it does say whether the daemon is ALIVE, and a dead `tailscaled` is a dead backup
+# path. That single verdict is drawn below.
+#
+# 🔴 WHICH SIGNAL DECIDES THAT THE UNIT EXISTS: `LoadState`, NEVER `is-active`.
+# MEASURED on systemd 261, this host: for a service that does not exist at all,
+# `systemctl is-active` prints `inactive` (rc 4) -- BYTE-IDENTICAL to what it prints for
+# a unit that exists and is stopped -- while `systemctl show -p LoadState --value` prints
+# `not-found` for the absent one and `loaded` for real stopped units (checked against
+# `fstrim.service` and `emergency.service`). So `is-active` alone cannot tell "tailscale
+# was never applied here" from "tailscaled is down", and keying a FAIL on it would make
+# every never-applied host a node-side FAILURE -- which is rc 1, which is `die` and a
+# rollback in apply-tailscale.sh: the first-run blocker this script has been fixed for
+# twice already.
 unit_state=$(systemctl is-active tailscaled.service 2>/dev/null || true)
+unit_load=$(systemctl show -p LoadState --value tailscaled.service 2>/dev/null || true)
 
 # 🔴 `--accept-dns=false` ON BOTH ROLES, and the symmetry is the point. The reasoning is
 # the same on either machine: MagicDNS makes tailscale take over the host resolver, and
@@ -846,7 +874,9 @@ else
 fi
 
 echo
-echo "daemon  : tailscaled unit is '${unit_state:-unknown}'  (context only -- no verdict is keyed on it)"
+echo "daemon  : tailscaled unit is '${unit_state:-unknown}', LoadState '${unit_load:-unknown}'"
+echo "          (a unit that EXISTS and is not 'active' FAILS below; no other verdict is"
+echo "           keyed on the unit, and a unit that is not on this host at all is not one)"
 echo "backend : $backend"
 echo "online  : $online"
 echo "addrs   : ${ips:-<none>}"
@@ -870,6 +900,35 @@ rc=0
 fails=()
 actions=()
 unknowns=()
+
+# 🔴 A DEAD `tailscaled` IS A DEFECT, AND IT USED TO BE rc 4 -- "NOT YET DETERMINABLE (no
+# defect found)". With the daemon stopped or crashed there is no `tailscale status` and no
+# `tailscale debug prefs` to read, and the on-disk fallback needs root, so `_identity_state`
+# lands on `none` and every claim in this script comes out UNEVALUATED rather than wrong.
+# MEASURED two ways: a real tailscaled 1.102.3 killed mid-run did not move the exit code
+# off 4, and the fixture control below (`test_a_dead_tailscaled_unit_is_a_failure_not_
+# incomplete`) is RED against the code at dca21bfd for the same reason. "No defect found"
+# about a stopped daemon is the reassuring answer on the one fact the operator most needs
+# told from the far side of a trip.
+#
+# 🔴 GATED ON THE UNIT EXISTING, and that gate is the whole risk of this check. Only
+# `LoadState=loaded` counts as "the unit is really here" -- see the measurement beside the
+# reads above. Every other answer, INCLUDING `not-found` (never installed), `masked`, an
+# error, or an empty string from a host with no systemd or a systemctl too old for
+# `--value`, leaves this run exactly as it was before this block existed. Deliberately
+# fail-OPEN: this guard may only ever add a finding about a unit it has positively
+# identified, because the false positive costs a rollback of a correct switch.
+if [ "$unit_load" = "loaded" ] && [ "$unit_state" != "active" ]; then
+  fails+=("🔴 THE tailscaled UNIT IS INSTALLED ON THIS HOST BUT IS NOT RUNNING:
+    \`systemctl is-active tailscaled.service\` says '${unit_state:-unknown}', and its
+    LoadState is 'loaded', so the unit genuinely exists here -- this is NOT the
+    never-installed state. THE BACKUP PATH IS DEAD RIGHT NOW: a daemon that is not
+    running carries no traffic and answers no login, whatever else this run could or
+    could not evaluate about the node's identity. Read why it stopped, then start it:
+      systemctl status tailscaled
+      journalctl -u tailscaled -b --no-pager | tail -50
+      sudo systemctl start tailscaled")
+fi
 
 # 🔴 FOUR ANSWERS, THREE OUTCOMES. `authed` stays as the one flag the claims below read,
 # but it is now derived from a classifier that can say WHY it is not 1 -- because "never

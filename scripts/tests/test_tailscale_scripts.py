@@ -31,6 +31,14 @@ CAN be exercised without one, chosen for the defects that were actually found:
     controls in the OTHER direction are the expensive ones: an EMPTY persisted profile is
     what a never-logged-in daemon carries, and reading that as an identity would make
     every first run rc 1 and roll the config back.
+  * 🔴 a `tailscaled` that is STOPPED or CRASHED must be rc 1. With the daemon down there
+    is no status and no prefs to read, so every claim came out unevaluated and the run
+    exited 4 -- "NOT YET DETERMINABLE (no defect found)" -- about a backup path that is
+    dead right now. The control in the other direction is the one that would cost most: a
+    host where tailscale was NEVER installed has no unit, and `systemctl is-active` prints
+    `inactive` there too, so the FAIL is gated on `LoadState=loaded` and the never-applied
+    host stays rc 4. rc 1 there is `die` + rollback in apply-tailscale.sh, on every first
+    run.
   * a SELF-CONTRADICTORY daemon (a non-logged-out backend holding no address) must not be
     rc 1. Its own message said "re-run this check before doing anything else"; apply's
     answer to rc 1 is `die` -> restore `configuration.nix` -> report that the RUNNING
@@ -288,7 +296,11 @@ def test_self_test_passes(script):
 # the freshly-switched node, driven end to end against a fake `tailscale`
 # --------------------------------------------------------------------------------------
 def _fake_tailscale(
-    tmp_path: Path, status: dict, prefs: dict | None, lan_route: bool = True
+    tmp_path: Path,
+    status: dict,
+    prefs: dict | None,
+    lan_route: bool = True,
+    unit: tuple[str, str] = ("active", "loaded"),
 ) -> dict:
     """A PATH containing fakes for everything the checker reads from the host.
 
@@ -310,10 +322,23 @@ def _fake_tailscale(
         '# passes --role explicitly, so an answer would be ignored anyway.\n'
         "exit 0\n",
     )
-    # `systemctl is-active` is CONTEXT ONLY in the checker (no verdict is keyed on it),
-    # but the sandbox has no systemd at all, so stub it rather than depend on the `||
-    # true` that currently covers its absence.
-    write_exec(bindir / "systemctl", 'echo active\nexit 0\n')
+    # 🔴 THE UNIT STUB ANSWERS BOTH READS THE CHECKER MAKES, AND THEY ARE DIFFERENT
+    # QUESTIONS. `is-active` is liveness; `show -p LoadState --value` is existence, and
+    # only the pair can separate "tailscaled is down" from "tailscale was never applied
+    # to this host" -- MEASURED on systemd 261, `is-active` prints `inactive` for BOTH.
+    # Default is a healthy unit; the cases below drive the other combinations. The
+    # sandbox has no systemd at all, so this is stubbed rather than left to the `|| true`.
+    unit_state, unit_load = unit
+    write_exec(
+        bindir / "systemctl",
+        'case "$1" in\n'
+        f'  is-active) printf "%s\\n" "{unit_state}"\n'
+        f'             [ "{unit_state}" = active ] || exit 3\n'
+        "             exit 0 ;;\n"
+        f'  show)      printf "%s\\n" "{unit_load}"; exit 0 ;;\n'
+        "esac\n"
+        "exit 0\n",
+    )
     (tmp_path / "status.json").write_text(json.dumps(status))
     if prefs is not None:
         (tmp_path / "prefs.json").write_text(json.dumps(prefs))
@@ -431,6 +456,75 @@ def test_an_authenticated_but_broken_node_is_still_a_failure(tmp_path):
     r = _run("bash", CHECK, "--role", "server", env=env)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "FAIL:" in r.stdout
+
+
+# --------------------------------------------------------------------------------------
+# 🔴 A STOPPED OR CRASHED `tailscaled` IS A FAILURE -- AND A HOST THAT NEVER HAD ONE IS NOT
+#
+# With the daemon down there is no `tailscale status` and no `tailscale debug prefs`, and
+# the on-disk fallback needs root, so every claim in the checker comes out UNEVALUATED and
+# the run exited 4: "NOT YET DETERMINABLE (no defect found)" -- about a backup path that is
+# dead right now. Reproduced live against a real tailscaled 1.102.3: killing the daemon did
+# not move the exit code.
+#
+# The other direction is the expensive one and is pinned right below it. On a host where
+# tailscale was NEVER installed there is no unit at all, and `systemctl is-active` prints
+# `inactive` there too -- byte-identical to a stopped unit (measured, systemd 261). Failing
+# on `is-active` alone would make every first run a node-side FAIL, which is rc 1, which is
+# `die` + rollback in apply-tailscale.sh: the config deleted by the run that installed it.
+# `LoadState` is the signal that separates them.
+# --------------------------------------------------------------------------------------
+@pytest.mark.parametrize("unit_state", ["inactive", "failed"])
+def test_a_dead_tailscaled_unit_is_a_failure_not_incomplete(tmp_path, unit_state):
+    # No prefs: a daemon that is not running answers neither of the checker's reads. That
+    # is what makes the old verdict rc 4 -- there is nothing left to find a defect in.
+    env = _fake_tailscale(tmp_path, NEVER_AUTHED, None, unit=(unit_state, "loaded"))
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 1, (
+        f"a tailscaled unit that EXISTS and is '{unit_state}' exited {r.returncode}. The "
+        "backup path is down and rc 4 reports that as 'no defect found'.\n"
+        + r.stdout
+        + r.stderr
+    )
+    assert "IS INSTALLED ON THIS HOST BUT IS NOT RUNNING" in r.stdout, (
+        "the run failed, but not with the dead-unit finding -- some other verdict is "
+        "carrying this test:\n" + r.stdout
+    )
+    assert unit_state in r.stdout and "systemctl status tailscaled" in r.stdout
+
+
+@pytest.mark.parametrize(
+    "label,unit",
+    [
+        # `systemctl show -p LoadState` for a unit that does not exist.
+        ("tailscale was never applied to this host", ("inactive", "not-found")),
+        # No systemd at all, or a systemctl too old for `--value`: both reads come back
+        # empty. The guard must stay silent rather than guess.
+        ("nothing answers systemctl", ("", "")),
+    ],
+)
+def test_a_host_with_no_tailscaled_unit_is_still_rc_4(tmp_path, label, unit):
+    """🔴 THE REGRESSION THAT WOULD COST THE MOST. This is the pre-apply / first-run
+    state; rc 1 here makes apply-tailscale.sh roll back the config it just installed."""
+    env = _fake_tailscale(tmp_path, NEVER_AUTHED, NO_PREFS, unit=unit)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 4, (
+        f"{label}: exited {r.returncode}, not 4. The dead-unit FAIL must be gated on the "
+        "unit EXISTING -- `is-active` prints 'inactive' for an absent unit too.\n"
+        + r.stdout
+        + r.stderr
+    )
+    assert "FAIL:" not in r.stdout
+    assert "IS INSTALLED ON THIS HOST BUT IS NOT RUNNING" not in r.stdout
+
+
+def test_a_healthy_unit_draws_no_unit_finding(tmp_path):
+    """The control for both of the above: with the unit loaded AND active, rc 0 is still
+    reachable. Without this, a guard that failed on every unit state would pass them."""
+    env = _fake_tailscale(tmp_path, AUTHED_APPROVED, SERVER_PREFS, unit=("active", "loaded"))
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "IS INSTALLED ON THIS HOST BUT IS NOT RUNNING" not in r.stdout
 
 
 # --------------------------------------------------------------------------------------
