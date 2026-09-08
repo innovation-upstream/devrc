@@ -463,21 +463,70 @@ def test_main_exit_code_is_nonzero_when_a_row_could_not_be_read(monkeypatch, tmp
     assert "checkout missing" in capsys.readouterr().out
 
 
+_READABLE_ROW = {
+    "app": "an-app", "dir": "repo", "slug": "o/r", "fetch": "ok",
+    "default_branch": "main", "checked_out": "main", "dirty_files": "0",
+    "manifest_version": "1.0.0", "package_version": "1.0.0",
+    "build_command": "pnpm run build", "lockfile": "pnpm-lock.yaml",
+    "vitest_projects": "2+", "lockstep_guard": "manifest.test",
+}
+
+
 def _one_row(monkeypatch, **over):
     """A single fully-readable row, so a test can exercise main() with REAL rows
     rather than REPOS=[] — an empty list cannot see anything that depends on a
     row's contents, which is how the `--no-fetch`-exits-0 half went unpinned."""
-    row = {
-        "app": "an-app", "dir": "repo", "slug": "o/r", "fetch": "ok",
-        "default_branch": "main", "checked_out": "main", "dirty_files": "0",
-        "manifest_version": "1.0.0", "package_version": "1.0.0",
-        "build_command": "pnpm run build", "lockfile": "pnpm-lock.yaml",
-        "vitest_projects": "2+", "lockstep_guard": "manifest.test",
-    }
+    row = dict(_READABLE_ROW)
     row.update(over)
     monkeypatch.setattr(fleet, "REPOS", [("repo", "o/r", "an-app")])
     monkeypatch.setattr(fleet, "inspect", lambda *a, **k: dict(row))
     return row
+
+
+def _fleet_rows(monkeypatch, *overrides):
+    """N fully-readable rows, keyed by app slug so one main() run can hold rows
+    that must render DIFFERENTLY from each other — which is the only way to
+    assert that two cells are distinct strings rather than the same one twice.
+
+    Each override must carry a distinct `app`; `dir`/`slug` are derived from it
+    so `REPOS` and the fake `inspect` cannot drift apart.
+    """
+    rows = []
+    for over in overrides:
+        row = dict(_READABLE_ROW)
+        row.update(over)
+        row["dir"] = row["app"]
+        row["slug"] = f"o/{row['app']}"
+        rows.append(row)
+    apps = [r["app"] for r in rows]
+    assert len(set(apps)) == len(apps), f"app slugs must be distinct: {apps}"
+    monkeypatch.setattr(fleet, "REPOS", [(r["dir"], r["slug"], r["app"]) for r in rows])
+    by_app = {r["app"]: r for r in rows}
+    monkeypatch.setattr(fleet, "inspect", lambda _d, _s, app, **_k: dict(by_app[app]))
+    return rows
+
+
+def _with_platform(monkeypatch, tmp_path, status=STATUS):
+    """Point `fleet.main()` at a captured `civitai app status` dump, so its
+    platform-enrichment branch actually RUNS.
+
+    🔴 This is the setup that did not exist. Round 3 rewrote the enrichment
+    guard and an audit measured the coverage at ZERO: reverting the predicate to
+    the pre-round-3 `if "error" in row:`, replacing it with `if False:`, and
+    planting a bare `raise` inside the loop body EACH left the suite at 45
+    passed. The `else:` branch of main()'s platform block was never executed by
+    any test, because the only test that set CIVITAI_STATUS_FILE also set
+    `REPOS = []` — an empty fleet cannot enter a per-row loop.
+
+    Pinning `sys.modules["app_state"]` is the same fix as in
+    `test_an_unknown_platform_state_is_not_swallowed_by_fleet`: `fleet.main()`
+    does a plain `import app_state`, which would otherwise load a SECOND module
+    object from the same file.
+    """
+    dump = tmp_path / "status.txt"
+    dump.write_text(status)
+    monkeypatch.setenv("CIVITAI_STATUS_FILE", str(dump))
+    monkeypatch.setitem(sys.modules, "app_state", app_state)
 
 
 def test_a_failed_fetch_exits_nonzero_even_though_every_column_read(monkeypatch, capsys):
@@ -606,6 +655,206 @@ def test_an_unknown_platform_state_is_not_swallowed_by_fleet(monkeypatch, tmp_pa
 
     with pytest.raises(app_state.UnknownState):
         fleet.main()
+
+
+# --- the table's columns must not shift, and its markers must not be invented --
+
+
+def _column_starts(out: str) -> list[dict[str, int]]:
+    """Where `guard`, `fetch` and `platform` begin, in the header and each row.
+
+    Pins a RELATIONSHIP — every row agrees with the header — rather than the
+    literal offsets, which a deliberate column-width change is allowed to move.
+    """
+    lines = [ln for ln in out.splitlines() if ln and not ln.startswith("-")]
+    hdr, body = lines[0], lines[1:]
+    return [
+        {"guard": hdr.index("guard"), "fetch": hdr.index("fetch"),
+         "platform": hdr.index("platform")}
+    ] + [
+        {"guard": ln.index("version-lockstep"), "fetch": ln.index("skipped"),
+         "platform": ln.index("not-consulted")}
+        for ln in body
+    ]
+
+
+def _vitest(config: str | None, *, ref_exists: bool = True) -> str:
+    """Whatever `vitest_projects()` really returns for one repo shape."""
+    ok = dict(_GIT_DIR)
+    if config is not None:
+        ok["show r:vite.config.ts"] = config
+    if ref_exists:
+        ok["rev-parse --verify"] = "abc123"
+    saved = fleet._RUN
+    fleet._RUN = _FakeGit(ok)
+    try:
+        return fleet.vitest_projects("/x", "r")
+    finally:
+        fleet._RUN = saved
+
+
+def test_the_proj_column_never_shifts_the_columns_after_it(monkeypatch, capsys):
+    """🔴 REGRESSION. `no-vite` is 7 characters and the cell was `:>4`; Python's
+    width specifier PADS but never TRUNCATES, so that one row pushed `guard`,
+    `fetch` and `platform` three columns right while every other row and the
+    header stayed put. Measured before the fix: `guard` at 112 in the header and
+    in a `2+` row, at 115 in a `no-vite` row.
+
+    The values are taken from `vitest_projects()` ITSELF rather than from a
+    literal list, so a new sentinel added to that function is covered here
+    without anyone remembering to update this test — the case that produced the
+    defect, since `no-vite` was itself a new sentinel.
+    """
+    every_value = {
+        _vitest("test: { projects: [a, b] }"),   # "2+"
+        _vitest("test: { environment: 'node' }"),  # "1"
+        _vitest(None, ref_exists=True),          # "no-vite"
+        _vitest(None, ref_exists=False),         # "?"
+    }
+    assert len(every_value) == 4, every_value  # each branch really is distinct
+
+    _fleet_rows(monkeypatch, *[
+        {"app": f"app{i}", "fetch": "skipped", "vitest_projects": value,
+         "lockstep_guard": "version-lockstep"}
+        for i, value in enumerate(sorted(every_value))
+    ])
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    fleet.main()
+    out = capsys.readouterr().out
+
+    starts = _column_starts(out)
+    assert len(starts) == 5, out  # header + one row per sentinel
+    assert all(s == starts[0] for s in starts), (starts, out)
+
+
+def test_an_unreadable_version_does_not_print_a_lockstep_break_marker(monkeypatch, capsys):
+    """🔴 REGRESSION. `!` is documented one line above its own cell as 'lockstep
+    broken — loud', and it was printed whenever the two strings DIFFERED — but
+    `?` differs from every real version, so a row whose manifest version could
+    not be read rendered `?/5.2.9!`, asserting a version-lockstep violation from
+    a comparison that never happened. Both readings are still shown; only the
+    assertion is dropped.
+    """
+    _fleet_rows(
+        monkeypatch,
+        {"app": "unread-mf", "manifest_version": fleet.UNREADABLE,
+         "package_version": "5.2.9"},
+        {"app": "unread-pkg", "manifest_version": "6.1.4",
+         "package_version": fleet.UNREADABLE},
+        # The positive control, and the reason this is not just "no `!` ever":
+        # two READ versions that disagree must still shout.
+        {"app": "real-break", "manifest_version": "2.4.1",
+         "package_version": "3.7.0"},
+    )
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    fleet.main()
+    out = capsys.readouterr().out
+
+    assert "?/5.2.9" in out and "?/5.2.9!" not in out, out
+    assert "6.1.4/?" in out and "6.1.4/?!" not in out, out
+    assert "2.4.1/3.7.0!" in out, out
+
+
+# --- the platform-enrichment loop, which had ZERO tests executing it ----------
+
+
+def test_platform_state_is_enriched_onto_a_row_the_platform_knows(monkeypatch, tmp_path, capsys):
+    """INVARIANT GUARD, not regression coverage — this passes at the pre-fix
+    commit too. It exists because NOTHING executed the loop it covers: with a
+    bare `raise` planted in the loop body the suite still reported 45 passed, so
+    every other claim about this branch was vacuous.
+
+    `sensei 0.1.21` resolves to `approved/deploying` in the STATUS fixture, a
+    state no other assertion in this file names.
+    """
+    _with_platform(monkeypatch, tmp_path)
+    _fleet_rows(monkeypatch, {"app": "sensei", "manifest_version": "0.1.21",
+                              "package_version": "0.1.21"})
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch"])
+    fleet.main()
+    out = capsys.readouterr().out
+    assert "approved/deploying" in out, out
+    assert "not-consulted" not in out, out
+
+
+def test_an_error_row_with_a_readable_version_still_gets_platform_state(monkeypatch, tmp_path, capsys):
+    """INVARIANT GUARD for the round-3 delta itself, which shipped unexecuted —
+    it is GREEN at that commit, because the behaviour there is already right.
+    What was missing is any test that ran it: the predicate used to be `if
+    "error" in row:`, denying platform state to a row with ONE unreadable
+    column, and reverting that one expression left the suite at 45 passed. This
+    is regression coverage against the PRE-round-3 predicate, not against
+    round 3.
+
+    `gen-matrix 0.8.8` is `approved/failed` in the fixture; the row carries an
+    unreadable `vitest_projects` and the matching `error`, exactly the shape
+    `test_an_unreadable_column_does_not_discard_the_readable_ones` uses.
+    """
+    _with_platform(monkeypatch, tmp_path)
+    _fleet_rows(monkeypatch, {"app": "gen-matrix", "manifest_version": "0.8.8",
+                              "package_version": "0.8.8",
+                              "vitest_projects": fleet.UNREADABLE,
+                              "error": "unreadable: vitest_projects"})
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch"])
+    assert fleet.main() == 1  # the unreadable column still exits non-zero
+    out = capsys.readouterr().out
+    assert "approved/failed" in out, out
+    assert "version-unread" not in out, out
+
+
+def test_the_three_platform_answers_are_three_distinct_strings(monkeypatch, tmp_path, capsys):
+    """🔴 REGRESSION. `not-consulted` acquired a second meaning: the printer's
+    `!!` discriminator ("default_branch" not in r) and the loop's skip
+    (manifest_version unreadable) are DIFFERENT predicates, so a row could reach
+    the table and still be skipped — and it then printed `not-consulted` on a
+    run where the platform WAS consulted. The cell's own comment says `-` "is a
+    REAL deploy state ... so it must never also mean 'not consulted'"; this is
+    the same principle on the same cell.
+
+    Not fixable by deleting the skip: `resolve(parsed, app, "?")` returns
+    `none/-`, a real-looking platform state for a version nobody read.
+    """
+    _with_platform(monkeypatch, tmp_path)
+    _fleet_rows(
+        monkeypatch,
+        {"app": "custom-generators", "manifest_version": fleet.UNREADABLE,
+         "package_version": "0.6.5", "error": "unreadable: manifest_version"},
+        {"app": "sensei", "manifest_version": "0.1.21", "package_version": "0.1.21"},
+    )
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch"])
+    fleet.main()
+    consulted = capsys.readouterr().out
+
+    assert "version-unread" in consulted, consulted
+    assert "approved/deploying" in consulted, consulted
+    assert "not-consulted" not in consulted, consulted
+    # ... and the skipped row must not borrow a REAL state either.
+    assert "none/-" not in consulted, consulted
+
+    # The third string, from the run where the platform genuinely was not asked.
+    _one_row(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    fleet.main()
+    unconsulted = capsys.readouterr().out
+    assert "not-consulted" in unconsulted, unconsulted
+    assert "version-unread" not in unconsulted, unconsulted
+
+
+def test_the_submit_floor_is_still_read_for_a_row_with_no_version(monkeypatch, tmp_path, capsys):
+    """The floor is keyed on the app slug alone, so it is answerable even when
+    the version is not — and reporting it as unavailable would be the same
+    fabrication in the other direction. `custom-generators`' highest version on
+    record is `0.6.5` (a withdrawn row, which still occupies the floor)."""
+    _with_platform(monkeypatch, tmp_path)
+    _fleet_rows(monkeypatch, {"app": "custom-generators",
+                              "manifest_version": fleet.UNREADABLE,
+                              "package_version": "0.6.5",
+                              "error": "unreadable: manifest_version"})
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--json"])
+    fleet.main()
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["submit_floor"] == "0.6.5", row
+    assert row["platform"] == "version-unread", row
 
 
 def test_an_absent_json_field_is_distinct_from_an_unreadable_one(monkeypatch, tmp_path):

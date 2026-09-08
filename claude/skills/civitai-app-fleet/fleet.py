@@ -315,21 +315,44 @@ def main() -> int:
             print(f"note: platform state unread ({exc})", file=sys.stderr)
         else:
             for row in rows:
+                # The floor is keyed on the APP SLUG alone, so it is answerable
+                # even for a row whose version could not be read. It is computed
+                # before the version guard below for that reason: reporting it
+                # as unavailable would be the same fabrication in the other
+                # direction — claiming a read failed when it succeeded.
+                floor = app_state.submit_floor(parsed, row["app"])
+                row["submit_floor"] = floor or "none"
                 # Enrich anything with a usable version. An `error` row is not
                 # automatically unusable — only one whose VERSION could not be
                 # read is, and skipping on `error` alone denied platform state
                 # to rows that had it available.
+                #
+                # 🔴 THE SKIP NEEDS ITS OWN WORD. This predicate is narrower than
+                # the `!!` discriminator in the printer below, so a row can reach
+                # the table AND be skipped here — and it then printed
+                # `not-consulted` on a run where the platform WAS consulted,
+                # giving that string the same double meaning the `-` comment
+                # below forbids. Three cases, three strings: `not-consulted`
+                # (--no-platform), `unread` (the CLI failed for every row),
+                # `version-unread` (consulted, this row had no version to ask
+                # about). Do NOT drop the guard instead — `resolve(parsed, app,
+                # "?")` answers `none/-`, a real-looking state for a version that
+                # was never read, which is worse than either.
                 if row.get("manifest_version", UNREADABLE) == UNREADABLE:
+                    row["platform"] = "version-unread"
                     continue
-                floor = app_state.submit_floor(parsed, row["app"])
-                row["submit_floor"] = floor or "none"
                 state = app_state.resolve(parsed, row["app"], row["manifest_version"])
                 row["platform"] = f"{state['review']}/{state['deploy']}"
 
     if args.json:
         print(json.dumps(rows, indent=2))
     else:
-        hdr = f"{'app':<21} {'branch':<7} {'checked-out':<26} {'dirty':>5} {'ver':<9} {'build':<16} {'lock':<16} {'proj':>4} {'guard':<17} {'fetch':<8} {'platform'}"
+        # 🔴 `proj` is 7 wide, not 4, because `no-vite` is 7 characters and
+        # Python's `:>N` PADS but never TRUNCATES — an over-long value silently
+        # pushes `guard`, `fetch` and `platform` right on that row alone. Any
+        # widening of a `vitest_projects()` return value has to move this number
+        # and the matching one in the row below together.
+        hdr = f"{'app':<21} {'branch':<7} {'checked-out':<26} {'dirty':>5} {'ver':<9} {'build':<16} {'lock':<16} {'proj':>7} {'guard':<17} {'fetch':<8} {'platform'}"
         print(hdr)
         print("-" * len(hdr))
         for r in rows:
@@ -341,12 +364,26 @@ def main() -> int:
                 print(f"{r['app']:<21} !! {r.get('error', 'unknown')}")
                 continue
             ver = r["manifest_version"]
-            if r["package_version"] != ver:
-                ver = f"{ver}/{r['package_version']}!"  # lockstep broken — loud
+            pkg = r["package_version"]
+            if pkg != ver:
+                # 🔴 `!` ASSERTS A LOCKSTEP VIOLATION, so it may only be printed
+                # when BOTH sides were actually read. `?` differs from every real
+                # version string, so a bare `!=` fabricated the marker for a row
+                # whose manifest version could not be read at all: `?/0.8.8!`
+                # claims a comparison that never happened. Both values are still
+                # shown — that part is a real reading — the ASSERTION is dropped.
+                broken = UNREADABLE not in (ver, pkg)
+                ver = f"{ver}/{pkg}{'!' if broken else ''}"
+                # ⚠ KNOWN AND DELIBERATE: a two-version cell overflows this
+                # column's 9 and shifts the rest of THIS row. Unlike `proj`,
+                # whose value set is closed and short, a version string has no
+                # bound, so no width fixes it and truncating would turn a read
+                # version into a fabricated one. Overflowing loudly is the least
+                # bad of the three; the alignment guard is scoped accordingly.
             print(
                 f"{r['app']:<21} {r['default_branch']:<7} {r['checked_out'][:26]:<26} "
                 f"{r['dirty_files']:>5} {ver:<9} {r['build_command'][:16]:<16} "
-                f"{r['lockfile'][:16]:<16} {r['vitest_projects']:>4} "
+                f"{r['lockfile'][:16]:<16} {r['vitest_projects']:>7} "
                 # The fetch column exists because the docstring claimed the
                 # result was "reported per row" while the table had no such
                 # column — true of --json only. `skipped` is shown for the same
@@ -355,7 +392,10 @@ def main() -> int:
                 # one while leaving the other indistinguishable from fresh data.
                 f"{r['lockstep_guard']:<17} {r['fetch']:<8} "
                 # `-` is a REAL deploy state meaning "no deploy for this row",
-                # so it must never also mean "not consulted".
+                # so it must never also mean "not consulted". By the same rule
+                # `not-consulted` reaches this cell ONLY via --no-platform (or
+                # the CLI raising before the loop): a row the loop consulted and
+                # then skipped says `version-unread`, set above.
                 f"{r.get('platform', 'not-consulted')}"
             )
 
