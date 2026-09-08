@@ -1624,21 +1624,30 @@ def test_a_GUESSED_repo_is_never_auto_opened_whatever_the_shape(monkeypatch, tex
     assert "https://github.com/wrongorg/wrongrepo/issues/1291" in seen["urls"], seen
 
 
-def test_the_one_row_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
-    """A single-row picker with no explanation reads as a broken handler asking
-    the operator to confirm the obvious. rofi cannot report a reason after a
-    dismissal (see `pick`), so the reason goes above the choice.
+def test_the_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
+    """A picker whose top row was GUESSED, with no explanation, reads as a broken
+    handler asking the operator to confirm the obvious. rofi cannot report a
+    reason after a dismissal (see `pick`), so the reason goes above the choice.
 
-    🔴 AND THE NOTE NAMES THE CLICKED TEXT, NEVER A REPOSITORY OR THE MAPPING —
-    the ROW already carries the repo, and `_every_sink`'s disclosure guards
-    cannot see a string that goes to rofi."""
+    ⚠ THIS TEST USED TO ASSERT `n == 1` AND WAS RENAMED FROM
+    `test_the_one_row_picker_...`. That single row was the defect the operator
+    reported from the real click path on 2026-09-07 — the guess could not be
+    overridden — so the row COUNT it pinned is superseded. What survives
+    unchanged is the claim its name makes and the disclosure rule, both of which
+    matter more than the count: the note must explain itself, and it must not
+    name a repository.
+
+    The count is now pinned by
+    `test_a_GUESSED_repo_is_offered_WITH_the_whole_universe_beneath_it`, which
+    is the regression for the report."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
     seen = {}
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": seen.update(n=len(c), mesg=mesg) or "")
     assert MO.main(["audit-pr 1291"]) == 0
-    assert seen["n"] == 1, seen
+    assert seen["n"] > 1, ("the guess must not be the ONLY option — that is the "
+                           "reported defect, not the design")
     assert "audit-pr 1291" in seen["mesg"], seen
     assert "tmux pane" in seen["mesg"], seen
     _no_universe_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
@@ -2637,3 +2646,123 @@ def test_systemctl_is_MENTIONED_but_never_SPAWNED():
     assert "systemctl" not in _spawn_argv0_literals(HANDLER), (
         "mention-open.py now SPAWNS systemctl — the ACKNOWLEDGED_UNSTUBBED "
         "entry covering it is an unreachability claim and is now FALSE")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A GUESSED REPO MUST BE OVERRIDABLE — REPORTED FROM THE REAL CLICK PATH
+#
+# 2026-09-07, operator, clicking `audit-pr 1291` in Alacritty: a ONE-ROW picker
+# holding the tmux pane's repo, above the note "audit-pr 1291 names no
+# repository". Their words: "in this case the guess is right, but in practice
+# it's not."
+#
+# That is the whole defect. Suppressing the auto-open (#1336) was correct — a
+# `default`-sourced repo is evidence about the WINDOW, not about the reference,
+# so it must never open unconfirmed. But having declined to act on the guess,
+# the handler offered nothing else: confirm the wrong repo, or dismiss and type
+# the URL by hand. The universe was already built and already the answer
+# everywhere else a repository cannot be named; this arm just never reached it.
+# --------------------------------------------------------------------------- #
+def _guessed_picker(monkeypatch, *, universe, pane="wrongorg/wrongrepo",
+                    mapping=FAKE_UNIVERSE):
+    """Drive `main()` down the guessed-repo path and return what `pick` saw.
+
+    ⚠ `mapping` IS A PARAMETER BECAUSE `universe=[]` DOES NOT EMPTY THE UNIVERSE.
+    `repo_universe()` unions the generated file with `discover_repos()`, so a
+    caller that clears only the file still gets every mapped repo — my own
+    empty-universe test asserted 1 row and got 4 for exactly that reason. The
+    empty case needs BOTH sources cleared, and that is worth a parameter rather
+    than a comment, because the trap is silent in the other direction too."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(mapping))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: list(universe))
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: pane)
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(rows=list(c), mesg=mesg) or "")
+    assert MO.main(["audit-pr 1291"]) == 0
+    return seen
+
+
+def test_a_GUESSED_repo_is_offered_WITH_the_whole_universe_beneath_it(monkeypatch):
+    """🔴 THE REGRESSION FOR THE REPORTED SYMPTOM. Red before this change: the
+    picker held exactly ONE row.
+
+    The guess must still be FIRST — it is the most likely answer and stays one
+    Enter away — and everything else must be reachable by typing."""
+    seen = _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY, "acme/widget"])
+    urls = [c["url"] for c in seen["rows"]]
+    assert len(urls) > 1, f"a guess with no alternatives is a dead end: {urls}"
+    assert "wrongorg/wrongrepo" in urls[0], (
+        f"the guess must stay FIRST — one Enter for the common case: {urls[0]}")
+    assert any(UNIVERSE_ONLY in u for u in urls), (
+        f"the universe never reached the guessed picker: {urls}")
+    assert all(u.endswith("/1291") for u in urls), urls
+
+
+def test_the_guessed_row_is_NOT_offered_twice(monkeypatch):
+    """The pane's repo is usually in the universe too. Two identical rows read
+    as a rendering bug rather than as a recommendation, and the operator cannot
+    tell which one is the 'real' one — because neither is."""
+    seen = _guessed_picker(monkeypatch,
+                           universe=["wrongorg/wrongrepo", "acme/widget"])
+    urls = [c["url"] for c in seen["rows"]]
+    assert len(urls) == len(set(urls)), f"duplicate rows: {urls}"
+    assert sum("wrongorg/wrongrepo" in u for u in urls) == 1, urls
+
+
+def test_a_guessed_picker_is_NOT_described_as_nothing_here_knows(monkeypatch):
+    """🔴 THE ORDER GUARD, and it pins a defect no behavioural test can see.
+
+    After the fix BOTH `guessed` and `offered_universe` are true on this path,
+    so the note is chosen by the ORDER of two branches. `universe_note` opens
+    "nothing here knows X" — which is false here: the first row is a
+    recommendation the handler is explicitly asking about. Swap the branches and
+    the picker still shows the right rows in the right order, so only the words
+    are wrong, and only this test says so."""
+    seen = _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY])
+    assert "nothing here knows" not in seen["mesg"], seen["mesg"]
+    assert "guess" in seen["mesg"].lower(), seen["mesg"]
+    assert "tmux pane" in seen["mesg"], seen["mesg"]
+    # …and it must say the rest are SEARCHABLE, because "confirm or dismiss" —
+    # the old wording — is now false: neither is what the operator should do.
+    assert "search" in seen["mesg"].lower(), seen["mesg"]
+    _no_universe_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
+
+
+def test_the_ONE_ROW_wording_survives_for_an_EMPTY_universe(monkeypatch):
+    """⚠ The narrow wording is kept, not deleted: with no mapping file (or an
+    unreadable one) the universe is empty and a lone guessed row is still
+    reachable. "Confirm, or dismiss" is the correct instruction THERE, and
+    telling the operator to "type to search" over one row would be nonsense."""
+    seen = _guessed_picker(monkeypatch, universe=[], mapping={})
+    assert len(seen["rows"]) == 1, seen["rows"]
+    assert "Confirm, or dismiss" in seen["mesg"], seen["mesg"]
+    assert "search" not in seen["mesg"].lower(), seen["mesg"]
+
+
+def test_the_guessed_repo_is_still_NEVER_opened_unconfirmed(monkeypatch):
+    """🔴 THE SAFETY PROPERTY #1336 ADDED, RE-ASSERTED HERE because this change
+    touches the branch that enforces it. Widening the offer must not weaken the
+    rule: a repo measured from the tmux pane is evidence about the WINDOW, and
+    opening it unconfirmed is the confident-wrong-page failure the whole handler
+    is anchored against. `open_url` must not be reached without a selection."""
+    opened = []
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
+    _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY])
+    assert opened == [], f"a guessed repo was opened without a selection: {opened}"
+
+
+def test_an_EXPLICIT_owner_still_opens_directly_and_gets_NO_picker(monkeypatch):
+    """🔴 THE NEGATIVE CONTROL FOR THE WHOLE CHANGE. A rule that appended the
+    universe to every candidate would satisfy every assertion above while
+    putting a 392-row picker in front of `owner/repo#N`, which carries its own
+    evidence and must still open with zero keystrokes."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [UNIVERSE_ONLY])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    picked, opened = [], []
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="": picked.append(c) or "")
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
+    assert MO.main(["civitai/talos-infra#1065"]) == 0
+    assert picked == [], "an explicit owner must not raise a picker"
+    assert opened == ["https://github.com/civitai/talos-infra/issues/1065"], opened

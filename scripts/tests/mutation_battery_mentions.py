@@ -191,7 +191,9 @@ MUTANTS: list[tuple] = [
      "REFUSAL-PATH DISCLOSURE"),
     ("K38", "disclosure", "the same KEY leak on the PICKER path, where it rides "
                           "out on stdout instead of a toast",
+     "        # outright. Either way the operator now gets a choice instead of a toast.\n"
      "        offered_universe = True\n",
+     "        # outright. Either way the operator now gets a choice instead of a toast.\n"
      "        offered_universe = True\n"
      '        print("did you mean:", ", ".join(sorted(load_known_repos())))\n',
      "PICKER-PATH DISCLOSURE"),
@@ -286,7 +288,10 @@ MUTANTS: list[tuple] = [
     # ---- F6: OFFERED is not RESOLVED ---------------------------------------
     ("K19", "deletion", "a universe row becomes auto-openable again, so a click "
                         "on a hex colour opens an unrelated repo's issue",
-     "        offered_universe = True\n", "        offered_universe = False\n",
+     "        # outright. Either way the operator now gets a choice instead of a toast.\n"
+     "        offered_universe = True\n",
+     "        # outright. Either way the operator now gets a choice instead of a toast.\n"
+     "        offered_universe = False\n",
      "bypassing the picker"),
     ("K20", "widening", "`_OFFER_NUM_RE` loses its bound and drifts away from "
                         "the Alacritty hint regex it mirrors",
