@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: "The hosted subsystem store (pod in ns `subsystem-store`), client `cairn` on PATH — the pinned `ZacxDev/cairn` flake package, not `scripts/cairn`. Use for: `cairn doctor`, cairn sync/recall/search/ls-entries, cairn-who, a stale or unstamped store, a `cairn` exit 4, seeding the pod, a scope a token cannot reach. Writes are `subsystem-index`; pruning is `prune-index`."
+description: "The hosted subsystem store (pod in ns `subsystem-store`), client `cairn` on PATH. Use for: `cairn doctor`, cairn sync/recall/search/ls-entries, cairn-who, a stale or unstamped store, a `cairn` exit 4, seeding the pod, a scope a token cannot reach. Writes are `subsystem-index`; pruning is `prune-index`."
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
