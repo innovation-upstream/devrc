@@ -216,9 +216,16 @@ def test_the_non_pytest_targets_are_covered_and_named():
     # transforms against fixtures under a mktemp dir — an lsof header in two
     # column layouts, a planted directory name, and a large flat tree sized from
     # the live ARG_MAX. The only binaries it reaches are find/du/stat/sort/awk/sh
-    # over that mktemp dir. It does execute the script itself ONCE, to assert the
-    # non-root refusal (rc 2), which exits before the script opens a temp file or
-    # touches the filesystem.
+    # over that mktemp dir.
+    # 🔴 THIS PREVIOUSLY SAID "It does execute the script itself ONCE". Wrong,
+    # and wrong in the direction that stops a reader counting: the suite runs the
+    # interpreter on the script FIVE times on the EXECUTE path (the plain refusal
+    # check, three seam-reachability cases in §1b, and §2c's `bash -x` xtrace
+    # read) and SOURCES it ten more times, counting the four probe scripts. Every
+    # one of the five exits 2 at the root check before the script opens a temp
+    # file or touches the filesystem — that is the property this entry rests on,
+    # and it does not depend on the count. The suite now ABORTS if it is itself
+    # running as root, so the root check is always the branch those five reach.
     assert shells == [
         "scripts/tests/test_release_wrapper.sh",
         "scripts/tests/test_resume_state.sh",

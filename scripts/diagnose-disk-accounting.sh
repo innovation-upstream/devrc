@@ -168,6 +168,64 @@ _on_device() { sed -z -n "s/^$1\t//p"; }
 # stream that are NOT on device $1.
 _not_on_device() { sed -z -n "/^$1\t/!{s/^[0-9]*\t//;p;}"; }
 
+# The depth-1 enumeration all three /tmp sections share, in ONE place.
+# $1 = base, $2 = the file find's stderr is kept in, $3.. = extra find
+# predicates (`-type d` for the inode breakdown).
+#
+# 🔴 `%D` MAKES find STAT EVERY ENTRY, AND A FAILED STAT EMITS NO RECORD AT ALL.
+# The `-print0` form this replaced still printed the NAME when the stat failed;
+# `-printf '%D\t%p\0'` prints nothing, so such an entry vanishes from the size
+# breakdown AND the inode breakdown AND the foreign-entry listing at once — and
+# `foreign_entries` then affirmatively printed "none". MEASURED 2026-09-07 over
+# a mode-0400 directory holding three entries, on the two GNU findutils builds
+# this script can actually resolve, both rc 1: 4.10.0 (the system PATH, what a
+# non-interactive `bash` and therefore a `sudo` run gets) `-print0` 116 bytes /
+# `-printf '%D\t%p\0'` 0 bytes; 4.11.0 (the nix dev shell) 119 bytes / 0 bytes.
+# Not specific to one build. (Not measured on `bfs`, which is only an
+# interactive zsh alias here and never what this script runs.)
+#
+# Root is NOT immune, which is what makes this worth code rather than a note. A
+# FUSE mountpoint not mounted `allow_other` (an AppImage's /tmp/.mount_*, gvfs,
+# sshfs), or an entry on a device answering ESTALE/EIO, fails `stat` for uid 0
+# too — and /tmp is exactly where those live.
+#
+# So the stderr is KEPT, in a file, and every caller reports the count. Same
+# reason section 2's find writes to $DENIED_LOG instead of /dev/null: a scan
+# that reports a number with no denial count is a FLOOR presented as a total.
+#
+# The `|| true` here covers route (a) ONLY — find's own rc 1 — of the two aborts
+# `size_breakdown`'s comment describes. Route (b), `xargs` rc 123, happens one
+# stage later and is guarded at each caller's `xargs`.
+_depth1_nul() {
+  local base="$1" errf="$2"; shift 2
+  find "$base" -xdev -mindepth 1 -maxdepth 1 "$@" -printf '%D\t%p\0' 2>"$errf" || true
+}
+
+# How many entries the enumeration whose stderr is in $1 could not stat. ALWAYS
+# a single integer and never empty — the callers compare it with `-gt`, and the
+# `grep -c` / `|| echo 0` two-line-zero defect `report_denials` carries a
+# comment about is the same hazard one function over.
+_unstattable_count() {
+  local n
+  n=$(grep -c . "$1" 2>/dev/null; true)
+  case "$n" in ''|*[!0-9]*) echo 0 ;; *) echo "$n" ;; esac
+}
+
+# Print the blind spot the count in $1 represents, or nothing. $2 = the base
+# being measured, $3 = the stderr file. Loud on purpose: an entry that reached
+# no list is the difference between a floor and a total.
+_report_unstattable() {
+  local n="$1" base="$2" errf="$3"
+  [ "$n" -gt 0 ] || return 0
+  printf '  !! UNSTATTABLE: %d depth-1 entries of %s reached NO list above.\n' "$n" "$base"
+  printf '     Every figure for %s here is a FLOOR, not a total. First lines:\n' "$base"
+  # `|| true`: this pipeline is the LAST command of the function, so its status
+  # is the function's status, and the function is called at statement level in
+  # all three sections — i.e. the same `set -e` exposure the sweep above the
+  # executable region is about, one level of indirection down.
+  head_n 5 < "$errf" | sed 's/^/       /' || true
+}
+
 # Top-level entries of $1 that are ON $1's OWN FILESYSTEM, largest first.
 #
 # 🔴 NOT `du -sh -x "$1"/*`. MEASURED 2026-09-02: /tmp held 171,886 top-level
@@ -196,19 +254,63 @@ _not_on_device() { sed -z -n "/^$1\t/!{s/^[0-9]*\t//;p;}"; }
 # `set -e`: sections 6d-inodes, 7 and 8 never print and the report ends with no
 # error. MEASURED 2026-09-07: (a) rc 1, (b) rc 123, each reproducible on its own.
 # That is the same truncated-scan failure as E2BIG and SIGPIPE, reached by a
-# third and a fourth route. What is tolerated is per-ENTRY failure; a total
-# failure is still visible, as an empty section.
+# third and a fourth route.
+#
+# 🔴 THE GUARDS ARE PER-STAGE, AND THE CAPTURE CARRIES NONE. An earlier draft of
+# this round wrapped the whole `out=$(…)` in `|| true` instead. It works — and it
+# destroys the only thing that could tell you it works: with an outer guard,
+# DELETING any inner one changes nothing observable, and MEASURED, both `|| true`
+# mutants in the battery went WRONG-KILLER. A guard whose removal is invisible is
+# not a guard.
+#
+# 🔴 AND `sort` IS DELIBERATELY THE ONE STAGE LEFT UNGUARDED — the mirror image
+# of the same trap. `_on_device` gained a `|| true` here (the audit's note that
+# it was the one stage without one), but putting one on `sort` MEASURED as
+# breaking BOTH `sigpipe-head-closes-the-pipe` rows: the whole point of `head_n`
+# is that `sort` never takes SIGPIPE, so masking `sort`'s status is exactly what
+# makes a reinstated `head -n` invisible. What stays exposed is a `sort` that
+# fails for its OWN reasons — no space for its temp files, say — and that is the
+# same exposure the statement-level pipeline had before this round, not a new
+# one. It is listed with the other deliberate exceptions above section 1.
+#
+# 🔴 THIS COMMENT USED TO END: "What is tolerated is per-ENTRY failure; a total
+# failure is still visible, as an empty section." BOTH HALVES WERE FALSE, and
+# the round that wrote them is the round that falsified them. Per-entry failure
+# was not tolerated but SILENTLY ERASED — `-printf '%D\t%p\0'` emits no record
+# for an entry it cannot stat (see `_depth1_nul`) — and an empty section was not
+# "visible" but indistinguishable from a clean directory, because nothing said
+# which of the two it was. Both are fixed below: the stderr is counted and
+# reported, and the empty list says in words that it is empty.
+#
+# 🔴 `dev=$(…) || dev=`, NOT a bare assignment. A command substitution in an
+# assignment is a CHECKED command under `set -e`, so a failing `stat` killed the
+# whole run ON THIS LINE and the refusal below never printed — the same
+# unreachable-message defect this file records for `OUT=$(lsof …)`, reintroduced
+# by the round that added the refusal. MEASURED 2026-09-07: under the script's
+# own `set -euo pipefail`, `size_breakdown /tmp/<absent>` exited 1 having
+# printed nothing at all. The suite could not see it: a suite that sources this
+# file must turn `set -e` back OFF to run, so it took the refusal branch either
+# way. The probe in section 4c of the suite runs `set -e` for real.
 size_breakdown() {
-  local base="$1" dev
-  dev=$(_dev_of "$base")
+  local base="$1" dev errf blind out
+  dev=$(_dev_of "$base") || dev=
   if ! _dev_is_valid "$dev"; then
-    echo "COULD NOT MEASURE: no device id for $base — NOT an empty directory"
+    echo "COULD NOT MEASURE: no device id for $base — NOT an empty directory (size breakdown)"
     return 0
   fi
-  { find "$base" -xdev -mindepth 1 -maxdepth 1 -printf '%D\t%p\0' 2>/dev/null || true; } \
-    | _on_device "$dev" \
+  errf=$(mktemp) || { echo "COULD NOT MEASURE: no temp file for $base's size breakdown"; return 0; }
+  out=$(_depth1_nul "$base" "$errf" \
+    | { _on_device "$dev" || true; } \
     | { xargs -0 -r du -sh -x 2>/dev/null || true; } \
-    | sort -rh | head_n 15
+    | sort -rh | head_n 15)
+  blind=$(_unstattable_count "$errf") || blind=0
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out"
+  else
+    echo "  none — no depth-1 entry of $base is on $base's own filesystem (NOT zero bytes)"
+  fi
+  _report_unstattable "$blind" "$base" "$errf"
+  rm -f "$errf"
 }
 
 # Inode count per top-level DIRECTORY of $1 that is on $1's OWN filesystem,
@@ -238,16 +340,25 @@ size_breakdown() {
 # The device filter and the two `|| true`s are the same two defects as
 # `size_breakdown` above; read its comment.
 inode_breakdown() {
-  local base="$1" dev
-  dev=$(_dev_of "$base")
+  local base="$1" dev errf blind out
+  dev=$(_dev_of "$base") || dev=
   if ! _dev_is_valid "$dev"; then
-    echo "COULD NOT MEASURE: no device id for $base — NOT an empty directory"
+    echo "COULD NOT MEASURE: no device id for $base — NOT an empty directory (inode breakdown)"
     return 0
   fi
-  { find "$base" -xdev -mindepth 1 -maxdepth 1 -type d -printf '%D\t%p\0' 2>/dev/null || true; } \
-    | _on_device "$dev" \
+  errf=$(mktemp) || { echo "COULD NOT MEASURE: no temp file for $base's inode breakdown"; return 0; }
+  out=$(_depth1_nul "$base" "$errf" -type d \
+    | { _on_device "$dev" || true; } \
     | { xargs -0 -r -n1 sh -c 'printf "%12d  %s\n" "$(find "$1" -xdev -printf . 2>/dev/null | wc -c)" "$1"' _ || true; } \
-    | sort -rn | head_n 15
+    | sort -rn | head_n 15)
+  blind=$(_unstattable_count "$errf") || blind=0
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out"
+  else
+    echo "  none — no depth-1 DIRECTORY of $base is on $base's own filesystem (NOT zero inodes)"
+  fi
+  _report_unstattable "$blind" "$base" "$errf"
+  rm -f "$errf"
 }
 
 # The depth-1 entries of $1 that the two breakdowns above SKIPPED, because they
@@ -259,20 +370,43 @@ inode_breakdown() {
 # a total. Section 6c already prints the same listing for /home, and its "none
 # found" branch is deliberately loud for the same reason. A section that drops
 # what it could not count without saying so is worse than one that never tried.
+#
+# 🔴 ONE ROW PER NUL RECORD — never `tr '\0' '\n' | head_n 15`, which is what
+# this function was written with in round 1. It reintroduced, in the same
+# commit that fixed it
+# for `split_by_device`, the defect `report_foreign_mounts` reads its list with
+# `read -r -d ''` to avoid: /tmp is mode 1777, so any local process can create a
+# directory whose name contains a newline, `tr` turns it into two report rows —
+# the second of which reads as a real path — and `head_n`, which counts LINES,
+# lets that one name eat two of the fifteen slots.
+#
+# 🔴 AND THE "none" BRANCH MUST NOT OUTRANK ITS OWN BLIND SPOT. An entry find
+# could not stat is absent from this listing too (see `_depth1_nul`), so "none"
+# is only honest when the enumeration saw everything. When it did not, say so.
 foreign_entries() {
-  local base="$1" dev out
-  dev=$(_dev_of "$base")
+  local base="$1" dev errf blind p n=0
+  dev=$(_dev_of "$base") || dev=
   if ! _dev_is_valid "$dev"; then
     echo "  COULD NOT MEASURE: no device id for $base — NOT an absence of foreign mounts"
     return 0
   fi
-  out=$({ find "$base" -xdev -mindepth 1 -maxdepth 1 -printf '%D\t%p\0' 2>/dev/null || true; } \
-        | _not_on_device "$dev" | tr '\0' '\n' | head_n 15)
-  if [ -n "$out" ]; then
-    printf '%s\n' "$out" | sed 's/^/  /'
-  else
-    echo "  none — every depth-1 entry is on the same filesystem as $base"
+  errf=$(mktemp) || { echo "  COULD NOT MEASURE: no temp file for $base's foreign-entry listing"; return 0; }
+  while IFS= read -r -d '' p; do
+    n=$((n + 1))
+    [ "$n" -gt 15 ] || printf '  %s\n' "$p"
+  done < <(_depth1_nul "$base" "$errf" | _not_on_device "$dev")
+  blind=$(_unstattable_count "$errf") || blind=0
+  if [ "$n" -gt 15 ]; then
+    printf '  ... and %d more\n' "$((n - 15))"
+  elif [ "$n" -eq 0 ]; then
+    if [ "$blind" -gt 0 ]; then
+      echo "  none VISIBLE — and the line below says why that is NOT 'no foreign mounts'"
+    else
+      echo "  none — every depth-1 entry is on the same filesystem as $base"
+    fi
   fi
+  _report_unstattable "$blind" "$base" "$errf"
+  rm -f "$errf"
 }
 
 # Partition the directories under $1 by filesystem: on-root candidates into $2,
@@ -354,7 +488,7 @@ report_denials() {
   echo "OTHER, unclassified                  : $unclassified"
   if [ "$denied" -gt 0 ]; then
     echo "!! Running as root and STILL denied — the counts above are FLOORS, not totals."
-    grep 'Permission denied' "$log" | head_n 20
+    grep 'Permission denied' "$log" | head_n 20 || true
   fi
   if [ "$unclassified" -gt 0 ]; then
     echo "-- unclassified errors (read these; they are not known-benign) --"
@@ -378,6 +512,32 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 2
 fi
 
+# 🔴 THE `set -e` SWEEP, AND WHAT IT DELIBERATELY LEAVES OPEN. Twice now an
+# enumeration of "commands whose failure kills the report" was done BY EYE and
+# missed a site (round 1 covered the pipelines and missed section 5's bare
+# `du -sh`). It is now done mechanically: join backslash continuations, then
+# take every line in this file whose first word is one of
+# find/du/ls/dumpe2fs/findmnt/lsof/stat/xargs/grep/sed/sort/uniq/wc/tr/awk/
+# mktemp/date/seq/dd/id, plus every `VAR=$(…)`, and require a `||` (or a
+# trailing `; true` inside the substitution, which has the same effect).
+# Everything that scan reports is guarded above EXCEPT these, each checked by
+# hand and left open on purpose:
+#   * `X=$((…))` — MEASURED: an arithmetic assignment is rc 0 even when the
+#     expression evaluates to 0, so it is not in the class at all.
+#   * `read … < <(find … | awk …)` in section 2 — MEASURED: a process
+#     substitution's status is NOT checked by `set -e`, which is why denials in
+#     section 2 do not kill the run.
+#   * `out=$(… | sort … | head_n …)` in the two breakdowns — every stage but
+#     `sort` carries its own `|| true`, and `sort` deliberately does not; the
+#     reason, and what it measured, is in `size_breakdown`'s comment. What is
+#     exposed is a `sort` that fails for its own reasons (no space for its temp
+#     files), which is the same exposure the statement-level pipeline had before
+#     this round rather than a new one.
+#   * `DENIED_LOG=$(mktemp …)` and the five `stat -f` reads in section 1 — these
+#     abort BEFORE any figure is printed, so they cannot leave a floor looking
+#     like a total. They end the run with a blank report, which is wrong-looking
+#     rather than reassuring. That is the criterion, and it is the only reason
+#     they are not guarded.
 DEV=${DEV:-/dev/nvme0n1p2}
 DENIED_LOG=$(mktemp /tmp/disk-accounting-denied.XXXXXX)
 trap 'rm -f "$DENIED_LOG"' EXIT
@@ -401,8 +561,18 @@ printf 'blocks used     : %d  (%.1f GiB)\n' "$BLOCKS_USED" "$(echo "$BLOCKS_USED
 printf 'inodes used     : %d\n' "$INODES_USED"
 echo
 echo "--- static ext4 metadata (this is the ONLY 'overhead' that is not files) ---"
-dumpe2fs -h "$DEV" 2>/dev/null | grep -iE 'Inode size|Inode count|Block count|Reserved block count|Journal size|Filesystem state|Last checked'
-INODE_SIZE=$(dumpe2fs -h "$DEV" 2>/dev/null | awk -F: '/^Inode size/{gsub(/ /,"",$2);print $2}')
+# 🔴 `|| echo`, NOT a bare pipeline. `$DEV` is a GUESS (`/dev/nvme0n1p2` unless
+# the caller overrides it) and `grep` exits 1 when nothing matches, so on a host
+# where the guess is wrong — or where dumpe2fs is not installed — this pipeline
+# returns 1, `set -e` kills the run HERE, and the operator is left holding the
+# "blocks used / inodes used" figures printed three lines above with sections
+# 2-8 missing and no error. MEASURED 2026-09-07 in an isolated probe of these
+# two lines with `DEV=/dev/nope-xyz`: the pipeline returned 1 under
+# `set -euo pipefail` and the next statement never ran. Same class as the
+# `du -sh` in section 5 below.
+dumpe2fs -h "$DEV" 2>/dev/null | grep -iE 'Inode size|Inode count|Block count|Reserved block count|Journal size|Filesystem state|Last checked' \
+  || echo "COULD NOT MEASURE: dumpe2fs read no ext4 superblock fields from $DEV — set DEV=<device> if that is the wrong partition"
+INODE_SIZE=$(dumpe2fs -h "$DEV" 2>/dev/null | awk -F: '/^Inode size/{gsub(/ /,"",$2);print $2}') || INODE_SIZE=
 if [ -n "${INODE_SIZE:-}" ]; then
   echo "$INODES_TOTAL $INODE_SIZE" | awk '{printf "inode TABLES    : %.1f GiB (preallocated, counted as used blocks)\n", $1*$2/1073741824}'
 fi
@@ -438,7 +608,7 @@ for d in /*; do
         }
         END {print n+0, b+0, dup+0}'
   )
-  gib=$(echo "$blocks" | awk '{printf "%.1f", $1*512/1073741824}')
+  gib=$(echo "$blocks" | awk '{printf "%.1f", $1*512/1073741824}') || gib=
   printf '%14d %12s %10d  %s\n' "$n" "$gib" "$dups" "$d"
   TOTAL_INODES=$((TOTAL_INODES + n))
   TOTAL_DEDUPED=$((TOTAL_DEDUPED + dups))
@@ -485,7 +655,16 @@ if [ -d /var/lib/rancher/k3s/storage ]; then
   { find /var/lib/rancher/k3s/storage -xdev -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true; } \
     | { xargs -0 -r du -sh --exclude=/mnt 2>/dev/null || true; } | sort -rh | head_n 30
   echo "--- total ---"
-  du -sh /var/lib/rancher/k3s/storage 2>/dev/null
+  # 🔴 `|| echo`, NOT a bare `du`. This site sat directly under the two guarded
+  # pipelines above, under a comment that described the treatment it did not
+  # have. `du` prints an UNDER-COUNTED total and exits 1 when a PVC directory is
+  # unlinked between readdir and stat, or is simply unreadable — MEASURED
+  # 2026-09-07 over a directory holding a mode-000 subdirectory: `12K` printed,
+  # rc 1 — and with the message already at /dev/null `set -e` then killed the
+  # run, so sections 6, 6b, 6c, 6d, 7 and 8 never printed. A floor presented as
+  # a total, and then no error. The `|| echo` labels the floor as one.
+  du -sh /var/lib/rancher/k3s/storage 2>/dev/null \
+    || echo "COULD NOT MEASURE: du failed under /var/lib/rancher/k3s/storage — any total it printed is a FLOOR"
   echo "--- inodes per PVC (top 15) ---"
   for p in /var/lib/rancher/k3s/storage/*; do
     [ -d "$p" ] || continue
@@ -519,7 +698,17 @@ echo "=== 6c. /home breakdown — ROOT FILESYSTEM ONLY (top 15 by allocated size
 # The device split and the foreign listing both live in `split_by_device` /
 # `report_foreign_mounts` above; read their comments for the `du -x` and
 # subshell-accumulator defects they exist to prevent.
-ROOT_DEV=$(_dev_of /)
+# `|| ROOT_DEV=` then a digits check, for the reason `size_breakdown` carries a
+# comment about: a bare `VAR=$(…)` is a CHECKED command under `set -e`, so a
+# failing `stat` would kill the run here rather than reach a refusal. An EMPTY
+# root device is worse than no section — `split_by_device` compares each
+# candidate against it, so every directory under /home would come back "foreign"
+# and 6c would print a confident list of foreign mounts that are nothing of the
+# kind.
+ROOT_DEV=$(_dev_of /) || ROOT_DEV=
+if ! _dev_is_valid "$ROOT_DEV"; then
+  echo "COULD NOT MEASURE: no device id for / — skipping 6c rather than calling every /home directory foreign"
+else
 # Create BOTH before widening the trap: if the second mktemp failed while the trap
 # still named only $DENIED_LOG, the first temp file leaked on that exit path.
 ONROOT_LIST=$(mktemp) && FOREIGN_LIST=$(mktemp) || { rm -f "${ONROOT_LIST:-}"; exit 3; }
@@ -531,6 +720,7 @@ split_by_device /home "$ONROOT_LIST" "$FOREIGN_LIST" "$ROOT_DEV"
 { xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>/dev/null || true; } | sort -rh | head_n 15
 echo "--- NOT on the root filesystem, so NOT part of this accounting ---"
 report_foreign_mounts "$FOREIGN_LIST"
+fi
 
 echo
 echo "=== 6d. /tmp breakdown — MEASURED 2026-09-01 as the largest inode consumer ==="
@@ -541,11 +731,20 @@ echo "--- top 15 by allocated size ---"
 size_breakdown /tmp
 echo "--- top 15 by inode count ---"
 inode_breakdown /tmp
-echo "--- NOT on the root filesystem, so EXCLUDED from the two lists above ---"
+# 🔴 "NOT on /TMP'S OWN filesystem", not "not on the root filesystem". The three
+# helpers above compare each entry against `stat -c '%d' /tmp`, NOT against
+# $ROOT_DEV, so on a host where /tmp is its own mount this heading named the
+# wrong filesystem. (On the host this targets they are the same device — 6d's
+# own text says /tmp is on the root partition — which is exactly why a wrong
+# heading here could sit unnoticed.)
+echo "--- NOT on /tmp's own filesystem, so EXCLUDED from the two lists above ---"
 foreign_entries /tmp
 echo "--- entry-name families (what is generating them) ---"
-ls -A /tmp 2>/dev/null | sed -E 's/[0-9]{3,}.*$//; s/[A-Za-z0-9]{8,}$//' \
-  | sort | uniq -c | sort -rn | head_n 20
+# `|| true` for the same reason as section 5's `du`: `ls` exits 2 if /tmp cannot
+# be read, `pipefail` promotes it and `set -e` would end the report one line
+# before section 7. Found by the same mechanical sweep, not by eye.
+{ ls -A /tmp 2>/dev/null | sed -E 's/[0-9]{3,}.*$//; s/[A-Za-z0-9]{8,}$//' \
+  | sort | uniq -c | sort -rn | head_n 20; } || true
 
 echo
 echo "=== 7. Deleted-but-open files ==="

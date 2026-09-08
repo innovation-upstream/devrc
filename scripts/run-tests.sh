@@ -3940,16 +3940,24 @@ SHELL_TESTS=(
   # "the gate is bypassed".
   "scripts/tests/test_cleanup_disk_gate.sh"
   # Registered in the SAME commit that adds it, for the reason the entries above
-  # exist. It covers `scripts/diagnose-disk-accounting.sh` — 282 lines of
-  # ROOT-PRIVILEGED bash that had no test file at all, in a repo with no
-  # shellcheck gate, which is precisely why a root COMMAND INJECTION (a planted
-  # /tmp directory name reaching `xargs -I{} sh -c`) and two silent
-  # whole-run aborts shipped invisibly. Nothing in it needs root: the script was
-  # given a sourceable seam (BASH_SOURCE[0] != $0 returns before the root check)
-  # and the suite drives the pure transforms against fixtures — an lsof header
-  # in two different column layouts, a directory literally named
-  # `evil";echo PWNED-AS-$(id -un) >&2;"x`, and a ~17,500-entry tree sized from
-  # the live ARG_MAX. It reaches no launcher, no network and no git.
+  # exist. It covers `scripts/diagnose-disk-accounting.sh` — ROOT-PRIVILEGED
+  # bash that had no test file at all, in a repo with no shellcheck gate, which
+  # is precisely why a root COMMAND INJECTION (a planted /tmp directory name
+  # reaching `xargs -I{} sh -c`) and two silent whole-run aborts shipped
+  # invisibly. Nothing in it needs root: the script has a sourceable seam that
+  # returns before the root check, and the suite drives the pure transforms
+  # against fixtures — an lsof header in two different column layouts, a
+  # directory literally named `evil";echo PWNED-AS-$(id -un) >&2;"x`, and a
+  # ~17,500-entry tree sized from the live ARG_MAX. It reaches no launcher, no
+  # network and no git.
+  # 🔴 THIS COMMENT PREVIOUSLY SAID "282 lines" and described the seam as
+  # `BASH_SOURCE[0] != $0 returns before the root check`. Both were stale: 282
+  # was the count at the merge base (567 after round 1, 730 after round 2), and
+  # that BASH_SOURCE expression was MEASURED reachable from the environment,
+  # removed, and is now a banned pattern in the suite's own scanner — which only
+  # reads `diagnose-disk-accounting.sh`, so this copy survived it. A stale
+  # justification is why the wrong number is quoted downstream, so no line count
+  # is stated here at all any more.
   # Watched red: `s += $col` -> `s += $8` fails it with "SIZE/OFF found at col 7".
   "scripts/tests/test_diagnose_disk_accounting.sh"
 )

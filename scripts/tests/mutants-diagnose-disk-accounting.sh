@@ -193,13 +193,22 @@ run inject-xargs-I-substitution \
   '    | { xargs -0 -I{} sh -c '"'"'printf "%12d  %s\n" "$(find "{}" -xdev -printf . 2>/dev/null | wc -c)" "{}"'"'"' || true; } \'
 
 # --- defect 3: E2BIG --------------------------------------------------------
+# 🔴 THE KILLER MOVED, AND SAYING WHY IS THE POINT. It used to be
+# `size_breakdown exited`: the glob died E2BIG, the failure was the LAST thing
+# the function did, so its rc reached the caller. Round 2 put the pipeline in a
+# `out=$(…)` capture with four statements after it, so the function now returns
+# `rm`'s 0 whatever the pipeline did, and no rc assertion can ever see this
+# mutant. What it CANNOT do any more is quietly return a truncated list: the
+# empty `out` prints the explicit "none" line and the row-count guard sees 1 row
+# where it demands 15. MEASURED WRONG-KILLER under the old name, 15 FAIL lines,
+# none of them the rc one.
 run e2big-glob-expanded-into-du \
-  'size_breakdown exited' \
-  '  { find "$base" -xdev -mindepth 1 -maxdepth 1 -printf '"'"'%D\t%p\0'"'"' 2>/dev/null || true; } \
-    | _on_device "$dev" \
+  'size_breakdown returned' \
+  '  out=$(_depth1_nul "$base" "$errf" \
+    | { _on_device "$dev" || true; } \
     | { xargs -0 -r du -sh -x 2>/dev/null || true; } \
-    | sort -rh | head_n 15' \
-  '  du -sh -x "$base"/* 2>/dev/null | sort -rh | head_n 15'
+    | sort -rh | head_n 15)' \
+  '  out=$(du -sh -x "$base"/* 2>/dev/null | sort -rh | head_n 15)'
 
 # --- the SIGPIPE route to the same "truncated scan" failure ------------------
 # 🔴 TWO ROWS, ONE MUTATION. `head_n` is shared, so a single edit breaks both
@@ -249,52 +258,161 @@ run head-short-form-15 \
 # "something" is tolerated; each row removes exactly one, and the two are killed
 # by fixtures that isolate one stage each (0400 dir -> find rc 1 with output;
 # mode-000 subdirectory -> du rc 1 -> xargs rc 123, find rc 0).
-run find-error-aborts-the-run \
+# 🔴 ONE ROW, NOT TWO. There used to be `find-error-aborts-the-run` and
+# `inode-find-error-aborts-the-run`, one per breakdown. Round 2 consolidated the
+# three depth-1 enumerations into `_depth1_nul` — a predicate open-coded at three
+# sites was wrong at all three — so there is now ONE `|| true` to remove and one
+# mutant that removes it. Two rows applying the identical edit would have looked
+# like twice the coverage.
+run depth1-find-error-aborts-the-run \
   'a failing find/du aborted the run' \
-  '  { find "$base" -xdev -mindepth 1 -maxdepth 1 -printf '"'"'%D\t%p\0'"'"' 2>/dev/null || true; } \
-    | _on_device "$dev" \
-    | { xargs -0 -r du -sh -x 2>/dev/null || true; } \' \
-  '  find "$base" -xdev -mindepth 1 -maxdepth 1 -printf '"'"'%D\t%p\0'"'"' 2>/dev/null \
-    | _on_device "$dev" \
-    | { xargs -0 -r du -sh -x 2>/dev/null || true; } \'
+  '  find "$base" -xdev -mindepth 1 -maxdepth 1 "$@" -printf '"'"'%D\t%p\0'"'"' 2>"$errf" || true' \
+  '  find "$base" -xdev -mindepth 1 -maxdepth 1 "$@" -printf '"'"'%D\t%p\0'"'"' 2>"$errf"'
 
 run du-failure-aborts-the-run \
   'a failing find/du aborted the run' \
   '    | { xargs -0 -r du -sh -x 2>/dev/null || true; } \
-    | sort -rh | head_n 15' \
+    | sort -rh | head_n 15)' \
   '    | xargs -0 -r du -sh -x 2>/dev/null \
-    | sort -rh | head_n 15'
+    | sort -rh | head_n 15)'
 
-run inode-find-error-aborts-the-run \
-  'a failing find/du aborted the run' \
-  '  { find "$base" -xdev -mindepth 1 -maxdepth 1 -type d -printf '"'"'%D\t%p\0'"'"' 2>/dev/null || true; } \' \
-  '  find "$base" -xdev -mindepth 1 -maxdepth 1 -type d -printf '"'"'%D\t%p\0'"'"' 2>/dev/null \'
+# 🔴 THE F-1 MUTANT, and the one the round-1 fix would have SURVIVED. `%D` makes
+# find stat every entry; with the stderr at /dev/null an entry it cannot stat is
+# erased from all three sections at once and `foreign_entries` says "none".
+run depth1-stderr-discarded \
+  'route (a): size_breakdown COUNTS the entries it could not stat' \
+  'find "$base" -xdev -mindepth 1 -maxdepth 1 "$@" -printf '"'"'%D\t%p\0'"'"' 2>"$errf" || true' \
+  'find "$base" -xdev -mindepth 1 -maxdepth 1 "$@" -printf '"'"'%D\t%p\0'"'"' 2>/dev/null || true'
+
+run unstattable-count-pinned-to-zero \
+  'route (a): foreign_entries COUNTS the entries it could not stat' \
+  '  n=$(grep -c . "$1" 2>/dev/null; true)' \
+  '  n=0'
+
+run unstattable-report-suppressed \
+  'route (a): inode_breakdown COUNTS the entries it could not stat' \
+  '  [ "$n" -gt 0 ] || return 0' \
+  '  [ "$n" -gt 0 ] && return 0'
+
+# 🔴 THE AFFIRMATIVE "none" OVER A BLIND SCAN — the sentence the round-1 report
+# printed while three entries were missing from every list.
+run foreign-none-outranks-its-blind-spot \
+  'route (a): foreign_entries does NOT claim every entry is on the same filesystem' \
+  '    if [ "$blind" -gt 0 ]; then' \
+  '    if false; then'
+
+# The F-3 shape, restored verbatim: a `tr`-flattened stream indented per LINE.
+# 🔴 The killer is the guard's FAIL text, not its `pass` text — the two are
+# worded differently here, and this row was scored WRONG-KILLER first time round
+# for exactly that reason, which is the SECOND time this file has made that
+# mistake (see `foreign-list-one-per-line` below).
+run foreign-entries-tr-flattened \
+  'foreign_entries emitted' \
+  '  while IFS= read -r -d '"''"' p; do
+    n=$((n + 1))
+    [ "$n" -gt 15 ] || printf '"'"'  %s\n'"'"' "$p"
+  done < <(_depth1_nul "$base" "$errf" | _not_on_device "$dev")' \
+  '  out=$(_depth1_nul "$base" "$errf" | _not_on_device "$dev" | tr '"'"'\0'"'"' '"'"'\n'"'"' | head_n 15)
+  [ -z "$out" ] || { printf '"'"'%s\n'"'"' "$out" | sed '"'"'s/^/  /'"'"'; n=1; }'
+
+# 🔴 THE CHECKED ASSIGNMENT. Three sites share the shape, so the mutation
+# carries the line BELOW it to stay a single occurrence and to keep the edit
+# inside `size_breakdown` alone.
+run dev-assignment-rearms-set-e \
+  'an unreadable base killed the run under set -e' \
+  '  dev=$(_dev_of "$base") || dev=
+  if ! _dev_is_valid "$dev"; then
+    echo "COULD NOT MEASURE: no device id for $base — NOT an empty directory (size breakdown)"' \
+  '  dev=$(_dev_of "$base")
+  if ! _dev_is_valid "$dev"; then
+    echo "COULD NOT MEASURE: no device id for $base — NOT an empty directory (size breakdown)"'
+
+# An empty list must SAY it is empty; printing nothing is what a non-measurement
+# also does, and "an empty section is still visible" was a false claim.
+run size-empty-list-prints-nothing \
+  'size_breakdown SAYS its list is empty rather than printing nothing' \
+  '    echo "  none — no depth-1 entry of $base is on $base'"'"'s own filesystem (NOT zero bytes)"' \
+  '    :'
+
+run inode-empty-list-prints-nothing \
+  'inode_breakdown SAYS its list is empty rather than printing nothing' \
+  '    echo "  none — no depth-1 DIRECTORY of $base is on $base'"'"'s own filesystem (NOT zero inodes)"' \
+  '    :'
+
+# --- the `set -e` sweep: unguarded statements in the ROOT-ONLY region ---------
+# 🔴 These three sites cannot be reached without root, so they are scored on
+# STRUCTURAL guards — the `required` rows and section 7b's sweep. That is
+# labelled here rather than left for a reader to assume: the behaviour is
+# measured in section 4b (route (b)) and in the probes above; what these rows
+# prove is that the pins actually fire.
+run k3s-du-total-unguarded \
+  "section 5's du TOTAL is guarded, not bare" \
+  '  du -sh /var/lib/rancher/k3s/storage 2>/dev/null \
+    || echo "COULD NOT MEASURE: du failed under /var/lib/rancher/k3s/storage — any total it printed is a FLOOR"' \
+  '  du -sh /var/lib/rancher/k3s/storage 2>/dev/null'
+
+run dumpe2fs-pipeline-unguarded \
+  "section 1's dumpe2fs pipeline is guarded" \
+  'Last checked'"'"' \
+  || echo "COULD NOT MEASURE: dumpe2fs read no ext4 superblock fields from $DEV — set DEV=<device> if that is the wrong partition"' \
+  'Last checked'"'"
+
+# 🔴 THE ONE THE `required` TABLE DOES NOT PIN — only the 7b sweep sees it, which
+# is the whole reason 7b exists rather than a tenth `required` row.
+run tmp-name-families-unguarded \
+  'the set -e sweep found' \
+  '{ ls -A /tmp 2>/dev/null | sed -E '"'"'s/[0-9]{3,}.*$//; s/[A-Za-z0-9]{8,}$//'"'"' \
+  | sort | uniq -c | sort -rn | head_n 20; } || true' \
+  'ls -A /tmp 2>/dev/null | sed -E '"'"'s/[0-9]{3,}.*$//; s/[A-Za-z0-9]{8,}$//'"'"' \
+  | sort | uniq -c | sort -rn | head_n 20'
+
+# --- the record-counted truncation that replaced `head_n 15` ------------------
+# 🔴 NEW EXPRESSION, NEW MUTANTS. `head_n 15` counted LINES; the loop counts
+# RECORDS, which is a different thing that can be off by one or forget to say it
+# truncated — and a listing that stops at 15 without saying so is the same
+# floor-presented-as-a-total this file is about.
+run foreign-truncation-off-by-one \
+  '20 foreign entries printed' \
+  '    [ "$n" -gt 15 ] || printf '"'"'  %s\n'"'"' "$p"' \
+  '    [ "$n" -gt 16 ] || printf '"'"'  %s\n'"'"' "$p"'
+
+run foreign-truncation-not-stated \
+  'the truncation is STATED, not silent' \
+  '  if [ "$n" -gt 15 ]; then
+    printf '"'"'  ... and %d more\n'"'"' "$((n - 15))"' \
+  '  if false; then
+    printf '"'"'  ... and %d more\n'"'"' "$((n - 15))"'
+
+run root-dev-reading-unguarded \
+  'the root device reading cannot kill the run' \
+  'ROOT_DEV=$(_dev_of /) || ROOT_DEV=' \
+  'ROOT_DEV=$(_dev_of /)'
 
 # --- defect 7, the /tmp half: -xdev LISTS a foreign mountpoint at depth 1 -----
 run tmp-size-device-filter-dropped \
   'size_breakdown DROPS every entry on a foreign device' \
-  '  { find "$base" -xdev -mindepth 1 -maxdepth 1 -printf '"'"'%D\t%p\0'"'"' 2>/dev/null || true; } \
-    | _on_device "$dev" \' \
-  '  { find "$base" -xdev -mindepth 1 -maxdepth 1 -printf '"'"'%D\t%p\0'"'"' 2>/dev/null || true; } \
-    | sed -z -n '"'"'s/^[0-9]*\t//p'"'"' \'
+  '  out=$(_depth1_nul "$base" "$errf" \
+    | { _on_device "$dev" || true; } \' \
+  '  out=$(_depth1_nul "$base" "$errf" \
+    | { sed -z -n '"'"'s/^[0-9]*\t//p'"'"' || true; } \'
 
 run tmp-inode-device-filter-dropped \
   'inode_breakdown DROPS every directory on a foreign device' \
-  '  { find "$base" -xdev -mindepth 1 -maxdepth 1 -type d -printf '"'"'%D\t%p\0'"'"' 2>/dev/null || true; } \
-    | _on_device "$dev" \' \
-  '  { find "$base" -xdev -mindepth 1 -maxdepth 1 -type d -printf '"'"'%D\t%p\0'"'"' 2>/dev/null || true; } \
-    | sed -z -n '"'"'s/^[0-9]*\t//p'"'"' \'
+  '  out=$(_depth1_nul "$base" "$errf" -type d \
+    | { _on_device "$dev" || true; } \' \
+  '  out=$(_depth1_nul "$base" "$errf" -type d \
+    | { sed -z -n '"'"'s/^[0-9]*\t//p'"'"' || true; } \'
 
 # 🔴 STRUCTURAL PIN, and it is labelled as one. A second filesystem needs root,
 # so `du -x` cannot be checked behaviourally in this suite; a mutant dropping it
 # SURVIVED before the `required` row was added.
 run du-x-dropped-from-the-tmp-breakdown \
-  'du keeps -x in the /tmp size breakdown' \
+  'du keeps -x AND its || true in the /tmp size breakdown' \
   '    | { xargs -0 -r du -sh -x 2>/dev/null || true; } \' \
   '    | { xargs -0 -r du -sh 2>/dev/null || true; } \'
 
 run du-x-dropped-from-the-home-breakdown \
-  'du keeps -x in the /home size breakdown' \
+  'du keeps -x AND its || true in the /home size breakdown' \
   '{ xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>/dev/null || true; }' \
   '{ xargs -0 -r du -sh < "$ONROOT_LIST" 2>/dev/null || true; }'
 
@@ -307,13 +425,9 @@ run dev-of-returns-hex-not-decimal \
 # An empty device reading must REFUSE, not print an empty section.
 run absent-device-prints-an-empty-section \
   'an unreadable base REFUSES rather than printing an empty size section' \
-  '    echo "COULD NOT MEASURE: no device id for $base — NOT an empty directory"
-    return 0
-  fi
-  { find "$base" -xdev -mindepth 1 -maxdepth 1 -printf' \
-  '    return 0
-  fi
-  { find "$base" -xdev -mindepth 1 -maxdepth 1 -printf'
+  '    echo "COULD NOT MEASURE: no device id for $base — NOT an empty directory (size breakdown)"
+    return 0' \
+  '    return 0'
 
 # 🔴 The device filter's own blind spot: excluding a foreign mount is right,
 # excluding it SILENTLY is the failure this file catalogues. Section 6c prints
@@ -321,21 +435,18 @@ run absent-device-prints-an-empty-section \
 # need for one.
 run foreign-entries-lists-nothing \
   '6d NAMES the entries it excluded (first)' \
-  '  if [ -n "$out" ]; then
-    printf '"'"'%s\n'"'"' "$out" | sed '"'"'s/^/  /'"'"'' \
-  '  if false; then
-    printf '"'"'%s\n'"'"' "$out" | sed '"'"'s/^/  /'"'"''
+  '    [ "$n" -gt 15 ] || printf '"'"'  %s\n'"'"' "$p"' \
+  '    [ "$n" -gt 15 ] || :'
 
 run foreign-entries-inverted-filter \
   '_not_on_device is the exact complement of _on_device' \
   '_not_on_device() { sed -z -n "/^$1\t/!{s/^[0-9]*\t//;p;}"; }' \
   '_not_on_device() { sed -z -n "s/^[0-9]*\t//p"; }'
 
-run foreign-entries-none-branch-always \
+run foreign-entries-none-branch-never \
   'POSITIVE CONTROL: an all-on-device base prints the explicit' \
-  '  out=$({ find "$base" -xdev -mindepth 1 -maxdepth 1 -printf '"'"'%D\t%p\0'"'"' 2>/dev/null || true; } \
-        | _not_on_device "$dev" | tr '"'"'\0'"'"' '"'"'\n'"'"' | head_n 15)' \
-  '  out=$(printf '"'"'%s'"'"' "always-something")'
+  '  elif [ "$n" -eq 0 ]; then' \
+  '  elif false; then'
 
 # The digits predicate: it guards a value that reaches a `sed` SCRIPT.
 run dev-is-valid-accepts-anything-non-empty \
