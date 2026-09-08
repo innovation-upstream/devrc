@@ -96,10 +96,14 @@ MEASURED_ALL_TIER_A_CHARS = 11_344
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
 #
 # The ceiling sits EXACTLY ON MEASURED_TIER_A_CHARS — 0 headroom, so the next
-# tier-A addition of any size reds this gate. (It sat 254 above until
-# `civitai-app-fleet` landed; an audit found that sentence still asserting 254
-# in the present tense after the constant had moved.) The mean tier-A entry is
+# tier-A addition of any size reds this gate. The mean tier-A entry is
 # 7,617 / 22 = 346.2.
+#
+# The 254 chars of headroom this paragraph used to assert were consumed by the
+# RAISE in #1391 (7,242/7,496 -> 7,639/7,639), not by the re-base below; an
+# audit caught the sentence still asserting 254 in the present tense, and then
+# caught the first correction MISATTRIBUTING the cause to this PR. Both
+# ceilings have been at 0 headroom since #1391.
 #
 # 🔴 LOWERED 7_676 -> 7_496 later the SAME DAY, re-based again after retiring the
 # `initiatives` (tier A) and `repo-cos` (tier B) skills with their subsystems. The

@@ -8,7 +8,7 @@ nearly did.
 ## Before dispatching
 
 Run `fleet.py`. Do not write repo shape into a brief from memory — the default
-branch, the vitest project count and the guard's filename all differ between
+branch, whether the repo declares multiple vitest projects and the guard's filename all differ between
 repos and all moved during the session that discovered them.
 
 Then write **one brief file** and point every agent at it, with a short

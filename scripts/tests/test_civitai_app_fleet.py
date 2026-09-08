@@ -162,6 +162,17 @@ def test_deploy_states_contains_no_invented_members():
     }
 
 
+def test_review_states_contains_no_invented_members():
+    """🔴 The comment on REVIEW_STATES says "same standard as DEPLOY_STATES",
+    and DEPLOY_STATES' standard is provenance PLUS an exact-set pin. An audit
+    measured the gap: widening REVIEW_STATES with `queued` or `escalated`
+    SURVIVED a fully green suite, because its only guard pinned the single
+    literal `marinated`. The round closed a named hazard with a sentence; this
+    is the pin the sentence claimed.
+    """
+    assert app_state.REVIEW_STATES == {"pending", "approved", "rejected", "withdrawn"}
+
+
 def test_prose_and_header_lines_are_skipped_not_raised():
     """The CLI prints a header and trailing notes; neither is a row nor an error."""
     assert all(r["app"] != "note:" for r in rows())
@@ -361,12 +372,17 @@ def test_any_unreadable_column_sets_error_and_a_nonzero_exit(monkeypatch, tmp_pa
 
 
 def test_a_failed_fetch_is_recorded_not_shrugged_off(monkeypatch, tmp_path):
-    """A fetch that failed leaves every column describing a STALE ref, while the
-    module docstring claims the inventory cannot rot."""
+    """A fetch that failed leaves every column describing a STALE ref, so it is
+    recorded rather than shrugged off — as a `fetch` value, NOT as an `error`.
+
+    An earlier revision of this test asserted `"fetch failed" in row["error"]`,
+    which pinned the over-correction rather than the behaviour: folding it into
+    `error` made `main()` print `!!` INSTEAD of the row. See
+    `test_a_failed_fetch_does_not_discard_the_row` for the half that matters.
+    """
     ok = {**_GIT_DIR, "branch --show-current": "main", "status --porcelain": ""}
     row, _ = _fleet_row(monkeypatch, tmp_path, ok)
     assert row["fetch"] == "FAILED", row
-    assert "fetch failed" in row["error"], row
 
 
 def test_no_fetch_does_not_write_to_the_clone(monkeypatch, tmp_path):
@@ -384,14 +400,115 @@ def test_fetch_happens_by_default(monkeypatch, tmp_path):
     assert any("fetch" in c for c in fake.calls), fake.calls
 
 
-def test_vitest_projects_reports_a_class_not_an_invented_count(monkeypatch, tmp_path):
-    """The body tests for a `projects:` key, which cannot tell two from three.
-    Reporting `2` for a three-project repo would be a number asserted rather
-    than counted."""
-    ok = {**_GIT_DIR, "show origin/?:vite.config.ts": "projects: [a,b,c]"}
-    assert fleet.vitest_projects.__doc__ and "2+" in fleet.vitest_projects.__doc__
-    monkeypatch.setattr(fleet, "_RUN", _FakeGit(ok))
-    assert fleet.vitest_projects("/x", "origin/?") in {"1", "2+", fleet.UNREADABLE}
+def test_vitest_projects_distinguishes_single_from_multi(monkeypatch):
+    """🔴 The first version of this test asserted the result was in
+    {"1","2+","?"} — every value the function can return, so it was
+    tautological — plus a spelled check on the docstring. An audit mutated the
+    body to `return "1"` unconditionally and it SURVIVED a green suite, which is
+    exactly the `--project node` trap the module docstring describes: a wrong
+    filter matches nothing and RUNS nothing, reading like a passing filter.
+    """
+    multi = _FakeGit({**_GIT_DIR, "show r:vite.config.ts": "test: { projects: [a, b] }"})
+    monkeypatch.setattr(fleet, "_RUN", multi)
+    assert fleet.vitest_projects("/x", "r") == "2+"
+
+    single = _FakeGit({**_GIT_DIR, "show r:vite.config.ts": "test: { environment: 'node' }"})
+    monkeypatch.setattr(fleet, "_RUN", single)
+    assert fleet.vitest_projects("/x", "r") == "1"
+
+    monkeypatch.setattr(fleet, "_RUN", _FakeGit(_GIT_DIR))
+    assert fleet.vitest_projects("/x", "r") == fleet.UNREADABLE
+
+
+def test_checked_out_and_dirty_are_never_fabricated(monkeypatch, tmp_path):
+    """Both survived mutation after round 2 claimed to have fixed them.
+    `dirty_files: "0"` is the value `fleet.py` itself calls 'precisely the value
+    that makes a caller proceed'."""
+    ok = {**_GIT_DIR, "symbolic-ref": "refs/remotes/origin/main"}
+    row, _ = _fleet_row(monkeypatch, tmp_path, ok)
+    assert row["checked_out"] == fleet.UNREADABLE, row
+    assert row["dirty_files"] == fleet.UNREADABLE, row
+    assert row["lockstep_guard"] == fleet.UNREADABLE, row
+
+
+def test_a_failed_fetch_does_not_discard_the_row(monkeypatch, tmp_path):
+    """🔴 THE OVER-CORRECTION. Round 2 folded a failed fetch into `error`, and
+    an error row prints as a bare `!!` INSTEAD of the row — so one unreachable
+    remote collapsed all seven rows and the inventory emitted nothing. A failed
+    fetch is a staleness warning: the columns WERE read."""
+    ok = {
+        **_GIT_DIR,
+        "symbolic-ref": "refs/remotes/origin/main",
+        "branch --show-current": "main",
+        "status --porcelain": "",
+        "ls-tree --name-only origin/main:src": "manifest.test.ts",
+        "ls-tree --name-only origin/main": "pnpm-lock.yaml",
+        "show origin/main:block.manifest.json": '{"version": "1.0.0", "buildCommand": "pnpm run build"}',
+        "show origin/main:package.json": '{"version": "1.0.0"}',
+        "show origin/main:vite.config.ts": "projects: []",
+    }
+    row, _ = _fleet_row(monkeypatch, tmp_path, ok)  # every read succeeds; only fetch fails
+    assert row["fetch"] == "FAILED", row
+    assert "error" not in row, row
+    assert row["lockfile"] == "pnpm-lock.yaml", row
+
+
+def test_main_exit_code_is_nonzero_when_a_row_could_not_be_read(monkeypatch, tmp_path, capsys):
+    """🔴 `main()` had NO test, so a mutant returning 0 unconditionally survived
+    — the exact claim ('non-zero if any repo could not be inspected') that the
+    error-flag fix was made to honour."""
+    monkeypatch.setattr(fleet, "WORKSPACE", str(tmp_path))  # no repos exist here
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    assert fleet.main() == 1
+    assert "checkout missing" in capsys.readouterr().out
+
+
+def test_main_exit_code_is_zero_when_every_row_reads(monkeypatch, capsys):
+    """The positive control: without it the test above passes against a main()
+    that returns 1 unconditionally."""
+    monkeypatch.setattr(fleet, "REPOS", [])
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    assert fleet.main() == 0
+    capsys.readouterr()
+
+
+def test_no_platform_never_renders_a_real_deploy_state(monkeypatch, capsys):
+    """`-` is a REAL deploy state meaning 'no deploy for this row'. Rendering it
+    for 'not consulted' makes the two indistinguishable — and survived."""
+    monkeypatch.setattr(fleet, "REPOS", [("repo", "o/r", "an-app")])
+    monkeypatch.setattr(fleet, "inspect", lambda *a, **k: {
+        "app": "an-app", "fetch": "skipped", "default_branch": "main",
+        "checked_out": "main", "dirty_files": "0", "manifest_version": "1.0.0",
+        "package_version": "1.0.0", "build_command": "pnpm run build",
+        "lockfile": "pnpm-lock.yaml", "vitest_projects": "2+",
+        "lockstep_guard": "manifest.test",
+    })
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    fleet.main()
+    out = capsys.readouterr().out
+    assert "not-consulted" in out, out
+
+
+def test_an_unknown_platform_state_is_not_swallowed_by_fleet(monkeypatch, tmp_path):
+    """🔴 The broad `except Exception` caught UnknownState, muting the guard
+    that found `preview-live` — through the entry point the skill says to run
+    first. Neutering the re-raise left the suite GREEN, so it is pinned here."""
+    dump = tmp_path / "status.txt"
+    dump.write_text(STATUS.replace("approved   building", "approved   teleporting"))
+    monkeypatch.setenv("CIVITAI_STATUS_FILE", str(dump))
+    monkeypatch.setattr(fleet, "REPOS", [])
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch"])
+
+    # 🔴 `fleet.main()` does a plain `import app_state`, while this module loads
+    # the same file under the private name `_cvt_app_state`. Without this line
+    # those are TWO module objects with two distinct `UnknownState` classes, and
+    # `pytest.raises(app_state.UnknownState)` does not catch the one fleet
+    # raises — the test fails while the behaviour is correct. Pinning the name
+    # makes both halves the same class.
+    monkeypatch.setitem(sys.modules, "app_state", app_state)
+
+    with pytest.raises(app_state.UnknownState):
+        fleet.main()
 
 
 def test_an_absent_json_field_is_distinct_from_an_unreadable_one(monkeypatch, tmp_path):

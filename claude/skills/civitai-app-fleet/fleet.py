@@ -31,16 +31,27 @@ Usage:
 
 🔴 BY DEFAULT THIS RUNS `git fetch` IN SEVEN CLONES OTHER SESSIONS ARE STANDING
 IN. That is a write to a shared checkout, so it is stated here rather than left
-to be discovered, its result is reported per row (`fetch: ok|FAILED|skipped`),
-and `--no-fetch` turns it off. A fetch that FAILS makes every column below
-describe a stale ref, which is why it is an error rather than a shrug.
+to be discovered, and `--no-fetch` turns it off. To run without touching
+anything at all you need BOTH `--no-fetch` and `--no-platform`.
 
-Exit is non-zero if any repo could not be fully inspected — a missing checkout,
-a non-repository, an unreadable column, or a failed fetch. An earlier draft
-promised this while setting the error flag in exactly one place (`isdir`), so a
-directory whose refs were unreadable produced a full row of plausible defaults
-and exit 0; a wrapper branching on rc proceeded against repos it had read
-nothing from. Every UNREADABLE column now sets it.
+The fetch result is a column in the table and a key in `--json`
+(`fetch: ok|FAILED|skipped`), and a trailing stderr note names every row whose
+refs may be stale. `skipped` is surfaced as loudly as `FAILED` because
+`--no-fetch` produces byte-IDENTICAL staleness — an earlier round warned about
+one and left the other indistinguishable from fresh data.
+
+🔴 A FAILED FETCH DOES NOT DISCARD THE ROW. It is a staleness warning, not a
+read failure: the columns were read, they may just be old. An earlier round
+folded it into `error`, and an error row prints as a bare `!!` INSTEAD of the
+row — so a single unreachable remote collapsed all seven rows and this tool
+emitted no inventory at all. Serving probably-correct data with a caveat beats
+serving none.
+
+Exit is non-zero when a row could not be READ (missing checkout, non-repository,
+unreadable column) or when a fetch FAILED. `--no-fetch` alone does not fail: you
+asked for it. An early draft promised this while setting the flag in exactly one
+place (`isdir`), so a directory whose refs were unreadable produced a full row of
+plausible defaults and exit 0.
 """
 
 from __future__ import annotations
@@ -219,14 +230,22 @@ def inspect(directory: str, slug: str, app: str, *, fetch: bool = True) -> dict[
         }
     )
 
+    # 🔴 A FAILED FETCH IS A STALENESS WARNING, NOT AN ERROR — and the
+    # distinction is the difference between degraded data and no data.
+    #
+    # An earlier round folded it into `error`, and `main()` prints an error row
+    # as a bare `!!` line INSTEAD of the row. So one unreachable remote — no SSH
+    # agent, no network, a VPN down — collapsed every one of the seven rows to
+    # `!!`, and the tool SKILL.md says to start every bulk pass with emitted no
+    # inventory at all. The columns had all been read successfully; they were
+    # merely possibly-stale, which is exactly what the warning says. Discarding
+    # probably-correct data is a worse failure than serving it with a caveat.
+    #
+    # `error` is therefore reserved for a row that could not be READ: a missing
+    # checkout, a non-repository, or an unreadable column.
     unread = sorted(k for k, v in row.items() if v == UNREADABLE)
-    if unread or row["fetch"] == "FAILED":
-        parts = []
-        if unread:
-            parts.append("unreadable: " + ", ".join(unread))
-        if row["fetch"] == "FAILED":
-            parts.append("fetch failed (columns may be stale)")
-        row["error"] = "; ".join(parts)
+    if unread:
+        row["error"] = "unreadable: " + ", ".join(unread)
     return row
 
 
@@ -245,7 +264,7 @@ def main() -> int:
 
     if not args.no_platform:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import app_state  # noqa: PLC0415 — optional, and only when asked for
+        import app_state  # noqa: PLC0415 — imported only when the platform is consulted
 
         try:
             parsed = app_state.parse_rows(app_state.read_status())
@@ -274,7 +293,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(rows, indent=2))
     else:
-        hdr = f"{'app':<21} {'branch':<7} {'checked-out':<26} {'dirty':>5} {'ver':<9} {'build':<16} {'lock':<16} {'proj':>4} {'guard':<17} {'platform'}"
+        hdr = f"{'app':<21} {'branch':<7} {'checked-out':<26} {'dirty':>5} {'ver':<9} {'build':<16} {'lock':<16} {'proj':>4} {'guard':<17} {'fetch':<8} {'platform'}"
         print(hdr)
         print("-" * len(hdr))
         for r in rows:
@@ -288,12 +307,28 @@ def main() -> int:
                 f"{r['app']:<21} {r['default_branch']:<7} {r['checked_out'][:26]:<26} "
                 f"{r['dirty_files']:>5} {ver:<9} {r['build_command'][:16]:<16} "
                 f"{r['lockfile'][:16]:<16} {r['vitest_projects']:>4} "
+                # The fetch column exists because the docstring claimed the
+                # result was "reported per row" while the table had no such
+                # column — true of --json only. `skipped` is shown for the same
+                # reason `FAILED` is: --no-fetch produces byte-identical
+                # staleness to a failed fetch, and an earlier round warned about
+                # one while leaving the other indistinguishable from fresh data.
+                f"{r['lockstep_guard']:<17} {r['fetch']:<8} "
                 # `-` is a REAL deploy state meaning "no deploy for this row",
                 # so it must never also mean "not consulted".
-                f"{r['lockstep_guard']:<17} {r.get('platform', 'not-consulted')}"
+                f"{r.get('platform', 'not-consulted')}"
             )
 
-    return 1 if any("error" in r for r in rows) else 0
+    stale = [r["app"] for r in rows if r.get("fetch") in {"FAILED", "skipped"}]
+    if stale and not args.json:
+        why = "not fetched" if args.no_fetch else "fetch failed"
+        print(f"\nnote: {why} — refs may be stale for: {', '.join(stale)}", file=sys.stderr)
+
+    # A row that could not be READ is an error. A row that is merely possibly
+    # STALE is not — it still exits non-zero when the fetch FAILED (something
+    # went wrong) but not when --no-fetch skipped it (you asked for that).
+    failed_fetch = any(r.get("fetch") == "FAILED" for r in rows)
+    return 1 if failed_fetch or any("error" in r for r in rows) else 0
 
 
 if __name__ == "__main__":
