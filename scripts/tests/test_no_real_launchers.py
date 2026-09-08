@@ -1567,6 +1567,20 @@ def test_the_module_loader_scan_can_actually_find_something(tmp_path):
 # assembles its patterns — which keeps THIS file inside the scan's scope instead
 # of excluding it, so a real clobber added here would still be caught.
 PINNED_PATH_CLOBBERS = {
+    "test_tmux_reply_agent.py": (
+        'PA' + 'TH=os.path.dirname(tmux_exe)',
+        "task 524. The site is a FIXTURE, not a launcher: it reproduces the "
+        "systemd environment the tmux-reply-agent unit really runs under, whose "
+        "`Environment=PATH=` is deliberately coreutils+python3+tmux and contains "
+        "no `claude`. The clobber IS the thing under test — a launched tmux pane "
+        "inherited that PATH and sat on `command not found` on workbench "
+        "2026-09-07. It is safe because it overrides PATH ONLY, on a dict handed "
+        "to one subprocess.run, and points at the directory holding the real "
+        "tmux binary, so nothing is executed from an attacker-controlled path "
+        "and no launcher is reached. A fixture that did NOT clobber PATH could "
+        "not fail, which is what makes this entry load-bearing rather than "
+        "incidental.",
+    ),
     "test_session_stamp_seam.py": (
         '"PATH"' + ': str(empty_bin)',
         "an EMPTY directory in tmp_path, justified by emptiness like "
