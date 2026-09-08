@@ -20,55 +20,48 @@ is the PRIVATE proposal, not this doc.
 
 - **`ZacxDev/cairn` has SIX merged PRs and NONE open.** #1 SIGHUP hot-reload, #2 the ledger
   narrowing (`c8aee7203`), #3 `8e4ef84` (spawn-port TOCTOU), #4 `218b6c1` (the nix flake),
-  #5 `9213726` (CI floor + reload-atomicity control), and **#6 `9d58f02`
-  (2026-09-08T19:55:20Z) — rank 12, leakscan coverage derived from content.**
-  Verified by CONTENT, never ancestry: on `origin/main` `tests/leakscan.py` resolves
-  `partition_tracked_files`/`BINARY_SNIFF_BYTES` **10** times, and the only surviving
-  `TEXT_SUFFIXES` hits are prose in comments and test docstrings — the constant is gone.
-  🔴 **#6's tree WAS the merged tree**: it sat directly on `9213726` and nothing landed
-  between, so its three green checks were a claim about what actually merged.
-- 🔴 **RANK 3 HALF 2 IS CLAIMED AND IN FLIGHT BY ANOTHER SESSION — DO NOT START IT.**
-  `claim-work cairn-oss-multi-instance-3` returns **rc 10** (taken by another owner, not
-  rc 12/"already yours"), claimed 2026-09-08T13:26:46-05:00 for exactly the named slice:
-  *"pin ZacxDev/cairn as a devrc flake input and deploy the PACKAGED client
-  (packages.cairn) instead of the mkOutOfStoreSymlink. NOT the entry_shape/writer
-  consolidation — that is slice 3."* That session is live and well along: worktree
-  `~/workspace/devrc-flake-pin`, branch `feat/cairn-flake-pin`, commit `4c77daab`
-  *"deploy `cairn` from the PINNED flake package, not a symlink into this checkout"* at
-  13:59:59, **617 insertions** over `flake.nix`, `flake.lock`, `nix/home.nix`,
-  `nix/sessionVariables.nix` plus a new 334-line `scripts/tests/test_cairn_flake_pin.py`.
-  Clean tree, **unpushed, no PR yet** — which is why the closing condition still reads unmet.
-  ⚠ **SUPERSEDED 2026-09-08T22:15Z: it is now PUSHED and OPEN as devrc #1406**
-  (`feat/cairn-flake-pin`, *"deploy `cairn` from the PINNED flake package, not a fork in this
-  checkout"*), found by the pre-create `gh pr list` sweep. The two sentences above describe the
-  state hours earlier — do not read them as current, and do not conclude the slice is stalled.
-  The rank-3 CLAIM is unaffected: still held by that session, still `rc 10`, still not ours.
-- **Rank 3's closing condition re-verified NOT met 2026-09-08** (and this is expected while
-  the above is unpushed): `readlink -f ~/.local/bin/cairn` → `/home/zach/workspace/devrc/
-  scripts/cairn`, `grep -c cairn ~/workspace/devrc/flake.nix` → **0**.
+  #5 `9213726` (CI floor + reload-atomicity control), #6 `9d58f02` — rank 12, leakscan
+  coverage derived from content. Verified by CONTENT, never ancestry.
+- **devrc #1381 — ✅ MERGED `baa664e4`, DEPLOYED and VERIFIED.** `cairn who` is re-homed as
+  its own `cairn-who` binary and `unbounded_timeout_reason` extracted to
+  `scripts/lib/timeouts.py`. Three audit rounds; the ladder ended on the **ATTRIBUTION GATE**
+  (two consecutive zero-payload fix rounds), not on a clean round — every round found a defect
+  in the PREVIOUS round's fix, and none in the shipped behaviour. `ship.sh` converged BOTH
+  hosts to `39c31521`; measured after: `cairn-who` on PATH → `devrc/scripts/cairn-who`,
+  `--help` rc 0; `cairn who 42` → exit 2 on both hosts; deployed `SKILL.md` 0× `cairn who`,
+  3× `cairn-who`; `cairn doctor --no-sync` exit 10 all-OK; `ls-entries` 225 over the network.
+- **devrc #1394 — ✅ MERGED `65d8bfba`.** Records the operator decision of 2026-09-08:
+  **CONSOLIDATE ONTO THE PIN.** The fork is CLOSED; it said "unanswered" in three places and
+  all three were fixed, because one stale copy re-opens a settled question.
+- 🔴 **RANK 3 HALF 2, SLICE 2 IS CLAIMED AND IN FLIGHT — PUSHED as devrc PR #1406**
+  (`feat/cairn-flake-pin`, head `f98be263`, worktree `~/workspace/devrc-flake-pin`).
+  `claim-work cairn-oss-multi-instance-3` is HELD for exactly that slice, NOT the
+  entry_shape/writer consolidation. ⚠ **SIX FILES ARE UNCOMMITTED in that worktree** — the
+  round-1 audit fix round, which exists nowhere else. Do not delete the worktree.
+  ⚠ Earlier revisions of this doc described commit `4c77daab` as "unpushed, no PR yet"; that
+  is superseded — do not read it as current or conclude the slice stalled.
+- **#1406 has had a round-1 adversarial audit.** One 🔴 (`cairn validate` goes silent on the
+  pinned client — see the investigation block), one 🟡 (a guard that passed while deploying a
+  dangling symlink), six 🟢. All fixed in the worktree; **round 2 has NOT been run**, and by
+  the stop rule it is warranted because round 1 produced findings that needed fixing.
+- **Rank 3's closing condition re-verified NOT met 2026-09-08** — expected while #1406 is
+  open: `readlink -f ~/.local/bin/cairn` → `/home/zach/workspace/devrc/scripts/cairn`,
+  `grep -c cairn ~/workspace/devrc/flake.nix` → **0**. #1406 additionally needs a
+  `home-manager switch` after merge; unlike #1381 there is NO capability gap in the interim.
 - **Rank 12 — ✅ MERGED and CLOSED**, claim `cairn-oss-multi-instance-12` RELEASED.
-  `leakscan.py`'s coverage no longer comes from a hand-written `TEXT_SUFFIXES` set; it is
-  derived from the bytes (a NUL within the first 8000, git's own rule). Every enumerated
-  file lands in exactly one bucket — scanned, or skipped-with-a-reason — and `main` names
-  every skip in its output. **Watched on the MERGED tree, not inferred from the diff:**
-  a worktree at `origin/main` running `python3 tests/leakscan.py` printed
-  `SKIPPED tests/leakscan.py — the gate's own fixtures, exempt by name`, then
-  `38 file(s) scanned, 1 skipped`, `0 findings`, rc 0.
-- **Ranks 4, 8, 13, 15 remain unclaimed and untouched this session.** **Rank 11 re-verified
-  live and still refused** (`cairn create --scope cairn …` → rc 6, `[not-found]`).
+- **Ranks 4, 8, 13, 15 remain unclaimed and untouched.** **Rank 11 re-verified live and still
+  refused** (`cairn create --scope cairn …` → rc 6, `[not-found]`) — it is an OPERATOR action.
 - 🔴 **A cairn-built image is still NOT PUBLISHED.** #4 produces a loadable tarball; nothing
   pushes it to a registry. Rank 7 remains blocked on publication (rank 13), not buildability.
 - **No civitai instance exists.** The homelab pod still runs its own copy.
 - **Session capture** remains DESIGNED, DECIDED and MERGED as a proposal, and BUILT NOWHERE
   (`claudedocs/proposal-cairn-session-capture.md`, `e16f9609a`). Rank 8.
 - **The opencode exporter** shipped (`f58d2df04`, #1338) and still has **no caller**.
-- **devrc PR #1386 carried the previous revision of this doc; this revision is carried by the
-  PR opened from branch `docs/handoff-cairn-rank12`.**
-- **This session did NOT resolve a clawgate task.** `clawgate_handoff.sh resolve` exits **5**,
-  0 links, with its positive control green (the same endpoint returned 3 links for another
-  session). 🔴 That is NOT a clean bill of health: a wrong session id also answers 200 with an
-  empty array, so the reading cannot distinguish "touched no task" from "wrong id". No
-  `clawgate-task:` field was written.
+- **This session did NOT resolve a clawgate task.** `clawgate_handoff.sh resolve` exits **6**:
+  one linked task (#527, model-benchmarking) with role `read`, none `worked`. Filing or
+  reading a task is not doing its work, and #527 is not this effort — so **no
+  `clawgate-task:` field was written**. That is a different outcome from the previous
+  revision's exit 5 (no links at all), and neither is a clean bill of health.
 
 ## Open investigations — live diagnosis state
 
@@ -335,6 +328,33 @@ commit, which already moves `flake.nix`, `nix/home.nix` and `nix/sessionVariable
 **Re-measure the client and library diffs AFTER that lands**, not before — a measurement
 taken now describes a tree that is about to change.
 
+### `cairn validate` prints nothing on the PINNED client — fixed in the worktree, NOT committed, and the class is still open
+- **Symptom + exact repro:** after #1406 merges and a `home-manager switch`, the mandated
+  post-write check in `subsystem-index` returns exit 0 and prints only a state banner.
+  Repro: `CAIRN_MIRROR_ROOT=$HOME/.claude/analyze-service-index
+  /nix/store/5zlb4zpk91b2ypppadg1d80s7y3wanh8-cairn-9213726/bin/cairn validate --scope devrc --no-sync`
+  against `python3 ~/workspace/devrc/scripts/cairn validate --scope devrc --no-sync`.
+- **Observed (with values):** packaged client **rc 0, 76 bytes, 0 contract blocks**; the
+  in-repo fork **rc 0, 5,842 bytes, 4 blocks**. The writer invoked directly
+  (`subsystem_touch.py --store ~/.cache/subsystem-store --validate --scope devrc`) gives
+  **rc 0, 5,765 bytes**, `entry shape:` / `marker reachability:` / `dropped lines:` and
+  `OK — 31 of 31`. The OSS client reimplements `validate` on the reader's resolver instead of
+  shelling the writer. via: measurement
+- **Ruled out:** that anything programmatic breaks — the only caller is a human via the
+  skill; every script, hook, skill and systemd unit was grepped. via: command
+- **Ruled out:** that the exit-code change 3 → 5 is a regression — `3` is
+  `EXIT_UNREACHABLE_NO_CACHE` in the client's own table and `5` is `EXIT_CORRUPT`, so the
+  fork was leaking the writer's namespace and the packaged code is more coherent. via: code
+- **Leading hypothesis:** RESOLVED for `validate` — both skills now route the post-write
+  check at the writer, and `test_subsystem_touch.py`'s pinned-sentence ledger was moved in
+  the same change (it went red and caught this, which is the mechanism working). What is
+  NOT resolved is the CLASS: an audit measured 5 of 6 verbs byte-identical to the fork, so
+  `validate` was the only diverging verb TODAY, and nothing in devrc's gate would notice the
+  next one. That is rank 16.
+- **Next probe:** none for `validate`. For the class, run rank 16's check:
+  `nix build github:ZacxDev/cairn/<rev>#cairn` then exercise each verb against a fixture
+  cache and diff against `scripts/cairn`.
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
@@ -352,30 +372,30 @@ taken now describes a tree that is about to change.
    forcing: none — done
 
 3. 🔨 **HALF DONE — devrc consumes cairn as a pinned flake input.**
-   🔴 **IN FLIGHT, CLAIMED BY ANOTHER SESSION — DO NOT START.** `claim-work
-   cairn-oss-multi-instance-3` → **rc 10**, taken 2026-09-08T13:26:46-05:00 for slice 2 (pin
-   the input + deploy the packaged client). Live worktree `~/workspace/devrc-flake-pin`,
-   branch `feat/cairn-flake-pin`, commit `4c77daab`, 617 insertions, **unpushed**.
+   🔴 **IN FLIGHT, CLAIMED — DO NOT START.** `claim-work cairn-oss-multi-instance-3` is HELD
+   for slice 2. Worktree `~/workspace/devrc-flake-pin`, branch `feat/cairn-flake-pin`,
+   **PUSHED as devrc PR #1406** (was `4c77daab` unpushed; now three commits, head `f98be263`).
+   ⚠ **SIX FILES ARE UNCOMMITTED IN THAT WORKTREE** — the round-1 audit fix round. Do not
+   delete the worktree; the fixes exist nowhere else.
    - **Half 1 — ✅ MERGED: `ZacxDev/cairn`#4, `218b6c1`.**
-   - **Half 2 — slice 1 MERGED (devrc #1381, `baa664e4`); slice 2 IN FLIGHT as above; slice 3
-     (point the writer at the pinned `entry_shape`, delete devrc's five duplicated `lib/`
-     modules) NOT STARTED.** The fork was DECIDED 2026-09-08 — CONSOLIDATE ONTO THE PIN — and
-     is not to be re-asked.
-   🔴 `nix/home.nix` deploys `scripts/cairn` as an `mkOutOfStoreSymlink`, and the comment
-   above that entry says it is REQUIRED, not preferred, because `.resolve()` must land beside
-   `lib/`. (Grep for `mkOutOfStoreSymlink is NOT a preference`; no line numbers — a previous
-   revision of this bullet cited two that were already wrong at their own merge base.) **#4
-   solves exactly that** by installing script and `lib/` together under `libexec`. Client
-   edits will then need a `home-manager switch`.
-   🔴 **Slice 1 (devrc #1381) required a `home-manager switch` to finish landing**: the
-   `cairn who` REMOVAL went live on merge, but `~/.local/bin/cairn-who` is created by
-   ACTIVATION. ⚠ Every `cairn who` spelling elsewhere in this doc — and in
+   - **Half 2 — slice 1 MERGED (devrc #1381, `baa664e4`, both hosts switched and verified);
+     slice 2 IN FLIGHT as PR #1406; slice 3 (point the writer at the pinned `entry_shape`,
+     delete devrc's five duplicated `lib/` modules) NOT STARTED.** The fork was DECIDED
+     2026-09-08 — CONSOLIDATE ONTO THE PIN — and is not to be re-asked.
+   **#1406 carries:** `cairn.url = "github:ZacxDev/cairn"` (lock rev `9213726`), deliberately
+   **NOT** `inputs.nixpkgs.follows` — cairn pins `python312` on purpose; the package threaded
+   through `extraSpecialArgs` as `cairnPackage` (required, no default, so a broken thread is
+   an eval error); `CAIRN_MIRROR_ROOT` in `nix/sessionVariables.nix`; 8 new guards in
+   `scripts/tests/test_cairn_flake_pin.py`; floor 12927 → 13026.
+   🔴 **`cairn-who` KEEPS `mkOutOfStoreSymlink` and that asymmetry is deliberate** — it is
+   devrc-only, absent from the OSS package, and resolves `scripts/lib/`. Do not "tidy" the
+   two deploy modes into agreement in either direction.
+   ⚠ Every `cairn who` spelling elsewhere in this doc — and in
    `handoff-cairn-task-linkage.md` and `proposal-cairn-session-capture.md` — is the DEAD
-   spelling and exits 2. They are left as written because they record what was true when
-   written; **do not copy a command out of them.**
+   spelling and exits 2. **Do not copy a command out of them.**
    **Closing condition:** a merged devrc PR in which `flake.nix` names cairn as an input and
    `readlink -f ~/.local/bin/cairn` resolves into `/nix/store`. Re-verified NOT met
-   2026-09-08 — expected, since slice 2 is unpushed.
+   2026-09-08 — #1406 is open, and it additionally needs a `home-manager switch` to land.
    forcing: none
 
 4. **Merge or close `civitai/talos-infra` #1414** (the instance proposal). Four open questions
@@ -445,6 +465,38 @@ taken now describes a tree that is about to change.
     this session.
     **Closing condition:** a merged devrc PR after which `cairn recall --ref <name>` prints
     one entry, OR the footer and `/resume` stop prescribing flags the wrapper lacks.
+    forcing: none
+
+16. **Nothing in devrc's gate ever EXECUTES the deployed `cairn` binary.** Every cairn guard
+    reads `flake.nix` / `flake.lock` / `nix/home.nix` / `nix/sessionVariables.nix` as TEXT.
+    That is why the `cairn validate` regression in rank 3's audit (see the investigation
+    block) stayed invisible through all 13,076 tests including the three cairn suites. A
+    future `nix flake lock --update-input cairn` to a rev where `packages.cairn` still builds
+    but a VERB regressed would leave devrc's gate fully green and surface at the operator.
+    cairn's own `checks.client-resolves-its-lib` lives in cairn's flake and devrc's gate does
+    not run it. Cheapest fix: a check that `nix build`s the package and runs
+    `doctor --no-sync` plus `--validate` against a fixture cache.
+    **Closing condition:** a merged devrc PR whose gate fails when the pinned client's
+    `validate` is stubbed to print nothing.
+    forcing: gate
+
+17. **The public `ZacxDev/cairn` client still documents a `who` timeout that no longer
+    exists.** `cairn:1442` reads "`who` resolves it to its own, longer default. See
+    `_who_timeout`" — both `who` and `_who_timeout` were removed by `d165406` before the repo
+    was published. Flagged 2026-09-07 and never fixed; still live at `9d58f02`. One line, its
+    own small PR against the OSS repo.
+    **Closing condition:** `grep -c _who_timeout ~/workspace/cairn/cairn` → 0 on `origin/main`.
+    forcing: none
+
+18. **Three deferred findings from #1406's round-1 audit, none blocking.** (a)
+    `nix/sessionVariables.nix` hardcodes `.claude/analyze-service-index`, a SECOND `.nix`
+    spelling of `subsystem_touch.DEFAULT_STORE_ROOT`, which `test_store_root_ledger.py`
+    structurally cannot see because its own residuals section puts `.nix` out of scope. (b)
+    The packaged `lib/host_identity.py` honours `CAIRN_HOST`; devrc's copy does not — dormant
+    today (nothing sets it), and it would make `cairn recall`'s host banner disagree with the
+    writer's. (c) `claude/skills/cairn/SKILL.md`'s "consolidated in a later slice" names no
+    owner and no mechanism. (a) and (b) both disappear if rank 3 slice 3 lands.
+    **Closing condition:** rank 3 slice 3 merges, or a PR that addresses (a)–(c) explicitly.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -923,37 +975,57 @@ binary file whose first 8000 bytes hold no NUL is SCANNED (decoded with `errors=
 at worst a false positive a human resolves). No text file can be skipped. The boundary is
 tested on both sides, including the accepted case of a NUL past the sniff window.
 
+- 🔴 **`test_nebula_relay_apply.py`'s result is keyed to the HOST, not the tree.** This
+  session measured **20 failed** in it on BOTH a branch and a plain-`main` control at
+  `01956bf0`, and concluded "main is red on its own"; an audit measured **30 passed / 0
+  failed** at the SAME commit hours later. Both readings are real — the suite reads
+  `/etc/nebula/ca.crt` and `/etc/nixos/configuration.nix`, and #1272 shipped "a read-only
+  check **and the sudo apply beside it**", so applying the relay flips it with no commit
+  involved. **Never quote a devrc red-baseline; re-derive it with a control run.** The same
+  baseline also went stale a second way the same day: the `age`/`opencode` 7 that were red
+  in the morning were fixed by main by the afternoon.
+- 🔴 **Two skill ratchets have ZERO headroom and both were breached this session.** The
+  skill-listing total-chars ratchet (`assert 11256 <= 11192`, plus `MEASURED_ALL_TIER_A_CHARS`
+  in `test_skill_tiers.py`) went red on a **64-char** description growth — four failures, one
+  cause. Fix it **length-neutrally** rather than re-pinning the constants: `client
+  `scripts/cairn`` → `client `cairn` on PATH` are both exactly 22 chars. And
+  `scripts/testlib/skills_mapping.py` has a **7,400-byte** ceiling that was at 7,292 — an
+  explanatory comment added 742 and blew it. That ceiling's own message says an overage is a
+  question about which ambition crept back, never about raising the number.
+- 🔴 **A required `home.nix` argument breaks anything that evaluates it STANDALONE.**
+  `cairnPackage` has no default on purpose. `scripts/testlib/skills_mapping.py:56` imports
+  `home.nix` with a stub arg set and reported `nix cannot evaluate nix/home.nix` — a message
+  that blames `home.nix` for a defect in the STUB SET. It is the ONLY such evaluator in the
+  repo (verified: the other three build synthetic flake fixtures). Add every new required arg
+  to that stub set in the same commit.
+- **The lock's `cairn → 'nixpkgs'` is DEDUPLICATION, not a `follows`** — cairn's own lock
+  pins the same rev `42f17a57f4f6`. Positive control in the same file: home-manager, which
+  really does follow, records the LIST `['nixpkgs']`; cairn records the STRING `'nixpkgs'`.
+- **`nix develop -c pytest` REWRITES `flake.lock`** when `flake.nix`'s inputs have changed,
+  so a lock-only mutant is silently reverted before pytest reads it and scores SURVIVED
+  without ever running. Use a bare interpreter or `--no-write-lock-file` for such batteries.
+- **The `who` split's deploy asymmetry is deliberate and was measured in both directions.**
+  Between merge and switch: `cairn who` exit 2, `cairn-who` command-not-found, deployed skill
+  still saying `cairn who`. `mkOutOfStoreSymlink` names the link's TARGET, not who creates
+  the link — activation does.
+
 ## How to verify
-
-🔴 **Verify a merge by CONTENT, never by ancestry — a squash is never an ancestor**, so
-`git merge-base --is-ancestor <head> origin/main` reads false after every squash merge,
-forever. The merged ranks are confirmed on `origin/main` by content: `.github/workflows/ci.yml`
-reads `FLOOR = 1648` and `ATOMICITY_MIN_RELOADS` resolves 7 times in
-`tests/test_subsystem_store_api.py` (#5); `flake.nix` exists (#4); `partition_tracked_files`
-/`BINARY_SNIFF_BYTES` resolve 10 times in `tests/leakscan.py` (#6).
-
 ```bash
-# rank 12 — MERGED
-gh pr view 6 -R ZacxDev/cairn --json state,mergedAt,mergeCommit   # MERGED, 9d58f02
-git -C ~/workspace/cairn fetch origin && \
-  git -C ~/workspace/cairn grep -c 'partition_tracked_files\|BINARY_SNIFF_BYTES' origin/main -- tests/leakscan.py
-# ^ 10. `TEXT_SUFFIXES` still greps 1 in that file and 3 in the test module — ALL PROSE
-#   (comments + docstrings recording the history). The constant itself is gone; grep the
-#   lines rather than the count, or a prose mention reads as the enumeration surviving.
+# 1. #1406's own state — six files should still be uncommitted until the fix round lands
+git -C ~/workspace/devrc-flake-pin status -s
+gh pr view 1406 -R innovation-upstream/devrc --json state,mergeable,mergeStateStatus
 
-# the accounting is visible in the run itself — this is the closing condition, watched
-git -C ~/workspace/cairn worktree add --detach /tmp/v6 origin/main
-(cd /tmp/v6 && python3 tests/leakscan.py | tail -5)   # a named SKIPPED line, then "38 file(s) scanned, 1 skipped"
-git -C ~/workspace/cairn worktree remove --force /tmp/v6
+# 2. the gate, and a CONTROL on plain main — never read one without the other
+nix build ~/workspace/devrc-flake-pin#checks.x86_64-linux.pytests --no-link
+nix log $(nix path-info --derivation ~/workspace/devrc-flake-pin#checks.x86_64-linux.pytests) \
+  | grep -E '^\s+(PASS|FAIL)\s+scripts/tests\s|TOTAL collected'
 
-# rank 3 — claimed by ANOTHER session; check the lock before touching it
-claim-work cairn-oss-multi-instance-3    # rc 10 = taken by someone else. Do NOT start.
-git -C ~/workspace/devrc worktree list | grep flake-pin   # their live worktree
-readlink -f ~/.local/bin/cairn           # still devrc/scripts/cairn while their commit is unpushed
-grep -c cairn ~/workspace/devrc/flake.nix # 0, same reason
+# 3. slice 1 is live on BOTH hosts (already verified 2026-09-08)
+cairn-who --help >/dev/null; echo "cairn-who rc=$?"      # expect 0
+cairn who 42 >/dev/null 2>&1; echo "cairn who rc=$?"     # expect 2
+grep -c 'cairn who' ~/.claude/skills/cairn/SKILL.md      # expect 0
+
+# 4. the validate divergence this session found
+python3 ~/workspace/devrc/scripts/lib/subsystem_touch.py \
+  --store ~/.cache/subsystem-store --validate --scope devrc | wc -c   # expect ~5765, 4 blocks
 ```
-Expected: #6 MERGED at `9d58f02`; the leakscan run on `origin/main` printing a
-scanned+skipped accounting with every skip named; rank 3 still claimed by another owner.
-⚠ Rank 3's state is the one line here most likely to have moved — the other session's work
-was unpushed at 2026-09-08T20:00Z; re-read the claim and `readlink -f ~/.local/bin/cairn`
-rather than trusting this sentence.
