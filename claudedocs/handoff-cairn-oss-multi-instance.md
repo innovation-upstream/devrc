@@ -30,8 +30,10 @@ is the PRIVATE proposal, not this doc.
   shows `cairn-oss-multi-instance-3` taken 2026-09-08 ~01:45Z for the *first slice only*
   (re-home `cairn who` as its own binary; extract `unbounded_timeout_reason` into devrc
   `lib/timeouts.py`), explicitly **not** pinning the flake and **not** touching the
-  `entry_shape`/writer fork. The operator fork below is therefore still unanswered — that
-  session routed around it rather than deciding it.
+  `entry_shape`/writer fork. That slice MERGED 2026-09-08 (devrc #1381, squash `baa664e4`),
+  and both hosts are switched. 🔴 The operator fork below was then ANSWERED the same day —
+  **CONSOLIDATE ONTO THE PIN**; see the fork block for the decision and the re-measured
+  numbers behind it.
 - **Rank 3 is still not done**, re-verified live 2026-09-08: `readlink -f ~/.local/bin/cairn`
   → `/home/zach/workspace/devrc/scripts/cairn` (not `/nix/store`), `grep -c cairn
   ~/workspace/devrc/flake.nix` → **0**.
@@ -175,21 +177,42 @@ and re-deriving it costs a session an hour. **Do not re-measure it; verify it st
   deliberately-excluded subcommand, so devrc can consume it if `cairn who` moves to its own
   `cairn-who` binary — which is the seam the OSS cut already chose — and devrc's writer takes
   its shared vocabulary from the pinned `entry_shape` instead of its own copies.
-- **Next probe:** none needed to decide; the measurement is done. The open QUESTION is a
-  design one for the devrc side: whether devrc deletes its five duplicated `lib/` modules in
-  favour of the pinned ones (consolidation, and the drift above is the argument for it) or
-  keeps them. That is rank 3's second half, and it is a fork worth putting to the operator
-  before building.
+- 🔴 **DECIDED BY THE OPERATOR, 2026-09-08: CONSOLIDATE ONTO THE PIN.** devrc deletes its five
+  duplicated `lib/` modules and takes them from the pinned flake; the writer takes its shared
+  vocabulary from the pinned `entry_shape` instead of its own copies. **The fork is CLOSED —
+  do not re-ask it**, and do not read the paragraph above as a live question. It was put with
+  the re-measured numbers below and with this trade named: the cost is that devrc's 6,654-line
+  `subsystem_touch.py` must take its vocabulary from the 264-line `entry_shape`, which is the
+  real work and the part that can surprise us.
+- **RE-MEASURED 2026-09-08, after `cairn-who` merged (devrc #1381). The figures above are from
+  09-07 and have moved in BOTH directions.** This item says verify rather than re-derive; this
+  is that verification, and it changed the picture:
+  - the CLIENT diff **shrank**: 259 lines (43+/116−) → **142 (52+/74−)**. Most of the removals
+    were `cairn who`, which now lives in its own binary on both sides.
+  - the LIBRARY drift **widened**: `cairn_doctor` **21 → 43** changed lines, `host_identity`
+    **113 → 122**. `subsystem_resolver` (40), `subsystem_recall` (38) and
+    `subsystem_read_store` (4) are unmoved. The OSS side keeps taking PRs while devrc's copies
+    sit still, so this gap grows on its own — which is the argument for consolidating, and it
+    is stronger than it was yesterday.
+  - 🔴 **there are now TWO `timeouts.py`, one per side, 41 changed lines apart, created hours
+    apart on 2026-09-08** — devrc's by #1381, the OSS one by the extraction. The duplication
+    this item is about reproduced itself while the item sat open. The OSS copy also defines a
+    `DEFAULT_TIMEOUT = 60` that nothing imports; devrc's defines none.
+- **Next step:** rank 3's remaining slices, in order — pin the input in `flake.nix`, move
+  `~/.local/bin/cairn` into `/nix/store`, then the consolidation above. `cairn-who` stays
+  devrc-only and out-of-store; it is deliberately not part of the pin.
 
 ### Two ledger guards in cairn are narrower than their own sentences — STILL OPEN by decision
 Unchanged this session. `tests/test_subsystem_store_api.py:20239` and `:20271`. Neither ships
 a defect; recorded on cairn PR #1 as open-by-decision. Fix when someone is next in that file.
 
-### The devrc/OSS cairn client fork — UNCHANGED, and it is rank 3's second half
-The measurement in the block above still stands and was not re-run this session. Nothing in
-#4 touched `cairn` or `lib/`, so the fork is exactly as measured. **The operator fork inside
-it is still unanswered:** whether devrc DELETES its five duplicated `lib/` modules in favour
-of the pinned ones, or keeps them. Put that question before building.
+### The devrc/OSS cairn client fork — RE-MEASURED and DECIDED 2026-09-08
+⚠ This block previously said the fork was UNCHANGED and unmeasured this session. Both halves
+are now out of date: devrc #1381 moved the client, and the numbers were re-run. The client
+diff SHRANK to 142 lines while the library drift WIDENED (`cairn_doctor` 21 → 43). 🔴 **The
+operator fork is ANSWERED: CONSOLIDATE ONTO THE PIN** — devrc deletes its five duplicated
+`lib/` modules and the writer takes its vocabulary from the pinned `entry_shape`. Full
+decision, trade and figures in the fork block above; do not re-ask it.
 
 ### CLOSED-PENDING-MERGE 2026-09-08 — a SECOND cairn intermittent, distinct from the one rank 6 closed
 🔴 **This is NOT the flake the rank-6 investigation was about.** That one was
@@ -260,8 +283,8 @@ countable.
    - **Half 2 — one slice of four is in review; the rest is still open.** Remaining: pin the
      input in `flake.nix`, move `~/.local/bin/cairn` into `/nix/store`, point the writer at
      the pinned `entry_shape`, and decide the fate of devrc's five duplicated `lib/` modules.
-     🔴 **THE OPERATOR FORK IS STILL UNANSWERED and must be put before building** — see the
-     fork investigation above.
+     🔴 **THE OPERATOR FORK IS ANSWERED (2026-09-08): CONSOLIDATE ONTO THE PIN** — see the
+     fork investigation above for the decision, the trade and the re-measured figures.
      - **The slice is devrc PR #1381.** Extracting `unbounded_timeout_reason` is not optional
        there: the store path reached that predicate by importing the whole `who` module, a
        reach that breaks the moment the two are separate binaries, and re-open-coding it
