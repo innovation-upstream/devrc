@@ -1,4 +1,4 @@
-{ config, pkgs, lib, isNixOS ? false, ... }:
+{ config, pkgs, lib, isNixOS ? false, cairnPackage, ... }:
 let
   home = config.home.homeDirectory;
   workspace = "${home}/workspace";
@@ -1441,13 +1441,19 @@ in
   # a bare command, and an agent running in another repo cannot resolve an absolute
   # devrc path. Bare command on `home.sessionPath` resolves from any cwd.
   #
-  # 🔴 mkOutOfStoreSymlink is NOT a preference here — it is REQUIRED. `scripts/cairn`
-  # reaches its siblings through `Path(__file__).resolve().parent / "lib"`, exactly
-  # like the opencode CLI above. `.resolve()` follows the symlink back to the
-  # checkout, so `lib/` is found in the repo. A store copy would resolve `__file__`
-  # into /nix/store, where `lib/` is NOT deployed — the import would fail outright.
-  # Only these launcher paths are symlinked; `scripts/lib/` must not be deployed,
-  # same rule as opencode's `lib/`.
+  # 🔴 mkOutOfStoreSymlink is NOT a preference here — it is REQUIRED for `cairn-who`
+  # below, and NO LONGER required for `cairn`. That asymmetry is the whole point of
+  # this pair, so read both lines together. The underlying constraint is unchanged
+  # and belongs to BOTH scripts: each reaches its siblings through
+  # `Path(__file__).resolve().parent / "lib"`, and `.resolve()` follows symlinks, so
+  # what must hold is that the directory holding the REAL file also holds `lib/`.
+  # Out-of-store satisfies that by resolving back into the checkout. The pinned
+  # `cairn` flake package satisfies it a SECOND way — it installs the real script and
+  # its `lib/` together under `libexec` and puts a wrapper in `bin/` — which is why a
+  # store path is now correct for that binary and only that binary. `cairn-who` has
+  # no such package: it is devrc-only, deliberately absent from the OSS repo, and the
+  # `lib/` it resolves is `scripts/lib/`, which must not be deployed, same rule as
+  # opencode's `lib/`. Deploying it in-store would leave HALF the split working.
   #
   # ⚠ NO LINE NUMBERS, AND THE OLD ONES WERE MEASURED WRONG BEFORE THIS CHANGE EVEN
   # TOUCHED THEM. This comment used to cite `scripts/cairn:68` for the lib lookup and
@@ -1456,16 +1462,28 @@ in
   # the recall/validate section — all four stale, with nothing to signal it. A line
   # number is a claim that rots silently. The imports are named by EXPRESSION above;
   # grep for it.
-  home.file.".local/bin/cairn".source =
-    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn";
+  #
+  # 🔴 THE PACKAGE, NOT `scripts/cairn`. `scripts/cairn` and the `scripts/lib/`
+  # reader modules still exist — the writer and `cairn-who` import them — but they
+  # are no longer what lands on PATH. Two copies of the reader were the reason for
+  # the cutover; leaving the fork DEPLOYED would have kept the whole problem while
+  # adding a lock entry. `cairnPackage` is threaded in from flake.nix's `cairn`
+  # input via `extraSpecialArgs` and is required (no default), so a broken thread
+  # is an eval error rather than a symlink to `/bin/cairn`.
+  home.file.".local/bin/cairn".source = "${cairnPackage}/bin/cairn";
   # 🔴 `cairn-who` — the task -> sessions -> windows -> transcripts resolver, split
   # out of `cairn` because it is a different noun: it touches no store, no cache and
-  # none of the store's flags. Same deploy mode, and for the SAME REASON, not merely
-  # by analogy: `scripts/cairn-who` resolves `lib/cairn_who.py` (and, through it,
-  # `lib/timeouts.py`) through its own `Path(__file__).resolve().parent / "lib"`.
-  # As a `home.file` copy it would resolve into /nix/store and fail on import before
-  # printing anything. Deploying `cairn` out-of-store and this one in-store would
-  # leave HALF the split working, which is why both lines are here together.
+  # none of the store's flags. 🔴 NO LONGER THE SAME DEPLOY MODE AS THE LINE ABOVE,
+  # and that is the change to read carefully: this one keeps `mkOutOfStoreSymlink`
+  # because `scripts/cairn-who` resolves `lib/cairn_who.py` (and, through it,
+  # `lib/timeouts.py`) through its own `Path(__file__).resolve().parent / "lib"`,
+  # and there IS NO PACKAGE that ships those beside it — `cairn-who` is devrc-only
+  # and deliberately absent from the OSS repo. As a `home.file` copy it would
+  # resolve into /nix/store and fail on import before printing anything.
+  # ⚠ SO DO NOT "TIDY" THE TWO INTO AGREEMENT IN EITHER DIRECTION. Making this one
+  # a store copy to match `cairn` breaks it outright; putting `cairn` back on an
+  # out-of-store symlink to match this one re-forks the client. Both lines stay
+  # here together precisely so the difference is read as deliberate.
   home.file.".local/bin/cairn-who".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn-who";
   # Claude Code hooks managed here (the script only — the settings.json

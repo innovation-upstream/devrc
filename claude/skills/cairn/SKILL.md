@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: "The hosted subsystem store (pod in ns `subsystem-store`), client `scripts/cairn`. Use for: `cairn doctor`, cairn sync/recall/search/ls-entries, cairn-who, a stale or unstamped store, a `cairn` exit 4, seeding the pod, a scope a token cannot reach. Writes are `subsystem-index`; pruning is `prune-index`."
+description: "The hosted subsystem store (pod in ns `subsystem-store`), client `cairn` on PATH — the pinned `ZacxDev/cairn` flake package, not `scripts/cairn`. Use for: `cairn doctor`, cairn sync/recall/search/ls-entries, cairn-who, a stale or unstamped store, a `cairn` exit 4, seeding the pod, a scope a token cannot reach. Writes are `subsystem-index`; pruning is `prune-index`."
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
@@ -71,9 +71,15 @@ there; it is not restated here.
 
 ## Where a host reads from
 
-`scripts/lib/subsystem_read_store.py` is the ONE answer, and
-`cairn doctor`'s `reader-resolution` check prints it. Two directories exist and
-they are not interchangeable: `~/.cache/subsystem-store` is the synced
+`scripts/lib/subsystem_read_store.py` is the ONE answer for devrc's OWN readers
+(the `subsystem-index` writer and `cairn-who`), and `cairn doctor`'s
+`reader-resolution` check prints it. ⚠ The deployed `cairn` is the pinned flake
+package and carries its OWN copy of that module; the two agree today and are
+consolidated in a later slice — so if they ever disagree, `doctor`'s printed
+path is the authority for the CLIENT, and this file's for the writer.
+
+Two directories exist and they are not interchangeable:
+`~/.cache/subsystem-store` is the synced
 read-through cache, stamped by `cairn sync`; `~/.claude/analyze-service-index`
 is the pre-cutover per-host mirror, frozen and refreshed by nothing.
 **The discriminator is the stamp, not the path** — a store that cannot date
