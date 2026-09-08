@@ -809,6 +809,6 @@ case "$cmd" in
     ;;
   *)
     die "usage: $(basename "$0") pre|post|verdict <pre> <post>|extract <layout>
-  rc 0 clean · 1 race/misplacement · 2 usage · 3 could-not-decide · 4 windows missing · 5 no workspace at all"
+  rc 0 clean · 1 race/misplacement · 2 usage · 3 could-not-decide · 4 windows missing · 5 no workspace at all · 6 the unit ran and REFUSED"
     ;;
 esac
