@@ -489,7 +489,21 @@ def _fleet_rows(monkeypatch, *overrides):
     assert that two cells are distinct strings rather than the same one twice.
 
     Each override must carry a distinct `app`; `dir`/`slug` are derived from it
-    so `REPOS` and the fake `inspect` cannot drift apart.
+    so THIS FIXTURE'S `REPOS` and THIS FIXTURE'S fake `inspect` cannot disagree
+    about which row belongs to which repo.
+
+    🔴 THAT IS FIXTURE-INTERNAL CONSISTENCY AND NOTHING MORE. The sentence it
+    replaces ("so `REPOS` and the fake `inspect` cannot drift apart") read as
+    reassurance about the `inspect()` -> `main()` seam, which this fixture does
+    not touch at all: it REPLACES `fleet.inspect`, so every test built on it
+    pins what `main()` does with a row of the shape written HERE, never that
+    `inspect()` produces a row of that shape. Measured: renaming
+    `manifest_version` in `inspect()` left this file at 51 passed while a real
+    `fleet.py --no-fetch --no-platform` died with `KeyError: 'manifest_version'`
+    at the printer, on its first row. That seam is pinned by
+    `test_the_keys_inspect_produces_cover_the_keys_every_consumer_reads` and
+    `test_a_real_inspect_row_renders_through_main`, which deliberately do NOT
+    use this fixture.
     """
     rows = []
     for over in overrides:
@@ -802,18 +816,46 @@ def test_an_error_row_with_a_readable_version_still_gets_platform_state(monkeypa
     assert "version-unread" not in out, out
 
 
-def test_the_three_platform_answers_are_three_distinct_strings(monkeypatch, tmp_path, capsys):
-    """🔴 REGRESSION. `not-consulted` acquired a second meaning: the printer's
-    `!!` discriminator ("default_branch" not in r) and the loop's skip
-    (manifest_version unreadable) are DIFFERENT predicates, so a row could reach
+def _platform_cells(out: str) -> list[str]:
+    """The platform cell of every printed ROW, exactly.
+
+    🔴 A SUBSTRING CHECK CANNOT TELL THESE SENTINELS APART: `version-unread`
+    CONTAINS `unread`, so `"unread" in out` is satisfied by the wrong answer and
+    an assertion built on it is walkable. The platform cell is the last column
+    and none of its four values contains a space, so splitting is lossless.
+    `!!` lines are excluded — a row with no columns never reaches the cell.
+    """
+    lines = [ln for ln in out.splitlines() if ln and not ln.startswith("-")]
+    return [ln.split()[-1] for ln in lines[1:] if " !! " not in ln]
+
+
+def test_the_four_platform_answers_are_four_distinct_strings(monkeypatch, tmp_path, capsys):
+    """🔴 REGRESSION for two arms, INVARIANT GUARD for two — labelled per arm
+    below, because counting all four as regression coverage would overclaim.
+
+    `not-consulted` acquired a second meaning: the printer's `!!` discriminator
+    and the loop's version skip are DIFFERENT predicates, so a row could reach
     the table and still be skipped — and it then printed `not-consulted` on a
     run where the platform WAS consulted. The cell's own comment says `-` "is a
     REAL deploy state ... so it must never also mean 'not consulted'"; this is
-    the same principle on the same cell.
+    the same principle on the same cell, and it applies to all four answers.
 
     Not fixable by deleting the skip: `resolve(parsed, app, "?")` returns
     `none/-`, a real-looking platform state for a version nobody read.
+
+    🔴 THE NAME USED TO CLAIM MORE THAN THE BODY DELIVERED. An earlier revision
+    was called "three platform answers" and asserted TWO of them; the `unread`
+    arm — the `except Exception` branch, the case where the CLI is absent or
+    unauthed — was entered by no test in this file, and three isolated mutants
+    survived a fully green suite because of it: `unread` -> `not-consulted`
+    (which makes a failed CLI indistinguishable from `--no-platform`, the exact
+    double meaning this taxonomy exists to remove), `unread` -> `version-unread`,
+    and the floor's `unread` -> `none`. Every arm is exercised here now.
     """
+    seen = {}
+
+    # ARM 1 (REGRESSION, red before the round that added `version-unread`):
+    # consulted, this row WAS inspected, its manifest version was not read.
     _with_platform(monkeypatch, tmp_path)
     _fleet_rows(
         monkeypatch,
@@ -824,20 +866,64 @@ def test_the_three_platform_answers_are_three_distinct_strings(monkeypatch, tmp_
     monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch"])
     fleet.main()
     consulted = capsys.readouterr().out
-
-    assert "version-unread" in consulted, consulted
-    assert "approved/deploying" in consulted, consulted
-    assert "not-consulted" not in consulted, consulted
+    assert _platform_cells(consulted) == ["version-unread", "approved/deploying"], consulted
     # ... and the skipped row must not borrow a REAL state either.
     assert "none/-" not in consulted, consulted
+    seen["consulted, row inspected, version unreadable"] = _platform_cells(consulted)[0]
 
-    # The third string, from the run where the platform genuinely was not asked.
+    # ARM 2 (INVARIANT GUARD — green before this round; nothing ran it):
+    # consulted, and the CLI failed for EVERY row. A status file that does not
+    # exist makes `read_status` raise FileNotFoundError, which is not
+    # `UnknownState`, so it lands in the `except Exception` arm — the same place
+    # an absent or unauthed `civitai` binary lands. Both keys the arm writes are
+    # asserted, because the floor is unanswerable here for the same reason the
+    # state is: nothing was read.
+    monkeypatch.setenv("CIVITAI_STATUS_FILE", str(tmp_path / "no-such-dump.txt"))
+    monkeypatch.setitem(sys.modules, "app_state", app_state)
+    _fleet_rows(monkeypatch, {"app": "sensei", "manifest_version": "0.1.21",
+                              "package_version": "0.1.21"})
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--json"])
+    fleet.main()
+    cap = capsys.readouterr()
+    row = json.loads(cap.out)[0]
+    assert row["platform"] == "unread", row
+    assert row["submit_floor"] == "unread", row
+    assert "platform state unread" in cap.err, cap.err
+    seen["consulted, the CLI failed for every row"] = row["platform"]
+
+    # ARM 3 (REGRESSION, red before this round): consulted, but the row returned
+    # early from `inspect()` and has no columns at all. It used to fall into the
+    # version guard and be labelled `version-unread`, claiming a manifest was
+    # consulted and found unreadable on a row where no file was ever opened.
+    # Table mode never showed it — such a row prints `!!` — but `--json` did.
+    _with_platform(monkeypatch, tmp_path)
+    monkeypatch.setattr(fleet, "REPOS", [("repo", "o/r", "gen-matrix")])
+    monkeypatch.setattr(fleet, "inspect", lambda *a, **k: {
+        "app": "gen-matrix", "dir": "repo", "slug": "o/r", "error": "checkout missing"})
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--json"])
+    fleet.main()
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["platform"] == "not-inspected", row
+    # The floor IS answerable — it is keyed on the app slug alone — so it stays.
+    assert row["submit_floor"] == "0.8.8", row
+    seen["consulted, row never inspected"] = row["platform"]
+
+    # ARM 4 (INVARIANT GUARD): the platform genuinely was not asked.
     _one_row(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
     fleet.main()
     unconsulted = capsys.readouterr().out
-    assert "not-consulted" in unconsulted, unconsulted
-    assert "version-unread" not in unconsulted, unconsulted
+    assert _platform_cells(unconsulted) == ["not-consulted"], unconsulted
+    seen["--no-platform, never asked"] = _platform_cells(unconsulted)[0]
+
+    # The ledger: four cases, four answers, no two of them the same string.
+    assert seen == {
+        "consulted, row inspected, version unreadable": "version-unread",
+        "consulted, the CLI failed for every row": "unread",
+        "consulted, row never inspected": "not-inspected",
+        "--no-platform, never asked": "not-consulted",
+    }, seen
+    assert len(set(seen.values())) == 4, seen
 
 
 def test_the_submit_floor_is_still_read_for_a_row_with_no_version(monkeypatch, tmp_path, capsys):
@@ -865,3 +951,204 @@ def test_an_absent_json_field_is_distinct_from_an_unreadable_one(monkeypatch, tm
     monkeypatch.setattr(fleet, "_RUN", _FakeGit(ok))
     assert fleet._json_field("/x", "origin/main", "block.manifest.json", "buildCommand") == "-"
     assert fleet._json_field("/x", "origin/main", "nope.json", "buildCommand") == fleet.UNREADABLE
+
+
+# --- the inspect() -> main() seam, which every fixture above REPLACES ----------
+#
+# 🔴 EVERY `main()` TEST ABOVE INSTALLS A FAKE `inspect`, so all of them are
+# scoped to ONE side of this seam: they pin what `main()` does with a row of the
+# shape the fixture writes, never that `inspect()` writes that shape. Measured
+# before these two guards existed: renaming `manifest_version` in `inspect()`
+# left this file at 51 passed, while `fleet.py --no-fetch --no-platform` against
+# the real workspace died with `KeyError: 'manifest_version'` at the printer on
+# its first row — a tool dead on every invocation, with a fully green suite.
+#
+# Neither guard below uses `_one_row`, `_fleet_rows` or a fake `inspect`.
+
+# The keys `inspect()` writes on a row it read in full. A LEDGER: it fails when
+# the set grows, shrinks OR is renamed, which is the whole point — a rename is
+# what nothing could see.
+_INSPECT_KEYS = {
+    "app", "dir", "slug", "fetch", "default_branch", "checked_out",
+    "dirty_files", "manifest_version", "package_version", "build_command",
+    "lockfile", "vitest_projects", "lockstep_guard",
+}
+
+# `error` is conditional: set when a column could not be read, absent otherwise.
+_INSPECT_CONDITIONAL_KEYS = {"error"}
+
+# Keys `main()` writes onto a row itself, so they are legitimately read without
+# `inspect()` ever producing them.
+_MAIN_AUTHORED_KEYS = {"platform", "submit_floor"}
+
+# Every row key read anywhere in fleet.py OUTSIDE `inspect()`. Derived from the
+# AST below; pinned here so the derivation itself cannot quietly return nothing.
+_KEYS_CONSUMED = {
+    "app", "error", "fetch", "default_branch", "checked_out", "dirty_files",
+    "manifest_version", "package_version", "build_command", "lockfile",
+    "vitest_projects", "lockstep_guard", "platform", "submit_floor",
+}
+
+
+def _row_keys_read_outside_inspect() -> set[str]:
+    """Every string row-key any CONSUMER in fleet.py looks up.
+
+    Walks the whole module and skips only the `inspect()` subtree — the
+    producer — so a consumer added in a new helper (`_inspected` is exactly
+    that) is picked up without anyone remembering to list it here. Covers
+    `r["k"]` / `row["k"]`, `.get("k")`, `.setdefault("k", …)` and `"k" in row`.
+    """
+    import ast
+
+    with open(os.path.join(SKILL_DIR, "fleet.py"), encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    for node in list(ast.walk(tree)):
+        if isinstance(node, ast.FunctionDef) and node.name == "inspect":
+            producer = node
+            break
+    else:  # pragma: no cover - the positive control for the skip itself
+        raise AssertionError("fleet.inspect() not found — this walk is scoped to nothing")
+    skip = set(map(id, ast.walk(producer)))
+
+    names = {"r", "row"}
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if id(node) in skip:
+            continue
+        if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+                and node.value.id in names and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str)):
+            found.add(node.slice.value)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"get", "setdefault"}
+                and isinstance(node.func.value, ast.Name) and node.func.value.id in names
+                and node.args and isinstance(node.args[0], ast.Constant)):
+            found.add(node.args[0].value)
+        elif (isinstance(node, ast.Compare) and isinstance(node.left, ast.Constant)
+                and isinstance(node.left.value, str)
+                and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops)
+                and any(isinstance(c, ast.Name) and c.id in names for c in node.comparators)):
+            found.add(node.left.value)
+    return found
+
+
+_REAL_REPO = {
+    # Every value distinct from every other, and none of them equal to a literal
+    # this test's assertion names for a DIFFERENT cell — a fixture whose fields
+    # collide cannot see a mutant that returns the wrong one.
+    "rev-parse --git-dir": ".git",
+    "symbolic-ref": "refs/remotes/origin/trunk",
+    "branch --show-current": "zach/wip",
+    "status --porcelain": " M a\n M b\n M c",
+    # `:src` first: `_FakeGit` matches on prefix and the bare ref is a prefix of it.
+    "ls-tree --name-only origin/trunk:src": "version-lockstep.test.ts",
+    "ls-tree --name-only origin/trunk": "yarn.lock",
+    # The two versions DISAGREE on purpose. Equal ones would be the fixture
+    # collision the mutation rules warn about — a mutant that reads the manifest
+    # for BOTH `manifest_version` and `package_version` produces byte-identical
+    # output and survives. A real lockstep break is also a state this fleet
+    # actually reaches, so the row stays realistic.
+    "show origin/trunk:block.manifest.json":
+        '{"version": "0.9.1", "buildCommand": "pnpm run build"}',
+    "show origin/trunk:package.json": '{"version": "0.9.0"}',
+    "show origin/trunk:vite.config.ts": "test: { environment: 'node' }",
+}
+
+
+def test_the_keys_inspect_produces_cover_the_keys_every_consumer_reads(monkeypatch, tmp_path):
+    """INVARIANT GUARD, not regression coverage — the seam is correct today; it
+    was simply pinned by nothing.
+
+    Pins a RELATIONSHIP, not a component: the ledger of keys `inspect()` writes
+    against the ledger of keys the rest of `fleet.py` reads. Fails when either
+    set grows OR shrinks, and on a rename of any member of either.
+
+    Limits, stated rather than implied: this checks key NAMES and which shape
+    produces them. It cannot see a key whose VALUE is wrong, and it cannot see a
+    consumer that reaches a row through a name other than `r` or `row`.
+    `test_a_real_inspect_row_renders_through_main` is the behavioural half that
+    covers the value axis.
+    """
+    monkeypatch.setattr(fleet, "WORKSPACE", str(tmp_path))
+    (tmp_path / "repo").mkdir()
+
+    monkeypatch.setattr(fleet, "_RUN", _FakeGit(_REAL_REPO))
+    readable = fleet.inspect("repo", "o/r", "an-app", fetch=False)
+    assert set(readable) == _INSPECT_KEYS, sorted(set(readable) ^ _INSPECT_KEYS)
+    assert "error" not in readable, readable  # nothing failed, so nothing is flagged
+
+    monkeypatch.setattr(fleet, "_RUN", _FakeGit(_GIT_DIR))  # every read after git-dir fails
+    unreadable = fleet.inspect("repo", "o/r", "an-app", fetch=False)
+    assert set(unreadable) == _INSPECT_KEYS | _INSPECT_CONDITIONAL_KEYS, sorted(unreadable)
+
+    early = fleet.inspect("does-not-exist", "o/r", "an-app", fetch=False)
+    assert set(early) == {"app", "dir", "slug", "error"}, sorted(early)
+
+    consumed = _row_keys_read_outside_inspect()
+    assert consumed == _KEYS_CONSUMED, sorted(consumed ^ _KEYS_CONSUMED)
+
+    # THE SEAM ITSELF: everything a consumer reads is either produced by
+    # `inspect()` or written by `main()`.
+    orphans = consumed - _MAIN_AUTHORED_KEYS - _INSPECT_KEYS - _INSPECT_CONDITIONAL_KEYS
+    assert not orphans, f"read by a consumer, produced by nothing: {sorted(orphans)}"
+
+
+def test_a_real_inspect_row_renders_through_main(monkeypatch, tmp_path, capsys):
+    """INVARIANT GUARD, not regression coverage — green before this round too.
+
+    The behavioural half of the seam: `fleet.inspect` is NOT replaced, so the
+    row `main()` prints is the row `inspect()` actually built, and every cell is
+    pinned as a whole normalised line rather than by substring. A structural
+    ledger type-checks past a wrong VALUE; this does not.
+    """
+    monkeypatch.setattr(fleet, "WORKSPACE", str(tmp_path))
+    (tmp_path / "repo").mkdir()
+    monkeypatch.setattr(fleet, "_RUN", _FakeGit(_REAL_REPO))
+    monkeypatch.setattr(fleet, "REPOS", [("repo", "o/r", "an-app")])
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+
+    assert fleet.main() == 0, "every column read and --no-fetch was asked for"
+    out = capsys.readouterr().out
+    body = [ln for ln in out.splitlines() if ln.startswith("an-app")]
+    assert len(body) == 1, out
+    assert body[0].split() == [
+        "an-app", "trunk", "zach/wip", "3",
+        "0.9.1/0.9.0!",                  # both versions read, and they disagree
+        "pnpm", "run", "build",          # build_command, as the table splits it
+        "yarn.lock", "1", "version-lockstep", "skipped", "not-consulted",
+    ], body[0]
+
+
+def test_a_long_branch_overflows_its_column_rather_than_being_truncated(monkeypatch, capsys):
+    """INVARIANT GUARD, not regression coverage — this is the behaviour today
+    and it is deliberate; what was wrong was the COMMENT describing it.
+
+    The note beside `ver` framed it as THE exceptional unbounded cell ("Unlike
+    `proj`, whose value set is closed and short, a version string has no
+    bound"), which reads as exhaustive and is not: `branch` comes from
+    `origin/HEAD`, is equally unbounded, and its `:<7` cell pads without
+    truncating for exactly the same reason — truncating a read branch name would
+    fabricate a different one. Measured here: `platform` starts at the same
+    column in the header and in a `main` row, and `len("development") - 7`
+    further right in a `development` row.
+
+    Zero blast radius today (every default branch in REPOS is `main` or
+    `trunk`), so nothing is widened. If someone ever DOES bound this cell, this
+    test goes red and the comment beside `ver` must move with it.
+    """
+    _fleet_rows(
+        monkeypatch,
+        {"app": "short-branch", "fetch": "skipped", "default_branch": "main"},
+        {"app": "long-branch", "fetch": "skipped", "default_branch": "development"},
+    )
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    fleet.main()
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if ln and not ln.startswith("-")]
+    hdr, short, long_ = lines[0], lines[1], lines[2]
+
+    # The value is READ IN FULL — the half that must never regress.
+    assert "development" in long_, long_
+    assert short.index("not-consulted") == hdr.index("platform"), (short, hdr)
+    assert long_.index("not-consulted") == hdr.index("platform") + len("development") - 7, (
+        long_, hdr)

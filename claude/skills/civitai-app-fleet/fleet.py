@@ -281,6 +281,20 @@ def inspect(directory: str, slug: str, app: str, *, fetch: bool = True) -> dict[
     return row
 
 
+def _inspected(row: dict[str, str]) -> bool:
+    """Did `inspect()` get far enough to read ANY column?
+
+    🔴 ONE PREDICATE, ONE PLACE. `main()` asks this question twice — the
+    printer's `!!` discriminator, and the platform loop's never-inspected case —
+    and open-coding the same question at two sites is exactly how the loop and
+    the printer came to disagree in the first place (the `not-consulted` double
+    meaning fixed a round ago). `default_branch` is the first key `inspect()`
+    writes past BOTH of its early returns, so its presence is precisely "this
+    row has columns"; a missing checkout or a non-repository has none.
+    """
+    return "default_branch" in row
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", action="store_true", help="machine-readable")
@@ -322,6 +336,17 @@ def main() -> int:
                 # direction — claiming a read failed when it succeeded.
                 floor = app_state.submit_floor(parsed, row["app"])
                 row["submit_floor"] = floor or "none"
+                # 🔴 A ROW THAT WAS NEVER INSPECTED IS NOT A ROW WHOSE VERSION
+                # COULD NOT BE READ, and for one round it said it was. Moving
+                # the floor above the version guard let an early-return row —
+                # missing checkout, non-repository — fall into the guard below
+                # and acquire `version-unread`, which claims a manifest was
+                # consulted and found unreadable on a row where no file was ever
+                # opened. Table mode never showed it (such a row prints `!!`),
+                # but `--json` did, and `--json` is what drives a fan-out.
+                if not _inspected(row):
+                    row["platform"] = "not-inspected"
+                    continue
                 # Enrich anything with a usable version. An `error` row is not
                 # automatically unusable — only one whose VERSION could not be
                 # read is, and skipping on `error` alone denied platform state
@@ -332,12 +357,14 @@ def main() -> int:
                 # the table AND be skipped here — and it then printed
                 # `not-consulted` on a run where the platform WAS consulted,
                 # giving that string the same double meaning the `-` comment
-                # below forbids. Three cases, three strings: `not-consulted`
+                # below forbids. Four cases, four strings: `not-consulted`
                 # (--no-platform), `unread` (the CLI failed for every row),
-                # `version-unread` (consulted, this row had no version to ask
-                # about). Do NOT drop the guard instead — `resolve(parsed, app,
-                # "?")` answers `none/-`, a real-looking state for a version that
-                # was never read, which is worse than either.
+                # `not-inspected` (consulted, but this row has no columns at
+                # all), `version-unread` (consulted, this row was inspected and
+                # had no version to ask about). Do NOT drop the guard instead —
+                # `resolve(parsed, app, "?")` answers `none/-`, a real-looking
+                # state for a version that was never read, which is worse than
+                # any of the four.
                 if row.get("manifest_version", UNREADABLE) == UNREADABLE:
                     row["platform"] = "version-unread"
                     continue
@@ -360,7 +387,7 @@ def main() -> int:
             # non-repository, where `inspect()` returned early. A row with an
             # unreadable COLUMN still prints, with `?` where the read failed;
             # its `error` key and the non-zero exit already say so.
-            if "default_branch" not in r:
+            if not _inspected(r):
                 print(f"{r['app']:<21} !! {r.get('error', 'unknown')}")
                 continue
             ver = r["manifest_version"]
@@ -380,6 +407,19 @@ def main() -> int:
                 # bound, so no width fixes it and truncating would turn a read
                 # version into a fabricated one. Overflowing loudly is the least
                 # bad of the three; the alignment guard is scoped accordingly.
+                #
+                # ⚠ AND `ver` IS NOT THE ONLY SUCH CELL — the sentence above
+                # named it as the exception to `proj` and read as exhaustive,
+                # which it is not. `branch` is the other one: `default_branch()`
+                # returns whatever `origin/HEAD` names, which is unbounded, and
+                # its cell (`:<7`, header and row alike) is padded but never
+                # truncated for the same reason this one is. Measured with a
+                # `development` default branch: `platform` starts at column 142
+                # in the header and in a `main` row, at 146 in that row. Zero
+                # blast radius TODAY — every default branch in REPOS is `main`
+                # or `trunk` — so nothing is being widened; what is fixed is the
+                # claim. `checked-out`, `build` and `lock` are the cells that
+                # ARE bounded, by an explicit `[:N]` slice.
             print(
                 f"{r['app']:<21} {r['default_branch']:<7} {r['checked_out'][:26]:<26} "
                 f"{r['dirty_files']:>5} {ver:<9} {r['build_command'][:16]:<16} "
