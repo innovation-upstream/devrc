@@ -463,6 +463,103 @@ def test_main_exit_code_is_nonzero_when_a_row_could_not_be_read(monkeypatch, tmp
     assert "checkout missing" in capsys.readouterr().out
 
 
+def _one_row(monkeypatch, **over):
+    """A single fully-readable row, so a test can exercise main() with REAL rows
+    rather than REPOS=[] — an empty list cannot see anything that depends on a
+    row's contents, which is how the `--no-fetch`-exits-0 half went unpinned."""
+    row = {
+        "app": "an-app", "dir": "repo", "slug": "o/r", "fetch": "ok",
+        "default_branch": "main", "checked_out": "main", "dirty_files": "0",
+        "manifest_version": "1.0.0", "package_version": "1.0.0",
+        "build_command": "pnpm run build", "lockfile": "pnpm-lock.yaml",
+        "vitest_projects": "2+", "lockstep_guard": "manifest.test",
+    }
+    row.update(over)
+    monkeypatch.setattr(fleet, "REPOS", [("repo", "o/r", "an-app")])
+    monkeypatch.setattr(fleet, "inspect", lambda *a, **k: dict(row))
+    return row
+
+
+def test_a_failed_fetch_exits_nonzero_even_though_every_column_read(monkeypatch, capsys):
+    """🔴 An audit dropped `failed_fetch or` from main()'s return and the whole
+    suite stayed green: a stale inventory would have exited 0, which is the
+    round-1 bug this file's docstring exists to prevent."""
+    _one_row(monkeypatch, fetch="FAILED")
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-platform"])
+    assert fleet.main() == 1
+    capsys.readouterr()
+
+
+def test_no_fetch_alone_exits_zero(monkeypatch, capsys):
+    """The other half, and the reason the pair must use a REAL row: `skipped` is
+    deliberately NOT `FAILED` — you asked for it. Widening the failure set to
+    include `skipped` would break this."""
+    _one_row(monkeypatch, fetch="skipped")
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    assert fleet.main() == 0
+    capsys.readouterr()
+
+
+def test_the_fetch_state_appears_in_the_table_and_the_stale_note(monkeypatch, capsys):
+    """The docstring claims a `fetch` column and a trailing stale note. Deleting
+    either left the suite green, so both are pinned — header included, since
+    dropping it silently misaligns every column after it."""
+    _one_row(monkeypatch, fetch="skipped")
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    fleet.main()
+    cap = capsys.readouterr()
+    assert "fetch" in cap.out.splitlines()[0], cap.out
+    assert "skipped" in cap.out, cap.out
+    assert "may be stale" in cap.err and "an-app" in cap.err, cap.err
+
+
+def test_the_stale_note_covers_skipped_as_well_as_failed(monkeypatch, capsys):
+    """Narrowing the stale set to {"FAILED"} undoes F2 — `--no-fetch` produces
+    byte-identical staleness — and survived a green suite."""
+    _one_row(monkeypatch, fetch="skipped")
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    fleet.main()
+    assert "may be stale" in capsys.readouterr().err
+
+
+def test_an_unreadable_column_does_not_discard_the_readable_ones(monkeypatch, capsys):
+    """🔴 The round that wrote 'discarding probably-correct data is worse than
+    serving it with a caveat' applied it to the fetch axis only: one unreadable
+    column still replaced the row with `!!`, losing ten readable facts."""
+    _one_row(monkeypatch, vitest_projects=fleet.UNREADABLE,
+             error="unreadable: vitest_projects")
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    rc = fleet.main()
+    out = capsys.readouterr().out
+    assert "!!" not in out, out
+    assert "pnpm-lock.yaml" in out and "manifest.test" in out, out
+    assert rc == 1, "an unreadable column must still exit non-zero"
+
+
+def test_a_row_with_no_columns_is_still_replaced(monkeypatch, capsys):
+    """The other side: a missing checkout has nothing to print, so `!!` is
+    right. Without this the test above would pass against a main() that never
+    prints `!!` at all."""
+    monkeypatch.setattr(fleet, "REPOS", [("repo", "o/r", "an-app")])
+    monkeypatch.setattr(fleet, "inspect", lambda *a, **k: {
+        "app": "an-app", "dir": "repo", "slug": "o/r", "error": "checkout missing"})
+    monkeypatch.setattr(sys, "argv", ["fleet.py", "--no-fetch", "--no-platform"])
+    assert fleet.main() == 1
+    assert "!! checkout missing" in capsys.readouterr().out
+
+
+def test_vitest_absent_is_distinct_from_unreadable(monkeypatch):
+    """`git show <ref>:vite.config.ts` fails for a missing FILE and an
+    unreadable REF alike; collapsing them made a readable non-vite repo look
+    like a failed read — the conflation the sentinel exists to prevent."""
+    absent = _FakeGit({**_GIT_DIR, "rev-parse --verify": "abc123"})
+    monkeypatch.setattr(fleet, "_RUN", absent)
+    assert fleet.vitest_projects("/x", "origin/main") == "no-vite"
+
+    monkeypatch.setattr(fleet, "_RUN", _FakeGit(_GIT_DIR))  # ref unreadable too
+    assert fleet.vitest_projects("/x", "origin/main") == fleet.UNREADABLE
+
+
 def test_main_exit_code_is_zero_when_every_row_reads(monkeypatch, capsys):
     """The positive control: without it the test above passes against a main()
     that returns 1 unconditionally."""

@@ -34,18 +34,32 @@ IN. That is a write to a shared checkout, so it is stated here rather than left
 to be discovered, and `--no-fetch` turns it off. To run without touching
 anything at all you need BOTH `--no-fetch` and `--no-platform`.
 
-The fetch result is a column in the table and a key in `--json`
-(`fetch: ok|FAILED|skipped`), and a trailing stderr note names every row whose
-refs may be stale. `skipped` is surfaced as loudly as `FAILED` because
-`--no-fetch` produces byte-IDENTICAL staleness — an earlier round warned about
-one and left the other indistinguishable from fresh data.
+The fetch result is a `fetch: ok|FAILED|skipped` column in the table and a key
+in `--json` — on every row that was inspected. A row that returned early
+(missing checkout, non-repository) has neither, because no fetch was attempted.
+A trailing stderr note names every possibly-stale row in table mode; `--json`
+omits it, on the grounds that a JSON consumer should read the per-row `fetch`
+key rather than parse stderr.
+
+`skipped` is shown in the same column and note as `FAILED` because `--no-fetch`
+produces byte-IDENTICAL staleness, and an earlier round warned about one while
+leaving the other indistinguishable from fresh data. They are NOT identical in
+every respect and the difference is deliberate: `FAILED` exits non-zero,
+`skipped` does not. Something went wrong in the first case; you asked for the
+second.
 
 🔴 A FAILED FETCH DOES NOT DISCARD THE ROW. It is a staleness warning, not a
 read failure: the columns were read, they may just be old. An earlier round
 folded it into `error`, and an error row prints as a bare `!!` INSTEAD of the
-row — so a single unreachable remote collapsed all seven rows and this tool
-emitted no inventory at all. Serving probably-correct data with a caveat beats
-serving none.
+row — so a GLOBAL fetch failure (no network, no SSH agent, VPN down) collapsed
+every row and this tool emitted no inventory at all. Serving probably-correct
+data with a caveat beats serving none.
+
+⚠ Measured, because the first wording of this paragraph overstated it by 7×:
+ONE unreachable remote collapses exactly ONE row — the other six print in full.
+The all-seven case needs a cause common to all seven. The bug was real; the
+blast radius written down for it was not, and a reader told the rows are coupled
+when they are independent will mis-triage the next occurrence.
 
 Exit is non-zero when a row could not be READ (missing checkout, non-repository,
 unreadable column) or when a fetch FAILED. `--no-fetch` alone does not fail: you
@@ -127,18 +141,30 @@ def _json_field(repo: str, ref: str, path: str, field: str) -> str:
     return str(parsed.get(field, "-"))
 
 
+def _ref_exists(repo: str, ref: str) -> bool:
+    return _git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}") is not None
+
+
 def vitest_projects(repo: str, ref: str) -> str:
     """Whether the repo declares MULTIPLE vitest projects — the `--project` trap.
 
-    Deliberately reported as `1` / `2+`, not as a count: the body tests for a
-    `projects:` key, which cannot distinguish two from three. An earlier draft
-    labelled this "how many vitest projects" and printed `2` for any multi-
-    project repo, which is a number asserted rather than counted.
+    Reported as `1` / `2+`, not as a count: the body tests for a `projects:`
+    key, which cannot distinguish two from three. An earlier draft labelled this
+    "how many vitest projects" and printed `2` for any multi-project repo, which
+    is a number asserted rather than counted.
+
+    🔴 `no-vite` is NOT `?`. `git show <ref>:vite.config.ts` fails both when the
+    REF is unreadable and when the FILE is simply absent, and an earlier draft
+    collapsed the two into UNREADABLE — the exact conflation the sentinel above
+    exists to prevent, and one that made a perfectly readable repo (a non-vite
+    block, or one that renamed to vite.config.mts) look like a failed read. The
+    ref is checked first, so "I read it and there is none" is distinct from "I
+    could not read it".
     """
     cfg = _git(repo, "show", f"{ref}:vite.config.ts")
-    if cfg is None or not cfg:
-        return UNREADABLE
-    return "2+" if "projects:" in cfg else "1"
+    if cfg:
+        return "2+" if "projects:" in cfg else "1"
+    return "no-vite" if _ref_exists(repo, ref) else UNREADABLE
 
 
 def lockstep_guard_home(repo: str, ref: str) -> str:
@@ -233,16 +259,22 @@ def inspect(directory: str, slug: str, app: str, *, fetch: bool = True) -> dict[
     # 🔴 A FAILED FETCH IS A STALENESS WARNING, NOT AN ERROR — and the
     # distinction is the difference between degraded data and no data.
     #
-    # An earlier round folded it into `error`, and `main()` prints an error row
-    # as a bare `!!` line INSTEAD of the row. So one unreachable remote — no SSH
-    # agent, no network, a VPN down — collapsed every one of the seven rows to
-    # `!!`, and the tool SKILL.md says to start every bulk pass with emitted no
-    # inventory at all. The columns had all been read successfully; they were
-    # merely possibly-stale, which is exactly what the warning says. Discarding
-    # probably-correct data is a worse failure than serving it with a caveat.
+    # An earlier round folded it into `error`, and `main()` printed an error row
+    # as a bare `!!` line INSTEAD of the row. A GLOBAL fetch failure therefore
+    # collapsed every row and the tool emitted no inventory at all. The columns
+    # had all been read successfully; they were merely possibly-stale.
+    # Discarding probably-correct data is a worse failure than serving it with a
+    # caveat.
     #
-    # `error` is therefore reserved for a row that could not be READ: a missing
-    # checkout, a non-repository, or an unreadable column.
+    # 🔴 AND THE SAME RULE BINDS THE UNREADABLE-COLUMN AXIS. An audit caught the
+    # round that wrote the sentence above applying it to the fetch axis ONLY: a
+    # row with ONE unreadable column still lost its other ten readable facts to
+    # a `!!` line — branch, checked-out, dirty count, both versions,
+    # buildCommand, lockfile, guard file, platform. A repo with no
+    # `vite.config.ts` on the default ref is enough to trigger it. So `error` is
+    # recorded (and the exit code is non-zero), but `main()` still PRINTS the
+    # row with `?` in the columns it could not read. Only a row with no columns
+    # at all — a missing checkout or a non-repository — is replaced.
     unread = sorted(k for k, v in row.items() if v == UNREADABLE)
     if unread:
         row["error"] = "unreadable: " + ", ".join(unread)
@@ -283,7 +315,11 @@ def main() -> int:
             print(f"note: platform state unread ({exc})", file=sys.stderr)
         else:
             for row in rows:
-                if "error" in row:
+                # Enrich anything with a usable version. An `error` row is not
+                # automatically unusable — only one whose VERSION could not be
+                # read is, and skipping on `error` alone denied platform state
+                # to rows that had it available.
+                if row.get("manifest_version", UNREADABLE) == UNREADABLE:
                     continue
                 floor = app_state.submit_floor(parsed, row["app"])
                 row["submit_floor"] = floor or "none"
@@ -297,8 +333,12 @@ def main() -> int:
         print(hdr)
         print("-" * len(hdr))
         for r in rows:
-            if "error" in r:
-                print(f"{r['app']:<21} !! {r['error']}")
+            # Only a row with NO columns is replaced — a missing checkout or a
+            # non-repository, where `inspect()` returned early. A row with an
+            # unreadable COLUMN still prints, with `?` where the read failed;
+            # its `error` key and the non-zero exit already say so.
+            if "default_branch" not in r:
+                print(f"{r['app']:<21} !! {r.get('error', 'unknown')}")
                 continue
             ver = r["manifest_version"]
             if r["package_version"] != ver:

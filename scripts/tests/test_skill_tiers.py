@@ -168,9 +168,19 @@ MEASURED_ALL_TIER_A_CHARS = 11_344
 # one skill to tier B in claude/skill-tiers.json is a ONE-LINE edit and is the
 # intended move. The playbook is printed by the failing assertion below.
 #
-# 🔴 RAISED ONCE, DELIBERATELY, 2026-09-08: 7,496 -> 7,639 (+143), to keep
-# `civitai-app-release` at tier A. THE RULE ABOVE STILL STANDS. This is the
-# SECOND ratchet raised for that one skill in this commit — the other is
+# 🔴 LOWERED 7_639 -> 7_617 on 2026-09-08, when the skill raised for below was
+# reframed and RENAMED `civitai-app-release` -> `civitai-app-fleet`: its entry
+# got 22 chars shorter (description 373->353, name 19->17), so the ceiling
+# follows it down and headroom stays 0. Re-pinning on a cut is this file's own
+# rule, and it pays back part of the raise below. An audit caught this entry
+# missing while the sibling file's equivalent had been written — leaving the
+# RAISE below as the newest record, so a reader could "restore" 7_639 and bank
+# 22 chars of the regrowth this constant exists to refuse.
+#
+# 🔴 RAISED ONCE, DELIBERATELY, 2026-09-08: 7,496 -> 7,639 (+143), to admit the
+# skill now called `civitai-app-fleet` (named `civitai-app-release` when the
+# raise was taken) at tier A. THE RULE ABOVE STILL STANDS. This was the SECOND
+# ratchet raised for that one skill in that commit — the other is
 # LISTING_TOTAL_CEILING_CHARS in test_skill_descriptions.py — and both were
 # taken by Zach with the "do NOT raise" text quoted to him first.
 #
