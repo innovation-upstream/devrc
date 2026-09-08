@@ -98,7 +98,7 @@ IGNORE_ALERTNAMES = frozenset({"Watchdog", "InfoInhibitor"})
 # Real-time signal offset per source: the block's `signal = N` in graphical.nix
 # must match, so `pkill -RTMIN+N i3status-rs` refreshes exactly that block.
 SIGNALS = {"clawgate": 11, "mail": 12, "alerts": 13, "civitai": 14, "media": 16,
-           "airvpn": 10, "telemetry": 17}
+           "airvpn": 10, "telemetry": 17, "runaways": 19}
 
 # telemetry deadman: how long the check must be CONTINUOUSLY unable to evaluate
 # before the bar shows the visible `tlm ?` pill. A ClickHouse restart or a nebula
@@ -857,6 +857,9 @@ def _toast_specs() -> dict:
         "telemetry": {"threshold": 0, "urgency": "critical",
                       "summary": "🔴 Telemetry source DEAD",
                       "action": "xdg-open http://grafana.homelab.lan"},
+        "runaways": {"threshold": 0, "urgency": "normal",
+                     "summary": "⚠ Runaway process detected",
+                     "action": "xdg-open http://grafana.homelab.lan"},
     }
 
 
@@ -1294,6 +1297,109 @@ def fetch_airvpn() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Runaway processes
+# ---------------------------------------------------------------------------
+# Defaults for the runaway detection scan. Thresholds are env-tunable so a
+# host can retune without code changes.
+RUNAWAY_CPU_THRESHOLD = float(os.environ.get("RUNAWAY_CPU_THRESHOLD", "80"))
+RUNAWAY_MIN_AGE = int(os.environ.get("RUNAWAY_MIN_AGE", "600"))
+
+# Commands never to flag — expected heavy hitters whose CPU is not a problem.
+# Same shape as syshealth's DEF_IGNORE, but the poller only cares about runaways
+# so this is a short, stable list.
+RUNAWAY_IGNORE = frozenset(t for t in
+                           os.environ.get("RUNAWAY_IGNORE", "anno,logd,ps").split(",")
+                           if t.strip())
+
+PS_RUNAWAY_FORMAT = "pid=,ppid=,user=,pcpu=,pmem=,rss=,etimes=,comm=,args="
+PS_RUNAWAY_FIELDS = 9
+
+
+def parse_runaways(procs, cpu_threshold=None, min_age=None) -> dict:
+    """Pure: list of process dicts -> status dict with count + process list.
+
+    Each proc dict must have: pid, pcpu, etimes, comm, args, ppid.
+    The function filters by cpu_threshold and min_age, excludes self/ps,
+    and returns a status dict compatible with bar-status-poll's format.
+    """
+    cpu_threshold = cpu_threshold if cpu_threshold is not None else RUNAWAY_CPU_THRESHOLD
+    min_age = min_age if min_age is not None else RUNAWAY_MIN_AGE
+    if not isinstance(procs, list):
+        return {"count": 0, "state": "Idle", "detail": "no process data",
+                "processes": []}
+    flagged = []
+    for p in procs:
+        if not isinstance(p, dict):
+            continue
+        pid = p.get("pid")
+        pcpu = p.get("pcpu", 0)
+        etimes = p.get("etimes", 0)
+        if not pid or pcpu < cpu_threshold or etimes < min_age:
+            continue
+        # Skip self and ps (same logic as syshealth)
+        if p.get("comm") in ("ps", "python3", "bar-status-poll"):
+            continue
+        flagged.append({
+            "pid": int(pid),
+            "cpu": float(pcpu),
+            "age_sec": int(etimes),
+            "comm": p.get("comm", "?"),
+            "cmd": p.get("args", p.get("comm", "?")),
+            "ppid": p.get("ppid"),
+            "user": p.get("user", "?"),
+        })
+    flagged.sort(key=lambda x: -x["cpu"])
+    count = len(flagged)
+    return {
+        "count": count,
+        "state": "Warning" if count > 0 else "Idle",
+        "detail": "%d runaway process(es)" % count if count else "no runaways",
+        "processes": flagged,
+    }
+
+
+def _scan_runaway_procs() -> list[dict]:
+    """Scan all processes via ps and return raw dicts for parse_runaways."""
+    try:
+        out = subprocess.check_output(
+            ["ps", "-eo", PS_RUNAWAY_FORMAT, "--no-headers"],
+            stderr=subprocess.DEVNULL, text=True, timeout=10)
+    except Exception:
+        return []
+    procs = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, PS_RUNAWAY_FIELDS - 1)
+        if len(parts) < PS_RUNAWAY_FIELDS - 1:
+            continue
+        if len(parts) == PS_RUNAWAY_FIELDS - 1:
+            parts.append("")
+        try:
+            procs.append({
+                "pid": int(parts[0]),
+                "ppid": int(parts[1]),
+                "user": parts[2],
+                "pcpu": float(parts[3]),
+                "pmem": float(parts[4]),
+                "rss": int(parts[5]),
+                "etimes": int(parts[6]),
+                "comm": parts[7],
+                "args": parts[8],
+            })
+        except (ValueError, IndexError):
+            continue
+    return procs
+
+
+def fetch_runaways() -> dict:
+    """Scan all processes, filter to runaways, return status dict."""
+    procs = _scan_runaway_procs()
+    return parse_runaways(procs)
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 def source(name: str, fn) -> dict:
@@ -1356,7 +1462,7 @@ def run_source(name: str, fn) -> dict:
 SOURCES = (("clawgate", fetch_clawgate), ("mail", fetch_mail),
            ("alerts", fetch_alerts), ("civitai", fetch_civitai),
            ("media", fetch_media), ("airvpn", fetch_airvpn),
-           ("telemetry", fetch_telemetry))
+           ("telemetry", fetch_telemetry), ("runaways", fetch_runaways))
 
 
 def _dispatch_all(payloads) -> int:
@@ -1402,6 +1508,8 @@ def main(argv=None) -> int:
     ap.add_argument("--mock-telemetry", metavar="FILE",
                     help="parse this JSON file as a deadman verdict (see "
                          "scripts/collector/deadman.py --json)")
+    ap.add_argument("--mock-runaways", metavar="FILE",
+                    help="parse this JSON file as a list of process dicts")
     ap.add_argument("--toast", action="store_true",
                     help="with --mock-*: also run the rising-edge toast gate. "
                          "OFF by default because it MOVES THE LIVE LATCHES in "
@@ -1413,7 +1521,7 @@ def main(argv=None) -> int:
     mocking = any(x is not None for x in
                   (args.mock_clawgate, args.mock_alerts, args.mock_civitai,
                    args.mock_media, args.mock_airvpn, args.mock_mail,
-                   args.mock_telemetry))
+                   args.mock_telemetry, args.mock_runaways))
 
     if mocking:
         mocked = []
@@ -1446,6 +1554,10 @@ def main(argv=None) -> int:
             prev = read_prev_status("telemetry")
             mocked.append(("telemetry", run_source(
                 "telemetry", lambda: parse_telemetry(verdict, prev=prev))))
+        if args.mock_runaways is not None:
+            with open(args.mock_runaways) as f:
+                mocked.append(("runaways", run_source(
+                    "runaways", lambda: parse_runaways(json.load(f)))))
         # 🔴 The mock path finishes through the SAME function the live poll
         # does, so the suppression seam is reachable from a test — it used to
         # `return 0` before the toast step and three mutants in that seam

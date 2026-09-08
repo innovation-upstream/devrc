@@ -412,13 +412,28 @@ let
       { button = "left"; cmd = "${scriptsDir}/i3status-gamemode --toggle"; }
     ];
   };
+  # runaways: workbench only. Count of runaway processes (sustained high CPU).
+  # Poller scans all processes every ~45s, flags those above CPU% + age threshold.
+  # Hide-at-zero; red when >0. Left-click opens fzf TUI to view/kill offenders.
+  # Signal 19, matching SIGNALS in bar-status-poll.
+  runawaysBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-runaways";
+    json = true;
+    interval = 30;
+    signal = 19;
+    click = [
+      { button = "left"; cmd = "${scriptsDir}/runaway-menu"; }
+      { button = "right"; cmd = "alacritty --class float,float -e python3 ~/workspace/devrc/scripts/syshealth"; }
+    ];
+  };
 
   blocks =
     [ memoryBlock diskBlock netBlock cpuBlock loadBlock temperatureBlock ]
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
-    ++ lib.optionals (!isLaptop) [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock ]
+    ++ lib.optionals (!isLaptop) [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock runawaysBlock ]
     ++ [ timeBlock ]
     ++ lib.optionals (!isLaptop) [ claudeRunsBlock rigcontrolBlock ]
     ++ [ gamemodeBlock notifsBlock ];
@@ -658,6 +673,16 @@ lib.mkIf isNixOS {
   # wrapper in home.packages.
   home.file.".config/i3status-rust/scripts/deep-search" = lib.mkIf (!isLaptop) {
     source = ../scripts/deep-search;
+    executable = true;
+  };
+  # runaways: the block script (reads ~/.cache/bar-status/runaways.json) and
+  # its fzf click handler. Workbench-only, matching runawaysBlock's gate.
+  home.file.".config/i3status-rust/scripts/i3status-runaways" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-runaways;
+    executable = true;
+  };
+  home.file.".config/i3status-rust/scripts/runaway-menu" = lib.mkIf (!isLaptop) {
+    source = ../scripts/runaway-menu;
     executable = true;
   };
 

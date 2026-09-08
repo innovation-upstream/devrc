@@ -48,6 +48,7 @@ civitai_block = _load("i3status-civitai", "i3status_civitai")
 media_block = _load("i3status-media", "i3status_media")
 airvpn_block = _load("i3status-airvpn", "i3status_airvpn")
 telemetry_block = _load("i3status-telemetry", "i3status_telemetry")
+runaways_block = _load("i3status-runaways", "i3status_runaways")
 # The ONE definition of "this cache is too old to present as a measurement",
 # which every block above loads as a co-located sibling. A real `.py`, so it
 # imports by path like any module — the blocks are extensionless and cannot.
@@ -589,6 +590,7 @@ BLOCKS = [
     ("mail", mail_block, "mail", "Warning"),
     ("alerts", alerts_block, None, "Critical"),
     ("civitai", civitai_block, None, "Critical"),
+    ("runaways", runaways_block, "cogs", "Warning"),
 ]
 
 
@@ -679,6 +681,7 @@ ALL_BLOCKS = [
     ("media", media_block),
     ("airvpn", airvpn_block),
     ("telemetry", telemetry_block),
+    ("runaways", runaways_block),
 ]
 
 #: The nf-md-alert triangle the two alert blocks prepend. A LITERAL codepoint,
@@ -710,6 +713,8 @@ UNMEASURED_PILL = {
     "airvpn": {"icon": "net_vpn", "text": "", "short_text": "",
                "state": "Warning"},
     "telemetry": {"text": "tlm ?", "short_text": "tlm ?", "state": "Warning"},
+    "runaways": {"icon": "cogs", "text": "?", "short_text": "?",
+                 "state": "Warning"},
 }
 
 #: 🔴 What each block renders for a MEASURED, CURRENT, entirely quiet reading.
@@ -724,6 +729,7 @@ MEASURED_ALL_CLEAR_PILL = {
     "airvpn": {"icon": "net_vpn", "text": "", "short_text": "",
                "state": "Idle"},                      # tunnel deliberately off
     "telemetry": {"text": "", "state": "Idle"},
+    "runaways": {"text": "", "state": "Idle"},
 }
 
 
@@ -995,7 +1001,7 @@ BLOCK_SOURCE_FILES = [
     ("clawgate", "i3status-clawgate"), ("mail", "i3status-mail"),
     ("alerts", "i3status-alerts"), ("civitai", "i3status-civitai"),
     ("media", "i3status-media"), ("airvpn", "i3status-airvpn"),
-    ("telemetry", "i3status-telemetry"),
+    ("telemetry", "i3status-telemetry"), ("runaways", "i3status-runaways"),
 ]
 assert [n for n, _ in BLOCK_SOURCE_FILES] == [n for n, _ in ALL_BLOCKS]
 
@@ -1815,6 +1821,10 @@ ALARM_CACHES = {
         {"count": 3, "state": "Critical"},
         {"text": "tlm 3", "short_text": "tlm 3", "state": "Critical"},
         {"text": "tlm 3?", "short_text": "tlm 3?", "state": "Critical"}),
+    "runaways": (
+        {"count": 3, "state": "Warning", "processes": []},
+        {"icon": "cogs", "text": "3", "short_text": "3", "state": "Warning"},
+        {"icon": "cogs", "text": "3?", "short_text": "3?", "state": "Warning"}),
 }
 assert sorted(ALARM_CACHES) == sorted(n for n, _ in ALL_BLOCKS)
 
@@ -1983,6 +1993,7 @@ BLOCK_SCRIPTS = [
     ("i3status-media", "media.json", "media"),
     ("i3status-airvpn", "airvpn.json", "airvpn"),
     ("i3status-telemetry", "telemetry.json", "telemetry"),
+    ("i3status-runaways", "runaways.json", "runaways"),
 ]
 # 🔴 Pinned two-way against the block registry, so a block added to one and not
 # the other is a failure rather than a silent hole. Both lists are hand-written
@@ -2969,7 +2980,7 @@ def test_the_SOURCES_table_is_a_LEDGER_of_every_polled_source():
     """
     names = [n for n, _fn in poll.SOURCES]
     assert names == ["clawgate", "mail", "alerts", "civitai", "media", "airvpn",
-                     "telemetry"], names
+                     "telemetry", "runaways"], names
     assert len(names) == len(set(names)), "a source is polled twice: %s" % names
     for _n, fn in poll.SOURCES:
         assert callable(fn)
@@ -3367,12 +3378,12 @@ _HOME_FILE = re.compile(
 #: scriptsDir-backed custom blocks, MEASURED. The floor exists so a regex that
 #: silently stops matching fails loudly instead of vacuously passing. Raise it
 #: when you add a block; the failure message prints the number it saw.
-_EXPECTED_SCRIPT_BLOCKS = 12
+_EXPECTED_SCRIPT_BLOCKS = 13
 #: ALL block definitions, MEASURED — including the ones with no scriptsDir
 #: command. Pins the `^  }` terminator: with `^  };`, `temperatureBlock`'s
 #: `} // (if isLaptop …)` idiom swallowed `gpuBlock` whole and only 19 were
 #: found. Nothing else notices, because the swallowed block has no command.
-_EXPECTED_BLOCK_DEFS = 21
+_EXPECTED_BLOCK_DEFS = 22
 #: Ungated/gated split, MEASURED. Guards `_block_gates` itself: if gate parsing
 #: collapses to all-True or all-False (a stray `isLaptop` in a comment, the list
 #: reflowed onto one line), `checked` stays correct while the gate assertion
