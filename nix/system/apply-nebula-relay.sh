@@ -72,6 +72,33 @@ IFACE="nebula.${NET}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK="${HERE}/check-nebula-relays.sh"
 
+# 🔴 RUN THE VERIFIER THROUGH THIS SHELL, NEVER BY EXECUTING IT DIRECTLY.
+#
+# `"$CHECK" …` dispatches on the verifier's `#!/usr/bin/env bash` shebang, which
+# makes /usr/bin/env a hard runtime dependency of this script. That path does not
+# exist everywhere this repo's tests run: the `nix build .#checks…pytests` sandbox
+# has no /usr/bin, so every direct execution died with
+#
+#     /usr/bin/env: bad interpreter: No such file or directory
+#
+# surfacing as `ABORT: the verifier could not read the current config (rc=126)`.
+# rc 126 is "found but not executable" — it is NOT one of the verifier's own codes,
+# so the abort message blamed the config for an interpreter fault. That failed all
+# 20 tests in test_nebula_relay_apply.py on the sandbox tier while the dev-host tier
+# stayed green, because the dev host does have /usr/bin/env. A suite that runs in
+# two tiers has to be green in both; this is the shape where one tier is
+# structurally unable to see the bug.
+#
+# `$BASH` is the absolute path of the interpreter already running this script, so
+# the verifier runs under exactly the same shell with no PATH lookup and no
+# /usr/bin/env. Both scripts keep their shebangs — they are still run directly by
+# the operator, where /usr/bin/env exists.
+#
+# One helper rather than three call sites: the invocation was open-coded three
+# times (preflight, post-test verify, post-restart retry), and a fix applied to
+# some-but-not-all of them regrows the bug at whichever site was missed.
+run_check() { "$BASH" "$CHECK" "$@"; }
+
 die() { echo "ABORT: $*" >&2; exit 1; }
 
 # Scratch dir for everything this script writes outside $CFG.
@@ -119,7 +146,7 @@ echo "  unit      : $UNIT loaded"
 # loaded, so a stale edit that was never switched does not read as satisfied.
 PRE="$SCRATCH/pre.out"
 set +e
-"$CHECK" "$RELAY" >"$PRE" 2>&1
+run_check "$RELAY" >"$PRE" 2>&1
 pre_rc=$?
 set -e
 case "$pre_rc" in
@@ -434,7 +461,7 @@ verify_now() {   # dies on failure; retries exactly once, on ONE narrow conditio
   echo "  unit      : active"
 
   out="$SCRATCH/check.out"
-  set +e; "$CHECK" "$RELAY" >"$out" 2>&1; rc=$?; set -e
+  set +e; run_check "$RELAY" >"$out" 2>&1; rc=$?; set -e
   sed 's/^/    | /' "$out"
 
   # 🔴 THE RETRY IS NARROWER THAN rc 2. The verifier returns 2 for seven different
@@ -448,7 +475,7 @@ verify_now() {   # dies on failure; retries exactly once, on ONE narrow conditio
   if [ "$rc" = "2" ] && grep -qx 'REASON: unit-process-disagree' "$out"; then
     echo "  retry     : the running process has not picked up the new config; restarting $UNIT once"
     systemctl restart "$UNIT"
-    set +e; "$CHECK" "$RELAY" >"$out" 2>&1; rc=$?; set -e
+    set +e; run_check "$RELAY" >"$out" 2>&1; rc=$?; set -e
     sed 's/^/    | /' "$out"
   fi
   [ "$rc" = "0" ] || die "the verifier does not see $RELAY advertised by the running unit (rc=$rc)"
