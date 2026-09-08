@@ -141,6 +141,11 @@ class _Recorder(HTTPServer):
         self.claim_batches = []      # popped one per claim; [] when exhausted
         self.claim_status = 200
         self.result_status = 200
+        # The transcript DELTA STREAM rides the same poll, on the hook tier.
+        # Separate status knobs from the claim's, because the whole point of the
+        # seam tests below is that one surface failing must not disturb the other.
+        self.stream_status = 200
+        self.cursor_status = 200
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -160,7 +165,40 @@ class _Handler(BaseHTTPRequestHandler):
             batch = self.server.claim_batches.pop(0) if self.server.claim_batches else []
             self._reply(200, json.dumps({"writes": batch}).encode())
             return
+        if self.path == "/api/transcripts/stream":
+            if self.server.stream_status != 200:
+                self._reply(self.server.stream_status, b'{"error":"no"}')
+                return
+            # 🔴 THE CURSOR IS THE SERVER'S ANSWER, so this stub must actually
+            # answer one — a fake that returned only `{"ok":true}` would leave the
+            # host with no cursor to adopt and the next poll would reseed for ever,
+            # which is not the behaviour under test.
+            frame = json.loads(raw.decode() or "{}")
+            cursors = [
+                {"sessionId": s["sessionId"],
+                 "offset": s.get("offset", 0) + len(s.get("data", "").encode()),
+                 "reason": "accepted"}
+                for s in frame.get("sessions", [])
+            ]
+            self._reply(200, json.dumps(
+                {"ok": True, "applied": len(cursors), "cursors": cursors}).encode())
+            return
         self._reply(self.server.result_status, b'{"ok":true}')
+
+    def do_GET(self):  # noqa: N802 — name fixed by BaseHTTPRequestHandler
+        """The transcript stream's one READ: where the server's cursors are.
+
+        🔴 IT EXISTS SO A MISSING do_GET CANNOT BE MISTAKEN FOR A DEFECT IN THE
+        AGENT. Without it BaseHTTPRequestHandler answers 501, the stream backs
+        off, and every streaming test below would be measuring the stub.
+        """
+        self.server.requests.append({
+            "path": self.path, "body": b"", "auth": self.headers.get("Authorization"),
+        })
+        if self.server.cursor_status != 200:
+            self._reply(self.server.cursor_status, b'{"error":"no"}')
+            return
+        self._reply(200, b'{"sessions":[]}')
 
     def _reply(self, status, body):
         self.send_response(status)
@@ -2355,3 +2393,127 @@ def test_the_launch_env_KEEPS_tmux_reachable_when_the_server_PATH_lacks_it(monke
         subprocess.run([tmux_exe, "-L", sock, "kill-server"], capture_output=True,
                        env=server_env, timeout=30)
         shutil.rmtree(sockdir, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# The transcript DELTA STREAM seam.
+#
+# 🔴 THE MODULE AND THE AGENT ARE EACH TESTED IN ISOLATION ELSEWHERE, AND THAT IS
+# EXACTLY WHY THESE EXIST. `test_transcript_stream.py` drives the protocol against
+# a simulated server; the tests above drive the write path against a stub. Neither
+# ever builds the combined state, and the defect this feature can produce lives in
+# the seam nobody owns: a stream failure reaching the WRITE loop's handler, which
+# would put the agent into its 60-second backoff and delay somebody's typed reply
+# by a minute.
+# --------------------------------------------------------------------------- #
+
+
+def _projects_tree(tmp_path, session_id="stream-sess", body=None):
+    """A synthetic ~/.claude/projects tree with one session."""
+    root = tmp_path / "projects" / "-home-zach-workspace-devrc"
+    root.mkdir(parents=True, exist_ok=True)
+    f = root / f"{session_id}.jsonl"
+    f.write_text(body or (
+        '{"type":"user","sessionId":"%s","message":{"role":"user","content":"hello"}}\n'
+        % session_id), encoding="utf-8")
+    return tmp_path / "projects", f
+
+
+def _stream_posts(server):
+    return [r for r in server.requests if r["path"] == "/api/transcripts/stream"]
+
+
+def test_the_agent_streams_transcript_deltas_on_the_SAME_poll(server, tmux_stub, tmp_path):
+    """🔴 THE WHOLE CLAIM OF THIS FEATURE'S TRANSPORT: no new port, no new
+    connection, no new unit — the deltas ride the poll the write agent already
+    holds. Asserted by seeing BOTH surfaces' traffic from ONE process."""
+    projects, _ = _projects_tree(tmp_path)
+    server.claim_batches = [[write()]]
+    rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=4, env_extra={
+        "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
+
+    posts = _stream_posts(server)
+    assert posts, f"the agent never streamed a delta frame; requests={[r['path'] for r in server.requests]}\n{out}"
+    frame = json.loads(posts[0]["body"])
+    assert frame["host"] == "workbench", frame
+    assert [s["sessionId"] for s in frame["sessions"]] == ["stream-sess"], frame
+    assert frame["sessions"][0]["reset"] is True, "the first frame for an unseen file must reseed"
+
+    # 🔴 THE HOOK TOKEN, NOT THE TERMINAL ONE. Fusing the tiers would mean
+    # disarming the write surface silently takes the operator's session view with
+    # it — see transcript_round's docstring.
+    assert posts[0]["auth"] == "Bearer hook-token-for-the-stream", posts[0]["auth"]
+    claims = [r for r in server.requests if r["path"].endswith("/claim")]
+    assert claims, "the write path stopped working once streaming was added"
+    assert claims[0]["auth"] == "Bearer not-a-real-terminal-token-not-a-real-token"
+
+    # And the write itself still happened.
+    assert len(tmux_stub.send_keys_calls()) == 2, tmux_stub.send_keys_calls()
+
+
+def test_a_FAILING_transcript_stream_does_not_disturb_the_write_path(server, tmux_stub, tmp_path):
+    """🔴 THE SEAM DEFECT THIS GUARDS. Everything the stream can raise is caught
+    at the stream's own call site, NOT by the loop's handler — that handler puts
+    the agent into a 60-second backoff, so a transcript hiccup would delay a
+    typed reply by a minute. The write surface is the capability with a person
+    waiting on it."""
+    projects, _ = _projects_tree(tmp_path)
+    server.stream_status = 500
+    server.claim_batches = [[write()]]
+    rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=4, env_extra={
+        "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
+
+    assert _stream_posts(server), "the stream never even tried — this test is measuring nothing"
+    sends = tmux_stub.send_keys_calls()
+    assert len(sends) == 2, (
+        f"a FAILING transcript stream stopped the write from being delivered: {sends}\n{out}")
+    results = [r for r in server.requests if r["path"].endswith("/result")]
+    assert results and json.loads(results[0]["body"])["state"] == "delivered", out
+    assert "transcript streaming failed this poll" in out, (
+        f"the stream failure was swallowed silently: {out}")
+
+
+def test_no_hook_token_turns_streaming_OFF_and_says_so_without_touching_the_write_path(
+    server, tmux_stub, tmp_path
+):
+    """🔴 NOT FATAL, AND NOT SILENT. The transcript routes are on the hook tier;
+    a host with a terminal token but no hook token must still deliver writes, and
+    the 5-minute bulk push keeps feeding the read model. Exiting here would take
+    the write surface down over a read model's missing key."""
+    projects, _ = _projects_tree(tmp_path)
+    server.claim_batches = [[write()]]
+    rc, out = run_agent(server, tmux_stub, tmp_path, env_extra={
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
+
+    assert not _stream_posts(server), "a frame was streamed with no hook token"
+    assert "transcript streaming is OFF" in out, out
+    assert "bulk push" in out, "the log does not say what still covers the feed: " + out
+    assert len(tmux_stub.send_keys_calls()) == 2, (
+        f"the write path broke when streaming was unconfigured\n{out}")
+
+
+def test_a_transcript_stream_failure_forces_a_RE_HYDRATION_on_the_next_poll(
+    server, tmux_stub, tmp_path
+):
+    """🔴 THE MOST LIKELY CAUSE OF A STREAM FAILURE IS A REDEPLOY, which is
+    exactly when this host's cursors may no longer describe what the server
+    holds. Adopting them again is what makes the gap bounded rather than
+    permanent — so a failure must cost a cursor read, not just a retry."""
+    projects, _ = _projects_tree(tmp_path)
+    server.stream_status = 500
+    server.claim_batches = [[write()], []]
+    rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=8, env_extra={
+        "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
+
+    cursor_reads = [r for r in server.requests if r["path"] == "/api/transcripts/stream/cursors"]
+    assert len(cursor_reads) >= 2, (
+        f"the cursors were read {len(cursor_reads)} time(s) across repeated stream failures — "
+        f"hydration happens once per agent lifetime, so a failure that does not clear it leaves "
+        f"the host resending against cursors the server may no longer hold\n{out}")

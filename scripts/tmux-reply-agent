@@ -1038,14 +1038,17 @@ def main(argv: list[str]) -> int:
         # The write surface is the capability with a person waiting on it.
         if stream_state is not None:
             try:
-                counts = transcript_round(api, hook_token, host, stream_state)
+                # 🔴 THE RESULT IS DELIBERATELY NOT INSPECTED FOR REFUSALS. A
+                # refusal is the NORMAL way a host that fell out of step learns
+                # where the server got to — it happens on every redeploy and after
+                # every bulk push — so logging or counting it as a fault would fire
+                # the one signal this loop has at exactly the moments the design
+                # is working. An earlier revision had a `if counts["refused"]:`
+                # branch here that assigned the empty string it had just been
+                # assigned: dead code that read as a decision.
+                transcript_round(api, hook_token, host, stream_state)
                 if stream_problem:
                     log("transcript streaming is working again")
-                    stream_problem = ""
-                if counts.get("refused"):
-                    # A refusal is NORMAL — it is how a host that fell out of step
-                    # learns where the server got to — so it is not an error, but a
-                    # SUSTAINED refusal is worth seeing.
                     stream_problem = ""
             except Exception as exc:  # noqa: BLE001 — must never affect the write path
                 reason = f"{exc!r}"
