@@ -26,9 +26,9 @@ command unrunnable, which is why fixing the first didn't appear to help:
    be reached. Fixed by probing without injecting.
 
 🔴 **Every doc misattributed both symptoms to an opencode *version* problem for the
-entire arc.** They are not version-related — both hosts run 1.18.21 (verified at
-the consumer 2026-08-29), and the browser-only resolution was measured identical
-on 1.18.4, 1.18.16 and 1.18.18. It has NOT been re-derived at 1.18.21; it held
+entire arc.** They are not version-related — both hosts run 1.18.29 (verified at
+the consumer 2026-09-08), and the browser-only resolution was measured identical
+on 1.18.4, 1.18.16 and 1.18.18. It has NOT been re-derived at the current pin; it held
 across every bump that was measured, which is why the version hypothesis stays
 closed. Do not re-open it.
 
@@ -250,8 +250,8 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   fail-closed property is *verified at runtime* rather than trusted — on any
   opencode where the host-tool denial didn't take, `browser agent` refuses instead
   of running the model unconfined. The gate runs BEFORE the tab is opened, so a
-  gate failure leaks no tab. **Both hosts run 1.18.21** (verified at the consumer
-  2026-08-29); the browser-only resolution itself is last measured on 1.18.18,
+  gate failure leaks no tab. **Both hosts run 1.18.29** (verified at the consumer
+  2026-09-08); the browser-only resolution itself is last measured on 1.18.18,
   and resolved identically on 1.18.4 and 1.18.16 before that — there is no
   version-skew caveat between the hosts, but the resolution is not re-derived at
   the current pin.

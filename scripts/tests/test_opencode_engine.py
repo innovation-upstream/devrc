@@ -11,7 +11,7 @@ duplicate of it).
   That is a real gap, and it is exactly the gap the version pin exists to cover:
   a config whose keys are unchanged can have its RESOLVED MEANING changed by the
   binary underneath it. opencode.jsonc's header documents a large set of
-  behaviours annotated "measured on v1.18.21 — do not re-derive" — last-match-
+  behaviours annotated "measured on v1.18.29 — do not re-derive" — last-match-
   wins ordering, hidden agents inheriting the global permission block, the exact
   tool set. A static test cannot see any of those change. This file runs the
   real engine and checks them.
@@ -91,7 +91,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OC_DIR = ROOT / "scripts" / "opencode"
 TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 
-# 🔴 THE PIN. Every "measured on v1.18.21" claim in opencode.jsonc's header, in
+# 🔴 THE PIN. Every "measured on v1.18.29" claim in opencode.jsonc's header, in
 # scripts/opencode/README.md and in test_opencode_config.py's docstrings is keyed
 # to this exact version. It is pinned declaratively by nix/pkgs/tools/default.nix
 # resolving `pkgs.opencode` out of flake.lock's nixpkgs.
@@ -190,9 +190,37 @@ TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 #     not apply: `nix profile list` carries no opencode entry, and PATH resolves
 #     into /nix/store/...-opencode-1.18.21 out of the flake itself. This is a
 #     genuine lock movement, not per-host profile drift.
-PINNED_VERSION = "1.18.21"
+#
+# 🔴 RE-DERIVED 1.18.21 -> 1.18.29 (2026-09-08) — the lock moved again, under a
+# config this repo did not touch. Same class, same method as the entry above, so
+# only what is NEW or DIFFERENT is written down here:
+#
+#   * THE CONTROL. This whole file against the NEW binary with the OLD pin:
+#     1 failed (exactly the version assertion below), 24 passed. The
+#     engine-vs-model conformance tests, the resolved tool maps and the ordered
+#     permission arrays all hold, so the harness DISCRIMINATES rather than being
+#     green by default. Both sibling files together: 1 failed, 664 passed.
+#   * BOTH HOSTS AT THE CONSUMER, measured not assumed: workbench and laptop
+#     each resolve `readlink -f $(command -v opencode)` to the SAME store path,
+#     /nix/store/6pw7n475sa1d4scq8sy1qkdn2bcy0glc-opencode-1.18.29, and each
+#     reports zero `opencode` entries in `nix profile list`.
+#   * THE LOCK IS THE CAUSE, proven rather than inferred: building `opencode`
+#     from flake.lock's own nixpkgs rev 42f17a57f4f6e33b3de3dca0a2a5ea5233169d02
+#     yields that identical store path. So PATH is serving the flake's binary —
+#     the DEV-HOST cause the assertion names first does not apply here, which is
+#     why that message now prints the resolved path instead of guessing.
+#   * THE TOOL NAMESPACE was re-derived directly, because several docs assert it
+#     in the present tense: the union of the resolved tool KEYS across all seven
+#     agents is exactly {bash, edit, glob, grep, invalid, question, read, skill,
+#     task, todowrite, webfetch, write} — `list` and `websearch` appear in none.
+#     That is what re-keys those claims rather than relabelling them.
+#   * NOT REPEATED, and named so nobody reads this as more than it is: the
+#     seven-agent dual dump under both binaries (same reasoning as the entry
+#     above), and the browser-agent browser-only resolution, which is not in
+#     ENGINE_AGENTS and whose docs say so on their own lines.
+PINNED_VERSION = "1.18.29"
 
-# MEASURED via `opencode debug agent nav --pure` at 1.18.21. This is the cost AND
+# MEASURED via `opencode debug agent nav --pure` at 1.18.29. This is the cost AND
 # blast-radius pin that test_opencode_config.py's `test_nav_is_kept_lean` only
 # asserts about the CONFIG KEYS; here it is read off the engine's resolved tool
 # map. `skill` alone injects the ~3,730-token catalogue on every request.
@@ -661,8 +689,24 @@ def test_engine_is_the_version_every_measurement_is_keyed_to():
     signal, and it clears with the documented one-time per-host prerequisite:
 
         nix profile remove opencode   # then home-manager switch / ship.sh
+
+    🔴 BUT THAT IS ONLY ONE OF TWO CAUSES, and the other one is now the common
+    one. A nixpkgs bump in flake.lock moves the binary under an unchanged
+    config, which is the class this whole file exists to catch — and its fix is
+    the opposite of the profile fix: re-derive, then re-key. The failure message
+    below therefore reports the RESOLVED store path (which spells the version)
+    and hands over the one command that DISCRIMINATES the two, instead of
+    leading with whichever cause was more common when it was written.
     """
     exe = _opencode_bin()
+    # 🔴 The RESOLVED path, not the PATH entry. `~/.nix-profile/bin/opencode` is
+    # the same string whether home-manager or an imperative `nix profile install`
+    # put it there, so the PATH entry cannot tell the two causes apart — the
+    # store path it resolves to can, and it names the version for free. Measured
+    # 2026-09-08: this message led with "usually the imperative profile entry",
+    # the host had ZERO such entries, and the advice would have sent the reader
+    # to `nix profile remove` for a genuine lock movement.
+    resolved = Path(exe).resolve()
     # Through `_run_opencode` like everything else. `--version` is ~7 bytes and
     # would survive a pipe today — but "small enough to be safe" is a claim about
     # the CURRENT output, and routing it here means this module has exactly ONE
@@ -676,13 +720,22 @@ def test_engine_is_the_version_every_measurement_is_keyed_to():
         f"claim in scripts/opencode/opencode.jsonc, scripts/opencode/README.md "
         f"and scripts/tests/test_opencode_config.py is keyed to "
         f"{PINNED_VERSION!r}.\n"
-        f"  * On a DEV HOST this usually means the old imperative profile entry "
-        f"is still winning PATH. Fix: `nix profile remove opencode`, then "
-        f"`home-manager switch --flake ~/workspace/devrc --impure`.\n"
-        f"  * If flake.lock genuinely moved opencode, do NOT just bump "
-        f"PINNED_VERSION: re-derive the header's measurements against the new "
-        f"binary first (the rest of this file tells you which ones changed), "
-        f"then update both together."
+        f"  ran: {exe}\n"
+        f"  resolved: {resolved}\n"
+        f"🔴 That path names the version, so WHICH BINARY ran is not in doubt. "
+        f"What it does not say is WHICH CAUSE — do not guess, run the control:\n"
+        f"    nix build --no-link --print-out-paths \\\n"
+        f"      \"github:NixOS/nixpkgs/$(jq -r .nodes.nixpkgs.locked.rev "
+        f"flake.lock)#opencode\"\n"
+        f"  * SAME store path -> flake.lock genuinely MOVED opencode under an "
+        f"unchanged config. Do NOT just bump PINNED_VERSION: re-derive the "
+        f"header's measurements against the new binary first (the rest of this "
+        f"file tells you which ones), then update the pin and every re-keyed "
+        f"claim in PIN_SURFACE together.\n"
+        f"  * DIFFERENT store path -> this host is serving an opencode the flake "
+        f"did not build, i.e. the old imperative profile entry is still winning "
+        f"PATH. Fix: `nix profile remove opencode`, then "
+        f"`home-manager switch --flake ~/workspace/devrc --impure`."
     )
 
 
@@ -797,6 +850,34 @@ _VERSION_RE = re.compile(
 # nothing and reads as an orphan. Snippets carry no version literal of their own,
 # or they would match themselves when this file is scanned.
 HISTORICAL_VERSION_CLAIMS = (
+    # 🔴 Added by the 2026-09-08 re-derivation pass. Same rule as every entry
+    # below: a claim the engine tests do NOT re-derive is FROZEN and enumerated,
+    # never relabelled. (No version literals in THIS comment — a number here is
+    # itself a claim in the pin surface.)
+    ("scripts/tests/test_opencode_engine.py", "— the lock moved again",
+     "names this pass's own transition, by its version pair"),
+    ("scripts/tests/test_opencode_engine.py", "permission arrays — holds on",
+     "the PRIOR pass's control result, stated at the version it was run on"),
+    ("scripts/tests/test_opencode_engine.py", "out of the flake itself",
+     "the PRIOR pass's store-path observation — a dated fact about that host, then"),
+    ("scripts/tests/test_opencode_engine.py", "store path), so those lines now carry",
+     "the dated consumer re-verification that retired the deployed-state exemptions"),
+    # 🔴 FROZEN, NOT re-keyed, and this REVERSES what the previous pass did to
+    # this line. The module header above already names it as out of scope ("the
+    # k8s 'index 74 after all 30 global rules' incident record, whose counts
+    # describe a tree that no longer exists"), and its sibling copy in
+    # test_opencode_config.py is ledgered on exactly that ground. Re-keying it
+    # asserts those counts were re-measured on the pinned binary; they were not,
+    # and they are already known to be false today (66 global bash rules). The
+    # STRUCTURAL claim beneath it — agent rules append AFTER the global block —
+    # IS re-derived, by the engine-vs-model conformance tests.
+    # ⚠ Consequence, stated rather than hidden: the two copies of this incident
+    # now disagree about which version it was measured on, because relabelling
+    # moved one of them and not the other. Freezing stops the drift; it does not
+    # undo it, and nothing here can recover the original number.
+    ("scripts/opencode/agent/k8s.md", "global deny/ask at a stroke. Measured on",
+     "a dated incident record whose rule INDEX and COUNT describe a tree that no "
+     "longer exists, so no fresh run can confirm the sentence"),
     # 🔴 Added by the 2026-08-29 re-derivation pass. Each is a claim the engine
     # tests do NOT re-derive, so re-keying it would have been relabelling a
     # measurement nobody repeated — the exact thing this ledger exists to stop.
@@ -1166,7 +1247,7 @@ def test_engine_and_model_agree_on_every_pinned_command(engine_name, model_agent
 # --------------------------------------------------------------------------- #
 def test_engine_resolves_navs_tool_set_to_exactly_the_pinned_four():
     """test_opencode_config.py's `test_nav_is_kept_lean` docstring says "VERIFIED
-    against `opencode debug agent nav` on 1.18.21: the resolved tool set is
+    against `opencode debug agent nav` on 1.18.29: the resolved tool set is
     exactly {glob, grep, read} (+ the internal `invalid`)" — but that file
     asserts only the CONFIG KEYS, so the verification was a one-off nobody
     re-ran. This re-runs it every gate.
