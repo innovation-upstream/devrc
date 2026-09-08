@@ -1349,13 +1349,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def _store_timeout(args: argparse.Namespace) -> int:
     """The store commands' bound, resolved in ONE place.
 
-    🔴 THE SENTINEL CREATED FOUR CHANCES TO FORGET. `--timeout` defaults to
-    `None` rather than to `DEFAULT_TIMEOUT`, so every store call site has to
-    resolve it — and mutating all four to pass the raw `None` through kept the
-    whole suite green: a `None` reaches `urllib` as NO timeout, the same
-    unbounded wait `cairn_who._run` refuses on the other side of the split. One
-    resolver, four callers, and `test_no_call_site_passes_the_RAW_sentinel_attribute`
-    pins that no fifth caller open-codes it, while
+    🔴 THE SENTINEL CREATES ONE CHANCE TO FORGET PER CALL SITE. `--timeout`
+    defaults to `None` rather than to `DEFAULT_TIMEOUT`, so every store call
+    site has to resolve it — and mutating them to pass the raw `None` through
+    kept the whole suite green: a `None` reaches `urllib` as NO timeout, the
+    same unbounded wait `cairn_who._run` refuses on the other side of the split.
+    ⚠ An earlier draft of this paragraph asserted "FOUR chances" and "four
+    callers". MEASURED at this commit and at the fork point alike: there are
+    NINE `_store_timeout(args)` sites, so the count was wrong when it was
+    written and the split did not move it. Nothing asserts on it — a number no
+    test pins is unpinned by construction — so it is stated as "every site"
+    rather than re-counted into the next drift.
+    `test_no_call_site_passes_the_RAW_sentinel_attribute`
+    pins that no further caller open-codes it, while
     `test_every_STORE_subcommand_reaches_the_network_with_a_POSITIVE_bound`
     covers the spellings an AST scan cannot see. `fetch_snapshot` refuses a
     non-positive bound outright, so a future caller that bypasses both

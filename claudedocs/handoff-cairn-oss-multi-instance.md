@@ -252,15 +252,34 @@ countable.
    forcing: none — done
 
 3. 🔨 **HALF DONE — Phase A3, devrc consumes cairn as a pinned flake input.**
-   🔴 **IN FLIGHT ELSEWHERE — `claim-work` slug `cairn-oss-multi-instance-3` is HELD by another
-   session** (taken 2026-09-08 ~01:45Z) for the **first slice only**: re-home `cairn who` as its
-   own `cairn-who` binary + extract `unbounded_timeout_reason` into devrc `lib/timeouts.py`.
-   That session explicitly did NOT pin the flake and did NOT touch the `entry_shape`/writer fork.
+   🔴 **IN FLIGHT — `claim-work` slug `cairn-oss-multi-instance-3`, taken 2026-09-08 ~01:45Z
+   for the FIRST SLICE ONLY**: re-home `cairn who` as its own `cairn-who` binary + extract
+   `unbounded_timeout_reason` into devrc `lib/timeouts.py`. That slice explicitly does NOT pin
+   the flake and does NOT touch the `entry_shape`/writer fork.
    - **Half 1 — ✅ MERGED 2026-09-08: `ZacxDev/cairn`#4, squash `218b6c1`.**
-   - **Half 2 — the rest is still open** after that slice: pin the input in `flake.nix`, move
-     `~/.local/bin/cairn` into `/nix/store`, point the writer at the pinned `entry_shape`, and
-     decide the fate of devrc's five duplicated `lib/` modules. 🔴 **THE OPERATOR FORK IS STILL
-     UNANSWERED and must be put before building** — see the fork investigation above.
+   - **Half 2 — one slice of four is in review; the rest is still open.** Remaining: pin the
+     input in `flake.nix`, move `~/.local/bin/cairn` into `/nix/store`, point the writer at
+     the pinned `entry_shape`, and decide the fate of devrc's five duplicated `lib/` modules.
+     🔴 **THE OPERATOR FORK IS STILL UNANSWERED and must be put before building** — see the
+     fork investigation above.
+     - **The slice is devrc PR #1381.** Extracting `unbounded_timeout_reason` is not optional
+       there: the store path reached that predicate by importing the whole `who` module, a
+       reach that breaks the moment the two are separate binaries, and re-open-coding it
+       recreates the two-copies bug the predicate already caused once.
+       🔴 **Merging it requires a `home-manager switch`.** The `who` REMOVAL is live on merge
+       (`~/.local/bin/cairn` is an out-of-store symlink), but `~/.local/bin/cairn-who` is
+       created by ACTIVATION, and the deployed skill copy still says `cairn who` until the
+       switch. Between merge and switch the capability is unavailable.
+     ⚠ Every `cairn who` spelling elsewhere in this doc — and in
+     `handoff-cairn-task-linkage.md` and `proposal-cairn-session-capture.md` — becomes the
+     DEAD spelling once #1381 merges, and exits 2. They are left as written because they
+     record what was true when written; do not copy a command out of them.
+   🔴 `nix/home.nix` deploys `scripts/cairn` as an `mkOutOfStoreSymlink` and the comment above
+   that entry says it is REQUIRED, not preferred, because `.resolve()` must land beside `lib/`.
+   (⚠ This bullet cited `:1474` and `:1467`; both were already wrong at `c5e425c7`, landing on
+   unrelated `shell-env-nudge` comments — so no line numbers. Grep for
+   `mkOutOfStoreSymlink is NOT a preference`.) **#4 solves exactly that** by installing script
+   and `lib/` together under `libexec`. Client edits will then need a `home-manager switch`.
    **Closing condition:** a merged devrc PR in which `flake.nix` names cairn as an input and
    `readlink -f ~/.local/bin/cairn` resolves into `/nix/store`. Re-verified NOT met 2026-09-08.
    forcing: none

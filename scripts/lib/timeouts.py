@@ -16,9 +16,15 @@ that reach, and the cheap repair — re-open-coding the check on the store side 
 is exactly the two-copies state above. The predicate lives here instead, imported
 by BOTH binaries, so the two halves cannot drift apart again now that they are
 two programs rather than one.
-`test_the_timeout_predicate_has_exactly_ONE_implementation` pins that
-structurally, over `scripts/cairn`, `scripts/cairn-who`, `cairn_who.py` and
-this file.
+`test_the_timeout_predicate_has_exactly_ONE_implementation` pins that over the
+three CONSUMERS — `scripts/cairn`, `scripts/cairn-who`, `cairn_who.py` — using
+this file as its POSITIVE CONTROL rather than as a fourth subject. ⚠ An earlier
+draft of this sentence claimed the guard pinned it "structurally … and this
+file"; both halves were false. It matched on a parameter NAME (`timeout`), so a
+copy spelled `isinstance(t, int)` — or pasted from the predicate below, whose
+parameter is `value` — walked straight past it; and asserting ZERO over the file
+that OWNS the check could only ever pass, which is slack wearing the shape of
+coverage. Read the guard before quoting its reach.
 
 ⚠ THERE IS NO SHARED `DEFAULT_TIMEOUT` HERE, DELIBERATELY. The two callers have
 DIFFERENT bounds for measured reasons — the store's 20s is tuned for an HTTP

@@ -181,10 +181,22 @@ def test_BOTH_sides_import_the_predicate_from_the_module_that_owns_it():
     scan; this owns the positive side — every file that USES the rule gets it
     from `timeouts`.
     """
+    # ⚠ BOTH IMPORT SPELLINGS PASS, DELIBERATELY. An earlier version required
+    # the literal `from timeouts import unbounded_timeout_reason`, which reddens
+    # on `import timeouts` + `timeouts.unbounded_timeout_reason(...)` — an
+    # equally correct refactor producing identical behaviour. A guard that
+    # reddens on a correct tree reports a problem the tree does not have, and
+    # the next author's fix is to weaken the guard. What must hold is that the
+    # name resolves to THIS module, not how it was spelled.
     for path in (CAIRN, LIB / "cairn_who.py"):
         src = path.read_text(encoding="utf-8")
-        assert "from timeouts import unbounded_timeout_reason" in src, (
-            f"{path.name} does not import the shared predicate from `timeouts`")
+        from_form = "from timeouts import unbounded_timeout_reason" in src
+        module_form = "import timeouts" in src and (
+            "timeouts.unbounded_timeout_reason(" in src)
+        assert from_form or module_form, (
+            f"{path.name} does not take the shared predicate from `timeouts` — "
+            f"neither `from timeouts import unbounded_timeout_reason` nor "
+            f"`import timeouts` + `timeouts.unbounded_timeout_reason(...)`")
         assert "unbounded_timeout_reason(" in src, (
             f"{path.name} imports the predicate but never calls it — a dead "
             "import is not a guard")
@@ -301,19 +313,70 @@ def test_cairn_who_is_deployed_OUT_OF_STORE_like_its_sibling():
         f"`cairn-who` points somewhere unexpected: {assignment.strip()!r}")
 
 
-def test_the_nix_comment_no_longer_claims_cairn_reaches_cairn_who():
-    """🔴 A COMMENT IS A CLAIM. The `cairn` deploy comment justified
-    mkOutOfStoreSymlink by naming `cairn_who` imports at three line numbers
-    inside `scripts/cairn`. Those importers are gone; a maintainer reading the
-    stale version would go looking for a coupling that no longer exists, and
-    could reasonably conclude the requirement lapsed with it. It has not — the
-    requirement now rests on each script's OWN `lib/` lookup.
+def test_the_nix_deploy_comment_still_states_why_the_MODE_is_required():
+    """The `cairn` deploy comment must keep saying why `mkOutOfStoreSymlink` is
+    REQUIRED — a store copy resolves `__file__` into /nix/store, where
+    `scripts/lib/` is not deployed, and the client dies on import.
+
+    ⚠ RENAMED, AND NARROWER THAN THE NAME IT HAD. It was
+    `test_the_nix_comment_no_longer_claims_cairn_reaches_cairn_who`, which
+    described an invariant three drafts failed to express — the body now checks
+    something strictly weaker, and the old name would have read as coverage
+    this does not provide. The full account of what is and is not pinned, and
+    why the stronger versions were withdrawn, is in the comment block below;
+    read it before widening this docstring back.
     """
     nix = NIX_HOME.read_text(encoding="utf-8")
-    block = nix.split('home.file.".local/bin/cairn".source', 1)[0][-1400:]
-    assert "for `cairn_who`" not in block, (
-        "nix/home.nix still justifies cairn's deploy mode by its `cairn_who` "
-        "imports — `scripts/cairn` no longer has any")
+    lines = nix.splitlines()
+    anchor = next(
+        (i for i, ln in enumerate(lines)
+         if 'home.file.".local/bin/cairn".source' in ln), None)
+    assert anchor is not None, (
+        'nix/home.nix has no `home.file.".local/bin/cairn".source` entry')
+
+    # The comment block is however many contiguous `#` lines sit immediately
+    # above the entry — no character budget to slide off.
+    start = anchor
+    while start > 0 and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    block = "\n".join(lines[start:anchor])
+    assert block.strip(), (
+        "the `cairn` deploy entry has no comment above it at all — the "
+        "requirement it documents is load-bearing, so its disappearance is "
+        "the same defect as its going stale")
+
+    # 🔴 WHAT THIS GUARD DOES NOT COVER — stated because reading it as wider
+    # than it is would stop the next person looking, which is worse than no
+    # guard at all.
+    #
+    # The invariant worth pinning is "the comment does not JUSTIFY the deploy
+    # mode by a coupling that no longer exists". Two drafts failed to express
+    # it, and both failures are recorded here so a third is not derived:
+    #
+    #   1. a SPELLING check (`"for `cairn_who`" not in block`). Walkable by
+    #      rewording — the shipped comment says "for the `cairn_who` importers"
+    #      and passed on the inserted "the" alone.
+    #   2. deriving "does the code actually reach it" and permitting the
+    #      mention only then. First by substring, which the script's OWN PROSE
+    #      satisfies (`_store_timeout`'s docstring names `cairn_who._run`), so
+    #      the assertion was unreachable — MEASURED: the reworded justification
+    #      left it GREEN. Then by AST, which is accurate about the code and
+    #      still WRONG here, because it forbids the RETRACTION: this comment
+    #      legitimately records that it "used to cite ... for the `cairn_who`
+    #      importers ... all four stale". A live justification and a record of
+    #      one being removed are the same tokens in a different mood, and no
+    #      text predicate available here separates them.
+    #
+    # So this guard asserts only that the comment BLOCK IS STILL THERE. Its
+    # disappearance is a real defect — the requirement it documents is
+    # load-bearing and a store copy silently breaks the lib lookup — and that
+    # much is checkable. Whether its CONTENT still tells the truth is not
+    # pinned by anything, and a human review is what covers it.
+    assert "mkOutOfStoreSymlink" in block or "REQUIRED" in block, (
+        "the `cairn` deploy comment no longer states why the deploy MODE is "
+        "required. A store copy resolves `__file__` into /nix/store, where "
+        "scripts/lib/ is not deployed, and the client dies on import — that "
+        "reason must survive in the comment even when the rest is rewritten.")
 
 
 def test_the_SKILL_routes_to_the_binary_not_the_dead_subcommand():

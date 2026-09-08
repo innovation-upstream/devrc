@@ -1199,31 +1199,67 @@ def test_both_entry_points_ACCEPT_the_same_positive_bound():
 
 
 def test_the_timeout_predicate_has_exactly_ONE_implementation():
-    """🔴 One rule, one place — asserted structurally, not by convention.
+    """🔴 One rule, one place — and the pattern is proved able to MATCH.
 
-    A second `isinstance(timeout, int)` anywhere in this CLI is the copy that
-    drifts. Searching the tree is how the disagreement was found; this is how
-    it stays found.
+    A re-open-coded int check in a CONSUMER is the copy that drifts. Searching
+    the tree is how the disagreement was found; this is how it stays found.
+
+    ⚠ AN EARLIER VERSION OF THIS GUARD WAS NARROWER THAN ITS OWN DESCRIPTION,
+    and `timeouts.py`'s docstring called it "structural" when it was spelled.
+    It searched for `isinstance(timeout, int)` — the parameter NAME — so a copy
+    written `isinstance(t, int)`, or pasted from the predicate itself (whose
+    parameter is `value`), was invisible. It also asserted ZERO over
+    `timeouts.py`, the one file where the check legitimately lives; that arm
+    could only ever pass, which made the owner file's inclusion dead slack
+    rather than coverage.
+
+    Two changes: the pattern no longer names a variable, and the owner file is
+    the POSITIVE CONTROL — a reassuring zero across the consumers is worthless
+    unless the pattern is shown to match SOMETHING.
     """
-    import re
+    import ast
 
-    # 🔴 EVERY FILE ON EITHER SIDE OF THE SPLIT, INCLUDING THE NEW LAUNCHER AND
-    # THE MODULE THAT OWNS THE RULE. Listing only the two originals would leave
-    # `scripts/cairn-who` free to open-code a third copy — the site a reader
-    # would most plausibly add one to, since it is the file that looks like the
-    # `who` entry point now.
+    def opencoded_sites(path):
+        """`isinstance(<anything>, int)` CALLS — parsed, never grepped.
+
+        ⚠ A REGEX OVER THE SOURCE COUNTS PROSE, and that is not hypothetical:
+        the first version of this guard used one, and its own positive control
+        was satisfied by the DOCSTRING two frames up, which spells
+        `isinstance(t, int)` while explaining the hazard. MEASURED — rewriting
+        the owner's real check to `type(value) is int` left the control GREEN
+        on the strength of that sentence alone. Comments vanish at parse time
+        and docstrings become Constant nodes, so only real calls are counted.
+        """
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        n = 0
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "isinstance"
+                    and len(node.args) == 2
+                    and isinstance(node.args[1], ast.Name)
+                    and node.args[1].id == "int"):
+                n += 1
+        return n
+
+    owner = REPO_ROOT / "scripts" / "lib" / "timeouts.py"
+    # 🔴 POSITIVE CONTROL FIRST. If this is 0 the check has stopped seeing the
+    # implementation it was written for, and every zero below is a fact about
+    # this function rather than about the consumers.
+    owner_hits = opencoded_sites(owner)
+    assert owner_hits >= 1, (
+        f"found {owner_hits} `isinstance(_, int)` calls in the file that OWNS "
+        f"the predicate — this check can no longer see the very construct it "
+        f"searches for, so the consumer zeros below prove nothing")
+
+    # 🔴 EVERY CONSUMER ON EITHER SIDE OF THE SPLIT, INCLUDING THE NEW LAUNCHER
+    # — the site a reader would most plausibly add a copy to, since it is the
+    # file that looks like the `who` entry point now. The owner is deliberately
+    # NOT in this list; it is the control above.
     for path in (REPO_ROOT / "scripts" / "cairn",
                  REPO_ROOT / "scripts" / "cairn-who",
-                 REPO_ROOT / "scripts" / "lib" / "cairn_who.py",
-                 REPO_ROOT / "scripts" / "lib" / "timeouts.py"):
-        src = path.read_text(encoding="utf-8")
-        # 🔴 EXACTLY ZERO, not "at most one". The earlier bound allowed one
-        # copy on the theory that the predicate's own body is a legitimate
-        # site — but its parameter is `value`, not `timeout`, so this pattern
-        # never matched inside it, and the allowance was dead slack permitting
-        # one genuine re-open-coded copy. Measured: an agreeing duplicate in
-        # `_run` SURVIVED under the old bound.
-        opencoded = len(re.findall(r"isinstance\(\s*timeout\s*,\s*int\s*\)", src))
+                 REPO_ROOT / "scripts" / "lib" / "cairn_who.py"):
+        opencoded = opencoded_sites(path)
         assert opencoded == 0, (
             f"{path.name} open-codes the timeout predicate at {opencoded} "
             "site(s) — import `unbounded_timeout_reason` instead so the "

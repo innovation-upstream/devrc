@@ -64,8 +64,17 @@ from typing import Any, Sequence
 # rule by importing this module; now that they are two binaries, `timeouts.py`
 # is what keeps the two copies from drifting apart again. See its docstring for
 # the disagreement that consolidating them found.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from timeouts import unbounded_timeout_reason  # noqa: E402,F401
+# ⚠ GUARDED, like every other `sys.path` insert in this file (`find_transcript`)
+# and like the `_cairn_who` shim this replaced. Unconditional, it moved
+# `scripts/lib` to `sys.path[0]` for the WHOLE process on every import of this
+# module — a side effect on the importer, not on us. No collision is measured
+# today (nothing in `scripts/lib/` shadows a stdlib or site-packages name, and
+# `timeouts` resolves nowhere else), so this is consistency and blast-radius
+# hygiene, not a fix for an observed break.
+_LIB = str(Path(__file__).resolve().parent)
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+from timeouts import unbounded_timeout_reason  # noqa: E402
 
 #: How long to wait on each external tool. `session-manager` shells into tmux on
 #: two hosts and a full cross-host scan measured ~5s; the laptop being asleep is

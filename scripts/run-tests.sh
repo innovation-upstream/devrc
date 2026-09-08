@@ -1685,12 +1685,19 @@ TARGET_FLOORS=(
   # arithmetic on the two sides. Pinned AFTER merging main into the branch, per
   # the ORDER note above.
   # 2026-09-07, the `cairn-who` split: 12870 collected, so 12793 carried 77 of
-  # SLACK — more than the 20-test suite this branch adds could vanish with the
-  # gate still green, which is the exact "three PRs landed without bumping it"
-  # drift the header calls out. 12870 - min(50, max(1, 12870/20)) = 12870 - 50 =
-  # 12820, the gate's own printed count put through the rule. Pinned AFTER
-  # rebasing onto origin/main (c5e425c7), per the ORDER note above — the count
-  # is from the rebased tree, not from either side alone.
+  # SLACK — the "three PRs landed without bumping it" drift the header calls
+  # out. 12870 - min(50, max(1, 12870/20)) = 12870 - 50 = 12820, the gate's own
+  # printed count put through the rule. Pinned AFTER rebasing onto origin/main
+  # (c5e425c7), per the ORDER note above — the count is from the rebased tree,
+  # not from either side alone.
+  # ⚠ WHAT THIS DOES NOT CLOSE, because an audit round read the sentence above
+  # as if it did: the ratchet removes the ACCUMULATED drift (77 -> 50), not the
+  # per-target slack, and 50 is what the rule deliberately leaves. This
+  # branch's own 20-test suite is still INSIDE that band, so deleting
+  # `test_cairn_split.py` wholesale would not redden this floor. That is the
+  # documented trade at line 1083, not a defect here — but the floor is not
+  # the thing standing between that file and silent deletion, and nothing in
+  # this entry should be read as claiming otherwise.
   "scripts/tests|12820"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
