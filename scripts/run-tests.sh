@@ -1695,7 +1695,22 @@ TARGET_FLOORS=(
   # than it does: the ratchet removes ACCUMULATED drift, not the per-target
   # slack, and ~50 is what the rule deliberately leaves. A suite inside that
   # band is not protected from silent deletion by this floor.
-  "scripts/tests|12927"
+  #
+  # 2026-09-08, the cairn flake pin: 13076 collected, so 12927 carried 149 of
+  # SLACK. 13076 - min(50, max(1, 13076/20)) = 13076 - 50 = 13026, the
+  # AUTHORITATIVE gate's own printed count put through the documented rule, and
+  # pinned AFTER rebasing onto origin/main (01956bf0) per the ORDER note — a
+  # floor is a claim about the tree you measured.
+  # ⚠ THE +8 IS THIS BRANCH'S AND WAS ATTRIBUTED, NOT ASSUMED. The same gate ran
+  # on PLAIN origin/main in a separate detached worktree as the control and
+  # printed collected=13068; the branch printed 13076. The delta is exactly
+  # `scripts/tests/test_cairn_flake_pin.py`'s 8 tests, and all 8 pass.
+  # ⚠ Both runs also reported failed=20, every one in `test_nebula_relay_apply.py`
+  # (arrived with #1272). Identical on both sides, so main is red on its own and
+  # this branch adds no failure — which is why the count above is trustworthy
+  # despite a red gate. The `age`/`opencode` 7 that were red earlier today are
+  # GONE; main fixed them. Re-derive this baseline rather than quoting it.
+  "scripts/tests|13026"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
