@@ -65,7 +65,23 @@ class FakeServer:
     def __init__(self):
         self.tails: dict[str, str] = {}
         self.offsets: dict[str, int | None] = {}
+        self.hosts: dict[str, str] = {}
         self.frames: list[dict] = []
+
+    def bulk_push(self, session_id: str, tail: str, file_bytes, host: str = "workbench"):
+        """The 5-minute reconciler's write, modelled.
+
+        🔴 THIS IS THE WRITER THE FAKE DID NOT HAVE, AND ITS ABSENCE HID A
+        BLOCKER. The two feeders write the same row; nothing on this side modelled
+        the other one, so a disagreement between them (the bulk push stamping a
+        different `host`, or a NULL cursor) was invisible to every test here. It
+        took an adversarial audit reading two units' environment blocks to find
+        it. A fake that models only the writer under test is a fake that cannot
+        see a seam.
+        """
+        self.tails[session_id] = tail[-self.MAX_TAIL:]
+        self.offsets[session_id] = file_bytes  # None = UNKNOWN, as the server stores it
+        self.hosts[session_id] = host
 
     # the two callables run_round expects
     def get(self, path):
@@ -93,17 +109,26 @@ class FakeServer:
                 tail = (self.tails.get(sid, "") and "") + data
                 self.tails[sid] = tail[-self.MAX_TAIL :]
                 self.offsets[sid] = d["offset"] + nbytes
+                self.hosts[sid] = payload["host"]
                 cursors.append({"sessionId": sid, "offset": self.offsets[sid], "reason": "accepted"})
                 continue
             stored = self.offsets.get(sid)
             if stored is None:
                 cursors.append({"sessionId": sid, "offset": None, "reason": "unknown-offset"})
                 continue
+            # 🔴 THE HOST RULE, MODELLED. The stored offset is a position in the
+            # host's file; an append from a DIFFERENT host is refused with a NULL
+            # offset, because handing back a number that belongs to another
+            # machine's file invites the client to retry against nonsense.
+            if self.hosts.get(sid) not in (None, payload["host"]):
+                cursors.append({"sessionId": sid, "offset": None, "reason": "host-changed"})
+                continue
             if d["offset"] != stored:
                 cursors.append({"sessionId": sid, "offset": stored, "reason": "offset-mismatch"})
                 continue
             self.tails[sid] = (self.tails.get(sid, "") + data)[-self.MAX_TAIL :]
             self.offsets[sid] = stored + nbytes
+            self.hosts[sid] = payload["host"]
             cursors.append({"sessionId": sid, "offset": self.offsets[sid], "reason": "accepted"})
         applied = sum(1 for c in cursors if c["reason"] == "accepted")
         return {"ok": True, "applied": applied, "cursors": cursors}
@@ -835,3 +860,150 @@ def test_at_least_one_reseed_padding_actually_lands_MID_RUNE(tmp_path):
     assert hits >= 1, (
         "no padding makes the reseed seek land inside a rune, so the alignment path is never "
         "reached and its test is vacuous")
+
+
+def test_a_reseed_of_an_IN_FLIGHT_FIRST_LINE_waits_rather_than_shipping_a_fragment(tmp_path):
+    """🔴 THE CONTROL THE RESEED PATH DID NOT HAVE. The append path distinguishes
+    "this record is bigger than the window" (stream it) from "this line is still
+    being written" (wait). `_read_reseed` had no such discriminator — it always
+    reaches EOF by construction — so it shipped a fragment even where the
+    justification provably cannot apply: a file SMALLER than the window cannot
+    contain a record larger than the window.
+
+    Measured before the fix: a 61-byte file holding half a record produced
+    `(0, 61, '{"type":"user"…half a r')`. The previous revision waited.
+    """
+    d = tmp_path / "proj"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "sess-1.jsonl").write_text('{"type":"user","message":{"role":"user","content":"half a r',
+                                    encoding="utf-8")
+
+    state = ts.StreamState()
+    deltas, skipped = plan(tmp_path, state)
+    assert deltas == [], f"a first line still being written was shipped as a fragment: {deltas}"
+    assert skipped.get(ts.SKIP_NO_BOUNDARY) == 1
+
+    # And once it is a whole record, it goes.
+    with (d / "sess-1.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write('ecord"}}\n')
+    deltas, _ = plan(tmp_path, state)
+    assert len(deltas) == 1 and deltas[0]["reset"] is True
+
+
+def test_an_append_ending_EXACTLY_at_the_window_boundary_still_waits(tmp_path):
+    """🔴 THE ONE POINT `len(raw) < budget` GOT WRONG. A file that ends precisely
+    `budget` bytes past the cursor reads a FULL window that is ALSO the end of the
+    file; the length test then calls it an over-window record and ships a
+    fragment. One chance in 49,152 per poll — and the caller has the exact answer
+    in the `stat` it already took.
+    """
+    p = write_session(tmp_path, "proj", "sess-1", line(1))
+    state = ts.StreamState()
+    deltas, _ = plan(tmp_path, state)
+    cur = deltas[0]["offset"] + len(deltas[0]["data"].encode())
+    state.cursors["sess-1"] = cur
+
+    budget = 64
+    append(p, "Z" * budget)  # exactly `budget` bytes, no newline, at EOF
+    deltas, skipped = plan(tmp_path, state, max_delta_bytes=budget)
+    assert deltas == [], (
+        f"a line still being written that happened to be EXACTLY the window size was shipped "
+        f"as a fragment: {deltas}")
+    assert skipped.get(ts.SKIP_NO_BOUNDARY) == 1
+
+    # One byte MORE and it is genuinely an over-window record, so it streams.
+    append(p, "Z")
+    deltas, _ = plan(tmp_path, state, max_delta_bytes=budget)
+    assert len(deltas) == 1, "a record that IS bigger than the window did not stream"
+
+
+def test_a_name_that_strips_to_nothing_is_not_counted_as_a_DUPLICATE(tmp_path):
+    """A file called " .jsonl" is not a duplicate of anything. Counting it as one
+    reports the wrong mechanism for the one signal these counters exist to give.
+    """
+    write_session(tmp_path, "proj", " ", line(1))
+    write_session(tmp_path, "proj", "real", line(2))
+    state = ts.StreamState()
+    deltas, skipped = plan(tmp_path, state)
+    assert [d["sessionId"] for d in deltas] == ["real"]
+    assert skipped.get(ts.SKIP_NO_SESSION_ID) == 1, f"counted as: {skipped}"
+    assert ts.SKIP_DUPLICATE_ID not in skipped
+
+
+def test_note_inode_evicts_LEAST_RECENTLY_SEEN_not_longest_lived(tmp_path):
+    """A plain assignment leaves an existing key at its ORIGINAL position, so
+    eviction would drop the longest-LIVED session — typically the most active
+    one. Unreachable at the shipped limit, and wrong for free if it ever is not.
+    """
+    state = ts.StreamState()
+    state.INODE_LIMIT = 3
+    for sid in ("a", "b", "c"):
+        state.note_inode(sid, 1)
+    state.note_inode("a", 2)   # `a` is now the most recently seen
+    state.note_inode("d", 3)   # forces one eviction
+    assert "a" in state.inodes, "the most recently SEEN session was evicted"
+    assert "b" not in state.inodes, "the least recently seen session survived"
+
+
+def test_a_bulk_push_that_stamps_a_DIFFERENT_host_does_not_wedge_the_stream(tmp_path):
+    """🔴 THE SEAM THAT HID A BLOCKER, NOW DRIVEN END TO END. The two feeders
+    write the same row's `host`, and they used to derive it by different rules —
+    the bulk push falling through to `uname -n` ("nixos" on BOTH machines), the
+    stream reading the collector's label ("workbench"). While `host` was
+    display-only that cost nothing. Once the stream made it a correctness
+    predicate it became a PERMANENT reseed loop: the push stamping one value back
+    every 5 minutes, the stream refusing every append 5 seconds later and
+    reseeding up to 48 KiB per session.
+
+    The rule is now single-sourced (`scripts/lib/host_label.py`, pinned across
+    both feeders by `test_BOTH_feeders_resolve_the_SAME_host_label`). This test
+    covers the OTHER half — that if a host change does happen (a session genuinely
+    resumed on the other machine), the stream RECOVERS in one poll instead of
+    looping.
+    """
+    p = write_session(tmp_path, "proj", "sess-1", line(1) + line(2))
+    srv = FakeServer()
+    state = ts.StreamState()
+    ts.run_round(srv.post, srv.get, "workbench", state, tmp_path)
+    assert srv.hosts["sess-1"] == "workbench"
+    # 🔴 THE HOST MUST HOLD A REAL CURSOR AFTER ONE ROUND. It can only have come
+    # from the RESPONSE — hydration ran against an empty server. Without that
+    # adoption every poll reseeds and the two assertions below become unreachable,
+    # so this is the precondition that makes the rest of the test mean anything.
+    assert state.cursors.get("sess-1") is not None, (
+        "the host did not adopt a cursor from the response, so it reseeds on every poll and "
+        "nothing below is being tested")
+    srv.bulk_push("sess-1", p.read_text(), len(p.read_bytes()), host="nixos")
+
+    append(p, line(3))
+    counts = ts.run_round(srv.post, srv.get, "workbench", state, tmp_path)
+    assert counts["refused"] == 1, "the host change was not detected at all"
+
+    # ONE more poll and it is back — a bounded gap, not a loop.
+    counts = ts.run_round(srv.post, srv.get, "workbench", state, tmp_path)
+    assert counts["applied"] == 1, (
+        "the stream did not recover on the next poll — this is the permanent reseed loop, and "
+        "it would repeat after every single bulk tick")
+    assert srv.hosts["sess-1"] == "workbench"
+    assert srv.tails["sess-1"].endswith(line(3))
+
+
+def test_a_bulk_push_with_an_UNKNOWN_cursor_is_recovered_in_one_poll(tmp_path):
+    """The other cross-writer state the fake could not previously model: a bulk
+    push that reports no file size at all (which the real builder does whenever a
+    transcript holds one undecodable byte). The server stores NULL, every append
+    is refused as `unknown-offset`, and the host must RESEED — in one poll."""
+    p = write_session(tmp_path, "proj", "sess-1", line(1) + line(2))
+    srv = FakeServer()
+    state = ts.StreamState()
+    ts.run_round(srv.post, srv.get, "workbench", state, tmp_path)
+
+    srv.bulk_push("sess-1", p.read_text(), None)  # fileBytes UNKNOWN
+
+    append(p, line(3))
+    counts = ts.run_round(srv.post, srv.get, "workbench", state, tmp_path)
+    assert counts["refused"] == 1
+    counts = ts.run_round(srv.post, srv.get, "workbench", state, tmp_path)
+    assert counts["applied"] == 1, (
+        "the stream did not recover on the next poll from an unknown cursor")
+    assert srv.tails["sess-1"].endswith(line(3))

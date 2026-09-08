@@ -126,6 +126,25 @@ def _load_transcript_stream(path: str = None):
 
 TRANSCRIPT_STREAM = _load_transcript_stream()
 
+
+def _load_host_label(path: str = None):
+    """Load `scripts/lib/host_label.py` by EXPLICIT PATH.
+
+    🔴 IT RAISES RATHER THAN FALLING BACK, like the text policy and unlike the
+    transcript tailer. The label decides which host's writes this agent claims: a
+    fallback that guessed would make it deliver another machine's commands, or
+    none at all. A missing module must stop the agent.
+    """
+    path = path or os.path.join(_HERE, "lib", "host_label.py")
+    loader = importlib.machinery.SourceFileLoader("_tra_host_label", path)
+    spec = importlib.util.spec_from_loader("_tra_host_label", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+HOST_LABEL = _load_host_label()
+
 # Where the transcripts live. Overridable so the tests never touch the real one,
 # and spelled the same way transcript-push.sh spells it so the two feeders agree
 # about which files exist.
@@ -137,8 +156,11 @@ ACTIVITY_ENV = os.path.expanduser("~/.config/activity-collector/env")
 
 # The host vocabulary the read model and the queue both use. `hostname` is
 # "nixos" on BOTH machines, so it cannot be the source of truth; ACTIVITY_HOST is.
-HOST_NAMES = ("workbench", "laptop")
-DEFAULT_LOCAL_HOST = "workbench"
+# 🔴 RE-EXPORTED FROM THE SHARED MODULE, NOT RESTATED. Two literals here and one
+# rule there is the same drift this consolidation exists to end; the tests below
+# read these names, so they must BE the module's values, not equal to them.
+HOST_NAMES = HOST_LABEL.HOST_NAMES
+DEFAULT_LOCAL_HOST = HOST_LABEL.DEFAULT_LOCAL_HOST
 
 # The poll cadence. The server's write TTL is 90s, so this is ~18 polls inside a
 # write's whole deliverable life: a reply typed on a phone lands within seconds,
@@ -230,31 +252,20 @@ def resolve(key: str, conf_file: str, env=None) -> str:
 
 
 def local_host_label(env=None, env_file: str = ACTIVITY_ENV) -> str:
-    """This machine's ACTIVITY_HOST label.
+    """This machine's ACTIVITY_HOST label — DELEGATED, not re-derived.
 
-    Same rule as the collector's, and it has to be: the server's queue is keyed on
-    the host label the read model stores, so an agent that computed a different
-    label would poll for a host nobody enqueues to and deliver nothing, silently.
+    🔴 THIS USED TO BE A SECOND COPY OF THE RULE, AND transcript-push.sh HELD A
+    THIRD (in shell, falling through to `uname -n`, which is "nixos" on BOTH
+    machines). The three agreed while `host` was display-only and stopped agreeing
+    the moment the delta stream made it a correctness predicate. `scripts/lib/
+    host_label.py` carries the rule and the measurement; this wrapper stays only
+    so the name and the tests that use it keep working.
+
+    The server's termwrite queue is keyed on this label, so an agent computing a
+    different one would poll for a host nobody enqueues to and deliver nothing,
+    silently — which is why a wrapper is acceptable here and a fourth copy is not.
     """
-    e = os.environ if env is None else env
-    v = (e.get("ACTIVITY_HOST") or "").strip().lower()
-    if v in HOST_NAMES:
-        return v
-    try:
-        with open(env_file, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-    except OSError:
-        text = ""
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("ACTIVITY_HOST="):
-            val = line[len("ACTIVITY_HOST="):].strip()
-            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
-                val = val[1:-1]
-            val = val.strip().lower()
-            if val in HOST_NAMES:
-                return val
-    return DEFAULT_LOCAL_HOST
+    return HOST_LABEL.local_host_label(env=env, env_file=env_file)
 
 
 # ── tmux ─────────────────────────────────────────────────────────────────────

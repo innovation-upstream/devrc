@@ -135,6 +135,7 @@ MAX_CANDIDATES = 200
 # every real event in the journal.
 SKIP_UNCHANGED = "unchanged"
 SKIP_DUPLICATE_ID = "duplicate-session-id"
+SKIP_NO_SESSION_ID = "no-session-id"
 SKIP_NO_BOUNDARY = "no-record-boundary"
 SKIP_UNDECODABLE = "undecodable"
 SKIP_UNREADABLE = "unreadable"
@@ -172,7 +173,15 @@ class StreamState:
         self.hydrated = False
 
     def note_inode(self, session_id: str, inode: int) -> None:
-        """Record a file identity, bounded."""
+        """Record a file identity, bounded, LEAST-RECENTLY-SEEN first.
+
+        🔴 THE POP-THEN-SET IS THE EVICTION ORDER, NOT A NO-OP. A plain
+        assignment leaves an existing key at its ORIGINAL insertion position, so
+        eviction would drop the longest-LIVED session — typically the most active
+        one — rather than the least recently seen. Unreachable at the current
+        limit, and wrong for free if it ever is not.
+        """
+        self.inodes.pop(session_id, None)
         self.inodes[session_id] = inode
         while len(self.inodes) > self.INODE_LIMIT:
             # dicts preserve insertion order, so this evicts the oldest.
@@ -224,7 +233,7 @@ def _decode_exact(raw: bytes) -> str | None:
         return None
 
 
-def _read_append(path: str, offset: int, budget: int):
+def _read_append(path: str, offset: int, budget: int, at_eof: bool = False):
     """Whole records starting at `offset`, at most `budget` bytes.
 
     Returns (start, byte_length, text) on success, or a SKIP_* reason string.
@@ -246,10 +255,17 @@ def _read_append(path: str, offset: int, budget: int):
     nl = raw.rfind(b"\n")
     if nl >= 0:
         raw = raw[: nl + 1]
-    elif len(raw) < budget:
+    elif at_eof:
         # The read reached EOF without a newline: this is just a line still being
         # written. Sending it would put a fragment in the stored tail; it costs
         # one poll to wait.
+        #
+        # 🔴 `at_eof` COMES FROM THE CALLER'S stat, NOT FROM `len(raw) < budget`.
+        # The length test is wrong at exactly one point — a file that ends
+        # precisely `budget` bytes past the cursor reads a FULL window that is
+        # also the end of the file, and the length test then calls it an
+        # over-window record and ships the fragment. One chance in 49,152 per
+        # poll, and the caller already knows the answer exactly.
         return SKIP_NO_BOUNDARY
     else:
         # 🔴 THE WINDOW IS FULL AND HOLDS NO BOUNDARY, SO THIS RECORD IS LONGER
@@ -331,6 +347,17 @@ def _read_reseed(path: str, size: int, window: int):
     nl = raw.rfind(b"\n")
     if nl >= 0:
         raw = raw[: nl + 1]
+    elif start == 0:
+        # 🔴 THE WHOLE FILE IS SHORTER THAN THE WINDOW AND HOLDS NO RECORD
+        # BOUNDARY AT ALL, so this is a FIRST LINE STILL BEING WRITTEN — the one
+        # case where the "a record bigger than the window can never complete"
+        # justification provably does not apply. Waiting costs one poll.
+        #
+        # The append path has had this discriminator since the stall fix and a
+        # test to go with it; the reseed path did not, so it shipped a fragment
+        # here where the previous revision had waited. `start == 0` is exact and
+        # free — it is already in hand.
+        return SKIP_NO_BOUNDARY
     else:
         raw = _cut_at_rune_boundary(raw)
     if not raw:
@@ -367,10 +394,19 @@ def _cut_at_rune_boundary(raw: bytes) -> bytes:
     bytes are half a character — and, downstream, what keeps the two sides' byte
     counts equal, since a lossy decode would diverge them for ever.
 
-    ⚠ IT REMOVES AT MOST 3 BYTES, and it removes them only when the final
-    sequence is genuinely incomplete. A complete trailing rune is left alone; an
-    invalid lead byte is left alone too, so `_decode_exact` still rejects real
-    corruption rather than having it silently trimmed away.
+    ⚠ TWO THINGS THIS DOES NOT DO, both of which an earlier version of this
+    docstring claimed and neither of which was true:
+      * it does not remove "at most 3 bytes" — an incomplete FOUR-byte sequence
+        costs 4. At most 3 is the bound for a valid UTF-8 prefix only.
+      * it does not leave every invalid byte alone. A run of stray CONTINUATION
+        bytes at the end is walked past and dropped, so `_decode_exact` never
+        sees them. Byte accounting stays exact (the result is always a prefix of
+        the input, so `offset + len(sent)` is still the true file position), but
+        the effect is to convert a REPORTABLE corruption into an unreported one —
+        the next poll then stalls on `undecodable` instead, which is where it
+        surfaces.
+    A complete trailing rune is left alone, and an invalid LEAD byte is left
+    alone, so ordinary corruption still reaches `_decode_exact`.
     """
     n = len(raw)
     for back in range(1, 5):
@@ -494,8 +530,13 @@ def plan_frame(
         # is not live; the cost of it becoming live is total, and the fix is
         # this branch. Candidates arrive newest-first, so the survivor is the
         # freshest file.
+        # A name that strips to nothing is not a duplicate of anything — counting
+        # it as one would report the wrong mechanism for a file called " .jsonl".
         sid = sid.strip()
-        if not sid or sid in claimed:
+        if not sid:
+            skip(SKIP_NO_SESSION_ID)
+            continue
+        if sid in claimed:
             skip(SKIP_DUPLICATE_ID)
             continue
         claimed.add(sid)
@@ -541,7 +582,8 @@ def plan_frame(
             skip(SKIP_UNCHANGED)
             continue
 
-        got = _read_append(path, offset, per_session)
+        got = _read_append(path, offset, per_session,
+                           at_eof=(st.st_size - offset) <= per_session)
         if isinstance(got, str):
             skip(got)
             continue

@@ -1107,6 +1107,7 @@ def test_the_RESIDENT_agent_restart_triggers_name_EVERY_module_it_imports():
     want = {
         "scripts/tmux-reply-agent",
         "scripts/lib/tmux_text_policy.py",
+        "scripts/lib/host_label.py",
         "scripts/lib/transcript_stream.py",
         "scripts/lib/transcript_search.py",
     }
@@ -1132,7 +1133,15 @@ def test_every_module_the_agent_loads_by_path_IS_a_restart_trigger():
     assert loaded, "the scanner found no path-loaded modules — it is measuring nothing"
 
     stream = (REPO_ROOT / "scripts" / "lib" / "transcript_stream.py").read_text()
-    loaded |= set(re.findall(r'os\.path\.join\(_HERE,\s*"([^"]+\.py)"\)', stream))
+    transitive = set(re.findall(r'os\.path\.join\(_HERE,\s*"([^"]+\.py)"\)', stream))
+    # 🔴 A POSITIVE CONTROL ON THE TRANSITIVE HOP TOO. The agent scan above has
+    # one; this one did not, so if its regex ever stopped matching,
+    # transcript_search.py would silently drop out of `loaded`, `missing` would be
+    # empty, and this test would PASS while the exact gap it exists to close
+    # reopened.
+    assert transitive, ("the transitive scanner found no path-loaded modules in "
+                        "transcript_stream.py — it is measuring nothing")
+    loaded |= transitive
 
     block = _reply_agent_unit_block()
     m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
@@ -1267,3 +1276,115 @@ def test_ONE_oversized_session_alone_is_still_sent_rather_than_dropped_for_ever(
         "a session larger than the whole budget was dropped rather than sent alone — it is "
         "the newest file, so it would be dropped first on every tick, for ever"
     )
+
+
+# ---------------------------------------------------------------------------
+# THE CROSS-FEEDER HOST SEAM.
+#
+# 🔴 THE TWO FEEDERS WRITE THE SAME ROW'S `host` COLUMN, AND NOTHING PINNED THEM
+# TOGETHER. This push derived it in shell (falling through to `uname -n`, which is
+# "nixos" on BOTH machines); tmux-reply-agent read the collector's env file and
+# said "workbench". The disagreement was free while `host` was display-only — the
+# stored rows just said "nixos", uselessly — and became a PERMANENT REFUSAL the
+# moment the delta stream made `host` a correctness predicate: every 5-minute
+# push stamping `nixos` back, every 5-second poll reseeding because "the host
+# changed". Caught before deploy, with both values measured side by side.
+# ---------------------------------------------------------------------------
+
+
+def _host_label_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "host_label_under_test", REPO_ROOT / "scripts" / "lib" / "host_label.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _agent_module():
+    import importlib.machinery
+    import importlib.util
+
+    path = str(REPO_ROOT / "scripts" / "tmux-reply-agent")
+    loader = importlib.machinery.SourceFileLoader("tmux_reply_agent_hostseam", path)
+    spec = importlib.util.spec_from_file_location("tmux_reply_agent_hostseam", path, loader=loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("env_body,want", [
+    ('ACTIVITY_HOST=laptop\n', "laptop"),
+    ('ACTIVITY_HOST="workbench"\n', "workbench"),
+    ('ACTIVITY_HOST=not-a-real-host\n', "workbench"),   # invalid -> default
+    ('', "workbench"),                                    # absent -> default
+])
+def test_BOTH_feeders_resolve_the_SAME_host_label(server, projects, tmp_path, env_body, want):
+    """🔴 THE ASSERTION IS THAT THE TWO AGREE, NOT THAT EITHER IS RIGHT. Pinning
+    each side to a literal separately is what let them drift: both tests would
+    stay green while the two values differed.
+
+    The push is driven end to end (so the SHELL's resolution is what is measured,
+    not a Python restatement of it) and compared with what the agent computes from
+    the same file.
+    """
+    env_file = tmp_path / "activity-env"
+    env_file.write_text(env_body)
+
+    agent = _agent_module()
+    agent_label = agent.local_host_label(env={}, env_file=str(env_file))
+
+    # The shell half, through the real script. TRANSCRIPT_PUSH_HOST is deliberately
+    # NOT set — that override is what the other tests use, and using it here would
+    # bypass the very resolution under test.
+    projects("host-seam", transcript("host-seam", human_turn("hi", "host-seam")))
+    conf = tmp_path / "clawgate.env"
+    conf.write_text("")
+    env = dict(os.environ)
+    for k in ("CLAWGATE_API_URL", "CLAWGATE_HOOK_TOKEN", "ACTIVITY_HOST", "TRANSCRIPT_PUSH_HOST"):
+        env.pop(k, None)
+    env.update({
+        "CLAWGATE_CONF_FILE": str(conf),
+        "CLAUDE_PROJECTS_DIR": str(projects.root),
+        "HOME": str(tmp_path),
+        "CLAWGATE_API_URL": base_url(server),
+        "CLAWGATE_HOOK_TOKEN": "t",
+        # Point the shared module at the fixture's env file.
+        "HOST_LABEL_ENV_FILE": str(env_file),
+    })
+    proc = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True,
+                          env=env, timeout=180)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    pushed = json.loads(pushes(server)[0]["body"])["host"]
+
+    assert agent_label == want, f"the agent resolved {agent_label!r}, want {want!r}"
+    assert pushed == agent_label, (
+        f"the two feeders that write the SAME row disagree about this host: the bulk push says "
+        f"{pushed!r}, the stream agent says {agent_label!r}. Since `host` became a correctness "
+        f"predicate, that difference is a permanent reseed loop — the push stamping one value "
+        f"back every 5 minutes and the stream refusing every append 5 seconds later."
+    )
+
+
+def test_the_push_REFUSES_rather_than_guessing_when_the_label_cannot_be_resolved(
+    server, projects, tmp_path
+):
+    """🔴 A FALLBACK IS WHAT PRODUCED THE DEFECT. `uname -n` returns a plausible
+    name on both machines, so the old fallback failed silently and looked correct.
+    Exiting is loud and cannot be mistaken for a working feed.
+    """
+    projects("s", transcript("s", human_turn("hi")))
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={
+            "CLAWGATE_API_URL": base_url(server),
+            "CLAWGATE_HOOK_TOKEN": "t",
+            "TRANSCRIPT_PUSH_HOST": "",  # the override is empty, so resolution runs
+            "TRANSCRIPT_PUSH_HOST_LABEL": str(tmp_path / "no-such-module.py"),
+        },
+    )
+    assert proc.returncode == 3, f"rc={proc.returncode}: {proc.stdout}{proc.stderr}"
+    assert "refusing to push under a guessed name" in proc.stdout
+    assert not pushes(server), "a push went out under a guessed host name"

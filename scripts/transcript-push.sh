@@ -61,6 +61,11 @@
 
 set -euo pipefail
 
+# Defined FIRST: the host-label resolution below is the earliest thing that can
+# exit, and it reports through log(). A definition further down would make that
+# branch die with "log: command not found" instead of its own message.
+log() { printf 'transcript-push: %s\n' "$*"; }
+
 API_DEFAULT="http://192.168.50.250:30302"
 CONF_FILE="${CLAWGATE_CONF_FILE:-$HOME/.claude/clawgate.env}"
 CURL_TIMEOUT="${TRANSCRIPT_PUSH_CURL_TIMEOUT:-30}"
@@ -69,11 +74,39 @@ BUILD_TIMEOUT="${TRANSCRIPT_PUSH_BUILD_TIMEOUT:-120}"
 # Where the transcripts live. Overridable so the tests never touch the real one.
 PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 
-# This host's name as the read model will record it. `ACTIVITY_HOST` is the
-# fleet's existing per-host handle (the activity collector sets it on both
-# machines), so reusing it keeps one answer to "which box is this" rather than
-# minting a second.
-HOST_NAME="${TRANSCRIPT_PUSH_HOST:-${ACTIVITY_HOST:-$(uname -n)}}"
+# This host's name as the read model will record it.
+#
+# 🔴 THE RULE IS `scripts/lib/host_label.py`, NOT A SHELL EXPANSION, AND THE
+# DIFFERENCE WAS A LIVE DEFECT. This line used to be
+#
+#     HOST_NAME="${TRANSCRIPT_PUSH_HOST:-${ACTIVITY_HOST:-$(uname -n)}}"
+#
+# whose comment claimed it reused the fleet's per-host handle "rather than
+# minting a second". It did not: ACTIVITY_HOST lives in a FILE the unit does not
+# source and this script never read, so it fell through to `uname -n` — which is
+# **"nixos" on BOTH machines**. Measured on the deployed server: every stored
+# transcript row said `host: nixos`, so the column was useless, while the reply
+# agent (which does read the file) called the same machine "workbench".
+#
+# That cost nothing while `host` was display-only. The delta stream makes it a
+# CORRECTNESS predicate — an append whose host differs from the stored row's is
+# refused, because the stored offset is a position in the other machine's file —
+# so the disagreement would have become a permanent reseed loop: this push
+# stamping `nixos` back onto every row every 5 minutes, the stream reseeding
+# every session every 5 seconds because "the host changed".
+#
+# `TRANSCRIPT_PUSH_HOST` still wins, for the tests and for a deliberate override.
+HOST_LABEL_PY="${TRANSCRIPT_PUSH_HOST_LABEL:-$(dirname "$(readlink -f "$0")")/lib/host_label.py}"
+if [ -n "${TRANSCRIPT_PUSH_HOST:-}" ]; then
+  HOST_NAME="$TRANSCRIPT_PUSH_HOST"
+else
+  # 🔴 A FAILURE HERE IS FATAL, NOT A FALLBACK TO `uname -n`. Falling back is what
+  # produced the defect above, and it would produce it again silently.
+  if ! HOST_NAME="$(python3 "$HOST_LABEL_PY" 2>/dev/null)" || [ -z "$HOST_NAME" ]; then
+    log "could not resolve this host's label via $HOST_LABEL_PY — refusing to push under a guessed name"
+    exit 3
+  fi
+fi
 
 # 🔴 THESE BOUNDS MUST STAY UNDER THE SERVER'S OWN, NOT AT THEM. The server
 # enforces MaxTailBytes=262144, MaxSessionsPerPush=128 and MaxPushTailBytes=4 MiB
@@ -100,7 +133,6 @@ MAX_AGE_HOURS="${TRANSCRIPT_PUSH_MAX_AGE_HOURS:-24}"
 # in the steady state and it is bounded by TAIL_BYTES, so this is generous.
 MAX_CANDIDATES="${TRANSCRIPT_PUSH_MAX_CANDIDATES:-200}"
 
-log() { printf 'transcript-push: %s\n' "$*"; }
 
 # ── credentials ──────────────────────────────────────────────────────────────
 # 🔴 THE ENVIRONMENT WINS OVER THE FILE, and that direction is load-bearing —

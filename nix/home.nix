@@ -3845,6 +3845,10 @@ in
       #
       # tmux_text_policy.py — the text allowlist. TIGHTENING it is a security
       #   change, and this is the one process it has to reach.
+      # host_label.py — the ONE rule for "which box is this". It decides which
+      #   host's writes this agent claims AND which host the transcript stream
+      #   files its deltas under; a stale copy would either deliver another
+      #   machine's commands or reseed every session for ever.
       # transcript_stream.py — the transcript delta tailer, and transcript_search
       #   .py which it loads in turn. A splice bug in either is a CORRECTNESS bug
       #   in what the operator reads about a session; both were added after the
@@ -3858,6 +3862,7 @@ in
       X-Restart-Triggers = [
         "${../scripts/tmux-reply-agent}"
         "${../scripts/lib/tmux_text_policy.py}"
+        "${../scripts/lib/host_label.py}"
         "${../scripts/lib/transcript_stream.py}"
         "${../scripts/lib/transcript_search.py}"
       ];
