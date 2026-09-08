@@ -3517,8 +3517,11 @@ def test_every_custom_block_script_is_DEPLOYED_UNDER_A_COMPATIBLE_GATE():
 #: icon set. This is an ALLOWLIST, not documentation: adding an entry is the
 #: moment to check it is a real key, with
 #:   grep '^<name> *=' <i3status-rust>/share/icons/material-nf.toml
-#: The set has 76 keys; these 4 are all that this repo's blocks reference.
-_KNOWN_GOOD_ICONS = {"cogs", "mail", "net_vpn", "tasks", "net_down"}
+#: The set has 76 keys; these 6 are all that this repo's blocks reference.
+#: (`refresh` is the fans pill. material-nf has NO `fan` key — measured against
+#: the 0.36.1 set, whose 76 keys were listed in full — and `refresh`'s rotating
+#: arrows are the closest real one.)
+_KNOWN_GOOD_ICONS = {"cogs", "mail", "net_vpn", "tasks", "net_down", "refresh"}
 
 #: Two spellings, because the blocks use two. `^ICON… = "x"` is the module
 #: constant; `"icon": "x"` is the inline literal `i3status-media` and
