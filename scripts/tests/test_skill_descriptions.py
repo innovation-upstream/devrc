@@ -287,9 +287,11 @@ MIN_LISTING_ENTRIES = 30
 #
 # 🔴 RAISED ONCE, DELIBERATELY, 2026-09-08: 10,800 -> 11,192, to admit
 # `civitai-app-release` (392 chars), then LOWERED to 11,170 the same day when
-# the skill was reframed as `civitai-app-fleet` and its description got 22 chars
-# shorter — re-pinning on a cut is the rule this file states, and it pays part
-# of the raise back. THE RULE ABOVE STILL STANDS — this is the
+# the skill was reframed as `civitai-app-fleet` and its ENTRY got 22 chars
+# shorter — description 373->353 (20) plus the shorter name (19->17). An audit
+# caught an earlier wording that credited all 22 to the description; the
+# constant was right and the attribution was not. Re-pinning on a cut is the
+# rule this file states, and it pays part of the raise back. THE RULE ABOVE STILL STANDS — this is the
 # exception, not a precedent, and it was taken by Zach with the "do NOT raise"
 # sentence quoted back to him first. What was weighed:
 #   - Both playbook remedies were available and both were declined: demoting an

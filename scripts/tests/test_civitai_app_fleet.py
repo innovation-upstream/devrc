@@ -1,8 +1,8 @@
-"""Guards for the civitai-app-fleet skill's two scripts.
+"""Guards for the civitai-app-fleet skill's three scripts.
 
-🔴 EVERY CASE BELOW IS A DEFECT THAT ACTUALLY OCCURRED on 2026-09-07, not an
-imagined one. Both scripts exist because prose telling the reader to be careful
-had already failed twice in a single session:
+🔴 EVERY CASE BELOW IS A DEFECT THAT ACTUALLY OCCURRED, not an imagined one.
+`app_state.py` and `preflight.py` exist because prose telling the reader to be
+careful had already failed twice in a single session on 2026-09-07:
 
   - the per-slug status view reported `withdrawn` for an app that was building
     fine, because a withdrawn duplicate of the same version sat on top of it;
@@ -13,6 +13,11 @@ The second is the reason `parse_rows` RAISES on an unknown token rather than
 defaulting: a fall-through is invisible, and invisibility is what made it cost
 an hour. `test_unknown_deploy_state_raises` is the guard that keeps it loud —
 delete the raise and that test goes red.
+
+`fleet.py`'s tests were added a round later, after an audit found it shipping
+with none: three columns fabricated affirmative values on git failure and its
+exit code promised a coverage it did not have. Its tests all drive a REAL
+failure path through the `_RUN` seam, because the happy path hid every one.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ def _load(name: str):
 
 app_state = _load("app_state")
 preflight = _load("preflight")
+fleet = _load("fleet")
 
 
 # The shape `civitai app status` actually prints. The custom-generators pair is
@@ -57,6 +63,7 @@ custom-generators           0.6.5    approved   building      -        2026-09-0
 app-requests                0.4.1    approved   live          -        2026-09-08  https://app-requests.example.test/
 app-requests                0.4.0    approved   live          abc1234  2026-09-05  https://app-requests.example.test/
 prompt-library              0.1.0    withdrawn  -             -        2026-09-01  -
+gen-matrix                  0.8.8    approved   failed        -        2026-09-04  -
 
 note: the server returned the newest 100 submissions — older ones may exist.
 """
@@ -83,6 +90,16 @@ def test_withdrawn_is_still_the_answer_when_it_is_the_only_row():
     """Ignoring withdrawn rows wholesale would be the opposite bug."""
     got = app_state.resolve(rows(), "prompt-library", "0.1.0")
     assert got["review"] == "withdrawn", got
+
+
+def test_two_non_withdrawn_rows_resolve_to_the_newest():
+    """The tie-break the docstring did not state and nothing pinned. The CLI
+    lists newest-first, so the first non-withdrawn row IS the newest — a
+    `pending` submission above an already-live one resolves to `pending`, which
+    is right, but it is a behaviour rather than an accident."""
+    newer = "app-requests                0.4.1    pending    -             -        2026-09-09  -\n"
+    got = app_state.resolve(app_state.parse_rows(newer + STATUS), "app-requests", "0.4.1")
+    assert (got["review"], got["deploy"]) == ("pending", "-"), got
 
 
 def test_absent_version_reports_none_rather_than_inventing_a_state():
@@ -148,7 +165,7 @@ def test_deploy_states_contains_no_invented_members():
 def test_prose_and_header_lines_are_skipped_not_raised():
     """The CLI prints a header and trailing notes; neither is a row nor an error."""
     assert all(r["app"] != "note:" for r in rows())
-    assert len(rows()) == 6
+    assert len(rows()) == 7
 
 
 # --- the submit floor ---------------------------------------------------------
@@ -275,3 +292,113 @@ def test_read_status_shells_out_when_no_file_seam_is_set(monkeypatch):
     monkeypatch.setattr(app_state, "_RUN", lambda *a, **k: (calls.append(a), Result())[1])
     assert app_state.read_status() == STATUS
     assert calls and calls[0][0][:3] == ["civitai", "app", "status"], calls
+
+
+# --- fleet.py: an unreadable repo must never render as a measured one ---------
+#
+# 🔴 `fleet.py` shipped with ZERO tests in the first draft, and an audit found
+# three columns fabricating affirmative values plus an exit code that promised
+# coverage it did not have. Every test below drives a REAL failure path — git
+# exiting non-zero — through the `_RUN` seam, because the defects were only
+# reachable when git failed and the happy path hid all of them.
+
+
+class _FakeGit:
+    """A `subprocess.run` stand-in. `ok` maps an argv-suffix to stdout; anything
+    not listed exits 1, which is what a broken/absent repo actually does."""
+
+    def __init__(self, ok: dict[str, str]):
+        self.ok = ok
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **_kw):
+        self.calls.append(list(argv))
+        key = " ".join(argv[3:]) if argv[:1] == ["git"] else " ".join(argv)
+        for pattern, out in self.ok.items():
+            if key.startswith(pattern):
+                return type("R", (), {"returncode": 0, "stdout": out, "stderr": ""})()
+        return type("R", (), {"returncode": 1, "stdout": "", "stderr": "boom"})()
+
+
+def _fleet_row(monkeypatch, tmp_path, ok: dict[str, str], **kw):
+    monkeypatch.setattr(fleet, "WORKSPACE", str(tmp_path))
+    (tmp_path / "repo").mkdir(exist_ok=True)
+    fake = _FakeGit(ok)
+    monkeypatch.setattr(fleet, "_RUN", fake)
+    return fleet.inspect("repo", "owner/repo", "an-app", **kw), fake
+
+
+_GIT_DIR = {"rev-parse --git-dir": ".git"}
+
+
+def test_a_directory_that_is_not_a_repo_is_an_error_not_a_row(monkeypatch, tmp_path):
+    """🔴 It previously reported checked_out='(detached)' and dirty_files='0' —
+    and '0 dirty' is exactly the value that makes a caller proceed."""
+    monkeypatch.setattr(fleet, "WORKSPACE", str(tmp_path))
+    (tmp_path / "repo").mkdir()
+    monkeypatch.setattr(fleet, "_RUN", _FakeGit({}))
+    row = fleet.inspect("repo", "owner/repo", "an-app")
+    assert row["error"] == "not a git repository", row
+    assert "dirty_files" not in row and "checked_out" not in row, row
+
+
+def test_an_unreadable_lockfile_is_not_reported_as_no_lockfile(monkeypatch, tmp_path):
+    """🔴 The highest-consequence column. `lockfile()` returned the literal
+    "none" on git failure, so a repo with a pnpm-lock.yaml it could not read
+    reported as having none — the input that makes the manifest/lockfile
+    agreement check wrong in the direction that breaks a platform build."""
+    row, _ = _fleet_row(monkeypatch, tmp_path, _GIT_DIR)
+    assert row["lockfile"] == fleet.UNREADABLE, row
+    assert row["lockfile"] != "none"
+
+
+def test_any_unreadable_column_sets_error_and_a_nonzero_exit(monkeypatch, tmp_path):
+    """🔴 The exit code promised 'non-zero if any repo could not be inspected'
+    while the flag was set only for a MISSING DIRECTORY."""
+    row, _ = _fleet_row(monkeypatch, tmp_path, _GIT_DIR)
+    assert "error" in row and "unreadable" in row["error"], row
+    assert "lockfile" in row["error"] and "default_branch" in row["error"], row
+
+
+def test_a_failed_fetch_is_recorded_not_shrugged_off(monkeypatch, tmp_path):
+    """A fetch that failed leaves every column describing a STALE ref, while the
+    module docstring claims the inventory cannot rot."""
+    ok = {**_GIT_DIR, "branch --show-current": "main", "status --porcelain": ""}
+    row, _ = _fleet_row(monkeypatch, tmp_path, ok)
+    assert row["fetch"] == "FAILED", row
+    assert "fetch failed" in row["error"], row
+
+
+def test_no_fetch_does_not_write_to_the_clone(monkeypatch, tmp_path):
+    """The clones are shared; a fetch is a write to a tree other sessions are
+    standing in, so it must be opt-out and must actually not happen."""
+    row, fake = _fleet_row(monkeypatch, tmp_path, _GIT_DIR, fetch=False)
+    assert row["fetch"] == "skipped", row
+    assert not any("fetch" in c for c in fake.calls), fake.calls
+
+
+def test_fetch_happens_by_default(monkeypatch, tmp_path):
+    """Positive control for the test above — otherwise it would pass against a
+    function that never fetches at all."""
+    _row, fake = _fleet_row(monkeypatch, tmp_path, _GIT_DIR)
+    assert any("fetch" in c for c in fake.calls), fake.calls
+
+
+def test_vitest_projects_reports_a_class_not_an_invented_count(monkeypatch, tmp_path):
+    """The body tests for a `projects:` key, which cannot tell two from three.
+    Reporting `2` for a three-project repo would be a number asserted rather
+    than counted."""
+    ok = {**_GIT_DIR, "show origin/?:vite.config.ts": "projects: [a,b,c]"}
+    assert fleet.vitest_projects.__doc__ and "2+" in fleet.vitest_projects.__doc__
+    monkeypatch.setattr(fleet, "_RUN", _FakeGit(ok))
+    assert fleet.vitest_projects("/x", "origin/?") in {"1", "2+", fleet.UNREADABLE}
+
+
+def test_an_absent_json_field_is_distinct_from_an_unreadable_one(monkeypatch, tmp_path):
+    """`-` means the file parsed and the field is genuinely absent; `?` means it
+    could not be read. Collapsing them would hide a missing buildCommand — the
+    defect that broke a real platform build."""
+    ok = {**_GIT_DIR, "show origin/main:block.manifest.json": '{"version": "1.0.0"}'}
+    monkeypatch.setattr(fleet, "_RUN", _FakeGit(ok))
+    assert fleet._json_field("/x", "origin/main", "block.manifest.json", "buildCommand") == "-"
+    assert fleet._json_field("/x", "origin/main", "nope.json", "buildCommand") == fleet.UNREADABLE

@@ -26,10 +26,21 @@ it from the repos and the platform, so it cannot rot — the failure mode become
 Usage:
     fleet.py                 # every repo, one row each
     fleet.py --json          # machine-readable, for driving a fan-out
-    fleet.py --no-platform   # skip `civitai app status` (offline / no auth)
+    fleet.py --no-platform   # skip `civitai app status` (no CLI / no auth)
+    fleet.py --no-fetch      # do not write to the shared clones
 
-Exit non-zero if any repo could not be inspected, so a fan-out built on this
-cannot silently skip a repo it failed to read.
+🔴 BY DEFAULT THIS RUNS `git fetch` IN SEVEN CLONES OTHER SESSIONS ARE STANDING
+IN. That is a write to a shared checkout, so it is stated here rather than left
+to be discovered, its result is reported per row (`fetch: ok|FAILED|skipped`),
+and `--no-fetch` turns it off. A fetch that FAILS makes every column below
+describe a stale ref, which is why it is an error rather than a shrug.
+
+Exit is non-zero if any repo could not be fully inspected — a missing checkout,
+a non-repository, an unreadable column, or a failed fetch. An earlier draft
+promised this while setting the error flag in exactly one place (`isdir`), so a
+directory whose refs were unreadable produced a full row of plausible defaults
+and exit 0; a wrapper branching on rc proceeded against repos it had read
+nothing from. Every UNREADABLE column now sets it.
 """
 
 from __future__ import annotations
@@ -57,10 +68,28 @@ REPOS = [
 
 _RUN = subprocess.run  # patched by tests; see app_state.py for why this seam exists
 
+# 🔴 THE SENTINEL, AND WHY EVERY READER MUST USE IT.
+#
+# An audit of the first draft found this file doing the exact thing it exists to
+# prevent: `lockfile()` returned the literal "none" when git failed, so a repo
+# whose `pnpm-lock.yaml` was simply unreadable reported as having NO lockfile —
+# a fabricated value, in the column that decides the manifest/lockfile check.
+# `checked_out` reported "(detached)" and `dirty_files` reported "0" for a
+# directory that was not a git repository at all, and "0 dirty" is precisely the
+# value that makes a caller proceed.
+#
+# So: `_git` returns None for FAILED, distinct from "" for "ran, empty output",
+# and every reader converts None to UNREADABLE rather than to a plausible
+# default. A column that could not be read must never be mistakable for one that
+# was.
+UNREADABLE = "?"
 
-def _git(repo: str, *args: str) -> str:
+
+def _git(repo: str, *args: str) -> str | None:
+    """stdout on success; None when git failed. NEVER "" for a failure — the
+    caller cannot distinguish that from a legitimately empty result."""
     proc = _RUN(["git", "-C", repo, *args], capture_output=True, text=True, check=False)
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+    return proc.stdout.strip() if proc.returncode == 0 else None
 
 
 def default_branch(repo: str) -> str:
@@ -71,33 +100,41 @@ def default_branch(repo: str) -> str:
     value is reported as "?" rather than defaulted.
     """
     head = _git(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
-    return head.rsplit("/", 1)[-1] if head else "?"
+    return head.rsplit("/", 1)[-1] if head else UNREADABLE
 
 
 def _json_field(repo: str, ref: str, path: str, field: str) -> str:
     raw = _git(repo, "show", f"{ref}:{path}")
-    if not raw:
-        return "?"
+    if raw is None or not raw:
+        return UNREADABLE
     try:
-        return str(json.loads(raw).get(field, "-"))
+        parsed = json.loads(raw)
     except json.JSONDecodeError:
-        return "?"
+        return UNREADABLE
+    # "-" means the file parsed and the field is genuinely absent — a real
+    # answer, distinct from UNREADABLE.
+    return str(parsed.get(field, "-"))
 
 
 def vitest_projects(repo: str, ref: str) -> str:
-    """How many vitest projects — the `--project node` trap.
+    """Whether the repo declares MULTIPLE vitest projects — the `--project` trap.
 
-    A wrong filter does not fail loudly; it matches nothing and runs nothing.
+    Deliberately reported as `1` / `2+`, not as a count: the body tests for a
+    `projects:` key, which cannot distinguish two from three. An earlier draft
+    labelled this "how many vitest projects" and printed `2` for any multi-
+    project repo, which is a number asserted rather than counted.
     """
     cfg = _git(repo, "show", f"{ref}:vite.config.ts")
-    if not cfg:
-        return "?"
-    return "2" if "projects:" in cfg else "1"
+    if cfg is None or not cfg:
+        return UNREADABLE
+    return "2+" if "projects:" in cfg else "1"
 
 
 def lockstep_guard_home(repo: str, ref: str) -> str:
     """Which file carries the manifest/package version-lockstep assertion."""
     listing = _git(repo, "ls-tree", "--name-only", f"{ref}:src")
+    if listing is None:
+        return UNREADABLE
     names = set(listing.splitlines())
     if "version-lockstep.test.ts" in names:
         return "version-lockstep"
@@ -107,56 +144,125 @@ def lockstep_guard_home(repo: str, ref: str) -> str:
 
 
 def lockfile(repo: str, ref: str) -> str:
-    names = set(_git(repo, "ls-tree", "--name-only", ref).splitlines())
+    """🔴 Returns UNREADABLE, never "none", when the ref cannot be read.
+
+    The first draft returned "none" on git failure — a fabricated answer in the
+    column that decides whether `buildCommand` and the committed lockfile agree.
+    A repo with a `pnpm-lock.yaml` it simply could not read reported as having
+    no lockfile at all.
+    """
+    listing = _git(repo, "ls-tree", "--name-only", ref)
+    if listing is None:
+        return UNREADABLE
+    names = set(listing.splitlines())
     found = [n for n in ("pnpm-lock.yaml", "package-lock.json", "yarn.lock") if n in names]
     return "+".join(found) if found else "none"
 
 
-def inspect(directory: str, slug: str, app: str) -> dict[str, str]:
-    repo = os.path.join(WORKSPACE, directory)
-    if not os.path.isdir(repo):
-        return {"app": app, "dir": directory, "error": "checkout missing"}
+def inspect(directory: str, slug: str, app: str, *, fetch: bool = True) -> dict[str, str]:
+    """One row. Sets "error" whenever a column could not be READ, not only when
+    the checkout is missing.
 
-    _RUN(["git", "-C", repo, "fetch", "origin", "--quiet"], capture_output=True, check=False)
+    🔴 The first draft set "error" at exactly one place — `isdir` — so a
+    directory that existed but was not a git repository, or whose ref was
+    unresolvable, produced a full row of plausible-looking defaults and an exit
+    code of 0. A caller branching on that rc proceeded against repos it had read
+    nothing from. Anything that returns UNREADABLE is now an error.
+    """
+    repo = os.path.join(WORKSPACE, directory)
+    row: dict[str, str] = {"app": app, "dir": directory, "slug": slug}
+
+    if not os.path.isdir(repo):
+        return {**row, "error": "checkout missing"}
+    if _git(repo, "rev-parse", "--git-dir") is None:
+        return {**row, "error": "not a git repository"}
+
+    # 🔴 A FETCH IS A WRITE TO A CLONE OTHER SESSIONS ARE STANDING IN, and it is
+    # opt-out rather than silent. Its failure is recorded, because a fetch that
+    # failed leaves every column below describing a STALE ref while this file
+    # claims the inventory "cannot rot".
+    if fetch:
+        proc = _RUN(
+            ["git", "-C", repo, "fetch", "origin", "--quiet"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        row["fetch"] = "ok" if proc.returncode == 0 else "FAILED"
+    else:
+        row["fetch"] = "skipped"
+
     base = default_branch(repo)
     ref = f"origin/{base}"
 
-    checked_out = _git(repo, "branch", "--show-current") or "(detached)"
-    dirty = len([ln for ln in _git(repo, "status", "--porcelain").splitlines() if ln])
+    branch = _git(repo, "branch", "--show-current")
+    status = _git(repo, "status", "--porcelain")
 
-    return {
-        "app": app,
-        "dir": directory,
-        "slug": slug,
-        "default_branch": base,
-        # 🔴 The base clone's CURRENT branch, which is frequently NOT the default
-        # and frequently carries someone's uncommitted work. Branch off `ref`,
-        # never off local HEAD.
-        "checked_out": checked_out,
-        "dirty_files": str(dirty),
-        "manifest_version": _json_field(repo, ref, "block.manifest.json", "version"),
-        "package_version": _json_field(repo, ref, "package.json", "version"),
-        "build_command": _json_field(repo, ref, "block.manifest.json", "buildCommand"),
-        "lockfile": lockfile(repo, ref),
-        "vitest_projects": vitest_projects(repo, ref),
-        "lockstep_guard": lockstep_guard_home(repo, ref),
-    }
+    row.update(
+        {
+            "default_branch": base,
+            # 🔴 The base clone's CURRENT branch, which is frequently NOT the
+            # default and frequently carries someone's uncommitted work. Branch
+            # off `ref`, never off local HEAD.
+            "checked_out": UNREADABLE if branch is None else (branch or "(detached)"),
+            "dirty_files": (
+                UNREADABLE
+                if status is None
+                else str(len([ln for ln in status.splitlines() if ln]))
+            ),
+            "manifest_version": _json_field(repo, ref, "block.manifest.json", "version"),
+            "package_version": _json_field(repo, ref, "package.json", "version"),
+            "build_command": _json_field(repo, ref, "block.manifest.json", "buildCommand"),
+            "lockfile": lockfile(repo, ref),
+            "vitest_projects": vitest_projects(repo, ref),
+            "lockstep_guard": lockstep_guard_home(repo, ref),
+        }
+    )
+
+    unread = sorted(k for k, v in row.items() if v == UNREADABLE)
+    if unread or row["fetch"] == "FAILED":
+        parts = []
+        if unread:
+            parts.append("unreadable: " + ", ".join(unread))
+        if row["fetch"] == "FAILED":
+            parts.append("fetch failed (columns may be stale)")
+        row["error"] = "; ".join(parts)
+    return row
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", action="store_true", help="machine-readable")
-    ap.add_argument("--no-platform", action="store_true", help="skip civitai app status")
+    ap.add_argument("--no-platform", action="store_true", help="skip `civitai app status`")
+    ap.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="do not `git fetch` the clones (they are shared; a fetch writes to them)",
+    )
     args = ap.parse_args()
 
-    rows = [inspect(d, s, a) for d, s, a in REPOS]
+    rows = [inspect(d, s, a, fetch=not args.no_fetch) for d, s, a in REPOS]
 
     if not args.no_platform:
-        try:
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            import app_state  # noqa: PLC0415 — optional, and only when asked for
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import app_state  # noqa: PLC0415 — optional, and only when asked for
 
+        try:
             parsed = app_state.parse_rows(app_state.read_status())
+        except app_state.UnknownState:
+            # 🔴 DO NOT SWALLOW THIS. An unrecognised platform state is the whole
+            # reason `app_state.parse_rows` raises rather than guessing, and the
+            # first draft caught it here under a bare `except Exception` — so the
+            # loud guard became a stderr note with a SUCCESS exit, through the
+            # very entry point this skill tells you to run first. `preview-live`
+            # was found only because that guard was allowed to reach a human.
+            raise
+        except Exception as exc:  # noqa: BLE001 — CLI absent/unauthed is fine
+            for row in rows:
+                row.setdefault("submit_floor", "unread")
+                row.setdefault("platform", "unread")
+            print(f"note: platform state unread ({exc})", file=sys.stderr)
+        else:
             for row in rows:
                 if "error" in row:
                     continue
@@ -164,11 +270,6 @@ def main() -> int:
                 row["submit_floor"] = floor or "none"
                 state = app_state.resolve(parsed, row["app"], row["manifest_version"])
                 row["platform"] = f"{state['review']}/{state['deploy']}"
-        except Exception as exc:  # platform is optional; NEVER fake it
-            for row in rows:
-                row.setdefault("submit_floor", "unread")
-                row.setdefault("platform", "unread")
-            print(f"note: platform state unread ({exc})", file=sys.stderr)
 
     if args.json:
         print(json.dumps(rows, indent=2))
@@ -187,7 +288,9 @@ def main() -> int:
                 f"{r['app']:<21} {r['default_branch']:<7} {r['checked_out'][:26]:<26} "
                 f"{r['dirty_files']:>5} {ver:<9} {r['build_command'][:16]:<16} "
                 f"{r['lockfile'][:16]:<16} {r['vitest_projects']:>4} "
-                f"{r['lockstep_guard']:<17} {r.get('platform', '-')}"
+                # `-` is a REAL deploy state meaning "no deploy for this row",
+                # so it must never also mean "not consulted".
+                f"{r['lockstep_guard']:<17} {r.get('platform', 'not-consulted')}"
             )
 
     return 1 if any("error" in r for r in rows) else 0

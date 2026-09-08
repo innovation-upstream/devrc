@@ -10,19 +10,23 @@ allowed-tools: Bash, Read, Edit, Write, Grep, Glob
 Seven repos that ship one app each. Most work here is **the same change rolled
 through all of them**; releasing is the last mile of that, not the whole job.
 Platform operation — Tekton, Flipt, deploy diagnosis — is `app-blocks` in
-`datapacket-talos`, and it only loads with that repo as cwd.
+`civitai/talos-infra` (checked out here as `datapacket-talos`), and it only
+loads with that repo as cwd.
 
 ## Start every bulk pass with the inventory
 
 ```bash
 SKILL=~/.claude/skills/civitai-app-fleet
-python3 $SKILL/fleet.py            # --json to drive a fan-out, --no-platform offline
+python3 $SKILL/fleet.py            # --json drives a fan-out; --no-platform skips the CLI
+                                   # 🔴 it git-fetches SEVEN SHARED clones by
+                                   # default — --no-fetch to touch nothing
 ```
 
 It reports, per repo: **default branch** (`sensei` is `trunk`, six are `main`),
 what the base clone currently has **checked out and how dirty it is**, both
-version fields, `buildCommand`, lockfile, **vitest project count** (six have 2,
-one has 1) and **which file holds the version-lockstep guard** (split between
+version fields, `buildCommand`, lockfile, **whether it declares multiple vitest
+projects** (`2+` vs `1` — a class, not a count: the check cannot tell two from
+three) and **which file holds the version-lockstep guard** (split between
 `manifest.test.ts` and `version-lockstep.test.ts`).
 
 Every one of those columns was a wrong assumption before it was a column. Do not
@@ -68,8 +72,10 @@ civitai app submit <dir> --yes            # --yes required non-interactively
 ```
 
 Then a **moderator must approve** before anything builds. A failed build leaves
-the previous version serving — it is not an outage. `.envrc` is dropped from
-every bundle by the `.env*` rule.
+the previous version serving — it is not an outage. The `.env*` rule drops
+`.envrc` from every bundle, but KEEPS `.env.example`, `.env.production` and
+`.env.sample` at the project root — `.env.production` is load-bearing for some
+apps, so the second half of that rule matters as much as the first.
 
 `CIVITAI_STATUS_FILE=<dump>` makes `app_state.py` read a captured status instead
 of calling the CLI — for reasoning about a past state, and how the tests run
