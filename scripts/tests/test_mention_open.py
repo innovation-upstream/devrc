@@ -18,6 +18,7 @@ The two things worth pinning:
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -292,11 +293,49 @@ def _mapping_is_never_the_operators(monkeypatch, tmp_path):
     when = time.time() - 1.0 * 86400  # fresh: inside STALE_MAPPING_DAYS
     os.utime(p, (when, when))
     monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", p)
-    # 🔴 THE SUBPROCESS HALF. `mention-open.py:135` already reads this variable,
-    # and a child inherits the environment — so this closes the class for every
-    # `_run()` test, present and future, rather than depending on each one
-    # remembering to pass `--no-discovery`.
+    # 🔴 THE SUBPROCESS HALF. `mention-open.py`'s `KNOWN_REPOS_PATH` already
+    # reads this variable, and a child inherits the environment — so this closes
+    # the class for every `_run()` test, present and future, rather than
+    # depending on each one remembering to pass `--no-discovery`.
+    #
+    # ⚠ NAMED, NOT LINE-NUMBERED. This comment used to cite `mention-open.py:135`
+    # and the line had already moved to 141 — worse, 135 is now `WORKSPACE`, a
+    # DIFFERENT variable, so the reference pointed at the wrong hazard while
+    # reading as precise. A constant's name survives an edit above it.
     monkeypatch.setenv("MENTION_OPEN_KNOWN_REPOS", str(p))
+
+    # 🔴 THE SECOND HOST-STATE FILE GETS BOTH REDIRECTS TOO. `known_universe.json`
+    # names private repositories exactly as the mapping does, and it feeds the
+    # PICKER — the one surface those names are allowed to reach. Redirecting only
+    # the mapping would leave every disclosure guard in this file asserting on
+    # `FAKE_UNIVERSE`'s synthetic names while the code under test read the
+    # operator's real 388-row universe: the guard would be structurally unable
+    # to see the leak it is named for. Same two mechanisms, same reason — the
+    # `setattr` for in-process reads, the `setenv` for `_run()`'s real child.
+    # ⚠ AND IT IS DELIBERATELY NOT WRITTEN. The mapping redirect writes
+    # `FAKE_UNIVERSE` so a leaking mutant leaks synthetic names; this one points
+    # at a path that does not exist, so `load_known_universe()` returns [] and
+    # the universe a test sees is exactly the one its own mapping state implies.
+    # Writing a default here was tried and it silently CHANGED NINE EXISTING
+    # TESTS: cases built to assert an empty universe — an unreadable mapping, a
+    # mapping holding no usable rows — started getting a picker from the file
+    # instead of the refusal they were written to pin, so they failed for a
+    # reason that had nothing to do with what they test. A redirect must relocate
+    # a read, never invent content the test did not ask for. Tests that DO want
+    # a universe write one, or patch `load_known_universe`.
+    u = tmp_path / "autouse-known-universe.json"
+    monkeypatch.setattr(MO, "KNOWN_UNIVERSE_PATH", u)
+    monkeypatch.setenv("MENTION_OPEN_KNOWN_UNIVERSE", str(u))
+
+    # 🔴 AND THE WORKSPACE, WHICH WAS THE REMAINING HOLE IN THIS FIXTURE. The
+    # two redirects above stop a child reading the operator's FILES; nothing
+    # stopped it reading their DISK. `discover_repos()` fans out `git remote
+    # get-url` over `DEVRC_WORKSPACE`, which every `_run()` test inherited from
+    # the real environment — so the next such test written with digits and
+    # without `--no-discovery` walks the operator's real `~/workspace` and reads
+    # back real repositories, exactly as the mapping hole did. It was closed
+    # per-test; a per-test guard is one forgotten flag away from being no guard.
+    monkeypatch.setenv("DEVRC_WORKSPACE", str(tmp_path / "no-checkouts-here"))
     return p
 
 
@@ -1585,21 +1624,30 @@ def test_a_GUESSED_repo_is_never_auto_opened_whatever_the_shape(monkeypatch, tex
     assert "https://github.com/wrongorg/wrongrepo/issues/1291" in seen["urls"], seen
 
 
-def test_the_one_row_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
-    """A single-row picker with no explanation reads as a broken handler asking
-    the operator to confirm the obvious. rofi cannot report a reason after a
-    dismissal (see `pick`), so the reason goes above the choice.
+def test_the_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
+    """A picker whose top row was GUESSED, with no explanation, reads as a broken
+    handler asking the operator to confirm the obvious. rofi cannot report a
+    reason after a dismissal (see `pick`), so the reason goes above the choice.
 
-    🔴 AND THE NOTE NAMES THE CLICKED TEXT, NEVER A REPOSITORY OR THE MAPPING —
-    the ROW already carries the repo, and `_every_sink`'s disclosure guards
-    cannot see a string that goes to rofi."""
+    ⚠ THIS TEST USED TO ASSERT `n == 1` AND WAS RENAMED FROM
+    `test_the_one_row_picker_...`. That single row was the defect the operator
+    reported from the real click path on 2026-09-07 — the guess could not be
+    overridden — so the row COUNT it pinned is superseded. What survives
+    unchanged is the claim its name makes and the disclosure rule, both of which
+    matter more than the count: the note must explain itself, and it must not
+    name a repository.
+
+    The count is now pinned by
+    `test_a_GUESSED_repo_is_offered_WITH_the_whole_universe_beneath_it`, which
+    is the regression for the report."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
     seen = {}
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": seen.update(n=len(c), mesg=mesg) or "")
     assert MO.main(["audit-pr 1291"]) == 0
-    assert seen["n"] == 1, seen
+    assert seen["n"] > 1, ("the guess must not be the ONLY option — that is the "
+                           "reported defect, not the design")
     assert "audit-pr 1291" in seen["mesg"], seen
     assert "tmux pane" in seen["mesg"], seen
     _no_universe_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
@@ -2316,3 +2364,405 @@ def test_every_TELEMETRY_only_shape_is_invisible_to_the_click_handler():
         assert MO.resolve(pat.sample) == (None, []), (
             f"{name}: a telemetry-only shape reached the CLICK surface — "
             f"resolve() is scanning at the wrong profile")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PICKER UNIVERSE IS A SEPARATE CORPUS FROM THE RESOLUTION MAPPING
+#
+# `repo_universe()` used to read `discover_repos().values()`, which silently
+# inherited both of the mapping's filters. The mapping answers "what does the
+# bare name `foo` mean?", so it MUST drop an issues-disabled repo and MUST drop
+# a bare name two owners share. A picker answers "which repo do you want?", its
+# rows are fully-qualified, and nothing opens without a selection — so neither
+# filter buys anything there and both cost coverage.
+#
+# MEASURED on the operator's host 2026-09-07: `gh api user/repos` returned 388
+# repos; the picker offered 339. 53 repos the operator owns or collaborates on
+# could not be reached by typing at the picker at all.
+# --------------------------------------------------------------------------- #
+UNIVERSE_ONLY = "rivalorg/spadeworks-archived"
+
+
+def test_repo_universe_offers_a_repo_that_is_ONLY_in_the_universe_file():
+    """🔴 THE HEADLINE REGRESSION. Red on pre-change code, where `repo_universe`
+    took one argument and read the mapping alone.
+
+    `UNIVERSE_ONLY` stands for the 53 real repos the mapping's filters removed —
+    issues disabled, or a bare name two owners share. It is deliberately NOT a
+    value of `FAKE_UNIVERSE`, so it can only arrive through the new source."""
+    out = MO.repo_universe(dict(FAKE_UNIVERSE), [UNIVERSE_ONLY])
+    assert UNIVERSE_ONLY in out, out
+    # POSITIVE CONTROL — the mapping half did not stop working in the process.
+    for full in set(FAKE_UNIVERSE.values()):
+        assert full in out, (full, out)
+
+
+def test_the_union_is_STRICTLY_WIDENING_neither_source_can_remove_a_row():
+    """Ordering and precedence are not concepts here: this is a list of things
+    to offer, not a mapping from a name to one answer. Pinned in BOTH directions
+    because a `dict.update`-shaped implementation would let the second source
+    silently drop rows the first contributed and still pass a one-way check."""
+    mapped = MO.repo_universe(dict(FAKE_UNIVERSE), [])
+    filed = MO.repo_universe({}, [UNIVERSE_ONLY])
+    both = MO.repo_universe(dict(FAKE_UNIVERSE), [UNIVERSE_ONLY])
+    assert set(both) == set(mapped) | set(filed), (both, mapped, filed)
+    assert set(both) > set(mapped), "the file must ADD to the mapping"
+    assert set(both) > set(filed), "the mapping must ADD to the file"
+
+
+def test_the_universe_dedupes_case_insensitively_and_keeps_ONE_row():
+    """`acme/Widget` and `acme/widget` are ONE repository on GitHub — GitHub repo
+    names are case-insensitive, which is why the mapping writes two spellings of
+    every key. Two identical-looking rows in rofi is a worse picker, and the
+    operator cannot tell which one is 'right' because neither is."""
+    out = MO.repo_universe({"w": "acme/Widget"}, ["acme/widget"])
+    assert out == ["acme/Widget"], (
+        "the on-disk spelling wins and the duplicate is dropped")
+
+
+def test_the_universe_file_cannot_INVENT_a_row_that_is_not_owner_slash_repo():
+    """Same rule as the mapping's `clean_repo_map`, same reason: a row that is
+    not exactly `owner/repo` builds a URL that 404s while looking authoritative.
+    A picker row is worse than a mapping row here — the operator SELECTED it, so
+    a 404 reads as the handler being broken rather than the reference being bad."""
+    junk = ["acme/widget/", "acme//widget", "noslash", "", "a/b\nc/d",
+            "  acme/widget  ", 12, None, ["acme/widget"]]
+    assert MO.repo_universe({}, junk) == []
+    # POSITIVE CONTROL: the same call with a GOOD row is non-empty, so the empty
+    # above is the filter working and not the function failing to read anything.
+    assert MO.repo_universe({}, junk + ["acme/widget"]) == ["acme/widget"]
+
+
+@pytest.mark.parametrize("body,why", [
+    (None, "absent"),
+    ("", "empty"),
+    ("{not json", "malformed"),
+    ('{"loamfield": "gardenersguild/trowelcast"}', "a DICT — the mapping's shape"),
+    ('"gardenersguild/trowelcast"', "a bare string"),
+    ("42", "a number"),
+])
+def test_load_known_universe_answers_EVERY_failure_with_an_empty_list(
+        tmp_path, body, why):
+    """🔴 IDENTICAL POSTURE TO `load_known_repos`, AND FOR THE IDENTICAL REASON:
+    this runs on a detached click handler with nowhere to print a traceback.
+
+    ⚠ THE DICT CASE IS NOT HYPOTHETICAL. `known_repos.json` sits in the same
+    directory and IS a dict; a `--path`/`--universe-path` mix-up at generation
+    time writes one where the other belongs. Without the `isinstance(raw, list)`
+    check, iterating a dict yields its KEYS — so the picker would silently offer
+    bare repo names that are not `owner/repo` and build 404 URLs from them."""
+    p = tmp_path / "universe.json"
+    if body is not None:
+        p.write_text(body)
+    assert MO.load_known_universe(p) == [], why
+
+
+def test_load_known_universe_reads_a_GOOD_file(tmp_path):
+    """The positive control for the parametrisation above. Six ways of returning
+    `[]` prove nothing about the reader unless it can also return rows — a
+    function hardcoded to `return []` passes every case above."""
+    p = tmp_path / "universe.json"
+    p.write_text(json.dumps(["acme/widget", "not a repo", "acme/gadget"]))
+    assert MO.load_known_universe(p) == ["acme/widget", "acme/gadget"], (
+        "good rows kept IN FILE ORDER, the malformed one dropped")
+
+
+def test_the_universe_path_is_resolved_at_CALL_time_not_bound_as_a_default():
+    """🔴 THE DEFECT THAT MADE `load_known_repos`' OWN OVERRIDE TEST INERT, and
+    it is a CLASS, not one site: a `path: Path = KNOWN_UNIVERSE_PATH` default is
+    evaluated at IMPORT, so every test that patches the module constant passes
+    while observing nothing. Measured on the mapping half: deleting the entire
+    `load_known_repos()` call from `discover_repos` left the suite green."""
+    import inspect
+    sig = inspect.signature(MO.load_known_universe)
+    assert sig.parameters["path"].default is None, (
+        "the default must be None and resolved inside the body")
+
+
+def test_the_picker_actually_OFFERS_a_universe_only_repo_end_to_end(monkeypatch):
+    """🔴 THE BEHAVIOURAL HALF. Every assertion above is about `repo_universe` in
+    isolation; this drives `main()` and reads what reached `pick`, so a correct
+    universe that `main()` never passes to the picker still fails.
+
+    That seam is exactly where this feature could be inert: `main()` built the
+    universe from `repo_universe(discovered)` with no second argument, and a
+    version of this change that widened the function but not the call site would
+    pass every unit test in this section."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [UNIVERSE_ONLY])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(rows=list(c), mesg=mesg) or "")
+    assert MO.main(["nosuchrepo#77"]) == 0
+    urls = [c["url"] for c in seen["rows"]]
+    assert any(UNIVERSE_ONLY in u for u in urls), (
+        f"the universe-only repo never reached the picker: {urls}")
+    assert all(u.endswith("/77") for u in urls), urls
+
+
+def test_the_universe_file_is_NOT_read_on_a_click_that_resolves(monkeypatch):
+    """🔴 A LATENCY GUARD, AND THE REASON THE CALL IS INSIDE A CONDITIONAL
+    EXPRESSION. The whole subsystem exists because a click took 4.3s; the fix
+    was deleting a lookup, and re-adding an unconditional `stat` + `read` +
+    `json.loads` on the fast path would be the same mistake in miniature.
+
+    `owner/repo#N` is answered by the text alone and must never touch the file."""
+    reads = []
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: reads.append(1) or [])
+    monkeypatch.setattr(MO, "open_url", lambda url: reads.append(url) or 0)
+    assert MO.main(["--no-discovery", "civitai/talos-infra#1065"]) == 0
+    assert reads == ["https://github.com/civitai/talos-infra/issues/1065"], (
+        f"expected exactly one open and no universe read, got {reads}")
+
+
+def test_the_staleness_note_names_the_UNIT_not_only_the_generator(tmp_path):
+    """🔴 THE TEXT IS A CLAIM AND THE CLAIM CHANGED. It used to say "nothing
+    regenerates it", which was true and is now false: a daily user unit does.
+    Left alone, it would send the operator to re-run a generator by hand while
+    the actual fault — a failing unit, an expired token, a host that was off —
+    stayed invisible. A stale mapping past seven days now means SEVERAL runs did
+    not land, which is a different diagnosis and needs a different sentence."""
+    p = tmp_path / "known_repos.json"
+    p.write_text(json.dumps(FAKE_UNIVERSE))
+    old = time.time() - (MO.STALE_MAPPING_DAYS + 3) * 86400
+    os.utime(p, (old, old))
+    note = MO.staleness_note(p)
+    assert note, "positive control: a file this old MUST produce a note"
+    assert "mention-known-repos-refresh" in note, note
+    assert "nothing regenerates it" not in note, note
+    # And it still says nothing about a ROW — the disclosure rule is unchanged.
+    _no_universe_token_anywhere(note, "STALENESS NOTE DISCLOSURE")
+
+
+def test_the_universe_reaches_NO_sink_but_rofi(monkeypatch, capsys):
+    """🔴 THE DISCLOSURE GUARD FOR THE NEW CORPUS. `known_universe.json` names
+    private repositories — MORE of them than the mapping does, because it is
+    deliberately unfiltered — and it is read on the picker path. The existing
+    guards assert on `FAKE_UNIVERSE`'s tokens; this one adds the universe-only
+    row, which no mapping-derived guard can see."""
+    notify_argv = []
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [UNIVERSE_ONLY])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "notify",
+                        lambda *a: notify_argv.append(["notify-send", *a]))
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="": "")   # dismissed
+    MO.main(["nosuchrepo#77"])
+    blob = _every_sink(capsys, notify_argv)
+    for token in (UNIVERSE_ONLY, UNIVERSE_ONLY.split("/")[0],
+                  UNIVERSE_ONLY.split("/")[1]):
+        assert token not in blob, (
+            f"a universe row reached a sink that is not rofi: {token!r}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE FILE-WIDE SPAWN PIN — required by this handler's entry in
+# `test_no_real_launchers.py::ACKNOWLEDGED_UNSTUBBED`.
+#
+# `mention-open.py` names `systemctl` in ONE operator-facing string (the
+# staleness note tells you which unit to check). `launcher_scan.hazard_hits` is
+# a TEXTUAL scan — deliberately, since erring toward reporting is right for a
+# scan whose failure mode is a missed launch — so that mention registers this
+# file as "reaching systemctl" and it had to be acknowledged.
+#
+# 🔴 AN ACKNOWLEDGEMENT BLINDS THE GUARD IT IS FILED UNDER, AND THAT WAS
+# MEASURED ON THIS EXACT TABLE: `tmux-reply-agent`'s entry claimed by grep that
+# no call site existed, and injecting a real `subprocess.run(["systemctl", …])`
+# into it left that whole suite green — the acknowledgement had absorbed the
+# thing the guard exists to catch. Its remedy was an AST pin, and this is the
+# same remedy for the same reason.
+#
+# ⚠ THE EXISTING LEDGER DOES NOT COVER THIS, WHICH IS WHY A SECOND TEST EXISTS.
+# `test_the_resolution_path_spawns_ONLY_these_local_commands` records what the
+# RESOLUTION PATH actually spawns at runtime — a stronger claim on the path it
+# drives, and blind everywhere else: a `systemctl` call added to `notify()`, or
+# to any branch that run does not reach, would not appear in its ledger. This
+# one reads the whole FILE.
+# --------------------------------------------------------------------------- #
+_SPAWN_FUNCS = {"run", "Popen", "call", "check_output", "check_call", "system",
+                "execv", "execvp", "execve", "spawnv", "spawnvp"}
+
+# Every argv[0] this handler is allowed to spawn, and why each is here:
+#   git         — reading a checkout's remote (discovery)
+#   tmux        — asking the pane for its repo
+#   notify-send — the refusal toast
+#   xdg-open    — opening the chosen URL
+#   rofi        — the picker
+EXPECTED_ARGV0 = {"git", "tmux", "notify-send", "xdg-open", "rofi"}
+
+
+def _spawn_argv0_literals(path: Path) -> set[str]:
+    """Every literal argv[0] in a spawn-shaped call, read from the SYNTAX TREE.
+
+    A non-literal argv[0] is reported as `<computed>` rather than skipped: a
+    spawn whose command comes from a variable is exactly how a ledger keyed on
+    literals gets walked past, so it must fail this test loudly instead of
+    vanishing from the set. `pick()` already carries a comment requiring its
+    rofi argv to stay a list literal for this reason.
+    """
+    tree = ast.parse(path.read_text())
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name not in _SPAWN_FUNCS:
+            continue
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+            head = first.elts[0]
+            found.add(head.value if isinstance(head, ast.Constant)
+                      else "<computed>")
+        else:
+            found.add("<not-a-list>")
+    return found
+
+
+def test_mention_open_SPAWNS_these_argv0_AND_NOTHING_ELSE():
+    """🔴 GROWS-OR-SHRINKS, both directions asserted.
+
+    A NEW binary appearing here is the hazard the `ACKNOWLEDGED_UNSTUBBED`
+    entry would otherwise hide. A binary DISAPPEARING matters too: it means a
+    capability was removed and the acknowledgement's justification — which
+    names this set — has silently stopped describing the file.
+    """
+    assert _spawn_argv0_literals(HANDLER) == EXPECTED_ARGV0
+
+
+def test_systemctl_is_MENTIONED_but_never_SPAWNED():
+    """🔴 THE CLAIM THE ACKNOWLEDGEMENT ACTUALLY MAKES, asserted directly rather
+    than left to the reader of a prose justification.
+
+    Both halves are pinned. The mention must EXIST — delete the staleness note's
+    command and this test says so, because a justification describing a file
+    that no longer mentions the name is a stale entry in that table. And it must
+    remain a mention only."""
+    text = HANDLER.read_text()
+    assert re.search(r"(?<![\w-])systemctl(?![\w-])", text), (
+        "the acknowledgement in test_no_real_launchers.py exists BECAUSE this "
+        "file names systemctl; if that is gone, remove the acknowledgement too")
+    assert "systemctl" not in _spawn_argv0_literals(HANDLER), (
+        "mention-open.py now SPAWNS systemctl — the ACKNOWLEDGED_UNSTUBBED "
+        "entry covering it is an unreachability claim and is now FALSE")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A GUESSED REPO MUST BE OVERRIDABLE — REPORTED FROM THE REAL CLICK PATH
+#
+# 2026-09-07, operator, clicking `audit-pr 1291` in Alacritty: a ONE-ROW picker
+# holding the tmux pane's repo, above the note "audit-pr 1291 names no
+# repository". Their words: "in this case the guess is right, but in practice
+# it's not."
+#
+# That is the whole defect. Suppressing the auto-open (#1336) was correct — a
+# `default`-sourced repo is evidence about the WINDOW, not about the reference,
+# so it must never open unconfirmed. But having declined to act on the guess,
+# the handler offered nothing else: confirm the wrong repo, or dismiss and type
+# the URL by hand. The universe was already built and already the answer
+# everywhere else a repository cannot be named; this arm just never reached it.
+# --------------------------------------------------------------------------- #
+def _guessed_picker(monkeypatch, *, universe, pane="wrongorg/wrongrepo",
+                    mapping=FAKE_UNIVERSE):
+    """Drive `main()` down the guessed-repo path and return what `pick` saw.
+
+    ⚠ `mapping` IS A PARAMETER BECAUSE `universe=[]` DOES NOT EMPTY THE UNIVERSE.
+    `repo_universe()` unions the generated file with `discover_repos()`, so a
+    caller that clears only the file still gets every mapped repo — my own
+    empty-universe test asserted 1 row and got 4 for exactly that reason. The
+    empty case needs BOTH sources cleared, and that is worth a parameter rather
+    than a comment, because the trap is silent in the other direction too."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(mapping))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: list(universe))
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: pane)
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(rows=list(c), mesg=mesg) or "")
+    assert MO.main(["audit-pr 1291"]) == 0
+    return seen
+
+
+def test_a_GUESSED_repo_is_offered_WITH_the_whole_universe_beneath_it(monkeypatch):
+    """🔴 THE REGRESSION FOR THE REPORTED SYMPTOM. Red before this change: the
+    picker held exactly ONE row.
+
+    The guess must still be FIRST — it is the most likely answer and stays one
+    Enter away — and everything else must be reachable by typing."""
+    seen = _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY, "acme/widget"])
+    urls = [c["url"] for c in seen["rows"]]
+    assert len(urls) > 1, f"a guess with no alternatives is a dead end: {urls}"
+    assert "wrongorg/wrongrepo" in urls[0], (
+        f"the guess must stay FIRST — one Enter for the common case: {urls[0]}")
+    assert any(UNIVERSE_ONLY in u for u in urls), (
+        f"the universe never reached the guessed picker: {urls}")
+    assert all(u.endswith("/1291") for u in urls), urls
+
+
+def test_the_guessed_row_is_NOT_offered_twice(monkeypatch):
+    """The pane's repo is usually in the universe too. Two identical rows read
+    as a rendering bug rather than as a recommendation, and the operator cannot
+    tell which one is the 'real' one — because neither is."""
+    seen = _guessed_picker(monkeypatch,
+                           universe=["wrongorg/wrongrepo", "acme/widget"])
+    urls = [c["url"] for c in seen["rows"]]
+    assert len(urls) == len(set(urls)), f"duplicate rows: {urls}"
+    assert sum("wrongorg/wrongrepo" in u for u in urls) == 1, urls
+
+
+def test_a_guessed_picker_is_NOT_described_as_nothing_here_knows(monkeypatch):
+    """🔴 THE ORDER GUARD, and it pins a defect no behavioural test can see.
+
+    After the fix BOTH `guessed` and `offered_universe` are true on this path,
+    so the note is chosen by the ORDER of two branches. `universe_note` opens
+    "nothing here knows X" — which is false here: the first row is a
+    recommendation the handler is explicitly asking about. Swap the branches and
+    the picker still shows the right rows in the right order, so only the words
+    are wrong, and only this test says so."""
+    seen = _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY])
+    assert "nothing here knows" not in seen["mesg"], seen["mesg"]
+    assert "guess" in seen["mesg"].lower(), seen["mesg"]
+    assert "tmux pane" in seen["mesg"], seen["mesg"]
+    # …and it must say the rest are SEARCHABLE, because "confirm or dismiss" —
+    # the old wording — is now false: neither is what the operator should do.
+    assert "search" in seen["mesg"].lower(), seen["mesg"]
+    _no_universe_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
+
+
+def test_the_ONE_ROW_wording_survives_for_an_EMPTY_universe(monkeypatch):
+    """⚠ The narrow wording is kept, not deleted: with no mapping file (or an
+    unreadable one) the universe is empty and a lone guessed row is still
+    reachable. "Confirm, or dismiss" is the correct instruction THERE, and
+    telling the operator to "type to search" over one row would be nonsense."""
+    seen = _guessed_picker(monkeypatch, universe=[], mapping={})
+    assert len(seen["rows"]) == 1, seen["rows"]
+    assert "Confirm, or dismiss" in seen["mesg"], seen["mesg"]
+    assert "search" not in seen["mesg"].lower(), seen["mesg"]
+
+
+def test_the_guessed_repo_is_still_NEVER_opened_unconfirmed(monkeypatch):
+    """🔴 THE SAFETY PROPERTY #1336 ADDED, RE-ASSERTED HERE because this change
+    touches the branch that enforces it. Widening the offer must not weaken the
+    rule: a repo measured from the tmux pane is evidence about the WINDOW, and
+    opening it unconfirmed is the confident-wrong-page failure the whole handler
+    is anchored against. `open_url` must not be reached without a selection."""
+    opened = []
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
+    _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY])
+    assert opened == [], f"a guessed repo was opened without a selection: {opened}"
+
+
+def test_an_EXPLICIT_owner_still_opens_directly_and_gets_NO_picker(monkeypatch):
+    """🔴 THE NEGATIVE CONTROL FOR THE WHOLE CHANGE. A rule that appended the
+    universe to every candidate would satisfy every assertion above while
+    putting a 392-row picker in front of `owner/repo#N`, which carries its own
+    evidence and must still open with zero keystrokes."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [UNIVERSE_ONLY])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    picked, opened = [], []
+    monkeypatch.setattr(MO, "pick", lambda c, mesg="": picked.append(c) or "")
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
+    assert MO.main(["civitai/talos-infra#1065"]) == 0
+    assert picked == [], "an explicit owner must not raise a picker"
+    assert opened == ["https://github.com/civitai/talos-infra/issues/1065"], opened

@@ -499,8 +499,8 @@ def m_skill_listing(env: Env) -> dict:
         #: THREE IS NOT FIXED. `costliest tier-A entry: <skill>` interpolates a
         #: skill name into an otherwise-static label, so this column leaks
         #: whenever the costliest entries happen to be the client-named skills.
-        #: Today they are not — measured `clickup`, `session-manager`,
-        #: `window-triage` — which is exactly why declaring it only when the
+        #: Today they are not — measured `clickup` and `session-manager` —
+        #: which is exactly why declaring it only when the
         #: leak is visible would be wrong: the cell contents are a ranking that
         #: moves on its own, with no commit to notice it.
         column_kinds=("name", ""),
@@ -1578,9 +1578,11 @@ WORK_INTAKE: tuple[tuple[str, bool, str, tuple[str, ...]], ...] = (
      "someone else's system of record — set off this machine",
      ("claude/skills/clickup/SKILL.md",
       "scripts/check-clickup-addressed")),
-    ("the initiatives board", False,
-     "threads, not units — momentum, never an acceptance criterion",
-     ("claude/skills/initiatives/SKILL.md", "scripts/initiatives")),
+    # (The durable "initiatives board" was a fourth intake — threads, not units;
+    # momentum, never an acceptance criterion. RETIRED 2026-09-07, skill and
+    # subsystem both, so it mints nothing now. Its row is dropped rather than
+    # kept at zero: this tuple counts systems that CAN mint work, and a row
+    # pointing at files that do not exist is the dead pointer §4 warns about.)
     ("claim-work", False,
      "a LOCK over a handoff doc's ranked list, not a queue",
      ("scripts/claim-work.sh",

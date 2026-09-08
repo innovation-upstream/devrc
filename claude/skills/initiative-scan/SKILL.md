@@ -8,8 +8,9 @@ allowed-tools: Bash
 # initiative-scan — on-demand initiative + progress ledger
 
 🔴 **There is no `initiative-scan` binary — `which initiative-scan` finds nothing.** It is a
-python script, and it does **not** live under `scripts/initiatives/` (that path is the
-*durable board*, a different subsystem with its own `initiatives` skill). The one file is:
+python script. It had a confusable same-named neighbour for a while — a *durable board*
+with its own `initiatives` skill, in a directory of that name — which was RETIRED
+2026-09-07, directory and all. This is now the only thing by that name. The one file is:
 
 ```bash
 python3 ~/workspace/devrc/scripts/session-analysis/initiative-scan.py --days 4 --tmux

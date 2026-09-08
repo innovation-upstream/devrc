@@ -111,6 +111,8 @@ def _post(
     plan_cwd=None,
     unit_status="0",
     journal="(fixture)",
+    sends=None,
+    live_claude=None,
 ):
     ids = HEALTHY_IDS if ids is None else ids
     names = HEALTHY_NAMES if names is None else names
@@ -130,6 +132,10 @@ def _post(
     ]
     if windows is not None:
         lines.append(f"tmux_windows={windows}")
+    if sends is not None:
+        lines.append(f"sends_logged={sends}")
+    if live_claude is not None:
+        lines.append(f"claude_panes_live={live_claude}")
     if replayed is not None:
         lines += [
             f"replayed_layout_file={replayed}",
@@ -871,3 +877,87 @@ def test_the_systemctl_verb_extractor_can_SEE_a_mutating_verb():
     bad = _systemctl_verbs('  raw=$(systemctl --user restart "$UNIT" 2>&1)\n')
     assert bad == ["restart"], bad
     assert bad[0] not in nolaunch.SYSTEMCTL_READ_VERBS
+
+
+# --------------------------------------------------------------------------- #
+# The failure the 2026-09-06 reboot actually produced
+#
+# The unit RAN, exited 0, sent 43 `claude --resume` lines and started NOTHING.
+# Windows and ids were perfect — 54/54, correct (session, index) set, no extras,
+# no missing — so every comparison in this file read CLEAN while the workspace
+# was 54 bare shells. Restoring the windows is continuum's job; resuming the
+# conversations is the unit's, and they fail independently.
+# --------------------------------------------------------------------------- #
+
+def test_sends_that_started_nothing_are_reported_even_when_the_windows_are_PERFECT(tmp_path):
+    """🔴 THE REGRESSION. Every id matches; only the resumes are missing."""
+    r = _verdict(_pre(tmp_path), _post(tmp_path, sends="43", live_claude="1"), tmp_path)
+    assert r.returncode == RC_RACE, r.stdout + r.stderr
+    assert "THE RESUMES DID NOT LAND" in r.stdout
+    assert "43 send(s)" in r.stdout and "1 pane(s)" in r.stdout
+    # It must NOT be reported as a window problem — the windows were fine.
+    assert "RACE EVIDENCE" not in r.stdout
+
+
+def test_resumes_that_landed_are_reported_without_alarm(tmp_path):
+    r = _verdict(_pre(tmp_path), _post(tmp_path, sends="43", live_claude="43"), tmp_path)
+    assert r.returncode == RC_CLEAN, r.stdout + r.stderr
+    assert "THE RESUMES DID NOT LAND" not in r.stdout
+    assert "43 pane(s) running claude vs 43 send(s) logged" in r.stdout
+
+
+def test_an_unmeasured_pane_count_is_not_read_as_zero_resumes(tmp_path):
+    """A missing count must not become a confident failure report, nor a pass.
+
+    ⚠ This fixture uses the BARE token, which production never emits — see the
+    test below, which is the one that pins the real shape. Kept because the
+    bare form is still a legal reading of "unmeasured" and costs nothing."""
+    r = _verdict(_pre(tmp_path), _post(tmp_path, sends="43", live_claude="UNMEASURED"),
+                 tmp_path)
+    assert r.returncode == RC_INCONCLUSIVE, r.stdout + r.stderr
+    assert "UNKNOWN" in r.stdout
+    assert "THE RESUMES DID NOT LAND" not in r.stdout
+
+
+def test_the_unmeasured_marker_AS_PRODUCTION_SPELLS_IT_is_not_an_integer_comparison(tmp_path):
+    """🔴 THE FIXTURE ABOVE COULD NOT SEE THIS BUG. The emitter writes
+    `claude_panes_live=UNMEASURED reason=no-tmux-server-responding` and `get`
+    returns everything after `key=`, so the arm's `[ "$live" = UNMEASURED ]`
+    was never true in production. It fell through to `[ "$live" -lt "$sends" ]`
+    — an integer comparison against a sentence — on the one path whose entire
+    job is to say "I do not know".
+
+    Pins the value the emitter ACTUALLY writes, not a tidier one."""
+    r = _verdict(_pre(tmp_path),
+                 _post(tmp_path, sends="43",
+                       live_claude="UNMEASURED reason=no-tmux-server-responding"),
+                 tmp_path)
+    assert r.returncode == RC_INCONCLUSIVE, r.stdout + r.stderr
+    assert "UNKNOWN" in r.stdout
+    assert "THE RESUMES DID NOT LAND" not in r.stdout
+    # The shell must not have errored on an integer comparison.
+    combined = r.stdout + r.stderr
+    assert "integer expression expected" not in combined, combined
+    assert "integer expected" not in combined, combined
+    # 🔴 And the specific regression: the failed `-lt` did not abort, it fell
+    # into the `else` and printed the reason string AS A PANE COUNT, returning
+    # RC_CLEAN. Pin that shape, not just the rc.
+    assert "reason=no-tmux-server-responding pane(s) running claude" not in r.stdout, \
+        r.stdout
+
+
+def test_the_verdict_says_the_live_pane_count_is_WHOLE_HOST(tmp_path):
+    """`claude_panes_live` counts every claude pane on the box — including ones
+    started by hand and ones the unit SKIPPED as already running. Without that
+    caveat printed, `live >= sends` reads as "every send landed", which it does
+    not establish."""
+    r = _verdict(_pre(tmp_path), _post(tmp_path, sends="43", live_claude="43"), tmp_path)
+    assert "WHOLE-HOST" in r.stdout, r.stdout
+
+
+def test_a_boot_where_the_unit_sent_nothing_does_not_trip_the_arm(tmp_path):
+    """Zero sends is a different finding (the unit had no work, or never ran)
+    and must not be reported as resumes failing to land."""
+    r = _verdict(_pre(tmp_path), _post(tmp_path, sends="0", live_claude="0"), tmp_path)
+    assert "THE RESUMES DID NOT LAND" not in r.stdout
+    assert r.returncode == RC_CLEAN, r.stdout + r.stderr

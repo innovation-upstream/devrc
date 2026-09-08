@@ -4,10 +4,10 @@
 P1 of "handoff-doc full-text search". There is no server-side query over handoff
 doc BODIES today, and that is the gap this closes:
 
-  * `scripts/initiatives/sync.py` stores DERIVED metadata only — `summary` is one
+  * the retired initiatives sync stored DERIVED metadata only — `summary` was one
     parsed line, `current_doc` is a PATH, and `search_text` is session prompts.
     Not one byte of a doc's body reaches Postgres.
-  * `scripts/initiatives/viewer.py` live-reads bodies off disk (`read_doc_detail_live`,
+  * its viewer live-read bodies off disk (`read_doc_detail_live`,
     512 KB cap) and its search is CLIENT-SIDE JS over what the page already shipped.
 
 So the corpus is queryable only by a human who already knows which doc to open,
@@ -1506,7 +1506,7 @@ class PostgresSectionStore:
         port-forward, the process being killed by `TimeoutStartSec` — left it that
         way, because `MailDB.__exit__` only calls `conn.close()` and an unfinished
         transaction is discarded, not flushed. The truncate, however, was already
-        durable. `scripts/initiatives/sync.py::write_snapshot` is the in-repo
+        durable. The retired `initiatives` sync's `write_snapshot` was the in-repo
         template: it "commits once at the end (all-or-nothing per run)".
 
         The old `upsert` docstring claimed the opposite — "a run that dies

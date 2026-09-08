@@ -60,10 +60,6 @@
     "check-clickup-addressed": { "tier": "A" },
     "clawgate": { "tier": "A" },
     "clickup": { "tier": "A" },
-    "close-the-loop": {
-      "tier": "B",
-      "why": "a deliberate ritual Zach opens by name; nothing he says by accident should start it"
-    },
     "devrc-dx": { "tier": "A" },
     "dl-router": { "tier": "A" },
     "espanso-audit": {
@@ -78,17 +74,12 @@
       "tier": "B",
       "why": "CLOSEST CALL in this ledger -- 'what's stalled' IS a symptom, but the mis-route lands on `initiatives` (the durable board), a degraded answer rather than a wrong action; flip to A the first time that costs anything"
     },
-    "initiatives": { "tier": "A" },
     "mailbox": { "tier": "A" },
     "obs-read": { "tier": "A" },
     "opencode": { "tier": "A" },
     "prune-index": {
       "tier": "B",
       "why": "'prune the analyze-service index' -- named, not described; and the three prune-* siblings spend most of their prose disambiguating each other, which name-only makes moot"
-    },
-    "quiesce-workload": {
-      "tier": "B",
-      "why": "called by name ('quiesce stash-sense', 'resume prometheus'); no symptom routes here -- you already know the workload"
     },
     "prune-memory": {
       "tier": "B",
@@ -98,18 +89,9 @@
       "tier": "B",
       "why": "'prune/shrink this skill' -- named, not described"
     },
-    "repo-cos": {
-      "tier": "B",
-      "why": "a weekly ritual opened by name or as /repo-cos; the email that prompts it names it"
-    },
     "resume": { "tier": "A" },
     "session-manager": { "tier": "A" },
-    "sglang": {
-      "tier": "B",
-      "why": "named by the thing it operates (sglang / sglang-server); GPU-contention symptoms route to obs-read first anyway"
-    },
     "signal": { "tier": "A" },
-    "standup": { "tier": "A" },
     "subsystem-index": {
       "tier": "B",
       "why": "invoked BY `/handoff`, which names it in its own body; its own description says 'rarely run directly', so no symptom needs to route to it"
@@ -127,7 +109,6 @@
       "tier": "B",
       "why": "CLOSE CALL -- run as a gate immediately after an agent reports done, and named when it is; flip to A if a 'done' claim ever gets believed because this did not fire"
     },
-    "vetr-mailbox": { "tier": "A" },
-    "window-triage": { "tier": "A" }
+    "vetr-mailbox": { "tier": "A" }
   }
 }

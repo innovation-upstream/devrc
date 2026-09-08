@@ -381,9 +381,10 @@ otherwise collide and hand the new window a dead session's id. Spec:
 A blind dogfood found this tool "precise about what it measured but it does not tell a cold
 reader what it did **not** measure" — while **60 open PRs**, one conflicting for eleven days,
 sat outside every number it prints. `report["not_measured"]` names each such population and
-the **skill that answers it**: `pull_requests` → `standup`, `mail_queue` → `mailbox`,
-`cluster_alerts` → `standup`, `initiative_board` → `initiatives`,
-`gui_windows_outside_tmux` → `i3`.
+the **skill that answers it**: `pull_requests` → `initiative-scan`, `mail_queue` →
+`mailbox`, `cluster_alerts` → `obs-read`, `gui_windows_outside_tmux` → `i3`.
+(`initiative_board` → `initiatives` was a fifth until the board was retired
+2026-09-07; a population that no longer exists is not an unmeasured one.)
 
 🔴 **It is DERIVED from the report's own keys, not a written-down list.** An entry is emitted
 only while the report carries no key for that population, so the day PR querying lands the

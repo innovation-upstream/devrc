@@ -16,15 +16,12 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Diagnose and resolve disk pressure on the workbench NixOS host (root partition `/dev/nvme0n1p2`, 1.8TB). The host was at 87% usage with ~228G free. The session freed ~200G through cleanup, then investigated why the filesystem reports 1.5TB used while only ~600GB of data is measurable.
 
 ## State now
-- **BOTH PRs MERGED to `main`.** devrc#1227 → `d8fe0bce`; devrc#1301 → `46264622`. Verified by CONTENT, not ancestry (a squash is never an ancestor of its base). Base clone at `46264622`, worktrees removed, claim `nix-disk-cleanup-1` RELEASED.
-- No clawgate task: `clawgate_handoff.sh resolve` exited **5 — NOTHING RESOLVED**. An unknown session id answers 200 with an empty array, so that cannot distinguish "touched no task" from "wrong id". No `clawgate-task:` field recorded.
-- 🔴 **NOTHING IS LIVE.** `/etc/tmpfiles.d/00-nixos.conf` carries none of these rules. The 98 GB came from running the rules by hand with `systemd-tmpfiles --clean`, NOT from the config. Two operator actions remain (ranks 1–2).
-
-### What's DONE
-1. **Reclaim taken and measured** — inodes 96,135,443 → 84,836,132 (−11,299,311); available 308G → 406G; 83% → 77%.
-2. **`apply-tmp-churn-retention.sh` fixed** — `m:7d` → `mM:7d`, dead glob withdrawn, argument guards, ledger uniqueness. **Eviction REMOVED, not fixed** (below).
-3. **`scripts/diagnose-disk-accounting.sh`** shipped — root-required, hardlink-deduping, reports its own blind spots.
-4. **`nix/system/apply-tmp-churn-stale-lines-2026-09-04.sh`** + its `.md` — the hand patch, scripted.
+- 🔴 **BOTH HOSTS ARE NOW APPLIED AND LIVE — rank 2, the last operator step, is CLOSED.**
+  - **Workbench**: 7 `mM:7d` rules live, 0 stale, since the 2026-09-06 reboot. Re-confirmed 2026-09-07 17:54 CDT as the known-good control for the preflight tool.
+  - **Laptop (`192.168.50.155`)**: applied 2026-09-07 17:54 CDT via `preflight-tmp-churn-host.sh --init`. 7 live, 0 stale, switch took without a reboot (`/run/booted-system` ≠ `/run/current-system`), timer `active`, first reap 18:54 CDT.
+- **The laptop needed a DIFFERENT tool than this doc assumed.** Its `/etc/nixos/configuration.nix` had **no `systemd.tmpfiles.rules` attribute at all** (`anchor lines: 0`), so `apply-tmp-churn-retention.sh` — whose inserter appends INTO an existing list — correctly refused. `--init` creates the attribute; the created block then matches the anchor, so the retention script maintains it from then on.
+- **PRs open, both unaudited:** `innovation-upstream/devrc#1366` (rank 5 test coverage; independently re-verified: 71 assertions green, 19/19 mutants killed by their own guard, both controls watched) and `#1370` (the preflight/`--init` tool, now live-verified on both hosts — see its issue comment correcting `d5421b4d`'s "never run against a real /etc/nixos" caveat).
+- Claim `nix-disk-cleanup-5` remains HELD — it tracks `#1366`, which is still open.
 
 ## Open investigations — live diagnosis state
 
@@ -277,19 +274,82 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **The laptop's `/etc/nixos` is UNMEASURED** from the workbench.
 - ⚠ **`/tmp` has already regrown**: available 406G → 367G (79%) within hours of the reclaim. Nothing throttles it until the rules are live.
 
+### Is the daily reap cadence sufficient under build load? — UNRESOLVED, sampler in flight
+- **Symptom + exact repro:** the reap is daily (18:16 CDT); the question is whether `/tmp` can re-fill faster than that under real build load. Reproduce by sampling `df -i /`, `df -k /` and `ls -U /tmp | wc -l` on a fixed interval across a build.
+- **Observed (with values):** sampler at `scratchpad/churn-sample.sh`, 5-minute interval:
+  - `19:43:25Z` inodes **67,693,096** · avail **482,245,348 KB** · `/tmp` top-level **263,976**
+  - `19:48:25Z` inodes **68,058,181** · avail **480,538,360 KB** · `/tmp` top-level **263,998**
+  - ⇒ **+365,085 inodes and −1.63 GiB in 5 minutes** (~73k inodes/min).
+  - 🔴 **`/tmp` top-level moved only +22 while inodes moved +365k** — the churn is INSIDE existing directories, not new top-level entries.
+- **Ruled out — that this is idle baseline.** The samples were taken while this session's own subagent was running `nix build` and the full devrc suite, which is precisely the `nix-develop-*`/`nix-shell.*` generator. The figure is a PEAK-LOAD reading, not a baseline one.
+    via: measurement
+- **Ruled out — that the top-level stub count is what grows under load.** +22 entries against +365,085 inodes over the same interval.
+    via: measurement
+- **Leading hypothesis:** at ~73k inodes/min sustained, the 54.7M free inodes are ~12.5 hours of continuous building against a 24-hour reap cadence — so a heavy build day could approach the inode wall before the next reap. **UNCONFIRMED: this rests on two samples taken under atypical load.**
+- **Next probe, verbatim:** read the completed curve and compare a build window against an idle one —
+  ```bash
+  cat /tmp/claude-1000/-home-zach-workspace-homelab-talos/c8eedffa-36a5-41b3-b250-99d5d2851435/scratchpad/churn.tsv
+  ```
+  Confirm the terminator line `SAMPLER-DONE` is present before reading it as complete — this doc's own primary lesson. If the scratchpad is gone, re-run a sampler across a known-idle hour; the two rates are the whole question.
+
+### `df -i` and `--output` are mutually exclusive — a sampler that silently recorded an empty column
+- **Symptom + exact repro:** `df -i --output=iused /` → `df: options -i and --output are mutually exclusive`, exit non-zero.
+- **Observed (with values):** the first sampler build wrote `2026-09-07T19:42:34Z\t\t482957336\t263974` — a well-formed TSV row with an **empty** inode field, for an hour, with no error surfaced because the failure went to a discarded stderr.
+- **Ruled out — that the column was zero.** It was empty, not `0`; the command never produced a value at all.
+    via: measurement
+- **Fix:** parse both reads positionally from plain `df` (`df -i / | awk 'NR==2{print $3}'`), and run a **positive control** printing both values before trusting an hour of collection.
+- **Generalisation:** this is the same family as this doc's `NR-1` → −1 and `grep -c` → `"0\n0"` findings — an instrument recording a field it never measured, failing toward a value that reads as data.
+
+### ANSWERED — the churn curve ran to completion, and it INVERTS this effort's framing
+- **Symptom + exact repro:** whether the daily 18:16 CDT reap can outpace `/tmp` regrowth. Sampled `df -i /`, `df -k /` and `ls -U /tmp | wc -l` every 5 minutes for 55 minutes, 12 points, terminator line present (`SAMPLER-DONE`) so the run is readable as complete rather than truncated.
+- **Observed (with values), 2026-09-07 19:43:25Z → 20:38:26Z:**
+
+  | metric | start | end | delta | extrapolated | headroom | time to wall |
+  |---|---:|---:|---:|---:|---:|---:|
+  | inodes used | 67,693,096 | 68,404,278 | +711,182 | **+18.6M/day** | 54.7M free | ~2.9 days |
+  | avail (KB) | 482,245,348 | 460,816,188 | −21,429,160 | **−490 GiB/day** | 439 GiB | **<1 day** |
+  | `/tmp` top-level | 263,976 | 264,281 | +305 | **+8k/day** | — | — |
+
+  - The inode series **OSCILLATES** — peak 68,495,522 at 20:08, trough 67,343,314 at 19:53, i.e. a 1.15M swing inside the window. Net drift is upward but a single interval is worthless: an early two-point read of this same series gave `+365,085 in 5 min` (≈105M/day) and the very next point was **−714,867**. Transient build churn is released, not accumulated.
+  - The **avail** series is the near-monotonic one. That is the signal to watch, not inodes.
+- 🔴 **The finding that matters: under load, BYTES are ~3x tighter than INODES — the opposite of this effort's premise.** The whole investigation was framed as an inode problem, correctly, for the ACCUMULATED state (`/tmp` held 81% of this filesystem's inodes). For the RATE the ranking inverts: the daily reap comfortably covers inodes (it cleared ~17M in one pass against +18.6M/day), while the byte side has under a day of margin at this rate. **A capacity alarm built on `df -i` alone would not have seen this.**
+- **Ruled out — that the daily cadence is insufficient for INODES.** +18.6M/day against a reap measured at ~17M/pass plus `nix-gc` deleting 11,263 store paths / 29.1 GiB nightly. Roughly balanced, with ~2.9 days of headroom as the buffer.
+    via: measurement
+- **Ruled out — that the top-level stub count is a growth driver.** +305 entries in 55 minutes (~8k/day) against +711,182 inodes over the same window. This independently confirms rank 6 as non-urgent.
+    via: measurement
+- 🔴 **SCOPE, stated because the number is meaningless without it: the entire window ran under a heavy build.** This session's own subagent ran for 3,764 s — essentially exactly this window — executing a full `nix build` of both sandbox checks plus a 22,003-test suite. **Every rate above is a PEAK-LOAD figure and none of them is a baseline.** Two earlier readings of this same series were wrong in opposite directions (one extrapolated a spike as a trend, one read the rebound as a refutation); this one is right only because it names the load it was taken under.
+- **Next probe, if anyone wants the baseline:** re-run the same 12-point sampler across a known-idle hour and compare. The two rates are the whole remaining question, and nothing else about this effort depends on the answer.
+  ```bash
+  for i in $(seq 1 12); do
+    printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$(df -i / | awk 'NR==2{print $3}')" \
+      "$(df -k / | awk 'NR==2{print $4}')" "$(ls -U /tmp | wc -l)"
+    [ "$i" -lt 12 ] && sleep 300
+  done; echo SAMPLER-DONE
+  ```
+
 ## Next steps (ranked)
-1. **Run the patch script on the WORKBENCH** — `sudo bash ~/workspace/devrc/nix/system/apply-tmp-churn-stale-lines-2026-09-04.sh` (`--dry-run` first needs no root). Fixes the contradictory header and deletes the dead rule.
+🔴 **Ranks 1–6 keep their original meaning and numbering** — the rank is half a `claim-work` slug's identity, so renumbering would silently re-point live claims. Status is marked in place.
+
+1. **DONE — workbench patched, verified live.**
    forcing: none
-2. **Run it on the LAPTOP.** `--dry-run` FIRST: if the header does not match byte-for-byte it refuses — safe but useless — and only a dry run tells you. Exit 3 = not in scope (that host may never have run the retention script, in which case it needs `apply-tmp-churn-retention.sh` instead).
+2. **DONE — LAPTOP applied and verified live 2026-09-07**, via `preflight-tmp-churn-host.sh --init` rather than `apply-tmp-churn-retention.sh` (that host had no `systemd.tmpfiles.rules` attribute to append into). 7 live, 0 stale, confirmed independently of the script.
    forcing: none
-3. **`sudo nixos-rebuild boot` + reboot.** Until this, nothing is live and `/tmp` keeps growing.
+3. **DONE — rebuild/reboot**, and `switch` is unblocked on both hosts.
    forcing: none
-4. **Decide whether `/var/lib/docker` is live** — 57 GB, 1,640,840 inodes, never examined. k3s uses containerd. `docker ps -a`, `docker system df`.
+4. **ANSWERED — `/var/lib/docker` is live and in use.**
    forcing: none
-5. **Cover `scripts/diagnose-disk-accounting.sh`** — 282 lines of root-privileged shell with NO test file, in a repo with NO shellcheck gate. That combination is exactly why its root-command-injection and E2BIG defects were invisible to the merge gate. The lsof column resolution is a pure text transform and is cheap to pin.
+5. **IN REVIEW — `#1366`**, rank 5 test coverage. Independently re-verified. Claim `nix-disk-cleanup-5` HELD; release when it merges.
+   forcing: gate — root-privileged shell with no test file in a repo with no shellcheck gate.
+6. **DEFLATED BY MEASUREMENT — recommend WON'T-FIX.** 52,049 stubs = 0.08% of inodes, growing ~8k/day.
    forcing: none
-6. **The 43,708 `/tmp` directory stubs** — `e` never removes the matched directory, so they accumulate every cycle. Needs a different mechanism.
+7. **ANSWERED — the churn curve ran.** Daily cadence holds for inodes; bytes are the tighter constraint under load.
    forcing: none
+8. **Prune the `devrc/diagnose-disk-accounting` index entry** — stale `OPEN:` bullet beside its own `RESOLVED`.
+   forcing: none
+9. 🔴 **AUDIT `#1366` AND `#1370` BEFORE MERGING — the highest-value open item.** Both are root-privileged shell. `#1366` changes the disk-accounting script +232/−100 with four behavioural fixes on paths unreachable without root; `#1370` EDITS `/etc/nixos` as root. This effort's record is that every one of three fix rounds in this same area introduced the next defect, all reporting success and passing their own verifier. Fixture and mutation evidence is strong about the guards and says nothing about the unguardable root-only paths. Budget several rounds; stop on the first that returns no finding.
+   forcing: regression — three prior fix rounds in this area each shipped a regression their own verifier passed.
+10. **Confirm the laptop's first reap actually happened** — the timer was armed for 2026-09-07 18:54 CDT but its next-elapse property read empty, and no reap has been observed there yet. `ssh zach@192.168.50.155 'systemctl status systemd-tmpfiles-clean.service; df -i /'` — expect a `status=0/SUCCESS` and inodes below the 24,749,866 / 117,236-top-level-entry baseline recorded at apply time.
+    forcing: none
 
 ## Gotchas / decisions / dead-ends
 - **RO mount hypothesis was WRONG.** A prior session hypothesized that data written to `/nix/store` before the RO mount was applied was "hidden" by the mount. This was disproved: NixOS populates the store during boot, then mounts it RO. The RO mount shows current filesystem state; `nix-collect-garbage` operates through the underlying RW filesystem. The 75M "missing" inodes were not hidden — they are ext4 metadata overhead.
@@ -350,9 +410,47 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **`main` is protected in NAME ONLY** (`required_status_checks` absent, `enforce_admins: false`, deliberate) — your own gate run is the only gate, so name the tier and base sha in any claim.
 - **Tekton posts `error` = "KILLED: the gate pod died … Not a code failure"** — infrastructure, not your diff.
 
+- 🔴 **`nixos-rebuild switch` is NO LONGER BLOCKED — this doc's "use `boot` + reboot" workaround is obsolete on BOTH hosts.** A switch succeeded on the workbench 2026-09-07 13:24 CDT: `/run/current-system` and `/nix/var/nix/profiles/system` (→ `system-389-link`) both moved while `/run/booted-system` stayed at the 09-06 18:01 boot. The journal shows `nixos-rebuild-switch-to-configuration.service ... Deactivated successfully` in 7.05s with **no `NIXOS_NO_CHECK`** and **no `switchInhibitors` message**, and **k3s was never restarted** (`ActiveEnterTimestamp` still `2026-09-06 18:02:20`).
+  **Mechanism, and it is the satisfying one:** the blocker was a `switchInhibitors` check on the *pending* `dbus → broker` channel migration. `systemctl show dbus -p FragmentPath` now returns `/etc/systemd/system/dbus-broker.service` on **both** hosts — the reboot COMPLETED the migration, which removed the inhibitor. The laptop is also clear (`booted == current`, dbus-broker), so it can `switch` without a reboot too.
+- 🔴 **The patch script's own advice is WRONG on the laptop.** It prints *"(or run with `--dry-run`, which needs no privileges)"*, but `--dry-run` still reads `$CFG`, and the two hosts differ: workbench `/etc/nixos/configuration.nix` is `-rw-r--r--`, the **laptop's is `-rw-------` root-only**. So on the laptop the dry run needs `sudo` too. Worth fixing in the script's message — a "needs no privileges" claim that is host-dependent is the same shape as the rest of this investigation's instrument defects.
+- **The laptop was NEVER patched — not "patched but unrebuilt".** `/etc/nixos/configuration.nix` mtime is **Aug 24**; the tmpfiles work is from Sep 3–4, and `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` there is **0**. That settles the ambiguity this doc left open. The laptop is also under no pressure: **56% disk, 23% inodes**, though `/tmp` IS on its root filesystem (116,968 top-level entries), so it has the same problem shape at smaller scale.
+- **The unruled `/tmp` prefixes are real but NEGLIGIBLE — measured, so nobody builds a rule set for them.** ~212k of the 264,614 top-level entries match no ledger rule (`tmp*` 76k, `cgparent-` 21k, `apk-retry-` 16k, `fx-excerpt-` 15k, `dockerfile-` 9k, `cbf-` 9k, `gh-status-response.` 8k, `devrc-report-` 7k, `bap-` 4k, `resume-handoff-` 1.4k, `devrc-marker-` 2k). Sampling 40 subtrees per prefix and extrapolating: the **whole uncovered set is ~0.7M inodes / ~3 GiB** — ~1% of inodes. Most are stubs holding 1–6 inodes each.
+- **`homelab-talos-prs-*`: the withdrawal was right AND the entries are real.** This doc says the glob "now matches 0 directories" — true, and still true. There are **2,358 `homelab-talos-prs-*` REGULAR FILES** in `/tmp` today (1.1–1.3 KB each, oldest 11 days). That is exactly the `e`-ignores-plain-files mechanism this doc records: the rule was dead for its whole life, withdrawing it changed nothing, and nothing reaps the files.
+- **`/mnt/rootcheck` is no longer mounted** (`findmnt` → not mounted). The reboot took it. That closes one of the two `OPEN:` bullets on the `devrc/diagnose-disk-accounting` index entry; the `/var/lib/kubelet` bind-mount double-count is unaffected and still stands.
+- 🔴 **zsh does not word-split, and it cost a silent wrong answer here.** `for f in $s` over a multi-word capture loops ONCE on the whole string, so a per-file `stat` loop printed `ERR` for every prefix and looked like a permissions problem. `while read -r f` gave the right answer immediately. This repo's RULES name this exact trap; knowing it did not prevent it — the sixth instance of that pattern in this effort.
+- **`pgrep -f` matched this session's own shell**, as the RULES predict, when checking whether the sampler was alive. The sampler's real pid was distinguishable only by reading the command lines. Never let such a pattern reach `pkill`.
+- **Coordination, checked and clean:** PR `innovation-upstream/devrc#1361` and claim `nebula-pre-departure-hardening-2` also target the laptop's nix config, so it was worth checking for collision. `#1361` touches only repo-tracked `nix/system/apply-nebula-*.sh` — **no shared file** with the tmpfiles patch. Host-level ordering on the laptop is still worth sequencing, but there is no merge hazard.
+
+- 🔴 **Rank 5 SHIPPED as `innovation-upstream/devrc#1366`, and building it found FOUR defects this doc never named — including a shipped fix that was INERT.** Independently re-verified in a separate worktree off the branch, not taken on the subagent's report: suite 71 assertions green, and the 19-mutant battery reproduced **19/19 KILLED by their own guard**, baseline 71 ok / 0 FAIL, negative control **red at 6 FAIL**, and a behaviour-free `comment-reword` control correctly killing nothing. Both controls watched, which is what makes the battery evidence rather than a claim.
+  - 🔴 **`LSOF_OUT=$(lsof +L1 2>/dev/null); LSOF_RC=$?` is `set -e`-FATAL, so the fix recorded in this doc for the `count=-1` defect could NEVER EXECUTE.** An assignment from a command substitution is a *checked* command, and `lsof` exits 1 when it finds nothing — the ordinary case. The no-rows message written specifically to stop a zero being read as a measurement was unreachable, and sections 7–8 never printed at all. `|| rc=$?` fixes it. **This is the same family as this doc's own `NR-1` → −1 finding, shipped by the fix for it.**
+  - 🔴 **A THIRD abort route this doc's list of eight never names: `<producer> | sort | head -N` under `pipefail` is SIZE-DEPENDENT.** Measured: **40 entries survive rc 0, 20,000 die rc 141**, silently. Real `/tmp` had 171,886 at the time. Nine sites. Fixed with `head_n() { awk -v n="$1" 'NR<=n'; }` — read to EOF instead of closing the pipe.
+  - **A second E2BIG instance:** `du -sh --exclude=/mnt /var/lib/rancher/k3s/storage/*` in section 5.
+  - **The `xargs -I{}` injection mechanism is NOT what the index entry implies.** GNU `xargs -I` **strips double quotes from its input**, so with `"{}"` the `;` never becomes a statement separator — the leak is **command substitution** (`$(id -un)` expanding inside the surviving quotes) and it lands on **stdout, in the printed path**, not stderr. Unquoted `{}` gives the full statement injection on stderr. Arbitrary root command execution either way, and the "grep for the EXPANSION, never the word" rule is doubly load-bearing because the expansion appears in the stdout path too.
+  - **Two `set -e`-fatal `dumpe2fs` lines are REPORTED, NOT FIXED** — they execute only under root, and a change to them cannot be verified from here. Sections 1, 2, 3, 5, 6, 6b and 8 remain unguarded for the same reason; the suite header says so rather than letting a reader assume coverage it does not have.
+- 🔴 **The subagent found a race in its OWN harness, which is worth more than any single guard.** `printf "$CODE" | grep -q` lets `grep -q` win and SIGPIPE the `printf`, so under `pipefail` a SUCCESSFUL MATCH is reported as "not found" — the same unmodified tree gave 71 ok on one run and a spurious `FAIL: … the script no longer contains …` on the next. Both scans now read from a file. **A mutation battery whose scanner is nondeterministic scores mutants at random**; validate the instrument before reading its verdict.
+- **Four mutants first scored `WRONG-KILLER` and were FIXED, not waved through** — the battery had named each guard's *pass* wording as the killer rather than its *fail* wording. That is the "a mutant killed by a different guard's error is not a kill" rule catching a real scoring bug.
+
+- **CARRIED FORWARD from the status header, because these are measurements and it is not.** The workbench reclaim, with its numbers and its attribution caveat: operator ran the patch + `nixos-rebuild` + reboot 2026-09-06, boot at **18:01** (`who -b`); all five of this doc's own `How to verify` checks passed at **2026-09-07T19:27Z** and again after the 13:24 CDT switch; `systemd-tmpfiles-clean.service` ran **2026-09-06 18:16→20:11 exit 0**, costing 1h54m wall / 9m28s CPU / **64 GB memory peak** / 103.4 GB read / 24.2 GB written on a node also running k3s. Movement since the post-reclaim reading: inodes **84.8M → 67.2M**, available **367G → 462G**, **79% → 74%**.
+  ⚠ 🔴 **That improvement is NOT cleanly attributable to tmpfiles alone, and must never be quoted as a tmpfiles figure.** A rival mechanism fired in the same window: `nix-gc.service` at 2026-09-07 00:02 deleted **11,263 store paths / 29.1 GiB**, followed by `nix-optimise` at 00:56. What is established is that the tmpfiles run happened, completed, and read 103.4 GB doing it — not how the 96 GB splits between the two.
+    via: measurement
+- 🔴 **`apply-tmp-churn-stale-lines-2026-09-04.sh --dry-run` exits 0 with "nothing to do" ON AN UNAPPLIED HOST — and my predicted exit 3 was WRONG.** Measured on the laptop 2026-09-07. The script is honest (it prints the discriminating `grep -c 'mM:7d'` itself and says the green is not "already patched"), but the exit code and wording both read as success. This is the RULES shape *"a wrapper that reports 'nothing to do' instead of erroring is how a green gets believed"* — met in the wild, in this effort's own tooling. `nix/system/preflight-tmp-churn-host.sh` now runs that grep plus three other reads and CLASSIFIES into five states rather than leaving an exit code to stand in for an answer.
+- 🔴 **A `|| echo` fallback turned a PERMISSION DENIAL into a reassuring "precondition would PASS", and I nearly reported it.** Probing the laptop's readable `/etc/nixos` backups, `grep -n "systemd.tmpfiles" "$f" || echo "  none — precondition 1 would PASS"` printed the PASS line because grep **failed with `Permission denied`**, not because it found nothing — the file I had selected with `ls -1t | head -1` was mode 0600. Caught only by reading the stderr sitting directly above my own reassuring line. **Same family as this doc's `grep -c` → `"0\n0"` and `NR-1` → −1 findings, and the direction is the constant: an error became the answer that let the work proceed.** Fix: separate READABILITY from CONTENT — test `[ -r "$f" ]` first, enumerate what is actually readable, and report grep's exit code beside its count so a zero is attributable.
+    via: measurement
+- **The laptop's `/etc/nixos` is mostly UNREADABLE to a non-root probe, and unevenly so** — of 5 `.nix` files and 12 `configuration.nix.bak-*`, the live config and 5 backups are 0600 while 7 older backups are 0644. The newest readable copy was **2026-06-13 (14,893 B)** against a live **2026-08-24 (16,722 B)**, so any precondition read from it was a hypothesis about a 2.5-month-old snapshot, ~1.8 KB behind. It happened to be right; **the actual safety was the script re-checking both preconditions at runtime and refusing**, not the pre-check.
+- **`--init`'s design is deliberately the inverse of the deleted eviction feature.** It NEVER rewrites or deletes a line — it appends a new top-level attribute before the file's final `}`, behind three refusing preconditions (no `systemd.tmpfiles` anywhere; last non-blank line is exactly `}`; `nix-instantiate --parse` succeeds after the edit or the backup is restored *and re-parsed*). Fixture-verified in both directions before it ever ran: 7 rules inserted with **all original lines still present**, conflict and bad-tail fixtures both refused at exit 3, and a deliberately malformed block failed the parse, fired the restore, and left the file **byte-identical** (`cmp -s` clean).
+    via: measurement
+- **`cp -a` preservation is a usable cross-check on a backup's identity.** The laptop's `configuration.nix.bak-20260907-175418` reads **16,722 B, mtime Aug 24** — size AND mtime identical to the pre-edit live file measured earlier in the session, which is positive evidence the backup is the original rather than a re-stamped copy.
+- ⚠ **`systemctl show <timer> -p NextElapseUSecRealtime --value` returned EMPTY on the laptop** while `is-active` said `active`. So the timer being armed is verified; its next-fire time is only relayed from the run's own output. A property that answers empty is not a reading — do not quote the time as independently confirmed.
+
 ## How to verify
-1. **The reclaim:** `df -i /` — used inodes ~84.8M against the 96.1M baseline.
-2. **The patch:** `sudo bash nix/system/apply-tmp-churn-stale-lines-2026-09-04.sh --dry-run`, then after applying: `grep -c 'mtime-ONLY ageing'` → 0, `'age-by corrected'` → 1, `'homelab-talos-prs'` → 0, `'mM:7d'` → 7.
-3. **Append-only:** `grep -c '_evicted\|_spans' nix/system/apply-tmp-churn-retention.sh` → 0.
-4. **Tests:** `nix develop ~/workspace/devrc -c python3 -m pytest scripts/tests/test_tmp_churn_retention.py -q` → 14 passed.
-5. **Rules live** (only after a reboot): `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → 7, and `grep -c ' m:7d'` → 0.
+1. **Both hosts live:** `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → **7**, `grep -c ' m:7d'` → **0**. Works without root on both.
+2. **One command that classifies either host** (workbench is the known-good control, expect `applied-and-live — 7`):
+   ```bash
+   cd ~/workspace/devrc && git fetch -q origin feat/preflight-tmp-churn-host && \
+     git show FETCH_HEAD:nix/system/preflight-tmp-churn-host.sh > /tmp/pf.sh && sudo bash /tmp/pf.sh
+   ```
+   For the laptop, wrap it in `ssh -t zach@192.168.50.155 '...'`.
+3. **The switch took without a reboot:** `readlink /run/booted-system` ≠ `readlink /run/current-system`.
+4. **The reclaim held (workbench):** `df -i /` → used inodes materially below the 96.1M baseline (67.2M on 2026-09-07); `df -h /` → Use% ≤ 77%.
+5. **The laptop's backup is the pre-edit original:** `/etc/nixos/configuration.nix.bak-20260907-175418` is 16,722 B, mtime Aug 24.
+6. **Rank 5 tests:** both tiers — `nix develop ~/workspace/devrc -c bash scripts/run-tests.sh`, and `nix build .#checks.x86_64-linux.pytests` one at a time, reading the COUNTS not "BUILD OK".
