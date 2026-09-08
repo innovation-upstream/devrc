@@ -1815,7 +1815,12 @@ TARGET_FLOORS=(
   # arithmetic done by hand here.
   "scripts/session-analysis/tests|525"
   "scripts/session-analysis/session_insight/tests|55"
-  "scripts/mail-actions/tests|129"
+  # 129 -> 116 on 2026-09-07: the initiative TAGGER was removed with the
+  # initiatives board, taking test_routing_tag.py (7), the routing half of
+  # test_run_routing.py and two fetch_current_initiatives cases in
+  # test_db_schema.py, and adding back two retirement guards. Deliberate
+  # deletion, and 116 is the number the gate itself printed for it.
+  "scripts/mail-actions/tests|116"
   # 2026-08-16, the Signal chat pipeline arrives as a NEW target: 387 collected
   # (10 suites). MEASURED, never computed — the entry was pinned at 1 so the
   # AUTHORITATIVE gate would print its own replacement, and `nix build
