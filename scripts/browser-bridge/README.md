@@ -2213,13 +2213,14 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   Because the gate runs **before** the tab is opened, a gate failure leaks no tab.
 
   *Prerequisite:* an opencode whose `debug agent` reports a browser-only tool set.
-  **Both hosts run 1.18.21** — verified at the consumer 2026-08-29, both
+  **Both hosts run 1.18.29** — verified at the consumer 2026-09-08, both
   `readlink -f $(command -v opencode)` resolving to the same
-  `…-opencode-1.18.21` store path, so the pin and the deploy agree. There is no
+  `…-opencode-1.18.29` store path, so the pin and the deploy agree. There is no
   version-skew caveat here any more; the hosts CONVERGED on 2026-08-15.
-  🔴 **But the browser-only RESOLUTION is last verified on 1.18.18**, not on
-  1.18.21 (2026-08-19: the gate replicated ON EACH HOST parses to exactly one
-  enabled tool, `browser`, with every host tool present and `false`; measured
+  🔴 **But the browser-only RESOLUTION is last verified on 1.18.18**, not at the
+  current pin nor at either pin since (2026-08-19: the gate replicated ON EACH
+  HOST parses to exactly one enabled tool, `browser`, with every host tool
+  present and `false`; measured
   identical on 1.18.4 and 1.18.16 before that). It was NOT re-derived at the
   current pin, and nothing in CI would notice if it changed: `browser-agent` is
   absent from the engine tests' `ENGINE_AGENTS`, and this repo's own
@@ -2318,9 +2319,9 @@ ln -sf ~/workspace/devrc/scripts/browser-bridge/opencode/tools/browser_tool_impl
 (The global def keeps the `__STEPS__`/`__MODEL__` placeholders — inert on its own;
 the wrapper substitutes them per run.)
 
-**opencode version.** Both hosts run 1.18.21 and that is what `flake.lock` pins.
+**opencode version.** Both hosts run 1.18.29 and that is what `flake.lock` pins.
 The custom-tool mechanism (`.opencode/tools/*.js`, `permission: {"*": deny, …}`)
-is **last verified on 1.18.18** — not re-derived at 1.18.21, since the check
+is **last verified on 1.18.18** — not re-derived at 1.18.21 nor at the pin, since the check
 below needs the real binary (measured identical on 1.18.4 before that) — `opencode debug agent
 browser-agent` resolves to `bash:false … browser:true`
 (exactly one enabled tool) on each, plus an end-to-end `opencode debug agent …
