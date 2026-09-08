@@ -128,6 +128,12 @@ CLAUDE_CODE_EXPECTED = [
     # test_node_wipe_still_outranks_the_commit_reason, which pin BOTH directions.
     "check_git_commit_to_main",
     "check_pkill_full_pattern",
+    # 🔴 The FIFTEENTH, added 2026-09-07 after `TMUX_TMPDIR=… tmux kill-server`
+    # destroyed the operator's tmux server and 47 live Claude conversations —
+    # the SECOND run of that exact mistake in one arc (43 panes the first time).
+    # Measured ALLOW against the two real `-L`-carrying uses in this repo before
+    # it landed; see the check's docstring for that blast-radius measurement.
+    "check_tmux_kill_shared_server",
     "check_heredoc_to_file",
     "check_cd_then_git",
     "check_private_key",
@@ -2159,6 +2165,230 @@ def test_pkill_deny_message_names_the_replacement_recipe():
     assert "pgrep -f" in reason
     assert "/proc/" in reason
     assert gc._QUOTING_ESCAPE_HATCH in reason
+
+
+# --------------------------------------------------------------------------- #
+# 10. 🔴 check_tmux_kill_shared_server — the incident of 2026-09-07 21:54:15 CDT
+#
+# `TMUX_TMPDIR=$SCRATCH/run tmux kill-server` killed the operator's tmux server
+# and 47 live Claude conversations 1.2s later (42 `tmux-spawn-*.scope` units torn
+# down 21:54:17–22). `TMUX_TMPDIR` is NOT isolation: a client inside a pane reads
+# `$TMUX`, whose socket path wins. Only `-L`/`-S` select a different server.
+#
+# The `TMUX_TMPDIR=` spelling below is THE regression case — it must be denied
+# through the same `VAR=`-peeling path every other check relies on.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("command", [
+    # 🔴 the literal incident command
+    "TMUX_TMPDIR=/tmp/scratch/run tmux kill-server",
+    "TMUX_TMPDIR=$S/run tmux kill-server 2>&1; sleep 1",
+    "tmux kill-server",
+    "tmux kill-session",
+    "tmux kill-session -t scratch8",
+    # tmux accepts unambiguous prefixes of a command name
+    "tmux kill-ser",
+    "tmux kill-serv",
+    "tmux kill-ses",
+    # a named socket that is STILL the operator's default server
+    "tmux -L default kill-server",
+    "tmux -S /run/user/1000/tmux-1000/default kill-server",
+    "tmux -Ldefault kill-server",
+    # value-taking server flags must not be mistaken for the subcommand
+    "tmux -f /home/zach/.tmux.conf kill-server",
+    "tmux -c /bin/sh kill-server",
+    "tmux -T 256 kill-server",
+    # non-value flags interleaved
+    "tmux -2 kill-server",
+    "tmux -u -q kill-server",
+    # the standard wrapper / separator / nesting matrix
+    "sudo tmux kill-server",
+    "env tmux kill-server",
+    "timeout 5 tmux kill-server",
+    "/run/current-system/sw/bin/tmux kill-server",
+    "ls && tmux kill-server",
+    "ls; tmux kill-server",
+    "bash -c 'tmux kill-server'",
+    "FOO=1 TMUX_TMPDIR=/tmp/x tmux kill-server",
+])
+def test_tmux_kill_shared_server_is_denied(command):
+    assert gc.check_tmux_kill_shared_server(command) is not None, command
+    assert gc.evaluate(command, "claude-code") is not None, command
+
+
+@pytest.mark.parametrize("command", [
+    # 🔴 THE PRESCRIBED REPLACEMENT — denying it would leave the deny message
+    # pointing at a blocked command, the failure the pkill check documents.
+    "tmux -L my-probe-$$ kill-server",
+    "tmux -L cg524 kill-server",
+    "tmux -S /tmp/probe.sock kill-server",
+    "tmux -Lcg524 kill-server",
+    'tmux -L "$sock" kill-server',
+    # the two real uses measured in this repo before the check landed
+    "tmux -L $SOCKET kill-server",
+    "tmux -L probe-1234 kill-session -t probe",
+    # narrower kills destroy exactly what the caller named — routine automation
+    "tmux kill-pane -t %3",
+    "tmux kill-window -t @7",
+    # reads and ordinary tmux work
+    "tmux list-sessions",
+    "tmux list-panes -a",
+    "tmux new-session -d -s probe",
+    "tmux display-message -p '#{pid}'",
+    "tmux",
+    # not tmux at all
+    "echo 'never run tmux kill-server without -L'",
+    "grep -n kill-server scripts/foo.py",
+])
+def test_tmux_kill_near_misses_stay_allowed(command):
+    assert gc.check_tmux_kill_shared_server(command) is None, command
+
+
+def test_tmux_kill_check_can_return_both_verdicts():
+    """Negative + positive control on the check itself."""
+    assert gc.check_tmux_kill_shared_server("tmux kill-server") is not None
+    assert gc.check_tmux_kill_shared_server("tmux -L probe kill-server") is None
+
+
+def test_tmux_kill_is_the_only_check_that_fires_on_the_incident_command():
+    """🔴 Reachability: the deny is attributable to THIS guard, not a neighbour.
+
+    Without this, the test above could pass because some other check happens to
+    dislike the string — which is the "green for the wrong reason" mutation trap
+    RULES.md describes.
+    """
+    cmd = "TMUX_TMPDIR=/tmp/scratch/run tmux kill-server"
+    matching = [c.__name__ for c in gc.POLICIES["claude-code"]
+                if (c(cmd, None) if getattr(c, "wants_cwd", False) else c(cmd))]
+    assert matching == ["check_tmux_kill_shared_server"], matching
+
+
+def test_tmux_kill_deny_message_names_TMUX_TMPDIR_as_the_false_isolation():
+    """🔴 The deny must correct the specific WRONG BELIEF that caused the incident.
+
+    The agent did not run `tmux kill-server` carelessly — it ran it believing
+    `TMUX_TMPDIR` had scoped it. A message that only says "don't do that" leaves
+    that belief intact, so the next agent reaches for the same non-isolation.
+    """
+    reason = gc.check_tmux_kill_shared_server("TMUX_TMPDIR=/tmp/x/run tmux kill-server")
+    assert "TMUX_TMPDIR" in reason
+    assert "$TMUX" in reason
+    assert "-L" in reason
+    assert gc._QUOTING_ESCAPE_HATCH in reason
+
+
+def test_tmux_value_flag_table_covers_every_value_taking_server_flag():
+    """🔴 THE ONLY WAY THIS CHECK FAILS OPEN.
+
+    An unconsumed flag value is read as the subcommand, so a missing entry makes
+    `tmux -<flag> <value> kill-server` resolve its subcommand to `<value>`, not
+    match `kill-s`, and ALLOW the incident command. Pinned as a set so dropping
+    one is a test failure rather than a silent hole.
+    """
+    assert set(gc._TMUX_VALUE_FLAGS) == {"-c", "-f", "-L", "-S", "-T"}
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE REGRESSION TEST: the LITERAL command, byte for byte
+# --------------------------------------------------------------------------- #
+
+# 🔴 Recovered verbatim from the session transcript at 2026-09-08T02:54:15.802Z
+# (= 21:54:15.802 CDT), NOT retyped into a tidier equivalent. Three properties of
+# this exact string are load-bearing, and a cleaned-up fixture drops all three:
+#
+#   1. THE `TMUX_TMPDIR=` PREFIX IS PRESENT. That prefix is the entire reason the
+#      agent believed the command was safe, so a guard exercised only against a
+#      bare `tmux kill-server` is untested against the one form that actually
+#      occurred — and a leading env assignment is exactly the shape a command
+#      parser mishandles. Here it must survive `_peel_variants`' `_ASSIGN` strip
+#      and still reach the check.
+#   2. `$SCRATCH/run` IS AN UNEXPANDED SHELL VARIABLE. The guard sees the
+#      PRE-expansion text; if it ever reasons about paths it must not be fooled
+#      by one it cannot resolve.
+#   3. IT IS A REAL INCIDENT, not a hypothetical. It destroyed 47 live Claude
+#      conversations.
+_INCIDENT_COMMAND = "TMUX_TMPDIR=$SCRATCH/run tmux kill-server"
+
+# The legitimate spelling the deny message prescribes — an explicitly named,
+# non-default socket.
+_ISOLATED_COMMAND = "tmux -L my-probe-9182 kill-server"
+
+
+def test_the_exact_command_that_killed_47_conversations_is_denied():
+    """🔴 Red at base c5e425c7, green at HEAD. The whole PR in one assertion.
+
+    Asserts THIS guard's OWN denial reason reaches the caller, not merely that
+    something said no: a deny for a neighbouring reason would leave the incident
+    command blocked by accident, and would silently stop being a regression test
+    the moment that neighbour changed. The substrings pinned below appear in no
+    other check's message.
+    """
+    reason = gc.check_tmux_kill_shared_server(_INCIDENT_COMMAND)
+    assert reason is not None, f"the incident command is ALLOWED: {_INCIDENT_COMMAND!r}"
+
+    # Reached through the real entry point the hook calls, with the real policy —
+    # a check that is correct but unregistered protects nobody.
+    end_to_end = gc.evaluate(_INCIDENT_COMMAND, "claude-code")
+    assert end_to_end == reason, (
+        "evaluate() denied for a DIFFERENT check's reason — this guard is either "
+        "unregistered or outranked, so the regression is not actually closed"
+    )
+    assert "DOES NOT ISOLATE YOU" in reason
+    assert "47 live conversations" in reason
+
+
+def test_the_isolated_spelling_the_deny_message_prescribes_is_still_allowed():
+    """🔴 THE DISCRIMINATING CONTROL — without it the test above is vacuous.
+
+    A guard hardcoded to `return "denied"` passes the regression test while
+    breaking every legitimate use in the repo. This is the assertion that
+    separates "blocks the incident" from "blocks tmux", and it is cheap because
+    it was MEASURED: every real shell use of a `kill-s…` in this repo already
+    passes `-L`, so this is the shape real callers actually write.
+
+    It is also the command the deny message TELLS the reader to run. If this ever
+    goes red the guard has started contradicting its own remediation advice.
+    """
+    assert gc.check_tmux_kill_shared_server(_ISOLATED_COMMAND) is None, (
+        f"the prescribed replacement is DENIED: {_ISOLATED_COMMAND!r}"
+    )
+    assert gc.evaluate(_ISOLATED_COMMAND, "claude-code") is None
+
+
+def test_the_incident_and_its_control_differ_ONLY_in_the_socket_selector():
+    """Pin that the pair above is a controlled comparison.
+
+    If the two fixtures ever drift into differing by more than the `-L` selector
+    (a different subcommand, a typo'd binary), the pair stops isolating the
+    variable under test and quietly becomes two unrelated assertions.
+
+    🔴 THIS IS AN INVARIANT GUARD, NOT REGRESSION COVERAGE — labelled rather than
+    counted, per `claude/RULES.md`. It calls no guard and touches no production
+    code, so it PASSES at base c5e425c7 exactly as it passes at HEAD: it pins a
+    property of the two fixture strings, which the bug never violated. Measured,
+    not assumed — it was run against the base tree and came back green while its
+    two neighbours went red with `AttributeError`. The red-at-base claim for this
+    PR rests on those two, never on this one.
+    """
+    assert _INCIDENT_COMMAND.endswith("tmux kill-server")
+    assert _ISOLATED_COMMAND.endswith("kill-server")
+    assert "-L" not in _INCIDENT_COMMAND, "the denied fixture must carry NO socket selector"
+    assert "-L" in _ISOLATED_COMMAND, "the allowed fixture must carry one"
+
+
+def test_tmux_kill_prefix_matches_both_wide_kills_and_neither_narrow_one():
+    """🔴 Pin the PREFIX rule, not two spellings.
+
+    tmux resolves unambiguous command prefixes, so a guard keyed on the two full
+    words is walked past by `kill-ser`. `kill-s` is exactly the set {kill-server,
+    kill-session} and excludes {kill-pane, kill-window} — assert both directions,
+    because a prefix that also caught the narrow kills would over-block routine
+    automation.
+    """
+    wide = ["kill-server", "kill-session", "kill-ser", "kill-ses"]
+    narrow = ["kill-pane", "kill-window"]
+    assert all(c.startswith(gc._TMUX_KILL_MANY_PREFIX) for c in wide)
+    assert not any(c.startswith(gc._TMUX_KILL_MANY_PREFIX) for c in narrow)
 
 
 # 🔴 The handle these two tests use must be one that CANNOT resolve on any host.

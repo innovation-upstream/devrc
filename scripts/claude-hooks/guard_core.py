@@ -2162,6 +2162,118 @@ def check_pkill_full_pattern(cmd):
     return None
 
 
+# tmux server options that CONSUME the next token. Getting this table wrong is
+# the only way this check can fail OPEN: an unconsumed value is read as the
+# subcommand, so `tmux -f conf kill-server` would resolve its subcommand to
+# `conf`, not match, and ALLOW the very command that caused the incident.
+_TMUX_VALUE_FLAGS = ("-c", "-f", "-L", "-S", "-T")
+
+# `kill-server` and `kill-session` are the only two tmux commands beginning
+# `kill-s`, and tmux accepts any UNAMBIGUOUS PREFIX of a command name — so
+# `kill-ser`, `kill-ses` and `kill-serv` all work. Matching the prefix rather
+# than the two full spellings is what makes this a check on the ACTION instead
+# of on two words an abbreviation walks straight past. `kill-pane` and
+# `kill-window` deliberately do NOT match; see the docstring.
+_TMUX_KILL_MANY_PREFIX = "kill-s"
+
+
+def check_tmux_kill_shared_server(cmd):
+    """`tmux kill-server` with no `-L`/`-S` destroys the OPERATOR'S live server.
+
+    🔴 THIS IS A MEASURED INCIDENT, NOT A HYPOTHETICAL. On 2026-09-07 at
+    21:54:15.802 CDT an agent ran
+
+        TMUX_TMPDIR=$SCRATCH/run tmux kill-server
+
+    believing `TMUX_TMPDIR` scoped it to a throwaway directory. It did not. The
+    operator's tmux server died 1.2 seconds later, taking 47 live Claude
+    conversations with it; 42 `tmux-spawn-*.scope` units were torn down between
+    21:54:17 and 21:54:22. It was the SECOND time in the same arc — an earlier
+    run of the identical mistake destroyed 43 panes.
+
+    🔴 WHY `TMUX_TMPDIR` IS NOT ISOLATION. A tmux client run from INSIDE a pane
+    reads the `$TMUX` environment variable, whose first field is the socket path
+    of the server that owns the pane, and `$TMUX` WINS over the path derived
+    from `$TMUX_TMPDIR`. So the variable is silently ignored and the client
+    connects to the default server. That is not inference — the same agent had
+    already measured it 72 seconds earlier and did not read it as the warning it
+    was: with `$TMUX_TMPDIR` pointed at a directory containing NO socket
+    (`ls`/`find` both empty), `tmux display-message -p '#{pid}'` still answered
+    with a live server pid and `tmux list-sessions` still listed the operator's
+    real sessions, `(attached)` and all. Only `-L <label>` / `-S <path>` select
+    a socket explicitly, because those override `$TMUX`.
+
+    So the rule is: a `kill-s…` subcommand must NAME its socket, and that socket
+    must not be the default one. Env assignments are peeled off before this
+    check ever sees the argv (`_peel_variants`), which is exactly right — an
+    isolation claim made through the environment is not one.
+
+    SCOPE — deliberately the two commands that destroy MORE THAN THE CALLER
+    NAMED, matched by tmux's own prefix-abbreviation rule (`_TMUX_KILL_MANY_PREFIX`):
+      DENY   tmux kill-server / kill-session (and `kill-ser`, `kill-ses`, …)
+      ALLOW  tmux kill-pane / kill-window
+
+    `kill-pane` and `kill-window` are routine in this repo's own automation and
+    destroy exactly what the caller pointed at. Denying them would fire during
+    correct work, and `_IRREVERSIBLE_CHECKS` argues at length why a guard that
+    fires on correct work is worse than no guard: it gets routed around AND it
+    reports safety. The operator's own standing instruction to agents names
+    `kill-server` and `kill-session` and stops there; so does this.
+
+    MEASURED BLAST RADIUS before landing — every real shell use of a `kill-s…`
+    in this repo already passes `-L`, so this check denies NONE of them:
+      ALLOW  tmux -L "$sock" kill-server        (scripts/session-write-harness/real_pane_check.py:292)
+      ALLOW  tmux -L "$sock" kill-server        (scripts/tests/test_tmux_reply_agent.py:1626)
+
+    🔴 KNOWN BLIND SPOT, stated rather than papered over: the guard matches on
+    `argv[0]`, so a binary reached through a VARIABLE — `TB=$(command -v tmux);
+    $TB kill-server` — is invisible to it, and that shape appears in the very
+    transcripts this check was written from. It is not closable by a text guard
+    without resolving shell variables. An `-L $var` whose value cannot be
+    resolved is likewise taken at face value and ALLOWED, so that the isolated
+    spelling this message prescribes stays usable.
+    """
+    for argv in commands(cmd):
+        if os.path.basename(argv[0]) != "tmux":
+            continue
+        socket, subcmd, i = None, None, 1
+        while i < len(argv):
+            tok = argv[i]
+            if tok in _TMUX_VALUE_FLAGS:
+                if tok in ("-L", "-S") and i + 1 < len(argv):
+                    socket = argv[i + 1]
+                i += 2
+                continue
+            if len(tok) > 2 and tok[:2] in ("-L", "-S"):
+                socket = tok[2:]
+                i += 1
+                continue
+            if tok.startswith("-") and tok != "-":
+                i += 1
+                continue
+            subcmd = tok
+            break
+        if subcmd is None or not subcmd.startswith(_TMUX_KILL_MANY_PREFIX):
+            continue
+        # An explicitly named socket is the whole point — but `-L default` and
+        # `-S …/default` name the operator's own server, so they are not an
+        # escape from this check.
+        if socket is not None and os.path.basename(socket) != "default":
+            continue
+        return ("`tmux kill-server` / `kill-session` without `-L <socket>` is blocked by your "
+                "RULES: it destroys the OPERATOR'S live tmux server and every Claude "
+                "conversation running in it. 🔴 `TMUX_TMPDIR` DOES NOT ISOLATE YOU — a client "
+                "run inside a pane reads `$TMUX`, whose socket path WINS over the one derived "
+                "from `$TMUX_TMPDIR`, so the variable is ignored and you hit the default "
+                "server. This exact command killed 47 live conversations on 2026-09-07 and 43 "
+                "more before that. Only `-L <unique-socket>` (or `-S <path>`) selects a "
+                "different server, because those override `$TMUX`: run "
+                "`tmux -L my-probe-$$ new-session -d …` and kill THAT. `kill-pane` and "
+                "`kill-window` stay allowed, as does any `-L`/`-S` naming a non-default socket."
+                + _QUOTING_ESCAPE_HATCH)
+    return None
+
+
 # =========================================================================== #
 # POLICIES
 # =========================================================================== #
@@ -2279,6 +2391,13 @@ _CLAUDE_CODE_CHECKS = [
     check_dd_to_block_device,
     check_git_commit_to_main,
     check_pkill_full_pattern,
+    # 🔴 The FIFTEENTH check, added 2026-09-07 in direct response to a measured
+    # incident: `TMUX_TMPDIR=… tmux kill-server` destroyed the operator's server
+    # and 47 live Claude conversations. It sits beside check_pkill_full_pattern
+    # because it is the same family — a kill whose blast radius is wider than the
+    # caller believed — and BEFORE the advisory checks for the usual "report the
+    # more serious problem" reason.
+    check_tmux_kill_shared_server,
     check_heredoc_to_file,
     check_cd_then_git,
     check_private_key,
