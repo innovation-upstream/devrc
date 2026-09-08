@@ -196,10 +196,33 @@ def test_self_test_passes(script):
 # --------------------------------------------------------------------------------------
 # the freshly-switched node, driven end to end against a fake `tailscale`
 # --------------------------------------------------------------------------------------
-def _fake_tailscale(tmp_path: Path, status: dict, prefs: dict | None) -> dict:
-    """A PATH containing a `tailscale` that answers from fixtures, plus a fake /proc."""
+def _fake_tailscale(
+    tmp_path: Path, status: dict, prefs: dict | None, lan_route: bool = True
+) -> dict:
+    """A PATH containing fakes for everything the checker reads from the host.
+
+    🔴 EVERY HOST INPUT IS STUBBED, INCLUDING THE ROUTING TABLE — and that is not
+    tidiness. The first version stubbed only `tailscale` and `/proc`, and let the real
+    `ip -4 -o route show` answer the LAN-route question. It passed here because this
+    workbench genuinely has a route to 192.168.50.0/24, and went RED in Tekton, whose
+    sandbox has neither the route nor `ip` — two tests, on a claim that had nothing to
+    do with the routing table. A fixture that lets the host decide is blind to exactly
+    the dimension it pins, in whichever tier happens to disagree.
+    """
     bindir = tmp_path / "bin"
     bindir.mkdir()
+    route = f"{SUBNET} dev eth0 proto kernel scope link src 192.168.50.250\n" if lan_route else ""
+    write_exec(
+        bindir / "ip",
+        f'if [ "$*" = "-4 -o route show" ]; then printf %s "{route}"; exit 0; fi\n'
+        '# the role probe: `ip -4 -o addr show nebula.mesh`. Silent -- every case here\n'
+        '# passes --role explicitly, so an answer would be ignored anyway.\n'
+        "exit 0\n",
+    )
+    # `systemctl is-active` is CONTEXT ONLY in the checker (no verdict is keyed on it),
+    # but the sandbox has no systemd at all, so stub it rather than depend on the `||
+    # true` that currently covers its absence.
+    write_exec(bindir / "systemctl", 'echo active\nexit 0\n')
     (tmp_path / "status.json").write_text(json.dumps(status))
     if prefs is not None:
         (tmp_path / "prefs.json").write_text(json.dumps(prefs))
@@ -288,6 +311,17 @@ def test_an_authenticated_but_broken_node_is_still_a_failure(tmp_path):
     r = _run("bash", CHECK, "--role", "server", env=env)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "FAIL:" in r.stdout
+
+
+def test_a_subnet_router_with_no_lan_route_still_fails(tmp_path):
+    """The control for the stubbed routing table above: with the route REMOVED, a
+    subnet router is a definitive FAIL even though everything else is perfect. Without
+    this the `lan_route` stub is a fixture nothing can see, and `lan_route=True` would
+    be indistinguishable from not reading `ip route` at all."""
+    env = _fake_tailscale(tmp_path, AUTHED_APPROVED, SERVER_PREFS, lan_route=False)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "no non-tailscale route" in r.stdout, r.stdout
 
 
 # --------------------------------------------------------------------------------------
