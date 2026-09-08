@@ -2217,9 +2217,9 @@ def test_a_launched_pane_gets_a_PATH_THAT_CAN_FIND_claude(monkeypatch, tmp_path)
 
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
-    claude = bindir / "claude"
-    claude.write_text("#!/bin/sh\nexit 0\n")
-    claude.chmod(0o755)
+    # POSIX-sh body, no shebang — write_exec owns that, and
+    # test_runtime_shebangs.py fails any test that writes its own.
+    write_exec(bindir / "claude", "exit 0\n")
 
     sockdir = tempfile.mkdtemp(prefix="t524.")
     sock = "t524-" + os.path.basename(str(tmp_path))
