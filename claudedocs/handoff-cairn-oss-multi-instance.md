@@ -18,29 +18,25 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- **`ZacxDev/cairn` has FOUR merged PRs.** #1 SIGHUP hot-reload, #2 the ledger narrowing
-  (`c8aee7203`), #3 `8e4ef84` (spawn-port TOCTOU), and **#4 `218b6c1` (2026-09-08) — THE
-  FLAKE.** `packages.cairn`, `packages.server-image` (Linux only), `apps.cairn`,
-  `checks.client-resolves-its-lib`, a dev shell, and a `nix` CI job.
-  Verified by CONTENT, never ancestry (a squash is never an ancestor): `flake.nix`,
-  `flake.lock` and both new test files exist on `origin/main`, and `serverTools` (12),
-  `serverPath` (14), `flake_image_block` (2) and `PYTHONDONTWRITEBYTECODE` (3) all resolve
-  there. Final suite **1698 passed / 0 failed**; leakscan 0 findings across 38 files.
-- **Rank 3's FIRST HALF is done. The second half — the devrc side — is NOT STARTED**, and
-  devrc still consumes nothing: `flake.nix` has zero cairn references and `scripts/cairn` is
-  still an `mkOutOfStoreSymlink`. Rank 3's closing condition is **not** met.
-- 🔴 **A cairn-built image is now BUILDABLE for the first time, and is still not PUBLISHED.**
-  #4 produces a loadable tarball; nothing pushes it to a registry. Rank 7 remains blocked on
-  publication, not on buildability.
-- **No civitai instance exists.** The homelab pod still runs its own copy.
-- **Session capture** remains DESIGNED, DECIDED and MERGED as a proposal, and BUILT
-  NOWHERE (`claudedocs/proposal-cairn-session-capture.md`, `e16f9609a`). Rank 8.
-- **The opencode exporter** shipped (`f58d2df04`, #1338) and still has **no caller**.
-- **Cleanup done:** worktree `~/workspace/cairn-flake` removed, base clone fast-forwarded to
-  `218b6c1`, branch `feat/flake` deleted locally and on origin, `claim-work` slug
-  `cairn-oss-multi-instance-3` RELEASED. devrc `main` still carries only the four pre-existing
-  untracked files that are not mine.
-- **devrc PR #1367** carries this handoff doc.
+- **`ZacxDev/cairn` has four merged PRs (#1–#4) and ONE OPEN: [#5](https://github.com/ZacxDev/cairn/pull/5)**,
+  branch `fix/reload-atomicity-budget-and-ci-floor`, `OPEN`/`MERGEABLE`, **all three checks green
+  on the real runner** (`leakscan` pass, `nix` pass, `tests` pass 8m28s with
+  `collected=1698 failed=0 floor=1648`). Exactly two files: `.github/workflows/ci.yml` (+15-1)
+  and `tests/test_subsystem_store_api.py` (+64-17). **NOT MERGED** — rank 10's and rank 14's
+  closing conditions both require the merge, so both stay open.
+- **Rank 3's second half is claimed by ANOTHER SESSION**, not this one: `claim-work --list` shows
+  `cairn-oss-multi-instance-3` taken 2026-09-08 ~01:45Z for the *first slice only* (re-home
+  `cairn who` as its own binary; extract `unbounded_timeout_reason` into devrc `lib/timeouts.py`),
+  explicitly **not** pinning the flake and **not** touching the `entry_shape`/writer fork. So the
+  operator fork below is still unanswered — that session routed around it rather than deciding it.
+- **Rank 3 is still not done**, re-verified live this session: `readlink -f ~/.local/bin/cairn` →
+  `/home/zach/workspace/devrc/scripts/cairn` (not `/nix/store`), `grep -c cairn
+  ~/workspace/devrc/flake.nix` → **0**.
+- **Rank 4 re-verified live:** `civitai/talos-infra` #1414 still **OPEN**.
+- **Rank 11 re-verified live:** the store holds **23** scopes and `cairn` is still not among them.
+- `claim-work` slug **`cairn-oss-multi-instance-10` is HELD by this session** — release it when #5
+  merges: `claim-work --release cairn-oss-multi-instance-10`.
+- devrc `main` is clean apart from five untracked files that are not mine.
 
 ## Open investigations — live diagnosis state
 
@@ -187,6 +183,50 @@ The measurement in the block above still stands and was not re-run this session.
 it is still unanswered:** whether devrc DELETES its five duplicated `lib/` modules in favour
 of the pinned ones, or keeps them. Put that question before building.
 
+### CLOSED-PENDING-MERGE 2026-09-08 — a SECOND cairn intermittent, distinct from the one rank 6 closed
+🔴 **This is NOT the flake the rank-6 investigation was about.** That one was
+`TestTheDeployedEntrypoint::test_a_TWO_LINE_token_file_authorises_BOTH_lines`. This is a
+different test, found by reading CI for a rate exactly as the stale kickoff asked — and unlike
+rank 6's, **this one carries its evidence**, which is why it was fixable rather than merely
+countable.
+- **Symptom + exact repro:** no local repro needed; it is in CI history.
+  `tests/test_subsystem_store_api.py::TestAReloadIsAtomicUnderLoad::test_no_observer_EVER_sees_a_table_that_is_neither`
+  fails with `AssertionError: only 1 reload(s) were driven inside the 3s budget, so at most one
+  swap was available to observe and the verdict below is about a static table` / `assert 1 >= 2`.
+- **Observed (with values), 2026-09-08:** the repo's **entire** CI history is **26 runs, 24
+  success / 2 failure** (published 2026-09-05). **Both failures are this same assertion**:
+  `e2cf6fe` 2026-09-07T04:21Z and `492191f` 2026-09-08T01:05Z — and the second **postdates #3's
+  merge** (2026-09-07T18:01Z), so it is not residue of the rank-6 work. ≈**2/26 (7.7%)**.
+  via: measurement
+- **Ruled out: that this is general runner load.** Wall-time discriminator per RULES — the
+  failing run took **497.47s** against a passing run's **477.52s**, ~4%. Load inflates every test
+  in a run; this inflated exactly one test's own budget, so it is a narrow timing dependency in
+  that one test. via: measurement
+- **Ruled out: that it is a product defect.** The assertion is a *positive control* the test
+  makes about itself, and it was CORRECT to refuse — with one swap there is nothing to observe.
+  The defect was that `ATOMICITY_SAMPLE_BUDGET_S = 3.0` bounded **both** the samplers and the
+  reload driver, so the deadline could stop the driver at `reloads == 1` and starve the control
+  it was written to police. Mechanism: one `reload_tokens` call outlasting the whole budget while
+  four sampler threads contend for the GIL. via: code
+- **Fixed in #5, and the fix is NOT just the obvious half.** `ATOMICITY_MIN_RELOADS = 2` is read
+  by **both** the loop and the assertion so they cannot drift. The driver breaks only on
+  `reloads >= MIN and deadline passed`, `range(400)` retained as the runaway bound. 🔴 **The
+  samplers are gated on the reload count too** — gating only the driver would let the minimum be
+  reached after every observer had stopped, satisfying `reloads >= 2` while making the "no third
+  state" verdict vacuous. Both original controls unchanged in strength.
+- **Control, before/after** (budget 0.35s, 0.5s injected per `reload_tokens` call): before →
+  **1** reload, FAIL; after → **2**, pass; after with MIN overridden to 5 → **5**, pass; before
+  with MIN overridden to 5 → **1**, same FAIL. The loop tracks the constant, not the clock.
+  via: measurement
+- 🔴 **A SURVIVING MUTANT, reported rather than hidden:** clear-then-refill *with no widened
+  window* **survives this test**. It was proven live by watching the structural sibling
+  `test_a_successful_reload_REBINDS_and_leaves_the_old_tuple_INTACT` go red on it. This is a
+  pre-existing limit that sibling's own docstring already states; #5 neither causes nor fixes it,
+  and nothing was adjusted to hide it. **Not filed as a work item** — no closing condition
+  distinguishes it from the sibling guard that already covers it. via: measurement
+- **Next probe:** none. Merge #5. If it recurs after that, the assertion now names the constant
+  it fell short of rather than the budget, so read the message.
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
@@ -204,27 +244,21 @@ of the pinned ones, or keeps them. Put that question before building.
    forcing: none — done
 
 3. 🔨 **HALF DONE — Phase A3, devrc consumes cairn as a pinned flake input.**
-   🔴 **THIS ITEM'S PREMISE WAS INCOMPLETE AND THE WORK SPLIT IN TWO.** cairn had no
-   `flake.nix`, so there was nothing for devrc to pin.
-   - **Half 1 — ✅ MERGED 2026-09-08: `ZacxDev/cairn`#4, squash `218b6c1`.** Four audit
-     rounds; ladder ended on the attribution gate, rationale posted on the PR.
-   - **Half 2 — NOT STARTED: the devrc side.** Pin the input in `flake.nix`, move
-     `~/.local/bin/cairn` into `/nix/store`, re-home `cairn who` as its own `cairn-who`
-     binary, point the writer at the pinned `entry_shape`, and decide the fate of devrc's
-     five duplicated `lib/` modules. 🔴 **Put that fork to the operator BEFORE building** —
-     see the fork investigation above.
-   🔴 `nix/home.nix:1474` deploys `scripts/cairn` as an `mkOutOfStoreSymlink` and its comment
-   at `:1467` says that is REQUIRED, not preferred, because `.resolve()` must land beside
-   `lib/`. **#4 solves exactly that** by installing script and `lib/` together under
-   `libexec`. Client edits will then need a `home-manager switch`.
+   🔴 **IN FLIGHT ELSEWHERE — `claim-work` slug `cairn-oss-multi-instance-3` is HELD by another
+   session** (taken 2026-09-08 ~01:45Z) for the **first slice only**: re-home `cairn who` as its
+   own `cairn-who` binary + extract `unbounded_timeout_reason` into devrc `lib/timeouts.py`.
+   That session explicitly did NOT pin the flake and did NOT touch the `entry_shape`/writer fork.
+   - **Half 1 — ✅ MERGED 2026-09-08: `ZacxDev/cairn`#4, squash `218b6c1`.**
+   - **Half 2 — the rest is still open** after that slice: pin the input in `flake.nix`, move
+     `~/.local/bin/cairn` into `/nix/store`, point the writer at the pinned `entry_shape`, and
+     decide the fate of devrc's five duplicated `lib/` modules. 🔴 **THE OPERATOR FORK IS STILL
+     UNANSWERED and must be put before building** — see the fork investigation above.
    **Closing condition:** a merged devrc PR in which `flake.nix` names cairn as an input and
-   `readlink -f ~/.local/bin/cairn` resolves into `/nix/store`. (The original wording said
-   `~/.claude/…/cairn`; the actual deploy path is `~/.local/bin/cairn`.)
+   `readlink -f ~/.local/bin/cairn` resolves into `/nix/store`. Re-verified NOT met 2026-09-08.
    forcing: none
 
 4. **Merge or close `civitai/talos-infra` #1414** (the instance proposal). Four open questions
-   in §11. None blocks A3.
-   ⚠ **Not re-verified since 2026-09-06**, still OPEN then.
+   in §11. None blocks A3. **Re-verified live 2026-09-08: still OPEN.**
    forcing: none
 
 5. ✅ **DONE 2026-09-06 — `ZacxDev/cairn` #2, squash `c8aee7203`.** Both ledger 🟢s closed.
@@ -233,18 +267,19 @@ of the pinned ones, or keeps them. Put that question before building.
 
 6. ✅ **DONE AND MERGED 2026-09-07 — `ZacxDev/cairn` #3, squash `8e4ef84`.** Rate measured,
    did NOT reproduce; **not "fixed"**, and the PR says so. Nine audit rounds.
+   🔴 **A LATER KICKOFF MESSAGE RE-ISSUED THIS ITEM AS OPEN.** A 2026-09-08 `/resume` arrived
+   carrying "the intermittent now sits at ~27 runs / 1 failure — read the next N CI runs for a
+   RATE". That was already superseded twice over. **A kickoff block is a snapshot of the moment
+   it was written, not a live instruction** — reconcile it against the doc's own rank table
+   before acting on it. Reading CI anyway is what surfaced rank 14, so the run was not wasted.
    forcing: none — done
 
 7. **Retire `deployment.yaml`'s no-reload paragraph IN THE SAME COMMIT that moves the store's
    `image:` tag to one built from cairn at or past `b25abb5`.**
    **Closing condition:** a merged `ZacxDev/homelab-infra` PR in which the `image:` line and
    that paragraph change together — checkable from the diff alone.
-   🔴 **THE BLOCKER IS NOW NARROWER AND NAMED.** It was "no cairn-built image exists"; the
-   concrete cause was that `build-push.sh` was never extracted, so cairn could not build its
-   own image by any route. **#4 closes that** — `packages.server-image` builds, and was RUN
-   (seeded via `kubectl exec`-shaped `tar`, rotated via `kill -HUP 1`, served a 200 with two
-   401 controls). ⚠ **Still blocked on PUBLICATION**: #4 produces a loadable tarball and
-   nothing pushes it to a registry. That is the remaining step, and nothing schedules it.
+   ⚠ **Still blocked on PUBLICATION** (rank 13): #4 produces a loadable tarball and nothing
+   pushes it to a registry.
    forcing: none — it cannot fire before a published image exists
 
 8. **Session capture — DESIGNED AND DECIDED, NOT BUILT.**
@@ -260,29 +295,28 @@ of the pinned ones, or keeps them. Put that question before building.
    ⚠ **The module has NO CALLER.** Wiring it in is rank 8's work.
    forcing: none — done
 
-10. **Raise cairn's CI collected-test floor.** `.github/workflows/ci.yml` pins `FLOOR = 200`
-    against a suite that now collects **1698** — it cannot see a suite that silently narrows
-    to 300, the exact failure its own comment says it prevents. devrc's convention for the
-    replacement is `m - min(50, max(1, m/20))`.
-    ⚠ Re-read the current count before computing it; it moved four times in one session.
-    **Closing condition:** a merged `ZacxDev/cairn` PR moving that literal.
+10. 🔨 **IN FLIGHT: `ZacxDev/cairn`#5 — raise cairn's CI collected-test floor.**
+    `.github/workflows/ci.yml` pinned `FLOOR = 200` against a suite collecting **1698**.
+    #5 moves it to **1648** = `m - min(50, max(1, m/20))` for the measured `m = 1698`.
+    **Gate controls watched in both directions:** green at 1698 and at exactly 1648; **red at
+    1647 and at 300**; and **green at 300 under the OLD `FLOOR = 200`** — that last one is the
+    demonstration the old floor was inert, not an assertion that it was.
+    ⚠ **This is an INVARIANT GUARD, not regression coverage** — no bug ever narrowed this suite.
+    The workflow comment and the PR body both say so.
+    **Closing condition:** #5 merged (a merged `ZacxDev/cairn` PR moving that literal).
     forcing: none
 
 11. 🔴 **OPERATOR ACTION — add a `cairn` scope to the store token's allowlist.** Work in
     `~/workspace/cairn` cannot be recorded in the subsystem store: `cairn create --scope cairn`
-    is refused `[not-found]`, exit 6. **Measured** — the token allowlist holds 23 scopes and
-    `cairn` is not among them:
-    `KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec deploy/subsystem-store-api --
-    cut -d' ' -f2,3 /run/secrets/subsystem-store/token` (fields 2,3 only; field 1 is the
-    secret). This session's cairn-repo lessons went to `devrc/cairn` instead.
+    is refused `[not-found]`, exit 6. **Re-verified live 2026-09-08: the store holds 23 scopes
+    and `cairn` is still not among them.** cairn-repo lessons keep landing in `devrc/` instead.
     **Closing condition:** `cairn create --scope cairn …` exits 0.
     forcing: none
 
 12. **Derive `leakscan.py`'s file coverage instead of enumerating it.** #4 closed two holes
-    (`.nix`, then `.dockerignore` — the second found by the guard written for the first) and
-    added a guard pinning the set against `git ls-files`. The CLASS is open: coverage is still
-    a hand-written suffix list, so the next new file type in this PUBLIC repo is unscanned
-    while the run prints a confident `0 findings`.
+    (`.nix`, then `.dockerignore`) and added a guard pinning the set against `git ls-files`. The
+    CLASS is open: coverage is still a hand-written suffix list, so the next new file type in
+    this PUBLIC repo is unscanned while the run prints a confident `0 findings`.
     **Closing condition:** a merged `ZacxDev/cairn` PR in which a tracked, non-binary file the
     scan skips causes a non-zero exit or an explicit `SKIPPED` line naming it.
     forcing: security — the repo is public and the gate is the reason it can be
@@ -294,6 +328,26 @@ of the pinned ones, or keeps them. Put that question before building.
     difference table and explicitly does not settle it.
     **Closing condition:** a tag in the registry built from cairn at or past `b25abb5`, and
     `homelab-infra`'s `image:` line able to name it.
+    forcing: none
+
+14. 🔨 **IN FLIGHT: `ZacxDev/cairn`#5 — the SECOND intermittent, the reload-atomicity control.**
+    Distinct from rank 6's flake; see the investigation block above for the full evidence
+    (2/26 CI runs, both the same assertion, wall-time-discriminated as not-load).
+    **Rides the SAME PR as rank 10** — two ranks, one PR, deliberately: both are "the gate is
+    weaker than it claims" in the same two files.
+    **Closing condition:** #5 merged. After that, a recurrence is a NEW finding, not this one.
+    forcing: gate — it turned the public repo's only CI gate red on 2 of its first 26 runs
+
+15. **`cairn recall` prescribes flags its own CLI rejects.** The digest's footer says
+    "`--ref <name>` prints any one of them in full; `--limit 31` prints them all", but
+    `cairn recall` accepts only `--scope/--repo/--no-sync/--mode` and exits **2** on `--ref`.
+    `/resume` step 4 documents the same drill-downs against that command, so a session following
+    either verbatim dead-ends and falls back to `cairn search` or the raw reader.
+    ⚠ Also measured 2026-09-08: the `devrc` digest is now **98.7 KB**, against the ~5 KB the
+    skill documents — 31 entries, `tests` alone carrying 94 nuance bullets. The skill's byte
+    figures are from 2026-08-13 and it says to re-measure; this is that measurement.
+    **Closing condition:** a merged devrc PR after which `cairn recall --ref <name>` prints one
+    entry, OR the footer and the `/resume` skill stop prescribing flags the wrapper lacks.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -644,34 +698,80 @@ The guard written for it then found a SECOND gap nobody had spotted:
 to distinguish, deliberately. See the `devrc/cairn` store entry (revision `4f3cb4da30f648e4`)
 and rank 11.
 
+**🔴 A KICKOFF BLOCK IS A SNAPSHOT, NOT A LIVE INSTRUCTION — AND ITS ASSIGNMENT CAN ALREADY BE
+DONE.** The 2026-09-08 `/resume` arrived saying "rank 6 is the cheapest real item: the
+intermittent now sits at ~27 runs / 1 failure — read the next N CI runs for a RATE rather than
+burning a local hour". Rank 6 had been **merged the previous day** at ≈43 runs, and this doc
+already carried a gotcha rejecting a rate as the instrument for it. The doc's own rank table is
+the authority; the kickoff is what someone typed when they wrote it. **Reconcile the kickoff
+against the ranks before acting.** ⚠ And do the work anyway when it is cheap: reading CI as
+instructed is exactly what surfaced rank 14, which nobody knew existed.
+
+**🔴 THE SAME SYMPTOM CLASS IN THE SAME SUITE IS NOT THE SAME BUG — CHECK WHICH TEST.** "The
+cairn full-suite intermittent" had been one named test through three investigation blocks. A
+fresh read of the failure logs showed the only two failures in the repo's CI history are a
+**different** test entirely. Had the run been scored as "the flake, still at ~2%", the rate
+would have been attributed to a test that has not failed since. **Read the failing test NAME out
+of the log before folding a failure into an existing investigation.**
+
+**🔴 A RATE INSTRUMENT IS NOT WRONG IN GENERAL — IT WAS WRONG FOR THAT ONE OBSERVATION.** This
+doc already records "a rate is the wrong instrument when the one observation carried no
+evidence", and that stands for rank 6. Rank 14 is the inverse from the same command: two
+observations, both carrying a self-diagnosing assertion naming exactly why they failed. **The
+discriminator is whether the failure carries evidence, not whether counting is a good idea.**
+
+**🔴 GATING THE OBVIOUS HALF OF A TIMING FIX MAKES THE ASSERTION VACUOUS.** The natural fix to
+"the budget starves the minimum-reload control" is to let the driver run past the deadline until
+it reaches the minimum. Done alone that is worse than the bug: the samplers still stop on the
+clock, so the minimum gets reached after every observer has gone home and `reloads >= 2` passes
+over a window nobody watched. **Both the producer and the observers have to be gated on the same
+constant.** Same family as this doc's existing "a fixture that cannot reach the code path passes
+with the guard deleted".
+
+**A SURVIVING MUTANT REPORTED IS WORTH MORE THAN A GREEN SWEEP.** #5's battery left one mutant
+alive (clear-then-refill with no widened window). It was not hidden and nothing was adjusted to
+kill it: it was proven live against a structural sibling test that DOES catch it, identified as
+a pre-existing documented limit, and deliberately not filed as a work item because no closing
+condition separates it from the guard already covering it.
+
+**🔴 `cairn recall`'s FOOTER PRESCRIBES FLAGS THE `cairn` WRAPPER DOES NOT HAVE.** `--ref` exits
+**2**. The featured-entry pick also fell back to `most-recent fallback` (it chose `tests`, which
+had nothing to do with this effort) because the newest datapacket handoff supplied no matching
+path window — so the one body printed in a 98.7 KB digest was irrelevant by construction. Use
+`cairn search`, or `python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --scope <s> --ref
+<name>`, which does accept it. Rank 15.
+
+**⚠ A STORE ENTRY'S `OPEN:` BULLET WAS STALE IN THE WAY THE BADGE WARNS ABOUT.** `devrc/cairn`
+carries `2026-08-29: OPEN: no entry in this store carries a task, PR or session ref, so nothing
+joins an entry to the work that produced it`. Measured 2026-09-08: entries now carry
+`[cairn: zach/<uuid>]` refs — several are visible in `cairn search` output. The remedy landed and
+the bullet did not move, which is exactly the "a remedy that has since landed reads exactly like
+one that has not" case the index badge names. Close it when next in that entry.
+
 ## How to verify
 
 ```bash
-# #4 landed — by CONTENT, never ancestry (a squash is never an ancestor)
-gh pr view 4 -R ZacxDev/cairn --json state,mergedAt,mergeCommit   # MERGED, 218b6c1
-git -C ~/workspace/cairn cat-file -e origin/main:flake.nix && echo present
-git -C ~/workspace/cairn grep -c serverTools origin/main -- flake.nix
+# rank 10 + rank 14 — the open PR, and its checks on the REAL runner
+gh pr view 5 -R ZacxDev/cairn --json state,mergeable,files
+gh pr checks 5 -R ZacxDev/cairn        # leakscan / nix / tests all pass
+gh pr diff 5 -R ZacxDev/cairn          # exactly 2 files; FLOOR 200 -> 1648; ATOMICITY_MIN_RELOADS
 
-# the flake works, from the merged base clone
-cd ~/workspace/cairn && nix build .#packages.x86_64-linux.cairn --no-link
-cd ~/workspace/cairn && nix build .#checks.x86_64-linux.client-resolves-its-lib --no-link
-cd ~/workspace/cairn && nix build .#packages.x86_64-linux.server-image --no-link
-# ^ ONE AT A TIME. A combined invocation contends on the store and can report a FALSE red.
-cd ~/workspace/cairn && nix flake check --all-systems --no-build   # rc 0
-
-# the packaged client resolves lib/ from /nix/store, and doctor no longer crashes
-P=$(cd ~/workspace/cairn && nix build .#cairn --no-link --print-out-paths)
-$P/bin/cairn doctor | head -3        # a real report; exit 9 is a VERDICT, exit 1 was the crash
-
-# suite + leak gate
-cd ~/workspace/cairn && nix develop ~/workspace/devrc -c python3 -m pytest tests -q -p no:randomly
-cd ~/workspace/cairn && python3 tests/leakscan.py --self-test && python3 tests/leakscan.py
+# the evidence rank 14 rests on — the repo's whole CI history
+gh run list -R ZacxDev/cairn --limit 100 --json conclusion,headSha,createdAt
+# 26 runs, 24 success / 2 failure; both failures e2cf6fe + 492191f, same assertion
 
 # rank 3 is NOT done until this resolves into /nix/store (it does not today)
-readlink -f ~/.local/bin/cairn
+readlink -f ~/.local/bin/cairn                       # -> devrc/scripts/cairn
 grep -c cairn ~/workspace/devrc/flake.nix            # 0 today
+
+# rank 4 / rank 11 spot checks
+gh pr view 1414 -R civitai/talos-infra --json state  # OPEN
+ls ~/.cache/subsystem-store/ | tr '\n' ' '           # 23 scopes, no `cairn`
+
+# the claim this session holds — release it when #5 merges
+claim-work --check cairn-oss-multi-instance-10
 ```
-Expected: PR #4 MERGED at `218b6c1`; cairn **1698 passed**; leakscan `0 findings across 38
-files` with both controls green; all three nix outputs build; `nix flake check --all-systems`
-rc 0; `readlink -f ~/.local/bin/cairn` resolves into `~/workspace/devrc/scripts/cairn`
-(**not** `/nix/store` — that is rank 3's second half).
+Expected: #5 `OPEN`/`MERGEABLE` with three green checks and `collected=1698 failed=0 floor=1648`;
+cairn CI history 26 runs / 2 failures, both the reload-atomicity assertion; `readlink -f
+~/.local/bin/cairn` still resolving into `~/workspace/devrc/scripts/cairn` (**not** `/nix/store`);
+#1414 OPEN; no `cairn` scope.
