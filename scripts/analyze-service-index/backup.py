@@ -616,10 +616,17 @@ def resolve_recipient(identity: Path) -> str:
         )
     p = age_public_key_bytes(identity)
     if p.returncode != 0:
-        # 🔴 age-keygen's stderr ECHOES THE OFFENDING INPUT LINE — measured
-        # 2026-08-27: a non-identity file comes back as `unknown identity type:
-        # "<the line>"`. On a file that IS an identity but is subtly mangled,
-        # that line is the SECRET KEY. It is not quoted here.
+        # 🔴 age-keygen's stderr CAN ECHO THE OFFENDING INPUT LINE — measured
+        # 2026-08-27 on age 1.3.1: a non-identity file comes back as `unknown
+        # identity type: "<the line>"`. On a file that IS an identity but is
+        # subtly mangled, that line is the SECRET KEY. It is not quoted here.
+        #
+        # ⚠ age 1.3.2 REMOVED that echo upstream (re-measured 2026-09-08: 9 of
+        # 23 manglings leak on 1.3.1, 0 of 23 on 1.3.2). This redaction is kept
+        # regardless — `age-keygen` is whatever is on PATH and this subsystem
+        # does not pin the operator's binary, so a defence that is only correct
+        # on the newest version is not a defence. The test proves it with an
+        # INJECTED leak rather than by requiring upstream to keep the bug.
         raise BackupError(
             f"could not derive an age recipient from {identity} (rc="
             f"{p.returncode}, {len(p.stdout)} bytes of stdout). age-keygen's "

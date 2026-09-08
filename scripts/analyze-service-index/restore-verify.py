@@ -276,6 +276,128 @@ DECRYPT_CAUSES = frozenset(
     {DECRYPT_AGE_MISSING, DECRYPT_AGE_REFUSED, DECRYPT_EMPTY_PLAINTEXT})
 
 
+# 🔴 WHICH PHASE OF age's DECRYPT FAILED — HEADER OR PAYLOAD.
+#
+# This exists because the STRUCTURAL signal it replaces was REMOVED UPSTREAM,
+# silently, by a routine `flake.lock` bump. The history matters, because the
+# obvious reading of this block ("substring-matching another module's prose",
+# which the comment above rightly calls the thing this feature exists to
+# remove) is the reading that gets it deleted again.
+#
+# WHAT USED TO WORK. `escrow-verify.py` decided "the escrowed key WORKED and
+# the BACKUP is tampered" (ARTIFACT-CORRUPT) from the PRESENCE of age's
+# `--output` file after a non-zero exit. That was measured, and it was true:
+# age v1.3.1's `cmd/age/age.go` ran
+#
+#     out.Write(nil) // trigger the lazyOpener even if r is empty
+#     if _, err := io.Copy(out, r); err != nil { errorf("%v", err) }
+#
+# — the eager `Write(nil)` CREATED the output file after `age.Decrypt` had
+# already returned, i.e. after the header authenticated and an identity
+# matched, but BEFORE a single payload chunk was decrypted. So "file present +
+# rc != 0" really did mean "the header authenticated, the payload did not".
+#
+# WHAT CHANGED. age v1.3.2 moved that line AFTER the copy:
+#
+#     if _, err := io.Copy(out, r); err != nil { errorf("%v", err) }
+#     // Trigger the lazyOpener even if r is empty, if Copy succeeded.
+#     if _, err := out.Write(nil); err != nil { errorf("%v", err) }
+#
+# The file is now created only once plaintext has actually been produced. age's
+# STREAM chunk is 64 KiB, so for any artifact whose corruption falls in the
+# FIRST chunk — every small backup, and the first-chunk case of every large one
+# — no output file is created at all, and the old discriminator reads exactly
+# like a wrong key.
+#
+# MEASURED 2026-09-08, both binaries, same harness, output-file EXISTENCE
+# separated from output-file SIZE (conflating those two is what hid this):
+#
+#                                   age 1.3.1            age 1.3.2
+#   wrong key                       ABSENT               ABSENT
+#   damaged header                  ABSENT               ABSENT
+#   payload flip @300 / @400        PRESENT size=0       ABSENT
+#   truncated -30 bytes             PRESENT size=0       ABSENT
+#   payload flip @70000             PRESENT size=65536   PRESENT size=65536
+#   valid encryption of nothing     PRESENT size=0       PRESENT size=0  (rc 0)
+#
+# So under 1.3.2 the verifier reported a TAMPERED backup as DECRYPT-FAILED —
+# "the escrowed identity does not match this artifact's recipients, or the
+# HEADER is damaged" — sending the operator at the KEY for a fault that is the
+# ARTIFACT's. That is the exact inversion `ARTIFACT-CORRUPT` was added to stop,
+# so losing it silently is the regression, not the failing test.
+#
+# 🔴 WHY A STRING, AND WHY THAT IS SAFE HERE. The structural signal is gone and
+# cannot be reconstructed from the CLI: age exposes no "authenticate the header
+# only" mode, and an X25519 recipient stanza carries an ephemeral share, so the
+# identity cannot be compared against it from outside. age's own stderr is the
+# only remaining discriminator. It is a sound one, and the soundness is
+# STRUCTURAL even though the signal is textual — `cmd/age/age.go::decrypt` is
+#
+#     r, err := age.Decrypt(in, identities...)   // HEADER phase
+#     ... if err != nil { errorf("%v", err) }    // never reaches the copy
+#     if _, err := io.Copy(out, r); err != nil { errorf("%v", err) }  // PAYLOAD
+#
+# so an error raised by that copy can only be reached once `age.Decrypt` has
+# returned successfully — which is precisely the claim ARTIFACT-CORRUPT makes.
+# The payload-phase vocabulary is owned by ONE file, `internal/stream/stream.go`,
+# and is two strings; both are listed below and both are pinned by a test that
+# runs the REAL binary.
+#
+# 🔴 AND IT FAILS SAFE, WHICH IS THE PART THAT MATTERS. An unrecognised message
+# classifies as UNKNOWN, never as PAYLOAD, so a future upstream reword can only
+# ever cost the strong verdict — it can NEVER manufacture one. "This artifact
+# is tampered" is the most destructive sentence this tool can print about a
+# backup, and no unmatched string can produce it. If the vocabulary does move,
+# the live-binary test below goes RED and says so, which is the whole difference
+# from the failure this block documents: that one degraded in silence.
+AGE_PHASE_HEADER = "header"    # failed before any plaintext was possible
+AGE_PHASE_PAYLOAD = "payload"  # header authenticated; a payload chunk did not
+AGE_PHASE_UNKNOWN = "unknown"  # age said something this does not recognise
+
+AGE_PHASES = frozenset({AGE_PHASE_HEADER, AGE_PHASE_PAYLOAD, AGE_PHASE_UNKNOWN})
+
+# Owned by age's `internal/stream/stream.go`. Reachable ONLY from `io.Copy`,
+# i.e. only after the header authenticated and an identity matched.
+_AGE_PAYLOAD_MARKERS = (
+    "failed to decrypt and authenticate payload chunk",
+    "last chunk is empty, try age v1.0.0",
+)
+
+# Owned by age's `age.go` and `cmd/age/age.go`, all raised before `age.Decrypt`
+# returns. This set is deliberately NOT used to license any strong claim — it
+# exists so an operator-facing message can say which half failed, and so the
+# test below can assert the two halves are actually distinguishable.
+_AGE_HEADER_MARKERS = (
+    "no identity matched any of the recipients",
+    "failed to read header",
+    "invalid header intro",
+    "the file is not passphrase-encrypted",
+)
+
+
+def age_failure_phase(stderr: str) -> str:
+    """Classify age's stderr into the PHASE that failed.
+
+    Returns one of `AGE_PHASES`. PAYLOAD is returned only for a marker that age
+    can emit nowhere but after a successful header decrypt; everything
+    unrecognised is UNKNOWN, never PAYLOAD — see the block above on failing safe.
+
+    ⚠ The PAYLOAD test runs first, and that precedence is deliberate rather than
+    incidental. No message age emits today carries markers from both sets — the
+    two vocabularies come from different files and different phases — so the
+    order is unobservable on any measured input. It is written this way so that
+    if a future age ever prefixed a payload error with a header-ish warning, the
+    result would be the CORRECT verdict rather than a downgrade. The fail-safe
+    property that matters is about UNRECOGNISED text, and it holds either way.
+    """
+    s = (stderr or "").lower()
+    if any(m in s for m in _AGE_PAYLOAD_MARKERS):
+        return AGE_PHASE_PAYLOAD
+    if any(m in s for m in _AGE_HEADER_MARKERS):
+        return AGE_PHASE_HEADER
+    return AGE_PHASE_UNKNOWN
+
+
 # --------------------------------------------------------------------------- #
 # the classified refusals
 # --------------------------------------------------------------------------- #
@@ -340,13 +462,18 @@ class RestoreVerifyError(B.BackupError):
     """
 
     def __init__(self, message: str, *, cause: str | None = None,
-                 token: str | None = None):
+                 token: str | None = None, age_phase: str | None = None):
         super().__init__(message)
         if cause is not None and cause not in DECRYPT_CAUSES:
             raise KeyError(
                 f"{cause!r} is not a published cause. The set is closed on "
                 f"purpose: a consumer branches on these, so inventing one "
                 f"silently lands in whatever `else` that consumer has.")
+        if age_phase is not None and age_phase not in AGE_PHASES:
+            raise KeyError(
+                f"{age_phase!r} is not a published age phase. Closed for the "
+                f"same reason as `cause`: `escrow-verify.py` branches on it to "
+                f"decide whether a failure blames the ARTIFACT or the KEY.")
         if token is not None and token not in EXIT_CODES:
             raise KeyError(
                 f"{token!r} is not in EXIT_CODES. A classified refusal is an "
@@ -355,6 +482,9 @@ class RestoreVerifyError(B.BackupError):
                 f"the test that pins it.")
         self.cause = cause
         self.token = token
+        # None means "this failure carries no observation of age's phase" —
+        # never a default one. Only the `DECRYPT_AGE_REFUSED` branch sets it.
+        self.age_phase = age_phase
         self.exit_code = EXIT_FAILED if token is None else EXIT_CODES[token]
 
 
@@ -671,13 +801,18 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
             "artifact this cannot verify, and skipping it would report safety "
             "that was never measured.",
             cause=DECRYPT_AGE_MISSING)
-    # 🔴 A STALE OUTPUT FILE MAKES age's OWN FAILURE UNREADABLE. MEASURED: on
-    # BOTH the wrong-key and damaged-header paths age leaves a PRE-EXISTING
-    # `--output` file completely untouched (rc=1, file present, original 34-byte
-    # content intact) — it only creates the file once it has authenticated the
-    # header. Consumers therefore read the PRESENCE of `plain` as "age got past
-    # the header", and a leftover from an aborted earlier run turns that into a
-    # lie: a WRONG KEY reads as a corrupt artifact.
+    # 🔴 A STALE OUTPUT FILE MAKES age's OWN FAILURE UNREADABLE. MEASURED on
+    # BOTH 1.3.1 and 1.3.2: on the wrong-key and damaged-header paths age leaves
+    # a PRE-EXISTING `--output` file completely untouched (rc=1, file present,
+    # original 34-byte content intact). Consumers read the PRESENCE of `plain`
+    # as "age got past the header", and a leftover from an aborted earlier run
+    # turns that into a lie: a WRONG KEY reads as a corrupt artifact.
+    #
+    # ⚠ Presence is no longer the PRIMARY discriminator — age 1.3.2 stopped
+    # creating the file before the payload, so absence proves nothing (see
+    # `age_failure_phase`). It is still an unambiguous POSITIVE signal on both
+    # versions: bytes on disk can only have come from an authenticated chunk.
+    # That is exactly why this unlink still has to happen.
     #
     # `work_dir` is routinely REUSED — `B._private_dir` documents the
     # already-exists case as "every run after the first with an explicit
@@ -702,7 +837,13 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
             f"is damaged. This is "
             f"NOT a corruption verdict about the git history inside — nothing "
             f"here has read it.",
-            cause=DECRYPT_AGE_REFUSED)
+            cause=DECRYPT_AGE_REFUSED,
+            # WHICH half of age's decrypt failed, taken from age's own stderr
+            # at the only place that has it. Published as a value so consumers
+            # branch on an enumerated phase rather than re-parsing this
+            # message; see `age_failure_phase` for why a string is what is
+            # left, and why UNKNOWN can never license the strong verdict.
+            age_phase=age_failure_phase(p.stderr))
     if not plain.is_file() or plain.stat().st_size == 0:
         # 🔴 MEASURED: `age` encrypts a ZERO-BYTE payload to a perfectly valid
         # 200-byte ciphertext, and decrypts it back at rc=0. So an object that

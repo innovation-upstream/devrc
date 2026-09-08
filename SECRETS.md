@@ -283,10 +283,23 @@ no commit; this flag is it, upstreamed. What remains unexercised is only a
 unchanged.** `age-keygen -y` prints only the `age1…` recipient (measured, age
 v1.3.1: exactly 63 bytes, `age1…` + one `\n`), which is why the pin above is
 committed in a public repo. The secret half is never printed, never hashed into a
-message, and never passed in argv. ⚠ **age-keygen's stderr is NOT safe** — a file
-it cannot parse comes back as `unknown identity type: "<the offending line>"`,
-i.e. it echoes its input, which on a mangled identity is the secret key. The tool
-quotes no stream at all on that path.
+message, and never passed in argv. ⚠ **age-keygen's stderr is NOT safe** — on
+**age ≤ 1.3.1** a file it cannot parse comes back as
+`unknown identity type: "<the offending line>"`, i.e. it echoes its input, which
+on a mangled identity is the secret key. The tool quotes no stream at all on that
+path.
+
+🔴 **age 1.3.2 removed that echo, and the redaction stays anyway.** Upstream
+fixed it deliberately in `parse.go` (*"Don't include arg in the error: it may
+contain private key material, and callers print these errors"*). Re-measured
+2026-09-08 over 23 realistic manglings — whitespace, case, prefix typos,
+quoting, truncation, CRLF, NUL and non-UTF8 bytes — against the same fixtures:
+**9 of 23 leak on 1.3.1, 0 of 23 on 1.3.2**. The guard is not removed, because
+`age-keygen` here is whatever is on PATH and this repo does not pin the
+operator's binary; a defence that is only correct on the newest release is not a
+defence. Its non-vacuity no longer depends on age leaking either — the test
+injects a leaking stderr at the one seam that shells out (`age_public_key_bytes`)
+rather than requiring upstream to keep the bug.
 
 ##### Verifying a hand-pasted note (the browser-clipboard leg)
 
@@ -368,11 +381,40 @@ disaster-recovery key gets rotated, or a tampered backup gets waved through:
 the `--host` prefix trap `restore-verify.py` documents), and neither is a verdict
 on the escrow.
 
-Measured (age v1.3.1, many offsets and sizes): a wrong key or a damaged header
-leaves **no** plaintext file, while payload corruption and truncation leave one —
-because age writes output *before* authenticating the payload. That, plus a
-machine-readable cause published by `restore-verify.py`, is what separates the
-rows; none of it is parsed out of age's stderr.
+🔴 **How rows `25` and `33` are told apart — and it CHANGED under age 1.3.2.**
+
+Originally (measured, age v1.3.1, many offsets and sizes): a wrong key or a
+damaged header left **no** plaintext file, while payload corruption and
+truncation left one, because age created its `--output` file *before*
+authenticating the payload. That file's presence was the discriminator.
+
+age 1.3.2 moved one line in `cmd/age/age.go` — the eager `out.Write(nil)` that
+created the file now runs *after* `io.Copy` succeeds — so a corruption inside
+age's **first 64 KiB STREAM chunk** now leaves no file at all, exactly like a
+wrong key. Re-measured 2026-09-08 against both binaries:
+
+| fixture | age 1.3.1 | age 1.3.2 |
+|---|---|---|
+| wrong key | absent | absent |
+| damaged header | absent | absent |
+| payload flip @300 / @400 | **present, 0 bytes** | **absent** |
+| truncated −30 bytes | **present, 0 bytes** | **absent** |
+| payload flip @70000 (large file) | present, 65536 bytes | present, 65536 bytes |
+| valid encryption of nothing | present, 0 bytes (rc 0) | present, 0 bytes (rc 0) |
+
+Untreated, that reported every **tampered** small backup as `25 DECRYPT-FAILED`
+— *"your key may not match"* — for a fault that is the artifact's. The
+discriminator is now age's own **failure phase**: an error raised from the
+payload copy is reachable only after `age.Decrypt` returned, i.e. only after the
+header authenticated with the escrowed identity. Output-file presence is kept as
+a corroborating positive (bytes on disk can only come from an authenticated
+chunk) but is no longer sufficient alone.
+
+⚠ This is the one place the subsystem reads age's stderr, and it **fails safe**:
+an unrecognised message classifies as *unknown* and falls through to row `25`,
+never to `33`. A future reword can cost the strong verdict; it cannot
+manufacture one. `restore-verify.py::age_failure_phase` carries the argument,
+and a live-binary test goes red — loudly — if age's vocabulary moves again.
 
 ⚠ It cannot unlock the vault and will not try: every `bw` call runs with stdin on
 `/dev/null`, `--nointeraction`, and a timeout, so an unattended run **fails fast

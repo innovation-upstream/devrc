@@ -4253,3 +4253,147 @@ def test_restore_print_plan_is_SILENT_for_the_DEFAULT_identity(
                   max_lag_days=1.0, identity_source="$SOPS_AGE_KEY_FILE")
     out2 = capsys.readouterr().out
     assert "NOT the default identity" in out2, out2
+
+
+# --------------------------------------------------------------------------- #
+# age's failure PHASE — the discriminator that decides whether a decrypt failure
+# blames the ARTIFACT or the KEY. See `RV.age_failure_phase` for the upstream
+# change (age 1.3.2) that made this necessary and the fail-safe argument.
+# --------------------------------------------------------------------------- #
+def _age_decrypt_failure(cipher: Path, identity: Path, out: Path) -> str:
+    """Run the REAL `age -d` and return its stderr. Asserts it actually failed,
+    so a case that silently started SUCCEEDING cannot be read as a phase."""
+    out.unlink(missing_ok=True)
+    p = subprocess.run(
+        [AGE, "--decrypt", "--identity", str(identity), "--output", str(out),
+         str(cipher)], capture_output=True, text=True)
+    assert p.returncode != 0, (
+        f"age SUCCEEDED on a fixture built to fail; this case no longer "
+        f"observes a failure phase at all. stderr={p.stderr!r}")
+    return p.stderr
+
+
+def test_age_failure_phase_SEPARATES_a_wrong_key_from_a_tampered_payload(
+        tmp_path, identity):
+    """🔴 THE LIVE-BINARY PIN ON age's FAILURE VOCABULARY.
+
+    `escrow-verify.py` reports ARTIFACT-CORRUPT — "the escrowed key WORKED, the
+    BACKUP is tampered", the strongest and most destructive claim the subsystem
+    makes — when this classifier says PAYLOAD. That verdict used to be derived
+    STRUCTURALLY, from age creating its `--output` file before decrypting the
+    payload; age 1.3.2 moved that line and the structural signal vanished
+    SILENTLY, downgrading every tampered small backup to "your key may be
+    wrong". This test is what makes the next such move LOUD instead.
+
+    It runs the real `age` binary over three fixtures whose phases are known by
+    construction, and pins that the classifier separates them.
+
+    ⚠ The corruption is at offset 400 — inside age's FIRST 64 KiB STREAM chunk,
+    which is the case that broke. A fixture corrupted past the first chunk still
+    leaves partial plaintext on disk, so it would pass on the OLD code too and
+    would not see this regression at all. Two points measured on purpose:
+    offset 400 (first chunk, no output) and a large payload corrupted at 70000
+    (later chunk, partial output), because the behaviour differs between them.
+    """
+    plain = tmp_path / "p.bin"
+    # Comfortably past offset 400 so the flip lands in the ciphertext PAYLOAD,
+    # and comfortably inside age's 64 KiB first chunk so it is the broken case.
+    plain.write_bytes(b"synthetic payload, not a real backup\n" * 100)
+    cipher = tmp_path / "p.age"
+    B.encrypt(plain, cipher, _recipient(identity))
+    blob = cipher.read_bytes()
+    assert 400 < len(blob) < 65_536, len(blob)
+    out = tmp_path / "out.bin"
+
+    # 1. WRONG KEY — age never gets past the header.
+    other = tmp_path / "other.key"
+    subprocess.run([AGE_KEYGEN, "-o", str(other)], check=True, capture_output=True)
+    wrong = _age_decrypt_failure(cipher, other, out)
+    assert RV.age_failure_phase(wrong) == RV.AGE_PHASE_HEADER, (
+        f"a WRONG KEY no longer classifies as the header phase. age said "
+        f"{wrong!r}. If this is a reword, add it to `_AGE_HEADER_MARKERS`; if "
+        f"age changed behaviour, re-measure before trusting any verdict here.")
+
+    # 2. TAMPERED PAYLOAD, first chunk — the case age 1.3.2 broke.
+    mangled = bytearray(blob)
+    mangled[400] ^= 0xFF          # XOR: always changes the byte
+    assert mangled[400] != blob[400]
+    tampered = tmp_path / "tampered.age"
+    tampered.write_bytes(bytes(mangled))
+    payload = _age_decrypt_failure(tampered, identity, out)
+    assert not out.exists(), (
+        "age wrote an output file for a first-chunk corruption — the old "
+        "structural signal is back. That is not a failure, but this test's "
+        "premise has changed: re-measure before simplifying anything.")
+    assert RV.age_failure_phase(payload) == RV.AGE_PHASE_PAYLOAD, (
+        f"a TAMPERED PAYLOAD no longer classifies as the payload phase. age "
+        f"said {payload!r}. ARTIFACT-CORRUPT is now UNREACHABLE for this case "
+        f"and tampered backups are being reported as possible key faults — "
+        f"re-measure age and update `_AGE_PAYLOAD_MARKERS` together with the "
+        f"comment block that justifies it.")
+
+    # 3. TRUNCATION — the other realistic damage shape, same phase.
+    trunc = tmp_path / "trunc.age"
+    trunc.write_bytes(blob[:-30])
+    assert RV.age_failure_phase(
+        _age_decrypt_failure(trunc, identity, out)) == RV.AGE_PHASE_PAYLOAD
+
+    # 4. THE SECOND MEASUREMENT POINT: corruption PAST the first chunk, where
+    #    age does leave partial plaintext. Same phase, different mechanism —
+    #    naming both is what stops "measured at one point" reading as general.
+    big = tmp_path / "big.bin"
+    big.write_bytes(bytes((i * 7 + 3) % 251 for i in range(200_000)))
+    big_cipher = tmp_path / "big.age"
+    B.encrypt(big, big_cipher, _recipient(identity))
+    bb = bytearray(big_cipher.read_bytes())
+    bb[70_000] ^= 0xFF
+    big_bad = tmp_path / "big-bad.age"
+    big_bad.write_bytes(bytes(bb))
+    late = _age_decrypt_failure(big_bad, identity, out)
+    assert RV.age_failure_phase(late) == RV.AGE_PHASE_PAYLOAD
+    assert out.exists() and out.stat().st_size > 0, (
+        "a LATER-chunk corruption stopped leaving partial plaintext; the "
+        "`plain_present` half of escrow-verify's OR is now dead on every "
+        "version, not just this one")
+
+
+def test_age_failure_phase_calls_an_UNRECOGNISED_message_UNKNOWN_not_PAYLOAD():
+    """🔴 THE FAIL-SAFE DIRECTION, AND THE REASON A STRING MATCH IS TOLERABLE.
+
+    An unmatched message must never license ARTIFACT-CORRUPT. A future age
+    reword can then only ever COST the strong verdict — it can never
+    manufacture one about a backup that is actually fine, which is the
+    direction that gets an operator to distrust a good archive (or, worse, to
+    trust the `DECRYPT-FAILED` remedy and rotate a key that works).
+
+    The empty string is included deliberately: a killed or `exec`-failed age
+    leaves no stderr at all, and "no evidence" must classify as UNKNOWN rather
+    than fall through to whichever branch happens to be last.
+    """
+    for msg in ("",
+                "age: error: something nobody has written yet",
+                "age: error: failed to open output file: permission denied",
+                "Killed",
+                "age: error: FAILED TO DECRYPT AND AUTHENTICATE PAYLOD CHUNK"):
+        assert RV.age_failure_phase(msg) == RV.AGE_PHASE_UNKNOWN, msg
+
+    # And the positive control for THIS test: a real payload marker must still
+    # be recognised, or the assertions above would pass on a function that
+    # returned UNKNOWN unconditionally.
+    assert RV.age_failure_phase(
+        "age: error: failed to decrypt and authenticate payload chunk, file "
+        "may be corrupted or tampered with") == RV.AGE_PHASE_PAYLOAD
+
+
+def test_a_published_age_phase_must_be_one_of_the_enumerated_ones():
+    """The closed-set discipline `cause` already has. A consumer branches on
+    this, so an invented value would silently land in whatever `else` the
+    consumer has — which for escrow-verify is the DECRYPT-FAILED verdict."""
+    with pytest.raises(KeyError):
+        RV.RestoreVerifyError("x", age_phase="not-a-phase")
+    # The enumerated ones are accepted, so the guard above is about the VALUE
+    # and not about the keyword being rejected outright.
+    for phase in sorted(RV.AGE_PHASES):
+        assert RV.RestoreVerifyError("x", age_phase=phase).age_phase == phase
+    # Absent means absent: never a default phase.
+    assert RV.RestoreVerifyError("x").age_phase is None

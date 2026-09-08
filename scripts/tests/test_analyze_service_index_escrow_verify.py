@@ -1795,8 +1795,13 @@ def test_the_phase_probe_OBSERVES_rather_than_reimplements(escrow_world):
         assert RVmod.decrypt is not before, "the probe never installed itself"
         seen["state"] = state
     assert RVmod.decrypt is before, "the probe did not restore the original"
+    # WHOLE-DICT equality, deliberately: a subset check would let a new
+    # observation appear without anyone deciding what its "nothing observed"
+    # value is. `age_phase` was added here in the age-1.3.2 fix and this
+    # assertion is what forced it to be declared rather than defaulted.
     assert seen["state"] == {"reached": False, "returned": False,
-                             "plain_present": None, "cause": None}
+                             "plain_present": None, "cause": None,
+                             "age_phase": None}
     # And on a real run it records the success phase.
     v, _ = _decrypt_run(escrow_world)
     assert v.decrypt_checked is True
@@ -4556,8 +4561,39 @@ def _secret_line(text: str) -> str:
 # 🔴 A LEADING SPACE IS THE LIKELIEST WEB-VAULT CLIPBOARD ARTIFACT — i.e. the
 # exact mangling this whole mode exists to catch. The leaking cases are the
 # realistic ones; that is what made the vacuous version so quiet.
-_LEAKING = "leaking"
-_NON_LEAKING = "non-leaking"
+#
+# 🔴 AND age v1.3.2 REMOVED THE ECHO, WHICH BREAKS THE CONTROL BUT NOT THE
+# GUARD. Upstream fixed it deliberately, in `parse.go`:
+#
+#   -   return nil, fmt.Errorf("unknown identity type: %q", arg)
+#   +   // Don't include arg in the error: it may contain private key material,
+#   +   // and callers print these errors.
+#   +   return nil, fmt.Errorf("unknown identity type")
+#
+# MEASURED 2026-09-08, 23 realistic manglings (whitespace, case, prefix typos,
+# quoting, truncation, CRLF, NUL and non-UTF8 bytes, split lines), the same
+# fixtures against both binaries, comparing case-INSENSITIVELY against the
+# fixture's own secret AND against its bech32 body and 20/30/40-char fragments:
+#
+#   age 1.3.1   9 of 23 put the secret or its body into stderr
+#   age 1.3.2   0 of 23
+#
+# 🔴 SO THE OLD POSITIVE CONTROL ASSERTED THAT UPSTREAM MUST KEEP A
+# VULNERABILITY, and went red the moment upstream fixed it. That is the wrong
+# thing to assert, and "no input echoes any more" is the wrong reason to delete
+# a redaction: `age-keygen` here is whatever is on PATH, not a version this
+# repo pins for the operator, and 1.3.1 is a binary people still have. The
+# guard STAYS, and its non-vacuity is now proven by
+# `test_the_REDACTION_survives_an_INJECTED_leak` below, which feeds a leaking
+# stderr through the seam and therefore cannot go vacuous on ANY age version.
+#
+# The ledger below is kept because it is still true of age <= 1.3.1, and it is
+# still checked — but in the SAFE DIRECTION ONLY (see
+# `test_the_MANGLER_LEDGER_never_UNDERSTATES_the_installed_age_keygen`): a
+# mangler marked non-leaking that DOES leak is a finding; a mangler marked
+# leaking on a version that no longer echoes is not.
+_LEAKING = "leaking"          # echoes on age <= 1.3.1; silent on >= 1.3.2
+_NON_LEAKING = "non-leaking"  # never echoes, on any measured version
 
 _MANGLERS = [
     (lambda t: t.replace("\n", " "), "newlines collapsed to spaces", _NON_LEAKING),
@@ -4571,38 +4607,110 @@ _MANGLERS = [
 ]
 
 
-def test_the_LEAKING_manglers_really_DO_make_age_keygen_echo_the_secret(tmp_path):
-    """🔴 THE POSITIVE CONTROL THE FIRST VERSION OF THIS GUARD LACKED.
+def test_the_REDACTION_survives_an_INJECTED_leak(tmp_path, monkeypatch):
+    """🔴 THE POSITIVE CONTROL, REBUILT SO IT CANNOT GO VACUOUS.
 
     A "no key material in the message" assertion is worth exactly as much as the
-    input's ability to PUT key material there. This runs `age-keygen -y` directly
-    on each fixture and asserts the stderr of the two `_LEAKING` manglers really
-    does contain the secret — and that the three `_NON_LEAKING` ones really do
-    not. If age ever stops echoing, this goes red and tells you the guard below
-    has become vacuous, instead of leaving it silently green forever.
+    stream's ability to PUT key material there. The previous version got that
+    ability from age-keygen itself — it asserted the two `_LEAKING` manglers
+    really did echo the secret. That was honest measurement, and it had one
+    fatal property: it was an assertion about UPSTREAM CONTINUING TO LEAK. age
+    1.3.2 fixed the echo (see the ledger above), so the control went red while
+    the guard it protects was fine.
 
-    ⚠ THE COMPARISON IS CASE-INSENSITIVE, and that is not fussiness: a
-    case-SENSITIVE check returns a FALSE NEGATIVE on the lowercased-prefix case
-    while the full key body is sitting in the stream. (The auditor's own first
-    check made exactly that error.)
+    This replaces it at the SEAM instead. `B.age_public_key_bytes` is the single
+    place this subsystem shells out to `age-keygen -y`; injecting a
+    CompletedProcess whose stderr carries the fixture's own secret reproduces
+    exactly the stream a leaking age hands over, on ANY age version. If anyone
+    interpolates that stderr into the refusal, this goes red — which is the one
+    thing the guard has to be able to see.
+
+    ⚠ CASE-INSENSITIVE, and against the BODY as well as the whole line: a
+    case-sensitive check reads clean on a lowercased-prefix echo while the whole
+    key body is sitting in the message, and a `"AGE-SECRET-KEY-" not in msg`
+    spelling check reads clean on a message that dropped the prefix and kept the
+    key.
     """
     k = _new_identity(tmp_path, "escrowed.key")
     text = k.read_text(encoding="utf-8")
     secret = _secret_line(text)
-    seen = {_LEAKING: 0, _NON_LEAKING: 0}
+    body = secret.split("AGE-SECRET-KEY-", 1)[-1]
+
+    # The shape age <= 1.3.1 really produced, rebuilt from the fixture's own
+    # key: rc=1, empty stdout, and the offending line echoed into stderr.
+    leaking_stderr = (
+        f'age-keygen: error: failed to parse input: error at line 3: '
+        f'unknown identity type: "{secret}"\n').encode("utf-8")
+    monkeypatch.setattr(
+        B, "age_public_key_bytes",
+        lambda _p: subprocess.CompletedProcess([], 1, b"", leaking_stderr))
+
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(), note=text, expect="0" * 16)
+    exc = ei.value
+    assert exc.token == "NOT-AN-AGE-IDENTITY"
+    rendered = str(exc).lower()
+
+    # 🔴 THE CONTROL'S OWN CONTROL: the injected stream really does carry the
+    # secret, so a clean `rendered` below is redaction and not an empty stream.
+    assert secret.lower() in leaking_stderr.decode("utf-8").lower()
+
+    assert secret.lower() not in rendered
+    assert body.lower() not in rendered
+    assert "age-secret-key-" not in rendered
+    assert exc.detail is None, (
+        "a detail field was populated on a path whose only upstream stream is "
+        "age-keygen's input-echoing stderr")
+
+
+def test_the_MANGLER_LEDGER_never_UNDERSTATES_the_installed_age_keygen(tmp_path):
+    """🔴 THE LEDGER IS CHECKED IN THE SAFE DIRECTION ONLY.
+
+    `_MANGLERS` records which manglings made age-keygen echo. That fact is
+    VERSION-DEPENDENT (9 of 23 inputs on 1.3.1, 0 of 23 on 1.3.2), so demanding
+    a `_LEAKING` mangler still leak is demanding upstream keep a vulnerability —
+    the mistake the previous control made.
+
+    The asymmetry is what makes this worth running. A mangler marked
+    `_NON_LEAKING` that DOES echo on the installed binary is a real finding: it
+    means the ledger understates the hazard, and anyone reading it would pick
+    fixtures that cannot see a leak. The reverse — marked `_LEAKING`, silent on
+    this version — is upstream having fixed something, and is merely reported.
+
+    It also pins what IS version-independent: every mangling here is REFUSED.
+    A mangler that age-keygen started ACCEPTING would silently stop exercising
+    the refusal path the guard lives on.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    text = k.read_text(encoding="utf-8")
+    secret = _secret_line(text)
+    body = secret.split("AGE-SECRET-KEY-", 1)[-1]
+
+    echoed, understated = [], []
     for mangler, label, kind in _MANGLERS:
         f = tmp_path / f"probe-{abs(hash(label))}.key"
         f.write_text(mangler(text), encoding="utf-8")
         p = subprocess.run([AGE_KEYGEN, "-y", str(f)], capture_output=True)
-        assert p.returncode != 0, f"{label} was ACCEPTED by age-keygen"
+        assert p.returncode != 0, (
+            f"{label} was ACCEPTED by age-keygen — this mangling no longer "
+            f"reaches the refusal path the redaction guard lives on")
         err = p.stderr.decode("utf-8", "replace").lower()
-        leaked = secret.lower() in err
-        assert leaked == (kind is _LEAKING), (
-            f"{label}: expected {kind}, stderr {'HAS' if leaked else 'lacks'} "
-            f"the secret. The ledger above is now wrong about this age version; "
-            f"re-measure before trusting the guard that reads it.")
-        seen[kind] += 1
-    assert seen[_LEAKING] >= 2 and seen[_NON_LEAKING] >= 3, seen
+        leaked = secret.lower() in err or body.lower() in err
+        if leaked:
+            echoed.append(label)
+            if kind is _NON_LEAKING:
+                understated.append(label)
+
+    assert not understated, (
+        f"the ledger marks these _NON_LEAKING but the INSTALLED age-keygen "
+        f"echoes the secret for them: {understated}. The ledger understates "
+        f"the hazard — re-measure it, and check that the leaking fixtures the "
+        f"guard relies on are still the realistic ones.")
+    # Not an assertion, deliberately: on age >= 1.3.2 this is legitimately
+    # empty, and an emptiness check here would re-create the version coupling
+    # this test exists to remove. The guard's non-vacuity is proven by
+    # `test_the_REDACTION_survives_an_INJECTED_leak`, not by this number.
+    assert isinstance(echoed, list)
 
 
 @pytest.mark.parametrize("mangler,label,kind", _MANGLERS)
@@ -4614,11 +4722,17 @@ def test_NO_pubkey_failure_message_EVER_carries_key_material(tmp_path, mangler,
     line is the SECRET KEY. Quoting it would leak the very thing this module
     refuses to print, on exactly the failure it exists to report.
 
-    🔴 THE GUARD IS ONLY AS GOOD AS ITS LEAKING FIXTURES. Two of the five
-    manglers put the real secret into age-keygen's stderr — proven by
-    `test_the_LEAKING_manglers_really_DO_make_age_keygen_echo_the_secret` above,
-    which is this test's positive control. Interpolating `p.stderr` into the
-    NOT-AN-AGE-IDENTITY verdict is killed here by those two.
+    🔴 THE GUARD IS ONLY AS GOOD AS ITS LEAKING FIXTURES, AND ON age >= 1.3.2
+    NONE OF THESE FIXTURES LEAK ANY MORE (the ledger above has the measurement
+    and the upstream diff). So on a current binary this test can no longer kill
+    an "interpolate `p.stderr` into the verdict" mutant by itself — it is the
+    BEHAVIOURAL half, asserting every realistic mangling is refused with no key
+    material rendered.
+
+    Its positive control is `test_the_REDACTION_survives_an_INJECTED_leak`,
+    which injects a leaking stderr at the `B.age_public_key_bytes` seam and so
+    kills that mutant on any age version. Read the two together; neither is
+    sufficient alone.
 
     ⚠ CASE-INSENSITIVE, against the FIXTURE'S OWN secret — a case-sensitive
     check reads clean on the lowercased-prefix case while the whole key body is

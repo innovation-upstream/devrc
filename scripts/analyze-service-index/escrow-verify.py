@@ -101,11 +101,11 @@ send the operator hunting for corruption that is not there.
     is unchanged in force for the SECRET half: it is never printed, never
     hashed into a message, and never passed in argv.
     🔴 AND age-keygen's STDERR IS NOT SAFE, on exactly the failure this mode
-    exists to catch. Measured: a file whose identity TYPE it cannot recognise
-    comes back as `unknown identity type: "<the offending line>"` — it ECHOES
-    ITS INPUT, and on a subtly-mangled identity that line is the SECRET KEY. So
-    the `NOT-AN-AGE-IDENTITY` refusal reports the exit code and the stdout byte
-    count and quotes no stream at all.
+    exists to catch. Measured on age <= 1.3.1: a file whose identity TYPE it
+    cannot recognise comes back as `unknown identity type: "<the offending
+    line>"` — it ECHOES ITS INPUT, and on a subtly-mangled identity that line is
+    the SECRET KEY. So the `NOT-AN-AGE-IDENTITY` refusal reports the exit code
+    and the stdout byte count and quotes no stream at all.
     ⚠ WHICH manglings echo is NOT obvious, and a guard built on the wrong ones
     is vacuous. MEASURED 2026-08-27, age v1.3.1, ten inputs, compared
     case-INSENSITIVELY against the fixture's own secret: collapsed newlines, an
@@ -113,6 +113,13 @@ send the operator hunting for corruption that is not there.
     without repeating them), while a LEADING SPACE on the secret line — the
     likeliest web-vault clipboard artifact — and a LOWERCASED `age-secret-key-`
     prefix leak the WHOLE line. The realistic manglings are the leaking ones.
+    🔴 age 1.3.2 REMOVED THE ECHO — upstream's own fix, in `parse.go`: "Don't
+    include arg in the error: it may contain private key material, and callers
+    print these errors." Re-measured 2026-09-08 over 23 realistic manglings:
+    9 of 23 leak on 1.3.1, 0 of 23 on 1.3.2. THE REDACTION STAYS: `age-keygen`
+    is whatever is on PATH, not a version this repo pins for the operator. What
+    changed is the TEST — it injects a leaking stderr at the seam instead of
+    asserting that upstream still leaks, which is a thing no test should require.
     ⚠ `age --decrypt` does NOT echo, which is why `restore-verify.py` may quote
     its stderr and this module may not. Two different tools, two different
     rules; do not unify them without re-measuring.
@@ -370,10 +377,17 @@ EXIT_CODES: dict[str, int] = {
     # 🔴 AND A SIXTH, ADDED AFTER RE-MEASURING age: `ARTIFACT-CORRUPT`. The
     # five-way version reported a TAMPERED or TRUNCATED artifact as
     # `ARTIFACT-EMPTY` — "THE ESCROW IS FINE … a valid encryption of an empty
-    # payload" — because it read file PRESENCE as "age reported success". It does
-    # not: age writes output before authenticating the payload. Detecting
-    # tampering is the single most important thing a backup verifier does, and
-    # that spelling reported it as nothing to worry about.
+    # payload" — because it read file PRESENCE as "age reported success". It is
+    # not: a non-zero exit is a non-zero exit whatever the file looks like.
+    # Detecting tampering is the single most important thing a backup verifier
+    # does, and that spelling reported it as nothing to worry about.
+    #
+    # ⚠ The evidence for this verdict has since MOVED, though the verdict has
+    # not. It was "age left an output file"; age 1.3.2 stopped creating that
+    # file before the payload, so it is now "age's error names the PAYLOAD
+    # phase", with the file kept as a corroborating positive. The measurements,
+    # the upstream diff and the fail-safe argument live in
+    # `restore_verify.age_failure_phase` — one place, not restated here.
     "AGE-MISSING": 29,          # precondition: the tool is not installed
     "ARTIFACT-UNREADABLE": 30,  # the pipeline failed BEFORE decrypt was reached
     "DECRYPT-FAILED": 25,       # age wrote NOTHING: wrong key OR damaged header
@@ -781,6 +795,21 @@ def _rv():
 
 # 🔴 WHAT THE PROBE BELOW OBSERVES — RE-MEASURED, age v1.3.1, MANY SAMPLES.
 #
+# ⚠⚠ THE `PLAIN PRESENT` COLUMN BELOW IS AGE 1.3.1's, AND age 1.3.2 CHANGED IT.
+# Re-measured 2026-09-08: on 1.3.2 a PAYLOAD corruption or TRUNCATION inside the
+# first 64 KiB STREAM chunk leaves PLAIN **ABSENT**, not present-at-size-0 —
+# upstream moved the eager `out.Write(nil)` in `cmd/age/age.go` to after the
+# copy, so the file is created only once plaintext exists. The rows for a large
+# file corrupted past the first chunk, for the wrong key, for a damaged header
+# and for both rc=0 cases are UNCHANGED on both versions.
+#
+# The table is kept as written because consequence 1 below still follows from it
+# and because it records what was actually observed at the time. What it can no
+# longer support on its own is the ARTIFACT-CORRUPT verdict; that now rests on
+# `restore_verify.age_failure_phase`, which carries the cross-version table, the
+# upstream diff and the fail-safe argument. Read that before reasoning from the
+# numbers here.
+#
 # An earlier round wrote down "corrupt ciphertext -> rc=1, PLAIN absent" from a
 # SINGLE corrupted offset and built the classifier on it. That is false, and the
 # way it is false is the worst possible one: a TAMPERED artifact was reported as
@@ -808,15 +837,27 @@ def _rv():
 #     "corrupt payload" — both are PRESENT at size 0. So the rc==0 / rc!=0 split
 #     has to come from the module that knows, and it does:
 #     `restore_verify.DECRYPT_*` causes, published as values.
-#  2. Within a NON-ZERO age exit, file presence IS meaningful and is the only
-#     thing that separates a KEY fault from a DATA fault:
-#       * PLAIN ABSENT  -> age never wrote anything: the identity did not match
-#                          the recipients, OR the header is damaged. NOT
-#                          separable from outside, so neither is asserted.
+#  2. Within a NON-ZERO age exit, file presence separates a KEY fault from a
+#     DATA fault — but it is now HALF the signal, not the whole of it, and the
+#     asymmetry is the part to keep hold of:
 #       * PLAIN PRESENT -> age AUTHENTICATED THE HEADER, which requires the
 #                          identity to match, and then failed on a payload chunk
 #                          or ran out of input. The escrowed key WORKED; the
-#                          artifact is tampered, corrupt or truncated.
+#                          artifact is tampered, corrupt or truncated. 🔴 STILL
+#                          TRUE ON EVERY MEASURED VERSION — bytes on disk can
+#                          only have come from an authenticated chunk. A sound
+#                          POSITIVE.
+#       * PLAIN ABSENT  -> 🔴 NO LONGER MEANS WHAT THIS SAID. On 1.3.1 it meant
+#                          "age never got past the header". On 1.3.2 it ALSO
+#                          covers a payload corruption in the first 64 KiB
+#                          chunk, which is the common case for a small backup.
+#                          Absence is now evidence of NOTHING on its own.
+#     So the KEY-vs-DATA split is taken from `age_phase` — age's own failure
+#     phase, published as a value by `restore_verify.age_failure_phase` — with
+#     `plain_present` retained as the corroborating positive above. An
+#     UNRECOGNISED age message yields `unknown`, which lands on the
+#     "not separable from outside, so neither is asserted" verdict, exactly as
+#     PLAIN ABSENT used to.
 @contextlib.contextmanager
 def _decrypt_phase_probe(RV):
     """Observe HOW FAR restore-verify's decrypt step got. Yields a state dict.
@@ -834,7 +875,7 @@ def _decrypt_phase_probe(RV):
     `finally`.
     """
     state = {"reached": False, "returned": False, "plain_present": None,
-             "cause": None}
+             "cause": None, "age_phase": None}
     real = RV.decrypt
 
     def probe(cipher, plain, identity):
@@ -871,6 +912,12 @@ def _decrypt_phase_probe(RV):
             # owns it. `getattr` because a non-RestoreVerifyError has no cause;
             # None then means "no published cause", never a default one.
             state["cause"] = getattr(exc, "cause", None)
+            # WHICH half of age's decrypt failed — header or payload — also as
+            # a published VALUE, for the same reason and with the same `getattr`
+            # discipline. This is what replaces `plain_present` as the primary
+            # evidence for ARTIFACT-CORRUPT; see `restore_verify.
+            # age_failure_phase` for the upstream change that forced it.
+            state["age_phase"] = getattr(exc, "age_phase", None)
             raise
         state["returned"] = True
 
@@ -1438,7 +1485,8 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                                 f"diagnose the artifact.",
                                 detail=str(exc))
                         if (phase["cause"] == RV.DECRYPT_AGE_REFUSED
-                                and phase["plain_present"]):
+                                and (phase["age_phase"] == RV.AGE_PHASE_PAYLOAD
+                                     or phase["plain_present"])):
                             # 🔴 THE CAUSE IS PART OF THE CONDITION, not decoration.
                             # This branch makes the strongest claim in the file —
                             # "the key worked, the BACKUP is tampered" — and it was
@@ -1461,12 +1509,32 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                             # the one that stops the strongest claim in the file
                             # being made about it by default.
                             #
-                            # age exited NON-ZERO having already written output.
-                            # Measured across 8 offsets x 4 sizes plus 3
-                            # truncations: reaching the payload at all means age
-                            # authenticated the HEADER, which requires the
-                            # identity to match. So the key worked and the bytes
-                            # did not.
+                            # 🔴 TWO SIGNALS, OR'd, AND THE ORDER IS THE HISTORY.
+                            # Either one proves the same thing — that age got PAST
+                            # the header, which it cannot do unless the escrowed
+                            # identity matched a recipient — so the key worked and
+                            # the bytes did not.
+                            #
+                            #   * `age_phase == payload`: age's own error names a
+                            #     failure that lives in `internal/stream`, which
+                            #     `cmd/age` reaches only after `age.Decrypt`
+                            #     returned. This is now the PRIMARY signal.
+                            #   * `plain_present`: age wrote plaintext before
+                            #     failing. Still sound on every version — bytes on
+                            #     disk can only come from an authenticated chunk —
+                            #     but no longer SUFFICIENT on its own.
+                            #
+                            # The second one used to be the whole condition, on a
+                            # measurement (8 offsets x 4 sizes + 3 truncations,
+                            # age v1.3.1) that was correct when taken and that age
+                            # v1.3.2 invalidated by moving one line in
+                            # `cmd/age/age.go`. `restore_verify.age_failure_phase`
+                            # carries the diff, the cross-version table and the
+                            # fail-safe argument; the short version is that a
+                            # first-chunk corruption now writes no file at all, so
+                            # `plain_present` alone silently downgraded every
+                            # tampered small backup to DECRYPT-FAILED — a verdict
+                            # that sends the operator at the KEY.
                             raise EscrowError(
                                 "ARTIFACT-CORRUPT",
                                 f"🔴 {key} is TAMPERED, CORRUPT or TRUNCATED. age "
