@@ -305,46 +305,135 @@ DECRYPT_CAUSES = frozenset(
 # A DOWNGRADE — say so rather than let the next reader assume it is as solid as
 # the phase observation it replaces. The module docstring above argues against
 # exactly this shape, for good reasons that still apply. It is done anyway
-# because the alternative is losing the distinction entirely, and the three
-# strings are IDENTICAL on both measured versions:
+# because the alternative is losing the distinction entirely, and the strings are
+# IDENTICAL on both measured versions.
 #
-#   "failed to decrypt and authenticate payload chunk"  -> payload
-#   "no identity matched any of the recipients"         -> wrong key
-#   "failed to read header"                             -> damaged header
+# 🔴 THE FIRST VERSION OF THIS TABLE HAD THREE ENTRIES AND A COMMENT SAYING "on
+# both measured age versions every refusal classifies". AN ADVERSARIAL AUDIT
+# MEASURED THAT FALSE (2026-09-09, both versions, driving the REAL escrow-verify
+# path with really-damaged artifacts). The sweep that built the three-entry table
+# varied payload SIZE across seven values and mangling SHAPE across five, and
+# none of the five produced a header-MAC-only fault or a payload-stripped one. So
+# three ORDINARY corruption shapes fell through to `unrecognised` and reached the
+# consumer's "CANNOT SAY WHY" verdict — which told the operator age had probably
+# REWORDED, when the artifact was simply damaged in a shape nothing named:
 #
-# The mitigation is that an UNRECOGNISED stderr is its own published value, so a
-# future age that rewords does NOT silently fall into one of the three answers —
-# it produces a refusal that says it could not classify. Fail-safe, not
-# fail-quiet.
+#     header MAC bit flipped     -> "bad header MAC"
+#     payload stripped entirely  -> "failed to read nonce: EOF"
+#     payload truncated to 8 B   -> "unexpected EOF"
+#
+# It failed SAFE — no rotation advice was given — but a verdict that says it
+# cannot classify an ordinary truncation is a verdict nobody can act on.
+#
+# 🔴 THE SPLIT BETWEEN "PRE-AUTH" AND "POST-AUTH" IS MEASURED, NOT REASONED. age
+# reads and authenticates the whole header, then reads a 16-byte nonce, then the
+# payload chunks. Truncating INSIDE the header and truncating AFTER it produce
+# disjoint messages — every in-header truncation carries `failed to read header`,
+# every post-header one carries `failed to read nonce` or a bare `unexpected EOF`
+# (measured at 8 offsets spanning both sides of the boundary, both versions):
+#
+#   "failed to decrypt and authenticate payload chunk"  -> payload, post-auth
+#   "no identity matched any of the recipients"         -> pre-auth
+#   "failed to read header"                             -> pre-auth
+#   "bad header MAC"                                    -> pre-auth
+#   "failed to parse x25519 recipient"                  -> pre-auth
+#   "failed to read nonce"                              -> TRUNCATED, post-auth
+#   "unexpected eof"                                    -> TRUNCATED, post-auth
+#   "last chunk is empty"                               -> TRUNCATED, post-auth
+#
+# A POST-AUTH refusal means age got past the header, which requires the identity
+# to match — so `AGE_REFUSED_TRUNCATED` licenses the same strong verdict as
+# `AGE_REFUSED_PAYLOAD` ("the key worked, the bytes did not"), and that is why it
+# is a separate value rather than folded into it: what age observed is a
+# truncation, not a failed chunk authentication, and a verdict should not assert
+# the one when it saw the other.
+#
+# The mitigation is unchanged and is the reason this can be widened safely: an
+# UNRECOGNISED stderr is still its own published value, so a future age that
+# rewords does NOT silently fall into one of the answers — it produces a refusal
+# that says it could not classify. Fail-safe, not fail-quiet.
 AGE_REFUSED_PAYLOAD = "payload-auth-failed"      # header OK, payload bad
-AGE_REFUSED_NO_IDENTITY = "no-identity-matched"  # the identity does not match
+# 🔴 NOT "the identity is wrong" — MEASURED 2026-09-09, ONE FLIPPED BIT in the
+# recipient stanza produces this message on both versions, and on v1.3.2 a bit in
+# the wrapped-file-key body does too. It is "age could not open the header WITH
+# THIS IDENTITY", which a damaged header causes just as well as a wrong key. The
+# consumer's verdict already says both and refuses to pick; this comment used to
+# say `-> wrong key` and was the one place that overclaimed.
+AGE_REFUSED_NO_IDENTITY = "no-identity-matched"
 AGE_REFUSED_HEADER = "header-unreadable"         # the header itself is damaged
+AGE_REFUSED_TRUNCATED = "truncated-after-header"  # header OK, bytes ran out
 AGE_REFUSED_UNRECOGNISED = "unrecognised"        # age said something new
 
 AGE_REFUSALS = frozenset({
     AGE_REFUSED_PAYLOAD, AGE_REFUSED_NO_IDENTITY, AGE_REFUSED_HEADER,
-    AGE_REFUSED_UNRECOGNISED})
+    AGE_REFUSED_TRUNCATED, AGE_REFUSED_UNRECOGNISED})
+
+# The published refusals that mean AGE GOT PAST THE HEADER — i.e. it
+# authenticated the header, which requires the identity to match. Exported as a
+# SET rather than left for the consumer to spell, because `escrow-verify.py`
+# makes the strongest claim in the subsystem on exactly this predicate and a
+# second copy of it is a second place for it to be wrong.
+AGE_REFUSALS_POST_AUTH = frozenset({AGE_REFUSED_PAYLOAD, AGE_REFUSED_TRUNCATED})
+
+# The mirror: age NAMED a refusal and it happened BEFORE the header opened, so
+# exactly two causes remain (wrong identity, damaged header) and neither is
+# separable from here. Published for the same reason as the set above — the
+# consumer branches on it — and stated as its own set rather than as "everything
+# that is not post-auth", because `AGE_REFUSED_UNRECOGNISED` is in neither: age
+# said something nothing has measured, which is a third state and must not be
+# absorbed into either claim by an else.
+AGE_REFUSALS_PRE_AUTH = frozenset({AGE_REFUSED_NO_IDENTITY, AGE_REFUSED_HEADER})
 
 # 🔴 SUBSTRINGS, DELIBERATELY NOT ANCHORED REGEXES. age prefixes its stderr with
 # the program name and appends a "report unexpected errors" URL line, and both
 # have moved between releases; matching the sentence in the middle survives that
 # while an anchored match would not. Each is the distinctive clause, with no
 # punctuation that could be re-styled.
+#
+# 🔴 ORDER IS LOAD-BEARING HERE, AND IT WAS NOT BEFORE. age's in-header EOF
+# message NESTS one clause inside another — `failed to read header: parsing age
+# header: unexpected EOF reading intro` (v1.3.2) carries BOTH a pre-auth marker
+# and a post-auth one, so a first-match scan can be made to answer either.
+#
+# 🔴 THE RULE IS THEREFORE TOTAL, NOT SPECIFIC TO THE PAIR THAT OVERLAPS TODAY:
+# EVERY PRE-AUTH MARKER COMES BEFORE EVERY POST-AUTH ONE. A message naming any
+# pre-auth cause can then never be scored post-auth, whatever else it also says
+# — and post-auth is the answer that lets `escrow-verify.py` assert the escrowed
+# identity opened the header. The narrower version of this rule (order only the
+# EOF family after the header markers) was written first and was WRONG in the
+# same way the bug this file is being repaired for was wrong: it fixed the
+# overlap somebody had seen rather than the class.
+# `test_a_message_carrying_BOTH_a_header_and_an_EOF_marker_classifies_as_HEADER`
+# pins the whole cross-product; do not reorder this tuple across the divider.
 _AGE_REFUSAL_MARKERS = (
-    ("failed to decrypt and authenticate payload chunk", AGE_REFUSED_PAYLOAD),
+    # -- PRE-AUTH: age never opened the header ------------------------------- #
     ("no identity matched any of the recipients", AGE_REFUSED_NO_IDENTITY),
     ("failed to read header", AGE_REFUSED_HEADER),
+    ("bad header mac", AGE_REFUSED_HEADER),
+    ("failed to parse x25519 recipient", AGE_REFUSED_HEADER),
+    # -- POST-AUTH: age opened the header, then the bytes failed it ---------- #
+    ("failed to decrypt and authenticate payload chunk", AGE_REFUSED_PAYLOAD),
+    ("failed to read nonce", AGE_REFUSED_TRUNCATED),
+    ("last chunk is empty", AGE_REFUSED_TRUNCATED),
+    ("unexpected eof", AGE_REFUSED_TRUNCATED),
 )
 
 
 def classify_age_refusal(stderr: str) -> str:
-    """Which of age's three refusals this was — or that it was none of them.
+    """Which of age's refusals this was — or that it was none of them.
 
     🔴 NEVER GUESSES. An unmatched stderr returns `AGE_REFUSED_UNRECOGNISED`,
     which the consumer must handle as "cannot classify", not as a default. That
-    is the whole reason this returns a fourth value instead of `None` or the
-    most likely of the three: the caller's strongest claim — "your backup is
+    is the whole reason this returns a distinct value instead of `None` or the
+    most likely of the others: the caller's strongest claim — "your backup is
     tampered and your key is fine" — must never be reached by falling through.
+
+    🔴 THE COMPARISON IS CASE-FOLDED AND THE MARKERS ARE SPELLED LOWER-CASE. Both
+    halves are load-bearing together and neither is guarded by the other: an
+    audit's mutation battery removed this `.lower()` and the whole suite stayed
+    green, because every message age emits today is already lower-case in the
+    matched clause. `test_classify_age_refusal_is_CASE_FOLDED` is what makes the
+    fold non-vacuous.
     """
     low = (stderr or "").lower()
     for marker, kind in _AGE_REFUSAL_MARKERS:

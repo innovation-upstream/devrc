@@ -4265,16 +4265,29 @@ def test_restore_print_plan_is_SILENT_for_the_DEFAULT_identity(
 # mean "age authenticated the header", stopped being available on every artifact
 # this subsystem actually produces.
 #
-# The distinction SURVIVED, through age's own three refusal messages. That is a
-# WEAKER footing than the phase observation it replaces — it is a substring match
-# on another tool's prose, which this module's own docstring argues against — so
-# the classifier is validated against the REAL binary here rather than against
+# The distinction SURVIVED, through age's own refusal messages. That is a WEAKER
+# footing than the phase observation it replaces — it is a substring match on
+# another tool's prose, which this module's own docstring argues against — so the
+# classifier is validated against the REAL binary here rather than against
 # strings someone typed. If age rewords, THIS goes red, and it goes red saying
-# which of the three it can no longer see.
+# which refusal it can no longer see.
+#
+# 🔴 WIDENED 2026-09-09 BY AN ADVERSARIAL AUDIT OF THAT CHANGE. The first version
+# provoked THREE refusals and the code claimed every refusal classified. The
+# audit drove really-damaged artifacts through the real verifier and found three
+# more — a flipped header MAC, a payload stripped to nothing, and a payload
+# truncated to 8 bytes — all of which fell through to `unrecognised` and reached
+# the consumer's "CANNOT SAY WHY" verdict on BOTH versions.
+#
+# 🔴 THE FIXTURE SET IS THE GUARD. Every one of those shapes is provoked here
+# from the REAL binary; three of them were absent because the original sweep
+# varied payload SIZE and not mangling SHAPE. Adding a marker without adding the
+# fixture that provokes it would be pinning a string nobody watched age emit.
 # --------------------------------------------------------------------------- #
 def _age_refusal_stderr(tmp_path, kind: str) -> str:
-    """Provoke one of age's three refusals with the REAL binary and return its
-    stderr. Built, never spelled — a hardcoded fixture cannot notice a reword.
+    """Provoke one of age's refusals with the REAL binary and return its stderr.
+
+    Built, never spelled — a hardcoded fixture cannot notice a reword.
     """
     ident = tmp_path / f"id-{kind}.key"
     r = subprocess.run([AGE_KEYGEN, "-o", str(ident)], capture_output=True,
@@ -4306,6 +4319,27 @@ def _age_refusal_stderr(tmp_path, kind: str) -> str:
         before = blob[40]
         blob[40] ^= 0xFF
         assert blob[40] != before
+    elif kind == "header-mac":
+        # 🔴 A DIFFERENT FAULT FROM `header` ABOVE, AND IT WAS THE MISSING ONE.
+        # Damaging the intro makes age fail to PARSE the header; damaging only
+        # the trailing `--- <mac>` line leaves a well-formed header whose MAC
+        # does not verify, and age says something else entirely for it.
+        lines = bytes(blob).split(b"\n")
+        i = next(n for n, ln in enumerate(lines) if ln.startswith(b"--- "))
+        mac = bytearray(lines[i])
+        before = mac[8]
+        mac[8] ^= 0x01
+        assert mac[8] != before
+        lines[i] = bytes(mac)
+        blob = bytearray(b"\n".join(lines))
+    elif kind == "truncated-no-payload":
+        # Everything after the header removed: age opens the header, then has no
+        # nonce to read. The header authenticated, so this is an ARTIFACT fault.
+        assert len(blob) > hdr_end
+        blob = blob[:hdr_end]
+    elif kind == "truncated-mid-nonce":
+        assert len(blob) > hdr_end + 8
+        blob = blob[:hdr_end + 8]
     elif kind == "no-identity":
         other = tmp_path / f"other-{kind}.key"
         r = subprocess.run([AGE_KEYGEN, "-o", str(other)], capture_output=True,
@@ -4331,15 +4365,21 @@ def _age_refusal_stderr(tmp_path, kind: str) -> str:
     ("payload", "AGE_REFUSED_PAYLOAD"),
     ("no-identity", "AGE_REFUSED_NO_IDENTITY"),
     ("header", "AGE_REFUSED_HEADER"),
+    # 🔴 THE THREE THE 2026-09-08 SWEEP MISSED. Each of these produced
+    # `unrecognised` before 2026-09-09 and reached the consumer's "CANNOT SAY
+    # WHY" verdict, which told the operator age had probably reworded.
+    ("header-mac", "AGE_REFUSED_HEADER"),
+    ("truncated-no-payload", "AGE_REFUSED_TRUNCATED"),
+    ("truncated-mid-nonce", "AGE_REFUSED_TRUNCATED"),
 ])
-def test_classify_age_refusal_reads_the_REAL_binarys_three_refusals(
+def test_classify_age_refusal_reads_the_REAL_binarys_refusals(
         tmp_path, kind, expected_attr):
     """🔴 POSITIVE CONTROL, against the installed age — not against a string.
 
     `escrow-verify.py` decides whether to tell an operator their BACKUP is
     tampered or their KEY might be wrong by reading this function's answer. If
-    age rewords any of the three, this is what goes red, naming the one that
-    moved, instead of the verdict quietly becoming wrong.
+    age rewords any of these, this is what goes red, naming the one that moved,
+    instead of the verdict quietly becoming wrong.
     """
     err = _age_refusal_stderr(tmp_path, kind)
     got = RV.classify_age_refusal(err)
@@ -4352,9 +4392,150 @@ def test_classify_age_refusal_reads_the_REAL_binarys_three_refusals(
         f"downstream of this answer.")
 
 
+@pytest.mark.parametrize("kind", ["payload", "truncated-no-payload",
+                                  "truncated-mid-nonce"])
+def test_the_POST_AUTH_set_is_exactly_what_licenses_the_STRONGEST_verdict(
+        tmp_path, kind):
+    """🔴 THE CLAIM `ARTIFACT-CORRUPT` MAKES, PINNED AT ITS SOURCE.
+
+    `escrow-verify.py` says "age authenticated the header with the ESCROWED key
+    — which a non-matching identity cannot do" on the strength of this set. Each
+    member is provoked here from a REAL artifact whose header is INTACT and
+    whose identity is the RIGHT one, so membership is earned by observation
+    rather than by someone's reading of age's source.
+    """
+    err = _age_refusal_stderr(tmp_path, kind)
+    assert RV.classify_age_refusal(err) in RV.AGE_REFUSALS_POST_AUTH, err
+
+
+@pytest.mark.parametrize("kind", ["no-identity", "header", "header-mac"])
+def test_no_PRE_AUTH_refusal_is_EVER_scored_as_post_auth(tmp_path, kind):
+    """🔴 THE MIRROR, AND THE ONE THAT MATTERS MOST. A pre-auth refusal scored
+    post-auth would assert "THE ESCROW IS FINE; THE BACKUP IS NOT" about a run
+    that never proved the identity opens anything — a confident wrong answer in
+    the direction that stops an operator investigating their key.
+    """
+    err = _age_refusal_stderr(tmp_path, kind)
+    got = RV.classify_age_refusal(err)
+    assert got not in RV.AGE_REFUSALS_POST_AUTH, (
+        f"age's {kind} refusal now scores as post-auth ({got!r}), which lets "
+        f"escrow-verify claim the header authenticated. Its stderr was:\n{err}")
+
+
+def test_a_message_carrying_BOTH_a_header_and_an_EOF_marker_classifies_as_HEADER():
+    """🔴 THE ORDER OF `_AGE_REFUSAL_MARKERS` IS LOAD-BEARING, AND THIS IS WHY.
+
+    age v1.3.2 NESTS the post-auth clause inside the pre-auth one — `failed to
+    read header: parsing age header: unexpected EOF reading intro` carries both.
+    Matched in the wrong order it would score as a post-header truncation and
+    license the strongest verdict in the subsystem for a header that never
+    opened.
+
+    🔴 THE OVERLAP IS BUILT FROM THE SHIPPED MARKERS, not spelled and not taken
+    from a live run, and both halves of that are deliberate. Spelling it would
+    let the table drift away from the fixture. Taking it from the binary would
+    make this test's SUBJECT version-dependent: MEASURED 2026-09-09, only v1.3.2
+    nests the two clauses — v1.3.1's in-header truncations say `failed to parse
+    header: failed to read line: EOF` and `parsing age header: file is empty`,
+    which carry no post-auth marker at all. A guard that can only fire on one of
+    two installed binaries is not a guard, and this property is about OUR tuple's
+    order, which is version-free. `test_the_real_binarys_in_header_truncations_
+    are_NEVER_post_auth` is the live half.
+    """
+    pre_markers = [(m, k) for m, k in RV._AGE_REFUSAL_MARKERS
+                   if k in RV.AGE_REFUSALS_PRE_AUTH]
+    post_markers = [m for m, k in RV._AGE_REFUSAL_MARKERS
+                    if k in RV.AGE_REFUSALS_POST_AUTH]
+    assert pre_markers and post_markers, "nothing to overlap; table is empty"
+    # 🔴 THE WHOLE CROSS-PRODUCT, not just the pair age happens to nest today.
+    # The first draft of this test paired only the HEADER markers with the EOF
+    # family — the overlap that had actually been observed — and a control run
+    # against the other installed age caught it: the payload marker sat ahead of
+    # the header markers, so a synthetic `failed to read header: … payload
+    # chunk …` scored post-auth. Nothing in age produces that message today.
+    # Pinning only the seen overlap is the same mistake, one level down, as the
+    # sweep that produced the three-entry table.
+    for pre, pre_kind in pre_markers:
+        for post in post_markers:
+            nested = f"age: error: {pre}: parsing age header: {post} reading intro"
+            got = RV.classify_age_refusal(nested)
+            assert got == pre_kind, (
+                f"{nested!r} classified as {got!r}, not {pre_kind!r}. EVERY "
+                f"pre-auth marker must be matched BEFORE EVERY post-auth one; "
+                f"do not reorder `_AGE_REFUSAL_MARKERS` across the divider.")
+            assert got not in RV.AGE_REFUSALS_POST_AUTH
+
+
+def test_the_real_binarys_in_header_truncations_are_NEVER_post_auth(tmp_path):
+    """🔴 THE LIVE HALF OF THE ORDERING PROPERTY, and the one that would catch a
+    reword the built fixture above cannot see.
+
+    Every truncation that lands INSIDE the header must classify as something
+    other than post-auth, whatever age chooses to say about it — because a
+    post-auth answer would let `escrow-verify.py` assert that the escrowed
+    identity opened a header it never opened. This walks real truncation offsets
+    across the header and requires that of each.
+
+    ⚠ It does NOT require the answer to be `header-unreadable`: age is entitled
+    to describe an unopenable header in a way nothing has measured, and
+    `unrecognised` is the correct, safe answer to that. What is not negotiable
+    is that it never comes back post-auth.
+    """
+    ident = tmp_path / "id-inhdr.key"
+    r = subprocess.run([AGE_KEYGEN, "-o", str(ident)], capture_output=True,
+                       text=True)
+    assert r.returncode == 0, r.stderr
+    pub = [ln.split(": ", 1)[1].strip() for ln in
+           ident.read_text(encoding="utf-8").splitlines()
+           if ln.startswith("# public key:")][0]
+    plain = tmp_path / "plain-inhdr"
+    plain.write_bytes(os.urandom(4096))
+    cipher = tmp_path / "c-inhdr.age"
+    r = subprocess.run([AGE, "--encrypt", "--recipient", pub, "--output",
+                        str(cipher), str(plain)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    blob = cipher.read_bytes()
+    hdr_end = blob.index(b"\n", blob.index(b"--- ")) + 1
+
+    checked = 0
+    for keep in (10, 30, 60, hdr_end - 40, hdr_end - 5, hdr_end - 1):
+        if keep <= 0 or keep >= hdr_end:
+            continue
+        bad = tmp_path / "bad-inhdr.age"
+        bad.write_bytes(blob[:keep])
+        out = tmp_path / "out-inhdr"
+        out.unlink(missing_ok=True)
+        r = subprocess.run([AGE, "--decrypt", "--identity", str(ident),
+                            "--output", str(out), str(bad)],
+                           capture_output=True, text=True)
+        assert r.returncode != 0, keep
+        got = RV.classify_age_refusal(r.stderr)
+        assert got not in RV.AGE_REFUSALS_POST_AUTH, (
+            f"a ciphertext truncated to {keep} bytes — INSIDE the header, which "
+            f"age therefore never authenticated — classified as {got!r}, a "
+            f"post-auth refusal. escrow-verify would report ARTIFACT-CORRUPT "
+            f"and tell the operator their key is fine. stderr was:\n{r.stderr}")
+        checked += 1
+    # 🔴 POSITIVE CONTROL: an empty loop asserts nothing, and every `continue`
+    # above is a way to reach one.
+    assert checked >= 4, f"only {checked} in-header offsets were exercised"
+
+
+def test_classify_age_refusal_is_CASE_FOLDED():
+    """🔴 THE `.lower()` IS UNGUARDED WITHOUT THIS — an audit's mutation battery
+    deleted it and the whole suite stayed green, because every clause age emits
+    today is already lower-case. A guard nothing can break is not a guard.
+
+    Built from the shipped markers, so it cannot drift from them.
+    """
+    for marker, kind in RV._AGE_REFUSAL_MARKERS:
+        shouty = f"age: ERROR: {marker.upper()}"
+        assert RV.classify_age_refusal(shouty) == kind, shouty
+
+
 def test_classify_age_refusal_NEVER_guesses_on_something_it_has_not_seen():
-    """🔴 NEGATIVE CONTROL. An instrument that can only ever return one of three
-    answers is indistinguishable from one wired to nothing.
+    """🔴 NEGATIVE CONTROL. An instrument that can only ever return one of its
+    known answers is indistinguishable from one wired to nothing.
 
     The fall-through must be its own published value, because the consumer's
     STRONGEST claim — "your backup is tampered and your key is fine" — must
@@ -4364,21 +4545,58 @@ def test_classify_age_refusal_NEVER_guesses_on_something_it_has_not_seen():
                  "totally unrelated output", "failed to decrypt"):
         assert RV.classify_age_refusal(text) == RV.AGE_REFUSED_UNRECOGNISED, text
     # And the published set is closed, so a consumer's branch cannot be
-    # bypassed by inventing a fourth value at a raise site.
+    # bypassed by inventing another value at a raise site.
     with pytest.raises(KeyError):
         RV.RestoreVerifyError("x", age_refusal="invented")
 
 
-def test_the_three_markers_are_all_LOAD_BEARING_and_none_is_a_prefix_of_another():
+def test_the_markers_are_all_LOAD_BEARING_and_none_is_a_prefix_of_another():
     """A marker that another marker contains would make the answer depend on the
-    order of a tuple, which is not a property anyone should have to know."""
+    order of a tuple.
+
+    🔴 THAT ORDER IS NOW A REAL DEPENDENCE, BUT NOT VIA THE MARKERS — it comes
+    from age NESTING one clause inside another in a single MESSAGE, which no
+    marker-vs-marker check can see. This test keeps the markers themselves
+    mutually non-containing so the tuple's order is the ONLY ordering fact
+    anyone has to know, and
+    `test_a_message_carrying_BOTH_a_header_and_an_EOF_marker_classifies_as_HEADER`
+    pins that one against the real binary.
+
+    🔴 EVERY MARKER IS LOWER-CASE, and that is not style: `classify_age_refusal`
+    case-folds its input, so a marker carrying a capital could never match. A
+    shouty marker would be a dead entry that reads as coverage.
+    """
     markers = [m for m, _ in RV._AGE_REFUSAL_MARKERS]
-    assert len(markers) == 3
-    assert len(set(markers)) == 3
+    assert len(markers) >= 3
+    assert len(set(markers)) == len(markers)
     for a in markers:
         for b in markers:
             if a is not b:
                 assert a not in b, (a, b)
-    # Every published refusal except the fall-through has exactly one marker.
+        assert a == a.lower(), a
+    # Every published refusal except the fall-through has at least one marker,
+    # and no marker names a refusal the closed set does not publish.
     kinds = {k for _, k in RV._AGE_REFUSAL_MARKERS}
     assert kinds == RV.AGE_REFUSALS - {RV.AGE_REFUSED_UNRECOGNISED}
+    # The post-auth set is a strict subset of the published refusals and never
+    # includes the fall-through — the consumer's strongest claim must not be
+    # reachable from "age said something new".
+    assert RV.AGE_REFUSALS_POST_AUTH < RV.AGE_REFUSALS
+    assert RV.AGE_REFUSED_UNRECOGNISED not in RV.AGE_REFUSALS_POST_AUTH
+    assert RV.AGE_REFUSED_NO_IDENTITY not in RV.AGE_REFUSALS_POST_AUTH
+    assert RV.AGE_REFUSED_HEADER not in RV.AGE_REFUSALS_POST_AUTH
+    # 🔴 THE ORDER ITSELF, as structure rather than as behaviour: every pre-auth
+    # marker sits before every post-auth one in the tuple. The behavioural test
+    # above can only see the overlaps someone thought to build; this sees the
+    # property directly, so a new marker inserted on the wrong side of the
+    # divider goes red even if nothing yet produces a message carrying both.
+    kinds_in_order = [k for _, k in RV._AGE_REFUSAL_MARKERS]
+    last_pre = max(i for i, k in enumerate(kinds_in_order)
+                   if k in RV.AGE_REFUSALS_PRE_AUTH)
+    first_post = min(i for i, k in enumerate(kinds_in_order)
+                     if k in RV.AGE_REFUSALS_POST_AUTH)
+    assert last_pre < first_post, (
+        f"a post-auth marker sits at index {first_post}, before the last "
+        f"pre-auth one at {last_pre}. A message naming a pre-auth cause could "
+        f"then be scored post-auth, which is what lets escrow-verify claim the "
+        f"escrowed key opened the header: {kinds_in_order}")

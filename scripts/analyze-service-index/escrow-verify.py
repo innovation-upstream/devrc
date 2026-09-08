@@ -391,12 +391,20 @@ EXIT_CODES: dict[str, int] = {
     # `restore_verify.classify_age_refusal` does not know — and that belongs in
     # the sentence an operator reads, not in a number a timer branches on.
     #
-    # ⚠ The second message is DEFENSIVE, NOT OBSERVED — the same status as
-    # `PUBKEY-DERIVATION-EMPTY` below and labelled for the same reason. On both
-    # measured age versions every refusal classifies. It exists because the
-    # discriminator now rests on an upstream tool's PROSE (see `AGE_REFUSED_*`
-    # in restore-verify.py): if age rewords, this admits it instead of picking
-    # whichever of the three answers the fall-through happened to reach.
+    # ⚠ THE SECOND MESSAGE IS REACHABLE, AND THIS COMMENT USED TO SAY IT WAS NOT.
+    # It read "DEFENSIVE, NOT OBSERVED … on both measured age versions every
+    # refusal classifies", and an adversarial audit measured that FALSE
+    # (2026-09-09): a flipped header-MAC bit, a payload stripped to nothing and a
+    # payload truncated to 8 bytes each produced a refusal the table did not
+    # name, on BOTH versions, so three ordinary corruption shapes landed here
+    # while the sentence told the operator age had probably reworded. Those three
+    # are now classified (see `_AGE_REFUSAL_MARKERS` in restore-verify.py). What
+    # survives is the genuine fall-through: a refusal nothing in that table
+    # matches. It exists because the discriminator rests on an upstream tool's
+    # PROSE — if age rewords, this admits it instead of picking whichever answer
+    # the fall-through happened to reach. Do not re-label it "not observed": the
+    # honest claim is that no CURRENTLY KNOWN fault reaches it, which is a
+    # statement about a sweep, not about age.
     "DECRYPT-FAILED": 25,
     # 🔴 RAISED BEFORE ANY `bw` CALL — see `preflight_decrypt_imports`. Its own
     # code because the remedy is unlike every other one here: nothing is wrong
@@ -845,7 +853,7 @@ def _rv():
 #                          presence is SUFFICIENT evidence, it just stopped
 #                          being NECESSARY.
 #     So the primary discriminator moved to `restore_verify.classify_age_refusal`
-#     — age's own three refusal messages, which are byte-identical on v1.3.1 and
+#     — age's own refusal messages, which are byte-identical on v1.3.1 and
 #     v1.3.2. Read the `AGE_REFUSED_*` block there before touching this: it says
 #     plainly that substring-matching another tool's prose is WEAKER than the
 #     phase observation it replaces, and why it was taken anyway.
@@ -1494,10 +1502,21 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                         #     on v1.3.1 for every tamper, and on v1.3.2 only
                         #     once a whole 64 KiB chunk has gone out. Still
                         #     SUFFICIENT; no longer NECESSARY.
-                        #   * `age_refusal == payload-auth-failed` — age itself
-                        #     saying it got to the payload. Byte-identical on
-                        #     v1.3.1 and v1.3.2, and the only signal that
-                        #     survives the lazy-create change.
+                        #   * a POST-AUTH refusal — age itself saying it got
+                        #     past the header, either by failing a payload chunk
+                        #     or by running out of bytes after opening it.
+                        #     Byte-identical on v1.3.1 and v1.3.2, and the only
+                        #     signal that survives the lazy-create change.
+                        # 🔴 THE SECOND ARM TESTS A SET, NOT ONE VALUE, AND THE
+                        # SET LIVES IN restore-verify. It was `== payload-auth-
+                        # failed` alone, and an audit measured what that missed:
+                        # a payload stripped entirely, or truncated to 8 bytes,
+                        # makes age say "failed to read nonce" / "unexpected
+                        # EOF" — post-header faults, licensing exactly this
+                        # verdict, that fell through to "cannot say why".
+                        # `AGE_REFUSALS_POST_AUTH` is imported rather than
+                        # spelled so this predicate cannot drift from the table
+                        # that decides what post-auth means.
                         # An UNRECOGNISED refusal reaches NEITHER of the two
                         # strong verdicts below — it gets DECRYPT-FAILED's
                         # SECOND message, which names all three open causes.
@@ -1505,7 +1524,7 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                             phase["cause"] == RV.DECRYPT_AGE_REFUSED
                             and (bool(phase["plain_present"])
                                  or phase["age_refusal"]
-                                 == RV.AGE_REFUSED_PAYLOAD))
+                                 in RV.AGE_REFUSALS_POST_AUTH))
                         if _corrupt:
                             # 🔴 THE CAUSE IS PART OF THE CONDITION, not decoration.
                             # This branch makes the strongest claim in the file —
@@ -1529,29 +1548,37 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                             # the one that stops the strongest claim in the file
                             # being made about it by default.
                             #
-                            # age exited NON-ZERO after reaching the PAYLOAD —
+                            # age exited NON-ZERO after getting PAST THE HEADER —
                             # witnessed either by output it had already flushed
-                            # or by its own "failed to decrypt and authenticate
-                            # payload chunk". Reaching the payload at all means
-                            # age authenticated the HEADER, which requires the
-                            # identity to match. So the key worked and the bytes
-                            # did not.
+                            # or by its own message ("failed to decrypt and
+                            # authenticate payload chunk", or one of the
+                            # truncation refusals age only emits once the header
+                            # is open). Getting past the header at all means age
+                            # authenticated it, which requires the identity to
+                            # match. So the key worked and the bytes did not.
                             #
                             # 🔴 THE SENTENCE BELOW LOST THE WORDS "began
                             # writing plaintext", and that is a CORRECTION, not
                             # a reword: on age v1.3.2 a tampered artifact under
                             # 64 KiB writes NO plaintext, so the old wording
                             # asserted an act this branch can no longer observe.
-                            # What it CAN still assert — the header
-                            # authenticated with the escrowed key — is what it
-                            # now says, and nothing more.
+                            # 🔴 AND IT LOST "then FAILED on the payload" FOR THE
+                            # SAME REASON, 2026-09-09: the branch now also fires
+                            # on a TRUNCATED artifact, where age never reached a
+                            # payload chunk — it ran out of bytes reading the
+                            # nonce. Asserting the payload there would be the
+                            # identical mistake one version later. What it CAN
+                            # still assert on every arm — the header
+                            # authenticated with the escrowed key, and the run
+                            # failed after that — is what it now says.
                             raise EscrowError(
                                 "ARTIFACT-CORRUPT",
                                 f"🔴 {key} is TAMPERED, CORRUPT or TRUNCATED. age "
                                 f"authenticated the header with the ESCROWED key "
                                 f"— which a non-matching identity cannot do — and "
-                                f"then FAILED on the payload. THE ESCROW IS FINE; "
-                                f"THE BACKUP IS NOT. "
+                                f"then FAILED PAST IT: a payload chunk that would "
+                                f"not authenticate, or an artifact that ran out of "
+                                f"bytes. THE ESCROW IS FINE; THE BACKUP IS NOT. "
                                 f"This is the finding a backup verifier exists to "
                                 f"make: treat the artifact as unusable, check the "
                                 f"other retained objects for this scope, and do "
@@ -1564,8 +1591,14 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                         # SAID which of the two it was, and an unrecognised
                         # refusal falls to the second DECRYPT-FAILED message
                         # below instead of borrowing this one's claim.
-                        if phase["age_refusal"] in (RV.AGE_REFUSED_NO_IDENTITY,
-                                                    RV.AGE_REFUSED_HEADER):
+                        # The set is IMPORTED, not spelled — the same reason as
+                        # `AGE_REFUSALS_POST_AUTH` above. A refusal published in
+                        # restore-verify but named in neither set lands in the
+                        # "CANNOT SAY WHY" message below, which is the safe
+                        # place for it, and `test_the_STRONG_verdict_fires_on_
+                        # EVERY_post_auth_refusal_and_NO_other` walks both sets
+                        # so a new one cannot go quietly unhandled.
+                        if phase["age_refusal"] in RV.AGE_REFUSALS_PRE_AUTH:
                             raise EscrowError(
                                 "DECRYPT-FAILED",
                                 f"age REFUSED {key} before reaching the payload at "
@@ -1585,7 +1618,7 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                             "DECRYPT-FAILED",
                             f"age REFUSED {key} and this verifier CANNOT SAY WHY. "
                             f"age exited non-zero without leaving plaintext, and "
-                            f"its message matched none of the three refusals this "
+                            f"its message matched none of the refusals this "
                             f"tool knows how to read. THREE THINGS ARE NOW EQUALLY "
                             f"CONSISTENT with what was seen and NONE is asserted: "
                             f"the escrowed identity does not match, the artifact's "

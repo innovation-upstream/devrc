@@ -1346,10 +1346,38 @@ def _corrupt_payload(blob: bytes, offset: int = 400) -> bytes:
     return bytes(b)
 
 
+def _age_header_end(blob: bytes) -> int:
+    """One past the newline that closes age's `--- <mac>` header line."""
+    return blob.index(b"\n", blob.index(b"--- ")) + 1
+
+
+def _strip_payload(blob: bytes) -> bytes:
+    """Everything after the header removed. age opens the header, then has no
+    nonce left to read — a fault in the ARTIFACT, after the key has worked."""
+    end = _age_header_end(blob)
+    assert len(blob) > end, "fixture has no payload to strip"
+    return blob[:end]
+
+
+def _truncate_mid_nonce(blob: bytes) -> bytes:
+    end = _age_header_end(blob)
+    assert len(blob) > end + 8
+    return blob[:end + 8]
+
+
 @pytest.mark.parametrize("mangle,name", [
     (lambda blob: _corrupt_payload(blob, 400), "payload byte flipped"),
     (lambda blob: _corrupt_payload(blob, 300), "payload byte flipped, offset 300"),
     (lambda blob: blob[:-30], "ciphertext truncated"),
+    # 🔴 THE TWO AN ADVERSARIAL AUDIT FOUND MISCLASSIFIED (2026-09-09). Both are
+    # ordinary truncations, both leave the header INTACT and the identity
+    # RIGHT, and both used to reach DECRYPT-FAILED's "CANNOT SAY WHY" — a
+    # verdict that names a wrong key among its three open causes. The tail
+    # truncation above did NOT catch them: it removes 30 bytes from inside a
+    # payload chunk, which age reports as a chunk-authentication failure. These
+    # cut BEFORE any chunk, where age says something else entirely.
+    (_strip_payload, "payload stripped entirely"),
+    (_truncate_mid_nonce, "truncated 8 bytes into the nonce"),
 ])
 def test_a_TAMPERED_or_TRUNCATED_artifact_is_ARTIFACT_CORRUPT_not_EMPTY(
         escrow_world, tmp_path, mangle, name):
@@ -1429,6 +1457,81 @@ def test_a_TAMPERED_payload_is_ARTIFACT_CORRUPT_even_when_age_WROTE_NOTHING(
     assert ei.value.token == "ARTIFACT-CORRUPT"
     assert ei.value.exit_code == 33
     assert ei.value.exit_code != EV.EXIT_CODES["DECRYPT-FAILED"]
+
+
+def test_a_TRUNCATED_artifact_is_ARTIFACT_CORRUPT_even_when_age_WROTE_NOTHING(
+        escrow_world, monkeypatch):
+    """🔴 THE SECOND POST-AUTH REFUSAL, FORCED IN ISOLATION (added 2026-09-09).
+
+    An adversarial audit measured that the OR's second arm was `== payload-auth-
+    failed` alone, so a truncation age reports as "failed to read nonce" or
+    "unexpected EOF" — the header opened, the bytes ran out — fell through to
+    "CANNOT SAY WHY", which lists a wrong key among its open causes.
+
+    The real-artifact params on `test_a_TAMPERED_or_TRUNCATED_artifact_is_
+    ARTIFACT_CORRUPT_not_EMPTY` cover this too, but only through whichever
+    signal the INSTALLED age happens to supply: on v1.3.1 they would still pass
+    through `plain_present`. This forces `plain_present` false so the refusal
+    value is the only thing that can produce the verdict, on every host.
+    """
+    RVmod = EV._rv()
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=RVmod.AGE_REFUSED_TRUNCATED, write_plaintext=False)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "ARTIFACT-CORRUPT"
+    assert ei.value.exit_code == 33
+    assert ei.value.exit_code != EV.EXIT_CODES["DECRYPT-FAILED"]
+
+
+def test_the_STRONG_verdict_fires_on_EVERY_post_auth_refusal_and_NO_other(
+        escrow_world, monkeypatch):
+    """🔴 THE SEAM BETWEEN THE TWO MODULES, ASSERTED AS A LEDGER.
+
+    `escrow-verify.py` reads `RV.AGE_REFUSALS_POST_AUTH` to decide when to say
+    "THE ESCROW IS FINE; THE BACKUP IS NOT". A test that names two refusals by
+    hand goes quietly incomplete the day a third is published — the failure this
+    whole round exists to fix, one level up. So this walks the PUBLISHED set and
+    requires the strong verdict for every member, and requires that no
+    non-member can reach it.
+    """
+    RVmod = EV._rv()
+    assert RVmod.AGE_REFUSALS_POST_AUTH, "an empty set would pass vacuously"
+    assert RVmod.AGE_REFUSALS_PRE_AUTH, "an empty set would pass vacuously"
+    # 🔴 The three groups must PARTITION the published set. A refusal in neither
+    # named set is not a bug — it lands in the unclassified message on purpose —
+    # but it must be VISIBLE here rather than absorbed, so the arithmetic is
+    # asserted before the behaviour.
+    assert not (RVmod.AGE_REFUSALS_POST_AUTH & RVmod.AGE_REFUSALS_PRE_AUTH)
+    assert (RVmod.AGE_REFUSALS_POST_AUTH | RVmod.AGE_REFUSALS_PRE_AUTH
+            | {RVmod.AGE_REFUSED_UNRECOGNISED}) == RVmod.AGE_REFUSALS, (
+        "a published refusal belongs to neither named set and is not the "
+        "fall-through: it will silently take the unclassified verdict. Put it "
+        "in a set, or state here why it belongs with the unknown.")
+
+    for refusal in sorted(RVmod.AGE_REFUSALS_POST_AUTH):
+        _refusing_decrypt(RVmod, monkeypatch, refusal=refusal,
+                          write_plaintext=False)
+        with pytest.raises(EV.EscrowError) as ei:
+            _decrypt_run(escrow_world)
+        assert ei.value.token == "ARTIFACT-CORRUPT", refusal
+    for refusal in sorted(RVmod.AGE_REFUSALS_PRE_AUTH):
+        _refusing_decrypt(RVmod, monkeypatch, refusal=refusal,
+                          write_plaintext=False)
+        with pytest.raises(EV.EscrowError) as ei:
+            _decrypt_run(escrow_world)
+        assert ei.value.token == "DECRYPT-FAILED", refusal
+        # ...and the TWO-cause sentence, not the three-cause one: age named
+        # which side of the payload it stopped on.
+        assert "TWO CAUSES PRODUCE THIS" in ei.value.verdict, refusal
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=RVmod.AGE_REFUSED_UNRECOGNISED,
+                      write_plaintext=False)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "DECRYPT-FAILED"
+    assert "CANNOT SAY WHY" in ei.value.verdict
+    assert "TWO CAUSES PRODUCE THIS" not in ei.value.verdict
 
 
 def test_a_TAMPERED_payload_is_ARTIFACT_CORRUPT_when_only_PLAINTEXT_says_so(
@@ -1664,8 +1767,9 @@ def test_every_decrypt_family_VERDICT_is_pinned_WHOLE(escrow_world, tmp_path):
     assert ei.value.verdict == (
         f"🔴 {KEY_DELTA_NEW} is TAMPERED, CORRUPT or TRUNCATED. age "
         f"authenticated the header with the ESCROWED key — which a non-matching "
-        f"identity cannot do — and then FAILED on the "
-        f"payload. THE ESCROW IS FINE; THE BACKUP IS NOT. This is the finding a "
+        f"identity cannot do — and then FAILED PAST IT: a payload chunk that "
+        f"would not authenticate, or an artifact that ran out of bytes. "
+        f"THE ESCROW IS FINE; THE BACKUP IS NOT. This is the finding a "
         f"backup verifier exists to make: treat the artifact as unusable, check "
         f"the other retained objects for this scope, and do NOT rotate the key.")
 
@@ -4377,10 +4481,17 @@ _PINNED_DESTRUCTIVE_TEXTS: frozenset[str] = frozenset({
     # tampered payload writes NO plaintext — the old clause asserted an act the
     # branch can no longer observe. What survives is the claim that is still
     # supported: the header authenticated with the escrowed key.
+    #
+    # 🔴 "then FAILED on the payload" WENT THE SAME WAY, one round later
+    # (2026-09-09). The branch now also fires on a TRUNCATED artifact, where age
+    # ran out of bytes reading the nonce and never reached a payload chunk —
+    # asserting the payload there would be the identical mistake in a new
+    # spelling. The sentence names the disjunction it can actually support.
     (
         '🔴 {key} is TAMPERED, CORRUPT or TRUNCATED. age authenticated the '
         'header with the ESCROWED key — which a non-matching identity cannot '
-        'do — and then FAILED on the payload. THE '
+        'do — and then FAILED PAST IT: a payload chunk that would not '
+        'authenticate, or an artifact that ran out of bytes. THE '
         'ESCROW IS FINE; THE BACKUP IS NOT. This is the finding a backup '
         'verifier exists to make: treat the artifact as unusable, check the '
         'other retained objects for this scope, and do NOT rotate the key.'
@@ -4410,7 +4521,7 @@ _PINNED_DESTRUCTIVE_TEXTS: frozenset[str] = frozenset({
     (
         'age REFUSED {key} and this verifier CANNOT SAY WHY. age exited '
         'non-zero without leaving plaintext, and its message matched none of '
-        'the three refusals this tool knows how to read. THREE THINGS ARE NOW '
+        'the refusals this tool knows how to read. THREE THINGS ARE NOW '
         'EQUALLY CONSISTENT with what was seen and NONE is asserted: the '
         "escrowed identity does not match, the artifact's HEADER is damaged, "
         'or the PAYLOAD is tampered. 🔴 DO NOT ROTATE OR RE-ESCROW ON THIS. '
