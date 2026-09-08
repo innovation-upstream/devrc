@@ -104,6 +104,10 @@
 # non-empty NodeID or LoginName there means a login was COMPLETED on this host at some
 # point, and a logged-out backend on top of that is a LOST identity. Absence still reads
 # as `none`, because a genuinely fresh install has no persisted profile.
+# MEASURED 2026-09-08, a real unprivileged tailscaled 1.102.3 that had never
+# authenticated: `Config` is `null`, `tailscaled.state` is the two bytes `{}` -- and
+# `LoggedOut` is **true**, which is why `LoggedOut` is NOT one of the signals. Reading it
+# as evidence of a lost identity would fail every first run.
 #
 # Exit: 0 = every claim holds, including admin-console approval and disabled key expiry
 #       3 = everything THIS HOST controls is correct, but an ADMIN-CONSOLE action is
@@ -343,11 +347,14 @@ if sys.argv[2] != "-":
     # as an identity would report every first-run host as a dead backup path and make
     # apply-tailscale.sh roll back the config it had just installed.
     #
-    # `LoggedOut` is deliberately NOT read as evidence. It would cover the
-    # `tailscale logout` shape (logout deletes the profile, so `Config` goes away with
-    # it), but what a never-logged-in daemon writes there has not been established here,
-    # and a false `true` on a fresh node is precisely the rollback above. An unverified
-    # signal is not added on the reassuring-to-check but expensive-to-be-wrong side.
+    # 🔴 `LoggedOut` IS NOT EVIDENCE OF A LOST IDENTITY, AND THAT IS MEASURED, NOT
+    # ASSUMED. It looks like it would cover the `tailscale logout` shape -- logout
+    # deletes the profile, so `Config` goes away with it -- but a real tailscaled
+    # 1.102.3, started fresh and never authenticated, reported `"LoggedOut": true` and
+    # `"Config": null` (measured 2026-09-08, unprivileged daemon, its own statedir).
+    # Reading it as an identity would therefore make EVERY first run a rc-1 FAIL and roll
+    # back the config apply-tailscale.sh had just installed. `Config` is the field that
+    # discriminates, and it is the only one used.
     pcfg = pf.get("Config")
     if pcfg is None:
         pcfg = pf.get("Persist")
@@ -773,12 +780,16 @@ _read_live_state() {
   # reachable only for a root caller whose local API is nevertheless unreadable -- a
   # narrow case, but the alternative there is the restart hole with no detector at all.
   #
-  # The marker is `"profile-`, a per-profile entry key, and NOT `_current-profile`: the
-  # latter is written for the empty profile a never-logged-in daemon carries, so keying
-  # on it would report a FRESH host as a dead backup path and make apply-tailscale.sh
-  # roll back the config it had just installed. The file is a JSON map whose VALUES are
-  # base64 (no `"` and no `-`), so the marker cannot be matched inside one. Nothing from
-  # the file is printed -- it holds this node's private keys.
+  # The marker is `"profile-`, a per-profile entry key, and NOT `_current-profile`: both
+  # key names exist in the 1.102.3 binary, but the latter is the pointer, written for the
+  # empty profile a never-logged-in daemon carries too, so keying on it could report a
+  # FRESH host as a dead backup path and make apply-tailscale.sh roll back the config it
+  # had just installed. Measured 2026-09-08 on a real unprivileged tailscaled 1.102.3
+  # that had never authenticated: its `tailscaled.state` was the two bytes `{}` --
+  # neither key present -- so this branch correctly finds nothing on a fresh host.
+  # The file is a JSON map whose VALUES are base64 (no `"` and no `-`), so the marker
+  # cannot be matched inside one. Nothing from the file is printed -- it holds this
+  # node's private keys.
   if [ "$persisted" != "true" ] && [ "$prefs_src" = "none" ]; then
     if [ -r "${TS_STATE_FILE:-/var/lib/tailscale/tailscaled.state}" ] \
        && grep -q '"profile-' "${TS_STATE_FILE:-/var/lib/tailscale/tailscaled.state}" 2>/dev/null; then
