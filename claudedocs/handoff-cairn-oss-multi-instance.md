@@ -18,25 +18,33 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- **`ZacxDev/cairn` has four merged PRs (#1–#4) and ONE OPEN: [#5](https://github.com/ZacxDev/cairn/pull/5)**,
-  branch `fix/reload-atomicity-budget-and-ci-floor`, `OPEN`/`MERGEABLE`, **all three checks green
-  on the real runner** (`leakscan` pass, `nix` pass, `tests` pass 8m28s with
-  `collected=1698 failed=0 floor=1648`). Exactly two files: `.github/workflows/ci.yml` (+15-1)
-  and `tests/test_subsystem_store_api.py` (+64-17). **NOT MERGED** — rank 10's and rank 14's
-  closing conditions both require the merge, so both stay open.
-- **Rank 3's second half is claimed by ANOTHER SESSION**, not this one: `claim-work --list` shows
-  `cairn-oss-multi-instance-3` taken 2026-09-08 ~01:45Z for the *first slice only* (re-home
-  `cairn who` as its own binary; extract `unbounded_timeout_reason` into devrc `lib/timeouts.py`),
-  explicitly **not** pinning the flake and **not** touching the `entry_shape`/writer fork. So the
-  operator fork below is still unanswered — that session routed around it rather than deciding it.
-- **Rank 3 is still not done**, re-verified live this session: `readlink -f ~/.local/bin/cairn` →
-  `/home/zach/workspace/devrc/scripts/cairn` (not `/nix/store`), `grep -c cairn
+- **`ZacxDev/cairn` has FIVE merged PRs.** #1 SIGHUP hot-reload, #2 the ledger narrowing
+  (`c8aee7203`), #3 `8e4ef84` (spawn-port TOCTOU), #4 `218b6c1` (the nix flake), and
+  **#5 `9213726` (2026-09-08T05:45:44Z) — the CI floor + the reload-atomicity control.**
+  Verified by CONTENT, never ancestry (a squash is never an ancestor): on `origin/main`
+  `.github/workflows/ci.yml` reads `FLOOR = 1648` and `ATOMICITY_MIN_RELOADS` resolves **7**
+  times in `tests/test_subsystem_store_api.py`.
+- **Ranks 10 and 14 are CLOSED by that merge** — both closing conditions named it.
+  `claim-work` slug `cairn-oss-multi-instance-10` RELEASED.
+- **Rank 3's second half is claimed by ANOTHER SESSION**, not this one: `claim-work --list`
+  shows `cairn-oss-multi-instance-3` taken 2026-09-08 ~01:45Z for the *first slice only*
+  (re-home `cairn who` as its own binary; extract `unbounded_timeout_reason` into devrc
+  `lib/timeouts.py`), explicitly **not** pinning the flake and **not** touching the
+  `entry_shape`/writer fork. The operator fork below is therefore still unanswered — that
+  session routed around it rather than deciding it.
+- **Rank 3 is still not done**, re-verified live 2026-09-08: `readlink -f ~/.local/bin/cairn`
+  → `/home/zach/workspace/devrc/scripts/cairn` (not `/nix/store`), `grep -c cairn
   ~/workspace/devrc/flake.nix` → **0**.
 - **Rank 4 re-verified live:** `civitai/talos-infra` #1414 still **OPEN**.
-- **Rank 11 re-verified live:** the store holds **23** scopes and `cairn` is still not among them.
-- `claim-work` slug **`cairn-oss-multi-instance-10` is HELD by this session** — release it when #5
-  merges: `claim-work --release cairn-oss-multi-instance-10`.
-- devrc `main` is clean apart from five untracked files that are not mine.
+- **Rank 11 re-verified live:** the store holds **23** scopes and `cairn` is still not among
+  them — `cairn create --scope cairn` was watched to refuse `[not-found]` this session.
+- 🔴 **A cairn-built image is still NOT PUBLISHED.** #4 produces a loadable tarball; nothing
+  pushes it to a registry. Rank 7 remains blocked on publication (rank 13), not buildability.
+- **No civitai instance exists.** The homelab pod still runs its own copy.
+- **Session capture** remains DESIGNED, DECIDED and MERGED as a proposal, and BUILT NOWHERE
+  (`claudedocs/proposal-cairn-session-capture.md`, `e16f9609a`). Rank 8.
+- **The opencode exporter** shipped (`f58d2df04`, #1338) and still has **no caller**.
+- **devrc PR #1386** carries this handoff doc.
 
 ## Open investigations — live diagnosis state
 
@@ -295,21 +303,22 @@ countable.
    ⚠ **The module has NO CALLER.** Wiring it in is rank 8's work.
    forcing: none — done
 
-10. 🔨 **IN FLIGHT: `ZacxDev/cairn`#5 — raise cairn's CI collected-test floor.**
-    `.github/workflows/ci.yml` pinned `FLOOR = 200` against a suite collecting **1698**.
-    #5 moves it to **1648** = `m - min(50, max(1, m/20))` for the measured `m = 1698`.
+10. ✅ **DONE AND MERGED 2026-09-08 — `ZacxDev/cairn` #5, squash `9213726`.** cairn's CI
+    collected-test floor moved from an inert `FLOOR = 200` (against 1698 collected) to
+    **1648** = `m - min(50, max(1, m/20))` for the measured `m`.
     **Gate controls watched in both directions:** green at 1698 and at exactly 1648; **red at
     1647 and at 300**; and **green at 300 under the OLD `FLOOR = 200`** — that last one is the
     demonstration the old floor was inert, not an assertion that it was.
     ⚠ **This is an INVARIANT GUARD, not regression coverage** — no bug ever narrowed this suite.
     The workflow comment and the PR body both say so.
-    **Closing condition:** #5 merged (a merged `ZacxDev/cairn` PR moving that literal).
-    forcing: none
+    forcing: none — done
 
 11. 🔴 **OPERATOR ACTION — add a `cairn` scope to the store token's allowlist.** Work in
     `~/workspace/cairn` cannot be recorded in the subsystem store: `cairn create --scope cairn`
-    is refused `[not-found]`, exit 6. **Re-verified live 2026-09-08: the store holds 23 scopes
-    and `cairn` is still not among them.** cairn-repo lessons keep landing in `devrc/` instead.
+    is refused `[not-found]`, exit 6 — **watched again 2026-09-08**, and the store still holds
+    **23** scopes with `cairn` not among them. cairn-repo lessons keep landing in `devrc/cairn`
+    instead. ⚠ When re-checking, do NOT pipe `cairn create` into `tail` — the pipe returns
+    `tail`'s status and the refusal reads as `rc=0`.
     **Closing condition:** `cairn create --scope cairn …` exits 0.
     forcing: none
 
@@ -330,12 +339,14 @@ countable.
     `homelab-infra`'s `image:` line able to name it.
     forcing: none
 
-14. 🔨 **IN FLIGHT: `ZacxDev/cairn`#5 — the SECOND intermittent, the reload-atomicity control.**
-    Distinct from rank 6's flake; see the investigation block above for the full evidence
-    (2/26 CI runs, both the same assertion, wall-time-discriminated as not-load).
-    **Rides the SAME PR as rank 10** — two ranks, one PR, deliberately: both are "the gate is
-    weaker than it claims" in the same two files.
-    **Closing condition:** #5 merged. After that, a recurrence is a NEW finding, not this one.
+14. ✅ **DONE AND MERGED 2026-09-08 — `ZacxDev/cairn` #5, squash `9213726`** (the same PR as
+    rank 10; two ranks, one PR, deliberately — both are "the gate is weaker than it claims" in
+    the same two files). The reload-atomicity positive control is no longer bounded by the
+    budget it polices: `ATOMICITY_MIN_RELOADS = 2` is read by BOTH the driver loop and the
+    assertion, and the SAMPLERS are gated on it too.
+    ⚠ **NOT claimed as "the flake is gone"** — it is claimed that the control can no longer be
+    starved by its own budget. A recurrence after `9213726` is a NEW finding, not this one, and
+    the assertion now names the constant it fell short of rather than the budget.
     forcing: gate — it turned the public repo's only CI gate red on 2 of its first 26 runs
 
 15. **`cairn recall` prescribes flags its own CLI rejects.** The digest's footer says
@@ -751,14 +762,14 @@ one that has not" case the index badge names. Close it when next in that entry.
 ## How to verify
 
 ```bash
-# rank 10 + rank 14 — the open PR, and its checks on the REAL runner
-gh pr view 5 -R ZacxDev/cairn --json state,mergeable,files
-gh pr checks 5 -R ZacxDev/cairn        # leakscan / nix / tests all pass
-gh pr diff 5 -R ZacxDev/cairn          # exactly 2 files; FLOOR 200 -> 1648; ATOMICITY_MIN_RELOADS
+# ranks 10 + 14 landed — by CONTENT, never ancestry (a squash is never an ancestor)
+gh pr view 5 -R ZacxDev/cairn --json state,mergedAt,mergeCommit    # MERGED, 9213726
+git -C ~/workspace/cairn grep -n 'FLOOR = ' origin/main -- .github/workflows/ci.yml   # 1648
+git -C ~/workspace/cairn grep -c ATOMICITY_MIN_RELOADS origin/main -- tests/test_subsystem_store_api.py
 
-# the evidence rank 14 rests on — the repo's whole CI history
+# the evidence rank 14 rested on — the repo's CI history at the time
 gh run list -R ZacxDev/cairn --limit 100 --json conclusion,headSha,createdAt
-# 26 runs, 24 success / 2 failure; both failures e2cf6fe + 492191f, same assertion
+# at the merge: 26 runs, 24 success / 2 failure; both failures e2cf6fe + 492191f, same assertion
 
 # rank 3 is NOT done until this resolves into /nix/store (it does not today)
 readlink -f ~/.local/bin/cairn                       # -> devrc/scripts/cairn
@@ -767,11 +778,8 @@ grep -c cairn ~/workspace/devrc/flake.nix            # 0 today
 # rank 4 / rank 11 spot checks
 gh pr view 1414 -R civitai/talos-infra --json state  # OPEN
 ls ~/.cache/subsystem-store/ | tr '\n' ' '           # 23 scopes, no `cairn`
-
-# the claim this session holds — release it when #5 merges
-claim-work --check cairn-oss-multi-instance-10
 ```
-Expected: #5 `OPEN`/`MERGEABLE` with three green checks and `collected=1698 failed=0 floor=1648`;
-cairn CI history 26 runs / 2 failures, both the reload-atomicity assertion; `readlink -f
-~/.local/bin/cairn` still resolving into `~/workspace/devrc/scripts/cairn` (**not** `/nix/store`);
+Expected: #5 MERGED at `9213726` with `FLOOR = 1648` and `ATOMICITY_MIN_RELOADS` present on
+`origin/main`; `readlink -f ~/.local/bin/cairn` still resolving into
+`~/workspace/devrc/scripts/cairn` (**not** `/nix/store` — that is rank 3's second half);
 #1414 OPEN; no `cairn` scope.
