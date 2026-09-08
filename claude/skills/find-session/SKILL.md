@@ -35,7 +35,9 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   prints its window on stderr (`ARCHIVE window: the last 12 days (since …) — DEFAULT`) with
   the number of transcripts it skipped unopened, and `--json --live` carries the same facts as
   `archive.window`. Pass **`--all-time`** for the whole corpus (~15 s warm, ~43 s cold) or `--since YYYY-MM-DD`
-  for a different one; naming both is a usage error. Measured 2026-09-08 `--claude-only`,
+  for a different one; naming both is a usage error. ⚠ **Under `--json` WITHOUT `--live` the
+  window is on STDERR only** — that path emits the bare array every caller parses, so there is
+  no machine-readable window there; `--live --json` carries `archive.window`. Measured 2026-09-08 `--claude-only`,
   warm, back to back, quoting the walk's OWN skip counter: `--since 3d` 2.40 s / skipped 780
   of 924, **`--since 12d` 7.35 s / skipped 467 of 924**, `--since 30d` 13.35 s / skipped
   **0** of 924, `--all-time` 13.09 s. 🔴 **A 30-day default would be a NO-OP** — it skips
@@ -93,7 +95,7 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   also pins each one against the behaviour it describes. Do not reword them here alone; an
   earlier hand-written version of this table shipped two claims the code contradicted.
 - `0` — the run completed. NOT a claim that anything matched — an empty LIVE section and an empty ARCHIVE section both exit 0. 🔴 NOR a claim about coverage: a `--tail` that resolved to ONE window exits 0 even when a host did not answer, so another window may match on the host that was never asked. This is the code a caller ACTS on — read `tail.coverage_complete` before treating the resolution as unique.
-- `2` — bad arguments: `--tail` without `--live`, `--limit` below 1, an unparseable `--since`, a query that names nothing (no terms and no `--skill`, or a `--skill` that canonicalises to empty), or `--skill` with `--opencode-only` — that corpus carries no skill attribution, so the combination has no answer rather than an empty one.
+- `2` — bad arguments: `--tail` without `--live`, `--tail` below 1, `--limit` below 1, an unparseable `--since`, `--since` together with `--all-time` (they name two different windows), `--live` with no search terms (it matches a window's task/label/codename, so `--skill` alone is an ARCHIVE query), a query that names nothing (no terms and no `--skill`, or a `--skill` that canonicalises to empty), or `--skill` with `--opencode-only` — that corpus carries no skill attribution, so the combination has no answer rather than an empty one.
 - `3` — `--tail` ONLY: it could not resolve to exactly one live window — several matched, or none did on a fleet where every host answered. It carries NO claim about coverage; the candidate list may be incomplete, and `tail.coverage_complete` is the field that says so.
 - `4` — `--tail` ONLY: something the tail needed was NOT measured — the live scan failed or no host answered, or `session-manager tail` itself failed (rc 2/4/5), or nothing matched while a host was unreachable. Without `--tail` a failed scan still exits 0 and says so in the LIVE section.
 - Branch on `tail.ok` / `tail.rc` / `tail.coverage_complete` in `--json` rather than on the

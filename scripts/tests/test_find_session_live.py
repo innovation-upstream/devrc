@@ -1650,13 +1650,14 @@ def test_the_R4_ledger_names_only_tests_that_exist():
 # --------------------------------------------------------------------------- #
 # R4-1  a non-dict `hosts` crashed a function contracted never to raise
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("body,label", [
-    ('{"hosts": [1, 2]}', "hosts is a list"),
-    ('{"hosts": {"wb": null}}', "a host entry is null"),
-    ('{"hosts": {"wb": []}}', "a host entry is a list"),
-    ('{"hosts": {"wb": "reachable"}}', "a host entry is a string"),
+@pytest.mark.parametrize("body,label,wrong_type", [
+    ('{"hosts": [1, 2]}', "hosts is a list", "list"),
+    ('{"hosts": {"wb": null}}', "a host entry is null", "NoneType"),
+    ('{"hosts": {"wb": []}}', "a host entry is a list", "list"),
+    ('{"hosts": {"wb": "reachable"}}', "a host entry is a string", "str"),
 ], ids=["list", "null-entry", "list-entry", "str-entry"])
-def test_a_non_dict_hosts_is_a_DISCRIMINATED_error_not_a_crash(body, label):
+def test_a_non_dict_hosts_is_a_DISCRIMINATED_error_not_a_crash(
+        body, label, wrong_type):
     """🔴 R4-1. `live_scan`'s entire contract is to RETURN a status-
     discriminated result rather than raise — the caller's next move is to print
     "the live fleet was NOT measured". The `isinstance(report, dict)` guard
@@ -1682,9 +1683,17 @@ def test_a_non_dict_hosts_is_a_DISCRIMINATED_error_not_a_crash(body, label):
     assert res["hosts_reachable"] is None and res["hosts_unreachable"] is None, (
         f"{label}: an unmeasured scan must publish None host lists, never [] — "
         "an empty unreachable list reads as 'every host answered'")
-    assert "hosts" in (res["error"] or ""), (
+    # 🔴 ASSERT THE OPERAND, NOT THE SUBJECT. `"hosts" in error` is a spelled
+    # guard: it passed a message that reported "(got dict)" for a bad host
+    # ENTRY — true of `hosts`, useless about the entry, and self-contradictory
+    # to read. The diagnostic must name the type that is actually wrong.
+    err = res["error"] or ""
+    assert "hosts" in err or "host entr" in err, (
         f"{label}: the error must name WHICH part of the report was wrong; "
-        f"got {res['error']!r}")
+        f"got {err!r}")
+    assert wrong_type in err, (
+        f"{label}: the error must name the OFFENDING type {wrong_type!r}, not "
+        f"the type of whatever contains it; got {err!r}")
 
 
 def test_a_REAL_hosts_object_still_parses():
@@ -1821,19 +1830,44 @@ def test_since_and_all_time_TOGETHER_is_a_USAGE_error(monkeypatch):
 
 
 def test_the_WINDOW_IS_ANNOUNCED_on_the_classic_path(monkeypatch):
-    """🔴 A BOUND NOBODY IS TOLD ABOUT IS A SILENT CAP. The classic path's
-    stdout is the bare JSON array every caller parses, so the window goes to
-    stderr — and it must go there even when the run found nothing, because
-    "no sessions matched" under an unannounced window is the exact sentence
-    that reads as a corpus-wide absence.
+    """🔴 A BOUND NOBODY IS TOLD ABOUT IS A SILENT CAP — and it must be told on
+    the stream the caller is actually reading.
+
+    🔴 THIS TEST PINNED THE WRONG STREAM FOR ONE ROUND. It asserted stderr, on
+    the reasoning that "the classic path's stdout is the bare JSON array every
+    caller parses" — true only under `--json`. On the HUMAN branch stdout is
+    prose with no parse contract, so `find-session.py redis 2>/dev/null` printed
+    `No sessions matched: redis` and nothing whatever about the bound, while
+    this test read green. The window now follows the reader: stdout when a human
+    is reading, stderr when a machine is.
+
+    It must appear even when the run matched nothing — "no sessions matched"
+    under an unannounced window is the exact sentence that reads as a
+    corpus-wide absence.
     """
     run = make_run()
     got = run_main(monkeypatch, ["zzterm"], run, archive=[])
-    assert "ARCHIVE window:" in got["err"], got["err"]
-    assert f"last {fs.DEFAULT_SINCE_DAYS} days" in got["err"]
-    assert "--all-time" in got["err"], (
+    assert "ARCHIVE window:" in got["out"], (
+        f"the human path must disclose its window on STDOUT; "
+        f"stdout={got['out']!r} stderr={got['err']!r}")
+    assert f"last {fs.DEFAULT_SINCE_DAYS} days" in got["out"]
+    assert "--all-time" in got["out"], (
         "the notice must say how to LIFT the bound, not just that one exists")
-    assert "DEFAULT" in got["err"]
+    assert "DEFAULT" in got["out"]
+
+
+def test_the_window_goes_to_STDERR_under_json_so_stdout_stays_PARSEABLE(
+        monkeypatch):
+    """🔴 THE OTHER HALF, and the boundary control on the test above. `--json`
+    without `--live` emits the bare array every existing caller parses; the
+    window must NOT land in it. A fix that simply moved the print to stdout
+    would satisfy the test above and corrupt this path."""
+    run = make_run()
+    got = run_main(monkeypatch, ["zzterm", "--json"], run, archive=[])
+    assert "ARCHIVE window:" in got["err"], got["err"]
+    assert "ARCHIVE window:" not in got["out"], (
+        f"the window leaked into --json stdout: {got['out']!r}")
+    json.loads(got["out"])          # raises if the line leaked
 
 
 def test_the_window_notice_says_NOT_MEASURED_rather_than_zero():

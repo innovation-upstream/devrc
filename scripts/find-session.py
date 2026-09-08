@@ -31,8 +31,8 @@ the window is printed on every archive run, with the number of transcripts it
 skipped unopened.
 
 So for the question people actually ask — *"find that thing I lost track of, is
-it still running, which window, where did it leave off"* — the 30-second archive
-search is the WRONG instrument: it answers a question about the past over a
+it still running, which window, where did it leave off"* — the archive walk is
+the WRONG instrument whatever it costs: it answers a question about the past over a
 corpus that cannot say whether anything is running now. `--live` runs the live
 scan FIRST and falls back to the archive only when the live fleet matched
 nothing (or `--deep` forces both).
@@ -67,7 +67,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
@@ -124,6 +124,16 @@ LIVE_TIMEOUT_SECS = 90
 # It would have capped the answer while buying nothing — the worst of both. 12
 # days skips about half and is the operator's chosen point on that curve.
 #
+# 🔴 AND THAT ZERO IS STRUCTURAL, NOT THIS WEEK'S LUCK — which is what makes the
+# argument outlive the measurement. The oldest walked transcript sits at a hard
+# floor across many project dirs, because Claude Code PRUNES `~/.claude/projects`
+# on a 30-day retention and no `cleanupPeriodDays` override is set. So the Claude
+# corpus can never be deeper than ~30 days and any default at or above that is
+# inert BY CONSTRUCTION. ⚠ It does not generalise to the OTHER corpus: the
+# opencode store has no such pruning and reaches back much further (see
+# `window_notice`), which is exactly why its cut is the larger one and why the
+# notice must name it as unmeasured rather than imply the printed count is all.
+#
 # Whole-tool, both corpora: 7.67 / 7.99 s windowed against 14.26 / 17.06 s under
 # `--all-time` on a warm cache, and 42.96 s on a COLD one. The user-facing
 # strings quote the warm figure with the cold one named, because a number that
@@ -174,12 +184,25 @@ EXIT_CONTRACT = (
               "match on the host that was never asked. This is the code a "
               "caller ACTS on — read `tail.coverage_complete` before treating "
               "the resolution as unique."),
-    (EXIT_USAGE, "bad arguments: `--tail` without `--live`, `--limit` below 1, "
-                 "an unparseable `--since`, a query that names nothing (no "
-                 "terms and no `--skill`, or a `--skill` that canonicalises "
-                 "to empty), or `--skill` with `--opencode-only` — that "
-                 "corpus carries no skill attribution, so the combination "
-                 "has no answer rather than an empty one."),
+    # 🔴 THE ENUMERATION IS THE CLAIM, AND IT WENT STALE THE FIRST TIME ANYONE
+    # ADDED A USAGE ERROR. `main` has nine `return EXIT_USAGE` sites; this
+    # sentence named five causes covering six of them, and the gate that
+    # rebuilds it from a ledger only checks sentence -> code ("every cause named
+    # is really an exit 2"), never code -> sentence. Its own comment says so.
+    # So the two errors THIS change added and one that predates it were absent
+    # from the table an agent is told to branch on, and the suite stayed green.
+    # `test_every_EXIT_USAGE_site_is_a_cause_the_sentence_NAMES` closes the
+    # other direction by TRACING each probe to the line it returns from.
+    (EXIT_USAGE, "bad arguments: `--tail` without `--live`, `--tail` below 1, "
+                 "`--limit` below 1, an unparseable `--since`, `--since` "
+                 "together with `--all-time` (they name two different "
+                 "windows), `--live` with no search terms (it matches a "
+                 "window's task/label/codename, so `--skill` alone is an "
+                 "ARCHIVE query), a query that names nothing (no terms and no "
+                 "`--skill`, or a `--skill` that canonicalises to empty), or "
+                 "`--skill` with `--opencode-only` — that corpus carries no "
+                 "skill attribution, so the combination has no answer rather "
+                 "than an empty one."),
     (EXIT_AMBIGUOUS, "`--tail` ONLY: it could not resolve to exactly one live "
                      "window — several matched, or none did on a fleet where "
                      "every host answered. It carries NO claim about coverage; "
@@ -248,7 +271,14 @@ def window_notice(since, source, skipped=None, examined=None):
                 f"{DEFAULT_SINCE_DAYS}-day default is NOT applied to --skill, "
                 "because 'has skill X ever been used' is a historical question "
                 "and adoption-scan reads this answer. Pass --since to narrow.")
-    stamp = since.date().isoformat()
+    # 🔴 A `--since` CARRYING A TIME WAS DISCLOSED AS A BARE DATE. `--since
+    # 2026-08-01T12:34:56` parses and the walk uses the full timestamp, but this
+    # printed "since 2026-08-01" — naming a WIDER window than ran, which is the
+    # one direction a disclosure must never err in. The comment above
+    # `resolve_window` claimed the printed window "can never name a date the
+    # search did not use"; that was true of the DATE and false of the WINDOW.
+    stamp = (since.date().isoformat() if since.time() == time.min
+             else since.isoformat(sep=" "))
     if source == WINDOW_EXPLICIT:
         head = f"ARCHIVE window: since {stamp} (--since)."
     else:
@@ -257,11 +287,32 @@ def window_notice(since, source, skipped=None, examined=None):
                 "was NOT looked at; pass --all-time for the whole corpus "
                 "(~15s warm, ~43s cold) or --since YYYY-MM-DD for a "
                 "different window.")
+    # 🔴 THE COUNT IS ONE LEG OF THREE, AND IT MUST SAY SO. `ARCHIVE_STATS` is
+    # filled only by the LOCAL Claude walk; `search_peers` and `search_opencode`
+    # are windowed by the same `since` and counted by nothing. Measured
+    # 2026-09-08 on the live stores: the local Claude corpus loses 466 of 926
+    # (50%) to the 12-day default, while the local OPENCODE corpus loses 487 of
+    # 707 (69%) and appears in no number here — that store reaches back to
+    # 2026-07-02, far deeper than the Claude corpus, whose oldest transcript is
+    # a hard 30-day retention floor. So the unreported cut is both the larger
+    # fraction and the longer reach.
+    #
+    # 🔴 AND "local" WAS THE WRONG WORD FOR IT. Everywhere else in this codebase
+    # `local` means THIS HOST as opposed to a peer (`search_peers`,
+    # `_query_db(label="local")`) — an opencode session on this machine IS a
+    # local transcript, and was not in the count. Naming the corpus and the host
+    # separately, and naming what is excluded, is the same correction this
+    # change already made once to the DENOMINATOR: a partial measurement
+    # presented without its scope reads as the whole thing.
+    excluded = (" — the opencode corpus and the peer hosts were windowed too "
+                "and are NOT in this count")
     if skipped is None:
-        return head + " (local transcripts skipped by the window: NOT MEASURED)"
+        return head + (" (Claude transcripts on THIS host skipped by the "
+                       "window: NOT MEASURED" + excluded + ")")
     total = skipped + examined if examined is not None else None
-    return head + (f" (local transcripts skipped unopened: {skipped}"
-                   + (f" of {total}" if total is not None else "") + ")")
+    return head + (f" (Claude transcripts on THIS host skipped unopened: "
+                   f"{skipped}" + (f" of {total}" if total is not None else "")
+                   + excluded + ")")
 
 
 def _default_run(argv, timeout=LIVE_TIMEOUT_SECS):
@@ -354,11 +405,24 @@ def live_scan(terms=()):
     # crash surfaces as a traceback where the tool's whole purpose is to say
     # "the fleet was NOT measured". Discriminated at the SOURCE, like the two
     # host lists, so no publisher has to re-derive it.
-    if not isinstance(hosts, dict) or not all(isinstance(v, dict)
-                                              for v in hosts.values()):
+    # 🔴 THE TWO SHAPES ARE REPORTED SEPARATELY, because one message for both
+    # named the WRONG OPERAND: a bad host ENTRY reported "(got dict)" — true of
+    # `hosts` and useless about the entry — which reads as self-contradictory in
+    # 3 of the 4 shapes this guard exists for. The test now asserts the operand,
+    # not just that the word "hosts" appears; a guard checked by a substring of
+    # its own subject is satisfied by a wrong diagnostic.
+    if not isinstance(hosts, dict):
         return dict(out, error=(f"session-manager exited {rc} and produced a "
-                                f"report whose `hosts` is not an object of "
-                                f"host objects (got {type(hosts).__name__})"))
+                                f"report whose `hosts` is "
+                                f"{type(hosts).__name__}, not an object"))
+    bad = sorted(k for k, v in hosts.items() if not isinstance(v, dict))
+    if bad:
+        return dict(out, error=(
+            f"session-manager exited {rc} and produced a report whose host "
+            f"entr{'y' if len(bad) == 1 else 'ies'} "
+            f"{', '.join(repr(k) for k in bad)} "
+            f"{'is' if len(bad) == 1 else 'are'} not an object (got "
+            f"{type(hosts[bad[0]]).__name__})"))
     out["hosts_reachable"] = sorted(k for k, v in hosts.items() if v.get("reachable"))
     out["hosts_unreachable"] = sorted(k for k, v in hosts.items()
                                       if not v.get("reachable"))
@@ -932,6 +996,19 @@ def _window_line(source, since):
 
 def main(argv=None):
     a = parse_args(argv)
+    # 🔴 RESET HERE, NOT BESIDE THE WALK. Both reset sites used to sit INSIDE an
+    # `if run_archive:` / classic-path branch, so a `--live` run that the live
+    # fleet answered left the PREVIOUS call's counters in place and
+    # `archive.window.message` published `"… skipped unopened: 0 of 2"` for a
+    # walk that never happened — a measured-looking count beside
+    # `archive.ran: false`, exactly the null-vs-0 laundering the design forbids.
+    # `skipped_stale` and `sessions_examined` escaped it only because they are
+    # separately guarded by `run_archive`; `message` was not, and the comment on
+    # `ARCHIVE_STATS` claiming "reset by `main` before every call" was false for
+    # that branch. It is true now: one reset, unconditional, before either leg.
+    # (Not reachable from a shell today — `main` runs once per process — so this
+    # was a latent defect plus a comment the code contradicted.)
+    ARCHIVE_STATS.clear()
     if a.since:
         try:
             datetime.fromisoformat(a.since)
@@ -1028,13 +1105,22 @@ def main(argv=None):
     # output moves.
     # ------------------------------------------------------------------ #
     if not a.live:
-        ARCHIVE_STATS.clear()
         results = archive_search(a, since)
-        # 🔴 STDERR, AND UNCONDITIONALLY. Stdout on this path is the bare JSON
-        # array every existing caller parses, so the window cannot go there —
-        # and it must still be said, because the caller who most needs to know
-        # the search was bounded is the one piping it into something else.
-        print(_window_line(window_source, since), file=sys.stderr)
+        # 🔴 STDOUT ON THE HUMAN PATH, STDERR UNDER `--json` — and the earlier
+        # revision sent BOTH to stderr, which put the disclosure where the most
+        # common invocation never looks. The justification it carried ("stdout
+        # on this path is the bare JSON array every existing caller parses") is
+        # true only under `--json`; on the human branch stdout is prose with no
+        # parse contract to protect, and `--live`'s human branch already prints
+        # the window to stdout. So `find-session.py redis 2>/dev/null` used to
+        # print `No sessions matched: redis` and nothing at all about the bound.
+        # ⚠ KNOWN AND DELIBERATE: `--json` WITHOUT `--live` still emits the bare
+        # array, so its window is on stderr ONLY — there is no machine-readable
+        # window on that path. Adding a key would change a shape callers parse;
+        # `--live --json` carries `archive.window`. Said out loud in SKILL.md
+        # rather than left for a consumer to discover.
+        print(_window_line(window_source, since),
+              file=sys.stderr if a.json else sys.stdout)
         shown = results[: a.limit]
         if a.json:
             print(json.dumps([render(r) for r in shown], indent=2))
@@ -1087,9 +1173,11 @@ def main(argv=None):
     # depending on this flag at all.
     coverage_complete = True
     if run_archive:
-        ARCHIVE_STATS.clear()
         results = archive_search(a, since)
-        print(_window_line(window_source, since), file=sys.stderr)
+        # No print here: the human branch says it in the ARCHIVE block below and
+        # `--json` carries `archive.window`. Printing it to stderr as well made
+        # `--live --deep` announce the same window TWICE, once per stream.
+
         # 🔴 A SECOND, UNFILTERED scan, and it is not waste. The first scan was
         # NARROWED by the terms, so a session that IS live but whose window
         # title no longer says those words is absent from it — annotating an
@@ -1215,10 +1303,15 @@ def main(argv=None):
     print("\n".join(live_lines))
     print()
     if not run_archive:
+        # The `--all-time` hint is CONDITIONAL: suggesting it to a caller who
+        # already passed it, on a run where it did nothing, is the noise that
+        # trains a reader to skip the line.
+        hint = (f" (last {DEFAULT_SINCE_DAYS} days by default; add --all-time "
+                f"for the whole corpus, ~15s warm)"
+                if window_source == WINDOW_DEFAULT else
+                f" (window: {window_source})")
         print(f"ARCHIVE: skipped — the live fleet answered. Pass --deep to "
-              f"search the {len(a.terms)}-term transcript walk too "
-              f"(last {DEFAULT_SINCE_DAYS} days by default; add --all-time "
-              f"for the whole corpus, ~15s warm).")
+              f"search the {len(a.terms)}-term transcript walk too{hint}.")
     else:
         print(f"ARCHIVE ({len(results)} matched; ran because: {archive_reason})")
         print("  " + _window_line(window_source, since))

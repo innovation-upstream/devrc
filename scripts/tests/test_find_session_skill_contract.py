@@ -36,6 +36,7 @@ import importlib.util
 import inspect
 import io
 import json
+import sys
 import re
 from pathlib import Path
 
@@ -469,10 +470,17 @@ def exit_unavailable_sources(tree) -> list:
 EXIT_2_CAUSES = (
     ("`--tail` without `--live`",
      (["zzterm", "--tail", "5"],)),
+    ("`--tail` below 1",
+     (["zzterm", "--live", "--tail", "0"], ["zzterm", "--live", "--tail", "-5"])),
     ("`--limit` below 1",
      (["zzterm", "--live", "--limit", "0"],)),
     ("an unparseable `--since`",
      (["zzterm", "--since", "not-a-date"],)),
+    ("`--since` together with `--all-time` (they name two different windows)",
+     (["zzterm", "--since", "2026-01-01", "--all-time"],)),
+    ("`--live` with no search terms (it matches a window's task/label/codename, "
+     "so `--skill` alone is an ARCHIVE query)",
+     (["--skill", "browser", "--live"],)),
     ("a query that names nothing (no terms and no `--skill`, or a `--skill` "
      "that canonicalises to empty)",
      ([], ["--skill", "/"])),
@@ -567,6 +575,96 @@ def test_the_bare_literal_scan_CAN_fire():
              and n.args and isinstance(n.args[0], ast.Constant)
              and n.args[0].value in {c for c, _ in fs.EXIT_CONTRACT}]
     assert found, "the offender shape this scan looks for is unmatchable"
+
+
+def _exit_usage_return_lines(tree):
+    """Every `return EXIT_USAGE` line lexically inside `main`.
+
+    By NAME only: `test_no_exit_path_uses_a_BARE_LITERAL_instead_of_the_constant`
+    already forbids the literal spelling, so a bare `return 2` cannot hide here
+    without failing that gate first.
+    """
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "main")
+    return {n.lineno for n in ast.walk(fn)
+            if isinstance(n, ast.Return)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == "EXIT_USAGE"}
+
+
+def _traced_exit_usage_line(argv):
+    """Run one probe and report WHICH `return EXIT_USAGE` line it left from.
+
+    A line tracer rather than coverage: this needs the last such line executed
+    by THIS call, and it must not depend on a plugin being installed.
+    """
+    hit = []
+    path = fs.__file__
+
+    def tracer(frame, event, arg):
+        if event == "call":
+            return tracer if frame.f_code.co_filename == path else None
+        if event == "line" and frame.f_code.co_filename == path:
+            hit.append(frame.f_lineno)
+        return tracer
+
+    old = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        rc, _, _ = _run(argv, _runner(_report([])), archive=[])
+    finally:
+        sys.settrace(old)
+    return rc, hit
+
+
+def test_every_EXIT_USAGE_SITE_is_a_cause_the_sentence_NAMES():
+    """🔴 THE MISSING DIRECTION, and the one this PR walked straight through.
+
+    `test_the_exit_2_sentence_is_EXACTLY_the_cause_ledger_JOINED` proves every
+    cause NAMED is real. Nothing proved every cause REAL is named — the ledger's
+    own comment block says as much ("that direction only proves the probes are
+    honest about what they test"). Measured on the first change to add a usage
+    error since: `main` grew `--tail < 1` and `--since` + `--all-time`, the
+    shipped exit-code table an agent branches on named neither, and the suite
+    was fully green. A third (`--live` with no terms) had been unnamed since it
+    was written.
+
+    Structural counting alone would not do it — several probes share a site and
+    one cause carries two argvs — so each probe is TRACED to the line it
+    actually returns from, and the union must cover every site.
+    """
+    tree = ast.parse(inspect.getsource(fs))
+    sites = _exit_usage_return_lines(tree)
+    assert sites, "no `return EXIT_USAGE` found in main() — gate wired to nothing"
+    covered = set()
+    for _, argv in _EXIT_2_PROBES:
+        rc, lines = _traced_exit_usage_line(argv)
+        assert rc == fs.EXIT_USAGE, f"{argv} exited {rc}, not {fs.EXIT_USAGE}"
+        covered |= sites & set(lines)
+    missing = sorted(sites - covered)
+    assert not missing, (
+        f"main() can exit {fs.EXIT_USAGE} at line(s) {missing} for a reason the "
+        "exit-2 sentence does not name. An agent reads that sentence in "
+        "`claude/skills/find-session/SKILL.md` and branches on it, so an "
+        "unnamed cause is an rc it cannot explain. Add the cause to "
+        "`EXIT_CONTRACT`, to `EXIT_2_CAUSES` with an argv that reaches THIS "
+        "line, and to the shipped doc.")
+
+
+def test_the_TRACER_can_actually_SEE_a_return_line():
+    """🔴 POSITIVE CONTROL on the instrument above. A tracer wired to nothing
+    returns an empty `hit` for every probe, `covered` stays empty, and the gate
+    would then fail LOUDLY rather than pass — but only because `sites` is
+    non-empty. If both ever went empty together the gate would pass vacuously,
+    so pin that the tracer observes at least one real site.
+    """
+    tree = ast.parse(inspect.getsource(fs))
+    sites = _exit_usage_return_lines(tree)
+    rc, lines = _traced_exit_usage_line(["zzterm", "--tail", "5"])
+    assert rc == fs.EXIT_USAGE
+    assert sites & set(lines), (
+        "the tracer observed no `return EXIT_USAGE` line for a probe that "
+        "certainly hit one — it is not watching the module under test")
 
 
 def test_every_EXIT_UNAVAILABLE_source_is_on_the_tail_path():
