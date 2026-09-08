@@ -47,6 +47,13 @@ let
   # every float popup, including the retired agent-ops one.)
   btopCmd = "alacritty --class float,float -o window.dimensions.columns=160 -o window.dimensions.lines=45 -e btop";
 
+  # Shared by the runaways pill's clicks and by its toast's middle-click action
+  # (`_syshealth_action` in bar-status-poll), which `_toast_specs` requires to
+  # open the SAME target as the block's left-click. `${home}` rather than a
+  # literal `~`: every other working-tree reference in this file interpolates it,
+  # and `~` survives only if the click is spawned through a shell.
+  syshealthCmd = "alacritty --class float,float -o window.dimensions.columns=120 -o window.dimensions.lines=40 -e ${pkgs.bash}/bin/bash -c '${home}/workspace/devrc/scripts/syshealth; echo; read -n 1 -r -s -p \"[any key to close]\"'";
+
   # Python env for the decoupled bar-status poller (workbench systemd user timer):
   # psycopg2 for the homelab Postgres open-mail_actions count; clawgate + Alertmanager
   # go over stdlib urllib, so psycopg2 is the only non-stdlib dep.
@@ -412,9 +419,16 @@ let
       { button = "left"; cmd = "${scriptsDir}/i3status-gamemode --toggle"; }
     ];
   };
-  # runaways: workbench only. Count of runaway processes (sustained high CPU).
-  # Poller scans all processes every ~45s, flags those above CPU% + age threshold.
-  # Hide-at-zero; red when >0. Left-click opens fzf TUI to view/kill offenders.
+  # runaways: workbench only. Count of runaway processes (sustained high CPU),
+  # as decided by `scripts/syshealth` — the poller renders that verdict and owns
+  # no predicate of its own. Hide-at-zero; red when >0.
+  # 🔴 BOTH buttons open syshealth in a FLOAT TERMINAL, and the terminal is not
+  # optional. i3status-rust runs a click through `sh -c` with NO CONTROLLING
+  # TERMINAL (the live i3status-rs has TTY `?`), so a bare TUI here exits
+  # `inappropriate ioctl for device` and the click is a SILENT NO-OP. An earlier
+  # revision pointed left-click at a bare fzf menu for exactly that reason.
+  # The bare-command left-clicks elsewhere in this file are all rofi, which is a
+  # GUI and needs no tty.
   # Signal 19, matching SIGNALS in bar-status-poll.
   runawaysBlock = {
     block = "custom";
@@ -423,8 +437,8 @@ let
     interval = 30;
     signal = 19;
     click = [
-      { button = "left"; cmd = "${scriptsDir}/runaway-menu"; }
-      { button = "right"; cmd = "alacritty --class float,float -e python3 ~/workspace/devrc/scripts/syshealth"; }
+      { button = "left"; cmd = syshealthCmd; }
+      { button = "right"; cmd = syshealthCmd; }
     ];
   };
 
@@ -675,14 +689,12 @@ lib.mkIf isNixOS {
     source = ../scripts/deep-search;
     executable = true;
   };
-  # runaways: the block script (reads ~/.cache/bar-status/runaways.json) and
-  # its fzf click handler. Workbench-only, matching runawaysBlock's gate.
+  # runaways: the block script (reads ~/.cache/bar-status/runaways.json).
+  # Workbench-only, matching runawaysBlock's gate. Both clicks run `syshealth`
+  # from the working tree via syshealthCmd, so there is no click handler to
+  # deploy here.
   home.file.".config/i3status-rust/scripts/i3status-runaways" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-runaways;
-    executable = true;
-  };
-  home.file.".config/i3status-rust/scripts/runaway-menu" = lib.mkIf (!isLaptop) {
-    source = ../scripts/runaway-menu;
     executable = true;
   };
 

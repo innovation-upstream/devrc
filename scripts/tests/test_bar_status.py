@@ -2965,6 +2965,120 @@ def test_dispatch_edge_toast_NEVER_raises(_never_reach_the_desktop):
     assert seen == []
 
 
+#: A `syshealth --json` report, trimmed to the fields `parse_runaways` reads.
+#: Values are pairwise distinct AND distinct from every constant the assertions
+#: name, so a mutant that hardcodes a literal cannot pass by coincidence.
+def _syshealth_report(*rows):
+    return {"runaways": list(rows), "verdict": {"exit_code": 1}}
+
+
+def _runaway_row(pid, pcpu, args):
+    return {"pid": pid, "pcpu": pcpu, "args": args, "age_sec": 1234,
+            "user": "zach", "ppid": 7, "cwd": "/tmp", "critical": False}
+
+
+def test_parse_runaways_renders_syshealths_verdict_and_does_not_re_derive_it():
+    """The payload is syshealth's `runaways` list, mapped — no predicate here.
+
+    🔴 Watched RED against the previous implementation: it re-derived the set
+    from `ps` and dropped every `comm == "python3"`, so the second row below —
+    the shape of this box's own collector, router and agent scripts — was
+    invisible. This asserts the row SURVIVES, which is the half that was broken.
+    """
+    out = poll.parse_runaways(_syshealth_report(
+        _runaway_row(4242, 97.0, "node /srv/thing.js"),
+        _runaway_row(4243, 88.25, "python3 /home/zach/collector.py")))
+    assert out["count"] == 2, out
+    assert [p["pid"] for p in out["processes"]] == [4242, 4243]   # sorted by cpu desc
+    assert out["processes"][1]["cmd"] == "python3 /home/zach/collector.py"
+    assert out["state"] == "Warning"
+    assert "error" not in out
+    # `detail` is the toast BODY, so the top offender must reach it.
+    assert "node /srv/thing.js" in out["detail"] and "97" in out["detail"]
+
+
+def test_parse_runaways_reports_a_BROKEN_detector_as_UNMEASURED_not_as_zero():
+    """🔴 The failure a count cannot express. A detector that could not run and
+    one that ran and found nothing both have `count == 0`; only the `error` key
+    tells them apart, and `bar_freshness.is_marker` reads it to render the
+    visible `?` pill. Without this the bar would show a confident empty block
+    while the source was dead."""
+    for broken in (None, [], {}, {"runaways": "not-a-list"}, {"verdict": {}}):
+        out = poll.parse_runaways(broken)
+        assert out["count"] == 0, broken
+        assert out["error"], "a broken detector rendered as a clean zero: %r" % (broken,)
+        assert freshness.is_marker(out), broken
+    # Control: a REAL empty reading is NOT a marker — it is a measured zero.
+    quiet = poll.parse_runaways(_syshealth_report())
+    assert quiet["count"] == 0 and not quiet.get("error")
+    assert not freshness.is_marker(quiet)
+
+
+def test_new_count_counts_only_pids_the_PREVIOUS_poll_did_not_have():
+    """🔴 The toast gates on this, not on `count` — see the `runaways` spec.
+
+    A `nix build`'s cc1plus legitimately holds 100% for longer than the age
+    gate, so `count` sits pinned and a level latch would never re-arm. Watched
+    RED with `new_count` keyed to `count`: the third case below returned 2.
+    """
+    rows = (_runaway_row(4242, 97.5, "cc1plus"),
+            _runaway_row(4243, 88.25, "node x.js"))
+    report = _syshealth_report(*rows)
+    # nothing seen before -> both are new
+    assert poll.parse_runaways(report, prev_pids=[])["new_count"] == 2
+    # both already announced -> none new, so the latch re-arms
+    assert poll.parse_runaways(report, prev_pids=[4242, 4243])["new_count"] == 0
+    # the pinned one persists, a genuinely new one appears -> exactly ONE
+    assert poll.parse_runaways(report, prev_pids=[4242])["new_count"] == 1
+    # unparseable previous pids are ignored, never counted as absent
+    assert poll.parse_runaways(report, prev_pids=[None, "x", 4242])["new_count"] == 1
+
+
+def test_the_runaways_toast_gates_on_new_count_and_opens_what_the_click_opens():
+    """Pins BOTH halves of the spec, because each was wrong once: it gated on
+    `count` (so a second runaway never toasted) and its action opened Grafana,
+    which has no view of local processes."""
+    spec = poll._toast_specs()["runaways"]
+    assert spec["count_key"] == "new_count", spec
+    assert "syshealth" in spec["action"], spec
+    assert "grafana" not in spec["action"].lower(), spec
+    # The dispatcher must actually READ that key — a spelled-but-unread
+    # count_key is the defect class this whole change is about.
+    fired = []
+    got = poll.evaluate_edge_toast(
+        "runaways", {"count": 9, "new_count": 0, "detail": "d"}, spec,
+        fire=lambda *a, **k: fired.append(a), read=lambda n: False,
+        write=lambda n, v: None)
+    assert got == (False, False), got
+    assert fired == [], "toasted on count while new_count was 0: %r" % (fired,)
+
+
+def test_fetch_runaways_IGNORES_syshealths_EXIT_CODE(monkeypatch, tmp_path):
+    """🔴 syshealth folds every section into one status, so it exits 1 whenever
+    ANYTHING warns — load, zombies, hogs — while `runaways` is empty. MEASURED
+    on this host: `runaways: []` at rc 1. A poller that gated on the status
+    would fail every such poll and pin the `?` pill forever, looking exactly
+    like a working freshness guard. This pins that the code never consults it.
+    """
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    payload = json.dumps(_syshealth_report(_runaway_row(4242, 99.0, "cc1plus")))
+
+    def fake_run(argv, **kw):
+        return subprocess.CompletedProcess(argv, 1, stdout=payload, stderr="")
+
+    monkeypatch.setattr(poll.subprocess, "run", fake_run)
+    out = poll.fetch_runaways()
+    assert out["count"] == 1, out
+    assert not out.get("error"), out
+    # Control: the SAME rc with unreadable stdout IS a failure, so the test is
+    # not merely asserting that nothing can ever fail.
+    monkeypatch.setattr(poll.subprocess, "run",
+                        lambda argv, **kw: subprocess.CompletedProcess(
+                            argv, 1, stdout="not json", stderr=""))
+    broken = poll.fetch_runaways()
+    assert broken["count"] == 0 and broken["error"], broken
+
+
 def test_the_SOURCES_table_is_a_LEDGER_of_every_polled_source():
     """🔴 A ledger, pinned as a LITERAL, failing when the set GROWS or SHRINKS.
 

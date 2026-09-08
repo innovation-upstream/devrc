@@ -857,9 +857,22 @@ def _toast_specs() -> dict:
         "telemetry": {"threshold": 0, "urgency": "critical",
                       "summary": "🔴 Telemetry source DEAD",
                       "action": "xdg-open http://grafana.homelab.lan"},
+        # 🔴 Gates on `new_count`, NOT `count` — the same defect `clawgate_stuck`
+        # above exists to avoid, arrived at from the other side. A plain level
+        # latch fires on 0 -> 1 and then stays set while the source is non-zero,
+        # and this source sits non-zero for long stretches on an ordinary day:
+        # a `nix build`'s `cc1plus` legitimately holds 100% for well past the
+        # 10-minute age gate. A genuinely new runaway is then a 1 -> 2 increment
+        # while the latch is ALREADY set — same colour, no toast, and the event
+        # worth interrupting for is the one that cannot interrupt.
+        # `new_count` is the pids absent from the previous poll, so it returns
+        # to 0 once a runaway has been announced and the edge is available again
+        # for the next one. ONE spec, not two: keying a second latch on `count`
+        # beside this one would double-toast the first runaway.
         "runaways": {"threshold": 0, "urgency": "normal",
-                     "summary": "⚠ Runaway process detected",
-                     "action": "xdg-open http://grafana.homelab.lan"},
+                     "count_key": "new_count",
+                     "summary": "⚠ New runaway process",
+                     "action": _syshealth_action()},
     }
 
 
@@ -1299,104 +1312,109 @@ def fetch_airvpn() -> dict:
 # ---------------------------------------------------------------------------
 # Runaway processes
 # ---------------------------------------------------------------------------
-# Defaults for the runaway detection scan. Thresholds are env-tunable so a
-# host can retune without code changes.
-RUNAWAY_CPU_THRESHOLD = float(os.environ.get("RUNAWAY_CPU_THRESHOLD", "80"))
-RUNAWAY_MIN_AGE = int(os.environ.get("RUNAWAY_MIN_AGE", "600"))
+# 🔴 THIS SOURCE OWNS NO PREDICATE, DELIBERATELY — it renders what
+# `scripts/syshealth` already decides. That is not deference for its own sake:
+# an earlier revision of this block re-implemented the predicate and got every
+# part of it wrong in the same direction, silently. It excluded `comm ==
+# "python3"` to skip itself, which on this host hides the collector, the
+# router, this very poller and every agent script — the most likely runaway
+# class here was the one class it could not see. It had no zombie filter, so an
+# unreapable zombie pinned the pill red forever. And its ignore list was built,
+# documented as the tuning knob, and never read by anything.
+# `syshealth` gets all three right (self by RESOLVED PID, never a comm name;
+# zombies excluded from the eligible set; a working case-insensitive ignore
+# list), is stdlib-only, and is MEASURED at ~0.09 s — so a 45 s poll can simply
+# ask it. One rule, one place.
+SYSHEALTH = os.path.join(DEVRC_DIR, "scripts", "syshealth")
+SYSHEALTH_TIMEOUT = 15
 
-# Commands never to flag — expected heavy hitters whose CPU is not a problem.
-# Same shape as syshealth's DEF_IGNORE, but the poller only cares about runaways
-# so this is a short, stable list.
-RUNAWAY_IGNORE = frozenset(t for t in
-                           os.environ.get("RUNAWAY_IGNORE", "anno,logd,ps").split(",")
-                           if t.strip())
 
-PS_RUNAWAY_FORMAT = "pid=,ppid=,user=,pcpu=,pmem=,rss=,etimes=,comm=,args="
-PS_RUNAWAY_FIELDS = 9
+def _syshealth_action() -> str:
+    """The toast's middle-click target. `_toast_specs`'s docstring requires this
+    to be the SAME thing the block's left-click opens, so both are syshealth in
+    a float terminal. (The previous revision opened Grafana here, copy-pasted
+    from the `telemetry` spec — Grafana has no view of local processes.)"""
+    return ("alacritty --class float,float -e %s %s"
+            % (sys.executable, SYSHEALTH))
 
 
-def parse_runaways(procs, cpu_threshold=None, min_age=None) -> dict:
-    """Pure: list of process dicts -> status dict with count + process list.
+def parse_runaways(report, prev_pids=()) -> dict:
+    """Pure: a `syshealth --json` report -> this source's status payload.
 
-    Each proc dict must have: pid, pcpu, etimes, comm, args, ppid.
-    The function filters by cpu_threshold and min_age, excludes self/ps,
-    and returns a status dict compatible with bar-status-poll's format.
+    `prev_pids` are the pids the PREVIOUS poll flagged; `new_count` counts the
+    ones absent from it. See the `runaways` entry in `_toast_specs` for why the
+    toast gates on that number and not on `count`.
+
+    A report that is not a dict, or carries no `runaways` list, is an ERROR
+    payload rather than a zero — `bar_freshness.is_marker` reads `error`, so the
+    pill renders the visible `?` instead of a confident "no runaways". A broken
+    detector must never be indistinguishable from a quiet one.
     """
-    cpu_threshold = cpu_threshold if cpu_threshold is not None else RUNAWAY_CPU_THRESHOLD
-    min_age = min_age if min_age is not None else RUNAWAY_MIN_AGE
-    if not isinstance(procs, list):
-        return {"count": 0, "state": "Idle", "detail": "no process data",
-                "processes": []}
+    if not isinstance(report, dict) or not isinstance(report.get("runaways"), list):
+        return {"count": 0, "new_count": 0, "state": "Idle", "processes": [],
+                "error": "syshealth --json carried no runaways list"}
+    prev = set()
+    for p in prev_pids or ():
+        try:
+            prev.add(int(p))
+        except (TypeError, ValueError):
+            continue
     flagged = []
-    for p in procs:
-        if not isinstance(p, dict):
+    for r in report["runaways"]:
+        if not isinstance(r, dict):
             continue
-        pid = p.get("pid")
-        pcpu = p.get("pcpu", 0)
-        etimes = p.get("etimes", 0)
-        if not pid or pcpu < cpu_threshold or etimes < min_age:
-            continue
-        # Skip self and ps (same logic as syshealth)
-        if p.get("comm") in ("ps", "python3", "bar-status-poll"):
+        try:
+            pid = int(r["pid"])
+        except (KeyError, TypeError, ValueError):
             continue
         flagged.append({
-            "pid": int(pid),
-            "cpu": float(pcpu),
-            "age_sec": int(etimes),
-            "comm": p.get("comm", "?"),
-            "cmd": p.get("args", p.get("comm", "?")),
-            "ppid": p.get("ppid"),
-            "user": p.get("user", "?"),
+            "pid": pid,
+            "cpu": float(r.get("pcpu") or 0.0),
+            "cmd": str(r.get("args") or r.get("comm") or "?")[:200],
         })
     flagged.sort(key=lambda x: -x["cpu"])
     count = len(flagged)
+    new_count = sum(1 for f in flagged if f["pid"] not in prev)
+    if count:
+        detail = "%d runaway process(es), top: %s (%.0f%%)" % (
+            count, flagged[0]["cmd"], flagged[0]["cpu"])
+    else:
+        detail = "no runaways"
     return {
         "count": count,
+        "new_count": new_count,
         "state": "Warning" if count > 0 else "Idle",
-        "detail": "%d runaway process(es)" % count if count else "no runaways",
+        "detail": detail,
         "processes": flagged,
     }
 
 
-def _scan_runaway_procs() -> list[dict]:
-    """Scan all processes via ps and return raw dicts for parse_runaways."""
-    try:
-        out = subprocess.check_output(
-            ["ps", "-eo", PS_RUNAWAY_FORMAT, "--no-headers"],
-            stderr=subprocess.DEVNULL, text=True, timeout=10)
-    except Exception:
-        return []
-    procs = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, PS_RUNAWAY_FIELDS - 1)
-        if len(parts) < PS_RUNAWAY_FIELDS - 1:
-            continue
-        if len(parts) == PS_RUNAWAY_FIELDS - 1:
-            parts.append("")
-        try:
-            procs.append({
-                "pid": int(parts[0]),
-                "ppid": int(parts[1]),
-                "user": parts[2],
-                "pcpu": float(parts[3]),
-                "pmem": float(parts[4]),
-                "rss": int(parts[5]),
-                "etimes": int(parts[6]),
-                "comm": parts[7],
-                "args": parts[8],
-            })
-        except (ValueError, IndexError):
-            continue
-    return procs
-
-
 def fetch_runaways() -> dict:
-    """Scan all processes, filter to runaways, return status dict."""
-    procs = _scan_runaway_procs()
-    return parse_runaways(procs)
+    """Ask `syshealth --json` for the runaway set and render its verdict.
+
+    🔴 THE EXIT CODE IS NOT THE SIGNAL AND IS DELIBERATELY NOT CHECKED.
+    syshealth folds every section it inspects into one status, so it returns 1
+    whenever ANYTHING warns — load, zombies, cpu hogs, failed units — while
+    `runaways` is empty. MEASURED 2026-09-08 on this host: `runaways: []` at
+    rc 1, with warnings for load and zombies. Gating on the status would fail
+    every such poll and pin the unmeasured `?` pill permanently, while looking
+    exactly like a working freshness guard. Parse stdout; unparseable output is
+    the only failure, and it is reported as one.
+    """
+    prev = read_prev_status("runaways")
+    prev_pids = []
+    if isinstance(prev, dict) and isinstance(prev.get("processes"), list):
+        prev_pids = [p.get("pid") for p in prev["processes"]
+                     if isinstance(p, dict)]
+    try:
+        proc = subprocess.run([sys.executable, SYSHEALTH, "--json"],
+                              capture_output=True, text=True,
+                              timeout=SYSHEALTH_TIMEOUT)
+        report = json.loads(proc.stdout)
+    except Exception as err:
+        return {"count": 0, "new_count": 0, "state": "Idle", "processes": [],
+                "error": str(err)[:200]}
+    return parse_runaways(report, prev_pids)
 
 
 # ---------------------------------------------------------------------------
