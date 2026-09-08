@@ -71,7 +71,8 @@ BLOCK_CLOSE = "carry on with the item."
 # which is the conditional that measured 1/14. Every resume has a topic.
 EXPECTED_COMMAND = (
     "python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline "
-    "--query \"<this handoff's topic, in plain words>\" --limit 3"
+    "--query \"<this handoff's topic, in plain words>\" --limit 3 "
+    "--exclude-slug <the path on step 2's `handoff:` line>"
 )
 
 # The step that was MEASURED to fire 5/6, and whose company this command was
@@ -196,13 +197,14 @@ def test_every_flag_the_skill_prescribes_is_one_the_TOOL_accepts():
     # 🔴 The argv below is written out by hand, so this equality is what keeps it
     # honest: add a flag to the prescribed command and this fails HERE, naming
     # the flag, instead of the probe quietly continuing to test the old three.
-    assert flags == ["--limit", "--offline", "--query"], (
+    assert flags == ["--exclude-slug", "--limit", "--offline", "--query"], (
         f"the prescribed command's flags changed to {flags}. Extend the argv "
         "built below to pass the new flag, so the probe still proves the parser "
         "accepts everything /resume tells a reader to type."
     )
 
-    argv = ["--query", "x", "--offline", "--limit", "0"]
+    argv = ["--query", "x", "--offline", "--limit", "0",
+            "--exclude-slug", "claudedocs/handoff-anything.md"]
     rc = mod.main(argv)
     assert rc == 2, (
         f"`handoff_search.main({argv})` returned {rc}, not the usage code 2 the "

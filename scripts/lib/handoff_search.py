@@ -292,6 +292,13 @@ class SearchOutcome:
     backend: str
     repo: str | None = None
     sections: tuple[str, ...] = ()
+    #: Slugs the caller asked to be left out of scope — the doc it has ALREADY
+    #: READ. 🔴 IT IS A SCOPE FILTER, SO IT COUNTS AS ONE: it feeds `scoped` and
+    #: makes `filtered` true, which is what puts `in_scope_*` on the stats line
+    #: beside `indexed_*`. An exclusion that narrowed the search WITHOUT moving
+    #: the printed numbers would be an invisible filter, and this module's whole
+    #: argument is that a zero must carry the reason it is a zero.
+    exclude: tuple[str, ...] = ()
     limit: int = DEFAULT_LIMIT
     scoped: IndexStats | None = None
     known_repos: tuple[str, ...] = ()
@@ -331,7 +338,7 @@ class SearchOutcome:
 
     @property
     def filtered(self) -> bool:
-        return self.repo is not None or bool(self.sections)
+        return self.repo is not None or bool(self.sections) or bool(self.exclude)
 
     @property
     def truncated(self) -> bool:
@@ -405,6 +412,7 @@ def run_search(
     unmeasured: Sequence[tuple[str, str]] = (),
     targets: Sequence[str] = (),
     unreadable: Sequence[tuple[str, str]] = (),
+    exclude: Sequence[str] = (),
 ) -> SearchOutcome:
     """Query the store and CLASSIFY the result. The one place `status` is decided.
 
@@ -479,14 +487,20 @@ def run_search(
         return SearchOutcome(
             query=query, stats=stats, hits=(), status=status,
             backend=backend,
-            repo=repo, sections=tuple(sections), limit=limit, scoped=stats,
+            repo=repo, sections=tuple(sections), exclude=tuple(exclude),
+            limit=limit, scoped=stats,
             known_repos=tuple(store.repos()), unmeasured=tuple(unmeasured),
             targets=tuple(targets),
             unreadable=tuple(unreadable),
         )
 
     known = tuple(store.repos())
-    scoped = store.stats(repo=repo, sections=sections)
+    # 🔴 `exclude` IS A RUNG-2 FILTER LIKE THE OTHERS, so it goes through the
+    # SCOPED count and not just the query. Excluding every doc that could have
+    # matched is then `empty-scope`/`no-rows` (rc 4) — "your filter emptied the
+    # corpus" — instead of `no-match` (rc 0), which would assert the corpus is
+    # silent about a topic it was never allowed to answer on.
+    scoped = store.stats(repo=repo, sections=sections, exclude=exclude)
     # 🔴 ONE STATUS, TWO REASONS, AND THE REASONS ARE NOT REDUNDANT. Both are
     # "the filter emptied the corpus", so a caller switching on `status` sees one
     # case — but the two have DIFFERENT fixes and the message has to say which.
@@ -504,13 +518,15 @@ def run_search(
     if reason is not None:
         return SearchOutcome(
             query=query, stats=stats, hits=(), status="empty-scope", backend=backend,
-            repo=repo, sections=tuple(sections), limit=limit, scoped=scoped,
+            repo=repo, sections=tuple(sections), exclude=tuple(exclude),
+            limit=limit, scoped=scoped,
             known_repos=known, scope_reason=reason, unmeasured=tuple(unmeasured),
             targets=tuple(targets),
             unreadable=tuple(unreadable),
         )
 
-    hits = tuple(store.search(query, repo=repo, sections=sections, limit=limit))
+    hits = tuple(store.search(query, repo=repo, sections=sections, limit=limit,
+                              exclude=exclude))
     return SearchOutcome(
         query=query,
         stats=stats,
@@ -519,6 +535,7 @@ def run_search(
         backend=backend,
         repo=repo,
         sections=tuple(sections),
+        exclude=tuple(exclude),
         limit=limit,
         scoped=scoped,
         known_repos=known,
@@ -542,6 +559,14 @@ def render(outcome: SearchOutcome) -> str:
         scope.append(f"repo={outcome.repo}")
     if outcome.sections:
         scope.append("section=" + ",".join(outcome.sections))
+    # 🔴 AN EXCLUSION MUST NAME ITSELF ON EVERY STATUS, INCLUDING THE ZEROS. It is
+    # the one filter the reader did not necessarily choose per-run — `/resume`
+    # passes it from a template — so a reader who did not notice the flag would
+    # otherwise read "the corpus is silent" about a document that was in the
+    # index and deliberately withheld. Printed on the scope line, which every
+    # branch below emits before its own block.
+    if outcome.exclude:
+        scope.append("excluded=" + ",".join(outcome.exclude))
     lines = [
         recall_banner(),
         "",
@@ -669,8 +694,24 @@ def render(outcome: SearchOutcome) -> str:
             lines += [
                 "   The filter is VALID — every label and section kind in it is real — "
                 "but this corpus holds no row under it.",
-                "   Widen or drop --repo / --section and re-run.",
+                # 🔴 THE REMEDY NAMES THE FLAGS THIS RUN ACTUALLY PASSED. Sending a
+                # reader to "widen --repo / --section" when the thing that emptied
+                # the scope was --exclude-slug is the same defect the no-match
+                # branch below already fixed once: a next step that names a command
+                # without checking the state it prints in.
+                "   Widen or drop "
+                + " / ".join(
+                    ["--repo / --section"] + (["--exclude-slug"] if outcome.exclude else [])
+                )
+                + " and re-run.",
             ]
+            if outcome.exclude:
+                lines.append(
+                    f"   This run EXCLUDED {len(outcome.exclude)} slug(s) "
+                    f"({', '.join(outcome.exclude)}). If the corpus's only answer "
+                    f"here is a doc you have already read, that is not silence — it "
+                    f"is the exclusion doing exactly what you asked."
+                )
         return "\n".join(lines)
 
     if outcome.status == "no-match":
@@ -741,6 +782,7 @@ def outcome_json(outcome: SearchOutcome) -> dict:
         "query": outcome.query,
         "repo": outcome.repo,
         "sections": list(outcome.sections),
+        "excluded": list(outcome.exclude),
         "limit": outcome.limit,
         "indexed_docs": outcome.stats.indexed_docs,
         "indexed_sections": outcome.stats.indexed_sections,
@@ -824,6 +866,25 @@ def _offline_store(
     return MemorySectionStore(rows), warnings, unmeasured, unreadable
 
 
+def exclusion_slug(value: str) -> str:
+    """Normalise one `--exclude-slug` value to the slug the index stores.
+
+    🔴 IT ACCEPTS A PATH BECAUSE THE CALLER HAS A PATH, NOT A SLUG. The measured
+    reason this flag exists at all is that `/resume` step 4 spends its top hit on
+    the document the session just read — and what that session holds is the
+    `handoff:` line `resume-state.sh` printed, i.e.
+    `claudedocs/handoff-<topic>.md`. Requiring it to strip the prefix and the
+    suffix by hand adds a derivation step to a fenced command, and the whole
+    finding behind this change is that a step needing extra input is a step that
+    stops firing (`RE-KEYING WAS HALF THE FIX` in the handoff doc). So both
+    spellings work, and the slug is derived by the SAME `slug_for` the indexer
+    used to write the row — never by a second hand-rolled strip, which is how the
+    two would drift apart on a doc in a subdirectory."""
+    if value.endswith(".md") or "/" in value:
+        return handoff_index.slug_for(value)
+    return value
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="search the handoff-doc section index",
@@ -837,6 +898,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "unknown label is rejected, never answered with a zero")
     ap.add_argument("--section", action="append", default=[], choices=list(SECTIONS),
                     help="restrict to one or more section kinds (repeatable)")
+    ap.add_argument("--exclude-slug", action="append", default=[], metavar="SLUG|PATH",
+                    help="leave a document OUT of the search (repeatable). Takes a "
+                         "slug (`ssr-cpu-regression`) or the doc path "
+                         "(`claudedocs/handoff-ssr-cpu-regression.md`). Use it for "
+                         "the handoff you have ALREADY READ, so the hits are docs "
+                         "you have not seen. Excludes that slug in EVERY repo — a "
+                         "bare slug cannot say which. The exclusion is printed on "
+                         "the scope line and counted in `in_scope_*`")
     ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
                     help=f"maximum hits to return (>= {MIN_LIMIT})")
     ap.add_argument("--json", action="store_true")
@@ -846,6 +915,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--offline-repo", action="append", default=[],
                     help="repo root for --offline (repeatable)")
     args = ap.parse_args(argv)
+    # Normalised ONCE, here, so every backend and the renderer see the same
+    # strings — the value printed on the scope line is the value that was matched
+    # against `slug`, not the raw argument that may still have been a path.
+    # 🔴 De-duplicated but ORDER-PRESERVING: the scope line names them, and a
+    # repeated `--exclude-slug` must not make that line report a filter twice.
+    exclude = tuple(dict.fromkeys(exclusion_slug(v) for v in args.exclude_slug))
 
     # 🔴 BOUNDED BEFORE THE QUERY RUNS, not clamped silently. `--limit 0` produced
     # zero hits from a healthy index and rendered the corpus-is-silent prose; a
@@ -883,13 +958,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         outcome = run_search(store, args.query, backend=backend, repo=args.repo,
                              sections=args.section, limit=args.limit,
                              unmeasured=unmeasured, unreadable=unreadable,
-                             targets=tuple(label for _, label in targets))
+                             targets=tuple(label for _, label in targets),
+                             exclude=exclude)
     else:
         MailDB = handoff_index.import_maildb()
         with MailDB() as db:
             store = handoff_index.PostgresSectionStore(db.conn)
             outcome = run_search(store, args.query, backend="postgres", repo=args.repo,
-                                 sections=args.section, limit=args.limit)
+                                 sections=args.section, limit=args.limit,
+                                 exclude=exclude)
 
     print(json.dumps(outcome_json(outcome), indent=2) if args.json else render(outcome))
     # 🔴 NO NON-ANSWER EXITS ZERO, and each gets a DIFFERENT code. A broken index

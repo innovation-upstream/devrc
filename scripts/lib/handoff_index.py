@@ -1279,7 +1279,11 @@ class SectionStore(Protocol):
     values rather than answered with a fluent zero."""
 
     def stats(
-        self, *, repo: str | None = None, sections: Sequence[str] = ()
+        self,
+        *,
+        repo: str | None = None,
+        sections: Sequence[str] = (),
+        exclude: Sequence[str] = (),
     ) -> IndexStats: ...
 
     def repos(self) -> tuple[str, ...]: ...
@@ -1291,6 +1295,7 @@ class SectionStore(Protocol):
         repo: str | None = None,
         sections: Sequence[str] = (),
         limit: int = 10,
+        exclude: Sequence[str] = (),
     ) -> list[Hit]: ...
 
 
@@ -1316,20 +1321,41 @@ class MemorySectionStore:
     def __init__(self, sections: Iterable[Section]):
         self._rows = list(sections)
 
-    def _selected(self, repo: str | None, sections: Sequence[str]) -> list[Section]:
+    def _selected(
+        self,
+        repo: str | None,
+        sections: Sequence[str],
+        exclude: Sequence[str] = (),
+    ) -> list[Section]:
         """The rows a query with these filters could reach. 🔴 THE ONE PREDICATE,
         read by both `stats` and `search`, so the counter and the query can never
-        disagree about what is in scope — the disagreement being the bug."""
+        disagree about what is in scope — the disagreement being the bug.
+
+        🔴 `exclude` DROPS THE SLUG IN EVERY REPO, because a bare slug cannot say
+        which. The table's key is `(repo, slug)` and two repos can hold the same
+        basename, so `--exclude-slug comic-flex` removes it from both. That is
+        deliberate over-exclusion, not an oversight: the flag exists so a caller
+        can drop a document it has ALREADY READ, and reading it in one repo is
+        the ordinary reason. It is stated here because a filter that silently
+        removes more than the caller named is the kind of zero this module spends
+        most of its prose making readable."""
         want = set(sections)
+        drop = set(exclude)
         return [
             r for r in self._rows
-            if (repo is None or r.repo == repo) and (not want or r.section in want)
+            if (repo is None or r.repo == repo)
+            and (not want or r.section in want)
+            and r.slug not in drop
         ]
 
     def stats(
-        self, *, repo: str | None = None, sections: Sequence[str] = ()
+        self,
+        *,
+        repo: str | None = None,
+        sections: Sequence[str] = (),
+        exclude: Sequence[str] = (),
     ) -> IndexStats:
-        rows = self._selected(repo, sections)
+        rows = self._selected(repo, sections, exclude)
         docs = {(r.repo, r.slug) for r in rows}
         return IndexStats(indexed_docs=len(docs), indexed_sections=len(rows))
 
@@ -1343,12 +1369,13 @@ class MemorySectionStore:
         repo: str | None = None,
         sections: Sequence[str] = (),
         limit: int = 10,
+        exclude: Sequence[str] = (),
     ) -> list[Hit]:
         wanted = set(_tokens(query))
         if not wanted:
             return []
         hits: list[Hit] = []
-        for row in self._selected(repo, sections):
+        for row in self._selected(repo, sections, exclude):
             present = wanted & set(_tokens(f"{row.heading} {row.body}"))
             if not present:
                 continue
@@ -1400,19 +1427,36 @@ def _boost_case(column: str = "section") -> str:
     return f"CASE {column} {arms} ELSE {DEFAULT_BOOST} END"
 
 
-def _filter_predicates(*, repo: bool, sections: bool) -> list[str]:
-    """The `WHERE` fragments for the `repo`/`sections` filters. ONE definition.
+def _filter_predicates(
+    *, repo: bool, sections: bool, exclude: bool = False
+) -> list[str]:
+    """The `WHERE` fragments for the `repo`/`sections`/`exclude` filters. ONE
+    definition.
 
     🔴 READ BY BOTH `search_sql` AND `stats_sql`, so the query and the count that
     qualifies it cannot come to different views of what is in scope. That
     divergence is not hypothetical: the count used to have no filters at all,
     which is how `--repo <never-indexed>` printed `indexed_docs=352` beside a
-    zero-result query and called the result an answer about the corpus."""
+    zero-result query and called the result an answer about the corpus.
+
+    🔴 THE ORDER OF THIS LIST IS THE ORDER OF THE BOUND PARAMETERS. Both callers
+    append their params in exactly this sequence, so a fragment added in the
+    middle here silently rebinds every parameter after it — a wrong-but-valid
+    query, not an error. New fragments go on the END, and `exclude` is last."""
     out: list[str] = []
     if repo:
         out.append("repo = %s")
     if sections:
         out.append("section = ANY(%s)")
+    if exclude:
+        # 🔴 `<> ALL(...)` and not `NOT IN (...)`: with a bound array parameter
+        # the two are equivalent for non-NULL slugs, and `slug` is `NOT NULL` by
+        # the table definition — but ALL keeps the parameter a single array,
+        # matching how `sections` is bound and keeping the param count fixed at
+        # one per fragment. A per-element `NOT IN` would make the param count
+        # depend on the caller's list length, which is what the ordering note
+        # above says must not happen.
+        out.append("slug <> ALL(%s)")
     return out
 
 
@@ -1560,26 +1604,33 @@ class PostgresSectionStore:
     STATS_SQL = f"SELECT count(DISTINCT (repo, slug)), count(*) FROM {TABLE}"
 
     @staticmethod
-    def stats_sql(*, repo: bool, sections: bool) -> str:
+    def stats_sql(*, repo: bool, sections: bool, exclude: bool = False) -> str:
         """The count query, as text, so a test can pin it without a database.
 
         🔴 THE PREDICATES ARE THE SAME STRINGS `search_sql` USES. Two hand-typed
         WHERE clauses over one table is the duplicated predicate
         `claude/RULES.md` says is wrong at N−1 sites — and here the two sites are
         the query and the number that tells you whether to believe the query."""
-        where = _filter_predicates(repo=repo, sections=sections)
+        where = _filter_predicates(repo=repo, sections=sections, exclude=exclude)
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         return f"{PostgresSectionStore.STATS_SQL}{clause}"
 
     def stats(
-        self, *, repo: str | None = None, sections: Sequence[str] = ()
+        self,
+        *,
+        repo: str | None = None,
+        sections: Sequence[str] = (),
+        exclude: Sequence[str] = (),
     ) -> IndexStats:
-        sql = self.stats_sql(repo=repo is not None, sections=bool(sections))
+        sql = self.stats_sql(repo=repo is not None, sections=bool(sections),
+                             exclude=bool(exclude))
         params: list[object] = []
         if repo is not None:
             params.append(repo)
         if sections:
             params.append(list(sections))
+        if exclude:
+            params.append(list(exclude))
         with self._conn.cursor() as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
@@ -1596,14 +1647,17 @@ class PostgresSectionStore:
             return tuple(r[0] for r in cur.fetchall())
 
     @staticmethod
-    def search_sql(*, repo: bool, sections: bool) -> str:
+    def search_sql(*, repo: bool, sections: bool, exclude: bool = False) -> str:
         """The ranked query, as text, so a test can pin it without a database.
 
         `plainto_tsquery` and not `websearch_to_tsquery`: the caller is `/resume`
         and subagents passing a phrase, not a human typing search operators, and
         `plainto_tsquery` ANDs the terms — which is the behaviour that makes a
         two-word query narrow rather than widen."""
-        where = ["tsv @@ q", *_filter_predicates(repo=repo, sections=sections)]
+        where = [
+            "tsv @@ q",
+            *_filter_predicates(repo=repo, sections=sections, exclude=exclude),
+        ]
         return (
             f"SELECT repo, slug, doc_path, doc_date, section, ordinal, heading, body, "
             f"ts_rank(tsv, q) * {_boost_case()} AS rank "
@@ -1620,13 +1674,22 @@ class PostgresSectionStore:
         repo: str | None = None,
         sections: Sequence[str] = (),
         limit: int = 10,
+        exclude: Sequence[str] = (),
     ) -> list[Hit]:
-        sql = self.search_sql(repo=repo is not None, sections=bool(sections))
+        sql = self.search_sql(repo=repo is not None, sections=bool(sections),
+                              exclude=bool(exclude))
+        # 🔴 THIS ORDER MIRRORS `_filter_predicates` AND THE SQL TEXT. `query`
+        # binds first because `plainto_tsquery(…, %s)` sits in the FROM clause,
+        # ahead of every WHERE fragment; `limit` binds last because LIMIT is the
+        # final clause. psycopg2 binds positionally, so a param appended out of
+        # order produces a valid query against the wrong columns, never an error.
         params: list[object] = [query]
         if repo is not None:
             params.append(repo)
         if sections:
             params.append(list(sections))
+        if exclude:
+            params.append(list(exclude))
         params.append(limit)
         with self._conn.cursor() as cur:
             cur.execute(sql, params)

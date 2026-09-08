@@ -5600,3 +5600,226 @@ def _defined_test_names() -> set[str]:
                                  path.read_text(), re.M):
             names.add(match.group(1))
     return names
+
+
+# --------------------------------------------------------------------------- #
+# Excluding a document the caller has already read (`--exclude-slug`)
+# --------------------------------------------------------------------------- #
+
+
+class TestExcludingADocumentTheCallerHasAlreadyRead:
+    """🔴 THE DEFECT THIS CLOSES WAS MEASURED, NOT IMAGINED. Over the 20 post-fix
+    `/resume` runs that queried the corpus (2026-09-08), **23 of 60 hit slots**
+    were the session's OWN handoff — the document it had just read in step 3 —
+    and it was the **#1 hit in 13 of 20**, taking all three slots twice. That is
+    structural rather than unlucky: step 4 tells the caller to query the
+    handoff's TOPIC, and the best text match for a doc's topic is that doc. The
+    retrieval budget was being spent on the one document guaranteed to be
+    redundant.
+
+    ⚠ The measurement behind those numbers had to be rebuilt once: the first pass
+    scanned transcripts for `claudedocs/handoff-<slug>.md` and reported **100%**,
+    because the search's own output prints each hit's doc path — the needle
+    matched the instrument. `claude/RULES.md` → "validate the INSTRUMENT before
+    you read its verdict". The 38% is derived from `resume-state.sh`'s `handoff:`
+    line and `claim-work --slug-for` arguments, neither of which the search can
+    write."""
+
+    def _corpus_with_two_docs(self):
+        return hi.MemorySectionStore(_corpus())
+
+    def test_the_measured_defect_and_its_fix_over_ONE_store(self):
+        """🔴 THE DIFFERENTIAL IS THE ASSERTION. Same store, same query, one flag
+        apart — so nothing but the exclusion can explain the change. `quixotry`
+        is a DOC_FULL term, i.e. exactly the "query your own topic" shape."""
+        store = self._corpus_with_two_docs()
+        before = hs.run_search(store, "quixotry", backend="memory")
+        assert before.status == "hit"
+        # The defect: the doc you already read is what comes back.
+        assert {h.slug for h in before.hits} == {"widget-relay"}
+
+        after = hs.run_search(store, "quixotry", backend="memory",
+                              exclude=["widget-relay"])
+        assert "widget-relay" not in {h.slug for h in after.hits}, (
+            "the excluded slug came back — the filter did not reach `search`"
+        )
+
+    def test_a_doc_PATH_and_a_bare_SLUG_name_the_same_document(self):
+        """The flag takes either, because what the caller HOLDS is the path
+        `resume-state.sh` printed. The slug is derived by the same `slug_for`
+        the indexer wrote the row with — never a second hand-rolled strip, which
+        is how the two would drift on a doc in a subdirectory."""
+        assert hs.exclusion_slug("claudedocs/handoff-widget-relay.md") == "widget-relay"
+        assert hs.exclusion_slug("widget-relay") == "widget-relay"
+        # …and the derivation is the INDEXER's, demonstrated rather than assumed.
+        assert hs.exclusion_slug(
+            "claudedocs/handoff-widget-relay.md"
+        ) == hi.slug_for("claudedocs/handoff-widget-relay.md")
+
+    def test_the_exclusion_is_NEVER_silent(self):
+        """🔴 AN INVISIBLE FILTER IS THE HAZARD THIS MODULE EXISTS TO PREVENT. A
+        reader who did not notice the flag must not read the result as "the
+        corpus is silent". Two independent tells, because `/resume` passes this
+        from a template and the reader did not necessarily choose it per-run."""
+        store = self._corpus_with_two_docs()
+        out = hs.run_search(store, "quixotry", backend="memory",
+                            exclude=["widget-relay"])
+        text = hs.render(out)
+        assert "excluded=widget-relay" in text
+        # …and it counts as a filter, which is what puts the scoped pair on the
+        # stats line beside the totals.
+        assert out.filtered is True
+        assert "in_scope_sections=" in text
+        assert out.in_scope.indexed_sections < out.stats.indexed_sections
+
+    def test_an_unfiltered_run_still_prints_no_scope_pair(self):
+        """🔴 THE NEGATIVE CONTROL for the assertion above. If `filtered` were
+        simply always true, `in_scope_sections=` would appear on every run and
+        the previous test would prove nothing."""
+        text = hs.render(hs.run_search(self._corpus_with_two_docs(), "quixotry",
+                                       backend="memory"))
+        assert "in_scope_sections=" not in text
+        assert "excluded=" not in text
+
+    def test_excluding_EVERYTHING_is_empty_scope_not_the_corpus_is_silent(self):
+        """🔴 THE SILENT-ZERO CONTRACT, EXTENDED TO THE NEW FILTER. Excluding
+        every doc leaves a scope of zero rows, and that is `empty-scope` (rc 4) —
+        "your filter emptied the corpus" — never `no-match` (rc 0), which would
+        assert the corpus is silent about a topic it was never allowed to answer
+        on. This is the whole reason `exclude` goes through the SCOPED count and
+        not only through `search`."""
+        store = self._corpus_with_two_docs()
+        out = hs.run_search(store, "quixotry", backend="memory",
+                            exclude=["widget-relay", "cable-audit"])
+        assert out.status == "empty-scope"
+        assert out.scope_reason == "no-rows"
+        assert hs.exit_code_for(out) == 4
+        text = hs.render(out)
+        assert "the filter, not the corpus, is what is empty" in text
+        assert "the index WAS searched" not in text
+        # The remedy names the flag THIS run actually passed.
+        assert "--exclude-slug" in text
+        assert "that is not silence" in text
+
+    def test_the_empty_scope_remedy_does_NOT_name_the_flag_when_unused(self):
+        """🔴 THE MIRROR CONTROL. The no-match branch already learned this lesson
+        once — a remedy that names a command without checking the state it prints
+        in. A reader whose scope was emptied by `--section` must not be sent to
+        drop an `--exclude-slug` they never passed."""
+        store = hi.MemorySectionStore(
+            hi.sections_for_doc("cablerepo", "claudedocs/handoff-cable-audit.md",
+                                DOC_SPARSE))
+        text = hs.render(hs.run_search(store, "trundlebore", backend="memory",
+                                       sections=["gotcha"]))
+        assert "🔴 EMPTY SCOPE" in text
+        assert "--exclude-slug" not in text
+        assert "that is not silence" not in text
+
+    def test_stats_and_search_cannot_disagree_about_the_exclusion(self):
+        """🔴 THE ONE-PREDICATE PROPERTY, which is why `_selected` takes the
+        filter rather than `search` doing its own dropping. The counter and the
+        query reading different scopes IS the bug this module was built around."""
+        store = self._corpus_with_two_docs()
+        whole = store.stats()
+        scoped = store.stats(exclude=["widget-relay"])
+        assert scoped.indexed_docs == whole.indexed_docs - 1
+        assert scoped.indexed_sections < whole.indexed_sections
+        # …and nothing reachable by `search` sits outside that scope.
+        reachable = store.search("quixotry trundlebore", limit=50,
+                                 exclude=["widget-relay"])
+        assert all(h.slug != "widget-relay" for h in reachable)
+
+    def test_an_unknown_slug_is_a_NO_OP_not_a_rejection(self):
+        """Unlike `--repo`, an unrecognised slug is not a caller error worth
+        refusing: the natural use is "exclude the doc I read", and a doc that is
+        not in the corpus (never committed, or newly renamed) is exactly the
+        durability-hole case the indexer reports elsewhere. Refusing here would
+        turn an ordinary resume into a non-answer."""
+        store = self._corpus_with_two_docs()
+        plain = hs.run_search(store, "quixotry", backend="memory")
+        odd = hs.run_search(store, "quixotry", backend="memory",
+                            exclude=["no-such-handoff-anywhere"])
+        assert odd.status == plain.status == "hit"
+        assert [h.slug for h in odd.hits] == [h.slug for h in plain.hits]
+
+    def test_the_CLI_dedupes_repeats_without_reordering(self):
+        """The scope line NAMES the exclusions, so a repeated flag must not make
+        that line report one filter twice."""
+        assert hs.exclusion_slug("claudedocs/handoff-a.md") == "a"
+        seen = tuple(dict.fromkeys(
+            hs.exclusion_slug(v)
+            for v in ["claudedocs/handoff-a.md", "a", "b", "a"]))
+        assert seen == ("a", "b")
+
+
+class TestThePostgresExclusionBindsToThePredicateItBelongsTo:
+    """🔴 THE FAILURE MODE HERE IS A VALID QUERY AGAINST THE WRONG COLUMNS.
+    psycopg2 binds `%s` POSITIONALLY, so a parameter appended out of order
+    produces no error at all — Postgres happily compares `slug` against the
+    section list and `section` against the slug list, returns rows, and the
+    caller reads them as an answer. No test in this repo reaches a database, so
+    the SQL text and the bound-parameter order are the only things that CAN be
+    pinned, and pinning one without the other is exactly the gap."""
+
+    EXCLUDE = ["widget-relay"]
+
+    def test_the_predicate_appears_only_when_asked_for(self):
+        base = hi.PostgresSectionStore.search_sql(repo=False, sections=False)
+        with_ex = hi.PostgresSectionStore.search_sql(repo=False, sections=False,
+                                                     exclude=True)
+        assert "slug <> ALL(%s)" not in base
+        assert "slug <> ALL(%s)" in with_ex
+        # …and the same for the count, which must agree with the query.
+        assert "slug <> ALL(%s)" in hi.PostgresSectionStore.stats_sql(
+            repo=False, sections=False, exclude=True)
+        assert "slug <> ALL(%s)" not in hi.PostgresSectionStore.stats_sql(
+            repo=False, sections=False)
+
+    def test_the_bound_params_line_up_with_the_placeholders_in_order(self):
+        """🔴 FIXTURE VALUES ARE PAIRWISE DISTINCT ON PURPOSE. `sections` and
+        `exclude` are both lists, so a swap between them is invisible to a type
+        check — only distinct VALUES can see it. The repo label, the section
+        list, the exclude list and the limit are four different values, and the
+        limit is deliberately not 1 or 3 (numbers that appear as defaults and in
+        the boost table), so a mutant binding a constant cannot pass."""
+        conn = RecordingConn()
+        store = hi.PostgresSectionStore(conn)
+        store.search("zarfwidget", repo="relayrepo", sections=["gotcha"],
+                     exclude=self.EXCLUDE, limit=17)
+        sql = conn.statements()[0]
+        params = conn.params_for("SELECT repo, slug")[0]
+        # The contract, spelled as a list so a reordering names itself.
+        assert params == ["zarfwidget", "relayrepo", ["gotcha"], self.EXCLUDE, 17]
+        # 🔴 AND THE COUNT MUST MATCH THE PLACEHOLDERS. A param list that is
+        # right but short (or long) is the same silent-rebind defect.
+        assert sql.count("%s") == len(params)
+        # 🔴 POSITIONAL, NOT MERELY PRESENT: the exclude list must sit at the
+        # index of ITS OWN placeholder among all placeholders, counted off the
+        # generated text rather than restated by hand.
+        placeholders = [
+            i for i, chunk in enumerate(sql.split("%s")[:-1])
+        ]
+        assert len(placeholders) == len(params)
+        before_exclude = sql.split("slug <> ALL(%s)")[0].count("%s")
+        assert params[before_exclude] == self.EXCLUDE, (
+            "the exclude list is not bound to the `slug <> ALL(%s)` placeholder"
+        )
+
+    def test_the_count_query_binds_the_same_way(self):
+        conn = RecordingConn()
+        store = hi.PostgresSectionStore(conn)
+        store.stats(repo="relayrepo", sections=["gotcha"], exclude=self.EXCLUDE)
+        params = conn.params_for("SELECT count(")[0]
+        assert params == ["relayrepo", ["gotcha"], self.EXCLUDE]
+        sql = conn.statements()[0]
+        assert sql.count("%s") == len(params)
+
+    def test_omitting_the_exclusion_binds_one_FEWER_param(self):
+        """🔴 THE NEGATIVE CONTROL. Without it, the assertions above would pass
+        for an implementation that always appends the exclude list."""
+        conn = RecordingConn()
+        hi.PostgresSectionStore(conn).search("zarfwidget", repo="relayrepo",
+                                             sections=["gotcha"], limit=17)
+        params = conn.params_for("SELECT repo, slug")[0]
+        assert params == ["zarfwidget", "relayrepo", ["gotcha"], 17]
+        assert conn.statements()[0].count("%s") == len(params)
