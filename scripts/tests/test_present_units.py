@@ -120,8 +120,8 @@ def _env(block: str) -> dict[str, str]:
 def test_positive_control_the_block_extractor_finds_a_known_unit():
     """If `unit_block` returned an empty string every assertion below would be a
     substring check against nothing."""
-    block = unit_block("systemd.user.services.initiatives-viewer")
-    assert "INITIATIVES_VIEWER_PORT=8899" in block
+    block = unit_block("systemd.user.services.present-serve")
+    assert "PRESENT_SERVE_PORT=8900" in block
     assert len(block) > 500
 
 
@@ -227,7 +227,6 @@ LOCAL_BIND_CLAIMS = {
     "BROWSER_RECEIVER_PORT": "activity receiver (scripts/collector)",
     "BROWSER_BRIDGE_PORT": "browser-bridge loopback server",
     "DL_ROUTER_PORT": "dl-router sidecar",
-    "INITIATIVES_VIEWER_PORT": "initiatives-viewer",
     "PRESENT_SERVE_PORT": "present-serve",                       # this change
     "nix/home.nix::127.0.0.1": "homelab-kube-tunnel SOCKS proxy",
     # 9090/3100 here are PLACEHOLDER URLs fed to `alloy validate` at build time
@@ -242,10 +241,13 @@ LOCAL_BIND_CLAIMS = {
 #: Ports of REMOTE services reached through a `kubectl port-forward` on an
 #: ephemeral LOCAL port. They name a port in a cluster, not one here, so two
 #: units naming the same value is correct and not a collision.
-REMOTE_SERVICE_CLAIMS = {
-    "RECAP_SERVICE_PORT": "homelab ns promptver, svc/vllm-recap:8000",
-    "AGENT_PORT": "homelab ns devpod-initiatives, svc/…:18789",
-}
+# Both entries here belonged to the retired `initiatives-viewer` (the vllm-recap
+# port-forward and the initiatives devpod agent) and went with it on 2026-09-07.
+# The dict stays because the DISTINCTION it encodes is the load-bearing part: a
+# remote port reached through an ephemeral local forward is not a local bind, so
+# two units naming the same value is correct and not a collision. Re-populate it
+# the next time a unit port-forwards, rather than re-deriving the rule.
+REMOTE_SERVICE_CLAIMS: dict[str, str] = {}
 
 
 def _strip_nix_comments(text: str) -> str:
@@ -292,7 +294,7 @@ def test_positive_control_the_port_scan_finds_the_known_ports():
     carrying a claim about all of them."""
     found = _declared_ports()
     # shape 1 — the env literal
-    assert found.get("INITIATIVES_VIEWER_PORT") == {8899}, found
+    assert found.get("PRESENT_SERVE_PORT") == {8900}, found
     assert found.get("BROWSER_BRIDGE_PORT") == {8788}, found
     # shape 2 — the host:port literal that shape 1 alone could not see. This is
     # the exact declaration whose mutation to :8900 used to pass.
@@ -300,7 +302,13 @@ def test_positive_control_the_port_scan_finds_the_known_ports():
     assert found.get("nix/home.nix::127.0.0.1") == {1080}, found
     # shape 3 — the nix binding interpolated into --web.listen-address
     assert found.get("nix/observability.nix::nodeExporterPort") == {9101}, found
-    assert len(found) >= 10, f"only {len(found)} labels found: {sorted(found)}"
+    # Vacuity floor on the scan, set BELOW the live measurement so a legitimate
+    # retirement does not red it while a scan wired to nothing still cannot pass.
+    # 10 -> 7 on 2026-09-07: retiring initiatives-viewer took INITIATIVES_VIEWER_PORT,
+    # RECAP_SERVICE_PORT and AGENT_PORT with it, leaving 8. The three assertions
+    # above are the real control — they name one DECLARATION SHAPE each, so a regex
+    # that stopped matching is caught by name rather than by this count.
+    assert len(found) >= 7, f"only {len(found)} labels found: {sorted(found)}"
 
 
 def test_the_scan_ignores_ports_on_hosts_this_machine_cannot_bind():
@@ -318,17 +326,19 @@ def test_the_comment_stripper_removes_prose_without_removing_code():
     empty scan that every assertion above is written to catch — and one that ate
     nothing would re-introduce the aliasing this ledger cannot represent.
 
-    The prose case is real: nix/home.nix's initiatives-viewer comment block
-    names `192.168.50.250:8899` in English. That is a description of a bind, not
-    a bind, and attributing it to the file's label would make any future
-    `192.168.50.250:<other>` mention read as a second owner.
+    The prose case is real: nix/home.nix's port-collision comment block names
+    `192.168.50.250:8900` in English. That is a description of a bind, not a
+    bind, and attributing it to the file's label would make any future
+    `192.168.50.250:<other>` mention read as a second owner. (It named
+    `:8899` — initiatives-viewer's — until that unit was retired 2026-09-07;
+    the neighbouring `:8900` sentence in the same block is the same shape.)
     """
     src = HOME_NIX.read_text(encoding="utf-8")
-    assert "192.168.50.250:8899" in src, (
+    assert "192.168.50.250:8900" in src, (
         "the fixture this control depends on is gone — find another commented "
         "host:port in nix/home.nix or delete this test, do not weaken it")
     stripped = _strip_nix_comments(src)
-    assert "192.168.50.250:8899" not in stripped
+    assert "192.168.50.250:8900" not in stripped
     assert "127.0.0.1:1080" in stripped, (
         "the SOCKS proxy's ExecStart is code, not a comment — the stripper is "
         "eating declarations and every scan above is now under-counting")
