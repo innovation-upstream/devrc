@@ -4253,3 +4253,132 @@ def test_restore_print_plan_is_SILENT_for_the_DEFAULT_identity(
                   max_lag_days=1.0, identity_source="$SOPS_AGE_KEY_FILE")
     out2 = capsys.readouterr().out
     assert "NOT the default identity" in out2, out2
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 classify_age_refusal — the INSTRUMENT the escrow verdicts are read from
+#
+# ADDED 2026-09-08, when a nixpkgs bump moved `age` 1.3.1 -> 1.3.2 and took away
+# the observable `escrow-verify.py` had been classifying on. v1.3.2 creates the
+# `--output` file LAZILY, on the first successful write, so a tampered payload
+# under one 64 KiB chunk now leaves NO file — and file presence, which used to
+# mean "age authenticated the header", stopped being available on every artifact
+# this subsystem actually produces.
+#
+# The distinction SURVIVED, through age's own three refusal messages. That is a
+# WEAKER footing than the phase observation it replaces — it is a substring match
+# on another tool's prose, which this module's own docstring argues against — so
+# the classifier is validated against the REAL binary here rather than against
+# strings someone typed. If age rewords, THIS goes red, and it goes red saying
+# which of the three it can no longer see.
+# --------------------------------------------------------------------------- #
+def _age_refusal_stderr(tmp_path, kind: str) -> str:
+    """Provoke one of age's three refusals with the REAL binary and return its
+    stderr. Built, never spelled — a hardcoded fixture cannot notice a reword.
+    """
+    ident = tmp_path / f"id-{kind}.key"
+    r = subprocess.run([AGE_KEYGEN, "-o", str(ident)], capture_output=True,
+                       text=True)
+    assert r.returncode == 0, r.stderr
+    pub = [ln.split(": ", 1)[1].strip() for ln in
+           ident.read_text(encoding="utf-8").splitlines()
+           if ln.startswith("# public key:")][0]
+
+    plain = tmp_path / f"plain-{kind}"
+    plain.write_bytes(os.urandom(4096))
+    cipher = tmp_path / f"c-{kind}.age"
+    r = subprocess.run([AGE, "--encrypt", "--recipient", pub, "--output",
+                        str(cipher), str(plain)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    blob = bytearray(cipher.read_bytes())
+
+    # The header ends at the newline that terminates the `--- <mac>` line.
+    hdr_end = blob.find(b"\n", blob.find(b"\n---") + 1) + 1
+    use_ident = ident
+    if kind == "payload":
+        # XOR, never a literal write: writing 0xff over a byte that already was
+        # 0xff is a NO-OP, and one such no-op nearly produced a measurement
+        # saying age fails to detect tampering.
+        before = blob[hdr_end + 8]
+        blob[hdr_end + 8] ^= 0xFF
+        assert blob[hdr_end + 8] != before
+    elif kind == "header":
+        before = blob[40]
+        blob[40] ^= 0xFF
+        assert blob[40] != before
+    elif kind == "no-identity":
+        other = tmp_path / f"other-{kind}.key"
+        r = subprocess.run([AGE_KEYGEN, "-o", str(other)], capture_output=True,
+                           text=True)
+        assert r.returncode == 0, r.stderr
+        use_ident = other
+    else:  # pragma: no cover - the caller's kinds are enumerated below
+        raise AssertionError(kind)
+
+    bad = tmp_path / f"bad-{kind}.age"
+    bad.write_bytes(bytes(blob))
+    out = tmp_path / f"out-{kind}"
+    r = subprocess.run([AGE, "--decrypt", "--identity", str(use_ident),
+                        "--output", str(out), str(bad)],
+                       capture_output=True, text=True)
+    assert r.returncode != 0, (
+        f"{kind}: age ACCEPTED an input this test needs it to refuse — the "
+        f"fixture no longer provokes the refusal it is named for")
+    return r.stderr
+
+
+@pytest.mark.parametrize("kind,expected_attr", [
+    ("payload", "AGE_REFUSED_PAYLOAD"),
+    ("no-identity", "AGE_REFUSED_NO_IDENTITY"),
+    ("header", "AGE_REFUSED_HEADER"),
+])
+def test_classify_age_refusal_reads_the_REAL_binarys_three_refusals(
+        tmp_path, kind, expected_attr):
+    """🔴 POSITIVE CONTROL, against the installed age — not against a string.
+
+    `escrow-verify.py` decides whether to tell an operator their BACKUP is
+    tampered or their KEY might be wrong by reading this function's answer. If
+    age rewords any of the three, this is what goes red, naming the one that
+    moved, instead of the verdict quietly becoming wrong.
+    """
+    err = _age_refusal_stderr(tmp_path, kind)
+    got = RV.classify_age_refusal(err)
+    assert got == getattr(RV, expected_attr), (
+        f"age's {kind} refusal now classifies as {got!r}. Its stderr was:\n"
+        f"{err}\n"
+        f"Re-measure and teach `_AGE_REFUSAL_MARKERS` the new string — do NOT "
+        f"widen a marker until it matches, and do NOT let this fall to "
+        f"`unrecognised` silently: escrow-verify's ARTIFACT-CORRUPT verdict is "
+        f"downstream of this answer.")
+
+
+def test_classify_age_refusal_NEVER_guesses_on_something_it_has_not_seen():
+    """🔴 NEGATIVE CONTROL. An instrument that can only ever return one of three
+    answers is indistinguishable from one wired to nothing.
+
+    The fall-through must be its own published value, because the consumer's
+    STRONGEST claim — "your backup is tampered and your key is fine" — must
+    never be reachable by default.
+    """
+    for text in ("", "age: error: something nobody has written yet",
+                 "totally unrelated output", "failed to decrypt"):
+        assert RV.classify_age_refusal(text) == RV.AGE_REFUSED_UNRECOGNISED, text
+    # And the published set is closed, so a consumer's branch cannot be
+    # bypassed by inventing a fourth value at a raise site.
+    with pytest.raises(KeyError):
+        RV.RestoreVerifyError("x", age_refusal="invented")
+
+
+def test_the_three_markers_are_all_LOAD_BEARING_and_none_is_a_prefix_of_another():
+    """A marker that another marker contains would make the answer depend on the
+    order of a tuple, which is not a property anyone should have to know."""
+    markers = [m for m, _ in RV._AGE_REFUSAL_MARKERS]
+    assert len(markers) == 3
+    assert len(set(markers)) == 3
+    for a in markers:
+        for b in markers:
+            if a is not b:
+                assert a not in b, (a, b)
+    # Every published refusal except the fall-through has exactly one marker.
+    kinds = {k for _, k in RV._AGE_REFUSAL_MARKERS}
+    assert kinds == RV.AGE_REFUSALS - {RV.AGE_REFUSED_UNRECOGNISED}

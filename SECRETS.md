@@ -359,7 +359,7 @@ disaster-recovery key gets rotated, or a tampered backup gets waved through:
 | `28` `NO-ARTIFACT` | zero objects under the prefix | wrong `--host`/prefix, or the backups are gone — `restore-verify.py` diagnoses which |
 | `29` `AGE-MISSING` | `age` is not on PATH | environment fault; says nothing about the escrow |
 | `30` `ARTIFACT-UNREADABLE` | failed before the key was used | diagnose the object, not the key |
-| `25` `DECRYPT-FAILED` | age wrote **nothing**: wrong key **or** damaged header — **not separable** | try a **different** artifact (`--scope <other>`) with the same escrowed copy: if another opens, the key is fine and this object's header is damaged. **Do not rotate first.** |
+| `25` `DECRYPT-FAILED` | age refused **before the payload**: wrong key **or** damaged header — **not separable**. ⚠ The same code also carries a second message, *"CANNOT SAY WHY"*, when age refuses in a way this tool cannot read — then **three** causes stay open, corruption included. Read the sentence, not just the number. | try a **different** artifact (`--scope <other>`) with the same escrowed copy: if another opens, the key is fine and this object's header is damaged. **Do not rotate first.** |
 | `33` `ARTIFACT-CORRUPT` | age authenticated the header (**the key worked**) then failed the payload | 🔴 **the backup is TAMPERED/CORRUPT/TRUNCATED.** Check the other retained objects. Do not rotate. |
 | `31` `ARTIFACT-EMPTY` | age exited **zero** on an empty payload (**the key worked**) | the artifact holds nothing; do not rotate |
 | `26` `RESTORE-FAILED` | decrypted fine, the git bundle is bad | artifact fault; do not rotate |
@@ -368,11 +368,35 @@ disaster-recovery key gets rotated, or a tampered backup gets waved through:
 the `--host` prefix trap `restore-verify.py` documents), and neither is a verdict
 on the escrow.
 
-Measured (age v1.3.1, many offsets and sizes): a wrong key or a damaged header
-leaves **no** plaintext file, while payload corruption and truncation leave one —
-because age writes output *before* authenticating the payload. That, plus a
-machine-readable cause published by `restore-verify.py`, is what separates the
-rows; none of it is parsed out of age's stderr.
+🔴 **HOW `25` AND `33` ARE TOLD APART — AND HOW THAT GOT WEAKER (2026-09-08).**
+
+Originally: measured on age **v1.3.1**, a wrong key or a damaged header left
+**no** plaintext file, while payload corruption and truncation left one, because
+age created its `--output` as soon as it had authenticated the header. File
+presence therefore *was* the discriminator, and none of it was parsed out of
+age's stderr.
+
+**age v1.3.2 took that away.** It creates `--output` **lazily**, on the first
+successful write — re-measured 2026-09-08 across 7 payload sizes × 5 manglings
+on both versions. So a tampered artifact **under 64 KiB leaves no file at all**,
+which is every artifact this subsystem produces. Left alone, that reported a
+TAMPERED backup as `25` — the row that points at your key.
+
+The distinction **survives**, but on weaker footing: it is now taken primarily
+from age's own refusal message (`failed to decrypt and authenticate payload
+chunk` vs `no identity matched any of the recipients` vs `failed to read
+header`), which is byte-identical on v1.3.1 and v1.3.2. File presence is kept as
+a second signal — still **sufficient**, no longer **necessary**. Both are
+combined in `escrow-verify.py`; the classification itself is
+`restore-verify.py::classify_age_refusal`.
+
+⚠ **Say plainly what that costs:** a substring match on another tool's prose is
+weaker than the phase observation it replaced, and this subsystem's own design
+notes argue against exactly that shape. The mitigation is that an
+**unrecognised** message is its own outcome — the verifier then says it *cannot
+say why* and names all three causes, rather than picking one. If you ever see
+that sentence, age has reworded: teach `classify_age_refusal` the new string
+rather than acting on a guess.
 
 ⚠ It cannot unlock the vault and will not try: every `bw` call runs with stdin on
 `/dev/null`, `--nointeraction`, and a timeout, so an unattended run **fails fast
