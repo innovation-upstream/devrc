@@ -1653,20 +1653,40 @@ def test_the_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
     _no_universe_token_anywhere(seen["mesg"], "GUESSED-NOTE DISCLOSURE")
 
 
-def test_the_note_is_NOT_attached_to_the_ordinary_bare_hash_N_picker(monkeypatch):
-    """🔴 THE NEGATIVE CONTROL FOR THE NOTE, and it guards the most common
-    interaction in this handler. A bare `#N` with a pane repo has been a
-    two-row picker since before any of this; putting a line of apology above it
-    would tax every single click. The note rides ONLY on the one-row picker the
-    suppression created."""
+def test_the_bare_hash_N_picker_SAYS_the_github_row_is_a_guess(monkeypatch):
+    """🔴 SUPERSEDES `test_the_note_is_NOT_attached_to_the_ordinary_bare_hash_N_
+    picker`, WHICH PINNED `mesg == ""` AND `2` ROWS ON PURPOSE.
+
+    That test's claim was that a bare `#N` with a pane repo is not a dead end,
+    so a note above it would be "a line of apology" taxing every click. Half of
+    it survives — the two measured rows are still FIRST, so the common case is
+    still one Enter — and half is OVERRULED: the OPERATOR asked for the universe
+    here on 2026-09-08 ("fix the bare-#N and any other cases left unfixed"),
+    because when the pane guess is wrong the right repo was unreachable. Once
+    several hundred rows are in the list, an unexplained picker is the bug and
+    the note is what stops it reading as one.
+
+    ⚠ THE NOTE MUST NAME THE ROW, NOT "THE FIRST ROW". The guess is at row 2
+    here — the clawgate task is above it — and #1380's wording said FIRST
+    unconditionally, which was true only of the `audit-pr` shape."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [])
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
     seen = {}
-    monkeypatch.setattr(MO, "pick",
-                        lambda c, mesg="": seen.update(n=len(c), mesg=mesg) or "")
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c, mesg="": seen.update(rows=list(c), mesg=mesg) or "")
     assert MO.main(["#1291"]) == 0
-    assert seen["n"] == 2, seen
-    assert seen["mesg"] == "", seen
+    urls = [c["url"] for c in seen["rows"]]
+    # clawgate, the pane guess, then the three FAKE_UNIVERSE repos.
+    assert len(urls) == 5, urls
+    assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", urls
+    assert "wrongorg/wrongrepo" in urls[1], urls
+    assert "Row 2" in seen["mesg"], seen["mesg"]
+    assert "3 rows below it" in seen["mesg"], seen["mesg"]
+    assert "guess" in seen["mesg"].lower(), seen["mesg"]
+    assert "nothing here knows" not in seen["mesg"], seen["mesg"]
+    _no_universe_token_anywhere(seen["mesg"], "BARE-HASH-N GUESS NOTE")
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -2108,9 +2128,18 @@ def test_the_picker_NOTE_never_names_a_universe_row(universe, monkeypatch,
 
 
 def test_the_ORDINARY_picker_gets_no_note(spy, monkeypatch):
-    """The bare `#N` picker — clawgate plus a pane-attributed GitHub row — is
-    not a dead end. Putting a line of apology above the single most common
-    interaction in this handler would be a regression dressed as a diagnosis."""
+    """A picker whose every row is EVIDENCE is not a dead end and needs no
+    explanation.
+
+    🔴 ITS SCOPE NARROWED ON 2026-09-08 AND THE DOCSTRING IS REWRITTEN RATHER
+    THAN LEFT TO ROT. It used to claim the bare `#N` picker never carries a
+    note. That is no longer true on a real host: the universe is now appended
+    beneath the guess, and a several-hundred-row picker with no explanation is
+    the bug, not the note. What this pins now is the DEGENERATE host the `spy`
+    fixture happens to build — its whole universe is the pane's own repo, so the
+    dedupe appends nothing, there is nothing to search, and the two measured
+    rows still speak for themselves. A comment claiming the wider coverage would
+    read as a guard on the common path while guarding only this corner."""
     seen = {}
     monkeypatch.setattr(
         MO, "pick",
@@ -2148,12 +2177,28 @@ def test_the_picker_passes_its_NOTE_to_rofi_as_mesg(monkeypatch):
     assert "-mesg" not in seen["cmd"], seen["cmd"]
 
 
-def test_a_bare_hash_N_that_the_PANE_already_attributes_does_NOT_get_the_universe(
+def test_a_bare_hash_N_that_the_PANE_attributes_gets_the_universe_BELOW_it(
         spy, universe):
-    """The universe is the LAST resort. A measured pane repo is evidence, and
-    burying it under 300 options would be a regression dressed as a feature."""
+    """🔴 SUPERSEDES `test_a_bare_hash_N_that_the_PANE_already_attributes_does_
+    NOT_get_the_universe`, WHOSE ASSERTION WAS `("pick", 2) in spy`.
+
+    Its argument — "the universe is the LAST resort; a measured pane repo is
+    evidence, and burying it under 300 options would be a regression dressed as
+    a feature" — is a real prior decision, taken in #1380 and written down
+    there. The OPERATOR overruled it on 2026-09-08, asking explicitly for "the
+    bare-#N and any other cases left unfixed": a pane repo is evidence about the
+    WINDOW, not about the reference, and when it is wrong the two-row picker
+    offered no way to say so. Same defect as `audit-pr N`, one rung along.
+
+    🔴 WHAT SURVIVES OF THE OLD CLAIM IS PINNED HERE, NOT DROPPED. The two
+    MEASURED rows stay first, in their old order — clawgate, then the pane's
+    GitHub repo — so the common case is still one Enter and rofi still opens on
+    the clawgate row. The universe is strictly APPENDED."""
     assert MO.main(["#370"]) == 0
-    assert ("pick", 2) in spy, spy
+    # clawgate + the pane repo + the three FAKE_UNIVERSE repos, deduped.
+    assert ("pick", 5) in spy, spy
+    assert spy[-1] == ("open", "https://clawgate.zacx.dev/tasks/370"), (
+        "the clawgate row must still be the first, default-selected one")
 
 
 @pytest.fixture
@@ -2664,7 +2709,7 @@ def test_systemctl_is_MENTIONED_but_never_SPAWNED():
 # everywhere else a repository cannot be named; this arm just never reached it.
 # --------------------------------------------------------------------------- #
 def _guessed_picker(monkeypatch, *, universe, pane="wrongorg/wrongrepo",
-                    mapping=FAKE_UNIVERSE):
+                    mapping=FAKE_UNIVERSE, text="audit-pr 1291"):
     """Drive `main()` down the guessed-repo path and return what `pick` saw.
 
     ⚠ `mapping` IS A PARAMETER BECAUSE `universe=[]` DOES NOT EMPTY THE UNIVERSE.
@@ -2672,14 +2717,19 @@ def _guessed_picker(monkeypatch, *, universe, pane="wrongorg/wrongrepo",
     caller that clears only the file still gets every mapped repo — my own
     empty-universe test asserted 1 row and got 4 for exactly that reason. The
     empty case needs BOTH sources cleared, and that is worth a parameter rather
-    than a comment, because the trap is silent in the other direction too."""
+    than a comment, because the trap is silent in the other direction too.
+
+    ⚠ `text` IS A PARAMETER BECAUSE THE DEFECT HAS TWO SHAPES, and they differ
+    in exactly the way that broke the note: `audit-pr N` offers the guess at row
+    1, a bare `#N` offers the clawgate task first and the guess at row 2. A
+    helper hard-wired to one of them is how the second went unfixed."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(mapping))
     monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: list(universe))
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: pane)
     seen = {}
     monkeypatch.setattr(MO, "pick",
                         lambda c, mesg="": seen.update(rows=list(c), mesg=mesg) or "")
-    assert MO.main(["audit-pr 1291"]) == 0
+    assert MO.main([text]) == 0
     return seen
 
 
@@ -2766,3 +2816,295 @@ def test_an_EXPLICIT_owner_still_opens_directly_and_gets_NO_picker(monkeypatch):
     assert MO.main(["civitai/talos-infra#1065"]) == 0
     assert picked == [], "an explicit owner must not raise a picker"
     assert opened == ["https://github.com/civitai/talos-infra/issues/1065"], opened
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SAME DEFECT ONE RUNG ALONG — THE BARE `#N` THE PANE ATTRIBUTES
+#
+# 2026-09-08, operator: "fix the bare-#N and any other cases left unfixed".
+#
+# #1380 closed the shape where the guess was ALONE (`audit-pr N`) and wrote
+# down, in the handler and in
+# `test_a_bare_hash_N_that_the_PANE_already_attributes_does_NOT_get_the_universe`,
+# that it was deliberately leaving the two-row shape alone: "burying two good
+# rows under several hundred is a regression dressed as a feature", and the
+# trade belonged to the operator. The operator has now made it. The rows that
+# were MEASURED stay on top — that half of the old claim is still pinned, in the
+# superseding test above and in the ordering test below — and the universe goes
+# underneath.
+#
+# Everything here drives `main()` rather than a helper, because a correct helper
+# `main()` never calls is the failure mode this file has already had.
+# --------------------------------------------------------------------------- #
+def test_a_bare_hash_N_offers_the_universe_UNDER_the_two_measured_rows(
+        monkeypatch):
+    """🔴 THE REGRESSION FOR THE 2026-09-08 REPORT. Red before this change: the
+    picker held exactly TWO rows and the pane's repo was the only GitHub one, so
+    a wrong pane guess left the right repository unreachable."""
+    seen = _guessed_picker(monkeypatch, text="#1291",
+                           universe=[UNIVERSE_ONLY, "acme/widget"])
+    urls = [c["url"] for c in seen["rows"]]
+    assert len(urls) > 2, f"the two-row picker is unchanged: {urls}"
+    assert any(UNIVERSE_ONLY in u for u in urls), (
+        f"the universe never reached the bare-#N picker: {urls}")
+    assert any("acme/widget" in u for u in urls), urls
+    assert all(u.endswith("/1291") for u in urls), urls
+
+
+def test_the_bare_hash_N_ORDER_is_clawgate_then_the_guess_then_the_universe(
+        monkeypatch):
+    """🔴 THE HALF OF THE SUPERSEDED TEST'S CLAIM THAT SURVIVES, PINNED AS AN
+    ORDERING RATHER THAN AS A ROW COUNT.
+
+    The common case must stay one or two keystrokes: rofi opens on row 1, so the
+    clawgate task is still one Enter and the pane's repo is one arrow key away.
+    Every universe row must sit BELOW both.
+
+    ⚠ THE ROW-COUNT FLOOR IS WHAT MAKES THIS A REGRESSION TEST RATHER THAN AN
+    INVARIANT GUARD. Without it the two positional assertions are satisfied by
+    the PRE-CHANGE two-row picker — there is simply nothing at index 2 to be
+    out of order — so it would have been green at base while claiming to pin the
+    ordering the change introduces."""
+    seen = _guessed_picker(monkeypatch, text="#1291",
+                           universe=[UNIVERSE_ONLY, "acme/widget"])
+    urls = [c["url"] for c in seen["rows"]]
+    assert len(urls) == 7, urls
+    assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", (
+        f"the MEASURED rows must stay on top: {urls}")
+    assert urls[1] == "https://github.com/wrongorg/wrongrepo/issues/1291", (
+        f"the MEASURED rows must stay on top: {urls}")
+    assert not any(UNIVERSE_ONLY in u or "acme/widget" in u for u in urls[:2]), urls
+    assert UNIVERSE_ONLY in "\n".join(urls[2:]), urls
+
+
+def test_the_bare_hash_N_note_names_the_GUESSED_ROWS_POSITION(monkeypatch):
+    """🔴 THE WORDING DEFECT WIDENING THE ARM CREATES, AND THE REASON
+    `guessed_note` GREW A `rank`. #1380's multi-row wording opened "The FIRST
+    row is a guess from the tmux pane" — true of `audit-pr N`, FALSE here, where
+    row 1 is the clawgate task and the guess is row 2. Pointing the operator at
+    the wrong row is worse than saying nothing: they would distrust the clawgate
+    task and trust the guess.
+
+    Pinned as the WHOLE normalised string, because a guard on the words `guess`
+    and `tmux pane` is walkable by a reword that still names the wrong row."""
+    seen = _guessed_picker(monkeypatch, text="#1291",
+                           universe=[UNIVERSE_ONLY, "acme/widget"])
+    assert seen["mesg"] == (
+        "#1291 names no repository. Row 2 is a guess from the tmux pane, which "
+        "may not be the pane you clicked in — the 5 rows below it are every "
+        "repository this host knows. Type to search, or dismiss."), seen["mesg"]
+    _no_universe_token_anywhere(seen["mesg"], "BARE-#N GUESS-NOTE DISCLOSURE")
+
+
+def test_the_audit_pr_note_still_names_ROW_1(monkeypatch):
+    """The other half of the same pin — the shape #1380 fixed must not have its
+    row number silently shifted by the `rank` parameter. Its guess is row 1."""
+    seen = _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY, "acme/widget"])
+    assert seen["mesg"] == (
+        "audit-pr 1291 names no repository. Row 1 is a guess from the tmux "
+        "pane, which may not be the pane you clicked in — the 5 rows below it "
+        "are every repository this host knows. Type to search, or dismiss."), (
+            seen["mesg"])
+
+
+def test_the_bare_hash_N_guess_is_NEVER_opened_unconfirmed(monkeypatch):
+    """🔴 THE SAFETY PROPERTY, RE-ASSERTED FOR THIS SHAPE. Widening the offer
+    must not weaken the rule. `open_url` is reachable here only through a
+    selection, and there is none.
+
+    ⚠ INVARIANT GUARD, NOT A REGRESSION TEST — green at base 18bc1500 too,
+    because #1336 already suppressed the auto-open for this rung. It is here to
+    catch the widening WEAKENING it, which is a different failure from the one
+    being fixed."""
+    opened = []
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
+    _guessed_picker(monkeypatch, text="#1291", universe=[UNIVERSE_ONLY])
+    assert opened == [], f"a guessed repo was opened without a selection: {opened}"
+
+
+def test_a_bare_hash_N_whose_universe_ADDS_NOTHING_keeps_the_two_row_picker(
+        monkeypatch):
+    """⚠ THE DEGENERATE HOST, AND THE REASON THE APPEND IS GUARDED ON `extra`
+    RATHER THAN ON `universe`. When the only repository this host knows IS the
+    pane's, the dedupe leaves nothing to append — so there is nothing to
+    explain, and a note claiming "the N rows below it" would name rows that are
+    not in the list. The picker stays two rows and stays silent.
+
+    ⚠ INVARIANT GUARD — green at base 18bc1500 too. It pins the boundary the
+    widening must NOT cross, not behaviour the widening created."""
+    seen = _guessed_picker(monkeypatch, text="#1291",
+                           universe=["wrongorg/wrongrepo"],
+                           mapping={"wr": "wrongorg/wrongrepo"})
+    urls = [c["url"] for c in seen["rows"]]
+    assert len(urls) == 2, urls
+    assert seen["mesg"] == "", seen["mesg"]
+
+
+def test_the_guessed_row_is_not_offered_twice_on_the_bare_hash_N_path_either(
+        monkeypatch):
+    """The dedupe is at the `main()` level rather than inside the `audit-pr`
+    arm, so it covers this shape too. A pane repo that is ALSO in the universe
+    appears exactly once.
+
+    ⚠ THE COUNT IS ASSERTED FIRST FOR THE SAME REASON AS THE ORDERING TEST: a
+    two-row picker has no duplicates either, so without it this would be green
+    at base. Three mapped repos + two universe rows = five distinct
+    repositories, one of which IS the pane's, so the append contributes four
+    beneath the two measured rows."""
+    seen = _guessed_picker(monkeypatch, text="#1291",
+                           universe=["wrongorg/wrongrepo", "acme/widget"])
+    urls = [c["url"] for c in seen["rows"]]
+    assert len(urls) == 6, urls
+    assert len(urls) == len(set(urls)), f"duplicate rows: {urls}"
+    assert sum("wrongorg/wrongrepo" in u for u in urls) == 1, urls
+
+
+def test_the_DEFAULT_REPO_FLAG_rides_the_same_rung_as_the_pane(monkeypatch):
+    """🔴 `--default-repo` IS THE SAME LADDER RUNG AS `tmux_pane_repo()`, and the
+    predicate is `repo_source == default` rather than "the pane answered". With
+    the pane silent, the flag alone must still produce an overridable offer —
+    otherwise a caller could re-open the exact hole this change closes by
+    handing the guess in from outside."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [UNIVERSE_ONLY])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    seen = {}
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c, mesg="": seen.update(rows=list(c), mesg=mesg) or "")
+    assert MO.main(["--default-repo", "wrongorg/wrongrepo", "#1291"]) == 0
+    urls = [c["url"] for c in seen["rows"]]
+    assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", urls
+    assert urls[1] == "https://github.com/wrongorg/wrongrepo/issues/1291", urls
+    assert any(UNIVERSE_ONLY in u for u in urls), urls
+    assert "Row 2" in seen["mesg"], seen["mesg"]
+
+
+def test_a_bare_hash_N_with_NO_pane_repo_is_UNCHANGED_by_this_widening(
+        monkeypatch):
+    """🔴 THE UNTOUCHED NEIGHBOUR. Nothing attributed this `#N`, so there is no
+    guess to override and PASS 3's own arm — not the guessed one — appends the
+    universe. It must still do so, and it must still carry NO note: the rows are
+    a real clawgate task plus a list, with nothing being recommended.
+
+    ⚠ INVARIANT GUARD — green at base 18bc1500 too, by design: "unchanged" is
+    the whole claim."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    seen = {}
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c, mesg="": seen.update(rows=list(c), mesg=mesg) or "")
+    assert MO.main(["#1291"]) == 0
+    urls = [c["url"] for c in seen["rows"]]
+    assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", urls
+    assert len(urls) == 4, urls
+    assert seen["mesg"] == "", seen["mesg"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    # `mapped` — the operator named the repo, the mapping supplied the owner.
+    # DELIBERATELY NOT WIDENED, and the reasoning is in the PR body: the TEXT is
+    # evidence about the REFERENCE, `regen-known-repos.py` drops a bare name two
+    # owners share rather than picking one (so a `mapped` hit is unique on this
+    # host by construction), and the mapping's AGE already reaches the operator
+    # through `staleness_note`. Putting a several-hundred-row picker in front of
+    # every `repo#N` would tax the shape that carries its own evidence.
+    ("loamfield#12", "https://github.com/gardenersguild/trowelcast/issues/12"),
+    # `explicit` — the strongest rung there is.
+    ("civitai/talos-infra#1065",
+     "https://github.com/civitai/talos-infra/issues/1065"),
+])
+def test_the_TEXTS_OWN_evidence_still_opens_with_ZERO_keystrokes(monkeypatch,
+                                                                text, expected):
+    """🔴 THE NEGATIVE CONTROL FOR THE WIDENING. A rule that appended the
+    universe to every candidate — or that read `guessed` as "the text named no
+    OWNER" rather than "the ladder answered from `default`" — would satisfy
+    every assertion above while putting a picker in front of the two shapes that
+    already know the answer. Both must still open directly, and a WRONG pane
+    repo is loaded so a guess leaking into these paths is visible.
+
+    ⚠ INVARIANT GUARD / NEGATIVE CONTROL — green at base 18bc1500 too."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [UNIVERSE_ONLY])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": pytest.fail(f"asked about {text}"))
+    opened = []
+    monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
+    assert MO.main([text]) == 0
+    assert opened == [expected], opened
+
+
+def test_a_SIX_DIGIT_click_is_STILL_a_toast_with_a_pane_repo_loaded(monkeypatch):
+    """🔴 THE OTHER NEGATIVE CONTROL. `#282828` is a colour literal; every row a
+    picker could offer names an issue no repository has. `colour` bars the
+    universe before any of this, and a pane repo must not sneak it back in — the
+    scanner refuses the text, so `span is None`, so `guessed` is False.
+
+    ⚠ INVARIANT GUARD / NEGATIVE CONTROL — green at base 18bc1500 too."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [UNIVERSE_ONLY])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": pytest.fail("raised a picker"))
+    notices = []
+    monkeypatch.setattr(MO, "notify", lambda *a, **k: notices.append(tuple(a)))
+    assert MO.main(["#282828"]) == 1
+    assert notices, "no toast at all"
+    body = " ".join(notices[-1])
+    assert "colour literal" in body, body
+    _no_universe_token_anywhere(body, "COLOUR-TOAST DISCLOSURE")
+
+
+def test_PRINT_mode_on_a_bare_hash_N_lists_the_CANDIDATES_not_the_universe(
+        monkeypatch, capsys):
+    """🔴 THE DISCLOSURE CONTROL FOR THE WIDENED ARM. `--print` returns before
+    the guessed branch AND `may_offer_universe` is false under it, so the
+    universe is doubly barred — but widening an arm is exactly the kind of
+    change that reaches a path by accident, and the leak here would be private
+    repository names on stdout.
+
+    ⚠ INVARIANT GUARD / NEGATIVE CONTROL — green at base 18bc1500 too."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [UNIVERSE_ONLY])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": pytest.fail("--print raised a picker"))
+    assert MO.main(["--print", "#1291"]) == 0
+    out = capsys.readouterr().out
+    # POSITIVE CONTROL: it really did resolve and print something.
+    assert "https://clawgate.zacx.dev/tasks/1291" in out, out
+    assert len(out.strip().splitlines()) == 2, out
+    assert UNIVERSE_ONLY not in out, out
+    _no_universe_token_anywhere(out, "PRINT-MODE DISCLOSURE")
+
+
+def test_the_universe_reaches_ROFI_AND_NO_OTHER_SINK_on_the_bare_hash_N_path(
+        monkeypatch, capsys, real_notify):
+    """🔴 THE WIDENED ARM'S DISCLOSURE GUARD, through the REAL `notify()`.
+    `_every_sink` folds stdout, stderr and every `notify-send` argv into one
+    string; a universe row may appear in the rofi rows and NOWHERE in it.
+
+    POSITIVE CONTROL: the same run's picker rows are asserted to CONTAIN a
+    universe token, so a version of this test that scanned an empty universe
+    could not pass by finding nothing."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [UNIVERSE_ONLY])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    seen = {}
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c, mesg="": seen.update(rows=MO.picker_rows(c), mesg=mesg) or "")
+    assert MO.main(["#1291"]) == 0
+    rows = "\n".join(seen["rows"])
+    assert UNIVERSE_ONLY in rows, (
+        f"POSITIVE CONTROL FAILED — no universe row was offered at all: {rows}")
+    assert any(t in rows for t in FAKE_UNIVERSE_TOKENS), rows
+    blob = _every_sink(capsys, real_notify)
+    _no_universe_token_anywhere(blob, "BARE-#N EVERY SINK")
+    for token in (UNIVERSE_ONLY, UNIVERSE_ONLY.split("/")[0],
+                  UNIVERSE_ONLY.split("/")[1]):
+        assert token not in blob, (
+            f"a universe row reached a sink that is not rofi: {token!r}")
