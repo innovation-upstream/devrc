@@ -34,7 +34,7 @@ is a per-test `pytest-timeout` budget, NOT lowering this back under the CLI's bo
 🔴 THIS LIVES IN ITS OWN UNIQUELY-NAMED MODULE, NOT conftest.py. `conftest` is not
 namespaced: with 7 `conftest.py` files in this repo and no `__init__.py`, an
 importer binds to whichever lands in sys.modules first, so
-`pytest scripts/browser-bridge/tests scripts/repo-cos/tests` died with
+`pytest scripts/browser-bridge/tests <a second suite>` died with
 `ImportError: cannot import name 'CLI_TIMEOUT_S' from 'conftest'` — blaming the
 wrong file. The shipped gate runs one target per pytest invocation and was safe,
 but "safe by how it happens to be invoked" is not a property to rely on.

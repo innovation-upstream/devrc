@@ -427,9 +427,11 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 # Sources (grep `shutil.which` under scripts/):
 #   curl    scripts/browser-bridge/tests/{test_server,test_browser_cli_args}.py (41+ tests)
 #   bash    the `browser` CLI + drafter + ship-converge suites
-#   node    scripts/initiatives/tests/{test_viewer,test_streaming}.py  (123 tests)
-#   rg      scripts/repo-cos/tests/test_prescan.py
-#   git     scripts/repo-cos/tests/test_prescan.py, scripts/tests/test_ship_converge.py
+#   node    scripts/tests/test_opencode_session_env_plugin.py,
+#           scripts/tests/test_skill_mjs_parses.py
+#   rg      (no suite needs it since repo-cos retired; kept because gateTools and
+#           REQUIRED_TOOLS are pinned two-way and dropping it is its own change)
+#   git     scripts/tests/test_ship_converge.py
 #   awk     scripts/browser-bridge/tests/test_browser_session_id.py
 #   jq,grep scripts/task-spec-drafter/tests/test_severity_and_gate_skip.py
 #   setsid  scripts/browser-bridge/tests/test_browser_agent.py (process-group kill)
@@ -763,8 +765,6 @@ HERMETIC_TARGETS=(
   # are injected fakes, and conftest.py fails any test that reaches for the real
   # `requests` — so no Postgres, no MinIO, no network.
   scripts/signal/tests
-  scripts/initiatives/tests
-  scripts/repo-cos/tests
   scripts/task-spec-drafter/tests
   # Added 2026-08-22 with the check-clickup-addressed migration out of
   # datapacket-talos, where no gate had ever run it — the suite was invoked by
@@ -1865,8 +1865,6 @@ TARGET_FLOORS=(
   # idempotence check for `ensure_schema()` — so unlike every entry above this
   # one, EXPECTED_SKIPS is NOT untouched; see its new sibling pin there.
   "scripts/signal/tests|920"
-  "scripts/initiatives/tests|745"
-  "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"
   # 2026-08-22, check-clickup-addressed arrives as a NEW target: 176 collected on
   # the branch, agreeing with what its own tests/run_all.py reports (176 passed,
@@ -3269,10 +3267,6 @@ _nolaunch_ack_reason() {
 # is unset or empty". One predicate — `_skip_entry_applies` — decides both the
 # count and the forgiveness, so the two cannot drift apart.
 EXPECTED_SKIPS=(
-  # Opt-in drift check against the LIVE homelab store — needs a kubeconfig and
-  # network, neither of which a hermetic gate may have. Skips everywhere unless
-  # REPO_COS_LIVE_DRIFT_CHECK=1.
-  "scripts/repo-cos/tests|live-store drift check is opt-in"
   # Needs a REAL Postgres (SIGNAL_PG_DSN). Unlike the skill_audit case below —
   # which was correctly fixed by re-pointing at tracked fixtures so it RUNS —
   # this one cannot be made hermetic: the test exists because SQLite does not

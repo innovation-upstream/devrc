@@ -74,7 +74,6 @@
       "tier": "B",
       "why": "CLOSEST CALL in this ledger -- 'what's stalled' IS a symptom, but the mis-route lands on `initiatives` (the durable board), a degraded answer rather than a wrong action; flip to A the first time that costs anything"
     },
-    "initiatives": { "tier": "A" },
     "mailbox": { "tier": "A" },
     "obs-read": { "tier": "A" },
     "opencode": { "tier": "A" },
@@ -89,10 +88,6 @@
     "prune-skill": {
       "tier": "B",
       "why": "'prune/shrink this skill' -- named, not described"
-    },
-    "repo-cos": {
-      "tier": "B",
-      "why": "a weekly ritual opened by name or as /repo-cos; the email that prompts it names it"
     },
     "resume": { "tier": "A" },
     "session-manager": { "tier": "A" },

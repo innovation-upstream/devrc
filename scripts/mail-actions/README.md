@@ -206,7 +206,7 @@ Each newly-extracted action is tagged, best-effort, with the **existing initiati
 it relates to** (if any). The run loads the Phase-1 store's `initiatives.current`
 view ONCE (`MailDB.fetch_current_initiatives()`, reusing the open connection — no
 second port-forward) and, for each action, ranks the mail **subject** against it via
-the shared router `scripts/initiatives/route.py` (loaded by explicit importlib path —
+the shared initiatives router (loaded by explicit importlib path —
 NOT on `sys.path`, to avoid the `llm.py` shadow trap). The top match is taken **only
 when `ranked[0]["confident"]`**; the slug lands in `related_initiative` and surfaces
 as `relates to: <slug>` in `extract.py list` and on the clawgate card. Strictly

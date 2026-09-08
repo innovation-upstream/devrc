@@ -57,7 +57,7 @@ same directory. Measured over the 761 transcripts these scripts actually walk:
 | candidate | transcripts matched | verdict |
 |---|---|---|
 | `check-clickup-addressed` (bare name) | 96 (12.6%) | unusable — the known one |
-| `scripts/repo-cos/` (sibling CLAUDE.md row, as a proxy) | 83 (10.9%) | what the directory spelling would cost |
+| the `repo-cos` subsystem directory (a sibling CLAUDE.md row at the time, used as a proxy; retired 2026-09-07) | 83 (10.9%) | what the directory spelling would cost |
 | `scripts/session-analysis/` (ditto) | 72 (9.5%) | ” |
 | `check-clickup-addressed/scripts/` (old marker) | 11 (1.4%) | ✅ anchored |
 | `scripts/check-clickup-addressed/[file].py` (shipped) | — | ✅ anchored: requires a FILE |

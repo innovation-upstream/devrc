@@ -109,7 +109,7 @@ SCANNED_FILES = tuple(sorted({s[0] for s in EMPTY_DEFAULT_SITES}))
 #: `git ls-files` finds **17 matches in 9 files**. Six of them are the guarded
 #: sites below; the rest are these, in NEITHER ledger and NOT scanned:
 #:
-#:   scripts/initiatives/run-sync.sh           HOMELAB, KUBECONFIG
+#:   (initiatives + repo-cos wrappers retired 2026-09-07)
 #:   scripts/collector/run-regrowth-check.sh   HOMELAB, KUBECONFIG
 #:   .zshrc                                    DEVRC_DIR
 #:   scripts/initiatives/run-viewer.sh
@@ -133,13 +133,10 @@ SCANNED_FILES = tuple(sorted({s[0] for s in EMPTY_DEFAULT_SITES}))
 #: specific scripts. Widening the sweep repo-wide is a follow-up, and it is a
 #: real one: the hazard is identical.
 UNAUDITED_ELSEWHERE = (
-    "scripts/initiatives/run-sync.sh",
     "scripts/collector/run-regrowth-check.sh",
     ".zshrc",
-    "scripts/initiatives/run-viewer.sh",
     "scripts/mail-actions/run-archive.sh",
     "scripts/mail-triage",
-    "scripts/repo-cos/run-weekly.sh",
     "scripts/task-spec-drafter/drafter.sh",
 )
 

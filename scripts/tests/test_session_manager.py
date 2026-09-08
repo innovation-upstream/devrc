@@ -10443,7 +10443,6 @@ _EXPECTED_NOT_MEASURED = {
     "pull_requests": ("pull_requests", "initiative-scan"),
     "mail_queue": ("mail_queue", "mailbox"),
     "cluster_alerts": ("cluster_alerts", "obs-read"),
-    "initiative_board": ("initiative_board", "initiatives"),
     "gui_windows_outside_tmux": ("gui_windows", "i3"),
 }
 
@@ -10571,8 +10570,8 @@ def test_the_not_measured_POPULATION_SET_cannot_silently_SHRINK():
     # 🔴 AND THE DERIVED OUTPUT MOVES WITH IT, against a LITERAL count. `5` is a
     # number the constant cannot supply; `len(NOT_MEASURED_POPULATIONS)` is the
     # trap this test exists to close, so it must not appear on this line.
-    assert len(base_gather()["not_measured"]) == 5
-    assert len(sm.render_not_measured(base_gather())) == 6  # heading + 5 rows
+    assert len(base_gather()["not_measured"]) == 4
+    assert len(sm.render_not_measured(base_gather())) == 5  # heading + 4 rows
 
 
 def test_every_not_measured_population_names_a_skill_that_EXISTS():
@@ -10687,7 +10686,6 @@ def test_the_NOT_MEASURED_section_is_pinned_as_a_WHOLE_normalised_string():
     assert _block_after(lines, heading) == [
         "cluster_alerts             -> /obs-read",
         "gui_windows_outside_tmux   -> /i3",
-        "initiative_board           -> /initiatives",
         "mail_queue                 -> /mailbox",
         "pull_requests              -> /initiative-scan",
     ]
@@ -10713,7 +10711,10 @@ def test_render_not_measured_tells_an_ABSENT_key_from_an_EMPTY_list():
     # was this assertion for the whole PR, and it is the reason deleting an
     # entry stayed green: both sides shrank together. See
     # `test_the_not_measured_POPULATION_SET_cannot_silently_SHRINK`.
-    assert len(populated) == 6
+    # 6 -> 5 on 2026-09-07: `initiative_board` was dropped when the board it
+    # named was retired. That is the mechanism WORKING — the literal is what
+    # made a deliberate removal announce itself in three places at once.
+    assert len(populated) == 5
 
 
 def test_the_not_measured_section_is_printed_in_EVERY_state_including_empty():

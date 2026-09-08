@@ -1400,14 +1400,13 @@ NOT_MEASURED_POPULATIONS = {
                  "with nobody sitting in front of it, which is the failure "
                  "mode that most needs a human."),
     },
-    "initiative_board": {
-        "report_key": "initiative_board",
-        "owner_skill": "initiatives",
-        "note": ("The DURABLE record of what is in flight. These rows are live "
-                 "tmux windows only, so an initiative with no window open — "
-                 "stalled, or between sessions — contributes nothing here. "
-                 "'Nothing is running' is not 'nothing is in flight'."),
-    },
+    # (`initiative_board` sat here until 2026-09-07: the DURABLE record of what
+    # was in flight, unmeasurable from a tmux scan because an initiative with no
+    # window open contributes nothing. The board was RETIRED, so there is no
+    # longer a population to declare unmeasured — the honest move is to drop the
+    # row, not repoint it at a surviving skill that holds none of those rows.
+    # The caveat it carried is NOT lost: "nothing is running" still is not
+    # "nothing is in flight", and `/initiative-scan` is what answers the latter.)
     "gui_windows_outside_tmux": {
         "report_key": "gui_windows",
         "owner_skill": "i3",

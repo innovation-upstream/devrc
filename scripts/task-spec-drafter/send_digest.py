@@ -6,7 +6,8 @@ the day's triage (would-dispatch TASKs + the NEEDS-DECISION / STALE / ALREADY-DO
 classifications) so he can adjudicate from his inbox without the tool touching
 anything.
 
-REUSES repo-cos's `email_send.py` (the DKIM-signed postfix-relay send path) — it
+REUSES `email_send.py` (the DKIM-signed postfix-relay send path; inherited from the
+retired repo-cos subsystem and now maintained here) — it
 does NOT build a new mailer — but sends under the drafter's OWN identity
 (`From: task-drafter@mail.zacx.dev`, `Reply-To: zachlowden1@gmail.com`) so a reply
 lands in Zach's inbox, NOT repo-cos's Postgres feedback parser (which acts on
@@ -57,11 +58,16 @@ def _reply_to() -> str:
 
 
 def _load_email_send():
-    """Load repo-cos/email_send.py in isolation (explicit path, no sys.path edits)."""
+    """Load the sibling email_send.py in isolation (explicit path, no sys.path edits).
+
+    It used to live in `scripts/repo-cos/`; that subsystem was RETIRED 2026-09-07 and
+    the module moved here, to its only remaining consumer. The explicit-path load is
+    kept because mail-actions ships a shadowing `_db.py` and this package must not
+    put sibling dirs on sys.path."""
     here = Path(__file__).resolve().parent
-    mod_path = here.parent / "repo-cos" / "email_send.py"
+    mod_path = here / "email_send.py"
     if not mod_path.exists():
-        raise FileNotFoundError(f"repo-cos email_send.py not found at {mod_path}")
+        raise FileNotFoundError(f"email_send.py not found at {mod_path}")
     spec = importlib.util.spec_from_file_location("drafter_email_send", mod_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot build import spec for {mod_path}")
