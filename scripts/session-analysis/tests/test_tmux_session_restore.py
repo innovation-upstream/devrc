@@ -1281,7 +1281,22 @@ def test_a_restore_with_no_tmux_server_REFUSES(tmp_path, monkeypatch, capsys):
     """🔴 THE REGRESSION TEST FOR THE MEASURED LOSS. With no server, the old
     code ran `tmux new-session` itself, sent into the server it had just
     created inside its own cgroup, and systemd killed it on exit. Nothing may
-    be sent, and no session may be created."""
+    be sent, and no session may be created.
+
+    🔴 THE rc == 0 IS STILL DELIBERATE, ON A RE-DERIVED REASON. It was
+    originally justified by "no server is the normal COLD-BOOT state, because
+    the unit fires on a 45s timer". That trigger is gone — the unit is now
+    started by `tmux-session-restore.path` when the tmux socket appears — so
+    that justification has expired and this docstring is NOT left asserting it.
+
+    Re-derived against the new trigger, the answer is unchanged: `PathChanged=`
+    fires on socket DELETION as well as creation (measured), so a server
+    shutdown re-triggers the unit; the unit's `ConditionPathExists=` skips the
+    ordinary case before ExecStart; and what remains is a RACE (stale socket, or
+    a server with zero sessions). `OnFailure=notify-failure@%n` bypasses DND, and
+    a race must not raise an alarm indistinguishable from a real failure. See
+    the comment at the refusal in `cmd_restore` for the full argument.
+    """
     monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: True)
     monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
 
@@ -1296,7 +1311,11 @@ def test_a_restore_with_no_tmux_server_REFUSES(tmp_path, monkeypatch, capsys):
 
     rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
 
-    assert rc == 0, "a standing cold-boot state must not fire the OnFailure toast"
+    assert rc == 0, (
+        "the refusal must not fire the DND-bypassing OnFailure toast: the path "
+        "trigger re-fires on server SHUTDOWN too, and what reaches this branch "
+        "past ConditionPathExists is a race, not a failure"
+    )
     assert ran == [], f"ran tmux commands while refusing: {ran}"
     assert not any("new-session" in c for cmd in ran for c in cmd)
     assert not any("send-keys" in c for cmd in ran for c in cmd)

@@ -850,11 +850,32 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
         # 🔴 EXIT 0, NOT 1, AND THAT IS A DELIBERATE CHOICE — NOT AN OVERSIGHT.
         # The unit is `OnFailure=notify-failure@%n`, and that toast bypasses
         # DND (`nix/home.nix` — "any unit that can fail on a STANDING condition
-        # breaches it again"). Until the unit is triggered on the tmux socket
-        # appearing rather than a fixed `OnActiveSec=45s`, NO SERVER IS THE
-        # NORMAL COLD-BOOT STATE — a standing condition, firing on every boot
-        # forever. A skip the operator can read in the log is the honest
-        # report; a nightly alarm for an expected state is not.
+        # breaches it again").
+        #
+        # 🔴 THE ORIGINAL REASON HAS EXPIRED; THIS IS THE REPLACEMENT. This
+        # comment used to say "until the unit is triggered on the tmux socket
+        # appearing rather than a fixed OnActiveSec=45s, no server is the normal
+        # COLD-BOOT state". That trigger change has now landed — the unit is
+        # started by `tmux-session-restore.path` — so "every boot forever" is no
+        # longer why. RE-DERIVED against the new trigger, and the answer is the
+        # same:
+        #
+        #   * `PathChanged=` fires on the watched socket being DELETED as well
+        #     as created (MEASURED). Socket deletion is the operator's tmux
+        #     server exiting — routine. So "no server" moved from *every boot*
+        #     to *every server shutdown*; it did not become rare.
+        #   * The unit's `ConditionPathExists=` catches the ordinary shape of
+        #     that before ExecStart, so this branch is not even reached for it.
+        #   * What is left is a RACE: the socket existed when systemd checked
+        #     the condition and no server answers by the time this runs — a
+        #     stale socket from a SIGKILLed server, or a server with zero
+        #     sessions. A race is precisely the thing that must not raise a
+        #     DND-bypassing alarm, because the alarm would be indistinguishable
+        #     from a real failure and would train the operator to ignore it.
+        #
+        # A skip the operator can read in the log is the honest report; a
+        # nightly alarm for an expected state is not. `tmux-restore-observe.sh`
+        # is the instrument that surfaces this deliberately-quiet path.
         print("no tmux server is running — REFUSING to restore.", file=sys.stderr)
         print("  Starting one here would put it inside this unit's cgroup, and "
               "systemd would kill it the moment this process exits, taking every "
