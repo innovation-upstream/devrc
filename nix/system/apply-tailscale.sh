@@ -23,6 +23,9 @@
 #   TS_MAX_TOTAL_BUILDS=25
 #   TS_MAX_PENDING_MIB=64            download volume, gated separately from build count
 #   TS_MAX_TOTAL_MIB=128
+#   TS_MAX_PENDING_FETCH=50          number of paths to fetch, gated separately again --
+#   TS_MAX_TOTAL_FETCH=100           it is the axis that still has a number when the
+#                                    download SIZE cannot be parsed
 #   TS_MAX_CHANGED_PATHS=250
 #   TS_LIST_MAX=200                  how many pending derivation names a refusal prints
 #
@@ -81,10 +84,18 @@
 #      thousands of paths to fetch is a world-sized change with a build count of 0 --
 #      which is why (2) exists as a separate gate rather than a printed column.
 #
-#   2. DOWNLOAD VOLUME, baseline and total, in MiB. Same two dry-builds, the other number
-#      they report. Gated in its OWN right: a build count and a download volume are
-#      independent axes and either can be world-sized while the other is tiny. This was
-#      once a decorative column in the summary table that no gate read.
+#   2. DOWNLOAD VOLUME **AND FETCH COUNT**, baseline and total. The same two dry-builds,
+#      the other two numbers they report. Both gated in their OWN right: build count,
+#      download volume and path count are independent axes and any one of them can be
+#      world-sized while the others are tiny. Both were once decorative columns in the
+#      summary table that no gate read.
+#      🔴 AND THE SIZE IS FAIL-CLOSED. If dry-build announces paths to fetch but prints a
+#      size this script cannot parse -- an unknown unit, a comma decimal separator, or no
+#      parenthetical at all -- the volume is reported as UNKNOWN and REFUSED, never as
+#      0.0. Reporting it as zero is exactly how a 2400-path substitutable world rebuild
+#      passed all four gates in silence; measured, on four separate malformed shapes.
+#      The FETCH COUNT is the backstop for that same blind spot: it still has a number
+#      when the size does not.
 #
 #   3. THE NIXPKGS RELEASE STRING. Extracted with ONE implementation from the store-path
 #      basename of both the running system and the candidate derivation, so the two can
@@ -146,6 +157,11 @@ MAX_PENDING_BUILDS="${TS_MAX_PENDING_BUILDS:-10}"
 MAX_TOTAL_BUILDS="${TS_MAX_TOTAL_BUILDS:-25}"
 MAX_PENDING_MIB="${TS_MAX_PENDING_MIB:-64}"
 MAX_TOTAL_MIB="${TS_MAX_TOTAL_MIB:-128}"
+# Measured 2026-09-07 on this host: 24 paths pending, 25 with tailscale added. These are
+# ~2x and ~4x that, so they refuse a world-sized queue without becoming a permanent red
+# light on a normal one.
+MAX_PENDING_FETCH="${TS_MAX_PENDING_FETCH:-50}"
+MAX_TOTAL_FETCH="${TS_MAX_TOTAL_FETCH:-100}"
 MAX_CHANGED_PATHS="${TS_MAX_CHANGED_PATHS:-250}"
 LIST_MAX="${TS_LIST_MAX:-200}"
 
@@ -198,6 +214,26 @@ die() { echo "ABORT: $*" >&2; exit 1; }
 #   these 24 paths will be fetched (159.4 MiB download, 651.1 MiB unpacked):
 # Absent lines mean ZERO, which is why the self-test drives a zero case AND a non-zero
 # one: a parser wired to nothing also returns zero, and zero is the reassuring answer.
+#
+# 🔴 THE SIZE FIELD IS `UNKNOWN`, NOT 0.0, WHENEVER IT CANNOT BE READ -- AND THAT IS THE
+# WHOLE POINT OF THIS FUNCTION'S SECOND HALF. The previous implementation searched for
+#   will be fetched \(([0-9.]+) ([KMG]i?B) download
+# and left `mib = 0.0` on no match, which is indistinguishable from a genuine zero.
+# MEASURED, all four against the real gate: `these 2400 paths will be fetched:` (no
+# parenthetical at all), `2.5 TiB`, `900000000 B`, and `4096,0 MiB` (a comma decimal
+# separator, which a non-C locale produces) EACH returned `0|2400|0.0` -- so a
+# 2400-path, entirely substitutable world rebuild passed all four gates in silence.
+# That is precisely the change the download gate was added to stop.
+#
+# So the distinction that has to survive is "there was nothing to fetch" vs "there was
+# something to fetch and I could not size it":
+#   * NO fetch line at all  -> genuinely nothing to fetch -> 0.0.
+#   * a fetch line WITH a size this function understands -> that size, scaled to MiB.
+#   * a fetch line whose size it cannot read -> the literal string `UNKNOWN`, which
+#     `_gate_reasons` REFUSES on. Fail closed: an unmeasured download is not a small one.
+# The unit table is exhaustive over what nix emits and `.get()` returns None -- there is
+# deliberately no defaulting-to-MiB fallback, because a unit this script has never heard
+# of is exactly the case where guessing 1.0 turns a TiB into a rounding error.
 _drybuild_counts() {   # $1 = file holding dry-build's stderr; prints "built|fetched|mib"
   python3 - "$1" <<'PY'
 import re, sys
@@ -213,13 +249,24 @@ def count(kind):
         return 0
     return int(m.group(1)) if m.group(1) else 1
 
-mib = 0.0
-m = re.search(r"will be fetched \(([0-9.]+) ([KMG]i?B) download", text)
-if m:
-    v, unit = float(m.group(1)), m.group(2)
-    mib = v * {"KiB": 1 / 1024.0, "MiB": 1.0, "GiB": 1024.0,
-               "KB": 1 / 1024.0, "MB": 1.0, "GB": 1024.0}.get(unit, 1.0)
-print("%d|%d|%.1f" % (count("built"), count("fetched"), mib))
+UNITS = {"B": 1 / 1048576.0,
+         "KB": 1 / 1024.0, "KiB": 1 / 1024.0,
+         "MB": 1.0,        "MiB": 1.0,
+         "GB": 1024.0,     "GiB": 1024.0,
+         "TB": 1048576.0,  "TiB": 1048576.0}
+
+fetch_line = re.search(r"^(?:these [0-9]+|this) paths? will be fetched\b(.*)$", text, re.M)
+if fetch_line is None:
+    mib = "0.0"                       # no fetch line -> nothing to fetch -> a real zero
+else:
+    m = re.match(r"\s*\(\s*([0-9]+(?:\.[0-9]+)?)\s+([A-Za-z]+)\s+download\b",
+                 fetch_line.group(1))
+    if m is None:
+        mib = "UNKNOWN"               # a fetch line we cannot size -- NOT a zero
+    else:
+        factor = UNITS.get(m.group(2))
+        mib = "UNKNOWN" if factor is None else "%.1f" % (float(m.group(1)) * factor)
+print("%d|%d|%s" % (count("built"), count("fetched"), mib))
 PY
 }
 
@@ -261,16 +308,35 @@ _store_path() {
 # expensive possible lie, because it tells the operator the backup path is DONE.
 # Measured; that exact one-line fixture reproduced it.
 #
-# So: strip Nix comments FIRST (`#` to end of line, and `/* ... */` blocks, both replaced
-# with spaces so line numbers survive), then require an actual SETTING -- the attribute
-# followed by `=`, `{` or a further `.`, which is every way Nix can spell one and no way
-# it can spell a mention. Prints `lineno:text` per declaration, nothing at all when
-# there is none, so the caller branches on emptiness.
+# So: blank out everything that is NOT executable Nix -- comments AND string literals --
+# then require an actual SETTING: the attribute followed by `=`, `{` or a further `.`,
+# which is every way Nix can spell one and no way it can spell a mention. Prints
+# `lineno:text` per declaration, nothing at all when there is none, so the caller
+# branches on emptiness.
 #
-# Direction of error is deliberate: a declaration this misses means the script proceeds
-# and adds a SECOND block, which `nix-instantiate '<nixpkgs/nixos>' -A system` then
-# refuses as a duplicate definition BEFORE anything is written. A mention it wrongly
-# accepted would exit 0 and leave the host unprotected with no further check at all.
+# 🔴 STRINGS, NOT JUST COMMENTS -- AND THE `[.={]` ANCHOR IS NOT ENOUGH ON ITS OWN. An
+# earlier version blanked comments only, on the reasoning that the anchor already rejects
+# a bare mention. It does reject `"services.tailscale is not enabled here"`. It does NOT
+# reject a string that happens to contain the punctuation, and MEASURED, both of these
+# reported the host as ALREADY CONFIGURED and printed "Nothing to do. Exiting 0":
+#     warnings = [ "you should run services.tailscale.enable = true; here" ];
+#     text = ''<newline>  services.tailscale.enable = true;<newline>'';
+# That is the most expensive lie this script can tell -- it says the backup path is DONE
+# on a host where nothing was applied, two days before the operator leaves for months.
+#
+# The blanking is a LEFT-TO-RIGHT SCANNER, not three independent regexes, because the
+# constructs nest: a `#` inside a string is not a comment and a `"` inside a comment is
+# not a string, and only a scanner that consumes them in order gets both right. It
+# handles `#` line comments, `/* */` blocks, `"..."` with backslash escapes, and Nix's
+# `''...''` indented strings with their `''$`, `'''` and `''\` escapes. Newlines are
+# preserved so the line numbers reported below still index the ORIGINAL file.
+#
+# Direction of error is deliberate, and unchanged: a declaration this misses means the
+# script proceeds and adds a SECOND block, which `nix-instantiate '<nixpkgs/nixos>' -A
+# system` then refuses as a duplicate definition BEFORE anything is written. A mention it
+# wrongly accepted would exit 0 and leave the host unprotected with no further check at
+# all. So when the scanner is confused -- by an identifier ending in `''`, say -- it
+# fails toward the loud, harmless side.
 _cfg_tailscale_decls() {   # $1 = config path; prints "lineno:line" per declaration
   python3 - "$1" <<'PY'
 import re, sys
@@ -279,11 +345,65 @@ try:
 except Exception as e:
     sys.stderr.write("read: %s\n" % e); sys.exit(2)
 
-# Blank out comments, preserving every newline so line numbers still line up.
-def blank(m):
-    return re.sub(r"[^\n]", " ", m.group(0))
-stripped = re.sub(r"/\*.*?\*/", blank, src, flags=re.S)
-stripped = re.sub(r"#[^\n]*", blank, stripped)
+
+def blank_non_code(text):
+    """Replace comments and string literals with spaces, keeping every newline."""
+    out = list(text)
+    n = len(text)
+
+    def wipe(a, b):
+        for k in range(a, b):
+            if out[k] != "\n":
+                out[k] = " "
+
+    i = 0
+    while i < n:
+        if text.startswith("#", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            wipe(i, j)
+            i = j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            wipe(i, j)
+            i = j
+        elif text.startswith("''", i):
+            # Nix indented string. It ends at the next `''` that is not itself the start
+            # of an escape: `''$`, `'''` and `''\` all continue the string.
+            j = i + 2
+            while j < n:
+                if text.startswith("''", j):
+                    if text[j + 2:j + 3] in ("$", "'", "\\"):
+                        j += 3
+                        continue
+                    j += 2
+                    break
+                j += 1
+            else:
+                j = n
+            wipe(i, j)
+            i = j
+        elif text.startswith('"', i):
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            else:
+                j = n
+            wipe(i, j)
+            i = j
+        else:
+            i += 1
+    return "".join(out)
+
+
+stripped = blank_non_code(src)
 
 orig = src.splitlines()
 for i, line in enumerate(stripped.splitlines()):
@@ -458,7 +578,7 @@ T
   # 🔴 The refusing fixture is not invented: 40 pending / 47 total / +7 delta is what
   # `nixos-rebuild dry-build` reported on this host on 2026-09-07, against an UNCHANGED
   # config and with the tailscale block added. The gate must refuse THAT.
-  got=$(_gate_reasons 26.11 26.11 40 47)
+  got=$(_gate_reasons 26.11 26.11 40 47 0.0 17.6 3 4)
   if printf '%s' "$got" | grep -q 'PENDING WORK UNRELATED'; then
     echo "  [self-test] gate REFUSES the real measured state (40 pending / 47 total) -> ok"
   else
@@ -467,7 +587,7 @@ T
   # The allowing branch: nothing pending, tailscale's own 7 derivations. If this
   # refused, the script could never succeed and the gate would be a permanent red
   # light that everyone learns to override.
-  got=$(_gate_reasons 26.11 26.11 0 7)
+  got=$(_gate_reasons 26.11 26.11 0 7 0.0 17.6 2 5)
   if [ -z "$got" ]; then
     echo "  [self-test] gate ALLOWS a clean tree with tailscale's own 7 builds -> ok"
   else
@@ -475,14 +595,14 @@ T
   fi
   # 🔴 THE RELEASE JUMP, which must refuse on its own even when the counts are tiny --
   # a release change is an OS upgrade however small the queue looks at eval time.
-  got=$(_gate_reasons 26.05 26.11 0 3)
+  got=$(_gate_reasons 26.05 26.11 0 3 0.0 9.5 1 3)
   if printf '%s' "$got" | grep -q 'NIXPKGS RELEASE CHANGE'; then
     echo "  [self-test] gate REFUSES a 26.05 -> 26.11 jump even with 3 builds pending -> ok"
   else
     echo "  [self-test] gate FAILED: a release jump passed on low counts. got: '$got'"; rc=1
   fi
   # And the total-size gate on its own, with a clean baseline.
-  got=$(_gate_reasons 26.11 26.11 0 900)
+  got=$(_gate_reasons 26.11 26.11 0 900 0.0 17.6 3 6)
   if printf '%s' "$got" | grep -q 'TOTAL BUILD SIZE'; then
     echo "  [self-test] gate REFUSES 900 total builds from a clean baseline -> ok"
   else
@@ -490,9 +610,13 @@ T
   fi
 
   # --- _over_mib, the FRACTIONAL comparison ------------------------------------------
-  # `-gt` cannot compare "159.4" at all: it aborts the shell. Driven in both directions,
-  # and across the boundary with a fraction on BOTH sides so a mutant that truncates to
-  # an integer (159.4 -> 159, 64.5 -> 64) is visible.
+  # `-gt` cannot compare "159.4" at all. MEASURED in the shape the gate actually uses
+  # (`if _over ...; then`): bash prints `[: 159.4: integer expected` to stderr, `[`
+  # returns 2, errexit does not apply to an `if` condition, and EXECUTION CONTINUES with
+  # the gate SILENT -- it fails OPEN, it does not abort. See `_over_mib` below; this
+  # comment used to say the opposite. Driven in both directions, and across the boundary
+  # with a fraction on BOTH sides so a mutant that truncates to an integer (159.4 -> 159,
+  # 64.5 -> 64) is visible.
   if _over_mib "159.4" "64";   then echo "  [self-test] _over_mib 159.4 > 64 -> ok"; else echo "  [self-test] _over_mib FAILED: 159.4 not > 64"; rc=1; fi
   if _over_mib "17.6" "64";    then echo "  [self-test] _over_mib FAILED: 17.6 > 64"; rc=1; else echo "  [self-test] _over_mib 17.6 < 64 -> not over -> ok"; fi
   if _over_mib "64.5" "64.4";  then echo "  [self-test] _over_mib 64.5 > 64.4 (fraction decides) -> ok"; else echo "  [self-test] _over_mib FAILED: 64.5 not > 64.4 -- truncating to int?"; rc=1; fi
@@ -503,7 +627,7 @@ T
   # one that walked straight through a gate that read only build counts. 0 to build,
   # 4 GiB to fetch. Both build gates are silent here BY CONSTRUCTION, so if this passes
   # the download gate is genuinely the only thing that saw it.
-  got=$(_gate_reasons 26.11 26.11 0 0 4096.0 4096.0)
+  got=$(_gate_reasons 26.11 26.11 0 0 4096.0 4096.0 3 3)
   if printf '%s' "$got" | grep -q 'PENDING DOWNLOAD VOLUME'; then
     echo "  [self-test] gate REFUSES 4096 MiB of pending downloads at ZERO builds -> ok"
   else
@@ -516,14 +640,14 @@ T
   fi
   # The download gates must ALLOW tailscale's own measured cost, or the script can never
   # succeed and the gate becomes a permanent red light everyone learns to override.
-  got=$(_gate_reasons 26.11 26.11 0 7 0.0 17.6)
+  got=$(_gate_reasons 26.11 26.11 0 7 0.0 17.6 0 1)
   if [ -z "$got" ]; then
     echo "  [self-test] gate ALLOWS tailscale's own measured 7 builds / 17.6 MiB -> ok"
   else
     echo "  [self-test] gate FAILED: refused the measured tailscale-only delta: '$got'"; rc=1
   fi
   # And the TOTAL download gate on its own, from a clean baseline.
-  got=$(_gate_reasons 26.11 26.11 0 0 0.0 900.0)
+  got=$(_gate_reasons 26.11 26.11 0 0 0.0 900.0 0 4)
   if printf '%s' "$got" | grep -q 'TOTAL DOWNLOAD VOLUME'; then
     echo "  [self-test] gate REFUSES 900 MiB total from a clean baseline -> ok"
   else
@@ -532,7 +656,7 @@ T
   # 🔴 THE NEGATIVE DELTA. The two dry-builds are separate evaluations and CAN disagree;
   # the old phrasing rendered "Only -3 of the 37 are tailscale's" -- nonsense stated as
   # a measurement, inside the one message the operator reads to make a judgement call.
-  got=$(_gate_reasons 26.11 26.11 40 37)
+  got=$(_gate_reasons 26.11 26.11 40 37 0.0 17.6 3 2)
   if printf '%s' "$got" | grep -q 'Only -'; then
     echo "  [self-test] negative-delta phrasing FAILED: still says 'Only -N of the M'"; rc=1
   elif printf '%s' "$got" | grep -q 'FEWER builds'; then
@@ -540,11 +664,161 @@ T
   else
     echo "  [self-test] negative-delta phrasing FAILED: got '$got'"; rc=1
   fi
-  got=$(_gate_reasons 26.11 26.11 40 47)
+  got=$(_gate_reasons 26.11 26.11 40 47 0.0 17.6 3 4)
   if printf '%s' "$got" | grep -q "Only 7 of the 47 are tailscale's"; then
     echo "  [self-test] a POSITIVE delta still reads 'Only 7 of the 47' -> ok"
   else
     echo "  [self-test] positive-delta phrasing FAILED: got '$got'"; rc=1
+  fi
+
+  # --- _is_num, the thing that keeps a non-number away from the comparison ------------
+  local numcase
+  for numcase in "0:yes" "0.0:yes" "17.6:yes" "4096.0:yes" "159.4:yes" \
+                 "UNKNOWN:no" ":no" ".:no" "1.2.3:no" "4096,0:no" "-1:no" "1e3:no"; do
+    if _is_num "${numcase%%:*}"; then got=yes; else got=no; fi
+    if [ "$got" = "${numcase##*:}" ]; then
+      echo "  [self-test] _is_num '${numcase%%:*}' -> $got -> ok"
+    else
+      echo "  [self-test] _is_num '${numcase%%:*}' FAILED: got $got, want ${numcase##*:}"; rc=1
+    fi
+  done
+  # The control that makes the case above matter: awk WOULD have said "not over".
+  if _over_mib "UNKNOWN" "64"; then
+    echo "  [self-test] the _over_mib fixture is not what this file claims"; rc=1
+  else
+    echo "  [self-test] _over_mib('UNKNOWN', 64) is silently FALSE -- so _is_num is load-bearing -> ok"
+  fi
+
+  # --- 🔴 AN UNMEASURABLE DOWNLOAD MUST REFUSE, NOT READ AS ZERO -----------------------
+  # The build counts and the fetch counts are held DELIBERATELY BELOW every other limit
+  # here, so nothing but the unparseable-size branch can produce a refusal. If this
+  # passes, that branch is genuinely the only thing that saw it.
+  got=$(_gate_reasons 26.11 26.11 0 3 UNKNOWN 17.6 3 4)
+  if printf '%s' "$got" | grep -q 'PENDING DOWNLOAD VOLUME COULD NOT BE MEASURED'; then
+    echo "  [self-test] gate REFUSES an UNPARSEABLE pending download size -> ok"
+  else
+    echo "  [self-test] gate FAILED OPEN on an unparseable pending size. got: '$got'"; rc=1
+  fi
+  got=$(_gate_reasons 26.11 26.11 0 3 0.0 UNKNOWN 3 4)
+  if printf '%s' "$got" | grep -q 'TOTAL DOWNLOAD VOLUME COULD NOT BE MEASURED'; then
+    echo "  [self-test] gate REFUSES an UNPARSEABLE total download size -> ok"
+  else
+    echo "  [self-test] gate FAILED OPEN on an unparseable total size. got: '$got'"; rc=1
+  fi
+
+  # --- the FETCH COUNT gates, both directions -----------------------------------------
+  # The download SIZES here are 0.0 and the build counts are 3, both far under their
+  # limits, so only the fetch gates can speak.
+  got=$(_gate_reasons 26.11 26.11 0 3 0.0 17.6 2400 2401)
+  if printf '%s' "$got" | grep -q 'PENDING FETCH COUNT'; then
+    echo "  [self-test] gate REFUSES 2400 pending paths to fetch -> ok"
+  else
+    echo "  [self-test] gate FAILED: 2400 pending fetches allowed. got: '$got'"; rc=1
+  fi
+  got=$(_gate_reasons 26.11 26.11 0 3 0.0 17.6 7 913)
+  if printf '%s' "$got" | grep -q 'TOTAL FETCH COUNT'; then
+    echo "  [self-test] gate REFUSES 913 total paths to fetch from a small baseline -> ok"
+  else
+    echo "  [self-test] gate FAILED: 913 total fetches allowed. got: '$got'"; rc=1
+  fi
+  # 🔴 AND IT MUST ALLOW THE MEASURED REALITY, or the fetch gate is a permanent red light
+  # that everyone learns to override. 24 pending / 25 total is what this host reported on
+  # 2026-09-07 -- neither number is a round multiple of its limit.
+  got=$(_gate_reasons 26.11 26.11 0 7 0.0 17.6 24 25)
+  if [ -z "$got" ]; then
+    echo "  [self-test] gate ALLOWS the measured 24 pending / 25 total fetched paths -> ok"
+  else
+    echo "  [self-test] gate FAILED: refused the measured fetch counts: '$got'"; rc=1
+  fi
+
+  # --- the ARITY guard ------------------------------------------------------------------
+  # A call site that omits an axis must be LOUD. The old signature defaulted the missing
+  # ones to 0, which is a gate that cannot fire dressed as a gate that passed.
+  if got=$(_gate_reasons 26.11 26.11 0 3 0.0 17.6 2>&1); then
+    echo "  [self-test] _gate_reasons FAILED: returned 0 for a 6-argument call"; rc=1
+  elif printf '%s' "$got" | grep -q 'needs 8 arguments'; then
+    echo "  [self-test] _gate_reasons refuses a 6-argument call by name -> ok"
+  else
+    echo "  [self-test] _gate_reasons FAILED: wrong error for a short call: '$got'"; rc=1
+  fi
+
+  # --- 🔴 THE SEAM: _drybuild_counts -> _gate_reasons, JOINED ---------------------------
+  # Everything above drives the parser on well-formed text and the gate on numbers typed
+  # in by hand. The defect this replaces lived in NEITHER -- it lived in the join, where
+  # the parser's "I could not read this" was spelled `0.0` and the gate read it as "there
+  # is nothing to download". So these cases go through BOTH, exactly as the real run
+  # does, and the fixtures are the four malformed shapes measured against the old gate.
+  local seam_case seam_label seam_text seam_counts seam_gate
+  # 🔴 THE POSITIVE CONTROL FIRST. A well-formed world-sized fetch line must REFUSE --
+  # otherwise a seam harness that refused everything (or that was wired to nothing and
+  # happened to print a refusal) would look identical to a working one.
+  printf 'these 2400 paths will be fetched (4096.0 MiB download, 9000.0 MiB unpacked):\n' \
+    >"$dir/seam-ok.txt"
+  seam_counts=$(_drybuild_counts "$dir/seam-ok.txt")
+  IFS='|' read -r _sb _sf _sm <<<"$seam_counts"
+  seam_gate=$(_gate_reasons 26.11 26.11 "$_sb" "$_sb" "$_sm" "$_sm" "$_sf" "$_sf")
+  if [ -n "$seam_gate" ] && [ "$_sm" = "4096.0" ]; then
+    echo "  [self-test] seam control: a well-formed 4096.0 MiB / 2400-path line parses AND refuses -> ok"
+  else
+    echo "  [self-test] seam control FAILED: counts '$seam_counts', gate '$seam_gate'"; rc=1
+  fi
+  # And a genuinely EMPTY dry-build must still pass the seam, or the gate is a red light.
+  printf 'building the system configuration...\n' >"$dir/seam-zero.txt"
+  seam_counts=$(_drybuild_counts "$dir/seam-zero.txt")
+  IFS='|' read -r _sb _sf _sm <<<"$seam_counts"
+  seam_gate=$(_gate_reasons 26.11 26.11 "$_sb" "$_sb" "$_sm" "$_sm" "$_sf" "$_sf")
+  if [ -z "$seam_gate" ] && [ "$seam_counts" = "0|0|0.0" ]; then
+    echo "  [self-test] seam control: an EMPTY dry-build is a real 0.0 and is ALLOWED -> ok"
+  else
+    echo "  [self-test] seam control FAILED on the empty case: counts '$seam_counts', gate '$seam_gate'"; rc=1
+  fi
+  # Now the four measured malformed shapes. Every one of them returned `0|2400|0.0` and
+  # passed all four gates in silence.
+  #
+  # 🔴 THE EXPECTED SIZE IS PINNED EXACTLY, not merely asserted "not 0.0". A weaker
+  # version of this loop was MUTATION-TESTED and a mutant that defaulted an unrecognised
+  # unit to MiB -- reading 4 EiB as 4.0 -- SURVIVED it: the value was not 0.0, and the
+  # fetch-count gate refused the change for an unrelated reason. The fetch gate catching
+  # it is defence in depth, not a reason to leave this guard unable to see the bug it
+  # exists for.
+  local seam_want
+  for seam_case in \
+      "no size parenthetical at all|UNKNOWN|these 2400 paths will be fetched:" \
+      "a TiB download (understood -- must SCALE, not refuse)|2621440.0|these 2400 paths will be fetched (2.5 TiB download, 9.0 TiB unpacked):" \
+      "a comma decimal separator|UNKNOWN|these 2400 paths will be fetched (4096,0 MiB download, 9000,0 MiB unpacked):" \
+      "a unit this script has never seen|UNKNOWN|these 2400 paths will be fetched (4.0 EiB download, 9.0 EiB unpacked):"; do
+    seam_label="${seam_case%%|*}"
+    seam_case="${seam_case#*|}"
+    seam_want="${seam_case%%|*}"
+    seam_text="${seam_case#*|}"
+    printf '%s\n' "$seam_text" >"$dir/seam.txt"
+    seam_counts=$(_drybuild_counts "$dir/seam.txt")
+    IFS='|' read -r _sb _sf _sm <<<"$seam_counts"
+    seam_gate=$(_gate_reasons 26.11 26.11 "$_sb" "$_sb" "$_sm" "$_sm" "$_sf" "$_sf")
+    if [ "$_sm" != "$seam_want" ]; then
+      echo "  [self-test] seam FAILED: $seam_label sized as '$_sm', want '$seam_want'"; rc=1
+    elif [ -z "$seam_gate" ]; then
+      echo "  [self-test] seam FAILED: $seam_label passed the gate ($seam_counts)"; rc=1
+    else
+      echo "  [self-test] seam: $seam_label -> $seam_counts -> REFUSED -> ok"
+    fi
+  done
+  # 🔴 `2.5 TiB` IS PARSEABLE NOW, and it must be scaled, not merely refused: a TiB read
+  # as 2.5 MiB is six orders of magnitude of "this is fine".
+  printf 'these 3 paths will be fetched (2.5 TiB download, 9.0 TiB unpacked):\n' >"$dir/tib.txt"
+  got=$(_drybuild_counts "$dir/tib.txt")
+  if [ "$got" = "0|3|2621440.0" ]; then
+    echo "  [self-test] 2.5 TiB is scaled to MiB (2621440.0), not read as 2.5 -> ok"
+  else
+    echo "  [self-test] TiB scaling FAILED: got '$got', want '0|3|2621440.0'"; rc=1
+  fi
+  # A bare-byte size is likewise a real number, not an UNKNOWN.
+  printf 'these 2 paths will be fetched (900000000 B download, 1000000000 B unpacked):\n' >"$dir/bytes.txt"
+  got=$(_drybuild_counts "$dir/bytes.txt")
+  if [ "$got" = "0|2|858.3" ]; then
+    echo "  [self-test] a bare-byte size is scaled to MiB (900000000 B -> 858.3) -> ok"
+  else
+    echo "  [self-test] byte scaling FAILED: got '$got', want '0|2|858.3'"; rc=1
   fi
 
   # --- _cfg_tailscale_decls: a MENTION is not a DECLARATION ---------------------------
@@ -564,11 +838,29 @@ T
   # passes every other fixture here, so the anchor is untested and a config that merely
   # NAMES the option in a warning string reports the host as already done.
   printf '%s\n' '{' '  warnings = [ "services.tailscale is not enabled here" ];' '}' >"$dir/c-string.nix"
+  # 🔴 THE FIXTURE THAT DISCRIMINATES STRING-BLANKING FROM THE `[.={]` ANCHOR ALONE. The
+  # case above carries no `[.={]` after the attribute path, so it is rejected by the
+  # anchor and stays 0 even with every line of string handling deleted -- it cannot see
+  # that mutation. These two CAN: each is a string whose CONTENTS are a syntactically
+  # perfect declaration, and each reported "Nothing to do. Exiting 0" before the scanner
+  # existed.
+  printf '%s\n' '{' '  warnings = [ "you should run services.tailscale.enable = true; here" ];' '}' \
+    >"$dir/c-instring.nix"
+  printf '%s\n' '{' "  text = ''" '    services.tailscale.enable = true;' "  '';" '}' \
+    >"$dir/c-indented.nix"
+  # ...and the control that keeps the two above from being satisfied by a scanner that
+  # blanks the whole file: a real declaration SITTING AFTER a closed string on the line
+  # before must still be found.
+  printf '%s\n' '{' '  warnings = [ "not enabled" ];' '  services.tailscale.enable = true;' '}' \
+    >"$dir/c-afterstring.nix"
   printf '%s\n' '{' '  # services.tailscale = { enable = true; };' '  services.tailscale.enable = true;' '}' >"$dir/c-both.nix"
   for decl_case in "c-mention:0:a bare mention inside a # comment" \
                    "c-block:0:a declaration inside a /* */ block comment" \
                    "c-pkgonly:0:pkgs.tailscale in systemPackages is not a service" \
                    "c-string:0:the option NAMED in a warning string is not a setting" \
+                   "c-instring:0:a whole declaration INSIDE a double-quoted string" \
+                   "c-indented:0:a whole declaration inside a '' indented string" \
+                   "c-afterstring:1:a real declaration on the line after a closed string" \
                    "c-dotted:1:services.tailscale.enable = true" \
                    "c-attrset:1:services.tailscale = { ... }" \
                    "c-both:1:a commented-out copy PLUS a real one"; do
@@ -593,10 +885,34 @@ T
 
 _over() { [ "$1" -gt "$2" ]; }
 
-# The MiB figures are FRACTIONAL ("159.4"), so `-gt` cannot compare them: bash would
-# abort with "integer expression expected" inside a gate, under `set -e`, which is the
-# gate failing OPEN dressed as a crash. awk does the comparison in floating point.
+# 🔴 THE MiB FIGURES ARE FRACTIONAL ("159.4") AND `-gt` CANNOT COMPARE THEM -- BUT NOT IN
+# THE WAY THIS COMMENT USED TO CLAIM. It said `-gt` "aborts the shell ... under `set -e`".
+# MEASURED in the shape actually used here, `if _over "159.4" "64"; then`:
+#     $ set -euo pipefail; _over() { [ "$1" -gt "$2" ]; }
+#     $ if _over "159.4" "64"; then echo FIRED; else echo SILENT; fi; echo "continued"
+#     bash: line 2: [: 159.4: integer expected
+#     SILENT
+#     continued                          <- and the script exits 0
+# `[` prints to stderr and returns 2; because the call is the CONDITION of an `if`,
+# errexit does not apply to it, so nothing aborts -- the gate simply does not fire and
+# execution carries on. The conclusion (use awk) was right; the stated mechanism was
+# backwards, and it matters: a comment describing a LOUD abort where the truth is a
+# SILENT fail-open is how the next maintainer decides the guard is redundant and deletes
+# it. awk does the comparison in floating point, and `_is_num` below keeps a
+# non-numeric string from reaching it at all.
 _over_mib() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 > b + 0) }'; }
+
+# 🔴 A BARE NON-NEGATIVE DECIMAL, AND NOTHING ELSE. `_over_mib UNKNOWN 64` would evaluate
+# `"UNKNOWN" + 0` as 0 in awk and report "not over" -- the fail-open this whole round
+# exists to close. Every MiB figure is put through here BEFORE any comparison, and a
+# value that fails is REFUSED rather than compared.
+_is_num() {
+  case "$1" in
+    ''|.|*[!0-9.]*) return 1 ;;   # empty, a bare dot, or any character that is not a digit/dot
+    *.*.*)          return 1 ;;   # more than one decimal point
+  esac
+  return 0
+}
 
 # THE GATE, as a pure function of the six numbers, so every branch can be driven from
 # fixtures. A refusal that has only ever been reasoned about is not a guard; the
@@ -610,11 +926,32 @@ _over_mib() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 > b + 0) }'; }
 # untouched. Build count and download volume are independent axes and either can be
 # world-sized alone.
 #
+# 🔴 THE FETCH COUNTS ARE NOT DECORATION EITHER -- THE SAME DEFECT, ONE COLUMN OVER.
+# `_drybuild_counts` has always parsed the fetch count correctly and the summary table
+# has always printed it, and until now NO GATE READ IT. That is the identical
+# "decorative column" shape the download-volume gate was added to fix: a change of 2400
+# fetched paths whose size could not be read passed every gate, and the count -- correct,
+# parsed, printed -- was sitting right there. Defaults are set from the SAME measurement
+# as the rest: 24 pending / 25 total on this host on 2026-09-07, tailscale's own cost
+# being +1 fetched path.
+#
+# 🔴 ALL EIGHT ARGUMENTS ARE REQUIRED. They used to have `${5:-0}`-style defaults, which
+# is the shape that lets a call site quietly omit an axis and get a gate that cannot
+# fire. A missing argument is now loud.
+#
 # Prints one reason per paragraph; empty output means "allow".
-_gate_reasons() {   # $1 run_rel  $2 cand_rel  $3 pending_builds  $4 total_builds
-                    # $5 pending_mib  $6 total_mib   (both optional; default 0)
+_gate_reasons() {   # $1 run_rel      $2 cand_rel
+                    # $3 pending_builds  $4 total_builds
+                    # $5 pending_mib     $6 total_mib      (may be the string UNKNOWN)
+                    # $7 pending_fetch   $8 total_fetch
+  if [ "$#" -ne 8 ]; then
+    printf '%s\n' "INTERNAL ERROR: _gate_reasons needs 8 arguments, got $#. Refusing to
+    return a verdict from a gate that was not given every axis it measures." >&2
+    return 2
+  fi
   local run_rel="$1" cand_rel="$2" b_built="$3" c_built="$4"
-  local b_mib="${5:-0}" c_mib="${6:-0}" d_built=$(( $4 - $3 )) delta_note
+  local b_mib="$5" c_mib="$6" b_fetch="$7" c_fetch="$8"
+  local d_built=$(( $4 - $3 )) delta_note
   # 🔴 A NEGATIVE DELTA IS A REAL OBSERVED STATE, not an impossible one: the two
   # dry-builds are separate evaluations and the store can gain paths between them, so the
   # candidate can legitimately report FEWER builds than the baseline. Phrased as
@@ -643,16 +980,47 @@ _gate_reasons() {   # $1 run_rel  $2 cand_rel  $3 pending_builds  $4 total_build
     printf '%s\n' "TOTAL BUILD SIZE: $c_built derivations would be built (limit
     $MAX_TOTAL_BUILDS). Adding tailscale should be a handful of substituted paths."
   fi
-  if _over_mib "$b_mib" "$MAX_PENDING_MIB"; then
+  # 🔴 UNPARSEABLE FIRST, AND IT REFUSES. An unmeasured download is not a small one, and
+  # the numeric gates below would silently read it as zero.
+  if ! _is_num "$b_mib"; then
+    printf '%s\n' "PENDING DOWNLOAD VOLUME COULD NOT BE MEASURED ('$b_mib'). \`nixos-rebuild
+    dry-build\` announced paths to fetch for the CURRENT config but printed a size this
+    script cannot read -- an unknown unit, a locale that uses a comma decimal separator,
+    or no size at all. REFUSED, deliberately: an unmeasured download is not a small one,
+    and reporting it as 0 MiB is how a 2400-path substitutable world rebuild walked
+    through all four gates in silence. Read the numbers yourself:
+      nixos-rebuild dry-build   (its summary goes to STDERR)
+    then re-run with --allow-world-rebuild if you are satisfied."
+  elif _over_mib "$b_mib" "$MAX_PENDING_MIB"; then
     printf '%s\n' "PENDING DOWNLOAD VOLUME: the CURRENT config already wants to fetch
     $b_mib MiB (limit $MAX_PENDING_MIB MiB), and \`switch\` fetches it too. A change with
     NOTHING to build can still be world-sized -- a fully substitutable channel bump is
     thousands of paths and gigabytes of download at a build count of zero. Same clean
     fix: land the pending change on its own first, or --allow-world-rebuild."
   fi
-  if _over_mib "$c_mib" "$MAX_TOTAL_MIB"; then
+  if ! _is_num "$c_mib"; then
+    printf '%s\n' "TOTAL DOWNLOAD VOLUME COULD NOT BE MEASURED ('$c_mib') for the
+    CANDIDATE config. Same reason and same refusal as above: this gate does not treat an
+    unreadable size as zero."
+  elif _over_mib "$c_mib" "$MAX_TOTAL_MIB"; then
     printf '%s\n' "TOTAL DOWNLOAD VOLUME: $c_mib MiB would be fetched (limit
     $MAX_TOTAL_MIB MiB). Tailscale's own measured cost on this host is ~17.6 MiB."
+  fi
+  # 🔴 THE FETCH COUNT, WHICH IS THE AXIS THAT STILL HAS A NUMBER WHEN THE SIZE DOES NOT.
+  # It is the only gate that sees a fetch line whose size is unreadable AND whose volume
+  # therefore cannot be compared -- so it is not redundant with the two above, it is the
+  # backstop for exactly their blind spot.
+  if _over "$b_fetch" "$MAX_PENDING_FETCH"; then
+    printf '%s\n' "PENDING FETCH COUNT: the CURRENT config already wants to fetch
+    $b_fetch paths (limit $MAX_PENDING_FETCH), and \`switch\` fetches them too. Measured
+    on this host, a normal pending queue is ~24 paths and tailscale's own cost is +1.
+    Thousands of paths is a channel bump wearing a feature's clothes, whatever the
+    download size says -- or fails to say. Land the pending change on its own first, or
+    --allow-world-rebuild."
+  fi
+  if _over "$c_fetch" "$MAX_TOTAL_FETCH"; then
+    printf '%s\n' "TOTAL FETCH COUNT: $c_fetch paths would be fetched (limit
+    $MAX_TOTAL_FETCH). Adding tailscale measured 25 fetched paths in total on this host."
   fi
 }
 
@@ -1020,7 +1388,8 @@ echo
 
 # --- the gate ---------------------------------------------------------------------------
 # One implementation, exercised in both directions by --self-test above.
-refuse=$(_gate_reasons "$run_rel" "$cand_rel" "$b_built" "$c_built" "$b_mib" "$c_mib")
+refuse=$(_gate_reasons "$run_rel" "$cand_rel" "$b_built" "$c_built" \
+                       "$b_mib" "$c_mib" "$b_fetch" "$c_fetch")
 
 if [ -n "$refuse" ] && [ "$ALLOW_WORLD" != "1" ]; then
   echo "REFUSING to switch:" >&2
@@ -1215,9 +1584,23 @@ case "$chk_rc" in
     echo "              Nothing outstanding; the steps below are already done."
     ;;
   4)
-    echo "  verifier  : rc 4 -- EXPECTED. The switch succeeded and the node is NOT YET"
-    echo "              AUTHENTICATED, because this script does not run \`tailscale up\`"
-    echo "              (it needs a browser). No defect was found. KEEPING the config."
+    # 🔴 NAME WHAT WAS OBSERVED, NOT ONE CAUSE OUT OF SEVERAL. This used to read "the
+    # switch succeeded and the node is NOT YET AUTHENTICATED" -- an assertion about the
+    # node's identity, made by a script that never looked at it, for an exit code with
+    # more than one cause. It is reachable two lines below the verifier printing
+    # `PASS authed`, on an authenticated node whose prefs could not be read. On a first
+    # run the not-yet-authenticated reading is almost always right, which is exactly why
+    # it is worth not asserting: the run where it is wrong is the run that matters.
+    echo "  verifier  : rc 4 -- INCOMPLETE, and NO DEFECT WAS FOUND. One or more of the"
+    echo "              verifier's claims could not be evaluated; the reasons are listed"
+    echo "              under 'NOT YET DETERMINABLE' in its own output immediately above,"
+    echo "              and that output is the authority on which ones. On a first run"
+    echo "              that is normally 'this node has never authenticated', because"
+    echo "              this script does not run \`tailscale up\` (it needs a browser) --"
+    echo "              but rc 4 also covers unreadable prefs on a node that IS"
+    echo "              authenticated. KEEPING the config either way: an unevaluated"
+    echo "              claim is not a defect. Note that a node which HAD an identity and"
+    echo "              LOST it -- an expired or revoked key -- is rc 1, not this."
     ;;
   3)
     echo "  verifier  : rc 3 -- the node side is correct; an ADMIN-CONSOLE action is"
@@ -1235,9 +1618,10 @@ case "$chk_rc" in
   1)
     die "the verifier reports a definitive node-side FAILURE (rc 1) after the switch.
   That is NOT the not-yet-authenticated state -- rc 4 is, and this is not it. Something
-  the node itself controls is wrong: forwarding off, no LAN route, or a node that HAS a
-  tailnet identity and is nevertheless not Running/Online/advertising. Its output is
-  immediately above. Rolling back."
+  the node itself controls is wrong: forwarding off, no LAN route, a node that HAS a
+  tailnet identity and is nevertheless not Running/Online/advertising, or a node that HAD
+  one and has LOST it (an expired or revoked node key). Its output is immediately above
+  and names which. Rolling back."
     ;;
   *)
     die "the verifier exited $chk_rc, which is not one of its documented codes
@@ -1287,5 +1671,7 @@ echo
 echo "Then confirm all of it, from live runtime state:"
 echo "       bash ${CHECK} --role ${ROLE}"
 echo "         0 = done   3 = a step above is outstanding"
-echo "         4 = step 1 has not been done yet (what it says RIGHT NOW)"
-echo "         1 = a node-side defect   2 = it could not read the daemon"
+echo "         4 = a claim could not be evaluated and no defect was found"
+echo "             (normally: step 1 has not been done yet)"
+echo "         1 = a node-side defect -- INCLUDING an EXPIRED or REVOKED node key,"
+echo "             which is what step 3 exists to prevent   2 = it could not read the daemon"

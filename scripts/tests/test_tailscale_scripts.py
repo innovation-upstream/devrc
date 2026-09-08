@@ -16,8 +16,23 @@ CAN be exercised without one, chosen for the defects that were actually found:
   * the freshly-switched state (`NeedsLogin`, no address) must be rc 4, not a FAIL, and
     must NOT print "keyexpiry : disabled" -- an absent `KeyExpiry` on an unauthenticated
     node means "no node key exists", not "expiry is off".
+  * 🔴 and the MIRROR of that, which is the more expensive error: a node that HAD an
+    identity and LOST it -- an expired or revoked node key -- must be rc 1, never rc 4.
+    Keys expire at 180 days by default, shorter than the trip. The checker used to
+    require BackendState and the address list to AGREE and to resolve disagreement to
+    "never authenticated", so an expired node printed "THIS NODE HAS NEVER AUTHENTICATED
+    ... the EXPECTED state immediately after apply-tailscale.sh" beside the very address
+    it had retained, and exited 4: "no defect found", about a dead backup path.
+  * the closure preflight's DOWNLOAD gate must fail CLOSED. `_drybuild_counts` used to
+    return 0.0 MiB for any size string it could not parse -- indistinguishable from
+    nothing to download -- so a 2400-path substitutable world rebuild passed all four
+    gates in silence. The parser and the gate were each tested; the defect lived in the
+    SEAM between them, which is now driven directly.
   * `--help` must print the comment header and stop -- not truncate it, not run past it
-    into `set -euo pipefail`.
+    into `set -euo pipefail`. The guard for that must NOT be built from the same
+    "stop at the first non-# line" rule the implementation uses, or it cannot see the
+    implementation truncate: one inserted blank line cost 56 of 75 help lines with both
+    tests green.
   * `--role` as the final argument must SAY something rather than exit 1 in silence.
 
 Both scripts' own `--self-test` suites are run here too, so their internal controls are
@@ -54,16 +69,46 @@ def _run(*argv, **kw):
     )
 
 
+# 🔴 THE HEADER IS BOUNDED BY `set -euo pipefail`, NOT BY "the first non-# line" -- AND
+# THAT DIFFERENCE IS THE WHOLE GUARD. The previous helper walked from the shebang and
+# STOPPED AT THE FIRST NON-`#` LINE: the exact rule the scripts' own `--help` awk uses.
+# A guard built from the implementation's rule cannot see the implementation truncate.
+# MUTATION-PROVEN, against the then-75-line header at dd207064: inserting ONE blank line
+# into check-tailscale.sh's header dropped `--help` from 75 lines to 19 -- losing the
+# entire exit-code vocabulary, the thing an operator reads this text for -- and BOTH
+# `--help` tests still passed, because `want` had been computed with the same truncating
+# rule and shrank to match.
+#
+# So the boundary is read from a DIFFERENT fact: both files end their header at the
+# literal `set -euo pipefail`. Everything between the shebang and that line must be a
+# comment; a blank or code line in there is the truncation itself, and is reported as
+# such rather than being silently absorbed into the expectation.
+HEADER_END = "set -euo pipefail"
+
+# State pins, not rule restatements. The floors sit under the current lengths (98 and
+# 148) with room for ordinary editing. Their job is the case the structural check above
+# would still call well-formed: a wholesale deletion of most of the header, every
+# remaining line still a comment.
+HELP_MIN_LINES = {"check-tailscale.sh": 70, "apply-tailscale.sh": 110}
+
+
 def _header_comment_lines(path: Path) -> list[str]:
-    """The `#` block after the shebang -- the text `--help` is supposed to print."""
-    out = []
-    for i, line in enumerate(path.read_text().splitlines()):
-        if i == 0:
-            continue
-        if not line.startswith("#"):
-            break
-        out.append(re.sub(r"^# ?", "", line))
-    return out
+    """The header block, delimited by `set -euo pipefail` -- what `--help` must print."""
+    lines = path.read_text().splitlines()
+    assert HEADER_END in lines, (
+        f"{path.name} has no bare `{HEADER_END}` line, so this test cannot locate the "
+        "end of the header independently of the awk that prints it"
+    )
+    block = lines[1:lines.index(HEADER_END)]
+    intruders = [(i + 2, ln) for i, ln in enumerate(block) if not ln.startswith("#")]
+    assert not intruders, (
+        f"{path.name}: line(s) {[n for n, _ in intruders]} between the shebang and "
+        f"`{HEADER_END}` do not start with '#'. The `--help` awk stops at the first such "
+        "line, so everything after it is silently dropped from the help text -- one "
+        "blank line here cost check-tailscale.sh 56 of its then-75 lines, including its "
+        f"whole exit-code vocabulary. Offending line(s): {[ln for _, ln in intruders]!r}"
+    )
+    return [re.sub(r"^# ?", "", ln) for ln in block]
 
 
 # --------------------------------------------------------------------------------------
@@ -164,7 +209,37 @@ def test_help_prints_exactly_the_comment_header(script):
         f"({len(got)} lines printed vs {len(want)} in the header). A hardcoded line "
         "range truncated one of these mid-paragraph and ran the other past the end."
     )
-    assert "set -euo pipefail" not in "\n".join(got)
+    assert HEADER_END not in "\n".join(got)
+    # A minimum length, pinned as STATE. `got == want` above compares the printed text to
+    # the file's own header; if BOTH shrink together it stays green, which is how the
+    # truncation this test now guards went unseen. This assertion is not derived from the
+    # file at all.
+    floor = HELP_MIN_LINES[script.name]
+    assert len(got) >= floor, (
+        f"{script.name} --help printed only {len(got)} lines; it has never been shorter "
+        f"than {floor}. Something truncated the header."
+    )
+
+
+def test_check_help_carries_the_whole_exit_code_vocabulary():
+    """The exit codes are what an operator reads `--help` FOR, and they live at the very
+    END of check-tailscale.sh's header -- so they are the first thing a truncation loses.
+    Asserted against the PRINTED output, on the code's meaning and not just its digit."""
+    got = _run("bash", CHECK, "--help").stdout
+    for code, meaning in (
+        ("0", "every claim holds"),
+        ("1", "definitive node-side FAIL"),
+        ("2", "cannot determine"),
+        ("3", "ADMIN-CONSOLE action"),
+        ("4", "INCOMPLETE"),
+    ):
+        # `Exit: 0 = ...` sits on the same line as the label, the rest are indented.
+        assert re.search(rf"(?:^|\s){code} = ", got, flags=re.M), (
+            f"`--help` does not document exit code {code}:\n{got}"
+        )
+        assert meaning in got, (
+            f"`--help` documents exit {code} without saying '{meaning}':\n{got}"
+        )
 
 
 @pytest.mark.parametrize("script", [APPLY, CHECK], ids=lambda p: p.name)
@@ -312,6 +387,133 @@ def test_an_authenticated_but_broken_node_is_still_a_failure(tmp_path):
     assert "FAIL:" in r.stdout
 
 
+# --------------------------------------------------------------------------------------
+# 🔴 AN EXPIRED OR REVOKED NODE KEY IS A FAILURE, NOT "not yet authenticated"
+#
+# Node keys expire after 180 days by default -- shorter than the trip -- so this is the
+# single most likely way the backup path dies while it is being relied on. The checker
+# used to require BackendState and the address list to AGREE and to resolve every
+# disagreement to "never authenticated", which is rc 4: "NOT YET DETERMINABLE (no defect
+# found)". It printed "THIS NODE HAS NEVER AUTHENTICATED ... That is the EXPECTED state
+# immediately after apply-tailscale.sh" beside the very 100.x address the node had
+# retained. A checker that answers "no defect" when the path is dead is worse than none.
+#
+# ⚠ WHICH JSON SHAPE A REAL EXPIRY PRODUCES HAS NOT BEEN CAPTURED FROM A LIVE DAEMON, so
+# both documented shapes are pinned: the address survives while the backend drops to
+# NeedsLogin, and `Self.Expired: true` under a backend that still reads Running.
+# --------------------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "label,status",
+    [
+        (
+            "logged out but the netmap address was RETAINED",
+            {
+                "BackendState": "NeedsLogin",
+                "TailscaleIPs": ["100.100.10.5"],
+                "Self": {"Online": False, "PrimaryRoutes": [SUBNET]},
+            },
+        ),
+        (
+            "NoState with the address retained",
+            {
+                "BackendState": "NoState",
+                "TailscaleIPs": ["100.100.10.5"],
+                "Self": {"Online": False, "PrimaryRoutes": [SUBNET]},
+            },
+        ),
+        (
+            "Self.Expired under a backend that still says Running",
+            {
+                "BackendState": "Running",
+                "TailscaleIPs": ["100.100.10.5"],
+                "Self": {"Online": True, "PrimaryRoutes": [SUBNET], "Expired": True},
+            },
+        ),
+    ],
+    ids=["needslogin-retained-addr", "nostate-retained-addr", "running-expired-flag"],
+)
+def test_an_expired_or_revoked_node_key_is_a_failure_not_incomplete(tmp_path, label, status):
+    env = _fake_tailscale(tmp_path, status, SERVER_PREFS)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, (
+        f"{label}: a node that HAD an identity and lost it exited {r.returncode}, not 1. "
+        "rc 4 says 'no defect found' about a dead backup path.\n" + out
+    )
+    assert "HAS NEVER AUTHENTICATED" not in out, (
+        f"{label}: still claims the node never authenticated, next to the address it "
+        "retained:\n" + out
+    )
+    assert "HAD A TAILNET IDENTITY AND NO LONGER HAS A VALID ONE" in r.stdout, out
+
+
+def test_the_expired_shapes_are_not_reachable_by_the_fresh_install_path(tmp_path):
+    """The control for the three cases above, in the other direction: strip BOTH pieces
+    of evidence -- no retained address, no Expired flag -- and the SAME code must go back
+    to rc 4. Without this, a checker that simply failed everything would satisfy them."""
+    env = _fake_tailscale(tmp_path, NEVER_AUTHED, NO_PREFS)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "HAS NEVER AUTHENTICATED" in r.stdout
+
+
+def test_a_key_expiry_date_in_the_past_is_a_failure(tmp_path):
+    """The third, independent detector: a daemon still reporting Running with no Expired
+    flag, whose KeyExpiry has nonetheless lapsed. It reads a different field from either
+    shape above, so a build that emits neither of those still cannot hide a dead key."""
+    status = {
+        "BackendState": "Running",
+        "TailscaleIPs": ["100.100.10.5"],
+        "Self": {
+            "Online": True,
+            "PrimaryRoutes": [SUBNET],
+            "KeyExpiry": "2020-01-02T03:04:05Z",
+        },
+    }
+    env = _fake_tailscale(tmp_path, status, SERVER_PREFS)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "KEY EXPIRY DATE IS IN THE PAST" in r.stdout, r.stdout
+    # ...and the control: the SAME shape with a future date is an ACTION (rc 3), not a
+    # FAIL. A guard that failed on any KeyExpiry at all would pass the assertion above.
+    status["Self"]["KeyExpiry"] = "2099-01-02T03:04:05Z"
+    (tmp_path / "future").mkdir()
+    env = _fake_tailscale(tmp_path / "future", status, SERVER_PREFS)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "KEY EXPIRY DATE IS IN THE PAST" not in r.stdout
+
+
+def test_an_unreadable_prefs_run_does_not_assert_what_the_node_advertises(tmp_path):
+    """One run printed BOTH `what this node ADVERTISES is UNKNOWN` and `<subnet> is
+    advertised but NOT APPROVED` -- the second asserting, and sending the operator to the
+    admin console over, the exact fact the first had declared unknowable. `PrimaryRoutes`
+    being empty has two causes with different fixes (a browser vs `tailscale up` here),
+    and a run that cannot read prefs has no evidence to choose between them."""
+    unapproved = {
+        "BackendState": "Running",
+        "TailscaleIPs": ["100.100.10.5"],
+        "Self": {"Online": True, "PrimaryRoutes": []},
+    }
+    env = _fake_tailscale(tmp_path, unapproved, None)  # prefs unreadable
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    # The verdict paragraphs are hard-wrapped, so compare on whitespace-normalised text.
+    flat = " ".join(r.stdout.split())
+    assert "what this node ADVERTISES is UNKNOWN" in flat, r.stdout
+    assert "is advertised but NOT APPROVED" not in flat, (
+        "the run asserts the node advertises the route in the same breath as declaring "
+        "that unknowable:\n" + r.stdout
+    )
+    assert "carries NO traffic over tailscale right now" in flat, r.stdout
+    # THE CONTROL: with prefs READABLE and the route genuinely advertised, the admin
+    # console action must still fire. Otherwise this test is satisfied by deleting it.
+    (tmp_path / "readable").mkdir()
+    env = _fake_tailscale(tmp_path / "readable", unapproved, SERVER_PREFS)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "is advertised but NOT APPROVED" in r.stdout, r.stdout
+
+
 def test_a_subnet_router_with_no_lan_route_still_fails(tmp_path):
     """The control for the stubbed routing table above: with the route REMOVED, a
     subnet router is a definitive FAIL even though everything else is perfect. Without
@@ -321,6 +523,119 @@ def test_a_subnet_router_with_no_lan_route_still_fails(tmp_path):
     r = _run("bash", CHECK, "--role", "server", env=env)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "no non-tailscale route" in r.stdout, r.stdout
+
+
+# --------------------------------------------------------------------------------------
+# 🔴 THE SEAM: what the dry-build PARSER returns, fed to the GATE that reads it
+#
+# The parser was tested on well-formed fixtures and the gate was tested on numbers typed
+# in by hand, and the defect lived in NEITHER -- it lived in the join. `_drybuild_counts`
+# spelled "I could not read the download size" as `0.0`, and `_gate_reasons` read that as
+# "there is nothing to download". MEASURED against the old code, all four shapes below
+# returned `0|2400|0.0` and passed every gate in silence: a 2400-path, entirely
+# substitutable world rebuild, which is exactly what the gate exists to stop.
+#
+# So this drives BOTH functions, out of the real script, exactly as a real run does.
+# --------------------------------------------------------------------------------------
+def _gate_probe(tmp_path: Path, dry_build_stderr: str) -> tuple[str, str]:
+    """Run `_drybuild_counts` on `dry_build_stderr`, feed the result to `_gate_reasons`.
+
+    Returns (counts_record, gate_output). Empty gate output means "allowed".
+    """
+    src = APPLY.read_text()
+    # Everything up to the `--self-test` dispatcher: the limit variables and every
+    # function, and nothing that touches the host.
+    prefix = src.split('\nif [ "$SELFTEST" = "1" ]; then', 1)[0]
+    assert "_gate_reasons()" in prefix and "_drybuild_counts()" in prefix, (
+        "the seam probe no longer captures both functions -- the script was reordered"
+    )
+    fixture = tmp_path / "dry.err"
+    fixture.write_text(dry_build_stderr)
+    probe = tmp_path / "seam.sh"
+    # The fixture path travels in the ENVIRONMENT, not in `$1`: `prefix` carries the
+    # script's own argument parser, which rejects an unknown positional with exit 2.
+    probe.write_text(
+        prefix
+        + '\nc=$(_drybuild_counts "$TS_SEAM_FIXTURE")\n'
+        'IFS="|" read -r b f m <<<"$c"\n'
+        'printf "%s\\n---\\n" "$c"\n'
+        '_gate_reasons 26.11 26.11 "$b" "$b" "$m" "$m" "$f" "$f"\n'
+    )
+    env = dict(os.environ, TS_SEAM_FIXTURE=str(fixture))
+    r = _run("bash", probe, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    counts, _, gate = r.stdout.partition("\n---\n")
+    return counts.strip(), gate.strip()
+
+
+# 🔴 `expect_mib` IS PINNED EXACTLY, NOT JUST "not 0.0". A first version of this test
+# asserted only that the size was not `0.0` and that SOME gate fired, and a mutant that
+# defaulted an unrecognised unit to MiB -- turning 4 EiB into 4.0 -- SURVIVED it: the
+# number was not 0.0, and the fetch-count gate caught the change for an unrelated reason.
+# Defence in depth is not a reason to leave the inner guard unpinned; the exact value is
+# the only assertion that can see that mutation.
+@pytest.mark.parametrize(
+    "label,line,expect_mib",
+    [
+        ("no size parenthetical", "these 2400 paths will be fetched:", "UNKNOWN"),
+        # A unit it DOES understand must be scaled, not refused -- 2.5 TiB read as
+        # 2.5 MiB would be six orders of magnitude of "this is fine".
+        ("TiB", "these 2400 paths will be fetched (2.5 TiB download, 9.0 TiB unpacked):",
+         "2621440.0"),
+        ("comma decimal separator",
+         "these 2400 paths will be fetched (4096,0 MiB download, 9000,0 MiB unpacked):",
+         "UNKNOWN"),
+        ("an unknown unit",
+         "these 2400 paths will be fetched (4.0 EiB download, 9.0 EiB unpacked):",
+         "UNKNOWN"),
+    ],
+)
+def test_a_world_sized_fetch_never_passes_the_gate_however_its_size_is_spelled(
+    tmp_path, label, line, expect_mib
+):
+    counts, gate = _gate_probe(tmp_path, line + "\n")
+    assert counts == f"0|2400|{expect_mib}", (
+        f"{label}: got {counts}, want 0|2400|{expect_mib}. An unreadable size must be "
+        "spelled UNKNOWN -- never as 0.0 (indistinguishable from nothing to download) "
+        "and never as a number invented by defaulting the unit."
+    )
+    assert gate, f"{label}: {counts} passed every gate in silence"
+
+
+def test_the_seam_still_allows_a_real_tailscale_sized_change(tmp_path):
+    """The control. Both directions, or the four cases above are satisfied by a gate that
+    refuses everything -- which is a permanent red light people learn to override."""
+    counts, gate = _gate_probe(
+        tmp_path,
+        "these 7 derivations will be built:\n"
+        "  /nix/store/aaaa-tailscale-1.102.3.drv\n"
+        "these 25 paths will be fetched (17.6 MiB download, 61.1 MiB unpacked):\n"
+        "  /nix/store/bbbb-thing\n",
+    )
+    assert counts == "7|25|17.6", counts
+    assert gate == "", f"the measured tailscale-only delta was refused:\n{gate}"
+
+
+def test_an_empty_dry_build_is_a_real_zero_and_is_allowed(tmp_path):
+    """`0.0` must still MEAN zero when there genuinely is nothing to fetch -- otherwise
+    the fix above would have turned the gate into an unconditional refusal."""
+    counts, gate = _gate_probe(tmp_path, "building the system configuration...\n")
+    assert counts == "0|0|0.0", counts
+    assert gate == "", gate
+
+
+def test_the_fetch_count_is_gated_and_not_merely_printed(tmp_path):
+    """The count was parsed correctly and printed in the summary table, and read by no
+    gate -- the identical 'decorative column' defect the download-volume gate was added
+    to fix. It is the axis that still has a number when the SIZE cannot be parsed."""
+    counts, gate = _gate_probe(
+        tmp_path, "these 2400 paths will be fetched (1.0 MiB download, 2.0 MiB unpacked):\n"
+    )
+    assert counts == "0|2400|1.0", counts
+    assert "FETCH COUNT" in gate, (
+        "2400 paths to fetch passed with a 1.0 MiB size -- both build gates and both "
+        f"download-volume gates are silent by construction here:\n{gate}"
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -340,6 +655,17 @@ def test_a_subnet_router_with_no_lan_route_still_fails(tmp_path):
         # is not a setting. Only the `[.={]` anchor rejects this; a bare
         # `services\.tailscale` match accepts it and reports the host as already done.
         ('  warnings = [ "services.tailscale is not enabled here" ];', False),
+        # 🔴 THE FIXTURES THAT DISCRIMINATE STRING-BLANKING FROM THAT ANCHOR. The case
+        # above has no `[.={]` after the attribute path, so the anchor alone rejects it
+        # and it stays False with every line of string handling deleted -- it cannot see
+        # that mutation. These two can: each is a string whose CONTENTS are a
+        # syntactically perfect declaration, and each made the script print "Nothing to
+        # do. Exiting 0" on a host where nothing had been applied.
+        ('  warnings = [ "you should run services.tailscale.enable = true; here" ];', False),
+        ("  text = ''\n    services.tailscale.enable = true;\n  '';", False),
+        # ...and the control against a scanner that blanks too much: a real declaration
+        # after a CLOSED string must still be found.
+        ('  warnings = [ "off" ];\n  services.tailscale.enable = true;', True),
         ("  services.tailscale.enable = true;", True),
         ("  services.tailscale = {\n    enable = true;\n  };", True),
         ("  services.tailscale={enable=true;};", True),

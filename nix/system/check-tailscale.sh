@@ -50,12 +50,34 @@
 # most likely to kill this path silently mid-trip. "Disabled" is now claimed ONLY when
 # the node IS authenticated; otherwise the claim is UNKNOWN (see rc 4).
 #
-# 🔴 AUTHENTICATED IS A FIRST-CLASS STATE, NOT A FAILURE. `apply-tailscale.sh` installs
-# the service and switches; it deliberately does NOT run `tailscale up`, which needs a
-# browser. So immediately after a successful apply the node is configured, running, and
-# has no tailnet identity at all -- backend `NeedsLogin`, no address, nothing
-# advertised, no key. Reporting that as a node-side FAIL made the apply script roll back
-# the config it had just installed. It is rc 4.
+# 🔴 IDENTITY IS THREE STATES, NOT TWO, AND CONFLATING TWO OF THEM IS THE WORST BUG THIS
+# SCRIPT CAN HAVE. `apply-tailscale.sh` installs the service and switches; it deliberately
+# does NOT run `tailscale up`, which needs a browser. So immediately after a successful
+# apply the node is configured, running, and has no tailnet identity at all -- backend
+# `NeedsLogin`, no address, nothing advertised, no key. Reporting THAT as a node-side FAIL
+# made the apply script roll back the config it had just installed. But the reverse error
+# is worse:
+#
+#   NONE       -- never authenticated. No addresses AND backend NeedsLogin/NoState/empty.
+#                 rc 4. Genuinely expected straight after apply.
+#   OK         -- an address in 100.64.0.0/10, a backend that is not a logged-out one, and
+#                 `Self.Expired` not set. Every other claim is judged against this.
+#   LOST       -- 🔴 THIS NODE HAD AN IDENTITY AND NO LONGER HAS ONE. rc 1, a FAIL.
+#                 Node keys expire after 180 days by default -- SHORTER THAN THE TRIP --
+#                 and `tailscale logout` / an admin revoke do the same thing. Two shapes,
+#                 and BOTH are handled because only one of them has been observed here:
+#                   * the daemon drops the node to `NeedsLogin`/`NoState` while KEEPING
+#                     the netmap address it was issued; and
+#                   * `Self.Expired: true` with the backend still `Running`.
+#                 An earlier version required backend AND address to AGREE and called
+#                 disagreement "not authenticated", so an EXPIRED node printed
+#                 "THIS NODE HAS NEVER AUTHENTICATED ... that is the EXPECTED state
+#                 immediately after apply-tailscale.sh" -- next to the very address it had
+#                 retained -- and exited 4, "no defect found". A checker that answers
+#                 "no defect" when the backup path is dead is worse than no checker.
+#   INCOHERENT -- a backend that is neither logged-out nor holding an address (e.g.
+#                 `Running` with an empty netmap). Not the post-apply state and not a
+#                 usable one. rc 1, with its own message: it does NOT claim expiry.
 #
 # Exit: 0 = every claim holds, including admin-console approval and disabled key expiry
 #       3 = everything THIS HOST controls is correct, but an ADMIN-CONSOLE action is
@@ -64,14 +86,15 @@
 #           step that cannot be scripted, and apply-tailscale.sh must not roll back a
 #           correct switch because a browser tab has not been clicked yet.
 #       4 = INCOMPLETE. No defect was found, but one or more claims could not be
-#           evaluated. Overwhelmingly the common cause is that the node has not
-#           authenticated yet -- the EXPECTED state straight after apply-tailscale.sh --
-#           in which case advertisement, route approval and key expiry are all
-#           unknowable rather than wrong. Also covers unreadable prefs. Like 3, this is
-#           NOT a reason to roll back a switch.
-#       1 = a definitive node-side FAIL: the node HAS a tailnet identity and something
-#           about it is wrong (backend not Running, not Online, not advertising,
-#           forwarding off, no LAN route).
+#           evaluated. The common cause is that the node has NEVER authenticated -- the
+#           EXPECTED state straight after apply-tailscale.sh -- in which case
+#           advertisement, route approval and key expiry are all unknowable rather than
+#           wrong. Also covers unreadable prefs on a node that IS authenticated. Like 3,
+#           this is NOT a reason to roll back a switch. It is NOT used for a node that
+#           has LOST an identity it once had; that is 1.
+#       1 = a definitive node-side FAIL: the node HAS or HAD a tailnet identity and
+#           something about it is wrong -- an EXPIRED or REVOKED node key, a backend that
+#           is not Running, not Online, not advertising, forwarding off, or no LAN route.
 #       2 = cannot determine -- tailscale absent, daemon unreachable, role ambiguous,
 #           parser failure, or the parser failed its own controls
 set -euo pipefail
@@ -121,24 +144,52 @@ _in_csv() {  # $1 = needle, $2 = csv
   return 1
 }
 
-# --- has this node ever authenticated to a tailnet? -----------------------------------
-# 🔴 THE STATE apply-tailscale.sh LANDS IN, and the reason this predicate exists rather
-# than being inlined: the apply script installs the service and switches, then asks this
-# checker whether to keep the change. Straight after that switch the node has NEVER run
-# `tailscale up` (it needs a browser), so backend is `NeedsLogin`, there is no address,
-# nothing is advertised and there is no node key. Reporting that as a node-side FAIL is
-# what made the apply script roll back a config it had just installed correctly.
+# --- what is this node's tailnet IDENTITY? -------------------------------------------
+# Prints exactly one of: none | ok | lost | incoherent.  See the header for what each
+# means and why there are four names for three verdicts.
 #
-# TWO signals, and they must AGREE -- disagreement means NOT authenticated, because the
-# reassuring answer is the one that has to carry more evidence:
-#   * an address in 100.64.0.0/10 is the DURABLE signal. A node that has completed
-#     `tailscale up` keeps it even when the backend is `Stopped` (WantRunning=false).
-#   * `BackendState` is the daemon saying it in words. `NeedsLogin` / `NoState` mean
-#     there is no tailnet identity, whatever else is in the document.
-_authenticated() {   # $1 = BackendState, $2 = comma-separated TailscaleIPs
-  [ -n "$2" ] || return 1
-  case "$1" in NeedsLogin|NoState|"") return 1 ;; esac
-  return 0
+# 🔴 THE ERROR THIS REPLACES. The predecessor was a two-valued `_authenticated` that
+# required BOTH signals to agree and resolved every disagreement to "not authenticated"
+# -- on the stated principle that "the reassuring answer has to carry more evidence".
+# The principle is right; the application was inverted. "Never authenticated" is not the
+# cautious answer here, it is the REASSURING one: it routes to rc 4, "no defect found",
+# and prints that this is the expected state right after an apply. So the ONE state that
+# kills this backup path on a months-long trip -- a node key that expired at ~180 days --
+# was reported as a fresh install, with the retained 100.x address printed on the same
+# line as the claim that the node had never logged in.
+#
+# The signals, and which way each one cuts:
+#   * an address in 100.64.0.0/10 is DURABLE, and durability is the whole point: a node
+#     keeps it when the backend is `Stopped` (WantRunning=false) AND when its key has
+#     expired. So an address is evidence an identity was ISSUED -- never, on its own,
+#     evidence that it is still valid.
+#   * `BackendState` is the daemon's own word for what it can do RIGHT NOW. `NeedsLogin`
+#     / `NoState` mean it cannot act as a tailnet member at this moment.
+#   * `Self.Expired` is the control plane saying the node key is dead while the backend
+#     may still read `Running`. It was parsed-adjacent and thrown away before.
+#
+# So: address + logged-out backend is not "no identity", it is a LOST one. Only the
+# absence of BOTH is "never authenticated".
+#
+# ⚠ WHICH SHAPE A REAL EXPIRY PRODUCES HAS NOT BEEN CAPTURED FROM A LIVE DAEMON HERE --
+# the two above are from documented behaviour. Both are therefore treated as LOST, so it
+# does not matter which one the daemon actually emits; the cost of handling the one that
+# never occurs is a dead branch, and the cost of handling neither is a silent dead path.
+_identity_state() {   # $1 = BackendState, $2 = comma-separated TailscaleIPs, $3 = Expired
+  # The control plane's explicit "this key is dead" outranks everything else, including a
+  # backend that still says `Running`.
+  if [ "$3" = "true" ]; then printf 'lost'; return 0; fi
+  case "$1" in
+    NeedsLogin|NoState|"")
+      # Logged out. WITH an address it had an identity and lost it; without one it never
+      # had any.
+      if [ -n "$2" ]; then printf 'lost'; else printf 'none'; fi ;;
+    *)
+      # A backend that is not logged-out. With an address that is a live identity.
+      # Without one the daemon is contradicting itself -- and that is neither the
+      # post-apply state (which is NeedsLogin) nor a usable one.
+      if [ -n "$2" ]; then printf 'ok'; else printf 'incoherent'; fi ;;
+  esac
 }
 
 # --- the parser -------------------------------------------------------------------
@@ -146,7 +197,13 @@ _authenticated() {   # $1 = BackendState, $2 = comma-separated TailscaleIPs
 # already known not to be importable from the python3 on the default PATH here.
 #
 # Emits ONE `|`-separated record so a caller cannot half-read it:
-#   backend|online|ips|advertised|primary|expiry_iso|expiry_days|route_all|prefs_src
+#   backend|online|ips|advertised|primary|expiry_iso|expiry_days|route_all|prefs_src|expired
+#
+# 🔴 `expired` IS THE LAST FIELD AND IT IS READ. `Self.Expired` used to be sitting one
+# line away from `Self.KeyExpiry` in this parser and was never extracted, so the single
+# most likely way this backup path dies mid-trip -- the node key lapsing at ~180 days --
+# was invisible to every verdict below. It is appended rather than inserted so the field
+# positions the self-test asserts by index do not silently shift.
 #
 # Exits 2 rather than printing a record when the document is not what it claims to be,
 # so "the parser found nothing" can never be reported as "this node advertises nothing"
@@ -174,6 +231,11 @@ online = "true" if me.get("Online") is True else "false"
 
 ips = [i for i in (st.get("TailscaleIPs") or me.get("TailscaleIPs") or []) if isinstance(i, str)]
 primary = [r for r in (me.get("PrimaryRoutes") or []) if isinstance(r, str)]
+
+# `Self.Expired` -- the control plane's own "this node key is dead". Compared to the
+# literal `True` and nothing else: `omitempty` means the field is ABSENT on a healthy
+# node, and a truthiness test would read a stray non-empty string as expired.
+expired = "true" if me.get("Expired") is True else "false"
 
 # Key expiry. `KeyExpiry` is omitempty AND some builds emit the Go zero time instead,
 # so BOTH spellings of "expiry is disabled" have to be handled; treating only one of
@@ -205,7 +267,7 @@ if sys.argv[2] != "-":
     src = "prefs"
 
 print("|".join((backend, online, ",".join(ips), ",".join(advertised),
-                ",".join(primary), expiry, days, route_all, src)))
+                ",".join(primary), expiry, days, route_all, src, expired)))
 PY
 }
 
@@ -255,7 +317,7 @@ J
          "KeyExpiry":"2099-01-02T03:04:05Z","PrimaryRoutes":["192.168.50.0/24"]}}
 J
   _t "advertised + approved                       " \
-     "Running|true|100.100.10.5|192.168.50.0/24|192.168.50.0/24|2099-01-02T03:04:05+00:00|D|false|prefs" \
+     "Running|true|100.100.10.5|192.168.50.0/24|192.168.50.0/24|2099-01-02T03:04:05+00:00|D|false|prefs|false" \
      "$dir/approved.json" "$dir/adv-prefs.json"
 
   # 🔴 THE CASE THIS SCRIPT EXISTS FOR: advertised, NOT approved. Identical on the node
@@ -266,7 +328,7 @@ J
          "KeyExpiry":"2099-01-02T03:04:05Z","PrimaryRoutes":[]}}
 J
   _t "advertised but NOT approved (empty Primary) " \
-     "Running|true|100.100.10.5|192.168.50.0/24||2099-01-02T03:04:05+00:00|D|false|prefs" \
+     "Running|true|100.100.10.5|192.168.50.0/24||2099-01-02T03:04:05+00:00|D|false|prefs|false" \
      "$dir/unapproved.json" "$dir/adv-prefs.json"
 
   # PrimaryRoutes absent entirely (the field is omitempty) must read the SAME as empty,
@@ -276,7 +338,7 @@ J
  "Self":{"HostName":"workbench","Online":true,"KeyExpiry":"2099-01-02T03:04:05Z"}}
 J
   _t "PrimaryRoutes absent == not approved        " \
-     "Running|true|100.100.10.5|192.168.50.0/24||2099-01-02T03:04:05+00:00|D|false|prefs" \
+     "Running|true|100.100.10.5|192.168.50.0/24||2099-01-02T03:04:05+00:00|D|false|prefs|false" \
      "$dir/noprimary.json" "$dir/adv-prefs.json"
 
   # Key expiry DISABLED, both spellings. Omitted...
@@ -285,14 +347,26 @@ J
  "Self":{"HostName":"laptop","Online":true,"PrimaryRoutes":[]}}
 J
   _t "key expiry disabled (field omitted)         " \
-     "Running|true|100.100.10.5|||||?|none" "$dir/noexpiry.json" "-"
+     "Running|true|100.100.10.5|||||?|none|false" "$dir/noexpiry.json" "-"
   # ...and spelled as the Go zero time, which is NOT an expiry in the year 1.
   cat >"$dir/zeroexpiry.json" <<'J'
 {"BackendState":"Running","TailscaleIPs":["100.100.10.5"],
  "Self":{"HostName":"laptop","Online":true,"KeyExpiry":"0001-01-01T00:00:00Z","PrimaryRoutes":[]}}
 J
   _t "key expiry disabled (Go zero time)          " \
-     "Running|true|100.100.10.5|||||?|none" "$dir/zeroexpiry.json" "-"
+     "Running|true|100.100.10.5|||||?|none|false" "$dir/zeroexpiry.json" "-"
+
+  # 🔴 `Self.Expired` MUST REACH THE RECORD. Every other fixture in this file has the
+  # field absent, so they all assert the LAST slot as `false` -- which a parser that
+  # hardcoded `false`, or dropped the field entirely, would satisfy. This is the fixture
+  # that can tell those apart: it is the only one whose expected value is `true`.
+  cat >"$dir/expired.json" <<'J'
+{"BackendState":"Running","TailscaleIPs":["100.100.10.5"],
+ "Self":{"HostName":"workbench","Online":true,"Expired":true,"PrimaryRoutes":[]}}
+J
+  _t "Self.Expired reaches the record as 'true'  " \
+     "Running|true|100.100.10.5|192.168.50.0/24||||false|prefs|true" \
+     "$dir/expired.json" "$dir/adv-prefs.json"
 
   # A logged-out node: BackendState carries it, Online is false, no addresses.
   cat >"$dir/needslogin.json" <<'J'
@@ -300,7 +374,7 @@ J
  "Self":{"HostName":"laptop","Online":false}}
 J
   _t "NeedsLogin (not authenticated)              " \
-     "NeedsLogin|false||||||?|none" "$dir/needslogin.json" "-"
+     "NeedsLogin|false||||||?|none|false" "$dir/needslogin.json" "-"
 
   # A plain client that ACCEPTS routes. RouteAll is the `--accept-routes` pref, and
   # `AdvertiseRoutes: null` is how the daemon spells "none" -- distinct from `[]`.
@@ -308,7 +382,7 @@ J
 {"AdvertiseRoutes":null,"RouteAll":true,"WantRunning":true}
 J
   _t "client prefs: null routes, RouteAll on      " \
-     "Running|true|100.100.10.5|||||true|prefs" "$dir/noexpiry.json" "$dir/client-prefs.json"
+     "Running|true|100.100.10.5|||||true|prefs|false" "$dir/noexpiry.json" "$dir/client-prefs.json"
 
   # --- the DAYS arithmetic, at two points -------------------------------------------
   local n exp got_days
@@ -394,30 +468,55 @@ J
     echo "  [self-test] _in_csv rejects a different mask (/16 != /24) -> ok"
   fi
 
-  # --- _authenticated, driven in BOTH directions -------------------------------------
-  # 🔴 The whole rc-4 split, and the key-expiry claim, hang off this one predicate. A
-  # version that answered "yes" to everything would make rc 4 unreachable and put the
-  # post-switch FAIL back; one that answered "no" to everything would make rc 0
-  # unreachable and permanently report a working node as not-yet-set-up. Both directions
-  # are driven, on the exact states the daemon emits.
+  # --- _identity_state, every state driven -------------------------------------------
+  # 🔴 EVERY VERDICT IN THIS SCRIPT HANGS OFF THIS ONE FUNCTION, so all four answers are
+  # driven and each is reachable from at least two different inputs. A version that
+  # answered `none` to everything would make rc 0 unreachable and permanently report a
+  # working node as not-yet-set-up; one that answered `ok` to everything would put the
+  # post-switch rollback back; and one that never says `lost` -- the shipped bug -- lets
+  # an EXPIRED node key exit 4 as "no defect found", which is the failure this whole
+  # script exists to prevent.
+  #
+  # The three `lost` rows are the ones that matter, and each carries DIFFERENT evidence:
+  # a retained address under two different logged-out backends, and the explicit
+  # `Expired` flag under a backend that still reads `Running`. A mutant that reads only
+  # the address, or only the flag, survives one row and dies on the others.
   local a_case
   for a_case in \
-      "Running:100.100.10.5:yes:a logged-in node" \
-      "Stopped:100.100.10.5:yes:logged in but WantRunning=false -- the key still exists" \
-      "NeedsLogin::no:the state straight after apply-tailscale.sh" \
-      "NoState::no:the daemon has no state at all" \
-      "NeedsLogin:100.100.10.5:no:signals DISAGREE -- must not resolve to authenticated" \
-      "Running::no:Running with no address is not an identity" \
-      ":100.100.10.5:no:an empty BackendState is not evidence of anything"; do
-    local a_backend a_ips a_want a_why a_got
-    IFS=':' read -r a_backend a_ips a_want a_why <<<"$a_case"
-    if _authenticated "$a_backend" "$a_ips"; then a_got=yes; else a_got=no; fi
+      "Running:100.100.10.5:false:ok:a logged-in node" \
+      "Stopped:100.100.10.5:false:ok:logged in but WantRunning=false -- the key still exists" \
+      "NeedsLogin::false:none:the state straight after apply-tailscale.sh" \
+      "NoState::false:none:the daemon has no state at all" \
+      "::false:none:an empty BackendState with no address is not evidence of anything" \
+      "NeedsLogin:100.100.10.5:false:lost:EXPIRED/REVOKED -- logged out but the netmap address was RETAINED" \
+      "NoState:100.100.10.5:false:lost:the same, via NoState" \
+      "Running:100.100.10.5:true:lost:Self.Expired outranks a backend that still says Running" \
+      ":100.100.10.5:false:lost:an address with no backend word is still an issued identity" \
+      "Running::false:incoherent:Running with an empty netmap is neither fresh nor usable" \
+      "Stopped::false:incoherent:Stopped with no address at all"; do
+    local a_backend a_ips a_exp a_want a_why a_got
+    IFS=':' read -r a_backend a_ips a_exp a_want a_why <<<"$a_case"
+    a_got=$(_identity_state "$a_backend" "$a_ips" "$a_exp")
     if [ "$a_got" = "$a_want" ]; then
-      echo "  [self-test] _authenticated '${a_backend:-<empty>}' / '${a_ips:-<none>}' -> $a_got  ($a_why) -> ok"
+      echo "  [self-test] _identity_state '${a_backend:-<empty>}' / '${a_ips:-<none>}' / Expired=$a_exp -> $a_got  ($a_why) -> ok"
     else
-      echo "  [self-test] _authenticated '${a_backend:-<empty>}' / '${a_ips:-<none>}' FAILED: got $a_got, want $a_want"; rc=1
+      echo "  [self-test] _identity_state '${a_backend:-<empty>}' / '${a_ips:-<none>}' / Expired=$a_exp FAILED: got '$a_got', want '$a_want'"; rc=1
     fi
   done
+  # 🔴 THE RELATIONSHIP, not just the rows: a retained address must move the answer AWAY
+  # from `none`, and the Expired flag must move it away from `ok`. Asserted as a pair of
+  # inequalities so a table that happened to be right row-by-row for the wrong reason
+  # still has to satisfy the property the rows exist to express.
+  if [ "$(_identity_state NeedsLogin '' false)" = "$(_identity_state NeedsLogin 100.100.10.5 false)" ]; then
+    echo "  [self-test] FAILED: a RETAINED address does not change the answer -- expiry is invisible"; rc=1
+  else
+    echo "  [self-test] a retained address changes NeedsLogin's answer (none -> lost) -> ok"
+  fi
+  if [ "$(_identity_state Running 100.100.10.5 false)" = "$(_identity_state Running 100.100.10.5 true)" ]; then
+    echo "  [self-test] FAILED: Self.Expired does not change the answer -- the flag is discarded"; rc=1
+  else
+    echo "  [self-test] Self.Expired changes Running's answer (ok -> lost) -> ok"
+  fi
   return $rc
 }
 
@@ -521,7 +620,7 @@ if ! rec=$(_parse_ts "$TMPD/status.json" "$prefs_arg"); then
   echo "CANNOT DETERMINE: could not parse the daemon's own state" >&2
   exit 2
 fi
-IFS='|' read -r backend online ips advertised primary expiry days route_all prefs_src <<<"$rec"
+IFS='|' read -r backend online ips advertised primary expiry days route_all prefs_src expired <<<"$rec"
 
 # CONTEXT ONLY -- deliberately not a verdict. `systemctl cat` exits 0 for a dead unit
 # and `is-active` says nothing about whether the node is authenticated or routing.
@@ -550,6 +649,7 @@ echo "daemon  : tailscaled unit is '${unit_state:-unknown}'  (context only -- no
 echo "backend : $backend"
 echo "online  : $online"
 echo "addrs   : ${ips:-<none>}"
+echo "expired : $expired   (Self.Expired -- the control plane's own word on the node key)"
 echo "adverts : ${advertised:-<none>}   (source: $prefs_src -- what THIS NODE claims)"
 echo "primary : ${primary:-<none>}   (source: control plane -- what is APPROVED)"
 if [ -n "$expiry" ]; then
@@ -570,43 +670,101 @@ fails=()
 actions=()
 unknowns=()
 
+# 🔴 FOUR ANSWERS, THREE OUTCOMES. `authed` stays as the one flag the claims below read,
+# but it is now derived from a classifier that can say WHY it is not 1 -- because "never
+# had an identity" (rc 4, expected) and "had one and lost it" (rc 1, the backup path is
+# DEAD) used to be the same answer, and the reassuring one won.
+idstate=$(_identity_state "$backend" "$ips" "$expired")
+# An explicit `if`, not `[ ... ] && authed=1`. MEASURED on bash 5.3.15: that shape does
+# NOT abort mid-script under `set -e` -- but when it is the LAST statement executed it
+# becomes the script's exit status, so the same line is harmless here and would silently
+# turn a PASS into an exit 1 if anything were ever moved after it. See the note beside
+# the `actions` bucket at the bottom of this file.
 authed=0
-if _authenticated "$backend" "$ips"; then authed=1; fi
+if [ "$idstate" = "ok" ]; then authed=1; fi
+# Why the identity-dependent claims below cannot be judged. Set for every non-`ok` state
+# so no claim ever has to invent a reason -- the old text said "`tailscale up` has never
+# run here" unconditionally, which is a false statement about an EXPIRED node.
+noid_reason=""
 
-if [ "$authed" = "1" ]; then
-  echo "PASS  authed    : this node holds a tailnet identity ($ips)"
-  # These two are verdicts ONLY once there is an identity to have a verdict about.
-  if [ "$backend" != "Running" ]; then
-    fails+=("tailscaled backend is '$backend', not 'Running' -- this node carries no
+case "$idstate" in
+  ok)
+    echo "PASS  authed    : this node holds a tailnet identity ($ips)"
+    # These two are verdicts ONLY once there is an identity to have a verdict about.
+    if [ "$backend" != "Running" ]; then
+      fails+=("tailscaled backend is '$backend', not 'Running' -- this node carries no
     traffic even though it IS logged in (it holds $ips). Bring it up:  $UP_CMD")
-  fi
-  if [ "$online" != "true" ]; then
-    fails+=("the control plane does not consider this node Online; it cannot be reached.")
-  fi
-else
-  unknowns+=("THIS NODE HAS NEVER AUTHENTICATED to a tailnet (backend '$backend',
-    addresses: ${ips:-<none>}). That is the EXPECTED state immediately after
+    fi
+    if [ "$online" != "true" ]; then
+      fails+=("the control plane does not consider this node Online; it cannot be reached.")
+    fi
+    ;;
+  none)
+    noid_reason="\`tailscale up\` has never run on this host"
+    unknowns+=("THIS NODE HAS NEVER AUTHENTICATED to a tailnet (backend '$backend', no
+    addresses, Self.Expired '$expired'). That is the EXPECTED state immediately after
     \`apply-tailscale.sh\`, which installs and starts the service but deliberately does
     NOT log in -- \`tailscale up\` needs a browser. It is NOT a node-side defect, and
     every claim below that depends on a tailnet identity is reported UNKNOWN rather than
     guessed at. Authenticate it, then re-run this check:
       $UP_CMD")
-fi
+    ;;
+  lost)
+    # 🔴 A FAIL, AND THE MOST IMPORTANT ONE IN THIS SCRIPT. This is what a lapsed node key
+    # looks like from the node, and the trip is longer than the 180-day default.
+    noid_reason="this node's tailnet identity is EXPIRED or REVOKED (see the FAIL above)"
+    fails+=("🔴 THIS NODE HAD A TAILNET IDENTITY AND NO LONGER HAS A VALID ONE. Backend is
+    '$backend', Self.Expired is '$expired', and the netmap addresses it was issued are
+    still present: ${ips:-<none>}. A node that had never logged in would have NEITHER --
+    so this is not the fresh-install state, it is an EXPIRED NODE KEY, a \`tailscale
+    logout\`, or a node removed/disabled in the admin console. THE BACKUP PATH IS DEAD
+    RIGHT NOW: nothing reaches this host over tailscale until it is re-authenticated.
+    Tailscale's default key lifetime is 180 days, which is shorter than a months-long
+    trip, and the lapse produces no local error -- which is why this is a FAIL and not an
+    'incomplete'. Re-authenticate, from a machine with a browser:
+      $UP_CMD
+    Then DISABLE KEY EXPIRY so it cannot happen again:
+      https://login.tailscale.com/admin/machines -> this machine -> ... ->
+      Disable key expiry")
+    ;;
+  *)
+    # `incoherent`: a backend that is neither logged-out nor holding an address.
+    noid_reason="the daemon's own state is self-contradictory (see the FAIL above)"
+    fails+=("the daemon reports backend '$backend' -- which is NOT one of the logged-out
+    states -- yet lists NO tailnet address at all. Those two cannot both be true of a
+    working node, so this run will not resolve them into either 'authenticated' or 'never
+    authenticated'. It is reported as a defect rather than as 'not yet determinable'
+    because a node in this state carries no traffic, and because the post-apply state is
+    \`NeedsLogin\` with no address, which is NOT this. If tailscaled was only just
+    started it may still be fetching its netmap -- re-run this check before doing
+    anything else. If it persists:
+      systemctl status tailscaled ; tailscale status
+      $UP_CMD")
+    ;;
+esac
 
 # --- what this node ADVERTISES (its own prefs) ---------------------------------------
+# 🔴 `adv_verdict` RECORDS WHETHER THIS CLAIM WAS ACTUALLY EVALUATED, and the approval
+# check below reads it. Without it, a run with unreadable prefs printed BOTH "what this
+# node ADVERTISES is UNKNOWN" and "$SUBNET is advertised but NOT APPROVED" -- the second
+# asserting, and pointing the operator at the admin console over, the exact fact the
+# first had just declared unknowable. Three values: `unknown`, `yes`, `no`.
+adv_verdict=unknown
 if [ "$prefs_src" = "none" ]; then
   unknowns+=("could not read \`tailscale debug prefs\`, so what this node ADVERTISES is
     UNKNOWN. Deliberately not reported as 'advertises nothing' -- that would be a
     definitive claim derived from a file that was never read. It is equally not reported
     as a node-side FAIL: a file this script could not read is not evidence of a defect.")
 elif [ "$authed" != "1" ]; then
-  unknowns+=("what this node advertises cannot be judged before it authenticates:
-    \`AdvertiseRoutes\` is set BY \`tailscale up\`, which has never run here.
+  unknowns+=("what this node advertises cannot be judged: $noid_reason, and
+    \`AdvertiseRoutes\` is runtime state owned by \`tailscale up\`.
     (prefs currently say: ${advertised:-<none>})")
 elif [ "$ROLE" = "server" ]; then
   if _in_csv "$SUBNET" "$advertised"; then
+    adv_verdict=yes
     echo "PASS  advertise : this node advertises $SUBNET"
   else
+    adv_verdict=no
     fails+=("this node does NOT advertise $SUBNET (advertised: ${advertised:-<none>}).
     Fix:  $UP_CMD")
   fi
@@ -621,18 +779,40 @@ if [ "$ROLE" = "server" ]; then
   # 🔴 THE SECOND, DIFFERENT CLAIM. An advertised-but-unapproved route looks IDENTICAL
   # to success from this node and carries no traffic at all.
   if [ "$authed" != "1" ]; then
-    unknowns+=("whether $SUBNET is APPROVED in the admin console cannot be known before
-    this node authenticates -- the control plane has no machine here yet, so there is
-    nothing to approve and \`PrimaryRoutes\` is empty for a reason that is not refusal.
-    Re-run after \`tailscale up\`.")
+    unknowns+=("whether $SUBNET is APPROVED in the admin console cannot be known while
+    this node has no valid identity -- $noid_reason -- so \`PrimaryRoutes\` is empty for
+    a reason that is not refusal. Re-run once the node holds a live identity.")
   elif _in_csv "$SUBNET" "$primary"; then
     echo "PASS  approved  : $SUBNET is APPROVED in the admin console; this node is its primary router"
-  else
+  elif [ "$adv_verdict" = "yes" ]; then
     actions+=("$SUBNET is advertised but NOT APPROVED. It carries NO traffic until a
     human approves it, and the node cannot tell the difference. This CANNOT be
     scripted -- the admin console is the only place it exists:
       https://login.tailscale.com/admin/machines -> this machine -> ... ->
       Edit route settings -> tick $SUBNET -> Save")
+  else
+    # 🔴 NOT APPROVED, BUT THIS RUN CANNOT SAY THE CONSOLE IS WHY. `PrimaryRoutes` is
+    # empty for BOTH "the admin never ticked it" and "the node never advertised it", and
+    # those need different fixes -- one is a browser, the other is `tailscale up` on this
+    # host. Naming the console when the advertisement is unknown, or is known to be
+    # ABSENT, sends the operator to the wrong machine. Reported as an unevaluated claim
+    # rather than an admin action; when the advertisement is known-absent the FAIL above
+    # is already the finding, and rc 1 outranks this either way.
+    if [ "$adv_verdict" = "no" ]; then
+      unknowns+=("$SUBNET is NOT in \`PrimaryRoutes\`, but this node is not advertising it
+    either (see the FAIL above), so approval cannot even be asked for yet -- there is
+    nothing for the admin console to approve. Fix the advertisement FIRST, then re-run
+    this check and expect an approval action to appear. NOTE EITHER WAY: $SUBNET carries
+    NO traffic over tailscale right now.")
+    else
+      unknowns+=("$SUBNET is NOT in \`PrimaryRoutes\`, so it is not approved -- but this
+    run could not read this node's own prefs, so it CANNOT tell whether the cause is an
+    unticked box in the admin console or a node that never advertised the route at all.
+    Those have different fixes (a browser vs \`tailscale up\` on this host) and this run
+    has no evidence to choose between them. Get prefs readable and re-run:
+      tailscale debug prefs
+    NOTE EITHER WAY: $SUBNET carries NO traffic over tailscale right now.")
+    fi
   fi
 
   # Forwarding, read from the KERNEL. A sysctl that is in the config but was never
@@ -670,8 +850,8 @@ if [ "$ROLE" = "server" ]; then
   fi
 else
   if [ "$authed" != "1" ]; then
-    unknowns+=("whether this client accepts subnet routes cannot be judged before it
-    authenticates: \`RouteAll\` is the \`--accept-routes\` pref and is set BY
+    unknowns+=("whether this client accepts subnet routes cannot be judged: $noid_reason.
+    \`RouteAll\` is the \`--accept-routes\` pref and is runtime state owned by
     \`tailscale up\`. (prefs currently say RouteAll=$route_all)")
   elif [ "$route_all" = "true" ]; then
     echo "PASS  acceptrt  : this client accepts subnet routes (RouteAll / --accept-routes)"
@@ -682,8 +862,8 @@ else
   if ip -4 -o route show 2>/dev/null | awk -v s="$SUBNET" '$1==s' | grep -q 'dev tailscale'; then
     echo "PASS  lanroute  : $SUBNET is installed here via a tailscale interface"
   elif [ "$authed" != "1" ]; then
-    unknowns+=("$SUBNET is not installed here via tailscale, but this node has not
-    authenticated, so no route COULD have been installed. Not a finding yet.")
+    unknowns+=("$SUBNET is not installed here via tailscale, and $noid_reason, so no
+    route COULD be installed. Not a separate finding.")
   else
     actions+=("$SUBNET is not in this host's routing table via tailscale. Either the
     route is not approved in the admin console, or --accept-routes is off here, or the
@@ -698,7 +878,20 @@ fi
 # node that had never logged in -- the reassuring branch, on the single item most likely
 # to kill this path silently mid-trip. "Disabled" is claimed ONLY when there IS a node
 # key for expiry to have been disabled on.
-if [ -n "$expiry" ]; then
+if [ -n "$expiry" ] && [ "${days#-}" != "$days" ]; then
+  # 🔴 A DATE IN THE PAST IS A THIRD, INDEPENDENT DETECTOR of the dead-key state, and it
+  # reads a different field from either shape `_identity_state` handles. A daemon that
+  # kept reporting `Running` with `Self.Expired` absent while its KeyExpiry had already
+  # lapsed would slip past both of those; it does not slip past this. Cheap, and the
+  # failure it covers is the one that ends the trip's remote access.
+  fails+=("🔴 THIS NODE'S KEY EXPIRY DATE IS IN THE PAST: $expiry ($days days, i.e.
+    ${days#-} days ago). The node key has LAPSED and this backup path is dead until the
+    node is re-authenticated:
+      $UP_CMD
+    Then disable key expiry so it cannot recur:
+      https://login.tailscale.com/admin/machines -> this machine -> ... ->
+      Disable key expiry")
+elif [ -n "$expiry" ]; then
   actions+=("node key expiry is ENABLED: it expires $expiry, in $days days.
     Tailscale's default is 180 days, shorter than a months-long trip, and when it lapses
     this backup path goes dark with no local error. Disabling it is an ADMIN-CONSOLE
@@ -706,13 +899,12 @@ if [ -n "$expiry" ]; then
       https://login.tailscale.com/admin/machines -> this machine -> ... ->
       Disable key expiry")
 elif [ "$authed" != "1" ]; then
-  unknowns+=("NODE KEY EXPIRY IS UNKNOWN, not disabled. \`Self.KeyExpiry\` is absent, and
-    on a node that has never authenticated that means the control plane has never issued
-    a node key -- there is nothing yet for expiry to be on or off for. Absence is
+  unknowns+=("NODE KEY EXPIRY IS UNKNOWN, not disabled. \`Self.KeyExpiry\` is absent and
+    $noid_reason, so there is no live node key for expiry to be on or off for. Absence is
     ambiguous, and this is the one claim where guessing the reassuring answer is most
     expensive: the default is 180 days, shorter than the trip, and the lapse is silent.
-    Re-run after \`tailscale up\` -- and expect it to say ENABLED, because that is the
-    default a new node gets.")
+    Re-run once the node holds a live identity -- and expect it to say ENABLED, because
+    that is the default a new node gets.")
 else
   echo "PASS  keyexpiry : disabled -- this node IS authenticated and the daemon reports no"
   echo "                  KeyExpiry, so this node key will not expire mid-trip"
@@ -736,8 +928,12 @@ fi
 if [ ${#actions[@]} -gt 0 ]; then
   echo "ACTION REQUIRED (admin console / human -- cannot be scripted):"
   for a in "${actions[@]}"; do printf '  - %s\n' "$a"; done
-  # 🔴 NOT `[ "$rc" = 0 ] && rc=3`: under `set -e` an `a && b` whose test is FALSE
-  # fails as a whole and kills the script right before it prints its verdict.
+  # 🔴 NOT `[ "$rc" = 0 ] && rc=3`. MEASURED on bash 5.3.15, and the mechanism is NOT the
+  # "aborts the script" one this comment used to assert: an `a && b` whose test is FALSE
+  # does NOT trigger errexit mid-script -- errexit does not apply to the non-final command
+  # of an AND-list. What it DOES do is leave the list's status non-zero, so when such a
+  # line is the last statement executed it becomes the script's exit status: a PASS run
+  # would exit 1 having printed a PASS. An explicit `if` cannot do either.
   if [ "$rc" = "0" ]; then rc=3; fi
 fi
 if [ "$rc" = "0" ]; then
