@@ -1684,7 +1684,14 @@ TARGET_FLOORS=(
   # own count put through the gate's formula and printed BY the gate, not
   # arithmetic on the two sides. Pinned AFTER merging main into the branch, per
   # the ORDER note above.
-  "scripts/tests|12793"
+  # 2026-09-07, the `cairn-who` split: 12870 collected, so 12793 carried 77 of
+  # SLACK — more than the 20-test suite this branch adds could vanish with the
+  # gate still green, which is the exact "three PRs landed without bumping it"
+  # drift the header calls out. 12870 - min(50, max(1, 12870/20)) = 12870 - 50 =
+  # 12820, the gate's own printed count put through the rule. Pinned AFTER
+  # rebasing onto origin/main (c5e425c7), per the ORDER note above — the count
+  # is from the rebased tree, not from either side alone.
+  "scripts/tests|12820"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
