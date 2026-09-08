@@ -7,7 +7,7 @@
 # plumbing.
 #
 # 🔴 EVERY GUARD HERE FAILS CLOSED. This is the deliberate opposite of
-# scripts/initiatives/run-sync.sh, whose sops block is best-effort because a
+# the retired scripts/initiatives/run-sync.sh, whose sops block was best-effort because a
 # telemetry-off scan is still useful. Here a missing age key / absent repo /
 # missing sops / empty decrypt means THE STORE WAS NOT MEASURED, and a check
 # that cannot measure must never look like a check that measured a clean store.

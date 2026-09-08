@@ -394,7 +394,7 @@ All three read `CLICKHOUSE_URL/USER/PASSWORD` from env (via `validation/chquery.
   their canonical repo. Momentum times from the last genuine USER-turn timestamp, **not the
   transcript file mtime** (Claude Code rewrites `.jsonl` in place → mtime falsely reads as
   "active"). ➜ The durable subsystem built on this scan (store → 15-min sync → viewer at
-  `192.168.50.250:8899` → recaps → router + assistant) is the **`initiatives` skill** — don't
+  `192.168.50.250:8899` → recaps → router + assistant) was RETIRED 2026-09-07 — don't
   duplicate it here.
 - `~/workspace/devrc/scripts/session-analysis/insights.py [--days 14] [--insight-days 30] [--json] [--host H] [--html PATH]`
   — the report over Layer A + the message stream + Layer B. Telemetry-native successor to

@@ -668,7 +668,7 @@ lib.mkIf isNixOS {
   # to refresh the matching block. Fully fail-safe: a down source writes a 'stale'
   # marker (the block renders empty) and never wedges. Laptop is excluded: it is
   # nebula-only with no direct LAN path to these homelab endpoints, exactly like
-  # mail-actions-archive / repo-cos in home.nix.
+  # mail-actions-archive in home.nix.
   #
   # A user service runs with a minimal env, so PATH must be explicit: the pinned
   # python (psycopg2) + kubectl (the mail + Alertmanager port-forwards) + procps
