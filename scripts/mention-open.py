@@ -856,8 +856,8 @@ def universe_note(subject: str, offered: int, path: Path | None = None) -> str:
             f"scripts/regen-known-repos.py")
 
 
-def guessed_note(subject: str) -> str:
-    """The line shown ABOVE the picker when the ONLY repository on offer was
+def guessed_note(subject: str, offered: int = 1) -> str:
+    """The line shown ABOVE the picker when the FIRST repository on offer was
     GUESSED — `repo_source == "default"`, i.e. the tmux pane rather than
     anything the clicked text said.
 
@@ -867,14 +867,34 @@ def guessed_note(subject: str) -> str:
     the same argument as `universe_note`: rofi cannot report a reason after the
     fact, so the reason goes above the choice.
 
-    🔴 IT NAMES THE CLICKED TEXT AND NOTHING ELSE — never the repository, never
-    the mapping. The candidate ROW already shows the repo, which is the whole
-    point of asking; the note must not become a second place a name can leak
-    from, and `_every_sink`'s guards would not see this one (it goes to rofi).
+    🔴 TWO WORDINGS, BECAUSE THE TWO SITUATIONS NEED DIFFERENT ACTIONS — and
+    the one-row wording was MEASURED WRONG in practice. Reported from the real
+    click path 2026-09-07: `audit-pr 1291` said "names no repository" over a
+    single row, and the only moves were to accept the guess or dismiss. When the
+    pane guess is wrong — which the operator reports is the common case — that
+    is a dead end wearing an explanation. So when alternatives are on offer the
+    note must say the ROW IS A GUESS *and* that the rest are searchable;
+    "confirm or dismiss" would now be false, since neither is what to do.
+
+    ⚠ The one-row wording is KEPT rather than deleted: the universe can be empty
+    (no mapping file yet, or an unreadable one), and a lone guessed row is still
+    reachable then. It is no longer the common path, and the `offered` default
+    stays 1 so the narrower claim is what a caller gets by omission.
+
+    🔴 IT NAMES THE CLICKED TEXT AND A COUNT, NOTHING ELSE — never the
+    repository, never the mapping. The candidate ROW already shows the repo,
+    which is the whole point of asking; the note must not become a second place
+    a name can leak from, and `_every_sink`'s guards would not see this one (it
+    goes to rofi).
     """
-    return (f"{subject} names no repository — the one offered was measured from "
-            "the tmux pane, which may not be the pane you clicked in. Confirm, "
-            "or dismiss.")
+    if offered <= 1:
+        return (f"{subject} names no repository — the one offered was measured "
+                "from the tmux pane, which may not be the pane you clicked in. "
+                "Confirm, or dismiss.")
+    return (f"{subject} names no repository. The FIRST row is a guess from the "
+            f"tmux pane, which may not be the pane you clicked in — the other "
+            f"{offered - 1} are every repository this host knows. Type to "
+            f"search, or dismiss.")
 
 
 def colour_literal_offer(span: dict | None, text: str) -> str:
@@ -1159,6 +1179,52 @@ def main(argv: list[str] | None = None) -> int:
     # `--print`, which is what it is for.
     guessed = span is not None and span["repo_source"] == SOURCE_DEFAULT
 
+    # 🔴 A GUESS THE OPERATOR CANNOT OVERRIDE IS NOT AN OFFER — IT IS A PROMPT
+    # WITH ONE WRONG ANSWER. Reported from the real click path 2026-09-07:
+    # `audit-pr 1291` produced a ONE-ROW picker holding the pane's repo and the
+    # note "names no repository". The row happened to be right that time, and
+    # the operator's point stands — in practice the pane guess is often wrong,
+    # and when it is, the picker offers no way to say so. Confirm the wrong
+    # repo, or dismiss and type the URL by hand. Both are worse than the
+    # refusal this branch replaced.
+    #
+    # The suppression above is still exactly right: a `default`-sourced repo is
+    # evidence about the WINDOW, not about the reference, so it must never open
+    # unconfirmed. What was missing is the other half — having declined to act
+    # on the guess, offer the alternatives. The universe is already built and
+    # already the answer everywhere else a repository cannot be named, and it is
+    # fuzzy-matched, so 392 rows cost the operator a few keystrokes rather than
+    # a scroll.
+    #
+    # 🔴 THE GUESS STAYS FIRST, and that is the whole reason this is an APPEND
+    # rather than a replace. It is the most likely answer and it is one Enter
+    # away, so the common case does not get slower; the universe below it is
+    # what makes the uncommon case possible at all. Same shape as the bare-`#N`
+    # arm above, which keeps the clawgate candidate first for the same reason.
+    # 🔴 SCOPED TO THE GUESS THAT IS *ALONE*, AND THE NARROWING IS DELIBERATE.
+    # A bare `#N` the pane attributes already offers TWO rows — the clawgate
+    # task and the pane's GitHub repo — and `test_a_bare_hash_N_that_the_PANE_
+    # already_attributes_does_NOT_get_the_universe` pins that on purpose: it is
+    # the single most common interaction in this handler, and burying two good
+    # rows under several hundred options is a regression dressed as a feature.
+    # A one-row picker is a different thing entirely — there is nothing to bury,
+    # and no way to say "not that one".
+    #
+    # ⚠ THE SAME COMPLAINT DOES PARTLY APPLY TO THAT TWO-ROW CASE — if the pane
+    # guess is wrong there, the operator still cannot reach the right repo — but
+    # fixing it costs every ordinary click a full-height picker, which is a
+    # trade for the operator to make rather than one to smuggle in beside a bug
+    # fix. Left alone, and written down instead.
+    guessed_alone = guessed and len(candidates) == 1 and not offered_universe
+
+    if guessed_alone and universe:
+        seen = {c["url"] for c in candidates}
+        # Deduped: the pane's repo is usually IN the universe too, and offering
+        # it twice makes the first row look like a rendering bug rather than a
+        # recommendation.
+        candidates = candidates + [c for c in universe if c["url"] not in seen]
+        offered_universe = True
+
     # 🔴 `and not offered_universe`: see PASS 3. One candidate is enough to open
     # only when that candidate is EVIDENCE about the reference — an explicit
     # owner, a measured checkout, a mapping hit. A universe row is an OPTION,
@@ -1174,10 +1240,18 @@ def main(argv: list[str] | None = None) -> int:
     # this handler. So the guessed note rides on the ONE case the branch above
     # created: a single row, which without a reason reads as a broken handler
     # asking the operator to confirm the obvious.
-    mesg = (universe_note(span["raw"] if span is not None else text,
-                          len(candidates))
-            if offered_universe else
-            guessed_note(span["raw"]) if (guessed and len(candidates) == 1)
+    # 🔴 `guessed` IS TESTED FIRST, AND THE ORDER IS THE WHOLE POINT. Both
+    # conditions are now true on the common path — the guessed arm above sets
+    # `offered_universe` — and the two notes make OPPOSITE claims about the top
+    # row. `universe_note` opens "nothing here knows X", which is false when the
+    # first row is a recommendation the handler is asking about; putting it
+    # first would have described the fix as a dead end. Swap these two branches
+    # and the picker still works, so no behavioural test catches it: the guard
+    # is `test_a_guessed_picker_is_NOT_described_as_nothing_here_knows`.
+    mesg = (guessed_note(span["raw"], len(candidates))
+            if guessed_alone and span is not None
+            else universe_note(span["raw"] if span is not None else text,
+                               len(candidates)) if offered_universe
             else "")
     url = pick(candidates, mesg=mesg)
     return open_url(url) if url else 0
