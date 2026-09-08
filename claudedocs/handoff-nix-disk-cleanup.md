@@ -16,12 +16,12 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Diagnose and resolve disk pressure on the workbench NixOS host (root partition `/dev/nvme0n1p2`, 1.8TB). The host was at 87% usage with ~228G free. The session freed ~200G through cleanup, then investigated why the filesystem reports 1.5TB used while only ~600GB of data is measurable.
 
 ## State now
-- 🔴 **BOTH HOSTS ARE NOW APPLIED AND LIVE — rank 2, the last operator step, is CLOSED.**
-  - **Workbench**: 7 `mM:7d` rules live, 0 stale, since the 2026-09-06 reboot. Re-confirmed 2026-09-07 17:54 CDT as the known-good control for the preflight tool.
-  - **Laptop (`192.168.50.155`)**: applied 2026-09-07 17:54 CDT via `preflight-tmp-churn-host.sh --init`. 7 live, 0 stale, switch took without a reboot (`/run/booted-system` ≠ `/run/current-system`), timer `active`, first reap 18:54 CDT.
-- **The laptop needed a DIFFERENT tool than this doc assumed.** Its `/etc/nixos/configuration.nix` had **no `systemd.tmpfiles.rules` attribute at all** (`anchor lines: 0`), so `apply-tmp-churn-retention.sh` — whose inserter appends INTO an existing list — correctly refused. `--init` creates the attribute; the created block then matches the anchor, so the retention script maintains it from then on.
-- **PRs open, both unaudited:** `innovation-upstream/devrc#1366` (rank 5 test coverage; independently re-verified: 71 assertions green, 19/19 mutants killed by their own guard, both controls watched) and `#1370` (the preflight/`--init` tool, now live-verified on both hosts — see its issue comment correcting `d5421b4d`'s "never run against a real /etc/nixos" caveat).
-- Claim `nix-disk-cleanup-5` remains HELD — it tracks `#1366`, which is still open.
+- 🔴 **BOTH TMPFILES HOSTS ARE LIVE, AND TWO OF THIS EFFORT'S THREE PRs ARE MERGED.**
+  - **`innovation-upstream/devrc#1366` MERGED** — squash `ffac18f8`. Rank 5's test coverage for `scripts/diagnose-disk-accounting.sh`. **Four audit rounds, 21 findings (3 🔴), all fixed.** 202 assertions, 64 mutants each killed by its own guard, red at every earlier tip (96 → 55 → 23 → 3 → 0). Verified by CONTENT after merge, not ancestry. Claim `nix-disk-cleanup-5` RELEASED.
+  - **`innovation-upstream/devrc#1392` MERGED** — squash `94f82796`. The nixpkgs toolchain drift that had `main` red for everyone. Verified by content: `classify_age_refusal` live in `scripts/analyze-service-index/{escrow,restore}-verify.py`, `PINNED_VERSION = "1.18.29"`.
+  - **`innovation-upstream/devrc#1370` OPEN** at `2fe861d4` — the preflight/`--init` tool. One audit round (**3 🔴 + 9 🟡**), all fixed, first-ever test suite (54 tests). **Tekton PENDING at handoff time — merge it once green.**
+- **Workbench + laptop both applied and live**: 7 `mM:7d` rules, 0 stale, on each. Workbench has been live since the **2026-09-06 18:01 reboot**; its reclaim held at **67.2M inodes against the 96.1M baseline**, 74% disk. The laptop went live 2026-09-07 17:54 via `preflight-tmp-churn-host.sh --init` (generation 247), verified independently of the script.
+- **No clawgate task.** `clawgate_handoff.sh resolve` → **rc 5, NOTHING RESOLVED**, with its positive control confirming the board is reachable. A wrong session id also answers 200 with an empty array, so this is not a clean bill of health and no `clawgate-task:` field is recorded.
 
 ## Open investigations — live diagnosis state
 
@@ -327,28 +327,57 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
   done; echo SAMPLER-DONE
   ```
 
-## Next steps (ranked)
-🔴 **Ranks 1–6 keep their original meaning and numbering** — the rank is half a `claim-work` slug's identity, so renumbering would silently re-point live claims. Status is marked in place.
+### `#1370` merge is gated on a Tekton run that had not settled at handoff time
+- **Symptom + exact repro:** `gh pr checks 1370 --repo innovation-upstream/devrc` → both checks `pending` as of this handoff. The branch is `feat/preflight-tmp-churn-host` @ `2fe861d4`.
+- **Observed (with values):** on the merged tree (this branch + current main), `scripts/tests` collects **12977, passes 12977, fails 0** — measured locally via `nix develop /home/zach/workspace/devrc -c bash scripts/run-tests.sh --targets scripts/tests`. The 7 age/opencode failures that were red on this branch an hour earlier are **gone**, because `#1392` landed on main.
+- **Ruled out — that #1370's earlier red was its own.** Its three files (`nix/system/preflight-tmp-churn-host.sh`, `scripts/run-tests.sh`, `scripts/tests/test_preflight_tmp_churn_host.py`) have **zero overlap** with the failing files, and the failures were the declared drift set.
+    via: measurement
+- **Next probe, verbatim:**
+  ```bash
+  gh pr checks 1370 --repo innovation-upstream/devrc
+  gh pr merge 1370 --repo innovation-upstream/devrc --squash --delete-branch
+  # then verify by CONTENT, never ancestry — a squash is never an ancestor of its base:
+  git -C /home/zach/workspace/devrc fetch origin main -q
+  git -C /home/zach/workspace/devrc cat-file -e origin/main:scripts/tests/test_preflight_tmp_churn_host.py && echo present
+  ```
 
-1. **DONE — workbench patched, verified live.**
+### `apply-tmp-churn-retention.sh`'s documented rollback is a no-op on a symlinked config — OPEN, filed not fixed
+- **Symptom + exact repro:** `nix/system/apply-tmp-churn-retention.sh:276` does `cp -a "$CFG" "$BAK"`. `cp -a` implies `-d`, so when `/etc/nixos/configuration.nix` is a symlink — the standard layout for anyone keeping their NixOS config in a git repo — the "backup" is a symlink to the file about to be edited, and the documented rollback restores nothing.
+- **Observed (with values):** measured end to end on the sibling script during the `#1370` audit — config left edited-and-broken with **no recoverable copy anywhere**, and the error message directing the operator to a backup pointing at the corruption.
+- **Ruled out — that this is only a documentation defect.** It is live on that script's `--apply` path, not just its footer text.
+    via: measurement
+- **Next probe:** change it to `cp -aL` (or refuse on `[[ -L "$CFG" ]]`) plus a fixture test asserting the backup is not a symlink. `#1370` mitigated the reachable path from its own side and deliberately did not touch that file.
+
+## Next steps (ranked)
+🔴 **Ranks 1–10 keep their original meaning and numbering — including rank 10, which is the laptop reap check and NOT the #1370 merge; an earlier draft of this delta reused it and would have re-pointed any live claim** — the rank is half a `claim-work` slug's identity, so renumbering silently re-points live claims. Status is marked in place.
+
+1. **DONE — workbench patched and verified live.**
    forcing: none
-2. **DONE — LAPTOP applied and verified live 2026-09-07**, via `preflight-tmp-churn-host.sh --init` rather than `apply-tmp-churn-retention.sh` (that host had no `systemd.tmpfiles.rules` attribute to append into). 7 live, 0 stale, confirmed independently of the script.
+2. **DONE — laptop applied and verified live 2026-09-07**, via `preflight-tmp-churn-host.sh --init`.
    forcing: none
-3. **DONE — rebuild/reboot**, and `switch` is unblocked on both hosts.
+3. **DONE — rebuild/reboot**; `nixos-rebuild switch` is unblocked on both hosts.
    forcing: none
 4. **ANSWERED — `/var/lib/docker` is live and in use.**
    forcing: none
-5. **IN REVIEW — `#1366`**, rank 5 test coverage. Independently re-verified. Claim `nix-disk-cleanup-5` HELD; release when it merges.
-   forcing: gate — root-privileged shell with no test file in a repo with no shellcheck gate.
-6. **DEFLATED BY MEASUREMENT — recommend WON'T-FIX.** 52,049 stubs = 0.08% of inodes, growing ~8k/day.
+5. **DONE — `#1366` MERGED** (`ffac18f8`). Claim released.
+   forcing: none
+6. **WON'T-FIX — the `/tmp` directory stubs.** 52,049 = 0.08% of inodes, growing ~8k/day.
    forcing: none
 7. **ANSWERED — the churn curve ran.** Daily cadence holds for inodes; bytes are the tighter constraint under load.
    forcing: none
-8. **Prune the `devrc/diagnose-disk-accounting` index entry** — stale `OPEN:` bullet beside its own `RESOLVED`.
+8. **Prune the `devrc/diagnose-disk-accounting` index entry** — a stale `OPEN:` bullet sits beside its own `RESOLVED`. Partly done: `/mnt/rootcheck` recorded as no longer mounted.
    forcing: none
-9. 🔴 **AUDIT `#1366` AND `#1370` BEFORE MERGING — the highest-value open item.** Both are root-privileged shell. `#1366` changes the disk-accounting script +232/−100 with four behavioural fixes on paths unreachable without root; `#1370` EDITS `/etc/nixos` as root. This effort's record is that every one of three fix rounds in this same area introduced the next defect, all reporting success and passing their own verifier. Fixture and mutation evidence is strong about the guards and says nothing about the unguardable root-only paths. Budget several rounds; stop on the first that returns no finding.
-   forcing: regression — three prior fix rounds in this area each shipped a regression their own verifier passed.
-10. **Confirm the laptop's first reap actually happened** — the timer was armed for 2026-09-07 18:54 CDT but its next-elapse property read empty, and no reap has been observed there yet. `ssh zach@192.168.50.155 'systemctl status systemd-tmpfiles-clean.service; df -i /'` — expect a `status=0/SUCCESS` and inodes below the 24,749,866 / 117,236-top-level-entry baseline recorded at apply time.
+9. **DONE — `#1366` audited (4 rounds) and `#1370` audited (1 round).** `#1392` was merged WITHOUT an adversarial audit, on the operator's explicit "go".
+   forcing: none
+10. **Confirm the laptop's first reap actually happened** — the timer was armed for 2026-09-07 18:54 CDT, its `NextElapseUSecRealtime` read EMPTY, and this session never went back to check. `ssh zach@192.168.50.155 'systemctl status systemd-tmpfiles-clean.service; df -i /'` — expect `status=0/SUCCESS` and inodes below the 24,749,866 / 117,236-top-level baseline recorded at apply time.
+    forcing: none
+11. 🔴 **MERGE `#1370` once Tekton goes green** — it was `pending` at handoff. Repo `innovation-upstream/devrc`, branch `feat/preflight-tmp-churn-host` @ `2fe861d4`. Local evidence: merged tree collects 12977 / passes 12977 / fails 0, and its own suite is 54/54. Verify by CONTENT after merging.
+    forcing: gate — the PR is open and CI-gated; nothing else advances until it settles.
+12. **Fix `apply-tmp-churn-retention.sh:276` (`cp -a` → `cp -aL`)** — see the open investigation. Repo `innovation-upstream/devrc`, one file plus a fixture test. Closing condition: that PR merged.
+    forcing: none
+13. **Consider an adversarial audit of the merged `#1392`.** It rewrites the logic deciding whether a corrupt backup means "rotate your escrow key", and it merged unaudited. `/audit-pr` works on a merged PR by ref. **This is the highest-risk unaudited thing this effort shipped.**
+    forcing: security — the change governs disaster-recovery key-rotation verdicts, and its own author recorded that the new keying rests on substring matches of another tool's prose.
+14. **Delete the stale `/tmp/disk-accounting-*` leftovers** — 19 seen, **2 non-empty** (84 B / 203 B of captured scan stderr). Resolve by ownership and mtime, never a blanket `rm`, and not while a battery may be running.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -442,15 +471,41 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **`cp -a` preservation is a usable cross-check on a backup's identity.** The laptop's `configuration.nix.bak-20260907-175418` reads **16,722 B, mtime Aug 24** — size AND mtime identical to the pre-edit live file measured earlier in the session, which is positive evidence the backup is the original rather than a re-stamped copy.
 - ⚠ **`systemctl show <timer> -p NextElapseUSecRealtime --value` returned EMPTY on the laptop** while `is-active` said `active`. So the timer being armed is verified; its next-fire time is only relayed from the run's own output. A property that answers empty is not a reading — do not quote the time as independently confirmed.
 
+- 🔴 **A silent nixpkgs bump INVERTED A DISASTER-RECOVERY VERDICT, and it surfaced only as "the gate is red".** `age` 1.3.1 → 1.3.2 **creates `--output` lazily, on the first successful write**. I reproduced it independently: over a 4 KiB payload with a flipped payload byte, `age 1.3.1` leaves `out.txt` **present** (size 0, stderr `failed to decrypt and authenticate payload chunk`), `age 1.3.2` leaves **no file at all**. The escrow verifier used exactly that presence to mean *"age authenticated the header, so the escrow key is FINE and the BACKUP is corrupt"* (`ARTIFACT-CORRUPT`). Under 1.3.2 the same tampered backup reads as `DECRYPT-FAILED` — **the verdict that gets a healthy DR key rotated.** Every artifact this subsystem produces is under 64 KiB, so the whole population was affected. Fixed in `#1392` by re-keying to age's own three refusal strings; the weakening (a substring match on another tool's prose) is stated in code and `SECRETS.md` rather than quietly re-greened, and an unrecognised refusal reaches neither strong verdict.
+    via: measurement
+- 🔴 **A GUARD THAT SILENTLY STOPPED GUARDING: `age-keygen` 1.3.2 no longer echoes its input, so the secret-redaction test went VACUOUS.** 1.3.1 leaked the secret on **6 of 17** manglings (three the ledger never listed); 1.3.2 on **0**. Proven vacuous, not merely unnecessary: re-interpolating `p.stderr` **survives** `test_NO_pubkey_failure_message_EVER_carries_key_material`. The risk is still live because the login shell runs 1.3.1. Both positive controls moved onto a stub reproducing 1.3.1's stderr.
+    via: measurement
+- 🔴 **A TEST'S OWN ERROR MESSAGE GAVE THE WRONG DIAGNOSIS, AND I RELAYED IT WITHOUT CHECKING.** `test_opencode_engine.py` said the usual cause is a stale imperative profile entry and prescribed `nix profile remove opencode` + `home-manager switch`. **Measured false here:** `nix profile remove opencode` → *"does not match any packages in the profile"*; the **home-manager generation itself** ships it (`home-manager-generation/home-path/bin/opencode → …opencode-1.18.29`); it is plain `pkgs.opencode` at `nix/home.nix:120` with no flake input; and `nix eval` of `homeConfigurations.zach.config.home.packages` says a switch today builds **`opencode-1.18.29`** — the version already installed. The prescribed fix was a provable no-op. That discriminating check is now written into the assertion message.
+    via: measurement
+- 🔴 **TOOLS DIFFER BETWEEN THE INTERACTIVE SHELL AND THE DEV SHELL, AND THE GATE RUNS IN THE DEV SHELL.** Measured: `find` is **bfs 4.1.1** interactively and **GNU findutils** in `nix develop`; `age` is **v1.3.1** interactively and **v1.3.2** in the dev shell. Any version claim must name the shell it was measured in. This is the same family as the `%D` finding below and it is why the age drift was invisible from a normal terminal.
+    via: measurement
+- 🔴 **A CLEAN `git merge` CARRIED A STALE DRIFT FLOOR FORWARD — TWICE — AND NOTHING FLAGGED IT.** `scripts/run-tests.sh`'s `"scripts/tests|N"` is exactly the value a textually-clean merge preserves wrongly. First merge: three-way conflict where **all three candidates were wrong** (base 12793, ours 12848, main's 12820) because main had moved 26 commits — merged tree collected **12966** → floor **12916**. Second merge (after `#1366`/`#1392` landed): **rc 0, no conflict at all**, and the carried-forward 12916 was stale against a tree collecting **12977** → floor **12927**. Both re-derived by sourcing the gate's own `_suggested_floor` out of `run-tests.sh` and feeding it the measured count — never arithmetic across a conflict, which both sides' comments explicitly warn against.
+    via: measurement
+- 🔴 **THE SHARED CLONE SWITCHED BRANCHES MID-SESSION.** `/home/zach/workspace/devrc` was on `main` and is now on `feat/nct6683-fans-bar` — another session's work. `handoff_doc.py` pushes **wherever the checkout sits**, so this handoff was written from a dedicated worktree (`devrc-handoff` off `origin/main`) rather than the base clone. Check `git branch --show-current` before any write to that clone.
+- ⚠ **Two near-misses from my own greps, both of which would have read as reassuring:**
+  - Verifying `#1392` merged, a content check against a **guessed path** (`scripts/lib/analyze_service_index/escrow_verify.py`) returned a clean **`0`** — indistinguishable from "the merge did not land". The real path is `scripts/analyze-service-index/escrow-verify.py`; only a fallback `git grep` caught it.
+  - `bash clawgate_handoff.sh field <doc> | head -2; echo rc=$?` printed **0** because the **pipe ate the status** — the exact trap the `/handoff` skill documents. The real rc was 1.
+- ⚠ **`$sha:path` in zsh is eaten as a `:s` history modifier** — `git show $sha:scripts/diagnose-disk-accounting.sh` silently became `c1169e3bounting.sh`. Brace it: `${sha}:path`. Hit despite the rule naming this exact case.
+- **The laptop's live `--init` run was SAFE, but on two axes by luck rather than by check.** The `#1370` audit later found three 🔴; each was checked against what actually ran: 🔴1 (read-only mode can edit `/etc/nixos` via an old retention script) did not fire because the laptop's devrc `38bd8edd` **contains** `d8fe0bce` — confirmed twice, since no `bak-tmp-churn-*` exists either; 🔴3 (symlinked config) missed because that config is a regular file; 🟡12 (mode downgrade) changed nothing because it was already 0600.
+- **The laptop's config was edited by ANOTHER SESSION 22 minutes after mine**, and the coordination check I ran earlier predicted it: `configuration.nix.bak-drop443-20260907-181625` is the nebula drop-443 work (generation 248). My rules survived it — 7 `mM:7d` still live. Git-level overlap was nil; the host-level sequencing worked out.
+
 ## How to verify
-1. **Both hosts live:** `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → **7**, `grep -c ' m:7d'` → **0**. Works without root on both.
-2. **One command that classifies either host** (workbench is the known-good control, expect `applied-and-live — 7`):
+1. **Both tmpfiles hosts live:** `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → **7**; `grep -c ' m:7d'` → **0**. Works without root on both. For the laptop wrap in `ssh -t zach@192.168.50.155 '...'`.
+2. **One command that classifies either host** (workbench is the known-good control — expect `applied-and-live — 7`):
    ```bash
    cd ~/workspace/devrc && git fetch -q origin feat/preflight-tmp-churn-host && \
      git show FETCH_HEAD:nix/system/preflight-tmp-churn-host.sh > /tmp/pf.sh && sudo bash /tmp/pf.sh
    ```
-   For the laptop, wrap it in `ssh -t zach@192.168.50.155 '...'`.
-3. **The switch took without a reboot:** `readlink /run/booted-system` ≠ `readlink /run/current-system`.
-4. **The reclaim held (workbench):** `df -i /` → used inodes materially below the 96.1M baseline (67.2M on 2026-09-07); `df -h /` → Use% ≤ 77%.
-5. **The laptop's backup is the pre-edit original:** `/etc/nixos/configuration.nix.bak-20260907-175418` is 16,722 B, mtime Aug 24.
-6. **Rank 5 tests:** both tiers — `nix develop ~/workspace/devrc -c bash scripts/run-tests.sh`, and `nix build .#checks.x86_64-linux.pytests` one at a time, reading the COUNTS not "BUILD OK".
+3. **`#1366` and `#1392` really landed** (by CONTENT — a squash is never an ancestor of its base):
+   ```bash
+   git -C /home/zach/workspace/devrc fetch origin main -q
+   git -C /home/zach/workspace/devrc cat-file -e origin/main:scripts/tests/test_diagnose_disk_accounting.sh && echo 1366-ok
+   git -C /home/zach/workspace/devrc grep -c classify_age_refusal origin/main -- '*.py' | head -3   # 1392
+   ```
+4. **The age inversion is real** (run it before trusting any re-derivation of it): encrypt a 4 KiB payload, flip a byte near the end, decrypt with `--output` under both `age` builds — 1.3.1 leaves the file present, 1.3.2 leaves none. Interactive shell is 1.3.1; `nix develop` is 1.3.2.
+5. **The workbench reclaim held:** `df -i /` → used inodes materially below the 96.1M baseline (67.2M on 2026-09-07); `df -h /` → Use% ≤ 77%.
+6. **The drift floor matches the tree it is in** — never carry one across a merge:
+   ```bash
+   nix develop /home/zach/workspace/devrc -c bash -c \
+     'eval "$(sed -n "/^_suggested_floor()/,/^}/p" scripts/run-tests.sh)"; _suggested_floor <measured-count>'
+   ```
