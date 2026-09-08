@@ -230,16 +230,26 @@ TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 #     incoming binary rather than the harness being green by default.
 #
 # 🔴 NOT COVERED by this pass, named so nobody reads it as more than it is:
-#   * THE LAPTOP. Every "both hosts run <v>" line was re-verified AT THE CONSUMER
-#     on the workbench only (`readlink -f $(command -v opencode)` in a login
-#     shell -> the incoming store path). The laptop was UNREACHABLE at the time
-#     (ssh to its nebula address refused), so those sentences are now split: the
-#     workbench half carries the pin and is dated, the laptop half says
-#     explicitly that it is unverified. Do not re-conjoin them.
-#   * The DEV SHELL is not the interactive shell. `nix develop` and the login
-#     shell happened to agree on opencode here (both resolve the same store
-#     path), but they did NOT agree on `age` in the same session — so "the
-#     version on PATH" is a claim about ONE shell until you say which.
+#   * THE LAPTOP — ✅ NOW COVERED, 2026-09-08. This entry read "the laptop was
+#     UNREACHABLE at the time (ssh to its nebula address refused), so those
+#     sentences are now split". It answers on nebula now, and by the same method
+#     (`readlink -f $(command -v opencode)` in a LOGIN shell) it resolves to the
+#     identical store path as the workbench: `6pw7n475…-opencode-1.18.29`. The
+#     split sentences elsewhere have been re-conjoined ON THAT EVIDENCE — which
+#     is the only thing that licenses re-conjoining them.
+#     ⚠ Still NOT covered on the laptop: the browser-only RESOLUTION
+#     (`opencode debug agent`). The version and the resolution are two claims;
+#     closing the cheap one does not close the other.
+#   * The DEV SHELL is not the interactive shell — the PRINCIPLE STANDS, its
+#     EXAMPLE WAS FALSE and is retracted. It read that the two "did NOT agree on
+#     `age` in the same session". MEASURED 2026-09-08: non-interactive zsh,
+#     login zsh, login bash and the devShell ALL resolve age v1.3.2, on both
+#     hosts — nothing resolves v1.3.1 anywhere, though v1.3.1 derivations do
+#     remain in the store. The claim was true when written or was never
+#     re-checked; either way it is not true now, and an example that has rotted
+#     argues for the principle less well than no example. "The version on PATH"
+#     is still a claim about ONE shell until you say which — that part needed no
+#     example to be true.
 PINNED_VERSION = "1.18.29"
 
 # MEASURED via `opencode debug agent nav --pure` at 1.18.29, on BOTH the incoming

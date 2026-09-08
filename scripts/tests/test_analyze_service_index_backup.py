@@ -1191,14 +1191,29 @@ def test_resolve_recipient_NEVER_quotes_age_keygens_INPUT_ECHOING_stderr(
     test's positive control impossible: the guard would have gone green while
     proving nothing about our redaction.
 
-    🔴 THE RISK IS LIVE, NOT HISTORICAL. Both versions are installed on this host
-    right now (login shell v1.3.1, dev shell v1.3.2) and the deployed backup unit
-    takes whatever its PATH provides, so a message that quoted stderr would still
-    print a key today. A guard whose sensitivity depends on which of two
-    installed binaries answers is not a guard — so the leak is supplied
-    deterministically instead. `backup.py` invokes `age-keygen` as a bare literal
-    (see `age_public_key_bytes`), so PATH is the whole injection surface and
-    nothing in production changes.
+    THE UPSTREAM FIX, NAMED: age v1.3.2, commit `c45ccfd2` ("avoid echoing
+    private keys in errors", reported by Trail of Bits), released 2026-08-29.
+    ⚠ The `error at line N` prefix is NOT new — only the echo was removed.
+
+    🔴 THE RISK IS LIVE, NOT HISTORICAL — BUT THE REASON GIVEN HERE WAS FALSE
+    AND IS RETRACTED. It read "Both versions are installed on this host right
+    now (login shell v1.3.1, dev shell v1.3.2)". They are not. MEASURED
+    2026-09-08: non-interactive zsh, login zsh, login bash and the flake
+    devShell all resolve v1.3.2 on the workbench, and the laptop does too — no
+    shell on either host resolves v1.3.1. (v1.3.1 derivations remain in the
+    store; nothing puts one on a PATH.) A claim about which binary answers rots
+    the moment a pin moves, and this one did.
+
+    The real reason, which is stronger: **v1.3.2 did not close every echo
+    path.** MEASURED 2026-09-08 with a synthetic key — `age -r
+    "<AGE-SECRET-KEY-1…>"` still prints the whole key, because
+    `cmd/age/parse.go` keeps `unknown recipient type: %q`. A message that quoted
+    stderr would still print a key today, against the CURRENT pin.
+
+    A guard whose sensitivity depends on which binary answers is not a guard —
+    so the leak is supplied deterministically instead. `backup.py` invokes
+    `age-keygen` as a bare literal (see `age_public_key_bytes`), so PATH is the
+    whole injection surface and nothing in production changes.
 
     ⚠ CASE-INSENSITIVE, against the FIXTURE'S OWN secret: a case-sensitive check
     reads clean on the lowercased-prefix case while the whole key body is in the
