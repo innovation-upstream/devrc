@@ -4919,17 +4919,26 @@ exit 1
 @pytest.mark.parametrize("mangler,label,kind", _MANGLERS)
 def test_NO_pubkey_failure_message_EVER_carries_key_material(tmp_path, mangler,
                                                              label, kind):
-    """🔴 age-keygen's STDERR ECHOES ITS INPUT on the realistic manglings —
-    measured: an unrecognised identity TYPE comes back as `unknown identity
-    type: "<the line>"`, and on a leading-space or lowercased-prefix paste that
-    line is the SECRET KEY. Quoting it would leak the very thing this module
-    refuses to print, on exactly the failure it exists to report.
+    """age-keygen's STDERR ECHOED ITS INPUT on the realistic manglings —
+    measured on v1.3.1: an unrecognised identity TYPE came back as `unknown
+    identity type: "<the line>"`, and on a leading-space or lowercased-prefix
+    paste that line is the SECRET KEY. Quoting it would leak the very thing this
+    module refuses to print, on exactly the failure it exists to report.
 
-    🔴 THE GUARD IS ONLY AS GOOD AS ITS LEAKING FIXTURES. Two of the five
-    manglers put the real secret into age-keygen's stderr — proven by
-    `test_the_LEAKING_manglers_really_DO_make_age_keygen_echo_the_secret` above,
-    which is this test's positive control. Interpolating `p.stderr` into the
-    NOT-AN-AGE-IDENTITY verdict is killed here by those two.
+    🔴 THIS TEST IS VACUOUS ON age-keygen >= v1.3.2, AND THE DOCSTRING USED TO
+    SAY THE OPPOSITE. It claimed "interpolating `p.stderr` into the
+    NOT-AN-AGE-IDENTITY verdict is killed here by those two". MEASURED
+    2026-09-08 with v1.3.2 installed: that mutation SURVIVES all five params.
+    v1.3.2 prints a bare `unknown identity type` with no quoted line, so no
+    fixture built from the live binary can put key material in the stream.
+
+    The mutation is killed by
+    `test_the_redaction_is_pinned_against_a_STUB_that_echoes_like_age_v1_3_1`,
+    which supplies v1.3.1's stderr deterministically instead of hoping the
+    installed binary still leaks. THIS test is kept because it is still the only
+    one that walks all five manglings against the REAL binary and pins that none
+    of them reaches the message — a weaker claim, and it is stated as one rather
+    than left reading like the guard it used to be.
 
     ⚠ CASE-INSENSITIVE, against the FIXTURE'S OWN secret — a case-sensitive
     check reads clean on the lowercased-prefix case while the whole key body is
