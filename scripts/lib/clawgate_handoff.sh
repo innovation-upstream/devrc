@@ -863,11 +863,24 @@ clawgate_resolve(){
     # only the ordering above left the dangerous case wide open. `OPENCODE=1` is
     # set by opencode's CLI in a yargs TOP-LEVEL `.middleware()`, so it is
     # present for every subcommand and rides down into its tool shells. If it is
-    # set while `OPENCODE_SESSION_ID` is absent-or-empty, then the only id in
-    # reach is a `CLAUDE_CODE_SESSION_ID` INHERITED from an ancestor Claude Code
-    # session — asking the board about it returns ANOTHER SESSION'S TASKS with
-    # exit 0, which is the exact silent misattribution this function exists to
-    # stop. Refuse instead.
+    # set while `OPENCODE_SESSION_ID` is absent-or-empty, a
+    # `CLAUDE_CODE_SESSION_ID` in scope MAY be one INHERITED from an ancestor
+    # Claude Code session — and asking the board about that returns ANOTHER
+    # SESSION'S TASKS with exit 0, the exact silent misattribution this function
+    # exists to stop. Refuse instead.
+    #
+    # 🔴 "MAY BE", NOT "IS" — AND THE DIFFERENCE IS NOT DECIDABLE HERE. The
+    # MIRROR nesting exists: a Claude Code session launched FROM an opencode
+    # tool exports its OWN `CLAUDE_CODE_SESSION_ID` while `OPENCODE=1` and an
+    # empty `OPENCODE_SESSION_ID` ride down from the parent. `browser` records
+    # that same residual and states the reason plainly — NO environment variable
+    # separates the two directions. So this arm refuses a genuinely-own id in
+    # the mirror case, and that is a deliberate trade, not an oversight: the
+    # cost is a MISSING `clawgate-task:` field, where using the id costs a WRONG
+    # one. Fail-closed both ways round. An earlier draft of this comment
+    # asserted the universal ("the only id in reach IS inherited"); it was false
+    # in exactly this case, and the operator-facing sentence in
+    # `claude/skills/handoff/SKILL.md` inherited the same overclaim.
     #
     # 🔴 THIS IS NOT A THEORETICAL STATE. `scripts/opencode/plugin/session-env.js`
     # sets `OPENCODE_SESSION_ID=""` deliberately on the PTY path (the hook fires
