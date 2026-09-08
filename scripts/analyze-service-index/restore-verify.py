@@ -276,6 +276,83 @@ DECRYPT_CAUSES = frozenset(
     {DECRYPT_AGE_MISSING, DECRYPT_AGE_REFUSED, DECRYPT_EMPTY_PLAINTEXT})
 
 
+# 🔴 WHICH REFUSAL IT WAS, INSIDE `age-refused`. A SECOND, NARROWER VALUE — and
+# it exists because a TOOLCHAIN BUMP took away the observable the consumer used.
+#
+# MEASURED 2026-09-08 in the dev shell (`nix develop`), age v1.3.1 vs v1.3.2, over
+# 7 payload sizes x 5 manglings + wrong-key + damaged-header, 84 runs:
+#
+#   v1.3.1  a payload-authentication failure ALWAYS leaves the `--output` file
+#           behind — at size 0 for anything under one 64 KiB chunk, partial
+#           above it. `--output` PRESENT therefore meant "age got past the
+#           header", which is what `escrow-verify.py` classified on.
+#   v1.3.2  the output file is created LAZILY, on the first successful write. A
+#           payload failure in the FIRST chunk leaves NO file at all — measured
+#           at 64 B, 1 KiB, 64 KiB-1, 64 KiB and 64 KiB+1; only the >= 64 KiB
+#           cases where an earlier chunk already flushed still leave one
+#           (196608 B of a 256 KiB payload, 983040 B of a 1 MiB one).
+#           A PRE-EXISTING file is left completely untouched (34-byte control
+#           read back intact), exactly like the wrong-key path — so it is lazy
+#           creation, not unlink-on-failure.
+#
+# So `--output` presence is now SUFFICIENT but no longer NECESSARY evidence that
+# the header authenticated, and for the artifact sizes this subsystem actually
+# produces it is usually absent. Left alone, a TAMPERED backup was classified as
+# "wrong key OR damaged header" — the verdict that sends an operator at the
+# escrow instead of at the artifact.
+#
+# 🔴 THE CLASSIFICATION IS A SUBSTRING MATCH ON ANOTHER TOOL'S PROSE, AND THAT IS
+# A DOWNGRADE — say so rather than let the next reader assume it is as solid as
+# the phase observation it replaces. The module docstring above argues against
+# exactly this shape, for good reasons that still apply. It is done anyway
+# because the alternative is losing the distinction entirely, and the three
+# strings are IDENTICAL on both measured versions:
+#
+#   "failed to decrypt and authenticate payload chunk"  -> payload
+#   "no identity matched any of the recipients"         -> wrong key
+#   "failed to read header"                             -> damaged header
+#
+# The mitigation is that an UNRECOGNISED stderr is its own published value, so a
+# future age that rewords does NOT silently fall into one of the three answers —
+# it produces a refusal that says it could not classify. Fail-safe, not
+# fail-quiet.
+AGE_REFUSED_PAYLOAD = "payload-auth-failed"      # header OK, payload bad
+AGE_REFUSED_NO_IDENTITY = "no-identity-matched"  # the identity does not match
+AGE_REFUSED_HEADER = "header-unreadable"         # the header itself is damaged
+AGE_REFUSED_UNRECOGNISED = "unrecognised"        # age said something new
+
+AGE_REFUSALS = frozenset({
+    AGE_REFUSED_PAYLOAD, AGE_REFUSED_NO_IDENTITY, AGE_REFUSED_HEADER,
+    AGE_REFUSED_UNRECOGNISED})
+
+# 🔴 SUBSTRINGS, DELIBERATELY NOT ANCHORED REGEXES. age prefixes its stderr with
+# the program name and appends a "report unexpected errors" URL line, and both
+# have moved between releases; matching the sentence in the middle survives that
+# while an anchored match would not. Each is the distinctive clause, with no
+# punctuation that could be re-styled.
+_AGE_REFUSAL_MARKERS = (
+    ("failed to decrypt and authenticate payload chunk", AGE_REFUSED_PAYLOAD),
+    ("no identity matched any of the recipients", AGE_REFUSED_NO_IDENTITY),
+    ("failed to read header", AGE_REFUSED_HEADER),
+)
+
+
+def classify_age_refusal(stderr: str) -> str:
+    """Which of age's three refusals this was — or that it was none of them.
+
+    🔴 NEVER GUESSES. An unmatched stderr returns `AGE_REFUSED_UNRECOGNISED`,
+    which the consumer must handle as "cannot classify", not as a default. That
+    is the whole reason this returns a fourth value instead of `None` or the
+    most likely of the three: the caller's strongest claim — "your backup is
+    tampered and your key is fine" — must never be reached by falling through.
+    """
+    low = (stderr or "").lower()
+    for marker, kind in _AGE_REFUSAL_MARKERS:
+        if marker in low:
+            return kind
+    return AGE_REFUSED_UNRECOGNISED
+
+
 # --------------------------------------------------------------------------- #
 # the classified refusals
 # --------------------------------------------------------------------------- #
@@ -340,13 +417,22 @@ class RestoreVerifyError(B.BackupError):
     """
 
     def __init__(self, message: str, *, cause: str | None = None,
-                 token: str | None = None):
+                 token: str | None = None, age_refusal: str | None = None):
         super().__init__(message)
         if cause is not None and cause not in DECRYPT_CAUSES:
             raise KeyError(
                 f"{cause!r} is not a published cause. The set is closed on "
                 f"purpose: a consumer branches on these, so inventing one "
                 f"silently lands in whatever `else` that consumer has.")
+        # 🔴 CLOSED FOR THE SAME REASON AS `cause`, and checked here rather than
+        # trusted from the call site: `escrow-verify.py` branches on this value
+        # to decide whether to tell an operator their BACKUP is tampered or
+        # their KEY is wrong, and an unpublished string would land in whichever
+        # branch happened to be last.
+        if age_refusal is not None and age_refusal not in AGE_REFUSALS:
+            raise KeyError(
+                f"{age_refusal!r} is not a published age refusal. The set is "
+                f"closed: {sorted(AGE_REFUSALS)}.")
         if token is not None and token not in EXIT_CODES:
             raise KeyError(
                 f"{token!r} is not in EXIT_CODES. A classified refusal is an "
@@ -354,6 +440,7 @@ class RestoreVerifyError(B.BackupError):
                 f"adding one means adding it to the table in the same commit as "
                 f"the test that pins it.")
         self.cause = cause
+        self.age_refusal = age_refusal
         self.token = token
         self.exit_code = EXIT_FAILED if token is None else EXIT_CODES[token]
 
@@ -671,13 +758,21 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
             "artifact this cannot verify, and skipping it would report safety "
             "that was never measured.",
             cause=DECRYPT_AGE_MISSING)
-    # 🔴 A STALE OUTPUT FILE MAKES age's OWN FAILURE UNREADABLE. MEASURED: on
-    # BOTH the wrong-key and damaged-header paths age leaves a PRE-EXISTING
-    # `--output` file completely untouched (rc=1, file present, original 34-byte
-    # content intact) — it only creates the file once it has authenticated the
-    # header. Consumers therefore read the PRESENCE of `plain` as "age got past
-    # the header", and a leftover from an aborted earlier run turns that into a
-    # lie: a WRONG KEY reads as a corrupt artifact.
+    # 🔴 A STALE OUTPUT FILE MAKES age's OWN FAILURE UNREADABLE. MEASURED (age
+    # v1.3.1, and RE-MEASURED on v1.3.2 2026-09-08): on BOTH the wrong-key and
+    # damaged-header paths age leaves a PRE-EXISTING `--output` file completely
+    # untouched (rc=1, file present, original 34-byte content intact).
+    #
+    # ⚠ THE *REASON* CHANGED BETWEEN THE TWO VERSIONS AND THIS UNLINK GOT MORE
+    # IMPORTANT, NOT LESS. On v1.3.1 age created/truncated the output as soon as
+    # it authenticated the header, so presence meant "past the header". On
+    # v1.3.2 it creates the file LAZILY, on the first successful WRITE — so a
+    # payload failure inside the first 64 KiB chunk leaves nothing at all, and a
+    # leftover from an aborted run is now the ONLY thing that could make the
+    # consumer's `plain_present` true. A WRONG KEY would read as a corrupt
+    # artifact — the strongest and most misleading verdict in the subsystem.
+    # See `AGE_REFUSED_*` above for the measurement and for what replaced
+    # presence as the primary discriminator.
     #
     # `work_dir` is routinely REUSED — `B._private_dir` documents the
     # already-exists case as "every run after the first with an explicit
@@ -702,7 +797,12 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
             f"is damaged. This is "
             f"NOT a corruption verdict about the git history inside — nothing "
             f"here has read it.",
-            cause=DECRYPT_AGE_REFUSED)
+            cause=DECRYPT_AGE_REFUSED,
+            # 🔴 CLASSIFIED HERE, WHERE age's OWN stderr IS IN HAND. The consumer
+            # gets a published VALUE, never this message to substring-match: it
+            # is the only place the raw stream exists, and pushing the parse out
+            # to the caller is how two callers end up with two different parsers.
+            age_refusal=classify_age_refusal(p.stderr))
     if not plain.is_file() or plain.stat().st_size == 0:
         # 🔴 MEASURED: `age` encrypts a ZERO-BYTE payload to a perfectly valid
         # 200-byte ciphertext, and decrypts it back at rc=0. So an object that
