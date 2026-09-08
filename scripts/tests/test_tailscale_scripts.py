@@ -37,6 +37,11 @@ from pathlib import Path
 
 import pytest
 
+SCRIPTS = Path(__file__).resolve().parents[1]
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+from testlib.mockbin import write_exec  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[2]
 APPLY = REPO / "nix" / "system" / "apply-tailscale.sh"
 CHECK = REPO / "nix" / "system" / "check-tailscale.sh"
@@ -198,9 +203,13 @@ def _fake_tailscale(tmp_path: Path, status: dict, prefs: dict | None) -> dict:
     (tmp_path / "status.json").write_text(json.dumps(status))
     if prefs is not None:
         (tmp_path / "prefs.json").write_text(json.dumps(prefs))
-    shim = bindir / "tailscale"
-    shim.write_text(
-        "#!/usr/bin/env bash\n"
+    # 🔴 `testlib.mockbin.write_exec` owns the shebang. A test-written stub carrying
+    # `#!/usr/bin/env bash` execs on this NixOS host and ENOENTs in the nix build
+    # sandbox, so the defect is invisible in the tier most people run. The bodies here
+    # are POSIX sh for the same reason. `test_runtime_shebangs.py` caught this file
+    # doing it by hand on its first gate run.
+    write_exec(
+        bindir / "tailscale",
         'case "$1 $2" in\n'
         f'  "status --json") cat "{tmp_path}/status.json"; exit 0 ;;\n'
         + (
@@ -208,9 +217,8 @@ def _fake_tailscale(tmp_path: Path, status: dict, prefs: dict | None) -> dict:
             if prefs is not None
             else '  "debug prefs") exit 1 ;;\n'
         )
-        + "esac\nexit 1\n"
+        + "esac\nexit 1\n",
     )
-    shim.chmod(0o755)
     proc = tmp_path / "proc"
     (proc / "sys/net/ipv4").mkdir(parents=True)
     (proc / "sys/net/ipv6/conf/all").mkdir(parents=True)
@@ -328,7 +336,7 @@ def test_shellcheck_is_clean_at_warning_level():
     # NEGATIVE CONTROL first: a clean report from a scanner that is not scanning is not
     # a clean report.
     bad = Path(os.environ.get("TMPDIR", "/tmp")) / f"ts-shellcheck-control-{os.getpid()}.sh"
-    bad.write_text("#!/usr/bin/env bash\nfoo=1\ncat $1 | grep x\n")
+    write_exec(bad, "foo=1\ncat $1 | grep x\n")
     try:
         control = _run(sc, "-S", "warning", bad)
         assert control.returncode != 0, "shellcheck reported a known-bad script as clean"
