@@ -29,11 +29,22 @@
 # SIGTERM. Ctrl-C (SIGINT) was NOT established either way — do not read the trap
 # as a guarantee there.
 #
-# `nixos-rebuild test` runs before `switch`, so an ACTIVATION failure does not
-# leave a registered generation and a rewritten bootloader behind. 🔴 But `test`
-# ACTIVATES: between it and `switch` the change IS running, so a rollback in that
-# window restores the FILE while the system keeps running the change until a
-# reboot. The trap says so explicitly rather than claiming nothing is running.
+# `nixos-rebuild test` runs before `switch`, so a failure during the TEST phase
+# leaves no registered generation and no rewritten bootloader.
+#
+# 🔴 That is the ONLY phase for which it is true, and an earlier version of this
+# header claimed it of "an ACTIVATION failure" generally — which is false, and is
+# the belief that produced two separate bugs here. Both are now guarded, and the
+# guards are the point of the flags, not over-caution to be tidied away:
+#   - `test` ACTIVATES (it only skips the boot menu), so between `test` and
+#     `switch` the change IS running; a rollback there restores the FILE while
+#     the system keeps running the change until a reboot.
+#   - `switch` installs the bootloader BEFORE it activates (nixpkgs 26.11,
+#     switch-to-configuration-ng/src/main.rs — `do_install_bootloader` at the
+#     Action::Switch branch precedes the activation check). So a switch that
+#     fails mid-activation has ALREADY written the boot entry, and "a reboot
+#     reverts it" is exactly backwards there.
+# The trap distinguishes five states and says which one you are in.
 #
 # Idempotent: a config that is already migrated exits 0 without touching anything.
 #
@@ -104,11 +115,12 @@ finish() {
       echo "🔴 ROLLBACK FAILED: could not restore $CFG from $BAK." >&2
       echo "   Do it by hand:  sudo cp $BAK $CFG" >&2
     fi
-    # 🔴 Three states, not two. `nixos-rebuild test` ACTIVATES the configuration (it
-    # only skips the boot menu), so the window between `test` returning and `switch`
-    # returning is one where the file is restored while the change IS running. Saying
-    # "nothing is running the change" there is false, and it is said at exactly the
-    # moment the operator is deciding what to do next.
+    # 🔴 One branch per reachable state, tested MOST-RECENT-FIRST. The flags are armed
+    # in program order, so they are monotonic and the reverse order is what makes the
+    # latest one win — reordering this chain silently reinstates an older, wrong message
+    # (measured: moving the ACTIVATED test above SWITCH_ATTEMPTED reproduces the
+    # "a REBOOT reverts it" bug). Do not count the branches in a comment; the count has
+    # been wrong twice. Each message must be true in ITS state and false in none.
     if [ "$SWITCHED" = "1" ]; then
       echo "🔴 The system had ALREADY been switched. The FILE is restored but the RUNNING" >&2
       echo "   system is not — run \`sudo nixos-rebuild switch\` to return it." >&2
@@ -260,7 +272,12 @@ for kv in "${MIGRATED[@]}"; do
     echo "  NOT IN EFFECT: $kv — last assignment of ${key} is '${eff}' (landed=${landed})" >&2
     missing=$((missing + 1))
   else
-    echo "  MISSING   : $kv — no assignment of ${key} anywhere in the journald config" >&2
+    if [ "$DROPINS_SEEN" = "yes" ]; then
+      echo "  MISSING   : $kv — no assignment of ${key} in the main file or any drop-in" >&2
+    else
+      echo "  MISSING   : $kv — no assignment of ${key} in /etc/systemd/journald.conf" >&2
+      echo "              (drop-ins were NOT read, so this is not a claim about them)" >&2
+    fi
     missing=$((missing + 1))
   fi
 done

@@ -24,7 +24,7 @@ workbench working tree where a `git checkout` would have deleted them unreported
   NOT `git ls-files`, see the gotcha below): the two ops scripts
   `nix/system/apply-journald-settings-migration.sh` and `scripts/diagnose-nix-disk.sh`, the
   extracted rewriter `scripts/lib/journald_migrate.py` and its suite
-  `scripts/tests/test_journald_migrate.py` (25 tests), and this doc.
+  `scripts/tests/test_journald_migrate.py` (37 tests), and this doc.
 - **The journald migration is APPLIED and VERIFIED on the workbench** — separate claims, both made:
   - `/etc/nixos/configuration.nix:745` now reads `services.journald.settings.Journal = { SystemMaxUse = "2G"; };`
   - live `/etc/systemd/journald.conf` = `[Journal]` / `Audit=keep` / `SystemMaxUse=2G`
@@ -119,7 +119,7 @@ readlink -f /run/current-system                # expect nixos-system-nixos-26.11
 # the PR's file list (five: two ops scripts, the rewriter, its tests, this doc)
 gh pr diff 1412 --name-only
 
-# the rewriter's own suite (25 tests, incl. every audit-found edge case)
+# the rewriter's own suite (37 tests, incl. every audit-found edge case)
 nix develop ~/workspace/devrc -c python3 -m pytest \
   ~/workspace/devrc/scripts/tests/test_journald_migrate.py -q
 
