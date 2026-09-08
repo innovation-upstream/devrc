@@ -338,59 +338,95 @@ ledger has been writing to it all along.
   append the `continuum_save.sh` interpolation back onto the running server's `status-right`
   (no restart). Awaiting operator direction as of this writing.
 
+### ✅ RESOLVED 2026-09-07 — the laptop's dead chain is FIXED and VERIFIED END-TO-END
+🔴 **The block above ("THE LAPTOP'S RECOVERY CHAIN IS DEAD") is RESOLVED — do not re-run
+its remedy.** Both settings were applied to the laptop's LIVE server; no restart.
+
+- **What was wrong (both bugs live at once — the server predated BOTH fixes):**
+  - `@resurrect-hook-post-save-all` = **empty**, while the INVALID-kind
+    `@resurrect-hook-post-save` = `~/.config/tmux/tmux-post-save.sh` — i.e. the pre-#1297
+    state, so the hook was attached to a kind resurrect never invokes.
+  - `status-right` carried no `continuum_save.sh` — the pre-#1309 clobber.
+- **The fix, applied live (no server restart, 9 conversations untouched):**
+  ```
+  tmux set -g  @resurrect-hook-post-save-all "~/.config/tmux/tmux-post-save.sh"
+  tmux set -ag status-right "#(/nix/store/nhgxbv11…-tmuxplugin-continuum-…/scripts/continuum_save.sh)"
+  ```
+  Rollback copy of the original `status-right` is at `~/.cache/status-right.pre-rearm.bak`
+  ON THE LAPTOP.
+- **VERIFIED END-TO-END, before/after:**
+
+  | | before | after |
+  |---|---|---|
+  | `~/.tmux/resurrect/last` | `…20260814…` (24 days stale) | `…20260907T185838` |
+  | `restore-plan.json` | **absent** | present, 18:58:42, **9 entries** |
+  | plan bind quality | n/a | 9/9 have a session_id — **8 ledger, 1 fuzzy**; `ledger_reason` 8 `ok`, 1 `transcript-missing`; 4 distinct cwds |
+
+  ⚠ **Attribution note, stated because it matters:** the forced-save command in that check
+  **FAILED** (`rc 127` — a path extraction returned empty so it ran `./scripts/save.sh`).
+  That attempt is NOT the evidence. The evidence is the before/after around it: continuum
+  autosaved on its own within seconds of the re-arm. Do not cite the forced save.
+- **Durability:** no follow-up needed. The on-disk config already carries BOTH settings
+  (`tmux.conf` lines 55 and 325), so a future server start applies them itself; the live
+  `set` only bridges the gap until then.
+- **Ruled out:** restarting the laptop's tmux server as the remedy — it would have
+  destroyed 9 live conversations, the exact harm this arc already caused once on the
+  workbench. via: code
+
 ## Next steps (ranked)
-1. **Finish gating the reworked #1351 and push it.** Dev tier PASSED on `3b348542`; BOTH
-   sandbox derivations PASSED on the merged tree `83697d30` (read out of `nix log`, not the
-   exit code). Dev tier is re-running on `83697d30` so the claim names one sha. Then
-   `git push` (13+ commits ahead, unpushed) and retitle — the published title, "the resumes
-   were sent 24s before the panes existed", still states the refuted mechanism. Body drafted
-   at `scratchpad/pr-body.md` (scratch — copy it somewhere durable).
-   IN FLIGHT: innovation-upstream/devrc#1351
-   forcing: gate — an unpushed branch is invisible, and the PR as published asserts a
-   refuted mechanism.
-2. **Implement the socket trigger — the half that actually restores.** 🔴 The rework STOPS
-   THE DESTRUCTION; it does NOT make cold-boot restore work. Trigger the unit on the tmux
-   socket appearing rather than `OnActiveSec=45s`: `devrc/nix/home.nix`. 🔴 Do NOT reach for
-   `RemainAfterExit=yes` alone — with `KillMode=control-group` the unit would own the
-   operator's server. 🔴 When this lands, revisit the refusal's exit-0: it is exit 0
-   BECAUSE no-server is a standing cold-boot state, and this is what stops it being one.
+1. **Socket-activation trigger for the boot unit — the half that actually restores.** 🔴
+   #1351 (MERGED, squash `9353d958`) STOPS THE DESTRUCTION; it does NOT make cold-boot
+   restore work. After it, a cold boot REFUSES and the operator re-runs by hand. Trigger the
+   unit on the tmux socket appearing rather than `OnActiveSec=45s`: `devrc/nix/home.nix`.
+   🔴 Do NOT reach for `RemainAfterExit=yes` alone — with `KillMode=control-group` the unit
+   would own the operator's server. 🔴 When this lands, revisit the refusal's exit-0: it is
+   0 BECAUSE no-server is a standing cold-boot state, and this is what stops it being one
+   (`test_a_restore_with_no_tmux_server_REFUSES` pins that reasoning in its failure message).
+   IN FLIGHT: dispatched to a subagent 2026-09-07; claim `tmux-restore-chain-2` HELD.
    forcing: incident — 2026-09-06, a reboot left 43 conversations dead and the unit
    reported `Result=success`.
-3. **Restore opencode sessions too — separate PR, AFTER #1351 merges.** Recon and decisions
-   are recorded above and in the `devrc/tmux-session-restore` cairn entry. Operator
-   decisions 2026-09-07: **full auto-resume parity**; an UNBOUND opencode pane **sends
-   nothing** and is listed in the cheat-sheet; **separate PR after #1351**, because it
-   touches `live_claude_panes`, `ledger_binding`, `cmd_restore` and `_verify_sends` — the
-   same four #1351 rewrites. Work: runtime-aware pane filter; plan entries gain `runtime`
-   (absent ⇒ `claude`, so a plan written before the change still restores across the reboot
-   that follows it — needs its own test); pass runtime to `pane_filename`; replace the two
-   claude-shaped validations (`transcript-missing` ⇒ does a `session` row exist;
-   `project-mismatch` ⇒ `session.directory == pane cwd`) reading the DB with stdlib
-   `sqlite3` in `mode=ro`; reject a row with a non-empty `parent_id`; `_verify_sends` and
-   `tmux-restore-observe.sh` become runtime-aware; `session.title` replaces the
-   `first_user_line` grep. 🔴 The save-side tally MUST distinguish "no opencode panes
-   existed" from "opencode panes existed and I bound zero" — see the rot gotcha below.
+2. **Restore opencode sessions too — separate PR.** #1351 has now merged, so this is
+   unblocked. Recon, decisions and the two probe findings are in the ANSWERED block above
+   and in the `devrc/tmux-session-restore` cairn entry. Operator decisions 2026-09-07: full
+   auto-resume parity; an UNBOUND opencode pane sends NOTHING and is listed in the
+   cheat-sheet; the save-side tally MUST distinguish "no opencode panes existed" from
+   "opencode panes existed and I bound zero".
    forcing: user — operator asked for opencode restore parity on 2026-09-07 and chose the
    design; one opencode window was already lost unrecovered on 2026-09-06.
-4. **Pin `TMUX_TMPDIR=%t` on the unit.** Re-confirmed live this session: the unit's
-   `Environment=` carries `PATH` and `HOME` only. Its two siblings already pin it
+3. **Chain-liveness detection — clawgate task 526, FILED.** A host can be byte-identical to
+   `origin/main` with a completely dead chain and nothing detects it; the laptop sat 24 days
+   that way looking healthy. Adds a `drift-check.sh` arm that reads the LIVE tmux server,
+   not just files on disk. Body carries the measured evidence and the noise constraints
+   (no server ⇒ no rc; UNMEASURED ⇒ no rc).
+   forcing: incident — 2026-09-07, the laptop's chain was found dead only because a human
+   went looking; 9 conversations were one reboot from loss.
+4. **Gate/tier/battery inventory — clawgate task 525, FILED.** Inventory every gate, tier
+   and battery; evidence whether each has ever caught anything; recommend drops + per-path
+   tiering. 🔴 Its body records that `/activity` **structurally cannot** answer the value
+   question (no gate emits; `adoption-scan`'s registry holds no gate), so the agent uses
+   transcript/CI/git proxies and files a follow-on to add emission.
+   forcing: user — operator asked for it on 2026-09-07.
+5. **Pin `TMUX_TMPDIR=%t` on the unit.** Re-confirmed live: the unit's `Environment=`
+   carries `PATH` and `HOME` only, on BOTH hosts. Its two siblings already pin it
    (`nix/home.nix:3678`, `:3891`) and both have tests.
    forcing: regression — the unit works today only because the user-manager environment
    happens to carry the variable.
-5. **Reboot again to confirm whatever fix lands.** Nothing but a real reboot has ever
-   exercised this path, and it has now overturned two successive hypotheses.
+6. **Reboot to confirm whatever fix lands.** Nothing but a real reboot has ever exercised
+   this path, and it has now overturned two successive hypotheses.
    `~/workspace/devrc/scripts/tmux-restore-observe.sh pre` → reboot → `… post`.
    forcing: none
-6. **Run bare `claude` windows inside tmux** so a closed window detaches instead of
+7. **Run bare `claude` windows inside tmux** so a closed window detaches instead of
    vanishing.
    forcing: incident — 2026-09-06, the operator closed i3 windows; two conversations
    survived only via transcript archaeology and one opencode window was never recovered.
-7. **`--assume-empty` for `restore --dry-run`** so a pre-reboot dry run exercises the send
+8. **`--assume-empty` for `restore --dry-run`** so a pre-reboot dry run exercises the send
    path instead of only the skip branch. `devrc/scripts/tmux-session-restore.py`.
    forcing: none
 
-⚠ Ranks 4–7 were 3–6 before this update; opencode restore was inserted at 3. Only rank 1
-was claimed at the time (`tmux-restore-chain-1`), so no live claim was re-pointed.
+⚠ Ranks shifted: the old rank 1 (#1351) is CLOSED and removed, so everything moved up one
+and two filed tasks were inserted at 3 and 4. Live claims at the time of writing:
+`tmux-restore-chain-2` (now rank 1) and `tmux-restore-chain-laptop-coverage` (resolved,
+being released). Re-derive a slug before claiming — do not assume an old rank number.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The handoff this arc started from never existed.** `/resume` was given
