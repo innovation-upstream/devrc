@@ -646,6 +646,48 @@ run sort-ledger-site-added \
   "printf 'store paths     : %d\\n' \"\$(ls /nix/store/ 2>/dev/null | wc -l)\"" \
   "printf 'store paths     : %d\\n' \"\$(ls /nix/store/ 2>/dev/null | sort | wc -l)\""
 
+# --- round 4: section 6's du printed a FLOOR with no marker ------------------
+# 🔴 TWO MUTANTS, ISOLATED, because the site has TWO ways to be wrong and one
+# guard each. Neither mutant touches the other's literal, so a row that goes red
+# proves its OWN assertion is reachable rather than that "something failed".
+# Section 6 is root-only, so both are INVARIANT PINS with no behavioural half —
+# what a fixture CAN show, and did (2026-09-08, a mode-000 subdirectory): the
+# expression prints 20K against a true 24K and now appends the marker, rc 0.
+run section6-du-status-not-read \
+  "section 6 BRANCHES on du's status instead of discarding it" \
+  $'    if du_out=$(du -sh -x "$d" 2>/dev/null); then du_mark=; else du_mark=\'  !! FLOOR — du could not read all of it\'; fi' \
+  $'    du_out=$(du -sh -x "$d" 2>/dev/null) || true; du_mark='
+
+# 🔴 The mirror: the branch stays, so the row above is still GREEN, and the only
+# thing that can see this is the pin on the printf's argument list. A marker
+# computed and never printed is the field-that-is-not-a-guard shape.
+run section6-marker-computed-but-not-printed \
+  'section 6 PRINTS the marker it computed' \
+  '"$(find "$d" -xdev -printf . 2>/dev/null | wc -c)" "$d" "$du_mark"' \
+  '"$(find "$d" -xdev -printf . 2>/dev/null | wc -c)" "$d"'
+
+# --- round 4: the `: > "$DU_ERR"` truncations, fatal and invisible ------------
+# 🔴 SCORED ON THE LEDGER, and nothing else in the suite can reach it: §7b's
+# first-word sweep cannot see a line headed by `:` and the sort ledger needs a
+# `| sort`, so before this ledger existed BOTH sites could lose their guard with
+# the suite fully green. Section 6c's copy is the one that matters — it fires
+# after sections 1..6b have printed.
+run duerr-truncation-unguarded-6c \
+  "not every ': > \$DU_ERR' truncation is guarded" \
+  ': > "$DU_ERR" || echo "COULD NOT MEASURE: could not truncate du'"'"'s stderr file — any PARTIALLY READ count below may include paths from an earlier section"
+{ xargs -0 -r du -sh -x < "$ONROOT_LIST"' \
+  ': > "$DU_ERR"
+{ xargs -0 -r du -sh -x < "$ONROOT_LIST"'
+
+# 🔴 THE OTHER DIRECTION OF THE SAME LEDGER — a NEW unguarded truncation, which
+# is the shape a future edit actually adds. It must go red for GROWTH too, or
+# the ledger is half a ledger.
+run duerr-truncation-added-unguarded \
+  "not every ': > \$DU_ERR' truncation is guarded" \
+  '  _report_unreadable /var/lib/rancher/k3s/storage "$DU_ERR"' \
+  '  _report_unreadable /var/lib/rancher/k3s/storage "$DU_ERR"
+  : > "$DU_ERR"'
+
 echo
 echo "== SURVIVES control — a behaviour-free edit must NOT kill anything =="
 survives comment-reword \

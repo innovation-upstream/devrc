@@ -1185,8 +1185,10 @@ top-level enumeration is NUL-safe find|xargs, and KEEPS find's stderr@find "$bas
 /tmp candidates are compared by DEVICE too (defect 7, section 6d)@| { _on_device "$dev" || true; }@-xdev still LISTS a mountpoint at depth 1, so it reaches du as a starting point — the one case du -x cannot handle
 du keeps -x AND its || true in the /tmp size breakdown@xargs -0 -r du -sh -x 2>>"$SCAN_DUERR" || true@INVARIANT PIN, not a regression guard, for the -x half: a second filesystem needs root, so -x cannot be checked behaviourally here and a mutant dropping it SURVIVED. The `|| true` half IS behaviourally covered, by route (b) in section 4b — this literal pins both, so read it as two claims. The redirection is part of the literal on purpose: it was `2>/dev/null` until round 3, and a du that cannot read a path is then an under-count with no marker (section 4b-iii).
 du keeps -x AND its || true in the /home size breakdown@xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>>"$DU_ERR" || true@same three claims for section 6c's call site; 6c is root-only, so its du-stderr capture is an INVARIANT PIN with no behavioural half
-section 5's PVC listing keeps du's stderr too@xargs -0 -r du -sh --exclude=/mnt 2>>"$DU_ERR" || true@root-only INVARIANT PIN: the third du site, discarding its stderr the way the other two did until round 3
+section 5's PVC listing keeps du's stderr too@xargs -0 -r du -sh --exclude=/mnt 2>>"$DU_ERR" || true@root-only INVARIANT PIN, about THIS pipeline and no other. A previous wording called it "the third du site", which asserted a COUNT of the file's du invocations; the count was wrong and the scope it implied was wider than any row here checks. `_report_unreadable`'s own comment declares which sites route du's stderr to a file and states that it says nothing about the rest.
 the du blind spot is REPORTED, not merely captured@_report_unreadable@capturing a stream nothing reads is worse than discarding it — it looks like coverage. Behaviourally covered for size_breakdown in section 4b-iii; this pins that the two root-only sites call it as well.
+section 6 BRANCHES on du's status instead of discarding it@if du_out=$(du -sh -x "$d" 2>/dev/null); then du_mark=; else du_mark=@a du that cannot read a tree prints a PARTIAL total and exits 1; this row rendered that floor exactly like a complete figure, and since `_report_unreadable` landed the absence of a marker reads as "nothing was missed". Root-only, so this is an INVARIANT PIN.
+section 6 PRINTS the marker it computed@"$(find "$d" -xdev -printf . 2>/dev/null | wc -c)" "$d" "$du_mark"@a variable that is set but never reaches the output is the field-that-is-not-a-guard shape: the branch above would look like coverage while every row still printed identically.
 every temp file this script opens carries an identifying name@mktemp "/tmp/disk-accounting-$1.XXXXXX"@a bare `mktemp` writes /tmp/tmp.XXXXXXXXXX — an unattributable file, in the directory this script exists to diagnose
 the EXIT trap names a FUNCTION, not a fixed list of files@trap _cleanup_temps EXIT@a trap naming a fixed LIST is an enumeration by eye: the three breakdown temp files were never in either version of it. This row pins the NAME only — the ORDER is a separate guard below, because a description wider than its check is how six guards in one session read as coverage while providing none.
 section 5's du TOTAL is guarded, not bare@|| echo "COULD NOT MEASURE: du failed under /var/lib/rancher/k3s/storage@it printed an under-counted total, exited 1 with its message already at /dev/null, and set -e then killed sections 6..8. Root-only, so this is an INVARIANT PIN; the failure itself is measured in section 4b route (b).
@@ -1211,6 +1213,26 @@ case "${trap_line:-x}${denied_line:-x}" in
   *) [ "$trap_line" -lt "$denied_line" ] \
        && pass "the EXIT trap is installed BEFORE the run's first mktemp (line $trap_line < $denied_line)" \
        || fail "the EXIT trap is installed at line $trap_line, AFTER the first mktemp at $denied_line — that file is uncovered on the exit path its own creation can take" ;;
+esac
+
+# 🔴 EVERY `: > "$DU_ERR"` TRUNCATION, NOT "a truncation" — a RELATIONSHIP, so
+# it fails when the set grows as well as when a guard is dropped. A redirection
+# failure on a SPECIAL BUILTIN is fatal under `set -e` (MEASURED 2026-09-08,
+# bash 5.3.15: `set -euo pipefail; : > /absent/x` ends the shell, rc 1), and
+# NEITHER ledger in 7b below can see this shape — the sweep keys on a line's
+# first word and this one's is `:`, and the line carries no `| sort`. A single
+# `required` row would go green with one of the two sites unguarded, which is
+# why this counts instead of pinning one literal. The numbers are DERIVED here,
+# never written down: what is asserted is that they are equal and non-zero.
+duerr_total="$(grep -cF ': > "$DU_ERR"' "$CODE_FILE" || true)"
+duerr_guarded="$(grep -cF ': > "$DU_ERR" || echo "COULD NOT MEASURE' "$CODE_FILE" || true)"
+case "${duerr_total:-x}${duerr_guarded:-x}" in
+  *[!0-9]*) fail "the DU_ERR truncation ledger cannot be read (total=[${duerr_total:-}] guarded=[${duerr_guarded:-}])" ;;
+  *) if [ "$duerr_total" -ge 1 ] && [ "$duerr_total" = "$duerr_guarded" ]; then
+       pass "every ': > \$DU_ERR' truncation carries a guard ($duerr_guarded of $duerr_total)"
+     else
+       fail "not every ': > \$DU_ERR' truncation is guarded ($duerr_guarded of $duerr_total) — an unguarded one is fatal under set -e, and at section 6c it fires AFTER sections 1..6b have already printed"
+     fi ;;
 esac
 
 # --------------------------------------------------------------------------- #

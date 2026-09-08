@@ -276,6 +276,25 @@ _report_unstattable() {
 # nothing either way; now the ABSENCE of a `!! UNSTATTABLE` line reads as an
 # affirmative "nothing was missed" — the same floor-presented-as-a-total
 # reading, arrived at by trusting a report that never had the evidence.
+#
+# 🔴 EXACTLY WHICH SITES THIS COVERS — a DECLARED scope, in the sense
+# `split_by_device` below uses the phrase. It fires only for a caller that gave
+# du a stderr FILE — as written today, `size_breakdown`'s own capture, section
+# 5's PVC listing and section 6c's /home listing. Every OTHER `du` in this file
+# still sends its stderr to `/dev/null`, and this report says nothing whatever
+# about them.
+#
+# Do NOT take a number from this comment. Round 4's finding was a sentence
+# elsewhere that counted these sites and counted them wrong, so what is written
+# here is the derivation instead of the answer:
+#
+#   grep -n '_report_unreadable' scripts/diagnose-disk-accounting.sh   # callers
+#   grep -nE '(^|[^#[:alnum:]_])du ' scripts/diagnose-disk-accounting.sh \
+#     | grep -v ':[[:space:]]*#'                                       # du sites
+#
+# For any du site that comes back and is not one of the callers, silence is not
+# evidence of a complete figure. Read that site's own comment for what it says
+# instead.
 _report_unreadable() {
   local base="$1" errf="$2" n
   n=$(_errline_count "$errf")
@@ -312,9 +331,29 @@ _report_unreadable() {
 # is accepted: a non-root CALLER — i.e. the test suite — now writes into the
 # system /tmp rather than into its own sandbox, and when a deliberately broken
 # copy of this script dies between the `mktemp` and the `rm` (which is what the
-# mutation battery does, ~60 times per full sweep) the files stay there. They are
-# harmless, empty, and — the point of this whole change — NAMED, which is how
-# they get noticed and swept at all.
+# mutation battery does, once per mutant) the files stay there. They are mode
+# 0600 and NAMED — the point of this whole change, because the name is how they
+# get noticed and swept at all.
+#
+# 🔴 THEY ARE NOT ALL EMPTY, which is what this said for a round. MEASURED
+# 2026-09-08 on this host: leftovers of both kinds were present and some held a
+# fixture's captured stderr, e.g. `du: cannot read directory
+# '/tmp/tmp.XXXXXXXXXX/du-errors/locked': Permission denied`. Fixture noise
+# rather than host data, and 0600 keeps it out of another user's reach — but
+# "empty" was simply the wrong word. No count is written down here, because the
+# number is whatever the last interrupted sweep happened to leave;
+# `ls -l /tmp/disk-accounting-*` is the answer.
+#
+# 🔴 AND THE HALF THAT WAS NEVER RECORDED: hardcoding /tmp also removes `TMPDIR`
+# as an ESCAPE ROUTE, on exactly the failure this script is pointed at.
+# `$DENIED_LOG` and `$DU_ERR` are opened at the top of the executable region and
+# are deliberately unguarded (see the exception list above section 1), so a root
+# filesystem out of inodes — the condition being diagnosed — ends the run on
+# those two lines with a blank report. The exception list accepts the blank
+# report as the honest outcome; what it does not say, and this does, is that the
+# bare `mktemp` this replaced would have honoured an inherited `$TMPDIR` and the
+# template cannot. Pointing this run's scratch at another filesystem now means
+# editing this file.
 _scan_mktemp() { REPLY=$(mktemp "/tmp/disk-accounting-$1.XXXXXX") || { REPLY=; return 1; }; }
 
 # Remove every temp file the run currently holds open. It reads the variables at
@@ -820,7 +859,17 @@ if [ -d /var/lib/rancher/k3s/storage ]; then
   # started reporting their blind spots the absence of a marker started reading
   # as "nothing was missed". Truncated per site so one site's count cannot be
   # attributed to another.
-  : > "$DU_ERR"
+  #
+  # 🔴 `|| echo`, NOT a bare `: >`. A redirection failure on a SPECIAL BUILTIN
+  # is fatal under `set -e` — MEASURED 2026-09-08 on bash 5.3.15:
+  # `set -euo pipefail; : > /absent/x` ends the shell, rc 1, nothing after it
+  # runs; the same line with `|| echo` is caught and the run continues. This
+  # shape is in NEITHER ledger §7b keeps: the sweep's regex reads a line's first
+  # word and this line's is `:`, and it carries no `| sort`. It also cannot be a
+  # bare `|| true` — a file that did not truncate still holds an EARLIER site's
+  # paths, and `_report_unreadable` would then attribute them to this one, which
+  # is the "one count standing for two claims" the two-sinks comment is about.
+  : > "$DU_ERR" || echo "COULD NOT MEASURE: could not truncate du's stderr file — any PARTIALLY READ count below may include paths from an earlier section"
   { find /var/lib/rancher/k3s/storage -xdev -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true; } \
     | { xargs -0 -r du -sh --exclude=/mnt 2>>"$DU_ERR" || true; } | sort -rh | head_n 30
   _report_unreadable /var/lib/rancher/k3s/storage "$DU_ERR"
@@ -848,9 +897,27 @@ echo
 echo "=== 6. Other root-only trees the unprivileged scan could not see ==="
 for d in /root /var/lib/docker /var/lib/containerd /var/lib/kubelet /var/lib/private; do
   if [ -d "$d" ]; then
-    printf '%10s %12d inodes  %s\n' \
-      "$(du -sh -x "$d" 2>/dev/null | awk '{print $1}')" \
-      "$(find "$d" -xdev -printf . 2>/dev/null | wc -c)" "$d"
+    # 🔴 du's STATUS IS READ HERE, AND THE MARKER IS WHAT IT BUYS. A `du` that
+    # cannot fully read a tree prints a PARTIAL total on stdout and exits 1 —
+    # a stale NFS/CSI mount under /var/lib/kubelet is the realistic case on a
+    # k3s node. With the status thrown away and the message already at
+    # /dev/null, this row rendered that floor EXACTLY like a complete figure,
+    # and since `_report_unreadable` landed the absence of a marker reads as an
+    # affirmative "nothing was missed" (see its comment). This site has no
+    # stderr FILE to report a path count from, so what it can say is that the
+    # number is a floor.
+    # `if du_out=$(…)`, not a bare assignment: a command in an `if` condition
+    # is not checked by `set -e`, so a failing du marks the row instead of
+    # ending the report — the same checked-assignment reasoning as section 6c's
+    # `ROOT_DEV` reading, reached by an `if` rather than an `||`. (Spelled
+    # WITHOUT quoting that line verbatim: the mutation battery matches raw text,
+    # and a comment reproducing a mutant's literal makes the mutation ambiguous
+    # and scores it MUTATION DID NOT APPLY. That is how this comment was first
+    # written, and the occurrence check caught it.)
+    if du_out=$(du -sh -x "$d" 2>/dev/null); then du_mark=; else du_mark='  !! FLOOR — du could not read all of it'; fi
+    printf '%10s %12d inodes  %s%s\n' \
+      "$(printf '%s\n' "$du_out" | awk '{print $1}')" \
+      "$(find "$d" -xdev -printf . 2>/dev/null | wc -c)" "$d" "$du_mark"
   else
     printf '%10s %12s          %s\n' absent - "$d"
   fi
@@ -893,7 +960,12 @@ split_by_device /home "$ONROOT_LIST" "$FOREIGN_LIST" "$ROOT_DEV"
 # `pipefail` + `set -e` would take the whole report with it. du's stderr is KEPT
 # (see section 5 and `_report_unreadable`): a /home directory du could not fully
 # read is listed here short, and silence is not evidence that none was.
-: > "$DU_ERR"
+# Guarded for the reason section 5's copy carries — and this is the site that
+# makes it matter: here the truncation runs AFTER sections 1 through 6b have
+# already printed, so an unguarded failure ends the report mid-way with figures
+# above it and no message, which is precisely the criterion the exception list
+# above section 1 uses to decide a site may stay unguarded.
+: > "$DU_ERR" || echo "COULD NOT MEASURE: could not truncate du's stderr file — any PARTIALLY READ count below may include paths from an earlier section"
 { xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>>"$DU_ERR" || true; } | sort -rh | head_n 15
 _report_unreadable /home "$DU_ERR"
 echo "--- NOT on the root filesystem, so NOT part of this accounting ---"
