@@ -84,6 +84,7 @@ KEYS="$(mktemp -t journald-keys-XXXXXXXX)"
 BAK="${CFG}.bak-journald-$(date +%Y%m%d-%H%M%S)-$$"
 PATCHED=0
 ACTIVATION_ATTEMPTED=0  # `nixos-rebuild test` was entered (may have partly applied)
+SWITCH_ATTEMPTED=0      # `nixos-rebuild switch` was entered — bootloader ALREADY written
 ACTIVATED=0   # `nixos-rebuild test` returned 0 — activated, not persisted
 SWITCHED=0    # `nixos-rebuild switch` has returned (activated AND persisted)
 OK=0
@@ -111,6 +112,12 @@ finish() {
     if [ "$SWITCHED" = "1" ]; then
       echo "🔴 The system had ALREADY been switched. The FILE is restored but the RUNNING" >&2
       echo "   system is not — run \`sudo nixos-rebuild switch\` to return it." >&2
+    elif [ "$SWITCH_ATTEMPTED" = "1" ]; then
+      echo "🔴 \`nixos-rebuild switch\` was entered but did not complete. It installs the" >&2
+      echo "   bootloader BEFORE activating, so the migrated generation is most likely" >&2
+      echo "   ALREADY IN THE BOOT MENU — a reboot does NOT reliably revert it. The file" >&2
+      echo "   is restored; run \`sudo nixos-rebuild switch\` to bring the system and the" >&2
+      echo "   boot entry back to it." >&2
     elif [ "$ACTIVATED" = "1" ]; then
       echo "🔴 \`nixos-rebuild test\` had ALREADY ACTIVATED the change, so it IS running now," >&2
       echo "   even though the file is restored. It was never added to the boot menu, so a" >&2
@@ -181,6 +188,12 @@ nixos-rebuild test
 ACTIVATED=1
 
 echo "== nixos-rebuild switch =="
+# 🔴 Armed BEFORE the call, and the reason is not symmetry for its own sake:
+# switch-to-configuration runs do_install_bootloader for Action::Switch BEFORE
+# activation (nixpkgs 26.11, switch-to-configuration-ng/src/main.rs). So at the only
+# moment a `switch` can fail mid-activation, the new generation IS already in the boot
+# menu — and telling the operator "a reboot reverts it" would be exactly backwards.
+SWITCH_ATTEMPTED=1
 nixos-rebuild switch
 SWITCHED=1
 echo
@@ -197,7 +210,9 @@ echo "== verify =="
 # Both were measured. We resolve precedence ourselves below: LAST assignment wins,
 # which is the order cat-config emits and the order systemd applies.
 MERGED="$(mktemp -t journald-merged-XXXXXXXX)"
+DROPINS_SEEN=no
 if systemd-analyze cat-config systemd/journald.conf > "$MERGED" 2>/dev/null && [ -s "$MERGED" ]; then
+  DROPINS_SEEN=yes
   echo "  reading   : systemd-analyze cat-config systemd/journald.conf (main file + drop-ins)"
 else
   echo "  reading   : /etc/systemd/journald.conf (systemd-analyze unavailable — DROP-INS NOT CHECKED)" >&2
@@ -225,13 +240,24 @@ for kv in "${MIGRATED[@]}"; do
   eff="$(grep -E "^${key}=" "$MERGED" | tail -1 || true)"
 
   if [ "$landed" = "yes" ] && [ "$eff" = "$kv" ]; then
-    echo "  ok        : $kv  (in journald.conf, and in effect)"
+    # Only claim the second fact when it was actually a SEPARATE read. In the fallback
+    # branch $MERGED is a copy of journald.conf, so `landed` and `eff` are the same
+    # bytes and "in effect" would be asserting a check that never happened — the same
+    # shape as the mislabelled "merged" output this verify loop was rewritten to fix.
+    if [ "$DROPINS_SEEN" = "yes" ]; then
+      echo "  ok        : $kv  (in journald.conf, and in effect)"
+    else
+      echo "  ok        : $kv  (in journald.conf; DROP-INS NOT CHECKED, so 'in effect' is unverified)"
+    fi
   elif [ "$landed" = "no" ] && [ "$eff" = "$kv" ]; then
     echo "  NOT LANDED: $kv is in effect, but NOT in /etc/systemd/journald.conf —" >&2
     echo "              something other than settings.Journal is supplying it." >&2
     missing=$((missing + 1))
   elif [ -n "$eff" ]; then
-    echo "  OVERRIDDEN: $kv — effective value is '${eff}' (a later drop-in wins)" >&2
+    # Deliberately does not name the cause: the later assignment is USUALLY a drop-in,
+    # but the same key appearing twice in journald.conf produces this too, and when the
+    # pair never landed the `landed=no` half is what matters. Print what was measured.
+    echo "  NOT IN EFFECT: $kv — last assignment of ${key} is '${eff}' (landed=${landed})" >&2
     missing=$((missing + 1))
   else
     echo "  MISSING   : $kv — no assignment of ${key} anywhere in the journald config" >&2

@@ -72,16 +72,26 @@ def to_nix_string(value: str) -> str:
     return f'"{out}"'
 
 
-def parse_settings(body: str, form: str = "block") -> list[tuple[str, str]]:
+def parse_settings(body: str, form: str) -> list[tuple[str, str]]:
     """Parse a journald.conf(5) fragment into ordered key/value pairs.
 
     `form` is "block" (a `''`-string source) or "inline" (a `"`-string source). It
     decides what a backslash MEANS — see the refusal below.
 
+    🔴 REQUIRED, deliberately. It defaulted to "block" for one round, which is the
+    PERMISSIVE side: a caller that forgot it on inline input would get exactly the
+    silently-wrong value the parameter exists to prevent. Measured — flipping that
+    default survived the whole suite, because the only caller passes it explicitly, so
+    nothing would have caught the omission. A module whose doctrine is "refuse rather
+    than guess" should not make guessing the default; an unknown form is refused below.
+
     Comments and blank lines are skipped. Anything else that is not a `Key=Value` with a
     well-formed key raises Refused — including a `[Journal]` section header, which would
     otherwise be silently dropped and change what the config means.
     """
+    if form not in ("block", "inline"):
+        raise Refused(f"unknown source form {form!r} — expected 'block' or 'inline'")
+
     pairs: list[tuple[str, str]] = []
     for raw in body.splitlines():
         line = raw.strip()

@@ -192,6 +192,24 @@ def test_a_value_that_depends_on_EVALUATION_is_refused(value, what):  # audit R2
         jm.rewrite(src)
 
 
+def test_parse_settings_REQUIRES_the_form_argument():  # audit R4 #3
+    """Pins the parameter as required, which a default silently un-pins.
+
+    It defaulted to "block" — the permissive side — for one round, and audit round 4
+    measured that FLIPPING that default survived the entire suite, because the only
+    caller passes it explicitly. Nothing would have caught a future caller omitting it
+    on inline input, which is precisely the silently-wrong value the guard exists to
+    stop. This test fails if a default is reintroduced.
+    """
+    with pytest.raises(TypeError):
+        jm.parse_settings("SystemMaxUse=2G")  # type: ignore[call-arg]
+
+
+def test_parse_settings_refuses_an_unknown_form():
+    with pytest.raises(jm.Refused, match="unknown source form"):
+        jm.parse_settings("SystemMaxUse=2G", "sideways")
+
+
 def test_a_bare_double_apostrophe_escape_is_refused():  # audit R3 NEW-C
     """Every earlier param of the test above also contained `${`, so all three died on
     THAT half of the guard. Audit round 3 mutation-tested it: deleting `or "''" in value`
