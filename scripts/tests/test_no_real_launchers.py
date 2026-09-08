@@ -243,7 +243,7 @@ def test_the_stubbed_launcher_set_is_pinned():
 # seven scripts named it.
 ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
-        {"airvpn-menu", "keylog-spin-capture.sh",
+        {"airvpn-menu", "keylog-spin-capture.sh", "mention-open.py",
          "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py",
          "syshealth", "tmux-reply-agent", "tmux-restore-observe.sh"},
         "verb-split rather than record-only — see the systemctl tests below. "
@@ -302,6 +302,36 @@ ACKNOWLEDGED_UNSTUBBED = {
         "argv[0] set is exactly {tmux_bin}, with both controls watched (clean "
         "tree passes; the injected call site fails with that test's own "
         "message). Do not restore this entry without that pin. "
+        "mention-open.py (added 2026-09-07 with the refresh timer) is the "
+        "PROSE-MENTION shape again, and it arrives WITH its pin rather than "
+        "acquiring one after an audit — which is the only lesson the "
+        "tmux-reply-agent paragraph above is asking anyone to carry. Its SINGLE "
+        "occurrence of the name is inside `staleness_note()`'s operator-facing "
+        "body: `check systemctl --user status mention-known-repos-refresh`. That "
+        "sentence is the whole point of the note — a mapping older than "
+        "STALE_MAPPING_DAYS now means the DAILY UNIT has not landed for a week, "
+        "so the actionable thing is the unit, and the previous wording ('nothing "
+        "regenerates it') sent the operator to re-run a generator by hand while a "
+        "failing unit stayed invisible. Rewording it to dodge the scanner would "
+        "delete the only pointer from the symptom to its cause. "
+        "🔴 THE PIN, because this entry would otherwise blind the guard exactly "
+        "as the one above did: "
+        "test_mention_open.py::test_mention_open_SPAWNS_these_argv0_AND_NOTHING_"
+        "ELSE walks the handler's AST and asserts its spawn argv[0] set is "
+        "exactly {git, tmux, notify-send, xdg-open, rofi}, grows-or-shrinks, "
+        "with a `<computed>` sentinel so a spawn built from a variable fails "
+        "loudly instead of leaving the set. "
+        "test_systemctl_is_MENTIONED_but_never_SPAWNED asserts both halves of "
+        "this justification directly — that the mention still EXISTS (so this "
+        "entry cannot outlive the sentence it describes) and that systemctl is "
+        "not in the spawn set. ⚠ The neighbouring runtime ledger "
+        "(test_the_resolution_path_spawns_ONLY_these_local_commands) does NOT "
+        "cover this and must not be cited for it: it records what the RESOLUTION "
+        "PATH spawns, so a systemctl call added to notify() or to any branch it "
+        "does not drive would never enter its ledger. Both controls were "
+        "WATCHED: clean tree passes, and an injected "
+        "`subprocess.run([\"systemctl\", \"restart\", …])` fails with that "
+        "test's own message. "
         "tmux-restore-observe.sh (added 2026-09-06) is the SECOND on the VERB "
         "ground and is justified separately rather than absorbed into "
         "syshealth's sentence: its single call site is `systemctl --user show "
@@ -316,7 +346,8 @@ ACKNOWLEDGED_UNSTUBBED = {
         "moment the script grows one"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
-         "notify-failure.sh", "playwright-nixos", "resume-state.sh",
+         "notify-failure.sh", "playwright-nixos", "regen-known-repos.py",
+         "resume-state.sh",
          "session-manager", "session-resolve", "ship.sh", "tmux-post-save.sh",
          "tmux-scratch-slots.sh"},
         "MEASURED unreachable: a whole-tier run under a recording interceptor "
@@ -341,6 +372,22 @@ ACKNOWLEDGED_UNSTUBBED = {
         "that raises on anything else — test_session_resolve.py pins that "
         "allowlist in both directions, so this justification cannot rot into "
         "a claim about a file that has grown a launcher. "
+        "regen-known-repos.py (added 2026-09-07 with the picker universe) is "
+        "the same PROSE-MENTION shape and is re-justified, not reworded. Its "
+        "single occurrence is one clause of a comment explaining why the picker "
+        "universe is a SECOND FILE rather than a new shape inside "
+        "known_repos.json: the collector's session-tailer.py reads that mapping "
+        "from a nix `home.file` COPY, which only changes on a `home-manager "
+        "switch`, so the two readers could not change together and a reshaped "
+        "file would have a flag day. Deleting the word would delete the reason "
+        "the design is what it is. It is not a call site: the complete set of "
+        "argv[0] literals this script can spawn is `gh` and `git`, pinned in "
+        "BOTH directions by test_regen_known_repos.py::test_regen_SPAWNS_these_"
+        "argv0_AND_NOTHING_ELSE — an AST walk with a `<computed>` sentinel, so "
+        "a spawn built from a variable fails rather than silently leaving the "
+        "set. Both controls watched: clean tree passes, an injected "
+        "`subprocess.run([\"home-manager\", \"switch\"])` fails with that "
+        "test's own message. "
         "tmux-scratch-slots.sh (added 2026-08-19) is the FOURTH of this shape "
         "and carries the STRONGEST form of the justification: the other three "
         "merely lack a call site, whereas this file has no executable "
@@ -1520,6 +1567,20 @@ def test_the_module_loader_scan_can_actually_find_something(tmp_path):
 # assembles its patterns — which keeps THIS file inside the scan's scope instead
 # of excluding it, so a real clobber added here would still be caught.
 PINNED_PATH_CLOBBERS = {
+    "test_tmux_reply_agent.py": (
+        'PA' + 'TH=os.path.dirname(tmux_exe)',
+        "task 524. The site is a FIXTURE, not a launcher: it reproduces the "
+        "systemd environment the tmux-reply-agent unit really runs under, whose "
+        "`Environment=PATH=` is deliberately coreutils+python3+tmux and contains "
+        "no `claude`. The clobber IS the thing under test — a launched tmux pane "
+        "inherited that PATH and sat on `command not found` on workbench "
+        "2026-09-07. It is safe because it overrides PATH ONLY, on a dict handed "
+        "to one subprocess.run, and points at the directory holding the real "
+        "tmux binary, so nothing is executed from an attacker-controlled path "
+        "and no launcher is reached. A fixture that did NOT clobber PATH could "
+        "not fail, which is what makes this entry load-bearing rather than "
+        "incidental.",
+    ),
     "test_session_stamp_seam.py": (
         '"PATH"' + ': str(empty_bin)',
         "an EMPTY directory in tmp_path, justified by emptiness like "
@@ -1578,25 +1639,9 @@ PINNED_PATH_CLOBBERS = {
         "single needle covers every site rather than pinning whichever the "
         "scan reaches first. `sys.executable` is absolute, so the interpreter "
         "still resolves with PATH gone"),
-    "test_standup_local_health.py": (
-        'env["PATH"]' + ' = str(self._restricted_bin())',
-        "the FIRST pinned clobber whose replacement directory is not empty, so "
-        "it is justified by ENUMERATION rather than by emptiness: "
-        "Harness.RESTRICTED_BIN lists the nine coreutils standup needs to run "
-        "at all, the harness asserts the directory's contents are a subset of "
-        "that list, and it asserts systemctl is absent — which is the point of "
-        "the test: standup.sh must skip its host-health section gracefully "
-        "when the systemctl BINARY IS NOT INSTALLED, and no amount of "
-        "PREPENDING can make a binary unfindable. 🔴 That is ALL it removes — "
-        "it says nothing about a systemctl that is present while the user "
-        "manager/bus is unreachable, which is a different condition with a "
-        "different (and once-broken) rendering; that one is covered by the "
-        "SC_FAIL_ALL/SC_FAIL_SHOW modes of the stub, with systemctl very much "
-        "on PATH. No launcher in HAZARD_VOCABULARY is reachable "
-        "from it: no systemctl, kubectl, gh, ssh, home-manager or pkill"),
     "test_resume_state_clawgate.py": (
         'env["PATH"]' + ' = f"{nocg}',
-        "justified by ENUMERATION, like test_standup_local_health.py above. The "
+        "justified by ENUMERATION rather than by emptiness. The "
         "replacement is two directories the test CONSTRUCTS: `nocg`, holding "
         "copies of this suite's gh/kubectl/curl tripwire stubs and nothing "
         "else, and `_sandbox_bin`, holding symlinks to exactly its "

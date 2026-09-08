@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""`cairn-who <task>` — which sessions, tmux windows and transcripts worked a task.
+
+🔴 A SEPARATE BINARY BECAUSE IT IS A SEPARATE NOUN. `cairn` is the read-through
+client for the hosted subsystem store: every one of its verbs is about an ENTRY,
+takes `--scope`/`--repo`/`--no-sync`, and syncs a cache. This is about SESSIONS
+on named hosts — it touches no store, no cache and none of the store's network,
+shares none of those flags, and carries its own longer timeout because nothing
+about an HTTP snapshot fetch applies to shelling into tmux on a sleeping laptop.
+It shipped as a `cairn who` subcommand whose parser asserted the opposite; that
+claim is retracted in `lib/cairn_who.py`'s module docstring, where the reasoning
+lives. The same seam is the one `github.com/ZacxDev/cairn` chose independently:
+the OSS extraction ships the store client and excludes this, because the hosts it
+reports cannot appear in a public repo.
+
+🔴 THIS FILE IS A LAUNCHER, NOT A SECOND IMPLEMENTATION. Everything — the parser,
+the defaults, the resolution — lives in `lib/cairn_who.py`, which is also what
+`scripts/tests/test_cairn_who.py` imports. A parser re-declared here would be the
+copy that drifts, and the drift would be invisible to that suite.
+
+🔴 `Path(__file__).resolve()` IS LOAD-BEARING FOR THE DEPLOY. This is put on PATH
+by `nix/home.nix` as a `config.lib.file.mkOutOfStoreSymlink`, exactly like
+`scripts/cairn`: `.resolve()` follows the symlink back into the checkout so
+`lib/` is found there. A `home.file` store COPY would resolve `__file__` into
+/nix/store, where `scripts/lib/` is not deployed, and the import below would fail
+outright — the command would not start at all.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import cairn_who  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(cairn_who.main())

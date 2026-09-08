@@ -9,72 +9,86 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-🔴 **SHIPPED AND VERIFIED LIVE — clawgate `0.8.28`, pod `clawgate-c8f7c4f6f-qhkqr`,
-0 restarts.** The whole arc is done: rank 32 armed the host agent, rank 33 drove
-the loop end to end and found the defect that broke every reply, and the three UI
-PRs are merged **and now running**.
-
 🔴 **THE LOOP ITSELF IS CLOSED AND PROVEN — a reply typed in the web UI lands in a
 REAL pane. Observed 2026-09-06 TWICE:** once via a token-API control that isolated
 the fault, and once end to end through the UI path after the fix. Rank 33 carries
-the evidence and the defect it found.
+the evidence and the defect it found. (Carried forward across a Status replace —
+it is the arc's central result, not status.)
 
-Deploy commit `ae534d56f` on `ZacxDev/homelab-infra` `trunk`; image digest
-`sha256:17d0a26da6bddfa24d7d34577370aeabc2a53d3786d868ab9c75a8d0329bab32`,
-pushed to harbor as both `0.8.28` and `latest`.
-
-**Verified BY CONTENT against the live pod, never by version string** — the
-version was already 0.8.27 before any of this merged, which is exactly why it is
-not a deploy check:
-
-| feature | live evidence | negative control |
-|---|---|---|
-| wider shell | `min-[2560px]:max-w-[150rem]`, `2xl:max-w-[110rem]` on `/` | old `2xl:max-w-[96rem]` = **0** |
-| auto-fit tmux grid | 8 instances on `/ui/tmux` | old `lg:grid-cols-2` = **0** |
-| chat markdown | `<p class="my-1">` in a rendered turn | — |
-| tool input disclosure | `<details data-tool-detail>` → `⚙ Bash` → `<pre>` | not `<details open>` |
-| free-form reply | `data-chat-freeform-reply`, `data-reply-state="ready"` | — |
-
-🔴 **UPDATE 2026-09-07 — THE SURFACE IS NOW AUTHENTICATED. Live version is
-`0.8.29` (`ZacxDev/homelab-infra#743`, squash `3f6ef8ae7`), and everything below
-about an unauthenticated LAN surface describes `0.8.28`, which is no longer
-running.** `requireSession` is no longer `return next`; both it and
-`requireArmedTerminalUI` require an HMAC-signed session cookie minted by
-`POST /login` against `CLAWGATE_UI_PASSWORD` (fail-closed: unset ⇒ refuse).
-Re-measured live: the uncredentialed `POST /ui/term/send-keys` that returned
-**200** now returns **401**, and anonymous `GET /` returns **303** to `/login`.
-🔴 **The free-form box and the tool-input disclosure are still ARMED — they are
-now behind a login rather than removed.** Full evidence, and the reason the gate
-had to land on TWO wrappers, is rank 39.
-
-🔴 **THE FREE-FORM SEND-KEYS BOX IS ARMED.** Live on a real session page:
-`data-reply-state="ready"`, `data-reply-host="laptop"`, `data-reply-pane="%31"`,
-`data-reply-entry="0"`, confirm text *"Send this reply to laptop %31 and press
-Enter?"*. Before this deploy `#741` was merged and INERT; from this pin the
-session page both READS tool inputs and WRITES arbitrary commands into a live
-pane.
-
-**Merged this session** (all content-verified on their mainline, never by
-ancestry — a squash is never an ancestor):
+🔴 **LIVE IS `0.8.31`. Rank 42 is MERGED, and a seven-item tmux-page feedback round
+shipped on top of it** — six PRs, one deploy, and a host-side fix in `devrc` that made
+the launcher work for the first time.
 
 | PR | what | squash |
 |---|---|---|
-| `innovation-upstream/devrc#1334` | rank 32 — `enableTmuxReplyAgent = true` | `5a8ec6ff` |
-| `innovation-upstream/devrc#1333` | rank 32 handoff | `c19fb289` |
-| `ZacxDev/homelab-infra#735` | the host-label defect rank 33 found | `0d553fcd` |
-| `ZacxDev/homelab-infra#737` | UI PR 1 — layout, markdown, auto-approve fold | `efa44e763` |
-| `ZacxDev/homelab-infra#738` | UI PR 2 — tool inputs, collapsed | `a74f312f7` |
-| `ZacxDev/homelab-infra#741` | UI PR 3 — free-form reply | `9d4b6900` |
-| `ZacxDev/homelab-infra` | deploy pin 0.8.28 | `ae534d56f` |
+| `ZacxDev/homelab-infra#749` | **rank 42** — the three UI residuals | `6ee01514c` |
+| `innovation-upstream/devrc#1364` | task 516 producer — `window_activity` on the wire | `112a52255` |
+| `ZacxDev/homelab-infra#751` | task 520 — clawgatectl reaches tmux/transcripts/panes/launch | `439fa7643` |
+| `ZacxDev/homelab-infra#752` | task 516 consumer — per-window age + `windows_measured` | `bf1a32945` |
+| `ZacxDev/homelab-infra#753` | task 518 — JSONL chat view replaces `chat.go` | `59230349b` |
+| `ZacxDev/homelab-infra#754` | task 517 — reply DELIVERY state from the queue | `1e548f431` |
+| `ZacxDev/homelab-infra#760` | task 523 — launch→session linkage | `0826aa200` |
+| `innovation-upstream/devrc#1379` | task 524 — the launcher's PATH defect | `18bc15004` |
+| `ZacxDev/homelab-infra` | deploy pin **0.8.31** | `c3eaee1d1` |
 
-**In flight:** `innovation-upstream/devrc#1350` (the UI briefs) and `#1353` (the
-pre-deploy handoff update) are both OPEN and docs-only.
+**Verified live by CONTENT after the deploy** (the version is never the check):
+`window_activity`, `window_id` and `windowsMeasured=true` are all on the wire in
+`GET /api/tmux/snapshot`; `/ui/tmux` renders **35 distinct** relative ages on one
+page (the anti-vacuity check that they are per-WINDOW, not per-host); the session
+page carries `data-session-view-choice`×5 and `data-reply-state`, with
+`lg:grid-cols-2` and `RenderChatPage` both **0** as negative controls; and the two
+new transcript routes answer **200** while `/nosuch` answers **404**.
 
-**No `clawgate-task:` field is recorded.** `clawgate_handoff.sh resolve` exited
-**5** with its positive control confirming the board answered 1 link for a
-*different* session — so the board is reachable and this 0 is a real reading, but
-a wrong session id also answers 200 with an empty array. That is an unresolvable
-read, **not** a clean bill of health.
+🔴 **THE LAUNCHER RAN `claude` FOR THE FIRST TIME.** Task 523's measurement found it
+had never worked — every launched window died on `claude: command not found`. Task
+524 fixed it in `devrc`, and a live launch after the deploy opened a window running
+Claude Code. Pane PATH went **3 entries → 15**, with `claude` resolvable at
+`/home/zach/.nix-profile/bin`.
+
+### 🔴 STILL OPEN — three of the seven feedback items are DESIGNED, NOT BUILT
+
+Filed with acceptance criteria and closing conditions; no code exists for any of them.
+They live as clawgate tasks **519**, **521** and **522** — deliberately NOT as handoff
+ranks, because the ranked list below is this arc's own queue and the board is theirs.
+
+### ⚠ NOTHING IS `complete` — every card is `ready_for_review`
+
+516/517/518/520/523/524 all need live click-through by the operator. **524's is
+actively blocked**: window `@58` on `workbench`/`scratch` is parked on Claude Code's
+trust-folder prompt, so no `claude_session_id` is ever minted. Measured over 6
+snapshots; corroborated by a frozen `window_activity` and **0** new
+`~/.claude/projects/**.jsonl` files. Answering that prompt is an operator security
+decision. `tmux kill-window -t @58` once read.
+
+### The three unbuilt items — clawgate tasks 519 / 521 / 522
+
+**519 — transcript streaming.** Tail the JSONL over the host agent's
+existing outbound long-poll so the session view is seconds-fresh instead of the
+current 5-minute timer, and lift the `MaxSessionsPerPush = 8` coverage cap.
+🔴 **The operator's scoping decision, verbatim, so it is not re-litigated:** *"2
+distinct systems: clawgate and the session streaming is only for me. Cairn and the
+handoff session shipping is for the entire team and needs to be opt-in (as it
+currently is)."* So task **362**'s "a person must knowingly trigger the share"
+constraint governs the TEAM corpus and does NOT bind this. Do not merge the two
+systems and do not relax 362's opt-in on the strength of this.
+⚠ Decide whether task **180** (every clawgate deploy is a hard API outage —
+`Recreate` + `replicas: 1`) gates it: today a deploy drops a 5-minute push the next
+push repairs; after this it drops live streams on every deploy.
+**521 — chief agent.** A kubeclaw agent with full `clawgatectl`
+reach, a `chief` verb, and a clawgate-skill section so the operator's own Claude
+Code can drive it. 🔴 **BLOCKED on task 375** (`ready_for_review`, not complete):
+measured, `command -v clawgatectl` is **ABSENT** in a live agent pod and that
+image has no Dockerfile in git. Re-verify in a real pod rather than trusting 375's
+status field.
+🔴 Chief is a privilege concentration — send-keys into any pane on either host plus
+process launch, reachable through a chat box. Its writes must stay on the
+fail-closed tier and be attributable in the log by a FIELD, not by timing.
+**522 — chief slide-out + running recap.** Depends on 521
+for an inference path; clawgate has **no LLM client** (`go.mod` carries no
+anthropic/openai dep — an "agent" here is a kubeclaw pod it provisions).
+Operator decision: cover **every** window on `/ui/tmux`, not only those with a
+stored transcript — so the recap must say which input it used, since a
+`claude: false` pane can only be summarised from `pane_preview`.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -1874,6 +1888,30 @@ mechanism is worth not re-deriving.
   the contention reading is wrong and the 30s timeout in
   `scripts/tests/test_skill_mjs_parses.py:70` is the thing to look at.
 
+### `ZacxDev/homelab-infra#749`'s four checks are REGISTERED but NONE is terminal
+
+- **Symptom + exact repro:** `gh pr checks 749 --repo ZacxDev/homelab-infra`
+  at handoff time.
+- **Observed (with values):** all four gates present and all four `pending` —
+  `tekton/clawgate-ci`, `tekton/clawgate-e2e`, `tekton/gitops-validate`,
+  `tekton/ux-audit-clawgate`. `gh pr view` = `OPEN MERGEABLE UNSTABLE`, head
+  `f54aae80a`.
+- **Ruled out:** "the rollup is empty, so this repo has no CI for the change" —
+  it was 2 of 4 sixty seconds after `gh pr create` and 4 of 4 shortly after, i.e.
+  the early reading was an unregistered rollup, not an absence. `via: measurement`
+- **Ruled out:** "pending on this PR is the rank-17/18 platform signature" — no
+  check has REPORTED yet, so there is nothing to attribute; the signature is a
+  RED, not a pending. `via: code`
+- **Leading hypothesis:** ordinary queueing. The minimum-count rule is satisfied
+  structurally (4 registered, the floor for this repo is ≥1 and in practice 4),
+  and none is terminal, so "settled" is a claim nobody can make yet.
+- **Next probe:** `gh pr checks 749 --repo ZacxDev/homelab-infra | awk -F'\t' '{print $1" | "$2}'`
+  — 🔴 read it with `-F'\t'`; check NAMES contain spaces, so `$2` from a default
+  `awk` is a fragment of the name and every terminal/busy test is then applied to
+  the wrong field. Require every check to hold a TERMINAL conclusion; treat an
+  EMPTY conclusion as busy, not as settled. On a red, read WHICH test failed and
+  which NODE the PipelineRun landed on before debugging the diff (ranks 17, 18).
+
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
   is a statement about the OLD leg.** A PipelineRun executes the **deployed Task object in the
@@ -3117,6 +3155,104 @@ mechanism is worth not re-deriving.
 
 - **The CSS cwd trap is real and has a cheap tell:** `app.css` built from inside
   `containers/clawgate/` came to **44,975 bytes**; ~5 KB means the trap fired.
+
+- 🔴 **2026-09-07 — `handoff-tmux-webapp.md` IN THE devrc CLONE WAS 2 COMMITS
+  BEHIND `origin/main`, AND READING IT WOULD HAVE PRODUCED A WRONG SESSION.** The
+  working copy still said `0.8.28`, still listed rank 39 (auth) as OPEN, and still
+  described the LAN surface as authenticating nobody — all three superseded by
+  `#1357`/`#1358`. The kickoff message was the only thing that disagreed with the
+  file, which is the tell. **Read the doc from the ref** (`git show
+  origin/main:claudedocs/handoff-tmux-webapp.md`) or fast-forward first; the base
+  clone is write-only for worktree-based work and falls behind silently. Left
+  unfixed it is also a `status=stale-base` refusal from `handoff_doc.py` at the
+  END of the session, after all the work.
+- 🔴 **2026-09-07 — A GUARD CAN BE WALKED BY A UNIT, AND BY AN IMPORT ALIAS.** Two
+  independent predicates in `containers/clawgate/`, both written explicitly to be
+  unwalkable, both walkable by a NAME: `aaOffScreen` tested
+  `strings.HasSuffix(v, "px")` so `left:-437rem` — the same 6,992px, the same
+  nowhere — was skipped in silence; `aaEvictsIn` tested `pkg.Name == "maps"` so
+  `import m "maps"` evaded it **in a file whose import block SAYS the answer.**
+  The general shape: when a predicate reads a DERIVED surface (the call site, the
+  declaration's suffix) while a DEFINING surface exists (the import block, the
+  CSS unit table), the defining one is the one to read. Ask what the value MEANS,
+  not how it is spelled.
+- 🔴 **2026-09-07 — FIXING A LEAK CAN DESTROY THE ONLY COPY OF THE EVIDENCE.**
+  Redaction and logging are one obligation, not a fix plus a nicety: the three
+  auto-approve toggles that rendered the pgx DSN into the operator's banner logged
+  it **nowhere**, so redacting alone would have deleted the driver error from the
+  system entirely. **Before redacting anything, grep for where else it is
+  recorded** — and if the answer is "nowhere", the log line is part of the fix.
+- 🔴 **2026-09-07 — `internal/ui/auto_approve_header_test.go` WAS gofmt-CLEAN AT
+  BASE WHILE 17 OTHER FILES IN THE MODULE ARE NOT.** So a repo-wide `gofmt -l`
+  says nothing about whether YOUR change left a file dirty — the baseline is
+  per-file. Check the file's own base state (`git show
+  origin/trunk:<path> | gofmt -l /dev/stdin`, or a scratch copy) before deciding a
+  listing is pre-existing.
+- ⚠ **2026-09-07 — the module's Go tests need `web/static/app.css`, which is a
+  gitignored BUILD ARTIFACT**, so a fresh worktree fails 3 tests in
+  `internal/ui` + `internal/api` for a reason that has nothing to do with the
+  diff. `nix-shell -p tailwindcss --run 'tailwindcss -i web/css/input.css -o
+  web/static/app.css --minify'` **from inside `containers/clawgate/`**. Measured
+  this session: **45,275 bytes** — consistent with the recorded ~44,975 tell, so
+  the cwd trap did not fire; ~5 KB means it did.
+- ⚠ **2026-09-07 — LSP diagnostics in a homelab-talos worktree are PHANTOM and
+  loud.** Every `internal/...` import reported `cannot find package … in GOROOT`,
+  plus a false `"errors" imported and not used` on a file that calls `errors.Is`.
+  They resolve against the primary clone's module view. `go build ./...` /
+  `go vet` are the arbiter; do not "fix" code to satisfy them.
+
+- 🔴 **2026-09-08 — A VERSION-PIN BUMP INSIDE A FEATURE PR CREATES AN
+  ImagePullBackOff THE INSTANT IT MERGES.** `#751` bumped `deployment.yaml` and
+  `cmd/clawgatectl/client.go` to `0.8.30` as part of its own change — correct for
+  `TestDeployPinMatchesClientBuildVersion` — but nothing builds an image on merge, so
+  Flux reconciled a pin with no image behind it and the cluster sat in
+  ImagePullBackOff for ~80 minutes. The old pod kept serving, so it was a stuck
+  rollout, not an outage. **The pin bump and the image build are ONE operation and
+  must not be split across a merge boundary.**
+- 🔴 **2026-09-08 — AN EMPTY COMMIT IS THE WRONG RE-TRIGGER IN THIS REPO, AND IT
+  MANUFACTURES A FALSE GREEN.** `clawgate-ci-pipeline.yaml:13-14` filters on *push
+  touching `containers/clawgate/**`*, so a zero-file commit matches nothing and
+  `clawgate-ci`, `clawgate-e2e` and `ux-audit-clawgate` never fire — while
+  `gitops-validate` registers anyway, because its `ci-changed-paths.py` reads an
+  absent path list as "unknown → run". Result: one check passes, `mergeStateStatus`
+  reads **CLEAN**, and the PR looks mergeable with three quarters of the gate unrun.
+  Re-run the PipelineRun from its own spec instead.
+- 🔴 **2026-09-08 — `gh pr checks` CAN REPORT A STALE ALL-PASS ON THE CORRECT HEAD
+  SHA, SECONDS AFTER A PUSH, AND BOTH DOCUMENTED RULES MISS IT.** Measured on `#754`:
+  immediately after pushing, the rollup showed **4/4 pass** against the new head — the
+  minimum-count rule and the all-terminal rule BOTH passed, and it was the parent
+  commit's verdict. The real checks reset to pending ~45s later. **The discriminator
+  is elapsed time versus pipeline duration**: Tekton cannot run in seconds. Wait for
+  the rollup to RESET before believing it.
+  ⚠ And the minimum is now **5**, not 4 — `comic-flex-ci` joined the rollup.
+- 🔴 **2026-09-08 — RANK 18's NODE IS WRONG NOW; THE MECHANISM SURVIVES.** That entry
+  pins `talos-uvh-gtj` as the bad node (0-pass/14-fail). Measured this session:
+  `uvh-gtj` **passed twice** and the failure landed on **`talos-xr6-r7p`**, which has
+  tasks **#411** and **#431** open against it. Device-isolated I/O contention still
+  explains it — `dbtest: created … from template in 1m26.403s` against sub-second
+  locally — but *"check whether it ran on uvh-gtj"* now mis-attributes. **Read the
+  node from the PipelineRun; do not carry the name forward.**
+  🔴 The decisive control is a re-run **from the run's own spec**: same commit, same
+  pipeline, different node → pass. That separates the platform from the diff in a way
+  no amount of re-reading the diff can.
+- 🔴 **2026-09-08 — FOUR MERGED-TREE DEFECTS IN ONE BATCH, NONE VISIBLE FROM ANY PR.**
+  Five branches, each 4/4 green, produced: two BUILD failures (517's and 523's code
+  calling `RenderChatPage`/`ChatPagePath`, which 518 renamed — zero shared files), a
+  **duplicate migration number** (516 and 517 both added `0032`; `version INT PRIMARY
+  KEY` plus a `current` read once before the loop ⇒ the second INSERT dies and the pod
+  **fails to start**), and one **semantic** conflict that compiled fine (523's test
+  pinned a sentence 518 rewrote). ⚠ The migration one is NOT silent — a pre-existing
+  guard on trunk catches it — but no PR's CI runs the merged tree, so it would land
+  red on trunk. **Build the integration branch and run the suite there before merging
+  a batch.**
+- ⚠ **2026-09-08 — a rename sweep is unsafe when the new name CONTAINS the old.**
+  Replacing `ChatView{` → `SessionChatView{` turned already-correct files into
+  `SessionSessionChatView`. Six files were damaged and repaired; the check that
+  settled it was diffing each against trunk for byte-identity, not re-reading the sed.
+- ⚠ **2026-09-08 — three separate agents independently invented the same `serverEnv`
+  e2e fixture.** That is a signal about the harness, not a coincidence: the terminal
+  write surface cannot be armed from outside, so every spec that wants to click Send
+  has to build its own server.
 
 ## How to verify
 

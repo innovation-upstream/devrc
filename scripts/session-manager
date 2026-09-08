@@ -208,6 +208,14 @@ waiting_signals, waiting_status, unsent_prompt, unsent_prompt_status,
 pane_preview, pane_preview_status, claude_session_id, runtime, ledger,
 fuzzyclaw, panes. The row ledger is pinned by a test.
 
+`window_activity` is the ONE OPTIONAL row key and is therefore listed apart
+from the ledger above: epoch seconds from tmux's `#{window_activity}`, PRESENT
+only when it was measured and ABSENT — never null, never 0 — otherwise. It is
+when this WINDOW last produced output, which is a different question from
+`age_secs` (when an AGENT last wrote a ledger record) and from a consumer's own
+receive time (one value for the whole HOST). Its absence is pinned by a test in
+both directions.
+
 🔴 `repo` IS THE PROJECT KEY, AND IT IS RESOLVED ON THE HOST THAT OWNS THE
 DIRECTORY
 ---------------------------------------------------------------------------
@@ -402,8 +410,9 @@ ACTIVITY_ENV = os.path.join(HOME, ".config", "activity-collector", "env")
 # 🔴 The laptop's SSH target. `10.42.0.100` is the LAPTOP on nebula;
 # `10.42.0.10` is the homelab GATEWAY. Getting this wrong does not fail loudly —
 # SSH succeeds against a real host and reports the gateway's tmux state as the
-# laptop's. Matches `claude/skills/standup/standup.sh:26`, the repo's only
-# existing precedent. The LAN address is same-network-only, so a LAN-first probe
+# laptop's. It matched `claude/skills/standup/standup.sh:26`, the repo's only
+# other precedent, until that skill was retired (2026-09-07); this constant is
+# now the precedent. The LAN address is same-network-only, so a LAN-first probe
 # buys a timeout on every scan of a laptop that usually is not on this network.
 # Pinned by a test.
 # --------------------------------------------------------------------------- #
@@ -452,7 +461,42 @@ TMUX_PANES_ARGV = ("tmux", "list-panes", "-a", "-F", PANE_FORMAT)
 # means the server restarted. A wrong-but-stable clock serves that perfectly;
 # reading it as a time does not. pid alone is insufficient — pids are reused
 # across a reboot (the laptop's server sits at pid 2509).
-WINDOW_FORMAT = "#{window_id}|#{window_index}|#{pid}|#{start_time}|#{session_name}"
+#
+# 🔴 `#{window_activity}` IS PER-WINDOW AND IS A REAL TIMESTAMP — the one field
+# here that MAY be rendered as a time, and the reason the two paragraphs above
+# insist that `#{start_time}` may not. tmux updates it whenever the window's
+# active pane produces output or is otherwise touched, in EPOCH SECONDS on the
+# host's clock. It answers "when did THIS window last do anything", which
+# `#{start_time}` (server-level, frozen, possibly years wrong) and a consumer's
+# own receive time (per HOST, identical for every window under it) both cannot.
+#
+# 🔴 IT RIDES ALONG FOR THE SAME BUDGET REASON pid/start_time do: `list-windows`
+# is already issued once per host, so this costs no extra tmux invocation and no
+# fifth ssh round trip. And it goes BEFORE session_name for the same maxsplit
+# reason they do.
+#
+# ⚠ IT IS THE HOST'S CLOCK, NOT OURS. A host whose clock is skewed reports a
+# skewed activity time, so a consumer must handle "in the future" rather than
+# render a negative age as freshness. It is also NOT a claim about the CLAUDE
+# agent in the window — tmux measures terminal output, so a window painting a
+# spinner is "active" whether or not anything is progressing.
+#
+# 🔴 MEASURED ON THE LIVE FLEET 2026-09-07, AND IT INHERITS THE PRE-NTP CLOCK
+# PROBLEM THE start_time PARAGRAPH ABOVE DESCRIBES. 86 windows across both hosts,
+# all 86 carrying the field, none zero or negative — but 12 of the laptop's 32
+# report `2021-01-01`, the SAME frozen pre-NTP RTC value its `#{start_time}`
+# does. Those are windows that have produced no output since their tmux server
+# started, so tmux stamped them at the server's start instant, which was recorded
+# under the wrong clock and does not move when NTP later corrects it.
+#
+# That is NOT a fabrication by this tool and is deliberately NOT clamped here: it
+# is what tmux recorded, the RELATIVE claim it makes ("nothing has happened in
+# this window since the server came up") is TRUE, and suppressing it would
+# replace a visibly absurd number with a silent absence — the substitution this
+# whole file refuses. It renders as ~49,000h. A consumer wanting a ceiling must
+# choose one deliberately; there is no honest one to pick here.
+WINDOW_FORMAT = ("#{window_id}|#{window_index}|#{pid}|#{start_time}"
+                 "|#{window_activity}|#{session_name}")
 TMUX_WINDOWS_ARGV = ("tmux", "list-windows", "-a", "-F", WINDOW_FORMAT)
 
 # --------------------------------------------------------------------------- #
@@ -1370,13 +1414,17 @@ CAVEATS = {
 NOT_MEASURED_POPULATIONS = {
     "pull_requests": {
         "report_key": "pull_requests",
-        "owner_skill": "standup",
+        "owner_skill": "initiative-scan",
         "note": ("Open PRs, their review state and whether they CONFLICT are "
                  "not read here at all. Measured 2026-08-15: 60 open, one "
                  "conflicting for eleven days and one open since February, "
                  "none of them visible in any number this tool prints. A "
                  "window that is idle because its PR is blocked looks exactly "
-                 "like a window that is idle because the work is done."),
+                 "like a window that is idle because the work is done. \u26a0 "
+                 "The FLEET-WIDE sweep retired with `standup` (2026-09-07); "
+                 "what `initiative-scan` answers is the initiative-scoped "
+                 "slice, so a PR belonging to no tracked initiative is "
+                 "unowned by any skill today."),
     },
     "mail_queue": {
         "report_key": "mail_queue",
@@ -1389,20 +1437,19 @@ NOT_MEASURED_POPULATIONS = {
     },
     "cluster_alerts": {
         "report_key": "cluster_alerts",
-        "owner_skill": "standup",
+        "owner_skill": "obs-read",
         "note": ("Firing alerts, in-flight deploys and rollout state on any "
                  "cluster. A tmux pane scan cannot see work that is failing "
                  "with nobody sitting in front of it, which is the failure "
                  "mode that most needs a human."),
     },
-    "initiative_board": {
-        "report_key": "initiative_board",
-        "owner_skill": "initiatives",
-        "note": ("The DURABLE record of what is in flight. These rows are live "
-                 "tmux windows only, so an initiative with no window open — "
-                 "stalled, or between sessions — contributes nothing here. "
-                 "'Nothing is running' is not 'nothing is in flight'."),
-    },
+    # (`initiative_board` sat here until 2026-09-07: the DURABLE record of what
+    # was in flight, unmeasurable from a tmux scan because an initiative with no
+    # window open contributes nothing. The board was RETIRED, so there is no
+    # longer a population to declare unmeasured — the honest move is to drop the
+    # row, not repoint it at a surviving skill that holds none of those rows.
+    # The caveat it carried is NOT lost: "nothing is running" still is not
+    # "nothing is in flight", and `/initiative-scan` is what answers the latter.)
     "gui_windows_outside_tmux": {
         "report_key": "gui_windows",
         "owner_skill": "i3",
@@ -1551,7 +1598,7 @@ WINDOW_FIELD_COUNT = WINDOW_FORMAT.count("|") + 1
 
 
 def split_window_line(line: str):
-    """One tmux `list-windows` row -> (window_id, index, pid, start_time, session).
+    """One `list-windows` row -> (id, index, pid, start_time, activity, session).
 
     🔴 THE ONE PLACE THAT KNOWS THE FIELD ORDER. parse_windows and
     parse_tmux_server_id both read the SAME rendered rows, and when each carried
@@ -1569,10 +1616,10 @@ def split_window_line(line: str):
     parts = line.split("|", WINDOW_FIELD_COUNT - 1)
     if len(parts) < WINDOW_FIELD_COUNT:
         return None
-    wid, idx, pid, started, sess = (p.strip() for p in parts)
+    wid, idx, pid, started, activity, sess = (p.strip() for p in parts)
     if not wid.startswith("@") or not idx:
         return None
-    return wid, idx, pid, started, sess
+    return wid, idx, pid, started, activity, sess
 
 
 def parse_windows(raw: str) -> dict:
@@ -1592,8 +1639,45 @@ def parse_windows(raw: str) -> dict:
         fields = split_window_line(line)
         if fields is None:
             continue
-        wid, idx, _pid, _started, sess = fields
+        wid, idx, _pid, _started, _activity, sess = fields
         out[wid] = (sess, idx)
+    return out
+
+
+def parse_window_activity(raw: str) -> dict:
+    """`list-windows -a -F WINDOW_FORMAT` -> {window_id: epoch_seconds:int}.
+
+    🔴 ABSENT, NEVER ZERO. A window whose `#{window_activity}` is empty, not an
+    integer, or non-positive is OMITTED from the mapping rather than carried as
+    0 — an epoch 0 renders as "56 years ago", which is a fabricated measurement
+    wearing the costume of a real one, and it is the exact shape the rest of
+    this tool exists to refuse. Downstream, a missing key means "not measured"
+    and the row simply carries no activity field.
+
+    A separate function from `parse_windows` for the reason its docstring gives:
+    that one's contract is the SLOT join, and widening its return value would
+    make every existing caller and fixture care about a value none of them uses.
+    This reads the same rows through the same `split_window_line`, exactly as
+    `parse_tmux_server_id` does.
+
+    ⚠ NOT VALIDATED AGAINST THE READER'S CLOCK HERE. The value is the reporting
+    host's clock, so a skewed host can report a future timestamp; this is a
+    parser and clamping it would hide the skew rather than report it. The
+    consumer renders the skew.
+    """
+    out = {}
+    for line in (raw or "").splitlines():
+        fields = split_window_line(line)
+        if fields is None:
+            continue
+        wid, _idx, _pid, _started, activity, _sess = fields
+        try:
+            secs = int(activity)
+        except (TypeError, ValueError):
+            continue
+        if secs <= 0:
+            continue
+        out[wid] = secs
     return out
 
 
@@ -1627,7 +1711,7 @@ def parse_tmux_server_id(raw: str):
         if fields is None:
             continue
         rows += 1
-        _wid, _idx, pid, started, _sess = fields
+        _wid, _idx, pid, started, _activity, _sess = fields
         seen.add((pid, started))
     if rows == 0:
         return None, "no parseable window rows"
@@ -2788,7 +2872,7 @@ def fold_windows(panes, host, slots=None, task_index=None,
                  slot_window_ids=None, captures=None,
                  capture_status="skipped", ledger_index=None,
                  pane_preview=False, repo_index=None,
-                 repo_status="unmeasured") -> list:
+                 repo_status="unmeasured", window_activity=None) -> list:
     """Collapse panes into one row per (session, window_index).
 
     A window is `claude` if ANY of its panes is; the row's task/busy/pane_id
@@ -2858,12 +2942,27 @@ def fold_windows(panes, host, slots=None, task_index=None,
     MEASUREMENT — `not_a_repo`, `home` or `no_path` — and says which. The
     resolution itself happened on the host that OWNS the directory; see
     `REPO_PROBE_SCRIPT` for why it cannot happen here.
+
+    🔴 `window_activity` IS `{window_id: epoch_seconds}` FROM THE SAME
+    `list-windows` CALL `slot_window_ids` CAME FROM, and the row carries the KEY
+    ONLY WHEN IT HAS A VALUE. This is the one field on the row that is ABSENT
+    rather than null when unmeasured, and that is deliberate: `age_secs` already
+    owns the null-plus-`age_source` shape for AGENT activity, and a second
+    nullable age beside it would read as the same measurement failing. An
+    absent key cannot be mistaken for a measured zero, and a measured zero here
+    would render as 1970 — see `parse_window_activity`.
+
+    It is a DIFFERENT quantity from `age_secs`, not a fallback for it:
+    `age_secs` is how long since an AGENT wrote a ledger record, and
+    `window_activity` is when tmux last saw output in the window. A bare shell
+    has the second and never the first.
     """
     now = time.time() if now is None else now
     slots = slots or {}
     task_index = task_index or {}
     slot_window_ids = slot_window_ids or {}
     ledger_index = ledger_index or {}
+    window_activity = window_activity or {}
     order, groups = [], {}
     for p in (panes or ()):
         key = (p.get("session"), p.get("window_index"))
@@ -2942,7 +3041,7 @@ def fold_windows(panes, host, slots=None, task_index=None,
             # `not_claude` while the text was never requested would let a
             # consumer conclude the fleet holds no Claude panes.
             p_status, p_text = "disabled", None
-        rows.append({
+        row = {
             # 🔴 WHAT KIND OF ENTITY THIS ROW IS. Always `tmux` here — this
             # function folds PANES, so by construction every row it builds has
             # one. It is written explicitly rather than left to a default
@@ -3043,7 +3142,16 @@ def fold_windows(panes, host, slots=None, task_index=None,
             "ledger": led,
             "fuzzyclaw": task,
             "panes": len(members),
-        })
+        }
+        # 🔴 SET ONLY WHEN MEASURED — the key is ABSENT otherwise, never null and
+        # never 0. See the docstring: this is the sole row field with that shape,
+        # and the alternative (`"window_activity": None` on every row) would put a
+        # second nullable age beside `age_secs` measuring a DIFFERENT thing, which
+        # is how two unrelated signals get read as one failing one.
+        act = window_activity.get(wid) if wid else None
+        if act is not None:
+            row["window_activity"] = act
+        rows.append(row)
     return rows
 
 
@@ -3806,6 +3914,10 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     local_live_windows = None
     local_windows_error = None
     raw_panes, slot_ids = {}, {}
+    # `{host: {window_id: epoch_seconds}}`, or None for a host whose
+    # `list-windows` did not answer — the same None-vs-{} discriminant
+    # `slot_ids` carries, for the same reason.
+    win_activity = {}
     captures, capture_status = {}, {}
     ledger_res = {}
     # Parsed once in pass 1 and re-read by the repo probe in pass 2, rather than
@@ -3871,6 +3983,23 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         windows_measured = bool(wins_res["reachable"])
         live = parse_windows(wins_res["stdout"]) if windows_measured else None
         slot_ids[host] = slots_to_window_ids(live) if live is not None else None
+        # 🔴 PER-WINDOW LAST ACTIVITY, off the SAME rows — no extra tmux call and
+        # no fifth ssh round trip (see WINDOW_FORMAT). `None`, not `{}`, when
+        # list-windows did not answer: `{}` would say "every window was looked at
+        # and none had an activity time", which is a measurement nobody took.
+        #
+        # ⚠ THIS CONDITIONAL IS REDUNDANT TODAY AND IS NOT COUNTED AS A TESTED
+        # GUARD. Measured: a mutant that drops the `if windows_measured` and
+        # parses unconditionally SURVIVES the suite, and correctly so — the SAME
+        # flag already gates `slot_ids[host]` two lines up, so on a failed
+        # list-windows every row's `wid` is None and `fold_windows` looks nothing
+        # up regardless. It is kept as depth (the two gates would have to be
+        # removed together to leak an unmeasured activity time onto a row), and
+        # `test_a_PARTIAL_list_windows_read_publishes_no_activity` pins the
+        # OUTCOME rather than this line. Do not read it as a defence that has
+        # been shown to work; the outcome has, this expression has not.
+        win_activity[host] = (parse_window_activity(wins_res["stdout"])
+                              if windows_measured else None)
         # The tmux SERVER identity, from the SAME rows list-windows already
         # returned — see WINDOW_FORMAT for why it rides along instead of costing
         # a fifth ssh call. Unmeasured when list-windows itself did not answer:
@@ -4164,7 +4293,11 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             # Per host, like the ledger — the resolution happened on the machine
             # that owns these directories.
             repo_index=repo_index.get(host),
-            repo_status=repo_host_status.get(host, "unmeasured"))
+            repo_status=repo_host_status.get(host, "unmeasured"),
+            # Per host, from that host's OWN list-windows rows. A host whose
+            # window list did not answer passes None and every row on it simply
+            # carries no activity key.
+            window_activity=win_activity.get(host))
 
     # --- 🔴 --claude-only: drop the shells, and COUNT what was dropped -------
     # The summary then describes the RENDERED set, which is the safe direction:

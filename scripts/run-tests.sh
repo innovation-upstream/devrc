@@ -427,9 +427,11 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 # Sources (grep `shutil.which` under scripts/):
 #   curl    scripts/browser-bridge/tests/{test_server,test_browser_cli_args}.py (41+ tests)
 #   bash    the `browser` CLI + drafter + ship-converge suites
-#   node    scripts/initiatives/tests/{test_viewer,test_streaming}.py  (123 tests)
-#   rg      scripts/repo-cos/tests/test_prescan.py
-#   git     scripts/repo-cos/tests/test_prescan.py, scripts/tests/test_ship_converge.py
+#   node    scripts/tests/test_opencode_session_env_plugin.py,
+#           scripts/tests/test_skill_mjs_parses.py
+#   rg      (no suite needs it since repo-cos retired; kept because gateTools and
+#           REQUIRED_TOOLS are pinned two-way and dropping it is its own change)
+#   git     scripts/tests/test_ship_converge.py
 #   awk     scripts/browser-bridge/tests/test_browser_session_id.py
 #   jq,grep scripts/task-spec-drafter/tests/test_severity_and_gate_skip.py
 #   setsid  scripts/browser-bridge/tests/test_browser_agent.py (process-group kill)
@@ -763,8 +765,6 @@ HERMETIC_TARGETS=(
   # are injected fakes, and conftest.py fails any test that reaches for the real
   # `requests` — so no Postgres, no MinIO, no network.
   scripts/signal/tests
-  scripts/initiatives/tests
-  scripts/repo-cos/tests
   scripts/task-spec-drafter/tests
   # Added 2026-08-22 with the check-clickup-addressed migration out of
   # datapacket-talos, where no gate had ever run it — the suite was invoked by
@@ -1081,7 +1081,10 @@ fi
 #
 # 🔴 WHAT THIS CAN NO LONGER CATCH, stated plainly rather than left to be
 # discovered: deleting up to `min(50, m/20)` tests from a SINGLE target is now
-# silent — up to 50 of scripts/tests' ~1900, 1 of the 13-test i3 suite. The old
+# silent — up to 50 of scripts/tests' 12870 (⚠ this figure read "~1900" and
+# undated until 2026-09-08; it was 6.8x stale, which understates the target and
+# so OVERSTATES the proportion this blind spot covers), 1 of the 13-test i3
+# suite. Re-derive it rather than trusting it — nothing asserts on it. The old
 # exact total went red on a one-test deletion. That precision is what cost
 # eleven reconciliations in a day, and it has never once caught a real deletion;
 # the collapses it exists for — a suite emptied, renamed, dropped from
@@ -1684,16 +1687,15 @@ TARGET_FLOORS=(
   # own count put through the gate's formula and printed BY the gate, not
   # arithmetic on the two sides. Pinned AFTER merging main into the branch, per
   # the ORDER note above.
-  # 2026-09-08, the /tmp-churn preflight harness (#1370 round-1 rework):
-  # 12793 -> 12898 collected. +54 for scripts/tests/test_preflight_tmp_churn_host.py
-  # — a NEW FILE in an existing directory target, so HERMETIC_TARGETS needs no
-  # entry and movement on THIS line is the only evidence the gate runs it at all.
-  # ZERO new skips (this target reports skipped=0), so EXPECTED_SKIPS is untouched.
-  # The number is `_suggested_floor 12898` = 12898 - min(50, max(1, 644)) = 12848,
-  # produced by sourcing the gate's OWN function out of this file and feeding it
-  # the count the gate itself printed — not arithmetic across a conflict. If this
-  # line conflicts, re-run the gate on the MERGED tree and copy what it prints.
-  "scripts/tests|12848"
+  # 2026-09-08, MERGED: main's `cairn-who` split (12870) plus #1370's 54-test
+  # preflight harness. Neither side's number survives the merge — this one was
+  # re-derived by running the gate on the MERGED tree and putting its own
+  # printed count through `_suggested_floor`, per the note both sides carried.
+  # ⚠ Carried forward from main, because an audit round read it as closing more
+  # than it does: the ratchet removes ACCUMULATED drift, not the per-target
+  # slack, and ~50 is what the rule deliberately leaves. A suite inside that
+  # band is not protected from silent deletion by this floor.
+  "scripts/tests|12916"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -1815,9 +1817,21 @@ TARGET_FLOORS=(
   #   "scripts/session-analysis/tests|440"
   # 440 is copied verbatim from that message, which is this run's own count put
   # through the documented rule — never arithmetic done by hand here.
-  "scripts/session-analysis/tests|440"
+  # 2026-09-06: 440 -> 525, and the gate FORCED it. +7 tests in
+  # test_tmux_session_restore.py pinning the boot-race fix (settle-wait +
+  # send verification) took the target to 552, which is ABOVE the drift
+  # ceiling: a floor of 440 would let a whole suite vanish underneath it
+  # with the gate still green. 525 is copied verbatim from the gate's own
+  # message — this run's count through the documented rule, never
+  # arithmetic done by hand here.
+  "scripts/session-analysis/tests|525"
   "scripts/session-analysis/session_insight/tests|55"
-  "scripts/mail-actions/tests|129"
+  # 129 -> 116 on 2026-09-07: the initiative TAGGER was removed with the
+  # initiatives board, taking test_routing_tag.py (7), the routing half of
+  # test_run_routing.py and two fetch_current_initiatives cases in
+  # test_db_schema.py, and adding back two retirement guards. Deliberate
+  # deletion, and 116 is the number the gate itself printed for it.
+  "scripts/mail-actions/tests|116"
   # 2026-08-16, the Signal chat pipeline arrives as a NEW target: 387 collected
   # (10 suites). MEASURED, never computed — the entry was pinned at 1 so the
   # AUTHORITATIVE gate would print its own replacement, and `nix build
@@ -1874,8 +1888,6 @@ TARGET_FLOORS=(
   # idempotence check for `ensure_schema()` — so unlike every entry above this
   # one, EXPECTED_SKIPS is NOT untouched; see its new sibling pin there.
   "scripts/signal/tests|920"
-  "scripts/initiatives/tests|745"
-  "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"
   # 2026-08-22, check-clickup-addressed arrives as a NEW target: 176 collected on
   # the branch, agreeing with what its own tests/run_all.py reports (176 passed,
@@ -3278,10 +3290,6 @@ _nolaunch_ack_reason() {
 # is unset or empty". One predicate — `_skip_entry_applies` — decides both the
 # count and the forgiveness, so the two cannot drift apart.
 EXPECTED_SKIPS=(
-  # Opt-in drift check against the LIVE homelab store — needs a kubeconfig and
-  # network, neither of which a hermetic gate may have. Skips everywhere unless
-  # REPO_COS_LIVE_DRIFT_CHECK=1.
-  "scripts/repo-cos/tests|live-store drift check is opt-in"
   # Needs a REAL Postgres (SIGNAL_PG_DSN). Unlike the skill_audit case below —
   # which was correctly fixed by re-pointing at tracked fixtures so it RUNS —
   # this one cannot be made hermetic: the test exists because SQLite does not

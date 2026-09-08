@@ -665,7 +665,6 @@ _PINNED_CONFTESTS = (
     "scripts/browser-bridge/tests/conftest.py",
     "scripts/claude-hooks/tests/conftest.py",
     "scripts/dl-router/tests/conftest.py",
-    "scripts/repo-cos/tests/conftest.py",
     "scripts/session-analysis/session_insight/tests/conftest.py",
     "scripts/signal/tests/conftest.py",
     "scripts/tests/conftest.py",

@@ -26,8 +26,7 @@ nothing (or `--deep` forces both).
 
 `--tail N` closes the loop: it prints the scrollback of the resolved window, so
 one call answers "where did it leave off" too. It REFUSES on an ambiguous match
-rather than picking one — see `window-triage` §7, "Ambiguity is refused, not
-guessed".
+rather than picking one: ambiguity is refused, not guessed.
 
 🔴 AN UNREACHABLE HOST IS NEVER RENDERED AS "NOT RUNNING". Same rule the opencode
 leg already follows: if the live scan fails, or a host did not answer, that is
@@ -699,9 +698,9 @@ def _tail_outcome(a, live):
     """Resolve `--tail` to ONE window, or REFUSE and say why.
 
     Returns `(row_or_None, exit_code, lines)`. 🔴 It never picks a row when the
-    match is ambiguous — `window-triage` §7, "Ambiguity is refused, not
-    guessed": a scrollback printed from the wrong window is an answer that reads
-    as correct, which is strictly worse than no answer.
+    match is ambiguous — ambiguity is refused, not guessed: a scrollback printed
+    from the wrong window is an answer that reads as correct, which is strictly
+    worse than no answer.
 
     🔴 PARTIAL COVERAGE IS ITS OWN CLAIM AND IS MADE HERE, not inherited. The
     reason the ARCHIVE block got its own PARTIAL line — "the LIVE section's

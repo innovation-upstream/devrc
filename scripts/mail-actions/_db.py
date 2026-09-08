@@ -327,25 +327,6 @@ class MailDB:
             )
             return cur.fetchall()
 
-    def fetch_current_initiatives(self):
-        """Best-effort read of `initiatives.current` (Phase-1 store) → list of
-        {slug, repo, title} for the surface-only mail→initiative router.
-
-        Reuses THIS already-open mailbox connection instead of `route.load_current()`
-        opening a SECOND kubectl port-forward to the same DB. Strictly best-effort:
-        if the `initiatives` schema/view is absent (the sync isn't deployed on this
-        host), returns [] via a `to_regclass` guard — routing is display-only and must
-        never break extraction. Any harder failure propagates to the caller's
-        try/except, which also degrades to no-tag."""
-        with self._c.cursor() as cur:
-            cur.execute("SELECT to_regclass('initiatives.current')")
-            reg = cur.fetchone()
-            if reg is None or reg[0] is None:
-                return []
-        with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT slug, repo, title FROM initiatives.current")
-            return [dict(r) for r in cur.fetchall()]
-
     # -- writes ------------------------------------------------------------
     def mark_processed(self, mail_id: int, label: str) -> None:
         """Append `label` to mail.labels (dedup) and stamp processed_at=now()."""

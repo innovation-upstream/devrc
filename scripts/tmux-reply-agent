@@ -232,7 +232,7 @@ def tmux_bin() -> str:
     return os.environ.get("TMUX_REPLY_TMUX_BIN", "tmux")
 
 
-def run_tmux(args: list[str]) -> tuple[int, str, str]:
+def run_tmux(args: list[str], env: dict[str, str] | None = None) -> tuple[int, str, str]:
     """Run one tmux command with an ARGV LIST and no shell.
 
     🔴 NO SHELL, EVER, AND THIS IS THE SINGLE MOST IMPORTANT LINE IN THE FILE.
@@ -245,7 +245,7 @@ def run_tmux(args: list[str]) -> tuple[int, str, str]:
     """
     try:
         p = subprocess.run([tmux_bin()] + args, capture_output=True, text=True,
-                           timeout=TMUX_TIMEOUT, check=False)
+                           timeout=TMUX_TIMEOUT, check=False, env=env)
     except subprocess.TimeoutExpired:
         return 124, "", f"tmux timed out after {TMUX_TIMEOUT}s"
     except OSError as exc:
@@ -515,6 +515,42 @@ KIND_NEW_SESSION = "new-session"
 NEW_SESSION_ALWAYS_SUBMITS = True
 
 
+def pane_path_env() -> str:
+    """The PATH a LAUNCHED pane should run with, taken from the tmux server.
+
+    🔴 WHY THE PANE CANNOT JUST INHERIT OURS. `new-window` runs the new pane with
+    the environment of the process that asked for it — this agent — and under
+    systemd that is the unit's deliberately minimal `Environment=PATH=` (coreutils
+    + python3 + tmux). Measured on workbench 2026-09-07: a launched window ran
+    `claude` and got `command not found`, its PATH exactly the unit's three
+    entries, while `tmux show-environment -g PATH` on the same server was the
+    operator's complete PATH. tmux was never the source; the caller was.
+
+    🔴 THE SERVER'S GLOBAL ENVIRONMENT IS THE RIGHT SOURCE, AND THAT IS A
+    DELIBERATE CHOICE OVER TWO ALTERNATIVES. Widening the unit's own PATH would
+    grant this agent — which spawns shells as the operator — a larger environment
+    for every purpose, to fix one. Spawning a login shell would run the
+    operator's whole rc chain for a value we can read directly. The server's
+    global PATH is what every window the operator opens by hand already gets, so
+    a launched window becomes indistinguishable from a hand-opened one, which is
+    the actual requirement.
+
+    Returns "" when the server has no PATH to report — tmux prints `-PATH` for an
+    unset variable — in which case the caller passes no `-e` and the pane behaves
+    exactly as it did before this function existed. That is the pre-existing
+    behaviour, not a new failure mode, and it stays diagnosable: the window opens
+    and sits on `command not found` rather than vanishing.
+    """
+    rc, out, _ = run_tmux(["show-environment", "-g", "PATH"])
+    if rc != 0:
+        return ""
+    line = out.splitlines()[0].strip() if out.strip() else ""
+    # `-PATH` is tmux's spelling for "this variable is unset".
+    if not line.startswith("PATH=") or len(line) == len("PATH="):
+        return ""
+    return line[len("PATH="):]
+
+
 def open_window(cwd: str, tmux_session: str = "") -> tuple[str, str]:
     """Open a new tmux window at cwd, in tmux_session when one is named.
 
@@ -562,11 +598,35 @@ def open_window(cwd: str, tmux_session: str = "") -> tuple[str, str]:
     switched windows, and a relative target would type into whatever they moved to.
     """
     argv = ["new-window", "-P", "-F", NEW_WINDOW_FORMAT, "-c", cwd]
+
     if tmux_session:
         # `=` forces an EXACT session match; the trailing colon means "this
         # session, next free index". Both are required — see the docstring.
         argv += ["-t", "=" + tmux_session + ":"]
-    rc, out, err = run_tmux(argv)
+    # 🔴 THE NEW PANE INHERITS THE ENVIRONMENT OF THE PROCESS THAT ASKS FOR IT,
+    # WHICH IS THIS AGENT — and under systemd that is the unit's deliberately
+    # minimal `Environment=PATH=` (coreutils + python3 + tmux). Measured on
+    # workbench 2026-09-07: a launched window ran `claude` and got `command not
+    # found`, its PATH exactly those three entries, while the same server's
+    # `show-environment -g PATH` was the operator's complete PATH. tmux was never
+    # the source; this caller was. See pane_path_env for why the server's global
+    # PATH is the right value and why `new-window -e` is NOT the mechanism (it
+    # does not reach the pane's environment on tmux 3.7c — measured).
+    # 🔴 THE SERVER'S PATH FIRST, THIS UNIT'S APPENDED — and the order is the
+    # whole design, not a style choice. Server-first is what makes a launched
+    # window resolve `claude` the way a hand-opened one does. Appending our own
+    # is what keeps `tmux` itself executable: this very process re-execs tmux
+    # with this environment, so replacing PATH outright breaks the agent the
+    # moment the operator's PATH happens not to carry tmux. Caught by
+    # test_a_launched_pane_gets_a_PATH_THAT_CAN_FIND_claude, which uses a server
+    # PATH that deliberately does not contain tmux.
+    launch_env = None
+    pane_path = pane_path_env()
+    if pane_path:
+        own = os.environ.get("PATH", "")
+        launch_env = dict(os.environ,
+                          PATH=(pane_path + os.pathsep + own) if own else pane_path)
+    rc, out, err = run_tmux(argv, env=launch_env)
     if rc != 0:
         return "", (err or f"tmux exited {rc}")
 

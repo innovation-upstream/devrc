@@ -129,27 +129,6 @@ def test_insert_action_defaults_thread_key_and_related_null_when_absent():
     assert params["related_initiative"] is None
 
 
-def test_fetch_current_initiatives_absent_view_returns_empty():
-    db, conn = _db_with_conn()
-    # to_regclass('initiatives.current') → NULL when the Phase-1 sync isn't deployed.
-    conn.next_result = [(None,)]
-    assert db.fetch_current_initiatives() == []
-    sql, _ = conn.executed[-1]
-    assert "to_regclass('initiatives.current')" in sql
-
-
-def test_fetch_current_initiatives_reads_view_when_present():
-    db, conn = _db_with_conn()
-    # Execute #1 (to_regclass) → a non-NULL regclass tuple; execute #2 (SELECT) → rows.
-    row = {"slug": "clawgate-chat-polish", "repo": "/r/devrc",
-           "title": "Clawgate chat polish"}
-    conn.result_queue = [[("initiatives.current",)], [row]]
-    rows = db.fetch_current_initiatives()
-    assert rows == [row]
-    sql, _ = conn.executed[-1]
-    assert "SELECT slug, repo, title FROM initiatives.current" in sql
-
-
 def test_supersede_open_actions_sql_has_timestamp_guard():
     db, conn = _db_with_conn()
     conn.next_rowcount = 1

@@ -358,7 +358,7 @@ let
   #
   # 🔴 IT HAS NO CLICK ANY MORE, deliberately. This block used to double as the
   # launcher for the `agent-ops` mission-control TUI, which is RETIRED (its
-  # panels all had homes elsewhere — session-manager, standup, /initiative-scan
+  # panels all had homes elsewhere — session-manager, /initiative-scan
   # and the bar's own pills — and its one irreplaceable part, the /proc-walking
   # Claude detector, was extracted to scripts/lib/claude_sessions.py). A click
   # exec'ing a path home-manager no longer deploys fails silently, so the click
@@ -668,7 +668,7 @@ lib.mkIf isNixOS {
   # to refresh the matching block. Fully fail-safe: a down source writes a 'stale'
   # marker (the block renders empty) and never wedges. Laptop is excluded: it is
   # nebula-only with no direct LAN path to these homelab endpoints, exactly like
-  # mail-actions-archive / repo-cos in home.nix.
+  # mail-actions-archive in home.nix.
   #
   # A user service runs with a minimal env, so PATH must be explicit: the pinned
   # python (psycopg2) + kubectl (the mail + Alertmanager port-forwards) + procps

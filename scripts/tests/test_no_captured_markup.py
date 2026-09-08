@@ -130,13 +130,6 @@ _FORUM_BLOCK = (
     "assert on). No single run in this file clears the threshold; this is the "
     "block rule doing exactly what it was added for, on a region that on a REAL "
     "capture holds the thread title and its category names.")
-_SLUGS_FIXTURE = (
-    "🔴 PINNED, NOT BLESSED. A hand-refreshed snapshot of the live initiatives "
-    "board, consumed as the routing vocabulary test_routing.py measures against "
-    "— so it is FUNCTIONAL, not a leftover capture. Whether to hash or truncate "
-    "the slugs is the operator's call; this pin exists so the gate SEES it "
-    "instead of scanning clean over it.")
-
 # --- THE PINNED (PATH, SIGNAL) -> (COUNT, WHY) ALLOWLIST ------------------------
 # 🔴 Keyed on (PATH, SIGNAL) and pinned to a COUNT, exactly like the JSON
 # sibling and for the same reason: the VALUE cannot appear here, because the
@@ -175,8 +168,13 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("scripts/dl-router/tests/fixtures/forum-thread-page.html",
      "@itemprop:author"): (4, _FORUM_FIXTURE),
 
-    ("scripts/repo-cos/tests/fixtures/initiatives_current_slugs.txt",
-     C.SIGNAL_TXT_VOCABULARY): (144, _SLUGS_FIXTURE),
+    # (`scripts/repo-cos/tests/fixtures/initiatives_current_slugs.txt` was pinned
+    # here at 144 vocabulary hits — a hand-refreshed snapshot of the live
+    # initiatives board used as repo-cos's routing vocabulary. Both the fixture
+    # and the suite reading it were deleted with those subsystems on 2026-09-07,
+    # so the pin went with them: an entry matching no hit is a FAIL by design,
+    # precisely so a stale pin cannot sit here pre-approving whatever lands at
+    # that path next.)
 }
 
 #: A 70-character sentence — clears `MIN_FREE_TEXT_CHARS` with room to spare, so
