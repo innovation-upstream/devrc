@@ -101,6 +101,36 @@ def _load_tmux_text_policy(path: str = None):
 
 TEXT_POLICY = _load_tmux_text_policy()
 
+
+def _load_transcript_stream(path: str = None):
+    """Load `scripts/lib/transcript_stream.py` by EXPLICIT PATH.
+
+    🔴 IT RETURNS None RATHER THAN RAISING, WHICH IS THE OPPOSITE OF THE POLICY
+    LOADER ABOVE, AND THE ASYMMETRY IS THE POINT. The text policy is a SAFETY
+    rule on the path that executes commands; a missing copy must stop the agent,
+    because the alternative is running with a weaker check. Transcript streaming
+    is a READ-MODEL nicety: it types nothing, runs nothing, and its absence costs
+    freshness that the five-minute bulk push restores anyway. Letting it stop the
+    write agent would trade a real capability for a cosmetic one.
+    """
+    path = path or os.path.join(_HERE, "lib", "transcript_stream.py")
+    try:
+        loader = importlib.machinery.SourceFileLoader("_tra_transcript_stream", path)
+        spec = importlib.util.spec_from_loader("_tra_transcript_stream", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+    except Exception:  # noqa: BLE001 — see the docstring: never fatal
+        return None
+
+
+TRANSCRIPT_STREAM = _load_transcript_stream()
+
+# Where the transcripts live. Overridable so the tests never touch the real one,
+# and spelled the same way transcript-push.sh spells it so the two feeders agree
+# about which files exist.
+PROJECTS_DIR = os.environ.get("CLAUDE_PROJECTS_DIR") or os.path.expanduser("~/.claude/projects")
+
 API_DEFAULT = "http://192.168.50.250:30302"
 CONF_FILE = os.environ.get("CLAWGATE_CONF_FILE") or os.path.expanduser("~/.claude/clawgate.env")
 ACTIVITY_ENV = os.path.expanduser("~/.config/activity-collector/env")
@@ -344,6 +374,32 @@ def post_json(url: str, token: str, payload: dict) -> dict:
             raise Refused("the server has no terminal write route (HTTP 404) — it "
                           "predates the write surface, or has no database wired") from exc
         raise Refused(f"the server answered HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise Refused(f"could not reach the server: {exc.reason}") from exc
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise Refused(f"the server's answer was not JSON: {exc}") from exc
+
+
+def get_json(url: str, token: str) -> dict:
+    """A bounded, bearer-authenticated GET.
+
+    🔴 IT IS A SEPARATE FUNCTION RATHER THAN A `method=` ARGUMENT TO post_json,
+    because post_json's HTTPError branches are written about the TERMINAL write
+    surface — its 503 text asserts that the pod's terminal secret was removed.
+    Reusing it for a read on the HOOK tier would make an ordinary hook-token
+    problem report a disarmed write surface, which is the one message in this file
+    that must never fire wrongly.
+    """
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Accept", "application/json")
+    req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            raw = resp.read(MAX_RESPONSE_BYTES)
+    except urllib.error.HTTPError as exc:
+        raise Refused(f"the server answered HTTP {exc.code} to a read") from exc
     except urllib.error.URLError as exc:
         raise Refused(f"could not reach the server: {exc.reason}") from exc
     try:
@@ -890,6 +946,36 @@ def one_round(api: str, token: str, host: str, agent: str) -> int:
     return len(writes)
 
 
+def transcript_round(api: str, hook_token: str, host: str, state) -> dict:
+    """One transcript-streaming round, over the connection this agent already has.
+
+    🔴 IT RIDES THIS POLL AND OPENS NOTHING NEW. No inbound port on either host,
+    no second long-lived connection, no second unit — one more request per
+    existing ~5s cycle, which is why the session view goes from five-minutes-fresh
+    to seconds-fresh for the cost of a route rather than a transport.
+
+    🔴 IT IS ON THE HOOK TIER, NOT THE TERMINAL ONE, AND THAT SEPARATION IS
+    DELIBERATE. The transcript ingest executes nothing; the write surface executes
+    arbitrary commands as the operator. Fusing them into one request would put a
+    read-model feed behind the credential whose whole purpose is to gate command
+    execution, so disarming the write surface — a security act — would silently
+    take the operator's session view with it.
+
+    ⚠ THE ONE COUPLING THAT REMAINS, STATED RATHER THAN HIDDEN: this runs inside
+    the reply agent's loop, and the reply agent exits 2 without
+    CLAWGATE_TERMINAL_TOKEN. So on a host where the write surface is disarmed,
+    streaming does not run either — the five-minute bulk push is the whole feed
+    there, exactly as it was before this change.
+    """
+    return TRANSCRIPT_STREAM.run_round(
+        lambda path, payload: post_json(api + path, hook_token, payload),
+        lambda path: get_json(api + path, hook_token),
+        host,
+        state,
+        PROJECTS_DIR,
+    )
+
+
 def main(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -921,8 +1007,57 @@ def main(argv: list[str]) -> int:
     agent = f"{host}:{os.getpid()}"
     log(f"polling {api} every {POLL_SECONDS:g}s for writes addressed to `{host}` as `{agent}`")
 
+    # ── transcript streaming, on this same poll ──────────────────────────────
+    # 🔴 A SEPARATE CREDENTIAL, AND ITS ABSENCE IS NOT FATAL. The transcript
+    # routes are on the HOOK tier; a host with a terminal token but no hook token
+    # can still deliver writes, and the five-minute bulk push keeps feeding the
+    # read model. Exiting here would take the write surface down over a read
+    # model's missing key.
+    hook_token = resolve("CLAWGATE_HOOK_TOKEN", CONF_FILE)
+    stream_state = None
+    if TRANSCRIPT_STREAM is None:
+        log("transcript streaming is OFF: scripts/lib/transcript_stream.py could not be "
+            "loaded — the 5-minute bulk push is the whole transcript feed on this host")
+    elif not hook_token:
+        log(f"transcript streaming is OFF: no CLAWGATE_HOOK_TOKEN in the environment or "
+            f"{CONF_FILE} — the 5-minute bulk push is the whole transcript feed on this host")
+    else:
+        stream_state = TRANSCRIPT_STREAM.StreamState()
+        log("transcript streaming is ON, riding this poll")
+
+    # 🔴 LOG A REPEATING STREAM CONDITION ONCE, NOT EVERY POLL, for the same
+    # reason the write loop does: 17,280 polls a day would bury every real event.
+    stream_problem = ""
+
     backoff_reason = ""
     while not _STOP:
+        # 🔴 THE STREAM RUNS FIRST AND ITS FAILURES NEVER REACH THE WRITE PATH.
+        # Everything it can raise is caught HERE rather than by the loop's own
+        # handler, because that handler puts the agent into a 60-second backoff —
+        # so a transcript hiccup would delay somebody's typed reply by a minute.
+        # The write surface is the capability with a person waiting on it.
+        if stream_state is not None:
+            try:
+                counts = transcript_round(api, hook_token, host, stream_state)
+                if stream_problem:
+                    log("transcript streaming is working again")
+                    stream_problem = ""
+                if counts.get("refused"):
+                    # A refusal is NORMAL — it is how a host that fell out of step
+                    # learns where the server got to — so it is not an error, but a
+                    # SUSTAINED refusal is worth seeing.
+                    stream_problem = ""
+            except Exception as exc:  # noqa: BLE001 — must never affect the write path
+                reason = f"{exc!r}"
+                if reason != stream_problem:
+                    log(f"transcript streaming failed this poll (the 5-minute bulk push still "
+                        f"covers it): {reason}")
+                    stream_problem = reason
+                # 🔴 RE-HYDRATE ON THE NEXT POLL. The most likely cause is that
+                # clawgate was redeployed, which is exactly when this host's
+                # cursors may no longer describe what the server holds.
+                stream_state.hydrated = False
+
         try:
             one_round(api, token, host, agent)
             if backoff_reason:

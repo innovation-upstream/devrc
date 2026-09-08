@@ -482,6 +482,117 @@ def test_the_newest_sessions_win_when_the_cap_bites(server, projects, tmp_path):
     assert ids == ["sess-4", "sess-5"], f"the cap kept the wrong sessions: {ids}"
 
 
+def test_every_pushed_session_carries_fileBytes_equal_to_its_file_size(server, projects, tmp_path):
+    """🔴 THE SEAM WITH THE DELTA STREAM, AND ITS ABSENCE IS SILENT. `fileBytes`
+    is where this tail ENDS in the file, which the server stores as the delta
+    stream's resume cursor. Without it a bulk push REPLACES the tail while leaving
+    the cursor describing the tail it replaced, and the next delta appends onto a
+    base that no longer matches its offset — a splice, stored, with nothing to
+    indicate it. Nothing about the tail itself looks wrong when this is missing.
+    """
+    f = projects("sess-a", transcript("sess-a", human_turn("do the thing")))
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sent = json.loads(pushes(server)[0]["body"])["sessions"]
+    assert len(sent) == 1
+    assert sent[0]["fileBytes"] == f.stat().st_size, (
+        "fileBytes does not equal the transcript's size, so the cursor the server stores "
+        "will not match where the stream reads from"
+    )
+    # 🔴 AND IT MUST BE >= THE TAIL IT ACCOMPANIES, which is what the server
+    # enforces: a cursor pointing BEFORE the start of the stored tail is a splice
+    # waiting to happen, and the server rejects the whole atomic push over it.
+    assert sent[0]["fileBytes"] >= len(sent[0]["tail"].encode("utf-8"))
+
+
+def test_a_truncated_tail_reports_the_WHOLE_file_size_not_the_tail_length(server, projects, tmp_path):
+    """The cursor is a FILE position. Reporting the tail's length instead would
+    put it 250 KiB behind on every long session — and the stream would then be
+    refused for ever while looking correctly configured."""
+    big = transcript("sess-big", *[human_turn(f"turn {i} " + "x" * 400, "sess-big") for i in range(900)])
+    f = projects("sess-big", big)
+    assert f.stat().st_size > 196608, "the fixture is not big enough to be truncated"
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sent = json.loads(pushes(server)[0]["body"])["sessions"][0]
+    assert sent["truncated"] is True
+    assert sent["fileBytes"] == f.stat().st_size
+    assert sent["fileBytes"] > len(sent["tail"].encode("utf-8")), (
+        "a TRUNCATED tail reported a fileBytes equal to its own length — the cursor would "
+        "point at the start of the stored tail rather than its end"
+    )
+
+
+def test_coverage_is_not_capped_at_eight_sessions(server, projects, tmp_path):
+    """🔴 RED ON PRE-CHANGE CODE. The default was MAX_PER_PUSH=6 against a server
+    cap of 8, so a host with 21 changed sessions carried SIX of them per
+    five-minute tick — which is why most session cards had no conversation to
+    show at all (~93 live windows, measured 2026-09-07).
+
+    21 is deliberately NOT a multiple of 8 or 6: a fixture of 8, 16 or 12 could be
+    passed by a mutant restoring the old cap by landing exactly on a boundary.
+    """
+    n = 21
+    assert n % 8 != 0 and n % 6 != 0
+    for i in range(n):
+        projects(f"sess-{i:02d}", transcript(f"sess-{i:02d}", human_turn(f"turn {i}", f"sess-{i:02d}")))
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sent = json.loads(pushes(server)[0]["body"])["sessions"]
+    assert len(sent) == n, f"one push carried {len(sent)} of {n} changed sessions"
+    assert len({s["sessionId"] for s in sent}) == n
+
+
+def test_the_aggregate_byte_bound_stops_the_push_before_the_session_count_does(
+    server, projects, tmp_path
+):
+    """🔴 THIS IS THE BOUND THE SESSION COUNT USED TO STAND IN FOR. Raising the
+    count from 6 to 48 is only safe because the TOTAL is bounded directly; without
+    it, 48 sessions of 192 KiB would be a 9 MiB body the server refuses on every
+    tick.
+
+    The fixture keeps every session well under the per-session tail cap, so this
+    can only fail on the aggregate — a fixture that also breached the tail bound
+    would die to the other guard and this check would be unreachable.
+    """
+    body = transcript("x", *[human_turn("y" * 400, "x") for _ in range(40)])
+    per = len(body.encode())
+    assert per < 196608, "the fixture breaches the per-session tail cap and would test that instead"
+    n = 12
+    for i in range(n):
+        projects(f"sess-{i:02d}", body)
+
+    budget = per * 4  # room for ~4 sessions
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={
+            "CLAWGATE_API_URL": base_url(server),
+            "CLAWGATE_HOOK_TOKEN": "t",
+            "TRANSCRIPT_PUSH_MAX_BYTES": str(budget),
+        },
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sent = json.loads(pushes(server)[0]["body"])["sessions"]
+    assert 0 < len(sent) < n, f"the aggregate bound did not bite: {len(sent)} of {n} sessions"
+    total = sum(len(s["tail"].encode()) for s in sent)
+    assert total <= budget + per, f"the push carried {total} bytes against a {budget}-byte budget"
+
+
 def test_the_client_bounds_sit_UNDER_the_servers_not_at_them(server, projects, tmp_path):
     """🔴 A CLIENT TUNED EXACTLY TO THE SERVER'S CAP TURNS ANY ROUNDING
     DISAGREEMENT INTO A FEEDER THAT FAILS EVERY TICK while looking correctly
@@ -490,17 +601,32 @@ def test_the_client_bounds_sit_UNDER_the_servers_not_at_them(server, projects, t
     changes one.
     """
     server_max_tail_bytes = 256 * 1024  # transcript.MaxTailBytes
-    server_max_sessions = 8  # transcript.MaxSessionsPerPush
+    # 🔴 RAISED FROM 8 TO 128 WITH THE SERVER, AND THE PAIR MOVED FOR A REASON,
+    # NOT TO MAKE A TEST PASS. 8 was a COVERAGE cap wearing a safety cap's
+    # clothes: measured 2026-09-07 against ~93 live windows, at most 8 sessions
+    # could carry a transcript per push, so most session cards had no conversation
+    # to show at all. The ceiling the count was standing in for is the AGGREGATE
+    # tail bytes, which the server now bounds directly (transcript.MaxPushTailBytes)
+    # — so the count is free to rise and the third assertion below is the one now
+    # doing the work the second used to pretend to do.
+    server_max_sessions = 128  # transcript.MaxSessionsPerPush
+    server_max_push_bytes = 4 * 1024 * 1024  # transcript.MaxPushTailBytes
 
     text = SCRIPT.read_text()
     tail_default = _shell_default(text, "TAIL_BYTES", "TRANSCRIPT_PUSH_TAIL_BYTES")
     sess_default = _shell_default(text, "MAX_PER_PUSH", "TRANSCRIPT_PUSH_MAX_SESSIONS")
+    bytes_default = _shell_default(text, "MAX_PUSH_BYTES", "TRANSCRIPT_PUSH_MAX_BYTES")
 
     assert tail_default < server_max_tail_bytes, (
         f"the default tail ({tail_default}) is not UNDER the server's cap ({server_max_tail_bytes})"
     )
     assert sess_default < server_max_sessions, (
         f"the default session count ({sess_default}) is not UNDER the server's cap ({server_max_sessions})"
+    )
+    assert bytes_default < server_max_push_bytes, (
+        f"the default aggregate ({bytes_default}) is not UNDER the server's cap "
+        f"({server_max_push_bytes}) — this is the bound that actually holds now that the "
+        f"session count is {sess_default}"
     )
 
 

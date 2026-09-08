@@ -75,13 +75,24 @@ PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 # minting a second.
 HOST_NAME="${TRANSCRIPT_PUSH_HOST:-${ACTIVITY_HOST:-$(uname -n)}}"
 
-# 🔴 THESE THREE BOUNDS MUST STAY UNDER THE SERVER'S OWN, NOT AT THEM. The
-# server enforces MaxTailBytes=262144 and MaxSessionsPerPush=8 and REJECTS a push
-# that exceeds either — a rejection changes nothing server-side, so a client tuned
-# exactly to the limit turns any rounding disagreement into a feeder that fails
-# every single tick while looking correctly configured.
+# 🔴 THESE BOUNDS MUST STAY UNDER THE SERVER'S OWN, NOT AT THEM. The server
+# enforces MaxTailBytes=262144, MaxSessionsPerPush=128 and MaxPushTailBytes=4 MiB
+# and REJECTS a push that exceeds any of them — a rejection changes nothing
+# server-side, so a client tuned exactly to a limit turns any rounding
+# disagreement into a feeder that fails every single tick while looking correctly
+# configured.
+#
+# 🔴 MAX_PER_PUSH WAS 6 AGAINST A SERVER CAP OF 8, AND THAT PAIR WAS A COVERAGE
+# CAP, NOT A SAFETY BOUND. Measured 2026-09-07 against ~93 live windows: at most
+# six sessions could carry a transcript per tick, so most session cards had no
+# conversation to show at all. The server now bounds the AGGREGATE tail bytes
+# directly — which is the ceiling the count was only ever approximating — so the
+# count is free to rise to what coverage needs. 48 sessions x 192 KiB is 9 MiB in
+# the worst case, so MAX_PUSH_BYTES below is what actually holds, and the builder
+# stops adding sessions when it is reached.
 TAIL_BYTES="${TRANSCRIPT_PUSH_TAIL_BYTES:-196608}"     # 192 KiB; server cap 256 KiB
-MAX_PER_PUSH="${TRANSCRIPT_PUSH_MAX_SESSIONS:-6}"      # server cap 8
+MAX_PER_PUSH="${TRANSCRIPT_PUSH_MAX_SESSIONS:-48}"     # server cap 128
+MAX_PUSH_BYTES="${TRANSCRIPT_PUSH_MAX_BYTES:-3145728}" # 3 MiB; server cap 4 MiB
 # How far back to consider a transcript at all. 24h keeps a session readable the
 # morning after; older ones are past the server's retention anyway.
 MAX_AGE_HOURS="${TRANSCRIPT_PUSH_MAX_AGE_HOURS:-24}"
@@ -209,6 +220,7 @@ timeout "$BUILD_TIMEOUT" python3 "$BUILDER" \
   --host "$HOST_NAME" \
   --tail-bytes "$TAIL_BYTES" \
   --max-sessions "$MAX_PER_PUSH" \
+  --max-push-bytes "$MAX_PUSH_BYTES" \
   --max-age-hours "$MAX_AGE_HOURS" \
   --max-candidates "$MAX_CANDIDATES" \
   >"$PAYLOAD" 2>"$WORK/build.err"

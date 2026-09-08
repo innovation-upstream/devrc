@@ -64,8 +64,28 @@ def hash_tail(tail: bytes) -> str:
     return hashlib.sha256(tail).hexdigest()
 
 
-def read_tail(path: Path, max_bytes: int) -> tuple[str, bool] | None:
-    """Return (tail_text, truncated) for one transcript, or None if unreadable.
+def read_tail(path: Path, max_bytes: int) -> tuple[str, bool, int] | None:
+    """Return (tail_text, truncated, file_bytes) for one transcript, or None.
+
+    🔴 `file_bytes` IS WHERE THIS TAIL ENDS IN THE FILE, AND IT IS THE DELTA
+    STREAM'S RESUME CURSOR. The server stores it as the position its stored tail
+    corresponds to. Without it a bulk push REPLACES the tail while leaving the
+    cursor describing the tail it replaced, and the next delta appends onto a base
+    that no longer matches its offset — a splice, stored, with nothing to indicate
+    it. See migration 0034 on the clawgate side.
+
+    🔴 IT IS DERIVED FROM WHAT WAS ACTUALLY READ, NOT FROM `size`, BECAUSE THE
+    FILE IS BEING APPENDED TO. `size` is a stat taken before the read; the bytes
+    that came back can end past it. `start + len(raw)` is exact either way.
+
+    🔴 AND IT IS RETURNED AS 0 — MEANING *UNKNOWN* — WHENEVER THE DECODED TAIL
+    RE-ENCODES LONGER THAN THE BYTES IT CAME FROM. `errors="replace"` turns one
+    bad byte into a three-byte U+FFFD, so a corrupt transcript can produce a tail
+    LARGER than its own file. The server rejects a fileBytes smaller than the tail
+    beside it (a cursor pointing before the start of the stored tail is a splice
+    waiting to happen), so claiming the honest number there would fail the WHOLE
+    atomic push and take every other session in the request with it. Unknown makes
+    the stream reseed that one session and costs nothing else.
 
     🔴 THE LEADING PARTIAL RECORD IS DROPPED, NOT SHIPPED. Seeking to
     `size - max_bytes` lands in the middle of a JSON line essentially every time.
@@ -89,15 +109,19 @@ def read_tail(path: Path, max_bytes: int) -> tuple[str, bool] | None:
     """
     try:
         size = path.stat().st_size
+        start = 0
         with path.open("rb") as fh:
             if size > max_bytes:
-                fh.seek(size - max_bytes)
+                start = size - max_bytes
+                fh.seek(start)
                 truncated = True
             else:
                 truncated = False
             raw = fh.read(max_bytes)
     except OSError:
         return None
+
+    file_end = start + len(raw)
 
     if truncated:
         nl = raw.find(b"\n")
@@ -108,7 +132,10 @@ def read_tail(path: Path, max_bytes: int) -> tuple[str, bool] | None:
             return None
         raw = raw[nl + 1 :]
 
-    return raw.decode("utf-8", errors="replace"), truncated
+    text = raw.decode("utf-8", errors="replace")
+    if len(text.encode("utf-8")) > file_end:
+        file_end = 0  # UNKNOWN — see the docstring.
+    return text, truncated, file_end
 
 
 def project_of(transcript: Path) -> str:
@@ -192,8 +219,18 @@ def build(args: argparse.Namespace) -> dict:
     known = load_digest(Path(args.digest))
 
     sessions = []
+    # 🔴 THE AGGREGATE, WHICH THE SESSION COUNT DOES NOT IMPLY. The server bounds
+    # the total tail bytes in one push (MaxPushTailBytes) as well as the count, and
+    # a rejection changes nothing server-side — so a builder that only counted
+    # sessions would, once the count rose from 6 to 48, start producing pushes that
+    # are refused on EVERY tick while looking correctly configured. Stopping here
+    # means a very busy host catches up over several ticks instead.
+    max_push_bytes = getattr(args, "max_push_bytes", 0) or 0
+    total_bytes = 0
     for path in candidates(projects_dir, args.max_age_hours, args.max_candidates):
         if len(sessions) >= args.max_sessions:
+            break
+        if max_push_bytes and total_bytes >= max_push_bytes:
             break
         # The session id IS the filename stem — that is how Claude Code writes
         # them, and it is the same id the attention queue and session-manager's
@@ -205,11 +242,19 @@ def build(args: argparse.Namespace) -> dict:
         result = read_tail(path, args.tail_bytes)
         if result is None:
             continue
-        text, truncated = result
+        text, truncated, file_bytes = result
         if not text.strip():
             continue
 
-        digest = hash_tail(text.encode("utf-8"))
+        encoded = text.encode("utf-8")
+        # 🔴 CHECKED BEFORE THE SKIP, NOT AFTER, so a single oversized session
+        # cannot be admitted by arriving first. A session that alone exceeds the
+        # remaining budget is deferred to the next tick rather than dropped for
+        # ever — the loop is re-run every five minutes and the candidate list is
+        # ordered by recency, so it is first next time.
+        if max_push_bytes and sessions and total_bytes + len(encoded) > max_push_bytes:
+            break
+        digest = hash_tail(encoded)
         # 🔴 THE SKIP. This single comparison is the whole reason the steady-state
         # push is kilobytes rather than megabytes.
         if known.get(session_id) == digest:
@@ -231,8 +276,15 @@ def build(args: argparse.Namespace) -> dict:
                 "tail": text,
                 "truncated": truncated,
                 "contentHash": digest,
+                # 🔴 THE SEAM WITH THE DELTA STREAM. See read_tail. The server
+                # rejects a fileBytes SMALLER than the tail it accompanies, which
+                # is why this is `size` and not, say, len(text) — the tail is a
+                # decoded string and `errors="replace"` can make it a different
+                # length from the bytes it came from.
+                "fileBytes": file_bytes,
             }
         )
+        total_bytes += len(encoded)
 
     return {"host": args.host, "sessions": sessions}
 
@@ -244,6 +296,9 @@ def main() -> int:
     ap.add_argument("--host", required=True)
     ap.add_argument("--tail-bytes", type=int, required=True)
     ap.add_argument("--max-sessions", type=int, required=True)
+    # Optional so an older caller keeps working: 0 means "no aggregate bound",
+    # which is exactly the behaviour before this flag existed.
+    ap.add_argument("--max-push-bytes", type=int, default=0)
     ap.add_argument("--max-age-hours", type=float, required=True)
     ap.add_argument("--max-candidates", type=int, required=True)
     args = ap.parse_args()
