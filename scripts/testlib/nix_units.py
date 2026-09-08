@@ -160,6 +160,69 @@ def directive(name: str, block: str) -> str | None:
     return None
 
 
+def section(name: str, block: str) -> str | None:
+    """The body of a nested `name = { … };` attribute set inside `block`, or None.
+
+    🔴 `directive()` CANNOT ANSWER ABOUT A NESTED SECTION, AND IT FAILS LOUDLY
+    RATHER THAN WRONGLY — which is how this function came to exist. A systemd
+    unit in `nix/home.nix` is a set of SECTIONS (`Unit`, `Service`, `Path`,
+    `Timer`, `Install`), and a directive name may legitimately appear in more
+    than one of them. The measured case: a path unit declares BOTH
+
+        Unit = { Description = "…"; };      # the [Unit] section
+        Path = { PathChanged = "…"; Unit = "tmux-session-restore.service"; };
+
+    so `directive("Unit", unit_source(…))` matches the SECTION on the first
+    line, reads `{ Description = "…"` as the start of a multi-line value, and
+    raises `NotImplementedError`. Loud, but useless to the caller — the answer
+    it wants is inside `Path`.
+
+    So callers narrow to the section first: `directive("Unit", section("Path",
+    blk))`. The refusal above is what makes that safe to write; a reader that
+    had silently returned the first `Unit =` it found would have answered
+    "Description = …" and the guard would have compared it against a service
+    name and failed for a reason no one could read.
+
+    BRACE MATCHING, NOT A REGEX. A section body contains nested `{ … }` (a
+    `lib.mkIf` wrapper, an attrset value), so the closing brace is the first
+    one at depth zero, not the first one at all. Braces inside double-quoted
+    strings are skipped — `Environment = [ "PATH=${…}" ]` puts them there
+    routinely — using the same escape-aware scan `strip_nix_comments` uses.
+
+    Raises NotImplementedError if the section is opened and never closed, for
+    the reason `directive()` gives: a truncation a caller would act on is worse
+    than a refusal. Returns None when the section is simply not present, which
+    is an ordinary answer (a unit with no `[Install]`).
+    """
+    m = re.search(rf"(?m)^\s*{re.escape(name)}\s*=\s*\{{", block)
+    if not m:
+        return None
+    i = m.end()          # first char after the opening brace
+    depth = 1
+    in_str = False
+    start = i
+    while i < len(block):
+        c = block[i]
+        if c == "\\" and in_str:
+            i += 2
+            continue
+        if c == '"':
+            in_str = not in_str
+        elif not in_str:
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return block[start:i]
+        i += 1
+    raise NotImplementedError(
+        f"section `{name}` is opened but never closed in this block, so its "
+        "body cannot be read. Returning a truncation here would be worse than "
+        "refusing — see this function's docstring."
+    )
+
+
 def declares(attr_path: str, src: str) -> bool:
     """Is `attr_path` a LIVE top-level declaration in `src` (comments stripped)?
 

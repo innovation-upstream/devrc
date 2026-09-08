@@ -677,9 +677,17 @@ unit_ran_line() {
   rc_main=$(get "$1" unit_ExecMainStatus)
   if [ -z "$started" ]; then
     echo "🔴 the boot unit has NOT RUN this boot (InactiveExitTimestamp empty)."
-    echo "  Its timer is OnActiveSec=45s — if you ran this immediately after login,"
-    echo "  wait and re-run. 'Result=success' says nothing here: it reads the same"
-    echo "  for a unit that never started."
+    # 🔴 NOT A DURATION ANY MORE, so "wait and re-run" is the wrong advice: the
+    # unit is started by tmux-session-restore.path when the tmux server's
+    # socket is created, and if no server has started this boot there is
+    # nothing to wait for. Naming the trigger tells the operator what to CHECK
+    # (systemctl --user status tmux-session-restore.path) instead of what to
+    # wait for.
+    echo "  It is triggered by tmux-session-restore.path when the tmux server's socket"
+    echo "  appears — NOT on a fixed delay. If no tmux server has started this boot it"
+    echo "  has not fired, and waiting will not change that; check the path unit with"
+    echo "  'systemctl --user status tmux-session-restore.path'. 'Result=success' says"
+    echo "  nothing here: it reads the same for a unit that never started."
   elif [ -n "$rc_main" ] && [ "$rc_main" != 0 ]; then
     # 🔴 `Result` is systemd's verdict on the UNIT; `ExecMainStatus` is the
     # PROCESS's exit code, and for a Type=oneshot they disagree routinely.

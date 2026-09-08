@@ -346,15 +346,94 @@ def test_an_empty_id_section_is_inconclusive_never_a_comparison(tmp_path):
 
 def test_a_unit_that_never_ran_says_so_instead_of_reading_as_success(tmp_path):
     """🔴 `Result=success ExecMainStatus=0` is byte-identical for a unit that
-    never started — measured on a never-run user unit. The timer is
-    OnActiveSec=45s, so an operator running `post` immediately after login hits
-    exactly this and would otherwise read 'the unit succeeded'."""
+    never started — measured on a never-run user unit. An operator running
+    `post` on a boot where no tmux server ever came up hits exactly this and
+    would otherwise read 'the unit succeeded'."""
     r = _verdict(_pre(tmp_path), _post(tmp_path, unit_started=""), tmp_path)
     assert "NOT RUN" in r.stdout
-    assert "OnActiveSec=45s" in r.stdout
     assert "reads the same" in r.stdout
     # It is a caveat on the reading, not a verdict of its own.
     assert r.returncode == RC_CLEAN, r.stdout + r.stderr
+
+
+# 🔴 THE WHOLE NOT-RUN ADVICE, PINNED AS ONE NORMALISED STRING.
+#
+# A guard on WORDS is walkable by REWORDING, and that is not hypothetical here:
+# the first version of this test asserted `"tmux-session-restore.path" in
+# stdout`, and a mutation sweep measured it SURVIVING a mutant that changed the
+# advice to say the restore is triggered by `tmux-session-restore.timer` — the
+# name still appeared in the *second* sentence ("check 'systemctl --user status
+# tmux-session-restore.path'"), so the guard stayed green over advice that had
+# been made incoherent.
+#
+# The artifact under test is PROSE the operator acts on, so the claim has to be
+# the whole string. The price is that a cosmetic reword fails this test; pay it
+# and update the constant — that is what makes the claim machine-readable.
+EXPECTED_NOT_RUN_ADVICE = (
+    "🔴 the boot unit has NOT RUN this boot (InactiveExitTimestamp empty). "
+    "It is triggered by tmux-session-restore.path when the tmux server's socket "
+    "appears — NOT on a fixed delay. If no tmux server has started this boot it "
+    "has not fired, and waiting will not change that; check the path unit with "
+    "'systemctl --user status tmux-session-restore.path'. 'Result=success' says "
+    "nothing here: it reads the same for a unit that never started."
+)
+
+
+def _not_run_advice(stdout: str) -> str:
+    """The NOT-RUN block, normalised to one space-separated line.
+
+    Bounded by its own opening line and the end of the indented continuation,
+    so surrounding verdict output cannot drift into the comparison.
+    """
+    lines = stdout.splitlines()
+    for i, ln in enumerate(lines):
+        if "has NOT RUN this boot" in ln:
+            block = [ln.strip()]
+            for nxt in lines[i + 1:]:
+                if nxt.startswith("  ") and nxt.strip():
+                    block.append(nxt.strip())
+                else:
+                    break
+            return " ".join(block)
+    return ""
+
+
+def test_the_never_ran_line_names_the_PATH_UNIT_and_not_a_fixed_DELAY(tmp_path):
+    """🔴 THE ADVICE, NOT JUST THE WORDING. This block used to read "Its timer is
+    OnActiveSec=45s — if you ran this immediately after login, wait and re-run",
+    and once the trigger became `tmux-session-restore.path` watching the tmux
+    socket, that advice is actively wrong: if no tmux server has started this
+    boot the unit has NOT fired and no amount of waiting will make it. Telling
+    the operator to wait sends them to a state that will never arrive.
+    """
+    r = _verdict(_pre(tmp_path), _post(tmp_path, unit_started=""), tmp_path)
+    advice = _not_run_advice(r.stdout)
+    assert advice, (
+        "no NOT-RUN advice block was emitted at all — the run/no-run fact is "
+        "the thing this line exists to state"
+    )
+    assert advice == EXPECTED_NOT_RUN_ADVICE, (
+        "the not-run advice no longer matches the pinned text. If you reworded "
+        "it deliberately, update EXPECTED_NOT_RUN_ADVICE in the same commit. "
+        "It must keep naming tmux-session-restore.path as the trigger, because "
+        "that is what the operator can go and check.\n"
+        f"  got:      {advice}\n"
+        f"  expected: {EXPECTED_NOT_RUN_ADVICE}"
+    )
+
+
+def test_no_fixed_delay_advice_survives_ANYWHERE_in_the_report(tmp_path):
+    """A separate, WIDER claim than the pinned block above: the stale
+    "wait for the timer" advice must not reappear anywhere in the report, not
+    merely in the one block. These are different scopes, which is why both
+    exist — the pin above would not notice a second copy elsewhere."""
+    r = _verdict(_pre(tmp_path), _post(tmp_path, unit_started=""), tmp_path)
+    for stale in ("OnActiveSec", "45s", "wait and re-run"):
+        assert stale not in r.stdout, (
+            f"{stale!r} appears in the report — the trigger is no longer a "
+            "fixed delay, so telling the operator to wait sends them to a "
+            "state that will never arrive"
+        )
 
 
 def test_a_clean_boot_says_so_AND_says_it_is_only_one_sample(tmp_path):
