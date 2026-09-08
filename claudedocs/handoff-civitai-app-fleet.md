@@ -198,10 +198,17 @@ done
 git -C ~/workspace/civit/civitai-app-sensei show \
   origin/trunk:src/toolchain-lockstep.test.ts | grep -cE '^\s*it\('
 
-# all six released apps serve
+# all six released apps serve.
+# 🔴 The apex is a CLIENT hostname and this repo is PUBLIC, so it is not
+# committed. Put `civitai_apps_apex=<apex-domain>` (bare domain, no scheme) in
+# ~/.config/bar/urls.env (0600, untracked) and `bar-url` resolves it — the same
+# indirection the civitai bar block uses for its Grafana link. An unset key
+# exits 3 naming the key and the file, so this loop can never silently check
+# nothing. See scripts/bar-url.
+apex=$(bar-url civitai_apps_apex) || exit 3
 for h in app-requests generate-from-model custom-generators \
          playable-collections model-benchmarking sensei; do
-  curl -sS -o /dev/null -w "$h %{http_code}\n" https://$h.civit.ai/
+  curl -sS -o /dev/null -w "$h %{http_code}\n" "https://$h.$apex/"
 done
 
 # the skill's own gates (six named files)
