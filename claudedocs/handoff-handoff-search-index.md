@@ -56,7 +56,7 @@ the cause of the other 19 is now measured rather than guessed — see the block 
 - 🔴 **YIELD IS ANSWERED — 1 of 20, AND THE CAUSE OF THE OTHER 19 IS MEASURED.** Adoption says
   the command RAN; this says what the answer was worth. **23 of 60 hit slots were the
   session's OWN handoff** — the doc it had just read in step 3 — and it was the **#1 hit in
-  13 of 20** queries. Fix shipped in `#TBD` (`--exclude-slug`). Full block below.
+  13 of 20** queries. Fix shipped in `#1399` (`--exclude-slug`). Full block below.
 - 🔴 **ADOPTION RE-MEASURED 2026-09-08T17:00Z at n=22 — 20 of 22 (91%), control 21/22.** The
   laptop still contributes **0 runs**, measured over SSH rather than assumed, so this remains
   a workbench-only reading. The measuring session is excluded from both halves by session id.
