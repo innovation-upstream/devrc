@@ -2216,11 +2216,21 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   **The workbench runs 1.18.29** — verified at the consumer 2026-09-08,
   `readlink -f $(command -v opencode)` in a login shell resolving to the store
   path `flake.lock` pins, so the pin and the deploy agree there.
-  🔴 **The LAPTOP is UNVERIFIED at this pin.** It was unreachable when the pin
-  moved (ssh to its nebula address refused), so it was last checked at the
-  consumer on 2026-08-29, at the version this pin superseded. "Both hosts run
-  the same opencode" is therefore a claim nobody has re-checked — do not repeat
-  it until you have.
+  ✅ **The LAPTOP is now verified at this pin too** (2026-09-08), by the same
+  method: `readlink -f $(command -v opencode)` in a **login shell** resolves to
+  `/nix/store/6pw7n475…-opencode-1.18.29/bin/opencode` — byte-identical to the
+  workbench's. So "both hosts run the same opencode" is a re-checked claim, not
+  a repeated one.
+  ⚠ It was UNVERIFIED when the pin moved, and the reason is worth keeping: the
+  laptop was unreachable at its **LAN** address, and the note recorded that as
+  "unreachable" full stop. It answers on **nebula** (`zach@10.42.0.100`), which
+  is how this check was run. A host being off-LAN is not a host being down —
+  `ship.sh` has the same blind spot (`LAPTOP_SSH_DEFAULT` is the LAN address,
+  overridable with `LAPTOP_SSH`).
+  🔴 **The browser-only RESOLUTION on the laptop is STILL UNVERIFIED** — that is
+  a separate claim from the version, and closing the easy half must not be read
+  as closing both. It needs `opencode debug agent` run on the laptop; only the
+  workbench's resolution has been re-derived at this pin.
   ✅ **The browser-only RESOLUTION *was* re-derived at the pin** (2026-09-08),
   which the two bumps before this one had declined: the gate's scratch project
   rebuilt exactly as the wrapper builds it and run against the REAL pinned
