@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""i3status-rust custom block: AIO pump + case fan RPM.
+
+Reads /sys/class/hwmon/*/fan*_input DIRECTLY — no cache file, no poller, no
+network. Like `i3status-load` and unlike the count pills, this block has no
+`bar_freshness` sibling to load: a sysfs fan tacho is a purely local reading, so
+there is no writer that can die behind it and nothing that can go stale.
+
+WHY IT IS ALWAYS VISIBLE, against the bar's hide-at-zero house style. Every
+count pill hides when quiet because its quiet state is "nothing to do". A pump
+RPM is not a count — the operator asked for the number itself, and the whole
+point of putting a liquid cooler's pump on a bar is that you can see it turning
+BEFORE it stops. A hide-when-healthy pump pill would be invisible in exactly the
+state it is meant to certify. The colour rules still apply: it is neutral (Idle)
+while healthy and only reddens on an actual stall.
+
+Rendering (fans render left-to-right in the order nix passes them):
+  all readable, all above their floors -> `2660·1736`   Idle
+  a fan below its floor                -> `!0·1736`     Critical
+  one fan unreadable                   -> `2660·?`      Warning
+  chip or every fan unreadable         -> `?`           Warning
+
+🔴 The `!` and the trailing-`?` grammar are the bar's, not this block's — `!`
+marks the specific reading that is alarming (as clawgate's `22!2` does) and `?`
+means "this is not a current measurement". An outage may make a reading less
+trusted; it may never make a recorded alarm quieter, so a pill with one
+unreadable fan and one STALLED fan is still Critical, not Warning.
+
+🔴 hwmon NUMBERING IS NOT STABLE ACROSS BOOTS. The chip sat on `hwmon11` when
+this was written, behind ten nvme/spd5118/k10temp/amdgpu devices whose probe
+order is not guaranteed. So the chip is located by its `name` file (`nct6687`),
+never by a path literal — a hardcoded `/sys/class/hwmon/hwmon11` would silently
+start reporting an NVMe's fan-less hwmon after an unrelated kernel bump.
+
+🔴 A FAN THAT READS 0 IS NOT NECESSARILY BROKEN, which is why the floor is
+per-fan and OPTIONAL. On this board fan2 and fan4-10 have nothing plugged into
+them and read a permanent 0, and a case fan under a zero-RPM PWM curve can
+legitimately stop when idle. Only a fan given an explicit `:MINRPM` can raise
+Critical; a fan passed without one is displayed and never alarms. Watch the
+pump, which must never stop.
+
+🔴 The icon must be a key in i3status-rust's icon set (material-nf), NOT an XDG
+desktop-icon name — an unknown key renders the whole pill as a red
+`Failed to render full text`, in every visible state. material-nf has no `fan`
+key; `refresh` (rotating arrows) is the closest real one. `test_bar_status.py`
+pins every block icon against the real icon set.
+
+nix/graphical.nix passes `--fan pump=1:500 --fan case=3`, and gates BOTH this
+script's `home.file` and the block itself on `!isLaptop` — the chip is the
+workbench's Super I/O and the laptop has no such device.
+"""
+import argparse
+import json
+import math
+import re
+import sys
+from pathlib import Path
+
+ICON = "refresh"
+DEFAULT_CHIP = "nct6687"
+SEP = "·"
+_UNKNOWN = {"icon": ICON, "text": "?", "short_text": "?", "state": "Warning"}
+
+#: A hwmon `name` is a kernel identifier, and it is pasted into a glob below.
+_CHIP_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+class FanSpec:
+    """One `--fan LABEL=INDEX[:MINRPM]` argument."""
+
+    def __init__(self, label, index, floor):
+        self.label = label
+        self.index = index
+        self.floor = floor
+
+    def __repr__(self):                                   # pragma: no cover
+        return "FanSpec(%r, %r, %r)" % (self.label, self.index, self.floor)
+
+    def __eq__(self, other):
+        return (isinstance(other, FanSpec)
+                and (self.label, self.index, self.floor)
+                == (other.label, other.index, other.floor))
+
+
+def parse_fan(spec):
+    """`pump=1:500` -> FanSpec('pump', 1, 500.0). Raises ValueError.
+
+    The floor is OPTIONAL and its absence is meaningful: it is the difference
+    between a fan that can raise Critical and one that is display-only. `=1:`
+    with an empty floor is rejected rather than read as absent — a truncated
+    argument must not silently disarm the alarm it was meant to configure.
+    """
+    label, sep, rest = spec.partition("=")
+    if not sep:
+        raise ValueError("--fan needs LABEL=INDEX[:MINRPM], got %r" % (spec,))
+    if not label.strip():
+        raise ValueError("--fan %r has an empty label" % (spec,))
+    idx_s, has_floor, floor_s = rest.partition(":")
+    try:
+        index = int(idx_s)
+    except ValueError:
+        raise ValueError("--fan %r: index %r is not an integer" % (spec, idx_s))
+    if index < 1:
+        raise ValueError(
+            "--fan %r: hwmon fan inputs are 1-based, got index %d"
+            % (spec, index))
+    floor = None
+    if has_floor:
+        try:
+            floor = float(floor_s)
+        except ValueError:
+            raise ValueError(
+                "--fan %r: floor %r is not a number (omit the ':' entirely for "
+                "a display-only fan)" % (spec, floor_s))
+        # NaN loses every comparison, so a NaN floor disarms the Critical state
+        # forever with no error — the silent-disarm this block exists to avoid.
+        # An infinite floor is the mirror image: permanently Critical.
+        if not math.isfinite(floor):
+            raise ValueError(
+                "--fan %r: floor must be a finite number, got %r"
+                % (spec, floor))
+        if floor < 0:
+            raise ValueError(
+                "--fan %r: a negative floor (%g) can never be crossed — a tacho "
+                "never reads below 0, so this silently disables the alarm"
+                % (spec, floor))
+    return FanSpec(label.strip(), index, floor)
+
+
+def find_chip(chip, root="/sys/class/hwmon"):
+    """Locate the hwmon directory whose `name` is `chip`. None if absent.
+
+    By NAME, never by number — see the module docstring. Sorted for determinism
+    when (implausibly) two devices share a name.
+    """
+    if not _CHIP_RE.match(chip or ""):
+        raise ValueError("--chip %r is not a plausible hwmon name" % (chip,))
+    try:
+        candidates = sorted(Path(root).glob("hwmon*"))
+    except OSError:
+        return None
+    for d in candidates:
+        try:
+            if (d / "name").read_text().strip() == chip:
+                return d
+        except OSError:
+            continue
+    return None
+
+
+def read_rpm(chip_dir, index):
+    """Read fan<index>_input. None if missing, unreadable or not an integer."""
+    if chip_dir is None:
+        return None
+    try:
+        raw = (chip_dir / ("fan%d_input" % index)).read_text().strip()
+    except OSError:
+        return None
+    try:
+        rpm = int(raw)
+    except ValueError:
+        return None
+    # A tacho cannot be negative; a negative value means the file is not what we
+    # think it is, which is an unreadable state, not a stalled fan.
+    return None if rpm < 0 else rpm
+
+
+def render(readings):
+    """Pure: [(FanSpec, rpm_or_None)] -> i3status-rust block dict.
+
+    Ordering of the state decision is load-bearing: the alarm is evaluated
+    BEFORE the unknown, so a pill holding one stalled fan and one unreadable
+    fan stays Critical. The reverse order would let a second fan's sensor
+    failure downgrade a real pump stall to a Warning.
+    """
+    if not readings:
+        # No fans configured at all: a block that renders nothing forever is
+        # indistinguishable from a healthy one. Say we cannot tell.
+        return dict(_UNKNOWN)
+    if all(rpm is None for _, rpm in readings):
+        return dict(_UNKNOWN)
+
+    parts, alarm, unknown = [], False, False
+    for spec, rpm in readings:
+        if rpm is None:
+            parts.append("?")
+            unknown = True
+        elif spec.floor is not None and rpm < spec.floor:
+            parts.append("!%d" % rpm)
+            alarm = True
+        else:
+            parts.append("%d" % rpm)
+
+    state = "Critical" if alarm else ("Warning" if unknown else "Idle")
+    text = SEP.join(parts)
+    # short_text keeps the FIRST fan only — nix passes the pump first precisely
+    # because it is the one worth the width when the bar is crowded.
+    return {"icon": ICON, "text": text, "short_text": parts[0], "state": state}
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--chip", default=DEFAULT_CHIP)
+    p.add_argument("--fan", action="append", default=[], metavar="LABEL=N[:MIN]")
+    # The TEST SEAM. Without it every end-to-end test reads the builder's own
+    # /sys, so its verdict depends on what hardware the host happens to have —
+    # which is how a test ends up asserting whatever the workbench reports.
+    p.add_argument("--hwmon-root", default="/sys/class/hwmon")
+    # argparse exits 2 on a bad value, which would skip the `?` pill entirely
+    # and leave the bar with no block at all. Convert it into the same failure
+    # every other malformed input takes.
+    try:
+        args = p.parse_args(argv)
+    except SystemExit:
+        raise ValueError("could not parse fan arguments: %r" % (argv,))
+    specs = [parse_fan(s) for s in args.fan]
+    chip_dir = find_chip(args.chip, args.hwmon_root)
+    readings = [(s, read_rpm(chip_dir, s.index)) for s in specs]
+    sys.stdout.write(json.dumps(render(readings)) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        # Last-resort: a visible `?` pill, never the invisible empty one — a
+        # silently blank block is indistinguishable from "the pump is fine".
+        # Built from a literal so it cannot depend on whatever just failed.
+        sys.stdout.write(
+            '{"icon": "%s", "text": "?", "short_text": "?", '
+            '"state": "Warning"}\n' % ICON)
+        sys.exit(0)
