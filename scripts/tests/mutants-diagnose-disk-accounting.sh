@@ -204,9 +204,9 @@ run inject-xargs-I-substitution \
 # none of them the rc one.
 run e2big-glob-expanded-into-du \
   'size_breakdown returned' \
-  '  out=$(_depth1_nul "$base" "$errf" \
+  '  out=$(_depth1_nul "$base" "$SCAN_ERRF" \
     | { _on_device "$dev" || true; } \
-    | { xargs -0 -r du -sh -x 2>/dev/null || true; } \
+    | { xargs -0 -r du -sh -x 2>>"$SCAN_DUERR" || true; } \
     | sort -rh | head_n 15)' \
   '  out=$(du -sh -x "$base"/* 2>/dev/null | sort -rh | head_n 15)'
 
@@ -271,9 +271,9 @@ run depth1-find-error-aborts-the-run \
 
 run du-failure-aborts-the-run \
   'a failing find/du aborted the run' \
-  '    | { xargs -0 -r du -sh -x 2>/dev/null || true; } \
+  '    | { xargs -0 -r du -sh -x 2>>"$SCAN_DUERR" || true; } \
     | sort -rh | head_n 15)' \
-  '    | xargs -0 -r du -sh -x 2>/dev/null \
+  '    | xargs -0 -r du -sh -x 2>>"$SCAN_DUERR" \
     | sort -rh | head_n 15)'
 
 # 🔴 THE F-1 MUTANT, and the one the round-1 fix would have SURVIVED. `%D` makes
@@ -289,10 +289,18 @@ run unstattable-count-pinned-to-zero \
   '  n=$(grep -c . "$1" 2>/dev/null; true)' \
   '  n=0'
 
+# 🔴 THE ANCHOR LINE ABOVE IS PART OF THE MUTATION, and it has to be: round 3
+# gave `_report_unreadable` the same `[ "$n" -gt 0 ] || return 0` guard, so the
+# bare expression now occurs TWICE and the battery correctly refused to apply it
+# (`occurrences=2`). The `local` line pins it to `_report_unstattable` alone —
+# a `count=1` replace on a two-occurrence pattern is the failure this file's
+# header is about, and the check is what caught it.
 run unstattable-report-suppressed \
   'route (a): inode_breakdown COUNTS the entries it could not stat' \
-  '  [ "$n" -gt 0 ] || return 0' \
-  '  [ "$n" -gt 0 ] && return 0'
+  '  local n="$1" base="$2" errf="$3"
+  [ "$n" -gt 0 ] || return 0' \
+  '  local n="$1" base="$2" errf="$3"
+  [ "$n" -gt 0 ] && return 0'
 
 # 🔴 THE AFFIRMATIVE "none" OVER A BLIND SCAN — the sentence the round-1 report
 # printed while three entries were missing from every list.
@@ -311,8 +319,8 @@ run foreign-entries-tr-flattened \
   '  while IFS= read -r -d '"''"' p; do
     n=$((n + 1))
     [ "$n" -gt 15 ] || printf '"'"'  %s\n'"'"' "$p"
-  done < <(_depth1_nul "$base" "$errf" | _not_on_device "$dev")' \
-  '  out=$(_depth1_nul "$base" "$errf" | _not_on_device "$dev" | tr '"'"'\0'"'"' '"'"'\n'"'"' | head_n 15)
+  done < <(_depth1_nul "$base" "$SCAN_ERRF" | _not_on_device "$dev")' \
+  '  out=$(_depth1_nul "$base" "$SCAN_ERRF" | _not_on_device "$dev" | tr '"'"'\0'"'"' '"'"'\n'"'"' | head_n 15)
   [ -z "$out" ] || { printf '"'"'%s\n'"'"' "$out" | sed '"'"'s/^/  /'"'"'; n=1; }'
 
 # 🔴 THE CHECKED ASSIGNMENT. Three sites share the shape, so the mutation
@@ -391,16 +399,16 @@ run root-dev-reading-unguarded \
 # --- defect 7, the /tmp half: -xdev LISTS a foreign mountpoint at depth 1 -----
 run tmp-size-device-filter-dropped \
   'size_breakdown DROPS every entry on a foreign device' \
-  '  out=$(_depth1_nul "$base" "$errf" \
+  '  out=$(_depth1_nul "$base" "$SCAN_ERRF" \
     | { _on_device "$dev" || true; } \' \
-  '  out=$(_depth1_nul "$base" "$errf" \
+  '  out=$(_depth1_nul "$base" "$SCAN_ERRF" \
     | { sed -z -n '"'"'s/^[0-9]*\t//p'"'"' || true; } \'
 
 run tmp-inode-device-filter-dropped \
   'inode_breakdown DROPS every directory on a foreign device' \
-  '  out=$(_depth1_nul "$base" "$errf" -type d \
+  '  out=$(_depth1_nul "$base" "$SCAN_ERRF" -type d \
     | { _on_device "$dev" || true; } \' \
-  '  out=$(_depth1_nul "$base" "$errf" -type d \
+  '  out=$(_depth1_nul "$base" "$SCAN_ERRF" -type d \
     | { sed -z -n '"'"'s/^[0-9]*\t//p'"'"' || true; } \'
 
 # 🔴 STRUCTURAL PIN, and it is labelled as one. A second filesystem needs root,
@@ -408,13 +416,13 @@ run tmp-inode-device-filter-dropped \
 # SURVIVED before the `required` row was added.
 run du-x-dropped-from-the-tmp-breakdown \
   'du keeps -x AND its || true in the /tmp size breakdown' \
-  '    | { xargs -0 -r du -sh -x 2>/dev/null || true; } \' \
-  '    | { xargs -0 -r du -sh 2>/dev/null || true; } \'
+  '    | { xargs -0 -r du -sh -x 2>>"$SCAN_DUERR" || true; } \' \
+  '    | { xargs -0 -r du -sh 2>>"$SCAN_DUERR" || true; } \'
 
 run du-x-dropped-from-the-home-breakdown \
   'du keeps -x AND its || true in the /home size breakdown' \
-  '{ xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>/dev/null || true; }' \
-  '{ xargs -0 -r du -sh < "$ONROOT_LIST" 2>/dev/null || true; }'
+  '{ xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>>"$DU_ERR" || true; }' \
+  '{ xargs -0 -r du -sh < "$ONROOT_LIST" 2>>"$DU_ERR" || true; }'
 
 # The device READING itself: hex vs decimal is a silent total mis-classification.
 run dev-of-returns-hex-not-decimal \
@@ -559,6 +567,84 @@ run lsof-bin-honoured-on-the-execute-path \
 ' \
   'LSOF_BIN=${LSOF_BIN:-lsof}
 '
+
+# --- round 3: du's stderr, the second and different blind spot ---------------
+# 🔴 ROUTE (b) KEEPS THE ENTRY AND SHORTENS ITS NUMBER, which is why these are
+# not scored on the route-(a) guards. MEASURED on the §4b-iii fixture: 8K
+# printed against a true 12K, with no marker of any kind while du's stderr went
+# to /dev/null.
+run du-stderr-discarded \
+  'route (b): size_breakdown REPORTS that du could not read a path' \
+  '    | { xargs -0 -r du -sh -x 2>>"$SCAN_DUERR" || true; } \
+    | sort -rh | head_n 15)' \
+  '    | { xargs -0 -r du -sh -x 2>/dev/null || true; } \
+    | sort -rh | head_n 15)'
+
+run du-blind-spot-not-reported \
+  "route (b): du's own error line is quoted, not just tallied" \
+  '  _report_unreadable "$base" "$SCAN_DUERR"' \
+  '  :'
+
+# 🔴 THE TWO SINKS ARE NOT INTERCHANGEABLE, and this is the mutant that says so:
+# handing the du report find's stderr yields a count of 0 over a fixture find can
+# stat completely, i.e. an affirmative silence.
+run du-report-reads-finds-stderr \
+  'route (b): size_breakdown REPORTS that du could not read a path' \
+  '  _report_unreadable "$base" "$SCAN_DUERR"' \
+  '  _report_unreadable "$base" "$SCAN_ERRF"'
+
+# --- round 3: the temp files nothing named and no trap covered ---------------
+run scan-temp-file-anonymous \
+  'a scan temp file is named [' \
+  '_scan_mktemp() { REPLY=$(mktemp "/tmp/disk-accounting-$1.XXXXXX") || { REPLY=; return 1; }; }' \
+  '_scan_mktemp() { REPLY=$(mktemp) || { REPLY=; return 1; }; }'
+
+# 🔴 THE HISTORICAL SHAPE, restored exactly: a cleanup that names the files
+# somebody thought of. Killed only by the SIGINT probe, because every other
+# guard here removes its own temp files on the happy path.
+run cleanup-forgets-the-scan-temps \
+  'an interrupt mid-breakdown leaked' \
+  '  rm -f "${DENIED_LOG:-}" "${DU_ERR:-}" "${ONROOT_LIST:-}" "${FOREIGN_LIST:-}" \
+        "${SCAN_ERRF:-}" "${SCAN_DUERR:-}"' \
+  '  rm -f "${DENIED_LOG:-}" "${ONROOT_LIST:-}" "${FOREIGN_LIST:-}"'
+
+# 🔴 STRUCTURAL PIN, labelled as one. The trap line is in the ROOT-ONLY region,
+# so no fixture can reach it; what the SIGINT probe measures is the FUNCTION, and
+# what this row proves is that the script really installs that function rather
+# than a hand-written list.
+run trap-named-as-a-fixed-list \
+  'the EXIT trap names a FUNCTION, not a fixed list of files' \
+  'trap _cleanup_temps EXIT' \
+  "trap 'rm -f \"\$DENIED_LOG\"' EXIT"
+
+# 🔴 THE ORDER HALF, scored on the ordering guard rather than the name pin: the
+# trap still names `_cleanup_temps`, so the `required` row above stays GREEN and
+# only the line-number comparison can see it.
+run trap-installed-after-the-first-mktemp \
+  'the EXIT trap is installed at line' \
+  'trap _cleanup_temps EXIT
+DENIED_LOG=$(mktemp /tmp/disk-accounting-denied.XXXXXX)' \
+  'DENIED_LOG=$(mktemp /tmp/disk-accounting-denied.XXXXXX)
+trap _cleanup_temps EXIT'
+
+run k3s-du-listing-stderr-discarded \
+  "section 5's PVC listing keeps du's stderr too" \
+  '| { xargs -0 -r du -sh --exclude=/mnt 2>>"$DU_ERR" || true; } | sort -rh | head_n 30' \
+  '| { xargs -0 -r du -sh --exclude=/mnt 2>/dev/null || true; } | sort -rh | head_n 30'
+
+# --- round 3: the trailing-sort ledger, both directions ----------------------
+# 🔴 SHRINK AND GROW, because a ledger asserted only one way is half a ledger.
+# Neither of these is visible to the first-word sweep: the guarded form still
+# contains `||` and the added one is inside a `$(…)` in a printf argument.
+run sort-ledger-site-guarded-away \
+  'the sort ledger found' \
+  '| { xargs -0 -r du -sh --exclude=/mnt 2>>"$DU_ERR" || true; } | sort -rh | head_n 30' \
+  '| { xargs -0 -r du -sh --exclude=/mnt 2>>"$DU_ERR" || true; } | { sort -rh || true; } | head_n 30'
+
+run sort-ledger-site-added \
+  'the sort ledger found' \
+  "printf 'store paths     : %d\\n' \"\$(ls /nix/store/ 2>/dev/null | wc -l)\"" \
+  "printf 'store paths     : %d\\n' \"\$(ls /nix/store/ 2>/dev/null | sort | wc -l)\""
 
 echo
 echo "== SURVIVES control — a behaviour-free edit must NOT kill anything =="

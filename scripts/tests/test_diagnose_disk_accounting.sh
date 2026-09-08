@@ -2,9 +2,13 @@
 # Regression guards for scripts/diagnose-disk-accounting.sh.
 #
 # WHY THIS EXISTS. That script is ROOT-PRIVILEGED bash that had no test file, in
-# a repo with no shellcheck gate. (It was 282 lines when this suite was written;
-# no line count is quoted here any more, because the last one went stale in one
-# round and was still being cited from run-tests.sh two rounds later.)
+# a repo with no shellcheck gate. (It was 282 lines at the merge base
+# `c1169e3b` — BEFORE this suite's own commit, which added the seam and most of
+# the comments. "When this suite was written" is the wrong anchor for that
+# figure and stood here for a round: by the end of that commit the file was 414
+# lines. No CURRENT count is quoted anywhere any more, because the last one went
+# stale within a round and was still being cited from run-tests.sh two rounds
+# later. `wc -l scripts/diagnose-disk-accounting.sh`.)
 # Every defect pinned below was real,
 # shipped, and invisible to the merge gate — including a root COMMAND INJECTION
 # reachable by any local process (via a planted /tmp directory name) and an
@@ -31,11 +35,16 @@
 # measurement (`dumpe2fs -h /dev/nvme0n1p2`, `find / -xdev` over root-only
 # trees, `findmnt /mnt/rootcheck`). Their numbers cannot be produced without
 # root on a real host, so their arithmetic is UNGUARDED here. Their `set -e`
-# EXPOSURE is a different question and IS covered, structurally: section 7b
-# sweeps the whole file for a statement whose failure would truncate the report,
-# which is how section 5's bare `du -sh` total was found. What is guarded
-# behaviourally is every defect the file's own comments record, all of which
-# live in the transforms below.
+# EXPOSURE is a different question and is covered structurally by section 7b —
+# but read that section's own header for what its scan can and cannot see. It
+# does NOT "sweep the whole file", which is what this sentence used to claim: it
+# keeps lines by their FIRST WORD and drops any line containing `||`, so a
+# pipeline headed by `for`/`done`/`printf` or guarded only in an early stage is
+# invisible to it. That is why 7b also carries a second, separate ledger over
+# the trailing `sort` stages, and why the script's own sweep comment lists five
+# deliberate exceptions rather than two. What is guarded behaviourally is every
+# defect the file's own comments record, all of which live in the transforms
+# below.
 set -uo pipefail
 
 # 🔴 `CDPATH=` and `>/dev/null` on the `cd`: with CDPATH set in the environment
@@ -132,7 +141,8 @@ set -uo pipefail
 for fn in lsof_deleted_summary report_deleted_open_files size_breakdown \
           inode_breakdown _dev_of _dev_is_valid _on_device _not_on_device \
           foreign_entries split_by_device report_foreign_mounts \
-          report_denials; do
+          report_denials _errline_count _report_unstattable _report_unreadable \
+          _scan_mktemp _cleanup_temps; do
   if declare -F "$fn" >/dev/null; then pass "helper $fn is sourceable"
   else fail "helper $fn is NOT defined after sourcing"; fi
 done
@@ -513,10 +523,17 @@ has "route (b): the readable sibling still produces a row" "$lock_out" "$LOCKDIR
 echo "== 4b-ii. ROUTE (a): an UNSTATTABLE entry must be COUNTED, not erased =="
 # 🔴 THE DEFECT, and it was introduced by the round-1 fix for route (a). `-print0`
 # still printed the NAME of an entry whose stat failed; `-printf '%D\t%p\0'`
-# forces a stat to format the record and emits NOTHING when it fails. MEASURED
-# 2026-09-07 over this very fixture, both `find` builds on this host, both rc 1:
-# `-print0` 116 B (GNU findutils 4.10.0, the bash PATH) / 119 B (4.11.0, the nix
-# dev shell); `-printf '%D\t%p\0'` **0 B** in both. So the entry left the size
+# forces a stat to format the record and emits NOTHING when it fails.
+#
+# RE-MEASURED 2026-09-07 (round 3), one fixture, three implementations — the
+# figures that stood here (116 B / 119 B, "both rc 1") could not all have been
+# true, because `-print0` emits the paths it FOUND, so two builds cannot
+# disagree about one fixture, and `-print0` needs no stat, so it does not error.
+# Over a 35-character 0400 base holding three entries: GNU findutils 4.10.0
+# (the bash PATH), 4.11.0 (the nix dev shell) and bfs 4.1.1 (the interactive
+# alias) all gave `-print0` **114 B, rc 0** and `-printf '%D\t%p\0'` **0 B,
+# rc 1**. The load-bearing half — 0 bytes under `%D` — is identical on all
+# three. So the entry left the size
 # breakdown, the inode breakdown AND the foreign-entry listing at once — and
 # `foreign_entries` then printed "none — every depth-1 entry is on the same
 # filesystem as …", an affirmative claim of absence produced by a blind scan.
@@ -571,6 +588,172 @@ has "POSITIVE CONTROL: a stattable fixture still lists its entries" "$ok_sz" "$O
 has "POSITIVE CONTROL: a stattable fixture DOES print the affirmative 'none'" \
     "$ok_fgn" "none — every depth-1 entry is on the same filesystem as $OK_DIR"
 chmod 700 "$ERRDIR"; chmod 700 "$LOCKDIR/locked"
+
+# --------------------------------------------------------------------------- #
+echo "== 4b-iii. ROUTE (b): a path du cannot READ is an UNDER-COUNT, not a total =="
+# 🔴 THE ASYMMETRY THAT MADE A PRE-EXISTING `2>/dev/null` WORTH FIXING NOW.
+# Route (a) ERASES an entry; route (b) keeps it and SHORTENS its number. §4b
+# above pins that route (b) does not kill the run and that the readable sibling
+# still produces a row — neither of which says anything about the figure printed
+# for the unreadable one. With du's stderr at /dev/null nothing did. And once
+# §4b-ii's `!! UNSTATTABLE` line existed, the ABSENCE of a blind-spot line
+# started reading as an affirmative "nothing was missed" — a floor presented as
+# a total, reached by trusting a report that never had the evidence.
+#
+# 🔴 THE POSITIVE CONTROL ASSERTS THE UNDER-COUNT ITSELF, not merely that du
+# exits non-zero. "The blind spot is reported" would otherwise be satisfiable on
+# a fixture where du in fact read everything. MEASURED over this fixture:
+# 8K reported for `locked` against a true 12K, a 33% shortfall.
+DUFIX="$TMP/du-partial"
+mkdir -p "$DUFIX/open" "$DUFIX/locked/inner"
+head -c 4096 /dev/zero > "$DUFIX/open/f"
+head -c 4096 /dev/zero > "$DUFIX/locked/inner/f"
+du_true="$(du -s -x --block-size=1K "$DUFIX/locked" 2>/dev/null | awk '{print $1}')"
+chmod 000 "$DUFIX/locked/inner"
+du_short="$(du -s -x --block-size=1K "$DUFIX/locked" 2>/dev/null | awk '{print $1}')"
+case "${du_true:-x}${du_short:-x}" in
+  *[!0-9]*) fail "POSITIVE CONTROL (du under-count): unparsable du output (true=[${du_true:-}] short=[${du_short:-}])" ;;
+  *) [ "$du_short" -lt "$du_true" ] \
+       && pass "POSITIVE CONTROL: du really under-counts the locked fixture (${du_short}K reported vs ${du_true}K true)" \
+       || fail "POSITIVE CONTROL FAILED: du reported ${du_short}K against a true ${du_true}K — no under-count, so every assertion below is vacuous" ;;
+esac
+
+du_out="$(size_breakdown "$DUFIX" 2>/dev/null)"
+has "route (b): size_breakdown REPORTS that du could not read a path" \
+    "$du_out" "!! PARTIALLY READ: du could not read 1 path(s) under $DUFIX."
+has "route (b): the under-counted figures are called FLOORS" \
+    "$du_out" "The sizes above are FLOORS for those paths, not totals."
+has "route (b): du's own error line is quoted, not just tallied" "$du_out" "cannot read directory"
+has "route (b): the readable sibling is still listed" "$du_out" "$DUFIX/open"
+# 🔴 THE TWO BLIND SPOTS MUST STAY TELLABLE APART. `find` can stat everything in
+# this fixture, so the route-(a) line must NOT appear: one message doing both
+# jobs would make both counts meaningless, and merging the two stderr sinks is
+# exactly how that would happen.
+lacks "route (b): a du failure is NOT reported as an unstattable entry" "$du_out" "UNSTATTABLE"
+
+# 🔴 POSITIVE CONTROL for the branch: on a fixture du can read completely, the
+# line is ABSENT — otherwise a function that printed it unconditionally would
+# satisfy every assertion above.
+ok_du="$(size_breakdown "$OK_DIR" 2>/dev/null)"
+lacks "POSITIVE CONTROL: a fully readable fixture reports NO du blind spot" "$ok_du" "PARTIALLY READ"
+has "POSITIVE CONTROL: that fixture still produced a size row" "$ok_du" "$OK_DIR/a"
+chmod 700 "$DUFIX/locked/inner"
+
+# --------------------------------------------------------------------------- #
+echo "== 4b-iv. TEMP FILES: identifiable names, and ONE trap that covers them all =="
+# 🔴 THE DEFECT. The three breakdown helpers opened `errf=$(mktemp)` — an
+# anonymous `/tmp/tmp.XXXXXXXXXX` — and NONE of the three was named in the
+# script's EXIT trap; only its own function's last statement removed it. The
+# realistic way this run ends is not an abort but SIGINT: the run it was written
+# for took ~3 h over 78 million entries. MEASURED 2026-09-07 on this host's
+# bash: an EXIT trap DOES run when the shell is killed by an untrapped SIGINT —
+# so the trap removed the NAMED $DENIED_LOG and left up to three unattributable
+# files in /tmp, the directory under diagnosis.
+# 🔴 `${REPLY:-}`, and a `declare -F` gate, so this section stays REPORTABLE
+# against a tree that has no `_scan_mktemp` at all. Without them the suite dies
+# on `set -u` at the first unset REPLY and every guard below it goes unmeasured
+# — which is exactly the truncated-run failure this file is about, in the file
+# that is about it. MEASURED: the red-at-`eb4e3a81` matrix stopped at 79 ok
+# before this gate, and reports the full set with it.
+REPLY=
+if declare -F _scan_mktemp >/dev/null; then
+  _scan_mktemp probe-4biv || fail "_scan_mktemp could not create a temp file"
+fi
+scan_path="${REPLY:-}"
+case "${scan_path##*/}" in
+  disk-accounting-probe-4biv.*) pass "a scan temp file is NAMED for this script and its purpose (${scan_path##*/})" ;;
+  *) fail "a scan temp file is named [${scan_path##*/}] — an operator cannot attribute it to this script" ;;
+esac
+[ -n "$scan_path" ] && [ -f "$scan_path" ] && pass "the named temp file really exists before cleanup" \
+  || fail "_scan_mktemp reported success without creating a file"
+[ -n "$scan_path" ] && rm -f "$scan_path"
+
+# 🔴 THE END-TO-END CASE, AND IT INTERRUPTS FOR REAL. The property is "a signal
+# arriving between the mktemp and the rm does not leak", so the probe stubs
+# `_report_unstattable` — which `size_breakdown` calls AFTER opening both temp
+# files and BEFORE removing them — to record the two paths and kill itself.
+# The trap is installed by the probe because it only exists on the script's ROOT
+# execute path, which this suite cannot reach; that the script really installs
+# THIS function is pinned separately in section 7 (`trap _cleanup_temps EXIT`).
+# What is measured here is the half a structural pin cannot reach: that the
+# function removes a file opened long after the trap went up.
+#
+# 🔴 THE PROBE FALLS BACK FROM SIGINT TO SIGTERM, AND THE FALLBACK IS THE POINT.
+# A first draft used `kill -INT` alone. It passed when this suite was run in the
+# foreground and produced THREE FAILs the moment the mutation battery ran it
+# from a `nohup … &` — bash sets SIGINT and SIGQUIT to SIG_IGN in a command
+# started asynchronously without job control, and a non-interactive shell
+# CANNOT reset a signal that was ignored on entry. MEASURED with a two-line
+# stand-in (`kill -INT $$; echo SURVIVED`): it dies silently when run in the
+# foreground and prints SURVIVED when run from `( … & wait )`. Left as-is, the
+# leak assertion would have gone VACUOUSLY GREEN in
+# exactly the runner that matters (0 files recorded as surviving because none
+# was ever opened for a signal that never arrived) — which is why the "was it
+# really interrupted" rows below are not decoration. SIGINT is still attempted
+# first, because it is the signal the defect is about; SIGTERM is delivered the
+# same way and reaches the same EXIT trap.
+SIGFIX="$TMP/sigint-fixture"
+mkdir -p "$SIGFIX/a"; touch "$SIGFIX/a/f"
+cat > "$TMP/sigint-probe.sh" <<PROBE
+set -euo pipefail
+source "$SCRIPT"
+if [ "\${1:-}" = "trapped" ]; then trap _cleanup_temps EXIT; fi
+_report_unstattable() {
+  printf '%s\n%s\n' "\$SCAN_ERRF" "\$SCAN_DUERR" > "$TMP/sigint-paths"
+  kill -INT \$\$
+  # Reached only when SIGINT was ignored on entry to this shell.
+  echo "SIGINT-IGNORED-USING-SIGTERM"
+  kill -TERM \$\$
+}
+size_breakdown "$SIGFIX" >/dev/null
+echo "NOT-INTERRUPTED"
+PROBE
+
+# POSITIVE CONTROL FIRST — the UNTRAPPED run must LEAK, or "the trapped run left
+# nothing behind" is indistinguishable from a probe that never opened a file.
+# `: >` rather than `rm -f`: a probe that failed to run at all must leave an
+# EMPTY ledger for the loops below to read, not a missing file — otherwise the
+# redirect fails and the count guards report on nothing.
+: > "$TMP/sigint-paths"
+si_untrapped="$("$BASH_BIN" "$TMP/sigint-probe.sh" untrapped 2>&1)"
+lacks "the probe really was interrupted (untrapped run)" "$si_untrapped" "NOT-INTERRUPTED"
+leaked=0; leak_names=""
+while IFS= read -r si_p; do
+  [ -n "$si_p" ] || continue
+  if [ -e "$si_p" ]; then leaked=$((leaked + 1)); leak_names="$leak_names ${si_p##*/}"; rm -f "$si_p"; fi
+done < "$TMP/sigint-paths"
+[ "$leaked" -eq 2 ] && pass "POSITIVE CONTROL: with no trap the signal leaks both temp files ($leak_names)" \
+  || fail "POSITIVE CONTROL FAILED: an untrapped signal leaked $leaked of 2 temp files — the trapped run below would prove nothing"
+# Informational, and it names which signal the harness could actually deliver —
+# a reader of a green run should not have to guess which half was exercised.
+case "$si_untrapped" in
+  *SIGINT-IGNORED-USING-SIGTERM*) pass "the interrupt was delivered as SIGTERM (SIGINT is SIG_IGN in this runner)" ;;
+  *) pass "the interrupt was delivered as SIGINT" ;;
+esac
+
+: > "$TMP/sigint-paths"
+si_trapped="$("$BASH_BIN" "$TMP/sigint-probe.sh" trapped 2>&1)"
+lacks "the probe really was interrupted (trapped run)" "$si_trapped" "NOT-INTERRUPTED"
+survivors=0; survivor_names=""
+while IFS= read -r si_p; do
+  [ -n "$si_p" ] || continue
+  if [ -e "$si_p" ]; then survivors=$((survivors + 1)); survivor_names="$survivor_names ${si_p##*/}"; rm -f "$si_p"; fi
+done < "$TMP/sigint-paths"
+[ "$survivors" -eq 0 ] && pass "an interrupt mid-breakdown leaves NO temp file behind in /tmp" \
+  || fail "an interrupt mid-breakdown leaked $survivors temp file(s) into /tmp:$survivor_names"
+
+# 🔴 AND EMPTY SLOTS MUST BE HARMLESS: `_cleanup_temps` runs on EVERY exit path,
+# including one taken before a single mktemp. MEASURED: `rm -f ""` is rc 0 and
+# silent, which is why the function needs no per-slot test — but a future
+# rewrite that added one and got it wrong would end the run on the trap.
+keepf="$TMP/not-a-scan-temp"; : > "$keepf"
+DENIED_LOG= ; DU_ERR= ; ONROOT_LIST= ; FOREIGN_LIST= ; SCAN_ERRF= ; SCAN_DUERR=
+cleanup_empty_out="$(_cleanup_temps 2>&1)"; cleanup_empty_rc=$?
+eq "_cleanup_temps with every slot empty is silent" "$cleanup_empty_out" ""
+[ "$cleanup_empty_rc" -eq 0 ] && pass "_cleanup_temps with every slot empty is rc 0" \
+  || fail "_cleanup_temps exited $cleanup_empty_rc with nothing to remove — the EXIT trap would rewrite the run's status"
+[ -f "$keepf" ] && pass "POSITIVE CONTROL: _cleanup_temps removes only what the run RECORDED" \
+  || fail "_cleanup_temps removed a file it was never given — it is an rm, not a cleanup"
 
 # --------------------------------------------------------------------------- #
 echo "== 4c. the refusal branches must be REACHABLE under the real set -e =="
@@ -1000,8 +1183,12 @@ the /tmp inode walk passes the name as an ARGUMENT@xargs -0 -r -n1 sh -c 'printf
 top-level enumeration is NUL-safe find|xargs, and KEEPS find's stderr@find "$base" -xdev -mindepth 1 -maxdepth 1 "$@" -printf '%D\t%p\0' 2>"$errf"@the glob form dies E2BIG and set -euo pipefail takes the whole run with it; and %D forces a stat per entry, so 2>/dev/null here erases an unstattable entry from every list at once
 /home candidates are compared by DEVICE, because du -x cannot do it@d=$(_dev_of "$p") || continue@du -x only stops du crossing AWAY from its start; started ON a foreign mount it walks all of it
 /tmp candidates are compared by DEVICE too (defect 7, section 6d)@| { _on_device "$dev" || true; }@-xdev still LISTS a mountpoint at depth 1, so it reaches du as a starting point — the one case du -x cannot handle
-du keeps -x AND its || true in the /tmp size breakdown@xargs -0 -r du -sh -x 2>/dev/null || true@INVARIANT PIN, not a regression guard, for the -x half: a second filesystem needs root, so -x cannot be checked behaviourally here and a mutant dropping it SURVIVED. The `|| true` half IS behaviourally covered, by route (b) in section 4b — this literal pins both, so read it as two claims.
-du keeps -x AND its || true in the /home size breakdown@xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>/dev/null || true@same pair of claims for section 6c's call site
+du keeps -x AND its || true in the /tmp size breakdown@xargs -0 -r du -sh -x 2>>"$SCAN_DUERR" || true@INVARIANT PIN, not a regression guard, for the -x half: a second filesystem needs root, so -x cannot be checked behaviourally here and a mutant dropping it SURVIVED. The `|| true` half IS behaviourally covered, by route (b) in section 4b — this literal pins both, so read it as two claims. The redirection is part of the literal on purpose: it was `2>/dev/null` until round 3, and a du that cannot read a path is then an under-count with no marker (section 4b-iii).
+du keeps -x AND its || true in the /home size breakdown@xargs -0 -r du -sh -x < "$ONROOT_LIST" 2>>"$DU_ERR" || true@same three claims for section 6c's call site; 6c is root-only, so its du-stderr capture is an INVARIANT PIN with no behavioural half
+section 5's PVC listing keeps du's stderr too@xargs -0 -r du -sh --exclude=/mnt 2>>"$DU_ERR" || true@root-only INVARIANT PIN: the third du site, discarding its stderr the way the other two did until round 3
+the du blind spot is REPORTED, not merely captured@_report_unreadable@capturing a stream nothing reads is worse than discarding it — it looks like coverage. Behaviourally covered for size_breakdown in section 4b-iii; this pins that the two root-only sites call it as well.
+every temp file this script opens carries an identifying name@mktemp "/tmp/disk-accounting-$1.XXXXXX"@a bare `mktemp` writes /tmp/tmp.XXXXXXXXXX — an unattributable file, in the directory this script exists to diagnose
+the EXIT trap names a FUNCTION, not a fixed list of files@trap _cleanup_temps EXIT@a trap naming a fixed LIST is an enumeration by eye: the three breakdown temp files were never in either version of it. This row pins the NAME only — the ORDER is a separate guard below, because a description wider than its check is how six guards in one session read as coverage while providing none.
 section 5's du TOTAL is guarded, not bare@|| echo "COULD NOT MEASURE: du failed under /var/lib/rancher/k3s/storage@it printed an under-counted total, exited 1 with its message already at /dev/null, and set -e then killed sections 6..8. Root-only, so this is an INVARIANT PIN; the failure itself is measured in section 4b route (b).
 section 1's dumpe2fs pipeline is guarded@|| echo "COULD NOT MEASURE: dumpe2fs read no ext4 superblock fields@$DEV is a GUESS and grep exits 1 on no match, so a wrong device killed the whole report at section 1. Root-only: INVARIANT PIN.
 the root device reading cannot kill the run@ROOT_DEV=$(_dev_of /) || ROOT_DEV=@a bare VAR=$(...) is a CHECKED command under set -e; and an EMPTY root device makes split_by_device call every /home directory foreign
@@ -1011,6 +1198,20 @@ the seam reads no variable at all@if (return 0 2>/dev/null); then@`return` canno
 section 6d reports what its device filter EXCLUDED@foreign_entries /tmp@dropping a foreign mount silently is the floor-presented-as-a-total failure this file exists to prevent
 the device id is validated as digits before it reaches sed@_dev_is_valid "$dev"@the value is interpolated into a sed script; a / or a * would change the expression rather than fail
 REQUIRED
+
+# 🔴 ORDER, NOT JUST PRESENCE — the other half of the row above. A trap that
+# names the right function but goes up AFTER the first `mktemp` does not cover
+# that file on the exit path the `mktemp` line itself can take, and no
+# fixed-string pin can see the difference. Line numbers are read from the
+# comment-stripped copy, which is fine: only their ORDER is asserted.
+trap_line="$(grep -n 'trap _cleanup_temps EXIT' "$CODE_FILE" | head_n 1 | cut -d: -f1)"
+denied_line="$(grep -n 'DENIED_LOG=\$(mktemp' "$CODE_FILE" | head_n 1 | cut -d: -f1)"
+case "${trap_line:-x}${denied_line:-x}" in
+  *[!0-9]*) fail "the EXIT trap / first mktemp ordering cannot be read (trap=[${trap_line:-}] mktemp=[${denied_line:-}]) — one of them is gone" ;;
+  *) [ "$trap_line" -lt "$denied_line" ] \
+       && pass "the EXIT trap is installed BEFORE the run's first mktemp (line $trap_line < $denied_line)" \
+       || fail "the EXIT trap is installed at line $trap_line, AFTER the first mktemp at $denied_line — that file is uncovered on the exit path its own creation can take" ;;
+esac
 
 # --------------------------------------------------------------------------- #
 echo "== 7b. THE set -e SWEEP — an unguarded statement is a truncated report =="
@@ -1072,6 +1273,69 @@ sweep_n="$(printf '%s\n' "$sweep_hits" | grep -c . || true)"
   || fail "the set -e sweep found $sweep_n unguarded statement-level commands, expected the 1 pinned below — a new one truncates the report with no message: [$sweep_hits]"
 has "the one unguarded statement is section 2's process-substitution find" \
     "$sweep_hits" 'find "$d" -xdev -printf'
+
+# 🔴 A SECOND LEDGER, OVER WHAT THE SWEEP ABOVE STRUCTURALLY CANNOT SEE — and it
+# exists because the CLAIM and the SCAN disagreed. The script's sweep comment
+# read "Everything that scan reports is guarded above EXCEPT these" and then
+# listed the two `out=$(… | sort …)` captures, which a reader takes for the
+# complete inventory of deliberate `set -e` exposure. It is not: the sweep keys
+# on a line's FIRST WORD and drops any line containing `||`, so a pipeline
+# headed by `for`/`done`/`printf` is invisible to it, and so is one whose EARLY
+# stages are guarded while its LAST stage is not. THREE statement-level
+# pipelines ending in an unguarded `sort` were therefore never in either the
+# scan or the list.
+#
+# `sort` is deliberately never guarded — the whole point of `head_n` is that
+# `sort` never takes SIGPIPE, and MEASURED, a `|| true` on it breaks both
+# `sigpipe-head-closes-the-pipe` rows. So this ledger does not demand a guard.
+# It pins the NUMBER, failing when the set GROWS *or* SHRINKS, so the comment
+# and the code cannot drift apart again silently.
+#
+# The discriminator is positional and needs no guess: take the text AFTER the
+# LAST `sort` on the joined line, and treat the site as guarded only if a `||`
+# appears there. Section 6d's entry-name families is the one line where it does
+# (`{ … | sort | uniq -c | sort -rn | head_n 20; } || true`).
+sort_sites() { # $1 = file -> joined lines whose LAST sort stage carries no ||
+  local l
+  grep -v '^[[:space:]]*#' "$1" \
+    | sed -e ':a' -e '/\\$/N' -e 's/\\\n/ /' -e 'ta' \
+    | grep -E '\| *sort[[:space:]]' \
+    | while IFS= read -r l; do
+        case "${l##*sort}" in *'||'*) : ;; *) printf '%s\n' "$l" ;; esac
+      done
+}
+
+# 🔴 THE CANARY EXERCISES BOTH BRANCHES, so one file is the positive control AND
+# the negative one: two unguarded sort stages (a statement-level pipeline the
+# first-word sweep would miss, and a multi-line `out=$(…)` capture), one guarded
+# group that must be EXCLUDED, one sort-free line, one commented sort.
+SORT_CANARY="$TMP/sort-canary.txt"
+{
+  printf '%s\n' 'done | sort -rn | head_n 5'
+  printf '%s\n' 'out=$(find /b \'
+  printf '%s\n' '  | sort -rh | head_n 15)'
+  printf '%s\n' '{ ls /c | sort -rn | head_n 5; } || true'
+  printf '%s\n' 'ls /d | wc -l'
+  printf '%s\n' '# ls /e | sort -rn'
+} > "$SORT_CANARY"
+sort_canary_hits="$(sort_sites "$SORT_CANARY" || true)"
+sort_canary_n="$(printf '%s\n' "$sort_canary_hits" | grep -c . || true)"
+[ "$sort_canary_n" -eq 2 ] && pass "POSITIVE CONTROL: the sort ledger finds both unguarded canary sort stages (2)" \
+  || fail "POSITIVE CONTROL FAILED: the sort ledger found $sort_canary_n unguarded sort stages in a canary holding exactly 2 — its count over the real script would mean nothing"
+lacks "the sort ledger EXCLUDES a sort inside a { … } || true group" "$sort_canary_hits" "/c"
+lacks "the sort ledger does NOT flag a commented sort" "$sort_canary_hits" "/e"
+
+sort_hits="$(sort_sites "$SCRIPT" || true)"
+sort_n="$(printf '%s\n' "$sort_hits" | grep -c . || true)"
+[ "$sort_n" -eq 5 ] && pass "exactly five unguarded sort stages, as the script's sweep comment now says" \
+  || fail "the sort ledger found $sort_n unguarded sort stages, expected the 5 the script's sweep comment enumerates — a new one is an exposure nobody wrote down: [$sort_hits]"
+# Named individually, because a bare 5 could be any five. The three below are
+# precisely the ones the first-word sweep cannot reach.
+has "the sort ledger names section 5's PVC listing" "$sort_hits" 'du -sh --exclude=/mnt'
+has "the sort ledger names section 5's inodes-per-PVC loop" "$sort_hits" 'done | sort -rn | head_n 15'
+has "the sort ledger names section 6c's /home listing" "$sort_hits" '< "$ONROOT_LIST"'
+has "the sort ledger names the size-breakdown capture" "$sort_hits" 'du -sh -x 2>>"$SCAN_DUERR"'
+has "the sort ledger names the inode-breakdown capture" "$sort_hits" '| sort -rn | head_n 15)'
 
 # --------------------------------------------------------------------------- #
 # 🔴 DO NOT print `RESULT: PASS (exit=0)` here — that grammar is RESERVED to

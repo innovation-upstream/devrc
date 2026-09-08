@@ -3950,14 +3950,21 @@ SHELL_TESTS=(
   # directory literally named `evil";echo PWNED-AS-$(id -un) >&2;"x`, and a
   # ~17,500-entry tree sized from the live ARG_MAX. It reaches no launcher, no
   # network and no git.
-  # 🔴 THIS COMMENT PREVIOUSLY SAID "282 lines" and described the seam as
-  # `BASH_SOURCE[0] != $0 returns before the root check`. Both were stale: 282
-  # was the count at the merge base (567 after round 1, 730 after round 2), and
-  # that BASH_SOURCE expression was MEASURED reachable from the environment,
-  # removed, and is now a banned pattern in the suite's own scanner — which only
-  # reads `diagnose-disk-accounting.sh`, so this copy survived it. A stale
-  # justification is why the wrong number is quoted downstream, so no line count
-  # is stated here at all any more.
+  # 🔴 THIS COMMENT HAS NOW CARRIED A WRONG LINE COUNT TWICE, in the commit
+  # correcting the previous wrong one each time. It said "282 lines"; round 2
+  # replaced that with "282 at the merge base (567 after round 1, 730 after
+  # round 2)" — and 730 was false the moment it was typed (the file was 766).
+  # A count of a file that changes every round cannot be maintained in a comment
+  # in a different file, so none is stated here: run
+  # `wc -l scripts/diagnose-disk-accounting.sh`. The only figure that cannot go
+  # stale is anchored to a sha, and one is enough — the file entered this PR's
+  # history at 282 lines (`git show c1169e3b:scripts/diagnose-disk-accounting.sh
+  # | wc -l`) and has grown with each audit round since.
+  # The other half of the old stale claim: the seam was described as
+  # `BASH_SOURCE[0] != $0 returns before the root check`. That expression was
+  # MEASURED reachable from the environment, removed, and is now a banned
+  # pattern in the suite's own scanner — which only reads
+  # `diagnose-disk-accounting.sh`, so this copy survived it.
   # Watched red: `s += $col` -> `s += $8` fails it with "SIZE/OFF found at col 7".
   "scripts/tests/test_diagnose_disk_accounting.sh"
 )
