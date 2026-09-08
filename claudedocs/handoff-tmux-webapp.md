@@ -1912,6 +1912,110 @@ mechanism is worth not re-deriving.
   EMPTY conclusion as busy, not as settled. On a red, read WHICH test failed and
   which NODE the PipelineRun landed on before debugging the diff (ranks 17, 18).
 
+### ✅ RESOLVED — `devrc-ci`'s pytests leg was RED ON `main` ITSELF, from a nixpkgs lockfile bump
+
+🔴 **Root cause: the flake lockfile bump `cb86343d` (#1382, 2026-09-07 22:55) moved two
+nix-provided tools out from under pins the repo asserts on.** No PR caused any of the 7
+failures. Fixed by **#1392** (`fix/toolchain-drift-2026-09`), squash `94f82796`, merged
+2026-09-08T18:26:46Z — verified on `origin/main` **by content, not ancestry**:
+`PINNED_VERSION = "1.18.29"` in `scripts/tests/test_opencode_engine.py` and
+`classify_age_refusal` present ×2 in `scripts/analyze-service-index/restore-verify.py`.
+
+| tool | flake.lock before | after (dev shell **and** nix sandbox) | what it broke |
+|---|---|---|---|
+| `opencode` | 1.18.21 | 1.18.29 | 1 failure — the version pin |
+| `age` / `age-keygen` | 1.3.1 | 1.3.2 | 6 failures — escrow/backup guards keyed to 1.3.1's behaviour |
+
+**Both are working gates, not bad tests.** The version assertion's own docstring already
+carried the remedy: *"If flake.lock genuinely moved opencode, do NOT just bump
+PINNED_VERSION: re-derive the header's measurements against the new binary first."*
+#1392 did exactly that.
+
+**Verified on the MERGED tree, because #1392's own green ran on a branch 2 commits behind
+`main`** and that is a claim about the branch, not about what merging produces. Built the
+integration tree (`f8641223` + `origin/main`, clean merge) and ran the authoritative tier
+`nix build .#checks.x86_64-linux.pytests`:
+`PASS scripts/tests (collected=12923 passed=12923 skipped=0 failed=0)` — the exact target
+that was `FAIL … failed=7` — and `TOTAL collected=20968 passed=20966 skipped=2 failed=0`,
+28/28 per-target floors, `RESULT: PASS (exit=0)`. 🔴 **The anti-vacuity check is the
+collected COUNT: 20948 → 20968.** A merged tree that still collected 20948 would have been
+the branch tree again, and the pass would have meant nothing.
+
+The evidence below is preserved as recorded — the three-way control and its ruling-out are
+sound and are what made this attributable. Only the two bullets that guessed at a mechanism
+are corrected in place.
+
+- **Symptom + exact repro:** the `tekton/devrc-pytests` check fails on any devrc PR.
+  The gate's own summary line reads
+  `FAIL  scripts/tests  (collected=12863 passed=12856 skipped=0 failed=7 errors=0)`
+  against `TOTAL collected=20908 passed=20899 skipped=2 failed=7`.
+- **Observed (with values):** two distinct error texts in the failing target, both
+  from nix-provided tools:
+  - `AssertionError: opencode on PATH is '1.18.29', but every 'measured on v1.18.21'
+    claim in scripts/opencode/opencode.jsonc, scripts/opencode/README.md and
+    scripts/tests/test_opencode_config.py is keyed to '1.18.21'.` → `assert '1.18.29' == '1.18.21'`
+  - `age-keygen: error: failed to parse input: error at line 3: unknown identity type`
+    (6 occurrences), from
+    `/nix/store/b8mq9lqr30vlmx661xhp0cwvhyns29p6-age-1.3.2/bin/age-keygen -y …`
+- **Ruled out — my change.** A THREE-WAY control, all on node `talos-xr6-r7p`, all
+  byte-identical at `failed=7`, opencode-drift 1, age-keygen 6:
+  `devrc-ci-zkcb2` rev `fec498fb5` (main + one markdown file) · `devrc-ci-rerun-ho`
+  the same commit re-run from its own spec · **`devrc-ci-ctrl-main` rev `18bc15004`
+  = `main` itself, without my commit.** A docs-only diff cannot move an opencode
+  version pin. `via: measurement`
+- **Ruled out — the node.** All four runs above ran on `talos-xr6-r7p`, and
+  `devrc-ci-sljm8` **succeeded** on that same node 7 minutes before mine with
+  `failed=0`. So this is not rank 18's device-isolated I/O contention.
+  `via: measurement`
+- **Ruled out — a flake.** The same commit re-run from its own spec produced the
+  identical failure counts. Deterministic, not timing. `via: measurement`
+- ⚠ **CORRECTED — the "NOT EXPLAINED" above was a WRONG-FILE error, not a real
+  local/CI divergence.** The bullet reasoned from `python3 -m pytest
+  scripts/tests/test_opencode_config.py` passing **640/640** locally. That file was
+  never the one failing: the assertion lives in
+  **`scripts/tests/test_opencode_engine.py::test_engine_is_the_version_every_measurement_is_keyed_to`**,
+  a different module. Run the right one and it reproduces on the dev host in under a
+  second — `assert '1.18.29' == '1.18.21'`, byte-identical to CI's text. There was no
+  divergence to explain. `via: measurement`
+- ⚠ **The "leading hypothesis" it produced is therefore REFUTED, and it was the
+  expensive kind: plausible, self-consistent, and pointing at the wrong layer.** It
+  proposed that the gate's nix shell put different binaries on PATH than an
+  interactive shell. False for opencode — both are **1.18.29** — and the nix-shell
+  difference is real only for `age` (login shell 1.3.1, dev shell 1.3.2), which is a
+  *second* cause, not the explanation for the first.
+  🔴 **The reusable tell: a failure text quotes a MODULE, and the doc quoted a
+  FILENAME the reader supplied from memory.** Read the failing test's fully-qualified
+  node id out of the gate output and run *that*, before theorising about the
+  environment. An environment theory built on a wrong-file control is a second sample
+  of nothing.
+- 🔴 **Both hand-created control PipelineRuns have served their purpose and can be
+  deleted:** `devrc-ci-ctrl-main` and `devrc-ci-rerun-ho` in ns `tekton-ci`. They are
+  evidence, not scheduled work.
+- **What actually generalises, and is worth carrying:** a lockfile bump in this repo
+  is a **behaviour change to every version-pinned guard**, and those guards are
+  deliberately environment-dependent. When `devrc-pytests` goes red across unrelated
+  PRs at once, check `git log -1 flake.lock` before reading any diff.
+
+### ⚠ Task 524's closing condition is blocked on an interactive prompt, not on a defect
+
+- **Symptom + exact repro:** launch a session from the clawgate UI; the window never
+  acquires a `claude_session_id`, so 524's mechanical closing condition cannot pass.
+- **Observed (with values):** window `@58` on `workbench`/`scratch` is in the read
+  model with `claude=true` and `claude_session_id` empty across **6 snapshots / 6
+  minutes**; `window_activity` frozen at the launch instant `1788840435`; **0** new
+  `~/.claude/projects/**.jsonl` files in 12 minutes; the pane renders Claude Code's
+  trust-folder prompt (`1. Yes, I trust this folder`).
+- **Ruled out — the PATH defect 524 fixed.** The same pane's PATH carries 15 entries
+  with `claude` resolvable at `/home/zach/.nix-profile/bin`; before the fix it was
+  the unit's 3 entries. The launcher works. `via: measurement`
+- **Leading hypothesis:** Claude Code does not create a session until the trust
+  prompt is answered, so a FIRST launch into an untrusted directory can never
+  satisfy the condition as written.
+- **Next probe:** answer the prompt in `@58` (operator decision — it is a security
+  gate), or re-launch into an already-trusted directory, then
+  `curl -s -H "Authorization: Bearer $TOK" $B/api/tmux/snapshot` and read
+  `claude_session_id` for that `window_id`. `tmux kill-window -t @58` once read.
+
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
   is a statement about the OLD leg.** A PipelineRun executes the **deployed Task object in the
