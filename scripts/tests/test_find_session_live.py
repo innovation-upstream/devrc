@@ -1618,3 +1618,297 @@ def test_a_SUPPRESSED_flag_cannot_escape_the_partition(monkeypatch):
     ledger = {d for d, _, _ in fs.ARCHIVE_ONLY_FLAGS}
     assert dests != fs.LIVE_AWARE_DESTS | ledger, (
         "an unclassified flag left the partition equality holding")
+
+
+# =========================================================================== #
+# ROUND 4 — the two crashes/degenerates a live trace found, and the WINDOW
+# =========================================================================== #
+# 🔴 RED AT BASE, AND HOW IT WAS SHOWN. Every node below was replayed against a
+# second worktree checked out at `origin/main` (18bc1500) with THIS FILE copied
+# in and nothing else changed, so the only difference between the two runs is
+# the implementation. The matrix is in the PR body.
+#
+# 🔴 TWO OF THESE ARE CONTROLS, NOT COVERAGE, and they are named so nobody
+# counts them as bugs fixed: `test_a_REAL_hosts_object_still_parses` and
+# `test_tail_of_exactly_ONE_line_is_accepted` are BOUNDARY controls — they
+# prove the two new guards reject only what they claim to reject. They are
+# GREEN at base, deliberately: a guard that also broke the happy path would
+# show up here and nowhere else.
+R4_BOUNDARY_CONTROLS = (
+    "test_a_REAL_hosts_object_still_parses",
+    "test_tail_of_exactly_ONE_line_is_accepted",
+)
+
+
+def test_the_R4_ledger_names_only_tests_that_exist():
+    """The ledger above is a claim about this file; pin it to the file."""
+    here = set(globals())
+    missing = [n for n in R4_BOUNDARY_CONTROLS if n not in here]
+    assert not missing, f"ledger names tests that do not exist: {missing}"
+
+
+# --------------------------------------------------------------------------- #
+# R4-1  a non-dict `hosts` crashed a function contracted never to raise
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("body,label", [
+    ('{"hosts": [1, 2]}', "hosts is a list"),
+    ('{"hosts": {"wb": null}}', "a host entry is null"),
+    ('{"hosts": {"wb": []}}', "a host entry is a list"),
+    ('{"hosts": {"wb": "reachable"}}', "a host entry is a string"),
+], ids=["list", "null-entry", "list-entry", "str-entry"])
+def test_a_non_dict_hosts_is_a_DISCRIMINATED_error_not_a_crash(body, label):
+    """🔴 R4-1. `live_scan`'s entire contract is to RETURN a status-
+    discriminated result rather than raise — the caller's next move is to print
+    "the live fleet was NOT measured". The `isinstance(report, dict)` guard
+    proved the top level was an object and then this code called `.items()` on
+    whatever `hosts` was and `.get()` on each value.
+
+    MEASURED at base: all four raise AttributeError straight out of
+    `live_scan`, past the `except` that only wraps the subprocess call.
+    """
+    fs_run = lambda argv, timeout=None: (0, body, "")  # noqa: E731
+    saved, fs.RUN = fs.RUN, fs_run
+    try:
+        res = fs.live_scan(("zzterm",))
+    except Exception as e:  # noqa: BLE001
+        pytest.fail(f"{label}: live_scan RAISED {type(e).__name__}: {e} — a "
+                    "function whose whole job is to report 'not measured' "
+                    "cannot report it by crashing")
+    finally:
+        fs.RUN = saved
+    assert res["status"] == "error", (
+        f"{label}: a malformed report must be `error` (nothing measured), got "
+        f"{res['status']!r}")
+    assert res["hosts_reachable"] is None and res["hosts_unreachable"] is None, (
+        f"{label}: an unmeasured scan must publish None host lists, never [] — "
+        "an empty unreachable list reads as 'every host answered'")
+    assert "hosts" in (res["error"] or ""), (
+        f"{label}: the error must name WHICH part of the report was wrong; "
+        f"got {res['error']!r}")
+
+
+def test_a_REAL_hosts_object_still_parses():
+    """🔴 R4-1 BOUNDARY CONTROL (green at base). The guard must reject only
+    malformed shapes. A guard that also rejected a real report would make every
+    live scan read as unmeasured — strictly worse than the crash it replaced.
+    """
+    body = json.dumps({
+        "hosts": {"workbench": {"reachable": True, "windows": [ROW_VIOLET]},
+                  "laptop": {"reachable": False, "windows": []}},
+        "filters": {"match_fields": ["task", "label", "codename"]},
+    })
+    fs_run = lambda argv, timeout=None: (0, body, "")  # noqa: E731
+    saved, fs.RUN = fs.RUN, fs_run
+    try:
+        res = fs.live_scan(("zzterm",))
+    finally:
+        fs.RUN = saved
+    assert res["status"] == "ok"
+    assert res["hosts_reachable"] == ["workbench"]
+    assert res["hosts_unreachable"] == ["laptop"]
+    assert res["rows"] == [ROW_VIOLET]
+
+
+# --------------------------------------------------------------------------- #
+# R4-2  `--tail` below 1 printed a header naming a line count nothing honoured
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("value", [0, -5], ids=["zero", "negative"])
+def test_tail_below_one_is_a_USAGE_error(monkeypatch, value):
+    """🔴 R4-2. MEASURED at base against a real window: `--tail 0` and
+    `--tail -5` were both ACCEPTED, both exited 0, and printed a scrollback
+    block headed `(last 0 lines)` / `(last -5 lines)` over a value
+    `session-manager tail` had silently clamped to zero. Output-line deltas
+    over one window at four values: 0 -> +0, -5 -> +0, 5 -> +5, 40 -> +40.
+
+    Refused, not clamped — the same call `--limit < 1` gets one flag over.
+    """
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--tail", str(value)], run)
+    assert got["rc"] == fs.EXIT_USAGE, (
+        f"--tail {value} exited {got['rc']}, not EXIT_USAGE — a degenerate "
+        "line count was accepted and rendered as a header nobody honoured")
+    assert "--tail must be at least 1" in got["err"]
+    assert not tail_calls(got["calls"]), (
+        "a refused --tail must not shell out to `session-manager tail`")
+
+
+def test_tail_of_exactly_ONE_line_is_accepted(monkeypatch):
+    """🔴 R4-2 BOUNDARY CONTROL (green at base). `1` is the smallest honoured
+    value and must still work — a guard written `<= 1` would pass every test
+    above and break the real boundary.
+    """
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--tail", "1"], run)
+    assert got["rc"] == fs.EXIT_OK, got["err"]
+    assert tail_calls(got["calls"]), "--tail 1 must actually tail"
+    assert "--lines" in tail_calls(got["calls"])[0]
+    argv = tail_calls(got["calls"])[0]
+    assert argv[argv.index("--lines") + 1] == "1"
+
+
+# --------------------------------------------------------------------------- #
+# R4-3  the DEFAULT ARCHIVE WINDOW, and the fact that it is never silent
+# --------------------------------------------------------------------------- #
+NOW = __import__("datetime").datetime(2026, 9, 8, 14, 30, 5)
+
+
+def test_the_default_window_is_DEFAULT_SINCE_DAYS_and_midnight_anchored():
+    """🔴 R4-3. Derived from the constant, never a second literal: a test that
+    hardcoded `12` would go green against a code change that moved the constant
+    and left the behaviour behind.
+    """
+    a = fs.parse_args(["zzterm"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert source == fs.WINDOW_DEFAULT
+    expected = (NOW - __import__("datetime").timedelta(
+        days=fs.DEFAULT_SINCE_DAYS)).replace(hour=0, minute=0, second=0,
+                                             microsecond=0)
+    assert since == expected, (
+        f"the default window must be exactly {fs.DEFAULT_SINCE_DAYS} whole "
+        f"days back at midnight; got {since}")
+    assert since.hour == since.minute == since.second == 0, (
+        "a window anchored at the current TIME of day cannot be spelled by a "
+        "caller, who only has --since YYYY-MM-DD")
+
+
+def test_an_explicit_since_OVERRIDES_the_default():
+    a = fs.parse_args(["zzterm", "--since", "2026-01-02"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert source == fs.WINDOW_EXPLICIT
+    assert since.date().isoformat() == "2026-01-02"
+
+
+def test_all_time_LIFTS_the_window_entirely():
+    a = fs.parse_args(["zzterm", "--all-time"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert source == fs.WINDOW_ALL_TIME
+    assert since is None, "--all-time must pass NO cutoff to the walk"
+
+
+def test_a_SKILL_query_is_UNWINDOWED_because_it_is_a_historical_question():
+    """🔴 R4-3, AND THE REASON THE EXEMPTION EXISTS. `adoption-scan` routes
+    "has skill X ever been used" here BY NAME. Windowing that would convert a
+    corpus-wide "no recorded use" into "not in the last N days" with nothing on
+    screen to say so — and the `skills_used` rollup is itself forward-only from
+    2026-08-29, so the evidence base is young enough for a short window to start
+    discarding real uses within days.
+    """
+    a = fs.parse_args(["--skill", "browser"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert source == fs.WINDOW_SKILL_EXEMPT
+    assert since is None, (
+        "a --skill query must reach the whole corpus; a windowed one answers "
+        "'used recently', which is a different question")
+
+
+def test_an_EXPLICIT_since_still_wins_under_skill():
+    """The exemption removes a default nobody asked for; it does not override
+    an instruction somebody gave."""
+    a = fs.parse_args(["--skill", "browser", "--since", "2026-01-02"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert source == fs.WINDOW_EXPLICIT
+    assert since is not None and since.date().isoformat() == "2026-01-02"
+
+
+def test_since_and_all_time_TOGETHER_is_a_USAGE_error(monkeypatch):
+    """Two windows named at once is refused, not resolved — picking a winner
+    makes one of the two flags silently inert."""
+    run = make_run()
+    got = run_main(monkeypatch,
+                   ["zzterm", "--since", "2026-01-02", "--all-time"], run)
+    assert got["rc"] == fs.EXIT_USAGE
+    assert "two different windows" in got["err"]
+
+
+def test_the_WINDOW_IS_ANNOUNCED_on_the_classic_path(monkeypatch):
+    """🔴 A BOUND NOBODY IS TOLD ABOUT IS A SILENT CAP. The classic path's
+    stdout is the bare JSON array every caller parses, so the window goes to
+    stderr — and it must go there even when the run found nothing, because
+    "no sessions matched" under an unannounced window is the exact sentence
+    that reads as a corpus-wide absence.
+    """
+    run = make_run()
+    got = run_main(monkeypatch, ["zzterm"], run, archive=[])
+    assert "ARCHIVE window:" in got["err"], got["err"]
+    assert f"last {fs.DEFAULT_SINCE_DAYS} days" in got["err"]
+    assert "--all-time" in got["err"], (
+        "the notice must say how to LIFT the bound, not just that one exists")
+    assert "DEFAULT" in got["err"]
+
+
+def test_the_window_notice_says_NOT_MEASURED_rather_than_zero():
+    """🔴 A `0 skipped` from a counter nobody wired is indistinguishable from a
+    real one. `window_notice` is handed `None` when the walk published no
+    counters, and must say so."""
+    since, _ = fs.resolve_window(fs.parse_args(["zzterm"]), now=NOW)
+    line = fs.window_notice(since, fs.WINDOW_DEFAULT, skipped=None)
+    assert "NOT MEASURED" in line
+    assert "skipped unopened: 0" not in line
+
+
+def test_the_window_notice_reports_a_MEASURED_drop_with_its_denominator():
+    since, _ = fs.resolve_window(fs.parse_args(["zzterm"]), now=NOW)
+    line = fs.window_notice(since, fs.WINDOW_DEFAULT, skipped=5310,
+                            examined=624)
+    assert "5310" in line and "5934" in line, (
+        f"the cap's size must carry its denominator; got {line!r}")
+
+
+def test_the_all_time_and_skill_notices_do_NOT_claim_a_cut():
+    all_time = fs.window_notice(None, fs.WINDOW_ALL_TIME)
+    assert "WHOLE corpus" in all_time and "nothing was cut" in all_time
+    skill = fs.window_notice(None, fs.WINDOW_SKILL_EXEMPT)
+    assert "WHOLE corpus" in skill and "--skill" in skill
+
+
+def test_the_window_TRAVELS_IN_THE_JSON_envelope(monkeypatch):
+    """🔴 `total` is a count UNDER A WINDOW, and a caller that cannot see the
+    window reads it as a corpus-wide one."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([])),
+                             (): (0, live_report([]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json"], run,
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    doc = json.loads(got["out"])
+    win = doc["archive"]["window"]
+    assert win["source"] == fs.WINDOW_DEFAULT
+    assert win["default_days"] == fs.DEFAULT_SINCE_DAYS
+    assert win["since"] is not None, "a windowed run must publish its cutoff"
+    assert "ARCHIVE window:" in win["message"]
+    # The seam replaced `archive_search`, so nothing published counters — and
+    # that must publish as null, not as a reassuring zero.
+    assert win["skipped_stale"] is None
+
+
+def test_the_window_block_is_NULL_COUNTED_when_the_archive_never_ran(monkeypatch):
+    """The fast path pays for no walk at all, so its counters are not a zero."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json"], run)
+    doc = json.loads(got["out"])
+    assert doc["archive"]["ran"] is False
+    win = doc["archive"]["window"]
+    assert win["skipped_stale"] is None and win["sessions_examined"] is None
+
+
+def test_the_window_is_printed_in_the_LIVE_paths_ARCHIVE_BLOCK(monkeypatch):
+    """Its own line under its own heading — the same reason the PARTIAL
+    coverage caveat is repeated there rather than inherited from LIVE."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([])),
+                             (): (0, live_report([]))})
+    got = run_main(monkeypatch, ["zzterm", "--live"], run,
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    assert "ARCHIVE window:" in got["out"], got["out"]
+
+
+def test_all_time_is_CLASSIFIED_and_gets_the_archive_only_notice(monkeypatch):
+    """🔴 It is a WINDOW, not a corpus selector, so it gets the SHORT notice —
+    the same call `--since` gets, and for the same reason: appending "pass
+    --deep" to every window flag is the noise that trains a reader to skip the
+    line."""
+    assert "all_time" in {d for d, _, _ in fs.ARCHIVE_ONLY_FLAGS}, (
+        "--all-time steers only the archive; leaving it unclassified breaks "
+        "the partition gate")
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--all-time"], run)
+    assert "--all-time" in got["err"]
+    assert "ARCHIVE-ONLY flags" in got["err"]
+    assert "pass --deep to actually search the corpus you selected" not in got["err"]

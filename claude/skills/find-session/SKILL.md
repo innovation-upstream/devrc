@@ -1,7 +1,7 @@
 ---
 name: find-session
 description: "Find a past Claude Code OR opencode session by keyword — searches both runtimes on both hosts and returns ranked sessions with the resume command. Use to recover 'the session where we did X'."
-argument-hint: "<term> [<term> …] | --skill NAME [--live [--deep] [--tail N]] [--limit N] [--project SUBSTR (archive only)] [--since YYYY-MM-DD (archive only)] [--any (archive only)] [--claude-only|--opencode-only]"
+argument-hint: "<term> [<term> …] | --skill NAME [--live [--deep] [--tail N]] [--limit N] [--project SUBSTR (archive only)] [--since YYYY-MM-DD | --all-time (archive only)] [--any (archive only)] [--claude-only|--opencode-only]"
 allowed-tools: Bash, Read
 ---
 
@@ -11,20 +11,42 @@ Goal: kill the hand-typed "find the session where we did pr 235 / migrated the r
 
 Query: `$ARGUMENTS`.
 
-## 🔴 If the user thinks it might still be RUNNING, use `--live` — 1.8 s, not 30 s
+## 🔴 If the user thinks it might still be RUNNING, use `--live` — ~1 s, not ~8 s (or ~43 s unwindowed)
 
-Measured 2026-08-28: the transcript walk below takes **30.1 s**; the live cross-host tmux
-scan takes **1.82 s**, and its rows already carry the task, the label, the hotkey, the
-status, `waiting_probable`, the path and the session id. For *"find that thing I lost
-track of, is it still running, which window, where did it leave off"* the archive is the
-**wrong instrument** — it searches the past for a question about now.
+Re-measured 2026-09-08: the UNWINDOWED transcript walk takes **42.96 s cold / 14.26 s
+warm**, while the live cross-host tmux scan takes **1.10 s / 1.21 s** over two runs, and its
+rows already carry the task, the label, the hotkey, the status, `waiting_probable`, the path
+and the session id. For *"find that thing I lost track of, is it still running, which
+window, where did it leave off"* the archive is the **wrong instrument** — it searches the
+past for a question about now.
+
+⚠ **These numbers age; the RATIO is the argument.** The 2026-08-28 figures were 30.1 s and
+1.82 s. Re-measure rather than quoting this paragraph's age — the corpus grows and the live
+fleet does not, so live-first only ever gets more right.
 
 ```bash
 python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tail 80]
 ```
 
-- **Live first, archive only as a fallback.** If any live window matched, the 30 s walk is
+- **Live first, archive only as a fallback.** If any live window matched, the archive walk is
   skipped entirely and the output says so. `--deep` runs both.
+- 🔴 **THE ARCHIVE LEG IS WINDOWED BY DEFAULT — the last 12 days.** A result set is a count
+  UNDER A WINDOW, so **never report "no sessions matched" as a corpus-wide absence**: the run
+  prints its window on stderr (`ARCHIVE window: the last 12 days (since …) — DEFAULT`) with
+  the number of transcripts it skipped unopened, and `--json --live` carries the same facts as
+  `archive.window`. Pass **`--all-time`** for the whole corpus (~15 s warm, ~43 s cold) or `--since YYYY-MM-DD`
+  for a different one; naming both is a usage error. Measured 2026-09-08 `--claude-only`,
+  warm, back to back, quoting the walk's OWN skip counter: `--since 3d` 2.40 s / skipped 780
+  of 924, **`--since 12d` 7.35 s / skipped 467 of 924**, `--since 30d` 13.35 s / skipped
+  **0** of 924, `--all-time` 13.09 s. 🔴 **A 30-day default would be a NO-OP** — it skips
+  zero files, because nothing in this corpus is older than that; it would cap the answer and
+  buy nothing. ⚠ The walked set is **924 session transcripts**, not the 5,954 `*.jsonl` a
+  bare `find` reports — ~5,030 of those are `subagents/agent-*.jsonl`, excluded by name.
+  🔴 **`--skill` is EXEMPT and stays corpus-wide.** "Has skill X ever been used" is a
+  historical question and `adoption-scan` routes it here by name; windowing it would turn a
+  corpus-wide "no recorded use" into "not in the last 12 days" with nothing on screen to say
+  so. An explicit `--since` still applies under `--skill` — the exemption only removes a
+  default nobody asked for.
 - **Matched against `task`, `label` and `codename` — deliberately NOT `path`.** Measured on
   a 72-row scan: one substring hit **1** row on `task` and **29** on `path`, because nearly
   every window shares a repo path. The LIVE header prints the field list it searched, so
@@ -50,7 +72,7 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   `archive.live_coverage_complete: false` beside `live_ids_measured: true`. Do not report
   an `<UNMEASURED>` hit as finished.
 - 🔴 **These flags reach the ARCHIVE leg ONLY** — `--skill`, `--any`, `--project`, `--since`,
-  `--claude-only`, `--opencode-only`, `--all` — and the tool names them on stderr. (That
+  `--all-time`, `--claude-only`, `--opencode-only`, `--all` — and the tool names them on stderr. (That
   list is `ARCHIVE_ONLY_FLAGS` in the script and is pinned against this line by
   `test_find_session_skill_contract.py`; it carries no count, because a count is a claim
   nothing enforces.) Surface
