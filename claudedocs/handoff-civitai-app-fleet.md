@@ -346,9 +346,14 @@ done
 git -C ~/workspace/civit/civitai-app-sensei show \
   origin/trunk:src/toolchain-lockstep.test.ts | grep -cE '^\s*it\('
 
-# all six released apps serve
+# all six released apps serve.
+# 🔴 APEX is the app-hosting apex domain and is DELIBERATELY not committed —
+# devrc is a PUBLIC repo and scripts/tests/test_no_client_hostnames.py fails on a
+# client subdomain literal. This line spelled it until 2026-09-08 and was RED on
+# main for it. Read the apex off `civitai app doctor`, then:
+APEX=<the app-hosting apex domain>
 for h in app-requests generate-from-model custom-generators \
          playable-collections model-benchmarking sensei; do
-  curl -sS -o /dev/null -w "$h %{http_code}\n" https://$h.civit.ai/
+  curl -sS -o /dev/null -w "$h %{http_code}\n" "https://$h.$APEX/"
 done
 ```
