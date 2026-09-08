@@ -18,12 +18,15 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- **`ZacxDev/cairn` has FIVE merged PRs and ONE OPEN.** #1 SIGHUP hot-reload, #2 the ledger
+- **`ZacxDev/cairn` has SIX merged PRs and NONE open.** #1 SIGHUP hot-reload, #2 the ledger
   narrowing (`c8aee7203`), #3 `8e4ef84` (spawn-port TOCTOU), #4 `218b6c1` (the nix flake),
-  #5 `9213726` (CI floor + reload-atomicity control). **OPEN: #6
-  `fix/leakscan-derived-coverage`, head `b5bd231` — rank 12, leakscan coverage derived from
-  content.** All three checks pass (leakscan, nix, tests); `mergeable=MERGEABLE`,
-  `mergeStateStatus=CLEAN` as of 2026-09-08.
+  #5 `9213726` (CI floor + reload-atomicity control), and **#6 `9d58f02`
+  (2026-09-08T19:55:20Z) — rank 12, leakscan coverage derived from content.**
+  Verified by CONTENT, never ancestry: on `origin/main` `tests/leakscan.py` resolves
+  `partition_tracked_files`/`BINARY_SNIFF_BYTES` **10** times, and the only surviving
+  `TEXT_SUFFIXES` hits are prose in comments and test docstrings — the constant is gone.
+  🔴 **#6's tree WAS the merged tree**: it sat directly on `9213726` and nothing landed
+  between, so its three green checks were a claim about what actually merged.
 - 🔴 **RANK 3 HALF 2 IS CLAIMED AND IN FLIGHT BY ANOTHER SESSION — DO NOT START IT.**
   `claim-work cairn-oss-multi-instance-3` returns **rc 10** (taken by another owner, not
   rc 12/"already yours"), claimed 2026-09-08T13:26:46-05:00 for exactly the named slice:
@@ -38,10 +41,14 @@ is the PRIVATE proposal, not this doc.
 - **Rank 3's closing condition re-verified NOT met 2026-09-08** (and this is expected while
   the above is unpushed): `readlink -f ~/.local/bin/cairn` → `/home/zach/workspace/devrc/
   scripts/cairn`, `grep -c cairn ~/workspace/devrc/flake.nix` → **0**.
-- **Rank 12 — BUILT, PR OPEN, not merged.** `leakscan.py`'s coverage no longer comes from a
-  hand-written `TEXT_SUFFIXES` set; it is derived from the bytes (a NUL within the first
-  8000, git's own rule). Every enumerated file lands in exactly one bucket — scanned, or
-  skipped-with-a-reason — and `main` names every skip in its output.
+- **Rank 12 — ✅ MERGED and CLOSED**, claim `cairn-oss-multi-instance-12` RELEASED.
+  `leakscan.py`'s coverage no longer comes from a hand-written `TEXT_SUFFIXES` set; it is
+  derived from the bytes (a NUL within the first 8000, git's own rule). Every enumerated
+  file lands in exactly one bucket — scanned, or skipped-with-a-reason — and `main` names
+  every skip in its output. **Watched on the MERGED tree, not inferred from the diff:**
+  a worktree at `origin/main` running `python3 tests/leakscan.py` printed
+  `SKIPPED tests/leakscan.py — the gate's own fixtures, exempt by name`, then
+  `38 file(s) scanned, 1 skipped`, `0 findings`, rc 0.
 - **Ranks 4, 8, 13, 15 remain unclaimed and untouched this session.** **Rank 11 re-verified
   live and still refused** (`cairn create --scope cairn …` → rc 6, `[not-found]`).
 - 🔴 **A cairn-built image is still NOT PUBLISHED.** #4 produces a loadable tarball; nothing
@@ -268,7 +275,7 @@ countable.
 - **Next probe:** none. Merge #5. If it recurs after that, the assertion now names the constant
   it fell short of rather than the budget, so read the message.
 
-### CLOSED-PENDING-MERGE 2026-09-08 — rank 12, leakscan's coverage was an enumeration
+### CLOSED 2026-09-08 — rank 12, leakscan's coverage was an enumeration (MERGED as `9d58f02`)
 - **Symptom + exact repro:** not a failure anyone saw — a silent gap. `git show
   9213726:tests/leakscan.py` line 110: `TEXT_SUFFIXES` is a hand-written set, and
   `tracked_files()` drops any file whose suffix is absent from it. The run then prints
@@ -289,7 +296,8 @@ countable.
 - **Ruled out: that a suffix fast-path was worth keeping alongside the derivation.** Keeping
   it leaves the enumeration load-bearing, so the class stays open; the sniff is bounded at
   8000 bytes, so a huge binary is not read in full anyway. via: code
-- **Fixed in `ZacxDev/cairn` #6 (`b5bd231`), NOT YET MERGED.** `partition_tracked_files()`
+- **Fixed in `ZacxDev/cairn` #6, MERGED 2026-09-08 as `9d58f02`** (PR head was `b5bd231`).
+  `partition_tracked_files()`
   buckets every enumerated file — including the directory skips — so
   `set(scanned) | set(skipped)` equals the enumeration by construction and the test asserts
   it without re-implementing any filtering. `enumerate_repo(root)` is parameterised so the
@@ -312,7 +320,8 @@ countable.
   battery's snapshot afterwards. via: measurement
 - **Full suite 1703 passed / 0 failed, 547s local; CI `collected=1703 failed=0 floor=1648`.**
   via: measurement
-- **Next probe:** none. Merge #6, then rank 12's closing condition is met by content.
+- **Next probe:** none. Merged; the closing condition is met by content and was watched on
+  the merged tree (38 scanned / 1 skipped, the skip named, rc 0).
 
 ### The devrc and OSS cairn CLIENTS HAVE FORKED — status unchanged this session, ONE FIGURE NOW STALE
 ⚠ Not re-measured this session; the decision (CONSOLIDATE ONTO THE PIN) stands and is not
@@ -403,17 +412,20 @@ taken now describes a tree that is about to change.
     **Closing condition:** `cairn create --scope cairn …` exits 0.
     forcing: none
 
-12. 🔨 **BUILT, PR OPEN, NOT MERGED — `ZacxDev/cairn` #6, head `b5bd231`.** `leakscan.py`'s
+12. ✅ **DONE AND MERGED 2026-09-08 — `ZacxDev/cairn` #6, squash `9d58f02`.** `leakscan.py`'s
     coverage is now DERIVED from content (a NUL within the first 8000 bytes, git's own rule)
     instead of a hand-written `TEXT_SUFFIXES` enumeration; every enumerated file lands in
     exactly one bucket and `main` names every skip. Red-at-base / green-at-HEAD regression
     matrix, 8/8 mutants killed by their intended test, full suite 1703 passed, CI green on
-    all three checks. Claim `cairn-oss-multi-instance-12` is **still held** — the item closes
-    on merge, not on PR. Worktree `<scratchpad>/wt-leakscan` retained in case of audit fixes.
-    ⚠ **`/audit-pr 6` was OFFERED and NOT RUN** — this session was configured not to dispatch
-    subagents unasked.
-    **Closing condition:** #6 merged — after which a tracked non-binary file the scan skips
-    causes a non-zero exit or an explicit `SKIPPED` line naming it. Checkable from the diff.
+    all three checks. Claim `cairn-oss-multi-instance-12` **RELEASED**.
+    **Closing condition MET, and watched rather than inferred:** at `origin/main` the gate
+    prints `SKIPPED tests/leakscan.py — the gate's own fixtures, exempt by name` then
+    `38 file(s) scanned, 1 skipped` — a named skip line, in the output a reader of CI sees.
+    ⚠ **`/audit-pr 6` was OFFERED and NEVER RUN**, by neither the building session nor the
+    merging one. This shipped on its own evidence (regression matrix + 8/8 mutation battery),
+    which is real but is not an adversarial read. Recorded so it reads as skipped, not clean.
+    ⚠ The building session's `<scratchpad>/wt-leakscan` worktree was left in place — it
+    belongs to that session, so it was not removed here.
     forcing: security — the repo is public and this gate is the reason it can be
 
 13. **Publish a cairn-built image to a registry.** Rank 7 is blocked on this. ⚠ Decide FIRST
@@ -431,6 +443,22 @@ taken now describes a tree that is about to change.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
+
+**🔴 THE PATH THIS DOC'S OWN KICKOFF NAMES SERVES A STALE REVISION, AND IT LOOKS CURRENT.**
+The 2026-09-08 merge session was told to read `~/workspace/devrc/claudedocs/handoff-cairn-oss-
+multi-instance.md` — the PRIMARY CLONE's working copy. That clone was checked out on
+`feat/nct6683-fans-bar`, so the file it served was **two revisions behind `origin/main`**
+(141 insertions / 209 deletions apart) and **did not know PR #6 existed at all**: it listed
+rank 12 as unstarted work with no PR, and described rank 3's fork as an open question the
+operator had since answered. Nothing about the read looked wrong — the file was present,
+well-formed and internally consistent, which is exactly the failure mode. Acting on it would
+have meant re-deriving built-and-green work from scratch. 🔴 **The devrc base-clone refresh
+hook does NOT cover this** — it syncs only `CLAUDE.md` and `.claude/skills/**`, and
+`claudedocs/` is deliberately outside that set. **Read a handoff from the ref, not the
+working tree**: `git -C ~/workspace/devrc fetch origin main && git show
+origin/main:claudedocs/<doc>.md`, or work out of a `worktree add --detach <wt> origin/main`.
+Same class as this repo's existing stale-blocker lesson, moved one level up: there the FACT
+inside the doc was stale, here the whole DOCUMENT was.
 
 **🔴 A RATE IS THE WRONG INSTRUMENT WHEN THE ONE OBSERVATION CARRIED NO EVIDENCE.** Rank 6
 was written as "get a rate, then fix it or close it", and 43 runs at ≈2.3% cannot
@@ -872,19 +900,21 @@ tested on both sides, including the accepted case of a NUL past the sniff window
 `git merge-base --is-ancestor <head> origin/main` reads false after every squash merge,
 forever. The merged ranks are confirmed on `origin/main` by content: `.github/workflows/ci.yml`
 reads `FLOOR = 1648` and `ATOMICITY_MIN_RELOADS` resolves 7 times in
-`tests/test_subsystem_store_api.py` (#5); `flake.nix` exists (#4).
+`tests/test_subsystem_store_api.py` (#5); `flake.nix` exists (#4); `partition_tracked_files`
+/`BINARY_SNIFF_BYTES` resolve 10 times in `tests/leakscan.py` (#6).
 
 ```bash
-# rank 12 — the OPEN PR, and its evidence
-gh pr view 6 -R ZacxDev/cairn --json state,mergeable,mergeStateStatus   # OPEN / MERGEABLE / CLEAN
-gh pr checks 6 -R ZacxDev/cairn                                        # leakscan, nix, tests — all pass
+# rank 12 — MERGED
+gh pr view 6 -R ZacxDev/cairn --json state,mergedAt,mergeCommit   # MERGED, 9d58f02
 git -C ~/workspace/cairn fetch origin && \
-  git -C ~/workspace/cairn grep -c TEXT_SUFFIXES origin/fix/leakscan-derived-coverage -- tests/leakscan.py
-# ^ 1 = prose mention only; the identifier is gone from code (grep the file to confirm)
+  git -C ~/workspace/cairn grep -c 'partition_tracked_files\|BINARY_SNIFF_BYTES' origin/main -- tests/leakscan.py
+# ^ 10. `TEXT_SUFFIXES` still greps 1 in that file and 3 in the test module — ALL PROSE
+#   (comments + docstrings recording the history). The constant itself is gone; grep the
+#   lines rather than the count, or a prose mention reads as the enumeration surviving.
 
-# the accounting is visible in the run itself
-git -C ~/workspace/cairn worktree add --detach /tmp/v6 origin/fix/leakscan-derived-coverage
-(cd /tmp/v6 && python3 tests/leakscan.py | tail -4)   # "38 file(s) scanned, 1 skipped" + a named SKIPPED line
+# the accounting is visible in the run itself — this is the closing condition, watched
+git -C ~/workspace/cairn worktree add --detach /tmp/v6 origin/main
+(cd /tmp/v6 && python3 tests/leakscan.py | tail -5)   # a named SKIPPED line, then "38 file(s) scanned, 1 skipped"
 git -C ~/workspace/cairn worktree remove --force /tmp/v6
 
 # rank 3 — claimed by ANOTHER session; check the lock before touching it
@@ -893,5 +923,8 @@ git -C ~/workspace/devrc worktree list | grep flake-pin   # their live worktree
 readlink -f ~/.local/bin/cairn           # still devrc/scripts/cairn while their commit is unpushed
 grep -c cairn ~/workspace/devrc/flake.nix # 0, same reason
 ```
-Expected: #6 OPEN, MERGEABLE, three green checks; the leakscan run printing a scanned+skipped
-accounting with every skip named; rank 3 still claimed by another owner with its work unpushed.
+Expected: #6 MERGED at `9d58f02`; the leakscan run on `origin/main` printing a
+scanned+skipped accounting with every skip named; rank 3 still claimed by another owner.
+⚠ Rank 3's state is the one line here most likely to have moved — the other session's work
+was unpushed at 2026-09-08T20:00Z; re-read the claim and `readlink -f ~/.local/bin/cairn`
+rather than trusting this sentence.
