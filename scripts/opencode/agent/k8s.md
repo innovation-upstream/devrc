@@ -8,7 +8,14 @@ permission:
   write: deny
   # 🔴 NO `"*": allow` HERE. Agent rules are APPENDED AFTER the global block and
   # opencode is LAST-MATCH-WINS, so an agent-level wildcard NULLIFIES every
-  # global deny/ask at a stroke. Measured on 1.18.21: with `"*": allow` present
+  # global deny/ask at a stroke. That structural claim IS re-derived at the pin,
+  # every gate, by the engine-vs-model conformance tests in
+  # scripts/tests/test_opencode_engine.py.
+  # 🔴 The counts below are a dated incident record measured on 1.18.4, NOT
+  # re-derived at the pin: they describe a tree with 30 global bash rules, and
+  # the global block resolves 66 today, so no fresh run reproduces index 74.
+  # Every bump since re-spelled this line to the incoming version anyway;
+  # 2026-09-08 put it back. With `"*": allow` present
   # it landed at index 74, after all 30 global rules, and only the 4 rules below
   # it survived — `git stash`, `git reset --hard`, `git add -A`, `rm -rf ~…`,
   # `sops -d`, `nixos-rebuild` and `home-manager switch` were all plain ALLOW on
