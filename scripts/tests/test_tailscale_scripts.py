@@ -23,6 +23,23 @@ CAN be exercised without one, chosen for the defects that were actually found:
     "never authenticated", so an expired node printed "THIS NODE HAS NEVER AUTHENTICATED
     ... the EXPECTED state immediately after apply-tailscale.sh" beside the very address
     it had retained, and exited 4: "no defect found", about a dead backup path.
+  * 🔴 and the SHAPE of that which survives a RESTART. `TailscaleIPs`, `Self.Expired` and
+    `Self.KeyExpiry` are all netmap fields and the netmap is in-memory only, so one
+    reboot on a node whose key had lapsed wiped every detector at once and the dead path
+    read as a fresh install again -- rc 4, "no defect found". The durable evidence is the
+    persisted profile in `tailscale debug prefs` (`Config`/`ipn.Prefs.Persist`), and the
+    controls in the OTHER direction are the expensive ones: an EMPTY persisted profile is
+    what a never-logged-in daemon carries, and reading that as an identity would make
+    every first run rc 1 and roll the config back.
+  * a SELF-CONTRADICTORY daemon (a non-logged-out backend holding no address) must not be
+    rc 1. Its own message said "re-run this check before doing anything else"; apply's
+    answer to rc 1 is `die` -> restore `configuration.nix` -> report that the RUNNING
+    system was not restored, so the next `nixos-rebuild switch` by anyone would silently
+    delete the backup path. It is rc 4 now, and the checker takes the second sample
+    itself after a settle rather than telling a human to.
+  * a READ of an option is not a DECLARATION of it. `config.services.tailscale.enable` in
+    a `mkIf` or an assertion made the apply script print "already DECLARES ... Nothing to
+    do. Exiting 0" on a host with no tailscale at all.
   * the closure preflight's DOWNLOAD gate must fail CLOSED. `_drybuild_counts` used to
     return 0.0 MiB for any size string it could not parse -- indistinguishable from
     nothing to download -- so a 2400-path substitutable world rebuild passed all four
@@ -324,6 +341,15 @@ def _fake_tailscale(
     env = dict(os.environ)
     env["PATH"] = f"{bindir}:{env['PATH']}"
     env["TS_PROC_ROOT"] = str(proc)
+    # The settle re-read costs wall time and every case here is a STABLE fixture -- the
+    # stub answers identically however many times it is called, so a second read can only
+    # slow the suite down. `test_a_self_contradictory_daemon_is_re_read_after_a_settle`
+    # turns it back on, against a stub that deliberately answers differently the second
+    # time, so the mechanism itself is not left unexercised by this default.
+    env["TS_SETTLE_SECS"] = "0"
+    # The on-disk fallback must not read the REAL host's state file from a test. Pointed
+    # at a path that does not exist unless a case creates it.
+    env["TS_STATE_FILE"] = str(tmp_path / "tailscaled.state")
     return env
 
 
@@ -339,6 +365,26 @@ NEVER_AUTHED = {
 }
 SERVER_PREFS = {"AdvertiseRoutes": [SUBNET], "RouteAll": False, "WantRunning": True}
 NO_PREFS = {"AdvertiseRoutes": None, "RouteAll": False, "WantRunning": False}
+# `ipn.Prefs.Persist` is marshalled under the key `Config`. A non-empty NodeID/LoginName
+# means a login was COMPLETED on this host at some point, and -- unlike everything in the
+# netmap -- it is reloaded from `tailscaled.state` on every daemon start.
+PERSISTED_PREFS = {
+    "AdvertiseRoutes": [SUBNET],
+    "RouteAll": False,
+    "WantRunning": True,
+    "Config": {
+        "NodeID": "nEXAMPLECafeBeef",
+        "UserProfile": {"LoginName": "operator@example.test"},
+    },
+}
+# What a daemon that has NEVER logged in carries: the key is present, the profile is
+# empty. Reading this as an identity would make every first run a FAIL.
+EMPTY_PROFILE_PREFS = {
+    "AdvertiseRoutes": None,
+    "RouteAll": False,
+    "WantRunning": False,
+    "Config": {"NodeID": "", "UserProfile": {"LoginName": "", "DisplayName": ""}},
+}
 
 
 def test_a_freshly_switched_node_is_rc_4_not_a_failure(tmp_path):
@@ -457,6 +503,235 @@ def test_the_expired_shapes_are_not_reachable_by_the_fresh_install_path(tmp_path
     assert "HAS NEVER AUTHENTICATED" in r.stdout
 
 
+# --------------------------------------------------------------------------------------
+# 🔴 THE RESTART HOLE: all three netmap detectors go blind together, and only the DISK
+# still knows.
+#
+# `TailscaleIPs`, `Self.Expired` and `Self.KeyExpiry` are netmap fields, and the netmap is
+# in-memory only -- it is fed by control-plane map responses and there is no
+# restore-from-disk path. So one reboot, power cut or `nixos-rebuild switch` on a node
+# whose key has already lapsed wipes ALL THREE at once: the daemon mints a new node key,
+# control answers with an AuthURL, no map poll happens, and `tailscale status` reports
+# `NeedsLogin` with nothing in it -- byte-identical to a fresh install. Every one of the
+# three cases above then goes green while the backup path is dead, and the checker printed
+# "THIS NODE HAS NEVER AUTHENTICATED ... It is NOT a node-side defect", rc 4.
+#
+# `lost` only survived while the daemon had run CONTINUOUSLY since before the lapse. Over
+# a months-long absence that is not an assumption worth making.
+# --------------------------------------------------------------------------------------
+def test_an_expired_key_that_survived_a_restart_is_still_a_failure(tmp_path):
+    """The status document here has NO evidence in it at all -- that is the point. The
+    only thing separating it from a fresh install is the persisted profile in prefs."""
+    env = _fake_tailscale(tmp_path, NEVER_AUTHED, PERSISTED_PREFS)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, (
+        "a node whose key lapsed and which has since RESTARTED exited "
+        f"{r.returncode}, not 1. Its netmap is empty, so the address, `Self.Expired` and "
+        "`KeyExpiry` detectors are all blind and it reads as a fresh install -- while the "
+        "backup path is dead.\n" + out
+    )
+    assert "HAD A TAILNET IDENTITY AND NO LONGER HAS A VALID ONE" in r.stdout, out
+    assert "HAS NEVER AUTHENTICATED" not in out, out
+
+
+@pytest.mark.parametrize(
+    "label,prefs",
+    [
+        ("prefs carry an EMPTY profile, which is what a fresh daemon has",
+         EMPTY_PROFILE_PREFS),
+        ("prefs carry no `Config` key at all", NO_PREFS),
+    ],
+)
+def test_a_fresh_install_is_still_rc_4_whatever_its_prefs_look_like(tmp_path, label, prefs):
+    """THE CONTROL, and it is the expensive direction. If an empty persisted profile were
+    read as an identity, EVERY first run would be rc 1 and apply-tailscale.sh would roll
+    back the config it had just installed -- the exact bug this whole file exists over."""
+    env = _fake_tailscale(tmp_path, NEVER_AUTHED, prefs)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 4, f"{label}: {r.stdout}{r.stderr}"
+    assert "HAS NEVER AUTHENTICATED" in r.stdout
+    assert "FAIL:" not in r.stdout
+
+
+def test_the_on_disk_state_file_is_the_fallback_when_prefs_cannot_be_read(tmp_path):
+    """Prefs are the authority; when they cannot be read at all the daemon's own state
+    file is the only remaining durable evidence. Driven in BOTH directions, plus the
+    scoping control -- a readable prefs document must WIN over the file."""
+    state = tmp_path / "tailscaled.state"
+
+    # (a) prefs unreadable + a real profile entry on disk -> the identity was LOST.
+    state.write_text('{"_machinekey":"cHJpdmtleQ","profile-a1b2":"eyJVc2VyUHJvZmlsZSI6e319"}')
+    env = _fake_tailscale(tmp_path, NEVER_AUTHED, None)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "HAD A TAILNET IDENTITY AND NO LONGER HAS A VALID ONE" in r.stdout
+
+    # (b) THE CONTROL. What a never-logged-in daemon writes: a machine key, and the
+    # `_current-profile` pointer at the EMPTY profile. Keying on that pointer instead of
+    # a `profile-` entry would fail every fresh host.
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "tailscaled.state").write_text(
+        '{"_machinekey":"cHJpdmtleQ","_current-profile":""}'
+    )
+    env = _fake_tailscale(tmp_path / "b", NEVER_AUTHED, None)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "HAS NEVER AUTHENTICATED" in r.stdout
+
+    # (c) THE SCOPING CONTROL. Prefs READABLE and carrying no identity, with a profile
+    # entry sitting on disk: prefs win, because a second opinion that can only contradict
+    # the authority is not one worth acting on.
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "tailscaled.state").write_text('{"profile-a1b2":"eyJ4IjoxfQ"}')
+    env = _fake_tailscale(tmp_path / "c", NEVER_AUTHED, NO_PREFS)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 4, r.stdout + r.stderr
+
+
+# The three EVIDENCE clauses the `lost` FAIL can carry, one per route into that state.
+# They are asserted as an EXCLUSIVE set -- the right one present and the other two absent
+# -- because the defect was not a missing sentence, it was the WRONG one: the text
+# asserted "the netmap addresses it was issued are still present: <none>" followed by "a
+# node that had never logged in would have NEITHER", printing the absence of its own
+# evidence as evidence. A guard that only checked the offending words is walkable by any
+# rewording that still names an address the run cannot see.
+LOST_EVIDENCE = {
+    "address": "still present:",
+    "persisted": "there is no netmap address left",
+    "expired-flag": "Self.Expired is the control plane's own word",
+}
+
+
+@pytest.mark.parametrize(
+    "route,ips,prefs",
+    [
+        # Reached via the retained netmap address.
+        ("address", ["100.100.10.5"], SERVER_PREFS),
+        # Reached via the persisted profile, netmap gone -- the restart shape.
+        ("persisted", [], PERSISTED_PREFS),
+        # Reached via `Self.Expired` alone, with nothing else to point at.
+        ("expired-flag", [], SERVER_PREFS),
+    ],
+)
+def test_the_expired_fail_names_the_evidence_it_actually_has(tmp_path, route, ips, prefs):
+    status = {
+        "BackendState": "Running",
+        "TailscaleIPs": ips,
+        "Self": {"Online": True, "Expired": True},
+    }
+    env = _fake_tailscale(tmp_path, status, prefs)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    flat = " ".join(r.stdout.split())
+    assert "HAD A TAILNET IDENTITY AND NO LONGER HAS A VALID ONE" in flat
+    for name, clause in LOST_EVIDENCE.items():
+        if name == route:
+            assert clause in flat, (
+                f"the {route} route does not name its own evidence:\n{r.stdout}"
+            )
+        else:
+            assert clause not in flat, (
+                f"the {route} route claims the {name} evidence, which this run does not "
+                f"have:\n{r.stdout}"
+            )
+    if route == "address":
+        assert "still present: 100.100.10.5" in flat, r.stdout
+    else:
+        # The exact shape of the original defect: an address slot rendered from nothing.
+        assert "still present: <none>" not in flat, r.stdout
+        assert "still present: ," not in flat, r.stdout
+        assert "would have NEITHER" not in flat, r.stdout
+
+
+# --------------------------------------------------------------------------------------
+# 🔴 A SELF-CONTRADICTORY DAEMON IS NOT A DEFECT -- AND rc 1 FOR IT WAS AN APPLY-TIME
+# ROLLBACK.
+#
+# The `incoherent` FAIL's own text says "if tailscaled was only just started it may still
+# be fetching its netmap -- re-run this check before doing anything else". Apply's answer
+# to rc 1 is `die` -> EXIT trap -> restore `$CFG` and report that the RUNNING system was
+# not restored. It never re-ran, and there was no settle window anywhere: apply goes
+# `systemctl is-active` -> `tailscale version` -> `bash "$CHECK"` with no sleep at all.
+# The cost of that spurious rollback is not a wasted run -- `configuration.nix` loses the
+# tailscale block while the running system keeps it, so the next `nixos-rebuild switch`
+# by anyone silently deletes the backup path.
+# --------------------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "label,backend",
+    [
+        ("Running with an empty netmap", "Running"),
+        # Reachable with a pre-existing state file: node key present, WantRunning=false,
+        # netmap not fetched.
+        ("Stopped with no address", "Stopped"),
+        # `tailscale up` on a freshly-restarted, previously-down node.
+        ("Starting with a nil netmap", "Starting"),
+    ],
+)
+def test_a_self_contradictory_daemon_is_not_a_rollback(tmp_path, label, backend):
+    status = {"BackendState": backend, "TailscaleIPs": [], "Self": {"Online": False}}
+    env = _fake_tailscale(tmp_path, status, SERVER_PREFS)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    out = r.stdout + r.stderr
+    assert r.returncode == 4, (
+        f"{label}: exited {r.returncode}. rc 1 makes apply-tailscale.sh `die`, restore "
+        "configuration.nix and leave the running system carrying a change the file no "
+        "longer has -- for a state whose own message says to re-run the check.\n" + out
+    )
+    assert "SELF-CONTRADICTORY" in r.stdout, out
+    assert "FAIL:" not in r.stdout, out
+    # ...and it must NOT be quietly reclassified as the fresh-install state either: those
+    # need different actions and only one of them is expected after an apply.
+    assert "HAS NEVER AUTHENTICATED" not in out, out
+
+
+def test_a_genuine_node_side_failure_is_still_rc_1_with_the_same_backend(tmp_path):
+    """The control for the three cases above: `Stopped` is one of them, so moving
+    `incoherent` off rc 1 must not have taken the real FAIL with it. Same backend, one
+    piece of evidence added -- the retained address -- and it goes red again."""
+    status = {
+        "BackendState": "Stopped",
+        "TailscaleIPs": ["100.100.10.5"],
+        "Self": {"Online": False, "PrimaryRoutes": [SUBNET]},
+    }
+    env = _fake_tailscale(tmp_path, status, SERVER_PREFS)
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "FAIL:" in r.stdout
+
+
+def test_a_self_contradictory_daemon_is_re_read_after_a_settle(tmp_path):
+    """The settle is not decoration: the checker takes the second sample itself instead
+    of telling a human to. Driven with a stub that answers DIFFERENTLY the second time --
+    an incoherent first read, a healthy one after -- so a settle that never re-reads
+    reports rc 4 here instead of the rc 0 a working daemon deserves."""
+    env = _fake_tailscale(tmp_path, AUTHED_APPROVED, SERVER_PREFS)
+    bindir = tmp_path / "bin"
+    incoherent = {"BackendState": "Starting", "TailscaleIPs": [], "Self": {"Online": False}}
+    (tmp_path / "first.json").write_text(json.dumps(incoherent))
+    write_exec(
+        bindir / "tailscale",
+        'case "$1 $2" in\n'
+        '  "status --json")\n'
+        f'    if [ -f "{tmp_path}/called" ]; then cat "{tmp_path}/status.json";\n'
+        f'    else : >"{tmp_path}/called"; cat "{tmp_path}/first.json"; fi\n'
+        "    exit 0 ;;\n"
+        f'  "debug prefs") cat "{tmp_path}/prefs.json"; exit 0 ;;\n'
+        "esac\nexit 1\n",
+    )
+    env["TS_SETTLE_SECS"] = "1"
+    r = _run("bash", CHECK, "--role", "server", env=env)
+    assert "settle  :" in r.stdout, (
+        "the checker rendered a verdict off ONE instantaneous sample of a daemon that had "
+        "not fetched its netmap yet:\n" + r.stdout
+    )
+    assert r.returncode == 0, (
+        "the settle did not actually RE-READ the daemon -- the second answer was healthy "
+        f"and the run still exited {r.returncode}:\n" + r.stdout + r.stderr
+    )
+    assert "SELF-CONTRADICTORY" not in r.stdout
+
+
 def test_a_key_expiry_date_in_the_past_is_a_failure(tmp_path):
     """The third, independent detector: a daemon still reporting Running with no Expired
     flag, whose KeyExpiry has nonetheless lapsed. It reads a different field from either
@@ -504,7 +779,11 @@ def test_an_unreadable_prefs_run_does_not_assert_what_the_node_advertises(tmp_pa
         "the run asserts the node advertises the route in the same breath as declaring "
         "that unknowable:\n" + r.stdout
     )
-    assert "carries NO traffic over tailscale right now" in flat, r.stdout
+    # 🔴 SCOPED TO THIS NODE. `Self.PrimaryRoutes` is a fact about this node only, so an
+    # unqualified "the subnet carries NO traffic right now" is a claim about the whole
+    # tailnet derived from one node's view -- and false the moment a second subnet router
+    # is approved for the same subnet, which is planned here.
+    assert "carries NO traffic over tailscale VIA THIS NODE right now" in flat, r.stdout
     # THE CONTROL: with prefs READABLE and the route genuinely advertised, the admin
     # console action must still fire. Otherwise this test is satisfied by deleting it.
     (tmp_path / "readable").mkdir()
@@ -537,10 +816,18 @@ def test_a_subnet_router_with_no_lan_route_still_fails(tmp_path):
 #
 # So this drives BOTH functions, out of the real script, exactly as a real run does.
 # --------------------------------------------------------------------------------------
-def _gate_probe(tmp_path: Path, dry_build_stderr: str) -> tuple[str, str]:
+def _gate_probe(
+    tmp_path: Path, dry_build_stderr: str, baseline_stderr: str | None = None
+) -> tuple[str, str]:
     """Run `_drybuild_counts` on `dry_build_stderr`, feed the result to `_gate_reasons`.
 
-    Returns (counts_record, gate_output). Empty gate output means "allowed".
+    Returns (counts_record, gate_output). Empty gate output means "allowed". The record
+    returned is always the CANDIDATE's.
+
+    🔴 `baseline_stderr` EXISTS SO THE TWO SIDES CAN DIFFER. Without it this probe fed the
+    same numbers to both the pending and the total axis of every gate, so each gate's twin
+    always fired with it -- and a test asserting "some gate fired" passed with either one
+    DELETED. Pass a different baseline and each gate can be isolated.
     """
     src = APPLY.read_text()
     # Everything up to the `--self-test` dispatcher: the limit variables and every
@@ -551,17 +838,27 @@ def _gate_probe(tmp_path: Path, dry_build_stderr: str) -> tuple[str, str]:
     )
     fixture = tmp_path / "dry.err"
     fixture.write_text(dry_build_stderr)
+    base_fixture = tmp_path / "base.err"
+    base_fixture.write_text(
+        dry_build_stderr if baseline_stderr is None else baseline_stderr
+    )
     probe = tmp_path / "seam.sh"
-    # The fixture path travels in the ENVIRONMENT, not in `$1`: `prefix` carries the
+    # The fixture paths travel in the ENVIRONMENT, not in `$1`: `prefix` carries the
     # script's own argument parser, which rejects an unknown positional with exit 2.
     probe.write_text(
         prefix
         + '\nc=$(_drybuild_counts "$TS_SEAM_FIXTURE")\n'
         'IFS="|" read -r b f m <<<"$c"\n'
+        'bc=$(_drybuild_counts "$TS_SEAM_BASELINE")\n'
+        'IFS="|" read -r bb bf bm <<<"$bc"\n'
         'printf "%s\\n---\\n" "$c"\n'
-        '_gate_reasons 26.11 26.11 "$b" "$b" "$m" "$m" "$f" "$f"\n'
+        '_gate_reasons 26.11 26.11 "$bb" "$b" "$bm" "$m" "$bf" "$f"\n'
     )
-    env = dict(os.environ, TS_SEAM_FIXTURE=str(fixture))
+    env = dict(
+        os.environ,
+        TS_SEAM_FIXTURE=str(fixture),
+        TS_SEAM_BASELINE=str(base_fixture),
+    )
     r = _run("bash", probe, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     counts, _, gate = r.stdout.partition("\n---\n")
@@ -600,6 +897,22 @@ def test_a_world_sized_fetch_never_passes_the_gate_however_its_size_is_spelled(
         "and never as a number invented by defaulting the unit."
     )
     assert gate, f"{label}: {counts} passed every gate in silence"
+    # 🔴 ASSERT WHICH GATE, NOT THAT SOME GATE FIRED. Every line here also trips the
+    # FETCH COUNT gate on its 2400 paths, so a bare `assert gate` is satisfied by that
+    # alone: `_is_num` could accept the literal string UNKNOWN, `_over_mib "UNKNOWN"`
+    # would then be silently false, the whole download-volume axis would be dead, and
+    # this test would stay green. Naming the reason is what can see that.
+    if expect_mib == "UNKNOWN":
+        assert "DOWNLOAD VOLUME COULD NOT BE MEASURED" in gate, (
+            f"{label}: an unreadable size did not REFUSE on the download-volume axis -- "
+            f"the only reasons given were:\n{gate}"
+        )
+    else:
+        assert "TOTAL DOWNLOAD VOLUME:" in gate, (
+            f"{label}: a size this script DOES understand must be compared, not refused "
+            f"as unmeasurable:\n{gate}"
+        )
+        assert "COULD NOT BE MEASURED" not in gate, gate
 
 
 def test_the_seam_still_allows_a_real_tailscale_sized_change(tmp_path):
@@ -627,14 +940,44 @@ def test_an_empty_dry_build_is_a_real_zero_and_is_allowed(tmp_path):
 def test_the_fetch_count_is_gated_and_not_merely_printed(tmp_path):
     """The count was parsed correctly and printed in the summary table, and read by no
     gate -- the identical 'decorative column' defect the download-volume gate was added
-    to fix. It is the axis that still has a number when the SIZE cannot be parsed."""
-    counts, gate = _gate_probe(
-        tmp_path, "these 2400 paths will be fetched (1.0 MiB download, 2.0 MiB unpacked):\n"
-    )
+    to fix. It is the axis that still has a number when the SIZE cannot be parsed.
+
+    🔴 THE TWO SIDES CARRY DIFFERENT NUMBERS, and that is the whole fix to this test. It
+    used to drive `pending == total == 2400`, which trips BOTH fetch gates, so `"FETCH
+    COUNT" in gate` was satisfied with either one deleted -- each masked the other's
+    absence. Each is now isolated: one case where only the pending limit (50) is crossed,
+    one where only the total limit (100) is.
+    """
+    small = "these 3 paths will be fetched (1.0 MiB download, 2.0 MiB unpacked):\n"
+    big = "these 2400 paths will be fetched (1.0 MiB download, 2.0 MiB unpacked):\n"
+
+    # TOTAL only: 3 pending (under 50), 2400 total (over 100).
+    counts, gate = _gate_probe(tmp_path, big, baseline_stderr=small)
     assert counts == "0|2400|1.0", counts
-    assert "FETCH COUNT" in gate, (
-        "2400 paths to fetch passed with a 1.0 MiB size -- both build gates and both "
-        f"download-volume gates are silent by construction here:\n{gate}"
+    assert "TOTAL FETCH COUNT" in gate, (
+        "2400 paths would be fetched, at a 1.0 MiB size that silences both "
+        f"download-volume gates, and nothing refused it:\n{gate}"
+    )
+    assert "PENDING FETCH COUNT" not in gate, (
+        f"the PENDING gate fired on a baseline of 3 paths (limit 50):\n{gate}"
+    )
+
+    # PENDING only: 2400 already queued by the CURRENT config (over 50), 60 in the
+    # candidate (under 100). `switch` applies the pending work too, which is why the
+    # baseline is gated at all.
+    (tmp_path / "pending").mkdir()
+    counts, gate = _gate_probe(
+        tmp_path / "pending",
+        "these 60 paths will be fetched (1.0 MiB download, 2.0 MiB unpacked):\n",
+        baseline_stderr=big,
+    )
+    assert counts == "0|60|1.0", counts
+    assert "PENDING FETCH COUNT" in gate, (
+        "2400 paths were already queued by the CURRENT config and nothing refused "
+        f"it:\n{gate}"
+    )
+    assert "TOTAL FETCH COUNT" not in gate, (
+        f"the TOTAL gate fired on a candidate of 60 paths (limit 100):\n{gate}"
     )
 
 
@@ -666,6 +1009,21 @@ def test_the_fetch_count_is_gated_and_not_merely_printed(tmp_path):
         # ...and the control against a scanner that blanks too much: a real declaration
         # after a CLOSED string must still be found.
         ('  warnings = [ "off" ];\n  services.tailscale.enable = true;', True),
+        # 🔴 A READ IS NOT A DECLARATION, and neither of these is a comment or a string --
+        # so nothing above can see the mutation that removes the lookbehind. Both were
+        # MEASURED classifying as declarations, which makes the script print "already
+        # DECLARES ... Nothing to do. Exiting 0" on a host with no tailscale at all.
+        ('  networking.firewall.checkReversePath = '
+         'lib.mkIf config.services.tailscale.enable "loose";', False),
+        ('  assertions = [ { assertion = config.services.tailscale.enable; '
+         'message = "x"; } ];', False),
+        # ...and the control against a lookbehind that swallows real declarations: one
+        # that does NOT start its line must still be found.
+        ("  config = { services.tailscale.enable = true; };", True),
+        # THE SECOND-RUN CONTROL: the shape this script itself appends must read as a
+        # declaration next time, or every re-run adds another copy.
+        ("  services.tailscale = {\n    enable = true;\n"
+         '    useRoutingFeatures = "server";\n    openFirewall = true;\n  };', True),
         ("  services.tailscale.enable = true;", True),
         ("  services.tailscale = {\n    enable = true;\n  };", True),
         ("  services.tailscale={enable=true;};", True),

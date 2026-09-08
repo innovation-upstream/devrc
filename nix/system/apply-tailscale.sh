@@ -310,9 +310,13 @@ _store_path() {
 #
 # So: blank out everything that is NOT executable Nix -- comments AND string literals --
 # then require an actual SETTING: the attribute followed by `=`, `{` or a further `.`,
-# which is every way Nix can spell one and no way it can spell a mention. Prints
-# `lineno:text` per declaration, nothing at all when there is none, so the caller
-# branches on emptiness.
+# and NOT preceded by an identifier character or a dot. Prints `lineno:text` per
+# declaration, nothing at all when there is none, so the caller branches on emptiness.
+#
+# ⚠ THAT PAIR IS NOT "EVERY WAY NIX CAN SPELL A SETTING AND NO WAY IT CAN SPELL A
+# MENTION" -- this comment claimed exactly that and it was false in both directions. It
+# is a heuristic with a KNOWN, DELIBERATE direction of error, stated at the bottom of
+# this comment. What it does cover is every shape that has actually been measured here.
 #
 # 🔴 STRINGS, NOT JUST COMMENTS -- AND THE `[.={]` ANCHOR IS NOT ENOUGH ON ITS OWN. An
 # earlier version blanked comments only, on the reasoning that the anchor already rejects
@@ -324,6 +328,20 @@ _store_path() {
 # That is the most expensive lie this script can tell -- it says the backup path is DONE
 # on a host where nothing was applied, two days before the operator leaves for months.
 #
+# 🔴 A READ OF THE OPTION IS NOT A DECLARATION OF IT, AND THE ANCHOR CANNOT TELL THEM
+# APART. `config.services.tailscale.enable` is a perfectly ordinary thing to find in a
+# config that does NOT enable tailscale -- it is how one option is made to depend on
+# another -- and it carries the `.` the anchor looks for. MEASURED, both of these were
+# classified as declarations and printed "already DECLARES ... Nothing to do. Exiting 0"
+# on a host where nothing had been applied:
+#     networking.firewall.checkReversePath = lib.mkIf config.services.tailscale.enable "loose";
+#     assertions = [ { assertion = config.services.tailscale.enable; ... } ];
+# The character BEFORE the attribute path is what separates the two: a declaration begins
+# an attribute path, so it is never preceded by `.` or by the tail of another identifier,
+# while every read is reached THROUGH one (`config.`, `osConfig.`, `nodes.x.config.`).
+# Hence the `(?<![...])` guard -- one character, and it needs no list of module-argument
+# names to keep working.
+#
 # The blanking is a LEFT-TO-RIGHT SCANNER, not three independent regexes, because the
 # constructs nest: a `#` inside a string is not a comment and a `"` inside a comment is
 # not a string, and only a scanner that consumes them in order gets both right. It
@@ -333,10 +351,11 @@ _store_path() {
 #
 # Direction of error is deliberate, and unchanged: a declaration this misses means the
 # script proceeds and adds a SECOND block, which `nix-instantiate '<nixpkgs/nixos>' -A
-# system` then refuses as a duplicate definition BEFORE anything is written. A mention it
-# wrongly accepted would exit 0 and leave the host unprotected with no further check at
-# all. So when the scanner is confused -- by an identifier ending in `''`, say -- it
-# fails toward the loud, harmless side.
+# system` then refuses as a duplicate definition BEFORE anything is written. A mention or
+# a READ it wrongly accepted would exit 0 and leave the host unprotected with no further
+# check at all. So when the scanner is confused -- by an identifier ending in `''`, or by
+# an attribute path this heuristic has not seen, say -- it fails toward the loud,
+# harmless side.
 _cfg_tailscale_decls() {   # $1 = config path; prints "lineno:line" per declaration
   python3 - "$1" <<'PY'
 import re, sys
@@ -406,8 +425,18 @@ def blank_non_code(text):
 stripped = blank_non_code(src)
 
 orig = src.splitlines()
+
+# `(?<![A-Za-z0-9_.'-])` -- ONE character of context, and it is what separates a
+# DECLARATION from a READ. A declaration begins an attribute path; a read is always
+# reached through another one (`config.services.tailscale.enable`,
+# `osConfig.services.tailscale...`), so the character before it is a dot. The class also
+# covers an identifier tail, since Nix identifiers may contain `-` and `'`
+# (`my-services.tailscale...` is somebody else's attribute, not this option).
+# A negative lookbehind at position 0 succeeds, so a declaration at the very start of a
+# line is still found.
+DECL = re.compile(r"(?<![A-Za-z0-9_.'-])services\s*\.\s*tailscale\s*[.={]")
 for i, line in enumerate(stripped.splitlines()):
-    if re.search(r"services\s*\.\s*tailscale\s*[.={]", line):
+    if DECL.search(line):
         print("%d:%s" % (i + 1, orig[i].strip()))
 PY
 }
@@ -854,12 +883,36 @@ T
   printf '%s\n' '{' '  warnings = [ "not enabled" ];' '  services.tailscale.enable = true;' '}' \
     >"$dir/c-afterstring.nix"
   printf '%s\n' '{' '  # services.tailscale = { enable = true; };' '  services.tailscale.enable = true;' '}' >"$dir/c-both.nix"
+  # 🔴 THE FIXTURES THAT DISCRIMINATE A READ FROM A DECLARATION. Neither is a comment and
+  # neither is a string, so string-blanking cannot see them; both carry the `[.={]` the
+  # anchor looks for, so the anchor cannot either. MEASURED against the pre-guard regex:
+  # both printed "already DECLARES ... Nothing to do. Exiting 0" on a host with no
+  # tailscale at all. They die only on the `(?<![A-Za-z0-9_.'-])` lookbehind.
+  printf '%s\n' '{' '  networking.firewall.checkReversePath = lib.mkIf config.services.tailscale.enable "loose";' '}' \
+    >"$dir/c-cfgread.nix"
+  printf '%s\n' '{' '  assertions = [ { assertion = config.services.tailscale.enable; message = "x"; } ];' '}' \
+    >"$dir/c-assert.nix"
+  # ...and the control against a lookbehind that is too wide: a real declaration must
+  # still be found when it is NOT at the start of a line -- here after `{ ` on one line,
+  # which is how a module writes a small `mkIf` body. Without this, deleting the whole
+  # `services.tailscale` match and printing nothing would satisfy the two cases above.
+  printf '%s\n' '{' '  config = { services.tailscale.enable = true; };' '}' >"$dir/c-inline.nix"
+  # 🔴 THE SECOND-RUN CONTROL: the block this script itself writes must be recognised as
+  # a declaration on the next run, or every re-run appends another copy. Generated from
+  # the real `$BLOCK` further down would be circular; this is the shape it emits.
+  printf '%s\n' '{' '  services.tailscale = {' '    enable = true;' '    useRoutingFeatures = "server";' \
+    '    openFirewall = true;              # UDP 41641 for direct (non-DERP) connections' '  };' '}' \
+    >"$dir/c-ownblock.nix"
   for decl_case in "c-mention:0:a bare mention inside a # comment" \
                    "c-block:0:a declaration inside a /* */ block comment" \
                    "c-pkgonly:0:pkgs.tailscale in systemPackages is not a service" \
                    "c-string:0:the option NAMED in a warning string is not a setting" \
                    "c-instring:0:a whole declaration INSIDE a double-quoted string" \
                    "c-indented:0:a whole declaration inside a '' indented string" \
+                   "c-cfgread:0:a READ of the option (lib.mkIf config.services.tailscale.enable)" \
+                   "c-assert:0:a READ of the option inside an assertion" \
+                   "c-inline:1:a real declaration mid-line, after '{ '" \
+                   "c-ownblock:1:the block THIS script writes, on a second run" \
                    "c-afterstring:1:a real declaration on the line after a closed string" \
                    "c-dotted:1:services.tailscale.enable = true" \
                    "c-attrset:1:services.tailscale = { ... }" \
@@ -1109,11 +1162,20 @@ fi
 # A MENTION is not a declaration, and saying so out loud matters: the operator who wrote
 # that comment is exactly the one who might read a bare "proceeding" as "it ignored my
 # config". This branch is the reason `_cfg_tailscale_decls` strips comments at all.
+#
+# 🔴 THE WORDING NAMES THE CLASS, NOT ONE MEMBER OF IT. This line used to assert "every
+# occurrence is inside a comment", which was true of the one case that prompted it and is
+# false of the two the scanner has since grown to reject: a string literal whose contents
+# are a valid declaration, and a READ of the option (`config.services.tailscale.enable`)
+# in live code. Printing a specific, wrong reason next to the lines themselves invites the
+# operator to look at a comment that is not there and conclude the script is broken.
 if grep -q 'services\.tailscale' "$CFG"; then
   echo "  state     : $CFG MENTIONS services.tailscale but does not DECLARE it --"
   grep -n 'services\.tailscale' "$CFG" | sed 's/^/    | /'
-  echo "              every occurrence is inside a comment, so nothing is applied."
-  echo "              Proceeding to add the real block."
+  echo "              no occurrence above is a setting on this host: each is inside a"
+  echo "              comment or a string literal, or is a READ of the option"
+  echo "              (\`config.services.tailscale...\`) rather than a definition of it."
+  echo "              Nothing there applies tailscale. Proceeding to add the real block."
 fi
 
 # --- a sysctl key defined twice is a Nix evaluation error --------------------------------
