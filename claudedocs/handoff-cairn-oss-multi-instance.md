@@ -33,35 +33,52 @@ is the PRIVATE proposal, not this doc.
 - **devrc #1394 — ✅ MERGED `65d8bfba`.** Records the operator decision of 2026-09-08:
   **CONSOLIDATE ONTO THE PIN.** The fork is CLOSED; it said "unanswered" in three places and
   all three were fixed, because one stale copy re-opens a settled question.
-- 🔴 **RANK 3 HALF 2, SLICE 2 IS CLAIMED AND IN FLIGHT — PUSHED as devrc PR #1406**
-  (`feat/cairn-flake-pin`, head `f98be263`, worktree `~/workspace/devrc-flake-pin`).
-  `claim-work cairn-oss-multi-instance-3` is HELD for exactly that slice, NOT the
-  entry_shape/writer consolidation. ⚠ **SIX FILES ARE UNCOMMITTED in that worktree** — the
-  round-1 audit fix round, which exists nowhere else. Do not delete the worktree.
-  ⚠ Earlier revisions of this doc described commit `4c77daab` as "unpushed, no PR yet"; that
-  is superseded — do not read it as current or conclude the slice stalled.
+- 🔴 **RANK 3 HALF 2, SLICE 2 — devrc PR #1406, STILL OPEN, and the six audit-fix files are
+  now COMMITTED.** ⚠ **THIS SUPERSEDES EVERY EARLIER "SIX FILES ARE UNCOMMITTED" SENTENCE IN
+  THIS DOC** — that was true earlier on 2026-09-08 and is now false in the dangerous direction
+  (a reader would treat committed work as at-risk, or re-do it). The round-1 audit fix round is
+  `f9ff05c4`, *"fix(audit): round 1 — `cairn validate` stopped being the write-protocol check,
+  and a guard passed while deploying a dangling symlink"*, 6 files / 97 insertions /
+  14 deletions. **The worktree `~/workspace/devrc-flake-pin` is CLEAN.** Its earlier
+  descriptions of `4c77daab` as "unpushed, no PR yet" are likewise superseded.
+- 🔴 **`origin/main` HAS BEEN MERGED INTO THE BRANCH — `b79cf63a` is a TRUE MERGED TREE**
+  (`git merge-base --is-ancestor origin/main HEAD` → true). The branch had drifted **3 ahead /
+  17 behind**; `git merge-tree --write-tree` exited **0** (no textual conflict — read the EXIT
+  CODE, never a marker grep), but main had touched `SECRETS.md`, three `scripts/tests/` files
+  and two skills, all of which share ratchets with this diff, so a clean textual merge is not
+  evidence and the gate is being re-run on the merged tree rather than on the branch.
+  `scripts/run-tests.sh --check-floors` → `RESULT: PASS`, GLOBAL floor **20441**, on that tree.
+- ⚠ **`b79cf63a` was NOT YET PUSHED at the time of this write.** `f9ff05c4` and the merge exist
+  only in `~/workspace/devrc-flake-pin`; PR #1406's head on GitHub may still read `f98be263`.
+  **Check the head before quoting one.**
 - **#1406 has had a round-1 adversarial audit.** One 🔴 (`cairn validate` goes silent on the
-  pinned client — see the investigation block), one 🟡 (a guard that passed while deploying a
-  dangling symlink), six 🟢. All fixed in the worktree; **round 2 has NOT been run**, and by
-  the stop rule it is warranted because round 1 produced findings that needed fixing.
-- **Rank 3's closing condition re-verified NOT met 2026-09-08** — expected while #1406 is
-  open: `readlink -f ~/.local/bin/cairn` → `/home/zach/workspace/devrc/scripts/cairn`,
+  pinned client), one 🟡 (a guard that passed while deploying a dangling symlink), six 🟢 —
+  three of the 🟢 deferred as rank 18. All fixed and now COMMITTED; **round 2 has NOT been
+  run**, and by the stop rule it is warranted because round 1 produced findings that needed
+  fixing.
+- **Claim `cairn-oss-multi-instance-3` re-checked live: `rc 12` — ALREADY OURS**, not rc 10.
+  Earlier revisions saying "another session" were written before this session inherited it.
+- **Rank 3's closing condition still NOT met 2026-09-08** — expected while #1406 is open:
+  `readlink -f ~/.local/bin/cairn` → `/home/zach/workspace/devrc/scripts/cairn`,
   `grep -c cairn ~/workspace/devrc/flake.nix` → **0**. #1406 additionally needs a
   `home-manager switch` after merge; unlike #1381 there is NO capability gap in the interim.
 - **Rank 12 — ✅ MERGED and CLOSED**, claim `cairn-oss-multi-instance-12` RELEASED.
-- **Ranks 4, 8, 13, 15 remain unclaimed and untouched.** **Rank 11 re-verified live and still
-  refused** (`cairn create --scope cairn …` → rc 6, `[not-found]`) — it is an OPERATOR action.
+- **Ranks 4, 8, 13, 15, 16, 17, 18 remain unclaimed and untouched this session.** **Rank 11
+  was last re-verified live 2026-09-08 and still refused** (`cairn create --scope cairn …` →
+  rc 6, `[not-found]`) — it is an OPERATOR action; **not re-checked in this session.**
 - 🔴 **A cairn-built image is still NOT PUBLISHED.** #4 produces a loadable tarball; nothing
   pushes it to a registry. Rank 7 remains blocked on publication (rank 13), not buildability.
 - **No civitai instance exists.** The homelab pod still runs its own copy.
 - **Session capture** remains DESIGNED, DECIDED and MERGED as a proposal, and BUILT NOWHERE
   (`claudedocs/proposal-cairn-session-capture.md`, `e16f9609a`). Rank 8.
 - **The opencode exporter** shipped (`f58d2df04`, #1338) and still has **no caller**.
-- **This session did NOT resolve a clawgate task.** `clawgate_handoff.sh resolve` exits **6**:
-  one linked task (#527, model-benchmarking) with role `read`, none `worked`. Filing or
-  reading a task is not doing its work, and #527 is not this effort — so **no
-  `clawgate-task:` field was written**. That is a different outcome from the previous
-  revision's exit 5 (no links at all), and neither is a clean bill of health.
+- **This session did NOT resolve a clawgate task.** `clawgate_handoff.sh resolve` exits **5**,
+  0 links, **with its positive control green** (the same endpoint returned 2 links for session
+  `5542cd95-…`). 🔴 That is NOT a clean bill of health: a wrong session id also answers 200 with
+  an empty array, so the reading cannot distinguish "touched no task" from "wrong id". No
+  `clawgate-task:` field was written. ⚠ This is a THIRD distinct outcome across three
+  revisions of this doc — exit 6 (one `read` link, #527), exit 5 (no links), exit 5 again —
+  which is itself the evidence that the reading is about the session id, not about the board.
 
 ## Open investigations — live diagnosis state
 
@@ -355,6 +372,85 @@ taken now describes a tree that is about to change.
   `nix build github:ZacxDev/cairn/<rev>#cairn` then exercise each verb against a fixture
   cache and diff against `scripts/cairn`.
 
+### `tekton/devrc-pytests` is RED on #1406 at `f98be263`, and the named test is NOT in the diff — NOT YET ATTRIBUTED
+- **Symptom + exact repro:** `gh pr checks 1406 -R innovation-upstream/devrc` →
+  `FAILED: pytests — FAILING:
+  TestARefusedWriteIsIndistinguishableFromAnAbsentOne.test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_dif`.
+  The class lives at `scripts/tests/test_subsystem_store_api.py:13100` and nothing in #1406's
+  diff touches it or anything it imports.
+- **Observed (with values), 2026-09-08:** run **locally green** —
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest scripts/tests/test_subsystem_store_api.py
+  -k TestARefusedWriteIsIndistinguishableFromAnAbsentOne` → **5 passed, 739 deselected, 7.09s**.
+  via: measurement
+- 🔴 **Ruled out: that the Tekton tier is simply broken today.** PR **#1411** at `e19eb28d`
+  passed the same tier in the same window — `TOTAL collected=21163 passed=21161 skipped=2
+  failed=0 (floor: 20342)`. So the tier CAN be green; that is the positive control.
+  via: measurement
+- 🔴 **Ruled out: that the other red devrc runs share this cause — they do not, and reading
+  them as one failure is the trap.** Same window, five failed SHAs, **four distinct verdict
+  classes**: `b8cac6a8` FAILED on `test_every_decrypt_family_VERDICT_is_pinned_WHOLE`
+  (failed=7); `42eb7917` FAILED on `test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N`;
+  `03d7e0ad` and `b3c9a93d` `KILLED: … the gate pod died at or after step pytests
+  (preempted/evicted/OOM/timeout). Not a code failure.`; `d67b83da` `BROKEN GATE: … step clone
+  failed (rc 128)`. Per the `tekton` skill the KILLED/BROKEN ones are congestion, not code, and
+  the discriminator is whether the step emitted a verdict at all. via: measurement
+- **NOT ruled out, and this is the honest gap:** the run that posted this status has been
+  **PRUNED** — `kubectl -n tekton-ci get pipelineruns` holds no run whose `revision` param is
+  `f98be263` (the pruner is `keep: 20` **per pipeline**, hourly), so its log cannot be read and
+  *which* of the class's assertions fired is unrecoverable. Same shape as rank 6's lost
+  traceback. via: measurement
+- **Leading hypothesis:** a load-induced timing failure in a test that spawns a real server.
+  The box sat at **load average 61–72** through this session with a sibling agent running its
+  own `gate.sh --tier both`, and this class binds a port and drives an HTTP round trip. That is
+  a hypothesis, **NOT a diagnosis** — nothing measured ties it to that run.
+- **Next probe:** the status is STALE — it describes `f98be263`, three commits behind the
+  branch. Push `b79cf63a` and read the FRESH verdict. If it reproduces, read the log
+  *immediately*, before the hourly prune, rather than re-running:
+  `KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pipelineruns -o json` filtered on
+  `.spec.params[] | select(.name=="revision")`.
+
+### Round 1's two behavioural findings on #1406 — FIXED, and mutation-verified in BOTH directions
+🔴 This block records the evidence behind `f9ff05c4` so nobody re-derives it. **Round 2 has
+NOT been run yet**; by the stop rule it is warranted, because round 1 produced findings that
+needed fixing.
+- **Finding 1 (🔴), symptom + exact repro:** after #1406 merges and a `home-manager switch`,
+  the mandated post-write check in the `subsystem-index` skill returns exit 0 and prints only a
+  state banner. The client on PATH becomes the pinned OSS package, which reimplements
+  `validate` on the READER's resolver instead of shelling `subsystem_touch.py`.
+- **Observed (with values):** packaged client **rc 0, 76 bytes, 0 contract blocks**; the writer
+  invoked directly **rc 0, 5,765 bytes** with `entry shape:` / `marker reachability:` /
+  `dropped lines:` and `OK — 31 of 31`. Both "green"; only one looked. Exit codes diverge too —
+  writer **3** on a malformed entry, packaged client **5** (`EXIT_CORRUPT`; its own `3` is
+  `EXIT_UNREACHABLE_NO_CACHE`). via: measurement
+- **Fixed by** pointing both skills at the writer's own invocation and MOVING
+  `test_subsystem_touch.py`'s pinned-sentence ledger in the same commit — the ledger went RED
+  on the old spelling, which is the mechanism working rather than a chore.
+- **Finding 2 (🟡), symptom + exact repro:**
+  `test_the_package_is_passed_to_the_home_module_through_extraSpecialArgs` ran its name-check
+  and its value-check INDEPENDENTLY over the whole `extraSpecialArgs` region.
+- **Observed (with values):** the decoy `cairnPackage = pkgs.hello;` **plus**
+  `cairnUnused = cairn.packages.${system}.cairn;` **SURVIVED at `f98be263`** — re-measured this
+  session, **8 passed** — while `home.file.".local/bin/cairn".source` becomes
+  `${pkgs.hello}/bin/cairn`; home-manager's `insertFileEntry` does an unconditional `ln -s`, so
+  that BUILDS and deploys a **dangling symlink**, the exact outcome the required-argument
+  design claims to prevent. `cairnPackage = pkgs.hello;` ALONE was already KILLED, so the guard
+  was **narrower than its own docstring**, not inert. via: measurement
+- **Ruled out: that these were invariant guards with no live bug behind them.** The pre-fix
+  matrix was re-run against `git show HEAD:` of the test file: the decoy SURVIVED at base and
+  is KILLED at HEAD, and a legal **multi-line** `nix/home.nix` header — a CORRECT tree — was
+  **RED at base** with `nix/home.nix does not accept 'cairnPackage'`, a red naming a cause the
+  tree does not have, and is green at HEAD. via: measurement
+- **Mutation battery: 6/6 killed BY THEIR INTENDED GUARD'S OWN MESSAGE**, run under
+  `PYTHONDONTWRITEBYTECODE=1`, every anchor required to match exactly once (0 or 2 ⇒ INVALID,
+  never a pass), tree diffed byte-identical against the battery's snapshot afterwards. Mutants:
+  the decoy; `pkgs.hello` alone; a second `cairnPackage =` binding (killed on the new
+  `count == 1`); `home.nix` dropping the argument; the skill reverting to `cairn validate`
+  (killed on the pinned sentence). The sixth is the REACHABILITY control above — expected LIVE,
+  and it stayed green, which is what makes the header fix a fix rather than a tightening.
+  via: measurement
+- **Next probe:** push `b79cf63a`, then run the **round-2 delta audit** over
+  `f98be263..b79cf63a`.
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
@@ -374,9 +470,11 @@ taken now describes a tree that is about to change.
 3. 🔨 **HALF DONE — devrc consumes cairn as a pinned flake input.**
    🔴 **IN FLIGHT, CLAIMED — DO NOT START.** `claim-work cairn-oss-multi-instance-3` is HELD
    for slice 2. Worktree `~/workspace/devrc-flake-pin`, branch `feat/cairn-flake-pin`,
-   **PUSHED as devrc PR #1406** (was `4c77daab` unpushed; now three commits, head `f98be263`).
-   ⚠ **SIX FILES ARE UNCOMMITTED IN THAT WORKTREE** — the round-1 audit fix round. Do not
-   delete the worktree; the fixes exist nowhere else.
+   **PUSHED as devrc PR #1406**. 🔴 **UPDATED 2026-09-08 — THE SIX FILES ARE NOW
+   COMMITTED as `f9ff05c4`, and `origin/main` is MERGED IN as `b79cf63a` (a TRUE merged tree).
+   The worktree is CLEAN.** Every "six files are uncommitted" sentence elsewhere in this doc is
+   superseded — do not act on one. ⚠ `b79cf63a` was **not pushed** at the time of this write, so
+   PR #1406's head on GitHub may still read `f98be263`; check before quoting a head sha.
    - **Half 1 — ✅ MERGED: `ZacxDev/cairn`#4, `218b6c1`.**
    - **Half 2 — slice 1 MERGED (devrc #1381, `baa664e4`, both hosts switched and verified);
      slice 2 IN FLIGHT as PR #1406; slice 3 (point the writer at the pinned `entry_shape`,
