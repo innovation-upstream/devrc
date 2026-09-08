@@ -38,6 +38,11 @@ is the PRIVATE proposal, not this doc.
   13:59:59, **617 insertions** over `flake.nix`, `flake.lock`, `nix/home.nix`,
   `nix/sessionVariables.nix` plus a new 334-line `scripts/tests/test_cairn_flake_pin.py`.
   Clean tree, **unpushed, no PR yet** — which is why the closing condition still reads unmet.
+  ⚠ **SUPERSEDED 2026-09-08T22:15Z: it is now PUSHED and OPEN as devrc #1406**
+  (`feat/cairn-flake-pin`, *"deploy `cairn` from the PINNED flake package, not a fork in this
+  checkout"*), found by the pre-create `gh pr list` sweep. The two sentences above describe the
+  state hours earlier — do not read them as current, and do not conclude the slice is stalled.
+  The rank-3 CLAIM is unaffected: still held by that session, still `rc 10`, still not ours.
 - **Rank 3's closing condition re-verified NOT met 2026-09-08** (and this is expected while
   the above is unpushed): `readlink -f ~/.local/bin/cairn` → `/home/zach/workspace/devrc/
   scripts/cairn`, `grep -c cairn ~/workspace/devrc/flake.nix` → **0**.
@@ -457,8 +462,24 @@ hook does NOT cover this** — it syncs only `CLAUDE.md` and `.claude/skills/**`
 `claudedocs/` is deliberately outside that set. **Read a handoff from the ref, not the
 working tree**: `git -C ~/workspace/devrc fetch origin main && git show
 origin/main:claudedocs/<doc>.md`, or work out of a `worktree add --detach <wt> origin/main`.
-Same class as this repo's existing stale-blocker lesson, moved one level up: there the FACT
-inside the doc was stale, here the whole DOCUMENT was.
+
+⚠ **CORRECTION, SAME DAY, AND IT INVERTS WHAT THIS BLOCK CLAIMED TO BE.** The paragraph above
+was written as a NEW discovery. It is not one, and presenting it as one is itself the defect:
+`/resume` **step 1 already carries this rule** — *"The working-tree copy is a GUESS about what
+the handoff says — run step 2 FIRST and read the copy it names"* — backed by two measurements
+older than this session (a datapacket clone serving a handoff **276 lines** behind `origin/trunk`
+with the whole resume framed on it; a clone serving a skill file **692 commits** stale). 🔴 **And
+the tooling that prevents it was never run.** `scripts/resume-state.sh` resolves the doc, fetches,
+compares, and prints `handoff-read:` naming the authoritative copy — it exists precisely so this
+cannot happen, and step 2 orders it BEFORE the read for that reason. This session hand-rolled
+`git`/`gh` instead, which step 2 explicitly forbids, hit the trap the tool was built to prevent,
+and then wrote it up as novel. **Run `resume-state.sh` before reading the doc.** Measured when it
+was finally run at 2026-09-08T22:11Z: it reported the tree copy STALE at **829 lines local vs 930
+on `origin/main`** — still stale, hours after the merge — plus a `!! GAPS` block
+(`gh answered for 5 of 6 referenced PR(s)`) that a hand-rolled check reports as nothing at all.
+🔴 **A digest with a gap block is NOT an all-clear**, and hand-rolling cannot produce that
+distinction. Same class as this repo's existing stale-blocker lesson, moved one level up: there
+the FACT inside the doc was stale, here the whole DOCUMENT was — and the remedy already existed.
 
 **🔴 A RATE IS THE WRONG INSTRUMENT WHEN THE ONE OBSERVATION CARRIED NO EVIDENCE.** Rank 6
 was written as "get a rate, then fix it or close it", and 43 runs at ≈2.3% cannot
@@ -849,12 +870,20 @@ path window — so the one body printed in a 98.7 KB digest was irrelevant by co
 `cairn search`, or `python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --scope <s> --ref
 <name>`, which does accept it. Rank 15.
 
-**⚠ A STORE ENTRY'S `OPEN:` BULLET WAS STALE IN THE WAY THE BADGE WARNS ABOUT.** `devrc/cairn`
-carries `2026-08-29: OPEN: no entry in this store carries a task, PR or session ref, so nothing
-joins an entry to the work that produced it`. Measured 2026-09-08: entries now carry
-`[cairn: zach/<uuid>]` refs — several are visible in `cairn search` output. The remedy landed and
-the bullet did not move, which is exactly the "a remedy that has since landed reads exactly like
-one that has not" case the index badge names. Close it when next in that entry.
+**✅ CLOSED 2026-09-08 — A STORE ENTRY'S `OPEN:` BULLET WAS STALE IN THE WAY THE BADGE WARNS
+ABOUT.** `devrc/cairn` carried `2026-08-29: OPEN: no entry in this store carries a task, PR or
+session ref, so nothing joins an entry to the work that produced it`. The remedy had landed and
+the bullet had not moved — exactly the "a remedy that has since landed reads exactly like one
+that has not" case the index badge names. Now rewritten as `RESOLVED caec932e:` via `cairn put`
+(revision `da318a4c6a96f9d8`), naming the implementing site rather than asserting closure:
+`ATTRIBUTION = " [cairn: {actor}/{session}]"` in `scripts/subsystem-store-api/server.py`,
+appended SERVER-side from the authenticating token so a body cannot forge someone else's
+attribution. **Control that the write did what it claimed, not merely that bytes landed:** the
+`devrc/cairn` index row moved `17 nuance / 🔴 2 OPEN` → `18 nuance / 🔴 1 OPEN`, i.e. both
+dimensions touched. ⚠ **The surviving `🔴 1 OPEN` is a DIFFERENT bullet** (`2026-09-01: OPEN: "N
+overlapping SCOPES need a merge rule"`) and was deliberately left — no evidence either way was
+gathered, and closing an unverified marker is worse than leaving it. 🔴 The bullet closed only
+because a handoff doc named it; **nothing mechanical would have**, which is the actual lesson.
 
 **🔴 THE KICKOFF NAMED AN ITEM ANOTHER LIVE SESSION HAD ALREADY CLAIMED — AND THE LOCK, NOT
 THE PROSE, IS WHAT CAUGHT IT.** The 2026-09-08 `/resume` said rank 3 half 2 was "now
