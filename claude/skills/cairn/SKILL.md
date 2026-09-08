@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: "The hosted subsystem store (pod in ns `subsystem-store`) and its client `scripts/cairn`. Use for: `cairn doctor`, cairn sync/recall/search/ls-entries/who, a stale or unstamped store, a `cairn` exit 4, seeding the pod, a scope a token cannot reach. Writes are `subsystem-index`; pruning is `prune-index`."
+description: "The hosted subsystem store (pod in ns `subsystem-store`), client `scripts/cairn`. Use for: `cairn doctor`, cairn sync/recall/search/ls-entries, cairn-who, a stale or unstamped store, a `cairn` exit 4, seeding the pod, a scope a token cannot reach. Writes are `subsystem-index`; pruning is `prune-index`."
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
@@ -33,12 +33,15 @@ staleness it was run to measure.
 | find a hunk by text | `cairn search '<query>'` (`--all-scopes` to search every scope) |
 | what does the cache actually hold | `cairn ls-entries` |
 | parse-check the cached entries | `cairn validate` |
-| which sessions/windows/transcripts worked a task | `cairn who <task>` (`--json`, `--host`, `--no-windows`) |
+| which sessions/windows/transcripts worked a task | `cairn-who <task>` (`--json`, `--host`, `--no-windows`) — a SEPARATE binary |
 | diagnose anything above going wrong | `cairn doctor` |
 
-`cairn who` is about a **task**, not a store entry: it touches no store and never
-syncs, and it has its own longer `--timeout` because it shells into tmux on two
-hosts.
+🔴 **`cairn-who` is a separate command, not a `cairn` subcommand.** It is about a
+**task**, not a store entry: it touches no store and never syncs, takes none of
+the `--scope`/`--repo`/`--no-sync` flags, and has its own longer `--timeout`
+because it shells into tmux on two hosts rather than fetching an HTTP snapshot.
+Typing it as a `cairn` subcommand is no longer valid: argparse exits 2 with an
+`invalid choice` naming the verbs that remain.
 
 **Writes are not this skill's.** `subsystem-index` owns the one protocol for
 every writer; `prune-index` owns deletion, with its own confirmation gate. Load

@@ -1442,14 +1442,32 @@ in
   # devrc path. Bare command on `home.sessionPath` resolves from any cwd.
   #
   # 🔴 mkOutOfStoreSymlink is NOT a preference here — it is REQUIRED. `scripts/cairn`
-  # reaches its siblings through `Path(__file__).resolve().parent / "lib"` (:68, and
-  # again at :756/:808/:818 for `cairn_who`), exactly like the opencode CLI above.
-  # `.resolve()` follows the symlink back to the checkout, so `lib/` is found in the
-  # repo. A store copy would resolve `__file__` into /nix/store, where `lib/` is NOT
-  # deployed — the import would fail outright. Only this one path is symlinked;
-  # `scripts/lib/` must not be deployed, same rule as opencode's `lib/`.
+  # reaches its siblings through `Path(__file__).resolve().parent / "lib"`, exactly
+  # like the opencode CLI above. `.resolve()` follows the symlink back to the
+  # checkout, so `lib/` is found in the repo. A store copy would resolve `__file__`
+  # into /nix/store, where `lib/` is NOT deployed — the import would fail outright.
+  # Only these launcher paths are symlinked; `scripts/lib/` must not be deployed,
+  # same rule as opencode's `lib/`.
+  #
+  # ⚠ NO LINE NUMBERS, AND THE OLD ONES WERE MEASURED WRONG BEFORE THIS CHANGE EVEN
+  # TOUCHED THEM. This comment used to cite `scripts/cairn:68` for the lib lookup and
+  # `:756/:808/:818` for the `cairn_who` importers. Checked at the commit this branch
+  # forked from: `:68` was BLANK and the other three were unrelated comment lines in
+  # the recall/validate section — all four stale, with nothing to signal it. A line
+  # number is a claim that rots silently. The imports are named by EXPRESSION above;
+  # grep for it.
   home.file.".local/bin/cairn".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn";
+  # 🔴 `cairn-who` — the task -> sessions -> windows -> transcripts resolver, split
+  # out of `cairn` because it is a different noun: it touches no store, no cache and
+  # none of the store's flags. Same deploy mode, and for the SAME REASON, not merely
+  # by analogy: `scripts/cairn-who` resolves `lib/cairn_who.py` (and, through it,
+  # `lib/timeouts.py`) through its own `Path(__file__).resolve().parent / "lib"`.
+  # As a `home.file` copy it would resolve into /nix/store and fail on import before
+  # printing anything. Deploying `cairn` out-of-store and this one in-store would
+  # leave HALF the split working, which is why both lines are here together.
+  home.file.".local/bin/cairn-who".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn-who";
   # Claude Code hooks managed here (the script only — the settings.json
   # registration is per-host/unmanaged, as for bash-guard.py above, whose script
   # is likewise managed now). audit-pr-nudge fires

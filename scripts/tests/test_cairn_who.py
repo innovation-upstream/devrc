@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gate on `cairn who` — the task -> session -> window -> transcript join.
+"""Gate on `cairn-who` — the task -> session -> window -> transcript join.
 
 WHAT THIS FILE IS DEFENDING. Every hop resolved before the command existed; the
 defect class is not "a hop breaks" but "two different answers get printed the
@@ -688,21 +688,21 @@ def test_who_never_raises_or_focuses_a_window():
         assert verb not in code, f"who reaches for {verb!r} — that is screen theft"
 
 
-def test_who_owns_its_own_timeout_default_and_accepts_the_flag_AFTER_the_subcommand():
-    """🔴 `cairn`'s top-level `--timeout` is 20s, tuned for an HTTP fetch.
+def test_who_owns_its_own_timeout_default_and_ADVERTISES_the_one_it_ships():
+    """🔴 `cairn`'s bound is 20s, tuned for an HTTP fetch; this one is not.
 
-    `who` shells into tmux on two hosts, and `DEFAULT_TIMEOUT` here carries a
-    docstring reasoning specifically about a sleeping laptop. Inheriting the
-    store's bound meant the documented rationale was not what shipped — and
-    `cairn who --timeout N` was rejected outright, because the flag only existed
-    BEFORE the subcommand where nobody would type it.
+    `cairn-who` shells into tmux on two hosts, and `DEFAULT_TIMEOUT` here carries
+    a docstring reasoning specifically about a sleeping laptop. Inheriting the
+    store's bound meant the documented rationale was not what shipped. Driven
+    through the REAL binary, whose `--help` must advertise the constant this
+    module defines rather than a restated literal — a restated one drifts.
     """
     import subprocess as sp
 
-    cairn = REPO_ROOT / "scripts" / "cairn"
-    help_out = sp.run([sys.executable, str(cairn), "who", "--help"],
+    who = REPO_ROOT / "scripts" / "cairn-who"
+    help_out = sp.run([sys.executable, str(who), "--help"],
                       capture_output=True, text=True, timeout=60).stdout
-    assert "--timeout" in help_out, "who does not accept --timeout after the subcommand"
+    assert "--timeout" in help_out, "cairn-who does not accept --timeout"
     assert f"default {W.DEFAULT_TIMEOUT}" in help_out, (
         f"the help advertises a default that is not who's own:\n{help_out}")
 
@@ -826,97 +826,114 @@ def _load_cairn_cli():
     return mod
 
 
-def test_the_CLI_resolves_a_missing_timeout_to_WHOs_own_default(monkeypatch):
-    """🔴 Pins the `None -> DEFAULT_TIMEOUT` step in `cmd_who`.
+def test_the_BINARY_resolves_a_missing_timeout_to_WHOs_own_default(monkeypatch):
+    """🔴 Pins the "no flag given -> DEFAULT_TIMEOUT" step in `cairn_who.main`.
 
-    Dropping it survived every earlier battery. `_run` now REFUSES a `None`
-    bound, so the consequence is a loud error rather than the unbounded wait it
-    used to be — but "fails visibly" is not "is correct", and the resolution
-    itself was still unpinned. Measured under the mutant: every run reported
-    `clawgate-unreachable — refusing to run clawgatectl with timeout=None`.
+    Dropping the equivalent step survived every earlier battery when this was a
+    subcommand. `_run` REFUSES a `None` bound, so the consequence is a loud error
+    rather than the unbounded wait it used to be — but "fails visibly" is not "is
+    correct", and the resolution itself was still unpinned. Measured under the
+    mutant: every run reported `clawgate-unreachable — refusing to run
+    clawgatectl with timeout=None`.
     """
-    cli = _load_cairn_cli()
     seen = {}
 
     def fake_resolve(task, *, timeout, host, skip_windows):
         seen["timeout"] = timeout
         return W.WhoReport(task=task, state=W.WHO_NO_SESSIONS)
 
-    sys.modules.pop("cairn_who", None)
     monkeypatch.setattr(W, "resolve", fake_resolve)
-    monkeypatch.setitem(sys.modules, "cairn_who", W)
 
-    args = cli.build_parser().parse_args(["who", "42"])
-    monkeypatch.setattr(sys, "argv", ["cairn", "who", "42"])
-    args.func(args)
+    W.main(["42"])
     assert seen["timeout"] == W.DEFAULT_TIMEOUT, (
-        f"the CLI passed {seen['timeout']!r} instead of who's own default")
+        f"cairn-who passed {seen['timeout']!r} instead of its own default")
 
-    args = cli.build_parser().parse_args(["who", "42", "--timeout", "7"])
-    args.func(args)
+    W.main(["42", "--timeout", "7"])
     assert seen["timeout"] == 7, "an explicit --timeout was not honoured"
 
 
-@pytest.mark.parametrize("argv,expected", [
-    # who's own flag wins
-    (["who", "42", "--timeout", "7"], 7),
-    # a TOP-LEVEL --timeout is honoured, not discarded
-    (["--timeout", "5", "who", "42"], 5),
-    # …including after another value-taking global, the spelling the old
-    # hand-rolled argv scanner got WRONG (it stopped at --cache's value)
-    (["--cache", "/tmp/c", "--timeout", "5", "who", "42"], 5),
-    # …and via argparse's long-option abbreviation, which a literal
-    # `== "--timeout"` comparison could never see
-    (["--time", "5", "who", "42"], 5),
-    # neither given -> who's OWN default, never the store's shorter one
-    (["who", "42"], None),
-    # who's own flag beats a top-level one
-    (["--timeout", "5", "who", "42", "--timeout", "9"], 9),
-])
-def test_the_timeout_precedence_is_who_then_TOP_LEVEL_then_whos_own_default(
-        argv, expected, monkeypatch):
-    """🔴 REGRESSION GUARD over every spelling, driven through `cmd_who` itself.
+def test_there_is_exactly_ONE_timeout_flag_and_no_precedence_rule_to_get_wrong(
+        monkeypatch):
+    """🔴 THE PRECEDENCE CLASS IS GONE BY CONSTRUCTION, AND THAT IS THE POINT.
 
-    The first fix here printed a notice saying a top-level `--timeout` was being
-    discarded, driven by hand-parsing `sys.argv`. That scanner returned the
-    WRONG answer for two reachable spellings — after another value-taking global
-    option, and via argparse's long-option abbreviation — so those silently
-    discarded exactly as before, which is what the notice existed to prevent.
-    Re-implementing argparse's parsing in order to describe argparse's behaviour
-    was the mistake; distinct dests remove the clobber and there is nothing to
-    announce.
+    As a `cairn who` subcommand this needed `_who_timeout` and a distinct
+    argparse `dest`: argparse copies the subparser's namespace over the parent's,
+    so a top-level `cairn --timeout N who …` silently VANISHED. The first fix
+    printed a notice driven by hand-parsing `sys.argv`, and that scanner was
+    WRONG for two reachable spellings — after another value-taking global
+    (`--cache <val> --timeout 5 who 42`, it stopped at `--cache`'s value) and via
+    argparse's long-option abbreviation (`--time 5 who 42`, which a literal
+    `== "--timeout"` cannot see). A standalone binary has no parent parser, so
+    there is nothing to clobber and nothing to announce.
 
-    Only the helper was tested before, never `cmd_who`, so deleting the whole
-    block left the suite green — the seam nobody owns.
+    WHAT THIS ACTUALLY CHECKS, stated to match the body rather than the
+    intention: (a) BEHAVIOURALLY, that `--timeout` is honoured on either side of
+    the positional — the spelling that used to depend on which parser owned it;
+    (b) STRUCTURALLY, that the `who_timeout` dest exists in NO file on either
+    side of the split. (b) is a state assertion, not a name-absence one: that
+    dest existed solely to survive the subparser clobber, so its presence
+    anywhere means a parent/child timeout pair is back. A helper RENAME walks
+    past a check for `_who_timeout`; it does not walk past this.
     """
-    cli = _load_cairn_cli()
     seen = {}
+    monkeypatch.setattr(W, "resolve",
+                        lambda task, *, timeout, host, skip_windows:
+                        (seen.__setitem__("timeout", timeout),
+                         W.WhoReport(task=task, state=W.WHO_NO_SESSIONS))[1])
 
-    def fake_resolve(task, *, timeout, host, skip_windows):
-        seen["timeout"] = timeout
-        return W.WhoReport(task=task, state=W.WHO_NO_SESSIONS)
+    # One flag, honoured wherever it is typed relative to the positional.
+    W.main(["42", "--timeout", "9"])
+    assert seen["timeout"] == 9
+    W.main(["--timeout", "9", "42"])
+    assert seen["timeout"] == 9, (
+        "a --timeout before the task id was not honoured — a standalone binary "
+        "has no subparser boundary for it to fall on the wrong side of")
 
-    monkeypatch.setattr(W, "resolve", fake_resolve)
-    monkeypatch.setitem(sys.modules, "cairn_who", W)
-    args = cli.build_parser().parse_args(argv)
-    args.func(args)
-    want = W.DEFAULT_TIMEOUT if expected is None else expected
-    assert seen["timeout"] == want, (
-        f"{' '.join(argv)} resolved to {seen['timeout']}, expected {want}")
+    # …and the store client has no second one to disagree with it.
+    cli = _load_cairn_cli()
+    dests = {a.dest for a in cli.build_parser()._actions}
+    assert dests, "could not read the store parser's dests — this checked NOTHING"
+    assert "who_timeout" not in dests, (
+        "`scripts/cairn` still carries the who-specific timeout dest. That dest "
+        "existed ONLY to survive the subparser clobber; if it is back, so is "
+        "the precedence rule this split removed.")
+
+    # The dest is gone from the CODE of every file on both sides, not just from
+    # the store parser's top level — a subparser's dest does not surface in
+    # `build_parser()._actions` unless you walk into it, so the structural sweep
+    # is what makes the claim above cover the whole split.
+    #
+    # 🔴 SCANNED AS A `dest=` SPELLING, NOT AS A BARE SUBSTRING. The prose above
+    # and in `cairn_who.main` NAMES `_who_timeout` to record why it is gone, and
+    # a substring scan matched that documentation and went red — a guard that
+    # forbids describing the hazard it guards is the wrong guard. `_code_strings`
+    # drops docstrings but not `#` comments, so the pattern carries the weight.
+    import re  # noqa: PLC0415
+
+    pattern = re.compile(r"""dest\s*=\s*["']who_timeout["']""")
+    for path in (REPO_ROOT / "scripts" / "cairn",
+                 REPO_ROOT / "scripts" / "cairn-who",
+                 LIB / "cairn_who.py"):
+        assert not pattern.search(path.read_text(encoding="utf-8")), (
+            f"{path.name} still declares the `who_timeout` argparse dest")
+
+    # POSITIVE CONTROL for the pattern: a reassuring zero above is worthless if
+    # the regex cannot match the thing it looks for. This is the exact spelling
+    # `scripts/cairn` carried before the split.
+    assert pattern.search('w.add_argument("--timeout", dest="who_timeout")'), (
+        "the who_timeout detector cannot match its own target — the four "
+        "assertions above checked NOTHING")
 
 
 def test_who_never_writes_a_warning_to_STDOUT(capsys, monkeypatch):
-    """`cairn who --json` writes JSON to stdout; anything else breaks a parse.
+    """`cairn-who --json` writes JSON to stdout; anything else breaks a parse.
 
-    The previous design printed a notice, and its stream was unpinned — dropping
-    `file=sys.stderr` survived the suite.
+    The subcommand design printed a notice about a discarded flag, and its
+    stream was unpinned — dropping `file=sys.stderr` survived the suite.
     """
-    cli = _load_cairn_cli()
     monkeypatch.setattr(W, "resolve", lambda task, *, timeout, host, skip_windows:
                         W.WhoReport(task=task, state=W.WHO_NO_SESSIONS))
-    monkeypatch.setitem(sys.modules, "cairn_who", W)
-    args = cli.build_parser().parse_args(["--timeout", "5", "who", "42", "--json"])
-    args.func(args)
+    W.main(["42", "--json"])
     out = capsys.readouterr().out
     json.loads(out)  # raises if anything non-JSON was printed alongside it
 
@@ -928,8 +945,8 @@ def test_the_store_commands_still_get_the_STORE_default_when_no_flag_is_given():
     args = cli.build_parser().parse_args(["recall"])
     assert args.timeout is None, "the sentinel is not in place"
     assert cli.DEFAULT_TIMEOUT > 0
-    who = cli.build_parser().parse_args(["who", "42"])
-    assert cli._who_timeout(who, W.DEFAULT_TIMEOUT) == W.DEFAULT_TIMEOUT
+    assert cli._store_timeout(args) == cli.DEFAULT_TIMEOUT, (
+        "the resolver did not turn the sentinel into the store's own bound")
 
 
 def _passes_args_timeout_raw(kw) -> bool:
@@ -1134,7 +1151,7 @@ def test_the_POSITIVE_bound_actually_reaches_urlopen(monkeypatch):
         "given — the validated parameter is not what goes to the network")
 
 
-#: Every value that must be refused as a timeout, by BOTH halves of this CLI.
+#: Every value that must be refused as a timeout, by BOTH binaries.
 UNBOUNDED_TIMEOUTS = [None, 0, -1, "60", True, False, 1.5, [], object()]
 
 
@@ -1143,7 +1160,7 @@ def test_BOTH_entry_points_refuse_the_SAME_unusable_timeouts(bad):
     """🔴 TWO-WAY PIN. The rule was open-coded twice and the copies DISAGREED.
 
     Only `fetch_snapshot` excluded `bool`, while a comment claimed it refused
-    "the way `cairn_who._run` always has". Measured before this fix:
+    "the way `cairn_who._run` always has". Measured before that fix:
     `_run(["sleep","3"], True)` ran with a ONE-SECOND bound and reported
     `did not answer within Trues` — verbatim the "nobody notices" failure
     `_run`'s own docstring describes.
@@ -1152,6 +1169,14 @@ def test_BOTH_entry_points_refuse_the_SAME_unusable_timeouts(bad):
     makes a future divergence fail here instead of shipping. Consolidation was
     the bug-finding instrument: the disagreement was only audible once the two
     predicates were put side by side.
+
+    🔴 AND THE SPLIT RAISED THE STAKES RATHER THAN SETTLING THEM. These are now
+    two separate PROGRAMS in two separate files; the store side reached the rule
+    by importing the `who` module, which only worked while `who` was a
+    subcommand of it. The cheap repair when that reach broke would have been to
+    re-open-code the check — exactly the two-copies state above. They import
+    `lib/timeouts.py` instead, and this stays the behavioural proof that they
+    still agree.
     """
     cli = _load_cairn_cli()
     with pytest.raises(W.WhoError) as who_exc:
@@ -1182,8 +1207,15 @@ def test_the_timeout_predicate_has_exactly_ONE_implementation():
     """
     import re
 
+    # 🔴 EVERY FILE ON EITHER SIDE OF THE SPLIT, INCLUDING THE NEW LAUNCHER AND
+    # THE MODULE THAT OWNS THE RULE. Listing only the two originals would leave
+    # `scripts/cairn-who` free to open-code a third copy — the site a reader
+    # would most plausibly add one to, since it is the file that looks like the
+    # `who` entry point now.
     for path in (REPO_ROOT / "scripts" / "cairn",
-                 REPO_ROOT / "scripts" / "lib" / "cairn_who.py"):
+                 REPO_ROOT / "scripts" / "cairn-who",
+                 REPO_ROOT / "scripts" / "lib" / "cairn_who.py",
+                 REPO_ROOT / "scripts" / "lib" / "timeouts.py"):
         src = path.read_text(encoding="utf-8")
         # 🔴 EXACTLY ZERO, not "at most one". The earlier bound allowed one
         # copy on the theory that the predicate's own body is a legitimate
