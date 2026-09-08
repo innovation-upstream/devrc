@@ -18,10 +18,17 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- **`ZacxDev/cairn` has SIX merged PRs and NONE open.** #1 SIGHUP hot-reload, #2 the ledger
+- **`ZacxDev/cairn` has SEVEN merged PRs and NONE open.** #1 SIGHUP hot-reload, #2 the ledger
   narrowing (`c8aee7203`), #3 `8e4ef84` (spawn-port TOCTOU), #4 `218b6c1` (the nix flake),
   #5 `9213726` (CI floor + reload-atomicity control), #6 `9d58f02` — rank 12, leakscan
-  coverage derived from content. Verified by CONTENT, never ancestry.
+  coverage derived from content — and **#7 `059ec17` (2026-09-08T23:23:50Z) — rank 15, the
+  recall drill-down flags the digest's own footer prescribes.** Verified by CONTENT, never
+  ancestry: `reject_recall_flags`/`recall_selection` resolve **6** times in
+  `lib/subsystem_recall.py` and **2** in `cairn` on `origin/main`. CI green on `main` at job
+  level (`leakscan`/`nix`/`tests`), `collected=1707 failed=0 floor=1648`.
+  🔴 **#7 IS MERGED UPSTREAM AND NOT LIVE ON THIS HOST** — it fixes the OSS client, and
+  `~/.local/bin/cairn` still resolves to `devrc/scripts/cairn` until #1406 lands and the pin
+  moves. See rank 15; do not read "merged" as "the flag works here".
 - **devrc #1381 — ✅ MERGED `baa664e4`, DEPLOYED and VERIFIED.** `cairn who` is re-homed as
   its own `cairn-who` binary and `unbounded_timeout_reason` extracted to
   `scripts/lib/timeouts.py`. Three audit rounds; the ladder ended on the **ATTRIBUTION GATE**
@@ -461,11 +468,47 @@ taken now describes a tree that is about to change.
 14. ✅ **DONE AND MERGED 2026-09-08 — `ZacxDev/cairn` #5, `9213726`** (same PR as rank 10).
     forcing: gate — it turned the public repo's only CI gate red on 2 of its first 26 runs
 
-15. **`cairn recall` prescribes flags its own CLI rejects.** `--ref` exits 2. Not re-checked
-    this session.
-    **Closing condition:** a merged devrc PR after which `cairn recall --ref <name>` prints
-    one entry, OR the footer and `/resume` stop prescribing flags the wrapper lacks.
-    forcing: none
+15. 🔨 **FIXED UPSTREAM AND MERGED — `ZacxDev/cairn` #7, squash `059ec17` — BUT NOT LIVE HERE.**
+    The digest's footer prescribed `--ref <name>` / `--limit N` and the client exited **2**
+    (`unrecognized arguments`), so a reader following the output it had just been shown hit a
+    dead end and fell back to the raw module. **Root cause was structural, and the fix is not
+    the flags:** `main()` derived `mode`/`limit`/`page` AND enforced the flag-conflict rules
+    inline, while the client reaches the module as a **library**, never through `main()` — so
+    offering the flags meant open-coding both at a second site. Extracted instead:
+    `recall_selection()` and `reject_recall_flags()`, called by BOTH, so `main()` got shorter
+    rather than the wrapper growing a copy. All four flags wired (`--ref`, `--list`, `--limit`,
+    `--page`), not just the two named here — fixing only `--ref` leaves the CLASS open, the
+    same enumeration-vs-derivation shape rank 12 closed.
+    **Evidence, split rather than totalled:** two tests RED at base `9d58f02` on their OWN
+    assertions (`rc=2 … unrecognized arguments: --ref`; `assert not missing`, after its
+    positive control passed, which is what proves the regex read the footer). A third fails at
+    base with `AttributeError` — API shape, **not** counted as regression evidence.
+    Live against the real store, because tests passing and the client working are different
+    claims: `--ref cairn` → rc 0, 70 lines (one entry, against a 31-entry digest); `--list` →
+    41; `--limit 2` → 99; `--page 1` → rc 0; `--list --limit 3` → refused rc 2 with the SHARED
+    wording. Suite 1707 passed / 0 failed; CI on `main` green, `collected=1707 failed=0
+    floor=1648`.
+    🔴 **A DEFECT THE CHANGE INTRODUCED, CAUGHT BY EXERCISING IT:** exposing `--limit` made
+    `recall()`'s `ValueError` reachable from the command line for the first time — `--limit 0`
+    printed a TRACEBACK at rc 1 where the module's own CLI has always answered a clean 2.
+    Guarded, watched before and after, pinned by a fourth test. Reachable by measurement.
+    ⚠ **Two failures the FULL suite found that a 4-test subset did not** — "a test subset is
+    not the gate", again: the mutation battery refused orphaned anchors (`mutation anchor
+    occurs 0x`) because moving the guards left two mutants reading `args.*`, and a TEXT ledger
+    (`"rc.main(" not in src`) tripped on a COMMENT of mine quoting the callee — a false RED, so
+    the comment was reworded and the guard left alone. ⚠ That ledger cannot tell a call from a
+    comment; recorded, not fixed.
+    🔴 **NOT CLOSABLE UNDER THE OLD WORDING, AND MERGED IS NOT LIVE.** The fix is in the OSS
+    client; this host still runs devrc's `scripts/cairn` (`readlink -f ~/.local/bin/cairn` →
+    `devrc/scripts/cairn`, re-verified after the merge), so `--ref` is still broken HERE.
+    **Closing condition, re-pointed so it is checkable again:** `ZacxDev/cairn` #7 merged
+    (done, `059ec17`) **AND** #1406 landed **AND** the flake input bumped past `059ec17`,
+    after which `cairn recall --ref <name>` prints one entry on this host.
+    ⚠ **Deliberately NOT done here, reported instead:** the client never computes a focus
+    window, so the digest's featured-entry pick can only ever say `most-recent fallback` —
+    which is exactly this doc's own "the one body printed in a 98.7 KB digest was irrelevant by
+    construction" complaint. Different defect, real behaviour change, its own PR.
+    forcing: none — it cannot fire before the pin moves
 
 16. **Nothing in devrc's gate ever EXECUTES the deployed `cairn` binary.** Every cairn guard
     reads `flake.nix` / `flake.lock` / `nix/home.nix` / `nix/sessionVariables.nix` as TEXT.
