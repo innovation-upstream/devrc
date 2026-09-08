@@ -301,6 +301,20 @@ _report_unreadable() {
 # below write their own identifying templates inline, because they are opened
 # once, at top level, where a helper would only hide them. What every one of
 # them shares is the naming convention and `_cleanup_temps`.
+#
+# 🔴 `/tmp` IS HARDCODED, NOT `${TMPDIR:-/tmp}`, AND THAT IS THE DELIBERATE HALF
+# OF A BEHAVIOUR CHANGE. The bare `mktemp` this replaced HONOURED `$TMPDIR`; the
+# template does not. That is the safer direction for this file specifically:
+# `$DENIED_LOG` already hardcodes /tmp, and this script's whole premise is that a
+# local unprivileged process must not influence a root run — an inherited
+# `TMPDIR=/anything` deciding where a root run writes its scan stderr is the
+# `LSOF_BIN` lesson (see the seam) wearing a different name. The cost is real and
+# is accepted: a non-root CALLER — i.e. the test suite — now writes into the
+# system /tmp rather than into its own sandbox, and when a deliberately broken
+# copy of this script dies between the `mktemp` and the `rm` (which is what the
+# mutation battery does, ~60 times per full sweep) the files stay there. They are
+# harmless, empty, and — the point of this whole change — NAMED, which is how
+# they get noticed and swept at all.
 _scan_mktemp() { REPLY=$(mktemp "/tmp/disk-accounting-$1.XXXXXX") || { REPLY=; return 1; }; }
 
 # Remove every temp file the run currently holds open. It reads the variables at
