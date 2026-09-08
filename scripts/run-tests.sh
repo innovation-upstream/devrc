@@ -1684,7 +1684,16 @@ TARGET_FLOORS=(
   # own count put through the gate's formula and printed BY the gate, not
   # arithmetic on the two sides. Pinned AFTER merging main into the branch, per
   # the ORDER note above.
-  "scripts/tests|12793"
+  # 2026-09-08, the /tmp-churn preflight harness (#1370 round-1 rework):
+  # 12793 -> 12898 collected. +54 for scripts/tests/test_preflight_tmp_churn_host.py
+  # — a NEW FILE in an existing directory target, so HERMETIC_TARGETS needs no
+  # entry and movement on THIS line is the only evidence the gate runs it at all.
+  # ZERO new skips (this target reports skipped=0), so EXPECTED_SKIPS is untouched.
+  # The number is `_suggested_floor 12898` = 12898 - min(50, max(1, 644)) = 12848,
+  # produced by sourcing the gate's OWN function out of this file and feeding it
+  # the count the gate itself printed — not arithmetic across a conflict. If this
+  # line conflicts, re-run the gate on the MERGED tree and copy what it prints.
+  "scripts/tests|12848"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
