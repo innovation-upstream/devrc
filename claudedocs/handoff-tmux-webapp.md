@@ -1912,6 +1912,74 @@ mechanism is worth not re-deriving.
   EMPTY conclusion as busy, not as settled. On a red, read WHICH test failed and
   which NODE the PipelineRun landed on before debugging the diff (ranks 17, 18).
 
+### 🔴 `devrc-ci`'s pytests leg is RED ON `main` ITSELF — it will block every devrc PR
+
+- **Symptom + exact repro:** the `tekton/devrc-pytests` check fails on any devrc PR.
+  The gate's own summary line reads
+  `FAIL  scripts/tests  (collected=12863 passed=12856 skipped=0 failed=7 errors=0)`
+  against `TOTAL collected=20908 passed=20899 skipped=2 failed=7`.
+- **Observed (with values):** two distinct error texts in the failing target, both
+  from nix-provided tools:
+  - `AssertionError: opencode on PATH is '1.18.29', but every 'measured on v1.18.21'
+    claim in scripts/opencode/opencode.jsonc, scripts/opencode/README.md and
+    scripts/tests/test_opencode_config.py is keyed to '1.18.21'.` → `assert '1.18.29' == '1.18.21'`
+  - `age-keygen: error: failed to parse input: error at line 3: unknown identity type`
+    (6 occurrences), from
+    `/nix/store/b8mq9lqr30vlmx661xhp0cwvhyns29p6-age-1.3.2/bin/age-keygen -y …`
+- **Ruled out — my change.** A THREE-WAY control, all on node `talos-xr6-r7p`, all
+  byte-identical at `failed=7`, opencode-drift 1, age-keygen 6:
+  `devrc-ci-zkcb2` rev `fec498fb5` (main + one markdown file) · `devrc-ci-rerun-ho`
+  the same commit re-run from its own spec · **`devrc-ci-ctrl-main` rev `18bc15004`
+  = `main` itself, without my commit.** A docs-only diff cannot move an opencode
+  version pin. `via: measurement`
+- **Ruled out — the node.** All four runs above ran on `talos-xr6-r7p`, and
+  `devrc-ci-sljm8` **succeeded** on that same node 7 minutes before mine with
+  `failed=0`. So this is not rank 18's device-isolated I/O contention.
+  `via: measurement`
+- **Ruled out — a flake.** The same commit re-run from its own spec produced the
+  identical failure counts. Deterministic, not timing. `via: measurement`
+- 🔴 **NOT EXPLAINED, and my first theory was WRONG.** I reasoned the local pass was
+  because this host had an older opencode. Measured afterwards: `opencode --version`
+  here is **1.18.29 — the same version CI reports** — and
+  `python3 -m pytest scripts/tests/test_opencode_config.py` still passes **640/640**
+  on both `main` and my branch. So the local/CI divergence is **not** a version
+  difference and I did not identify what it is. Do not carry my discarded theory
+  forward.
+- **Leading hypothesis:** the failing assertions live in a target CI runs
+  differently from a bare `pytest <file>` — the gate runs `scripts/tests` as one
+  target with its own floor and its own nix shell, so the binaries on PATH inside
+  that shell are the thing to read, not the ones in an interactive shell.
+- **Next probe:** read the failing target's own invocation out of the gate script
+  and reproduce it verbatim rather than running the test file directly:
+  ```bash
+  KUBECONFIG=$KC_HOMELAB kubectl logs -n tekton-ci devrc-ci-ctrl-main-gate-pod \
+    --all-containers --tail=-1 | grep -a -B5 "1.18.29' == '1.18.21"
+  ```
+  then compare `command -v opencode age-keygen` inside that shell against an
+  interactive one. ⚠ `devrc-ci-ctrl-main` and `devrc-ci-rerun-ho` are hand-created
+  PipelineRuns I made for the control; they are evidence, not scheduled work, and
+  can be deleted once read.
+
+### ⚠ Task 524's closing condition is blocked on an interactive prompt, not on a defect
+
+- **Symptom + exact repro:** launch a session from the clawgate UI; the window never
+  acquires a `claude_session_id`, so 524's mechanical closing condition cannot pass.
+- **Observed (with values):** window `@58` on `workbench`/`scratch` is in the read
+  model with `claude=true` and `claude_session_id` empty across **6 snapshots / 6
+  minutes**; `window_activity` frozen at the launch instant `1788840435`; **0** new
+  `~/.claude/projects/**.jsonl` files in 12 minutes; the pane renders Claude Code's
+  trust-folder prompt (`1. Yes, I trust this folder`).
+- **Ruled out — the PATH defect 524 fixed.** The same pane's PATH carries 15 entries
+  with `claude` resolvable at `/home/zach/.nix-profile/bin`; before the fix it was
+  the unit's 3 entries. The launcher works. `via: measurement`
+- **Leading hypothesis:** Claude Code does not create a session until the trust
+  prompt is answered, so a FIRST launch into an untrusted directory can never
+  satisfy the condition as written.
+- **Next probe:** answer the prompt in `@58` (operator decision — it is a security
+  gate), or re-launch into an already-trusted directory, then
+  `curl -s -H "Authorization: Bearer $TOK" $B/api/tmux/snapshot` and read
+  `claude_session_id` for that `window_id`. `tmux kill-window -t @58` once read.
+
 ## Gotchas
 - 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
   is a statement about the OLD leg.** A PipelineRun executes the **deployed Task object in the
