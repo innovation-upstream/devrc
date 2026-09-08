@@ -192,6 +192,34 @@ def test_a_value_that_depends_on_EVALUATION_is_refused(value, what):  # audit R2
         jm.rewrite(src)
 
 
+def test_a_bare_double_apostrophe_escape_is_refused():  # audit R3 NEW-C
+    """Every earlier param of the test above also contained `${`, so all three died on
+    THAT half of the guard. Audit round 3 mutation-tested it: deleting `or "''" in value`
+    SURVIVED a green 30-test run. This case has no `${` and kills that mutant."""
+    src = BLOCK.replace("SystemMaxUse=2G", r"SystemMaxUse=2G''\\")
+    with pytest.raises(jm.Refused, match="antiquotation"):
+        jm.rewrite(src)
+
+
+@pytest.mark.parametrize("value", [r"5m\t", r"C:\\path", r"a\nb"])
+def test_the_INLINE_form_refuses_a_backslash(value):  # audit R3, mirror of R1 #10
+    """The mirror hazard. In a `''`-string a backslash is literal, so re-escaping it is
+    right. In a `"`-string Nix has ALREADY interpreted it — `"5m\t"` IS `5m<TAB>` — so
+    escaping the raw text would emit a literal backslash-t instead, wrong in the opposite
+    direction. We only see un-evaluated text, so refuse."""
+    src = INLINE.replace("SyncIntervalSec=30s", f"SyncIntervalSec={value}")
+    with pytest.raises(jm.Refused, match="backslash"):
+        jm.rewrite(src)
+
+
+def test_the_BLOCK_form_still_ACCEPTS_a_backslash():
+    """The other side of that boundary — refusing both forms would be over-wide, and
+    this is the case R1 #10's escaping exists to serve."""
+    src = BLOCK.replace("SystemMaxUse=2G", r"SyncIntervalSec=5m\t")
+    _, pairs = jm.rewrite(src)
+    assert pairs == [("SyncIntervalSec", r"5m\t")]
+
+
 def test_the_inline_form_refuses_an_antiquotation_too():  # audit R2 NEW-5
     """Same hazard, other spelling: `${` antiquotes inside a "-string as well."""
     src = INLINE.replace("SyncIntervalSec=30s", "SyncIntervalSec=${interval}")

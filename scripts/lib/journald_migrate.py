@@ -72,8 +72,11 @@ def to_nix_string(value: str) -> str:
     return f'"{out}"'
 
 
-def parse_settings(body: str) -> list[tuple[str, str]]:
+def parse_settings(body: str, form: str = "block") -> list[tuple[str, str]]:
     """Parse a journald.conf(5) fragment into ordered key/value pairs.
+
+    `form` is "block" (a `''`-string source) or "inline" (a `"`-string source). It
+    decides what a backslash MEANS — see the refusal below.
 
     Comments and blank lines are skipped. Anything else that is not a `Key=Value` with a
     well-formed key raises Refused — including a `[Journal]` section header, which would
@@ -109,6 +112,19 @@ def parse_settings(body: str) -> list[tuple[str, str]]:
                 f"({value!r}) — its VALUE depends on evaluation, so a literal rewrite "
                 "would change it. Migrate this one by hand."
             )
+        # The MIRROR of the hazard above, and it only exists for the inline form. In a
+        # `''`-string a backslash is literal, so re-escaping it for the `"`-string we
+        # emit is right. In a `"`-string Nix has ALREADY interpreted it — source `"5m\t"`
+        # is `5m<TAB>` — so escaping the raw text would emit the literal backslash-t
+        # instead, changing the value in the opposite direction. We only have the
+        # un-evaluated text, so refuse rather than guess which one was meant.
+        if form == "inline" and "\\" in value:
+            raise Refused(
+                f"value for {key!r} contains a backslash escape ({value!r}) in a "
+                'double-quoted source string. Nix has already interpreted it, and this '
+                "rewrite only sees the raw text, so it cannot preserve the value. "
+                "Migrate this one by hand."
+            )
         pairs.append((key, value))
     if not pairs:
         raise Refused("the extraConfig block contained no settings")
@@ -130,7 +146,7 @@ def rewrite(src: str) -> tuple[str, list[tuple[str, str]]]:
     """Return (new_source, migrated_pairs). Raises Refused and writes nothing on doubt."""
     pattern, matches = _matches(src)
     indent, body = matches[0]
-    pairs = parse_settings(body)
+    pairs = parse_settings(body, "inline" if pattern is _INLINE else "block")
 
     # Emit the file's own line ending, so a CRLF config does not come back as a mixed
     # one — the operator reviews this as a `diff -u` and a changed ending shows up there.

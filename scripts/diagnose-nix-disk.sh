@@ -35,8 +35,17 @@ skip() { echo "  (unavailable: $*)"; }
 # --with-always-set-home), HOME is the TARGET user's — i.e. /root — so a bare $HOME
 # would make section 8 walk root's home and print almost nothing. SUDO_USER names who
 # actually invoked us; fall back to HOME when not under sudo.
+HOME_SOURCE="\$HOME"
 if [ -n "${SUDO_USER:-}" ]; then
-  TARGET_HOME="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+  resolved="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+  # Gate the attribution on the RESOLUTION, not on SUDO_USER being set: an unresolvable
+  # user fell back to $HOME while the line claimed it had used SUDO_USER.
+  if [ -n "$resolved" ]; then
+    TARGET_HOME="$resolved"
+    HOME_SOURCE="SUDO_USER=$SUDO_USER"
+  else
+    HOME_SOURCE="\$HOME (SUDO_USER=$SUDO_USER did not resolve)"
+  fi
 fi
 TARGET_HOME="${TARGET_HOME:-$HOME}"
 
@@ -136,7 +145,7 @@ echo ""
 
 # 8. /home breakdown
 echo "=== 8. home breakdown ==="
-echo "  (home: ${TARGET_HOME}${SUDO_USER:+  — resolved from SUDO_USER=$SUDO_USER, not \$HOME})"
+echo "  (home: ${TARGET_HOME}  — from ${HOME_SOURCE})"
 found8=0
 for d in "$TARGET_HOME"/.local/share/Steam "$TARGET_HOME"/.ollama "$TARGET_HOME"/.cache \
          "$TARGET_HOME"/.config "$TARGET_HOME"/workspace "$TARGET_HOME"/go \

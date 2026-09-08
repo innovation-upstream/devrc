@@ -83,13 +83,14 @@ TMP="${CFG}.new.$$"
 KEYS="$(mktemp -t journald-keys-XXXXXXXX)"
 BAK="${CFG}.bak-journald-$(date +%Y%m%d-%H%M%S)-$$"
 PATCHED=0
-ACTIVATED=0   # `nixos-rebuild test` has activated the config (not persisted)
+ACTIVATION_ATTEMPTED=0  # `nixos-rebuild test` was entered (may have partly applied)
+ACTIVATED=0   # `nixos-rebuild test` returned 0 — activated, not persisted
 SWITCHED=0    # `nixos-rebuild switch` has returned (activated AND persisted)
 OK=0
 
 finish() {
   local rc=$?
-  rm -f "$TMP" "$KEYS" "${MERGED:-}"
+  rm -f "$TMP" "$KEYS" ${MERGED:+"$MERGED"}
   if [ "$OK" = "1" ]; then return; fi
   if [ "$PATCHED" = "1" ] && [ -f "$BAK" ]; then
     echo >&2
@@ -115,8 +116,12 @@ finish() {
       echo "   even though the file is restored. It was never added to the boot menu, so a" >&2
       echo "   REBOOT reverts it — or run \`sudo nixos-rebuild switch\` to activate the" >&2
       echo "   restored config immediately." >&2
+    elif [ "$ACTIVATION_ATTEMPTED" = "1" ]; then
+      echo "🔴 \`nixos-rebuild test\` was entered but did not complete, so the change may be" >&2
+      echo "   PARTLY APPLIED to the running system. The file is restored; run" >&2
+      echo "   \`sudo nixos-rebuild switch\` to bring the system back to it." >&2
     else
-      echo "   The system was never activated, so nothing is running the change." >&2
+      echo "   Activation was never attempted, so nothing is running the change." >&2
     fi
   fi
   exit $rc
@@ -168,6 +173,10 @@ nixos-rebuild dry-build
 # `test` activates WITHOUT registering a generation or touching the bootloader, so an
 # activation failure here is recoverable; `switch` does both BEFORE activating.
 echo "== nixos-rebuild test =="
+# Armed BEFORE the call: `test` failing PARTWAY through activation has already applied
+# some of the change, so "never activated" would be false there too — the same defect
+# as the switch/test boundary, one step earlier.
+ACTIVATION_ATTEMPTED=1
 nixos-rebuild test
 ACTIVATED=1
 
@@ -181,12 +190,15 @@ echo
 # journald.conf(5) key, and a hardcoded check reports a false alarm on any host whose
 # config carried a different setting.
 echo "== verify =="
-# Read the MERGED configuration, not just /etc/systemd/journald.conf: a drop-in under
-# /etc/systemd/journald.conf.d/ or /run/systemd/journald.conf.d/ overrides that file, so
-# checking it alone would report `ok` for a setting something else has made inert.
+# 🔴 `systemd-analyze cat-config` CONCATENATES the main file and every drop-in, with
+# `# <path>` headers between them — it does NOT resolve precedence. So a plain
+# `grep -qxF` over its output matches an overridden line and reports ok, and it also
+# matches a line that lives ONLY in a stale drop-in and never reached journald.conf.
+# Both were measured. We resolve precedence ourselves below: LAST assignment wins,
+# which is the order cat-config emits and the order systemd applies.
 MERGED="$(mktemp -t journald-merged-XXXXXXXX)"
 if systemd-analyze cat-config systemd/journald.conf > "$MERGED" 2>/dev/null && [ -s "$MERGED" ]; then
-  echo "  reading   : systemd-analyze cat-config systemd/journald.conf (merged, incl. drop-ins)"
+  echo "  reading   : systemd-analyze cat-config systemd/journald.conf (main file + drop-ins)"
 else
   echo "  reading   : /etc/systemd/journald.conf (systemd-analyze unavailable — DROP-INS NOT CHECKED)" >&2
   cat /etc/systemd/journald.conf > "$MERGED" 2>/dev/null \
@@ -194,16 +206,39 @@ else
 
 fi
 
+# TWO independent facts per key, because either alone can be true while the migration
+# is broken:
+#   (a) LANDED   — the pair is in /etc/systemd/journald.conf, the file NixOS generates
+#                  from settings.Journal. Proves the migration itself worked.
+#   (b) IN EFFECT — it is the LAST assignment across the concatenation. Proves nothing
+#                  overrides it.
+# Checking only (b) passes when a stale drop-in happens to supply the same value and the
+# migration never landed; checking only (a) passes when a drop-in overrides it. Measured
+# both ways in audit round 3.
 missing=0
 for kv in "${MIGRATED[@]}"; do
-  if grep -qxF "$kv" "$MERGED"; then
-    echo "  ok        : $kv"
+  key="${kv%%=*}"
+  landed=no
+  grep -qxF "$kv" /etc/systemd/journald.conf 2>/dev/null && landed=yes
+  # Comment lines (`# <path>`, `#SystemMaxUse=`) cannot match: the key is anchored at
+  # start-of-line.
+  eff="$(grep -E "^${key}=" "$MERGED" | tail -1 || true)"
+
+  if [ "$landed" = "yes" ] && [ "$eff" = "$kv" ]; then
+    echo "  ok        : $kv  (in journald.conf, and in effect)"
+  elif [ "$landed" = "no" ] && [ "$eff" = "$kv" ]; then
+    echo "  NOT LANDED: $kv is in effect, but NOT in /etc/systemd/journald.conf —" >&2
+    echo "              something other than settings.Journal is supplying it." >&2
+    missing=$((missing + 1))
+  elif [ -n "$eff" ]; then
+    echo "  OVERRIDDEN: $kv — effective value is '${eff}' (a later drop-in wins)" >&2
+    missing=$((missing + 1))
   else
-    echo "  MISSING   : $kv — not present in the merged journald config as written" >&2
+    echo "  MISSING   : $kv — no assignment of ${key} anywhere in the journald config" >&2
     missing=$((missing + 1))
   fi
 done
-[ "$missing" = "0" ] || die "$missing migrated setting(s) did not reach the merged config"
+[ "$missing" = "0" ] || die "$missing migrated setting(s) did not land or are not in effect"
 
 echo
 echo "--- merged journald config ---"
