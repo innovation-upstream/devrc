@@ -23,7 +23,7 @@ platform change, and the loud failure is the point — case 2 is only invisible
 when the fall-through is silent.
 
 Offline-testable by design: set CIVITAI_STATUS_FILE to a captured `civitai app
-status` dump and no network call is made. `scripts/tests/test_civitai_app_release.py`
+status` dump and no network call is made. `scripts/tests/test_civitai_app_fleet.py`
 drives every branch below through that seam.
 """
 
@@ -49,13 +49,31 @@ import sys
 _RUN = subprocess.run
 
 # Review states a submission row can carry (column 3).
+# Provenance, same standard as DEPLOY_STATES below: `approved`, `withdrawn` and
+# `rejected` all occur in the live listing 2026-09-08; `pending` was observed on
+# a submission the same day, between submit and moderator review. An audit
+# pointed out that the "a too-wide set fails silently" argument was made for
+# DEPLOY_STATES and then not applied here — widening this set passed a fully
+# green suite, because its only guard pinned the single literal `marinated`.
 REVIEW_STATES = {"pending", "approved", "rejected", "withdrawn"}
 
 # Deploy states (column 4). "-" means no deploy for this row.
 # 🔴 ORDERED WORST-TO-BEST IS NOT THE POINT — completeness is. Adding a state
 # the platform introduced is a one-line change here; the alternative (a
 # fall-through default) is what silently mis-reported `deploying` for an hour.
-DEPLOY_STATES = {"-", "queued", "building", "deploying", "live", "failed"}
+#
+# 🔴 EVERY MEMBER WAS OBSERVED, none guessed — and that distinction is not
+# pedantry. The first draft of this set was wrong in BOTH directions: it omitted
+# `preview-live` (live on `w6-ui-dogfood`) and included `queued`, which occurs
+# nowhere in the listing. The omission surfaced on `fleet.py`'s first real run,
+# via this guard raising, within an hour of the file being merged — the guard
+# working exactly as designed, on its author. Re-derive with
+#     civitai app status | awk 'NF>=4 && $2 ~ /^[0-9]/ {print $4}' | sort -u
+# rather than from memory, and add a member only after seeing it.
+#
+# Provenance: `-`, `live`, `failed`, `preview-live` from the live listing
+# 2026-09-08; `building` and `deploying` observed on submissions the same day.
+DEPLOY_STATES = {"-", "building", "deploying", "live", "failed", "preview-live"}
 
 # A row is authoritative for a version unless it was withdrawn. A withdrawn row
 # is a real event, but it never describes what the OTHER submission of the same
@@ -133,6 +151,14 @@ def resolve(rows: list[dict[str, str]], app: str, version: str) -> dict[str, str
     duplicate says nothing about the sibling submission of the same version.
     Returns the withdrawn row only when it is the ONLY row — then it is the
     answer, not noise.
+
+    TIE-BREAK, when MORE THAN ONE non-withdrawn row shares a version: the FIRST
+    is returned, and the CLI lists newest-first, so that is the newest. An audit
+    pointed out the docstring said "the non-withdrawn row" in the singular while
+    the code already handled a plural; the fixture only ever had one, so nothing
+    pinned it. A `pending/-` row above an `approved/live` row therefore resolves
+    to `pending/-`, which is correct — it is the newer submission — but it is a
+    behaviour, not an accident, so it is written down and tested.
     """
     matching = [r for r in rows if r["app"] == app and r["version"] == version]
     if not matching:
