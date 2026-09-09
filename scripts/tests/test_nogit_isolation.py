@@ -2285,8 +2285,14 @@ def test_a_LINKED_WORKTREE_protects_the_COMMON_config(tmp_path):
     exists in the non-worktree shape and every test here would still pass.
     """
     main = _scratch_root(tmp_path)
-    # A worktree needs a commit to check out.
-    for cmd in (["git", "-C", str(main), "commit", "-q", "--allow-empty",
+    # A worktree needs a commit to check out. `maintenance.auto=false` because
+    # `git commit` otherwise forks a DETACHED `git maintenance run --auto` whose
+    # cwd is this repo, i.e. a co-tenant this fixture did not start — the
+    # 2026-09-06 flake, see `test_git_repo_isolation.py::_NO_AUTO_MAINTENANCE`.
+    # Harmless to this test's verdict (it wants a co-tenant), but a fixture in
+    # this family must not plant one of its own.
+    for cmd in (["git", "-C", str(main), "-c", "maintenance.auto=false",
+                 "commit", "-q", "--allow-empty",
                  "-m", "base", "--no-gpg-sign"],):
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
                               env={**os.environ, "GIT_AUTHOR_NAME": "t",
