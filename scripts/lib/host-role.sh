@@ -169,9 +169,18 @@ first_reachable_ssh() {
     # 🔴 The prefix is the CALLER's, not a hardcoded "ship:". This lib is shared,
     # and `drift-check.sh` writes a JOURNAL whose every line must start with
     # `[`, `===`, `drift-check: ` or two spaces — a stray `ship: …` from here
-    # fails its hygiene guard (measured:
-    # test_the_ladder_escalates_when_the_streak_FILE_cannot_be_written) and, worse,
-    # attributes the message to the wrong program in the operator's log.
+    # fails its hygiene guard and, worse, attributes the message to the wrong
+    # program in the operator's log.
+    #
+    # Guarded by `test_ship_ssh_probe_wiring.py::test_drift_checks_probe_output_
+    # is_journal_clean`, which drives the probe deliberately and asserts the
+    # prefix. ⚠ An earlier version of this comment cited
+    # `test_the_ladder_escalates_when_the_streak_FILE_cannot_be_written` instead;
+    # that test could see a probe line when the citation was written and cannot
+    # now — the same change that added this default also stopped `--no-remote`
+    # probing and defaulted DRIFT_SKIP_SSH_PROBE=1 in the fixture. Deleting the
+    # default scored 594 passed against it. Cited here so nobody restores the
+    # dead pointer.
     echo "${SSH_PROBE_LOG_PREFIX:-ship}: $target did not answer" >&2
   done
   return 1

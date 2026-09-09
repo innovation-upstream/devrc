@@ -152,6 +152,33 @@ def test_the_seam_cannot_be_reached_through_the_ENVIRONMENT(tmp_path):
     )
 
 
+def test_the_flag_is_listed_in_help(tmp_path):
+    """The Usage block is what `--help` prints, and nothing read it.
+
+    `ship.sh` asserts in a comment that this flag "appears in --help like every
+    other option". It did not, for one commit: the flag was added to the arg
+    loop and not to the header. Deleting the Usage lines again is otherwise
+    undetectable -- and this round treated exactly that shape (an unguarded
+    fix) as a defect worth closing, so it should not leave one behind.
+
+    The positive control matters: `--help` prints a comment block by an awk
+    range, so a header edit can silently truncate the whole listing. Asserting
+    only the new flag would then pass while every other option vanished.
+    """
+    res = subprocess.run(["bash", str(SHIP), "--help"], capture_output=True,
+                         text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    assert "--print-remote-target" in res.stdout, (
+        "the flag is not in the Usage block that --help prints, so a reader "
+        "sent there by ship.sh's own comment will not find it"
+    )
+    for control in ("--detect-role", "--no-remote", "--no-switch"):
+        assert control in res.stdout, (
+            f"{control} is missing too -- the header listing is truncated, so "
+            "the assertion above proves nothing about the flag specifically"
+        )
+
+
 def test_the_skip_switch_turns_the_probe_off(tmp_path):
     """`SHIP_SKIP_SSH_PROBE` is the documented escape hatch -- unexercised until now."""
     log = tmp_path / "probed.log"
@@ -234,10 +261,8 @@ def test_the_probes_diagnostic_carries_the_CALLERS_prefix(tmp_path):
 
     `drift-check.sh` accepts only lines starting with `[`, `===`,
     `drift-check: ` or two spaces. A hardcoded `ship:` here fails that hygiene
-    guard -- measured, as
-    `test_the_ladder_escalates_when_the_streak_FILE_cannot_be_written` -- and
-    independently misattributes the message to the wrong program in the
-    operator's log.
+    guard and independently misattributes the message to the wrong program in
+    the operator's log.
 
     ⚠ SCOPE: this asserts the LIB under both prefix values. The drift-check
     side is asserted by
@@ -342,6 +367,18 @@ def test_drift_check_makes_no_ssh_connection_under_no_remote(tmp_path):
     env["DRIFT_REPO"] = str(tmp_path / "norepo")
     env["DRIFT_STATE_DIR"] = str(tmp_path / "state")
     env["DRIFT_GH"] = str(tmp_path / "no-gh")   # absent -> the arm takes its no-gh branch
+    # 🔴 AND THE OTHER TWO. Pinning the three above was measured INSUFFICIENT:
+    # `DRIFT_SESSION_MANAGER` defaults to the real 352 KB program, which the
+    # phase-2 gate execs to scan the operator's LIVE tmux (57 rows, measured) --
+    # `drift-check.sh` says of that scan "which no test may do", and
+    # `test_drift_check.py` pins it as its FOURTH hermeticity seam for the same
+    # reason. `$HOME` is the other: unredirected, each run walks the real
+    # ~/.claude and ~/.config/opencode (344 managed symlinks) and reads
+    # settings.json. Read-only, but the verdict then depends on the operator's
+    # live session state -- and pinning both is FASTER: 3 session-manager execs
+    # to 0, these tests 8.28s to 0.84s.
+    env["DRIFT_SESSION_MANAGER"] = str(tmp_path / "no-session-manager")
+    env["HOME"] = str(tmp_path / "home")
 
     subprocess.run(["bash", str(drift), "--no-remote"], capture_output=True,
                    text=True, env=env, timeout=300)
@@ -385,7 +422,12 @@ def test_drift_checks_probe_output_is_journal_clean(tmp_path):
            "DRIFT_SKIP_SSH_PROBE": "0",
            "DRIFT_REPO": str(tmp_path / "norepo"),
            "DRIFT_STATE_DIR": str(tmp_path / "state2"),
-           "DRIFT_GH": str(tmp_path / "no-gh")}
+           "DRIFT_GH": str(tmp_path / "no-gh"),
+           # Same five seams as the test above -- see its note. The real
+           # session-manager scans live tmux; an unredirected HOME walks the
+           # operator's ~/.claude.
+           "DRIFT_SESSION_MANAGER": str(tmp_path / "no-session-manager"),
+           "HOME": str(tmp_path / "home2")}
     for var in ("REMOTE_SSH", "LAPTOP_SSH"):
         env.pop(var, None)
 

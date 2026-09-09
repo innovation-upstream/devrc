@@ -747,11 +747,14 @@
 #                    as UNREACHABLE and escalates rc 13 after
 #                    $DRIFT_UNREACHABLE_ESCALATE runs. It never runs under
 #                    --no-remote, and never when an explicit $REMOTE_SSH names
-#                    one target — those two conditions are what stop the suite
-#                    reaching a real host (measured: 0 unstubbed ssh attempts).
-#                    The fixture ALSO defaults it to 1, for determinism rather
-#                    than containment: 8 stubbed probes still ran, and a future
-#                    test that forgets a stub should not be the first to notice.
+#                    one target. Those two conditions stop 271 of 279 probing
+#                    runs; the remaining 8 were stopped by the FIXTURE'S OWN
+#                    stub ssh, not by them — so "0 unstubbed attempts" is a
+#                    joint result, and crediting it to the gate alone (as an
+#                    earlier version of this line did) would mislead anyone
+#                    deciding the stub is removable. The fixture ALSO defaults
+#                    this to 1, for determinism rather than containment, so a
+#                    future test that forgets a stub is not the first to notice.
 #                    NOT forwarded over ssh — the remote leg does no probing of
 #                    its own.
 #   SSH_PROBE_TIMEOUT / SSH_PROBE_CMD / SSH_PROBE_LOG_PREFIX
