@@ -40,6 +40,18 @@ is the PRIVATE proposal, not this doc.
 - 🔴 **NO `clawgate-task:` FIELD** — `resolve` exits 5; board reachable (8 links for another
   session) but a wrong id also answers 200 with an empty array.
 
+- 🔴 **THE SHARED CLONE `$DEVRC` IS ON ANOTHER SESSION'S BRANCH — `feat/audit-pr-round-0-algorithm`,
+  re-checked at hand-off time. ANY tool that commits to "the current branch" from that clone
+  lands there, `handoff_doc.py` INCLUDED.** This bit this session: a handoff update was
+  committed and PUSHED to that branch. Remediated without rewriting history — cherry-picked to
+  `main` (`f7242d83`) and REVERTED on their branch (`1c1a0f1f`), after which their branch
+  diffed EMPTY against their own last commit `d16bfd7a`. They had no PR open and my commit
+  touched only this doc. **Run `handoff_doc.py --repo <a worktree on `main`>`, not `$DEVRC`,
+  until that clone moves.**
+- **This hand-off itself was written from a `main` worktree for exactly that reason**, and
+  because the clone's copy of this doc sits at the reverted state — i.e. a STALE BASE that
+  would have merged into an out-of-date document.
+
 ## Open investigations — live diagnosis state
 
 ### Two ledger guards in cairn are narrower than their own sentences — left OPEN by decision
@@ -1389,6 +1401,28 @@ reported `Failed services: analyze-service-index-commit.service`, which reads as
 timer-triggered, failed 603 times over 3 days, and its most recent failure PREDATED this
 switch's completion. Check `journalctl --since` and the unit's trigger before attributing a
 reported failure to the thing that reported it. See rank 21.
+
+**🔴 A TOOL THAT COMMITS TO "THE CURRENT BRANCH" IS A LOADED GUN IN A SHARED CLONE — AND I
+FIRED IT ONE PARAGRAPH AFTER DOCUMENTING IT.** `handoff_doc.py --confirm --push` commits to
+whatever `$DEVRC` is checked out at. It was on another session's `feat/audit-pr-round-0-algorithm`,
+so a handoff update landed and PUSHED there. The gotcha warning that the shared clone is not on
+`main` had been written into this very doc minutes earlier, about `home-manager switch` — the
+hazard was understood, the *class* was not generalised from "builds from the tree" to "commits
+to the tree's branch". **Ask of every tool: which branch does this WRITE to, and did I check it
+this minute?**
+🔴 **THE REMEDIATION SHAPE, because it is reusable and non-destructive:** cherry-pick the commit
+onto the branch it belonged on and push; then `git revert` it on the branch it polluted and push
+that. **No force-push, no history rewrite** — safe even if the other session has already pulled.
+Then PROVE the restoration rather than asserting it: `git diff --stat <their-last-commit> HEAD`
+must be EMPTY. Confirm first that the intruding commit touched nothing of theirs
+(`git show --stat`) and that no PR is open on that branch, because a revert on a branch with an
+open PR shows up in their review.
+
+**⚠ `git worktree add <path> main` IS AVAILABLE PRECISELY BECAUSE THE CLONE IS ELSEWHERE.** A
+branch can only be checked out in one worktree; the shared clone squatting on a feature branch
+is what leaves `main` free to check out. The stale-base risk goes with it — the clone's copy of
+a doc can be behind, or as here, at a reverted state — so a worktree on `main` fixes the write
+target and the read base in one move.
 
 ## How to verify
 
