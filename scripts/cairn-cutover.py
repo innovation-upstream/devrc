@@ -74,13 +74,20 @@ covered the whole criterion.
 
 USAGE
 -----
-    cairn-cutover.py                       # dry run: plan and report, change nothing
+    cairn-cutover.py                       # dry run: plan and report, change no STORE
                                            # ⚠ on a store P5 has already frozen this
                                            # exits 19 (P3 retired) INSTEAD of reporting
                                            # a plan — deliberately: a plan you can never
-                                           # apply is not information. Still changes
-                                           # nothing.
+                                           # apply is not information.
+                                           # 🔴 "change nothing" is about the STORES. A
+                                           # dry run STILL creates <run-dir> holding a
+                                           # full plaintext copy of the SERVED store
+                                           # (P0 runs first); roll back by deleting it.
+                                           # An earlier draft of this note said "still
+                                           # changes nothing" flatly, which was false.
     cairn-cutover.py --apply --push <ns>/<deploy>
+    cairn-cutover.py --freeze --apply      # run P5 alone — the route out of a PARTIAL
+                                           # or interrupted freeze, which P3 now refuses
     cairn-cutover.py --unfreeze            # roll P5 back
     cairn-cutover.py --rollback-push <run-dir>
 
@@ -1399,56 +1406,84 @@ def main(argv: list[str] | None = None) -> int:
         # candidates, 5 were POD-NEWER, two of them `OPEN:` -> `RESOLVED` closures
         # carrying ~20 lines of later corrections. It would report success.
         #
-        # So this refuses instead, by the same instrument P5 uses. The signal is
-        # the freeze, not a flag or a date: a store whose entries all refuse a
-        # write has completed the cutover, and a store that is still writable has
-        # not — so a genuine first cutover is untouched and passes straight
-        # through. To get bytes to the pod now, use the write route (`cairn
-        # append` / `cairn put`), which is what replaced this phase.
-        # ⚠ NO `examined == 0` BRANCH HERE, DELIBERATELY. `survey` walks the same
+        # So this refuses instead, using the instrument P5 already uses. The
+        # signal is the FREEZE — evidence P5 leaves and nothing else here does —
+        # not a flag or a date, so a genuine first cutover passes straight
+        # through and P3 stays live for it.
+        #
+        # ⚠ NO `examined == 0` BRANCH, DELIBERATELY. `survey` walks the same
         # `read_store` population P0 already refused as RC_NO_STORE, so a zero is
-        # unreachable by the time this runs — and a guard that cannot execute is
-        # worse than none, because it reads as coverage. P5 keeps its own check
-        # because `--freeze` reaches it without passing P0.
-        # 🔴 THE PREDICATE IS `refused > 0`, NOT `writable == 0`, AND THE
-        # DIFFERENCE IS TWO REAL STATES — both measured, both wrong in the
-        # earlier spelling:
+        # unreachable here — and a guard that cannot execute is worse than none,
+        # because it reads as coverage. P5 keeps its own check because `--freeze`
+        # reaches it without passing P0.
+        #
+        # 🔴 `refused`, NOT `writable == 0` — the earlier spelling was wrong in
+        # BOTH directions, and both are real states:
         #   * `set_entry_mode` freezes FILES, never scope DIRECTORIES (see its
         #     docstring), so a genuinely NEW entry written after the freeze is
-        #     0644 and `writable == 0` goes FALSE on a store that HAS been cut
-        #     over. Measured on the real mirror 2026-09-02 (`34d00d90`): five
-        #     entries existed only on one host, created exactly that way. The
-        #     guard would have gone silent in the one situation that makes
-        #     someone reach for P3.
-        #   * `probe_writable` returns "refused" ONLY for `PermissionError`;
-        #     EROFS is a plain `OSError` and lands in `other`. A never-cut-over
-        #     store on a read-only mount therefore reads `writable == 0` and the
-        #     guard fired with a FALSE diagnosis, refusing a legitimate first
-        #     cutover.
-        # `refused` counts entries that answered EACCES to a real append, which
-        # is the thing P5's freeze produces and nothing else here does — so it is
-        # both the honest evidence and what the message below claims. P5 verifies
-        # its own work the same way (`refused != examined`); one instrument, one
-        # claim.
+        #     0644 and `writable == 0` went FALSE on a store that HAD been cut
+        #     over — silent in the one situation that makes someone reach for P3.
+        #     `34d00d90`/#1254 records five entries created exactly that way.
+        #   * a never-cut-over store on a read-only mount reads `writable == 0`
+        #     and the old predicate fired with a FALSE diagnosis.
         #
-        # ⚠ DIRECTION OF THE RESIDUAL: a never-cut-over store carrying a stray
-        # 0444 entry refuses P3. That is a false refusal, not a false push — it
-        # costs an operator one `chmod`, where the other direction costs the pod.
+        # 🔴 AND `other` IS ITS OWN OUTCOME, ABOVE THE RETIREMENT — because
+        # `refused > 0` ALONE FAILS OPEN ON THE BUCKET IT DOES NOT MEASURE, in
+        # the destructive direction. `probe_writable` returns "refused" only for
+        # `PermissionError`; EROFS is a plain `OSError` and lands in `other`. So
+        # a CUT-OVER store on a read-only mount — a natural hardening once local
+        # disk is declared a cache — reads `refused == 0` and would push the
+        # frozen mirror over the pod. Trading one direction for the other is not
+        # a fix. This file's own doctrine says it in one line: RC_COULD_NOT_
+        # MEASURE is "an instrument did not answer; never folded into a pass".
+        # An unreadable store is exactly that, so it gets that code rather than
+        # either verdict.
         frozen = survey(args.store)
         say(f"P3 local store: {frozen}")
+        if frozen["other"] > 0:
+            return refuse(RC_COULD_NOT_MEASURE, (
+                f"P3 could not measure {frozen['other']} of {frozen['examined']} "
+                f"entry file(s): the write probe answered neither 'writable' nor "
+                f"EACCES, so whether this store has been cut over is UNKNOWN — "
+                f"most likely a read-only mount (EROFS is not a PermissionError) "
+                f"or an I/O error. Both verdicts would be a guess in a direction "
+                f"that matters. Read the survey line above, fix the mount or the "
+                f"permissions, and re-run. NOTHING was pushed."
+            ))
         if frozen["refused"] > 0:
+            # 🔴 THE MESSAGE STATES WHAT WAS MEASURED, NOT A CONCLUSION IT CANNOT
+            # REACH. An earlier draft said "so P5 has frozen it and local disk is
+            # a read-through CACHE" — false for a PARTIAL freeze, which this
+            # script produces as a first-class outcome (`RC_FREEZE_INEFFECTIVE`
+            # with `unknown > 0` leaves entries at 0444 on a store whose freeze
+            # did NOT take), and false again after a SIGINT mid-`set_entry_mode`.
+            # Mode bits cannot tell that apart from a completed cutover, so the
+            # message reports the count and names BOTH routes out.
+            mixed = frozen["writable"] > 0
             return refuse(RC_CUTOVER_COMPLETE, (
                 f"P3 is RETIRED on this store — {frozen['refused']} of "
-                f"{frozen['examined']} entry file(s) refuse a write, so P5 has "
-                f"frozen it and local disk is a read-through CACHE of the pod. "
-                f"Pushing it back would overwrite every entry the pod has moved "
-                f"on since, and `seed.sh` never deletes, so it would report "
-                f"success. 🔴 Do NOT pass --allow-overwrite to get past this: "
-                f"that is the silent revert, not the fix. Write to the pod "
-                f"through `cairn create` for an entry it has never seen, or "
-                f"`cairn append` / `cairn put` for one it already holds — "
-                f"append and put BOTH 404 on a ref that does not resolve, so "
-                f"create is the verb for the ADD case. NOTHING was pushed."
+                f"{frozen['examined']} entry file(s) refuse a write, which only "
+                f"P5's freeze produces here. Pushing local disk back would "
+                f"overwrite every entry the pod has moved on since, and "
+                f"`seed.sh` never deletes, so it would report success. "
+                f"🔴 Do NOT pass --allow-overwrite to get past this: that is the "
+                f"silent revert, not the fix. Write to the pod through `cairn "
+                f"create` for an entry it has never seen, or `cairn append` / "
+                f"`cairn put` for one it already holds — append and put BOTH 404 "
+                f"on a ref that does not resolve, so create is the verb for the "
+                f"ADD case."
+                + (
+                    f" ⚠ {frozen['writable']} entr(y/ies) here are still WRITABLE, "
+                    f"so this may instead be a PARTIAL or INTERRUPTED freeze "
+                    f"rather than a completed cutover — the mode bits cannot "
+                    f"tell the two apart. If P5 never finished, complete it with "
+                    f"`--freeze --apply` (which runs P5 alone and does not "
+                    f"re-enter this phase); if this IS a cut-over store, the "
+                    f"writable file is a post-freeze creation and belongs on the "
+                    f"pod via `cairn create`."
+                    if mixed else ""
+                )
+                + " NOTHING was pushed."
             ))
 
         if not args.apply:
