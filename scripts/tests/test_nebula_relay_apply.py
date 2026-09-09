@@ -980,12 +980,23 @@ def test_the_verifier_is_never_execed_via_its_own_shebang():
     dispatch -- that makes /usr/bin/env a runtime dependency of this script, and the
     nix build sandbox has no /usr at all.
 
-    🔴 THIS GUARD EXISTS BECAUSE THE BEHAVIOURAL EVIDENCE IS INVISIBLE ON ONE TIER.
-    The dev host HAS /usr/bin/env, so with the fix reverted every behavioural test in
-    this file still passes there -- measured: 30 passed. Only the sandbox tier
-    (`nix build .#checks.x86_64-linux.pytests`) goes red. A source assertion is tier
-    -independent, so a revert fails wherever the suite runs, including in the tier
-    most sessions actually run.
+    WHY IT EXISTED, AND WHY THAT REASON NO LONGER HOLDS. It was written when the only
+    other coverage was behavioural-via-the-real-environment: the dev host HAS
+    /usr/bin/env, so reverting the fix left the whole file green there and only the
+    sandbox tier went red. A source assertion was then the one thing failing on both.
+
+    ⚠ `test_the_verifier_runs_with_its_shebang_BROKEN` below took that job over, and
+    took it over BETTER -- it manufactures the missing interpreter itself, so it is
+    tier-independent AND spelling-independent. RE-MEASURED at this tree with the helper
+    reverted to `run_check() { "$CHECK" "$@"; }`: **2 failed, 37 passed** on the dev
+    host, and both failures are these two tests. So the sentence this docstring used to
+    carry -- "only the sandbox tier goes red" -- is now FALSE, and it was the whole
+    stated justification for keeping this half.
+
+    What this test still earns: it fails FAST (no subprocess, no fixture) and names the
+    intended shape in its message, so a revert gets a readable diagnosis instead of "the
+    happy path exited 1". That is a real but MODEST reason -- recorded as such rather
+    than left reading like the load-bearing guard, which it is not.
 
     ⚠ THIS IS THE CHEAP HALF AND IT IS SPELLING-BOUND. It asserts the helper exists.
     It does NOT prove the absence of a second, direct call site: an audit measured that
@@ -1060,14 +1071,21 @@ def test_a_verifier_that_did_not_RUN_is_not_reported_as_a_config_fault(rig, rc, 
     r = rig.run(apply=rig.apply_beside_stub_verifier(rc))
     combined = r.stdout + r.stderr
     assert r.returncode != 0, combined
-    assert "did NOT RUN" in combined, f"{label}: {combined}"
-    assert f"rc={rc}" in combined, combined
+    assert "did NOT RUN" in combined, (
+        f"{label}: an rc outside the verifier's own {{0,1,2}} must be reported as "
+        f"'did NOT RUN', not as a verdict:\n{combined}")
+    assert f"rc={rc}" in combined, (
+        f"the abort must name the actual rc ({rc}) it could not interpret:\n{combined}")
     assert "could not read the current config" not in combined, (
         f"{label}: an exec/signal fault is still being blamed on $CFG:\n{combined}")
     # The advice is CONDITIONAL on whether anything was written. Nothing has been at the
     # preflight, so "re-run" is correct here — and must not be the other branch's text.
-    assert "Nothing has been written yet" in combined, combined
-    assert "DO NOT simply re-run" not in combined, combined
+    assert "Nothing has been written yet" in combined, (
+        "nothing has been written at the preflight, so the advice MUST say 'Nothing has "
+        "been written yet':\n" + combined)
+    assert "DO NOT simply re-run" not in combined, (
+        "the post-write branch's advice ('DO NOT simply re-run') reached the preflight, "
+        "where nothing has been written:\n" + combined)
 
 
 @pytest.mark.parametrize("rc", [126, 137])
@@ -1086,8 +1104,11 @@ def test_a_POST_REBUILD_verifier_that_did_not_RUN_does_not_blame_the_mesh(rig, r
     r = rig.run(apply=rig.apply_beside_sequenced_verifier(first_rc=1, then_rc=rc))
     combined = r.stdout + r.stderr
     assert r.returncode != 0, combined
-    assert "did NOT RUN" in combined, combined
-    assert f"rc={rc}" in combined, combined
+    assert "did NOT RUN" in combined, (
+        "an rc outside the verifier's own {0,1,2} must be reported as 'did NOT RUN', "
+        "not as a verdict about the relay:\n" + combined)
+    assert f"rc={rc}" in combined, (
+        f"the abort must name the actual rc ({rc}) it could not interpret:\n{combined}")
     assert "does not see" not in combined, (
         f"an exec/signal fault at the post-rebuild verify is still reported as the "
         f"relay not being advertised:\n{combined}")
@@ -1097,8 +1118,32 @@ def test_a_POST_REBUILD_verifier_that_did_not_RUN_does_not_blame_the_mesh(rig, r
     # unit, prints "ALREADY SATISFIED" and exits 0 over a config that no longer carries
     # the change. An unconditional "idempotent, re-run it" said exactly that, and also
     # contradicted the trap paragraph printed two lines below it.
-    assert "DO NOT simply re-run" in combined, combined
-    assert "Nothing has been written yet" not in combined, combined
+    assert "DO NOT simply re-run" in combined, (
+        "$CFG has been patched by now, so the advice MUST say 'DO NOT simply re-run' "
+        "rather than inviting one:\n" + combined)
+    assert "Nothing has been written yet" not in combined, (
+        "the preflight branch's advice ('Nothing has been written yet') reached a site "
+        "where $CFG HAS been written:\n" + combined)
+
+
+def test_an_INHERITED_PATCHED_cannot_change_the_preflight_advice(rig):
+    """The advice branches on $PATCHED, so $PATCHED must come from THIS run.
+
+    The flags used to be declared beside the trap, far below the preflight, so the only
+    way to read one early was `${PATCHED:-0}` -- which falls back to an INHERITED
+    environment variable. This script's own header documents running it as
+    `sudo env "PATH=$PATH" bash ...`, which preserves the caller's environment, so an
+    exported PATCHED=1 made the preflight claim work had been done when none had.
+
+    Fail-safe in direction (it over-warns rather than under-warns), but it is a message
+    about what the machine's state IS, and getting that from the caller's environment is
+    wrong regardless of which way it errs."""
+    r = rig.run(apply=rig.apply_beside_stub_verifier(126), extra_env={"PATCHED": "1"})
+    combined = r.stdout + r.stderr
+    assert r.returncode != 0, combined
+    assert "Nothing has been written yet" in combined, (
+        "an inherited PATCHED=1 reached the preflight's advice:\n" + combined)
+    assert "DO NOT simply re-run" not in combined, combined
 
 
 def test_a_REAL_verifier_refusal_still_blames_the_config(rig):
@@ -1108,8 +1153,11 @@ def test_a_REAL_verifier_refusal_still_blames_the_config(rig):
     r = rig.run(apply=rig.apply_beside_stub_verifier(2))
     combined = r.stdout + r.stderr
     assert r.returncode != 0, combined
-    assert "could not read the current config" in combined, combined
-    assert "did NOT RUN" not in combined, combined
+    assert "could not read the current config" in combined, (
+        "rc 2 is a real verifier refusal and must keep saying so:\n" + combined)
+    assert "did NOT RUN" not in combined, (
+        "rc 2 IS one of the verifier's own verdicts and must NOT be reported as "
+        "'did NOT RUN':\n" + combined)
 
 
 def test_scripts_are_executable_and_pass_bash_n():

@@ -107,8 +107,26 @@ PY
 
 # Run the test file against a (possibly mutated) nix/system copy.
 #   $1 = directory, $2... = extra pytest args
+# 🔴 PURGE THE BYTECODE CACHE, DO NOT MERELY REFUSE TO WRITE ONE.
+# PYTHONDONTWRITEBYTECODE=1 (exported at the top of this file) stops THIS run creating
+# a cache; it does NOT stop it READING one an earlier ordinary `pytest` invocation left
+# behind. CPython validates a cached module on mtime-in-whole-SECONDS plus size, so an
+# edit to the TEST FILE made between two battery runs can be served stale — and the
+# mutant is then scored against the OLD assertions.
+# MEASURED 2026-09-08: an edit adding explicit assertion messages was invisible for two
+# consecutive single-mutant runs, both reporting M-FH-6 as WRONG-KILLER ("failed, but
+# not with 'DO NOT simply re-run'") while the phrase was demonstrably in the output of
+# the same command run by hand. Deleting __pycache__ made it pass immediately.
+# This is the harness lying about the code under test, which is the one failure a
+# mutation battery must not have.
+purge_pycache() {
+  find "$(dirname "$TESTFILE")" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null
+  return 0
+}
+
 run_tests() {
   local d="$1"; shift
+  purge_pycache
   DEVRC_TEST_NEBULA_DIR="$d" \
     python3 -m pytest "$TESTFILE" -q -p no:randomly --no-header "$@" 2>&1
 }
@@ -326,9 +344,6 @@ mutant "M-FH-1-verifier-execed-via-shebang" apply 1 \
   test_the_verifier_is_never_execed_via_its_own_shebang \
   'no longer invokes the verifier through'
 
-# The verifier's exit codes and apply's `verifier_answered` are ONE fact in two files.
-# A new code on either side, unmatched on the other, silently reclassifies a verdict as
-# an exec fault — in the reassuring direction ("nothing was determined").
 # 🔴 M-FH-5 IS THE ONE THE STRUCTURAL GUARD CANNOT SEE. An audit demonstrated that
 # swapping ONE call site to "${CHECK}" reintroduces the /usr/bin/env dependency while
 # leaving the dev-host suite fully green — a source regex pins a SPELLING, and there are
@@ -340,6 +355,9 @@ mutant "M-FH-5-braces-evade-the-regex" apply 1 \
   test_the_verifier_runs_with_its_shebang_BROKEN \
   'something still EXECS it'
 
+# The verifier's exit codes and apply's `verifier_answered` are ONE fact in two files.
+# A new code on either side, unmatched on the other, silently reclassifies a verdict as
+# an exec fault — in the reassuring direction ("nothing was determined").
 mutant "M-FH-2-verifier-grows-a-code" check 1 \
   '  _self_test || exit 2' \
   '  _self_test || exit 3' \
@@ -371,7 +389,7 @@ mutant "M-FH-4-siteB-classify-dropped" apply 1 \
 # that unit, prints ALREADY SATISFIED and exits 0 over a config file that no longer
 # contains it.
 mutant "M-FH-6-advice-unconditional" apply 1 \
-  '  if [ "${PATCHED:-0}" = "0" ]; then' \
+  '  if [ "$PATCHED" = "0" ]; then' \
   '  if true; then' \
   test_a_POST_REBUILD_verifier_that_did_not_RUN_does_not_blame_the_mesh \
   'DO NOT simply re-run'

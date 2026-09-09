@@ -101,6 +101,24 @@ run_check() { "$BASH" "$CHECK" "$@"; }
 
 die() { echo "ABORT: $*" >&2; exit 1; }
 
+# Trap state. Each flag is set immediately AFTER the step it names succeeds, so the
+# message the trap prints is what was actually reached, never what was intended.
+#
+# 🔴 DECLARED HERE, NOT BESIDE THE TRAP THAT READS THEM. `die_verifier_did_not_run`
+# below reads PATCHED from the PREFLIGHT, which runs long before the trap section. With
+# the declarations down there, the only way to read PATCHED early was `${PATCHED:-0}` --
+# and that silently falls back to an INHERITED ENVIRONMENT VARIABLE. This script's own
+# header documents invoking it as `sudo env "PATH=$PATH" bash ...`, which preserves the
+# caller's environment, so an exported PATCHED=1 made the preflight print the "DO NOT
+# simply re-run" branch when nothing whatsoever had been written. Measured 2026-09-08.
+# Declaring them first makes `"$PATCHED"` correct everywhere and removes the fallback.
+PATCHED=0           # $CFG has been replaced by the patched file
+TEST_ATTEMPTED=0    # `nixos-rebuild test` was started
+ACTIVATED=0         # ... and returned 0: the change is RUNNING, nothing persisted
+SWITCH_ATTEMPTED=0  # `nixos-rebuild switch` was started -- the profile MAY have moved
+PERSISTED=0         # ... and returned 0: profile + bootloader now carry the change
+OK=0
+
 # 🔴 THE VERIFIER ONLY EVER EXITS 0, 1 OR 2. ANY OTHER CODE MEANS IT DID NOT RUN.
 #
 # check-nebula-relays.sh's exit codes are a CLOSED set, stated in its header and
@@ -129,7 +147,12 @@ die() { echo "ABORT: $*" >&2; exit 1; }
 # Which paragraph the trap then prints depends on WHICH verify failed, and the two
 # are not the same (measured):
 #   verify_now after `nixos-rebuild test`   -> ACTIVATED, NOT PERSISTED
-#   verify_now after `nixos-rebuild switch` -> PERSISTED / the profile may have moved
+#   verify_now after `nixos-rebuild switch` -> PERSISTED
+# Those are two of the trap's MUTUALLY EXCLUSIVE branches, not a pair that can both
+# print. "THE PROFILE MAY HAVE MOVED" is a THIRD branch and is unreachable at the second
+# site: `set -e` plus `PERSISTED=1` immediately after a successful `nixos-rebuild switch`
+# means PERSISTED is always 1 by the time that verify runs. An earlier draft of this
+# comment wrote "PERSISTED / the profile may have moved", which reads as "either".
 # An earlier draft of this comment attributed the PERSISTED paragraphs to the first
 # site. It does not print them: PERSISTED and SWITCH_ATTEMPTED are both still 0 there,
 # which `test_verifier_failure_after_a_good_test_says_activated_not_persisted` pins.
@@ -152,10 +175,11 @@ die_verifier_did_not_run() {
   # contains the change, which the next `nixos-rebuild switch` by anyone quietly
   # removes.
   #
-  # `${PATCHED:-0}` and not `$PATCHED`: the flags are declared further down, AFTER the
-  # preflight, so a bare reference would abort under `set -u` at the first call site.
+  # `"$PATCHED"`, not `${PATCHED:-0}`: the flags are declared at the top of this script
+  # precisely so this read needs no fallback. A `:-` default here would silently accept
+  # an INHERITED value -- see the declaration block for the measurement.
   local tail
-  if [ "${PATCHED:-0}" = "0" ]; then
+  if [ "$PATCHED" = "0" ]; then
     tail="Nothing has been written yet -- fix the invocation and re-run."
   else
     tail="🔴 DO NOT simply re-run. \$CFG has already been patched, and possibly
@@ -405,15 +429,6 @@ echo "== patch =="
 TMP="$(mktemp "${CFG}.new.XXXXXXXX")" || die "cannot create a temp file next to $CFG"
 cp -p "$CFG" "$TMP"
 BAK="${CFG}.bak-nebula-relay-$(date +%Y%m%d-%H%M%S)-$$"
-
-# Trap state. Each flag is set immediately AFTER the step it names succeeds, so the
-# message the trap prints is what was actually reached, never what was intended.
-PATCHED=0           # $CFG has been replaced by the patched file
-TEST_ATTEMPTED=0    # `nixos-rebuild test` was started
-ACTIVATED=0         # ... and returned 0: the change is RUNNING, nothing persisted
-SWITCH_ATTEMPTED=0  # `nixos-rebuild switch` was started -- the profile MAY have moved
-PERSISTED=0         # ... and returned 0: profile + bootloader now carry the change
-OK=0
 
 finish() {
   local rc=$?
