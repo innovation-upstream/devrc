@@ -25,7 +25,7 @@
 # rewording that a reader would accept and that must nevertheless go red.
 #
 # 🔴 IT NEVER TOUCHES YOUR WORKING TREE. Everything is mutated inside a
-# `mktemp -d` copy built by naming FIVE INDIVIDUAL FILES — that selective copy,
+# `mktemp -d` copy built by naming SEVEN INDIVIDUAL FILES — that selective copy,
 # not the assertion below it, is what keeps a `.git` out. The assertion is an
 # INVARIANT GUARD and is labelled as one rather than counted as coverage: it
 # cannot fire today and has never been watched to. It earns its two lines only
@@ -82,6 +82,19 @@ ROOT="$T/tree"
 mkdir -p "$ROOT/scripts/tests" \
          "$ROOT/claude/skills/audit-pr/reference"
 cp -a "$SRC/scripts/tests/test_audit_ladder_stop_rule.py" "$ROOT/scripts/tests/"
+# 🔴 The SIXTH file, and it is not optional: `test_the_carve_outs_cited_clause_
+# still_exists_in_the_dispatcher` IMPORTS this module to read INVARIANT_CLAUSES,
+# so without it the UNMUTATED baseline aborts and the battery runs ZERO rows —
+# reporting a test the author never touched. Measured: adding this line took the
+# battery from a baseline abort back to `21 row(s), all as expected`.
+cp -a "$SRC/scripts/audit-dispatch.py" "$ROOT/scripts/"
+# 🔴 The SEVENTH file is THIS SCRIPT, and the reason is the same one again:
+# `test_the_batterys_floor_is_re_derived_from_this_modules_size` reads the
+# `MIN_TESTS` literal below out of this file, so without it the baseline aborts
+# and every row goes unmeasured. That is the SECOND guard added to the module
+# whose dependency this list did not carry — assume the next one needs a line
+# here too, and run the battery before believing a green.
+cp -a "$SRC/scripts/tests/mutants-audit-ladder.sh" "$ROOT/scripts/tests/"
 cp -a "$SRC/claude/RULES.md"          "$ROOT/claude/"
 cp -a "$SRC/claude/RULES-ARCHIVE.md"  "$ROOT/claude/"
 cp -a "$SRC/claude/skills/audit-pr/SKILL.md" "$ROOT/claude/skills/audit-pr/"
@@ -112,16 +125,31 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED and every control ok. The floor catches COLLAPSE, not growth.
-# `run-tests.sh`'s own floor formula is `m - min(50, max(1, m/20))`; at m=13
-# that is 12. It catches COLLAPSE, not growth — losing one test still clears it,
+# `run-tests.sh`'s own floor formula is `m - min(50, max(1, m/20))`; at m=16
+# that is 15. It catches COLLAPSE, not growth — losing one test still clears it,
 # losing two reports HARNESS BROKE.
 #
-# 🔴 THIS FLOOR DOES NOT TRACK THE MODULE — RE-DERIVE IT WHEN YOU ADD A TEST.
+# 🟢 THIS FLOOR NOW TRACKS THE MODULE — a test pins it, and you do not re-derive
+# it by hand. What follows is the history of why, kept because it is the
+# argument for never going back to a hand-maintained number:
 # Measured 2026-08-31: the module grew 11 → 13 while this stayed at 10, so the
 # gap it tolerated silently widened from one test to three. Nothing failed; a
 # floor that is too LOW never complains, which is exactly why it goes unnoticed.
 # Re-derive with the formula above against `--collect-only`, never by memory.
-MIN_TESTS=12
+#
+# 🔴 IT HAPPENED AGAIN, and this is the second occurrence in the same file.
+# The module grew 13 → 15 while this stayed at 12. MEASURED at that setting:
+# deleting BOTH tests the growth added — the carve-out pin and the dispatcher
+# seam guard — left the battery reporting `✅ 21 row(s), all as expected`,
+# rc 0. The battery vouched for a module that had silently lost both guards it
+# was added to protect. A too-low floor is invisible precisely because it never
+# complains — so it is no longer defended by remembering. `run-tests.sh` solved
+# this for its own table with `--check-floors`, a two-way pin guarded by
+# `test_run_tests_floors.py`; the same pin for THIS literal now lives in
+# `test_audit_ladder_stop_rule.py::test_the_batterys_floor_is_re_derived_from_
+# this_modules_size`, which reads the number below, counts the module, and
+# fails with the replacement value. Growth cannot silently outrun it again.
+MIN_TESTS=15
 failing() {
   local out n f total
   # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran" on

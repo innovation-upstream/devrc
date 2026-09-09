@@ -42,6 +42,25 @@ let
   loadWarnAbove = 48;
   loadCritAbove = 72;   # 1.5x the alert threshold: worse than "we already told you"
 
+  # 🔴 SINGLE SOURCE for the cooling fan mapping — passed VERBATIM to BOTH the
+  # `fansBlock` pill and its `fans-detail` click. They are two renderings of ONE
+  # configuration, and they must never disagree about which header is the pump
+  # or what floor alarms.
+  #
+  # This exists because an audit measured the drift: `fans-detail` used to carry
+  # its own `KNOWN_FANS = [(1, "AIO pump", 500), (3, "Case fan", None)]` while
+  # nix passed `--fan pump=1:500 --fan case=3` to the pill alone. Moving the pump
+  # to another header and updating ONLY this line left **84 of 84 tests green**
+  # and produced a pill reading `2448·1650 Idle` beside a view reading
+  # `AIO pump ? unreadable`. The pill's own seam guard could not catch it: it
+  # deliberately asserts STATE not spelling, which is right for the pill.
+  #
+  # The labels are display names because `fans-detail` renders them and the pill
+  # renders none — so a friendly label costs the pill nothing and removes the
+  # second copy. Pinned by
+  # `test_fans_detail.py::test_the_pill_and_the_VIEW_get_the_SAME_fan_mapping`.
+  fanArgs = "--fan 'AIO pump=1:500' --fan 'Case fan=3'";
+
   # Floating btop for the vitals-block left-clicks (memory/cpu/temperature/gpu).
   # `float,float` matches the existing i3 float rule so it opens as a float.
   # Explicit dimensions are REQUIRED — btop refuses to render ("terminal size too
@@ -209,13 +228,18 @@ let
   #
   # 30s: a pump does not change speed meaningfully faster, and this spawns a
   # python process every tick forever.
+  # 🔴 LEFT-CLICK OPENS THE COOLING VIEW, NOT btop. It used to be btop, which is
+  # a CPU/memory view: when this pill goes red the questions are "is the pump
+  # dead" and "how hot is the thing it was cooling", and btop answers neither.
+  # `fans-detail` is the cooling equivalent of the memory/disk/media detail
+  # floats — pump + case fan with PWM duty, then CPU/GPU/VRM/NVMe temperatures.
   fansBlock = {
     block = "custom";
-    command = "${scriptsDir}/i3status-fans --fan pump=1:500 --fan case=3";
+    command = "${scriptsDir}/i3status-fans ${fanArgs}";
     json = true;
     interval = 30;
     click = [
-      { button = "left"; cmd = btopCmd; }
+      { button = "left"; cmd = "alacritty --class float,float -o window.dimensions.columns=84 -o window.dimensions.lines=22 -e ${scriptsDir}/fans-detail ${fanArgs}"; }
     ];
   };
   # nvidia_gpu: workbench only (RTX 5080). The block's state is TEMPERATURE-driven
@@ -633,6 +657,18 @@ lib.mkIf isNixOS {
   # ships a block whose command does not exist.
   home.file.".config/i3status-rust/scripts/i3status-fans" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-fans;
+    executable = true;
+  };
+  # 🔴 fans-detail is the fans pill's left-click target, AND `i3status-fans`
+  # above is its REQUIRED CO-LOCATED SIBLING — fans-detail loads it by path to
+  # reuse the chip-location and tacho-reading predicate rather than open-coding
+  # a second copy that would drift silently (only one of the two is on screen).
+  # So the two MUST carry the SAME gate: a fans-detail deployed without
+  # i3status-fans beside it renders a red "sibling did not load" banner instead
+  # of the cooling view. Pinned by
+  # `test_fans_detail.py::test_fans_detail_and_its_SIBLING_are_deployed_together`.
+  home.file.".config/i3status-rust/scripts/fans-detail" = lib.mkIf (!isLaptop) {
+    source = ../scripts/fans-detail;
     executable = true;
   };
   # 🔴 claude_sessions.py is a CO-LOCATED SIBLING MODULE, not a block — the same

@@ -1,0 +1,494 @@
+#!/usr/bin/env python3
+"""Cooling-system detail view for the i3status-rust `fans` block (left-click).
+
+The bar pill shows two numbers (`2660·1736`); a left-click opens THIS float
+terminal — the whole cooling picture: the AIO pump and every case-fan header
+with its PWM duty, then the temperatures that explain what the fans are
+responding to (CPU package + per-CCD, GPU, VRM/chipset thermistors, NVMe).
+
+WHY NOT btop. The pill's click used to open btop, which is a CPU/memory view:
+it shows load, not cooling. When a pump pill goes red the question is "is the
+pump dead, and how hot is the thing it was cooling" — btop answers neither.
+
+🔴 EVERY SHARED PREDICATE COMES FROM THE SIBLING — chip name, chip location,
+argument parsing and tacho reading are all `i3status-fans`', loaded from beside
+this file. An earlier version of this paragraph claimed that and was FALSE: only
+`read_rpm` was reused, while `CHIP`, the chip-location walk and the whole fan
+table were second copies. An audit measured both drifting with 84 of 84 tests
+green — renaming the chip produced a view saying "Super I/O NOT FOUND, run the
+sudo script" beside a pill reading 2448 rpm, an actively wrong diagnosis.
+
+The fan mapping is not defined here at all: nix passes ONE `fanArgs` string
+verbatim to both this view and the pill. That makes `i3status-fans` a REQUIRED
+CO-LOCATED SIBLING — same shape as `bar_freshness.py` for the count pills — and
+`nix/graphical.nix` must deploy both under the SAME gate.
+
+Reads /sys/class/hwmon only: no cache, no poller, no network, no privilege.
+
+Everything is best-effort — a launcher must never crash loudly.
+
+The pure/mockable logic (parse sysfs, format) is factored out and unit-tested
+in scripts/tests/test_fans_detail.py; `--dump` prints one frame and exits
+without opening a terminal or looping.
+
+    fans-detail            # live, redraws every 2s until q / Esc / Ctrl-C
+    fans-detail --dump     # one frame, for tests and for piping
+    fans-detail --interval 5
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import os
+import sys
+import time
+from pathlib import Path
+
+HWMON = "/sys/class/hwmon"
+
+#: 🔴 FALLBACK ONLY — nix passes `--chip`/`--fan` VERBATIM to both this view and
+#: the pill (see `fanArgs` in nix/graphical.nix). These defaults exist so the
+#: script is runnable by hand, NOT as a second configuration: an audit measured
+#: the earlier hardcoded table drifting from the pill's arguments with 84 of 84
+#: tests green, producing `AIO pump ? unreadable` beside a healthy pill.
+#: `DEFAULT_CHIP` is imported from the sibling rather than re-spelt here.
+DEFAULT_FANS = ["AIO pump=1:500", "Case fan=3"]
+
+BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
+RED, YELLOW, GREEN, CYAN = "\033[31m", "\033[33m", "\033[32m", "\033[36m"
+
+
+def _load_sibling():
+    """Load `i3status-fans` from beside this file. None if unavailable.
+
+    🔴 `abspath`, NEVER `realpath`/`Path.resolve()` — this is the repo's standard
+    sibling shape (cf. `i3status-clawgate` loading `bar_freshness.py`), and the
+    reason is nix. `home.file` deploys EACH file as its OWN store path, so the
+    deployed script is a symlink to `/nix/store/<hash>-hm_fansdetail` — a FILE
+    directly in /nix/store, not a directory containing anything. Resolving it
+    makes the sibling's computed location `/nix/store/i3status-fans`, which does
+    not exist, while the real sibling sits under its own separate hash.
+    MEASURED in production: the first version used `.resolve()`, deployed
+    cleanly, and rendered the "sibling did not load" banner on a host where both
+    files were correctly deployed side by side. `abspath` keeps us in
+    ~/.config/i3status-rust/scripts, where they ARE siblings.
+
+    🔴 `dont_write_bytecode` IS NOT TIDINESS — it is what stops a `.pyc` from
+    pinning OLD code forever. The loader's source path is the SYMLINK in
+    ~/.config/i3status-rust/scripts, so the cache would be written into the
+    operator's config dir (/nix/store is read-only), and CPython validates a
+    cached `.pyc` on the source's **mtime-in-whole-seconds + size** only. Every
+    /nix/store path has **mtime=1** — MEASURED on this host:
+    `/nix/store/4lmg…-hm_i3statusfans mtime=1 size=11916`. So the mtime half can
+    never change, and any later redeploy that happens to land on the SAME BYTE
+    SIZE is invisible to the check: the stale `.pyc` is honoured and the newly
+    deployed source is never compiled. Not hypothetical — that config dir
+    already holds three July `.pyc` files, and TWO of them still validate
+    against today's deployed source (`disk-detail` and `i3status-notifs`, both
+    headers `src_mtime=1` with sizes 6571 / 6930 equal to the store paths now
+    deployed): two-month-old bytecode still being honoured across every switch
+    since. Only the third was invalidated, and only because its source happened
+    to change SIZE. Those three predate this script and are not its to clean
+    up; the point is that this one never joins them.
+
+    Restored afterwards rather than left set, because this mutates a
+    PROCESS-GLOBAL. Nothing calls it in-process today, but a future in-process
+    test would silently inherit a suppressed bytecode cache from whichever test
+    imported the view first. The restore is in `finally`, i.e. strictly AFTER
+    `exec_module` — restoring any earlier would hand the write back to the very
+    import this flag exists to cover.
+
+    Deferred and best-effort on purpose: an import-time failure would make the
+    whole view die with a traceback where a launcher must not. The `None` case
+    is rendered as a visible banner by `render`, never as an empty screen.
+    """
+    prev_dont_write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    here = Path(os.path.dirname(os.path.abspath(__file__))) / "i3status-fans"
+    try:
+        loader = importlib.machinery.SourceFileLoader("i3status_fans", str(here))
+        spec = importlib.util.spec_from_loader("i3status_fans", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+    finally:
+        sys.dont_write_bytecode = prev_dont_write_bytecode
+
+
+# --------------------------------------------------------------------------- #
+# Pure / mockable logic (unit-tested against fixtures — NO real sysfs)
+# --------------------------------------------------------------------------- #
+def read_int(path):
+    """Read an integer out of a sysfs file. None if absent or unparsable."""
+    try:
+        return int(Path(path).read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def read_str(path):
+    """Read a sysfs string. None if absent OR undecodable.
+
+    🔴 `(OSError, ValueError)`, matching `read_int` above. A hwmon `name` that is
+    not valid UTF-8 raises UnicodeDecodeError — a ValueError, NOT an OSError —
+    which escaped `find_chips`, past `render`, into the __main__ failsafe: the
+    view printed ZERO BYTES on stdout and exited 0, breaking both `--dump`'s
+    "one frame" contract and `render`'s "never raises". The sibling's own test
+    suite already treats that exact fixture as a real case for the pill.
+    """
+    try:
+        return Path(path).read_text().strip()
+    except (OSError, ValueError):
+        return None
+
+
+def find_chips(root=HWMON):
+    """name -> [dir, ...] for every hwmon device. Empty dict if none."""
+    out = {}
+    try:
+        dirs = sorted(Path(root).glob("hwmon*"))
+    except OSError:
+        return out
+    for d in dirs:
+        name = read_str(d / "name")
+        if name:
+            out.setdefault(name, []).append(d)
+    return out
+
+
+def read_temps(d):
+    """[(label, celsius)] for one hwmon dir, in tempN order.
+
+    A sysfs temp is millidegrees. A label file is optional — NONE of the
+    nct6687's fans carry one on this board, and its temps do, so neither
+    presence nor absence can be assumed.
+    """
+    out = []
+    try:
+        files = sorted(d.glob("temp*_input"),
+                       key=lambda p: int("".join(c for c in p.name if c.isdigit()) or 0))
+    except OSError:
+        return out
+    for f in files:
+        raw = read_int(f)
+        if raw is None:
+            continue
+        base = f.name[:-len("_input")]
+        label = read_str(d / (base + "_label")) or base
+        out.append((label, raw / 1000.0))
+    return out
+
+
+def read_pwm(d, index):
+    """PWM duty for fanN as a 0-100 percentage, or None.
+
+    🔴 sysfs pwmN is RAW 0-255, not a percentage. Reporting it unscaled would
+    show "201%" for a pump at 79%. (`sensors` renders this differently again
+    and has been seen printing >100% for pump headers.)
+    """
+    raw = read_int(d / ("pwm%d" % index))
+    if raw is None:
+        return None
+    return max(0.0, min(100.0, raw * 100.0 / 255.0))
+
+
+def bar(pct, width=10, filled="█", empty="░"):
+    """A fixed-width block gauge. `None` renders as all-empty, never blank."""
+    if pct is None:
+        return empty * width
+    n = int(round(max(0.0, min(100.0, pct)) / 100.0 * width))
+    return filled * n + empty * (width - n)
+
+
+#: Temperature gauge scale and thresholds, in Celsius. 30 C is roughly ambient
+#: (nothing interesting below it) and 100 C is where this CPU throttles, so the
+#: bar spans the range an operator actually cares about instead of 0-100 "percent".
+TEMP_FLOOR, TEMP_CEIL = 30.0, 100.0
+TEMP_WARN, TEMP_CRIT = 85.0, 95.0
+
+
+def temp_bar(celsius, width=10):
+    """A gauge scaled 30-100 C. 🔴 NOT `bar(celsius)`.
+
+    `bar` takes a PERCENTAGE — feeding it degrees was an accident that happened
+    to look plausible (80 C -> 8/10) while meaning nothing: 40 C and 40% are not
+    the same reading, and the mapping silently breaks the moment the scale or the
+    width changes.
+    """
+    if celsius is None:
+        return bar(None, width)
+    span = TEMP_CEIL - TEMP_FLOOR
+    pct = (celsius - TEMP_FLOOR) / span * 100.0
+    return bar(pct, width)
+
+
+def temp_color(celsius):
+    """CYAN / YELLOW / RED by threshold — the view exists to answer "how hot"."""
+    if celsius is None:
+        return CYAN
+    if celsius >= TEMP_CRIT:
+        return RED
+    if celsius >= TEMP_WARN:
+        return YELLOW
+    return CYAN
+
+
+def fan_rows(chip_dir, sib, specs):
+    """[(name, rpm, pct, floor, state)] for the KNOWN fans.
+
+    state: 'stall' (below its floor) · 'unknown' (unreadable) · 'ok'.
+    Uses the sibling's `read_rpm` so "unreadable" means exactly what the pill
+    means by it.
+    """
+    rows = []
+    for sp in specs:
+        idx, name, floor = sp.index, sp.label, sp.floor
+        rpm = sib.read_rpm(chip_dir, idx) if sib else None
+        pct = read_pwm(chip_dir, idx) if chip_dir is not None else None
+        if rpm is None:
+            state = "unknown"
+        elif floor is not None and rpm < floor:
+            state = "stall"
+        else:
+            state = "ok"
+        rows.append((name, rpm, pct, floor, state))
+    return rows
+
+
+def unconnected(chip_dir, sib, specs):
+    """Indices of fan headers that exist and read exactly 0.
+
+    Not a fault: this board has ten headers and two things plugged in.
+    Summarised as a count rather than ten zero rows.
+    """
+    if chip_dir is None or sib is None:
+        return []
+    named = {sp.index for sp in specs}
+    out = []
+    for f in sorted(chip_dir.glob("fan*_input")):
+        digits = "".join(c for c in f.name if c.isdigit())
+        if not digits:
+            continue
+        idx = int(digits)
+        if idx in named:
+            continue
+        if sib.read_rpm(chip_dir, idx) == 0:
+            out.append(idx)
+    return sorted(out)
+
+
+def summarise(values):
+    """(min, max) of a list of numbers, or None for an empty list."""
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return None
+    return min(vals), max(vals)
+
+
+def render(chips, sib, specs=(), chip=None, now="", color=True):
+    """Pure: the whole frame as a string. Never raises, never returns ''."""
+    def c(code, s):
+        return ("%s%s%s" % (code, s, RESET)) if color else str(s)
+
+    L = []
+    L.append("")
+    L.append("  %s  %s" % (c(BOLD, "COOLING"), c(DIM, now)))
+    L.append("")
+
+    if sib is None:
+        L.append("  %s" % c(RED, "cannot read fans: the i3status-fans sibling did"))
+        L.append("  %s" % c(RED, "not load — it must sit beside this script."))
+        L.append("")
+
+    chip = chip or (getattr(sib, "DEFAULT_CHIP", None) if sib else None) or "nct6687"
+    chip_dirs = chips.get(chip) or []
+    chip_dir = chip_dirs[0] if chip_dirs else None
+
+    if chip_dir is None:
+        L.append("  %s" % c(RED, "Super I/O (%s) NOT FOUND — the nct6683 driver" % chip))
+        L.append("  %s" % c(RED, "is not loaded, so there are no fan readings."))
+        L.append("  %s" % c(DIM, "persist it:  sudo bash nix/system/apply-nct6683-module.sh"))
+        L.append("")
+    else:
+        for name, rpm, pct, floor, state in fan_rows(chip_dir, sib, specs):
+            if state == "unknown":
+                val, mark = c(YELLOW, "%9s" % "?"), c(YELLOW, "unreadable")
+            elif state == "stall":
+                val, mark = c(RED, "%5d rpm" % rpm), c(RED, "STALLED (floor %d)" % floor)
+            else:
+                val = c(GREEN, "%5d rpm" % rpm)
+                mark = c(DIM, "floor %d" % floor) if floor else c(DIM, "no floor")
+            duty = "%s %3s%%" % (bar(pct), "?" if pct is None else int(round(pct)))
+            L.append("  %-10s %s  %s  %s" % (name, val, duty, mark))
+
+        idle = unconnected(chip_dir, sib, specs)
+        if idle:
+            L.append("  %s" % c(DIM, "%d unconnected header(s): %s"
+                                % (len(idle), ", ".join("fan%d" % i for i in idle))))
+        L.append("")
+
+    # Temperatures, most-decisive first.
+    for label, names in (("CPU", ("k10temp",)), ("GPU", ("amdgpu",))):
+        for nm in names:
+            for d in chips.get(nm) or []:
+                for tlabel, temp in read_temps(d):
+                    L.append("  %-10s %-10s %s %s"
+                             % (label, tlabel[:10],
+                                c(temp_color(temp), "%5.1f C" % temp),
+                                temp_bar(temp)))
+                    label = ""
+    if chip_dir is not None:
+        temps = read_temps(chip_dir)
+        board = [(l, t) for l, t in temps if "Thermistor" in l or "Diode" in l]
+        tsi = [(l, t) for l, t in temps if "TSI" in l]
+        for tlabel, temp in tsi:
+            # F8: `[:8]` rendered `AMD TSI Addr 98h` and `…9Ah` identically.
+            L.append("  %-10s %-10s %s %s"
+                     % ("board", tlabel.replace("Addr ", "")[:10],
+                        c(temp_color(temp), "%5.1f C" % temp), temp_bar(temp)))
+        rng = summarise([t for _, t in board])
+        if rng:
+            L.append("  %-10s %-10s %s"
+                     % ("", "VRM/chip", c(temp_color(rng[1]), "%.0f-%.0f C" % rng)
+                        + c(DIM, "  (%d sensors)" % len(board))))
+    nvme = []
+    for d in chips.get("nvme") or []:
+        nvme += [t for _, t in read_temps(d)]
+    rng = summarise(nvme)
+    if rng:
+        L.append("  %-10s %-10s %s"
+                 % ("disk", "NVMe", c(temp_color(rng[1]), "%.0f-%.0f C" % rng)
+                    + c(DIM, "  (%d sensors)" % len(nvme))))
+    L.append("")
+    return "\n".join(L)
+
+
+# --------------------------------------------------------------------------- #
+def main(argv=None):
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--dump", action="store_true")
+    p.add_argument("--interval", type=float, default=2.0)
+    p.add_argument("--hwmon-root", default=HWMON)   # TEST SEAM (see i3status-fans)
+    # 🔴 The SAME flags the pill takes, because nix passes ONE `fanArgs` string
+    # to both. Parsed by the SIBLING's `parse_fan`, so "which header, what floor,
+    # what counts as a valid spec" has exactly one definition.
+    p.add_argument("--chip", default=None)
+    p.add_argument("--fan", action="append", default=None, metavar="LABEL=N[:MIN]")
+    # 🔴 `parse_known_args`, NOT `parse_args` in a try/except. The first version
+    # caught argparse's SystemExit and re-parsed with `[]`, which DISCARDS every
+    # good argument alongside the bad one — so `--dump --nonsense` dropped
+    # `--dump`, fell into the watch loop and HUNG FOREVER. Caught by a test that
+    # timed out rather than failed, which is exactly how that ships unnoticed.
+    # Ignoring an unknown flag while honouring the known ones is the behaviour a
+    # launcher wants.
+    args, _unknown = p.parse_known_args(argv)
+
+    sib = _load_sibling()
+    interval = args.interval if args.interval and args.interval > 0 else 2.0
+
+    # Parse the fan mapping with the SIBLING's parser. A spec the pill would
+    # reject (a floor of 0, a truncated `:`) must be rejected identically here —
+    # re-implementing the grammar is the drift this whole change removes. If the
+    # sibling is missing, `specs` stays empty and `render` prints its banner.
+    specs = []
+    if sib is not None:
+        for spec in (args.fan if args.fan is not None else DEFAULT_FANS):
+            try:
+                specs.append(sib.parse_fan(spec))
+            except Exception:
+                # A bad spec must not take the whole view down; the row simply
+                # does not appear, and the banner/`?` states still render.
+                pass
+
+    def frame():
+        return render(find_chips(args.hwmon_root), sib, specs=specs,
+                      chip=args.chip, now=time.strftime("%H:%M:%S"))
+
+    if args.dump:
+        sys.stdout.write(frame() + "\n")
+        return 0
+
+    # 🔴 The footer used to advertise `q` and NOTHING READ STDIN — measured under
+    # a pty: `q` and `q\n` left it running 8 s later, so the keypress echoed and
+    # was wiped by the next redraw and the view read as HUNG. Either the key
+    # works or the footer must not claim it. It works now: cbreak mode when
+    # stdin is a tty, restored in `finally`, and a plain non-tty run (a pipe,
+    # a test) simply never sees a key and still exits on Ctrl-C.
+    # 🔴 `\x03` IS IN THE SET DELIBERATELY. cbreak leaves ISIG on, so a real
+    # terminal turns Ctrl-C into SIGINT and the KeyboardInterrupt handler below
+    # catches it — but that depends on this process being in the tty's
+    # FOREGROUND PROCESS GROUP, which is not true in every launcher. MEASURED
+    # under a bare pty: q and Esc exited in 0.2 s while `\x03` left it running
+    # past 6 s, i.e. the footer's "Ctrl-C" claim was false in that setting.
+    # Reading the byte makes the promise true in both, and costs nothing when
+    # SIGINT does arrive first.
+    quit_keys = {"q", "Q", "\x1b", "\x03"}
+    fd = None
+    old = None
+    try:
+        if sys.stdin is not None and sys.stdin.isatty():
+            import termios
+            import tty
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+            # 🔴 Clear ISIG so Ctrl-C arrives as a BYTE we can read, rather than
+            # as a SIGINT the tty driver generates. cbreak alone leaves ISIG on,
+            # and the signal then only reaches us if this process is in the
+            # tty's FOREGROUND PROCESS GROUP — true under alacritty, NOT true in
+            # every launcher, and measurably not true under a bare pty, where
+            # `\x03` was swallowed and the footer's "Ctrl-C" was a false claim.
+            # With ISIG off the byte is delivered and `quit_keys` handles it, so
+            # the promise holds identically everywhere and is testable.
+            # `finally` restores the original attributes on every path.
+            attrs = termios.tcgetattr(fd)
+            attrs[3] &= ~termios.ISIG          # lflag
+            termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+    except Exception:
+        fd, old = None, None       # no tty control: Ctrl-C remains the way out
+
+    try:
+        while True:
+            sys.stdout.write("\033[2J\033[H")       # clear + home
+            sys.stdout.write(frame() + "\n")
+            sys.stdout.write("  \033[2m%s\033[0m\n"
+                             % ("q / Ctrl-C to close" if fd is not None
+                                else "Ctrl-C to close"))
+            sys.stdout.flush()
+            if fd is not None:
+                import select
+                r, _, _ = select.select([sys.stdin], [], [], interval)
+                if r and sys.stdin.read(1) in quit_keys:
+                    break
+            else:
+                time.sleep(interval)
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        if fd is not None and old is not None:
+            try:
+                import termios
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception:
+                pass
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        # A launcher must never crash loudly — but it must not exit SILENTLY
+        # either, or a float window that opens and vanishes is indistinguishable
+        # from one that never opened.
+        import traceback
+        traceback.print_exc()
+        sys.stderr.write("\n  fans-detail failed — press Enter to close.\n")
+        try:
+            input()
+        except Exception:
+            pass
+        sys.exit(0)

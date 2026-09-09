@@ -112,8 +112,8 @@ hindsight — on #498 the plateau was diagnosed six rounds late.
 
 The delta bullet above says to hunt regressions the fix round introduced. **The one it actually
 produces, over and over, is not code — it is the SENTENCE the fix wrote to explain itself.** Measured
-on `homelab-infra` #702: six rounds, **zero 🔴**, the code correct from round 1, and **four of the six
-findings were a claim the previous round had written while fixing the round before it.** One guard's
+on `homelab-infra` #702: six rounds, **zero 🔴**, the code correct from round 1, and **round after
+round the finding was a claim the previous round had written while fixing the round before it.** One guard's
 rationale went through FIVE drafts — each retracted by the next round, each composed in the commit
 that fixed the last.
 
@@ -149,6 +149,22 @@ round applies to the code. Full case history: reference file.
 Rounds continue **only** while the previous round produced a finding that required a fix. The first
 round that returns no findings is the last one — stop there, and do not re-confirm it. Stop on that,
 not on the author saying it's done.
+
+🔴 **A round that reports only NITS THAT CHANGE NOTHING A READER DOES is a stopping round** — the
+same set `audit-dispatch.py` already keeps out of every brief (`nit-is-not-a-finding`), not a wider
+one. **A 🟢 that DOES change what a reader does is a finding and the ladder continues**: #804's round
+8 carried three, two of them shipped features that could be unwired with the suite green. File the
+stopping kind as one follow-up task naming the file, closed when its PR merges or a named reader
+dismisses it in writing — filed rather than fixed, so the round that files them is still the last.
+
+⚠ **That subset is the only class of FINDING that cannot extend a ladder — no SEVERITY is, and
+"deploy-blocking only" was rejected.** The attribution gate and the prose escape hatch below end a
+ladder for reasons that are not findings at all; this sentence is about findings only.
+`homelab-infra` #702 ran six rounds carrying **zero deploy-blockers** while its later rounds kept
+catching false claims the previous round's own fix had written: one guard's rationale went through
+five successive drafts, each retracted by the next round. A blocker-keyed ladder ends after round 1,
+so rounds 2–6 never run — draft 1 ships as the code's stated reason, and nobody ever asks the
+retire-or-accept question that ladder ended on. Should-fix findings are what keep it running.
 
 🔴 **A "safe to merge" VERDICT is not the stop signal — the FINDINGS are.** #804's rounds **5, 6 and
 7 each returned "safe to merge" and each still reported real defects** that were then fixed — the
