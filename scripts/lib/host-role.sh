@@ -147,10 +147,32 @@ first_reachable_ssh() {
     # makes it see the continuation's leading word (`target`) as a program and
     # report it as unaccounted-for on the unit PATH. Keeping it on one line lets
     # it see `ssh`, which the table already carries as pkgs.openssh.
-    elif ssh -o BatchMode=yes -o ConnectTimeout="$timeout" -o StrictHostKeyChecking=accept-new "$target" true >/dev/null 2>&1; then
+    #
+    # `-n` redirects stdin from /dev/null: without it `ssh host true` EATS the
+    # caller's stdin, so an operator looping `while read h; do ship.sh; done`
+    # loses lines to the probe. No in-repo consumer pipes into these scripts
+    # today; this keeps that a non-issue rather than a latent one.
+    #
+    # 🔴 `StrictHostKeyChecking=accept-new` is a DELIBERATE and DECLARED trust
+    # change, looser than the effective default (`ssh -G` reports `ask` on this
+    # host) and looser than the real legs, which set nothing. It is required for
+    # the probe to work at all: with BatchMode and `ask`, an unknown host is
+    # refused, so a FIRST connection to a reinstalled machine could never
+    # succeed and the fallback would be inert exactly when it is needed. What it
+    # does NOT do is accept a CHANGED key — a reinstalled host or a squatter on
+    # the LAN address still fails the probe, and the run falls back rather than
+    # trusting it. The cost is that a first-ever address is TOFU-adopted without
+    # the operator being asked.
+    elif ssh -n -o BatchMode=yes -o ConnectTimeout="$timeout" -o StrictHostKeyChecking=accept-new "$target" true >/dev/null 2>&1; then
       echo "$target"; return 0
     fi
-    echo "ship: $target did not answer" >&2
+    # 🔴 The prefix is the CALLER's, not a hardcoded "ship:". This lib is shared,
+    # and `drift-check.sh` writes a JOURNAL whose every line must start with
+    # `[`, `===`, `drift-check: ` or two spaces — a stray `ship: …` from here
+    # fails its hygiene guard (measured:
+    # test_the_ladder_escalates_when_the_streak_FILE_cannot_be_written) and, worse,
+    # attributes the message to the wrong program in the operator's log.
+    echo "${SSH_PROBE_LOG_PREFIX:-ship}: $target did not answer" >&2
   done
   return 1
 }

@@ -294,6 +294,21 @@
 #   SHIP_ROLE     force the local role (workbench|laptop) when detection fails/differs
 #   REMOTE_SSH    ssh target for the OTHER host (default derived from role)
 #   LAPTOP_SSH    back-compat: ssh target used ONLY when the remote host is the laptop
+#   SHIP_SKIP_SSH_PROBE=1  do not probe addresses; use the first derived candidate
+#                  as-is. The escape hatch for a harness the probe's extra
+#                  connection perturbs — one such was measured (it shifted the
+#                  window a convergence test detects), which is why the probe
+#                  only runs when there is more than one candidate at all.
+#   SSH_PROBE_TIMEOUT  ssh ConnectTimeout for the probe, seconds (default 5).
+#                  NOT validated: a non-numeric value makes ssh error out
+#                  instantly, so every address reports "did not answer" and the
+#                  run proceeds on its default target.
+#   SSH_PROBE_CMD  replace the probe wholesale; receives the target as $1 and
+#                  signals reachability by exit status. A TEST SEAM — it is how
+#                  the fallback is driven without a network. Unprefixed and
+#                  ungated by design so `lib/host-role.sh` can be sourced and
+#                  probed standalone; setting it in production replaces the
+#                  reachability check entirely.
 #   SHIP_REPO     repo path the CONVERGE routine operates on (default $HOME/workspace/devrc)
 #   SHIP_NO_SWITCH=1  same as --no-switch: run full git-landing logic, skip home-manager switch
 #   SHIP_LIST_MAX  max paths ENUMERATED per dirty-classification bucket
@@ -362,6 +377,15 @@ else
   resolve_local_role() { echo "${SHIP_ROLE:-unknown}"; }
   remote_role_of()   { case "${1:-}" in workbench) echo laptop ;; laptop) echo workbench ;; *) echo "" ;; esac; }
   remote_ssh_of()    { echo "${REMOTE_SSH:-}"; }
+  # 🔴 Defined here for the same reason as the four above: the address-selection
+  # block calls it unconditionally, and an undefined function in DEGRADED mode
+  # prints `command not found` into the middle of a recovery — the tool you
+  # reach for when a host is ALREADY broken. This file rejected that shape once
+  # before (see the detect_role note below: "said out loud rather than crashing
+  # on an undefined function"); this keeps it rejected.
+  # One element, always: degraded mode has no defaults to fall back to, so the
+  # probe is skipped and an explicit $REMOTE_SSH passes through untouched.
+  remote_ssh_candidates_of() { echo "${REMOTE_SSH:-}"; }
   WORKBENCH_IP_PRIMARY="<lib unavailable>"
   LAPTOP_IP_PRIMARY="<lib unavailable>"
 fi
@@ -419,6 +443,9 @@ SHIP_NO_SWITCH="${SHIP_NO_SWITCH:-0}"
 SHIP_LIST_MAX="${SHIP_LIST_MAX:-10}"
 DO_LOCAL=1
 DO_REMOTE=1
+# Hidden test seam — see the block after address selection. Defaulted here (not
+# read bare) because this script runs under `set -u`.
+SHIP_PRINT_REMOTE_TARGET="${SHIP_PRINT_REMOTE_TARGET:-0}"
 for a in "$@"; do
   case "$a" in
     --no-remote|--no-laptop) DO_REMOTE=0 ;;   # skip the OTHER (remote) host
@@ -457,6 +484,17 @@ fi
 # applies $REMOTE_SSH unconditionally and the back-compat $LAPTOP_SSH ONLY when
 # the remote host really is the laptop (from the laptop it would point at itself).
 REMOTE_ROLE="$(remote_role_of "$SHIP_ROLE")"
+# 🔴 CANDIDATES FIRST — this order is load-bearing. `remote_ssh_candidates_of`
+# reads $REMOTE_SSH to detect an OPERATOR-SUPPLIED target, and the assignment
+# below fills that same variable with a DERIVED default. Computed after it, the
+# function sees the script's own default, mistakes it for an explicit override,
+# and returns a one-element list — so the probe is skipped and the fallback
+# NEVER RUNS. Measured: with the two lines in the other order, `ship.sh` on a
+# workbench with the laptop off-LAN resolved zach@192.168.50.155 and exited
+# without ever trying nebula, while every lib-level test and a live probe of
+# `first_reachable_ssh` passed. That is the isolation seam: both halves correct
+# alone, broken together, and only a test that runs THIS FILE can see it.
+_cands="$(remote_ssh_candidates_of "$SHIP_ROLE")"
 REMOTE_SSH="$(remote_ssh_of "$SHIP_ROLE")"
 
 # In degraded recovery mode the SSH defaults are deliberately absent (see above),
@@ -478,8 +516,7 @@ fi
 # Only DERIVED defaults are probed. An explicit $REMOTE_SSH/$LAPTOP_SSH is a
 # one-element list by construction (see remote_ssh_candidates_of), so this never
 # redirects a run the operator addressed by hand.
-_cands="$(remote_ssh_candidates_of "$SHIP_ROLE")"
-mapfile -t _cand_arr <<<"$_cands"
+mapfile -t _cand_arr <<<"$_cands"   # $_cands was captured ABOVE, before REMOTE_SSH was derived
 # 🔴 PROBE ONLY WHEN THERE IS SOMETHING TO CHOOSE BETWEEN. With one candidate
 # there is no alternative to fall back to, so a probe buys nothing and COSTS: it
 # is an extra ssh connection before the legs run, and anything downstream that
@@ -507,6 +544,27 @@ if [ "$DO_REMOTE" = 1 ] && [ "${#_cand_arr[@]}" -gt 1 ] \
     echo "  the remote leg will fail; pass REMOTE_SSH=user@host if it lives elsewhere," >&2
     echo "  or --no-remote to converge this host alone (which compares NO cross-host agreement)." >&2
   fi
+fi
+
+# Hidden mode: print the remote target this run WOULD use, then exit. Mirrors
+# `--detect-role` above, and exists for the same reason — a decision made inside
+# this script was otherwise unreachable from a test.
+#
+# 🔴 IT EXISTS BECAUSE THE SELECTION ABOVE WAS PROVABLY UNGUARDED. Measured
+# during this PR's round-1 audit: deleting the whole address-selection block
+# left the ENTIRE suite green (98/98 in test_ship_converge.py), because every
+# ship.sh fixture that reaches an ssh shim sets $REMOTE_SSH — which is a
+# one-element candidate list, which skips the probe. So the bug this PR fixes
+# could be reintroduced wholesale without a single test going red. The lib-level
+# tests could not see it either: they source host-role.sh and never load this
+# file. This seam is what makes the fallback, the announcement and the
+# no-candidate diagnosis observable from outside.
+#
+# Prints the resolved target on stdout; the announcements above have already
+# gone to stderr, so a test can assert on both separately.
+if [ "$SHIP_PRINT_REMOTE_TARGET" = 1 ]; then
+  printf '%s\n' "$REMOTE_SSH"
+  exit 0
 fi
 
 # --- Self-supersession fingerprint --------------------------------------------
