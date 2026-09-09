@@ -97,11 +97,34 @@ _emit_verdict() {
   local rc="$1"
   [ "$VERDICT_EMITTED" -eq 0 ] || return 0
   VERDICT_EMITTED=1
+  # Ordering owned here rather than at the two call sites — see the identical
+  # note in run-tests.sh's `_emit_verdict`. Always SCOPE, then RESULT.
+  _emit_scope
   if [ "$rc" -eq 0 ]; then
     echo "RESULT: PASS (exit=0)"
   else
     echo "RESULT: FAIL (exit=$rc)"
   fi
+}
+# --- GUARD 5b: this runner states its scope too --------------------------------
+# 🔴 THE POINT IS UNIFORMITY, and it is not decoration. `gate.sh` requires to
+# SEE `SCOPE: FULL` from EVERY tier before it may print a gate PASS — a positive
+# control, so that a runner which says nothing is "cannot vouch" rather than
+# "ran everything". Exempting this tier because it happens to have no narrowing
+# flag today would make that control a per-tier special case, which is precisely
+# the shape RULES.md calls "a guard narrower than its description": it would
+# stop covering this file the moment someone gave it a `--suites` selector.
+#
+# ⚠ So this is CONSTANT ONLY FOR AS LONG AS THIS RUNNER HAS NO SELECTION FLAG.
+# If you add one, this must become a variable that reports it — a hardcoded FULL
+# over a narrowed run is a lie the gate is built to believe.
+# The vocabulary is owned by run-tests.sh's GUARD 11 and pinned two-way by
+# scripts/tests/test_scoped_runs.py.
+SCOPE_EMITTED=0
+_emit_scope() {
+  [ "$SCOPE_EMITTED" -eq 0 ] || return 0
+  SCOPE_EMITTED=1
+  echo "SCOPE: FULL (this runner has no selection flag; it always runs every suite)"
 }
 _on_exit() { _emit_verdict "$?"; }
 trap '_on_exit' EXIT

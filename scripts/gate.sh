@@ -41,6 +41,26 @@
 # deliberately its own code: it means "this gate could not vouch for its own
 # answer", which is a different finding from "the tests failed".
 #
+# 🔴 AND A VERDICT IS NOT A GATE UNLESS IT COVERED THE WHOLE SUITE. A runner's
+# `RESULT: PASS` is true of the targets it ran and silent about how many that
+# was, so a narrowed run and a full gate were byte-identical on the only line
+# this script parsed. MEASURED 2026-09-08 at the parent commit:
+#
+#     DEVRC_TARGETS=scripts/collector/i3/tests scripts/gate.sh --tier pytest
+#     -> GATE: RESULT=PASS exit=0        (1 of 28 targets; 12 tests; 3m04s)
+#
+# That line is what everyone quotes as "the gate passed". So each runner now
+# prints its own scope (`SCOPE: FULL|PARTIAL|SCOPED|UNKNOWN`) and this script
+# requires to SEE `SCOPE: FULL` from every tier it ran before it may print
+# `GATE: RESULT=PASS`.
+#
+#   * status zero + scope not FULL        -> exit 91, GATE: RESULT=PARTIAL
+#
+# 🔴 A POSITIVE CONTROL, NOT AN ABSENCE CHECK. "Warn when narrowed, treat
+# silence as full" would make an old runner, a truncated log and a renamed
+# marker all read as a full gate — the reassuring zero this repo keeps banning.
+# A MISSING scope line is therefore NOT a pass either; it lands in the same 91.
+#
 # Usage:
 #   scripts/gate.sh [--tier pytest|node|both] [--set hermetic|all]
 #                   [--timeout SECS] [--log-dir DIR] [ROOT]
@@ -69,10 +89,16 @@
 #                         inside a pytest process", which suppresses the re-exec
 #                         so a nested run cannot re-enter `nix develop`.
 #
-# Exit: 0 = every selected tier passed and agreed with its own content.
+# Exit: 0 = every selected tier passed and agreed with its own content, and
+#           every tier reported `SCOPE: FULL`.
 #       1 = a tier genuinely failed.
 #       2 = a usage/precondition problem in this script.
 #      90 = status/content disagreement, or a truncated run: NOT a verdict.
+#      91 = every tier passed, but at least one did NOT run the whole suite (or
+#           did not say). NOT a gate result. Precedence is
+#           UNVOUCHED(90) > FAIL(1) > PARTIAL(91) > PASS(0): a real failure is
+#           the more actionable finding, so narrowing only decides the verdict
+#           of a run that otherwise passed.
 #
 # TEST SEAM: DEVRC_GATE_PYTEST_RUNNER / DEVRC_GATE_NODE_RUNNER override the
 # runner paths. They exist so the negative controls in
@@ -129,6 +155,25 @@ esac
 case "$TIMEOUT" in
   ''|*[!0-9]*) echo "gate: FATAL — --timeout must be a whole number of seconds, got '$TIMEOUT'" >&2; exit 2 ;;
 esac
+
+# 🔴 REFUSE A NARROWED GATE UP FRONT, not only after the fact. This script has
+# no `--targets` flag, so the ONLY way its pytest tier gets narrowed is an
+# ambient `DEVRC_TARGETS` — i.e. a value nobody typed for THIS command, exported
+# for some earlier one and still in the shell. The post-hoc SCOPE check below
+# catches it too, but only after paying the full run; catching it here costs
+# nothing and names the variable, which is the whole remedy.
+# NOT unset-and-continue: silently ignoring an operator's exported selection is
+# the mirror defect (they asked for a subset and got a full run with no word
+# said), and this script's doctrine is that a selection mistake must be loud.
+if [ -n "${DEVRC_TARGETS+x}" ]; then
+  echo "gate: FATAL — DEVRC_TARGETS is set in this environment ('${DEVRC_TARGETS}')." >&2
+  echo "  run-tests.sh reads it, so this gate would run a SUBSET of the suite and" >&2
+  echo "  still print GATE: RESULT=PASS — a full-gate verdict off a partial run." >&2
+  echo "  \`unset DEVRC_TARGETS\` (or run \`env -u DEVRC_TARGETS scripts/gate.sh …\`)." >&2
+  echo "  For a deliberate fast, change-scoped run use scripts/scoped-tests.sh," >&2
+  echo "  which is explicitly NOT a gate." >&2
+  exit 2
+fi
 
 # --- GUARD 9: NO TEST MAY OPERATE ON THE REPO THE SUITE RUNS FROM -------------
 # 🔴 BEFORE the ROOT block below, not after it: with GIT_DIR set and no
@@ -273,13 +318,14 @@ fi
 
 GATE_FAIL=0
 GATE_UNVOUCHED=0
+GATE_PARTIAL=0
 TIER_LINES=()
 
 # Run one runner. Everything that matters is decided from ($rc, log content).
 run_tier() { # $1 = label, $2.. = command
   local label="$1"; shift
   local log="$LOG_DIR/$label.log"
-  local rc reason verdict panic
+  local rc reason verdict panic scope
 
   echo "gate: === $label === (full log: $log)"
   if [ -n "$TIMEOUT_BIN" ]; then
@@ -299,6 +345,11 @@ run_tier() { # $1 = label, $2.. = command
   verdict="$(grep -aE '^RESULT: (PASS|FAIL)' "$log" | tail -1 || true)"
   panic="$(grep -ac 'panic: test timed out' "$log" || true)"
   : "${panic:=0}"
+  # Same anchoring rule as the verdict: column 0, so a test fixture echoing the
+  # word cannot be mistaken for the runner's own claim. Empty when the runner
+  # printed no scope line at all — which is NOT read as FULL below.
+  scope="$(grep -aoE '^SCOPE: (FULL|PARTIAL|SCOPED|UNKNOWN)' "$log" | tail -1 || true)"
+  scope="${scope#SCOPE: }"
 
   reason=""
   if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
@@ -339,8 +390,20 @@ run_tier() { # $1 = label, $2.. = command
   elif [ "$rc" -ne 0 ]; then
     GATE_FAIL=1
     TIER_LINES+=("FAIL  $label  exit=$rc${reason:+  ($reason)}  verdict='${verdict:-<none>}'")
+  elif [ "$scope" != "FULL" ]; then
+    # 🔴 The tier PASSED and is still not a gate result. Anything other than a
+    # positively-observed FULL lands here, the empty string included: a runner
+    # that printed no scope at all has not told us it ran the whole suite, and
+    # inferring one from silence is exactly the reassuring zero this check
+    # exists to remove.
+    GATE_PARTIAL=1
+    echo "gate: $label passed but did NOT run the whole suite." >&2
+    echo "  scope reported: ${scope:-<none — the runner printed no SCOPE line>}" >&2
+    echo "  A narrowed run's verdict is about what it ran. This gate will not" >&2
+    echo "  report PASS off it — see $log for which targets/files were selected." >&2
+    TIER_LINES+=("PARTIAL  $label  exit=0  scope='${scope:-<none>}'  verdict='$verdict'")
   else
-    TIER_LINES+=("PASS  $label  exit=0  verdict='$verdict'")
+    TIER_LINES+=("PASS  $label  exit=0  scope=FULL  verdict='$verdict'")
   fi
   echo
 }
@@ -366,6 +429,10 @@ fi
 if [ "$GATE_FAIL" -ne 0 ]; then
   echo "GATE: RESULT=FAIL exit=1"
   exit 1
+fi
+if [ "$GATE_PARTIAL" -ne 0 ]; then
+  echo "GATE: RESULT=PARTIAL exit=91"
+  exit 91
 fi
 echo "GATE: RESULT=PASS exit=0"
 exit 0
