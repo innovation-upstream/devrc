@@ -3018,14 +3018,20 @@ def test_the_runaways_source_has_NO_TOAST_SPEC_because_cpu_monitor_owns_it():
     """🔴 An ABSENCE is the invariant, so it needs a guard — nothing else fails
     when a spec is added back, and adding one is the obvious "improvement".
 
-    `scripts/cpu-monitor.sh` already toasts this event: `⚠ Runaway process:
-    <comm>` at CRITICAL urgency after a 6-sample sustain, capped by
-    `CPU_MON_MAX_ALERTS_PER_DAY` (default 8), with a `✓ Runaway process cleared`
-    on recovery. A spec here fires a SECOND toast for the same process, at
-    normal urgency, UNCAPPED — measured live: ~7 minutes after cpu-monitor's,
-    on the same `cc1plus`. The cap exists because toast volume was a measured
-    problem (123-267/day cut to 11-32/day), so the duplicate regressed the very
-    thing that fix bought.
+    `scripts/cpu-monitor.sh` toasts `⚠ Runaway process: <comm>` at CRITICAL
+    urgency after a 6-sample sustain, capped by `CPU_MON_MAX_ALERTS_PER_DAY`
+    (default 8). A spec here fired a SECOND toast at normal urgency, UNCAPPED,
+    ~7 minutes later. The cap exists because toast volume was a measured problem
+    (123-267/day cut to 11-32/day), so the duplicate regressed what that bought.
+
+    🔴 This is a TRADE, not a redundancy, and the `_toast_specs` comment carries
+    the measured detail: cpu-monitor inspects only `top`'s FIRST DATA ROW at
+    >=95% instantaneous, while syshealth flags EVERY eligible process at >=80%
+    lifetime-average — so the 80-95% band, the runner-up, and rank churn lose
+    their interrupt (the pill still goes red). If those need interrupting, widen
+    cpu-monitor; do not add a second announcer here.
+    ⚠ Its `✓ Runaway process cleared` is JOURNAL-ONLY unless
+    `CPU_MON_CLEAR_TOASTS=1`, which nothing in this repo sets.
     """
     specs = poll._toast_specs()
     assert "runaways" not in specs, (

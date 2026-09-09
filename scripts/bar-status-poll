@@ -857,20 +857,35 @@ def _toast_specs() -> dict:
         "telemetry": {"threshold": 0, "urgency": "critical",
                       "summary": "🔴 Telemetry source DEAD",
                       "action": "xdg-open http://grafana.homelab.lan"},
-        # 🔴 `runaways` HAS NO SPEC HERE, DELIBERATELY — do not add one back.
-        # `scripts/cpu-monitor.sh` already owns the runaway toast and is live as
-        # a systemd user unit: it fires `⚠ Runaway process: <comm>` at CRITICAL
-        # urgency after a 6-sample sustain (`:276`), caps desktop toasts at
-        # `CPU_MON_MAX_ALERTS_PER_DAY` (default 8, `:209`), and sends a matching
-        # `✓ Runaway process cleared` on recovery (`:284`). A spec here is a
-        # SECOND announcer of the same event with none of that: it fired ~7
-        # minutes after cpu-monitor's for the same process, at normal urgency,
-        # UNCAPPED. That cap is not incidental — it exists because toast volume
-        # was a measured problem (123-267/day cut to 11-32/day, 2026-08-05, see
-        # nix/home.nix), and an uncapped second announcer regresses exactly it.
-        # The division is: cpu-monitor owns the INTERRUPT, this pill owns the
-        # AMBIENT display. `media` and `airvpn` are polled sources with no spec
-        # either — a source without a toast is the normal shape, not a gap.
+        # 🔴 `runaways` HAS NO SPEC HERE, DELIBERATELY — and this is a TRADE, not
+        # a redundancy. Read the second paragraph before re-adding one.
+        # `scripts/cpu-monitor.sh` is live as a systemd user unit and fires
+        # `⚠ Runaway process: <comm>` at CRITICAL urgency, capped at
+        # `CPU_MON_MAX_ALERTS_PER_DAY` (default 8, enforced `:209`). A spec here
+        # was a SECOND announcer at normal urgency, UNCAPPED, firing ~7 min
+        # later. That cap is not incidental — toast volume was a measured
+        # problem (123-267/day cut to 11-32/day, 2026-08-05, nix/home.nix:539),
+        # and an uncapped second announcer regresses exactly it.
+        # 🔴 **The two predicates are NOT the same set, and cpu-monitor's is
+        # STRICTLY NARROWER on the class this source exists for.** MEASURED:
+        # cpu-monitor takes `top -bn2`'s FIRST DATA ROW ONLY (`runaway_proc`
+        # awk `exit`s), at `CPU_MON_RUNAWAY_PCT=95` (nix/home.nix:2345),
+        # instantaneous, needing the SAME pid for 6x30s. syshealth flags EVERY
+        # eligible process at >=80% LIFETIME-AVERAGE for >=600s. So removing
+        # this spec gives up an interrupt for: (a) the 80-95% band — e.g. a
+        # python3 agent script averaging 88%, which the header of this very
+        # source names as the likeliest runaway class here; (b) the runner-up
+        # when two are hot, never inspected; (c) rank churn, where two processes
+        # swap the top slot so `runaway_streak` resets and never reaches 6.
+        # The pill still goes RED for all three — only the interrupt is gone.
+        # That was judged the better trade against an uncapped duplicate. 🔴 If
+        # those classes need interrupting, WIDEN CPU-MONITOR (it owns the
+        # interrupt, the cap and the sustain); do not add a second announcer
+        # here. ⚠ Its `✓ Runaway process cleared` (`:284`) is JOURNAL-ONLY —
+        # `clear_alert` toasts only under `CPU_MON_CLEAR_TOASTS=1`, which
+        # nothing in this repo sets — so there is no recovery toast today.
+        # `media` and `airvpn` are polled sources with no spec either: a source
+        # without a toast is the normal shape, not a gap.
     }
 
 

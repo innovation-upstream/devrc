@@ -47,18 +47,16 @@ let
   # every float popup, including the retired agent-ops one.)
   btopCmd = "alacritty --class float,float -o window.dimensions.columns=160 -o window.dimensions.lines=45 -e btop";
 
-  # Used by the runaways pill's clicks. 🔴 NOT shared with the toast's
-  # middle-click action — `_syshealth_action` in bar-status-poll builds its own
-  # string, because this one carries Nix store interpolations that Python cannot
-  # produce. They are TWO SPELLINGS OF ONE RULE and they cannot be collapsed, so
-  # they are pinned to each other by
-  # `test_bar_status.py::test_the_toast_action_and_the_CLICK_are_the_same_shape`,
-  # which reads BOTH files. An earlier revision of this comment claimed they
-  # WERE shared; they never were, and by the time an audit read it they had
-  # already drifted — the toast had lost the `read -n 1` hold below.
-  # 🔴 That hold is load-bearing: syshealth prints and exits in ~0.16 s, and
-  # `alacritty -e CMD` closes when CMD does, so without it the window flashes
-  # and vanishes — indistinguishable from the click doing nothing.
+  # The runaways pill's clicks — BOTH buttons, and the only consumer. There is
+  # no Python counterpart any more: `_syshealth_action` and the toast it served
+  # were deleted when cpu-monitor was made the sole runaway announcer (see the
+  # `runaways` block in `_toast_specs`), so this string is now the ONE spelling
+  # of the rule rather than one of two that had to be kept in sync.
+  # 🔴 The `read -n 1` hold is load-bearing: syshealth prints and exits in
+  # ~0.16 s, and `alacritty -e CMD` closes when CMD does, so without it the
+  # window flashes and vanishes — indistinguishable from the click doing
+  # nothing, which is a defect this pill shipped once already. Pinned by
+  # `test_bar_status.py::test_the_runaways_CLICK_still_holds_its_terminal_open`.
   # `${home}` rather than a literal `~`: every other working-tree reference in
   # this file interpolates it, and `~` survives only if the click is spawned
   # through a shell.
