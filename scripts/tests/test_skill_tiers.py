@@ -85,18 +85,25 @@ MIN_SKILLS = 30
 # --------------------------------------------------------------------------- #
 MEASURED_ENTRIES = 35
 MEASURED_TIER_A_ENTRIES = 22
-MEASURED_TIER_A_CHARS = 7_639
+MEASURED_TIER_A_CHARS = 7_617
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_824
+MEASURED_UNDER_LEDGER_CHARS = 7_802
 # ...and what the same 35 entries would cost with every skill tier A. The
 # difference is what the ledger buys: 3,542 chars.
-MEASURED_ALL_TIER_A_CHARS = 11_366
+MEASURED_ALL_TIER_A_CHARS = 11_344
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
 #
-# The ceiling sits 254 chars above MEASURED_TIER_A_CHARS — less than the MEAN
-# tier-A entry, which is 7,242 / 21 = 344.9.
+# The ceiling sits EXACTLY ON MEASURED_TIER_A_CHARS — 0 headroom, so the next
+# tier-A addition of any size reds this gate. The mean tier-A entry is
+# 7,617 / 22 = 346.2.
+#
+# The 254 chars of headroom this paragraph used to assert were consumed by the
+# RAISE in #1391 (7,242/7,496 -> 7,639/7,639), not by the re-base below; an
+# audit caught the sentence still asserting 254 in the present tense, and then
+# caught the first correction MISATTRIBUTING the cause to this PR. Both
+# ceilings have been at 0 headroom since #1391.
 #
 # 🔴 LOWERED 7_676 -> 7_496 later the SAME DAY, re-based again after retiring the
 # `initiatives` (tier A) and `repo-cos` (tier B) skills with their subsystems. The
@@ -161,9 +168,19 @@ MEASURED_ALL_TIER_A_CHARS = 11_366
 # one skill to tier B in claude/skill-tiers.json is a ONE-LINE edit and is the
 # intended move. The playbook is printed by the failing assertion below.
 #
-# 🔴 RAISED ONCE, DELIBERATELY, 2026-09-08: 7,496 -> 7,639 (+143), to keep
-# `civitai-app-release` at tier A. THE RULE ABOVE STILL STANDS. This is the
-# SECOND ratchet raised for that one skill in this commit — the other is
+# 🔴 LOWERED 7_639 -> 7_617 on 2026-09-08, when the skill raised for below was
+# reframed and RENAMED `civitai-app-release` -> `civitai-app-fleet`: its entry
+# got 22 chars shorter (description 373->353, name 19->17), so the ceiling
+# follows it down and headroom stays 0. Re-pinning on a cut is this file's own
+# rule, and it pays back part of the raise below. An audit caught this entry
+# missing while the sibling file's equivalent had been written — leaving the
+# RAISE below as the newest record, so a reader could "restore" 7_639 and bank
+# 22 chars of the regrowth this constant exists to refuse.
+#
+# 🔴 RAISED ONCE, DELIBERATELY, 2026-09-08: 7,496 -> 7,639 (+143), to admit the
+# skill now called `civitai-app-fleet` (named `civitai-app-release` when the
+# raise was taken) at tier A. THE RULE ABOVE STILL STANDS. This was the SECOND
+# ratchet raised for that one skill in that commit — the other is
 # LISTING_TOTAL_CEILING_CHARS in test_skill_descriptions.py — and both were
 # taken by Zach with the "do NOT raise" text quoted to him first.
 #
@@ -181,7 +198,7 @@ MEASURED_ALL_TIER_A_CHARS = 11_366
 # the one this raise was taken for. Headroom is pinned back to 0, so the next
 # addition of any size reds this gate — and if a third raise is proposed, the
 # right answer is almost certainly a demotion instead.
-TIER_A_CEILING_CHARS = 7_639
+TIER_A_CEILING_CHARS = 7_617
 
 # 🔴 Skills that must NEVER be tier B, pinned as a RELATIONSHIP rather than left
 # to review. Each one fires from a SYMPTOM Zach describes rather than from its own
@@ -529,8 +546,8 @@ def test_control_the_tier_a_ratchet_can_go_red(ledger, skills):
     unnoticed.
 
     🔴 IT PROVES NOTHING ABOUT A SMALL ENTRY, and that gap is real rather than
-    theoretical — a tier-A skill under the current 254 chars of headroom lands
-    with no eviction, which is exactly how the sibling ceiling in
+    theoretical — a tier-A skill landing inside the headroom slips in with no
+    eviction, which is exactly how the sibling ceiling in
     `test_skill_descriptions.py` went from ~250 of headroom to 68 when
     `subsystem-index` arrived. The fixture is the mean deliberately: a control
     built from the smallest possible entry would grade a property this ceiling

@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""i3status-rust custom block: runaway process count.
+
+Reads the cache file written by scripts/bar-status-poll and emits ONE
+i3status-rust JSON line. This is INSTANT (a local file read) and never touches
+the network, so it can never block the bar.
+
+CALM rendering (colour == "look at me"):
+  count == 0, measured           -> empty, invisible block (hide-at-zero)
+  count > 0                      -> `system` icon + count, coloured Warning
+  cache missing/stale/error/OLD  -> `?` — the board could not be read, which is
+                                     not an empty one
+Click (wired in graphical.nix) opens `syshealth` in a float terminal.
+"""
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+import time
+
+NAME = "runaways"
+ICON = "cogs"
+_VALID_STATES = ("Idle", "Info", "Good", "Warning", "Critical")
+_EMPTY = {"text": "", "state": "Idle"}
+
+
+def _load_freshness():
+    sys.dont_write_bytecode = True
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "bar_freshness.py")
+    loader = importlib.machinery.SourceFileLoader("_bar_freshness", path)
+    spec = importlib.util.spec_from_loader("_bar_freshness", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+try:
+    fresh = _load_freshness()
+except Exception:
+    fresh = None
+
+MAX_CACHE_AGE_SECS = getattr(fresh, "MAX_CACHE_AGE_SECS", None)
+
+
+def cache_path() -> str:
+    base = os.environ.get("BAR_STATUS_DIR") or os.path.join(
+        os.path.expanduser("~"), ".cache", "bar-status")
+    return os.path.join(base, NAME + ".json")
+
+
+def load(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+_int_or_none = getattr(fresh, "int_or_none", None)
+
+
+def _unmeasured(payload, icon: str) -> dict:
+    """The VISIBLE `?` pill: the board could not be read just now.
+
+    Carries forward the count if the payload still has one, so a known
+    alarm is not silenced by a measurement outage.
+    """
+    if not isinstance(payload, dict):
+        return {"icon": icon, "text": "?", "short_text": "?", "state": "Warning"}
+    count = _int_or_none(payload.get("count", 0))
+    if count is not None and count > 0:
+        return {"icon": icon, "text": "%d?" % count, "short_text": "%d?" % count,
+                "state": "Warning"}
+    return {"icon": icon, "text": "?", "short_text": "?", "state": "Warning"}
+
+
+def render(payload, icon: str = ICON, now=None) -> dict:
+    now = time.time() if now is None else now
+    if not isinstance(payload, dict):
+        return _unmeasured(None, icon)
+    if fresh and fresh.unmeasured(payload, now):
+        return _unmeasured(payload, icon)
+    count = _int_or_none(payload.get("count", 0))
+    if count is None:
+        return _unmeasured(payload, icon)
+    if count <= 0:
+        return dict(_EMPTY)
+    text = str(count)
+    state = payload.get("state")
+    if state not in _VALID_STATES or state == "Idle":
+        state = "Warning"
+    return {"icon": icon, "text": text, "short_text": text, "state": state}
+
+
+def main() -> int:
+    sys.stdout.write(json.dumps(render(load(cache_path()))) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        sys.stdout.write(
+            '{"icon": "%s", "text": "?", "short_text": "?", '
+            '"state": "Warning"}\n' % ICON)
+        sys.exit(0)
