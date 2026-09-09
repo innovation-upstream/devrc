@@ -864,13 +864,19 @@ def test_scoped_tests_selects_a_test_that_names_a_changed_non_test_file(tmp_path
     tests that NAME it, which is how a one-file edit outside a test dir gets a
     cheap run instead of the 13k-test monolith."""
     r = _repo(tmp_path)
-    (r / "scripts" / "widget-tool.sh").write_text("#!/usr/bin/env bash\necho hi\n")
+    # 🔴 NO SHEBANG. This file is never EXECUTED — the mapper only needs a
+    # changed path for a test to name — and
+    # `test_no_test_writes_a_usr_bin_env_shebang_at_runtime` is a structural scan
+    # that does not care whether you meant to run it. MEASURED: an earlier draft
+    # wrote `#!/usr/bin/env bash` here and failed the SANDBOX tier (where
+    # /usr/bin/env does not exist) while the dev host never noticed.
+    (r / "scripts" / "widget-tool.sh").write_text("echo hi\n")
     (r / "scripts" / "tests" / "test_widget.py").write_text(
         'PATH_UNDER_TEST = "scripts/widget-tool.sh"\n\n\ndef test_w():\n    assert True\n')
     (r / "scripts" / "tests" / "test_other.py").write_text(
         "def test_o():\n    assert True\n")
     _commit(r)
-    (r / "scripts" / "widget-tool.sh").write_text("#!/usr/bin/env bash\necho bye\n")
+    (r / "scripts" / "widget-tool.sh").write_text("echo bye\n")
     rec = _stub_runner(tmp_path, [str(r / "scripts" / "tests")])
     proc = _run([str(SCOPED), "--base", "HEAD", str(r)],
                 env={"DEVRC_SCOPED_RUNNER": str(tmp_path / "stub-runner.sh")},
