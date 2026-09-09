@@ -475,11 +475,22 @@ def test_it_preflights_python3_before_touching_anything(rig, tmp_path):
     plain `sudo` (env_reset) leaves root without one. Half-applying is the
     failure mode this preflight exists to prevent: it must fire BEFORE the
     backup and BEFORE the edit."""
-    # PATH is the shim dir ALONE — no python3, and no coreutils either. The
-    # preflight branch is builtins-only precisely so it still speaks in this
-    # environment; if it ever reaches for `cat` again, this goes red in the nix
-    # sandbox tier where /run/current-system/sw/bin does not exist at all.
-    p = rig.run(env={"PATH": str(rig.bin)}, expect=1)
+    # 🔴 PATH is REPLACED by an EMPTY directory — not prepended to. This is a
+    # PATH-clobbering site and is pinned as one in
+    # `test_no_real_launchers.py::PINNED_PATH_CLOBBERS`; read that entry before
+    # changing the shape here. Replacing is REQUIRED: python3 is present both on
+    # the dev host and in the nix sandbox, and no amount of PREPENDING can make
+    # a binary unfindable, so a prepending version would measure the environment
+    # instead of the preflight. The directory is created empty by this test one
+    # line above the clobber, so nothing at all — least of all a launcher — is
+    # reachable through it.
+    #
+    # Emptiness is also what makes the assertion strong rather than incidental:
+    # the preflight branch is builtins-only, so with NOTHING on PATH it must
+    # still speak. If it ever reaches for `cat` again, this goes red.
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    p = rig.run(env={"PATH": str(empty)}, expect=1)
     assert "no python3 on PATH" in p.stderr
     assert 'sudo env "PATH=$PATH" bash' in p.stderr
     assert rig.cfg.read_text() == FIXTURE
