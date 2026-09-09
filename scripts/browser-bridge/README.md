@@ -2224,9 +2224,13 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   ⚠ It was UNVERIFIED when the pin moved, and the reason is worth keeping: the
   laptop was unreachable at its **LAN** address, and the note recorded that as
   "unreachable" full stop. It answers on **nebula** (`zach@10.42.0.100`), which
-  is how this check was run. A host being off-LAN is not a host being down —
-  `ship.sh` has the same blind spot (`LAPTOP_SSH_DEFAULT` is the LAN address,
-  overridable with `LAPTOP_SSH`).
+  is how this check was run. A host being off-LAN is not a host being down.
+  ⚠ `ship.sh` and `drift-check.sh` **had** the same blind spot; both now try the
+  LAN address and then nebula (`lib/host-role.sh` → `remote_ssh_candidates_of`
+  / `first_reachable_ssh`). Note the fix is only reached for the DERIVED
+  defaults: setting `LAPTOP_SSH` or `REMOTE_SSH` by hand pins one address and
+  deliberately DISABLES the fallback, so the old workaround is now the thing
+  that reintroduces the old failure.
   🔴 **The browser-only RESOLUTION on the laptop is STILL UNVERIFIED** — that is
   a separate claim from the version, and closing the easy half must not be read
   as closing both. It needs `opencode debug agent` run on the laptop; only the
