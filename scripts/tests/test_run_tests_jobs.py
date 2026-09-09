@@ -101,6 +101,27 @@ def _narrow_cpus(n: int) -> list[int] | None:
     return allowed[:n]
 
 
+# 🔴 THE ONLY SKIP REASON IN THIS FILE, AND IT MUST NOT FIRE ON THE GATING TIER.
+# `run-tests.sh` GUARD 2 pins the expected-skip SET, so an unpinned skip reds the
+# gate even with `failed=0` — measured on this PR's head 6597318a, which reported
+# `collected=21495 passed=21488 skipped=7 failed=0` and FAILED, because five
+# host-conditional skips fired on a builder whose `nproc` is 4. Every one of
+# those is gone: each case now uses a cgroup quota of 1, which is below `nproc`
+# on any multi-core host, so the same assertion is exact everywhere.
+#
+# These last two cannot be written that way — they need a quota ABOVE `nproc` and
+# BELOW the cap of 8, which needs `nproc` narrowed. They are guarded rather than
+# assumed, and both conditions are satisfied where it matters: the dev box has 24
+# CPUs and the nix check derivation carries `pkgs.util-linux` in `gateTools`
+# (flake.nix), so `taskset` is on PATH in the sandbox tier too. If either ever
+# stops holding, GUARD 2 reds the gate and NAMES this skip — loud, not silent.
+_NARROW_UNAVAILABLE = (
+    "cannot narrow the child's CPU set: `taskset` is missing or this process is "
+    "confined to fewer than 2 CPUs. This must not happen in the gating tier — "
+    "see the note above this constant."
+)
+
+
 def _run(env_overrides: dict[str, str], cpus: list[int] | None = None):
     """Run the runner as far as the banner, then stop.
 
@@ -223,32 +244,38 @@ def _no_quota_anywhere(tmp_path: Path) -> dict[str, str]:
     return _fake_cgroup(tmp_path, [("", "max 100000"), ("leaf", "max 100000")])
 
 
-def test_an_unquota_d_host_gets_more_than_the_old_hardcoded_four(tmp_path):
-    """RED before this change (the old code capped at 4), green after.
+def test_an_unquota_d_host_gets_nproc_capped_at_eight(tmp_path):
+    """The whole formula on an unquota'd host: `min(nproc, 8)`.
 
-    Skipped rather than asserted on a small box: on a host with <=4 usable cores
-    the old and new formulas agree, so the test could not distinguish them and a
-    green would mean nothing. The skip guard reads `nproc` for the same reason
-    the assertion does — written on `os.cpu_count()` it did not fire on the one
-    machine where it mattered, which is how the gating tier went red.
+    Two claims in one assertion, because they are one expression: the old
+    hardcoded 4 is gone (this is RED at any nproc >= 5 against the old code),
+    and the new ceiling is 8 rather than nproc (visible at any nproc >= 9).
+
+    🔴 IT DOES NOT SKIP ON A SMALL HOST, AND THAT IS THE POINT OF THIS VERSION.
+    The first draft skipped when `nproc <= 4`, because there the old and new
+    formulas coincide and a green proves nothing about the regression. That
+    reasoning is right and the remedy was wrong twice over: the gating builder
+    reports `nproc` 4, so the skip fired exactly where the gate runs — and
+    `run-tests.sh` GUARD 2 requires every skip to be pinned in EXPECTED_SKIPS,
+    so five unpinned skips turned a suite with `failed=0` into a RED gate.
+    (Measured on this PR's head 6597318a: `collected=21495 passed=21488
+    skipped=7 failed=0`, reported FAILED.)
+
+    ⚠ SO LABEL WHAT IT IS AT EACH SIZE, rather than hiding the weak case behind
+    a skip: above 4 usable cores this is regression coverage; at or below 4 the
+    two formulas agree and it degrades to an INVARIANT GUARD on the current
+    formula. It is never vacuous and never wrong — `min(nproc, 8)` is what the
+    code must produce at every size — and the mutation sweep that has to see the
+    cap move runs on a 24-core host where it does discriminate.
     """
     usable = _nproc()
-    if usable <= 4:
-        pytest.skip(f"nproc reports {usable}; old and new formulas agree below 5")
     got = _parallelism(_run(_no_quota_anywhere(tmp_path)))
     assert got == min(usable, 8), (
         f"expected min(nproc={usable}, 8) = {min(usable, 8)} workers on an "
-        f"unquota'd host, got {got}. 4 means the hardcoded cap is back."
+        f"unquota'd host, got {got}. 4 on a host with more than 4 cores means "
+        "the hardcoded cap is back; nproc on a host with more than 8 means the "
+        "ceiling is gone."
     )
-
-
-def test_the_cap_is_eight_not_nproc(tmp_path):
-    """The ceiling is deliberate: past ~8 the run is bounded by its biggest FILE."""
-    usable = _nproc()
-    if usable <= 8:
-        pytest.skip(f"nproc reports {usable}; the 8-cap is not observable below 9")
-    got = _parallelism(_run(_no_quota_anywhere(tmp_path)))
-    assert got == 8, f"expected the cap of 8 on a {usable}-core host, got {got}"
 
 
 def test_the_real_unseamed_walk_produces_a_budget_within_its_own_bounds():
@@ -279,22 +306,44 @@ def test_the_real_unseamed_walk_produces_a_budget_within_its_own_bounds():
 
 
 def test_a_cgroup_quota_narrower_than_nproc_wins(tmp_path):
-    """The devrc-ci case: quota 4 on a much larger node must yield 4, not nproc.
+    """The devrc-ci SHAPE: a container quota below the node's core count wins.
 
     This is the branch the old `min(nproc, 4)` got right only by coincidence.
-    🔴 Skipped where nproc is already <= 4, because there the quota and the
-    fallback agree and a green would not distinguish them.
+
+    🔴 THE QUOTA IS 1, NOT THE POD'S ACTUAL 4, AND THAT IS DELIBERATE. A quota
+    of 4 is indistinguishable from the `nproc` fallback on a 4-core host — which
+    is the gating builder — so the first draft skipped there, i.e. on the one
+    machine whose answer decides the merge. A quota of 1 is below `nproc` on
+    every host that has more than one CPU, so the same claim is observable
+    everywhere and the test never skips. The numbers differ from the pod's; the
+    shape under test does not.
     """
-    if _nproc() <= 4:
-        pytest.skip(f"nproc reports {_nproc()}; a quota of 4 cannot be seen to narrow it")
-    env = _fake_cgroup(tmp_path, [("", "max 100000"), ("pod", "400000 100000")])
-    assert _parallelism(_run(env)) == 4
-
-
-def test_a_one_cpu_quota_yields_one_worker(tmp_path):
-    """A 1-CPU pod must not run 4 workers — the oversubscription the cap feared."""
     env = _fake_cgroup(tmp_path, [("", "max 100000"), ("pod", "100000 100000")])
-    assert _parallelism(_run(env)) == 1
+    got = _parallelism(_run(env))
+    assert got == 1, (
+        f"expected the cgroup quota of 1 to win, got {got}. Anything else means "
+        "the walk fell through to nproc and the container branch is not wired."
+    )
+
+
+def test_a_one_cpu_quota_yields_one_worker_on_a_multi_core_host(tmp_path):
+    """A 1-CPU pod must not run 8 workers — the oversubscription the cap feared.
+
+    Same fixture as the test above; this one carries the POSITIVE CONTROL that
+    the fixture can discriminate at all. If `nproc` here were 1, both would
+    assert `1` against a host that answers `1` anyway, and neither would be
+    evidence. Asserting the control explicitly is cheaper than reasoning about
+    it later.
+    """
+    usable = _nproc()
+    env = _fake_cgroup(tmp_path, [("", "max 100000"), ("pod", "100000 100000")])
+    got = _parallelism(_run(env))
+    assert got == 1, f"expected 1 worker under a 1-CPU quota, got {got}"
+    assert usable > 1, (
+        f"nproc reports {usable}, so the fallback would ALSO have produced 1 — "
+        "this fixture cannot tell the quota branch from the fallback on this "
+        "host, and every quota test in this file is weaker than it looks here."
+    )
 
 
 def test_a_sub_cpu_quota_floors_at_one_rather_than_zero(tmp_path):
@@ -316,7 +365,7 @@ def test_a_quota_wider_than_nproc_does_not_widen_the_budget(tmp_path):
     """
     cpus = _narrow_cpus(2)
     if cpus is None:
-        pytest.skip("fewer than 2 CPUs in this process's affinity mask")
+        pytest.skip(_NARROW_UNAVAILABLE)
     env = _fake_cgroup(tmp_path, [("", "max 100000"), ("pod", "500000 100000")])
     got = _parallelism(_run(env, cpus=cpus))
     assert got == 2, (
@@ -328,7 +377,7 @@ def test_a_quota_wider_than_nproc_does_not_widen_the_budget(tmp_path):
 def test_the_narrowed_cpu_seam_actually_narrows_nproc(tmp_path):
     """POSITIVE CONTROL for the affinity narrowing used by the test above.
 
-    If `preexec_fn` silently did nothing, the case above would run on all cores
+    If the narrowing silently did nothing, the case above would run on all cores
     and its `== 2` would fail loudly — but a future refactor could just as
     easily make it pass for the wrong reason. So: with no quota anywhere and the
     child pinned to two CPUs, the budget must be exactly 2, and that number can
@@ -336,7 +385,7 @@ def test_the_narrowed_cpu_seam_actually_narrows_nproc(tmp_path):
     """
     cpus = _narrow_cpus(2)
     if cpus is None:
-        pytest.skip("fewer than 2 CPUs in this process's affinity mask")
+        pytest.skip(_NARROW_UNAVAILABLE)
     got = _parallelism(_run(_no_quota_anywhere(tmp_path), cpus=cpus))
     assert got == 2, (
         f"the child reported a budget of {got} while pinned to 2 CPUs; the "
@@ -351,13 +400,15 @@ def test_max_at_the_leaf_falls_through_to_a_parents_quota(tmp_path):
     This is the shape a systemd user scope inside a quota'd slice actually has,
     and a walk that stopped at the leaf would report the node's core count.
     """
-    if _nproc() <= 3:
-        pytest.skip(f"nproc reports {_nproc()}; a quota of 3 cannot be seen to narrow it")
     env = _fake_cgroup(
         tmp_path,
-        [("", "max 100000"), ("slice", "300000 100000"), ("slice/scope", "max 100000")],
+        [("", "max 100000"), ("slice", "100000 100000"), ("slice/scope", "max 100000")],
     )
-    assert _parallelism(_run(env)) == 3
+    got = _parallelism(_run(env))
+    assert got == 1, (
+        f"expected the PARENT's quota of 1, got {got}. nproc means the walk "
+        "stopped at the unquota'd leaf instead of climbing."
+    )
 
 
 def test_an_empty_cpu_max_is_skipped_and_the_walk_continues_to_the_parent(tmp_path):
@@ -376,10 +427,9 @@ def test_an_empty_cpu_max_is_skipped_and_the_walk_continues_to_the_parent(tmp_pa
     empty cpu.max is skipped rather than treated as a quota or as a reason to
     abandon the walk, so the parent's 6-core quota is the answer.
     """
-    usable = _nproc()
     root = tmp_path / "cgroup"
     (root / "a").mkdir(parents=True)
-    (root / "cpu.max").write_text("600000 100000\n")
+    (root / "cpu.max").write_text("100000 100000\n")
     (root / "a" / "cpu.max").write_text("")  # unreadable-as-a-pair
     self_file = tmp_path / "self-cgroup"
     self_file.write_text("0::/a\n")
@@ -387,9 +437,14 @@ def test_an_empty_cpu_max_is_skipped_and_the_walk_continues_to_the_parent(tmp_pa
         "DEVRC_TEST_CGROUP_ROOT": str(root),
         "DEVRC_TEST_CGROUP_SELF": str(self_file),
     }
-    # min(nproc, quota): the walk may only narrow what nproc already allowed, so
-    # on a builder with fewer than 6 cores the correct answer is nproc's.
-    assert _parallelism(_run(env)) == min(usable, 6)
+    # The parent's quota is 1, which is below `nproc` on any multi-core host, so
+    # this asserts an exact number rather than `min(nproc, quota)` — and it is
+    # the same number on the gating builder as on the dev box.
+    got = _parallelism(_run(env))
+    assert got == 1, (
+        f"expected the parent's quota of 1, got {got}. Anything else means the "
+        "empty cpu.max stopped the walk instead of being skipped."
+    )
 
 
 def test_the_walk_stops_at_the_root_it_was_given(tmp_path):
@@ -409,7 +464,7 @@ def test_the_walk_stops_at_the_root_it_was_given(tmp_path):
     usable = _nproc()
     root = tmp_path / "cgroup"
     (root / "deep" / "deeper").mkdir(parents=True)
-    (tmp_path / "cpu.max").write_text("200000 100000\n")  # OUTSIDE the root
+    (tmp_path / "cpu.max").write_text("100000 100000\n")  # OUTSIDE the root
     self_file = tmp_path / "self-cgroup"
     self_file.write_text("0::/deep/deeper\n")
     env = {
@@ -418,8 +473,8 @@ def test_the_walk_stops_at_the_root_it_was_given(tmp_path):
     }
     got = _parallelism(_run(env))
     assert got == min(usable, 8), (
-        f"expected the nproc fallback (min({usable}, 8)), got {got}. 2 means the "
-        "walk climbed past the root it was given."
+        f"expected the nproc fallback (min({usable}, 8)), got {got}. 1 means the "
+        "walk climbed past the root it was given and read the cpu.max above it."
     )
 
 
@@ -436,7 +491,7 @@ def test_a_root_level_cgroup_path_does_not_escape_the_root(tmp_path):
     root = tmp_path / "cgroup"
     root.mkdir()
     # OUTSIDE the seamed root, one level up — reachable only by escaping it.
-    (tmp_path / "cpu.max").write_text("200000 100000\n")
+    (tmp_path / "cpu.max").write_text("100000 100000\n")
     self_file = tmp_path / "self-cgroup"
     self_file.write_text("0::/\n")
     env = {
@@ -445,7 +500,7 @@ def test_a_root_level_cgroup_path_does_not_escape_the_root(tmp_path):
     }
     got = _parallelism(_run(env))
     assert got == min(usable, 8), (
-        f"expected the nproc fallback (min({usable}, 8)), got {got}. 2 means the "
+        f"expected the nproc fallback (min({usable}, 8)), got {got}. 1 means the "
         "walk climbed out of the root it was given and read the cpu.max above it."
     )
 
@@ -457,11 +512,9 @@ def test_a_hybrid_v1_v2_proc_self_cgroup_reads_the_unified_line(tmp_path):
     path, found no cpu.max, and the real v2 quota was silently missed — the
     budget fell back to nproc in exactly the container this feature exists for.
     """
-    if _nproc() <= 4:
-        pytest.skip(f"nproc reports {_nproc()}; a quota of 4 cannot be seen to narrow it")
     root = tmp_path / "cgroup"
     (root / "pod").mkdir(parents=True)
-    (root / "pod" / "cpu.max").write_text("400000 100000\n")
+    (root / "pod" / "cpu.max").write_text("100000 100000\n")
     self_file = tmp_path / "self-cgroup"
     self_file.write_text(
         "9:cpuset:/kubepods/besteffort\n"
@@ -473,9 +526,10 @@ def test_a_hybrid_v1_v2_proc_self_cgroup_reads_the_unified_line(tmp_path):
         "DEVRC_TEST_CGROUP_SELF": str(self_file),
     }
     got = _parallelism(_run(env))
-    assert got == 4, (
-        f"expected the v2 quota of 4, got {got}. The walk read a cgroup v1 line "
-        "instead of the `0::` unified one."
+    assert got == 1, (
+        f"expected the v2 quota of 1, got {got}. Anything else means the walk "
+        "read a cgroup v1 line instead of the `0::` unified one, found no "
+        "cpu.max at that path, and fell through to nproc."
     )
 
 
@@ -485,11 +539,9 @@ def test_a_cgroup_path_containing_a_colon_is_not_truncated(tmp_path):
     `0::/sess:2.scope` became `/sess`, a directory that does not exist, so the
     quota that was really there went unread.
     """
-    if _nproc() <= 4:
-        pytest.skip(f"nproc reports {_nproc()}; a quota of 4 cannot be seen to narrow it")
     root = tmp_path / "cgroup"
     (root / "sess:2.scope").mkdir(parents=True)
-    (root / "sess:2.scope" / "cpu.max").write_text("400000 100000\n")
+    (root / "sess:2.scope" / "cpu.max").write_text("100000 100000\n")
     self_file = tmp_path / "self-cgroup"
     self_file.write_text("0::/sess:2.scope\n")
     env = {
@@ -497,9 +549,10 @@ def test_a_cgroup_path_containing_a_colon_is_not_truncated(tmp_path):
         "DEVRC_TEST_CGROUP_SELF": str(self_file),
     }
     got = _parallelism(_run(env))
-    assert got == 4, (
-        f"expected the quota of 4 from `/sess:2.scope`, got {got}. The path was "
-        "truncated at the colon."
+    assert got == 1, (
+        f"expected the quota of 1 from `/sess:2.scope`, got {got}. Anything "
+        "else means the path was truncated at the colon and the directory the "
+        "walk looked in does not exist."
     )
 
 
