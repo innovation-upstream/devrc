@@ -336,11 +336,21 @@ def test_cairn_who_still_resolves_its_lib_relative_to_its_OWN_file():
     assert (LIB / "cairn_who.py").exists()
 
 
-def test_cairn_who_is_deployed_OUT_OF_STORE_like_its_sibling():
+def test_cairn_who_is_deployed_OUT_OF_STORE_unlike_its_sibling():
     """🔴 THE DEPLOY half. A store copy ships a `cairn-who` that cannot start.
 
-    Deploying `cairn` out-of-store and `cairn-who` as a `home.file` copy would
-    leave HALF the split working — the failure mode this whole file exists for.
+    ⚠ UNLIKE, NOT LIKE — this test was renamed when `cairn` moved to the pinned
+    flake package. The two deploy modes now DIFFER on purpose: `cairn` ships as
+    a store path because its package installs the real script and `lib/`
+    together, and `cairn-who` cannot, because it is devrc-only, absent from the
+    OSS package, and the `lib/` it resolves is `scripts/lib/`. Reading that
+    difference as an inconsistency and "fixing" it in either direction breaks
+    one of the two binaries.
+
+    This test still owns only ONE side. The RELATIONSHIP — `cairn` from the
+    package AND `cairn-who` out-of-store, asserted together so a change that
+    moved both cannot leave half the pair green — is pinned in
+    `test_cairn_flake_pin.py`.
     """
     nix = NIX_HOME.read_text(encoding="utf-8")
     key = 'home.file.".local/bin/cairn-who".source'
@@ -383,22 +393,41 @@ def _normalised_why(block):
     return " ".join(" ".join(para).split())
 
 
+# 🔴 UPDATED WHEN `cairn` MOVED TO THE PINNED FLAKE PACKAGE, and the old text is
+# worth recording because it was TRUE and is now FALSE. It read: "it is REQUIRED.
+# `scripts/cairn` reaches its siblings through `Path(__file__).resolve().parent /
+# "lib"` … A store copy would resolve `__file__` into /nix/store, where `lib/` is
+# NOT deployed — the import would fail outright." Every clause of that is STILL
+# TRUE of `scripts/cairn`; what changed is that `scripts/cairn` is no longer the
+# deployed artifact. The package satisfies the same requirement by a different
+# mechanism — real script and `lib/` installed TOGETHER under libexec — so the
+# paragraph had to be rewritten rather than deleted, and this test going red on
+# that commit was the design working, not an obstacle to route around.
 NIX_DEPLOY_WHY = (
-    "🔴 mkOutOfStoreSymlink is NOT a preference here — it is REQUIRED. "
-    "`scripts/cairn` reaches its siblings through "
-    '`Path(__file__).resolve().parent / "lib"`, exactly like the opencode CLI '
-    "above. `.resolve()` follows the symlink back to the checkout, so `lib/` is "
-    "found in the repo. A store copy would resolve `__file__` into /nix/store, "
-    "where `lib/` is NOT deployed — the import would fail outright. Only these "
-    "launcher paths are symlinked; `scripts/lib/` must not be deployed, same "
-    "rule as opencode's `lib/`."
+    "🔴 mkOutOfStoreSymlink is NOT a preference here — it is REQUIRED for "
+    "`cairn-who` below, and NO LONGER required for `cairn`. That asymmetry is "
+    "the whole point of this pair, so read both lines together. The underlying "
+    "constraint is unchanged and belongs to BOTH scripts: each reaches its "
+    'siblings through `Path(__file__).resolve().parent / "lib"`, and '
+    "`.resolve()` follows symlinks, so what must hold is that the directory "
+    "holding the REAL file also holds `lib/`. Out-of-store satisfies that by "
+    "resolving back into the checkout. The pinned `cairn` flake package "
+    "satisfies it a SECOND way — it installs the real script and its `lib/` "
+    "together under `libexec` and puts a wrapper in `bin/` — which is why a "
+    "store path is now correct for that binary and only that binary. "
+    "`cairn-who` has no such package: it is devrc-only, deliberately absent "
+    "from the OSS repo, and the `lib/` it resolves is `scripts/lib/`, which "
+    "must not be deployed, same rule as opencode's `lib/`. Deploying it "
+    "in-store would leave HALF the split working."
 )
 
 
 def test_the_nix_deploy_comment_pins_its_WHY_paragraph_verbatim():
-    """The `cairn` deploy comment must keep saying why `mkOutOfStoreSymlink` is
-    REQUIRED — a store copy resolves `__file__` into /nix/store, where
-    `scripts/lib/` is not deployed, and the client dies on import.
+    """The `cairn` deploy comment must keep saying WHERE `mkOutOfStoreSymlink`
+    is still REQUIRED and where it no longer is — the constraint is the same for
+    both binaries (the directory holding the REAL file must hold `lib/`) and only
+    `cairn` has a package that satisfies it a second way. A reader who takes the
+    asymmetry for an oversight breaks whichever side they "tidy".
     """
     nix = NIX_HOME.read_text(encoding="utf-8")
     lines = nix.splitlines()
@@ -446,7 +475,9 @@ def test_the_nix_deploy_comment_pins_its_WHY_paragraph_verbatim():
     #      "# Deployed with mkOutOfStoreSymlink, same as claim-work above."
     #      kept it GREEN, while the test's NAME claimed the reason was pinned.
     #      ⚠ UNITS: that is a net delete of 468 CHARACTERS / 475 bytes (the
-    #      paragraph is 532 chars / 539 bytes). Earlier receipts said "473-byte"
+    #      paragraph was 532 chars / 539 bytes AT THAT TIME — it has since been
+    #      rewritten for the flake-package cutover, so do not re-measure the
+    #      current text against those figures). Earlier receipts said "473-byte"
     #      and "468 B"; the first matched nothing and the second was `len(str)`
     #      labelled as bytes. `len()` on a str is characters — the em-dashes in
     #      this paragraph are 3 bytes each, so the two never agree here.
@@ -457,8 +488,9 @@ def test_the_nix_deploy_comment_pins_its_WHY_paragraph_verbatim():
     assert why is not None, (
         "the `cairn` deploy comment no longer contains its WHY paragraph — the "
         "line beginning `mkOutOfStoreSymlink is NOT a preference here` is gone. "
-        "A store copy resolves `__file__` into /nix/store, where scripts/lib/ "
-        "is not deployed, and the client dies on import.")
+        "That paragraph is where the deploy ASYMMETRY is explained: `cairn` "
+        "ships from the pinned package, `cairn-who` must stay out-of-store or "
+        "it dies on import because scripts/lib/ is not deployed.")
     assert why == NIX_DEPLOY_WHY, (
         "the `cairn` deploy comment's WHY paragraph changed. If the edit was "
         "deliberate, update NIX_DEPLOY_WHY in this file to match — the "

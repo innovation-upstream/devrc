@@ -15,6 +15,25 @@ in
 
   ELIXIR_LSP_PATH = "${elixirLspPath}/share/vscode/extensions/JakeBecker.elixir-ls/elixir-ls-release/language_server.sh";
   K9S_FEATURE_GATE_NODE_SHELL = "true";
+
+  # 🔴 REQUIRED BY THE PINNED `cairn` PACKAGE, AND ITS ABSENCE IS SILENT.
+  # devrc's forked client had the frozen pre-cutover mirror's path hardcoded; the
+  # extracted OSS client reads it from here instead, because a path out of one
+  # deployment's disk is exactly what could not survive extraction. Unset does NOT
+  # mean "no mirror problem" — `cairn doctor` then reports `frozen-mirror
+  # NOT-OBSERVABLE`, a status that contributes NOTHING to the verdict, so a check
+  # that was PASSING silently becomes a check that is not RUN.
+  # MEASURED on this host against the real 225-entry cache root, all three points:
+  #   devrc's scripts/cairn          -> frozen-mirror OK
+  #   packaged client, var unset     -> frozen-mirror NOT-OBSERVABLE
+  #   packaged client, var set here  -> frozen-mirror OK
+  # ⚠ home.sessionVariables land in profile.d, sourced by INTERACTIVE shells, not
+  # by the non-interactive `zsh -c` an agent's Bash tool uses — the same caveat the
+  # PLAYWRIGHT_BROWSERS_PATH note below records. A long-lived agent still INHERITS
+  # it from the interactive shell that launched it, and a `doctor` run that misses
+  # it degrades to NOT-OBSERVABLE rather than reporting a false OK, which is the
+  # safe direction for a check whose whole job is to notice a writable mirror.
+  CAIRN_MIRROR_ROOT = "${homePath}/.claude/analyze-service-index";
 }
 # Playwright on NixOS: point it at the nixpkgs-patched browser bundle instead of
 # its own download (a generic-linux ELF that stub-ld refuses → exitCode=127 /

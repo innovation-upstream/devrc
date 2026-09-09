@@ -16,43 +16,63 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-🔴 **RANKS 5 AND 6 ARE BOTH CLOSED. Claims `audit-pr-ladder-5` and `-6` are RELEASED.** The
-ladder that began with #1185's unaudited fix round ran to termination and shipped as
-**devrc #1342, squash `08ef1d5a`** (+707/−29 across `scripts/audit-dispatch.py`,
-`scripts/tests/test_audit_dispatch.py`, `scripts/tests/mutants-audit-dispatch.py`).
+🔴 **RANKS 7 AND 11 ARE BOTH CLOSED AND MERGED.** Claims `audit-pr-ladder-7` and `-11` released.
 
-- **Rank 5** — #1185's fix round `90202ce5..2eaa3c62` was audited (round 2): **3 🟡 + 4 🟢, no
-  🔴**. Its closing condition ("a round returns no findings, or a named reader dismisses it in
-  writing") was met by way of rank 6 landing the fixes and a further round clearing them.
-- **Rank 6** — #1342 fixed all three 🟡. Then a BLIND first-full audit of #1342 found **2 more
-  🟡**, both measured; those were fixed too, and the fix round after them changed **zero
-  payload lines**.
-- **Gate on the MERGED tree at base `3f8c81bb`, all four legs, and `origin/main` had not moved
-  when they finished:** dev-host pytest 22,003 collected / 22,000 passed / 3 skipped / **0
-  failed** (floor 21,196) · dev-host node 1,449/0 · `nix` pytests 22,003/0, 0 timeout panics ·
-  `nix` nodetests 1,449/0, 0 timeout panics. `nix` derivations built ONE AT A TIME.
-- **Verified by CONTENT, never ancestry** (a squash makes the head a permanent non-ancestor):
-  `shell_code`/`last_command` both present on `origin/main`, both `r19/*` FIX_MATRIX rows
-  present. Base clone re-synced to `08ef1d5a`.
+- **Rank 11** — `#1395` → squash **`63ad792d`**. #1342's control assertions are REACHABLE and
+  there are **EIGHT**, not six (5 `assert` statements; a 4-iteration loop is four controls).
+  Reachability was the live risk: they sit behind an early `return` and a `len(blocks) == 1`
+  assert, either of which would have made all eight vacuous on a green suite. Each was isolated
+  by mutating the PARSER — never the assertion, which proves only that the assertion exists —
+  so exactly one control breaks and fails FIRST. All eight killed carrying their own message.
+  Landed as `TESTLIB_ROWS` in `scripts/tests/mutants-audit-dispatch.py`.
+- **Rank 7** — `#1396` → squash **`e9b665bd`**. `scripts/testlib/**` is **SCAFFOLDING**, PAYLOAD
+  only when the PR's stated deliverable is that module's behaviour, **decided once at round 1**.
+  Tie-breaker shipped as the **REVERT TEST**. Rule in the skill body, evidence + worked case in
+  `claude/skills/audit-pr/reference/round-ladder-evidence.md`.
+- **Verified by CONTENT, never ancestry** (a squash makes the head a permanent non-ancestor —
+  `merge-base --is-ancestor` returns false and that is expected): on `origin/main`,
+  `TESTLIB_ROWS` ×7, the `T9` control row, `*mod.TESTLIB_ROWS` in `_known_mutant_ids`,
+  `DECIDE ONCE`, `ONE NUMBER, ONE NAME`, and the reference section all present.
+- **Gate, four legs, on the MERGED tree at base `b508b684`** (integration branch `integ/r7-r11`
+  carrying BOTH PRs, because disjoint files are not safety): dev-host pytest
+  `21020/21022 failed=0` floor 20342 · dev-host node `1449/1449` floor 1367 · `nix` pytests
+  `RESULT: PASS`, **0** `panic: test timed out`, **0** target FAIL rows · `nix` nodetests
+  `RESULT: PASS`. `nix` derivations built ONE AT A TIME.
 
-**What actually shipped, and the ratio worth remembering:** the PR's payload — the brief text
-`audit-dispatch.py` emits — is **~13 of 707 lines**. Everything else is the apparatus proving
-it correct. Nine rounds across three PRs produced roughly a dozen lines of corrected prose.
+**IN FLIGHT — the only thing this session did not land:**
+- 🔴 **The queue-update PR is NOT OPEN yet.** Commit **`9e6c48bb`** (one file,
+  `claudedocs/handoff-audit-pr-ladder.md`, +41/−4) is pushed on branch
+  **`docs/handoff-r7-r11-closed`**, worktree `/home/zach/workspace/devrc-r7-queue`. Its gate run
+  was still executing at session end. **Open the PR and merge it** — until then the ranked list
+  on `main` still shows ranks 7 and 11 as OPEN, which is the exact duplicate-work hazard this
+  doc records as the most-skipped step.
 
 **Carried forward (this section REPLACES, so these live here until they stop being true):**
+- 🔴 **The base clone `~/workspace/devrc` is BEHIND and CANNOT fast-forward.** `merge --ff-only`
+  refuses because the tree holds **untracked** `nix/system/apply-nebula-relay.sh` and
+  `check-nebula-relays.sh` that `#1272`/`01956bf0` has since landed upstream. Measured before
+  touching anything: both local copies are strictly SMALLER than the merged ones (205 vs 480,
+  317 vs 360 lines) with older mtimes, and upstream is a structural superset — stale earlier
+  drafts, not newer WIP. **Preserved byte-exact to
+  `~/workspace/.wip-preserve-nebula-basclone-2026-09-08/` and deliberately NOT deleted** (another
+  session's tree). To unblock: `rm` those two paths, then `git -C ~/workspace/devrc merge
+  --ff-only origin/main`.
 - **Preserved WIP from earlier sessions, still untouched — do not delete without reading:**
   `~/workspace/.wip-preserve-discord-embed-2026-08-28/` and
   `~/workspace/.wip-preserve-memory-detail-2026-08-30/`.
-- **The effort's original five PRs, merged and content-verified** (never by ancestry):
-  `#1153` → `018e5761` · `#1157` → `3e4c447f` · `#1178` → `0aa90f20` · `#1185` → `76d20386` ·
-  `#1191` → `a4529101`. Then `#1342` → `08ef1d5a`.
-- ⚠ **Fleet parity was last verified at `a4529101` (2026-09-01) and is STALE** — `main` has
-  moved many times since (`08ef1d5a` at this writing). Re-run `scripts/drift-check.sh`; do not
-  quote the old rc 0. **Neither #1316 nor #1342 has been shipped to either host** — both are
-  `claudedocs`/`scripts` changes that `home-manager` does not deploy, but `ship.sh` has not run.
-- ⚠ **Worktree count keeps climbing: 144 registered (2026-09-06), none prunable**, and an
-  external process has now run a real `git worktree remove` against **two** live agents
-  mid-run. Still unowned, still no checkable closing condition.
+- **The effort's PRs, merged and content-verified** (never by ancestry): `#1153` → `018e5761` ·
+  `#1157` → `3e4c447f` · `#1178` → `0aa90f20` · `#1185` → `76d20386` · `#1191` → `a4529101` ·
+  `#1342` → `08ef1d5a` · `#1395` → `63ad792d` · `#1396` → `e9b665bd`.
+- ⚠ **Fleet parity is STALE — rank 12, still open and now wider.** Last verified at `a4529101`
+  (2026-09-01). `#1316`, `#1342`, `#1395` and `#1396` have none of them been shipped.
+- ⚠ **Worktree count still climbing and still unowned.** This session added five
+  (`devrc-r11-controls`, `devrc-r7-testlib`, `devrc-integ`, `devrc-basectl`, `devrc-r7-queue`)
+  against the ~144 already registered; `basectl`/`mergecheck`/`leakctl` were removed as used.
+  **Remove the rest once the queue PR merges.**
+- **No `clawgate-task:` field recorded.** `clawgate_handoff.sh resolve` returned **rc 5**
+  (nothing resolved) with its positive control PASSING — the board is reachable and the token is
+  accepted, so the 0 is a real reading. Per the tool that is NOT proof this session's id is
+  right: an unknown id also answers 200 with an empty array.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -152,10 +172,16 @@ retained as DONE markers; do not re-claim them.
    The fix round before the merge changed ZERO payload lines, so one more round would have
    fired the attribution gate.
    forcing: none
-7. **Decide the `scripts/testlib/**` payload-vs-scaffolding classification and write it into
-   `claude/skills/audit-pr/reference/round-ladder-evidence.md`.** It is the whole of the #1132
-   three-way disagreement, and #1132's own ladder called it BOTH WAYS one round apart.
-   *Closes when* the reference file states the call with its reason.
+7. **DONE (2026-09-08) — the call is SCAFFOLDING, decided once at round 1, by the REVERT TEST.**
+   `#1396` → squash **`e9b665bd`**. The reference file states the call, its reason, the worked
+   case (`nix_units.py` +225 — revert it and all 15 corrected claims still ship) and the named
+   exception (a testlib scanner that IS a repo gate, on a PR whose deliverable is that gate); the
+   rule itself is in the skill body, where rules live. Claim `audit-pr-ladder-7` RELEASED.
+   ⚠ **A finding fell out that is NOT about testlib and is worth more than the call itself:**
+   #1132's ledger printed TWO differently-named numbers ("payload lines" / "executable payload"),
+   so its rounds read as zero *or* non-zero at will — the class never had to flip for the gate to
+   be disarmed. Shipped as **ONE NUMBER, ONE NAME**. The churn for #1132's rounds 6 and 7 was
+   deliberately NOT recomputed, so nothing claims that stop was wrong.
    forcing: none
 8. **Churn-measure the ladders OUTSIDE devrc** — `homelab-talos`, `civit-datapacket-talos`,
    `vetr`, `auditloop`, `civitai-gpu-fleet`, `naida-ai`. #1316's waste audit was devrc-only
@@ -819,6 +845,87 @@ retained as DONE markers; do not re-claim them.
   distinguish a reachable control from one sitting behind an early `return`. The mutation has to
   land on the PARSER, arranged so exactly one control's claim breaks and it is the FIRST to
   fail; the control's own message is then the evidence.
+
+- 🔴 **THE BASE MOVING IS WHAT FOUND THE TWO THINGS A FILE-OVERLAP CHECK COULD NOT.** Gating ranks
+  7+11 took three bases in one session (`57319960` → `65d8bfba` → `b508b684`, then `c59752b8`
+  before the merge). Re-running because the base moved — not because a file overlapped — is what
+  surfaced (a) `94f82796`, which FIXED the `failed=7` I had spent six readings characterising as
+  an inherited red, and (b) open PR #1050 editing the SAME `audit-pr/SKILL.md` my rank-7 change
+  edits. Neither was findable from my own diff. ⚠ **And the treadmill is real**: `main` moved
+  again between the last green and the merge, so the honest close was to gate at a NAMED base,
+  state the delta, merge, and then gate real `main` — not to chase a moving tip forever.
+- 🔴 **SIX READINGS OF AN INHERITED RED, AND THE ANSWER WAS THAT SOMEONE ELSE FIXED IT.** The
+  seven failures reproduced identically on four trees (rank-11 alone dev-host + sandbox,
+  integration dev-host + sandbox) AND on a pristine detached worktree at the unmodified base —
+  which is exactly the control that made "not mine" checkable rather than asserted, and it was
+  worth running. But the *resolution* came from re-fetching, not from more measurement of my own
+  tree. **When a red reproduces at an unmodified base, the next move is to look upstream for a
+  fix in flight, not to characterise it further.** #1389 already had it in CI with a
+  main-without-their-commit control.
+- 🔴 **A `--ff-only` BASE-CLONE SYNC THAT REFUSES IS A FINDING, NOT AN OBSTACLE — and the tell was
+  UNTRACKED files, not a diverged branch.** `~/workspace/devrc` refused to fast-forward because it
+  held **untracked** `nix/system/apply-nebula-relay.sh` and `check-nebula-relays.sh` that
+  `#1272`/`01956bf0` had just landed upstream. Measured before touching anything: both local
+  copies are strictly SMALLER than the merged ones (205 vs 480, 317 vs 360 lines) with older
+  mtimes, and upstream is a structural superset — stale earlier drafts, not newer WIP. **Preserved
+  byte-exact to `~/workspace/.wip-preserve-nebula-basclone-2026-09-08/` and NOT deleted**; the
+  base clone is left 6 commits behind rather than removing another session's files unilaterally.
+  The generalisable half: `--ff-only` refusing on *untracked* paths means upstream now ships a file
+  someone was drafting locally — compare the two before assuming either is the good one.
+- ⚠ **A PR-body trailer appended after the body is already written lands MID-DOCUMENT.** Appending
+  a gate table to a body file that already ended in the `🤖 Generated with` trailer put the
+  trailer in the middle. Caught before `gh pr create`; noted because the same shape applies to any
+  append onto a file with a footer.
+
+- 🔴 **THE BASE MOVED FOUR TIMES DURING ONE GATE CYCLE, AND EVERY SINGLE RED THIS SESSION WAS
+  EXPLAINED BY IT — NOT ONE WAS MINE.** Bases: `39c31521` → `57319960` → `65d8bfba` →
+  `b508b684` → `c59752b8` → `27d5028d` → `03d7e0ad`. Three separate reds, three upstream causes:
+  (1) `failed=7` from nixpkgs drift (`age-keygen` no longer echoing its input, `opencode`
+  1.18.29 vs pins at 1.18.21) — fixed upstream by `94f82796` **while I was measuring it**;
+  (2) a 3600s TIMEOUT; (3) a content-gate failure on **another session's** file. **The rule that
+  worked every time was the same one: re-run because the BASE MOVED, not because a file
+  overlapped.** It is also what surfaced open PR `#1050` editing the same `audit-pr/SKILL.md`
+  this session's rank-7 change edits — invisible to any diff-based check.
+- 🔴 **SIX READINGS OF AN INHERITED RED, AND THE ANSWER WAS THAT SOMEONE ELSE HAD FIXED IT.**
+  The seven failures reproduced identically on four trees (rank-11 alone dev-host + sandbox,
+  integration dev-host + sandbox) AND on a **pristine detached worktree at the unmodified base** —
+  that control is what made "not mine" checkable rather than asserted, and it was worth running.
+  But the RESOLUTION came from re-fetching, not from more measurement of my own tree.
+  **When a red reproduces at an unmodified base, look upstream for a fix in flight before
+  characterising it further.** `#1389` already had it in CI with a main-without-their-commit
+  control.
+- 🔴 **A 3600s TIMEOUT IS NOT AN ASSERTION FAILURE, AND THE DISCRIMINATOR IS THE TARGET'S OWN
+  WALL TIME.** The gate died at its budget stalled on
+  `scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py`. That target passes **alone
+  in 49.94s**, and in **67.18s** under the runner's EXACT plugin set and xdist args
+  (`-p testlib.{nolaunch,spool,gitenv,nogit}_plugin -n 8 --dist loadfile`) — reproducing the
+  runner's invocation, not just the test file, is what made the second number worth anything.
+  ~50× against two clean isolated runs is the load signature; the re-run completed. ⚠ **Two
+  passing isolated runs are NOT proof the full suite completes** — the re-run is what proved it,
+  and it is also what surfaced the next finding.
+- 🔴 **A CLIENT SUBDOMAIN REACHED THIS PUBLIC REPO, THE CONTENT GATE CAUGHT IT, AND THE MERGE
+  HAPPENED ANYWAY.** `test_no_client_hostnames.py` fired on
+  `claudedocs/handoff-civitai-app-fleet.md` (landed by `6d488a1b`, another session). Already
+  redacted on current `origin/main` — verified two ways: the pattern is gone from
+  `git show origin/main:<path>`, and the gate passes **18/18** on a pristine `origin/main`
+  worktree. 🔴 **But redacting at HEAD does not unpublish it:** CLAUDE.md states all four content
+  gates read `git ls-files` and are blind to history, and this repo's history is public. **With
+  branch protection declared off, a content gate that fires is a NOTIFICATION, not a barrier.**
+  Whether the history needs anything beyond the HEAD fix belongs to that doc's owner —
+  `SECRETS.md` → "Dead credentials in reachable history" is the procedure.
+- 🔴 **`--ff-only` REFUSING ON *UNTRACKED* PATHS IS A FINDING, NOT AN OBSTACLE.** The base clone
+  could not sync because upstream had just landed files someone was drafting locally. **Compare
+  the two before assuming either is the good one** — measured here as strictly smaller + older
+  mtimes + upstream a structural superset ⇒ stale drafts. Preserve with `cp -a`, never delete
+  another session's tree, and report the blockage rather than "fixing" it.
+- ⚠ **Appending to a PR-body file that already ends in a trailer puts the trailer MID-DOCUMENT.**
+  Caught before `gh pr create`. Applies to any append onto a file with a footer.
+- 🔴 **A MERGE COMMIT'S `--stat` SHOWS THE OTHER SIDE'S FILES, WHICH READS AS "MY COMMIT TOUCHED
+  THIS".** `git show --stat HEAD` on a merge listed a file from another session's commit, under a
+  label saying it was mine. In a repo with shared checkouts — where this doc already records that
+  a wrong-branch commit is the SILENT failure — the right response is to stop and read
+  `git log --no-merges <base>..HEAD` rather than explain the stat away. It confirmed one
+  non-merge commit, mine, one file.
 
 ## How to verify
 ```bash

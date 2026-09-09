@@ -48,6 +48,7 @@ civitai_block = _load("i3status-civitai", "i3status_civitai")
 media_block = _load("i3status-media", "i3status_media")
 airvpn_block = _load("i3status-airvpn", "i3status_airvpn")
 telemetry_block = _load("i3status-telemetry", "i3status_telemetry")
+runaways_block = _load("i3status-runaways", "i3status_runaways")
 # The ONE definition of "this cache is too old to present as a measurement",
 # which every block above loads as a co-located sibling. A real `.py`, so it
 # imports by path like any module — the blocks are extensionless and cannot.
@@ -589,6 +590,7 @@ BLOCKS = [
     ("mail", mail_block, "mail", "Warning"),
     ("alerts", alerts_block, None, "Critical"),
     ("civitai", civitai_block, None, "Critical"),
+    ("runaways", runaways_block, "cogs", "Warning"),
 ]
 
 
@@ -679,6 +681,7 @@ ALL_BLOCKS = [
     ("media", media_block),
     ("airvpn", airvpn_block),
     ("telemetry", telemetry_block),
+    ("runaways", runaways_block),
 ]
 
 #: The nf-md-alert triangle the two alert blocks prepend. A LITERAL codepoint,
@@ -710,6 +713,8 @@ UNMEASURED_PILL = {
     "airvpn": {"icon": "net_vpn", "text": "", "short_text": "",
                "state": "Warning"},
     "telemetry": {"text": "tlm ?", "short_text": "tlm ?", "state": "Warning"},
+    "runaways": {"icon": "cogs", "text": "?", "short_text": "?",
+                 "state": "Warning"},
 }
 
 #: 🔴 What each block renders for a MEASURED, CURRENT, entirely quiet reading.
@@ -724,6 +729,7 @@ MEASURED_ALL_CLEAR_PILL = {
     "airvpn": {"icon": "net_vpn", "text": "", "short_text": "",
                "state": "Idle"},                      # tunnel deliberately off
     "telemetry": {"text": "", "state": "Idle"},
+    "runaways": {"text": "", "state": "Idle"},
 }
 
 
@@ -995,7 +1001,7 @@ BLOCK_SOURCE_FILES = [
     ("clawgate", "i3status-clawgate"), ("mail", "i3status-mail"),
     ("alerts", "i3status-alerts"), ("civitai", "i3status-civitai"),
     ("media", "i3status-media"), ("airvpn", "i3status-airvpn"),
-    ("telemetry", "i3status-telemetry"),
+    ("telemetry", "i3status-telemetry"), ("runaways", "i3status-runaways"),
 ]
 assert [n for n, _ in BLOCK_SOURCE_FILES] == [n for n, _ in ALL_BLOCKS]
 
@@ -1815,6 +1821,10 @@ ALARM_CACHES = {
         {"count": 3, "state": "Critical"},
         {"text": "tlm 3", "short_text": "tlm 3", "state": "Critical"},
         {"text": "tlm 3?", "short_text": "tlm 3?", "state": "Critical"}),
+    "runaways": (
+        {"count": 3, "state": "Warning", "processes": []},
+        {"icon": "cogs", "text": "3", "short_text": "3", "state": "Warning"},
+        {"icon": "cogs", "text": "3?", "short_text": "3?", "state": "Warning"}),
 }
 assert sorted(ALARM_CACHES) == sorted(n for n, _ in ALL_BLOCKS)
 
@@ -1983,6 +1993,7 @@ BLOCK_SCRIPTS = [
     ("i3status-media", "media.json", "media"),
     ("i3status-airvpn", "airvpn.json", "airvpn"),
     ("i3status-telemetry", "telemetry.json", "telemetry"),
+    ("i3status-runaways", "runaways.json", "runaways"),
 ]
 # 🔴 Pinned two-way against the block registry, so a block added to one and not
 # the other is a failure rather than a silent hole. Both lists are hand-written
@@ -2954,6 +2965,152 @@ def test_dispatch_edge_toast_NEVER_raises(_never_reach_the_desktop):
     assert seen == []
 
 
+#: A `syshealth --json` report, trimmed to the fields `parse_runaways` reads.
+#: Values are pairwise distinct AND distinct from every constant the assertions
+#: name, so a mutant that hardcodes a literal cannot pass by coincidence.
+def _syshealth_report(*rows):
+    return {"runaways": list(rows), "verdict": {"exit_code": 1}}
+
+
+def _runaway_row(pid, pcpu, args):
+    return {"pid": pid, "pcpu": pcpu, "args": args, "age_sec": 1234,
+            "user": "zach", "ppid": 7, "cwd": "/tmp", "critical": False}
+
+
+def test_parse_runaways_renders_syshealths_verdict_and_does_not_re_derive_it():
+    """The payload is syshealth's `runaways` list, mapped — no predicate here.
+
+    🔴 Watched RED against the previous implementation: it re-derived the set
+    from `ps` and dropped every `comm == "python3"`, so the second row below —
+    the shape of this box's own collector, router and agent scripts — was
+    invisible. This asserts the row SURVIVES, which is the half that was broken.
+    """
+    out = poll.parse_runaways(_syshealth_report(
+        _runaway_row(4242, 97.0, "node /srv/thing.js"),
+        _runaway_row(4243, 88.25, "python3 /home/zach/collector.py")))
+    assert out["count"] == 2, out
+    assert [p["pid"] for p in out["processes"]] == [4242, 4243]   # sorted by cpu desc
+    assert out["processes"][1]["cmd"] == "python3 /home/zach/collector.py"
+    assert out["state"] == "Warning"
+    assert "error" not in out
+    # `detail` is the toast BODY, so the top offender must reach it.
+    assert "node /srv/thing.js" in out["detail"] and "97" in out["detail"]
+
+
+def test_parse_runaways_reports_a_BROKEN_detector_as_UNMEASURED_not_as_zero():
+    """🔴 The failure a count cannot express. A detector that could not run and
+    one that ran and found nothing both have `count == 0`; only the `error` key
+    tells them apart, and `bar_freshness.is_marker` reads it to render the
+    visible `?` pill. Without this the bar would show a confident empty block
+    while the source was dead."""
+    for broken in (None, [], {}, {"runaways": "not-a-list"}, {"verdict": {}}):
+        out = poll.parse_runaways(broken)
+        assert out["count"] == 0, broken
+        assert out["error"], "a broken detector rendered as a clean zero: %r" % (broken,)
+        assert freshness.is_marker(out), broken
+    # Control: a REAL empty reading is NOT a marker — it is a measured zero.
+    quiet = poll.parse_runaways(_syshealth_report())
+    assert quiet["count"] == 0 and not quiet.get("error")
+    assert not freshness.is_marker(quiet)
+
+
+def test_new_count_counts_only_pids_the_PREVIOUS_poll_did_not_have():
+    """🔴 The toast gates on this, not on `count` — see the `runaways` spec.
+
+    A `nix build`'s cc1plus legitimately holds 100% for longer than the age
+    gate, so `count` sits pinned and a level latch would never re-arm. Watched
+    RED with `new_count` keyed to `count`: the third case below returned 2.
+    """
+    rows = (_runaway_row(4242, 97.5, "cc1plus"),
+            _runaway_row(4243, 88.25, "node x.js"))
+    report = _syshealth_report(*rows)
+    # nothing seen before -> both are new
+    assert poll.parse_runaways(report, prev_pids=[])["new_count"] == 2
+    # both already announced -> none new, so the latch re-arms
+    assert poll.parse_runaways(report, prev_pids=[4242, 4243])["new_count"] == 0
+    # the pinned one persists, a genuinely new one appears -> exactly ONE
+    assert poll.parse_runaways(report, prev_pids=[4242])["new_count"] == 1
+    # unparseable previous pids are ignored, never counted as absent
+    assert poll.parse_runaways(report, prev_pids=[None, "x", 4242])["new_count"] == 1
+
+
+def test_the_runaways_toast_gates_on_new_count_and_opens_what_the_click_opens():
+    """Pins BOTH halves of the spec, because each was wrong once: it gated on
+    `count` (so a second runaway never toasted) and its action opened Grafana,
+    which has no view of local processes."""
+    spec = poll._toast_specs()["runaways"]
+    assert spec["count_key"] == "new_count", spec
+    assert "grafana" not in spec["action"].lower(), spec
+    # The dispatcher must actually READ that key — a spelled-but-unread
+    # count_key is the defect class this whole change is about.
+    fired = []
+    got = poll.evaluate_edge_toast(
+        "runaways", {"count": 9, "new_count": 0, "detail": "d"}, spec,
+        fire=lambda *a, **k: fired.append(a), read=lambda n: False,
+        write=lambda n, v: None)
+    assert got == (False, False), got
+    assert fired == [], "toasted on count while new_count was 0: %r" % (fired,)
+
+
+def test_the_toast_action_and_the_CLICK_are_the_same_shape():
+    """🔴 Pins a RELATIONSHIP across TWO FILES, because the rule is spelled twice.
+
+    `_syshealth_action()` (Python) and `syshealthCmd` (Nix) cannot be collapsed
+    into one source — one carries store interpolations — so nothing but a test
+    can hold them together, and they HAD already drifted: the toast opened a
+    bare `alacritty -e syshealth`, which closes the instant syshealth prints and
+    exits (~0.16 s), while the click wrapped it in a `read -n 1` hold.
+
+    🔴 Watched RED against that drift, and against the guard this REPLACES.
+    The old assertion was `"syshealth" in spec["action"]` — a check on a WORD,
+    walkable by any string containing it. MEASURED: with the action mutated to
+    `xdg-open http://syshealth.invalid/not-a-terminal` the whole suite stayed
+    at 568 passed, MUTANT SURVIVED. It asserted a relationship its body never
+    inspected: it never opened `graphical.nix` at all. This reads both sides.
+    """
+    action = poll._toast_specs()["runaways"]["action"]
+    nix = (Path(__file__).resolve().parents[2] / "nix" / "graphical.nix").read_text()
+    m = re.search(r'^\s*syshealthCmd\s*=\s*"(?P<cmd>.*)";\s*$', nix, re.M)
+    assert m, "syshealthCmd is gone or reshaped in graphical.nix — repin this test"
+    click = m.group("cmd")
+    # The three properties that make either one WORK, asserted on BOTH sides.
+    for label, cmd in (("toast action", action), ("click", click)):
+        assert "syshealth" in cmd, (label, cmd)
+        assert cmd.lstrip().startswith("alacritty"), (
+            "%s must run in a TERMINAL — syshealth is a TUI, and i3status-rust "
+            "spawns a click with no controlling tty: %r" % (label, cmd))
+        assert "read -n 1" in cmd, (
+            "%s must HOLD THE WINDOW OPEN — syshealth prints and exits in ~0.16s, "
+            "so `alacritty -e syshealth` flashes and vanishes, which is "
+            "indistinguishable from the click doing nothing: %r" % (label, cmd))
+
+
+def test_fetch_runaways_IGNORES_syshealths_EXIT_CODE(monkeypatch, tmp_path):
+    """🔴 syshealth folds every section into one status, so it exits 1 whenever
+    ANYTHING warns — load, zombies, hogs — while `runaways` is empty. MEASURED
+    on this host: `runaways: []` at rc 1. A poller that gated on the status
+    would fail every such poll and pin the `?` pill forever, looking exactly
+    like a working freshness guard. This pins that the code never consults it.
+    """
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    payload = json.dumps(_syshealth_report(_runaway_row(4242, 99.0, "cc1plus")))
+
+    def fake_run(argv, **kw):
+        return subprocess.CompletedProcess(argv, 1, stdout=payload, stderr="")
+
+    monkeypatch.setattr(poll.subprocess, "run", fake_run)
+    out = poll.fetch_runaways()
+    assert out["count"] == 1, out
+    assert not out.get("error"), out
+    # Control: the SAME rc with unreadable stdout IS a failure, so the test is
+    # not merely asserting that nothing can ever fail.
+    monkeypatch.setattr(poll.subprocess, "run",
+                        lambda argv, **kw: subprocess.CompletedProcess(
+                            argv, 1, stdout="not json", stderr=""))
+    broken = poll.fetch_runaways()
+    assert broken["count"] == 0 and broken["error"], broken
+
+
 def test_the_SOURCES_table_is_a_LEDGER_of_every_polled_source():
     """🔴 A ledger, pinned as a LITERAL, failing when the set GROWS or SHRINKS.
 
@@ -2969,7 +3126,7 @@ def test_the_SOURCES_table_is_a_LEDGER_of_every_polled_source():
     """
     names = [n for n, _fn in poll.SOURCES]
     assert names == ["clawgate", "mail", "alerts", "civitai", "media", "airvpn",
-                     "telemetry"], names
+                     "telemetry", "runaways"], names
     assert len(names) == len(set(names)), "a source is polled twice: %s" % names
     for _n, fn in poll.SOURCES:
         assert callable(fn)
@@ -3367,12 +3524,30 @@ _HOME_FILE = re.compile(
 #: scriptsDir-backed custom blocks, MEASURED. The floor exists so a regex that
 #: silently stops matching fails loudly instead of vacuously passing. Raise it
 #: when you add a block; the failure message prints the number it saw.
-_EXPECTED_SCRIPT_BLOCKS = 12
+#: 2026-09-08: 12 -> 13 with `fansBlock`. Raised per the instruction above, and
+#: it was NOT cosmetic: at 12 the regex regression this floor exists to catch
+#: (`^  };` for `^  }`) yields exactly the un-raised number, so the assertion
+#: credited with catching it passes and the suite dies elsewhere, naming the
+#: wrong block.
+#: 🔴 2026-09-08, MERGE: 13 -> 14 with `runawaysBlock`. Both sides of this merge
+#: raised this counter by one, for DIFFERENT blocks — `fansBlock` on main,
+#: `runawaysBlock` here — so the merged tree carries BOTH and neither side's 13
+#: is right. A textually clean merge produced a number that was wrong for the
+#: tree it created. This value was re-MEASURED from the merged tree, never
+#: derived by adding the two sides.
+_EXPECTED_SCRIPT_BLOCKS = 14
 #: ALL block definitions, MEASURED — including the ones with no scriptsDir
 #: command. Pins the `^  }` terminator: with `^  };`, `temperatureBlock`'s
 #: `} // (if isLaptop …)` idiom swallowed `gpuBlock` whole and only 19 were
 #: found. Nothing else notices, because the swallowed block has no command.
-_EXPECTED_BLOCK_DEFS = 21
+#: 2026-09-08: 21 -> 22 with `fansBlock`. MEASURED that the un-raised value was
+#: the live hole: reintroducing the `^  };` terminator swallows `fansBlock` into
+#: `temperatureBlock` and yields 21 — the old floor exactly — so this assertion
+#: passed while the detector it names was blind.
+#: 🔴 2026-09-08, MERGE: 22 -> 23 with `runawaysBlock`, same two-sided raise as
+#: the counter above and the same hazard — re-MEASURED from the merged tree,
+#: not computed from the two sides.
+_EXPECTED_BLOCK_DEFS = 23
 #: Ungated/gated split, MEASURED. Guards `_block_gates` itself: if gate parsing
 #: collapses to all-True or all-False (a stray `isLaptop` in a comment, the list
 #: reflowed onto one line), `checked` stays correct while the gate assertion
@@ -3444,6 +3619,20 @@ def _block_gates(nix):
     return gates
 
 
+def _block_is_workbench_only(nix, block):
+    """True if `block` reaches the bar only on the workbench (`!isLaptop`).
+
+    Reads the SEGMENT of the `blocks` list the block appears in, so the answer
+    comes from the same text `_block_gates` parses rather than from a second,
+    drifting notion of what "gated" means.
+    """
+    body = nix.split("  blocks =", 1)[1].split("\nin\n", 1)[0]
+    for segment in _split_top_level(_strip_nix_comments(body)):
+        if re.search(r"\b%s\b" % re.escape(block), segment):
+            return "!isLaptop" in segment
+    return False
+
+
 def test_every_custom_block_script_is_DEPLOYED_UNDER_A_COMPATIBLE_GATE():
     """🔴 A block and its script are declared in two places, and nothing made
     them agree. `loadBlock` shipped in the UNCONDITIONAL half of `blocks` while
@@ -3494,6 +3683,35 @@ def test_every_custom_block_script_is_DEPLOYED_UNDER_A_COMPATIBLE_GATE():
                 "%s reaches the bar on EVERY host but %s is deployed under "
                 "`%s` — the ungated hosts get a block whose command is absent"
                 % (block, script, deployed[script].strip()))
+        elif not gates.get(block):
+            # 🔴 THE OTHER DIRECTION, and it was uncovered. The check above
+            # fires only when the BLOCK is ungated, so a GATED block whose
+            # script carries a DIFFERENT gate was never compared. MEASURED on
+            # `fansBlock`: rewriting its `home.file` to `lib.mkIf isLaptop` —
+            # the workbench renders the block while the script deploys only to
+            # the laptop — left the suite 529/529 GREEN, while `nix/graphical.nix`
+            # carried a 🔴 comment asserting the pairing was protected.
+            #
+            # Compare the POLARITY, not the text: a gated block needs a script
+            # gated the SAME way. `_block_gates` only knows ungated-vs-gated, and
+            # every gate in this file is spelled with `isLaptop`, so that is what
+            # is compared — a richer gate vocabulary needs a richer parse, and
+            # the floors above are what stop this going quietly vacuous.
+            dep = deployed[script]
+            # 🔴 A script deployed MORE WIDELY than its block is NOT a finding,
+            # and asserting it was the first version of this check. It flagged
+            # `rigcontrolBlock` and `claudeRunsBlock` — both long-standing,
+            # both deliberate — because a laptop that holds a script it never
+            # runs has a spare symlink and nothing else. Only the reverse
+            # breaks anything, and a guard that reddens on main's existing,
+            # correct config is worse than no guard: everyone learns to click
+            # through it.
+            if "mkIf" in dep and (
+                    ("!isLaptop" in dep) != _block_is_workbench_only(nix, block)):
+                problems.append(
+                    "%s and its script %s are gated in OPPOSITE directions "
+                    "(`%s`) — one host renders the block while the other gets "
+                    "the script" % (block, script, dep.strip()))
 
     # Positive controls. Without these a regex that stops matching reports a
     # confident pass over nothing.
@@ -3517,8 +3735,11 @@ def test_every_custom_block_script_is_DEPLOYED_UNDER_A_COMPATIBLE_GATE():
 #: icon set. This is an ALLOWLIST, not documentation: adding an entry is the
 #: moment to check it is a real key, with
 #:   grep '^<name> *=' <i3status-rust>/share/icons/material-nf.toml
-#: The set has 76 keys; these 4 are all that this repo's blocks reference.
-_KNOWN_GOOD_ICONS = {"cogs", "mail", "net_vpn", "tasks", "net_down"}
+#: The set has 76 keys; these 6 are all that this repo's blocks reference.
+#: (`refresh` is the fans pill. material-nf has NO `fan` key — measured against
+#: the 0.36.1 set, whose 76 keys were listed in full — and `refresh`'s rotating
+#: arrows are the closest real one.)
+_KNOWN_GOOD_ICONS = {"cogs", "mail", "net_vpn", "tasks", "net_down", "refresh"}
 
 #: Two spellings, because the blocks use two. `^ICON… = "x"` is the module
 #: constant; `"icon": "x"` is the inline literal `i3status-media` and
