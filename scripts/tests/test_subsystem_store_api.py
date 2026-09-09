@@ -357,6 +357,45 @@ def store(tmp_path: Path) -> Iterator[Path]:
         yield root
 
 
+@pytest.fixture
+def sited_root(tmp_path: Path) -> Iterator[Path]:
+    """An EMPTY store root, sited off the contended disk. It does not exist yet.
+
+    🔴 THE SAME SITING AS `store` AND `scoped_store` ABOVE, FOR THE LONG TAIL
+    NEITHER OF THEM COVERS. devrc#1211 sited `store`; a later round sited
+    `scoped_store`; both times the tests that build their OWN root inline were
+    left on disk — 18 of them, spelled `tmp_path / "store"`, and one of those
+    (`TestARefusedWriteIsIndistinguishableFromAnAbsentOne`) is the class whose
+    positive control kept failing the gate on docs-only PRs. Fixing a predicate
+    at one call site of N is the error this whole module keeps re-learning, so
+    the remaining sites take their root from HERE rather than from a fourth copy
+    of the same idea.
+
+    🔴 A FIXTURE RATHER THAN AN INLINE `with`, AND THE REASON IS LIFETIME.
+    `store_siting.store_root` is a context manager because a tmpfs holder is not
+    pytest's to clean and tmpfs is RAM. Several of the migrated sites build the
+    root inside a HELPER whose return value — a path, or a pair of
+    `present()`/`absent()` closures — is used throughout the test body; a `with`
+    wrapped around the helper CALL would tear the store down before a single
+    assertion ran, and a `with` wrapped around each whole test body is 30 blocks
+    of re-indentation that a scripted conversion has already been reverted for
+    once. Taking the context manager as a fixture makes its lifetime the TEST's,
+    per site, with nothing to get wrong per site.
+
+    ⚠ ONE BEHAVIOUR DIFFERENCE FROM AN INLINE `with`, STATED RATHER THAN GLOSSED.
+    `store_root` skips its budget check when the body is already raising, so that
+    a budget violation cannot replace the error an author needs to read. pytest
+    does not throw a test's failure into a fixture generator, so on THIS path the
+    check runs even for a failing test. That is already true of `store` and
+    `scoped_store`, so it is the standing cost of the fixture idiom here rather
+    than something introduced by the migration — but it is a real difference and
+    a `StoreBudgetExceeded` reported alongside a failing test may not be the
+    thing that failed.
+    """
+    with store_siting.store_root(tmp_path) as root:
+        yield root
+
+
 # RFC 5737 TEST-NET-3, and three DISTINCT addresses: a test that used one
 # address for the client and the same one for the spoofed header could not tell
 # "keyed on CF-Connecting-IP" from "keyed on anything at all".
@@ -12480,10 +12519,15 @@ class TestRefusedIsIndistinguishableFromAbsent:
     test. See the module docstring's residual-leak note.
     """
 
-    def _phases(self, tmp_path: Path):
+    def _phases(self, root: Path):
         """Yields a builder for phase A (denied scope present) and phase B (it
-        never existed), both at ONE path so `  store: <root>` cannot differ."""
-        root = tmp_path / "store"
+        never existed), both at ONE path so `  store: <root>` cannot differ.
+
+        🔴 THE ROOT IS PASSED IN ALREADY SITED (`sited_root`), never built from
+        `tmp_path` here. The closures below outlive this call, so a `with` around
+        it would tear the store down before the caller used either of them —
+        which is why the siting is a fixture and not a block in this function.
+        """
 
         def present():
             if root.exists():
@@ -12515,9 +12559,9 @@ class TestRefusedIsIndistinguishableFromAbsent:
         return code, _comparable(headers), body
 
     def test_RECALL_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
-        root, present, absent = self._phases(tmp_path)
+        root, present, absent = self._phases(sited_root)
         present()
         refused = self._ask(root, ZACH, f"/api/v1/recall/{DENY_SCOPE}")
         absent()
@@ -12542,9 +12586,9 @@ class TestRefusedIsIndistinguishableFromAbsent:
     SEARCH_QUERY = f"/api/v1/search/{DENY_SCOPE}?q=drill+head+overheats"
 
     def test_SEARCH_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
-        root, present, absent = self._phases(tmp_path)
+        root, present, absent = self._phases(sited_root)
         present()
         refused = self._ask(root, ZACH, self.SEARCH_QUERY)
         absent()
@@ -12556,7 +12600,7 @@ class TestRefusedIsIndistinguishableFromAbsent:
         assert dict(refused[1])["x-store-status"] == "scope-absent"
 
     def test_POSITIVE_CONTROL_the_RECALL_comparison_CAN_see_the_difference(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 WITHOUT THIS, THE RECALL TEST ABOVE IS SATISFIED BY A SERVER THAT
         ANSWERS THE SAME BYTES TO EVERYTHING.
@@ -12566,7 +12610,7 @@ class TestRefusedIsIndistinguishableFromAbsent:
         pair did not differ, the equality above would be measuring the harness
         rather than the fix.
         """
-        root, present, absent = self._phases(tmp_path)
+        root, present, absent = self._phases(sited_root)
         present()
         seen = self._ask(root, GOOD_TOKEN, f"/api/v1/recall/{DENY_SCOPE}")
         absent()
@@ -12578,7 +12622,7 @@ class TestRefusedIsIndistinguishableFromAbsent:
         assert QUARTZ_NUANCE.encode() in seen[2]
 
     def test_POSITIVE_CONTROL_the_SEARCH_comparison_CAN_see_the_difference(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 THE SEARCH PATH HAD NO POSITIVE CONTROL AT ALL, and the recall one
         does not cover it: they are different routes, different renderers and
@@ -12592,7 +12636,7 @@ class TestRefusedIsIndistinguishableFromAbsent:
         an UNRESTRICTED token: present -> `search-hit` carrying the matched
         nuance, absent -> `scope-absent`. Both non-empty, and different.
         """
-        root, present, absent = self._phases(tmp_path)
+        root, present, absent = self._phases(sited_root)
         present()
         found = self._ask(root, GOOD_TOKEN, self.SEARCH_QUERY)
         absent()
@@ -12931,14 +12975,17 @@ class TestTheLoaderItselfTakesTheAllowlist:
     Neither half alone pins the loader.
     """
 
-    def _store(self, tmp_path: Path, *scope_dirs: str) -> Path:
+    def _store(self, root: Path, *scope_dirs: str) -> Path:
         """A store whose scope DIRECTORY NAMES are exactly as given.
 
         Spelled by hand rather than through `_build_store`, because one test
         below needs a directory whose name does NOT equal its own folded form
         and that fixture is the whole point of it.
+
+        🔴 `root` ARRIVES SITED (`sited_root`) and does not exist yet — the
+        `mkdir(parents=True)` below is unchanged, which is exactly the drop-in
+        contract `store_siting.store_root` documents.
         """
-        root = tmp_path / "store"
         for name in scope_dirs:
             (root / name).mkdir(parents=True)
             (root / name / f"{name}-entry.md").write_text(
@@ -12946,16 +12993,16 @@ class TestTheLoaderItselfTakesTheAllowlist:
             )
         return root
 
-    def test_POSITIVE_CONTROL_no_allowlist_loads_every_scope(self, tmp_path: Path):
+    def test_POSITIVE_CONTROL_no_allowlist_loads_every_scope(self, sited_root: Path):
         """Without this the three tests below are satisfied by a loader that
         returns an empty index for everything.
         """
-        root = self._store(tmp_path, ALLOW_SCOPE, DENY_SCOPE)
+        root = self._store(sited_root, ALLOW_SCOPE, DENY_SCOPE)
         index = api.rc.load_index(root, on_malformed="collect")
         assert set(index.scopes) == {ALLOW_SCOPE, DENY_SCOPE}
 
     def test_an_EMPTY_allowlist_registers_NO_scope_not_EVERY_scope(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 THE ASYMMETRY, PINNED AT THE LOADER TOO. `None` and `()` are both
         falsy, so a filter written `if allowed and …` treats "you may see
@@ -12966,12 +13013,12 @@ class TestTheLoaderItselfTakesTheAllowlist:
         entirely when measured through that door. Here there is nothing in the
         way.
         """
-        root = self._store(tmp_path, ALLOW_SCOPE, DENY_SCOPE)
+        root = self._store(sited_root, ALLOW_SCOPE, DENY_SCOPE)
         index = api.rc.load_index(root, on_malformed="collect", visible_scopes=())
         assert index.scopes == ()
         assert len(index) == 0
 
-    def test_a_denied_scopes_NAME_is_not_registered_either(self, tmp_path: Path):
+    def test_a_denied_scopes_NAME_is_not_registered_either(self, sited_root: Path):
         """🔴 SKIPPING THE READ IS NOT SKIPPING THE SCOPE. A filter placed one
         line too late still appends the directory name to `extra_scopes`, so the
         denied scope arrives on `index.scopes` — the `known_scopes` enumeration
@@ -12980,14 +13027,14 @@ class TestTheLoaderItselfTakesTheAllowlist:
 
         Invisible through `load_store`, which drops the key again on the way out.
         """
-        root = self._store(tmp_path, ALLOW_SCOPE, DENY_SCOPE)
+        root = self._store(sited_root, ALLOW_SCOPE, DENY_SCOPE)
         index = api.rc.load_index(
             root, on_malformed="collect", visible_scopes=(ALLOW_SCOPE,)
         )
         assert index.scopes == (ALLOW_SCOPE,)
 
     def test_the_DIRECTORY_NAME_is_FOLDED_before_it_is_compared(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 OVER-FILTERING, AND THE FIXTURE HAS TO REACH IT. Every other store
         in this file has directory names that are already their own folded form,
@@ -13002,7 +13049,7 @@ class TestTheLoaderItselfTakesTheAllowlist:
             "the fixture directory must NOT already equal its folded form, or "
             "this test measures nothing"
         )
-        root = self._store(tmp_path, raw_dir, DENY_SCOPE)
+        root = self._store(sited_root, raw_dir, DENY_SCOPE)
         index = api.rc.load_index(
             root, on_malformed="collect", visible_scopes=(ALLOW_SCOPE,)
         )
@@ -13047,9 +13094,10 @@ class TestUnreadableEntriesInDeniedScopes:
     describe it by the two `RESIDUAL LEDGER` guards beside it.
     """
 
-    def _store(self, tmp_path: Path, kind: str) -> Path:
+    def _store(self, root: Path, kind: str) -> Path:
+        # `root` arrives sited (`sited_root`); `_build_store` creates it.
         store = _build_store(
-            tmp_path / "store",
+            root,
             {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
         )
         _make_unreadable(store, DENY_SCOPE, kind)
@@ -13070,9 +13118,9 @@ class TestUnreadableEntriesInDeniedScopes:
 
     @pytest.mark.parametrize("kind", ["perm", "emacs"])
     def test_a_SCOPED_caller_is_unaffected_by_an_unreadable_DENIED_entry(
-        self, tmp_path: Path, kind: str
+        self, sited_root: Path, kind: str
     ):
-        store = self._store(tmp_path, kind)
+        store = self._store(sited_root, kind)
         _s, index = api.rc.load_store(
             store, verb="recalled", visible_scopes=(ALLOW_SCOPE,)
         )
@@ -13080,7 +13128,7 @@ class TestUnreadableEntriesInDeniedScopes:
         assert index.malformed == ()
 
     def test_POSITIVE_CONTROL_the_same_file_in_the_CALLERS_OWN_scope_still_RAISES(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 WITHOUT THIS THE TEST ABOVE IS SATISFIED BY A FIXTURE THAT CREATED
         NOTHING UNREADABLE. It also pins the half that must NOT change: the
@@ -13093,18 +13141,18 @@ class TestUnreadableEntriesInDeniedScopes:
         caller. Its own-scope behaviour is asserted below, as a collected
         malformed row.
         """
-        store = self._store(tmp_path, "perm")
+        store = self._store(sited_root, "perm")
         with pytest.raises(api.rc.EntryUnreadableError):
             api.rc.load_store(store, verb="recalled", visible_scopes=(DENY_SCOPE,))
 
     def test_the_BROKEN_LINK_in_the_CALLERS_OWN_scope_is_REPORTED_not_fatal(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """The other side of the guard: refusing an entry must not silently
         empty the scope that holds it. The caller who OWNS the hostile file
         still gets their good entry, and still gets told about the bad one.
         """
-        store = self._store(tmp_path, "emacs")
+        store = self._store(sited_root, "emacs")
         _s, index = api.rc.load_store(
             store, verb="recalled", visible_scopes=(DENY_SCOPE,)
         )
@@ -13113,7 +13161,7 @@ class TestUnreadableEntriesInDeniedScopes:
         assert [m.label for m in index.malformed] == [f"{DENY_SCOPE}/{EMACS_LOCK}"]
 
     def test_the_UNRESTRICTED_reading_of_a_BROKEN_LINK_no_longer_DIES(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 THE INVERSION. This test used to be
         `test_the_UNRESTRICTED_reading_is_UNCHANGED_and_that_is_the_residual`
@@ -13128,7 +13176,7 @@ class TestUnreadableEntriesInDeniedScopes:
         before `open()`, so the Emacs lock file costs its own entry and nothing
         else.
         """
-        store = self._store(tmp_path, "emacs")
+        store = self._store(sited_root, "emacs")
         _s, index = api.rc.load_store(store, verb="recalled")
         # The OTHER scope's content survived, which is the DoS half.
         assert set(index.scopes) == {ALLOW_SCOPE, DENY_SCOPE}
@@ -13140,7 +13188,7 @@ class TestUnreadableEntriesInDeniedScopes:
         assert "broken symlink" in index.malformed[0].reason
 
     def test_an_UNREADABLE_REGULAR_FILE_still_RAISES_and_THAT_is_the_residual(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 THE HALF THAT IS **NOT** CLOSED, kept as its own named test rather
         than left implied by the parametrize list this used to share.
@@ -13157,12 +13205,12 @@ class TestUnreadableEntriesInDeniedScopes:
         were quietly widened to refuse everything it could not read, this would
         go green-by-collapse and the four-state rule would be gone.
         """
-        store = self._store(tmp_path, "perm")
+        store = self._store(sited_root, "perm")
         with pytest.raises(api.rc.EntryUnreadableError):
             api.rc.load_store(store, verb="recalled")
 
     def test_the_503_body_NAMED_the_denied_scope_and_its_PATH_over_HTTP(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 THE DISCLOSURE ITSELF, DRIVEN THROUGH THE SERVER — the layer where
         it was a leak rather than an exception type.
@@ -13173,7 +13221,7 @@ class TestUnreadableEntriesInDeniedScopes:
         matter: the status is a denial of service he did not cause, and the body
         names a scope and a filename he is not allowed to know exist.
         """
-        store = self._store(tmp_path, "perm")
+        store = self._store(sited_root, "perm")
         with running(store, tokens=(ZACH,)) as (base, _):
             code, headers, body = fetch(
                 f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
@@ -13198,7 +13246,7 @@ class TestUnreadableEntriesInDeniedScopes:
         assert str(store / DENY_SCOPE / LOCKED_ENTRY) not in text
 
     def test_POSITIVE_CONTROL_a_LEGACY_token_DOES_still_get_the_503(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 THE FIXTURE MUST ACTUALLY PRODUCE AN UNREADABLE ENTRY. Without this
         the assertions above are a zero from a check that might see nothing — a
@@ -13208,7 +13256,7 @@ class TestUnreadableEntriesInDeniedScopes:
         It is also the honest record of the residual: unrestricted callers still
         get the 503, and still get the path in it.
         """
-        store = self._store(tmp_path, "perm")
+        store = self._store(sited_root, "perm")
         with running(store, tokens=(GOOD_TOKEN,)) as (base, _):
             code, headers, body = fetch(
                 f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
@@ -13219,7 +13267,7 @@ class TestUnreadableEntriesInDeniedScopes:
         assert LOCKED_ENTRY in text and DENY_SCOPE in text
 
     def test_a_FIFO_named_md_in_a_DENIED_scope_no_longer_HANGS_the_reader(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 THE MOST SERIOUS OF THE THREE, AND THE ONE A NORMAL TEST CANNOT
         ASSERT: a wedged thread produces no exception and no value, so there is
@@ -13247,7 +13295,7 @@ class TestUnreadableEntriesInDeniedScopes:
         `open()` of the fifo itself, which is the syscall in question rather
         than a proxy for it.
         """
-        store = self._store(tmp_path, "fifo")
+        store = self._store(sited_root, "fifo")
         probe = _load_store_probe(
             store, expr=f"None if sys.argv[1] == 'unrestricted' else ({ALLOW_SCOPE!r},)"
         )
@@ -13277,7 +13325,7 @@ class TestUnreadableEntriesInDeniedScopes:
         assert f"MALFORMED={DENY_SCOPE}/{LOCKED_ENTRY}\n" in unrestricted.stdout
 
     def test_a_SYMLINK_to_a_FIFO_no_longer_HANGS_and_the_DEADLINE_still_SEES_one(
-        self, tmp_path: Path
+        self, sited_root: Path, tmp_path: Path
     ):
         """🔴 THE SECOND INVERSION, AND THE PROBE'S OWN POSITIVE CONTROL, in one
         test — because the two have to move together.
@@ -13310,7 +13358,7 @@ class TestUnreadableEntriesInDeniedScopes:
         it.
         """
         store = _build_store(
-            tmp_path / "store",
+            sited_root,
             {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
         )
         real_fifo = tmp_path / "a-real-fifo"
@@ -13393,7 +13441,7 @@ class TestTheLoaderRefusesHostileEntriesByKind:
     table being wrong, and no test read the documents.
     """
 
-    def _hostile(self, tmp_path: Path) -> Path:
+    def _hostile(self, root: Path) -> Path:
         """One store, BOTH refused shapes, in a scope that is not the one asked
         for — the arrangement the operator reproduced: unrestricted token, a
         dangling `.#lock.md` in `bravo`, and a recall for `alpha`.
@@ -13406,9 +13454,11 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         failing it, and with no `pytest-timeout` plugin loaded nothing would have
         cut it off. Every read of this store now goes through `under_deadline`,
         which turns that hang back into a red.
+
+        🔴 `root` ARRIVES SITED (`sited_root`); `_build_store` creates it.
         """
         store = _build_store(
-            tmp_path / "store",
+            root,
             {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
         )
         _make_unreadable(store, DENY_SCOPE, "emacs")
@@ -13416,7 +13466,7 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         return store
 
     def test_an_UNRESTRICTED_recall_of_ANOTHER_scope_is_200_not_503(
-        self, tmp_path: Path
+        self, sited_root: Path, tmp_path: Path
     ):
         """🔴 THE MEASURED SYMPTOM, DRIVEN THROUGH THE SERVER ON THE LIVE
         CREDENTIAL SHAPE. Before the guard this exact request answered `503
@@ -13435,7 +13485,7 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         a socket timeout — which this test converts into a NAMED failure below,
         because "the worker never came back" is the whole claim.
         """
-        store = self._hostile(tmp_path)
+        store = self._hostile(sited_root)
         token_file = tmp_path / "token"
         token_file.write_text(GOOD_TOKEN + "\n")
         with running_subprocess(store, token_file) as (base, _proc):
@@ -13455,7 +13505,7 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         assert KELP_NUANCE in text, "the caller's own content vanished"
 
     def test_the_REFUSED_entries_are_SURFACED_not_silently_dropped(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 A SKIP RENDERS AS "NOTHING RECORDED", which is the conflation this
         whole store exists to avoid — so the 200 above is only correct if the
@@ -13471,7 +13521,7 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         store holding a real fifo, in-process, and `read_text` never returned.
         The deadline is what converts that back into a `None`, i.e. a red.
         """
-        store = self._hostile(tmp_path)
+        store = self._hostile(sited_root)
         done = under_deadline(_load_store_probe(store), 30.0)
         assert done is not None, (
             "an UNRESTRICTED `load_store` of the hostile store HUNG — a "
@@ -13586,7 +13636,7 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         assert len(index.entries(DENY_SCOPE)) == 1
 
     def test_a_SYMLINKED_entry_is_STILL_READ_the_guard_is_NOT_the_broad_one(
-        self, tmp_path: Path
+        self, sited_root: Path, tmp_path: Path
     ):
         """🔴 THE UPPER BOUND ON THE GUARD, AND THE MUTANT IT EXISTS TO KILL.
 
@@ -13600,7 +13650,7 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         The entry's CONTENT is asserted, not merely its presence: a guard that
         refused it would still leave the scope registered.
         """
-        store = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        store = _build_store(sited_root, {ALLOW_SCOPE: KELP_NUANCE})
         real = tmp_path / "outside" / "linked-entry.md"
         real.parent.mkdir()
         real.write_text(
@@ -13623,7 +13673,7 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         )
 
     def test_under_RAISE_a_refused_entry_RAISES_the_same_class_as_any_other(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 THE POLICY IS `on_malformed`'s, NOT THE GUARD'S. The WRITER's probe
         loads with `RAISE` precisely because it must not modify a store it read
@@ -13636,7 +13686,7 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         fifo, therefore it cannot hang" is a property of two filenames, not of
         the code. That is not a guarantee worth resting the suite's liveness on.
         """
-        store = self._hostile(tmp_path)
+        store = self._hostile(sited_root)
         done = under_deadline(_load_index_raise_probe(store), 30.0)
         assert done is not None, (
             "`load_index` under RAISE HUNG on the hostile store — a REFUSE cell "
@@ -13648,7 +13698,7 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         assert _probe_field(done.stdout, "SOURCE") in (EMACS_LOCK, LOCKED_ENTRY)
 
     def test_a_BOGUS_policy_is_still_a_ValueError_not_a_refusal(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """The guard branches on `on_malformed` BEFORE `build_index` validates
         it, so the predicate is shared (`_check_on_malformed`) rather than
@@ -13663,11 +13713,11 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         alone opened. If that ordering ever changes, this test becomes a hang and
         must move to `under_deadline` with the others.
         """
-        store = self._hostile(tmp_path)
+        store = self._hostile(sited_root)
         with pytest.raises(ValueError, match="on_malformed must be one of"):
             api.rc.load_index(store, on_malformed="collct")
 
-    def test_the_REFUSED_row_is_filed_under_the_FOLDED_scope(self, tmp_path: Path):
+    def test_the_REFUSED_row_is_filed_under_the_FOLDED_scope(self, sited_root: Path):
         """🔴 THE SCOPE ON A `MalformedEntry` IS THE NORMALIZED ONE — that is
         `MalformedEntry`'s own contract, and `malformed_in` compares against
         `normalize_ref(scope)`. A refusal filed under the RAW directory name
@@ -13681,7 +13731,7 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         """
         raw_dir = "Kelp_Forest"
         assert api.rc.normalize_ref(raw_dir) == ALLOW_SCOPE != raw_dir
-        store = _build_store(tmp_path / "store", {raw_dir: KELP_NUANCE})
+        store = _build_store(sited_root, {raw_dir: KELP_NUANCE})
         _make_unreadable(store, raw_dir, "emacs")
 
         _s, index = api.rc.load_store(store, verb="recalled")
@@ -13690,13 +13740,13 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         ]
         assert index.malformed_outside([ALLOW_SCOPE]) == ()
 
-    def test_a_CLEAN_store_is_UNCHANGED_by_the_guard(self, tmp_path: Path):
+    def test_a_CLEAN_store_is_UNCHANGED_by_the_guard(self, sited_root: Path):
         """The positive control. Every assertion above is about a hostile store;
         without this, a loader that refused EVERY candidate would satisfy the
         `.malformed` ones and only fail on content nobody asserted.
         """
         store = _build_store(
-            tmp_path / "store",
+            sited_root,
             {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
         )
         _s, index = api.rc.load_store(store, verb="recalled")
@@ -14271,8 +14321,23 @@ class TestARefusedWriteIsIndistinguishableFromAnAbsentOne:
     criteria 1-3 closed.
     """
 
-    def _phases(self, tmp_path: Path):
-        root = tmp_path / "store"
+    def _phases(self, root: Path):
+        """Phase A (denied scope present) and phase B (it never existed), both
+        at ONE path so the store path cannot itself be the thing that differs.
+
+        🔴 THE ROOT IS PASSED IN ALREADY SITED (`sited_root`), and THIS IS THE
+        SITE THAT KEPT FAILING THE GATE. `test_POSITIVE_CONTROL_the_APPEND_
+        comparison_CAN_see_the_difference` below is the only test in this class
+        that gets a `200 appended`; its siblings all assert a 404, which is
+        answered before any write. So it is the only one that reaches
+        `server.py:_replace_bytes` and executes the two in-request fsyncs, which
+        is why it — specifically — is the one that recurred on docs-only PRs.
+
+        🔴 THE CLOSURES OUTLIVE THIS CALL, which is why the siting is a fixture
+        and not a `with` block here: a `with store_siting.store_root(...)` around
+        the body of this helper would tear the store down at `return`, before
+        `present()` or `absent()` was ever invoked.
+        """
 
         def present():
             if root.exists():
@@ -14297,9 +14362,9 @@ class TestARefusedWriteIsIndistinguishableFromAnAbsentOne:
         return code, _comparable(headers), body
 
     def test_APPEND_to_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
-        root, present, absent = self._phases(tmp_path)
+        root, present, absent = self._phases(sited_root)
         present()
         refused = self._post(root, ZACH, DENY_SCOPE)
         absent()
@@ -14316,7 +14381,7 @@ class TestARefusedWriteIsIndistinguishableFromAnAbsentOne:
         assert refused[2], "both bodies are empty — the equality would be vacuous"
 
     def test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_difference(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 WITHOUT THIS, THE EQUALITY ABOVE IS SATISFIED BY A SERVER THAT
         ANSWERS 404 TO EVERYTHING — and by a fail-closed one that answers two
@@ -14324,7 +14389,7 @@ class TestARefusedWriteIsIndistinguishableFromAnAbsentOne:
         scope: present -> `appended`, absent -> `not-found`. Both non-empty, and
         different.
         """
-        root, present, absent = self._phases(tmp_path)
+        root, present, absent = self._phases(sited_root)
         present()
         wrote = self._post(root, DANA, DENY_SCOPE)
         absent()
@@ -14382,9 +14447,9 @@ class TestARefusedWriteIsIndistinguishableFromAnAbsentOne:
         assert missing_ref[2]
 
     def test_PUT_to_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
-        root, present, absent = self._phases(tmp_path)
+        root, present, absent = self._phases(sited_root)
 
         def put(record):
             with running(root, tokens=(record,)) as (base, _):
@@ -15515,9 +15580,9 @@ class TestTheWritePrimitives:
         assert api.nuance_insert_index(lines) == 4
 
     def test_an_entry_with_no_NUANCE_heading_is_422_not_a_reshaped_file(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
-        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        root = _build_store(sited_root, {ALLOW_SCOPE: KELP_NUANCE})
         path = entry_file(root, ALLOW_SCOPE)
         text = path.read_text().replace(resolver.NUANCE_HEADING, "## Notes")
         path.write_text(text)
@@ -15531,7 +15596,7 @@ class TestTheWritePrimitives:
         assert path.read_bytes() == before
 
     def test_a_FAILED_write_leaves_the_entry_and_no_temp_file(
-        self, tmp_path: Path, monkeypatch
+        self, sited_root: Path, monkeypatch
     ):
         """🔴 `os.replace`, NOT `open(path, "w")`. A truncate-then-write leaves a
         window in which a concurrent reader sees an EMPTY or half-written entry
@@ -15543,7 +15608,7 @@ class TestTheWritePrimitives:
         temp file must not be left behind either (it is invisible to every
         walker, so nothing would ever report or clean it up).
         """
-        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        root = _build_store(sited_root, {ALLOW_SCOPE: KELP_NUANCE})
         path = entry_file(root, ALLOW_SCOPE)
         before = path.read_bytes()
 
@@ -15661,20 +15726,24 @@ class TestAnAppendDoesNotREWRITETheFile:
     `If-Match` is invalidated for a change nobody asked for.
     """
 
-    def _entry_path(self, tmp_path: Path) -> Path:
-        root = tmp_path / "store" / ALLOW_SCOPE
+    def _entry_path(self, store: Path) -> Path:
+        # `store` arrives sited (`sited_root`) and does not exist yet — the scope
+        # directory is created under it exactly as it was under `tmp_path /
+        # "store"`. `append_bullet` below writes through `_replace_bytes`, so
+        # this is one of the sites whose in-request fsync the siting is for.
+        root = store / ALLOW_SCOPE
         root.mkdir(parents=True)
         path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
         path.write_bytes(LOSSY_ENTRY)
         return path
 
-    def test_every_byte_OUTSIDE_the_inserted_line_is_IDENTICAL(self, tmp_path: Path):
+    def test_every_byte_OUTSIDE_the_inserted_line_is_IDENTICAL(self, sited_root: Path):
         """🔴 THE WHOLE CLAIM, PINNED ON BYTES. The expected file is spelled here
         as `prefix + <the one new line> + suffix` over the ORIGINAL bytes, so a
         writer that changed anything at all — an encoding, a line ending, a
         trailing newline — fails on the equality rather than on a property
         somebody remembered to check."""
-        path = self._entry_path(tmp_path)
+        path = self._entry_path(sited_root)
         head_end = LOSSY_ENTRY.index(_HEADING_BYTES) + len(_HEADING_BYTES)
 
         status, line, _rev = api.append_bullet(
@@ -15713,11 +15782,11 @@ class TestAnAppendDoesNotREWRITETheFile:
         )[resolver.WHAT_HEADING]
         assert "\udce9" in what, what
 
-    def test_a_NON_UTF8_byte_on_an_untouched_line_SURVIVES(self, tmp_path: Path):
+    def test_a_NON_UTF8_byte_on_an_untouched_line_SURVIVES(self, sited_root: Path):
         """Named separately from the equality above because this is the one that
         DESTROYS content the store cannot re-derive, and because `U+FFFD` is the
         specific corpse to look for."""
-        path = self._entry_path(tmp_path)
+        path = self._entry_path(sited_root)
         assert b"\xe9" in LOSSY_ENTRY and b"\xef\xbf\xbd" not in LOSSY_ENTRY
 
         status, line, _rev = api.append_bullet(
@@ -15738,8 +15807,8 @@ class TestAnAppendDoesNotREWRITETheFile:
             "the append replaced an undecodable byte with U+FFFD"
         )
 
-    def test_CRLF_line_endings_are_NOT_normalised(self, tmp_path: Path):
-        path = self._entry_path(tmp_path)
+    def test_CRLF_line_endings_are_NOT_normalised(self, sited_root: Path):
+        path = self._entry_path(sited_root)
         before_crlf = LOSSY_ENTRY.count(b"\r\n")
         assert before_crlf == 2, "the fixture stopped exercising CRLF"
 
@@ -15755,8 +15824,8 @@ class TestAnAppendDoesNotREWRITETheFile:
 
         assert after.count(b"\r\n") == before_crlf
 
-    def test_a_file_with_NO_trailing_newline_does_not_gain_one(self, tmp_path: Path):
-        path = self._entry_path(tmp_path)
+    def test_a_file_with_NO_trailing_newline_does_not_gain_one(self, sited_root: Path):
+        path = self._entry_path(sited_root)
         assert not LOSSY_ENTRY.endswith(b"\n")
 
         status, line, _rev = api.append_bullet(
@@ -15773,11 +15842,11 @@ class TestAnAppendDoesNotREWRITETheFile:
             "the append added a trailing newline to a file that had none"
         )
 
-    def test_the_bullet_INHERITS_the_headings_own_line_ending(self, tmp_path: Path):
+    def test_the_bullet_INHERITS_the_headings_own_line_ending(self, sited_root: Path):
         """A CRLF entry must not gain an LF-terminated line in the middle of it.
         The terminator is taken from the heading the bullet is inserted under,
         never assumed."""
-        root = tmp_path / "store" / ALLOW_SCOPE
+        root = sited_root / ALLOW_SCOPE
         root.mkdir(parents=True)
         path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
         original = (
@@ -15798,12 +15867,12 @@ class TestAnAppendDoesNotREWRITETheFile:
         )
 
     def test_a_NO_trailing_newline_entry_whose_HEADING_is_the_LAST_line(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """The boundary the terminator rule turns on: there is no line ending to
         inherit, so one is introduced BEFORE the bullet and the file still does
         not end in a newline."""
-        root = tmp_path / "store" / ALLOW_SCOPE
+        root = sited_root / ALLOW_SCOPE
         root.mkdir(parents=True)
         path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
         original = (
@@ -16378,8 +16447,9 @@ class TestTheDedupeScopeIsTheINSERTIONScope:
     FIRST_PROSE = "the mooring pennant chafes against the fairlead"
     SECOND_PROSE = "the stern gland weeps a drop a minute under way"
 
-    def _twin_heading_entry(self, tmp_path: Path) -> Path:
-        root = tmp_path / "store" / ALLOW_SCOPE
+    def _twin_heading_entry(self, store: Path) -> Path:
+        # `store` arrives sited (`sited_root`) and does not exist yet.
+        root = store / ALLOW_SCOPE
         root.mkdir(parents=True)
         path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
         path.write_text(
@@ -16407,9 +16477,9 @@ class TestTheDedupeScopeIsTheINSERTIONScope:
         return path
 
     def test_a_bullet_matching_the_SECOND_section_is_APPENDED_not_swallowed(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
-        path = self._twin_heading_entry(tmp_path)
+        path = self._twin_heading_entry(sited_root)
         before = path.read_bytes()
 
         status, line, _rev = api.append_bullet(
@@ -16431,12 +16501,12 @@ class TestTheDedupeScopeIsTheINSERTIONScope:
         assert first_body.splitlines()[1] == line, after
 
     def test_a_bullet_matching_the_FIRST_section_is_STILL_a_duplicate(
-        self, tmp_path: Path
+        self, sited_root: Path
     ):
         """🔴 THE POSITIVE CONTROL, and the reason the fix is a NARROWING rather
         than a removal: within the section the writer actually inserts into,
         idempotency is unchanged and not one byte is written."""
-        path = self._twin_heading_entry(tmp_path)
+        path = self._twin_heading_entry(sited_root)
         before = path.read_bytes()
 
         status, _line, _rev = api.append_bullet(
@@ -16447,11 +16517,11 @@ class TestTheDedupeScopeIsTheINSERTIONScope:
         assert status == "duplicate"
         assert path.read_bytes() == before
 
-    def test_the_section_body_STOPS_at_the_next_heading(self, tmp_path: Path):
+    def test_the_section_body_STOPS_at_the_next_heading(self, sited_root: Path):
         """The narrowing is the section boundary itself, so it is asserted
         directly: `## Pointers` sits between the two nuance blocks and its
         content belongs to neither."""
-        path = self._twin_heading_entry(tmp_path)
+        path = self._twin_heading_entry(sited_root)
         lines = path.read_text(encoding="utf-8").splitlines()
 
         block = api.nuance_block(lines)
@@ -16493,12 +16563,12 @@ class TestTheRENAMEIsFSYNCedToo:
         return kinds
 
     def test_an_append_fsyncs_BOTH_the_file_and_its_DIRECTORY(
-        self, tmp_path: Path, monkeypatch
+        self, sited_root: Path, monkeypatch
     ):
         """🔴 ONE ASSERTION PER FSYNC, so deleting EITHER one goes red — a single
         "fsync was called" check is green with the directory one removed, which
         is exactly the mutant that survived."""
-        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        root = _build_store(sited_root, {ALLOW_SCOPE: KELP_NUANCE})
         path = entry_file(root, ALLOW_SCOPE)
 
         kinds = self._fsynced_kinds(
@@ -16515,11 +16585,11 @@ class TestTheRENAMEIsFSYNCedToo:
             "append visible is not durable across a crash"
         )
 
-    def test_a_PUT_fsyncs_BOTH_as_well(self, tmp_path: Path, monkeypatch):
+    def test_a_PUT_fsyncs_BOTH_as_well(self, sited_root: Path, monkeypatch):
         """Both write primitives go through `_replace_bytes`, and the test says so
         rather than assuming it: a second copy of the write would be the
         predicate-at-two-sites shape this module keeps finding."""
-        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        root = _build_store(sited_root, {ALLOW_SCOPE: KELP_NUANCE})
         path = entry_file(root, ALLOW_SCOPE)
         data = _entry(entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=f"- 2026-05-06: {BULLET_E}").encode()
         revision = api.entry_revision(path.read_bytes())
@@ -16535,14 +16605,14 @@ class TestTheRENAMEIsFSYNCedToo:
         assert False in kinds and True in kinds, kinds
 
     def test_an_UNFSYNCABLE_directory_does_not_fail_the_write(
-        self, tmp_path: Path, monkeypatch
+        self, sited_root: Path, monkeypatch
     ):
         """Best-effort is a decision, so it is pinned: a filesystem that refuses a
         directory fd must not turn a completed append into a 503. Trading a rare
         durability gap for a certain availability one is the wrong trade, and an
         unasserted `try/except` is the shape that silently becomes the right one
         for the wrong reason."""
-        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        root = _build_store(sited_root, {ALLOW_SCOPE: KELP_NUANCE})
         path = entry_file(root, ALLOW_SCOPE)
         real_open = os.open
 
@@ -19372,6 +19442,28 @@ class TestTheStoreIsSitedOffTheContendedDisk:
     as flaky while every test still passed — the change would be inert and
     indistinguishable from a working one, which is the failure mode this class
     exists to make impossible.
+
+    🔴 READ THE PARAGRAPH ABOVE AT THE WIDTH ITS BODY ACTUALLY HAS, BECAUSE IT WAS
+    WRONG BY EXACTLY THAT GAP. It says "a fixture that silently fell back to disk
+    EVERYWHERE", and the positive control under it took ONE fixture (`store`). That
+    is one site wide. When it was written this file had 18 further store roots built
+    inline from `tmp_path`, every one of them disk-backed unconditionally, and the
+    class that kept failing `tekton/devrc-pytests` on docs-only PRs was among them —
+    behind this green. A control on one fixture cannot see the other sites, and its
+    docstring claiming "everywhere" is what stopped anyone looking.
+
+    So the claim is now split, deliberately, into two guards that fail differently:
+
+      * BEHAVIOURAL, here: `store` and `sited_root` are each shown to LAND on tmpfs
+        when one is usable. This is what a structural check cannot do — it type-
+        checks past a wrong argument — but it can only ever cover the fixtures it
+        names, and it SKIPS where there is no tmpfs, which may well be CI.
+      * STRUCTURAL, in `test_store_siting_ledger.py`: `_DISK_ROOTED_ALLOWLIST` plus
+        `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY` enumerate EVERY
+        store site in this file and fail when the set grows or shrinks. That one
+        holds on a machine with no tmpfs at all.
+
+    Neither half is the guard. The pair is.
     """
 
     def test_the_fstype_is_resolved_by_LONGEST_mount_point_not_by_prefix(self):
@@ -19450,6 +19542,57 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         assert (store / BROKEN_SCOPE / "thing-gamma.md").read_text().startswith(
             "no front matter"
         )
+
+    def test_the_sited_root_fixture_ACTUALLY_lands_on_tmpfs_when_one_exists(
+        self, sited_root: Path
+    ):
+        """🔴 THE SECOND FIXTURE NEEDS ITS OWN CONTROL, AND THAT IS THE WHOLE
+        LESSON OF THIS CLASS'S HEADER.
+
+        `sited_root` carries the 18 store roots that used to be built inline from
+        `tmp_path`, one of which is the write path that kept failing the gate. A
+        control on `store` says nothing about it: they are separate fixtures with
+        separate bodies, and a `sited_root` that had been written to fall back
+        unconditionally would leave every one of those 18 sites back on the
+        contended disk with `store`'s control still green.
+
+        The root does not exist yet — that is `store_root`'s documented contract —
+        so the filesystem is resolved from its PARENT, which is the tmpfs holder
+        directory itself. Asserting on `sited_root` directly would read the
+        fstype of a path that is not there.
+        """
+        available = store_siting.tmpfs_dir()
+        if available is None:
+            pytest.skip(
+                "no USABLE tmpfs: absent, not tmpfs, under _MIN_FREE_BYTES "
+                "free, or unwritable. The fallback path is exercised. Check "
+                "WHICH cause applies before reading this as a bare absence."
+            )
+        assert not sited_root.exists(), (
+            "sited_root exists before the test created it — `store_root`'s "
+            "contract is that callers mkdir their own scopes under it, and the "
+            "parent-directory assertion below is written against that contract"
+        )
+        landed = store_siting.mount_fstype(sited_root.parent)
+        assert landed == "tmpfs", (
+            f"sited_root's holder landed on {landed!r} while a tmpfs at "
+            f"{available} was available — the 18 sites that take their root from "
+            "this fixture are back on the contended disk and the fix is inert"
+        )
+
+    def test_the_sited_root_fixture_is_a_USABLE_store_root_wherever_it_lands(
+        self, sited_root: Path
+    ):
+        """The other half, and it is not a duplicate of the `store` version: this
+        fixture yields an EMPTY path rather than a populated tree, so what has to
+        be true of it is that a scope can be created under it and read back. A
+        `store_root` that yielded something un-mkdir-able would fail every
+        migrated site at once, and the tmpfs assertion above would not notice."""
+        (sited_root / SCOPE).mkdir(parents=True)
+        (sited_root / SCOPE / "thing-alpha.md").write_text(
+            _entry("thing-alpha", SCOPE)
+        )
+        assert (sited_root / SCOPE / "thing-alpha.md").is_file()
 
 
 class TestTheSitingRULESThemselvesArePinned:

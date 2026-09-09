@@ -223,11 +223,14 @@ def test_every_ledgered_file_IMPORTS_AND_CALLS_the_shared_siting_at_least_once()
     as coverage is what stops anyone looking, so the name now states the weaker,
     true thing.
 
-    `scoped_store` is fixed. The residual gap is recorded and NOT closed here:
-    `test_subsystem_store_api.py` still builds store roots inline from `tmp_path` at
-    the sites `_DISK_ROOTED_SITES` counts below — 20 of them spelled `tmp_path /
-    "store"` and 13 not — each in one or two tests rather than a shared fixture. That
-    count is asserted so it can only go DOWN — see the next test.
+    `scoped_store` is fixed, and so are the 18 sites that were spelled `tmp_path /
+    "store"` — they take their root from the `sited_root` fixture now. The residual
+    gap is recorded and NOT closed here: `test_subsystem_store_api.py` still builds
+    15 store roots inline from `tmp_path` under OTHER directory names. Every one of
+    them is enumerated, with its reason, in `_DISK_ROOTED_ALLOWLIST` below, and
+    `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY` asserts that set in
+    BOTH directions — so this test's "at least once" weakness is covered there
+    rather than left standing.
     """
     offenders = []
     for name in sorted(EXPECTED_SERVER_TESTS):
@@ -269,54 +272,115 @@ def test_the_scan_can_actually_SEE_a_build_server_call():
 # AST collapses all four — quoting and spacing do not survive parsing at all.
 #
 # A scripted mass conversion of these sites was attempted and REVERTED: it silently
-# skipped 9 of 19 signature edits while its own assertion still passed. Hence a ratchet
-# rather than a rushed refactor.
-# 🔴 33, UP FROM 20, AND NOT ONE SITE WAS ADDED. The predicate below stopped being
-# spelled, and 13 inline disk-backed store roots that had always been there became
-# visible. Every one of them was a REAL store served by `running(...)`. The
-# breakdown, RE-MEASURED 2026-09-02 and summing to 13 — an earlier revision of this
-# comment said "five" `served` and summed to 15, which is the sort of arithmetic
-# nobody re-does:
+# skipped 9 of 19 signature edits while its own assertion still passed. That is why the
+# conversion that finally landed is verified by the CENSUS below rather than by the
+# converting script's own assertion.
 #
-#     served              3    a `cp -a` of the store fixture, written into, served
-#     served-elsewhere    3
-#     stage               2    the output of `run_seed`, served back
-#     absent              2    `running(tmp_path / "absent")`
-#     big                 1
-#     at-the-cap          1
-#     unambiguous         1
-#                        --
-#                        13   + the 20 `store`/`name`/`kind` sites = 33
+# 🔴 A COUNT WAS REPLACED BY AN ENUMERATED SET, AND THE REASON IS NOT TIDINESS.
+# `_DISK_ROOTED_SITES = 33` could not distinguish "a site was migrated and a new one was
+# written" from "nothing happened": both read 33. It also could not say WHICH sites it
+# was counting, so its own history is a list of arguments about whether a number moving
+# meant new debt or a wider predicate (20 -> 33 was the latter, with not one site added).
+# An enumerated allowlist answers both: the failure message names the site, and a
+# migration plus a regression in one commit shows up as one name arriving and another
+# leaving rather than as a flat total.
 #
-# The `absent` pair is the only debatable entry: an absent store writes nothing and
-# fsyncs nothing, so counting it errs WIDE — the safe direction for a ratchet, and not
-# worth a second spelled exception to avoid.
+# EVERY KEY IS A SITE THAT IS STILL DISK-ROOTED, AND EVERY VALUE IS THE REASON IT IS
+# STILL HERE. An empty reason is a failure — see `test_the_disk_rooted_census_matches_
+# the_allowlist_EXACTLY`. Adding a key is how you record debt you are choosing to leave;
+# it is not a way to silence the guard, because the reason is read by a human at review
+# time and the key names the exact test.
 #
-# 🔴 SO THIS NUMBER MOVING UP IS NOT ALWAYS DEBT ARRIVING. The assertion below cannot
-# tell "13 new store sites were written" from "the predicate got 13 sites wider", and
-# they demand opposite actions. Establish WHICH before touching the constant, the same
-# way the DOWN direction already demands.
-_DISK_ROOTED_SITES = 33
+# The 18 sites spelled `tmp_path / "store"` are GONE — they take their root from the
+# `sited_root` fixture (see `test_subsystem_store_api.py`), which is
+# `store_siting.store_root` with a test's lifetime. What remains is the population that
+# was never spelled "store": stores built under another directory name, all of them
+# served READ-ONLY.
+#
+# 🔴 SAY WHAT THE REASON CLAIMS AND WHAT IT DOES NOT. "read-only" here means the test
+# drives `run_verify` / a GET route and issues no write verb, so no request reaches
+# `server.py:_replace_bytes` and nothing fsyncs inside a request — which is the specific
+# mechanism the gate flake is made of. It does NOT mean these are harmless: they are
+# still disk-backed store roots, and siting them is the obvious follow-up. They are
+# recorded rather than migrated because this change was scoped to the write-path sites
+# that were failing the gate, and a 33-site conversion is exactly the shape that got
+# reverted last time.
+_DISK_ROOTED_ALLOWLIST: dict[str, str] = {
+    "TestFourStates.test_store_unreachable_is_503_and_NOT_a_200 :: tmp_path / 'absent'":
+        "the store deliberately does NOT exist; nothing is written and nothing is "
+        "fsynced. Counted at all only because the predicate errs WIDE.",
+    "TestFourStates.test_scope_empty_and_store_unreachable_SHARE_NOTHING :: "
+    "tmp_path / 'absent'":
+        "same absent-store shape as above.",
+    "TestByteIdentityVerifier.test_NEGATIVE_a_ONE_CHARACTER_divergence_FAILS_and_names_"
+    "the_scope :: tmp_path / 'served'":
+        "a `cp -a` of the store fixture served READ-ONLY to `run_verify`; no write "
+        "verb, so no in-request fsync.",
+    "TestByteIdentityVerifier.test_NEGATIVE_a_MISSING_entry_on_the_remote_FAILS :: "
+    "tmp_path / 'served'":
+        "read-only `run_verify` copy, as above.",
+    "TestByteIdentityVerifier.test_a_PAGINATED_index_is_REFUSED_rather_than_partially_"
+    "compared :: tmp_path / 'big'":
+        "read-only `run_verify` fixture. LISTING_PAGE_SIZE+1 entries, so it is also "
+        "the largest store in this population.",
+    "TestByteIdentityVerifier.test_a_scope_of_EXACTLY_LISTING_PAGE_SIZE_is_COMPARED_not_"
+    "refused :: tmp_path / 'at-the-cap'":
+        "read-only `run_verify` fixture, the other side of the same boundary.",
+    "TestByteIdentityVerifier.test_an_UNAMBIGUOUS_scope_of_the_SAME_SHAPE_still_PASSES "
+    ":: tmp_path / 'unambiguous'":
+        "read-only `run_verify` fixture.",
+    "TestByteIdentityVerifier.test_the_disclosure_survives_a_FAILING_run :: "
+    "tmp_path / 'served'":
+        "read-only `run_verify` copy.",
+    "TestByteIdentityVerifier.test_every_permitted_difference_is_ACCOUNTED_FOR_not_"
+    "merely_small :: tmp_path / 'served-elsewhere'":
+        "read-only `run_verify` copy.",
+    "TestByteIdentityVerifier.test_a_POD_SHAPED_remote_PASSES_when_only_the_THREE_"
+    "permitted_lines_differ :: tmp_path / 'served-elsewhere'":
+        "read-only `run_verify` copy.",
+    "TestByteIdentityVerifier.test_a_POD_SHAPED_remote_STILL_FAILS_on_a_real_content_"
+    "difference :: tmp_path / 'served-elsewhere'":
+        "read-only `run_verify` copy.",
+    "TestSeedThenVerify.test_a_seeded_copy_serves_byte_identical_digests :: "
+    "tmp_path / 'stage'":
+        "the output of `seed.sh` run as a SUBPROCESS, then served read-only to "
+        "`run_verify`. The writer is the seed script, not the request path.",
+    "TestSeedThenVerify.test_a_seed_that_MISSED_a_scope_is_caught_by_the_verifier :: "
+    "tmp_path / 'stage'":
+        "same seed-then-verify shape as above.",
+    "TestTheLoaderRefusesHostileEntriesByKind._recall_over_http :: tmp_path / name":
+        "a per-kind hostile store read through `running_subprocess`; the route under "
+        "test is a GET recall, and several kinds are FIFOs that must never be written.",
+    "TestTheLoaderRefusesHostileEntriesByKind.test_the_REFUSED_DIRECTORY_is_a_NAMED_row_"
+    "not_a_silent_skip :: tmp_path / kind":
+        "same hostile-kind read path as above.",
+}
 
 # Directory names that make a `tmp_path / "<name>"` a store root ON SIGHT, with no
-# need for it to flow anywhere. MEASURED 2026-09-02: of the 33 counted sites, 26 flow
-# into a store consumer and would be caught without this set; 7 are counted ONLY by
-# this set, so deleting it would lose those seven.
+# need for it to flow anywhere.
 #
-# 🔴 BUT DO NOT READ THOSE 7 AS "SITES THAT GENUINELY DO NOT FLOW ANYWHERE" — an
-# earlier revision of this comment said exactly that and it is false of all seven. They
-# are every `tmp_path / "store"` at :11310, :11765, :13099, :14086, :14201, :14227 and
-# :14803 of `test_subsystem_store_api.py`, and they split two ways, each one a MASKED
-# GAP in the flow arm rather than a shortcut:
-#   * :11310 and :13099 are `root = tmp_path / "store"` in a `_phases` helper whose
-#     NESTED `present()`/`absent()` closures call `_build_store(root, …)` — a consumer
-#     `_ROOT_CONSUMERS` names. They are invisible only because `_walk_scope` stops at a
-#     nested function boundary, so no single scope sees both the binding and the call.
-#   * the other five reach `api.append_bullet` / `api.rc.load_index` — real store
-#     consumers that `_ROOT_CONSUMERS` simply does not name (see its own comment: the
-#     set closes renames, not GROWTH into a new consumer name).
-# So `_ROOT_NAMES` is currently propping up the flow arm on this file. Deleting it
-# would not "lose seven non-flowing sites", it would expose two structural gaps.
+# 🔴 RE-MEASURED, AND THE PREVIOUS MEASUREMENT'S SUBJECT NO LONGER EXISTS. It read:
+# "of the 33 counted sites, 26 flow into a store consumer and would be caught without
+# this set; 7 are counted ONLY by this set" — and it named those seven, every one of
+# them a `tmp_path / "store"` whose binding was invisible to the flow arm because
+# `_walk_scope` stops at a nested-function boundary or because the consumer
+# (`api.append_bullet`, `api.rc.load_index`) is not in `_ROOT_CONSUMERS`. All seven
+# were among the 18 sites migrated to `sited_root`, so the propping-up they described
+# is gone with them.
+#
+# MEASURED on the current file, by running the census with `_ROOT_NAMES` set to
+# `{"store", "src"}` and again with it EMPTY: **15 both times, with an identical set of
+# keys.** So on `test_subsystem_store_api.py` today this set catches nothing the flow
+# arm does not already catch, and deleting it would lose nothing THERE.
+#
+# 🔴 IT IS KEPT ANYWAY, AND NOT OUT OF CAUTION. Two of this file's own probe tests
+# depend on the on-sight arm being present — see
+# `test_the_site_index_does_not_key_on_the_DIRECTORY_being_spelled_store`, whose whole
+# subject is the relationship between the two arms — and the flow arm's own comment
+# records that `_ROOT_CONSUMERS` closes renames but NOT growth into a new consumer
+# name. A set that is currently redundant on one file is not a set that is redundant.
+# What HAS changed is that its contribution is now measurable in one command, so the
+# next reader does not have to trust this paragraph.
 _ROOT_NAMES = {"store", "src"}
 
 
@@ -611,33 +675,227 @@ def _used_as_a_store_root(node: ast.AST) -> bool:
     return _STORE_ROOT_PARENTS.get(id(node), False)
 
 
-def test_the_inline_disk_rooted_store_sites_do_not_GROW():
+def _qualnames(tree: ast.AST) -> dict[int, str]:
+    """`id(node) -> dotted name of the innermost class/def it sits in`.
+
+    🔴 A LINE NUMBER IS NOT A SITE IDENTITY. The census below has to name each site
+    in a message a human acts on, and in a key that survives the file being edited
+    ANYWHERE ABOVE it. A line number survives neither: it moves when an unrelated
+    docstring gains a sentence, so a ledger keyed on one would demand an edit on
+    every commit and would be routinely re-baselined without anyone reading it.
+    The enclosing `Class.function` moves only when the thing itself is renamed,
+    which is a change a reviewer should see.
+    """
+    owner: dict[int, str] = {}
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = f"{prefix}.{child.name}" if prefix else child.name
+                for sub in ast.walk(child):
+                    owner[id(sub)] = name
+                walk(child, name)
+            else:
+                for sub in ast.walk(child):
+                    owner.setdefault(id(sub), prefix or "<module>")
+                walk(child, prefix)
+
+    walk(tree, "")
+    return owner
+
+
+def _disk_rooted_census(tree: ast.AST) -> dict[str, int]:
+    """Every disk-rooted store site in `tree`, keyed `<qualname> :: <expression>`.
+
+    The expression comes from `ast.unparse`, so quoting and spacing are normalised
+    away exactly as they are for the predicate itself — `tmp_path/"store"` and
+    `tmp_path / 'store'` produce the SAME key, and neither can be used to walk
+    past a ledger entry. Two identical expressions in one scope get ` #2`, ` #3`
+    suffixes in source order; the value is the line number, for the message only.
+    """
+    _index_store_root_uses(tree)
+    owner = _qualnames(tree)
+    hits = sorted(
+        (n for n in ast.walk(tree) if _is_disk_rooted_store_expr(n)),
+        key=lambda n: (n.lineno, n.col_offset),
+    )
+    seen: dict[str, int] = {}
+    census: dict[str, int] = {}
+    for node in hits:
+        base = f"{owner.get(id(node), '<module>')} :: {ast.unparse(node)}"
+        seen[base] = seen.get(base, 0) + 1
+        key = base if seen[base] == 1 else f"{base} #{seen[base]}"
+        census[key] = node.lineno
+    return census
+
+
+def test_the_disk_rooted_census_matches_the_allowlist_EXACTLY():
+    """🔴 A SET, IN BOTH DIRECTIONS — not a count, and not a ceiling.
+
+    This is the guard the `store` fixture's own positive control could not be:
+    that one takes a single fixture and proves IT lands on tmpfs, which says
+    nothing about the other sites in the file. Here every store site the
+    predicate can see is enumerated and compared to `_DISK_ROOTED_ALLOWLIST`.
+
+      * a name in the census that is NOT in the allowlist is a NEW disk-backed
+        store root — the regression this exists to catch, and the shape a revert
+        of one of the migrated sites takes.
+      * a name in the allowlist that is NOT in the census means either the site
+        was migrated (delete the entry, in the same commit) or the predicate
+        NARROWED and stopped seeing it (widen it back — deleting the entry would
+        bank a coverage loss as if it were progress). The message says both,
+        because this assertion cannot tell them apart and they demand opposite
+        actions.
+
+    ⚠ IT IS A CLAIM ABOUT WHAT THE PREDICATE CAN SEE, WHICH IS NARROWER THAN "every
+    store root in the file". `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_
+    counted` below records the standing hole: a disk-backed root bound inside a
+    `@pytest.fixture` crosses a scope boundary the AST cannot follow, so it is
+    invisible here. An empty census would therefore NOT prove the file is fully
+    sited, and the `test_the_census_can_actually_SEE_a_disk_rooted_site` control
+    below is what stops an empty one reading as an all-clear.
+    """
     path = TESTS / "test_subsystem_store_api.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    _index_store_root_uses(tree)
-    actual = sum(1 for n in ast.walk(tree) if _is_disk_rooted_store_expr(n))
-    assert actual <= _DISK_ROOTED_SITES, (
-        f"{actual} inline disk-backed store roots, up from {_DISK_ROOTED_SITES}. "
-        "Each writes through server.py:_replace_bytes and fsyncs inside the request, "
-        "so a new one rejoins the contention-flake population. Use "
-        "testlib.store_siting.store_root() instead. 🔴 BUT FIRST check WHICH happened, "
-        "because this direction is ambiguous too: did someone WRITE new inline store "
-        "sites, or did _is_disk_rooted_store_expr get WIDER and start seeing sites "
-        "that were always there? Round 7 was the second — 20 -> 33 with no site added, "
-        "because the predicate stopped keying on the directory being spelled 'store'. "
-        "Raising the constant is right for a widening and wrong for new debt."
+    census = _disk_rooted_census(tree)
+
+    unrecorded = sorted(set(census) - set(_DISK_ROOTED_ALLOWLIST))
+    stale = sorted(set(_DISK_ROOTED_ALLOWLIST) - set(census))
+    assert not unrecorded, (
+        "these disk-backed store roots are NOT in _DISK_ROOTED_ALLOWLIST:\n  "
+        + "\n  ".join(f"{k}   (line {census[k]})" for k in unrecorded)
+        + "\n\nEach one builds its store on the contended disk. A store that is "
+        "written through the server fsyncs the file AND its parent directory "
+        "INSIDE the request (server.py:_replace_bytes), and one such fsync "
+        "exceeding HANG_TIMEOUT is what fails tekton/devrc-pytests on PRs whose "
+        "diff cannot reach the test at all. Take the root from the `sited_root` "
+        "fixture instead — or, if this site genuinely cannot be sited, add it to "
+        "_DISK_ROOTED_ALLOWLIST WITH THE REASON, which a reviewer will read."
     )
-    # 🔴 NO SLACK, and no `or actual == 0` escape. The previous version tolerated a
-    # drop of up to three and passed unconditionally at zero — so the count could
-    # regrow 0 -> 18 with the constant still reading 18 and the ratchet never biting.
-    assert actual == _DISK_ROOTED_SITES, (
-        f"only {actual} inline sites left, was {_DISK_ROOTED_SITES}. 🔴 FIRST check "
-        "WHICH happened: sites genuinely converted to store_root(), or "
-        "_is_disk_rooted_store_expr narrowed so it counts fewer? The counter and "
-        "the constant live in this file and this assertion cannot tell them apart. "
-        "If sites were fixed, lower _DISK_ROOTED_SITES in the SAME commit. If the "
-        "predicate narrowed, widen it back — lowering the constant would bank a "
-        "coverage loss as if it were progress."
+    assert not stale, (
+        "_DISK_ROOTED_ALLOWLIST names sites the census no longer sees:\n  "
+        + "\n  ".join(stale)
+        + "\n\n🔴 FIRST establish WHICH happened, because this assertion cannot and "
+        "the two demand opposite actions: (a) the site was genuinely migrated to "
+        "store_siting.store_root() — delete the entry in the SAME commit; or (b) "
+        "_is_disk_rooted_store_expr NARROWED and stopped seeing a site that is "
+        "still there — widen it back. Deleting the entry for (b) banks a coverage "
+        "loss as if it were progress."
+    )
+    empty = sorted(k for k, why in _DISK_ROOTED_ALLOWLIST.items() if not why.strip())
+    assert not empty, (
+        f"these allowlist entries carry no reason: {empty}. An entry without one is "
+        "a silenced guard: the whole point of an enumerated allowlist over a count "
+        "is that a human reading the diff can tell debt being recorded from debt "
+        "being hidden."
+    )
+
+
+def test_the_census_can_actually_SEE_a_disk_rooted_site():
+    """The positive control, and it is not optional here.
+
+    The census asserts a SET, and the day the allowlist reaches empty an assertion
+    of `set() == set()` is satisfied by a scanner wired to nothing just as well as
+    by a fully-sited file. So feed it a module that MUST produce a non-zero count
+    and watch the number move. Report the pair, never the zero alone.
+    """
+    probe = (
+        "def test_probe(tmp_path):\n"
+        "    root = tmp_path / 'store'\n"
+        "    running(root)\n"
+    )
+    census = _disk_rooted_census(ast.parse(probe))
+    assert list(census) == ["test_probe :: tmp_path / 'store'"], (
+        f"the census reported {census} for a module with exactly one obvious "
+        "disk-backed store root. Every zero it reports elsewhere is therefore "
+        "uninterpretable — fix the scanner, not the ledger."
+    )
+
+
+# 🔴 THE OTHER SIDE OF THE RELATIONSHIP. The census above pins the sites that are NOT
+# sited; this pins the ones that ARE, so the pair fails whichever way the relationship
+# is broken.
+#
+# 🔴 THE CASE THAT MAKES THIS A SECOND GUARD RATHER THAN A DUPLICATE, MEASURED BY
+# MUTATION RATHER THAN ARGUED — and the first draft of this comment was WRONG about
+# it, in the direction that overstates the census. Three mutants, each run with
+# `__pycache__` cleared:
+#
+#   1. a migrated TEST reverted to `tmp_path / "store"`
+#      -> census RED (names the test), sited-ledger green. 22 others passed.
+#   2. the `sited_root` FIXTURE de-sited to `tmp_path / "store"`
+#      -> BOTH red. The census sees it after all, because `_ROOT_NAMES` counts a
+#         directory spelled "store" ON SIGHT, with no flow analysis and therefore no
+#         scope boundary to be blind at.
+#   3. the `sited_root` FIXTURE de-sited to `tmp_path / "holder"`
+#      -> census GREEN, sited-ledger RED. 22 others passed.
+#
+# So the census's fixture blind spot is real but NARROWER than "a fixture": it needs
+# the directory name to be outside `_ROOT_NAMES` as well, which is mutant 3 and is
+# exactly what an author writing a holder directory would produce. That mutant is the
+# whole justification for this ledger — without it, a de-siting reaches the disk with
+# every other guard in both files green.
+#
+# Keyed the same way as the census: the enclosing class/def, never a line number.
+_SITED_STORE_ROOT_CALLERS: frozenset[str] = frozenset(
+    {
+        # The three shared fixtures. `sited_root` is the one the 18 previously
+        # inline `tmp_path / "store"` sites now take their root from.
+        "store",
+        "scoped_store",
+        "sited_root",
+        # An inline `with` in a test that needs the root before `_build_store`.
+        "TestPUTCreatesANewEntry.test_a_scopes_FIRST_entry_creates_the_directory",
+        # The siting module's own fallback tests, which call it directly.
+        "TestTheSitingRULESThemselvesArePinned.test_mkdtemp_REFUSING_falls_back_"
+        "instead_of_raising",
+        "TestTheSitingRULESThemselvesArePinned.test_the_fallback_honours_a_custom_"
+        "store_NAME",
+    }
+)
+
+
+def _store_root_callers(tree: ast.AST) -> set[str]:
+    """Enclosing class/def of every `store_siting.store_root(...)` CALL."""
+    owner = _qualnames(tree)
+    return {
+        owner.get(id(node), "<module>")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "store_root"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "store_siting"
+    }
+
+
+def test_the_SITED_store_roots_are_a_pinned_ledger_too():
+    """Fails when the sited set GROWS *or* SHRINKS, for the same reason as the census.
+
+    SHRINKING is the regression: a `store_root(...)` call disappearing means a store
+    went back onto the contended disk, and if it went back inside a pytest fixture the
+    census above is structurally unable to notice. GROWING is not a fault, but it is a
+    change to the ledger this file exists to hold, so it is recorded rather than
+    absorbed — the alternative is a `>=` that quietly stops describing the file.
+    """
+    path = TESTS / "test_subsystem_store_api.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found = _store_root_callers(tree)
+    missing = sorted(_SITED_STORE_ROOT_CALLERS - found)
+    extra = sorted(found - _SITED_STORE_ROOT_CALLERS)
+    assert not missing, (
+        f"these no longer call store_siting.store_root(): {missing}. A store that "
+        "stopped being sited is back in the fsync-contention population — and if it "
+        "was re-rooted inside a @pytest.fixture UNDER A DIRECTORY NAME OUTSIDE "
+        "_ROOT_NAMES, this is the ONLY guard that can see it: the census's flow arm "
+        "stops at the fixture's scope boundary and its on-sight arm only recognises "
+        f"{sorted(_ROOT_NAMES)}. Measured by mutation, not assumed. If the removal is "
+        "deliberate, delete the name here in the SAME commit."
+    )
+    assert not extra, (
+        f"new store_siting.store_root() callers: {extra}. That is the right "
+        "direction — add them to _SITED_STORE_ROOT_CALLERS so this ledger keeps "
+        "describing the file."
     )
 
 
@@ -857,16 +1115,23 @@ def test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted():
     inside a `@pytest.fixture` and served in a test that requests it. That is a hole,
     it is recorded here so it cannot be rediscovered as news, and it is pinned so that
     CLOSING it fails this test and forces whoever closes it to delete this guard and
-    move `_DISK_ROOTED_SITES` in the same commit.
+    add the newly-visible sites to `_DISK_ROOTED_ALLOWLIST` in the same commit.
+
+    🔴 THIS HOLE IS WHY THE CENSUS ALONE IS NOT THE WHOLE GUARD, and it is why
+    `_SITED_STORE_ROOT_CALLERS` exists beside it: a store re-rooted onto disk INSIDE a
+    fixture is invisible to `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`
+    and visible to the sited-ledger, because the `store_root(...)` call it deleted is
+    named there.
 
     Fixture-binding is this file's dominant idiom, so the hole is not exotic. TWO LIVE
     INSTANCES on `test_subsystem_store_api.py`, both real `cp -a` copies of a store,
-    written into, and served in-process by the real store server:
+    written into, and served in-process by the real store server — cited BY NAME,
+    because a line citation into that file has shipped wrong repeatedly:
 
-      * `served = tmp_path / "ordered-served"` in the `shuffled_pair` fixture (:3945),
-        served at :4392 and four more `running(served)` sites;
-      * `served = tmp_path / "ambig-served"` in the `ambiguous_pair` fixture (:4294),
-        served at :4758 and one more.
+      * `served = tmp_path / "ordered-served"` in the `shuffled_pair` fixture, served
+        by five `running(served)` sites;
+      * `served = tmp_path / "ambig-served"` in the `ambiguous_pair` fixture, served
+        by two.
 
     🔴 WHY IT IS NOT CLOSED, stated rather than implied. The flow arm is scoped per
     function (`_walk_scope` stops at a function boundary), and a pytest fixture crosses
@@ -921,9 +1186,9 @@ def test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted():
     )
     assert _count_disk_rooted(via_fixture) == 0, (
         "the ratchet now SEES a store root bound in a fixture. That is good news and "
-        "it makes this guard wrong: delete it, re-measure _DISK_ROOTED_SITES (the two "
-        "live instances at test_subsystem_store_api.py:3945 and :4294 will start "
-        "counting), and rewrite the residual in "
+        "it makes this guard wrong: delete it, re-run the census (the `shuffled_pair` "
+        "and `ambiguous_pair` fixtures in test_subsystem_store_api.py will start "
+        "appearing in it) and record or migrate them, and rewrite the residual in "
         "test_one_tests_store_root_does_not_vouch_for_ANOTHERS_scratch_directory."
     )
     assert _count_disk_rooted(via_fixture_tuple) == 0, (
@@ -983,9 +1248,9 @@ def test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted():
 # whole suite, and `test_every_ledgered_file_IMPORTS_AND_CALLS_the_shared_siting_at_
 # least_once` above is what keeps the ledgered files routed through the seam, so the
 # two together cover the population. A deselected subset run is not that claim. Nor is
-# it a claim about the 33 inline sites the FIRST ratchet counts (20 of them spelled
-# `tmp_path / "store"`, 13 not): those never reach `store_root`, live on disk rather
-# than tmpfs, and are that ratchet's business, not this budget's.
+# it a claim about the 15 inline sites `_DISK_ROOTED_ALLOWLIST` enumerates: those never
+# reach `store_root`, live on disk rather than tmpfs, and are the census's business,
+# not this budget's.
 
 # How much bigger than the measured peak the budget must be. 🔴 THE PREVIOUS BUDGET HAD
 # ZERO SLACK — 1,875,968 was exactly (442 + 16) * 4096 where 442 was the sweep's own
