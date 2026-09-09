@@ -4,25 +4,40 @@ WHY THIS FILE EXISTS — both features were built from measurements, and both ar
 the kind whose failure mode is a HANG or a silently-skipped tier rather than a
 wrong answer, so they need controls that watch them actually bite.
 
-SLOT LIMITER. Nothing serialised gate runs. Measured 2026-09-08 across 237 real
-runs, bucketed by overlapping runs: 0 others -> 14.5 min median, 6+ others ->
-48.9 min. 3.4x, and superlinear (7 runs x 4 workers on 24 cores fair-shares to
-~1.2x). 35 of the 117 red runs in that window died on SIGTERM at the 3600s cap,
-producing no verdict for an hour of wall clock.
+SLOT LIMITER. Nothing serialised gate runs on a box where dozens of agent
+sessions each start their own. ⚠ THE HEADLINE NUMBER THIS FILE USED TO CARRY IS
+WITHDRAWN: "0 others -> 14.5 min, 6+ others -> 48.9 min, 3.4x and superlinear"
+was measured across 237 real runs, but bucketing runs by how many others
+overlapped them is length-biased — a long run overlaps more runs BY
+CONSTRUCTION — so the trend appears with zero interaction between runs. A null
+Monte Carlo (237 runs, Poisson arrivals, lognormal durations fitted to the same
+marginal, no interaction at all) reproduces the shape, the 14.5 min baseline and
+~2.06x of the 3.4x. Contention is real and its mechanism is uncontroversial;
+that dataset cannot size it. What the same window does support, being a count
+rather than a bucketed median: 35 of the 117 red runs died on SIGTERM at the
+3600s cap, producing no verdict for an hour of wall clock.
 
 RE-EXEC. `run-tests.sh` refuses to run without its REQUIRED_TOOLS and prints the
-`nix develop` line that fixes it. 100 of the 100 gate log dirs in /tmp using the
-default log location died on exactly that, pytest never starting — a correct
-instruction being re-typed by hand, 100 times.
+`nix develop` line that fixes it. Measured across every gate log dir on the box,
+101 of 382 runs (26%) died on exactly that with pytest never starting. ⚠ The
+earlier "100 of 100" was a population defined by the failure's own cause: the
+default LOG_DIR is a `mktemp -d`, so runs inside `nix develop` land under nix's
+per-shell TMPDIR and only runs OUTSIDE it land in bare /tmp — 101/101 there, and
+0 of 281 inside.
 
 Every test here drives the REAL gate.sh with the documented runner seams and its
 own private slot dir, so nothing it does can contend with a live gate run on the
-box, and nothing on the box can make it flake.
+box, and nothing on the box can make it flake. 🔴 `_gate_env` SCRUBS the
+operator-facing gate variables out of the inherited environment: an exported
+DEVRC_GATE_SLOT_DIR used to be inherited straight into these runs, which joined
+the operator's pool, queued behind it and turned this file's own positive
+control red on a TimeoutExpired.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -44,6 +59,27 @@ GATE = REPO / "scripts" / "gate.sh"
 # that has no limiter in it at all: green on the base commit, for a feature that
 # did not exist. Parentheses and the space make this unreachable by any path.
 QUEUED_MARKER = "slot(s) busy"
+
+# 🔴 EVERY GATE VARIABLE THE AMBIENT ENVIRONMENT MIGHT CARRY. A test that
+# inherits one of these is steered by whoever exported it: measured by an
+# auditor, `DEVRC_GATE_SLOT_DIR` exported with the pool held made
+# `test_a_green_runner_gives_a_green_gate_and_a_nonzero_count` fail on a 120s
+# TimeoutExpired after the gate printed `all 2 slot(s) busy — queueing`. This
+# list is derived from gate.sh in
+# `test_the_help_text_documents_every_env_var_the_script_reads`, which fails if
+# the script grows a variable nothing here has considered.
+_AMBIENT_GATE_VARS = (
+    "DEVRC_GATE_TIMEOUT",
+    "DEVRC_GATE_SLOTS",
+    "DEVRC_GATE_SLOT_WAIT",
+    "DEVRC_GATE_SLOT_DIR",
+    "DEVRC_GATE_SLOT_POOL",
+    "DEVRC_GATE_NO_REEXEC",
+    "DEVRC_GATE_ENV",
+    "DEVRC_GATE_REEXEC",
+    "DEVRC_GATE_PYTEST_RUNNER",
+    "DEVRC_GATE_NODE_RUNNER",
+)
 
 
 def _fake_runner(path: Path, *, sleep: float = 0.0, verdict: str = "PASS") -> Path:
@@ -71,13 +107,16 @@ def _fake_runner(path: Path, *, sleep: float = 0.0, verdict: str = "PASS") -> Pa
 
 def _gate_env(tmp_path: Path, **over: str) -> dict[str, str]:
     env = dict(os.environ)
+    for var in _AMBIENT_GATE_VARS:
+        env.pop(var, None)
     runner = _fake_runner(tmp_path / "fake-runner.sh")
     env.update(
         {
             "DEVRC_GATE_PYTEST_RUNNER": str(runner),
             "DEVRC_GATE_NODE_RUNNER": str(runner),
-            # Never let a test re-enter `nix develop`: it would cost minutes and
-            # would be testing nix, not this script.
+            # Never let a test re-enter `nix develop` by accident: it would cost
+            # minutes and would be testing nix, not this script. The tests that
+            # are ABOUT the re-exec pop this deliberately.
             "DEVRC_GATE_NO_REEXEC": "1",
         }
     )
@@ -195,6 +234,10 @@ def test_slots_zero_disables_the_limiter(tmp_path):
     proc = _run_gate(tmp_path, env, "--tier", "pytest")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "slot limiter DISABLED" in proc.stdout
+    assert "slot: NONE HELD — DISABLED" in proc.stdout, (
+        "the report line must say WHY no slot is held; `NONE HELD` alone reads "
+        f"identically to a run that queued and gave up.\n{proc.stdout}"
+    )
 
 
 def test_a_full_pool_fails_open_rather_than_blocking_forever(tmp_path):
@@ -230,6 +273,50 @@ def test_a_full_pool_fails_open_rather_than_blocking_forever(tmp_path):
         "an unslotted run must SAY it was unslotted; its timing is not "
         f"comparable to a slotted one.\n{proc.stdout}"
     )
+    assert "this run CONTENDED" in proc.stdout, (
+        "giving up on a slot is the ONE unslotted state that is a claim about "
+        f"contention, and the report must distinguish it from the others.\n{proc.stdout}"
+    )
+
+
+def test_an_unopenable_pool_is_not_reported_as_contention(tmp_path):
+    """A lock file that cannot be OPENED is a pool problem, not a busy pool.
+
+    The old loop sent an open failure down the same `|| continue` path as a held
+    lock, so the gate announced `slot(s) busy — queueing` for a pool nobody was
+    holding, waited out DEVRC_GATE_SLOT_WAIT, and then blamed contention. The
+    diagnosis a reader takes from that log is wrong in the expensive direction.
+
+    Here the slot dir exists but is not writable, so `slot-1.lock` cannot be
+    created and the gate must say so instead of claiming the pool is busy.
+    """
+    if os.geteuid() == 0:
+        import pytest
+
+        pytest.skip("root ignores the directory permission this test depends on")
+    slots = tmp_path / "slots"
+    slots.mkdir()
+    os.chmod(slots, 0o500)
+    try:
+        env = _gate_env(
+            tmp_path,
+            DEVRC_GATE_SLOTS="1",
+            DEVRC_GATE_SLOT_DIR=str(slots),
+            # Large on purpose: a run that misdiagnosed this as contention would
+            # sit here for the whole budget and blow the test's own timeout.
+            DEVRC_GATE_SLOT_WAIT="600",
+        )
+        proc = _run_gate(tmp_path, env, "--tier", "pytest", timeout=120)
+    finally:
+        os.chmod(slots, 0o700)
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined
+    assert QUEUED_MARKER not in combined, (
+        "the gate announced contention for a pool it could not even open.\n" + combined
+    )
+    assert "could not open any lock file" in combined, combined
+    assert "not a contention condition" in proc.stdout, proc.stdout
+    assert "GATE: RESULT=PASS" in proc.stdout, combined
 
 
 def test_a_held_slot_is_named_in_the_gate_report(tmp_path):
@@ -251,9 +338,86 @@ def test_the_limiter_is_inert_when_nested_and_no_slot_dir_is_named(tmp_path):
     proc = _run_gate(tmp_path, env, "--tier", "pytest")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "slot limiter INERT" in proc.stdout, proc.stdout
+    assert "nested inside pytest" in proc.stdout, proc.stdout
+
+
+def test_a_descendant_does_not_queue_behind_its_own_ancestors_slot(tmp_path):
+    """ONE SLOT PER GATE TREE. A nested run must not wait for a lock its own
+    ancestor holds — that is a deadlock built out of a performance feature.
+
+    Reproduces the reachable shape directly: hold the pool's only slot from this
+    process, then run the gate with DEVRC_GATE_SLOT_POOL already naming that
+    pool, exactly as an outer gate run would have exported it. Without the
+    ancestry check the run queues for the whole DEVRC_GATE_SLOT_WAIT and this
+    test times out; with it, the run is inert and finishes at once.
+    """
+    import fcntl
+
+    slots = tmp_path / "slots"
+    slots.mkdir()
+    holder = open(slots / "slot-1.lock", "a")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        env = _gate_env(
+            tmp_path,
+            DEVRC_GATE_SLOTS="1",
+            DEVRC_GATE_SLOT_DIR=str(slots),
+            DEVRC_GATE_SLOT_POOL=str(slots),
+            DEVRC_GATE_SLOT_WAIT="600",
+        )
+        proc = _run_gate(tmp_path, env, "--tier", "pytest", timeout=120)
+    finally:
+        holder.close()
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined
+    assert QUEUED_MARKER not in combined, (
+        "the run queued for a pool its own ancestor already holds a place in.\n" + combined
+    )
+    assert "an ancestor gate run already" in proc.stdout, proc.stdout
+    assert "GATE: RESULT=PASS" in proc.stdout, combined
+
+
+def test_a_gate_run_names_the_pool_it_holds_for_its_descendants(tmp_path):
+    """The other half: the marker has to be EXPORTED, or the check above is dead.
+
+    A runner that prints its own environment is the only place this is
+    observable — the variable exists to be inherited by whatever the tier
+    spawns, which is exactly the population that used to deadlock.
+    """
+    slots = tmp_path / "slots"
+    d = tmp_path / "one"
+    d.mkdir()
+    probe = d / "probe.sh"
+    write_exec(
+        probe,
+        "echo '======== FAKE SUMMARY ========'\n"
+        'echo "POOL_SEEN=[${DEVRC_GATE_SLOT_POOL:-<unset>}]"\n'
+        "echo 'RESULT: PASS (exit=0)'\n"
+        "exit 0\n",
+    )
+    env = _gate_env(d, DEVRC_GATE_SLOTS="2", DEVRC_GATE_SLOT_DIR=str(slots))
+    env["DEVRC_GATE_PYTEST_RUNNER"] = str(probe)
+    proc = subprocess.run(
+        ["bash", str(GATE), "--tier", "pytest", "--log-dir", str(d / "L"), str(REPO)],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    log = (d / "L" / "pytest.log").read_text()
+    assert f"POOL_SEEN=[{slots}]" in log, (
+        "the tier's children did not inherit DEVRC_GATE_SLOT_POOL, so nothing "
+        f"they spawn can tell that this tree already has a slot.\n{log}"
+    )
 
 
 def test_a_rejected_slot_count_is_a_usage_error_not_a_verdict(tmp_path):
+    """Config that does not parse is a REFUSAL, and deliberately so.
+
+    The limiter fails open on every RUNTIME condition, but a typo'd slot count
+    must not be silently read as "unlimited". Exit 2 is the script's usage code
+    and is never a verdict about the tests — which is why the FAIL-OPEN comment
+    in gate.sh now names this exception instead of claiming nothing can change
+    the outcome.
+    """
     env = _gate_env(tmp_path, DEVRC_GATE_SLOTS="two", DEVRC_GATE_SLOT_DIR=str(tmp_path / "s"))
     proc = _run_gate(tmp_path, env, "--tier", "pytest")
     assert proc.returncode == 2, (
@@ -328,10 +492,10 @@ def test_an_orphan_spawned_by_the_tier_does_not_keep_holding_the_slot(tmp_path):
 def test_time_spent_waiting_is_not_charged_to_the_timeout(tmp_path):
     """The --timeout cap must start when the TIER starts, not at process start.
 
-    A run that queued 20 min behind another must still get its full budget;
-    otherwise the limiter manufactures the very timeout it exists to prevent.
-    Here: a 3s hold on the only slot, a 2s tier, and a 4s cap. If queue time
-    were charged, the tier would be killed and the gate would go red.
+    A run that queued behind another must still get its full budget; otherwise
+    the limiter manufactures the very timeout it exists to prevent. Here: a 3s
+    hold on the only slot, a 2s tier, and a 4s cap. If queue time were charged,
+    the tier would be killed and the gate would go red.
     """
     import fcntl
     import threading
@@ -360,9 +524,15 @@ def test_time_spent_waiting_is_not_charged_to_the_timeout(tmp_path):
 
 
 # --- the re-exec --------------------------------------------------------------
+#
+# 🔴 EVERY TEST BELOW POPS PYTEST_CURRENT_TEST. That is not boilerplate: it is
+# the ONLY remaining short-circuit in front of the three re-exec guards, and
+# leaving it set is how all three of them used to be unreachable. See the
+# GATE_NESTED comment in gate.sh for the mutation table.
 
 
 def _fake_nix(path: Path, record: Path) -> Path:
+    """A `nix` that records the argv it was handed and does NOT exec it."""
     return write_exec(
         path,
         textwrap.dedent(
@@ -374,22 +544,32 @@ def _fake_nix(path: Path, record: Path) -> Path:
     )
 
 
+def _reexec_env(tmp_path: Path, bindir: Path, **over: str) -> dict[str, str]:
+    """An env in which the re-exec would fire unless a guard stops it.
+
+    Keeps the runner seams — they are cheap and they no longer suppress the
+    re-exec — so a guard that DOES fire leaves the gate running a fake runner in
+    milliseconds rather than the real 7k-test suite.
+    """
+    env = _gate_env(tmp_path, **over)
+    env.pop("DEVRC_GATE_NO_REEXEC", None)
+    env.pop("DEVRC_GATE_ENV", None)
+    env.pop("DEVRC_GATE_REEXEC", None)
+    env.pop("PYTEST_CURRENT_TEST", None)
+    env["DEVRC_GATE_SLOT_DIR"] = str(tmp_path / "s")
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    env.update(over)
+    return env
+
+
 def test_it_re_enters_nix_develop_when_not_in_a_gate_environment(tmp_path):
-    """The 100-wasted-invocations fix, observed through a recording fake `nix`."""
+    """The wasted-invocations fix, observed through a recording fake `nix`."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     record = tmp_path / "argv.txt"
     _fake_nix(bindir / "nix", record)
 
-    env = _gate_env(tmp_path, DEVRC_GATE_SLOT_DIR=str(tmp_path / "s"))
-    env.pop("DEVRC_GATE_NO_REEXEC")
-    # The seams would suppress the re-exec; this test is ABOUT the re-exec.
-    env.pop("DEVRC_GATE_PYTEST_RUNNER")
-    env.pop("DEVRC_GATE_NODE_RUNNER")
-    env.pop("PYTEST_CURRENT_TEST", None)
-    env.pop("DEVRC_GATE_ENV", None)
-    env["PATH"] = f"{bindir}:{env['PATH']}"
-
+    env = _reexec_env(tmp_path, bindir)
     proc = subprocess.run(
         ["bash", str(GATE), "--tier", "pytest", "--log-dir", str(tmp_path / "L"), str(REPO)],
         capture_output=True, text=True, env=env, timeout=120,
@@ -410,60 +590,198 @@ def test_it_re_enters_nix_develop_when_not_in_a_gate_environment(tmp_path):
 
 
 def test_it_does_not_re_exec_when_already_in_a_gate_environment(tmp_path):
-    env = _gate_env(tmp_path, DEVRC_GATE_SLOT_DIR=str(tmp_path / "s"))
-    env.pop("DEVRC_GATE_NO_REEXEC")
-    env["DEVRC_GATE_ENV"] = "1"
+    """DEVRC_GATE_ENV=1 is the normal exit condition: the flake's shellHook set it.
+
+    🔴 Reaches its guard: no runner-seam short-circuit stands in front of it any
+    more, and PYTEST_CURRENT_TEST is popped. Deleting the DEVRC_GATE_ENV guard
+    from gate.sh makes this test fail — before, it did not.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    record = tmp_path / "argv.txt"
+    _fake_nix(bindir / "nix", record)
+    env = _reexec_env(tmp_path, bindir, DEVRC_GATE_ENV="1")
     proc = _run_gate(tmp_path, env, "--tier", "pytest")
+    assert not record.exists(), (
+        "the gate re-entered `nix develop` from inside a gate environment — the "
+        f"DEVRC_GATE_ENV guard did not fire.\n{proc.stdout}{proc.stderr}"
+    )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "re-entering" not in proc.stdout, proc.stdout
 
 
 def test_the_loop_guard_stops_a_second_re_exec(tmp_path):
     """If the flake's shellHook ever stops setting DEVRC_GATE_ENV, this is what
-    keeps the re-exec from being a fork bomb rather than a wrong answer."""
+    keeps the re-exec from being a fork bomb rather than a wrong answer.
+
+    DEVRC_GATE_ENV is deliberately absent here, so the ONLY thing standing
+    between this run and a second `nix develop` is DEVRC_GATE_REEXEC — the
+    variable gate.sh sets on itself on the way in.
+    """
     bindir = tmp_path / "bin"
     bindir.mkdir()
     record = tmp_path / "argv.txt"
     _fake_nix(bindir / "nix", record)
-    env = _gate_env(tmp_path, DEVRC_GATE_SLOT_DIR=str(tmp_path / "s"))
-    env.pop("DEVRC_GATE_NO_REEXEC")
-    env.pop("DEVRC_GATE_ENV", None)
-    env["DEVRC_GATE_REEXEC"] = "1"
-    env["PATH"] = f"{bindir}:{env['PATH']}"
+    env = _reexec_env(tmp_path, bindir, DEVRC_GATE_REEXEC="1")
     proc = _run_gate(tmp_path, env, "--tier", "pytest")
     assert not record.exists(), (
         "re-exec fired despite the loop guard being set — a second pass means "
-        "there is no bound on the recursion at all."
+        f"there is no bound on the recursion at all.\n{proc.stdout}{proc.stderr}"
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def test_no_reexec_opt_out_is_honoured(tmp_path):
+    """The documented escape hatch: run against the ambient PATH.
+
+    DEVRC_GATE_ENV and DEVRC_GATE_REEXEC are both absent, so this variable is
+    the only guard in play.
+    """
     bindir = tmp_path / "bin"
     bindir.mkdir()
     record = tmp_path / "argv.txt"
     _fake_nix(bindir / "nix", record)
-    env = _gate_env(tmp_path, DEVRC_GATE_SLOT_DIR=str(tmp_path / "s"))
-    env["DEVRC_GATE_NO_REEXEC"] = "1"
-    env.pop("DEVRC_GATE_ENV", None)
-    env["PATH"] = f"{bindir}:{env['PATH']}"
+    env = _reexec_env(tmp_path, bindir, DEVRC_GATE_NO_REEXEC="1")
     proc = _run_gate(tmp_path, env, "--tier", "pytest")
-    assert not record.exists()
+    assert not record.exists(), (
+        "DEVRC_GATE_NO_REEXEC=1 did not stop the re-exec.\n"
+        f"{proc.stdout}{proc.stderr}"
+    )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_a_relative_path_invocation_survives_the_re_exec(tmp_path):
+    """`cd <repo>/scripts && bash gate.sh` must still produce a verdict.
+
+    `${BASH_SOURCE[0]}` is whatever the caller typed, `cd "$ROOT"` happens
+    before the re-exec, and the re-exec used to hand that relative path to the
+    inner shell — which resolved it against the NEW cwd and died
+    `bash: gate.sh: No such file or directory`, rc=127, with no GATE block, no
+    RESULT line and no instruction. Before the re-exec existed the same
+    invocation printed a correct, actionable FATAL, so this was a regression
+    into a code outside the script's whole documented exit set.
+
+    The fake `nix` here EXECS what it was handed rather than just recording it,
+    so the failure reproduces end to end instead of being inferred from an argv.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    record = tmp_path / "argv.txt"
+    write_exec(
+        bindir / "nix",
+        textwrap.dedent(
+            f"""\
+            printf '%s\\n' "$@" > {record}
+            shift 3          # drop: develop <root> --command
+            exec "$@"
+            """
+        ),
+    )
+    env = _reexec_env(tmp_path, bindir)
+    proc = subprocess.run(
+        ["bash", "gate.sh", "--tier", "pytest", "--log-dir", str(tmp_path / "L"), str(REPO)],
+        cwd=str(REPO / "scripts"),
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode != 127, (
+        "the re-exec handed a relative path to the inner shell; rc=127 is not "
+        f"in this script's documented exit set at all.\n{combined}"
+    )
+    assert record.exists(), combined
+    argv = record.read_text().split("\n")
+    handed = argv[4] if len(argv) > 4 else ""
+    assert os.path.isabs(handed) and handed.endswith("gate.sh"), (
+        f"the re-exec handed the inner shell {handed!r}, not an absolute path: {argv}"
+    )
+    assert "GATE: RESULT=PASS" in proc.stdout, (
+        f"the re-exec'd run produced no verdict.\n{combined}"
+    )
+    assert proc.returncode == 0, combined
+
+
+def _env_vars_gate_sh_reads() -> set[str]:
+    """Every environment variable gate.sh reads, DERIVED FROM THE SOURCE.
+
+    🔴 A LITERAL LIST HERE IS THE BUG THIS FUNCTION REPLACES. The predecessor of
+    the test below was named "...documents every env var the script reads" and
+    checked four hardcoded strings; four MORE that the script reads
+    (DEVRC_GATE_TIMEOUT, DEVRC_GATE_ENV, DEVRC_GATE_REEXEC,
+    PYTEST_CURRENT_TEST) were absent from --help and it was green. A guard whose
+    name says "every" must check every, or it reads as coverage while providing
+    none.
+
+    The rule is mechanical: an ALL-CAPS name read through a
+    tolerates-absence expansion (`${NAME:-…}`, `${NAME:+…}`, `${NAME-…}`,
+    `${NAME+…}`) BEFORE the script ever assigns it. That is what reading an
+    environment variable looks like and what reading one of the script's own
+    locals does not — `GATE_SLOT_STATE` is assigned at its declaration and read
+    afterwards, so it drops out; `DEVRC_GATE_REEXEC` is read first and exported
+    later, so it stays in, which is correct because both halves are real.
+    Comment lines are excluded, so documenting a variable cannot satisfy the
+    test that checks it is documented.
+    """
+    lines = GATE.read_text().splitlines()
+    body_start = next(i for i in range(1, len(lines)) if not lines[i].startswith("#"))
+    body = "\n".join(l for l in lines[body_start:] if not l.lstrip().startswith("#"))
+    first_read: dict[str, int] = {}
+    for m in re.finditer(r"\$\{([A-Z][A-Z0-9_]*)(?::-|:\+|:=|:\?|-|\+)", body):
+        first_read.setdefault(m.group(1), m.start())
+    first_assign: dict[str, int] = {}
+    for m in re.finditer(r"(?m)^[^\n]*?\b([A-Z][A-Z0-9_]*)=", body):
+        first_assign.setdefault(m.group(1), m.start())
+    return {n for n, p in first_read.items() if p < first_assign.get(n, 1 << 30)}
+
+
+def test_the_env_var_derivation_can_actually_see_a_variable():
+    """POSITIVE CONTROL for the derivation. A regex that matched nothing would
+    make the test below pass over an empty set — the reassuring zero."""
+    found = _env_vars_gate_sh_reads()
+    assert len(found) >= 8, f"the derivation found only {sorted(found)}"
+    for expected in ("DEVRC_GATE_SLOTS", "DEVRC_GATE_TIMEOUT", "PYTEST_CURRENT_TEST"):
+        assert expected in found, f"{expected} not derived; found {sorted(found)}"
+    # NEGATIVE CONTROL: a name gate.sh assigns before reading is not an env var.
+    assert "GATE_SLOT_STATE" not in found, sorted(found)
+    assert "TIER" not in found, sorted(found)
 
 
 def test_the_help_text_documents_every_env_var_the_script_reads():
     """--help used to be a hardcoded `sed 2,70p` and silently truncated as the
     header grew. A flag documented nowhere the operator looks is a flag that
-    does not exist."""
+    does not exist.
+
+    DEVRC_GATE_ENV is the one an operator most needs and the one that was
+    missing: the banner says "not in a gate environment (DEVRC_GATE_ENV unset)"
+    and --help could not say what that was.
+    """
     proc = subprocess.run(
         ["bash", str(GATE), "--help"], capture_output=True, text=True, timeout=30
     )
     assert proc.returncode == 0
-    for var in (
-        "DEVRC_GATE_SLOTS",
-        "DEVRC_GATE_SLOT_WAIT",
-        "DEVRC_GATE_NO_REEXEC",
-        "DEVRC_GATE_SLOT_DIR",
-    ):
-        assert var in proc.stdout, f"{var} is read by gate.sh but absent from --help"
+    undocumented = sorted(v for v in _env_vars_gate_sh_reads() if v not in proc.stdout)
+    assert not undocumented, (
+        f"gate.sh reads {undocumented} but --help never mentions them. Add each "
+        "to the `Env:` block in the header — that block IS the help text."
+    )
+
+
+def test_the_ambient_scrub_list_covers_every_gate_variable():
+    """The seam between two files, asserted as a LEDGER rather than a spot check.
+
+    `_gate_env` scrubs a hardcoded tuple; gate.sh owns the real set. If the
+    script grows a variable nobody adds to `_AMBIENT_GATE_VARS`, the next
+    exported value silently steers these tests again — which is exactly how an
+    exported DEVRC_GATE_SLOT_DIR turned this file's positive control red. Fails
+    when the set GROWS or SHRINKS, not merely when it disagrees in one
+    direction.
+
+    PYTEST_CURRENT_TEST is deliberately NOT scrubbed by `_gate_env`: it is
+    pytest's own, it is genuinely true while these tests run, and the re-exec
+    tests pop it themselves to reach the guards behind it.
+    """
+    derived = _env_vars_gate_sh_reads() - {"PYTEST_CURRENT_TEST"}
+    assert derived == set(_AMBIENT_GATE_VARS), (
+        "the scrub list and gate.sh's env vars disagree.\n"
+        f"  in gate.sh but not scrubbed: {sorted(derived - set(_AMBIENT_GATE_VARS))}\n"
+        f"  scrubbed but not in gate.sh: {sorted(set(_AMBIENT_GATE_VARS) - derived)}"
+    )

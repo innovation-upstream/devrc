@@ -106,6 +106,17 @@
 #              source, precisely because nobody TYPED it and it is therefore
 #              the harder of the two to notice. Prefer the flag; export this
 #              only for the length of one command.
+#   DEVRC_TEST_BUDGET_ONLY
+#              TEST SEAM. Stop right after the `parallelism =N` banner, having
+#              run no tests at all, and exit 3. Exists so
+#              `scripts/tests/test_run_tests_jobs.py` can observe the worker
+#              budget eleven times without paying eleven full nested runs. It
+#              can only ever make a run RED — see the block next to the banner.
+#   DEVRC_TEST_CGROUP_ROOT / DEVRC_TEST_CGROUP_SELF
+#              TEST SEAM. Point the CPU-quota walk at a fake cgroup hierarchy so
+#              the container branch (a quota NARROWER than the node's core
+#              count) is testable on a host that has no quota — which is every
+#              host here. See the _devrc_cpu_budget block.
 #
 # Usage:
 #   scripts/run-tests.sh [--set hermetic|all] [--check-targets] [--check-floors]
@@ -3391,10 +3402,11 @@ EXPECTED_SKIPS=(
   # recommends for a bisect or a flake hunt. Before this entry that mode exited
   # 1 on GUARD 2 alone: #841 introduced both the test and the parallelism, so it
   # shipped a race whose documented workaround it had broken.
-  # ⚠ "the gate tiers run parallel" is NPROC-DERIVED, NOT structural, so say the
-  # conditional part out loud: `_devrc_default_jobs` is `min(nproc, 4)`, and the
-  # comment beside it anticipates 1–2-core CI nodes. Measured 2026-08-26 on
-  # THIS host: `nix build .#checks.x86_64-linux.pytests` logged
+  # ⚠ "the gate tiers run parallel" is DERIVED FROM THE MACHINE, NOT structural,
+  # so say the conditional part out loud: `_devrc_default_jobs` is
+  # `min(nproc, narrowest cgroup v2 quota, 8)` — see the block that computes it —
+  # and it anticipates 1–2-core CI nodes. Measured 2026-08-26 on THIS host, when
+  # the cap was still 4: `nix build .#checks.x86_64-linux.pytests` logged
   # `parallelism =4 (-n 4 --dist loadfile)`, so the sandbox saw >= 4 cores and
   # the control ran. On a genuinely 1-core builder the gating tier is SERIAL, this
   # pin applies, and GUARD 9's positive control does not run behind a green
@@ -3618,16 +3630,44 @@ _devrc_cpu_budget() {
   # quota wins. Fail-open: any unreadable step just leaves the answer empty.
   local cg d q p root self
   root="${DEVRC_TEST_CGROUP_ROOT:-/sys/fs/cgroup}"
+  root="${root%/}"           # normalised so the `break` below can string-compare
+  [ -n "$root" ] || root="/"
   self="${DEVRC_TEST_CGROUP_SELF:-/proc/self/cgroup}"
-  cg="$(cut -d: -f3 "$self" 2>/dev/null | head -1)"
+  # 🔴 THE `0::` LINE, NOT THE FIRST LINE. `cut -d: -f3 | head -1` took whichever
+  # line came first, and on a HYBRID v1+v2 host that is a cgroup v1 controller
+  # line — so a real v2 quota was missed and the budget silently fell back to
+  # `nproc`. `sed -n 's/^0:://p'` selects the unified-hierarchy line by its own
+  # marker, and because it strips a fixed PREFIX rather than splitting on `:` it
+  # also survives a cgroup path that itself contains a colon (a systemd scope
+  # name can).
+  cg="$(sed -n 's/^0:://p' "$self" 2>/dev/null | head -1)"
   [ -n "$cg" ] || return 0
+  # 🔴 STRIP THE TRAILING SLASH BEFORE THE WALK. In a k8s cgroupns-private
+  # container `/proc/self/cgroup` reads `0::/`, so `${root}${cg}` is
+  # `<root>/` — which never string-equals `$root`, so the `break` below never
+  # fires, and `dirname "<root>/"` returns the PARENT of the root. The walk then
+  # climbs out of the hierarchy it was given, which is exactly the escape the
+  # break exists to prevent. Normalising here makes the terminator comparable.
   d="${root}${cg}"
+  d="${d%/}"
+  [ -n "$d" ] || d="/"
   while [ "${d:-/}" != "/" ]; do
     if [ -r "$d/cpu.max" ]; then
-      # 🔴 Reset BEFORE the read, not after. A `read` that fails (empty file,
-      # short line) leaves the PREVIOUS iteration's values in place, so a
-      # deeper level's quota would be re-reported as this level's — a wrong
-      # number, not a missing one, which is the failure that reads as success.
+      # Reset BEFORE the read, not after. The intent: a `read` that fails
+      # (empty file, short line) must not leave the PREVIOUS iteration's values
+      # in place, because a deeper level's quota re-reported as this level's is
+      # a wrong number rather than a missing one.
+      #
+      # ⚠ LABELLED HONESTLY — THIS IS AN INVARIANT GUARD, NOT TESTED COVERAGE.
+      # Measured 2026-09-08 by deleting these two assignments and running
+      # `scripts/tests/test_run_tests_jobs.py`: 15 passed, mutant SURVIVED. No
+      # fixture reachable through the DEVRC_TEST_CGROUP_* seam can make it
+      # matter — bash's `read` assigns its variables even when it returns
+      # non-zero at EOF, and this walk RETURNS on the first numeric quota, so a
+      # stale NUMERIC pair can never reach a later iteration. Kept because it
+      # costs nothing and forecloses a silent failure if this loop ever stops
+      # returning early; do not count it as covered, and do not restate the
+      # earlier version of this comment, which asserted it was load-bearing.
       q=""; p=""
       read -r q p < "$d/cpu.max" 2>/dev/null || true
       case "${q:-}" in
@@ -3715,6 +3755,32 @@ fi
 # whether it was parallel cannot be compared against another run's timing, and
 # "it was serial all along" is exactly the failure the `unset` above prevents.
 echo "  parallelism =${PYTEST_JOBS} pytest worker(s)$([ "$PYTEST_JOBS" -gt 1 ] && echo " (-n ${PYTEST_JOBS} --dist loadfile)" || echo " (serial)")"
+
+# TEST SEAM: stop HERE, having computed and announced the worker budget and
+# nothing else.
+#
+# 🔴 WHY IT EXISTS. `scripts/tests/test_run_tests_jobs.py` asserts on the banner
+# line above and on nothing after it, but every case still needs its own process
+# (each drives a different fake cgroup through DEVRC_TEST_CGROUP_ROOT/SELF), so
+# it cannot share one run. Measured 2026-09-08 on the workbench: a full nested
+# run costs ~150s wall, and the file has eleven of them — ~28 minutes of nested
+# runs added to the very tier this change exists to speed up, spawning 8 xdist
+# workers each inside an outer run that already has 8. With this seam each case
+# costs the preamble only.
+#
+# 🔴 IT CANNOT MANUFACTURE A GREEN. The exit is NON-ZERO on purpose, so the EXIT
+# trap emits `RESULT: FAIL (exit=3)`: a run that executed no tests must never be
+# readable as a pass, and an ambient `DEVRC_TEST_BUDGET_ONLY` leaking into a real
+# gate run therefore reds it loudly instead of quietly skipping the suite. Exit 3
+# is this file's established "an environment precondition stopped the run before
+# it could say anything about the tests" code — the same one `--targets` and the
+# DEVRC_TEST_JOBS validation use — and is deliberately NOT 1 ("tests failed").
+if [ -n "${DEVRC_TEST_BUDGET_ONLY:-}" ]; then
+  echo "run-tests: DEVRC_TEST_BUDGET_ONLY is set — stopping after the parallelism"
+  echo "           banner. NO TESTS RAN. This is a test seam for"
+  echo "           scripts/tests/test_run_tests_jobs.py, never a way to pass the gate." >&2
+  exit 3
+fi
 
 # --- session-marker accounting, shared by GUARDS 7, 8 and 10 -------------------
 # All three ask the same question of the same quantity — "did this plugin

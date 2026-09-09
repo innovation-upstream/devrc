@@ -162,16 +162,28 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   🔴 **It now RE-ENTERS `nix develop` itself, and it QUEUES rather than piling on.** Two
   behaviours that look like a hang and are not. (a) Launched outside a gate environment it
   re-execs into the repo's dev shell instead of printing the `nix develop …` line for you to
-  re-type — measured 2026-09-08, **100 of the 100** default-location gate log dirs in `/tmp`
-  had died on that FATAL with pytest never starting, the node tier paid twice each time.
-  `DEVRC_GATE_NO_REEXEC=1` opts out. (b) At most `DEVRC_GATE_SLOTS` (default **2**) gate runs
-  execute at once per box; the rest print `slot(s) busy` and wait. Measured over 237 real runs
-  bucketed by overlap: **0 others → 14.5 min median, 6+ others → 48.9 min**, i.e. 3.4x and
-  superlinear, with 35 of 117 reds dying on SIGTERM at the 3600s cap having produced no verdict
-  at all. 🔴 **A queued gate is WORKING — do not kill it and do not `DEVRC_GATE_SLOTS=0`
-  around it**; the `--timeout` budget starts when the tier starts, so queue time is never
-  charged to the tests. The GATE block prints `slot: N of M` or `slot: NONE HELD`, and only a
-  slotted run's duration is comparable to another's.
+  re-type — measured 2026-09-08 across every gate log dir on the box, **101 of 382 runs (26%)**
+  had died on that FATAL with pytest never starting, and 91 of those 101 paid the node tier
+  anyway. ⚠ An earlier version of this bullet said **100 of 100**; that population was defined
+  by the failure's own cause (the default `LOG_DIR` is a `mktemp -d`, so only runs launched
+  OUTSIDE the dev shell land in bare `/tmp` — 101/101 there, 0 of 281 inside).
+  `DEVRC_GATE_NO_REEXEC=1` opts out. (b) At most `DEVRC_GATE_SLOTS` (default **2**) `gate.sh`
+  runs execute at once **per (uid, slot pool)** — 🔴 **not per box**: it does not cover
+  pytest-nested runs (inert by default), it does not cover either `nix build` check tier (which
+  cannot join the pool — it runs in a sandbox, and its concurrency is nix's own `max-jobs`), a
+  descendant of a gate run is inert rather than queued, and the bound lapses after
+  `DEVRC_GATE_SLOT_WAIT` (default **600s**), after which the run proceeds unslotted. 🔴 **A
+  queued gate is WORKING — do not kill it and do not `DEVRC_GATE_SLOTS=0` around it**; it
+  prints a heartbeat every 60s, and the `--timeout` budget starts when the tier starts, so
+  queue time is never charged to the tests. The GATE block prints `slot: N of M` or
+  `slot: NONE HELD — <why>`, and only a slotted run's duration is comparable to another's.
+  ⚠ **The contention number this feature was justified with is WITHDRAWN, and the feature is
+  kept anyway.** "237 runs bucketed by overlap: 0 others → 14.5 min, 6+ → 48.9 min, 3.4x and
+  superlinear" is length-biased — a longer run overlaps more runs *by construction* — and a
+  null Monte Carlo with zero interaction reproduces the shape, the baseline and ~2.06x of the
+  3.4x. Contention is real; **that dataset cannot size it**, so do not quote 3.4x. What the
+  same window does support, being a count and not a bucketed median: **35 of 117 red runs died
+  on SIGTERM at the 3600s cap**, producing no verdict for an hour of wall clock.
 - 🔴 **BUILD THE TWO `nix` CHECK DERIVATIONS ONE AT A TIME — a combined invocation produces FALSE FAILURES.** `nix build .#checks.x86_64-linux.pytests .#checks.x86_64-linux.nodetests` builds both concurrently, and the tests that shell out to nested `nix` then contend on the store. MEASURED 2026-08-30 on one tree: the combined call reported **2 failures** — `SQLite database … is busy` evaluating `nix/home.nix`, and `OperationalError('database is locked')` in dl-router — while the SAME tree, same derivations, run **sequentially**, reported **0**. Load-dependent, so earlier combined runs were green and looked fine. **A combined GREEN is trustworthy** (a contended run fails loudly, it does not fake a pass); **a combined RED is not**, until re-checked one at a time. This cost a near-miss report of "PR #1029 broke the gate", against a diff that touched one test file and could not reach either failure. ⚠ Same run also reproduced the documented `| tail` trap: `nix build … | tail` printed `NIXBUILD_RC=0` for a build that had just failed 45 tests — read the runners' own `RESULT:` lines, never the piped exit code.
 - **To run a SUBSET, use the flake devShell — it already carries the gate toolchain:** `nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q` (cwd-independent with absolute paths; MEASURED from the repo root and from `/tmp`, pytest 9.1.1). `gate.sh` has no per-file filter and `run-tests.sh`'s positional is a repo ROOT, not a test selector — but that is a gap in those two entry points, **not** in the repo: the toolchain is there, by another door. 🔴 **`.envrc` is `use opencode`, so a loaded direnv does NOT put pytest on PATH** — and the worktree recipe in `claude/RULES.md` says to copy `.envrc`, which propagates that env into every worktree. A bare `python3 -m pytest` failing with `No module named pytest` therefore means you are in the opencode shell, never that the suite is unrunnable. This bullet exists because three true observations — no `gate.sh` filter, no `run-tests.sh` selector, direnv has no pytest — were read as "no subset mode exists", and an ad-hoc `nix-shell -p` was built instead of opening the door that was already there.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
