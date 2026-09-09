@@ -932,7 +932,12 @@ Facts = namedtuple(
     "pr repo title base_ref url round_no cwd_repo_dir cwd_repo_slug repo_relation "
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
     "ledger assembled_at claims_source head_check base_assumed "
-    "base_assumed_reason repo_unknown_reason",
+    "base_assumed_reason repo_unknown_reason round_zero",
+    # `round_zero` is appended LAST and defaulted so that every existing
+    # construction — including the suite's — keeps working unchanged. It is
+    # None for every round except 0, and None AT round 0 means the skill was
+    # not readable, which `render_checklist` reports rather than hiding.
+    defaults=(None,),
 )
 # 🔴 `repo_unknown_reason` — ROUND 13'S NINTH INSTANCE, AND THE THIRD IN THIS
 # EXACT FAMILY. `no_sha_reason` was `headRefOid`, `base_assumed_reason` was
@@ -3220,6 +3225,20 @@ def render_ledger(facts):
         ])
     led = facts.ledger
     if led is None:
+        # 🔴 ROUND 0 GETS ITS OWN SENTENCE. It reaches this branch for the same
+        # mechanical reason round 1 does (no previous round to attribute
+        # against), but "a first, full audit" is a false description of it —
+        # and round 0 carries a DIFFERENT ledger line, which the reader would
+        # otherwise never be told to write.
+        if facts.round_no == 0:
+            lines += [
+                "Not measured, and not measurable: round 0 runs before any fix "
+                "exists, so there is no payload to attribute. Carry the "
+                "round-0 ledger from the section above instead — `round 0 · "
+                "requirements: N (unattributed: U) · deletion candidates: D` — "
+                "and start THIS ledger at round 2.",
+            ]
+            return "\n".join(lines)
         lines += [
             "Not measured: a first, full audit has no previous round to "
             "attribute against. Start the ledger at your round 2.",
@@ -3341,6 +3360,32 @@ def render_checklist(facts):
     that has already been silently shaved once, with a commit message claiming
     the opposite. The paraphrase would have drifted with nothing watching.
     """
+    # 🔴 ROUND 0 IS A DIFFERENT PASS, NOT A LIGHTER ONE. It asks whether the
+    # change should exist; the nine axes ask whether it is correct. Emitting
+    # both would let the auditor answer the correctness question first, which
+    # is the exact ordering failure the section exists to prevent — so this
+    # returns the round-0 section INSTEAD of the checklist, not before it.
+    if facts.round_no == 0:
+        if not facts.round_zero:
+            return "\n".join([
+                "## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE",
+                "",
+                "⚠ **COULD NOT INLINE the round-0 section** — "
+                "`~/.claude/skills/audit-pr/SKILL.md` was not readable from "
+                "here, so no instructions are printed rather than a guess at "
+                "them. Read its **ROUND 0** section and work its five steps in "
+                "order, or re-run this assembly where the skill is readable.",
+            ])
+        return "\n".join([
+            "## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE",
+            "",
+            "This round works the section below **instead of** the nine axes, "
+            "which are not in this brief. Do not audit for correctness here: "
+            "that is round 1's job, and doing it first is the ordering failure "
+            "this round exists to prevent.",
+            "",
+            facts.round_zero,
+        ])
     lines = ["## AUDIT FOR", ""]
     if facts.round_no >= 2:
         lines += [
@@ -3372,10 +3417,12 @@ def render_output_contract(facts):
 
 
 def render_brief(facts):
-    kind = (
-        "FIRST, FULL adversarial audit" if facts.round_no < 2
-        else f"DELTA re-audit — ROUND {facts.round_no}"
-    )
+    if facts.round_no == 0:
+        kind = "ROUND 0 — REQUIREMENTS & DELETION pass (NOT a correctness audit)"
+    elif facts.round_no < 2:
+        kind = "FIRST, FULL adversarial audit"
+    else:
+        kind = f"DELTA re-audit — ROUND {facts.round_no}"
     head = "\n".join([
         f"# {kind} — PR #{facts.pr} in `{facts.repo}`",
         "",
@@ -3644,6 +3691,38 @@ def _read_checklist(repo_dir):
     return None
 
 
+ROUND_ZERO_HEADING = "## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE"
+
+
+def _read_round_zero(repo_dir):
+    """The round-0 section, read from the skill rather than duplicated here.
+
+    Same seam and same reason as `_read_checklist`: a second copy of a block
+    that lives in SKILL.md is a second thing to keep in step, and this one
+    carries its OWN retirement condition — a paraphrase here would let the
+    section be deleted from the skill while the brief kept dispatching it.
+
+    Returns None when the skill is not readable from here, which the caller
+    reports rather than papering over: round 0 with no instructions is not a
+    round 0.
+    """
+    for cand in (
+        Path(repo_dir) / "claude" / "skills" / "audit-pr" / "SKILL.md",
+        Path.home() / ".claude" / "skills" / "audit-pr" / "SKILL.md",
+    ):
+        try:
+            body = cand.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        m = re.search(
+            r"^" + re.escape(ROUND_ZERO_HEADING) + r"[^\n]*\n(.*?)(?=\n## )",
+            body, re.M | re.S,
+        )
+        if m:
+            return m.group(1).strip()
+    return None
+
+
 def build_parser():
     ap = argparse.ArgumentParser(
         prog="audit-dispatch.py",
@@ -3655,7 +3734,9 @@ def build_parser():
     # `pr=None`.
     ap.add_argument("pr", type=int, nargs="?", help="the PR number")
     ap.add_argument("--round", dest="round_no", type=int, default=1,
-                    help="round number; >=2 assembles a DELTA re-audit brief")
+                    help="round number; 0 assembles the ROUND 0 requirements "
+                         "& deletion pass (the nine axes are NOT in that "
+                         "brief); >=2 assembles a DELTA re-audit brief")
     ap.add_argument("--repo", help="owner/name, when the PR is not in the cwd's repo")
     ap.add_argument("--out", help="write the brief to this file instead of stdout")
     ap.add_argument("--check", metavar="FILE",
@@ -3719,12 +3800,16 @@ def check_brief_file(path, out_stream, err_stream):
 
 
 def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
-         checklist_reader=None):
+         checklist_reader=None, round_zero_reader=None):
     # `checklist_reader` is injected by the test suite so no test depends on
     # whether THIS HOST happens to have the skill deployed under ~/.claude —
     # a suite that reads the ambient home is not hermetic, and the sandbox gate
-    # tier runs with a different one.
+    # tier runs with a different one. `round_zero_reader` is the same seam for
+    # the same reason, and is deliberately a SECOND reader rather than a
+    # round-aware first one: making `checklist_reader` take the round would
+    # change the signature every existing injection is written against.
     checklist_reader = checklist_reader or _read_checklist
+    round_zero_reader = round_zero_reader or _read_round_zero
     parser = build_parser()
     args = parser.parse_args(argv)
     out_stream = stdout or sys.stdout
@@ -3735,6 +3820,22 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         return check_brief_file(args.check, out_stream, err_stream)
     if args.pr is None:
         parser.error("the PR number is required (or use --check FILE)")
+
+    # 🔴 A NEGATIVE ROUND USED TO ASSEMBLE A ROUND-1 BRIEF IN SILENCE. Every
+    # gate in this module is spelled `>= 2` or `< 2`, so `--round -1` fell
+    # through the `< 2` side and printed "FIRST, FULL adversarial audit" at
+    # rc 0 — a brief whose header disagreed with the flag that asked for it.
+    # Harmless while 0 was also meaningless; not harmless now that 0 names a
+    # DIFFERENT pass, because -1 would silently get the correctness checklist
+    # from a run that asked for something else.
+    if args.round_no < 0:
+        print(
+            f"🔴 REFUSING: --round {args.round_no} is not a round. Rounds are "
+            "0 (the requirements & deletion pass), 1 (the first full "
+            "correctness audit), then 2+ (delta re-audits).",
+            file=err_stream,
+        )
+        return 4
 
     # 🔴 An EMPTY `--audited` is the fifth row of round 5's measured table: it
     # is falsy, so it falls straight through to `emit_anchor(newest)` and the
@@ -4066,7 +4167,25 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     emit_from = args.audited or emit_anchor(newest)
     claims = list(newest.items) if newest else []
     claims_round = newest.round_no if newest else None
-    if newest is not None and newest.round_no >= args.round_no:
+    # 🔴 BOTH WARNINGS BELOW ARE ABOUT ANCHORING A DELTA, AND ROUND 0 ANCHORS
+    # NOTHING. `render_claims` returns "" below round 2, the range comes from
+    # the base, and `prev_sha` is never read — so on a PR that already has a
+    # ladder, `--round 0` printed "Using it anyway" about a block it does not
+    # use, and told the operator to check they were "not re-auditing a round
+    # that already ran" for a pass that is not a re-audit. Measured on devrc
+    # #1427 (`round=5` block): both sentences, on every run.
+    #
+    # It fires on EVERY round 0 of any PR with a block, which is the shape
+    # `claude/RULES.md` calls a permanently-red gate — and the stream it
+    # trains the operator to ignore is the one carrying the missing-intermediate
+    # -block warning that the skill says is announced "on stderr, once, and
+    # nowhere in the brief".
+    #
+    # Round 1 deliberately keeps both: a round-1 run over a `round=3` block
+    # plausibly meant to be a delta, and there the nudge is correct.
+    if args.round_no == 0:
+        pass
+    elif newest is not None and newest.round_no >= args.round_no:
         print(
             f"⚠ the newest claims block says round={newest.round_no}, and you "
             f"asked for round {args.round_no}. Using it anyway — but check you "
@@ -4155,6 +4274,10 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         base_assumed=base_assumed,
         base_assumed_reason=base_assumed_reason,
         repo_unknown_reason=repo_unknown_reason,
+        # Read ONLY at round 0. Every other round would carry a section it
+        # never prints, and reading the skill twice per run to no effect is
+        # the kind of dead work round 0 itself exists to delete.
+        round_zero=round_zero_reader(repo_dir) if args.round_no == 0 else None,
     )
 
     # 🔴 THE REFUSAL'S SCOPE IS THE BRIEF, AND ONLY THE BRIEF. A refused run

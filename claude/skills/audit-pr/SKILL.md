@@ -77,6 +77,57 @@ kill by **resolved PID**. Never let a pattern reach `pkill -f` — it matches yo
 one scratchpad path and the branch namespace, so two audit rounds that both pick `cgpg` or port
 55432 collide silently and one reports a green computed against the other's database.
 
+## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE (runs BEFORE the checklist)
+
+⚠ **ON TRIAL, NOT A STANDING RULE — read the retirement condition at the end of this section
+before you run it.**
+
+Every axis below asks whether the change is CORRECT. None asks whether it should EXIST, and an
+audit scoped to a diff will never raise it on its own: that is how a 145 KB webhook listener
+nothing had ever run survived every round that read it. Round 0 is the only round that can
+conclude **close this PR, do not audit it**.
+
+The order is the mechanism, not a preference — steps 3–5 spent on something step 2 would have
+deleted is the waste this exists to catch. Work them in order; do not skip ahead.
+
+1. **Question every requirement, and NAME its author.** For each behaviour the diff introduces,
+   record the requirement and its **author of record**: Zach (quote the ask), a **prior audit
+   round** (`#N round R`), a `RULES.md`/`CLAUDE.md` bullet (quote it), or **unattributed** — which
+   is itself a finding. 🔴 **A requirement whose author is a PRIOR ROUND OF THIS LADDER is the
+   highest-scrutiny class, not the safest.** It arrives carrying a measured incident and a case
+   history, so re-opening it reads as ignoring evidence and nobody does — the "requirements from
+   smart people are the most dangerous" case exactly. Then make it less dumb: name the requirement
+   you would drop or weaken, not only the code that implements it.
+2. **Delete.** List what could go — from the diff AND from the code it touches. Decide each by the
+   **REVERT TEST already defined below** (revert this file's diff: does the PR's stated deliverable
+   still ship?); do not mint a second rule for it. Where the payload is prose the deletion
+   instruments already exist — `/prune-skill`, `/prune-memory` — name the one that applies rather
+   than hand-rolling a cut.
+3. **Simplify — only what survived step 2.** Owned by `/simplify` and `/code-review`: route there,
+   do not restate them here. 🔴 Do not route before steps 1–2 have run; simplifying a part that
+   should not exist is the failure this ordering prevents.
+4. **Accelerate.** The ladder's own cycle time is in scope — report it, do not act on it. The
+   attribution gate below is what acts.
+5. **Automate — last.** If the round proposes automation, say what it automates and confirm steps
+   1–4 ran on that thing first.
+
+🔴 **ROUND 0 REPORTS; IT DOES NOT MOVE THE LADDER.** Its verdict is one of `proceed to the
+checklist` / `requirement questioned — <which>` / `deletion candidate — <what>` / `close, do not
+audit`. It is **not** a finding for the findings-keyed stop rule, it cannot end a ladder, and it
+cannot license skipping a round. Every stop rule below is unchanged by it.
+
+**Ledger:** `round 0 · requirements: N (unattributed: U) · deletion candidates: D`. Once the ladder
+ends, add `deleted: X · re-added: Y (Y/X = Z%)`, both from the same `--numstat` command the
+attribution gate already runs. An add-back of 0% means the deletion pass was too timid; deleting
+nothing at all is reportable.
+
+🔴 **RETIREMENT CONDITION — this section is on trial.** Run it on the next 3–5 PRs and count the
+ones where its verdict CHANGED what happened. **If that count is zero, DELETE this section** — do
+not automate it further, and do not keep it because it reads well. Closed by that count reaching a
+decision, recorded on the PR that removes this section or on the one that promotes it out of trial.
+
+## THE CHECKLIST — the nine axes (runs AFTER round 0)
+
 **Audit for:**
 1. **Risks** — what breaks in production.
 2. **Regressions** — behaviour this silently alters or removes.
