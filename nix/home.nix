@@ -4722,23 +4722,96 @@ in
     };
   };
 
-  # Post-reboot claude session restore — fires ~45s after login so
-  # tmux-continuum has time to restore the session layout first, then this
-  # service resumes claude conversations in each window.  Idempotent: skips
+  # Post-reboot claude session restore — resumes the `claude` conversation in
+  # each window of the workspace tmux-continuum restores.  Idempotent: skips
   # windows already running claude.
+  #
+  # ⚠ "after continuum has restored the layout" is the SCRIPT's doing, not this
+  # unit's ordering, and the distinction matters because the unit's Description
+  # used to claim the latter.  The unit starts when the SOCKET appears —
+  # measured at t_sock+0.065s and +0.288s in two runs, i.e. BEFORE continuum has
+  # replayed anything.  `wait_for_workspace_to_settle()` inside the script is
+  # what waits for the replay to stop moving; nothing in systemd orders it.
+  #
+  # 🔴 TRIGGERED BY THE TMUX SOCKET APPEARING, NOT BY A FIXED DELAY.  The timer
+  # this replaced was `OnActiveSec=45s`, and a duration was never the variable.
+  # On a cold boot nothing else has started tmux by second 45, so the restore
+  # script's own `tmux new-session -d` created the server INSIDE this unit's
+  # cgroup.  The sends were delivered SUCCESSFULLY into it; then ExecStart
+  # returned and `Type=oneshot` + `RemainAfterExit=no` + `KillMode=control-group`
+  # tore the cgroup down, taking the server and every claude process with it.
+  # The unit reported `Result=success`.  Measured 2026-09-06: 43 conversations,
+  # silently.  The journal is what separates that from "the panes were not
+  # ready": `Started tmux child pane N launched by process <pid>` arrived in TWO
+  # cohorts — 17 at the unit's own timestamp naming the unit's pid, then 56
+  # lines 24s later naming a DIFFERENT pid.  Two servers, not one unready one.
+  #
+  # So the trigger is now the OBSERVABLE the restore actually depends on: a tmux
+  # server that this unit did not create, and therefore cannot destroy.
   systemd.user.services.tmux-session-restore = {
     Unit = {
-      Description = "Resume claude conversations after tmux-continuum restores sessions";
-      After = [ "graphical-session.target" ];
-      Wants = [ "graphical-session.target" ];
+      # 🔴 THIS STRING IS WHAT `systemctl --user status` SHOWS, so it is read far
+      # more often than the comments around it. It used to say "after
+      # tmux-continuum restores sessions", and that is now FALSE: the unit
+      # starts when the SOCKET appears, measured at t_sock+0.065s and +0.288s in
+      # two runs — i.e. BEFORE continuum has restored anything. The script's own
+      # `wait_for_workspace_to_settle` is what waits for the replay; the unit's
+      # start is not ordered against it.
+      Description = "Resume claude conversations when the tmux server's socket appears";
+      # 🔴 NO `Wants=/After=graphical-session.target` ANY MORE.  Those ordered a
+      # TIMER-driven unit against the desktop coming up; the socket existing is
+      # a strictly stronger precondition than the desktop existing, and `Wants=`
+      # on a path-triggered unit can PULL IN graphical-session.target on a
+      # headless boot, which is not this unit's business.
+      #
+      # 🔴 SECOND GUARD, NOT A DUPLICATE OF THE PATH UNIT.  `PathChanged=` fires
+      # on any change to the watched name — MEASURED including DELETION (the
+      # server exiting).  Without this condition, `systemctl --user stop` on the
+      # operator's tmux server would start a restore into a box with no server.
+      # With it, systemd skips the unit before ExecStart: measured on this host
+      # 2026-09-07 with both controls — a failing ConditionPathExists left
+      # `Result=success ActiveState=inactive`, ExecStart did NOT run, and the
+      # `OnFailure=` handler did NOT fire (0 firings, against 1 for a genuine
+      # `exit 1` positive control).  That last fact is why this is safe to add
+      # under an `OnFailure=` that bypasses DND.
+      ConditionPathExists = "%t/tmux-%U/default";
       OnFailure = [ "notify-failure@%n.service" ];
     };
     Service = {
       Type = "oneshot";
-      # The timer's OnActiveSec=45s already delays startup; no ExecStartPre needed.
+      # 🔴 NO `RemainAfterExit=yes`.  It is measured to keep a unit-spawned tmux
+      # server alive, and it is the WRONG fix: with `KillMode=control-group`
+      # this unit would then OWN whatever server it started, and a
+      # `systemctl --user stop tmux-session-restore` would kill the operator's
+      # entire workspace.  The trigger change removes the need for it — the
+      # server pre-exists in someone else's cgroup, so there is nothing here to
+      # keep alive.
+      #
+      # The full argument, so a reader with a checkout and no network does not
+      # have to find a PR body: `RemainAfterExit=yes` IS measured to keep a
+      # unit-spawned tmux server alive past ExecStart returning (isolated
+      # experiment, private `-L` socket, `systemd-run --user -p Type=oneshot`:
+      # without it the server dies with the cgroup, with it the server
+      # survives).  That is exactly why it is tempting and exactly why it is
+      # wrong — it does not stop the unit owning the server, it makes the
+      # ownership PERMANENT.  The unit would then hold the operator's entire
+      # workspace in its cgroup for the rest of the session, and any ordinary
+      # `systemctl --user stop`/`restart`, or a `home-manager switch` that
+      # restarts the unit, would take all of it down.  Refusing to create a
+      # server is what makes the ownership question moot.
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.tmux pkgs.coreutils ]}"
         "HOME=%h"
+        # 🔴 LOAD-BEARING, AND IT CLOSES A SEAM.  The path unit below watches
+        # `%t/tmux-%U/default`; `tmux` finds its socket at
+        # `$TMUX_TMPDIR/tmux-$UID/default` and its compiled-in default is
+        # /tmp, NOT %t.  Without this pin the unit could be triggered by a
+        # socket in one directory and then talk to a server in another — the
+        # trigger and the query would be answering about different servers.
+        # Pinning both to `%t` makes them one declaration.  (The two other
+        # units in this file that shell out to tmux pin it for the same reason;
+        # the inherited manager value is undeclared runtime state.)
+        "TMUX_TMPDIR=%t"
       ];
       ExecStart = "${pkgs.python312}/bin/python3 %h/workspace/devrc/scripts/tmux-session-restore.py restore --staleness-check 2";
       # Re-run the unit when the script changes.
@@ -4746,16 +4819,87 @@ in
     };
   };
 
-  systemd.user.timers.tmux-session-restore = {
+  # 🔴 `PathChanged=`, NOT `PathExists=` — AND THAT IS NOT A STYLE CHOICE.
+  # systemd re-checks a path unit's condition the moment the triggered unit
+  # TERMINATES (systemd.path(5)).  `PathExists=` is a STATE, so a socket that
+  # goes on existing re-satisfies it forever.  MEASURED on this host 2026-09-07
+  # with a transient unit on a scratch path: `PathExists=` ran the oneshot 5
+  # times in 8 seconds and left BOTH units `Result=start-limit-hit`, ActiveState
+  # `failed` — which under the `OnFailure=` above is a DND-bypassing toast on
+  # every boot, i.e. strictly worse than the bug being fixed.  The same applies
+  # to `PathExistsGlob=` and `DirectoryNotEmpty=`; all three are states.
+  #
+  # `PathChanged=` is an EVENT, and the same experiment measured it behaving:
+  #   * parent directory absent at arm time  -> no fire (systemd watches the
+  #     nearest existing ancestor and descends), and creating the DIRECTORY
+  #     alone does not fire either — this is the cold-boot shape;
+  #   * the unix socket created              -> fires exactly ONCE;
+  #   * 8s later                             -> still once.  NO BUSY LOOP;
+  #   * a SIBLING file created in the watched directory -> does NOT fire (0),
+  #     against 1 for the watched name.  That matters: this directory collects
+  #     other agents' probe sockets;
+  #   * socket already present when the path unit STARTS -> does NOT fire.
+  #     So a mid-session `home-manager switch` cannot fire a restore into the
+  #     live workspace — which the OnActiveSec timer this replaces DID do,
+  #     45s after every switch.
+  #
+  # ⚠ The known gap, stated rather than hidden: if a tmux server somehow starts
+  # BEFORE this path unit is armed, the pre-existing-socket case above means it
+  # never fires and the restore does not run.  `default.target` is reached
+  # within a second of login, long before any terminal, so this is not the boot
+  # ordering — but it is why the unit is not claimed to be unconditional.
+  #
+  # 🔴 SECOND GAP, AND IT IS A DEPENDENCY ON UNDECLARED RUNTIME STATE.  The
+  # watched path is `%t/tmux-%U/default`.  `tmux` puts its socket at
+  # `$TMUX_TMPDIR/tmux-$UID/default` and its COMPILED-IN DEFAULT IS /tmp, so
+  # this watch is correct only because the INTERACTIVE session has
+  # `TMUX_TMPDIR=/run/user/1000` — and that value appears in no /etc/nixos file,
+  # no /etc/environment.d (which does not exist here), and not in home-manager's
+  # own ~/.config/environment.d/10-home-manager.conf.  Something imports it at
+  # login and nobody has written down what (the same finding is recorded at the
+  # tmux-snapshot-push unit above, where it decided only where that unit
+  # LOOKED).
+  #
+  # 🔴 THE CONSEQUENCE IS STRICTLY WORSE HERE THAN THERE.  For the collector it
+  # decided where to look.  For this unit it decides whether the unit RUNS AT
+  # ALL: if the interactive session ever loses that variable, tmux's socket goes
+  # to /tmp/tmux-$UID/ instead, this path unit's inotify watch never fires, and
+  # NO restore happens.  Silently — there is no failed unit, no toast, and the
+  # only trace is a boot where the unit simply never started.
+  #
+  # ⚠ DETECTABLE, NOT PREVENTED.  `scripts/tmux-restore-observe.sh` prints
+  # "the boot unit has NOT RUN this boot (InactiveExitTimestamp empty)" and
+  # names this path unit as the thing to check, which is exactly the symptom
+  # this produces.  That is a reader an operator has to run, not an alarm.
+  #
+  # 🔴 A FALLBACK WATCH ON /tmp WAS CONSIDERED AND DELIBERATELY NOT ADDED.
+  # `Paths=` accepts several entries, so watching BOTH is one line.  What is not
+  # one line is the consequence: the service pins `TMUX_TMPDIR=%t`, so a unit
+  # fired by a /tmp socket would still query the %t server — the trigger and the
+  # query naming two different servers, which is precisely the seam
+  # `TestTheTriggerAndTheQueryNameOneServer` exists to close, reintroduced by the
+  # fix.  Closing it would mean the service resolving WHICH socket fired.
+  # systemd does pass `$TRIGGER_PATH` (systemd.exec(5), read on this host under
+  # systemd 261), but its own documentation says the information "is provided in
+  # a best-effort way", that simultaneous triggers "will be coalesced and only
+  # one will be reported, with no guarantee as to which one", and that it
+  # "should not be relied upon".  Branching on it is therefore not a fix; it is
+  # a second race.  The alternative — unpinning `TMUX_TMPDIR` so the service
+  # inherits it — puts the unit back on the undeclared runtime state this
+  # comment is about.  So: one watch, one pin, one server, and the dependency
+  # written down.  If TMUX_TMPDIR is ever DECLARED somewhere (an
+  # `environment.d` drop-in, or home-manager's `home.sessionVariables`), that is
+  # the real fix, and it makes this whole paragraph obsolete.
+  systemd.user.paths.tmux-session-restore = {
     Unit = {
-      Description = "One-shot timer — run tmux-session-restore once after login";
+      Description = "Run tmux-session-restore when the tmux server's socket appears";
     };
-    Timer = {
-      OnActiveSec = "45s";
+    Path = {
+      PathChanged = "%t/tmux-%U/default";
       Unit = "tmux-session-restore.service";
     };
     Install = {
-      WantedBy = [ "timers.target" ];
+      WantedBy = [ "default.target" ];
     };
   };
 }

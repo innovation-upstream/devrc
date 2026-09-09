@@ -45,6 +45,7 @@ from testlib.nix_units import (  # noqa: E402
     declares,
     directive,
     is_conditional,
+    section,
     strip_nix_comments,
     unit_source,
 )
@@ -270,3 +271,91 @@ class TestUnitSource:
         with pytest.raises(AssertionError):
             unit_source("systemd.user.services.ghost",
                         "  # systemd.user.services.ghost = {\n")
+
+
+# --- section -------------------------------------------------------------------
+
+class TestSection:
+    """🔴 THE MEASURED DEFECT: a directive name that is ALSO a section name.
+
+    A path unit declares a `Unit = { Description = …; }` SECTION and a
+    `Path = { Unit = "x.service"; }` DIRECTIVE. Asking `directive()` for
+    `Unit` over the whole block hits the section, reads `{ Description = "…"`
+    as a multi-line value and raises. `section()` is what lets a caller narrow
+    first.
+    """
+
+    PATH_UNIT = (
+        '    Unit = {\n'
+        '      Description = "watch the socket";\n'
+        '    };\n'
+        '    Path = {\n'
+        '      PathChanged = "%t/tmux-%U/default";\n'
+        '      Unit = "tmux-session-restore.service";\n'
+        '    };\n'
+        '    Install = {\n'
+        '      WantedBy = [ "default.target" ];\n'
+        '    };\n'
+    )
+
+    def test_it_returns_only_the_named_sections_body(self):
+        body = section("Path", self.PATH_UNIT)
+        assert "PathChanged" in body
+        assert "Description" not in body, "leaked into the [Unit] section"
+        assert "WantedBy" not in body, "ran on into the [Install] section"
+
+    def test_it_is_what_makes_the_colliding_name_readable(self):
+        """The whole point: `Unit` means two different things here."""
+        assert directive("Unit", section("Path", self.PATH_UNIT)) == \
+            '"tmux-session-restore.service"'
+        assert directive("Description", section("Unit", self.PATH_UNIT)) == \
+            '"watch the socket"'
+
+    def test_the_unnarrowed_read_still_refuses_rather_than_answering_wrongly(self):
+        """Pins the behaviour `section()` exists to work around — if
+        `directive()` ever starts silently answering here, callers that forgot
+        to narrow would get "Description = …" compared against a service name.
+        """
+        with pytest.raises(NotImplementedError):
+            directive("Unit", self.PATH_UNIT)
+
+    def test_an_absent_section_is_None_not_an_error(self):
+        """A unit with no [Install] is ordinary, not broken."""
+        assert section("Timer", self.PATH_UNIT) is None
+
+    def test_a_nested_brace_does_not_end_the_section_early(self):
+        """🔴 THE CLOSING BRACE IS THE FIRST AT DEPTH ZERO, NOT THE FIRST AT
+        ALL. A regex stopping at the first `}` would cut the section in half at
+        the inner attrset and silently hide every directive after it."""
+        src = (
+            '    Service = {\n'
+            '      Nested = { a = 1; };\n'
+            '      ExecStart = "/bin/true";\n'
+            '    };\n'
+        )
+        body = section("Service", src)
+        assert directive("ExecStart", body) == '"/bin/true"', (
+            "the section was truncated at the nested attrset's closing brace"
+        )
+
+    def test_a_brace_inside_a_STRING_does_not_change_depth(self):
+        """`Environment = [ "PATH=${…}" ]` puts unbalanced-looking braces inside
+        strings routinely. An UNMATCHED `{` in a string is the discriminating
+        fixture: with string-awareness off, depth never returns to zero and the
+        function raises instead of answering."""
+        src = (
+            '    Service = {\n'
+            '      Environment = [ "PATH=${pkgs.foo}/bin" "ODD={" ];\n'
+            '      Type = "oneshot";\n'
+            '    };\n'
+            '    Install = {\n'
+            '      WantedBy = [ "default.target" ];\n'
+            '    };\n'
+        )
+        body = section("Service", src)
+        assert directive("Type", body) == '"oneshot"'
+        assert "WantedBy" not in body
+
+    def test_an_unterminated_section_raises_rather_than_truncating(self):
+        with pytest.raises(NotImplementedError):
+            section("Path", '    Path = {\n      PathChanged = "/x";\n')
