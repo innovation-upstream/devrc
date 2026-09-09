@@ -26,7 +26,7 @@ It rendered as one, measured 2026-08-14: a `stale` payload, an `error` marker, a
 missing file and a cache the poller had stopped refreshing ALL produced
 `{"text": "", "state": "Idle"}` — byte-identical to the measured all-clear. This
 is a CLIENT PROD cluster reached through its own kubeconfig and its own
-port-forward, i.e. the source most likely of the seven to fail on its own while
+port-forward, i.e. the source most likely of the eight to fail on its own while
 everything else on the bar stays green, and the one whose silence is most
 expensive. "Red is CORRECT when real" is the standing rule for this pill; a
 blackout that renders as no-red-at-all is the same claim made without a
