@@ -185,13 +185,18 @@ let
   #
   # 30s: a pump does not change speed meaningfully faster, and this spawns a
   # python process every tick forever.
+  # 🔴 LEFT-CLICK OPENS THE COOLING VIEW, NOT btop. It used to be btop, which is
+  # a CPU/memory view: when this pill goes red the questions are "is the pump
+  # dead" and "how hot is the thing it was cooling", and btop answers neither.
+  # `fans-detail` is the cooling equivalent of the memory/disk/media detail
+  # floats — pump + case fan with PWM duty, then CPU/GPU/VRM/NVMe temperatures.
   fansBlock = {
     block = "custom";
     command = "${scriptsDir}/i3status-fans --fan pump=1:500 --fan case=3";
     json = true;
     interval = 30;
     click = [
-      { button = "left"; cmd = btopCmd; }
+      { button = "left"; cmd = "alacritty --class float,float -o window.dimensions.columns=76 -o window.dimensions.lines=22 -e ${scriptsDir}/fans-detail"; }
     ];
   };
   # nvidia_gpu: workbench only (RTX 5080). The block's state is TEMPERATURE-driven
@@ -585,6 +590,18 @@ lib.mkIf isNixOS {
   # ships a block whose command does not exist.
   home.file.".config/i3status-rust/scripts/i3status-fans" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-fans;
+    executable = true;
+  };
+  # 🔴 fans-detail is the fans pill's left-click target, AND `i3status-fans`
+  # above is its REQUIRED CO-LOCATED SIBLING — fans-detail loads it by path to
+  # reuse the chip-location and tacho-reading predicate rather than open-coding
+  # a second copy that would drift silently (only one of the two is on screen).
+  # So the two MUST carry the SAME gate: a fans-detail deployed without
+  # i3status-fans beside it renders a red "sibling did not load" banner instead
+  # of the cooling view. Pinned by
+  # `test_fans_detail.py::test_fans_detail_and_its_SIBLING_are_deployed_together`.
+  home.file.".config/i3status-rust/scripts/fans-detail" = lib.mkIf (!isLaptop) {
+    source = ../scripts/fans-detail;
     executable = true;
   };
   # 🔴 claude_sessions.py is a CO-LOCATED SIBLING MODULE, not a block — the same

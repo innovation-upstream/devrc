@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+"""Cooling-system detail view for the i3status-rust `fans` block (left-click).
+
+The bar pill shows two numbers (`2660·1736`); a left-click opens THIS float
+terminal — the whole cooling picture: the AIO pump and every case-fan header
+with its PWM duty, then the temperatures that explain what the fans are
+responding to (CPU package + per-CCD, GPU, VRM/chipset thermistors, NVMe).
+
+WHY NOT btop. The pill's click used to open btop, which is a CPU/memory view:
+it shows load, not cooling. When a pump pill goes red the question is "is the
+pump dead, and how hot is the thing it was cooling" — btop answers neither.
+
+🔴 THE CHIP-LOCATION AND FAN-READING PREDICATE IS NOT RE-IMPLEMENTED HERE. It
+is loaded from the `i3status-fans` block script sitting beside this file, so
+the pill and this view can never disagree about which hwmon device is the
+Super I/O or what counts as an unreadable tacho. A predicate open-coded at two
+sites is wrong at one of them eventually, and the two would drift silently
+because only one of them is on screen. That makes `i3status-fans` a REQUIRED
+CO-LOCATED SIBLING — same shape as `bar_freshness.py` for the count pills —
+and `nix/graphical.nix` must deploy both under the SAME gate.
+
+Reads /sys/class/hwmon only: no cache, no poller, no network, no privilege.
+
+Everything is best-effort — a launcher must never crash loudly.
+
+The pure/mockable logic (parse sysfs, format) is factored out and unit-tested
+in scripts/tests/test_fans_detail.py; `--dump` prints one frame and exits
+without opening a terminal or looping.
+
+    fans-detail            # live, redraws every 2s until q / Ctrl-C
+    fans-detail --dump     # one frame, for tests and for piping
+    fans-detail --interval 5
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import sys
+import time
+from pathlib import Path
+
+HWMON = "/sys/class/hwmon"
+CHIP = "nct6687"
+
+#: Fan headers this board actually has something plugged into, and what it is.
+#: Everything else reads a permanent 0 and is summarised as "unconnected"
+#: rather than listed — ten zero rows would bury the two that matter.
+KNOWN_FANS = [(1, "AIO pump", 500), (3, "Case fan", None)]
+
+BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
+RED, YELLOW, GREEN, CYAN = "\033[31m", "\033[33m", "\033[32m", "\033[36m"
+
+
+def _load_sibling():
+    """Load `i3status-fans` from beside this file. None if unavailable.
+
+    Deferred and best-effort on purpose: an import-time failure would make the
+    whole view die with a traceback where a launcher must not. The `None` case
+    is rendered as a visible banner by `render`, never as an empty screen.
+    """
+    here = Path(__file__).resolve().parent / "i3status-fans"
+    try:
+        loader = importlib.machinery.SourceFileLoader("i3status_fans", str(here))
+        spec = importlib.util.spec_from_loader("i3status_fans", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Pure / mockable logic (unit-tested against fixtures — NO real sysfs)
+# --------------------------------------------------------------------------- #
+def read_int(path):
+    """Read an integer out of a sysfs file. None if absent or unparsable."""
+    try:
+        return int(Path(path).read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def read_str(path):
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return None
+
+
+def find_chips(root=HWMON):
+    """name -> [dir, ...] for every hwmon device. Empty dict if none."""
+    out = {}
+    try:
+        dirs = sorted(Path(root).glob("hwmon*"))
+    except OSError:
+        return out
+    for d in dirs:
+        name = read_str(d / "name")
+        if name:
+            out.setdefault(name, []).append(d)
+    return out
+
+
+def read_temps(d):
+    """[(label, celsius)] for one hwmon dir, in tempN order.
+
+    A sysfs temp is millidegrees. A label file is optional — NONE of the
+    nct6687's fans carry one on this board, and its temps do, so neither
+    presence nor absence can be assumed.
+    """
+    out = []
+    try:
+        files = sorted(d.glob("temp*_input"),
+                       key=lambda p: int("".join(c for c in p.name if c.isdigit()) or 0))
+    except OSError:
+        return out
+    for f in files:
+        raw = read_int(f)
+        if raw is None:
+            continue
+        base = f.name[:-len("_input")]
+        label = read_str(d / (base + "_label")) or base
+        out.append((label, raw / 1000.0))
+    return out
+
+
+def read_pwm(d, index):
+    """PWM duty for fanN as a 0-100 percentage, or None.
+
+    🔴 sysfs pwmN is RAW 0-255, not a percentage. Reporting it unscaled would
+    show "201%" for a pump at 79%. (`sensors` renders this differently again
+    and has been seen printing >100% for pump headers.)
+    """
+    raw = read_int(d / ("pwm%d" % index))
+    if raw is None:
+        return None
+    return max(0.0, min(100.0, raw * 100.0 / 255.0))
+
+
+def bar(pct, width=10, filled="█", empty="░"):
+    """A fixed-width block gauge. `None` renders as all-empty, never blank."""
+    if pct is None:
+        return empty * width
+    n = int(round(max(0.0, min(100.0, pct)) / 100.0 * width))
+    return filled * n + empty * (width - n)
+
+
+def fan_rows(chip_dir, sib, known=KNOWN_FANS):
+    """[(name, rpm, pct, floor, state)] for the KNOWN fans.
+
+    state: 'stall' (below its floor) · 'unknown' (unreadable) · 'ok'.
+    Uses the sibling's `read_rpm` so "unreadable" means exactly what the pill
+    means by it.
+    """
+    rows = []
+    for idx, name, floor in known:
+        rpm = sib.read_rpm(chip_dir, idx) if sib else None
+        pct = read_pwm(chip_dir, idx) if chip_dir is not None else None
+        if rpm is None:
+            state = "unknown"
+        elif floor is not None and rpm < floor:
+            state = "stall"
+        else:
+            state = "ok"
+        rows.append((name, rpm, pct, floor, state))
+    return rows
+
+
+def unconnected(chip_dir, sib, known=KNOWN_FANS):
+    """Indices of fan headers that exist and read exactly 0.
+
+    Not a fault: this board has ten headers and two things plugged in.
+    Summarised as a count rather than ten zero rows.
+    """
+    if chip_dir is None or sib is None:
+        return []
+    named = {i for i, _, _ in known}
+    out = []
+    for f in sorted(chip_dir.glob("fan*_input")):
+        digits = "".join(c for c in f.name if c.isdigit())
+        if not digits:
+            continue
+        idx = int(digits)
+        if idx in named:
+            continue
+        if sib.read_rpm(chip_dir, idx) == 0:
+            out.append(idx)
+    return sorted(out)
+
+
+def summarise(values):
+    """(min, max) of a list of numbers, or None for an empty list."""
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return None
+    return min(vals), max(vals)
+
+
+def render(chips, sib, now="", color=True):
+    """Pure: the whole frame as a string. Never raises, never returns ''."""
+    def c(code, s):
+        return ("%s%s%s" % (code, s, RESET)) if color else str(s)
+
+    L = []
+    L.append("")
+    L.append("  %s  %s" % (c(BOLD, "COOLING"), c(DIM, now)))
+    L.append("")
+
+    if sib is None:
+        L.append("  %s" % c(RED, "cannot read fans: the i3status-fans sibling did"))
+        L.append("  %s" % c(RED, "not load — it must sit beside this script."))
+        L.append("")
+
+    chip_dirs = chips.get(CHIP) or []
+    chip_dir = chip_dirs[0] if chip_dirs else None
+
+    if chip_dir is None:
+        L.append("  %s" % c(RED, "Super I/O (%s) NOT FOUND — the nct6683 driver" % CHIP))
+        L.append("  %s" % c(RED, "is not loaded, so there are no fan readings."))
+        L.append("  %s" % c(DIM, "persist it:  sudo bash nix/system/apply-nct6683-module.sh"))
+        L.append("")
+    else:
+        for name, rpm, pct, floor, state in fan_rows(chip_dir, sib):
+            if state == "unknown":
+                val, mark = c(YELLOW, "%9s" % "?"), c(YELLOW, "unreadable")
+            elif state == "stall":
+                val, mark = c(RED, "%5d rpm" % rpm), c(RED, "STALLED (floor %d)" % floor)
+            else:
+                val = c(GREEN, "%5d rpm" % rpm)
+                mark = c(DIM, "floor %d" % floor) if floor else c(DIM, "no floor")
+            duty = "%s %3s%%" % (bar(pct), "?" if pct is None else int(round(pct)))
+            L.append("  %-10s %s  %s  %s" % (name, val, duty, mark))
+
+        idle = unconnected(chip_dir, sib)
+        if idle:
+            L.append("  %s" % c(DIM, "%d unconnected header(s): %s"
+                                % (len(idle), ", ".join("fan%d" % i for i in idle))))
+        L.append("")
+
+    # Temperatures, most-decisive first.
+    for label, names in (("CPU", ("k10temp",)), ("GPU", ("amdgpu",))):
+        for nm in names:
+            for d in chips.get(nm) or []:
+                for tlabel, temp in read_temps(d):
+                    L.append("  %-10s %-8s %s %s"
+                             % (label, tlabel, c(CYAN, "%5.1f C" % temp),
+                                bar(temp, width=10)))
+                    label = ""
+    if chip_dir is not None:
+        temps = read_temps(chip_dir)
+        board = [(l, t) for l, t in temps if "Thermistor" in l or "Diode" in l]
+        tsi = [(l, t) for l, t in temps if "TSI" in l]
+        for tlabel, temp in tsi:
+            L.append("  %-10s %-8s %s %s"
+                     % ("board", tlabel[:8], c(CYAN, "%5.1f C" % temp), bar(temp)))
+        rng = summarise([t for _, t in board])
+        if rng:
+            L.append("  %-10s %-8s %s"
+                     % ("", "VRM/chip", c(CYAN, "%.0f-%.0f C" % rng)
+                        + c(DIM, "  (%d sensors)" % len(board))))
+    nvme = []
+    for d in chips.get("nvme") or []:
+        nvme += [t for _, t in read_temps(d)]
+    rng = summarise(nvme)
+    if rng:
+        L.append("  %-10s %-8s %s"
+                 % ("disk", "NVMe", c(CYAN, "%.0f-%.0f C" % rng)
+                    + c(DIM, "  (%d sensors)" % len(nvme))))
+    L.append("")
+    return "\n".join(L)
+
+
+# --------------------------------------------------------------------------- #
+def main(argv=None):
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--dump", action="store_true")
+    p.add_argument("--interval", type=float, default=2.0)
+    p.add_argument("--hwmon-root", default=HWMON)   # TEST SEAM (see i3status-fans)
+    # 🔴 `parse_known_args`, NOT `parse_args` in a try/except. The first version
+    # caught argparse's SystemExit and re-parsed with `[]`, which DISCARDS every
+    # good argument alongside the bad one — so `--dump --nonsense` dropped
+    # `--dump`, fell into the watch loop and HUNG FOREVER. Caught by a test that
+    # timed out rather than failed, which is exactly how that ships unnoticed.
+    # Ignoring an unknown flag while honouring the known ones is the behaviour a
+    # launcher wants.
+    args, _unknown = p.parse_known_args(argv)
+
+    sib = _load_sibling()
+    interval = args.interval if args.interval and args.interval > 0 else 2.0
+
+    def frame():
+        return render(find_chips(args.hwmon_root), sib,
+                      now=time.strftime("%H:%M:%S"))
+
+    if args.dump:
+        sys.stdout.write(frame() + "\n")
+        return 0
+
+    try:
+        while True:
+            sys.stdout.write("\033[2J\033[H")       # clear + home
+            sys.stdout.write(frame() + "\n")
+            sys.stdout.write("  \033[2mq / Ctrl-C to close\033[0m\n")
+            sys.stdout.flush()
+            time.sleep(interval)
+    except (KeyboardInterrupt, EOFError):
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        # A launcher must never crash loudly — but it must not exit SILENTLY
+        # either, or a float window that opens and vanishes is indistinguishable
+        # from one that never opened.
+        import traceback
+        traceback.print_exc()
+        sys.stderr.write("\n  fans-detail failed — press Enter to close.\n")
+        try:
+            input()
+        except Exception:
+            pass
+        sys.exit(0)
