@@ -18,50 +18,33 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- **`ZacxDev/cairn` has EIGHT merged PRs and NONE open.** #1 SIGHUP hot-reload, #2 the ledger
-  narrowing (`c8aee7203`), #3 `8e4ef84` (spawn-port TOCTOU), #4 `218b6c1` (the nix flake),
-  #5 `9213726` (CI floor + reload-atomicity), #6 `9d58f02` (rank 12, leakscan coverage
-  derived from bytes), **#7 `059ec17` (rank 15, the recall drill-down flags)** and **#8
-  `3167e44` (rank 13, the build-push path)**. Verified by CONTENT, never ancestry — a squash
-  is never an ancestor. CI green on `main` after each, read at JOB level, not off the rollup.
-- 🔴 **TWO MERGED THINGS ARE NOT LIVE, AND THAT IS THE MOST IMPORTANT LINE HERE.**
-  - **#7 fixes the OSS client**, but this host still runs devrc's copy:
-    `readlink -f ~/.local/bin/cairn` → `/home/zach/workspace/devrc/scripts/cairn`. So
-    `cairn recall --ref` is STILL BROKEN HERE until #1406 lands and the pin moves past
-    `059ec17`. Rank 15 is deliberately NOT marked done.
-  - **#8 publishes nothing.** It adds the path; the push is an operator step that has not
-    happened. Rank 7 stays blocked.
-- **Rank 12 CLOSED** (claim released) — closing condition watched on the MERGED tree, not
-  read off the diff: the gate prints `SKIPPED tests/leakscan.py — the gate's own fixtures,
-  exempt by name`, then `38 file(s) scanned, 1 skipped`, `0 findings`, rc 0.
-- **Rank 15 merged upstream** (claim released). **Rank 13's path merged** (claim released);
-  the publish is blocked on two strings only the operator can give — the registry and the
-  version tag (deployed is `0.7.0`).
-- **IN FLIGHT, NOT PR'd: `fix/client-focus-window`** in `~/workspace/cairn` (worktree
-  `/tmp/wt-cairn-focus`, branch off `3167e44`). The full suite was still running when this
-  doc was written — **do not PR it without reading that result.** Rank 19.
-- **Store writes landed this session:** the stale `2026-08-29: OPEN:` bullet in `devrc/cairn`
-  is now `RESOLVED caec932e:` (`cairn put`, revision `da318a4c6a96f9d8`), and a session bullet
-  was appended (`083552c54491cc8b`). **Control that it did what it claimed:** the index row
-  moved `17 nuance / 🔴 2 OPEN` → `18 nuance / 🔴 1 OPEN`. The surviving OPEN is a DIFFERENT
-  bullet (`2026-09-01`, the scope merge rule), deliberately left — no evidence was gathered
-  either way, and closing an unverified marker is worse than leaving it.
-- 🔴 **RANK 3 SLICE 2 IS ANOTHER SESSION'S, STILL IN FLIGHT — devrc PR #1406 open, claim held
-  (`rc 10`), and SIX FILES ARE UNCOMMITTED in its worktree `~/workspace/devrc-flake-pin`
-  (its round-1 audit fix round). DO NOT delete that worktree — the fixes exist nowhere else.**
-  Carried forward deliberately: this session did not touch rank 3, and the line is the kind a
-  `State now` replace silently drops.
-- **A cairn-built image is still NOT PUBLISHED** — #4 makes a loadable tarball, #8 adds the
-  push path, and nothing has pushed anything. Rank 7 remains blocked on that, not on
-  buildability.
-- **The devrc/OSS `lib/` fork stays DECIDED — CONSOLIDATE ONTO THE PIN**, recorded in
-  devrc **#1394 `65d8bfba`**. Not re-asked this session and not to be re-asked; carried
-  forward because a decision is the most durable thing a `State now` replace can drop.
-- **devrc docs merged:** #1400, #1413 (three corrections), #1419 (rank 15).
-- 🔴 **NO `clawgate-task:` FIELD** — `clawgate_handoff.sh resolve` exits **5**, 0 tasks. Its
-  own positive control shows the board answered 8 links for a different session, so the board
-  is reachable and the token accepted; but a WRONG id also answers 200 with an empty array, so
-  this is NOT a clean bill of health. No field was written and none was invented.
+- **`ZacxDev/cairn` has TEN merged PRs and NONE open.** Added since the last revision:
+  **#9 `a3c84db1`** (rank 19 — the client builds a focus window; `focus_window` refs in the
+  client went **0 → 1**, verified by content) and **#10 `934ec38e`** (rank 17 — the `--timeout`
+  comment promised a second resolver that never existed here; closing condition verified on
+  `origin/main`, both removed names grep to **0**). Claims for 12, 13, 15, 17 all RELEASED.
+- 🔴 **NOTHING UNBLOCKED REMAINS FOR AN AGENT.** Ranks 4, 8, 11 and 13 need the operator;
+  3 is another session's (#1406, OPEN); 7 waits on 13's publish; 18 mostly dissolves when
+  slice 3 lands; and **16 is blocked on #1406 too — see its entry, the wall is its own
+  wording.** Re-derived 2026-09-09, not assumed.
+- 🔴 **STILL NOT LIVE ON THIS HOST:** `readlink -f ~/.local/bin/cairn` →
+  `/home/zach/workspace/devrc/scripts/cairn`. #7, #9 and #10 all fix the OSS client, so none
+  of them is in the binary this machine runs until #1406 lands and the pin moves.
+- 🔴 **RANK 3 SLICE 2 IS ANOTHER SESSION'S — devrc PR #1406 open, claim held, and SIX FILES
+  ARE UNPUSHED — 8 commits, `[ahead 8]` — in `~/workspace/devrc-flake-pin`. DO NOT delete
+  that worktree. ⚠ Its `git status` is CLEAN, so the obvious check says "stale warning,
+  safe to delete" and is WRONG; read the ahead-count instead.**
+- **A cairn-built image is still NOT PUBLISHED.** #8 added the path; nothing has pushed.
+  Rank 13 is blocked on two strings only the operator can give — the registry and the tag.
+- **The devrc/OSS `lib/` fork stays DECIDED — CONSOLIDATE ONTO THE PIN** (devrc #1394
+  `65d8bfba`). Not re-asked; not to be re-asked.
+- **Store writes this session:** `devrc/cairn` stale `OPEN:` → `RESOLVED caec932e:`
+  (`da318a4c6a96f9d8`), plus two session bullets (`083552c5`, `4c9146b7`). Badge moved
+  `17 nuance / 🔴 2 OPEN` → `18 / 🔴 1 OPEN`; the survivor is a different, unverified bullet.
+- **devrc docs merged:** #1400, #1413, #1419, and handoff commit `8401ff63`.
+- 🔴 **NO `clawgate-task:` FIELD** — `resolve` exits **5**. Its positive control shows the
+  board answered 8 links for another session, so it is reachable; but a wrong id also answers
+  200 with an empty array. NOT a clean bill of health.
 
 ## Open investigations — live diagnosis state
 
@@ -399,8 +382,15 @@ taken now describes a tree that is about to change.
    🔴 **IN FLIGHT, CLAIMED — DO NOT START.** `claim-work cairn-oss-multi-instance-3` is HELD
    for slice 2. Worktree `~/workspace/devrc-flake-pin`, branch `feat/cairn-flake-pin`,
    **PUSHED as devrc PR #1406** (was `4c77daab` unpushed; now three commits, head `f98be263`).
-   ⚠ **SIX FILES ARE UNCOMMITTED IN THAT WORKTREE** — the round-1 audit fix round. Do not
-   delete the worktree; the fixes exist nowhere else.
+   🔴 **CORRECTED 2026-09-09 — "SIX FILES ARE UNCOMMITTED" IS NOW FALSE, AND THE CHECK A
+   READER WOULD RUN TO TEST IT RETURNS THE DANGEROUS ANSWER.** That worktree's
+   `git status --porcelain` is now **EMPTY** (audit rounds committed, through round 3
+   `6ae94c01`), so anyone validating the old warning sees a CLEAN tree and concludes it is
+   stale and the worktree is disposable. It is not: `git -C ~/workspace/devrc-flake-pin
+   status -sb` reads **`[ahead 8]`** — **8 commits exist ONLY there and are UNPUSHED.**
+   **DO NOT delete that worktree.** The conclusion never changed; only the reason did, and
+   the wrong reason is the one that gets checked. Verify with the ahead-count, never with
+   dirtiness.
    - **Half 1 — ✅ MERGED: `ZacxDev/cairn`#4, `218b6c1`.**
    - **Half 2 — slice 1 MERGED (devrc #1381, `baa664e4`, both hosts switched and verified);
      slice 2 IN FLIGHT as PR #1406; slice 3 (point the writer at the pinned `entry_shape`,
@@ -567,6 +557,17 @@ taken now describes a tree that is about to change.
     `doctor --no-sync` plus `--validate` against a fixture cache.
     **Closing condition:** a merged devrc PR whose gate fails when the pinned client's
     `validate` is stubbed to print nothing.
+    🔴 **BLOCKED ON #1406, AND ITS OWN WORDING IS WHY — MEASURED 2026-09-09.** This asks for a
+    gate over "the PINNED client's `validate`", and there is no pinned client: on `origin/main`
+    `flake.nix` holds **0** cairn references and `packages.cairn`/`cairnPackage` appear
+    **nowhere**, because the pin is rank 3 slice 2 and #1406 is still OPEN. A gate that
+    `nix build`s a flake input that does not exist cannot be written, let alone go red for the
+    right reason. ⚠ It is ALSO the only remaining item carrying a forcing function, so it reads
+    as the obvious next pick — a session that takes it will re-derive this wall. **Do it in the
+    same PR as slice 2, or immediately after #1406 merges.** (Separately: the natural
+    implementation touches `scripts/run-tests.sh`, which #1406 also touches — test-merge rather
+    than reason about it.) This is the doc's own "check that an item's first step is possible in
+    the repo it names" lesson, hit again.
     forcing: gate
 
 17. **The public `ZacxDev/cairn` client still documents a `who` timeout that no longer
