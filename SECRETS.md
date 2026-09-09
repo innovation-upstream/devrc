@@ -399,10 +399,22 @@ probably reworded when the artifact was simply damaged. The table is now keyed o
 
 | age said | reached | classification |
 |---|---|---|
-| `no identity matched any of the recipients` | header not opened | pre-auth → `25` |
-| `failed to read header`, `bad header MAC`, `failed to parse X25519 recipient` | header not opened | pre-auth → `25` |
+| `no identity matched any of the recipients` | no identity shown to work | pre-auth → `25` |
+| `failed to read header`, `failed to parse X25519 recipient` | no identity shown to work | pre-auth → `25` |
+| `bad header MAC` | **a stanza unwrapped** — the key WORKS — but the header failed its integrity check | key proven → `33` |
 | `failed to decrypt and authenticate payload chunk` | **past the header** | post-auth → `33` |
 | `failed to read nonce`, `unexpected EOF`, `last chunk is empty` | **past the header** | post-auth → `33` |
+
+🔴 **`bad header MAC` is the one to read twice.** It was filed pre-auth in the
+first draft of this table, where row `25` tells the operator *"the escrowed
+identity does not match … if none open, the key is the likely cause"* — a
+rotation-shaped sentence about a key the message vindicates. The discriminating
+control, measured on both versions: decrypt the **same** damaged blob with the
+right identity and with a wrong one — `bad header MAC` vs `no identity matched`.
+age reaches the header's integrity check only after an identity has unwrapped a
+recipient stanza, so that message is positive evidence the escrow **works**. It
+gets `33` with its own sentence, because `33`'s usual wording asserts age
+*authenticated* the header, which is what a MAC failure means it did not.
 
 The pre-auth/post-auth split is measured, not reasoned: age authenticates the
 whole header before it reads the nonce, so truncating *inside* the header and

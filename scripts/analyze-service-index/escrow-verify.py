@@ -398,13 +398,30 @@ EXIT_CODES: dict[str, int] = {
     # payload truncated to 8 bytes each produced a refusal the table did not
     # name, on BOTH versions, so three ordinary corruption shapes landed here
     # while the sentence told the operator age had probably reworded. Those three
-    # are now classified (see `_AGE_REFUSAL_MARKERS` in restore-verify.py). What
-    # survives is the genuine fall-through: a refusal nothing in that table
-    # matches. It exists because the discriminator rests on an upstream tool's
-    # PROSE — if age rewords, this admits it instead of picking whichever answer
-    # the fall-through happened to reach. Do not re-label it "not observed": the
-    # honest claim is that no CURRENTLY KNOWN fault reaches it, which is a
-    # statement about a sweep, not about age.
+    # are now classified (see `_AGE_REFUSAL_MARKERS` in restore-verify.py).
+    #
+    # 🔴 AND THE REPLACEMENT SENTENCE WAS WRONG TOO — it read "no CURRENTLY KNOWN
+    # fault reaches it", and the audit of THAT round measured three that do, on
+    # both versions. All three are faults of the RUN rather than of the artifact,
+    # which is why an artifact-shaped sweep kept missing them:
+    #
+    #     a corrupted escrowed identity  -> `malformed secret key: invalid character`
+    #     a truncated escrowed identity  -> `no identities found`
+    #     the output path uncreatable    -> `open <path>: no such file or directory`
+    #                                       (the ENOSPC / vanished-work-dir shape)
+    #
+    # They are deliberately NOT given markers: each is a fault in the run's own
+    # environment, and inventing an artifact verdict for it is how the first two
+    # rounds went wrong. This message is the right destination for them — it
+    # asserts nothing and forbids rotation. What was wrong was only the claim
+    # that nothing arrives here.
+    #
+    # So the honest statement, and do not narrow it again: THIS BRANCH IS
+    # REACHABLE, by an unrecognised age reword AND by a run-environment fault,
+    # and the three causes its message enumerates are the ARTIFACT-side ones —
+    # they are not exhaustive of why age refused. It exists because the
+    # discriminator rests on an upstream tool's PROSE: if age rewords, this
+    # admits it instead of picking whichever answer the fall-through reached.
     "DECRYPT-FAILED": 25,
     # 🔴 RAISED BEFORE ANY `bw` CALL — see `preflight_decrypt_imports`. Its own
     # code because the remedy is unlike every other one here: nothing is wrong
@@ -1591,13 +1608,42 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                         # SAID which of the two it was, and an unrecognised
                         # refusal falls to the second DECRYPT-FAILED message
                         # below instead of borrowing this one's claim.
+                        # 🔴 KEY PROVEN, HEADER DAMAGED — the third state, and
+                        # it is ARTIFACT-CORRUPT's SECOND message rather than a
+                        # sixth exit code because the REMEDY is identical (the
+                        # backup is damaged; do not rotate) while the WITNESS is
+                        # not. `DECRYPT-FAILED` already carries two messages
+                        # under one code for the same reason.
+                        #
+                        # It must not borrow the message above: that one says
+                        # "age authenticated the header", which is exactly what
+                        # a MAC failure means it did NOT do. And it must not
+                        # fall to the pre-auth branch below, which is where an
+                        # audit found it — that sentence offers "the escrowed
+                        # identity does not match" as an open cause, and the
+                        # discriminating control in restore-verify's
+                        # `AGE_REFUSED_HEADER_MAC` block EXCLUDES it.
+                        if phase["age_refusal"] == RV.AGE_REFUSED_HEADER_MAC:
+                            raise EscrowError(
+                                "ARTIFACT-CORRUPT",
+                                f"🔴 {key} has a DAMAGED HEADER. The ESCROWED key "
+                                f"unwrapped one of its recipient stanzas — which "
+                                f"age only lets an identity that MATCHES do — and "
+                                f"the header then failed its own integrity check. "
+                                f"THE ESCROW IS FINE; THE BACKUP IS NOT. age never "
+                                f"reached the payload, so nothing is claimed about "
+                                f"it. Treat the artifact as unusable, check the "
+                                f"other retained objects for this scope, and do "
+                                f"NOT rotate the key.",
+                                detail=str(exc))
                         # The set is IMPORTED, not spelled — the same reason as
                         # `AGE_REFUSALS_POST_AUTH` above. A refusal published in
                         # restore-verify but named in neither set lands in the
                         # "CANNOT SAY WHY" message below, which is the safe
                         # place for it, and `test_the_STRONG_verdict_fires_on_
-                        # EVERY_post_auth_refusal_and_NO_other` walks both sets
-                        # so a new one cannot go quietly unhandled.
+                        # EVERY_post_auth_refusal_and_NO_other` walks every
+                        # published value so a new one cannot go quietly
+                        # unhandled.
                         if phase["age_refusal"] in RV.AGE_REFUSALS_PRE_AUTH:
                             raise EscrowError(
                                 "DECRYPT-FAILED",

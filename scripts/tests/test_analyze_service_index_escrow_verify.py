@@ -1504,10 +1504,11 @@ def test_the_STRONG_verdict_fires_on_EVERY_post_auth_refusal_and_NO_other(
     # asserted before the behaviour.
     assert not (RVmod.AGE_REFUSALS_POST_AUTH & RVmod.AGE_REFUSALS_PRE_AUTH)
     assert (RVmod.AGE_REFUSALS_POST_AUTH | RVmod.AGE_REFUSALS_PRE_AUTH
-            | {RVmod.AGE_REFUSED_UNRECOGNISED}) == RVmod.AGE_REFUSALS, (
-        "a published refusal belongs to neither named set and is not the "
+            | {RVmod.AGE_REFUSED_HEADER_MAC, RVmod.AGE_REFUSED_UNRECOGNISED}
+            ) == RVmod.AGE_REFUSALS, (
+        "a published refusal belongs to no named group and is not the "
         "fall-through: it will silently take the unclassified verdict. Put it "
-        "in a set, or state here why it belongs with the unknown.")
+        "in a group, or state here why it belongs with the unknown.")
 
     for refusal in sorted(RVmod.AGE_REFUSALS_POST_AUTH):
         _refusing_decrypt(RVmod, monkeypatch, refusal=refusal,
@@ -1515,6 +1516,28 @@ def test_the_STRONG_verdict_fires_on_EVERY_post_auth_refusal_and_NO_other(
         with pytest.raises(EV.EscrowError) as ei:
             _decrypt_run(escrow_world)
         assert ei.value.token == "ARTIFACT-CORRUPT", refusal
+        # ...and the message that asserts age got PAST the header, which is the
+        # only one these refusals earn.
+        assert "authenticated the header with the ESCROWED key" in ei.value.verdict
+
+    # 🔴 THE THIRD STATE: the key is PROVEN and the header is damaged. Same
+    # token and exit code as above — the remedy is identical — and a DIFFERENT
+    # message, because "age authenticated the header" is precisely what a MAC
+    # failure means it did not do.
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=RVmod.AGE_REFUSED_HEADER_MAC,
+                      write_plaintext=False)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "ARTIFACT-CORRUPT"
+    assert ei.value.exit_code == 33
+    assert "unwrapped one of its recipient stanzas" in ei.value.verdict
+    assert "authenticated the header with the ESCROWED key" not in ei.value.verdict
+    # 🔴 It must NOT offer the rotation-shaped cause the pre-auth verdict does.
+    assert "TWO CAUSES PRODUCE THIS" not in ei.value.verdict
+    assert "the key is the likely cause" not in ei.value.verdict
+    assert "do NOT rotate the key" in ei.value.verdict
+
     for refusal in sorted(RVmod.AGE_REFUSALS_PRE_AUTH):
         _refusing_decrypt(RVmod, monkeypatch, refusal=refusal,
                           write_plaintext=False)
@@ -4495,6 +4518,24 @@ _PINNED_DESTRUCTIVE_TEXTS: frozenset[str] = frozenset({
         'ESCROW IS FINE; THE BACKUP IS NOT. This is the finding a backup '
         'verifier exists to make: treat the artifact as unusable, check the '
         'other retained objects for this scope, and do NOT rotate the key.'
+    ),
+    # ARTIFACT-CORRUPT, message 2 of 2 — the key is PROVEN and the HEADER is
+    # damaged.
+    #
+    # 🔴 SAME TOKEN AND EXIT CODE, DIFFERENT WITNESS, and the split is the
+    # table's own "split by REMEDY" doctrine rather than a shortcut: the remedy
+    # is identical (the backup is damaged, do not rotate) while the evidence is
+    # not. It may NOT borrow message 1, which asserts age "authenticated the
+    # header" — precisely what a MAC failure means it did not do — and it must
+    # not fall to the pre-auth verdict, which offers a non-matching identity as
+    # an open cause that the discriminating control EXCLUDES.
+    (
+        '🔴 {key} has a DAMAGED HEADER. The ESCROWED key unwrapped one of its '
+        'recipient stanzas — which age only lets an identity that MATCHES do — '
+        'and the header then failed its own integrity check. THE ESCROW IS '
+        'FINE; THE BACKUP IS NOT. age never reached the payload, so nothing is '
+        'claimed about it. Treat the artifact as unusable, check the other '
+        'retained objects for this scope, and do NOT rotate the key.'
     ),
     # DECRYPT-FAILED, message 1 of 2 — age NAMED a pre-payload refusal.
     #

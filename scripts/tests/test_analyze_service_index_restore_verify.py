@@ -47,6 +47,7 @@ wrong reason and stays green with the guard it claims to test deleted.
 from __future__ import annotations
 
 import ast
+import base64
 import hashlib
 import importlib.util
 from testlib import hermetic_git  # noqa: E402
@@ -4297,8 +4298,15 @@ def _age_refusal_stderr(tmp_path, kind: str) -> str:
            ident.read_text(encoding="utf-8").splitlines()
            if ln.startswith("# public key:")][0]
 
+    # 🔴 THE PAYLOAD SIZE IS PART OF THE FIXTURE for one kind. age chunks the
+    # payload at 64 KiB; `last chunk is empty` is only reachable when a
+    # ciphertext whose payload spills ONE byte past a chunk boundary loses that
+    # byte, so the final chunk is empty rather than short. At 4 KiB the same
+    # truncation is an ordinary chunk-authentication failure. Measured on both
+    # versions.
+    size = 65537 if kind == "truncated-last-chunk-empty" else 4096
     plain = tmp_path / f"plain-{kind}"
-    plain.write_bytes(os.urandom(4096))
+    plain.write_bytes(os.urandom(size))
     cipher = tmp_path / f"c-{kind}.age"
     r = subprocess.run([AGE, "--encrypt", "--recipient", pub, "--output",
                         str(cipher), str(plain)], capture_output=True, text=True)
@@ -4324,13 +4332,46 @@ def _age_refusal_stderr(tmp_path, kind: str) -> str:
         # Damaging the intro makes age fail to PARSE the header; damaging only
         # the trailing `--- <mac>` line leaves a well-formed header whose MAC
         # does not verify, and age says something else entirely for it.
+        #
+        # 🔴 DECODE, FLIP, RE-ENCODE — do NOT flip a byte of the base64 TEXT.
+        # An audit measured the text-flip version over 30 fresh keys per binary:
+        # 1 run in 20 lands on a character that makes the closing line ILLEGAL
+        # base64, so age fails EARLIER with `failed to read header: … malformed
+        # closing line`, which classifies as `header-unreadable`. Both answers
+        # were accepted by this test's own assertion, so on those runs the
+        # marker it exists to exercise was never reached and the guard was
+        # vacuous — silently, ~5% of the time.
         lines = bytes(blob).split(b"\n")
         i = next(n for n, ln in enumerate(lines) if ln.startswith(b"--- "))
-        mac = bytearray(lines[i])
-        before = mac[8]
-        mac[8] ^= 0x01
-        assert mac[8] != before
-        lines[i] = bytes(mac)
+        raw = bytearray(base64.b64decode(lines[i][4:] + b"=="))
+        before = raw[0]
+        raw[0] ^= 0x01
+        assert raw[0] != before
+        lines[i] = b"--- " + base64.b64encode(bytes(raw)).rstrip(b"=")
+        blob = bytearray(b"\n".join(lines))
+    elif kind == "stanza-arg-unparseable":
+        # 🔴 PROVOKES `failed to parse X25519 recipient`, which was added to the
+        # marker table with NO fixture — an audit's mutation battery deleted the
+        # marker and the whole suite stayed green. The comment at the head of
+        # this block says the fixture set IS the guard; this is that claim being
+        # made true rather than reworded.
+        #
+        # An ILLEGAL base64 character in the stanza argument. Deterministic on
+        # both versions: `illegal base64 data at input byte 0`.
+        lines = bytes(blob).split(b"\n")
+        j = next(n for n, ln in enumerate(lines) if ln.startswith(b"-> X25519 "))
+        arg = lines[j][len(b"-> X25519 "):]
+        lines[j] = b"-> X25519 " + b"!" * len(arg)
+        blob = bytearray(b"\n".join(lines))
+    elif kind == "stanza-arg-wrong-length":
+        # 🔴 A DIFFERENT FAULT, and it was found BY WRITING THE FIXTURE ABOVE —
+        # the first attempt at provoking the parse error used a legal-but-short
+        # base64 argument and produced `invalid X25519 recipient block`, a
+        # refusal nothing in the table named. Kept as its own kind so both stay
+        # provoked rather than one masking the other.
+        lines = bytes(blob).split(b"\n")
+        j = next(n for n, ln in enumerate(lines) if ln.startswith(b"-> X25519 "))
+        lines[j] = b"-> X25519 " + base64.b64encode(b"too-short").rstrip(b"=")
         blob = bytearray(b"\n".join(lines))
     elif kind == "truncated-no-payload":
         # Everything after the header removed: age opens the header, then has no
@@ -4340,6 +4381,12 @@ def _age_refusal_stderr(tmp_path, kind: str) -> str:
     elif kind == "truncated-mid-nonce":
         assert len(blob) > hdr_end + 8
         blob = blob[:hdr_end + 8]
+    elif kind == "truncated-last-chunk-empty":
+        # See the payload-size note above: one byte off a payload that is one
+        # byte past a chunk boundary leaves age with an EMPTY final chunk, which
+        # it reports differently from a short one. The other marker in the table
+        # that had no fixture.
+        blob = blob[:-1]
     elif kind == "no-identity":
         other = tmp_path / f"other-{kind}.key"
         r = subprocess.run([AGE_KEYGEN, "-o", str(other)], capture_output=True,
@@ -4368,9 +4415,17 @@ def _age_refusal_stderr(tmp_path, kind: str) -> str:
     # 🔴 THE THREE THE 2026-09-08 SWEEP MISSED. Each of these produced
     # `unrecognised` before 2026-09-09 and reached the consumer's "CANNOT SAY
     # WHY" verdict, which told the operator age had probably reworded.
-    ("header-mac", "AGE_REFUSED_HEADER"),
+    ("header-mac", "AGE_REFUSED_HEADER_MAC"),
     ("truncated-no-payload", "AGE_REFUSED_TRUNCATED"),
     ("truncated-mid-nonce", "AGE_REFUSED_TRUNCATED"),
+    # 🔴 THE TWO MARKERS THAT SHIPPED WITH NO FIXTURE AT ALL. An audit's
+    # mutation battery deleted each and the whole suite stayed green — the block
+    # above says the fixture set IS the guard, and for these two it was not.
+    ("stanza-arg-unparseable", "AGE_REFUSED_HEADER"),
+    ("truncated-last-chunk-empty", "AGE_REFUSED_TRUNCATED"),
+    # 🔴 FOUND BY WRITING THE FIXTURE ABOVE — a fourth real refusal the table
+    # never named, which the first attempt at that fixture produced by accident.
+    ("stanza-arg-wrong-length", "AGE_REFUSED_HEADER"),
 ])
 def test_classify_age_refusal_reads_the_REAL_binarys_refusals(
         tmp_path, kind, expected_attr):
@@ -4393,7 +4448,8 @@ def test_classify_age_refusal_reads_the_REAL_binarys_refusals(
 
 
 @pytest.mark.parametrize("kind", ["payload", "truncated-no-payload",
-                                  "truncated-mid-nonce"])
+                                  "truncated-mid-nonce",
+                                  "truncated-last-chunk-empty"])
 def test_the_POST_AUTH_set_is_exactly_what_licenses_the_STRONGEST_verdict(
         tmp_path, kind):
     """🔴 THE CLAIM `ARTIFACT-CORRUPT` MAKES, PINNED AT ITS SOURCE.
@@ -4408,18 +4464,100 @@ def test_the_POST_AUTH_set_is_exactly_what_licenses_the_STRONGEST_verdict(
     assert RV.classify_age_refusal(err) in RV.AGE_REFUSALS_POST_AUTH, err
 
 
-@pytest.mark.parametrize("kind", ["no-identity", "header", "header-mac"])
+@pytest.mark.parametrize("kind", ["no-identity", "header",
+                                  "stanza-arg-unparseable",
+                                  "stanza-arg-wrong-length"])
 def test_no_PRE_AUTH_refusal_is_EVER_scored_as_post_auth(tmp_path, kind):
     """🔴 THE MIRROR, AND THE ONE THAT MATTERS MOST. A pre-auth refusal scored
     post-auth would assert "THE ESCROW IS FINE; THE BACKUP IS NOT" about a run
     that never proved the identity opens anything — a confident wrong answer in
     the direction that stops an operator investigating their key.
+
+    ⚠ `header-mac` is deliberately NOT in this list any more, and its removal is
+    the finding rather than a narrowing: it is not a pre-auth refusal. See
+    `test_bad_header_MAC_PROVES_the_key_worked` for the control.
     """
     err = _age_refusal_stderr(tmp_path, kind)
     got = RV.classify_age_refusal(err)
-    assert got not in RV.AGE_REFUSALS_POST_AUTH, (
-        f"age's {kind} refusal now scores as post-auth ({got!r}), which lets "
-        f"escrow-verify claim the header authenticated. Its stderr was:\n{err}")
+    assert got in RV.AGE_REFUSALS_PRE_AUTH, (
+        f"age's {kind} refusal classifies as {got!r}, which is not a pre-auth "
+        f"refusal. Its stderr was:\n{err}")
+    assert got not in RV.AGE_REFUSALS_KEY_PROVEN, (
+        f"age's {kind} refusal now counts as evidence the escrowed key WORKS "
+        f"({got!r}) — it is not. Its stderr was:\n{err}")
+
+
+def test_bad_header_MAC_PROVES_the_key_worked(tmp_path):
+    """🔴 THE DISCRIMINATING CONTROL, and the reason `bad header MAC` is neither
+    pre-auth nor post-auth.
+
+    The first draft of the marker table filed it with the pre-auth refusals,
+    whose operator-facing verdict offers *"the escrowed identity does not match
+    this artifact's recipients"* as an open cause and ends *"if none open, the
+    key is the likely cause"* — a rotation-shaped sentence about a key this very
+    message vindicates.
+
+    The control is the SAME damaged blob decrypted twice. If the wrong identity
+    reports `no identity matched` where the right one reports `bad header MAC`,
+    then age reached the MAC check only because the identity unwrapped a stanza
+    — so the two causes the pre-auth verdict calls inseparable ARE separable
+    here, and the one it names first is excluded.
+
+    Measured on both installed binaries, 3 runs each, before this test existed.
+    """
+    err = _age_refusal_stderr(tmp_path, "header-mac")
+    assert RV.classify_age_refusal(err) == RV.AGE_REFUSED_HEADER_MAC, err
+    assert RV.AGE_REFUSED_HEADER_MAC in RV.AGE_REFUSALS_KEY_PROVEN
+    assert RV.AGE_REFUSED_HEADER_MAC not in RV.AGE_REFUSALS_PRE_AUTH
+    assert RV.AGE_REFUSED_HEADER_MAC not in RV.AGE_REFUSALS_POST_AUTH
+
+    # 🔴 THE CONTROL ITSELF: rebuild the same damaged artifact and decrypt it
+    # with a NON-MATCHING identity. Without this the test above is satisfied by
+    # any message containing the marker, and says nothing about what it proves.
+    ident = tmp_path / "ctrl-good.key"
+    r = subprocess.run([AGE_KEYGEN, "-o", str(ident)], capture_output=True,
+                       text=True)
+    assert r.returncode == 0, r.stderr
+    pub = [ln.split(": ", 1)[1].strip() for ln in
+           ident.read_text(encoding="utf-8").splitlines()
+           if ln.startswith("# public key:")][0]
+    other = tmp_path / "ctrl-other.key"
+    r = subprocess.run([AGE_KEYGEN, "-o", str(other)], capture_output=True,
+                       text=True)
+    assert r.returncode == 0, r.stderr
+
+    plain = tmp_path / "ctrl-plain"
+    plain.write_bytes(os.urandom(4096))
+    cipher = tmp_path / "ctrl.age"
+    r = subprocess.run([AGE, "--encrypt", "--recipient", pub, "--output",
+                        str(cipher), str(plain)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    lines = cipher.read_bytes().split(b"\n")
+    i = next(n for n, ln in enumerate(lines) if ln.startswith(b"--- "))
+    raw = bytearray(base64.b64decode(lines[i][4:] + b"=="))
+    before = raw[0]
+    raw[0] ^= 0x01
+    assert raw[0] != before
+    lines[i] = b"--- " + base64.b64encode(bytes(raw)).rstrip(b"=")
+    bad = tmp_path / "ctrl-bad.age"
+    bad.write_bytes(b"\n".join(lines))
+
+    seen = {}
+    for label, use in (("right", ident), ("wrong", other)):
+        out = tmp_path / f"ctrl-out-{label}"
+        out.unlink(missing_ok=True)
+        r = subprocess.run([AGE, "--decrypt", "--identity", str(use),
+                            "--output", str(out), str(bad)],
+                           capture_output=True, text=True)
+        assert r.returncode != 0, label
+        seen[label] = RV.classify_age_refusal(r.stderr)
+
+    assert seen["right"] == RV.AGE_REFUSED_HEADER_MAC, seen
+    assert seen["wrong"] == RV.AGE_REFUSED_NO_IDENTITY, (
+        f"the WRONG identity did not report a non-matching identity on this "
+        f"blob ({seen}), so `bad header MAC` no longer proves the key unwrapped "
+        f"a stanza — and the verdict keyed on that proof is no longer earned. "
+        f"Re-measure before trusting `AGE_REFUSALS_KEY_PROVEN`.")
 
 
 def test_a_message_carrying_BOTH_a_header_and_an_EOF_marker_classifies_as_HEADER():
@@ -4435,12 +4573,19 @@ def test_a_message_carrying_BOTH_a_header_and_an_EOF_marker_classifies_as_HEADER
     from a live run, and both halves of that are deliberate. Spelling it would
     let the table drift away from the fixture. Taking it from the binary would
     make this test's SUBJECT version-dependent: MEASURED 2026-09-09, only v1.3.2
-    nests the two clauses — v1.3.1's in-header truncations say `failed to parse
-    header: failed to read line: EOF` and `parsing age header: file is empty`,
-    which carry no post-auth marker at all. A guard that can only fire on one of
-    two installed binaries is not a guard, and this property is about OUR tuple's
-    order, which is version-free. `test_the_real_binarys_in_header_truncations_
-    are_NEVER_post_auth` is the live half.
+    nests the two clauses — v1.3.1's in-header truncations say `failed to read
+    header: failed to parse header: failed to read line: EOF` and `failed to
+    read header: parsing age header: file is empty`, which carry no POST-auth
+    marker. A guard that can only fire on one of two installed binaries is not a
+    guard, and this property is about OUR tuple's order, which is version-free.
+    `test_the_real_binarys_in_header_truncations_are_NEVER_post_auth` is the live
+    half.
+
+    ⚠ Both v1.3.1 strings are quoted WITH their `failed to read header:` prefix,
+    and an audit caught an earlier draft that dropped it. Without the prefix they
+    carry no marker at all, which would say v1.3.1's in-header truncations reach
+    `unrecognised`. They reach `header-unreadable` — a different thing for the
+    operator, and the difference is exactly the clause that was trimmed.
     """
     pre_markers = [(m, k) for m, k in RV._AGE_REFUSAL_MARKERS
                    if k in RV.AGE_REFUSALS_PRE_AUTH]
@@ -4585,6 +4730,12 @@ def test_the_markers_are_all_LOAD_BEARING_and_none_is_a_prefix_of_another():
     assert RV.AGE_REFUSED_UNRECOGNISED not in RV.AGE_REFUSALS_POST_AUTH
     assert RV.AGE_REFUSED_NO_IDENTITY not in RV.AGE_REFUSALS_POST_AUTH
     assert RV.AGE_REFUSED_HEADER not in RV.AGE_REFUSALS_POST_AUTH
+    # 🔴 `AGE_REFUSALS_KEY_PROVEN` is what the "do not rotate" advice rests on,
+    # so nothing may enter it that is not positive evidence the key worked. The
+    # fall-through especially: "age said something new" is not proof of anything.
+    assert RV.AGE_REFUSALS_POST_AUTH < RV.AGE_REFUSALS_KEY_PROVEN
+    assert not (RV.AGE_REFUSALS_KEY_PROVEN & RV.AGE_REFUSALS_PRE_AUTH)
+    assert RV.AGE_REFUSED_UNRECOGNISED not in RV.AGE_REFUSALS_KEY_PROVEN
     # 🔴 THE ORDER ITSELF, as structure rather than as behaviour: every pre-auth
     # marker sits before every post-auth one in the tuple. The behavioural test
     # above can only see the overlaps someone thought to build; this sees the

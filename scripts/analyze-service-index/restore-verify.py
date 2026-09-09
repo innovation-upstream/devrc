@@ -335,11 +335,17 @@ DECRYPT_CAUSES = frozenset(
 #   "failed to decrypt and authenticate payload chunk"  -> payload, post-auth
 #   "no identity matched any of the recipients"         -> pre-auth
 #   "failed to read header"                             -> pre-auth
-#   "bad header MAC"                                    -> pre-auth
 #   "failed to parse x25519 recipient"                  -> pre-auth
+#   "bad header MAC"                                    -> KEY PROVEN, see below
 #   "failed to read nonce"                              -> TRUNCATED, post-auth
 #   "unexpected eof"                                    -> TRUNCATED, post-auth
 #   "last chunk is empty"                               -> TRUNCATED, post-auth
+#
+# ⚠ `bad header MAC` WAS PRE-AUTH IN THE FIRST DRAFT OF THIS TABLE and an
+# adversarial audit caught it: age reaches the header's integrity check only
+# after an identity has already unwrapped a recipient stanza, so the message
+# PROVES the escrowed key works. It belongs to neither block — see
+# `AGE_REFUSED_HEADER_MAC` below for the discriminating control that settles it.
 #
 # A POST-AUTH refusal means age got past the header, which requires the identity
 # to match — so `AGE_REFUSED_TRUNCATED` licenses the same strong verdict as
@@ -361,12 +367,42 @@ AGE_REFUSED_PAYLOAD = "payload-auth-failed"      # header OK, payload bad
 # say `-> wrong key` and was the one place that overclaimed.
 AGE_REFUSED_NO_IDENTITY = "no-identity-matched"
 AGE_REFUSED_HEADER = "header-unreadable"         # the header itself is damaged
+# 🔴 ITS OWN VALUE, AND NOT A SHADE OF `header-unreadable` — an adversarial audit
+# of the round that first classified this string caught it grouped with the
+# pre-auth refusals, where the operator-facing verdict says "the escrowed
+# identity does not match this artifact's recipients, or the artifact's HEADER is
+# damaged … if none open, the key is the likely cause."
+#
+# MEASURED 2026-09-09, BOTH VERSIONS, 3 RUNS EACH, with the discriminating
+# control that settles it — the SAME damaged blob decrypted twice:
+#
+#     RIGHT identity  ->  age: error: bad header MAC
+#     WRONG identity  ->  age: error: no identity matched any of the recipients
+#
+# age only reaches the header's integrity check AFTER an identity has unwrapped a
+# recipient stanza. So this message PROVES the escrowed key works and the
+# artifact is damaged: the two causes the pre-auth verdict calls inseparable are
+# separable here, and the one it names first is EXCLUDED. Grouping it pre-auth
+# pointed a rotation-shaped sentence at a key measurement had just vindicated.
+#
+# ⚠ It is NOT post-auth either, and that is why it is a third value rather than
+# a move from one set to the other: `ARTIFACT-CORRUPT`'s sentence asserts "age
+# authenticated the header", which is precisely what a MAC failure means it did
+# NOT do. Same REMEDY as post-auth (the backup is damaged, do not rotate), a
+# different WITNESS — so `escrow-verify.py` gives it that token with its own
+# message, the way `DECRYPT-FAILED` already carries two.
+#
+# 🔴 The fixture must decode the `--- <mac>` base64, flip a bit and RE-ENCODE.
+# Flipping a byte of the base64 TEXT lands on an illegal character often enough
+# to matter — measured 1 run in 20 — and age then fails earlier, on the closing
+# line, with a message that classifies as `header-unreadable`.
+AGE_REFUSED_HEADER_MAC = "header-mac-failed"     # key PROVEN, header damaged
 AGE_REFUSED_TRUNCATED = "truncated-after-header"  # header OK, bytes ran out
 AGE_REFUSED_UNRECOGNISED = "unrecognised"        # age said something new
 
 AGE_REFUSALS = frozenset({
     AGE_REFUSED_PAYLOAD, AGE_REFUSED_NO_IDENTITY, AGE_REFUSED_HEADER,
-    AGE_REFUSED_TRUNCATED, AGE_REFUSED_UNRECOGNISED})
+    AGE_REFUSED_HEADER_MAC, AGE_REFUSED_TRUNCATED, AGE_REFUSED_UNRECOGNISED})
 
 # The published refusals that mean AGE GOT PAST THE HEADER — i.e. it
 # authenticated the header, which requires the identity to match. Exported as a
@@ -375,14 +411,23 @@ AGE_REFUSALS = frozenset({
 # second copy of it is a second place for it to be wrong.
 AGE_REFUSALS_POST_AUTH = frozenset({AGE_REFUSED_PAYLOAD, AGE_REFUSED_TRUNCATED})
 
-# The mirror: age NAMED a refusal and it happened BEFORE the header opened, so
-# exactly two causes remain (wrong identity, damaged header) and neither is
-# separable from here. Published for the same reason as the set above — the
-# consumer branches on it — and stated as its own set rather than as "everything
-# that is not post-auth", because `AGE_REFUSED_UNRECOGNISED` is in neither: age
-# said something nothing has measured, which is a third state and must not be
-# absorbed into either claim by an else.
+# The mirror: age NAMED a refusal and it happened BEFORE any identity was shown
+# to work, so exactly two causes remain (wrong identity, damaged header) and
+# neither is separable from here. Published for the same reason as the set above
+# — the consumer branches on it — and stated as its own set rather than as
+# "everything that is not post-auth", because two published values are in
+# NEITHER: `AGE_REFUSED_HEADER_MAC` (the key is proven, so the pre-auth sentence
+# is false about it) and `AGE_REFUSED_UNRECOGNISED` (age said something nothing
+# has measured). Both are states of their own and must not be absorbed into
+# either claim by an `else`.
 AGE_REFUSALS_PRE_AUTH = frozenset({AGE_REFUSED_NO_IDENTITY, AGE_REFUSED_HEADER})
+
+# 🔴 THE PREDICATE THE "DO NOT ROTATE" ADVICE RESTS ON, published once. Every
+# member is a refusal age can only emit after an identity unwrapped a recipient
+# stanza, so each one is positive evidence the escrowed key WORKS. Derived from
+# the two sets rather than spelled, so a value added to either is covered here
+# without anybody remembering to.
+AGE_REFUSALS_KEY_PROVEN = AGE_REFUSALS_POST_AUTH | {AGE_REFUSED_HEADER_MAC}
 
 # 🔴 SUBSTRINGS, DELIBERATELY NOT ANCHORED REGEXES. age prefixes its stderr with
 # the program name and appends a "report unexpected errors" URL line, and both
@@ -406,11 +451,22 @@ AGE_REFUSALS_PRE_AUTH = frozenset({AGE_REFUSED_NO_IDENTITY, AGE_REFUSED_HEADER})
 # `test_a_message_carrying_BOTH_a_header_and_an_EOF_marker_classifies_as_HEADER`
 # pins the whole cross-product; do not reorder this tuple across the divider.
 _AGE_REFUSAL_MARKERS = (
-    # -- PRE-AUTH: age never opened the header ------------------------------- #
+    # -- PRE-AUTH: no identity has been shown to work ------------------------ #
     ("no identity matched any of the recipients", AGE_REFUSED_NO_IDENTITY),
     ("failed to read header", AGE_REFUSED_HEADER),
-    ("bad header mac", AGE_REFUSED_HEADER),
     ("failed to parse x25519 recipient", AGE_REFUSED_HEADER),
+    # 🔴 FOUND BY BUILDING THE FIXTURE THE ROUND ABOVE SHIPPED WITHOUT. Writing
+    # a provoking input for `failed to parse x25519 recipient` produced THIS
+    # message instead on the first attempt — a fourth real refusal nothing named,
+    # reaching `unrecognised`. Both are deterministic and they are different
+    # faults: an ILLEGAL base64 character in the stanza argument gives the parse
+    # error, a LEGAL but WRONG-LENGTH argument gives this one. Measured on both
+    # versions. That is the case for fixtures over enumeration: the marker list
+    # only ever contains what somebody thought to provoke.
+    ("invalid x25519 recipient block", AGE_REFUSED_HEADER),
+    # -- KEY PROVEN, header damaged: age got here only by unwrapping a stanza,
+    #    but it did NOT authenticate the header, so neither block above fits -- #
+    ("bad header mac", AGE_REFUSED_HEADER_MAC),
     # -- POST-AUTH: age opened the header, then the bytes failed it ---------- #
     ("failed to decrypt and authenticate payload chunk", AGE_REFUSED_PAYLOAD),
     ("failed to read nonce", AGE_REFUSED_TRUNCATED),
@@ -428,12 +484,18 @@ def classify_age_refusal(stderr: str) -> str:
     most likely of the others: the caller's strongest claim — "your backup is
     tampered and your key is fine" — must never be reached by falling through.
 
-    🔴 THE COMPARISON IS CASE-FOLDED AND THE MARKERS ARE SPELLED LOWER-CASE. Both
-    halves are load-bearing together and neither is guarded by the other: an
-    audit's mutation battery removed this `.lower()` and the whole suite stayed
-    green, because every message age emits today is already lower-case in the
-    matched clause. `test_classify_age_refusal_is_CASE_FOLDED` is what makes the
-    fold non-vacuous.
+    🔴 THE COMPARISON IS CASE-FOLDED AND THE MARKERS ARE SPELLED LOWER-CASE.
+    When that was first written it was guarded by nothing — a mutation battery
+    removed this `.lower()` and the whole suite stayed green, because every
+    clause age emitted was already lower-case, so
+    `test_classify_age_refusal_is_CASE_FOLDED` was added to make the fold
+    non-vacuous.
+
+    ⚠ That is no longer the only guard, and the sentence claiming it was became
+    false in the same commit that added `bad header MAC` — age spells MAC in
+    capitals, so the real binary's own fixture now kills the same mutant. The
+    built test still earns its place: it covers EVERY marker, including the ones
+    age happens to emit in lower case today.
     """
     low = (stderr or "").lower()
     for marker, kind in _AGE_REFUSAL_MARKERS:
