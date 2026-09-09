@@ -1675,11 +1675,29 @@ class TestP3IsRetiredOnceTheStoreIsFrozen:
                       "--apply", "--push", "ns/dep"])
         assert rc == cc.RC_CUTOVER_COMPLETE, f"rc={rc}"
         text = "".join(capsys.readouterr())
-        first_create = text.index("cairn create")
-        freeze_at = text.index("--freeze --apply")
-        assert first_create < freeze_at, (
-            f"the freeze route is offered before the push — following it in that "
-            f"order strands local-only content behind a retired P3.\n{text}"
+        # 🔴 ANCHORED INSIDE THE MIXED CLAUSE, AND THE FIRST DRAFT WAS NOT.
+        # `str.index` returns the FIRST occurrence, and "cairn create" appears
+        # TWICE — once in the base sentence that precedes the whole suffix. So
+        # `first_create` always resolved to that one, which trivially precedes
+        # `--freeze --apply`, and the ordering WITHIN the clause — the thing this
+        # test's name and docstring claim to pin — was never measured. MEASURED:
+        # reverting the clause to the round-2 wording ("If P5 never finished,
+        # complete it with `--freeze --apply`. Afterwards get any local-only
+        # content onto the pod with `cairn create`") passed all 97 tests. That
+        # mutant IS the defect this test exists to stop recurring.
+        assert "still WRITABLE" in text, (
+            f"the MIXED suffix is absent, so there is no clause to order.\n{text}"
+        )
+        clause = text[text.index("still WRITABLE"):]
+        for token in ("cairn create", "--freeze --apply"):
+            assert token in clause, (
+                f"the MIXED clause no longer names {token!r}, so the ordering "
+                f"below is unmeasurable.\n{clause}"
+            )
+        assert clause.index("cairn create") < clause.index("--freeze --apply"), (
+            f"the freeze route is offered before the push WITHIN the mixed "
+            f"clause — following it in that order strands local-only content "
+            f"behind a retired P3.\n{clause}"
         )
         assert "pushes NOTHING" in text, (
             f"the message does not say the freeze route sends nothing.\n{text}"
