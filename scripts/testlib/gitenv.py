@@ -876,6 +876,44 @@ def live_cotenants(git_dirs: "list[Path]") -> "list[str]":
     return found
 
 
+def describe_cotenants(cotenants: "list[str]") -> str:
+    """`pid:comm` is not enough to attribute an intruder — add cwd and cmdline.
+
+    `live_cotenants` returns a bounded `pid:comm` list by design (it is a
+    detector, not a debugger). When a test's "nothing is in here yet"
+    PRECONDITION fails we need the two fields that actually identify the
+    process, and we need them at failure time: /proc entries for a transient
+    process are gone before anyone reads the log.
+
+    🔴 THIS IS NOT SPECULATIVE TOOLING — it is what identified the 2026-09-06
+    flake. `pid:comm` alone said `['126220:git']` for four days and the obvious
+    mechanism was refuted from the wrong end; the first run carrying cwd+cmdline
+    printed `cmdline='git maintenance run --auto --quiet --detach'` with
+    `ppid=1`, which named the writer outright. It lives HERE, next to
+    `live_cotenants`, so every caller of the probe can reach it — a second copy
+    in one test module is how only one site of a family ended up wired.
+
+    Best-effort by construction — a process that exits between the scan and this
+    call yields `<gone>`, which is itself the useful answer (it dates the
+    intruder's lifetime to under one scan). It runs INSIDE assertion messages,
+    so it must never raise.
+    """
+    out = []
+    for entry in cotenants:
+        pid = entry.split(":", 1)[0]
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            cwd = "<gone>"
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                cmdline = fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            cmdline = "<gone>"
+        out.append(f"{entry} cwd={cwd!r} cmdline={cmdline!r}")
+    return "; ".join(out) or "<none>"
+
+
 def attribution_evidence(git_dirs: "list[Path]") -> "list[str]":
     """Reasons this session cannot attribute a delta to a test. Empty == it can.
 
