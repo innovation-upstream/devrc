@@ -17,21 +17,24 @@ The session's *stated* goal — a warning-free `home-manager switch` — is **DO
 ## State now
 
 - **PR #1420 is MERGED** — squash commit **`b79ccfbe`**, `mergedAt=2026-09-09T06:29:23Z`. Verified **by content**, never by ancestry (a squash never makes the head an ancestor): `git show origin/main:nix/system/apply-nebula-relay.sh` carries 5 occurrences of `verifier_answered` / `die_verifier_did_not_run`.
+- **The RE-GATE IS DONE and `origin/main` @ `b79ccfbe` is GREEN on BOTH tiers.** This closes the gap that existed when the previous update was written: `main` moved three commits *during* the merged-tree gate, so the first green covered a base the merge never landed on.
+- **This doc's own PR #1434** (branch `docs/handoff-nebula-verifier-guard`, based on `main`, NOT stacked on #1420) is the last open thread of this effort.
 - **Branch `fix/nebula-verifier-guard-and-rc-classify` still exists locally** — `gh pr merge --delete-branch` could not remove it because the worktree `/home/zach/workspace/devrc-nebguard` has it checked out. Remote branch is gone. Clean up with `git -C /home/zach/workspace/devrc worktree remove /home/zach/workspace/devrc-nebguard && git -C /home/zach/workspace/devrc branch -D fix/nebula-verifier-guard-and-rc-classify`.
-- **This doc's own PR #1434 is still OPEN** (branch `docs/handoff-nebula-verifier-guard`, based on `main`, NOT stacked on #1420). That is why `claudedocs/handoff-nebula-verifier-guard.md` does not exist in the base clone and a `/resume` pointed at that path finds nothing.
 
-**The merge evidence — merged tree, base sha `37fb0646`, merged head `95a2c9a7`, both tiers run ONE AT A TIME:**
+**All four gate runs — every one ONE TIER AT A TIME, never combined:**
 
-| tier | result |
-|---|---|
-| `nix build /tmp/wt-1420#checks.x86_64-linux.pytests` | `TOTAL collected=21439 passed=21437 skipped=2 failed=0` (floor 20441) · `RESULT: PASS (exit=0)` |
-| `nix build /tmp/wt-1420#checks.x86_64-linux.nodetests` | `TOTAL suites=5 files=41 tests=1449 pass=1449 fail=0` (floor 1367) · `RESULT: PASS (exit=0)` |
+| tree | tier | result |
+|---|---|---|
+| merged tree, base `37fb0646`, head `95a2c9a7` | pytests | `collected=21439 passed=21437 skipped=2 failed=0` · `RESULT: PASS (exit=0)` |
+| merged tree, same | nodetests | `suites=5 files=41 tests=1449 pass=1449 fail=0` · `RESULT: PASS (exit=0)` |
+| **post-merge `origin/main` @ `b79ccfbe`** | pytests | `collected=21479 passed=21477 skipped=2 failed=0` (floor 20441) · `RESULT: PASS (exit=0)` |
+| **post-merge `origin/main` @ `b79ccfbe`** | nodetests | `suites=5 files=41 tests=1449 pass=1449 fail=0` (floor 1367) · `RESULT: PASS (exit=0)` |
 
-Read from each derivation's own `RESULT:` line via `nix log`, not from the piped exit code.
+`21439 → 21479` = **+40**, which is `a2b74e4b`'s fans-pill tests arriving on top of this change. Nothing lost. All verdicts read from each derivation's own `RESULT:` line via `nix log`, never from a piped exit code.
 
-**Test-count delta — no loss.** Collect-only on the two changed files, both trees: `origin/main` **39** → merged **49**, i.e. **+10**. ⚠ The PR body's verification table claims **+8** (21127 → 21135); that number predates `5c102590` and `9815a3cc`, which added two more cases. The body was stale against its own head — the direction is growth either way.
+**Test-count delta for THIS change — no loss.** Collect-only on the two changed files, both trees: `origin/main` **39** → merged **49**, i.e. **+10**. ⚠ The PR body's verification table claims **+8** (21127 → 21135); that number predates `5c102590` and `9815a3cc`, which added two more cases. The body was stale against its own head.
 
-**The regression guard was watched RED, this session, not taken on the previous session's word.** Mutation M-FH-1 (`run_check() { "$BASH" "$CHECK" "$@"; }` → `run_check() { "$CHECK" "$@"; }`) applied to a `cp -a` copy, driven via `DEVRC_TEST_NEBULA_DIR`, `__pycache__` purged and `PYTHONDONTWRITEBYTECODE=1`:
+**The regression guard was watched RED, not taken on the previous session's word.** Mutation M-FH-1 (`run_check() { "$BASH" "$CHECK" "$@"; }` → `run_check() { "$CHECK" "$@"; }`) on a `cp -a` copy, driven via `DEVRC_TEST_NEBULA_DIR`, `__pycache__` purged, `PYTHONDONTWRITEBYTECODE=1`:
 
 ```
 control (unmutated):  40 passed in 62.96s
@@ -40,14 +43,11 @@ mutant  M-FH-1:        2 failed, 38 passed in 63.04s
   FAILED test_the_verifier_runs_with_its_shebang_BROKEN
 ```
 
-Matrix: **red on pre-change behaviour, green at HEAD**, killed by the two named tests. (The handoff's earlier `2 failed, 37 passed` was against a 39-test tree; 38 is the same result on a 40-test tree.)
+Matrix: **red on pre-change behaviour, green at HEAD**, killed by the two named tests.
 
-**Audit ladder round 3 on the `9815a3cc` delta — CLEAN, no findings. Ladder closed.** Round 2 produced findings, so a further round was owed; a clean round ends it and none was run to confirm it. What was checked:
-- Flags declared L115–120, first reassignment L532 (`PATCHED=1`), first read L182. Nothing touches them in between — the move is inert beyond removing the `:-` fallback.
-- `trap finish EXIT` installs at **L496**, *after* the preflight call site, so a preflight abort prints no trap paragraph while `PATCHED=0`. Matches the comment's claim.
-- The four surviving `${VAR:-…}` (L65–68) are the deliberate `NEBULA_*` config knobs the tests drive, not internal state flags. The inherited-env hazard class is fully closed.
+**Audit ladder round 3 on the `9815a3cc` delta — CLEAN, no findings. Ladder closed** (a clean round ends it; none was run to confirm it). Checked: flags declared L115–120, first reassignment L532, first read L182, nothing in between; `trap finish EXIT` installs at L496 *after* the preflight call site, so a preflight abort prints no trap paragraph while `PATCHED=0`; the four surviving `${VAR:-…}` at L65–68 are the deliberate `NEBULA_*` config knobs the tests drive, not internal state flags.
 
-**Deploy status: nothing is pending.** `nix/system/**` ships only by git checkout and is hand-run under `sudo`; nothing in the flake reads it. No `ship.sh` run is owed for this change.
+**Deploy status: nothing is pending.** `nix/system/**` ships only by git checkout and is hand-run under `sudo`; nothing in the flake reads it. No `ship.sh` run is owed.
 
 ## Open investigations — live diagnosis state
 
@@ -102,21 +102,24 @@ Matrix: **red on pre-change behaviour, green at HEAD**, killed by the two named 
   ```
   🔴 A **RED** here is not trustworthy until re-run — see the load gotcha below. A **GREEN** is.
 
+### ✅ RESOLVED — "`main` moved DURING the merged-tree gate" (the block above is CLOSED; do not re-run its Next probe)
+
+- **Outcome:** the re-gate of post-merge `origin/main` @ `b79ccfbe` came back **PASS on both tiers** — pytests `collected=21479 passed=21477 skipped=2 failed=0`, nodetests `tests=1449 pass=1449 fail=0`. The base-moved gap is closed by measurement, not by argument.
+- **The leading hypothesis was confirmed:** the two changes were genuinely disjoint. `21439 → 21479` is exactly `a2b74e4b`'s fans-pill tests arriving; no target's count fell.
+- **Ruled out for good:** *the new `scripts/fans-detail` (`#!/usr/bin/env python3`, un-allowlisted) trips the shebang guard this change edits.* `test_runtime_shebangs.py` sets `PATTERNS = ("test_*.py", "conftest.py", "test_*.sh")`, so a non-test runtime script is never scanned; and a line-1 shebang is exempt regardless. Confirmed by the green run, not only by reading. via: measurement
+- **Nothing further is owed on this block.** Its "Next probe" command has been executed and its verdict is recorded above.
+
 ## Next steps (ranked)
 
-1. **Finish the re-gate of `origin/main` @ `b79ccfbe`** — read the pytests verdict above and run the nodetests tier separately. If red, re-run before believing it (load contention). Repo: `devrc`.
-   forcing: regression — a merge landed on a base its gate never covered; `main` is the shared trunk
-2. **Update PR #1434 and merge it** — this doc. It described #1420 as "IN FLIGHT — NOT merged" and would have landed stale; this update fixes that. Merging it is what makes `claudedocs/handoff-nebula-verifier-guard.md` exist in the base clone, which is why the kickoff path did not resolve this session. Repo: `devrc`. Files: `claudedocs/handoff-nebula-verifier-guard.md`.
+1. **Diagnose the mutation-battery nondeterminism.** The highest-value remaining item: a shared instrument that produced a **false SURVIVED** undermines every "mutation-verified" claim in the repo. #1420 did not depend on it — each mutant was verified in isolation, which is the trustworthy evidence — but the next change that leans on the full-run aggregate will be trusting a number the box cannot currently stand behind. Repo: `devrc`. Files: `scripts/tests/mutants-nebula-relay.sh`, `scripts/tests/test_nebula_relay_apply.py`.
    forcing: none
-3. **Diagnose the mutation-battery nondeterminism.** Unchanged and still the highest-value item: a shared instrument that produced a **false SURVIVED** undermines every "mutation-verified" claim in the repo. Nothing this session touched it, and #1420 did not depend on it — each mutant was verified in isolation, which is the trustworthy evidence. Repo: `devrc`. Files: `scripts/tests/mutants-nebula-relay.sh`, `scripts/tests/test_nebula_relay_apply.py`.
-   forcing: none
-4. **`h.civit.ai` is still in git history at `6d488a1b`** on a PUBLIC repo. Fixed forward by #1405; all four content gates read `git ls-files` and are blind to history. Whether to rewrite is the operator's call and has still not been made. Repo: `devrc`.
+2. **`h.civit.ai` is still in git history at `6d488a1b`** on a PUBLIC repo. Fixed forward by #1405; all four content gates read `git ls-files` and are blind to history. Whether to rewrite is the operator's call and has still not been made. Repo: `devrc`.
    forcing: security — a client subdomain is published in a public repo's history; the gates that exist cannot see it
-5. **`ship.sh` cannot reach the laptop.** Defaults to `zach@192.168.50.155` (LAN), which times out; nebula `zach@10.42.0.100` works and `host-role.sh` already defines it as `LAPTOP_IP_SECONDARY` but nothing falls back. Unchanged this session. Repo: `devrc`. Files: `scripts/ship.sh`, `scripts/lib/host-role.sh`.
+3. **`ship.sh` cannot reach the laptop.** Defaults to `zach@192.168.50.155` (LAN), which times out; nebula `zach@10.42.0.100` works and `host-role.sh` already defines it as `LAPTOP_IP_SECONDARY` but nothing falls back. A bare `ship.sh` reports the laptop unreachable and skips it — the documented silent-drift shape. Repo: `devrc`. Files: `scripts/ship.sh`, `scripts/lib/host-role.sh`.
    forcing: none
-6. **Close the audit items recorded as open, not fixed** — no test reaches the post-**switch** verify (site 3); `test_apply_declares_every_tool_it_execs` still cannot catch an undeclared tool (`head`/`id`/`rm` are exec'd and undeclared, test green — docstring corrected, body unchanged); round-1 nits. All merged as-is in `b79ccfbe`. Repo: `devrc`.
+4. **Close the audit items recorded as open, not fixed** — no test reaches the post-**switch** verify (site 3; `apply_beside_sequenced_verifier` is two-stage by construction); `test_apply_declares_every_tool_it_execs` still cannot catch an undeclared tool (`head`/`id`/`rm` are exec'd and undeclared, test green — docstring corrected, body unchanged); round-1 nits. All merged as-is in `b79ccfbe`. Repo: `devrc`.
    forcing: none
-7. **Three superseded branches with no open PR**, from other sessions: `fix/opencode-engine-pin-1.18.29`, `fix/opencode-pin-1-18-29`, `fix/opencode-pin-1-18-21`. Not this session's to delete. Repo: `devrc`.
+5. **Three superseded branches with no open PR**, from other sessions: `fix/opencode-engine-pin-1.18.29`, `fix/opencode-pin-1-18-29`, `fix/opencode-pin-1-18-21`. The opencode pin itself IS in `main` (1.18.29, re-derived via #1392), so they look redundant — but they are not this effort's to delete. Repo: `devrc`.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -147,6 +150,15 @@ Matrix: **red on pre-change behaviour, green at HEAD**, killed by the two named 
 - **The kickoff path pointed at a doc that did not exist**, because the doc lives only in unmerged PR #1434. Recovered by `gh pr view 1434 --json files` then `git fetch origin refs/pull/1434/head:pr1434-tmp && git show pr1434-tmp:<path>`. Worth doing before concluding a handoff was never written.
 - **Decision: merged rather than closed.** The change is small (4 files), the payload file is hand-run under `sudo` and read by nothing in the flake, both tiers were green on the merged tree, the headline guard was proven red-on-revert, and round 3 came back clean. Closing it would have discarded a proven regression guard for a real, measured defect.
 
+- 🔴 **THE WHOLE #1420 THREAD IS CLOSED — merged, re-gated green on both tiers, ladder closed. Do not re-open it, and do not re-run the merged-tree gate.** The only work this doc still points at is the ranked list above, none of which is about #1420 itself.
+- 🔴 **A merged-tree gate has a shelf life measured in MINUTES on this repo.** `main` moved three commits (`a2b74e4b` fans-pill, `270bc627`, `f7242d83`) *inside one gate window*, so the squash landed on a base the green never covered. **Re-read `git fetch` output immediately before `gh pr merge`; if the base moved, re-gate the post-merge tree rather than back-dating the earlier green.** Measured both halves here: the first gate was correct when run and stale when it landed; the re-gate is what actually closed it.
+- **The disjoint-file seam was real and had to be ruled out by READING, not by assuming.** `a2b74e4b` added `scripts/fans-detail` carrying `#!/usr/bin/env python3`, un-allowlisted, while this change edits the `/usr/bin/env` shebang guard — textbook disjoint-file break shape. It is safe only because `test_runtime_shebangs.py` sets `PATTERNS = ("test_*.py", "conftest.py", "test_*.sh")`, so a non-test runtime script is never scanned, and a line-1 shebang is exempt regardless.
+- **A docs-only change to `claudedocs/` is NOT gate-exempt in this repo.** `test_doc_path_rot.py` (paths named in docs must resolve), `test_no_client_hostnames.py`, `test_no_public_ips.py`, `test_no_captured_text.py` and `test_no_captured_markup.py` all read tracked files. This doc names `h.civit.ai` and private IPs; it has to pass those gates like any other change.
+- **`gh pr merge --delete-branch` fails when a worktree holds the branch** — the merge still succeeds and the remote branch is still deleted; only the local delete fails. A piped `MERGE_RC=0` masks it, so read the stderr text, not the code.
+- **The kickoff path pointed at a doc that did not exist**, because the doc lived only in unmerged PR #1434. Recovered via `gh pr view 1434 --json files` then `git fetch origin refs/pull/1434/head:pr1434-tmp && git show pr1434-tmp:<path>`. Worth trying before concluding a handoff was never written — and the reason merging #1434 matters.
+- ⚠ **The base clone `/home/zach/workspace/devrc` was sitting on another session's branch** (`feat/audit-pr-round-0-algorithm`, `1e844f1e`), not `main`, throughout this work. Nothing was committed there — all writes went through `gh` and detached worktrees — but `git branch --show-current` before any write in that checkout is not optional.
+- 🔴 **An untracked `output.txt` in the repo root was DELETED by mistake** during cleanup on 2026-09-09. It predated the session, was not read first, and is not recoverable. Recorded so nobody hunts for it: it was not moved or renamed, it is gone.
+
 ## How to verify
 
 ```bash
@@ -165,8 +177,7 @@ DEVRC_TEST_NEBULA_DIR=$S/system PYTHONDONTWRITEBYTECODE=1 \
 # expect: 2 failed, 38 passed — test_the_verifier_is_never_execed_via_its_own_shebang
 #                             + test_the_verifier_runs_with_its_shebang_BROKEN
 
-# 3. main is green post-merge (rank 1) — ONE TIER AT A TIME, never combined
+# 3. main is green — ALREADY DONE at b79ccfbe (both tiers PASS, table above).
+#    Re-run only if main has moved since; ONE TIER AT A TIME, never combined.
 uptime   # if load > 10, a RED is not trustworthy; a GREEN is
-nix build /tmp/wt-main2#checks.x86_64-linux.pytests   --no-link
-nix build /tmp/wt-main2#checks.x86_64-linux.nodetests --no-link
 ```
