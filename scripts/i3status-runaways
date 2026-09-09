@@ -10,7 +10,7 @@ CALM rendering (colour == "look at me"):
   count > 0                      -> `system` icon + count, coloured Warning
   cache missing/stale/error/OLD  -> `?` — the board could not be read, which is
                                      not an empty one
-Click (wired in graphical.nix) opens the runaway-menu fzf TUI.
+Click (wired in graphical.nix) opens `syshealth` in a float terminal.
 """
 import importlib.machinery
 import importlib.util

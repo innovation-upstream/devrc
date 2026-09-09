@@ -1329,13 +1329,31 @@ SYSHEALTH = os.path.join(DEVRC_DIR, "scripts", "syshealth")
 SYSHEALTH_TIMEOUT = 15
 
 
+#: 🔴 The `read -n 1` hold is LOAD-BEARING, not decoration. `syshealth` prints a
+#: table and exits — MEASURED at 0.156-0.187 s on this host — and `alacritty -e
+#: CMD` closes the moment CMD exits, so a bare `-e syshealth` opens a window that
+#: vanishes before it can be read. That is indistinguishable from the click doing
+#: nothing, which is the exact defect (round 1, finding 1) this pill already
+#: shipped once on the click path.
+#: 🔴 This string and `syshealthCmd` in `nix/graphical.nix` are TWO SPELLINGS OF
+#: ONE RULE and they cannot be collapsed — one is Nix with store interpolations,
+#: the other Python. An earlier revision of this comment claimed they were
+#: "shared"; they never were, and they had already drifted apart when an audit
+#: caught it. They are pinned to each other by
+#: `test_the_toast_action_and_the_CLICK_are_the_same_shape`, which reads BOTH
+#: files — a test asserting only that this contains "syshealth" is walkable by a
+#: string that is not a terminal at all, and that is measured, not hypothetical.
+SYSHEALTH_TERM = ("alacritty --class float,float "
+                  "-o window.dimensions.columns=120 -o window.dimensions.lines=40")
+
+
 def _syshealth_action() -> str:
-    """The toast's middle-click target. `_toast_specs`'s docstring requires this
-    to be the SAME thing the block's left-click opens, so both are syshealth in
-    a float terminal. (The previous revision opened Grafana here, copy-pasted
-    from the `telemetry` spec — Grafana has no view of local processes.)"""
-    return ("alacritty --class float,float -e %s %s"
-            % (sys.executable, SYSHEALTH))
+    """The toast's middle-click target: the SAME shape the block's clicks run,
+    as `_toast_specs`'s docstring requires — a float terminal that HOLDS OPEN.
+    (The revision before last opened Grafana, copy-pasted from the `telemetry`
+    spec; the one after that opened a terminal that closed in ~0.16 s.)"""
+    return ("%s -e bash -c '%s; echo; read -n 1 -r -s -p \"[any key to close]\"'"
+            % (SYSHEALTH_TERM, SYSHEALTH))
 
 
 def parse_runaways(report, prev_pids=()) -> dict:
@@ -1375,6 +1393,11 @@ def parse_runaways(report, prev_pids=()) -> dict:
     flagged.sort(key=lambda x: -x["cpu"])
     count = len(flagged)
     new_count = sum(1 for f in flagged if f["pid"] not in prev)
+    # `pid` is read BACK (by the next poll, for `new_count`). `cpu` and `cmd`
+    # are consumed HERE, building `detail`, and by a human reading the cache
+    # file — nothing reads them back. That is a deliberate, stated exception to
+    # "emit no field without a consumer", not an oversight: an earlier revision
+    # of this comment claimed every field had one, which was false for these two.
     if count:
         detail = "%d runaway process(es), top: %s (%.0f%%)" % (
             count, flagged[0]["cmd"], flagged[0]["cpu"])
@@ -1527,7 +1550,8 @@ def main(argv=None) -> int:
                     help="parse this JSON file as a deadman verdict (see "
                          "scripts/collector/deadman.py --json)")
     ap.add_argument("--mock-runaways", metavar="FILE",
-                    help="parse this JSON file as a list of process dicts")
+                    help="parse this JSON file as a `syshealth --json` REPORT dict "
+                             "(not a list of process dicts — that was the pre-delegation shape)")
     ap.add_argument("--toast", action="store_true",
                     help="with --mock-*: also run the rising-edge toast gate. "
                          "OFF by default because it MOVES THE LIVE LATCHES in "

@@ -3040,7 +3040,6 @@ def test_the_runaways_toast_gates_on_new_count_and_opens_what_the_click_opens():
     which has no view of local processes."""
     spec = poll._toast_specs()["runaways"]
     assert spec["count_key"] == "new_count", spec
-    assert "syshealth" in spec["action"], spec
     assert "grafana" not in spec["action"].lower(), spec
     # The dispatcher must actually READ that key — a spelled-but-unread
     # count_key is the defect class this whole change is about.
@@ -3051,6 +3050,39 @@ def test_the_runaways_toast_gates_on_new_count_and_opens_what_the_click_opens():
         write=lambda n, v: None)
     assert got == (False, False), got
     assert fired == [], "toasted on count while new_count was 0: %r" % (fired,)
+
+
+def test_the_toast_action_and_the_CLICK_are_the_same_shape():
+    """🔴 Pins a RELATIONSHIP across TWO FILES, because the rule is spelled twice.
+
+    `_syshealth_action()` (Python) and `syshealthCmd` (Nix) cannot be collapsed
+    into one source — one carries store interpolations — so nothing but a test
+    can hold them together, and they HAD already drifted: the toast opened a
+    bare `alacritty -e syshealth`, which closes the instant syshealth prints and
+    exits (~0.16 s), while the click wrapped it in a `read -n 1` hold.
+
+    🔴 Watched RED against that drift, and against the guard this REPLACES.
+    The old assertion was `"syshealth" in spec["action"]` — a check on a WORD,
+    walkable by any string containing it. MEASURED: with the action mutated to
+    `xdg-open http://syshealth.invalid/not-a-terminal` the whole suite stayed
+    at 568 passed, MUTANT SURVIVED. It asserted a relationship its body never
+    inspected: it never opened `graphical.nix` at all. This reads both sides.
+    """
+    action = poll._toast_specs()["runaways"]["action"]
+    nix = (Path(__file__).resolve().parents[2] / "nix" / "graphical.nix").read_text()
+    m = re.search(r'^\s*syshealthCmd\s*=\s*"(?P<cmd>.*)";\s*$', nix, re.M)
+    assert m, "syshealthCmd is gone or reshaped in graphical.nix — repin this test"
+    click = m.group("cmd")
+    # The three properties that make either one WORK, asserted on BOTH sides.
+    for label, cmd in (("toast action", action), ("click", click)):
+        assert "syshealth" in cmd, (label, cmd)
+        assert cmd.lstrip().startswith("alacritty"), (
+            "%s must run in a TERMINAL — syshealth is a TUI, and i3status-rust "
+            "spawns a click with no controlling tty: %r" % (label, cmd))
+        assert "read -n 1" in cmd, (
+            "%s must HOLD THE WINDOW OPEN — syshealth prints and exits in ~0.16s, "
+            "so `alacritty -e syshealth` flashes and vanishes, which is "
+            "indistinguishable from the click doing nothing: %r" % (label, cmd))
 
 
 def test_fetch_runaways_IGNORES_syshealths_EXIT_CODE(monkeypatch, tmp_path):

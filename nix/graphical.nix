@@ -47,11 +47,21 @@ let
   # every float popup, including the retired agent-ops one.)
   btopCmd = "alacritty --class float,float -o window.dimensions.columns=160 -o window.dimensions.lines=45 -e btop";
 
-  # Shared by the runaways pill's clicks and by its toast's middle-click action
-  # (`_syshealth_action` in bar-status-poll), which `_toast_specs` requires to
-  # open the SAME target as the block's left-click. `${home}` rather than a
-  # literal `~`: every other working-tree reference in this file interpolates it,
-  # and `~` survives only if the click is spawned through a shell.
+  # Used by the runaways pill's clicks. 🔴 NOT shared with the toast's
+  # middle-click action — `_syshealth_action` in bar-status-poll builds its own
+  # string, because this one carries Nix store interpolations that Python cannot
+  # produce. They are TWO SPELLINGS OF ONE RULE and they cannot be collapsed, so
+  # they are pinned to each other by
+  # `test_bar_status.py::test_the_toast_action_and_the_CLICK_are_the_same_shape`,
+  # which reads BOTH files. An earlier revision of this comment claimed they
+  # WERE shared; they never were, and by the time an audit read it they had
+  # already drifted — the toast had lost the `read -n 1` hold below.
+  # 🔴 That hold is load-bearing: syshealth prints and exits in ~0.16 s, and
+  # `alacritty -e CMD` closes when CMD does, so without it the window flashes
+  # and vanishes — indistinguishable from the click doing nothing.
+  # `${home}` rather than a literal `~`: every other working-tree reference in
+  # this file interpolates it, and `~` survives only if the click is spawned
+  # through a shell.
   syshealthCmd = "alacritty --class float,float -o window.dimensions.columns=120 -o window.dimensions.lines=40 -e ${pkgs.bash}/bin/bash -c '${home}/workspace/devrc/scripts/syshealth; echo; read -n 1 -r -s -p \"[any key to close]\"'";
 
   # Python env for the decoupled bar-status poller (workbench systemd user timer):
@@ -427,8 +437,10 @@ let
   # TERMINAL (the live i3status-rs has TTY `?`), so a bare TUI here exits
   # `inappropriate ioctl for device` and the click is a SILENT NO-OP. An earlier
   # revision pointed left-click at a bare fzf menu for exactly that reason.
-  # The bare-command left-clicks elsewhere in this file are all rofi, which is a
-  # GUI and needs no tty.
+  # The bare-command left-clicks elsewhere in this file need no tty either —
+  # rofi menus, yad, and the two toggles are GUIs or fire-and-forget, none of
+  # them a TUI. (An earlier revision of this comment said "all rofi", which is
+  # true of the menu/detail handlers and false of yad/gamemode/rig-control.)
   # Signal 19, matching SIGNALS in bar-status-poll.
   runawaysBlock = {
     block = "custom";
@@ -757,10 +769,19 @@ lib.mkIf isNixOS {
       # change to the deadman logic — or to the shared clawgate "needs the
       # operator" predicate, which decides the pill's whole meaning — would leave
       # the unit definition identical and the timer would not re-arm.
+      # syshealth joined that set when the runaways source stopped carrying its
+      # own predicate and started rendering syshealth's verdict — the poller
+      # execs `$DEVRC_DIR/scripts/syshealth`, an explicit working-tree path, so
+      # it belongs here by the rule stated above. Effect is milder than the
+      # others (the unit is a oneshot re-run every 45s, so a changed syshealth
+      # applies on the next poll either way); it is listed because the ledger
+      # claims to enumerate this class, and a ledger that silently omits a
+      # member is worse than one that never claimed to be complete.
       X-Restart-Triggers = [
         "${../scripts/bar-status-poll}"
         "${../scripts/collector/deadman.py}"
         "${../scripts/lib/clawgate_tasks.py}"
+        "${../scripts/syshealth}"
       ];
     };
   };
