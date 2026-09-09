@@ -1285,9 +1285,12 @@ def _strip_shell_comments(src):
     in_comment = False
     sub_depth = 0
     tick_depth = 0
-    heredoc_term = None      # set at `<<WORD`, consumed at the next newline
+    heredoc_terms = []       # set at `<<WORD`, consumed at the next newline
     heredoc_active = None
+    heredoc_dash = False
+    unmodelled = False       # a construct this walk cannot lex -> refuse to strip
     prev_closed_group = False   # a `)` or backtick that CLOSED — mid-word
+    saw_subst = False           # a substitution opened on this line (see below)
     prev_was_escape = False
     after_join = False          # a backslash-newline was just consumed
 
@@ -1301,8 +1304,15 @@ def _strip_shell_comments(src):
                 j = n
             line = src[i:j]
             out.append(line)
-            if line.strip() == heredoc_active:
-                heredoc_active = None
+            # 🔴 EXACT MATCH, not `.strip()`. bash allows leading whitespace on the
+            # terminator ONLY under `<<-`, and then only TABS. `.strip()` ended a
+            # heredoc early on a space-indented `  EOF`, after which the remaining
+            # BODY was lexed as shell and its `#` lines removed — an over-strip.
+            if (line.lstrip("\t") if heredoc_dash else line) == heredoc_active:
+                # `cmd <<A <<B` runs the bodies BACK TO BACK, with no intervening
+                # newline for the main loop to pop the queue at — so the second
+                # body was lexed as shell. Pull the next terminator right here.
+                heredoc_active = heredoc_terms.pop(0) if heredoc_terms else None
             if j < n:
                 out.append("\n")
             i = j + 1
@@ -1311,10 +1321,11 @@ def _strip_shell_comments(src):
         if c == "\n":
             # A comment ENDS at the newline no matter what preceded it.
             in_comment = False
-            if heredoc_term is not None:
-                heredoc_active, heredoc_term = heredoc_term, None
+            if heredoc_terms:
+                heredoc_active = heredoc_terms.pop(0)
             out.append(c)
-            prev_closed_group = prev_was_escape = False
+            prev_closed_group = prev_was_escape = after_join = False
+            saw_subst = False
             i += 1
             continue
 
@@ -1371,7 +1382,7 @@ def _strip_shell_comments(src):
             # `)` is a word start (`(true)# x` is a comment), while a `)` that
             # closed `$(`/`$((` is mid-word (`$(true)#x` is one word).
             or (prev in " \t;|&()" and not prev_was_escape)
-            or (prev == "`" and not prev_closed_group)
+            or (prev == "`" and not prev_closed_group and not prev_was_escape)
         )
         was_escape, closed_group = prev_was_escape, prev_closed_group
         prev_was_escape = prev_closed_group = after_join = False
@@ -1394,21 +1405,41 @@ def _strip_shell_comments(src):
             i += 2
             prev_was_escape = True
             continue
-        elif c == "<" and src[i : i + 2] == "<<" and heredoc_term is None:
-            m = re.match(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", src[i:])
+        elif c == "<" and src[i : i + 2] == "<<" and src[i : i + 3] != "<<<":
+            # 🔴 A QUEUE, BECAUSE `cmd <<A <<B` IS TWO HEREDOCS. The single-slot
+            # version armed only the first, and the SECOND body was lexed as
+            # shell — an over-strip on data.
+            m = re.match(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", src[i:])
             out.append(c)
             if m:
-                heredoc_term = m.group(2)
+                heredoc_dash = bool(m.group(1))
+                heredoc_terms.append(m.group(3))
+            else:
+                # `<<\EOF`, `<<$VAR`, `<< "a b"` … forms this walk cannot resolve.
+                # Refusing to strip the WHOLE source is the loud direction; lexing
+                # a body we failed to arm is the silent one.
+                unmodelled = True
         elif c == "`":
             tick_depth ^= 1
             if tick_depth == 0:
                 prev_closed_group = True
             out.append(c)
-        elif c == "(" and (prev == "$" or (prev == "(" and sub_depth)):
+        elif c == "(" and (prev == "$" or sub_depth or (prev is not None and prev in "<>")):
+            # Every `(` inside a substitution counts, and `<(`/`>(` open one too.
+            # Counting only `$(`/`((` left a plain subshell `$( (cd /) )` and a
+            # process substitution `<(echo z)` with an UNPAIRED closer.
             sub_depth += 1
+            saw_subst = True
             out.append(c)
-        elif c == ")" and sub_depth:
-            sub_depth -= 1
+        elif c == ")" and (sub_depth or saw_subst):
+            # 🔴 `saw_subst` IS THE FAIL-SAFE, AND IT IS DELIBERATELY ONE-WAY. A
+            # `case` pattern's `)` inside `$( … )` is genuinely unbalanced, so no
+            # counter can pair it. Once a substitution has opened on this line,
+            # EVERY later `)` is treated as mid-word — which KEEPS a following
+            # `#`. That is the loud direction; the alternative was a silent
+            # over-strip on ordinary shell.
+            if sub_depth:
+                sub_depth -= 1
             prev_closed_group = True
             out.append(c)
         elif c == "#" and at_word_start and not closed_group:
@@ -1417,6 +1448,11 @@ def _strip_shell_comments(src):
             out.append(c)
         i += 1
 
+    if unmodelled:
+        # Every unmodelled construct becomes an UNDER-strip (a phantom
+        # requirement — loud) instead of a silent over-strip. Structural, so it
+        # covers shapes nobody enumerated.
+        return src
     return "".join(out)
 
 
@@ -1432,6 +1468,14 @@ def _strip_shell_comments(src):
         ("a SUBSHELL's `)#`", "(true)# /lib/MARK.py", False),
         ("a comment after a multi-line string closes",
          'echo "one\ntwo" # /lib/MARK.py', False),
+        # 🔴 THREE MECHANISMS THE DOCSTRING ASSERTED AS MEASURED AND NO ROW
+        # COVERED. Each was found by mutating the walk and watching every row
+        # stay green: deleting `(` from the word-start set, deleting the opening-
+        # backtick clause, and replacing `prev == "\n"` with `or False` — the
+        # last of which does almost all the real work on the actual script.
+        ("a full-line comment on line >= 2", "echo one\n# /lib/MARK.py", False),
+        ("a bare `(` is a word start", "echo a (# /lib/MARK.py", False),
+        ("an unquoted OPENING backtick", "echo `#/lib/MARK.py`", False),
         # --- bash KEEPS these as executable text: removing the marker would be
         #     an OVER-strip, which hides a dependency and passes the ledger ---
         ("`X=y#foo` is one word", "F=/lib/MARK.py#tag", True),
@@ -1455,6 +1499,21 @@ def _strip_shell_comments(src):
         ("inside a multi-line \"...\"", 'echo "one\n# /lib/MARK.py\nthree"', True),
         ("inside a multi-line '...'", "echo 'one\n# /lib/MARK.py\nthree'", True),
         ("a backslash-newline continuation joins", "echo abc\\\n#/lib/MARK.py", True),
+        # 🔴 SEVEN MEASURED OVER-STRIPS FROM ONE AUDIT ROUND, EVERY ONE A GROUP
+        # DELIMITER THE COUNTER COULD NOT PAIR. They are the reason the walk now
+        # fails SAFE (see `saw_subst` and `unmodelled`) instead of enumerating.
+        ("a plain subshell inside $( )", "V=$( (cd / && pwd) )#/lib/MARK.py", True),
+        ("a case pattern's ) inside $( )",
+         "V=$(case a in b) echo Z;; esac)#/lib/MARK.py", True),
+        ("a nested ( inside $(( ))", "echo $(( (1+2)*3 ))#/lib/MARK.py", True),
+        ("a process substitution <( )", "wc -l <(echo z)#/lib/MARK.py", True),
+        ("an ESCAPED backtick is not an opening one", "echo x\\`#/lib/MARK.py", True),
+        ("TWO heredocs on one line", "cat <<A <<B\nx\nA\n# /lib/MARK.py\nB", True),
+        ("a backslash-quoted heredoc terminator",
+         "cat <<\\EOF\n# /lib/MARK.py\nEOF", True),
+        ("a variable heredoc terminator", "T=EOF; cat <<$T\n# /lib/MARK.py\nEOF", True),
+        ("a space-indented terminator does NOT end <<EOF",
+         "cat <<EOF\nbody\n  EOF\n# /lib/MARK.py\nEOF", True),
     ],
 )
 def test_the_shell_comment_stripper_AGREES_WITH_BASH(name, text, marker_survives):
