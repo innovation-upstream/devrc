@@ -223,6 +223,7 @@ def test_the_stubbed_launcher_set_is_pinned():
     assert set(nolaunch.HOST_LAUNCHERS) == {
         "systemd-run", "notify-send", "dunstify", "dunstctl", "rofi", "yad",
         "openrgb", "ddcutil", "xdg-open", "i3-msg", "xdotool", "espanso",
+        "alacritty",
     }
     # systemctl is NOT record-only — it is verb-split, and lives in its own
     # tests below. Putting it here would swallow `is-active`, which scripts and

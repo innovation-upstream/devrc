@@ -479,6 +479,50 @@ MUTANTS: list[tuple] = [
      "            candidates = candidates + extra\n",
      "            candidates = extra + candidates\n",
      "the MEASURED rows must stay on top"),
+    # ---- F14: the fzf picker (rofi's replacement, 2026-09-09) ---------------
+    # 🔴 THE WHOLE POINT OF THE SWAP IS ONE FLAG, AND ITS LOSS IS SILENT: the
+    # picker still opens, still matches, still returns the right URL — it just
+    # goes back to ranking the wanted repository EIGHTH. Nothing behavioural
+    # fails. These rows are what stop that being a green regression.
+    ("K48", "deletion", "the picker loses `--tiebreak=end`, so fzf falls back to "
+                        "its LENGTH tiebreak — the exact rofi defect the swap "
+                        "was made to escape, with every behavioural test green",
+     "    'fzf --tiebreak=end --layout=reverse --info=inline '\n",
+     "    'fzf --layout=reverse --info=inline '\n",
+     "without --tiebreak=end"),
+    ("K49", "operand swap", "the tiebreak becomes `length`, which is rofi's "
+                            "behaviour spelled as an fzf flag — a mutant that "
+                            "looks deliberate in a diff",
+     "    'fzf --tiebreak=end --layout=reverse --info=inline '\n",
+     "    'fzf --tiebreak=length --layout=reverse --info=inline '\n",
+     "without --tiebreak=end"),
+    ("K50", "widening", "`--exact` is added, which MEASURED does not fix the tie "
+                        "(rank 27 either way) and narrows the match set from 56 "
+                        "rows to 21 — the fuzzy narrowing a 392-row universe "
+                        "depends on",
+     "    'fzf --tiebreak=end --layout=reverse --info=inline '\n",
+     "    'fzf --tiebreak=end --exact --layout=reverse --info=inline '\n",
+     "--exact: MEASURED not to fix the tie"),
+    ("K51", "deletion", "the header COUNT stops being derived from the header "
+                        "lines, so `--header-lines` disagrees with what was "
+                        "prepended and the FIRST candidate row — the clawgate "
+                        "task on a bare `#N` — is swallowed into the header",
+     '        chosen = run_picker("\\n".join([*header, *rows]) + "\\n", len(header))\n',
+     '        chosen = run_picker("\\n".join([*header, *rows]) + "\\n", 0)\n',
+     "the note must be WRAPPED"),
+    ("K52", "deletion", "the picker's private tmpdir is no longer removed, so a "
+                        "list of PRIVATE repository names is left behind on "
+                        "every click — the disclosure sink a terminal adds",
+     "        shutil.rmtree(workdir, ignore_errors=True)\n",
+     "        pass\n",
+     "outlived the pick"),
+    ("K53", "deletion", "the alacritty wrapper drops `pkgs.fzf`, so the picker's "
+                        "`sh -c` line prints `fzf: not found` into a terminal "
+                        "that immediately closes — a silent dead click, green "
+                        "in every suite",
+     "      pkgs.alacritty pkgs.fzf\n",
+     "      pkgs.alacritty\n",
+     "the wrapper's PATH is MISSING"),
     ("K36", "deletion", "the alacritty wrapper drops `pkgs.git` from the hint's "
                         "PATH: `git` is then absent under the display manager's "
                         "environment, FileNotFoundError is caught as OSError, "
@@ -502,6 +546,8 @@ TARGETS: dict[str, pathlib.Path] = {
     "K33": OPEN_, "K34": OPEN_, "K35": OPEN_,
     "K37": OPEN_, "K38": OPEN_, "K39": OPEN_,
     "K45": OPEN_, "K46": OPEN_, "K47": OPEN_,
+    "K48": OPEN_, "K49": OPEN_, "K50": OPEN_, "K51": OPEN_, "K52": OPEN_,
+    "K53": ALACRITTY,
     "K40": ALACRITTY, "K41": SCAN, "K42": ALACRITTY,
     # 🔴 A FOURTH FILE, AND A NIX ONE. The wrapper's PATH is a seam between two
     # files in two languages that agree only by coincidence, and both directions

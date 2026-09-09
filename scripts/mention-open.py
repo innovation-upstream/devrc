@@ -18,7 +18,7 @@ RESOLUTION
 ----------
   1 openable candidate   -> xdg-open it, UNLESS the repository was guessed from
                             the tmux pane — see `repo_source` in `main()`.
-  2+ (a bare `#N`)       -> rofi picker, one row per platform, showing the URL.
+  2+ (a bare `#N`)       -> the picker, one row per platform, showing the URL.
   any of the above whose repository was GUESSED
                          -> the same rows, FIRST, with the fuzzy universe
                             appended beneath them so the guess is overridable.
@@ -64,8 +64,8 @@ only from a source that names THIS repo unambiguously, in this order:
   4. the tmux pane the operator was most recently in.
 
 🔴 AND WHEN NONE OF THEM ANSWERS, THE OPERATOR CHOOSES — THE HANDLER DOES NOT
-REFUSE. Every repository this host knows about goes into a rofi picker with
-`-matching fuzzy`, so `talos-inf#12` is four keystrokes from `talos-infra`. The
+REFUSE. Every repository this host knows about goes into a FUZZY picker (fzf in
+a float terminal), so `talos-inf#12` is four keystrokes from `talos-infra`. The
 old toast `no mention in the clicked text` read as a failure when it was the
 guard working, and a guard that reads as a bug gets deleted by the next
 maintainer — so every unresolvable shape now becomes a CHOICE.
@@ -201,9 +201,11 @@ KNOWN_UNIVERSE_PATH = Path(
 # fault. Seven days means "several consecutive runs did not happen".
 STALE_MAPPING_DAYS = 7
 
-# rofi theme — the same one nix/i3/config.nix already uses for the app launcher,
-# so the picker looks like every other picker on this desktop.
-ROFI_THEME = "gruvbox-dark-hard"
+# ⚠ `ROFI_THEME = "gruvbox-dark-hard"` USED TO BE HERE and is GONE with the rofi
+# call it configured. The picker's palette now comes from the terminal it runs
+# in: `--color=16` tells fzf to use the sixteen ANSI colours, which alacritty
+# already paints gruvbox (nix/programs/alacritty/default.nix). Same argument,
+# one fewer copy of the theme name — see `PICKER_SH`.
 
 # How many `git remote get-url` children run at once during discovery. 16 was
 # measured as the knee on this host (8/16/32/64 -> 24/26/28/32 ms for 100
@@ -219,7 +221,7 @@ PLATFORM_LABEL = {
 
 
 # --------------------------------------------------------------------------- #
-# Pure helpers (unit-tested without touching git, tmux, rofi or a browser)
+# Pure helpers (unit-tested without touching git, tmux, the picker or a browser)
 # --------------------------------------------------------------------------- #
 _SSH_REMOTE = re.compile(r"^(?:ssh://)?git@[^:/]+[:/](?P<path>.+?)(?:\.git)?/?$")
 _HTTP_REMOTE = re.compile(r"^https?://[^/]+/(?P<path>.+?)(?:\.git)?/?$")
@@ -364,10 +366,10 @@ def repo_universe(repos: dict | None,
     Rows that are not exactly `owner/repo` are dropped from BOTH sources — they
     build a URL that 404s while looking authoritative — and the result is deduped
     case-insensitively, because `acme/Widget` and `acme/widget` are one
-    repository on GitHub and two identical-looking rows in rofi.
+    repository on GitHub and two identical-looking rows in the picker.
 
     🔴 THE RETURN VALUE NAMES PRIVATE REPOSITORIES. It may reach the operator's
-    rofi window and nothing else — no log line, no notification body, no
+    picker window and nothing else — no log line, no notification body, no
     telemetry row, no test fixture. See the module docstring.
     """
     by_key: dict[str, str] = {}
@@ -396,8 +398,8 @@ def universe_candidates(num: str, universe: list[str]) -> list[dict]:
 
 def row_to_url(row: str, candidates: list[dict]) -> str:
     """Map a picker row back to its URL. Matches on the URL suffix rather than
-    the row index, so a rofi build that decorates or reorders rows cannot open
-    the wrong one."""
+    the row index, so a picker that decorates or reorders rows cannot open the
+    wrong one."""
     row = (row or "").strip()
     if not row:
         return ""
@@ -651,87 +653,265 @@ def open_url(url: str) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# THE PICKER — fzf in a dedicated float terminal
+#
+# 🔴 IT WAS ROFI UNTIL 2026-09-09, AND THE SWAP IS A MEASUREMENT, NOT A TASTE.
+# rofi's `-sorting-method fzf` gave the right SCORES and then broke every tie by
+# ROW LENGTH, which is exactly backwards for `owner/repo`: every row of one
+# owner matches at the same offset, so they all score identically, and the
+# LONGEST loses. MEASURED on the real 392-row universe, query `civitai`:
+# `civitai/civitai` ranked **8th of 230**, under seven rows containing the token
+# ONCE — all of them shorter. The second occurrence did not help; it HURT.
+#
+# 🔴 ROFI CANNOT FIX THAT, AND ALL THREE ESCAPES WERE MEASURED CLOSED: it
+# exposes no `--tiebreak`; `-display-columns` is DISPLAY-only (matching still
+# runs over the whole row — verified headless); and reordering the row changes
+# nothing (three shapes tried, all rank 8). Under a length tiebreak a longer
+# repo name always loses at equal score. Structural.
+#
+# fzf's `--tiebreak=end` prefers the match nearest the END of the line, and in
+# `…/owner/repo/pull/<id>` the suffix after the repo is a CONSTANT, so "nearest
+# the end" is exactly "in the repo name rather than the owner". MEASURED on the
+# same 392 rows: `civitai` -> **1 of 230**, and the controls do not move
+# (`devrc` 1/16, `talos-infra` 1/1, `comfyui` 1/5 — identical either way).
+#
+# ⚠ TWO FLAGS CONSIDERED AND REJECTED, both by measurement rather than taste:
+#   * `--exact` does NOT fix this. Same synthetic corpus, same query: rank 27
+#     with it and 27 without — the defect is a TIEBREAK, and exact matching
+#     leaves the scores just as tied. It also narrows the match set (a 6-char
+#     prefix went from 56 rows to 21), which is the fuzzy narrowing rofi's
+#     `-matching fuzzy` existed to provide. Strictly worse on both axes.
+#   * `--select-1` would re-open the defect #1336 closed. It auto-accepts when
+#     the initial query matches exactly one row — and the ONE-ROW picker is
+#     precisely the guessed-repo confirmation case, which must never open
+#     unconfirmed. See `repo_source == "default"` in `main()`.
+# --------------------------------------------------------------------------- #
+
+# The terminal the picker runs in, and its geometry.
+#
+# `--class float,mention-open` puts it under `for_window [class="float"]
+# floating enable` in `nix/i3/config.nix` — the SAME rule every other float
+# terminal in `nix/graphical.nix` relies on — while the instance half names this
+# window specifically, so a future i3 rule can size or place it without catching
+# every other float. (alacritty's `--class` is `<general>,<instance>`; i3's
+# `class=` matches the general half.)
+PICKER_CLASS = "float,mention-open"
+PICKER_COLUMNS = 120
+PICKER_LINES = 22
+
+# 🔴 THE ROWS NEVER TOUCH argv, AND THAT IS THE WHOLE REASON FOR THE FIFOs.
+# They name PRIVATE repositories (see the module docstring), and a terminal
+# emulator does NOT proxy stdin: it hands its child a PTY, so the `input=` that
+# fed rofi has nowhere to go. Every other transport puts the rows somewhere a
+# second process can read them — argv is world-readable in `/proc`, an env var
+# likewise, a temp file lands them on disk. A FIFO holds nothing at rest: the
+# bytes live in a kernel pipe buffer between two processes and are gone when
+# both ends close. The pair lives in a 0700 `mkdtemp` removed in a `finally`.
+#
+# 🔴 THE HEADER GOES DOWN THE SAME PIPE, as `--header-lines`, rather than into
+# `--header` on argv. The note is pinned to name no repository — but pinning is
+# a claim about today's `universe_note`/`guessed_note`, and routing it through
+# the private channel makes "nothing that could carry a universe token is ever
+# an argument" STRUCTURAL instead. The count is `len(header)` of the very list
+# being prepended, so it cannot drift from what it counts.
+#
+# `sh -c` is unavoidable — fzf must read one FIFO and write the other, and only
+# a shell can redirect. It is NON-INTERACTIVE (`-c`), so no history file is
+# read or written, and the FIFO paths arrive as POSITIONAL ARGUMENTS: nothing is
+# interpolated into the script text.
+#
+# 🔴 IT STAYS A LIST LITERAL WHOSE argv[0] IS THE CONSTANT `"alacritty"`.
+# `test_mention_open.py`'s AST ledger of spawnable executables reads exactly
+# that; handing `subprocess.Popen` a variable reports `<computed>` and the
+# ledger — the guard that stops a network call being re-added — goes red for a
+# reason that has nothing to do with what is being spawned. The same test reads
+# the FIRST WORD of the `-c` script to learn that `fzf` must be on the wrapper's
+# PATH, so that word must stay `fzf`.
+PICKER_SH = (
+    'fzf --tiebreak=end --layout=reverse --info=inline '
+    '--prompt="mention > " --pointer=">" --color=16 '
+    '--header-lines="$3" <"$1" >"$2"'
+)
+
+# How long the picker may stay open before it is abandoned. Inherited from the
+# rofi call this replaced, unchanged: it is "the operator walked away", not a
+# tuned constant.
+PICKER_TIMEOUT = 120.0
+
+
+def picker_header(mesg: str) -> list[str]:
+    """The note, wrapped to the picker's width — one list entry per fzf header
+    line.
+
+    Returned as a LIST because `--header-lines` needs a count and the count must
+    be `len()` of the exact lines prepended, never a second measurement of the
+    same string. Too LOW and a header line becomes a selectable row that
+    `row_to_url` maps to nothing (harmless); too HIGH and it eats the FIRST real
+    row — which is the clawgate task on a bare `#N`. Deriving both from one list
+    removes that direction entirely.
+
+    ⚠ NO MARKUP ESCAPING, and its absence is deliberate. rofi's `-mesg` rendered
+    PANGO, so `<` and `&` had to be escaped or the whole line vanished. fzf's
+    header is plain text, so the escaping is not merely unnecessary — leaving it
+    in would show the operator a literal `&amp;` in text they typed.
+    """
+    if not mesg:
+        return []
+    import textwrap  # noqa: PLC0415 — see the `concurrent.futures` note above
+    return textwrap.wrap(mesg, width=PICKER_COLUMNS - 2) or [mesg]
+
+
+def run_picker(payload: str, header_lines: int) -> str:
+    """Show `payload` in a terminal running fzf; return the selected row, or ""
+    for a dismissal, a timeout, or a terminal that never started.
+
+    `payload` is `header_lines` header lines followed by the rows, newline
+    separated. It is written to a FIFO and NEVER to argv, an env var or a file
+    — see `PICKER_SH`.
+
+    🔴 THE OPEN ORDER IS LOAD-BEARING AND IT IS A DEADLOCK, NOT A STYLE. The
+    shell applies `<"$1" >"$2"` BEFORE exec'ing fzf, and opening a FIFO for
+    WRITING blocks until a READER exists — so the child sits in `open("$2")`
+    with fzf not yet running and nothing draining `$1`. Everything still works
+    while the rows fit in one 64 KiB pipe buffer, which today's ~392 rows
+    (~27 KB) do; the day they do not, the write blocks, the child never
+    unblocks, and the click hangs until the 120s timeout. Opening the choice
+    FIFO **first** — `O_RDWR`, which needs no peer and never blocks — removes
+    the cycle for any payload size.
+    """
+    # Imported here rather than at module scope for the reason the
+    # `concurrent.futures` comment at the top of this file measures: every one
+    # of these lands on EVERY click, and only the picker path needs them.
+    import errno       # noqa: PLC0415
+    import select      # noqa: PLC0415
+    import shutil      # noqa: PLC0415
+    import tempfile    # noqa: PLC0415
+
+    workdir = tempfile.mkdtemp(prefix="mention-open-")
+    rows_fifo = os.path.join(workdir, "rows")
+    choice_fifo = os.path.join(workdir, "choice")
+    proc = None
+    rfd = -1
+    try:
+        os.mkfifo(rows_fifo, 0o600)
+        os.mkfifo(choice_fifo, 0o600)
+        proc = subprocess.Popen(
+            ["alacritty", "--class", PICKER_CLASS,
+             "-o", f"window.dimensions.columns={PICKER_COLUMNS}",
+             "-o", f"window.dimensions.lines={PICKER_LINES}",
+             "-e", "/bin/sh", "-c", PICKER_SH,
+             "mention-open", rows_fifo, choice_fifo, str(header_lines)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + PICKER_TIMEOUT
+
+        # 🔴 FIRST, and see the docstring. O_RDWR also means the read loop below
+        # can never see a PREMATURE EOF: a read-only FIFO with no writer yet
+        # returns end-of-file at once, which is indistinguishable from "the
+        # operator dismissed it". Holding a write end ourselves leaves the child
+        # exiting — which `poll()` reports — as the only EOF-shaped answer.
+        rfd = os.open(choice_fifo, os.O_RDWR | os.O_NONBLOCK)
+
+        # --- feed the rows in -------------------------------------------- #
+        # Opening a FIFO for writing fails with ENXIO until a reader opens it,
+        # so this is a poll rather than a blocking open: a terminal that never
+        # starts (or a stub that exits at once) must return, not hang for two
+        # minutes.
+        wfd = -1
+        while wfd < 0:
+            try:
+                wfd = os.open(rows_fifo, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError as exc:
+                if exc.errno != errno.ENXIO:
+                    raise
+                if proc.poll() is not None or time.monotonic() > deadline:
+                    return ""
+                time.sleep(0.02)
+        data = payload.encode()
+        try:
+            while data:
+                _r, w, _x = select.select([], [wfd], [], 0.2)
+                if w:
+                    try:
+                        data = data[os.write(wfd, data):]
+                        continue
+                    except BlockingIOError:  # pragma: no cover — select said writable
+                        pass
+                if proc.poll() is not None or time.monotonic() > deadline:
+                    break
+        finally:
+            os.close(wfd)
+
+        # --- read the selection back ------------------------------------- #
+        out = b""
+        while b"\n" not in out:
+            r, _w, _x = select.select([rfd], [], [], 0.2)
+            if r:
+                chunk = os.read(rfd, 65536)
+                if chunk:
+                    out += chunk
+                    continue
+            if time.monotonic() > deadline:
+                break
+            if proc.poll() is not None:
+                # The child is gone, so anything it wrote is already in the
+                # pipe. Drain once, then stop — a dismissal leaves nothing.
+                try:
+                    out += os.read(rfd, 65536)
+                except BlockingIOError:
+                    pass
+                break
+        return out.decode("utf-8", "replace").split("\n", 1)[0]
+    finally:
+        if rfd >= 0:
+            os.close(rfd)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+
+
 def pick(candidates: list[dict], mesg: str = "") -> str:
-    """Ask rofi which candidate to open. Returns the chosen URL, or "" if the
+    """Ask fzf which candidate to open. Returns the chosen URL, or "" if the
     operator dismissed the picker (which must open NOTHING).
 
-    🔴 `mesg` IS WHERE THE DIAGNOSIS GOES, AND THE REASON IS THAT ROFI CANNOT
-    TELL THE TWO EXITS APART. With `-no-custom` a name that matches nothing
-    cannot be submitted, so "I typed `kubectl-neat` and the list went empty" and
-    "I changed my mind" BOTH arrive back here as rofi exiting non-zero with no
-    selection. There is no signal that separates them — not the exit code, not
-    stdout — so a toast fired after a dismissal would fire after every dismissal,
-    which is the noise this handler must not make. The diagnosis therefore goes
-    where it costs nothing and is read BEFORE the choice: a line above the list,
-    on the operator's own screen, which is the one surface the universe may
-    already reach. See `universe_note` for what it may say.
+    🔴 `mesg` IS WHERE THE DIAGNOSIS GOES, AND THE REASON IS THAT THE PICKER
+    CANNOT TELL THE TWO EXITS APART. fzf does not return the query, so "I typed
+    `kubectl-neat` and the list went empty" and "I changed my mind" BOTH arrive
+    back here as no selection. There is no signal that separates them — not the
+    exit code, not stdout — so a toast fired after a dismissal would fire after
+    every dismissal, which is the noise this handler must not make. The
+    diagnosis therefore goes where it costs nothing and is read BEFORE the
+    choice: a header above the list, on the operator's own screen, which is the
+    one surface the universe may already reach. See `universe_note`.
 
-    🔴 `-matching fuzzy` IS LOAD-BEARING, not a nicety. It is the entire reason
-    the namesake cap could be removed and the reason a hundred-row universe is a
-    narrowing rather than a wall: the operator types `talos-inf` and the list
-    collapses. Removing this flag silently restores the wall the old cap existed
-    to prevent, with every test still green — so it is pinned by the suite.
+    🔴 FUZZY MATCHING IS LOAD-BEARING, not a nicety, and it is fzf's DEFAULT —
+    which is why nothing below spells it. It is the entire reason the namesake
+    cap could be removed and the reason a hundred-row universe is a narrowing
+    rather than a wall: the operator types `talos-inf` and the list collapses.
+    `--exact` would take it away; the suite pins its ABSENCE for that reason.
 
-    🔴 `-no-custom` is equally load-bearing in the other direction: it stops rofi
-    returning free text the operator TYPED as if it were a selection, which
-    `row_to_url` would then fail to match — dismissal-shaped, but by accident.
+    🔴 fzf NEVER RETURNS THE QUERY, which is what rofi needed `-no-custom` for.
+    Free text the operator TYPED would come back as a row `row_to_url` cannot
+    match — dismissal-shaped, but by accident. fzf prints a SELECTED item or
+    nothing; the flag that would break that is `--print-query`, and the suite
+    pins its absence.
+
+    🔴 WITH AN EMPTY QUERY fzf PRESERVES INPUT ORDER, so the clawgate row stays
+    FIRST on a bare `#N`. Sorting only applies to a scored match set, and an
+    empty query scores nothing. Verified end-to-end against a real fzf, not
+    assumed.
     """
     rows = picker_rows(candidates)
-    # `-mesg` renders as PANGO MARKUP, and the note embeds the clicked text. A
-    # stray `<` or `&` there would break the whole line's rendering, so the three
-    # markup-significant characters are escaped. Rows are NOT markup (there is no
-    # `-markup-rows`), so they need no such treatment.
-    #
-    # 🔴 SPLICED WITH `*`, NEVER CONCATENATED ONTO A NAME. The argv must stay a
-    # LIST LITERAL whose first element is the constant `"rofi"`, because
-    # `test_mention_open.py`'s AST ledger of spawnable executables reads exactly
-    # that; handing `subprocess.run` a variable reports `<computed>` and the
-    # ledger — the guard that stops a network call being re-added — goes red for
-    # a reason that has nothing to do with what is being spawned.
-    mesg_argv = ["-mesg", (mesg.replace("&", "&amp;")
-                               .replace("<", "&lt;")
-                               .replace(">", "&gt;"))] if mesg else []
+    header = picker_header(mesg)
     try:
-        r = subprocess.run(
-            # 🔴 `-sort -sorting-method fzf` IS NOT DECORATION — WITHOUT IT
-            # `-matching fuzzy` FILTERS BUT DOES NOT RANK, and rofi falls back
-            # to INPUT ORDER, which `repo_universe()` returns alphabetically.
-            #
-            # REPORTED FROM THE REAL PICKER 2026-09-08: typing `devrc` put
-            # `civitai/developer-docs` and `civitai/dev-runner-config` ABOVE the
-            # actual `devrc` repo. Not a matching bug — all three genuinely
-            # contain d-e-v…r…c as a subsequence — a RANKING one. Nothing was
-            # scoring them, so `c…` simply sorted before `i…`.
-            #
-            # MEASURED on a 7-row corpus in the exact shape `picker_rows()`
-            # builds, query `devrc`: input order puts the right repo **6th**;
-            # fzf scoring puts it **1st**, with the two decoys 2nd and 3rd.
-            #
-            # 🔴 NO NEW DEPENDENCY, AND THAT WAS THE RESEARCH RESULT. fzf's
-            # algorithm (Smith-Waterman-derived, with bonuses for consecutive
-            # runs and word/camel boundaries) is the de-facto standard the whole
-            # fzf/fzy/skim family implements — and rofi already ships it as
-            # `-sorting-method fzf`. Swapping in another picker would have
-            # bought the same algorithm plus a dependency and a theme that
-            # drifts from the launcher's (see NOT_FROM_THE_WRAPPER_PATH). The
-            # defect was never the library; it was a flag nobody passed.
-            #
-            # ⚠ PRE-SORTING IN PYTHON CANNOT FIX THIS. rofi re-filters on every
-            # keystroke, so an order we hand it only survives until the operator
-            # types one character — the ranking must live where the filtering
-            # does. That is why this is a rofi flag and not a `sorted()` call.
-            ["rofi", "-dmenu", "-i", "-matching", "fuzzy",
-             "-sort", "-sorting-method", "fzf",
-             "-p", "mention", "-theme", ROFI_THEME,
-             "-format", "s", "-no-custom", *mesg_argv],
-            input="\n".join(rows), capture_output=True, text=True, timeout=120)
+        chosen = run_picker("\n".join([*header, *rows]) + "\n", len(header))
     except (OSError, subprocess.SubprocessError) as exc:
         notify("could not show the mention picker",
                f"{type(exc).__name__}: {exc}")
         return ""
-    if r.returncode != 0:
-        return ""  # dismissed — not an error
-    return row_to_url(r.stdout, candidates)
+    return row_to_url(chosen, candidates)
 
 
 # --------------------------------------------------------------------------- #
@@ -863,16 +1043,16 @@ def universe_note(subject: str, offered: int, path: Path | None = None) -> str:
     """The line shown ABOVE the fuzzy picker when the universe is the last resort.
 
     🔴 IT EXISTS BECAUSE A DISMISSED PICKER CANNOT BE READ. `pick()` explains
-    why: rofi with `-no-custom` reports "nothing matched what I typed" and "I
-    changed my mind" identically, so the only honest place to say "this host has
+    why: the picker reports "nothing matched what I typed" and "I changed my
+    mind" identically, so the only honest place to say "this host has
     no repository called `kubectl-neat`" is BEFORE the choice, not after it. A
     real dismissal still opens nothing and still says nothing.
 
     🔴 IT NAMES THE CLICKED TEXT, A COUNT AND A DATE — NEVER A ROW. `subject` is
     what the OPERATOR typed or clicked, which they already have; `offered` is a
     cardinality; the date is the mapping file's mtime. None of the three is a
-    repository name from the universe, and this string reaches rofi only — it is
-    never handed to `notify()`, which would put it on stderr.
+    repository name from the universe, and this string reaches the picker only —
+    it is never handed to `notify()`, which would put it on stderr.
     """
     age = mapping_age_days(path)
     if age is None:
@@ -900,7 +1080,7 @@ def guessed_note(subject: str, below: int = 0, rank: int = 1) -> str:
     🔴 A PICKER WITH NO EXPLANATION READS AS A BUG. Suppressing the auto-open is
     the safety property; saying WHY is what stops the operator concluding the
     handler is broken and going back to typing the URL. It is the same argument
-    as `universe_note`: rofi cannot report a reason after the fact, so the
+    as `universe_note`: the picker cannot report a reason after the fact, so the
     reason goes above the choice.
 
     🔴 TWO WORDINGS, KEYED ON `below` RATHER THAN ON A ROW COUNT, AND THE KEY IS
@@ -929,7 +1109,7 @@ def guessed_note(subject: str, below: int = 0, rank: int = 1) -> str:
     repository, never the mapping. The candidate ROW already shows the repo,
     which is the whole point of asking; the note must not become a second place
     a name can leak from, and `_every_sink`'s guards would not see this one (it
-    goes to rofi).
+    goes to the picker).
     """
     if below <= 0:
         return (f"{subject} names no repository — the GitHub row offered was "
@@ -1258,7 +1438,9 @@ def main(argv: list[str] | None = None) -> int:
     # two-row case, the right repo is still unreachable. It is the SAME defect
     # one rung along, the operator hit it, and the trade has now been made in
     # their favour. The cost is bounded by the ordering: rows 1 and 2 are
-    # unchanged and `rofi` opens on row 1, so the common case is still one Enter.
+    # unchanged and the picker opens on row 1, so the common case is still one
+    # Enter — fzf preserves INPUT ORDER while the query is empty, which `pick()`
+    # documents and the suite verifies against a real fzf.
     #
     # 🔴 THE PREDICATE IS `repo_source == default`, NOT A SHAPE. `guessed` is
     # computed above from `mention_scan`'s own constant, so `--default-repo`
