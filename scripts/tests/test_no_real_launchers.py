@@ -1692,6 +1692,32 @@ PINNED_PATH_CLOBBERS = {
         "measure the environment instead of the code. The fixture ASSERTS the "
         "one-entry contents itself, so this justification is a live invariant "
         "rather than prose that can rot"),
+    "test_nixos_option_renames_apply.py": (
+        '"PATH"' + ': str(empty)',
+        "justified by EMPTINESS, the same shape as test_claude_log_rotate.py "
+        "and test_session_stamp_seam.py above. `empty` is `tmp_path / "
+        "\"empty-bin\"`, created by `empty.mkdir()` on the line immediately "
+        "before the clobber and never written to, so it is not merely audited "
+        "but CONSTRUCTED empty — nothing can appear in a freshly-minted tmp "
+        "dir. No HAZARD_VOCABULARY name is reachable through it: no "
+        "systemd-run, systemctl, notify-send, rofi, yad, xdotool, i3-msg, "
+        "openrgb, espanso, home-manager or nixos-rebuild. 🔴 That last one is "
+        "the point worth stating out loud, because this suite's OTHER tests do "
+        "put a `nixos-rebuild` on PATH: it is a `testlib.mockbin.write_exec` "
+        "stub in the rig's own bin dir, and this one test deliberately does NOT "
+        "use that dir. 🔴 REPLACING is required to reach the case at all. The "
+        "test drives apply-nixos-option-renames-2026-09-09.sh's python3 "
+        "preflight — the guard that stops it half-applying an edit to "
+        "/etc/nixos/configuration.nix when a plain `sudo` (env_reset) leaves "
+        "root without a python3, which is the live condition on the workbench "
+        "because /run/current-system/sw/bin has none. python3 is present on the "
+        "dev host AND inside the nix sandbox, so no amount of PREPENDING can "
+        "make it unfindable and a prepending version would measure the "
+        "environment instead of the script. Emptiness is load-bearing a second "
+        "way: the preflight's error branch is written with shell BUILTINS only, "
+        "precisely so it can still speak in an impoverished environment, and an "
+        "empty PATH is what makes that claim observable — a branch that reached "
+        "for `cat` would print nothing and this test would go red"),
 }
 
 

@@ -109,7 +109,11 @@ file does not race itself — but the ~8 sibling files in `scripts/tests` that
 also invoke `systemctl`/`openrgb`/`systemd-run`/`notify-send` run on SIBLING
 workers and append to this same file. Measured composition of the log for a
 9-file subset at `-n 4`: 23 `systemctl(blocked)`, 9 `openrgb`, 8 `systemd-run`,
-8 `notify-send` foreign lines per run.
+8 `notify-send` foreign lines per run. ⚠ `-n 4` is the CONDITION THAT WAS
+MEASURED, not the current default: `run-tests.sh` now sizes N from the narrowest
+cgroup v2 quota falling back to `nproc`, capped at 8, so on the workbench it is
+8. More workers means MORE foreign lines, which makes the per-worker tagging
+below more load-bearing, not less — do not read the numbers above as a bound.
 
 That breaks the shape every assertion here uses:
 
@@ -199,7 +203,9 @@ LOG_NAME = "launches.log"
 
 # pytest-xdist exports this into each WORKER process, and a child shell inherits
 # it. MEASURED (6 files, `-n 4 --dist loadfile`): four distinct ids `gw0`..`gw3`
-# reached a `sh -c` child; the same suite run serially left it UNSET there.
+# reached a `sh -c` child; the same suite run serially left it UNSET there. The
+# measurement was taken when the runner's cap was a flat 4; nothing here depends
+# on the number, only on the id being present per worker and absent when serial.
 WORKER_ENV = "PYTEST_XDIST_WORKER"
 
 # The tag used when `WORKER_ENV` is absent: a serial pytest run, or one of the

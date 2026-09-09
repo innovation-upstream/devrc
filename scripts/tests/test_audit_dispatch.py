@@ -1025,6 +1025,22 @@ def fake_checklist(_repo_dir):
     return CHECKLIST
 
 
+# The round-0 section's stand-in. Deliberately NOT a copy of the real one: these
+# tests assert that the brief carries WHATEVER the skill said, and a fixture
+# quoting the shipped prose would pass just as well against a script that
+# restated the section internally. The two-way pin on the real file is
+# `test_the_round_zero_section_the_script_reads_is_the_one_the_skill_ships`.
+ROUND_ZERO_FIXTURE = (
+    "1. **Question every requirement, and NAME its author.** <fixture>\n"
+    "2. **Delete.** <fixture>\n"
+    "5. **Automate — last.** <fixture>"
+)
+
+
+def fake_round_zero(_repo_dir):
+    return ROUND_ZERO_FIXTURE
+
+
 # 🔴 THE FAKE'S OWN, INDEPENDENT READ of which repository each side names —
 # deliberately NOT `ad.pr_slug` / `ad._slug_from_remote`. A fake that asks the
 # code under test what the world looks like is a second sample of the thing in
@@ -1177,6 +1193,12 @@ def run_main(argv, **kw):
     `runner=` straight into `make_runner` and raised.
     """
     out, err = io.StringIO(), io.StringIO()
+    # 🔴 POPPED BEFORE `make_runner`, for the reason the docstring above gives
+    # about `runner`: anything left in `kw` is forwarded to `make_runner`,
+    # which does not take it. Defaulted to the fixture rather than to None so
+    # a round-0 test cannot silently fall through to the REAL `_read_round_zero`
+    # and read whatever this HOST happens to have deployed under `~/.claude`.
+    round_zero_reader = kw.pop("round_zero_reader", fake_round_zero)
     runner = kw.pop("runner", None) or make_runner(**kw)
     rc = ad.main(
         argv,
@@ -1184,6 +1206,7 @@ def run_main(argv, **kw):
         stdout=out,
         stderr=err,
         checklist_reader=fake_checklist,
+        round_zero_reader=round_zero_reader,
     )
     return rc, out.getvalue(), err.getvalue()
 
@@ -8022,6 +8045,256 @@ def test_a_gh_failure_is_reported_and_not_papered_over():
     assert "gh pr view 900" in err and "failed" in err
 
 
+# --------------------------------------------------------------------------- #
+# ROUND 0 — the requirements & deletion pass
+# --------------------------------------------------------------------------- #
+#
+# 🔴 EVERY TEST IN THIS SECTION IS AN INVARIANT GUARD, NOT REGRESSION
+# COVERAGE — the count is the ledger's to carry, not this comment's. The module
+# docstring's rule is why: `--round 0` did not exist at any base in
+# RED_AT_BASE_REFS, so "watched red there" would only restate that the feature
+# was added. Their evidence is the mutation battery and the negative controls
+# each carries inline.
+
+
+def test_round_zero_emits_the_deletion_pass_INSTEAD_OF_the_nine_axes():
+    """🔴 THE ORDERING IS THE WHOLE MECHANISM, so it is asserted both ways.
+
+    The section exists because an audit scoped to a diff asks whether the
+    change is CORRECT and never whether it should EXIST. A brief carrying BOTH
+    lets the auditor answer the correctness question first, which is exactly
+    the failure the ordering prevents — so the absence of the checklist is as
+    load-bearing as the presence of the section, and a test asserting only the
+    presence would stay green against a brief that appended round 0 to the
+    nine axes.
+    """
+    rc, out, err = run_main(["900", "--round", "0"])
+    assert rc == 0, f"round 0 exited {rc}: {err}"
+
+    assert ROUND_ZERO_FIXTURE in out, (
+        "the round-0 section the reader returned is not in the brief, so the "
+        f"round dispatches with no instructions at all:\n{out[:2000]}"
+    )
+    assert "REQUIREMENTS & DELETION pass" in out, (
+        "the brief's own title does not say which pass this is; a round-0 "
+        "brief headed 'FIRST, FULL adversarial audit' is the state this "
+        "feature exists to end"
+    )
+    # The negative half. `CHECKLIST` is the fixture `fake_checklist` returns,
+    # so this is a claim about THIS run and not about the shipped skill.
+    assert CHECKLIST not in out and "## AUDIT FOR" not in out, (
+        "the nine correctness axes are in the round-0 brief. Round 0 must "
+        "replace them, not precede them: an auditor handed both will answer "
+        "'is it correct?' before 'should it exist?', and the answer to the "
+        "second is what makes the first worth asking."
+    )
+
+
+def test_round_zero_says_it_cannot_measure_a_ledger_rather_than_claiming_round_one():
+    """The `led is None` branch is shared with round 1 and its sentence was not.
+
+    Round 0 reaches that branch for a mechanically identical reason (no
+    previous round to attribute against) and a DIFFERENT real one (no fix
+    exists yet). Left on round 1's wording the brief tells a round-0 auditor
+    they ran 'a first, full audit' — and never tells them to carry the round-0
+    ledger line, which is the only ledger that round can produce.
+    """
+    rc, out, err = run_main(["900", "--round", "0"])
+    assert rc == 0, f"round 0 exited {rc}: {err}"
+
+    assert "a first, full audit has no previous round" not in out, (
+        "round 0's ledger section describes it as 'a first, full audit' — a "
+        "false description of a pass that deliberately is not one"
+    )
+    assert "requirements: N (unattributed: U) · deletion candidates: D" in out, (
+        "the round-0 ledger line is not in the brief, so the round is asked "
+        "for a ledger nobody told it the shape of"
+    )
+
+
+def test_round_zero_reports_an_unreadable_skill_instead_of_inventing_the_steps():
+    """None from the reader must not become a brief that looks complete.
+
+    🔴 The failure this refuses is the one `claude/RULES.md` calls a zero you
+    did not watch a command earn: a round-0 brief with the section silently
+    missing reads as an ordinary brief, and the auditor works the steps
+    from memory — which is where the paraphrase this module keeps deleting
+    comes back.
+    """
+    rc, out, err = run_main(["900", "--round", "0"],
+                            round_zero_reader=lambda _d: None)
+    assert rc == 0, f"round 0 exited {rc}: {err}"
+    assert "COULD NOT INLINE the round-0 section" in out, (
+        "an unreadable skill produced a brief that does not say so:\n"
+        + out[:2000]
+    )
+    # Positive control for the assertion above: the SAME run with a readable
+    # section must NOT carry the banner, or the check is satisfied by every
+    # brief and asserts nothing.
+    _, ok_out, _ = run_main(["900", "--round", "0"])
+    assert "COULD NOT INLINE the round-0 section" not in ok_out, (
+        "the banner is in a brief whose section WAS readable, so its presence "
+        "above is not evidence of the unreadable path"
+    )
+
+
+def test_a_negative_round_is_refused_rather_than_assembled_as_round_one():
+    """Every gate in the script is `>= 2` or `< 2`, so -1 fell through as 1.
+
+    Harmless while 0 was merely meaningless; not harmless now that 0 names a
+    different pass, because `--round -1` would hand back the correctness
+    checklist under a header disagreeing with the flag that asked for it.
+    """
+    rc, out, err = run_main(["900", "--round", "-1"])
+    assert rc == 4, f"expected the refusal rc, got {rc}"
+    assert out.strip() == "", "a refused run must render no brief"
+    assert "is not a round" in err, err
+    # The refusal must name the rounds that DO exist, or the operator's next
+    # move is a second guess.
+    assert "0" in err and "2+" in err, err
+
+
+def test_round_zero_does_not_warn_about_a_claims_block_it_never_consults():
+    """🔴 FOUND BY A LIVE SMOKE TEST, not by this suite — devrc #1427.
+
+    Round 0 anchors nothing: `render_claims` returns "" below round 2, the
+    range comes from the base, and `prev_sha` is never read. The delta-anchor
+    warning fired anyway, saying "Using it anyway" about a block round 0 does
+    not use and telling the operator to check they were not "re-auditing a
+    round that already ran" — of a pass that is not a re-audit.
+
+    It fired on EVERY round 0 of any PR carrying a block, and stderr is where
+    the missing-intermediate-block warning lives — the one the skill says is
+    announced "on stderr, once, and nowhere in the brief". A stream with a
+    permanent false alarm on it is a stream nobody reads.
+    """
+    rc, out, err = run_main(["900", "--round", "0"], comments=[CLAIMS_BLOCK_R2])
+    assert rc == 0, f"round 0 exited {rc}: {err}"
+    assert "Using it anyway" not in err, (
+        "round 0 warns about a claims block it never consults:\n" + err
+    )
+    assert "re-auditing a round that already ran" not in err, err
+
+    # 🔴 POSITIVE CONTROL. Without it a zero here is indistinguishable from a
+    # fixture that carries no block at all, or from the warning having been
+    # deleted outright — the fix is a ROUND-0 suppression, not a removal, so
+    # round 1 over the same block must still say it.
+    rc1, _, err1 = run_main(["900", "--round", "1"], comments=[CLAIMS_BLOCK_R2])
+    assert rc1 == 0, f"round 1 exited {rc1}: {err1}"
+    assert "Using it anyway" in err1, (
+        "the warning is gone at round 1 as well, so this fix deleted it "
+        "rather than scoping it — and the round-0 assertion above is passing "
+        "for the wrong reason:\n" + err1
+    )
+
+
+def test_round_zero_cannot_emit_a_claims_block_that_a_later_round_would_anchor_on():
+    """🔴 THE SKILL'S 🔴 SENTENCE WAS A COMMENT, NOT A GUARD.
+
+    The section says "ROUND 0 REPORTS; IT DOES NOT MOVE THE LADDER". But
+    `if args.emit_claims:` sits below every round gate and had none of its own,
+    so `--round 0 --emit-claims` printed a well-formed ``audit-claims round=0``
+    block. `newest_block` hands that to a later `--round 2`, whose
+    `prev_sha = range_anchor(newest)` anchors the delta on the tip round 0
+    merely READ — attributing the change to a round that fixed nothing, which
+    is exactly the movement the prose forbids.
+
+    Measured live on devrc #1440 at `d16bfd7a`, rc 0:
+    ``audit-claims round=0 audited=d16bfd7a..d16bfd7a``.
+
+    `claude/RULES.md`: a field that exists is not a guard — only a BRANCH on it
+    is. This is the branch.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "0", "--emit-claims", "--audited", "aaaa1111"])
+    assert rc == 4, f"expected the emit refusal rc, got {rc}"
+    assert "audit-claims" not in out, (
+        "round 0 still emitted a claims block:\n" + out[-1500:]
+    )
+    assert "no fixes to claim" in err, err
+
+    # 🔴 POSITIVE CONTROL. Without it a missing block is indistinguishable from
+    # `--emit-claims` being broken for every round. Round 1 over the same flags
+    # must still emit one — the fix is a round-0 gate, not a removal.
+    rc1, out1, err1 = run_main(
+        ["900", "--round", "1", "--emit-claims", "--audited", "aaaa1111"])
+    assert rc1 == 0, f"round 1 --emit-claims exited {rc1}: {err1}"
+    assert "audit-claims round=1" in out1, (
+        "round 1 no longer emits a claims block either, so this fix disabled "
+        "the feature rather than scoping it:\n" + out1[-1500:]
+    )
+
+
+def test_the_round_zero_section_the_script_reads_is_the_one_the_skill_ships():
+    """🔴 THE SEAM. Two hermetically-correct halves that do not meet.
+
+    `_read_round_zero` anchors on a heading LITERAL; the skill owns that
+    heading. Both sides can be edited independently and stay green — the
+    script's own tests inject a fixture reader (deliberately), and the skill's
+    tests pin prose the script never parses. So nothing else in either module
+    would notice a heading rename, and the observable failure is a round-0
+    brief that quietly says COULD NOT INLINE forever.
+
+    This reads the REAL file with the REAL reader. It is hermetic because the
+    file is in this repo: `_read_round_zero` tries `<repo>/claude/skills/...`
+    first and only falls back to `~/.claude` when that misses.
+    """
+    section = ad._read_round_zero(REPO)
+    assert section, (
+        f"`_read_round_zero` found no round-0 section under {REPO}. Either "
+        f"the heading {ad.ROUND_ZERO_HEADING!r} was renamed in "
+        "claude/skills/audit-pr/SKILL.md, or the section was deleted. If it "
+        "was deleted deliberately — the retirement condition says it may be — "
+        "delete `--round 0` and these tests in the SAME commit, rather than "
+        "leaving a flag that dispatches an empty pass."
+    )
+    # Not a spelling pin: assert the steps are STRUCTURALLY present, so a
+    # reworded section stays green and a truncated one does not. A partial read
+    # is the dangerous shape here — the regex stops at the next `## `, so a
+    # heading inserted mid-section would silently return only its head.
+    for step in ("1.", "2.", "3.", "4."):
+        assert step in section, (
+            f"step {step} is missing from the section the script reads. The "
+            "regex stops at the next `## ` heading — if one was inserted into "
+            "the middle of the section, the brief now carries only its head "
+            f"while the skill still reads complete:\n{section[:600]}"
+        )
+    assert "RETIREMENT CONDITION" in section, (
+        "the retirement condition is not in the text the script inlines. It "
+        "is the only thing standing between a trial and a permanent rule, and "
+        "an auditor who never sees it cannot apply it."
+    )
+    # 🔴 THE HALF THAT WAS MISSING, AND THE ONLY ONE THAT CAN FAIL FOR THE
+    # CAUSE THAT MATTERS. Every assertion above is a PRESENCE check, and the
+    # capture's failure mode is being too WIDE: `_read_round_zero` stops at the
+    # next `## `, so deleting the `## THE CHECKLIST` heading — which reads like
+    # navigation — runs the capture on to `## After the fixes` and pulls the
+    # nine correctness axes into the round-0 section. Steps 1-5 and the
+    # retirement condition are all still present at the head of that longer
+    # capture, so every check above stays GREEN while the brief silently gains
+    # the checklist it exists to withhold.
+    #
+    # Measured on the shipped file: 3,367 chars with the heading, 4,057 without.
+    #
+    # The render tests cannot see this either — they inject `fake_round_zero`
+    # on purpose, so they never read the real file's structure at all. This is
+    # the guard for it.
+    assert "**Audit for:**" not in section, (
+        f"\n\nthe round-0 section the script reads is {len(section)} chars and "
+        "CONTAINS the nine correctness axes.\n"
+        "  `_read_round_zero` captures up to the next `## ` heading. Something "
+        "removed, demoted or reworded the `## THE CHECKLIST — the nine axes` "
+        "heading in claude/skills/audit-pr/SKILL.md, so the capture ran on "
+        "into the checklist.\n"
+        "  The effect is silent and defeats the whole design: `--round 0` "
+        "would inline the correctness checklist into a brief whose entire "
+        "purpose is to withhold it until round 1, and an auditor handed both "
+        "answers 'is it correct?' first.\n"
+        "  Restore a `## ` heading between the round-0 section and "
+        "`**Audit for:**`."
+    )
+
+
 # The two ledgers the module docstring commits to.
 #
 # 🔴 RED_AT_BASE WAS EMPTY, AND IS NOT ANY MORE. It was empty because the script
@@ -8406,6 +8679,22 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
+    # 🔴 ROUND 0 — the requirements & deletion pass. Every entry below is a
+    # guard, for the reason stated above their definitions: `--round 0` exists at no base
+    # in `RED_AT_BASE_REFS`, so a red there would be argparse accepting an
+    # integer and rendering a round-1 brief — a claim about the flag's absence,
+    # not about any behaviour. Their evidence is the in-test controls (the
+    # nine-axes NEGATIVE half, and the readable/unreadable pair) plus the
+    # battery. `..._is_the_one_the_skill_ships` is the SEAM guard: it is the
+    # only test in either module that reads the real skill with the real
+    # reader, and it is what goes red when a heading rename separates them.
+    "test_round_zero_emits_the_deletion_pass_INSTEAD_OF_the_nine_axes",
+    "test_round_zero_says_it_cannot_measure_a_ledger_rather_than_claiming_round_one",
+    "test_round_zero_reports_an_unreadable_skill_instead_of_inventing_the_steps",
+    "test_a_negative_round_is_refused_rather_than_assembled_as_round_one",
+    "test_round_zero_does_not_warn_about_a_claims_block_it_never_consults",
+    "test_round_zero_cannot_emit_a_claims_block_that_a_later_round_would_anchor_on",
+    "test_the_round_zero_section_the_script_reads_is_the_one_the_skill_ships",
     # 🔴 An invariant guard, NOT regression coverage — `_flake_check_names`
     # does not exist at `9e23c379`, so its red there would be an
     # `AttributeError` about a missing symbol rather than a wrong answer. Its

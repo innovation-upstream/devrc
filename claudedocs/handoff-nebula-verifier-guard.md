@@ -16,38 +16,29 @@ The session's *stated* goal — a warning-free `home-manager switch` — is **DO
 
 ## State now
 
-- **PR #1420 is MERGED** — squash commit **`b79ccfbe`**, `mergedAt=2026-09-09T06:29:23Z`. Verified **by content**, never by ancestry (a squash never makes the head an ancestor): `git show origin/main:nix/system/apply-nebula-relay.sh` carries 5 occurrences of `verifier_answered` / `die_verifier_did_not_run`.
-- **The RE-GATE IS DONE and `origin/main` @ `b79ccfbe` is GREEN on BOTH tiers.** This closes the gap that existed when the previous update was written: `main` moved three commits *during* the merged-tree gate, so the first green covered a base the merge never landed on.
-- **This doc's own PR #1434** (branch `docs/handoff-nebula-verifier-guard`, based on `main`, NOT stacked on #1420) is the last open thread of this effort.
-- **Branch `fix/nebula-verifier-guard-and-rc-classify` still exists locally** — `gh pr merge --delete-branch` could not remove it because the worktree `/home/zach/workspace/devrc-nebguard` has it checked out. Remote branch is gone. Clean up with `git -C /home/zach/workspace/devrc worktree remove /home/zach/workspace/devrc-nebguard && git -C /home/zach/workspace/devrc branch -D fix/nebula-verifier-guard-and-rc-classify`.
+🔴 **THE #1420 ARC IS CLOSED. Both PRs are merged, the tree is clean, and every claim is released.** What remains is the ranked list below — none of it is about #1420.
 
-**All four gate runs — every one ONE TIER AT A TIME, never combined:**
+- **#1420 MERGED** — squash `b79ccfbe`, `mergedAt=2026-09-09T06:29:23Z`. Verified by content, never by ancestry.
+- **#1434 MERGED** — squash **`4374ebad`**, `mergedAt=2026-09-09T16:01:20Z`. **This doc now exists on `origin/main`**, so the `/resume` kickoff path finally resolves; the whole reason the previous session's kickoff pointed at a missing file is gone.
+- **Cleanup done, after checking rather than assuming:** the `/home/zach/workspace/devrc-nebguard` worktree and its branch `fix/nebula-verifier-guard-and-rc-classify` are **removed**. Its tree was clean, and all four PR files were confirmed **byte-identical in `origin/main`** (`git diff --quiet origin/main 9815a3cc -- <file>`, four for four) before anything was deleted. ⚠ `git log origin/main..HEAD` there showed **5 "unpushed" commits** — that is the squash-merge ancestry false negative, NOT unsaved work. Content is the only valid check after a squash.
+- **Claims released:** `nebula-verifier-guard-1`, `nebula-verifier-guard-2`, and the stale predecessor **`nebula-relay-sandbox-shebang`** (held 20h by the previous session on this same lineage, never released after its work merged). Nothing from this effort still holds a lock.
 
-| tree | tier | result |
-|---|---|---|
-| merged tree, base `37fb0646`, head `95a2c9a7` | pytests | `collected=21439 passed=21437 skipped=2 failed=0` · `RESULT: PASS (exit=0)` |
-| merged tree, same | nodetests | `suites=5 files=41 tests=1449 pass=1449 fail=0` · `RESULT: PASS (exit=0)` |
-| **post-merge `origin/main` @ `b79ccfbe`** | pytests | `collected=21479 passed=21477 skipped=2 failed=0` (floor 20441) · `RESULT: PASS (exit=0)` |
-| **post-merge `origin/main` @ `b79ccfbe`** | nodetests | `suites=5 files=41 tests=1449 pass=1449 fail=0` (floor 1367) · `RESULT: PASS (exit=0)` |
+**The full gate ledger for both PRs — every run names its base, and every tier was run ONE AT A TIME:**
 
-`21439 → 21479` = **+40**, which is `a2b74e4b`'s fans-pill tests arriving on top of this change. Nothing lost. All verdicts read from each derivation's own `RESULT:` line via `nix log`, never from a piped exit code.
+| PR | base | tier | result |
+|---|---|---|---|
+| #1420 | `37fb0646` (merged tree `95a2c9a7`) | pytests | `collected=21439 passed=21437 failed=0` · PASS |
+| #1420 | same | nodetests | `tests=1449 pass=1449 fail=0` · PASS |
+| #1420 | post-merge `b79ccfbe` | pytests | `collected=21479 passed=21477 failed=0` · PASS |
+| #1420 | post-merge `b79ccfbe` | nodetests | `tests=1449 pass=1449 fail=0` · PASS |
+| #1434 | `8a9ebba6` | dev-host doc gates | 692 passed / **1 FAILED** — the leak blocker |
+| #1434 | `8a9ebba6` | dev-host, after `7fcc21d9` | **693 / 0** |
+| #1434 | `8a9ebba6` | sandbox pytests + nodetests | PASS / PASS |
+| #1434 | `4a67ea73` | dev-host seam + doc gates | **1015 / 0** |
+| #1434 | `4a67ea73` | sandbox pytests | `collected=21510 passed=21508 failed=0` · PASS |
+| #1434 | `4a67ea73` | sandbox nodetests | `tests=1449 pass=1449 fail=0` · PASS |
 
-**Test-count delta for THIS change — no loss.** Collect-only on the two changed files, both trees: `origin/main` **39** → merged **49**, i.e. **+10**. ⚠ The PR body's verification table claims **+8** (21127 → 21135); that number predates `5c102590` and `9815a3cc`, which added two more cases. The body was stale against its own head.
-
-**The regression guard was watched RED, not taken on the previous session's word.** Mutation M-FH-1 (`run_check() { "$BASH" "$CHECK" "$@"; }` → `run_check() { "$CHECK" "$@"; }`) on a `cp -a` copy, driven via `DEVRC_TEST_NEBULA_DIR`, `__pycache__` purged, `PYTHONDONTWRITEBYTECODE=1`:
-
-```
-control (unmutated):  40 passed in 62.96s
-mutant  M-FH-1:        2 failed, 38 passed in 63.04s
-  FAILED test_the_verifier_is_never_execed_via_its_own_shebang
-  FAILED test_the_verifier_runs_with_its_shebang_BROKEN
-```
-
-Matrix: **red on pre-change behaviour, green at HEAD**, killed by the two named tests.
-
-**Audit ladder round 3 on the `9815a3cc` delta — CLEAN, no findings. Ladder closed** (a clean round ends it; none was run to confirm it). Checked: flags declared L115–120, first reassignment L532, first read L182, nothing in between; `trap finish EXIT` installs at L496 *after* the preflight call site, so a preflight abort prints no trap paragraph while `PATCHED=0`; the four surviving `${VAR:-…}` at L65–68 are the deliberate `NEBULA_*` config knobs the tests drive, not internal state flags.
-
-**Deploy status: nothing is pending.** `nix/system/**` ships only by git checkout and is hand-run under `sudo`; nothing in the flake reads it. No `ship.sh` run is owed.
+**Deploy status: nothing is pending, for either PR.** `nix/system/**` ships only by git checkout and is hand-run under `sudo`; `claudedocs/**` is not deployed at all. No `ship.sh` run is owed by this work.
 
 ## Open investigations — live diagnosis state
 
@@ -159,25 +150,43 @@ Matrix: **red on pre-change behaviour, green at HEAD**, killed by the two named 
 - ⚠ **The base clone `/home/zach/workspace/devrc` was sitting on another session's branch** (`feat/audit-pr-round-0-algorithm`, `1e844f1e`), not `main`, throughout this work. Nothing was committed there — all writes went through `gh` and detached worktrees — but `git branch --show-current` before any write in that checkout is not optional.
 - 🔴 **An untracked `output.txt` in the repo root was DELETED by mistake** during cleanup on 2026-09-09. It predated the session, was not read first, and is not recoverable. Recorded so nobody hunts for it: it was not moved or renamed, it is gone.
 
+- 🔴 **A DOCS-ONLY PR IS NOT GATE-EXEMPT, AND THIS ONE WAS RED FROM ITS FIRST COMMIT.** Gating #1434 caught a real client subdomain committed in this doc at **four** places, in a **PUBLIC** repo:
+  ```
+  FAILED scripts/tests/test_no_client_hostnames.py::test_no_client_subdomain_literal_is_committed
+  1 failed, 692 passed in 278.03s
+  ```
+  **Two of the four came from the branch's FIRST commit `c5783513`** — so #1434 had been unmergeable since the moment it was opened, and nobody had run its gate, because a markdown-only diff reads as exempt. It is not: `test_doc_path_rot.py`, `test_no_client_hostnames.py`, `test_no_public_ips.py`, `test_no_captured_text.py` and `test_no_captured_markup.py` all read tracked files. Fixed in **`7fcc21d9`**.
+- 🔴 **Redacted, NOT allowlisted — and that choice is load-bearing.** An `ALLOWLIST` entry would have made the suite green by disarming a working gate over a genuine leak. The literal is gone from the doc; the finding it described is untouched and is rank 2 below, still reachable in history at `6d488a1b`.
+- 🔴 **`handoff_doc.py` COULD NOT make this fix.** Its `Gotchas` and `Open investigations` sections **APPEND**, so a merge can never *remove* text from them — and three of the four occurrences were in already-committed prose. A content redaction inside an append-only section requires a direct edit + commit; reaching for the handoff tool there would have silently failed to remove anything.
+- 🔴 **`main` moved THREE times inside this session's gates** (`b79ccfbe` → `8a9ebba6` → `4a67ea73`, plus `176f412b` after). A merged-tree gate on this repo has a shelf life of **minutes**. The discipline that worked: re-read `git fetch` immediately before `gh pr merge`, and when the base moved, **size the delta before deciding**. Twice the delta contained a real seam — `a2b74e4b` (a new un-allowlisted `#!/usr/bin/env python3` script vs the shebang guard) and `#1399` (a rewrite of `handoff_index.py`/`handoff_search.py`, the code that indexes handoff docs, against a change that ADDS one). Both were disjoint-file interactions that a file-overlap check would have called safe.
+- **The cheap discriminating move under time pressure:** run the *targeted* tests that can actually fail (doc gates, seam tests) in the dev shell first — ~3 min — before spending ~15 min on the full sandbox tier. It found the leak blocker immediately.
+- ⚠ **These content gates read `git ls-files`, and the sandbox tier builds from a store copy with NO `.git`.** So the **dev-host** tier is where the hostname/IP/captured-text gates are meaningful; a green sandbox run is parity with Tekton, not a second opinion on a leak. Two tiers, structurally different blind spots.
+- ⚠ **The base clone `/home/zach/workspace/devrc` was observed on ANOTHER session's branch** (`feat/audit-pr-round-0-algorithm`, `1e844f1e`) mid-session, and back on `main` later — nobody here moved it. Nothing was committed there; all writes went through `gh` and worktrees. `git branch --show-current` before any write in that checkout is not optional.
+
 ## How to verify
 
 ```bash
-# 1. #1420 really landed — by CONTENT, never by ancestry (squash merges break ancestry)
-gh pr view 1420 --json state,mergedAt,mergeCommit --jq '{state,mergedAt,mergeCommit:.mergeCommit.oid}'
+# 1. both PRs landed — by CONTENT, never by ancestry (squash breaks ancestry)
+gh pr view 1420 --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid)"'   # MERGED b79ccfbe
+gh pr view 1434 --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid)"'   # MERGED 4374ebad
 git -C ~/workspace/devrc show origin/main:nix/system/apply-nebula-relay.sh \
-  | grep -c 'verifier_answered\|die_verifier_did_not_run'      # expect 5
+  | grep -c 'verifier_answered\|die_verifier_did_not_run'                          # expect 5
+git -C ~/workspace/devrc cat-file -e origin/main:claudedocs/handoff-nebula-verifier-guard.md && echo "doc on main"
 
-# 2. the guard still goes RED on the revert (the claim worth re-checking)
+# 2. the leak literal is gone from the tracked doc, and the gate agrees
+git -C ~/workspace/devrc show origin/main:claudedocs/handoff-nebula-verifier-guard.md | grep -c 'civit'   # expect 0
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc/scripts/tests/test_no_client_hostnames.py -q -p no:cacheprovider
+
+# 3. the #1420 guard still goes RED on the revert (the one claim worth re-checking)
 S=/tmp/mfh1; rm -rf $S; mkdir -p $S; cp -a ~/workspace/devrc/nix/system $S/
 sed -i 's|run_check() { "\$BASH" "\$CHECK" "\$@"; }|run_check() { "$CHECK" "$@"; }|' $S/system/apply-nebula-relay.sh
 find ~/workspace/devrc/scripts -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
 DEVRC_TEST_NEBULA_DIR=$S/system PYTHONDONTWRITEBYTECODE=1 \
   nix develop ~/workspace/devrc -c python3 -m pytest \
   ~/workspace/devrc/scripts/tests/test_nebula_relay_apply.py -q -p no:cacheprovider
-# expect: 2 failed, 38 passed — test_the_verifier_is_never_execed_via_its_own_shebang
-#                             + test_the_verifier_runs_with_its_shebang_BROKEN
+# expect: 2 failed, 38 passed — the two named shebang tests
 
-# 3. main is green — ALREADY DONE at b79ccfbe (both tiers PASS, table above).
-#    Re-run only if main has moved since; ONE TIER AT A TIME, never combined.
-uptime   # if load > 10, a RED is not trustworthy; a GREEN is
+# 4. nothing from this effort still holds a lock
+claim-work --list | grep -i nebula || echo "no nebula claims held — correct"
 ```
