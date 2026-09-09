@@ -84,6 +84,15 @@ is the PRIVATE proposal, not this doc.
 - 🔴 **NO `clawgate-task:` FIELD** — `resolve` exits **5** with its positive control green
   (the board answered for another session). A wrong id also answers 200 with an empty array,
   so this cannot distinguish "touched no task" from "wrong id". NOT a clean bill of health.
+- **Figures from the parallel session, folded in rather than dropped:** `flake.nix` on
+  `origin/main` now holds **16** cairn references where it held **0** hours earlier;
+  `cairn recall --ref cairn --scope devrc` still exits **2**; `ZacxDev/cairn` #6–#10 all
+  landed the same day (ranks 12, 15, 13's path, 19, 17).
+- **Rank 16 is the only ranked item that is both UNBLOCKED and carries a forcing function.**
+  Everything else needs the operator: 13 (registry + version tag), 11 (the `cairn` scope
+  allowlist), 4 (§11 questions), 8 (§10 decisions); 7 waits on 13's publish.
+- **Store writes, parallel session:** `devrc/cairn` stale `OPEN:` → `RESOLVED caec932e:`,
+  plus two session bullets. Badge `17 nuance / 🔴 2 OPEN` → `18 / 🔴 1 OPEN`.
 
 ## Open investigations — live diagnosis state
 
@@ -527,6 +536,18 @@ discriminator arrived from an unrelated PR, not from more sampling.
    every OSS-client fix (#7, #9, #10) is still absent from the binary these machines run.
    ⚠ The worktree `~/workspace/devrc-flake-pin` is now fully merged and **safe to remove**;
    the `[ahead 8]` warning in earlier revisions is discharged.
+   🔴 **TWO WARNINGS ABOUT THAT WORKTREE WERE PUBLISHED HERE AND BOTH WERE WRONG. RETRACTED
+   by the parallel session, and the instrument is the lesson.** First it said six files were
+   UNCOMMITTED (they had been committed through audit round 3); the correction then said
+   **8 commits were UNPUSHED and the worktree must not be deleted**, and that was wrong too —
+   they were pushed AND merged. **The error was the instrument: `git status -sb`'s `[ahead N]`
+   compares against the LAST-FETCHED remote ref, and that worktree had never been fetched in,
+   so it reported a remote state hours stale.** A second reading, `git log origin/main..HEAD`
+   = 9, looked like corroboration and is the SQUASH trap this doc already records — after a
+   squash merge a branch's commits are never ancestors of `main`, forever, so that count is
+   non-zero for merged work by construction. **Two agreeing readings, both artifacts, pointing
+   the same wrong way.** What settled it was CONTENT plus `gh pr view --json state`.
+   **Never read ahead/behind without fetching first, and never let it outrank content.**
    - **Half 1 — ✅ MERGED: `ZacxDev/cairn`#4, `218b6c1`.**
    - **Half 2 — slice 1 MERGED (devrc #1381, `baa664e4`, both hosts switched and verified);
      slice 2 ✅ MERGED as #1406 `9300f234`; slice 3 (point the writer at the pinned
@@ -693,17 +714,13 @@ discriminator arrived from an unrelated PR, not from more sampling.
     `doctor --no-sync` plus `--validate` against a fixture cache.
     **Closing condition:** a merged devrc PR whose gate fails when the pinned client's
     `validate` is stubbed to print nothing.
-    🔴 **BLOCKED ON #1406, AND ITS OWN WORDING IS WHY — MEASURED 2026-09-09.** This asks for a
-    gate over "the PINNED client's `validate`", and there is no pinned client: on `origin/main`
-    `flake.nix` holds **0** cairn references and `packages.cairn`/`cairnPackage` appear
-    **nowhere**, because the pin is rank 3 slice 2 and #1406 is still OPEN. A gate that
-    `nix build`s a flake input that does not exist cannot be written, let alone go red for the
-    right reason. ⚠ It is ALSO the only remaining item carrying a forcing function, so it reads
-    as the obvious next pick — a session that takes it will re-derive this wall. **Do it in the
-    same PR as slice 2, or immediately after #1406 merges.** (Separately: the natural
-    implementation touches `scripts/run-tests.sh`, which #1406 also touches — test-merge rather
-    than reason about it.) This is the doc's own "check that an item's first step is possible in
-    the repo it names" lesson, hit again.
+    ✅ **UNBLOCKED 2026-09-09 — the premise that blocked it is gone.** This asks for a gate
+    over "the PINNED client's `validate`", and for a few hours there was no pinned client:
+    `flake.nix` held 0 cairn references. #1406 merged (`9300f234`) and it now holds **16**, so
+    `packages.cairn` exists to build a gate against. ⚠ Its natural implementation touches
+    `scripts/run-tests.sh`, which #1406 also moved — rebase onto current `main` and test-merge
+    rather than reasoning about it. **This is now the only ranked item that is both unblocked
+    and carries a forcing function.**
     forcing: gate
 
 17. **The public `ZacxDev/cairn` client still documents a `who` timeout that no longer
@@ -1296,6 +1313,26 @@ earlier controls printed OK, which is what proves it reachable rather than shado
 anyway.** A full suite was in flight while `cairn` and a test file were edited; the result was
 discarded and re-run rather than read. Cost ~9 minutes, and reading it would have cost a wrong
 belief about the tree.
+
+**🔴 `git status -sb`'s `[ahead N]` IS A CLAIM ABOUT YOUR LAST FETCH, NOT ABOUT THE REMOTE —
+AND I PUBLISHED A SAFETY WARNING OUT OF ONE.** Measured 2026-09-09: a worktree that had never
+been fetched in reported `[ahead 8]`, and that became a pushed doc line saying 8 commits
+existed nowhere else and the worktree must not be deleted. They were pushed AND the PR was
+merged. 🔴 **What made it stick was a SECOND reading that agreed:** `git log origin/main..HEAD`
+= 9, which is the squash trap this doc already records — after a squash merge a branch's
+commits are never ancestors of `main`, forever, so a non-zero count there is what MERGED work
+looks like. **Two independent-looking readings, both artifacts of the same stale/By-design
+mechanism, agreeing on the wrong answer.** Neither is evidence about the remote. The
+discriminators are CONTENT (`git grep -c <marker> origin/main -- <path>`) and
+`gh pr view --json state,mergeCommit`. **Fetch before reading ahead/behind, and never let it
+outrank content.**
+
+**🔴 A CORRECTION CAN BE WRONG IN THE SAME CLASS IT CORRECTS.** The "six files are
+uncommitted" line was retired and replaced with the "8 unpushed" line above — a fix that
+carried the identical defect (a stale reading, published as a live safety claim) one step
+further, and did so *inside a paragraph lecturing the reader about which check to trust*.
+Both are retracted in rank 3. **Re-measure at the moment of writing the correction, not from
+the survey that motivated it.**
 
 ## How to verify
 

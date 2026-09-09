@@ -54,6 +54,7 @@ real media path or third-party hostname may appear here.
 from __future__ import annotations
 
 import argparse
+import datetime
 import ast
 import importlib.machinery
 import importlib.util
@@ -1618,3 +1619,556 @@ def test_a_SUPPRESSED_flag_cannot_escape_the_partition(monkeypatch):
     ledger = {d for d, _, _ in fs.ARCHIVE_ONLY_FLAGS}
     assert dests != fs.LIVE_AWARE_DESTS | ledger, (
         "an unclassified flag left the partition equality holding")
+
+
+# =========================================================================== #
+# ROUND 4 — the two crashes/degenerates a live trace found, and the WINDOW
+# =========================================================================== #
+# 🔴 RED AT BASE, AND HOW IT WAS SHOWN. Every node below was replayed against a
+# second worktree checked out at `origin/main` (18bc1500) with THIS FILE copied
+# in and nothing else changed, so the only difference between the two runs is
+# the implementation. The matrix is in the PR body.
+#
+# 🔴 TWO OF THESE ARE CONTROLS, NOT COVERAGE, and they are named so nobody
+# counts them as bugs fixed: `test_a_REAL_hosts_object_still_parses` and
+# `test_tail_of_exactly_ONE_line_is_accepted` are BOUNDARY controls — they
+# prove the two new guards reject only what they claim to reject. They are
+# GREEN at base, deliberately: a guard that also broke the happy path would
+# show up here and nowhere else.
+R4_BOUNDARY_CONTROLS = (
+    "test_a_REAL_hosts_object_still_parses",
+    "test_tail_of_exactly_ONE_line_is_accepted",
+)
+
+
+def test_the_R4_ledger_names_only_tests_that_exist():
+    """The ledger above is a claim about this file; pin it to the file."""
+    here = set(globals())
+    missing = [n for n in R4_BOUNDARY_CONTROLS if n not in here]
+    assert not missing, f"ledger names tests that do not exist: {missing}"
+
+
+# --------------------------------------------------------------------------- #
+# R4-1  a non-dict `hosts` crashed a function contracted never to raise
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("body,label,wrong_type", [
+    ('{"hosts": [1, 2]}', "hosts is a list", "list"),
+    ('{"hosts": {"wb": null}}', "a host entry is null", "NoneType"),
+    ('{"hosts": {"wb": []}}', "a host entry is a list", "list"),
+    ('{"hosts": {"wb": "reachable"}}', "a host entry is a string", "str"),
+], ids=["list", "null-entry", "list-entry", "str-entry"])
+def test_a_non_dict_hosts_is_a_DISCRIMINATED_error_not_a_crash(
+        body, label, wrong_type):
+    """🔴 R4-1. `live_scan`'s entire contract is to RETURN a status-
+    discriminated result rather than raise — the caller's next move is to print
+    "the live fleet was NOT measured". The `isinstance(report, dict)` guard
+    proved the top level was an object and then this code called `.items()` on
+    whatever `hosts` was and `.get()` on each value.
+
+    MEASURED at base: all four raise AttributeError straight out of
+    `live_scan`, past the `except` that only wraps the subprocess call.
+    """
+    fs_run = lambda argv, timeout=None: (0, body, "")  # noqa: E731
+    saved, fs.RUN = fs.RUN, fs_run
+    try:
+        res = fs.live_scan(("zzterm",))
+    except Exception as e:  # noqa: BLE001
+        pytest.fail(f"{label}: live_scan RAISED {type(e).__name__}: {e} — a "
+                    "function whose whole job is to report 'not measured' "
+                    "cannot report it by crashing")
+    finally:
+        fs.RUN = saved
+    assert res["status"] == "error", (
+        f"{label}: a malformed report must be `error` (nothing measured), got "
+        f"{res['status']!r}")
+    assert res["hosts_reachable"] is None and res["hosts_unreachable"] is None, (
+        f"{label}: an unmeasured scan must publish None host lists, never [] — "
+        "an empty unreachable list reads as 'every host answered'")
+    # 🔴 ASSERT THE OPERAND, NOT THE SUBJECT. `"hosts" in error` is a spelled
+    # guard: it passed a message that reported "(got dict)" for a bad host
+    # ENTRY — true of `hosts`, useless about the entry, and self-contradictory
+    # to read. The diagnostic must name the type that is actually wrong.
+    err = res["error"] or ""
+    assert "hosts" in err or "host entr" in err, (
+        f"{label}: the error must name WHICH part of the report was wrong; "
+        f"got {err!r}")
+    assert wrong_type in err, (
+        f"{label}: the error must name the OFFENDING type {wrong_type!r}, not "
+        f"the type of whatever contains it; got {err!r}")
+
+
+def test_a_REAL_hosts_object_still_parses():
+    """🔴 R4-1 BOUNDARY CONTROL (green at base). The guard must reject only
+    malformed shapes. A guard that also rejected a real report would make every
+    live scan read as unmeasured — strictly worse than the crash it replaced.
+    """
+    body = json.dumps({
+        "hosts": {"workbench": {"reachable": True, "windows": [ROW_VIOLET]},
+                  "laptop": {"reachable": False, "windows": []}},
+        "filters": {"match_fields": ["task", "label", "codename"]},
+    })
+    fs_run = lambda argv, timeout=None: (0, body, "")  # noqa: E731
+    saved, fs.RUN = fs.RUN, fs_run
+    try:
+        res = fs.live_scan(("zzterm",))
+    finally:
+        fs.RUN = saved
+    assert res["status"] == "ok"
+    assert res["hosts_reachable"] == ["workbench"]
+    assert res["hosts_unreachable"] == ["laptop"]
+    assert res["rows"] == [ROW_VIOLET]
+
+
+# --------------------------------------------------------------------------- #
+# R4-2  `--tail` below 1 printed a header naming a line count nothing honoured
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("value", [0, -5], ids=["zero", "negative"])
+def test_tail_below_one_is_a_USAGE_error(monkeypatch, value):
+    """🔴 R4-2. MEASURED at base against a real window: `--tail 0` and
+    `--tail -5` were both ACCEPTED, both exited 0, and printed a scrollback
+    block headed `(last 0 lines)` / `(last -5 lines)` over a value
+    `session-manager tail` had silently clamped to zero. Output-line deltas
+    over one window at four values: 0 -> +0, -5 -> +0, 5 -> +5, 40 -> +40.
+
+    Refused, not clamped — the same call `--limit < 1` gets one flag over.
+    """
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--tail", str(value)], run)
+    assert got["rc"] == fs.EXIT_USAGE, (
+        f"--tail {value} exited {got['rc']}, not EXIT_USAGE — a degenerate "
+        "line count was accepted and rendered as a header nobody honoured")
+    assert "--tail must be at least 1" in got["err"]
+    assert not tail_calls(got["calls"]), (
+        "a refused --tail must not shell out to `session-manager tail`")
+
+
+def test_tail_of_exactly_ONE_line_is_accepted(monkeypatch):
+    """🔴 R4-2 BOUNDARY CONTROL (green at base). `1` is the smallest honoured
+    value and must still work — a guard written `<= 1` would pass every test
+    above and break the real boundary.
+    """
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--tail", "1"], run)
+    assert got["rc"] == fs.EXIT_OK, got["err"]
+    assert tail_calls(got["calls"]), "--tail 1 must actually tail"
+    assert "--lines" in tail_calls(got["calls"])[0]
+    argv = tail_calls(got["calls"])[0]
+    assert argv[argv.index("--lines") + 1] == "1"
+
+
+# --------------------------------------------------------------------------- #
+# R4-3  the DEFAULT ARCHIVE WINDOW, and the fact that it is never silent
+# --------------------------------------------------------------------------- #
+NOW = __import__("datetime").datetime(2026, 9, 8, 14, 30, 5)
+
+
+def test_the_default_window_is_DEFAULT_SINCE_DAYS_and_midnight_anchored():
+    """🔴 R4-3. Derived from the constant, never a second literal: a test that
+    hardcoded `12` would go green against a code change that moved the constant
+    and left the behaviour behind.
+    """
+    a = fs.parse_args(["zzterm"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert source == fs.WINDOW_DEFAULT
+    expected = (NOW - __import__("datetime").timedelta(
+        days=fs.DEFAULT_SINCE_DAYS)).replace(hour=0, minute=0, second=0,
+                                             microsecond=0)
+    assert since == expected, (
+        f"the default window must be exactly {fs.DEFAULT_SINCE_DAYS} whole "
+        f"days back at midnight; got {since}")
+    assert since.hour == since.minute == since.second == 0, (
+        "a window anchored at the current TIME of day cannot be spelled by a "
+        "caller, who only has --since YYYY-MM-DD")
+
+
+def test_an_explicit_since_OVERRIDES_the_default():
+    a = fs.parse_args(["zzterm", "--since", "2026-01-02"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert source == fs.WINDOW_EXPLICIT
+    assert since.date().isoformat() == "2026-01-02"
+
+
+def test_all_time_LIFTS_the_window_entirely():
+    a = fs.parse_args(["zzterm", "--all-time"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert source == fs.WINDOW_ALL_TIME
+    assert since is None, "--all-time must pass NO cutoff to the walk"
+
+
+def test_a_SKILL_query_is_UNWINDOWED_because_it_is_a_historical_question():
+    """🔴 R4-3, AND THE REASON THE EXEMPTION EXISTS. `adoption-scan` routes
+    "has skill X ever been used" here BY NAME. Windowing that would convert a
+    corpus-wide "no recorded use" into "not in the last N days" with nothing on
+    screen to say so — and the `skills_used` rollup is itself forward-only from
+    2026-08-29, so the evidence base is young enough for a short window to start
+    discarding real uses within days.
+    """
+    a = fs.parse_args(["--skill", "browser"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert source == fs.WINDOW_SKILL_EXEMPT
+    assert since is None, (
+        "a --skill query must reach the whole corpus; a windowed one answers "
+        "'used recently', which is a different question")
+
+
+def test_an_EXPLICIT_since_still_wins_under_skill():
+    """The exemption removes a default nobody asked for; it does not override
+    an instruction somebody gave."""
+    a = fs.parse_args(["--skill", "browser", "--since", "2026-01-02"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert source == fs.WINDOW_EXPLICIT
+    assert since is not None and since.date().isoformat() == "2026-01-02"
+
+
+def test_since_and_all_time_TOGETHER_is_a_USAGE_error(monkeypatch):
+    """Two windows named at once is refused, not resolved — picking a winner
+    makes one of the two flags silently inert."""
+    run = make_run()
+    got = run_main(monkeypatch,
+                   ["zzterm", "--since", "2026-01-02", "--all-time"], run)
+    assert got["rc"] == fs.EXIT_USAGE
+    assert "two different windows" in got["err"]
+
+
+def test_the_WINDOW_IS_ANNOUNCED_on_the_classic_path(monkeypatch):
+    """🔴 A BOUND NOBODY IS TOLD ABOUT IS A SILENT CAP — and it must be told on
+    the stream the caller is actually reading.
+
+    🔴 THIS TEST PINNED THE WRONG STREAM FOR ONE ROUND. It asserted stderr, on
+    the reasoning that "the classic path's stdout is the bare JSON array every
+    caller parses" — true only under `--json`. On the HUMAN branch stdout is
+    prose with no parse contract, so `find-session.py redis 2>/dev/null` printed
+    `No sessions matched: redis` and nothing whatever about the bound, while
+    this test read green. The window now follows the reader: stdout when a human
+    is reading, stderr when a machine is.
+
+    It must appear even when the run matched nothing — "no sessions matched"
+    under an unannounced window is the exact sentence that reads as a
+    corpus-wide absence.
+    """
+    run = make_run()
+    got = run_main(monkeypatch, ["zzterm"], run, archive=[])
+    assert "ARCHIVE window:" in got["out"], (
+        f"the human path must disclose its window on STDOUT; "
+        f"stdout={got['out']!r} stderr={got['err']!r}")
+    assert f"last {fs.DEFAULT_SINCE_DAYS} days" in got["out"]
+    assert "--all-time" in got["out"], (
+        "the notice must say how to LIFT the bound, not just that one exists")
+    assert "DEFAULT" in got["out"]
+
+
+def test_the_window_goes_to_STDERR_under_json_so_stdout_stays_PARSEABLE(
+        monkeypatch):
+    """🔴 THE OTHER HALF, and the boundary control on the test above. `--json`
+    without `--live` emits the bare array every existing caller parses; the
+    window must NOT land in it. A fix that simply moved the print to stdout
+    would satisfy the test above and corrupt this path."""
+    run = make_run()
+    got = run_main(monkeypatch, ["zzterm", "--json"], run, archive=[])
+    assert "ARCHIVE window:" in got["err"], got["err"]
+    assert "ARCHIVE window:" not in got["out"], (
+        f"the window leaked into --json stdout: {got['out']!r}")
+    json.loads(got["out"])          # raises if the line leaked
+
+
+def test_the_window_notice_says_NOT_MEASURED_rather_than_zero():
+    """🔴 A `0 skipped` from a counter nobody wired is indistinguishable from a
+    real one. `window_notice` is handed `None` when the walk published no
+    counters, and must say so."""
+    since, _ = fs.resolve_window(fs.parse_args(["zzterm"]), now=NOW)
+    line = fs.window_notice(since, fs.WINDOW_DEFAULT, skipped=None)
+    assert "NOT MEASURED" in line
+    assert "skipped unopened: 0" not in line
+
+
+def test_the_window_notice_reports_a_MEASURED_drop_with_its_denominator():
+    since, _ = fs.resolve_window(fs.parse_args(["zzterm"]), now=NOW)
+    line = fs.window_notice(since, fs.WINDOW_DEFAULT, skipped=5310,
+                            examined=624)
+    assert "5310" in line and "5934" in line, (
+        f"the cap's size must carry its denominator; got {line!r}")
+
+
+def test_the_all_time_and_skill_notices_do_NOT_claim_a_cut():
+    all_time = fs.window_notice(None, fs.WINDOW_ALL_TIME)
+    assert "WHOLE corpus" in all_time and "nothing was cut" in all_time
+    skill = fs.window_notice(None, fs.WINDOW_SKILL_EXEMPT)
+    assert "WHOLE corpus" in skill and "--skill" in skill
+
+
+def test_the_window_TRAVELS_IN_THE_JSON_envelope(monkeypatch):
+    """🔴 `total` is a count UNDER A WINDOW, and a caller that cannot see the
+    window reads it as a corpus-wide one."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([])),
+                             (): (0, live_report([]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json"], run,
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    doc = json.loads(got["out"])
+    win = doc["archive"]["window"]
+    assert win["source"] == fs.WINDOW_DEFAULT
+    assert win["default_days"] == fs.DEFAULT_SINCE_DAYS
+    assert win["since"] is not None, "a windowed run must publish its cutoff"
+    assert "ARCHIVE window:" in win["message"]
+    # The seam replaced `archive_search`, so nothing published counters — and
+    # that must publish as null, not as a reassuring zero.
+    assert win["skipped_stale"] is None
+
+
+def test_the_window_block_is_NULL_COUNTED_when_the_archive_never_ran(monkeypatch):
+    """The fast path pays for no walk at all, so its counters are not a zero."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json"], run)
+    doc = json.loads(got["out"])
+    assert doc["archive"]["ran"] is False
+    win = doc["archive"]["window"]
+    assert win["skipped_stale"] is None and win["sessions_examined"] is None
+
+
+def test_the_window_is_printed_in_the_LIVE_paths_ARCHIVE_BLOCK(monkeypatch):
+    """Its own line under its own heading — the same reason the PARTIAL
+    coverage caveat is repeated there rather than inherited from LIVE."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([])),
+                             (): (0, live_report([]))})
+    got = run_main(monkeypatch, ["zzterm", "--live"], run,
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    assert "ARCHIVE window:" in got["out"], got["out"]
+
+
+def test_all_time_is_CLASSIFIED_and_gets_the_archive_only_notice(monkeypatch):
+    """🔴 It is a WINDOW, not a corpus selector, so it gets the SHORT notice —
+    the same call `--since` gets, and for the same reason: appending "pass
+    --deep" to every window flag is the noise that trains a reader to skip the
+    line."""
+    assert "all_time" in {d for d, _, _ in fs.ARCHIVE_ONLY_FLAGS}, (
+        "--all-time steers only the archive; leaving it unclassified breaks "
+        "the partition gate")
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--all-time"], run)
+    assert "--all-time" in got["err"]
+    assert "ARCHIVE-ONLY flags" in got["err"]
+    assert "pass --deep to actually search the corpus you selected" not in got["err"]
+
+
+# =========================================================================== #
+# ROUND 5 — the fixes round 4's audit found SHIPPED WITH NO GUARD
+# =========================================================================== #
+# 🔴 A delta audit mutation-swept the previous round's nine fixes and found
+# FIVE that survived with the whole suite green: the scope clause, the `--since`
+# time stamp, the hoisted `ARCHIVE_STATS.clear()`, the conditional `--all-time`
+# hint and the `--live --deep` de-duplication. A fix nothing pins is a fix the
+# next refactor silently reverts — and the commit reported a mutation sweep for
+# ONE change without saying it covered only that one. These are those guards.
+
+def test_the_window_stamp_carries_a_TIME_when_the_cutoff_has_one():
+    """🔴 A cutoff with a time was disclosed as the bare DATE — a window up to a
+    day WIDER than the one that ran, the single direction a disclosure must not
+    err in. Both the human notice and `archive.window.since` go through
+    `window_stamp`, so they cannot disagree again."""
+    a = fs.parse_args(["zzterm", "--since", "2026-09-01T18:30:00"])
+    since, source = fs.resolve_window(a, now=NOW)
+    assert fs.window_stamp(since) == "2026-09-01 18:30:00"
+    assert fs.window_notice(since, source).startswith(
+        "ARCHIVE window: since 2026-09-01 18:30:00")
+
+
+def test_a_MIDNIGHT_cutoff_still_prints_as_a_bare_DATE():
+    """Boundary control: the time is added only when there IS one, or every
+    ordinary `--since 2026-09-01` grows a noisy ` 00:00:00`."""
+    a = fs.parse_args(["zzterm", "--since", "2026-09-01"])
+    since, _ = fs.resolve_window(a, now=NOW)
+    assert fs.window_stamp(since) == "2026-09-01"
+
+
+def test_the_window_stamp_is_the_SAME_FUNCTION_the_JSON_field_uses(monkeypatch):
+    """🔴 THE SEAM, not the two spellings. Round 4 fixed the human string and
+    left the JSON field on its own `.date()` call, so one object published
+    `since: "2026-09-01"` beside a message naming 18:30:00."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([])),
+                             (): (0, live_report([]))})
+    got = run_main(monkeypatch,
+                   ["zzterm", "--live", "--json", "--since", "2026-09-01T18:30:00"],
+                   run, archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    win = json.loads(got["out"])["archive"]["window"]
+    assert win["since"] == "2026-09-01 18:30:00", win
+    assert win["since"] in win["message"], (
+        "the field and the sentence describe different windows in one object")
+
+
+@pytest.mark.parametrize("argv,expect_present,expect_absent,claude_leg_ran", [
+    (["zzterm"], ("the peer hosts", "the opencode corpus"), (), True),
+    (["zzterm", "--claude-only"], ("the peer hosts",),
+     ("the opencode corpus",), True),
+    (["zzterm", "--opencode-only"], ("the opencode corpus",),
+     ("the peer hosts",), False),
+], ids=["default", "claude-only", "opencode-only"])
+def test_the_scope_clause_names_only_legs_that_actually_RAN(
+        argv, expect_present, expect_absent, claude_leg_ran):
+    """🔴 A LEG THAT DID NOT RUN IS NOT AN UNCOUNTED LEG. The flat sentence told
+    an `--opencode-only` caller that the opencode corpus was excluded from the
+    run that searched nothing else, and told a `--claude-only` caller about an
+    unreported cut in a corpus nobody opened."""
+    a = fs.parse_args(argv)
+    a.skill = ""
+    legs = fs.unmeasured_legs(a)
+    # 🔴 THE EXPECTATION IS A LITERAL, NOT THE IMPLEMENTATION. This line used to
+    # read `claude_leg_ran=not a.opencode_only` — the same expression the
+    # production call site uses — so the two could never disagree and the
+    # argument was pinned by nothing. `claude/RULES.md`: never derive a test's
+    # expectation from the code it tests.
+    line = fs.window_notice(datetime.datetime(2026, 8, 27), fs.WINDOW_DEFAULT,
+                            skipped=5, examined=5, legs=legs,
+                            claude_leg_ran=claude_leg_ran)
+    # 🔴 PRESENCE FIRST — an absence-only guard is satisfied by deleting the
+    # disclosure entirely. MEASURED: `unmeasured_legs` -> `return ()` left this
+    # test green in both find-session files while the live tool stopped naming
+    # the uncounted legs at all, which is the very cut the code comment calls
+    # "both the larger fraction and the longer reach". The `default` case was
+    # worse than one-sided: with no absences to check it asserted NOTHING.
+    for phrase in expect_present:
+        assert phrase in line, (
+            f"{argv} does not name {phrase!r}, a leg it DID window and does "
+            f"not count: {line!r}")
+    for phrase in expect_absent:
+        assert phrase not in line, (
+            f"{argv} names {phrase!r}, which this run never searched: {line!r}")
+    if not claude_leg_ran:
+        assert "NOT SEARCHED" in line, (
+            "under --opencode-only the Claude count is not merely unmeasured — "
+            f"that corpus was never opened: {line!r}")
+
+
+def test_the_scope_clause_has_NO_subject_verb_to_get_WRONG():
+    """Boundary control on the fix's own first draft, which picked the verb from
+    the NUMBER OF LEGS and printed 'the peer hosts was windowed too'."""
+    one = fs.window_notice(datetime.datetime(2026, 8, 27), fs.WINDOW_DEFAULT,
+                           skipped=1, examined=1, legs=("the peer hosts",))
+    assert "hosts was" not in one and "hosts is" not in one, one
+
+
+def test_ARCHIVE_STATS_is_reset_even_when_the_ARCHIVE_NEVER_RAN(monkeypatch):
+    """🔴 The reset sat inside `if run_archive:`, so a stale count from a prior
+    call could publish beside `archive.ran: false`. Two `main()` calls in one
+    process is the only way to see it."""
+    # 🔴 ASSERT THE STATE, NOT A DIGIT. The first draft of this test asserted
+    # `"7" not in message` and failed against CORRECT code, because the notice
+    # names a cutoff date — `2026-08-27` contains a 7. A guard spelled as a
+    # character search is satisfied, or defeated, by text that has nothing to do
+    # with the hazard; `claude/RULES.md` calls this the spelled-guard trap, and
+    # this is its second sighting inside this one change.
+    fs.ARCHIVE_STATS.update({"skipped_stale": 7, "sessions_examined": 3})
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json"], run)
+    win = json.loads(got["out"])["archive"]["window"]
+    assert "NOT MEASURED" in (win["message"] or ""), (
+        "a run whose archive never executed published a measured-looking "
+        f"count from a PREVIOUS call: {win['message']!r}")
+    assert "skipped unopened" not in (win["message"] or ""), win["message"]
+    assert win["skipped_stale"] is None and win["sessions_examined"] is None
+    assert json.loads(got["out"])["archive"]["ran"] is False
+
+
+def test_the_all_time_HINT_is_not_offered_to_someone_who_PASSED_it(monkeypatch):
+    """Telling a caller to add the flag they already passed, on a run where it
+    did nothing, is the noise that trains a reader to skip the line."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--all-time"], run)
+    skipped = [l for l in got["out"].splitlines() if l.startswith("ARCHIVE: skipped")]
+    assert skipped, got["out"]
+    assert "add --all-time" not in skipped[0], skipped[0]
+    assert "all-time" in skipped[0], (
+        f"it should still say WHICH window was in force: {skipped[0]!r}")
+
+
+def test_the_window_is_announced_ONCE_under_deep_not_once_per_STREAM(monkeypatch):
+    """🔴 `--live --deep` printed it to stderr AND stdout. A disclosure repeated
+    per stream reads as two different windows to anyone merging the two."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([])),
+                             (): (0, live_report([]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--deep"], run,
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    total = got["out"].count("ARCHIVE window:") + got["err"].count("ARCHIVE window:")
+    assert total == 1, (
+        f"the window was announced {total} times across the two streams; "
+        f"stdout={got['out'].count('ARCHIVE window:')} "
+        f"stderr={got['err'].count('ARCHIVE window:')}")
+
+
+def test_a_MULTI_BAD_hosts_report_names_EVERY_offenders_type():
+    """🔴 The wrong-operand class, one shape over: the message named only the
+    alphabetically-first offender's type, so it was wrong about the others."""
+    body = '{"hosts": {"wb": "up", "lt": []}}'
+    saved, fs.RUN = fs.RUN, (lambda argv, timeout=None: (0, body, ""))
+    try:
+        res = fs.live_scan(("zzterm",))
+    finally:
+        fs.RUN = saved
+    err = res["error"] or ""
+    assert "'lt'=list" in err and "'wb'=str" in err, (
+        f"the error must name each offender's own type; got {err!r}")
+
+
+# =========================================================================== #
+# ROUND 6 — THE SEAM. "Verified in isolation" is the new vacuous green.
+# =========================================================================== #
+# 🔴 MEASURED: change `legs=unmeasured_legs(a)` to `legs=()` at the ONE
+# production call site and ALL 283 tests across six files pass, while every
+# real archive run silently stops naming the peer-host and opencode legs as
+# windowed-but-uncounted — the disclosure the code comment itself calls "both
+# the larger fraction and the longer reach". Round 5 hardened the CALLEE
+# (`unmeasured_legs`) and asserted on `window_notice` DIRECTLY, so no test ever
+# built the combined state: `main` -> `_window_line` -> `unmeasured_legs` ->
+# `window_notice` -> the printed line. Both components were mutation-clean and
+# the feature was still one edit from deletion.
+#
+# These cases drive `main` and read what a caller actually SEES.
+
+@pytest.mark.parametrize("argv,expect_present,expect_absent,expect_not_searched", [
+    (["zzterm"], ("the peer hosts", "the opencode corpus"), (), False),
+    (["zzterm", "--claude-only"], ("the peer hosts",),
+     ("the opencode corpus",), False),
+    # 🔴 THE SHAPE THE SEAM'S OTHER ARGUMENT DECIDES, and it was missing. The
+    # production call site passes BOTH `legs=` and `claude_leg_ran=`; only
+    # `legs` was pinned, so `claude_leg_ran=not a.opencode_only` -> `True`
+    # left 185/185 green while `--opencode-only` printed "Claude transcripts on
+    # THIS host skipped by the window: NOT MEASURED" — telling the operator the
+    # Claude corpus was in scope but uncounted when it was never opened.
+    (["zzterm", "--opencode-only"], ("the opencode corpus",),
+     ("the peer hosts",), True),
+], ids=["default", "claude-only", "opencode-only"])
+def test_the_LEGS_reach_the_PRINTED_LINE_through_main(
+        monkeypatch, argv, expect_present, expect_absent, expect_not_searched):
+    """🔴 THE SEAM, not the component. Pins `main` -> printed notice."""
+    run = make_run()
+    got = run_main(monkeypatch, argv, run, archive=[])
+    window = [l for l in got["out"].splitlines() if "ARCHIVE window:" in l]
+    assert window, f"no window line on stdout: {got['out']!r}"
+    for phrase in expect_present:
+        assert phrase in window[0], (
+            f"{argv}: the printed notice does not name {phrase!r}, a leg it "
+            f"windowed and does not count: {window[0]!r}")
+    for phrase in expect_absent:
+        assert phrase not in window[0], (
+            f"{argv}: the printed notice names {phrase!r}, never searched: "
+            f"{window[0]!r}")
+    if expect_not_searched:
+        assert "NOT SEARCHED" in window[0], (
+            f"{argv}: the Claude corpus was never opened, but the notice "
+            f"reports it as merely uncounted: {window[0]!r}")
+    else:
+        assert "NOT SEARCHED" not in window[0], (
+            f"{argv}: the Claude walk RAN, but the notice says it was not "
+            f"searched: {window[0]!r}")
+
+
+def test_the_LEGS_reach_the_JSON_message_through_main(monkeypatch):
+    """The same seam on the machine-readable side — `archive.window.message`
+    is what a `--live --json` consumer reads, and it is produced by a different
+    call than the human line."""
+    run = make_run(by_terms={("zzterm",): (0, live_report([])),
+                             (): (0, live_report([]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json"], run,
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    msg = json.loads(got["out"])["archive"]["window"]["message"]
+    for phrase in ("the peer hosts", "the opencode corpus"):
+        assert phrase in msg, (
+            f"the JSON window message does not name {phrase!r}: {msg!r}")
