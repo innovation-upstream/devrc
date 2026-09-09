@@ -373,14 +373,26 @@ _DISK_ROOTED_ALLOWLIST: dict[str, str] = {
 # keys.** So on `test_subsystem_store_api.py` today this set catches nothing the flow
 # arm does not already catch, and deleting it would lose nothing THERE.
 #
-# 🔴 IT IS KEPT ANYWAY, AND NOT OUT OF CAUTION. Two of this file's own probe tests
-# depend on the on-sight arm being present — see
-# `test_the_site_index_does_not_key_on_the_DIRECTORY_being_spelled_store`, whose whole
-# subject is the relationship between the two arms — and the flow arm's own comment
-# records that `_ROOT_CONSUMERS` closes renames but NOT growth into a new consumer
-# name. A set that is currently redundant on one file is not a set that is redundant.
-# What HAS changed is that its contribution is now measurable in one command, so the
-# next reader does not have to trust this paragraph.
+# 🔴 AND IT IS INERT IN THIS FILE'S OWN PROBE SUITE TOO — SAY IT, BECAUSE THE FIRST
+# DRAFT OF THIS PARAGRAPH CLAIMED THE OPPOSITE. It read "two of this file's own probe
+# tests depend on the on-sight arm being present", naming
+# `test_the_site_index_does_not_key_on_the_DIRECTORY_being_spelled_store`. That is
+# false: every probe in that test hands its path to `running(...)`, so the FLOW arm
+# counts it and the directory's spelling never decides anything. MEASURED by setting
+# `_ROOT_NAMES` to the empty set and running every argument-free test in this module:
+# **zero behaviour changes.**
+#
+# So today this set catches nothing, anywhere that is measured. It is KEPT rather than
+# deleted, and the reason is an argument rather than a measurement, which is the
+# honest way to hold it: `_ROOT_CONSUMERS`' own comment records that the flow arm
+# closes RENAMES but not GROWTH into a new consumer name, and the on-sight arm is the
+# only path that does not go through that set at all. Deleting it is a real option and
+# a separate change; the CLOSING CONDITION for that decision is a measurement showing
+# the flow arm covers a store built under a name the consumer set does not know, which
+# nothing here demonstrates today.
+#
+# What HAS changed is that the contribution is now measurable in one command instead
+# of being asserted in prose — which is what caught the false sentence above.
 _ROOT_NAMES = {"store", "src"}
 
 
