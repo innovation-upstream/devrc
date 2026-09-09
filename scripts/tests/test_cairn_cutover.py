@@ -1617,6 +1617,116 @@ class TestP3IsRetiredOnceTheStoreIsFrozen:
             f"seed.sh was reached over a store nothing could measure: {seen}"
         )
 
+    def test_an_ORDINARY_dry_run_admits_the_run_dir_it_wrote(
+        self, cc, tmp_path, monkeypatch, capsys
+    ):
+        """🔴 THE PARTIAL SWEEP, ONE ROUND LATER — this is the site an operator
+        actually reads, and it was missed while USAGE and the frozen-store test
+        were fixed. On an UN-frozen store the run reaches the dry-run branch and
+        printed a flat "Nothing was changed." — while P0 had already synced a
+        full plaintext copy of the SERVED store into the run dir. The file's own
+        comment calls that out and notes the runbook prescribes several dry runs,
+        so they accumulate.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        self._past_p0(cc, monkeypatch, POD)
+        run_dir = tmp_path / "run"
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(run_dir)])
+        assert rc == cc.RC_OK, f"rc={rc}"
+        text = "".join(capsys.readouterr())
+        assert sorted(q.name for q in run_dir.rglob("*.md")), (
+            "the run dir holds no copy — this test no longer observes the thing"
+        )
+        assert "IN EITHER STORE" in text, (
+            f"the dry run still claims a flat 'Nothing was changed' while it "
+            f"wrote a plaintext copy of the served store.\n{text}"
+        )
+        assert "delete the run dir" in text, (
+            f"the dry run does not tell the operator how to roll back what it "
+            f"DID write.\n{text}"
+        )
+
+    def test_the_MIXED_advice_puts_the_PUSH_before_the_FREEZE_and_names_the_ledger(
+        self, cc, tmp_path, monkeypatch, capsys
+    ):
+        """🔴 TWO MEASURED HARMS FROM ONE SENTENCE OF ADVICE.
+
+        An earlier draft told a MIXED store to "complete it with `--freeze
+        --apply`". Reproduced end to end:
+          * on a never-cut-over store that FREEZES entries never pushed — the
+            `34d00d90`/#1254 shape, local-only content dark to every reader —
+            with P3 now retired over it;
+          * out of an interrupted freeze it writes a SECOND mode ledger holding
+            0444, and `--unfreeze` takes the NEWEST, so a 0600 entry is
+            "restored" to 0444 and the rollback exits 0.
+
+        So the advice must order the acts (push first) and carry the ledger
+        caveat with the route. Pinned on the ORDER, not on the words: `create`
+        must be recommended before `--freeze --apply` is mentioned.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        (root / "sc" / "later.md").write_text(_entry("sc", "later", "- 2026-01-02: y."))
+        assert cc.survey(root)["writable"] == 1, "fixture is not MIXED"
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        assert rc == cc.RC_CUTOVER_COMPLETE, f"rc={rc}"
+        text = "".join(capsys.readouterr())
+        first_create = text.index("cairn create")
+        freeze_at = text.index("--freeze --apply")
+        assert first_create < freeze_at, (
+            f"the freeze route is offered before the push — following it in that "
+            f"order strands local-only content behind a retired P3.\n{text}"
+        )
+        assert "pushes NOTHING" in text, (
+            f"the message does not say the freeze route sends nothing.\n{text}"
+        )
+        assert cc.MODE_LEDGER in text and "--mode-ledger" in text, (
+            f"the freeze route is named without the ledger caveat — a second "
+            f"freeze shadows the first and --unfreeze silently narrows a 0600 "
+            f"entry to 0444.\n{text}"
+        )
+
+    def test_the_UNMEASURABLE_branch_is_decided_BEFORE_the_retirement(
+        self, cc, tmp_path, monkeypatch
+    ):
+        """🔴 THE ORDERING THE FIX IS DESCRIBED BY, AND IT WAS UNPINNED —
+        moving the `other` block below the `refused` block survived the file.
+
+        Both spellings refuse and neither pushes, so the behavioural stake is
+        which code an operator sees for a store that is BOTH partly frozen and
+        partly unreadable. That store is the one this builds, and it is the one
+        no other test constructs: the F1 test stubs `probe_writable` for EVERY
+        entry, so it can never produce a mixed bucket. 'Could not measure' must
+        win, because a store you cannot read is not a store you have classified.
+        """
+        root = _tree(tmp_path / "s", {
+            "sc/a.md": _entry("sc", "a", "- 2026-01-01: x."),
+            "sc/b.md": _entry("sc", "b", "- 2026-01-01: y."),
+        })
+        seen = self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        real_probe = cc.probe_writable
+        monkeypatch.setattr(
+            cc, "probe_writable",
+            lambda q: "error:EROFS" if q.name == "b.md" else real_probe(q),
+        )
+        state = cc.survey(root)
+        assert state["refused"] == 1 and state["other"] == 1, (
+            f"fixture does not build the MIXED bucket: {state}"
+        )
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        assert rc == cc.RC_COULD_NOT_MEASURE, (
+            f"a store that is partly UNREADABLE was classified anyway (rc={rc}) "
+            f"— the unmeasurable branch must be decided first"
+        )
+        assert not any("seed.sh" in " ".join(argv) for argv in seen), seen
+
     def test_the_USAGE_note_states_the_dry_run_refusal_and_the_run_dir_cost(self):
         """🔴 THE BEHAVIOUR WAS PINNED AND THE DOCUMENTATION WAS NOT — deleting
         the whole USAGE note SURVIVED the file. The note is the only place a

@@ -1452,20 +1452,41 @@ def main(argv: list[str] | None = None) -> int:
             ))
         if frozen["refused"] > 0:
             # 🔴 THE MESSAGE STATES WHAT WAS MEASURED, NOT A CONCLUSION IT CANNOT
-            # REACH. An earlier draft said "so P5 has frozen it and local disk is
-            # a read-through CACHE" — false for a PARTIAL freeze, which this
-            # script produces as a first-class outcome (`RC_FREEZE_INEFFECTIVE`
-            # with `unknown > 0` leaves entries at 0444 on a store whose freeze
-            # did NOT take), and false again after a SIGINT mid-`set_entry_mode`.
-            # Mode bits cannot tell that apart from a completed cutover, so the
-            # message reports the count and names BOTH routes out.
+            # REACH — and this is the THIRD spelling, because the first two each
+            # asserted an absolute the mode bits do not establish. Draft 1: "so
+            # P5 has frozen it and local disk is a read-through CACHE", false for
+            # a PARTIAL freeze (`RC_FREEZE_INEFFECTIVE` with `unknown > 0` leaves
+            # entries at 0444 on a store whose freeze did NOT take) and after a
+            # SIGINT mid-`set_entry_mode`. Draft 2: "which only P5's freeze
+            # produces here", false for a never-cut-over store carrying one stray
+            # 0444 entry — and written in the very commit that DELETED the caveat
+            # recording that residual.
+            #
+            # 🔴 AND NO SINGLE PRESCRIBED ROUTE FOR THE MIXED CASE. Draft 2 told a
+            # MIXED store to "complete it with `--freeze --apply`". MEASURED, that
+            # advice does harm two ways:
+            #   * on a never-cut-over store it FREEZES entries that were never
+            #     pushed — the `34d00d90`/#1254 shape, content that exists only
+            #     locally and is dark to every reader — with P3 now retired over
+            #     it, so the ordinary route can never push it again;
+            #   * out of a genuinely interrupted freeze it writes a SECOND mode
+            #     ledger recording the 0444 the FIRST freeze already set, and
+            #     `--unfreeze` defaults to the NEWEST ledger — so a 0600 entry is
+            #     "restored" to 0444 and the rollback exits 0. That is
+            #     `save_modes`' documented widening hazard in mirror image: a
+            #     NARROWING presented as a restore.
+            # So the message names the ambiguity, puts the safe act first (get
+            # content to the pod), and carries the ledger caveat with the route.
             mixed = frozen["writable"] > 0
             return refuse(RC_CUTOVER_COMPLETE, (
                 f"P3 is RETIRED on this store — {frozen['refused']} of "
-                f"{frozen['examined']} entry file(s) refuse a write, which only "
-                f"P5's freeze produces here. Pushing local disk back would "
-                f"overwrite every entry the pod has moved on since, and "
-                f"`seed.sh` never deletes, so it would report success. "
+                f"{frozen['examined']} entry file(s) refuse a write. P5's freeze "
+                f"is what normally produces that, but it is not the only thing "
+                f"that can: a stray 0444 entry on a store that was NEVER cut "
+                f"over reads identically, and the mode bits cannot tell them "
+                f"apart. Pushing local disk back would overwrite every entry the "
+                f"pod has moved on since, and `seed.sh` never deletes, so it "
+                f"would report success. "
                 f"🔴 Do NOT pass --allow-overwrite to get past this: that is the "
                 f"silent revert, not the fix. Write to the pod through `cairn "
                 f"create` for an entry it has never seen, or `cairn append` / "
@@ -1473,14 +1494,19 @@ def main(argv: list[str] | None = None) -> int:
                 f"on a ref that does not resolve, so create is the verb for the "
                 f"ADD case."
                 + (
-                    f" ⚠ {frozen['writable']} entr(y/ies) here are still WRITABLE, "
-                    f"so this may instead be a PARTIAL or INTERRUPTED freeze "
-                    f"rather than a completed cutover — the mode bits cannot "
-                    f"tell the two apart. If P5 never finished, complete it with "
-                    f"`--freeze --apply` (which runs P5 alone and does not "
-                    f"re-enter this phase); if this IS a cut-over store, the "
-                    f"writable file is a post-freeze creation and belongs on the "
-                    f"pod via `cairn create`."
+                    f" ⚠ {frozen['writable']} entr(y/ies) here are still WRITABLE. "
+                    f"That is a completed cutover with a post-freeze creation, OR "
+                    f"a PARTIAL/INTERRUPTED freeze, OR a store never cut over at "
+                    f"all — indistinguishable by mode bits. Get any local-only "
+                    f"content onto the pod with `cairn create` FIRST: "
+                    f"`--freeze --apply` pushes NOTHING, so freezing before "
+                    f"sending strands whatever has not been sent. 🔴 And if you "
+                    f"run it to finish an interrupted freeze, roll back with "
+                    f"`--unfreeze --mode-ledger <the INTERRUPTED run>/"
+                    f"{MODE_LEDGER}` — a second freeze writes a second ledger "
+                    f"recording 0444, `--unfreeze` takes the NEWEST by default, "
+                    f"and the original modes are then lost with a success "
+                    f"message."
                     if mixed else ""
                 )
                 + " NOTHING was pushed."
@@ -1495,7 +1521,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"--dest {args.dest}")
             say("DRY RUN — the freeze would then chmod 0444 over "
                 f"{len(local)} entry file(s) and require EVERY ONE to refuse a write.")
-            say("Nothing was changed. Re-run with --apply.")
+            say("Nothing was changed IN EITHER STORE. ⚠ P0 has already written "
+                f"{cache_dir} — a full plaintext copy of the SERVED store; "
+                f"delete the run dir to roll that back. Re-run with --apply.")
             return RC_OK
 
         if not plan.shippable:
