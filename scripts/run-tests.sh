@@ -1028,6 +1028,12 @@ fi
 # narrowed — reading it afterwards would report "N of N" on every subset run,
 # which is precisely the reassuring-but-wrong number this is for.
 SET_TOTAL="${#TARGETS[@]}"
+# The UNNARROWED list, kept because `TARGETS` is the thing that gets narrowed.
+# A count alone cannot answer "which ones did NOT run", and that question is the
+# whole content of the CI-gap block in the SUMMARY: with the local full-suite
+# mandate gone, CI is the only automated signal, so the useful thing a narrowed
+# run can print is not what it covered but what it left for CI to find.
+SET_TARGETS_ALL=("${TARGETS[@]}")
 
 # --- SCOPED FILE SELECTION: resolve --files to (files, owning targets) ---------
 # Runs BEFORE the target-subset block below and feeds it: a file scope IS a
@@ -4586,6 +4592,67 @@ done
 # `SUMMARY (hermetic set)` as its FIRST line and `GATE: RESULT=PASS`. A bare
 # "$SET set" there is a positive claim that the whole set ran, printed on the
 # one surface CLAUDE.md tells people to read.
+# --- THE CI GAP: what this run left for something else to find -----------------
+# 🔴 WHY THIS IS THE MOST USEFUL THING A NARROWED RUN PRINTS. There is no longer
+# a mandate that every session run the full suite locally before merging, and
+# branch protection is off, so the only automated signal is the advisory
+# `tekton/devrc-pytests` / `tekton/devrc-nodetests` pair — which runs the FULL
+# set on push and lands minutes later. A narrowed run's job is therefore not to
+# approximate a gate. It is to say, out loud, WHICH work it handed to CI.
+#
+# 🔴 COMPUTED, NOT ASSERTED. Every number here is derived from what this run
+# actually selected against the declared list it actually read, so it cannot
+# drift the way a hand-written "and CI also runs X" sentence would. The ONE
+# claim about CI itself is the check names, and those live in `flake.nix`'s
+# `checks` attrset — if they are renamed this line is wrong and the block still
+# prints a correct, useful gap.
+#
+# ⚠ It reports the gap in THIS tier only. The node tier is named because it is a
+# separate derivation this script cannot see into, never counted.
+_print_ci_gap() {
+  local t s missing=() n_missing=0 other_files=0 n_here n_sel
+  for t in "${SET_TARGETS_ALL[@]}"; do
+    local hit=0
+    for s in "${TARGETS[@]}"; do [ "$t" = "$s" ] && { hit=1; break; }; done
+    [ "$hit" -eq 0 ] && missing+=("$t")
+  done
+  n_missing="${#missing[@]}"
+  # In SCOPED mode the SELECTED targets are also only partly covered: count the
+  # collectable files in each that this run did not name. A gap block that
+  # counted only whole targets would report `0 not selected` for a run that
+  # touched one file of thirteen thousand.
+  if [ "$SCOPED_MODE" -eq 1 ]; then
+    for t in "${TARGETS[@]}"; do
+      if [ -d "$t" ]; then
+        n_here="$(find "$t" -type f \( -name 'test_*.py' -o -name '*_test.py' \) 2>/dev/null | wc -l | tr -d ' ')"
+      else
+        n_here=1
+      fi
+      _scoped_files_for "$t"
+      n_sel="${#SCOPED_TARGET_FILES[@]}"
+      [ "${n_here:-0}" -gt "$n_sel" ] && other_files=$(( other_files + n_here - n_sel ))
+    done
+  fi
+  echo "  ---- what this run did NOT cover (the gap CI closes) ----"
+  echo "    🔴 This is an INNER-LOOP run. The full set runs on push as the advisory"
+  echo "       checks \`tekton/devrc-pytests\` + \`tekton/devrc-nodetests\`, which are"
+  echo "       the only automated signal and land minutes later. Not covered here:"
+  if [ "$n_missing" -gt 0 ]; then
+    echo "       - ${n_missing} of ${SET_TOTAL} pytest target(s) never ran:"
+    for t in "${missing[@]}"; do echo "           $t"; done
+  else
+    echo "       - 0 pytest targets were skipped (every declared target ran)"
+  fi
+  if [ "$SCOPED_MODE" -eq 1 ]; then
+    echo "       - ${other_files} other collectable file(s) inside the selected target(s)"
+    if [ "${#SKIPPED_FAMILIES[@]}" -gt 0 ]; then
+      for s in "${SKIPPED_FAMILIES[@]}"; do echo "       - $s"; done
+    fi
+  fi
+  echo "       - the NODE tier (scripts/run-node-tests.sh) — a separate derivation"
+  echo "         this runner does not invoke at all"
+}
+
 echo "======================== SUMMARY ($SET set)${SUBSET_NOTE} ========================"
 # Second, unmissable statement of the same fact, on the line right below the
 # banner — i.e. the SECOND line `gate.sh` prints. The banner is easy to skim
@@ -4611,11 +4678,13 @@ if [ "$SCOPED_MODE" -eq 1 ]; then
     for _skipped in "${SKIPPED_FAMILIES[@]}"; do echo "       - $_skipped"; done
   fi
   for _sf in "${SCOPED_FILES[@]}"; do echo "     file: $_sf"; done
+  _print_ci_gap
 elif [ -n "$SUBSET_NOTE" ]; then
   echo "  🔴 PARTIAL RUN — ${#TARGETS[@]} of ${SET_TOTAL} declared '$SET' target(s) ran."
   echo "     Every count below is for the SELECTED targets only. The unselected"
   echo "     ones were NOT executed and this verdict says nothing about them."
   echo "     Selected: ${TARGETS[*]}"
+  _print_ci_gap
 fi
 for r in "${RESULTS[@]}"; do echo "  $r"; done
 echo "  ----"

@@ -263,7 +263,18 @@ for c in "${CHANGED[@]}"; do
       # subsystem target at all (a repo-root doc, a nix module).
       sub="$(_subsystem_target "$c")"
       if [ -n "$sub" ]; then
-        scope_list="$(printf '%s\n' "$UNIVERSE" | grep -E "^${sub}(/|$)" || true)"
+        # 🔴 A `case` glob, NOT `grep -E "^$sub"`. A target path interpolated
+        # into a regex is a pattern, not a literal: any `.` in it becomes
+        # "any character" and the filter silently widens — the exact
+        # over-selection this narrowing exists to remove, wearing its costume.
+        scope_list=""
+        while IFS= read -r _u; do
+          case "$_u" in
+            "$sub"|"$sub"/*) scope_list="${scope_list}${_u}"$'\n' ;;
+          esac
+        done <<EOF
+$UNIVERSE
+EOF
       else
         scope_list="$UNIVERSE"
       fi

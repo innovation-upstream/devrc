@@ -108,7 +108,19 @@ def _scope_line(out: str) -> str | None:
 
 def test_an_empty_files_selection_is_fatal_not_a_full_run():
     """REGRESSION. `--files "$(map_changes)"` with a mapper that found nothing
-    must never become a run that tests something else and exits 0."""
+    must never become a run that tests something else and exits 0.
+
+    🔴 THE SECOND ASSERTION IS NOT DECORATION — it is what makes this test able
+    to see the guard it names. MEASURED: mutating the `--files` empty check to
+    `-lt 0` (i.e. deleting it) left this test GREEN when it asserted only the
+    first line, because the run then falls through to the target-subset block,
+    whose own empty check fires with a BYTE-IDENTICAL first line — it
+    interpolates `ONLY_TARGETS_SOURCE`, which this path has already set to
+    `--files`. A different guard's error killing the test is the textbook
+    green-for-the-wrong-reason: the mutant SURVIVED a fully green suite.
+
+    The follow-up line below is emitted by the `--files` check ALONE. The layered
+    defence is real and welcome; this test now pins the near layer specifically."""
     proc = _run([str(RUN_TESTS), "--files", "", "--check-targets", str(REPO_ROOT)])
     out = _out(proc)
     assert proc.returncode == 3, (
@@ -116,6 +128,11 @@ def test_an_empty_files_selection_is_fatal_not_a_full_run():
         f"rc={proc.returncode}\n{out}"
     )
     assert "--files was given but resolved to NOTHING" in out, out
+    assert "If a change-mapper produced this" in out, (
+        "the abort came from the target-subset block's empty check, not the "
+        "--files one — same first line, different guard. This test cannot "
+        f"vouch for the guard it names.\n{out}"
+    )
 
 
 def test_a_file_under_no_declared_target_is_fatal():
@@ -633,6 +650,87 @@ def test_a_full_run_still_runs_the_hook_and_shell_families(tmp_path):
         f"absence assertion proves nothing.\n{out[-3000:]}")
     assert re.search(r"^=== script scripts/tests/.*\.sh ", out, re.M), out[-3000:]
     assert re.search(r"^     NOT RUN in this mode", out, re.M) is None, out
+
+
+def test_a_narrowed_run_NAMES_the_work_it_left_for_ci(tmp_path):
+    """🔴 THE POINT OF A NARROWED RUN, now that there is no local full-suite
+    mandate and branch protection is off: the advisory `tekton/devrc-*` checks
+    are the only automated signal and they land minutes later. So the useful
+    thing this run can print is not what it covered — it is WHICH WORK IT HANDED
+    TO CI, named, so the operator knows what is still unknown.
+
+    Every number in the block is DERIVED from what the run selected against the
+    declared list it read, never asserted, so it cannot drift the way a
+    hand-written "CI also runs X" sentence would.
+
+    The fixture has TWO targets of DIFFERENT sizes and selects one file of one:
+    equal sizes could not tell "counted the right target" from "counted either"."""
+    a = tmp_path / "alpha"
+    b = tmp_path / "beta"
+    write_pytest_suite(a, 3, prefix="test_a1")
+    write_pytest_suite(a, 7, prefix="test_a2")
+    write_pytest_suite(a, 5, prefix="test_a3")   # 3 files in alpha
+    write_pytest_suite(b, 11, prefix="test_b1")  # 1 file in beta
+    runner = tmp_path / "run-tests.sh"
+    runner.write_text(patch_runner_source(
+        RUN_TESTS.read_text(), targets=[str(a), str(b)],
+        floors={str(a): 1, str(b): 1}, ack=[], hook_tests=[], shell_tests=[]))
+    proc = _run([str(runner), str(REPO_ROOT), "--files", str(a / "test_a2.py")],
+                env={"MIN_TESTS": "1"})
+    out = _out(proc)
+    assert proc.returncode == 0, f"rc={proc.returncode}\n{out}"
+    assert re.search(r"^  ---- what this run did NOT cover \(the gap CI closes\) ----$",
+                     out, re.M), out
+    # The unrun TARGET is named, not merely counted — a count cannot be acted on.
+    assert re.search(r"^       - 1 of 2 pytest target\(s\) never ran:$", out, re.M), out
+    assert re.search(r"^           " + re.escape(str(b)) + r"$", out, re.M), out
+    # 🔴 AND the unrun FILES inside the target that DID run. A gap block counting
+    # only whole targets would report the selected target as fully covered — for
+    # `scripts/tests` that is one file of 185 reported as a covered target.
+    assert re.search(r"^       - 2 other collectable file\(s\) inside the selected target",
+                     out, re.M), (
+        "the gap block did not count the unrun files inside the selected target "
+        f"(alpha holds 3 files; 1 was selected).\n{out}")
+    assert re.search(r"^       - the NODE tier ", out, re.M), out
+
+
+def test_a_FULL_run_prints_no_ci_gap_block(tmp_path):
+    """POSITIVE CONTROL by contrast. Without it, every assertion above is
+    satisfied by a block that prints unconditionally — including on a run that
+    left no gap at all, which would make it noise the reader learns to skip."""
+    a = tmp_path / "alpha"
+    write_pytest_suite(a, 3, prefix="test_a1")
+    runner = tmp_path / "run-tests.sh"
+    runner.write_text(patch_runner_source(
+        RUN_TESTS.read_text(), targets=[str(a)], floors={str(a): 1},
+        ack=[], hook_tests=[], shell_tests=[]))
+    proc = _run([str(runner), str(REPO_ROOT)], env={"MIN_TESTS": "1"})
+    out = _out(proc)
+    assert proc.returncode == 0, f"rc={proc.returncode}\n{out}"
+    assert not re.search(r"^  ---- what this run did NOT cover", out, re.M), (
+        f"a FULL run printed a CI-gap block it has no gap for.\n{out}")
+
+
+def test_a_target_subset_also_names_the_targets_it_skipped(tmp_path):
+    """The gap block is not scoped-only: a `--targets` PARTIAL run leaves the
+    same kind of hole and the operator has the same question about it."""
+    a = tmp_path / "alpha"
+    b = tmp_path / "beta"
+    write_pytest_suite(a, 3, prefix="test_a1")
+    write_pytest_suite(b, 11, prefix="test_b1")
+    runner = tmp_path / "run-tests.sh"
+    runner.write_text(patch_runner_source(
+        RUN_TESTS.read_text(), targets=[str(a), str(b)],
+        floors={str(a): 1, str(b): 1}, ack=[], hook_tests=[], shell_tests=[]))
+    proc = _run([str(runner), str(REPO_ROOT), "--targets", str(a)],
+                env={"MIN_TESTS": "1"})
+    out = _out(proc)
+    assert proc.returncode == 0, f"rc={proc.returncode}\n{out}"
+    assert re.search(r"^       - 1 of 2 pytest target\(s\) never ran:$", out, re.M), out
+    assert re.search(r"^           " + re.escape(str(b)) + r"$", out, re.M), out
+    # A target subset ran its targets WHOLE, so there is no intra-target file gap
+    # to report — claiming one would overstate the hole.
+    assert not re.search(r"other collectable file\(s\) inside", out, re.M), out
 
 
 def test_a_scoped_row_never_prints_the_targets_floor(tmp_path):
