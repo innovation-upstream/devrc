@@ -18,20 +18,33 @@ does not re-derive it.
 
 ## State now
 
-**Branch / PR:** `devrc` worktree at `/home/zach/workspace/devrc-fleet-skill`,
-branch `zach/civitai-app-fleet`, head `f769372c`, pushed, clean. PR **#1393** is
-`MERGEABLE` / **`UNSTABLE`** — no conflict, one red check.
+**devrc#1393 is MERGED** — `a30a587c`, 2026-09-09T00:39Z, squash. Verified by
+CONTENT, not ancestry (a squash never makes the branch head an ancestor):
+`claude/skills/civitai-app-fleet/` is on `origin/main`, the old
+`claude/skills/civitai-app-release/` directory is gone, and `fleet.py` carries the
+round-5 sentinels. Claim `civitai-app-fleet-1` released.
 
-**`origin/main` has MOVED to `4f49f5dc`** since this doc was first written:
-`6d488a1b` (#1402, this doc) and `4f49f5dc` (#1403, toolchain-claim retractions).
-So the "🔴 THIS DOC LANDS VIA devrc#1402" warning below is **retired — #1402
-merged 2026-09-08T20:27Z** and the doc is on `main`. The local primary clone
-`/home/zach/workspace/devrc` is still behind and does not have it; read it from a
-current worktree or `git show origin/main:claudedocs/handoff-civitai-app-fleet.md`.
+**The branch `zach/civitai-app-fleet` was deliberately NOT deleted.** The audit
+ladder's claims blocks anchor on `db08c7f0`, `f769372c`, `b8cac6a8`, `6cbaca03`,
+and a squash puts none of those in `main`'s history — deleting the branch would
+eventually let the objects be GC'd and make five rounds of reasoning
+un-re-derivable.
+
+**🔴 THE SKILL IS STILL NOT LIVE — the merge changed nothing on this machine.**
+
+    ~/.claude/skills/civitai-app-fleet    -> does not exist
+    ~/.claude/skills/civitai-app-release  -> still present
+    readlink -f .../civitai-app-release/SKILL.md
+      -> /nix/store/s3shyg901…-devrc-claude-skills/civitai-app-release/SKILL.md
+
+That `/nix/store` terminus is the arbiter: these are home-manager `home.file`
+**copies**, not `mkOutOfStoreSymlink`s. `fleet.py` has never been run against real
+data. This is rank 1 below and it is what converts six audit rounds into something
+usable.
 
 **DONE and merged — the seven app repos.** Each has a pinned flake (node 24 +
-pnpm 11), `.envrc`, `.nvmrc`, a `CLAUDE.md` (ecosystem map + ranked doc
-sources), an npm→pnpm conversion, and a 5-assertion toolchain drift guard:
+pnpm 11), `.envrc`, `.nvmrc`, a `CLAUDE.md` (ecosystem map + ranked doc sources),
+an npm→pnpm conversion, and a 5-assertion toolchain drift guard:
 
 | Repo | ready-to-work | guard backport | guard hole fix | released |
 |---|---|---|---|---|
@@ -43,69 +56,33 @@ sources), an npm→pnpm conversion, and a 5-assertion toolchain drift guard:
 | generate-from-model | #8 | #9 | #10 | 0.2.23 live |
 | sensei (base branch is `trunk`) | #66 | #67 (normalize) | — | 0.1.21 live |
 
-All six submits built and deployed on the real platform builder; every URL
-returns HTTP 200. That is the only proof that `buildCommand: pnpm run build`
-works, and it is measured rather than inferred.
+All six submits built and deployed on the real platform builder; every URL returns
+HTTP 200. That is the only proof that `buildCommand: pnpm run build` works, and it
+is measured rather than inferred.
 
-**The audit ladder on #1393, all rounds:**
+**The audit ladder is CLOSED at round 6.**
 
-- r1 (full, `eab2ceb6`): 2 🔴 — `fleet.py` fabricated values in three columns and
-  its exit code promised coverage it lacked. Fixed in `d6815fd1`.
-- r2 (delta): found the r1 fix OVER-CORRECTED — a failed fetch was folded into
-  `error`, and an error row prints `!!` instead of the row, so a global fetch
-  failure emitted no inventory at all. Fixed in `db08c7f0`.
-- r3 (delta): found (a) the r2 blast radius was overstated 7×, (b) r2's own rule
-  applied to one axis only, (c) four of the five behaviours r2 shipped were
-  unpinned. Fixed in `f769372c`. **Its claims block went unposted until this
-  session** — see *Gotchas*.
-- r4 (delta, range `db08c7f0..f769372c`): **dispatched, result NOT YET READ.**
+| round | found | fixed in |
+|---|---|---|
+| r1 | 2 🔴 — fabricated values in three columns; exit code overclaimed coverage | `d6815fd1` |
+| r2 | r1 OVER-CORRECTED — a failed fetch emitted no inventory at all | `db08c7f0` |
+| r3 | blast radius overstated 7×; r2's rule applied to one axis; 4/5 behaviours unpinned | `f769372c` |
+| r4 | 4 — two fabricated cells, `no-vite` column overflow, platform loop run by ZERO tests | `b8cac6a8` |
+| r5 | 2 🟡 — the `unread` sentinel nothing ran; the seam admission absent from the tree | `6cbaca03` |
+| r6 | **CLEAN** — no 🔴, no 🟡; 4 🟢 (below) | — |
 
-**IN FLIGHT — talos-infra#1456**, node 22 → 24 for the app-blocks builder.
-`MERGEABLE/CLEAN`, deliberately unmerged: that builder builds EVERY tenant's app
-block and Flux reconciles `trunk` in ~1 min. Needs someone who can speak for the
-other tenants. (Rank 3 below.)
+Round 6 was also the first round whose own self-reported numbers reproduced under
+independent re-measurement without needing correction.
 
-**DONE this session (rank 1, claimed as `civitai-app-fleet-1`):**
+**Also shipped this session:** devrc#1405 (`131aa3b0`) — `main` was genuinely red
+because the previous handoff doc spelled six client subdomains into this PUBLIC
+repo. Found by the round-4 auditor while attributing #1393's gate; #1393 neither
+caused nor fixed it. Watched red (1 failed) then green (18 passed).
 
-- **Round 3's `audit-claims` block was never posted.** That is a hard prerequisite:
-  `audit-dispatch.py --round N` for N ≥ 2 **refuses** without a parseable block,
-  and the previous session's stop point silently omitted it. Posted as
-  [#1393 comment 5591453254](https://github.com/innovation-upstream/devrc/pull/1393#issuecomment-5591453254)
-  with nine claims derived from `f769372c`'s commit message.
-- **The round-3 ledger figure in that comment is measured, not the script's.**
-  `audit-dispatch.py` renders `d6815fd1..HEAD`, which spans **two** commits
-  (round 2's fix *and* round 3's), so its 433-line total is not round 3's payload.
-  Measured over `f769372c` alone: **94 payload lines** (`fleet.py` +67/−27) and
-  113 scaffolding. The comment says which method produced which number.
-- **316 passed across the six affected gates — re-measured independently**, not
-  taken from the commit message. Command in *How to verify*.
-- **Round-4 delta brief assembled**, range `db08c7f0..f769372c` (1 commit,
-  3 files, 207 lines), at
-  `…/scratchpad/r4-brief.md` in this session's scratchpad.
-
-**IN FLIGHT — three jobs, none finished at the time of writing:**
-
-1. **The round-4 audit agent.** Dispatched against the brief above, working in its
-   own worktree `/home/zach/workspace/devrc-audit-1393-r4` (detached at
-   `f769372c`), told to remove it when done. Its report has NOT arrived.
-2. **Pristine-`main` control run** — full suite at `4f49f5dc` in
-   `/home/zach/workspace/devrc-r4-ctrl-main`, output at `…/scratchpad/ctrl.out`.
-3. **Merged-tree run** — full suite at `origin/main` + `f769372c` in
-   `/home/zach/workspace/devrc-r4-merged` (merge commit `5e658139`, **clean, no
-   textual conflict**), output at `…/scratchpad/merged.out`.
-
-Runs 2 and 3 exist to attribute #1393's red gate; see the open investigation below.
-**Nothing has been merged.** The claim `civitai-app-fleet-1` is still held.
-
-**Four worktrees were created this session** and all four still exist:
-`devrc-audit-1393-r4` (the agent's), `devrc-r4-ctrl-main`, `devrc-r4-merged`,
-`devrc-handoff-r4` (this doc). Remove them once their job is done —
-`git -C ~/workspace/devrc worktree remove --force <path>`.
-
-**Deploy/verify status, honestly:** unchanged from before. Six apps are live and
-serving; the skill is still NOT live — that needs a `home-manager switch` that has
-not been run. Round 4 is dispatched but unread, so the ladder's stop condition
-has **not** been met and #1393 must not be merged on the strength of this doc.
+**Deploy/verify status, honestly:** six apps live and serving, unchanged. The
+skill is merged and **not installed**. Nothing in this arc ran `civitai app
+status` against the real platform — every platform path in the tests goes through
+the `CIVITAI_STATUS_FILE` seam.
 
 ## Open investigations — live diagnosis state
 
@@ -198,38 +175,91 @@ The 7-failure reading below was taken at a `main` that no longer exists
 hypothesis. Only the *count and file set* need re-reading, and the control run
 above re-reads them as a side effect.
 
+### 🔴 devrc CI runs the nix build UNSANDBOXED — the gate silently lies
+- **Symptom + exact repro:** `tekton/devrc-pytests` red on a commit whose identical
+  derivation passes locally. `nix build <worktree>#checks.x86_64-linux.pytests`
+  on the dev host vs the same drv in CI.
+- **Observed (with values):** SAME derivation hash both sides —
+  `/nix/store/5ymf49nizdr4vaqr75avxcci8iha7qnm-devrc-pytests.drv`. Dev host:
+  `TOTAL collected=21161 passed=21159 skipped=2 failed=0`, `RESULT: PASS`. CI on
+  `dde14daf`: `collected=21161 … failed=1`,
+  `FAILING: test_the_allowlist_still_permits_every_local_remote_shape`, a
+  `TimeoutExpired` / `returncode: -9` on `git clone` of an EMPTY LOCAL bare repo
+  against a 120s budget, in `scripts/tests/test_nogit_isolation.py:945` — a file
+  #1393 never touches. CI's build path was
+  `/tmp/nix-build-devrc-pytests.drv-0`, **not `/build`**.
+- **Ruled out:** a defect in #1393 — the re-run of the SAME sha `dde14daf` on a
+  quieter cluster returned `pytests pass … failed=0` / `BOTH TIERS PASS`
+  (`devrc-ci-rerun-whhpb`). via: measurement
+- **Ruled out:** staleness (the branch being 18 commits behind). The branch was
+  brought fully up to date and the gate stayed red; pristine `origin/main` passes
+  the sandbox tier at `failed=0`. **This was my first attribution and it was
+  wrong.** via: measurement
+- **Ruled out:** a killed step. `step-pytests` exited **0** and printed a verdict;
+  only `step-verdict` exited 1. Per the tekton skill's discriminator that is the
+  "genuine single-test failure" bucket, not the exit-255 congestion bucket. via: measurement
+- **Leading hypothesis:** the `tekton` skill's gotcha 6(b) — nix's sandbox is
+  effectively OFF in the CI pod, so the tier is impure and timing-sensitive tests
+  fail under node starvation. **`/build`'s absence is the tell**; `nix config
+  show | grep '^sandbox '` reports a reassuring `true` over exactly this condition.
+- **Blast radius, measured from OUTSIDE my own pushes** (the one window the skill
+  says to trust): in the same hour `devrc-ci-pxfnr` (#1417) and `devrc-ci-f97rc`
+  (#1408) failed the SAME unrelated test as each other
+  (`test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_difference`), and
+  `devrc-ci-rmxjw` (#1419) also failed, while four other PRs passed.
+- **Next probe:** in a live gate pod —
+  `kubectl exec -n tekton-ci <gate-pod> -c step-pytests -- sh -c 'ls -d /build; nix config show | grep -E "^(sandbox|sandbox-fallback) "'`.
+  🔴 The fix is a `homelab-infra` PodSecurity change and the tekton skill says all
+  three obvious fixes are blocked by `baseline:latest` — read
+  `devrc-ci-pipeline.yaml:147-154` before proposing anything.
+
+### devrc `main`'s "7 pre-existing red tests" — RESOLVED, close it
+The block recorded earlier in this doc is **superseded**. Those 7 failures across
+`test_analyze_service_index_backup.py`,
+`test_analyze_service_index_escrow_verify.py` and `test_opencode_engine.py` are
+GONE at current `main` — fixed upstream. Measured twice: a full-suite control at
+`4f49f5dc` showed 2 failures, neither of them those three files (one a load flake
+I caused by running two 21k suites concurrently, one the hostname leak #1405
+fixed); and the sandbox tier at `b3c9a93d` returned `failed=0`. **The `age` /
+`age-keygen` (devrc#1398) hypothesis was never needed.** Do not re-derive it.
+
 ## Next steps (ranked)
 
-1. **Finish round 4 of the audit ladder on devrc#1393, then merge it.**
-   Three jobs are already running (see *State now*); read all three before acting.
-   **Order matters:** (a) the audit agent's report — a clean round is the stop
-   condition, and *ending the ladder is the correct outcome*, so do NOT run a
-   round 5 to confirm a clean round 4; (b) the gate attribution — do not merge
-   through a red gate you have not attributed; (c) only then
-   `gh pr merge 1393 --repo innovation-upstream/devrc --squash`.
-   If round 4 reports findings, fix them on `zach/civitai-app-fleet` in
-   `/home/zach/workspace/devrc-fleet-skill`, post a `round=4` claims block
-   (`audit-dispatch.py 1393 --repo innovation-upstream/devrc --round 4
-   --emit-claims --audited f769372c…`), and run round 5.
-   Release `claim-work --release civitai-app-fleet-1` when done or abandoned.
-   forcing: gate — the PR is open behind a stop rule, and its merge check is red.
-2. **`home-manager switch`, then smoke the skill against real data.**
-   Until then `~/.claude/skills/civitai-app-fleet/` does not exist and the old
-   `civitai-app-release/` directory lingers. After switching:
-   `python3 ~/.claude/skills/civitai-app-fleet/fleet.py --no-fetch`
+1. **`home-manager switch`, then smoke the skill against real data.** This is the
+   whole point of #1393 and it is not done — see *State now* for the `readlink`
+   evidence that the skill is not installed. After switching:
+   `python3 ~/.claude/skills/civitai-app-fleet/fleet.py --no-fetch` and confirm
+   `~/.claude/skills/civitai-app-release/` is gone. ⚠ The switch rebuilds the whole
+   home environment off a `main` that took many merges on 2026-09-08.
+   forcing: gate — the merged work is inert until this runs.
+2. **File the unsandboxed-CI-gate investigation above as a `homelab-infra` issue
+   or PR.** A gate that reports a red on a change it cannot distinguish from a
+   green one trains everyone to click through, and it flaked three unrelated PRs
+   in one hour. Closing condition: a merged `homelab-infra` PR, or a written
+   decision that the impurity is accepted.
+   forcing: gate — the devrc merge gate currently cannot be trusted.
+3. **Round 6's four 🟢s on the now-merged `fleet.py`.** The only one worth acting
+   on before someone next touches that code: `lockstep_guard` renders `{:<17}` with
+   `"version-lockstep"` at 16 chars — **one character of headroom** — and unlike
+   `proj` its guard does not derive values from `lockstep_guard_home()`, so a new
+   sentinel there reproduces round 4's column-shift defect invisibly. The other
+   three are docstring-accuracy: `_inspected()` names `default_branch` as "the
+   first key past both early returns" when `fetch` is; the AST key-ledger's helper
+   docstring claims wider coverage than the walk provides; the four-sentinel
+   taxonomy does not say which output surface shows which string.
    forcing: none
-3. **Decide talos-infra#1456** (node 22 → 24 for the app-blocks builder).
-   Needs a judgement about other tenants that I could not make. Files:
-   `clusters/production/apps/tekton-builds/app-blocks-pipeline.yaml`.
+4. **Decide talos-infra#1456** (node 22 → 24 for the app-blocks builder).
+   `MERGEABLE/CLEAN`, deliberately unmerged: it builds EVERY tenant's app block and
+   Flux reconciles `trunk` in ~1 min. Needs someone who can speak for the other
+   tenants. Files: `clusters/production/apps/tekton-builds/app-blocks-pipeline.yaml`.
    forcing: none
-4. **Locate `radio` / `cosmetic-studio` / `prompt-library`** — see the open
-   investigation; `civitai app pull <slug>` is the cheapest probe.
+5. **Locate `radio` / `cosmetic-studio` / `prompt-library`** — see the open
+   investigation earlier in this doc; `civitai app pull <slug>` is the cheapest probe.
    forcing: none
-5. **Diagnose devrc `main`'s red tests** — see the open investigations. A
-   permanently-red gate trains everyone to merge through it, and rank 1 is
-   currently blocked behind exactly that. The control run launched for rank 1
-   re-reads the failure set at the current `main` for free.
-   forcing: gate — the merge gate on every devrc PR is currently red.
+6. **Ask Zach about the duplicate withdrawn `custom-generators` 0.6.5 submission**
+   — see the open investigation earlier in this doc. Only he can answer whether he
+   submitted it from the web UI.
+   forcing: none
 
 ## Gotchas / decisions / dead-ends
 
@@ -309,48 +339,85 @@ above re-reads them as a side effect.
   `git fetch` was run against it. Everything this session did happened in
   worktrees created off `origin/main`.
 
+- 🔴 **A red CI check on devrc may be a LYING GATE, not a bad change — and the
+  cheapest proof is the DERIVATION HASH.** If `nix path-info --derivation
+  <worktree>#checks.x86_64-linux.pytests` matches the `.drv` in the CI log and the
+  results differ, the build is impure by definition and no amount of reading your
+  diff will explain it. That one command settled in seconds what two wrong
+  attributions had cost an hour.
+- 🔴 **I attributed the red gate WRONGLY TWICE before measuring it.** First
+  "inherited from main's 7 red tests" (main was green), then "staleness, the branch
+  is 18 behind" (it stayed red after catching up). Both were coherent, both had a
+  plausible mechanism, and **a theory that explains the failure is not evidence for
+  it.** The error under both was reading only the DEV tier while the merge gates on
+  the SANDBOX tier — a rule quoted earlier in the same session and then walked into.
+- 🔴 **`gh`'s status rollup gives NO log URL for a Tekton check** — both
+  `targetUrl` and `detailsUrl` come back empty. Attribution therefore means going
+  to the cluster: find the PipelineRun by `.spec.params[?(@.name=="revision")]`
+  (the `ci.zacx.dev/sha` label is `<none>`), then read `step-verdict`'s log. The
+  step-level exit codes are the first thing to read — a `verdict` failure with
+  `pytests` at exit 0 means a test failed, not that the step was killed.
+- 🔴 **Branch protection on devrc `main` is currently `enforce_admins: false` with
+  `required_status_checks: null`.** I told Zach merging would require lifting
+  protection and affecting every open PR; **that was wrong** — I carried it from the
+  tekton skill, which flags its own note as having "moved twice in one day" and says
+  to re-measure. `gh api repos/innovation-upstream/devrc/branches/main/protection`
+  is one command. Measure it; do not quote it.
+- 🔴 **A round's `audit-claims` block is a PREREQUISITE, not paperwork.**
+  `audit-dispatch.py --round N` for N ≥ 2 REFUSES (exit 2) without one, so a round
+  that ships a fix and never posts its block silently blocks the next round. Round
+  3 did exactly that. Post the block in the SAME session that ships the fix.
+- 🔴 **`audit-dispatch.py`'s ledger range spans MORE than the round it names** —
+  `range_anchor` is the previous block's `<from>`, so a round-N brief diffs from
+  what round N−1 *audited*, not what it *produced*. Round 3's ledger covered two
+  commits and over-reported its own payload 4.6× (433 vs 94). Measure
+  `git show --numstat <fix-sha>` yourself.
+- 🔴 **The generated brief's WHERE TO WORK section can be wrong about your cwd.**
+  It says "the repository this session is standing in" and tells you to dispatch
+  with `isolation: "worktree"`. If your cwd is a DIFFERENT repo (mine was
+  `~/workspace/civit/civitai-app-gen-matrix`) that flag worktrees the wrong repo and
+  hands the auditor a tree with no `fleet.py`. Have the agent run
+  `git -C <target-repo> worktree add` itself.
+- **`git worktree add` refuses a path another session already owns, and that
+  refusal is the safety.** `devrc-handoff-close` looked like a free name and is a
+  live worktree on `docs/handoff-picker-universe-close`. Note the branch is created
+  BEFORE the path check fails, so a failed `add -b` leaves a stray branch behind.
+- **Four subagents leaked scratch scripts into checkouts** (`probe.py`, `repro.py`,
+  `mutate.py`, `render.py`, `seam.py`, `f34probe.py`). Put "scratch goes in /tmp,
+  and `git status --porcelain` must be empty before you finish" in the brief.
+- **Decision: the ladder stopped at round 6 rather than fixing its four 🟢s and
+  running a round 7.** Fixing them would create an unaudited delta on a PR whose
+  ladder had just closed — reopening exactly what the stop rule closes. They are
+  rank 3 above instead.
+
 ## How to verify
 
 ```bash
-S=/tmp/claude-1000/-home-zach-workspace-civit-civitai-app-gen-matrix/f1768840-56ab-4f1f-99fb-1591210bc063/scratchpad
+# the merge landed — by CONTENT, never ancestry (squash breaks ancestry forever)
+git -C ~/workspace/devrc fetch origin
+git -C ~/workspace/devrc ls-tree --name-only origin/main claude/skills/civitai-app-fleet/
+git -C ~/workspace/devrc ls-tree --name-only origin/main claude/skills/civitai-app-release/  # expect: empty
+gh pr view 1393 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
 
-# the round-3 claims block is posted and parseable — round 4 refuses without it
-gh pr view 1393 --repo innovation-upstream/devrc --json comments \
-  --jq '.comments[].body' | grep -c 'audit-claims round=3'   # expect: 1
+# 🔴 is the skill actually LIVE? /nix/store terminus = NOT live, needs a switch
+readlink -f ~/.claude/skills/civitai-app-fleet/SKILL.md
+ls -d ~/.claude/skills/civitai-app-release   # expect: gone, after the switch
 
-# the six affected gates, re-measured (this session got 316 passed in 49s)
-nix develop /home/zach/workspace/devrc-fleet-skill --command bash -c \
+# the six gates, on a checkout of main
+nix develop ~/workspace/devrc --command bash -c \
   'python3 -m pytest scripts/tests/test_civitai_app_fleet.py \
      scripts/tests/test_skill_tiers.py scripts/tests/test_skill_descriptions.py \
      scripts/tests/test_skill_audit.py scripts/tests/test_doc_path_rot.py \
      scripts/tests/test_no_client_hostnames.py -q'
-# expect: 316 passed
+# expect: 325 passed
 
-# round 3's payload, measured over its own commit rather than the script's range
-git -C /home/zach/workspace/devrc-fleet-skill show --numstat --format= f769372c
-# expect: fleet.py 67/27, test_civitai_app_fleet.py 97/0, test_skill_tiers.py 13/3
+# the CI gate is impure — same drv, different result. THE one-command proof.
+nix path-info --derivation ~/workspace/devrc#checks.x86_64-linux.pytests
+# compare against the .drv named in the failing CI log; identical hash + different
+# verdict = impure build, i.e. a broken gate rather than a bad change.
 
-# the gate attribution — READ THE COUNTED OUTPUT, never the exit code
-grep -E "TOTAL collected|^RESULT:" $S/ctrl.out $S/merged.out
-grep -E "^(FAILED|ERROR) " $S/ctrl.out   | sed 's/::.*//' | sort -u > $S/ctrl.files
-grep -E "^(FAILED|ERROR) " $S/merged.out | sed 's/::.*//' | sort -u > $S/merged.files
-diff $S/ctrl.files $S/merged.files   # empty ⇒ inherited red, merge introduces nothing
-
-# every app repo carries the 5-assertion guard, and sensei is on trunk
-for r in civitai-app-gen-matrix civitai-app-custom-generators \
-         civitai-app-playable-collections civitai-app-requests \
-         civitai-app-model-benchmarking civitai-block-generate-from-model; do
-  git -C ~/workspace/civit/$r show origin/main:src/toolchain-lockstep.test.ts \
-    | grep -cE '^\s*it\('
-done
-git -C ~/workspace/civit/civitai-app-sensei show \
-  origin/trunk:src/toolchain-lockstep.test.ts | grep -cE '^\s*it\('
-
-# all six released apps serve.
-# 🔴 APEX is the app-hosting apex domain and is DELIBERATELY not committed —
-# devrc is a PUBLIC repo and scripts/tests/test_no_client_hostnames.py fails on a
-# client subdomain literal. This line spelled it until 2026-09-08 and was RED on
-# main for it. Read the apex off `civitai app doctor`, then:
+# all six released apps serve. APEX is NOT committed — devrc is PUBLIC and
+# scripts/tests/test_no_client_hostnames.py fails on a client subdomain literal.
 APEX=<the app-hosting apex domain>
 for h in app-requests generate-from-model custom-generators \
          playable-collections model-benchmarking sensei; do

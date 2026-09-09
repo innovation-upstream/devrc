@@ -693,7 +693,35 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
                                .replace(">", "&gt;"))] if mesg else []
     try:
         r = subprocess.run(
+            # 🔴 `-sort -sorting-method fzf` IS NOT DECORATION — WITHOUT IT
+            # `-matching fuzzy` FILTERS BUT DOES NOT RANK, and rofi falls back
+            # to INPUT ORDER, which `repo_universe()` returns alphabetically.
+            #
+            # REPORTED FROM THE REAL PICKER 2026-09-08: typing `devrc` put
+            # `civitai/developer-docs` and `civitai/dev-runner-config` ABOVE the
+            # actual `devrc` repo. Not a matching bug — all three genuinely
+            # contain d-e-v…r…c as a subsequence — a RANKING one. Nothing was
+            # scoring them, so `c…` simply sorted before `i…`.
+            #
+            # MEASURED on a 7-row corpus in the exact shape `picker_rows()`
+            # builds, query `devrc`: input order puts the right repo **6th**;
+            # fzf scoring puts it **1st**, with the two decoys 2nd and 3rd.
+            #
+            # 🔴 NO NEW DEPENDENCY, AND THAT WAS THE RESEARCH RESULT. fzf's
+            # algorithm (Smith-Waterman-derived, with bonuses for consecutive
+            # runs and word/camel boundaries) is the de-facto standard the whole
+            # fzf/fzy/skim family implements — and rofi already ships it as
+            # `-sorting-method fzf`. Swapping in another picker would have
+            # bought the same algorithm plus a dependency and a theme that
+            # drifts from the launcher's (see NOT_FROM_THE_WRAPPER_PATH). The
+            # defect was never the library; it was a flag nobody passed.
+            #
+            # ⚠ PRE-SORTING IN PYTHON CANNOT FIX THIS. rofi re-filters on every
+            # keystroke, so an order we hand it only survives until the operator
+            # types one character — the ranking must live where the filtering
+            # does. That is why this is a rofi flag and not a `sorted()` call.
             ["rofi", "-dmenu", "-i", "-matching", "fuzzy",
+             "-sort", "-sorting-method", "fzf",
              "-p", "mention", "-theme", ROFI_THEME,
              "-format", "s", "-no-custom", *mesg_argv],
             input="\n".join(rows), capture_output=True, text=True, timeout=120)
