@@ -487,28 +487,28 @@ MUTANTS: list[tuple] = [
     ("K48", "deletion", "the picker loses `--tiebreak=end`, so fzf falls back to "
                         "its LENGTH tiebreak — the exact rofi defect the swap "
                         "was made to escape, with every behavioural test green",
-     "    'fzf --tiebreak=end --layout=reverse --info=inline '\n",
-     "    'fzf --layout=reverse --info=inline '\n",
+     "    'fzf -i --tiebreak=end --layout=reverse --info=inline '\n",
+     "    'fzf -i --layout=reverse --info=inline '\n",
      "without --tiebreak=end"),
     ("K49", "operand swap", "the tiebreak becomes `length`, which is rofi's "
                             "behaviour spelled as an fzf flag — a mutant that "
                             "looks deliberate in a diff",
-     "    'fzf --tiebreak=end --layout=reverse --info=inline '\n",
-     "    'fzf --tiebreak=length --layout=reverse --info=inline '\n",
+     "    'fzf -i --tiebreak=end --layout=reverse --info=inline '\n",
+     "    'fzf -i --tiebreak=length --layout=reverse --info=inline '\n",
      "without --tiebreak=end"),
     ("K50", "widening", "`--exact` is added, which MEASURED does not fix the tie "
                         "(rank 27 either way) and narrows the match set from 56 "
                         "rows to 21 — the fuzzy narrowing a 392-row universe "
                         "depends on",
-     "    'fzf --tiebreak=end --layout=reverse --info=inline '\n",
-     "    'fzf --tiebreak=end --exact --layout=reverse --info=inline '\n",
+     "    'fzf -i --tiebreak=end --layout=reverse --info=inline '\n",
+     "    'fzf -i --tiebreak=end --exact --layout=reverse --info=inline '\n",
      "--exact: MEASURED not to fix the tie"),
     ("K51", "deletion", "the header COUNT stops being derived from the header "
                         "lines, so `--header-lines` disagrees with what was "
                         "prepended and the FIRST candidate row — the clawgate "
                         "task on a bare `#N` — is swallowed into the header",
-     '        chosen = run_picker("\\n".join([*header, *rows]) + "\\n", len(header))\n',
-     '        chosen = run_picker("\\n".join([*header, *rows]) + "\\n", 0)\n',
+     '                                     len(header))\n',
+     '                                     0)\n',
      "the note must be WRAPPED"),
     ("K52", "deletion", "the picker's private tmpdir is no longer removed, so a "
                         "list of PRIVATE repository names is left behind on "
@@ -523,6 +523,40 @@ MUTANTS: list[tuple] = [
      "      pkgs.alacritty pkgs.fzf\n",
      "      pkgs.alacritty\n",
      "the wrapper's PATH is MISSING"),
+    # ---- F15: the round-1 audit's findings, as mutants ----------------------
+    ("K54", "deletion", "the picker loses `-i`, so fzf is SMART-CASE: a query "
+                        "with an uppercase letter matches NOTHING and the "
+                        "operator cannot tell the empty list from a dismissal. "
+                        "MEASURED `NimbusWorks`: 0 rows without, 41 with",
+     "    'fzf -i --tiebreak=end --layout=reverse --info=inline '\n",
+     "    'fzf --tiebreak=end --layout=reverse --info=inline '\n",
+     "the picker lost `-i`"),
+    ("K55", "deletion", "`BrokenPipeError` stops being handled, so a selection "
+                        "made before the rows finish writing is DISCARDED and a "
+                        "false error toast fires — the operator's answer thrown "
+                        "away above 64 KiB of rows",
+     "                    except BrokenPipeError:\n",
+     "                    except InterruptedError:\n",
+     "the selection was thrown away"),
+    ("K56", "widening", "the picker's shell line grows a pipe that copies every "
+                        "PRIVATE row to a file — the disclosure sink a `-c` "
+                        "script makes possible and a first-word reader cannot "
+                        "see",
+     "    '--header-lines=\"$3\" <\"$1\" >\"$2\"'\n",
+     "    '--header-lines=\"$3\" <\"$1\" | tee /tmp/picker.log >\"$2\"'\n",
+     "PICKER_SH changed shape"),
+    ("K57", "deletion", "the picker terminal stops disabling clipboard-on-select, "
+                        "so a drag copies PRIVATE repository names into the X "
+                        "clipboard, where they OUTLIVE the pick",
+     '             "-o", "selection.save_to_clipboard=false",\n',
+     "",
+     "no longer disables clipboard-on-select"),
+    ("K58", "deletion", "a TIMEOUT goes back to being silent, so the 120s "
+                        "abandonment is indistinguishable from a dismissal — "
+                        "the undeclared behaviour change rofi did not have",
+     '    if outcome == PICKED_TIMEOUT:\n',
+     '    if False:\n',
+     "timed out"),
     ("K36", "deletion", "the alacritty wrapper drops `pkgs.git` from the hint's "
                         "PATH: `git` is then absent under the display manager's "
                         "environment, FileNotFoundError is caught as OSError, "
@@ -547,6 +581,7 @@ TARGETS: dict[str, pathlib.Path] = {
     "K37": OPEN_, "K38": OPEN_, "K39": OPEN_,
     "K45": OPEN_, "K46": OPEN_, "K47": OPEN_,
     "K48": OPEN_, "K49": OPEN_, "K50": OPEN_, "K51": OPEN_, "K52": OPEN_,
+    "K54": OPEN_, "K55": OPEN_, "K56": OPEN_, "K57": OPEN_, "K58": OPEN_,
     "K53": ALACRITTY,
     "K40": ALACRITTY, "K41": SCAN, "K42": ALACRITTY,
     # 🔴 A FOURTH FILE, AND A NIX ONE. The wrapper's PATH is a seam between two

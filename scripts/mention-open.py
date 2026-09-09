@@ -728,8 +728,27 @@ PICKER_LINES = 22
 # reason that has nothing to do with what is being spawned. The same test reads
 # the FIRST WORD of the `-c` script to learn that `fzf` must be on the wrapper's
 # PATH, so that word must stay `fzf`.
+# 🔴 THE SHAPE OF THIS STRING IS PINNED, NOT JUST ITS FIRST WORD. It is a SHELL
+# SCRIPT, which is a surface rofi did not have at all: `fzf … <"$1" | tee
+# /tmp/picker.log >"$2"` or `notify-send "$(cat "$1")"; fzf …` would write the
+# PRIVATE rows to disk or into a toast argv while every ledger here stayed
+# green, because the reader that learns `fzf` must be on PATH only inspects the
+# first word. `test_the_picker_SHELL_SCRIPT_stays_the_shape_it_is_pinned_to`
+# asserts the whole normalised string AND that it carries no `;` `|` `&` `` ` ``
+# `$(` and exactly the two redirections. Reword it freely; the test prints the
+# replacement.
+#
+# 🔴 `-i` IS LOAD-BEARING AND ITS ABSENCE WAS SILENT. fzf's default is
+# SMART-CASE: a query containing any uppercase letter becomes case-SENSITIVE.
+# rofi's `-i` was unconditional, so the swap quietly changed behaviour.
+# MEASURED on the 392-row synthetic corpus, query `NimbusWorks`: **0 rows**
+# without `-i`, **41** with. An empty list and a dismissal are indistinguishable
+# to `pick()`, so the operator types a capital letter and gets SILENCE — the
+# exact wall this whole change exists to remove, and `repo_universe()` preserves
+# each repo's original casing so mixed-case rows are real. Ranking is unaffected:
+# the eponymous repo is 1/41 with and without.
 PICKER_SH = (
-    'fzf --tiebreak=end --layout=reverse --info=inline '
+    'fzf -i --tiebreak=end --layout=reverse --info=inline '
     '--prompt="mention > " --pointer=">" --color=16 '
     '--header-lines="$3" <"$1" >"$2"'
 )
@@ -762,9 +781,29 @@ def picker_header(mesg: str) -> list[str]:
     return textwrap.wrap(mesg, width=PICKER_COLUMNS - 2) or [mesg]
 
 
-def run_picker(payload: str, header_lines: int) -> str:
-    """Show `payload` in a terminal running fzf; return the selected row, or ""
-    for a dismissal, a timeout, or a terminal that never started.
+# What `run_picker` is reporting alongside the row. `pick()` branches on it, and
+# the split exists because THREE different silences used to look identical.
+#
+# 🔴 A DISMISSAL MUST STAY SILENT AND THE OTHER TWO MUST NOT. Firing a toast
+# after a dismissal would fire one after EVERY dismissal, which is the noise
+# this handler must not make — but rofi's 120s `timeout=` raised
+# `TimeoutExpired`, which the old `except` turned into a toast, and the first
+# version of this rewrite swallowed that into the same silent "". Restored here
+# rather than argued away: a picker that timed out is not a picker that was
+# dismissed. `NEVER_SHOWN` is the case rofi had no analogue for — the terminal
+# started and died before it could be fed, which is what a missing `fzf` on the
+# wrapper's PATH looks like, and answering a CLICK with nothing at all is the
+# dead end this whole handler exists to remove.
+PICKED_SELECTED = "selected"
+PICKED_DISMISSED = "dismissed"
+PICKED_TIMEOUT = "timeout"
+PICKED_NEVER_SHOWN = "never-shown"
+
+
+def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
+    """Show `payload` in a terminal running fzf. Returns `(row, outcome)`, where
+    outcome is one of the `PICKED_*` constants above and `row` is "" for
+    anything but `PICKED_SELECTED`.
 
     `payload` is `header_lines` header lines followed by the rows, newline
     separated. It is written to a FIFO and NEVER to argv, an env var or a file
@@ -797,9 +836,21 @@ def run_picker(payload: str, header_lines: int) -> str:
         os.mkfifo(rows_fifo, 0o600)
         os.mkfifo(choice_fifo, 0o600)
         proc = subprocess.Popen(
+            # 🔴 `selection.save_to_clipboard=false` IS A DISCLOSURE FLAG, NOT
+            # COSMETICS, and it is a sink rofi never had. The picker inherits
+            # `~/.config/alacritty/alacritty.toml`, where this repo sets
+            # `save_to_clipboard = true` — so a drag across the list would copy
+            # PRIVATE repository names into the X CLIPBOARD, which OUTLIVES the
+            # pick and is readable by every X client on the display. The module
+            # docstring's enumeration of where the universe may go does not list
+            # a clipboard, and this is what keeps that true. (fzf turns mouse
+            # reporting on, so a plain drag is already claimed by fzf and a
+            # selection needs Shift — mitigation, not a guarantee, which is why
+            # the flag is passed rather than reasoned about.)
             ["alacritty", "--class", PICKER_CLASS,
              "-o", f"window.dimensions.columns={PICKER_COLUMNS}",
              "-o", f"window.dimensions.lines={PICKER_LINES}",
+             "-o", "selection.save_to_clipboard=false",
              "-e", "/bin/sh", "-c", PICKER_SH,
              "mention-open", rows_fifo, choice_fifo, str(header_lines)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -824,8 +875,12 @@ def run_picker(payload: str, header_lines: int) -> str:
             except OSError as exc:
                 if exc.errno != errno.ENXIO:
                     raise
-                if proc.poll() is not None or time.monotonic() > deadline:
-                    return ""
+                if proc.poll() is not None:
+                    # The terminal died before it could be fed, so the operator
+                    # saw nothing at all. That is NOT a dismissal.
+                    return "", PICKED_NEVER_SHOWN
+                if time.monotonic() > deadline:
+                    return "", PICKED_TIMEOUT
                 time.sleep(0.02)
         data = payload.encode()
         try:
@@ -837,6 +892,23 @@ def run_picker(payload: str, header_lines: int) -> str:
                         continue
                     except BlockingIOError:  # pragma: no cover — select said writable
                         pass
+                    except BrokenPipeError:
+                        # 🔴 A DEPARTED READER IS A NORMAL END, NOT A FAILURE,
+                        # AND TREATING IT AS ONE THREW THE ANSWER AWAY. fzf
+                        # accepts or dismisses as soon as the operator presses a
+                        # key — it does not wait to drain the whole list — and
+                        # closing its read end makes the next `os.write` raise
+                        # EPIPE. That is an `OSError`, so it used to propagate
+                        # into `pick()`'s handler, fire a "could not show the
+                        # mention picker" toast, and discard a row the child had
+                        # ALREADY written to the choice FIFO. MEASURED: fine at
+                        # 392 rows (~21 KB), broken at 1,200 (~67 KB) and 3,000
+                        # (~172 KB) — the boundary is the 64 KiB pipe buffer,
+                        # the same threshold the open-order fix above exists for,
+                        # because below it the whole payload lands in one write
+                        # before fzf can answer. Stop feeding and go read the
+                        # selection; it is already in the other pipe.
+                        break
                 if proc.poll() is not None or time.monotonic() > deadline:
                     break
         finally:
@@ -844,6 +916,7 @@ def run_picker(payload: str, header_lines: int) -> str:
 
         # --- read the selection back ------------------------------------- #
         out = b""
+        outcome = PICKED_DISMISSED
         while b"\n" not in out:
             r, _w, _x = select.select([rfd], [], [], 0.2)
             if r:
@@ -852,6 +925,7 @@ def run_picker(payload: str, header_lines: int) -> str:
                     out += chunk
                     continue
             if time.monotonic() > deadline:
+                outcome = PICKED_TIMEOUT
                 break
             if proc.poll() is not None:
                 # The child is gone, so anything it wrote is already in the
@@ -861,7 +935,14 @@ def run_picker(payload: str, header_lines: int) -> str:
                 except BlockingIOError:
                     pass
                 break
-        return out.decode("utf-8", "replace").split("\n", 1)[0]
+        row = out.decode("utf-8", "replace").split("\n", 1)[0]
+        if row:
+            # A row that arrived is an ANSWER even if the deadline passed while
+            # it was in flight — the operator chose, and discarding that because
+            # a clock ran out would be the same thrown-away selection the
+            # `BrokenPipeError` arm above exists to prevent.
+            return row, PICKED_SELECTED
+        return "", outcome
     finally:
         if rfd >= 0:
             os.close(rfd)
@@ -906,11 +987,24 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
     rows = picker_rows(candidates)
     header = picker_header(mesg)
     try:
-        chosen = run_picker("\n".join([*header, *rows]) + "\n", len(header))
+        chosen, outcome = run_picker("\n".join([*header, *rows]) + "\n",
+                                     len(header))
     except (OSError, subprocess.SubprocessError) as exc:
         notify("could not show the mention picker",
                f"{type(exc).__name__}: {exc}")
         return ""
+    # 🔴 ONLY A DISMISSAL IS SILENT. See the `PICKED_*` block: rofi's 120s
+    # `timeout=` produced a toast and the first version of this rewrite lost it,
+    # and a terminal that died before it could be fed is a CLICK THAT DID
+    # NOTHING with no explanation — the dead end the fuzzy picker replaced.
+    # Neither body names a repository: the universe reaches the picker only.
+    if outcome == PICKED_TIMEOUT:
+        notify("the mention picker timed out",
+               f"nothing was selected within {PICKER_TIMEOUT:.0f}s")
+    elif outcome == PICKED_NEVER_SHOWN:
+        notify("the mention picker could not open",
+               "the terminal exited before the list was shown — check that "
+               "alacritty and fzf are on the hint wrapper's PATH")
     return row_to_url(chosen, candidates)
 
 
