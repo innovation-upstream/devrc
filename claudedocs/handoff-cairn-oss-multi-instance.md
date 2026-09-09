@@ -548,6 +548,54 @@ this one, because each run was pruned before anyone read it.
   `kubectl -n tekton-ci logs pod/<run>-gate-pod -c step-pytests`. The pruner is `keep: 20`
   **per pipeline**, hourly; three occurrences were already lost to it.
 
+### CLOSED 2026-09-09 — the CI intermittent is `SERVER_BLOCKED_IN_FSYNC`, named by the instrument built for it
+🔴 **THIS SUPERSEDES BOTH EARLIER READINGS IN THIS DOC** — "attributed to the TIER, not the
+tree, root cause unknown", and the block that offered the missing cairn-#3 port race as a
+"plausible contributor". **The port race is NOT the mechanism. That hypothesis is RETRACTED**;
+it remains a real unfixed gap on its own merits, and nothing more.
+- **Symptom + exact repro:** `TestARefusedWriteIsIndistinguishableFromAnAbsentOne::test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_difference`
+  fails in the Tekton `pytests` tier. **Four occurrences**: #1406 at `f98be263`, #1417
+  (docs-only), #1425 at `f3bdca9e`, #1425 at `9a5b883d`.
+- 🔴 **THE VERDICT, IDENTICAL IN BOTH LOGS I PULLED BEFORE THE PRUNER TOOK THEM:**
+  `MECHANISM = SERVER_BLOCKED_IN_FSYNC (handler threads=1 [Thread-815
+  (process_request_thread)=SERVER_BLOCKED_IN_FSYNC], accept loop parked=True)`.
+  via: measurement
+- 🔴 **THE INSTRUMENT ALREADY EXISTED AND NOBODY HAD READ ITS OUTPUT.**
+  `_why_the_server_did_not_answer()` (`scripts/tests/test_subsystem_store_api.py:460`) emits
+  that `MECHANISM =` line *precisely* so a CI log can be grepped for it without a human
+  reading stacks — its own docstring says the store-api hang "stayed open for weeks" because
+  **a client-side read timeout is the observable the most mechanisms share, so on its own it
+  identifies none of them.** Three occurrences were spent re-deriving that ambiguity. **Grep
+  the log for `MECHANISM =` FIRST.** via: code
+- **The mechanism, from that docstring:** `server.py:_replace_bytes` issues **two** `fsync`s —
+  the file, then the parent directory — **inside the request and before the response is
+  written**. `fsync` blocks in uninterruptible D-state, is bounded by nothing, and **burns no
+  CPU**. The handler's `timeout = 15` does not bound it: that is a SOCKET timeout and does not
+  reach a syscall. So the write path stalls on disk and the client's read times out.
+- 🔴 **Ruled out: general CPU load — and the ruling-out is CONSISTENT with the mechanism, not
+  in tension with it.** Wall-time discriminator, CI-to-CI: the failing runs' `scripts/tests`
+  took **818.69 s** and **1091.87 s**, and `scripts/collector/tests` **11.21 s** and
+  **14.27 s** — *faster* than the dev host that passed (1181.72 s / 36.03 s). Nothing was
+  inflated. That is exactly what an `fsync` stall looks like: it consumes no CPU, so it cannot
+  appear in a CPU-shaped measurement. via: measurement
+- 🔴 **Ruled out: that it is caused by any diff.** #1417 changed **exactly one markdown file**
+  and failed identically. via: measurement
+- **Precondition corroborated:** the cluster is saturated. `talos-xr6-r7p` — the single node
+  both pipelines `nodeSelector`-pin to — is emitting `Insufficient cpu`, `FailedScheduling`
+  and `Preempted`, and **`main`'s OWN gate is `KILLED`** (`the gate pod died at or after step
+  pytests`). Disk contention on that node is the load this test cannot tolerate.
+  via: measurement
+- ⚠ **NOT established:** the disk-level numbers. I did not measure `talos-xr6-r7p`'s device
+  utilisation or PSI-io at the moment of failure, so "disk contention" is inferred from the
+  fsync park plus the node's scheduling state, not read off a disk metric.
+- **Next probe — and it is NOT a re-run.** Three options, none of them "run it again":
+  (a) bound the write path so a stalled `fsync` fails fast instead of hanging past the client
+  timeout; (b) raise this test's client timeout, which trades a red gate for a slow one and
+  does not make the server correct; (c) unpin the CI pipelines from one node so the disk is
+  not shared. 🔴 **Re-running to green is what `claude/RULES.md` calls training everyone to
+  click through, and with `enforce_admins: true` on devrc a permanently-red required check
+  blocks everyone.** Whichever is chosen, `MECHANISM =` is now the first thing to grep.
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
