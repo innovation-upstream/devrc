@@ -49,9 +49,14 @@ PHASES AND THEIR ROLLBACKS
                                  is modified. Roll back by deleting the run dir.
   P1  plan the delta           — read-only; writes only into the run directory
   P2  ref-collision check      — read-only
-  P3  push the delta           — rollback: `--rollback-push <run-dir>` re-PUTs the
-                                 pre-push bytes this script saved for every entry
-                                 it was about to overwrite
+  P3  push the delta           — 🔴 RETIRED once P5 has frozen the store: it
+                                 refuses with RC_CUTOVER_COMPLETE (19) rather
+                                 than pushing a frozen mirror back over a pod
+                                 that has moved on. Live only for a host that
+                                 has NOT been cut over. Rollback for a run that
+                                 did push: `--rollback-push <run-dir>` re-PUTs
+                                 the pre-push bytes this script saved for every
+                                 entry it was about to overwrite.
   P4  acceptance + byte check  — read-only
   P5  freeze local disk        — records every mode, then chmods. Rollback:
                                  `--unfreeze`, which RESTORES the recorded modes
@@ -142,6 +147,7 @@ RC_FREEZE_INEFFECTIVE = 16  # the freeze was applied and a write STILL succeeded
 # editing this sentence, and count.
 RC_ACCEPTANCE = 17
 RC_COULD_NOT_MEASURE = 18   # an instrument did not answer; never folded into a pass
+RC_CUTOVER_COMPLETE = 19    # P3 is RETIRED on this store — the freeze is already applied
 
 # 🔴 THE DISCRIMINATOR THIS WHOLE MERGE RULE TURNS ON. `server.render_bullet`
 # terminates every API-appended bullet with exactly this shape, and nothing else
@@ -1031,7 +1037,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "divergence is refused rather than silently superseded")
     p.add_argument("--run-dir", type=Path, default=None)
     p.add_argument("--push", default=None, metavar="NS/DEPLOY",
-                   help="hand the delta tree to seed.sh --push")
+                   help="hand the delta tree to seed.sh --push. RETIRED on a "
+                        "store whose entries already refuse a write: the cutover "
+                        "has completed there and P3 exits 19 rather than reverting "
+                        "the pod. Use `cairn append`/`cairn put` instead.")
     p.add_argument("--dest", default="/data")
     p.add_argument("--alias-owner", action="append", default=[], metavar="S:A=FILE",
                    help="acknowledge one LIVE ref collision by naming its owner")
@@ -1353,7 +1362,53 @@ def main(argv: list[str] | None = None) -> int:
             say(f"P2 {len(owners)} live collision(s) acknowledged by --alias-owner: "
                 f"{sorted(f'{s}:{a}' for s, a in owners)}")
 
-        # ---- P3 the push --------------------------------------------------
+        # ---- P3 the push — RETIRED ONCE THE FREEZE IS APPLIED ---------------
+        # 🔴 P3 IS DEAD POST-CUTOVER, AND THE OBVIOUS "FIX" IS THE DATA-LOSS BUG.
+        # This phase pushes LOCAL -> POD. That is correct exactly once: while the
+        # host still holds bytes the pod has never seen. After P5 freezes local
+        # disk the direction inverts — this header's own ordering argument says
+        # so ("After this cutover the hosts' stores are caches of the pod") — and
+        # the pod accumulates API-appended content the mirror will never have.
+        #
+        # What it looked like instead: `plan.shippable` is ADD + SUPERSEDES +
+        # MERGED, and SUPERSEDES/MERGED are BY DEFINITION entries whose pod bytes
+        # differ, which is what `seed.sh`'s pre-flight refuses. So P3 exits 8 the
+        # moment anything supersedes, and that reads as a shipped code path that
+        # can never complete — one `--allow-overwrite` away from working.
+        #
+        # 🔴 IT IS NOT. That refusal is the LAST GUARD between a stale mirror and
+        # authoritative content, and `--allow-overwrite` is the single change that
+        # would disarm it. `seed.sh`'s tar "adds and overwrites but never
+        # deletes", so a push from a frozen mirror silently reverts every entry
+        # the pod has moved on — MEASURED 2026-09-02/03: of 25 local-only bullet
+        # candidates, 5 were POD-NEWER, two of them `OPEN:` -> `RESOLVED` closures
+        # carrying ~20 lines of later corrections. It would report success.
+        #
+        # So this refuses instead, by the same instrument P5 uses. The signal is
+        # the freeze, not a flag or a date: a store whose entries all refuse a
+        # write has completed the cutover, and a store that is still writable has
+        # not — so a genuine first cutover is untouched and passes straight
+        # through. To get bytes to the pod now, use the write route (`cairn
+        # append` / `cairn put`), which is what replaced this phase.
+        # ⚠ NO `examined == 0` BRANCH HERE, DELIBERATELY. `survey` walks the same
+        # `read_store` population P0 already refused as RC_NO_STORE, so a zero is
+        # unreachable by the time this runs — and a guard that cannot execute is
+        # worse than none, because it reads as coverage. P5 keeps its own check
+        # because `--freeze` reaches it without passing P0.
+        frozen = survey(args.store)
+        say(f"P3 local store: {frozen}")
+        if frozen["writable"] == 0:
+            return refuse(RC_CUTOVER_COMPLETE, (
+                f"P3 is RETIRED on this store — all {frozen['examined']} entry "
+                f"file(s) already refuse a write, so the cutover has completed "
+                f"and local disk is a read-through CACHE of the pod. Pushing it "
+                f"back would overwrite every entry the pod has moved on since, "
+                f"and `seed.sh` never deletes, so it would report success. "
+                f"🔴 Do NOT pass --allow-overwrite to get past this: that is the "
+                f"silent revert, not the fix. Write to the pod through `cairn "
+                f"append` / `cairn put`. NOTHING was pushed."
+            ))
+
         if not args.apply:
             say(f"DRY RUN — {len(plan.shippable)} entr(ies) would be pushed "
                 f"({counts[ADD]} new, {counts[SUPERSEDES]} superseding, "

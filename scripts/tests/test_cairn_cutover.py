@@ -1386,6 +1386,118 @@ class TestTheScriptRefusesRatherThanProceeds:
         assert set(payload["sc/a.md"]) == {"sha256", "aliases"}
 
 
+POD = {"sc/pod-only.md": _entry("sc", "pod-only", "- 2026-01-01: lives only on the pod.")}
+
+
+class TestP3IsRetiredOnceTheStoreIsFrozen:
+    """🔴 P3 pushes LOCAL -> POD, which is correct exactly ONCE and destructive
+    afterwards. These are the first tests in this file to drive P3 through the
+    REAL `main`: the previous suite only re-extracted `seed.sh`'s `find`
+    expression, so 85 green tests said nothing about whether this phase runs.
+
+    The trap this guards is that P3's failure mode LOOKS like a bug worth fixing.
+    `plan.shippable` is ADD + SUPERSEDES + MERGED, and SUPERSEDES/MERGED are by
+    definition entries whose pod bytes differ — exactly what `seed.sh`'s
+    pre-flight refuses — so post-cutover it exits 8 the moment anything
+    supersedes and reads as a shipped path that can never complete. The
+    one-line "fix" is `--allow-overwrite`, and that is the silent revert:
+    `seed.sh`'s tar adds and overwrites but never deletes, so a push from a
+    frozen mirror reverts every entry the pod has moved on and reports success.
+    """
+
+    def _past_p0(self, cc, monkeypatch, pod_entries: dict[str, str]):
+        """Stub ONLY the P0 gates (backup, sync, write-route), never P3 itself.
+
+        🔴 The phase under test is left entirely real. A stub reaching into P3
+        would be testing the stub. The `cairn sync` stub POPULATES the cache dir
+        the way the real one does — reading the destination out of the argv it
+        was handed — because P0 refuses when the served copy is empty, and a
+        stub that merely returned success would fail the run before P3.
+        """
+        monkeypatch.setattr(cc, "backup_precondition",
+                            lambda **kw: (True, "backup OK (stubbed)"))
+        monkeypatch.setattr(cc, "write_route_deployed",
+                            lambda **kw: (True, None, "write route OK (stubbed)"))
+        monkeypatch.setattr(cc, "_config", lambda: ("http://stub.invalid", "tok"))
+
+        real_run = cc.run
+        seen = []
+
+        def fake_run(argv, **kw):
+            argv = [str(a) for a in argv]
+            seen.append(argv)
+            if argv[-1] == "sync" and "--cache" in argv:
+                dest = Path(argv[argv.index("--cache") + 1])
+                _tree(dest, pod_entries)
+                return cc.Ran(0, "synced (stubbed)", "")
+            return real_run(argv, **kw)
+
+        monkeypatch.setattr(cc, "run", fake_run)
+        return seen
+
+    def test_a_FROZEN_store_refuses_P3_and_never_reaches_seed(
+        self, cc, tmp_path, monkeypatch
+    ):
+        """The wiring, end to end: rc 19 out of the real `main`, and `seed.sh`
+        never invoked. Asserting only the rc would pass for a run that pushed
+        and then refused."""
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        seen = self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        assert cc.survey(root)["writable"] == 0, "fixture is not actually frozen"
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        assert rc == cc.RC_CUTOVER_COMPLETE, f"rc={rc}"
+        assert not any("seed.sh" in " ".join(str(a) for a in argv) for argv in seen), (
+            f"seed.sh was invoked despite the retirement: {seen}"
+        )
+
+    def test_a_WRITABLE_store_is_NOT_refused(self, cc, tmp_path, monkeypatch):
+        """🔴 THE CONTROL THAT KEEPS THE ONE ABOVE HONEST. A guard that refused
+        unconditionally would satisfy every assertion in the previous test while
+        breaking the one run P3 still exists for — a host that has NOT been cut
+        over. The ONLY difference between the two fixtures is the mode bits.
+
+        ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE, and labelled so it is not
+        counted as such: it passes at base too, by construction — before the
+        retirement existed nothing could return RC_CUTOVER_COMPLETE. Measured:
+        deleting the guard reds the two tests either side of it and leaves this
+        one green. Its job is to pin the over-refusal direction, which is the
+        direction a future edit would break.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        self._past_p0(cc, monkeypatch, POD)
+        assert cc.survey(root)["writable"] == 1, "fixture is not actually writable"
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+])
+        assert rc != cc.RC_CUTOVER_COMPLETE, (
+            "the retirement fired on a store that has NOT been cut over — P3 is "
+            "retired post-freeze, not deleted"
+        )
+
+    def test_the_refusal_names_the_REMEDY_and_warns_off_allow_overwrite(
+        self, cc, tmp_path, monkeypatch, capsys
+    ):
+        """A refusal that does not say what to do instead gets routed around —
+        and here the obvious route around IS the data-loss bug. Pin both halves:
+        the correct write path, and the flag that must not be reached for."""
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                 "--apply", "--push", "ns/dep"])
+        out = capsys.readouterr()
+        text = out.out + out.err
+        assert "cairn" in text and "append" in text, (
+            f"the refusal does not name the write route that replaced P3:\n{text}"
+        )
+        assert "--allow-overwrite" in text, (
+            f"the refusal does not warn off the flag that would disarm it:\n{text}"
+        )
+
+
 class TestTheDeltaTree:
     def test_materialise_copies_ONLY_the_shippable_entries(self, cc, tmp_path):
         text = _entry("sc", "same", "- 2026-01-01: unchanged.")
