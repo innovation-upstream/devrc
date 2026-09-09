@@ -1457,7 +1457,8 @@ class TestP3IsRetiredOnceTheStoreIsFrozen:
         """🔴 THE CONTROL THAT KEEPS THE ONE ABOVE HONEST. A guard that refused
         unconditionally would satisfy every assertion in the previous test while
         breaking the one run P3 still exists for — a host that has NOT been cut
-        over. The ONLY difference between the two fixtures is the mode bits.
+        over. The ONLY difference between the two fixtures is the mode bits —
+        same argv, same pod, same store contents.
 
         ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE, and labelled so it is not
         counted as such: it passes at base too, by construction — before the
@@ -1467,14 +1468,94 @@ class TestP3IsRetiredOnceTheStoreIsFrozen:
         direction a future edit would break.
         """
         root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
-        self._past_p0(cc, monkeypatch, POD)
-        assert cc.survey(root)["writable"] == 1, "fixture is not actually writable"
+        seen = self._past_p0(cc, monkeypatch, POD)
+        assert cc.survey(root)["refused"] == 0, "fixture is not actually un-frozen"
 
+        # 🔴 THE SAME ARGV AS THE FROZEN CASE, DOWN TO --apply --push. The first
+        # draft passed neither here, so the pair differed in the mode bits AND in
+        # whether it could reach `seed.sh` at all — while the docstring claimed
+        # the mode bits were the only difference. A control whose fixture differs
+        # on two axes cannot say which one moved the result.
         rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
-])
+                      "--apply", "--push", "ns/dep"])
         assert rc != cc.RC_CUTOVER_COMPLETE, (
             "the retirement fired on a store that has NOT been cut over — P3 is "
             "retired post-freeze, not deleted"
+        )
+        # 🔴 AND IT MUST REACH THE PUSH. `rc != 19` alone is satisfied by ANY
+        # earlier refusal (RC_NO_STORE, RC_BACKUP, RC_UNRESOLVED_DIVERGENCE), so
+        # a future change that made P0 reject this fixture would leave this test
+        # green over zero coverage.
+        assert any("seed.sh" in " ".join(argv) for argv in seen), (
+            f"the un-frozen run never reached seed.sh, so this proves nothing "
+            f"about the retirement being CONDITIONAL: {seen}"
+        )
+
+    def test_a_NEW_entry_created_AFTER_the_freeze_does_not_disarm_the_guard(
+        self, cc, tmp_path, monkeypatch
+    ):
+        """🔴 THE STATE THAT BROKE THE FIRST PREDICATE, AND IT IS A MEASURED ONE.
+
+        `set_entry_mode` freezes FILES and deliberately leaves scope DIRECTORIES
+        writable, so a genuinely new entry can still be created on local disk —
+        and `34d00d90`/#1254 records five entries that were created exactly that
+        way, existing on one host and dark to every reader. In that state
+        `writable >= 1`, so the original `writable == 0` predicate went SILENT on
+        a store that HAS been cut over, and P3 pushed. This is the situation that
+        makes someone reach for P3 in the first place, so it is the one the guard
+        must not miss.
+
+        `refused > 0` is what fixes it: the freeze leaves evidence that a later
+        creation cannot erase.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        seen = self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        # the post-freeze creation — a writable file in a still-writable scope dir
+        (root / "sc" / "brand-new.md").write_text(
+            _entry("sc", "brand-new", "- 2026-01-02: created after the freeze.")
+        )
+        state = cc.survey(root)
+        assert state["writable"] == 1 and state["refused"] == 1, (
+            f"fixture does not reproduce the mixed state: {state}"
+        )
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        assert rc == cc.RC_CUTOVER_COMPLETE, (
+            f"one writable file disarmed the retirement (rc={rc}) — this is the "
+            f"push the guard exists to stop, in the state that motivates it"
+        )
+        assert not any("seed.sh" in " ".join(argv) for argv in seen), (
+            f"seed.sh was reached from a cut-over store: {seen}"
+        )
+
+    def test_a_BARE_DRY_RUN_on_a_frozen_store_refuses_and_changes_nothing(
+        self, cc, tmp_path, monkeypatch
+    ):
+        """🔴 THE DRY RUN IS THE DOCUMENTED DEFAULT, AND ITS BEHAVIOUR MOVED.
+
+        The guard sits ABOVE `if not args.apply:`, so a bare invocation on a
+        cut-over store now exits 19 instead of printing a plan. That is the
+        intended trade — a plan that can never be applied is not information —
+        but it is a change to the one command the USAGE block tells people to
+        run first, so it is pinned here and stated there. Nothing pinned it
+        before: moving the guard below the dry-run branch was caught by no test.
+
+        The 'changes nothing' half of the USAGE claim must still hold.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        seen = self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        before = {p: p.stat().st_mode for p in root.rglob("*.md")}
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run")])
+        assert rc == cc.RC_CUTOVER_COMPLETE, f"a bare dry run returned {rc}"
+        assert {p: p.stat().st_mode for p in root.rglob("*.md")} == before, (
+            "the dry run moved a mode bit"
+        )
+        assert not any("seed.sh" in " ".join(argv) for argv in seen), (
+            f"a DRY RUN reached seed.sh: {seen}"
         )
 
     def test_the_refusal_names_the_REMEDY_and_warns_off_allow_overwrite(
@@ -1486,13 +1567,25 @@ class TestP3IsRetiredOnceTheStoreIsFrozen:
         root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
         self._past_p0(cc, monkeypatch, POD)
         cc.set_entry_mode(root, 0o444)
-        cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
-                 "--apply", "--push", "ns/dep"])
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        # 🔴 ASSERT THE CODE TOO — the first draft discarded `main`'s return
+        # value, so it never checked the text it read belonged to THIS refusal.
+        assert rc == cc.RC_CUTOVER_COMPLETE, f"rc={rc}"
         out = capsys.readouterr()
         text = out.out + out.err
-        assert "cairn" in text and "append" in text, (
-            f"the refusal does not name the write route that replaced P3:\n{text}"
-        )
+        # 🔴 NOT `"cairn" in text` — THAT WAS VACUOUS AND A MUTANT SURVIVED IT.
+        # P0 logs `cairn sync -> rc …` on every run, so the word is present no
+        # matter what the refusal says: a message rewritten to "the `append` /
+        # `put` verb", with `cairn` nowhere in it, passed. Pin each VERB, and the
+        # ADD case that only `create` serves.
+        for verb in ("cairn create", "cairn append", "cairn put"):
+            assert verb in text, (
+                f"the refusal does not name `{verb}`. `append` and `put` both 404 "
+                f"on a ref that does not resolve, so a refusal omitting `create` "
+                f"sends the ADD case — the one most likely to have brought the "
+                f"operator here — to two verbs that cannot serve it.\n{text}"
+            )
         assert "--allow-overwrite" in text, (
             f"the refusal does not warn off the flag that would disarm it:\n{text}"
         )
@@ -1760,3 +1853,26 @@ class TestAcceptanceRefusalNamesWhatItActuallyHas:
         assert "1 scope(s) compared clean" in err, err
         assert "UNCOMPARED" in err, err
         assert f"REFUSED (rc {cc.RC_ACCEPTANCE})" in err, err
+
+
+class TestTheExitCodesAreActuallyDisjoint:
+    """🔴 THE SCRIPT ASSERTS IT AND NOTHING CHECKED IT. Its module docstring says
+    "Exit codes are disjoint and each names one refusal", and a mutant setting
+    `RC_CUTOVER_COMPLETE = 18` — colliding with `RC_COULD_NOT_MEASURE` — SURVIVED
+    the whole file. A collision makes two different refusals indistinguishable to
+    any caller that branches on the code, which is the entire point of having
+    them. Pre-existing gap; this change adds a code to the set, so it closes it.
+    """
+
+    def test_no_two_RC_constants_share_a_value(self, cc):
+        codes = {n: v for n, v in vars(cc).items()
+                 if n.startswith("RC_") and isinstance(v, int)}
+        assert len(codes) >= 12, f"the ledger found almost nothing: {codes}"
+        seen: dict[int, str] = {}
+        for name, value in sorted(codes.items()):
+            assert value not in seen, (
+                f"{name} and {seen[value]} are both {value} — the module "
+                f"docstring's 'exit codes are disjoint' is false, and a caller "
+                f"branching on {value} cannot tell the two refusals apart"
+            )
+            seen[value] = name

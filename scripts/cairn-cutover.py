@@ -75,6 +75,11 @@ covered the whole criterion.
 USAGE
 -----
     cairn-cutover.py                       # dry run: plan and report, change nothing
+                                           # ⚠ on a store P5 has already frozen this
+                                           # exits 19 (P3 retired) INSTEAD of reporting
+                                           # a plan — deliberately: a plan you can never
+                                           # apply is not information. Still changes
+                                           # nothing.
     cairn-cutover.py --apply --push <ns>/<deploy>
     cairn-cutover.py --unfreeze            # roll P5 back
     cairn-cutover.py --rollback-push <run-dir>
@@ -999,14 +1004,24 @@ def set_entry_mode(store: Path, mode: int) -> int:
 
     🔴 FILES, NOT DIRECTORIES, AND THE ASYMMETRY IS A DESIGN DECISION WITH A
     KNOWN COST. Freezing the directories too would also stop a genuinely NEW
-    entry being created — and the hosted API has NO create route (`POST` and
-    `PUT` both resolve an existing ref; a ref that does not resolve is 404
-    `ref-unknown`), so the first entry for a new subsystem would have nowhere to
-    go at all. Freezing the files closes the hazard this cutover is about — an
-    append or an overwrite that lands only locally and dies at the next seed —
-    while leaving the one operation the API cannot yet serve. The gap is real and
-    is written down rather than papered over; see the design doc's "What
-    criterion 9 does NOT close".
+    entry being created. Freezing the files closes the hazard this cutover is
+    about — an append or an overwrite that lands only locally and dies at the
+    next seed — while leaving creation possible.
+
+    🔴 THE ORIGINAL REASON IS NOW STALE, AND SAYING SO MATTERS BECAUSE IT IS THE
+    SENTENCE P3'S RETIREMENT RESTS ON. This docstring used to argue the API had
+    "NO create route", so a new subsystem's first entry "would have nowhere to go
+    at all". That was true when written and is FALSE at HEAD: `cairn create`
+    (`scripts/cairn`, `PUT` + `If-None-Match: *`; server side `server.py:247`)
+    landed in `34d00d90`/#1254 precisely because writing new entries into this
+    frozen mirror had already cost five entries that were dark to every reader.
+    So creation has a hosted route now, and retiring P3 strands nothing.
+
+    ⚠ WHAT REMAINS TRUE is the mechanical consequence, which is why the files/
+    directories split stays: a directory left writable means an entry CAN still
+    be created on local disk, so `survey` can see a writable file on a store that
+    has been cut over. P3's retirement keys on `refused > 0` rather than
+    `writable == 0` for exactly that reason.
     """
     changed = 0
     for rel in read_store(store):
@@ -1395,18 +1410,45 @@ def main(argv: list[str] | None = None) -> int:
         # unreachable by the time this runs — and a guard that cannot execute is
         # worse than none, because it reads as coverage. P5 keeps its own check
         # because `--freeze` reaches it without passing P0.
+        # 🔴 THE PREDICATE IS `refused > 0`, NOT `writable == 0`, AND THE
+        # DIFFERENCE IS TWO REAL STATES — both measured, both wrong in the
+        # earlier spelling:
+        #   * `set_entry_mode` freezes FILES, never scope DIRECTORIES (see its
+        #     docstring), so a genuinely NEW entry written after the freeze is
+        #     0644 and `writable == 0` goes FALSE on a store that HAS been cut
+        #     over. Measured on the real mirror 2026-09-02 (`34d00d90`): five
+        #     entries existed only on one host, created exactly that way. The
+        #     guard would have gone silent in the one situation that makes
+        #     someone reach for P3.
+        #   * `probe_writable` returns "refused" ONLY for `PermissionError`;
+        #     EROFS is a plain `OSError` and lands in `other`. A never-cut-over
+        #     store on a read-only mount therefore reads `writable == 0` and the
+        #     guard fired with a FALSE diagnosis, refusing a legitimate first
+        #     cutover.
+        # `refused` counts entries that answered EACCES to a real append, which
+        # is the thing P5's freeze produces and nothing else here does — so it is
+        # both the honest evidence and what the message below claims. P5 verifies
+        # its own work the same way (`refused != examined`); one instrument, one
+        # claim.
+        #
+        # ⚠ DIRECTION OF THE RESIDUAL: a never-cut-over store carrying a stray
+        # 0444 entry refuses P3. That is a false refusal, not a false push — it
+        # costs an operator one `chmod`, where the other direction costs the pod.
         frozen = survey(args.store)
         say(f"P3 local store: {frozen}")
-        if frozen["writable"] == 0:
+        if frozen["refused"] > 0:
             return refuse(RC_CUTOVER_COMPLETE, (
-                f"P3 is RETIRED on this store — all {frozen['examined']} entry "
-                f"file(s) already refuse a write, so the cutover has completed "
-                f"and local disk is a read-through CACHE of the pod. Pushing it "
-                f"back would overwrite every entry the pod has moved on since, "
-                f"and `seed.sh` never deletes, so it would report success. "
-                f"🔴 Do NOT pass --allow-overwrite to get past this: that is the "
-                f"silent revert, not the fix. Write to the pod through `cairn "
-                f"append` / `cairn put`. NOTHING was pushed."
+                f"P3 is RETIRED on this store — {frozen['refused']} of "
+                f"{frozen['examined']} entry file(s) refuse a write, so P5 has "
+                f"frozen it and local disk is a read-through CACHE of the pod. "
+                f"Pushing it back would overwrite every entry the pod has moved "
+                f"on since, and `seed.sh` never deletes, so it would report "
+                f"success. 🔴 Do NOT pass --allow-overwrite to get past this: "
+                f"that is the silent revert, not the fix. Write to the pod "
+                f"through `cairn create` for an entry it has never seen, or "
+                f"`cairn append` / `cairn put` for one it already holds — "
+                f"append and put BOTH 404 on a ref that does not resolve, so "
+                f"create is the verb for the ADD case. NOTHING was pushed."
             ))
 
         if not args.apply:
