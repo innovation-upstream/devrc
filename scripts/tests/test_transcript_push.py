@@ -1191,11 +1191,18 @@ def _lib_modules_a_python_file_imports(path, libdir):
 
     🔴 A REGEX OVER IMPORT LINES IS IDIOM-SHAPED, AND THIS REPO USES THE OTHER
     IDIOMS. The first version of this scanner was `^(?:from|import)\s+(\w+)`,
-    which is blind to an import that is indented, wrapped in `try:`, or shares a
-    line (`import base64, json, sys`) — all three of which appear in
-    `scripts/lib/transcript_search.py` itself, i.e. inside this unit's own
-    dependency chain. Measured against the old scanner, five realistic "fifth
-    dependency" shapes were added and all five passed GREEN.
+    which is blind to an import that is indented or wrapped in `try:` — both of
+    which appear in `scripts/lib/transcript_search.py` itself, i.e. inside this
+    unit's own dependency chain. Measured against the old scanner, five realistic
+    "fifth dependency" shapes were added and all five passed GREEN.
+
+    ⚠ A THIRD EXAMPLE WAS CITED AND WAS WRONG, IN THE DIRECTION THAT MATTERS.
+    `import base64, json, sys` does appear in that file — inside a triple-quoted
+    raw-string literal (`_REMOTE_SCAN`), as the source of a script run on a PEER. It is not an
+    import of that module, and an AST walk correctly does not report it, while
+    the old regex DID. So on that one shape the rewrite is NARROWER, deliberately
+    and correctly. A multi-name import line is still handled — `ast.Import`
+    carries every alias — it simply was not the example it was quoted as.
 
     An AST walk sees every `import`/`from` at any depth, in one rule. It also
     picks up the `os.path.join(_HERE, "<name>.py")` loader idiom, because that is
@@ -1220,29 +1227,76 @@ def _lib_modules_a_python_file_imports(path, libdir):
 
 
 def _strip_shell_comments(src):
-    """Shell source with comments removed, so a scanner over it sees CODE.
+    """Shell source with comments removed, quote-aware, so a scanner sees CODE.
 
-    🔴 THE COMMENT-BLIND VERSION HAD BOTH FAILURE DIRECTIONS AT ONCE, MEASURED:
+    🔴 THE FIRST VERSION WAS A PAIR OF REGEXES AND WAS WRONG IN BOTH DIRECTIONS.
+    It stripped a full-line `#` and `\\s#.*$`, which is neither necessary nor
+    sufficient, and its docstring claimed the error was one-directional and safe.
+    Measured, both directions produce a wrong verdict:
 
-        a comment-only mention of scripts/lib/agent_ledger.py
-            -> ['agent_ledger.py'] appears in `needed`  (a PHANTOM requirement:
-               the test demands a trigger for a file the script never opens)
+      OVER-strip (the dangerous one — it PASSES). A real executable line that
+      resolves `scripts/lib/host-role.sh` and also carries a quoted `#`:
 
-        deleting line 99, the ONLY line that actually resolves host_label.py
-            -> 'host_label.py' still in `needed`, because line 79 mentions it in
-               prose — so the positive control below stayed GREEN over a scanner
-               that had stopped seeing executable code entirely
+          printf "fmt: a #b\\n"; ROLE="$(... /lib/host-role.sh)"
 
-    Approximate by design: a `#` inside a quoted string would be cut too. That
-    direction is safe here — it can only make the scanner see LESS, which the
-    per-arm controls below turn into a failure rather than a silent pass.
+      was truncated at the quoted `#`, so an UNDECLARED dependency vanished and
+      the guard went green. The same line without the quoted `#` fails correctly.
+      The claim that the per-arm controls turn this into a failure is false: they
+      pin two named modules, and ANY OTHER module lost this way is a silent pass.
+
+      UNDER-strip (loud, but it is the very defect round 12 reported fixed).
+      Confirmed against bash itself — `echo A;# x` and `echo B |# x` both comment
+      out — but `\\s#` matches neither, so:
+
+          echo A;#  see scripts/lib/agent_ledger.py     -> minted a PHANTOM
+          echo B |# scripts/lib/agent_ledger.py            requirement for a file
+          true &&#  scripts/lib/agent_ledger.py            the script never opens
+
+    So this walks the line: `#` opens a comment only OUTSIDE quotes and only at
+    the start of a word — start of line, or after whitespace or one of `;|&()`.
+    `X=y#foo` is left alone, because bash does not treat that as a comment either.
+
+    ⚠ WHAT IT STILL DOES NOT MODEL: a here-document body. A `#` line inside a
+    `<<EOF` block is content, not a comment, and would be stripped; a `/lib/x.py`
+    mentioned in prose inside one would not be. `transcript-push.sh` contains no
+    heredoc today (`grep -nE '<<|;#|\\|#|&&#'` finds nothing), which is why this
+    is recorded as a limit rather than implemented — but it IS a limit, and the
+    previous version of this docstring is the reason to write it down.
     """
     out = []
     for line in src.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith("#"):
-            continue
-        out.append(re.sub(r"\s#.*$", "", line))
+        res = []
+        in_single = in_double = False
+        i = 0
+        while i < len(line):
+            c = line[i]
+            prev = line[i - 1] if i else None
+            if in_single:
+                res.append(c)
+                in_single = c != "'"
+            elif in_double:
+                res.append(c)
+                if c == "\\" and i + 1 < len(line):
+                    i += 1
+                    res.append(line[i])
+                elif c == '"':
+                    in_double = False
+            elif c == "'":
+                in_single = True
+                res.append(c)
+            elif c == '"':
+                in_double = True
+                res.append(c)
+            elif c == "\\" and i + 1 < len(line):
+                res.append(c)
+                i += 1
+                res.append(line[i])
+            elif c == "#" and (prev is None or prev in " \t;|&()"):
+                break
+            else:
+                res.append(c)
+            i += 1
+        out.append("".join(res))
     return "\n".join(out)
 
 
@@ -1263,14 +1317,52 @@ def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
       (c) `host_label.py` — the unit's THIRD runnable file (`transcript-push.sh`
           execs it directly), whose own imports were previously never read.
 
-    It does NOT see a dependency reached through a shell variable holding a
-    computed path, or one loaded by a mechanism none of the three use. That is a
-    real limit, written down rather than implied by silence.
+    🔴 WHAT IT DOES NOT SEE, ENUMERATED BY RUNNING IT — an earlier version of
+    this paragraph gestured at "a mechanism none of the three use", which names
+    nothing checkable. Each of these was driven with a real undeclared
+    `scripts/lib` module injected into the builder, and each ESCAPED:
 
-    🔴 THREE ARMS, THREE SEPARATE POSITIVE CONTROLS. A control over the UNION
-    cannot tell "all arms work" from "one arm works and covers for a dead one" —
-    measured: with the shell arm reading prose, deleting the only executable
+        importlib.import_module("x") / __import__("x")
+        os.path.join(_HERE, f"{n}.py")            (an f-string, not a literal)
+        os.path.join(_HERE, os.path.basename(p), "x.py")   (the regex cannot
+                                                    cross the inner `)`)
+        Path(__file__).parent / "x.py"
+        a module imported by a module we scan     (ZERO transitive hops — the
+                                                   sibling above follows one)
+        an import inside a string that is executed elsewhere (the `_REMOTE_SCAN`
+                                                   idiom in transcript_search.py)
+
+    None is used by the three scanned files today, so nothing is invisible NOW —
+    but `importlib.import_module` and `Path(__file__).parent` both occur
+    elsewhere under `scripts/`, so these are repo idioms, not hypotheticals.
+    A relative import (`from .x import y`) is deliberately skipped: these modules
+    load as top-level, so that form would fail at runtime anyway.
+
+    🔴 TWO ARM-EXCLUSIVE CONTROLS AND ONE SHARED PROBE — NOT "three controls",
+    which is what this docstring claimed for one revision. Arms (a) and (b) each
+    have a sentinel only that arm can produce, so blinding either fails HERE
+    rather than hiding behind the other's hit. A control over the UNION cannot do
+    that: measured, with the shell arm reading prose, deleting the only executable
     `host_label.py` reference left a union control fully green.
+
+    ⚠ ARM (c) HAS NO ARM-EXCLUSIVE SENTINEL AND CANNOT BE GIVEN ONE HONESTLY —
+    its subject, `host_label.py`, imports only stdlib, so its correct result is
+    the empty set, and `assert from_host_label == set()` is satisfied identically
+    by "the arm ran" and "the arm is wired to nothing". Measured: blinding arm
+    (c) alone left the whole guard GREEN. What replaces it is a synthetic probe
+    of the SHARED helper and this call site's `libdir`. Stated precisely, because
+    the failure this whole round is about is a guard described more widely than
+    it works:
+
+      COVERED    the helper is live; the `libdir` passed here resolves
+      NOT COVERED a defect confined to arm (c)'s own call site (wrong path
+                 constant) while the helper stays healthy
+
+    And the probe is not independently demonstrable: a mutation that breaks the
+    shared helper is caught by arm (a)'s control FIRST, so the probe never runs.
+    That is a real limit on what its presence proves, not a reason to delete it —
+    it is what makes arm (c)'s empty result mean "read and empty" rather than
+    "never read".
 
     ⚠ WHAT THIS GUARDS IS A DECLARATION, NOT AN OUTAGE — this unit is oneshot on a
     timer with a working-tree ExecStart, so a missing trigger costs one tick. The
@@ -1306,13 +1398,27 @@ def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
     assert "host_label.py" in from_shell, (
         f"the SHELL arm found {sorted(from_shell)} — it is not reading executable "
         "shell code (the builder never imports host_label, so no other arm covers it)")
-    # (c) has no dependency to sentinel today: host_label.py imports only stdlib.
-    # Asserting a name here would be asserting a fixture, so instead pin the
-    # PROPERTY that makes its emptiness meaningful — the file parsed at all.
+    # 🔴 A SYNTHETIC PROBE, NOT AN ARM-EXCLUSIVE CONTROL — see the docstring for
+    # exactly what it does and does not cover. It runs the same helper, with the
+    # same `libdir` this call site passes, over a file that provably imports a lib
+    # module, so arm (c)'s empty result means "read and empty" rather than "never
+    # read". A shared-helper mutation dies to arm (a)'s control before reaching
+    # here; that is measured, and it is why this is not counted as a third arm.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as _d:
+        _probe = Path(_d) / "probe.py"
+        _probe.write_text("from transcript_search import iter_transcripts\n")
+        _probe_found = _lib_modules_a_python_file_imports(_probe, libdir)
+    assert _probe_found == {"transcript_search.py"}, (
+        f"arm (c)'s scanner returned {sorted(_probe_found)} for a file that plainly "
+        "imports transcript_search — the helper or the `libdir` this call site passes "
+        "is wrong, and arm (c)'s own empty result would be meaningless either way")
+
     assert from_host_label == set(), (
         f"host_label.py now imports {sorted(from_host_label)} from scripts/lib. That is "
-        "fine, but it must be declared as a trigger and this assertion updated — the "
-        "point is that its imports are READ, not that they are empty")
+        "fine — declare them as triggers and update this assertion. It is a ledger of a "
+        "known-stdlib-only file, NOT the control; the control is the probe above")
 
     needed = from_builder | from_shell | from_host_label
 
