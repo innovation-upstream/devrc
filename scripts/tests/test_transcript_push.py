@@ -45,6 +45,7 @@ not the happy path:
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -1185,6 +1186,66 @@ def test_every_module_the_agent_loads_by_path_IS_a_restart_trigger():
     )
 
 
+def _lib_modules_a_python_file_imports(path, libdir):
+    r"""Every `scripts/lib` module `path` pulls in, by AST — not by regex.
+
+    🔴 A REGEX OVER IMPORT LINES IS IDIOM-SHAPED, AND THIS REPO USES THE OTHER
+    IDIOMS. The first version of this scanner was `^(?:from|import)\s+(\w+)`,
+    which is blind to an import that is indented, wrapped in `try:`, or shares a
+    line (`import base64, json, sys`) — all three of which appear in
+    `scripts/lib/transcript_search.py` itself, i.e. inside this unit's own
+    dependency chain. Measured against the old scanner, five realistic "fifth
+    dependency" shapes were added and all five passed GREEN.
+
+    An AST walk sees every `import`/`from` at any depth, in one rule. It also
+    picks up the `os.path.join(_HERE, "<name>.py")` loader idiom, because that is
+    how this repo loads siblings when a plain import will not do — and it is the
+    idiom the resident-agent sibling test scans for, so a scanner here that could
+    not see it would be narrower than the test it was modelled on.
+    """
+    import ast
+
+    src = path.read_text()
+    names = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            names |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    found = {f"{n}.py" for n in names if (libdir / f"{n}.py").exists()}
+    # The SourceFileLoader idiom: os.path.join(_HERE, "x.py") / (_HERE, "lib", "x.py").
+    found |= {m for m in re.findall(r'os\.path\.join\(\s*_HERE\s*,[^)]*?"([^"]+\.py)"', src)
+              if (libdir / m).exists()}
+    return found
+
+
+def _strip_shell_comments(src):
+    """Shell source with comments removed, so a scanner over it sees CODE.
+
+    🔴 THE COMMENT-BLIND VERSION HAD BOTH FAILURE DIRECTIONS AT ONCE, MEASURED:
+
+        a comment-only mention of scripts/lib/agent_ledger.py
+            -> ['agent_ledger.py'] appears in `needed`  (a PHANTOM requirement:
+               the test demands a trigger for a file the script never opens)
+
+        deleting line 99, the ONLY line that actually resolves host_label.py
+            -> 'host_label.py' still in `needed`, because line 79 mentions it in
+               prose — so the positive control below stayed GREEN over a scanner
+               that had stopped seeing executable code entirely
+
+    Approximate by design: a `#` inside a quoted string would be cut too. That
+    direction is safe here — it can only make the scanner see LESS, which the
+    per-arm controls below turn into a failure rather than a silent pass.
+    """
+    out = []
+    for line in src.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        out.append(re.sub(r"\s#.*$", "", line))
+    return "\n".join(out)
+
+
 def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
     """🔴 THE HALF THE HAND-WRITTEN LEDGER LEFT OPEN. `transcript_search.py` was
     absent from the timer's triggers from the day the feeder shipped, and the
@@ -1192,45 +1253,68 @@ def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
     omission as correct. The agent unit already had a source-derived counterpart;
     the timer had none, which is precisely why the gap survived on this side.
 
-    So: derive the timer's expected set from the two files the unit actually
-    runs. A fifth dependency added to either tomorrow fails here rather than
-    waiting for someone to notice the `want` set is one short.
+    WHAT THIS SCANS, stated as narrowly as it is implemented — an earlier
+    docstring said "the two files the unit actually runs", which was both wider
+    than the body and one file short:
 
-    🔴 BOTH SOURCES, BECAUSE THE UNIT HAS TWO. The first draft of this test
-    scanned only the builder's imports and its own positive control caught that:
-    `host_label.py` is resolved by the SHELL (`transcript-push.sh:99`, fatal at
-    exit 3), never imported by the builder, so a builder-only scanner would have
-    declared the ledger complete while being blind to the dependency that
-    actually kills the unit.
+      (a) `build_transcript_push.py` — every import, by AST, at any depth;
+      (b) `transcript-push.sh` — literal `lib/<name>.{py,sh}` references, with
+          COMMENTS STRIPPED first;
+      (c) `host_label.py` — the unit's THIRD runnable file (`transcript-push.sh`
+          execs it directly), whose own imports were previously never read.
+
+    It does NOT see a dependency reached through a shell variable holding a
+    computed path, or one loaded by a mechanism none of the three use. That is a
+    real limit, written down rather than implied by silence.
+
+    🔴 THREE ARMS, THREE SEPARATE POSITIVE CONTROLS. A control over the UNION
+    cannot tell "all arms work" from "one arm works and covers for a dead one" —
+    measured: with the shell arm reading prose, deleting the only executable
+    `host_label.py` reference left a union control fully green.
 
     ⚠ WHAT THIS GUARDS IS A DECLARATION, NOT AN OUTAGE — this unit is oneshot on a
     timer with a working-tree ExecStart, so a missing trigger costs one tick. The
     resident-agent sibling above is the one where staleness is unbounded, and
     conflating the two is the error this arc made twice.
     """
-    import re
-
     libdir = REPO_ROOT / "scripts" / "lib"
 
-    # (a) what the BUILDER imports — plain sibling imports off its own sys.path.
-    builder = (REPO_ROOT / "scripts" / "lib" / "build_transcript_push.py").read_text()
-    names = set(re.findall(r"^(?:from|import)\s+([a-z_][a-z0-9_]*)", builder, re.M))
-    needed = {f"{n}.py" for n in names if (libdir / f"{n}.py").exists()}
+    # (a) the builder's imports.
+    from_builder = _lib_modules_a_python_file_imports(
+        libdir / "build_transcript_push.py", libdir)
 
-    # (b) what the SHELL resolves out of lib/ — a different mechanism, same
-    #     consequence when it is missing.
-    shell = (REPO_ROOT / "scripts" / "transcript-push.sh").read_text()
-    needed |= {m for m in re.findall(r'/lib/([a-z_][a-z0-9_]*\.py)', shell)
-               if (libdir / m).exists()}
+    # (b) what the SHELL resolves out of lib/, comments removed. `.sh` too:
+    #     scripts/lib holds shell helpers, and the old `\.py`-only pattern could
+    #     never have matched one.
+    shell = _strip_shell_comments((REPO_ROOT / "scripts" / "transcript-push.sh").read_text())
+    # 🔴 HYPHENS. `scripts/lib` really holds `host-role.sh`, and the first version
+    # of this pattern was `[a-z_][a-z0-9_]*`, which cannot match one — a mutant
+    # adding exactly that dependency SURVIVED. A filename character class is a
+    # place to be generous: the `.exists()` filter below is what makes a match
+    # real, so widening it costs nothing and narrowing it loses whole files.
+    from_shell = {m for m in re.findall(r"/lib/([A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:py|sh))", shell)
+                  if (libdir / m).exists()}
 
-    # 🔴 POSITIVE CONTROL, AND IT EARNED ITS KEEP IMMEDIATELY. A scanner that
-    # matches nothing yields an empty `missing` and PASSES — the same reassuring
-    # zero this arc has been bitten by repeatedly. Both names below are known to
-    # be real dependencies, one per mechanism, so this fails if either scanner
-    # stops measuring.
-    assert {"transcript_search.py", "host_label.py"} <= needed, (
-        f"the dependency scanner found {sorted(needed)} — it is not measuring the "
-        "unit's real dependencies, so its verdict is about the regex")
+    # (c) the third runnable file's own imports.
+    from_host_label = _lib_modules_a_python_file_imports(libdir / "host_label.py", libdir)
+
+    # 🔴 ONE CONTROL PER ARM. Each names a dependency only THAT arm can see, so a
+    # single dead scanner fails here instead of hiding behind another's hit.
+    assert "transcript_search.py" in from_builder, (
+        f"the BUILDER arm found {sorted(from_builder)} — it is not reading the "
+        "builder's imports, so its verdict is about the parser")
+    assert "host_label.py" in from_shell, (
+        f"the SHELL arm found {sorted(from_shell)} — it is not reading executable "
+        "shell code (the builder never imports host_label, so no other arm covers it)")
+    # (c) has no dependency to sentinel today: host_label.py imports only stdlib.
+    # Asserting a name here would be asserting a fixture, so instead pin the
+    # PROPERTY that makes its emptiness meaningful — the file parsed at all.
+    assert from_host_label == set(), (
+        f"host_label.py now imports {sorted(from_host_label)} from scripts/lib. That is "
+        "fine, but it must be declared as a trigger and this assertion updated — the "
+        "point is that its imports are READ, not that they are empty")
+
+    needed = from_builder | from_shell | from_host_label
 
     block = _unit_block()
     m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
