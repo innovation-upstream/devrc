@@ -45,9 +45,39 @@
     # paid only when something actually asks for the 1.57 output.
     # ------------------------------------------------------------------------
     nixpkgs-playwright-1_57.url = "github:NixOS/nixpkgs/d61c78f4921b1622127584d67b2e9afddf588c92";
+
+    # ------------------------------------------------------------------------
+    # `cairn` — the subsystem-store client, consumed as a PACKAGE instead of
+    # being forked into `scripts/cairn`. The extracted OSS repo is now the one
+    # copy of the reader; devrc keeps only what the OSS repo deliberately does
+    # not have (`scripts/cairn-who`, the writer, and the `scripts/lib/` modules
+    # those two still import).
+    #
+    # 🔴 THE PIN IS `flake.lock`, NOT THIS URL. The packaged client's VERSION IS
+    # ITS GIT REVISION — cairn's flake derives it from `self.shortRev` precisely
+    # so an artefact cannot be mislabelled — which is worth nothing if the input
+    # resolves to whatever the branch holds at build time. Move it with
+    # `nix flake lock --update-input cairn` and record what changed;
+    # `scripts/tests/test_cairn_flake_pin.py` fails if the lock entry goes away.
+    #
+    # 🔴 DELIBERATELY *NOT* `inputs.nixpkgs.follows = "nixpkgs"`, and the reason
+    # is upstream's rather than ours. cairn's own flake pins `pkgs.python312`
+    # because `server/Dockerfile` is `python:3.12-slim` and its CI pins 3.12; a
+    # bare `pkgs.python3` there once followed nixpkgs to 3.14 and shipped an
+    # interpreter NOTHING in that repo had ever run its suite under (that suite
+    # already emits a 3.14 tar-extraction DeprecationWarning, so the gap was
+    # behaviourally live, not theoretical). Following would rebuild the client
+    # against devrc's `nixpkgs-unstable` — a nixpkgs cairn's CI has never tested
+    # — so the thing deployed would stop being the thing that was tested. Same
+    # SHAPE of argument as the frozen playwright input above, different
+    # mechanism: that one is a version freeze, this one is a refusal to override
+    # someone else's freeze. The cost is a second nixpkgs in the lock, evaluated
+    # only when something asks for the cairn output.
+    # ------------------------------------------------------------------------
+    cairn.url = "github:ZacxDev/cairn";
   };
 
-  outputs = { self, nixpkgs, home-manager, nixpkgs-playwright-1_57, ... }:
+  outputs = { self, nixpkgs, home-manager, nixpkgs-playwright-1_57, cairn, ... }:
     let
       system = "x86_64-linux";
       # Explicit allowUnfree so unfree pkgs (elixir-ls, playwright browsers)
@@ -164,7 +194,18 @@
 
       homeConfigurations."zach" = home-manager.lib.homeManagerConfiguration {
         inherit pkgs;
-        extraSpecialArgs = { isNixOS = true; };
+        # 🔴 `cairnPackage` IS THREADED, NOT LOOKED UP. `nix/home.nix` cannot
+        # reach a flake input on its own — it is a home-manager module, and its
+        # only channel from here is `extraSpecialArgs`. It takes the argument
+        # WITHOUT a default on purpose, so a thread that gets cut is an
+        # evaluation error rather than a `~/.local/bin/cairn` symlink quietly
+        # pointing at `/bin/cairn`. The name differs from the input's
+        # (`cairn` -> `cairnPackage`) so "is the input wired" and "is the
+        # package wired" are not the same substring to a grep or a guard.
+        extraSpecialArgs = {
+          isNixOS = true;
+          cairnPackage = cairn.packages.${system}.cairn;
+        };
         modules = [
           ./nix/home.nix
           {

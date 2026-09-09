@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""`cairn-validate --scope <scope>` — the write-protocol parse check, run by the WRITER.
+
+🔴 IT EXISTS BECAUSE `cairn validate` STOPPED BEING THIS CHECK. `~/.local/bin/cairn`
+is the pinned OSS package once a host has switched, and its `validate` reimplements
+the check on the READER's resolver rather than shelling this repo's writer. Measured
+on one scope of the live cache, both clients at the locked rev: the package writes 0
+bytes to stdout (a 77-byte banner on stderr) and exits 0, where
+`scripts/lib/subsystem_touch.py --validate` prints 5,766 B carrying `entry shape:`,
+`marker reachability:` and `dropped lines:` — the last meaning content is ALREADY
+LOST. Both are "green"; only one of them looked. So the write protocol has to name
+the writer, and the only spelling that ran before this file was a literal
+`python3 /home/…/devrc/scripts/lib/subsystem_touch.py …` — an absolute checkout path
+baked into a protocol whose whole point is that agents work in other repos. A bare
+command on `home.sessionPath` resolves from any cwd, in either runtime.
+
+🔴 THIS FILE IS A LAUNCHER, NOT A SECOND IMPLEMENTATION — same rule as
+`scripts/cairn-who`. No parser is declared here and no flag is interpreted here:
+the two defaults are PREPENDED to the caller's own argv and handed to
+`subsystem_touch.main` unread. That is deliberate rather than terse. A launcher
+that scanned argv to decide whether the caller had already passed `--store` would
+be a second, partial copy of argparse's rules — it would miss the `--store=X` form
+or an abbreviation, and then silently append a default that argparse resolves LAST
+and therefore lets WIN over the caller's. Prepending needs no such scan: argparse's
+last-occurrence-wins gives the caller the override for free.
+
+What the two prepended arguments are, and why each:
+
+  --store <the synced cache>  `subsystem_touch`'s own default is the FROZEN
+      pre-cutover mirror (`~/.claude/analyze-service-index`, `0444`), which does
+      not move when you write. Validating it after a write parses the PRE-write
+      bytes and reports a clean entry that is not the one you wrote. The value
+      comes from `subsystem_read_store.read_store_root()` — THE one definition of
+      the synced cache root — never a second literal here.
+  --validate                  with no value, i.e. "check every entry in the scope",
+      which is the only form that can also catch a duplicate ref (a relationship
+      between two files). A caller who wants the single-file form passes
+      `--validate <path>` and argparse's last occurrence wins.
+
+🔴 EXIT CODES ARE THE WRITER'S, UNTRANSLATED — in particular **3** for a malformed
+entry, which is the code `claude/skills/subsystem-index/SKILL.md` tells a writer to
+stop on. The packaged client's `validate` returns **5** (`EXIT_CORRUPT`) for that
+condition and uses 3 for `EXIT_UNREACHABLE_NO_CACHE`, so the two tables must not be
+read for each other. `main()`'s return value is passed straight to `SystemExit`;
+nothing here maps, clamps or re-numbers it.
+
+🔴 `Path(__file__).resolve()` IS LOAD-BEARING FOR THE DEPLOY, exactly as for
+`scripts/cairn-who`. This is put on PATH by `nix/home.nix` as a
+`config.lib.file.mkOutOfStoreSymlink`: `.resolve()` follows the symlink back into
+the checkout, so `scripts/lib/` is found beside the real file. A `home.file` store
+COPY would resolve `__file__` into /nix/store, where `scripts/lib/` is not deployed,
+and both imports below would fail before anything printed. There is no package that
+ships `subsystem_touch.py` — it is the devrc-only WRITER and deliberately absent
+from the OSS repo, which carries the reader only.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import subsystem_read_store  # noqa: E402
+import subsystem_touch  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(subsystem_touch.main(
+        ["--store", str(subsystem_read_store.read_store_root()), "--validate"]
+        + sys.argv[1:]
+    ))
