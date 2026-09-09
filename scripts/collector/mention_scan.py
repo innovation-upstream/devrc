@@ -31,7 +31,7 @@ WHAT IS DETECTED
 ----------------
 Both profiles:
   clickup   868abc123                 -> https://app.clickup.com/t/868abc123
-  github    owner/repo#12             -> https://github.com/owner/repo/issues/12
+  github    owner/repo#12             -> https://github.com/owner/repo/pull/12
   github    repo#12                   -> owner resolved by the CALLER (see below)
   ambiguous #12                       -> clawgate task 12 OR a GitHub issue 12
   github    /audit-pr 12   audit-pr 12   (the ONE wordy form that is clickable —
@@ -154,10 +154,31 @@ _TELEMETRY_ONLY = (PROFILE_TELEMETRY,)
 # redirect, not this module's — nothing here should mint one either way.
 CLAWGATE_TASKS_URL = "https://clawgate.zacx.dev/tasks"
 CLICKUP_TASK_URL = "https://app.clickup.com/t/{id}"
-# `/issues/<n>` is deliberate and not a bug: GitHub redirects /issues/<n> to
-# /pull/<n> when <n> is a pull request, so one template covers both and we never
-# have to know which it is.
-GITHUB_ISSUE_URL = "https://github.com/{repo}/issues/{id}"
+# 🔴 `/pull/<n>`, AND THE NAME IS `REF` RATHER THAN `ISSUE` BECAUSE THE TEMPLATE
+# DOES NOT KNOW WHICH IT IS. GitHub normalises BOTH forms in BOTH directions, so
+# either one "covers both" and the choice is about what the operator READS in the
+# picker row, not about what resolves.
+#
+# MEASURED 2026-09-09 on a public repo holding both kinds, following redirects:
+#     /issues/<pr>    -> 200  …/pull/<pr>
+#     /pull/<pr>      -> 200  …/pull/<pr>
+#     /issues/<issue> -> 200  …/issues/<issue>
+#     /pull/<issue>   -> 200  …/issues/<issue>      ← the leg that licenses this
+# and on 4 ISSUES-DISABLED repos, `/pull/<pr>` resolves too — that population is
+# in the picker universe on purpose, so it had to be checked rather than assumed.
+#
+# ⚠ THE COMMENT THIS REPLACES WAS TRUE BUT ONE-SIDED, and its one-sidedness is
+# what made `/issues` look forced. It read: "`/issues/<n>` is deliberate and not
+# a bug: GitHub redirects /issues/<n> to /pull/<n> when <n> is a pull request, so
+# one template covers both and we never have to know which it is." Every clause
+# is correct; it simply never tested the mirror leg, so it read as "only /issues
+# is safe". Operator preference 2026-09-09: default to `/pull`, because the
+# overwhelming majority of references clicked here are pull requests and the row
+# shows the URL before you choose it.
+#
+# 🔴 NOT A DEDUPE CONCERN, checked before changing it: the telemetry key is
+# `platform:raw[@owner/repo]`, never the URL, so no already-emitted row re-emits.
+GITHUB_REF_URL = "https://github.com/{repo}/pull/{id}"
 
 PLATFORM_CLAWGATE = "clawgate"
 PLATFORM_GITHUB = "github"
@@ -510,7 +531,7 @@ def _github_url(full_repo: str | None, num: str) -> str:
     not known. NEVER a guessed owner — see the module docstring."""
     if not full_repo or "/" not in full_repo:
         return ""
-    return GITHUB_ISSUE_URL.format(repo=full_repo, id=num)
+    return GITHUB_REF_URL.format(repo=full_repo, id=num)
 
 
 def clawgate_url(task_id: str) -> str:
