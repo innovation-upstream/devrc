@@ -17,11 +17,13 @@ assertion. Fix that, and land the ops scripts that were sitting untracked in the
 workbench working tree where a `git checkout` would have deleted them unreported.
 
 ## State now
-- Branch: `chore/commit-staged-system-scripts`, rebased onto `origin/main` `03d7e0ad`.
-  (No head sha here on purpose — it moves every fix round; `gh pr view 1412 --json headRefOid`.)
-- **PR #1412 OPEN** — https://github.com/innovation-upstream/devrc/pull/1412. Five files, all
-  new, none modifying anything on `main` (checked with `git cat-file -e origin/main:<path>` —
-  NOT `git ls-files`, see the gotcha below): the two ops scripts
+- 🔴 **DONE — #1412 MERGED** as squash `f06b106f` (2026-09-09). Verified by CONTENT, never
+  by ancestry (a squash is never an ancestor of its base): all five files present in
+  `origin/main`, the two payload files byte-identical to the branch head, and the final
+  round-5 `SWITCH_ATTEMPTED` guard present — so the last revision landed, not an earlier one.
+- **PR #1412 (MERGED)** — https://github.com/innovation-upstream/devrc/pull/1412. Five files, all
+  new, none modifying anything that existed on `main` (checked with
+  `git cat-file -e origin/main:<path>` — NOT `git ls-files`, see the gotcha below): the two ops scripts
   `nix/system/apply-journald-settings-migration.sh` and `scripts/diagnose-nix-disk.sh`, the
   extracted rewriter `scripts/lib/journald_migrate.py` and its suite
   `scripts/tests/test_journald_migrate.py` (37 tests), and this doc.
@@ -40,11 +42,16 @@ workbench working tree where a `git checkout` would have deleted them unreported
   `nix-instantiate '<nixpkgs/nixos>' -A config.system.build.toplevel` →
   `nixos-system-nixos-26.11pre1068949.dc5d91f84032.drv` (assertion gone), and building
   `config.environment.etc."systemd/journald.conf"` showed `SystemMaxUse=2G` survives.
-- **IN FLIGHT:** `gate.sh --tier both` on the rebased tree, background id `b8tu5owud`,
-  output → `<scratchpad>/gate-rebased.txt`. Prior run on the pre-rebase base: node
-  `1449/1449 PASS`; pytest `collected=21127 passed=21124 failed=1`, the one failure foreign
-  (see below). The `nix build .#checks.x86_64-linux.{pytests,nodetests}` tier — the one
-  Tekton gates on — has **NOT been run** for this branch.
+- **GATE: BOTH TIERS PASS** on the merged tree `53d8b962` (branch merged with `origin/main`
+  at `efa9a0fc`) — the tree that became the squash. Dev-host `gate.sh --tier both`: pytest
+  `collected=21164 passed=21162 skipped=2 failed=0` (floor 20342), node `1449/1449`,
+  `GATE: RESULT=PASS`. Sandbox `nix build .#checks.x86_64-linux.{pytests,nodetests}`, run ONE
+  AT A TIME: both `RESULT: PASS (exit=0)`, 0 timeout panics. That sandbox tier is what Tekton
+  gates on and had never run on this branch until then.
+- **AUDIT: 5 rounds, `/audit-pr 1412`, all findings fixed or recorded open.** Four blockers,
+  and THREE of them were introduced by the previous round's fix — each a safety mechanism
+  producing the confusion it existed to prevent. Ladder stopped on the prose-payload
+  criterion (payload trend 489 → 148 → 90 → 42), stated in commit `4bd146a3`.
 - **No clawgate task.** `clawgate_handoff.sh resolve` → rc 5, positive control green
   (2 links for another session), so the board was genuinely read — but a wrong session id
   also answers 200 with an empty array, so this is not a clean bill of health and no
@@ -52,27 +59,39 @@ workbench working tree where a `git checkout` would have deleted them unreported
 - No claims held (`claim-work`).
 
 ## Next steps (ranked)
-1. **Re-run BOTH gate tiers against the CURRENT head and post the verdict to PR #1412.**
-   Do not reuse an older run: the first (`b8tu5owud`, base `85710f1a`) is superseded — it
-   FAILED on `test_no_client_subdomain_literal_is_committed`, which audit round 1 then fixed —
-   and every audit round since has changed payload. Name the run's base sha in the claim.
-   Then `nix build .#checks.x86_64-linux.pytests` and `…nodetests` ONE AT A TIME (concurrent
-   nested-`nix` contention produces measured FALSE failures); that sandbox tier is the one
-   Tekton gates on and has not been run on this branch. `IN FLIGHT: devrc#1412`.
-   forcing: gate — `main` is protected in name only (`required_status_checks` absent,
-   measured 2026-09-02), so nothing else blocks this merge.
+1. **Get ONE clean run of `scripts/diagnose-nix-disk.sh` on an idle box and put the real
+   runtime in its header.** The only measurement is 4h05m to reach section 3 of 10, at 3%
+   CPU under gate load, ended by an artefact — a floor, not a runtime. Nobody has ever seen
+   the script finish, so its own "all 10 sections attempted" banner is untested end to end.
+   forcing: none — but it is the last unverified claim shipped by this effort.
 2. **RESOLVED — no action.** This list previously ranked "unblock the base clone", predicting
    `merge --ff-only` would refuse there because two untracked nebula scripts sat at paths
    `main` now tracks. MEASURED afterwards: the base clone is at `origin/main`, `--ff-only`
    says `Already up to date`, and both files are tracked and byte-identical to `main`
    (`ec9c6363`, `e061d844`). Another session cleared it mid-run. forcing: none
 3. **`/audit-pr 1412`** before merging — offered to the operator, not yet answered. forcing: none
-4. **Fix the three deprecated-option warnings** surfaced by the 26.11 eval of
-   `/etc/nixos/configuration.nix`: `services.dnsmasq.servers` → `.settings.server`,
-   `services.gnome.tracker.enable` → `.tinysparql.enable`,
-   `services.gnome.tracker-miners.enable` → `.localsearch.enable`. They still work today.
+4. **Two deprecated-option renames in `/etc/nixos/configuration.nix`** — WARNING-ONLY, they
+   still work (`mkRenamedOptionModule`). Lines 361-362, exactly:
+   ```nix
+   services.gnome.tracker.enable = true;         ->  services.gnome.tinysparql.enable = true;
+   services.gnome.tracker-miners.enable = true;  ->  services.gnome.localsearch.enable = true;
+   ```
+   🔴 **Deliberately NOT given a `nix/system/apply-*.sh` script, and that is a judgement to
+   re-make, not a gap to fill.** The journald migration's rebuild-and-rollback trap took FIVE
+   audit rounds to get right — three of its four blockers were introduced by the previous
+   round's own fix — and a second root-privileged mutator would ship a COPY of that trap.
+   `claude/RULES.md` → "One rule, one place": a predicate duplicated across call sites is
+   typically wrong at N−1 of them, in the same direction. Paying that for two warnings that
+   change no behaviour is the wrong trade. If a THIRD such change appears, extract the trap
+   into a shared `nix/system/lib/` helper first, with its own tests, and drive all of them
+   through it — do not hand-copy it a second time.
+   ⚠ Was listed as THREE renames; `services.dnsmasq.servers` is now commented out at
+   `configuration.nix:71`, so it is not live. The original list came from an eval warning
+   that was true when captured — `/etc/nixos` changed underneath it.
    forcing: none
 5. **Apply the same journald migration to the laptop** when it next takes a channel update.
+   ⚠ As of 2026-09-09 the laptop is UNREACHABLE on both nebula (10.42.0.100) and LAN, so its
+   state could not be re-verified at close; the reading below is from earlier in that session.
    The rewriter now handles the laptop's one-line `"..."` form as well as the workbench's
    `''`-block (both are unit-tested), but it has only ever been RUN on the workbench —
    "the tests pass" and "it ran on that host" are different claims. forcing: none
