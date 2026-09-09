@@ -214,10 +214,12 @@ EXIT_CONTRACT = (
                  "search no corpus at all), `--skill` with `--opencode-only` — "
                  "that corpus carries no skill attribution, so the combination "
                  "has no answer rather than an empty one, or a malformed "
-                 "command line rejected by argparse ITSELF before `main` runs "
-                 "(an unknown flag, or a non-integer `--limit`/`--tail`), which "
-                 "exits 2 from inside argparse and is the one cause this "
-                 "module never returns."),
+                 "command line rejected by argparse ITSELF inside `main`'s "
+                 "first statement (an unknown flag, or a non-integer "
+                 "`--limit`/`--tail`). 🔴 That last one is the only exit 2 this "
+                 "module RAISES rather than returns — `parse_args` raises "
+                 "`SystemExit` — so an in-process caller must catch it, not "
+                 "read a return value."),
     (EXIT_AMBIGUOUS, "`--tail` ONLY: it could not resolve to exactly one live "
                      "window — several matched, or none did on a fleet where "
                      "every host answered. It carries NO claim about coverage; "

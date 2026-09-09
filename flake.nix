@@ -545,6 +545,111 @@
             fi
             touch "$out"
           '';
+
+        # 🔴 NOTHING INVOKES THIS YET — IT IS AN OUTPUT, NOT A GATE, AND SAYING
+        # SO IS THE POINT. `devrc-ci-pipeline.yaml` in the infra repo hardcodes
+        # exactly two legs (`LEG` ∈ {pytests, nodetests}, built as
+        # `.#checks.x86_64-linux.${LEG}`); there is no `nix flake check` and no
+        # loop, so a third output is never built by CI. Landing it silently
+        # would ship something that READS like a gate and can never fail —
+        # precisely the defect class this check exists to catch, committed by
+        # the check itself.
+        # Run it on demand: `nix build .#checks.x86_64-linux.cairn-client-runs`
+        # (~1.4 s; the cairn package is already in the home-manager closure, so
+        # it adds no build). Wiring a third leg is a separate change to a
+        # GitOps-reconciled repo and is deliberately not bundled here.
+        #
+        # 🔴 THE ONLY CHECK THAT *EXECUTES* THE PINNED CLIENT. Every other cairn
+        # guard in this repo reads `flake.nix` / `flake.lock` / `nix/home.nix` /
+        # `nix/sessionVariables.nix` as TEXT, so all of them stay green while the
+        # pinned client is thoroughly broken: they assert the WIRING, never that
+        # anything runs. A `nix flake lock --update-input cairn` to a revision
+        # where `packages.cairn` still builds but a VERB regressed would leave
+        # this repo's gate fully green and surface at the operator, mid-task.
+        # cairn's own `checks.client-resolves-its-lib` would catch some of that,
+        # and it lives in cairn's flake — which this repo's gate does not run.
+        #
+        # 🔴 IT ASSERTS OUTPUT CONTENT, NOT EXIT CODES, and the two verbs are
+        # asserted DIFFERENTLY on purpose:
+        #   `validate` — a fixture cache with exactly ONE parsable entry must
+        #     produce "1 of 1 entry file(s) parse". That string is the gate: a
+        #     client whose validate prints nothing fails here, which is this
+        #     check's whole reason to exist.
+        #   `doctor`   — asserted only to PRODUCE A REPORT. Its exit code is
+        #     deliberately NOT asserted: in a sandbox with no pod, no token and
+        #     no network, a non-zero doctor verdict is the CORRECT answer, and
+        #     demanding zero would either pin a wrong expectation or push the
+        #     check into faking an environment. Same reasoning cairn's own
+        #     packaging check records.
+        cairn-client-runs =
+        pkgs.runCommandLocal "devrc-cairn-client-runs"
+          {
+            nativeBuildInputs = [
+              cairn.packages.${system}.cairn
+              pkgs.coreutils
+              pkgs.gnugrep
+            ];
+          }
+          ''
+            export HOME="$TMPDIR/home"
+            mkdir -p "$HOME"
+            F="$TMPDIR/cache"
+            mkdir -p "$F/demo"
+
+            # A stamp is REQUIRED, not decoration: the reader refuses a store
+            # that cannot date itself rather than serving it, so without this
+            # the run below fails as `store-unreachable` and would "fail" for a
+            # reason that says nothing about the client's verbs.
+            printf 'synced=1700000000\nrevision=fixture\nentries=1\ncoverage=ALL\n' \
+              > "$F/.sync-stamp"
+
+            cat > "$F/demo/widget.md" <<'ENTRY'
+            ---
+            service: widget
+            scope: demo
+            sensitivity: public
+            created_by: handoff
+            ---
+            # widget
+
+            ## What it is
+            A fixture entry, and the ONLY one — so "1 of 1" below is a real count.
+
+            ## Pointers
+            - `nowhere/real.py` — a pointer.
+
+            ## Nuance / work-history
+            - 2026-01-01: a bullet.
+            ENTRY
+            # The heredoc is indented to match this file; strip that leading
+            # whitespace or the front matter is not at column 0 and the entry
+            # parses as prose. (Measured: an indented `---` is not front matter.)
+            sed -i 's/^            //' "$F/demo/widget.md"
+
+            # --- validate: the verb this gate exists to police -------------
+            rc=0
+            cairn --cache "$F" validate --scope demo --no-sync > val.txt 2>&1 || rc=$?
+            if ! grep -q '1 of 1 entry file(s) parse' val.txt; then
+              echo "checks.cairn-client-runs: the pinned client's \`validate\` did not report" >&2
+              echo "  parsing the one fixture entry. rc=$rc, output follows:" >&2
+              sed 's/^/    /' val.txt >&2
+              exit 1
+            fi
+
+            # --- doctor: drives the deep import closure --------------------
+            # `--help` would NOT do: the hazard packaging introduces is the
+            # sibling-import mechanism, and only a verb that reaches the deep
+            # modules exercises it.
+            cairn --cache "$F" doctor --no-sync > doc.txt 2>&1 || true
+            if [ ! -s doc.txt ]; then
+              echo "checks.cairn-client-runs: \`doctor\` produced NO output at all." >&2
+              echo "  Its exit code is not asserted (no pod in a sandbox), but a" >&2
+              echo "  client that cannot even report is not a working client." >&2
+              exit 1
+            fi
+
+            touch "$out"
+          '';
       };
     };
 }
