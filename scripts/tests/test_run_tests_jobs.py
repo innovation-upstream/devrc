@@ -29,13 +29,39 @@ Each test drives the real script and reads the banner line it prints
    file may use.
 
 2. EACH CASE NEEDS ITS OWN PROCESS, AND THAT USED TO COST A FULL SUITE RUN.
-   Every case drives a different fake cgroup, so they cannot share one run.
-   Measured 2026-09-08: a full nested run cost ~150s wall, eleven of them, each
-   spawning its own 8 xdist workers inside an outer run that already had 8 —
-   about 28 minutes of nested runs added to the tier this change exists to speed
-   up. `DEVRC_TEST_BUDGET_ONLY=1` stops the runner right after the banner these
+   Every case drives a different fake cgroup, so they cannot share one run —
+   ONE `_run` per test, so the cost scales with the number of cases here.
+   Measured 2026-09-08: a full nested run cost ~150s wall, and each spawns its
+   own 8 xdist workers inside an outer run that already had 8.
+   `DEVRC_TEST_BUDGET_ONLY=1` stops the runner right after the banner these
    tests read; nothing after it is observed here anyway. The seam exits NON-ZERO
    so it can never manufacture a green.
+   ⚠ DELIBERATELY A RATE, NOT A TOTAL. The first version of this paragraph said
+   "eleven of them — about 28 minutes", and both numbers were stale inside the
+   same round that wrote them: cases were added afterwards. A measurement quoted
+   in the round whose whole point was retracting an overstated measurement is
+   exactly the one a future reader will trust, so it is phrased so it cannot
+   drift.
+
+3. 🔴 THIS FILE NEEDS AT LEAST 2 USABLE CPUs, AND IS RED — NOT SKIPPED — BELOW
+   THAT. Measured 2026-09-09 at four points: `taskset -c 0` (1 CPU) gives
+   **1 failed, 13 passed, 2 skipped**; 2, 4 and 24 CPUs all give 16 passed. At
+   one CPU the positive control in
+   `test_a_one_cpu_quota_yields_one_worker_on_a_multi_core_host` fires — the
+   quota branch and the `nproc` fallback both answer 1, so the fixture cannot
+   tell them apart — and the two `_NARROW_UNAVAILABLE` cases skip, which
+   `run-tests.sh` GUARD 2 would additionally red because neither is in
+   EXPECTED_SKIPS.
+   That is the intended outcome, and the reason it is not "fixed": the only ways
+   to be green at 1 CPU are a vacuous assertion (both branches answer 1, so a
+   pass would mean nothing) or a skip GUARD 2 cannot forgive. A loud,
+   self-explaining failure beats either. What was missing was anyone SAYING the
+   boundary is 2 — an earlier header claimed the assertions were "exact
+   everywhere" and "never vacuous and never wrong", true at >=2 and false at 1.
+   ⚠ THE RUNNER ITSELF IS FINE AT 1 CPU: `min(nproc, quota, 8)` yields 1 and the
+   run goes serial, a supported mode. The 2-CPU floor is a property of THIS
+   FILE's ability to discriminate, not of the code under test. Today's builders
+   report 4, 8 and 24.
 """
 
 from __future__ import annotations
@@ -201,13 +227,37 @@ def _fake_cgroup(tmp_path: Path, levels: list[tuple[str, str]]) -> dict[str, str
 def test_the_budget_only_seam_runs_no_tests_and_cannot_report_a_pass():
     """POSITIVE + NEGATIVE control for every other test in this file.
 
-    Ten cases below read a banner from a run stopped by DEVRC_TEST_BUDGET_ONLY.
+    Every case below reads a banner from a run stopped by DEVRC_TEST_BUDGET_ONLY.
     If that seam ever became a silent early exit that still said PASS, an
     ambient value of it would empty the real gate and read as green. So: it must
     say NO TESTS RAN, and its verdict line must be FAIL.
+
+    🔴 AND THE WARNING MUST ARRIVE WHOLE, ON ONE STREAM. It shipped split — two
+    lines to stdout, the third `>&2` — so a reader of either stream alone got
+    half a sentence: "…This is a test seam for" with no object, or "…never a way
+    to pass the gate." with no subject. The whole point of the block is that it
+    is LOUD, and the loudness was the part that fragmented. Every other
+    assertion in this file reads `stdout + stderr` concatenated, which is
+    exactly why none of them could see it — so the per-stream check below is not
+    decoration, it is the only thing that can.
     """
     proc = _run({})
     out = proc.stdout + proc.stderr
+    warning_fragments = (
+        "DEVRC_TEST_BUDGET_ONLY is set",
+        "NO TESTS RAN. This is a test seam for",
+        "never a way to pass the gate.",
+    )
+    assert all(f in proc.stderr for f in warning_fragments), (
+        "the seam's warning is not entirely on stderr, so a reader of one "
+        "stream sees a fragment of a sentence."
+        "\n--- stdout ---\n" + proc.stdout[-1500:]
+        + "\n--- stderr ---\n" + proc.stderr[-1500:]
+    )
+    assert not any(f in proc.stdout for f in warning_fragments), (
+        "part of the seam's warning leaked onto stdout, so it is split across "
+        "streams again.\n--- stdout ---\n" + proc.stdout[-1500:]
+    )
     assert PARALLELISM_RE.search(out), out[-2000:]
     assert "NO TESTS RAN" in out, out[-2000:]
     assert proc.returncode == 3, (
@@ -425,7 +475,14 @@ def test_an_empty_cpu_max_is_skipped_and_the_walk_continues_to_the_parent(tmp_pa
 
     What the assertion below DOES pin, and what a mutant can still break: an
     empty cpu.max is skipped rather than treated as a quota or as a reason to
-    abandon the walk, so the parent's 6-core quota is the answer.
+    abandon the walk, so the PARENT's quota is the answer.
+
+    ⚠ THE PARENT'S QUOTA IS 1, AND DO NOT "RESTORE" A LARGER ONE. This docstring
+    said "6-core" after the fixture had already moved from `600000 100000` to
+    `100000 100000`, three lines above an assertion whose own message says 1. A
+    maintainer trusting the prose and putting 6 back would make this case pass on
+    a 24-core host and FAIL on the 4-core gating builder — precisely the round-1
+    defect, reintroduced by a comment. 1 is below `nproc` everywhere.
     """
     root = tmp_path / "cgroup"
     (root / "a").mkdir(parents=True)

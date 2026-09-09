@@ -3405,7 +3405,13 @@ EXPECTED_SKIPS=(
   # ⚠ "the gate tiers run parallel" is DERIVED FROM THE MACHINE, NOT structural,
   # so say the conditional part out loud: `_devrc_default_jobs` is
   # `min(nproc, narrowest cgroup v2 quota, 8)` — see the block that computes it —
-  # and it anticipates 1–2-core CI nodes. Measured 2026-08-26 on THIS host, when
+  # and it anticipates 1–2-core CI nodes — the RUNNER does: at one core it
+  # yields 1 and goes serial, which is a supported mode.
+  # ⚠ `scripts/tests/test_run_tests_jobs.py` does NOT: it needs >= 2 usable CPUs
+  # to tell the quota branch from the `nproc` fallback, and is RED (not skipped)
+  # at one, deliberately and loudly. Its header states the boundary and why a
+  # skip is not the remedy. The two claims are about different things and must
+  # not be read as contradicting each other. Measured 2026-08-26 on THIS host, when
   # the cap was still 4: `nix build .#checks.x86_64-linux.pytests` logged
   # `parallelism =4 (-n 4 --dist loadfile)`, so the sandbox saw >= 4 cores and
   # the control ran. On a genuinely 1-core builder the gating tier is SERIAL, this
@@ -3660,7 +3666,11 @@ _devrc_cpu_budget() {
       #
       # ⚠ LABELLED HONESTLY — THIS IS AN INVARIANT GUARD, NOT TESTED COVERAGE.
       # Measured 2026-09-08 by deleting these two assignments and running
-      # `scripts/tests/test_run_tests_jobs.py`: 15 passed, mutant SURVIVED. No
+      # `scripts/tests/test_run_tests_jobs.py`: the WHOLE file passed and the
+      # mutant SURVIVED. (Deliberately no test count — the first version of this
+      # line said "15 passed" and was stale within the same round, because a case
+      # was added after it was written. The finding is "nothing died", which does
+      # not depend on how many tests there are.) No
       # fixture reachable through the DEVRC_TEST_CGROUP_* seam can make it
       # matter — bash's `read` assigns its variables even when it returns
       # non-zero at EOF, and this walk RETURNS on the first numeric quota, so a
@@ -3762,11 +3772,15 @@ echo "  parallelism =${PYTEST_JOBS} pytest worker(s)$([ "$PYTEST_JOBS" -gt 1 ] &
 # 🔴 WHY IT EXISTS. `scripts/tests/test_run_tests_jobs.py` asserts on the banner
 # line above and on nothing after it, but every case still needs its own process
 # (each drives a different fake cgroup through DEVRC_TEST_CGROUP_ROOT/SELF), so
-# it cannot share one run. Measured 2026-09-08 on the workbench: a full nested
-# run costs ~150s wall, and the file has eleven of them — ~28 minutes of nested
-# runs added to the very tier this change exists to speed up, spawning 8 xdist
-# workers each inside an outer run that already has 8. With this seam each case
-# costs the preamble only.
+# it cannot share one run — ONE nested run per test case. Measured 2026-09-08 on
+# the workbench: a full nested run costs ~150s wall and spawns its own 8 xdist
+# workers inside an outer run that already has 8, so the cost added to the very
+# tier this change exists to speed up is ~150s TIMES the number of cases in that
+# file. With this seam each case costs the preamble only.
+# ⚠ Stated as a rate, not a total, on purpose: the first version said "eleven of
+# them — ~28 minutes" and both numbers were stale within the round that wrote
+# them (the file has 16 cases now). A total here drifts every time a case is
+# added; a rate does not.
 #
 # 🔴 IT CANNOT MANUFACTURE A GREEN. The exit is NON-ZERO on purpose, so the EXIT
 # trap emits `RESULT: FAIL (exit=3)`: a run that executed no tests must never be
@@ -3775,10 +3789,19 @@ echo "  parallelism =${PYTEST_JOBS} pytest worker(s)$([ "$PYTEST_JOBS" -gt 1 ] &
 # is this file's established "an environment precondition stopped the run before
 # it could say anything about the tests" code — the same one `--targets` and the
 # DEVRC_TEST_JOBS validation use — and is deliberately NOT 1 ("tests failed").
+# 🔴 ALL THREE LINES ON ONE STREAM. They used to be two on stdout and the third
+# on stderr, splitting a sentence mid-clause: a stdout-only reader got "…This is
+# a test seam for" with no object, and a stderr-only reader got "…never a way to
+# pass the gate." with no subject. The loudness this block relies on is exactly
+# the part that fragmented. stderr is the right stream for a warning — the
+# machine-read `RESULT:` line stays on stdout, where its consumers parse it.
+# The test cannot catch this on its own: it reads `stdout + stderr` concatenated.
 if [ -n "${DEVRC_TEST_BUDGET_ONLY:-}" ]; then
-  echo "run-tests: DEVRC_TEST_BUDGET_ONLY is set — stopping after the parallelism"
-  echo "           banner. NO TESTS RAN. This is a test seam for"
-  echo "           scripts/tests/test_run_tests_jobs.py, never a way to pass the gate." >&2
+  {
+    echo "run-tests: DEVRC_TEST_BUDGET_ONLY is set — stopping after the parallelism"
+    echo "           banner. NO TESTS RAN. This is a test seam for"
+    echo "           scripts/tests/test_run_tests_jobs.py, never a way to pass the gate."
+  } >&2
   exit 3
 fi
 

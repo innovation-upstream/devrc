@@ -209,17 +209,47 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   below). Running the full tiers is still allowed and sometimes right — a broad refactor, a
   change to the runners themselves — but it is a judgement, not a checklist item, and if you
   do run one, name the tier and the base sha in the claim.
-  🔴 **CI (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) is ADVISORY, and it is the only
-  automated signal that exists. Read it.** It posts on the PR head, it does not block, and
-  nobody is stopped from merging over a red one. `gh pr checks <n>`. A red check is
-  information you are expected to act on; merging through one is a decision you own and should
-  say out loud. Its tier is the `nix build` sandbox, which is blind to different things than a
-  dev-host run — see the two-tier bullet below.
-  🔴 **BE HONEST ABOUT WHAT THIS IS: it is LESS SAFE, deliberately.** Protection is off, the
-  local mandate is gone, and the remaining backstop is one advisory check plus whoever is
-  reading the PR. That is a knowing trade of safety for speed made by the operator, not an
-  arrangement that has been made safe by rearranging it. Nothing in this bullet should be read
-  as reassurance. ⚠ 2026-08-23 measured the OPPOSITE state
+  🔴 **CI (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) is ADVISORY — the only automated
+  signal on a PR, and NOT the only one in the system. Read it.** It posts on the PR head, it
+  does not block, and nobody is stopped from merging over a red one. `gh pr checks <n>`. Its
+  tier is the `nix build` sandbox, which is blind to different things than a dev-host run —
+  see the two-tier bullet below.
+  🔴 **A RED CHECK IS WEAK EVIDENCE ON ITS OWN, AND THE RATE IS MEASURED — do not act on the
+  colour, act on the failing test.** Re-derived 2026-09-09 over the 60 most-recently-updated
+  PRs, taking the NEWEST `tekton/devrc-pytests` status per head from
+  `/repos/…/commits/{sha}/statuses`: **21 of 50 terminal verdicts were not success (42%) — 12
+  `failure`, 9 `error` — and a further 10 of the 60 heads (17%) were still `pending`, i.e.
+  never resolved at all.** An independent audit measurement the same day, sampled minutes
+  apart, got 45% and ~10%; treat the pair as "roughly two in five reds are noise", not as a
+  constant. Two consequences: **read the failing test's name and ask whether your diff can
+  reach it** before debugging anything (six recent reds across six branches were six DIFFERENT
+  unrelated tests, with `origin/main`'s own run clean), and a green is one sample from that
+  same tier — do not upgrade it into a guarantee. ⚠ `error` is not `failure`; see the
+  `COULD NOT RUN` note further down. 🔴 **Merging through a red is still a decision you own
+  and should say out loud** — the noise rate is a reason to investigate, never a reason to
+  stop looking.
+  🔴 **BUT A BAD MERGE IS DETECTED, NOT UNDETECTED — `scripts/main-green-check.sh` is the
+  deadman, and it is LIVE.** Verified 2026-09-09 on the workbench: `main-green-check.timer` is
+  `active`, `OnUnitActiveSec=4h` (last run 10:17:35, next 14:17:35), enabled by
+  `enableMainGreenDeadman = true` in `nix/home.nix`. It runs **both `nix build` sandbox tiers
+  — the authoritative ones — against the current tip of `origin/main`**, one at a time,
+  **REPRODUCES a red before alerting** (rc 10 = `RED, REPRODUCED — failed BOTH attempts`), and
+  escalates through `notify-failure@`, the DND-defeating toast class. Its own header says it
+  exists *because* protection is off, and names the two commits that landed straight on `main`
+  and broke it on 2026-09-03 with a human noticing hours later by accident. **So the detection
+  window for a broken `main` is ≤4h, not "never".** ⚠ It REPORTS ONLY — never fixes, never
+  reverts, never pushes — and it is a `serverMode` unit, so it is running on the workbench and
+  you should not assume it on any other host. This bullet named `drift-check` ten times and
+  this zero times, which is how the sentence below came to be written wrong.
+  🔴 **BE HONEST ABOUT WHAT THIS IS: it is LESS SAFE, deliberately.** Protection is off and the
+  local mandate is gone, so nothing PREVENTS a bad merge; what remains is an advisory check
+  with a measured ~42% noise rate, whoever is reading the PR, and a 4-hourly deadman that
+  catches it AFTER the fact. That is a knowing trade of safety for speed made by the operator,
+  not an arrangement that has been made safe by rearranging it. **Prevention was traded for
+  detection — say it that way**, and note that an earlier draft of this very bullet claimed the
+  backstop was "one advisory check plus whoever is reading the PR", which was false and
+  understated the net by a whole subsystem. Nothing here should be read as reassurance.
+  ⚠ 2026-08-23 measured the OPPOSITE state
   (`contexts` = both checks, `enforce_admins: true`), and earlier that same day `contexts`
   held nodetests ALONE, which collects `*.test.mjs` only — so a Python-only PR could not
   fail it and read `UNSTABLE` with pytests red. **Check the LIST, never that the key
