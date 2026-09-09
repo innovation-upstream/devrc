@@ -689,6 +689,38 @@ run duerr-truncation-added-unguarded \
   : > "$DU_ERR"'
 
 echo
+echo "== the top-level enumerator (section 2's entry set) =="
+# 🔴 The defect these pin: section 2 read `[ -d "$d" ] || continue`, so a
+# top-level entry that was not a directory got no row. /swapfile is 48.00 GiB on
+# this host and was absent from the byte column entirely.
+# 🔴 `-type d` GOES IN THE PRINT BRANCH, and the first draft of this row put it
+# after `-maxdepth 1` instead — where it is INERT and the row SURVIVED, saying
+# nothing about the guard. In `\( … \) -prune -o -print0`, a non-directory simply
+# FAILS the left side and falls through to `-o -print0`, so it is printed anyway.
+# MEASURED on a fixture holding one dir and one file: the inert form emitted
+# both. A mutant must be the narrowest expression that can actually be wrong.
+run toplevel-directories-only \
+  "a top-level regular FILE is accounted for (the /swapfile shape)" \
+  '    -o -print0' \
+  '    -o -type d -print0'
+
+# 🔴 Not cosmetic: a newline-delimited enumeration splits a name containing a
+# newline into phantom paths, which `find` then logs as "vanished mid-scan
+# (benign, transient)" — an under-count reported as harmless.
+run toplevel-newline-delimited \
+  "a name containing a newline is emitted as ONE NUL-terminated record" \
+  '    -o -print0' \
+  '    -o -print'
+
+# 🔴 The `//` normalisation. Its guard is a COUNT, not a string match: deleting
+# this line makes `find ""` fail, and a bare "no doubled slashes" assertion then
+# passes on empty output — a survivor in a fully green suite, measured.
+run toplevel-root-normalisation-dropped \
+  "a root of '/' enumerated 0 entries" \
+  '  [ -n "$root" ] || root=/' \
+  '  :'
+
+echo
 echo "== SURVIVES control — a behaviour-free edit must NOT kill anything =="
 survives comment-reword \
   '# Root-privileged disk accounting for the workbench root filesystem.' \
