@@ -18,50 +18,50 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- **`ZacxDev/cairn` has SIX merged PRs and NONE open.** #1 SIGHUP hot-reload, #2 the ledger
+- **`ZacxDev/cairn` has EIGHT merged PRs and NONE open.** #1 SIGHUP hot-reload, #2 the ledger
   narrowing (`c8aee7203`), #3 `8e4ef84` (spawn-port TOCTOU), #4 `218b6c1` (the nix flake),
-  #5 `9213726` (CI floor + reload-atomicity control), #6 `9d58f02` — rank 12, leakscan
-  coverage derived from content. Verified by CONTENT, never ancestry.
-- **devrc #1381 — ✅ MERGED `baa664e4`, DEPLOYED and VERIFIED.** `cairn who` is re-homed as
-  its own `cairn-who` binary and `unbounded_timeout_reason` extracted to
-  `scripts/lib/timeouts.py`. Three audit rounds; the ladder ended on the **ATTRIBUTION GATE**
-  (two consecutive zero-payload fix rounds), not on a clean round — every round found a defect
-  in the PREVIOUS round's fix, and none in the shipped behaviour. `ship.sh` converged BOTH
-  hosts to `39c31521`; measured after: `cairn-who` on PATH → `devrc/scripts/cairn-who`,
-  `--help` rc 0; `cairn who 42` → exit 2 on both hosts; deployed `SKILL.md` 0× `cairn who`,
-  3× `cairn-who`; `cairn doctor --no-sync` exit 10 all-OK; `ls-entries` 225 over the network.
-- **devrc #1394 — ✅ MERGED `65d8bfba`.** Records the operator decision of 2026-09-08:
-  **CONSOLIDATE ONTO THE PIN.** The fork is CLOSED; it said "unanswered" in three places and
-  all three were fixed, because one stale copy re-opens a settled question.
-- 🔴 **RANK 3 HALF 2, SLICE 2 IS CLAIMED AND IN FLIGHT — PUSHED as devrc PR #1406**
-  (`feat/cairn-flake-pin`, head `f98be263`, worktree `~/workspace/devrc-flake-pin`).
-  `claim-work cairn-oss-multi-instance-3` is HELD for exactly that slice, NOT the
-  entry_shape/writer consolidation. ⚠ **SIX FILES ARE UNCOMMITTED in that worktree** — the
-  round-1 audit fix round, which exists nowhere else. Do not delete the worktree.
-  ⚠ Earlier revisions of this doc described commit `4c77daab` as "unpushed, no PR yet"; that
-  is superseded — do not read it as current or conclude the slice stalled.
-- **#1406 has had a round-1 adversarial audit.** One 🔴 (`cairn validate` goes silent on the
-  pinned client — see the investigation block), one 🟡 (a guard that passed while deploying a
-  dangling symlink), six 🟢. All fixed in the worktree; **round 2 has NOT been run**, and by
-  the stop rule it is warranted because round 1 produced findings that needed fixing.
-- **Rank 3's closing condition re-verified NOT met 2026-09-08** — expected while #1406 is
-  open: `readlink -f ~/.local/bin/cairn` → `/home/zach/workspace/devrc/scripts/cairn`,
-  `grep -c cairn ~/workspace/devrc/flake.nix` → **0**. #1406 additionally needs a
-  `home-manager switch` after merge; unlike #1381 there is NO capability gap in the interim.
-- **Rank 12 — ✅ MERGED and CLOSED**, claim `cairn-oss-multi-instance-12` RELEASED.
-- **Ranks 4, 8, 13, 15 remain unclaimed and untouched.** **Rank 11 re-verified live and still
-  refused** (`cairn create --scope cairn …` → rc 6, `[not-found]`) — it is an OPERATOR action.
-- 🔴 **A cairn-built image is still NOT PUBLISHED.** #4 produces a loadable tarball; nothing
-  pushes it to a registry. Rank 7 remains blocked on publication (rank 13), not buildability.
-- **No civitai instance exists.** The homelab pod still runs its own copy.
-- **Session capture** remains DESIGNED, DECIDED and MERGED as a proposal, and BUILT NOWHERE
-  (`claudedocs/proposal-cairn-session-capture.md`, `e16f9609a`). Rank 8.
-- **The opencode exporter** shipped (`f58d2df04`, #1338) and still has **no caller**.
-- **This session did NOT resolve a clawgate task.** `clawgate_handoff.sh resolve` exits **6**:
-  one linked task (#527, model-benchmarking) with role `read`, none `worked`. Filing or
-  reading a task is not doing its work, and #527 is not this effort — so **no
-  `clawgate-task:` field was written**. That is a different outcome from the previous
-  revision's exit 5 (no links at all), and neither is a clean bill of health.
+  #5 `9213726` (CI floor + reload-atomicity), #6 `9d58f02` (rank 12, leakscan coverage
+  derived from bytes), **#7 `059ec17` (rank 15, the recall drill-down flags)** and **#8
+  `3167e44` (rank 13, the build-push path)**. Verified by CONTENT, never ancestry — a squash
+  is never an ancestor. CI green on `main` after each, read at JOB level, not off the rollup.
+- 🔴 **TWO MERGED THINGS ARE NOT LIVE, AND THAT IS THE MOST IMPORTANT LINE HERE.**
+  - **#7 fixes the OSS client**, but this host still runs devrc's copy:
+    `readlink -f ~/.local/bin/cairn` → `/home/zach/workspace/devrc/scripts/cairn`. So
+    `cairn recall --ref` is STILL BROKEN HERE until #1406 lands and the pin moves past
+    `059ec17`. Rank 15 is deliberately NOT marked done.
+  - **#8 publishes nothing.** It adds the path; the push is an operator step that has not
+    happened. Rank 7 stays blocked.
+- **Rank 12 CLOSED** (claim released) — closing condition watched on the MERGED tree, not
+  read off the diff: the gate prints `SKIPPED tests/leakscan.py — the gate's own fixtures,
+  exempt by name`, then `38 file(s) scanned, 1 skipped`, `0 findings`, rc 0.
+- **Rank 15 merged upstream** (claim released). **Rank 13's path merged** (claim released);
+  the publish is blocked on two strings only the operator can give — the registry and the
+  version tag (deployed is `0.7.0`).
+- **IN FLIGHT, NOT PR'd: `fix/client-focus-window`** in `~/workspace/cairn` (worktree
+  `/tmp/wt-cairn-focus`, branch off `3167e44`). The full suite was still running when this
+  doc was written — **do not PR it without reading that result.** Rank 19.
+- **Store writes landed this session:** the stale `2026-08-29: OPEN:` bullet in `devrc/cairn`
+  is now `RESOLVED caec932e:` (`cairn put`, revision `da318a4c6a96f9d8`), and a session bullet
+  was appended (`083552c54491cc8b`). **Control that it did what it claimed:** the index row
+  moved `17 nuance / 🔴 2 OPEN` → `18 nuance / 🔴 1 OPEN`. The surviving OPEN is a DIFFERENT
+  bullet (`2026-09-01`, the scope merge rule), deliberately left — no evidence was gathered
+  either way, and closing an unverified marker is worse than leaving it.
+- 🔴 **RANK 3 SLICE 2 IS ANOTHER SESSION'S, STILL IN FLIGHT — devrc PR #1406 open, claim held
+  (`rc 10`), and SIX FILES ARE UNCOMMITTED in its worktree `~/workspace/devrc-flake-pin`
+  (its round-1 audit fix round). DO NOT delete that worktree — the fixes exist nowhere else.**
+  Carried forward deliberately: this session did not touch rank 3, and the line is the kind a
+  `State now` replace silently drops.
+- **A cairn-built image is still NOT PUBLISHED** — #4 makes a loadable tarball, #8 adds the
+  push path, and nothing has pushed anything. Rank 7 remains blocked on that, not on
+  buildability.
+- **The devrc/OSS `lib/` fork stays DECIDED — CONSOLIDATE ONTO THE PIN**, recorded in
+  devrc **#1394 `65d8bfba`**. Not re-asked this session and not to be re-asked; carried
+  forward because a decision is the most durable thing a `State now` replace can drop.
+- **devrc docs merged:** #1400, #1413 (three corrections), #1419 (rank 15).
+- 🔴 **NO `clawgate-task:` FIELD** — `clawgate_handoff.sh resolve` exits **5**, 0 tasks. Its
+  own positive control shows the board answered 8 links for a different session, so the board
+  is reachable and the token accepted; but a WRONG id also answers 200 with an empty array, so
+  this is NOT a clean bill of health. No field was written and none was invented.
 
 ## Open investigations — live diagnosis state
 
@@ -355,6 +355,30 @@ taken now describes a tree that is about to change.
   `nix build github:ZacxDev/cairn/<rev>#cairn` then exercise each verb against a fixture
   cache and diff against `scripts/cairn`.
 
+### The `cairn` client never built a FOCUS WINDOW — FIXED on a branch, suite result unread
+- **Symptom + exact repro:** run both readers against the same store at the same instant.
+  `cairn recall --repo ~/workspace/devrc --no-sync | grep 'FEATURED IN FULL'` versus
+  `python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc | grep 'FEATURED IN FULL'`.
+- **Observed (with values), 2026-09-08:** client →
+  `most-recent fallback — newest entry file in \`devrc/\` (no handoff doc to read a path
+  window from)`; module → `resolved via claudedocs/handoff-cairn-oss-multi-instance.md — 11
+  of 48 quoted path(s) name it: devrc/scripts/cairn, scripts/lib/timeouts.py …`.
+  🔴 The parenthetical was **wrong about the world**, not merely unhelpful: the handoff doc
+  was there and the client never looked. `grep -c focus_window <client>` → **0**, while
+  `focus_window` is in the module's `__all__`. via: measurement
+- **Ruled out: that this is cosmetic.** It inverts the advice every skill gives — the wrapper
+  `/resume` step 4 PRESCRIBES was strictly worse than the raw module it says not to use. This
+  session ate it: the featured entry came back as `tests`, unrelated to the effort. via: measurement
+- **Ruled out: that the fix needs a new condition.** The module already has one
+  (`mode == DEFAULT_MODE and args.scope is None`); the client now mirrors it rather than
+  inventing a rule, so `--scope` still falls back — correct, not a bug. via: code
+- **Leading hypothesis:** none needed; cause and fix are both known. Branch
+  `fix/client-focus-window` passes `focus_paths`/`focus_source` and its output is byte-for-byte
+  the module's.
+- **Next probe:** read `/tmp/focus-suite.log` for `PYTEST_RC=`. Green ⇒ open the PR. The
+  regression test is RED at base `3167e44` on its own assertion; the fixture uses a repo NAMED
+  for its scope, because passing `--scope` would suppress the very window under test.
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
@@ -453,19 +477,84 @@ taken now describes a tree that is about to change.
     belongs to that session, so it was not removed here.
     forcing: security — the repo is public and this gate is the reason it can be
 
-13. **Publish a cairn-built image to a registry.** Rank 7 is blocked on this. ⚠ Decide FIRST
-    whether the deployed pod should be the nix image or keep the Dockerfile build.
-    **Closing condition:** a tag in the registry built from cairn at or past `b25abb5`.
+13. 🔨 **PUBLISH PATH BUILT AND MERGED — `ZacxDev/cairn` #8, squash `3167e44`. THE PUBLISH
+    ITSELF IS AN OPERATOR STEP AND HAS NOT HAPPENED.** ⚠ **The "decide nix vs Dockerfile"
+    premise was the WRONG FORK** and is retired: the deployed image is
+    `harbor.homelab.lan/library/subsystem-store-api:0.7.0`, built by **devrc's**
+    `scripts/subsystem-store-api/build-push.sh` from the **pre-extraction** server — and
+    cairn had no publish script at all. Harbor is a LAN host, so GitHub Actions cannot reach
+    it; this is a local `docker build` + push, not CI. #8 ports the script in, with the
+    registry as a REQUIRED parameter (`CAIRN_REGISTRY`) rather than a hardcoded internal
+    hostname, which in a public repo is both a leak and wrong for any other operator.
+    **Measured, so the upgrade is characterised rather than assumed:** the raw `server.py`
+    diff against the deployed copy is 659 lines and says nothing, because the extraction
+    rewrote docstrings wholesale. Stripping comments+docstrings and diffing the executable
+    token stream (file-against-itself control = 0) gives **638 tokens cairn HAS and the
+    deployed copy lacks** — `import signal`, `RELOAD_PREFIX`/`RELOAD_LOADED`/`RELOAD_REFUSED`,
+    `redacted_field()`, `MAX_SCOPE_CHARS` — against **17 the deployed copy has and cairn
+    lacks, every one a fragment of a reworded error-message STRING, not a construct.** So the
+    cairn server is a strict behavioural SUPERSET, and the SIGHUP reload is exactly what
+    rank 7 waits on.
+    **Controls in the script, one of them new:** `/data` must be empty in the image (a public
+    repo must not ship a store); the code must IMPORT (the positive half — an image with no
+    filesystem reports the same reassuring zero); and **the image's `server.py` must carry
+    SIGHUP**, so "we published the new server" and "the new server does the thing" are not
+    one unchecked claim. That guard was WATCHED to fail in place, for its own reason, after
+    the earlier controls printed OK — a first attempt ran the mutant from `/tmp`, where
+    `ROOT` became `/` and the BUILD failed instead, which is a mutant dying for a bystander's
+    reason and was not counted.
+    🔴 **BLOCKED ON TWO STRINGS ONLY THE OPERATOR CAN GIVE: the registry and the version tag**
+    (deployed is `0.7.0`). Publishing puts an artifact the cluster will pull into a registry,
+    so it was deliberately not done unasked. Everything else is proven: built locally
+    `--no-push`, all three controls green, image `sha256:1c616d5a4130`.
+    **Closing condition:** a tag in the registry built from cairn at or past `b25abb5`, and
+    `homelab-infra`'s `image:` line able to name it.
     forcing: none
 
 14. ✅ **DONE AND MERGED 2026-09-08 — `ZacxDev/cairn` #5, `9213726`** (same PR as rank 10).
     forcing: gate — it turned the public repo's only CI gate red on 2 of its first 26 runs
 
-15. **`cairn recall` prescribes flags its own CLI rejects.** `--ref` exits 2. Not re-checked
-    this session.
-    **Closing condition:** a merged devrc PR after which `cairn recall --ref <name>` prints
-    one entry, OR the footer and `/resume` stop prescribing flags the wrapper lacks.
-    forcing: none
+15. 🔨 **FIXED UPSTREAM AND MERGED — `ZacxDev/cairn` #7, squash `059ec17` — BUT NOT LIVE HERE.**
+    The digest's footer prescribed `--ref <name>` / `--limit N` and the client exited **2**
+    (`unrecognized arguments`), so a reader following the output it had just been shown hit a
+    dead end and fell back to the raw module. **Root cause was structural, and the fix is not
+    the flags:** `main()` derived `mode`/`limit`/`page` AND enforced the flag-conflict rules
+    inline, while the client reaches the module as a **library**, never through `main()` — so
+    offering the flags meant open-coding both at a second site. Extracted instead:
+    `recall_selection()` and `reject_recall_flags()`, called by BOTH, so `main()` got shorter
+    rather than the wrapper growing a copy. All four flags wired (`--ref`, `--list`, `--limit`,
+    `--page`), not just the two named here — fixing only `--ref` leaves the CLASS open, the
+    same enumeration-vs-derivation shape rank 12 closed.
+    **Evidence, split rather than totalled:** two tests RED at base `9d58f02` on their OWN
+    assertions (`rc=2 … unrecognized arguments: --ref`; `assert not missing`, after its
+    positive control passed, which is what proves the regex read the footer). A third fails at
+    base with `AttributeError` — API shape, **not** counted as regression evidence.
+    Live against the real store, because tests passing and the client working are different
+    claims: `--ref cairn` → rc 0, 70 lines (one entry, against a 31-entry digest); `--list` →
+    41; `--limit 2` → 99; `--page 1` → rc 0; `--list --limit 3` → refused rc 2 with the SHARED
+    wording. Suite 1707 passed / 0 failed; CI on `main` green, `collected=1707 failed=0
+    floor=1648`.
+    🔴 **A DEFECT THE CHANGE INTRODUCED, CAUGHT BY EXERCISING IT:** exposing `--limit` made
+    `recall()`'s `ValueError` reachable from the command line for the first time — `--limit 0`
+    printed a TRACEBACK at rc 1 where the module's own CLI has always answered a clean 2.
+    Guarded, watched before and after, pinned by a fourth test. Reachable by measurement.
+    ⚠ **Two failures the FULL suite found that a 4-test subset did not** — "a test subset is
+    not the gate", again: the mutation battery refused orphaned anchors (`mutation anchor
+    occurs 0x`) because moving the guards left two mutants reading `args.*`, and a TEXT ledger
+    (`"rc.main(" not in src`) tripped on a COMMENT of mine quoting the callee — a false RED, so
+    the comment was reworded and the guard left alone. ⚠ That ledger cannot tell a call from a
+    comment; recorded, not fixed.
+    🔴 **NOT CLOSABLE UNDER THE OLD WORDING, AND MERGED IS NOT LIVE.** The fix is in the OSS
+    client; this host still runs devrc's `scripts/cairn` (`readlink -f ~/.local/bin/cairn` →
+    `devrc/scripts/cairn`, re-verified after the merge), so `--ref` is still broken HERE.
+    **Closing condition, re-pointed so it is checkable again:** `ZacxDev/cairn` #7 merged
+    (done, `059ec17`) **AND** #1406 landed **AND** the flake input bumped past `059ec17`,
+    after which `cairn recall --ref <name>` prints one entry on this host.
+    ⚠ **Deliberately NOT done here, reported instead:** the client never computes a focus
+    window, so the digest's featured-entry pick can only ever say `most-recent fallback` —
+    which is exactly this doc's own "the one body printed in a 98.7 KB digest was irrelevant by
+    construction" complaint. Different defect, real behaviour change, its own PR.
+    forcing: none — it cannot fire before the pin moves
 
 16. **Nothing in devrc's gate ever EXECUTES the deployed `cairn` binary.** Every cairn guard
     reads `flake.nix` / `flake.lock` / `nix/home.nix` / `nix/sessionVariables.nix` as TEXT.
@@ -497,6 +586,28 @@ taken now describes a tree that is about to change.
     writer's. (c) `claude/skills/cairn/SKILL.md`'s "consolidated in a later slice" names no
     owner and no mechanism. (a) and (b) both disappear if rank 3 slice 3 lands.
     **Closing condition:** rank 3 slice 3 merges, or a PR that addresses (a)–(c) explicitly.
+    forcing: none
+
+
+19. 🔨 **IN FLIGHT — the client never built a FOCUS WINDOW, so its digest could only ever
+    say `most-recent fallback`.** Branch `fix/client-focus-window` in `~/workspace/cairn`,
+    **not yet PR'd** (full suite was still running at hand-off). 🔴 **The wrapper `/resume`
+    PRESCRIBES was strictly WORSE than the raw module it tells readers not to use** —
+    measured on the real store, same repo, same instant:
+    client → `most-recent fallback — (no handoff doc to read a path window from)`;
+    module → `resolved via claudedocs/handoff-cairn-oss-multi-instance.md — 11 of 48 quoted
+    path(s) name it`. That parenthetical was **wrong about the world**, not merely unhelpful:
+    the doc was there and the client never looked. This session ate it — its featured entry
+    came back as `tests`, unrelated to anything.
+    Fix: build the window under the MODULE'S OWN condition
+    (`mode == DEFAULT_MODE and args.scope is None`), never one invented here, and pass
+    `focus_paths`/`focus_source`. Verified both directions: with `--repo` the client's output
+    is now byte-for-byte the module's; with `--scope` it still falls back, which is correct.
+    Regression test is RED at base `3167e44` on its own assertion, printing the wrong line
+    verbatim; the fixture reaches the path a real caller does (a repo NAMED for its scope,
+    since `--scope` would suppress the very window under test).
+    **Closing condition:** a merged `ZacxDev/cairn` PR after which `cairn recall --repo <r>`
+    on a repo with a handoff doc reports `resolved via …` rather than `most-recent fallback`.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -1009,23 +1120,69 @@ tested on both sides, including the accepted case of a NUL past the sniff window
   still saying `cairn who`. `mkOutOfStoreSymlink` names the link's TARGET, not who creates
   the link — activation does.
 
+**🔴 A HANDOFF-WRITE GUARD FIRED ON A TEST FIXTURE, AND THE FIXTURE LOOKED EXACTLY LIKE A
+HANDOFF.** The Stop hook reported this session had read `handoff-focus.md` and written no
+handoff. That file is not a handoff — it is the pytest fixture created at
+`<tmp>/widget-cfg/claudedocs/handoff-focus.md` to exercise the focus-window resolver, which by
+construction must be named `claudedocs/handoff-*.md` to be found at all. **A guard that
+matches a PATH SHAPE cannot tell a document from a fixture of a document**, and the fixture is
+mandatory — the thing under test is "does the reader find `claudedocs/handoff-*.md`". The
+guard's substance was right anyway (real work WAS unrecorded), so it was obeyed rather than
+dismissed. Worth knowing before someone "fixes" the resolver's fixture naming: it cannot change.
+
+**🔴 THE PRESCRIBED TOOL WAS WORSE THAN THE DEPRECATED ONE, AND ONLY A SIDE-BY-SIDE SHOWED
+IT.** `cairn recall` and `subsystem_recall.py` were never compared on the same repo at the
+same moment, so a whole class of "the digest featured something irrelevant" was absorbed as
+normal for a year of sessions. **When a wrapper and the thing it wraps both still work, diff
+their OUTPUT on one input** — neither one's output is suspicious alone.
+
+**🔴 THE FORK I PUT TO THE OPERATOR WAS THE WRONG FORK.** Rank 13 was framed as "nix image vs
+Dockerfile" and I asked which. Measuring first would have shown the real blocker: the deployed
+image is built by DEVRC's script from the PRE-EXTRACTION server, and cairn had no publish
+script at all — so the question was never which image, it was that this repo could not publish
+one. **A recorded fork can be stale in its PREMISE, not just its answer; re-measure before
+putting it to a human.**
+
+**A RAW LINE DIFF CANNOT TELL PROSE FROM CODE, AND THE EXTRACTION MADE THAT THE WHOLE
+QUESTION.** `server.py` differs from the deployed copy by 659 lines, which supports any story
+you like. Stripping comments and docstrings and diffing the executable TOKEN stream — with a
+file-against-itself positive control returning 0 — resolved it: 638 tokens cairn has and the
+deployed copy lacks, against 17 the other way, every one of those 17 a fragment of a reworded
+error-message string. **Strict superset, measured in ten minutes; unmeasurable by eye.**
+
+**A MUTANT MUST BE RUN WHERE THE CODE LIVES.** The `--no-push` control for #8's SIGHUP guard
+was first run from `/tmp`, where `ROOT` resolved to `/` and the BUILD failed — rc 1, but for a
+bystander's reason. Re-run in place it failed with the guard's OWN message, AFTER the two
+earlier controls printed OK, which is what proves it reachable rather than shadowed.
+
+**🔴 EDITING SOURCE DURING A PYTEST RUN INVALIDATES THAT RUN — this repo says so and I did it
+anyway.** A full suite was in flight while `cairn` and a test file were edited; the result was
+discarded and re-run rather than read. Cost ~9 minutes, and reading it would have cost a wrong
+belief about the tree.
+
 ## How to verify
+
+🔴 **Verify a merge by CONTENT, never ancestry — a squash is never an ancestor.**
+
 ```bash
-# 1. #1406's own state — six files should still be uncommitted until the fix round lands
-git -C ~/workspace/devrc-flake-pin status -s
-gh pr view 1406 -R innovation-upstream/devrc --json state,mergeable,mergeStateStatus
+# the four merges this session landed
+gh pr view 6 -R ZacxDev/cairn --json state,mergeCommit   # MERGED 9d58f02
+gh pr view 7 -R ZacxDev/cairn --json state,mergeCommit   # MERGED 059ec17
+gh pr view 8 -R ZacxDev/cairn --json state,mergeCommit   # MERGED 3167e44
+git -C ~/workspace/cairn grep -c 'reject_recall_flags\|recall_selection' origin/main -- lib/subsystem_recall.py cairn
+git -C ~/workspace/cairn grep -c CAIRN_REGISTRY origin/main -- server/build-push.sh   # 4
 
-# 2. the gate, and a CONTROL on plain main — never read one without the other
-nix build ~/workspace/devrc-flake-pin#checks.x86_64-linux.pytests --no-link
-nix log $(nix path-info --derivation ~/workspace/devrc-flake-pin#checks.x86_64-linux.pytests) \
-  | grep -E '^\s+(PASS|FAIL)\s+scripts/tests\s|TOTAL collected'
+# 🔴 MERGED IS NOT LIVE — this is the line that matters
+readlink -f ~/.local/bin/cairn        # STILL devrc/scripts/cairn; #7 is not live here
+cairn recall --ref cairn --scope devrc >/dev/null 2>&1; echo $?   # still 2 until the pin moves
 
-# 3. slice 1 is live on BOTH hosts (already verified 2026-09-08)
-cairn-who --help >/dev/null; echo "cairn-who rc=$?"      # expect 0
-cairn who 42 >/dev/null 2>&1; echo "cairn who rc=$?"     # expect 2
-grep -c 'cairn who' ~/.claude/skills/cairn/SKILL.md      # expect 0
+# rank 19, in flight — read the suite BEFORE opening a PR
+grep PYTEST_RC /tmp/focus-suite.log
+python3 /tmp/wt-cairn-focus/cairn recall --repo ~/workspace/devrc --no-sync | grep 'FEATURED IN FULL'
+#   expect: "resolved via claudedocs/handoff-…" — the base prints "most-recent fallback"
 
-# 4. the validate divergence this session found
-python3 ~/workspace/devrc/scripts/lib/subsystem_touch.py \
-  --store ~/.cache/subsystem-store --validate --scope devrc | wc -c   # expect ~5765, 4 blocks
+# the store writes, by the badge rather than by the write succeeding
+cairn recall --repo ~/workspace/devrc --no-sync | grep -a '^  cairn '   # 18 nuance, 🔴 1 OPEN
 ```
+Expected: #6/#7/#8 MERGED at those shas; `readlink` still resolving into `devrc/scripts/cairn`
+(that is rank 3's pin, not a fault); the `devrc/cairn` row at `18 nuance / 🔴 1 OPEN`.
