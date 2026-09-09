@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -83,7 +84,17 @@ def _narrow_cpus(n: int) -> list[int] | None:
     Restricting the child's affinity mask makes `nproc` small enough that a
     quota can sit between it and the cap, which is the only arrangement in which
     "the walk may only NARROW" is observable at all.
+
+    🔴 VIA `taskset`, NOT `preexec_fn`. `subprocess`'s `preexec_fn` runs Python
+    in the child between fork and exec, and this suite runs under pytest-xdist,
+    whose workers are threaded — forking a threaded process and then allocating
+    in the child is the classic deadlock, and a deadlock is the one failure mode
+    worse than a red test. `taskset` is in this repo's own gate toolchain
+    (`gateTools` in flake.nix carries `pkgs.util-linux`), so it is present in
+    the sandbox tier as well as the dev shell.
     """
+    if shutil.which("taskset") is None:
+        return None
     allowed = sorted(os.sched_getaffinity(0))
     if len(allowed) < n:
         return None
@@ -98,8 +109,8 @@ def _run(env_overrides: dict[str, str], cpus: list[int] | None = None):
     preamble instead of a whole nested suite. Every assertion in this file is
     about that one line.
 
-    `cpus`, when given, is applied to the CHILD's affinity mask only — GNU
-    `nproc` honours it, so this is how a case pins the runner's fallback input
+    `cpus`, when given, runs the child under `taskset` — GNU `nproc` honours the
+    affinity mask, so this is how a case pins the runner's fallback input
     without touching this process or the machine.
     """
     env = dict(os.environ)
@@ -118,13 +129,15 @@ def _run(env_overrides: dict[str, str], cpus: list[int] | None = None):
     env.pop("DEVRC_TARGETS", None)
     env["DEVRC_TEST_BUDGET_ONLY"] = "1"
     env.update(env_overrides)
+    argv = ["bash", str(RUNNER), str(REPO)]
+    if cpus is not None:
+        argv = ["taskset", "-c", ",".join(str(c) for c in cpus)] + argv
     proc = subprocess.run(
-        ["bash", str(RUNNER), str(REPO)],
+        argv,
         capture_output=True,
         text=True,
         env=env,
         timeout=900,
-        preexec_fn=(None if cpus is None else (lambda: os.sched_setaffinity(0, set(cpus)))),
     )
     return proc
 
