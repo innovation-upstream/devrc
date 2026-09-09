@@ -1577,8 +1577,9 @@ class TestSkillDocsArePinned:
         # It pinned `cairn sync && cairn validate --scope <scope>` until
         # `~/.local/bin/cairn` became the PINNED OSS package, which reimplements
         # `validate` on the reader's resolver instead of shelling THIS module.
-        # MEASURED on the built package against the live cache: 76 B of output
-        # and exit 0, against this writer's 5,765 B carrying `entry shape:`,
+        # MEASURED on one scope of the live cache, both clients at the locked
+        # rev: the package writes 0 B to STDOUT (77 B of banner on stderr) and
+        # exits 0, against this writer's 5,766 B of stdout carrying `entry shape:`,
         # `marker reachability:` and `dropped lines:` — the last meaning content
         # is ALREADY LOST. Both "green"; only one looked. So the CLAIM below
         # stopped being true of the old spelling: the writer no longer finds its
@@ -1586,9 +1587,26 @@ class TestSkillDocsArePinned:
         # no longer what runs. The pin moves to the writer's own invocation,
         # which is precisely what this ledger exists to force — the module and
         # its only caller move together, or the suite goes red. It went red.
+        #
+        # 🔴 THE WHOLE INVOCATION, NOT THE FLAGS — AND THE FRAGMENT WAS MEASURED
+        # WALKABLE. The first version of this pin named
+        # `--store ~/.cache/subsystem-store --validate --scope <scope>`, which is
+        # a substring of FLAGS with nothing binding it to a WRITER. Two rewrites
+        # of the skill's mandated line left the suite GREEN at 79 passed while
+        # re-opening exactly what the move above closed:
+        #   * routing those same flags at the packaged client
+        #     (`cairn sync && cairn \` + the pinned continuation) — the flags are
+        #     still there, the writer is not;
+        #   * restoring `cairn validate` as the mandated line and demoting the
+        #     writer to an optional "for a fuller report" aside — the pinned text
+        #     survives inside prose that tells the reader not to run it.
+        # A guard on WORDS is walkable by rewording; the artifact here is PROSE,
+        # so the answer is to pin the whole normalised command. The cost is real
+        # and is the point: a cosmetic reword of this line now fails the test, and
+        # that is what buys a machine-readable claim about which BINARY runs.
         (
-            "--store ~/.cache/subsystem-store --validate --scope <scope>",
-            "🔴 the write-time parse check — the writer finds its own defect, "
+            "cairn sync && cairn-validate --scope <scope>",
+            "🔴 the write-time parse check — the WRITER finds its own defect, "
             "not a different tool in a later session",
         ),
         (
@@ -1922,8 +1940,20 @@ class TestSkillDocsArePinned:
         "sentence,why", HANDOFF_SENTENCES, ids=[w for _, w in HANDOFF_SENTENCES]
     )
     def test_handoff_step_sentence(self, sentence: str, why: str) -> None:
-        doc = INDEX_DOC.read_text(encoding="utf-8")
-        assert sentence in doc, (
+        # 🔴 NORMALISED ON BOTH SIDES. A pinned RUNNABLE COMMAND has to survive
+        # the markdown around it: a line wrapped with a `\` continuation, or
+        # re-indented inside its fence, is the same command and must not read as
+        # a deletion. Collapsing whitespace runs to one space on both sides is
+        # what lets a pin name a whole invocation instead of a fragment of flags
+        # — and a fragment is what this ledger measured walkable, twice, by
+        # rewrites that kept the flags and changed the binary. It does NOT weaken
+        # any other pin here: every one of them matched literally before, and a
+        # literal match is preserved by collapsing the same runs on both sides.
+        def norm(s: str) -> str:
+            return " ".join(s.split())
+
+        doc = norm(INDEX_DOC.read_text(encoding="utf-8"))
+        assert norm(sentence) in doc, (
             f"claude/skills/subsystem-index/SKILL.md no longer contains the sentence pinning {why}.\n"
             f"  missing: {sentence!r}\n"
             f"  Either restore it or change scripts/lib/subsystem_touch.py in the SAME\n"

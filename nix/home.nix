@@ -1486,6 +1486,33 @@ in
   # here together precisely so the difference is read as deliberate.
   home.file.".local/bin/cairn-who".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn-who";
+  # 🔴 `cairn-validate` — the WRITE-PROTOCOL parse check, and the THIRD member of
+  # the pair above rather than a variant of either. It is not `cairn validate`:
+  # once a host has switched, `~/.local/bin/cairn` is the pinned OSS package,
+  # whose `validate` reimplements the check on the READER's resolver instead of
+  # shelling this repo's writer — measured on one scope of the live cache, both
+  # clients at the locked rev: 0 bytes of STDOUT (a 77-byte stderr banner) and
+  # exit 0, where the writer prints 5,766 B on stdout carrying `entry shape:`,
+  # `marker reachability:` and `dropped lines:`. Both "green"; one of them is
+  # empty on the stream you read. So `claude/skills/subsystem-index/SKILL.md` must name the
+  # writer, and before this line the only spelling that RAN was a literal
+  # `python3 /home/…/devrc/scripts/lib/subsystem_touch.py` — an absolute checkout
+  # path inside the protocol this whole change exists to decouple from the
+  # checkout. On PATH for the same reason as `claim-work` and `cairn`: an agent
+  # working in another repo, in either runtime, can resolve a bare command.
+  # 🔴 SAME DEPLOY MODE AS `cairn-who`, FOR THE SAME REASON, AND NOT AS TIDINESS.
+  # `scripts/cairn-validate` reaches `lib/subsystem_touch.py` and
+  # `lib/subsystem_read_store.py` through its own
+  # `Path(__file__).resolve().parent / "lib"`, and there IS NO PACKAGE shipping
+  # those beside it — `subsystem_touch.py` is the devrc-only WRITER and is
+  # deliberately absent from the OSS repo, which extracted the reader only. A
+  # `home.file` copy would resolve into /nix/store and die on import before
+  # printing anything. So the asymmetry above is now two-against-one: `cairn` is
+  # in-store because its package installs script and `lib/` together; these two
+  # are out-of-store because nothing installs theirs. Read all three lines
+  # together and do not "tidy" them into agreement in either direction.
+  home.file.".local/bin/cairn-validate".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn-validate";
   # Claude Code hooks managed here (the script only — the settings.json
   # registration is per-host/unmanaged, as for bash-guard.py above, whose script
   # is likewise managed now). audit-pr-nudge fires
