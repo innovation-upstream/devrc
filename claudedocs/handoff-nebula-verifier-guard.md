@@ -16,22 +16,38 @@ The session's *stated* goal — a warning-free `home-manager switch` — is **DO
 
 ## State now
 
-- **Branch / PR:** `fix/nebula-verifier-guard-and-rc-classify` @ `9815a3cc` → **PR #1420 OPEN**, `MERGEABLE/CLEAN`, both Tekton checks SUCCESS. ⚠ **10 commits behind `origin/main`** — those checks are a claim about the *branch*, not the merged tree.
-- **Worktree:** `/home/zach/workspace/devrc-nebguard` (kept deliberately; six throwaway control worktrees removed).
+- **PR #1420 is MERGED** — squash commit **`b79ccfbe`**, `mergedAt=2026-09-09T06:29:23Z`. Verified **by content**, never by ancestry (a squash never makes the head an ancestor): `git show origin/main:nix/system/apply-nebula-relay.sh` carries 5 occurrences of `verifier_answered` / `die_verifier_did_not_run`.
+- **Branch `fix/nebula-verifier-guard-and-rc-classify` still exists locally** — `gh pr merge --delete-branch` could not remove it because the worktree `/home/zach/workspace/devrc-nebguard` has it checked out. Remote branch is gone. Clean up with `git -C /home/zach/workspace/devrc worktree remove /home/zach/workspace/devrc-nebguard && git -C /home/zach/workspace/devrc branch -D fix/nebula-verifier-guard-and-rc-classify`.
+- **This doc's own PR #1434 is still OPEN** (branch `docs/handoff-nebula-verifier-guard`, based on `main`, NOT stacked on #1420). That is why `claudedocs/handoff-nebula-verifier-guard.md` does not exist in the base clone and a `/resume` pointed at that path finds nothing.
 
-**DONE this session (all merged + shipped to both hosts):**
-- **#1384** `fix(neovim)` — adopt `withRuby=false`/`withPython3=false`. Warning count 2→0 (negative control: unset=2, `false`=0, `true`=0). Generation closure −43,551,224 B. Verified behaviourally: `nvim --headless` reports `ruby=0 py3=0 rubyprog=UNSET` on both hosts.
-- **#1398** `docs(secrets)` — `SECRETS.md` said age-keygen echoes secrets on malformed input; false since age 1.3.2. Measured **4/8 leak on 1.3.1, 0/8 on 1.3.2** (same fixtures both binaries; the 4 is the positive control).
-- **#1407** `fix(nebula)` — the verifier was exec'd via its `#!/usr/bin/env bash` shebang; the nix sandbox has **no `/usr`**, so 20 tests failed there while the dev-host tier stayed green. Now `run_check() { "$BASH" "$CHECK" "$@"; }`.
-- **News:** 410 unread cleared on **both** hosts, archived first to `~/.local/share/home-manager/news-archive-2026-09-08.txt` (3818 lines / 91,087 B each) so the 540 consumed ids are not lost. `read-ids` 0 → 540.
-- **#1410 CLOSED, not merged** — obsolete; #1405 fixed the same `h.civit.ai` leak first, deliberately (their comment cites the same guard).
+**The merge evidence — merged tree, base sha `37fb0646`, merged head `95a2c9a7`, both tiers run ONE AT A TIME:**
 
-**IN FLIGHT — #1420 (`9815a3cc`), 4 files, +458/−14.** Closes both round-1 audit findings on #1407 and all round-2 findings. Adds: a behavioural spelling-independent guard, `verifier_answered` rc classification at both call sites, 6 battery mutants, 2 `test_runtime_shebangs.py` allowlist entries.
+| tier | result |
+|---|---|
+| `nix build /tmp/wt-1420#checks.x86_64-linux.pytests` | `TOTAL collected=21439 passed=21437 skipped=2 failed=0` (floor 20441) · `RESULT: PASS (exit=0)` |
+| `nix build /tmp/wt-1420#checks.x86_64-linux.nodetests` | `TOTAL suites=5 files=41 tests=1449 pass=1449 fail=0` (floor 1367) · `RESULT: PASS (exit=0)` |
 
-**Deploy/verify status — be precise:**
-- `home-manager switch` is **clean on both hosts**, verified by re-running the operator's exact command. Only the upstream `install`→`add` line remains (home-manager's own; they fixed it in #8756 then **reverted** it in #8835 for Lix — issue #9598 open, no PR).
-- Both hosts converged + switched at `03d7e0ad` via `ship.sh`.
-- **#1420 is NOT merged and NOT deployed.** `nix/system/**` ships only by git checkout and is hand-run under `sudo` — nothing in the flake reads it, so no deploy is pending.
+Read from each derivation's own `RESULT:` line via `nix log`, not from the piped exit code.
+
+**Test-count delta — no loss.** Collect-only on the two changed files, both trees: `origin/main` **39** → merged **49**, i.e. **+10**. ⚠ The PR body's verification table claims **+8** (21127 → 21135); that number predates `5c102590` and `9815a3cc`, which added two more cases. The body was stale against its own head — the direction is growth either way.
+
+**The regression guard was watched RED, this session, not taken on the previous session's word.** Mutation M-FH-1 (`run_check() { "$BASH" "$CHECK" "$@"; }` → `run_check() { "$CHECK" "$@"; }`) applied to a `cp -a` copy, driven via `DEVRC_TEST_NEBULA_DIR`, `__pycache__` purged and `PYTHONDONTWRITEBYTECODE=1`:
+
+```
+control (unmutated):  40 passed in 62.96s
+mutant  M-FH-1:        2 failed, 38 passed in 63.04s
+  FAILED test_the_verifier_is_never_execed_via_its_own_shebang
+  FAILED test_the_verifier_runs_with_its_shebang_BROKEN
+```
+
+Matrix: **red on pre-change behaviour, green at HEAD**, killed by the two named tests. (The handoff's earlier `2 failed, 37 passed` was against a 39-test tree; 38 is the same result on a 40-test tree.)
+
+**Audit ladder round 3 on the `9815a3cc` delta — CLEAN, no findings. Ladder closed.** Round 2 produced findings, so a further round was owed; a clean round ends it and none was run to confirm it. What was checked:
+- Flags declared L115–120, first reassignment L532 (`PATCHED=1`), first read L182. Nothing touches them in between — the move is inert beyond removing the `:-` fallback.
+- `trap finish EXIT` installs at **L496**, *after* the preflight call site, so a preflight abort prints no trap paragraph while `PATCHED=0`. Matches the comment's claim.
+- The four surviving `${VAR:-…}` (L65–68) are the deliberate `NEBULA_*` config knobs the tests drive, not internal state flags. The inherited-env hazard class is fully closed.
+
+**Deploy status: nothing is pending.** `nix/system/**` ships only by git checkout and is hand-run under `sudo`; nothing in the flake reads it. No `ship.sh` run is owed for this change.
 
 ## Open investigations — live diagnosis state
 
@@ -71,19 +87,36 @@ The session's *stated* goal — a warning-free `home-manager switch` — is **DO
   ```
   If timeouts confirm it, the fix is in the harness (raise/scale the timeout, or refuse to run above a load threshold rather than reporting a number it cannot stand behind).
 
+### `main` moved DURING the merged-tree gate — the re-gate of the real post-merge tree is IN FLIGHT
+
+- **Symptom + exact repro:** the gate was run against base `37fb0646`; by the time `gh pr merge` ran, `origin/main` had advanced to `f7242d83`, so the squash landed on a base the gate never saw. `git fetch` reported `f7242d83..b79ccfbe`. This is the documented base-moved case — a merged-tree result expires when the base moves, and disjoint files are not safety.
+- **Observed (with values):** three commits landed inside the gate window — `a2b74e4b` `feat(bar): clicking the fans pill opens a COOLING view` (adds `scripts/fans-detail` +494, `scripts/tests/test_fans_detail.py` +694, edits `nix/graphical.nix` and `test_i3status_fans.py`), plus handoff docs `270bc627` and `f7242d83`.
+- **Ruled out:** *the new `scripts/fans-detail` trips the shebang guard this PR edits.* It carries `#!/usr/bin/env python3` and is NOT in `ALLOWLIST`, which is the exact disjoint-file break shape — but `test_runtime_shebangs.py` sets `PATTERNS = ("test_*.py", "conftest.py", "test_*.sh")`, so a non-test runtime script is never scanned, and a script's own line-1 shebang is exempt regardless. via: code
+- **Ruled out:** *the PR's two new ALLOWLIST entries go stale under the two-way accounting* (an entry matching no offender FAILS). Both name `scripts/tests/test_nebula_relay_apply.py` with substrings `nonexistent/interpreter` and `original.startswith`; both still match. via: measurement
+- **Leading hypothesis:** `origin/main` @ `b79ccfbe` is green — the two changes are genuinely disjoint and the one plausible seam was ruled out by reading the guard's scan scope. **Not yet evidence.**
+- **Next probe:** the build was still running at hand-off under load **104**. Read its verdict, then run the node tier separately:
+  ```bash
+  nix log /nix/store/7s5gxwaifzk15qf5vgjmq7x3bfpcxywq-devrc-pytests.drv \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -E "TOTAL collected|RESULT:|^FAILED"
+  nix build /tmp/wt-main2#checks.x86_64-linux.nodetests --no-link   # worktree at b79ccfbe
+  ```
+  🔴 A **RED** here is not trustworthy until re-run — see the load gotcha below. A **GREEN** is.
+
 ## Next steps (ranked)
 
-1. **Decide #1420: merge or close.** Re-gate on the MERGED tree first — the branch is 10 behind, so its green Tekton checks say nothing about the merge result. Build the two nix checks **one at a time** (a combined invocation produces false failures). Repo: `devrc`. Files: the 4 in the PR.
+1. **Finish the re-gate of `origin/main` @ `b79ccfbe`** — read the pytests verdict above and run the nodetests tier separately. If red, re-run before believing it (load contention). Repo: `devrc`.
+   forcing: regression — a merge landed on a base its gate never covered; `main` is the shared trunk
+2. **Update PR #1434 and merge it** — this doc. It described #1420 as "IN FLIGHT — NOT merged" and would have landed stale; this update fixes that. Merging it is what makes `claudedocs/handoff-nebula-verifier-guard.md` exist in the base clone, which is why the kickoff path did not resolve this session. Repo: `devrc`. Files: `claudedocs/handoff-nebula-verifier-guard.md`.
    forcing: none
-2. **Diagnose the battery nondeterminism** (block above). This is the highest-value item: it is a shared instrument, a false `SURVIVED` undermines every "mutation-verified" claim in the repo, and the load that triggers it is normal for this box. Repo: `devrc`. Files: `scripts/tests/mutants-nebula-relay.sh`, `scripts/tests/test_nebula_relay_apply.py`.
+3. **Diagnose the mutation-battery nondeterminism.** Unchanged and still the highest-value item: a shared instrument that produced a **false SURVIVED** undermines every "mutation-verified" claim in the repo. Nothing this session touched it, and #1420 did not depend on it — each mutant was verified in isolation, which is the trustworthy evidence. Repo: `devrc`. Files: `scripts/tests/mutants-nebula-relay.sh`, `scripts/tests/test_nebula_relay_apply.py`.
    forcing: none
-3. **`h.civit.ai` is still in git history at `6d488a1b`** on a PUBLIC repo. Fixed forward by #1405, but all four content gates read `git ls-files` and are blind to history (`SECRETS.md` → "Dead credentials in reachable history"). Whether to rewrite is the operator's call and was never made. Repo: `devrc`.
+4. **`h.civit.ai` is still in git history at `6d488a1b`** on a PUBLIC repo. Fixed forward by #1405; all four content gates read `git ls-files` and are blind to history. Whether to rewrite is the operator's call and has still not been made. Repo: `devrc`.
    forcing: security — a client subdomain is published in a public repo's history; the gates that exist cannot see it
-4. **`ship.sh` cannot reach the laptop.** It defaults to `zach@192.168.50.155` (LAN), which timed out; nebula `zach@10.42.0.100` works and `host-role.sh` already defines it as `LAPTOP_IP_SECONDARY` but nothing falls back to it. Worked around this session with `REMOTE_SSH=zach@10.42.0.100`. Left unfixed: a bare `ship.sh` reports the laptop unreachable and skips it — the documented silent-drift shape. Repo: `devrc`. Files: `scripts/ship.sh`, `scripts/lib/host-role.sh`.
+5. **`ship.sh` cannot reach the laptop.** Defaults to `zach@192.168.50.155` (LAN), which times out; nebula `zach@10.42.0.100` works and `host-role.sh` already defines it as `LAPTOP_IP_SECONDARY` but nothing falls back. Unchanged this session. Repo: `devrc`. Files: `scripts/ship.sh`, `scripts/lib/host-role.sh`.
    forcing: none
-5. **Close the audit items recorded as open, not fixed** — no test reaches the post-**switch** verify (site 3; `apply_beside_sequenced_verifier` is two-stage by construction); `test_apply_declares_every_tool_it_execs` still cannot catch an undeclared tool (`head`/`id`/`rm` are exec'd and undeclared, test green — docstring corrected, body unchanged); round-1 nits (closed-set regex spellings, rc-2 ambiguity, unquoted counter path, `apply-tailscale.sh` has no equivalent guard). Repo: `devrc`.
+6. **Close the audit items recorded as open, not fixed** — no test reaches the post-**switch** verify (site 3); `test_apply_declares_every_tool_it_execs` still cannot catch an undeclared tool (`head`/`id`/`rm` are exec'd and undeclared, test green — docstring corrected, body unchanged); round-1 nits. All merged as-is in `b79ccfbe`. Repo: `devrc`.
    forcing: none
-6. **Three superseded branches with no open PR**, from other sessions: `fix/opencode-engine-pin-1.18.29`, `fix/opencode-pin-1-18-29`, `fix/opencode-pin-1-18-21`. The opencode pin itself IS in `main` (1.18.29, re-derived via #1392), so they look redundant — but they are not this session's to delete. Repo: `devrc`.
+7. **Three superseded branches with no open PR**, from other sessions: `fix/opencode-engine-pin-1.18.29`, `fix/opencode-pin-1-18-29`, `fix/opencode-pin-1-18-21`. Not this session's to delete. Repo: `devrc`.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -99,37 +132,41 @@ The session's *stated* goal — a warning-free `home-manager switch` — is **DO
 - **The Bash tool caps timeouts at 600 s.** A 40-minute request is silently clamped, and the SIGTERM'd battery left 29 `/tmp/nebula-relay-pre.*` files that made the *next* run report a false failure.
 - **Four sessions collided on one failure this session** (the age 1.3.2 breakage), none using `claim-work` until late. A second collision followed on the `h.civit.ai` leak. `claim-work` only helps whoever checks it first.
 
+**Carried forward from the previous `State now` (durable measured records, moved here so replacing the status header does not delete them):**
+- **#1384** `fix(neovim)` — adopt `withRuby=false`/`withPython3=false`. Warning count 2→0 (negative control: unset=2, `false`=0, `true`=0). Generation closure −43,551,224 B. Verified behaviourally: `nvim --headless` reports `ruby=0 py3=0 rubyprog=UNSET` on both hosts.
+- **#1398** `docs(secrets)` — `SECRETS.md` said age-keygen echoes secrets on malformed input; false since age 1.3.2. Measured **4/8 leak on 1.3.1, 0/8 on 1.3.2** (same fixtures both binaries; the 4 is the positive control).
+- **#1407** `fix(nebula)` — the verifier was exec'd via its `#!/usr/bin/env bash` shebang; the nix sandbox has **no `/usr`**, so 20 tests failed there while the dev-host tier stayed green. Now `run_check() { "$BASH" "$CHECK" "$@"; }`. **This is the defect #1420's guard now pins.**
+- **#1410 CLOSED, not merged** — obsolete; #1405 fixed the same `h.civit.ai` leak first, deliberately (their comment cites the same guard).
+- **News:** 410 unread cleared on **both** hosts, archived first to `~/.local/share/home-manager/news-archive-2026-09-08.txt` (3818 lines / 91,087 B each) so the 540 consumed ids are not lost. `read-ids` 0 → 540.
+- **`home-manager switch` was clean on both hosts** as of 2026-09-08, both converged at `03d7e0ad` via `ship.sh`. Only the upstream `install`→`add` line remains (home-manager's own; fixed in #8756, **reverted** in #8835 for Lix — issue #9598 open, no PR).
+
+- 🔴 **RANK 1 OF THE PREVIOUS LIST IS DONE — do not re-run it.** "Decide #1420: merge or close, re-gating on the merged tree first" is closed: gated, audited, merged as `b79ccfbe`. The claim `nebula-verifier-guard-1` was taken for it and should be released.
+- 🔴 **The box was at load 83–104 for this entire session, from ~4 OTHER Claude sessions running concurrent `nix build …pytests` gates** (`devrc-m3`, `devrc-toastfix`, `devrc-find-session-window`, `cairn` — identified via `pgrep -af "nix build"`). That is the same store-contention hazard `CLAUDE.md` documents for *combined* invocations, arriving cross-session instead. **Asymmetric, and the asymmetry is the usable part: a GREEN under contention is trustworthy, a RED is not** until re-run. Both merged-tree greens were obtained under it.
+- **A merged-tree gate has a shelf life measured in minutes on this repo.** `main` moved three commits inside one gate window. Re-check `git fetch` output immediately before `gh pr merge`, and if the base moved, the honest move is to re-gate the post-merge tree rather than back-date the earlier green.
+- **`gh pr merge --delete-branch` fails when a worktree holds the branch** — the merge still succeeds and the remote branch is still deleted; only the local delete fails. `MERGE_RC=0` from a pipeline masks it, so read the stderr text, not the code.
+- **The kickoff path pointed at a doc that did not exist**, because the doc lives only in unmerged PR #1434. Recovered by `gh pr view 1434 --json files` then `git fetch origin refs/pull/1434/head:pr1434-tmp && git show pr1434-tmp:<path>`. Worth doing before concluding a handoff was never written.
+- **Decision: merged rather than closed.** The change is small (4 files), the payload file is hand-run under `sudo` and read by nothing in the flake, both tiers were green on the merged tree, the headline guard was proven red-on-revert, and round 3 came back clean. Closing it would have discarded a proven regression guard for a real, measured defect.
+
 ## How to verify
 
-**The shipped work (should all pass today):**
 ```bash
-# 1. the switch is clean on both hosts — only the upstream alias line
-home-manager switch --flake ~/workspace/devrc --impure 2>&1 | grep -iE "warning|unread|default value of"
-ssh zach@10.42.0.100 'home-manager switch --flake ~/workspace/devrc --impure 2>&1 | grep -iE "warning|unread"'
-# expect exactly: warning: 'install' is a deprecated alias for 'add'
+# 1. #1420 really landed — by CONTENT, never by ancestry (squash merges break ancestry)
+gh pr view 1420 --json state,mergedAt,mergeCommit --jq '{state,mergedAt,mergeCommit:.mergeCommit.oid}'
+git -C ~/workspace/devrc show origin/main:nix/system/apply-nebula-relay.sh \
+  | grep -c 'verifier_answered\|die_verifier_did_not_run'      # expect 5
 
-# 2. neovim providers are really off (ask neovim, not the file)
-nvim --headless -c 'echo "ruby=" . get(g:,"loaded_ruby_provider","UNSET") . " py3=" . get(g:,"loaded_python3_provider","UNSET")' -c q
-# expect: ruby=0 py3=0
-```
+# 2. the guard still goes RED on the revert (the claim worth re-checking)
+S=/tmp/mfh1; rm -rf $S; mkdir -p $S; cp -a ~/workspace/devrc/nix/system $S/
+sed -i 's|run_check() { "\$BASH" "\$CHECK" "\$@"; }|run_check() { "$CHECK" "$@"; }|' $S/system/apply-nebula-relay.sh
+find ~/workspace/devrc/scripts -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
+DEVRC_TEST_NEBULA_DIR=$S/system PYTHONDONTWRITEBYTECODE=1 \
+  nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc/scripts/tests/test_nebula_relay_apply.py -q -p no:cacheprovider
+# expect: 2 failed, 38 passed — test_the_verifier_is_never_execed_via_its_own_shebang
+#                             + test_the_verifier_runs_with_its_shebang_BROKEN
 
-**Before merging #1420 — on the MERGED tree, one at a time:**
-```bash
-R=/home/zach/workspace/devrc
-git -C $R worktree add --detach /tmp/wt-1420 origin/main && cp $R/.envrc /tmp/wt-1420/
-git -C /tmp/wt-1420 merge --no-edit origin/fix/nebula-verifier-guard-and-rc-classify
-nix build /tmp/wt-1420#checks.x86_64-linux.pytests   --no-link   # then, SEPARATELY:
-nix build /tmp/wt-1420#checks.x86_64-linux.nodetests --no-link
-# read each derivation's own RESULT: line, never the piped exit code:
-nix log $(nix path-info --derivation /tmp/wt-1420#checks.x86_64-linux.pytests) \
-  | sed 's/\x1b\[[0-9;]*m//g' | grep -E "TOTAL collected|RESULT:"
+# 3. main is green post-merge (rank 1) — ONE TIER AT A TIME, never combined
+uptime   # if load > 10, a RED is not trustworthy; a GREEN is
+nix build /tmp/wt-main2#checks.x86_64-linux.pytests   --no-link
+nix build /tmp/wt-main2#checks.x86_64-linux.nodetests --no-link
 ```
-Expect `failed=0` and `RESULT: PASS` on both. Compare `collected` against a base build of `origin/main` alone — a drop means tests were lost, not fixed.
-
-**The battery (expect it to be flaky until item 2 is done):**
-```bash
-find /tmp -maxdepth 1 -name 'nebula-relay-pre.*' -type f -user "$(id -un)" -delete
-uptime   # if load > 10, the full-run aggregate is not trustworthy
-nix develop /home/zach/workspace/devrc -c bash /home/zach/workspace/devrc-nebguard/scripts/tests/mutants-nebula-relay.sh
-```
-A single mutant in isolation IS trustworthy: `… mutants-nebula-relay.sh M-FH-1-verifier-execed-via-shebang`.
