@@ -4854,10 +4854,31 @@ def test_the_redaction_is_pinned_against_a_STUB_that_echoes_like_age_v1_3_1(
     message" now survives against v1.3.2 for a reason that says NOTHING about
     whether our code redacts.
 
-    🔴 AND THE RISK IS LIVE, not historical. Both versions are installed on this
-    host today (login shell v1.3.1, dev shell v1.3.2) and the deployed backup
-    unit takes whatever its PATH provides. A guard whose sensitivity depends on
-    which of two installed binaries answers is not a guard.
+    THE UPSTREAM FIX, NAMED so this is an attributable fact rather than a
+    measurement someone has to re-derive: age v1.3.2, commit `c45ccfd2`
+    ("avoid echoing private keys in errors", reported by Trail of Bits),
+    released 2026-08-29. It dropped the `%q` from `unknown identity type: %q`
+    in `age-keygen`'s parse path. ⚠ The `error at line N` prefix is NOT new —
+    only the echo was removed, so do not read the line number as the fix.
+
+    🔴 AND THE RISK IS LIVE, not historical — BUT NOT FOR THE REASON THIS
+    PARAGRAPH USED TO GIVE, WHICH WAS FALSE. It read "Both versions are
+    installed on this host today (login shell v1.3.1, dev shell v1.3.2)". They
+    are not. MEASURED 2026-09-08 on the workbench: non-interactive zsh, login
+    zsh, login bash and the flake devShell ALL resolve v1.3.2, and the laptop
+    does too — no shell on either host resolves v1.3.1. (v1.3.1 derivations do
+    still sit in the store; nothing puts them on a PATH.) A claim about which
+    binary answers is exactly the kind that rots when a pin moves, which is what
+    happened here.
+
+    The real reason the risk is live, and it is a stronger one: **v1.3.2 did not
+    close every echo path.** MEASURED 2026-09-08 with a synthetic key —
+    `age -r "<AGE-SECRET-KEY-1…>"` still prints the whole key back, because
+    `cmd/age/parse.go` keeps `unknown recipient type: %q`. So a redaction guard
+    is still needed against the CURRENT pinned age, not merely against a version
+    somebody might still have. That is why the leak below is supplied by a STUB
+    rather than by whichever age is installed: the guard's sensitivity must not
+    depend on the toolchain at all.
 
     So the leak is supplied by a STUB on PATH that reproduces v1.3.1's stderr
     byte for byte. `backup.py` invokes `age-keygen` as a bare literal (see
