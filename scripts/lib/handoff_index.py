@@ -1455,7 +1455,12 @@ def _exclusion_list(exclude) -> list[str]:
             # filters nothing — a silent no-op, which is the class this module
             # spent three rounds closing. An error message that names the next
             # defect as its remedy is worse than one that names none.
-            + (f", e.g. [{exclude!r}]" if exclude else "")
+            # 🔴 KEYED ON THE HAZARD THE COMMENT NAMES, NOT ON EMPTINESS. The
+            # first fix suppressed the example only for `""`, while `" "` — one
+            # character different — was still told to pass `[' ']`, which IS
+            # accepted and filters nothing. `.strip()` is the predicate the
+            # sentence above actually describes.
+            + (f", e.g. [{exclude!r}]" if exclude.strip() else "")
             + " — or () for no exclusion."
         )
     out = list(exclude)

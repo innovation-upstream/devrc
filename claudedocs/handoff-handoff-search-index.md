@@ -278,12 +278,24 @@ the cause of the other 19 is now measured rather than guessed — see the block 
    little to offer a resuming session, and the right response is to stop paying for the step
    rather than to tune the ranker again.
    forcing: none
-2. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
+2. **A BLANK `--exclude-slug` is still a silent no-op, and it is reachable from the CLI.**
+   `--exclude-slug "  "` normalises to `""`, prints `excluded=` with nothing after it, leaves
+   `in_scope_docs == indexed_docs`, and returns the document the caller meant to drop — the exact
+   class three audit rounds closed everywhere else. The library layer accepts `[""]` too. Round 4
+   measured both; this PR deliberately fixed only the *advice* (the refusal no longer offers a
+   blank as its remedy) and NOT the behaviour, to keep the audit ladder's last round inside the
+   claim-correction criterion it stopped on. 🔴 The fix belongs at `main()` as an input rejection
+   (`RC_USAGE` / rc 2), never in the renderers — a `label or "(unnamed)"` there re-introduces the
+   falsy-string shape swept out of the decision path.
+   **Closing condition:** a merged PR in which `handoff_search.py --exclude-slug "  "` exits 2,
+   with a test that watches it fail at the previous commit.
+   forcing: none
+3. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
    `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire
    test `test_through_main_the_residual_is_recorded_and_the_report_is_true` fails the day someone
    does it, which is the intended signal.
    forcing: none
-3. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
+4. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
    operator sees THAT rows were deleted, not WHICH. 🔴 The fix belongs at `main` as an input
    rejection (`RC_USAGE`), NEVER in the renderers — a `label or "(unnamed)"` there would
    re-introduce the exact falsy-string shape three audit rounds swept out of the decision path.
@@ -410,9 +422,13 @@ the cause of the other 19 is now measured rather than guessed — see the block 
 - 🔴 **AN UNSCOPED TEST COUNT IS A COVERAGE CLAIM, AND THIS PR MADE IT FOUR TIMES.** "the whole
   suite green at 304", "SURVIVED all 314 tests", "a 306-test green suite", "304 of 304 tests
   passed" — every one numerically TRUE and every one naming a two-file scope of ~300 against a
-  repo of ~21,000. Three audit rounds each caught one site and fixed that site; the shape only
-  went away when it was swept at all four. 🔴 **A number needs the DENOMINATOR'S NAME, not just
-  the numerator** — and when a round fixes an instance of a shape, grep for the shape.
+  repo of ~21,000. **FOUR quoted counts, FIVE textual sites** — `SURVIVED all 314 tests` occurs
+  twice — and rounds 1-3 each caught one site and fixed that site. Round 4 found the fifth still
+  unswept, inside the very test the earlier version of this bullet held up as the exemplar; the
+  bullet had already claimed the sweep was complete. 🔴 **A number needs the DENOMINATOR'S NAME,
+  not just the numerator** — and when a round fixes an instance of a shape, grep for the shape
+  and COUNT the hits, because "I swept it" is itself a claim of exactly the kind this bullet is
+  about.
 - 🔴 **A PERFECT 100% (OR 0%) IS A REASON TO SUSPECT THE NEEDLE, NOT TO WRITE IT DOWN.** The
   first pass at the number above reported 23-of-23 self-hits, because it grepped transcripts
   for `claudedocs/handoff-<slug>.md` — a string the SEARCH ITSELF PRINTS for every hit, so the

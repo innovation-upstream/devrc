@@ -5914,7 +5914,8 @@ class TestTheCLIActuallyHandsTheExclusionToTheSearch:
                 f"test still passes"
             )
             # 🔴 PIN THE VALUE, NOT JUST THE KEYWORD. A round-2 mutant wrote
-            # `exclude=()` at the postgres site and SURVIVED all 314 tests: the
+            # `exclude=()` at the postgres site and SURVIVED all 314 tests (the
+            # two-file scope at that round's tip, not the ~21k suite): the
             # keyword was present and the flag was inert. A guard on a NAME is
             # walkable by supplying a different value under the same name —
             # `claude/RULES.md`, "a guard can be SPELLED rather than STRUCTURAL".
@@ -6046,6 +6047,16 @@ class TestAnExcludeArgumentThatWouldLIEIsRefused:
         assert "e.g." not in msg, msg
         assert "['']" not in msg, msg
         assert "or () for no exclusion" in msg, msg
+        # 🔴 A BLANK STRING IS THE SAME HAZARD ONE CHARACTER AWAY. The first fix
+        # keyed the suppression on emptiness, so `" "` was still told to pass
+        # `[' ']` — accepted, and filters nothing. Round 4 measured it.
+        for blank in (" ", "\n", "\t "):
+            try:
+                store.stats(exclude=blank)
+            except TypeError as bexc:
+                assert "e.g." not in str(bexc), f"{blank!r}: {bexc}"
+            else:
+                pytest.fail(f"{blank!r} was accepted")
         # …and the NON-empty case still gets its worked example, so this is a
         # narrowing of the message rather than a deletion of it.
         try:
@@ -6117,6 +6128,39 @@ class TestTheTwoRemedyBranchesAgreeOnTheVERBAsWellAsTheFLAGS:
         # the SAME clause text reaches both renderers (one capitalised)
         assert clause in no_match
         assert clause.capitalize() in empty
+
+    def test_BOTH_renderer_branches_CALL_the_helper_rather_than_agreeing_by_text(self):
+        """🔴 THE TEXT-AGREEMENT PIN IS NOT A CONSOLIDATION PIN, AND A MUTANT
+        PROVED IT. Round 4 reverted both renderer branches to independent
+        open-coded literals, leaving `widen_or_drop_clause` defined and entirely
+        UNREFERENCED — the suite stayed green at 321/321, because every existing
+        assertion compares STRINGS and none observes where the string came from.
+
+        So this reads the source: both branches must CALL the helper, and neither
+        may carry the verb as a literal. Same instrument as
+        `test_EVERY_run_search_call_in_main_forwards_the_exclusion`, and the same
+        lesson one class over — `claude/RULES.md`, "a guard's DESCRIPTION claims
+        COVERAGE; check the implementation is as wide as the sentence"."""
+        src = Path(hs.__file__).read_text()
+        tree = ast.parse(src)
+        render = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.FunctionDef) and n.name == "render")
+        calls = [n for n in ast.walk(render)
+                 if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", None) == "widen_or_drop_clause"]
+        assert len(calls) == 2, (
+            f"expected the empty-scope and no-match branches to each CALL "
+            f"widen_or_drop_clause; found {len(calls)} call(s). A branch that "
+            f"builds the clause itself agrees by text today and drifts tomorrow, "
+            f"and every string assertion in this file stays green while it does."
+        )
+        # …and the verb must not survive as a literal anywhere in the renderer.
+        body = ast.get_source_segment(src, render) or ""
+        for literal in ('"widen or drop ', "'widen or drop ", '"Widen or drop '):
+            assert literal not in body, (
+                f"render() still carries the verb as the literal {literal!r} — "
+                f"that is the open-coding this helper exists to remove"
+            )
 
     def test_an_unfiltered_run_is_still_told_there_is_nothing_to_widen(self):
         """🔴 THE NEGATIVE CONTROL. A blanket 'widen or drop' everywhere would
