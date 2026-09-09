@@ -16,14 +16,35 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Diagnose and resolve disk pressure on the workbench NixOS host (root partition `/dev/nvme0n1p2`, 1.8TB). The host was at 87% usage with ~228G free. The session freed ~200G through cleanup, then investigated why the filesystem reports 1.5TB used while only ~600GB of data is measurable.
 
 ## State now
-- 🔴 **ALL THREE PRs OF THIS EFFORT ARE MERGED. Both tmpfiles hosts are live. Nothing is in flight.**
-  - **`#1366` MERGED** — squash `ffac18f8`. Rank 5's test coverage for `scripts/diagnose-disk-accounting.sh`, after **four audit rounds, 21 findings (3 🔴)**. 202 assertions, 64 mutants each killed by its own guard, red at every earlier tip (96 → 55 → 23 → 3 → 0).
-  - **`#1392` MERGED** — squash `94f82796`. The nixpkgs toolchain drift that had `main` red for everyone, and the disaster-recovery verdict inversion inside it.
-  - **`#1370` MERGED** — squash `b29cde5e`. The preflight/`--init` tool, after one audit round (**3 🔴 + 9 🟡**) and its first-ever test suite (54 tests). Tekton green on `2fe861d4`: pytests `collected=21022 passed=21020 skipped=2 failed=0`, nodetests `1449/1449`.
-  - All three verified **by CONTENT** on `origin/main` after merge, never by ancestry — a squash is never an ancestor of its base. `#1370`'s check: `nix/system/preflight-tmp-churn-host.sh` and `scripts/tests/test_preflight_tmp_churn_host.py` present, `INIT=yes` present, and the re-derived drift floor `"scripts/tests|12927"` landed intact.
-- **Workbench + laptop both applied and live**: 7 `mM:7d` rules, 0 stale, on each. Workbench live since the **2026-09-06 18:01 reboot**, reclaim held at **67.2M inodes against the 96.1M baseline** (74% disk). Laptop live since **2026-09-07 17:54** via `preflight-tmp-churn-host.sh --init` (generation 247).
-- **Claim `nix-disk-cleanup-5` RELEASED.** No claims held.
-- **No clawgate task** — `clawgate_handoff.sh resolve` → rc 5 with its positive control green; a wrong session id also answers 200 with an empty array, so that is not a clean bill of health and no field is recorded.
+- 🔴 **`#1409` IS MERGED — rank 15/16 CLOSED, and with it the whole age-refusal arc.** Squash
+  commit **`50b384c0`**, `mergedAt 2026-09-09T17:05:19Z`, branch deleted (verified NOT a stacked
+  parent first: `gh pr list --base fix/age-refusal-markers-post-header` → `[]`, so no child PR
+  could be irreversibly closed by the delete).
+- **Verified BY CONTENT on `origin/main`, never by ancestry** (a squash is never an ancestor of its
+  base): `AGE_REFUSED_HEADER_MAC` in 4 files (`escrow-verify.py` 4, `restore-verify.py` 10, both
+  suites), `AGE_REFUSED_TRUNCATED` in 3, `AGE_REFUSALS_KEY_PROVEN` in 3. A nonsense-symbol negative
+  control returned **empty output**, so the grep can distinguish present from absent.
+- **Verified LIVE on merged `main`, clean tree:** `HEAD=50b384c0`, `branch=main`,
+  `git status --porcelain` = **0 modified paths**, the two owning suites → **450 passed in 116.78s**.
+  Stated as a clean-tree run on purpose — it is evidence about the COMMITTED SOURCE, not about a
+  deployed copy carrying an uncommitted fix.
+- **Both claims RELEASED:** `nix-disk-cleanup-15` and `nix-disk-cleanup-13`. None of this effort's
+  claims are held any more.
+- **Base clone re-synced** `fbc4dd39 → 50b384c0` by `merge --ff-only` (worktrees do the committing,
+  so it drifts). The merge worktree `devrc-merge-1409-f61a6666` was removed. ⚠ **`devrc-age-markers`
+  is deliberately LEFT** — it still holds the now-deleted branch `fix/age-refusal-markers-post-header`;
+  harmless, but detach or remove it before reusing that name.
+- 🔴 **CARRIED FORWARD — the audit ladder is CLOSED at 5 rounds; do NOT dispatch another.** Rounds
+  4–5 found things about guards the ladder itself had written. Round 4's auditor: *"not one finding
+  is about the shipped classifier's behaviour."* **Nothing in the merge changed that** — the two
+  items this session raised were gate/merge questions, not audit findings, and both are now closed.
+- **CARRIED FORWARD, unchanged — Workbench + laptop both applied and live**: 7 `mM:7d` rules,
+  0 stale, on each. Workbench live since the **2026-09-06 18:01 reboot**, reclaim held at
+  **67.2M inodes against the 96.1M baseline** (74% disk). Laptop live since **2026-09-07 17:54**
+  via `preflight-tmp-churn-host.sh --init` (generation 247).
+- **No clawgate task** — `clawgate_handoff.sh resolve` → **rc 5** with its positive control green.
+  A wrong id also answers 200 with an empty array, so this is not a clean bill of health and no
+  field is recorded.
 
 ## Open investigations — live diagnosis state
 
@@ -350,8 +371,128 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
     via: measurement
 - **Next probe:** change it to `cp -aL` (or refuse on `[[ -L "$CFG" ]]`) plus a fixture test asserting the backup is not a symlink. `#1370` mitigated the reachable path from its own side and deliberately did not touch that file.
 
+### Tekton `devrc-pytests` is RED on #1409 and it is NOT that branch
+- **Symptom + exact repro:** `gh pr checks 1409 --repo innovation-upstream/devrc` → `tekton/devrc-pytests fail`, `FAILING: TestARefusedWriteIsIndistinguishableFromAnAbsentOne.test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_dif…`.
+- **Observed (with values):** the failing class lives in `scripts/tests/test_subsystem_store_api.py` — the same file this doc already records as a known flake owned by `#863` ("third signature across five test classes, all the same in-process round-trip"). This is a fourth class name in that family. `tekton/devrc-nodetests` passes: `suites=5 files=41 tests=1449 pass=1449 fail=0`.
+- **Ruled out — that `#1409` causes it.** That PR touches five files, none in that subsystem, and every in-tree referrer of `restore-verify` lives under `scripts/tests`.
+    via: command
+- **Leading hypothesis:** the `#863` in-process round-trip flake recurring; `claudedocs/handoff-devrc-ci-red` (PR #1389) separately claims devrc-ci pytests is red on `main` itself.
+- **Next probe:** read the gate pod log rather than the check state — `KUBECONFIG=$KC_HOMELAB kubectl logs -n tekton-ci <pipelinerun>-gate-pod --all-containers`.
+
+### The full gate has not been run against `#1409` round 5 — saturation, not a red
+- **Symptom + exact repro:** `nix develop /home/zach/workspace/devrc-age-markers -c bash scripts/gate.sh --tier both` — twice SIGTERM'd at its own 3600 s cap: `FAIL pytest exit=124 (timeout after 3600s)` / `RESULT: FAIL (exit=143)`.
+- **Observed (with values):** load 60–98 all session with 6+ concurrent gates from other sessions. Round 3's run reached 24 of 29 targets; round 4's reached 8. `scripts/tests` inflated **22:51 → 37:08 → 53:19** across runs — the whole target, which is the load signature rather than one assertion. Round 4's run showed 3 failed in `scripts/tests`, ALL three `subprocess.TimeoutExpired: … timed out after 120 seconds` on a NESTED `run-tests.sh` (`test_a_pinned_skip_whose_TARGET_did_not_run_does_not_count`, `test_a_partial_run_is_declared_where_gate_sh_actually_LOOKS`, `test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N`). All three pass in isolation: `3 passed in 200s`.
+- **Ruled out — that those 3 are a code failure.** The exception is a nested-run timeout, not an assertion, and they pass alone.
+    via: measurement
+- **Ruled out — that round 5 is unmeasured.** The two owning suites are 450 passed on both age binaries; rounds 3 and 4 between them covered all 29 pytest targets (round 3: 24 in-gate + 6 separately; round 4: 8 in-gate + 21 separately at 6161 passed / 2 skipped / 0 failed).
+    via: measurement
+- **Next probe, verbatim** — run when `cat /proc/loadavg` is under ~20:
+  ```bash
+  cd /home/zach/workspace/devrc-age-markers && nix develop . -c bash scripts/gate.sh --tier both
+  ```
+
+### The merged tree is UNGATED — Tekton gated the BRANCH, and the base moved 48 commits
+- **Symptom + exact repro:** `gh pr checks 1409` is green, but Tekton's `revision` param is
+  `e1536984` — the PR head, not `origin/main` + the PR. RULES: *"Gate on the MERGED tree, not the
+  PR branch."* Reproduce with
+  `KUBECONFIG=$KC_HOMELAB kubectl get pipelinerun -n tekton-ci devrc-ci-mkpb5 -o json | python3 -c 'import json,sys;print({p["name"]:p.get("value") for p in json.load(sys.stdin)["spec"]["params"]})'`.
+- **Observed (with values):** merge-base `01956bf0`; `origin/main` `176f412b`; **48 commits** on
+  main since. **Two of the PR's five files were edited on main, on the same subject:**
+  - `SECRETS.md` ← `03d7e0ad` (#1398) *"age 1.3.2 removed the age-keygen input echo"* and `9300f234` (#1406)
+  - `scripts/tests/test_analyze_service_index_escrow_verify.py` ← `4f49f5dc` (#1403) *"three claims #1392 left in the tree were false or stale"*
+  - Both auto-merged by `ort` with no conflict. Inspected: main's correction survives
+    (`age ≤ 1.3.1` present in merged `SECRETS.md`; `c45ccfd2` present in the merged test), and
+    #1409's additions survive (`AGE_REFUSED_HEADER_MAC`, `AGE_REFUSED_TRUNCATED`,
+    `AGE_REFUSALS_{PRE_AUTH,POST_AUTH,KEY_PROVEN}` all present).
+- **Ruled out — that the merge re-introduced the FALSE sentence main retracted.** The string
+  `login shell v1.3.1, dev shell v1.3.2` counts **1 on `origin/main` AND 1 on `e1536984`** in that
+  file (plus 1 in `test_analyze_service_index_backup.py` on both). Merged line 5087 reads
+  `…(login shell v1.3.1, dev shell v1.3.2)". They` — main's own retraction **quoting the sentence
+  it replaces**, exactly as `4f49f5dc`'s message says it does. The merge introduced nothing.
+    via: measurement
+- **Ruled out — that the stale drift floor was carried forward a THIRD time.** This doc records
+  `run-tests.sh`'s `"scripts/tests|N"` being merged wrongly twice. Here the PR does **not** touch
+  `run-tests.sh`, so the merge takes main's value. Anchored counts: `origin/main` → `13026`
+  (1 candidate, line 1737); PR head → `12927` (line 1698); merged tree takes **13026**.
+    via: measurement
+- **Ruled out — a disjoint-file break via a main-side CALLER of the changed scripts.** 24 in-tree
+  referrers of `escrow-verify`/`restore-verify`; intersected against main's 48-commit file set →
+  **9 hits**, of which the code/test ones are `test_analyze_service_index_backup.py`,
+  `test_analyze_service_index_escrow_verify.py`, `test_store_root_ledger.py`,
+  `test_subsystem_touch.py`, `run-tests.sh`. All are inside the in-flight run's target set.
+    via: measurement
+- **Leading hypothesis:** the merged tree is green — main's 48 commits were each gated on merge and
+  the overlap is doc/test text rather than call-signature change. **UNCONFIRMED: the run has not finished.**
+- **Next probe, verbatim** — confirm the terminator BEFORE reading it as complete:
+  ```bash
+  O=/tmp/claude-1000/-home-zach-workspace-homelab-talos/f61a6666-fa21-45c9-b691-838f7bee60c2/scratchpad/merged-overlap.txt
+  grep -c OVERLAP-RUN-DONE "$O"   # must be 1
+  grep -E '^### TARGET|passed|failed|error' "$O"
+  ```
+  If the scratchpad is gone, re-create the merged worktree and re-run
+  `scratchpad/merged-overlap-gate.sh` (its target list is derived, not guessed — see the
+  referrer intersection above).
+
+### `main` retracted the premise behind this doc's own "verify on BOTH age binaries" step
+- **Symptom + exact repro:** this doc's `How to verify` step 3 says *"the gate tier is v1.3.2;
+  production resolves v1.3.1"* and prescribes symlinking the login-shell `age` to test v1.3.1.
+- **Observed (with values):** `4f49f5dc` (#1403, merged to main 2026-09-08) states, measured on
+  both hosts: non-interactive zsh, login zsh, login bash **and** the flake devShell all resolve
+  **age v1.3.2**; nothing puts v1.3.1 on a PATH (v1.3.1 derivations remain in the store, unreferenced).
+  It explicitly retracts *"Both versions are installed on this host today (login shell v1.3.1,
+  dev shell v1.3.2)"* as FALSE in three places.
+- **Ruled out — that this invalidates `#1409`.** Its audit measured the three re-keyed marker
+  strings **byte-identical on v1.3.1 and v1.3.2**, so the classifier does not depend on which
+  binary answers.
+    via: doc
+- **Consequence, not yet applied:** `How to verify` step 3's v1.3.1 half now describes a
+  configuration that does not exist on these hosts. It is corrected in this update's
+  `How to verify`; the *reason* the redaction guard stays is unchanged and stronger — `4f49f5dc`
+  measured that v1.3.2 still echoes on the **recipient** path (`unknown recipient type: %q`).
+- **Next probe:** `readlink -f $(command -v age); age --version` in a LOGIN shell on each host,
+  before anyone re-derives the two-binary story.
+
+### RESOLVED — the merged tree was gated, and the #863 flake did not reproduce on it
+- **Symptom + exact repro:** Tekton gates the PR BRANCH (`revision=e1536984`), but `main` had moved
+  48 commits with two of the PR's five files edited on main. RULES: *"Gate on the MERGED tree, not
+  the PR branch."* Nothing had gated the merge.
+- **Observed (with values):** merged worktree `d03587c0` = `176f412b` + `e1536984`. Eight targets,
+  one per pytest invocation, terminator `OVERLAP-RUN-DONE` present so the file is readable as
+  complete. **All 8 `rc=0`; 2,524 passed, 0 failed**, under load 62 → 92:
+  `escrow_verify` 254 · `restore_verify` 196 · `backup` 145 · `store_root_ledger` 88 ·
+  `subsystem_touch` 914 · `doc_path_rot` 76 · `no_captured_markup` 93 ·
+  **`subsystem_store_api` 758 passed in 666s** — the #863 flake file itself.
+- **Ruled out — that the #863 flake still blocks this work.** Three independent signals, on two
+  different trees: (1) Tekton re-ran the UNCHANGED head `e1536984` and passed both legs
+  (21143 collected / 21141 passed / 0 failed; 1449/1449); (2) the merged tree passed
+  `test_subsystem_store_api.py` 758/758 under load ~90; (3) `main` has since landed `c507d71d`
+  (#1432), a 1,203-line harness fix for a **port TOCTOU** in that same file. ⚠ (3) is context, NOT
+  attribution — it is not established that it fixes the specific class that was red.
+    via: measurement
+- **Ruled out — that the two overlapping files merged incoherently.** `ort` auto-merged both;
+  inspection confirms BOTH sides survive — main's correction (`age ≤ 1.3.1` in `SECRETS.md`,
+  `c45ccfd2` in the test) and #1409's additions. The string main deleted as FALSE
+  (`login shell v1.3.1, dev shell v1.3.2`) counts 1 on `origin/main` AND 1 on `e1536984`, and the
+  merged occurrence is main's own retraction QUOTING the sentence it replaces.
+    via: measurement
+- **Ruled out — that the base moving under the merged-tree test invalidated it.** RULES require a
+  re-run when the base moves. It moved by exactly ONE commit — this session's own handoff doc — and
+  rather than assume disjointness, the two doc-scanning suites were re-run on `main` INCLUDING it:
+  `test_no_captured_markup` **93 passed**, `test_doc_path_rot` **76 passed**. `test_doc_path_rot`'s
+  `CORPUS_DIRS = ("claude", "CLAUDE.md")` also puts `claudedocs/` deliberately out of corpus —
+  note `ROOTS` DOES contain `claudedocs`, but that is which TOKENS count as repo-path claims, a
+  different thing from which docs are scanned.
+    via: measurement
+- **Not done, and not blocking:** the full `scripts/gate.sh --tier both` was never run on the merged
+  tree. Load ran 49 → 92 all session with 9–13 concurrent sibling gates, and the gate's 3600 s cap
+  has been hit twice at that load. What ran instead is stated above; **it is a targeted run over a
+  derived overlap surface, not "the gate"** — do not let anyone quote it as the latter.
+
 ## Next steps (ranked)
-🔴 **Ranks 1–14 keep their original meaning and numbering** — the rank is half a `claim-work` slug's identity, so renumbering silently re-points live claims. Status is marked in place. **Ranks 1–7, 9 and 11 are closed; 8, 10, 12, 13, 14 remain.**
+🔴 **Ranks 1–16 keep their original meaning and numbering** — the rank is half a `claim-work`
+slug's identity. **Ranks 1–7, 9, 11, 13, 15 and 16 are closed; 8, 10, 12 and 14 remain, and all
+four are `forcing: none`, i.e. not eligible to be worked.** 🔴 **This effort has no forced work
+left. A `/resume` that draws from this queue should conclude the arc is DONE and go elsewhere.**
 
 1. **DONE — workbench patched and verified live.**
    forcing: none
@@ -365,21 +506,33 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
    forcing: none
 6. **WON'T-FIX — the `/tmp` directory stubs.** 52,049 = 0.08% of inodes, ~8k/day.
    forcing: none
-7. **ANSWERED — the churn curve ran.** Daily cadence holds for inodes; bytes are the tighter constraint under load.
+7. **ANSWERED — the churn curve ran.** Daily cadence holds for inodes; bytes are tighter under load.
    forcing: none
-8. **Prune the `devrc/diagnose-disk-accounting` index entry** — a stale `OPEN:` bullet sits beside its own `RESOLVED`. Partly done: `/mnt/rootcheck` recorded as no longer mounted.
+8. **Prune the `devrc/diagnose-disk-accounting` index entry** — a stale `OPEN:` bullet sits beside
+   its own `RESOLVED`. Partly done: `/mnt/rootcheck` recorded as no longer mounted.
    forcing: none
-9. **DONE — `#1366` audited (4 rounds), `#1370` audited (1 round).** `#1392` merged WITHOUT an adversarial audit, on the operator's explicit "go" — see rank 13.
+9. **DONE — `#1366` audited (4 rounds), `#1370` audited (1 round).**
    forcing: none
-10. **Confirm the laptop's first reap actually happened** — the timer was armed for 2026-09-07 18:54 CDT, its `NextElapseUSecRealtime` read EMPTY, and no session has gone back to check. `ssh zach@192.168.50.155 'systemctl status systemd-tmpfiles-clean.service; df -i /'` — expect `status=0/SUCCESS` and inodes below the 24,749,866 / 117,236-top-level baseline recorded at apply time.
+10. **Confirm the laptop's first reap actually happened** — timer armed for 2026-09-07 18:54 CDT,
+    its `NextElapseUSecRealtime` read EMPTY, no session has checked.
+    `ssh zach@192.168.50.155 'systemctl status systemd-tmpfiles-clean.service; df -i /'` — expect
+    `status=0/SUCCESS` and inodes below the **24,749,866 / 117,236-top-level** baseline.
     forcing: none
 11. **DONE — `#1370` MERGED** (`b29cde5e`), Tekton green, verified by content.
     forcing: none
-12. **Fix `apply-tmp-churn-retention.sh:276` (`cp -a` → `cp -aL`)** — its documented rollback is a no-op on a symlinked config; measured live during the `#1370` audit. Repo `innovation-upstream/devrc`, one file plus a fixture test asserting the backup is not a symlink. Closing condition: that PR merged.
+12. **Fix `apply-tmp-churn-retention.sh:276` (`cp -a` → `cp -aL`)** — its documented rollback is a
+    no-op on a symlinked config. Repo `innovation-upstream/devrc`, one file plus a fixture test
+    asserting the backup is not a symlink. Closing condition: that PR merged.
     forcing: none
-13. 🔴 **Adversarial audit of the merged `#1392` — the highest-risk unaudited thing this effort shipped.** It rewrites the logic deciding whether a corrupt backup means "rotate your escrow key", and its own author recorded that the new keying rests on substring matches of another tool's prose. `/audit-pr` works on a merged PR by ref.
-    forcing: security — the change governs disaster-recovery key-rotation verdicts and merged without an adversarial pass.
-14. **Delete the stale `/tmp/disk-accounting-*` leftovers** — 19 seen, **2 non-empty** (84 B / 203 B of captured scan stderr). Resolve by ownership and mtime, never a blanket `rm`, and not while a battery may be running.
+13. **DONE — `#1392` audited.** Fix was `#1409`; ladder closed on the attribution criterion.
+    forcing: none
+14. **Delete the stale `/tmp/disk-accounting-*` leftovers** — 19 seen, 2 non-empty (84 B / 203 B).
+    Resolve by ownership and mtime, never a blanket `rm`, and not while a battery may be running.
+    forcing: none
+15. **DONE — the Tekton red was a flake**, disproved by re-running the unchanged head `e1536984`.
+    forcing: none
+16. **DONE — `#1409` MERGED** (`50b384c0`), merged tree gated at 2,524 passed / 0 failed, verified
+    by content on `origin/main` and live on a clean `main` at 450 passed. Both claims released.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -494,24 +647,119 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - ⚠ **`grep … | head -1` READ THE WRONG LINE TWICE IN ONE SESSION, and both times the wrong answer looked plausible.** Verifying `#1370`'s merge, `grep -oE '"scripts/tests\|[0-9]+"' | head -1` returned **`"scripts/tests|4976"`** — a figure from a *comment example* at `run-tests.sh:1481`, not the live `TARGET_FLOORS` entry at `:1698` (`12927`). Four lines in that file mention `scripts/tests|`. Earlier the same shape produced a bare `0` from a **guessed path** while verifying `#1392`, which reads exactly like "the merge did not land". **Anchor the pattern (`^  "scripts/tests\|`), and print how many candidates matched** — a first-match on an unanchored pattern is a claim about ordering, not about content.
 - **Merge order mattered and was derived, not guessed.** `#1370` was red on Tekton with 7 failures it did not cause; `#1392` was green and was the fix for exactly those. Merging `#1392` first turned `#1370` green without touching it — confirmed on the merged tree before either merge (`scripts/tests` 12977 collected / 12977 passed / **0 failed**, where the same tree had shown the 7 drift failures an hour earlier).
 
+- 🔴 **TWO `age` BINARIES ARE INSTALLED AND THEY BEHAVE DIFFERENTLY.** Login shell = **v1.3.1**; `nix develop` = **v1.3.2**, which creates `--output` LAZILY on the first successful write (so a tampered artifact under 64 KiB leaves NO file, where 1.3.1 left one). The gate runs 1.3.2; the operator's `check-escrow.sh` nix-shell resolves 1.3.1. **Any claim about age must name which binary it was measured on**, and a guard that fires on only one of them is a defect.
+- 🔴 **`bad header MAC` PROVES THE ESCROWED KEY WORKS.** The discriminating control, both binaries, re-measured at scale by an auditor (336 wrong-identity header corruptions → ZERO `bad header MAC`, against 39/37 from the right-identity control): the SAME damaged blob gives `bad header MAC` with the right identity and `no identity matched any of the recipients` with the wrong one. age reaches the header's integrity check only after an identity has unwrapped a recipient stanza. It is neither pre-auth nor post-auth — `ARTIFACT-CORRUPT`'s usual wording asserts "age authenticated the header", which is what a MAC failure means it did NOT do.
+- **The marker table's ORDER is load-bearing**: every pre-auth marker precedes every `AGE_REFUSALS_KEY_PROVEN` one, because age v1.3.2 NESTS clauses (`failed to read header: parsing age header: unexpected EOF reading intro`) on 21 of 168 in-header offsets. v1.3.1 nests on 0 of 168.
+- **A fixture that flips a byte of the `--- <mac>` line's BASE64 TEXT is ~5% vacuous** — it sometimes lands on an illegal character and age fails earlier, on the closing line, with a different classification. Decode, flip, re-encode.
+- 🔴 **Running a gate target outside `gate.sh`:** `testlib` needs `PYTHONPATH=<repo>/scripts`, and you must invoke **ONE TARGET PER pytest RUN** — basenames collide across targets (`test_db_schema.py` is in both `signal/` and `mail-actions/`), so a combined invocation dies at collection. The runner does it per-target for exactly this reason.
+- 🔴 **NEVER restore a mutation battery's files with `git checkout --`.** Mine reverted the round's own UNCOMMITTED edits instead of the temporary copies, so every mutant afterwards died on an unrelated guard — **including the must-survive control**. The control dying is the only thing that exposed it; a battery without one would have reported 5-for-5 kills that proved nothing. Restore by `cp -a`, prove it with `cmp`, and put EVERY file you mutate in the backup set (the test files too).
+- 🔴 **A guard can pass on prose ABOUT the thing it guards.** A table check that asked whether each marker appeared anywhere in a comment block was satisfied by the ⚠ note below the table that happens to NAME the marker; deleting the row survived. Extract rows structurally, compare the ANSWER column, and check both directions — a row with the right string and the wrong classification is how the founding bug got written. The same guard also had to learn: pin the exit code beside the cause, and REJECT duplicate rows rather than last-wins (a duplicate inserted above the real table shadowed it).
+- **A five-round ladder where every round found something real can still need stopping.** Rounds 4–5 found real defects *in guards the ladder itself had just written*; round 5 could not produce a single red-at-base test because every fix was a guard widening, an unreachable-path hardening, or prose. The attribution judgement — "is this finding about the shipped thing or about my own scaffolding?" — is what ends it, not a clean round.
+- **`gate.sh` has a 3600 s wall-clock cap and reports the timeout as `RESULT: FAIL (exit=143)` / `exit=124`.** Under contention that is an infrastructure timeout, not a test failure — check for real `FAILED` lines before attributing it.
+
+- 🔴 **`xargs -0 command grep` SILENTLY MEASURES NOTHING — it reported ZERO referrers where there
+  are 24.** `xargs` execs its argument as a **binary**, and `command` is a shell **builtin**, so
+  every invocation died `127`; `2>/dev/null` ate the error and the empty result read as a clean
+  "no consumers of the changed code". Caught only by a positive control that HAD to match and
+  didn't. Use `G=$(command -v grep); … | xargs -0 "$G"`. **This is the same family as this doc's
+  `NR-1` → −1, `grep -c` → `"0\n0"`, and `df -i --output` findings, and the direction is again the
+  constant: the error became the answer that let the work proceed.** Note the bitter detail —
+  the `command grep` habit exists *because* this host's `grep` is a ugrep function that is
+  `.gitignore`-blind, i.e. a correct fix for one instrument defect created another.
+    via: measurement
+- 🔴 **A `Succeeded` PipelineRun is a claim about the RUN, not about tests executing.** Read
+  `gh pr checks`' description text, which carries the real counts
+  (`collected=21143 passed=21141 skipped=2 failed=0 (floor: 20342)`). A green with a collected
+  count far below the floor is a different failure wearing the same colour.
+- **A flake is better disproved by RE-RUNNING THE SAME COMMIT than by matching the failure
+  signature.** This doc's rank 15 asked for a signature match; the re-run gave a strictly stronger
+  result — same commit, same pipeline, opposite verdict — and cost nothing, because another
+  session had already triggered it. Check for an in-flight PipelineRun on your exact head
+  (`kubectl get pipelinerun -n tekton-ci -o json`, filter on `.spec.params[?(@.name=="revision")]`)
+  **before** re-deriving an old red.
+- ⚠ **`$ref:path` in zsh is eaten as a `:s` history modifier** — `git show $ref:scripts/tests/x.py`
+  became `origin/mainrow_verify.py`. Brace it: `${ref}:path`. Hit **again** this session despite
+  this doc already recording the identical trap; the defence is mechanical (always brace), not
+  attentional.
+- **The base clone `/home/zach/workspace/devrc` was on `main` and clean this session** (176f412b =
+  `origin/main`), unlike the prior session where it had been switched to another session's branch.
+  Check `git -C … branch --show-current` before any write regardless — `handoff_doc.py` pushes
+  wherever the checkout sits.
+- **A fresh `devrc` worktree has NO `.envrc`** (it is untracked in this repo), so `direnv` provides
+  nothing and any gate target must be invoked explicitly under `nix develop <worktree>`. This is the
+  opposite of `homelab-talos`, where `.envrc` IS tracked — do not carry the habit across repos.
+- **"When the host is quiet" was not achievable this session and may not be next.** Load went
+  49 → 62 → 67 with 9 → 13 concurrent sibling gates over ~30 minutes. If a full `gate.sh` is
+  required, either accept a scheduled quiet window or gate on the targeted overlap set and **say
+  which one ran** — never let a targeted run be reported as "the gate passed".
+
+- 🔴 **RE-RUN THE SAME COMMIT before re-deriving an old red.** This doc's rank 15 asked to "confirm
+  the Tekton red is still the #863 flake" by matching its signature. A re-run of the **unchanged**
+  head was strictly stronger — same commit, same pipeline, opposite verdict — and cost nothing,
+  because another session had already triggered it. **Check for an in-flight PipelineRun on your
+  exact head before spending any effort on signature archaeology:**
+  `kubectl get pipelinerun -n tekton-ci -o json`, filter `.spec.params[?(@.name=="revision")]`.
+    via: measurement
+- 🔴 **A `Succeeded` PipelineRun is a claim about the RUN, not about tests executing.** Read the
+  `gh pr checks` description text, which carries the counts (`collected=21143 … (floor: 20342)`).
+  A green whose collected count sits below the floor is a different failure wearing the same colour.
+- 🔴 **A negative control's EXIT CODE is worthless through a pipe — read its OUTPUT.**
+  `git grep -c <nonsense> … | head -2; echo rc=$?` printed `rc=0` because `head` owns the status.
+  The control still worked, but only because the EMPTY OUTPUT carried the claim. Same family as
+  this doc's `grep -c` → `"0\n0"` and `NR-1` → `-1`, and the third time in this effort a status was
+  eaten by a pipe.
+    via: measurement
+- 🔴 **`--delete-branch` on a STACKED parent is irreversible — check before every merge.** GitHub
+  auto-closes a PR whose base branch is deleted and REFUSES to reopen it; the branch is restorable,
+  the PR object and its review thread are not. One command:
+  `gh pr list --repo <r> --state open --base <branch>` → `[]` means safe. Cheap, and there is no
+  undo if it isn't.
+- **"Disjoint files" was tested, not assumed, and the mechanism was real.** The base moved by one
+  commit — this session's own handoff doc — which LOOKS disjoint from a Python PR. But two suites in
+  the run (`test_doc_path_rot`, `test_no_captured_markup`) scan docs via `git ls-files`, so the
+  commit was in a plausible blast radius. Re-running those two on `main` including it (93 and 76
+  passed) cost 30 seconds and replaced an assumption with a measurement.
+- ⚠ **`ROOTS` and `CORPUS_DIRS` in `test_doc_path_rot.py` are different things and the names invite
+  the error.** `claudedocs` IS in `ROOTS` (which top-level dirs make a *token* a claim about this
+  repo) and is deliberately NOT in `CORPUS_DIRS = ("claude", "CLAUDE.md")` (which docs get scanned).
+  Reading the first as the second says the handoff tree is gated when it is not.
+- **A targeted overlap run is NOT "the gate" — name which one ran.** The merged tree here was
+  covered by 8 suites derived from a referrer intersection (24 referrers ∩ main's 48-commit file
+  set = 9 hits), not by `gate.sh`. It is good evidence and it is a narrower claim; say so, because
+  next session will otherwise read "merged tree green" as the full gate.
+
 ## How to verify
-1. **Both tmpfiles hosts live:** `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → **7**; `grep -c ' m:7d'` → **0**. No root needed on either. Laptop: wrap in `ssh -t zach@192.168.50.155 '...'`.
-2. **All three PRs really landed** (by CONTENT — a squash is never an ancestor of its base):
+1. **Both tmpfiles hosts still live:** `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → **7**;
+   `grep -c ' m:7d'` → **0**. No root needed. Laptop: wrap in `ssh -t zach@192.168.50.155 '...'`.
+2. **All four PRs of this effort landed** (by CONTENT — a squash is never an ancestor of its base):
    ```bash
    git -C /home/zach/workspace/devrc fetch origin main -q
    git -C /home/zach/workspace/devrc cat-file -e origin/main:scripts/tests/test_diagnose_disk_accounting.sh   # 1366
    git -C /home/zach/workspace/devrc cat-file -e origin/main:scripts/tests/test_preflight_tmp_churn_host.py   # 1370
    git -C /home/zach/workspace/devrc grep -c classify_age_refusal origin/main -- '*.py'                       # 1392
+   git -C /home/zach/workspace/devrc grep -c AGE_REFUSED_HEADER_MAC origin/main -- '*.py'                     # 1409 -> 4 files
    ```
-3. **The drift floor on main matches its tree** — ANCHOR the pattern, an unanchored first match reads a comment example:
+   🔴 The last one must be **NON-EMPTY** now (`#1409` merged as `50b384c0`). Pair it with a
+   nonsense symbol that must come back EMPTY, or a zero is indistinguishable from a broken grep.
+3. **`#1409` live on merged `main`** — run on a CLEAN tree or the result is about a deployed copy,
+   not the commit:
    ```bash
-   git -C /home/zach/workspace/devrc show origin/main:scripts/run-tests.sh | grep -nE '^  "scripts/tests\|[0-9]+"'
+   D=/home/zach/workspace/devrc
+   git -C $D status --porcelain | wc -l          # must be 0
+   PYTHONDONTWRITEBYTECODE=1 nix develop $D -c env PYTHONPATH=$D/scripts python3 -m pytest \
+     $D/scripts/tests/test_analyze_service_index_escrow_verify.py \
+     $D/scripts/tests/test_analyze_service_index_restore_verify.py -q
    ```
-   → `12927`. Re-derive with the gate's own function if the tree moves:
-   `nix develop /home/zach/workspace/devrc -c bash -c 'eval "$(sed -n "/^_suggested_floor()/,/^}/p" scripts/run-tests.sh)"; _suggested_floor <measured-count>'`
-4. **The age inversion is real** (run it before trusting any re-derivation): encrypt a 4 KiB payload, flip a byte near the end, decrypt with `--output` under both builds — 1.3.1 leaves the file present, 1.3.2 leaves none. Interactive shell is 1.3.1; `nix develop` is 1.3.2.
-5. **The workbench reclaim held:** `df -i /` → used inodes materially below the 96.1M baseline (67.2M on 2026-09-07); `df -h /` → Use% ≤ 77%.
-6. **One command classifies either host** (workbench is the known-good control — expect `applied-and-live — 7`), now that the tool is on `main`:
+   → **450 passed**. 🔴 The old "on BOTH age binaries" instruction is WITHDRAWN — `4f49f5dc` (#1403)
+   measured that every shell on both hosts resolves **age v1.3.2** and nothing puts v1.3.1 on a
+   PATH, so that leg tested a configuration that no longer exists.
+4. **`bad header MAC` really does prove the key** — decode the `--- <mac>` line, flip a bit,
+   re-encode, decrypt with the right and the wrong identity → right = `age: error: bad header MAC`,
+   wrong = `age: error: no identity matched any of the recipients`.
+5. **The workbench reclaim held:** `df -i /` → used inodes materially below the 96.1M baseline
+   (67.2M on 2026-09-07); `df -h /` → Use% ≤ 77%.
+6. **One command classifies either tmpfiles host** (workbench is the known-good control — expect
+   `applied-and-live — 7`):
    ```bash
    cd ~/workspace/devrc && git fetch -q origin main && \
      git show origin/main:nix/system/preflight-tmp-churn-host.sh > /tmp/pf.sh && sudo bash /tmp/pf.sh

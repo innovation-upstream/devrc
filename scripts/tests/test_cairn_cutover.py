@@ -1386,6 +1386,457 @@ class TestTheScriptRefusesRatherThanProceeds:
         assert set(payload["sc/a.md"]) == {"sha256", "aliases"}
 
 
+POD = {"sc/pod-only.md": _entry("sc", "pod-only", "- 2026-01-01: lives only on the pod.")}
+
+
+class TestP3IsRetiredOnceTheStoreIsFrozen:
+    """🔴 P3 pushes LOCAL -> POD, which is correct exactly ONCE and destructive
+    afterwards. These are the first tests in this file to drive P3 through the
+    REAL `main`: the previous suite only re-extracted `seed.sh`'s `find`
+    expression, so 85 green tests said nothing about whether this phase runs.
+
+    The trap this guards is that P3's failure mode LOOKS like a bug worth fixing.
+    `plan.shippable` is ADD + SUPERSEDES + MERGED, and SUPERSEDES/MERGED are by
+    definition entries whose pod bytes differ — exactly what `seed.sh`'s
+    pre-flight refuses — so post-cutover it exits 8 the moment anything
+    supersedes and reads as a shipped path that can never complete. The
+    one-line "fix" is `--allow-overwrite`, and that is the silent revert:
+    `seed.sh`'s tar adds and overwrites but never deletes, so a push from a
+    frozen mirror reverts every entry the pod has moved on and reports success.
+    """
+
+    def _past_p0(self, cc, monkeypatch, pod_entries: dict[str, str]):
+        """Stub ONLY the P0 gates (backup, sync, write-route), never P3 itself.
+
+        🔴 The phase under test is left entirely real. A stub reaching into P3
+        would be testing the stub. The `cairn sync` stub POPULATES the cache dir
+        the way the real one does — reading the destination out of the argv it
+        was handed — because P0 refuses when the served copy is empty, and a
+        stub that merely returned success would fail the run before P3.
+        """
+        monkeypatch.setattr(cc, "backup_precondition",
+                            lambda **kw: (True, "backup OK (stubbed)"))
+        monkeypatch.setattr(cc, "write_route_deployed",
+                            lambda **kw: (True, None, "write route OK (stubbed)"))
+        monkeypatch.setattr(cc, "_config", lambda: ("http://stub.invalid", "tok"))
+
+        real_run = cc.run
+        seen = []
+
+        def fake_run(argv, **kw):
+            argv = [str(a) for a in argv]
+            seen.append(argv)
+            if argv[-1] == "sync" and "--cache" in argv:
+                dest = Path(argv[argv.index("--cache") + 1])
+                _tree(dest, pod_entries)
+                return cc.Ran(0, "synced (stubbed)", "")
+            # 🔴 SEED IS INTERCEPTED, NOT EXECUTED. `scripts/tests` is in
+            # run-tests.sh's HERMETIC_TARGETS ("safe to run offline in the nix
+            # sandbox") and `kubectl` is deliberately absent from REQUIRED_TOOLS
+            # — but `seed.sh --push` shells out to it, so letting this fall
+            # through really dialled localhost:8080 and made the outcome depend
+            # on an ambient KUBECONFIG, inside a `timeout=600` in a suite with a
+            # wall clock. The `seen` ledger still proves reachability, which is
+            # all these tests read it for.
+            if any(a.endswith("seed.sh") for a in argv):
+                return cc.Ran(0, "seed: OK (stubbed — not executed)", "")
+            return real_run(argv, **kw)
+
+        monkeypatch.setattr(cc, "run", fake_run)
+        return seen
+
+    def test_a_FROZEN_store_refuses_P3_and_never_reaches_seed(
+        self, cc, tmp_path, monkeypatch
+    ):
+        """The wiring, end to end: rc 19 out of the real `main`, and `seed.sh`
+        never invoked. Asserting only the rc would pass for a run that pushed
+        and then refused."""
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        seen = self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        assert cc.survey(root)["writable"] == 0, "fixture is not actually frozen"
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        assert rc == cc.RC_CUTOVER_COMPLETE, f"rc={rc}"
+        assert not any("seed.sh" in " ".join(str(a) for a in argv) for argv in seen), (
+            f"seed.sh was invoked despite the retirement: {seen}"
+        )
+
+    def test_a_WRITABLE_store_is_NOT_refused(self, cc, tmp_path, monkeypatch):
+        """🔴 THE CONTROL THAT KEEPS THE ONE ABOVE HONEST. A guard that refused
+        unconditionally would satisfy every assertion in the previous test while
+        breaking the one run P3 still exists for — a host that has NOT been cut
+        over. The ONLY difference between the two fixtures is the mode bits —
+        same argv, same pod, same store contents.
+
+        ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE, and labelled so it is not
+        counted as such: it passes at base too, by construction — before the
+        retirement existed nothing could return RC_CUTOVER_COMPLETE. Measured:
+        deleting the guard reds the two tests either side of it and leaves this
+        one green. Its job is to pin the over-refusal direction, which is the
+        direction a future edit would break.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        seen = self._past_p0(cc, monkeypatch, POD)
+        assert cc.survey(root)["refused"] == 0, "fixture is not actually un-frozen"
+
+        # 🔴 THE SAME ARGV AS THE FROZEN CASE, DOWN TO --apply --push. The first
+        # draft passed neither here, so the pair differed in the mode bits AND in
+        # whether it could reach `seed.sh` at all — while the docstring claimed
+        # the mode bits were the only difference. A control whose fixture differs
+        # on two axes cannot say which one moved the result.
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        assert rc != cc.RC_CUTOVER_COMPLETE, (
+            "the retirement fired on a store that has NOT been cut over — P3 is "
+            "retired post-freeze, not deleted"
+        )
+        # 🔴 AND IT MUST REACH THE PUSH. `rc != 19` alone is satisfied by ANY
+        # earlier refusal (RC_NO_STORE, RC_BACKUP, RC_UNRESOLVED_DIVERGENCE), so
+        # a future change that made P0 reject this fixture would leave this test
+        # green over zero coverage.
+        assert any("seed.sh" in " ".join(argv) for argv in seen), (
+            f"the un-frozen run never reached seed.sh, so this proves nothing "
+            f"about the retirement being CONDITIONAL: {seen}"
+        )
+
+    def test_a_NEW_entry_created_AFTER_the_freeze_does_not_disarm_the_guard(
+        self, cc, tmp_path, monkeypatch
+    ):
+        """🔴 THE STATE THAT BROKE THE FIRST PREDICATE, AND IT IS A MEASURED ONE.
+
+        `set_entry_mode` freezes FILES and deliberately leaves scope DIRECTORIES
+        writable, so a genuinely new entry can still be created on local disk —
+        and `34d00d90`/#1254 records five entries that were created exactly that
+        way, existing on one host and dark to every reader. In that state
+        `writable >= 1`, so the original `writable == 0` predicate went SILENT on
+        a store that HAS been cut over, and P3 pushed. This is the situation that
+        makes someone reach for P3 in the first place, so it is the one the guard
+        must not miss.
+
+        `refused > 0` is what fixes it: the freeze leaves evidence that a later
+        creation cannot erase.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        seen = self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        # the post-freeze creation — a writable file in a still-writable scope dir
+        (root / "sc" / "brand-new.md").write_text(
+            _entry("sc", "brand-new", "- 2026-01-02: created after the freeze.")
+        )
+        state = cc.survey(root)
+        assert state["writable"] == 1 and state["refused"] == 1, (
+            f"fixture does not reproduce the mixed state: {state}"
+        )
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        assert rc == cc.RC_CUTOVER_COMPLETE, (
+            f"one writable file disarmed the retirement (rc={rc}) — this is the "
+            f"push the guard exists to stop, in the state that motivates it"
+        )
+        assert not any("seed.sh" in " ".join(argv) for argv in seen), (
+            f"seed.sh was reached from a cut-over store: {seen}"
+        )
+
+    def test_the_MIXED_state_refusal_names_the_route_out_instead_of_a_conclusion(
+        self, cc, tmp_path, monkeypatch, capsys
+    ):
+        """🔴 MODE BITS CANNOT TELL A COMPLETED CUTOVER FROM A PARTIAL FREEZE.
+
+        `RC_FREEZE_INEFFECTIVE` with `unknown > 0` is a first-class outcome that
+        LEAVES entries at 0444 on a store whose freeze did not take, and a SIGINT
+        mid-`set_entry_mode` produces the same shape. An earlier draft's message
+        asserted "so P5 has frozen it and local disk is a read-through CACHE" —
+        false in exactly that state, and it left the operator with no route out,
+        because P3 now refuses before P5 is reached.
+
+        So a MIXED store must be told it might be a partial freeze and pointed at
+        `--freeze --apply`, which runs P5 alone and does not re-enter this phase.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        (root / "sc" / "later.md").write_text(_entry("sc", "later", "- 2026-01-02: y."))
+        assert cc.survey(root)["writable"] == 1, "fixture is not MIXED"
+
+        cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                 "--apply", "--push", "ns/dep"])
+        text = "".join(capsys.readouterr())
+        assert "--freeze --apply" in text, (
+            f"a MIXED store was refused with no route out — the partial-freeze "
+            f"operator cannot reach P5 through this phase.\n{text}"
+        )
+        assert "PARTIAL" in text, (
+            f"the refusal states a conclusion the mode bits cannot establish "
+            f"instead of naming the ambiguity.\n{text}"
+        )
+
+    def test_an_UNMEASURABLE_store_is_neither_retired_nor_pushed(
+        self, cc, tmp_path, monkeypatch
+    ):
+        """🔴 THE BUCKET `refused > 0` DOES NOT MEASURE, AND IT FAILED OPEN.
+
+        `probe_writable` returns "refused" only for `PermissionError`. EROFS is a
+        plain `OSError` and lands in `other` — so a CUT-OVER store on a read-only
+        mount (a natural hardening once local disk is a cache) read `refused == 0`
+        and P3 PUSHED it. Measured: `survey` `{'writable':0,'refused':0,'other':1}`
+        gave rc 17 with seed.sh reached. A mutant widening the predicate to
+        `refused > 0 or other > 0` SURVIVED all 91 tests, so the suite was blind
+        to this bucket in both directions.
+
+        The answer is neither verdict: an instrument that did not answer gets
+        RC_COULD_NOT_MEASURE, which is this file's own stated doctrine.
+
+        ⚠ The unreadable state is injected by stubbing `probe_writable` rather
+        than by mounting a real read-only filesystem, which needs root. The
+        errno mapping underneath it (EACCES/EPERM -> PermissionError; EROFS/EIO
+        -> plain OSError) is the part that makes the injection faithful, and it
+        is asserted here rather than assumed.
+        """
+        import errno as _errno
+        assert isinstance(OSError(_errno.EACCES, "x"), OSError)
+        assert not isinstance(OSError(_errno.EROFS, "x"), PermissionError), (
+            "EROFS maps to PermissionError on this platform, so `other` would "
+            "never hold it and this test is measuring nothing"
+        )
+
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        seen = self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        monkeypatch.setattr(cc, "probe_writable", lambda _p: "error:EROFS")
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        assert rc == cc.RC_COULD_NOT_MEASURE, (
+            f"an unreadable store was folded into a verdict (rc={rc}) — the one "
+            f"outcome this file says must never happen"
+        )
+        assert not any("seed.sh" in " ".join(argv) for argv in seen), (
+            f"seed.sh was reached over a store nothing could measure: {seen}"
+        )
+
+    def test_an_ORDINARY_dry_run_admits_the_run_dir_it_wrote(
+        self, cc, tmp_path, monkeypatch, capsys
+    ):
+        """🔴 THE PARTIAL SWEEP, ONE ROUND LATER — this is the site an operator
+        actually reads, and it was missed while USAGE and the frozen-store test
+        were fixed. On an UN-frozen store the run reaches the dry-run branch and
+        printed a flat "Nothing was changed." — while P0 had already synced a
+        full plaintext copy of the SERVED store into the run dir. The file's own
+        comment calls that out and notes the runbook prescribes several dry runs,
+        so they accumulate.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        self._past_p0(cc, monkeypatch, POD)
+        run_dir = tmp_path / "run"
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(run_dir)])
+        assert rc == cc.RC_OK, f"rc={rc}"
+        text = "".join(capsys.readouterr())
+        assert sorted(q.name for q in run_dir.rglob("*.md")), (
+            "the run dir holds no copy — this test no longer observes the thing"
+        )
+        assert "IN EITHER STORE" in text, (
+            f"the dry run still claims a flat 'Nothing was changed' while it "
+            f"wrote a plaintext copy of the served store.\n{text}"
+        )
+        assert "delete the run dir" in text, (
+            f"the dry run does not tell the operator how to roll back what it "
+            f"DID write.\n{text}"
+        )
+
+    def test_the_MIXED_advice_puts_the_PUSH_before_the_FREEZE_and_names_the_ledger(
+        self, cc, tmp_path, monkeypatch, capsys
+    ):
+        """🔴 TWO MEASURED HARMS FROM ONE SENTENCE OF ADVICE.
+
+        An earlier draft told a MIXED store to "complete it with `--freeze
+        --apply`". Reproduced end to end:
+          * on a never-cut-over store that FREEZES entries never pushed — the
+            `34d00d90`/#1254 shape, local-only content dark to every reader —
+            with P3 now retired over it;
+          * out of an interrupted freeze it writes a SECOND mode ledger holding
+            0444, and `--unfreeze` takes the NEWEST, so a 0600 entry is
+            "restored" to 0444 and the rollback exits 0.
+
+        So the advice must order the acts (push first) and carry the ledger
+        caveat with the route. Pinned on the ORDER, not on the words: `create`
+        must be recommended before `--freeze --apply` is mentioned.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        (root / "sc" / "later.md").write_text(_entry("sc", "later", "- 2026-01-02: y."))
+        assert cc.survey(root)["writable"] == 1, "fixture is not MIXED"
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        assert rc == cc.RC_CUTOVER_COMPLETE, f"rc={rc}"
+        text = "".join(capsys.readouterr())
+        # 🔴 ANCHORED INSIDE THE MIXED CLAUSE, AND THE FIRST DRAFT WAS NOT.
+        # `str.index` returns the FIRST occurrence, and "cairn create" appears
+        # TWICE — once in the base sentence that precedes the whole suffix. So
+        # `first_create` always resolved to that one, which trivially precedes
+        # `--freeze --apply`, and the ordering WITHIN the clause — the thing this
+        # test's name and docstring claim to pin — was never measured. MEASURED:
+        # reverting the clause to the round-2 wording ("If P5 never finished,
+        # complete it with `--freeze --apply`. Afterwards get any local-only
+        # content onto the pod with `cairn create`") passed all 97 tests. That
+        # mutant IS the defect this test exists to stop recurring.
+        assert "still WRITABLE" in text, (
+            f"the MIXED suffix is absent, so there is no clause to order.\n{text}"
+        )
+        clause = text[text.index("still WRITABLE"):]
+        for token in ("cairn create", "--freeze --apply"):
+            assert token in clause, (
+                f"the MIXED clause no longer names {token!r}, so the ordering "
+                f"below is unmeasurable.\n{clause}"
+            )
+        assert clause.index("cairn create") < clause.index("--freeze --apply"), (
+            f"the freeze route is offered before the push WITHIN the mixed "
+            f"clause — following it in that order strands local-only content "
+            f"behind a retired P3.\n{clause}"
+        )
+        assert "pushes NOTHING" in text, (
+            f"the message does not say the freeze route sends nothing.\n{text}"
+        )
+        assert cc.MODE_LEDGER in text and "--mode-ledger" in text, (
+            f"the freeze route is named without the ledger caveat — a second "
+            f"freeze shadows the first and --unfreeze silently narrows a 0600 "
+            f"entry to 0444.\n{text}"
+        )
+
+    def test_the_UNMEASURABLE_branch_is_decided_BEFORE_the_retirement(
+        self, cc, tmp_path, monkeypatch
+    ):
+        """🔴 THE ORDERING THE FIX IS DESCRIBED BY, AND IT WAS UNPINNED —
+        moving the `other` block below the `refused` block survived the file.
+
+        Both spellings refuse and neither pushes, so the behavioural stake is
+        which code an operator sees for a store that is BOTH partly frozen and
+        partly unreadable. That store is the one this builds, and it is the one
+        no other test constructs: the F1 test stubs `probe_writable` for EVERY
+        entry, so it can never produce a mixed bucket. 'Could not measure' must
+        win, because a store you cannot read is not a store you have classified.
+        """
+        root = _tree(tmp_path / "s", {
+            "sc/a.md": _entry("sc", "a", "- 2026-01-01: x."),
+            "sc/b.md": _entry("sc", "b", "- 2026-01-01: y."),
+        })
+        seen = self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        real_probe = cc.probe_writable
+        monkeypatch.setattr(
+            cc, "probe_writable",
+            lambda q: "error:EROFS" if q.name == "b.md" else real_probe(q),
+        )
+        state = cc.survey(root)
+        assert state["refused"] == 1 and state["other"] == 1, (
+            f"fixture does not build the MIXED bucket: {state}"
+        )
+
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        assert rc == cc.RC_COULD_NOT_MEASURE, (
+            f"a store that is partly UNREADABLE was classified anyway (rc={rc}) "
+            f"— the unmeasurable branch must be decided first"
+        )
+        assert not any("seed.sh" in " ".join(argv) for argv in seen), seen
+
+    def test_the_USAGE_note_states_the_dry_run_refusal_and_the_run_dir_cost(self):
+        """🔴 THE BEHAVIOUR WAS PINNED AND THE DOCUMENTATION WAS NOT — deleting
+        the whole USAGE note SURVIVED the file. The note is the only place a
+        reader learns that the documented default command exits 19 on a
+        cut-over store, and that a dry run still writes a plaintext copy of the
+        served store to disk. Pin both claims, not the word 'dry run'."""
+        src = CUTOVER.read_text(encoding="utf-8")
+        usage = src[src.index("USAGE"):src.index("Exit codes are disjoint")]
+        assert "19" in usage and "P3 retired" in usage, (
+            f"USAGE no longer says a bare run exits 19 on a frozen store:\n{usage}"
+        )
+        for claim in ("plaintext copy", "deleting it"):
+            assert claim in usage, (
+                f"USAGE no longer records the run-dir cost ({claim!r}) — the "
+                f"earlier draft flatly said 'still changes nothing', which was "
+                f"false.\n{usage}"
+            )
+
+    def test_a_BARE_DRY_RUN_on_a_frozen_store_refuses_and_changes_nothing(
+        self, cc, tmp_path, monkeypatch
+    ):
+        """🔴 THE DRY RUN IS THE DOCUMENTED DEFAULT, AND ITS BEHAVIOUR MOVED.
+
+        The guard sits ABOVE `if not args.apply:`, so a bare invocation on a
+        cut-over store now exits 19 instead of printing a plan. That is the
+        intended trade — a plan that can never be applied is not information —
+        but it is a change to the one command the USAGE block tells people to
+        run first, so it is pinned here and stated there. Nothing pinned it
+        before: moving the guard below the dry-run branch was caught by no test.
+
+        The 'changes nothing' half of the USAGE claim must still hold.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        seen = self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        before = {p: p.stat().st_mode for p in root.rglob("*.md")}
+
+        run_dir = tmp_path / "run"
+        rc = cc.main(["--store", str(root), "--run-dir", str(run_dir)])
+        assert rc == cc.RC_CUTOVER_COMPLETE, f"a bare dry run returned {rc}"
+        assert {p: p.stat().st_mode for p in root.rglob("*.md")} == before, (
+            "the dry run moved a mode bit in the STORE"
+        )
+        # 🔴 AND THE HALF THE FIRST DRAFT COULD NOT SEE. It asserted "changes
+        # nothing" by globbing the STORE only — while its own `cairn sync` stub
+        # wrote the served copy into the run dir, so the counter-evidence was
+        # produced inside the test and never looked at. P0 runs before P3, so a
+        # refused dry run still leaves a full plaintext copy on disk. Assert the
+        # true shape rather than the comfortable one; USAGE says the same.
+        assert run_dir.exists(), "P0 did not create the run dir — fixture drift"
+        copied = sorted(str(q.relative_to(run_dir)) for q in run_dir.rglob("*.md"))
+        assert copied, (
+            "the run dir holds no copy, so this test is no longer observing the "
+            "thing USAGE warns about"
+        )
+        assert not any("seed.sh" in " ".join(argv) for argv in seen), (
+            f"a DRY RUN reached seed.sh: {seen}"
+        )
+
+    def test_the_refusal_names_the_REMEDY_and_warns_off_allow_overwrite(
+        self, cc, tmp_path, monkeypatch, capsys
+    ):
+        """A refusal that does not say what to do instead gets routed around —
+        and here the obvious route around IS the data-loss bug. Pin both halves:
+        the correct write path, and the flag that must not be reached for."""
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        self._past_p0(cc, monkeypatch, POD)
+        cc.set_entry_mode(root, 0o444)
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"),
+                      "--apply", "--push", "ns/dep"])
+        # 🔴 ASSERT THE CODE TOO — the first draft discarded `main`'s return
+        # value, so it never checked the text it read belonged to THIS refusal.
+        assert rc == cc.RC_CUTOVER_COMPLETE, f"rc={rc}"
+        out = capsys.readouterr()
+        text = out.out + out.err
+        # 🔴 NOT `"cairn" in text` — THAT WAS VACUOUS AND A MUTANT SURVIVED IT.
+        # P0 logs `cairn sync -> rc …` on every run, so the word is present no
+        # matter what the refusal says: a message rewritten to "the `append` /
+        # `put` verb", with `cairn` nowhere in it, passed. Pin each VERB, and the
+        # ADD case that only `create` serves.
+        for verb in ("cairn create", "cairn append", "cairn put"):
+            assert verb in text, (
+                f"the refusal does not name `{verb}`. `append` and `put` both 404 "
+                f"on a ref that does not resolve, so a refusal omitting `create` "
+                f"sends the ADD case — the one most likely to have brought the "
+                f"operator here — to two verbs that cannot serve it.\n{text}"
+            )
+        assert "--allow-overwrite" in text, (
+            f"the refusal does not warn off the flag that would disarm it:\n{text}"
+        )
+
+
 class TestTheDeltaTree:
     def test_materialise_copies_ONLY_the_shippable_entries(self, cc, tmp_path):
         text = _entry("sc", "same", "- 2026-01-01: unchanged.")
@@ -1648,3 +2099,26 @@ class TestAcceptanceRefusalNamesWhatItActuallyHas:
         assert "1 scope(s) compared clean" in err, err
         assert "UNCOMPARED" in err, err
         assert f"REFUSED (rc {cc.RC_ACCEPTANCE})" in err, err
+
+
+class TestTheExitCodesAreActuallyDisjoint:
+    """🔴 THE SCRIPT ASSERTS IT AND NOTHING CHECKED IT. Its module docstring says
+    "Exit codes are disjoint and each names one refusal", and a mutant setting
+    `RC_CUTOVER_COMPLETE = 18` — colliding with `RC_COULD_NOT_MEASURE` — SURVIVED
+    the whole file. A collision makes two different refusals indistinguishable to
+    any caller that branches on the code, which is the entire point of having
+    them. Pre-existing gap; this change adds a code to the set, so it closes it.
+    """
+
+    def test_no_two_RC_constants_share_a_value(self, cc):
+        codes = {n: v for n, v in vars(cc).items()
+                 if n.startswith("RC_") and isinstance(v, int)}
+        assert len(codes) >= 12, f"the ledger found almost nothing: {codes}"
+        seen: dict[int, str] = {}
+        for name, value in sorted(codes.items()):
+            assert value not in seen, (
+                f"{name} and {seen[value]} are both {value} — the module "
+                f"docstring's 'exit codes are disjoint' is false, and a caller "
+                f"branching on {value} cannot tell the two refusals apart"
+            )
+            seen[value] = name
