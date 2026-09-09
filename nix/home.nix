@@ -3739,18 +3739,30 @@ in
         # triggers, which is what makes the omission an asymmetry rather than a
         # policy.
         "${../scripts/lib/host_label.py}"
-        # 🔴 THE BUILDER'S OWN IMPORT, MISSED FOR THE WHOLE ARC. The resident
-        # agent's list gained transcript_search.py when the tailer started
-        # loading it; this timer's did not, even though build_transcript_push.py
-        # imports it directly and cannot run without it:
+        # The builder's own import, and the oldest omission in this list:
+        # build_transcript_push.py has imported transcript_search since the
+        # feeder shipped, and cannot run without it —
         #
         #   builder without transcript_search.py -> rc 1
         #   ModuleNotFoundError: No module named 'transcript_search'
         #
-        # The asymmetry mattered twice over: a comment three lines below asserted
-        # this unit "names every module it depends on", and the test it named
-        # pinned a hand-written 3-set — so the gap was not merely unnoticed, it
-        # was locked in by the guard meant to prevent it.
+        # ⚠ WHAT IT COSTS IS ONE TICK, NOT A STALE DEPLOY, AND THE COMMIT THAT
+        # ADDED THIS ENTRY SAID OTHERWISE. This is a `Type=oneshot` fired by a
+        # 5-minute timer, and ExecStart above names the WORKING-TREE path, not a
+        # store path; transcript-push.sh then resolves the builder through
+        # `readlink -f "$0"`, so the next tick execs whatever is on disk with or
+        # without a trigger. Measured on the live unit:
+        #
+        #   ExecStart=…/bash %h/workspace/devrc/scripts/transcript-push.sh
+        #   Type=oneshot   timer: last run 19s ago, next in 4min 40s
+        #
+        # So a missing trigger here buys back at most one 5-minute tick — the
+        # bound the reply-agent block states for exactly this contrast (search
+        # for "where a stale copy costs at most five minutes"). It is listed
+        # because the other three are, and because a hard dependency that can
+        # exit the unit belongs in its own declaration; NOT because omitting it
+        # runs old code indefinitely. That consequence is the resident agent's,
+        # and this arc has now made the same overstatement twice.
         "${../scripts/lib/transcript_search.py}"
       ];
     };
@@ -3877,7 +3889,8 @@ in
       # ⚠ THE COVERAGE USED TO SIT WHERE IT MATTERED LEAST. The transcript-push
       # TIMER — where a stale copy costs at most five minutes, because the next
       # tick runs fresh code — names every module it depends on and is pinned by
-      # `test_the_unit_restart_triggers_name_EVERY_half`. This RESIDENT unit,
+      # `test_the_unit_restart_triggers_name_EVERY_hard_dependency` (and now by a
+      # source-derived sibling, the way this unit already was). This RESIDENT unit,
       # where a stale copy lasts until somebody notices, named two while loading
       # four. Both units and both tests were widened in the same arc; the numbers
       # are deliberately not restated here, because they moved three times while

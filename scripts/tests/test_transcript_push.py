@@ -1015,17 +1015,21 @@ def test_the_unit_PATH_carries_the_binaries_the_script_needs():
         assert pkg in block, f"the transcript feeder's PATH is missing {pkg}"
 
 
-def test_the_unit_restart_triggers_name_EVERY_half():
-    """The builder decides WHICH sessions are sent and HOW MUCH of each, and
-    host_label.py decides WHAT HOST they are filed under — a change to either
-    changes what this unit delivers with no edit to the shell at all, so a trigger
-    on the shell alone would leave a deployed unit running the old rule.
+def test_the_unit_restart_triggers_name_EVERY_hard_dependency():
+    """Every file this unit cannot run without is declared as a trigger.
 
-    🔴 THE NAME SAID "BOTH HALVES" WHILE THE UNIT GREW A THIRD, and the same
-    commit that added it wired it into the AGENT's triggers — so the omission was
-    an asymmetry, not a policy. Asserted as a SET, because a list of `in` checks
-    is exactly what grows silently: `host_label.py` is now FATAL for this unit
-    (exit 3) and was not listed.
+    Asserted as a SET, not a list of `in` checks, because a membership test grows
+    silently — which is how this list reached four entries having been described
+    as "both halves" through three of them.
+
+    ⚠ WHAT A MISSING TRIGGER COSTS HERE IS ONE TICK, AND THE PROSE IN THIS FILE
+    SAID OTHERWISE THROUGH TWO REVISIONS. This unit is `Type=oneshot` on a
+    5-minute timer whose ExecStart names the WORKING-TREE path, so the next tick
+    execs current code regardless. The indefinitely-stale consequence belongs to
+    the RESIDENT reply agent, which imports once and runs for weeks — see the
+    two tests below, which are the ones where that reasoning applies. The
+    declaration is still worth pinning (a dependency that can exit the unit
+    should be visible in the unit), but this test is not guarding an outage.
     """
     import re
 
@@ -1038,18 +1042,19 @@ def test_the_unit_restart_triggers_name_EVERY_half():
         "scripts/lib/build_transcript_push.py",
         "scripts/lib/host_label.py",
         # 🔴 THE BUILDER IMPORTS IT AND CANNOT RUN WITHOUT IT (ModuleNotFoundError,
-        # rc 1). It was missing for the whole arc — and this ledger, whose own
-        # failure message says "every file this unit hard-depends on must be one",
-        # was pinning the 3-set that omitted it. A hand-written want-set is a
-        # ledger only while somebody checks it against the thing it describes;
-        # the sibling test derives its set from the agent's SOURCE, and that is
-        # the one that caught the equivalent gap on the other unit.
+        # rc 1), and it was the OLDEST omission here — the builder has imported it
+        # since the feeder shipped, before the delta tailer existed. A hand-written
+        # want-set is a ledger only while somebody checks it against the thing it
+        # describes: this one was pinning the 3-set that omitted it, so the gap was
+        # not merely unnoticed, it was locked in by its own guard. That is why the
+        # test below derives the set from SOURCE instead.
         "scripts/lib/transcript_search.py",
     }
     assert declared == want, (
         f"the transcript-push unit's restart triggers are {sorted(declared)}, want "
-        f"{sorted(want)} — every file this unit hard-depends on must be one, or a fix to it "
-        "ships while the timer keeps running the old copy")
+        f"{sorted(want)} — every file this unit hard-depends on must be one. A missing "
+        "one costs at most one 5-minute tick here (oneshot + working-tree ExecStart), "
+        "but an undeclared hard dependency is invisible to anyone reading the unit")
 
 
 def test_the_script_and_builder_are_executable():
@@ -1178,6 +1183,64 @@ def test_every_module_the_agent_loads_by_path_IS_a_restart_trigger():
         f"the agent loads {sorted(missing)} at startup but the unit does not trigger on "
         "them — a resident service would keep running the old copy indefinitely"
     )
+
+
+def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
+    """🔴 THE HALF THE HAND-WRITTEN LEDGER LEFT OPEN. `transcript_search.py` was
+    absent from the timer's triggers from the day the feeder shipped, and the
+    test that grades those triggers is a set somebody typed — so it graded the
+    omission as correct. The agent unit already had a source-derived counterpart;
+    the timer had none, which is precisely why the gap survived on this side.
+
+    So: derive the timer's expected set from the two files the unit actually
+    runs. A fifth dependency added to either tomorrow fails here rather than
+    waiting for someone to notice the `want` set is one short.
+
+    🔴 BOTH SOURCES, BECAUSE THE UNIT HAS TWO. The first draft of this test
+    scanned only the builder's imports and its own positive control caught that:
+    `host_label.py` is resolved by the SHELL (`transcript-push.sh:99`, fatal at
+    exit 3), never imported by the builder, so a builder-only scanner would have
+    declared the ledger complete while being blind to the dependency that
+    actually kills the unit.
+
+    ⚠ WHAT THIS GUARDS IS A DECLARATION, NOT AN OUTAGE — this unit is oneshot on a
+    timer with a working-tree ExecStart, so a missing trigger costs one tick. The
+    resident-agent sibling above is the one where staleness is unbounded, and
+    conflating the two is the error this arc made twice.
+    """
+    import re
+
+    libdir = REPO_ROOT / "scripts" / "lib"
+
+    # (a) what the BUILDER imports — plain sibling imports off its own sys.path.
+    builder = (REPO_ROOT / "scripts" / "lib" / "build_transcript_push.py").read_text()
+    names = set(re.findall(r"^(?:from|import)\s+([a-z_][a-z0-9_]*)", builder, re.M))
+    needed = {f"{n}.py" for n in names if (libdir / f"{n}.py").exists()}
+
+    # (b) what the SHELL resolves out of lib/ — a different mechanism, same
+    #     consequence when it is missing.
+    shell = (REPO_ROOT / "scripts" / "transcript-push.sh").read_text()
+    needed |= {m for m in re.findall(r'/lib/([a-z_][a-z0-9_]*\.py)', shell)
+               if (libdir / m).exists()}
+
+    # 🔴 POSITIVE CONTROL, AND IT EARNED ITS KEEP IMMEDIATELY. A scanner that
+    # matches nothing yields an empty `missing` and PASSES — the same reassuring
+    # zero this arc has been bitten by repeatedly. Both names below are known to
+    # be real dependencies, one per mechanism, so this fails if either scanner
+    # stops measuring.
+    assert {"transcript_search.py", "host_label.py"} <= needed, (
+        f"the dependency scanner found {sorted(needed)} — it is not measuring the "
+        "unit's real dependencies, so its verdict is about the regex")
+
+    block = _unit_block()
+    m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
+    assert m, "the transcript-push unit declares no X-Restart-Triggers at all"
+    declared = set(re.findall(r"\$\{\.\./scripts/lib/([^}]+)\}", m.group(1)))
+    missing = needed - declared
+    assert not missing, (
+        f"the transcript-push unit hard-depends on {sorted(missing)} from scripts/lib "
+        "but does not declare them as restart triggers — the unit's hard dependencies "
+        "must be readable from the unit")
 
 
 def test_an_UNDECODABLE_byte_makes_fileBytes_UNKNOWN_instead_of_400ing_the_WHOLE_push(
