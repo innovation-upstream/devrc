@@ -233,7 +233,7 @@ def _decode_exact(raw: bytes) -> str | None:
         return None
 
 
-def _read_append(path: str, offset: int, budget: int, at_eof: bool = False):
+def _read_append(path: str, offset: int, budget: int, *, at_eof: bool):
     """Whole records starting at `offset`, at most `budget` bytes.
 
     Returns (start, byte_length, text) on success, or a SKIP_* reason string.

@@ -1015,14 +1015,33 @@ def test_the_unit_PATH_carries_the_binaries_the_script_needs():
         assert pkg in block, f"the transcript feeder's PATH is missing {pkg}"
 
 
-def test_the_unit_restart_triggers_name_BOTH_halves():
-    """The builder decides WHICH sessions are sent and HOW MUCH of each. A change
-    there changes what this unit delivers with no edit to the shell at all, so a
-    trigger on the shell alone would leave a deployed unit running the old rule.
+def test_the_unit_restart_triggers_name_EVERY_half():
+    """The builder decides WHICH sessions are sent and HOW MUCH of each, and
+    host_label.py decides WHAT HOST they are filed under — a change to either
+    changes what this unit delivers with no edit to the shell at all, so a trigger
+    on the shell alone would leave a deployed unit running the old rule.
+
+    🔴 THE NAME SAID "BOTH HALVES" WHILE THE UNIT GREW A THIRD, and the same
+    commit that added it wired it into the AGENT's triggers — so the omission was
+    an asymmetry, not a policy. Asserted as a SET, because a list of `in` checks
+    is exactly what grows silently: `host_label.py` is now FATAL for this unit
+    (exit 3) and was not listed.
     """
+    import re
+
     block = _unit_block()
-    assert "../scripts/transcript-push.sh" in block
-    assert "../scripts/lib/build_transcript_push.py" in block
+    m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
+    assert m, "the transcript-push unit declares no X-Restart-Triggers at all"
+    declared = set(re.findall(r"\$\{\.\./([^}]+)\}", m.group(1)))
+    want = {
+        "scripts/transcript-push.sh",
+        "scripts/lib/build_transcript_push.py",
+        "scripts/lib/host_label.py",
+    }
+    assert declared == want, (
+        f"the transcript-push unit's restart triggers are {sorted(declared)}, want "
+        f"{sorted(want)} — every file this unit hard-depends on must be one, or a fix to it "
+        "ships while the timer keeps running the old copy")
 
 
 def test_the_script_and_builder_are_executable():
@@ -1388,3 +1407,44 @@ def test_the_push_REFUSES_rather_than_guessing_when_the_label_cannot_be_resolved
     assert proc.returncode == 3, f"rc={proc.returncode}: {proc.stdout}{proc.stderr}"
     assert "refusing to push under a guessed name" in proc.stdout
     assert not pushes(server), "a push went out under a guessed host name"
+
+
+def test_the_agent_reads_the_env_file_the_SHARED_MODULE_names(tmp_path):
+    """🔴 THE PATH IS THE THIRD LITERAL, AND RE-EXPORTING THE OTHER TWO IS NOT
+    ENOUGH. The consolidation re-exported HOST_NAMES and DEFAULT_LOCAL_HOST
+    "rather than restating two literals" and left the env-file PATH restated in
+    the agent — and because `local_host_label` passes it as the DEFAULT
+    `env_file`, host_label.ACTIVITY_ENV was dead there. Measured: pointing the
+    agent's copy at /nonexistent changed nothing, 203/203 still passed.
+
+    That is the exact axis that produced the earlier blocker: two feeders reading
+    two files. `test_BOTH_feeders_resolve_the_SAME_host_label` cannot see it — it
+    passes `env_file=` explicitly, so it exercises the module's PARSING and never
+    the agent's own path.
+
+    🔴 IT RUNS IN A SUBPROCESS BECAUSE THE BINDING IS AT IMPORT TIME. Setting the
+    variable after importing would prove nothing about what a real agent does.
+    """
+    env_file = tmp_path / "activity-env"
+    env_file.write_text("ACTIVITY_HOST=laptop\n")
+
+    snippet = (
+        "import importlib.machinery, importlib.util, sys\n"
+        "loader = importlib.machinery.SourceFileLoader('a', sys.argv[1])\n"
+        "spec = importlib.util.spec_from_file_location('a', sys.argv[1], loader=loader)\n"
+        "m = importlib.util.module_from_spec(spec); loader.exec_module(m)\n"
+        # no env_file= argument: the DEFAULT is what is under test
+        "print(m.local_host_label(env={}))\n"
+    )
+    env = dict(os.environ, HOST_LABEL_ENV_FILE=str(env_file))
+    env.pop("ACTIVITY_HOST", None)
+    out = subprocess.run(
+        [sys.executable, "-c", snippet, str(REPO_ROOT / "scripts" / "tmux-reply-agent")],
+        capture_output=True, text=True, env=env, timeout=120)
+    assert out.returncode == 0, out.stdout + out.stderr
+    got = out.stdout.strip()
+    assert got == "laptop", (
+        f"the agent resolved {got!r} from its DEFAULT env-file path, want 'laptop' — it is not "
+        f"reading the file the shared module names, so the two feeders can be pointed at "
+        f"different files and the reseed loop comes back invisibly"
+    )

@@ -862,6 +862,33 @@ def test_at_least_one_reseed_padding_actually_lands_MID_RUNE(tmp_path):
         "reached and its test is vacuous")
 
 
+def test_a_reseed_of_an_UNTERMINATED_OVER_WINDOW_record_still_streams(tmp_path):
+    """🔴 THE OTHER SIDE OF `start == 0`, AND IT WAS UNPINNED. Narrowing the wait
+    to `start == 0` is what stops a fragment being shipped where no stall is
+    possible; WIDENING it back to every no-newline window reintroduces the
+    permanent reseed loop, and the existing loop test could not see that because
+    its 100 KiB fixture record is newline-TERMINATED, so `rfind` succeeds and the
+    branch is never reached.
+
+    Measured with the widened branch: `deltas=0 skipped={'no-record-boundary': 1}`
+    on every poll — and `plan_frame` cannot leave the reseed branch until a cursor
+    is adopted, so that is the loop.
+    """
+    d = tmp_path / "proj"
+    d.mkdir(parents=True, exist_ok=True)
+    # An over-window record with NO terminating newline: still being written.
+    body = '{"type":"user","t":"' + ("y" * (3 * ts.RESEED_TAIL_BYTES))
+    (d / "sess-1.jsonl").write_text(body, encoding="utf-8")
+
+    state = ts.StreamState()
+    deltas, skipped = plan(tmp_path, state)
+    assert len(deltas) == 1, (
+        f"an UNTERMINATED record larger than the window produced no reseed — this is the "
+        f"permanent loop, and the newline-terminated fixture cannot see it: {skipped}")
+    assert deltas[0]["reset"] is True
+    assert deltas[0]["offset"] > 0, "the reseed did not start inside the record"
+
+
 def test_a_reseed_of_an_IN_FLIGHT_FIRST_LINE_waits_rather_than_shipping_a_fragment(tmp_path):
     """🔴 THE CONTROL THE RESEED PATH DID NOT HAVE. The append path distinguishes
     "this record is bigger than the window" (stream it) from "this line is still

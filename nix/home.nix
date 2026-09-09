@@ -3732,6 +3732,13 @@ in
         # change there is a change to what this unit delivers, with no edit to
         # the shell at all.
         "${../scripts/lib/build_transcript_push.py}"
+        # 🔴 A THIRD HARD DEPENDENCY, ADDED THE DAY THE HOST LABEL WAS
+        # CONSOLIDATED AND NOT LISTED WITH IT. This unit now EXITS 3 when
+        # host_label.py cannot be resolved, so it is as load-bearing as the
+        # builder beside it — and the same commit did add it to the reply agent's
+        # triggers, which is what makes the omission an asymmetry rather than a
+        # policy.
+        "${../scripts/lib/host_label.py}"
       ];
     };
   };

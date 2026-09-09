@@ -152,7 +152,15 @@ PROJECTS_DIR = os.environ.get("CLAUDE_PROJECTS_DIR") or os.path.expanduser("~/.c
 
 API_DEFAULT = "http://192.168.50.250:30302"
 CONF_FILE = os.environ.get("CLAWGATE_CONF_FILE") or os.path.expanduser("~/.claude/clawgate.env")
-ACTIVITY_ENV = os.path.expanduser("~/.config/activity-collector/env")
+# 🔴 THE PATH COMES FROM THE SHARED MODULE TOO, NOT JUST THE VOCABULARY. The
+# consolidation re-exported HOST_NAMES and DEFAULT_LOCAL_HOST "rather than
+# restating two literals" and left the THIRD literal — this path — restated. The
+# consequence was measured: because local_host_label passes it as the default
+# `env_file`, host_label.ACTIVITY_ENV (and HOST_LABEL_ENV_FILE with it) was DEAD
+# for the agent, and pointing the module at a different file changed nothing here
+# — 203/203 still passed. That is the exact axis that produced the round-2
+# blocker: two feeders reading two files.
+ACTIVITY_ENV = HOST_LABEL.ACTIVITY_ENV
 
 # The host vocabulary the read model and the queue both use. `hostname` is
 # "nixos" on BOTH machines, so it cannot be the source of truth; ACTIVITY_HOST is.
