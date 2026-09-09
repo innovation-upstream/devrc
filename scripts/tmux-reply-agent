@@ -989,6 +989,40 @@ def skip_memo_key(skipped) -> frozenset:
     return frozenset(k for k in (skipped or {}) if k != "unchanged")
 
 
+def skip_reasons_to_report(seen: frozenset, skipped) -> frozenset:
+    """The reasons worth logging THIS poll, given the ones already reported.
+
+    🔴 THE MEMO IS STICKY, AND A SET-COMPARISON MEMO WAS NOT ENOUGH. Comparing
+    the current reason set against the previous one logs on every change in
+    EITHER direction — so a reason that appears and disappears costs TWO lines
+    per cycle, and `no-record-boundary` is exactly that shape: a session is
+    mid-record on one poll and complete on the next, which _read_append's own
+    docstring calls the ordinary steady state. A condition that is ordinary is
+    also ordinarily ABSENT, which is what makes it flap rather than persist.
+
+    Measured against a verbatim transcription of the loop, 40 polls:
+
+        constant reason, constant counts              1 log line
+        constant reason, MOVING counts                1 log line   (the count fix)
+        reason FLAPS present/absent                  39 log lines  <- this
+        reason present 1 poll in 10                   8 log lines
+                                                     = 3,456/day at 17,280 polls
+
+    So the fix that made the counts stop mattering did not make the LINE stop
+    repeating, while its own docstring claimed it had. Reporting each reason the
+    FIRST time this process sees it gives a bound that is provable rather than
+    hoped for: at most one line per distinct reason per agent lifetime — four,
+    since there are four reasons.
+
+    ⚠ THE COST, STATED: a reason that goes away and comes back is not re-reported.
+    That is deliberate. The counts are still printed when a reason is first seen,
+    and the condition is diagnostic rather than urgent — the bulk push covers
+    every skipped session either way. A signal that fires 3,456 times a day is
+    not a louder version of this one; it is a channel nobody reads.
+    """
+    return skip_memo_key(skipped) - seen
+
+
 def transcript_round(api: str, hook_token: str, host: str, state) -> dict:
     """One transcript-streaming round, over the connection this agent already has.
 
@@ -1074,6 +1108,10 @@ def main(argv: list[str]) -> int:
     # complete) and a stream SKIP (the request was fine, some session could not be
     # read). They are different facts and a single variable would let one mask the
     # other.
+    #
+    # `stream_skips` is STICKY — the reasons already reported, never cleared. See
+    # skip_reasons_to_report for why a set that tracks the CURRENT reasons still
+    # floods when a reason flaps.
     stream_problem = ""
     stream_skips: frozenset = frozenset()
 
@@ -1114,16 +1152,13 @@ def main(argv: list[str]) -> int:
                 # the journal-flooding this memo exists to prevent (17,280 polls a
                 # day). The REASONS are the condition; the counts are noise, and
                 # they are still printed in the line so nothing is lost.
-                notable = {k: v for k, v in (counts.get("skipped") or {}).items()
-                           if k != "unchanged"}
-                reasons = skip_memo_key(counts.get("skipped"))
-                if reasons != stream_skips:
-                    if reasons:
-                        log("transcript streaming skipped some sessions "
-                            f"(the 5-minute bulk push still covers them): {notable}")
-                    elif stream_skips:
-                        log("transcript streaming is no longer skipping any session")
-                    stream_skips = reasons
+                fresh = skip_reasons_to_report(stream_skips, counts.get("skipped"))
+                if fresh:
+                    notable = {k: v for k, v in (counts.get("skipped") or {}).items()
+                               if k != "unchanged"}
+                    log("transcript streaming skipped some sessions "
+                        f"(the 5-minute bulk push still covers them): {notable}")
+                    stream_skips |= fresh
             except Exception as exc:  # noqa: BLE001 — must never affect the write path
                 reason = f"{exc!r}"
                 if reason != stream_problem:

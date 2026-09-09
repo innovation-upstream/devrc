@@ -2545,12 +2545,53 @@ def test_a_REPEATING_skip_condition_is_logged_ONCE_not_on_every_poll(server, tmu
         "CLAUDE_PROJECTS_DIR": str(projects),
     })
 
+    # 🔴 EXACTLY ONE, NOT "AT MOST ONE". An upper bound is satisfied by ZERO —
+    # i.e. by the skip line never being emitted at all, which is the regression
+    # this whole memo arc is about. Measured: with `if fresh:` forced false the
+    # `<= 1` version SURVIVED. The fixture provably emits one line on the shipped
+    # code, so the exact count is available and is what must be asserted.
     lines = [l for l in out.splitlines() if "skipped some sessions" in l]
-    assert len(lines) <= 1, (
-        f"the skip condition was logged {len(lines)} times across one run — the memo is not "
-        f"holding, and this loop polls 17,280 times a day:\n" + "\n".join(lines[:5]))
-    if lines:
-        assert "no-record-boundary" in lines[0], lines[0]
+    assert len(lines) == 1, (
+        f"the skip condition was logged {len(lines)} times across one run, want exactly 1 — "
+        f"0 means the signal is gone, >1 means the memo is not holding and this loop polls "
+        f"17,280 times a day:\n" + "\n".join(lines[:5]) + "\n---\n" + out[-1500:])
+    assert "no-record-boundary" in lines[0], lines[0]
+
+
+def test_a_FLAPPING_skip_reason_is_reported_ONCE_not_on_every_appearance():
+    """🔴 THE SET-COMPARISON MEMO STILL FLOODED, AND ITS OWN DOCSTRING CLAIMED IT
+    DID NOT. Comparing the current reason set against the previous one logs on
+    every change in EITHER direction, so a reason that appears and disappears
+    costs TWO lines per cycle — and `no-record-boundary` is exactly that shape: a
+    session is mid-record on one poll and complete on the next, which the tailer's
+    own docstring calls the ordinary steady state.
+
+    Measured against a transcription of the loop before this fix: 39 log lines
+    over 40 polls when the reason flaps; 8 when it appears 1 poll in 10, which is
+    3,456 a day at the real cadence.
+
+    Driven against the REAL decision function, because a rule inside main()'s loop
+    cannot be tested where it can be wrong — the lesson the previous fix in this
+    same arc had to learn.
+    """
+    report = AGENT.skip_reasons_to_report
+    seen = frozenset()
+    lines = 0
+    # 40 polls, the reason flapping on every other one.
+    for i in range(40):
+        skipped = {"no-record-boundary": 1} if i % 2 == 0 else {"unchanged": 3}
+        fresh = report(seen, skipped)
+        if fresh:
+            lines += 1
+            seen |= fresh
+    assert lines == 1, (
+        f"a FLAPPING reason produced {lines} log lines over 40 polls. At 17,280 polls a day "
+        f"that is a channel nobody reads.")
+
+    # 🔴 THE POSITIVE CONTROL: a genuinely NEW reason must still be reported, or
+    # the bound above is achieved by saying nothing.
+    fresh = report(seen, {"undecodable": 1})
+    assert fresh == frozenset({"undecodable"}), fresh
 
 
 def test_the_skip_memo_key_ignores_COUNTS_and_tracks_REASONS():
