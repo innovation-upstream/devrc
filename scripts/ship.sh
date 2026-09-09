@@ -289,6 +289,11 @@
 #   scripts/ship.sh --no-local   # remote host only
 #   scripts/ship.sh --no-switch  # land on main + verify git state, SKIP home-manager (test/dry-run)
 #   scripts/ship.sh --detect-role # print detected local role (workbench|laptop|unknown) and exit
+#   scripts/ship.sh --print-remote-target
+#                                # resolve the remote host's address (LAN, then
+#                                # nebula) and print it, then exit. Converges
+#                                # nothing. The fallback announcement goes to
+#                                # stderr; read both, not the exit status.
 #
 # Env overrides:
 #   SHIP_ROLE     force the local role (workbench|laptop) when detection fails/differs

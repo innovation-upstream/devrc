@@ -747,10 +747,13 @@
 #                    as UNREACHABLE and escalates rc 13 after
 #                    $DRIFT_UNREACHABLE_ESCALATE runs. It never runs under
 #                    --no-remote, and never when an explicit $REMOTE_SSH names
-#                    one target. Defaulted to 1 by the test fixture: the probe
-#                    reaches a REAL host, and a read-only breach is still a
-#                    breach. NOT forwarded over ssh — the remote leg does no
-#                    probing of its own.
+#                    one target — those two conditions are what stop the suite
+#                    reaching a real host (measured: 0 unstubbed ssh attempts).
+#                    The fixture ALSO defaults it to 1, for determinism rather
+#                    than containment: 8 stubbed probes still ran, and a future
+#                    test that forgets a stub should not be the first to notice.
+#                    NOT forwarded over ssh — the remote leg does no probing of
+#                    its own.
 #   SSH_PROBE_TIMEOUT / SSH_PROBE_CMD / SSH_PROBE_LOG_PREFIX
 #                    shared with ship.sh via lib/host-role.sh and documented in
 #                    that script's header; the prefix is set here so the probe's
@@ -1049,7 +1052,9 @@ REMOTE_SSH="$(remote_ssh_of "$LOCAL_ROLE")"
 # this script did not — the same wiring applied asymmetrically to its two
 # callers. The second-order cost was larger than the contract breach:
 # `test_drift_check.py` issues one probe pair per `--no-remote` test, so the
-# suite made 568 real ssh attempts to a live host, and with the laptop off-LAN
+# suite made 558 real ssh attempts to a live host (279 per address; an earlier
+# note in this file said 568 — that figure was never reproduced), and with the
+# laptop off-LAN
 # each LAN probe burns the full ConnectTimeout — turning a hermetic 7.5-minute
 # module into a half-hour one whose verdict depends on the operator's network.
 if [ "$DO_REMOTE" = 1 ] && [ "${DRIFT_SKIP_SSH_PROBE:-0}" != 1 ] \

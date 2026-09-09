@@ -293,20 +293,29 @@ class Fleet:
             # write to the operator's real state dir and inherit a streak from
             # whatever ran before them.
             DRIFT_STATE_DIR=str(self.state),
-            # 🔴 THE SIXTH HERMETICITY SEAM, and it was paid for the same way as
-            # the fifth. The address probe added in #1439 runs before the remote
-            # leg and reaches the OPERATOR'S REAL LAPTOP. MEASURED at b280162a:
-            # this module made 568 outbound ssh attempts (284 per address), one
-            # pair per test, to a live host — a read-only breach is still a
-            # breach, and with the laptop off-LAN each LAN probe burns the full
-            # ConnectTimeout, so the module's runtime and its VERDICT started
-            # depending on the operator's network.
+            # 🔴 THE SIXTH SEAM — and it is a DETERMINISM seam, not an outbound
+            # one. Say that precisely, because the first version of this comment
+            # did not and would have misled anyone deciding to remove it.
             #
-            # `--no-remote` is now gated in the script itself, which removes most
-            # of them; this closes the rest, including the sites that pass
-            # neither `--no-remote` nor an explicit REMOTE_SSH. A test that wants
-            # the probe to run opts out with `envextra={"DRIFT_SKIP_SSH_PROBE": "0"}`
-            # and installs a stub ssh — never the real one.
+            # What happened: the address probe added in #1439 ran before the
+            # remote leg, and at the PR head before any gate this module made
+            # 558 outbound ssh attempts (279 per address) to the operator's real
+            # laptop — a read-only breach is still a breach, and with the host
+            # off-LAN each probe burned the full ConnectTimeout, so the module's
+            # runtime and its VERDICT depended on the operator's network.
+            #
+            # 🔴 But the `[ "$DO_REMOTE" = 1 ]` gate in the script closed ALL of
+            # that on its own. MEASURED with the gate and without this seam:
+            # 8 probe executions, of which 0 reached an unstubbed ssh — every one
+            # landed on a fixture `stub_ssh` — across 11 static call sites that
+            # pass neither `--no-remote` nor an explicit REMOTE_SSH. (Positive
+            # control for the instrument: 558 on the ungated tree.)
+            #
+            # So this exists to stop 8 stubbed probes perturbing timing and
+            # output, and as defence in depth if a future test forgets a stub —
+            # NOT because tests still reach a live host. A test that wants the
+            # probe opts out with `envextra={"DRIFT_SKIP_SSH_PROBE": "0"}` and
+            # installs a stub ssh, never the real one.
             DRIFT_SKIP_SSH_PROBE="1",
         )
         env.update(envextra)   # per-test overrides win (e.g. a blocked state dir)
@@ -4180,13 +4189,37 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
     # probe in `timeout`. That residue is stated rather than modelled — this
     # budget covers the failure mode that actually happens (an address that does
     # not answer), not a malicious half-open peer.
-    lib_src = (DRIFT.parent / "lib" / "host-role.sh").read_text()
+    lib = DRIFT.parent / "lib" / "host-role.sh"
+    lib_src = lib.read_text()
     m5 = re.search(r"SSH_PROBE_TIMEOUT:-(\d+)", lib_src)
     assert m5, "no SSH_PROBE_TIMEOUT default in lib/host-role.sh"
     probe_cap = int(m5.group(1))
-    n_candidates = max(
-        2, len(re.findall(r"^\s*echo \"\$(?:WORKBENCH|LAPTOP)_SSH_SECONDARY\"",
-                          lib_src, re.M)) + 1)
+
+    # 🔴 ASK THE LIB, do not pattern-match it. A first version counted
+    # `^\s*echo "\$..._SSH_SECONDARY"` lines and floored the result at 2 — but
+    # the lib emits both candidates on ONE line (`echo "$X_DEFAULT"; echo
+    # "$X_SECONDARY"`), so the regex matched 0 and the whole value came from the
+    # floor: a literal wearing a derivation's costume, in a block whose own
+    # comment says a literal beside the thing it counts drifts. Proved by adding
+    # a genuine third address: the count stayed 2 and this test stayed GREEN,
+    # which is the "a network call added with no room for it" shape it exists to
+    # catch. Running the function is the only derivation that tracks the lib.
+    probed_roles = ("workbench", "laptop")
+    counts = []
+    for role in probed_roles:
+        out = subprocess.run(
+            ["bash", "-c",
+             f'set -euo pipefail; unset REMOTE_SSH LAPTOP_SSH; '
+             f'source "{lib}"; remote_ssh_candidates_of {role}'],
+            capture_output=True, text=True, check=True,
+        )
+        counts.append(len([ln for ln in out.stdout.splitlines() if ln.strip()]))
+    n_candidates = max(counts)
+    assert n_candidates >= 2, (
+        f"the candidate lists collapsed to {counts}; with fewer than two "
+        "addresses there is no fallback to budget for, which means the probe "
+        "was removed and this term should go with it"
+    )
     probe = n_candidates * probe_cap
 
     needed = (2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2

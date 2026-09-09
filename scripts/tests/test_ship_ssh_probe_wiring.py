@@ -123,6 +123,35 @@ def test_an_explicit_target_is_never_probed_or_redirected(tmp_path, override):
     )
 
 
+def test_the_seam_cannot_be_reached_through_the_ENVIRONMENT(tmp_path):
+    """🔴 The env->flag change, guarded — it was not, by this file's own standard.
+
+    As `$SHIP_PRINT_REMOTE_TARGET` this seam was INHERITABLE: an operator who
+    exported it while debugging would get, from every later `ship.sh` in that
+    shell, an address printed and rc 0 having converged NOTHING. Reverting the
+    initialiser to `${SHIP_PRINT_REMOTE_TARGET:-0}` is otherwise undetectable,
+    because after the change no test sets the variable at all.
+
+    So: export it, pass NO flag, and require a real run — which here means it
+    must NOT print a bare address and exit 0.
+    """
+    env = {**os.environ, "SHIP_ROLE": "workbench",
+           "SHIP_PRINT_REMOTE_TARGET": "1",
+           "SSH_PROBE_CMD": _probe_stub(tmp_path, LAPTOP_NEBULA),
+           "SHIP_REPO": str(tmp_path / "norepo"),
+           "SHIP_NO_SWITCH": "1"}
+    for var in ("REMOTE_SSH", "LAPTOP_SSH"):
+        env.pop(var, None)
+    res = subprocess.run(["bash", str(SHIP), "--no-remote"], capture_output=True,
+                         text=True, env=env, timeout=300)
+    printed = res.stdout.strip().splitlines()
+    assert printed[:1] != [LAPTOP_NEBULA] and printed[:1] != [LAPTOP_LAN], (
+        "an EXPORTED SHIP_PRINT_REMOTE_TARGET still triggered the seam: the run "
+        f"printed {printed[:1]!r} instead of converging. That is the inheritable "
+        "vacuous green the flag exists to make impossible."
+    )
+
+
 def test_the_skip_switch_turns_the_probe_off(tmp_path):
     """`SHIP_SKIP_SSH_PROBE` is the documented escape hatch -- unexercised until now."""
     log = tmp_path / "probed.log"
@@ -210,11 +239,20 @@ def test_the_probes_diagnostic_carries_the_CALLERS_prefix(tmp_path):
     independently misattributes the message to the wrong program in the
     operator's log.
 
-    ⚠ SCOPE: this asserts the LIB under both prefix values. It does not load
-    `drift-check.sh`; that side is covered by the test named above, in
-    `test_drift_check.py`. An earlier draft of this docstring claimed "both
-    callers are asserted so neither can regress alone", which was wrong about
-    THIS file -- the coverage exists, in another module.
+    ⚠ SCOPE: this asserts the LIB under both prefix values. The drift-check
+    side is asserted by
+    `test_drift_checks_probe_output_is_journal_clean` below, IN THIS FILE.
+
+    🔴 That test exists because this docstring has now been wrong twice. Draft 1
+    said "both callers are asserted so neither can regress alone" -- false, this
+    module loaded one. Draft 2 pointed at
+    `test_the_ladder_escalates_when_the_streak_FILE_cannot_be_written` in
+    `test_drift_check.py` -- true when written, and FALSE BY THE TIME IT WAS
+    WRITTEN: the same commit stopped `--no-remote` from probing and defaulted
+    `DRIFT_SKIP_SSH_PROBE=1` module-wide, so that test can no longer emit a
+    probe line at all. Measured: deleting `SSH_PROBE_LOG_PREFIX=drift-check`
+    scored 594 passed. A correction that pointed at coverage its own commit had
+    just removed.
     """
     stub = _probe_stub(tmp_path, "zach@nothing-answers")
     for prefix, expected in (("", "ship: "), ("drift-check", "drift-check: ")):
@@ -272,7 +310,8 @@ def test_drift_check_makes_no_ssh_connection_under_no_remote(tmp_path):
 
     MEASURED before the fix: it made two outbound probe connections to the
     operator's real laptop, and `test_drift_check.py` -- which passes
-    `--no-remote` throughout -- issued 568 of them across the module. A
+    `--no-remote` throughout -- issued 558 of them across the module (279 per
+    address; an earlier note said 568, which was my own count and was wrong). A
     read-only breach is still a breach, and with the laptop off-LAN each probe
     burns the full ConnectTimeout, so the suite's runtime and verdict began
     depending on the operator's network.
@@ -286,6 +325,23 @@ def test_drift_check_makes_no_ssh_connection_under_no_remote(tmp_path):
            "PATH": f"{bindir}:{os.environ['PATH']}"}
     for var in ("REMOTE_SSH", "LAPTOP_SSH", "DRIFT_SKIP_SSH_PROBE"):
         env.pop(var, None)
+    # 🔴 THIS TEST RUNS THE PRODUCTION DEADMAN, so every default it does not
+    # override reaches the OPERATOR'S REAL MACHINE. Measured before these three
+    # keys existed: it fetched in `$HOME/workspace/{devrc,homelab-talos,
+    # tmux-fuzzyclaw}` (truncating FETCH_HEAD in three SHARED checkouts), made
+    # authenticated `gh api` calls as the real user, and — worst — incremented
+    # the real `unreachable-laptop` escalation streak by one PER RUN, because
+    # the stub ssh always fails. Four suite runs inside one 6h timer window
+    # would drive that counter to DRIFT_UNREACHABLE_ESCALATE and fire the
+    # DND-bypassing failure toast for a host whose true state never got there.
+    #
+    # That is the same breach this very test was written to close, one layer
+    # out: `test_drift_check.py`'s fixture pins these three for exactly this
+    # reason and calls it a hermeticity seam. A test that reaches a live host to
+    # prove nothing reaches a live host is not a test.
+    env["DRIFT_REPO"] = str(tmp_path / "norepo")
+    env["DRIFT_STATE_DIR"] = str(tmp_path / "state")
+    env["DRIFT_GH"] = str(tmp_path / "no-gh")   # absent -> the arm takes its no-gh branch
 
     subprocess.run(["bash", str(drift), "--no-remote"], capture_output=True,
                    text=True, env=env, timeout=300)
@@ -307,6 +363,46 @@ def test_drift_check_makes_no_ssh_connection_under_no_remote(tmp_path):
         "the control saw NO probe even with the remote leg in scope, so this "
         "test cannot distinguish a working gate from a probe that never runs"
     )
+
+
+def test_drift_checks_probe_output_is_journal_clean(tmp_path):
+    """🔴 The drift-check half of the prefix seam, asserted where it is claimed.
+
+    `drift-check.sh` writes a journal whose every line must begin with `[`,
+    `===`, `drift-check: ` or two spaces. The probe lives in a SHARED lib whose
+    other caller is `ship.sh`, so its diagnostic carries whichever prefix the
+    caller sets -- and an unset one says `ship:`, which both fails the hygiene
+    rule and misattributes the line to a program that is not running.
+
+    This drives the probe deliberately (`DRIFT_SKIP_SSH_PROBE=0`, remote leg in
+    scope) with an ssh that always fails, so both candidates report. Hermetic:
+    repo, state dir and gh are pinned into tmp_path, and ssh is a stub.
+    """
+    drift = SCRIPTS / "drift-check.sh"
+    bindir, _log = _recording_ssh(tmp_path, exit_code=255)
+    env = {**os.environ, "SHIP_ROLE": "workbench",
+           "PATH": f"{bindir}:{os.environ['PATH']}",
+           "DRIFT_SKIP_SSH_PROBE": "0",
+           "DRIFT_REPO": str(tmp_path / "norepo"),
+           "DRIFT_STATE_DIR": str(tmp_path / "state2"),
+           "DRIFT_GH": str(tmp_path / "no-gh")}
+    for var in ("REMOTE_SSH", "LAPTOP_SSH"):
+        env.pop(var, None)
+
+    res = subprocess.run(["bash", str(drift)], capture_output=True, text=True,
+                         env=env, timeout=300)
+    out = res.stdout + res.stderr
+    probe_lines = [ln for ln in out.splitlines() if "did not answer" in ln]
+    assert probe_lines, (
+        "the probe produced no diagnostic, so this test cannot see the prefix "
+        f"it exists to check:\n{out[-2000:]}"
+    )
+    for ln in probe_lines:
+        assert ln.startswith("drift-check: "), (
+            f"probe line {ln!r} does not carry drift-check's prefix. The shared "
+            "lib defaults to `ship:`, which fails this script's journal hygiene "
+            "rule and names the wrong program in the operator's log."
+        )
 
 
 def test_a_failing_real_probe_moves_to_the_next_address(tmp_path):
