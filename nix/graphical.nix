@@ -40,6 +40,25 @@ let
   loadWarnAbove = 48;
   loadCritAbove = 72;   # 1.5x the alert threshold: worse than "we already told you"
 
+  # 🔴 SINGLE SOURCE for the cooling fan mapping — passed VERBATIM to BOTH the
+  # `fansBlock` pill and its `fans-detail` click. They are two renderings of ONE
+  # configuration, and they must never disagree about which header is the pump
+  # or what floor alarms.
+  #
+  # This exists because an audit measured the drift: `fans-detail` used to carry
+  # its own `KNOWN_FANS = [(1, "AIO pump", 500), (3, "Case fan", None)]` while
+  # nix passed `--fan pump=1:500 --fan case=3` to the pill alone. Moving the pump
+  # to another header and updating ONLY this line left **84 of 84 tests green**
+  # and produced a pill reading `2448·1650 Idle` beside a view reading
+  # `AIO pump ? unreadable`. The pill's own seam guard could not catch it: it
+  # deliberately asserts STATE not spelling, which is right for the pill.
+  #
+  # The labels are display names because `fans-detail` renders them and the pill
+  # renders none — so a friendly label costs the pill nothing and removes the
+  # second copy. Pinned by
+  # `test_fans_detail.py::test_the_pill_and_the_VIEW_get_the_SAME_fan_mapping`.
+  fanArgs = "--fan 'AIO pump=1:500' --fan 'Case fan=3'";
+
   # Floating btop for the vitals-block left-clicks (memory/cpu/temperature/gpu).
   # `float,float` matches the existing i3 float rule so it opens as a float.
   # Explicit dimensions are REQUIRED — btop refuses to render ("terminal size too
@@ -209,11 +228,11 @@ let
   # floats — pump + case fan with PWM duty, then CPU/GPU/VRM/NVMe temperatures.
   fansBlock = {
     block = "custom";
-    command = "${scriptsDir}/i3status-fans --fan pump=1:500 --fan case=3";
+    command = "${scriptsDir}/i3status-fans ${fanArgs}";
     json = true;
     interval = 30;
     click = [
-      { button = "left"; cmd = "alacritty --class float,float -o window.dimensions.columns=76 -o window.dimensions.lines=22 -e ${scriptsDir}/fans-detail"; }
+      { button = "left"; cmd = "alacritty --class float,float -o window.dimensions.columns=84 -o window.dimensions.lines=22 -e ${scriptsDir}/fans-detail ${fanArgs}"; }
     ];
   };
   # nvidia_gpu: workbench only (RTX 5080). The block's state is TEMPERATURE-driven

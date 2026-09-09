@@ -13,11 +13,13 @@ ones worth keeping:
 
     run:  pytest scripts/tests/test_fans_detail.py
 """
+import os
 import importlib.machinery
 import importlib.util
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -79,8 +81,15 @@ def workbench(hw):
     return root
 
 
-def _frame(root, color=False):
-    return detail.render(detail.find_chips(root), fans, now="", color=color)
+#: The mapping nix passes. Built through the SIBLING's parser, so these tests
+#: exercise the same path production does rather than a hand-built table.
+SPECS = [fans.parse_fan(x) for x in detail.DEFAULT_FANS]
+
+
+def _frame(root, color=False, specs=None):
+    return detail.render(detail.find_chips(root), fans,
+                         specs=SPECS if specs is None else specs,
+                         now="", color=color)
 
 
 # --------------------------------------------------------------------------- #
@@ -163,7 +172,7 @@ def test_the_named_fans_are_never_counted_as_unconnected(hw):
     unconnected would tell the operator nothing is plugged in."""
     root, add = hw
     d = add("nct6687", fans_map={1: 2448, 3: 0, 4: 0})
-    assert detail.unconnected(d, fans) == [4]
+    assert detail.unconnected(d, fans, SPECS) == [4]
 
 
 # --------------------------------------------------------------------------- #
@@ -180,6 +189,45 @@ def test_thermistors_collapse_to_a_range(workbench):
     out = _frame(workbench)
     assert "VRM/chip" in out
     assert re.search(r"\d+-\d+ C", out), out
+
+
+def test_a_temperature_is_NOT_gauged_as_a_percentage():
+    """🔴 `bar()` takes a PERCENTAGE and the temps were passing DEGREES into it.
+    It happened to look plausible (80 C -> 8/10) while meaning nothing, and it
+    silently breaks the moment the scale or width changes. `temp_bar` scales
+    30-100 C — the range an operator cares about — so the two disagree."""
+    assert detail.temp_bar(30.0) == "░" * 10          # floor: empty
+    assert detail.temp_bar(100.0) == "█" * 10         # ceiling: full
+    assert detail.temp_bar(65.0) == detail.bar(50.0)  # midpoint of 30-100
+    # and it is genuinely different from treating C as %
+    assert detail.temp_bar(40.0) != detail.bar(40.0)
+
+
+def test_temperature_colour_crosses_at_the_thresholds():
+    """The view exists to answer "how hot is it" — a number with no colour makes
+    the operator do the comparison."""
+    assert detail.temp_color(70.0) == detail.CYAN
+    assert detail.temp_color(detail.TEMP_WARN) == detail.YELLOW
+    assert detail.temp_color(detail.TEMP_CRIT) == detail.RED
+    assert detail.temp_color(None) == detail.CYAN
+    assert detail.TEMP_WARN < detail.TEMP_CRIT
+
+
+def test_two_board_sensors_with_the_same_prefix_render_DISTINCTLY(hw):
+    """`tlabel[:8]` rendered `AMD TSI Addr 98h` and `…Addr 9Ah` identically, so
+    two different sensors read as one."""
+    root, add = hw
+    add("nct6687", fans_map={1: 2448},
+        temps=[("AMD TSI Addr 98h", 82000), ("AMD TSI Addr 9Ah", 61000)])
+    out = _frame(root)
+    board = [l for l in out.splitlines() if "AMD TSI" in l]
+    assert len(board) == 2, out
+    # Compare the LABEL region — everything before the reading. Slicing fixed
+    # token positions is what made the first version of this assertion compare
+    # ['AMD','TSI'] against itself and fail on correct output.
+    labels = [l.split(" C ")[0].rsplit(" ", 1)[0].strip() for l in board]
+    assert labels[0] != labels[1], (labels, board)
+    assert "98" in labels[0] and "9A" in labels[1], labels
 
 
 def test_summarise_ignores_None_and_handles_empty():
@@ -202,7 +250,7 @@ def test_a_MISSING_CHIP_says_the_driver_is_not_loaded(hw):
 
 
 def test_an_ABSENT_hwmon_root_renders_a_frame_rather_than_raising(tmp_path):
-    out = detail.render(detail.find_chips(tmp_path / "nope"), fans, color=False)
+    out = detail.render(detail.find_chips(tmp_path / "nope"), fans, specs=SPECS, color=False)
     assert out.strip(), "empty frame"
     assert "NOT FOUND" in out
 
@@ -211,7 +259,7 @@ def test_a_MISSING_SIBLING_is_announced_not_silently_empty(workbench):
     """fans-detail reuses i3status-fans' predicate. Deployed without it, the
     view must SAY so — a cooling screen with no fan rows and no explanation is
     indistinguishable from a machine with no fans."""
-    out = detail.render(detail.find_chips(workbench), None, color=False)
+    out = detail.render(detail.find_chips(workbench), None, specs=SPECS, color=False)
     assert "sibling" in out.lower()
     assert out.strip()
 
@@ -219,7 +267,7 @@ def test_a_MISSING_SIBLING_is_announced_not_silently_empty(workbench):
 def test_render_NEVER_returns_empty_for_any_shape(hw):
     root, add = hw
     for chips in ({}, detail.find_chips(root)):
-        out = detail.render(chips, fans, color=False)
+        out = detail.render(chips, fans, specs=SPECS, color=False)
         assert out.strip(), chips
 
 
@@ -248,6 +296,43 @@ def test_bad_arguments_still_render_rather_than_exiting_2(workbench):
 # --------------------------------------------------------------------------- #
 # the SEAM guards
 # --------------------------------------------------------------------------- #
+def test_an_UNDECODABLE_hwmon_name_still_prints_a_frame(tmp_path):
+    """🔴 `read_str` caught only OSError while `read_int` caught ValueError too.
+    A hwmon `name` that is not valid UTF-8 raises UnicodeDecodeError — a
+    ValueError — which escaped `find_chips`, past `render`, into the __main__
+    failsafe: **stdout 0 bytes, exit 0**. That breaks `--dump`'s "one frame"
+    contract silently, and a caller doing `out=$(fans-detail --dump)` gets an
+    empty string with a success status.
+
+    The fixture is the one the sibling's own suite already uses for the pill.
+    """
+    root = tmp_path / "hwmon"
+    (root / "hwmon0").mkdir(parents=True)
+    (root / "hwmon0" / "name").write_bytes(b"\xff\xfe bad\n")
+    (root / "hwmon1").mkdir()
+    (root / "hwmon1" / "name").write_text("nct6687\n")
+    (root / "hwmon1" / "fan1_input").write_text("2448\n")
+
+    p = subprocess.run(
+        [sys.executable, str(DETAIL), "--dump", "--hwmon-root", str(root),
+         "--fan", "AIO pump=1:500"],
+        capture_output=True, text=True, timeout=20)
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.strip(), "stdout was EMPTY — the frame contract broke"
+    assert "2448" in p.stdout, p.stdout
+    assert "Traceback" not in p.stderr, p.stderr
+
+
+def test_render_does_not_raise_on_an_undecodable_name(tmp_path):
+    """The pure half of the same defect: `render`'s docstring says it never
+    raises, so the undecodable device must be skipped, not propagated."""
+    root = tmp_path / "hwmon"
+    (root / "hwmon0").mkdir(parents=True)
+    (root / "hwmon0" / "name").write_bytes(b"\xff\xfe\n")
+    out = detail.render(detail.find_chips(root), fans, specs=[], color=False)
+    assert out.strip()
+
+
 def test_the_sibling_loads_when_the_script_is_a_SYMLINK_to_a_LONE_store_path(tmp_path):
     """🔴 THE PRODUCTION BUG, REPRODUCED. `home.file` deploys EACH file as its
     OWN /nix/store path, so the deployed script is a symlink to
@@ -326,6 +411,126 @@ def test_fans_detail_and_its_SIBLING_are_deployed_together():
         "fans-detail and its REQUIRED sibling are deployed under DIFFERENT "
         "gates:\n  fans-detail   %s\n  i3status-fans %s"
         % (gates["fans-detail"], gates["i3status-fans"]))
+
+
+def _pty_trial(key, hwmon_root, seconds=6.0):
+    """Drive the live watch loop under a real pty. Returns True if it exited."""
+    import pty as _pty
+    import signal as _sig
+    m, s = _pty.openpty()
+    p = subprocess.Popen(
+        [sys.executable, str(DETAIL), "--hwmon-root", str(hwmon_root),
+         "--interval", "1", "--fan", "AIO pump=1:500"],
+        stdin=s, stdout=s, stderr=s, close_fds=True)
+    os.close(s)
+    time.sleep(1.5)                       # let it draw at least one frame
+    if key:
+        os.write(m, key)
+    t0, exited = time.time(), False
+    while time.time() - t0 < seconds:
+        if p.poll() is not None:
+            exited = True
+            break
+        time.sleep(0.1)
+    if not exited:
+        p.send_signal(_sig.SIGKILL)
+    p.wait(timeout=10)
+    os.close(m)
+    return exited
+
+
+@pytest.mark.parametrize("key,label,should_exit", [
+    (b"q", "q", True),
+    (b"Q", "Q", True),
+    (b"\x1b", "esc", True),
+    (b"\x03", "ctrl-c", True),
+    (b"x", "an unrelated key", False),     # negative control
+    (None, "no key at all", False),        # negative control
+])
+def test_the_FOOTER_KEYS_actually_close_the_view(key, label, should_exit, hw):
+    """🔴 THE FOOTER IS A CLAIM. It advertised `q / Ctrl-C to close` while the
+    watch loop read stdin NOWHERE — measured under a pty, `q` left it running
+    past 8 s, so the keypress echoed, got wiped by the next 2 s redraw, and the
+    view read as HUNG.
+
+    Ctrl-C needed its own fix: cbreak leaves ISIG on, so the tty driver turns
+    `\\x03` into a SIGINT that only arrives if this process is in the tty's
+    FOREGROUND PROCESS GROUP — true under alacritty, not true under a bare pty,
+    where the byte was swallowed and the promise was false. ISIG is now cleared
+    so the byte is delivered and handled identically everywhere.
+
+    The two negative controls are what stop this becoming "any key quits",
+    which would make the assertions above pass while the view was unusable.
+    """
+    root, add = hw
+    add("nct6687", fans_map={1: 2448}, pwm={1: 201})
+    assert _pty_trial(key, root) is should_exit, label
+
+
+def test_the_pill_and_the_VIEW_get_the_SAME_fan_mapping():
+    """🔴 THE DRIFT GUARD. An audit measured this exact hole: `fans-detail`
+    carried its own `KNOWN_FANS = [(1, "AIO pump", 500), (3, "Case fan", None)]`
+    while nix passed `--fan pump=1:500 --fan case=3` to the PILL alone.
+
+    Moving the pump to another header and updating only the nix line left
+    **84 of 84 tests green**, and produced:
+
+        PILL : {"text": "2448·1650", "state": "Idle"}
+        VIEW :   AIO pump   ?  ░░░░░░░░░░  ?%  unreadable
+
+    The pill's own seam guard cannot catch it — it deliberately asserts STATE
+    not spelling ("re-ordering or renaming a fan is free"), which is correct for
+    the pill. So the mapping is now ONE nix binding passed verbatim to both, and
+    this asserts they are literally the same string.
+    """
+    nix = GRAPHICAL.read_text()
+    m = re.search(r"fansBlock = \{(.*?)^  \};", nix, re.S | re.M)
+    assert m, "fansBlock not found"
+    body = m.group(1)
+    cmd = re.search(r'command = "([^"]+)"', body)
+    click = re.search(r'button = "left"; cmd = "([^"]+)"', body)
+    assert cmd and click, body
+
+    binding = re.search(r'fanArgs = "([^"]+)"', nix)
+    assert binding, "no single-source `fanArgs` binding in nix/graphical.nix"
+
+    def fan_args(s):
+        # Resolve the binding first: the whole point of the fix is that neither
+        # command spells the mapping itself, so a raw scan finds nothing.
+        return re.findall(r"--fan\s+('[^']*'|\S+)",
+                          s.replace("${fanArgs}", binding.group(1)))
+
+    pill, view = fan_args(cmd.group(1)), fan_args(click.group(1))
+    assert pill, "the pill resolves to no --fan arguments"
+    assert pill == view, (
+        "the pill and the cooling view disagree about the fan mapping — one of "
+        "them will render a fan the other cannot see:\n  pill %r\n  view %r"
+        % (pill, view))
+
+    # 🔴 And they must come from the SAME binding, not two equal literals that
+    # drift on the next edit. Both commands must interpolate it.
+    assert "${fanArgs}" in cmd.group(1), (
+        "the pill spells its own fan mapping instead of using `fanArgs`: %r"
+        % cmd.group(1))
+    assert "${fanArgs}" in click.group(1), (
+        "the cooling view spells its own fan mapping instead of using "
+        "`fanArgs`: %r" % click.group(1))
+
+
+def test_the_view_parses_the_fan_args_nix_actually_passes():
+    """The strings agreeing is not enough: they must also be VALID. A spec the
+    sibling rejects (floor 0, truncated `:`) would silently drop that fan's row
+    from the view while the pill refuses to start at all."""
+    nix = GRAPHICAL.read_text()
+    m = re.search(r'fanArgs = "([^"]+)"', nix)
+    assert m, "no single-source `fanArgs` binding in nix/graphical.nix"
+    specs = re.findall(r"--fan\s+'([^']*)'|--fan\s+(\S+)", m.group(1))
+    flat = [a or b for a, b in specs]
+    assert flat, m.group(1)
+    parsed = [fans.parse_fan(s) for s in flat]        # raises on a bad spec
+    armed = [p for p in parsed if p.floor is not None]
+    assert armed, "no fan in the shared mapping carries a floor — nothing alarms"
+    assert parsed[0].index == 1, "the pump is expected on fan1 first"
 
 
 def test_the_fans_pill_click_points_at_THIS_script():
