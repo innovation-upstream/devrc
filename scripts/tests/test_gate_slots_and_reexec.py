@@ -24,9 +24,14 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import textwrap
 import time
 from pathlib import Path
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(_HERE, os.pardir)))
+from testlib.mockbin import write_exec  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 GATE = REPO / "scripts" / "gate.sh"
@@ -45,19 +50,23 @@ def _fake_runner(path: Path, *, sleep: float = 0.0, verdict: str = "PASS") -> Pa
     """A stand-in runner that prints a well-formed verdict and exits to match."""
     rc = 0 if verdict == "PASS" else 1
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    # 🔴 write_exec owns the shebang, and that is not style. An env-based
+    # interpreter path written at RUNTIME execs on this NixOS dev host and NOT
+    # in the nix build sandbox, which is the authoritative tier — so the defect
+    # is structurally invisible to the tier most people run. This file arrived
+    # carrying it and test_runtime_shebangs.py caught it on the first sandbox
+    # run, which is that guard working.
+    return write_exec(
+        path,
         textwrap.dedent(
             f"""\
-            #!/usr/bin/env bash
             echo "======== FAKE SUMMARY ========"
             sleep {sleep}
             echo "RESULT: {verdict} (exit={rc})"
             exit {rc}
             """
-        )
+        ),
     )
-    path.chmod(0o755)
-    return path
 
 
 def _gate_env(tmp_path: Path, **over: str) -> dict[str, str]:
@@ -270,14 +279,13 @@ def test_an_orphan_spawned_by_the_tier_does_not_keep_holding_the_slot(tmp_path):
     d.mkdir()
     orphan_marker = tmp_path / "orphan.pid"
     runner = d / "spawner.sh"
-    runner.write_text(
-        "#!/usr/bin/env bash\n"
+    write_exec(
+        runner,
         "echo '======== FAKE SUMMARY ========'\n"
-        f"setsid sleep 30 & echo $! > {orphan_marker}\n"
+        f"sleep 30 & echo $! > {orphan_marker}\n"
         "echo 'RESULT: PASS (exit=0)'\n"
-        "exit 0\n"
+        "exit 0\n",
     )
-    runner.chmod(0o755)
 
     env1 = _gate_env(d, DEVRC_GATE_SLOTS="1", DEVRC_GATE_SLOT_DIR=str(slots))
     env1["DEVRC_GATE_PYTEST_RUNNER"] = str(runner)
@@ -355,17 +363,15 @@ def test_time_spent_waiting_is_not_charged_to_the_timeout(tmp_path):
 
 
 def _fake_nix(path: Path, record: Path) -> Path:
-    path.write_text(
+    return write_exec(
+        path,
         textwrap.dedent(
             f"""\
-            #!/usr/bin/env bash
             printf '%s\\n' "$@" > {record}
             exit 0
             """
-        )
+        ),
     )
-    path.chmod(0o755)
-    return path
 
 
 def test_it_re_enters_nix_develop_when_not_in_a_gate_environment(tmp_path):
