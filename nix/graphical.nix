@@ -150,6 +150,50 @@ let
     chip = "k10temp-*";
     inputs = [ "Tctl" ];
   });
+  # fans: workbench only. AIO pump + case fan RPM, read straight from the
+  # Nuvoton NCT6687D Super I/O via /sys/class/hwmon (no cache, no poller, no
+  # `bar_freshness` sibling — nothing here can go stale).
+  #
+  #   `2660·1736`  Idle      both turning, both above their floors
+  #   `!0·1736`    Critical  the PUMP has stopped
+  #   `2660·?`     Warning   one tacho unreadable
+  #   `?`          Warning   the chip is absent — i.e. `nct6683` is not loaded
+  #
+  # 🔴 NOT hide-at-zero, unlike every count pill. A count's quiet state means
+  # "nothing to do"; a pump RPM is the number itself, and a cooler pill that is
+  # invisible while healthy is invisible in exactly the state it certifies. The
+  # colour rules still hold — neutral until something actually stalls.
+  #
+  # 🔴 The FLOOR IS PER-FAN AND OPTIONAL, and only the pump gets one. fan2 and
+  # fan4-10 have nothing plugged in and read a permanent 0, and a case fan on a
+  # zero-RPM PWM curve may legitimately stop when idle — a blanket floor would
+  # make the pill cry wolf about a fan doing its job. The pump must never stop,
+  # so it alarms below 500 RPM (it runs ~2660-2823, driven at pwm1=114%, which
+  # is normal: MSI overdrives pump headers by design).
+  #
+  # 🔴 Workbench only, and gated in BOTH places — this entry via the `blocks`
+  # list below and the `home.file` further down. The chip is this board's Super
+  # I/O (MSI X670E GAMING PLUS WIFI); the laptop has no such device, and a block
+  # whose script is deployed under a narrower gate than the block itself renders
+  # a command that does not exist.
+  #
+  # 🔴 The driver is `nct6683` (NOT nct6775, which reports "no such device" for
+  # this chip) and NOTHING loads it automatically. `nix/system/apply-nct6683-module.sh`
+  # persists it via boot.kernelModules; until that has been run under sudo this
+  # pill renders `?` after every reboot — deliberately visible, so the missing
+  # driver announces itself rather than showing a blank block.
+  #
+  # 30s: a pump does not change speed meaningfully faster, and this spawns a
+  # python process every tick forever.
+  fansBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-fans --fan pump=1:500 --fan case=3";
+    json = true;
+    interval = 30;
+    click = [
+      { button = "left"; cmd = btopCmd; }
+    ];
+  };
   # nvidia_gpu: workbench only (RTX 5080). The block's state is TEMPERATURE-driven
   # (idle/good/info/warning are UPPER bounds; temp ≤ idle → neutral). Keep it CALM
   # like temperatureBlock: the 5080 idles ~45°C and sits ~65-78°C under sustained
@@ -415,6 +459,7 @@ let
 
   blocks =
     [ memoryBlock diskBlock netBlock cpuBlock loadBlock temperatureBlock ]
+    ++ lib.optional (!isLaptop) fansBlock
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
@@ -532,6 +577,14 @@ lib.mkIf isNixOS {
   # host renders a `custom` block whose command does not exist.
   home.file.".config/i3status-rust/scripts/i3status-load" = {
     source = ../scripts/i3status-load;
+    executable = true;
+  };
+  # fans: see `fansBlock` above. `mkIf (!isLaptop)` MATCHES the block's gate in
+  # the `blocks` list — the NCT6687D is the workbench board's Super I/O, and the
+  # laptop has no such chip. Gating one of the two and not the other is what
+  # ships a block whose command does not exist.
+  home.file.".config/i3status-rust/scripts/i3status-fans" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-fans;
     executable = true;
   };
   # 🔴 claude_sessions.py is a CO-LOCATED SIBLING MODULE, not a block — the same
