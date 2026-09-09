@@ -3095,8 +3095,8 @@ def test_the_runaways_pill_CLICKS_are_wired_to_syshealthCmd():
     runaway table, and every assertion about the string is still true because
     the string is still there, just uncalled. (The fans pill shipped the mirror
     image of this bug and its guard is the idiom followed here — see
-    `scripts/tests/test_fans_detail.py`, which lives on `main`; this branch is
-    based on a commit before it.)
+    `scripts/tests/test_fans_detail.py`, which arrived on `main` via #1430 and is
+    now on this branch too, via the merge in this PR.)
 
     BOTH buttons are asserted because the block declares both. Why `right` was
     added is not recorded here — only that it is wired, and that dropping it

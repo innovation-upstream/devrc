@@ -821,7 +821,7 @@ lib.mkIf isNixOS {
   # repo paths itself (no .zshenv handles under systemd).
   systemd.user.services.bar-status-poll = lib.mkIf (!isLaptop) {
     Unit = {
-      Description = "Poll clawgate/mail/alerts/civitai/media/airvpn/telemetry → ~/.cache/bar-status for the i3 bar";
+      Description = "Poll clawgate/mail/alerts/civitai/media/airvpn/telemetry/runaways → ~/.cache/bar-status for the i3 bar";
       After = [ "network-online.target" ];
       Wants = [ "network-online.target" ];
       # Toast on failure (the notify-failure@ template lives in home.nix, installed

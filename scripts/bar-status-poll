@@ -18,8 +18,12 @@ pixels. `scripts/bar_freshness.py` is the one predicate all EIGHT use — one pe
 entry in `SOURCES` below. That number is DERIVED and read back against this
 sentence by `test_bar_status.py::
 test_the_PROSE_COUNT_of_freshness_consumers_matches_the_SOURCES_ledger`, so it
-is no longer a hand-maintained count (it said SEVEN at four sites for as long as
-the runaways pill has existed). After
+is no longer a hand-maintained count (it said SEVEN at SEVEN sites across three
+files for as long as the runaways pill has existed -- round 1 of the audit found
+four, and fixing those found three more, which is why the count is derived now
+and not written down). 🔴 `_COUNT_PROSE` is NOT pinned two-way: nothing asserts
+it enumerates every prose site, so a site it does not list is unguarded and this
+sentence is the only place that says so. After
 writing each file the poller signals i3status-rs (RTMIN+N) so the corresponding
 block refreshes immediately.
 
@@ -901,7 +905,9 @@ def _toast_specs() -> dict:
         # ⚠ The `123-267/day -> 11-32/day` figure belongs to a DIFFERENT knob and
         # is not evidence for this one: it credits raising CPU_MON_THRESHOLD /
         # CPU_MON_RUNAWAY_PCT on 2026-08-05 (PR #351, 4c3e9132). The cap landed
-        # six days later in PR #430 (d71bf18f), whose own headline is ~330 ->
+        # six days later, on 2026-08-12, in PR #430 (d71bf18f) -- the raise
+        # itself is dated 2026-08-06 by its commit, not the 08-05 the prose
+        # elsewhere rounds to; whose own headline is ~330 ->
         # ~60 toasts/day across ALL producers.
         # 🔴 **The two predicates are NOT the same set, and cpu-monitor's is
         # STRICTLY NARROWER on the class this source exists for.** MEASURED:
