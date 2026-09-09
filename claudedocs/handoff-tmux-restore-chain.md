@@ -26,39 +26,32 @@ worked: every link in the save→plan→restore chain was broken, silently, for 
 | #1344 | `1ecc03c1` | no instrument existed to read a reboot; adds `tmux-restore-observe.sh` |
 | #1351 | `9353d958` | the unit MANUFACTURED a tmux server systemd then killed; adds the no-server REFUSAL |
 | #1375 | head `10570f92` | 81-row gate inventory + `scripts/check-gate-inventory.py` |
+| **#1415** | **`176f412b`** | **the kill-server guard — MERGED, SHIPPED, VERIFIED LIVE on both hosts** |
+| **#1376** | **`e55533ea`** | **socket-activation trigger — MERGED, SHIPPED, VERIFIED LIVE on both hosts** |
 
 - 🔴 **THE REBOOT — 2026-09-06 18:01:46**, from 32 days of uptime; still the only time the BOOT
-  path has ever been exercised. The 2026-09-07 incident was a server kill mid-session, a
-  different path.
-- 🔴 **OPERATOR DIRECTIVE, 2026-09-09: PROCEED REGARDLESS OF LOAD.** A previous session held
-  merges twice because the box sat at 72–118 all session (six other sessions gating) and load 85
-  is where it fell over on 09-07. The operator has overridden that. **Proceed — do not
-  re-litigate it, and do not hold again for load.**
+  path has ever been exercised, and it ran the OLD timer design. **#1376 REPLACED the trigger, so
+  the mechanism now deployed has never fired at boot on either host.**
+- 🔴 **OPERATOR DIRECTIVE, 2026-09-09: PROCEED REGARDLESS OF LOAD.** Do not hold merges for load.
+- 🔴 **OPERATOR DECISION, 2026-09-09: THE REBOOT IS ON HOLD.** Recommended and explicitly deferred
+  — do not run one, and do not re-propose it without being asked.
 
-### This session
-- Branch: `main` at `4a67ea73` (base clone clean). Integration worktree
-  `/home/zach/workspace/devrc-merge-1415`, branch `merge-gate-1415-4a67ea73`,
-  merged head **`b7fb13d7`** = `origin/main` + #1415's `a8c47b05`, clean textual merge.
-- **Claim `tmux-restore-chain-1` is HELD BY THIS SESSION** (rc 0, host nixos). Release on merge:
-  `claim-work --release tmux-restore-chain-1`.
-- 🔴 **THE GUARD IS STILL NOT LIVE.** Re-measured this session with the positive control:
-  deployed `~/.claude/hooks/guard_core.py` has **0** hits for `check_tmux_kill_shared_server`
-  and **3** for `check_pkill_full_pattern`. Unchanged from the previous session's reading.
-- **DONE — the round-2 delta audit of #1415 ran, and it is no longer blocked.** The blocker was
-  purely the comment FORMAT; a fenced ```audit-claims block was posted
-  (`#issuecomment-5604779176`) and `audit-dispatch.py 1415 --round 2` then exited **0**.
-  Findings posted as `#issuecomment-5604855111`.
-- **DONE — the guard half of #1415 is verified BEHAVIOURALLY, not on the fix pass's authority.**
-  29/29 adversarial cases correct against the MERGED tree, controls green, and reachable through
-  the real `evaluate(cmd, "claude-code")` entry point rather than only callable directly.
-  Probe preserved at
-  `/tmp/claude-1000/-home-zach-workspace-devrc/097b404c-db17-4472-bd37-dc90cf8fa675/scratchpad/probe_guard.py`
-  (scratch — will be GC'd; worth re-creating in-repo if this shape recurs).
-- **IN FLIGHT — the merged-tree gate.** Node tier **PASS** (1449/1449, floor 1367). Pytest tier
-  re-running inside the flake devshell; its result was not yet in when this was written.
-  🔴 The nix sandbox tier (`nix build .#checks.x86_64-linux.{pytests,nodetests}`, ONE AT A TIME)
-  has **NOT** been started — it must not run concurrently with the dev-host tier.
-- Deploy/verify status: **nothing merged, nothing deployed, nothing shipped this session.**
+### This session (2026-09-09)
+- 🔴 **THE GUARD IS LIVE.** Verified by REPRODUCING THE SYMPTOM against the deployed artifact on
+  **both** hosts, not by grep: `TMUX_TMPDIR=$SCRATCH/run tmux kill-server` → **DENIED**, with
+  controls proving it is not a blanket denier (`echo hello`, `tmux -L my-probe-$$ kill-server`,
+  `tmux kill-pane` all ALLOWED; `ssh <host> tmux kill-server` DENIED). Deployed store path
+  `ylm9slz…-hm_guard_core.py`, identical on both hosts. Hit count 0 → 3, positive control 4.
+- 🔴 **THE SOCKET TRIGGER IS LIVE.** Both hosts: `tmux-session-restore.path` **active**,
+  `tmux-session-restore.timer` **inactive**, watching `/run/user/1000/tmux-1000/default`
+  (`PathChanged`), `TMUX_TMPDIR=%t` expanded, and `ConditionPathExists=%t/tmux-%U/default` present
+  at line 10 of the deployed unit. The laptop's 12 live conversations were untouched by the switch.
+- **Both hosts converged and CROSS-HOST COMPARED** at `605b29ac` — the first time today `ship.sh`
+  could make that claim rather than `NOT COMPARED` (see the #1439 block below).
+- **PRs opened this session:** **#1464** (retire the OOM script — the operator's decision),
+  **#1460** (correct a false `nix/home.nix` comment), **#1443** (this handoff).
+  **#1459 was opened and then CLOSED** by that same decision.
+- **Claims: all released except `tmux-restore-plan-generations`** (#1383), which this session holds.
 
 ## Open investigations — live diagnosis state
 
@@ -510,49 +503,160 @@ Found by the round-2 delta audit. **In the STAGED half — merging #1415 does no
   via: code
 - **Next probe:** fold into the same fix.
 
-## Next steps (ranked)
-🔴 **Ranks are STABLE and are half a claim's identity** (`claim-work --slug-for <this doc> <rank>`).
-Do not re-rank.
+### ✅ CLOSED — the two open PRs of rank 1 and rank 3 are MERGED, SHIPPED and VERIFIED
+🔴 **Retires "The three PRs still open" and "THE GUARD IS NOT LIVE" above — do not re-derive them.**
+- **#1415** merged `176f412b`, **#1376** merged `e55533ea`. Both verified by content in
+  `origin/main` (never by ancestry — a squash merge makes `--is-ancestor` false forever).
+- **Ruled out:** that Tekton's green was sufficient — #1415's legs were green on a base **11
+  commits stale**, and gating the merged tree is what found the break below. via: measurement
+- **Ruled out:** that #1376's fixes were unpushed, as the previous handoff said — they were 4
+  commits in `.claude/worktrees/agent-a91d846562d761c79`, and the push was a genuine
+  fast-forward (`4fbe8440..83e10200`, **0 commits discarded**). via: measurement
+- **Next probe:** none. Rank 7 (`TMUX_TMPDIR=%t` on the unit) is **SUBSUMED by #1376** — measured
+  present at `nix/home.nix:4814`. Do not do it again.
 
-1. **Merge #1415 — the guard — then `ship.sh`.** BLOCKED ONLY ON the merged-tree gate finishing:
-   node tier PASS, pytest tier in flight, **nix sandbox tier not yet started** (run the two
-   derivations ONE AT A TIME). `MERGEABLE/CLEAN`; both Tekton legs SUCCESS but on a base **11
-   commits stale**, which is why the merged tree is being gated locally. The round-2 audit's two
-   findings are BOTH in the staged sudo script, which merging does not run — they are not a
-   reason to hold the guard. Release the claim on merge.
-   IN FLIGHT: innovation-upstream/devrc#1415
-   forcing: incident — 2026-09-07, an agent ran `TMUX_TMPDIR=… tmux kill-server` against the live
-   server and destroyed 47 conversations; the guard is MEASURED not live until this merges.
-2. **Fix the staged script's stale-restore path** (the 🟡 above) — a follow-up PR, immediately
-   after rank 1. Touches `nix/system/apply-tmux-oom-protection.sh` and
-   `scripts/tests/test_tmux_oom_protection_staged.py`.
-   forcing: regression — introduced by #1415's own round-1 fix pass; it silently reverts
-   `/etc/nixos/configuration.nix` including unrelated operator edits.
-3. **Push #1376's local fix commits, then merge.** The remote still shows the unfixed version;
-   4 commits sit in `.claude/worktrees/agent-a91d846562d761c79`. Dev tier PASS, mutation 10/10;
-   the sandbox tier was never run.
-   IN FLIGHT: innovation-upstream/devrc#1376
-   forcing: regression — the published PR carries a 🔴 deploy-blocker that is already fixed
-   locally; anyone merging what is on the remote ships the unfixed version.
-4. **Re-gate and merge #1383.** Its green is on a stale base and it has never been audited; it is
-   the fix for the save side destroying its own best record.
+### ✅ ANSWERED — #1415 and #1376 were each green ALONE and RED MERGED, on disjoint files
+- **Symptom + exact repro:** merge `origin/main`+#1415 with #1376 and run
+  `test_guard_core.py -k "kill_server_call_site or shell_text_writes_a_kill"`.
+- **Observed (with values):** two failures —
+  `added: ['scripts/tests/test_tmux_restore_trigger.py']` from the two-way
+  `_KILL_MENTION_LEDGER`, and `shell text this guard denies, outside the named files:
+  [('scripts/tests/test_tmux_restore_trigger.py', <the wide-kill spelling>)]`. #1415 added the
+  ledger; #1376 added a file whose class docstring names that command in PROSE. **Zero file
+  overlap between the two diffs.**
+- **Ruled out:** that a clean `git merge` said anything about it — the merge was textually clean
+  and `mergeable: CLEAN`. via: measurement
+- **Ruled out:** that it was a defect in either PR — the ledger is two-way BY DESIGN so a new file
+  must be classified by a human. via: code
+- **Fixed** in `27b94ffe`: classified in `_KILL_MENTION_LEDGER` and named in the shell-text
+  scanner's allowlist. Red-at-base confirmed: 2 failed → 3 passed, scanner's positive control
+  green throughout.
+- **Next probe:** none. The lesson is in Gotchas: this is the RULES.md "disjoint files are not
+  safety" case, and the trigger was the base MOVING.
+
+### ✅ ANSWERED — `ship.sh` could not reach the laptop, and #1439 fixed it (verified)
+- **Symptom + exact repro:** `bash scripts/ship.sh` → laptop leg `ssh: connect to host
+  192.168.50.155 port 22: Connection timed out`, `[laptop] converge exited 255`, final verdict
+  `cross-host agreement NOT COMPARED`. Hit TWICE today; both times the laptop was converged BY
+  HAND over nebula (`zach@10.42.0.100`).
+- **Observed (with values):** after #1439 merged, the same command printed
+  `ship: zach@192.168.50.155 did not answer — falling back to zach@10.42.0.100 for laptop.` and
+  ended `converged + verified — 2 hosts compared, both at 605b29ac (local=workbench remote=laptop)`.
+- **Ruled out:** that the laptop was unreachable — nebula answered throughout; only the LAN
+  address was silent. via: measurement
+- **Next probe:** none. ⚠ Note the failure mode this closed: a `NOT COMPARED` verdict is a SKIP,
+  not a pass, and nothing else converges the laptop.
+
+### ✅ ANSWERED — the restore stack DOES operate on the laptop, end to end
+- **Symptom + exact repro:** operator asked whether the chain works on `zach@10.42.0.100`.
+- **Observed (with values):** save side alive — `status-right` carries `continuum_save.sh`,
+  `@resurrect-hook-post-save-all` set, `~/.tmux/resurrect/last` and `restore-plan.json` both
+  written **5 minutes before the check**, plan = **12 entries, 12/12 with a session_id** (11 `ok`,
+  1 `transcript-missing`), 4 distinct cwds. Restore side ready — path unit active,
+  `ConditionPathExists` satisfied, script running from the working tree; a live `--dry-run`
+  resolved all 12 and correctly reported `would relaunch 0 windows, skipped 12` (claude already
+  running in each).
+- **Ruled out:** that the laptop's tmux socket is in `/tmp`, which `nix/home.nix` asserted — the
+  server's own `/proc/<pid>/environ` carries `TMUX_TMPDIR=/run/user/1000`, the socket is at
+  `/run/user/1000/tmux-1000/default`, and `/tmp/tmux-1000` **does not exist**. via: measurement
+- **Ruled out:** the failure that comment PREDICTS for that arrangement ("silently reports zero
+  windows") — measured over the exact non-interactive-ssh path `session-manager` uses,
+  `TMUX_TMPDIR` is present and `tmux list-windows -a` returned **29 windows**. via: measurement
+- **Leading hypothesis:** it works because `TMUX_TMPDIR` is in the ssh session environment from an
+  UNDECLARED source — `grep -c TMUX_TMPDIR ~/.zshenv` on the laptop is **0**, so devrc is still
+  not what sets it. The hazard is MASKED, not absent. **#1460 corrects the comment.**
+- **Next probe:** none. ⚠ The laptop's tmux server dates from **Aug 28 18:39**, so its save side
+  is alive only because a previous session applied two settings to the LIVE server; the on-disk
+  config carries both, so a future server start re-applies them.
+
+### 🟡 The laptop's `transcript-push.service` is FAILING, with a specific cause
+- **Symptom + exact repro:** `systemctl --user is-active transcript-push.service` → `failed` on
+  the laptop; it is what makes the user manager report `degraded` on every switch.
+- **Observed (with values):** `transcript-push: push not accepted (HTTP '413'): 413 Request
+  Entity Too Large — nginx/1.29.4`, then `Main process exited, code=exited, status=5`.
+  Last run 2026-09-09 14:32:08 CDT.
+- **Ruled out:** that it is a missing binary — `status=5/NOTINSTALLED` is systemd's label for
+  exit code 5, not a statement about installation. via: code
+- **Leading hypothesis:** the laptop's transcript payload exceeds `client_max_body_size` on the
+  clawgate ingress. The fix is either that ingress limit (which lives in **homelab-talos**, a
+  different repo) or a cap/chunk in the pusher.
+- **Next probe:** decide which side owns it before editing anything — this was reported rather
+  than fixed, deliberately, to avoid widening scope into another repo unasked.
+
+### 🔴 #1383 is audited and needs FOUR fixes before merge — findings recorded so they are not re-derived
+First full audit, 2026-09-09. Verdict **merge after fixing 🔴 1**. Line numbers in
+`scripts/tmux-session-restore.py` at PR head `2ece276c`.
+- **🔴 1 · `free_generation_stamp` silently overwrites a generation — `:505-558`.** The anchor
+  parses a LOCAL-time stamp, so when the clock repeats (DST fall-back) or steps back >60s the
+  anchor lands behind `now`, `stamp > newest` can never be satisfied, and `:558` returns the last
+  candidate **with no occupancy check**. Measured on this host's zone (`America/Winnipeg`), 4/4
+  fixtures, in the production call sequence: a bound session id and its cheat-sheet destroyed,
+  **rc 0, nothing printed**, `prune_generations` reporting `0 pruned`. The docstring calls this a
+  "bounded, VISIBLE loss" — it is not visible. Fix: stamp in UTC (`time.gmtime`), or at minimum
+  refuse to return an occupied stamp.
+- **🟡 2 · the concurrent-save race the docstring names is not closed — `:580`, `:595`.**
+  `scripts/tmux-post-save.sh:21` launches `save` backgrounded and disowned with **no lock**; the
+  implemented test covers only the SEQUENTIAL same-second case. Two processes in the same second
+  use **fixed temp names**: measured `FileNotFoundError` out of `os.replace`, a generation holding
+  one process's bytes under the other's rename, and `FileExistsError` from `os.symlink`. Fix:
+  per-process temp names (`.{pid}.tmp`) + `O_EXCL`.
+- **🟡 3 · `prune_generations` reports stamps it failed to delete — `:639-664`.** `:660-663`
+  swallows the unlink `OSError` then appends to `removed` unconditionally. Measured:
+  `2 kept (max 1), 1 pruned` while **nothing was pruned**.
+- **🟡 4 · the shrink report can name a file the same save just deleted — `:739` vs `:757-765`.**
+  `protect=(stamp,)` does not protect `previous_gen`, the file the recovery command names.
+  Measured at `KEEP_GENERATIONS=1`: report names a path that `exists() == False`. Fix:
+  `protect=(stamp, previous_stamp)`.
+- **Ruled out:** a semantic conflict with #1376, which was the main worry — `cmd_save` hangs off
+  the continuum `post-save-all` hook, not the socket-triggered unit; the plan is read at `:959`
+  **before** `wait_for_tmux_server()` at `:969`, so a save cannot swap the plan under a running
+  restore; the no-server refusal writes nothing so it cannot rotate or prune. via: code
+- **Ruled out:** that #1383 re-breaks the kill-mention ledger — it adds no new file and no
+  wide-kill prose; merged tree `e142d06d` ran **1714 passed** including that ledger with its own
+  positive control green. via: measurement
+- **Ruled out:** that its regression tests are vacuous — **12 of the 15 new tests are RED at base
+  `c5e425c7`**, failing on the data loss itself with their own messages, and the `-L` guard was
+  killed by two independent mutants. via: measurement
+- **Next probe:** fix 1–4 in one commit, re-run the change-scoped subset, merge.
+
+## Next steps (ranked)
+🔴 **RANKS WERE RENUMBERED THIS SESSION AND THAT IS A HAZARD** — `claim-work --slug-for <doc> <rank>`
+derives the slug FROM the rank, so re-ranking silently re-points live claims. It is safe right now
+only because every rank-derived claim has been RELEASED; the one live claim
+(`tmux-restore-plan-generations`, rank 2 below) is TOPICAL, not rank-derived. **Prefer a topical
+slug over a rank-derived one from here on.**
+
+1. **Merge #1464 — retire the staged OOM script.** The operator's decision, already taken. Deletes
+   `nix/system/apply-tmux-oom-protection.sh` + its test file (840 lines) and drops both ledger
+   entries in the same change (the ledger is two-way and fails on a SHRINK).
+   IN FLIGHT: innovation-upstream/devrc#1464
+   forcing: user — operator chose "delete it, close #1459 too" on 2026-09-09 after a round-0 audit.
+2. **Fix #1383's four findings, then merge.** 🔴 1 + 🟡 2/3/4 above, in one commit. Its green is on
+   a base 78 commits stale, but the merged tree was measured at 1714 passed.
    IN FLIGHT: innovation-upstream/devrc#1383
    forcing: incident — 2026-09-07, a continuum autosave overwrote a 47-entry plan with 10 entries
    and no backup, which is why 20 windows needed manual identification.
-5. **Implement opencode restore** (decisions already taken: full auto-parity; an UNBOUND opencode
+3. **Merge #1460** — corrects a `nix/home.nix` comment measured false in BOTH halves.
+   IN FLIGHT: innovation-upstream/devrc#1460
+   forcing: regression — the comment would lead a maintainer to the wrong conclusion either way.
+4. **Merge #1443** — this handoff doc.
+   IN FLIGHT: innovation-upstream/devrc#1443
+   forcing: none
+5. **Decide who owns the laptop's `transcript-push` 413** (ingress limit in homelab-talos vs a cap
+   in the pusher), then fix it.
+   forcing: regression — the laptop's user manager reports `degraded` on every switch, and
+   transcripts are not reaching clawgate from that host.
+6. **Implement opencode restore** (decisions already taken: full auto-parity; an UNBOUND opencode
    pane sends NOTHING and is listed; the save-side tally must distinguish "no opencode panes
    existed" from "existed and I bound zero").
    forcing: user — operator asked for opencode restore parity on 2026-09-07 and chose the design.
-6. **Work clawgate task 526** (drift-check chain-liveness arm) — and fix its `ZacxDev/devrc` repo
+7. **Work clawgate task 526** (drift-check chain-liveness arm) — and fix its `ZacxDev/devrc` repo
    field first.
    forcing: incident — 2026-09-07, the laptop's chain was found dead only because a human went
    looking; 9 conversations were one reboot from loss.
-7. **Pin `TMUX_TMPDIR=%t` on the unit** — re-confirmed live on BOTH hosts that `Environment=`
-   carries `PATH` and `HOME` only. ⚠ #1376 may already do this; check before duplicating.
-   forcing: regression — the unit works today only because the user-manager environment happens
-   to carry the variable.
-8. **Reboot to confirm whatever lands.** Nothing but a real reboot has exercised the boot path,
-   and it has overturned two successive hypotheses.
+8. **Reboot to confirm the boot path.** 🔴 **ON HOLD BY THE OPERATOR — do not run one, and do not
+   re-propose it unasked.** Recorded because it is still the only thing that can verify the arc:
+   #1376 replaced the trigger and the deployed mechanism has never fired at boot.
    forcing: none
 9. **`--assume-empty` for `restore --dry-run`.**
    forcing: none
@@ -802,39 +906,91 @@ ELSE.** They map to ranks 1–3 below. A resuming session on the SAME host+workt
   written, and that 0 is NOT a clean bill of health: a wrong session id answers 200 with an empty
   array too.
 
+- 🔴 **THE LOCAL FULL-SUITE RITUAL BEFORE EVERY MERGE IS DELETED — CLAUDE.md changed mid-session.**
+  It used to say "run BOTH tiers yourself before merging"; that requirement is gone, because the
+  runs produced 27–50 concurrent full-suite runs on one 24-core box and the dev-host tier
+  repeatedly hit its own 3600s cap and produced **no verdict at all** — strictly worse than not
+  running it. What replaces it: **read CI** (advisory, ~42% of reds measured to be noise — act on
+  the failing TEST, not the colour) and run a **change-scoped subset**
+  (`nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q`). I hit the deleted ritual's
+  exact failure twice today before the doc changed: both full gates died on the cap, on a
+  DIFFERENT target each time — which is the tell for load, since a failed assertion inflates one
+  test and load inflates the whole run.
+- 🔴 **`gate.sh` outside the flake devshell EXITS 3 HAVING RUN NO TESTS** — `FATAL — required
+  tool(s) missing from PATH: logrotate dash`. A combined run then prints `PASS node / FAIL pytest
+  exit=3`, which reads like a real pytest failure and is not.
+- 🔴 **`no tests ran in 0.12s` IS A BROKEN SELECTOR, NOT A PASS.** I passed
+  `scripts/claude-hooks/tests/test_tmux_session_restore.py`; the real path is
+  `scripts/session-analysis/tests/`. pytest reported a cheerful zero. Corrected run: 1738 passed.
+- 🔴 **`git checkout -- <file>` TO CLEAN UP A MUTATION ALSO REVERTS THE FIX YOU JUST WROTE.** I ran
+  a negative control on the kill-mention ledger, cleaned up with `git checkout --`, and committed
+  and pushed a tree that deleted the script while the ledger still named it — red, exactly as my
+  own control had just demonstrated. Caught by reading the STAGED diff against what I intended.
+  Restore a mutated file from a `cp -a` copy, not from the index.
+- 🔴 **A trailing `echo "RC=$?"` in a BACKGROUNDED command makes the harness report exit 0 for a
+  red run** — the task notification said `exit code 0` for a gate whose content said
+  `GATE: RESULT=FAIL exit=1`, and again for a `ship.sh` that exited 255. Read the `RESULT:`/per-host
+  lines in the CONTENT.
+- 🔴 **`PIPESTATUS` IS A BASHISM — zsh uses `pipestatus`.** `echo "MERGE_RC=${PIPESTATUS[0]}"`
+  printed empty for a `gh pr merge`, telling me nothing. Verify a squash landed by CONTENT in
+  `origin/main`, never by `--is-ancestor` (false after every squash, forever).
+- 🔴 **A `| tail` swallowed a failed `git worktree add` again** — `WT_RC=0` for a create that had
+  failed on `fatal: 'refs/heads/integration' exists`. A branch named `<x>` blocks every `<x>/<y>`;
+  use a FLAT integration branch name.
+- 🔴 **The deployed guard BLOCKS YOUR OWN COMMIT MESSAGE if it quotes the incident command** — the
+  hook parses heredoc lines as real commands. That is correct behaviour and it names the escape
+  hatch: write the message to a file and `git commit -F <file>`. Unplanned end-to-end proof the
+  guard fires through the Bash tool.
+- 🔴 **`--is-ancestor` OVER A LIST OF BRANCHES IS A FALSE-POSITIVE MACHINE.** I used it to hunt
+  stranded work on the laptop and got ~22 "UNMERGED" branches; nearly all were squash-merged, for
+  which `--is-ancestor` is false forever by construction. Do not report that list as stranded work.
+- **A laptop sha that is in NO clone is usually another session mid-flight, not a diverged host.**
+  I measured the laptop at `31f60d81`, an object absent from this clone. `git reflog` on the
+  laptop settled it in one command: another session checked out a feature branch at 14:20,
+  committed at 14:24, and returned to `main` at 14:30. My probe landed in the gap.
+- **Round 0 of `/audit-pr` earned its keep on its first real use.** It is the only round that can
+  conclude *close this PR*, and it did: it attributed the requirement to a verbatim operator ask
+  issued 23 minutes after the incident under a diagnosis that was refuted the next day, then
+  measured that the payload is inert against 4/4 recorded OOM events (all `CONSTRAINT_MEMCG`,
+  tmux unreachable from the victim cgroup). Record for its trial: `ran: 1 · changed the outcome: 1`.
+- ⚠ **`CLAUDE.md` says `nix/system/` "already holds nine of these"; it holds 22 today** (21 after
+  #1464). Not corrected here — flagged so the next reader does not trust the count.
+- **The `scripts/tests` collected-test floor has ~710 of headroom** (13756 collected vs floor
+  13026), measured before deleting 20 tests in #1464. Check this before any deletion — floors are
+  per-target minimums and a deletion can breach one.
+
 ## How to verify
 ```bash
-# 1. is the guard LIVE yet? (0 = not deployed; the second is the positive control)
-grep -c check_tmux_kill_shared_server ~/.claude/hooks/guard_core.py
-grep -c check_pkill_full_pattern      ~/.claude/hooks/guard_core.py
+# 1. the guard is LIVE — reproduce the SYMPTOM, do not grep
+python3 - <<'PY'
+import importlib.util, os
+p = os.path.expanduser("~/.claude/hooks/guard_core.py")
+s = importlib.util.spec_from_file_location("g", p)
+m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+print("incident ->", "DENIED" if m.evaluate("TMUX_TMPDIR=/tmp/x tmux kill-server","claude-code") else "ALLOWED")
+print("control  ->", "DENIED" if m.evaluate("tmux kill-pane -t %1","claude-code") else "ALLOWED")
+PY
 
-# 2. the merged-tree gate — BOTH tiers, and pytest needs the devshell
-nix develop /home/zach/workspace/devrc --command bash \
-  /home/zach/workspace/devrc-merge-1415/scripts/gate.sh --tier both \
-  /home/zach/workspace/devrc-merge-1415
-# then the sandbox tier, ONE AT A TIME (a combined RED is untrustworthy):
-#   git -C <merged-worktree> archive HEAD | tar -x -C <dir> && nix build <dir>#checks…pytests
-#   …then …#checks…nodetests
+# 2. the socket trigger is live on BOTH hosts
+systemctl --user is-active tmux-session-restore.path tmux-session-restore.timer
+ssh zach@10.42.0.100 'systemctl --user is-active tmux-session-restore.path tmux-session-restore.timer'
 
-# 3. re-run the behavioural guard probe against any tree
-python3 /tmp/claude-1000/-home-zach-workspace-devrc/097b404c-db17-4472-bd37-dc90cf8fa675/scratchpad/probe_guard.py
-#   expect: cases=29 failures=0, and all three CONTROL flags True
+# 3. both hosts converged AND compared (not "NOT COMPARED")
+bash ~/workspace/devrc/scripts/ship.sh   # read every per-host line, not the verdict
 
-# 4. the two round-2 findings, as posted
-gh pr view 1415 --repo innovation-upstream/devrc --json comments \
-  --jq '.comments[-1].body' | head -40
+# 4. the laptop's chain is alive (save side is the half that was dead)
+ssh zach@10.42.0.100 'ls -l ~/.tmux/resurrect/last ~/.config/initiatives/restore-plan.json'
 
-# 5. 🔴 #1376's fixes are LOCAL — confirm before merging what is on the remote
-git -C /home/zach/workspace/devrc/.claude/worktrees/agent-a91d846562d761c79 log --oneline -5
-git ls-remote origin refs/heads/feat/tmux-restore-socket-activation   # compare to the above
+# 5. change-scoped tests — NOT the full gate
+nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q
 
-# 6. the recovery method + evidence, if another incident needs it
-ls ~/.cache/restore-rescue-2026-09-07/
-
-# 7. the three open PRs
-for n in 1376 1383 1415; do
+# 6. open PRs from this arc
+for n in 1383 1443 1460 1464; do
   gh pr view $n --repo innovation-upstream/devrc \
-    --json number,state,mergeable,mergeStateStatus,headRefOid,statusCheckRollup \
-    --jq '"#\(.number) \(.state) \(.mergeable)/\(.mergeStateStatus) head=\(.headRefOid[0:8]) checks=\([.statusCheckRollup[]?|"\(.context//.name)=\(.state//.conclusion)"]|join(" "))"'
+    --json number,state,mergeable,mergeStateStatus \
+    --jq '"#\(.number) \(.state) \(.mergeable)/\(.mergeStateStatus)"'
 done
+
+# 7. the recovery method + evidence, if another incident needs it
+ls ~/.cache/restore-rescue-2026-09-07/
 ```
