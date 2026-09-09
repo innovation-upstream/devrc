@@ -3373,7 +3373,7 @@ def render_checklist(facts):
                 "⚠ **COULD NOT INLINE the round-0 section** — "
                 "`~/.claude/skills/audit-pr/SKILL.md` was not readable from "
                 "here, so no instructions are printed rather than a guess at "
-                "them. Read its **ROUND 0** section and work its five steps in "
+                "them. Read its **ROUND 0** section and work its steps in "
                 "order, or re-run this assembly where the skill is readable.",
             ])
         return "\n".join([

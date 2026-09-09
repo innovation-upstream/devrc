@@ -93,7 +93,7 @@ audit scoped to a diff will never raise it on its own: that is how a 145 KB webh
 nothing had ever run survived every round that read it. Round 0 is the only round that can
 conclude **close this PR, do not audit it**.
 
-The order is the mechanism, not a preference — steps 3–5 spent on something step 2 would have
+The order is the mechanism, not a preference — steps 3–4 spent on something step 2 would have
 deleted is the waste this exists to catch. Work them in order; do not skip ahead.
 
 1. **Question every requirement, and NAME its author.** For each behaviour the diff introduces,
@@ -104,20 +104,34 @@ deleted is the waste this exists to catch. Work them in order; do not skip ahead
    history, so re-opening it reads as ignoring evidence and nobody does — the "requirements from
    smart people are the most dangerous" case exactly. Then make it less dumb: name the requirement
    you would drop or weaken, not only the code that implements it.
-2. **Delete.** List what could go — from the diff AND from the code it touches. Decide each by the
-   **REVERT TEST already defined below** (revert this file's diff: does the PR's stated deliverable
-   still ship?); do not mint a second rule for it. Where the payload is prose the deletion
-   instruments already exist — `/prune-skill`, `/prune-memory` — name the one that applies rather
-   than hand-rolling a cut.
+2. **Delete.** List what could go — from the diff AND from the code it touches. For each
+   candidate ask: **(a) is it RUNNING** — configured, installed, reachable? **(b) has it ever
+   caught a real problem, or only fired falsely? (c) does something else already check this
+   property against reality?** A "no" to (a) retires it outright; `/adoption-scan` answers (a) and
+   (b) for anything already shipped. Where the payload is prose the deletion instruments already
+   exist — `/prune-skill`, `/prune-memory` — name the one that applies rather than hand-rolling a
+   cut.
+   🔴 **NOT the REVERT TEST below — that answers a DIFFERENT question and is wrong here in both
+   directions.** It decides whether a file is payload or scaffolding, not whether a thing should
+   exist: applied to a PR's own payload it always answers *keep* (reverting it is exactly what
+   stops the deliverable shipping), and applied to the surrounding code it always answers
+   *deletable* (the deliverable ships regardless). Round 0 is the only round that can conclude
+   *close this PR* and a borrowed predicate that can never say so is worse than none. Question (a)
+   is the one that did the work in the incident this section cites — the 145 KB listener had no
+   token configured on either host and had never run.
 3. **Simplify — only what survived step 2.** Owned by `/simplify` and `/code-review`: NAME them,
    do not restate them here. 🔴 Both of those MUTATE (`/simplify` applies its fixes; `/code-review`
    takes `--fix`), and you are dispatched READ-ONLY — so this is a recommendation for the OPERATOR
    to run afterwards, never something you invoke. 🔴 Do not reach for it before steps 1–2 have run;
    simplifying a part that should not exist is the failure this ordering prevents.
-4. **Accelerate.** The ladder's own cycle time is in scope — report it, do not act on it. The
-   attribution gate below is what acts.
-5. **Automate — last.** If the round proposes automation, say what it automates and confirm steps
-   1–4 ran on that thing first.
+4. **Do not accelerate or automate anything steps 1–2 have not cleared.** If this round proposes
+   either, name what it applies to and confirm the requirement was questioned and the deletion
+   considered FIRST. The ladder's own cycle time is in scope to REPORT; the attribution gate below
+   is what acts on it.
+   ⚠ This was two steps — *accelerate* then *automate* — and they were merged because nothing read
+   them: the ledger counts only steps 1–2, all four verdicts are step-1/2 outcomes, and step 4 said
+   "report, do not act" while pointing at a gate that already acts. What survives is the ORDERING
+   claim, which is the half that does work. Recorded so the pair is not re-derived as ceremony.
 
 🔴 **ROUND 0 REPORTS; IT DOES NOT MOVE THE LADDER.** Its verdict is one of `proceed to the
 checklist` / `requirement questioned — <which>` / `deletion candidate — <what>` / `close, do not

@@ -8117,7 +8117,7 @@ def test_round_zero_reports_an_unreadable_skill_instead_of_inventing_the_steps()
 
     🔴 The failure this refuses is the one `claude/RULES.md` calls a zero you
     did not watch a command earn: a round-0 brief with the section silently
-    missing reads as an ordinary brief, and the auditor works the five steps
+    missing reads as an ordinary brief, and the auditor works the steps
     from memory — which is where the paraphrase this module keeps deleting
     comes back.
     """
@@ -8248,11 +8248,11 @@ def test_the_round_zero_section_the_script_reads_is_the_one_the_skill_ships():
         "delete `--round 0` and these tests in the SAME commit, rather than "
         "leaving a flag that dispatches an empty pass."
     )
-    # Not a spelling pin: assert the five steps are STRUCTURALLY present, so a
+    # Not a spelling pin: assert the steps are STRUCTURALLY present, so a
     # reworded section stays green and a truncated one does not. A partial read
     # is the dangerous shape here — the regex stops at the next `## `, so a
     # heading inserted mid-section would silently return only its head.
-    for step in ("1.", "2.", "3.", "4.", "5."):
+    for step in ("1.", "2.", "3.", "4."):
         assert step in section, (
             f"step {step} is missing from the section the script reads. The "
             "regex stops at the next `## ` heading — if one was inserted into "
