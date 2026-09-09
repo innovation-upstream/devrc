@@ -257,10 +257,15 @@ _STAMP_RE = re.compile(r"^(?P<stamp>\d{8}T\d{6}Z)\.bundle\.age$")
 
 # 🔴 MACHINE-READABLE CAUSES FOR THE DECRYPT STEP. `decrypt()` below has three
 # distinct failure branches and they mean COMPLETELY different things to a
-# caller — one is an environment fault, one says the identity does not open the
-# artifact, and one says the identity DID open it and the artifact holds
-# nothing. Every one of them raises `RestoreVerifyError`, so from the outside
-# they were separable only by reading the message text.
+# caller — one is an environment fault, one is "age refused" and one says the
+# identity DID open the artifact and it holds nothing. Every one of them raises
+# `RestoreVerifyError`, so from the outside they were separable only by reading
+# the message text.
+#
+# ⚠ THE MIDDLE ONE USED TO BE DESCRIBED HERE AS "the identity does not open the
+# artifact", and that stopped being true when `AGE_REFUSED_*` arrived: the
+# `age-refused` branch now covers refusals that PROVE the identity works. Its
+# sub-classification is the `age_refusal` value, not the cause.
 #
 # `escrow-verify.py` has to make exactly that distinction to decide whether a
 # failure is a verdict on the ESCROWED KEY or on the ARTIFACT, and getting it
@@ -434,20 +439,28 @@ AGE_REFUSALS_PRE_AUTH = frozenset({AGE_REFUSED_NO_IDENTITY, AGE_REFUSED_HEADER})
 # STANZA — so each member is positive evidence the escrowed key WORKS, and each
 # licenses a verdict that tells an operator NOT to rotate.
 #
-# ⚠ WHAT IT IS FOR, stated narrowly because an earlier draft of this comment
-# claimed a role it does not have. It is NOT read by a production branch:
-# `escrow-verify.py` needs two DIFFERENT messages on this side of the line (age
-# authenticated the header, versus age proved the key and then failed the
-# header's own MAC), so it branches on `AGE_REFUSALS_POST_AUTH` and on
-# `AGE_REFUSED_HEADER_MAC` separately. That earlier draft said a value added to
-# either set is "covered here without anybody remembering to" — false: nothing
-# downstream reads this, so adding a member covers nothing by itself.
+# ⚠ WHAT READS IT, ENUMERATED — because the two previous drafts of this comment
+# were each false about exactly that, in opposite directions. The first claimed
+# a value added to either source set is "covered here without anybody
+# remembering to"; the second corrected that to "NOT read by a production
+# branch", which the SAME COMMIT falsified 560 lines below by adding one. So:
 #
-# What it DOES own is the ORDER of `_AGE_REFUSAL_MARKERS` below, which is the
-# thing an audit measured to be unguarded: every marker on this side must be
-# matched AFTER every pre-auth one, or a message naming a pre-auth cause could
-# be scored as proof the key worked. That invariant is stated over this set
-# precisely so a third strong value cannot be added outside it.
+#   * `decrypt()` in this file branches on it to choose which of three
+#     diagnoses its operator-facing message carries. That IS a production read,
+#     and adding a member changes what an operator is told about their key.
+#   * the ORDER of `_AGE_REFUSAL_MARKERS` below is stated over it: every marker
+#     on this side must be matched AFTER every pre-auth one, or a message
+#     naming a pre-auth cause could be scored as proof the key worked. An audit
+#     measured that invariant unguarded when it was stated over the narrower
+#     `AGE_REFUSALS_POST_AUTH`.
+#   * `escrow-verify.py` does NOT read it, and that is deliberate rather than an
+#     oversight: it needs two DIFFERENT messages on this side of the line (age
+#     authenticated the header, versus age proved the key and then failed the
+#     header's own MAC), so it branches on `AGE_REFUSALS_POST_AUTH` and on
+#     `AGE_REFUSED_HEADER_MAC` separately.
+#
+# Adding a member therefore covers the marker ORDER and this file's diagnosis
+# automatically, and covers escrow-verify's verdicts NOT AT ALL — check both.
 AGE_REFUSALS_KEY_PROVEN = AGE_REFUSALS_POST_AUTH | {AGE_REFUSED_HEADER_MAC}
 
 # 🔴 SUBSTRINGS, DELIBERATELY NOT ANCHORED REGEXES. age prefixes its stderr with
@@ -503,9 +516,17 @@ _AGE_REFUSAL_MARKERS = (
     # `bad header mac` to the very END of the tuple SURVIVES the suite, because
     # it never crosses the divider and the stated invariant is about crossing
     # it. The only behaviour that could differ is a message carrying BOTH a MAC
-    # clause and a truncation clause; measured 120/120 on both binaries, age
-    # emits `bad header MAC` bare. Both orderings would land on the same token
-    # and the same remedy in any case — only the witness sentence would differ.
+    # clause and a truncation clause; measured 240/240 on both binaries — plus
+    # 24 artifacts damaged in a MAC clause AND a payload clause together — age
+    # emits `bad header MAC` bare, because the MAC check short-circuits before
+    # any payload read.
+    #
+    # ⚠ AND IF THAT EVER STOPPED HOLDING, THE ALTERNATIVE WOULD BE FALSE, NOT
+    # MERELY DIFFERENT — an earlier draft of this note said "only the witness
+    # sentence would differ", which understates its own case. The answer would
+    # become `truncated-after-header`, and escrow-verify then asserts "age
+    # authenticated the header with the ESCROWED key" — the exact statement a
+    # MAC failure disproves. Same token and same remedy; a wrong witness.
     #
     # -- KEY PROVEN, header damaged: age got here only by unwrapping a stanza,
     #    but it did NOT authenticate the header, so neither block fits -------- #
@@ -996,12 +1017,31 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
         # including the ones that disprove its first half three lines below the
         # `classify_age_refusal` call that establishes it. The consumer was
         # fixed and the sibling the consumer points at was not.
-        if refusal in AGE_REFUSALS_KEY_PROVEN:
+        # 🔴 TWO KEY-PROVEN SENTENCES, NOT ONE, and the split is a CORRECTION.
+        # A single "the identity DID open it" was written first and is FALSE for
+        # `header-mac-failed`: age unwrapped a recipient stanza and the header
+        # then failed its own MAC, so it never opened the artifact. That is the
+        # third instance in this subsystem of a message asserting an act one of
+        # its arms cannot observe — `escrow-verify.py` has already dropped
+        # "began writing plaintext" and "then FAILED on the payload" for exactly
+        # this reason, and says in terms that a MAC failure means age did NOT
+        # authenticate the header. Both arms still license the same conclusion
+        # (the key is not implicated); only the WITNESS differs, so only the
+        # witness clause differs.
+        if refusal == AGE_REFUSED_HEADER_MAC:
+            diagnosis = (
+                f"the identity at {identity}{_identity_note(identity)} UNWRAPPED "
+                f"one of its recipient stanzas — age only lets a MATCHING "
+                f"identity get that far — and the header then failed its own "
+                f"integrity check. age never reached the payload, so nothing is "
+                f"claimed about it. This is an ARTIFACT fault; the key is not "
+                f"implicated")
+        elif refusal in AGE_REFUSALS_KEY_PROVEN:
             diagnosis = (
                 f"the identity at {identity}{_identity_note(identity)} DID open "
-                f"it — age only gets this far with one that matches — and the "
-                f"CIPHERTEXT is damaged. This is an ARTIFACT fault; the key is "
-                f"not implicated")
+                f"it — age only gets past the header with one that matches — and "
+                f"the CIPHERTEXT is damaged beyond it. This is an ARTIFACT "
+                f"fault; the key is not implicated")
         elif refusal in AGE_REFUSALS_PRE_AUTH:
             diagnosis = (
                 f"either the identity at {identity}{_identity_note(identity)} "

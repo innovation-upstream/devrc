@@ -4795,21 +4795,28 @@ def test_EVERY_destructive_advice_message_is_pinned_WHOLE():
     # POSITIVE CONTROL: if this ever collapses to nothing, the pattern or the
     # renderer has broken and the whole ledger would pass vacuously.
     #
-    # 🔴 THE FLOOR IS DERIVED, NOT SPELLED. It read `>= 12` beside a message
-    # saying "the measured count is 13" — and an audit measured 15. A literal
-    # here is a count kept beside the thing it counts, which is the shape this
-    # file's own rules say will drift; it had drifted before the round that
-    # added the fifteenth even touched it. The pin set below is forced equal to
-    # `must_pin` by the two assertions that follow, so its size IS the measured
-    # count and cannot go stale.
-    assert len(must_pin) >= len(_PINNED_DESTRUCTIVE_TEXTS), (
-        f"only {len(must_pin)} destructive-advice message(s) found against "
-        f"{len(_PINNED_DESTRUCTIVE_TEXTS)} pinned — the renderer or the pattern "
-        f"has regressed. A message that stops being SEEN here stops being "
-        f"guarded, silently.")
-    assert must_pin, (
-        "no destructive-advice message was found at all: the pattern or the "
-        "renderer is broken and this ledger would pass vacuously.")
+    # 🔴 AN INDEPENDENT FLOOR, DELIBERATELY A LITERAL — and the previous two
+    # revisions of this line were each wrong in the opposite direction, so the
+    # reasoning is written down rather than re-derived.
+    #
+    # It began as `>= 12` beside a message saying "the measured count is 13",
+    # against a real 15; an audit caught the PROSE. The fix replaced the literal
+    # with `>= len(_PINNED_DESTRUCTIVE_TEXTS)` — which the next audit showed is
+    # implied by the `unpinned` and `stale` assertions below, since together
+    # they force `must_pin == _PINNED_DESTRUCTIVE_TEXTS`. A control that can
+    # only fail when the assertions it precedes also fail is not a control.
+    #
+    # What the original literal bought is a floor that survives someone
+    # "greening" this ledger by deleting pins: a renderer regression that stops
+    # SEEING messages then still goes red here. So the literal comes back,
+    # deliberately loose, with NO count quoted in prose beside it — the drift
+    # was in the sentence, never in the number.
+    assert len(must_pin) >= 12, (
+        f"only {len(must_pin)} destructive-advice message(s) found — the "
+        f"renderer or `_DESTRUCTIVE_ADVICE` has regressed, and a message that "
+        f"stops being SEEN here stops being guarded, silently. This floor is "
+        f"independent of `_PINNED_DESTRUCTIVE_TEXTS` on purpose; do not "
+        f"re-derive it from that set.")
 
     unpinned = must_pin - _PINNED_DESTRUCTIVE_TEXTS
     assert not unpinned, (
