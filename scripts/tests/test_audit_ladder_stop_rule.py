@@ -205,8 +205,15 @@ Mutation controls, each run on a copy of the HEAD tree, under
 is the positive control, so a red below is the mutant and not the harness.
 **Re-measured 2026-08-26 against the then-current 11-test module** -- the counts
 first recorded here were taken against a 5-test module that never existed, and
-M2/M5 have since gained assertions that also fire. 🔴 The module is **13 tests**
-as of 2026-08-31 (the escape-hatch pins), so the POS control below reads 13.
+M2/M5 have since gained assertions that also fire. 🔴 The module was **13 tests**
+as of 2026-08-31 (the escape-hatch pins), so the POS control rows below read 13.
+🔴 IT IS **16** NOW (#1427 added the carve-out pin, the dispatcher seam guard and
+the battery-floor pin), so those rows are a RECORD OF A PAST RUN, not a
+prediction of your next one -- read the ratio, never the literal. This was the
+last hand-maintained copy of the module's size in this file and it was already
+stale before #1427 touched it; the floor that used to be maintained the same way
+is now pinned by `test_the_batterys_floor_is_re_derived_from_this_modules_size`,
+which is the only number here you never have to update.
 
 ⚠ **A first draft of this note said "the per-mutant FAILED counts are unchanged
 because no mutant here touches the escape hatch". THAT WAS FALSE FOR M5** — and
@@ -1137,11 +1144,23 @@ def test_the_batterys_floor_is_re_derived_from_this_modules_size():
     same pin for this literal, and it prints the replacement value rather than
     asking anyone to do arithmetic.
 
-    The count is `^def test_` in this file rather than a pytest collection: a
-    collection would re-enter pytest from inside a test. The parametrising
-    DECORATOR is asserted absent because it is the one construct that would
-    make the two numbers diverge -- and diverge in the dangerous direction, a
-    floor lower than the tests that actually run.
+    The count is a regex over this file rather than a pytest collection: a
+    collection would re-enter pytest from inside a test.
+
+    🔴 IT MATCHES INDENTED DEFS ON PURPOSE. `^def test_` was the first draft
+    and it is blind to a test METHOD -- MEASURED: appending an ordinary
+    `class TestSomeGrouping:` with three methods gave `^def test_` = 16 while
+    pytest collected 19, so the floor sat three too low and the guard stayed
+    GREEN. That is the dangerous direction, and it is silent. `^\\s*def test_`
+    sees both shapes.
+
+    The parametrising DECORATOR is still asserted absent, but it is NOT the
+    only construct that can make the two numbers diverge -- the first draft of
+    this docstring claimed it was, and the class case above refutes that.
+    Divergence that makes the regex count HIGHER than the collection (a
+    non-collected class, a nested helper named `test_`) fails LOUDLY, because
+    the floor it demands exceeds what runs; only the lower direction is
+    dangerous, and it is the one now covered.
 
     ⚠ The absence check matches the DECORATOR, not the bare word. The first
     draft tested `"parametrize" not in src` and failed on its own docstring,
@@ -1149,6 +1168,13 @@ def test_the_batterys_floor_is_re_derived_from_this_modules_size():
     green nowhere, and briefly red for a reason that had nothing to do with
     the floor it exists to check.
     """
+    assert BATTERY_SH.is_file(), (
+        f"{BATTERY_SH} is missing. It is the mutation battery for THIS module "
+        "and its header says it is not run by CI, which makes it a plausible "
+        "cleanup target -- but this guard reads its floor. If you moved it, "
+        "re-point BATTERY_SH; if you deleted it, delete this guard in the same "
+        "commit rather than leaving a pin on a file that no longer exists."
+    )
     battery = _read(BATTERY_SH)
     literals = re.findall(r"^MIN_TESTS=(\d+)", battery, re.M)
     assert len(literals) == 1, (
@@ -1165,7 +1191,7 @@ def test_the_batterys_floor_is_re_derived_from_this_modules_size():
         "before trusting it -- a floor derived from the smaller number is too "
         "LOW, which is the failure mode that never complains."
     )
-    m = len(re.findall(r"^def test_", src, re.M))
+    m = len(re.findall(r"^\s*def test_", src, re.M))
     expected = m - min(50, max(1, m // 20))
     assert floor == expected, (
         f"`{BATTERY_SH.name}` floors at MIN_TESTS={floor}, but this module now "

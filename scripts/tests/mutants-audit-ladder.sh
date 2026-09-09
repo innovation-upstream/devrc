@@ -125,11 +125,13 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED and every control ok. The floor catches COLLAPSE, not growth.
-# `run-tests.sh`'s own floor formula is `m - min(50, max(1, m/20))`; at m=15
-# that is 14. It catches COLLAPSE, not growth — losing one test still clears it,
+# `run-tests.sh`'s own floor formula is `m - min(50, max(1, m/20))`; at m=16
+# that is 15. It catches COLLAPSE, not growth — losing one test still clears it,
 # losing two reports HARNESS BROKE.
 #
-# 🔴 THIS FLOOR DOES NOT TRACK THE MODULE — RE-DERIVE IT WHEN YOU ADD A TEST.
+# 🟢 THIS FLOOR NOW TRACKS THE MODULE — a test pins it, and you do not re-derive
+# it by hand. What follows is the history of why, kept because it is the
+# argument for never going back to a hand-maintained number:
 # Measured 2026-08-31: the module grew 11 → 13 while this stayed at 10, so the
 # gap it tolerated silently widened from one test to three. Nothing failed; a
 # floor that is too LOW never complains, which is exactly why it goes unnoticed.
