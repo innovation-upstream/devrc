@@ -142,7 +142,7 @@ for fn in lsof_deleted_summary report_deleted_open_files size_breakdown \
           inode_breakdown _dev_of _dev_is_valid _on_device _not_on_device \
           foreign_entries split_by_device report_foreign_mounts \
           report_denials _errline_count _report_unstattable _report_unreadable \
-          _scan_mktemp _cleanup_temps; do
+          _scan_mktemp _cleanup_temps toplevel_accountable_entries; do
   if declare -F "$fn" >/dev/null; then pass "helper $fn is sourceable"
   else fail "helper $fn is NOT defined after sourcing"; fi
 done
@@ -1358,6 +1358,52 @@ has "the sort ledger names section 5's inodes-per-PVC loop" "$sort_hits" 'done |
 has "the sort ledger names section 6c's /home listing" "$sort_hits" '< "$ONROOT_LIST"'
 has "the sort ledger names the size-breakdown capture" "$sort_hits" 'du -sh -x 2>>"$SCAN_DUERR"'
 has "the sort ledger names the inode-breakdown capture" "$sort_hits" '| sort -rn | head_n 15)'
+
+# --------------------------------------------------------------------------- #
+echo "== 12. SECTION 2 ACCOUNTS FOR TOP-LEVEL FILES, NOT ONLY DIRECTORIES =="
+# 🔴 The defect this pins: section 2's loop read `[ -d "$d" ] || continue`, so a
+# top-level entry that was not a directory never reached `find`. Section 3's
+# residual is that loop's total, so the miss shows up as unexplained space
+# rather than as an error. MEASURED on the workbench 2026-09-09: `/swapfile` is
+# a regular file of 100663328 512B blocks = 48.00 GiB on the same device as `/`.
+#
+# The fixture uses a REGULAR FILE at the top level (the /swapfile shape), a
+# directory (must still be listed), a symlink (must not — `-d`/`-f` follow them
+# and the target is walked on its own), a fifo (an inode with no data blocks),
+# and a skip-listed name.
+tl="$TMP/toplevel"
+mkdir -p "$tl/realdir" "$tl/proc"
+printf 'x' > "$tl/swapfile"
+ln -s realdir "$tl/linkdir"
+mkfifo "$tl/afifo" 2>/dev/null || true
+
+tl_out="$(toplevel_accountable_entries "$tl")"
+
+has "a top-level regular FILE is accounted for (the /swapfile shape)" "$tl_out" "$tl/swapfile"
+has "a top-level directory is still accounted for"                    "$tl_out" "$tl/realdir"
+lacks "a top-level SYMLINK is excluded (-d/-f follow them)"           "$tl_out" "$tl/linkdir"
+lacks "a skip-listed name is excluded"                                "$tl_out" "$tl/proc"
+lacks "a fifo is excluded — an inode with no data blocks"             "$tl_out" "$tl/afifo"
+
+# 🔴 THE CONTROL THAT MAKES THE ABOVE A REGRESSION TEST RATHER THAN A CONTRACT
+# TEST. The helper is new, so "it lists the file" would pass vacuously against
+# any implementation. This re-runs the RETIRED predicate over the same fixture
+# and asserts it does NOT list the file — so the two disagree on exactly the
+# entry that cost 48 GiB. Reintroducing a `-d`-only guard makes this fail.
+retired_out=""
+for e in "$tl"/*; do
+  case "${e##*/}" in proc|sys|dev|run|mnt) continue ;; esac
+  [ -d "$e" ] || continue          # <-- the retired guard, verbatim
+  [ -L "$e" ] && continue
+  retired_out+="$e"$'\n'
+done
+lacks "CONTROL: the retired -d-only guard MISSES the top-level file" "$retired_out" "$tl/swapfile"
+has   "CONTROL: the retired -d-only guard did list the directory"    "$retired_out" "$tl/realdir"
+
+# A root argument of "/" must not produce doubled slashes: "//etc" reads as a
+# different path in the report and would not match any later pathspec.
+root_out="$(toplevel_accountable_entries / | head_n 5)"
+lacks "a root of '/' yields no doubled-slash paths" "$root_out" "//"
 
 # --------------------------------------------------------------------------- #
 # 🔴 DO NOT print `RESULT: PASS (exit=0)` here — that grammar is RESERVED to

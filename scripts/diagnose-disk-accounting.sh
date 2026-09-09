@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
 # Root-privileged disk accounting for the workbench root filesystem.
 #
-# WHY THIS EXISTS: scripts/diagnose-nix-disk.sh ran `find "$d" 2>/dev/null` as an
-# unprivileged user. Every root-only tree (/root, /var/lib/docker,
-# /var/lib/kubelet, /var/lib/private, /var/lib/rancher/k3s/storage) is skipped
-# SILENTLY by that, so its inode and byte counts are floors, not totals — and the
-# 2026-08-31 handoff read the resulting shortfall as "ext4 metadata overhead".
-# ext4 does not consume *used* inodes for metadata, so that reading cannot be
-# right: every used inode is a real file or directory.
+# WHY THIS EXISTS: its predecessor `scripts/diagnose-nix-disk.sh` ran
+# `find "$d" 2>/dev/null` as an unprivileged user. Every root-only tree (/root,
+# /var/lib/docker, /var/lib/kubelet, /var/lib/private,
+# /var/lib/rancher/k3s/storage) is skipped SILENTLY by that, so its inode and
+# byte counts are floors, not totals — and the 2026-08-31 handoff read the
+# resulting shortfall as "ext4 metadata overhead". ext4 does not consume *used*
+# inodes for metadata, so that reading cannot be right: every used inode is a
+# real file or directory.
+#
+# 🔴 THAT PREDECESSOR IS DELETED (2026-09-09) — do not go looking for it. It was
+# committed to main by #1412 without anyone noticing it had already been
+# superseded, then deleted once the question was actually asked. Every one of its
+# ten sections is subsumed here: its 1/3/4 by section 2, its 5 by section 7, its
+# 7 by 6b, its 8 by 6c, and its 2/6/10 (dumpe2fs, ext4 journal, reserved blocks)
+# by the single `dumpe2fs -h` read in section 1. The ONE thing it printed that
+# this file did not is `swapon --show`, which is not disk accounting — but
+# chasing that difference is what surfaced the 48 GiB `/swapfile` defect fixed
+# in toplevel_accountable_entries(). It had no tests, and no code referenced it.
 #
 # This script must run as root. It counts what the previous one could not, and it
 # reports its own blind spots (denied directories) instead of hiding them.
@@ -673,6 +684,43 @@ report_denials() {
   fi
 }
 
+# Enumerate the top-level entries of a filesystem root that section 2 must
+# account for, one per line.
+#
+# 🔴 THIS EXISTS BECAUSE SECTION 2 SKIPPED TOP-LEVEL *FILES*. The loop read
+# `[ -d "$d" ] || continue`, so every top-level entry that was not a directory
+# was dropped before `find` ever saw it — and section 3's residual, "the number
+# the whole question turns on", is that loop's total. MEASURED 2026-09-09 on the
+# workbench: `/swapfile` is a top-level REGULAR FILE of 100663328 512B blocks =
+# 48.00 GiB, on the same device as `/` (`/dev/nvme0n1p2`), and it was counted
+# nowhere. The residual was therefore short by 48 GiB and read as unexplained
+# space. The predecessor `diagnose-nix-disk.sh` could not have caught it either:
+# it walked a HARDCODED directory list, so it never looked at `/swapfile` as
+# storage — it only printed `swapon --show` beside it, which is why the gap
+# survived both scripts.
+#
+# Order matters: `-L` first, because `-d`/`-f` FOLLOW symlinks, so a symlink to
+# a directory would otherwise be walked twice (once here, once at its target).
+# Everything that is neither a regular file nor a directory — sockets, fifos,
+# device nodes — is excluded: they occupy an inode but no data blocks, and
+# counting them as storage is the over-counting this script exists to avoid.
+toplevel_accountable_entries() {
+  local root="${1:-/}"
+  # "/" -> "" so the glob below is "/*" and not "//*", which would emit paths
+  # with a doubled slash that read as a different filesystem in the output.
+  root="${root%/}"
+  local e base
+  for e in "$root"/*; do
+    base=${e##*/}
+    case "$base" in
+      proc|sys|dev|run|mnt) continue ;;
+    esac
+    [ -L "$e" ] && continue
+    { [ -d "$e" ] || [ -f "$e" ]; } || continue
+    printf '%s\n' "$e"
+  done
+}
+
 # --- end of the sourceable seam ---------------------------------------------
 # See the header for why this is `(return …)` and not `${BASH_SOURCE[0]}`, and
 # for what was measured. The `LSOF_BIN` override is deliberately INSIDE this
@@ -781,7 +829,11 @@ echo "NOTE: static metadata for this fs is tens of GiB, NOT hundreds. A multi-hu
 echo "      shortfall is unmeasured FILES, never metadata."
 
 echo
-echo "=== 2. Inodes and allocated bytes per top-level directory ==="
+echo "=== 2. Inodes and allocated bytes per top-level entry ==="
+echo "  TOP-LEVEL FILES ARE INCLUDED, not just directories. /swapfile is a regular"
+echo "  file of 48.00 GiB on this fs (measured 2026-09-09) and was previously dropped"
+echo "  by a '[ -d ] || continue' guard, so section 3's residual was short by that"
+echo "  much and read as unexplained space. See toplevel_accountable_entries()."
 echo "  -xdev: stays on the root fs. /mnt/rootcheck is EXCLUDED — it is a bind mount"
 echo "  of / and would double-count the entire filesystem."
 echo "  HARDLINKS ARE DEDUPED. find visits every LINK, so a naive '%b' sum counts a"
@@ -791,12 +843,7 @@ echo "  way, producing a NEGATIVE residual. Each inode is now counted once."
 TOTAL_INODES=0
 TOTAL_DEDUPED=0
 printf '%14s %12s %10s  %s\n' "INODES" "GiB(alloc)" "dup-links" "PATH"
-for d in /*; do
-  case "$d" in
-    /proc|/sys|/dev|/run|/mnt) continue ;;
-  esac
-  [ -d "$d" ] || continue
-  [ -L "$d" ] && continue
+while IFS= read -r d; do
   # %y=type %n=link count %i=inode %b=512B blocks. Only non-directories with more
   # than one link go in the seen[] hash, so it holds multiply-linked FILES only —
   # directories always have nlink>1 and appear exactly once in find's output.
@@ -812,7 +859,11 @@ for d in /*; do
   printf '%14d %12s %10d  %s\n' "$n" "$gib" "$dups" "$d"
   TOTAL_INODES=$((TOTAL_INODES + n))
   TOTAL_DEDUPED=$((TOTAL_DEDUPED + dups))
-done
+# 🔴 `done < <(...)`, NOT `... | while`. A pipeline runs the loop body in a
+# SUBSHELL, so TOTAL_INODES/TOTAL_DEDUPED would be discarded at `done` and
+# section 3's residual would be computed from zero — a wrong answer that prints
+# cleanly. Process substitution keeps the loop in this shell.
+done < <(toplevel_accountable_entries /)
 printf '%14d %12s %10d  TOTAL\n' "$TOTAL_INODES" "" "$TOTAL_DEDUPED"
 echo "  dup-links = extra directory entries pointing at an already-counted inode."
 echo "  A zero in that column for a tree you KNOW is hardlinked (/nix) means the"
