@@ -205,10 +205,17 @@ retained as DONE markers; do not re-claim them.
     met — see "RESOLVED — #1342's controls" under Open investigations for the numbers and the
     two harness controls.
     forcing: none
-12. **Ship #1316 and #1342 to both hosts and re-verify fleet parity.** Neither has been
-    shipped; parity was last verified at `a4529101` on 2026-09-01 and is stale. *Closes when*
-    `scripts/ship.sh` reports both hosts at the same sha and `scripts/drift-check.sh` is read
-    per-host line (not just its final verdict).
+12. **DONE (2026-09-09) — both hosts converged and parity re-verified.** `ship.sh` rc 0,
+    `2 hosts compared, both at 7edcb1e0` (workbench + laptop), carrying all four PRs this
+    effort landed (`eac71667` #1316, `08ef1d5a` #1342, `63ad792d` #1395, `e9b665bd` #1396 —
+    ancestry is the right test for a squash commit sitting ON main). Workbench: 580 managed
+    artifacts resolve / 0 dangling / 0 stale; laptop: 528 / 0 / 0, clean tree. `drift-check.sh`
+    **rc 16 = ACTIONABLE, NOT drift** with BOTH hosts checked, `[parity] AGREE` apart from the
+    three allowlisted per-host keys, `[srcrepo] compared=2 same=2 differing=0`, `SRC-RC=0` on
+    both. Claim `audit-pr-ladder-12` RELEASED.
+    🔴 **It took TWO runs of each, and the first of each would have read as a pass** — see the
+    LAN/nebula gotcha below. That is the whole reason this item's closing condition says
+    *read per-host line, not the final verdict*.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -926,6 +933,35 @@ retained as DONE markers; do not re-claim them.
   a wrong-branch commit is the SILENT failure — the right response is to stop and read
   `git log --no-merges <base>..HEAD` rather than explain the stat away. It confirmed one
   non-merge commit, mine, one file.
+
+- 🔴 **`drift-check.sh` PRINTED `no drift` (rc 16) WITH THE LAPTOP NEVER EVALUATED — AND THE
+  SUMMARY LINE IS NOT WHERE IT SAYS SO.** Both `ship.sh` and `drift-check.sh` derive the laptop's
+  ssh target from `LAPTOP_SSH_DEFAULT` in `scripts/lib/host-role.sh`, which is the **LAN** address
+  `192.168.50.155` — reachable only same-network. Measured 2026-09-09: it timed out, and the run
+  still ended `no drift on the host(s) CHECKED: workbench (local)` + `rc=16`. The script IS honest
+  in its body — `[laptop] UNREACHABLE — … This is not a pass`, `[parity] NOT COMPARED`,
+  `[srcrepo] NOT COMPARED`, `[tiers] laptop: NOT REPORTED` — but a reader who takes the last line
+  gets a clean bill for a fleet of one. **The fix is one env var: `REMOTE_SSH=zach@10.42.0.100`**
+  (nebula), which `remote_ssh_of()` honours unconditionally in BOTH scripts. With it: both hosts
+  checked, `[parity] AGREE`, `[srcrepo] compared=2 same=2 differing=0`. ⚠ The unreachable counter
+  was at **3/4** — one more silent run and it would have escalated to rc 13 on its own, so this
+  was found one run before the deadman would have found it. Open PR **#1287 `feat/workhost`** is
+  exactly this problem (reach a host over whichever path is up) and is unmerged.
+- 🔴 **A `home-manager switch` FAILING WITH `home-manager: command not found` IS THE DOCUMENTED
+  PROFILE-BLANKING, NOT A BROKEN TOOLCHAIN — and the discriminator is an mtime correlation, not a
+  `which`.** `ship.sh` rc 9 on the workbench; `command -v home-manager` immediately after
+  resolved fine (`~/.nix-profile/bin/home-manager`). `~/.local/state/nix/profiles/` showed
+  generations **2103 at 00:41:36** and **2104 at 00:41:45** bracketing the run — a *concurrent*
+  switch (another session), whose intermediate generation drops every `home.packages` binary for
+  ~1s, and a bare-name invocation inside that window dies. **Check for an in-flight switch before
+  re-running, and re-run rather than debugging**: the second attempt was rc 0. Resolving PIDs via
+  `/proc/<pid>/cmdline` and skipping the pgrep itself is the read that answers "is one running";
+  never let a `-f` pattern reach `pkill`.
+- ⚠ **`ship.sh` correctly shipped a DIRTY workbench, and said why.** It classified the 1 untracked
+  path against **162 nix-read paths derived from 29 nix files**, found 0 hits, and stated *"NO
+  dirty path is read by nix — what was built/deployed IS origin/main"*. Dirty is not a blocker;
+  dirty **in a nix-read path** is. That distinction is the difference between a skipped host and a
+  correct deploy.
 
 ## How to verify
 ```bash
