@@ -18,81 +18,24 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- ✅ **RANK 3 SLICE 2 IS MERGED — devrc #1406, squash `9300f234`, 2026-09-09T01:56Z.**
-  ⚠ **THIS SUPERSEDES EVERY "another session's / OPEN / `[ahead 8]` / DO NOT delete that
-  worktree" SENTENCE IN EARLIER REVISIONS.** The claim was re-checked live and returned
-  **rc 12 — ALREADY OURS**, not rc 10; the session that finished it is the one that held it.
-  `~/workspace/devrc-flake-pin` is fully merged and **safe to remove**.
-- 🔴 **STILL NOT LIVE ON EITHER HOST, AND MERGING DID NOT CHANGE THAT.**
-  `readlink -f ~/.local/bin/cairn` → `/home/zach/workspace/devrc/scripts/cairn`.
-  `~/.local/bin/cairn` becomes a store path at **`home-manager switch`**, not at merge, and
-  the **laptop is a second, independent switch**. Until both, #7/#9/#10's OSS-client fixes
-  are still absent from the binary these machines run. **Merged ≠ deployed ≠ verified.**
-- **The merge went in through a THREE-ROUND audit ladder, and rounds 2 and 3 both found
-  real defects — in the PREVIOUS round's fixes, not in the payload.** Round 1: a 🔴
-  (`cairn validate` silently stopped being the write-protocol check) and a 🟡 (a guard that
-  passed while deploying a dangling symlink). Round 2: no 🔴, eight 🟡, three of them defects
-  in round 1's own fix round. Round 3 closed those three. **The ladder did not end on a clean
-  round** — it ended because the operator called the merge with the remaining five recorded
-  open-by-decision on the PR.
-- 🔴 **`scripts/cairn-validate` SHIPPED, and it was NOT in the original scope** — it is the
-  audit ladder's answer to the round-1 🔴. The mandated post-write check has to name the
-  WRITER, because the pinned client reimplements `validate` on the reader's resolver.
-  Measured, both clients, same scope, same moment: the packaged `validate` writes **0 bytes
-  to stdout** (77 B of banner on **stderr**) and exits 0; the writer writes **5,766 B** with
-  `entry shape:`, `marker reachability:` and `dropped lines:`. Both "green"; only one looked.
-  ⚠ Round 1 had recorded this as "76 bytes of output" — re-measuring found it is *stderr*,
-  so a caller reading stdout gets **nothing**. The stronger fact replaced the weaker one.
-- **The three skills now name one runnable command.** `cairn-validate --scope <scope>`,
-  deployed `mkOutOfStoreSymlink` like `cairn-who`. The bare `subsystem_touch.py` spelling was
-  **not on PATH and exits 127**; the absolute `python3 /home/zach/workspace/devrc/...` spelling
-  baked a checkout path into a protocol whose point is that agents work in other repos.
-  ⚠ `claude/skills/resume/SKILL.md:128` still carries the exit-127 spelling — a THIRD file,
-  found late, not fixed.
-- **Gate, on the merged tree, from two independent runners.** Tekton on `48bb44e3`:
-  `collected=21346 passed=21344 skipped=2 failed=0` (floor 20441) and
-  `suites=5 files=41 tests=1449 pass=1449 fail=0` (floor 1367). The local hermetic tier agreed
-  exactly on the earlier head. **`origin/main` moved 28 commits across this session and was
-  re-merged and re-gated three times** — a moved base invalidates a merged-tree result.
-- 🔴 **The merged tree found three reds the branch alone never would have**, all from the
-  fix rounds' own additions: a seam ledger correctly refusing a NEW router; a guard that was
-  **structurally incapable of passing in the sandbox tier**; and a repo-wide shebang scan.
-  See the investigation block. Fixed in `29f16402` before the merge.
-- **`ZacxDev/cairn` has TEN merged PRs and NONE open.** #9 `a3c84db1` (rank 19) and #10
-  `934ec38e` (rank 17). Claims for 12, 13, 15, 17 all RELEASED.
-- 🔴 **Rank 16 is UNBLOCKED by this merge** — it was blocked on #1406. Its point is the
-  sharpest thing the ladder produced: nothing in devrc's gate ever *executed* the deployed
-  client, which is why the `validate` regression survived 13,076 green tests. #1406 makes a
-  partial answer — three of `cairn-validate`'s four guards run the real binary — but rank 16's
-  own closing condition is **not** met.
-- 🔴 **WHAT REMAINS FOR AN AGENT, re-derived 2026-09-09 after the merge, not assumed:**
-  **rank 3 slice 3** (point the writer at the pinned `entry_shape`, delete devrc's five
-  duplicated `lib/` modules) is now the largest unblocked item, and **rank 16** is unblocked
-  for the first time. Ranks 4, 8, 11 and 13 still need the operator; 7 waits on 13's publish;
-  18's successors are the five open-by-decision 🟡s below. ⚠ **Rank 3's own remaining half is
-  an operator action too** — the `home-manager switch` on both hosts.
-- **A cairn-built image is still NOT PUBLISHED.** Rank 13 blocked on two strings only the
-  operator can give — the registry and the tag.
-- **The devrc/OSS `lib/` fork stays DECIDED — CONSOLIDATE ONTO THE PIN** (#1394 `65d8bfba`).
-  Slice 3 is the remaining work and is NOT started.
-- ⚠ **devrc #1417 was CLOSED, not merged, and the reason is worth keeping.** It carried this
-  session's earlier handoff delta, but four commits touched this doc on `main` while it sat
-  open — including `c756efe0`, which made the *same* correction #1417 existed for. Merging it
-  would have replaced 1,189 lines with 1,129 and dropped other sessions' newer content. Its
-  unique content was re-landed on top of current `main` instead. **A docs PR left open across
-  a busy day is a stale-base hazard, not a harmless one.**
-- 🔴 **NO `clawgate-task:` FIELD** — `resolve` exits **5** with its positive control green
-  (the board answered for another session). A wrong id also answers 200 with an empty array,
-  so this cannot distinguish "touched no task" from "wrong id". NOT a clean bill of health.
-- **Figures from the parallel session, folded in rather than dropped:** `flake.nix` on
-  `origin/main` now holds **16** cairn references where it held **0** hours earlier;
-  `cairn recall --ref cairn --scope devrc` still exits **2**; `ZacxDev/cairn` #6–#10 all
-  landed the same day (ranks 12, 15, 13's path, 19, 17).
-- **Rank 16 is the only ranked item that is both UNBLOCKED and carries a forcing function.**
-  Everything else needs the operator: 13 (registry + version tag), 11 (the `cairn` scope
-  allowlist), 4 (§11 questions), 8 (§10 decisions); 7 waits on 13's publish.
-- **Store writes, parallel session:** `devrc/cairn` stale `OPEN:` → `RESOLVED caec932e:`,
-  plus two session bullets. Badge `17 nuance / 🔴 2 OPEN` → `18 / 🔴 1 OPEN`.
+- **`ZacxDev/cairn`: ELEVEN merged PRs, NONE open.** #11 `c84c1429` (validate reports what it
+  checked) is the newest; #6–#10 landed earlier this session.
+- ✅ **devrc #1433 `4a362c8d` — the pin moved `9213726` → `c84c1429` AND devrc gained
+  `checks.cairn-client-runs`,** the only check that EXECUTES the pinned client. Verified by
+  content on `origin/main`: the check resolves 5×, lock rev reads `c84c1429`. Both Tekton legs
+  green on that PR — the only run that exercised the bump against the full 21k-test suite.
+- 🔴 **STILL NOT LIVE UNTIL A `home-manager switch`.** `readlink -f ~/.local/bin/cairn` →
+  `devrc/scripts/cairn`. The pin is merged; the binary comes from ACTIVATION. Until it runs,
+  #6/#7/#9/#10/#11 are merged-and-unreachable from this shell, and the silent `validate` is
+  still what this host executes.
+- **Rank 16 CLOSED; rank 20 FILED** — the check is an OUTPUT, not a gate: devrc CI hardcodes
+  two legs and never builds a third. Wiring it touches a GitOps-reconciled repo, so it is the
+  operator's call, not a rider on a devrc PR.
+- **Everything else needs the operator:** 13 (registry + version tag), 11 (the `cairn` scope
+  allowlist), 4 (§11 questions), 8 (§10 decisions). 7 waits on 13's publish.
+- **A cairn-built image is still NOT PUBLISHED.** #8 added the path; nothing has pushed.
+- 🔴 **NO `clawgate-task:` FIELD** — `resolve` exits 5; the board is reachable (positive
+  control: 8 links for another session) but a wrong id also answers 200 with an empty array.
 
 ## Open investigations — live diagnosis state
 
@@ -793,24 +736,22 @@ it remains a real unfixed gap on its own merits, and nothing more.
     construction" complaint. Different defect, real behaviour change, its own PR.
     forcing: none — it cannot fire before the pin moves
 
-16. **Nothing in devrc's gate ever EXECUTES the deployed `cairn` binary.** Every cairn guard
-    reads `flake.nix` / `flake.lock` / `nix/home.nix` / `nix/sessionVariables.nix` as TEXT.
-    That is why the `cairn validate` regression in rank 3's audit (see the investigation
-    block) stayed invisible through all 13,076 tests including the three cairn suites. A
-    future `nix flake lock --update-input cairn` to a rev where `packages.cairn` still builds
-    but a VERB regressed would leave devrc's gate fully green and surface at the operator.
-    cairn's own `checks.client-resolves-its-lib` lives in cairn's flake and devrc's gate does
-    not run it. Cheapest fix: a check that `nix build`s the package and runs
-    `doctor --no-sync` plus `--validate` against a fixture cache.
-    **Closing condition:** a merged devrc PR whose gate fails when the pinned client's
-    `validate` is stubbed to print nothing.
-    ✅ **UNBLOCKED 2026-09-09 — the premise that blocked it is gone.** This asks for a gate
-    over "the PINNED client's `validate`", and for a few hours there was no pinned client:
-    `flake.nix` held 0 cairn references. #1406 merged (`9300f234`) and it now holds **16**, so
-    `packages.cairn` exists to build a gate against. ⚠ Its natural implementation touches
-    `scripts/run-tests.sh`, which #1406 also moved — rebase onto current `main` and test-merge
-    rather than reasoning about it. **This is now the only ranked item that is both unblocked
-    and carries a forcing function.**
+16. ✅ **DONE — devrc #1433, squash `4a362c8d`.** `checks.cairn-client-runs` builds the pinned
+    package and RUNS it: `validate` against a one-entry fixture cache must report
+    `1 of 1 entry file(s) parse`, and `doctor --no-sync` must produce a report (its exit code
+    deliberately NOT asserted — with no pod, token or network a non-zero verdict is CORRECT).
+    The same PR bumped the pin `9213726` → `c84c1429`.
+    **Closing condition MET and EXERCISED, not asserted:** green against the real client, and
+    RED with the client stubbed to `exit 0`, failing with the check's OWN message rather than
+    a bystander's; tree restored byte-identical after.
+    🔴 **WHAT IT FOUND ON ITS FIRST RUN, and the reason the item was worth doing:** the pinned
+    client's `validate` printed NOTHING on a clean store and exited 0 — and that verb is the
+    post-write check the index protocol MANDATES, so every store write validated by the
+    packaged client was passing vacuously. **cairn's OWN CI did not catch it** (1709 tests
+    green while the verb was inert, because its covering test asserted only `rc == 0` and the
+    absence of an error string). Fixed upstream in `ZacxDev/cairn` #11 `c84c1429`. That is the
+    empirical answer to "won't upstream catch a broken client" — no, it did not.
+    ⚠ **It is an OUTPUT, not yet a GATE — see rank 20.**
     forcing: gate
 
 17. **The public `ZacxDev/cairn` client still documents a `who` timeout that no longer
@@ -852,6 +793,21 @@ it remains a real unfixed gap on its own merits, and nothing more.
     since `--scope` would suppress the very window under test).
     **Closing condition:** a merged `ZacxDev/cairn` PR after which `cairn recall --repo <r>`
     on a repo with a handoff doc reports `resolved via …` rather than `most-recent fallback`.
+    forcing: none
+
+20. **Wire `checks.cairn-client-runs` into CI — it currently runs only on demand.**
+    `devrc-ci-pipeline.yaml` (in the infra repo, NOT devrc) hardcodes exactly two legs:
+    `LEG` ∈ {`pytests`, `nodetests`}, built as `.#checks.x86_64-linux.${LEG}`. Measured
+    2026-09-09: **2** static `value:` assignments, no `nix flake check`, no loop — so a third
+    output is never built by CI and the check cannot fail a PR. The check itself says this in
+    `flake.nix` rather than reading like a gate it is not.
+    ⚠ **Deliberately not bundled into #1433:** that pipeline lives in a GitOps-reconciled repo
+    where committing to the mainline IS deploying, which is an operator decision, not a rider
+    on a devrc PR. Cost is not the obstacle — the check rebuilds in **~1.4 s** and the cairn
+    package is the same derivation home-manager already builds, so it adds no build.
+    **Closing condition:** a merged infra-repo PR after which `gh pr checks <any devrc PR>`
+    lists a third leg for `cairn-client-runs`, AND that leg goes red when the pinned client is
+    stubbed to print nothing.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -1423,6 +1379,20 @@ carried the identical defect (a stale reading, published as a live safety claim)
 further, and did so *inside a paragraph lecturing the reader about which check to trust*.
 Both are retracted in rank 3. **Re-measure at the moment of writing the correction, not from
 the survey that motivated it.**
+
+**🔴 A `checks.` OUTPUT IS NOT A GATE, AND NOTHING WARNS YOU.** `nix build` succeeds, the
+output looks exactly like `pytests` and `nodetests`, and CI never touches it — devrc's
+pipeline hardcodes `LEG` ∈ {pytests, nodetests} with no `nix flake check` and no loop. A check
+added without wiring reads like coverage and can never fail, which is the same
+declarations-vs-instances error as counting guards instead of what they cover. **Before adding
+a check anywhere, grep the thing that INVOKES checks and confirm your name appears in it.**
+
+**🔴 "UPSTREAM'S OWN CI WILL CATCH A BROKEN DEPENDENCY" — MEASURED FALSE, ONCE, WHICH IS ALL
+IT TAKES.** The best argument against a gate that executes a pinned dependency is that the
+dependency's own gate already runs its full suite. cairn's did: 1709 tests green while
+`cairn validate` was completely inert, because the covering test asserted only `rc == 0` and
+the absence of an error string. The consumer-side check found it on its FIRST run. **A
+dependency's green suite is a claim about the tests it has, not about the verbs it ships.**
 
 ## How to verify
 

@@ -5,11 +5,11 @@
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1788846344,
-        "narHash": "sha256-zcgGqHCayZwaYjqBRbS5rpxz6Uk495YAnB6POf3i+gs=",
+        "lastModified": 1788926377,
+        "narHash": "sha256-voZR/UA9CaqNgQEk1W6Sg1eOttA01n7k6+RdCleFlWs=",
         "owner": "ZacxDev",
         "repo": "cairn",
-        "rev": "921372635ff3240e4993b0db67032d61da83637e",
+        "rev": "c84c14292e9977d2675f9d0645b10c6d7453086d",
         "type": "github"
       },
       "original": {
