@@ -1623,7 +1623,25 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                         # identity does not match" as an open cause, and the
                         # discriminating control in restore-verify's
                         # `AGE_REFUSED_HEADER_MAC` block EXCLUDES it.
-                        if phase["age_refusal"] == RV.AGE_REFUSED_HEADER_MAC:
+                        # 🔴 `cause` IS PART OF THIS CONDITION FOR THE SAME
+                        # REASON IT IS PART OF `_corrupt`'s — and it was missing
+                        # here for one commit, which is the predicate-right-at-
+                        # one-of-its-two-sites shape this repo keeps hitting.
+                        # This branch makes a claim of identical strength, so it
+                        # takes the identical guard: a future raise site that
+                        # attaches `age_refusal=` under a NEW cause must not
+                        # reach it and be certified "THE ESCROW IS FINE".
+                        #
+                        # ⚠ LABELLED SURVIVOR, exactly like `_corrupt`'s: a
+                        # mutation deleting this cause test passes the suite
+                        # today, because `age_refusal` is set at one raise site
+                        # and that site's cause is `age-refused`. It is kept for
+                        # the reason above — the property is of the RAISE SITES,
+                        # not of this condition, and it is the raise-side mutant
+                        # that proves the test load-bearing.
+                        if (phase["cause"] == RV.DECRYPT_AGE_REFUSED
+                                and phase["age_refusal"]
+                                == RV.AGE_REFUSED_HEADER_MAC):
                             raise EscrowError(
                                 "ARTIFACT-CORRUPT",
                                 f"🔴 {key} has a DAMAGED HEADER. The ESCROWED key "

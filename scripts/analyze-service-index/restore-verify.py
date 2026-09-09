@@ -336,10 +336,18 @@ DECRYPT_CAUSES = frozenset(
 #   "no identity matched any of the recipients"         -> pre-auth
 #   "failed to read header"                             -> pre-auth
 #   "failed to parse x25519 recipient"                  -> pre-auth
+#   "invalid x25519 recipient block"                    -> pre-auth
 #   "bad header MAC"                                    -> KEY PROVEN, see below
 #   "failed to read nonce"                              -> TRUNCATED, post-auth
 #   "unexpected eof"                                    -> TRUNCATED, post-auth
 #   "last chunk is empty"                               -> TRUNCATED, post-auth
+#
+# ⚠ THIS SUMMARY IS A SECOND COPY OF `_AGE_REFUSAL_MARKERS`, and the first
+# version of it went stale within one commit — the round that ADDED
+# `invalid x25519 recipient block` listed eight entries for nine markers. It is
+# kept because it is what a reader reaches for, and it is now pinned against the
+# tuple by `test_the_marker_SUMMARY_TABLES_list_every_shipped_marker`, in both
+# directions, alongside the operator-facing table in `SECRETS.md`.
 #
 # ⚠ `bad header MAC` WAS PRE-AUTH IN THE FIRST DRAFT OF THIS TABLE and an
 # adversarial audit caught it: age reaches the header's integrity check only
@@ -422,11 +430,24 @@ AGE_REFUSALS_POST_AUTH = frozenset({AGE_REFUSED_PAYLOAD, AGE_REFUSED_TRUNCATED})
 # either claim by an `else`.
 AGE_REFUSALS_PRE_AUTH = frozenset({AGE_REFUSED_NO_IDENTITY, AGE_REFUSED_HEADER})
 
-# 🔴 THE PREDICATE THE "DO NOT ROTATE" ADVICE RESTS ON, published once. Every
-# member is a refusal age can only emit after an identity unwrapped a recipient
-# stanza, so each one is positive evidence the escrowed key WORKS. Derived from
-# the two sets rather than spelled, so a value added to either is covered here
-# without anybody remembering to.
+# 🔴 EVERY REFUSAL age CAN ONLY EMIT ONCE AN IDENTITY HAS UNWRAPPED A RECIPIENT
+# STANZA — so each member is positive evidence the escrowed key WORKS, and each
+# licenses a verdict that tells an operator NOT to rotate.
+#
+# ⚠ WHAT IT IS FOR, stated narrowly because an earlier draft of this comment
+# claimed a role it does not have. It is NOT read by a production branch:
+# `escrow-verify.py` needs two DIFFERENT messages on this side of the line (age
+# authenticated the header, versus age proved the key and then failed the
+# header's own MAC), so it branches on `AGE_REFUSALS_POST_AUTH` and on
+# `AGE_REFUSED_HEADER_MAC` separately. That earlier draft said a value added to
+# either set is "covered here without anybody remembering to" — false: nothing
+# downstream reads this, so adding a member covers nothing by itself.
+#
+# What it DOES own is the ORDER of `_AGE_REFUSAL_MARKERS` below, which is the
+# thing an audit measured to be unguarded: every marker on this side must be
+# matched AFTER every pre-auth one, or a message naming a pre-auth cause could
+# be scored as proof the key worked. That invariant is stated over this set
+# precisely so a third strong value cannot be added outside it.
 AGE_REFUSALS_KEY_PROVEN = AGE_REFUSALS_POST_AUTH | {AGE_REFUSED_HEADER_MAC}
 
 # 🔴 SUBSTRINGS, DELIBERATELY NOT ANCHORED REGEXES. age prefixes its stderr with
@@ -441,15 +462,24 @@ AGE_REFUSALS_KEY_PROVEN = AGE_REFUSALS_POST_AUTH | {AGE_REFUSED_HEADER_MAC}
 # and a post-auth one, so a first-match scan can be made to answer either.
 #
 # 🔴 THE RULE IS THEREFORE TOTAL, NOT SPECIFIC TO THE PAIR THAT OVERLAPS TODAY:
-# EVERY PRE-AUTH MARKER COMES BEFORE EVERY POST-AUTH ONE. A message naming any
-# pre-auth cause can then never be scored post-auth, whatever else it also says
-# — and post-auth is the answer that lets `escrow-verify.py` assert the escrowed
-# identity opened the header. The narrower version of this rule (order only the
-# EOF family after the header markers) was written first and was WRONG in the
-# same way the bug this file is being repaired for was wrong: it fixed the
-# overlap somebody had seen rather than the class.
-# `test_a_message_carrying_BOTH_a_header_and_an_EOF_marker_classifies_as_HEADER`
-# pins the whole cross-product; do not reorder this tuple across the divider.
+# EVERY PRE-AUTH MARKER COMES BEFORE EVERY `AGE_REFUSALS_KEY_PROVEN` ONE. A
+# message naming any pre-auth cause can then never be scored as proof the key
+# worked, whatever else it also says — and that is the answer letting
+# `escrow-verify.py` tell an operator their escrow is fine. The narrower version
+# of this rule (order only the EOF family after the header markers) was written
+# first and was WRONG in the same way the bug this file is being repaired for
+# was wrong: it fixed the overlap somebody had seen rather than the class.
+#
+# 🔴 AND THE SECOND DRAFT WAS NARROW TOO — it said "before every POST-AUTH one",
+# which left `bad header mac` unconstrained, because `AGE_REFUSED_HEADER_MAC` is
+# in neither set. An audit's mutation moved that marker PAST every post-auth
+# entry, across this divider, and the whole suite stayed green. The rule is now
+# stated over `AGE_REFUSALS_KEY_PROVEN`, which is exactly the set of kinds whose
+# verdict says the key is fine — so a third strong value cannot be added outside
+# it. `test_a_message_carrying_BOTH_a_pre_auth_and_a_KEY_PROVEN_marker_
+# classifies_as_PRE_AUTH` pins the whole cross-product and
+# `test_the_markers_are_all_LOAD_BEARING_and_none_is_a_prefix_of_another` pins
+# the index order; do not reorder this tuple across the divider.
 _AGE_REFUSAL_MARKERS = (
     # -- PRE-AUTH: no identity has been shown to work ------------------------ #
     ("no identity matched any of the recipients", AGE_REFUSED_NO_IDENTITY),
@@ -464,8 +494,21 @@ _AGE_REFUSAL_MARKERS = (
     # versions. That is the case for fixtures over enumeration: the marker list
     # only ever contains what somebody thought to provoke.
     ("invalid x25519 recipient block", AGE_REFUSED_HEADER),
+    # ===== THE DIVIDER. Everything below is `AGE_REFUSALS_KEY_PROVEN`: a
+    # message matching any of it says the escrowed identity WORKED, so nothing
+    # above may be reachable past it. Do not move an entry across this line. ==
+    #
+    # ⚠ ORDER *WITHIN* THIS BLOCK IS NOT PINNED, AND THAT IS DELIBERATE — say it
+    # rather than let a reader infer a guarantee. A mutation moving
+    # `bad header mac` to the very END of the tuple SURVIVES the suite, because
+    # it never crosses the divider and the stated invariant is about crossing
+    # it. The only behaviour that could differ is a message carrying BOTH a MAC
+    # clause and a truncation clause; measured 120/120 on both binaries, age
+    # emits `bad header MAC` bare. Both orderings would land on the same token
+    # and the same remedy in any case — only the witness sentence would differ.
+    #
     # -- KEY PROVEN, header damaged: age got here only by unwrapping a stanza,
-    #    but it did NOT authenticate the header, so neither block above fits -- #
+    #    but it did NOT authenticate the header, so neither block fits -------- #
     ("bad header mac", AGE_REFUSED_HEADER_MAC),
     # -- POST-AUTH: age opened the header, then the bytes failed it ---------- #
     ("failed to decrypt and authenticate payload chunk", AGE_REFUSED_PAYLOAD),
@@ -941,19 +984,43 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
          "--output", str(plain), str(cipher)],
         capture_output=True, text=True)
     if p.returncode != 0:
+        # 🔴 CLASSIFIED HERE, WHERE age's OWN stderr IS IN HAND. The consumer
+        # gets a published VALUE, never this message to substring-match: it is
+        # the only place the raw stream exists, and pushing the parse out to the
+        # caller is how two callers end up with two different parsers.
+        refusal = classify_age_refusal(p.stderr)
+        # 🔴 AND THIS MESSAGE READS IT TOO, which it did not until an audit
+        # pointed out that `SECRETS.md` sends operators HERE to tell a key fault
+        # from an artifact fault — while this sentence said "the identity …
+        # does not open it, or the ciphertext is damaged" for EVERY refusal,
+        # including the ones that disprove its first half three lines below the
+        # `classify_age_refusal` call that establishes it. The consumer was
+        # fixed and the sibling the consumer points at was not.
+        if refusal in AGE_REFUSALS_KEY_PROVEN:
+            diagnosis = (
+                f"the identity at {identity}{_identity_note(identity)} DID open "
+                f"it — age only gets this far with one that matches — and the "
+                f"CIPHERTEXT is damaged. This is an ARTIFACT fault; the key is "
+                f"not implicated")
+        elif refusal in AGE_REFUSALS_PRE_AUTH:
+            diagnosis = (
+                f"either the identity at {identity}{_identity_note(identity)} "
+                f"does not open it, or the ciphertext's HEADER is damaged. Those "
+                f"are NOT separable from age's message alone")
+        else:
+            diagnosis = (
+                f"age refused in a way this tool cannot classify, so NOTHING is "
+                f"asserted about the identity at "
+                f"{identity}{_identity_note(identity)} or about the ciphertext. "
+                f"Read age's own message above")
         raise RestoreVerifyError(
             f"DECRYPT FAILED for {cipher.name} (age rc={p.returncode}): "
-            f"{p.stderr.strip()}. The object was retrieved but the identity at "
-            f"{identity}{_identity_note(identity)} does not open it, or the ciphertext "
-            f"is damaged. This is "
+            f"{p.stderr.strip()}. The object was retrieved but {diagnosis}. This "
+            f"is "
             f"NOT a corruption verdict about the git history inside — nothing "
             f"here has read it.",
             cause=DECRYPT_AGE_REFUSED,
-            # 🔴 CLASSIFIED HERE, WHERE age's OWN stderr IS IN HAND. The consumer
-            # gets a published VALUE, never this message to substring-match: it
-            # is the only place the raw stream exists, and pushing the parse out
-            # to the caller is how two callers end up with two different parsers.
-            age_refusal=classify_age_refusal(p.stderr))
+            age_refusal=refusal)
     if not plain.is_file() or plain.stat().st_size == 0:
         # 🔴 MEASURED: `age` encrypts a ZERO-BYTE payload to a perfectly valid
         # 200-byte ciphertext, and decrypts it back at rc=0. So an object that

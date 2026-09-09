@@ -1556,6 +1556,27 @@ def test_the_STRONG_verdict_fires_on_EVERY_post_auth_refusal_and_NO_other(
     assert "CANNOT SAY WHY" in ei.value.verdict
     assert "TWO CAUSES PRODUCE THIS" not in ei.value.verdict
 
+    # 🔴 THE WALK IS OVER THE PUBLISHED SET, and this loop is what makes that
+    # sentence true. The groups above are three hand-named collections; an audit
+    # pointed out that a SIXTH published value added to the partition literal
+    # satisfies every assertion above while being walked by none of them — and
+    # `AGE_REFUSED_HEADER_MAC` is itself the proof that "in neither group" is
+    # not a safe destination. So every value in `AGE_REFUSALS` is driven through
+    # the real consumer here, and each must produce one of the two tokens this
+    # branch family is allowed to emit. A new value that reaches something else
+    # — or nothing — fails without anyone remembering to extend a list.
+    for refusal in sorted(RVmod.AGE_REFUSALS):
+        _refusing_decrypt(RVmod, monkeypatch, refusal=refusal,
+                          write_plaintext=False)
+        with pytest.raises(EV.EscrowError) as ei:
+            _decrypt_run(escrow_world)
+        assert ei.value.token in ("ARTIFACT-CORRUPT", "DECRYPT-FAILED"), refusal
+        # And the strong token is reachable ONLY from the key-proven set.
+        if ei.value.token == "ARTIFACT-CORRUPT":
+            assert refusal in RVmod.AGE_REFUSALS_KEY_PROVEN, (
+                f"{refusal!r} reached ARTIFACT-CORRUPT — 'THE ESCROW IS FINE' — "
+                f"without being published as evidence the key worked.")
+
 
 def test_a_TAMPERED_payload_is_ARTIFACT_CORRUPT_when_only_PLAINTEXT_says_so(
         escrow_world, monkeypatch):
@@ -4773,9 +4794,22 @@ def test_EVERY_destructive_advice_message_is_pinned_WHOLE():
                 if _DESTRUCTIVE_ADVICE.search(text)}
     # POSITIVE CONTROL: if this ever collapses to nothing, the pattern or the
     # renderer has broken and the whole ledger would pass vacuously.
-    assert len(must_pin) >= 12, (
-        f"only {len(must_pin)} destructive-advice message(s) found — the "
-        f"renderer or the pattern has regressed; the measured count is 13")
+    #
+    # 🔴 THE FLOOR IS DERIVED, NOT SPELLED. It read `>= 12` beside a message
+    # saying "the measured count is 13" — and an audit measured 15. A literal
+    # here is a count kept beside the thing it counts, which is the shape this
+    # file's own rules say will drift; it had drifted before the round that
+    # added the fifteenth even touched it. The pin set below is forced equal to
+    # `must_pin` by the two assertions that follow, so its size IS the measured
+    # count and cannot go stale.
+    assert len(must_pin) >= len(_PINNED_DESTRUCTIVE_TEXTS), (
+        f"only {len(must_pin)} destructive-advice message(s) found against "
+        f"{len(_PINNED_DESTRUCTIVE_TEXTS)} pinned — the renderer or the pattern "
+        f"has regressed. A message that stops being SEEN here stops being "
+        f"guarded, silently.")
+    assert must_pin, (
+        "no destructive-advice message was found at all: the pattern or the "
+        "renderer is broken and this ledger would pass vacuously.")
 
     unpinned = must_pin - _PINNED_DESTRUCTIVE_TEXTS
     assert not unpinned, (

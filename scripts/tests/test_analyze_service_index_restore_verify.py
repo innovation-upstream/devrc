@@ -4560,7 +4560,62 @@ def test_bad_header_MAC_PROVES_the_key_worked(tmp_path):
         f"Re-measure before trusting `AGE_REFUSALS_KEY_PROVEN`.")
 
 
-def test_a_message_carrying_BOTH_a_header_and_an_EOF_marker_classifies_as_HEADER():
+def test_the_marker_SUMMARY_TABLES_list_every_shipped_marker():
+    """🔴 TWO SECOND COPIES OF `_AGE_REFUSAL_MARKERS` EXIST, and both went stale
+    inside one commit — the round that ADDED `invalid x25519 recipient block`
+    listed 8 entries in restore-verify's own summary comment and 8 strings in
+    the operator-facing table in `SECRETS.md`, for 9 markers.
+
+    A reader who looks a string up in either and does not find it concludes it
+    reaches the unclassified verdict — its behaviour BEFORE it was classified,
+    i.e. exactly backwards. Both directions are checked: a marker missing from a
+    table fails, and a table naming a string the tuple does not carry fails too,
+    because that is the shape a marker RENAME leaves behind.
+    """
+    markers = [m for m, _ in RV._AGE_REFUSAL_MARKERS]
+    src = Path(RV.__file__).read_text(encoding="utf-8")
+
+    # 🔴 THE ROWS ARE EXTRACTED STRUCTURALLY, NOT SLICED. The first version of
+    # this test took the whole comment block between two anchors and asked
+    # whether each marker appeared ANYWHERE in it — and a mutation deleting the
+    # `invalid x25519 recipient block` ROW survived, because the ⚠ note a few
+    # lines below happens to NAME that marker while explaining why the table
+    # exists. The guard passed on prose ABOUT the table instead of the table.
+    # Reading only lines of the row shape `#   "<marker>" -> <kind>` is what
+    # makes a deleted row visible.
+    rows = {q.lower() for q in re.findall(r'^#   "([^"]+)"\s+->', src, re.M)}
+    assert rows, "no summary-table rows matched; the table's shape has changed"
+
+    secrets = (Path(RV.__file__).parents[2] / "SECRETS.md").read_text(
+        encoding="utf-8").lower()
+
+    for m in markers:
+        assert m.lower() in rows, (
+            f"marker {m!r} has no row in restore-verify's own summary table "
+            f"(rows present: {sorted(rows)}). That table is what a reader "
+            f"consults; a marker absent from it reads as unclassified.")
+        assert m in secrets, (
+            f"marker {m!r} is missing from the operator-facing table in "
+            f"SECRETS.md, which is where someone maps an exit code to a cause "
+            f"during a recovery.")
+
+    # 🔴 THE OTHER DIRECTION: a row naming a string the tuple no longer carries.
+    # A rename leaves precisely this, and it reads as coverage.
+    #
+    # ⚠ CASE-FOLDED, and the first draft of this check was not — it went red on
+    # `bad header MAC`, which is CORRECT in the table (it is age's own wording,
+    # which capitalises MAC) and necessarily lower-case in the tuple (because
+    # `classify_age_refusal` folds its input, so an upper-case marker could
+    # never match). The two spellings are both right; only a case-sensitive
+    # comparison of them is wrong.
+    assert rows <= {m.lower() for m in markers}, (
+        f"restore-verify's summary table has row(s) for "
+        f"{sorted(rows - {m.lower() for m in markers})}, which "
+        f"`_AGE_REFUSAL_MARKERS` does not carry. A stale entry reads as "
+        f"coverage that does not exist.")
+
+
+def test_a_message_carrying_BOTH_a_pre_auth_and_a_KEY_PROVEN_marker_classifies_as_PRE_AUTH():
     """🔴 THE ORDER OF `_AGE_REFUSAL_MARKERS` IS LOAD-BEARING, AND THIS IS WHY.
 
     age v1.3.2 NESTS the post-auth clause inside the pre-auth one — `failed to
@@ -4573,24 +4628,33 @@ def test_a_message_carrying_BOTH_a_header_and_an_EOF_marker_classifies_as_HEADER
     from a live run, and both halves of that are deliberate. Spelling it would
     let the table drift away from the fixture. Taking it from the binary would
     make this test's SUBJECT version-dependent: MEASURED 2026-09-09, only v1.3.2
-    nests the two clauses — v1.3.1's in-header truncations say `failed to read
-    header: failed to parse header: failed to read line: EOF` and `failed to
-    read header: parsing age header: file is empty`, which carry no POST-auth
-    marker. A guard that can only fire on one of two installed binaries is not a
-    guard, and this property is about OUR tuple's order, which is version-free.
-    `test_the_real_binarys_in_header_truncations_are_NEVER_post_auth` is the live
-    half.
+    nests the two clauses. v1.3.1's in-header truncations produce FOUR shapes
+    over the 168 offsets, and every one of them opens `failed to read header:` —
+    `… failed to parse header: failed to read line: EOF` (95 offsets), `… failed
+    to read header: EOF` (45), `… parsing age header: file is empty` (22), `…
+    parsing age header: failed to read header: EOF` (6) — so none carries a
+    KEY-PROVEN marker. A guard that can only fire on one of two installed
+    binaries is not a guard, and this property is about OUR tuple's order, which
+    is version-free. `test_the_real_binarys_in_header_truncations_are_NEVER_post_auth`
+    is the live half.
 
-    ⚠ Both v1.3.1 strings are quoted WITH their `failed to read header:` prefix,
-    and an audit caught an earlier draft that dropped it. Without the prefix they
+    ⚠ Every one of those is quoted WITH its `failed to read header:` prefix, and
+    an audit caught an earlier draft that dropped it — and then a later audit
+    caught the replacement enumerating two of the four. Without the prefix they
     carry no marker at all, which would say v1.3.1's in-header truncations reach
     `unrecognised`. They reach `header-unreadable` — a different thing for the
     operator, and the difference is exactly the clause that was trimmed.
     """
     pre_markers = [(m, k) for m, k in RV._AGE_REFUSAL_MARKERS
                    if k in RV.AGE_REFUSALS_PRE_AUTH]
+    # 🔴 `KEY_PROVEN`, NOT `POST_AUTH`. An audit's mutation moved the
+    # `bad header mac` marker past every post-auth entry and the suite stayed
+    # green: `AGE_REFUSED_HEADER_MAC` is in neither set, so a rule stated over
+    # POST_AUTH left the marker whose verdict says "the escrow is fine"
+    # completely unconstrained. The set that matters is every kind whose verdict
+    # asserts the key worked.
     post_markers = [m for m, k in RV._AGE_REFUSAL_MARKERS
-                    if k in RV.AGE_REFUSALS_POST_AUTH]
+                    if k in RV.AGE_REFUSALS_KEY_PROVEN]
     assert pre_markers and post_markers, "nothing to overlap; table is empty"
     # 🔴 THE WHOLE CROSS-PRODUCT, not just the pair age happens to nest today.
     # The first draft of this test paired only the HEADER markers with the EOF
@@ -4666,6 +4730,53 @@ def test_the_real_binarys_in_header_truncations_are_NEVER_post_auth(tmp_path):
     assert checked >= 4, f"only {checked} in-header offsets were exercised"
 
 
+@pytest.mark.parametrize("kind,must_say,must_not_say", [
+    # KEY PROVEN — the identity demonstrably opened the header, so the message
+    # must NOT offer "the identity does not open it" as a live possibility.
+    ("header-mac", "DID open", "does not open it"),
+    ("payload", "DID open", "does not open it"),
+    ("truncated-no-payload", "DID open", "does not open it"),
+    # PRE-AUTH — both causes genuinely open, and the message says so.
+    ("no-identity", "NOT separable", "DID open"),
+    ("header", "NOT separable", "DID open"),
+])
+def test_restore_verifys_OWN_message_reads_the_classification(
+        tmp_path, kind, must_say, must_not_say):
+    """🔴 `SECRETS.md` SENDS OPERATORS TO `restore-verify.py` TO TELL A KEY FAULT
+    FROM AN ARTIFACT FAULT — and until an audit said so, this message answered
+    "the identity … does not open it, or the ciphertext is damaged" for EVERY
+    refusal, including the ones that disprove its first half three lines below
+    the `classify_age_refusal` call that establishes it.
+
+    The consumer in `escrow-verify.py` was fixed and the sibling the consumer
+    POINTS AT was not — a predicate right at one of its two sites. This drives
+    the real `decrypt()` with really-damaged artifacts and reads the sentence.
+    """
+    ident = tmp_path / f"m-{kind}.key"
+    r = subprocess.run([AGE_KEYGEN, "-o", str(ident)], capture_output=True,
+                       text=True)
+    assert r.returncode == 0, r.stderr
+    err = _age_refusal_stderr(tmp_path, kind)          # builds the fixture set
+    refusal = RV.classify_age_refusal(err)
+
+    # Rebuild the same damaged artifact through the real `decrypt()` so the
+    # message under test is the one operators actually see.
+    cipher = tmp_path / f"bad-{kind}.age"
+    assert cipher.is_file(), "the fixture helper did not leave its artifact"
+    use = tmp_path / (f"other-{kind}.key" if kind == "no-identity"
+                      else f"id-{kind}.key")
+    with pytest.raises(RV.RestoreVerifyError) as ei:
+        RV.decrypt(cipher, tmp_path / f"plain-out-{kind}", use)
+    msg = str(ei.value)
+    assert ei.value.age_refusal == refusal, (refusal, ei.value.age_refusal)
+    assert must_say in msg, (
+        f"{kind} classified {refusal!r} but the message does not say "
+        f"{must_say!r}:\n{msg}")
+    assert must_not_say not in msg, (
+        f"{kind} classified {refusal!r} and the message still says "
+        f"{must_not_say!r}, which its own classification disproves:\n{msg}")
+
+
 def test_classify_age_refusal_is_CASE_FOLDED():
     """🔴 THE `.lower()` IS UNGUARDED WITHOUT THIS — an audit's mutation battery
     deleted it and the whole suite stayed green, because every clause age emits
@@ -4704,7 +4815,7 @@ def test_the_markers_are_all_LOAD_BEARING_and_none_is_a_prefix_of_another():
     marker-vs-marker check can see. This test keeps the markers themselves
     mutually non-containing so the tuple's order is the ONLY ordering fact
     anyone has to know, and
-    `test_a_message_carrying_BOTH_a_header_and_an_EOF_marker_classifies_as_HEADER`
+    `test_a_message_carrying_BOTH_a_pre_auth_and_a_KEY_PROVEN_marker_classifies_as_PRE_AUTH`
     pins that one against the real binary.
 
     🔴 EVERY MARKER IS LOWER-CASE, and that is not style: `classify_age_refusal`
@@ -4744,10 +4855,26 @@ def test_the_markers_are_all_LOAD_BEARING_and_none_is_a_prefix_of_another():
     kinds_in_order = [k for _, k in RV._AGE_REFUSAL_MARKERS]
     last_pre = max(i for i, k in enumerate(kinds_in_order)
                    if k in RV.AGE_REFUSALS_PRE_AUTH)
-    first_post = min(i for i, k in enumerate(kinds_in_order)
-                     if k in RV.AGE_REFUSALS_POST_AUTH)
-    assert last_pre < first_post, (
-        f"a post-auth marker sits at index {first_post}, before the last "
+    # 🔴 OVER `KEY_PROVEN`, NOT `POST_AUTH` — see the note in the cross-product
+    # test above. Stated over POST_AUTH this assertion left `bad header mac`
+    # free to sit anywhere, and an audit's mutation moved it to the END of the
+    # tuple with the whole suite still green.
+    first_strong = min(i for i, k in enumerate(kinds_in_order)
+                       if k in RV.AGE_REFUSALS_KEY_PROVEN)
+    assert last_pre < first_strong, (
+        f"a KEY-PROVEN marker sits at index {first_strong}, before the last "
         f"pre-auth one at {last_pre}. A message naming a pre-auth cause could "
-        f"then be scored post-auth, which is what lets escrow-verify claim the "
-        f"escrowed key opened the header: {kinds_in_order}")
+        f"then be scored as proof the escrowed key worked, which is what lets "
+        f"escrow-verify tell an operator their escrow is fine: {kinds_in_order}")
+    # 🔴 AND EVERY KIND MUST BE ON ONE SIDE OR THE OTHER. Without this, a kind
+    # in neither group (which is exactly what `AGE_REFUSED_HEADER_MAC` was) has
+    # an unconstrained index and the two bounds above simply skip it.
+    ungrouped = [k for k in kinds_in_order
+                 if k not in RV.AGE_REFUSALS_PRE_AUTH
+                 and k not in RV.AGE_REFUSALS_KEY_PROVEN]
+    assert not ungrouped, (
+        f"marker kind(s) {sorted(set(ungrouped))} are in neither "
+        f"AGE_REFUSALS_PRE_AUTH nor AGE_REFUSALS_KEY_PROVEN, so their position "
+        f"in the tuple is pinned by nothing and they can be moved across the "
+        f"divider silently. Put each on a side, or state here why it has no "
+        f"ordering constraint.")

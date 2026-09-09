@@ -360,7 +360,7 @@ disaster-recovery key gets rotated, or a tampered backup gets waved through:
 | `29` `AGE-MISSING` | `age` is not on PATH | environment fault; says nothing about the escrow |
 | `30` `ARTIFACT-UNREADABLE` | failed before the key was used | diagnose the object, not the key |
 | `25` `DECRYPT-FAILED` | age refused **before the payload**: wrong key **or** damaged header — **not separable**. ⚠ The same code also carries a second message, *"CANNOT SAY WHY"*, when age refuses in a way this tool cannot read — then **three** causes stay open, corruption included. Read the sentence, not just the number. | try a **different** artifact (`--scope <other>`) with the same escrowed copy: if another opens, the key is fine and this object's header is damaged. **Do not rotate first.** |
-| `33` `ARTIFACT-CORRUPT` | age authenticated the header (**the key worked**) then failed past it — a payload chunk that would not authenticate, or an artifact that ran out of bytes | 🔴 **the backup is TAMPERED/CORRUPT/TRUNCATED.** Check the other retained objects. Do not rotate. |
+| `33` `ARTIFACT-CORRUPT` | age got past the header — **the key worked** — and then failed: a payload chunk that would not authenticate, or an artifact that ran out of bytes. ⚠ The same code carries a **second** message for a damaged header MAC, where age proved the key and never read a payload byte. Read the sentence, not just the number. | 🔴 **the backup is TAMPERED/CORRUPT/TRUNCATED.** Check the other retained objects. Do not rotate. |
 | `31` `ARTIFACT-EMPTY` | age exited **zero** on an empty payload (**the key worked**) | the artifact holds nothing; do not rotate |
 | `26` `RESTORE-FAILED` | decrypted fine, the git bundle is bad | artifact fault; do not rotate |
 
@@ -400,7 +400,7 @@ probably reworded when the artifact was simply damaged. The table is now keyed o
 | age said | reached | classification |
 |---|---|---|
 | `no identity matched any of the recipients` | no identity shown to work | pre-auth → `25` |
-| `failed to read header`, `failed to parse X25519 recipient` | no identity shown to work | pre-auth → `25` |
+| `failed to read header`, `failed to parse X25519 recipient`, `invalid X25519 recipient block` | no identity shown to work | pre-auth → `25` |
 | `bad header MAC` | **a stanza unwrapped** — the key WORKS — but the header failed its integrity check | key proven → `33` |
 | `failed to decrypt and authenticate payload chunk` | **past the header** | post-auth → `33` |
 | `failed to read nonce`, `unexpected EOF`, `last chunk is empty` | **past the header** | post-auth → `33` |
