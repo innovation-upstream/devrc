@@ -293,6 +293,34 @@ class Fleet:
             # write to the operator's real state dir and inherit a streak from
             # whatever ran before them.
             DRIFT_STATE_DIR=str(self.state),
+            # 🔴 THE SIXTH SEAM — and it is a DETERMINISM seam, not an outbound
+            # one. Say that precisely, because the first version of this comment
+            # did not and would have misled anyone deciding to remove it.
+            #
+            # What happened: the address probe added in #1439 ran before the
+            # remote leg, and at the PR head before any gate this module made
+            # 558 outbound ssh attempts (279 per address) to the operator's real
+            # laptop — a read-only breach is still a breach, and with the host
+            # off-LAN each probe burned the full ConnectTimeout, so the module's
+            # runtime and its VERDICT depended on the operator's network.
+            #
+            # 🔴 But the `[ "$DO_REMOTE" = 1 ]` gate in the script closed ALL of
+            # that on its own. MEASURED with the gate and without this seam:
+            # 8 probe executions, of which 0 reached an unstubbed ssh — every one
+            # landed on a fixture `stub_ssh`. (Positive control for the
+            # instrument: 558 on the ungated tree.) ⚠ An earlier version added
+            # "across 11 static call sites"; that number is NOT mechanically
+            # reproducible — an AST sweep of the 203 `.check(` sites finds 4
+            # passing neither `--no-remote` nor REMOTE_SSH, three of them
+            # `*args` helper wrappers. The DYNAMIC count is the one that means
+            # anything, and it reproduces exactly.
+            #
+            # So this exists to stop 8 stubbed probes perturbing timing and
+            # output, and as defence in depth if a future test forgets a stub —
+            # NOT because tests still reach a live host. A test that wants the
+            # probe opts out with `envextra={"DRIFT_SKIP_SSH_PROBE": "0"}` and
+            # installs a stub ssh, never the real one.
+            DRIFT_SKIP_SSH_PROBE="1",
         )
         env.update(envextra)   # per-test overrides win (e.g. a blocked state dir)
         # `script` runs a COPY of the checker whose `lib/` a test controls. The
@@ -1791,6 +1819,23 @@ _SHELL_BUILTINS = frozenset("""
 # reviewer can check, whereas a heuristic filter would swallow a real command.
 _PROSE_NOT_COMMANDS = frozenset({
     "a", "f", "n", "prev", "more", "see", "the", "laptop", "workbench",
+    # 🔴 `target` is a LOOP VARIABLE and a `local` declaration in
+    # lib/host-role.sh's first_reachable_ssh, not a program. It is here because
+    # of a MEASURED blind spot in `_command_tokens`, not because the word is
+    # prose: `for` and `local` are both in _TRANSPARENT, so stripping them
+    # leaves the VARIABLE NAME as tokens[0]. Two lines produce it:
+    #     local timeout="${SSH_PROBE_TIMEOUT:-5}" target
+    #     for target in "$@"; do
+    # ⚠ The blind spot is older than this entry and nothing surfaced it,
+    # because the only other loop variable in that file is `ip` — which passes
+    # solely by COINCIDENCE, `ip` being a real command already in
+    # UNIT_PATH_REQUIREMENTS (iproute2). Rename that variable and this guard
+    # would have reported it too. Widening `_command_tokens` to skip `for X in`
+    # and `local` declarations is the structural fix; it is deliberately NOT
+    # done here, because it may unmask other words across drift-check.sh and
+    # that belongs in its own change rather than riding along with an ssh
+    # fallback.
+    "target",
 })
 
 
@@ -4134,13 +4179,62 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
     sites, in_loop, GH_CALLS = _derive_gh_calls(DRIFT.read_text())
     assert sites >= 3, f"the gh call sites cannot be counted: {sites}"
     assert in_loop >= 1, "no gh call found inside the ruleset loop"
-    needed = 2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2 + GH_CALLS * gh + 60
+
+    # 🔴 THE ADDRESS PROBE IS A NETWORK CALL AND MUST BE IN THIS MODEL. #1439
+    # added it to this script and did NOT extend the budget — the exact omission
+    # this test's docstring says it exists to catch, arriving in the commit that
+    # quoted the docstring. It is bounded by `ConnectTimeout=$SSH_PROBE_TIMEOUT`
+    # per address, over the candidate list, so the worst case is
+    # len(candidates) x that default. DERIVED from the lib for the same reason
+    # everything else here is: a literal beside the thing it counts drifts.
+    #
+    # ⚠ ConnectTimeout bounds the TCP CONNECT only. A peer that accepts :22 and
+    # then stalls in key exchange is NOT bounded by it, and nothing wraps the
+    # probe in `timeout`. That residue is stated rather than modelled — this
+    # budget covers the failure mode that actually happens (an address that does
+    # not answer), not a malicious half-open peer.
+    lib = DRIFT.parent / "lib" / "host-role.sh"
+    lib_src = lib.read_text()
+    m5 = re.search(r"SSH_PROBE_TIMEOUT:-(\d+)", lib_src)
+    assert m5, "no SSH_PROBE_TIMEOUT default in lib/host-role.sh"
+    probe_cap = int(m5.group(1))
+
+    # 🔴 ASK THE LIB, do not pattern-match it. A first version counted
+    # `^\s*echo "\$..._SSH_SECONDARY"` lines and floored the result at 2 — but
+    # the lib emits both candidates on ONE line (`echo "$X_DEFAULT"; echo
+    # "$X_SECONDARY"`), so the regex matched 0 and the whole value came from the
+    # floor: a literal wearing a derivation's costume, in a block whose own
+    # comment says a literal beside the thing it counts drifts. Proved by adding
+    # a genuine third address: the count stayed 2 and this test stayed GREEN,
+    # which is the "a network call added with no room for it" shape it exists to
+    # catch. Running the function is the only derivation that tracks the lib.
+    probed_roles = ("workbench", "laptop")
+    counts = []
+    for role in probed_roles:
+        out = subprocess.run(
+            ["bash", "-c",
+             f'set -euo pipefail; unset REMOTE_SSH LAPTOP_SSH; '
+             f'source "{lib}"; remote_ssh_candidates_of {role}'],
+            capture_output=True, text=True, check=True,
+        )
+        counts.append(len([ln for ln in out.stdout.splitlines() if ln.strip()]))
+    n_candidates = max(counts)
+    assert n_candidates >= 2, (
+        f"the candidate lists collapsed to {counts}; with fewer than two "
+        "addresses there is no fallback to budget for, which means the probe "
+        "was removed and this term should go with it"
+    )
+    probe = n_candidates * probe_cap
+
+    needed = (2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2
+              + GH_CALLS * gh + probe + 60)
     assert ceiling >= needed, (
         "TimeoutStartSec=%d cannot absorb the worst case: %d source fetches at "
-        "%ds + a %ds phase-2 scan + %d branch-protection probes at %ds + 60s of "
-        "devrc fetch/ssh = %ds. systemd would kill the run and the deadman would "
-        "report nothing, on a schedule."
-        % (ceiling, 2 * len(EXPECTED_SOURCE_REPOS), cap, phase2, GH_CALLS, gh, needed)
+        "%ds + a %ds phase-2 scan + %d branch-protection probes at %ds + %ds of "
+        "address probing + 60s of devrc fetch/ssh = %ds. systemd would kill the "
+        "run and the deadman would report nothing, on a schedule."
+        % (ceiling, 2 * len(EXPECTED_SOURCE_REPOS), cap, phase2, GH_CALLS, gh,
+           probe, needed)
     )
 
 

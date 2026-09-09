@@ -49,9 +49,14 @@ PHASES AND THEIR ROLLBACKS
                                  is modified. Roll back by deleting the run dir.
   P1  plan the delta           — read-only; writes only into the run directory
   P2  ref-collision check      — read-only
-  P3  push the delta           — rollback: `--rollback-push <run-dir>` re-PUTs the
-                                 pre-push bytes this script saved for every entry
-                                 it was about to overwrite
+  P3  push the delta           — 🔴 RETIRED once P5 has frozen the store: it
+                                 refuses with RC_CUTOVER_COMPLETE (19) rather
+                                 than pushing a frozen mirror back over a pod
+                                 that has moved on. Live only for a host that
+                                 has NOT been cut over. Rollback for a run that
+                                 did push: `--rollback-push <run-dir>` re-PUTs
+                                 the pre-push bytes this script saved for every
+                                 entry it was about to overwrite.
   P4  acceptance + byte check  — read-only
   P5  freeze local disk        — records every mode, then chmods. Rollback:
                                  `--unfreeze`, which RESTORES the recorded modes
@@ -69,8 +74,20 @@ covered the whole criterion.
 
 USAGE
 -----
-    cairn-cutover.py                       # dry run: plan and report, change nothing
+    cairn-cutover.py                       # dry run: plan and report, change no STORE
+                                           # ⚠ on a store P5 has already frozen this
+                                           # exits 19 (P3 retired) INSTEAD of reporting
+                                           # a plan — deliberately: a plan you can never
+                                           # apply is not information.
+                                           # 🔴 "change nothing" is about the STORES. A
+                                           # dry run STILL creates <run-dir> holding a
+                                           # full plaintext copy of the SERVED store
+                                           # (P0 runs first); roll back by deleting it.
+                                           # An earlier draft of this note said "still
+                                           # changes nothing" flatly, which was false.
     cairn-cutover.py --apply --push <ns>/<deploy>
+    cairn-cutover.py --freeze --apply      # run P5 alone — the route out of a PARTIAL
+                                           # or interrupted freeze, which P3 now refuses
     cairn-cutover.py --unfreeze            # roll P5 back
     cairn-cutover.py --rollback-push <run-dir>
 
@@ -142,6 +159,7 @@ RC_FREEZE_INEFFECTIVE = 16  # the freeze was applied and a write STILL succeeded
 # editing this sentence, and count.
 RC_ACCEPTANCE = 17
 RC_COULD_NOT_MEASURE = 18   # an instrument did not answer; never folded into a pass
+RC_CUTOVER_COMPLETE = 19    # P3 is RETIRED on this store — the freeze is already applied
 
 # 🔴 THE DISCRIMINATOR THIS WHOLE MERGE RULE TURNS ON. `server.render_bullet`
 # terminates every API-appended bullet with exactly this shape, and nothing else
@@ -993,14 +1011,24 @@ def set_entry_mode(store: Path, mode: int) -> int:
 
     🔴 FILES, NOT DIRECTORIES, AND THE ASYMMETRY IS A DESIGN DECISION WITH A
     KNOWN COST. Freezing the directories too would also stop a genuinely NEW
-    entry being created — and the hosted API has NO create route (`POST` and
-    `PUT` both resolve an existing ref; a ref that does not resolve is 404
-    `ref-unknown`), so the first entry for a new subsystem would have nowhere to
-    go at all. Freezing the files closes the hazard this cutover is about — an
-    append or an overwrite that lands only locally and dies at the next seed —
-    while leaving the one operation the API cannot yet serve. The gap is real and
-    is written down rather than papered over; see the design doc's "What
-    criterion 9 does NOT close".
+    entry being created. Freezing the files closes the hazard this cutover is
+    about — an append or an overwrite that lands only locally and dies at the
+    next seed — while leaving creation possible.
+
+    🔴 THE ORIGINAL REASON IS NOW STALE, AND SAYING SO MATTERS BECAUSE IT IS THE
+    SENTENCE P3'S RETIREMENT RESTS ON. This docstring used to argue the API had
+    "NO create route", so a new subsystem's first entry "would have nowhere to go
+    at all". That was true when written and is FALSE at HEAD: `cairn create`
+    (`scripts/cairn`, `PUT` + `If-None-Match: *`; server side `server.py:247`)
+    landed in `34d00d90`/#1254 precisely because writing new entries into this
+    frozen mirror had already cost five entries that were dark to every reader.
+    So creation has a hosted route now, and retiring P3 strands nothing.
+
+    ⚠ WHAT REMAINS TRUE is the mechanical consequence, which is why the files/
+    directories split stays: a directory left writable means an entry CAN still
+    be created on local disk, so `survey` can see a writable file on a store that
+    has been cut over. P3's retirement keys on `refused > 0` rather than
+    `writable == 0` for exactly that reason.
     """
     changed = 0
     for rel in read_store(store):
@@ -1031,7 +1059,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "divergence is refused rather than silently superseded")
     p.add_argument("--run-dir", type=Path, default=None)
     p.add_argument("--push", default=None, metavar="NS/DEPLOY",
-                   help="hand the delta tree to seed.sh --push")
+                   help="hand the delta tree to seed.sh --push. RETIRED on a "
+                        "store whose entries already refuse a write: the cutover "
+                        "has completed there and P3 exits 19 rather than reverting "
+                        "the pod. Use `cairn append`/`cairn put` instead.")
     p.add_argument("--dest", default="/data")
     p.add_argument("--alias-owner", action="append", default=[], metavar="S:A=FILE",
                    help="acknowledge one LIVE ref collision by naming its owner")
@@ -1353,7 +1384,134 @@ def main(argv: list[str] | None = None) -> int:
             say(f"P2 {len(owners)} live collision(s) acknowledged by --alias-owner: "
                 f"{sorted(f'{s}:{a}' for s, a in owners)}")
 
-        # ---- P3 the push --------------------------------------------------
+        # ---- P3 the push — RETIRED ONCE THE FREEZE IS APPLIED ---------------
+        # 🔴 P3 IS DEAD POST-CUTOVER, AND THE OBVIOUS "FIX" IS THE DATA-LOSS BUG.
+        # This phase pushes LOCAL -> POD. That is correct exactly once: while the
+        # host still holds bytes the pod has never seen. After P5 freezes local
+        # disk the direction inverts — this header's own ordering argument says
+        # so ("After this cutover the hosts' stores are caches of the pod") — and
+        # the pod accumulates API-appended content the mirror will never have.
+        #
+        # What it looked like instead: `plan.shippable` is ADD + SUPERSEDES +
+        # MERGED, and SUPERSEDES/MERGED are BY DEFINITION entries whose pod bytes
+        # differ, which is what `seed.sh`'s pre-flight refuses. So P3 exits 8 the
+        # moment anything supersedes, and that reads as a shipped code path that
+        # can never complete — one `--allow-overwrite` away from working.
+        #
+        # 🔴 IT IS NOT. That refusal is the LAST GUARD between a stale mirror and
+        # authoritative content, and `--allow-overwrite` is the single change that
+        # would disarm it. `seed.sh`'s tar "adds and overwrites but never
+        # deletes", so a push from a frozen mirror silently reverts every entry
+        # the pod has moved on — MEASURED 2026-09-02/03: of 25 local-only bullet
+        # candidates, 5 were POD-NEWER, two of them `OPEN:` -> `RESOLVED` closures
+        # carrying ~20 lines of later corrections. It would report success.
+        #
+        # So this refuses instead, using the instrument P5 already uses. The
+        # signal is the FREEZE — evidence P5 leaves and nothing else here does —
+        # not a flag or a date, so a genuine first cutover passes straight
+        # through and P3 stays live for it.
+        #
+        # ⚠ NO `examined == 0` BRANCH, DELIBERATELY. `survey` walks the same
+        # `read_store` population P0 already refused as RC_NO_STORE, so a zero is
+        # unreachable here — and a guard that cannot execute is worse than none,
+        # because it reads as coverage. P5 keeps its own check because `--freeze`
+        # reaches it without passing P0.
+        #
+        # 🔴 `refused`, NOT `writable == 0` — the earlier spelling was wrong in
+        # BOTH directions, and both are real states:
+        #   * `set_entry_mode` freezes FILES, never scope DIRECTORIES (see its
+        #     docstring), so a genuinely NEW entry written after the freeze is
+        #     0644 and `writable == 0` went FALSE on a store that HAD been cut
+        #     over — silent in the one situation that makes someone reach for P3.
+        #     `34d00d90`/#1254 records five entries created exactly that way.
+        #   * a never-cut-over store on a read-only mount reads `writable == 0`
+        #     and the old predicate fired with a FALSE diagnosis.
+        #
+        # 🔴 AND `other` IS ITS OWN OUTCOME, ABOVE THE RETIREMENT — because
+        # `refused > 0` ALONE FAILS OPEN ON THE BUCKET IT DOES NOT MEASURE, in
+        # the destructive direction. `probe_writable` returns "refused" only for
+        # `PermissionError`; EROFS is a plain `OSError` and lands in `other`. So
+        # a CUT-OVER store on a read-only mount — a natural hardening once local
+        # disk is declared a cache — reads `refused == 0` and would push the
+        # frozen mirror over the pod. Trading one direction for the other is not
+        # a fix. This file's own doctrine says it in one line: RC_COULD_NOT_
+        # MEASURE is "an instrument did not answer; never folded into a pass".
+        # An unreadable store is exactly that, so it gets that code rather than
+        # either verdict.
+        frozen = survey(args.store)
+        say(f"P3 local store: {frozen}")
+        if frozen["other"] > 0:
+            return refuse(RC_COULD_NOT_MEASURE, (
+                f"P3 could not measure {frozen['other']} of {frozen['examined']} "
+                f"entry file(s): the write probe answered neither 'writable' nor "
+                f"EACCES, so whether this store has been cut over is UNKNOWN — "
+                f"most likely a read-only mount (EROFS is not a PermissionError) "
+                f"or an I/O error. Both verdicts would be a guess in a direction "
+                f"that matters. Read the survey line above, fix the mount or the "
+                f"permissions, and re-run. NOTHING was pushed."
+            ))
+        if frozen["refused"] > 0:
+            # 🔴 THE MESSAGE STATES WHAT WAS MEASURED, NOT A CONCLUSION IT CANNOT
+            # REACH — and this is the THIRD spelling, because the first two each
+            # asserted an absolute the mode bits do not establish. Draft 1: "so
+            # P5 has frozen it and local disk is a read-through CACHE", false for
+            # a PARTIAL freeze (`RC_FREEZE_INEFFECTIVE` with `unknown > 0` leaves
+            # entries at 0444 on a store whose freeze did NOT take) and after a
+            # SIGINT mid-`set_entry_mode`. Draft 2: "which only P5's freeze
+            # produces here", false for a never-cut-over store carrying one stray
+            # 0444 entry — and written in the very commit that DELETED the caveat
+            # recording that residual.
+            #
+            # 🔴 AND NO SINGLE PRESCRIBED ROUTE FOR THE MIXED CASE. Draft 2 told a
+            # MIXED store to "complete it with `--freeze --apply`". MEASURED, that
+            # advice does harm two ways:
+            #   * on a never-cut-over store it FREEZES entries that were never
+            #     pushed — the `34d00d90`/#1254 shape, content that exists only
+            #     locally and is dark to every reader — with P3 now retired over
+            #     it, so the ordinary route can never push it again;
+            #   * out of a genuinely interrupted freeze it writes a SECOND mode
+            #     ledger recording the 0444 the FIRST freeze already set, and
+            #     `--unfreeze` defaults to the NEWEST ledger — so a 0600 entry is
+            #     "restored" to 0444 and the rollback exits 0. That is
+            #     `save_modes`' documented widening hazard in mirror image: a
+            #     NARROWING presented as a restore.
+            # So the message names the ambiguity, puts the safe act first (get
+            # content to the pod), and carries the ledger caveat with the route.
+            mixed = frozen["writable"] > 0
+            return refuse(RC_CUTOVER_COMPLETE, (
+                f"P3 is RETIRED on this store — {frozen['refused']} of "
+                f"{frozen['examined']} entry file(s) refuse a write. P5's freeze "
+                f"is what normally produces that, but it is not the only thing "
+                f"that can: a stray 0444 entry on a store that was NEVER cut "
+                f"over reads identically, and the mode bits cannot tell them "
+                f"apart. Pushing local disk back would overwrite every entry the "
+                f"pod has moved on since, and `seed.sh` never deletes, so it "
+                f"would report success. "
+                f"🔴 Do NOT pass --allow-overwrite to get past this: that is the "
+                f"silent revert, not the fix. Write to the pod through `cairn "
+                f"create` for an entry it has never seen, or `cairn append` / "
+                f"`cairn put` for one it already holds — append and put BOTH 404 "
+                f"on a ref that does not resolve, so create is the verb for the "
+                f"ADD case."
+                + (
+                    f" ⚠ {frozen['writable']} entr(y/ies) here are still WRITABLE. "
+                    f"That is a completed cutover with a post-freeze creation, OR "
+                    f"a PARTIAL/INTERRUPTED freeze, OR a store never cut over at "
+                    f"all — indistinguishable by mode bits. Get any local-only "
+                    f"content onto the pod with `cairn create` FIRST: "
+                    f"`--freeze --apply` pushes NOTHING, so freezing before "
+                    f"sending strands whatever has not been sent. 🔴 And if you "
+                    f"run it to finish an interrupted freeze, roll back with "
+                    f"`--unfreeze --mode-ledger <the INTERRUPTED run>/"
+                    f"{MODE_LEDGER}` — a second freeze writes a second ledger "
+                    f"recording 0444, `--unfreeze` takes the NEWEST by default, "
+                    f"and the original modes are then lost with a success "
+                    f"message."
+                    if mixed else ""
+                )
+                + " NOTHING was pushed."
+            ))
+
         if not args.apply:
             say(f"DRY RUN — {len(plan.shippable)} entr(ies) would be pushed "
                 f"({counts[ADD]} new, {counts[SUPERSEDES]} superseding, "
@@ -1363,7 +1521,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"--dest {args.dest}")
             say("DRY RUN — the freeze would then chmod 0444 over "
                 f"{len(local)} entry file(s) and require EVERY ONE to refuse a write.")
-            say("Nothing was changed. Re-run with --apply.")
+            say("Nothing was changed IN EITHER STORE. ⚠ P0 has already written "
+                f"{cache_dir} — a full plaintext copy of the SERVED store; "
+                f"delete the run dir to roll that back. Re-run with --apply.")
             return RC_OK
 
         if not plan.shippable:

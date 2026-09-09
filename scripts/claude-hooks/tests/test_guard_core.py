@@ -2534,6 +2534,13 @@ _KILL_MENTION_LEDGER = {
     "scripts/tests/test_session_resolve.py": "ARGV: `;`-injection fixtures, asserted REJECTED",
     "scripts/tests/test_session_write.py": "ARGV: `;`-injection fixtures, asserted REJECTED",
     "scripts/tests/test_tmux_reply_agent.py": "ARGV: subprocess lists, all carry -L",
+    # Added by the socket-activation PR. The mention is one line of a class
+    # docstring explaining WHY the service needs `ConditionPathExists=`:
+    # `PathChanged=` fires on socket DELETION too, and a deletion is the
+    # operator's server exiting — so without the condition, every
+    # `tmux kill-server` would start a restore into a box with no server.
+    # Prose about the event, not a call: that file executes no tmux kill.
+    "scripts/tests/test_tmux_restore_trigger.py": "prose: why the service needs ConditionPathExists",
     "scripts/tests/test_waiting_windows.py": "prose: forbidden-verb list",
 }
 
@@ -2663,6 +2670,7 @@ def test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny():
         "scripts/claude-hooks/guard_core.py",
         "scripts/claude-hooks/tests/test_guard_core.py",
         "scripts/session-write-harness/real_pane_check.py",  # a docstring line
+        "scripts/tests/test_tmux_restore_trigger.py",  # a docstring line; see the ledger
     }
     seen_in_allowlisted, offenders = 0, []
     for rel in _tracked_files():

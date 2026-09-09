@@ -83,10 +83,35 @@ SANDBOX_REFUSAL_RC = 97
 
 
 def _host_role_constant(name):
-    """Read a `NAME="value"` constant straight out of lib/host-role.sh."""
-    m = re.search(rf'^{name}="([^"]*)"', HOST_ROLE_LIB.read_text(), re.M)
-    assert m, f"{name} is no longer defined in {HOST_ROLE_LIB}"
-    return m.group(1)
+    """The VALUE of a constant in lib/host-role.sh, evaluated by bash.
+
+    🔴 EVALUATED, NOT SCRAPED. This read a `NAME="value"` literal with a regex
+    until 2026-09-09, when the ssh defaults became DERIVED
+    (`"${SSH_USER_DEFAULT}@${LAPTOP_IP_PRIMARY}"`, so one address lives in one
+    place). The regex then returned the literal string
+    `${SSH_USER_DEFAULT}@${LAPTOP_IP_PRIMARY}` and the caller asserted the ssh
+    shim had been handed THAT — a failure that reads as "the fallback target
+    moved" when nothing about the target had moved at all.
+
+    A helper that can only read constants nobody ever derives is a tripwire on
+    an ordinary refactor. Sourcing the lib is hermetic: it defines variables and
+    functions and does nothing else (see its SOURCE-ONLY note), so this touches
+    no network and starts no host.
+    """
+    out = subprocess.run(
+        ["bash", "-c", f'set -euo pipefail; source "{HOST_ROLE_LIB}"; printf %s "${{{name}-}}"'],
+        capture_output=True, text=True, check=True,
+    )
+    value = out.stdout.strip()
+    assert value, (
+        f"{name} is empty or no longer defined in {HOST_ROLE_LIB} "
+        f"(stderr: {out.stderr.strip()!r})"
+    )
+    assert "$" not in value, (
+        f"{name} evaluated to {value!r}, which still contains an unexpanded "
+        "variable — the lib defines it before its inputs are set."
+    )
+    return value
 
 
 def _write_sandbox_bin(d):

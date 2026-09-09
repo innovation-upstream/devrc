@@ -389,7 +389,7 @@ disaster-recovery key gets rotated, or a tampered backup gets waved through:
 | `29` `AGE-MISSING` | `age` is not on PATH | environment fault; says nothing about the escrow |
 | `30` `ARTIFACT-UNREADABLE` | failed before the key was used | diagnose the object, not the key |
 | `25` `DECRYPT-FAILED` | age refused **before the payload**: wrong key **or** damaged header — **not separable**. ⚠ The same code also carries a second message, *"CANNOT SAY WHY"*, when age refuses in a way this tool cannot read — then **three** causes stay open, corruption included. Read the sentence, not just the number. | try a **different** artifact (`--scope <other>`) with the same escrowed copy: if another opens, the key is fine and this object's header is damaged. **Do not rotate first.** |
-| `33` `ARTIFACT-CORRUPT` | age authenticated the header (**the key worked**) then failed the payload | 🔴 **the backup is TAMPERED/CORRUPT/TRUNCATED.** Check the other retained objects. Do not rotate. |
+| `33` `ARTIFACT-CORRUPT` | age got past the header — **the key worked** — and then failed: a payload chunk that would not authenticate, or an artifact that ran out of bytes. ⚠ The same code carries a **second** message for a damaged header MAC, where age proved the key and never read a payload byte. Read the sentence, not just the number. | 🔴 **the backup is TAMPERED/CORRUPT/TRUNCATED.** Check the other retained objects. Do not rotate. |
 | `31` `ARTIFACT-EMPTY` | age exited **zero** on an empty payload (**the key worked**) | the artifact holds nothing; do not rotate |
 | `26` `RESTORE-FAILED` | decrypted fine, the git bundle is bad | artifact fault; do not rotate |
 
@@ -412,20 +412,57 @@ which is every artifact this subsystem produces. Left alone, that reported a
 TAMPERED backup as `25` — the row that points at your key.
 
 The distinction **survives**, but on weaker footing: it is now taken primarily
-from age's own refusal message (`failed to decrypt and authenticate payload
-chunk` vs `no identity matched any of the recipients` vs `failed to read
-header`), which is byte-identical on v1.3.1 and v1.3.2. File presence is kept as
-a second signal — still **sufficient**, no longer **necessary**. Both are
-combined in `escrow-verify.py`; the classification itself is
-`restore-verify.py::classify_age_refusal`.
+from age's own refusal message, which is byte-identical on v1.3.1 and v1.3.2.
+File presence is kept as a second signal — still **sufficient**, no longer
+**necessary**. Both are combined in `escrow-verify.py`; the classification itself
+is `restore-verify.py::classify_age_refusal`.
+
+🔴 **THE FIRST VERSION OF THAT TABLE HAD THREE ENTRIES AND MISSED THREE ORDINARY
+FAULTS (corrected 2026-09-09).** An adversarial audit of the change above drove
+really-damaged artifacts through the real verifier on both age versions and found
+that a flipped header-MAC bit, a payload stripped to nothing, and a payload
+truncated to 8 bytes each produce a refusal none of the three entries named — so
+they landed in the *"CANNOT SAY WHY"* message, which told the operator age had
+probably reworded when the artifact was simply damaged. The table is now keyed on
+**where age got to**, which is the thing the verdict actually turns on:
+
+| age said | reached | classification |
+|---|---|---|
+| `no identity matched any of the recipients` | no identity shown to work | pre-auth → `25` |
+| `failed to read header`, `failed to parse X25519 recipient`, `invalid X25519 recipient block` | no identity shown to work | pre-auth → `25` |
+| `bad header MAC` | **a stanza unwrapped** — the key WORKS — but the header failed its integrity check | key proven → `33` |
+| `failed to decrypt and authenticate payload chunk` | **past the header** | post-auth → `33` |
+| `failed to read nonce`, `unexpected EOF`, `last chunk is empty` | **past the header** | post-auth → `33` |
+
+🔴 **`bad header MAC` is the one to read twice.** It was filed pre-auth in the
+first draft of this table, where row `25` tells the operator *"the escrowed
+identity does not match … if none open, the key is the likely cause"* — a
+rotation-shaped sentence about a key the message vindicates. The discriminating
+control, measured on both versions: decrypt the **same** damaged blob with the
+right identity and with a wrong one — `bad header MAC` vs `no identity matched`.
+age reaches the header's integrity check only after an identity has unwrapped a
+recipient stanza, so that message is positive evidence the escrow **works**. It
+gets `33` with its own sentence, because `33`'s usual wording asserts age
+*authenticated* the header, which is what a MAC failure means it did not.
+
+The pre-auth/post-auth split is measured, not reasoned: age authenticates the
+whole header before it reads the nonce, so truncating *inside* the header and
+truncating *after* it produce disjoint messages (every in-header truncation
+carries `failed to read header`). A post-auth refusal therefore proves the
+escrowed identity opened the header, which is exactly what `33` claims. Note the
+first line of `classify_age_refusal`'s marker tuple order is load-bearing for
+this: age's in-header EOF messages nest the post-auth clause inside the pre-auth
+one, so the pre-auth markers are matched first.
 
 ⚠ **Say plainly what that costs:** a substring match on another tool's prose is
 weaker than the phase observation it replaced, and this subsystem's own design
 notes argue against exactly that shape. The mitigation is that an
-**unrecognised** message is its own outcome — the verifier then says it *cannot
-say why* and names all three causes, rather than picking one. If you ever see
-that sentence, age has reworded: teach `classify_age_refusal` the new string
-rather than acting on a guess.
+**unrecognised** message is still its own outcome — the verifier then says it
+*cannot say why* and names all three causes, rather than picking one. If you see
+that sentence, age has said something no measured fault produces: teach
+`classify_age_refusal` the new string rather than acting on a guess. ⚠ And do not
+read "no measured fault reaches it" as "nothing can" — that is a claim about a
+sweep, and the sweep above is what the previous one's wording got wrong.
 
 ⚠ It cannot unlock the vault and will not try: every `bw` call runs with stdin on
 `/dev/null`, `--nointeraction`, and a timeout, so an unattended run **fails fast

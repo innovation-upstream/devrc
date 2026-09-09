@@ -52,6 +52,23 @@
 #                      hang someone reads as "still going".
 #     --log-dir DIR    where full logs land (default: a mktemp -d).
 #
+# Env:
+#   DEVRC_GATE_TIMEOUT    default for --timeout, in seconds (default 3600). The
+#                         flag wins over it.
+#   DEVRC_GATE_NO_REEXEC  =1 to run against the ambient PATH instead of
+#                         re-entering `nix develop`. See the RE-EXEC block.
+#   DEVRC_GATE_ENV        =1 means "already inside a sanctioned gate
+#                         environment", set by the flake's own shellHook. It is
+#                         what the re-exec below tests for, and what the GATE
+#                         banner means when it says "not in a gate environment".
+#   DEVRC_GATE_REEXEC     =1 is the re-exec loop guard, set BY this script on
+#                         the way into `nix develop`. Setting it by hand
+#                         suppresses the re-exec exactly once, which is not what
+#                         DEVRC_GATE_NO_REEXEC does and is rarely what you want.
+#   PYTEST_CURRENT_TEST   read, not set: its presence means "we are running
+#                         inside a pytest process", which suppresses the re-exec
+#                         so a nested run cannot re-enter `nix develop`.
+#
 # Exit: 0 = every selected tier passed and agreed with its own content.
 #       1 = a tier genuinely failed.
 #       2 = a usage/precondition problem in this script.
@@ -65,6 +82,21 @@
 # a seam for tests, not a supported way to run the gate.
 
 set -uo pipefail
+
+# 🔴 RESOLVE OUR OWN PATH BEFORE ANYTHING CAN `cd`. `${BASH_SOURCE[0]}` is
+# whatever the caller typed, and `cd <repo>/scripts && bash gate.sh` types a
+# RELATIVE one. The re-exec below runs AFTER `cd "$ROOT"`, where that relative
+# path no longer resolves — measured: `exec nix develop <repo> --command bash
+# gate.sh …` died `bash: gate.sh: No such file or directory`, rc=127, with no
+# GATE block, no RESULT line and no instruction, i.e. outside this script's
+# entire documented exit set. Before the re-exec existed the same invocation
+# printed a correct, actionable FATAL. Resolving once, here, is what makes
+# GATE_SELF safe to use from any working directory later in the file.
+GATE_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/$(basename "${BASH_SOURCE[0]}")"
+if [ ! -f "$GATE_SELF" ]; then
+  echo "gate: FATAL — cannot resolve my own path from '${BASH_SOURCE[0]}'" >&2
+  exit 2
+fi
 
 TIER="both"
 SET="hermetic"
@@ -82,7 +114,10 @@ while [ $# -gt 0 ]; do
     --timeout=*) TIMEOUT="${1#*=}"; shift ;;
     --log-dir) LOG_DIR="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
     --log-dir=*) LOG_DIR="${1#*=}"; shift ;;
-    -h|--help) sed -n '2,70p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # Print the header comment up to the first line of code, rather than a
+    # hardcoded range: `2,70p` silently truncated --help the moment the header
+    # grew, which is a help text that lies about the flags it documents.
+    -h|--help) awk 'NR>1 { if ($0 !~ /^#/) exit; print }' "$GATE_SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) ROOT="$1"; shift ;;
   esac
 done
@@ -132,8 +167,8 @@ unset "${DEVRC_GIT_REPO_POINTERS[@]}"
 unset "${DEVRC_GITENV_CONTROL_VARS[@]}"
 
 if [ -z "$ROOT" ]; then
-  ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null || true)"
-  [ -n "$ROOT" ] || ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  ROOT="$(git -C "$(dirname "$GATE_SELF")" rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$ROOT" ] || ROOT="$(cd "$(dirname "$GATE_SELF")/.." && pwd)"
 fi
 cd "$ROOT" || { echo "gate: FATAL — cannot cd to ROOT=$ROOT" >&2; exit 2; }
 
@@ -144,6 +179,84 @@ if [ -z "$LOG_DIR" ]; then
   LOG_DIR="$(mktemp -d -t devrc-gate-XXXXXX)"
 fi
 mkdir -p "$LOG_DIR" || { echo "gate: FATAL — cannot create log dir $LOG_DIR" >&2; exit 2; }
+
+# --- IS THIS A NESTED INVOCATION? ----------------------------------------------
+# GATE_NESTED — "we are inside a pytest process". Same nesting signal
+# `run-tests.sh` uses to force nested runs serial, and inherited by child
+# processes (measured there, serial and under xdist), so it catches a test
+# spawning this script through a wrapper no seam variable touches. It is the one
+# thing keeping the re-exec below out of a nested run.
+#
+# 🔴 THE RUNNER SEAMS NO LONGER SUPPRESS THE RE-EXEC, AND THAT IS A FIX. There
+# used to be a second flag here — GATE_SEAMED, "a test is driving this script
+# against a fake runner" — sitting FIRST in the re-exec condition. Every test
+# that drives this script sets those seams, so that short-circuit fired in all
+# of them and the three guards behind it were never evaluated by anything.
+# Measured, one mutation at a time against the whole file: deleting the
+# DEVRC_GATE_NO_REEXEC guard, the DEVRC_GATE_ENV guard, or the
+# DEVRC_GATE_REEXEC loop guard each left every test PASSING. A guard no test can
+# reach pins nothing, and the loop guard is the one whose failure mode this file
+# itself calls an unkillable fork bomb.
+#
+# GATE_NESTED alone still keeps the re-exec out of every ordinary suite run,
+# because PYTEST_CURRENT_TEST is set in all of them; a test that wants to reach
+# the guards now has to pop it deliberately, which is exactly the opt-in the
+# seams were silently providing to everybody.
+GATE_NESTED=0
+[ -n "${PYTEST_CURRENT_TEST:-}" ] && GATE_NESTED=1
+
+# --- RE-EXEC INTO THE REPO'S OWN DEV SHELL -------------------------------------
+# 🔴 WHY. `run-tests.sh` refuses to run outside an environment carrying its
+# REQUIRED_TOOLS, and prints the exact `nix develop …` line that fixes it.
+# MEASURED 2026-09-08 across every gate log dir still on this box: 101 of 382
+# runs (26%) died on that FATAL — `logrotate dash` missing — with the pytest
+# tier never starting. Each was a human or an agent typing `scripts/gate.sh`,
+# reading the instruction, and typing it again with the prefix; 91 of the 101
+# ran the node tier anyway, paying that suite twice.
+#
+# ⚠ AN EARLIER VERSION OF THIS COMMENT SAID "100 of 100", AND THAT NUMBER WAS AN
+# ARTEFACT OF HOW THE POPULATION WAS SELECTED. LOG_DIR defaults to
+# `mktemp -d -t devrc-gate-XXXXXX`, so a run INSIDE `nix develop` lands under
+# nix's per-shell TMPDIR and a run OUTSIDE it lands in bare /tmp. Globbing
+# `/tmp/devrc-gate-*` therefore selects exactly the runs launched outside the
+# dev shell — the failing kind, by construction — and 100% of them failing says
+# nothing beyond that. Counting both locations: outside, 101 dirs / 101 FATALs;
+# inside, 281 dirs / 0. 26% is the honest figure, and it is still roughly one
+# gate invocation in four thrown away on an instruction the script can follow
+# itself.
+#
+# The message was never wrong; making a correct instruction be re-typed by hand
+# is the defect. So: if we are not already in a sanctioned gate environment and
+# the repo has a flake, re-enter it and run the SAME arguments there.
+#
+# 🔴 THE RE-EXEC IS FULLY RESOLVED, NOT `"$@"`. ROOT may have been derived from
+# the script's own location rather than typed, and LOG_DIR may be a mktemp dir
+# this process just created — replaying the original argv would re-derive both
+# INSIDE the new shell, where `mktemp` honours nix's per-shell TMPDIR and would
+# silently choose a DIFFERENT log dir from the one just announced. Passing the
+# resolved values through makes the inner run land exactly where the outer one
+# said it would.
+#
+# 🔴 LOOP GUARD. `DEVRC_GATE_ENV=1` comes from the flake's shellHook, so the
+# normal exit condition is that the inner run sees it. If that hook ever stops
+# setting it, this would re-exec forever; `DEVRC_GATE_REEXEC` is set by US and
+# breaks the cycle on the second pass regardless. Belt and braces, because the
+# failure mode of getting it wrong is an unkillable fork bomb rather than a
+# wrong answer. Opt out entirely with DEVRC_GATE_NO_REEXEC=1.
+if [ "$GATE_NESTED" -eq 0 ] \
+   && [ "${DEVRC_GATE_NO_REEXEC:-0}" != "1" ] \
+   && [ "${DEVRC_GATE_ENV:-0}" != "1" ] \
+   && [ "${DEVRC_GATE_REEXEC:-0}" != "1" ] \
+   && [ -f "$ROOT/flake.nix" ] \
+   && command -v nix >/dev/null 2>&1; then
+  echo "gate: not in a gate environment (DEVRC_GATE_ENV unset) — re-entering \`nix develop $ROOT\`."
+  echo "gate: (set DEVRC_GATE_NO_REEXEC=1 to run against the ambient PATH instead)"
+  export DEVRC_GATE_REEXEC=1
+  # `exec`, so there is no wrapper process to swallow the inner status — the
+  # whole point of this script is that its own exit code is readable.
+  exec nix develop "$ROOT" --command bash "$GATE_SELF" \
+      --tier "$TIER" --set "$SET" --timeout "$TIMEOUT" --log-dir "$LOG_DIR" "$ROOT"
+fi
 
 # `timeout` is not universally present (busybox coreutils on this box provide
 # it, the nix sandbox provides GNU's). Degrade LOUDLY rather than silently
