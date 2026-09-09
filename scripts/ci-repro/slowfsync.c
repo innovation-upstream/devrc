@@ -17,21 +17,62 @@
  * stall short and print an identical line, turning an under-delivered stall
  * into a PASSING run that reads as "not reproducible".
  *
+ * 🔴 `SLOWFSYNC_SKIP_TMPFS=1` — THE FILESYSTEM-AWARE MODE, AND IT EXISTS
+ * BECAUSE THE DEFAULT MODE CANNOT MEASURE A SITING FIX AT ALL. This shim
+ * intercepts fsync(2) in libc, so it stalls whatever the fd is backed by. That
+ * is right for "does a slow fsync fail this test" and WRONG for "does siting
+ * the store off the contended disk fix it": with the default mode both arms of
+ * that comparison go red, and the red on the fixed arm is the shim's, not the
+ * code's. The mechanism the README documents is *device* contention — an fsync
+ * on tmpfs has no backing device to wait for and does not block — so this mode
+ * models the mechanism instead of modelling "every fsync is slow": an fd whose
+ * filesystem reports TMPFS_MAGIC is passed straight through.
+ *
+ * Two properties of that pass-through are deliberate:
+ *   * it does NOT consume the one-shot latch, so a later fsync on a real disk
+ *     still gets the full stall. A pass-through that spent the latch would turn
+ *     "the store moved to tmpfs" into "the shim ran out of ammunition", which
+ *     is a green that means nothing.
+ *   * a *failing* fstatfs() stalls rather than skips. The conservative
+ *     direction for a reproducer is to fire: a shim that quietly stops firing
+ *     reports a pass.
+ * The stall line prints the fd's fs magic, so which filesystem was stalled is
+ * readable from the run rather than inferred.
+ *
  * Build:  gcc -shared -fPIC -o slowfsync.so slowfsync.c -ldl
  * Use:    LD_PRELOAD=/abs/path/slowfsync.so pytest ...
+ *         SLOWFSYNC_SKIP_TMPFS=1 LD_PRELOAD=... pytest ...
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include <errno.h>
+#include <sys/vfs.h>
+
+/* linux/magic.h is not guaranteed on every toolchain this may be built with,
+ * and the value is a stable part of the kernel ABI. */
+#ifndef TMPFS_MAGIC
+#define TMPFS_MAGIC 0x01021994
+#endif
 
 /* The server under test is multi-threaded, so the latch is atomic: a plain int
  * is a C11 data race and could spend a second 65s stall on another thread. */
 static volatile int stalled = 0;
 
 #define STALL_SECONDS 65
+
+/* The fd's filesystem magic, or 0 when it could not be read. 0 is NOT tmpfs,
+ * so an unreadable fd stalls — see the header comment. */
+static unsigned long fs_magic(int fd) {
+    struct statfs sb;
+    if (fstatfs(fd, &sb) != 0) {
+        return 0UL;
+    }
+    return (unsigned long)sb.f_type;
+}
 
 int fsync(int fd) {
     static int (*real)(int) = NULL;
@@ -50,10 +91,20 @@ int fsync(int fd) {
             return -1;
         }
     }
+    unsigned long magic = fs_magic(fd);
+    if (getenv("SLOWFSYNC_SKIP_TMPFS") != NULL && magic == TMPFS_MAGIC) {
+        /* Deliberately BEFORE the latch, and deliberately loud: a silent skip
+         * is indistinguishable from a shim that never attached. */
+        fprintf(stderr, "[slowfsync] pass-through fsync(%d): tmpfs (magic=0x%lx), "
+                "latch untouched, pid=%d\n", fd, magic, (int)getpid());
+        fflush(stderr);
+        return real(fd);
+    }
     if (!__atomic_test_and_set(&stalled, __ATOMIC_SEQ_CST)) {
         struct timespec t0, t1, rem;
-        fprintf(stderr, "[slowfsync] stalling fsync(%d) for %ds (HANG_TIMEOUT=60), pid=%d\n",
-                fd, STALL_SECONDS, (int)getpid());
+        fprintf(stderr, "[slowfsync] stalling fsync(%d) for %ds (HANG_TIMEOUT=60), "
+                "fs magic=0x%lx, pid=%d\n",
+                fd, STALL_SECONDS, magic, (int)getpid());
         fflush(stderr);
         clock_gettime(CLOCK_MONOTONIC, &t0);
         rem.tv_sec = STALL_SECONDS;
