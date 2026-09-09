@@ -21,46 +21,58 @@ workbench working tree where a `git checkout` would have deleted them unreported
   ancestry (a squash is never an ancestor of its base): all five files present in
   `origin/main`, the two payload files byte-identical to the branch head, and the final
   round-5 `SWITCH_ATTEMPTED` guard present — so the last revision landed, not an earlier one.
-- **#1436 OPEN, head `b3f8bcc3`, branch `chore/journald-followup-corrections`, worktree
-  `~/workspace/devrc-followup`** — the follow-up corrections. 🔴 **Do NOT merge it on the
-  previous session's say-so: its gate is RED and could not be cleared.** See the ranked list.
+- **#1436 OPEN, head `a1a37280`, branch `chore/journald-followup-corrections`, worktree
+  `~/workspace/devrc-followup`, `mergeable: MERGEABLE`.**
+- 🔴 **The head MOVED this session, and the previous session's evidence does NOT cover it.**
+  #1436 was **19 commits behind** `origin/main` at `807f98f0`. `origin/main` was merged in
+  (clean, no conflicts) and pushed as `a1a37280`, so the branch is now **0 behind / 3 ahead**
+  and the tree being gated IS the PR head. Those 19 commits added **~7,283 lines across 36
+  files**, mostly new tests (`test_subsystem_store_api.py` +1246, `test_fans_detail.py` +694,
+  `test_tmux_oom_protection_staged.py` +492, `test_handoff_index.py` +623). Any verdict taken
+  against `807f98f0` — including the previous session's targeted 861-test run — is a claim
+  about a tree that no longer exists.
+- **Semantic-conflict check on the merge: done, negative.** The two files #1436 touches
+  (`claudedocs/handoff-journald-26-11-migration.md`, `scripts/diagnose-nix-disk.sh`) are
+  touched by **none** of the 19 commits (`git log HEAD..origin/main -- <the two paths>` →
+  empty). The one plausible disjoint-file interaction was checked by hand rather than assumed:
+  `main` modified `scripts/tests/test_runtime_shebangs.py` (+16) while our side modifies a
+  `.sh` file — the change is **allowlist entries for `test_nebula_relay_apply.py` only**, and
+  `diagnose-nix-disk.sh` carries the required `#!/usr/bin/env bash`. No interaction.
+- **IN FLIGHT: `scripts/gate.sh --tier both` on the merged tree `a1a37280`**, background id
+  `bca7cvlbp`, run log `<scratchpad>/gate-run.txt`, tier logs `<scratchpad>/gate-logs/`.
+  Launched with **`--timeout 14400`** (4h) instead of the 3600s default. Invocation avoids a
+  `cd` by using gate.sh's ROOT positional:
+  `nix develop <worktree> --command <worktree>/scripts/gate.sh --tier both --timeout 14400 --log-dir <dir> <worktree>`.
+- **The sandbox tier has NOT been run on this branch.** `nix build
+  .#checks.x86_64-linux.pytests` and `…nodetests` are still pending, and must run **one at a
+  time and after gate.sh finishes** — concurrent nested `nix` contends on the store and
+  produces measured FALSE failures.
 - **The journald migration is APPLIED and VERIFIED on the workbench** (unchanged): live
   `/etc/systemd/journald.conf` = `[Journal]` / `Audit=keep` / `SystemMaxUse=2G`;
   `/run/current-system` → `nixos-system-nixos-26.11pre1068949.dc5d91f84032`.
-- **#1412's gate: BOTH TIERS PASS** on the merged tree `53d8b962` (branch merged with
-  `origin/main` at `efa9a0fc`) — the tree that became the squash. Dev-host: pytest
-  `collected=21164 passed=21162 skipped=2 failed=0` (floor 20342), node `1449/1449`.
-  Sandbox `nix build .#checks.x86_64-linux.{pytests,nodetests}` ONE AT A TIME: both
-  `RESULT: PASS (exit=0)`, 0 timeout panics.
-- **#1436's gate: RED, on LOAD, not on the change.** Two consecutive `gate.sh --tier both`
-  runs hit the 3600s timeout and were `Terminated` (`exit=124`, `RESULT: FAIL (exit=143)`).
-  Evidence it is load: node `1449/1449 PASS` on both; every pytest target that completed
-  passed; load average **72 → 92** across the two runs with 257 concurrent `python3.12`
-  and 54 other Claude session wrappers on the box. Targeted substitute run: **861 passed,
-  0 failed** across every test in `scripts/tests/` that reads either path the diff touches
-  (found by `grep -rl`, not hand-picked). That is a NARROWER claim than "the gate passed".
-- **Audit: 5 rounds on #1412, `/audit-pr`.** Four blockers, THREE introduced by the
-  previous round's own fix. Ladder stopped on the prose-payload criterion (payload trend
-  489 → 148 → 90 → 42), reasoning recorded in commit `4bd146a3`.
-- **No clawgate task.** `clawgate_handoff.sh resolve` → rc 5. An unknown session id answers
-  200 with an EMPTY ARRAY, so this cannot distinguish "touched no task" from "wrong id" —
-  not a clean bill of health, and no `clawgate-task:` field is recorded.
-- No claims held (`claim-work`).
+- **Claim held: `journald-26-11-migration-1`** (`claim-work`), subject "rank 1: gate both
+  tiers on the MERGED tree for devrc#1436 once the box is quiet, then merge". **Release it**
+  (`claim-work --release journald-26-11-migration-1`) when #1436 merges or the work is abandoned.
+- **No clawgate task.** `clawgate_handoff.sh resolve` → **rc 5**, positive control green (8
+  links for another session, so the board was genuinely read). An unknown session id also
+  answers 200 with an EMPTY ARRAY, so this cannot distinguish "touched no task" from "wrong
+  id" — not a clean bill of health, and no `clawgate-task:` field is recorded.
 
 ## Next steps (ranked)
-1. **Run `scripts/gate.sh --tier both` on a QUIET box, then `nix build
-   .#checks.x86_64-linux.pytests` and `…nodetests` ONE AT A TIME, then merge #1436.**
-   Check `cat /proc/loadavg` first — both prior attempts died at load 72-92 from other
-   sessions. `IN FLIGHT: devrc#1436`.
+1. **Read the running gate's verdict, then run the two sandbox derivations ONE AT A TIME, then
+   merge #1436.** `<scratchpad>/gate-run.txt` (`GATE_RC=`) and `<scratchpad>/gate-logs/{pytest,node}.log`;
+   then `nix build .#checks.x86_64-linux.pytests` and `…nodetests` separately — never in one
+   invocation. Name the tier **and the base sha `a1a37280`** in the claim. On merge, release
+   `claim-work --release journald-26-11-migration-1`. `IN FLIGHT: devrc#1436`.
    forcing: gate — #1436 carries a retraction of a false claim currently live on `main`
-   (`diagnose-nix-disk.sh`'s header understates its runtime by ~an order of magnitude),
-   and nothing else blocks the merge since `main` is protected in name only.
-2. **Decide whether `scripts/diagnose-nix-disk.sh` should exist at all — BEFORE measuring
-   its runtime.** The index records it as superseded by `scripts/diagnose-disk-accounting.sh`,
+   (`diagnose-nix-disk.sh`'s header understates its runtime by ~an order of magnitude), and
+   `main` is protected in name only, so nothing else blocks the merge.
+2. **Decide whether `scripts/diagnose-nix-disk.sh` should exist at all — BEFORE measuring its
+   runtime.** The index records it as superseded by `scripts/diagnose-disk-accounting.sh`,
    and that successor's header names it as the thing being corrected (its unprivileged `find`
    yields floors read as totals). Deleting it is the likely right answer; if it stays, its
    header must point at the successor. Only if it stays is a clean runtime run worth doing.
-   forcing: none — but this INVERTS the previous version of this list, which said to measure
+   forcing: none — but this INVERTS an earlier version of this list, which said to measure
    the runtime. Measuring a script that should be deleted is the wrong work.
 3. **Migrate the laptop's journald config.** It carries
    `services.journald.extraConfig = "SyncIntervalSec=30s";` at `configuration.nix:370`
@@ -76,13 +88,10 @@ workbench working tree where a `git checkout` would have deleted them unreported
    built by an auditor caught a branch-ordering hazard in seconds and does not exist in the
    repo. This is why that defect class recurred four times.
    forcing: none
-5. **Measure the `sudo $HOME` question** — `sudo printenv HOME` on the workbench. Round 4's
-   NEW-3 fix (resolving section 8's home from `SUDO_USER`) is inference from `sudoers(5)`
-   plus nixpkgs not building sudo with `--with-always-set-home`, NOT a measurement. The fix
-   is correct either way; only the justification is unverified.
-   forcing: none
-6. **The two live gnome renames** at `/etc/nixos/configuration.nix:361-362`, exact edit in
-   the Gotchas section. Deliberately NOT scripted — see that entry before reversing it.
+5. **Fix the three deprecated-option warnings** surfaced by the 26.11 eval of
+   `/etc/nixos/configuration.nix`: `services.dnsmasq.servers` → `.settings.server`,
+   `services.gnome.tracker.enable` → `.tinysparql.enable`,
+   `services.gnome.tracker-miners.enable` → `.localsearch.enable`. They still work today.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -182,26 +191,60 @@ workbench working tree where a `git checkout` would have deleted them unreported
   is commented out at `configuration.nix:71`. It came from an eval warning true when
   captured — `/etc/nixos` changed underneath it — and a too-narrow first grep missed it.
 
+- 🔴 **A gate red at `exit=124` / `RESULT: FAIL (exit=143)` is `Terminated`, NOT a verdict on
+  the change.** It means the tier hit `gate.sh`'s wall-clock cap. Reporting it as a failing
+  test sends the next session to debug a diff that was never evaluated. The cap is a supported
+  knob — `--timeout SECS` or `DEVRC_GATE_TIMEOUT`, `0` disables — so a loaded box is a reason
+  to **raise the cap**, not to conclude anything about the code.
+- **Waiting for a quiet box is not a plan on this host, and that is now MEASURED, not assumed.**
+  Load sat at a ~88 plateau with 12 other full suites running; the 15-min average was still
+  climbing. Sample `/proc/loadavg` several times and read the 1-min against the 5-min before
+  deciding a load figure is a spike worth waiting out.
+- **`gate.sh` takes a ROOT positional**, so it can be run against a worktree with no `cd` —
+  which matters because the Bash guard blocks `cd <path> && …`. Same for `--log-dir`, which
+  keeps the tier logs somewhere you can still read after the run.
+- **Decision: #1436 was brought up to date by MERGE, not rebase, and pushed.** Rationale: it
+  makes the gated tree and the PR head the same object, so the two-tier claim is about the
+  tree that actually merges rather than about a branch 19 commits behind it. The merge commit
+  disappears in the squash anyway. Cost: the PR's own diff is unchanged (2 files), but its
+  head is new, so Tekton re-runs.
+- 🔴 **A `.sh` change plus a `main` that edited `test_runtime_shebangs.py` is exactly the
+  "disjoint files are not safety" shape** — no shared file, and still a possible break, because
+  one side can widen a scan while the other adds something for it to catch. It was clean here,
+  but it was *checked*, not assumed; `git log HEAD..origin/main -- <paths>` answers only the
+  textual half of that question.
+- **`core.hooksPath` was re-measured immediately before the push** (empty, local and global)
+  rather than trusted from earlier in the session — a pre-push hook that runs the suite inside
+  the worktree would have collided with the gate running in that same worktree.
+
 ## How to verify
 ```bash
-# the migration is live on the workbench (three separate claims)
-grep -A3 'services\.journald' /etc/nixos/configuration.nix
-cat /etc/systemd/journald.conf                 # expect SystemMaxUse=2G and Audit=keep
+# the running gate's verdict — read the CONTENT, never an exit code alone
+S=<scratchpad>
+grep -E 'GATE_RC=|RESULT:|panic: test timed out' $S/gate-run.txt $S/gate-logs/*.log
+
+# the sandbox tier Tekton gates on — ONE AT A TIME, never in one invocation
+nix build ~/workspace/devrc-followup#checks.x86_64-linux.pytests
+nix build ~/workspace/devrc-followup#checks.x86_64-linux.nodetests
+
+# the gated tree is the PR head (expect the same sha on both sides)
+git -C ~/workspace/devrc-followup rev-parse HEAD
+gh pr view 1436 --repo innovation-upstream/devrc --json headRefOid --jq .headRefOid
+
+# the branch is not behind main (expect "0<TAB>3")
+git -C ~/workspace/devrc-followup rev-list --left-right --count origin/main...HEAD
+
+# the migration is live on this host (all three are separate claims)
+grep -A2 'services\.journald' /etc/nixos/configuration.nix
+cat /etc/systemd/journald.conf                 # expect SystemMaxUse=2G
 readlink -f /run/current-system                # expect nixos-system-nixos-26.11pre…
 
 # the rewriter's suite (37 tests, every audit-found edge case)
 nix develop ~/workspace/devrc -c python3 -m pytest \
   ~/workspace/devrc/scripts/tests/test_journald_migrate.py -q
 
-# #1412 landed by CONTENT (a squash is never an ancestor — do not check ancestry)
+# #1412 landed by CONTENT (a squash is never an ancestor — do NOT check ancestry)
 git -C ~/workspace/devrc cat-file -e origin/main:scripts/lib/journald_migrate.py && echo present
-
-# before merging #1436 — check the box is quiet FIRST, both prior attempts died on load
-cat /proc/loadavg
-nix develop ~/workspace/devrc-followup -c bash -c \
-  'cd ~/workspace/devrc-followup && ./scripts/gate.sh --tier both'
-nix build ~/workspace/devrc-followup#checks.x86_64-linux.pytests --no-link -L
-nix build ~/workspace/devrc-followup#checks.x86_64-linux.nodetests --no-link -L
 ```
 ## Open investigations — live diagnosis state
 
@@ -254,3 +297,28 @@ nix build ~/workspace/devrc-followup#checks.x86_64-linux.nodetests --no-link -L
   file during the run:
   `cp scripts/diagnose-nix-disk.sh /tmp/diag-frozen.sh && time bash /tmp/diag-frozen.sh > /tmp/diag.txt 2>&1; grep -c '^=== ' /tmp/diag.txt`
   Expect 10. Then replace the runtime paragraph in the script's header with the real number.
+
+### Can #1436's gate be run to completion on this box at all?
+- **Symptom + exact repro:** two prior `gate.sh --tier both` runs died at the **3600s default
+  cap** — `exit=124`, `RESULT: FAIL (exit=143)`, i.e. `Terminated`, not a test failure.
+- **Observed (with values):** load is a **sustained plateau, not a spike**. Sampled every 20s
+  over two minutes: `86.70 / 97.43 / 94.76 / 93.00 / 92.34 / 87.02`, with 1-min ≈ 5-min ≈ 88
+  and the 15-min average *climbing* 75.23 → 77.19. Box has **24 cores**. Concurrent workload
+  measured at the same moment: **12** full-suite runs matching `pytest scripts/tests -q`,
+  **92** `python3.12` processes, **131** processes matching `claude`. Node tier passed
+  `1449/1449` under this load on **both** prior attempts; every pytest target that completed
+  passed. So the failure is the wall-clock cap, not the change.
+- **Ruled out:** "wait for the box to go quiet" as a viable plan — each of the 12 competing
+  sessions is itself running a ~1h suite, so the plateau is self-sustaining and load never
+  approached the ~5 the operator asked for. `via: measurement`
+- **Ruled out:** the change itself as the cause of the red — node passed twice under identical
+  load and no pytest target reported a failure. `via: measurement`
+- **Leading hypothesis:** the suite simply takes longer than 3600s at ~3.4x contention
+  slowdown, so raising the cap is sufficient. `DEVRC_GATE_TIMEOUT` / `--timeout SECS` is a
+  supported knob (`0` disables); the current run uses 14400.
+- **Next probe:** read `<scratchpad>/gate-run.txt` for the `GATE_RC=` line and the two
+  `RESULT:` lines. 🔴 **Three outcomes are NOT "the tests failed"**: `exit=124` /
+  `RESULT: FAIL (exit=143)` = hit the 4h cap (still could-not-gate, report as such, do not
+  debug the diff); gate **exit 90** = status/content disagreement or a truncated run, meaning
+  "read the log", not a verdict; a `panic: test timed out` line anywhere. Only a clean
+  `RESULT: PASS (exit=0)` on both tiers is a verdict.
