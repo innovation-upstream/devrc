@@ -1637,11 +1637,27 @@ def test_a_terminal_that_cannot_be_SPAWNED_says_so(monkeypatch):
 # because the two properties that matter most are properties of fzf's ALGORITHM
 # and would survive any argv check unchanged.
 # --------------------------------------------------------------------------- #
-def _fzf_available() -> bool:
-    return shutil.which("fzf") is not None
+def _require_fzf() -> None:
+    """🔴 NOT a `skipif`, and that was MEASURED rather than chosen on principle.
+
+    These four were `@pytest.mark.skipif(shutil.which("fzf") is None)` first. On
+    the dev host fzf is on PATH and all four ran; in the nix check sandbox — the
+    tier the merge is actually gated on — all four SKIPPED, and `run-tests.sh`
+    failed the derivation on the unpinned skips. Which is the guard doing its
+    job: the authoritative tier had zero coverage of the single property this
+    whole change exists for, and a `skipif` is what made that silent.
+
+    So fzf is declared in `run-tests.sh` REQUIRED_TOOLS and in flake.nix
+    `gateTools` (both, spelled differently — binary vs package), and its absence
+    is an environment fault to fix there, never a skip here.
+    """
+    assert shutil.which("fzf") is not None, (
+        "fzf is not on PATH. The mention picker IS fzf, so this is a broken "
+        "environment, not a reason to skip: add it to REQUIRED_TOOLS in "
+        "scripts/run-tests.sh and pkgs.fzf to gateTools in flake.nix, or enter "
+        "the repo's dev shell (`nix develop`), which carries both.")
 
 
-@pytest.mark.skipif(not _fzf_available(), reason="fzf is not on PATH")
 def test_REAL_fzf_ranks_the_eponymous_repo_FIRST_under_tiebreak_end():
     """🔴 THE MEASUREMENT THE SWAP IS FOR, RE-RUN AS A TEST, on a corpus of the
     SAME SHAPE as the operator's (an owner whose name is also one of its repos,
@@ -1652,6 +1668,7 @@ def test_REAL_fzf_ranks_the_eponymous_repo_FIRST_under_tiebreak_end():
     which is the NEGATIVE CONTROL: an assertion that only checked "rank 1 with
     the flag" would pass against an fzf that ranked it first regardless, and
     would then not be measuring the flag at all."""
+    _require_fzf()
     rows, target = _eponymous_corpus()
     plain = _fzf_rank(rows, "nimbusworks", target)
     tiebreak = _fzf_rank(rows, "nimbusworks", target, "--tiebreak=end")
@@ -1662,7 +1679,6 @@ def test_REAL_fzf_ranks_the_eponymous_repo_FIRST_under_tiebreak_end():
     assert tiebreak == 1, f"--tiebreak=end ranked it {tiebreak}, not 1"
 
 
-@pytest.mark.skipif(not _fzf_available(), reason="fzf is not on PATH")
 def test_REAL_fzf_does_not_reorder_rows_when_the_query_is_EMPTY():
     """🔴 THE CLAWGATE ROW MUST STAY FIRST. A bare `#N` offers the clawgate task
     and then the pane's repo, and several tests pin that order — but they all
@@ -1670,6 +1686,7 @@ def test_REAL_fzf_does_not_reorder_rows_when_the_query_is_EMPTY():
     operator typed anything. Ranking applies to a SCORED match set; an empty
     query scores nothing, so input order survives. Asserted against the real
     binary because it is a claim about fzf, not about our argv."""
+    _require_fzf()
     rows, _target = _eponymous_corpus()
     out = subprocess.run(["fzf", "--filter", "", "--tiebreak=end"],
                          input="\n".join(rows), capture_output=True, text=True)
@@ -1824,20 +1841,20 @@ def _fzf_interactive_first_row(rows: list[str], query: str) -> str:
     return got.decode("utf-8", "replace").split("\n")[0]
 
 
-@pytest.mark.skipif(not _fzf_available(), reason="fzf is not on PATH")
 def test_REAL_INTERACTIVE_fzf_opens_on_the_FIRST_INPUT_ROW_with_no_query():
     """🔴 THE CLAWGATE ROW, AT THE INSTRUMENT THE OPERATOR ACTUALLY USES. A bare
     `#N` offers the clawgate task first and the pane's repo second, and several
     tests pin that order — every one of them by stubbing `pick`. This is the one
     that presses Enter on a real fzf."""
+    _require_fzf()
     rows, _target = _eponymous_corpus()
     assert _fzf_interactive_first_row(rows, "") == rows[0]
 
 
-@pytest.mark.skipif(not _fzf_available(), reason="fzf is not on PATH")
 def test_REAL_INTERACTIVE_fzf_puts_the_eponymous_repo_under_the_cursor():
     """The ranking claim at the same instrument: with the owner's name typed,
     Enter must open `owner/owner` and not the shortest sibling."""
+    _require_fzf()
     rows, target = _eponymous_corpus()
     got = _fzf_interactive_first_row(rows, "nimbusworks")
     assert f"/{target}/pull/" in got, got

@@ -157,6 +157,19 @@
         # tests drive a REAL tmux on a private `-L` socket, and this entry is what
         # stops them SKIPPING in the check sandbox, where a skip is an error.
         pkgs.tmux
+        # 🔴 fzf, for the SAME reason and it was learned the same way. The
+        # mention picker's ranking (`--tiebreak=end`, the whole point of
+        # replacing rofi) is a property of fzf's ALGORITHM, so the four tests
+        # that pin it run the REAL binary — two through `--filter`, two through
+        # a pty. MEASURED 2026-09-09: without this entry the dev-host tier ran
+        # them and the check sandbox SKIPPED all four, and `run-tests.sh` failed
+        # the derivation on the unpinned skips. That is the guard working: the
+        # authoritative tier would otherwise have carried zero coverage of the
+        # reason this change exists. It is also a PRODUCTION dependency now —
+        # `nix/programs/alacritty/default.nix` puts `pkgs.fzf` on the hint
+        # wrapper's PATH — so the gate environment carrying it is not a
+        # test-only convenience.
+        pkgs.fzf
       ];
     in
     {
