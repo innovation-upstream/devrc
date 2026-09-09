@@ -5029,7 +5029,14 @@ fi
 # and it does not care how much of the target ran. Its forgiveness still
 # requires each pin's own CONDITION to hold — suspending the total does not make
 # an inapplicable pin forgive anything.
-if [ "$SCOPED_MODE" -eq 1 ]; then
+# 🔴 `${SCOPED_MODE:-0}`, NOT `$SCOPED_MODE`. This block is EXTRACTED from this
+# file and executed standalone under `bash -uo pipefail` by
+# test_conditional_skip_pins.py, where this variable does not exist — a bare
+# expansion is an unbound-variable abort there (exit 127), which took FOUR of
+# that file's tests red in the sandbox tier while the dev host never ran them.
+# Identical remedy, and identical reason, to the `${ONLY_TARGETS:-}` a few
+# screens up; I reintroduced the very defect its comment warns about.
+if [ "${SCOPED_MODE:-0}" -eq 1 ]; then
   SCOPED_SUSPENDED+=("GUARD 2's skip TOTAL (observed skips == applicable pins; $pin_expected of ${#EXPECTED_SKIPS[@]} pin(s) would have been counted). The UNPINNED-skip check still ran.")
 elif [ "$TOT_SKIPPED" -ne "$pin_expected" ]; then
   echo "  ERROR: $TOT_SKIPPED test(s) skipped, but $pin_expected of ${#EXPECTED_SKIPS[@]} pinned entries apply here." >&2
@@ -5080,7 +5087,7 @@ for entry in "${NOLAUNCH_SEEN[@]}"; do
     # that does not happen to include one of them intercepts nothing, and that
     # is CORRECT, not a defect. See the SCOPED_SUSPENDED header for the measured
     # reproduction and for why only this half is suspended.
-    if [ "$SCOPED_MODE" -eq 1 ]; then
+    if [ "${SCOPED_MODE:-0}" -eq 1 ]; then
       echo "    $nt  intercepted=$nhits (ACKNOWLEDGED — required direction SUSPENDED: a slice cannot be expected to reach the seam)  systemctl-reads=$reads  plugin=$markers"
       SCOPED_SUSPENDED+=("GUARD 7's REQUIRED direction for $nt (acknowledged targets must intercept >= 1 launcher)")
     else

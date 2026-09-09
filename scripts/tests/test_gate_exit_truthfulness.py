@@ -251,6 +251,10 @@ def test_the_gate_verdict_survives_a_pipe(tmp_path):
     r = _fake_runner(tmp_path / "red.sh", RED_BODY)
     env = {k: v for k, v in os.environ.items() if not k.startswith("DEVRC_GATE_")}
     env["DEVRC_GATE_PYTEST_RUNNER"] = str(r)
+    # gate.sh refuses gate-weakening env vars, and the line above puts one
+    # BACK deliberately — this suite drives the runner seam. See gate.sh's
+    # pre-flight block.
+    env["DEVRC_GATE_ALLOW_AMBIENT"] = "1"
     proc = subprocess.run(
         ["bash", "-c",
          f"bash {GATE} --tier pytest --log-dir {tmp_path / 'logs'} {REPO_ROOT} 2>&1 | tail -3"],
@@ -284,6 +288,10 @@ def test_the_disagreement_check_is_what_catches_a_lying_runner(tmp_path):
     r = _fake_runner(tmp_path / "liar.sh", RED_BODY.replace("exit 1", "exit 0"))
     env = {k: v for k, v in os.environ.items() if not k.startswith("DEVRC_GATE_")}
     env["DEVRC_GATE_PYTEST_RUNNER"] = str(r)
+    # gate.sh refuses gate-weakening env vars, and the line above puts one
+    # BACK deliberately — this suite drives the runner seam. See gate.sh's
+    # pre-flight block.
+    env["DEVRC_GATE_ALLOW_AMBIENT"] = "1"
     proc = subprocess.run(
         ["bash", str(mutated), "--tier", "pytest", "--log-dir", str(tmp_path / "m"), str(REPO_ROOT)],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120, env=env,
