@@ -23,6 +23,7 @@ import importlib.util
 import json
 import math
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -471,11 +472,24 @@ def test_the_smallest_ACCEPTED_floor_really_does_alarm_at_zero_rpm():
 
 
 def _nix_fan_args():
-    """The `--fan …` arguments nix actually passes, read out of graphical.nix."""
+    """The `--fan …` arguments nix actually passes, read out of graphical.nix.
+
+    🔴 Resolves the `fanArgs` binding. The pill's command no longer spells the
+    mapping — it interpolates ONE binding that is also passed to `fans-detail`,
+    because an audit measured the two drifting apart with 84 of 84 tests green.
+    A scan of the raw command string now finds no `--fan` at all, so this must
+    substitute the binding or it silently reports an empty mapping.
+    """
     nix = (SCRIPTS.parent / "nix" / "graphical.nix").read_text()
     m = re.search(r'command = "\$\{scriptsDir\}/i3status-fans([^"]*)"', nix)
     assert m, "fansBlock's `command =` line not found in nix/graphical.nix"
-    return m.group(1).split()
+    raw = m.group(1)
+    b = re.search(r'fanArgs = "([^"]+)"', nix)
+    assert b, "no `fanArgs` binding in nix/graphical.nix"
+    raw = raw.replace("${fanArgs}", b.group(1))
+    # shlex: the labels are quoted ('AIO pump=1:500'), so a bare .split() would
+    # cut them in half and every spec would fail to parse.
+    return shlex.split(raw)
 
 
 def test_the_NIX_COMMAND_LINE_parses_and_arms_the_pump_alarm():
@@ -512,4 +526,4 @@ def test_the_nix_command_line_names_the_pump_first():
     space is tight if the order is ever swapped."""
     args = _nix_fan_args()
     first = [a for i, a in enumerate(args) if i and args[i - 1] == "--fan"][0]
-    assert fans.parse_fan(first).label == "pump", first
+    assert "pump" in fans.parse_fan(first).label.lower(), first
