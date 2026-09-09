@@ -118,8 +118,8 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED and every control ok. The floor catches COLLAPSE, not growth.
-# `run-tests.sh`'s own floor formula is `m - min(50, max(1, m/20))`; at m=13
-# that is 12. It catches COLLAPSE, not growth — losing one test still clears it,
+# `run-tests.sh`'s own floor formula is `m - min(50, max(1, m/20))`; at m=15
+# that is 14. It catches COLLAPSE, not growth — losing one test still clears it,
 # losing two reports HARNESS BROKE.
 #
 # 🔴 THIS FLOOR DOES NOT TRACK THE MODULE — RE-DERIVE IT WHEN YOU ADD A TEST.
@@ -127,7 +127,16 @@ ROWS=0
 # gap it tolerated silently widened from one test to three. Nothing failed; a
 # floor that is too LOW never complains, which is exactly why it goes unnoticed.
 # Re-derive with the formula above against `--collect-only`, never by memory.
-MIN_TESTS=12
+#
+# 🔴 IT HAPPENED AGAIN, and this is the second occurrence in the same file.
+# The module grew 13 → 15 while this stayed at 12. MEASURED at that setting:
+# deleting BOTH tests the growth added — the carve-out pin and the dispatcher
+# seam guard — left the battery reporting `✅ 21 row(s), all as expected`,
+# rc 0. The battery vouched for a module that had silently lost both guards it
+# was added to protect. A too-low floor is invisible precisely because it never
+# complains, so the only defence is re-deriving it in the same commit that adds
+# a test.
+MIN_TESTS=14
 failing() {
   local out n f total
   # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran" on

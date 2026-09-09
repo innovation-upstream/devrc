@@ -464,10 +464,12 @@ SKILL_NIT_ONLY_STOPS = (
     "writing — filed rather than fixed, so the round that files them is still "
     "the last."
 )
-SKILL_NIT_IS_THE_ONLY_ONE = (
-    "⚠ **That subset is the ONLY thing that cannot extend a ladder — no "
-    "SEVERITY is, and \"deploy-blocking only\" was rejected.** "
-    "`homelab-infra` #702 ran six "
+SKILL_ONLY_THE_NIT_SUBSET_STOPS = (
+    "⚠ **That subset is the only class of FINDING that cannot extend a ladder "
+    "— no SEVERITY is, and \"deploy-blocking only\" was rejected.** The "
+    "attribution gate and the prose escape hatch below end a ladder for "
+    "reasons that are not findings at all; this sentence is about findings "
+    "only. `homelab-infra` #702 ran six "
     "rounds carrying **zero deploy-blockers** while its later rounds kept "
     "catching false claims the previous round's own fix had written: one "
     "guard's rationale went through five successive drafts, each retracted by "
@@ -1106,7 +1108,7 @@ def test_the_nit_carve_out_is_stated_WITH_the_rejection_that_bounds_it():
     _assert_pinned_once(SKILL_MD, SKILL_NIT_ONLY_STOPS, "the nit carve-out")
     _assert_pinned_once(
         SKILL_MD,
-        SKILL_NIT_IS_THE_ONLY_ONE,
+        SKILL_ONLY_THE_NIT_SUBSET_STOPS,
         "the rejection of a deploy-blocking-only ladder",
     )
 
@@ -1130,6 +1132,15 @@ def test_the_carve_outs_cited_clause_still_exists_in_the_dispatcher():
     is `claude/RULES.md` -> spelled-guards: a guard on a WORD passes while the
     hazard exists in another shape. Reading `INVARIANT_CLAUSES` cannot be
     walked that way -- a comment is not a member of the emitted tuple.
+
+    ⚠ "15 passed here" is a claim about THIS MODULE, and the mutant was never a
+    SUITE-level survivor: it kills 5 tests in all, 4 of them in
+    `test_audit_dispatch.py`, which already carries
+    `test_control_a_clause_deleted_from_the_constant_is_detected` for exactly
+    this deletion. What this guard adds is a failure for the SKILL-CITATION
+    reason -- the skill's prose citing an enforcement that no longer ships --
+    not first detection of the deletion. Do not read the row as evidence the
+    suite was blind.
 
     Deliberately the ID and not the clause TEXT -- `test_audit_dispatch.py`
     owns the text pin, and a second copy here would drift against it.

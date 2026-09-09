@@ -157,8 +157,9 @@ one. **A 🟢 that DOES change what a reader does is a finding and the ladder co
 stopping kind as one follow-up task naming the file, closed when its PR merges or a named reader
 dismisses it in writing — filed rather than fixed, so the round that files them is still the last.
 
-⚠ **That subset is the ONLY thing that cannot extend a ladder — no SEVERITY is, and
-"deploy-blocking only" was rejected.**
+⚠ **That subset is the only class of FINDING that cannot extend a ladder — no SEVERITY is, and
+"deploy-blocking only" was rejected.** The attribution gate and the prose escape hatch below end a
+ladder for reasons that are not findings at all; this sentence is about findings only.
 `homelab-infra` #702 ran six rounds carrying **zero deploy-blockers** while its later rounds kept
 catching false claims the previous round's own fix had written: one guard's rationale went through
 five successive drafts, each retracted by the next round. A blocker-keyed ladder ends after round 1,
