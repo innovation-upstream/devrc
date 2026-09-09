@@ -3014,75 +3014,48 @@ def test_parse_runaways_reports_a_BROKEN_detector_as_UNMEASURED_not_as_zero():
     assert not freshness.is_marker(quiet)
 
 
-def test_new_count_counts_only_pids_the_PREVIOUS_poll_did_not_have():
-    """🔴 The toast gates on this, not on `count` — see the `runaways` spec.
+def test_the_runaways_source_has_NO_TOAST_SPEC_because_cpu_monitor_owns_it():
+    """🔴 An ABSENCE is the invariant, so it needs a guard — nothing else fails
+    when a spec is added back, and adding one is the obvious "improvement".
 
-    A `nix build`'s cc1plus legitimately holds 100% for longer than the age
-    gate, so `count` sits pinned and a level latch would never re-arm. Watched
-    RED with `new_count` keyed to `count`: the third case below returned 2.
+    `scripts/cpu-monitor.sh` already toasts this event: `⚠ Runaway process:
+    <comm>` at CRITICAL urgency after a 6-sample sustain, capped by
+    `CPU_MON_MAX_ALERTS_PER_DAY` (default 8), with a `✓ Runaway process cleared`
+    on recovery. A spec here fires a SECOND toast for the same process, at
+    normal urgency, UNCAPPED — measured live: ~7 minutes after cpu-monitor's,
+    on the same `cc1plus`. The cap exists because toast volume was a measured
+    problem (123-267/day cut to 11-32/day), so the duplicate regressed the very
+    thing that fix bought.
     """
-    rows = (_runaway_row(4242, 97.5, "cc1plus"),
-            _runaway_row(4243, 88.25, "node x.js"))
-    report = _syshealth_report(*rows)
-    # nothing seen before -> both are new
-    assert poll.parse_runaways(report, prev_pids=[])["new_count"] == 2
-    # both already announced -> none new, so the latch re-arms
-    assert poll.parse_runaways(report, prev_pids=[4242, 4243])["new_count"] == 0
-    # the pinned one persists, a genuinely new one appears -> exactly ONE
-    assert poll.parse_runaways(report, prev_pids=[4242])["new_count"] == 1
-    # unparseable previous pids are ignored, never counted as absent
-    assert poll.parse_runaways(report, prev_pids=[None, "x", 4242])["new_count"] == 1
+    specs = poll._toast_specs()
+    assert "runaways" not in specs, (
+        "a `runaways` toast spec is back: cpu-monitor.sh already owns this "
+        "event with a sustain, a daily cap and a recovery toast, and this one "
+        "has none of them. If cpu-monitor is being retired, retire it FIRST "
+        "and say so here. specs=%r" % sorted(specs))
+    # The source is still POLLED — this is about the toast, not the pill.
+    assert "runaways" in [n for n, _fn in poll.SOURCES]
+    # Control: the guard can tell the two apart. A source WITH a spec is present.
+    assert "telemetry" in specs and "telemetry" in [n for n, _fn in poll.SOURCES]
 
 
-def test_the_runaways_toast_gates_on_new_count_and_opens_what_the_click_opens():
-    """Pins BOTH halves of the spec, because each was wrong once: it gated on
-    `count` (so a second runaway never toasted) and its action opened Grafana,
-    which has no view of local processes."""
-    spec = poll._toast_specs()["runaways"]
-    assert spec["count_key"] == "new_count", spec
-    assert "grafana" not in spec["action"].lower(), spec
-    # The dispatcher must actually READ that key — a spelled-but-unread
-    # count_key is the defect class this whole change is about.
-    fired = []
-    got = poll.evaluate_edge_toast(
-        "runaways", {"count": 9, "new_count": 0, "detail": "d"}, spec,
-        fire=lambda *a, **k: fired.append(a), read=lambda n: False,
-        write=lambda n, v: None)
-    assert got == (False, False), got
-    assert fired == [], "toasted on count while new_count was 0: %r" % (fired,)
-
-
-def test_the_toast_action_and_the_CLICK_are_the_same_shape():
-    """🔴 Pins a RELATIONSHIP across TWO FILES, because the rule is spelled twice.
-
-    `_syshealth_action()` (Python) and `syshealthCmd` (Nix) cannot be collapsed
-    into one source — one carries store interpolations — so nothing but a test
-    can hold them together, and they HAD already drifted: the toast opened a
-    bare `alacritty -e syshealth`, which closes the instant syshealth prints and
-    exits (~0.16 s), while the click wrapped it in a `read -n 1` hold.
-
-    🔴 Watched RED against that drift, and against the guard this REPLACES.
-    The old assertion was `"syshealth" in spec["action"]` — a check on a WORD,
-    walkable by any string containing it. MEASURED: with the action mutated to
-    `xdg-open http://syshealth.invalid/not-a-terminal` the whole suite stayed
-    at 568 passed, MUTANT SURVIVED. It asserted a relationship its body never
-    inspected: it never opened `graphical.nix` at all. This reads both sides.
+def test_the_runaways_CLICK_still_holds_its_terminal_open():
+    """The click survives the toast's removal and its shape is still
+    load-bearing: `syshealth` prints and exits in ~0.16 s, and `alacritty -e
+    CMD` closes when CMD does, so without the `read -n 1` hold the window
+    flashes and vanishes — indistinguishable from the click doing nothing,
+    which is a defect this pill shipped once already.
     """
-    action = poll._toast_specs()["runaways"]["action"]
     nix = (Path(__file__).resolve().parents[2] / "nix" / "graphical.nix").read_text()
     m = re.search(r'^\s*syshealthCmd\s*=\s*"(?P<cmd>.*)";\s*$', nix, re.M)
     assert m, "syshealthCmd is gone or reshaped in graphical.nix — repin this test"
     click = m.group("cmd")
-    # The three properties that make either one WORK, asserted on BOTH sides.
-    for label, cmd in (("toast action", action), ("click", click)):
-        assert "syshealth" in cmd, (label, cmd)
-        assert cmd.lstrip().startswith("alacritty"), (
-            "%s must run in a TERMINAL — syshealth is a TUI, and i3status-rust "
-            "spawns a click with no controlling tty: %r" % (label, cmd))
-        assert "read -n 1" in cmd, (
-            "%s must HOLD THE WINDOW OPEN — syshealth prints and exits in ~0.16s, "
-            "so `alacritty -e syshealth` flashes and vanishes, which is "
-            "indistinguishable from the click doing nothing: %r" % (label, cmd))
+    assert "syshealth" in click, click
+    assert click.lstrip().startswith("alacritty"), (
+        "the click must run in a TERMINAL — i3status-rust spawns it with no "
+        "controlling tty: %r" % click)
+    assert "read -n 1" in click, (
+        "the click must HOLD THE WINDOW OPEN, or it flashes and vanishes: %r" % click)
 
 
 def test_fetch_runaways_IGNORES_syshealths_EXIT_CODE(monkeypatch, tmp_path):
