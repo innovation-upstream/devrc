@@ -465,8 +465,9 @@ SKILL_NIT_ONLY_STOPS = (
     "the last."
 )
 SKILL_NIT_IS_THE_ONLY_ONE = (
-    "⚠ **Nit is the ONLY severity that cannot extend a ladder — "
-    "\"deploy-blocking only\" was rejected.** `homelab-infra` #702 ran six "
+    "⚠ **That subset is the ONLY thing that cannot extend a ladder — no "
+    "SEVERITY is, and \"deploy-blocking only\" was rejected.** "
+    "`homelab-infra` #702 ran six "
     "rounds carrying **zero deploy-blockers** while its later rounds kept "
     "catching false claims the previous round's own fix had written: one "
     "guard's rationale went through five successive drafts, each retracted by "
@@ -1087,12 +1088,20 @@ def test_the_nit_carve_out_is_stated_WITH_the_rejection_that_bounds_it():
 
     "A nit cannot extend a ladder" invites exactly one next edit -- raise the
     bar to deploy-blocking -- and that is the REJECTED rule. `homelab-infra`
-    #702 ran six rounds carrying zero deploy-blockers, and four of its six
-    findings were a false claim the previous round's own fix had written: a
-    blocker-keyed ladder ends at round 1 and ships all four. Pinning only the
-    carve-out would leave that rejection free to be dropped by the author who
-    finds it verbose -- the same failure `RULES_STOP_CLAUSE` pins its
-    not-a-cap qualifier against.
+    #702 ran six rounds carrying zero deploy-blockers while its later rounds
+    kept catching false claims the previous round's own fix had written; a
+    blocker-keyed ladder ends after round 1, so those rounds never run.
+    Pinning only the carve-out would leave that rejection free to be dropped by
+    the author who finds it verbose -- the same failure `RULES_STOP_CLAUSE`
+    pins its not-a-cap qualifier against.
+
+    ⚠ THIS DOCSTRING CARRIED THE RETRACTED COUNT UNTIL ROUND 2. "four of its
+    six findings ... ships all four" was planted at five sites and swept at
+    four; this one survived, and it is the surface `SKILL.md` names as the
+    likeliest to -- "the docstring of the test that PINNED the guard". #702
+    ran 23 findings across six rounds (the table at
+    `reference/round-ladder-evidence.md`); no reading yields six. Do not
+    re-derive the number from this file's history.
     """
     _assert_pinned_once(SKILL_MD, SKILL_NIT_ONLY_STOPS, "the nit carve-out")
     _assert_pinned_once(

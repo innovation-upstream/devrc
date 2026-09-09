@@ -25,7 +25,7 @@
 # rewording that a reader would accept and that must nevertheless go red.
 #
 # 🔴 IT NEVER TOUCHES YOUR WORKING TREE. Everything is mutated inside a
-# `mktemp -d` copy built by naming FIVE INDIVIDUAL FILES — that selective copy,
+# `mktemp -d` copy built by naming SIX INDIVIDUAL FILES — that selective copy,
 # not the assertion below it, is what keeps a `.git` out. The assertion is an
 # INVARIANT GUARD and is labelled as one rather than counted as coverage: it
 # cannot fire today and has never been watched to. It earns its two lines only
@@ -82,6 +82,12 @@ ROOT="$T/tree"
 mkdir -p "$ROOT/scripts/tests" \
          "$ROOT/claude/skills/audit-pr/reference"
 cp -a "$SRC/scripts/tests/test_audit_ladder_stop_rule.py" "$ROOT/scripts/tests/"
+# 🔴 The SIXTH file, and it is not optional: `test_the_carve_outs_cited_clause_
+# still_exists_in_the_dispatcher` IMPORTS this module to read INVARIANT_CLAUSES,
+# so without it the UNMUTATED baseline aborts and the battery runs ZERO rows —
+# reporting a test the author never touched. Measured: adding this line took the
+# battery from a baseline abort back to `21 row(s), all as expected`.
+cp -a "$SRC/scripts/audit-dispatch.py" "$ROOT/scripts/"
 cp -a "$SRC/claude/RULES.md"          "$ROOT/claude/"
 cp -a "$SRC/claude/RULES-ARCHIVE.md"  "$ROOT/claude/"
 cp -a "$SRC/claude/skills/audit-pr/SKILL.md" "$ROOT/claude/skills/audit-pr/"
