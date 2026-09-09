@@ -129,7 +129,22 @@ def _run_find_session(root, argv, opencode_db=None):
     one session" collected whatever real sessions happened to match — and it
     would still have passed in the nix sandbox tier, where no DB or SSH exists.
     `opencode_db` defaults to a path that cannot exist, i.e. an empty corpus.
+
+    🔴 AND IT LIFTS THE CLI'S DEFAULT DATE WINDOW, because these tests are about
+    the SEARCH, not about the window. `find-session.py` bounds its archive leg to
+    the last `DEFAULT_SINCE_DAYS` days unless told otherwise; these fixtures are
+    scoped by `root`, and several pin SPECIFIC calendar dates that the assertions
+    depend on (the tz-comparison cases cannot be written any other way). When the
+    window landed it silently emptied three of them — a real result, correctly
+    produced, answering a question the test was not asking. `--all-time` is added
+    ONLY when the caller named no window itself: `--since` together with
+    `--all-time` is a usage error, and several tests here pass `--since`
+    deliberately.
     """
+    argv = list(argv)
+    if not any(x == "--all-time" or x == "--since" or x.startswith("--since=")
+               for x in argv):
+        argv.append("--all-time")
     mod = _load(SCRIPTS / "find-session.py", "fs_under_test")
     mod.ROOT = str(root)
     buf = io.StringIO()

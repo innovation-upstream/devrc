@@ -1,7 +1,7 @@
 ---
 name: find-session
 description: "Find a past Claude Code OR opencode session by keyword — searches both runtimes on both hosts and returns ranked sessions with the resume command. Use to recover 'the session where we did X'."
-argument-hint: "<term> [<term> …] | --skill NAME [--live [--deep] [--tail N]] [--limit N] [--project SUBSTR (archive only)] [--since YYYY-MM-DD (archive only)] [--any (archive only)] [--claude-only|--opencode-only]"
+argument-hint: "<term> [<term> …] | --skill NAME [--live [--deep] [--tail N]] [--limit N] [--project SUBSTR (archive only)] [--since YYYY-MM-DD | --all-time (archive only)] [--any (archive only)] [--claude-only|--opencode-only]"
 allowed-tools: Bash, Read
 ---
 
@@ -11,20 +11,52 @@ Goal: kill the hand-typed "find the session where we did pr 235 / migrated the r
 
 Query: `$ARGUMENTS`.
 
-## 🔴 If the user thinks it might still be RUNNING, use `--live` — 1.8 s, not 30 s
+## 🔴 If the user thinks it might still be RUNNING, use `--live` — ~1 s, not ~8 s (or ~43 s unwindowed)
 
-Measured 2026-08-28: the transcript walk below takes **30.1 s**; the live cross-host tmux
-scan takes **1.82 s**, and its rows already carry the task, the label, the hotkey, the
-status, `waiting_probable`, the path and the session id. For *"find that thing I lost
-track of, is it still running, which window, where did it leave off"* the archive is the
-**wrong instrument** — it searches the past for a question about now.
+Re-measured 2026-09-08: the UNWINDOWED transcript walk takes **42.96 s cold / 14.26 s
+warm**, while the live cross-host tmux scan takes **1.10 s / 1.21 s** over two runs, and its
+rows already carry the task, the label, the hotkey, the status, `waiting_probable`, the path
+and the session id. For *"find that thing I lost track of, is it still running, which
+window, where did it leave off"* the archive is the **wrong instrument** — it searches the
+past for a question about now.
+
+⚠ **These numbers age; the RATIO is the argument.** The 2026-08-28 figures were 30.1 s and
+1.82 s. Re-measure rather than quoting this paragraph's age — the corpus grows and the live
+fleet does not, so live-first only ever gets more right.
 
 ```bash
 python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tail 80]
 ```
 
-- **Live first, archive only as a fallback.** If any live window matched, the 30 s walk is
+- **Live first, archive only as a fallback.** If any live window matched, the archive walk is
   skipped entirely and the output says so. `--deep` runs both.
+- 🔴 **THE ARCHIVE LEG IS WINDOWED BY DEFAULT — the last 12 days.** A result set is a count
+  UNDER A WINDOW, so **never report "no sessions matched" as a corpus-wide absence**: the run
+  prints its window (`ARCHIVE window: the last 12 days (since …) — DEFAULT`) with the number of
+  transcripts it skipped unopened. 🔴 **The window follows the READER, so do not go looking on
+  one stream:** stdout when a human is reading (both the classic and the `--live` paths), stderr
+  under `--json` without `--live`, and inside the document as `archive.window` under
+  `--live --json`. ⚠ The printed count covers the **local Claude walk only** — the notice names
+  the other windowed legs (peer hosts, the opencode corpus) as uncounted, and they can be the
+  larger cut. Pass **`--all-time`** for the whole corpus (~15 s warm, ~43 s cold) or `--since YYYY-MM-DD`
+  for a different one; naming both is a usage error. ⚠ **Under `--json` WITHOUT `--live` the
+  window is on STDERR only** — that path emits the bare array every caller parses, so there is
+  no machine-readable window there; `--live --json` carries `archive.window`. Measured 2026-09-08 `--claude-only`,
+  warm, back to back, quoting the walk's OWN skip counter — ⚠ **windows written as `Nd` here are
+  DURATIONS, not spellings: `--since` takes `YYYY-MM-DD` only and `--since 3d` exits 2** — a
+  3-day window 2.40 s / skipped 780 of 924, **a 12-day window (the default) 7.35 s / skipped 467
+  of 924**, a 30-day window 13.35 s / skipped **0** of 924, `--all-time` 13.09 s. 🔴 **A 30-day default would be a NO-OP** — it skips
+  zero files, because nothing in this corpus is older than that; it would cap the answer and
+  buy nothing. ⚠ **Every count here is a DATED SNAPSHOT of a growing corpus — re-measure rather than
+  quoting it.** The walked set was **924 session transcripts** on 2026-09-08 and passed 940
+  within a day; it is not the 5,954 `*.jsonl` a bare `find` reports, since ~5,030 of those
+  are `subagents/agent-*.jsonl`, excluded by name. The RATIOS are what the argument rests
+  on, not the totals.
+  🔴 **`--skill` is EXEMPT and stays corpus-wide.** "Has skill X ever been used" is a
+  historical question and `adoption-scan` routes it here by name; windowing it would turn a
+  corpus-wide "no recorded use" into "not in the last 12 days" with nothing on screen to say
+  so. An explicit `--since` still applies under `--skill` — the exemption only removes a
+  default nobody asked for.
 - **Matched against `task`, `label` and `codename` — deliberately NOT `path`.** Measured on
   a 72-row scan: one substring hit **1** row on `task` and **29** on `path`, because nearly
   every window shares a repo path. The LIVE header prints the field list it searched, so
@@ -50,7 +82,7 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   `archive.live_coverage_complete: false` beside `live_ids_measured: true`. Do not report
   an `<UNMEASURED>` hit as finished.
 - 🔴 **These flags reach the ARCHIVE leg ONLY** — `--skill`, `--any`, `--project`, `--since`,
-  `--claude-only`, `--opencode-only`, `--all` — and the tool names them on stderr. (That
+  `--all-time`, `--claude-only`, `--opencode-only`, `--all` — and the tool names them on stderr. (That
   list is `ARCHIVE_ONLY_FLAGS` in the script and is pinned against this line by
   `test_find_session_skill_contract.py`; it carries no count, because a count is a claim
   nothing enforces.) Surface
@@ -71,7 +103,7 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   also pins each one against the behaviour it describes. Do not reword them here alone; an
   earlier hand-written version of this table shipped two claims the code contradicted.
 - `0` — the run completed. NOT a claim that anything matched — an empty LIVE section and an empty ARCHIVE section both exit 0. 🔴 NOR a claim about coverage: a `--tail` that resolved to ONE window exits 0 even when a host did not answer, so another window may match on the host that was never asked. This is the code a caller ACTS on — read `tail.coverage_complete` before treating the resolution as unique.
-- `2` — bad arguments: `--tail` without `--live`, `--limit` below 1, an unparseable `--since`, a query that names nothing (no terms and no `--skill`, or a `--skill` that canonicalises to empty), or `--skill` with `--opencode-only` — that corpus carries no skill attribution, so the combination has no answer rather than an empty one.
+- `2` — bad arguments: `--tail` without `--live`, `--tail` below 1, `--limit` below 1, an unparseable `--since`, `--since` together with `--all-time` (they name two different windows), `--live` with no search terms (it matches a window's task/label/codename, so `--skill` alone is an ARCHIVE query), a query that names nothing (no terms and no `--skill`, or a `--skill` that canonicalises to empty), `--claude-only` with `--opencode-only` (between them they search no corpus at all), `--skill` with `--opencode-only` — that corpus carries no skill attribution, so the combination has no answer rather than an empty one, or a malformed command line rejected by argparse ITSELF inside `main`'s first statement (an unknown flag, or a non-integer `--limit`/`--tail`). 🔴 That last one is the only exit 2 this module RAISES rather than returns — `parse_args` raises `SystemExit` — so an in-process caller must catch it, not read a return value.
 - `3` — `--tail` ONLY: it could not resolve to exactly one live window — several matched, or none did on a fleet where every host answered. It carries NO claim about coverage; the candidate list may be incomplete, and `tail.coverage_complete` is the field that says so.
 - `4` — `--tail` ONLY: something the tail needed was NOT measured — the live scan failed or no host answered, or `session-manager tail` itself failed (rc 2/4/5), or nothing matched while a host was unreachable. Without `--tail` a failed scan still exits 0 and says so in the LIVE section.
 - Branch on `tail.ok` / `tail.rc` / `tail.coverage_complete` in `--json` rather than on the

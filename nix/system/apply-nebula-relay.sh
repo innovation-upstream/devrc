@@ -101,6 +101,105 @@ run_check() { "$BASH" "$CHECK" "$@"; }
 
 die() { echo "ABORT: $*" >&2; exit 1; }
 
+# Trap state. Each flag is set immediately AFTER the step it names succeeds, so the
+# message the trap prints is what was actually reached, never what was intended.
+#
+# 🔴 DECLARED HERE, NOT BESIDE THE TRAP THAT READS THEM. `die_verifier_did_not_run`
+# below reads PATCHED from the PREFLIGHT, which runs long before the trap section. With
+# the declarations down there, the only way to read PATCHED early was `${PATCHED:-0}` --
+# and that silently falls back to an INHERITED ENVIRONMENT VARIABLE. This script's own
+# header documents invoking it as `sudo env "PATH=$PATH" bash ...`, which preserves the
+# caller's environment, so an exported PATCHED=1 made the preflight print the "DO NOT
+# simply re-run" branch when nothing whatsoever had been written. Measured 2026-09-08.
+# Declaring them first makes `"$PATCHED"` correct everywhere and removes the fallback.
+PATCHED=0           # $CFG has been replaced by the patched file
+TEST_ATTEMPTED=0    # `nixos-rebuild test` was started
+ACTIVATED=0         # ... and returned 0: the change is RUNNING, nothing persisted
+SWITCH_ATTEMPTED=0  # `nixos-rebuild switch` was started -- the profile MAY have moved
+PERSISTED=0         # ... and returned 0: profile + bootloader now carry the change
+OK=0
+
+# 🔴 THE VERIFIER ONLY EVER EXITS 0, 1 OR 2. ANY OTHER CODE MEANS IT DID NOT RUN.
+#
+# check-nebula-relays.sh's exit codes are a CLOSED set, stated in its header and
+# checked by test_the_verifiers_exit_codes_are_a_closed_set: 0 = advertised,
+# 1 = not advertised, 2 = it could not answer (unit not loaded/inactive, no
+# MainPID, unreadable -config, parser failure, its own self-test failing, or the
+# unit and the process disagreeing).
+#
+# So an rc outside {0,1,2} is not a verdict at all -- the verifier never got far
+# enough to have one. Before this classifier existed, every such code fell into
+# the same `*)` arm as a genuine rc 2 and was reported as
+#
+#     ABORT: the verifier could not read the current config (rc=126); fix that first
+#
+# which asserts a fact about $CFG that is false in every one of those cases. That
+# is not hypothetical: it is exactly how the /usr/bin/env fault this script was
+# just fixed for presented (126 = found, but its interpreter is missing), and the
+# misdirection is what made it read as a config problem rather than an exec one.
+#
+# 🔴 The consequential sites are the two VERIFY calls, not this one. There a
+# non-verifier rc reaches `die` after the change has been activated, so the EXIT
+# trap rolls back something that actually WORKED, for what was really a signal or
+# an exec fault. Failing with the right diagnosis is the difference between
+# "re-run it" and "go debug your mesh".
+#
+# Which paragraph the trap then prints depends on WHICH verify failed, and the two
+# are not the same (measured):
+#   verify_now after `nixos-rebuild test`   -> ACTIVATED, NOT PERSISTED
+#   verify_now after `nixos-rebuild switch` -> PERSISTED
+# Those are two of the trap's MUTUALLY EXCLUSIVE branches, not a pair that can both
+# print. "THE PROFILE MAY HAVE MOVED" is a THIRD branch and is unreachable at the second
+# site: `set -e` plus `PERSISTED=1` immediately after a successful `nixos-rebuild switch`
+# means PERSISTED is always 1 by the time that verify runs. An earlier draft of this
+# comment wrote "PERSISTED / the profile may have moved", which reads as "either".
+# An earlier draft of this comment attributed the PERSISTED paragraphs to the first
+# site. It does not print them: PERSISTED and SWITCH_ATTEMPTED are both still 0 there,
+# which `test_verifier_failure_after_a_good_test_says_activated_not_persisted` pins.
+verifier_answered() { case "$1" in 0|1|2) return 0 ;; *) return 1 ;; esac; }
+
+die_verifier_did_not_run() {
+  # 🔴 THE CLOSING ADVICE IS CONDITIONAL, BECAUSE "just re-run it" IS ACTIVELY HARMFUL
+  # ONCE ANYTHING HAS BEEN WRITTEN.
+  #
+  # This function is reached from THREE sites: the preflight (nothing written), the
+  # post-`test` verify, and the post-`switch` verify. An unconditional "this script is
+  # idempotent, re-run it" was measured to contradict the trap's own paragraph printed
+  # two lines below it -- the trap said PERSISTED / restoring the file is NOT enough,
+  # while this said nothing had changed.
+  #
+  # Worse than a contradiction, following it loses the change silently: after the trap
+  # rolls $CFG back, the running unit still advertises the relay, so a re-run's
+  # preflight asks the RUNNING unit, gets rc 0, prints "ALREADY SATISFIED -- nothing to
+  # do" and exits 0. That is a green all-clear over a config file that no longer
+  # contains the change, which the next `nixos-rebuild switch` by anyone quietly
+  # removes.
+  #
+  # `"$PATCHED"`, not `${PATCHED:-0}`: the flags are declared at the top of this script
+  # precisely so this read needs no fallback. A `:-` default here would silently accept
+  # an INHERITED value -- see the declaration block for the measurement.
+  local tail
+  if [ "$PATCHED" = "0" ]; then
+    tail="Nothing has been written yet -- fix the invocation and re-run."
+  else
+    tail="🔴 DO NOT simply re-run. \$CFG has already been patched, and possibly
+  activated or persisted. Read the trap's paragraph BELOW this message: it tracks
+  which of those was reached and is the only thing here that knows. Follow it.
+  A bare re-run asks the RUNNING unit, so if the change is live while the file was
+  rolled back you will get \"ALREADY SATISFIED -- nothing to do\" and exit 0 over a
+  config that no longer contains it."
+  fi
+  die "the verifier did NOT RUN (rc=$1) -- an exec, interpreter or signal fault, NOT
+  an answer about the config or the mesh. \`$CHECK\` only ever exits 0, 1 or 2 (see
+  its header), so this says nothing about whether $RELAY is advertised.
+    126  \`$CHECK\` is a DIRECTORY, or is not readable
+    127  it disappeared between the preflight's [ -r ] check and this call
+    128+ killed by a signal (130 = SIGINT, 137 = SIGKILL/OOM, 143 = SIGTERM)
+  (Not 'not executable': it is run as \`\"\$BASH\" \"\$CHECK\"\`, so bash READS it and
+  the exec bit is never consulted.)
+  $tail"
+}
+
 # Scratch dir for everything this script writes outside $CFG.
 #
 # 🔴 NOT `/tmp/<fixed-name>.$$`. /tmp is 1777, `>` follows symlinks, and this runs as
@@ -164,8 +263,10 @@ case "$pre_rc" in
      echo "  the verifier's finding, in full -- read the cost note before continuing:"
      sed 's/^/    | /' "$PRE"
      echo ;;
+  2) sed 's/^/    | /' "$PRE"
+     die "the verifier could not read the current config (rc=2); fix that first" ;;
   *) sed 's/^/    | /' "$PRE"
-     die "the verifier could not read the current config (rc=$pre_rc); fix that first" ;;
+     die_verifier_did_not_run "$pre_rc" ;;
 esac
 
 # 🔴 SYMLINKS ARE REFUSED, NOT FOLLOWED -- and that is a deliberate choice between the
@@ -329,15 +430,6 @@ TMP="$(mktemp "${CFG}.new.XXXXXXXX")" || die "cannot create a temp file next to 
 cp -p "$CFG" "$TMP"
 BAK="${CFG}.bak-nebula-relay-$(date +%Y%m%d-%H%M%S)-$$"
 
-# Trap state. Each flag is set immediately AFTER the step it names succeeds, so the
-# message the trap prints is what was actually reached, never what was intended.
-PATCHED=0           # $CFG has been replaced by the patched file
-TEST_ATTEMPTED=0    # `nixos-rebuild test` was started
-ACTIVATED=0         # ... and returned 0: the change is RUNNING, nothing persisted
-SWITCH_ATTEMPTED=0  # `nixos-rebuild switch` was started -- the profile MAY have moved
-PERSISTED=0         # ... and returned 0: profile + bootloader now carry the change
-OK=0
-
 finish() {
   local rc=$?
   cleanup_scratch
@@ -478,6 +570,12 @@ verify_now() {   # dies on failure; retries exactly once, on ONE narrow conditio
     set +e; run_check "$RELAY" >"$out" 2>&1; rc=$?; set -e
     sed 's/^/    | /' "$out"
   fi
+  # 🔴 CLASSIFY BEFORE BLAMING THE MESH. This runs after `nixos-rebuild test` has
+  # activated, so whatever this `die`s with is what the EXIT trap rolls back and what
+  # the operator is told the rollback was FOR. An exec/interpreter/signal fault here
+  # is not "the relay is not advertised" -- reporting it as one sends them to debug a
+  # mesh that is very possibly fine, having just undone a change that worked.
+  verifier_answered "$rc" || die_verifier_did_not_run "$rc"
   [ "$rc" = "0" ] || die "the verifier does not see $RELAY advertised by the running unit (rc=$rc)"
 }
 verify_now

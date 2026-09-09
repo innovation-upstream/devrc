@@ -58,7 +58,7 @@
       "why": "the tool is NAMED, never described -- 'cairn doctor', 'cairn sync', 'cairn-who'. The symptoms that could route here already belong to skills that name it in their own bodies: a refused read to `resume`, a stale index block to `analyze-service`, an entry that got huge to `prune-index`"
     },
     "check-clickup-addressed": { "tier": "A" },
-    "civitai-app-release": { "tier": "A" },
+    "civitai-app-fleet": { "tier": "A" },
     "clawgate": { "tier": "A" },
     "clickup": { "tier": "A" },
     "devrc-dx": { "tier": "A" },

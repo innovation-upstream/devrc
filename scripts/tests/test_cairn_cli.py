@@ -1269,20 +1269,43 @@ class TestTheHarnessItself:
 # 🔴 THE DEPLOY SEAM: `cairn` is on PATH, and HOW it is deployed is load-bearing.
 #
 # `scripts/cairn` reaches its siblings through `Path(__file__).resolve().parent
-# / "lib"`. Deployed as a home-manager STORE COPY, `__file__` resolves into
-# /nix/store — where `scripts/lib/` is deliberately NOT deployed — and every
-# `import subsystem_recall` dies at startup. Deployed as an
-# `mkOutOfStoreSymlink`, `.resolve()` follows the link back into the checkout
-# and `lib/` is found.
+# / "lib"`, and `.resolve()` follows symlinks — so the invariant is that the
+# directory holding the REAL file must also hold `lib/`. THERE ARE TWO WAYS TO
+# SATISFY IT AND THE DEPLOYED ONE CHANGED:
+#   * `mkOutOfStoreSymlink` into the checkout — what this repo did until the
+#     flake pin, and what `cairn-who` still does (see test_cairn_split.py);
+#   * the pinned `cairn` FLAKE PACKAGE, which installs the real script and its
+#     own `lib/` together under `libexec` with a wrapper in `bin/` — a store
+#     path where `lib/` genuinely is beside the script. This is what is
+#     deployed now.
+# What is NOT a way to satisfy it, and is the failure this guard was written
+# for: a plain `home.file` COPY of `scripts/cairn`, whose `__file__` resolves
+# into /nix/store where `scripts/lib/` is deliberately not deployed, so every
+# `import subsystem_recall` dies at startup.
+#
+# ⚠ `scripts/cairn` IS STILL IN THE TREE AND IS NO LONGER THE DEPLOYED ARTIFACT.
+# Every other test in this file drives the checkout's copy directly, which is
+# still worth doing (the writer and `cairn-who` share its `scripts/lib/`), but
+# do not read a green here as evidence about the binary on PATH — that is the
+# packaged client, gated by `test_cairn_flake_pin.py` and by cairn's own suite.
 #
 # Neither half is enough on its own, which is why this is one guard over a
 # RELATIONSHIP rather than two component checks:
-#   - pinning only the nix spelling would keep asserting "must be out-of-store"
-#     long after someone rewrote cairn to vendor its imports, i.e. it would
-#     outlive its own reason and nobody could tell;
+#   - pinning only the nix spelling would keep asserting a deploy mode long
+#     after someone rewrote cairn to vendor its imports, i.e. it would outlive
+#     its own reason and nobody could tell;
 #   - pinning only the __file__ lookup would stay green while the deploy line
-#     silently became a store copy and the shipped command stopped starting.
+#     silently became a plain store COPY and the shipped command stopped
+#     starting.
 # So: assert the reason still exists, THEN assert the deploy mode it forces.
+#
+# ⚠ THE FIRST BULLET IS THE ONE THAT ALMOST BIT. When `cairn` moved to the flake
+# package the old assertion here — "the assignment must name
+# mkOutOfStoreSymlink" — was RIGHT ABOUT THE REASON AND WRONG ABOUT THE REMEDY,
+# and it went red on a correct tree. Loosening it to "any deploy mode" was the
+# tempting fix and is the one that must not happen: what is pinned below is the
+# EXACT mechanism that satisfies the constraint today, so the next change to it
+# is again a review, not a silent pass.
 # ---------------------------------------------------------------------------
 
 NIX_HOME = REPO / "nix" / "home.nix"
@@ -1290,11 +1313,19 @@ NIX_HOME = REPO / "nix" / "home.nix"
 
 def test_cairn_still_resolves_its_lib_relative_to_its_own_file():
     """The REASON half of the seam. If this fails, the guard below is pinning a
-    constraint that no longer applies — delete both, don't loosen one."""
+    constraint that no longer applies — delete both, don't loosen one.
+
+    ⚠ THIS READS `scripts/cairn`, WHICH IS NO LONGER THE DEPLOYED FILE. It is
+    still the right thing to read: the OSS client this repo now deploys is the
+    extraction OF this file and resolves its `lib/` the same way, and the two
+    are not yet consolidated (`scripts/lib/` is still imported by the writer and
+    by `cairn-who`). Upstream's own suite owns the packaged copy; this pins that
+    the constraint the deploy mode below exists for is still real HERE.
+    """
     src = (REPO / "scripts" / "cairn").read_text()
     assert 'Path(__file__).resolve().parent / "lib"' in src, (
         "scripts/cairn no longer derives its lib/ path from __file__. The "
-        "out-of-store requirement below may be obsolete — re-derive it rather "
+        "deploy requirement below may be obsolete — re-derive it rather "
         "than editing the assertion."
     )
     # …and that the path it builds is actually imported from, not dead code.
@@ -1304,22 +1335,32 @@ def test_cairn_still_resolves_its_lib_relative_to_its_own_file():
     assert (REPO / "scripts" / "lib" / "subsystem_recall.py").exists()
 
 
-def test_cairn_is_deployed_out_of_store_not_as_a_store_copy():
-    """The DEPLOY half. A store copy ships a `cairn` that cannot start."""
+def test_cairn_is_deployed_from_the_pinned_package_not_a_bare_store_copy():
+    """The DEPLOY half. A bare store COPY ships a `cairn` that cannot start.
+
+    The mode changed and the constraint did not: the package is a store path in
+    which `lib/` sits beside the real script, so `.resolve()` lands where the
+    imports are. A `home.file` copy of `scripts/cairn` is the shape that still
+    breaks, and `mkOutOfStoreSymlink` back into the checkout is the fork this
+    change removed.
+    """
     nix = NIX_HOME.read_text()
     assert 'home.file.".local/bin/cairn".source' in nix, (
         "the `cairn` PATH entry is gone from nix/home.nix"
     )
-    # The whole assignment, whatever it spans, must name mkOutOfStoreSymlink.
+    # The whole assignment, whatever it spans.
     head = nix.split('home.file.".local/bin/cairn".source', 1)[1]
     assignment = head.split(";", 1)[0]
-    assert "mkOutOfStoreSymlink" in assignment, (
-        "`cairn` is deployed as a STORE COPY. Its `Path(__file__).resolve()` "
-        "lib lookup will resolve into /nix/store, where scripts/lib/ is not "
-        "deployed, and the command will fail on import. Use "
-        "mkOutOfStoreSymlink, as claim-work/dl-route/opencode-dispatch do.\n"
+    assert "${cairnPackage}/bin/cairn" in assignment, (
+        "`cairn` is not deployed from the pinned flake package's `bin/cairn` "
+        "wrapper. A bare `home.file` copy of scripts/cairn resolves __file__ "
+        "into /nix/store where scripts/lib/ is not deployed and dies on "
+        "import; an mkOutOfStoreSymlink re-forks the client. Thread the "
+        "package through extraSpecialArgs — see test_cairn_flake_pin.py.\n"
         f"got: {assignment.strip()!r}"
     )
-    assert "${workspace}/devrc/scripts/cairn" in assignment, (
-        f"`cairn` points somewhere unexpected: {assignment.strip()!r}"
+    assert "mkOutOfStoreSymlink" not in assignment, (
+        "`cairn` is back on an out-of-store symlink into the checkout, which "
+        "is the two-copies-of-the-reader state the flake pin removed.\n"
+        f"got: {assignment.strip()!r}"
     )

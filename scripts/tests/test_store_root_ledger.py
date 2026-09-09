@@ -152,6 +152,14 @@ ROUTED: dict[str, str] = {
         "of the cache and every reader of it move together, and `doctor` "
         "resolves the read store to report which one this host actually reads"
     ),
+    "scripts/cairn-validate": (
+        "the write-protocol parse check, and it routes here for the SAME reason "
+        "the three regressions above existed. `subsystem_touch`'s own `--store` "
+        "default is the FROZEN pre-cutover mirror, so a launcher that inherited "
+        "it would parse the PRE-write bytes and report a clean entry that is not "
+        "the one just written. Resolving through the resolver is what points the "
+        "mandated post-write check at the store that actually moved"
+    ),
 }
 
 #: Files that compute a store-root path THEMSELVES, each with the reason it is

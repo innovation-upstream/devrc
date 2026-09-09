@@ -49,10 +49,11 @@ MAPPING = 'home.file.".claude/skills"'
 #: home-manager's default `target` is the attribute name itself.
 TARGET = ".claude/skills"
 
-#: `config`/`pkgs`/`lib` are stubs: nix is lazy, so nothing outside this one
-#: attribute is forced, and a stub that IS forced fails closed.
+#: Stubs: nix is lazy, so nothing outside this attribute is forced, and a stub
+#: that IS forced fails closed. Every REQUIRED arg of home.nix must be listed
+#: or nix cannot apply it at all.
 _EXPR = """
-let fs = (import @PATH@ { config = {}; pkgs = {}; lib = {}; }).home.file or {};
+let fs = (import @PATH@ { config = {}; pkgs = {}; lib = {}; cairnPackage = {}; }).home.file or {};
     m = fs.".claude/skills" or {};
 in { declared = fs ? ".claude/skills";
      source = m ? source;
