@@ -1135,9 +1135,17 @@ def main(argv: list[str]) -> int:
                 # others are the only observable a stalled or corrupt session
                 # has. Two liveness bugs in the tailer were found by reading the
                 # code rather than by reading a log, because nothing printed
-                # these — and one of them re-read 48 KiB every five seconds, for
-                # ever, in silence. Rate-limited exactly like the failure line
-                # below: this runs 17,280 times a day.
+                # these.
+                #
+                # ⚠ IT IS **NOT** RATE-LIMITED "exactly like the failure line
+                # below", WHICH IS WHAT THIS COMMENT USED TO SAY. The two are
+                # structurally different and the difference matters to whoever
+                # reads the journal: the failure memo is a change-detector that is
+                # CLEARED on success and has a recovery line, so a repeating
+                # failure re-fires after each recovery; this one is STICKY and
+                # one-shot per reason per process, and its recovery line was
+                # removed on purpose. See skip_reasons_to_report for why, and for
+                # what that costs.
                 counts = transcript_round(api, hook_token, host, stream_state)
                 if stream_problem:
                     log("transcript streaming is working again")

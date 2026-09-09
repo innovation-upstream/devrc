@@ -2519,23 +2519,86 @@ def test_a_transcript_stream_failure_forces_a_RE_HYDRATION_on_the_next_poll(
         f"the host resending against cursors the server may no longer hold\n{out}")
 
 
-def test_a_REPEATING_skip_condition_is_logged_ONCE_not_on_every_poll(server, tmux_stub, tmp_path):
-    """🔴 THE MEMO WAS KEYED ON COUNTS AND THEREFORE DEFEATED ITSELF. A count
-    moves whenever a different NUMBER of sessions is mid-record this poll than
-    last — and `no-record-boundary` fires whenever an append window ends without
-    a newline, which the tailer's own docstring calls the ordinary steady state.
-    So the same condition re-logged every few seconds, on a loop that runs 17,280
-    times a day. That is the journal-flooding the memo exists to prevent, and it
-    is the failure mode that trains an operator to ignore the one channel this
-    unit has.
+def test_TWO_skip_reasons_are_each_logged_ONCE_through_the_REAL_loop(server, tmux_stub, tmp_path):
+    """🔴 THE STICKY MEMO'S UNION IS ONLY OBSERVABLE WITH **TWO** REASONS, AND
+    EVERY EARLIER TEST HAD ONE.
 
-    The fixture makes the COUNT move while the REASON stays the same: one session
-    whose in-flight line is present on every poll, and a second that appears
-    later. One line, not two.
+    `stream_skips |= fresh` accumulates; mutating it to a REBIND
+    (`stream_skips = fresh`) passed all 208 tests — and it restores exactly the
+    flood round 7 removed. With `= fresh`, `seen` is REPLACED by whatever was
+    fresh, so two simultaneously-present reasons ping-pong forever:
+
+        {A,B} - {A} = {B}   -> seen={B}
+        {A,B} - {B} = {A}   -> seen={A}   -> one line per poll, for ever
+
+    Measured against the real agent as a subprocess: shipped = 2 skip lines,
+    the rebind mutant = 69.
+
+    A single-reason flap does NOT distinguish them (both score 1), and the unit
+    test for `skip_reasons_to_report` cannot either — it does its own `seen |=
+    fresh`, so it is structurally blind to a mutation of the LOOP. This drives
+    the loop, with two reasons whose onsets are STAGGERED so the union is what
+    has to hold.
     """
-    projects, first = _projects_tree(tmp_path, "skip-a")
-    # Two sessions, both permanently mid-record: the reason is constant, the
-    # count goes 1 -> 2.
+    projects, _first = _projects_tree(tmp_path, "skip-a")
+    d = projects / "-home-zach-workspace-devrc"
+    # Reason 1, present from the first poll: a line still being written.
+    (d / "skip-a.jsonl").write_text('{"type":"user","partial":tr', encoding="utf-8")
+
+    # 🔴 REASON 2 ARRIVES **LATER**, AND THE STAGGER IS THE WHOLE FIXTURE. With
+    # both files present from poll 1 the rebind mutant SURVIVES: the first poll
+    # reports {A,B} and every later poll has fresh=∅, so `stream_skips = fresh`
+    # never executes again and the two formulations are indistinguishable. The
+    # ping-pong needs A to be reported BEFORE B appears — measured, this fixture
+    # scored 1 line shipped / many with the mutant only after the delay was added.
+    def _late_second_reason():
+        (d / "skip-b.jsonl").write_bytes(b'{"type":"user","t":"\xff\xfe"}\n')
+
+    timer = threading.Timer(0.5, _late_second_reason)
+    timer.start()
+    try:
+        server.claim_batches = [[], [], [], []]
+        rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=24, env_extra={
+            "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
+            "CLAUDE_PROJECTS_DIR": str(projects),
+        })
+    finally:
+        timer.cancel()
+
+    lines = [l for l in out.splitlines() if "skipped some sessions" in l]
+    # 🔴 A BOUND, NOT AN EXACT COUNT, AND ONLY HERE. Which poll each reason first
+    # appears on is timing-dependent (the undecodable file may be seen on the
+    # same poll as the partial one, or the next), so 1 or 2 lines are both
+    # correct. What is NOT correct is a line per poll — that is the regression,
+    # and it is orders of magnitude away from this bound rather than adjacent to
+    # it. The sibling test below asserts the exact count where it IS deterministic.
+    assert 1 <= len(lines) <= 2, (
+        f"two skip reasons with STAGGERED onsets produced {len(lines)} log lines. 0 means the "
+        f"signal is gone; more than 2 means the memo is not ACCUMULATING — the two reasons are "
+        f"ping-ponging and this loop polls 17,280 times a day:\n"
+        + "\n".join(lines[:6]) + "\n---\n" + out[-1500:])
+    reported = " ".join(lines)
+    assert "no-record-boundary" in reported, reported
+    assert "undecodable" in reported, (
+        "the SECOND reason was never reported — with a rebinding memo the two reasons "
+        f"ping-pong and neither ever settles:\n{reported}")
+
+
+def test_a_REPEATING_skip_condition_is_logged_ONCE_not_on_every_poll(server, tmux_stub, tmp_path):
+    """🔴 THE ONE-REASON CASE, WHERE THE COUNT IS DETERMINISTIC.
+
+    One session, one reason, present on every poll: a correct memo logs it
+    exactly once. An upper bound would not do here — `<= 1` is satisfied by ZERO,
+    i.e. by the skip line never being emitted at all, which is the regression
+    this whole arc is about. Measured: with the emit forced off, the `<= 1`
+    version SURVIVED.
+
+    ⚠ THE FIXTURE IS ONE SESSION, AND AN EARLIER COMMENT HERE CLAIMED TWO. It
+    wrote `skip-a.jsonl` — the same path `_projects_tree` had just created — so
+    "the count goes 1 -> 2" never happened and the unused `first` was the tell.
+    The two-reason case it was reaching for is the test above.
+    """
+    projects, _first = _projects_tree(tmp_path, "skip-a")
     (projects / "-home-zach-workspace-devrc" / "skip-a.jsonl").write_text(
         '{"type":"user","partial":tr', encoding="utf-8")
 
@@ -2545,11 +2608,6 @@ def test_a_REPEATING_skip_condition_is_logged_ONCE_not_on_every_poll(server, tmu
         "CLAUDE_PROJECTS_DIR": str(projects),
     })
 
-    # 🔴 EXACTLY ONE, NOT "AT MOST ONE". An upper bound is satisfied by ZERO —
-    # i.e. by the skip line never being emitted at all, which is the regression
-    # this whole memo arc is about. Measured: with `if fresh:` forced false the
-    # `<= 1` version SURVIVED. The fixture provably emits one line on the shipped
-    # code, so the exact count is available and is what must be asserted.
     lines = [l for l in out.splitlines() if "skipped some sessions" in l]
     assert len(lines) == 1, (
         f"the skip condition was logged {len(lines)} times across one run, want exactly 1 — "
@@ -2617,3 +2675,32 @@ def test_the_skip_memo_key_ignores_COUNTS_and_tracks_REASONS():
     # every poll of a quiet fleet logs.
     assert k({"unchanged": 3}) == k({}) == k(None) == frozenset()
     assert k({"unchanged": 3, "undecodable": 1}) == k({"undecodable": 9}) == frozenset({"undecodable"})
+
+
+def test_the_reported_reason_bound_matches_the_TAILERS_OWN_set():
+    """🔴 THE BOUND IS A RELATIONSHIP, NOT A NUMBER IN PROSE. `skip_reasons_to_report`
+    logs at most one line per distinct reason per agent lifetime, so the bound IS
+    the tailer's reason vocabulary — and an earlier docstring wrote it out as
+    "four, since there are four reasons" when there were five.
+
+    Derived from the DEFINING surface (`transcript_stream`'s SKIP_* constants),
+    not from a list restated here, so a sixth reason added tomorrow moves this
+    test rather than silently invalidating a sentence.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "ts_for_bound", REPO_ROOT / "scripts" / "lib" / "transcript_stream.py")
+    ts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ts)
+
+    reasons = {v for k, v in vars(ts).items() if k.startswith("SKIP_") and isinstance(v, str)}
+    assert len(reasons) >= 4, f"the SKIP_* scan found {reasons} — it is measuring nothing"
+    assert "unchanged" in reasons, "the steady-state reason is not named SKIP_UNCHANGED any more"
+
+    reportable = {r for r in reasons if r != "unchanged"}
+    # The key must drop `unchanged` and keep every other reason — that IS the bound.
+    assert AGENT.skip_memo_key({r: 1 for r in reasons}) == frozenset(reportable), (
+        "the memo key does not admit exactly the tailer's reportable reasons; the "
+        "per-lifetime line bound is therefore not what the docstring describes"
+    )
