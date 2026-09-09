@@ -1484,6 +1484,34 @@ def test_a_TRUNCATED_artifact_is_ARTIFACT_CORRUPT_even_when_age_WROTE_NOTHING(
     assert ei.value.exit_code != EV.EXIT_CODES["DECRYPT-FAILED"]
 
 
+def test_a_MAC_failure_wins_over_LEFTOVER_PLAINTEXT(escrow_world, monkeypatch):
+    """🔴 age's OWN CLASSIFICATION BEATS FILE PRESENCE, forced in isolation.
+
+    `_corrupt` is evaluated BEFORE the `AGE_REFUSED_HEADER_MAC` branch and its
+    first disjunct is `plain_present`, so if age ever left an `--output` file on
+    a MAC failure the MAC arm would be unreachable and the operator would get
+    "age authenticated the header with the ESCROWED key" — the one statement a
+    MAC failure specifically disproves.
+
+    An audit raised this out of its own delta and did not probe it, on the
+    grounds that it is unreachable today (`decrypt()` unlinks any stale output
+    first, and v1.3.2 creates the file lazily). Unreachable is not the same as
+    guarded: this forces BOTH signals to disagree — plaintext present AND a MAC
+    refusal — which no real age produces, and requires the classification to
+    win. Without the exclusion clause the mutant survives the whole suite.
+    """
+    RVmod = EV._rv()
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=RVmod.AGE_REFUSED_HEADER_MAC, write_plaintext=True)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "ARTIFACT-CORRUPT"
+    assert "unwrapped one of its recipient stanzas" in ei.value.verdict
+    assert "authenticated the header with the ESCROWED key" not in ei.value.verdict, (
+        "leftover plaintext made the payload branch win over age's own MAC "
+        "refusal, so the verdict asserts an act a MAC failure disproves.")
+
+
 def test_the_STRONG_verdict_fires_on_EVERY_post_auth_refusal_and_NO_other(
         escrow_world, monkeypatch):
     """🔴 THE SEAM BETWEEN THE TWO MODULES, ASSERTED AS A LEDGER.

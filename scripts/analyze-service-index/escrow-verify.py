@@ -1537,8 +1537,22 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                         # An UNRECOGNISED refusal reaches NEITHER of the two
                         # strong verdicts below — it gets DECRYPT-FAILED's
                         # SECOND message, which names all three open causes.
+                        # 🔴 age's OWN CLASSIFICATION WINS OVER `plain_present`,
+                        # and the order of these two disjuncts is why. An audit
+                        # noted, out of its own delta, that this branch is
+                        # evaluated BEFORE the `AGE_REFUSED_HEADER_MAC` one and
+                        # that its first disjunct is file presence — so if age
+                        # ever left an `--output` file on a MAC failure, this
+                        # branch would swallow it and emit "age authenticated
+                        # the header with the ESCROWED key", the one statement a
+                        # MAC failure specifically disproves. Unreachable today
+                        # (`decrypt()` unlinks first, and v1.3.2 creates the
+                        # file lazily) — but the fix is one clause and does not
+                        # depend on that staying true, and the whole subsystem's
+                        # history is observables that stopped holding.
                         _corrupt = (
                             phase["cause"] == RV.DECRYPT_AGE_REFUSED
+                            and phase["age_refusal"] != RV.AGE_REFUSED_HEADER_MAC
                             and (bool(phase["plain_present"])
                                  or phase["age_refusal"]
                                  in RV.AGE_REFUSALS_POST_AUTH))

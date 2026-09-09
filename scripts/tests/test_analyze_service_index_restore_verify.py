@@ -4641,10 +4641,35 @@ def test_the_marker_SUMMARY_TABLES_list_every_shipped_marker():
         if len(cells) != 3:
             continue
         for m in re.findall(r"`([^`]+)`", cells[0]):
-            secrets_rows[m.lower()] = _norm(cells[2])
+            # 🔴 THE WHOLE ROW, NOT THE ANSWER COLUMN. Keying only on `cells[2]`
+            # left the EXIT CODE beside it and the entire `reached` column
+            # unread — measured: rewriting the MAC row's `→ 33` to `→ 25`
+            # survived the suite, i.e. the founding bug reachable through the
+            # one column this table exists to provide, and rewriting the
+            # `reached` cell to "the key is proven and the header opened"
+            # survived too. The guard's own docstring calls this "where someone
+            # maps an EXIT CODE to a cause".
+            #
+            # 🔴 AND ROWS ARE REJECTED, NOT OVERWRITTEN. `secrets_rows[k] = …`
+            # was last-wins over the whole file, so a duplicate row inserted
+            # ABOVE the real table shadowed it — the founding bug verbatim, in
+            # the operator table, green. A second row for one marker is itself
+            # the defect: an operator reads whichever they reach first.
+            key = m.lower()
+            assert key not in secrets_rows, (
+                f"SECRETS.md has TWO rows for {m!r}. Whichever an operator "
+                f"reads first is the answer they act on, so a duplicate is not "
+                f"redundancy — it is an unreviewed second source of truth.")
+            secrets_rows[key] = _norm(" | ".join(cells[1:]))
     assert secrets_rows, (
         "no rows parsed out of SECRETS.md's classification table — its shape "
         "has changed and this guard is now reading nothing.")
+
+    # The exit code each side implies, so the table cannot name the right cause
+    # beside the wrong number. Derived from the consumer's own table rather than
+    # spelled: `escrow-verify.py` owns these, and a literal here would be a
+    # third copy of them.
+    _code = {"pre auth": "25", "post auth": "33", "key proven": "33"}
 
     for m in markers:
         want = _side[dict(RV._AGE_REFUSAL_MARKERS)[m]]
@@ -4666,18 +4691,37 @@ def test_the_marker_SUMMARY_TABLES_list_every_shipped_marker():
             f"tuple classifies it {want!r}. That table is what an operator "
             f"reads while deciding whether to rotate a disaster-recovery key.")
 
-        # 🔴 THE DIRECTIONAL CHECK, stated separately because it is the one that
-        # would have caught the founding bug: a PRE-AUTH marker must not be
-        # described by either table in language that says the key is proven.
-        # That is the sentence that sends an operator away from a wrong key.
-        if want == "pre auth":
-            for where, cell in (("restore-verify's summary", rows[m.lower()]),
-                                ("SECRETS.md", secrets_rows[m.lower()])):
-                assert "key proven" not in cell and "post auth" not in cell, (
-                    f"{where} describes the PRE-AUTH marker {m!r} as "
-                    f"{cell!r} — language that tells an operator the escrowed "
-                    f"key is fine, on a refusal that proves nothing of the "
-                    f"sort.")
+        # 🔴 THE EXIT CODE, pinned beside the cause. A row can otherwise name
+        # the right answer next to the wrong number, which is what an operator
+        # actually branches on during a recovery.
+        assert _code[want] in secrets_rows[m.lower()], (
+            f"SECRETS.md gives {m!r} a row that does not carry exit code "
+            f"{_code[want]}: {secrets_rows[m.lower()]!r}. `25` sends the "
+            f"operator at their key and `33` at the artifact — the number is "
+            f"the half a timer and a hurried human both read.")
+
+        # 🔴 THE DIRECTIONAL CHECK, IN BOTH DIRECTIONS — it was written for
+        # pre-auth only, and an audit measured the consequence: additive wrong
+        # language on a KEY-PROVEN row was invisible, so filing the MAC row as
+        # "key proven, post-auth" survived. "post-auth" said of a MAC failure is
+        # `escrow-verify`'s "age authenticated the header with the ESCROWED
+        # key", the one statement this whole change exists to deny. A check that
+        # covers one direction of a two-directional property is the same shape
+        # as the bug it was written for.
+        _forbidden = {
+            "pre auth": ("key proven", "post auth"),
+            "post auth": ("pre auth", "key proven"),
+            "key proven": ("pre auth", "post auth"),
+        }[want]
+        for where, cell in (("restore-verify's summary", rows[m.lower()]),
+                            ("SECRETS.md", secrets_rows[m.lower()])):
+            for bad in _forbidden:
+                assert bad not in cell, (
+                    f"{where} describes the {want.upper()} marker {m!r} as "
+                    f"{cell!r}, which also says {bad!r}. Every one of these "
+                    f"three answers licenses a different sentence to an "
+                    f"operator deciding whether to rotate a key; a row that "
+                    f"says two of them is a row that says nothing.")
 
     # 🔴 THE OTHER DIRECTION: a row naming a string the tuple no longer carries.
     # A rename leaves precisely this, and it reads as coverage.
@@ -4810,8 +4854,12 @@ def test_the_real_binarys_in_header_truncations_are_NEVER_post_auth(tmp_path):
         # it by construction, being in neither set. That is the identical
         # predicate-right-at-one-of-its-sites shape the previous round FILED as
         # a finding, left live in the very commit that filed it. This is the
-        # only guard here that reads the real binary, so the narrow spelling
-        # made it the one place a reworded age could open the path unobserved.
+        # only guard of the ORDERING PAIR that reads the real binary — the
+        # cross-product test above it is built from the shipped markers — so the
+        # narrow spelling made it the one place in that pair where a reworded
+        # age could open the path unobserved. (Plenty of OTHER tests in this
+        # file drive the real binary; an earlier draft of this sentence said
+        # "the only guard here", which reads as a claim about the file.)
         assert got not in RV.AGE_REFUSALS_KEY_PROVEN, (
             f"a ciphertext truncated to {keep} bytes — INSIDE the header, which "
             f"age therefore never authenticated — classified as {got!r}, which "

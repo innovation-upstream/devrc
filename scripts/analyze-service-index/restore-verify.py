@@ -445,22 +445,31 @@ AGE_REFUSALS_PRE_AUTH = frozenset({AGE_REFUSED_NO_IDENTITY, AGE_REFUSED_HEADER})
 # remembering to"; the second corrected that to "NOT read by a production
 # branch", which the SAME COMMIT falsified 560 lines below by adding one. So:
 #
-#   * `decrypt()` in this file branches on it to choose which of three
-#     diagnoses its operator-facing message carries. That IS a production read,
-#     and adding a member changes what an operator is told about their key.
 #   * the ORDER of `_AGE_REFUSAL_MARKERS` below is stated over it: every marker
 #     on this side must be matched AFTER every pre-auth one, or a message
 #     naming a pre-auth cause could be scored as proof the key worked. An audit
 #     measured that invariant unguarded when it was stated over the narrower
-#     `AGE_REFUSALS_POST_AUTH`.
+#     `AGE_REFUSALS_POST_AUTH`. This is the one place the set is load-bearing.
+#   * `decrypt()` in this file reads it — but only as the SECOND of four arms,
+#     after `AGE_REFUSED_HEADER_MAC` has been peeled off, so the arm it selects
+#     is reached by `AGE_REFUSALS_POST_AUTH` alone. 🔴 THE THIRD DRAFT OF THIS
+#     COMMENT SAID "which of three diagnoses" (the same commit had just made it
+#     four) AND "adding a member covers this file's diagnosis automatically" —
+#     the second is FALSE IN THE DANGEROUS DIRECTION: a future key-proven value
+#     that is not past-the-header would fall into the "DID open it" arm, which
+#     is exactly the overclaim the split was made to remove. Measured: swapping
+#     that arm's set to `AGE_REFUSALS_POST_AUTH` survives the whole suite, so
+#     the read is nominal today. ADD A MEMBER AND YOU MUST EDIT `decrypt()`.
 #   * `escrow-verify.py` does NOT read it, and that is deliberate rather than an
 #     oversight: it needs two DIFFERENT messages on this side of the line (age
 #     authenticated the header, versus age proved the key and then failed the
 #     header's own MAC), so it branches on `AGE_REFUSALS_POST_AUTH` and on
 #     `AGE_REFUSED_HEADER_MAC` separately.
 #
-# Adding a member therefore covers the marker ORDER and this file's diagnosis
-# automatically, and covers escrow-verify's verdicts NOT AT ALL — check both.
+# So adding a member covers the marker ORDER automatically and covers NOTHING
+# ELSE: `decrypt()`'s arms and escrow-verify's verdicts both need editing by
+# hand. `_side` in the table guard goes red on a new member, which is what makes
+# that a loud omission rather than a silent one.
 AGE_REFUSALS_KEY_PROVEN = AGE_REFUSALS_POST_AUTH | {AGE_REFUSED_HEADER_MAC}
 
 # 🔴 SUBSTRINGS, DELIBERATELY NOT ANCHORED REGEXES. age prefixes its stderr with
