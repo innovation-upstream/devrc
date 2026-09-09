@@ -149,8 +149,30 @@ fi
 # exists on the already-wired path, where there is nothing to restore. Printing
 # "restoring" while cp'ing a file that does not exist is a false statement at
 # exactly the moment an operator is reading under stress.
+#
+# 🔴 THE PREDICATE IS "DID *THIS RUN* TAKE THE BACKUP", NOT "DOES THE BACKUP
+# FILE EXIST" — and that distinction is the whole point, because $BACKUP is a
+# FIXED name that SURVIVES a successful run.
+#
+# The `-f "$BACKUP"` spelling this replaces was measured to destroy data:
+#   run 1  wires the import, writes $BACKUP, rebuild succeeds, $BACKUP remains;
+#   operator hand-edits $CFG (it is their system config; 18 sibling .bak files
+#     in that directory are evidence enough that it gets edited);
+#   run 2  takes the ALREADY-WIRED path, so it creates no backup — but the ERR
+#     trap still covers `nixos-rebuild switch` at the end. Any rebuild failure,
+#     for any unrelated reason, then found run 1's file and cp'd it over $CFG.
+# Measured result: the live, correctly-applied import GONE and the operator's
+# unrelated edit GONE, under a message that says "restoring" — and `cp -a`
+# restores the old mtime too, removing the obvious tell.
+#
+# A run that changed nothing must restore nothing. Do not "simplify" this back
+# to a file-existence test; scripts/tests/test_tmux_oom_protection_staged.py
+# pins the behaviour by EXECUTING the two-run scenario, not by grepping for a
+# spelling — the previous guard asserted `-f "$BACKUP"` was present and so read
+# as coverage while the defect was live.
+BACKUP_TAKEN_THIS_RUN=0
 restore() {
-  if [[ -f "$BACKUP" ]]; then
+  if [[ "$BACKUP_TAKEN_THIS_RUN" == "1" && -f "$BACKUP" ]]; then
     echo "FAILED — restoring $CFG from $BACKUP" >&2
     cp -a "$BACKUP" "$CFG"
   else
@@ -218,7 +240,6 @@ else
     echo "       to the top-level imports list manually, then re-run." >&2
     exit 1
   fi
-  cp -a "$CFG" "$BACKUP"
   awk '
     !ins && /^[[:space:]]*imports[[:space:]]*=/ { arm = 1 }
     arm && !ins && index($0, "[") > 0 {
@@ -234,6 +255,14 @@ else
     echo "       ./tmux-oom-protection.nix to its imports by hand, then rebuild." >&2
     exit 1
   fi
+  # 🔴 The backup is taken HERE — on the one branch that actually writes $CFG,
+  # immediately before the write — not up at the top of this block. Taken
+  # earlier, a refusal that modified NOTHING (the `imports =` guard above, or
+  # this awk finding no list) still deposited a `.bak.tmux-oom` into a directory
+  # already holding 18 of them, and left that file behind to arm the stale
+  # restore this script's `restore()` comment describes.
+  cp -a "$CFG" "$BACKUP"
+  BACKUP_TAKEN_THIS_RUN=1
   # Overwrite via cat (not mv) to preserve the file inode / 0644 root:root perms.
   cat "$CFG.new" > "$CFG"
   rm -f "$CFG.new"

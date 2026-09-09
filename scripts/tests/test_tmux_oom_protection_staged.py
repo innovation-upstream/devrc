@@ -10,15 +10,31 @@ closely. That is precisely when a latent hazard costs something. These pin the
 two properties that would be expensive to get wrong and are invisible on a
 casual read, plus the honesty of the header.
 
-🔴 THESE ARE STRUCTURAL GUARDS ON A SHELL SCRIPT, NOT A TEST OF ITS BEHAVIOUR.
-Applying it requires root and a `nixos-rebuild`, so its runtime effect is not
-reachable from the suite. Stated here so nobody reads a green run as "the OOM
-protection works" — it means "the script does not contain the two mistakes we
-know to look for". The claim it CANNOT make is the whole reason the PR body
-labels this arm unverified.
+🔴 MOSTLY STRUCTURAL GUARDS — WITH ONE BEHAVIOURAL EXCEPTION, AND THE EXCEPTION
+IS THERE BECAUSE THE STRUCTURAL FORM MISSED A DATA-LOSS BUG.
+
+The privileged EFFECT of this script (lowering oom_score_adj, `nixos-rebuild`)
+is genuinely not reachable from the suite, so a green run still does NOT mean
+"the OOM protection works". But its CONTROL FLOW is reachable, and this file
+used to claim otherwise — a claim that cost something. `restore()` was pinned by
+a test asserting the literal `-f "$BACKUP"` appeared in its body; that spelling
+passed while the script destroyed `/etc/nixos/configuration.nix` on a re-run,
+because a fixed-name backup SURVIVES a successful run and `-f` then finds a
+STALE one. The guard read as coverage and provided none.
+
+So `test_a_rerun_whose_rebuild_fails_does_not_restore_a_STALE_backup` executes
+the script with only its environment couplings replaced (paths, the `$EUID`
+test, the selector pre-flight, `nixos-rebuild`), leaving the trap, the backup
+and the restore logic untouched. Every substitution is asserted to have applied,
+so a harness that silently patched nothing cannot report a pass.
+
+The lesson generalises past this file: when the artifact under test is a shell
+script, a guard on its SOURCE TEXT is walkable by any change that keeps the
+text. Execute it.
 """
 from __future__ import annotations
 
+import os
 import re
 import stat
 import subprocess
@@ -476,6 +492,146 @@ def test_restore_does_not_claim_to_restore_a_backup_that_does_not_exist(text: st
         "restore() must check the backup exists before claiming to use it")
     assert "nothing to restore" in restore, (
         "the no-backup branch must say plainly that nothing was rolled back")
+    # 🔴 EXISTENCE IS NOT ENOUGH, and this assertion is the scar from finding
+    # that out: $BACKUP is a FIXED name that outlives a successful run, so
+    # `-f` alone is TRUE on a re-run that backed up nothing. The behavioural
+    # test below is the real guard; this one keeps the structural half honest
+    # about what it does and does not prove.
+    assert "BACKUP_TAKEN_THIS_RUN" in restore, (
+        "restore() must gate on whether THIS RUN took the backup, not merely on "
+        "the backup file existing — see the behavioural test in this file")
+
+
+def _instrumented_script(tmp_path, script_text: str) -> tuple[Path, Path]:
+    """Copy the script with ONLY its environment couplings replaced.
+
+    Untouched: the ERR trap, `restore()`, the backup, and every branch. Each
+    substitution is asserted to have applied — a patcher that silently matched
+    nothing would run a script still pointed at the REAL /etc/nixos, or would
+    exit at the `$EUID` guard and report a vacuous pass.
+    """
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    subs = [
+        ("CFG=/etc/nixos/configuration.nix", f"CFG={etc}/configuration.nix"),
+        ("MODULE=/etc/nixos/tmux-oom-protection.nix", f"MODULE={etc}/tmux-oom-protection.nix"),
+        ("if [[ $EUID -ne 0 ]]; then", "if false; then"),
+        ("if ! pgrep -u 1000 -x 'tmux: server' >/dev/null 2>&1; then", "if false; then"),
+        ('chown root:root "$MODULE"', "true"),
+        ("nixos-rebuild switch", "${FAKE_REBUILD:-true}"),
+    ]
+    body = script_text
+    for needle, repl in subs:
+        assert needle in body, (
+            f"instrumentation FAILED to find {needle!r} — the script changed shape, "
+            "and this harness would otherwise test a script it never patched")
+        body = body.replace(needle, repl)
+    path = tmp_path / "apply.sh"
+    path.write_text(body)
+    return path, etc / "configuration.nix"
+
+
+_CONFIG = """{ config, pkgs, ... }:
+{
+  imports =
+    [
+      ./hardware-configuration.nix
+    ];
+  networking.hostName = "nixos";
+}
+"""
+
+
+def _run_apply(script: Path, *, rebuild_ok: bool) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True,
+        env={"PATH": os.environ["PATH"], "FAKE_REBUILD": "true" if rebuild_ok else "false"})
+
+
+def test_a_rerun_whose_rebuild_fails_does_not_restore_a_STALE_backup(tmp_path, text: str):
+    """🔴 MEASURED DATA LOSS, not a hypothetical — the reason restore() gates on
+    a per-run flag rather than on the backup file existing.
+
+    $BACKUP has a FIXED name and survives a successful run. A re-run takes the
+    already-wired path and creates no backup, but the ERR trap still covers the
+    closing `nixos-rebuild switch`. With an existence test, ANY rebuild failure
+    — for any unrelated reason — restored the PREVIOUS run's file over the live
+    config, deleting both the correctly-applied import and whatever the operator
+    had edited since. `cp -a` restores the old mtime too, so there is no tell.
+    """
+    script, cfg = _instrumented_script(tmp_path, text)
+    cfg.write_text(_CONFIG)
+
+    first = _run_apply(script, rebuild_ok=True)
+    assert first.returncode == 0, f"run 1 should succeed:\n{first.stderr}"
+    assert "tmux-oom-protection.nix" in cfg.read_text(), "run 1 did not wire the import"
+
+    # The operator edits their own system config between runs. This line is the
+    # payload: it exists in NO backup, so restoring one silently deletes it.
+    cfg.write_text(cfg.read_text() + "  services.openssh.enable = true;  # OPERATOR EDIT\n")
+
+    second = _run_apply(script, rebuild_ok=False)
+    assert second.returncode != 0, "run 2's rebuild was supposed to fail"
+
+    after = cfg.read_text()
+    assert "OPERATOR EDIT" in after, (
+        "a failed re-run RESTORED A STALE BACKUP over the live config and "
+        "destroyed an unrelated operator edit — the exact measured defect")
+    assert "tmux-oom-protection.nix" in after, (
+        "a failed re-run removed the import that was already applied and live")
+    assert "nothing to restore" in second.stderr, (
+        "a run that took no backup must SAY it rolled nothing back")
+
+
+def test_a_FIRST_run_whose_rebuild_fails_still_rolls_the_config_back(tmp_path, text: str):
+    """🔴 THE POSITIVE CONTROL for the test above, and it is not optional.
+
+    Gating restore() on a per-run flag could be "passed" by a mutant that simply
+    never restores anything. This pins the other half: when THIS run did take
+    the backup and then failed, the config must go back — otherwise a half-wired
+    /etc/nixos survives a failed apply.
+    """
+    script, cfg = _instrumented_script(tmp_path, text)
+    cfg.write_text(_CONFIG)
+
+    proc = _run_apply(script, rebuild_ok=False)
+    assert proc.returncode != 0, "the rebuild was supposed to fail"
+    assert cfg.read_text() == _CONFIG, (
+        "a FAILED first run must restore the config it modified; it is still "
+        f"carrying this run's edit:\n{cfg.read_text()}")
+    assert "restoring" in proc.stderr, "the restoring branch must announce itself"
+
+
+def test_a_refusal_that_modifies_nothing_leaves_no_backup_behind(tmp_path, text: str):
+    """The backup belongs on the one branch that actually writes $CFG.
+
+    Taken earlier, a refusal that changed nothing still deposited a
+    `.bak.tmux-oom` beside the 18 already in /etc/nixos — and left that file
+    to arm the stale restore above on the next run.
+
+    🔴 THE FIXTURE HAS TO REACH THE RIGHT REFUSAL, and the obvious one does not.
+    A config with NO `imports =` at all exits at the `n_imports != 1` guard,
+    which sits ABOVE both the backup and the awk — so early-cp and late-cp
+    behave identically and a mutant moving the backup SURVIVES. Found exactly
+    that way: the first version of this test used that config and scored the
+    mutation as survived.
+
+    The branch that actually distinguishes them is the awk finding no list:
+    `imports =` present exactly ONCE (so the count guard passes) and no `[`
+    anywhere after it (so the awk arms and never inserts).
+    """
+    script, cfg = _instrumented_script(tmp_path, text)
+    cfg.write_text(
+        "{ config, pkgs, ... }:\n"
+        "{\n"
+        "  imports = myImportSet;\n"
+        '  networking.hostName = "nixos";\n'
+        "}\n")
+
+    proc = _run_apply(script, rebuild_ok=True)
+    assert proc.returncode != 0, "a config with no imports list must be REFUSED"
+    assert not (cfg.parent / "configuration.nix.bak.tmux-oom").exists(), (
+        "a refusal that modified nothing left a backup behind")
 
 
 def test_the_header_states_why_home_manager_cannot_do_this(text: str):
