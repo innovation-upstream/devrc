@@ -25,10 +25,19 @@ on a machine nobody named.
 
 import os
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+# 🔴 write_exec owns the shebang. `#!/usr/bin/env bash` here is forbidden by
+# `test_runtime_shebangs.py` because `env` is absent from the nix build sandbox,
+# so a stub written that way cannot run in the tier the merge is gated on.
+from testlib.mockbin import write_exec  # noqa: E402
 
 LIB = Path(__file__).resolve().parents[1] / "lib" / "host-role.sh"
 
@@ -103,10 +112,8 @@ def test_LAPTOP_SSH_does_not_leak_into_the_laptops_own_candidates():
 
 def _probe_stub(tmp_path: Path, reachable: str) -> str:
     """A prober that succeeds only for `reachable` (empty = nothing answers)."""
-    p = tmp_path / "probe.sh"
-    p.write_text('#!/usr/bin/env bash\n[ "$1" = "%s" ]\n' % reachable)
-    p.chmod(0o755)
-    return str(p)
+    return str(write_exec(tmp_path / "probe.sh",
+                          '[ "$1" = "%s" ]\n' % reachable))
 
 
 def test_the_lan_address_wins_when_it_answers(tmp_path):

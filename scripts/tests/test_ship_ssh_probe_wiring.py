@@ -27,9 +27,22 @@ argv the real line actually builds -- no network, no real host.
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+# 🔴 write_exec OWNS THE SHEBANG, and that is the point. A call site that writes
+# its own `#!/usr/bin/env bash` is exactly what
+# `test_runtime_shebangs.py::test_no_test_writes_a_usr_bin_env_shebang_at_runtime`
+# forbids: `env` is not on PATH in the nix build sandbox, so a stub written that
+# way is unrunnable in the tier the merge is gated on. This file shipped with two
+# such stubs and turned that guard RED on main — caught by the sandbox tier,
+# which the dev-host subset structurally cannot see.
+from testlib.mockbin import write_exec  # noqa: E402
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 SHIP = SCRIPTS / "ship.sh"
@@ -41,14 +54,11 @@ LAPTOP_NEBULA = "zach@10.42.0.100"
 
 def _probe_stub(tmp_path: Path, reachable: str, log: Path | None = None) -> str:
     """A $SSH_PROBE_CMD that succeeds only for `reachable`, optionally logging."""
-    p = tmp_path / "probe.sh"
-    body = "#!/usr/bin/env bash\n"
+    body = ""
     if log:
         body += f'echo "$1" >> "{log}"\n'
     body += f'[ "$1" = "{reachable}" ]\n'
-    p.write_text(body)
-    p.chmod(0o755)
-    return str(p)
+    return str(write_exec(tmp_path / "probe.sh", body))
 
 
 def _ship_target(tmp_path: Path, env: dict) -> subprocess.CompletedProcess:
@@ -201,13 +211,11 @@ def _recording_ssh(tmp_path: Path, exit_code: int = 0) -> tuple[Path, Path]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     log = tmp_path / "argv.log"
-    stub = bindir / "ssh"
-    stub.write_text(
-        "#!/usr/bin/env bash\n"
+    write_exec(
+        bindir / "ssh",
         f'printf "%s\\n" "$*" >> "{log}"\n'
-        f"exit {exit_code}\n"
+        f"exit {exit_code}\n",
     )
-    stub.chmod(0o755)
     return bindir, log
 
 
