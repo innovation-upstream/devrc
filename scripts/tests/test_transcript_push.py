@@ -1037,6 +1037,14 @@ def test_the_unit_restart_triggers_name_EVERY_half():
         "scripts/transcript-push.sh",
         "scripts/lib/build_transcript_push.py",
         "scripts/lib/host_label.py",
+        # 🔴 THE BUILDER IMPORTS IT AND CANNOT RUN WITHOUT IT (ModuleNotFoundError,
+        # rc 1). It was missing for the whole arc — and this ledger, whose own
+        # failure message says "every file this unit hard-depends on must be one",
+        # was pinning the 3-set that omitted it. A hand-written want-set is a
+        # ledger only while somebody checks it against the thing it describes;
+        # the sibling test derives its set from the agent's SOURCE, and that is
+        # the one that caught the equivalent gap on the other unit.
+        "scripts/lib/transcript_search.py",
     }
     assert declared == want, (
         f"the transcript-push unit's restart triggers are {sorted(declared)}, want "

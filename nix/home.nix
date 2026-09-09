@@ -3739,6 +3739,19 @@ in
         # triggers, which is what makes the omission an asymmetry rather than a
         # policy.
         "${../scripts/lib/host_label.py}"
+        # 🔴 THE BUILDER'S OWN IMPORT, MISSED FOR THE WHOLE ARC. The resident
+        # agent's list gained transcript_search.py when the tailer started
+        # loading it; this timer's did not, even though build_transcript_push.py
+        # imports it directly and cannot run without it:
+        #
+        #   builder without transcript_search.py -> rc 1
+        #   ModuleNotFoundError: No module named 'transcript_search'
+        #
+        # The asymmetry mattered twice over: a comment three lines below asserted
+        # this unit "names every module it depends on", and the test it named
+        # pinned a hand-written 3-set — so the gap was not merely unnoticed, it
+        # was locked in by the guard meant to prevent it.
+        "${../scripts/lib/transcript_search.py}"
       ];
     };
   };

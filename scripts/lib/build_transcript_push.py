@@ -282,14 +282,23 @@ def build(args: argparse.Namespace) -> dict:
         # push, a session that would overflow the budget is deferred to the next
         # tick rather than truncated.
         #
-        # ⚠ AND THE BUDGET IS CHARGED BEFORE THE DEDUPE SKIP BELOW, so a large
-        # UNCHANGED session — which contributes nothing to the payload — can end
-        # the loop and defer sessions behind it by one tick. Measured and
-        # deliberate: moving the check after the skip would mean hashing every
-        # candidate before knowing whether there is room, and one tick of
-        # deferral on a recency-ordered list is cheaper than that. With the
-        # shipped values (192 KiB tail against a 3 MiB budget) it needs 16
-        # unchanged sessions in one window to bite at all.
+        # ⚠ AND THE CHECK RUNS BEFORE THE DEDUPE SKIP BELOW, so a large UNCHANGED
+        # session can END the loop and defer sessions behind it by one tick.
+        # Deliberate: moving it after the skip would mean hashing every candidate
+        # before knowing whether there is room.
+        #
+        # 🔴 AN EARLIER VERSION SAID THE BUDGET IS "CHARGED" BY SUCH A SESSION AND
+        # QUANTIFIED IT AT "16 unchanged sessions". Both wrong: `total_bytes` is
+        # only incremented on APPEND, so an unchanged session is never charged,
+        # and the `and sessions` conjunct means an unchanged-ONLY window can never
+        # break at all. Measured with the shipped values:
+        #
+        #   18 large UNCHANGED sessions -> pushed 3, all 3 smalls reached
+        #   17 large CHANGED   sessions -> pushed 16, 0 of 3 smalls reached
+        #
+        # The mechanism is real — an unchanged session CAN end the loop once
+        # something is already in the push and the budget is nearly spent — but it
+        # is the CHANGED ones that fill the budget, and the number was invented.
         if max_push_bytes and sessions and total_bytes + len(encoded) > max_push_bytes:
             break
         digest = hash_tail(encoded)

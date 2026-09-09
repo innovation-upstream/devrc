@@ -2589,12 +2589,6 @@ def test_TWO_skip_reasons_are_each_logged_ONCE_through_the_REAL_loop(server, tmu
     })
 
     lines = [l for l in out.splitlines() if "skipped some sessions" in l]
-    # 🔴 A BOUND, NOT AN EXACT COUNT, AND ONLY HERE. Which poll each reason first
-    # appears on is timing-dependent (the undecodable file may be seen on the
-    # same poll as the partial one, or the next), so 1 or 2 lines are both
-    # correct. What is NOT correct is a line per poll — that is the regression,
-    # and it is orders of magnitude away from this bound rather than adjacent to
-    # it. The sibling test below asserts the exact count where it IS deterministic.
     # 🔴 EXACTLY TWO, NOT "AT MOST TWO", NOW THAT THE STAGGER IS DETERMINISTIC.
     # `1 <= len(lines)` was the arm that admitted the degenerate run: one line
     # means both reasons arrived together, which is precisely the configuration
