@@ -1448,3 +1448,48 @@ def test_the_agent_reads_the_env_file_the_SHARED_MODULE_names(tmp_path):
         f"reading the file the shared module names, so the two feeders can be pointed at "
         f"different files and the reseed loop comes back invisibly"
     )
+
+
+def test_the_BULK_push_dedupes_and_strips_session_ids_TOO(server, projects, tmp_path):
+    """🔴 THE GUARD WENT ON THE PATH WHERE THE BLAST RADIUS IS SMALLER FIRST.
+    The delta stream grew it, and there a duplicate costs ONE session. Here
+    `NormalizePush` rejects THE WHOLE PUSH on a duplicate or an empty id, a
+    rejection stores nothing, so the digest never matches, so the same poisoned
+    batch is re-sent every tick — permanently, for every session on this host.
+    And this is the feed the streaming design designates as the RECONCILER.
+
+    Measured before the fix, straight out of the builder:
+
+        emitted sessionIds: ['abc ', 'abc', 'same-uuid', 'same-uuid']
+        after the server's TrimSpace: ['abc', 'abc', 'same-uuid', 'same-uuid']
+        duplicates the server rejects the WHOLE push on: ['abc', 'same-uuid']
+
+    ⚠ RAISING MAX_PER_PUSH 6 -> 48 WIDENED THIS, which is why the change that
+    widened it is the one that had to close it.
+    """
+    body = transcript("x", human_turn("hi", "x"))
+    # Same <uuid> under two project directories.
+    projects("same-uuid", body, project="-home-zach-projA")
+    projects("same-uuid", transcript("y", human_turn("hi there", "y")), project="-home-zach-projB")
+    # "abc.jsonl" beside "abc .jsonl" — distinct on disk, one id after TrimSpace.
+    projects("abc", body, project="-home-zach-projA")
+    projects("abc ", transcript("z", human_turn("hello", "z")), project="-home-zach-projA")
+    projects("healthy", transcript("healthy", human_turn("fine", "healthy")))
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert pushes(server), "nothing was pushed at all: " + proc.stdout
+
+    ids = [s["sessionId"] for s in json.loads(pushes(server)[0]["body"])["sessions"]]
+    # The server TrimSpaces before checking, so that is the comparison that matters.
+    trimmed = [i.strip() for i in ids]
+    assert len(trimmed) == len(set(trimmed)), (
+        f"the bulk push carries ids that collide after the server's TrimSpace: {ids}. "
+        "NormalizePush rejects the WHOLE push on that, nothing is stored, the digest never "
+        "matches, and the same batch is re-sent on every tick for ever.")
+    assert "" not in trimmed, f"an id that strips to empty was pushed: {ids}"
+    assert "healthy" in trimmed, "the innocent session was dropped along with the duplicates"

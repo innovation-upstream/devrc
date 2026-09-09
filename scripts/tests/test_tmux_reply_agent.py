@@ -146,6 +146,10 @@ class _Recorder(HTTPServer):
         # seam tests below is that one surface failing must not disturb the other.
         self.stream_status = 200
         self.cursor_status = 200
+        #: How many times the agent has polled (claim requests), and an optional
+        #: callback fired with that count — see the hook in do_POST.
+        self.polls = 0
+        self.on_poll = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -158,6 +162,22 @@ class _Handler(BaseHTTPRequestHandler):
             "auth": self.headers.get("Authorization"),
         })
         if self.path.endswith("/claim"):
+            # 🔴 A DETERMINISTIC HOOK FOR STAGGERING A FIXTURE, replacing a
+            # wall-clock timer — and it is on the CLAIM, which is the agent's ONE
+            # guaranteed request per poll. The obvious hook (the delta POST) does
+            # not fire at all when the only thing to report is a SKIP: run_round
+            # returns early with sent=0 and posts nothing, so a counter there
+            # never advances and the staggered file is never written.
+            #
+            # Why not a timer: measured, under this box's normal load a
+            # `threading.Timer(0.5, …)` fired before the agent's first poll in 3
+            # of 12 runs. Both reasons were then present at poll 1 — the exact
+            # configuration in which the mutant this fixture exists to kill
+            # SURVIVES — and the test passed anyway, so a green run was
+            # indistinguishable from one that proved nothing.
+            self.server.polls += 1
+            if self.server.on_poll:
+                self.server.on_poll(self.server.polls)
             status = self.server.claim_status
             if status != 200:
                 self._reply(status, b'{"error":"no"}')
@@ -2547,23 +2567,26 @@ def test_TWO_skip_reasons_are_each_logged_ONCE_through_the_REAL_loop(server, tmu
 
     # 🔴 REASON 2 ARRIVES **LATER**, AND THE STAGGER IS THE WHOLE FIXTURE. With
     # both files present from poll 1 the rebind mutant SURVIVES: the first poll
-    # reports {A,B} and every later poll has fresh=∅, so `stream_skips = fresh`
-    # never executes again and the two formulations are indistinguishable. The
-    # ping-pong needs A to be reported BEFORE B appears — measured, this fixture
-    # scored 1 line shipped / many with the mutant only after the delay was added.
-    def _late_second_reason():
-        (d / "skip-b.jsonl").write_bytes(b'{"type":"user","t":"\xff\xfe"}\n')
+    # reports {A,B}, every later poll has fresh=∅, so `stream_skips = fresh` never
+    # executes again and the two formulations are indistinguishable.
+    #
+    # 🔴 SO THE STAGGER MUST BE DETERMINISTIC, AND A `threading.Timer` IS NOT.
+    # Measured with the timer: under this box's normal load it fired before the
+    # agent's first poll in 3 of 12 runs — the degenerate configuration — and the
+    # test PASSED anyway, so the mutant survived 4 of 14 loaded runs while the
+    # battery reported 6/6 at ambient load. The file is now written from the stub
+    # server's own handler on the agent's THIRD POLL, so "after A has been
+    # reported" is a fact about the traffic rather than about the clock.
+    def _second_reason_after_third_poll(n):
+        if n == 3:
+            (d / "skip-b.jsonl").write_bytes(b'{"type":"user","t":"\xff\xfe"}\n')
 
-    timer = threading.Timer(0.5, _late_second_reason)
-    timer.start()
-    try:
-        server.claim_batches = [[], [], [], []]
-        rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=24, env_extra={
-            "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
-            "CLAUDE_PROJECTS_DIR": str(projects),
-        })
-    finally:
-        timer.cancel()
+    server.on_poll = _second_reason_after_third_poll
+    server.claim_batches = [[], [], [], []]
+    rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=30, env_extra={
+        "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
 
     lines = [l for l in out.splitlines() if "skipped some sessions" in l]
     # 🔴 A BOUND, NOT AN EXACT COUNT, AND ONLY HERE. Which poll each reason first
@@ -2572,10 +2595,15 @@ def test_TWO_skip_reasons_are_each_logged_ONCE_through_the_REAL_loop(server, tmu
     # correct. What is NOT correct is a line per poll — that is the regression,
     # and it is orders of magnitude away from this bound rather than adjacent to
     # it. The sibling test below asserts the exact count where it IS deterministic.
-    assert 1 <= len(lines) <= 2, (
-        f"two skip reasons with STAGGERED onsets produced {len(lines)} log lines. 0 means the "
-        f"signal is gone; more than 2 means the memo is not ACCUMULATING — the two reasons are "
-        f"ping-ponging and this loop polls 17,280 times a day:\n"
+    # 🔴 EXACTLY TWO, NOT "AT MOST TWO", NOW THAT THE STAGGER IS DETERMINISTIC.
+    # `1 <= len(lines)` was the arm that admitted the degenerate run: one line
+    # means both reasons arrived together, which is precisely the configuration
+    # the mutant survives, so a pass there proved nothing.
+    assert len(lines) == 2, (
+        f"two skip reasons with STAGGERED onsets produced {len(lines)} log lines, want exactly "
+        f"2. 1 means the stagger did not happen and this run proved NOTHING; more than 2 means "
+        f"the memo is not ACCUMULATING — the two reasons are ping-ponging and this loop polls "
+        f"17,280 times a day:\n"
         + "\n".join(lines[:6]) + "\n---\n" + out[-1500:])
     reported = " ".join(lines)
     assert "no-record-boundary" in reported, reported
@@ -2678,14 +2706,22 @@ def test_the_skip_memo_key_ignores_COUNTS_and_tracks_REASONS():
 
 
 def test_the_reported_reason_bound_matches_the_TAILERS_OWN_set():
-    """🔴 THE BOUND IS A RELATIONSHIP, NOT A NUMBER IN PROSE. `skip_reasons_to_report`
-    logs at most one line per distinct reason per agent lifetime, so the bound IS
-    the tailer's reason vocabulary — and an earlier docstring wrote it out as
-    "four, since there are four reasons" when there were five.
+    """🔴 A LEDGER, NOT A RECOMPUTATION. `skip_reasons_to_report` logs at most one
+    line per distinct reason per agent lifetime, so the bound IS the tailer's
+    reason vocabulary — and the prose used to write it out as "four, since there
+    are four reasons" when there were five.
 
-    Derived from the DEFINING surface (`transcript_stream`'s SKIP_* constants),
-    not from a list restated here, so a sixth reason added tomorrow moves this
-    test rather than silently invalidating a sentence.
+    🔴 THE FIRST VERSION OF THIS TEST WAS A TAUTOLOGY. It built `reportable` as
+    `{r for r in reasons if r != "unchanged"}` and compared it against
+    `skip_memo_key`, whose body is the identical predicate — so both sides
+    recomputed from the same input and the equality held for ANY constant set.
+    Measured: adding a sixth reason to the tailer PASSED, while this test's own
+    docstring claimed such a change "moves this test".
+
+    So the expected set is written out ONCE, by hand, and checked BOTH ways
+    against the module: a reason added upstream fails here (GROWTH), and a reason
+    removed fails here too (SHRINK). That is a ledger — the only kind worth
+    having, and the same shape this repo's other two-way ledgers use.
     """
     import importlib.util
 
@@ -2694,13 +2730,28 @@ def test_the_reported_reason_bound_matches_the_TAILERS_OWN_set():
     ts = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ts)
 
-    reasons = {v for k, v in vars(ts).items() if k.startswith("SKIP_") and isinstance(v, str)}
-    assert len(reasons) >= 4, f"the SKIP_* scan found {reasons} — it is measuring nothing"
-    assert "unchanged" in reasons, "the steady-state reason is not named SKIP_UNCHANGED any more"
+    # The ledger. Every entry is a reason a skip line may name; `unchanged` is
+    # deliberately absent because it IS the steady state and must never be logged.
+    WANT_REPORTABLE = {
+        "no-record-boundary",
+        "undecodable",
+        "unreadable",
+        "duplicate-session-id",
+        "no-session-id",
+    }
 
-    reportable = {r for r in reasons if r != "unchanged"}
-    # The key must drop `unchanged` and keep every other reason — that IS the bound.
-    assert AGENT.skip_memo_key({r: 1 for r in reasons}) == frozenset(reportable), (
-        "the memo key does not admit exactly the tailer's reportable reasons; the "
-        "per-lifetime line bound is therefore not what the docstring describes"
-    )
+    declared = {v for k, v in vars(ts).items() if k.startswith("SKIP_") and isinstance(v, str)}
+    assert declared, "the SKIP_* scan found nothing — it is measuring nothing"
+    assert "unchanged" in declared, (
+        f"the steady-state reason is not among the tailer's SKIP_* values: {sorted(declared)}")
+
+    assert declared - {"unchanged"} == WANT_REPORTABLE, (
+        f"the tailer's reportable reasons are {sorted(declared - {'unchanged'})} but this "
+        f"ledger says {sorted(WANT_REPORTABLE)}. A reason added upstream widens the "
+        f"per-lifetime line bound the sticky memo promises; one removed narrows it. Update "
+        f"the ledger deliberately — that IS the accounting.")
+
+    # And the memo key must admit exactly the ledger, no more and no less.
+    assert AGENT.skip_memo_key({r: 1 for r in declared}) == frozenset(WANT_REPORTABLE), (
+        "the memo key does not admit exactly the tailer's reportable reasons, so the bound "
+        "the docstring describes is not the one the code enforces")

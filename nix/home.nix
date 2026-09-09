@@ -3863,9 +3863,12 @@ in
       #
       # ⚠ THE COVERAGE USED TO SIT WHERE IT MATTERED LEAST. The transcript-push
       # TIMER — where a stale copy costs at most five minutes, because the next
-      # tick runs fresh code — names both its halves and is pinned by
-      # `test_the_unit_restart_triggers_name_BOTH_halves`. This RESIDENT unit,
-      # where a stale copy lasts until somebody notices, named two of four.
+      # tick runs fresh code — names every module it depends on and is pinned by
+      # `test_the_unit_restart_triggers_name_EVERY_half`. This RESIDENT unit,
+      # where a stale copy lasts until somebody notices, named two while loading
+      # four. Both units and both tests were widened in the same arc; the numbers
+      # are deliberately not restated here, because they moved three times while
+      # this comment sat still.
       X-Restart-Triggers = [
         "${../scripts/tmux-reply-agent}"
         "${../scripts/lib/tmux_text_policy.py}"

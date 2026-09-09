@@ -264,8 +264,14 @@ def local_host_label(env=None, env_file: str = ACTIVITY_ENV) -> str:
 
     🔴 THIS USED TO BE A SECOND COPY OF THE RULE, AND transcript-push.sh HELD A
     THIRD (in shell, falling through to `uname -n`, which is "nixos" on BOTH
-    machines). The three agreed while `host` was display-only and stopped agreeing
-    the moment the delta stream made it a correctness predicate. `scripts/lib/
+    machines).
+
+    ⚠ THEY NEVER AGREED — an earlier version of this sentence said "the three
+    agreed while `host` was display-only". They did not: every stored transcript
+    row said `host: nixos` while this agent called the same machine `workbench`,
+    measured on the deployed server. What changed when the delta stream made
+    `host` a correctness predicate was the COST of the disagreement, not its
+    existence. host_label.py carries the measurement. `scripts/lib/
     host_label.py` carries the rule and the measurement; this wrapper stays only
     so the name and the tests that use it keep working.
 
@@ -1011,14 +1017,40 @@ def skip_reasons_to_report(seen: frozenset, skipped) -> frozenset:
     So the fix that made the counts stop mattering did not make the LINE stop
     repeating, while its own docstring claimed it had. Reporting each reason the
     FIRST time this process sees it gives a bound that is provable rather than
-    hoped for: at most one line per distinct reason per agent lifetime — four,
-    since there are four reasons.
+    hoped for: at most one line per distinct reason per agent lifetime, and the
+    reasons are the SKIP_* constants in `transcript_stream` minus `unchanged`.
+
+    ⚠ NO NUMBER IS WRITTEN HERE, AND ONE WAS — "four, since there are four
+    reasons", when there were five. Worse, a later commit's message claimed to
+    have removed it and had not: the edit landed on the emit-site comment and not
+    on this docstring, so the false number survived a round whose whole subject
+    was that number. A count restated in prose beside the list that defines it is
+    the rot the repo's own doc gate exists for.
+    `test_the_reported_reason_bound_matches_the_TAILERS_OWN_set` checks the
+    relationship against that module instead.
 
     ⚠ THE COST, STATED: a reason that goes away and comes back is not re-reported.
-    That is deliberate. The counts are still printed when a reason is first seen,
-    and the condition is diagnostic rather than urgent — the bulk push covers
-    every skipped session either way. A signal that fires 3,456 times a day is
-    not a louder version of this one; it is a channel nobody reads.
+    That is deliberate — a signal that fires 3,456 times a day is not a louder
+    version of this one, it is a channel nobody reads — and the counts are still
+    printed when a reason is first seen.
+
+    🔴 BUT NOT BECAUSE "the bulk push covers every skipped session either way",
+    WHICH IS WHAT THIS PARAGRAPH USED TO SAY AND IS FALSE. Measured, both feeders
+    over one fixture with a mode-000 file beside a healthy one:
+
+        STREAM emitted ['good'], skipped {'unreadable': 1}
+        BULK   emitted ['good']
+        -> covered by the bulk push? False
+
+    `read_tail` catches OSError and skips, so an `unreadable` session reaches
+    NEITHER feed. So the honest statement is narrower: `no-record-boundary` and
+    `undecodable` are covered by the reconciler; `unreadable` is covered by
+    nothing, and `duplicate-session-id` / `no-session-id` are conditions the
+    reconciler now guards against itself rather than repairs.
+
+    The consequence to accept with this design: a session stalled under a reason
+    whose one-shot budget was already spent on a benign earlier occurrence is not
+    announced again. `no-record-boundary` is the likeliest to be spent that way.
     """
     return skip_memo_key(skipped) - seen
 

@@ -227,6 +227,7 @@ def build(args: argparse.Namespace) -> dict:
     # means a very busy host catches up over several ticks instead.
     max_push_bytes = getattr(args, "max_push_bytes", 0) or 0
     total_bytes = 0
+    claimed: set[str] = set()
     for path in candidates(projects_dir, args.max_age_hours, args.max_candidates):
         if len(sessions) >= args.max_sessions:
             break
@@ -235,9 +236,31 @@ def build(args: argparse.Namespace) -> dict:
         # The session id IS the filename stem — that is how Claude Code writes
         # them, and it is the same id the attention queue and session-manager's
         # `claude_session_id` carry, which is what makes the join work at all.
-        session_id = path.stem
-        if not session_id:
+        #
+        # 🔴 STRIPPED AND DE-DUPLICATED, AND THE BLAST RADIUS HERE IS THE WHOLE
+        # HOST — WHICH IS THE OPPOSITE OF WHAT THE PROSE ELSEWHERE ASSUMED. The
+        # delta stream grew this guard first, and there a duplicate costs ONE
+        # session. Here `NormalizePush` rejects THE ENTIRE PUSH on a duplicate or
+        # an empty id, a rejection stores nothing, so the digest never matches,
+        # so the same poisoned batch is re-sent on every tick — permanently, for
+        # every session on this host. And this is the feed the whole streaming
+        # design designates as the RECONCILER.
+        #
+        # Two ways two files produce one id, both closed here as they are there:
+        # the same <uuid>.jsonl under two project directories, and — because the
+        # server TrimSpaces the id and this side did not — "abc.jsonl" beside
+        # "abc .jsonl".
+        #
+        # ⚠ RAISING `MAX_PER_PUSH` FROM 6 TO 48 WIDENED THIS. Six candidates
+        # rarely collide; forty-eight over a 24h window is a different exposure,
+        # and the change that widened it is the one that had to close it.
+        # Measured over the live corpus: 962 files, 0 duplicates after TrimSpace
+        # — so this is not live, and the cost of it becoming live is total.
+        # Candidates arrive newest-first, so the survivor is the freshest file.
+        session_id = path.stem.strip()
+        if not session_id or session_id in claimed:
             continue
+        claimed.add(session_id)
 
         result = read_tail(path, args.tail_bytes)
         if result is None:
@@ -247,11 +270,26 @@ def build(args: argparse.Namespace) -> dict:
             continue
 
         encoded = text.encode("utf-8")
-        # 🔴 CHECKED BEFORE THE SKIP, NOT AFTER, so a single oversized session
-        # cannot be admitted by arriving first. A session that alone exceeds the
-        # remaining budget is deferred to the next tick rather than dropped for
-        # ever — the loop is re-run every five minutes and the candidate list is
-        # ordered by recency, so it is first next time.
+        # 🔴 THE `and sessions` CONJUNCT IS AN EXEMPTION, AND AN EARLIER COMMENT
+        # HERE CLAIMED THE OPPOSITE — "a single oversized session cannot be
+        # admitted by arriving first". It can, deliberately: when the push is
+        # otherwise EMPTY, a session larger than the whole budget is sent anyway,
+        # because it is also the newest and would otherwise be dropped first on
+        # every tick, for ever. `test_ONE_oversized_session_alone_is_still_sent_
+        # rather_than_dropped_for_ever` exists to guarantee exactly that.
+        #
+        # What the ordering does buy is the OTHER case: once something is in the
+        # push, a session that would overflow the budget is deferred to the next
+        # tick rather than truncated.
+        #
+        # ⚠ AND THE BUDGET IS CHARGED BEFORE THE DEDUPE SKIP BELOW, so a large
+        # UNCHANGED session — which contributes nothing to the payload — can end
+        # the loop and defer sessions behind it by one tick. Measured and
+        # deliberate: moving the check after the skip would mean hashing every
+        # candidate before knowing whether there is room, and one tick of
+        # deferral on a recency-ordered list is cheaper than that. With the
+        # shipped values (192 KiB tail against a 3 MiB budget) it needs 16
+        # unchanged sessions in one window to bite at all.
         if max_push_bytes and sessions and total_bytes + len(encoded) > max_push_bytes:
             break
         digest = hash_tail(encoded)
@@ -276,11 +314,17 @@ def build(args: argparse.Namespace) -> dict:
                 "tail": text,
                 "truncated": truncated,
                 "contentHash": digest,
-                # 🔴 THE SEAM WITH THE DELTA STREAM. See read_tail. The server
-                # rejects a fileBytes SMALLER than the tail it accompanies, which
-                # is why this is `size` and not, say, len(text) — the tail is a
-                # decoded string and `errors="replace"` can make it a different
-                # length from the bytes it came from.
+                # 🔴 THE SEAM WITH THE DELTA STREAM. See read_tail.
+                #
+                # ⚠ AN EARLIER VERSION OF THIS COMMENT SAID "this is `size`", and
+                # read_tail's own 🔴 docstring says the opposite in capitals: it
+                # is derived from what was actually READ, not from the stat,
+                # because the file is being appended to while it is read. `size`
+                # is not even in scope here. The reason it is not len(text) is
+                # right, though: the tail is a decoded string and
+                # `errors="replace"` can make it a different length from the
+                # bytes it came from — which is also why read_tail reports 0 =
+                # UNKNOWN when that inflation happens.
                 "fileBytes": file_bytes,
             }
         )
