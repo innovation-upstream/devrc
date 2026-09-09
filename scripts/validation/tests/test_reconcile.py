@@ -85,6 +85,40 @@ def test_reconcile_claude_counts_when_both_present():
     assert r.missing == 0 and r.extra == 0
 
 
+def test_reconcile_tmux_is_SKIPPED_never_a_diff_against_an_empty_reference():
+    """🔴 THE SILENT-ZERO THIS CHANGE COULD HAVE SHIPPED.
+
+    The project reference for `source='tmux'` was the `task` field of the
+    fuzzyclaw task files, and that reader is deleted. The tempting minimal edit
+    was to drop the reader and leave the diff — which feeds `reconcile_sets` an
+    EMPTY reference and yields `missing=0, extra=<every collected project>`: a
+    well-formed finding reading "the collector over-collected everything",
+    manufactured entirely out of a measurement nobody took.
+
+    So the row must be `skipped` with a reason NAMING the missing reference, and
+    it must not publish a matched/missing/extra verdict at all.
+    """
+    client = FakeClient(rows_val=[{"project": "devrc"}, {"project": "homelab"}])
+    r = R.reconcile_tmux(client, Path("/nonexistent/activity"), since_epoch=0)
+    assert r.skipped is True
+    assert "NO INDEPENDENT PROJECT REFERENCE" in r.reason
+    assert r.matched == 0 and r.missing == 0 and r.extra == 0, (
+        "a skipped row must publish no verdict; `extra=2` here would be the "
+        "fabricated over-collection finding this test exists to refuse")
+    # ...and what WAS measured still rides along, so the skip is not a silence.
+    assert "collected projects=2" in r.reason
+
+
+def test_reconcile_tmux_with_NO_DATA_on_either_side_says_THAT_instead():
+    """The discriminating control: "nothing to compare" and "nothing to compare
+    it AGAINST" are different facts, and the reason must tell them apart."""
+    client = FakeClient(rows_val=[])
+    r = R.reconcile_tmux(client, Path("/nonexistent/activity"), since_epoch=0)
+    assert r.skipped is True
+    assert r.reason == "no tmux data on either side"
+    assert "NO INDEPENDENT PROJECT REFERENCE" not in r.reason
+
+
 def test_reconcile_zsh_missing_detected():
     # reference (plain histfile) has commands; collector recorded only a subset.
     client = FakeClient(rows_val=[{"text": "git status"}])

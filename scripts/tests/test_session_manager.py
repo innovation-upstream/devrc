@@ -166,7 +166,7 @@ def test_the_module_under_test_is_the_real_script():
     assert os.path.basename(_SCRIPT) == "session-manager"
     assert os.path.isfile(_SCRIPT)
     assert os.access(_SCRIPT, os.X_OK), "session-manager must be executable"
-    assert callable(sm.gather) and callable(sm.filter_live_tasks)
+    assert callable(sm.gather) and callable(sm.summarize)
 
 
 # =========================================================================== #
@@ -174,42 +174,10 @@ def test_the_module_under_test_is_the_real_script():
 # =========================================================================== #
 NOW = 1786449600.0  # 2026-08-11T12:00:00Z, fixed so nothing depends on wall time
 
-# Live task: @41 is live AND holds scratch7:3 in LIVE_WINDOWS below,
-# so BOTH halves of the guard accept it.
-TASK_LIVE = {
-    "task": "task-alpha-text",
-    "window_id": "@41",
-    "tmux_session": "scratch7",
-    "window_index": 3,
-    "status": "waiting",
-    "cwd": "/home/zach/workspace/repo-alpha",
-    "claude_session": "11111111-2222-4333-8444-555555555555",
-    "started": "2026-08-11T09:00:00+00:00",
-    "last_activity": "2026-08-11T11:30:00+00:00",   # -> age 1800s at NOW
-    "summary": "summary-alpha",
-    "transcript_path": "/home/zach/.claude/projects/proj-alpha/alpha.jsonl",
-}
-# Stale task: window_id @997 is NOT live. Every other field is well-formed, so
-# ONLY the intersection can reject it (that is what makes test 6 reachable).
-TASK_STALE = {
-    "task": "task-bravo-text",
-    "window_id": "@997",
-    "tmux_session": "scratch2",
-    "window_index": 8,
-    "status": "done",
-    "cwd": "/home/zach/workspace/repo-bravo",
-    "claude_session": "99999999-8888-4777-8666-333333333222",
-    "started": "2026-06-05T19:25:50-05:00",
-    "last_activity": "2026-06-05T19:31:20-05:00",
-    "summary": "summary-bravo",
-    "transcript_path": "/home/zach/.claude/projects/proj-bravo/bravo.jsonl",
-}
-
-# 🔴 The live-window fact is now a MAPPING, not a set of ids: {window_id:
+# 🔴 The live-window fact is a MAPPING, not a set of ids: {window_id:
 # (session, index)}. A bare set cannot answer "does @41 still sit in
-# scratch7:3?", and that question is the whole guard — see the module header of
-# session-manager. @41 is TASK_LIVE's window AND holds scratch7:3, so the
-# relationship holds for it and only for it.
+# scratch7:3?", and `slots_to_window_ids` inverts exactly this map to put the
+# window id on a row — which is the key the ledger join is looked up by.
 LIVE_WINDOWS = {"@41": ("scratch7", "3"),
                 "@52": ("misc", "5"),
                 "@63": ("other", "1")}
@@ -537,17 +505,25 @@ def base_gather(**kw):
         local_host="workbench",
         runner=make_runner(),
         use_ch=False,
-        use_fuzzyclaw=True,
-        # 🔴 The agent activity ledger is OFF in the SHARED fixture, deliberately.
-        # It ships ON, and its own tests below turn it on with injected per-host
-        # output. Leaving it on here would silently re-source `age_secs` and
-        # `claude_session_id` for every pre-existing assertion in this file, so
-        # each of those tests would stop pinning what its name says it pins. The
-        # ledger's default-on behaviour is asserted directly instead — see
+        # 🔴 THE SHARED FIXTURE HAS NO AGE SOURCE, DELIBERATELY — and that is a
+        # DIFFERENT reason from the one that used to be written here.
+        #
+        # It used to read `use_fuzzyclaw=True, use_ledger=False`: the task-file
+        # join supplied every age and session id, and the ledger was held off so
+        # it could not silently re-source them and quietly un-pin the assertions
+        # in this file. The task-file readers are now DELETED, so the masking
+        # hazard is gone — but so is the supplier.
+        #
+        # Turning the ledger ON here instead would re-create the original defect
+        # in mirror image: every assertion about a null age, an `unknown`
+        # bucket, or `rows_with_age` would start passing for a reason its name
+        # does not state. So the shared fixture stays age-less, `age_secs` is
+        # null on every row it produces, and the tests that are ABOUT age turn
+        # the ledger on themselves with injected per-host output. The ledger's
+        # default-ON behaviour is asserted directly — see
         # `test_the_ledger_is_ON_by_default_in_gathers_signature`.
         use_ledger=False,
         now=NOW,
-        fuzzyclaw_texts=[json.dumps(TASK_LIVE), json.dumps(TASK_STALE)],
         slots=SLOTS_FIXTURE,
         # The clawgate cache: absent by default, so no test inherits a value
         # that depends on the operator's real queue. Override per test.
@@ -1321,353 +1297,6 @@ def test_parse_iso_epoch(value, expected):
 
 
 # =========================================================================== #
-# §3.4 / §3.5 / §3.6 — THE fuzzyclaw LIVE-WINDOW INTERSECTION
-#
-# 🔴 This is the load-bearing guard. Measured on the workbench 2026-08-11:
-# 400 task files, 44 live windows, 43 intersect, 357 stale (89%), 0 unparseable.
-# Without the intersection, 89% of every row emitted would describe a window
-# that no longer exists.
-# =========================================================================== #
-def test_task_file_pointing_at_a_LIVE_window_is_included():
-    res = sm.filter_live_tasks([json.dumps(TASK_LIVE)], LIVE_WINDOWS)
-    assert [t["window_id"] for t in res["tasks"]] == ["@41"]
-    assert res["files_seen"] == 1 and res["files_live"] == 1
-    assert (res["files_stale"], res["files_mismatched"]) == (0, 0)
-    assert res["status"] == "ok"
-
-
-def test_task_file_pointing_at_a_DEAD_window_is_excluded():
-    """§3 test 5 — the one the mutation test (test 6) must turn red.
-
-    The assertion names the excluded window explicitly, so deleting the
-    intersection produces `['@41', '@997'] == ['@41']` — a failure that names
-    @997, i.e. THIS guard's failure and not some other check's error.
-    """
-    res = sm.filter_live_tasks(
-        [json.dumps(TASK_LIVE), json.dumps(TASK_STALE)], LIVE_WINDOWS)
-    assert [t["window_id"] for t in res["tasks"]] == ["@41"]
-    assert res["files_seen"] == 2
-    assert res["files_live"] == 1
-    assert res["files_unparseable"] == 0
-    assert res["files_stale"] == 1        # @997 is gone, not merely moved
-    assert res["files_mismatched"] == 0
-
-
-def test_the_intersection_is_REACHABLE_and_is_the_only_thing_excluding_it():
-    """§3 test 6 — the reachability half of the mutation test.
-
-    A mutation test is worthless if an EARLIER check would have rejected the
-    fixture anyway: the guard would never execute, and killing it would still
-    look green. So: the byte-identical stale fixture is fed twice, and the ONLY
-    difference between the two runs is whether its window_id is in the live set.
-    Included in one, excluded in the other => nothing upstream rejects it, and
-    the intersection is the sole cause of the exclusion.
-
-    (The destructive half — deleting the guard and watching the test above go
-    red — is performed by hand and reported in the PR; a suite cannot delete
-    its own subject's source.)
-    """
-    body = json.dumps(TASK_STALE)
-    excluded = sm.filter_live_tasks([body], LIVE_WINDOWS)
-    included = sm.filter_live_tasks(
-        [body], dict(LIVE_WINDOWS, **{"@997": ("scratch2", "8")}))
-    assert excluded["files_live"] == 0
-    assert included["files_live"] == 1
-    assert included["tasks"][0]["window_id"] == "@997"
-    # and it is well-formed by every OTHER standard, so no earlier check fires:
-    parsed = json.loads(body)
-    assert isinstance(parsed, dict)
-    assert sm.FUZZYCLAW_FIELDS.issubset(set(parsed))
-
-
-def test_an_empty_live_set_excludes_everything():
-    """The degenerate direction: tmux answered, and it has no windows."""
-    res = sm.filter_live_tasks(
-        [json.dumps(TASK_LIVE), json.dumps(TASK_STALE)], {})
-    assert res["tasks"] == [] and res["files_seen"] == 2
-    # MEASURED zero: status ok, count 0 — not the unmeasured case below.
-    assert res["status"] == "ok" and res["files_live"] == 0
-
-
-# --------------------------------------------------------------------------- #
-# 🔴 THE RELATIONSHIP HALF OF THE GUARD (the audit's F1)
-#
-# Measured on the workbench 2026-08-11 with the OLD id-only guard: 43 of 400
-# files survived it, but only 32 had a `window_id` that still resolved to the
-# `(session, index)` the file recorded. 7 named a slot now held by a DIFFERENT
-# live window, and 5 slots were claimed by more than one survivor (silent
-# last-wins). Two rendered rows therefore carried another window's
-# `claude_session_id` — the one carrier of the session id into ClickHouse.
-# After the fix, the same host measures 32 live, 357 stale, 11 slot-mismatched.
-# --------------------------------------------------------------------------- #
-def test_a_LIVE_window_id_in_the_WRONG_slot_is_rejected():
-    """🔴 The exact defect. @41 is alive, but it has been renumbered to
-    scratch7:9 — so the task file's claim about scratch7:3 is about a window
-    that is no longer there. Existence alone would have accepted it."""
-    moved = dict(LIVE_WINDOWS, **{"@41": ("scratch7", "9")})
-    res = sm.filter_live_tasks([json.dumps(TASK_LIVE)], moved)
-    assert res["tasks"] == []
-    assert res["files_mismatched"] == 1
-    assert res["files_stale"] == 0, (
-        "a moved window is NOT the same fact as a dead one; collapsing them "
-        "hides a renumber storm")
-    # and it IS accepted when the relationship holds — same file, same live id,
-    # only the SLOT differs between the two runs. So nothing else rejects it.
-    assert sm.filter_live_tasks([json.dumps(TASK_LIVE)],
-                                LIVE_WINDOWS)["files_live"] == 1
-
-
-def test_a_task_whose_SESSION_moved_is_rejected_even_though_the_index_matches():
-    """Half a match is not a match: the index still says 3, the session does
-    not. `renumber-windows` moves indexes, but a window can also be moved
-    between sessions."""
-    moved = dict(LIVE_WINDOWS, **{"@41": ("some-other-session", "3")})
-    res = sm.filter_live_tasks([json.dumps(TASK_LIVE)], moved)
-    assert res["tasks"] == [] and res["files_mismatched"] == 1
-
-
-def test_the_index_comparison_is_string_normalised_not_type_sensitive():
-    """fuzzyclaw writes `window_index` as an int; tmux reports it as text. A
-    type-sensitive compare would reject EVERY task file — a guard so strict it
-    is equivalent to deleting the feature, and it would look like a clean 0."""
-    assert TASK_LIVE["window_index"] == 3 and isinstance(
-        TASK_LIVE["window_index"], int)
-    res = sm.filter_live_tasks([json.dumps(TASK_LIVE)], LIVE_WINDOWS)
-    assert res["files_live"] == 1, "int 3 must match tmux's '3'"
-
-
-def test_two_files_claiming_ONE_slot_are_BOTH_dropped_not_last_wins():
-    """🔴 5 slots on the live host were contested. Last-wins attached an
-    arbitrary one of two contradictory records — and a wrong `claude_session_id`
-    reads as measured data, so it is worse than no record at all."""
-    a = dict(TASK_LIVE, claude_session="aaaaaaaa-1111-4111-8111-111111111111",
-             summary="claimant-a")
-    b = dict(TASK_LIVE, claude_session="bbbbbbbb-2222-4222-8222-222222222222",
-             summary="claimant-b")
-    idx = sm.index_tasks_by_window([a, b])
-    assert idx["index"] == {}, "a contested slot must resolve to NOTHING"
-    assert idx["conflicts"] == [{"session": "scratch7", "window_index": "3",
-                                 "claimants": 2, "window_ids": ["@41"]}]
-
-
-def test_a_third_claimant_is_counted_and_still_drops_the_slot():
-    """Off-by-one control on the conflict path: the 2->3 step must not restore
-    a winner, and the claimant count must actually move."""
-    claims = [dict(TASK_LIVE, summary=f"claimant-{i}") for i in range(3)]
-    idx = sm.index_tasks_by_window(claims)
-    assert idx["index"] == {}
-    assert idx["conflicts"][0]["claimants"] == 3
-
-
-def test_an_uncontested_slot_is_unaffected_by_the_conflict_logic():
-    """Positive control: conflict detection must not eat the normal case."""
-    idx = sm.index_tasks_by_window([TASK_LIVE, TASK_STALE])
-    assert idx["conflicts"] == []
-    assert idx["index"][("scratch7", "3")]["summary"] == "summary-alpha"
-    assert idx["index"][("scratch2", "8")]["summary"] == "summary-bravo"
-
-
-def test_an_UNMEASURED_live_set_is_not_an_empty_one():
-    """🔴 F2/F3, at the unit. None means "we never asked". It may only produce
-    `status: unmeasured` and `files_live: None` — never a measured 0."""
-    bodies = [json.dumps(TASK_LIVE), json.dumps(TASK_STALE), "{not json"]
-    unmeasured = sm.filter_live_tasks(bodies, None)
-    measured_zero = sm.filter_live_tasks(bodies, {})
-
-    assert unmeasured["status"] == "unmeasured"
-    assert unmeasured["files_live"] is None
-    assert unmeasured["files_stale"] is None
-    assert unmeasured["files_mismatched"] is None
-    assert unmeasured["error"]
-    # the file-level facts ARE still measurements and survive
-    assert unmeasured["files_seen"] == 3
-    assert unmeasured["files_unparseable"] == 1
-
-    assert measured_zero["status"] == "ok"
-    assert measured_zero["files_live"] == 0
-    # 🔴 and the two are DISTINGUISHABLE, which is the entire point
-    assert unmeasured["files_live"] is not measured_zero["files_live"]
-    assert unmeasured["status"] != measured_zero["status"]
-
-
-def test_the_unmeasured_reason_is_carried_through_verbatim():
-    res = sm.filter_live_tasks([], None, unmeasured_reason="ssh ate it")
-    assert res["error"] == "ssh ate it"
-
-
-@pytest.mark.parametrize("ids", [
-    {"@41", "@52"},          # the OLD argument shape — a bare set of ids
-    ["@41"],
-    ("@41",),
-])
-def test_passing_a_bare_SET_of_ids_is_a_TypeError_not_a_silent_downgrade(ids):
-    """🔴 The old signature took exactly this. Accepting it now would silently
-    restore the weaker existence-only check — the defect, re-entering through
-    the door marked "backwards compatible"."""
-    with pytest.raises(TypeError) as e:
-        sm.filter_live_tasks([json.dumps(TASK_LIVE)], ids)
-    assert "parse_windows" in str(e.value)
-
-
-def test_measured_stale_ratio_shape_is_handled_at_scale():
-    """A miniature of the real 400/43 distribution — the guard must scale and
-    must not be accidentally quadratic on membership."""
-    bodies = [json.dumps(dict(TASK_STALE, window_id=f"@{9000 + i}"))
-              for i in range(357)]
-    # each live file gets its OWN slot, so nothing is contested
-    bodies += [json.dumps(dict(TASK_LIVE, window_id=f"@{i}",
-                               tmux_session="scratch7", window_index=i))
-               for i in range(43)]
-    live = {f"@{i}": ("scratch7", str(i)) for i in range(43)}
-    res = sm.filter_live_tasks(bodies, live)
-    assert (res["files_seen"], res["files_live"]) == (400, 43)
-    assert (res["files_stale"], res["files_mismatched"]) == (357, 0)
-
-
-@pytest.mark.parametrize("body", [
-    "{not json",
-    "",
-    "[]",             # valid JSON, wrong shape
-    '"a string"',
-    "null",
-])
-def test_unparseable_or_wrong_shaped_task_file_is_skipped_not_fatal(body):
-    """§3 test 7."""
-    res = sm.filter_live_tasks([body, json.dumps(TASK_LIVE)], LIVE_WINDOWS)
-    assert res["files_live"] == 1
-    assert res["files_seen"] == 2
-    assert res["files_unparseable"] == 1
-
-
-def test_a_zero_from_no_files_is_distinguishable_from_a_zero_from_all_stale():
-    """SILENT-ZERO, fuzzyclaw edition. Both produce `tasks == []`; only the
-    counters say which happened."""
-    none_at_all = sm.filter_live_tasks([], LIVE_WINDOWS)
-    all_stale = sm.filter_live_tasks([json.dumps(TASK_STALE)] * 5,
-                                     LIVE_WINDOWS)
-    assert none_at_all["tasks"] == all_stale["tasks"] == []
-    assert none_at_all["files_seen"] == 0
-    assert all_stale["files_seen"] == 5
-    assert none_at_all != all_stale
-
-
-# --------------------------------------------------------------------------- #
-# §3.8 — THE FIELD LEDGER (fails if the consumed key set GROWS or SHRINKS)
-# --------------------------------------------------------------------------- #
-# Typed here independently of the implementation. Measured against the live
-# files 2026-08-11: 396/400 carry exactly these 11 keys; 4 predate
-# `transcript_path`. The spec's §2.1 field list omitted transcript_path — the
-# ledger exists so that kind of drift is loud.
-EXPECTED_FUZZYCLAW_FIELDS = {
-    "task", "window_id", "tmux_session", "window_index", "status", "cwd",
-    "claude_session", "started", "last_activity", "summary", "transcript_path",
-}
-
-
-def test_field_ledger_is_exactly_this_set():
-    assert set(sm.FUZZYCLAW_FIELDS) == EXPECTED_FUZZYCLAW_FIELDS, (
-        "the consumed task-file key set changed. GROWTH widens the trust "
-        "surface of a source CLAUDE.md marks UNTRUSTED; SHRINKAGE turns a real "
-        "field into a permanent null. Either way, account for it here."
-    )
-    assert len(sm.FUZZYCLAW_FIELDS) == 11
-
-
-def test_field_ledger_matches_what_the_code_ACTUALLY_READS():
-    """Behavioural half — a constant can drift from the code that ignores it.
-
-    A key-tracking mapping records every key `task_from_file_obj` touches, so
-    growth or shrinkage is caught in the CODE, not just in the constant.
-    """
-    class Tracking(dict):
-        def __init__(self, *a, **k):
-            super().__init__(*a, **k)
-            self.read = set()
-
-        def get(self, key, default=None):
-            self.read.add(key)
-            return super().get(key, default)
-
-        def __getitem__(self, key):
-            self.read.add(key)
-            return super().__getitem__(key)
-
-    probe = Tracking(TASK_LIVE)
-    sm.task_from_file_obj(probe)
-    assert probe.read == EXPECTED_FUZZYCLAW_FIELDS
-
-    # 🔴 REACHABILITY of the probe. Every value in TASK_LIVE is TRUTHY, so a
-    # SHORT-CIRCUITED extra read — `obj.get("summary") or obj.get("pid")` — is
-    # never evaluated and the probe above stays green while the code really does
-    # consume an off-ledger key on other inputs. A mutation sweep found exactly
-    # that. So run it again with every value FALSY, which forces the right-hand
-    # side of any `or` to execute.
-    falsy = Tracking({k: None for k in EXPECTED_FUZZYCLAW_FIELDS})
-    sm.task_from_file_obj(falsy)
-    assert falsy.read == EXPECTED_FUZZYCLAW_FIELDS, (
-        "a key was consumed only on the falsy path — the ledger must cover "
-        "EVERY branch that reads the untrusted task file, not just the happy one")
-
-    # ...and with the keys ABSENT entirely, the third shape a real file takes
-    # (4 of 400 live files predate `transcript_path`).
-    empty = Tracking({})
-    sm.task_from_file_obj(empty)
-    assert empty.read == EXPECTED_FUZZYCLAW_FIELDS
-
-
-def test_window_id_the_guard_keys_on_is_itself_in_the_ledger():
-    """`filter_live_tasks` reads `window_id` before projecting. If that key
-    ever left the ledger the guard would be silently comparing None."""
-    assert "window_id" in sm.FUZZYCLAW_FIELDS
-
-
-def test_task_projection_carries_every_value_through_unchanged():
-    got = sm.task_from_file_obj(TASK_LIVE)
-    assert got == {k: TASK_LIVE[k] for k in EXPECTED_FUZZYCLAW_FIELDS}
-
-
-def test_task_projection_of_a_missing_key_is_None_not_a_KeyError():
-    got = sm.task_from_file_obj({"window_id": "@1"})
-    assert got["transcript_path"] is None
-    assert set(got) == EXPECTED_FUZZYCLAW_FIELDS
-
-
-# --------------------------------------------------------------------------- #
-# §3.9 — fixtures are PAIRWISE DISTINCT, so a wrong-field bug cannot pass
-# --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("fixture,label", [(TASK_LIVE, "TASK_LIVE"),
-                                           (TASK_STALE, "TASK_STALE")])
-def test_fixture_field_values_are_pairwise_distinct(fixture, label):
-    values = [str(v) for v in fixture.values()]
-    assert len(set(values)) == len(values), (
-        f"{label} has two fields sharing a value; a transposed-field bug would "
-        f"pass every assertion in this file")
-
-
-def test_the_two_task_fixtures_share_no_value():
-    assert not (set(map(str, TASK_LIVE.values()))
-                & set(map(str, TASK_STALE.values())))
-
-
-def test_index_tasks_by_window_keys_on_session_and_index_as_strings():
-    idx = sm.index_tasks_by_window([TASK_LIVE, TASK_STALE])["index"]
-    assert set(idx) == {("scratch7", "3"), ("scratch2", "8")}
-    assert idx[("scratch7", "3")]["claude_session"] == TASK_LIVE["claude_session"]
-
-
-def test_index_tasks_skips_entries_missing_a_join_key():
-    res = sm.index_tasks_by_window([{"tmux_session": "s"}, {"window_index": 1}])
-    assert res["index"] == {} and res["conflicts"] == []
-
-
-def test_index_tasks_returns_a_COUNTED_result_never_a_bare_mapping():
-    """"no task for this slot" and "two files disagreed, so we refuse to guess"
-    are different facts and must not both be an absent key."""
-    res = sm.index_tasks_by_window([])
-    assert set(res) == {"index", "conflicts"}
-
-
-# =========================================================================== #
 # §3.10 — the ClickHouse SQL is a PINNED CONTRACT
 # The expected string below is typed from the kickoff brief, NOT derived from
 # the implementation. Only whitespace runs are normalised.
@@ -2111,18 +1740,6 @@ def test_tmux_not_running_is_REACHABLE_with_zero_windows():
     assert report["hosts"]["laptop"]["windows"] == []
 
 
-def test_remote_fuzzyclaw_is_not_fabricated():
-    """fuzzyclaw is LOCAL-only. A remote row must carry nulls, never the local
-    host's task joined onto a same-named remote session."""
-    panes = ("%31|3001|scratch7|3|win-alpha|/p|claude|"
-             f"{BRAILLE} remote lookalike")
-    report = base_gather(runner=make_runner(remote_panes=panes))
-    row = report["hosts"]["laptop"]["windows"][0]
-    assert row["fuzzyclaw"] is None
-    assert row["claude_session_id"] is None
-    assert row["age_secs"] is None
-
-
 def test_host_filter_scans_only_the_requested_host():
     runner = make_runner()
     report = base_gather(hosts=("workbench",), runner=runner)
@@ -2174,8 +1791,17 @@ def test_the_host_error_is_the_PANES_error_not_the_windows_error():
 def test_a_failed_list_windows_does_NOT_publish_a_measured_empty_id_set():
     """🔴 F3. `list-panes` succeeds, `list-windows` fails. The old code read
     only `wins_res["stdout"]`, so `live_window_ids` published as a measured
-    `[]`, every task dropped, `claude_session_id` went null, fuzzyclaw stayed
-    `"ok"` and the process exited 0. A fabricated zero, three fields wide."""
+    `[]` and every downstream join silently resolved against a host it read as
+    having no windows at all — `claude_session_id` went null and the process
+    exited 0. A fabricated zero.
+
+    The fuzzyclaw half of this test went with the task-file readers. What it
+    guarded is unchanged and is asserted here: `live_window_ids` must be `None`,
+    never `[]`, and the table must say so. `_host_ledger` consumes exactly that
+    distinction (an unmeasured live set makes it `unmeasured`, never `ok` with
+    zero live records) — see `test_a_host_whose_WINDOW_LIST_is_unmeasured_joins_
+    nothing_and_says_so`, which is the ledger-side half.
+    """
     runner = make_runner(local_windows_rc=1,
                          local_windows_err="lost server 500 lines")
     report = base_gather(runner=runner)
@@ -2188,75 +1814,40 @@ def test_a_failed_list_windows_does_NOT_publish_a_measured_empty_id_set():
         "None = never measured. [] would be a claim that the host has no "
         "windows, which is a different — and false — fact")
 
-    fz = report["fuzzyclaw"]
-    assert fz["status"] == "unmeasured"
-    assert fz["files_live"] is None
-    assert fz["files_seen"] == 2, "the FILES were still really counted"
-    assert "list-windows" in fz["error"]
-
-    assert report["summary"]["fuzzyclaw_status"] == "unmeasured"
-    assert report["summary"]["fuzzyclaw_live"] is None
     assert report["summary"]["windows_unmeasured"] == ["workbench"]
 
     # and it is LOUD in the table, not merely absent
     text = sm.render_table(report)
-    assert "LIVE COUNT UNMEASURED" in text
-    assert "this is NOT zero live tasks" in text
     assert "WINDOW LIST UNMEASURED ON: workbench" in text
 
 
-def test_the_measured_and_unmeasured_fuzzyclaw_zeroes_are_DIFFERENT_OUTPUT():
-    """The discriminating control. Same files, same panes; only whether
-    list-windows answered differs — and the two must not render the same."""
+def test_the_measured_and_unmeasured_window_list_zeroes_are_DIFFERENT_OUTPUT():
+    """The discriminating control for the test above. Same panes; only whether
+    `list-windows` answered differs — and the two must not render the same.
+
+    Without the second half this is a one-directional claim: a build that
+    published `None` unconditionally would pass the test above and fail here.
+    """
     unmeasured = base_gather(runner=make_runner(local_windows_rc=1,
                                                 local_windows_err="died"))
     measured_zero = base_gather(runner=make_runner(local_windows=""))
 
-    assert measured_zero["fuzzyclaw"]["status"] == "ok"
-    assert measured_zero["fuzzyclaw"]["files_live"] == 0
     assert measured_zero["hosts"]["workbench"]["live_window_ids"] == []
+    assert measured_zero["hosts"]["workbench"]["windows_measured"] is True
+    assert measured_zero["summary"]["windows_unmeasured"] == []
 
-    assert unmeasured["fuzzyclaw"]["status"] == "unmeasured"
-    assert unmeasured["fuzzyclaw"]["files_live"] is None
     assert unmeasured["hosts"]["workbench"]["live_window_ids"] is None
+    assert unmeasured["hosts"]["workbench"]["windows_measured"] is False
+    assert unmeasured["summary"]["windows_unmeasured"] == ["workbench"]
 
     a, b = sm.render_table(unmeasured), sm.render_table(measured_zero)
     assert a != b
-    # 🔴 Anchored on the FUZZYCLAW banner, not the bare word. "UNMEASURED" is
-    # now also how the `waiting` roll-up spells its own unmeasured case, so a
-    # substring test on the word alone stopped discriminating the two sections
-    # it was written to discriminate — it would have passed on a report whose
-    # fuzzyclaw zero was silently fabricated, as long as `waiting` said
-    # UNMEASURED somewhere else on the page.
-    assert "LIVE COUNT UNMEASURED" in a
-    assert "LIVE COUNT UNMEASURED" not in b
-
-
-def test_scanning_ONLY_the_remote_host_never_fabricates_a_fuzzyclaw_zero():
-    """🔴 F2. With `--host laptop` the local host never enters the loop, so the
-    live-window set is never measured — yet the task files were read. The old
-    code filtered 400 files against an empty set and reported
-    `files_seen: 400, files_live: 0, status: "ok"`: a measurement that never
-    happened, labelled ok."""
-    report = base_gather(hosts=("laptop",), local_host="workbench")
-    fz = report["fuzzyclaw"]
-
-    assert fz["status"] == "unmeasured"
-    assert fz["files_live"] is None
-    assert fz["files_seen"] == 2, "the files really were read and counted"
-    assert "was not scanned" in fz["error"] and "workbench" in fz["error"]
-    assert report["summary"]["fuzzyclaw_status"] == "unmeasured"
-    assert report["summary"]["fuzzyclaw_live"] is None
-
-    # positive control: scanning the local host DOES measure it, so the
-    # unmeasured verdict above is caused by the host filter and nothing else.
-    local = base_gather(hosts=("workbench",), local_host="workbench")
-    assert local["fuzzyclaw"]["status"] == "ok"
-    assert local["fuzzyclaw"]["files_live"] == 1
+    assert "WINDOW LIST UNMEASURED ON: workbench" in a
+    assert "WINDOW LIST UNMEASURED ON" not in b
 
 
 def test_scanning_only_the_remote_host_still_exits_OK_with_its_windows():
-    """The fuzzyclaw column being unmeasured must not poison the host scan: the
+    """A local-only source being unavailable must not poison the host scan: the
     laptop's windows WERE measured, so this is a real 0-exit with real rows."""
     report = base_gather(hosts=("laptop",), local_host="workbench")
     assert report["hosts"]["laptop"]["reachable"] is True
@@ -2286,7 +1877,7 @@ def test_json_golden_schema_and_values():
     assert blob["local_host"] == "workbench"
     assert blob["stale_threshold_secs"] == 3600
     assert set(blob) == {"ts", "local_host", "stale_threshold_secs", "hosts",
-                         "clickhouse", "fuzzyclaw", "ledger", "filters",
+                         "clickhouse", "ledger", "filters",
                          "caveats", "summary", "clawgate_queue",
                          # what this report contains NOTHING about, derived from
                          # the keys above rather than written down
@@ -2351,11 +1942,16 @@ def test_json_golden_schema_and_values():
         "task": "Working on alpha",
         "claude": True,
         "busy": True,
-        "age_secs": 1800.0,
-        # `use_ledger=False` in this fixture, so fuzzyclaw is the only writer
-        # that answered — and the row SAYS so rather than leaving the reader to
-        # infer which source an age came from.
-        "age_source": "fuzzyclaw",
+        # 🔴 NULL, and the PAIR is the golden. `use_ledger=False` in the shared
+        # fixture, so no writer answered — and `age_source: None` beside a null
+        # age is what says "nobody recorded this window" rather than "the ledger
+        # is broken" or, worse, "this window is 0 seconds old". The ledger-ON
+        # half of this pair is `test_THE_REGRESSION_the_ledger_restores_age_
+        # session_id_and_stale`, which pins the same two fields populated.
+        "age_secs": None,
+        "age_source": None,
+        # ...and `busy` therefore comes from the title GLYPH alone, which is the
+        # only remaining input to `classify_status` on an age-less row.
         "status": "busy",
         # 🔴 The capture batch RAN (make_runner answers it) but its output
         # carries no markers, so this pane is `uncaptured` — measured absence
@@ -2379,7 +1975,7 @@ def test_json_golden_schema_and_values():
         # asked" from "asked and missed".
         "pane_preview": None,
         "pane_preview_status": "disabled",
-        "claude_session_id": "11111111-2222-4333-8444-555555555555",
+        "claude_session_id": None,
         # 🔴 `runtime` names WHICH agent recorded the window. Null here because
         # this fixture runs `use_ledger=False`, so no writer answered — and
         # `claude: true` above is the pane's COMMAND matching /claude/, which is
@@ -2387,20 +1983,6 @@ def test_json_golden_schema_and_values():
         # `runtime: "opencode"`, which is why the row needs both.
         "runtime": None,
         "ledger": None,
-        "fuzzyclaw": {
-            "task": "task-alpha-text",
-            "window_id": "@41",
-            "tmux_session": "scratch7",
-            "window_index": 3,
-            "status": "waiting",
-            "cwd": "/home/zach/workspace/repo-alpha",
-            "claude_session": "11111111-2222-4333-8444-555555555555",
-            "started": "2026-08-11T09:00:00+00:00",
-            "last_activity": "2026-08-11T11:30:00+00:00",
-            "summary": "summary-alpha",
-            "transcript_path":
-                "/home/zach/.claude/projects/proj-alpha/alpha.jsonl",
-        },
         "panes": 2,
         # 🔴 The per-window activity time, in EPOCH SECONDS off tmux's
         # `#{window_activity}`. The literal is the fixture's own
@@ -2423,14 +2005,7 @@ def test_json_golden_schema_and_values():
     assert (second["label"], second["label_source"]) == ("tmp", "path")
     assert second["status"] == "unknown"
     assert second["age_secs"] is None
-    assert second["fuzzyclaw"] is None
 
-    assert blob["fuzzyclaw"] == {
-        "status": "ok", "error": None,
-        "tasks": [dict(TASK_LIVE)],
-        "files_seen": 2, "files_live": 1, "files_unparseable": 0,
-        "files_stale": 1, "files_mismatched": 0, "slot_conflicts": [],
-    }
     assert blob["summary"] == {
         "total_sessions": 3, "claude": 2, "shell": 1,
         # 🔴 LITERAL, and the whole point: this fixture's 3 windows are one busy
@@ -2442,6 +2017,9 @@ def test_json_golden_schema_and_values():
         "status": {
             "busy": {"claude": 1, "shell": 0, "total": 1},
             "idle": {"claude": 1, "shell": 0, "total": 1},
+            # 🔴 `stale` is 0 here because NOTHING HAS AN AGE, not because
+            # nothing is stale — `rows_with_age: 0` below is the field that
+            # tells those two apart, and that is exactly why it is published.
             "stale": {"claude": 0, "shell": 0, "total": 0},
             "unknown": {"claude": 0, "shell": 1, "total": 1},
         },
@@ -2461,8 +2039,6 @@ def test_json_golden_schema_and_values():
         "matched": None,
         "hosts_reachable": ["laptop", "workbench"],
         "hosts_unreachable": [],
-        "fuzzyclaw_live": 1,
-        "fuzzyclaw_status": "ok",
         "windows_unmeasured": [],
         # 🔴 LITERAL, and it is the unmeasured shape: the capture batch ran but
         # returned no markers, so 0 of 3 rows were scraped. `probable` is None
@@ -2491,42 +2067,49 @@ def test_json_golden_schema_and_values():
         # stuck-dispatch half rather than a second, weaker one.
         "clawgate_queue": {"count": None, "status": "absent",
                            "stuck_count": None, "schema_ok": False},
-        # 🔴 THE #419 METER, in the golden. One of these three windows has an
-        # age and it came from fuzzyclaw — because this fixture runs
-        # `use_ledger=False`. The two `none` rows are the shape the SHIPPED
+        # 🔴 THE #419 METER, in the golden, IN ITS BROKEN SHAPE — on purpose.
+        # This fixture runs `use_ledger=False`, so no writer answered and all
+        # three rows read `none`. That is precisely the shape the SHIPPED
         # default had for every row between #419 and the ledger: a null age with
         # nothing anywhere in the output naming which writer failed to supply
-        # it. Pinned literally so a regression that re-zeroes the ages cannot
-        # pass by leaving some unrelated total unchanged.
-        "age_sources": {"fuzzyclaw": 1, "none": 2},
+        # it. The meter is what makes it VISIBLE, and pinning it here means a
+        # build that silently re-sources an age cannot pass.
+        #
+        # 🔴 `"none"` is a STRING, not `None`: a null JSON key serialises to
+        # `"null"` and would read as a source called null. And the histogram
+        # creates a key only for a value it OBSERVED, which is what lets
+        # `scripts/lib/drift_phase2.py` read an ABSENT key as a real zero.
+        "age_sources": {"none": 3},
         # The entity axis, DERIVED from the rows. All three are tmux. Pinned
         # literally for the same reason as `age_sources`: it is the number that
         # moves when a row is built without a `kind`, and `total_sessions`
         # alone would not.
         "kind": {"tmux": 3},
-        "rows_with_age": 1,
-        "rows_with_session_id": 1,
+        "rows_with_age": 0,
+        "rows_with_session_id": 0,
     }
 
 
-def test_every_joined_row_names_the_window_its_task_describes():
+def test_every_joined_row_names_the_window_its_ledger_record_describes():
     """🔴 F1, asserted END-TO-END on the whole report rather than per unit.
 
-    This is the RELATIONSHIP the guard exists to establish, restated where a
-    consumer can see it: for every row that carries a fuzzyclaw task, the tmux
-    window id of the slot the row occupies IS the window id the task file names.
-    Before the fix this was violated by 2 of 44 live rows on this host, and the
-    violated field travelled as `claude_session_id`.
+    This is the RELATIONSHIP the join exists to establish, restated where a
+    consumer can see it: for every row that carries a ledger record, the tmux
+    window id of the slot the row occupies IS the window id the record names.
+    Its ancestor covered the fuzzyclaw task-file join, where the claim was
+    violated by 2 of 44 live rows on this host and the violated field travelled
+    as `claude_session_id`. Those readers are gone; the hazard is not, because
+    the ledger carries the same field to the same consumer.
     """
-    report = base_gather()
+    report = ledger_gather(workbench=[led_rec()], laptop=[])
     joined = [r for h in report["hosts"].values() for r in h["windows"]
-              if r.get("fuzzyclaw")]
+              if r.get("ledger")]
     assert joined, "positive control: the fixture must produce a joined row"
     for r in joined:
-        assert r["window_id"] == r["fuzzyclaw"]["window_id"], (
+        assert r["window_id"] == r["ledger"]["window_id"], (
             f"row {r['session']}:{r['window_index']} sits in window "
-            f"{r['window_id']} but carries a task file describing "
-            f"{r['fuzzyclaw']['window_id']} — including its claude_session_id")
+            f"{r['window_id']} but carries a ledger record describing "
+            f"{r['ledger']['window_id']} — including its claude_session_id")
 
 
 def test_a_row_whose_window_list_is_unmeasured_has_a_NULL_window_id():
@@ -2603,55 +2186,16 @@ def test_only_the_FIRST_claude_pane_leads_when_there_are_several():
     assert row["panes"] == 3
 
 
-def test_no_fuzzyclaw_flag_skips_the_source_and_says_so():
-    """🔴 Every COUNT is None under --no-fuzzyclaw, not 0.
-
-    The directory is never read, so `files_seen: 0` would be a fabricated
-    measurement — the same class of silent zero the `unmeasured` status exists
-    to refuse. `status: "skipped"` discriminates it, but a discriminated lie is
-    still a lie in the count, and a caller that reads `files_seen` without the
-    status (which is exactly what the status exists to stop) gets a measured 0.
-    """
-    report = base_gather(use_fuzzyclaw=False)
-    fz = report["fuzzyclaw"]
-    assert fz["status"] == "skipped"
-    for field in ("files_seen", "files_live", "files_unparseable",
-                  "files_stale", "files_mismatched"):
-        assert fz[field] is None, (
-            f"{field} must be None under --no-fuzzyclaw: nothing was measured")
-    assert fz["tasks"] == [] and fz["slot_conflicts"] == []
-    # the summary carries the same None + its discriminant
-    assert report["summary"]["fuzzyclaw_live"] is None
-    assert report["summary"]["fuzzyclaw_status"] == "skipped"
-    row = report["hosts"]["workbench"]["windows"][0]
-    assert row["fuzzyclaw"] is None and row["claude_session_id"] is None
-    # The banner names the flag that turns the source ON, because OFF is now
-    # the default: telling a reader "--no-fuzzyclaw" blamed a flag they never
-    # passed for an absence they did not ask for.
-    rendered = sm.render_table(report)
-    assert "opt in with --fuzzyclaw" in rendered
-    assert "--no-fuzzyclaw" not in rendered
-
-
-def test_the_skipped_and_measured_fuzzyclaw_zeroes_are_DIFFERENT_FACTS():
-    """DISCRIMINATING CONTROL for the test above — the positive half.
-
-    A genuinely measured zero must still report 0, or the fix above would have
-    "solved" the fabricated zero by making every zero unreadable. Same call,
-    only whether the source was read differs.
-    """
-    skipped = base_gather(use_fuzzyclaw=False)
-    measured = base_gather(fuzzyclaw_texts=[])
-    assert skipped["fuzzyclaw"]["files_seen"] is None
-    assert measured["fuzzyclaw"]["status"] == "ok"
-    assert measured["fuzzyclaw"]["files_seen"] == 0
-    assert measured["fuzzyclaw"]["files_live"] == 0
-
-
 def test_stale_threshold_flows_from_the_argument_into_the_rows():
-    """Measured at TWO thresholds against ONE fixture (age 1800s)."""
-    fresh = base_gather(threshold=3600)
-    stale = base_gather(threshold=1800)
+    """Measured at TWO thresholds against ONE fixture (age 1800s).
+
+    The age comes from the LEDGER — the shared fixture has no age source (see
+    `base_gather`), and `stale` is derived from an age, so a threshold test run
+    on an age-less report would pass at BOTH thresholds and pin nothing.
+    """
+    aged = [led_rec(ago=1800)]
+    fresh = ledger_gather(workbench=aged, threshold=3600)
+    stale = ledger_gather(workbench=aged, threshold=1800)
     assert fresh["hosts"]["workbench"]["windows"][0]["status"] == "busy"
     assert stale["hosts"]["workbench"]["windows"][0]["status"] == "stale"
     assert fresh["summary"]["status"]["stale"]["total"] == 0
@@ -3122,8 +2666,11 @@ def test_a_stale_SINGLE_WORD_pointer_is_caught_not_just_an_underscored_one():
 
     # 4. THE CONTRAST THAT MAKES 3 A NUMBER AND NOT A VIBE. Under the
     #    underscore-only rule — written out literally here, not read off the
-    #    implementation — 8 of those same corruptions were invisible: the 7
+    #    implementation — 7 of those same corruptions were invisible: the 6
     #    real keys clause (c) buys back, plus `ts`, which neither rule sees.
+    #    (It was 8/7 while `fuzzyclaw` was a top-level key; the counts are
+    #    DERIVED from the list below rather than restated, so removing a key
+    #    cannot leave a stale literal behind.)
     def _underscore_only(tok):
         return bool(re.fullmatch(r"[a-z]+(?:_[a-z]+)*(?:\.[a-z]+(?:_[a-z]+)*)+",
                                  tok)
@@ -3131,10 +2678,11 @@ def test_a_stale_SINGLE_WORD_pointer_is_caught_not_just_an_underscored_one():
 
     old_blind = [k for k in top
                  if k[:-1] not in report and not _underscore_only(k[:-1])]
-    assert sorted(old_blind) == ["caveats", "clickhouse", "filters",
-                                 "fuzzyclaw", "hosts", "ledger", "summary",
-                                 "ts"], old_blind
-    assert len(old_blind) == 8 and len(blind) == 1, (old_blind, blind)
+    _EXPECTED_OLD_BLIND = ["caveats", "clickhouse", "filters",
+                           "hosts", "ledger", "summary", "ts"]
+    assert sorted(old_blind) == _EXPECTED_OLD_BLIND, old_blind
+    assert len(old_blind) == len(_EXPECTED_OLD_BLIND) and len(blind) == 1, (
+        old_blind, blind)
 
     # 5. AND THE FALSE RED STAYS FIXED. The whole reason the underscore rule
     #    existed: an ordinary backticked word must not become a pointer. These
@@ -3192,7 +2740,7 @@ _MEASURED_ENGLISH_FALSE_REDS = (
 # is stale and a human must re-run the recipe -- that is the whole mechanism
 # that stops the false-red budget growing in silence.
 _LEDGER_KEY_SET = ("caveats", "clawgate_queue", "clickhouse", "filters",
-                   "fuzzyclaw", "hosts", "ledger", "local_host",
+                   "hosts", "ledger", "local_host",
                    "not_measured", "stale_threshold_secs", "summary", "ts")
 
 
@@ -3468,7 +3016,7 @@ def test_table_says_NOTHING_WAS_MEASURED_when_no_host_answered():
 
 def test_table_renders_a_completely_empty_report_without_raising():
     empty = {"ts": None, "local_host": None, "hosts": {},
-             "clickhouse": {}, "fuzzyclaw": {}, "summary": {}}
+             "clickhouse": {}, "summary": {}}
     assert isinstance(sm.render_table(empty), str)
 
 
@@ -3843,7 +3391,7 @@ def test_main_tail_with_an_explicit_host_is_not_marked_defaulted(
 # detail — narrowing must not erase reachability facts
 # =========================================================================== #
 def test_detail_filters_to_one_window():
-    report = sm.filter_report(base_gather(), "scratch7", "3")
+    report = sm.filter_report(detail_gather(), "scratch7", "3")
     rows = [r for h in report["hosts"].values() for r in h["windows"]]
     assert len(rows) == 1
     assert rows[0]["session"] == "scratch7"
@@ -3876,6 +3424,18 @@ HISTORY_ROW = {"ts": "2026-08-11 11:59:00", "kind": "prompt",
                "snippet": "fix the join key"}
 
 
+def detail_gather(**kw):
+    """A report whose `scratch7:3` row CARRIES a `claude_session_id`.
+
+    The shared fixture has no age source and therefore no session id either (see
+    `base_gather`), and `detail_history` exists to query BY that id — so a
+    `detail` test run on the bare fixture would exercise only the no-id branch
+    and pass whatever the query path did. The ledger is the sole supplier now,
+    so these turn it on with one record for `@41` (= `scratch7:3`).
+    """
+    return ledger_gather(workbench=[led_rec()], laptop=[], **kw)
+
+
 def test_sql_session_history_IS_reachable_from_main():
     """The dead-code check, structurally: name the caller, don't assume one."""
     import inspect
@@ -3892,13 +3452,13 @@ def test_detail_history_queries_the_session_id_of_the_narrowed_window():
             seen["sql"] = sql
             return [HISTORY_ROW]
 
-    report = sm.filter_report(base_gather(), "scratch7", "3")
+    report = sm.filter_report(detail_gather(), "scratch7", "3")
     hist = sm.detail_history(report, ch_client_factory=lambda: _CH())
     assert hist["status"] == "ok"
     assert hist["rows"] == [HISTORY_ROW]
-    assert hist["session"] == TASK_LIVE["claude_session"]
+    assert hist["session"] == LEDGER_SESS_ALPHA
     # 🔴 the id is QUOTED by chquery's one quoter, never f-strung raw
-    assert f"'{TASK_LIVE['claude_session']}'" in seen["sql"]
+    assert f"'{LEDGER_SESS_ALPHA}'" in seen["sql"]
     assert "LIMIT 10" in seen["sql"]
     assert hist["sql"] == seen["sql"]
 
@@ -3913,7 +3473,7 @@ def test_detail_history_quotes_a_hostile_session_id():
             return []
 
     evil = "abc' OR 1=1 --"
-    report = sm.filter_report(base_gather(), "scratch7", "3")
+    report = sm.filter_report(detail_gather(), "scratch7", "3")
     for h in report["hosts"].values():
         for r in h["windows"]:
             r["claude_session_id"] = evil
@@ -3927,7 +3487,7 @@ def test_detail_history_quotes_a_hostile_session_id():
     assert sm.sql_session_history(evil) == sql
     # positive control on the escaper: a benign id gets NO backslash, so the
     # assertion above is observing escaping and not a constant.
-    assert "\\" not in sm.sql_session_history(TASK_LIVE["claude_session"])
+    assert "\\" not in sm.sql_session_history(LEDGER_SESS_ALPHA)
 
 
 @pytest.mark.parametrize("kw,needle", [
@@ -3939,7 +3499,7 @@ def test_detail_history_skips_are_LABELLED_not_silently_empty(kw, needle):
     CH was off, the window has no session id, and the query returned nothing."""
     report = sm.filter_report(base_gather(), "misc", "5")   # no task -> no id
     if kw.get("use_ch") is False:
-        report = sm.filter_report(base_gather(), "scratch7", "3")
+        report = sm.filter_report(detail_gather(), "scratch7", "3")
     hist = sm.detail_history(report, **kw)
     assert hist["status"] == "skipped"
     assert needle in hist["reason"]
@@ -3948,7 +3508,7 @@ def test_detail_history_skips_are_LABELLED_not_silently_empty(kw, needle):
 
 
 def test_detail_history_genuine_zero_is_DISTINCT_from_both_skips():
-    report = sm.filter_report(base_gather(), "scratch7", "3")
+    report = sm.filter_report(detail_gather(), "scratch7", "3")
     real_zero = sm.detail_history(report, ch_client_factory=lambda: FakeCH([]))
     no_ch = sm.detail_history(report, use_ch=False)
     assert real_zero["status"] == "ok" and real_zero["rows"] == []
@@ -3961,7 +3521,7 @@ def test_detail_history_genuine_zero_is_DISTINCT_from_both_skips():
 
 
 def test_detail_history_failure_is_NOT_an_empty_history():
-    report = sm.filter_report(base_gather(), "scratch7", "3")
+    report = sm.filter_report(detail_gather(), "scratch7", "3")
     err = sm._chq.CHUnreachable("URLError: Connection refused")
     hist = sm.detail_history(report,
                              ch_client_factory=lambda: FakeCH(raise_=err))
@@ -3974,11 +3534,11 @@ def test_detail_history_failure_is_NOT_an_empty_history():
 def test_detail_history_unbuildable_client_is_unavailable_not_ok():
     def boom():
         raise RuntimeError("CLICKHOUSE_URL not set")
-    report = sm.filter_report(base_gather(), "scratch7", "3")
+    report = sm.filter_report(detail_gather(), "scratch7", "3")
     hist = sm.detail_history(report, ch_client_factory=boom)
     assert hist["status"] == "unavailable"
     assert "CLICKHOUSE_URL" in hist["error"]
-    assert hist["session"] == TASK_LIVE["claude_session"]
+    assert hist["session"] == LEDGER_SESS_ALPHA
 
 
 def test_detail_history_factory_is_resolved_at_CALL_time_not_bound():
@@ -3987,7 +3547,7 @@ def test_detail_history_factory_is_resolved_at_CALL_time_not_bound():
     import inspect
     assert (inspect.signature(sm.detail_history)
             .parameters["ch_client_factory"].default is None)
-    report = sm.filter_report(base_gather(), "scratch7", "3")
+    report = sm.filter_report(detail_gather(), "scratch7", "3")
     hist = sm.detail_history(report)          # no factory -> patched attribute
     assert hist["status"] == "unavailable"
     assert "_Forbidden" in hist["error"]
@@ -3997,7 +3557,7 @@ def test_main_detail_attaches_the_history_and_never_builds_CH_under_no_ch(
         monkeypatch, capsys):
     """End-to-end through main(), both the wiring and the --no-ch guarantee."""
     built = []
-    monkeypatch.setattr(sm, "gather", lambda **kw: base_gather())
+    monkeypatch.setattr(sm, "gather", lambda **kw: detail_gather())
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "make_ch_client",
                         lambda *a, **k: built.append(1) or FakeCH([HISTORY_ROW]))
@@ -4017,7 +3577,7 @@ def test_main_detail_attaches_the_history_and_never_builds_CH_under_no_ch(
 
 
 def test_main_detail_table_mode_prints_the_history_block(monkeypatch, capsys):
-    monkeypatch.setattr(sm, "gather", lambda **kw: base_gather())
+    monkeypatch.setattr(sm, "gather", lambda **kw: detail_gather())
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "make_ch_client",
                         lambda *a, **k: FakeCH([HISTORY_ROW]))
@@ -4181,17 +3741,6 @@ def test_fmt_age(secs, expected):
     assert sm._fmt_age(secs) == expected
 
 
-def test_read_fuzzyclaw_texts_returns_empty_for_a_missing_directory(tmp_path):
-    assert sm.read_fuzzyclaw_texts(str(tmp_path / "nope")) == []
-
-
-def test_read_fuzzyclaw_texts_reads_only_json_files(tmp_path):
-    (tmp_path / "a.json").write_text('{"window_id": "@1"}')
-    (tmp_path / "b.txt").write_text("ignored")
-    got = sm.read_fuzzyclaw_texts(str(tmp_path))
-    assert got == ['{"window_id": "@1"}']
-
-
 def test_summarize_counts_every_status_bucket():
     report = base_gather()
     s = sm.summarize(report)
@@ -4223,54 +3772,6 @@ def test_summarize_counts_every_status_bucket():
 # test names the mutation it kills, because a test whose mutant was never run
 # is a claim, not evidence.
 # =========================================================================== #
-
-# 🔴 A second live window id sharing @41's slot. This is the shape real tmux
-# CANNOT produce — a slot belongs to exactly one window — so this fixture builds
-# the impossible on purpose to exercise the drop from both directions. The shape
-# that IS reachable (two task FILES carrying one `window_id`) has its own
-# fixture and its own gather-level test further down; do not read this one as
-# proof that `slot_conflicts` is unreachable in production.
-#
-# Every value is pairwise distinct from TASK_LIVE's EXCEPT the slot itself —
-# the one field that must collide for the conflict to exist.
-_TASK_LIVE_TWIN = {
-    "task": "task-twin-text",
-    "window_id": "@52",
-    "tmux_session": "scratch7",
-    "window_index": 3,
-    "status": "running",
-    "cwd": "/home/zach/workspace/repo-twin",
-    "claude_session": "77777777-6666-4555-8444-333333333333",
-    "started": "2026-08-11T10:00:00+00:00",
-    "last_activity": "2026-08-11T11:45:00+00:00",
-    "summary": "summary-twin",
-    "transcript_path": "/home/zach/.claude/projects/proj-twin/twin.jsonl",
-}
-# @41 AND @52 both report slot scratch7:3, so both task files pass the
-# relationship guard and then collide at the index.
-_CONTESTED_WINDOWS = window_rows(("@41", "3", "scratch7"),
-                                 ("@52", "3", "scratch7"),
-                                 ("@63", "1", "other"))
-
-
-def _contested_report():
-    return base_gather(
-        runner=make_runner(local_windows=_CONTESTED_WINDOWS),
-        fuzzyclaw_texts=[json.dumps(TASK_LIVE), json.dumps(_TASK_LIVE_TWIN)])
-
-
-def test_the_contested_slot_fixture_actually_produces_a_conflict():
-    """INSTRUMENT CHECK before any verdict is read off this fixture.
-
-    If the relationship guard rejected one of the two files, every conflict test
-    below would pass vacuously against an empty list.
-    """
-    report = _contested_report()
-    assert report["fuzzyclaw"]["files_live"] == 2, "both files must SURVIVE"
-    assert report["fuzzyclaw"]["files_stale"] == 0
-    assert report["fuzzyclaw"]["files_mismatched"] == 0
-    assert len(report["fuzzyclaw"]["slot_conflicts"]) == 1
-
 
 # --------------------------------------------------------------------------- #
 # §4.1 — 🟡 A: `tail` against a host whose tmux SERVER is down
@@ -4425,34 +3926,58 @@ def test_a_down_server_scan_still_reports_a_reachable_host_with_zero_windows():
 # §4.2 — 🟡 B: `detail_history` stated a MEASURED negative over an UNMEASURED set
 #
 # One hardcoded reason answered every no-session-id case, so a `detail --json`
-# printed `LIVE COUNT UNMEASURED` and then asserted a measured absence about
-# that same unmeasured set a few lines later.
+# printed an UNMEASURED banner and then asserted a measured absence about that
+# same unmeasured set a few lines later.
+#
+# 🔴 THESE MOVED FROM FUZZYCLAW TO THE AGENT LEDGER, and the branch set changed
+# SHAPE, not just spelling:
+#   * the LOCAL-ONLY branch became a PER-HOST one. fuzzyclaw was read on the
+#     local host only, so any remote row forbade the claim; the ledger is read on
+#     every scanned host, so what forbids it now is that ROW'S host not having
+#     answered. That is a widening — a remote row whose host DID answer is now
+#     legitimately claimable, and a LOCAL row whose host did not is not.
+#   * the CONTESTED-SLOT branch is GONE and no replacement exists. fuzzyclaw
+#     DROPPED a slot two files both claimed; `agent_ledger.index_records_by_
+#     window` resolves by last activity instead, so a conflicted window still
+#     has a record. A branch here would describe a drop that does not happen —
+#     pinned by `test_a_ledger_CONFLICT_still_leaves_the_window_a_session_id`.
 # --------------------------------------------------------------------------- #
-_MEASURED_ABSENCE = "no live fuzzyclaw task file joined to it"
+_MEASURED_ABSENCE = "the agent ledger was read on its host and holds no live record"
 
 
 def test_no_session_reason_measured_absence_is_the_ONLY_measured_branch():
-    """The baseline: fuzzyclaw ran, the local window simply has no task."""
-    report = base_gather(fuzzyclaw_texts=[])
-    narrowed = sm.filter_report(report, "misc", "5")
+    """The baseline: the ledger answered for this row's host, and this window
+    simply has no record. `misc:5` is `@52`, which `led_rec()` does not name."""
+    narrowed = sm.filter_report(detail_gather(), "misc", "5")
     reason = sm.no_session_reason(narrowed)
     assert _MEASURED_ABSENCE in reason
     assert "NOT a measured absence" not in reason
 
 
-@pytest.mark.parametrize("kw,marker", [
-    (dict(use_fuzzyclaw=False), "--no-fuzzyclaw"),
-    (dict(runner=make_runner(local_windows_rc=1,
-                             local_windows_err="list-windows died")),
-     "intersection never ran"),
+@pytest.mark.parametrize("gather_kw,marker", [
+    # --no-ledger: nothing was read at all
+    (dict(use_ledger=False), "--no-ledger"),
+    # the read never answered on this row's host
+    (dict(ledger_outputs={"workbench": None}), "workbench: error"),
+    # it answered without the protocol's own sentinel, so it is not evidence
+    (dict(ledger_outputs={"workbench": "garbage\n"}), "workbench: no_sentinel"),
+    # it answered, but list-windows did not, so nothing could be intersected
+    (dict(runner=make_runner(local_windows_rc=1, local_windows_err="boom")),
+     "workbench: unmeasured"),
 ])
-def test_no_session_reason_refuses_to_claim_a_measured_absence(kw, marker):
-    """🔴 KILLS: reverting `no_session_reason` to the single hardcoded string.
+def test_no_session_reason_refuses_to_claim_a_measured_absence(gather_kw,
+                                                               marker):
+    """🔴 KILLS: reverting `no_session_reason` to a single hardcoded string.
 
-    Both of these leave `fuzzyclaw` UNMEASURED. The old code emitted the
-    measured-absence sentence unchanged for each.
+    Every one of these leaves the WORKBENCH's ledger not-`ok`, and `scratch7:3`
+    is a workbench window — so nothing was searched for it and no absence may be
+    reported as measured. The old code emitted the measured-absence sentence
+    unchanged for each.
     """
-    report = base_gather(**kw)
+    if "use_ledger" in gather_kw:
+        report = base_gather(**gather_kw)
+    else:
+        report = ledger_gather(workbench=[led_rec()], laptop=[], **gather_kw)
     narrowed = sm.filter_report(report, "scratch7", "3")
     reason = sm.no_session_reason(narrowed)
     assert marker in reason
@@ -4461,45 +3986,33 @@ def test_no_session_reason_refuses_to_claim_a_measured_absence(kw, marker):
         "nothing was measured, so no absence can be reported as measured")
 
 
-def test_the_unmeasured_reason_carries_WHY_the_intersection_never_ran():
-    """"Nothing was measured" without the CAUSE is half a fact.
+def test_the_unanswered_reason_NAMES_the_host_and_its_status():
+    """"Nothing was measured" without WHICH HOST and WHY is half a fact.
 
-    KILLS: dropping `fz["error"]` from the unmeasured branch. The reason is the
-    only place a `detail` reader learns the intersection failed because
-    list-windows died, rather than because the host was never scanned.
+    KILLS: collapsing the per-host reason to a bare sentence. On the default
+    `--host all` a target can match a row on each machine, so a reader who is
+    not told which one failed cannot act on it.
     """
-    report = base_gather(runner=make_runner(
-        local_windows_rc=1, local_windows_err="WINDOWS-STDERR-b41c"))
+    report = ledger_gather(workbench=[led_rec()], laptop=[],
+                           ledger_outputs={"workbench": "garbage\n"})
     narrowed = sm.filter_report(report, "scratch7", "3")
     reason = sm.no_session_reason(narrowed)
-    assert "WINDOWS-STDERR-b41c" in reason, (
-        "the underlying list-windows failure must be quoted, not summarised "
-        "away — it is the difference between two distinct causes")
-    assert "reason unrecorded" not in reason
+    assert "workbench" in reason and "no_sentinel" in reason
+    assert "laptop" not in reason, (
+        "the laptop's ledger answered and this target has no laptop row — "
+        "naming it would report a failure that did not happen")
 
 
-def test_a_scan_that_never_touched_the_local_host_lands_on_the_REMOTE_branch():
-    """RENAMED, because the old name claimed a branch it never exercised.
-
-    It was `..._names_an_UNSCANNED_local_host_distinctly` and was presented as
-    the second way to reach the `unmeasured` branch. Its fixture cannot reach
-    that branch: `--host laptop` produces laptop-only rows, and the REMOTE
-    branch is checked first, so the reason names fuzzyclaw's local-only limit.
-    The cause the old name advertised is in fact structurally unreachable here —
-    no local scan means no local row, so the remote branch always wins. Renamed
-    rather than rewritten: the ORDERING it actually pins is worth keeping.
-
-    🔴 KILLS: deleting the remote branch (the reason then reads "the fuzzyclaw
-    intersection never ran"), and moving it below the `unmeasured` branch.
-    """
-    report = base_gather(hosts=("laptop",))
-    assert report["fuzzyclaw"]["status"] == "unmeasured", (
-        "fixture sanity: the local host was never scanned, so the intersection "
-        "genuinely did not run — and the remote branch still answers first")
-    narrowed = sm.filter_report(report, "naida-dev", "1")
+def test_a_host_with_NO_LEDGER_BLOCK_AT_ALL_is_not_ok_by_default():
+    """🔴 KILLS: `(per_host.get(h) or {}).get("status", "ok")`, i.e. defaulting
+    an ABSENT block to answered. A host with no block was never read, which is
+    the strongest possible reason not to claim a measured absence — and it is
+    the one a `.get(..., "ok")` silently converts into one."""
+    report = ledger_gather(workbench=[led_rec()], laptop=[])
+    del report["ledger"]["hosts"]["workbench"]
+    narrowed = sm.filter_report(report, "scratch7", "3")
     reason = sm.no_session_reason(narrowed)
-    assert "LOCAL host only" in reason and "laptop" in reason
-    assert "intersection never ran" not in reason
+    assert "not read at all" in reason
     assert "NOT a measured absence" in reason
     assert _MEASURED_ABSENCE not in reason
 
@@ -4517,33 +4030,57 @@ _SHARED_SLOT_REMOTE = (
     f"|{SPARKLE} laptop side of the SAME session:index")
 
 
-def test_a_slot_present_on_BOTH_hosts_is_never_a_measured_absence():
-    """🔴 KILLS: `if remote:` -> `if all(r.host != local for r in rows)`.
+def test_a_slot_on_TWO_HOSTS_where_ONE_did_not_answer_is_never_measured():
+    """🔴 KILLS: checking the ROLL-UP status instead of each row's own host.
 
-    The predicate used to be `all(...)`. With rows from both hosts it was False,
-    so the function fell through to the measured-absence sentence — a MEASURED
-    negative covering a laptop row that fuzzyclaw never searched, since the task
-    files are local state. `any` remote row is enough to forbid the claim.
+    The roll-up here is `partial` — the laptop answered, the workbench did not —
+    and a check written against `ledger.status in ("ok", "partial")` passes it
+    straight through to the measured-absence sentence, over a workbench row
+    nothing was ever read for. The per-host check is what refuses.
+
+    The mirror image is the test below: when BOTH hosts answer, the same mixed
+    row set DOES reach the measured absence. Without that half this is a
+    one-directional claim satisfiable by refusing every mixed set.
     """
-    report = base_gather(
+    report = ledger_gather(
+        workbench=[], laptop=[],
+        ledger_outputs={"workbench": None},
         runner=make_runner(local_panes=_SHARED_SLOT_LOCAL,
-                           remote_panes=_SHARED_SLOT_REMOTE),
-        fuzzyclaw_texts=[])
+                           remote_panes=_SHARED_SLOT_REMOTE))
     narrowed = sm.filter_report(report, "scratch", "1")
     rows = [r for h in narrowed["hosts"].values() for r in h["windows"]]
     assert sorted(r["host"] for r in rows) == ["laptop", "workbench"], (
         "fixture sanity: this is the MIXED row set, not an all-remote one")
-    assert narrowed["fuzzyclaw"]["status"] == "ok", (
-        "fixture sanity: the local host WAS searched — so an `all()` predicate "
-        "reaches the measured-absence branch, which is the defect")
+    assert narrowed["ledger"]["status"] == "partial", (
+        "fixture sanity: the ROLL-UP is a status the gate below accepts, so a "
+        "roll-up-only check reaches the measured-absence branch — the defect")
     reason = sm.no_session_reason(narrowed)
-    assert "LOCAL host only" in reason and "laptop" in reason
+    assert "workbench: error" in reason
     assert "NOT a measured absence" in reason
     assert _MEASURED_ABSENCE not in reason
 
 
-def test_an_UNRECOGNISED_fuzzyclaw_status_cannot_become_a_measured_absence():
-    """🔴 KILLS: dropping the `st != "ok"` gate before the measured absence.
+def test_a_slot_on_TWO_HOSTS_that_BOTH_answered_IS_a_measured_absence():
+    """The positive control for the test above, and the WIDENING this replaced
+    the local-only branch with. Under fuzzyclaw any remote row forbade the
+    claim, because the task files were local state. The ledger is read per host,
+    so a mixed row set whose hosts BOTH answered is genuinely searched — and
+    refusing it would understate what the tool knows."""
+    report = ledger_gather(
+        workbench=[], laptop=[],
+        runner=make_runner(local_panes=_SHARED_SLOT_LOCAL,
+                           remote_panes=_SHARED_SLOT_REMOTE))
+    narrowed = sm.filter_report(report, "scratch", "1")
+    rows = [r for h in narrowed["hosts"].values() for r in h["windows"]]
+    assert sorted(r["host"] for r in rows) == ["laptop", "workbench"]
+    assert narrowed["ledger"]["status"] == "ok", "fixture sanity"
+    reason = sm.no_session_reason(narrowed)
+    assert _MEASURED_ABSENCE in reason
+    assert "NOT a measured absence" not in reason
+
+
+def test_an_UNRECOGNISED_ledger_status_cannot_become_a_measured_absence():
+    """🔴 KILLS: dropping the roll-up status gate before the measured absence.
 
     The measured absence used to be a FALLTHROUGH: every status the branches
     above do not name became a measured negative by default, so a status added
@@ -4551,51 +4088,24 @@ def test_an_UNRECOGNISED_fuzzyclaw_status_cannot_become_a_measured_absence():
     report with `ok` still reaches the measured absence, so this is a gate, not
     a blanket refusal.
     """
-    report = base_gather(fuzzyclaw_texts=[])
-    report["fuzzyclaw"]["status"] = "partial"        # a status invented later
+    report = detail_gather()
+    report["ledger"]["status"] = "degraded"       # a status invented later
     reason = sm.no_session_reason(sm.filter_report(report, "misc", "5"))
-    assert "partial" in reason
+    assert "degraded" in reason
     assert "NOT a measured absence" in reason
     assert _MEASURED_ABSENCE not in reason
 
-    report["fuzzyclaw"]["status"] = "ok"
+    report["ledger"]["status"] = "ok"
     assert _MEASURED_ABSENCE in sm.no_session_reason(
         sm.filter_report(report, "misc", "5"))
 
 
-def test_no_session_reason_for_a_REMOTE_window_names_the_local_only_limit():
-    """fuzzyclaw is LOCAL-only, so a laptop row could never have had a session
-    id. The old string called that a measured absence too."""
-    report = base_gather()
-    narrowed = sm.filter_report(report, "naida-dev", "1")
-    rows = [r for h in narrowed["hosts"].values() for r in h["windows"]]
-    assert [r["host"] for r in rows] == ["laptop"], "fixture sanity"
-    reason = sm.no_session_reason(narrowed)
-    assert "LOCAL host only" in reason and "laptop" in reason
-    assert "NOT a measured absence" in reason
-    assert _MEASURED_ABSENCE not in reason
-
-
 def test_no_session_reason_when_no_window_matched_the_target():
-    report = base_gather()
-    narrowed = sm.filter_report(report, "no-such-session", "99")
-    reason = sm.no_session_reason(narrowed)
+    report = sm.filter_report(detail_gather(), "no-such-session", "99")
+    reason = sm.no_session_reason(report)
     assert "matched the requested target" in reason
     assert "NOT a measured absence" in reason
     assert _MEASURED_ABSENCE not in reason
-
-
-def test_no_session_reason_for_a_slot_the_guard_DROPPED():
-    """A contested slot resolves to no task at all. "No file joined" is true but
-    misleading — files DID claim it and were dropped, which is a different and
-    actionable fact."""
-    report = _contested_report()
-    assert report["fuzzyclaw"]["slot_conflicts"], "fixture sanity"
-    narrowed = sm.filter_report(report, "scratch7", "3")
-    reason = sm.no_session_reason(narrowed)
-    assert "claimed by 2 task files" in reason
-    assert "ALL were dropped" in reason
-    assert "NOT a measured absence" in reason
 
 
 def test_the_unmeasured_reasons_are_PAIRWISE_DISTINCT():
@@ -4603,22 +4113,49 @@ def test_the_unmeasured_reasons_are_PAIRWISE_DISTINCT():
     return statement for all of them is exactly the defect."""
     reasons = {
         "measured": sm.no_session_reason(
-            sm.filter_report(base_gather(fuzzyclaw_texts=[]), "misc", "5")),
+            sm.filter_report(detail_gather(), "misc", "5")),
         "skipped": sm.no_session_reason(
-            sm.filter_report(base_gather(use_fuzzyclaw=False), "scratch7", "3")),
-        "remote": sm.no_session_reason(
-            sm.filter_report(base_gather(), "naida-dev", "1")),
+            sm.filter_report(base_gather(use_ledger=False), "scratch7", "3")),
+        "host_error": sm.no_session_reason(sm.filter_report(
+            ledger_gather(workbench=[led_rec()],
+                          ledger_outputs={"workbench": None}),
+            "scratch7", "3")),
+        "no_sentinel": sm.no_session_reason(sm.filter_report(
+            ledger_gather(workbench=[led_rec()],
+                          ledger_outputs={"workbench": "garbage\n"}),
+            "scratch7", "3")),
         "unmeasured": sm.no_session_reason(sm.filter_report(
-            base_gather(runner=make_runner(local_windows_rc=1,
-                                           local_windows_err="died")),
+            ledger_gather(workbench=[led_rec()],
+                          runner=make_runner(local_windows_rc=1,
+                                             local_windows_err="died")),
             "scratch7", "3")),
         "no_rows": sm.no_session_reason(
-            sm.filter_report(base_gather(), "nope", "9")),
-        "contested": sm.no_session_reason(
-            sm.filter_report(_contested_report(), "scratch7", "3")),
+            sm.filter_report(detail_gather(), "nope", "9")),
     }
     assert len(set(reasons.values())) == len(reasons), (
         "two cases share a sentence: " + repr(reasons))
+
+
+def test_a_ledger_CONFLICT_still_leaves_the_window_a_session_id():
+    """🔴 THE BRANCH THAT DELIBERATELY DOES NOT EXIST, pinned as behaviour.
+
+    fuzzyclaw DROPPED a slot two task files both claimed, so `no_session_reason`
+    carried a branch saying "N files claimed it and ALL were dropped". The
+    ledger resolves a same-window conflict by LAST ACTIVITY instead, so the row
+    keeps a record and an id. Re-adding a contested branch here would describe a
+    drop that cannot happen — and this test is what makes that observable rather
+    than a claim in a comment.
+    """
+    rep = ledger_gather(workbench=[
+        led_rec(session_id="older", ago=900, pane_id="%11"),
+        led_rec(session_id="newer", ago=60, pane_id="%12"),
+    ], laptop=[])
+    assert rep["ledger"]["conflicts"], "fixture sanity: @41 is claimed twice"
+    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
+    assert row["claude_session_id"] == "newer", (
+        "the conflict resolves to the most recent record, it is not dropped")
+    reason = sm.no_session_reason(sm.filter_report(rep, "scratch7", "3"))
+    assert "dropped" not in reason
 
 
 def test_detail_history_EMITS_the_selected_reason_not_a_constant():
@@ -4629,46 +4166,45 @@ def test_detail_history_EMITS_the_selected_reason_not_a_constant():
     KILLS: `detail_history` re-inlining any fixed string for the no-sid case.
     The autouse `_no_real_socket` guard also proves no client was built.
     """
-    report = base_gather(use_fuzzyclaw=False)
-    narrowed = sm.filter_report(report, "scratch7", "3")
+    narrowed = sm.filter_report(base_gather(use_ledger=False), "scratch7", "3")
     hist = sm.detail_history(narrowed, use_ch=True)
     assert hist["status"] == "skipped"
     assert hist["reason"] == sm.no_session_reason(narrowed)
-    assert "--no-fuzzyclaw" in hist["reason"]
+    assert "--no-ledger" in hist["reason"]
     assert _MEASURED_ABSENCE not in hist["reason"]
 
 
 def test_detail_history_no_ch_still_wins_over_the_reason_selection():
     """--no-ch is the operator's own explicit choice and must not be masked by
-    a fuzzyclaw story about a query that was never going to run."""
-    narrowed = sm.filter_report(base_gather(use_fuzzyclaw=False),
-                                "scratch7", "3")
+    a ledger story about a query that was never going to run."""
+    narrowed = sm.filter_report(base_gather(use_ledger=False), "scratch7", "3")
     assert sm.detail_history(narrowed, use_ch=False)["reason"] == "--no-ch"
 
 
 def test_a_detail_json_never_claims_a_measured_absence_it_did_not_measure(
         monkeypatch, capsys, absent_blocked_cache):
     """🔴 END-TO-END, the exact contradiction the auditor read in ONE payload:
-    `LIVE COUNT UNMEASURED` in the report and a measured absence beside it."""
+    an UNMEASURED source in the report and a measured absence beside it.
+
+    `list-windows` dies, so the workbench's ledger read cannot be intersected
+    and its per-host status is `unmeasured` — the records exist, none is
+    joinable. Nothing in the same payload may then assert a measured absence.
+    """
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "_default_runner",
                         make_runner(local_windows_rc=1,
-                                    local_windows_err="list-windows died"))
-    monkeypatch.setattr(sm, "read_fuzzyclaw_texts",
-                        lambda *a, **k: [json.dumps(TASK_LIVE)])
+                                    local_windows_err="list-windows died",
+                                    local_ledger=led_out(led_rec())))
     monkeypatch.setattr(sm, "load_scratch_slots", lambda *a, **k: {})
-    # 🔴 `--fuzzyclaw` is now REQUIRED to reach this code path at all: the join
-    # is opt-in, so without it the status would be `skipped` and this test
-    # would pass vacuously against a source that was never read.
     sm.main(["detail", "scratch7:3", "--host", "workbench", "--json",
-             "--no-ch", "--fuzzyclaw"])
+             "--no-ch"])
     blob = json.loads(capsys.readouterr().out)
-    assert blob["fuzzyclaw"]["status"] == "unmeasured"
-    assert blob["fuzzyclaw"]["files_live"] is None
+    assert blob["ledger"]["hosts"]["workbench"]["status"] == "unmeasured"
+    assert blob["ledger"]["hosts"]["workbench"]["live"] is None
     # --no-ch is the honest first answer here; the point is that the payload
     # never asserts a MEASURED absence over the unmeasured set above it.
     assert _MEASURED_ABSENCE not in json.dumps(blob), (
-        "the report says the live count was never measured, so nothing in the "
+        "the report says the join was never measured, so nothing in the "
         "same payload may assert a measured absence over it")
     assert blob["session_history"]["reason"] == "--no-ch"
 
@@ -4679,43 +4215,28 @@ def test_a_detail_json_never_claims_a_measured_absence_it_did_not_measure(
 # Four mutants survived the auditor's independently-built sweep. Each test below
 # names the one it kills, and asserts STATE rather than a word the code types.
 # --------------------------------------------------------------------------- #
-def test_the_unmeasured_reason_quotes_the_LIST_WINDOWS_stderr_verbatim():
-    """🔴 KILLS: `local_windows_error = panes_res["error"]` (gather:867).
+def test_each_hosts_TWO_tmux_errors_stay_attached_to_their_OWN_call():
+    """🔴 The "fact read off the wrong subprocess" class, at the surface that
+    still publishes both facts separately.
 
-    The pre-existing test asserted only `"list-windows" in fz["error"]` — a
-    prefix THE CODE TYPES ITSELF, so it stayed green while the operator-facing
-    reason degraded to "...unknown error". Same "fact read off the wrong
-    subprocess" class as the original F3, one level deeper.
-
-    So assert the value came from the RIGHT call: the two subprocesses get
-    PAIRWISE-DISTINCT stderr strings and only one of them may appear.
+    Its ancestor also asserted this of `report["fuzzyclaw"]["error"]`, which
+    quoted the list-windows stderr verbatim; that section went with the
+    task-file readers, and the ledger's own unmeasured reason is a TYPED
+    sentence rather than a quote (see `_host_ledger`), so there is nothing to
+    re-point that half at. The host block is the remaining place where reading
+    one call's error off the other is silently possible — BOTH calls fail here,
+    with PAIRWISE-DISTINCT messages, so neither field can satisfy this by
+    accident.
     """
-    report = base_gather(runner=make_runner(
-        local_windows_rc=1,
-        local_windows_err="WINDOWS-CALL-FAILED-9f3a: server lost"))
-    err = report["fuzzyclaw"]["error"]
-    assert "WINDOWS-CALL-FAILED-9f3a" in err, (
-        "the reason must quote the list-windows stderr, not a typed prefix")
-    assert "unknown error" not in err, (
-        "the mutant reads panes_res['error'] — None on a healthy panes call — "
-        "and degrades to this placeholder")
-
-
-def test_the_unmeasured_reason_does_not_quote_the_LIST_PANES_stderr():
-    """The mirror image, so neither direction is hardcoded: BOTH calls fail,
-    with distinct messages, and only the list-windows one may be quoted."""
     report = base_gather(runner=make_runner(
         local_rc=1, local_err="PANES-CALL-FAILED-11bd: panes exploded",
         local_windows_rc=1,
         local_windows_err="WINDOWS-CALL-FAILED-9f3a: server lost"))
-    err = report["fuzzyclaw"]["error"]
-    assert "WINDOWS-CALL-FAILED-9f3a" in err
-    assert "PANES-CALL-FAILED-11bd" not in err, (
-        "reading the fact off the wrong subprocess is the defect")
-    # and the host's own two facts stay attached to their own calls
     wb = report["hosts"]["workbench"]
     assert "PANES-CALL-FAILED-11bd" in wb["error"]
+    assert "WINDOWS-CALL-FAILED-9f3a" not in wb["error"]
     assert "WINDOWS-CALL-FAILED-9f3a" in wb["windows_error"]
+    assert "PANES-CALL-FAILED-11bd" not in wb["windows_error"]
 
 
 def test_the_PER_HOST_window_list_unmeasured_banner_reaches_the_table():
@@ -4729,8 +4250,10 @@ def test_the_PER_HOST_window_list_unmeasured_banner_reaches_the_table():
     🔴 Assert on THE BANNER LINE, not on the whole table. A first version of
     this test checked `"WINDOWS-STDERR-4c2e" in text` and a mutant that made the
     banner quote the PANES error survived it — the string was still in the
-    output, printed by the unrelated FUZZYCLAW section. That is a spelled guard:
-    it passed while the hazard existed in a different shape.
+    output, printed by an unrelated section elsewhere on the page. That is a
+    spelled guard: it passed while the hazard existed in a different shape. The
+    section that satisfied it then is gone, which does NOT make the narrowing
+    obsolete: any future section that quotes a host error re-opens it.
     """
     report = base_gather(runner=make_runner(
         local_rc=0, local_err="",
@@ -4769,9 +4292,10 @@ def test_the_banner_quotes_the_WINDOWS_error_not_the_PANES_error():
     unreachable = next(ln for ln in lines if "WORKBENCH: UNREACHABLE" in ln)
     assert "PANES-STDERR-77aa" in unreachable
     assert "WINDOWS-STDERR-4c2e" not in unreachable
-    # and the fuzzyclaw reason carries the WINDOWS one, not the panes one
-    fz_err = report["fuzzyclaw"]["error"]
-    assert "WINDOWS-STDERR-4c2e" in fz_err and "PANES-STDERR-77aa" not in fz_err
+    # and the host block still keeps the WINDOWS one under its own key
+    wb = report["hosts"]["workbench"]
+    assert "WINDOWS-STDERR-4c2e" in wb["windows_error"]
+    assert "PANES-STDERR-77aa" not in wb["windows_error"]
 
 
 def test_the_per_host_banner_is_ABSENT_when_the_window_list_WAS_measured():
@@ -4779,157 +4303,6 @@ def test_the_per_host_banner_is_ABSENT_when_the_window_list_WAS_measured():
     text = sm.render_table(base_gather())
     assert "WINDOW LIST UNMEASURED" not in text
     assert "panes were read; window ids were NOT" not in text
-
-
-def test_the_unmeasured_FUZZYCLAW_BANNER_quotes_the_REAL_reason():
-    """🔴 KILLS: `fz.get('error') or 'unknown reason'` -> the literal
-    `'unknown reason'` in render_table's unmeasured branch.
-
-    The underlying `fuzzyclaw.error` and the per-host WINDOW LIST banner were
-    both pinned, but the line an operator actually reads when `list-windows`
-    dies was asserted only to EXIST. Replacing it with the fallback left the
-    suite green while the screen stopped naming the cause — and "the
-    intersection never ran" without the cause is half a fact.
-
-    Both halves: the real reason must render, and the fallback must still be
-    reachable when there genuinely is no reason recorded.
-    """
-    report = base_gather(runner=make_runner(
-        local_windows_rc=1, local_windows_err="WINDOWS-STDERR-5d17"))
-    assert report["fuzzyclaw"]["status"] == "unmeasured", "fixture sanity"
-    text = sm.render_table(report)
-    assert "LIVE COUNT UNMEASURED" in text
-    assert "WINDOWS-STDERR-5d17" in text, (
-        "the operator's line must quote the cause, not a placeholder")
-    assert "unknown reason" not in text
-
-    # POSITIVE CONTROL for the fallback itself: it is reachable, so the
-    # assertion above is about the CHOICE, not about a dead branch.
-    report["fuzzyclaw"]["error"] = None
-    assert "unknown reason" in sm.render_table(report)
-
-
-def test_slot_conflicts_reach_the_REPORT_through_gather():
-    """🔴 KILLS: `report["fuzzyclaw"]["slot_conflicts"] = []` (gather:884).
-
-    Before this, `slot_conflicts` was pinned only at the pure-function level and
-    was COMPLETELY unpinned across the gather -> report -> render seam — the
-    "verified in isolation, broken at the seam" shape.
-    """
-    report = _contested_report()
-    assert report["fuzzyclaw"]["slot_conflicts"] == [{
-        "session": "scratch7", "window_index": "3",
-        "claimants": 2, "window_ids": ["@41", "@52"],
-    }]
-    # both files SURVIVED the liveness guard — the drop happens at the index
-    assert report["fuzzyclaw"]["files_live"] == 2
-    assert report["fuzzyclaw"]["status"] == "ok"
-
-
-def test_a_contested_slot_carries_NO_session_id_onto_the_rendered_row():
-    """The BEHAVIOURAL half. A structural check on the conflicts list would
-    type-check past a row that still carried a stranger's session id — which is
-    the unrecoverable failure the drop exists to prevent."""
-    report = _contested_report()
-    rows = report["hosts"]["workbench"]["windows"]
-    row = next(r for r in rows if (r["session"], r["window_index"])
-               == ("scratch7", "3"))
-    assert row["fuzzyclaw"] is None, "attaching an arbitrary claimant is worse"
-    assert row["claude_session_id"] is None
-    assert row["age_secs"] is None, "age is derived from the dropped task file"
-    # neither claimant's session id leaked onto any row
-    ids = {r["claude_session_id"] for r in rows}
-    assert TASK_LIVE["claude_session"] not in ids
-    assert _TASK_LIVE_TWIN["claude_session"] not in ids
-
-
-def test_the_SLOT_CONFLICT_line_reaches_the_TABLE():
-    """🔴 KILLS: `for c in ()` instead of `slot_conflicts` (render_table:1038).
-
-    Nothing asserted the warning ever reached the operator's screen.
-    """
-    text = sm.render_table(_contested_report())
-    line = next((ln for ln in text.splitlines() if "SLOT CONFLICT" in ln), None)
-    assert line is not None, "the conflict must be VISIBLE, not only in JSON"
-    assert "scratch7:3" in line
-    assert "2 task files" in line
-    assert "@41" in line and "@52" in line
-    assert "ALL DROPPED" in line
-
-
-def test_the_conflict_line_distinguishes_DUPLICATE_FILES_from_CONTENTION():
-    """`claimants` counts FILES, `window_ids` is a deduplicated set, so two
-    files describing ONE window rendered as "claimed by 2 task files (@41)" —
-    which reads like a contention the relationship guard can no longer produce.
-
-    KILLS: dropping the distinct-id count from the rendered line.
-    """
-    report = base_gather()
-    report["fuzzyclaw"]["slot_conflicts"] = [
-        {"session": "scratch7", "window_index": "3",
-         "claimants": 2, "window_ids": ["@41"]}]
-    line = next(ln for ln in sm.render_table(report).splitlines()
-                if "SLOT CONFLICT" in ln)
-    assert "2 task files" in line
-    assert "1 distinct window id" in line, (
-        "2 files naming 1 window is DUPLICATE FILES, not two windows contending")
-
-
-def test_no_slot_conflict_line_when_there_are_none():
-    """POSITIVE CONTROL: the loop must be able to render nothing."""
-    assert "SLOT CONFLICT" not in sm.render_table(base_gather())
-
-
-# 🔴 The REACHABLE conflict shape: a SECOND FILE for the SAME window. Identical
-# `window_id` and slot to TASK_LIVE, everything else distinct. Nothing on disk
-# forbids it — the files are `<index>.json`, not `<window_id>.json`, and
-# CLAUDE.md marks the directory UNTRUSTED — so the docs may not call
-# `slot_conflicts` unreachable.
-_TASK_LIVE_DUPLICATE_FILE = dict(
-    TASK_LIVE,
-    task="task-duplicate-file-text",
-    claude_session="44444444-3333-4222-8111-000000000000",
-    summary="summary-duplicate-file",
-    transcript_path="/home/zach/.claude/projects/proj-dup/dup.jsonl",
-)
-
-
-def test_TWO_FILES_NAMING_ONE_WINDOW_reach_slot_conflicts_through_gather():
-    """🔴 The conflict the relationship guard does NOT remove, driven end to end.
-
-    An earlier round documented `slot_conflicts` as "UNREACHABLE in production
-    today", reasoning only about two DISTINCT live window ids in one slot. Two
-    task files carrying ONE `window_id` is a different shape and is reachable:
-    both resolve to the single slot @41 really holds, both survive
-    `filter_live_tasks`, and they collide at the index.
-
-    So this is the evidence behind the corrected claim in the module docstring,
-    `index_tasks_by_window`'s docstring and SKILL.md. It also pins the
-    behavioural half: neither duplicate's `claude_session` may reach a row.
-    """
-    report = base_gather(fuzzyclaw_texts=[json.dumps(TASK_LIVE),
-                                          json.dumps(_TASK_LIVE_DUPLICATE_FILE)])
-    fz = report["fuzzyclaw"]
-    assert fz["status"] == "ok"
-    assert (fz["files_live"], fz["files_stale"], fz["files_mismatched"]) \
-        == (2, 0, 0), "both files must SURVIVE the guard; the drop is at the index"
-    assert fz["slot_conflicts"] == [{
-        "session": "scratch7", "window_index": "3",
-        "claimants": 2, "window_ids": ["@41"],
-    }], "2 FILES, 1 window id — the duplicate-files shape, not contention"
-
-    row = next(r for r in report["hosts"]["workbench"]["windows"]
-               if (r["session"], r["window_index"]) == ("scratch7", "3"))
-    assert row["fuzzyclaw"] is None and row["claude_session_id"] is None
-    ids = {r["claude_session_id"]
-           for r in report["hosts"]["workbench"]["windows"]}
-    assert TASK_LIVE["claude_session"] not in ids
-    assert _TASK_LIVE_DUPLICATE_FILE["claude_session"] not in ids
-
-    line = next(ln for ln in sm.render_table(report).splitlines()
-                if "SLOT CONFLICT" in ln)
-    assert "scratch7:3" in line and "2 task files" in line
-    assert "1 distinct window id" in line and "ALL DROPPED" in line
 
 
 # --------------------------------------------------------------------------- #
@@ -5036,8 +4409,7 @@ def mix_gather(**kw):
     row's age is None and the status comes from the glyph alone."""
     defaults = dict(hosts=("workbench",), local_host="workbench",
                     runner=make_runner(local_panes=IDLE_MIX_PANES,
-                                       local_windows=IDLE_MIX_WINDOWS),
-                    fuzzyclaw_texts=[], slots={})
+                                       local_windows=IDLE_MIX_WINDOWS), slots={})
     defaults.update(kw)
     return base_gather(**defaults)
 
@@ -5092,7 +4464,6 @@ def test_an_idle_AGENT_and_an_idle_SHELL_are_never_merged_into_one_count():
     int_keys = {k for k, v in s.items()
                 if isinstance(v, int) and not isinstance(v, bool)}
     assert int_keys == {"total_sessions", "claude", "shell",
-                        "fuzzyclaw_live",   # a FILE count, not a window count
                         # Whole-set totals in the same class as
                         # `total_sessions`, NOT per-status buckets: they count
                         # rows carrying a fact, across every status. The split
@@ -5311,7 +4682,6 @@ def test_main_json_end_to_end_carries_the_split_and_the_filter(
     monkeypatch.setattr(sm, "_default_runner",
                         make_runner(local_panes=IDLE_MIX_PANES,
                                     local_windows=IDLE_MIX_WINDOWS))
-    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
     rc = sm.main(["scan", "--json", "--no-ch", "--host", "workbench",
                   "--claude-only"])
     blob = json.loads(capsys.readouterr().out)
@@ -5711,58 +5081,45 @@ def test_the_caveats_are_in_the_json_as_structured_fields_not_prose():
     """🔴 KILLS: dropping `caveats` from the report, or reducing it to a
     string a consumer would have to parse."""
     cav = mix_gather()["caveats"]
-    assert set(cav) == {"claude_detection", "fuzzyclaw_scope", "ledger_scope",
+    assert set(cav) == {"claude_detection", "ledger_scope",
                         "waiting_signal", "unsent_prompt", "kind_scope",
                         "pane_preview"}
     det = cav["claude_detection"]
     assert det["method"] == "pane_current_command_regex"
     assert det["pattern"] == sm.CLAUDE_RE.pattern == "claude"
-    fz = cav["fuzzyclaw_scope"]
-    assert fz["scope"] == "local_host_only"
-    # 🔴 NARROWED, and the narrowing is the point. This list used to include
-    # `claude_session_id` and `age_secs`, which stopped being true the moment
-    # the ledger shipped — it is read per host, so a remote row carries both.
-    # The caveat is the MACHINE-READABLE one: a `--json` consumer following the
-    # old list would discard exactly the fields the ledger exists to add.
-    assert fz["null_fields_on_remote_rows"] == ["fuzzyclaw"]
     assert cav["ledger_scope"]["scope"] == "per_host"
     for entry in cav.values():
         assert entry["note"] and isinstance(entry["note"], str)
 
 
-def test_the_remote_null_field_LEDGER_is_true_of_a_real_remote_row():
-    """🔴 A RELATIONSHIP guard, not a spelling one: the ledger is checked
-    against what the code actually nulls, in both directions.
+def test_NO_CAVEAT_claims_a_field_is_null_merely_BECAUSE_a_row_is_REMOTE():
+    """🔴 A RELATIONSHIP guard over the WHOLE caveat set, and it replaces one
+    that could only see a single entry.
 
-    The claimed fields must be null on a REMOTE row (or the caveat overstates)
-    and non-null on the equivalent LOCAL row (or the caveat names fields that
-    are always null and the remote-vs-local distinction it exists to draw is
-    vacuous — the positive control).
+    Its ancestor read `CAVEATS["fuzzyclaw_scope"]["null_fields_on_remote_rows"]`
+    and checked those fields were null on a remote row and non-null locally.
+    That entry is gone with the task-file readers, and with the ledger read on
+    every host there is now NO field that is null merely because a row is
+    remote. So the guard inverts: no caveat may CLAIM one, and a remote row must
+    demonstrably carry the two fields the retired caveat used to be read as
+    excluding.
 
-    🔴 RUN IN BOTH LEDGER CONFIGURATIONS, and that is not thoroughness — it is
-    the fix for how this guard went blind. It reads `base_gather()`, which is
-    pinned `use_ledger=False`, so when the ledger arrived this test could no
-    longer see the two fields it had been asserting. A caveat naming
-    `age_secs`/`claude_session_id` as null-on-remote would have stayed green
-    here forever while the tool printed the opposite. Re-adding either to the
-    list now fails on the ledger-ON pass.
+    🔴 The structural half alone would be a vacuous guard — an empty set of
+    claims satisfies any loop over it. The behavioural half is what makes it
+    evidence: `@7` is a laptop window, and it gets an age AND a session id from
+    the laptop's own ledger read.
     """
-    for report in (base_gather(),
-                   ledger_gather(laptop=[led_rec(window_id="@7", ago=120,
-                                                 tmux_pid=LEDGER_PID_LAPTOP)],
-                                 use_fuzzyclaw=True)):
-        claimed = (report["caveats"]["fuzzyclaw_scope"]
-                   ["null_fields_on_remote_rows"])
-        remote = report["hosts"]["laptop"]["windows"][0]
-        assert remote["host"] == "laptop"
-        for field in claimed:
-            assert remote[field] is None, f"{field} is not null on a remote row"
-        local = next(r for r in report["hosts"]["workbench"]["windows"]
-                     if r["session"] == "scratch7")
-        for field in claimed:
-            assert local[field] is not None, (
-                f"{field} is null LOCALLY too — the ledger draws no "
-                "distinction")
+    rep = ledger_gather(laptop=[led_rec(window_id="@7", ago=120,
+                                        tmux_pid=LEDGER_PID_LAPTOP)],
+                        workbench=[])
+    for name, entry in rep["caveats"].items():
+        assert "null_fields_on_remote_rows" not in entry, (
+            f"caveat {name!r} claims a field is null on remote rows; the "
+            "ledger is read per host, so no such field exists")
+    remote = next(r for r in rows_of(rep) if r["host"] == "laptop")
+    assert remote["age_secs"] == 120.0
+    assert remote["age_source"] == "ledger"
+    assert remote["claude_session_id"] == LEDGER_SESS_ALPHA
 
 
 def test_the_LEDGER_scope_caveat_is_true_of_a_real_remote_row():
@@ -5777,15 +5134,14 @@ def test_the_LEDGER_scope_caveat_is_true_of_a_real_remote_row():
     """
     with_rec = ledger_gather(
         laptop=[led_rec(window_id="@7", session_id="ledger-remote",
-                        ago=9000, tmux_pid=LEDGER_PID_LAPTOP)],
-        use_fuzzyclaw=False)
+                        ago=9000, tmux_pid=LEDGER_PID_LAPTOP)])
     remote = next(r for r in rows_of(with_rec) if r["host"] == "laptop")
     assert remote["age_secs"] == 9000.0
     assert remote["claude_session_id"] == "ledger-remote"
     assert remote["status"] == "stale", (
         "the old caveat said a remote row is NEVER stale; it can be")
 
-    without = ledger_gather(laptop=[], use_fuzzyclaw=False)
+    without = ledger_gather(laptop=[])
     bare = next(r for r in rows_of(without) if r["host"] == "laptop")
     assert bare["age_secs"] is None and bare["claude_session_id"] is None
 
@@ -5801,27 +5157,27 @@ def test_the_caveats_are_printed_in_the_table_UNCONDITIONALLY(
         assert "caveat[claude_detection]:" in text
         assert "pane_current_command =~ /claude/" in text
         assert "wrapper shell" in text
-        assert "caveat[fuzzyclaw_scope]:" in text
-        assert "local_host_only" in text
-        # 🔴 The corrected pair, asserted TOGETHER. The fuzzyclaw line used to
-        # end "and are never `stale`" — a claim about age/session-id/stale that
-        # the per-host ledger falsifies. Printing the correction beside it is
-        # what stops both readings staying available.
+        # 🔴 The line that CORRECTED the retired `fuzzyclaw_scope` one. That
+        # caveat ended "and are never `stale`" — a claim about
+        # age/session-id/stale the per-host ledger falsifies. It is deleted
+        # rather than merely corrected, and the retracted wording must not
+        # reappear anywhere on the page.
         assert "caveat[ledger_scope]:" in text
         assert "per_host" in text
         assert "CAN be `stale`" in text
         assert "never `stale`" not in text, (
             "the retracted claim is back in the footer")
+        assert "fuzzyclaw" not in text, (
+            "the footer names a source this build no longer reads")
     # ...including the degenerate reports the renderer must survive
-    empty = {"hosts": {}, "summary": {}, "clickhouse": {}, "fuzzyclaw": {}}
+    empty = {"hosts": {}, "summary": {}, "clickhouse": {}}
     assert "caveat[claude_detection]:" in sm.render_table(empty)
 
     # and END-TO-END, on the path a cold caller actually takes
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "_default_runner", make_runner())
-    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
     sm.main(["scan", "--no-ch", "--host", "workbench"])
-    assert "caveat[fuzzyclaw_scope]:" in capsys.readouterr().out
+    assert "caveat[ledger_scope]:" in capsys.readouterr().out
 
 
 def test_the_caveat_footer_is_one_line_per_CAVEAT_pinned_both_ways():
@@ -7065,50 +6421,51 @@ def test_tail_plain_reaches_the_subprocess_and_is_recorded_in_the_json(
     assert "-e" in calls[-1]
 
 
-def test_fuzzyclaw_is_OFF_by_default_and_publishes_None_not_zero():
-    """🔴 Measured 2026-08-12: 29 live of 401 files, 363 stale, 9
-    slot-mismatched, and every live row reading `paused` — including a window
-    demonstrably running an agent. 29 rows, zero contribution, from a source
-    `CLAUDE.md` marks UNTRUSTED. Off by default; the counts stay None so the
-    absence is never a measured zero."""
-    import inspect
-    assert inspect.signature(sm.gather).parameters["use_fuzzyclaw"].default \
-        is False
-    rep = _REAL_GATHER(hosts=("workbench",), local_host="workbench",
-                       runner=make_runner(), use_ch=False, now=NOW,
-                       slots={}, clawgate_reader=lambda p: None)
-    assert rep["fuzzyclaw"]["status"] == "skipped"
-    assert rep["fuzzyclaw"]["files_seen"] is None
-    assert rep["summary"]["fuzzyclaw_live"] is None
+@pytest.mark.parametrize("flag", ["--fuzzyclaw", "--no-fuzzyclaw"])
+def test_the_RETIRED_fuzzyclaw_flags_are_REJECTED_not_silently_ignored(
+        capsys, absent_blocked_cache, flag):
+    """🔴 THE ONE THING A CALLER MUST NOT BE ABLE TO DO: pass a flag that was
+    removed and be told nothing.
 
+    Both flags are gone with the task-file readers, and the tempting migration
+    was to keep them as accepted no-ops so no invocation breaks. That is the
+    exact failure `main`'s old "OFF wins" stderr line existed to prevent, one
+    level up: a silently-ignored flag is how a caller concludes it was honoured.
+    A caller passing `--fuzzyclaw` today believes it is getting a task-file
+    join, and it must find out.
 
-@pytest.mark.parametrize("argv,expect_on", [
-    ([], False),
-    (["--fuzzyclaw"], True),
-    (["--no-fuzzyclaw"], False),
-    (["--fuzzyclaw", "--no-fuzzyclaw"], False),
-    (["--no-fuzzyclaw", "--fuzzyclaw"], False),
-])
-def test_the_fuzzyclaw_flags_compose_with_explicit_OFF_winning(
-        monkeypatch, capsys, absent_blocked_cache, argv, expect_on):
-    """🔴 `--no-fuzzyclaw` KEEPS WORKING — it now names the default rather than
-    changing it, so every existing invocation behaves identically. Passing both
-    is not an error; OFF wins and `main` says so, because a silently ignored
-    flag is how a caller concludes it was honoured."""
-    seen = {}
-    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    `scripts/drift-check.sh`'s phase-2 arm is such a caller (it passes
+    `--fuzzyclaw`), which is why this is loud rather than tolerant: it makes the
+    arm report COULD NOT MEASURE, never a fabricated `ok … 0` that would read as
+    "phase 2 is ready" — the deletion that gate is guarding.
 
-    def fake_gather(**kw):
-        seen.update(kw)
-        return _REAL_GATHER(**dict(kw, runner=make_runner(),
-                                   fuzzyclaw_texts=[], slots={},
-                                   clawgate_reader=lambda p: None, now=NOW))
-    monkeypatch.setattr(sm, "gather", fake_gather)
-    sm.main(["scan", "--host", "workbench", "--no-ch", *argv])
-    assert seen["use_fuzzyclaw"] is expect_on
+    argparse exits 2 and writes to stderr; both are asserted, because an exit
+    code with no message is only half the signal.
+    """
+    with pytest.raises(SystemExit) as exc:
+        sm.main(["scan", "--host", "workbench", "--no-ch", flag])
+    assert exc.value.code == 2
     err = capsys.readouterr().err
-    assert ("OFF wins" in err) is ("--fuzzyclaw" in argv
-                                   and "--no-fuzzyclaw" in argv)
+    assert "unrecognized arguments" in err and flag in err
+
+
+def test_the_gather_SIGNATURE_no_longer_carries_a_fuzzyclaw_seam(
+        absent_blocked_cache):
+    """The other half: the flag being rejected at the CLI proves nothing about
+    the function behind it. A `use_fuzzyclaw` / `fuzzyclaw_texts` parameter left
+    on `gather` is a live injection seam that a test — or a second caller
+    importing this module — could keep feeding, and the readers would come back
+    one call site at a time.
+
+    KILLS: re-adding either parameter as a tolerated no-op.
+    """
+    import inspect
+    params = inspect.signature(sm.gather).parameters
+    assert "use_fuzzyclaw" not in params
+    assert "fuzzyclaw_texts" not in params
+    # POSITIVE CONTROL: the ledger seam this replaced IS present, so the two
+    # assertions above are observing an absence and not a misspelled lookup.
+    assert "use_ledger" in params and "ledger_outputs" in params
 
 
 def test_no_capture_flag_reaches_gather(monkeypatch, absent_blocked_cache):
@@ -7202,7 +6559,7 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
         # tell "not asked" from "asked and not measured". See
         # `PREVIEW_STATUSES`.
         "pane_preview", "pane_preview_status",
-        "claude_session_id", "runtime", "ledger", "fuzzyclaw",
+        "claude_session_id", "runtime", "ledger",
         "panes",
     }
     # 🔴 THE ONE OPTIONAL KEY, AND IT IS PINNED IN BOTH DIRECTIONS RATHER THAN
@@ -7257,7 +6614,10 @@ LEDGER_PID = "4025325"           # the workbench's tmux server, per the fixture
 LEDGER_PID_LAPTOP = "3737"       # a DIFFERENT one — hosts must not share a pid
 
 
-def led_rec(window_id="@41", session_id="ledger-sess-alpha", ago=600,
+LEDGER_SESS_ALPHA = "ledger-sess-alpha"
+
+
+def led_rec(window_id="@41", session_id=LEDGER_SESS_ALPHA, ago=600,
             tmux_pid=LEDGER_PID, runtime="claude", pane_id="%11", **kw):
     """A ledger record, aged `ago` seconds before the suite's fixed NOW.
 
@@ -7317,7 +6677,7 @@ def test_THE_REGRESSION_the_ledger_restores_age_session_id_and_stale():
     fuzzyclaw only; leaving `claude_session_id` on the fuzzyclaw field.
     """
     # --- the control: exactly what shipped after #419 ---------------------
-    off = base_gather(use_ledger=False, use_fuzzyclaw=False)
+    off = base_gather(use_ledger=False)
     assert off["summary"]["rows_with_age"] == 0
     assert off["summary"]["rows_with_session_id"] == 0
     assert off["summary"]["status"]["stale"]["total"] == 0
@@ -7327,8 +6687,7 @@ def test_THE_REGRESSION_the_ledger_restores_age_session_id_and_stale():
     on = ledger_gather(
         workbench=[led_rec(window_id="@41", ago=600)],
         laptop=[led_rec(window_id="@7", session_id="ledger-sess-laptop",
-                        ago=9000, tmux_pid=LEDGER_PID_LAPTOP)],
-        use_fuzzyclaw=False)
+                        ago=9000, tmux_pid=LEDGER_PID_LAPTOP)])
     assert on["summary"]["rows_with_age"] == 2
     assert on["summary"]["rows_with_session_id"] == 2
     # 3 rows in this fixture: 2 joined to a ledger record, 1 (the bare shell in
@@ -7356,8 +6715,7 @@ def test_a_REMOTE_row_gets_an_age_which_fuzzyclaw_structurally_could_not_give_it
     local host's index for every host.
     """
     rep = ledger_gather(laptop=[led_rec(window_id="@7", ago=120,
-                                        tmux_pid=LEDGER_PID_LAPTOP)],
-                        use_fuzzyclaw=False)
+                                        tmux_pid=LEDGER_PID_LAPTOP)])
     lt = next(r for r in rows_of(rep) if r["host"] == "laptop")
     assert lt["age_secs"] == 120.0 and lt["age_source"] == "ledger"
     # ...and the workbench, whose ledger answered with NO records, is a measured
@@ -7376,36 +6734,50 @@ def test_the_ledger_read_goes_to_EVERY_host_not_just_the_local_one():
     assert sum(1 for c in ledger_calls if c[0] == "ssh") == 1
 
 
-def test_the_ledger_WINS_over_fuzzyclaw_when_both_describe_one_window():
-    """🔴 Precedence, not a merge. Both writers are live during the supersede
-    phase (spec §6) and they can disagree; two ages averaged or picked by
-    recency would be a number neither writer ever measured.
+def test_the_ledger_IS_THE_ONLY_WRITER_and_age_source_still_names_it():
+    """🔴 THE SUPERSEDE PHASE IS OVER — this replaces a PRECEDENCE pair.
 
-    Pinned on BOTH fields, because `claude_session_id` is the one carrier of the
-    session id into the ClickHouse join — a stale fuzzyclaw value winning here
-    resolves a live window's history to a session that ended days ago.
+    While the fuzzyclaw task files were also live, these two tests pinned that
+    the ledger WON where both answered and that fuzzyclaw still answered where
+    it alone did. With the task-file readers deleted there is one writer, so
+    what is left to pin is that `age_source` still NAMES it rather than being
+    collapsed into "age is not null".
+
+    That field is not decoration at one value: `summary.age_sources` is built
+    from it, it is the meter that made #419 visible, and
+    `scripts/lib/drift_phase2.py` reads the histogram it produces. KILLS:
+    deleting `age_source`, or hardcoding it beside a null age.
     """
     rep = ledger_gather(workbench=[led_rec(window_id="@41", ago=600)],
-                        use_fuzzyclaw=True)
+                        laptop=[])
     row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
     assert row["age_source"] == "ledger"
-    assert row["age_secs"] == 600.0          # NOT fuzzyclaw's 1800.0
-    assert row["claude_session_id"] == "ledger-sess-alpha"
-    # ...and the fuzzyclaw record is still CARRIED, not deleted: the supersede
-    # phase keeps both visible so a disagreement can be seen rather than
-    # resolved in silence.
-    assert row["fuzzyclaw"]["claude_session"].startswith("11111111")
-    assert row["ledger"]["session_id"] == "ledger-sess-alpha"
+    assert row["age_secs"] == 600.0
+    assert row["claude_session_id"] == LEDGER_SESS_ALPHA
+    assert row["ledger"]["session_id"] == LEDGER_SESS_ALPHA
+    # ...and the histogram carries the same name, with a real denominator.
+    assert rep["summary"]["age_sources"]["ledger"] == 1
+    assert rep["summary"]["rows_with_age"] == 1
 
 
-def test_fuzzyclaw_still_answers_for_a_window_the_ledger_has_never_seen():
-    """The fallback half of the precedence above. KILLS: making the ledger
-    authoritative for the ABSENCE of a record — during the supersede phase a
-    window whose agent predates the hook has no ledger record and must not lose
-    the age it already had."""
-    rep = ledger_gather(workbench=[], use_fuzzyclaw=True)
-    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
-    assert row["age_source"] == "fuzzyclaw" and row["age_secs"] == 1800.0
+def test_a_window_NO_WRITER_RECORDED_has_a_NULL_age_AND_a_NULL_source():
+    """The discriminating half, and the one that makes the field above readable.
+
+    KILLS: hardcoding `age_source = "ledger"` on every row. With one writer left
+    that mutant is invisible on any row that HAS an age — this is the row that
+    does not. `@52` is a live window with no record, so both fields must be
+    null: a null age with a non-null source would read as "the ledger answered
+    and this window is 0 seconds old", and `"none"` in the histogram is what
+    stops `rows_with_age` and the `stale` bucket from being read as the same
+    fact (`claude/RULES.md`: a null age is not age 0).
+    """
+    rep = ledger_gather(workbench=[led_rec(window_id="@41", ago=600)],
+                        laptop=[])
+    row = next(r for r in rows_of(rep) if r["window_id"] == "@52")
+    assert row["age_secs"] is None and row["age_source"] is None
+    assert rep["summary"]["age_sources"]["none"] >= 1
+    assert "fuzzyclaw" not in rep["summary"]["age_sources"], (
+        "the writer vocabulary drift_phase2.py reads must no longer contain it")
 
 
 def test_a_record_from_an_OLDER_TMUX_SERVER_never_reaches_a_row():
@@ -7419,8 +6791,7 @@ def test_a_record_from_an_OLDER_TMUX_SERVER_never_reaches_a_row():
     str; treating a mismatch as `not_live` (which would report the wrong reason).
     """
     rep = ledger_gather(
-        workbench=[led_rec(window_id="@41", tmux_pid="999999", ago=300)],
-        use_fuzzyclaw=False)
+        workbench=[led_rec(window_id="@41", tmux_pid="999999", ago=300)])
     row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
     assert row["age_secs"] is None and row["ledger"] is None
     assert row["claude_session_id"] is None
@@ -7432,8 +6803,7 @@ def test_a_record_from_an_OLDER_TMUX_SERVER_never_reaches_a_row():
 def test_a_record_for_a_DEAD_window_never_reaches_a_row():
     """The other rejection, kept distinct from the one above so the report says
     WHICH happened."""
-    rep = ledger_gather(workbench=[led_rec(window_id="@998")],
-                        use_fuzzyclaw=False)
+    rep = ledger_gather(workbench=[led_rec(window_id="@998")])
     assert all(r["ledger"] is None for r in rows_of(rep))
     assert rep["ledger"]["hosts"]["workbench"]["not_live"] == 1
     assert rep["ledger"]["hosts"]["workbench"]["generation_mismatch"] == 0
@@ -7447,7 +6817,6 @@ def test_a_host_whose_ledger_read_FAILED_is_partial_and_says_which_host():
     """
     rep = ledger_gather(laptop=[led_rec(window_id="@7",
                                         tmux_pid=LEDGER_PID_LAPTOP, ago=60)],
-                        use_fuzzyclaw=False,
                         ledger_outputs={"workbench": None})
     assert rep["ledger"]["status"] == "partial"
     assert "workbench" in rep["ledger"]["error"]
@@ -7471,7 +6840,7 @@ def test_a_host_that_answered_NEITHER_tmux_call_is_not_asked_a_third_time():
     that was never asked.
     """
     calls = []
-    rep = base_gather(use_ledger=True, use_fuzzyclaw=False,
+    rep = base_gather(use_ledger=True,
                       runner=make_runner(calls=calls, remote_rc=1,
                                          remote_err="ssh: connect timed out"))
     lt = rep["ledger"]["hosts"]["laptop"]
@@ -7505,7 +6874,7 @@ def test_a_host_that_answered_EITHER_tmux_call_is_still_read():
                 "local_windows_rc": 0},
                {"local_windows_rc": 1, "local_windows_err": "windows blew up"}):
         calls = []
-        base_gather(use_ledger=True, use_fuzzyclaw=False,
+        base_gather(use_ledger=True,
                     runner=make_runner(calls=calls, **kw))
         local_ledger = [c for c in calls
                         if c and c[0] != "ssh"
@@ -7521,7 +6890,7 @@ def test_a_host_with_NO_TMUX_SERVER_is_still_read():
     that was perfectly able to answer.
     """
     rep = base_gather(
-        use_ledger=True, use_fuzzyclaw=False,
+        use_ledger=True,
         ledger_outputs={"workbench": led_out(pid=None),
                         "laptop": led_out(pid=None)},
         runner=make_runner(remote_rc=1, remote_err="no server running on /tmp/x",
@@ -7536,8 +6905,7 @@ def test_output_without_the_SENTINEL_is_NO_SENTINEL_not_zero_records():
     """🔴 THE FABRICATED ZERO. Empty stdout from a swallowed command and a host
     with no records are the same bytes. KILLS: reading `records: []` off a read
     whose protocol never confirmed it ran."""
-    rep = ledger_gather(use_fuzzyclaw=False,
-                        ledger_outputs={"workbench": "garbage\n"})
+    rep = ledger_gather(ledger_outputs={"workbench": "garbage\n"})
     wb = rep["ledger"]["hosts"]["workbench"]
     assert wb["status"] == "no_sentinel"
     assert wb["seen"] is None and wb["live"] is None
@@ -7549,7 +6917,6 @@ def test_a_host_whose_WINDOW_LIST_is_unmeasured_joins_nothing_and_says_so():
     exist, none is joinable, and every count that would describe the join is
     None rather than 0."""
     rep = ledger_gather(workbench=[led_rec(window_id="@41")],
-                        use_fuzzyclaw=False,
                         runner=make_runner(local_windows_rc=1,
                                            local_windows_err="boom"))
     wb = rep["ledger"]["hosts"]["workbench"]
@@ -7593,27 +6960,15 @@ def test_a_record_from_the_FUTURE_clamps_to_zero_rather_than_going_negative():
     KILLS: dropping `max(0.0, …)` from either the ledger or the fuzzyclaw branch.
     """
     ahead = ledger_gather(
-        laptop=[led_rec(window_id="@7", ago=-300, tmux_pid=LEDGER_PID_LAPTOP)],
-        use_fuzzyclaw=False)
+        laptop=[led_rec(window_id="@7", ago=-300, tmux_pid=LEDGER_PID_LAPTOP)])
     row = next(r for r in rows_of(ahead) if r["host"] == "laptop")
     assert row["age_secs"] == 0.0, "a future record must clamp, not go negative"
     assert row["age_source"] == "ledger"
 
     exact = ledger_gather(
-        laptop=[led_rec(window_id="@7", ago=0, tmux_pid=LEDGER_PID_LAPTOP)],
-        use_fuzzyclaw=False)
+        laptop=[led_rec(window_id="@7", ago=0, tmux_pid=LEDGER_PID_LAPTOP)])
     assert next(r for r in rows_of(exact)
                 if r["host"] == "laptop")["age_secs"] == 0.0
-
-
-def test_a_FUZZYCLAW_task_from_the_future_clamps_too():
-    """The same clamp on the other branch — pinned separately, because a mutant
-    that drops only one of the two would otherwise be caught by neither."""
-    future = dict(TASK_LIVE, last_activity="2026-08-11T12:05:00+00:00")
-    rep = base_gather(use_fuzzyclaw=True,
-                      fuzzyclaw_texts=[json.dumps(future)])
-    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
-    assert row["age_secs"] == 0.0 and row["age_source"] == "fuzzyclaw"
 
 
 def test_a_generation_that_could_not_be_CHECKED_is_kept_and_declared():
@@ -7622,7 +6977,7 @@ def test_a_generation_that_could_not_be_CHECKED_is_kept_and_declared():
     rows rest on that. KILLS: counting them as verified, and KILLS: dropping
     them."""
     rep = ledger_gather(workbench=[led_rec(window_id="@41", tmux_pid=None)],
-                        wb_pid=None, use_fuzzyclaw=False)
+                        wb_pid=None)
     wb = rep["ledger"]["hosts"]["workbench"]
     assert wb["live"] == 1 and wb["generation_unchecked"] == 1
     assert wb["tmux_pid"] is None
@@ -7639,7 +6994,7 @@ def test_the_table_states_how_many_rows_have_an_age_and_from_which_writer():
     stale, or nothing has an AGE — and the by-status line cannot tell them
     apart. KILLS: rendering the summary without the ages line."""
     text = sm.render_table(ledger_gather(
-        workbench=[led_rec(window_id="@41", ago=600)], use_fuzzyclaw=False))
+        workbench=[led_rec(window_id="@41", ago=600)]))
     assert "ages: 1 of 3 row(s) have one" in text
     assert "ledger=1" in text and "none=2" in text
     assert "session ids: 1" in text
@@ -7649,7 +7004,7 @@ def test_the_table_reports_a_host_that_did_not_answer_as_such():
     """KILLS: rendering a failed read as an empty section — the exact shape the
     ClickHouse section is already forbidden from taking."""
     text = sm.render_table(ledger_gather(
-        use_fuzzyclaw=False, ledger_outputs={"workbench": None}))
+        ledger_outputs={"workbench": None}))
     assert "⚠ PARTIAL" in text
     assert "workbench  ERROR" in text
     # ...and the reason travels with it, so the operator is not left to guess
@@ -7672,8 +7027,7 @@ def test_a_ledger_CONFLICT_reaches_the_REPORT_through_gather():
     """
     rep = ledger_gather(
         workbench=[led_rec(pane_id="%11", session_id="agent-a", ago=900),
-                   led_rec(pane_id="%12", session_id="agent-b", ago=120)],
-        use_fuzzyclaw=False)
+                   led_rec(pane_id="%12", session_id="agent-b", ago=120)])
     conflicts = rep["ledger"]["conflicts"]
     assert len(conflicts) == 1, conflicts
     assert conflicts[0]["window_id"] == "@41"
@@ -7693,8 +7047,7 @@ def test_a_ledger_CONFLICT_is_PRINTED_not_only_carried():
     `render_ledger`."""
     text = sm.render_table(ledger_gather(
         workbench=[led_rec(pane_id="%11", session_id="agent-a"),
-                   led_rec(pane_id="%12", session_id="agent-b")],
-        use_fuzzyclaw=False))
+                   led_rec(pane_id="%12", session_id="agent-b")]))
     assert "⚠ LEDGER CONFLICT" in text
     assert "@41" in text and "claimed by 2 record(s)" in text
     assert "agent-a" in text and "agent-b" in text
@@ -7704,7 +7057,7 @@ def test_no_conflict_prints_NOTHING_so_the_warning_stays_meaningful():
     """The negative control: a warning that appears on every scan is one a
     reader learns to skip."""
     text = sm.render_table(ledger_gather(
-        workbench=[led_rec(pane_id="%11")], use_fuzzyclaw=False))
+        workbench=[led_rec(pane_id="%11")]))
     assert "LEDGER CONFLICT" not in text
 
 
@@ -7720,8 +7073,7 @@ def test_the_table_names_the_rejections_and_the_unverified_separately():
     were dropped when they were in fact trusted."""
     text = sm.render_table(ledger_gather(
         workbench=[led_rec(window_id="@998"),
-                   led_rec(window_id="@41", tmux_pid="999")],
-        use_fuzzyclaw=False))
+                   led_rec(window_id="@41", tmux_pid="999")]))
     assert "rejected:" in text
     assert "1 window gone" in text and "1 older tmux server" in text
     assert "unverified generation" not in text
@@ -7747,7 +7099,6 @@ def test_the_json_is_COMPACT_because_the_only_consumer_pays_by_the_token(
     """
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "_default_runner", make_runner())
-    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
     sm.main(["scan", "--no-ch", "--no-ledger", "--host", "workbench", "--json"])
     out = capsys.readouterr().out
 
@@ -7787,8 +7138,7 @@ def test_the_LEAN_row_field_ledger_fails_when_it_grows_or_shrinks():
     vanishes turns a consumer's read into a permanent absence; one that appears
     is a contract nobody reviewed — and here it also silently re-inflates the
     payload the view exists to shrink."""
-    rep = lean_of(ledger_gather(workbench=[led_rec(window_id="@41", ago=600)],
-                                use_fuzzyclaw=False))
+    rep = lean_of(ledger_gather(workbench=[led_rec(window_id="@41", ago=600)]))
     row = rep["hosts"]["workbench"]["windows"][0]
     assert set(row) == set(sm.LEAN_ROW_FIELDS)
     assert set(sm.LEAN_ROW_FIELDS) == {
@@ -7837,11 +7187,10 @@ def test_the_lean_view_keeps_EVERY_null_vs_zero_discriminator():
     one thing standing between a cold agent and a fabricated zero), dropping
     `summary.waiting`'s tri-state, or trimming a host down to its rows.
     """
-    full = ledger_gather(use_fuzzyclaw=False,
-                         ledger_outputs={"workbench": None})
+    full = ledger_gather(ledger_outputs={"workbench": None})
     lean = lean_of(full)
 
-    for key in ("summary", "caveats", "clawgate_queue", "ledger", "fuzzyclaw",
+    for key in ("summary", "caveats", "clawgate_queue", "ledger",
                 "filters", "local_host", "ts"):
         assert key in lean, key
     # the caveats survive IN FULL, not as a pointer to somewhere else
@@ -7862,8 +7211,7 @@ def test_the_lean_view_is_LOSSLESS_on_every_field_it_keeps():
     measured, 45 of 75 rows on a live scan. Lean passes values through
     untouched, so it is cheaper than the full payload AND more faithful than
     the cheap one."""
-    full = ledger_gather(workbench=[led_rec(window_id="@41", ago=600)],
-                         use_fuzzyclaw=False)
+    full = ledger_gather(workbench=[led_rec(window_id="@41", ago=600)])
     lean = lean_of(full)
     # 🔴 PAIRED BY IDENTITY AND COUNTED, because `zip` alone is length-blind: an
     # audit's mutant that dropped the LAST row of every host (`[:-1]`) survived
@@ -7897,15 +7245,15 @@ def test_a_long_task_survives_the_lean_view_UNTRUNCATED():
     assert not any("…" in t for t in tasks), tasks
 
 
-def test_the_lean_view_drops_the_sub_objects_that_DUPLICATE_row_fields():
+def test_the_lean_view_drops_the_sub_object_that_DUPLICATES_row_fields():
     """🔴 `ledger` was the single biggest row field at 7,039 B of 60,631 B — a
     full embedded record whose useful contents are already flat on the row, and
     it was added in the same change that added the duplication. KILLS: putting
-    either sub-object back."""
+    the sub-object back."""
     lean = lean_of(ledger_gather(workbench=[led_rec(window_id="@41")],
-                                 use_fuzzyclaw=True))
+                                 laptop=[]))
     row = lean["hosts"]["workbench"]["windows"][0]
-    assert "ledger" not in row and "fuzzyclaw" not in row
+    assert "ledger" not in row
     # ...but everything the dropped record CARRIED is still on the row
     assert row["claude_session_id"] and row["age_secs"] is not None
     assert row["age_source"] == "ledger"
@@ -7938,8 +7286,7 @@ def test_the_lean_view_shrinks_the_ROWS_which_is_where_the_payload_lives():
 
     A property, not a literal byte count, for the same reason.
     """
-    full = ledger_gather(workbench=[led_rec(window_id="@41")],
-                         use_fuzzyclaw=True)
+    full = ledger_gather(workbench=[led_rec(window_id="@41")], laptop=[])
     enc = lambda o: json.dumps(o, sort_keys=True, default=str,
                                separators=(",", ":"))
     lean = lean_of(full)
@@ -7970,7 +7317,6 @@ def test_lean_without_json_says_so_rather_than_being_ignored(
     same rule `--plain` and `--claude-only` already follow."""
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "_default_runner", make_runner())
-    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
     sm.main(["scan", "--no-ch", "--no-ledger", "--host", "workbench", "--lean"])
     cap = capsys.readouterr()
     assert "--lean" in cap.err and "no effect without" in cap.err
@@ -8026,7 +7372,7 @@ def test_the_retained_TOP_LEVEL_set_is_pinned_in_both_directions():
     lean = lean_of(base_gather(use_ledger=False))
     assert set(lean) == {
         "ts", "local_host", "stale_threshold_secs", "hosts", "clickhouse",
-        "fuzzyclaw", "ledger", "filters", "caveats", "summary",
+        "ledger", "filters", "caveats", "summary",
         # 🔴 `not_measured` SURVIVES THE LEAN PROJECTION, and it is the cheapest
         # thing here to justify keeping: it is the only key that tells a cold
         # agent what this payload contains NOTHING about. A lean view that
@@ -8057,7 +7403,6 @@ def test_the_lean_FLAG_actually_reaches_the_projection(
     """
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "_default_runner", make_runner())
-    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
     rc = sm.main(["scan", "--no-ch", "--no-ledger", "--host", "workbench",
                   "--json", "--lean"])
     payload = json.loads(capsys.readouterr().out)
@@ -8080,7 +7425,6 @@ def test_WITHOUT_the_flag_the_same_command_emits_the_FULL_payload(
     binary that emits the lean view unconditionally."""
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "_default_runner", make_runner())
-    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
     sm.main(["scan", "--no-ch", "--no-ledger", "--host", "workbench", "--json"])
     payload = json.loads(capsys.readouterr().out)
 
@@ -8106,7 +7450,6 @@ def test_INVARIANT_lean_and_full_agree_on_an_unreachable_fleet(
     monkeypatch.setattr(sm, "_default_runner",
                         make_runner(local_rc=1, local_err="down",
                                     remote_rc=1, remote_err="down"))
-    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
     lean_rc = sm.main(["scan", "--no-ch", "--no-ledger", "--json", "--lean"])
     capsys.readouterr()
     full_rc = sm.main(["scan", "--no-ch", "--no-ledger", "--json"])
@@ -8134,7 +7477,6 @@ def test_the_exit_code_is_computed_BEFORE_the_projection(
     """
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "_default_runner", make_runner())
-    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
     monkeypatch.setattr(sm, "LEAN_HOST_FIELDS",
                         tuple(f for f in sm.LEAN_HOST_FIELDS
                               if f != "reachable"))
@@ -8173,7 +7515,6 @@ def test_DETAIL_lean_keeps_the_prompt_history_that_detail_exists_for(
     """
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "_default_runner", make_runner())
-    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
     monkeypatch.setattr(sm, "detail_history",
                         lambda *a, **k: {"status": "ok", "session": "s-1",
                                          "rows": [{"ts": "t", "kind": "user",
@@ -8217,8 +7558,7 @@ def test_the_row_RUNTIME_carries_the_VALUE_not_just_the_key(monkeypatch):
     """
     rep = ledger_gather(
         workbench=[led_rec(window_id="@41", session_id="ses_9911",
-                           runtime="opencode")],
-        use_fuzzyclaw=False)
+                           runtime="opencode")])
     row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
     assert row["runtime"] == "opencode"
     assert row["claude_session_id"] == "ses_9911"
@@ -8233,7 +7573,7 @@ def test_a_row_no_writer_recorded_has_a_NULL_runtime_not_a_guess():
     """The other direction: `runtime` is null when nothing recorded the window,
     never inferred from the pane command. `claude` (the command matching
     /claude/) and `runtime` (which writer answered) are different facts."""
-    rep = ledger_gather(workbench=[], use_fuzzyclaw=False)
+    rep = ledger_gather(workbench=[])
     for row in rows_of(rep):
         assert row["runtime"] is None
 
@@ -8247,8 +7587,7 @@ def test_a_CROSS_RUNTIME_conflict_names_the_runtimes_in_the_TABLE():
         workbench=[led_rec(pane_id="%11", session_id="7f3a-claude",
                            runtime="claude", ago=900),
                    led_rec(pane_id="%12", session_id="ses_9911",
-                           runtime="opencode", ago=60)],
-        use_fuzzyclaw=False))
+                           runtime="opencode", ago=60)]))
     assert "⚠ LEDGER CONFLICT" in text
     assert "claude, opencode" in text
     # the session ids stay too — they are how you find the actual sessions
@@ -8943,9 +8282,9 @@ def test_measured_caveats_detaches_at_EVERY_DEPTH_not_just_the_first():
     """🔴 FIXED ONCE AT DEPTH 1, WALKED AT DEPTH 2. `{k: dict(v)}` copies each
     caveat but leaves every nested dict and list SHARED with the module
     constant: `waiting_signal["excluded"]` is a dict, and `signals` /
-    `kinds_enumerated` / `null_fields_on_remote_rows` are lists. Writing into
-    any of them in place poisoned CAVEATS process-wide, and the contamination
-    surfaced in a LATER scan's rendered line.
+    `kinds_enumerated` are lists. Writing into any of them in place poisoned
+    CAVEATS process-wide, and the contamination surfaced in a LATER scan's
+    rendered line.
 
     The earlier purity test asserted a top-level REBIND, which a shallow copy
     survives — precisely one level too shallow to see this.
@@ -8962,10 +8301,6 @@ def test_measured_caveats_detaches_at_EVERY_DEPTH_not_just_the_first():
     before_enum = list(sm.CAVEATS["kind_scope"]["kinds_enumerated"])
     out["kind_scope"]["kinds_enumerated"].append("POISONED")
     assert sm.CAVEATS["kind_scope"]["kinds_enumerated"] == before_enum
-    before_null = list(sm.CAVEATS["fuzzyclaw_scope"]["null_fields_on_remote_rows"])
-    out["fuzzyclaw_scope"]["null_fields_on_remote_rows"].append("POISONED")
-    assert sm.CAVEATS["fuzzyclaw_scope"]["null_fields_on_remote_rows"] \
-        == before_null
     # and a SECOND caller still sees the clean constant
     assert sm.measured_caveats({"hosts": {}})["waiting_signal"]["excluded"] \
         == before_excl
@@ -9042,7 +8377,7 @@ def test_the_summary_line_NAMES_every_class_even_when_the_count_is_missing():
     outright raise `KeyError`. Filtering SKIPS the class, so the summary line
     silently loses a column the by-status legend one line below still names."""
     text = sm.render_table({"hosts": {}, "summary": {"total_sessions": 0},
-                            "fuzzyclaw": {}, "ledger": {}})
+                            "ledger": {}})
     line = next(ln for ln in text.splitlines() if "summary:" in ln)
     assert "claude=0" in line and "shell=0" in line, (
         "a missing count must render as 0, not vanish from the line")
@@ -10673,7 +10008,7 @@ def test_the_docstring_documents_the_shell_pane_DECISION_not_just_the_behaviour(
 # =========================================================================== #
 _GATHER_REPORT_KEYS = {
     "ts", "local_host", "stale_threshold_secs", "hosts", "clickhouse",
-    "fuzzyclaw", "ledger", "filters", "clawgate_queue", "caveats", "summary",
+    "ledger", "filters", "clawgate_queue", "caveats", "summary",
     "not_measured",
 }
 
@@ -11206,8 +10541,7 @@ def match_gather(**kw):
     defaults = dict(
         runner=make_runner(local_panes=MATCH_PANES,
                            local_windows=MATCH_WINDOWS,
-                           remote_panes="", remote_windows=""),
-        use_fuzzyclaw=False)
+                           remote_panes="", remote_windows=""))
     defaults.update(kw)
     return base_gather(**defaults)
 
@@ -11398,7 +10732,7 @@ def test_a_match_with_zero_hits_on_an_UNREACHABLE_fleet_is_UNAVAILABLE():
     """The zero is UNMEASURED there, and it must not read as a real zero."""
     down = make_runner(local_rc=1, local_err="tmux: connection failed",
                        remote_rc=255, remote_err="ssh: no route")
-    got = base_gather(runner=down, use_fuzzyclaw=False, match=["zzkiwi"])
+    got = base_gather(runner=down, match=["zzkiwi"])
     assert sm.exit_code_for(got) == sm.EXIT_UNAVAILABLE
 
 
@@ -11409,7 +10743,6 @@ def test_main_match_end_to_end_through_the_CLI(monkeypatch, capsys,
     monkeypatch.setattr(sm, "_default_runner",
                         make_runner(local_panes=MATCH_PANES,
                                     local_windows=MATCH_WINDOWS))
-    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
     rc = sm.main(["scan", "--json", "--no-ch", "--lean", "--host", "workbench",
                   "--match", "zzkiwi"])
     blob = json.loads(capsys.readouterr().out)
@@ -11467,8 +10800,7 @@ def scratch3_gather(**kw):
     defaults = dict(
         runner=make_runner(local_panes=SCRATCH3_PANES,
                            local_windows=SCRATCH3_WINDOWS,
-                           remote_panes="", remote_windows=""),
-        use_fuzzyclaw=False)
+                           remote_panes="", remote_windows=""))
     defaults.update(kw)
     return base_gather(**defaults)
 
@@ -11497,8 +10829,7 @@ def test_the_sibling_indices_are_sorted_NUMERICALLY_not_lexically():
     windows = "".join(f"@5{i}|{i}|manywin\n" for i in (2, 10, 1))
     report = sm.filter_report(
         base_gather(runner=make_runner(local_panes=panes, local_windows=windows,
-                                       remote_panes="", remote_windows=""),
-                    use_fuzzyclaw=False),
+                                       remote_panes="", remote_windows="")),
         "manywin", "99")
     assert report["filters"]["detail_sibling_indices"] == ["1", "2", "10"]
 
@@ -11527,7 +10858,7 @@ def test_a_detail_miss_over_an_UNREACHABLE_FLEET_is_UNMEASURED_not_NOT_FOUND():
     SSH."""
     down = make_runner(local_rc=1, local_err="tmux: connection failed",
                        remote_rc=255, remote_err="ssh: no route")
-    report = sm.filter_report(base_gather(runner=down, use_fuzzyclaw=False),
+    report = sm.filter_report(base_gather(runner=down),
                               "scratch3", "3")
     assert sm.detail_not_found_message(report) is None
     assert report["filters"]["detail_matched"] is None
@@ -11543,7 +10874,7 @@ def test_a_PARTIAL_fleet_miss_names_the_host_it_could_not_search():
     runner = make_runner(local_panes=SCRATCH3_PANES,
                          local_windows=SCRATCH3_WINDOWS,
                          remote_rc=255, remote_err="ssh: no route")
-    report = sm.filter_report(base_gather(runner=runner, use_fuzzyclaw=False),
+    report = sm.filter_report(base_gather(runner=runner),
                               "scratch3", "3")
     msg = sm.detail_not_found_message(report)
     assert "searched: workbench" in msg
@@ -11565,8 +10896,7 @@ def test_the_detail_exit_CODES_were_already_right_and_stay_right():
     miss = sm.filter_report(scratch3_gather(), "scratch3", "3")
     down = sm.filter_report(
         base_gather(runner=make_runner(local_rc=1, local_err="tmux: down",
-                                       remote_rc=255, remote_err="ssh: no route"),
-                    use_fuzzyclaw=False),
+                                       remote_rc=255, remote_err="ssh: no route")),
         "scratch3", "3")
     assert sm.exit_code_for(hit) == sm.EXIT_OK
     assert sm.exit_code_for(miss) == sm.EXIT_EMPTY
@@ -11866,7 +11196,7 @@ def test_an_unreachable_host_carries_NO_rows_which_is_what_makes_the_maps_safe(
     """
     runner = make_runner(local_panes=SCRATCH3_PANES,
                          local_windows=SCRATCH3_WINDOWS, **kw)
-    got = base_gather(runner=runner, use_fuzzyclaw=False)
+    got = base_gather(runner=runner)
     # THE INVARIANT, over every host rather than one named one: no row may exist
     # for any host that did not answer.
     #
@@ -11900,7 +11230,7 @@ def test_the_prefilter_map_excludes_hosts_that_never_answered():
     runner = make_runner(local_panes=SCRATCH3_PANES,
                          local_windows=SCRATCH3_WINDOWS,
                          remote_rc=255, remote_err="ssh: no route")
-    got = base_gather(runner=runner, use_fuzzyclaw=False, claude_only=True,
+    got = base_gather(runner=runner, claude_only=True,
                       prefilter_index_map=True)
     assert got["filters"]["prefilter_window_indices"] == {"scratch3": ["1", "2"]}
 
@@ -11911,7 +11241,7 @@ def test_a_detail_over_an_UNREACHABLE_fleet_leaves_filtered_out_None_too():
     down = make_runner(local_rc=1, local_err="tmux: connection failed",
                        remote_rc=255, remote_err="ssh: no route")
     report = sm.filter_report(
-        base_gather(runner=down, use_fuzzyclaw=False, claude_only=True,
+        base_gather(runner=down, claude_only=True,
                     prefilter_index_map=True),
         "scratch3", "1")
     assert report["filters"]["detail_filtered_out"] is None
@@ -11968,7 +11298,7 @@ def test_match_counts_are_None_not_ZERO_over_an_unreachable_fleet():
     exactly this state; these now agree with it."""
     down = make_runner(local_rc=1, local_err="tmux: connection failed",
                        remote_rc=255, remote_err="ssh: no route")
-    got = base_gather(runner=down, use_fuzzyclaw=False, match=["zzkiwi"])
+    got = base_gather(runner=down, match=["zzkiwi"])
     assert got["filters"]["matched"] is None
     assert got["filters"]["excluded_by_match"] is None
     assert got["summary"]["matched"] is None
@@ -11996,7 +11326,7 @@ def test_a_PARTIALLY_reachable_fleet_still_publishes_real_counts():
     degraded state and stop being readable at all."""
     runner = make_runner(local_panes=MATCH_PANES, local_windows=MATCH_WINDOWS,
                          remote_rc=255, remote_err="ssh: no route")
-    got = base_gather(runner=runner, use_fuzzyclaw=False, match=["zzkiwi"])
+    got = base_gather(runner=runner, match=["zzkiwi"])
     assert got["filters"]["matched"] == 1
     assert got["filters"]["excluded_by_match"] == 2
 
@@ -12018,7 +11348,7 @@ def test_excluded_shells_is_None_not_ZERO_over_an_unreachable_fleet():
     """
     down = make_runner(local_rc=1, local_err="tmux: connection failed",
                        remote_rc=255, remote_err="ssh: no route")
-    got = base_gather(runner=down, use_fuzzyclaw=False, claude_only=True)
+    got = base_gather(runner=down, claude_only=True)
     assert got["filters"]["excluded_shells"] is None
     assert got["summary"]["excluded_shells"] is None, (
         "the summary mirror still publishes a measured-looking count — the two "
@@ -12031,7 +11361,7 @@ def test_excluded_shells_IS_a_real_zero_when_the_fleet_ANSWERED():
     would pass the test above."""
     runner = make_runner(local_panes=MATCH_PANES, local_windows=MATCH_WINDOWS,
                          remote_panes="", remote_windows="")
-    got = base_gather(runner=runner, use_fuzzyclaw=False, claude_only=True)
+    got = base_gather(runner=runner, claude_only=True)
     assert got["filters"]["excluded_shells"] is not None
     assert isinstance(got["filters"]["excluded_shells"], int)
 
@@ -12041,7 +11371,7 @@ def test_excluded_shells_survives_a_PARTIALLY_reachable_fleet():
     null must NOT fire on the fleet's common degraded state."""
     runner = make_runner(local_panes=MATCH_PANES, local_windows=MATCH_WINDOWS,
                          remote_rc=255, remote_err="ssh: no route")
-    got = base_gather(runner=runner, use_fuzzyclaw=False, claude_only=True)
+    got = base_gather(runner=runner, claude_only=True)
     assert got["filters"]["excluded_shells"] is not None
 
 
@@ -12069,7 +11399,7 @@ def test_the_table_filter_line_says_UNMEASURED_rather_than_printing_a_null():
     down = make_runner(local_rc=1, local_err="tmux: connection failed",
                        remote_rc=255, remote_err="ssh: no route")
     text = sm.render_table(
-        base_gather(runner=down, use_fuzzyclaw=False, match=["zzkiwi"]))
+        base_gather(runner=down, match=["zzkiwi"]))
     assert "an unmeasured number of row(s) matched" in text
     assert "None row(s)" not in text
 

@@ -28,8 +28,8 @@ SECURITY / TRUST: this gate runs the TARGET repo's OWN build/test commands and
 honours a repo-local `.verify-agent.json` — that is arbitrary code execution BY
 DESIGN. Do NOT run it against a repo whose contents or `.verify-agent.json` you
 do not trust; it will execute them. Per this repo's CLAUDE.md, agent-handed
-worktrees and fuzzyclaw task data are UNTRUSTED — treat a worktree you did not
-create the same way (inspect before verifying).
+worktrees are UNTRUSTED — treat a worktree you did not create the same way
+(inspect before verifying).
 
 Read-only w.r.t. the repo contents (never writes/commits/installs), except for
 running those build/test commands.

@@ -6,7 +6,8 @@ record the collector never produced, and report match / missing / extra counts:
 
   * zsh     events ↔ ~/.zsh_history
   * browser navs   ↔ Chrome/Chromium/Brave History sqlite
-  * tmux    events ↔ ~/.tmux/tasks/*.json + ~/.tmux/activity/*
+  * tmux    events ↔ ~/.tmux/activity/*  (see reconcile_tmux — the PROJECT half
+                     of this reference is GONE with the fuzzyclaw task files)
   * claude  prompts↔ ~/.claude/projects/**/*.jsonl  (user msgs)
 
 "missing" = present in the independent record but NOT collected (collector gap);
@@ -119,13 +120,28 @@ def reconcile_browser(client: CHClient, history_db: Path, since_epoch: float) ->
                  matched=matched, missing=missing, extra=extra)
 
 
-def reconcile_tmux(client: CHClient, tasks_dir: Path, activity_dir: Path,
+def reconcile_tmux(client: CHClient, activity_dir: Path,
                    since_epoch: float) -> Recon:
-    tasks = RS.read_tmux_tasks(tasks_dir)
+    """🔴 UNREFERENCED SINCE THE FUZZYCLAW READER WAS DELETED — and it says so
+    rather than diffing against an empty set.
+
+    The reference for "projects worked in tmux" was the `task` field of
+    `~/.tmux/tasks/*.json`. That reader is gone (see `refsources.py`), and
+    nothing else on this machine records a project name for a tmux window
+    independently of the collector — `~/.tmux/activity/*` records window ids and
+    timestamps, not projects.
+
+    🔴 SO THIS RETURNS `skipped`, NOT A DIFF AGAINST `set()`. An empty reference
+    fed to `reconcile_sets` yields `missing=0, extra=len(collected)` — a
+    well-formed finding reading "the collector over-collected every project",
+    manufactured entirely out of a measurement nobody took. That is the exact
+    substitution this whole module's "no data, skipped" rule exists to refuse,
+    and it is worse here because the numbers look real.
+
+    The collected count and the activity-file count are still read and reported,
+    so the row carries what WAS measured beside the reason it cannot be diffed.
+    """
     acts = RS.read_tmux_activity(activity_dir)
-    # Reference "projects worked in tmux" = task names. Compare against the set
-    # of projects the collector recorded for source=tmux in the window.
-    ref_projects = {t.get("task", "") for t in tasks if t.get("task")}
     table = client.conn.fq_table
     try:
         rows = client.rows(
@@ -135,15 +151,14 @@ def reconcile_tmux(client: CHClient, tasks_dir: Path, activity_dir: Path,
     except Exception as exc:
         return Recon("tmux", skipped=True, reason=f"query error: {exc}")
     coll_projects = {row.get("project", "") for row in rows if row.get("project")}
-    if not coll_projects and not ref_projects and not acts:
+    if not coll_projects and not acts:
         return Recon("tmux", skipped=True, reason="no tmux data on either side")
-    if not coll_projects:
-        return Recon("tmux", skipped=True,
-                     reason=f"no collected tmux events in window (ref tasks={len(ref_projects)}, "
-                            f"activity files={len(acts)})")
-    matched, missing, extra = reconcile_sets(coll_projects, ref_projects)
-    return Recon("tmux", collected=len(coll_projects), reference=len(ref_projects),
-                 matched=matched, missing=missing, extra=extra)
+    return Recon("tmux", skipped=True,
+                 reason=("NO INDEPENDENT PROJECT REFERENCE — the fuzzyclaw "
+                         "task-file reader was removed and nothing replaced it, "
+                         f"so this cannot be diffed (collected projects="
+                         f"{len(coll_projects)}, activity files={len(acts)}). "
+                         "This is NOT a clean reconciliation."))
 
 
 def reconcile_claude(client: CHClient, projects_dir: Path, since_epoch: float) -> Recon:
@@ -207,7 +222,6 @@ def default_paths() -> dict:
     return {
         "zsh_history": home / ".zsh_history",
         "browser_history": brave if brave.exists() else chromium,
-        "tmux_tasks": home / ".tmux/tasks",
         "tmux_activity": home / ".tmux/activity",
         "claude_projects": home / ".claude/projects",
         "opencode_db": home / ".local" / "share" / "opencode" / "opencode-stable.db",
@@ -221,7 +235,7 @@ def run_reconcile(client: CHClient, window_hours: float = 24.0,
     return [
         reconcile_zsh(client, p["zsh_history"], since),
         reconcile_browser(client, p["browser_history"], since),
-        reconcile_tmux(client, p["tmux_tasks"], p["tmux_activity"], since),
+        reconcile_tmux(client, p["tmux_activity"], since),
         reconcile_claude(client, p["claude_projects"], since),
         reconcile_opencode(client, p.get("opencode_db"), since),
     ]

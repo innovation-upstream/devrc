@@ -20,7 +20,6 @@ _Moved verbatim out of `SKILL.md` on 2026-08-21, when the body was cut from 23,2
 | `--no-ch` | skip ClickHouse — the client is never constructed |
 | `--no-capture` | skip the pane scrape; **every** `waiting_probable` AND `unsent_prompt` becomes `null` (both roll-up numbers `null`, never `0`) |
 | `--pane-preview` | publish each Claude pane's **visible screen** as `pane_preview`. Costs no extra tmux work (the capture already runs — `waiting`/`unsent` are derived from it and it used to throw the screen away), but makes the document **2.63x** larger: measured live back to back, 122,731 B without / 322,204 B with. Off by default for that reason; `--lean` drops it, so do not pass both |
-| `--fuzzyclaw` / `--no-fuzzyclaw` | the task-file join is **OFF by default** (see below) |
 | `--no-ledger` | skip the per-host agent-ledger read. Rows then have **no age and no session id** — the #419 view, reproducible on demand |
 | `--no-repo` | skip the per-host repo probe (one batched `sh -c` per host, the FIFTH ssh call). Every row's `repo` becomes `null` with `repo_status: **skipped**` and every per-host `repos_*` count becomes `null` — never `not_a_repo`, never `0`. This is the cost control for the probe; the field is otherwise ON by default |
 | `--plain` | `tail` only: strip ANSI at the source instead of `sed`-ing it out |
@@ -186,8 +185,8 @@ measured as null. `caveats`, `summary.waiting`'s tri-state, `clawgate_queue` and
 measurement status are kept in full, because a cheap payload that can lie is worse than an
 expensive one.
 
-Dropped from **rows** (8): `window_id`, `window_name`, `codename`, `pane_id`, `command`, `panes`,
-and the `ledger`/`fuzzyclaw` sub-objects — duplication, their useful contents are already flat on
+Dropped from **rows** (7): `window_id`, `window_name`, `codename`, `pane_id`, `command`, `panes`,
+and the `ledger` sub-object — duplication, its useful contents are already flat on
 the row. `label_source` is deliberately KEPT: like `age_source` it is provenance, and it is the
 only thing separating a row labelled from a real directory from one labelled because the cwd
 yielded nothing.
@@ -316,8 +315,6 @@ unconditionally — an agent that runs the script cold never reads this file:
 - `claude_detection` — `pane_current_command =~ /claude/`; a claude under a wrapper shell
   reads as `shell` (shallower than the `/proc` walk in `scripts/lib/claude_sessions.py`,
   which is not reachable over SSH — so both hosts are reported by ONE rule).
-- `fuzzyclaw_scope` — `local_host_only`; a REMOTE row carries null `fuzzyclaw`. It says
-  **nothing** about age/session-id/stale (it used to, and that was wrong — see below).
 - `ledger_scope` — `per_host`; `age_secs` / `claude_session_id` come from the agent ledger,
   read on EVERY scanned host, so a REMOTE row has both and **can** be `stale`.
 - `waiting_signal` — the enumerated signal set, the claude-rows-only scope, and the
@@ -340,10 +337,12 @@ unconditionally — an agent that runs the script cold never reads this file:
 one level out: not a qualification on a number this tool produced, but the list of
 populations it produced nothing about.
 
-## The agent activity ledger — where age / `stale` / `claude_session_id` come from
+## The agent activity ledger — the ONLY source of age / `stale` / `claude_session_id`
 
-#419 switched fuzzyclaw off, which also switched off the only supplier of `age_secs`, the
-`stale` bucket derived from it, and the `claude_session_id` the ClickHouse join needs.
+#419 switched the fuzzyclaw task-file join off, which also switched off the only supplier of
+`age_secs`, the `stale` bucket derived from it, and the `claude_session_id` the ClickHouse
+join needs. Its readers have since been **deleted** (drift-check's phase-2 gate measured 0
+rows still taking an age from them), so the ledger is now the sole writer.
 Measured 2026-08-12 on the shipped default view: **0 rows with an age, 0 with a session id,
 no `stale` bucket at all** — and nothing in the output said so.
 
@@ -359,8 +358,10 @@ Claude hook, and an opencode plugin — and the script reads each host's ledger 
 - `summary.rows_with_age` / `rows_with_session_id` / `age_sources` — the meter. A `stale=0`
   bucket means *either* nothing is stale *or* nothing has an age; only this tells them apart.
 
-Row fields: `age_secs`, `age_source` (`ledger` / `fuzzyclaw` / `null` — which SOURCE answered;
-the ledger wins), `runtime` (`claude` / `opencode` / `null` — which AGENT recorded it), `ledger`
+Row fields: `age_secs`, `age_source` (`ledger` / `null` — PROVENANCE. It is kept at one value
+deliberately: a null age must read as *no writer has recorded this window*, never as a broken
+ledger, and `summary.age_sources` is the meter that made #419 visible),
+`runtime` (`claude` / `opencode` / `null` — which AGENT recorded it), `ledger`
 (the joined record), `claude_session_id`.
 
 🔴 `runtime` is not `claude`. The `claude` column is `pane_current_command =~ /claude/`, so an
@@ -404,7 +405,6 @@ with a longer fuse. `clawgate_queue` (clawgate) is **not** listed — that one *
 | `scripts/validation/chquery.py` | shared CH client — a LIBRARY, `sys.path`-inserted |
 | `~/.config/activity-collector/env` | CH endpoint + creds (never hardcoded) |
 | `~/.cache/bar-status/clawgate.json` | the clawgate-queue cache (`scripts/bar-status-poll`) |
-| `~/.tmux/tasks/*.json` | fuzzyclaw task files (UNTRUSTED) |
 | `~/.cache/agent-ledger/*.json` | the agent activity ledger, one record per pane |
 | `scripts/lib/agent_ledger.py` | its record shape, read protocol and join filter |
 | `scripts/claude-hooks/agent-ledger-hook.py` | writer 1 (Claude Code) |

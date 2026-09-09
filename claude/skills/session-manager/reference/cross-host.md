@@ -37,7 +37,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=4 -o StrictHostKeyChecking=accept-new \
 🔴 **Those two calls are two INDEPENDENT measurements, and each publishes its own verdict.**
 `reachable` / `error` describe **list-panes**; `windows_measured` / `windows_error` describe
 **list-windows**. Reading one off the other is how a failed `list-windows` became invisible:
-`live_window_ids` published as a measured `[]`, every fuzzyclaw task dropped,
+`live_window_ids` published as a measured `[]`, every ledger record dropped as not-live,
 `claude_session_id` went null and the run still said `status: "ok"`, exit `0`. When
 `list-windows` did not answer, `live_window_ids` is `null` — never `[]`.
 
@@ -85,16 +85,17 @@ the reachable return.
 
 ## What does NOT cross the wire
 
-fuzzyclaw task files are local state and are read on the local host only, so a remote window
-carries `fuzzyclaw: null`. Joining the local host's task files onto same-named remote
-sessions would fabricate facts; a test pins that it does not happen.
+🔴 **Nothing on a row is null merely BECAUSE the row is remote — and this section used to say
+otherwise.** It read "a remote window carries `claude_session_id: null` and `age_secs: null`
+and is never `stale`". That is RETRACTED. It was true of the fuzzyclaw task files, which were
+local state read on the local host only; those readers are **deleted**, and the agent activity
+ledger that replaced them is read on EVERY scanned host over the same SSH transport, so a
+remote row carries both fields and CAN be `stale`.
 
-🔴 **This section used to say a remote window also carries `claude_session_id: null` and
-`age_secs: null` and is "never `stale`". That is RETRACTED.** It was true while fuzzyclaw was
-the only writer of those two fields; the agent activity ledger is read on EVERY scanned host
-over the same SSH transport, so a remote row now carries both and CAN be `stale`. The test
-that "pins it" pins `fuzzyclaw` alone. A null age means no writer has recorded that window —
-never age 0, and never a property of being remote.
+A null age therefore means no writer has recorded that window — never age 0, and never a
+property of being remote. What DOES still differ per host is whether the ledger **answered**:
+read `report["ledger"]["hosts"][<host>]["status"]` before reading any row's age as a measured
+absence (`no_session_reason` does exactly that).
 
 ## Local host identity
 

@@ -72,13 +72,22 @@ def test_read_chrome_history_missing_db():
 # --------------------------------------------------------------------------- #
 # tmux
 # --------------------------------------------------------------------------- #
-def test_read_tmux_tasks(tmp_path):
-    (tmp_path / "0.json").write_text(json.dumps({"task": "homelab", "status": "done"}))
-    (tmp_path / "1.json").write_text(json.dumps({"task": "devrc"}))
-    (tmp_path / "bad.json").write_text("{not valid json")
-    tasks = RS.read_tmux_tasks(tmp_path)
-    names = {t["task"] for t in tasks}
-    assert names == {"homelab", "devrc"}  # bad json skipped
+def test_the_fuzzyclaw_TASK_reader_is_GONE_and_stays_gone():
+    """🔴 `read_tmux_tasks` (`~/.tmux/tasks/*.json`) is deleted, and this is the
+    guard that stops it coming back by reflex.
+
+    It read a source `CLAUDE.md` marks UNTRUSTED (measured 89% stale) and it was
+    the ONLY supplier of the project reference `reconcile_tmux` diffed against —
+    so re-adding it silently re-arms that comparison. If a real independent
+    project reference ever appears, it belongs under its own name, not this one.
+
+    POSITIVE CONTROL: the SIBLING directory's reader is asserted present in the
+    same breath. `~/.tmux/activity/*` has a different writer
+    (`scripts/tmux-activity-emit.sh`) and is unaffected — without this half, a
+    typo'd module attribute would satisfy the assertion above.
+    """
+    assert not hasattr(RS, "read_tmux_tasks")
+    assert callable(RS.read_tmux_activity)
 
 
 def test_read_tmux_activity(tmp_path):
@@ -92,7 +101,6 @@ def test_read_tmux_activity(tmp_path):
 
 
 def test_read_tmux_missing():
-    assert RS.read_tmux_tasks(Path("/nope")) == []
     assert RS.read_tmux_activity(Path("/nope")) == []
 
 

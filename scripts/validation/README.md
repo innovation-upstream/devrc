@@ -81,9 +81,13 @@ GUI data. The extension no longer emits `active_ms` or focus/idle events at all
 so the replay/assert path no longer scripts or checks browser `active_ms`.
 - **`reconcile.py`** — for a recent window, diffs each source against an
   independent existing record: zsh ↔ `~/.zsh_history`, browser ↔ Chrome/Brave
-  `History` sqlite (read from a copy — the live DB is locked), tmux ↔
-  `~/.tmux/tasks` + `~/.tmux/activity`, claude ↔ `~/.claude/projects/**/*.jsonl`.
-  A source with no data reports "skipped", never a failure.
+  `History` sqlite (read from a copy — the live DB is locked), claude ↔
+  `~/.claude/projects/**/*.jsonl`. A source with no data reports "skipped",
+  never a failure. 🔴 **tmux is now permanently `skipped`**: its only
+  independent PROJECT reference was `~/.tmux/tasks/*.json` (fuzzyclaw), whose
+  reader was deleted, and `~/.tmux/activity/*` records window ids rather than
+  projects. The row says so instead of diffing against an empty set — see
+  `reconcile_tmux`.
 - **`refsources.py`** — the independent reference readers (pure parsers).
 - **`tests/`** — pytest unit coverage for ALL the pure logic (no live CH).
 
