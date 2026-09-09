@@ -18,33 +18,25 @@ is the PRIVATE proposal, not this doc.
 
 ## State now
 
-- **`ZacxDev/cairn` has TEN merged PRs and NONE open.** Added since the last revision:
-  **#9 `a3c84db1`** (rank 19 — the client builds a focus window; `focus_window` refs in the
-  client went **0 → 1**, verified by content) and **#10 `934ec38e`** (rank 17 — the `--timeout`
-  comment promised a second resolver that never existed here; closing condition verified on
-  `origin/main`, both removed names grep to **0**). Claims for 12, 13, 15, 17 all RELEASED.
-- 🔴 **NOTHING UNBLOCKED REMAINS FOR AN AGENT.** Ranks 4, 8, 11 and 13 need the operator;
-  3 is another session's (#1406, OPEN); 7 waits on 13's publish; 18 mostly dissolves when
-  slice 3 lands; and **16 is blocked on #1406 too — see its entry, the wall is its own
-  wording.** Re-derived 2026-09-09, not assumed.
-- 🔴 **STILL NOT LIVE ON THIS HOST:** `readlink -f ~/.local/bin/cairn` →
-  `/home/zach/workspace/devrc/scripts/cairn`. #7, #9 and #10 all fix the OSS client, so none
-  of them is in the binary this machine runs until #1406 lands and the pin moves.
-- 🔴 **RANK 3 SLICE 2 IS ANOTHER SESSION'S — devrc PR #1406 open, claim held, and SIX FILES
-  ARE UNPUSHED — 8 commits, `[ahead 8]` — in `~/workspace/devrc-flake-pin`. DO NOT delete
-  that worktree. ⚠ Its `git status` is CLEAN, so the obvious check says "stale warning,
-  safe to delete" and is WRONG; read the ahead-count instead.**
+- **`ZacxDev/cairn`: TEN merged PRs, NONE open.** #6–#10 landed this session (rank 12, 15,
+  13's path, 19, 17).
+- ✅ **RANK 3 SLICE 2 IS MERGED — devrc #1406, `9300f234`.** `flake.nix` on `origin/main`
+  holds **16** cairn references (was **0**). Verified by CONTENT, never ancestry.
+- 🔴 **STILL NOT LIVE ON THIS HOST, AND NOW FOR THE DOCUMENTED REASON:**
+  `readlink -f ~/.local/bin/cairn` → `/home/zach/workspace/devrc/scripts/cairn`, and
+  `cairn recall --ref cairn --scope devrc` still exits **2**. The pin is merged; the binary
+  is created by ACTIVATION, so this needs a **`home-manager switch`**. Until then #7, #9 and
+  #10 are merged-and-unreachable from this shell.
+- **Next actionable item is rank 16** — now unblocked by #1406, and the only ranked item that
+  is both unblocked and carries a forcing function.
+- **Everything else needs the operator:** 13 (registry + version tag), 11 (the `cairn` scope
+  allowlist), 4 (§11 questions), 8 (§10 decisions). 7 waits on 13's publish; 18 mostly
+  dissolves now slice 2 has landed.
 - **A cairn-built image is still NOT PUBLISHED.** #8 added the path; nothing has pushed.
-  Rank 13 is blocked on two strings only the operator can give — the registry and the tag.
-- **The devrc/OSS `lib/` fork stays DECIDED — CONSOLIDATE ONTO THE PIN** (devrc #1394
-  `65d8bfba`). Not re-asked; not to be re-asked.
-- **Store writes this session:** `devrc/cairn` stale `OPEN:` → `RESOLVED caec932e:`
-  (`da318a4c6a96f9d8`), plus two session bullets (`083552c5`, `4c9146b7`). Badge moved
-  `17 nuance / 🔴 2 OPEN` → `18 / 🔴 1 OPEN`; the survivor is a different, unverified bullet.
-- **devrc docs merged:** #1400, #1413, #1419, and handoff commit `8401ff63`.
-- 🔴 **NO `clawgate-task:` FIELD** — `resolve` exits **5**. Its positive control shows the
-  board answered 8 links for another session, so it is reachable; but a wrong id also answers
-  200 with an empty array. NOT a clean bill of health.
+- **Store writes this session:** `devrc/cairn` stale `OPEN:` → `RESOLVED caec932e:`, plus two
+  session bullets. Badge `17 nuance / 🔴 2 OPEN` → `18 / 🔴 1 OPEN`.
+- 🔴 **NO `clawgate-task:` FIELD** — `resolve` exits 5; its positive control shows the board
+  reachable, but a wrong id also answers 200 with an empty array. Not a clean bill of health.
 
 ## Open investigations — live diagnosis state
 
@@ -382,15 +374,21 @@ taken now describes a tree that is about to change.
    🔴 **IN FLIGHT, CLAIMED — DO NOT START.** `claim-work cairn-oss-multi-instance-3` is HELD
    for slice 2. Worktree `~/workspace/devrc-flake-pin`, branch `feat/cairn-flake-pin`,
    **PUSHED as devrc PR #1406** (was `4c77daab` unpushed; now three commits, head `f98be263`).
-   🔴 **CORRECTED 2026-09-09 — "SIX FILES ARE UNCOMMITTED" IS NOW FALSE, AND THE CHECK A
-   READER WOULD RUN TO TEST IT RETURNS THE DANGEROUS ANSWER.** That worktree's
-   `git status --porcelain` is now **EMPTY** (audit rounds committed, through round 3
-   `6ae94c01`), so anyone validating the old warning sees a CLEAN tree and concludes it is
-   stale and the worktree is disposable. It is not: `git -C ~/workspace/devrc-flake-pin
-   status -sb` reads **`[ahead 8]`** — **8 commits exist ONLY there and are UNPUSHED.**
-   **DO NOT delete that worktree.** The conclusion never changed; only the reason did, and
-   the wrong reason is the one that gets checked. Verify with the ahead-count, never with
-   dirtiness.
+   ✅ **SLICE 2 IS MERGED — devrc #1406, squash `9300f234`, 2026-09-09T01:56:13Z.** Verified
+   by CONTENT, never ancestry: `flake.nix` on `origin/main` now holds **16** cairn references
+   where it held **0** hours earlier.
+   🔴 **TWO WARNINGS ABOUT THAT WORKTREE WERE PUBLISHED HERE AND BOTH WERE WRONG. RETRACTED.**
+   First it said six files were UNCOMMITTED (they had been committed through audit round 3);
+   the correction then said **8 commits were UNPUSHED and the worktree must not be deleted**,
+   and that was wrong too — they were pushed AND merged. **The error was the instrument:
+   `git status -sb`'s `[ahead N]` compares against the LAST-FETCHED remote ref, and that
+   worktree had never been fetched in, so it reported a remote state hours stale.** A second
+   reading, `git log origin/main..HEAD` = 9, looked like corroboration and is the SQUASH trap
+   this doc already records — after a squash merge a branch's commits are never ancestors of
+   `main`, forever, so that count is non-zero for merged work by construction. **Two agreeing
+   readings, both artifacts, pointing the same wrong way.** The check that settled it was
+   CONTENT (`grep -c cairn origin/main -- flake.nix`) plus `gh pr view --json state`.
+   **Never read ahead/behind without fetching first, and never let it outrank content.**
    - **Half 1 — ✅ MERGED: `ZacxDev/cairn`#4, `218b6c1`.**
    - **Half 2 — slice 1 MERGED (devrc #1381, `baa664e4`, both hosts switched and verified);
      slice 2 IN FLIGHT as PR #1406; slice 3 (point the writer at the pinned `entry_shape`,
@@ -557,17 +555,13 @@ taken now describes a tree that is about to change.
     `doctor --no-sync` plus `--validate` against a fixture cache.
     **Closing condition:** a merged devrc PR whose gate fails when the pinned client's
     `validate` is stubbed to print nothing.
-    🔴 **BLOCKED ON #1406, AND ITS OWN WORDING IS WHY — MEASURED 2026-09-09.** This asks for a
-    gate over "the PINNED client's `validate`", and there is no pinned client: on `origin/main`
-    `flake.nix` holds **0** cairn references and `packages.cairn`/`cairnPackage` appear
-    **nowhere**, because the pin is rank 3 slice 2 and #1406 is still OPEN. A gate that
-    `nix build`s a flake input that does not exist cannot be written, let alone go red for the
-    right reason. ⚠ It is ALSO the only remaining item carrying a forcing function, so it reads
-    as the obvious next pick — a session that takes it will re-derive this wall. **Do it in the
-    same PR as slice 2, or immediately after #1406 merges.** (Separately: the natural
-    implementation touches `scripts/run-tests.sh`, which #1406 also touches — test-merge rather
-    than reason about it.) This is the doc's own "check that an item's first step is possible in
-    the repo it names" lesson, hit again.
+    ✅ **UNBLOCKED 2026-09-09 — the premise that blocked it is gone.** This asks for a gate
+    over "the PINNED client's `validate`", and for a few hours there was no pinned client:
+    `flake.nix` held 0 cairn references. #1406 merged (`9300f234`) and it now holds **16**, so
+    `packages.cairn` exists to build a gate against. ⚠ Its natural implementation touches
+    `scripts/run-tests.sh`, which #1406 also moved — rebase onto current `main` and test-merge
+    rather than reasoning about it. **This is now the only ranked item that is both unblocked
+    and carries a forcing function.**
     forcing: gate
 
 17. **The public `ZacxDev/cairn` client still documents a `who` timeout that no longer
@@ -1160,6 +1154,26 @@ earlier controls printed OK, which is what proves it reachable rather than shado
 anyway.** A full suite was in flight while `cairn` and a test file were edited; the result was
 discarded and re-run rather than read. Cost ~9 minutes, and reading it would have cost a wrong
 belief about the tree.
+
+**🔴 `git status -sb`'s `[ahead N]` IS A CLAIM ABOUT YOUR LAST FETCH, NOT ABOUT THE REMOTE —
+AND I PUBLISHED A SAFETY WARNING OUT OF ONE.** Measured 2026-09-09: a worktree that had never
+been fetched in reported `[ahead 8]`, and that became a pushed doc line saying 8 commits
+existed nowhere else and the worktree must not be deleted. They were pushed AND the PR was
+merged. 🔴 **What made it stick was a SECOND reading that agreed:** `git log origin/main..HEAD`
+= 9, which is the squash trap this doc already records — after a squash merge a branch's
+commits are never ancestors of `main`, forever, so a non-zero count there is what MERGED work
+looks like. **Two independent-looking readings, both artifacts of the same stale/By-design
+mechanism, agreeing on the wrong answer.** Neither is evidence about the remote. The
+discriminators are CONTENT (`git grep -c <marker> origin/main -- <path>`) and
+`gh pr view --json state,mergeCommit`. **Fetch before reading ahead/behind, and never let it
+outrank content.**
+
+**🔴 A CORRECTION CAN BE WRONG IN THE SAME CLASS IT CORRECTS.** The "six files are
+uncommitted" line was retired and replaced with the "8 unpushed" line above — a fix that
+carried the identical defect (a stale reading, published as a live safety claim) one step
+further, and did so *inside a paragraph lecturing the reader about which check to trust*.
+Both are retracted in rank 3. **Re-measure at the moment of writing the correction, not from
+the survey that motivated it.**
 
 ## How to verify
 
