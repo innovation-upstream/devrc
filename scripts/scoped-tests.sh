@@ -288,7 +288,14 @@ EOF
 done
 
 SEL_ARR=()
-for s in $SELECTED; do SEL_ARR+=("$s"); done
+# `set -f` for the same reason run-tests.sh's `--targets`/`--files` blocks give:
+# word splitting is wanted here, PATHNAME EXPANSION is not. Without it a path
+# carrying a glob character would silently select whatever happens to exist on
+# disk instead — a narrowing nobody asked for, and green.
+set -f
+# shellcheck disable=SC2206  # word splitting intended; globbing is not, hence set -f
+SEL_ARR=($SELECTED)
+set +f
 
 echo "scoped-tests: universe=${UNIVERSE_N} collectable test file(s) under ${#TARGETS[@]} '$SET' target(s)"
 for c in "${CHANGED[@]}"; do echo "  changed: $c"; done
@@ -302,7 +309,16 @@ if [ "${#UNMAPPED[@]}" -gt 0 ]; then
   echo "  🔴 UNMAPPED — no test file names these, so this run says NOTHING about them:"
   for u in "${UNMAPPED[@]}"; do echo "       $u"; done
 fi
-echo "scoped-tests: selected ${#SEL_ARR[@]} test file(s):"
+echo "scoped-tests: selected ${#SEL_ARR[@]} of ${UNIVERSE_N} test file(s):"
+# "N of M", never a bare N — the denominator is what turns a count into a
+# coverage statement, the same reason run-tests.sh's subset note carries one.
+# A selection past half the universe is not wrong, it is just no longer cheap,
+# and the operator is better off with the run that actually produces a verdict.
+if [ "$(( ${#SEL_ARR[@]} * 2 ))" -gt "$UNIVERSE_N" ]; then
+  echo "  ⚠ that is more than HALF the collectable test files. A scoped run this"
+  echo "    wide costs about what the gate costs and still is NOT a gate — you"
+  echo "    probably want \`scripts/gate.sh --tier both\` instead."
+fi
 for s in "${SEL_ARR[@]}"; do echo "  select : $s"; done
 
 if [ "${#SEL_ARR[@]}" -eq 0 ]; then

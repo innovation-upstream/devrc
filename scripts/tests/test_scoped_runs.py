@@ -56,6 +56,15 @@ SCOPED = REPO_ROOT / "scripts" / "scoped-tests.sh"
 # both scripts by test_the_scope_vocabulary_is_pinned_two_way below.
 SCOPE_STATES = ("FULL", "PARTIAL", "SCOPED", "UNKNOWN")
 
+# One real entry from each of the runner's two non-pytest registries. The pair
+# of tests below needs them to EXIST (an empty family makes "it was skipped"
+# vacuous) but not to be exhaustive — the whole set of SHELL_TESTS is 101s under
+# load, measured, and this file is not the place to spend that.
+# 🔴 Both are asserted present so a rename turns into a named failure here
+# rather than into a silently vacuous positive control.
+CHEAP_HOOK_TEST = "scripts/claude-hooks/tests/test_claude_notify.py"
+CHEAP_SHELL_TEST = "scripts/tests/test_release_wrapper.sh"
+
 
 def _run(args: list[str], timeout: int = 600, env: dict | None = None,
          cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -565,6 +574,16 @@ def test_the_scoped_summary_banner_says_it_is_not_a_gate_run(tmp_path):
     assert _scope_line(out) == "SCOPED", out
 
 
+def test_the_cheap_registry_entries_this_file_leans_on_still_exist():
+    """INVARIANT GUARD. `CHEAP_HOOK_TEST`/`CHEAP_SHELL_TEST` are patched into a
+    copied runner; a renamed or deleted entry would make that copy die on its
+    own "does not exist" error, killing the two tests below for a reason
+    unrelated to their subject — and, in the skip direction, making an absence
+    assertion vacuously true."""
+    for p in (CHEAP_HOOK_TEST, CHEAP_SHELL_TEST):
+        assert (REPO_ROOT / p).is_file(), f"{p} is gone — update the constant"
+
+
 def test_a_scoped_run_skips_the_hook_and_shell_families_and_SAYS_SO(tmp_path):
     """REGRESSION on the lever itself, and on the honesty that pays for it.
 
@@ -578,12 +597,14 @@ def test_a_scoped_run_skips_the_hook_and_shell_families_and_SAYS_SO(tmp_path):
     (a family of tests that stops running while the gate stays green), so the
     banner has to NAME what did not run."""
     d, runner = _scoped_fixture(tmp_path, floor=400)
-    # Give the copy real hook/shell families so "they were skipped" is a claim
-    # about something that exists. `runner_with_targets`-style empties would
-    # make this pass vacuously.
-    src = patch_runner_source(
-        RUN_TESTS.read_text(), targets=[str(d)], floors={str(d): 400}, ack=[])
-    runner.write_text(src)
+    # Give the copy ONE real entry in each family, so "they were skipped" is a
+    # claim about something that exists — empty families would make this pass
+    # vacuously. One rather than all five because the full SHELL_TESTS set is
+    # 101s under load, and adding a two-minute test to `scripts/tests` while
+    # shipping a change whose whole purpose is a cheaper run would be absurd.
+    runner.write_text(patch_runner_source(
+        RUN_TESTS.read_text(), targets=[str(d)], floors={str(d): 400}, ack=[],
+        hook_tests=[CHEAP_HOOK_TEST], shell_tests=[CHEAP_SHELL_TEST]))
     proc = _run([str(runner), str(REPO_ROOT), "--files", str(d / "test_beta.py")])
     out = _out(proc)
     assert proc.returncode == 0, f"rc={proc.returncode}\n{out}"
@@ -603,7 +624,8 @@ def test_a_full_run_still_runs_the_hook_and_shell_families(tmp_path):
     assertion would be about nothing."""
     d, runner = _scoped_fixture(tmp_path, floor=1)
     runner.write_text(patch_runner_source(
-        RUN_TESTS.read_text(), targets=[str(d)], floors={str(d): 1}, ack=[]))
+        RUN_TESTS.read_text(), targets=[str(d)], floors={str(d): 1}, ack=[],
+        hook_tests=[CHEAP_HOOK_TEST], shell_tests=[CHEAP_SHELL_TEST]))
     proc = _run([str(runner), str(REPO_ROOT)], env={"MIN_TESTS": "1"})
     out = _out(proc)
     assert re.search(r"^=== script scripts/claude-hooks/", out, re.M), (
