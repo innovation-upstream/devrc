@@ -87,7 +87,7 @@ def test_an_explicit_owner_repo_resolves_to_one_openable_candidate():
     span, cands = MO.resolve("civitai/talos-infra#1065")
     assert span["platform"] == "github"
     assert [c["url"] for c in cands] == [
-        "https://github.com/civitai/talos-infra/issues/1065"]
+        "https://github.com/civitai/talos-infra/pull/1065"]
 
 
 def test_a_clickup_id_resolves_to_one_openable_candidate():
@@ -121,7 +121,7 @@ def test_a_bare_number_with_a_repo_context_offers_both():
     _span, cands = MO.resolve("#370", default_repo="civitai/talos-infra")
     assert [(c["platform"], c["url"]) for c in cands] == [
         ("clawgate", "https://clawgate.zacx.dev/tasks/370"),
-        ("github", "https://github.com/civitai/talos-infra/issues/370"),
+        ("github", "https://github.com/civitai/talos-infra/pull/370"),
     ]
 
 
@@ -129,7 +129,7 @@ def test_a_measured_repo_mapping_resolves_the_short_form():
     _span, cands = MO.resolve("talos-infra#1065",
                               repos={"talos-infra": "civitai/talos-infra"})
     assert [c["url"] for c in cands] == [
-        "https://github.com/civitai/talos-infra/issues/1065"]
+        "https://github.com/civitai/talos-infra/pull/1065"]
 
 
 def test_an_unknown_short_form_repo_yields_NO_candidate_rather_than_a_guess():
@@ -164,7 +164,7 @@ def test_picker_rows_show_the_platform_and_the_url():
     assert len(rows) == 2
     assert rows[0].startswith("clawgate task 370 ")
     assert rows[0].endswith("https://clawgate.zacx.dev/tasks/370")
-    assert rows[1].endswith("https://github.com/civitai/talos-infra/issues/370")
+    assert rows[1].endswith("https://github.com/civitai/talos-infra/pull/370")
 
 
 def test_a_row_maps_back_to_its_own_url():
@@ -194,7 +194,7 @@ def test_the_matched_text_is_read_from_the_LAST_argument():
     from correct behaviour until the day an arg is added."""
     r = _run("--print", "--no-discovery", "civitai/talos-infra#1065")
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "https://github.com/civitai/talos-infra/issues/1065"
+    assert r.stdout.strip() == "https://github.com/civitai/talos-infra/pull/1065"
 
     # Same match, now preceded by extra arguments — the answer must not move.
     r2 = _run("--print", "--no-discovery", "--default-repo", "civitai/talos-infra",
@@ -208,7 +208,7 @@ def test_an_ambiguous_click_prints_every_candidate():
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines() == [
         "https://clawgate.zacx.dev/tasks/370",
-        "https://github.com/civitai/talos-infra/issues/370",
+        "https://github.com/civitai/talos-infra/pull/370",
     ]
 
 
@@ -427,7 +427,7 @@ def test_a_DISCOVERING_subprocess_resolves_through_the_FAKE_mapping(tmp_path,
     monkeypatch.setenv("DEVRC_WORKSPACE", str(tmp_path / "no-checkouts-here"))
     r = _run("--print", "--default-repo", "unused/by-this-shape", "loamfield#12")
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "https://github.com/gardenersguild/trowelcast/issues/12", (
+    assert r.stdout.strip() == "https://github.com/gardenersguild/trowelcast/pull/12", (
         "the child did not resolve through the redirected mapping — it either "
         f"read the operator's real one or nothing at all: {r.stdout!r} {r.stderr!r}")
 
@@ -461,7 +461,7 @@ def test_an_unambiguous_click_opens_without_paying_for_discovery(spy):
     text already carries `owner/repo` must not pay for it — that latency lands
     on the operator every single time."""
     assert MO.main(["civitai/talos-infra#1065"]) == 0
-    assert spy == [("open", "https://github.com/civitai/talos-infra/issues/1065")]
+    assert spy == [("open", "https://github.com/civitai/talos-infra/pull/1065")]
 
 
 def test_a_clickup_click_also_skips_discovery(spy):
@@ -526,7 +526,7 @@ def test_the_guard_does_not_swallow_a_NORMAL_run(spy):
     goes wrong, or every assertion above would hold for a wrapper that always
     reported a failure."""
     assert MO.guarded_main(["civitai/talos-infra#1065"]) == 0
-    assert spy == [("open", "https://github.com/civitai/talos-infra/issues/1065")]
+    assert spy == [("open", "https://github.com/civitai/talos-infra/pull/1065")]
 
 
 def test_the_ENTRY_POINT_is_the_guarded_one():
@@ -544,7 +544,7 @@ def test_the_ENTRY_POINT_is_the_guarded_one():
 def test_a_short_form_repo_is_resolved_from_the_discovered_checkouts(spy):
     assert MO.main(["talos-infra#1065"]) == 0
     assert "discover" in spy
-    assert spy[-1] == ("open", "https://github.com/civitai/talos-infra/issues/1065")
+    assert spy[-1] == ("open", "https://github.com/civitai/talos-infra/pull/1065")
 
 
 def test_text_the_SCANNER_REFUSED_offers_the_picker_instead_of_refusing(spy):
@@ -929,7 +929,7 @@ def test_a_mapping_ONLY_name_resolves_end_to_end_through_main(tmp_path, monkeypa
     opened = []
     monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
     assert MO.main(["plotwidget#42"]) == 0
-    assert opened == ["https://github.com/gardenersguild/plotwidget/issues/42"]
+    assert opened == ["https://github.com/gardenersguild/plotwidget/pull/42"]
 
 
 def test_the_loader_reads_the_path_at_CALL_time_not_at_import(tmp_path, monkeypatch):
@@ -954,7 +954,7 @@ def test_a_local_checkout_beats_the_mapping_for_the_same_name(tmp_path, monkeypa
 
 
 def test_a_three_segment_value_is_refused_rather_than_404ing(tmp_path, monkeypatch):
-    """`github.com/a/b/c/issues/12` 404s while looking authoritative — the same
+    """`github.com/a/b/c/pull/12` 404s while looking authoritative — the same
     rule `parse_owner_repo` enforces for a git remote."""
     monkeypatch.setattr(MO, "KNOWN_REPOS_PATH", _write_mapping(
         tmp_path, {"good": "gardenersguild/good", "bad": "gardenersguild/team/bad"}))
@@ -1117,7 +1117,7 @@ def test_an_UNREADABLE_checkout_does_not_ERASE_the_mappings_answer(
 
     Both directions are asserted: the mapping's row must SURVIVE, and a
     checkout the mapping never knew about must be ABSENT rather than present
-    with an empty value (an empty value builds `https://github.com//issues/12`).
+    with an empty value (an empty value builds `https://github.com//pull/12`).
     """
     p = tmp_path / "known_repos.json"
     p.write_text(json.dumps({"quillmarsh": "northgate/quillmarsh"}))
@@ -1191,7 +1191,7 @@ def test_the_picker_asks_rofi_for_FUZZY_matching(monkeypatch):
 
     monkeypatch.setattr(MO.subprocess, "run", fake_run)
     MO.pick([{"platform": "github", "id": "7",
-              "url": "https://github.com/gardenersguild/trowelcast/issues/7"}])
+              "url": "https://github.com/gardenersguild/trowelcast/pull/7"}])
     assert seen["cmd"][0] == "rofi"
     assert "-matching" in seen["cmd"]
     assert seen["cmd"][seen["cmd"].index("-matching") + 1] == "fuzzy"
@@ -1222,7 +1222,7 @@ def test_fuzzy_matching_is_never_asked_for_WITHOUT_ranking(monkeypatch):
                         lambda cmd, **kw: seen.update(cmd=cmd)
                         or types.SimpleNamespace(returncode=1, stdout="", stderr=""))
     MO.pick([{"platform": "github", "id": "7",
-              "url": "https://github.com/gardenersguild/trowelcast/issues/7"}])
+              "url": "https://github.com/gardenersguild/trowelcast/pull/7"}])
     cmd = seen["cmd"]
     fuzzy = "-matching" in cmd and cmd[cmd.index("-matching") + 1] == "fuzzy"
     assert fuzzy, "the picker must still MATCH fuzzily"
@@ -1498,7 +1498,7 @@ def test_the_refusal_keeps_the_ADVICE_when_it_also_names_a_cause(spy, monkeypatc
 
 
 @pytest.mark.parametrize("value", [
-    "acme/widget/",      # trailing slash -> .../acme/widget//issues/12
+    "acme/widget/",      # trailing slash -> .../acme/widget//pull/12
     "acme//widget",      # empty middle segment
     "acme/widget ",      # trailing space inside the URL path
     "acme/wid\nget",     # embedded newline
@@ -1611,8 +1611,8 @@ def test_universe_candidates_build_one_openable_row_per_repo():
     cands = MO.universe_candidates("77", ["gardenersguild/trowelcast",
                                           "rivalorg/spadeworks"])
     assert [c["url"] for c in cands] == [
-        "https://github.com/gardenersguild/trowelcast/issues/77",
-        "https://github.com/rivalorg/spadeworks/issues/77"]
+        "https://github.com/gardenersguild/trowelcast/pull/77",
+        "https://github.com/rivalorg/spadeworks/pull/77"]
     assert {c["platform"] for c in cands} == {"github"}
     assert {c["id"] for c in cands} == {"77"}
 
@@ -1648,7 +1648,7 @@ def test_an_audit_pr_REFERENCE_resolves_through_the_PANE_repo(spy, text):
     # difference. The exact SEQUENCE is asserted, not a set: the pane must be
     # measured before the picker is raised, and the picker before the open.
     assert spy == ["tmux", "discover", ("pick", 1),
-                   ("open", "https://github.com/civitai/talos-infra/issues/1291")], spy
+                   ("open", "https://github.com/civitai/talos-infra/pull/1291")], spy
 
 
 # --------------------------------------------------------------------------- #
@@ -1688,7 +1688,7 @@ def test_a_GUESSED_repo_is_never_auto_opened_whatever_the_shape(monkeypatch, tex
     assert MO.main([text]) == 0
     # POSITIVE CONTROL — the pane's repo really WAS offered. A run that resolved
     # nothing would satisfy "did not auto-open" while proving nothing.
-    assert "https://github.com/wrongorg/wrongrepo/issues/1291" in seen["urls"], seen
+    assert "https://github.com/wrongorg/wrongrepo/pull/1291" in seen["urls"], seen
 
 
 def test_the_picker_for_a_guessed_repo_SAYS_WHY(monkeypatch):
@@ -1758,10 +1758,10 @@ def test_the_bare_hash_N_picker_SAYS_the_github_row_is_a_guess(monkeypatch):
 
 @pytest.mark.parametrize("text,expected", [
     # `mapped` — the mapping resolved the owner for a repo the TEXT named.
-    ("loamfield#12", "https://github.com/gardenersguild/trowelcast/issues/12"),
+    ("loamfield#12", "https://github.com/gardenersguild/trowelcast/pull/12"),
     # `explicit` — the operator wrote the owner out.
     ("civitai/talos-infra#1065",
-     "https://github.com/civitai/talos-infra/issues/1065"),
+     "https://github.com/civitai/talos-infra/pull/1065"),
 ])
 def test_a_repo_the_TEXT_named_still_opens_with_no_picker(monkeypatch, text,
                                                           expected):
@@ -2005,7 +2005,7 @@ def test_print_mode_never_invokes_the_picker_or_the_universe(spy, universe, caps
 def test_print_mode_still_prints_a_resolvable_url(spy, universe, capsys):
     assert MO.main(["--print", "gardenersguild/trowelcast#1065"]) == 0
     assert capsys.readouterr().out.strip() == (
-        "https://github.com/gardenersguild/trowelcast/issues/1065")
+        "https://github.com/gardenersguild/trowelcast/pull/1065")
 
 
 def test_a_bare_hash_N_with_NO_repo_context_offers_the_universe_BELOW_clawgate(
@@ -2101,7 +2101,7 @@ def test_a_six_digit_literal_BESIDE_a_real_reference_does_not_suppress_it(spy):
     survived the whole suite before this test existed."""
     assert MO.main(['background = "#282828"; fixed in talos-infra#1065']) == 0, (
         "a colour literal BESIDE a real reference suppressed the reference")
-    assert spy[-1] == ("open", "https://github.com/civitai/talos-infra/issues/1065"), (
+    assert spy[-1] == ("open", "https://github.com/civitai/talos-infra/pull/1065"), (
         f"a colour literal BESIDE a real reference suppressed the "
         f"reference: {spy}")
 
@@ -2230,7 +2230,7 @@ def test_the_picker_passes_its_NOTE_to_rofi_as_mesg(monkeypatch):
 
     monkeypatch.setattr(MO.subprocess, "run", fake_run)
     cands = [{"platform": "github", "id": "7",
-              "url": "https://github.com/gardenersguild/trowelcast/issues/7"}]
+              "url": "https://github.com/gardenersguild/trowelcast/pull/7"}]
     MO.pick(cands, mesg="nothing here knows widget<1> & co")
     assert "-mesg" in seen["cmd"], seen["cmd"]
     body = seen["cmd"][seen["cmd"].index("-mesg") + 1]
@@ -2625,7 +2625,7 @@ def test_the_universe_file_is_NOT_read_on_a_click_that_resolves(monkeypatch):
                         lambda *a, **k: reads.append(1) or [])
     monkeypatch.setattr(MO, "open_url", lambda url: reads.append(url) or 0)
     assert MO.main(["--no-discovery", "civitai/talos-infra#1065"]) == 0
-    assert reads == ["https://github.com/civitai/talos-infra/issues/1065"], (
+    assert reads == ["https://github.com/civitai/talos-infra/pull/1065"], (
         f"expected exactly one open and no universe read, got {reads}")
 
 
@@ -2882,7 +2882,7 @@ def test_an_EXPLICIT_owner_still_opens_directly_and_gets_NO_picker(monkeypatch):
     monkeypatch.setattr(MO, "open_url", lambda url: opened.append(url) or 0)
     assert MO.main(["civitai/talos-infra#1065"]) == 0
     assert picked == [], "an explicit owner must not raise a picker"
-    assert opened == ["https://github.com/civitai/talos-infra/issues/1065"], opened
+    assert opened == ["https://github.com/civitai/talos-infra/pull/1065"], opened
 
 
 # --------------------------------------------------------------------------- #
@@ -2938,7 +2938,7 @@ def test_the_bare_hash_N_ORDER_is_clawgate_then_the_guess_then_the_universe(
     assert len(urls) == 7, urls
     assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", (
         f"the MEASURED rows must stay on top: {urls}")
-    assert urls[1] == "https://github.com/wrongorg/wrongrepo/issues/1291", (
+    assert urls[1] == "https://github.com/wrongorg/wrongrepo/pull/1291", (
         f"the MEASURED rows must stay on top: {urls}")
     assert not any(UNIVERSE_ONLY in u or "acme/widget" in u for u in urls[:2]), urls
     assert UNIVERSE_ONLY in "\n".join(urls[2:]), urls
@@ -3042,7 +3042,7 @@ def test_the_DEFAULT_REPO_FLAG_rides_the_same_rung_as_the_pane(monkeypatch):
     assert MO.main(["--default-repo", "wrongorg/wrongrepo", "#1291"]) == 0
     urls = [c["url"] for c in seen["rows"]]
     assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", urls
-    assert urls[1] == "https://github.com/wrongorg/wrongrepo/issues/1291", urls
+    assert urls[1] == "https://github.com/wrongorg/wrongrepo/pull/1291", urls
     assert any(UNIVERSE_ONLY in u for u in urls), urls
     assert "Row 2" in seen["mesg"], seen["mesg"]
 
@@ -3078,10 +3078,10 @@ def test_a_bare_hash_N_with_NO_pane_repo_is_UNCHANGED_by_this_widening(
     # host by construction), and the mapping's AGE already reaches the operator
     # through `staleness_note`. Putting a several-hundred-row picker in front of
     # every `repo#N` would tax the shape that carries its own evidence.
-    ("loamfield#12", "https://github.com/gardenersguild/trowelcast/issues/12"),
+    ("loamfield#12", "https://github.com/gardenersguild/trowelcast/pull/12"),
     # `explicit` — the strongest rung there is.
     ("civitai/talos-infra#1065",
-     "https://github.com/civitai/talos-infra/issues/1065"),
+     "https://github.com/civitai/talos-infra/pull/1065"),
 ])
 def test_the_TEXTS_OWN_evidence_still_opens_with_ZERO_keystrokes(monkeypatch,
                                                                 text, expected):
