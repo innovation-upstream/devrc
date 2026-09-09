@@ -242,15 +242,33 @@ debugging, changing or copying a specific pipeline.
    🔴 Bound EVERY task, not just the slow one — the task deadline is
    `taskStart + timeout` while the budget is `runStart + tasks`, so an unbounded early task
    (devrc's `notify` inherited the cluster's 1h default) lets them cross and re-opens this.
-9. ⚠ **Gotcha 6 is scoped to `homelab-infra`, not to Tekton.** `innovation-upstream/devrc` is a
-   DIFFERENT repo on a plan where protection works, and since 2026-08-23 it requires **both**
-   `tekton/devrc-nodetests` and `tekton/devrc-pytests` (measured — re-measure, this moved
-   twice in one day). A required check `ERROR`/`PENDING` ⇒ `mergeStateStatus=BLOCKED`,
-   both `SUCCESS` ⇒ `CLEAN`. So on devrc a Tekton check **is** a gate — on either tier;
-   the earlier nodetests-only window let pytests-red PRs read `UNSTABLE` and merge.
-   🔴 `enforce_admins: true` there means a wedged
-   Tekton blocks everyone with no override; the escape hatch is
-   `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`.
+9. 🔴 **RETRACTED 2026-09-09 — devrc is NOT gating. Gotcha 6 applies there too: DETECTORS.**
+   This entry used to say devrc required **both** `tekton/devrc-nodetests` and
+   `tekton/devrc-pytests` with `enforce_admins: true`, i.e. that a Tekton check **is** a gate
+   there. **Measured false 2026-09-09 17:07Z:**
+   ```
+   gh api /repos/innovation-upstream/devrc/branches/main/protection
+     -> required_status_checks: ABSENT   enforce_admins: false
+   gh api /repos/innovation-upstream/devrc/rulesets            -> []   (zero rulesets)
+   ```
+   Nothing is required; nothing is enforced. The entry's own "re-measure, this moved twice in
+   one day" was the right instinct — it moved again.
+   **Corroborated by BEHAVIOUR, not just the API:** PR **#1430** merged 2026-09-09 05:51:46Z,
+   **26 minutes BEFORE** its `devrc-pytests` failure status posted at 06:17:59Z. A required
+   check cannot allow that.
+   🔴 **Why a stale gating claim is worse than a stale fact: it inverts your reasoning.**
+   Believing devrc gates turns "the check is red" into "I am blocked", so a session declines to
+   merge and goes hunting for a defect that may not exist. On devrc a red has repeatedly been a
+   RESOURCE STALL rather than a bad change: `test_mjs_parses[attachments.mjs]` has now
+   false-failed at least **5 times** (twice already written up in `claudedocs/`), and its real
+   assertion is `subprocess.TimeoutExpired` on `node --check` with empty stdout/stderr — a
+   30 s budget against a command that genuinely costs 0.01–0.02 s. Measured 2026-09-09: the
+   SAME revision failed one run and passed the next (`devrc-ci-7h4w2` 1 failed →
+   `devrc-ci-tqfw5` 0 failed, both `collected=21500`). A session in this arc refused to merge a
+   green-on-re-run PR on exactly this false premise.
+   **So on devrc: read the per-context description, re-run before believing a red, and judge
+   the change on its merits.** If gating is ever wanted back it must be RE-ADDED — it is not
+   merely disabled. ⚠ Re-measure before trusting this entry too; it has now moved three times.
 10. 🔴 **RENAMING A REPO SILENTLY KILLS ITS TRIGGER.** Every trigger CEL-matches
     `body.repository.full_name`, so a renamed repo's webhooks stop matching and post-merge CI
     just… stops — no error, no red check, and a repo with no pushes looks identical. Measured
@@ -428,9 +446,11 @@ Neither vetr repo is wired to Tekton. **Check the repo before applying the noise
 unpinned PVC, no concurrency control, `error`-vs-`fail` on the CSS path only) are in the
 reference file. **Seven** triggers share `el-github-listener`: `naida-push-main`,
 `remix-push-trunk`, `gitops-validate-pr`, `gitops-validate-push-trunk`, `clawgate-ci-push`,
-`auditloop-push-main`, `devrc-ci-pr`. 🔴 **`devrc-ci-pr` is the only one whose check actually
-BLOCKS a merge** (gotcha #9) — the rest are detectors, because their repos cannot configure a
-required check at all. Read the count off the CR, never off this line:
+`auditloop-push-main`, `devrc-ci-pr`. 🔴 **NONE of these blocks a merge today.** This line used
+to say `devrc-ci-pr` was the one that did; that was RETRACTED 2026-09-09 — devrc's `main` has
+`required_status_checks: ABSENT`, `enforce_admins: false` and zero rulesets, so every trigger
+here is a DETECTOR. See gotcha #9 for the measurement and for why believing otherwise inverts
+your reasoning about a red check. Read the count off the CR, never off this line:
 `kubectl -n tekton-ci get eventlistener github-listener -o jsonpath='{.spec.triggers[*].name}'`
 — this file said "six" for the whole period `devrc-ci-pr` was live and gating.
 
