@@ -307,9 +307,13 @@ class Fleet:
             # 🔴 But the `[ "$DO_REMOTE" = 1 ]` gate in the script closed ALL of
             # that on its own. MEASURED with the gate and without this seam:
             # 8 probe executions, of which 0 reached an unstubbed ssh — every one
-            # landed on a fixture `stub_ssh` — across 11 static call sites that
-            # pass neither `--no-remote` nor an explicit REMOTE_SSH. (Positive
-            # control for the instrument: 558 on the ungated tree.)
+            # landed on a fixture `stub_ssh`. (Positive control for the
+            # instrument: 558 on the ungated tree.) ⚠ An earlier version added
+            # "across 11 static call sites"; that number is NOT mechanically
+            # reproducible — an AST sweep of the 203 `.check(` sites finds 4
+            # passing neither `--no-remote` nor REMOTE_SSH, three of them
+            # `*args` helper wrappers. The DYNAMIC count is the one that means
+            # anything, and it reproduces exactly.
             #
             # So this exists to stop 8 stubbed probes perturbing timing and
             # output, and as defence in depth if a future test forgets a stub —

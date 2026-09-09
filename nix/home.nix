@@ -3308,7 +3308,15 @@ in
       # At today's N=2 that is 120s of new worst case, which 180 could not
       # absorb: the cgroup would be killed mid-run and the deadman would report
       # NOTHING, on a schedule, looking like a unit that merely takes a while.
-      # 420 leaves headroom for one more source repo without another edit.
+      # 🔴 420 does NOT leave headroom for another source repo — this line said
+      # it did, and that was already false when written. Re-derived from the
+      # pinned test's own model: needed was 400 against 420 (20s slack) at the
+      # merge-base, and the address probe added in #1439 took it to 410, so the
+      # slack is 10s. One more source repo costs 2 hosts x 30s = 60s and would
+      # need the ceiling raised to at least 470. The guard catches that LOUDLY
+      # (the test recomputes and fails), so the cost of the stale sentence was a
+      # reader skipping the edit, not a silent overflow — but do not read this
+      # block as permission to add a repo without touching the number.
       #
       # This is a SEAM — the tunable lives in the script, the ceiling lives here,
       # and neither file's tests owned their product. Pinned by
@@ -3320,9 +3328,14 @@ in
       # probe's `$SSH_PROBE_TIMEOUT` (default 5s, per candidate address). Each
       # source fetch is capped individually too, so this ceiling only ever fires
       # on several wedges at once; the cgroup is killed and the timer re-arms on
-      # the next OnUnitActiveSec. The test named above counts both — it was
-      # extended when the probe landed, because a network call added with no room
-      # made for it is precisely what it exists to catch.
+      # the next OnUnitActiveSec.
+      #
+      # ⚠ The test named above counts the PROBE derivedly (it reads
+      # SSH_PROBE_TIMEOUT from the lib and runs remote_ssh_candidates_of for the
+      # count) but NOT the remote leg's 10s, which sits inside an
+      # undifferentiated `+ 60` literal — raising that 10s to 120s moves nothing
+      # in the test. An earlier version of this comment said it "counts both",
+      # which described coverage one term wider than the implementation.
       TimeoutStartSec = 420;
       Environment = [
         # iproute2 is load-bearing, not incidental: `ip -4 -o addr show` is how

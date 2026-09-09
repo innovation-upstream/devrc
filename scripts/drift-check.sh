@@ -747,12 +747,16 @@
 #                    as UNREACHABLE and escalates rc 13 after
 #                    $DRIFT_UNREACHABLE_ESCALATE runs. It never runs under
 #                    --no-remote, and never when an explicit $REMOTE_SSH names
-#                    one target. Those two conditions stop 271 of 279 probing
-#                    runs; the remaining 8 were stopped by the FIXTURE'S OWN
-#                    stub ssh, not by them — so "0 unstubbed attempts" is a
-#                    joint result, and crediting it to the gate alone (as an
-#                    earlier version of this line did) would mislead anyone
-#                    deciding the stub is removable. The fixture ALSO defaults
+#                    one target. MEASURED over the suite, twice: 333 runs reach
+#                    address selection — 279 stopped by --no-remote, 46 by the
+#                    one-candidate rule, and 8 probe. So the two conditions stop
+#                    325 of 333, and the 8 that probe are a DISJOINT cohort, not
+#                    a leak out of the 279. Their ssh calls landed on the
+#                    fixture's own stub, so "0 unstubbed attempts" is a joint
+#                    result of the conditions and the stub. ⚠ Two earlier
+#                    versions of this line got the mechanism wrong in opposite
+#                    directions — one credited the zero to the gate alone, the
+#                    next read it as an 8-in-279 gate leak. It is neither. The fixture ALSO defaults
 #                    this to 1, for determinism rather than containment, so a
 #                    future test that forgets a stub is not the first to notice.
 #                    NOT forwarded over ssh — the remote leg does no probing of
