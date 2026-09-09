@@ -3581,13 +3581,80 @@ _count_of() { # $1 = alternation regex, $2 = summary line
 # this in a pod requesting 1 CPU (limit 4); on a 1-2 core node a fixed -n 4
 # oversubscribes and pushes every timing-sensitive test in the suite — the 15s
 # subprocess waits, the gitenv settle re-read — toward its deadline, which turns
-# a capacity problem into a flaky gate. Capped at 4 because the measured win is
-# concentrated in one target and more workers past that buy little.
+# a capacity problem into a flaky gate.
+#
+# 🔴 THE BUDGET IS THE CGROUP QUOTA, NOT `nproc` — and on the tier that made the
+# old cap of 4 necessary, those two DISAGREE. `nproc` reports the cores of the
+# NODE, not the container's limit, so in the `devrc-ci` pod (limit 4 on a much
+# larger node) `nproc` answers with the node's count and every "adapt to the
+# machine" formula built on it silently oversubscribes by that factor. The old
+# `min(nproc, 4)` was not really adapting: the constant 4 was doing the work,
+# and it happened to equal the CI pod's limit. Reading `cpu.max` makes the
+# adaptation real — it yields exactly 4 in that pod for the RIGHT reason, and
+# yields the true core count on a dev host where there is no quota.
+#
+# ⚠ MEASURED, both branches, 2026-09-08: on the workbench every cgroup v2 level
+# from the leaf scope up to `user.slice` reads `max 100000` (no quota), so the
+# walk falls through to `nproc` = 24 and jobs = 8. A quota'd cgroup reads
+# `<quota> <period>`; 400000/100000 = 4 cores. Cgroup v1, an unreadable
+# hierarchy and a missing `/proc/self/cgroup` all fall back to `nproc`, which is
+# the pre-existing behaviour — this can only ever narrow the budget, never widen
+# it past what `nproc` already allowed.
+#
+# The ceiling is now 8 rather than 4. The measured win IS concentrated in one
+# target (`scripts/tests`, 40% of the run) and that is exactly the target with
+# enough files for `--dist loadfile` to keep 8 workers fed; the flat 4 left 20
+# of this box's 24 cores idle on a solo run. It is still a ceiling and not
+# `nproc`, because past ~8 the run is bounded by the biggest single FILE.
+#
+# TEST SEAM: DEVRC_TEST_CGROUP_ROOT / DEVRC_TEST_CGROUP_SELF point the walk at a
+# fake hierarchy so `scripts/tests/test_run_tests_jobs.py` can exercise the
+# quota branch on a host that HAS no quota — which is every dev host here, and
+# would otherwise leave the branch that matters (the CI pod's) untested on the
+# only machines anyone runs the tests on. A seam for tests, not a way to lie to
+# the runner about its own budget.
+_devrc_cpu_budget() {
+  # Narrowest readable cgroup v2 quota, walking leaf -> root; first numeric
+  # quota wins. Fail-open: any unreadable step just leaves the answer empty.
+  local cg d q p root self
+  root="${DEVRC_TEST_CGROUP_ROOT:-/sys/fs/cgroup}"
+  self="${DEVRC_TEST_CGROUP_SELF:-/proc/self/cgroup}"
+  cg="$(cut -d: -f3 "$self" 2>/dev/null | head -1)"
+  [ -n "$cg" ] || return 0
+  d="${root}${cg}"
+  while [ "${d:-/}" != "/" ]; do
+    if [ -r "$d/cpu.max" ]; then
+      # 🔴 Reset BEFORE the read, not after. A `read` that fails (empty file,
+      # short line) leaves the PREVIOUS iteration's values in place, so a
+      # deeper level's quota would be re-reported as this level's — a wrong
+      # number, not a missing one, which is the failure that reads as success.
+      q=""; p=""
+      read -r q p < "$d/cpu.max" 2>/dev/null || true
+      case "${q:-}" in
+        ''|max|*[!0-9]*) : ;;   # "max" = no quota at this level; keep walking up
+        *)
+          case "${p:-}" in ''|0|*[!0-9]*) : ;;
+            *) echo $(( q / p == 0 ? 1 : q / p )); return 0 ;;
+          esac ;;
+      esac
+    fi
+    # Stop at the hierarchy ROOT WE WERE GIVEN. Hardcoding /sys/fs/cgroup here
+    # would walk a seamed run straight out of its fake tree and on up to /.
+    [ "$d" = "$root" ] && break
+    d="$(dirname "$d")"
+  done
+  return 0
+}
 _devrc_default_jobs="$(nproc 2>/dev/null || echo 1)"
 case "$_devrc_default_jobs" in ''|*[!0-9]*|0) _devrc_default_jobs=1 ;; esac
-[ "$_devrc_default_jobs" -gt 4 ] && _devrc_default_jobs=4
+_devrc_quota="$(_devrc_cpu_budget 2>/dev/null || true)"
+case "${_devrc_quota:-}" in
+  ''|*[!0-9]*|0) : ;;
+  *) [ "$_devrc_quota" -lt "$_devrc_default_jobs" ] && _devrc_default_jobs="$_devrc_quota" ;;
+esac
+[ "$_devrc_default_jobs" -gt 8 ] && _devrc_default_jobs=8
 PYTEST_JOBS="${DEVRC_TEST_JOBS:-$_devrc_default_jobs}"
-unset _devrc_default_jobs
+unset _devrc_default_jobs _devrc_quota
 
 # Reject anything that is not a plain positive integer. `00` and `007` are
 # rejected too: they would pass a naive digit test, then fail `-gt 1` and run
