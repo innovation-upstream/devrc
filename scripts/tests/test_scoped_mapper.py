@@ -195,6 +195,34 @@ def test_scoped_tests_dry_run_runs_nothing(tmp_path):
     assert "A dry run is not a verdict" in out, out
 
 
+def test_scoped_tests_refuses_an_ambient_devrc_targets(tmp_path):
+    """REGRESSION, and it exists because a MUTANT CAUGHT ITS ABSENCE: the
+    refusal shipped in this round's first pass with no test at all, and
+    reverting it left the whole suite green.
+
+    The declared target list is read through `run-tests.sh --check-targets`,
+    which HONOURS `DEVRC_TARGETS` — so an exported value makes this mapper's
+    search universe a SUBSET, and a changed file whose covering tests live in an
+    unselected target maps to nothing. The end state is safe (exit 4, not a
+    pass), but the DIAGNOSIS is wrong: "no test names what you changed" when the
+    truth is "this mapper was not allowed to look there". A wrong diagnosis on a
+    refusal is how someone concludes their change is untested and moves on."""
+    r = throwaway_repo(tmp_path)
+    (r / "scripts" / "tests" / "test_a.py").write_text("def test_a():\n    assert True\n")
+    commit_all(r)
+    (r / "scripts" / "tests" / "test_a.py").write_text(
+        "def test_a():\n    assert True\n\n\ndef test_b():\n    assert True\n")
+    rec = stub_runner(tmp_path, [str(r / "scripts" / "tests")])
+    proc = run([str(SCOPED), "--base", "HEAD", str(r)],
+               env={"DEVRC_SCOPED_RUNNER": str(tmp_path / "stub-runner.sh"),
+                    "DEVRC_TARGETS": "scripts/tests"},
+               cwd=r)
+    out = out_of(proc)
+    assert proc.returncode == 2, f"rc={proc.returncode}\n{out}"
+    assert "DEVRC_TARGETS is set" in out, out
+    assert not rec.exists(), "the runner was invoked despite the refusal"
+
+
 def test_scoped_tests_refuses_an_unreadable_target_list(tmp_path):
     """An empty target list would map every change to nothing, and that would
     then be reported as an empty SELECTION — a fault in the caller wearing the
