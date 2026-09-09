@@ -72,13 +72,35 @@ def _nproc() -> int:
     return int(out)
 
 
-def _run(env_overrides: dict[str, str]):
+def _narrow_cpus(n: int) -> list[int] | None:
+    """The first `n` CPUs this process is allowed to use, or None if it cannot.
+
+    🔴 WHY NARROWING THE CPU SET IS THE ONLY WAY TO SEE ONE OF THE CLAIMS.
+    `min(nproc, quota, 8)` has three inputs and two seams. The quota is seamed;
+    `nproc` was not, and on a 24-core box `min(nproc, 8)` is 8 for EVERY quota
+    above 8 — so a mutant that let the quota WIN OUTRIGHT was still capped to 8
+    and produced the identical answer. Measured: it SURVIVED a fully green run.
+    Restricting the child's affinity mask makes `nproc` small enough that a
+    quota can sit between it and the cap, which is the only arrangement in which
+    "the walk may only NARROW" is observable at all.
+    """
+    allowed = sorted(os.sched_getaffinity(0))
+    if len(allowed) < n:
+        return None
+    return allowed[:n]
+
+
+def _run(env_overrides: dict[str, str], cpus: list[int] | None = None):
     """Run the runner as far as the banner, then stop.
 
     DEVRC_TEST_BUDGET_ONLY is the documented seam for exactly this: it exits
     after `parallelism =N` having run no tests, so a case costs the runner's
     preamble instead of a whole nested suite. Every assertion in this file is
     about that one line.
+
+    `cpus`, when given, is applied to the CHILD's affinity mask only — GNU
+    `nproc` honours it, so this is how a case pins the runner's fallback input
+    without touching this process or the machine.
     """
     env = dict(os.environ)
     # A nested run is forced serial by PYTEST_CURRENT_TEST, which we inherit —
@@ -102,6 +124,7 @@ def _run(env_overrides: dict[str, str]):
         text=True,
         env=env,
         timeout=900,
+        preexec_fn=(None if cpus is None else (lambda: os.sched_setaffinity(0, set(cpus)))),
     )
     return proc
 
@@ -268,10 +291,45 @@ def test_a_sub_cpu_quota_floors_at_one_rather_than_zero(tmp_path):
 
 
 def test_a_quota_wider_than_nproc_does_not_widen_the_budget(tmp_path):
-    """The walk may only ever NARROW what nproc already allowed."""
-    usable = _nproc()
-    env = _fake_cgroup(tmp_path, [("", "max 100000"), ("pod", "64000000 100000")])
-    assert _parallelism(_run(env)) == min(usable, 8)
+    """The walk may only ever NARROW what nproc already allowed.
+
+    🔴 THE CPU NARROWING IS WHAT MAKES THIS TEST ABLE TO FAIL. With the child
+    left on all 24 cores, `min(nproc, 8)` is 8 and a mutant that lets the quota
+    win outright is capped to 8 as well — identical output, mutant SURVIVED, and
+    that is exactly what was measured before this fixture existed. The guarded
+    branch has to land somewhere OTHER than its own boundary: two visible CPUs
+    and a quota of 5 puts the wrong answer (5) strictly between the right one
+    (2) and the cap (8).
+    """
+    cpus = _narrow_cpus(2)
+    if cpus is None:
+        pytest.skip("fewer than 2 CPUs in this process's affinity mask")
+    env = _fake_cgroup(tmp_path, [("", "max 100000"), ("pod", "500000 100000")])
+    got = _parallelism(_run(env, cpus=cpus))
+    assert got == 2, (
+        f"expected min(nproc=2, quota=5, cap=8) = 2, got {got}. 5 means the "
+        "quota was allowed to WIDEN the budget past what nproc permitted."
+    )
+
+
+def test_the_narrowed_cpu_seam_actually_narrows_nproc(tmp_path):
+    """POSITIVE CONTROL for the affinity narrowing used by the test above.
+
+    If `preexec_fn` silently did nothing, the case above would run on all cores
+    and its `== 2` would fail loudly — but a future refactor could just as
+    easily make it pass for the wrong reason. So: with no quota anywhere and the
+    child pinned to two CPUs, the budget must be exactly 2, and that number can
+    only have come from `nproc` seeing the narrowed mask.
+    """
+    cpus = _narrow_cpus(2)
+    if cpus is None:
+        pytest.skip("fewer than 2 CPUs in this process's affinity mask")
+    got = _parallelism(_run(_no_quota_anywhere(tmp_path), cpus=cpus))
+    assert got == 2, (
+        f"the child reported a budget of {got} while pinned to 2 CPUs; the "
+        "affinity narrowing did not take effect, so every test built on it is "
+        "measuring the unrestricted machine."
+    )
 
 
 def test_max_at_the_leaf_falls_through_to_a_parents_quota(tmp_path):

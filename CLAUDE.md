@@ -159,31 +159,14 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   ```
   ⚠ It over-matches too (`dl-router/server.py`, `present/measure.py`, `skill-audit.py` are not doc ceilings), so read each hit rather than counting them. This bullet has now been wrong THREE times: twice carrying a count that was stale within a day, and once — for longer, because nobody re-ran it — carrying a discovery method that silently returned an incomplete set. A grep quoted as authoritative is a claim like any other; the only fix that would stop this recurring is a test enumerating ceilinged docs two-way, which does not exist yet. Any addition needs an eviction in the SAME commit; raising a ceiling needs the commit message to say which instruction would not fit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
-  🔴 **It now RE-ENTERS `nix develop` itself, and it QUEUES rather than piling on.** Two
-  behaviours that look like a hang and are not. (a) Launched outside a gate environment it
-  re-execs into the repo's dev shell instead of printing the `nix develop …` line for you to
-  re-type — measured 2026-09-08 across every gate log dir on the box, **101 of 382 runs (26%)**
-  had died on that FATAL with pytest never starting, and 91 of those 101 paid the node tier
-  anyway. ⚠ An earlier version of this bullet said **100 of 100**; that population was defined
-  by the failure's own cause (the default `LOG_DIR` is a `mktemp -d`, so only runs launched
-  OUTSIDE the dev shell land in bare `/tmp` — 101/101 there, 0 of 281 inside).
-  `DEVRC_GATE_NO_REEXEC=1` opts out. (b) At most `DEVRC_GATE_SLOTS` (default **2**) `gate.sh`
-  runs execute at once **per (uid, slot pool)** — 🔴 **not per box**: it does not cover
-  pytest-nested runs (inert by default), it does not cover either `nix build` check tier (which
-  cannot join the pool — it runs in a sandbox, and its concurrency is nix's own `max-jobs`), a
-  descendant of a gate run is inert rather than queued, and the bound lapses after
-  `DEVRC_GATE_SLOT_WAIT` (default **600s**), after which the run proceeds unslotted. 🔴 **A
-  queued gate is WORKING — do not kill it and do not `DEVRC_GATE_SLOTS=0` around it**; it
-  prints a heartbeat every 60s, and the `--timeout` budget starts when the tier starts, so
-  queue time is never charged to the tests. The GATE block prints `slot: N of M` or
-  `slot: NONE HELD — <why>`, and only a slotted run's duration is comparable to another's.
-  ⚠ **The contention number this feature was justified with is WITHDRAWN, and the feature is
-  kept anyway.** "237 runs bucketed by overlap: 0 others → 14.5 min, 6+ → 48.9 min, 3.4x and
-  superlinear" is length-biased — a longer run overlaps more runs *by construction* — and a
-  null Monte Carlo with zero interaction reproduces the shape, the baseline and ~2.06x of the
-  3.4x. Contention is real; **that dataset cannot size it**, so do not quote 3.4x. What the
-  same window does support, being a count and not a bucketed median: **35 of 117 red runs died
-  on SIGTERM at the 3600s cap**, producing no verdict for an hour of wall clock.
+  🔴 **It RE-ENTERS `nix develop` itself — a pause at the start that is not a hang.** Launched
+  outside a gate environment it re-execs into the repo's dev shell instead of printing the
+  `nix develop …` line for you to re-type. Measured 2026-09-08 across every gate log dir on the
+  box, **101 of 382 runs (26%)** had died on that FATAL with pytest never starting, and 91 of
+  those 101 paid the node tier anyway. ⚠ The naive figure was **100 of 100**, and that
+  population was defined by the failure's own cause: the default `LOG_DIR` is a `mktemp -d`, so
+  only runs launched OUTSIDE the dev shell land in bare `/tmp` (101/101 there, 0 of 281
+  inside). `DEVRC_GATE_NO_REEXEC=1` opts out; `--help` lists every variable it reads.
 - 🔴 **BUILD THE TWO `nix` CHECK DERIVATIONS ONE AT A TIME — a combined invocation produces FALSE FAILURES.** `nix build .#checks.x86_64-linux.pytests .#checks.x86_64-linux.nodetests` builds both concurrently, and the tests that shell out to nested `nix` then contend on the store. MEASURED 2026-08-30 on one tree: the combined call reported **2 failures** — `SQLite database … is busy` evaluating `nix/home.nix`, and `OperationalError('database is locked')` in dl-router — while the SAME tree, same derivations, run **sequentially**, reported **0**. Load-dependent, so earlier combined runs were green and looked fine. **A combined GREEN is trustworthy** (a contended run fails loudly, it does not fake a pass); **a combined RED is not**, until re-checked one at a time. This cost a near-miss report of "PR #1029 broke the gate", against a diff that touched one test file and could not reach either failure. ⚠ Same run also reproduced the documented `| tail` trap: `nix build … | tail` printed `NIXBUILD_RC=0` for a build that had just failed 45 tests — read the runners' own `RESULT:` lines, never the piped exit code.
 - **To run a SUBSET, use the flake devShell — it already carries the gate toolchain:** `nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q` (cwd-independent with absolute paths; MEASURED from the repo root and from `/tmp`, pytest 9.1.1). `gate.sh` has no per-file filter and `run-tests.sh`'s positional is a repo ROOT, not a test selector — but that is a gap in those two entry points, **not** in the repo: the toolchain is there, by another door. 🔴 **`.envrc` is `use opencode`, so a loaded direnv does NOT put pytest on PATH** — and the worktree recipe in `claude/RULES.md` says to copy `.envrc`, which propagates that env into every worktree. A bare `python3 -m pytest` failing with `No module named pytest` therefore means you are in the opencode shell, never that the suite is unrunnable. This bullet exists because three true observations — no `gate.sh` filter, no `run-tests.sh` selector, direnv has no pytest — were read as "no subset mode exists", and an ad-hoc `nix-shell -p` was built instead of opening the door that was already there.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
@@ -213,9 +196,30 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   ⚠ **Tekton still RUNS** — both checks post on a PR head, they just do not gate. That is
   exactly why the marker stays `other`: it records that something runs at merge time, never
   that it blocks. There is still no `.github/workflows`.
-  🔴 **So run BOTH tiers yourself before merging** — `scripts/gate.sh --tier both` AND
-  `nix build .#checks.x86_64-linux.{pytests,nodetests}` one at a time, on the MERGED tree —
-  and name the tier and the base sha in the claim. ⚠ 2026-08-23 measured the OPPOSITE state
+  🔴 **THE LOCAL FULL-SUITE RITUAL BEFORE EVERY MERGE IS NO LONGER EXPECTED — this
+  instruction used to say "run BOTH tiers yourself before merging" and that requirement is
+  DELETED.** What it bought was not worth what it cost: it produced **27–50 concurrent
+  full-suite runs on one 24-core box**, each running the same ~22,000 tests, twice per change
+  (dev-host tier + sandbox tier) — while gating nothing, because nothing blocks a merge. The
+  runs contended with each other badly enough that the dev-host tier repeatedly hit its own
+  3600s cap and produced **no verdict at all**, which is strictly worse than not having run it.
+  What replaces it: **read CI**, and run a **change-scoped** subset locally while you iterate
+  (a separate PR is adding a first-class way to select one — until it lands, use
+  `nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q`, per the SUBSET bullet
+  below). Running the full tiers is still allowed and sometimes right — a broad refactor, a
+  change to the runners themselves — but it is a judgement, not a checklist item, and if you
+  do run one, name the tier and the base sha in the claim.
+  🔴 **CI (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) is ADVISORY, and it is the only
+  automated signal that exists. Read it.** It posts on the PR head, it does not block, and
+  nobody is stopped from merging over a red one. `gh pr checks <n>`. A red check is
+  information you are expected to act on; merging through one is a decision you own and should
+  say out loud. Its tier is the `nix build` sandbox, which is blind to different things than a
+  dev-host run — see the two-tier bullet below.
+  🔴 **BE HONEST ABOUT WHAT THIS IS: it is LESS SAFE, deliberately.** Protection is off, the
+  local mandate is gone, and the remaining backstop is one advisory check plus whoever is
+  reading the PR. That is a knowing trade of safety for speed made by the operator, not an
+  arrangement that has been made safe by rearranging it. Nothing in this bullet should be read
+  as reassurance. ⚠ 2026-08-23 measured the OPPOSITE state
   (`contexts` = both checks, `enforce_admins: true`), and earlier that same day `contexts`
   held nodetests ALONE, which collects `*.test.mjs` only — so a Python-only PR could not
   fail it and read `UNSTABLE` with pytests red. **Check the LIST, never that the key
@@ -330,16 +334,19 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   `devrc` + `homelab-talos`; laptop none) and at `githooks/` (08-21). It correlates with
   agent-worktree creation, is NOT a devrc setting, and `git config --local --get
   core.hooksPath` per clone is the only answer.
-  **Until then: run the gate yourself before you merge, and say which command you ran.**
-  Both of these assert collected-test FLOORS and parse structured output rather than reading
+  **If you do run a full tier, say which command you ran** — see the DELETED-RITUAL note
+  above for when that is worth doing at all.
+  Both tiers assert collected-test FLOORS and parse structured output rather than reading
   an exit code, because `node --test <dir>` silently yields a bogus `# tests 1` and a pytest
-  suite can collect 0 with a zero exit. Gate on the MERGED tree, not the PR branch.
+  suite can collect 0 with a zero exit. A full run is only meaningful on the MERGED tree, not
+  the PR branch.
   🔴 **BUT THEY ARE TWO DIFFERENT TIERS, NOT TWO SPELLINGS OF ONE — this line used to join
   them with "or", and that word cost a required check.** `scripts/gate.sh` runs
   `scripts/run-tests.sh` + `scripts/run-node-tests.sh` **on the dev host** (see its
   `PYTEST_RUNNER`/`NODE_RUNNER`); it does **not** invoke `nix build` at all.
   `nix build .#checks.x86_64-linux.{pytests,nodetests}` builds from a `cp -r ${./.}` **store
-  copy with NO `.git`**, and that is the tier **Tekton runs and the merge is gated on**.
+  copy with NO `.git`**, and that is the tier **Tekton runs** — advisory now, but still the
+  only automated one, and the one whose blind spots differ from a dev-host run's.
   Measured 2026-08-23 on #773: four consecutive `GATE: RESULT=PASS` runs, then
   `tekton/devrc-pytests` red — the sandbox tier had never been run. The dev-host tier is also
   structurally blind to anything keyed on the repo being a git checkout: GUARD 10's

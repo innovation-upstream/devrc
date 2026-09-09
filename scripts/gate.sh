@@ -55,19 +55,6 @@
 # Env:
 #   DEVRC_GATE_TIMEOUT    default for --timeout, in seconds (default 3600). The
 #                         flag wins over it.
-#   DEVRC_GATE_SLOTS      how many gate runs of THIS script may execute at once
-#                         per (uid, slot pool) — not per box; see the caveats in
-#                         the SLOT LIMITER block (default 2; 0 disables it).
-#   DEVRC_GATE_SLOT_WAIT  seconds to queue for a slot before giving up and
-#                         running unslotted anyway (default 600). Fail-open: the
-#                         wait always ends in a run, never in a refusal.
-#   DEVRC_GATE_SLOT_DIR   which slot pool to join (default: a fixed per-uid path
-#                         under /tmp). Naming one also opts a pytest-nested run
-#                         back INTO the limiter — see the SLOT LIMITER block.
-#   DEVRC_GATE_SLOT_POOL  set BY this script, not by you: the pool a gate run
-#                         already holds this process tree's place in. A
-#                         descendant that would join the same pool goes inert
-#                         instead of queueing behind its own ancestor.
 #   DEVRC_GATE_NO_REEXEC  =1 to run against the ambient PATH instead of
 #                         re-entering `nix develop`. See the RE-EXEC block.
 #   DEVRC_GATE_ENV        =1 means "already inside a sanctioned gate
@@ -79,8 +66,8 @@
 #                         suppresses the re-exec exactly once, which is not what
 #                         DEVRC_GATE_NO_REEXEC does and is rarely what you want.
 #   PYTEST_CURRENT_TEST   read, not set: its presence means "we are running
-#                         inside a pytest process", which makes the slot limiter
-#                         inert by default and suppresses the re-exec.
+#                         inside a pytest process", which suppresses the re-exec
+#                         so a nested run cannot re-enter `nix develop`.
 #
 # Exit: 0 = every selected tier passed and agreed with its own content.
 #       1 = a tier genuinely failed.
@@ -197,19 +184,19 @@ mkdir -p "$LOG_DIR" || { echo "gate: FATAL — cannot create log dir $LOG_DIR" >
 # GATE_NESTED — "we are inside a pytest process". Same nesting signal
 # `run-tests.sh` uses to force nested runs serial, and inherited by child
 # processes (measured there, serial and under xdist), so it catches a test
-# spawning this script through a wrapper no seam variable touches. Both features
-# below consult it, for different reasons and with different consequences.
+# spawning this script through a wrapper no seam variable touches. It is the one
+# thing keeping the re-exec below out of a nested run.
 #
 # 🔴 THE RUNNER SEAMS NO LONGER SUPPRESS THE RE-EXEC, AND THAT IS A FIX. There
 # used to be a second flag here — GATE_SEAMED, "a test is driving this script
-# against a fake runner" — sitting FIRST in the re-exec condition. Every test in
-# `scripts/tests/test_gate_slots_and_reexec.py` sets those seams, so that
-# short-circuit fired in all of them and the three guards behind it were never
-# evaluated by anything. Measured, one mutation at a time against the whole
-# file: deleting the DEVRC_GATE_NO_REEXEC guard, the DEVRC_GATE_ENV guard, or
-# the DEVRC_GATE_REEXEC loop guard each left all 14 tests PASSING. A guard no
-# test can reach pins nothing, and the loop guard is the one whose failure mode
-# this file itself calls an unkillable fork bomb.
+# against a fake runner" — sitting FIRST in the re-exec condition. Every test
+# that drives this script sets those seams, so that short-circuit fired in all
+# of them and the three guards behind it were never evaluated by anything.
+# Measured, one mutation at a time against the whole file: deleting the
+# DEVRC_GATE_NO_REEXEC guard, the DEVRC_GATE_ENV guard, or the
+# DEVRC_GATE_REEXEC loop guard each left every test PASSING. A guard no test can
+# reach pins nothing, and the loop guard is the one whose failure mode this file
+# itself calls an unkillable fork bomb.
 #
 # GATE_NESTED alone still keeps the re-exec out of every ordinary suite run,
 # because PYTEST_CURRENT_TEST is set in all of them; a test that wants to reach
@@ -271,221 +258,6 @@ if [ "$GATE_NESTED" -eq 0 ] \
       --tier "$TIER" --set "$SET" --timeout "$TIMEOUT" --log-dir "$LOG_DIR" "$ROOT"
 fi
 
-# --- SLOT LIMITER: BOUND HOW MANY GATES RUN AT ONCE ----------------------------
-# 🔴 WHY. Nothing serialised gate runs, and on a box shared by dozens of agent
-# sessions they all start their own. That contention is real and its mechanism
-# is uncontroversial: 30–50 concurrent full-suite runs on 24 cores oversubscribe
-# the machine several times over, and the suite is full of timing-sensitive
-# waits that drift toward their deadlines when it does.
-#
-# ⚠ WHAT THE AVAILABLE MEASUREMENT DOES AND DOES NOT ESTABLISH — READ THIS
-# BEFORE QUOTING A NUMBER FROM IT. Across 237 real runs (the runner's own
-# `run=NNNNs`), bucketed by how many other runs overlapped, the median gate rose
-# monotonically from 14.5 min (0 others) to 48.9 min (6+ others), a ratio of
-# 3.4x. That association is real. It is NOT a measurement of contention's
-# magnitude, because the bucketing variable is partly a FUNCTION of the outcome:
-# a longer run overlaps more runs by construction, so long runs sort themselves
-# into the high-overlap buckets whether or not overlap costs anything. This is
-# length-biased sampling. A null Monte Carlo — 237 runs, Poisson arrivals,
-# durations drawn from a lognormal fitted to the same marginal, ZERO interaction
-# between runs — reproduces the monotone shape, the 14.5 min baseline, and about
-# 2.06x of the 3.4x. So the causal magnitude is NOT established by this data,
-# and the earlier "3.4x, and SUPERLINEAR, therefore the excess must be spawn
-# storms" inference does not follow from it: an unbiased estimate would need
-# durations compared at randomised or instrumented concurrency, which nobody
-# has collected.
-#
-# What the same window does support without that bias, because it is a count and
-# not a bucketed median: 35 of the 117 red runs died on SIGTERM at the 3600s
-# `--timeout` cap, spending an hour of wall clock to produce no verdict at all.
-# That is the failure this limiter is built against, and it is enough on its own.
-#
-# 🔴 THE SLOT IS TAKEN BEFORE `run_tier`, SO QUEUE TIME IS NOT TEST TIME. The
-# --timeout cap starts when the tier starts. A run that waited for a slot still
-# gets its full budget; queueing can never manufacture the timeout it exists to
-# prevent.
-#
-# 🔴 WHAT "FAIL-OPEN" DOES AND DOES NOT PROMISE — stated precisely, because the
-# sentence that used to sit here ("Nothing here can change the verdict") was
-# false in two ways and a test drove straight through one of them.
-#   * A malformed DEVRC_GATE_SLOTS / DEVRC_GATE_SLOT_WAIT exits 2 BEFORE any
-#     tier runs. That is a refusal, deliberately: a typo'd slot count must not
-#     be silently read as "unlimited". Exit 2 is the script's usage code and is
-#     never a verdict about the tests.
-#   * Once the configuration parses, no RUNTIME condition can block: a missing
-#     `flock`, an uncreatable slot dir, a lock file that cannot be opened, or a
-#     wait past DEVRC_GATE_SLOT_WAIT each print what happened and run anyway.
-#   * What the limiter CAN still do is DELAY the start by up to
-#     DEVRC_GATE_SLOT_WAIT. A caller whose own timeout is shorter than that
-#     sees the delay as a hang and kills the run — which produces no verdict,
-#     the exact outcome this feature exists to reduce. That is why the default
-#     wait is 600s (see below) and not an hour, and why the queue prints a
-#     heartbeat instead of going silent.
-#
-# 🔴 WHY DEVRC_GATE_SLOT_WAIT DEFAULTS TO 600s AND NOT 3600s. The two automated
-# callers of this script — the harness Bash tool (600s) and `githooks/pre-push`
-# — both have their own, shorter, budgets, so an hour-long queue cannot be
-# waited out by either; it can only be killed. And a long wait buys little even
-# when nobody kills it: at the far end of the wait we fail open and contend
-# anyway, so the marginal value of the 40th minute of queueing is the
-# difference between contending now and contending later. 600s is long enough
-# to absorb a tier boundary and short enough that the fail-open happens while
-# the caller is still listening.
-#
-# 🔴 WHY 2 SLOTS. Each slotted run now sizes itself at up to 8 xdist workers
-# (see `run-tests.sh`'s budget block — the cap moved 4 -> 8 in the same change),
-# so 2 slots is 16 of this box's 24 cores, leaving headroom for the `nix build`
-# check tier, which takes no slot at all and cannot: it runs in a sandbox with
-# no access to this pool, and its concurrency is nix's own `max-jobs`. The old
-# pairing of "2 slots" with "4 workers" left the box two-thirds idle on a
-# fully-slotted run.
-#
-# The slot dir is a FIXED path, deliberately not under $TMPDIR: every real run
-# is inside `nix develop`, which gives each shell its own TMPDIR, so a
-# TMPDIR-relative lock would give every run its own private set of slots and
-# limit nothing. Per-uid so it cannot collide across users.
-#
-# 🔴 ONE SLOT PER GATE TREE, NOT PER GATE PROCESS. A gate run exports
-# DEVRC_GATE_SLOT_POOL naming the pool it represents, and any descendant that
-# would join THAT SAME pool goes inert instead of queueing. Without this, an
-# outer full-gate run holding one of two slots had its own nested children —
-# the suite's meta-tests, which spawn this script — queueing for the remaining
-# slot behind their own ancestor, for up to DEVRC_GATE_SLOT_WAIT, inside a
-# pytest process with a much shorter timeout of its own. Measured by an
-# auditor with DEVRC_GATE_SLOT_DIR exported and the pool held: the suite's own
-# positive control went RED on a 120s TimeoutExpired after printing
-# `all 2 slot(s) busy — queueing`. A descendant can never usefully wait for a
-# lock its ancestor is holding, so the ancestor's slot bounds the whole subtree.
-#
-# 🔴 NESTING vs TESTABILITY, and why DEVRC_GATE_SLOT_DIR settles the rest.
-# Inside a pytest process the limiter is otherwise inert by default: N xdist
-# workers each spawning gate.sh would queue behind unrelated real gate runs.
-# But the limiter's OWN tests run inside pytest too, so a blanket "inert when
-# nested" makes the one feature whose failure mode is a hang the one feature
-# nothing exercises. Naming a slot dir is the opt-in. ⚠ Those tests must name a
-# pool of their OWN and must SCRUB an inherited DEVRC_GATE_SLOT_DIR rather than
-# passing the operator's through — inheriting it is how the audit above turned
-# an operator's exported variable into a red suite.
-GATE_SLOTS="${DEVRC_GATE_SLOTS:-2}"
-GATE_SLOT_WAIT="${DEVRC_GATE_SLOT_WAIT:-600}"
-case "$GATE_SLOTS" in ''|*[!0-9]*) echo "gate: FATAL — DEVRC_GATE_SLOTS must be a whole number, got '$GATE_SLOTS'" >&2; exit 2 ;; esac
-case "$GATE_SLOT_WAIT" in ''|*[!0-9]*) echo "gate: FATAL — DEVRC_GATE_SLOT_WAIT must be a whole number, got '$GATE_SLOT_WAIT'" >&2; exit 2 ;; esac
-
-GATE_SLOT_HELD=""      # which slot we hold, for the report line
-GATE_SLOT_FD=""        # the fd carrying the lock; closed in the tier's children
-# 🔴 WHY WE HOLD NO SLOT, in words. `slot: NONE HELD` on its own conflated five
-# states — limiter disabled, inert because an ancestor holds this tree's place,
-# inert because nested, no `flock`/no writable pool, and "waited and gave up".
-# Only the LAST of those is a claim about contention, and a reader comparing two
-# runs' durations needs to know which one they are looking at.
-GATE_SLOT_STATE=""
-GATE_SLOT_DIR="${DEVRC_GATE_SLOT_DIR:-/tmp/devrc-gate-slots-$(id -u 2>/dev/null || echo 0)}"
-
-acquire_slot() {
-  if [ -n "${DEVRC_GATE_SLOT_POOL:-}" ] && [ "${DEVRC_GATE_SLOT_POOL}" = "$GATE_SLOT_DIR" ]; then
-    GATE_SLOT_STATE="INERT — an ancestor gate run already holds this process tree's place in $GATE_SLOT_DIR"
-    echo "gate: slot limiter INERT (an ancestor gate run already represents this tree in the pool)."
-    return 0
-  fi
-  # From here on, everything we spawn is inside our subtree; claim the pool for
-  # it whether or not we end up holding a lock, because a descendant queueing
-  # for a pool this run already failed open on is the same deadlock in a hat.
-  export DEVRC_GATE_SLOT_POOL="$GATE_SLOT_DIR"
-  if [ "$GATE_NESTED" -eq 1 ] && [ -z "${DEVRC_GATE_SLOT_DIR:-}" ]; then
-    GATE_SLOT_STATE="INERT — nested inside pytest and no DEVRC_GATE_SLOT_DIR named"
-    echo "gate: slot limiter INERT (nested inside pytest, and no DEVRC_GATE_SLOT_DIR named)."
-    return 0
-  fi
-  if [ "$GATE_SLOTS" -le 0 ]; then
-    GATE_SLOT_STATE="DISABLED — DEVRC_GATE_SLOTS=0"
-    echo "gate: slot limiter DISABLED (DEVRC_GATE_SLOTS=0)."
-    return 0
-  fi
-  if ! command -v flock >/dev/null 2>&1; then
-    GATE_SLOT_STATE="UNSLOTTED — no \`flock\` on PATH (not a contention condition)"
-    echo "gate: WARNING — no \`flock\` on PATH; running WITHOUT a concurrency slot." >&2
-    return 0
-  fi
-  if ! mkdir -p "$GATE_SLOT_DIR" 2>/dev/null; then
-    GATE_SLOT_STATE="UNSLOTTED — cannot create $GATE_SLOT_DIR (not a contention condition)"
-    echo "gate: WARNING — cannot create $GATE_SLOT_DIR; running WITHOUT a concurrency slot." >&2
-    return 0
-  fi
-  local waited=0 i announced=0 opened=0 next_heartbeat=60
-  while :; do
-    opened=0
-    for i in $(seq 1 "$GATE_SLOTS"); do
-      # 🔴 ONE LITERAL fd, REOPENED PER CANDIDATE, AND NO `eval`. The previous
-      # spelling built the redirection with `eval "exec ${fd}>>'$dir/slot-$i'"`,
-      # which (a) broke on a slot dir containing a quote and (b) sent that
-      # breakage down the same `|| continue` path as a HELD lock — so the gate
-      # announced contention for a pool nobody was holding. Reopening fd 201
-      # closes whatever it pointed at, so the loop leaks nothing.
-      #
-      # 🔴 fd 201 IS A LITERAL ON PURPOSE, not bash's `{var}>>` auto-allocation:
-      # `{var}` fds carry different close-on-exec behaviour, and this fd MUST be
-      # inherited by children so that `run_tier`'s explicit close is the thing
-      # that decides whether an orphan can keep the slot. That close is pinned
-      # by test_an_orphan_spawned_by_the_tier_does_not_keep_holding_the_slot; an
-      # fd bash closed for us would make that test pass for the wrong reason.
-      if ! exec 201>>"$GATE_SLOT_DIR/slot-$i.lock"; then
-        continue
-      fi
-      opened=$((opened + 1))
-      if flock -n 201; then
-        GATE_SLOT_HELD="$i"
-        GATE_SLOT_FD="201"
-        if [ "$waited" -gt 0 ]; then
-          echo "gate: acquired slot $i/$GATE_SLOTS after waiting ${waited}s."
-        else
-          echo "gate: acquired slot $i/$GATE_SLOTS immediately."
-        fi
-        return 0
-      fi
-    done
-    # 🔴 NO `2>/dev/null` ON THIS LINE. `exec` with only redirections applies
-    # them to the SHELL, permanently — `exec 201>&- 2>/dev/null` silenced every
-    # later warning in this function, including the three below, and the run
-    # then failed open in total silence. Guard the close on having opened
-    # something instead; closing an fd that was never opened is what the
-    # suppression was there for.
-    [ "$opened" -gt 0 ] && exec 201>&-
-    if [ "$opened" -eq 0 ]; then
-      # NOT contention: we never got far enough to ask whether anyone held a
-      # lock. Saying "busy" here is a wrong diagnosis, not a conservative one.
-      GATE_SLOT_STATE="UNSLOTTED — could not OPEN any lock file in $GATE_SLOT_DIR (not a contention condition)"
-      echo "gate: WARNING — could not open any lock file under $GATE_SLOT_DIR." >&2
-      echo "  No slot is held by anyone; this is a pool problem, not contention." >&2
-      echo "  Running WITHOUT a concurrency slot." >&2
-      return 0
-    fi
-    if [ "$waited" -ge "$GATE_SLOT_WAIT" ]; then
-      GATE_SLOT_STATE="UNSLOTTED — waited ${waited}s for a free slot and gave up (DEVRC_GATE_SLOT_WAIT=$GATE_SLOT_WAIT); this run CONTENDED"
-      echo "gate: WARNING — all $GATE_SLOTS slot(s) still busy after ${waited}s" >&2
-      echo "  (DEVRC_GATE_SLOT_WAIT=$GATE_SLOT_WAIT). Running WITHOUT a slot rather than" >&2
-      echo "  blocking further — this run will contend, and its duration is not" >&2
-      echo "  comparable to a slotted run's." >&2
-      return 0
-    fi
-    if [ "$announced" -eq 0 ]; then
-      echo "gate: all $GATE_SLOTS slot(s) busy — queueing (another gate is running on this box)."
-      echo "gate: waiting up to ${GATE_SLOT_WAIT}s; the --timeout budget starts AFTER the slot is taken."
-      announced=1
-    fi
-    sleep 5
-    waited=$((waited + 5))
-    # A queue that prints nothing for ten minutes is indistinguishable from a
-    # hang, and the advice "a queued gate is WORKING, do not kill it" is only
-    # followable if the run keeps saying so.
-    if [ "$waited" -ge "$next_heartbeat" ]; then
-      echo "gate: still queueing for a slot (${waited}s of ${GATE_SLOT_WAIT}s; this is not a hang)."
-      next_heartbeat=$((next_heartbeat + 60))
-    fi
-  done
-}
-
-acquire_slot
-
 # `timeout` is not universally present (busybox coreutils on this box provide
 # it, the nix sandbox provides GNU's). Degrade LOUDLY rather than silently
 # dropping the cap: a gate that quietly stopped enforcing its own timeout is the
@@ -510,26 +282,11 @@ run_tier() { # $1 = label, $2.. = command
   local rc reason verdict panic
 
   echo "gate: === $label === (full log: $log)"
-  # 🔴 THE SLOT FD IS CLOSED IN THE CHILD, and this is not tidiness. A flock
-  # lives on the open file DESCRIPTION, which fork/exec inherits — so a single
-  # process that outlives this gate (a daemonised helper, an orphaned server, a
-  # runner subprocess that escapes its group) keeps holding the slot after we
-  # exit. Nobody would ever see it: the pool would just be permanently one slot
-  # smaller, every later run would queue for DEVRC_GATE_SLOT_WAIT and then
-  # fail-open, and the limiter would be silently off while still printing that
-  # it was on. This repo has been bitten by orphans holding a resource before.
-  #
-  # The subshell exists ONLY to scope that close, and it ends in `exec` so it is
-  # REPLACED by the command — the subshell contributes no exit status of its
-  # own. 🔴 Nothing may come between this and `rc=$?`; that is the whole bug
-  # this script was written for.
   if [ -n "$TIMEOUT_BIN" ]; then
     # --kill-after: a runner that ignores TERM must not outlive the cap either.
-    ( [ -n "$GATE_SLOT_FD" ] && eval "exec ${GATE_SLOT_FD}>&-"
-      exec "$TIMEOUT_BIN" --kill-after=30s "$TIMEOUT" "$@" ) >"$log" 2>&1
+    "$TIMEOUT_BIN" --kill-after=30s "$TIMEOUT" "$@" >"$log" 2>&1
   else
-    ( [ -n "$GATE_SLOT_FD" ] && eval "exec ${GATE_SLOT_FD}>&-"
-      exec "$@" ) >"$log" 2>&1
+    "$@" >"$log" 2>&1
   fi
   # 🔴 NOTHING may run between the command and this line. This is the whole bug
   # in one statement: an `echo`, a `tee`, a `| tail` here and the status below
@@ -598,16 +355,6 @@ fi
 echo "======================== GATE ========================"
 for l in "${TIER_LINES[@]}"; do echo "  $l"; done
 echo "  logs: $LOG_DIR"
-# State the concurrency conditions the run actually got, because every duration
-# in this log is a claim about them. "Slow" and "contended" are different
-# findings and the log has to be able to tell them apart AFTER the fact.
-if [ -n "$GATE_SLOT_HELD" ]; then
-  echo "  slot: $GATE_SLOT_HELD of $GATE_SLOTS (concurrency was bounded)"
-else
-  # Name the STATE, never just the absence: only "waited and gave up" is a claim
-  # about contention, and the other four read identically without this line.
-  echo "  slot: NONE HELD — ${GATE_SLOT_STATE:-UNSLOTTED — reason not recorded}"
-fi
 
 # Precedence: "could not vouch" outranks "failed", which outranks "passed". A
 # gate that cannot trust its own instrument must never report a plain FAIL, let

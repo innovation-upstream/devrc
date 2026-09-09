@@ -86,15 +86,13 @@ def _gate(tmp_path: Path, *, pytest_runner: Path, extra: list[str] | None = None
     """
     # 🔴 SCRUB THE OPERATOR-FACING GATE VARIABLES OUT OF THE INHERITED
     # ENVIRONMENT. `**os.environ` used to pass whatever the caller had exported
-    # straight through, and `DEVRC_GATE_SLOT_DIR` is the one that bites: naming
-    # a pool opts a pytest-nested run back INTO the slot limiter, so with that
-    # variable exported and the pool held, this file's own POSITIVE control
-    # (`test_a_green_runner_gives_a_green_gate_and_a_nonzero_count`) went RED on
-    # a 120s TimeoutExpired after gate.sh printed `all 2 slot(s) busy —
-    # queueing`. Measured by an audit of #1429. A test whose verdict depends on
-    # the operator's shell is not a control. The ledger of names lives in
-    # `test_gate_slots_and_reexec.py::_AMBIENT_GATE_VARS`, which is pinned
-    # two-way against gate.sh's own source.
+    # straight through. An exported `DEVRC_GATE_TIMEOUT=5` would kill every tier
+    # these negative controls run and read as a gate bug; an exported
+    # `DEVRC_GATE_ENV` or `DEVRC_GATE_NO_REEXEC` changes which code path they
+    # take. A control whose verdict depends on the operator's shell is not a
+    # control. The ledger of names lives in
+    # `test_gate_reexec.py::_AMBIENT_GATE_VARS`, pinned two-way against
+    # gate.sh's own source.
     env = {
         k: v for k, v in os.environ.items()
         if not k.startswith("DEVRC_GATE_")
