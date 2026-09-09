@@ -1226,51 +1226,110 @@ def _lib_modules_a_python_file_imports(path, libdir):
     return found
 
 
+def _join_line_continuations(src):
+    r"""Join backslash-newline continuations, which bash joins BEFORE lexing.
+
+    Round 15 found this as an OVER-strip: `echo abc\` + a next line starting `#`
+    is ONE WORD to bash (`abc#...`), not a comment, and the per-line walk deleted
+    the second line outright. Latent — 21 continuations exist in
+    `transcript-push.sh` and none is followed by a `#` line — but it is the
+    false-PASS direction, so it is closed rather than documented.
+
+    An ODD number of trailing backslashes continues; an even number is escaped
+    backslashes and does not.
+    """
+    out, buf = [], ""
+    for line in src.splitlines():
+        trailing = len(line) - len(line.rstrip("\\"))
+        if trailing % 2 == 1:
+            buf += line[:-1]
+            continue
+        out.append(buf + line)
+        buf = ""
+    if buf:
+        out.append(buf)
+    return out
+
+
 def _strip_shell_comments(src):
-    """Shell source with comments removed, quote-aware, so a scanner sees CODE.
+    r"""Shell source with comments removed, quote-aware, so a scanner sees CODE.
 
-    🔴 THE FIRST VERSION WAS A PAIR OF REGEXES AND WAS WRONG IN BOTH DIRECTIONS.
-    It stripped a full-line `#` and `\\s#.*$`, which is neither necessary nor
-    sufficient, and its docstring claimed the error was one-directional and safe.
-    Measured, both directions produce a wrong verdict:
+    🔴 A REGEX PAIR WAS WRONG IN BOTH DIRECTIONS AND ITS DOCSTRING CALLED THE
+    ERROR ONE-DIRECTIONAL AND SAFE. Measured against bash, a real executable line
+    resolving `scripts/lib/host-role.sh` that also carried a quoted `#` was
+    truncated at that `#` — an UNDECLARED dependency vanished and the guard went
+    GREEN (false PASS); and `echo A;# x`, `|#`, `&&#`, `)#` are all comments to
+    bash, so keeping them minted PHANTOM requirements (false FAIL).
 
-      OVER-strip (the dangerous one — it PASSES). A real executable line that
-      resolves `scripts/lib/host-role.sh` and also carries a quoted `#`:
-
-          printf "fmt: a #b\\n"; ROLE="$(... /lib/host-role.sh)"
-
-      was truncated at the quoted `#`, so an UNDECLARED dependency vanished and
-      the guard went green. The same line without the quoted `#` fails correctly.
-      The claim that the per-arm controls turn this into a failure is false: they
-      pin two named modules, and ANY OTHER module lost this way is a silent pass.
-
-      UNDER-strip (loud, but it is the very defect round 12 reported fixed).
-      Confirmed against bash itself — `echo A;# x` and `echo B |# x` both comment
-      out — but `\\s#` matches neither, so:
-
-          echo A;#  see scripts/lib/agent_ledger.py     -> minted a PHANTOM
-          echo B |# scripts/lib/agent_ledger.py            requirement for a file
-          true &&#  scripts/lib/agent_ledger.py            the script never opens
-
-    So this walks the line: `#` opens a comment only OUTSIDE quotes and only at
-    the start of a word — start of line, or after whitespace or one of `;|&()`.
+    So: `#` opens a comment only OUTSIDE quotes and only at the start of a word.
     `X=y#foo` is left alone, because bash does not treat that as a comment either.
 
-    ⚠ WHAT IT STILL DOES NOT MODEL: a here-document body. A `#` line inside a
-    `<<EOF` block is content, not a comment, and would be stripped; a `/lib/x.py`
-    mentioned in prose inside one would not be. `transcript-push.sh` contains no
-    heredoc today (`grep -nE '<<|;#|\\|#|&&#'` finds nothing), which is why this
-    is recorded as a limit rather than implemented — but it IS a limit, and the
-    previous version of this docstring is the reason to write it down.
+    🔴 QUOTE STATE CARRIES ACROSS LINES. Round 15's finding, and the one that
+    mattered most: a bash string can span newlines, so re-initialising per line
+    made a `#`-leading line INSIDE a multi-line string look like a comment — the
+    false-PASS direction again — while the line AFTER a closing quote read that
+    quote as an opening one and kept a real trailing comment (false FAIL). Both
+    are gone now that the walk threads its state.
+
+    ⚠ I EXPECTED THIS FIX TO POISON THE REAL FILE AND IT DOES NOT — measured, not
+    assumed. `transcript-push.sh` has two lines with an odd `"` count and fifteen
+    with an odd `'`, which looks like it would leave the walk permanently "inside
+    a string"; every one of them is a FULL-LINE `#` comment, where the walk breaks
+    at column 0 before any quote is read. Real-tree output is unchanged.
+
+    ⚠ WHAT IT STILL DOES NOT MODEL — enumerated by running each shape against
+    bash, and every one is LATENT (absent from `transcript-push.sh` today):
+
+      a here-document body            `#` line inside `<<EOF` is content, not a
+                                      comment  (0 heredocs in the file)
+      `$'…'` ANSI-C quoting           `\'` is an escape there but not in plain
+                                      `'…'`, so the walk mis-pairs  (0 occurrences)
+      `#` inside `$(…)`/backticks
+      that sit inside double quotes   bash resets the quoting context; the walk
+                                      treats `"` as suppressing comments outright
+
+    All three of those remaining are the false-FAIL direction (a phantom
+    requirement), which is LOUD. The false-PASS shapes round 15 found — the
+    multi-line string, an escaped word-separator, a `)` closing a substitution,
+    and a line continuation — are fixed above and below, because a silent pass is
+    exactly what this guard exists to prevent.
     """
     out = []
-    for line in src.splitlines():
+    in_single = in_double = False
+    for line in _join_line_continuations(src):
         res = []
-        in_single = in_double = False
         i = 0
+        sub_depth = 0
+        prev_was_escape = False
+        prev_closed_sub = False
         while i < len(line):
             c = line[i]
-            prev = line[i - 1] if i else None
+            # 🔴 `prev` MUST NOT BE THE RAW PREVIOUS CHARACTER. Round 15: in
+            # `echo a\\ #x` the `\\ ` is consumed as an escaped SPACE, so re-reading
+            # line[i-1] saw a space and called the `#` a word start — to bash it is
+            # one word. Same for a `)` that closed a `$(…)`: `$(true)#x` is one
+            # word, while a subshell `(true)#x` really is a comment. Both are
+            # tracked as flags rather than re-read from the raw line.
+            prev = None if i == 0 else line[i - 1]
+            at_word_start = (
+                i == 0
+                # 🔴 THE SET IS CHOSEN BY A SAFETY ASYMMETRY, NOT BY COMPLETENESS.
+                # Omitting a character that bash WOULD treat as a comment start
+                # mints a phantom requirement — loud, and a human sees it. Adding
+                # one bash does NOT hides a real dependency — silent, and it is
+                # the exact failure this guard exists to prevent. So a character
+                # goes in only once measured as a comment start in a REALISTIC
+                # shape. Probed individually against bash:
+                #     ; | & ` and whitespace -> comment      (in)
+                #     < >                    -> NOT a comment (OUT: including
+                #                               them was a measured over-strip)
+                #     ) }                    -> context-dependent; the realistic
+                #                               shapes `(true)#` and `{ …; }#`
+                #                               ARE comments, so they stay in
+                or (prev in " \t;|&()}`" and not prev_was_escape and not prev_closed_sub)
+            )
+            prev_was_escape = False
+            prev_closed_sub = False
             if in_single:
                 res.append(c)
                 in_single = c != "'"
@@ -1279,6 +1338,7 @@ def _strip_shell_comments(src):
                 if c == "\\" and i + 1 < len(line):
                     i += 1
                     res.append(line[i])
+                    prev_was_escape = True
                 elif c == '"':
                     in_double = False
             elif c == "'":
@@ -1291,13 +1351,75 @@ def _strip_shell_comments(src):
                 res.append(c)
                 i += 1
                 res.append(line[i])
-            elif c == "#" and (prev is None or prev in " \t;|&()"):
+                prev_was_escape = True
+            elif c == "(" and (prev == "$" or (prev == "(" and sub_depth)):
+                # Only `$(` opens a substitution — a bare `(` is a SUBSHELL, whose
+                # `)` IS a word start (`(true)# x` is a comment to bash). `$((`
+                # pushes twice so both of `))` are consumed as closers.
+                sub_depth += 1
+                res.append(c)
+            elif c == ")" and sub_depth:
+                sub_depth -= 1
+                prev_closed_sub = True
+                res.append(c)
+            elif c == "#" and at_word_start:
                 break
             else:
                 res.append(c)
             i += 1
         out.append("".join(res))
     return "\n".join(out)
+
+
+@pytest.mark.parametrize(
+    "name,text,marker_survives",
+    [
+        # 🔴 EVERY ROW'S EXPECTATION WAS TAKEN FROM BASH, NOT FROM READING THE
+        # WALK. The probe was `<line-with-MARKER>; echo SAW` on ONE line: if bash
+        # swallows the same-line `; echo SAW` and never prints MARKER, it is a
+        # comment. `; echo SAW` on the NEXT line always runs and measures nothing
+        # — which is exactly how the first version of that harness was wrong.
+        ("a full-line comment", "# /lib/MARK.py", False),
+        ("a trailing comment", "echo hi   # /lib/MARK.py", False),
+        ("`;#` with no space", "echo A;# /lib/MARK.py", False),
+        ("`|#` with no space", "echo B |# /lib/MARK.py", False),
+        ("`&&#` with no space", "true &&# /lib/MARK.py", False),
+        ("a subshell's `)#`", "(true)# /lib/MARK.py", False),
+        ("`}` closing a group", "{ echo a; }# /lib/MARK.py", False),
+        # --- the false-PASS shapes: bash keeps these, so the walk must too ---
+        ("`X=y#foo` is one word", "F=/lib/MARK.py#tag", True),
+        ("a QUOTED # then real code", 'printf "a #b\\n"; R=/lib/MARK.py', True),
+        ("an ESCAPED word-separator", "echo a\\ #/lib/MARK.py", True),
+        ("`)` closing a $(...)", "echo $(true)#/lib/MARK.py", True),
+        ("`)` closing a $((...))", "echo $((1+2))#/lib/MARK.py", True),
+        ("`>` is NOT a comment start", "echo hi ># /lib/MARK.py", True),
+        ("inside a multi-line \"...\"", 'echo "one\n# /lib/MARK.py\nthree"', True),
+        ("inside a multi-line '...'", "echo 'one\n# /lib/MARK.py\nthree'", True),
+        ("a backslash-newline continuation", "echo abc\\\n#/lib/MARK.py", True),
+        # --- and one the other way, after a string CLOSES ---
+        ("a comment after a multi-line string closes",
+         'echo "one\ntwo" # /lib/MARK.py', False),
+    ],
+)
+def test_the_shell_comment_stripper_AGREES_WITH_BASH(name, text, marker_survives):
+    """🔴 THE STRIPPER IS A NO-OP ON THE REAL SCRIPT TODAY, SO NOTHING EXERCISED
+    IT. `transcript-push.sh` yields the same module set stripped, unstripped, and
+    under the old regex version — so every defect it has ever had was found by a
+    throwaway harness and then had no permanent guard. Its worth is entirely
+    prospective, which is precisely the code that rots unwatched.
+
+    Two rewrites and two audit rounds produced these rows. Each is a shape where
+    a previous version disagreed with bash; roughly half are the OVER-strip
+    direction, where a real `scripts/lib` dependency silently vanished and the
+    ledger passed GREEN — the failure this whole guard exists to prevent.
+    """
+    kept = "MARK.py" in _strip_shell_comments(text)
+    assert kept is marker_survives, (
+        f"{name}: bash {'keeps' if marker_survives else 'comments out'} the marker, "
+        f"but the stripper {'kept' if kept else 'removed'} it. "
+        + ("An OVER-strip hides a real dependency and the ledger passes green."
+           if marker_survives else
+           "An UNDER-strip mints a requirement for a file the script never opens."))
 
 
 def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
