@@ -2517,3 +2517,62 @@ def test_a_transcript_stream_failure_forces_a_RE_HYDRATION_on_the_next_poll(
         f"the cursors were read {len(cursor_reads)} time(s) across repeated stream failures — "
         f"hydration happens once per agent lifetime, so a failure that does not clear it leaves "
         f"the host resending against cursors the server may no longer hold\n{out}")
+
+
+def test_a_REPEATING_skip_condition_is_logged_ONCE_not_on_every_poll(server, tmux_stub, tmp_path):
+    """🔴 THE MEMO WAS KEYED ON COUNTS AND THEREFORE DEFEATED ITSELF. A count
+    moves whenever a different NUMBER of sessions is mid-record this poll than
+    last — and `no-record-boundary` fires whenever an append window ends without
+    a newline, which the tailer's own docstring calls the ordinary steady state.
+    So the same condition re-logged every few seconds, on a loop that runs 17,280
+    times a day. That is the journal-flooding the memo exists to prevent, and it
+    is the failure mode that trains an operator to ignore the one channel this
+    unit has.
+
+    The fixture makes the COUNT move while the REASON stays the same: one session
+    whose in-flight line is present on every poll, and a second that appears
+    later. One line, not two.
+    """
+    projects, first = _projects_tree(tmp_path, "skip-a")
+    # Two sessions, both permanently mid-record: the reason is constant, the
+    # count goes 1 -> 2.
+    (projects / "-home-zach-workspace-devrc" / "skip-a.jsonl").write_text(
+        '{"type":"user","partial":tr', encoding="utf-8")
+
+    server.claim_batches = [[], [], [], []]
+    rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=10, env_extra={
+        "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
+
+    lines = [l for l in out.splitlines() if "skipped some sessions" in l]
+    assert len(lines) <= 1, (
+        f"the skip condition was logged {len(lines)} times across one run — the memo is not "
+        f"holding, and this loop polls 17,280 times a day:\n" + "\n".join(lines[:5]))
+    if lines:
+        assert "no-record-boundary" in lines[0], lines[0]
+
+
+def test_the_skip_memo_key_ignores_COUNTS_and_tracks_REASONS():
+    """🔴 THE SUBPROCESS TEST ABOVE COULD NOT SEE THIS, AND THE MUTANT SURVIVED
+    IT. Its fixture has one skipping session throughout, so no count ever moves —
+    the count-keyed and set-keyed memos behave identically under it. The rule has
+    to be asserted at the point it can be wrong.
+
+    A count moves whenever a different NUMBER of sessions is mid-record this poll
+    than last, and `no-record-boundary` is the ordinary steady state — so a
+    count-keyed memo re-logs the same condition on a loop that runs 17,280 times
+    a day.
+    """
+    k = AGENT.skip_memo_key
+
+    # The COUNT moving must NOT move the key.
+    assert k({"no-record-boundary": 1}) == k({"no-record-boundary": 2}) == k({"no-record-boundary": 97})
+
+    # A new REASON must.
+    assert k({"no-record-boundary": 1}) != k({"no-record-boundary": 1, "undecodable": 1})
+
+    # `unchanged` is the steady state and must not register at all — otherwise
+    # every poll of a quiet fleet logs.
+    assert k({"unchanged": 3}) == k({}) == k(None) == frozenset()
+    assert k({"unchanged": 3, "undecodable": 1}) == k({"undecodable": 9}) == frozenset({"undecodable"})

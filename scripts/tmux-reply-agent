@@ -965,6 +965,30 @@ def one_round(api: str, token: str, host: str, agent: str) -> int:
     return len(writes)
 
 
+def skip_memo_key(skipped) -> frozenset:
+    """The rate-limit key for the transcript stream's skip line.
+
+    🔴 THE KEY IS THE SET OF REASONS, NOT THEIR COUNTS, AND THE COUNT VERSION
+    DEFEATED THE RATE LIMIT IT WAS WRITTEN AS. A count moves whenever a different
+    NUMBER of sessions is mid-record this poll than last — and `no-record-boundary`
+    fires whenever an append window ends without a newline, which the tailer's own
+    docstring calls the ordinary steady state. So the same condition re-logged
+    every few seconds, on a loop that runs 17,280 times a day. That is the
+    journal-flooding the memo exists to prevent, and it is what trains an operator
+    to ignore the one channel this unit has.
+
+    🔴 IT IS A FUNCTION RATHER THAN AN EXPRESSION INSIDE THE LOOP BECAUSE A RULE
+    THAT LIVES IN `main()` CANNOT BE TESTED AT THE POINT IT CAN BE WRONG. The
+    first attempt at this fix was pinned only through a whole-agent subprocess
+    run, and the count-keyed mutant SURVIVED it: the fixture had one skipping
+    session throughout, so no count ever moved and the distinction the test
+    claimed to make was never exercised.
+
+    `unchanged` is dropped: it IS the steady state and says nothing.
+    """
+    return frozenset(k for k in (skipped or {}) if k != "unchanged")
+
+
 def transcript_round(api: str, hook_token: str, host: str, state) -> dict:
     """One transcript-streaming round, over the connection this agent already has.
 
@@ -1051,7 +1075,7 @@ def main(argv: list[str]) -> int:
     # read). They are different facts and a single variable would let one mask the
     # other.
     stream_problem = ""
-    stream_skips: dict = {}
+    stream_skips: frozenset = frozenset()
 
     backoff_reason = ""
     while not _STOP:
@@ -1080,15 +1104,26 @@ def main(argv: list[str]) -> int:
                 if stream_problem:
                     log("transcript streaming is working again")
                     stream_problem = ""
+                # 🔴 THE MEMO IS THE SET OF REASONS, NOT THEIR COUNTS, AND THE
+                # COUNT VERSION DEFEATED THE RATE LIMIT IT WAS WRITTEN AS. A count
+                # moves whenever a different NUMBER of sessions is mid-record this
+                # poll than last — and `no-record-boundary` fires whenever an
+                # append window ends without a newline, which _read_append's own
+                # docstring calls the ordinary steady state. So a busy fleet
+                # re-logged the same condition every few seconds, which is exactly
+                # the journal-flooding this memo exists to prevent (17,280 polls a
+                # day). The REASONS are the condition; the counts are noise, and
+                # they are still printed in the line so nothing is lost.
                 notable = {k: v for k, v in (counts.get("skipped") or {}).items()
                            if k != "unchanged"}
-                if notable != stream_skips:
-                    if notable:
+                reasons = skip_memo_key(counts.get("skipped"))
+                if reasons != stream_skips:
+                    if reasons:
                         log("transcript streaming skipped some sessions "
                             f"(the 5-minute bulk push still covers them): {notable}")
                     elif stream_skips:
                         log("transcript streaming is no longer skipping any session")
-                    stream_skips = notable
+                    stream_skips = reasons
             except Exception as exc:  # noqa: BLE001 — must never affect the write path
                 reason = f"{exc!r}"
                 if reason != stream_problem:
