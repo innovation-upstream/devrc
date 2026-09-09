@@ -105,12 +105,20 @@ def _gate(tmp_path: Path, *, pytest_runner: Path, extra: list[str] | None = None
     )
 
 
+# 🔴 THE `SCOPE:` LINE IS PART OF THE RUNNER CONTRACT THESE FIXTURES MODEL, not
+# decoration. `gate.sh` requires to SEE `SCOPE: FULL` from a tier before it may
+# print `GATE: RESULT=PASS` — a POSITIVE control, so that a runner which says
+# nothing about its coverage is "cannot vouch" rather than "ran everything".
+# A fixture that omitted it would therefore be modelling a runner that does not
+# exist, and every PASS assertion below would be asserting the wrong thing.
+# The vocabulary and the requirement are pinned by scripts/tests/test_scoped_runs.py.
 GREEN_BODY = """
 echo "=== pytest scripts/fake ==="
 echo "======================== SUMMARY (hermetic set) ========================"
 echo "  PASS  scripts/fake  (collected=1234 passed=1234 skipped=0 floor=1200)"
 echo "  ----"
 echo "  TOTAL collected=1234  passed=1234  skipped=0  failed=0  (floor: 1200)"
+echo "SCOPE: FULL (28 of 28 hermetic target(s))"
 echo "RESULT: PASS (exit=0)"
 exit 0
 """
@@ -121,6 +129,7 @@ echo "======================== SUMMARY (hermetic set) ========================"
 echo "  FAIL  scripts/fake  (collected=1234 passed=1233 skipped=0 failed=1 errors=0)"
 echo "  ----"
 echo "  TOTAL collected=1234  passed=1233  skipped=0  failed=1  (floor: 1200)"
+echo "SCOPE: FULL (28 of 28 hermetic target(s))"
 echo "RESULT: FAIL (exit=1)"
 exit 1
 """

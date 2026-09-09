@@ -161,6 +161,32 @@ _owning_target() { # $1 = repo-relative path; echoes the longest matching target
   done
   printf '%s' "$own"
 }
+# The declared target that BELONGS to the changed file's subsystem: a target
+# living under one of its ancestor directories (`scripts/dl-router/server.py` ->
+# `scripts/dl-router/tests`), deepest first. Empty when there is none.
+#
+# 🔴 THIS IS WHAT MAKES THE BASENAME FALLBACK USABLE. MEASURED on this repo:
+# `server.py` matched 27 test files across the whole universe — almost all of
+# them unrelated suites that merely mention a file of that name — and 3 inside
+# `scripts/dl-router/tests`, which is the subsystem that actually owns it. An
+# over-selecting mapper is not merely slow: it hands back a run whose green says
+# far less about the change than its size implies.
+_subsystem_target() { # $1 = repo-relative path
+  local f="$1" d t best=""
+  d="$(dirname "$f")"
+  while [ -n "$d" ] && [ "$d" != "." ] && [ "$d" != "/" ]; do
+    for t in "${TARGETS[@]}"; do
+      case "$t" in
+        "$d"/tests|"$d"/tests/*)
+          [ "${#d}" -gt "${#best}" ] && best="$t"
+          ;;
+      esac
+    done
+    [ -n "$best" ] && break
+    d="$(dirname "$d")"
+  done
+  printf '%s' "$best"
+}
 _is_selectable_test_file() { # $1 = path
   local f="$1"
   [ -f "$f" ] || return 1
@@ -231,9 +257,21 @@ for c in "${CHANGED[@]}"; do
     # A one- or two-character basename would match everything; a bare `x.py`
     # would too. Require some specificity before falling back.
     if [ "${#b}" -ge 6 ]; then
-      hits="$(printf '%s\n' "$UNIVERSE" | tr '\n' '\0' \
-              | xargs -0 grep -l -F -e "$b" 2>/dev/null | sed 's#^\./##' | sort -u || true)"
-      [ -n "$hits" ] && used_basename=1
+      # Search the changed file's OWN subsystem first — see `_subsystem_target`
+      # for the 27-vs-3 measurement that makes this the default rather than an
+      # optimisation. The universe-wide search survives only for a file with no
+      # subsystem target at all (a repo-root doc, a nix module).
+      sub="$(_subsystem_target "$c")"
+      if [ -n "$sub" ]; then
+        scope_list="$(printf '%s\n' "$UNIVERSE" | grep -E "^${sub}(/|$)" || true)"
+      else
+        scope_list="$UNIVERSE"
+      fi
+      if [ -n "$scope_list" ]; then
+        hits="$(printf '%s\n' "$scope_list" | tr '\n' '\0' \
+                | xargs -0 grep -l -F -e "$b" 2>/dev/null | sed 's#^\./##' | sort -u || true)"
+        [ -n "$hits" ] && used_basename=1
+      fi
     fi
   fi
   if [ -z "$hits" ]; then

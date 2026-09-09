@@ -387,6 +387,37 @@ def test_unvouched_outranks_a_partial_scope(tmp_path):
     assert re.search(r"^GATE: RESULT=UNVOUCHED exit=90$", out, re.M), out
 
 
+def test_a_forged_scope_line_earlier_in_the_stream_cannot_win(tmp_path):
+    """🔴 THE SAME HAZARD `test_result_grammar_is_reserved.py` exists for, on the
+    new grammar. run-tests.sh inlines its HOOK_TESTS/SHELL_TESTS stdout straight
+    into its own stream with no prefixing, and a pytest PLUGIN can reach column 0
+    too — so a `SCOPE: FULL` printed by something other than the runner is
+    physically possible.
+
+    What makes it non-exploitable is the SELECTION RULE, not the absence of a
+    forger: the runner emits its own scope from the EXIT trap, i.e. LAST, and
+    gate.sh takes `| tail -1`. A first-match reader would take the forgery.
+    This pins the rule with a runner that forges FULL early and reports SCOPED
+    at the end.
+
+    ⚠ NOT the structural population scan `RESULT:` gets. Extending that scanner
+    to a second grammar is a separate change; this pins the mechanism that makes
+    the forgery lose, which is the half that decides the verdict."""
+    body = (
+        'echo "SCOPE: FULL (forged by a registry entry)"\n'
+        + _TIER_HEAD
+        + 'echo "SCOPE: SCOPED (the runner\'s own, from the EXIT trap)"\n'
+          'echo "RESULT: PASS (exit=0)"\n'
+    )
+    r = write_exec(tmp_path / "forge.sh", body)
+    proc = _gate(tmp_path, r)
+    out = _out(proc)
+    assert proc.returncode == 91, (
+        "a forged `SCOPE: FULL` earlier in the stream was taken over the "
+        f"runner's own trailing SCOPED.\nrc={proc.returncode}\n{out}"
+    )
+
+
 def test_gate_refuses_an_ambient_devrc_targets_before_running_anything(tmp_path):
     """REGRESSION. gate.sh has no --targets flag, so the only way its pytest
     tier gets narrowed is an exported DEVRC_TARGETS — a value nobody typed for
@@ -532,6 +563,54 @@ def test_the_scoped_summary_banner_says_it_is_not_a_gate_run(tmp_path):
     assert re.search(r"^  🔴 SCOPED RUN — NOT A GATE RUN\.", out, re.M), out
     assert re.search(r"^     file: " + re.escape(str(target_file)) + r"$", out, re.M), out
     assert _scope_line(out) == "SCOPED", out
+
+
+def test_a_scoped_run_skips_the_hook_and_shell_families_and_SAYS_SO(tmp_path):
+    """REGRESSION on the lever itself, and on the honesty that pays for it.
+
+    MEASURED on this box with a 1-target `--targets` subset: 172s total, of
+    which the selected target was 17s and the five SHELL_TESTS were 101s. Those
+    are hand-rolled scripts, not pytest targets, so no `--files` selection can
+    ever name them — a scoped run that still paid for them would be dominated by
+    tests unrelated to the change.
+
+    🔴 Both halves are asserted. Skipping them silently would be the #276 shape
+    (a family of tests that stops running while the gate stays green), so the
+    banner has to NAME what did not run."""
+    d, runner = _scoped_fixture(tmp_path, floor=400)
+    # Give the copy real hook/shell families so "they were skipped" is a claim
+    # about something that exists. `runner_with_targets`-style empties would
+    # make this pass vacuously.
+    src = patch_runner_source(
+        RUN_TESTS.read_text(), targets=[str(d)], floors={str(d): 400}, ack=[])
+    runner.write_text(src)
+    proc = _run([str(runner), str(REPO_ROOT), "--files", str(d / "test_beta.py")])
+    out = _out(proc)
+    assert proc.returncode == 0, f"rc={proc.returncode}\n{out}"
+    assert re.search(r"^     NOT RUN in this mode", out, re.M), out
+    assert re.search(r"^       - \d+ hand-rolled hook test script\(s\)$", out, re.M), out
+    assert re.search(r"^       - \d+ shell test script\(s\)$", out, re.M), out
+    # The discriminating half: they really did not run. `=== hook test` /
+    # `=== shell test` headers are what a real run prints for each one.
+    # `=== script <path>` is what a real run prints for each hook/shell entry.
+    assert not re.search(r"^=== script scripts/claude-hooks/", out, re.M), out
+    assert not re.search(r"^=== script scripts/tests/.*\.sh ", out, re.M), out
+
+
+def test_a_full_run_still_runs_the_hook_and_shell_families(tmp_path):
+    """POSITIVE CONTROL for the test above. Without it, "no hook headers in the
+    output" is satisfied by a runner that never ran them in ANY mode — the
+    assertion would be about nothing."""
+    d, runner = _scoped_fixture(tmp_path, floor=1)
+    runner.write_text(patch_runner_source(
+        RUN_TESTS.read_text(), targets=[str(d)], floors={str(d): 1}, ack=[]))
+    proc = _run([str(runner), str(REPO_ROOT)], env={"MIN_TESTS": "1"})
+    out = _out(proc)
+    assert re.search(r"^=== script scripts/claude-hooks/", out, re.M), (
+        "a FULL run of the same copy ran no hook tests, so the scoped test's "
+        f"absence assertion proves nothing.\n{out[-3000:]}")
+    assert re.search(r"^=== script scripts/tests/.*\.sh ", out, re.M), out[-3000:]
+    assert re.search(r"^     NOT RUN in this mode", out, re.M) is None, out
 
 
 def test_a_scoped_row_never_prints_the_targets_floor(tmp_path):
@@ -684,6 +763,41 @@ def test_scoped_tests_selects_a_test_that_names_a_changed_non_test_file(tmp_path
     # this passes for a mapper that selects everything.
     assert "test_other.py" not in argv, (
         f"the mapper selected a test that does not name the changed file.\n{argv}")
+
+
+def test_the_basename_fallback_is_scoped_to_the_changed_files_own_subsystem(tmp_path):
+    """REGRESSION on the mapper's precision, not on its safety.
+
+    The looser rule — "some test mentions a file of this name" — over-selects
+    badly across a repo where many subsystems have a `server.py` or a
+    `config.py`. MEASURED on this repo before the fix: `server.py` matched 27
+    test files repo-wide and 3 inside `scripts/dl-router/tests`, the subsystem
+    that actually owns it. A mapper that hands back 27 files gives a green whose
+    size implies far more than it says.
+
+    The fixture mirrors that shape: two subsystems, both with a `handler.py`
+    named by their own tests."""
+    r = _repo(tmp_path)
+    for sub in ("alpha", "beta"):
+        (r / "scripts" / sub / "tests").mkdir(parents=True)
+        (r / "scripts" / sub / "handler.py").write_text("VALUE = 1\n")
+        (r / "scripts" / sub / "tests" / f"test_{sub}.py").write_text(
+            'MODULE = "handler.py"\n\n\ndef test_x():\n    assert True\n')
+    _commit(r)
+    (r / "scripts" / "alpha" / "handler.py").write_text("VALUE = 2\n")
+    rec = _stub_runner(tmp_path, [str(r / "scripts" / "alpha" / "tests"),
+                                  str(r / "scripts" / "beta" / "tests"),
+                                  str(r / "scripts" / "tests")])
+    proc = _run([str(SCOPED), "--base", "HEAD", str(r)],
+                env={"DEVRC_SCOPED_RUNNER": str(tmp_path / "stub-runner.sh")},
+                cwd=r)
+    out = _out(proc)
+    assert proc.returncode == 0, f"rc={proc.returncode}\n{out}"
+    argv = rec.read_text()
+    assert "alpha/tests/test_alpha.py" in argv, argv
+    assert "beta/tests/test_beta.py" not in argv, (
+        "the basename fallback reached into a sibling subsystem that merely "
+        f"names a file of the same basename.\n{argv}")
 
 
 def test_scoped_tests_reports_changed_files_it_could_not_map(tmp_path):

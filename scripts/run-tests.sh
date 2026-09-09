@@ -4406,7 +4406,26 @@ HOOK_TESTS=(
   "scripts/claude-hooks/tests/test_register_nudge_hook.py"
   "scripts/claude-hooks/tests/test_bash_guard.py"
 )
-for HOOK_TEST in "${HOOK_TESTS[@]}"; do
+# 🔴 A SCOPED RUN RUNS THE FILES IT WAS GIVEN AND NOTHING ELSE — and this is the
+# half that decides whether the mode is worth having. MEASURED on this box
+# (load ~93) with a 1-target `--targets` subset: the run took 172s, of which the
+# SELECTED target was 17s and the five SHELL_TESTS below were 101s. A scoped run
+# that still paid for those would be dominated by tests it can never name: the
+# hook and shell entries are hand-rolled scripts, not pytest targets, so no
+# `--files` selection can ever reach them and nothing the operator changed can
+# make them relevant to THIS run.
+#
+# 🔴 SKIPPED LOUDLY, NEVER SILENTLY. A quiet skip of two whole test families is
+# the #276 shape this file exists to refuse. Both are named in the SUMMARY
+# banner's SCOPED block, and the run already says `SCOPE: SCOPED` and
+# `NOT A GATE RUN`, so nothing here can be read as coverage it did not provide.
+# They run on every FULL and every `--targets` PARTIAL run, unchanged.
+SKIPPED_FAMILIES=()
+if [ "$SCOPED_MODE" -eq 1 ]; then
+  SKIPPED_FAMILIES+=("${#HOOK_TESTS[@]} hand-rolled hook test script(s)")
+  HOOK_TESTS=()
+fi
+for HOOK_TEST in ${HOOK_TESTS[@]+"${HOOK_TESTS[@]}"}; do
   # Was `|| continue` — a SILENT skip, the exact #276 shape GUARD 5 exists to stop:
   # an entry added to this list that the runner quietly rejects, leaving the gate
   # green while the tests never ran. A missing entry is now a loud failure.
@@ -4546,7 +4565,13 @@ _run_shell_test_body() {
   echo
 }
 
-for SHELL_TEST in "${SHELL_TESTS[@]}"; do
+# See the SKIPPED_FAMILIES note above the hook loop: these five were 101s of a
+# measured 172s subset run, and no `--files` selection can name any of them.
+if [ "$SCOPED_MODE" -eq 1 ]; then
+  SKIPPED_FAMILIES+=("${#SHELL_TESTS[@]} shell test script(s)")
+  SHELL_TESTS=()
+fi
+for SHELL_TEST in ${SHELL_TESTS[@]+"${SHELL_TESTS[@]}"}; do
   _st_t0="$(date +%s)"
   TIMING_CALLS=$(( ${TIMING_CALLS:-0} + 1 ))
   _run_shell_test_body "$SHELL_TEST"
@@ -4578,6 +4603,13 @@ if [ "$SCOPED_MODE" -eq 1 ]; then
   echo "     slice of one. This verdict means ONLY: the files named below passed."
   echo "     It is not evidence that the change is safe to merge; run"
   echo "     \`scripts/gate.sh\` for that."
+  if [ "${#SKIPPED_FAMILIES[@]}" -gt 0 ]; then
+    # Named, not merely omitted: two whole families of tests did not run and
+    # `--files` cannot reach them, so the only place that fact can appear is
+    # here — on the surface gate.sh prints.
+    echo "     NOT RUN in this mode (no --files selection can name them):"
+    for _skipped in "${SKIPPED_FAMILIES[@]}"; do echo "       - $_skipped"; done
+  fi
   for _sf in "${SCOPED_FILES[@]}"; do echo "     file: $_sf"; done
 elif [ -n "$SUBSET_NOTE" ]; then
   echo "  🔴 PARTIAL RUN — ${#TARGETS[@]} of ${SET_TOTAL} declared '$SET' target(s) ran."
