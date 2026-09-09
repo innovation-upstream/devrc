@@ -31,7 +31,9 @@ is the PRIVATE proposal, not this doc.
   `/home/zach/workspace/devrc/scripts/cairn`. #7, #9 and #10 all fix the OSS client, so none
   of them is in the binary this machine runs until #1406 lands and the pin moves.
 - 🔴 **RANK 3 SLICE 2 IS ANOTHER SESSION'S — devrc PR #1406 open, claim held, and SIX FILES
-  ARE UNCOMMITTED in `~/workspace/devrc-flake-pin`. DO NOT delete that worktree.**
+  ARE UNPUSHED — 8 commits, `[ahead 8]` — in `~/workspace/devrc-flake-pin`. DO NOT delete
+  that worktree. ⚠ Its `git status` is CLEAN, so the obvious check says "stale warning,
+  safe to delete" and is WRONG; read the ahead-count instead.**
 - **A cairn-built image is still NOT PUBLISHED.** #8 added the path; nothing has pushed.
   Rank 13 is blocked on two strings only the operator can give — the registry and the tag.
 - **The devrc/OSS `lib/` fork stays DECIDED — CONSOLIDATE ONTO THE PIN** (devrc #1394
@@ -380,8 +382,15 @@ taken now describes a tree that is about to change.
    🔴 **IN FLIGHT, CLAIMED — DO NOT START.** `claim-work cairn-oss-multi-instance-3` is HELD
    for slice 2. Worktree `~/workspace/devrc-flake-pin`, branch `feat/cairn-flake-pin`,
    **PUSHED as devrc PR #1406** (was `4c77daab` unpushed; now three commits, head `f98be263`).
-   ⚠ **SIX FILES ARE UNCOMMITTED IN THAT WORKTREE** — the round-1 audit fix round. Do not
-   delete the worktree; the fixes exist nowhere else.
+   🔴 **CORRECTED 2026-09-09 — "SIX FILES ARE UNCOMMITTED" IS NOW FALSE, AND THE CHECK A
+   READER WOULD RUN TO TEST IT RETURNS THE DANGEROUS ANSWER.** That worktree's
+   `git status --porcelain` is now **EMPTY** (audit rounds committed, through round 3
+   `6ae94c01`), so anyone validating the old warning sees a CLEAN tree and concludes it is
+   stale and the worktree is disposable. It is not: `git -C ~/workspace/devrc-flake-pin
+   status -sb` reads **`[ahead 8]`** — **8 commits exist ONLY there and are UNPUSHED.**
+   **DO NOT delete that worktree.** The conclusion never changed; only the reason did, and
+   the wrong reason is the one that gets checked. Verify with the ahead-count, never with
+   dirtiness.
    - **Half 1 — ✅ MERGED: `ZacxDev/cairn`#4, `218b6c1`.**
    - **Half 2 — slice 1 MERGED (devrc #1381, `baa664e4`, both hosts switched and verified);
      slice 2 IN FLIGHT as PR #1406; slice 3 (point the writer at the pinned `entry_shape`,
