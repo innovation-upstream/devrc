@@ -1994,13 +1994,15 @@ def test_the_window_stamp_is_the_SAME_FUNCTION_the_JSON_field_uses(monkeypatch):
         "the field and the sentence describe different windows in one object")
 
 
-@pytest.mark.parametrize("argv,expect_present,expect_absent", [
-    (["zzterm"], ("the peer hosts", "the opencode corpus"), ()),
-    (["zzterm", "--claude-only"], ("the peer hosts",), ("the opencode corpus",)),
-    (["zzterm", "--opencode-only"], ("the opencode corpus",), ("the peer hosts",)),
+@pytest.mark.parametrize("argv,expect_present,expect_absent,claude_leg_ran", [
+    (["zzterm"], ("the peer hosts", "the opencode corpus"), (), True),
+    (["zzterm", "--claude-only"], ("the peer hosts",),
+     ("the opencode corpus",), True),
+    (["zzterm", "--opencode-only"], ("the opencode corpus",),
+     ("the peer hosts",), False),
 ], ids=["default", "claude-only", "opencode-only"])
 def test_the_scope_clause_names_only_legs_that_actually_RAN(
-        argv, expect_present, expect_absent):
+        argv, expect_present, expect_absent, claude_leg_ran):
     """🔴 A LEG THAT DID NOT RUN IS NOT AN UNCOUNTED LEG. The flat sentence told
     an `--opencode-only` caller that the opencode corpus was excluded from the
     run that searched nothing else, and told a `--claude-only` caller about an
@@ -2008,9 +2010,14 @@ def test_the_scope_clause_names_only_legs_that_actually_RAN(
     a = fs.parse_args(argv)
     a.skill = ""
     legs = fs.unmeasured_legs(a)
+    # 🔴 THE EXPECTATION IS A LITERAL, NOT THE IMPLEMENTATION. This line used to
+    # read `claude_leg_ran=not a.opencode_only` — the same expression the
+    # production call site uses — so the two could never disagree and the
+    # argument was pinned by nothing. `claude/RULES.md`: never derive a test's
+    # expectation from the code it tests.
     line = fs.window_notice(datetime.datetime(2026, 8, 27), fs.WINDOW_DEFAULT,
                             skipped=5, examined=5, legs=legs,
-                            claude_leg_ran=not a.opencode_only)
+                            claude_leg_ran=claude_leg_ran)
     # 🔴 PRESENCE FIRST — an absence-only guard is satisfied by deleting the
     # disclosure entirely. MEASURED: `unmeasured_legs` -> `return ()` left this
     # test green in both find-session files while the live tool stopped naming
@@ -2024,7 +2031,7 @@ def test_the_scope_clause_names_only_legs_that_actually_RAN(
     for phrase in expect_absent:
         assert phrase not in line, (
             f"{argv} names {phrase!r}, which this run never searched: {line!r}")
-    if a.opencode_only:
+    if not claude_leg_ran:
         assert "NOT SEARCHED" in line, (
             "under --opencode-only the Claude count is not merely unmeasured — "
             f"that corpus was never opened: {line!r}")
@@ -2115,12 +2122,21 @@ def test_a_MULTI_BAD_hosts_report_names_EVERY_offenders_type():
 #
 # These cases drive `main` and read what a caller actually SEES.
 
-@pytest.mark.parametrize("argv,expect_present,expect_absent", [
-    (["zzterm"], ("the peer hosts", "the opencode corpus"), ()),
-    (["zzterm", "--claude-only"], ("the peer hosts",), ("the opencode corpus",)),
-], ids=["default", "claude-only"])
+@pytest.mark.parametrize("argv,expect_present,expect_absent,expect_not_searched", [
+    (["zzterm"], ("the peer hosts", "the opencode corpus"), (), False),
+    (["zzterm", "--claude-only"], ("the peer hosts",),
+     ("the opencode corpus",), False),
+    # 🔴 THE SHAPE THE SEAM'S OTHER ARGUMENT DECIDES, and it was missing. The
+    # production call site passes BOTH `legs=` and `claude_leg_ran=`; only
+    # `legs` was pinned, so `claude_leg_ran=not a.opencode_only` -> `True`
+    # left 185/185 green while `--opencode-only` printed "Claude transcripts on
+    # THIS host skipped by the window: NOT MEASURED" — telling the operator the
+    # Claude corpus was in scope but uncounted when it was never opened.
+    (["zzterm", "--opencode-only"], ("the opencode corpus",),
+     ("the peer hosts",), True),
+], ids=["default", "claude-only", "opencode-only"])
 def test_the_LEGS_reach_the_PRINTED_LINE_through_main(
-        monkeypatch, argv, expect_present, expect_absent):
+        monkeypatch, argv, expect_present, expect_absent, expect_not_searched):
     """🔴 THE SEAM, not the component. Pins `main` -> printed notice."""
     run = make_run()
     got = run_main(monkeypatch, argv, run, archive=[])
@@ -2134,6 +2150,14 @@ def test_the_LEGS_reach_the_PRINTED_LINE_through_main(
         assert phrase not in window[0], (
             f"{argv}: the printed notice names {phrase!r}, never searched: "
             f"{window[0]!r}")
+    if expect_not_searched:
+        assert "NOT SEARCHED" in window[0], (
+            f"{argv}: the Claude corpus was never opened, but the notice "
+            f"reports it as merely uncounted: {window[0]!r}")
+    else:
+        assert "NOT SEARCHED" not in window[0], (
+            f"{argv}: the Claude walk RAN, but the notice says it was not "
+            f"searched: {window[0]!r}")
 
 
 def test_the_LEGS_reach_the_JSON_message_through_main(monkeypatch):

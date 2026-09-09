@@ -211,10 +211,13 @@ EXIT_CONTRACT = (
                  "ARCHIVE query), a query that names nothing (no terms and no "
                  "`--skill`, or a `--skill` that canonicalises to empty), "
                  "`--claude-only` with `--opencode-only` (between them they "
-                 "search no corpus at all), or `--skill` with "
-                 "`--opencode-only` — that corpus carries no skill "
-                 "attribution, so the combination has no answer rather than an "
-                 "empty one."),
+                 "search no corpus at all), `--skill` with `--opencode-only` — "
+                 "that corpus carries no skill attribution, so the combination "
+                 "has no answer rather than an empty one, or a malformed "
+                 "command line rejected by argparse ITSELF before `main` runs "
+                 "(an unknown flag, or a non-integer `--limit`/`--tail`), which "
+                 "exits 2 from inside argparse and is the one cause this "
+                 "module never returns."),
     (EXIT_AMBIGUOUS, "`--tail` ONLY: it could not resolve to exactly one live "
                      "window — several matched, or none did on a fleet where "
                      "every host answered. It carries NO claim about coverage; "

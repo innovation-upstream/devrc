@@ -239,7 +239,15 @@ def _run(argv, run, archive=None):
     out, err = io.StringIO(), io.StringIO()
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = fs.main(list(argv))
+            # 🔴 CATCH `SystemExit`. argparse rejects a malformed command line by
+            # RAISING it out of `parse_args`, so a probe for that cause used to
+            # error instead of reporting rc 2 — and the harness could not
+            # observe the one exit class this file most needs to reason about.
+            # `e.code` is what the shell would see.
+            try:
+                rc = fs.main(list(argv))
+            except SystemExit as e:
+                rc = e.code if isinstance(e.code, int) else 1
     finally:
         fs.RUN, fs.archive_search = old_run, old_archive
     return rc, out.getvalue(), err.getvalue()
@@ -488,8 +496,17 @@ EXIT_2_CAUSES = (
      "corpus at all)",
      (["zzterm", "--claude-only", "--opencode-only"],)),
     ("`--skill` with `--opencode-only` — that corpus carries no skill "
-     "attribution, so the combination has no answer rather than an empty one.",
+     "attribution, so the combination has no answer rather than an empty one",
      (["--skill", "browser", "--opencode-only"],)),
+    # 🔴 NOT A `return EXIT_USAGE` SITE, AND THAT IS THE POINT. argparse exits 2
+    # from inside `parse_args`, so this cause has no line in `main` for the
+    # traced-union gate to cover — it is named here because a caller branching
+    # on rc 2 meets it whether or not this module produced it. MEASURED
+    # unmutated: `--nope`, `--limit abc` and `--tail x` all exit 2 today.
+    ("a malformed command line rejected by argparse ITSELF before `main` runs "
+     "(an unknown flag, or a non-integer `--limit`/`--tail`), which exits 2 "
+     "from inside argparse and is the one cause this module never returns.",
+     (["--nope"], ["zzterm", "--limit", "abc"], ["zzterm", "--tail", "x"])),
 )
 
 _EXIT_2_PROBES = [(frag, argv) for frag, argvs in EXIT_2_CAUSES for argv in argvs]
@@ -621,21 +638,44 @@ def _exit_usage_sites(tree):
         stops seeing a shape the moment another gate bans it is one revert away
         from blind.)
 
-    🔴 AN ENUMERATION CANNOT BE COMPLETE — SO A SECOND GATE MAKES IT SUFFICIENT.
-    Spellings this collector does NOT see: `sys.exit(<alias>)`, a bare
-    `exit(EXIT_USAGE)` imported via `from sys import exit`, and
-    `return EXIT_USAGE if … else …`. The previous round wrote "the count ratchet
-    is the backstop if one appears" — FALSE, and false in a way that round had
-    already measured four lines up: the ratchet reads THIS collector, so a blind
-    spot here blinds both at once. Planting `_USAGE_ALIAS = EXIT_USAGE` plus
-    `sys.exit(_USAGE_ALIAS)` gave a reachable exit 2, named nowhere, with all
-    180 tests passing.
+    🔴 THIS IS NARROWER THAN THE HAZARD, AND THAT IS NOW STATED RATHER THAN
+    ARGUED AWAY. THREE ROUNDS RUNNING WROTE A COVERAGE CLAIM HERE AND ALL THREE
+    WERE FALSE:
 
-    Rather than invent a third justification, the hazard is REMOVED:
-    `test_the_module_EXITS_ONLY_BY_RETURNING_from_main` forbids `sys.exit` and
-    `raise SystemExit` anywhere but the `__main__` guard, so `return
-    EXIT_USAGE` is the only spelling that can reach the shell — and enumerating
-    it is then complete, not merely wide.
+      * round 3: "the count ratchet is the backstop if one appears" — false; the
+        ratchet reads THIS collector, so a blind spot blinds both at once;
+      * round 4: "`return EXIT_USAGE` is the only spelling that can reach the
+        shell — enumerating it is then complete" — false, and it DELETED the
+        honest disclosure list while saying so;
+      * the pattern itself: each round replaced a false claim with a stronger
+        false one, which is exactly what `claude/RULES.md` says to stop doing.
+
+    MEASURED at one reachable site in `main` — BEFORE this round's widening,
+    then AFTER it. Every row is a live exit 2 from an ordinary invocation:
+
+        spelling                                 before      after
+        sys.exit(EXIT_USAGE)                     KILLED      KILLED  <- control
+        _e = SystemExit(EXIT_USAGE); raise _e    SURVIVED    KILLED
+        _os._exit(EXIT_USAGE)  (aliased import)  SURVIVED    KILLED
+        build_parser().exit(EXIT_USAGE, "…")     SURVIVED    KILLED
+        _bye = sys.exit; _bye(EXIT_USAGE)        SURVIVED    SURVIVED
+        build_parser().error("…")                SURVIVED    SURVIVED
+        return EXIT_USAGE if a.any else EXIT_OK  SURVIVED    SURVIVED
+
+    🔴 THE LAST THREE ROWS ARE THE STANDING BLIND SPOT, AND NAMING THEM IS THE
+    POINT — catching them structurally would mean flagging every call to a local
+    name, every `.error(`, and every conditional return, which is breadth this
+    module cannot carry. The ternary is the sharpest: it IS a `return`, the
+    shape the sibling gate permits by design, so "only `return` reaches the
+    shell" would not deliver completeness even if it were true.
+
+    And argparse exits 2 with NO mutation at all (`--nope`, `--limit abc`,
+    `--tail x`) — that cause is now NAMED in `EXIT_CONTRACT` rather than covered
+    by a claim, because a caller branching on rc 2 meets it either way.
+
+    So: `test_the_module_EXITS_ONLY_BY_RETURNING_from_main` NARROWS the module
+    and is worth having; it does not make this list complete. No further
+    justification is offered, deliberately.
 
     Scanning the whole module rather than one function is what makes the last
     two impossible to reintroduce, and costs nothing: the contract table itself
@@ -968,13 +1008,26 @@ def test_the_doc_does_not_carry_a_FLAG_COUNT_that_nothing_enforces(body):
 #
 # The allowlist is the measurement table's COMPARISON rows. It is an
 # ENUMERATION, not a pattern: a new number is drift by default, and adding one
-# means saying here why it is not the default.
+# means saying here why it is not the default. 🔴 A comparison row IS matched
+# by the pattern and excused by NAME — an earlier draft said "a comparison row
+# is untouched", which described the older, narrower regex and was contradicted
+# by the code directly beneath it.
 _WINDOW_LITERAL_RE = re.compile(r"\b(\d+)[-\s]day\b|last\s+(\d+)\s+days", re.I)
+def _default_phrasing_re():
+    """The DEFAULT's own two phrasings, built from the constant."""
+    d = fs.DEFAULT_SINCE_DAYS
+    return re.compile(rf"last\s+{d}\s+days|\b{d}-day\s+window\s+\(the default\)",
+                      re.I)
+
+
 WINDOW_COMPARISON_DAYS = {
     3: "the narrow end of the measurement table",
     30: "the no-op point — Claude Code's retention floor, and the whole reason "
         "the default is not 30",
 }
+
+
+_DEFAULT_PHRASING_RE = _default_phrasing_re()
 
 
 def test_every_WINDOW_LENGTH_in_the_doc_is_DEFAULT_SINCE_DAYS(body):
@@ -988,11 +1041,30 @@ def test_every_WINDOW_LENGTH_in_the_doc_is_DEFAULT_SINCE_DAYS(body):
         "no window length found in the shipped body — either the doc stopped "
         "documenting the default window, or this pattern has rotted; a gate "
         "that matches nothing passes vacuously")
+    # 🔴 THE DEFAULT MUST NOT BE A COMPARISON VALUE, or "the body states the
+    # default" is satisfied by the table's own contrast row. MEASURED, both
+    # SURVIVING 185/185 before this line existed: set the constant to 3 (or to
+    # 30) and reword the four real mentions to name no number — the body then
+    # states the bound nowhere, while "a 3-day window 2.40 s" / "🔴 A 30-day
+    # default would be a NO-OP" satisfies the check ABOUT the actual default.
+    # The assertion's own message named the hole ("or moved to a comparison")
+    # and the assertion did not close it.
+    assert fs.DEFAULT_SINCE_DAYS not in WINDOW_COMPARISON_DAYS, (
+        f"`DEFAULT_SINCE_DAYS` is {fs.DEFAULT_SINCE_DAYS}, which is also listed "
+        f"in `WINDOW_COMPARISON_DAYS` ({sorted(WINDOW_COMPARISON_DAYS)}) as a "
+        "value the doc may state as a CONTRAST. The default and a foil cannot "
+        "be the same number: every gate below would then be satisfied by the "
+        "foil. Change the default, or drop it from the comparison list.")
     assert fs.DEFAULT_SINCE_DAYS in found, (
         f"the shipped body never states the actual default "
         f"({fs.DEFAULT_SINCE_DAYS} days) as a window length. Every mention was "
         "reworded away or moved to a comparison; an agent reading it cannot "
         "learn the bound.")
+    # ...and it must appear in the DEFAULT's own phrasing, not only somewhere.
+    assert _DEFAULT_PHRASING_RE.search(body), (
+        f"the body never names {fs.DEFAULT_SINCE_DAYS} in a phrasing that says "
+        "it IS the default (\"the last N days\" / \"N-day window (the "
+        "default)\"). A bare occurrence can be a comparison row.")
     wrong = sorted({n for n in found
                     if n != fs.DEFAULT_SINCE_DAYS
                     and n not in WINDOW_COMPARISON_DAYS})
@@ -1036,25 +1108,7 @@ def test_the_module_EXITS_ONLY_BY_RETURNING_from_main():
     is the process boundary itself, and it exits with whatever `main` RETURNED,
     so it adds no unnamed cause.
     """
-    tree = ast.parse(inspect.getsource(fs))
-    guard_spans = [
-        (n.lineno, n.end_lineno) for n in ast.walk(tree)
-        if isinstance(n, ast.If) and ast.dump(n.test).find("__main__") != -1]
-
-    def in_guard(lineno):
-        return any(a <= lineno <= b for a, b in guard_spans)
-
-    stray = []
-    for n in ast.walk(tree):
-        bad = (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-               and n.func.attr == "exit"
-               and getattr(n.func.value, "id", "") == "sys")
-        bad = bad or (isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
-                      and getattr(n.exc.func, "id", "") == "SystemExit")
-        bad = bad or (isinstance(n, ast.Call)
-                      and getattr(n.func, "id", "") == "exit")
-        if bad and not in_guard(n.lineno):
-            stray.append(n.lineno)
+    guard_spans, stray = _stray_exit_lines(ast.parse(inspect.getsource(fs)))
     assert guard_spans, (
         "no `if __name__ == '__main__'` block found — this gate's allowance "
         "resolves to nothing and it would reject the module's own entry point")
@@ -1067,19 +1121,105 @@ def test_the_module_EXITS_ONLY_BY_RETURNING_from_main():
         "`EXIT_USAGE_SITE_COUNT` in the same change and say so here.")
 
 
+def _main_guard_spans(tree):
+    """Spans of `if __name__ == "__main__":` blocks — STRUCTURALLY matched.
+
+    🔴 `ast.dump(n.test).find("__main__")` was a SUBSTRING search, so
+    `if "__main__" not in str(argv): sys.exit(...)` was excused as the entry
+    point and the gate did not fire. Compare the shape instead: `__name__`
+    against the literal, either way round.
+    """
+    spans = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.If) or not isinstance(n.test, ast.Compare):
+            continue
+        sides = [n.test.left, *n.test.comparators]
+        names = {x.id for x in sides if isinstance(x, ast.Name)}
+        consts = {x.value for x in sides if isinstance(x, ast.Constant)}
+        if "__name__" in names and "__main__" in consts and all(
+                isinstance(o, ast.Eq) for o in n.test.ops):
+            spans.append((n.lineno, n.end_lineno))
+    return spans
+
+
+def _stray_exit_lines(tree):
+    """`(guard_spans, stray_lines)` — the ONE detector, shared.
+
+    🔴 ITS CONTROL USED TO RE-DECLARE IT INLINE, so the control validated a
+    hand-copy and not the gate. MEASURED: blinding the real gate
+    (`n.func.attr == "exit"` -> `"exitt"`) left all 185 tests passing while a
+    genuine stray `sys.exit(EXIT_AMBIGUOUS)` — for which this gate is the SOLE
+    catcher, since `_exit_usage_sites` only matches an arg named `EXIT_USAGE` —
+    went unreported. One function, two callers, so a blinded gate blinds its
+    own control too.
+    """
+    spans = _main_guard_spans(tree)
+
+    def in_guard(lineno):
+        return any(a <= lineno <= b for a, b in spans)
+
+    stray = []
+    for n in ast.walk(tree):
+        # 🔴 ANY receiver, not `sys`/`os` by name. `import os as _os` then
+        # `_os._exit(...)` survived a by-name check, and so did
+        # `build_parser().exit(...)` — the receiver is whatever the author
+        # happened to call it. This module has no legitimate `.exit(`/`._exit(`
+        # outside the `__main__` guard, so the wider match costs nothing.
+        bad = (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+               and n.func.attr in ("exit", "_exit"))
+        bad = bad or (isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
+                      and getattr(n.exc.func, "id", "") == "SystemExit")
+        bad = bad or (isinstance(n, ast.Raise) and isinstance(n.exc, ast.Name))
+        bad = bad or (isinstance(n, ast.Call)
+                      and getattr(n.func, "id", "") == "exit")
+        if bad and not in_guard(n.lineno):
+            stray.append(n.lineno)
+    return spans, sorted(stray)
+
+
 def test_the_EXIT_SPELLING_gate_can_SEE_a_stray_exit():
     """POSITIVE CONTROL: the gate must reject the shape it exists to reject,
     and must NOT reject the `__main__` guard that legitimately carries one."""
-    mod = ast.parse("import sys\n"
-                    "def main():\n"
-                    "    sys.exit(2)\n"
-                    "if __name__ == '__main__':\n"
-                    "    sys.exit(main())\n")
-    spans = [(n.lineno, n.end_lineno) for n in ast.walk(mod)
-             if isinstance(n, ast.If) and ast.dump(n.test).find("__main__") != -1]
-    stray = [n.lineno for n in ast.walk(mod)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-             and n.func.attr == "exit" and getattr(n.func.value, "id", "") == "sys"
-             and not any(a <= n.lineno <= b for a, b in spans)]
+    # 🔴 THROUGH `_stray_exit_lines`, NOT A COPY OF IT — see that function.
+    spans, stray = _stray_exit_lines(ast.parse(
+        "import sys\n"
+        "def main():\n"
+        "    sys.exit(2)\n"
+        "if __name__ == '__main__':\n"
+        "    sys.exit(main())\n"))
+    assert spans, "the real detector did not recognise the `__main__` guard"
     assert stray == [3], (
         f"the detector missed a stray sys.exit or flagged the guard: {stray}")
+    # A SPOOFED guard must NOT be excused — the substring search was.
+    _, spoofed = _stray_exit_lines(ast.parse(
+        "import sys\n"
+        "def main(argv):\n"
+        "    if '__main__' not in str(argv):\n"
+        "        sys.exit(2)\n"))
+    assert spoofed == [4], (
+        f"a spoofed `__main__` string excused a stray exit: {spoofed}")
+
+
+# =========================================================================== #
+# 🔴 R5 — GUARDS THAT ARE GREEN AT THE AUDITED TIP, AND WHY THAT IS CORRECT
+# =========================================================================== #
+# The file carries `R3_GREEN_AT_AUDITED_TIP` and `R4_GREEN_AT_AUDITED_TIP` so a
+# reader can tell regression coverage from an invariant guard. Round 5 added
+# four guards without one, and all four pass against the PRE-FIX payload — which
+# is correct here (that payload was already right; the guards close walkability,
+# not a live defect) and is exactly why the ledger exists: without it, a reader
+# consulting R3/R4 concludes these four are red-at-base regression coverage.
+R5_GREEN_AT_AUDITED_TIP = (
+    "test_the_module_EXITS_ONLY_BY_RETURNING_from_main",
+    "test_the_EXIT_SPELLING_gate_can_SEE_a_stray_exit",
+    "test_every_WINDOW_LENGTH_in_the_doc_is_DEFAULT_SINCE_DAYS",
+    "test_the_window_literal_gate_can_SEE_a_wrong_number",
+)
+
+
+def test_the_R5_ledger_names_only_tests_that_exist():
+    """Two-way, like R3's and R4's: a renamed guard must not leave the ledger
+    naming a test nobody can find."""
+    here = set(globals())
+    missing = [n for n in R5_GREEN_AT_AUDITED_TIP if n not in here]
+    assert not missing, f"R5 ledger names tests that do not exist: {missing}"
