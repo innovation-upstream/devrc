@@ -394,6 +394,9 @@ EVIDENCE_MD = (
     REPO_ROOT / "claude" / "skills" / "audit-pr" / "reference"
     / "round-ladder-evidence.md"
 )
+# 🔴 Read for ONE reason: the nit carve-out's warrant is a clause this module
+# does not own. See `test_the_carve_outs_cited_clause_still_exists_in_the_dispatcher`.
+DISPATCH_PY = REPO_ROOT / "scripts" / "audit-dispatch.py"
 
 # --------------------------------------------------------------------------- #
 # THE PINS -- whole normalised strings, never keywords.
@@ -422,10 +425,35 @@ SKILL_HEADING = (
     "a clean round."
 )
 SKILL_STOP_BODY = (
-    "Rounds continue **only** while the previous round produced a finding that "
-    "required a fix. The first round that returns no findings is the last one — "
-    "stop there, and do not re-confirm it. Stop on that, not on the author "
-    "saying it's done."
+    "Rounds continue **only** while the previous round produced a "
+    "**deploy-blocking or should-fix** finding that required a fix. The first "
+    "round that returns none is the last one — stop there, and do not "
+    "re-confirm it. Stop on that, not on the author saying it's done."
+)
+
+# 🔴 The NIT CARVE-OUT, and the REJECTION that bounds it. Both halves in one
+# region on purpose, for the same reason `RULES_STOP_CLAUSE` carries its
+# not-a-cap qualifier: the carve-out alone reads as "severity gates the ladder"
+# and the obvious next edit is to raise the bar to deploy-blocking, which is the
+# rejected rule. #702 is the measurement that kills it -- six rounds, ZERO
+# deploy-blockers, four findings that were a false claim written by the previous
+# round's own fix -- so a blocker-keyed ladder stops at round 1 and ships them.
+#
+# Pinned as WHOLE normalised strings (`claude/RULES.md` -> spelled-guards): the
+# artifact is prose, so a keyword guard is walkable by rewording.
+SKILL_NIT_ONLY_STOPS = (
+    "🔴 **A round whose findings are ALL NITS is a stopping round** — a nit "
+    "changes nothing a reader does, which is why every brief already carries "
+    "`nit-is-not-a-finding`. File them as one follow-up task naming the file; "
+    "never spend a round on them."
+)
+SKILL_NIT_IS_THE_ONLY_ONE = (
+    "⚠ **Nit is the ONLY severity that cannot extend a ladder — "
+    "\"deploy-blocking only\" was rejected.** `homelab-infra` #702 ran six "
+    "rounds carrying **zero deploy-blockers**, and four of its six findings "
+    "were a false claim the previous round's fix had written. A blocker-keyed "
+    "ladder ends at round 1 and ships every one of them; should-fix findings "
+    "keep it running."
 )
 SKILL_NOT_A_CAP = (
     "🔴 **This is NOT a round cap, and a cap was rejected.** The count is set by "
@@ -1032,6 +1060,54 @@ def test_rules_md_states_the_stop_condition():
 def test_audit_pr_skill_states_the_stop_condition():
     _assert_pinned_once(SKILL_MD, SKILL_HEADING, "the stop-rule heading")
     _assert_pinned_once(SKILL_MD, SKILL_STOP_BODY, "the stop-rule body")
+
+
+def test_the_nit_carve_out_is_stated_WITH_the_rejection_that_bounds_it():
+    """🔴 The carve-out and the rejected rule are ONE claim, so both are pinned.
+
+    "A nit cannot extend a ladder" invites exactly one next edit -- raise the
+    bar to deploy-blocking -- and that is the REJECTED rule. `homelab-infra`
+    #702 ran six rounds carrying zero deploy-blockers, and four of its six
+    findings were a false claim the previous round's own fix had written: a
+    blocker-keyed ladder ends at round 1 and ships all four. Pinning only the
+    carve-out would leave that rejection free to be dropped by the author who
+    finds it verbose -- the same failure `RULES_STOP_CLAUSE` pins its
+    not-a-cap qualifier against.
+    """
+    _assert_pinned_once(SKILL_MD, SKILL_NIT_ONLY_STOPS, "the nit carve-out")
+    _assert_pinned_once(
+        SKILL_MD,
+        SKILL_NIT_IS_THE_ONLY_ONE,
+        "the rejection of a deploy-blocking-only ladder",
+    )
+
+
+def test_the_carve_outs_cited_clause_still_exists_in_the_dispatcher():
+    """🔴 SEAM: the skill's warrant is a clause the skill does not own.
+
+    The carve-out is justified by "every brief already carries
+    `nit-is-not-a-finding`" -- a clause id in `scripts/audit-dispatch.py`.
+    Rename or delete it there and nothing in the skill's own pins moves: the
+    prose goes on citing an enforcement that no longer ships, which reads to a
+    later author as though the dispatcher already handles nits when it does
+    not. The skill side is pinned by the test above; this asserts the other
+    end, so either edit alone fails.
+
+    Deliberately the ID and not the clause TEXT -- `test_audit_dispatch.py`
+    owns the text pin, and a second copy here would drift against it.
+    """
+    dispatch = _read(DISPATCH_PY)
+    assert '"nit-is-not-a-finding"' in dispatch, (
+        "`scripts/audit-dispatch.py` no longer defines a clause with the id "
+        "`nit-is-not-a-finding`, but `claude/skills/audit-pr/SKILL.md` still "
+        "cites it as the reason a nit-only round stops the ladder.\n\n"
+        "  If you RENAMED it: update the citation in the skill's stop-rule "
+        "section and `SKILL_NIT_ONLY_STOPS` above, in the same commit.\n"
+        "  If you DELETED it: the carve-out has lost its enforcement -- the "
+        "brief will start soliciting nits as findings again, and a nit-only "
+        "round will read as a round that found something. Restore the clause "
+        "or rewrite the carve-out to stand on its own."
+    )
 
 
 def test_the_prose_escape_hatch_demands_its_rationale_IN_THE_SUMMARY():

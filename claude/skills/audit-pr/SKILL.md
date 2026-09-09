@@ -146,9 +146,18 @@ round applies to the code. Full case history: reference file.
 
 ### 🔴 A clean round ENDS the ladder. Never run another round to confirm a clean round.
 
-Rounds continue **only** while the previous round produced a finding that required a fix. The first
-round that returns no findings is the last one — stop there, and do not re-confirm it. Stop on that,
-not on the author saying it's done.
+Rounds continue **only** while the previous round produced a **deploy-blocking or should-fix**
+finding that required a fix. The first round that returns none is the last one — stop there, and do
+not re-confirm it. Stop on that, not on the author saying it's done.
+
+🔴 **A round whose findings are ALL NITS is a stopping round** — a nit changes nothing a reader
+does, which is why every brief already carries `nit-is-not-a-finding`. File them as one follow-up
+task naming the file; never spend a round on them.
+
+⚠ **Nit is the ONLY severity that cannot extend a ladder — "deploy-blocking only" was rejected.**
+`homelab-infra` #702 ran six rounds carrying **zero deploy-blockers**, and four of its six findings
+were a false claim the previous round's fix had written. A blocker-keyed ladder ends at round 1 and
+ships every one of them; should-fix findings keep it running.
 
 🔴 **A "safe to merge" VERDICT is not the stop signal — the FINDINGS are.** #804's rounds **5, 6 and
 7 each returned "safe to merge" and each still reported real defects** that were then fixed — the
