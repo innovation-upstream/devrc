@@ -47,6 +47,23 @@ let
   # every float popup, including the retired agent-ops one.)
   btopCmd = "alacritty --class float,float -o window.dimensions.columns=160 -o window.dimensions.lines=45 -e btop";
 
+  # Used by the runaways pill's clicks. 🔴 NOT shared with the toast's
+  # middle-click action — `_syshealth_action` in bar-status-poll builds its own
+  # string, because this one carries Nix store interpolations that Python cannot
+  # produce. They are TWO SPELLINGS OF ONE RULE and they cannot be collapsed, so
+  # they are pinned to each other by
+  # `test_bar_status.py::test_the_toast_action_and_the_CLICK_are_the_same_shape`,
+  # which reads BOTH files. An earlier revision of this comment claimed they
+  # WERE shared; they never were, and by the time an audit read it they had
+  # already drifted — the toast had lost the `read -n 1` hold below.
+  # 🔴 That hold is load-bearing: syshealth prints and exits in ~0.16 s, and
+  # `alacritty -e CMD` closes when CMD does, so without it the window flashes
+  # and vanishes — indistinguishable from the click doing nothing.
+  # `${home}` rather than a literal `~`: every other working-tree reference in
+  # this file interpolates it, and `~` survives only if the click is spawned
+  # through a shell.
+  syshealthCmd = "alacritty --class float,float -o window.dimensions.columns=120 -o window.dimensions.lines=40 -e ${pkgs.bash}/bin/bash -c '${home}/workspace/devrc/scripts/syshealth; echo; read -n 1 -r -s -p \"[any key to close]\"'";
+
   # Python env for the decoupled bar-status poller (workbench systemd user timer):
   # psycopg2 for the homelab Postgres open-mail_actions count; clawgate + Alertmanager
   # go over stdlib urllib, so psycopg2 is the only non-stdlib dep.
@@ -461,6 +478,30 @@ let
       { button = "left"; cmd = "${scriptsDir}/i3status-gamemode --toggle"; }
     ];
   };
+  # runaways: workbench only. Count of runaway processes (sustained high CPU),
+  # as decided by `scripts/syshealth` — the poller renders that verdict and owns
+  # no predicate of its own. Hide-at-zero; red when >0.
+  # 🔴 BOTH buttons open syshealth in a FLOAT TERMINAL, and the terminal is not
+  # optional. i3status-rust runs a click through `sh -c` with NO CONTROLLING
+  # TERMINAL (the live i3status-rs has TTY `?`), so a bare TUI here exits
+  # `inappropriate ioctl for device` and the click is a SILENT NO-OP. An earlier
+  # revision pointed left-click at a bare fzf menu for exactly that reason.
+  # The bare-command left-clicks elsewhere in this file need no tty either —
+  # rofi menus, yad, and the two toggles are GUIs or fire-and-forget, none of
+  # them a TUI. (An earlier revision of this comment said "all rofi", which is
+  # true of the menu/detail handlers and false of yad/gamemode/rig-control.)
+  # Signal 19, matching SIGNALS in bar-status-poll.
+  runawaysBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-runaways";
+    json = true;
+    interval = 30;
+    signal = 19;
+    click = [
+      { button = "left"; cmd = syshealthCmd; }
+      { button = "right"; cmd = syshealthCmd; }
+    ];
+  };
 
   blocks =
     [ memoryBlock diskBlock netBlock cpuBlock loadBlock temperatureBlock ]
@@ -468,7 +509,7 @@ let
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
-    ++ lib.optionals (!isLaptop) [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock ]
+    ++ lib.optionals (!isLaptop) [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock runawaysBlock ]
     ++ [ timeBlock ]
     ++ lib.optionals (!isLaptop) [ claudeRunsBlock rigcontrolBlock ]
     ++ [ gamemodeBlock notifsBlock ];
@@ -730,6 +771,14 @@ lib.mkIf isNixOS {
     source = ../scripts/deep-search;
     executable = true;
   };
+  # runaways: the block script (reads ~/.cache/bar-status/runaways.json).
+  # Workbench-only, matching runawaysBlock's gate. Both clicks run `syshealth`
+  # from the working tree via syshealthCmd, so there is no click handler to
+  # deploy here.
+  home.file.".config/i3status-rust/scripts/i3status-runaways" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-runaways;
+    executable = true;
+  };
 
   # bar-status poller — WORKBENCH ONLY (!isLaptop). Every ~45s it queries clawgate
   # (pending Tasks), the homelab Postgres (open mail_actions), and Alertmanager
@@ -790,10 +839,19 @@ lib.mkIf isNixOS {
       # change to the deadman logic — or to the shared clawgate "needs the
       # operator" predicate, which decides the pill's whole meaning — would leave
       # the unit definition identical and the timer would not re-arm.
+      # syshealth joined that set when the runaways source stopped carrying its
+      # own predicate and started rendering syshealth's verdict — the poller
+      # execs `$DEVRC_DIR/scripts/syshealth`, an explicit working-tree path, so
+      # it belongs here by the rule stated above. Effect is milder than the
+      # others (the unit is a oneshot re-run every 45s, so a changed syshealth
+      # applies on the next poll either way); it is listed because the ledger
+      # claims to enumerate this class, and a ledger that silently omits a
+      # member is worse than one that never claimed to be complete.
       X-Restart-Triggers = [
         "${../scripts/bar-status-poll}"
         "${../scripts/collector/deadman.py}"
         "${../scripts/lib/clawgate_tasks.py}"
+        "${../scripts/syshealth}"
       ];
     };
   };
