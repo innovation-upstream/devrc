@@ -27,7 +27,11 @@ is the PRIVATE proposal, not this doc.
   - `cairn recall --repo <devrc>` → `resolved via claudedocs/handoff-…md — 16 of 64 quoted
     path(s) name it` (rank 19; was `most-recent fallback`)
   - `cairn validate --scope devrc` → `devrc: 33 of 33 entry file(s) parse, 0 malformed`
-    (cairn #11; was SILENT, and this verb is the mandated post-write check)
+    (cairn #11; was SILENT). 🔴 **CORRECTED: it is NOT the mandated post-write check.**
+    Re-measured on this same pin: the packaged verb emits **0 of 3 contract blocks** (56 B),
+    against `cairn-validate`'s **3 of 3** (6,119 B). #11 removed the SILENCE, not the
+    BLINDNESS — `dropped lines:`, whose non-zero means content is ALREADY LOST, still never
+    runs there. Keep the mandated check on `cairn-validate`. See the investigation block.
 - **`ZacxDev/cairn`: ELEVEN merged PRs, NONE open.** devrc: #1433 `4a362c8d` (pin bump +
   `checks.cairn-client-runs`), plus the doc commits.
 - **DONE this session:** ranks 12, 13's path, 15, 16, 17, 19. **Rank 3 slice 2** merged by the
@@ -51,6 +55,20 @@ is the PRIVATE proposal, not this doc.
 - **This hand-off itself was written from a `main` worktree for exactly that reason**, and
   because the clone's copy of this doc sits at the reverted state — i.e. a STALE BASE that
   would have merged into an out-of-date document.
+- ✅ **devrc #1432 MERGED — squash `c507d71d`** (this arc's last code change). devrc's fork
+  had **never received cairn #3**: `_free_port()` was the bare TOCTOU with no retry. Ported
+  (not cherry-picked — the two copies are 5,819 lines / 28 hunks apart). Re-measured here:
+  1000 trials x 20 binds recycled the released port **4** times; control with the socket still
+  OPEN, **0**. 16 mutants / 16 killed, **one survivor reported in the code**. Verified on
+  `origin/main` by content: `SPAWN_ATTEMPTS` x9, `_lost_the_port_race` x2.
+  ⚠ **`/audit-pr 1432` was offered, RECOMMENDED and NOT run** — recorded on the PR so it
+  reads as skipped, not clean. Same gap as rank 12's `/audit-pr 6`; that is now twice.
+- 🔴 **THE LAPTOP IS UNSWITCHED and it is blocked ON THE HOST, not on a decision.**
+  `ship.sh` exited 255 — `ssh: connect to host 192.168.50.155 port 22: Connection timed out`,
+  no ICMP either. Cross-host agreement `NOT COMPARED — 1 of 2 hosts reported a landed sha`.
+- ⚠ **`SECRETS.md:26` and `claude/skills/cairn/SKILL.md:89-92` still assert the pinned
+  client "is" deployed as settled fact.** True on the workbench now; **false on the laptop**.
+  Left as-is by an explicit scope decision (🟡5 of #1406's round-2 audit), not by oversight.
 
 ## Open investigations — live diagnosis state
 
@@ -554,6 +572,36 @@ it remains a real unfixed gap on its own merits, and nothing more.
   click through, and with `enforce_admins: true` on devrc a permanently-red required check
   blocks everyone.** Whichever is chosen, `MECHANISM =` is now the first thing to grep.
 
+### 🔴 2026-09-09 — `cairn validate` is NO LONGER SILENT, and it is STILL NOT the write-protocol check
+🔴 **CORRECTION TO A LINE IN THIS DOC'S OWN `State now`.** It records
+*"`cairn validate --scope devrc` → `devrc: 33 of 33 entry file(s) parse, 0 malformed`
+(cairn #11; was SILENT, **and this verb is the mandated post-write check**)"*. The first half
+is true. **The clause after the semicolon is false, and it is the dangerous half** — acting on
+it routes the mandated check back at a client that does not run it, re-opening the 🔴 that
+#1406's round-1 audit closed.
+- **Symptom + exact repro:** on the CURRENTLY DEPLOYED pin (`cairn-c84c142`, generation 713),
+  same scope, same moment:
+  `cairn validate --scope devrc` vs `cairn-validate --scope devrc`.
+- **Observed (with values), 2026-09-09:** packaged client → **56 B stdout**, 187 B stderr,
+  rc 0, and **0 of 3 contract blocks**; its entire stdout is
+  `cairn: devrc: 33 of 33 entry file(s) parse, 0 malformed`. The launcher → **6,119 B**,
+  rc 0, **3 of 3** blocks — `entry shape:`, `marker reachability:`, `dropped lines:` — and
+  `OK — 32 of 32`. via: measurement
+- **What cairn #11 actually changed:** it made the verb print a **parse count** where it
+  printed nothing. That removes the *silence*, not the *blindness*. The
+  `dropped lines:` advisory — the one whose non-zero means content is **ALREADY LOST** — still
+  never runs on the packaged client, and neither do the other two.
+- **Ruled out: that the differing totals (33 vs 32) indicate a defect.** The packaged client
+  syncs live (232 entries) and the launcher reads the local cache; they are counting different
+  stores. via: measurement
+- 🔴 **This is the round-1 🔴 reasserting itself IN THE DOCUMENTATION rather than in the
+  code** — a check that was *silent* becoming a check that *looks like it worked* is strictly
+  harder to notice, which is why the sentence matters more than the bug would.
+- **Next probe:** none needed for the fact. Fix the sentence wherever it appears, and keep the
+  mandated post-write check pointed at `cairn-validate`. If someone wants ONE binary again,
+  the closing condition is the packaged `validate` emitting all three blocks — measure it,
+  do not read a changelog.
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
@@ -577,13 +625,18 @@ it remains a real unfixed gap on its own merits, and nothing more.
    as "not merged" and is wrong. On `origin/main`: `scripts/cairn-validate` present,
    `flake.nix` names the cairn input, `nix/home.nix` carries `cairnPackage` ×3 and the
    `.local/bin/cairn-validate` entry ×1.
-   🔴 **THE CLOSING CONDITION IS ONLY HALF MET, AND THE REMAINING HALF IS AN OPERATOR
-   ACTION.** `readlink -f ~/.local/bin/cairn` still → `/home/zach/workspace/devrc/scripts/cairn`.
-   `~/.local/bin/cairn` becomes a store path at **`home-manager switch`**, not at merge. The
-   **laptop is a second, independent switch** that nothing in this PR forces. Until both,
-   every OSS-client fix (#7, #9, #10) is still absent from the binary these machines run.
-   ⚠ The worktree `~/workspace/devrc-flake-pin` is now fully merged and **safe to remove**;
-   the `[ahead 8]` warning in earlier revisions is discharged.
+   ✅ **CLOSING CONDITION MET ON THE WORKBENCH, 2026-09-09** — `readlink -f
+   ~/.local/bin/cairn` → `/nix/store/…-cairn-c84c142/bin/cairn`. ⚠ **Every earlier
+   "still → scripts/cairn" sentence in this doc is superseded.** It was made live by
+   `ship.sh --no-remote` and then by generation 713; the deploy asymmetry held —
+   `cairn-validate` and `cairn-who` both still resolve out-of-store into the checkout.
+   🔴 **THE LAPTOP IS STILL UNSWITCHED, and it is BLOCKED ON THE HOST, not on a
+   decision.** `ship.sh` (no flags) exited **255**: `ssh: connect to host 192.168.50.155
+   port 22: Connection timed out`, and it answers no ICMP either. Cross-host agreement is
+   therefore `NOT COMPARED — 1 of 2 hosts reported a landed sha`. Until it is powered on and
+   converged, every OSS-client fix is absent from the binary THAT machine runs.
+   ⚠ The worktree `~/workspace/devrc-flake-pin` was fully merged and has been **removed**;
+   the `[ahead 8]` warning is discharged.
    🔴 **TWO WARNINGS ABOUT THAT WORKTREE WERE PUBLISHED HERE AND BOTH WERE WRONG. RETRACTED
    by the parallel session, and the instrument is the lesson.** First it said six files were
    UNCOMMITTED (they had been committed through audit round 3); the correction then said
@@ -793,6 +846,41 @@ it remains a real unfixed gap on its own merits, and nothing more.
     only makes sense if anything still wants local versioning, and nothing obviously does.
     **Closing condition:** the unit is removed from the home-manager config, OR its next timer
     firing exits 0.
+    forcing: none
+
+22. 🔴 **The CI intermittent is DIAGNOSED but NOT FIXED — `SERVER_BLOCKED_IN_FSYNC`.**
+    `server.py:_replace_bytes` issues **two** `fsync`s — the file, then the parent directory —
+    **inside the request and before the response is written**. `fsync` blocks in
+    uninterruptible D-state, is bounded by nothing, and burns no CPU, so it is invisible to
+    every CPU-shaped metric; the handler's `timeout = 15` is a SOCKET timeout and does not
+    reach a syscall. Four occurrences, all in the write path, all
+    `TestARefusedWriteIsIndistinguishableFromAnAbsentOne::test_POSITIVE_CONTROL…`.
+    🔴 **THIS IS A REAL GATE RISK: devrc requires both Tekton checks with
+    `enforce_admins: true`, so when it fires nobody can merge.** Three remedies, none of them
+    a re-run: **(a) bound the write path** so a stalled `fsync` fails fast rather than hanging
+    past the client timeout — *recommended, and the only one that makes the SERVER correct*;
+    (b) raise this test's client timeout — trades a red gate for a slow one; (c) unpin the CI
+    pipelines so they stop sharing one node's disk. **Grep `MECHANISM =` FIRST on any
+    recurrence** — the instrument already exists and three occurrences were spent before
+    anyone read it.
+    **Closing condition:** a merged PR after which the write path cannot block past the
+    client timeout, OR a documented decision that (b)/(c) is the accepted trade.
+    forcing: gate — it has turned the repo's required check red on four PRs, including a
+    docs-only one
+
+23. **Two exit-127 / stale-spelling residues the round-3 fix round did not cover.**
+    (a) `claude/skills/resume/SKILL.md:128` still spells the post-write check as a bare
+    `subsystem_touch.py --validate --scope <scope>` — **not on PATH, exits 127** — and `:150`
+    carries the absolute `python3 ~/workspace/devrc/scripts/lib/subsystem_touch.py` spelling.
+    Both now have a one-word remedy (`cairn-validate`) and neither is pinned by any test, so
+    nothing will catch them drifting again. (b) `subsystem_touch.validate_command()`
+    (`scripts/lib/subsystem_touch.py`) still emits the absolute checkout-path spelling in the
+    `RECOVER —` block the skill tells writers to run verbatim. (c) 🟡8 from #1406's round-2
+    audit: the pinned package's own `🔴 MALFORMED —` remedy prints ``check a file with
+    `a writer --validate <path>` `` — the extraction scrub — which lives in `ZacxDev/cairn`,
+    not devrc, so it needs an upstream PR.
+    **Closing condition:** `grep -c 'subsystem_touch.py --validate' claude/skills/` → 0 on
+    `origin/main`, and an upstream PR for (c).
     forcing: none
 
 ## Gotchas / decisions / dead-ends
