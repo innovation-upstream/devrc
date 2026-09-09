@@ -1291,10 +1291,22 @@ lacks "the sweep does NOT flag a commented canary line" "$canary_hits" "/this-is
 # that line ever moves out of the process substitution, this ledger goes red.
 sweep_hits="$(sweep "$SCRIPT" || true)"
 sweep_n="$(printf '%s\n' "$sweep_hits" | grep -c . || true)"
-[ "$sweep_n" -eq 1 ] && pass "exactly one statement-level external is unguarded, as pinned" \
-  || fail "the set -e sweep found $sweep_n unguarded statement-level commands, expected the 1 pinned below — a new one truncates the report with no message: [$sweep_hits]"
-has "the one unguarded statement is section 2's process-substitution find" \
+[ "$sweep_n" -eq 2 ] && pass "exactly two statement-level externals are unguarded, as pinned" \
+  || fail "the set -e sweep found $sweep_n unguarded statement-level commands, expected the 2 pinned below — a new one truncates the report with no message: [$sweep_hits]"
+has "pinned #1: section 2's process-substitution find" \
     "$sweep_hits" 'find "$d" -xdev -printf'
+# 🔴 PINNED #2, ADDED 2026-09-09, AND DELIBERATELY NOT GUARDED. It is the `find`
+# inside toplevel_accountable_entries(). Guarding it with `|| true` — the change
+# that would make this ledger go back to 1 — would MASK a short enumeration,
+# which is the precise failure the function exists to prevent: fewer top-level
+# entries means section 2 silently omits rows and section 3's residual is wrong.
+# It cannot abort the run either way: the only caller invokes it inside a process
+# substitution, whose exit status bash does not check. Unlike #1 its stderr is
+# NOT redirected into DENIED_LOG, so a failure here is loud on the terminal
+# rather than counted in section 4's blind-spot report — that is the trade, and
+# it is written down here rather than discovered later.
+has "pinned #2: the top-level enumerator's find" \
+    "$sweep_hits" 'find "$root" -mindepth 1 -maxdepth 1'
 
 # 🔴 A SECOND LEDGER, OVER WHAT THE SWEEP ABOVE STRUCTURALLY CANNOT SEE — and it
 # exists because the CLAIM and the SCAN disagreed. The script's sweep comment
@@ -1372,18 +1384,33 @@ echo "== 12. SECTION 2 ACCOUNTS FOR TOP-LEVEL FILES, NOT ONLY DIRECTORIES =="
 # and the target is walked on its own), a fifo (an inode with no data blocks),
 # and a skip-listed name.
 tl="$TMP/toplevel"
-mkdir -p "$tl/realdir" "$tl/proc"
+mkdir -p "$tl/realdir" "$tl/proc" "$tl/.hiddendir"
 printf 'x' > "$tl/swapfile"
+printf 'x' > "$tl/.hiddenfile"
 ln -s realdir "$tl/linkdir"
-mkfifo "$tl/afifo" 2>/dev/null || true
+# 🔴 NO `|| true` HERE. With it, a host without mkfifo silently never creates the
+# path and the fifo assertion below passes because the entry does not exist —
+# green for the wrong reason. If mkfifo is missing this suite should say so.
+mkfifo "$tl/afifo"
 
-tl_out="$(toplevel_accountable_entries "$tl")"
+# The function emits NUL-separated names; render them one per line to assert on.
+tl_out="$(toplevel_accountable_entries "$tl" | tr '\0' '\n')"
 
 has "a top-level regular FILE is accounted for (the /swapfile shape)" "$tl_out" "$tl/swapfile"
 has "a top-level directory is still accounted for"                    "$tl_out" "$tl/realdir"
-lacks "a top-level SYMLINK is excluded (-d/-f follow them)"           "$tl_out" "$tl/linkdir"
 lacks "a skip-listed name is excluded"                                "$tl_out" "$tl/proc"
-lacks "a fifo is excluded — an inode with no data blocks"             "$tl_out" "$tl/afifo"
+# 🔴 THESE TWO ARE `has`, NOT `lacks`, AND THAT IS THE POINT. An earlier draft
+# excluded symlinks and fifos on two rationales that were MEASURED FALSE:
+# `find` without `-L` does not descend a symlink (so nothing is walked twice),
+# and `-printf %b` is 0 for both (so nothing is over-counted) — while each is a
+# real used inode, and section 3 reconciles INODES. Excluding them made the
+# residual worse. Re-introducing either exclusion must fail here.
+has "a top-level SYMLINK is counted — 1 inode, 0 blocks, find does not descend" "$tl_out" "$tl/linkdir"
+has "a fifo is counted — a real used inode that section 3 must reconcile"       "$tl_out" "$tl/afifo"
+# 🔴 DOTFILES. `"$root"/*` does not match them, so a top-level `.journal` and its
+# entire subtree were invisible — the same defect this function exists to fix.
+has "a top-level DOTFILE is accounted for"   "$tl_out" "$tl/.hiddenfile"
+has "a top-level DOT-DIRECTORY is accounted for" "$tl_out" "$tl/.hiddendir"
 
 # 🔴 THE CONTROL THAT MAKES THE ABOVE A REGRESSION TEST RATHER THAN A CONTRACT
 # TEST. The helper is new, so "it lists the file" would pass vacuously against
@@ -1399,11 +1426,54 @@ for e in "$tl"/*; do
 done
 lacks "CONTROL: the retired -d-only guard MISSES the top-level file" "$retired_out" "$tl/swapfile"
 has   "CONTROL: the retired -d-only guard did list the directory"    "$retired_out" "$tl/realdir"
+# The retired guard used a bare glob, which is ALSO why it never saw dotfiles.
+lacks "CONTROL: the retired glob MISSES the top-level dotfile" "$retired_out" "$tl/.hiddenfile"
 
 # A root argument of "/" must not produce doubled slashes: "//etc" reads as a
-# different path in the report and would not match any later pathspec.
-root_out="$(toplevel_accountable_entries / | head_n 5)"
-lacks "a root of '/' yields no doubled-slash paths" "$root_out" "//"
+# different path in the report and would not match any later pathspec. "//" is
+# checked too — `${root%/}` strips only ONE trailing slash.
+root_out="$(toplevel_accountable_entries /  | tr '\0' '\n')"
+root2_out="$(toplevel_accountable_entries // | tr '\0' '\n')"
+root_n="$(printf '%s\n' "$root_out"  | grep -c . || true)"
+root2_n="$(printf '%s\n' "$root2_out" | grep -c . || true)"
+# 🔴 POSITIVE CONTROL FIRST, AND IT IS NOT DECORATION. A `lacks "//"` assertion
+# passes on EMPTY output, so on its own it cannot tell a correct enumeration from
+# one that produced nothing at all. MEASURED: deleting `[ -n "$root" ] || root=/`
+# makes `${root%/}` yield "" and `find ""` fail, and every doubled-slash
+# assertion below then passed VACUOUSLY — a surviving mutant in a fully green
+# suite. These two counts are what make the two `lacks` below mean anything.
+[ "$root_n" -ge 5 ] && pass "POSITIVE CONTROL: a root of '/' enumerates ($root_n entries)" \
+  || fail "a root of '/' enumerated $root_n entries — the assertions below would pass vacuously"
+[ "$root2_n" -eq "$root_n" ] && pass "a root of '//' enumerates the same count as '/' ($root2_n)" \
+  || fail "'//' enumerated $root2_n entries but '/' enumerated $root_n"
+lacks "a root of '/' yields no doubled-slash paths"  "$root_out"  "//"
+lacks "a root of '//' yields no doubled-slash paths" "$root2_out" "//"
+
+# 🔴 A NEWLINE IN A TOP-LEVEL NAME MUST NOT SPLIT INTO PHANTOM PATHS. With a
+# newline-delimited enumeration the consumer loop ran 4 iterations for 3 entries,
+# and `find` then logged the two nonexistent paths into DENIED_LOG where section
+# 4 classifies them as "vanished mid-scan (benign, transient)" — an under-count
+# reported as harmless. NUL-delimited output is what closes that.
+nl_dir="$TMP/nlroot"; mkdir -p "$nl_dir"; : > "$nl_dir/has
+newline"
+nl_count="$(toplevel_accountable_entries "$nl_dir" | tr -cd '\0' | wc -c)"
+eq "a name containing a newline is emitted as ONE NUL-terminated record" "$nl_count" "1"
+
+# --------------------------------------------------------------------------- #
+echo "== 12b. SECTION 2'S CONSUMER IS PINNED TO THE NON-SUBSHELL FORM =="
+# 🔴 The script carries a 🔴 comment saying a `| while` refactor would run the
+# body in a subshell, discard TOTAL_INODES/TOTAL_DEDUPED and make section 3's
+# residual compute from zero — "a wrong answer that prints cleanly". That hazard
+# was asserted ONLY by comment: rewriting the consumer to a pipe left the whole
+# suite green, because section 12 drives the helper in isolation and never reads
+# the script's source. This ledger is what makes the comment enforceable.
+consumer_src="$(grep -n 'toplevel_accountable_entries' "$SCRIPT")"
+has "section 2 consumes the enumerator via process substitution" \
+    "$consumer_src" 'done < <(toplevel_accountable_entries /)'
+lacks "section 2 does NOT pipe the enumerator into while (subshell would drop the totals)" \
+    "$consumer_src" 'toplevel_accountable_entries / |'
+has "the consumer reads NUL-delimited records" \
+    "$(grep -n 'read -r -d' "$SCRIPT")" "read -r -d '' d"
 
 # --------------------------------------------------------------------------- #
 # 🔴 DO NOT print `RESULT: PASS (exit=0)` here — that grammar is RESERVED to
