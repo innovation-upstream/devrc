@@ -1124,7 +1124,7 @@ def test_a_mention_emits_its_own_event_and_roundtrips(env):
     payload = json.loads(ev["payload"])
     assert payload["platform"] == "github"
     assert payload["reference_id"] == "1065"
-    assert payload["url"] == "https://github.com/civitai/talos-infra/issues/1065"
+    assert payload["url"] == "https://github.com/civitai/talos-infra/pull/1065"
     assert payload["candidates"] == "github"
     assert "civitai/talos-infra#1065" in payload["context"]
 

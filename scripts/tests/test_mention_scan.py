@@ -63,15 +63,15 @@ def test_owner_repo_hash_number_is_unambiguously_github():
     assert m["id"] == "1065"
     assert m["raw"] == "civitai/talos-infra#1065"
     assert m["ambiguous"] is False
-    assert m["url"] == "https://github.com/civitai/talos-infra/issues/1065"
+    assert m["url"] == "https://github.com/civitai/talos-infra/pull/1065"
 
 
 def test_the_issues_url_is_used_for_prs_too():
-    """`/issues/<n>` is deliberate: GitHub redirects it to `/pull/<n>` when the
+    """`/pull/<n>` is deliberate: GitHub redirects it to `/pull/<n>` when the
     number is a PR, so one template covers both and the scanner never has to
     know which it is."""
     (m,) = MS.scan_mentions("innovation-upstream/devrc#992")
-    assert m["url"].endswith("/issues/992")
+    assert m["url"].endswith("/pull/992")
 
 
 def test_bare_repo_hash_number_is_github_but_has_no_url_without_an_owner():
@@ -85,12 +85,12 @@ def test_bare_repo_hash_number_is_github_but_has_no_url_without_an_owner():
 def test_a_measured_repo_mapping_supplies_the_owner():
     (m,) = MS.scan_mentions("see devrc#591",
                             repos={"devrc": "innovation-upstream/devrc"})
-    assert m["url"] == "https://github.com/innovation-upstream/devrc/issues/591"
+    assert m["url"] == "https://github.com/innovation-upstream/devrc/pull/591"
 
 
 def test_an_explicit_owner_beats_the_mapping():
     (m,) = MS.scan_mentions("civitai/devrc#1", repos={"devrc": "innovation-upstream/devrc"})
-    assert m["url"] == "https://github.com/civitai/devrc/issues/1"
+    assert m["url"] == "https://github.com/civitai/devrc/pull/1"
 
 
 def test_a_malformed_mapping_entry_yields_no_url_rather_than_a_broken_one():
@@ -182,7 +182,7 @@ def test_a_bare_number_gets_a_github_url_only_from_a_supplied_repo():
     (_clawgate, github) = MS.scan_mentions("#370")
     assert github["url"] == ""
     (_clawgate, github) = MS.scan_mentions("#370", default_repo="civitai/talos-infra")
-    assert github["url"] == "https://github.com/civitai/talos-infra/issues/370"
+    assert github["url"] == "https://github.com/civitai/talos-infra/pull/370"
 
 
 def test_a_span_reports_ambiguous_rather_than_picking_a_winner():
@@ -196,7 +196,7 @@ def test_an_unambiguous_span_carries_its_single_url():
     (span,) = MS.scan_mention_spans("civitai/talos-infra#1065")
     assert span["platform"] == "github"
     assert span["ambiguous"] is False
-    assert span["url"] == "https://github.com/civitai/talos-infra/issues/1065"
+    assert span["url"] == "https://github.com/civitai/talos-infra/pull/1065"
 
 
 def test_the_two_hash_patterns_never_claim_the_same_span():
@@ -500,7 +500,7 @@ def test_a_github_pull_url_is_a_mention_and_carries_its_own_owner():
     assert span["id"] == "7"
     assert span["repo"] == "gardenersguild/trowelcast"
     assert span["repo_source"] == MS.SOURCE_URL
-    assert span["url"] == "https://github.com/gardenersguild/trowelcast/issues/7"
+    assert span["url"] == "https://github.com/gardenersguild/trowelcast/pull/7"
 
 
 def test_a_github_issues_url_too_and_a_scheme_is_optional():
@@ -636,7 +636,7 @@ def test_A2_a_repo_token_immediately_before_the_ref_attributes_it():
     assert span["repo"] == "gardenersguild/trowelcast"
     assert span["repo_source"] == MS.SOURCE_ADJACENT
     assert span["candidates"][1]["url"] == (
-        "https://github.com/gardenersguild/trowelcast/issues/1291")
+        "https://github.com/gardenersguild/trowelcast/pull/1291")
 
 
 def test_A2_works_without_a_connector_word_too():
@@ -731,7 +731,7 @@ def test_A4_attributes_the_gh_cli_reference_beside_it():
     (span,) = MS.scan_mention_spans(
         "gh pr view 1291 --repo rivalorg/spadeworks", **TELEMETRY)
     assert span["repo"] == "rivalorg/spadeworks"
-    assert span["url"] == "https://github.com/rivalorg/spadeworks/issues/1291"
+    assert span["url"] == "https://github.com/rivalorg/spadeworks/pull/1291"
 
 
 def test_the_ladder_ranks_ADJACENT_above_URL_above_FLAG_above_DEFAULT():
@@ -990,3 +990,61 @@ def test_clean_repo_map_keeps_a_good_entry_and_is_total_on_junk():
         "a": "gardenersguild/trowelcast"}
     for junk in (None, [], "", 3, {1: "a/b"}):
         assert MS.clean_repo_map(junk) == {}
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 GITHUB REFS RESOLVE TO `/pull`, AND BOTH INPUT FORMS STILL PARSE
+#
+# Operator preference 2026-09-09: the row shows its URL before you choose it, and
+# the overwhelming majority of references clicked here are pull requests.
+#
+# MEASURED before changing it, because the old comment's reasoning ("GitHub
+# redirects /issues to /pull for a PR, so one template covers both") was true but
+# only tested ONE leg, which made `/issues` look forced. Following redirects on a
+# public repo holding both kinds:
+#     /issues/<pr>    -> 200 …/pull/<pr>      /pull/<pr>    -> 200 …/pull/<pr>
+#     /issues/<issue> -> 200 …/issues/<issue> /pull/<issue> -> 200 …/issues/<issue>
+# Both forms normalise in BOTH directions, so the choice is display, not
+# resolution — and `/pull/<pr>` was separately confirmed on 4 issues-disabled
+# repos, a population deliberately kept in the picker universe.
+# --------------------------------------------------------------------------- #
+def test_a_github_ref_resolves_to_PULL_not_issues():
+    """The output template. Pinned as a WHOLE normalised string rather than by
+    substring, because `"pull" in url` also passes for `…/pull-requests/…` and
+    for a repo named `pull`."""
+    assert MS.GITHUB_REF_URL == "https://github.com/{repo}/pull/{id}"
+    assert (MS.GITHUB_REF_URL.format(repo="acme/widget", id="12")
+            == "https://github.com/acme/widget/pull/12")
+
+
+def test_the_constant_is_named_for_what_it_BUILDS():
+    """🔴 A CONSTANT'S NAME IS A CLAIM. It was `GITHUB_ISSUE_URL` and it now
+    builds a `/pull/` URL; leaving the old name would have made every call site
+    read as issue-specific while doing the opposite. Renamed to `GITHUB_REF_URL`
+    — 'ref' because the template genuinely does NOT know which kind it is, which
+    is the whole reason either form works.
+
+    This asserts the old name is GONE rather than merely that the new one exists:
+    a module keeping both as aliases is how a false name survives a rename."""
+    assert not hasattr(MS, "GITHUB_ISSUE_URL"), (
+        "the old issue-specific name is back and now describes a /pull template")
+    assert MS.GITHUB_REF_URL.endswith("/pull/{id}")
+
+
+@pytest.mark.parametrize("form", ["issues", "pull"])
+def test_BOTH_url_forms_are_still_DETECTED_in_input_text(form):
+    """🔴 THE REGRESSION THIS CHANGE COULD HAVE CAUSED SILENTLY, and the reason
+    the rewrite protected one fixture by hand.
+
+    Changing the OUTPUT template must not narrow what the scanner RECOGNISES.
+    `GITHUB_URL_RE` matches `(?:pull|issues)` on purpose — the operator pastes
+    whichever GitHub gave them. A blind search-and-replace over the test files
+    would have rewritten the `/issues/` input fixture to `/pull/`, and the suite
+    would have stayed GREEN while silently losing all coverage of the `/issues/`
+    input form. That is a coverage loss no failure reports."""
+    text = f"https://github.com/hobbyist/plotwidget/{form}/4213"
+    (span,) = MS.scan_mention_spans(text, **TELEMETRY)
+    assert span["repo"] == "hobbyist/plotwidget", text
+    assert span["id"] == "4213", text
+    # …and whichever form arrived, the URL we hand back is the normalised one.
+    assert span["url"] == "https://github.com/hobbyist/plotwidget/pull/4213", text

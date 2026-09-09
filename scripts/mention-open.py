@@ -120,7 +120,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "collector"))
 
 from mention_scan import (  # noqa: E402
-    GITHUB_ISSUE_URL,
+    GITHUB_REF_URL,
     PLATFORM_CLAWGATE,
     PLATFORM_CLICKUP,
     PLATFORM_GITHUB,
@@ -390,7 +390,7 @@ def universe_candidates(num: str, universe: list[str]) -> list[dict]:
     refusal. Nothing here is opened without a selection.
     """
     return [{"platform": PLATFORM_GITHUB, "id": num,
-             "url": GITHUB_ISSUE_URL.format(repo=full, id=num)}
+             "url": GITHUB_REF_URL.format(repo=full, id=num)}
             for full in universe]
 
 
