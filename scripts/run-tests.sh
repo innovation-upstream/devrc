@@ -234,6 +234,16 @@ _emit_verdict() {
 # by `scripts/gate.sh` and pinned two-way by
 # `scripts/tests/test_scoped_runs.py::test_the_scope_vocabulary_is_pinned_two_way`.
 # Do not rename a state without moving both sides in the same commit.
+#   NONE     the invocation ran NO TESTS AT ALL — `--check-targets` and
+#            `--check-floors` validate a table and exit in milliseconds. 🔴 They
+#            used to print `SCOPE: FULL` + `RESULT: PASS (exit=0)` in about two
+#            seconds, having collected nothing: the full-gate-shaped pair, off a
+#            run that tested nothing. `gate.sh` cannot be driven into it (it
+#            passes no such flag), so it was never a false green THROUGH the
+#            gate — but it is a false green in the content contract this marker
+#            exists to establish, and CLAUDE.md now tells readers to parse
+#            exactly that pair. The whole value of `SCOPE: FULL` is that it can
+#            be trusted without re-running anything.
 #   FULL     every declared target of the selected set ran.
 #   PARTIAL  a TARGET subset ran (--targets / DEVRC_TARGETS). Still floor-guarded
 #            per selected target, so it is a real claim about those targets.
@@ -1090,6 +1100,29 @@ if [ "$SCOPED_FLAG_GIVEN" -eq 1 ]; then
       echo "           dropping it is how a scope shrinks to zero and still exits 0." >&2
       exit 3
     fi
+    # 🔴 IT MUST BE PYTEST-COLLECTABLE, and this is a FAMILY check, not a
+    # spelling nit. `SHELL_TESTS` are `scripts/tests/*.sh` — they sit under the
+    # `scripts/tests` DIRECTORY target, so the ownership check below accepts
+    # them, and the run then hands a shell script to pytest, collects 0, and
+    # reports "A collection error or an import breakage, not a pass". That is a
+    # WRONG DIAGNOSIS for a file that is a perfectly good test in a family
+    # `--files` cannot address. (`HOOK_TESTS` are already refused a line below:
+    # they live under `scripts/claude-hooks/tests/`, which is not a declared
+    # directory target.) Same rule GUARD 5 applies to a FILE target.
+    case "$(basename "$_f")" in
+      test_*.py|*_test.py) : ;;
+      *)
+        echo "run-tests: FATAL — --files names '$_f', which pytest cannot collect." >&2
+        echo "           --files selects pytest test files (test_*.py / *_test.py)." >&2
+        echo "           If this is one of the SHELL_TESTS (scripts/tests/*.sh) or" >&2
+        echo "           HOOK_TESTS (hand-rolled scripts run directly, not via" >&2
+        echo "           pytest), it is a good test in a family this mode cannot" >&2
+        echo "           address at all — those run on a FULL or --targets run." >&2
+        echo "           Refusing rather than handing it to pytest, which would" >&2
+        echo "           collect 0 and report it as a broken import." >&2
+        exit 3
+        ;;
+    esac
     # Longest-match wins so a file target (`.../test_guard_core.py`) beats a
     # directory target that happens to contain it. The declared list has no
     # nesting today; relying on that would make this correct by accident.
@@ -2611,6 +2644,11 @@ if [ "${#bad_targets[@]}" -gt 0 ]; then
 fi
 
 if [ "$CHECK_TARGETS_ONLY" -eq 1 ]; then
+  # Ran no tests — see GUARD 11's NONE state. Set here rather than at the
+  # top, because the scope block above has already resolved FULL/PARTIAL/
+  # SCOPED by the time we reach an early exit.
+  SCOPE_STATE="NONE"
+  SCOPE_DETAIL="--check-targets validated the target list and ran NO tests"
   # 🔴 SAY WHEN THIS IS A SUBSET. `all N hermetic target(s) resolve` after
   # validating ONE entry of twenty-eight is the same false full-set claim F3
   # fixed on the floor table and F1 fixed in the SUMMARY banner — this is the
@@ -2701,6 +2739,8 @@ fi
 MIN_TESTS="${MIN_TESTS:-$MIN_TESTS_COMPUTED}"
 
 if [ "$CHECK_FLOORS_ONLY" -eq 1 ]; then
+  SCOPE_STATE="NONE"
+  SCOPE_DETAIL="--check-floors validated the floor table and ran NO tests"
   echo "run-tests: all ${#TARGET_FLOORS[@]} floor(s) pin a known target, both ways (${#ALL_KNOWN_TARGETS[@]} known: hermetic + dev-host)."
   # A floor for a target OUTSIDE the selected set is printed, but is NOT part of
   # the global sum below — `MIN_TESTS_COMPUTED` accumulates over $TARGETS, and
@@ -4427,6 +4467,44 @@ HOOK_TESTS=(
 # `NOT A GATE RUN`, so nothing here can be read as coverage it did not provide.
 # They run on every FULL and every `--targets` PARTIAL run, unchanged.
 SKIPPED_FAMILIES=()
+# --- WHOLE-TARGET EXPECTATIONS SUSPENDED BY A SCOPED RUN -----------------------
+# 🔴 THREE LEDGERS, ONE PROPERTY, AND I ONLY NOTICED IT FOR ONE OF THEM.
+# GUARD 3's TARGET_FLOORS, GUARD 7's NOLAUNCH_ACK and GUARD 2's EXPECTED_SKIPS
+# are all expectations about a target RUN IN FULL. None of them can describe a
+# SLICE of one, and applying them to a slice does not make the gate stricter —
+# it makes it RED for a correct run, which claude/RULES.md rates worse than no
+# gate because it teaches everyone to click through.
+#
+# MEASURED on this branch before the fix, both with every selected test PASSING:
+#   --files scripts/tests/test_ship_detect_role.py
+#     -> 12 passed, `GUARD 7: scripts/tests intercepted NOTHING`, exit 1
+#      (green iff the selection happened to include one of THREE launcher-seam
+#       files out of 181 in that target — a coin flip)
+#   --files scripts/signal/tests/test_search.py
+#     -> 15 passed, `0 test(s) skipped, but 2 of 3 pinned entries apply`, exit 1
+#      (green iff the selection happened to include test_pg_type_compat.py)
+# `scripts/tests` is 63% of the suite, so the primary new workflow was red for
+# the majority case. Worse, both messages printed remediation advice — "delete
+# the NOLAUNCH_ACK entry", "delete its EXPECTED_SKIPS entry" — that would have
+# disabled a guard REPO-WIDE, or reddened the FULL gate, if followed.
+#
+# 🔴 ONLY THE WHOLE-TARGET HALF IS SUSPENDED. Each of these ledgers has two
+# directions and only one of them is a whole-target claim:
+#   GUARD 7  REQUIRED  "this target intercepts >= 1"     -> whole-target, SUSPENDED
+#            PERMITTED "no OTHER target may intercept"   -> per-observation, KEPT
+#   GUARD 2  TOTAL     "skips == applicable pins"        -> whole-target, SUSPENDED
+#            UNPINNED  "no skip may go unexplained"      -> per-observation, KEPT
+# The kept halves are the ones that catch a test reaching the operator's machine
+# or a suite silently skipping — neither of which cares how much of the target
+# ran. The per-invocation plugin-marker checks (`_markers_ok`, GUARD 9's
+# detector count) are also KEPT: they ask "did the guard load for THIS
+# invocation", which is exactly as answerable for a slice as for a target.
+#
+# 🔴 AND SUSPENSION IS ANNOUNCED, NEVER SILENT. Every entry here is printed in
+# the SUMMARY. A guard that quietly stops applying is the #276 shape this whole
+# file exists to refuse; the point is that the reader can see which expectations
+# this run did not evaluate.
+SCOPED_SUSPENDED=()
 if [ "$SCOPED_MODE" -eq 1 ]; then
   SKIPPED_FAMILIES+=("${#HOOK_TESTS[@]} hand-rolled hook test script(s)")
   HOOK_TESTS=()
@@ -4935,7 +5013,25 @@ if [ "${#unexpected[@]}" -gt 0 ]; then
   fail=1
 fi
 
-if [ "$TOT_SKIPPED" -ne "$pin_expected" ]; then
+# 🔴 THE SKIP TOTAL IS A WHOLE-TARGET EXPECTATION. A pin names a DIRECTORY and a
+# reason; it cannot say which FILE produces the skip. `_skip_entry_applies`
+# therefore counts a pin as applicable whenever its directory is in `TARGETS` —
+# true for a scoped run, whose target is present but only sliced. MEASURED
+# before this branch fixed it: `--files scripts/signal/tests/test_search.py`
+# gave 15 passed, 0 skipped, `0 test(s) skipped, but 2 of 3 pinned entries
+# apply here`, exit 1. Every scoped run inside that 920-test target was red
+# unless the selection happened to include `test_pg_type_compat.py`, and the
+# advice printed below ("delete its EXPECTED_SKIPS entry") would have made the
+# FULL gate red, because the real skip then becomes an UNPINNED skip group.
+#
+# 🔴 THE UNPINNED CHECK ABOVE IS DELIBERATELY *NOT* SUSPENDED. It is the half
+# that catches coverage silently collapsing, it is evaluated per OBSERVED skip,
+# and it does not care how much of the target ran. Its forgiveness still
+# requires each pin's own CONDITION to hold — suspending the total does not make
+# an inapplicable pin forgive anything.
+if [ "$SCOPED_MODE" -eq 1 ]; then
+  SCOPED_SUSPENDED+=("GUARD 2's skip TOTAL (observed skips == applicable pins; $pin_expected of ${#EXPECTED_SKIPS[@]} pin(s) would have been counted). The UNPINNED-skip check still ran.")
+elif [ "$TOT_SKIPPED" -ne "$pin_expected" ]; then
   echo "  ERROR: $TOT_SKIPPED test(s) skipped, but $pin_expected of ${#EXPECTED_SKIPS[@]} pinned entries apply here." >&2
   if [ "$TOT_SKIPPED" -lt "$pin_expected" ]; then
     echo "         FEWER than pinned: a pinned skip now RUNS (good) — delete its" >&2
@@ -4978,6 +5074,16 @@ for entry in "${NOLAUNCH_SEEN[@]}"; do
   for t in "${TARGETS[@]}"; do [ "$t" = "$nt" ] && is_pytest=1 && break; done
 
   if ack="$(_nolaunch_ack_reason "$nt")"; then
+    # 🔴 THE REQUIRED DIRECTION IS A WHOLE-TARGET CLAIM AND A SCOPED RUN CANNOT
+    # SATISFY IT. The acknowledgement says "*this target*, RUN IN FULL, drives
+    # launchers into the stub" — it names three seam files out of 181. A slice
+    # that does not happen to include one of them intercepts nothing, and that
+    # is CORRECT, not a defect. See the SCOPED_SUSPENDED header for the measured
+    # reproduction and for why only this half is suspended.
+    if [ "$SCOPED_MODE" -eq 1 ]; then
+      echo "    $nt  intercepted=$nhits (ACKNOWLEDGED — required direction SUSPENDED: a slice cannot be expected to reach the seam)  systemctl-reads=$reads  plugin=$markers"
+      SCOPED_SUSPENDED+=("GUARD 7's REQUIRED direction for $nt (acknowledged targets must intercept >= 1 launcher)")
+    else
     echo "    $nt  intercepted=$nhits (ACKNOWLEDGED)  systemctl-reads=$reads  plugin=$markers"
     # 🔴 The REQUIRED direction: an acknowledged target that intercepts nothing
     # means the guard is wired to nothing. A ledger that only PERMITTED
@@ -4985,6 +5091,7 @@ for entry in "${NOLAUNCH_SEEN[@]}"; do
     # silently covering zero targets.
     if [ "$nhits" -lt 1 ]; then
       nolaunch_problems+=("$nt  — acknowledged as a target that DRIVES launchers into the stub, but it intercepted NOTHING. Either the guard stopped being installed, or those seam tests stopped running. Reason on file: $ack")
+    fi
     fi
   else
     echo "    $nt  intercepted=$nhits  systemctl-reads=$reads  plugin=$markers"
@@ -5421,6 +5528,28 @@ if [ "${#nogit_problems[@]}" -gt 0 ]; then
   fail=1
 fi
 rm -rf "$NOGIT_DIR"
+
+# --- WHAT THIS SCOPED RUN DID NOT EVALUATE ------------------------------------
+# 🔴 PRINTED LAST BECAUSE IT IS POPULATED LAST — the GUARD 2 and GUARD 7
+# evaluation blocks above are what decide to suspend, and they run after the
+# SUMMARY banner. Printing it here rather than not at all is the whole point:
+# a guard that quietly stops applying is the failure this file exists to refuse,
+# so the reader gets the list of expectations this run was structurally unable
+# to evaluate, beside the verdict they are about to believe.
+#
+# ⚠ It is a SUSPENSION list, not a failure list. Nothing here changes `fail`.
+if [ "$SCOPED_MODE" -eq 1 ] && [ "${#SCOPED_SUSPENDED[@]}" -gt 0 ]; then
+  echo "  ---- whole-target expectations SUSPENDED by this SCOPED run ----"
+  echo "    Each of these is a claim about a target RUN IN FULL. A slice cannot"
+  echo "    satisfy one, so applying it would red a correct run — it was NOT"
+  echo "    evaluated here, and CI's full run is what evaluates it."
+  for _susp in "${SCOPED_SUSPENDED[@]}"; do echo "      - $_susp"; done
+  echo "    Still enforced above, because they are per-observation and not"
+  echo "    whole-target: GUARD 7's PERMITTED direction (no unacknowledged target"
+  echo "    may reach a real launcher), GUARD 2's UNPINNED-skip check, GUARD 8's"
+  echo "    spool isolation, GUARD 10's git isolation, and every plugin-marker"
+  echo "    count (which asks whether the guard loaded for THIS invocation)."
+fi
 
 # GUARD 6. One writer, fed the same value `exit` is about to take, so the
 # printed verdict and the process status cannot disagree — including through a

@@ -98,6 +98,13 @@ def _gate(tmp_path: Path, *, pytest_runner: Path, extra: list[str] | None = None
         if not k.startswith("DEVRC_GATE_")
     }
     env["DEVRC_GATE_PYTEST_RUNNER"] = str(pytest_runner)
+    # gate.sh REFUSES (exit 2) when a gate-weakening variable is set in its
+    # environment — the runner-replacement pair included, because an ambient
+    # value pointing at anything that prints a green verdict yields a green
+    # gate with nothing run. Stripping DEVRC_GATE_* above is not enough: the
+    # line above deliberately puts one BACK. This escape exists for exactly
+    # that seam, and nothing outside this repo's own tests sets it.
+    env["DEVRC_GATE_ALLOW_AMBIENT"] = "1"
     return subprocess.run(
         ["bash", str(GATE), "--tier", "pytest", "--log-dir", str(tmp_path / "logs"),
          *(extra or []), str(REPO_ROOT)],

@@ -156,24 +156,48 @@ case "$TIMEOUT" in
   ''|*[!0-9]*) echo "gate: FATAL — --timeout must be a whole number of seconds, got '$TIMEOUT'" >&2; exit 2 ;;
 esac
 
-# 🔴 REFUSE A NARROWED GATE UP FRONT, not only after the fact. This script has
-# no `--targets` flag, so the ONLY way its pytest tier gets narrowed is an
-# ambient `DEVRC_TARGETS` — i.e. a value nobody typed for THIS command, exported
-# for some earlier one and still in the shell. The post-hoc SCOPE check below
-# catches it too, but only after paying the full run; catching it here costs
-# nothing and names the variable, which is the whole remedy.
-# NOT unset-and-continue: silently ignoring an operator's exported selection is
-# the mirror defect (they asked for a subset and got a full run with no word
-# said), and this script's doctrine is that a selection mistake must be loud.
-if [ -n "${DEVRC_TARGETS+x}" ]; then
-  echo "gate: FATAL — DEVRC_TARGETS is set in this environment ('${DEVRC_TARGETS}')." >&2
-  echo "  run-tests.sh reads it, so this gate would run a SUBSET of the suite and" >&2
-  echo "  still print GATE: RESULT=PASS — a full-gate verdict off a partial run." >&2
-  echo "  \`unset DEVRC_TARGETS\` (or run \`env -u DEVRC_TARGETS scripts/gate.sh …\`)." >&2
+# 🔴 REFUSE AN AMBIENTLY-WEAKENED GATE UP FRONT, not only after the fact. This
+# script has no narrowing flag, so every route runs through the ENVIRONMENT —
+# a value nobody typed for THIS command, exported for some earlier one and still
+# in the shell. The post-hoc SCOPE check below catches the narrowing ones, but
+# only after paying the full run; catching them here costs nothing and names the
+# variable, which is the whole remedy.
+#
+# 🔴 ALL FOUR, NOT JUST `DEVRC_TARGETS`. An earlier revision of this block said
+# that variable was "the ONLY way its pytest tier gets narrowed", and that was
+# false in three directions — an over-broad claim beside an asymmetric refusal,
+# which reads as coverage and provides none:
+#   DEVRC_TARGETS              narrows to a target subset (SCOPE catches it late)
+#   DEVRC_GATE_PYTEST_RUNNER   REPLACES the runner wholesale — an ambient value
+#   DEVRC_GATE_NODE_RUNNER     pointing at anything that prints `SCOPE: FULL` +
+#                              `RESULT: PASS (exit=0)` yields a green gate with
+#                              NOTHING run, and no later check can see it
+#   MIN_TESTS                  overrides the collected-test floor
+# The runner-replacement pair is the worst of them and is exactly what the
+# in-repo tests use to drive this script against a forced-green stub. That seam
+# is legitimate FOR TESTS and must never be reachable by accident from a shell.
+#
+# NOT unset-and-continue: silently ignoring an operator's exported value is the
+# mirror defect (they asked for something and got something else with no word
+# said), and this script's doctrine is that such a mistake must be loud.
+_gate_ambient=()
+for _v in DEVRC_TARGETS DEVRC_GATE_PYTEST_RUNNER DEVRC_GATE_NODE_RUNNER MIN_TESTS; do
+  [ -n "${!_v+x}" ] && _gate_ambient+=("$_v=${!_v}")
+done
+if [ "${#_gate_ambient[@]}" -gt 0 ] && [ -z "${DEVRC_GATE_ALLOW_AMBIENT:-}" ]; then
+  echo "gate: FATAL — ${#_gate_ambient[@]} gate-weakening variable(s) set in this environment:" >&2
+  for _a in "${_gate_ambient[@]}"; do echo "         $_a" >&2; done
+  echo "  Each one changes what this gate RUNS or what it will ACCEPT, while" >&2
+  echo "  GATE: RESULT=PASS still reads as a full-gate verdict. A replaced runner" >&2
+  echo "  can print a green verdict having run nothing at all." >&2
+  echo "  \`unset\` them, or run \`env -u <VAR> scripts/gate.sh …\`." >&2
   echo "  For a deliberate fast, change-scoped run use scripts/scoped-tests.sh," >&2
   echo "  which is explicitly NOT a gate." >&2
+  echo "  DEVRC_GATE_ALLOW_AMBIENT=1 exists ONLY for this repo's own tests, which" >&2
+  echo "  must drive the runner seam; it is not a way to run a real gate." >&2
   exit 2
 fi
+unset _gate_ambient _v _a
 
 # --- GUARD 9: NO TEST MAY OPERATE ON THE REPO THE SUITE RUNS FROM -------------
 # 🔴 BEFORE the ROOT block below, not after it: with GIT_DIR set and no
@@ -348,7 +372,7 @@ run_tier() { # $1 = label, $2.. = command
   # Same anchoring rule as the verdict: column 0, so a test fixture echoing the
   # word cannot be mistaken for the runner's own claim. Empty when the runner
   # printed no scope line at all — which is NOT read as FULL below.
-  scope="$(grep -aoE '^SCOPE: (FULL|PARTIAL|SCOPED|UNKNOWN)' "$log" | tail -1 || true)"
+  scope="$(grep -aoE '^SCOPE: (FULL|NONE|PARTIAL|SCOPED|UNKNOWN)' "$log" | tail -1 || true)"
   scope="${scope#SCOPE: }"
 
   reason=""

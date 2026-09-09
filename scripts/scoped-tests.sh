@@ -75,6 +75,26 @@ fi
 unset CDPATH
 cd "$ROOT" || { echo "scoped-tests: FATAL — cannot cd to ROOT=$ROOT" >&2; exit 2; }
 
+# 🔴 AN AMBIENT `DEVRC_TARGETS` SILENTLY SHRINKS THIS MAPPER'S UNIVERSE. The
+# declared target list is read from `run-tests.sh --check-targets`, which HONOURS
+# that variable — so an exported value makes the search universe a subset, and
+# changed files whose covering tests live in an unselected target map to nothing.
+# The end state is safe (the run refuses at exit 4 rather than passing), but the
+# DIAGNOSIS it prints is wrong: "no test names what you changed" when the truth
+# is "this mapper was not allowed to look there". A wrong diagnosis on a refusal
+# is how someone concludes their change is untested and moves on.
+# Refused rather than unset, for the reason gate.sh gives: silently discarding an
+# operator's exported selection is the mirror defect.
+if [ -n "${DEVRC_TARGETS+x}" ]; then
+  echo "scoped-tests: FATAL — DEVRC_TARGETS is set ('${DEVRC_TARGETS}')." >&2
+  echo "  The declared target list is read through run-tests.sh, which honours" >&2
+  echo "  it, so this mapper's search universe would be a SUBSET — and a changed" >&2
+  echo "  file whose tests live outside it would be reported as UNMAPPED, which" >&2
+  echo "  is a wrong diagnosis rather than a wrong verdict." >&2
+  echo "  \`unset DEVRC_TARGETS\` (or \`env -u DEVRC_TARGETS scripts/scoped-tests.sh …\`)." >&2
+  exit 2
+fi
+
 RUNNER="${DEVRC_SCOPED_RUNNER:-$ROOT/scripts/run-tests.sh}"
 [ -x "$RUNNER" ] || [ -f "$RUNNER" ] || {
   echo "scoped-tests: FATAL — no runner at $RUNNER" >&2; exit 2; }

@@ -120,11 +120,19 @@ _emit_verdict() {
 # over a narrowed run is a lie the gate is built to believe.
 # The vocabulary is owned by run-tests.sh's GUARD 11 and pinned two-way by
 # scripts/tests/test_scoped_runs.py.
+#
+# 🔴 NOT A CONSTANT ANY MORE, and the reason is the same false-green shape:
+# `--check-suites` validates the pinned suite list and exits 0 in milliseconds
+# having run ZERO tests. Printing `SCOPE: FULL` + `RESULT: PASS (exit=0)` there
+# is the full-gate-shaped pair off a run that tested nothing. NONE says what
+# actually happened; `gate.sh` treats anything other than FULL as not-a-gate.
+SCOPE_STATE="FULL"
+SCOPE_DETAIL="this runner has no selection flag; it always runs every suite"
 SCOPE_EMITTED=0
 _emit_scope() {
   [ "$SCOPE_EMITTED" -eq 0 ] || return 0
   SCOPE_EMITTED=1
-  echo "SCOPE: FULL (this runner has no selection flag; it always runs every suite)"
+  echo "SCOPE: ${SCOPE_STATE} (${SCOPE_DETAIL})"
 }
 _on_exit() { _emit_verdict "$?"; }
 trap '_on_exit' EXIT
@@ -404,6 +412,8 @@ if [ "${#pin_problems[@]}" -gt 0 ]; then
 fi
 
 if [ "$CHECK_SUITES_ONLY" -eq 1 ]; then
+  SCOPE_STATE="NONE"
+  SCOPE_DETAIL="--check-suites validated the pinned suite list and ran NO tests"
   echo "run-node-tests: all ${#PINNED_DIRS[@]} pinned suite(s) match discovery."
   for entry in "${SUITES[@]}"; do
     d="${entry%%|*}"; rest="${entry#*|}"
