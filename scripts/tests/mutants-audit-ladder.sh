@@ -25,7 +25,7 @@
 # rewording that a reader would accept and that must nevertheless go red.
 #
 # 🔴 IT NEVER TOUCHES YOUR WORKING TREE. Everything is mutated inside a
-# `mktemp -d` copy built by naming SIX INDIVIDUAL FILES — that selective copy,
+# `mktemp -d` copy built by naming SEVEN INDIVIDUAL FILES — that selective copy,
 # not the assertion below it, is what keeps a `.git` out. The assertion is an
 # INVARIANT GUARD and is labelled as one rather than counted as coverage: it
 # cannot fire today and has never been watched to. It earns its two lines only
@@ -88,6 +88,13 @@ cp -a "$SRC/scripts/tests/test_audit_ladder_stop_rule.py" "$ROOT/scripts/tests/"
 # reporting a test the author never touched. Measured: adding this line took the
 # battery from a baseline abort back to `21 row(s), all as expected`.
 cp -a "$SRC/scripts/audit-dispatch.py" "$ROOT/scripts/"
+# 🔴 The SEVENTH file is THIS SCRIPT, and the reason is the same one again:
+# `test_the_batterys_floor_is_re_derived_from_this_modules_size` reads the
+# `MIN_TESTS` literal below out of this file, so without it the baseline aborts
+# and every row goes unmeasured. That is the SECOND guard added to the module
+# whose dependency this list did not carry — assume the next one needs a line
+# here too, and run the battery before believing a green.
+cp -a "$SRC/scripts/tests/mutants-audit-ladder.sh" "$ROOT/scripts/tests/"
 cp -a "$SRC/claude/RULES.md"          "$ROOT/claude/"
 cp -a "$SRC/claude/RULES-ARCHIVE.md"  "$ROOT/claude/"
 cp -a "$SRC/claude/skills/audit-pr/SKILL.md" "$ROOT/claude/skills/audit-pr/"
@@ -134,9 +141,13 @@ ROWS=0
 # seam guard — left the battery reporting `✅ 21 row(s), all as expected`,
 # rc 0. The battery vouched for a module that had silently lost both guards it
 # was added to protect. A too-low floor is invisible precisely because it never
-# complains, so the only defence is re-deriving it in the same commit that adds
-# a test.
-MIN_TESTS=14
+# complains — so it is no longer defended by remembering. `run-tests.sh` solved
+# this for its own table with `--check-floors`, a two-way pin guarded by
+# `test_run_tests_floors.py`; the same pin for THIS literal now lives in
+# `test_audit_ladder_stop_rule.py::test_the_batterys_floor_is_re_derived_from_
+# this_modules_size`, which reads the number below, counts the module, and
+# fails with the replacement value. Growth cannot silently outrun it again.
+MIN_TESTS=15
 failing() {
   local out n f total
   # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran" on

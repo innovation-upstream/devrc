@@ -384,6 +384,7 @@ which proves that assertion executes rather than restating the pins beside it.
 """
 
 import importlib.util
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -398,6 +399,11 @@ EVIDENCE_MD = (
 # 🔴 Read for ONE reason: the nit carve-out's warrant is a clause this module
 # does not own. See `test_the_carve_outs_cited_clause_still_exists_in_the_dispatcher`.
 DISPATCH_PY = REPO_ROOT / "scripts" / "audit-dispatch.py"
+# 🔴 The mutation battery that sweeps THIS module, read so its hand-maintained
+# floor can be pinned to this module's size. See
+# `test_the_batterys_floor_is_re_derived_from_this_modules_size`.
+BATTERY_SH = REPO_ROOT / "scripts" / "tests" / "mutants-audit-ladder.sh"
+SELF_PY = Path(__file__).resolve()
 
 # --------------------------------------------------------------------------- #
 # THE PINS -- whole normalised strings, never keywords.
@@ -1113,6 +1119,65 @@ def test_the_nit_carve_out_is_stated_WITH_the_rejection_that_bounds_it():
     )
 
 
+def test_the_batterys_floor_is_re_derived_from_this_modules_size():
+    """🔴 STRUCTURAL replacement for "remember to re-derive the floor".
+
+    `mutants-audit-ladder.sh` carries a hand-maintained `MIN_TESTS` that floors
+    how many tests must RUN before it will score a mutant. Nothing pinned it to
+    this module, and it has now drifted TWICE: 11->13 against a floor of 10
+    (recorded in that file), then 13->15 against a floor of 12, measured during
+    this PR's round 3. At the second drift, deleting BOTH tests the PR added
+    left the battery reporting `✅ 21 row(s), all as expected`, rc 0 -- it
+    vouched for a module that had lost the guards it exists to protect. A floor
+    that is too LOW never complains, so nothing surfaces it.
+
+    Prose asking the next author to re-derive it is what failed twice.
+    `run-tests.sh` already solved this shape for its own table with
+    `--check-floors`, two-way-pinned by `test_run_tests_floors.py`; this is the
+    same pin for this literal, and it prints the replacement value rather than
+    asking anyone to do arithmetic.
+
+    The count is `^def test_` in this file rather than a pytest collection: a
+    collection would re-enter pytest from inside a test. The parametrising
+    DECORATOR is asserted absent because it is the one construct that would
+    make the two numbers diverge -- and diverge in the dangerous direction, a
+    floor lower than the tests that actually run.
+
+    ⚠ The absence check matches the DECORATOR, not the bare word. The first
+    draft tested `"parametrize" not in src` and failed on its own docstring,
+    which is the word's only occurrence here -- a guard that could never pass,
+    green nowhere, and briefly red for a reason that had nothing to do with
+    the floor it exists to check.
+    """
+    battery = _read(BATTERY_SH)
+    literals = re.findall(r"^MIN_TESTS=(\d+)", battery, re.M)
+    assert len(literals) == 1, (
+        f"expected exactly one `MIN_TESTS=` assignment in {BATTERY_SH}, "
+        f"found {len(literals)}: {literals}. This guard reads the literal, so "
+        "a second assignment makes which one the battery uses ambiguous."
+    )
+    floor = int(literals[0])
+
+    src = _read(SELF_PY)
+    assert not re.search(r"^\s*@[\w.]*parametrize", src, re.M), (
+        "this module now parametrises a test, so `^def test_` no longer counts "
+        "the tests that RUN. Re-point this guard at the real collected count "
+        "before trusting it -- a floor derived from the smaller number is too "
+        "LOW, which is the failure mode that never complains."
+    )
+    m = len(re.findall(r"^def test_", src, re.M))
+    expected = m - min(50, max(1, m // 20))
+    assert floor == expected, (
+        f"`{BATTERY_SH.name}` floors at MIN_TESTS={floor}, but this module now "
+        f"has {m} tests, and `run-tests.sh`'s formula "
+        f"`m - min(50, max(1, m // 20))` gives {expected}.\n\n"
+        f"  Set MIN_TESTS={expected} in {BATTERY_SH}.\n\n"
+        "  A floor left BELOW the module's size is invisible: the battery "
+        "keeps printing `all as expected` while tests it was meant to sweep "
+        "quietly disappear. That has happened twice in this file's history."
+    )
+
+
 def test_the_carve_outs_cited_clause_still_exists_in_the_dispatcher():
     """🔴 SEAM: the skill's warrant is a clause the skill does not own.
 
@@ -1171,8 +1236,13 @@ def test_the_carve_outs_cited_clause_still_exists_in_the_dispatcher():
 def test_the_prose_escape_hatch_demands_its_rationale_IN_THE_SUMMARY():
     """🔴 The escape hatch must produce an ARTIFACT, not a state of mind.
 
-    This is the only clause that ends a ladder WITHOUT a clean round, so a
-    reader has to be able to tell that it was used. "Can NAME" alone is
+    This is one of two clauses that end a ladder WITHOUT a clean round -- the
+    other is the attribution gate, which stopped `homelab-infra` #702 on two
+    consecutive zero-payload rounds while round 6 still returned a 🟡
+    (`reference/round-ladder-evidence.md`). This docstring said "the only
+    clause" until round 4 of #1427; it was already false at `53c9f664`, and
+    what surfaced it was SKILL.md finally naming both enders in one sentence.
+    Either way a reader has to be able to tell that it was used. "Can NAME" alone is
     unobservable: the report looks identical whether the ladder converged or
     the hatch was invoked over unfixed 🟡s.
 
