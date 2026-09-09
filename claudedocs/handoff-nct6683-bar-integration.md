@@ -4,38 +4,21 @@
 Make the AIO pump and case fan RPMs visible in the i3status-rust bar, and persist the `nct6683` kernel module across reboots via NixOS configuration.
 
 ## State now
-- Branch: `feat/nct6683-fans-bar`, pushed. Commit `357aa140`. **No PR yet** — waiting on the gate (below).
-- 🔴 **BOTH RANKS ARE NOW DONE. This line previously said rank 1 was "STAGED, not applied" — that
-  was true when written and is FALSE now:** the operator ran the script at **2026-09-08 14:18:33**.
-  Verified: `/etc/nixos/configuration.nix:421` reads
-  `boot.kernelModules = [ "i2c-dev" "vfio_pci" "vfio" "vfio_iommu_type1" "nct6683" ];`,
-  `/etc/modules-load.d/nixos.conf` carries `nct6683`, and
-  `/etc/nixos/configuration.nix.bak-nct6683-20260908-141833` is the script's own backup format.
-  A dry run confirms `Already present in boot.kernelModules`. Re-running is harmless (idempotent).
-- ⚠ **Rank 2 is MERGED-PENDING, and is NOT currently deployed.** It was built, switched and
-  screenshotted live — then a later `home-manager switch` (17:15, `profile-2078`) from a checkout
-  that did not contain this PR **removed it**: `~/.config/i3status-rust/scripts/i3status-fans` does
-  not exist and `config-top.toml` has no fans block. Not a defect — `home.file` deploys from
-  whatever tree the switch ran in. **`scripts/ship.sh` after the PR merges is what puts it back.**
+- **Both ranks DONE and MERGED. Nothing is in flight.** No open PR, no branch of mine outstanding.
+- `nct6683` persists (operator ran the script 2026-09-08 14:18:33).
+- **PR #1411** merged (squash `161206e6`) — the pill.
+- **PR #1430** merged (squash `a2b74e4b`) — the cooling view + its audit round.
+- **Both hosts converged and VERIFIED at `a2b74e4b`** (`ship.sh` with `LAPTOP_SSH=zach@10.42.0.100`; the LAN address times out, nebula works). `2 hosts compared` — not `NOT COMPARED`.
+- Live: the pill renders `⟳ 2708·1652`; left-click opens the cooling float; `q`/Esc/Ctrl-C all close it; no `__pycache__` beside the deployed scripts.
 
-**DONE this session**
-- `scripts/i3status-fans` (new) — reads the NCT6687D tachos out of `/sys/class/hwmon`, no poller/cache/network.
-- `fansBlock` in `nix/graphical.nix` + its `home.file`, both gated `!isLaptop`; block sits between `temperatureBlock` and `gpuBlock`.
-- `scripts/tests/test_i3status_fans.py` (new, 50 tests) and `refresh` added to `_KNOWN_GOOD_ICONS` in `test_bar_status.py`.
-- `nix/system/apply-nct6683-module.sh` (new, executable) — the staged sudo script for rank 1.
-- Deployed: `home-manager switch --flake ~/workspace/devrc --impure` + `i3-msg restart`. **The pill is rendering live**, screenshotted as `⟳ 2810·1749` on the real bar.
+**What shipped**
+- `scripts/i3status-fans` + `fansBlock` (pill), `nix/system/apply-nct6683-module.sh` (the sudo script), `scripts/fans-detail` (cooling view), `scripts/tests/test_{i3status_fans,nct6683_apply,fans_detail}.py`.
+- `claude/skills/bar/SKILL.md` carries the pill + the click target.
 
-**IN FLIGHT**
-- 🔴 **The dev-host pytest tier has NOT reported yet.** `nix develop ~/workspace/devrc -c bash scripts/gate.sh --tier pytest` was still running when this doc was written; its verdict is UNKNOWN, not green. The **node tier passed** (1449 tests, 5 suites, 0 fail) and the **nix check derivations were never run at all**. Do not read "tests pass" into this doc — see "How to verify".
-
-**Verified so far (name the scope, not just the verdict)**
-- `scripts/tests/test_i3status_fans.py` — 50 passed, run under `nix develop`.
-- `scripts/tests/test_bar_status.py` — 529 passed, same shell. Includes the gate-pairing guard and the icon guard, and the icon guard's STRONG half ran (i3status-rust 0.36.1 is in this host's `/nix/store`, so the allowlist was checked against the real key set, not just against itself).
-- Three mutants, in an isolated copy under `PYTHONDONTWRITEBYTECODE=1`, control green either side. Each died to its OWN named guard with its OWN assertion:
-  - state-ordering swap (`Warning if unknown` before `Critical if alarm`) → **only** `test_render_an_ALARM_OUTRANKS_an_unreadable_sibling`, `assert 'Warning' == 'Critical'`; the other 49 passed, so the guard is isolated.
-  - `find_chip` matching any device instead of the `name` → `test_find_chip_locates_BY_NAME_not_by_number`.
-  - hide-at-zero (`return {}` when Idle) → `test_this_pill_is_ALWAYS_VISIBLE[readings0]`, `assert None` on the text.
-- All four render states driven end-to-end against real AND fake sysfs (see "How to verify").
+**Gate coverage — stated as it actually is**
+- #1411: dev-host both tiers PASS (21214 passed) + nix `pytests`/`nodetests` PASS, base `01956bf0`.
+- #1430: the pytest tier **timed out twice at 3600s with ZERO failing tests** (box at load ~70–96 on 24 cores from other sessions). Coverage was assembled as **22 of 29 targets in one gate run + the remaining 7 run directly** (1014 passed, floor sum 940), plus node 1449/1449. 🔴 **The nix sandbox tier was never run on the #1430 tree.**
+- Post-merge, `origin/main` content re-run: **99 passed** (`test_fans_detail` + `test_i3status_fans`).
 
 ## What was discovered
 - Motherboard: MSI X670E GAMING PLUS WIFI (MS-7E16)
@@ -59,31 +42,14 @@ Thermistors: 37–46°C (VRM/chipset)
 ```
 
 ## Next steps (ranked)
-🔴 **Renumbering note:** rank 2 was "add the bar block" and is now DONE, so rank 2 below is a
-different item. Both `nct6683-bar-integration-1` and `-2` claims from this session are RELEASED,
-so no live claim is re-pointed by that shift. Ranks 1 and 3 keep their original meaning.
-
-1. ~~Run the staged sudo script~~ — **DONE 2026-09-08 14:18:33 by the operator.** Kept at rank 1 so
-   live claims are not re-pointed. Verify with `grep -x nct6683 /etc/modules-load.d/nixos.conf`
-   (🔴 NOT `lsmod` — see Gotchas). Nothing to do.
-   forcing: none — completed.
-2. **Merge PR #1411, then `scripts/ship.sh`.** 🔴 **The ship is not optional and not cosmetic** — the
-   pill is currently ABSENT from the deployed bar (see State now), so merging alone leaves it
-   invisible. Gate on the MERGED tree, not the branch:
-   `nix develop ~/workspace/devrc -c bash scripts/gate.sh --tier both`, AND
-   `nix build .#checks.x86_64-linux.pytests` then `.nodetests` **one at a time**.
-   ⚠ **Do NOT reuse a base sha from this doc.** An earlier revision said "merged-tree == branch as
-   of `3d4ac941`"; `main` has moved many times since (it was 11+ commits ahead within the hour), and
-   a reader trusting that line gates the BRANCH — the exact trap the instruction exists to prevent.
-   Re-derive the base at the moment you gate.
-   forcing: gate — nothing else blocks this merge (`main` is protected in name only, deliberately),
-   so the two-tier run on a freshly-derived base is the only real gate.
-3. **Optional: a dunst toast when the pump stalls.** The pill already goes Critical below 500 RPM,
-   but a fullscreen game or a covered bar hides it. Would need a poller source + rising-edge latch
-   (the `bar-status-poll` shape), which is a real cost for a rare event.
-   forcing: none — nothing external is asking for it.
-4. **Optional: verify persistence survives an actual reboot.** The script's own check reads
-   `/etc/modules-load.d/nixos.conf`, which is what systemd replays at boot, so this adds little.
+1. **Optional: give the case fan an RPM floor in the pill.** Currently `--fan 'Case fan=3'` (display-only, can never alarm), so a DEAD case fan is invisible. Measured this session: it is pinned at 60% and never varies, so it should never read 0 — a floor of ~600 would be safe TODAY. One-line change to `fanArgs` in `nix/graphical.nix` + a test.
+   🔴 **Conditional, and the condition is rank 2:** if a BIOS curve with a zero-RPM idle region is ever set, this floor becomes a false alarm. Do NOT do this before deciding rank 2.
+   forcing: none — nothing external is asking; it closes a real blind spot but the current config is honest.
+2. **Optional (operator-only): set a real SYS_FAN3 curve in the MSI BIOS** for idle noise. Nothing in this repo can do it, and nothing depends on it.
+   forcing: none.
+3. **Optional: delta re-audit of #1430 against `823ab95f`.** The ladder's stop rule says a round that produced findings gets another, and round 1 produced 4 should-fix + 5 nits. The fix round rewrote one claim in three places and touched key handling twice — the shape most likely to carry the next finding. ⚠ #1430 is already MERGED, so this would be a post-merge audit of `main`.
+   forcing: none — merged and verified live; this is diligence, not a blocker.
+4. **Optional: `rescue/untracked-workbench-2026-09-08`** still exists on origin. It holds two untracked drafts removed to unblock `ship.sh`. `git diff origin/main..rescue/untracked-workbench-2026-09-08`, then delete the branch if superseded.
    forcing: none.
 
 ## Gotchas / decisions
@@ -132,38 +98,24 @@ so no live claim is re-pointed by that shift. Ranks 1 and 3 keep their original 
   `apply-nebula-relay.sh`, `check-nebula-relays.sh`, `output.txt`, `scripts/diagnose-nix-disk.sh`)
   belong to OTHER sessions. They were left exactly as found and nothing was blind-staged.
 
-## How to verify
-🔴 **The gate is NOT part of this list's green — it had not reported when this doc was written.**
+- **Rank 1 was completed by the OPERATOR, not by an agent: `sudo bash nix/system/apply-nct6683-module.sh` ran at 2026-09-08 14:18:33.** Carried here from `State now` because it is a durable fact under a REPLACE heading. Evidence: `/etc/nixos/configuration.nix:421` reads `boot.kernelModules = [ "i2c-dev" "vfio_pci" "vfio" "vfio_iommu_type1" "nct6683" ];`, `/etc/modules-load.d/nixos.conf` carries `nct6683`, and `/etc/nixos/configuration.nix.bak-nct6683-20260908-141833` is that script's own backup format. Re-running is idempotent ("Already present in boot.kernelModules").
+- 🔴 **`home.file` gives EACH file its own /nix/store path**, so a deployed script is a symlink to a *file* directly in `/nix/store`. `Path(__file__).resolve().parent` is therefore `/nix/store` itself, NOT a directory holding the sibling. Use `os.path.dirname(os.path.abspath(__file__))` — the repo idiom (`i3status-clawgate` → `bar_freshness.py`). This shipped once and rendered "sibling did not load" on a correctly-deployed host while all 24 tests passed, because tests run from the repo where the files genuinely ARE siblings.
+- 🔴 **A `.pyc` written into `~/.config/i3status-rust/scripts` outlives every same-size redeploy.** Every store path has `mtime=1` and CPython validates bytecode on source **mtime-seconds + size**. Verified three ways, including reproducing it: same-size edit + `touch -d @1` → the import returned the OLD value. Two such files from July are still being honoured today (they happen to compile identically, so nothing wrong is executing). `sys.dont_write_bytecode` is why fans-detail is on the right side of this; it is now pinned by a test with a positive control.
+- 🔴 **`sensors`' pwm percentage is NOT sysfs's.** sysfs `pwmN` is raw 0–255; unscaled it renders a pump at "201%". The earlier handoff note "pwm1: 114%" came from `sensors` and is not what sysfs reports.
+- 🔴 **The pill and the cooling view share ONE `fanArgs` binding** in `nix/graphical.nix`, passed verbatim to both. An audit measured the earlier duplicated config drifting with **84 of 84 tests green**, producing a pill reading `2448·1650 Idle` beside a view reading `AIO pump ? unreadable`, and (worse) a view saying "Super I/O NOT FOUND, run the sudo script" — an actively wrong diagnosis — beside a healthy pill.
+- 🔴 **cbreak alone leaves ISIG on**, so Ctrl-C becomes a SIGINT that only arrives if the process is in the tty's FOREGROUND PROCESS GROUP — true under alacritty, not under a bare pty. `fans-detail` clears ISIG so the byte is readable and the footer's promise holds everywhere.
+- 🔴 **A NEAR-MISS worth remembering: `git fetch` does not move your local branch head.** A worktree still at `9ae4fdb4` was merged with `origin/main`; the result silently DROPPED a subagent's 170 lines pushed in between. Only the non-fast-forward push rejection stopped it landing. **Before merging main into a feature branch, check the branch head against `origin/<branch>`, not just that you fetched.**
+- **No clawgate task was recorded** — `clawgate_handoff.sh resolve` exited 5 (0 tasks). Its positive control answered 11 links for a different session, so the board is reachable; but a wrong session id also answers 200 with an empty array, so this is NOT a clean bill of health.
+- The shared checkout `~/workspace/devrc` is routinely moved onto other sessions' branches mid-work (observed twice: `main`, then `feat/audit-pr-round-0-algorithm`). Do all writing in your own worktree.
 
-1. **The block, offline (no hardware needed):**
-   `nix develop ~/workspace/devrc -c python3 -m pytest scripts/tests/test_i3status_fans.py scripts/tests/test_bar_status.py -q`
-   → expect 50 + 529 passed.
-2. **The block against REAL hardware:**
-   `~/workspace/devrc/scripts/i3status-fans --fan pump=1:500 --fan case=3`
-   → `{"icon": "refresh", "text": "2836·1648", "short_text": "2836", "state": "Idle"}` (numbers vary).
-3. **The three states you cannot get from real hardware** — build a fake root and point at it:
-   ```bash
-   F=$(mktemp -d); mkdir -p $F/hwmon0 $F/hwmon3
-   echo nvme > $F/hwmon0/name; echo nct6687 > $F/hwmon3/name
-   echo 0 > $F/hwmon3/fan1_input; echo 1736 > $F/hwmon3/fan3_input
-   S=~/workspace/devrc/scripts/i3status-fans
-   $S --hwmon-root $F --fan pump=1:500 --fan case=3   # -> "!0·1736"  Critical
-   rm $F/hwmon3/fan3_input
-   $S --hwmon-root $F --fan pump=1:500 --fan case=3   # -> "!0·?"     Critical (alarm beats unknown)
-   rm $F/hwmon3/name
-   $S --hwmon-root $F --fan pump=1:500 --fan case=3   # -> "?"        Warning (driver not loaded)
-   ```
-4. **The pill is actually on the bar** (a switch alone does NOT do this):
-   ```bash
-   stat -c '%y' ~/.config/i3status-rust/config-top.toml
-   ps -eo pid,ppid,lstart,args | grep '/bin/i3status-rs' | grep -v grep   # must have STARTED AFTER that mtime
-   ```
-   If it started before, `i3-msg restart`. Then look at the bar between the temperature and GPU pills.
-5. **Rank 1 landed** (after the sudo script):
-   `grep -x nct6683 /etc/modules-load.d/nixos.conf` → exit 0. 🔴 **NOT `lsmod`** — see Gotchas.
-6. **Before merging:** `nix develop ~/workspace/devrc -c bash scripts/gate.sh --tier both`, then
-   `nix build .#checks.x86_64-linux.pytests` and `.nodetests` **one at a time** (a combined
-   invocation produces FALSE failures via store contention). Name the tier and base sha in the claim.
+## How to verify
+1. **The pill** — `~/.config/i3status-rust/scripts/i3status-fans --fan 'AIO pump=1:500' --fan 'Case fan=3'` → `{"icon":"refresh","text":"2708·1652",…,"state":"Idle"}`.
+2. **The cooling view** — `~/.config/i3status-rust/scripts/fans-detail --dump --fan 'AIO pump=1:500' --fan 'Case fan=3'` → pump/case rows with PWM gauges, then CPU/GPU/board/disk temps.
+3. **The keys** (the footer is a claim) — run it without `--dump` in a terminal; `q`, `Esc` and `Ctrl-C` must each close it, and an unrelated key must NOT.
+4. **The pill is actually on the bar** — `stat -c '%y' ~/.config/i3status-rust/config-top.toml` and `ps -eo pid,lstart,args | grep '/bin/i3status-rs' | grep -v grep`; the bar must have STARTED AFTER the config mtime, else `i3-msg restart`.
+5. **Rank 1 (driver) landed** — `grep -x nct6683 /etc/modules-load.d/nixos.conf` → exit 0. 🔴 **NOT `lsmod`**: the module is loaded by hand too, so lsmod cannot tell persistence from a live modprobe.
+6. **No bytecode leak** — `ls ~/.config/i3status-rust/scripts/__pycache__/ | grep -c i3status-fans` → `0`.
+7. **Suites** — `nix develop ~/workspace/devrc -c python3 -m pytest scripts/tests/test_fans_detail.py scripts/tests/test_i3status_fans.py scripts/tests/test_nct6683_apply.py -q` → 129 passed.
 ## Run this first — the index, one command
 ```bash
 cairn recall --repo /home/zach/workspace/devrc
@@ -173,3 +125,13 @@ Terse pointers this doc does not carry, curated by past sessions and outliving i
 reading, and it may describe a gotcha already fixed. `scope-absent`/`scope-empty` means
 nothing is recorded yet: ordinary, not an error, and not a clean bill of health.
 Non-blocking: if it exits non-zero, print the stderr line and carry on.
+## Open investigations — live diagnosis state
+
+### Is any fan / AIO tuning warranted? — ANSWERED, no action possible from Linux
+- **Symptom + exact repro:** operator asked whether fan or AIO tuning makes sense. Reproduce the readings with `bash -c 'H=/sys/class/hwmon/hwmon11; for i in $(seq 6); do echo "$(cat /sys/class/hwmon/hwmon6/temp1_input) $(cat $H/fan1_input) $(cat $H/pwm1) $(cat $H/fan3_input) $(cat $H/pwm3)"; sleep 5; done'` (chip is found by NAME — `hwmon11` is not stable).
+- **Observed (with values):** under load **96.49 on 24 cores** (4x oversubscribed, sustained): `Tctl` 81–83 °C, `Tccd1/2` 70–82 °C, pump 2678–2843 rpm at `pwm1` 226–228 (~89%), case fan 1641–1751 rpm at `pwm3` **153 (60%) in every single sample**. VRM 36–48 °C, GPU edge 49 °C, NVMe ≤56 °C. Tjmax ≈ 95 °C.
+- **Ruled out: a cooling deficiency.** At 4x oversubscription Tctl sits at 81 °C, ~14 °C below the 95 °C limit — the CPU is hitting its POWER ceiling, not its thermal one, so a better cooler buys no performance. via: measurement
+- **Ruled out: any Linux-side fan control.** `nct6683` exposes PWM READ-ONLY — no `pwm*_enable` files exist, `pwm1` is not writable, and `modinfo nct6683` lists exactly one parameter, `force` ("Set to one to enable support for unknown vendors"), which is a vendor-detection override and NOT a write-enable. So a fan-curve daemon is impossible; tuning is a BIOS-only act. via: command
+- **Ruled out: the pump needs attention.** `pwm1` moved 201 → 223 → 228 across the session as load rose, i.e. it tracks temperature. MSI overdrives pump headers by design. via: measurement
+- **Leading hypothesis:** the case fan is on a **flat 60% curve**, not a temperature curve — `pwm3` never left 153 across loads 60→96 and temps 71→83 °C. The available win is NOISE at idle, not cooling.
+- **Next probe:** none from Linux — it is a BIOS change (SYS_FAN3 curve, e.g. ~30% under 60 °C ramping to 100% by 85 °C). If the operator sets one, re-measure `pwm3` at idle before considering rank 2 below.
