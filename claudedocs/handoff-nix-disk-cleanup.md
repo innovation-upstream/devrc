@@ -16,14 +16,16 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Diagnose and resolve disk pressure on the workbench NixOS host (root partition `/dev/nvme0n1p2`, 1.8TB). The host was at 87% usage with ~228G free. The session freed ~200G through cleanup, then investigated why the filesystem reports 1.5TB used while only ~600GB of data is measurable.
 
 ## State now
-- 🔴 **ALL THREE PRs OF THIS EFFORT ARE MERGED. Both tmpfiles hosts are live. Nothing is in flight.**
-  - **`#1366` MERGED** — squash `ffac18f8`. Rank 5's test coverage for `scripts/diagnose-disk-accounting.sh`, after **four audit rounds, 21 findings (3 🔴)**. 202 assertions, 64 mutants each killed by its own guard, red at every earlier tip (96 → 55 → 23 → 3 → 0).
-  - **`#1392` MERGED** — squash `94f82796`. The nixpkgs toolchain drift that had `main` red for everyone, and the disaster-recovery verdict inversion inside it.
-  - **`#1370` MERGED** — squash `b29cde5e`. The preflight/`--init` tool, after one audit round (**3 🔴 + 9 🟡**) and its first-ever test suite (54 tests). Tekton green on `2fe861d4`: pytests `collected=21022 passed=21020 skipped=2 failed=0`, nodetests `1449/1449`.
-  - All three verified **by CONTENT** on `origin/main` after merge, never by ancestry — a squash is never an ancestor of its base. `#1370`'s check: `nix/system/preflight-tmp-churn-host.sh` and `scripts/tests/test_preflight_tmp_churn_host.py` present, `INIT=yes` present, and the re-derived drift floor `"scripts/tests|12927"` landed intact.
-- **Workbench + laptop both applied and live**: 7 `mM:7d` rules, 0 stale, on each. Workbench live since the **2026-09-06 18:01 reboot**, reclaim held at **67.2M inodes against the 96.1M baseline** (74% disk). Laptop live since **2026-09-07 17:54** via `preflight-tmp-churn-host.sh --init` (generation 247).
-- **Claim `nix-disk-cleanup-5` RELEASED.** No claims held.
-- **No clawgate task** — `clawgate_handoff.sh resolve` → rc 5 with its positive control green; a wrong session id also answers 200 with an empty array, so that is not a clean bill of health and no field is recorded.
+- 🔴 **ALL THREE PRs OF THE ORIGINAL EFFORT ARE MERGED. Both tmpfiles hosts are live.** `#1366` (`ffac18f8`), `#1392` (`94f82796`), `#1370` (`b29cde5e`) — all verified by CONTENT on `origin/main`, never by ancestry.
+- 🔴 **RANK 13 IS DONE, and it found something.** `#1392` merged without an adversarial audit; the audit ran, **confirmed its central repair**, and found one coverage defect. The fix is **`innovation-upstream/devrc#1409`**, branch `fix/age-refusal-markers-post-header`, head **`e1536984`**, 5 commits, OPEN, tree clean.
+- **What the audit confirmed about `#1392`**, re-measured independently rather than read off its table: age v1.3.2 creates `--output` lazily; its three re-keyed marker strings are byte-identical on v1.3.1 and v1.3.2; 10 of 11 mutants on its guards died to the guard that owns them. The re-key was the right repair.
+- **What it found:** the code claimed *"on both measured age versions every refusal classifies"*. False — ≥5 real refusal signatures fell outside the 3-marker table, and three ordinary corruption shapes (flipped header MAC, payload stripped, payload truncated to 8 B) reached the verdict that tells the operator age has probably *reworded*. Root cause of the miss: the sweep varied payload SIZE across seven values and mangling SHAPE across five.
+- **What `#1409` ships:** classifier re-keyed 3 → 9 markers, grouped PRE-AUTH / KEY-PROVEN / post-auth; `AGE_REFUSED_TRUNCATED` and `AGE_REFUSED_HEADER_MAC` added to the closed set; `AGE_REFUSALS_{PRE_AUTH,POST_AUTH,KEY_PROVEN}` exported so the consumer branches on sets it does not spell; `ARTIFACT-CORRUPT` gains a second message; `restore-verify.py`'s own operator message now reads the classification; `SECRETS.md`'s recovery table rewritten and pinned against the tuple in both directions.
+- 🔴 **The audit ladder is CLOSED at 5 rounds — do NOT dispatch another.** Every round found something real, but rounds 4–5 found things about guards the ladder itself had written. Round 4's auditor stated it: *"not one finding is about the shipped classifier's behaviour."* Stop criterion recorded in `e1536984` and in the PR's round-4 comment.
+- **Verify status, honestly:** the two owning suites are **450 passed on age v1.3.2 AND v1.3.1**. `scripts/gate.sh` was **NOT re-run for round 5** — the box has been at load 60–98 all session and the gate has been SIGTERM'd at its 3600 s cap twice. Rounds 1–3 passed the full gate or a documented union of runs.
+- **CARRIED FORWARD, unchanged — Workbench + laptop both applied and live**: 7 `mM:7d` rules, 0 stale, on each. Workbench live since the **2026-09-06 18:01 reboot**, reclaim held at **67.2M inodes against the 96.1M baseline** (74% disk). Laptop live since **2026-09-07 17:54** via `preflight-tmp-churn-host.sh --init` (generation 247).
+- **Claim `nix-disk-cleanup-13` is HELD.** Release when `#1409` merges. (`nix-disk-cleanup-5` was released earlier.)
+- **No clawgate task, again** — `clawgate_handoff.sh resolve` → rc 5 with its positive control green (the same endpoint answered 8 links for another session, so the board was genuinely read). A wrong session id also answers 200 with an empty array, so this is not a clean bill of health and no field is recorded.
 
 ## Open investigations — live diagnosis state
 
@@ -350,8 +352,28 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
     via: measurement
 - **Next probe:** change it to `cp -aL` (or refuse on `[[ -L "$CFG" ]]`) plus a fixture test asserting the backup is not a symlink. `#1370` mitigated the reachable path from its own side and deliberately did not touch that file.
 
+### Tekton `devrc-pytests` is RED on #1409 and it is NOT that branch
+- **Symptom + exact repro:** `gh pr checks 1409 --repo innovation-upstream/devrc` → `tekton/devrc-pytests fail`, `FAILING: TestARefusedWriteIsIndistinguishableFromAnAbsentOne.test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_dif…`.
+- **Observed (with values):** the failing class lives in `scripts/tests/test_subsystem_store_api.py` — the same file this doc already records as a known flake owned by `#863` ("third signature across five test classes, all the same in-process round-trip"). This is a fourth class name in that family. `tekton/devrc-nodetests` passes: `suites=5 files=41 tests=1449 pass=1449 fail=0`.
+- **Ruled out — that `#1409` causes it.** That PR touches five files, none in that subsystem, and every in-tree referrer of `restore-verify` lives under `scripts/tests`.
+    via: command
+- **Leading hypothesis:** the `#863` in-process round-trip flake recurring; `claudedocs/handoff-devrc-ci-red` (PR #1389) separately claims devrc-ci pytests is red on `main` itself.
+- **Next probe:** read the gate pod log rather than the check state — `KUBECONFIG=$KC_HOMELAB kubectl logs -n tekton-ci <pipelinerun>-gate-pod --all-containers`.
+
+### The full gate has not been run against `#1409` round 5 — saturation, not a red
+- **Symptom + exact repro:** `nix develop /home/zach/workspace/devrc-age-markers -c bash scripts/gate.sh --tier both` — twice SIGTERM'd at its own 3600 s cap: `FAIL pytest exit=124 (timeout after 3600s)` / `RESULT: FAIL (exit=143)`.
+- **Observed (with values):** load 60–98 all session with 6+ concurrent gates from other sessions. Round 3's run reached 24 of 29 targets; round 4's reached 8. `scripts/tests` inflated **22:51 → 37:08 → 53:19** across runs — the whole target, which is the load signature rather than one assertion. Round 4's run showed 3 failed in `scripts/tests`, ALL three `subprocess.TimeoutExpired: … timed out after 120 seconds` on a NESTED `run-tests.sh` (`test_a_pinned_skip_whose_TARGET_did_not_run_does_not_count`, `test_a_partial_run_is_declared_where_gate_sh_actually_LOOKS`, `test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N`). All three pass in isolation: `3 passed in 200s`.
+- **Ruled out — that those 3 are a code failure.** The exception is a nested-run timeout, not an assertion, and they pass alone.
+    via: measurement
+- **Ruled out — that round 5 is unmeasured.** The two owning suites are 450 passed on both age binaries; rounds 3 and 4 between them covered all 29 pytest targets (round 3: 24 in-gate + 6 separately; round 4: 8 in-gate + 21 separately at 6161 passed / 2 skipped / 0 failed).
+    via: measurement
+- **Next probe, verbatim** — run when `cat /proc/loadavg` is under ~20:
+  ```bash
+  cd /home/zach/workspace/devrc-age-markers && nix develop . -c bash scripts/gate.sh --tier both
+  ```
+
 ## Next steps (ranked)
-🔴 **Ranks 1–14 keep their original meaning and numbering** — the rank is half a `claim-work` slug's identity, so renumbering silently re-points live claims. Status is marked in place. **Ranks 1–7, 9 and 11 are closed; 8, 10, 12, 13, 14 remain.**
+🔴 **Ranks 1–14 keep their original meaning and numbering** — the rank is half a `claim-work` slug's identity, so renumbering silently re-points live claims. Status is marked in place. **Ranks 1–7, 9, 11 and 13 are closed; 8, 10, 12, 14 and the new 15 remain.**
 
 1. **DONE — workbench patched and verified live.**
    forcing: none
@@ -369,18 +391,20 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
    forcing: none
 8. **Prune the `devrc/diagnose-disk-accounting` index entry** — a stale `OPEN:` bullet sits beside its own `RESOLVED`. Partly done: `/mnt/rootcheck` recorded as no longer mounted.
    forcing: none
-9. **DONE — `#1366` audited (4 rounds), `#1370` audited (1 round).** `#1392` merged WITHOUT an adversarial audit, on the operator's explicit "go" — see rank 13.
+9. **DONE — `#1366` audited (4 rounds), `#1370` audited (1 round).**
    forcing: none
-10. **Confirm the laptop's first reap actually happened** — the timer was armed for 2026-09-07 18:54 CDT, its `NextElapseUSecRealtime` read EMPTY, and no session has gone back to check. `ssh zach@192.168.50.155 'systemctl status systemd-tmpfiles-clean.service; df -i /'` — expect `status=0/SUCCESS` and inodes below the 24,749,866 / 117,236-top-level baseline recorded at apply time.
+10. **Confirm the laptop's first reap actually happened** — timer armed for 2026-09-07 18:54 CDT, its `NextElapseUSecRealtime` read EMPTY, no session has checked. `ssh zach@192.168.50.155 'systemctl status systemd-tmpfiles-clean.service; df -i /'` — expect `status=0/SUCCESS` and inodes below the 24,749,866 / 117,236-top-level baseline.
     forcing: none
 11. **DONE — `#1370` MERGED** (`b29cde5e`), Tekton green, verified by content.
     forcing: none
-12. **Fix `apply-tmp-churn-retention.sh:276` (`cp -a` → `cp -aL`)** — its documented rollback is a no-op on a symlinked config; measured live during the `#1370` audit. Repo `innovation-upstream/devrc`, one file plus a fixture test asserting the backup is not a symlink. Closing condition: that PR merged.
+12. **Fix `apply-tmp-churn-retention.sh:276` (`cp -a` → `cp -aL`)** — its documented rollback is a no-op on a symlinked config. Repo `innovation-upstream/devrc`, one file plus a fixture test asserting the backup is not a symlink. Closing condition: that PR merged.
     forcing: none
-13. 🔴 **Adversarial audit of the merged `#1392` — the highest-risk unaudited thing this effort shipped.** It rewrites the logic deciding whether a corrupt backup means "rotate your escrow key", and its own author recorded that the new keying rests on substring matches of another tool's prose. `/audit-pr` works on a merged PR by ref.
-    forcing: security — the change governs disaster-recovery key-rotation verdicts and merged without an adversarial pass.
-14. **Delete the stale `/tmp/disk-accounting-*` leftovers** — 19 seen, **2 non-empty** (84 B / 203 B of captured scan stderr). Resolve by ownership and mtime, never a blanket `rm`, and not while a battery may be running.
+13. **DONE — `#1392` audited.** It confirmed the repair and found one coverage defect; the fix is `#1409`, five rounds, ladder closed on the attribution criterion. See rank 15 for what remains.
     forcing: none
+14. **Delete the stale `/tmp/disk-accounting-*` leftovers** — 19 seen, 2 non-empty (84 B / 203 B of captured scan stderr). Resolve by ownership and mtime, never a blanket `rm`, and not while a battery may be running.
+    forcing: none
+15. **Re-run the full gate on `#1409` when the host is quiet, then merge it.** Repo `innovation-upstream/devrc`, branch `fix/age-refusal-markers-post-header` @ `e1536984`. The Tekton red is the `#863` flake — confirm it is still that signature before merging through it, and never merge through a gate you have decided is meaningless without saying so. Then release claim `nix-disk-cleanup-13`. Closing condition: `#1409` merged, verified BY CONTENT on `origin/main` — `git -C /home/zach/workspace/devrc grep -c AGE_REFUSED_HEADER_MAC origin/main -- '*.py'`.
+    forcing: gate — Tekton `devrc-pytests` is red on the PR and blocks a clean merge signal.
 
 ## Gotchas / decisions / dead-ends
 - **RO mount hypothesis was WRONG.** A prior session hypothesized that data written to `/nix/store` before the RO mount was applied was "hidden" by the mount. This was disproved: NixOS populates the store during boot, then mounts it RO. The RO mount shows current filesystem state; `nix-collect-garbage` operates through the underlying RW filesystem. The 75M "missing" inodes were not hidden — they are ext4 metadata overhead.
@@ -494,24 +518,36 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - ⚠ **`grep … | head -1` READ THE WRONG LINE TWICE IN ONE SESSION, and both times the wrong answer looked plausible.** Verifying `#1370`'s merge, `grep -oE '"scripts/tests\|[0-9]+"' | head -1` returned **`"scripts/tests|4976"`** — a figure from a *comment example* at `run-tests.sh:1481`, not the live `TARGET_FLOORS` entry at `:1698` (`12927`). Four lines in that file mention `scripts/tests|`. Earlier the same shape produced a bare `0` from a **guessed path** while verifying `#1392`, which reads exactly like "the merge did not land". **Anchor the pattern (`^  "scripts/tests\|`), and print how many candidates matched** — a first-match on an unanchored pattern is a claim about ordering, not about content.
 - **Merge order mattered and was derived, not guessed.** `#1370` was red on Tekton with 7 failures it did not cause; `#1392` was green and was the fix for exactly those. Merging `#1392` first turned `#1370` green without touching it — confirmed on the merged tree before either merge (`scripts/tests` 12977 collected / 12977 passed / **0 failed**, where the same tree had shown the 7 drift failures an hour earlier).
 
+- 🔴 **TWO `age` BINARIES ARE INSTALLED AND THEY BEHAVE DIFFERENTLY.** Login shell = **v1.3.1**; `nix develop` = **v1.3.2**, which creates `--output` LAZILY on the first successful write (so a tampered artifact under 64 KiB leaves NO file, where 1.3.1 left one). The gate runs 1.3.2; the operator's `check-escrow.sh` nix-shell resolves 1.3.1. **Any claim about age must name which binary it was measured on**, and a guard that fires on only one of them is a defect.
+- 🔴 **`bad header MAC` PROVES THE ESCROWED KEY WORKS.** The discriminating control, both binaries, re-measured at scale by an auditor (336 wrong-identity header corruptions → ZERO `bad header MAC`, against 39/37 from the right-identity control): the SAME damaged blob gives `bad header MAC` with the right identity and `no identity matched any of the recipients` with the wrong one. age reaches the header's integrity check only after an identity has unwrapped a recipient stanza. It is neither pre-auth nor post-auth — `ARTIFACT-CORRUPT`'s usual wording asserts "age authenticated the header", which is what a MAC failure means it did NOT do.
+- **The marker table's ORDER is load-bearing**: every pre-auth marker precedes every `AGE_REFUSALS_KEY_PROVEN` one, because age v1.3.2 NESTS clauses (`failed to read header: parsing age header: unexpected EOF reading intro`) on 21 of 168 in-header offsets. v1.3.1 nests on 0 of 168.
+- **A fixture that flips a byte of the `--- <mac>` line's BASE64 TEXT is ~5% vacuous** — it sometimes lands on an illegal character and age fails earlier, on the closing line, with a different classification. Decode, flip, re-encode.
+- 🔴 **Running a gate target outside `gate.sh`:** `testlib` needs `PYTHONPATH=<repo>/scripts`, and you must invoke **ONE TARGET PER pytest RUN** — basenames collide across targets (`test_db_schema.py` is in both `signal/` and `mail-actions/`), so a combined invocation dies at collection. The runner does it per-target for exactly this reason.
+- 🔴 **NEVER restore a mutation battery's files with `git checkout --`.** Mine reverted the round's own UNCOMMITTED edits instead of the temporary copies, so every mutant afterwards died on an unrelated guard — **including the must-survive control**. The control dying is the only thing that exposed it; a battery without one would have reported 5-for-5 kills that proved nothing. Restore by `cp -a`, prove it with `cmp`, and put EVERY file you mutate in the backup set (the test files too).
+- 🔴 **A guard can pass on prose ABOUT the thing it guards.** A table check that asked whether each marker appeared anywhere in a comment block was satisfied by the ⚠ note below the table that happens to NAME the marker; deleting the row survived. Extract rows structurally, compare the ANSWER column, and check both directions — a row with the right string and the wrong classification is how the founding bug got written. The same guard also had to learn: pin the exit code beside the cause, and REJECT duplicate rows rather than last-wins (a duplicate inserted above the real table shadowed it).
+- **A five-round ladder where every round found something real can still need stopping.** Rounds 4–5 found real defects *in guards the ladder itself had just written*; round 5 could not produce a single red-at-base test because every fix was a guard widening, an unreachable-path hardening, or prose. The attribution judgement — "is this finding about the shipped thing or about my own scaffolding?" — is what ends it, not a clean round.
+- **`gate.sh` has a 3600 s wall-clock cap and reports the timeout as `RESULT: FAIL (exit=143)` / `exit=124`.** Under contention that is an infrastructure timeout, not a test failure — check for real `FAILED` lines before attributing it.
+
 ## How to verify
-1. **Both tmpfiles hosts live:** `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → **7**; `grep -c ' m:7d'` → **0**. No root needed on either. Laptop: wrap in `ssh -t zach@192.168.50.155 '...'`.
-2. **All three PRs really landed** (by CONTENT — a squash is never an ancestor of its base):
+1. **Both tmpfiles hosts still live:** `systemd-tmpfiles --cat-config | grep -c 'mM:7d'` → **7**; `grep -c ' m:7d'` → **0**. No root needed. Laptop: wrap in `ssh -t zach@192.168.50.155 '...'`.
+2. **The three original PRs landed** (by CONTENT — a squash is never an ancestor of its base):
    ```bash
    git -C /home/zach/workspace/devrc fetch origin main -q
    git -C /home/zach/workspace/devrc cat-file -e origin/main:scripts/tests/test_diagnose_disk_accounting.sh   # 1366
    git -C /home/zach/workspace/devrc cat-file -e origin/main:scripts/tests/test_preflight_tmp_churn_host.py   # 1370
    git -C /home/zach/workspace/devrc grep -c classify_age_refusal origin/main -- '*.py'                       # 1392
    ```
-3. **The drift floor on main matches its tree** — ANCHOR the pattern, an unanchored first match reads a comment example:
+3. **`#1409`'s two owning suites, on BOTH binaries** (the gate tier is v1.3.2; production resolves v1.3.1):
    ```bash
-   git -C /home/zach/workspace/devrc show origin/main:scripts/run-tests.sh | grep -nE '^  "scripts/tests\|[0-9]+"'
+   cd /home/zach/workspace/devrc-age-markers
+   PYTHONDONTWRITEBYTECODE=1 nix develop . -c python3 -m pytest \
+     scripts/tests/test_analyze_service_index_escrow_verify.py \
+     scripts/tests/test_analyze_service_index_restore_verify.py -q
    ```
-   → `12927`. Re-derive with the gate's own function if the tree moves:
-   `nix develop /home/zach/workspace/devrc -c bash -c 'eval "$(sed -n "/^_suggested_floor()/,/^}/p" scripts/run-tests.sh)"; _suggested_floor <measured-count>'`
-4. **The age inversion is real** (run it before trusting any re-derivation): encrypt a 4 KiB payload, flip a byte near the end, decrypt with `--output` under both builds — 1.3.1 leaves the file present, 1.3.2 leaves none. Interactive shell is 1.3.1; `nix develop` is 1.3.2.
+   → **450 passed**. For v1.3.1, symlink the login-shell `age`/`age-keygen` into a dir and prepend it INSIDE the dev shell (`export PATH=…` within a `bash -c`) — expanding `$PATH` in the OUTER shell swaps the interpreter too and produces three spurious `DECRYPT-DEPS-MISSING` failures.
+4. **`bad header MAC` really does prove the key** — decode the `--- <mac>` line, flip a bit, re-encode, decrypt the same blob with the right and the wrong identity → right = `age: error: bad header MAC`, wrong = `age: error: no identity matched any of the recipients`.
 5. **The workbench reclaim held:** `df -i /` → used inodes materially below the 96.1M baseline (67.2M on 2026-09-07); `df -h /` → Use% ≤ 77%.
-6. **One command classifies either host** (workbench is the known-good control — expect `applied-and-live — 7`), now that the tool is on `main`:
+6. **One command classifies either tmpfiles host** (workbench is the known-good control — expect `applied-and-live — 7`):
    ```bash
    cd ~/workspace/devrc && git fetch -q origin main && \
      git show origin/main:nix/system/preflight-tmp-churn-host.sh > /tmp/pf.sh && sudo bash /tmp/pf.sh

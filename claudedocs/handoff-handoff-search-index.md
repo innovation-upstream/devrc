@@ -15,9 +15,11 @@ Give the handoff corpus a queryable index, because git gave it redundancy but no
 424+ docs / 8.6 MB across four repos were readable only by knowing the slug.
 
 ## State now
-🔴 **THE MACHINERY IS LIVE, THE FIX IS SHIPPED, AND ADOPTION HAS MOVED — 4 of 4 post-fix runs
-query the index, against ~1 in 8 before.** All three are separate claims and each was measured
-on its own. What is STILL unmeasured is whether a hit ever changes what a session does.
+🔴 **THE MACHINERY IS LIVE, ADOPTION HELD AT n=22, AND YIELD IS NOW ANSWERED: 1 of 20.** All
+three are separate claims and each was measured on its own. **Adoption 20 of 22 (91%)**
+post-fix on the workbench, against 2 of 11 (18%) before — the preliminary 4/4 was not a
+small-n fluke. **Yield: exactly one of those 20 sessions had a hit change what it did**, and
+the cause of the other 19 is now measured rather than guessed — see the block below and rank 1.
 
 - **Merged:** `devrc#1209` (`45930d644`) index · `#1244` (`1b769b64b`) cairn I/O-stall classifier ·
   `#1264` (`baa95854`) this doc · `#1267` (`d86b4e45`) incomplete-read delete authority ·
@@ -51,9 +53,15 @@ on its own. What is STILL unmeasured is whether a hit ever changes what a sessio
   All four queried a TOPIC, which is what the re-keying was for.
   ⚠ **n=4, not the ~10 this doc asked for**, and the **laptop ran 0 resumes**, so this is a
   workbench-only reading over a third of the pre-fix window.
-- 🔴 **YIELD IS STILL ZERO-EVIDENCE, AND IT IS THE QUESTION THAT MATTERS.** Adoption says the
-  command RAN. The only pre-fix invocation returned 3 weak hits its session judged irrelevant.
-  Nothing yet shows a hit changing a decision — see rank 1.
+- 🔴 **YIELD IS ANSWERED — 1 of 20, AND THE CAUSE OF THE OTHER 19 IS MEASURED.** Adoption says
+  the command RAN; this says what the answer was worth. **23 of 60 hit slots were the
+  session's OWN handoff** — the doc it had just read in step 3 — and it was the **#1 hit in
+  13 of 20** queries. Fix shipped in `#1399` (`--exclude-slug`). Full block below.
+  ⚠ The 60 is the SUM OF HIT LINES ACTUALLY PARSED, not 20×3 assumed — every query used
+  `--limit 3` and the corpus returned three each time, so the two happen to coincide.
+- 🔴 **ADOPTION RE-MEASURED 2026-09-08T17:00Z at n=22 — 20 of 22 (91%), control 21/22.** The
+  laptop still contributes **0 runs**, measured over SSH rather than assumed, so this remains
+  a workbench-only reading. The measuring session is excluded from both halves by session id.
 - **Claim `handoff-search-index-1`: RELEASED** (`claim-work: RELEASED refs/heads/claim/…`), after
   `#1332` merged. Merging does not release a claim; this one was released by hand.
 
@@ -173,11 +181,12 @@ on its own. What is STILL unmeasured is whether a hit ever changes what a sessio
   after ~10 further runs, **raising its `CUT` to `#1332`'s merge time first** (left at `#1295`'s
   it counts the 14 pre-fix runs in the denominator, so a fully successful fix reports ~10/24 and
   reads as a failure). The prediction is that it tracks `cairn recall`'s 5/6, not step 3's 0/6.
-- **Residual, NOT measured:** whether the index, once actually queried, *yields* anything. n=1
-  query returned nothing useful, which is no evidence either way about hit quality. Adoption and
-  yield are separate questions and only the first is answered.
+- **Residual, SINCE MEASURED — do not re-open this one.** "Whether the index, once queried,
+  *yields* anything" was left open here at n=1. It was answered on 2026-09-08 at n=20: **1 of
+  20**, with the cause measured. See "RESOLVED — does a hit change what a session does?" below;
+  this bullet is kept only so the n=1 reading is not mistaken for the current one.
 
-### RESOLVED (preliminary, n=4) — does the fix actually change what a session does? Adoption yes; yield unknown
+### RESOLVED (preliminary, n=4; SUPERSEDED at n=22 by the block below) — does the fix change what a session does? Adoption yes
 - **Answer:** adoption moved from ~1-in-8 to 4-of-4. This supersedes the earlier block's
   "Next probe", which asked for exactly this re-run — that probe has now been run ONCE, at a
   smaller n than it specified, and its instruction to raise `CUT` was followed.
@@ -201,28 +210,92 @@ on its own. What is STILL unmeasured is whether a hit ever changes what a sessio
 - **Leading hypothesis:** the placement fix worked as designed. 4/4 is unlikely under the old
   rate (≈0.001 at 18%, crude binomial), but n=4 is small and the four runs are one repo and
   possibly one operator workflow, so this is a strong direction, not a settled rate.
-- **Next probe:** read those four sessions' transcripts around the `handoff_search` call and ask,
-  per session: did the output get REPORTED, and did it change a decision, a probe or a plan? That
-  is the yield question, and it needs no new data — the transcripts already exist.
-- **Residual, NOT measured:** yield, the laptop, and any repo other than `datapacket-talos`.
+- **Next probe:** none — run 2026-09-08, at n=20 rather than the 4 it specified. See the block
+  below, which supersedes this one's residual.
+- **Residual, NOT measured:** the laptop (still 0 runs) and any repo other than
+  `datapacket-talos`.
+
+### RESOLVED — does a hit change what a session does? YIELD = 1 of 20, and the cause is structural
+- **Answer:** yes, once, and the single case is genuinely the thing the index was built for —
+  but 19 of 20 sessions did nothing with the result, and the reason is now measured.
+- **Symptom + exact repro:** for every post-fix session that invoked `handoff_search.py --`,
+  read the turns AFTER the tool result and record (a) whether the output was reported to the
+  operator, (b) whether a hit document was subsequently opened, (c) whether a decision, probe
+  or plan moved. Session ids come from check 1; the transcripts already exist.
+- **Observed (with values):**
+  - **20 post-fix sessions queried the corpus.** In **19**, the next action was `claim-work`
+    or `gh pr view` and no hit was opened or mentioned. Exactly one session referred to the
+    output at all, to say *"Recall surfaces returned nothing new."*
+  - 🔴 **THE ONE THAT PAID OFF, AND IT PAID OFF ~5 h LATER, NOT AT STEP 4.** Session
+    `d1a30b84` ignored its hits at resume time like the rest. Later, asked to `recommend`, it
+    opened with *"Let me ground this rather than recommend from a corpus echo"*, read the
+    doc that had been **hit #2** of its query (`rank=1.6667`, a DIFFERENT effort in the same
+    repo), corrected its own first reading of it — it had taken an `## Open investigations`
+    line for current state, the exact hazard step 3 warns about — and **changed its
+    recommendation away from the entire backlog it was resuming** to an unclaimed
+    `forcing: security` item in that other effort. Cross-effort prioritisation is precisely
+    the value proposition; the delivery mechanism was **context carryover, not the step**.
+  - 🔴 **WHY THE OTHER 19 GOT NOTHING: 23 of 60 hit slots (38%) were the session's OWN
+    handoff**, already read in step 3, and it was the **#1 hit in 13 of 20** queries — three
+    of three slots in two of them. Arithmetic, not luck: step 4 says query the handoff's
+    TOPIC, and the best text match for a doc's topic is that doc. **The re-keying that made
+    the step unconditional is the same thing that aimed it at itself.**
+- **Ruled out:** that the hits were merely *unreported* while still informing the work — the
+  check is not "was it mentioned" but "was a hit DOCUMENT opened", and outside `d1a30b84` no
+  session touched a hit doc that was not its own handoff or its own `/handoff` write-back.
+  via: measurement
+- **Ruled out:** that the self-hits are an artifact of the fixtures or of one repo — the 38%
+  spans 20 sessions across four repos, and the two 3-of-3 cases are different repos.
+  via: measurement
+- **Leading hypothesis:** yield is low because the retrieval budget is spent on the one
+  document guaranteed to be redundant. Excluding it frees a third of the slots — and the top
+  slot two times in three — for documents the session has not read.
+- **Next probe:** re-run the yield read after `--exclude-slug` has been live for ~20 further
+  queries. The prediction is a rise off 1/20; the falsifier is that yield stays ~1/20 with
+  foreign hits in every slot, which would mean the corpus itself has little to offer a
+  resuming session and the honest response is to stop paying for the step.
+- 🔴 **THE INSTRUMENT HAD TO BE REBUILT MID-MEASUREMENT, and the tell was a perfect number.**
+  The first self-hit pass scanned transcripts for `claudedocs/handoff-<slug>.md` and reported
+  **100%** — because the search's own output prints each hit's doc path, so the needle was
+  matching the instrument. `claude/RULES.md` → "validate the INSTRUMENT before you read its
+  verdict". The 38% is rebuilt from two sources the search cannot write: `resume-state.sh`'s
+  `handoff:` line and `claim-work --slug-for` arguments. **A 100% or a 0% is a reason to
+  re-check the needle before writing it down.**
+- **Residual, NOT measured:** whether the freed slots are USED — this closes the "the top hit
+  is the doc you already read" defect, and says nothing about whether the corpus's second and
+  third choices are worth reading. That is the next probe above, and it is the real question.
 
 ## Next steps (ranked)
-1. **ANSWER YIELD — does a hit change what a session does?** The four post-fix transcripts already
-   contain the evidence; no waiting required. For each of `d1a30b84`, `c07a10b6`, `9c7cf8e5`,
-   `6b4118f0` in `~/.claude/projects/*/`, read the turns around the `handoff_search.py` call and
-   record whether the result was reported to the operator and whether it changed a decision, a
-   probe or a plan. 🔴 **This is the question the whole effort rides on** — an index that is
-   queried by every session and never useful is a cost, not a capability, and adoption cannot
-   distinguish the two. Fold in a re-run of check 1 at that point, which by then will have a
-   larger n and may have laptop runs. ⚠ Expect a real possibility that yield is LOW: the corpus
-   is ~4,900 sections and the one pre-fix hit scored `rank=1.1667` and was judged irrelevant.
+1. **RE-MEASURE YIELD ONCE `--exclude-slug` HAS ~20 QUERIES BEHIND IT.** Rank 1 as it stood is
+   ANSWERED (1 of 20) and the structural cause is fixed, not diagnosed-and-filed — do NOT re-run
+   the old read as if it were open. Wait for the queries, then repeat the yield read exactly as
+   the RESOLVED block describes it, and report the pair: yield, and how many hit slots were
+   still the session's own doc (should be ~0; if it is not, the skill wiring is not being
+   followed and that is an ADOPTION finding, not a yield one). 🔴 **This is the question the
+   whole effort rides on** — an index queried by every session and never useful is a cost, not
+   a capability, and adoption cannot distinguish the two. ⚠ **The falsifier is real and should
+   be honoured:** if yield stays ~1/20 with foreign hits filling every slot, the corpus has
+   little to offer a resuming session, and the right response is to stop paying for the step
+   rather than to tune the ranker again.
    forcing: none
-2. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
+2. **A BLANK `--exclude-slug` is still a silent no-op, and it is reachable from the CLI.**
+   `--exclude-slug "  "` normalises to `""`, prints `excluded=` with nothing after it, leaves
+   `in_scope_docs == indexed_docs`, and returns the document the caller meant to drop — the exact
+   class three audit rounds closed everywhere else. The library layer accepts `[""]` too. Round 4
+   measured both; this PR deliberately fixed only the *advice* (the refusal no longer offers a
+   blank as its remedy) and NOT the behaviour, to keep the audit ladder's last round inside the
+   claim-correction criterion it stopped on. 🔴 The fix belongs at `main()` as an input rejection
+   (`RC_USAGE` / rc 2), never in the renderers — a `label or "(unnamed)"` there re-introduces the
+   falsy-string shape swept out of the decision path.
+   **Closing condition:** a merged PR in which `handoff_search.py --exclude-slug "  "` exits 2,
+   with a test that watches it fail at the previous commit.
+   forcing: none
+3. **The label/derivation granularity residual** — `scripts/lib/handoff_index.py`,
    `rebuild_delete_labels`. Its own round, because the fix moves the delete scope. The tripwire
    test `test_through_main_the_residual_is_recorded_and_the_report_is_true` fails the day someone
    does it, which is the intended signal.
    forcing: none
-3. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
+4. **The empty-label display residual** — an empty label renders blank on FOUR surfaces; the
    operator sees THAT rows were deleted, not WHICH. 🔴 The fix belongs at `main` as an input
    rejection (`RC_USAGE`), NEVER in the renderers — a `label or "(unnamed)"` there would
    re-introduce the exact falsy-string shape three audit rounds swept out of the decision path.
@@ -308,6 +381,61 @@ on its own. What is STILL unmeasured is whether a hit ever changes what a sessio
   open item has nothing to type, so the step is conditional in substance while looking
   unconditional. Keying on the handoff's TOPIC is what made it runnable every time; all four
   post-fix queries are topic-shaped. **Ask what INPUT a step needs, not just where it sits.**
+- 🔴 **A RETRIEVAL STEP KEYED ON A DOC'S TOPIC RETRIEVES THAT DOC — 38% OF THE BUDGET, AND THE
+  TOP SLOT 65% OF THE TIME.** Measured over 20 real queries: 23 of 60 hit slots were the
+  session's own handoff, already read minutes earlier in step 3. It is arithmetic, not a
+  ranker bug: the best text match for a document's topic is that document. **Whenever a
+  retrieval query is keyed on something the caller already holds, ask what fraction of the
+  results the caller has ALREADY SEEN** — the answer is the retrieval you are not getting.
+  Closed by `--exclude-slug`, which the `/resume` fence now passes.
+- 🔴 **EVERY LAYER PINNED, AND THE FLAG STILL DELETABLE TO INERT WITH A GREEN SUITE.** `#1399`
+  shipped 13 tests covering `exclusion_slug`, the row filter, both backends' bound params, the
+  renderer and the `filtered` flag — and **nothing pinned that `main()` hands `exclude` to
+  `run_search` at all.** An audit deleted `exclude=exclude` from the CLI call site: the flag
+  became completely inert, the excluded doc came back as hit #1, and **304 of 304 tests
+  passed** — 304 being the TWO-FILE scope (`test_handoff_index.py` +
+  `test_resume_handoff_search_wiring.py`), not the ~21k-test suite.
+  The pre-existing "🔴 THE SEAM" guard proves only that argparse ACCEPTS the flag — it passes
+  `--limit 0`, which returns rc 2 *before any store is built*. `claude/RULES.md` → "verified in
+  isolation is the new vacuous green" and "a count of DECLARATIONS is not a count of INSTANCES".
+  **Ask which line makes the feature REACH the code you tested, and pin that line** — the two
+  call sites are now pinned behaviourally (offline) and by an AST ledger that fails if a call
+  site is added without `exclude=` as well as if one is removed. 🔴 **And the ledger pins the
+  VALUE, not just the keyword** — round 2 wrote `exclude=()` at the postgres site and it
+  SURVIVED all 314 tests — again the two-file scope, at that round's tip — while the
+  keyword was present and the flag was inert. A guard on a NAME
+  is walkable by supplying a different value under the same name.
+- 🔴 **I FIXED THE CLASS IN ONE BRANCH AND WROTE A COMMENT SAYING SO, WHILE ITS NEIGHBOUR KEPT
+  THE DEFECT.** The `empty-scope` remedy was taught to name only the flags the run passed, with a
+  comment citing "the same defect the no-match branch below already fixed once" — and `no-match`
+  went on telling exclusion-only runs to "widen `--repo` / `--section`". That is the branch that
+  matters: against a 401-doc corpus one exclusion can essentially never empty the scope, so
+  `no-match` is what a real `/resume` hits and `empty-scope` needs a one-doc corpus. Now ONE
+  function (`active_filter_flags`) answers it for both. **When a commit claims to fix a class,
+  sweep every site the way you swept the hardest one** — a comment asserting the sweep is not the
+  sweep.
+- 🔴 **A SILENT NO-OP IS THE WORST FAILURE A FILTER CAN HAVE, AND THREE INPUT SHAPES HAD IT.** An
+  absolute path, a `handoff-x` basename with no `.md`, and a trailing space each derived a garbled
+  slug, printed a confident `excluded=<garbage>`, matched nothing and returned the document the
+  caller was dropping. **A filter that declines to filter renders identically to one that
+  worked** — which is why the skill now tells the reader to check the COUNT, not just the tell.
+- 🔴 **AN UNSCOPED TEST COUNT IS A COVERAGE CLAIM, AND THIS PR MADE IT FOUR TIMES.** "the whole
+  suite green at 304", "SURVIVED all 314 tests", "a 306-test green suite", "304 of 304 tests
+  passed" — every one numerically TRUE and every one naming a two-file scope of ~300 against a
+  repo of ~21,000. **FOUR quoted counts, FIVE textual sites** — `SURVIVED all 314 tests` occurs
+  twice — and rounds 1-3 each caught one site and fixed that site. Round 4 found the fifth still
+  unswept, inside the very test the earlier version of this bullet held up as the exemplar; the
+  bullet had already claimed the sweep was complete. 🔴 **A number needs the DENOMINATOR'S NAME,
+  not just the numerator** — and when a round fixes an instance of a shape, grep for the shape
+  and COUNT the hits, because "I swept it" is itself a claim of exactly the kind this bullet is
+  about.
+- 🔴 **A PERFECT 100% (OR 0%) IS A REASON TO SUSPECT THE NEEDLE, NOT TO WRITE IT DOWN.** The
+  first pass at the number above reported 23-of-23 self-hits, because it grepped transcripts
+  for `claudedocs/handoff-<slug>.md` — a string the SEARCH ITSELF PRINTS for every hit, so the
+  needle matched the instrument's own output. Rebuilt from `resume-state.sh`'s `handoff:` line
+  and `claim-work --slug-for` arguments, which the search cannot write, it is 38%. Same family
+  as the `~24×` mention-vs-invocation overcount two bullets down: **both times the tool under
+  measurement was emitting the exact string being counted.**
 - 🔴 **A MEASUREMENT'S DENOMINATOR MUST NAME ITS OWN INSTRUMENT.** The first adoption reading
   had the measuring session inside the denominator, giving `8 − 1 = 7` where the analysis used
   6; an audit caught it. Every reading since states the accounting (`8 = 1 fired + 6 analysed +
@@ -374,15 +502,45 @@ for f in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
 print(f"runs={len(runs)} queried={len(hits & runs)} cairn(control)={len(cairn & runs)}")
 PY
 #    2026-09-07T02:25Z baseline: workbench 4/4 (control 4/4); laptop 0 runs.
+#    2026-09-08T17:00Z re-run:   workbench 20/22 (91%), control 21/22; laptop STILL 0 runs
+#                                (measured over ssh, not assumed).
+#    🔴 THE SCRIPT ABOVE DOES **NO** SESSION-ID EXCLUSION — it printed 23/21/22, and the
+#    20/22 was reached by subtracting the measuring session BY HAND afterwards. Said plainly
+#    because an audit read the annotation as describing the script and could not reproduce it.
+#    If you want the exclusion mechanised, filter `sid` against your own session id; otherwise
+#    report the raw triple and say which one you subtracted.
+#    An independent re-run hours later (larger window): runs=36 queried=33 (92%), control 34.
 #    Pre-fix same host, #1295..#1332: 11 runs, 2 queried, control 10.
+#    ⚠ The laptop half needs the same script run THERE — this one reads only this host's
+#    ~/.claude/projects. A workbench-only number is not a fleet number.
 
 # 2. The timer's OWN run — the only thing that tests the unit's environment:
 systemctl --user show handoff-index-sync.service -p Result -p ExecMainStatus
 journalctl --user -u handoff-index-sync.service --no-pager -n 20
 
 # 3. The DB path answers (backend= is the discriminator, NOT the row count):
-KUBECONFIG=$KC_HOMELAB python3 ~/workspace/devrc/scripts/lib/handoff_search.py --query fsync --limit 3
+#    🔴 `nix develop` IS REQUIRED, NOT JUST THE KUBECONFIG. A bare `python3` here dies with
+#    `psycopg2 is required` before it opens anything — the UNIT has the dependency, a hand-run
+#    does not, exactly as the unit has the KUBECONFIG a hand-run lacks. This line said
+#    `KUBECONFIG=… python3 …` until 2026-09-08 and could not have worked as written.
+KUBECONFIG=$KC_HOMELAB nix develop ~/workspace/devrc -c \
+  python3 ~/workspace/devrc/scripts/lib/handoff_search.py --query fsync --limit 3
 #    expect backend=postgres. backend=memory means it silently fell back and you verified nothing.
+#    2026-09-08: backend=postgres, indexed_sections=5125 — the SAME number the timer's own run
+#    reported writing, which is what makes the two agree rather than merely both be non-zero.
+
+# 3b. The exclusion actually frees slots (the rank-1 fix). A DIFFERENTIAL — one flag apart:
+Q="handoff search index adoption yield"
+python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "$Q" --limit 3 | grep '^──'
+python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "$Q" --limit 3 \
+  --exclude-slug claudedocs/handoff-handoff-search-index.md | grep -E '^──|excluded='
+#    expect: the first names devrc/handoff-search-index in its top slot(s); the second names it
+#    NOWHERE, prints `excluded=handoff-search-index` on the scope line, and reports an
+#    in_scope_docs LOWER than indexed_docs. 🔴 Do NOT assert "by one": the slug is excluded in
+#    EVERY repo, so two repos sharing a doc basename drop two. Measured 2026-09-08: 0 shared
+#    slugs between the reachable repos, so one is the usual case, never the contract.
+#    🔴 `excluded=` proves the flag PARSED; the COUNT proves it MATCHED — read both, because an
+#    unnormalisable value used to print a confident `excluded=<garbage>` and filter nothing.
 
 # 4. The consumer is LIVE, not merely merged (readlink is the arbiter):
 readlink -f ~/.claude/skills/resume/SKILL.md          # must resolve into /nix/store
