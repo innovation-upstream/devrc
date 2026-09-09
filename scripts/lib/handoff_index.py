@@ -1450,7 +1450,8 @@ def _exclusion_list(exclude) -> list[str]:
         raise TypeError(
             "exclude takes a SEQUENCE of slugs, not a bare str: a string iterates "
             f"per character, so exclude={exclude!r} would filter on "
-            f"{sorted(set(exclude))!r}. Pass [{exclude!r}]."
+            f"{sorted(set(exclude))!r}. Pass a list of slugs, e.g. "
+            f"[{exclude!r}] — or () for no exclusion."
         )
     out = list(exclude)
     bad = [e for e in out if not isinstance(e, str)]
@@ -1658,6 +1659,13 @@ class PostgresSectionStore:
         sections: Sequence[str] = (),
         exclude: Sequence[str] = (),
     ) -> IndexStats:
+        # 🔴 COERCE BEFORE THE `bool()`, NOT INSIDE THE `if` BELOW. Guarding the
+        # call with `if exclude:` made this backend silently ACCEPT the shapes the
+        # memory backend refuses — `exclude=""` is falsy, so the predicate was
+        # skipped and `_exclusion_list` never ran, while `_selected` raised. A
+        # guard against cross-backend divergence that is itself applied on only
+        # one backend is the divergence.
+        exclude = _exclusion_list(exclude)
         sql = self.stats_sql(repo=repo is not None, sections=bool(sections),
                              exclude=bool(exclude))
         params: list[object] = []
@@ -1666,7 +1674,7 @@ class PostgresSectionStore:
         if sections:
             params.append(list(sections))
         if exclude:
-            params.append(_exclusion_list(exclude))
+            params.append(list(exclude))
         with self._conn.cursor() as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
@@ -1712,6 +1720,7 @@ class PostgresSectionStore:
         limit: int = 10,
         exclude: Sequence[str] = (),
     ) -> list[Hit]:
+        exclude = _exclusion_list(exclude)   # see `stats` — coerce before bool()
         sql = self.search_sql(repo=repo is not None, sections=bool(sections),
                               exclude=bool(exclude))
         # 🔴 THIS ORDER MIRRORS `_filter_predicates` AND THE SQL TEXT. `query`
@@ -1725,7 +1734,7 @@ class PostgresSectionStore:
         if sections:
             params.append(list(sections))
         if exclude:
-            params.append(_exclusion_list(exclude))
+            params.append(list(exclude))
         params.append(limit)
         with self._conn.cursor() as cur:
             cur.execute(sql, params)

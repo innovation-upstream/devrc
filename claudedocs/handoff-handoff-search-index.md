@@ -385,8 +385,11 @@ the cause of the other 19 is now measured rather than guessed — see the block 
   `--limit 0`, which returns rc 2 *before any store is built*. `claude/RULES.md` → "verified in
   isolation is the new vacuous green" and "a count of DECLARATIONS is not a count of INSTANCES".
   **Ask which line makes the feature REACH the code you tested, and pin that line** — the two
-  call sites are now covered behaviourally (offline) and by an AST ledger that fails if a call
-  site is added without `exclude=` as well as if one is removed.
+  call sites are now pinned behaviourally (offline) and by an AST ledger that fails if a call
+  site is added without `exclude=` as well as if one is removed. 🔴 **And the ledger pins the
+  VALUE, not just the keyword** — round 2 wrote `exclude=()` at the postgres site and it
+  SURVIVED all 314 tests: the keyword was present and the flag was inert. A guard on a NAME
+  is walkable by supplying a different value under the same name.
 - 🔴 **I FIXED THE CLASS IN ONE BRANCH AND WROTE A COMMENT SAYING SO, WHILE ITS NEIGHBOUR KEPT
   THE DEFECT.** The `empty-scope` remedy was taught to name only the flags the run passed, with a
   comment citing "the same defect the no-match branch below already fixed once" — and `no-match`

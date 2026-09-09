@@ -737,7 +737,14 @@ def render(outcome: SearchOutcome) -> str:
         # than a missing measurement.
         flags = active_filter_flags(outcome)
         lines.append(
-            "   Try fewer/other terms, or widen " + " / ".join(flags)
+            # 🔴 "WIDEN OR DROP", NEVER BARE "WIDEN" — and this is the second
+            # time this pair of branches disagreed. `active_filter_flags` unified
+            # WHICH flags each branch names; the VERB stayed open-coded, and
+            # "widen --exclude-slug" is advice that guarantees the zero stays a
+            # zero: widening an exclusion excludes MORE. The sibling empty-scope
+            # branch already said "Widen or drop". One rule, one place — the
+            # phrasing included.
+            "   Try fewer/other terms, or widen or drop " + " / ".join(flags)
             + " before concluding nobody wrote it down."
             if flags else
             "   Try fewer or different terms before concluding nobody wrote it down. "

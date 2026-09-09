@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -510,3 +511,43 @@ def test_the_sentinels_can_report_a_missing_block(tmp_path):
     got = wiring_block(body)
     assert got == f"{BLOCK_OPEN} middle {BLOCK_CLOSE}", got
     assert "BEFORE" not in got and "AFTER" not in got
+
+
+def test_the_whole_FENCE_is_valid_shell_verbatim():
+    """🔴 THE FENCE IS A COPY-PASTE TARGET, AND BASH ABORTS THE WHOLE BLOCK ON A
+    PARSE ERROR — so one bad line makes EVERY command in it run zero times.
+
+    Two measured instances, both silent in every other test: `#1399` added an
+    UNQUOTED placeholder carrying an apostrophe and backticks
+    (`unexpected EOF while looking for matching '`), and the pre-existing
+    `cairn recall --repo <path>` line parses `<path>` as a REDIRECT. The second
+    one meant that even after the first was fixed, a verbatim paste still ran
+    neither command — and the round-2 audit's "bash -n rc 0" claim was true of
+    the LINE and false of the FENCE.
+
+    🔴 IT ASSERTS THE FENCE, NOT A LINE, because that is the unit a reader
+    pastes. A per-line check passes on exactly the corpus this test exists to
+    reject."""
+    fence = _step4_fence()
+    proc = subprocess.run(["bash", "-n"], input=fence, text=True,
+                          capture_output=True)
+    assert proc.returncode == 0, (
+        f"the step-4 fence is not valid shell — a verbatim paste runs NONE of "
+        f"its commands:\n{proc.stderr}\n--- fence ---\n{fence}"
+    )
+    # 🔴 POSITIVE CONTROL for the instrument: `bash -n` must be able to say no.
+    # Without it, a `bash` that silently accepted anything would make the
+    # assertion above a fact about the harness rather than about the fence.
+    bad = subprocess.run(["bash", "-n"], input="echo '\n", text=True,
+                         capture_output=True)
+    assert bad.returncode != 0, "bash -n accepted an unterminated quote"
+
+
+def _step4_fence() -> str:
+    """The step-4 code fence, as text — the block a reader copies."""
+    lines = RESUME_SKILL.read_text().splitlines()
+    idx = next(i for i, l in enumerate(lines) if EXPECTED_COMMAND.split()[0] in l
+               and "handoff_search.py" in l)
+    start = max(i for i in range(idx) if lines[i].strip().startswith("```"))
+    end = min(i for i in range(idx, len(lines)) if lines[i].strip() == "```")
+    return "\n".join(l.strip() for l in lines[start + 1:end])
