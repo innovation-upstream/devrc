@@ -5,7 +5,18 @@ Make the AIO pump and case fan RPMs visible in the i3status-rust bar, and persis
 
 ## State now
 - Branch: `feat/nct6683-fans-bar`, pushed. Commit `357aa140`. **No PR yet** — waiting on the gate (below).
-- **Rank 2 (the bar pill) is DONE and LIVE.** Rank 1 is **STAGED, not applied** — it needs sudo, which Claude cannot do.
+- 🔴 **BOTH RANKS ARE NOW DONE. This line previously said rank 1 was "STAGED, not applied" — that
+  was true when written and is FALSE now:** the operator ran the script at **2026-09-08 14:18:33**.
+  Verified: `/etc/nixos/configuration.nix:421` reads
+  `boot.kernelModules = [ "i2c-dev" "vfio_pci" "vfio" "vfio_iommu_type1" "nct6683" ];`,
+  `/etc/modules-load.d/nixos.conf` carries `nct6683`, and
+  `/etc/nixos/configuration.nix.bak-nct6683-20260908-141833` is the script's own backup format.
+  A dry run confirms `Already present in boot.kernelModules`. Re-running is harmless (idempotent).
+- ⚠ **Rank 2 is MERGED-PENDING, and is NOT currently deployed.** It was built, switched and
+  screenshotted live — then a later `home-manager switch` (17:15, `profile-2078`) from a checkout
+  that did not contain this PR **removed it**: `~/.config/i3status-rust/scripts/i3status-fans` does
+  not exist and `config-top.toml` has no fans block. Not a defect — `home.file` deploys from
+  whatever tree the switch ran in. **`scripts/ship.sh` after the PR merges is what puts it back.**
 
 **DONE this session**
 - `scripts/i3status-fans` (new) — reads the NCT6687D tachos out of `/sys/class/hwmon`, no poller/cache/network.
@@ -52,17 +63,21 @@ Thermistors: 37–46°C (VRM/chipset)
 different item. Both `nct6683-bar-integration-1` and `-2` claims from this session are RELEASED,
 so no live claim is re-pointed by that shift. Ranks 1 and 3 keep their original meaning.
 
-1. **Run the staged sudo script** — `sudo bash ~/workspace/devrc/nix/system/apply-nct6683-module.sh`.
-   Adds `"nct6683"` to `boot.kernelModules` in `/etc/nixos/configuration.nix`, rebuilds, and verifies.
-   `NCT_DRY_RUN=1` prints the edit and rebuilds nothing. Until this runs, the driver is loaded only
-   by August's hand `modprobe` and the pill will read `?` after the next reboot.
-   forcing: user — only the operator can sudo; Claude is forbidden `sudo nixos-rebuild` by CLAUDE.md.
-2. **Finish the gate, then open + merge the PR for `feat/nct6683-fans-bar`.** Needs BOTH tiers on the
-   MERGED tree (the branch already contains `origin/main`, so merged-tree == branch as of `3d4ac941`):
+1. ~~Run the staged sudo script~~ — **DONE 2026-09-08 14:18:33 by the operator.** Kept at rank 1 so
+   live claims are not re-pointed. Verify with `grep -x nct6683 /etc/modules-load.d/nixos.conf`
+   (🔴 NOT `lsmod` — see Gotchas). Nothing to do.
+   forcing: none — completed.
+2. **Merge PR #1411, then `scripts/ship.sh`.** 🔴 **The ship is not optional and not cosmetic** — the
+   pill is currently ABSENT from the deployed bar (see State now), so merging alone leaves it
+   invisible. Gate on the MERGED tree, not the branch:
    `nix develop ~/workspace/devrc -c bash scripts/gate.sh --tier both`, AND
    `nix build .#checks.x86_64-linux.pytests` then `.nodetests` **one at a time**.
+   ⚠ **Do NOT reuse a base sha from this doc.** An earlier revision said "merged-tree == branch as
+   of `3d4ac941`"; `main` has moved many times since (it was 11+ commits ahead within the hour), and
+   a reader trusting that line gates the BRANCH — the exact trap the instruction exists to prevent.
+   Re-derive the base at the moment you gate.
    forcing: gate — nothing else blocks this merge (`main` is protected in name only, deliberately),
-   so the two-tier run is the only real gate and it is not finished.
+   so the two-tier run on a freshly-derived base is the only real gate.
 3. **Optional: a dunst toast when the pump stalls.** The pill already goes Critical below 500 RPM,
    but a fullscreen game or a covered bar hides it. Would need a poller source + rising-edge latch
    (the `bar-status-poll` shape), which is a real cost for a rare event.

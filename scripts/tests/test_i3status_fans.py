@@ -22,6 +22,7 @@ import importlib.machinery
 import importlib.util
 import json
 import math
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -119,7 +120,7 @@ def test_parse_fan_WITHOUT_a_floor_is_display_only():
     ("pump=1:abc", "not a number"),
     ("pump=1:nan", "finite"),
     ("pump=1:inf", "finite"),
-    ("pump=1:-1", "negative floor"),
+    ("pump=1:-1", "can never be crossed"),
 ])
 def test_parse_fan_rejects(spec, needle):
     """Each rejection carries its OWN message, so a mutant that deletes one
@@ -178,8 +179,21 @@ def test_find_chip_returns_None_for_a_missing_root(tmp_path):
 
 @pytest.mark.parametrize("chip", ["", "*", "../../etc", "nct6687/../x", None])
 def test_find_chip_rejects_an_implausible_name(chip):
-    """The name is pasted into a glob; a wildcard would make the lookup match
-    whatever happens to be there."""
+    """🔴 THIS IS DEFENCE-IN-DEPTH, AND THIS DOCSTRING USED TO OVERCLAIM IT.
+
+    It said "the name is pasted into a glob; a wildcard would make the lookup
+    match whatever happens to be there", which is FALSE: `find_chip` globs the
+    literal `"hwmon*"` and compares the name with `==`, so `*` matches no `name`
+    file and finds nothing. MEASURED with the guard removed — `*`, `../../etc`,
+    `nct6687/../x`, `''` and `..` all render the identical `?` pill, against a
+    positive control (`nct6687` -> `2660`) showing the harness could see a
+    difference.
+
+    What the guard is actually worth: a typo becomes a loud ValueError instead
+    of a silent `?`, and a future refactor that DOES interpolate the name cannot
+    quietly become a sink. That is worth keeping and worth pinning; it is not
+    the injection fix the old wording advertised.
+    """
     with pytest.raises(ValueError):
         fans.find_chip(chip, "/sys/class/hwmon")
 
@@ -366,6 +380,56 @@ def test_the_positive_control_for_the_test_above(workbench):
     assert json.loads(p.stdout)["text"] == "2660·1736"
 
 
+def test_a_CRASH_prints_a_traceback_instead_of_impersonating_a_missing_driver(tmp_path):
+    """🔴 This pill's `?` is DEFINED — here, in the module docstring and in
+    nix/graphical.nix — as "the chip is absent, i.e. nct6683 is not loaded". A
+    crash renders the SAME `?`, so without a traceback any future defect
+    impersonates a missing driver: it reads as a known documented state, sends
+    the operator to the sudo script, and leaves nothing to contradict it.
+
+    The trigger is synthetic on purpose (real hwmon `name` files are kernel
+    ASCII): a `name` that is not valid UTF-8 makes `read_text()` raise
+    UnicodeDecodeError — a ValueError, NOT the OSError `find_chip` catches.
+    What is not synthetic is the requirement: stdout stays the pill, stderr
+    carries the diagnosis, exit stays 0.
+    """
+    root = tmp_path / "hwmon-root"
+    (root / "hwmon0").mkdir(parents=True)
+    (root / "hwmon0" / "name").write_bytes(b"\xff\xfe not utf8\n")
+    p = subprocess.run(
+        [sys.executable, str(FANS_SCRIPT), "--hwmon-root", str(root),
+         "--fan", "pump=1:500"],
+        capture_output=True, text=True, timeout=30)
+
+    assert p.returncode == 0, p.stderr
+    assert json.loads(p.stdout) == {"icon": "refresh", "text": "?",
+                                    "short_text": "?", "state": "Warning"}
+    assert "Traceback" in p.stderr, (
+        "a crash rendered the driver-not-loaded pill with NO diagnosis: "
+        "stderr was %r" % (p.stderr,))
+    assert "UnicodeDecodeError" in p.stderr, p.stderr
+
+
+def test_the_ORDINARY_unknown_pill_stays_SILENT_on_stderr(tmp_path):
+    """🔴 The control for the test above, and what stops it degenerating into
+    "always print something". A genuinely absent chip is a NORMAL state, not an
+    error: it must render the same pill with an EMPTY stderr, so the traceback
+    remains a real signal rather than noise every 30 seconds."""
+    root = tmp_path / "hwmon-root"
+    (root / "hwmon0").mkdir(parents=True)
+    (root / "hwmon0" / "name").write_text("nvme\n")
+    p = subprocess.run(
+        [sys.executable, str(FANS_SCRIPT), "--hwmon-root", str(root),
+         "--fan", "pump=1:500"],
+        capture_output=True, text=True, timeout=30)
+
+    assert p.returncode == 0
+    assert json.loads(p.stdout)["text"] == "?"
+    assert p.stderr == "", (
+        "the ordinary chip-absent path wrote to stderr — the traceback stops "
+        "being a signal if it fires every tick: %r" % (p.stderr,))
+
+
 def test_the_icon_is_a_key_the_bar_test_allowlists():
     """Cross-file pin: `test_bar_status.py` owns the MEASURED allowlist of real
     material-nf keys. An icon that is not one renders the whole pill as a red
@@ -379,3 +443,73 @@ def test_the_module_declares_no_infinite_or_nan_floor_path():
     for bad in (math.nan, math.inf, -math.inf):
         with pytest.raises(ValueError):
             fans.parse_fan("pump=1:%r" % bad)
+
+
+# --------------------------------------------------------------------------
+# the floor-of-zero hole, and the nix seam that would have hidden it
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("zero", ["0", "0.0", "-0", "0e0"])
+def test_a_floor_of_ZERO_is_REFUSED_because_it_can_never_fire(zero):
+    """🔴 `read_rpm` maps every negative reading to None, so `rpm < 0` is
+    UNREACHABLE: a floor of exactly 0 parses cleanly, looks configured, and can
+    never alarm — a stopped pump renders `0` in neutral Idle forever. The
+    original guard was `floor < 0`, which left this open by one.
+    """
+    with pytest.raises(ValueError) as e:
+        fans.parse_fan("pump=1:%s" % zero)
+    assert "can never be crossed" in str(e.value)
+
+
+def test_the_smallest_ACCEPTED_floor_really_does_alarm_at_zero_rpm():
+    """🔴 The positive control for the refusal above, and the thing that makes
+    it a boundary rather than "reject more". Without it, a guard rejecting every
+    floor would pass the test above while disabling the feature."""
+    spec = fans.parse_fan("pump=1:0.5")
+    assert spec.floor == 0.5
+    assert fans.render([(spec, 0)])["state"] == "Critical"
+    assert fans.render([(spec, 1)])["state"] == "Idle"
+
+
+def _nix_fan_args():
+    """The `--fan …` arguments nix actually passes, read out of graphical.nix."""
+    nix = (SCRIPTS.parent / "nix" / "graphical.nix").read_text()
+    m = re.search(r'command = "\$\{scriptsDir\}/i3status-fans([^"]*)"', nix)
+    assert m, "fansBlock's `command =` line not found in nix/graphical.nix"
+    return m.group(1).split()
+
+
+def test_the_NIX_COMMAND_LINE_parses_and_arms_the_pump_alarm():
+    """🔴 THE SEAM GUARD. Nothing fed that `command =` literal to `parse_fan`,
+    so a one-character typo in nix shipped a broken pill with a fully green
+    suite. MEASURED on the merged tree, mutating ONLY that string:
+
+      `--fan pump=1:`  -> 529/529 green, and the live pill is a permanent
+                          `?`/Warning while the pump turns at 2660 RPM.
+      `--fan pump=1:0` -> 529/529 green, and the alarm can never fire.
+
+    The precedent is in the same nix file: `test_the_load_pill_threshold_
+    MATCHES_cpu_monitors` pins `loadBlock`'s `command =` STRING for exactly this
+    reason. This asserts the STATE the arguments produce, not their spelling, so
+    re-ordering or renaming a fan is free and disarming one is not.
+    """
+    args = _nix_fan_args()
+    specs = [fans.parse_fan(a) for i, a in enumerate(args)
+             if i and args[i - 1] == "--fan"]
+    assert specs, "nix passes no --fan arguments at all"
+    # At least one fan must be able to raise Critical, or the pill is decorative.
+    armed = [s for s in specs if s.floor is not None]
+    assert armed, (
+        "NO fan in nix/graphical.nix carries a floor — the pump alarm is "
+        "disarmed and the pill can only ever render numbers: %r" % (args,))
+    # And that armed fan must actually alarm on a stopped tacho.
+    for s in armed:
+        assert fans.render([(s, 0)])["state"] == "Critical", s
+        assert s.floor > 0, s
+
+
+def test_the_nix_command_line_names_the_pump_first():
+    """`short_text` keeps the FIRST fan only, so the bar drops the pump when
+    space is tight if the order is ever swapped."""
+    args = _nix_fan_args()
+    first = [a for i, a in enumerate(args) if i and args[i - 1] == "--fan"][0]
+    assert fans.parse_fan(first).label == "pump", first

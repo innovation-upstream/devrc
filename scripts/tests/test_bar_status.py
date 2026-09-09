@@ -3367,12 +3367,21 @@ _HOME_FILE = re.compile(
 #: scriptsDir-backed custom blocks, MEASURED. The floor exists so a regex that
 #: silently stops matching fails loudly instead of vacuously passing. Raise it
 #: when you add a block; the failure message prints the number it saw.
-_EXPECTED_SCRIPT_BLOCKS = 12
+#: 2026-09-08: 12 -> 13 with `fansBlock`. Raised per the instruction above, and
+#: it was NOT cosmetic: at 12 the regex regression this floor exists to catch
+#: (`^  };` for `^  }`) yields exactly the un-raised number, so the assertion
+#: credited with catching it passes and the suite dies elsewhere, naming the
+#: wrong block.
+_EXPECTED_SCRIPT_BLOCKS = 13
 #: ALL block definitions, MEASURED — including the ones with no scriptsDir
 #: command. Pins the `^  }` terminator: with `^  };`, `temperatureBlock`'s
 #: `} // (if isLaptop …)` idiom swallowed `gpuBlock` whole and only 19 were
 #: found. Nothing else notices, because the swallowed block has no command.
-_EXPECTED_BLOCK_DEFS = 21
+#: 2026-09-08: 21 -> 22 with `fansBlock`. MEASURED that the un-raised value was
+#: the live hole: reintroducing the `^  };` terminator swallows `fansBlock` into
+#: `temperatureBlock` and yields 21 — the old floor exactly — so this assertion
+#: passed while the detector it names was blind.
+_EXPECTED_BLOCK_DEFS = 22
 #: Ungated/gated split, MEASURED. Guards `_block_gates` itself: if gate parsing
 #: collapses to all-True or all-False (a stray `isLaptop` in a comment, the list
 #: reflowed onto one line), `checked` stays correct while the gate assertion
@@ -3444,6 +3453,20 @@ def _block_gates(nix):
     return gates
 
 
+def _block_is_workbench_only(nix, block):
+    """True if `block` reaches the bar only on the workbench (`!isLaptop`).
+
+    Reads the SEGMENT of the `blocks` list the block appears in, so the answer
+    comes from the same text `_block_gates` parses rather than from a second,
+    drifting notion of what "gated" means.
+    """
+    body = nix.split("  blocks =", 1)[1].split("\nin\n", 1)[0]
+    for segment in _split_top_level(_strip_nix_comments(body)):
+        if re.search(r"\b%s\b" % re.escape(block), segment):
+            return "!isLaptop" in segment
+    return False
+
+
 def test_every_custom_block_script_is_DEPLOYED_UNDER_A_COMPATIBLE_GATE():
     """🔴 A block and its script are declared in two places, and nothing made
     them agree. `loadBlock` shipped in the UNCONDITIONAL half of `blocks` while
@@ -3494,6 +3517,35 @@ def test_every_custom_block_script_is_DEPLOYED_UNDER_A_COMPATIBLE_GATE():
                 "%s reaches the bar on EVERY host but %s is deployed under "
                 "`%s` — the ungated hosts get a block whose command is absent"
                 % (block, script, deployed[script].strip()))
+        elif not gates.get(block):
+            # 🔴 THE OTHER DIRECTION, and it was uncovered. The check above
+            # fires only when the BLOCK is ungated, so a GATED block whose
+            # script carries a DIFFERENT gate was never compared. MEASURED on
+            # `fansBlock`: rewriting its `home.file` to `lib.mkIf isLaptop` —
+            # the workbench renders the block while the script deploys only to
+            # the laptop — left the suite 529/529 GREEN, while `nix/graphical.nix`
+            # carried a 🔴 comment asserting the pairing was protected.
+            #
+            # Compare the POLARITY, not the text: a gated block needs a script
+            # gated the SAME way. `_block_gates` only knows ungated-vs-gated, and
+            # every gate in this file is spelled with `isLaptop`, so that is what
+            # is compared — a richer gate vocabulary needs a richer parse, and
+            # the floors above are what stop this going quietly vacuous.
+            dep = deployed[script]
+            # 🔴 A script deployed MORE WIDELY than its block is NOT a finding,
+            # and asserting it was the first version of this check. It flagged
+            # `rigcontrolBlock` and `claudeRunsBlock` — both long-standing,
+            # both deliberate — because a laptop that holds a script it never
+            # runs has a spare symlink and nothing else. Only the reverse
+            # breaks anything, and a guard that reddens on main's existing,
+            # correct config is worse than no guard: everyone learns to click
+            # through it.
+            if "mkIf" in dep and (
+                    ("!isLaptop" in dep) != _block_is_workbench_only(nix, block)):
+                problems.append(
+                    "%s and its script %s are gated in OPPOSITE directions "
+                    "(`%s`) — one host renders the block while the other gets "
+                    "the script" % (block, script, dep.strip()))
 
     # Positive controls. Without these a regex that stops matching reports a
     # confident pass over nothing.

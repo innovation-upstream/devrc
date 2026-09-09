@@ -23,12 +23,57 @@
 #            (edits nothing, rebuilds nothing — prints the line it WOULD write)
 set -euo pipefail
 
-CFG="/etc/nixos/configuration.nix"
+# Overridable ONLY so the test suite can drive the edit against a fixture —
+# `apply-nebula-relay.sh` in this directory does the same with NEBULA_CFG. An
+# /etc/nixos edit with no repeatable gate is the thing that goes wrong quietly.
+CFG="${NCT_CFG:-/etc/nixos/configuration.nix}"
 MOD="nct6683"
-LOADCONF="/etc/modules-load.d/nixos.conf"
-DRY="${NCT_DRY_RUN:-}"
+LOADCONF="${NCT_LOADCONF:-/etc/modules-load.d/nixos.conf}"
+
+# 🔴 `0`/`false`/`no` mean OFF, not ON. `[ -n "$DRY" ]` alone made
+# `NCT_DRY_RUN=0` turn dry-run ON — the exact inversion of what anyone typing
+# that means, and it fails SAFE (nothing happens) so nobody would notice until
+# they wondered why the module never persisted.
+case "${NCT_DRY_RUN:-}" in
+  ""|0|false|FALSE|no|NO) DRY="" ;;
+  *) DRY=1 ;;
+esac
 
 [ -r "$CFG" ] || { echo "ERROR: cannot read $CFG (run under sudo)" >&2; exit 2; }
+# 🔴 READABLE IS NOT WRITABLE, and the message above says "run under sudo" while
+# only proving the read. Without this, a non-root run walks the whole detection
+# path and dies at `cp` with a raw permission error instead of the intended one.
+# Skipped under dry-run, which writes nothing and is useful unprivileged.
+if [ -z "$DRY" ] && [ ! -w "$CFG" ]; then
+  echo "ERROR: $CFG is not writable — run under sudo (or set NCT_DRY_RUN=1)" >&2
+  exit 2
+fi
+
+# 🔴 HOST GUARD. This edits the host's own system config, and the chip it exists
+# for is the workbench board's Super I/O — running it on the laptop would add a
+# kernel module for hardware that is not there. `apply-nebula-relay.sh` guards
+# the same way with NEBULA_EXPECT_MESH_IP. Set NCT_SKIP_HOST_CHECK=1 to override
+# deliberately (a new machine with the same chip).
+#
+# 🔴 THE ROOT IS OVERRIDABLE, AND THAT IS WHAT MAKES THIS GUARD TESTABLE. It was
+# first written to read /sys/class/hwmon unconditionally and to skip itself
+# whenever NCT_CFG was set — so on a host WITH the chip, deleting the entire
+# guard left the suite 26/26 GREEN (measured). A test that can only observe the
+# guard on hardware the builder happens to lack is not a test. With
+# NCT_HWMON_ROOT both branches are reachable on any machine.
+HWMON_ROOT="${NCT_HWMON_ROOT:-/sys/class/hwmon}"
+if [ -z "${NCT_SKIP_HOST_CHECK:-}" ]; then
+  if ! ls -d "$HWMON_ROOT"/hwmon*/name >/dev/null 2>&1 \
+     || ! grep -qxs "nct6687\|nct6683" "$HWMON_ROOT"/hwmon*/name; then
+    echo "ERROR: no nct6687/nct6683 hwmon device on this host." >&2
+    echo "       This script persists the driver for the WORKBENCH's Nuvoton" >&2
+    echo "       Super I/O; on a host without that chip it adds a kernel module" >&2
+    echo "       for hardware that is not present." >&2
+    echo "       If the driver is simply not loaded YET, run 'sudo modprobe $MOD'" >&2
+    echo "       first and re-run. To override deliberately: NCT_SKIP_HOST_CHECK=1" >&2
+    exit 4
+  fi
+fi
 
 # Match the ASSIGNMENT, uncommented, at the start of a line. `[^]]*` keeps this
 # anchored to a single-line list — the file has exactly one today, and a

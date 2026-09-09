@@ -54,6 +54,7 @@ import json
 import math
 import re
 import sys
+import traceback
 from pathlib import Path
 
 ICON = "refresh"
@@ -61,7 +62,16 @@ DEFAULT_CHIP = "nct6687"
 SEP = "·"
 _UNKNOWN = {"icon": ICON, "text": "?", "short_text": "?", "state": "Warning"}
 
-#: A hwmon `name` is a kernel identifier, and it is pasted into a glob below.
+#: A hwmon `name` is a kernel identifier. 🔴 THIS IS DEFENCE-IN-DEPTH, NOT A
+#: PATCHED INJECTION SINK — an earlier version of this comment said the name is
+#: "pasted into a glob below", and that was FALSE. `find_chip` globs the literal
+#: `"hwmon*"` and compares the name with `==`, so a metacharacter is matched
+#: literally and simply finds nothing. MEASURED: with the guard removed, `*`,
+#: `../../etc`, `nct6687/../x`, `''` and `..` all render the same `?` pill they
+#: render with it, against a positive control (`nct6687` -> `2660`) proving the
+#: harness could see a difference. Keep the guard — it turns a typo into a loud
+#: ValueError instead of a silent `?`, and it stops a future refactor that DOES
+#: interpolate the name from becoming a sink — but do not restate the sink claim.
 _CHIP_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -119,10 +129,19 @@ def parse_fan(spec):
             raise ValueError(
                 "--fan %r: floor must be a finite number, got %r"
                 % (spec, floor))
-        if floor < 0:
+        # 🔴 `<= 0`, NOT `< 0`. `read_rpm` already maps every negative reading to
+        # None, so `rpm < 0.0` is UNREACHABLE — a floor of exactly 0 parses
+        # cleanly, looks configured, and can never fire: a stopped pump renders
+        # `0` in neutral Idle forever. That is the precise failure this rejection
+        # was written to describe, and the original `< 0` left it open by one.
+        # Measured: `pump=1:0` + rpm 0 -> Idle; `pump=1:0.5` + rpm 0 -> Critical,
+        # so the unreachable set is exactly `floor <= 0`.
+        if floor <= 0:
             raise ValueError(
-                "--fan %r: a negative floor (%g) can never be crossed — a tacho "
-                "never reads below 0, so this silently disables the alarm"
+                "--fan %r: a floor of %g can never be crossed — a tacho never "
+                "reads below 0 (and read_rpm discards negatives), so this "
+                "silently disables the alarm. Use a positive floor, or omit "
+                "the ':' entirely for a display-only fan"
                 % (spec, floor))
     return FanSpec(label.strip(), index, floor)
 
@@ -224,9 +243,18 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:
-        # Last-resort: a visible `?` pill, never the invisible empty one — a
-        # silently blank block is indistinguishable from "the pump is fine".
-        # Built from a literal so it cannot depend on whatever just failed.
+        # 🔴 PRINT THE TRACEBACK FIRST. This pill's `?` is DEFINED, here and in
+        # nix/graphical.nix, as "the chip is absent — i.e. nct6683 is not
+        # loaded". A crash renders that same `?`, so without this line ANY
+        # future defect impersonates a missing driver: it reads as a known,
+        # documented state, sends the operator to the sudo script, and leaves
+        # nothing anywhere to contradict it. i3status-rust reads STDOUT, so a
+        # traceback on STDERR cannot corrupt the block — it lands in the i3
+        # session log and costs nothing.
+        traceback.print_exc()
+        # Then the visible `?` pill, never the invisible empty one — a silently
+        # blank block is indistinguishable from "the pump is fine". Built from a
+        # literal so it cannot depend on whatever just failed.
         sys.stdout.write(
             '{"icon": "%s", "text": "?", "short_text": "?", '
             '"state": "Warning"}\n' % ICON)
