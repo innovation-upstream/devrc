@@ -383,6 +383,7 @@ every whole-string pin stays GREEN and only
 which proves that assertion executes rather than restating the pins beside it.
 """
 
+import importlib.util
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -425,10 +426,10 @@ SKILL_HEADING = (
     "a clean round."
 )
 SKILL_STOP_BODY = (
-    "Rounds continue **only** while the previous round produced a "
-    "**deploy-blocking or should-fix** finding that required a fix. The first "
-    "round that returns none is the last one — stop there, and do not "
-    "re-confirm it. Stop on that, not on the author saying it's done."
+    "Rounds continue **only** while the previous round produced a finding that "
+    "required a fix. The first round that returns no findings is the last one — "
+    "stop there, and do not re-confirm it. Stop on that, not on the author "
+    "saying it's done."
 )
 
 # 🔴 The NIT CARVE-OUT, and the REJECTION that bounds it. Both halves in one
@@ -436,24 +437,43 @@ SKILL_STOP_BODY = (
 # not-a-cap qualifier: the carve-out alone reads as "severity gates the ladder"
 # and the obvious next edit is to raise the bar to deploy-blocking, which is the
 # rejected rule. #702 is the measurement that kills it -- six rounds, ZERO
-# deploy-blockers, four findings that were a false claim written by the previous
-# round's own fix -- so a blocker-keyed ladder stops at round 1 and ships them.
+# deploy-blockers, while its later rounds kept catching false claims the
+# previous round's own fix had written.
+#
+# 🔴 THE QUALIFIER IS THE WHOLE CLAIM, and dropping it is how this went wrong
+# once already. `audit-dispatch.py`'s clause excuses "a nit THAT CHANGES NOTHING
+# A READER DOES" -- a CONDITION. An earlier draft of this pin carried the
+# unqualified "a nit changes nothing a reader does", promoting the condition to
+# an assertion and silently widening the carve-out to every 🟢. That set is not
+# empty and this module documents it 400 lines up: #804's round 8 carried three
+# 🟢, two of them shipped features that could be unwired with the suite green.
+# The wide reading also contradicted `SKILL_HATCH_NOT_A_LICENCE` -- pinned in
+# this same module, and green beside it -- and `RULES_STOP_CLAUSE`, which loads
+# in EVERY session while the skill loads only on trigger.
 #
 # Pinned as WHOLE normalised strings (`claude/RULES.md` -> spelled-guards): the
 # artifact is prose, so a keyword guard is walkable by rewording.
 SKILL_NIT_ONLY_STOPS = (
-    "🔴 **A round whose findings are ALL NITS is a stopping round** — a nit "
-    "changes nothing a reader does, which is why every brief already carries "
-    "`nit-is-not-a-finding`. File them as one follow-up task naming the file; "
-    "never spend a round on them."
+    "🔴 **A round that reports only NITS THAT CHANGE NOTHING A READER DOES is a "
+    "stopping round** — the same set `audit-dispatch.py` already keeps out of "
+    "every brief (`nit-is-not-a-finding`), not a wider one. **A 🟢 that DOES "
+    "change what a reader does is a finding and the ladder continues**: #804's "
+    "round 8 carried three, two of them shipped features that could be unwired "
+    "with the suite green. File the stopping kind as one follow-up task naming "
+    "the file, closed when its PR merges or a named reader dismisses it in "
+    "writing — filed rather than fixed, so the round that files them is still "
+    "the last."
 )
 SKILL_NIT_IS_THE_ONLY_ONE = (
     "⚠ **Nit is the ONLY severity that cannot extend a ladder — "
     "\"deploy-blocking only\" was rejected.** `homelab-infra` #702 ran six "
-    "rounds carrying **zero deploy-blockers**, and four of its six findings "
-    "were a false claim the previous round's fix had written. A blocker-keyed "
-    "ladder ends at round 1 and ships every one of them; should-fix findings "
-    "keep it running."
+    "rounds carrying **zero deploy-blockers** while its later rounds kept "
+    "catching false claims the previous round's own fix had written: one "
+    "guard's rationale went through five successive drafts, each retracted by "
+    "the next round. A blocker-keyed ladder ends after round 1, so rounds 2–6 "
+    "never run — draft 1 ships as the code's stated reason, and nobody ever "
+    "asks the retire-or-accept question that ladder ended on. Should-fix "
+    "findings are what keep it running."
 )
 SKILL_NOT_A_CAP = (
     "🔴 **This is NOT a round cap, and a cap was rejected.** The count is set by "
@@ -1086,27 +1106,45 @@ def test_the_carve_outs_cited_clause_still_exists_in_the_dispatcher():
     """🔴 SEAM: the skill's warrant is a clause the skill does not own.
 
     The carve-out is justified by "every brief already carries
-    `nit-is-not-a-finding`" -- a clause id in `scripts/audit-dispatch.py`.
-    Rename or delete it there and nothing in the skill's own pins moves: the
-    prose goes on citing an enforcement that no longer ships, which reads to a
-    later author as though the dispatcher already handles nits when it does
-    not. The skill side is pinned by the test above; this asserts the other
-    end, so either edit alone fails.
+    `nit-is-not-a-finding`" -- a clause in `scripts/audit-dispatch.py`. Rename
+    or delete it there and nothing in the skill's own pins moves: the prose
+    goes on citing an enforcement that no longer ships, which reads to a later
+    author as though the dispatcher handles nits when it does not. The skill
+    side is pinned by the test above; this asserts the other end, so either
+    edit alone fails.
+
+    🔴 STRUCTURAL, not a substring, and the first draft of this guard was the
+    substring. MEASURED: deleting the whole `Clause("nit-is-not-a-finding", …)`
+    while leaving the id behind in a comment -- `# removed the
+    "nit-is-not-a-finding" clause (see history)` -- scored 15 passed here. The
+    guard SURVIVED the exact deletion its own docstring claimed to catch, which
+    is `claude/RULES.md` -> spelled-guards: a guard on a WORD passes while the
+    hazard exists in another shape. Reading `INVARIANT_CLAUSES` cannot be
+    walked that way -- a comment is not a member of the emitted tuple.
 
     Deliberately the ID and not the clause TEXT -- `test_audit_dispatch.py`
     owns the text pin, and a second copy here would drift against it.
     """
-    dispatch = _read(DISPATCH_PY)
-    assert '"nit-is-not-a-finding"' in dispatch, (
-        "`scripts/audit-dispatch.py` no longer defines a clause with the id "
-        "`nit-is-not-a-finding`, but `claude/skills/audit-pr/SKILL.md` still "
-        "cites it as the reason a nit-only round stops the ladder.\n\n"
+    spec = importlib.util.spec_from_file_location("audit_dispatch", DISPATCH_PY)
+    assert spec is not None and spec.loader is not None, (
+        f"cannot load {DISPATCH_PY} as a module -- has it moved or been renamed?"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    ids = {clause.id for clause in mod.INVARIANT_CLAUSES}
+    assert "nit-is-not-a-finding" in ids, (
+        "`scripts/audit-dispatch.py` no longer EMITS a clause with the id "
+        "`nit-is-not-a-finding` -- INVARIANT_CLAUSES carries "
+        f"{sorted(ids)} -- but `claude/skills/audit-pr/SKILL.md` still cites "
+        "it as the reason a nit-only round stops the ladder.\n\n"
         "  If you RENAMED it: update the citation in the skill's stop-rule "
         "section and `SKILL_NIT_ONLY_STOPS` above, in the same commit.\n"
         "  If you DELETED it: the carve-out has lost its enforcement -- the "
         "brief will start soliciting nits as findings again, and a nit-only "
         "round will read as a round that found something. Restore the clause "
-        "or rewrite the carve-out to stand on its own."
+        "or rewrite the carve-out to stand on its own.\n\n"
+        "  A comment mentioning the id does NOT satisfy this: the tuple is "
+        "read, not the file's text."
     )
 
 
