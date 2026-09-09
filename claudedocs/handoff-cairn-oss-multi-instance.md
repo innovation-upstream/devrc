@@ -506,6 +506,48 @@ discriminator arrived from an unrelated PR, not from more sampling.
   command to an aside **while keeping the full string intact** survives it.
 - **Next probe:** these are rank 18's successors. None blocks anything today.
 
+### 2026-09-09 — the recurring CI intermittent finally CARRIED ITS EVIDENCE: a socket READ TIMEOUT
+🔴 **This SUPERSEDES the "attributed to the TIER, not the tree — root cause unknown" reading.**
+The attribution stands; the mechanism is now measured. Three occurrences were spent before
+this one, because each run was pruned before anyone read it.
+- **Symptom + exact repro:** no local repro.
+  `test_subsystem_store_api.py::TestARefusedWriteIsIndistinguishableFromAnAbsentOne::test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_difference`
+  fails in the Tekton `pytests` tier. Occurrences: #1406 at `f98be263`, #1417 (docs-only),
+  #1425 at `f3bdca9e`.
+- 🔴 **THE TRACEBACK, read from `devrc-ci-qxf9n`'s `step-pytests` log BEFORE the hourly prune
+  — which is the whole reason it exists this time.** It is **not** an assertion failure:
+  `_post` → `post_bullet` → `fetch` → `urlopen` → `http.client` → `socket.recv_into` →
+  **`TimeoutError: timed out`** at `socket.py:720`. The HTTP request to the spawned test
+  server was **established and then never answered**. via: measurement
+- 🔴 **Ruled out: general runner load — by the wall-time discriminator, at two points.** Load
+  inflates EVERY test in a run; a failed assertion inflates exactly one. In the FAILING CI run
+  `scripts/collector/tests` took **14.27 s**, against **36.03 s** for the same target on the
+  loaded dev host, and the whole `scripts/tests` target ran **1091.87 s** against the dev
+  host's **1181.72 s**. CI was *faster* than the box that passed. The run was not inflated;
+  one socket read timed out while everything around it ran quickly. via: measurement
+- 🔴 **Ruled out: that it is caused by any diff.** PR **#1417 changed exactly one file** — a
+  markdown handoff doc — and failed on the identical assertion. A docs-only diff cannot break
+  a server-API test. via: measurement
+- 🔴 **A REAL, INDEPENDENT GAP FOUND WHILE DIAGNOSING — devrc's fork never received cairn #3.**
+  `scripts/tests/test_subsystem_store_api.py:6910`'s `_free_port()` is the **pre-#3** version:
+  it binds port 0, reads the number, closes the socket, and returns — with **no retry, no
+  `SPAWN_ATTEMPTS`, no `_lost_the_port_race`**. `ZacxDev/cairn` closed that TOCTOU in **#3
+  (`8e4ef84`)** and its copy now carries the measurement in the docstring (3000 trials × 20
+  binds recycled the released port **8** times; the control, socket still OPEN, **0**). devrc
+  has carried the unfixed copy the whole time. This is the client fork showing up in CI rather
+  than in the client. via: code
+- ⚠ **NOT a diagnosis, and the distinction matters.** The TOCTOU's known signature is the
+  child dying with **EADDRINUSE**, which surfaces as a connection *refused* — not as an
+  established connection that never answers. A read timeout means something accepted and did
+  not reply. The port race is a **plausible contributor** and an unfixed gap worth closing on
+  its own merits; nothing measured ties it to THIS failure. Do not write it down as the cause.
+- **Next probe:** port cairn #3's retry into devrc's copy (see the new ranked item) and see
+  whether the rate moves. 🔴 **If it recurs first, pull the log IMMEDIATELY** —
+  `KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pipelineruns -o json`, filter
+  `.spec.params[] | select(.name=="revision")`, then
+  `kubectl -n tekton-ci logs pod/<run>-gate-pod -c step-pytests`. The pruner is `keep: 20`
+  **per pipeline**, hourly; three occurrences were already lost to it.
+
 ## Next steps (ranked)
 
 🔴 Numbering is STABLE and is half a claim's identity (`claim-work --slug-for <this doc>
