@@ -329,6 +329,17 @@ mutant "M-FH-1-verifier-execed-via-shebang" apply 1 \
 # The verifier's exit codes and apply's `verifier_answered` are ONE fact in two files.
 # A new code on either side, unmatched on the other, silently reclassifies a verdict as
 # an exec fault — in the reassuring direction ("nothing was determined").
+# 🔴 M-FH-5 IS THE ONE THE STRUCTURAL GUARD CANNOT SEE. An audit demonstrated that
+# swapping ONE call site to "${CHECK}" reintroduces the /usr/bin/env dependency while
+# leaving the dev-host suite fully green — a source regex pins a SPELLING, and there are
+# many. The behavioural guard breaks the verifier's shebang itself, so it does not care
+# how the call is written.
+mutant "M-FH-5-braces-evade-the-regex" apply 1 \
+  'run_check "$RELAY" >"$PRE" 2>&1' \
+  '"${CHECK}" "$RELAY" >"$PRE" 2>&1' \
+  test_the_verifier_runs_with_its_shebang_BROKEN \
+  'something still EXECS it'
+
 mutant "M-FH-2-verifier-grows-a-code" check 1 \
   '  _self_test || exit 2' \
   '  _self_test || exit 3' \
@@ -352,6 +363,18 @@ mutant "M-FH-4-siteB-classify-dropped" apply 1 \
   '  :' \
   test_a_POST_REBUILD_verifier_that_did_not_RUN_does_not_blame_the_mesh \
   'did NOT RUN'
+
+# 🔴 M-FH-6: the advice at the END of the abort is CONDITIONAL, and the condition is
+# the whole point. Unconditional "this script is idempotent, re-run it" contradicts the
+# trap paragraph printed two lines below it AND loses the change silently: after the
+# rollback the RUNNING unit still advertises the relay, so a re-run's preflight asks
+# that unit, prints ALREADY SATISFIED and exits 0 over a config file that no longer
+# contains it.
+mutant "M-FH-6-advice-unconditional" apply 1 \
+  '  if [ "${PATCHED:-0}" = "0" ]; then' \
+  '  if true; then' \
+  test_a_POST_REBUILD_verifier_that_did_not_RUN_does_not_blame_the_mesh \
+  'DO NOT simply re-run'
 
 # --- F-F: the parser's block terminator is load-bearing ----------------------------
 mutant "M-FF-1-terminator-removed" check 1 \

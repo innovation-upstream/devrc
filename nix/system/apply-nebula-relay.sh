@@ -120,24 +120,60 @@ die() { echo "ABORT: $*" >&2; exit 1; }
 # just fixed for presented (126 = found, but its interpreter is missing), and the
 # misdirection is what made it read as a config problem rather than an exec one.
 #
-# 🔴 The consequential site is the POST-REBUILD verify, not this one. There, a
-# non-verifier rc reaches `die` AFTER `nixos-rebuild test` has activated, so the
-# EXIT trap rolls back a change that actually WORKED and prints the PERSISTED /
-# "the profile may have moved" paragraphs for what was really a signal or an exec
-# fault. Failing with the right diagnosis is the difference between "re-run it"
-# and "go debug your mesh".
+# 🔴 The consequential sites are the two VERIFY calls, not this one. There a
+# non-verifier rc reaches `die` after the change has been activated, so the EXIT
+# trap rolls back something that actually WORKED, for what was really a signal or
+# an exec fault. Failing with the right diagnosis is the difference between
+# "re-run it" and "go debug your mesh".
+#
+# Which paragraph the trap then prints depends on WHICH verify failed, and the two
+# are not the same (measured):
+#   verify_now after `nixos-rebuild test`   -> ACTIVATED, NOT PERSISTED
+#   verify_now after `nixos-rebuild switch` -> PERSISTED / the profile may have moved
+# An earlier draft of this comment attributed the PERSISTED paragraphs to the first
+# site. It does not print them: PERSISTED and SWITCH_ATTEMPTED are both still 0 there,
+# which `test_verifier_failure_after_a_good_test_says_activated_not_persisted` pins.
 verifier_answered() { case "$1" in 0|1|2) return 0 ;; *) return 1 ;; esac; }
 
 die_verifier_did_not_run() {
+  # 🔴 THE CLOSING ADVICE IS CONDITIONAL, BECAUSE "just re-run it" IS ACTIVELY HARMFUL
+  # ONCE ANYTHING HAS BEEN WRITTEN.
+  #
+  # This function is reached from THREE sites: the preflight (nothing written), the
+  # post-`test` verify, and the post-`switch` verify. An unconditional "this script is
+  # idempotent, re-run it" was measured to contradict the trap's own paragraph printed
+  # two lines below it -- the trap said PERSISTED / restoring the file is NOT enough,
+  # while this said nothing had changed.
+  #
+  # Worse than a contradiction, following it loses the change silently: after the trap
+  # rolls $CFG back, the running unit still advertises the relay, so a re-run's
+  # preflight asks the RUNNING unit, gets rc 0, prints "ALREADY SATISFIED -- nothing to
+  # do" and exits 0. That is a green all-clear over a config file that no longer
+  # contains the change, which the next `nixos-rebuild switch` by anyone quietly
+  # removes.
+  #
+  # `${PATCHED:-0}` and not `$PATCHED`: the flags are declared further down, AFTER the
+  # preflight, so a bare reference would abort under `set -u` at the first call site.
+  local tail
+  if [ "${PATCHED:-0}" = "0" ]; then
+    tail="Nothing has been written yet -- fix the invocation and re-run."
+  else
+    tail="🔴 DO NOT simply re-run. \$CFG has already been patched, and possibly
+  activated or persisted. Read the trap's paragraph BELOW this message: it tracks
+  which of those was reached and is the only thing here that knows. Follow it.
+  A bare re-run asks the RUNNING unit, so if the change is live while the file was
+  rolled back you will get \"ALREADY SATISFIED -- nothing to do\" and exit 0 over a
+  config that no longer contains it."
+  fi
   die "the verifier did NOT RUN (rc=$1) -- an exec, interpreter or signal fault, NOT
   an answer about the config or the mesh. \`$CHECK\` only ever exits 0, 1 or 2 (see
-  its header), so nothing about $RELAY has been determined and nothing here should be
-  read as a finding about $CFG.
-    126  found, but not executable -- or ITS INTERPRETER is missing
+  its header), so this says nothing about whether $RELAY is advertised.
+    126  \`$CHECK\` is a DIRECTORY, or is not readable
     127  it disappeared between the preflight's [ -r ] check and this call
     128+ killed by a signal (130 = SIGINT, 137 = SIGKILL/OOM, 143 = SIGTERM)
-  Fix the invocation, then re-run: this script is idempotent and has changed nothing
-  it cannot repeat."
+  (Not 'not executable': it is run as \`\"\$BASH\" \"\$CHECK\"\`, so bash READS it and
+  the exec bit is never consulted.)
+  $tail"
 }
 
 # Scratch dir for everything this script writes outside $CFG.

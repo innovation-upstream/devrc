@@ -987,18 +987,46 @@ def test_the_verifier_is_never_execed_via_its_own_shebang():
     -independent, so a revert fails wherever the suite runs, including in the tier
     most sessions actually run.
 
-    Pinned as a PAIR on purpose: presence alone passes if someone adds a second, direct
-    call site beside the helper, and absence alone passes if the helper is deleted
-    outright."""
+    ⚠ THIS IS THE CHEAP HALF AND IT IS SPELLING-BOUND. It asserts the helper exists.
+    It does NOT prove the absence of a second, direct call site: an audit measured that
+    `"${CHECK}" "$RELAY"`, `$CHECK "$RELAY"`, a line-split call and several other
+    spellings all evade a source regex while reintroducing the exact dependency. The
+    real guard is `test_the_verifier_runs_with_its_shebang_BROKEN`, which is
+    behavioural and cannot be reworded around. This one is kept because it names the
+    intended shape and fails fast with a readable message."""
     src = APPLY.read_text()
     assert re.search(r'^run_check\(\)\s*\{\s*"\$BASH"\s+"\$CHECK"', src, re.M), (
         "the run_check helper is gone or no longer invokes the verifier through "
         '"$BASH" -- it must not be executed directly, or /usr/bin/env becomes a '
         "runtime dependency and the sandbox tier goes red")
-    stray = re.findall(r'^[^#\n]*(?<!run_)"\$CHECK"\s+"\$RELAY"', src, re.M)
-    assert not stray, (
-        f"a direct execution of the verifier is back at {len(stray)} site(s): {stray}. "
-        "It must go through run_check().")
+
+
+def test_the_verifier_runs_with_its_shebang_BROKEN(rig):
+    """F-H, the LOAD-BEARING half — behavioural, and spelling-independent.
+
+    Runs the whole happy path against a verifier whose shebang points at an
+    interpreter that does not exist AND whose exec bit is cleared. If apply invokes it
+    through `$BASH` the file is merely READ and none of that matters. If ANY call site
+    execs it directly — however it is spelled — the kernel refuses and the run dies.
+
+    🔴 This is what makes the guard un-walkable. Its structural sibling above pins one
+    spelling; an audit demonstrated that swapping a single call site to `"${CHECK}"`
+    reintroduces the /usr/bin/env dependency while leaving the dev-host suite at 38
+    passed. This test fails on that mutant, on every other spelling, and on both tiers
+    — because it manufactures the missing-interpreter condition itself instead of
+    waiting for a sandbox that happens to lack /usr/bin/env."""
+    d = rig.root / "brokenshebang"
+    shutil.copytree(_SYSDIR, d)
+    chk = d / CHECK.name
+    original = chk.read_text()
+    assert original.startswith("#!"), "the verifier lost its shebang; this test assumes one"
+    chk.write_text("#!/nonexistent/interpreter\n" + original.split("\n", 1)[1])
+    chk.chmod(0o644)          # not executable either — belt and braces
+    r = rig.run(apply=d / APPLY.name)
+    assert r.returncode == 0, (
+        "the run died with the verifier's shebang broken, so something still EXECS it "
+        "rather than reading it through an explicit interpreter:\n" + r.stdout + r.stderr)
+    assert "=== DONE ===" in r.stdout, r.stdout
 
 
 def test_the_verifiers_exit_codes_are_a_closed_set():
@@ -1021,7 +1049,7 @@ def test_the_verifiers_exit_codes_are_a_closed_set():
     assert set(m.group(1).split("|")) == {"0", "1", "2"}, m.group(1)
 
 
-@pytest.mark.parametrize("rc,label", [(126, "not executable / interpreter missing"),
+@pytest.mark.parametrize("rc,label", [(126, "a directory, or unreadable"),
                                       (127, "vanished"),
                                       (137, "SIGKILL/OOM")])
 def test_a_verifier_that_did_not_RUN_is_not_reported_as_a_config_fault(rig, rc, label):
@@ -1036,6 +1064,10 @@ def test_a_verifier_that_did_not_RUN_is_not_reported_as_a_config_fault(rig, rc, 
     assert f"rc={rc}" in combined, combined
     assert "could not read the current config" not in combined, (
         f"{label}: an exec/signal fault is still being blamed on $CFG:\n{combined}")
+    # The advice is CONDITIONAL on whether anything was written. Nothing has been at the
+    # preflight, so "re-run" is correct here — and must not be the other branch's text.
+    assert "Nothing has been written yet" in combined, combined
+    assert "DO NOT simply re-run" not in combined, combined
 
 
 @pytest.mark.parametrize("rc", [126, 137])
@@ -1059,6 +1091,14 @@ def test_a_POST_REBUILD_verifier_that_did_not_RUN_does_not_blame_the_mesh(rig, r
     assert "does not see" not in combined, (
         f"an exec/signal fault at the post-rebuild verify is still reported as the "
         f"relay not being advertised:\n{combined}")
+    # 🔴 THE OTHER BRANCH. $CFG has been patched and activated by now, so telling the
+    # operator to re-run is actively harmful: the trap rolls the file back while the
+    # RUNNING unit still advertises the relay, and a re-run's preflight then asks that
+    # unit, prints "ALREADY SATISFIED" and exits 0 over a config that no longer carries
+    # the change. An unconditional "idempotent, re-run it" said exactly that, and also
+    # contradicted the trap paragraph printed two lines below it.
+    assert "DO NOT simply re-run" in combined, combined
+    assert "Nothing has been written yet" not in combined, combined
 
 
 def test_a_REAL_verifier_refusal_still_blames_the_config(rig):
