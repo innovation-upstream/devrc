@@ -672,6 +672,24 @@ def test_cairn_validate_defaults_its_store_to_the_SYNCED_CACHE_not_the_mirror(
     literal path: that function is THE one definition of the synced cache root,
     and a literal here would be the second copy. Run with NO `--store`, from a
     tmp cwd, and read the store the tool reports.
+
+    🔴 READ BOTH STREAMS, BECAUSE THE SANDBOX HAS NO CACHE ROOT AND THAT IS NOT
+    A FAILURE OF THE THING UNDER TEST. The first version of this asserted
+    `f"store: {expected}"` on STDOUT, which holds on a dev host — where the
+    cache exists and the tool takes its success path — and is structurally
+    impossible in the `nix build` tier, whose `$HOME` is `/build/home` and
+    carries no `~/.cache/subsystem-store`. There the tool exits down the
+    not-found path and names the resolved root on STDERR instead. The claim
+    being made is WHICH store the launcher chose, never whether one exists, and
+    the tool names its choice on both paths — so the assertion belongs on the
+    combined output. Pinning it to one stream made a guard that could only ever
+    be green in one of the two tiers this suite runs in.
+
+    The negative half is what kills the mutant: the FROZEN mirror's path must
+    NOT appear. A launcher that dropped the `--store` prepend and inherited
+    `subsystem_touch`'s own default would name the mirror here, and asserting
+    only the positive half would let it through whenever both paths happened to
+    be printed.
     """
     import subprocess
 
@@ -689,11 +707,17 @@ def test_cairn_validate_defaults_its_store_to_the_SYNCED_CACHE_not_the_mirror(
         capture_output=True, text=True, cwd=tmp_path,
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
     )
-    assert f"store: {expected}" in proc.stdout, (
+    combined = proc.stdout + proc.stderr
+    assert expected in combined, (
         "`cairn-validate` with no `--store` did not resolve the synced cache "
-        f"({expected}). If it named {subsystem_touch.DEFAULT_STORE_ROOT}, it "
-        "inherited the writer's default — the frozen read-only mirror, which "
-        "does not move when you write.\n"
+        f"({expected}). It names the store it chose on BOTH its success and its "
+        "not-found path, so this holds whether or not a cache exists here.\n"
+        f"stdout: {proc.stdout[:800]}\nstderr: {proc.stderr[:800]}")
+    assert str(subsystem_touch.DEFAULT_STORE_ROOT) not in combined, (
+        f"`cairn-validate` named the FROZEN mirror "
+        f"({subsystem_touch.DEFAULT_STORE_ROOT}) — it inherited the writer's "
+        "own `--store` default instead of prepending the synced cache, so the "
+        "mandated post-write check would parse the PRE-write bytes.\n"
         f"stdout: {proc.stdout[:800]}\nstderr: {proc.stderr[:800]}")
 
 
@@ -715,7 +739,21 @@ def test_cairn_validate_is_a_LAUNCHER_and_declares_no_parser_of_its_own():
     assert os.access(CAIRN_VALIDATE, os.X_OK), (
         "scripts/cairn-validate is not executable — on PATH that is a "
         "`command not found` that reads as a broken deploy.")
-    assert src.splitlines()[0].startswith("#!"), "no shebang"
+    # 🔴 PIN THE RELATIONSHIP TO THE SIBLING, NOT A LITERAL. Both launchers are
+    # deployed the same way (`mkOutOfStoreSymlink`) and are invoked as bare
+    # commands from PATH, so they must agree on how they find an interpreter;
+    # asserting `cairn-validate`'s first line in isolation would pass while the
+    # two drifted apart. Comparing them also keeps this file free of a spelled
+    # shebang, which `test_runtime_shebangs.py` scans every `test_*.py` for —
+    # its allowlist is for sites that solve the problem a verified way, not a
+    # place to register a string this assertion never needed.
+    who_first = (REPO_ROOT / "scripts" / "cairn-who").read_text(
+        encoding="utf-8").splitlines()[0]
+    assert src.splitlines()[0] == who_first, (
+        "scripts/cairn-validate's interpreter line disagrees with its sibling "
+        f"scripts/cairn-who's ({who_first!r}). Both are out-of-store launchers "
+        "run as bare commands from PATH; a difference here is a deploy "
+        f"difference nobody chose.\ngot: {src.splitlines()[0]!r}")
 
 
 # ---------------------------------------------------------------------------
