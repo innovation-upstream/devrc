@@ -107,8 +107,26 @@ PY
 
 # Run the test file against a (possibly mutated) nix/system copy.
 #   $1 = directory, $2... = extra pytest args
+# 🔴 PURGE THE BYTECODE CACHE, DO NOT MERELY REFUSE TO WRITE ONE.
+# PYTHONDONTWRITEBYTECODE=1 (exported at the top of this file) stops THIS run creating
+# a cache; it does NOT stop it READING one an earlier ordinary `pytest` invocation left
+# behind. CPython validates a cached module on mtime-in-whole-SECONDS plus size, so an
+# edit to the TEST FILE made between two battery runs can be served stale — and the
+# mutant is then scored against the OLD assertions.
+# MEASURED 2026-09-08: an edit adding explicit assertion messages was invisible for two
+# consecutive single-mutant runs, both reporting M-FH-6 as WRONG-KILLER ("failed, but
+# not with 'DO NOT simply re-run'") while the phrase was demonstrably in the output of
+# the same command run by hand. Deleting __pycache__ made it pass immediately.
+# This is the harness lying about the code under test, which is the one failure a
+# mutation battery must not have.
+purge_pycache() {
+  find "$(dirname "$TESTFILE")" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null
+  return 0
+}
+
 run_tests() {
   local d="$1"; shift
+  purge_pycache
   DEVRC_TEST_NEBULA_DIR="$d" \
     python3 -m pytest "$TESTFILE" -q -p no:randomly --no-header "$@" 2>&1
 }
@@ -312,6 +330,69 @@ mutant "M-FI-2-reason-line-dropped" check 1 \
   '  :' \
   test_deferred_restart_is_retried \
   'assert r.returncode == 0'
+
+# --- F-H: the verifier is invoked through an explicit interpreter, and an rc that is
+#          NOT one of its own {0,1,2} is reported as "it did not run" ---------------
+#
+# 🔴 M-FH-1 IS THE ONE THAT NEEDS A BATTERY AT ALL. Reverting run_check to a direct
+# exec is INVISIBLE on the dev host — /usr/bin/env exists here, so all 30 behavioural
+# tests still pass and only the nix sandbox goes red. The structural guard is what
+# makes it fail on both tiers, and this mutant is that guard's positive control.
+mutant "M-FH-1-verifier-execed-via-shebang" apply 1 \
+  'run_check() { "$BASH" "$CHECK" "$@"; }' \
+  'run_check() { "$CHECK" "$@"; }' \
+  test_the_verifier_is_never_execed_via_its_own_shebang \
+  'no longer invokes the verifier through'
+
+# 🔴 M-FH-5 IS THE ONE THE STRUCTURAL GUARD CANNOT SEE. An audit demonstrated that
+# swapping ONE call site to "${CHECK}" reintroduces the /usr/bin/env dependency while
+# leaving the dev-host suite fully green — a source regex pins a SPELLING, and there are
+# many. The behavioural guard breaks the verifier's shebang itself, so it does not care
+# how the call is written.
+mutant "M-FH-5-braces-evade-the-regex" apply 1 \
+  'run_check "$RELAY" >"$PRE" 2>&1' \
+  '"${CHECK}" "$RELAY" >"$PRE" 2>&1' \
+  test_the_verifier_runs_with_its_shebang_BROKEN \
+  'something still EXECS it'
+
+# The verifier's exit codes and apply's `verifier_answered` are ONE fact in two files.
+# A new code on either side, unmatched on the other, silently reclassifies a verdict as
+# an exec fault — in the reassuring direction ("nothing was determined").
+mutant "M-FH-2-verifier-grows-a-code" check 1 \
+  '  _self_test || exit 2' \
+  '  _self_test || exit 3' \
+  test_the_verifiers_exit_codes_are_a_closed_set \
+  'still treats only 0/1/2 as answers'
+
+# 🔴 M-FH-3 IS WHY THE POST-REBUILD TEST EXISTS. An earlier sweep caught this mutant
+# with the STRUCTURAL closed-set test only: every behavioural case aborted at the
+# preflight, so `verifier_answered` — used solely at the post-rebuild site — never
+# executed. A guard that is never reached is not a guard.
+mutant "M-FH-3-answered-widened" apply 1 \
+  'verifier_answered() { case "$1" in 0|1|2) return 0 ;; *) return 1 ;; esac; }' \
+  'verifier_answered() { case "$1" in 0|1|2|126) return 0 ;; *) return 1 ;; esac; }' \
+  test_a_POST_REBUILD_verifier_that_did_not_RUN_does_not_blame_the_mesh \
+  'did NOT RUN'
+
+# The consequential site: this `die` is what the EXIT trap rolls back, so misreporting
+# an exec/signal fault as "the relay is not advertised" undoes a change that worked.
+mutant "M-FH-4-siteB-classify-dropped" apply 1 \
+  '  verifier_answered "$rc" || die_verifier_did_not_run "$rc"' \
+  '  :' \
+  test_a_POST_REBUILD_verifier_that_did_not_RUN_does_not_blame_the_mesh \
+  'did NOT RUN'
+
+# 🔴 M-FH-6: the advice at the END of the abort is CONDITIONAL, and the condition is
+# the whole point. Unconditional "this script is idempotent, re-run it" contradicts the
+# trap paragraph printed two lines below it AND loses the change silently: after the
+# rollback the RUNNING unit still advertises the relay, so a re-run's preflight asks
+# that unit, prints ALREADY SATISFIED and exits 0 over a config file that no longer
+# contains it.
+mutant "M-FH-6-advice-unconditional" apply 1 \
+  '  if [ "$PATCHED" = "0" ]; then' \
+  '  if true; then' \
+  test_a_POST_REBUILD_verifier_that_did_not_RUN_does_not_blame_the_mesh \
+  'DO NOT simply re-run'
 
 # --- F-F: the parser's block terminator is load-bearing ----------------------------
 mutant "M-FF-1-terminator-removed" check 1 \

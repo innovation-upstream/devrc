@@ -29,11 +29,16 @@ WHAT EACH TEST IS FOR — the audit findings the script was fixed for:
   F-D  a missing backup fails LOUDLY instead of silently skipping the rollback
   F-E  a symlinked $CFG is refused instead of being replaced by a regular file
   F-G  the verifier's FAIL text (with its egress-cost warning) reaches the operator
+  F-H  the verifier is invoked through an explicit interpreter, and an rc that is
+       NOT one of its own {0,1,2} is reported as "it did not run" rather than as a
+       fact about the config -- structural + behavioural, because the structural
+       half is the only one visible on the dev-host tier
 """
 from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -412,7 +417,12 @@ if open(os.path.join(STATE, "break_config")).read().strip() == "1":
 
     # ---- running it
     def run(self, net: str = "mesh", cfg: Path | None = None,
-            extra_env: dict | None = None, timeout: int = 120):
+            extra_env: dict | None = None, timeout: int = 120,
+            apply: Path | None = None):
+        """`apply` runs a COPY of the script from another directory. The script derives
+        CHECK from its own location (`HERE`), so a copy sited next to a stub verifier
+        exercises the real rc-handling against a chosen exit code -- which is the only
+        way to reach codes the real verifier cannot produce."""
         env = dict(os.environ)
         env["PATH"] = f"{self.bin}:{env.get('PATH', '')}"
         env["TMPDIR"] = str(self.tmpdir)
@@ -423,9 +433,49 @@ if open(os.path.join(STATE, "break_config")).read().strip() == "1":
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
-            ["bash", str(APPLY)], env=env, capture_output=True, text=True,
+            ["bash", str(apply or APPLY)], env=env, capture_output=True, text=True,
             timeout=timeout, cwd=str(self.root),
         )
+
+    def apply_beside_stub_verifier(self, rc: int, out: str = "stub verifier output"):
+        """A copy of the real apply script in a fresh dir, next to a verifier stub that
+        exits `rc`. Returns the path to the copy.
+
+        🔴 The stub goes through `write_exec` like every other shim in this file, NOT a
+        hand-written shebang. A `#!/usr/bin/env bash` stub execs fine on the dev host
+        and ENOENTs in the sandbox — which would make this test fabricate rc 126 from
+        its own stub rather than from the code under test, and pass for the wrong
+        reason on one tier while failing on the other. That is the very fault F-H
+        exists to pin, so writing it here would be circular."""
+        d = self.root / f"sysstub{rc}"
+        d.mkdir(exist_ok=True)
+        shutil.copy2(APPLY, d / APPLY.name)
+        write_exec(d / CHECK.name, f"printf '%s\\n' {shlex.quote(out)}\nexit {rc}\n")
+        return d / APPLY.name
+
+    def apply_beside_sequenced_verifier(self, first_rc: int, then_rc: int):
+        """Like the above, but the stub answers `first_rc` on its FIRST call and
+        `then_rc` on every later one.
+
+        This is the only way to reach the POST-REBUILD verify site. A stub that fails
+        at the preflight aborts there and never gets past it — so a single-code stub
+        cannot exercise the second call site at all, and the two sites classify their
+        rc independently. The post-rebuild one is the consequential half: it runs after
+        `nixos-rebuild test` has activated, so what it dies with is what the EXIT trap
+        rolls back and what the operator is told the rollback was for."""
+        d = self.root / f"sysseq{first_rc}_{then_rc}"
+        d.mkdir(exist_ok=True)
+        shutil.copy2(APPLY, d / APPLY.name)
+        counter = d / "calls"
+        write_exec(d / CHECK.name, (
+            f'n=$(cat {counter} 2>/dev/null || echo 0)\n'
+            f'n=$((n+1)); echo "$n" > {counter}\n'
+            f'if [ "$n" = "1" ]; then\n'
+            f'  echo "relay not advertised (stub call 1)"; exit {first_rc}\n'
+            f'fi\n'
+            f'echo "stub call $n"; exit {then_rc}\n'
+        ))
+        return d / APPLY.name
 
 
 @pytest.fixture()
@@ -883,8 +933,21 @@ def test_reason_token_ledger_is_pinned_and_apply_branches_on_a_real_one():
 
 
 def test_apply_declares_every_tool_it_execs():
-    """The preflight's job is to abort BEFORE the first write. A tool missing from its
-    list fails half-way through instead."""
+    """The preflight's job is to abort BEFORE the first write.
+
+    ⚠ READ WHAT THIS ACTUALLY CHECKS. It asserts a hard-coded list is a SUBSET of what
+    the script declares — it inspects one side of the relationship its name implies. It
+    therefore CANNOT catch a tool the script execs but does not declare, which is the
+    failure the preflight exists to prevent.
+
+    MEASURED 2026-09-08: `head`, `id` and `rm` are exec'd and undeclared right now, and
+    this test is green. (`$BASH` is a fourth omission but a CORRECT one — the
+    interpreter is by definition already running, so it needs no `command -v`.)
+
+    Closing it means deriving the exec'd set from the source, which is a real piece of
+    work and not this test's current claim. Until then the docstring says what the body
+    does, rather than what the name suggests — a guard that reads as coverage while
+    providing none is worse than no guard, because it stops anyone looking."""
     src = APPLY.read_text()
     m = re.search(r"^for t in (.*?); do$", src, re.M | re.S)
     assert m, "the preflight tool loop moved"
@@ -909,6 +972,192 @@ def test_no_predictable_tmp_literal_survives_in_the_source():
     src = APPLY.read_text()
     assert not re.search(r">\s*/tmp/", src), src
     assert "mktemp -d" in src
+
+
+def test_the_verifier_is_never_execed_via_its_own_shebang():
+    """F-H, structural half. The verifier MUST be invoked through an explicit
+    interpreter, never by executing it and letting its `#!/usr/bin/env bash` shebang
+    dispatch -- that makes /usr/bin/env a runtime dependency of this script, and the
+    nix build sandbox has no /usr at all.
+
+    WHY IT EXISTED, AND WHY THAT REASON NO LONGER HOLDS. It was written when the only
+    other coverage was behavioural-via-the-real-environment: the dev host HAS
+    /usr/bin/env, so reverting the fix left the whole file green there and only the
+    sandbox tier went red. A source assertion was then the one thing failing on both.
+
+    ⚠ `test_the_verifier_runs_with_its_shebang_BROKEN` below took that job over, and
+    took it over BETTER -- it manufactures the missing interpreter itself, so it is
+    tier-independent AND spelling-independent. RE-MEASURED at this tree with the helper
+    reverted to `run_check() { "$CHECK" "$@"; }`: **2 failed, 37 passed** on the dev
+    host, and both failures are these two tests. So the sentence this docstring used to
+    carry -- "only the sandbox tier goes red" -- is now FALSE, and it was the whole
+    stated justification for keeping this half.
+
+    What this test still earns: it fails FAST (no subprocess, no fixture) and names the
+    intended shape in its message, so a revert gets a readable diagnosis instead of "the
+    happy path exited 1". That is a real but MODEST reason -- recorded as such rather
+    than left reading like the load-bearing guard, which it is not.
+
+    ⚠ THIS IS THE CHEAP HALF AND IT IS SPELLING-BOUND. It asserts the helper exists.
+    It does NOT prove the absence of a second, direct call site: an audit measured that
+    `"${CHECK}" "$RELAY"`, `$CHECK "$RELAY"`, a line-split call and several other
+    spellings all evade a source regex while reintroducing the exact dependency. The
+    real guard is `test_the_verifier_runs_with_its_shebang_BROKEN`, which is
+    behavioural and cannot be reworded around. This one is kept because it names the
+    intended shape and fails fast with a readable message."""
+    src = APPLY.read_text()
+    assert re.search(r'^run_check\(\)\s*\{\s*"\$BASH"\s+"\$CHECK"', src, re.M), (
+        "the run_check helper is gone or no longer invokes the verifier through "
+        '"$BASH" -- it must not be executed directly, or /usr/bin/env becomes a '
+        "runtime dependency and the sandbox tier goes red")
+
+
+def test_the_verifier_runs_with_its_shebang_BROKEN(rig):
+    """F-H, the LOAD-BEARING half — behavioural, and spelling-independent.
+
+    Runs the whole happy path against a verifier whose shebang points at an
+    interpreter that does not exist AND whose exec bit is cleared. If apply invokes it
+    through `$BASH` the file is merely READ and none of that matters. If ANY call site
+    execs it directly — however it is spelled — the kernel refuses and the run dies.
+
+    🔴 This is what makes the guard un-walkable. Its structural sibling above pins one
+    spelling; an audit demonstrated that swapping a single call site to `"${CHECK}"`
+    reintroduces the /usr/bin/env dependency while leaving the dev-host suite at 38
+    passed. This test fails on that mutant, on every other spelling, and on both tiers
+    — because it manufactures the missing-interpreter condition itself instead of
+    waiting for a sandbox that happens to lack /usr/bin/env."""
+    d = rig.root / "brokenshebang"
+    shutil.copytree(_SYSDIR, d)
+    chk = d / CHECK.name
+    original = chk.read_text()
+    assert original.startswith("#!"), "the verifier lost its shebang; this test assumes one"
+    chk.write_text("#!/nonexistent/interpreter\n" + original.split("\n", 1)[1])
+    chk.chmod(0o644)          # not executable either — belt and braces
+    r = rig.run(apply=d / APPLY.name)
+    assert r.returncode == 0, (
+        "the run died with the verifier's shebang broken, so something still EXECS it "
+        "rather than reading it through an explicit interpreter:\n" + r.stdout + r.stderr)
+    assert "=== DONE ===" in r.stdout, r.stdout
+
+
+def test_the_verifiers_exit_codes_are_a_closed_set():
+    """F-H's load-bearing precondition. `verifier_answered` in apply-nebula-relay.sh
+    treats {0,1,2} as verdicts and EVERYTHING else as "it did not run". If the verifier
+    ever grows an `exit 3`, that new verdict would be misreported as an exec fault --
+    silently, and in the direction that reads as reassuring ("nothing was determined")
+    when something WAS.
+
+    So the two must move together. This fails the moment they diverge."""
+    codes = set(re.findall(r'^\s*(?:\|\|\s*)?exit\s+([0-9]+)', CHECK.read_text(), re.M))
+    codes |= set(re.findall(r'\|\|\s*exit\s+([0-9]+)', CHECK.read_text()))
+    assert codes <= {"0", "1", "2"}, (
+        f"check-nebula-relays.sh can now exit {sorted(codes)}, but apply-nebula-relay.sh's "
+        "`verifier_answered` still treats only 0/1/2 as answers -- a new code would be "
+        "reported as 'the verifier did NOT RUN'. Update both.")
+    m = re.search(r'verifier_answered\(\)\s*\{\s*case\s+"\$1"\s+in\s+([0-9|]+)\)',
+                  APPLY.read_text())
+    assert m, "verifier_answered() moved or was reworded"
+    assert set(m.group(1).split("|")) == {"0", "1", "2"}, m.group(1)
+
+
+@pytest.mark.parametrize("rc,label", [(126, "a directory, or unreadable"),
+                                      (127, "vanished"),
+                                      (137, "SIGKILL/OOM")])
+def test_a_verifier_that_did_not_RUN_is_not_reported_as_a_config_fault(rig, rc, label):
+    """F-H, behavioural half. rc outside {0,1,2} is not a verdict -- the verifier never
+    reached one. Reporting it as "could not read the current config" asserts something
+    about $CFG that is false, and is precisely how the /usr/bin/env fault (rc 126) read
+    as a config problem instead of an exec one."""
+    r = rig.run(apply=rig.apply_beside_stub_verifier(rc))
+    combined = r.stdout + r.stderr
+    assert r.returncode != 0, combined
+    assert "did NOT RUN" in combined, (
+        f"{label}: an rc outside the verifier's own {{0,1,2}} must be reported as "
+        f"'did NOT RUN', not as a verdict:\n{combined}")
+    assert f"rc={rc}" in combined, (
+        f"the abort must name the actual rc ({rc}) it could not interpret:\n{combined}")
+    assert "could not read the current config" not in combined, (
+        f"{label}: an exec/signal fault is still being blamed on $CFG:\n{combined}")
+    # The advice is CONDITIONAL on whether anything was written. Nothing has been at the
+    # preflight, so "re-run" is correct here — and must not be the other branch's text.
+    assert "Nothing has been written yet" in combined, (
+        "nothing has been written at the preflight, so the advice MUST say 'Nothing has "
+        "been written yet':\n" + combined)
+    assert "DO NOT simply re-run" not in combined, (
+        "the post-write branch's advice ('DO NOT simply re-run') reached the preflight, "
+        "where nothing has been written:\n" + combined)
+
+
+@pytest.mark.parametrize("rc", [126, 137])
+def test_a_POST_REBUILD_verifier_that_did_not_RUN_does_not_blame_the_mesh(rig, rc):
+    """F-H, the consequential half — and the site the PREFLIGHT tests cannot reach.
+
+    The preflight answers 1 (not advertised), so the script patches, runs
+    `nixos-rebuild test`, and only THEN gets a non-verifier rc. That `die` is what the
+    EXIT trap rolls back, so blaming it on the mesh undoes a change that worked and
+    sends the operator to debug a mesh that is very possibly fine.
+
+    🔴 This test exists because a mutation sweep found the gap: widening
+    `verifier_answered` to accept 126 was caught only by the STRUCTURAL closed-set
+    test, because every behavioural case aborted at the preflight and never executed
+    `verifier_answered` at all. A guard that is never reached is not a guard."""
+    r = rig.run(apply=rig.apply_beside_sequenced_verifier(first_rc=1, then_rc=rc))
+    combined = r.stdout + r.stderr
+    assert r.returncode != 0, combined
+    assert "did NOT RUN" in combined, (
+        "an rc outside the verifier's own {0,1,2} must be reported as 'did NOT RUN', "
+        "not as a verdict about the relay:\n" + combined)
+    assert f"rc={rc}" in combined, (
+        f"the abort must name the actual rc ({rc}) it could not interpret:\n{combined}")
+    assert "does not see" not in combined, (
+        f"an exec/signal fault at the post-rebuild verify is still reported as the "
+        f"relay not being advertised:\n{combined}")
+    # 🔴 THE OTHER BRANCH. $CFG has been patched and activated by now, so telling the
+    # operator to re-run is actively harmful: the trap rolls the file back while the
+    # RUNNING unit still advertises the relay, and a re-run's preflight then asks that
+    # unit, prints "ALREADY SATISFIED" and exits 0 over a config that no longer carries
+    # the change. An unconditional "idempotent, re-run it" said exactly that, and also
+    # contradicted the trap paragraph printed two lines below it.
+    assert "DO NOT simply re-run" in combined, (
+        "$CFG has been patched by now, so the advice MUST say 'DO NOT simply re-run' "
+        "rather than inviting one:\n" + combined)
+    assert "Nothing has been written yet" not in combined, (
+        "the preflight branch's advice ('Nothing has been written yet') reached a site "
+        "where $CFG HAS been written:\n" + combined)
+
+
+def test_an_INHERITED_PATCHED_cannot_change_the_preflight_advice(rig):
+    """The advice branches on $PATCHED, so $PATCHED must come from THIS run.
+
+    The flags used to be declared beside the trap, far below the preflight, so the only
+    way to read one early was `${PATCHED:-0}` -- which falls back to an INHERITED
+    environment variable. This script's own header documents running it as
+    `sudo env "PATH=$PATH" bash ...`, which preserves the caller's environment, so an
+    exported PATCHED=1 made the preflight claim work had been done when none had.
+
+    Fail-safe in direction (it over-warns rather than under-warns), but it is a message
+    about what the machine's state IS, and getting that from the caller's environment is
+    wrong regardless of which way it errs."""
+    r = rig.run(apply=rig.apply_beside_stub_verifier(126), extra_env={"PATCHED": "1"})
+    combined = r.stdout + r.stderr
+    assert r.returncode != 0, combined
+    assert "Nothing has been written yet" in combined, (
+        "an inherited PATCHED=1 reached the preflight's advice:\n" + combined)
+    assert "DO NOT simply re-run" not in combined, combined
+
+
+def test_a_REAL_verifier_refusal_still_blames_the_config(rig):
+    """The other side of the split, so the fix cannot be "call everything an exec
+    fault". rc 2 IS one of the verifier's own verdicts -- it really could not read the
+    config -- and must keep saying so."""
+    r = rig.run(apply=rig.apply_beside_stub_verifier(2))
+    combined = r.stdout + r.stderr
+    assert r.returncode != 0, combined
+    assert "could not read the current config" in combined, (
+        "rc 2 is a real verifier refusal and must keep saying so:\n" + combined)
+    assert "did NOT RUN" not in combined, (
+        "rc 2 IS one of the verifier's own verdicts and must NOT be reported as "
+        "'did NOT RUN':\n" + combined)
 
 
 def test_scripts_are_executable_and_pass_bash_n():
