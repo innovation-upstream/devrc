@@ -700,9 +700,7 @@ def render(outcome: SearchOutcome) -> str:
                 # branch below already fixed once: a next step that names a command
                 # without checking the state it prints in.
                 "   Widen or drop "
-                + " / ".join(
-                    ["--repo / --section"] + (["--exclude-slug"] if outcome.exclude else [])
-                )
+                + (" / ".join(active_filter_flags(outcome)) or "--repo / --section")
                 + " and re-run.",
             ]
             if outcome.exclude:
@@ -737,14 +735,22 @@ def render(outcome: SearchOutcome) -> str:
         # `outcome.filtered` is the discriminator and it is already read two lines
         # above for `scoped_note`, which is what makes the omission a miss rather
         # than a missing measurement.
+        flags = active_filter_flags(outcome)
         lines.append(
-            "   Try fewer/other terms, or widen --repo / --section before concluding "
-            "nobody wrote it down."
-            if outcome.filtered else
+            "   Try fewer/other terms, or widen " + " / ".join(flags)
+            + " before concluding nobody wrote it down."
+            if flags else
             "   Try fewer or different terms before concluding nobody wrote it down. "
-            "There is no filter to widen: this run passed no --repo / --section, so "
-            "every section in the index was already in scope."
+            "There is no filter to widen: this run passed no --repo / --section / "
+            "--exclude-slug, so every section in the index was already in scope."
         )
+        if outcome.exclude:
+            lines.append(
+                f"   ⚠ {len(outcome.exclude)} slug(s) were EXCLUDED "
+                f"({', '.join(outcome.exclude)}). If the corpus's only answer here is "
+                f"a doc you have already read, this zero is the exclusion working, "
+                f"not the corpus being silent."
+            )
         return "\n".join(lines)
 
     boosted = ", ".join(f"{k}×{v}" for k, v in sorted(SECTION_BOOST.items()))
@@ -872,17 +878,68 @@ def exclusion_slug(value: str) -> str:
     🔴 IT ACCEPTS A PATH BECAUSE THE CALLER HAS A PATH, NOT A SLUG. The measured
     reason this flag exists at all is that `/resume` step 4 spends its top hit on
     the document the session just read — and what that session holds is the
-    `handoff:` line `resume-state.sh` printed, i.e.
-    `claudedocs/handoff-<topic>.md`. Requiring it to strip the prefix and the
-    suffix by hand adds a derivation step to a fenced command, and the whole
-    finding behind this change is that a step needing extra input is a step that
-    stops firing (`RE-KEYING WAS HALF THE FIX` in the handoff doc). So both
-    spellings work, and the slug is derived by the SAME `slug_for` the indexer
-    used to write the row — never by a second hand-rolled strip, which is how the
-    two would drift apart on a doc in a subdirectory."""
-    if value.endswith(".md") or "/" in value:
-        return handoff_index.slug_for(value)
-    return value
+    `handoff:` line `resume-state.sh` printed. Requiring it to strip the prefix
+    and the suffix by hand adds a derivation step to a fenced command, and the
+    whole finding behind this change is that a step needing extra input is a step
+    that stops firing (`RE-KEYING WAS HALF THE FIX` in the handoff doc).
+
+    🔴 EVERY UNRECOGNISED SHAPE USED TO NO-OP SILENTLY, WHICH IS THE WORST
+    AVAILABLE FAILURE. An audit measured three: an ABSOLUTE path
+    (`/home/…/claudedocs/handoff-x.md`) derived `//home/…/claudedocs/x` because
+    `slug_for` only strips `claudedocs/` when it is the FIRST component; a
+    basename with the prefix but no suffix (`handoff-x`) matched neither arm of
+    the old `endswith('.md') or '/' in value` test; and a trailing space survived
+    into the slug. Each printed a confident `excluded=<garbage>` on the scope
+    line, changed `in_scope_*` by nothing, and returned the very document the
+    caller was trying to drop. **A filter that silently declines to filter is
+    indistinguishable from one that worked**, which is the whole class this
+    module exists to make impossible.
+
+    So normalisation is UNCONDITIONAL now, and shaped like the indexer's own:
+    strip whitespace, drop everything up to and including a `claudedocs/`
+    component wherever it appears (not only first), then hand what is left to
+    `slug_for` — the SAME function that wrote the row, never a second
+    hand-rolled strip. A bare slug is idempotent under it.
+
+    ⚠ WHAT IT STILL CANNOT DO, stated because the old docstring claimed the
+    opposite: it cannot recover the DIRECTORY of a nested doc. `slug_for` indexes
+    `claudedocs/sub/handoff-t.md` as `sub/t`, while `resume-state.sh` prints only
+    the BASENAME `handoff-t.md`, from which `sub/` is simply absent — so passing
+    what the skill tells you to pass excludes nothing for a nested doc. Measured
+    zero nested handoff docs across the reachable repos today, so this is latent;
+    it is named here rather than papered over, because the previous docstring
+    cited the nested case as the REASON for using `slug_for` while the end-to-end
+    path could not satisfy it."""
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    parts = [p for p in cleaned.split("/") if p not in ("", ".")]
+    if handoff_index.HANDOFF_DIR in parts:
+        parts = parts[len(parts) - 1 - parts[::-1].index(handoff_index.HANDOFF_DIR):]
+    return handoff_index.slug_for("/".join(parts))
+
+
+def active_filter_flags(outcome: "SearchOutcome") -> tuple[str, ...]:
+    """The scope flags this run ACTUALLY passed, in the order a reader types them.
+
+    🔴 ONE RULE, ONE PLACE — and it exists because the same defect was fixed in
+    one renderer branch and left standing in its neighbour. `#1399`'s first draft
+    taught `empty-scope` to name only the flags in play, wrote a comment saying it
+    was fixing "the same defect the no-match branch below already fixed once", and
+    left `no-match` telling every caller to "widen --repo / --section" — including
+    a run whose only filter was `--exclude-slug`. That is the worse of the two:
+    against the live corpus one exclusion can essentially never empty the scope,
+    so `no-match` is the branch a real `/resume` reaches and `empty-scope`
+    requires a one-document corpus. `claude/RULES.md`: a predicate open-coded at
+    N sites is wrong at N−1 of them, in the same direction."""
+    flags: list[str] = []
+    if outcome.repo is not None:
+        flags.append("--repo")
+    if outcome.sections:
+        flags.append("--section")
+    if outcome.exclude:
+        flags.append("--exclude-slug")
+    return tuple(flags)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

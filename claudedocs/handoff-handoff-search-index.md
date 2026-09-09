@@ -57,6 +57,8 @@ the cause of the other 19 is now measured rather than guessed — see the block 
   the command RAN; this says what the answer was worth. **23 of 60 hit slots were the
   session's OWN handoff** — the doc it had just read in step 3 — and it was the **#1 hit in
   13 of 20** queries. Fix shipped in `#1399` (`--exclude-slug`). Full block below.
+  ⚠ The 60 is the SUM OF HIT LINES ACTUALLY PARSED, not 20×3 assumed — every query used
+  `--limit 3` and the corpus returned three each time, so the two happen to coincide.
 - 🔴 **ADOPTION RE-MEASURED 2026-09-08T17:00Z at n=22 — 20 of 22 (91%), control 21/22.** The
   laptop still contributes **0 runs**, measured over SSH rather than assumed, so this remains
   a workbench-only reading. The measuring session is excluded from both halves by session id.
@@ -374,6 +376,31 @@ the cause of the other 19 is now measured rather than guessed — see the block 
   retrieval query is keyed on something the caller already holds, ask what fraction of the
   results the caller has ALREADY SEEN** — the answer is the retrieval you are not getting.
   Closed by `--exclude-slug`, which the `/resume` fence now passes.
+- 🔴 **EVERY LAYER PINNED, AND THE FLAG STILL DELETABLE TO INERT WITH A GREEN SUITE.** `#1399`
+  shipped 13 tests covering `exclusion_slug`, the row filter, both backends' bound params, the
+  renderer and the `filtered` flag — and **nothing pinned that `main()` hands `exclude` to
+  `run_search` at all.** An audit deleted `exclude=exclude` from the CLI call site: the flag
+  became completely inert, the excluded doc came back as hit #1, and **304 of 304 tests passed.**
+  The pre-existing "🔴 THE SEAM" guard proves only that argparse ACCEPTS the flag — it passes
+  `--limit 0`, which returns rc 2 *before any store is built*. `claude/RULES.md` → "verified in
+  isolation is the new vacuous green" and "a count of DECLARATIONS is not a count of INSTANCES".
+  **Ask which line makes the feature REACH the code you tested, and pin that line** — the two
+  call sites are now covered behaviourally (offline) and by an AST ledger that fails if a call
+  site is added without `exclude=` as well as if one is removed.
+- 🔴 **I FIXED THE CLASS IN ONE BRANCH AND WROTE A COMMENT SAYING SO, WHILE ITS NEIGHBOUR KEPT
+  THE DEFECT.** The `empty-scope` remedy was taught to name only the flags the run passed, with a
+  comment citing "the same defect the no-match branch below already fixed once" — and `no-match`
+  went on telling exclusion-only runs to "widen `--repo` / `--section`". That is the branch that
+  matters: against a 401-doc corpus one exclusion can essentially never empty the scope, so
+  `no-match` is what a real `/resume` hits and `empty-scope` needs a one-doc corpus. Now ONE
+  function (`active_filter_flags`) answers it for both. **When a commit claims to fix a class,
+  sweep every site the way you swept the hardest one** — a comment asserting the sweep is not the
+  sweep.
+- 🔴 **A SILENT NO-OP IS THE WORST FAILURE A FILTER CAN HAVE, AND THREE INPUT SHAPES HAD IT.** An
+  absolute path, a `handoff-x` basename with no `.md`, and a trailing space each derived a garbled
+  slug, printed a confident `excluded=<garbage>`, matched nothing and returned the document the
+  caller was dropping. **A filter that declines to filter renders identically to one that
+  worked** — which is why the skill now tells the reader to check the COUNT, not just the tell.
 - 🔴 **A PERFECT 100% (OR 0%) IS A REASON TO SUSPECT THE NEEDLE, NOT TO WRITE IT DOWN.** The
   first pass at the number above reported 23-of-23 self-hits, because it grepped transcripts
   for `claudedocs/handoff-<slug>.md` — a string the SEARCH ITSELF PRINTS for every hit, so the
@@ -448,8 +475,13 @@ print(f"runs={len(runs)} queried={len(hits & runs)} cairn(control)={len(cairn & 
 PY
 #    2026-09-07T02:25Z baseline: workbench 4/4 (control 4/4); laptop 0 runs.
 #    2026-09-08T17:00Z re-run:   workbench 20/22 (91%), control 21/22; laptop STILL 0 runs
-#                                (measured over ssh, not assumed). Excludes the measuring
-#                                session from both halves by session id.
+#                                (measured over ssh, not assumed).
+#    🔴 THE SCRIPT ABOVE DOES **NO** SESSION-ID EXCLUSION — it printed 23/21/22, and the
+#    20/22 was reached by subtracting the measuring session BY HAND afterwards. Said plainly
+#    because an audit read the annotation as describing the script and could not reproduce it.
+#    If you want the exclusion mechanised, filter `sid` against your own session id; otherwise
+#    report the raw triple and say which one you subtracted.
+#    An independent re-run hours later (larger window): runs=36 queried=33 (92%), control 34.
 #    Pre-fix same host, #1295..#1332: 11 runs, 2 queried, control 10.
 #    ⚠ The laptop half needs the same script run THERE — this one reads only this host's
 #    ~/.claude/projects. A workbench-only number is not a fleet number.
@@ -475,8 +507,12 @@ python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "$Q" -
 python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "$Q" --limit 3 \
   --exclude-slug claudedocs/handoff-handoff-search-index.md | grep -E '^──|excluded='
 #    expect: the first names devrc/handoff-search-index in its top slot(s); the second names it
-#    NOWHERE, prints `excluded=handoff-search-index` on the scope line, and drops in_scope_docs
-#    by one. A second run that still shows the doc means the fence lost the flag.
+#    NOWHERE, prints `excluded=handoff-search-index` on the scope line, and reports an
+#    in_scope_docs LOWER than indexed_docs. 🔴 Do NOT assert "by one": the slug is excluded in
+#    EVERY repo, so two repos sharing a doc basename drop two. Measured 2026-09-08: 0 shared
+#    slugs between the reachable repos, so one is the usual case, never the contract.
+#    🔴 `excluded=` proves the flag PARSED; the COUNT proves it MATCHED — read both, because an
+#    unnormalisable value used to print a confident `excluded=<garbage>` and filter nothing.
 
 # 4. The consumer is LIVE, not merely merged (readlink is the arbiter):
 readlink -f ~/.claude/skills/resume/SKILL.md          # must resolve into /nix/store

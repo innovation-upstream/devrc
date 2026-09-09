@@ -3614,7 +3614,13 @@ class TestTheNoMatchRemedyMatchesTheFilterTheRunActuallyHAD:
         out = capsys.readouterr().out
         assert rc == 0
         assert "NO MATCH" in out
-        assert "widen --repo / --section" in out
+        # 🔴 THE REMEDY NOW NAMES THE FLAGS THE RUN ACTUALLY PASSED. This used
+        # to read `widen --repo / --section` for a run that passed only
+        # `--section` — the same "name a flag nobody passed" defect one level in,
+        # and the reason `active_filter_flags` exists as ONE function.
+        assert "widen --section" in out
+        assert "--repo" not in out
+        assert "--exclude-slug" not in out
         assert "There is no filter to widen" not in out
 
 
@@ -5742,14 +5748,26 @@ class TestExcludingADocumentTheCallerHasAlreadyRead:
         assert odd.status == plain.status == "hit"
         assert [h.slug for h in odd.hits] == [h.slug for h in plain.hits]
 
-    def test_the_CLI_dedupes_repeats_without_reordering(self):
-        """The scope line NAMES the exclusions, so a repeated flag must not make
-        that line report one filter twice."""
-        assert hs.exclusion_slug("claudedocs/handoff-a.md") == "a"
-        seen = tuple(dict.fromkeys(
-            hs.exclusion_slug(v)
-            for v in ["claudedocs/handoff-a.md", "a", "b", "a"]))
-        assert seen == ("a", "b")
+    def test_the_CLI_dedupes_repeats_without_reordering(self, tmp_path, capsys):
+        """🔴 IT DRIVES `main()`, BECAUSE ITS NAME CLAIMS CLI COVERAGE. The first
+        version of this test re-implemented the de-dup expression inline and
+        asserted on its own arithmetic — so an audit's mutant that replaced the
+        real `dict.fromkeys` with a plain `tuple(...)` SURVIVED a fully green
+        suite. `claude/RULES.md`: a guard's DESCRIPTION claims coverage; check the
+        body is as wide as the sentence."""
+        repo = tmp_path / "alpharepo"
+        _write_repo(repo, {"handoff-alpha-topic.md": DOC_FULL,
+                           "handoff-beta-topic.md": DOC_SPARSE})
+        rc = hs.main(["--query", "quixotry", "--offline", "--offline-repo", str(repo),
+                      "--limit", "3",
+                      "--exclude-slug", "claudedocs/handoff-alpha-topic.md",
+                      "--exclude-slug", "alpha-topic",
+                      "--exclude-slug", "beta-topic",
+                      "--exclude-slug", "alpha-topic"])
+        out = capsys.readouterr().out
+        # Named once each, in first-seen order — not four times, not reordered.
+        assert "excluded=alpha-topic,beta-topic" in out, out
+        assert rc == 4, "excluding every doc must be empty-scope, not an answer"
 
 
 class TestThePostgresExclusionBindsToThePredicateItBelongsTo:
@@ -5823,3 +5841,184 @@ class TestThePostgresExclusionBindsToThePredicateItBelongsTo:
         params = conn.params_for("SELECT repo, slug")[0]
         assert params == ["zarfwidget", "relayrepo", ["gotcha"], 17]
         assert conn.statements()[0].count("%s") == len(params)
+
+
+class TestTheCLIActuallyHandsTheExclusionToTheSearch:
+    """🔴 THE SEAM NOBODY OWNED — and an audit proved it with a surviving mutant.
+
+    Every layer was pinned in isolation: `exclusion_slug`, `_selected`,
+    `_filter_predicates`, both backends' bound params, `render`, `filtered`. NONE
+    of them pinned that `main()` passes `exclude` to `run_search` at all. Deleting
+    `exclude=exclude` from the offline call site left the flag COMPLETELY INERT —
+    the doc came back as hit #1, no `excluded=` line, no scope pair — with the
+    whole suite green at 304 passed.
+
+    The pre-existing wiring guard is not this: it proves argparse ACCEPTS the flag
+    by passing `--limit 0`, which returns rc 2 before any store is built.
+    `claude/RULES.md` → "verified in isolation is the new vacuous green: the
+    defect lives in the SEAM nobody owns", and "a count of DECLARATIONS is not a
+    count of INSTANCES"."""
+
+    def test_the_offline_CLI_path_really_excludes(self, tmp_path, capsys):
+        repo = tmp_path / "alpharepo"
+        _write_repo(repo, {"handoff-alpha-topic.md": DOC_FULL,
+                           "handoff-beta-topic.md": DOC_SPARSE})
+        argv = ["--query", "quixotry", "--offline", "--offline-repo", str(repo),
+                "--limit", "3"]
+        rc_plain = hs.main(argv)
+        plain = capsys.readouterr().out
+        assert rc_plain == 0 and "alpha-topic" in plain, plain
+
+        rc_ex = hs.main(argv + ["--exclude-slug", "claudedocs/handoff-alpha-topic.md"])
+        excluded = capsys.readouterr().out
+        # 🔴 THE DIFFERENTIAL over ONE store, one flag apart.
+        assert "excluded=alpha-topic" in excluded, excluded
+        assert "── alpharepo/alpha-topic" not in excluded, excluded
+        assert "in_scope_docs=" in excluded, excluded
+
+    def test_EVERY_run_search_call_in_main_forwards_the_exclusion(self):
+        """🔴 THE POSTGRES CALL SITE CANNOT BE RUN HERE — no test in this repo
+        reaches a database — so it is pinned STRUCTURALLY, by reading `main`'s own
+        AST. The behavioural test above covers the offline site only, and an audit
+        showed the postgres site is mutable to inert independently.
+
+        This asserts a RELATIONSHIP, not a word: every `run_search(...)` call in
+        `main` must pass `exclude=`. It fails if a call site is added without it,
+        and it fails if one is removed — the ledger shape, so the guard notices
+        the set GROWING as well as shrinking."""
+        import ast
+        src = Path(hs.__file__).read_text()
+        tree = ast.parse(src)
+        main_fn = next(n for n in ast.walk(tree)
+                       if isinstance(n, ast.FunctionDef) and n.name == "main")
+        calls = [n for n in ast.walk(main_fn)
+                 if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", None) == "run_search"]
+        assert len(calls) == 2, (
+            f"expected 2 run_search call sites in main() (offline + postgres), "
+            f"found {len(calls)} — a new backend needs its own forwarding check"
+        )
+        for call in calls:
+            kw = {k.arg for k in call.keywords}
+            assert "exclude" in kw, (
+                f"a run_search call at line {call.lineno} does not forward "
+                f"`exclude` — the flag is INERT on that path and every existing "
+                f"test still passes"
+            )
+
+
+class TestTheExclusionValueNormalisesOrSaysSo:
+    """🔴 EVERY ONE OF THESE SHAPES SILENTLY NO-OPPED, AND AN AUDIT FOUND THEM.
+
+    `exclusion_slug` used to be `if value.endswith(".md") or "/" in value:
+    slug_for(value) else value`. An absolute path took the first arm and derived
+    `//home/.../claudedocs/x`, because `slug_for` strips `claudedocs/` only when
+    it is the FIRST component; `handoff-x` (prefix, no suffix) took NEITHER arm;
+    a trailing space survived into the slug. Each printed a confident
+    `excluded=<garbage>` on the scope line, moved `in_scope_*` by nothing, and
+    returned the very document the caller was dropping.
+
+    🔴 THE FIX ITSELF SHIPPED UNGUARDED FOR ONE ROUND: restoring the old
+    two-arm expression SURVIVED a 306-test green suite, because the round-1 fix
+    changed behaviour and wrote no test for it. That is the audit-fix-resets-the-
+    gate rule, caught by re-sweeping the fix rather than trusting it."""
+
+    #: Every spelling a caller can plausibly hold, and the ONE slug they mean.
+    #: 🔴 Distinct from any constant the assertions name, so a mutant that
+    #: hardcodes a literal cannot pass.
+    SPELLINGS = (
+        "widget-relay",                                   # the bare slug
+        "handoff-widget-relay",                           # prefix, no suffix
+        "handoff-widget-relay.md",                        # the resume-state.sh basename
+        "claudedocs/handoff-widget-relay.md",             # repo-relative path
+        "/home/z/workspace/r/claudedocs/handoff-widget-relay.md",   # ABSOLUTE
+        "  claudedocs/handoff-widget-relay.md  ",         # whitespace
+        "./claudedocs/handoff-widget-relay.md",           # dot-relative
+    )
+
+    def test_every_spelling_derives_the_slug_the_indexer_wrote(self):
+        for raw in self.SPELLINGS:
+            assert hs.exclusion_slug(raw) == "widget-relay", (
+                f"{raw!r} normalised to {hs.exclusion_slug(raw)!r}; a value that "
+                f"does not reach the stored slug filters NOTHING while still "
+                f"printing a confident `excluded=` line"
+            )
+
+    def test_the_spellings_actually_exclude_END_TO_END(self, tmp_path, capsys):
+        """🔴 THE BEHAVIOURAL HALF. Deriving the right string is not evidence the
+        row is dropped — that is the `slug_for` agreement, one seam short of the
+        thing the caller wanted."""
+        repo = tmp_path / "relayrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL,
+                           "handoff-cable-audit.md": DOC_SPARSE})
+        base = ["--query", "quixotry", "--offline", "--offline-repo", str(repo),
+                "--limit", "3"]
+        assert hs.main(base) == 0
+        assert "relayrepo/widget-relay" in capsys.readouterr().out
+
+        for raw in self.SPELLINGS:
+            hs.main(base + ["--exclude-slug", raw])
+            out = capsys.readouterr().out
+            assert "excluded=widget-relay" in out, f"{raw!r} -> {out}"
+            assert "── relayrepo/widget-relay" not in out, (
+                f"{raw!r} printed an excluded= line and returned the doc anyway"
+            )
+
+    def test_an_empty_value_is_not_a_garbage_slug(self):
+        assert hs.exclusion_slug("   ") == ""
+
+    def test_an_unmatched_slug_still_says_what_it_excluded(self, tmp_path, capsys):
+        """A slug the corpus does not hold is a no-op BY DESIGN (a doc may be
+        uncommitted, renamed, or in another repo). It must still name itself, so
+        the reader can tell that from a match: `excluded=` proves the flag
+        PARSED, the COUNT proves it MATCHED."""
+        repo = tmp_path / "relayrepo"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        hs.main(["--query", "quixotry", "--offline", "--offline-repo", str(repo),
+                 "--exclude-slug", "no-such-doc-anywhere"])
+        out = capsys.readouterr().out
+        assert "excluded=no-such-doc-anywhere" in out
+        assert "── relayrepo/widget-relay" in out, "an unknown slug must not filter"
+
+
+class TestAnExcludeArgumentThatWouldLIEIsRefused:
+    """🔴 BOTH SHAPES RETURN A WRONG SCOPE, NOT AN ERROR, AND ONE OF THEM MAKES
+    THE TWO BACKENDS DISAGREE — which no test in this repo can observe, because
+    none reaches a database.
+
+    A bare `str` satisfies `Sequence[str]` and iterates PER CHARACTER, so
+    `exclude="ab"` asks for slugs that are neither `a` nor `b`. A `None` element
+    makes `slug <> ALL(ARRAY[...,NULL])` evaluate NULL for every row: Postgres
+    returns ZERO while the memory backend returns EVERYTHING. Unreachable from
+    argparse; reachable from any programmatic caller, and `exclude` is the
+    parameter most naturally called with a single value."""
+
+    def test_a_bare_string_is_refused_rather_than_iterated(self):
+        store = hi.MemorySectionStore(_corpus())
+        with pytest.raises(TypeError, match="not a bare str"):
+            store.search("quixotry", exclude="widget-relay")
+        with pytest.raises(TypeError, match="not a bare str"):
+            store.stats(exclude="widget-relay")
+
+    def test_the_refusal_names_the_fix(self):
+        store = hi.MemorySectionStore(_corpus())
+        try:
+            store.stats(exclude="ab")
+        except TypeError as exc:
+            assert "['ab']" in str(exc), str(exc)
+        else:
+            pytest.fail("a bare str was accepted")
+
+    def test_a_non_string_element_is_refused_on_BOTH_backends(self):
+        with pytest.raises(TypeError, match="must be str"):
+            hi.MemorySectionStore(_corpus()).stats(exclude=["widget-relay", None])
+        conn = RecordingConn()
+        with pytest.raises(TypeError, match="must be str"):
+            hi.PostgresSectionStore(conn).search("q", exclude=["widget-relay", None])
+
+    def test_a_normal_list_is_still_accepted(self):
+        """🔴 THE NEGATIVE CONTROL. Without it a guard that refused EVERYTHING
+        would satisfy every assertion above."""
+        store = hi.MemorySectionStore(_corpus())
+        assert store.stats(exclude=["widget-relay"]).indexed_docs == 1
+        assert store.search("quixotry", exclude=["widget-relay"]) == []

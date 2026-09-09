@@ -1340,7 +1340,7 @@ class MemorySectionStore:
         removes more than the caller named is the kind of zero this module spends
         most of its prose making readable."""
         want = set(sections)
-        drop = set(exclude)
+        drop = set(_exclusion_list(exclude))
         return [
             r for r in self._rows
             if (repo is None or r.repo == repo)
@@ -1425,6 +1425,42 @@ def _boost_case(column: str = "section") -> str:
         f"WHEN '{token}' THEN {boost}" for token, boost in sorted(SECTION_BOOST.items())
     )
     return f"CASE {column} {arms} ELSE {DEFAULT_BOOST} END"
+
+
+def _exclusion_list(exclude) -> list[str]:
+    """Coerce an `exclude` argument, REFUSING the one shape that silently lies.
+
+    🔴 A BARE `str` SATISFIES `Sequence[str]` AND ITERATES PER CHARACTER, so
+    `exclude="ab"` asks for "every row whose slug is neither `a` nor `b`" —
+    a WRONG SCOPE, not a no-op, and it disagrees with `exclude=["ab"]`. Measured
+    by an audit: the two spellings returned different row sets from the same
+    store. `exclude` is the parameter most naturally called with a single value,
+    so this is the likely programmatic mistake, and a type checker cannot see it.
+
+    🔴 A `None` ELEMENT IS REFUSED FOR A DIFFERENT AND WORSE REASON: it makes the
+    backends DISAGREE. `slug <> ALL(ARRAY[...,NULL])` evaluates NULL for every
+    row, so Postgres returns ZERO while the memory backend returns EVERYTHING —
+    the exact cross-backend divergence this module is built to prevent, and
+    invisible in a repo where no test reaches a database.
+
+    Unreachable from argparse, which yields a list of `str`; reachable from any
+    programmatic or JSON-fed caller. Loud is the only safe direction here: a
+    wrong scope renders identically to a right one."""
+    if isinstance(exclude, str):
+        raise TypeError(
+            "exclude takes a SEQUENCE of slugs, not a bare str: a string iterates "
+            f"per character, so exclude={exclude!r} would filter on "
+            f"{sorted(set(exclude))!r}. Pass [{exclude!r}]."
+        )
+    out = list(exclude)
+    bad = [e for e in out if not isinstance(e, str)]
+    if bad:
+        raise TypeError(
+            f"exclude elements must be str; got {bad!r}. A None element makes the "
+            "postgres and memory backends return DIFFERENT rows (NULL propagates "
+            "through `slug <> ALL(...)`), which no test in this repo can see."
+        )
+    return out
 
 
 def _filter_predicates(
@@ -1630,7 +1666,7 @@ class PostgresSectionStore:
         if sections:
             params.append(list(sections))
         if exclude:
-            params.append(list(exclude))
+            params.append(_exclusion_list(exclude))
         with self._conn.cursor() as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
@@ -1689,7 +1725,7 @@ class PostgresSectionStore:
         if sections:
             params.append(list(sections))
         if exclude:
-            params.append(list(exclude))
+            params.append(_exclusion_list(exclude))
         params.append(limit)
         with self._conn.cursor() as cur:
             cur.execute(sql, params)

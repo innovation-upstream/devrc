@@ -72,7 +72,7 @@ BLOCK_CLOSE = "carry on with the item."
 EXPECTED_COMMAND = (
     "python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline "
     "--query \"<this handoff's topic, in plain words>\" --limit 3 "
-    "--exclude-slug <the path on step 2's `handoff:` line>"
+    "--exclude-slug \"<the handoff: basename from step 2>\""
 )
 
 # The step that was MEASURED to fire 5/6, and whose company this command was
