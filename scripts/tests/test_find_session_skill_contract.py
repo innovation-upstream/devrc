@@ -503,9 +503,11 @@ EXIT_2_CAUSES = (
     # traced-union gate to cover — it is named here because a caller branching
     # on rc 2 meets it whether or not this module produced it. MEASURED
     # unmutated: `--nope`, `--limit abc` and `--tail x` all exit 2 today.
-    ("a malformed command line rejected by argparse ITSELF before `main` runs "
-     "(an unknown flag, or a non-integer `--limit`/`--tail`), which exits 2 "
-     "from inside argparse and is the one cause this module never returns.",
+    ("a malformed command line rejected by argparse ITSELF inside `main`'s "
+     "first statement (an unknown flag, or a non-integer `--limit`/`--tail`). "
+     "🔴 That last one is the only exit 2 this module RAISES rather than "
+     "returns — `parse_args` raises `SystemExit` — so an in-process caller "
+     "must catch it, not read a return value.",
      (["--nope"], ["zzterm", "--limit", "abc"], ["zzterm", "--tail", "x"])),
 )
 
@@ -661,13 +663,28 @@ def _exit_usage_sites(tree):
         _bye = sys.exit; _bye(EXIT_USAGE)        SURVIVED    SURVIVED
         build_parser().error("…")                SURVIVED    SURVIVED
         return EXIT_USAGE if a.any else EXIT_OK  SURVIVED    SURVIVED
+      found by round 6, neither caught nor named at the time:
+        quit(EXIT_USAGE)                         SURVIVED    KILLED
+        raise _b.SystemExit(EXIT_USAGE)          SURVIVED    KILLED
 
-    🔴 THE LAST THREE ROWS ARE THE STANDING BLIND SPOT, AND NAMING THEM IS THE
-    POINT — catching them structurally would mean flagging every call to a local
-    name, every `.error(`, and every conditional return, which is breadth this
-    module cannot carry. The ternary is the sharpest: it IS a `return`, the
-    shape the sibling gate permits by design, so "only `return` reaches the
-    shell" would not deliver completeness even if it were true.
+    🔴 AND A FOURTH ROUND FOUND A FOURTH FALSE CLAIM HERE. Round 5 wrote "THE
+    LAST THREE ROWS ARE THE STANDING BLIND SPOT" — naming three and implying
+    the set closed. Round 6 measured two more that were neither caught NOR
+    named, both exiting 2 from a real script: `quit(EXIT_USAGE)` (the sibling
+    builtin of `exit`, which this detector already matched by name) and
+    `raise <recv>.SystemExit(…)` (the same receiver-blindness that had just
+    been fixed for CALLS, left open for RAISES). Both are now caught, at a cost
+    of one token and one clause.
+
+    🔴 SO THIS LIST IS NOT ASSERTED COMPLETE, AND NO SUCCESSOR SHOULD ASSERT IT.
+    Four consecutive rounds wrote a closure claim in this docstring and all four
+    were false — the honest statement is the MEASUREMENT: the rows below are
+    what was tried and what happened. What is uncaught is whatever nobody has
+    thought of yet, which is not a set anyone can enumerate. The three known
+    residues are kept uncaught deliberately (flagging every call to a local
+    name, every `.error(`, and every conditional return is breadth this module
+    cannot carry); the ternary is the sharpest, because it IS a `return`, the
+    shape the sibling gate permits by design.
 
     And argparse exits 2 with NO mutation at all (`--nope`, `--limit abc`,
     `--tail x`) — that cause is now NAMED in `EXIT_CONTRACT` rather than covered
@@ -1138,7 +1155,15 @@ def _main_guard_spans(tree):
         consts = {x.value for x in sides if isinstance(x, ast.Constant)}
         if "__name__" in names and "__main__" in consts and all(
                 isinstance(o, ast.Eq) for o in n.test.ops):
-            spans.append((n.lineno, n.end_lineno))
+            # 🔴 THE BODY, NOT THE NODE. `ast.If.end_lineno` spans the `orelse`,
+            # so `(n.lineno, n.end_lineno)` excuses the guard's `else:` / `elif`
+            # body too — measured: `else: sys.exit(9)` beneath a real
+            # `__main__` guard reported stray=[] while the identical statement
+            # under `if True:` was caught. This file ALREADY documents that
+            # exact trap for `_tail_path_lines` and guards it with
+            # `test_the_tail_path_whitelist_EXCLUDES_the_else_branch`; the
+            # lesson was not carried across when this helper was written.
+            spans.append((n.body[0].lineno, n.body[-1].end_lineno))
     return spans
 
 
@@ -1167,11 +1192,26 @@ def _stray_exit_lines(tree):
         # outside the `__main__` guard, so the wider match costs nothing.
         bad = (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                and n.func.attr in ("exit", "_exit"))
+        # `raise SystemExit(...)` AND `raise <anything>.SystemExit(...)` — the
+        # receiver-blindness fixed for CALLS above was left open for RAISES.
         bad = bad or (isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
-                      and getattr(n.exc.func, "id", "") == "SystemExit")
-        bad = bad or (isinstance(n, ast.Raise) and isinstance(n.exc, ast.Name))
+                      and (getattr(n.exc.func, "id", "") == "SystemExit"
+                           or getattr(n.exc.func, "attr", "") == "SystemExit"))
+        # 🔴 NARROWED from "any bare-name raise". That arm flagged
+        # `raise NotImplementedError`, `raise err` and a re-raised
+        # `except OSError as e: raise e` — none of them an exit, and the
+        # failure message told the author to "spell an exit as return
+        # <EXIT_*>", which is incoherent advice for those. `find-session.py`
+        # has no `raise` today, so the gate was green and the over-reach was
+        # latent: adding one ordinary `raise e` around the `RUN` subprocess
+        # would have turned it red for the wrong reason. Bare
+        # `raise SystemExit` is still caught.
+        bad = bad or (isinstance(n, ast.Raise) and isinstance(n.exc, ast.Name)
+                      and n.exc.id == "SystemExit")
+        # `quit` is `exit`'s sibling builtin and exits identically. It was
+        # neither caught NOR named — one token, no breadth cost.
         bad = bad or (isinstance(n, ast.Call)
-                      and getattr(n.func, "id", "") == "exit")
+                      and getattr(n.func, "id", "") in ("exit", "quit"))
         if bad and not in_guard(n.lineno):
             stray.append(n.lineno)
     return spans, sorted(stray)
@@ -1198,14 +1238,45 @@ def test_the_EXIT_SPELLING_gate_can_SEE_a_stray_exit():
         "        sys.exit(2)\n"))
     assert spoofed == [4], (
         f"a spoofed `__main__` string excused a stray exit: {spoofed}")
+    # 🔴 THE GUARD'S `else:` BODY IS NOT THE ENTRY POINT — `ast.If.end_lineno`
+    # spans the `orelse`, and this file already documents that trap for
+    # `_tail_path_lines`. Measured before the fix: stray=[] here.
+    _, in_else = _stray_exit_lines(ast.parse(
+        "import sys\n"
+        "def main():\n"
+        "    return 0\n"
+        "if __name__ == '__main__':\n"
+        "    sys.exit(main())\n"
+        "else:\n"
+        "    sys.exit(9)\n"))
+    assert in_else == [7], (
+        f"a stray exit in the `__main__` guard's else: body was excused: {in_else}")
+    # ...and the two spellings that were uncaught AND unnamed at round 5.
+    for src, why in (("def main():\n    quit(2)\n", "quit()"),
+                     ("import builtins as _b\n"
+                      "def main():\n    raise _b.SystemExit(2)\n",
+                      "raise <recv>.SystemExit()")):
+        _, got = _stray_exit_lines(ast.parse(src))
+        assert got, f"{why} is not detected — it exits 2 and is named nowhere"
+    # NEGATIVE CONTROL on the narrowed raise arm: an ordinary raise is NOT an
+    # exit, and flagging it made the gate red for the wrong reason.
+    for src in ("def f():\n    raise NotImplementedError\n",
+                "def f():\n    try:\n        pass\n"
+                "    except OSError as e:\n        raise e\n",
+                "def f():\n    err = ValueError('x')\n    raise err\n"):
+        _, got = _stray_exit_lines(ast.parse(src))
+        assert not got, (
+            f"an ordinary raise was flagged as a process exit: {got} in {src!r}")
 
 
 # =========================================================================== #
 # 🔴 R5 — GUARDS THAT ARE GREEN AT THE AUDITED TIP, AND WHY THAT IS CORRECT
 # =========================================================================== #
 # The file carries `R3_GREEN_AT_AUDITED_TIP` and `R4_GREEN_AT_AUDITED_TIP` so a
-# reader can tell regression coverage from an invariant guard. Round 5 added
-# four guards without one, and all four pass against the PRE-FIX payload — which
+# reader can tell regression coverage from an invariant guard. Round 5 left
+# four such guards unlisted (it AUTHORED one of them, modified two and left
+# one untouched — 'added' was wrong), and all four pass against the PRE-FIX
+# payload — which
 # is correct here (that payload was already right; the guards close walkability,
 # not a live defect) and is exactly why the ledger exists: without it, a reader
 # consulting R3/R4 concludes these four are red-at-base regression coverage.
@@ -1220,6 +1291,10 @@ R5_GREEN_AT_AUDITED_TIP = (
 def test_the_R5_ledger_names_only_tests_that_exist():
     """Two-way, like R3's and R4's: a renamed guard must not leave the ledger
     naming a test nobody can find."""
+    assert R5_GREEN_AT_AUDITED_TIP, (
+        "the ledger is empty — gate wired to nothing. Measured: emptying R3's "
+        "or R4's tuple FAILS their gates; emptying this one PASSED, so "
+        '"two-way, like R3\'s and R4\'s" was not true of it.')
     here = set(globals())
     missing = [n for n in R5_GREEN_AT_AUDITED_TIP if n not in here]
     assert not missing, f"R5 ledger names tests that do not exist: {missing}"
