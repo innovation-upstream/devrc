@@ -45,6 +45,7 @@ not the happy path:
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -482,6 +483,117 @@ def test_the_newest_sessions_win_when_the_cap_bites(server, projects, tmp_path):
     assert ids == ["sess-4", "sess-5"], f"the cap kept the wrong sessions: {ids}"
 
 
+def test_every_pushed_session_carries_fileBytes_equal_to_its_file_size(server, projects, tmp_path):
+    """🔴 THE SEAM WITH THE DELTA STREAM, AND ITS ABSENCE IS SILENT. `fileBytes`
+    is where this tail ENDS in the file, which the server stores as the delta
+    stream's resume cursor. Without it a bulk push REPLACES the tail while leaving
+    the cursor describing the tail it replaced, and the next delta appends onto a
+    base that no longer matches its offset — a splice, stored, with nothing to
+    indicate it. Nothing about the tail itself looks wrong when this is missing.
+    """
+    f = projects("sess-a", transcript("sess-a", human_turn("do the thing")))
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sent = json.loads(pushes(server)[0]["body"])["sessions"]
+    assert len(sent) == 1
+    assert sent[0]["fileBytes"] == f.stat().st_size, (
+        "fileBytes does not equal the transcript's size, so the cursor the server stores "
+        "will not match where the stream reads from"
+    )
+    # 🔴 AND IT MUST BE >= THE TAIL IT ACCOMPANIES, which is what the server
+    # enforces: a cursor pointing BEFORE the start of the stored tail is a splice
+    # waiting to happen, and the server rejects the whole atomic push over it.
+    assert sent[0]["fileBytes"] >= len(sent[0]["tail"].encode("utf-8"))
+
+
+def test_a_truncated_tail_reports_the_WHOLE_file_size_not_the_tail_length(server, projects, tmp_path):
+    """The cursor is a FILE position. Reporting the tail's length instead would
+    put it 250 KiB behind on every long session — and the stream would then be
+    refused for ever while looking correctly configured."""
+    big = transcript("sess-big", *[human_turn(f"turn {i} " + "x" * 400, "sess-big") for i in range(900)])
+    f = projects("sess-big", big)
+    assert f.stat().st_size > 196608, "the fixture is not big enough to be truncated"
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sent = json.loads(pushes(server)[0]["body"])["sessions"][0]
+    assert sent["truncated"] is True
+    assert sent["fileBytes"] == f.stat().st_size
+    assert sent["fileBytes"] > len(sent["tail"].encode("utf-8")), (
+        "a TRUNCATED tail reported a fileBytes equal to its own length — the cursor would "
+        "point at the start of the stored tail rather than its end"
+    )
+
+
+def test_coverage_is_not_capped_at_eight_sessions(server, projects, tmp_path):
+    """🔴 RED ON PRE-CHANGE CODE. The default was MAX_PER_PUSH=6 against a server
+    cap of 8, so a host with 21 changed sessions carried SIX of them per
+    five-minute tick — which is why most session cards had no conversation to
+    show at all (~93 live windows, measured 2026-09-07).
+
+    21 is deliberately NOT a multiple of 8 or 6: a fixture of 8, 16 or 12 could be
+    passed by a mutant restoring the old cap by landing exactly on a boundary.
+    """
+    n = 21
+    assert n % 8 != 0 and n % 6 != 0
+    for i in range(n):
+        projects(f"sess-{i:02d}", transcript(f"sess-{i:02d}", human_turn(f"turn {i}", f"sess-{i:02d}")))
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sent = json.loads(pushes(server)[0]["body"])["sessions"]
+    assert len(sent) == n, f"one push carried {len(sent)} of {n} changed sessions"
+    assert len({s["sessionId"] for s in sent}) == n
+
+
+def test_the_aggregate_byte_bound_stops_the_push_before_the_session_count_does(
+    server, projects, tmp_path
+):
+    """🔴 THIS IS THE BOUND THE SESSION COUNT USED TO STAND IN FOR. Raising the
+    count from 6 to 48 is only safe because the TOTAL is bounded directly; without
+    it, 48 sessions of 192 KiB would be a 9 MiB body the server refuses on every
+    tick.
+
+    The fixture keeps every session well under the per-session tail cap, so this
+    can only fail on the aggregate — a fixture that also breached the tail bound
+    would die to the other guard and this check would be unreachable.
+    """
+    body = transcript("x", *[human_turn("y" * 400, "x") for _ in range(40)])
+    per = len(body.encode())
+    assert per < 196608, "the fixture breaches the per-session tail cap and would test that instead"
+    n = 12
+    for i in range(n):
+        projects(f"sess-{i:02d}", body)
+
+    budget = per * 4  # room for ~4 sessions
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={
+            "CLAWGATE_API_URL": base_url(server),
+            "CLAWGATE_HOOK_TOKEN": "t",
+            "TRANSCRIPT_PUSH_MAX_BYTES": str(budget),
+        },
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sent = json.loads(pushes(server)[0]["body"])["sessions"]
+    assert 0 < len(sent) < n, f"the aggregate bound did not bite: {len(sent)} of {n} sessions"
+    total = sum(len(s["tail"].encode()) for s in sent)
+    assert total <= budget + per, f"the push carried {total} bytes against a {budget}-byte budget"
+
+
 def test_the_client_bounds_sit_UNDER_the_servers_not_at_them(server, projects, tmp_path):
     """🔴 A CLIENT TUNED EXACTLY TO THE SERVER'S CAP TURNS ANY ROUNDING
     DISAGREEMENT INTO A FEEDER THAT FAILS EVERY TICK while looking correctly
@@ -490,17 +602,32 @@ def test_the_client_bounds_sit_UNDER_the_servers_not_at_them(server, projects, t
     changes one.
     """
     server_max_tail_bytes = 256 * 1024  # transcript.MaxTailBytes
-    server_max_sessions = 8  # transcript.MaxSessionsPerPush
+    # 🔴 RAISED FROM 8 TO 128 WITH THE SERVER, AND THE PAIR MOVED FOR A REASON,
+    # NOT TO MAKE A TEST PASS. 8 was a COVERAGE cap wearing a safety cap's
+    # clothes: measured 2026-09-07 against ~93 live windows, at most 8 sessions
+    # could carry a transcript per push, so most session cards had no conversation
+    # to show at all. The ceiling the count was standing in for is the AGGREGATE
+    # tail bytes, which the server now bounds directly (transcript.MaxPushTailBytes)
+    # — so the count is free to rise and the third assertion below is the one now
+    # doing the work the second used to pretend to do.
+    server_max_sessions = 128  # transcript.MaxSessionsPerPush
+    server_max_push_bytes = 4 * 1024 * 1024  # transcript.MaxPushTailBytes
 
     text = SCRIPT.read_text()
     tail_default = _shell_default(text, "TAIL_BYTES", "TRANSCRIPT_PUSH_TAIL_BYTES")
     sess_default = _shell_default(text, "MAX_PER_PUSH", "TRANSCRIPT_PUSH_MAX_SESSIONS")
+    bytes_default = _shell_default(text, "MAX_PUSH_BYTES", "TRANSCRIPT_PUSH_MAX_BYTES")
 
     assert tail_default < server_max_tail_bytes, (
         f"the default tail ({tail_default}) is not UNDER the server's cap ({server_max_tail_bytes})"
     )
     assert sess_default < server_max_sessions, (
         f"the default session count ({sess_default}) is not UNDER the server's cap ({server_max_sessions})"
+    )
+    assert bytes_default < server_max_push_bytes, (
+        f"the default aggregate ({bytes_default}) is not UNDER the server's cap "
+        f"({server_max_push_bytes}) — this is the bound that actually holds now that the "
+        f"session count is {sess_default}"
     )
 
 
@@ -889,14 +1016,46 @@ def test_the_unit_PATH_carries_the_binaries_the_script_needs():
         assert pkg in block, f"the transcript feeder's PATH is missing {pkg}"
 
 
-def test_the_unit_restart_triggers_name_BOTH_halves():
-    """The builder decides WHICH sessions are sent and HOW MUCH of each. A change
-    there changes what this unit delivers with no edit to the shell at all, so a
-    trigger on the shell alone would leave a deployed unit running the old rule.
+def test_the_unit_restart_triggers_name_EVERY_hard_dependency():
+    """Every file this unit cannot run without is declared as a trigger.
+
+    Asserted as a SET, not a list of `in` checks, because a membership test grows
+    silently — which is how this list reached four entries having been described
+    as "both halves" through three of them.
+
+    ⚠ WHAT A MISSING TRIGGER COSTS HERE IS ONE TICK, AND THE PROSE IN THIS FILE
+    SAID OTHERWISE THROUGH TWO REVISIONS. This unit is `Type=oneshot` on a
+    5-minute timer whose ExecStart names the WORKING-TREE path, so the next tick
+    execs current code regardless. The indefinitely-stale consequence belongs to
+    the RESIDENT reply agent, which imports once and runs for weeks — see the
+    two tests below, which are the ones where that reasoning applies. The
+    declaration is still worth pinning (a dependency that can exit the unit
+    should be visible in the unit), but this test is not guarding an outage.
     """
+    import re
+
     block = _unit_block()
-    assert "../scripts/transcript-push.sh" in block
-    assert "../scripts/lib/build_transcript_push.py" in block
+    m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
+    assert m, "the transcript-push unit declares no X-Restart-Triggers at all"
+    declared = set(re.findall(r"\$\{\.\./([^}]+)\}", m.group(1)))
+    want = {
+        "scripts/transcript-push.sh",
+        "scripts/lib/build_transcript_push.py",
+        "scripts/lib/host_label.py",
+        # 🔴 THE BUILDER IMPORTS IT AND CANNOT RUN WITHOUT IT (ModuleNotFoundError,
+        # rc 1), and it was the OLDEST omission here — the builder has imported it
+        # since the feeder shipped, before the delta tailer existed. A hand-written
+        # want-set is a ledger only while somebody checks it against the thing it
+        # describes: this one was pinning the 3-set that omitted it, so the gap was
+        # not merely unnoticed, it was locked in by its own guard. That is why the
+        # test below derives the set from SOURCE instead.
+        "scripts/lib/transcript_search.py",
+    }
+    assert declared == want, (
+        f"the transcript-push unit's restart triggers are {sorted(declared)}, want "
+        f"{sorted(want)} — every file this unit hard-depends on must be one. A missing "
+        "one costs at most one 5-minute tick here (oneshot + working-tree ExecStart), "
+        "but an undeclared hard dependency is invisible to anyone reading the unit")
 
 
 def test_the_script_and_builder_are_executable():
@@ -944,3 +1103,932 @@ def test_a_SUBAGENT_transcript_is_never_pushed(projects, tmp_path):
     # POSITIVE CONTROL: the walk found the real one, so the absence above is not a
     # fact about a walk that enumerated nothing.
     assert ids == ["sess-main"], f"the main session was not picked up either: {ids}"
+
+
+def _reply_agent_unit_block() -> str:
+    """The tmux-reply-agent SERVICE block from nix/home.nix."""
+    text = HOME_NIX.read_text()
+    idx = text.index("systemd.user.services.tmux-reply-agent")
+    end = text.index("systemd.user.services", idx + 10)
+    return text[idx:end]
+
+
+def test_the_RESIDENT_agent_restart_triggers_name_EVERY_module_it_imports():
+    """🔴 THE COVERAGE USED TO SIT WHERE IT MATTERED LEAST. This file already pins
+    that the transcript-push TIMER names both its halves — where a stale copy
+    costs at most five minutes, because the next tick execs fresh code.
+
+    `tmux-reply-agent` is a RESIDENT service: it imports each module ONCE and then
+    runs for weeks. A fix to `transcript_stream.py` (or to `transcript_search.py`,
+    which it loads in turn) would land on disk and the running agent would keep
+    executing the old code indefinitely — a correctness change to what the
+    operator reads about a session that appears deployed and is not. The unit's
+    own comment states the rule for `tmux_text_policy.py`; the two transcript
+    modules were added afterwards and did not inherit it.
+
+    ⚠ ASSERTED AS A SET, NOT AS A LIST OF `in` CHECKS. A membership test grows
+    silently: the next module loaded at startup passes without anyone noticing,
+    which is exactly how this gap opened.
+    """
+    import re
+
+    block = _reply_agent_unit_block()
+    m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
+    assert m, "the reply-agent unit declares no X-Restart-Triggers at all"
+    declared = set(re.findall(r"\$\{\.\./([^}]+)\}", m.group(1)))
+
+    want = {
+        "scripts/tmux-reply-agent",
+        "scripts/lib/tmux_text_policy.py",
+        "scripts/lib/host_label.py",
+        "scripts/lib/transcript_stream.py",
+        "scripts/lib/transcript_search.py",
+    }
+    assert declared == want, (
+        f"the reply-agent's restart triggers are {sorted(declared)}, want {sorted(want)}. "
+        "A module this RESIDENT unit imports at startup but does not trigger on stays on "
+        "the OLD code until something else restarts the process."
+    )
+
+
+def test_every_module_the_agent_loads_by_path_IS_a_restart_trigger():
+    """🔴 THE RELATIONSHIP, NOT THE LIST. The test above pins a set someone typed;
+    this one derives the set from the AGENT'S OWN SOURCE, so a module added to the
+    agent tomorrow fails here rather than passing unseen.
+
+    It scans for the loader idiom the agent actually uses — `os.path.join(_HERE,
+    "lib", "<name>")` — plus the one transitive hop `transcript_stream` makes.
+    """
+    import re
+
+    agent = (REPO_ROOT / "scripts" / "tmux-reply-agent").read_text()
+    loaded = set(re.findall(r'os\.path\.join\(_HERE,\s*"lib",\s*"([^"]+)"\)', agent))
+    assert loaded, "the scanner found no path-loaded modules — it is measuring nothing"
+
+    stream = (REPO_ROOT / "scripts" / "lib" / "transcript_stream.py").read_text()
+    transitive = set(re.findall(r'os\.path\.join\(_HERE,\s*"([^"]+\.py)"\)', stream))
+    # 🔴 A POSITIVE CONTROL ON THE TRANSITIVE HOP TOO. The agent scan above has
+    # one; this one did not, so if its regex ever stopped matching,
+    # transcript_search.py would silently drop out of `loaded`, `missing` would be
+    # empty, and this test would PASS while the exact gap it exists to close
+    # reopened.
+    assert transitive, ("the transitive scanner found no path-loaded modules in "
+                        "transcript_stream.py — it is measuring nothing")
+    loaded |= transitive
+
+    block = _reply_agent_unit_block()
+    m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
+    declared = set(re.findall(r"\$\{\.\./scripts/lib/([^}]+)\}", m.group(1)))
+    missing = loaded - declared
+    assert not missing, (
+        f"the agent loads {sorted(missing)} at startup but the unit does not trigger on "
+        "them — a resident service would keep running the old copy indefinitely"
+    )
+
+
+def _lib_modules_a_python_file_imports(path, libdir):
+    r"""Every `scripts/lib` module `path` pulls in, by AST — not by regex.
+
+    🔴 A REGEX OVER IMPORT LINES IS IDIOM-SHAPED, AND THIS REPO USES THE OTHER
+    IDIOMS. The first version of this scanner was `^(?:from|import)\s+(\w+)`,
+    which is blind to an import that is indented or wrapped in `try:` — both of
+    which appear in `scripts/lib/transcript_search.py` itself, i.e. inside this
+    unit's own dependency chain. Measured against the old scanner, five realistic
+    "fifth dependency" shapes were added and all five passed GREEN.
+
+    ⚠ A THIRD EXAMPLE WAS CITED AND WAS WRONG, IN THE DIRECTION THAT MATTERS.
+    `import base64, json, sys` does appear in that file — inside a triple-quoted
+    raw-string literal (`_REMOTE_SCAN`), as the source of a script run on a PEER. It is not an
+    import of that module, and an AST walk correctly does not report it, while
+    the old regex DID. So on that one shape the rewrite is NARROWER, deliberately
+    and correctly. A multi-name import line is still handled — `ast.Import`
+    carries every alias — it simply was not the example it was quoted as.
+
+    An AST walk sees every `import`/`from` at any depth, in one rule. It also
+    picks up the `os.path.join(_HERE, "<name>.py")` loader idiom, because that is
+    how this repo loads siblings when a plain import will not do — and it is the
+    idiom the resident-agent sibling test scans for, so a scanner here that could
+    not see it would be narrower than the test it was modelled on.
+    """
+    import ast
+
+    src = path.read_text()
+    names = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            names |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    found = {f"{n}.py" for n in names if (libdir / f"{n}.py").exists()}
+    # The SourceFileLoader idiom: os.path.join(_HERE, "x.py") / (_HERE, "lib", "x.py").
+    found |= {m for m in re.findall(r'os\.path\.join\(\s*_HERE\s*,[^)]*?"([^"]+\.py)"', src)
+              if (libdir / m).exists()}
+    return found
+
+
+def _strip_shell_comments(src):
+    r"""Shell source with comments removed, so a scanner over it sees CODE.
+
+    🔴 READ THE DIRECTIONS BEFORE CHANGING ANYTHING HERE. An OVER-strip deletes
+    text bash would execute, so a `scripts/lib/<x>.py` inside it disappears and
+    the ledger PASSES over an undeclared dependency — silent, and the exact
+    failure the ledger exists to prevent. An UNDER-strip keeps a comment, minting
+    a requirement for a file the script never opens — LOUD, a human sees it.
+    Every judgement call below resolves toward under-stripping.
+
+    🔴 ONE PASS OVER THE WHOLE SOURCE, NOT LINE BY LINE. Three separate defects
+    were all the per-line architecture, and each was an over-strip:
+
+      * a `#`-leading line INSIDE a multi-line string was read as a comment;
+      * `sub_depth` reset per line, so a `$( … )` spanning a real newline left
+        its `)` looking like a word start (`X=$(echo a\ntrue)#x` is one word);
+      * a pre-pass that JOINED backslash-newline continuations swallowed the
+        next line when the first was a COMMENT — bash ends a comment at the
+        newline whatever the backslash does. That one was INTRODUCED by the fix
+        for the third over-strip, which is why the join now lives inside the
+        walk, where comment state is known.
+
+    WORD-START SET, each character measured against bash in a realistic shape.
+    Two entries were REMOVED after their justifications were refuted:
+
+        ; | & and whitespace      -> comment start          (in)
+        bare `(`                  -> comment start          (in)
+        `)` closing $( or $((     -> NOT a word start       (tracked, not listed)
+        `}`                       -> REMOVED. `{ echo a; }#` is a SYNTAX ERROR,
+                                     not a comment; `${V}#x` and `{a,b}#x` both
+                                     keep the text. The shape that justified it
+                                     does not parse.
+        ` (backtick)              -> REMOVED from the flat set and TRACKED: an
+                                     OPENING backtick starts a comment context,
+                                     a CLOSING one is mid-word (`echo `true`#x`
+                                     keeps `#x`) — the same asymmetry as `(`/`)`.
+        < >                       -> left OUT. bash DOES comment after them, so
+                                     this is a deliberate under-strip; see the
+                                     divergence test.
+
+    HEREDOC BODIES ARE CONTENT AND ARE KEPT VERBATIM. A `#` line inside `<<EOF`
+    is data, not a comment, and stripping it was an over-strip. Keeping it can
+    only over-report a dependency, which is the loud direction — and a heredoc
+    carrying a python script is exactly where a real `scripts/lib` import hides.
+
+    `$'…'` IS ITS OWN QUOTE STATE, because backslash escapes there and does not
+    in plain `'…'`. Treating them alike mis-paired the quotes and over-stripped.
+
+    ⚠ STILL NOT MODELLED, and both are the LOUD direction: a `#` inside `$(…)`
+    or backticks nested within double quotes (bash resets the quoting context
+    there; this walk does not), and `splitlines()`-only separators such as \x0c
+    which bash treats as ordinary characters.
+    """
+    out = []
+    i, n = 0, len(src)
+    in_single = in_double = in_ansi = False
+    in_comment = False
+    sub_depth = 0
+    tick_depth = 0
+    heredoc_terms = []       # set at `<<WORD`, consumed at the next newline
+    heredoc_active = None
+    heredoc_dash = False
+    unmodelled = False       # a construct this walk cannot lex -> refuse to strip
+    prev_closed_group = False   # a `)` or backtick that CLOSED — mid-word
+    saw_subst = False           # a substitution opened on this line (see below)
+    prev_was_escape = False
+    after_join = False          # a backslash-newline was just consumed
+
+    while i < n:
+        c = src[i]
+
+        # --- inside a heredoc body: copy verbatim until the terminator line ---
+        if heredoc_active is not None:
+            j = src.find("\n", i)
+            if j == -1:
+                j = n
+            line = src[i:j]
+            out.append(line)
+            # 🔴 EXACT MATCH, not `.strip()`. bash allows leading whitespace on the
+            # terminator ONLY under `<<-`, and then only TABS. `.strip()` ended a
+            # heredoc early on a space-indented `  EOF`, after which the remaining
+            # BODY was lexed as shell and its `#` lines removed — an over-strip.
+            if (line.lstrip("\t") if heredoc_dash else line) == heredoc_active:
+                # `cmd <<A <<B` runs the bodies BACK TO BACK, with no intervening
+                # newline for the main loop to pop the queue at — so the second
+                # body was lexed as shell. Pull the next terminator right here.
+                heredoc_active = heredoc_terms.pop(0) if heredoc_terms else None
+            if j < n:
+                out.append("\n")
+            i = j + 1
+            continue
+
+        if c == "\n":
+            # A comment ENDS at the newline no matter what preceded it.
+            in_comment = False
+            if heredoc_terms:
+                heredoc_active = heredoc_terms.pop(0)
+            out.append(c)
+            prev_closed_group = prev_was_escape = after_join = False
+            saw_subst = False
+            i += 1
+            continue
+
+        if in_comment:
+            i += 1
+            continue
+
+        # --- backslash-newline continuation, OUTSIDE a comment: bash joins ---
+        if c == "\\" and i + 1 < n and src[i + 1] == "\n" and not in_single:
+            i += 2
+            prev_was_escape = True
+            prev_closed_group = False
+            # 🔴 THE JOIN MUST NOT LOOK LIKE A LINE START. `prev` is read from the
+            # RAW source, where the character before is the newline we just
+            # consumed — so without this flag `echo abc\<nl>#x` saw a line start
+            # and stripped a word bash keeps joined. Measured as an over-strip.
+            after_join = True
+            continue
+
+        if in_single:
+            out.append(c)
+            if c == "'":
+                in_single = False
+            i += 1
+            continue
+
+        if in_ansi:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(src[i + 1])
+                i += 2
+                continue
+            if c == "'":
+                in_ansi = False
+            i += 1
+            continue
+
+        if in_double:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(src[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_double = False
+            i += 1
+            continue
+
+        prev = src[i - 1] if i else None
+        at_word_start = not after_join and (
+            i == 0
+            or prev == "\n"
+            # `)` is included but gated on prev_closed_group below: a SUBSHELL's
+            # `)` is a word start (`(true)# x` is a comment), while a `)` that
+            # closed `$(`/`$((` is mid-word (`$(true)#x` is one word).
+            or (prev in " \t;|&()" and not prev_was_escape)
+            or (prev == "`" and not prev_closed_group and not prev_was_escape)
+        )
+        was_escape, closed_group = prev_was_escape, prev_closed_group
+        prev_was_escape = prev_closed_group = after_join = False
+
+        if c == "$" and i + 1 < n and src[i + 1] == "'":
+            in_ansi = True
+            out.append(c)
+            out.append(src[i + 1])
+            i += 2
+            continue
+        if c == "'":
+            in_single = True
+            out.append(c)
+        elif c == '"':
+            in_double = True
+            out.append(c)
+        elif c == "\\" and i + 1 < n:
+            out.append(c)
+            out.append(src[i + 1])
+            i += 2
+            prev_was_escape = True
+            continue
+        elif c == "<" and src[i : i + 2] == "<<" and src[i : i + 3] != "<<<":
+            # 🔴 A QUEUE, BECAUSE `cmd <<A <<B` IS TWO HEREDOCS. The single-slot
+            # version armed only the first, and the SECOND body was lexed as
+            # shell — an over-strip on data.
+            m = re.match(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", src[i:])
+            out.append(c)
+            if m:
+                heredoc_dash = bool(m.group(1))
+                heredoc_terms.append(m.group(3))
+            else:
+                # `<<\EOF`, `<<$VAR`, `<< "a b"` … forms this walk cannot resolve.
+                # Refusing to strip the WHOLE source is the loud direction; lexing
+                # a body we failed to arm is the silent one.
+                unmodelled = True
+        elif c == "`":
+            tick_depth ^= 1
+            if tick_depth == 0:
+                prev_closed_group = True
+            out.append(c)
+        elif c == "(" and (prev == "$" or sub_depth or (prev is not None and prev in "<>")):
+            # Every `(` inside a substitution counts, and `<(`/`>(` open one too.
+            # Counting only `$(`/`((` left a plain subshell `$( (cd /) )` and a
+            # process substitution `<(echo z)` with an UNPAIRED closer.
+            sub_depth += 1
+            saw_subst = True
+            out.append(c)
+        elif c == ")" and (sub_depth or saw_subst):
+            # 🔴 `saw_subst` IS THE FAIL-SAFE, AND IT IS DELIBERATELY ONE-WAY. A
+            # `case` pattern's `)` inside `$( … )` is genuinely unbalanced, so no
+            # counter can pair it. Once a substitution has opened on this line,
+            # EVERY later `)` is treated as mid-word — which KEEPS a following
+            # `#`. That is the loud direction; the alternative was a silent
+            # over-strip on ordinary shell.
+            if sub_depth:
+                sub_depth -= 1
+            prev_closed_group = True
+            out.append(c)
+        elif c == "#" and at_word_start and not closed_group:
+            in_comment = True
+        else:
+            out.append(c)
+        i += 1
+
+    if unmodelled:
+        # Every unmodelled construct becomes an UNDER-strip (a phantom
+        # requirement — loud) instead of a silent over-strip. Structural, so it
+        # covers shapes nobody enumerated.
+        return src
+    return "".join(out)
+
+
+@pytest.mark.parametrize(
+    "name,text,marker_survives",
+    [
+        # --- bash COMMENTS these out, so the stripper must remove the marker ---
+        ("a full-line comment", "# /lib/MARK.py", False),
+        ("a trailing comment", "echo hi   # /lib/MARK.py", False),
+        ("`;#` with no space", "echo A;# /lib/MARK.py", False),
+        ("`|#` with no space", "echo B |# /lib/MARK.py", False),
+        ("`&&#` with no space", "true &&# /lib/MARK.py", False),
+        ("a SUBSHELL's `)#`", "(true)# /lib/MARK.py", False),
+        ("a comment after a multi-line string closes",
+         'echo "one\ntwo" # /lib/MARK.py', False),
+        # 🔴 THREE MECHANISMS THE DOCSTRING ASSERTED AS MEASURED AND NO ROW
+        # COVERED. Each was found by mutating the walk and watching every row
+        # stay green: deleting `(` from the word-start set, deleting the opening-
+        # backtick clause, and replacing `prev == "\n"` with `or False` — the
+        # last of which does almost all the real work on the actual script.
+        ("a full-line comment on line >= 2", "echo one\n# /lib/MARK.py", False),
+        ("a bare `(` is a word start", "echo a (# /lib/MARK.py", False),
+        ("an unquoted OPENING backtick", "echo `#/lib/MARK.py`", False),
+        # --- bash KEEPS these as executable text: removing the marker would be
+        #     an OVER-strip, which hides a dependency and passes the ledger ---
+        ("`X=y#foo` is one word", "F=/lib/MARK.py#tag", True),
+        # 🔴 THE MIRROR OF THE ROW ABOVE, AND THE ROW ABOVE IS VACUOUS WITHOUT IT.
+        # There the marker sits BEFORE the `#`, and the walk keeps everything
+        # accumulated before it breaks — so that row passes even under a mutant
+        # where EVERY `#` starts a comment. Here the marker sits after.
+        ("`X=#tag/lib/x` — marker AFTER the hash", "F=#tag/lib/MARK.py", True),
+        ("a QUOTED # then real code", 'printf "a #b\\n"; R=/lib/MARK.py', True),
+        ("an ESCAPED word-separator", "echo a\\ #/lib/MARK.py", True),
+        ("`)` closing a $(...)", "echo $(true)#/lib/MARK.py", True),
+        ("`)` closing a $((...))", "echo $((1+2))#/lib/MARK.py", True),
+        ("`}` of ${V} — NOT a comment start", "V=1; echo ${V}#/lib/MARK.py", True),
+        ("`}` of a brace expansion", "echo {a,b}#/lib/MARK.py", True),
+        ("a CLOSING backtick", "echo `true`#/lib/MARK.py", True),
+        ("a HEREDOC body is content", "cat <<EOF\n# /lib/MARK.py\nEOF", True),
+        ("$'...' escapes its own quote", "echo $'a\\'b #/lib/MARK.py'", True),
+        ("a COMMENT ending in a backslash does NOT continue",
+         "# c \\\necho /lib/MARK.py", True),
+        ("a $( ) spanning a real newline", "X=$(echo a\ntrue)#/lib/MARK.py", True),
+        ("inside a multi-line \"...\"", 'echo "one\n# /lib/MARK.py\nthree"', True),
+        ("inside a multi-line '...'", "echo 'one\n# /lib/MARK.py\nthree'", True),
+        ("a backslash-newline continuation joins", "echo abc\\\n#/lib/MARK.py", True),
+        # 🔴 SEVEN MEASURED OVER-STRIPS FROM ONE AUDIT ROUND, EVERY ONE A GROUP
+        # DELIMITER THE COUNTER COULD NOT PAIR. They are the reason the walk now
+        # fails SAFE (see `saw_subst` and `unmodelled`) instead of enumerating.
+        ("a plain subshell inside $( )", "V=$( (cd / && pwd) )#/lib/MARK.py", True),
+        ("a case pattern's ) inside $( )",
+         "V=$(case a in b) echo Z;; esac)#/lib/MARK.py", True),
+        ("a nested ( inside $(( ))", "echo $(( (1+2)*3 ))#/lib/MARK.py", True),
+        ("a process substitution <( )", "wc -l <(echo z)#/lib/MARK.py", True),
+        ("an ESCAPED backtick is not an opening one", "echo x\\`#/lib/MARK.py", True),
+        ("TWO heredocs on one line", "cat <<A <<B\nx\nA\n# /lib/MARK.py\nB", True),
+        ("a backslash-quoted heredoc terminator",
+         "cat <<\\EOF\n# /lib/MARK.py\nEOF", True),
+        ("a variable heredoc terminator", "T=EOF; cat <<$T\n# /lib/MARK.py\nEOF", True),
+        ("a space-indented terminator does NOT end <<EOF",
+         "cat <<EOF\nbody\n  EOF\n# /lib/MARK.py\nEOF", True),
+    ],
+)
+def test_the_shell_comment_stripper_AGREES_WITH_BASH(name, text, marker_survives):
+    """🔴 THE STRIPPER IS A NO-OP ON THE REAL SCRIPT TODAY, SO NOTHING EXERCISED
+    IT. `transcript-push.sh` yields the same module set stripped, unstripped, and
+    under every previous version — so its worth is entirely prospective, which is
+    precisely the code that rots unwatched. Three rewrites and three audit rounds
+    produced these rows; each is a shape where some version disagreed with bash.
+
+    🔴 EVERY EXPECTATION CAME FROM BASH, AND THE ORACLE THAT PRODUCED THEM WAS
+    ITSELF WRONG TWICE BEFORE IT WAS TRUSTED. Probe: `<line-with-MARK>; echo SAW`
+    on ONE line — if bash swallows the same-line `; echo SAW` and never prints
+    the marker, it is a comment. Putting `; echo SAW` on the NEXT line measures
+    nothing (it always runs), and `declare -f` is unreliable for backtick CONTENT
+    because bash stores those verbatim. The harness asserts a known-comment and a
+    known-code control before any row's expectation is read.
+
+    Two rows were REMOVED as refuted rather than kept and re-explained: `{ …; }#`
+    (a syntax error, so bash has no verdict) and `>#` (bash DOES comment there —
+    see the divergence test below).
+    """
+    kept = "MARK.py" in _strip_shell_comments(text)
+    assert kept is marker_survives, (
+        f"{name}: bash {'keeps' if marker_survives else 'comments out'} the marker, "
+        f"but the stripper {'kept' if kept else 'removed'} it. "
+        + ("An OVER-strip hides a real dependency and the ledger passes GREEN."
+           if marker_survives else
+           "An UNDER-strip mints a requirement for a file the script never opens."))
+
+
+@pytest.mark.parametrize("name,text", [
+    ("`>` before a comment", "echo hi ># /lib/MARK.py"),
+    ("`<` before a comment", ": <# /lib/MARK.py"),
+    # 🔴 A BACKTICK SUBSTITUTION NESTED INSIDE DOUBLE QUOTES. bash resets the
+    # quoting context inside `…`, so the `#` there IS a comment — measured, the
+    # script prints `[]`. This walk treats `"` as suppressing comments outright
+    # and keeps it. Same loud direction, same trade, and it is the one shape
+    # whose verdict the `; echo SAW` probe gets WRONG: that `echo` sits OUTSIDE
+    # the substitution, so it runs either way. Read stdout for this family.
+    ("a backtick substitution inside double quotes", 'echo "[`#/lib/MARK.py`]"'),
+])
+def test_the_stripper_DELIBERATELY_UNDER_STRIPS_after_a_redirect(name, text):
+    """🔴 A KNOWN DIVERGENCE FROM BASH, PINNED SO IT STAYS DELIBERATE.
+
+    bash DOES start a comment after `<` or `>` — `echo hi > a#foo` creates the
+    file `a#foo`, so `#` is legal mid-word, while `echo hi >#foo` is a syntax
+    error and creates NO file: the redirect lost its target because `#foo` was
+    eaten as a comment. An earlier version of this suite asserted the opposite
+    and called it measured.
+
+    They are still left OUT of the word-start set, because the two directions
+    are not symmetric. Omitting them UNDER-strips: a `/lib/<x>.py` in such a
+    comment mints a requirement for a file the script never opens — wrong, but
+    LOUD, and a human sees the failure. Including them would OVER-strip any
+    executable text after a redirect, which hides a real dependency and passes
+    the ledger GREEN. When the shapes are this rare (0 in `transcript-push.sh`),
+    take the loud error.
+    """
+    assert "MARK.py" in _strip_shell_comments(text), (
+        f"{name}: the stripper now removes text after a redirect. That is the "
+        "SILENT direction — a real dependency there would vanish and the ledger "
+        "would pass. If this was deliberate, the reasoning above must be rewritten.")
+
+
+def test_every_lib_module_this_UNIT_hard_depends_on_IS_a_restart_trigger():
+    """🔴 THE HALF THE HAND-WRITTEN LEDGER LEFT OPEN. `transcript_search.py` was
+    absent from the timer's triggers from the day the feeder shipped, and the
+    test that grades those triggers is a set somebody typed — so it graded the
+    omission as correct. The agent unit already had a source-derived counterpart;
+    the timer had none, which is precisely why the gap survived on this side.
+
+    WHAT THIS SCANS, stated as narrowly as it is implemented — an earlier
+    docstring said "the two files the unit actually runs", which was both wider
+    than the body and one file short:
+
+      (a) `build_transcript_push.py` — every import, by AST, at any depth;
+      (b) `transcript-push.sh` — literal `lib/<name>.{py,sh}` references, with
+          COMMENTS STRIPPED first;
+      (c) `host_label.py` — the unit's THIRD runnable file (`transcript-push.sh`
+          execs it directly), whose own imports were previously never read.
+
+    🔴 WHAT IT DOES NOT SEE, ENUMERATED BY RUNNING IT — an earlier version of
+    this paragraph gestured at "a mechanism none of the three use", which names
+    nothing checkable. Each of these was driven with a real undeclared
+    `scripts/lib` module injected into the builder, and each ESCAPED:
+
+        importlib.import_module("x") / __import__("x")
+        os.path.join(_HERE, f"{n}.py")            (an f-string, not a literal)
+        os.path.join(_HERE, os.path.basename(p), "x.py")   (the regex cannot
+                                                    cross the inner `)`)
+        Path(__file__).parent / "x.py"
+        a module imported by a module we scan     (ZERO transitive hops — the
+                                                   sibling above follows one)
+        an import inside a string that is executed elsewhere (the `_REMOTE_SCAN`
+                                                   idiom in transcript_search.py)
+
+    None is used by the three scanned files today, so nothing is invisible NOW —
+    but `importlib.import_module` and `Path(__file__).parent` both occur
+    elsewhere under `scripts/`, so these are repo idioms, not hypotheticals.
+    A relative import (`from .x import y`) is deliberately skipped: these modules
+    load as top-level, so that form would fail at runtime anyway.
+
+    🔴 TWO ARM-EXCLUSIVE CONTROLS AND ONE SHARED PROBE — NOT "three controls",
+    which is what this docstring claimed for one revision. Arms (a) and (b) each
+    have a sentinel only that arm can produce, so blinding either fails HERE
+    rather than hiding behind the other's hit. A control over the UNION cannot do
+    that: measured, with the shell arm reading prose, deleting the only executable
+    `host_label.py` reference left a union control fully green.
+
+    ⚠ ARM (c) HAS NO ARM-EXCLUSIVE SENTINEL AND CANNOT BE GIVEN ONE HONESTLY —
+    its subject, `host_label.py`, imports only stdlib, so its correct result is
+    the empty set, and `assert from_host_label == set()` is satisfied identically
+    by "the arm ran" and "the arm is wired to nothing". Measured: blinding arm
+    (c) alone left the whole guard GREEN. What replaces it is a synthetic probe
+    of the SHARED helper and this call site's `libdir`. Stated precisely, because
+    the failure this whole round is about is a guard described more widely than
+    it works:
+
+      COVERED    the helper is live; the `libdir` passed here resolves
+      NOT COVERED a defect confined to arm (c)'s own call site (wrong path
+                 constant) while the helper stays healthy
+
+    And the probe is not independently demonstrable: a mutation that breaks the
+    shared helper is caught by arm (a)'s control FIRST, so the probe never runs.
+    That is a real limit on what its presence proves, not a reason to delete it —
+    it is what makes arm (c)'s empty result mean "read and empty" rather than
+    "never read".
+
+    ⚠ WHAT THIS GUARDS IS A DECLARATION, NOT AN OUTAGE — this unit is oneshot on a
+    timer with a working-tree ExecStart, so a missing trigger costs one tick. The
+    resident-agent sibling above is the one where staleness is unbounded, and
+    conflating the two is the error this arc made twice.
+    """
+    libdir = REPO_ROOT / "scripts" / "lib"
+
+    # (a) the builder's imports.
+    from_builder = _lib_modules_a_python_file_imports(
+        libdir / "build_transcript_push.py", libdir)
+
+    # (b) what the SHELL resolves out of lib/, comments removed. `.sh` too:
+    #     scripts/lib holds shell helpers, and the old `\.py`-only pattern could
+    #     never have matched one.
+    shell = _strip_shell_comments((REPO_ROOT / "scripts" / "transcript-push.sh").read_text())
+    # 🔴 HYPHENS. `scripts/lib` really holds `host-role.sh`, and the first version
+    # of this pattern was `[a-z_][a-z0-9_]*`, which cannot match one — a mutant
+    # adding exactly that dependency SURVIVED. A filename character class is a
+    # place to be generous: the `.exists()` filter below is what makes a match
+    # real, so widening it costs nothing and narrowing it loses whole files.
+    from_shell = {m for m in re.findall(r"/lib/([A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:py|sh))", shell)
+                  if (libdir / m).exists()}
+
+    # (c) the third runnable file's own imports.
+    from_host_label = _lib_modules_a_python_file_imports(libdir / "host_label.py", libdir)
+
+    # 🔴 ONE CONTROL PER ARM. Each names a dependency only THAT arm can see, so a
+    # single dead scanner fails here instead of hiding behind another's hit.
+    assert "transcript_search.py" in from_builder, (
+        f"the BUILDER arm found {sorted(from_builder)} — it is not reading the "
+        "builder's imports, so its verdict is about the parser")
+    assert "host_label.py" in from_shell, (
+        f"the SHELL arm found {sorted(from_shell)} — it is not reading executable "
+        "shell code (the builder never imports host_label, so no other arm covers it)")
+    # 🔴 A SYNTHETIC PROBE, NOT AN ARM-EXCLUSIVE CONTROL — see the docstring for
+    # exactly what it does and does not cover. It runs the same helper, with the
+    # same `libdir` this call site passes, over a file that provably imports a lib
+    # module, so arm (c)'s empty result means "read and empty" rather than "never
+    # read". A shared-helper mutation dies to arm (a)'s control before reaching
+    # here; that is measured, and it is why this is not counted as a third arm.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as _d:
+        _probe = Path(_d) / "probe.py"
+        _probe.write_text("from transcript_search import iter_transcripts\n")
+        _probe_found = _lib_modules_a_python_file_imports(_probe, libdir)
+    assert _probe_found == {"transcript_search.py"}, (
+        f"arm (c)'s scanner returned {sorted(_probe_found)} for a file that plainly "
+        "imports transcript_search — the helper or the `libdir` this call site passes "
+        "is wrong, and arm (c)'s own empty result would be meaningless either way")
+
+    assert from_host_label == set(), (
+        f"host_label.py now imports {sorted(from_host_label)} from scripts/lib. That is "
+        "fine — declare them as triggers and update this assertion. It is a ledger of a "
+        "known-stdlib-only file, NOT the control; the control is the probe above")
+
+    needed = from_builder | from_shell | from_host_label
+
+    block = _unit_block()
+    m = re.search(r"X-Restart-Triggers = \[(.*?)\]", block, re.S)
+    assert m, "the transcript-push unit declares no X-Restart-Triggers at all"
+    declared = set(re.findall(r"\$\{\.\./scripts/lib/([^}]+)\}", m.group(1)))
+    missing = needed - declared
+    assert not missing, (
+        f"the transcript-push unit hard-depends on {sorted(missing)} from scripts/lib "
+        "but does not declare them as restart triggers — the unit's hard dependencies "
+        "must be readable from the unit")
+
+
+def test_an_UNDECODABLE_byte_makes_fileBytes_UNKNOWN_instead_of_400ing_the_WHOLE_push(
+    server, projects, tmp_path
+):
+    """🔴 ONE BAD BYTE IN ONE SMALL TRANSCRIPT WOULD 400 THE ENTIRE HOST'S FEED.
+
+    `read_tail` decodes with `errors="replace"`, which turns one bad byte into a
+    three-byte U+FFFD — so a small corrupt file produces a TAIL LARGER THAN THE
+    FILE IT CAME FROM. The server rejects a `fileBytes` smaller than the tail
+    beside it (a cursor pointing before the start of the stored tail is a splice
+    waiting to happen) and a rejection is atomic, so that one session would take
+    every other session in the request down with it — on every tick, for the whole
+    24-hour candidate window.
+
+    Reporting UNKNOWN instead costs that session a stream reseed and nothing else.
+
+    Measured on the guard and its absence:
+        shipped   file=29 tail_bytes=31 fileBytes=0   -> push accepted
+        no guard  file=29 tail_bytes=31 fileBytes=29  -> whole push REJECTED
+    """
+    d = projects.root / "-home-zach-workspace-devrc"
+    d.mkdir(exist_ok=True)
+    (d / "corrupt.jsonl").write_bytes(b'{"type":"user","t":"\xff"}\n')
+    projects("healthy", transcript("healthy", human_turn("fine", "healthy")))
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sent = {s["sessionId"]: s for s in json.loads(pushes(server)[0]["body"])["sessions"]}
+    assert "healthy" in sent, "the innocent session was lost"
+    bad = sent.get("corrupt")
+    assert bad is not None, "the corrupt session was dropped entirely"
+    assert len(bad["tail"].encode("utf-8")) > bad["fileBytes"] or bad["fileBytes"] == 0
+    assert bad["fileBytes"] == 0, (
+        f"fileBytes={bad['fileBytes']} for a {len(bad['tail'].encode())}-byte tail taken from a "
+        "smaller file — the server rejects that, atomically, taking every other session with it"
+    )
+
+
+def test_fileBytes_is_derived_from_what_was_READ_not_from_the_stat(tmp_path):
+    """🔴 THE FILE IS BEING APPENDED TO WHILE IT IS READ — that is the normal case
+    here, not an edge one, because the sessions worth feeding are the live ones.
+    `size` is a stat taken BEFORE the read, so bytes that arrive in between come
+    back in `raw` and the tail ends past `size`. Reporting `size` would put the
+    cursor BEHIND the stored tail's true end, and the next delta would duplicate
+    the bytes in between.
+
+    Driven directly rather than through the script: reproducing the race with a
+    real concurrent writer would be a timing test for a property that is decidable
+    by construction. The fixture instead makes `stat` under-report by patching it,
+    which is exactly the observable the race produces.
+    """
+    import importlib.util
+
+    # The builder imports `transcript_search` as a bare name, which works because
+    # it is normally RUN as a script from scripts/lib. Loading it as a module here
+    # needs that directory on the path — the same arrangement, spelled out.
+    sys.path.insert(0, str(BUILDER.parent))
+    try:
+        spec = importlib.util.spec_from_file_location("btp_under_test", BUILDER)
+        btp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(btp)
+    finally:
+        sys.path.remove(str(BUILDER.parent))
+
+    body = transcript("s", *[human_turn(f"turn {i}", "s") for i in range(20)])
+    f = tmp_path / "s.jsonl"
+    f.write_text(body)
+    real_size = f.stat().st_size
+
+    class _Stat:
+        st_size = real_size - 40  # the stat that a concurrent append raced
+
+    class _Path(type(f)):
+        def stat(self, *a, **kw):
+            return _Stat()
+
+    text, truncated, file_bytes = btp.read_tail(_Path(f), 1 << 20)
+    assert not truncated
+    assert file_bytes == real_size, (
+        f"fileBytes={file_bytes} but the read returned {real_size} bytes — the cursor would "
+        "sit BEHIND the end of the stored tail and the next delta would duplicate"
+    )
+
+
+def test_ONE_oversized_session_alone_is_still_sent_rather_than_dropped_for_ever(
+    server, projects, tmp_path
+):
+    """🔴 THE `and sessions` EXEMPTION, whose comment promises "deferred to the
+    next tick rather than dropped for ever". Without it, a session whose tail
+    alone exceeds the aggregate budget is skipped on EVERY tick — and since it is
+    also the newest, it is skipped first, every time. The exemption admits it when
+    the push is otherwise empty.
+    """
+    body = transcript("big", *[human_turn("y" * 400, "big") for _ in range(40)])
+    projects("big", body)
+    per = len(body.encode())
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={
+            "CLAWGATE_API_URL": base_url(server),
+            "CLAWGATE_HOOK_TOKEN": "t",
+            "TRANSCRIPT_PUSH_MAX_BYTES": str(per // 4),  # far under one session
+        },
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # 🔴 THE ABSENCE IS THE DEFECT, SO NAME IT. Without the exemption the builder
+    # produces an EMPTY payload and exits 10 ("nothing to push") — the script then
+    # exits 0 having POSTed nothing, and a test that indexed straight into the
+    # request list would die with an IndexError that names no mechanism at all.
+    assert pushes(server), (
+        "a session larger than the whole budget was dropped rather than sent alone: NOTHING "
+        "was pushed. It is the newest file, so it would be dropped first on every tick, for "
+        f"ever. Script said: {proc.stdout.strip()[:200]}")
+    sent = json.loads(pushes(server)[0]["body"])["sessions"]
+    assert [s["sessionId"] for s in sent] == ["big"], (
+        "a session larger than the whole budget was dropped rather than sent alone — it is "
+        "the newest file, so it would be dropped first on every tick, for ever"
+    )
+
+
+# ---------------------------------------------------------------------------
+# THE CROSS-FEEDER HOST SEAM.
+#
+# 🔴 THE TWO FEEDERS WRITE THE SAME ROW'S `host` COLUMN, AND NOTHING PINNED THEM
+# TOGETHER. This push derived it in shell (falling through to `uname -n`, which is
+# "nixos" on BOTH machines); tmux-reply-agent read the collector's env file and
+# said "workbench". The disagreement was free while `host` was display-only — the
+# stored rows just said "nixos", uselessly — and became a PERMANENT REFUSAL the
+# moment the delta stream made `host` a correctness predicate: every 5-minute
+# push stamping `nixos` back, every 5-second poll reseeding because "the host
+# changed". Caught before deploy, with both values measured side by side.
+# ---------------------------------------------------------------------------
+
+
+def _host_label_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "host_label_under_test", REPO_ROOT / "scripts" / "lib" / "host_label.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _agent_module():
+    import importlib.machinery
+    import importlib.util
+
+    path = str(REPO_ROOT / "scripts" / "tmux-reply-agent")
+    loader = importlib.machinery.SourceFileLoader("tmux_reply_agent_hostseam", path)
+    spec = importlib.util.spec_from_file_location("tmux_reply_agent_hostseam", path, loader=loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("env_body,want", [
+    ('ACTIVITY_HOST=laptop\n', "laptop"),
+    ('ACTIVITY_HOST="workbench"\n', "workbench"),
+    ('ACTIVITY_HOST=not-a-real-host\n', "workbench"),   # invalid -> default
+    ('', "workbench"),                                    # absent -> default
+])
+def test_BOTH_feeders_resolve_the_SAME_host_label(server, projects, tmp_path, env_body, want):
+    """🔴 THE ASSERTION IS THAT THE TWO AGREE, NOT THAT EITHER IS RIGHT. Pinning
+    each side to a literal separately is what let them drift: both tests would
+    stay green while the two values differed.
+
+    The push is driven end to end (so the SHELL's resolution is what is measured,
+    not a Python restatement of it) and compared with what the agent computes from
+    the same file.
+    """
+    env_file = tmp_path / "activity-env"
+    env_file.write_text(env_body)
+
+    agent = _agent_module()
+    agent_label = agent.local_host_label(env={}, env_file=str(env_file))
+
+    # The shell half, through the real script. TRANSCRIPT_PUSH_HOST is deliberately
+    # NOT set — that override is what the other tests use, and using it here would
+    # bypass the very resolution under test.
+    projects("host-seam", transcript("host-seam", human_turn("hi", "host-seam")))
+    conf = tmp_path / "clawgate.env"
+    conf.write_text("")
+    env = dict(os.environ)
+    for k in ("CLAWGATE_API_URL", "CLAWGATE_HOOK_TOKEN", "ACTIVITY_HOST", "TRANSCRIPT_PUSH_HOST"):
+        env.pop(k, None)
+    env.update({
+        "CLAWGATE_CONF_FILE": str(conf),
+        "CLAUDE_PROJECTS_DIR": str(projects.root),
+        "HOME": str(tmp_path),
+        "CLAWGATE_API_URL": base_url(server),
+        "CLAWGATE_HOOK_TOKEN": "t",
+        # Point the shared module at the fixture's env file.
+        "HOST_LABEL_ENV_FILE": str(env_file),
+    })
+    proc = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True,
+                          env=env, timeout=180)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    pushed = json.loads(pushes(server)[0]["body"])["host"]
+
+    assert agent_label == want, f"the agent resolved {agent_label!r}, want {want!r}"
+    assert pushed == agent_label, (
+        f"the two feeders that write the SAME row disagree about this host: the bulk push says "
+        f"{pushed!r}, the stream agent says {agent_label!r}. Since `host` became a correctness "
+        f"predicate, that difference is a permanent reseed loop — the push stamping one value "
+        f"back every 5 minutes and the stream refusing every append 5 seconds later."
+    )
+
+
+def test_the_push_REFUSES_rather_than_guessing_when_the_label_cannot_be_resolved(
+    server, projects, tmp_path
+):
+    """🔴 A FALLBACK IS WHAT PRODUCED THE DEFECT. `uname -n` returns a plausible
+    name on both machines, so the old fallback failed silently and looked correct.
+    Exiting is loud and cannot be mistaken for a working feed.
+    """
+    projects("s", transcript("s", human_turn("hi")))
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={
+            "CLAWGATE_API_URL": base_url(server),
+            "CLAWGATE_HOOK_TOKEN": "t",
+            "TRANSCRIPT_PUSH_HOST": "",  # the override is empty, so resolution runs
+            "TRANSCRIPT_PUSH_HOST_LABEL": str(tmp_path / "no-such-module.py"),
+        },
+    )
+    assert proc.returncode == 3, f"rc={proc.returncode}: {proc.stdout}{proc.stderr}"
+    assert "refusing to push under a guessed name" in proc.stdout
+    assert not pushes(server), "a push went out under a guessed host name"
+
+
+def test_the_agent_reads_the_env_file_the_SHARED_MODULE_names(tmp_path):
+    """🔴 THE PATH IS THE THIRD LITERAL, AND RE-EXPORTING THE OTHER TWO IS NOT
+    ENOUGH. The consolidation re-exported HOST_NAMES and DEFAULT_LOCAL_HOST
+    "rather than restating two literals" and left the env-file PATH restated in
+    the agent — and because `local_host_label` passes it as the DEFAULT
+    `env_file`, host_label.ACTIVITY_ENV was dead there. Measured: pointing the
+    agent's copy at /nonexistent changed nothing, 203/203 still passed.
+
+    That is the exact axis that produced the earlier blocker: two feeders reading
+    two files. `test_BOTH_feeders_resolve_the_SAME_host_label` cannot see it — it
+    passes `env_file=` explicitly, so it exercises the module's PARSING and never
+    the agent's own path.
+
+    🔴 IT RUNS IN A SUBPROCESS BECAUSE THE BINDING IS AT IMPORT TIME. Setting the
+    variable after importing would prove nothing about what a real agent does.
+    """
+    env_file = tmp_path / "activity-env"
+    env_file.write_text("ACTIVITY_HOST=laptop\n")
+
+    snippet = (
+        "import importlib.machinery, importlib.util, sys\n"
+        "loader = importlib.machinery.SourceFileLoader('a', sys.argv[1])\n"
+        "spec = importlib.util.spec_from_file_location('a', sys.argv[1], loader=loader)\n"
+        "m = importlib.util.module_from_spec(spec); loader.exec_module(m)\n"
+        # no env_file= argument: the DEFAULT is what is under test
+        "print(m.local_host_label(env={}))\n"
+    )
+    env = dict(os.environ, HOST_LABEL_ENV_FILE=str(env_file))
+    env.pop("ACTIVITY_HOST", None)
+    out = subprocess.run(
+        [sys.executable, "-c", snippet, str(REPO_ROOT / "scripts" / "tmux-reply-agent")],
+        capture_output=True, text=True, env=env, timeout=120)
+    assert out.returncode == 0, out.stdout + out.stderr
+    got = out.stdout.strip()
+    assert got == "laptop", (
+        f"the agent resolved {got!r} from its DEFAULT env-file path, want 'laptop' — it is not "
+        f"reading the file the shared module names, so the two feeders can be pointed at "
+        f"different files and the reseed loop comes back invisibly"
+    )
+
+
+def test_the_BULK_push_dedupes_and_strips_session_ids_TOO(server, projects, tmp_path):
+    """🔴 THE GUARD WENT ON THE PATH WHERE THE BLAST RADIUS IS SMALLER FIRST.
+    The delta stream grew it, and there a duplicate costs ONE session. Here
+    `NormalizePush` rejects THE WHOLE PUSH on a duplicate or an empty id, a
+    rejection stores nothing, so the digest never matches, so the same poisoned
+    batch is re-sent every tick — permanently, for every session on this host.
+    And this is the feed the streaming design designates as the RECONCILER.
+
+    Measured before the fix, straight out of the builder:
+
+        emitted sessionIds: ['abc ', 'abc', 'same-uuid', 'same-uuid']
+        after the server's TrimSpace: ['abc', 'abc', 'same-uuid', 'same-uuid']
+        duplicates the server rejects the WHOLE push on: ['abc', 'same-uuid']
+
+    ⚠ RAISING MAX_PER_PUSH 6 -> 48 WIDENED THIS, which is why the change that
+    widened it is the one that had to close it.
+    """
+    body = transcript("x", human_turn("hi", "x"))
+    # Same <uuid> under two project directories.
+    projects("same-uuid", body, project="-home-zach-projA")
+    projects("same-uuid", transcript("y", human_turn("hi there", "y")), project="-home-zach-projB")
+    # "abc.jsonl" beside "abc .jsonl" — distinct on disk, one id after TrimSpace.
+    projects("abc", body, project="-home-zach-projA")
+    projects("abc ", transcript("z", human_turn("hello", "z")), project="-home-zach-projA")
+    projects("healthy", transcript("healthy", human_turn("fine", "healthy")))
+
+    proc = run_push(
+        projects_root=projects.root,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert pushes(server), "nothing was pushed at all: " + proc.stdout
+
+    ids = [s["sessionId"] for s in json.loads(pushes(server)[0]["body"])["sessions"]]
+    # The server TrimSpaces before checking, so that is the comparison that matters.
+    trimmed = [i.strip() for i in ids]
+    assert len(trimmed) == len(set(trimmed)), (
+        f"the bulk push carries ids that collide after the server's TrimSpace: {ids}. "
+        "NormalizePush rejects the WHOLE push on that, nothing is stored, the digest never "
+        "matches, and the same batch is re-sent on every tick for ever.")
+    assert "" not in trimmed, f"an id that strips to empty was pushed: {ids}"
+    assert "healthy" in trimmed, "the innocent session was dropped along with the duplicates"
