@@ -74,12 +74,36 @@ def _load_sibling():
     files were correctly deployed side by side. `abspath` keeps us in
     ~/.config/i3status-rust/scripts, where they ARE siblings.
 
-    `dont_write_bytecode` keeps a `__pycache__` out of the operator's config dir.
+    🔴 `dont_write_bytecode` IS NOT TIDINESS — it is what stops a `.pyc` from
+    pinning OLD code forever. The loader's source path is the SYMLINK in
+    ~/.config/i3status-rust/scripts, so the cache would be written into the
+    operator's config dir (/nix/store is read-only), and CPython validates a
+    cached `.pyc` on the source's **mtime-in-whole-seconds + size** only. Every
+    /nix/store path has **mtime=1** — MEASURED on this host:
+    `/nix/store/4lmg…-hm_i3statusfans mtime=1 size=11916`. So the mtime half can
+    never change, and any later redeploy that happens to land on the SAME BYTE
+    SIZE is invisible to the check: the stale `.pyc` is honoured and the newly
+    deployed source is never compiled. Not hypothetical — that config dir
+    already holds three July `.pyc` files, and TWO of them still validate
+    against today's deployed source (`disk-detail` and `i3status-notifs`, both
+    headers `src_mtime=1` with sizes 6571 / 6930 equal to the store paths now
+    deployed): two-month-old bytecode still being honoured across every switch
+    since. Only the third was invalidated, and only because its source happened
+    to change SIZE. Those three predate this script and are not its to clean
+    up; the point is that this one never joins them.
+
+    Restored afterwards rather than left set, because this mutates a
+    PROCESS-GLOBAL. Nothing calls it in-process today, but a future in-process
+    test would silently inherit a suppressed bytecode cache from whichever test
+    imported the view first. The restore is in `finally`, i.e. strictly AFTER
+    `exec_module` — restoring any earlier would hand the write back to the very
+    import this flag exists to cover.
 
     Deferred and best-effort on purpose: an import-time failure would make the
     whole view die with a traceback where a launcher must not. The `None` case
     is rendered as a visible banner by `render`, never as an empty screen.
     """
+    prev_dont_write_bytecode = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
     here = Path(os.path.dirname(os.path.abspath(__file__))) / "i3status-fans"
     try:
@@ -90,6 +114,8 @@ def _load_sibling():
         return mod
     except Exception:
         return None
+    finally:
+        sys.dont_write_bytecode = prev_dont_write_bytecode
 
 
 # --------------------------------------------------------------------------- #

@@ -388,6 +388,149 @@ def test_the_sibling_loads_when_the_script_is_a_SYMLINK_to_a_LONE_store_path(tmp
         + q.stdout)
 
 
+def _nix_shaped(tmp_path, detail_bytes=None):
+    """The DEPLOYED layout: two lone `store` FILES plus a symlink dir that is
+    the only place they are siblings. Returns (linkdir, hwmon_root).
+
+    Same fixture as the symlink test above, factored out so the bytecode guard
+    and its positive control run through an identical harness.
+    """
+    storeish = tmp_path / "store"
+    storeish.mkdir(parents=True)
+    (storeish / "hash1-hm_fansdetail").write_bytes(
+        DETAIL.read_bytes() if detail_bytes is None else detail_bytes)
+    (storeish / "hash2-hm_i3statusfans").write_bytes(
+        (SCRIPTS / "i3status-fans").read_bytes())
+
+    linkdir = tmp_path / "scripts"          # ~/.config/i3status-rust/scripts
+    linkdir.mkdir(parents=True)
+    (linkdir / "fans-detail").symlink_to(storeish / "hash1-hm_fansdetail")
+    (linkdir / "i3status-fans").symlink_to(storeish / "hash2-hm_i3statusfans")
+
+    root = tmp_path / "hwmon"
+    (root / "hwmon0").mkdir(parents=True)
+    (root / "hwmon0" / "name").write_text("nct6687\n")
+    (root / "hwmon0" / "fan1_input").write_text("2448\n")
+    return linkdir, root
+
+
+def _run_deployed(linkdir, root):
+    env = dict(os.environ)
+    # 🔴 The harness must NOT silently supply the very suppression under test:
+    # inheriting PYTHONDONTWRITEBYTECODE would make the positive control below
+    # produce no .pyc either, and the guard would pass with the flag deleted.
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    return subprocess.run(
+        [sys.executable, str(linkdir / "fans-detail"), "--dump",
+         "--hwmon-root", str(root)],
+        capture_output=True, text=True, timeout=20, env=env)
+
+
+def _pycs(linkdir):
+    return sorted(p.name for p in linkdir.glob("__pycache__/*.pyc"))
+
+
+def test_loading_the_sibling_writes_NO_pyc_into_the_operators_config_dir(tmp_path):
+    """🔴 A `.pyc` here would pin OLD code FOREVER, not merely litter.
+
+    `_load_sibling` loads through the SYMLINK in
+    ~/.config/i3status-rust/scripts, so the bytecode cache is written into that
+    real, writable config dir (/nix/store itself is read-only). CPython
+    validates a cached `.pyc` on the source's **mtime-in-whole-seconds + size**
+    — and every /nix/store path has **mtime=1** (measured 2026-09-09:
+    `/nix/store/4lmg…-hm_i3statusfans mtime=1 size=11916`). The mtime half can
+    therefore never change, so any later redeploy landing on the same byte size
+    is invisible to the check and the stale cache is served instead.
+
+    Measured on the live host, not argued: that config dir already holds three
+    July `.pyc` files, two of which STILL validate against today's deployed
+    source — headers `src_mtime=1`, sizes 6571 / 6930, equal to the
+    `disk-detail` / `i3status-notifs` store paths deployed now. The mechanism
+    was also reproduced directly on 3.12.14: edit a module's contents, keep the
+    size, reset mtime to 1, re-import — the OLD value comes back. Those three
+    predate this script; the point of the guard is that fans-detail never joins
+    them.
+    """
+    linkdir, root = _nix_shaped(tmp_path)
+    p = _run_deployed(linkdir, root)
+    assert p.returncode == 0, p.stderr
+    assert "2448" in p.stdout, p.stdout            # the sibling really loaded
+    assert _pycs(linkdir) == [], (
+        "fans-detail wrote a bytecode cache into the deployed scripts dir: %s\n"
+        "Every /nix/store source has mtime=1, and CPython validates a .pyc on "
+        "mtime-seconds + size, so this file outlives every same-size redeploy "
+        "and the operator silently keeps running the OLD sibling. "
+        "`sys.dont_write_bytecode` in _load_sibling is what prevents it."
+        % _pycs(linkdir))
+
+    # 🔴 POSITIVE CONTROL — the assertion above is vacuous unless this harness
+    # can actually SEE a .pyc being written. Strip the suppression from a copy
+    # of the script and the same run must produce one.
+    assign = re.compile(rb"(?m)^([ \t]*)sys\.dont_write_bytecode[ \t]*=.*\n")
+    original = DETAIL.read_bytes()
+    assert assign.search(original), (
+        "no `sys.dont_write_bytecode = …` line to strip — this control is "
+        "mutating something that is no longer there")
+    # `pass`, not deletion: the restore lives in a `finally:` whose body would
+    # otherwise become empty and the copy would die of SyntaxError, which a
+    # careless reader could mistake for "no .pyc, guard works".
+    unguarded = assign.sub(lambda m: m.group(1) + b"pass\n", original)
+    assert not assign.search(unguarded), "the strip missed a line"
+    ctl_dir, ctl_root = _nix_shaped(tmp_path / "ctl", detail_bytes=unguarded)
+    q = _run_deployed(ctl_dir, ctl_root)
+    assert q.returncode == 0, q.stderr
+    assert "2448" in q.stdout, q.stdout
+    assert _pycs(ctl_dir), (
+        "POSITIVE CONTROL FAILED: even without `sys.dont_write_bytecode` no "
+        ".pyc appeared, so the guard above proves nothing. Check that the "
+        "child is not inheriting -B / PYTHONDONTWRITEBYTECODE.\n" + q.stdout)
+
+
+def test_load_sibling_holds_the_flag_ACROSS_the_import_then_RESTORES_it(monkeypatch):
+    """Two claims about a PROCESS-GLOBAL, and the ORDER between them.
+
+    `sys.dont_write_bytecode` is interpreter-wide. Setting it and walking away
+    is inert today (nothing calls `main()` in-process) but leaves a trap for the
+    first in-process caller: every later import in that interpreter, the test
+    runner's own included, silently stops caching. So it must be restored.
+
+    And the restore must land strictly AFTER `exec_module` — restoring one line
+    too early hands the write straight back to the import the flag exists to
+    cover, which is why this spies on the flag AT `exec_module` rather than
+    merely reading it at the end. Checking for a `.pyc` beside the repo copy
+    could NOT tell you this: the module-level `_load(...)` at the top of this
+    file already wrote `scripts/__pycache__/i3status-fans…pyc` during
+    collection, so an "is a new file there" assertion is answered before this
+    test starts. The nix-shaped subprocess test above is what covers the file.
+    """
+    seen = []
+    real_exec = importlib.machinery.SourceFileLoader.exec_module
+
+    def spy(self, module):
+        seen.append(bool(sys.dont_write_bytecode))
+        return real_exec(self, module)
+
+    monkeypatch.setattr(importlib.machinery.SourceFileLoader,
+                        "exec_module", spy)
+
+    prev = sys.dont_write_bytecode
+    try:
+        for start in (False, True):
+            seen.clear()
+            sys.dont_write_bytecode = start
+            mod = detail._load_sibling()
+            assert mod is not None, "the sibling did not load from the repo tree"
+            assert seen == [True], (
+                "entered with dont_write_bytecode=%r and the sibling's "
+                "exec_module ran with %r — the flag must be TRUE for the "
+                "import itself, or the .pyc is written anyway" % (start, seen))
+            assert bool(sys.dont_write_bytecode) == start, (
+                "_load_sibling leaked dont_write_bytecode process-globally: "
+                "entered %r, left %r" % (start, sys.dont_write_bytecode))
+    finally:
+        sys.dont_write_bytecode = prev
+
+
 def test_fans_detail_and_its_SIBLING_are_deployed_together():
     """🔴 fans-detail loads `i3status-fans` BY PATH from beside itself. Deploy
     one without the other and the click opens a red banner instead of the
