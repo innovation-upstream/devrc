@@ -30,11 +30,14 @@ operator decision. The list today:
     the allowlisted homelab-talos (commit = live deploy) all stay allowed.
   - pkill -f <pattern>       -> matches the caller's OWN command line (2026-08-10;
     RULES 🔴). `pgrep -f` and `pkill <name>` without `-f` stay allowed.
-  - tmux kill-server/-session without -L -> destroys the OPERATOR'S server and every
-    Claude conversation in it (2026-09-07). 🔴 `TMUX_TMPDIR` does NOT isolate a
-    client — `$TMUX` wins — which is how this cost 47 live conversations, and 43
-    on an earlier run of the same mistake. `kill-pane`/`kill-window` and any
-    `-L`/`-S` naming a non-default socket stay allowed.
+  - tmux kill-server/-session without a PROVEN non-default -L -> destroys the
+    OPERATOR'S server and every Claude conversation in it (2026-09-07). 🔴
+    `TMUX_TMPDIR` does NOT isolate a client — `$TMUX` wins — which is how this cost
+    47 live conversations, and 43 on an earlier run of the same mistake. Also
+    denied over `ssh <host> …`, where `$TMUX` is unset so the kill lands on that
+    host's default socket. `kill-pane`/`kill-window` stay allowed, as does an
+    `-L`/`-S` whose socket name is a LITERAL other than `default` — an unresolved
+    `-L "$sock"` is denied, because a value this guard cannot read is not proof.
   - large heredoc -> file    -> use the Write tool (token waste; audit-driven)
   - cd <path> && git ...     -> use git -C <path> (audit: #1 command shape, 1482x)
   - private key in a command -> reference the key file instead (never inline)
