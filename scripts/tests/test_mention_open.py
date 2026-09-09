@@ -1199,6 +1199,73 @@ def test_the_picker_asks_rofi_for_FUZZY_matching(monkeypatch):
     assert "-no-custom" in seen["cmd"]
 
 
+def test_fuzzy_matching_is_never_asked_for_WITHOUT_ranking(monkeypatch):
+    """🔴 THE RELATIONSHIP, NOT THE SPELLING — and the bug was the gap between
+    them. `-matching fuzzy` tells rofi WHICH rows survive; it says nothing about
+    their ORDER. With no `-sort`, rofi shows survivors in INPUT order, and
+    `repo_universe()` returns them alphabetically.
+
+    REPORTED FROM THE REAL PICKER 2026-09-08: typing `devrc` ranked
+    `civitai/developer-docs` and `civitai/dev-runner-config` ABOVE the actual
+    `devrc` repo. Every one of them genuinely contains d-e-v…r…c as a
+    subsequence, so the MATCH was correct and the ORDER was not — `c…` sorts
+    before `i…`. MEASURED on a 7-row corpus in the exact shape `picker_rows()`
+    builds: input order put the wanted repo **6th**, fzf scoring puts it
+    **1st**.
+
+    This asserts the pair rather than two independent flags, because either one
+    alone is a defect: fuzzy without sort is the reported bug, and sort without
+    fuzzy silently narrows what can be found at all. A test that only checked
+    `"-sort" in cmd` would pass on an argv that had dropped `fuzzy`."""
+    seen = {}
+    monkeypatch.setattr(MO.subprocess, "run",
+                        lambda cmd, **kw: seen.update(cmd=cmd)
+                        or types.SimpleNamespace(returncode=1, stdout="", stderr=""))
+    MO.pick([{"platform": "github", "id": "7",
+              "url": "https://github.com/gardenersguild/trowelcast/issues/7"}])
+    cmd = seen["cmd"]
+    fuzzy = "-matching" in cmd and cmd[cmd.index("-matching") + 1] == "fuzzy"
+    assert fuzzy, "the picker must still MATCH fuzzily"
+    assert "-sort" in cmd, (
+        "`-matching fuzzy` without `-sort` filters but does not RANK — rofi "
+        "falls back to input order, which is alphabetical, and a scattered "
+        "subsequence outranks an exact name")
+    assert "-sorting-method" in cmd, "a sort with no method is rofi's levenshtein default"
+    assert cmd[cmd.index("-sorting-method") + 1] == "fzf", (
+        "fzf's scoring is what rewards CONSECUTIVE runs and word boundaries; "
+        "rofi's `normal` method is plain levenshtein and does not")
+
+
+def test_the_rofi_argv_stays_a_LIST_LITERAL_so_the_ledger_can_read_it():
+    """🔴 The AST ledger of spawnable executables reads `pick`'s argv as a list
+    literal whose first element is the constant `"rofi"`. Building it from a
+    variable reports `<computed>` and reddens the no-network guard for a reason
+    that has nothing to do with what is spawned — the module already carries
+    that warning in a comment, and this is the assertion behind it.
+
+    Kept beside the flag tests because the tempting way to add a conditional
+    flag is exactly the refactor that breaks it."""
+    import ast
+    src = HANDLER.read_text()
+    tree = ast.parse(src)
+    found = False
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and node.args):
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name != "run":
+            continue
+        first = node.args[0]
+        if (isinstance(first, ast.List) and first.elts
+                and isinstance(first.elts[0], ast.Constant)
+                and first.elts[0].value == "rofi"):
+            found = True
+            literals = [e.value for e in first.elts if isinstance(e, ast.Constant)]
+            assert "-sort" in literals and "fzf" in literals, (
+                f"the rofi argv literal lost its ranking flags: {literals}")
+    assert found, "no `subprocess.run([\"rofi\", …])` list literal found in the handler"
+
+
 @pytest.mark.parametrize("state,write,expected", [
     ("absent", None, "has no repo mapping"),
     ("unreadable", "not json at all", "could not be read"),
