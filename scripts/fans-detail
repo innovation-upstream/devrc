@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import importlib.machinery
 import importlib.util
+import os
 import sys
 import time
 from pathlib import Path
@@ -55,11 +56,26 @@ RED, YELLOW, GREEN, CYAN = "\033[31m", "\033[33m", "\033[32m", "\033[36m"
 def _load_sibling():
     """Load `i3status-fans` from beside this file. None if unavailable.
 
+    🔴 `abspath`, NEVER `realpath`/`Path.resolve()` — this is the repo's standard
+    sibling shape (cf. `i3status-clawgate` loading `bar_freshness.py`), and the
+    reason is nix. `home.file` deploys EACH file as its OWN store path, so the
+    deployed script is a symlink to `/nix/store/<hash>-hm_fansdetail` — a FILE
+    directly in /nix/store, not a directory containing anything. Resolving it
+    makes the sibling's computed location `/nix/store/i3status-fans`, which does
+    not exist, while the real sibling sits under its own separate hash.
+    MEASURED in production: the first version used `.resolve()`, deployed
+    cleanly, and rendered the "sibling did not load" banner on a host where both
+    files were correctly deployed side by side. `abspath` keeps us in
+    ~/.config/i3status-rust/scripts, where they ARE siblings.
+
+    `dont_write_bytecode` keeps a `__pycache__` out of the operator's config dir.
+
     Deferred and best-effort on purpose: an import-time failure would make the
     whole view die with a traceback where a launcher must not. The `None` case
     is rendered as a visible banner by `render`, never as an empty screen.
     """
-    here = Path(__file__).resolve().parent / "i3status-fans"
+    sys.dont_write_bytecode = True
+    here = Path(os.path.dirname(os.path.abspath(__file__))) / "i3status-fans"
     try:
         loader = importlib.machinery.SourceFileLoader("i3status_fans", str(here))
         spec = importlib.util.spec_from_loader("i3status_fans", loader)

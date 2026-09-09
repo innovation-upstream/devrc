@@ -248,6 +248,61 @@ def test_bad_arguments_still_render_rather_than_exiting_2(workbench):
 # --------------------------------------------------------------------------- #
 # the SEAM guards
 # --------------------------------------------------------------------------- #
+def test_the_sibling_loads_when_the_script_is_a_SYMLINK_to_a_LONE_store_path(tmp_path):
+    """🔴 THE PRODUCTION BUG, REPRODUCED. `home.file` deploys EACH file as its
+    OWN /nix/store path, so the deployed script is a symlink to
+    `/nix/store/<hash>-hm_fansdetail` — a FILE sitting directly in /nix/store,
+    NOT a directory containing anything.
+
+    The first version resolved `__file__` before taking its parent, which made
+    the sibling's computed location `/nix/store/i3status-fans`. That does not
+    exist, so a correctly-deployed pair rendered the "sibling did not load"
+    banner on the real host. Every other test in this file passed, because they
+    run from the repo where the two files ARE siblings on disk — the layout the
+    bug depends on only exists after a nix switch.
+
+    This fixture is that layout: two lone files in separate directories, and a
+    symlink dir that is the only place they are siblings.
+    """
+    storeish = tmp_path / "store"
+    storeish.mkdir()
+    # each "store path" is a lone FILE directly in `storeish`, as nix does it
+    (storeish / "hash1-hm_fansdetail").write_bytes(DETAIL.read_bytes())
+    (storeish / "hash2-hm_i3statusfans").write_bytes((SCRIPTS / "i3status-fans").read_bytes())
+
+    linkdir = tmp_path / "scripts"
+    linkdir.mkdir()
+    (linkdir / "fans-detail").symlink_to(storeish / "hash1-hm_fansdetail")
+    (linkdir / "i3status-fans").symlink_to(storeish / "hash2-hm_i3statusfans")
+
+    root = tmp_path / "hwmon"
+    (root / "hwmon0").mkdir(parents=True)
+    (root / "hwmon0" / "name").write_text("nct6687\n")
+    (root / "hwmon0" / "fan1_input").write_text("2448\n")
+    (root / "hwmon0" / "fan3_input").write_text("1650\n")
+
+    p = subprocess.run(
+        [sys.executable, str(linkdir / "fans-detail"), "--dump",
+         "--hwmon-root", str(root)],
+        capture_output=True, text=True, timeout=20)
+    assert p.returncode == 0, p.stderr
+    assert "sibling" not in p.stdout.lower(), (
+        "the sibling did not load through the symlink — this is the nix layout, "
+        "and it is what the operator actually runs:\n" + p.stdout)
+    assert "2448" in p.stdout, p.stdout
+
+    # Positive control: the SAME harness must be able to SEE a missing sibling,
+    # or the assertion above passes for a fixture that could never fail.
+    (linkdir / "i3status-fans").unlink()
+    q = subprocess.run(
+        [sys.executable, str(linkdir / "fans-detail"), "--dump",
+         "--hwmon-root", str(root)],
+        capture_output=True, text=True, timeout=20)
+    assert "sibling" in q.stdout.lower(), (
+        "removing the sibling changed nothing — the check above is vacuous:\n"
+        + q.stdout)
+
+
 def test_fans_detail_and_its_SIBLING_are_deployed_together():
     """🔴 fans-detail loads `i3status-fans` BY PATH from beside itself. Deploy
     one without the other and the click opens a red banner instead of the
