@@ -933,8 +933,8 @@ Facts = namedtuple(
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
     "ledger assembled_at claims_source head_check base_assumed "
     "base_assumed_reason repo_unknown_reason round_zero",
-    # `round_zero` is appended LAST and defaulted so that every existing
-    # construction — including the suite's — keeps working unchanged. It is
+    # `round_zero` is appended LAST and defaulted so the two existing
+    # constructions — one here, one in the suite — keep working unchanged. It is
     # None for every round except 0, and None AT round 0 means the skill was
     # not readable, which `render_checklist` reports rather than hiding.
     defaults=(None,),
@@ -3705,6 +3705,22 @@ def _read_round_zero(repo_dir):
     Returns None when the skill is not readable from here, which the caller
     reports rather than papering over: round 0 with no instructions is not a
     round 0.
+
+    🔴 THE `## ` THAT TERMINATES THIS CAPTURE IS LOAD-BEARING, AND IN SKILL.md
+    IT IS THE HEADING `## THE CHECKLIST — the nine axes (runs AFTER round 0)`.
+    That heading reads like navigation and is not: delete it and the next `## `
+    is `## After the fixes`, so this returns the round-0 section PLUS the nine
+    correctness axes, and the assembler inlines the checklist into a brief
+    whose entire design is to withhold it. Measured on the shipped file at
+    `d16bfd7a`: 3,367 chars with the heading, 4,057 without, `**Audit for:**`
+    inside the capture.
+
+    It is silent, and the obvious guards do not see it — the round-0 render
+    tests inject a fixture reader on purpose, and a presence check for the five
+    steps stays green because they are all still there, at the head of an
+    over-long capture. `test_the_round_zero_section_the_script_reads_is_the_
+    one_the_skill_ships` therefore asserts the checklist is ABSENT from what
+    this returns, which is the only assertion that can fail for this cause.
     """
     for cand in (
         Path(repo_dir) / "claude" / "skills" / "audit-pr" / "SKILL.md",
@@ -3907,6 +3923,39 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     # everywhere else: `--audited` is written by `--emit-claims` and by nothing
     # else, so passing it to a plain assembly run is a no-op the operator would
     # otherwise read as "recorded".
+    # 🔴 ROUND 0 CANNOT EMIT A CLAIMS BLOCK, AND WITHOUT THIS THE SKILL'S
+    # 🔴 SENTENCE WAS A COMMENT RATHER THAN A GUARD. The section says "ROUND 0
+    # REPORTS; IT DOES NOT MOVE THE LADDER" — but `if args.emit_claims:` sits
+    # below every round gate and had none of its own, so
+    # `--round 0 --emit-claims` printed a well-formed ``audit-claims round=0``
+    # block. `newest_block` would then hand it to a later `--round 2`, whose
+    # `prev_sha = range_anchor(newest)` anchors the delta on round 0's tip:
+    # round 0 moving the ladder, in the one way the prose forbids.
+    #
+    # Measured on devrc #1440 at `d16bfd7a`: `--round 0 --emit-claims --audited
+    # d16bfd7a` emitted ``audit-claims round=0 audited=d16bfd7a..d16bfd7a`` at
+    # rc 0. `claude/RULES.md`: a field that exists is not a guard — only a
+    # BRANCH on it is.
+    #
+    # Refused rather than warned: round 0 runs BEFORE any fix exists, so it has
+    # no claims to record. There is no reading of the flag pair the operator
+    # meant.
+    if args.round_no == 0 and args.emit_claims:
+        print("\n".join([
+            f"{EMIT_REFUSAL_HEADER}: round 0 has no fixes to claim.",
+            "",
+            "  Round 0 runs BEFORE any fix exists — it reports requirements "
+            "and deletion candidates, and the skill says it does not move the "
+            "ladder. A `round=0` block is anchorable: the next delta round "
+            "would diff FROM the tip round 0 merely READ, attributing the "
+            "whole change to a round that fixed nothing.",
+            "",
+            "  Record round 0's verdict in the PR comment as prose. The claims "
+            "block starts at the round that first FIXES something — normally "
+            "`--round 1 --emit-claims --audited <the tip round 1 read>`.",
+        ]), file=err_stream)
+        return 4
+
     if args.audited and not args.emit_claims:
         print(
             "⚠ --audited names the tip this round's audit read and is only "

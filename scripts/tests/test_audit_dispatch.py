@@ -8049,7 +8049,8 @@ def test_a_gh_failure_is_reported_and_not_papered_over():
 # ROUND 0 — the requirements & deletion pass
 # --------------------------------------------------------------------------- #
 #
-# 🔴 ALL FOUR ARE INVARIANT GUARDS, NOT REGRESSION COVERAGE, and the module
+# 🔴 EVERY TEST IN THIS SECTION IS AN INVARIANT GUARD, NOT REGRESSION
+# COVERAGE — the count is the ledger's to carry, not this comment's. The module
 # docstring's rule is why: `--round 0` did not exist at any base in
 # RED_AT_BASE_REFS, so "watched red there" would only restate that the feature
 # was added. Their evidence is the mutation battery and the negative controls
@@ -8187,6 +8188,43 @@ def test_round_zero_does_not_warn_about_a_claims_block_it_never_consults():
     )
 
 
+def test_round_zero_cannot_emit_a_claims_block_that_a_later_round_would_anchor_on():
+    """🔴 THE SKILL'S 🔴 SENTENCE WAS A COMMENT, NOT A GUARD.
+
+    The section says "ROUND 0 REPORTS; IT DOES NOT MOVE THE LADDER". But
+    `if args.emit_claims:` sits below every round gate and had none of its own,
+    so `--round 0 --emit-claims` printed a well-formed ``audit-claims round=0``
+    block. `newest_block` hands that to a later `--round 2`, whose
+    `prev_sha = range_anchor(newest)` anchors the delta on the tip round 0
+    merely READ — attributing the change to a round that fixed nothing, which
+    is exactly the movement the prose forbids.
+
+    Measured live on devrc #1440 at `d16bfd7a`, rc 0:
+    ``audit-claims round=0 audited=d16bfd7a..d16bfd7a``.
+
+    `claude/RULES.md`: a field that exists is not a guard — only a BRANCH on it
+    is. This is the branch.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "0", "--emit-claims", "--audited", "aaaa1111"])
+    assert rc == 4, f"expected the emit refusal rc, got {rc}"
+    assert "audit-claims" not in out, (
+        "round 0 still emitted a claims block:\n" + out[-1500:]
+    )
+    assert "no fixes to claim" in err, err
+
+    # 🔴 POSITIVE CONTROL. Without it a missing block is indistinguishable from
+    # `--emit-claims` being broken for every round. Round 1 over the same flags
+    # must still emit one — the fix is a round-0 gate, not a removal.
+    rc1, out1, err1 = run_main(
+        ["900", "--round", "1", "--emit-claims", "--audited", "aaaa1111"])
+    assert rc1 == 0, f"round 1 --emit-claims exited {rc1}: {err1}"
+    assert "audit-claims round=1" in out1, (
+        "round 1 no longer emits a claims block either, so this fix disabled "
+        "the feature rather than scoping it:\n" + out1[-1500:]
+    )
+
+
 def test_the_round_zero_section_the_script_reads_is_the_one_the_skill_ships():
     """🔴 THE SEAM. Two hermetically-correct halves that do not meet.
 
@@ -8225,6 +8263,35 @@ def test_the_round_zero_section_the_script_reads_is_the_one_the_skill_ships():
         "the retirement condition is not in the text the script inlines. It "
         "is the only thing standing between a trial and a permanent rule, and "
         "an auditor who never sees it cannot apply it."
+    )
+    # 🔴 THE HALF THAT WAS MISSING, AND THE ONLY ONE THAT CAN FAIL FOR THE
+    # CAUSE THAT MATTERS. Every assertion above is a PRESENCE check, and the
+    # capture's failure mode is being too WIDE: `_read_round_zero` stops at the
+    # next `## `, so deleting the `## THE CHECKLIST` heading — which reads like
+    # navigation — runs the capture on to `## After the fixes` and pulls the
+    # nine correctness axes into the round-0 section. Steps 1-5 and the
+    # retirement condition are all still present at the head of that longer
+    # capture, so every check above stays GREEN while the brief silently gains
+    # the checklist it exists to withhold.
+    #
+    # Measured on the shipped file: 3,367 chars with the heading, 4,057 without.
+    #
+    # The render tests cannot see this either — they inject `fake_round_zero`
+    # on purpose, so they never read the real file's structure at all. This is
+    # the guard for it.
+    assert "**Audit for:**" not in section, (
+        f"\n\nthe round-0 section the script reads is {len(section)} chars and "
+        "CONTAINS the nine correctness axes.\n"
+        "  `_read_round_zero` captures up to the next `## ` heading. Something "
+        "removed, demoted or reworded the `## THE CHECKLIST — the nine axes` "
+        "heading in claude/skills/audit-pr/SKILL.md, so the capture ran on "
+        "into the checklist.\n"
+        "  The effect is silent and defeats the whole design: `--round 0` "
+        "would inline the correctness checklist into a brief whose entire "
+        "purpose is to withhold it until round 1, and an auditor handed both "
+        "answers 'is it correct?' first.\n"
+        "  Restore a `## ` heading between the round-0 section and "
+        "`**Audit for:**`."
     )
 
 
@@ -8612,8 +8679,8 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
-    # 🔴 ROUND 0 — the requirements & deletion pass. All five are guards for
-    # the reason stated above their definitions: `--round 0` exists at no base
+    # 🔴 ROUND 0 — the requirements & deletion pass. Every entry below is a
+    # guard, for the reason stated above their definitions: `--round 0` exists at no base
     # in `RED_AT_BASE_REFS`, so a red there would be argparse accepting an
     # integer and rendering a round-1 brief — a claim about the flag's absence,
     # not about any behaviour. Their evidence is the in-test controls (the
@@ -8626,6 +8693,7 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     "test_round_zero_reports_an_unreadable_skill_instead_of_inventing_the_steps",
     "test_a_negative_round_is_refused_rather_than_assembled_as_round_one",
     "test_round_zero_does_not_warn_about_a_claims_block_it_never_consults",
+    "test_round_zero_cannot_emit_a_claims_block_that_a_later_round_would_anchor_on",
     "test_the_round_zero_section_the_script_reads_is_the_one_the_skill_ships",
     # 🔴 An invariant guard, NOT regression coverage — `_flake_check_names`
     # does not exist at `9e23c379`, so its red there would be an

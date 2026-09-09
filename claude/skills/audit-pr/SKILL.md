@@ -49,6 +49,12 @@ that is empty by construction and a finding-free pass over it reads as a clean r
 
 Dispatch a subagent (read-only — it must NOT modify files or merge) to audit the change against this checklist. Have it read the diff and the code it touches, not just the PR description.
 
+⚠ **Consider `--round 0` FIRST — the requirements & deletion pass (its own section below).** It
+asks whether the change should EXIST, which no item on the checklist asks; it is the only round
+that can conclude *close this PR, do not audit it*. It is ON TRIAL, so it is a judgement call, not
+a step — but it has to be reachable from here or the trial closes by attrition rather than by
+evidence. Whichever you run, record `ran: R · changed the outcome: C` on the PR.
+
 **Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. What each hid, and `GOPRIVATE`: reference file.
 
 **Brief the auditor on the environment, or it will report false findings** — a fresh worktree is
@@ -103,9 +109,11 @@ deleted is the waste this exists to catch. Work them in order; do not skip ahead
    still ship?); do not mint a second rule for it. Where the payload is prose the deletion
    instruments already exist — `/prune-skill`, `/prune-memory` — name the one that applies rather
    than hand-rolling a cut.
-3. **Simplify — only what survived step 2.** Owned by `/simplify` and `/code-review`: route there,
-   do not restate them here. 🔴 Do not route before steps 1–2 have run; simplifying a part that
-   should not exist is the failure this ordering prevents.
+3. **Simplify — only what survived step 2.** Owned by `/simplify` and `/code-review`: NAME them,
+   do not restate them here. 🔴 Both of those MUTATE (`/simplify` applies its fixes; `/code-review`
+   takes `--fix`), and you are dispatched READ-ONLY — so this is a recommendation for the OPERATOR
+   to run afterwards, never something you invoke. 🔴 Do not reach for it before steps 1–2 have run;
+   simplifying a part that should not exist is the failure this ordering prevents.
 4. **Accelerate.** The ladder's own cycle time is in scope — report it, do not act on it. The
    attribution gate below is what acts.
 5. **Automate — last.** If the round proposes automation, say what it automates and confirm steps
@@ -116,15 +124,38 @@ checklist` / `requirement questioned — <which>` / `deletion candidate — <wha
 audit`. It is **not** a finding for the findings-keyed stop rule, it cannot end a ladder, and it
 cannot license skipping a round. Every stop rule below is unchanged by it.
 
-**Ledger:** `round 0 · requirements: N (unattributed: U) · deletion candidates: D`. Once the ladder
-ends, add `deleted: X · re-added: Y (Y/X = Z%)`, both from the same `--numstat` command the
-attribution gate already runs. An add-back of 0% means the deletion pass was too timid; deleting
-nothing at all is reportable.
+**Ledger:** `round 0 · requirements: N (unattributed: U) · deletion candidates: D`. Deleting
+nothing at all is reportable — say what you examined to get there.
 
-🔴 **RETIREMENT CONDITION — this section is on trial.** Run it on the next 3–5 PRs and count the
-ones where its verdict CHANGED what happened. **If that count is zero, DELETE this section** — do
-not automate it further, and do not keep it because it reads well. Closed by that count reaching a
-decision, recorded on the PR that removes this section or on the one that promotes it out of trial.
+⚠ **There is deliberately NO add-back percentage here.** An earlier draft asked for `deleted: X ·
+re-added: Y (Y/X = Z%)` "from the same `--numstat` command the attribution gate already runs", and
+that was **false**: `--numstat` reports added and deleted counts per file and cannot tell you that
+an added line is one previously deleted, so `Y` is undefined by the instrument named. The 10%
+add-back heuristic needs a measurement nothing here performs — and the sentence that followed it
+("an add-back of 0% means the deletion pass was too timid") asserted a direction measured nowhere,
+which is the shape this skill tells you to delete rather than reverse. Recorded so nobody derives
+it again.
+
+🔴 **RETIREMENT CONDITION — this section is on trial.** Run it on the next 3–5 PRs and record, on
+each PR, its verdict and whether that verdict CHANGED what happened. **If it ran and changed
+nothing, DELETE this section** — do not automate it further, and do not keep it because it reads
+well.
+
+🔴 **REPORT THE PAIR — `ran: R · changed the outcome: C` — never `C` alone.** A bare zero cannot
+distinguish "it ran five times and was useless" from "nobody ever typed `--round 0`", and those
+have opposite conclusions: the first retires the section, the second says the trial never started.
+`--round` still DEFAULTS to 1, so the second is the likelier reading of a silent zero. `R = 0` is
+not evidence about this section at all — it is evidence about its routing, and the fix is to run it,
+not to delete it. Closed by that pair reaching a decision, recorded on the PR that removes this
+section or on the one that promotes it out of trial.
+
+<!-- 🔴 LOAD-BEARING HEADING, NOT NAVIGATION. `_read_round_zero` in
+     scripts/audit-dispatch.py captures the ROUND 0 section up to the next
+     `## `, and this is that heading. Delete or demote it and the next `## ` is
+     `## After the fixes`, so the round-0 brief silently gains the nine
+     correctness axes it exists to withhold — measured: 3,367 chars -> 4,057.
+     Pinned by test_the_round_zero_section_the_script_reads_is_the_one_the_
+     skill_ships. Reword it freely; keep it a `## `. -->
 
 ## THE CHECKLIST — the nine axes (runs AFTER round 0)
 
