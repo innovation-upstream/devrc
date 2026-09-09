@@ -249,13 +249,17 @@ def _env(**extra) -> dict:
 # exists: for a few milliseconds a `git` with `ppid=1` and `cwd` = this brand-new
 # repo is sitting in it, and `live_cotenants` — correctly — reports it.
 #
-# That is the whole 2026-09-06 flake. MEASURED at load ~87 on 2026-09-09: 12
-# hits in ~1,170 `_mkrepo` + probe cycles (~1%), every attributable one carrying
-# `cmdline='git maintenance run --auto --quiet --detach'`. The old comment
-# called the mechanism REFUTED because `gc.auto` defaults to 6700 loose objects
-# and `_mkrepo` leaves three — true of whether gc does WORK, and irrelevant to
-# whether the process is SPAWNED. That is why 80 iterations found nothing: at
-# 1% the run needed hundreds.
+# That is the whole 2026-09-06 flake. MEASURED at load ~87 on 2026-09-09 over
+# 8,000 `_mkrepo`-and-probe cycles in two processes: 121 hits (~1.5%), ALL 121
+# `comm=git` with `ppid=1`, ZERO of any other kind. 78 of them were read before
+# the process exited and every one said `cmdline='git maintenance run --auto
+# --quiet --detach'`; the other 43 raced the read.
+#
+# The old comment called the mechanism REFUTED because `gc.auto` defaults to
+# 6700 loose objects and `_mkrepo` leaves three — true of whether gc does WORK,
+# and irrelevant to whether the process is SPAWNED. Its evidence was 80
+# iterations finding nothing; at 1.5% that sample has a ~70% chance of zero
+# hits, so "refuted" was a claim the sample could not support.
 #
 # `maintenance.auto=false` is the knob `run_auto_maintenance` itself reads, so
 # it suppresses the spawn rather than the work. Passed with `-c` on every
