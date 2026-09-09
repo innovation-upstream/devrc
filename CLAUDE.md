@@ -222,8 +222,8 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   never resolved at all.** An independent audit measurement the same day, sampled minutes
   apart, got 45% and ~10%; treat the pair as "roughly two in five reds are noise", not as a
   constant. Two consequences: **read the failing test's name and ask whether your diff can
-  reach it** before debugging anything (six recent reds across six branches were six DIFFERENT
-  unrelated tests, with `origin/main`'s own run clean), and a green is one sample from that
+  reach it** before debugging anything (six recent reds across six branches were each an
+  unrelated single test, with `origin/main`'s own run clean), and a green is one sample from that
   same tier — do not upgrade it into a guarantee. ⚠ `error` is not `failure`; see the
   `COULD NOT RUN` note further down. 🔴 **Merging through a red is still a decision you own
   and should say out loud** — the noise rate is a reason to investigate, never a reason to
@@ -237,10 +237,15 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   escalates through `notify-failure@`, the DND-defeating toast class. Its own header says it
   exists *because* protection is off, and names the two commits that landed straight on `main`
   and broke it on 2026-09-03 with a human noticing hours later by accident. **So the detection
-  window for a broken `main` is ≤4h, not "never".** ⚠ It REPORTS ONLY — never fixes, never
-  reverts, never pushes — and it is a `serverMode` unit, so it is running on the workbench and
-  you should not assume it on any other host. This bullet named `drift-check` ten times and
-  this zero times, which is how the sentence below came to be written wrong.
+  window for a broken `main` is HOURS, not "never"** — and the contrast that matters is that
+  one, not the exact bound. ⚠ **The bound is NOT a flat 4h, three ways.** `OnUnitActiveSec`
+  runs from the last ACTIVATION and `TimeoutStartSec=5400`, so a healthy cycle is up to ~5.5h;
+  and `SuccessExitStatus = 11` makes a run that COULD NOT MEASURE a systemd success, so a
+  deadman that has gone blind needs ~6 consecutive unmeasured runs (~24h) before rc 12 makes
+  any noise. ⚠ It REPORTS ONLY — never fixes, never reverts, never pushes — and it is a
+  `serverMode` unit, so it is running on the workbench and you should not assume it on any
+  other host. This FILE named `drift-check` ten times and this zero times, which is how the
+  sentence below came to be written wrong.
   🔴 **BE HONEST ABOUT WHAT THIS IS: it is LESS SAFE, deliberately.** Protection is off and the
   local mandate is gone, so nothing PREVENTS a bad merge; what remains is an advisory check
   with a measured ~42% noise rate, whoever is reading the PR, and a 4-hourly deadman that

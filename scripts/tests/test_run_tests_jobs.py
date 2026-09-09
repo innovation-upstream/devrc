@@ -254,9 +254,18 @@ def test_the_budget_only_seam_runs_no_tests_and_cannot_report_a_pass():
         "\n--- stdout ---\n" + proc.stdout[-1500:]
         + "\n--- stderr ---\n" + proc.stderr[-1500:]
     )
+    # 🔴 LABELLED, because it is NOT what the mutation kills. The assertion above
+    # covers every mutant that MOVES a fragment off stderr — including restoring
+    # the historical split, which is the mutation actually run — and it always
+    # wins first, so this line cannot execute for any of them. It is reachable
+    # only by a mutant that DUPLICATES the warning onto both streams, where the
+    # stderr check above passes and this one fires. Keeping it is cheap and it
+    # pins a real second failure mode; counting it as mutation-verified coverage
+    # would be the "an earlier check always wins so the guard never executes"
+    # shape in claude/RULES.md, so it is called out here instead.
     assert not any(f in proc.stdout for f in warning_fragments), (
-        "part of the seam's warning leaked onto stdout, so it is split across "
-        "streams again.\n--- stdout ---\n" + proc.stdout[-1500:]
+        "part of the seam's warning is ALSO on stdout — duplicated across "
+        "streams rather than split.\n--- stdout ---\n" + proc.stdout[-1500:]
     )
     assert PARALLELISM_RE.search(out), out[-2000:]
     assert "NO TESTS RAN" in out, out[-2000:]
