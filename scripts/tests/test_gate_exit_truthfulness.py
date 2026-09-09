@@ -84,10 +84,20 @@ def _gate(tmp_path: Path, *, pytest_runner: Path, extra: list[str] | None = None
     a truncation panic, a runner that lies about its own status) cannot be
     produced by the real runner at all.
     """
+    # 🔴 SCRUB THE OPERATOR-FACING GATE VARIABLES OUT OF THE INHERITED
+    # ENVIRONMENT. `**os.environ` used to pass whatever the caller had exported
+    # straight through. An exported `DEVRC_GATE_TIMEOUT=5` would kill every tier
+    # these negative controls run and read as a gate bug; an exported
+    # `DEVRC_GATE_ENV` or `DEVRC_GATE_NO_REEXEC` changes which code path they
+    # take. A control whose verdict depends on the operator's shell is not a
+    # control. The ledger of names lives in
+    # `test_gate_reexec.py::_AMBIENT_GATE_VARS`, pinned two-way against
+    # gate.sh's own source.
     env = {
-        **os.environ,
-        "DEVRC_GATE_PYTEST_RUNNER": str(pytest_runner),
+        k: v for k, v in os.environ.items()
+        if not k.startswith("DEVRC_GATE_")
     }
+    env["DEVRC_GATE_PYTEST_RUNNER"] = str(pytest_runner)
     return subprocess.run(
         ["bash", str(GATE), "--tier", "pytest", "--log-dir", str(tmp_path / "logs"),
          *(extra or []), str(REPO_ROOT)],
@@ -223,7 +233,8 @@ def test_the_gate_verdict_survives_a_pipe(tmp_path):
     with a bare `rc=0`.
     """
     r = _fake_runner(tmp_path / "red.sh", RED_BODY)
-    env = {**os.environ, "DEVRC_GATE_PYTEST_RUNNER": str(r)}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DEVRC_GATE_")}
+    env["DEVRC_GATE_PYTEST_RUNNER"] = str(r)
     proc = subprocess.run(
         ["bash", "-c",
          f"bash {GATE} --tier pytest --log-dir {tmp_path / 'logs'} {REPO_ROOT} 2>&1 | tail -3"],
@@ -255,7 +266,8 @@ def test_the_disagreement_check_is_what_catches_a_lying_runner(tmp_path):
     mutated.write_text(src.replace(needle, 'disagree=""'))
 
     r = _fake_runner(tmp_path / "liar.sh", RED_BODY.replace("exit 1", "exit 0"))
-    env = {**os.environ, "DEVRC_GATE_PYTEST_RUNNER": str(r)}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DEVRC_GATE_")}
+    env["DEVRC_GATE_PYTEST_RUNNER"] = str(r)
     proc = subprocess.run(
         ["bash", str(mutated), "--tier", "pytest", "--log-dir", str(tmp_path / "m"), str(REPO_ROOT)],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120, env=env,
