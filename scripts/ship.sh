@@ -467,6 +467,48 @@ if [ "$DO_REMOTE" = 1 ] && [ -z "$REMOTE_SSH" ]; then
   exit 6
 fi
 
+# --- Address selection: LAN first, then nebula --------------------------------
+# 🔴 The LAN address is only reachable from the same network and the laptop is
+# routinely elsewhere. MEASURED 2026-09-09: this script reached for
+# 192.168.50.155, ssh timed out, the leg exited 255 — while the host answered on
+# 10.42.0.100 throughout. The failure reads as a DEAD HOST, so the laptop stops
+# receiving deploys while merely looking unreachable, and nothing says which of
+# the two it was.
+#
+# Only DERIVED defaults are probed. An explicit $REMOTE_SSH/$LAPTOP_SSH is a
+# one-element list by construction (see remote_ssh_candidates_of), so this never
+# redirects a run the operator addressed by hand.
+_cands="$(remote_ssh_candidates_of "$SHIP_ROLE")"
+mapfile -t _cand_arr <<<"$_cands"
+# 🔴 PROBE ONLY WHEN THERE IS SOMETHING TO CHOOSE BETWEEN. With one candidate
+# there is no alternative to fall back to, so a probe buys nothing and COSTS: it
+# is an extra ssh connection before the legs run, and anything downstream that
+# counts connections or orders events sees a different sequence. MEASURED: with
+# the probe unconditional, `test_a_merge_landing_between_the_two_fetches_is_not_
+# convergence` stopped seeing its injected mid-run merge and returned rc 0 where
+# it must return rc 19 (hosts disagree) — the extra connection moved the very
+# window that test exists to detect. An explicit $REMOTE_SSH/$LAPTOP_SSH is
+# always a one-element list, so this also means an operator-addressed run makes
+# exactly the connections it used to.
+if [ "$DO_REMOTE" = 1 ] && [ "${#_cand_arr[@]}" -gt 1 ] \
+   && [ "${SHIP_SKIP_SSH_PROBE:-0}" != 1 ]; then
+  _chosen="$(first_reachable_ssh "${_cand_arr[@]}")" || _chosen=""
+  if [ -n "$_chosen" ]; then
+    if [ "$_chosen" != "$REMOTE_SSH" ]; then
+      echo "ship: $REMOTE_SSH did not answer — falling back to $_chosen for $REMOTE_ROLE." >&2
+    fi
+    REMOTE_SSH="$_chosen"
+  else
+    # Every candidate was tried and none answered. Say so explicitly rather than
+    # proceeding into a 255 that reads as a broken converge: this is a
+    # reachability fact about the host, and the run below will report it as one.
+    echo "ship: NO candidate address answered for $REMOTE_ROLE — tried:" >&2
+    printf '  %s\n' $_cands >&2
+    echo "  the remote leg will fail; pass REMOTE_SSH=user@host if it lives elsewhere," >&2
+    echo "  or --no-remote to converge this host alone (which compares NO cross-host agreement)." >&2
+  fi
+fi
+
 # --- Self-supersession fingerprint --------------------------------------------
 # See SELF-SUPERSESSION in the header. Watched: this script, and the lib it
 # sources. Both live inside the repo a local converge fast-forwards, so both can

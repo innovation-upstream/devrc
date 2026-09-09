@@ -1791,6 +1791,23 @@ _SHELL_BUILTINS = frozenset("""
 # reviewer can check, whereas a heuristic filter would swallow a real command.
 _PROSE_NOT_COMMANDS = frozenset({
     "a", "f", "n", "prev", "more", "see", "the", "laptop", "workbench",
+    # 🔴 `target` is a LOOP VARIABLE and a `local` declaration in
+    # lib/host-role.sh's first_reachable_ssh, not a program. It is here because
+    # of a MEASURED blind spot in `_command_tokens`, not because the word is
+    # prose: `for` and `local` are both in _TRANSPARENT, so stripping them
+    # leaves the VARIABLE NAME as tokens[0]. Two lines produce it:
+    #     local timeout="${SSH_PROBE_TIMEOUT:-5}" target
+    #     for target in "$@"; do
+    # ⚠ The blind spot is older than this entry and nothing surfaced it,
+    # because the only other loop variable in that file is `ip` — which passes
+    # solely by COINCIDENCE, `ip` being a real command already in
+    # UNIT_PATH_REQUIREMENTS (iproute2). Rename that variable and this guard
+    # would have reported it too. Widening `_command_tokens` to skip `for X in`
+    # and `local` declarations is the structural fix; it is deliberately NOT
+    # done here, because it may unmask other words across drift-check.sh and
+    # that belongs in its own change rather than riding along with an ssh
+    # fallback.
+    "target",
 })
 
 

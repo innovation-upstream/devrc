@@ -33,8 +33,19 @@ WORKBENCH_IP_PRIMARY="192.168.50.250"
 WORKBENCH_IP_SECONDARY="10.42.0.30"
 LAPTOP_IP_PRIMARY="192.168.50.155"
 LAPTOP_IP_SECONDARY="10.42.0.100"
-WORKBENCH_SSH_DEFAULT="zach@192.168.50.250"
-LAPTOP_SSH_DEFAULT="zach@192.168.50.155"
+SSH_USER_DEFAULT="zach"
+WORKBENCH_SSH_DEFAULT="${SSH_USER_DEFAULT}@${WORKBENCH_IP_PRIMARY}"
+LAPTOP_SSH_DEFAULT="${SSH_USER_DEFAULT}@${LAPTOP_IP_PRIMARY}"
+# 🔴 The SECONDARY (nebula) targets exist because the LAN address is only
+# reachable from the same network, and the laptop is routinely NOT on it.
+# MEASURED 2026-09-09: `ship.sh` reached for 192.168.50.155, ssh timed out, the
+# laptop leg exited 255 and the run reported `converge exited 255` — while the
+# host was up and answering on 10.42.0.100 the whole time. A timed-out leg reads
+# as a DEAD HOST, so the laptop silently stopped receiving deploys while looking
+# merely unreachable. Derived from the IP constants above rather than spelled
+# again: one address, one place.
+WORKBENCH_SSH_SECONDARY="${SSH_USER_DEFAULT}@${WORKBENCH_IP_SECONDARY}"
+LAPTOP_SSH_SECONDARY="${SSH_USER_DEFAULT}@${LAPTOP_IP_SECONDARY}"
 
 # detect_role <space-or-comma-separated ipv4 list> -> workbench|laptop|unknown
 # Pure + testable: takes an IP list as input (no live-machine calls), so it can
@@ -88,6 +99,60 @@ remote_ssh_of() {
     laptop)    echo "$WORKBENCH_SSH_DEFAULT" ;;
     *)         echo "" ;;
   esac
+}
+
+# remote_ssh_candidates_of <local-role> -> ssh targets to TRY, one per line,
+# most-preferred first: the LAN address, then the nebula one.
+#
+# 🔴 AN EXPLICIT TARGET IS NEVER SECOND-GUESSED. When $REMOTE_SSH or (for the
+# laptop) $LAPTOP_SSH is set, that ONE target is the whole list: an operator who
+# names a host means that host, and silently trying a different machine after it
+# fails to answer is how a converge lands somewhere nobody asked for. Only the
+# DERIVED defaults get a fallback.
+#
+# Pure: prints candidates, contacts nothing. The probing lives in
+# first_reachable_ssh so this stays unit-testable with no network.
+remote_ssh_candidates_of() {
+  if [ -n "${REMOTE_SSH:-}" ]; then echo "$REMOTE_SSH"; return 0; fi
+  case "${1:-}" in
+    workbench)
+      if [ -n "${LAPTOP_SSH:-}" ]; then echo "$LAPTOP_SSH"; return 0; fi
+      echo "$LAPTOP_SSH_DEFAULT"; echo "$LAPTOP_SSH_SECONDARY" ;;
+    laptop)
+      echo "$WORKBENCH_SSH_DEFAULT"; echo "$WORKBENCH_SSH_SECONDARY" ;;
+    *) echo "" ;;
+  esac
+}
+
+# first_reachable_ssh <target>... -> the first target that answers, or empty.
+#
+# Probes with BatchMode (never prompts) and a bounded ConnectTimeout, running
+# `true` rather than anything that could change state. Prints the winner on
+# stdout; every diagnostic goes to stderr so callers can capture the target
+# cleanly. Returns 1 when NOTHING answered — the caller must treat that as a
+# genuinely unreachable host, not as "use the first one anyway".
+#
+# 🔴 $SSH_PROBE_CMD replaces the probe wholesale (it receives the target as $1
+# and signals reachability by exit status). It exists so the selection logic can
+# be tested without a network — a probe that always fails, or one that answers
+# only for a named address, is how the fallback is driven red.
+first_reachable_ssh() {
+  local timeout="${SSH_PROBE_TIMEOUT:-5}" target
+  for target in "$@"; do
+    [ -n "$target" ] || continue
+    if [ -n "${SSH_PROBE_CMD:-}" ]; then
+      if "$SSH_PROBE_CMD" "$target"; then echo "$target"; return 0; fi
+    # 🔴 ONE LINE, not a continuation. `test_drift_check.py`'s command extractor
+    # reads the first token of each line as a command, so a wrapped invocation
+    # makes it see the continuation's leading word (`target`) as a program and
+    # report it as unaccounted-for on the unit PATH. Keeping it on one line lets
+    # it see `ssh`, which the table already carries as pkgs.openssh.
+    elif ssh -o BatchMode=yes -o ConnectTimeout="$timeout" -o StrictHostKeyChecking=accept-new "$target" true >/dev/null 2>&1; then
+      echo "$target"; return 0
+    fi
+    echo "ship: $target did not answer" >&2
+  done
+  return 1
 }
 
 # Standalone probe mode — only when EXECUTED, never when sourced.
