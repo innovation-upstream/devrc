@@ -380,7 +380,9 @@ the cause of the other 19 is now measured rather than guessed — see the block 
   shipped 13 tests covering `exclusion_slug`, the row filter, both backends' bound params, the
   renderer and the `filtered` flag — and **nothing pinned that `main()` hands `exclude` to
   `run_search` at all.** An audit deleted `exclude=exclude` from the CLI call site: the flag
-  became completely inert, the excluded doc came back as hit #1, and **304 of 304 tests passed.**
+  became completely inert, the excluded doc came back as hit #1, and **304 of 304 tests
+  passed** — 304 being the TWO-FILE scope (`test_handoff_index.py` +
+  `test_resume_handoff_search_wiring.py`), not the ~21k-test suite.
   The pre-existing "🔴 THE SEAM" guard proves only that argparse ACCEPTS the flag — it passes
   `--limit 0`, which returns rc 2 *before any store is built*. `claude/RULES.md` → "verified in
   isolation is the new vacuous green" and "a count of DECLARATIONS is not a count of INSTANCES".
@@ -388,7 +390,8 @@ the cause of the other 19 is now measured rather than guessed — see the block 
   call sites are now pinned behaviourally (offline) and by an AST ledger that fails if a call
   site is added without `exclude=` as well as if one is removed. 🔴 **And the ledger pins the
   VALUE, not just the keyword** — round 2 wrote `exclude=()` at the postgres site and it
-  SURVIVED all 314 tests: the keyword was present and the flag was inert. A guard on a NAME
+  SURVIVED all 314 tests — again the two-file scope, at that round's tip — while the
+  keyword was present and the flag was inert. A guard on a NAME
   is walkable by supplying a different value under the same name.
 - 🔴 **I FIXED THE CLASS IN ONE BRANCH AND WROTE A COMMENT SAYING SO, WHILE ITS NEIGHBOUR KEPT
   THE DEFECT.** The `empty-scope` remedy was taught to name only the flags the run passed, with a
@@ -404,6 +407,12 @@ the cause of the other 19 is now measured rather than guessed — see the block 
   slug, printed a confident `excluded=<garbage>`, matched nothing and returned the document the
   caller was dropping. **A filter that declines to filter renders identically to one that
   worked** — which is why the skill now tells the reader to check the COUNT, not just the tell.
+- 🔴 **AN UNSCOPED TEST COUNT IS A COVERAGE CLAIM, AND THIS PR MADE IT FOUR TIMES.** "the whole
+  suite green at 304", "SURVIVED all 314 tests", "a 306-test green suite", "304 of 304 tests
+  passed" — every one numerically TRUE and every one naming a two-file scope of ~300 against a
+  repo of ~21,000. Three audit rounds each caught one site and fixed that site; the shape only
+  went away when it was swept at all four. 🔴 **A number needs the DENOMINATOR'S NAME, not just
+  the numerator** — and when a round fixes an instance of a shape, grep for the shape.
 - 🔴 **A PERFECT 100% (OR 0%) IS A REASON TO SUSPECT THE NEEDLE, NOT TO WRITE IT DOWN.** The
   first pass at the number above reported 23-of-23 self-hits, because it grepped transcripts
   for `claudedocs/handoff-<slug>.md` — a string the SEARCH ITSELF PRINTS for every hit, so the

@@ -527,7 +527,12 @@ def test_the_whole_FENCE_is_valid_shell_verbatim():
 
     🔴 IT ASSERTS THE FENCE, NOT A LINE, because that is the unit a reader
     pastes. A per-line check passes on exactly the corpus this test exists to
-    reject."""
+    reject.
+
+    ⚠ RESIDUAL, NAMED RATHER THAN IMPLIED: `_step4_fence` STRIPS each line, so it
+    checks a reconstruction, not the exact bytes. Both forms are rc 0 today, so
+    nothing is masked — but a heredoc added to this fence would make the stripped
+    and indented forms disagree, and this test would follow the stripped one."""
     fence = _step4_fence()
     proc = subprocess.run(["bash", "-n"], input=fence, text=True,
                           capture_output=True)

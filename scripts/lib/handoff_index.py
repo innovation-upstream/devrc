@@ -1450,8 +1450,13 @@ def _exclusion_list(exclude) -> list[str]:
         raise TypeError(
             "exclude takes a SEQUENCE of slugs, not a bare str: a string iterates "
             f"per character, so exclude={exclude!r} would filter on "
-            f"{sorted(set(exclude))!r}. Pass a list of slugs, e.g. "
-            f"[{exclude!r}] — or () for no exclusion."
+            f"{sorted(set(exclude))!r}. Pass a list of slugs"
+            # 🔴 NO `e.g. ['']` FOR THE EMPTY STRING. That example is ACCEPTED and
+            # filters nothing — a silent no-op, which is the class this module
+            # spent three rounds closing. An error message that names the next
+            # defect as its remedy is worse than one that names none.
+            + (f", e.g. [{exclude!r}]" if exclude else "")
+            + " — or () for no exclusion."
         )
     out = list(exclude)
     bad = [e for e in out if not isinstance(e, str)]

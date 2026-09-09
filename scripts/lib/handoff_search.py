@@ -699,9 +699,7 @@ def render(outcome: SearchOutcome) -> str:
                 # the scope was --exclude-slug is the same defect the no-match
                 # branch below already fixed once: a next step that names a command
                 # without checking the state it prints in.
-                "   Widen or drop "
-                + (" / ".join(active_filter_flags(outcome)) or "--repo / --section")
-                + " and re-run.",
+                "   " + widen_or_drop_clause(outcome).capitalize() + " and re-run.",
             ]
             if outcome.exclude:
                 lines.append(
@@ -737,14 +735,9 @@ def render(outcome: SearchOutcome) -> str:
         # than a missing measurement.
         flags = active_filter_flags(outcome)
         lines.append(
-            # 🔴 "WIDEN OR DROP", NEVER BARE "WIDEN" — and this is the second
-            # time this pair of branches disagreed. `active_filter_flags` unified
-            # WHICH flags each branch names; the VERB stayed open-coded, and
-            # "widen --exclude-slug" is advice that guarantees the zero stays a
-            # zero: widening an exclusion excludes MORE. The sibling empty-scope
-            # branch already said "Widen or drop". One rule, one place — the
-            # phrasing included.
-            "   Try fewer/other terms, or widen or drop " + " / ".join(flags)
+            # 🔴 THE VERB AS WELL AS THE FLAGS — see `widen_or_drop_clause`,
+            # which is the single literal both branches now read.
+            "   Try fewer/other terms, or " + widen_or_drop_clause(outcome)
             + " before concluding nobody wrote it down."
             if flags else
             "   Try fewer or different terms before concluding nobody wrote it down. "
@@ -924,6 +917,19 @@ def exclusion_slug(value: str) -> str:
     if handoff_index.HANDOFF_DIR in parts:
         parts = parts[len(parts) - 1 - parts[::-1].index(handoff_index.HANDOFF_DIR):]
     return handoff_index.slug_for("/".join(parts))
+
+
+def widen_or_drop_clause(outcome: "SearchOutcome") -> str:
+    """The remedy clause naming this run's filters, verb included. ONE literal.
+
+    🔴 THE VERB WAS THE SECOND HALF OF THE SAME DEFECT. Round 1 consolidated
+    WHICH flags each branch names into `active_filter_flags` and left the verb
+    open-coded, so `no-match` said bare "widen" — advice that cannot turn its own
+    zero into a hit, because widening an exclusion excludes MORE. Round 2 fixed
+    both literals and wrote a comment claiming "one rule, one place — the
+    phrasing included", which was still false: two literals carried it. Round 3
+    caught the sentence. This function is the fix the sentence described."""
+    return "widen or drop " + " / ".join(active_filter_flags(outcome))
 
 
 def active_filter_flags(outcome: "SearchOutcome") -> tuple[str, ...]:

@@ -6030,6 +6030,29 @@ class TestAnExcludeArgumentThatWouldLIEIsRefused:
         else:
             pytest.fail("a bare str was accepted")
 
+    def test_the_refusal_does_NOT_offer_the_empty_string_as_the_fix(self):
+        """🔴 AN ERROR MESSAGE THAT NAMES THE NEXT DEFECT AS ITS REMEDY. For
+        `exclude=""` the message used to end `Pass [''] — or () for no
+        exclusion`, and `[""]` IS accepted: it filters nothing while printing a
+        confident `excluded=` line. That is the silent no-op this module spent
+        three rounds closing, offered as the fix for its own trigger."""
+        store = hi.MemorySectionStore(_corpus())
+        try:
+            store.stats(exclude="")
+        except TypeError as exc:
+            msg = str(exc)
+        else:
+            pytest.fail("the empty string was accepted")
+        assert "e.g." not in msg, msg
+        assert "['']" not in msg, msg
+        assert "or () for no exclusion" in msg, msg
+        # …and the NON-empty case still gets its worked example, so this is a
+        # narrowing of the message rather than a deletion of it.
+        try:
+            store.stats(exclude="ab")
+        except TypeError as exc2:
+            assert "e.g. ['ab']" in str(exc2), str(exc2)
+
     def test_a_non_string_element_is_refused_on_BOTH_backends(self):
         with pytest.raises(TypeError, match="must be str"):
             hi.MemorySectionStore(_corpus()).stats(exclude=["widget-relay", None])
@@ -6074,6 +6097,26 @@ class TestTheTwoRemedyBranchesAgreeOnTheVERBAsWellAsTheFLAGS:
                 f"exclusion excludes MORE, so it cannot turn this zero into a hit"
             )
             assert "drop" in text, which
+
+    def test_the_verb_comes_from_ONE_literal_shared_by_both_branches(self):
+        """🔴 THE SECOND HALF OF THE SAME CONSOLIDATION. Round 2 unified WHICH
+        flags and left the VERB as two literals, then wrote a comment claiming
+        "one rule, one place — the phrasing included"; round 3 caught the
+        sentence. `widen_or_drop_clause` is the literal both branches read, so
+        breaking it must break BOTH — which is what a shared rule means and what
+        two independently-correct literals would not do."""
+        store = self._corpus()
+        no_match = hs.render(hs.run_search(store, "plimforthxyz", backend="memory",
+                                           exclude=["widget-relay"]))
+        empty = hs.render(hs.run_search(store, "quixotry", backend="memory",
+                                        exclude=["widget-relay", "cable-audit"]))
+        clause = hs.widen_or_drop_clause(
+            hs.run_search(store, "plimforthxyz", backend="memory",
+                          exclude=["widget-relay"]))
+        assert clause == "widen or drop --exclude-slug"
+        # the SAME clause text reaches both renderers (one capitalised)
+        assert clause in no_match
+        assert clause.capitalize() in empty
 
     def test_an_unfiltered_run_is_still_told_there_is_nothing_to_widen(self):
         """🔴 THE NEGATIVE CONTROL. A blanket 'widen or drop' everywhere would
