@@ -3316,10 +3316,13 @@ in
       # _repo_fetch`, which recomputes it from both files and fails if either
       # moves out from under the other.
       #
-      # The ConnectTimeout inside the script is 10s and each source fetch is
-      # capped individually, so this ceiling only ever fires on several wedges at
-      # once; the cgroup is killed and the timer re-arms on the next
-      # OnUnitActiveSec.
+      # There are now TWO ConnectTimeouts: the remote leg's 10s, and the address
+      # probe's `$SSH_PROBE_TIMEOUT` (default 5s, per candidate address). Each
+      # source fetch is capped individually too, so this ceiling only ever fires
+      # on several wedges at once; the cgroup is killed and the timer re-arms on
+      # the next OnUnitActiveSec. The test named above counts both — it was
+      # extended when the probe landed, because a network call added with no room
+      # made for it is precisely what it exists to catch.
       TimeoutStartSec = 420;
       Environment = [
         # iproute2 is load-bearing, not incidental: `ip -4 -o addr show` is how

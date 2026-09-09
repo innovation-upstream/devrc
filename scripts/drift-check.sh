@@ -741,6 +741,20 @@
 #                    host. Deliberately NOT forwarded over ssh — the comparison
 #                    happens in the driver, and every value sent across that hop
 #                    is one that has to be proved safe.
+#   DRIFT_SKIP_SSH_PROBE=1  do not probe the remote host's addresses; use the
+#                    first derived candidate as-is. The probe (LAN, then nebula)
+#                    exists because a host that is merely off-LAN otherwise reads
+#                    as UNREACHABLE and escalates rc 13 after
+#                    $DRIFT_UNREACHABLE_ESCALATE runs. It never runs under
+#                    --no-remote, and never when an explicit $REMOTE_SSH names
+#                    one target. Defaulted to 1 by the test fixture: the probe
+#                    reaches a REAL host, and a read-only breach is still a
+#                    breach. NOT forwarded over ssh — the remote leg does no
+#                    probing of its own.
+#   SSH_PROBE_TIMEOUT / SSH_PROBE_CMD / SSH_PROBE_LOG_PREFIX
+#                    shared with ship.sh via lib/host-role.sh and documented in
+#                    that script's header; the prefix is set here so the probe's
+#                    diagnostics satisfy this script's journal hygiene.
 set -uo pipefail
 
 # --- Host identity: SOURCED, never copied (see header) ------------------------
@@ -1023,10 +1037,23 @@ REMOTE_SSH="$(remote_ssh_of "$LOCAL_ROLE")"
 # says a host that is "off, asleep or off-LAN … must not look like drift"; only
 # trying both addresses makes that true.
 #
-# Probing costs one bounded ssh, and ONLY when there is a real choice: an
+# Probing costs up to ONE BOUNDED ssh PER CANDIDATE (two today, at
+# $SSH_PROBE_TIMEOUT each — counted in the unit's TimeoutStartSec model), and
+# only when there is a real choice: an
 # explicit $REMOTE_SSH is a one-element list, so an operator-addressed run is
 # never redirected and makes exactly the connections it used to.
-if [ "${DRIFT_SKIP_SSH_PROBE:-0}" != 1 ] && command -v first_reachable_ssh >/dev/null; then
+# 🔴 `[ "$DO_REMOTE" = 1 ]` IS THE FIRST CONDITION, not an afterthought. Line 654
+# documents `--no-remote` as "this host only (no ssh)", and without this gate the
+# probe fires anyway: MEASURED at b280162a, `--no-remote` made two outbound
+# connections to the operator's laptop. `ship.sh` had the gate from the start and
+# this script did not — the same wiring applied asymmetrically to its two
+# callers. The second-order cost was larger than the contract breach:
+# `test_drift_check.py` issues one probe pair per `--no-remote` test, so the
+# suite made 568 real ssh attempts to a live host, and with the laptop off-LAN
+# each LAN probe burns the full ConnectTimeout — turning a hermetic 7.5-minute
+# module into a half-hour one whose verdict depends on the operator's network.
+if [ "$DO_REMOTE" = 1 ] && [ "${DRIFT_SKIP_SSH_PROBE:-0}" != 1 ] \
+   && command -v first_reachable_ssh >/dev/null; then
   mapfile -t _dc_cands <<<"$_dc_cands_raw"   # captured ABOVE, before REMOTE_SSH was derived
   # 🔴 The probe's own diagnostics must carry THIS script's prefix: the journal
   # accepts only `[`, `===`, `drift-check: ` and indented lines, and an

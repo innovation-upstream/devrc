@@ -293,6 +293,21 @@ class Fleet:
             # write to the operator's real state dir and inherit a streak from
             # whatever ran before them.
             DRIFT_STATE_DIR=str(self.state),
+            # 🔴 THE SIXTH HERMETICITY SEAM, and it was paid for the same way as
+            # the fifth. The address probe added in #1439 runs before the remote
+            # leg and reaches the OPERATOR'S REAL LAPTOP. MEASURED at b280162a:
+            # this module made 568 outbound ssh attempts (284 per address), one
+            # pair per test, to a live host — a read-only breach is still a
+            # breach, and with the laptop off-LAN each LAN probe burns the full
+            # ConnectTimeout, so the module's runtime and its VERDICT started
+            # depending on the operator's network.
+            #
+            # `--no-remote` is now gated in the script itself, which removes most
+            # of them; this closes the rest, including the sites that pass
+            # neither `--no-remote` nor an explicit REMOTE_SSH. A test that wants
+            # the probe to run opts out with `envextra={"DRIFT_SKIP_SSH_PROBE": "0"}`
+            # and installs a stub ssh — never the real one.
+            DRIFT_SKIP_SSH_PROBE="1",
         )
         env.update(envextra)   # per-test overrides win (e.g. a blocked state dir)
         # `script` runs a COPY of the checker whose `lib/` a test controls. The
@@ -4151,13 +4166,38 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
     sites, in_loop, GH_CALLS = _derive_gh_calls(DRIFT.read_text())
     assert sites >= 3, f"the gh call sites cannot be counted: {sites}"
     assert in_loop >= 1, "no gh call found inside the ruleset loop"
-    needed = 2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2 + GH_CALLS * gh + 60
+
+    # 🔴 THE ADDRESS PROBE IS A NETWORK CALL AND MUST BE IN THIS MODEL. #1439
+    # added it to this script and did NOT extend the budget — the exact omission
+    # this test's docstring says it exists to catch, arriving in the commit that
+    # quoted the docstring. It is bounded by `ConnectTimeout=$SSH_PROBE_TIMEOUT`
+    # per address, over the candidate list, so the worst case is
+    # len(candidates) x that default. DERIVED from the lib for the same reason
+    # everything else here is: a literal beside the thing it counts drifts.
+    #
+    # ⚠ ConnectTimeout bounds the TCP CONNECT only. A peer that accepts :22 and
+    # then stalls in key exchange is NOT bounded by it, and nothing wraps the
+    # probe in `timeout`. That residue is stated rather than modelled — this
+    # budget covers the failure mode that actually happens (an address that does
+    # not answer), not a malicious half-open peer.
+    lib_src = (DRIFT.parent / "lib" / "host-role.sh").read_text()
+    m5 = re.search(r"SSH_PROBE_TIMEOUT:-(\d+)", lib_src)
+    assert m5, "no SSH_PROBE_TIMEOUT default in lib/host-role.sh"
+    probe_cap = int(m5.group(1))
+    n_candidates = max(
+        2, len(re.findall(r"^\s*echo \"\$(?:WORKBENCH|LAPTOP)_SSH_SECONDARY\"",
+                          lib_src, re.M)) + 1)
+    probe = n_candidates * probe_cap
+
+    needed = (2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2
+              + GH_CALLS * gh + probe + 60)
     assert ceiling >= needed, (
         "TimeoutStartSec=%d cannot absorb the worst case: %d source fetches at "
-        "%ds + a %ds phase-2 scan + %d branch-protection probes at %ds + 60s of "
-        "devrc fetch/ssh = %ds. systemd would kill the run and the deadman would "
-        "report nothing, on a schedule."
-        % (ceiling, 2 * len(EXPECTED_SOURCE_REPOS), cap, phase2, GH_CALLS, gh, needed)
+        "%ds + a %ds phase-2 scan + %d branch-protection probes at %ds + %ds of "
+        "address probing + 60s of devrc fetch/ssh = %ds. systemd would kill the "
+        "run and the deadman would report nothing, on a schedule."
+        % (ceiling, 2 * len(EXPECTED_SOURCE_REPOS), cap, phase2, GH_CALLS, gh,
+           probe, needed)
     )
 
 

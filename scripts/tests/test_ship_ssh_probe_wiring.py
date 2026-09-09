@@ -16,8 +16,11 @@ never load `ship.sh`:
      once. The `/bin/false` mutant alone makes every probe report "did not
      answer", i.e. renders the whole fallback inert while the suite stays green.
 
-The first is closed via `SHIP_PRINT_REMOTE_TARGET=1`, a hidden mode that runs
-role resolution + address selection and prints the target it would use. The
+The first is closed via `--print-remote-target`, a flag that runs role
+resolution + address selection and prints the target it would use. (It began as
+an env var and was changed to argv in round 2: an env seam is INHERITABLE, and an
+inherited copy makes an ordinary `ship.sh` print an address and exit 0 having
+converged nothing.) The
 second is closed by putting a recording `ssh` FIRST ON PATH and asserting on the
 argv the real line actually builds -- no network, no real host.
 """
@@ -50,13 +53,13 @@ def _probe_stub(tmp_path: Path, reachable: str, log: Path | None = None) -> str:
 
 def _ship_target(tmp_path: Path, env: dict) -> subprocess.CompletedProcess:
     """Run ship.sh's hidden target-resolution mode with a forced role."""
-    full = {**os.environ, "SHIP_ROLE": "workbench",
-            "SHIP_PRINT_REMOTE_TARGET": "1", **env}
+    full = {**os.environ, "SHIP_ROLE": "workbench", **env}
     for var in ("REMOTE_SSH", "LAPTOP_SSH"):
         if var not in env:
             full.pop(var, None)
     return subprocess.run(
-        ["bash", str(SHIP)], capture_output=True, text=True, env=full, timeout=120
+        ["bash", str(SHIP), "--print-remote-target"],
+        capture_output=True, text=True, env=full, timeout=120,
     )
 
 
@@ -205,7 +208,13 @@ def test_the_probes_diagnostic_carries_the_CALLERS_prefix(tmp_path):
     guard -- measured, as
     `test_the_ladder_escalates_when_the_streak_FILE_cannot_be_written` -- and
     independently misattributes the message to the wrong program in the
-    operator's log. Both callers are asserted so neither can regress alone.
+    operator's log.
+
+    ⚠ SCOPE: this asserts the LIB under both prefix values. It does not load
+    `drift-check.sh`; that side is covered by the test named above, in
+    `test_drift_check.py`. An earlier draft of this docstring claimed "both
+    callers are asserted so neither can regress alone", which was wrong about
+    THIS file -- the coverage exists, in another module.
     """
     stub = _probe_stub(tmp_path, "zach@nothing-answers")
     for prefix, expected in (("", "ship: "), ("drift-check", "drift-check: ")):
@@ -224,6 +233,80 @@ def test_the_probes_diagnostic_carries_the_CALLERS_prefix(tmp_path):
             f"with SSH_PROBE_LOG_PREFIX={prefix!r} the diagnostic must start "
             f"{expected!r}; got {res.stderr!r}"
         )
+
+
+def test_the_degraded_block_defines_the_function_the_selection_calls(tmp_path):
+    """🔴 The lib-less recovery path, which had NO test and reproduced its bug.
+
+    `ship.sh` runs in "degraded recovery mode" when `lib/host-role.sh` is
+    missing -- the state you are in when a host is already broken, and the one
+    the script's own recovery instructions tell you to use. The selection block
+    calls `remote_ssh_candidates_of` unconditionally, so if the degraded block
+    does not define it the run prints `command not found` into the middle of a
+    recovery. Measured: deleting that one line reproduced the symptom while
+    `pytest -k "without_the_lib or through_a_symlink"` stayed green, 4 passed.
+    """
+    lonely = tmp_path / "scripts"
+    lonely.mkdir()
+    (lonely / "ship.sh").write_text(SHIP.read_text())
+    env = {**os.environ, "SHIP_ROLE": "workbench", "REMOTE_SSH": "zach@10.0.0.9"}
+    env.pop("LAPTOP_SSH", None)
+    res = subprocess.run(
+        ["bash", str(lonely / "ship.sh"), "--print-remote-target"],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert "degraded recovery mode" in res.stderr, (
+        f"expected the lib-less path; got:\n{res.stderr}"
+    )
+    assert "command not found" not in res.stderr, (
+        "an undefined function crashed into the middle of a RECOVERY run -- the "
+        f"exact shape this file rejects elsewhere:\n{res.stderr}"
+    )
+    assert res.stdout.strip() == "zach@10.0.0.9", (
+        f"degraded mode must still honour an explicit target; got {res.stdout!r}"
+    )
+
+
+def test_drift_check_makes_no_ssh_connection_under_no_remote(tmp_path):
+    """🔴 `--no-remote` is documented as "this host only (no ssh)".
+
+    MEASURED before the fix: it made two outbound probe connections to the
+    operator's real laptop, and `test_drift_check.py` -- which passes
+    `--no-remote` throughout -- issued 568 of them across the module. A
+    read-only breach is still a breach, and with the laptop off-LAN each probe
+    burns the full ConnectTimeout, so the suite's runtime and verdict began
+    depending on the operator's network.
+
+    The positive control below is the point: it proves this test can SEE a
+    probe, so the zero above is a measurement rather than a wiring accident.
+    """
+    drift = SCRIPTS / "drift-check.sh"
+    bindir, log = _recording_ssh(tmp_path, exit_code=255)
+    env = {**os.environ, "SHIP_ROLE": "workbench",
+           "PATH": f"{bindir}:{os.environ['PATH']}"}
+    for var in ("REMOTE_SSH", "LAPTOP_SSH", "DRIFT_SKIP_SSH_PROBE"):
+        env.pop(var, None)
+
+    subprocess.run(["bash", str(drift), "--no-remote"], capture_output=True,
+                   text=True, env=env, timeout=300)
+    probes = [ln for ln in (log.read_text().splitlines() if log.exists() else [])
+              if "BatchMode=yes" in ln and " true" in ln]
+    assert probes == [], (
+        "--no-remote is documented as making no ssh connection, but the address "
+        f"probe fired: {probes}"
+    )
+
+    # POSITIVE CONTROL — the same harness WITH the remote leg in scope must see
+    # probes, or the empty list above proves nothing about the gate.
+    log.unlink(missing_ok=True)
+    subprocess.run(["bash", str(drift)], capture_output=True, text=True,
+                   env=env, timeout=300)
+    seen = [ln for ln in (log.read_text().splitlines() if log.exists() else [])
+            if "BatchMode=yes" in ln and " true" in ln]
+    assert seen, (
+        "the control saw NO probe even with the remote leg in scope, so this "
+        "test cannot distinguish a working gate from a probe that never runs"
+    )
 
 
 def test_a_failing_real_probe_moves_to_the_next_address(tmp_path):

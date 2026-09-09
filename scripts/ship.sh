@@ -443,15 +443,23 @@ SHIP_NO_SWITCH="${SHIP_NO_SWITCH:-0}"
 SHIP_LIST_MAX="${SHIP_LIST_MAX:-10}"
 DO_LOCAL=1
 DO_REMOTE=1
-# Hidden test seam — see the block after address selection. Defaulted here (not
-# read bare) because this script runs under `set -u`.
-SHIP_PRINT_REMOTE_TARGET="${SHIP_PRINT_REMOTE_TARGET:-0}"
+# Set by --print-remote-target; NOT read from the environment, so it cannot be
+# inherited by an unrelated run. See the flag's own note in the arg loop.
+SHIP_PRINT_REMOTE_TARGET=0
 for a in "$@"; do
   case "$a" in
     --no-remote|--no-laptop) DO_REMOTE=0 ;;   # skip the OTHER (remote) host
     --no-local)  DO_LOCAL=0 ;;                # skip THIS (local) host
     --no-switch) SHIP_NO_SWITCH=1 ;;
     --detect-role) : ;;                        # handled above
+    # 🔴 ARGV, NOT AN ENV VAR — and that difference is the whole point. As
+    # $SHIP_PRINT_REMOTE_TARGET this was INHERITABLE: an operator who exported it
+    # while debugging would have every later `ship.sh` in that shell print an
+    # address and exit 0 having converged NOTHING — the vacuous green the rc 21
+    # refusal below exists to prevent, arriving by a route that refusal cannot
+    # see. As a flag it cannot be inherited, a typo lands in the `unknown arg`
+    # arm, and it appears in --help like every other option.
+    --print-remote-target) SHIP_PRINT_REMOTE_TARGET=1 ;;
     # Print the contiguous comment block after the shebang. Range-proof: no
     # hardcoded line numbers to drift as the header grows.
     -h|--help)   awk 'NR>1 { if (/^#/) print; else exit }' "$0"; exit 0 ;;
@@ -546,9 +554,15 @@ if [ "$DO_REMOTE" = 1 ] && [ "${#_cand_arr[@]}" -gt 1 ] \
   fi
 fi
 
-# Hidden mode: print the remote target this run WOULD use, then exit. Mirrors
-# `--detect-role` above, and exists for the same reason — a decision made inside
-# this script was otherwise unreachable from a test.
+# `--print-remote-target`: print the remote target this run WOULD use, then exit.
+# Mirrors `--detect-role` above — including in being ARGV, which is the property
+# that matters: an env-var version of this is inheritable, and an inherited copy
+# turns an ordinary `ship.sh` into a run that prints an address and exits 0
+# having converged nothing.
+#
+# ⚠ It exits 0 even when NO address answered, because the resolved target is
+# still a fact about what the run would use; the "NO candidate address answered"
+# diagnosis has already gone to stderr. Read both, not the status alone.
 #
 # 🔴 IT EXISTS BECAUSE THE SELECTION ABOVE WAS PROVABLY UNGUARDED. Measured
 # during this PR's round-1 audit: deleting the whole address-selection block
