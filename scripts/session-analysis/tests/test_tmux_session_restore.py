@@ -2003,8 +2003,14 @@ def test_two_saves_in_one_second_do_not_share_a_generation(state, monkeypatch,
     module — patching that would hand a frozen clock to pytest itself.
     """
     import time as _real_time
+    # 🔴 `gmtime` is the one the stamp uses — the stamp is UTC, deliberately, so
+    # that it stays monotonic across a DST fall-back (see `generation_stamp`).
+    # `localtime`/`mktime` are kept only because other call sites still use them;
+    # a stub that omitted `gmtime` is what caught this change, which is the stub
+    # doing its job rather than a reason to reach back for local time.
     monkeypatch.setattr(tsr, "time", types.SimpleNamespace(
         time=lambda: 1757282857.0,
+        gmtime=_real_time.gmtime,
         localtime=_real_time.localtime,
         strftime=_real_time.strftime,
         strptime=_real_time.strptime,
@@ -2080,3 +2086,245 @@ def test_an_empty_plan_still_writes_no_generation(state, monkeypatch, capsys):
     capsys.readouterr()
     assert tsr.list_generations() == before, (
         "an empty plan created a generation — repeated, that evicts real ones")
+
+
+# --------------------------------------------------------------------------- #
+# Audit round 1 (2026-09-09) — four findings, each pinned BEHAVIOURALLY.
+#
+# 🔴 THE FIRST ONE IS A MEASURED DATA LOSS AND IT IS NOT A CLOCK-FIXTURE
+# CURIOSITY. `free_generation_stamp` anchored on a LOCAL-time parse, so inside a
+# DST fall-back the anchor landed behind `now`, `stamp > newest` could never be
+# satisfied, and the fall-through returned an OCCUPIED stamp — destroying a bound
+# session id and its cheat-sheet at rc 0 with nothing printed.
+# --------------------------------------------------------------------------- #
+
+
+def _dst_clock(monkeypatch, now):
+    """Freeze `tsr`'s own `time` at `now`, with the REAL zone-aware functions.
+
+    The zone matters: these tests set TZ explicitly rather than trusting the
+    host's, so they assert the same thing on a CI box in UTC as on the operator's
+    workbench in America/Winnipeg. Without that they would pass vacuously
+    wherever the local zone has no DST.
+    """
+    import time as _real_time
+    monkeypatch.setattr(tsr, "time", types.SimpleNamespace(
+        time=lambda: now,
+        gmtime=_real_time.gmtime,
+        localtime=_real_time.localtime,
+        strftime=_real_time.strftime,
+        strptime=_real_time.strptime,
+        mktime=_real_time.mktime))
+
+
+@pytest.mark.parametrize("tz", ["America/Winnipeg", "UTC"])
+def test_a_generation_stamp_is_monotonic_across_a_DST_fall_back(state, monkeypatch, tz):
+    """🔴 The stamp must not repeat when the LOCAL clock repeats an hour.
+
+    2026-11-01 in America/Winnipeg runs 01:00-01:59 CDT and then 01:00-01:59 CST
+    again. A local-time stamp produces the SAME name for two instants an hour
+    apart, and `list_generations` sorts on that name — so the second save's
+    generation sorts as though it were the first's, and the anchor built from it
+    lands behind `now`.
+
+    Pinned in UTC as well as in the DST zone, so the test cannot pass merely
+    because the runner happens to sit somewhere without DST.
+    """
+    monkeypatch.setenv("TZ", tz)
+    import time as _real_time
+    _real_time.tzset()
+    # 🔴 DERIVED, NOT GUESSED. The first draft used an epoch constant that was
+    # a day off (2026-10-31), so the fixture never entered the repeated hour and
+    # BOTH parametrisations passed at base — a vacuous regression test that read
+    # as coverage. Verified: at these two instants the LOCAL stamps are both
+    # `20261101T010000` (collide) while the UTC stamps are `…T060000` /
+    # `…T070000` (do not).
+    first = 1793512800.0            # 2026-11-01 06:00:00 UTC = 01:00 CDT
+    second = first + 3600           # 2026-11-01 07:00:00 UTC = 01:00 CST
+    a = tsr.generation_stamp(first)
+    b = tsr.generation_stamp(second)
+    assert a != b, (
+        f"two instants an hour apart produced the SAME generation stamp {a!r} "
+        f"in TZ={tz} — one save would overwrite the other")
+    assert b > a, (
+        f"the later instant produced the EARLIER-sorting stamp ({b!r} <= {a!r}) "
+        f"in TZ={tz} — list_generations sorts on the name, so pruning would "
+        "delete the wrong end")
+
+
+@pytest.mark.parametrize("tz", ["America/Winnipeg", "UTC"])
+def test_a_save_inside_a_repeated_local_hour_does_not_destroy_a_generation(
+        state, monkeypatch, capsys, tz):
+    """The data loss end to end through `cmd_save` — an INVARIANT GUARD.
+
+    🔴 LABELLED, NOT COUNTED AS REGRESSION COVERAGE, BECAUSE IT IS **GREEN AT
+    BASE** IN BOTH ZONES — measured, not assumed. The deterministic red-at-base
+    guard for this class is
+    `test_a_generation_stamp_is_monotonic_across_a_DST_fall_back`, which fails at
+    base under `America/Winnipeg`.
+
+    Why this one does not go red at base: with a local-time stamp the two saves
+    DO collide on `20261101T010000`, but the base implementation's anchor then
+    calls `time.mktime` on that ambiguous local string, and glibc's tie-break for
+    a repeated hour is unspecified. In this harness it resolves to the CDT
+    reading, so the anchor steps forward and the second save is handed a free
+    stamp anyway. The round-1 audit measured it going BOTH ways depending on
+    prior calls in the process, and measured the losing direction in the
+    production call sequence — so the loss is real but not deterministic from a
+    test, and a test that pretends otherwise would be flaky rather than
+    protective.
+
+    It stays because it pins the PROPERTY that matters — the first save's bound
+    ids remain recoverable after a save inside the repeated hour — on the real
+    `cmd_save` path, and it will hold that property against any future rework of
+    the stamping. It just must not be read as evidence that the bug is caught.
+    """
+    monkeypatch.setenv("TZ", tz)
+    import time as _real_time
+    _real_time.tzset()
+    first = 1793512800.0            # 01:00 CDT — see the derivation above
+    second = first + 3600           # 01:00 CST, the SAME local wall-clock time
+
+    _dst_clock(monkeypatch, first)
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+
+    _dst_clock(monkeypatch, second)
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    capsys.readouterr()
+
+    lost = _bound_ids(good) - _recoverable_ids(state)
+    assert not lost, (
+        f"{len(lost)} of the first save's bound session ids are no longer "
+        f"recoverable after a save inside the repeated local hour (TZ={tz}) — "
+        "the second save overwrote the first's generation")
+
+
+def test_an_exhausted_stamp_search_REFUSES_instead_of_overwriting(state, monkeypatch):
+    """🔴 The fall-through used to return an OCCUPIED stamp and clobber it.
+
+    A save that fails loudly costs one save. A save that clobbers costs the bound
+    plan it existed to protect. Pinned on the REFUSAL, and on the existing
+    generations surviving it.
+
+    🔴 GETTING THE FIXTURE RIGHT IS THE WHOLE TEST, and the obvious version does
+    NOT reach this path: occupying a contiguous run of stamps does not exhaust
+    the search, because the anchor JUMPS PAST `newest` and the slot after the
+    newest generation is free by definition. Written that way first, and it
+    scored DID NOT RAISE — the guard was unreachable, not working.
+
+    The path is reachable only when the directory holds stamps that this
+    caller's `list_generations` did not see — i.e. another process claimed them
+    between the listing and the claim. That is precisely the race
+    `tmux-post-save.sh` creates by backgrounding `save` with no lock, so it is
+    simulated here by holding the listing empty while the files exist.
+    """
+    state.mkdir(parents=True, exist_ok=True)
+    tsr.generations_dir().mkdir(parents=True, exist_ok=True)
+    now = 1757282857.0
+    for i in range(0, 8):
+        tsr.generation_paths(tsr.generation_stamp(now + i))[0].write_text("[]")
+    survivors_before = sorted(p.name for p in tsr.generations_dir().iterdir())
+    # The stale view: this caller saw an empty directory a moment ago.
+    monkeypatch.setattr(tsr, "list_generations", lambda: [])
+
+    with pytest.raises(RuntimeError) as e:
+        tsr.free_generation_stamp(now, limit=5)
+    assert "REFUSING" in str(e.value), (
+        f"the refusal must say what it refused to do; got {e.value!r}")
+    assert sorted(p.name for p in tsr.generations_dir().iterdir()) == survivors_before, (
+        "the refusing path still modified the generations directory")
+
+
+def test_a_concurrent_save_cannot_take_a_stamp_another_save_claimed(state, monkeypatch):
+    """🟡 `tmux-post-save.sh` backgrounds `save` with NO lock, so this races.
+
+    An `exists()` check cannot close it — both callers see the slot free. The
+    claim is `O_CREAT|O_EXCL`, so the second caller must be handed a DIFFERENT
+    stamp even though nothing was written between the two calls.
+    """
+    state.mkdir(parents=True, exist_ok=True)
+    now = 1757282857.0
+    a = tsr.free_generation_stamp(now)
+    b = tsr.free_generation_stamp(now)
+    assert a != b, (
+        f"two callers in the same second were both handed {a!r} — one save "
+        "would overwrite the other's generation")
+
+
+def test_write_atomic_temp_names_are_per_process(state, monkeypatch, tmp_path):
+    """🟡 A fixed `.tmp` is shared state between two concurrent saves.
+
+    Measured on a fixed name: the second `os.replace` raised FileNotFoundError
+    because the first had already renamed the shared temp away. Asserted by
+    catching the temp name in the act, so it pins the NAME rather than the
+    absence of a crash.
+    """
+    seen = []
+    target = tmp_path / "x.json"
+    real_replace = os.replace
+
+    def spy(src, dst):
+        seen.append(str(src))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(tsr.os, "replace", spy)
+    tsr._write_atomic(target, "hello")
+    assert seen, "the write did not go through os.replace at all"
+    assert str(os.getpid()) in seen[0], (
+        f"the temp name {seen[0]!r} does not carry the pid — two concurrent "
+        "saves would share it")
+
+
+def test_prune_reports_only_what_it_actually_deleted(state, monkeypatch, capsys):
+    """🟡 The unlink OSError was swallowed and the stamp appended regardless.
+
+    Measured: `2 kept (max 1), 1 pruned` while NOTHING had been pruned. A
+    persistent unlink failure gives unbounded growth reported as healthy
+    retention on every save.
+    """
+    state.mkdir(parents=True, exist_ok=True)
+    tsr.generations_dir().mkdir(parents=True, exist_ok=True)
+    for stamp in ("20260101T000001", "20260101T000002"):
+        tsr.generation_paths(stamp)[0].write_text("[]")
+
+    real_unlink = Path.unlink
+
+    def refuse(self, *a, **k):
+        if _GEN_PLAN_RE_TEST.match(self.name):
+            raise PermissionError("read-only mount")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    removed = tsr.prune_generations(keep=1)
+    assert removed == [], (
+        f"prune reported {removed} as removed while every unlink was refused — "
+        "a reassuring count from a pruner wired to nothing")
+    assert len(tsr.list_generations()) == 2, "the fixture did not hold"
+
+
+_GEN_PLAN_RE_TEST = re.compile(r"^restore-plan_\d{8}T\d{6}\.json$")
+
+
+def test_the_shrink_report_never_names_a_file_this_save_just_pruned(
+        state, monkeypatch, capsys):
+    """🟡 `protect=(stamp,)` did not cover `previous_gen`.
+
+    The report tells the operator to restore from the previous generation; at a
+    low cap the same call had already deleted it. This file's own rule is that a
+    warning pointing at the wrong file is worse than no warning.
+    """
+    monkeypatch.setattr(tsr, "KEEP_GENERATIONS", 1)
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    err = capsys.readouterr().err
+
+    m = re.search(r"restore --plan (\S+)", err)
+    assert m, f"the shrink report did not name a recovery command:\n{err}"
+    named = Path(m.group(1))
+    assert named.exists(), (
+        f"the shrink report names {named}, which this same save deleted — a "
+        "dangling recovery command is worse than none")

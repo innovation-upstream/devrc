@@ -47,6 +47,7 @@ Scratchpad codenames come from the canonical scripts/tmux-scratch-slots.sh.
 """
 from __future__ import annotations
 
+import calendar
 import importlib.util
 import json
 import os
@@ -490,9 +491,30 @@ def generations_dir() -> Path:
 
 
 def generation_stamp(when: float | None = None) -> str:
-    """`20260907T221535` for a POSIX timestamp (now, if none)."""
+    """`20260907T221535` for a POSIX timestamp (now, if none). **UTC.**
+
+    🔴 UTC, NOT LOCAL TIME, AND THAT IS LOAD-BEARING — NOT A STYLE CHOICE.
+    Every ordering guarantee in this file rests on the stamp being monotonic,
+    because `list_generations` sorts on the NAME and pruning deletes from the
+    older end. Local time is NOT monotonic: it repeats an hour at every DST
+    fall-back and can step backwards whenever the zone changes.
+
+    MEASURED on this host's own zone (`America/Winnipeg`), 4 of 4 fixtures, in
+    the production call sequence: with a local-time stamp,
+    `free_generation_stamp`'s anchor landed BEHIND `now` inside the repeated
+    hour, `stamp > newest` could then never be satisfied, and the fall-through
+    returned an OCCUPIED stamp. A bound session id and its cheat-sheet were
+    destroyed, rc 0, nothing printed. That is the mutable-file defect this whole
+    file exists to remove, reappearing once a year in the mechanism built to
+    remove it.
+
+    The resurrect-style `%Y%m%dT%H%M%S` shape is kept because it is what the
+    surrounding tooling reads; only the CLOCK changed. Nothing parses these
+    names as local time — `list_generations` compares them as strings and the
+    only parse is the anchor below, which now uses `calendar.timegm` to match.
+    """
     return time.strftime(_GEN_STAMP_FMT,
-                         time.localtime(time.time() if when is None else when))
+                         time.gmtime(time.time() if when is None else when))
 
 
 def generation_paths(stamp: str) -> tuple[Path, Path]:
@@ -526,9 +548,28 @@ def free_generation_stamp(when: float | None = None, limit: int = 60) -> str:
     downstream.
 
     Cost of stepping forward: the generation is misdated by at most `limit`
-    seconds. Past `limit` the caller gets the last candidate and one save
-    overwrites another — a bounded, visible loss, versus a save loop that never
-    returns.
+    seconds.
+
+    🔴 PAST `limit` THIS RAISES. It used to return the last candidate, which
+    silently OVERWROTE an existing generation — measured destroying a bound
+    session id and its cheat-sheet at rc 0 with nothing printed, while
+    `prune_generations` reported `0 pruned`. The docstring called that "a
+    bounded, VISIBLE loss"; it was not visible by any means. A save that fails
+    loudly costs one save; a save that clobbers costs the bound plan that save
+    existed to protect, which is the entire subject of this file. So the trade
+    is inverted deliberately: raise, and let the caller's failure be seen.
+
+    🔴 THE FREE-CHECK AND THE CLAIM ARE ONE ATOMIC OPERATION (`O_CREAT|O_EXCL`),
+    NOT `exists()` THEN WRITE. `scripts/tmux-post-save.sh` launches `save`
+    BACKGROUNDED AND DISOWNED WITH NO LOCK, so a manual save genuinely races the
+    15-minute continuum hook — the race this function's first paragraph names.
+    An `exists()` test cannot close it: both processes see the slot free, both
+    return the same stamp, and then they interleave over fixed temp names.
+    Measured with a two-process interleaving: `FileNotFoundError` out of
+    `os.replace`, a generation holding one process's bytes under the other's
+    rename, and `FileExistsError` out of `os.symlink`. Creating the plan file
+    exclusively makes the winner unambiguous and the loser step to the next
+    second.
     """
     base = time.time() if when is None else when
     present = list_generations()
@@ -543,19 +584,37 @@ def free_generation_stamp(when: float | None = None, limit: int = 60) -> str:
     # the clock is; the loop below then only has to resolve occupancy.
     if newest:
         try:
-            base = max(base, time.mktime(time.strptime(newest, _GEN_STAMP_FMT)) + 1)
+            # `calendar.timegm`, not `time.mktime` — the stamp is UTC now, and
+            # `mktime` would reinterpret it as local, shifting the anchor by the
+            # UTC offset and (inside a DST fall-back) landing it BEHIND `now`.
+            base = max(base, calendar.timegm(time.strptime(newest, _GEN_STAMP_FMT)) + 1)
         except ValueError:
             # An unparseable name cannot have come from `generation_stamp`, and
             # `_GEN_PLAN_RE` already rejects the wrong SHAPE — so this is a
             # well-shaped impossible date. Leave the base alone and let the
             # step loop do what it can rather than crash the save.
             pass
-    stamp = generation_stamp(base)
-    for i in range(1, limit + 1):
-        if stamp > newest and not generation_paths(stamp)[0].exists():
-            return stamp
+    generations_dir().mkdir(parents=True, exist_ok=True)
+    for i in range(limit + 1):
         stamp = generation_stamp(base + i)
-    return stamp
+        if stamp <= newest:
+            continue
+        try:
+            # The CLAIM. Succeeds for exactly one racer; the other gets EEXIST
+            # and steps. The empty file it leaves is overwritten by the caller's
+            # `_write_atomic` a moment later.
+            fd = os.open(generation_paths(stamp)[0],
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return stamp
+    raise RuntimeError(
+        f"could not claim a free generation stamp newer than {newest!r} within "
+        f"{limit}s of {generation_stamp(base)!r}. REFUSING rather than "
+        f"overwriting an existing generation — the previous plan and its bound "
+        f"session ids are intact. Check {generations_dir()} for a clock jump or "
+        f"a stuck concurrent save.")
 
 
 def list_generations() -> list[str]:
@@ -586,10 +645,27 @@ def _write_atomic(path: Path, text: str) -> None:
     otherwise apply to every generation as it is created. `os.replace` is atomic
     within a directory, so a reader sees either the old file or the whole new
     one, never a half.
+
+    🔴 THE TEMP NAME CARRIES THE PID. A fixed `.tmp` is shared state between two
+    concurrent saves — and they DO run concurrently, because
+    `scripts/tmux-post-save.sh` backgrounds and disowns `save` with no lock.
+    Measured with a two-process interleaving on a fixed name: the second
+    `os.replace` raised `FileNotFoundError` (the first had already renamed the
+    shared temp away), and the surviving generation held one process's bytes
+    under the other's rename. Per-process names make the two writes independent.
     """
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except BaseException:
+        # Do not leave this run's temp behind on failure: it does not match
+        # `_GEN_PLAN_RE`, so `prune_generations` would never reap it.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _point_at(link: Path, target: Path) -> None:
@@ -603,7 +679,11 @@ def _point_at(link: Path, target: Path) -> None:
     pre-generations writer), and rename replaces either without a window in
     which the pointer is missing.
     """
-    tmp = link.with_name(link.name + ".new")
+    # 🔴 PER-PROCESS, for the same reason as `_write_atomic`: with a fixed
+    # `.new` name a concurrent save raised `FileExistsError` out of `os.symlink`
+    # — measured. The unlink-then-symlink pair is not atomic, so two processes
+    # sharing the name interleave between them.
+    tmp = link.with_name(f"{link.name}.{os.getpid()}.new")
     if os.path.lexists(tmp):        # lexists: a DANGLING leftover link is still there
         os.unlink(tmp)
     os.symlink(os.path.relpath(target, link.parent), tmp)
@@ -647,6 +727,16 @@ def prune_generations(keep: int | None = None,
     file `restore-plan.json` points at, leaving a DANGLING pointer and no
     current plan. Refusing to delete a protected stamp makes that unreachable
     regardless of how the ordering argument is disturbed.
+
+    🔴 A STAMP IS REPORTED REMOVED ONLY IF ITS PLAN FILE ACTUALLY WENT. The
+    unlink `OSError` used to be swallowed and the stamp appended regardless, so
+    the line `cmd_save` prints was internally contradictory — measured
+    `2 kept (max 1), 1 pruned` while NOTHING had been pruned. Worse than a wrong
+    number: a PERSISTENT unlink failure (a read-only remount, an immutable flag,
+    a permissions change) gives unbounded growth reported as healthy retention on
+    every single save — a reassuring count from a pruner wired to nothing.
+    A missing cheat-sheet is NOT a failure: `list_generations` keys on the plan
+    file, so a stamp with no cheat-sheet beside it is already half-gone.
     """
     keep = KEEP_GENERATIONS if keep is None else keep
     stamps = list_generations()
@@ -655,11 +745,17 @@ def prune_generations(keep: int | None = None,
     for stamp in doomed:
         if stamp in protect:
             continue
-        for p in generation_paths(stamp):
-            try:
-                p.unlink()
-            except OSError:
-                pass
+        gplan, gcheat = generation_paths(stamp)
+        try:
+            gplan.unlink()
+        except FileNotFoundError:
+            pass                    # already gone: the outcome we wanted
+        except OSError:
+            continue                # still there — do NOT claim it was pruned
+        try:
+            gcheat.unlink()
+        except OSError:
+            pass                    # not what `list_generations` counts
         removed.append(stamp)
     return removed
 
@@ -736,7 +832,19 @@ def cmd_save() -> int:
     _write_atomic(gcheat, cheat_sheet(plan))
     _point_at(PLAN, gplan)
     _point_at(CHEAT, gcheat)
-    pruned = prune_generations(protect=(stamp,))
+    # 🔴 PROTECT THE PREVIOUS GENERATION TOO, NOT JUST THE NEW ONE. The shrink
+    # report below names `previous_gen` as the thing to restore from, and with
+    # `protect=(stamp,)` this very call could delete it first — measured at
+    # KEEP_GENERATIONS=1: the report named a path whose `exists()` was False.
+    # This file's own rule is that a warning pointing at the wrong file is worse
+    # than no warning, and lowering the cap is the natural response to disk
+    # pressure, so the reachable-today argument is not a defence.
+    protected = (stamp,)
+    if previous_gen is not None:
+        m = _GEN_PLAN_RE.match(previous_gen.name)
+        if m:
+            protected += (m.group(1),)
+    pruned = prune_generations(protect=protected)
 
     n_ledger = sum(1 for e in plan if e.get("bind_source") == "ledger")
     n_fuzzy = sum(1 for e in plan if e.get("bind_source") == "fuzzy")
