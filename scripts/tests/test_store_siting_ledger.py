@@ -460,9 +460,20 @@ def _is_disk_rooted_store_expr(node: ast.AST) -> bool:
     that reaches `api.append_bullet` -> `_replace_bytes` and its two in-request
     fsyncs, i.e. exactly the flake population this file exists to shrink — left the
     ledger at **23 passed** and the api file at **760 passed**. The type gate is gone;
-    the flow gate is what does the discriminating, and it already ruled out round 3's
-    `(tmp_path / name).write_text(body)` false positive on its own
-    (`test_a_path_that_is_never_used_as_a_store_still_does_NOT_count` is the control).
+    the flow gate is what does the discriminating.
+
+    🔴 AND THE WIDENING SHIPPED WITH NO TEST — THE ONE DEFECT THIS MODULE'S WHOLE
+    PREMISE IS THAT A HAND MEASUREMENT CANNOT COVER. The first version of this
+    paragraph cited `test_a_path_that_is_never_used_as_a_store_still_does_NOT_count`
+    as the control that "already ruled out" round 3's false positive; that test's
+    probes are `ast.Constant` operands to the last one, as were both probes in
+    `test_the_census_can_actually_SEE_a_disk_rooted_site`. So restoring BOTH
+    `isinstance` gates verbatim — reverting this entire widening — left the file at
+    **23 passed**, and the measurement above was the only thing that had ever
+    exercised it. `test_the_operand_NODE_TYPE_is_not_what_decides_either` is the
+    regression coverage now: four non-Constant spellings across both arms, counted
+    when they flow into a consumer and 0 when they do not, and each half watched red
+    on its own mutant.
 
     ⚠ THE WIDENING IS NOT A GENERAL "ANY STORE ROOT" CLAIM — READ THE RESIDUAL. The
     left operand must still be the NAME `tmp_path`, and the expression must still be a
@@ -1187,6 +1198,96 @@ def test_a_path_that_is_never_used_as_a_store_still_does_NOT_count():
         f"counted {_count_disk_rooted(probe)} store roots in a module with none. A "
         "cache dir, a scratch file and a non-consumer call are not stores, and "
         "demanding store_root() for them is the false accusation round 3 measured."
+    )
+
+
+def test_the_operand_NODE_TYPE_is_not_what_decides_either():
+    """🔴 THE WIDENING THAT DELETED THE `isinstance` GATES HAD NO TEST AT ALL.
+
+    Both arms of `_is_disk_rooted_store_expr` used to require the operand to be an
+    `ast.Name` or an `ast.Constant` before the flow gate was ever consulted, so
+    `tmp_path / f"store-{k}"` and `tmp_path.joinpath("store" + k)` were uncounted no
+    matter where they flowed. The gates were deleted and the widening was measured BY
+    HAND in a commit message — in the module whose entire premise is that a hand
+    measurement is not coverage. MEASURED at the moment this test was written:
+    restoring BOTH gates verbatim left this file at **23 passed**, because every
+    existing probe uses an `ast.Constant` operand. Nothing in the repo went red.
+
+    ⚠ READ WHAT THIS PINS AND WHAT IT DOES NOT. It pins the OPERAND'S NODE TYPE, in
+    both arms, in both directions: four non-Constant, non-Name spellings that flow
+    into a consumer must be COUNTED, and the same spellings that flow nowhere must
+    stay 0. It says nothing about the left operand — that must still be the NAME
+    `tmp_path` — and nothing about any of the residual holes the census docstring
+    enumerates. The negative half is not decoration: widening the operand type
+    without the flow gate doing the discriminating re-creates round 3's false
+    accusation, `(tmp_path / name).write_text(body)` for a scratch file, in the
+    spelling an f-string produces.
+
+    Watched red, both halves, `__pycache__` cleared between mutants:
+
+      * restore both `isinstance` gates -> the four COUNTED probes report 0 and this
+        test fails on its own message; the four UNCOUNTED probes still pass.
+      * make the flow gate accept everything (`_used_as_a_store_root` -> `True`) ->
+        the four UNCOUNTED probes report 1 and this test fails on its own message;
+        the four COUNTED probes still pass.
+    """
+    # Each spelling appears TWICE: once flowing into `_build_store`, once flowing
+    # nowhere. The pair is what separates "the type gate is gone" from "the predicate
+    # now says yes to everything", and only the pair can.
+    counted = {
+        "f-string, `/` arm": (
+            "def test_probe(tmp_path, k, s):\n"
+            "    _build_store(tmp_path / f'store-{k}', s)\n"
+        ),
+        "concatenation, `/` arm": (
+            "def test_probe(tmp_path, k, s):\n"
+            "    _build_store(tmp_path / ('store-' + k), s)\n"
+        ),
+        "call, `/` arm": (
+            "def test_probe(tmp_path, k, s):\n"
+            "    _build_store(tmp_path / k.lower(), s)\n"
+        ),
+        "subscript, joinpath arm": (
+            "def test_probe(tmp_path, names, s):\n"
+            "    _build_store(tmp_path.joinpath(names[0]), s)\n"
+        ),
+    }
+    uncounted = {
+        "f-string, `/` arm": (
+            "def test_probe(tmp_path, i, b):\n"
+            "    (tmp_path / f'scratch-{i}').write_text(b)\n"
+        ),
+        "concatenation, `/` arm": (
+            "def test_probe(tmp_path, i, b):\n"
+            "    (tmp_path / ('scratch-' + i)).write_text(b)\n"
+        ),
+        "call, `/` arm": (
+            "def test_probe(tmp_path, i, b):\n"
+            "    (tmp_path / i.lower()).write_text(b)\n"
+        ),
+        "subscript, joinpath arm": (
+            "def test_probe(tmp_path, names, b):\n"
+            "    tmp_path.joinpath(names[0]).write_text(b)\n"
+        ),
+    }
+    # Named individually rather than totalled: a single number would let three of the
+    # four regress unnoticed behind one that still works.
+    blind = {k: _count_disk_rooted(v) for k, v in counted.items()}
+    blind = {k: n for k, n in blind.items() if n != 1}
+    assert not blind, (
+        f"these store roots flow straight into `_build_store` and are counted "
+        f"{blind} instead of 1. The operand's NODE TYPE is deciding again — an "
+        "f-string, a concatenation, a call or a subscript is an ordinary spelling of "
+        "a store directory, and a write-path store spelled that way is exactly the "
+        "fsync-contention population this file exists to shrink."
+    )
+    false_alarms = {k: _count_disk_rooted(v) for k, v in uncounted.items()}
+    false_alarms = {k: n for k, n in false_alarms.items() if n != 0}
+    assert not false_alarms, (
+        f"these scratch files flow into no store consumer at all and are counted "
+        f"{false_alarms} instead of 0. Flowing into a consumer is the whole "
+        "discriminator; without it the widened operand type re-creates round 3's "
+        "false accusation, demanding store_root() for a file that is not a store."
     )
 
 
