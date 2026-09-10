@@ -3629,12 +3629,33 @@ in
         #     prevent. The two agree today; they are not the same mechanism.
         #   * the LAPTOP leg gets no such guard — session-manager reaches it over
         #     ssh through the remote login shell, which sources .zshenv only, and
-        #     nothing in devrc sets TMUX_TMPDIR there. It works because the
-        #     laptop's socket is in /tmp. If the laptop ever acquires this host's
-        #     arrangement it silently reports zero windows — and `tmux` says "no
-        #     server running", which session-manager maps to reachable:true AND
-        #     windows_measured:TRUE, so the torn-collection gate in the pusher
-        #     cannot catch it either. Only an env pin on that side would.
+        #     nothing in devrc sets TMUX_TMPDIR there. The failure shape stands:
+        #     if that leg cannot find the socket it silently reports zero
+        #     windows — `tmux` says "no server running", which session-manager
+        #     maps to reachable:true AND windows_measured:TRUE, so the
+        #     torn-collection gate in the pusher cannot catch it either. Only an
+        #     env pin on that side would.
+        #
+        #     🔴 BUT THE REASON IT WORKS TODAY IS NOT THE ONE THIS COMMENT USED
+        #     TO GIVE, AND THE OLD REASON WAS MEASURED FALSE 2026-09-09. It said
+        #     "It works because the laptop's socket is in /tmp", and predicted
+        #     that acquiring this host's arrangement would break it. The laptop
+        #     HAS this host's arrangement: /tmp/tmux-1000 DOES NOT EXIST, the
+        #     socket is /run/user/1000/tmux-1000/default, and the server's own
+        #     environ carries TMUX_TMPDIR=/run/user/1000. By the old reasoning
+        #     the leg should therefore be reporting zero. It is not — measured
+        #     over the exact path session-manager uses (non-interactive ssh):
+        #     TMUX_TMPDIR=/run/user/1000 is present and `tmux list-windows -a`
+        #     returned 29 windows.
+        #
+        #     It works because TMUX_TMPDIR is in the ssh session environment —
+        #     and `grep -c TMUX_TMPDIR ~/.zshenv` on the laptop is 0, so devrc
+        #     is still not what sets it. That is the SAME undeclared runtime
+        #     state this comment flags two paragraphs up: a fact about this
+        #     boot, not a property of the configuration. So the laptop leg is
+        #     unguarded for the reason stated, but the hazard is currently
+        #     masked rather than absent — do not read "it works" as "it is
+        #     pinned", and do not restore the /tmp explanation.
         # `%t` is the user runtime dir (/run/user/UID).
         # Pinned by `test_the_unit_gives_tmux_its_SOCKET_directory`.
         "TMUX_TMPDIR=%t"
