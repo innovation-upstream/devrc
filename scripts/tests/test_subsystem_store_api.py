@@ -19470,21 +19470,46 @@ class TestTheStoreIsSitedOffTheContendedDisk:
     exactly what stops anyone looking. What the census actually reads is a
     `tmp_path / X` or `tmp_path.joinpath(X)` expression that flows into a store
     consumer within one function scope AND THROUGH A BINDING FORM ITS `_assignments`
-    RESOLVES. The holes, each measured: a root bound in a `@pytest.fixture` and served
-    in a test that requests it (two live instances, named in
-    `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted`); a root not spelled
-    off the NAME `tmp_path` at all — `Path(tmp_path) / "store"`, an alias
-    `base = tmp_path`, `os.path.join(...)`, `str(tmp_path) + "/store"`,
-    `tmp_path_factory.mktemp(...)`; a root reaching a consumer whose name is not in
-    `_ROOT_CONSUMERS`, which that set's own comment records as growth it cannot close;
-    and — 🔴 THE ONE THIS ENUMERATION MISSED, AND IT IS NONE OF THE OTHER THREE — a
-    root reaching a REAL consumer, in ONE function scope, with no fixture involved,
-    through a binding the census does not resolve: a dict or list ELEMENT
-    (`running(stores['a'])`), a `for` or comprehension TARGET, or a CLOSURE. Measured
-    at 0 each against an inline control of 1; the numbers are in
-    `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s fourth residual
-    bullet. "WITHIN ONE FUNCTION SCOPE" is what this sentence used to say, full stop,
-    and that is wider than the code by exactly this set.
+    RESOLVES.
+
+    🔴 THE HOLES, AND WHICH OF THEM A TEST RE-MEASURES ON EVERY RUN. This list used to
+    say "each measured and each pinned by a named guard over there rather than left to
+    be rediscovered as news", and that was true of ONE of them. The distinction is the
+    whole value of the sentence: a hole a guard re-measures cannot silently close or
+    widen, and a hole only written down can do both while every suite stays green. So
+    the label comes first, and it is checked rather than asserted:
+
+      * PINNED — a root bound in a `@pytest.fixture` and served in a test that
+        requests it. `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted`
+        runs every time, asserts 0 for both the plain and the tuple-returning fixture
+        form against an inline control of 1, and names two live instances here
+        (`served = tmp_path / "ordered-served"` in `shuffled_pair`, `served =
+        tmp_path / "ambig-served"` in `ambiguous_pair` — both verified present).
+      * ONLY WRITTEN DOWN — a root not spelled off the NAME `tmp_path` at all:
+        `Path(tmp_path) / "store"`, an alias `base = tmp_path`,
+        `os.path.join(...)`, `str(tmp_path) + "/store"`,
+        `tmp_path_factory.mktemp(...)`. NO TEST ANYWHERE exercises any of these —
+        every occurrence of those spellings in `test_store_siting_ledger.py` is
+        inside a docstring. The 0s were measured by hand and nothing re-measures
+        them, so this hole can close (the predicate widens and sites appear
+        uncounted-but-visible) or widen with the suite green.
+      * ONLY WRITTEN DOWN — a root reaching a consumer whose name is not in
+        `_ROOT_CONSUMERS`. Its own clause says it: recorded by "that set's own
+        comment", which is a comment, not a guard. The `serve_store(served)` -> 0
+        control that comment cites appears once in that file, in the comment itself.
+      * ONLY WRITTEN DOWN — 🔴 AND THIS ONE WAS MISSING FROM THE LIST ENTIRELY, WHICH
+        IS THE SAME DEFECT ONE LEVEL UP. A root reaching a REAL consumer, in ONE
+        function scope, with no fixture involved, through a binding the census does
+        not resolve: a dict or list ELEMENT (`running(stores['a'])`), a `for` or
+        comprehension TARGET, or a CLOSURE. Measured 0 each against an inline control
+        of 1; the numbers are in
+        `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s fourth residual
+        bullet.
+
+    So: one hole of four is guarded. "WITHIN ONE FUNCTION SCOPE" is what the sentence
+    above used to say, full stop, and that is wider than the code by the fourth
+    bullet — twice now a fix round's own explanatory sentence has been the next
+    round's defect, so read this one at the width its code has.
 
     Neither half is the guard. The pair is — and the pair is still not everything.
     """

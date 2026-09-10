@@ -884,21 +884,29 @@ def test_the_disk_rooted_census_matches_the_allowlist_EXACTLY():
     ⚠ IT IS A CLAIM ABOUT WHAT THE PREDICATE CAN SEE, WHICH IS NARROWER THAN "every
     store root in these files" — SAY THE WHOLE RESIDUAL, NOT ONE HOLE OF IT. This
     paragraph used to name only the fixture case, which made it read as the complete
-    list. The full set, each half measured:
+    list. The full set — and ONE OF THE FOUR IS PINNED BY A GUARD, the other three are
+    written down and nothing re-measures them on any run. That distinction is the
+    point: a hole a guard re-measures cannot silently close or widen; a hole only
+    written down can do both with the suite green.
 
-      * a root bound inside a `@pytest.fixture` and served in a test that requests it
-        crosses a scope boundary the AST cannot follow —
-        `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted` pins it, and two
-        live instances are named there;
-      * a root not spelled `tmp_path / X` or `tmp_path.joinpath(X)` at all —
-        `Path(tmp_path) / "store"`, an alias `base = tmp_path`, `os.path.join(...)`,
-        `str(tmp_path) + "/store"`, `tmp_path_factory.mktemp(...)`. Each measured 0,
-        both before and after this round's widening of the operand type;
-      * a root that reaches its consumer through a call the flow arm does not model —
-        `_ROOT_CONSUMERS` closes renames and not GROWTH into a new consumer name,
-        which its own comment records;
-      * 🔴 a root that reaches its consumer WITHIN ONE FUNCTION SCOPE but not through
-        a binding form `_assignments` resolves. The three bullets above did NOT cover
+      * PINNED. A root bound inside a `@pytest.fixture` and served in a test that
+        requests it crosses a scope boundary the AST cannot follow —
+        `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted` asserts 0 on both
+        fixture forms against an inline control of 1, and two live instances are
+        named there;
+      * ONLY WRITTEN DOWN. A root not spelled `tmp_path / X` or `tmp_path.joinpath(X)`
+        at all — `Path(tmp_path) / "store"`, an alias `base = tmp_path`,
+        `os.path.join(...)`, `str(tmp_path) + "/store"`,
+        `tmp_path_factory.mktemp(...)`. Each measured 0 by hand, both before and after
+        this round's widening of the operand type, and every occurrence of those
+        spellings in this file is inside a docstring — no test exercises one;
+      * ONLY WRITTEN DOWN. A root that reaches its consumer through a call the flow
+        arm does not model — `_ROOT_CONSUMERS` closes renames and not GROWTH into a
+        new consumer name, which its own COMMENT records, including the
+        `serve_store(served)` -> 0 measurement. A comment is not a guard;
+      * ONLY WRITTEN DOWN. 🔴 A root that reaches its consumer WITHIN ONE FUNCTION
+        SCOPE but not through a binding form `_assignments` resolves. The three
+        bullets above did NOT cover
         this and the list read as complete — the fixture bullet is a scope boundary,
         the spelling bullet is not `tmp_path / X`, the consumer bullet is a name
         outside `_ROOT_CONSUMERS`, and each of these is none of those. Measured, all
