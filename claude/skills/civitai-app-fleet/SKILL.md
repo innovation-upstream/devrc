@@ -120,14 +120,21 @@ A 200 says the app serves, not that **your** build serves. To claim a change is
 live, show the artefact MOVED and the change is in it — grep the served JS:
 
 ```bash
-SLUG=playable-collections
-B=$(curl -sS "https://$SLUG.civit.ai/" | command grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' | head -1)
+APP="https://<slug>.civit.ai"                      # substitute the slug ONCE, here
+B=$(curl -sS "$APP/" | command grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' | head -1)
 echo "$B"                                          # must DIFFER from the previous release's
-curl -sS "https://$SLUG.civit.ai/$B" > /tmp/b.js
+curl -sS "$APP/$B" > /tmp/b.js
 for t in a-testid-you-expect a-testid-you-retired; do
   printf '%-28s %s\n' "$t" "$(command grep -oF -- "\`$t\`" /tmp/b.js | wc -l)"
 done
 ```
+
+⚠ `<slug>` rather than a shell variable you set: this repo is PUBLIC, and
+`scripts/testlib/client_host_scan.py` strips the `$` off a `$VAR`-prefixed host
+and reads the result as a client SUBDOMAIN — so that spelling fails
+`test_no_client_hostnames.py`. (Writing the failing form here, even as an
+example, fails it too — this note is why.) Keep the URL **inside double
+quotes**: there `<` and `>` are literal, not redirections.
 
 🔴 **Two ways that grep returns a confident ZERO, and both read as a pass.**
 
