@@ -88,6 +88,13 @@
 #   PYTEST_CURRENT_TEST   read, not set: its presence means "we are running
 #                         inside a pytest process", which suppresses the re-exec
 #                         so a nested run cannot re-enter `nix develop`.
+#   DEVRC_GATE_ALLOW_AMBIENT
+#                         =1 suppresses the gate-weakening-variable refusal
+#                         below. It exists ONLY so this repo's own tests can
+#                         drive the DEVRC_GATE_*_RUNNER seam deliberately. It is
+#                         NOT a way to run a real gate: with it set, a replaced
+#                         runner can print `RESULT: PASS` having run nothing and
+#                         this script will believe it.
 #
 # Exit: 0 = every selected tier passed and agreed with its own content, and
 #           every tier reported `SCOPE: FULL`.

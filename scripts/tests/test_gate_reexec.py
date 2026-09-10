@@ -56,6 +56,11 @@ _AMBIENT_GATE_VARS = (
     "DEVRC_GATE_REEXEC",
     "DEVRC_GATE_PYTEST_RUNNER",
     "DEVRC_GATE_NODE_RUNNER",
+    # Suppresses gate.sh's gate-weakening-variable refusal. Scrubbed like
+    # the rest: a test that inherited it from the ambient shell would be
+    # driving a gate whose refusal is silently off, which is the one
+    # condition none of these tests could then observe.
+    "DEVRC_GATE_ALLOW_AMBIENT",
 )
 
 
@@ -69,11 +74,18 @@ def _fake_runner(path: Path, *, verdict: str = "PASS") -> Path:
     # is structurally invisible to the tier most people run. This file arrived
     # carrying it and test_runtime_shebangs.py caught it on the first sandbox
     # run, which is that guard working.
+    # 🔴 The `SCOPE:` line is part of the runner contract this fixture models.
+    # gate.sh requires to SEE `SCOPE: FULL` before it may print a gate PASS —
+    # a POSITIVE control, so a runner saying nothing about its coverage is
+    # "cannot vouch" (exit 91) rather than "ran everything". A fixture that
+    # omitted it would model a runner that cannot exist, and every re-exec
+    # assertion below would be reading a 91 instead of the 0 it expects.
     return write_exec(
         path,
         textwrap.dedent(
             f"""\
             echo "======== FAKE SUMMARY ========"
+            echo "SCOPE: FULL (fake runner: models a whole-suite run)"
             echo "RESULT: {verdict} (exit={rc})"
             exit {rc}
             """
@@ -105,6 +117,10 @@ def _reexec_env(tmp_path: Path, bindir: Path, **over: str) -> dict[str, str]:
     runner = _fake_runner(tmp_path / "fake-runner.sh")
     env["DEVRC_GATE_PYTEST_RUNNER"] = str(runner)
     env["DEVRC_GATE_NODE_RUNNER"] = str(runner)
+    # These two ARE gate-weakening variables and gate.sh refuses them; this
+    # suite sets them on purpose to drive the re-exec seam. See gate.sh's
+    # pre-flight block and its `Env:` entry for this escape.
+    env["DEVRC_GATE_ALLOW_AMBIENT"] = "1"
     env.pop("PYTEST_CURRENT_TEST", None)
     env["PATH"] = f"{bindir}:{env['PATH']}"
     env.update(over)
