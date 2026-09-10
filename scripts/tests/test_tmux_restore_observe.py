@@ -703,6 +703,76 @@ def test_capture_post_EMITS_the_verdict_DECIDING_fields_when_the_readers_SUCCEED
     assert "plan_layout_skew_seconds=" in text, text
 
 
+def test_the_plan_mtime_is_the_PLANS_not_the_symlinks(tmp_path):
+    """🔴 GNU `stat` uses lstat, and `$PLAN` is now a SYMLINK.
+
+    `tmux-session-restore.py cmd_save` writes an immutable generation and
+    repoints `restore-plan.json` at it, so every `stat` here reads a link.
+    MEASURED before the `-L` was added: on a link whose target was stamped
+    12:00:00, bare `stat -c '%y'` reported 22:41:47 — the moment the POINTER
+    moved, not when the plan was written. Both facts are timestamps and both
+    render plausibly, so the wrong one is invisible in the output.
+
+    The skew is asserted as an EXACT number rather than as "present": the two
+    candidate answers differ by ~1.8e9 seconds here, so arithmetic separates
+    them and a presence check cannot. Python's `Path.stat()` follows links
+    already, so `plan_staleness_hours` was never affected — this is the shell
+    half only.
+    """
+    obs = tmp_path / "obs"
+    obs.mkdir()
+    (obs / "pre-latest.txt").write_text("boot_time=OLD\ncaptured_at=T0\n")
+    res = tmp_path / "resurrect"
+    res.mkdir()
+    layout = res / "tmux_resurrect_20200101T000000.txt"
+    layout.write_text(
+        "window\talpha\t1\t:devrc\t1\t:*\tL\toff\n"
+        "pane\talpha\t1\t1\t:*\t1\tt\t:/home/u/devrc\t1\tzsh\t:\n"
+    )
+    os.utime(layout, (1, 1))
+
+    # The real on-disk shape: a generations dir plus a pointer into it.
+    gens = tmp_path / "restore-plans"
+    gens.mkdir()
+    gen = gens / "restore-plan_20260907T120000.json"
+    gen.write_text(
+        '[{"session":"alpha","window":"1","cwd":"/home/u/devrc","session_id":"x",'
+        '"bind_source":"ledger"}]'
+    )
+    os.utime(gen, (1001, 1001))
+    plan = tmp_path / "restore-plan.json"
+    plan.symlink_to(gen)
+    assert plan.is_symlink(), "fixture must be a symlink or it tests nothing"
+
+    env = dict(
+        os.environ,
+        PATH=f"{_live_stub_bin(tmp_path)}:{os.environ['PATH']}",
+        TMUX_RESTORE_OBSERVE_DIR=str(obs),
+        TMUX_RESURRECT_DIR=str(res),
+        TMUX_RESTORE_PLAN=str(plan),
+        TMUX_RESTORE_LOG=str(tmp_path / "none.log"),
+    )
+    subprocess.run(["bash", str(SCRIPT), "post"],
+                   capture_output=True, text=True, env=env, timeout=180)
+    text = sorted(obs.glob("post-*.txt"))[-1].read_text()
+
+    assert "plan_layout_skew_seconds=1000" in text, (
+        "the plan/layout skew was not computed from the plan GENERATION's mtime "
+        f"(1001) against the layout's (1) — `stat` read the symlink:\n{text}")
+    m = re.search(r"^plan_mtime=(.*)$", text, re.M)
+    assert m, f"plan_mtime is absent:\n{text}"
+    # Expectation DERIVED from the generation file by the same tool, not a
+    # literal date: epoch 1001 renders as 1969-12-31 or 1970-01-01 depending on
+    # the host's offset, and a hardcoded year is a test that passes in one
+    # timezone. (Measured: `1970-` failed at -0600.)
+    expected = subprocess.run(["stat", "-c", "%y", str(gen)],
+                              capture_output=True, text=True).stdout.strip()
+    assert m.group(1) == expected, (
+        f"plan_mtime={m.group(1)!r} is not the generation's mtime "
+        f"({expected!r}) — `stat` read the SYMLINK, so this reports when the "
+        "pointer was repointed: a different fact wearing the same name")
+
+
 def test_capture_post_EMITS_the_fields_the_verdict_READS(tmp_path):
     """🔴 THE SEAM. `extract` computes the unparsed count and `verdict` prints
     it, and both were pinned — while nothing checked that `capture post` writes
