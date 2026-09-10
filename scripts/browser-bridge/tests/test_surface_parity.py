@@ -33,6 +33,20 @@ guards firing against known-bad input.
 
 This module is part of the hermetic set (``scripts/run-tests.sh``), so it runs
 in ``nix build .#checks.x86_64-linux.pytests`` -- the repo's real pre-merge gate.
+
+🔴 NO SHELL LEXER LIVES HERE ANY MORE. This module used to carry
+``mask_shell_noncode``, a 129-line hand-rolled shell lexer (CODE/SQ/DQ/BQ
+states, a ``$(`` suspend stack, a heredoc queue) whose job was to answer "is
+this byte inside code?" before the dispatch regex ran. Successive audit rounds
+kept finding real over-strips in it and each fix added another branch; the
+defect rate never fell, because the thing being patched was a hand-rolled shell
+lexer. It was deleted on MEASUREMENT, not taste: on the corpus it is pointed at
+it detected nothing the command-position anchor did not already reject. The
+numbers, the two replacement options that were tried and refuted, and the
+residual blind spot are in ``parse_dispatched_ops``'s docstring; the script that
+produced them is `claudedocs/browser-bridge-shell-masker-measurement.py`.
+**If a future round is tempted to reinstate quote/heredoc tracking, run that
+script first and act on what it prints.**
 """
 import re
 import sys
@@ -78,163 +92,85 @@ def parse_subcommands(path: Path = BROWSER_CLI) -> list[str]:
     return m.group(1).split()
 
 
-def mask_shell_noncode(src: str) -> str:
-    """Blank out everything in a shell script that is NOT live code, preserving
-    every byte offset and newline so the result can be regex-scanned positionally.
-
-    Masked: comments, single-/double-quoted strings (INCLUDING multi-line ones),
-    backquoted spans, and heredoc bodies. Command substitutions ``$( … )`` are
-    NOT masked even inside double quotes, because that is real command position
-    -- the CLI genuinely dispatches from there (``resp="$(cmd_op screenshot …)"``).
-
-    WHY. A `cmd_op X` MENTION inside a docstring, heredoc, error message or
-    prose string is not a dispatch of `X`. The first version of this parser
-    matched any line whose first non-space character was not `#`, and harvested a
-    phantom op from a Python docstring on a merged tree (see
-    tests/fixtures/cmd_op_parse_rig.sh for the measurement and the pinned cases).
-
-    Deliberately a small lexer, not a shell parser: it handles the constructs the
-    `browser` CLI actually uses. If it over-masks, the non-empty guard in
-    ``parse_dispatched_ops`` and the exact-set control in
-    ``test_the_dispatch_parser_ignores_mentions_and_keeps_calls`` both fail loudly
-    -- over-tightening cannot pass vacuously.
-    """
-    out = list(src)
-    n = len(src)
-    i = 0
-    state = "CODE"          # CODE | SQ | DQ | BQ
-    substack: list[str] = []  # states suspended by an open `$(`
-    heredocs: list[tuple[str, bool]] = []  # (delimiter, strip_leading_tabs)
-
-    def blank(a: int, b: int) -> None:
-        for k in range(a, min(b, n)):
-            if out[k] != "\n":
-                out[k] = " "
-
-    while i < n:
-        c = src[i]
-
-        if state == "CODE":
-            if c == "\\" and i + 1 < n:
-                i += 2
-                continue
-            # `#` starts a comment only at the start of a word.
-            if c == "#" and (i == 0 or src[i - 1] in " \t\n;&|(<"):
-                j = src.find("\n", i)
-                j = n if j < 0 else j
-                blank(i, j)
-                i = j
-                continue
-            if src.startswith("$(", i):
-                substack.append(state)
-                i += 2
-                continue
-            if c == ")" and substack:
-                state = substack.pop()
-                i += 1
-                continue
-            if c == "'":
-                state = "SQ"
-                blank(i, i + 1)
-                i += 1
-                continue
-            if c == '"':
-                state = "DQ"
-                blank(i, i + 1)
-                i += 1
-                continue
-            if c == "`":
-                state = "BQ"
-                blank(i, i + 1)
-                i += 1
-                continue
-            m = re.match(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", src[i:])
-            if m and not src.startswith("<<<", i):
-                heredocs.append((m.group(3), bool(m.group(1))))
-                i += m.end()
-                continue
-            if c == "\n" and heredocs:
-                i += 1
-                for delim, strip_tabs in heredocs:
-                    while i < n:
-                        eol = src.find("\n", i)
-                        eol = n if eol < 0 else eol
-                        line = src[i:eol]
-                        probe = line.lstrip("\t") if strip_tabs else line
-                        blank(i, eol)
-                        i = min(eol + 1, n)
-                        if probe.strip() == delim:
-                            break
-                heredocs = []
-                continue
-            i += 1
-            continue
-
-        if state == "SQ":
-            if c == "'":
-                state = "CODE"
-            blank(i, i + 1)
-            i += 1
-            continue
-
-        if state == "BQ":
-            if c == "`":
-                state = "CODE"
-            blank(i, i + 1)
-            i += 1
-            continue
-
-        # DQ
-        if c == "\\" and i + 1 < n:
-            blank(i, i + 2)
-            i += 2
-            continue
-        if src.startswith("$(", i):
-            # NOT blanked: `$(` inside double quotes REOPENS command position,
-            # and the `(` is what the command-position regex anchors on. Blanking
-            # it here silently loses `resp="$(cmd_op screenshot "$full")"` -- a
-            # real dispatch (measured: the parser returned 18 ops instead of 19).
-            substack.append("DQ")
-            state = "CODE"
-            i += 2
-            continue
-        if c == '"':
-            state = "CODE"
-            blank(i, i + 1)
-            i += 1
-            continue
-        blank(i, i + 1)
-        i += 1
-
-    return "".join(out)
-
-
 #: A `cmd_op` call in genuine COMMAND POSITION: at the start of a statement, or
 #: immediately after a separator/opening construct. A substring mention such as
 #: "from `cmd_op stderr` it emits" or "usage: cmd_op OP [FIELDS]" is not a call,
 #: and neither is one preceded by a word character or a quote.
 _CMD_OP_CALL = re.compile(r"(?:^|[;&|(]|\bthen\b|\bdo\b|\belse\b)\s*cmd_op\s+([A-Za-z]+)", re.M)
 
+#: A WHOLE-LINE comment. This is the only "is it code?" question this module
+#: asks, and it is the only one it can answer without being wrong: a shell
+#: dispatch can never begin with `#`, so dropping such a line can remove a
+#: MENTION and never a call. There is no over-strip failure mode to audit.
+_COMMENT_LINE = re.compile(r"^[ \t]*#")
+
+
+def _drop_comment_lines(src: str) -> str:
+    """Blank whole-line comments, keeping every other line (and the line count)
+    intact so `_CMD_OP_CALL`'s `^` anchor still means "start of line"."""
+    return "".join(
+        "\n" if _COMMENT_LINE.match(ln) else ln
+        for ln in src.splitlines(keepends=True))
+
 
 def parse_dispatched_ops(path: Path = BROWSER_CLI) -> set[str]:
     """Ops the CLI actually puts on the wire, parsed from its `cmd_op <op>` call
     sites.
 
-    Two independent conditions, both required -- a MENTION of `cmd_op X` is not a
-    dispatch of `X`:
-      1. the occurrence survives ``mask_shell_noncode`` (not in a comment, string
-         or heredoc body), and
+    Two conditions, both required -- a MENTION of `cmd_op X` is not a dispatch
+    of `X`:
+      1. the occurrence is not on a whole-line comment, and
       2. it sits in genuine command position (start of statement, or after
          ``;`` ``&&`` ``||`` ``|`` ``(`` ``$(`` ``then`` ``do`` ``else``).
+
+    🔴 THERE USED TO BE A THIRD, `mask_shell_noncode` -- a 129-line hand-rolled
+    shell lexer (CODE/SQ/DQ/BQ states, a `$(` suspend stack, a heredoc queue).
+    It was DELETED, on measurement rather than on taste. Re-run the numbers
+    before reinstating any of it; the script is
+    `claudedocs/browser-bridge-shell-masker-measurement.py`.
+
+    WHAT WAS MEASURED, on the real `browser` CLI (144 KB, 53 `cmd_op`
+    occurrences of which 25 are prose), as a 2x2 over the two defences:
+
+        masker  anchor   ops parsed
+        ------  ------   ----------
+        on      on       19   <- what shipped
+        OFF     on       19   IDENTICAL, same 19 names
+        on      OFF      19   IDENTICAL, same 19 names
+        OFF     OFF      27   8 junk words: OP, already, can, dispatches,
+                              in, inside, runs, splices
+
+    So on the corpus it is pointed at, the lexer detected NOTHING the
+    command-position anchor did not already reject. Its whole marginal
+    contribution was ONE comment -- `# substitution (`resp="$(cmd_op nav ...)"`)`
+    -- which the anchor accepts (a `$(` precedes) and which the one-line
+    comment filter above now rejects for a reason that cannot be got wrong.
+
+    🔴 WHAT THIS PARSER THEREFORE CANNOT SEE, stated rather than implied: a
+    `cmd_op <word>` mention at the START OF A LINE inside a multi-line quoted
+    string or a heredoc body, and one in a TRAILING comment behind a `(`/`;`.
+    Measured on the CLI today: zero heredocs, zero process substitutions, zero
+    backticks outside comments and strings, and no multi-line quoted block with
+    a `cmd_op` mention in column 0. The CLI's own `python3 -c` docstring near
+    `classify()` documents the wording discipline that keeps it that way.
+    The failure mode if that changes is a PHANTOM op, which
+    ``test_the_classification_matches_what_the_cli_actually_dispatches`` and
+    ``test_the_dispatch_parser_did_not_over_tighten_on_the_real_cli`` both
+    report loudly by name -- it is not a silent hole. That is the trade this
+    deletion accepts, and it is the reason no replacement lexer was written:
+    stdlib `shlex` was tried and MEASURED to lose 8 of the 19 real dispatches
+    (it cannot see `"$(cmd_op ...)"` at all, because a double-quoted span is one
+    token to it), and no real shell parser (`shfmt`, `shellcheck`, a bash
+    grammar) is in this repo's devShell, so using one means a new input to the
+    hermetic pre-merge check for one test's benefit.
     """
-    ops = set(_CMD_OP_CALL.findall(mask_shell_noncode(_read(path))))
+    ops = set(_CMD_OP_CALL.findall(_drop_comment_lines(_read(path))))
     if not ops:
         raise AssertionError(
             f"HARNESS BROKEN: parsed ZERO `cmd_op <op>` dispatch sites from "
             f"{path.name}. Every op-parity assertion in this module would pass "
-            f"vacuously. If the CLI is fine, the command-position regex or the "
-            f"shell masker has been over-tightened -- fix the parser, do not "
-            f"relax the callers.")
+            f"vacuously. If the CLI is fine, the command-position regex has "
+            f"been over-tightened -- fix the parser, do not relax the callers.")
     return ops
 
 
@@ -397,14 +333,26 @@ RIG_REAL_DISPATCHES = {
 def test_the_dispatch_parser_ignores_mentions_and_keeps_calls():
     """A `cmd_op X` MENTION is not a dispatch of `X`.
 
-    RED-FIRST, MEASURED against this rig with the previous parser (which matched
-    any line not starting with `#`): it harvested 7 phantom ops --
-    phantombacktick, phantomdocstring, phantomdq, phantomheredoc,
-    phantommultilinedq, phantomquotedheredoc, phantomsq -- while keeping all 8
-    real ones. The real-world instance was a Python docstring inside a
-    `python3 -c` block on a merged tree, which produced a phantom wire op named
-    `stderr` and a diagnostic that sent the reader hunting for an op that does
-    not exist.
+    RED-FIRST, MEASURED against this rig with the ORIGINAL parser -- a bare
+    `\\bcmd_op\\s+(\\w+)` over every line whose first non-space character was not
+    `#`, i.e. NO command-position anchor and NO masking. It harvested 11 phantom
+    ops while keeping all 8 real ones. The real-world instance was a Python
+    docstring inside a `python3 -c` block on a merged tree, which produced a
+    phantom wire op named `stderr` and a diagnostic that sent the reader hunting
+    for an op that does not exist.
+
+    🔴 THE RIG NO LONGER CARRIES ALL 11, and that is deliberate. 5 of them
+    (phantomdocstring, phantomheredoc, phantommultilinedq, phantomquotedheredoc,
+    phantomsqblock) were rejected ONLY by `mask_shell_noncode`, the hand-rolled
+    shell lexer this module used to carry. That lexer was deleted after a
+    measurement showed it rejected NOTHING on the real CLI that the
+    command-position anchor did not already reject (see
+    ``parse_dispatched_ops``'s docstring for the 2x2, and
+    `claudedocs/browser-bridge-shell-masker-measurement.py` to re-run it).
+    Keeping their cases here would pin a behaviour this module no longer has --
+    a test for deleted code, which is not coverage. The 6 the anchor owns stay,
+    and `phantomcommentsubst` was ADDED because it is the one shape the deleted
+    lexer really was catching on the live CLI.
     """
     got = parse_dispatched_ops(RIG)
     leaked = sorted(o for o in got if o.startswith("phantom"))
@@ -433,8 +381,17 @@ def test_the_dispatch_parser_did_not_over_tighten_on_the_real_cli():
     pin the shapes the CLI actually uses -- in particular `screenshot`, which is
     dispatched from inside a command substitution nested in double quotes
     (`resp="$(cmd_op screenshot "$full")"`). MEASURED: an earlier version of the
-    masker blanked the `$(` and lost exactly that one op, 19 -> 18, while every
-    other test in this file stayed green.
+    now-deleted shell masker blanked the `$(` and lost exactly that one op,
+    19 -> 18, while every other test in this file stayed green. The op count is
+    19 and has been 19 under every version of the parser measured.
+
+    🔴 This is also where a PHANTOM shows up. The parser does not model
+    multi-line quoted strings or heredoc bodies, so a `cmd_op <word>` mention in
+    column 0 inside one would be harvested and reported here as
+    `only-in-CLI=[<word>]`. That is loud and names the offending word; it is not
+    a silent hole. The fix in that case is to reword the mention (the CLI's own
+    `classify()` docstring documents the discipline), not to reintroduce a
+    hand-rolled lexer.
     """
     wire, server_ops, _subs = _inventory()
     dispatched = parse_dispatched_ops()
@@ -444,26 +401,12 @@ def test_the_dispatch_parser_did_not_over_tighten_on_the_real_cli():
     assert "screenshot" in dispatched, (
         "`screenshot` is dispatched from `resp=\"$(cmd_op screenshot ...)\"` -- a "
         "command substitution nested inside double quotes. Losing it means the "
-        "masker stopped treating `$(` as reopening command position.")
+        "command-position anchor stopped treating `$(` as command position.")
     assert "getHtml" in dispatched, "`getHtml` is dispatched from a plain call site"
     assert dispatched == (wire | server_ops), (
         f"the CLI's real dispatch sites no longer equal server.py's op inventory. "
         f"only-in-CLI={sorted(dispatched - (wire | server_ops))} "
         f"only-in-server={sorted((wire | server_ops) - dispatched)}")
-
-
-def test_the_cli_uses_no_live_backtick_command_substitution():
-    """`mask_shell_noncode` masks backquoted spans conservatively, because the
-    only backticks in the CLI are inside prose comments (113 of them, MEASURED).
-    If a real ```...``` substitution were ever introduced, a dispatch inside it
-    would be silently masked away -- so pin the assumption rather than leave it
-    implicit."""
-    masked = mask_shell_noncode(_read(BROWSER_CLI))
-    assert "`" not in masked, (
-        "the `browser` CLI now contains a backtick OUTSIDE a comment/string. "
-        "mask_shell_noncode treats backquoted spans as non-code, so a `cmd_op` "
-        "dispatch inside one would be silently dropped. Rewrite it as $( ) or "
-        "teach the masker about backtick substitution.")
 
 
 def test_the_parsed_inventory_is_non_empty_and_plausible():

@@ -1177,10 +1177,14 @@ def classify(text):
     WORDING IS LOAD-BEARING HERE: the dispatch helper is named in BACKTICKS with
     a word BEFORE it, never followed directly by a bare word. The surface-parity
     gate harvests wire ops by matching that helper name followed by whitespace and
-    an identifier, and it skips only lines whose first non-space char is `#` — a
-    docstring line is not one. Prose of the form "<helper> stderr" is therefore
-    harvested as a phantom wire op and reddens the MERGED tree while this branch
-    and the gate branch are each green alone.
+    an identifier, in COMMAND POSITION (start of line, or after a separator such
+    as ; && || | or an opening paren), and it drops only whole-line comments — a
+    docstring line is not one, and it does not model quoted regions at all, so
+    being inside this program body buys nothing. Prose of the form
+    "<helper> stderr" is therefore harvested as a phantom wire op and reddens the
+    MERGED tree while this branch and the gate branch are each green alone.
+    Keeping a word before the backticked name is what defeats the command-position
+    anchor; see claudedocs/browser-bridge-shell-masker-measurement.py.
 
     Order matters: the op-level line is the most specific, then the server body
     that the HTTP branches echo verbatim, then a last-resort token.

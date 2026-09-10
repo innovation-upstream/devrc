@@ -14,6 +14,20 @@
 # turning the gate red with a diagnostic that sent the reader hunting for an op
 # that does not exist. Invisible on either branch alone. The class of bug, not the
 # word `stderr`, is what the cases below pin.
+#
+# 🔴 WHAT THIS RIG DELIBERATELY NO LONGER CONTAINS, and why. Five cases used to
+# live here -- phantommultilinedq (a multi-line double-quoted string),
+# phantomdocstring and phantomsqblock (mentions at column 0 inside a
+# single-quoted `python3 -c` program body), phantomheredoc and
+# phantomquotedheredoc (heredoc bodies, plain and `<<-`-with-quoted-delimiter).
+# Each was rejected ONLY by `mask_shell_noncode`, a 129-line hand-rolled shell
+# lexer that test_surface_parity.py used to carry. That lexer was DELETED after a
+# 2x2 measurement over the real `browser` CLI showed it rejected nothing the
+# command-position anchor did not already reject (19 ops parsed with it, 19
+# without, identical names). Keeping those cases would pin behaviour the parser
+# no longer has. The shapes are named here so the blind spot is on the record;
+# reintroducing them means reintroducing a lexer, so re-run
+# `claudedocs/browser-bridge-shell-masker-measurement.py` first.
 
 # --- MUST be harvested: genuine dispatches, in real command position ---------
 
@@ -42,50 +56,24 @@ die "no answer from the extension -- retry with cmd_op phantomdq in the message"
 
 echo 'inline note: cmd_op phantomsq is a mention, not a call'
 
-# A multi-line DOUBLE-quoted string. The mention below sits at column 0, i.e. in
-# what looks like command position -- only quote tracking rejects it.
-usage_text="
-cmd_op phantommultilinedq OP [EXTRA]
-"
-
-# A multi-line SINGLE-quoted string: the `python3 -c '...'` shape from #278.
-python3 -c '
-def explain(kind):
-    """Docs for the machine-readable cause.
-
-cmd_op phantomdocstring is only ever mentioned here, never dispatched.
-    """
-    return kind
-'
-
-# A heredoc body. Unquoted at the character level, and the mention starts the
-# line, so ONLY heredoc tracking rejects it.
-cat <<EOF
-cmd_op phantomheredoc OP [FIELDS] -- wire format reference
-EOF
-
-# An indented/tab-stripped heredoc with a QUOTED delimiter.
-cat <<-'HELP'
-	cmd_op phantomquotedheredoc -- also only documentation
-HELP
-
 # A backtick-quoted mention inside prose (the exact #278 shape).
 printf '%s\n' "see \`cmd_op phantombacktick\` above"
 
 # --- cases that isolate ONE defence each -------------------------------------
-# The two below exist because a mutation sweep found the corresponding defence
-# was NOT load-bearing on the earlier rig: removing it left the suite green.
+# Each of the two below exists because it is the ONLY case in this rig that the
+# named defence rejects: delete that defence and this line, and only this line,
+# leaks.
 
-# UNQUOTED prose in live command context. Quote/comment/heredoc masking all pass
-# it through untouched -- ONLY the command-position anchor rejects it. (Mutation
+# UNQUOTED prose in live command context. A whole-line comment filter passes it
+# through untouched -- ONLY the command-position anchor rejects it. (Mutation
 # P5, "drop command-position anchoring", survived until this line existed.)
 echo usage: cmd_op phantombareword OP [EXTRA]
 
-# A single-quoted `python3 -c` block containing NO double quotes, with the
-# mention at column 0 -- i.e. in apparent command position. ONLY single-quote
-# masking rejects it. The earlier docstring case was being caught by accident:
-# the `"""` in it toggled double-quote state, so removing single-quote masking
-# left the suite green for the wrong reason. (Mutation P6.)
-python3 -c '
-cmd_op phantomsqblock is mentioned in a single-quoted program body
-'
+# A WHOLE-LINE comment that quotes a dispatch verbatim, so the `$(` inside it
+# puts the mention in apparent command position and the anchor ACCEPTS it --
+# ONLY the whole-line comment filter rejects it. This is not hypothetical: it is
+# the shape of `browser`'s own comment
+#   # substitution (`resp="$(cmd_op nav ...)"`), and a subshell cannot write the
+# which was the single mention the deleted shell lexer really was catching on
+# the live CLI. It is harmless there only because `nav` happens to be a real op.
+# substitution (`resp="$(cmd_op phantomcommentsubst ...)"`), harvested by anchor
