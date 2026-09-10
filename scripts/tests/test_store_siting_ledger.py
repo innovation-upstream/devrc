@@ -237,11 +237,16 @@ def test_every_ledgered_file_IMPORTS_AND_CALLS_the_shared_siting_at_least_once()
     `TESTS / "test_subsystem_store_api.py"` under a docstring that talked about the
     ledger — and it now runs over all three, which is a real widening and still not
     coverage: `_is_disk_rooted_store_expr` sees a `tmp_path / X` or a
-    `tmp_path.joinpath(X)` that flows into a store consumer WITHIN ONE FUNCTION
-    SCOPE, and nothing else. Its own docstring enumerates what that excludes. So the
-    honest statement is that this test's "at least once" weakness is REDUCED by the
-    census over the sites the census can see, and the rest is written down rather
-    than guarded.
+    `tmp_path.joinpath(X)` that flows into a store consumer within one function scope
+    AND THROUGH A BINDING FORM `_assignments` RESOLVES — a dict or list element, a
+    `for` target, a comprehension target and a closure are each in one scope, reach a
+    real consumer, and each measure 0. "Within one function scope, and nothing else"
+    is what this sentence used to say, and it is wider than the code by exactly that
+    set. The enumeration lives in
+    `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s docstring, with the
+    numbers. So the honest statement is that this test's "at least once" weakness is
+    REDUCED by the census over the sites the census can see, and the rest is written
+    down rather than guarded.
     """
     offenders = []
     for name in sorted(EXPECTED_SERVER_TESTS):
@@ -486,6 +491,14 @@ def _is_disk_rooted_store_expr(node: ast.AST) -> bool:
     that RETURNS `tmp_path / "holder"` is counted only when the helper is itself
     CALLED in a store-flowing position, never when pytest injects it as a fixture.
 
+    ⚠ AND THE FLOW GATE IS NARROWER THAN "REACHES A CONSUMER IN THIS FUNCTION" —
+    `_used_as_a_store_root` only says yes to what `_index_store_root_uses` marked, and
+    that walks the binding forms `_assignments` resolves. A root reaching a real
+    consumer, in one scope, through a container ELEMENT (`stores['a']`, `stores[0]`),
+    a `for` or comprehension TARGET, or a CLOSURE measures 0 — enumerated with the
+    numbers in `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s fourth
+    residual bullet, and pinned by nothing.
+
     Quoting and spacing still do not matter: they do not survive parsing.
     """
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and (
@@ -619,9 +632,19 @@ def _assignments(scope: ast.AST):
     🔴 SAY WHICH ONES ARE HERE. A previous revision of this docstring listed four
     shapes as "here" and two of them were not: a helper that RETURNS the root is
     resolved in `_index_store_root_uses` via `flowing_callees`, not by any binding
-    form; and it omitted `ast.withitem`, which the body below does handle. The walrus
-    IS here, but it is an INVARIANT guard rather than regression coverage — it already
-    counted before this function existed, because a consumer's argument is walked
+    form; and it omitted `ast.withitem`, which the body below does handle.
+
+    🔴 AND SAY WHICH ONES ARE NOT, BECAUSE THIS SET IS HALF THE CENSUS'S FLOW REACH.
+    A `for` target and a comprehension target are bindings this does not yield, and a
+    container ELEMENT is not a target at all (`_path_base` returns None for an
+    `ast.Subscript`). Each measures 0 even inside one function scope with a real
+    consumer — enumerated in
+    `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s fourth residual
+    bullet. Widening this function would close them and is deliberately not done here;
+    doing it means re-running the census and recording whatever it starts seeing.
+
+    The walrus IS here, but it is an INVARIANT guard rather than regression coverage —
+    it already counted before this function existed, because a consumer's argument is walked
     recursively, so the nested `tmp_path / name` was reached without the binding ever
     being resolved. `test_the_site_index_sees_the_BINDING_FORMS_a_plain_assignment_is_
     not`'s docstring says the same thing, and the two used to disagree.
@@ -873,7 +896,30 @@ def test_the_disk_rooted_census_matches_the_allowlist_EXACTLY():
         both before and after this round's widening of the operand type;
       * a root that reaches its consumer through a call the flow arm does not model —
         `_ROOT_CONSUMERS` closes renames and not GROWTH into a new consumer name,
-        which its own comment records.
+        which its own comment records;
+      * 🔴 a root that reaches its consumer WITHIN ONE FUNCTION SCOPE but not through
+        a binding form `_assignments` resolves. The three bullets above did NOT cover
+        this and the list read as complete — the fixture bullet is a scope boundary,
+        the spelling bullet is not `tmp_path / X`, the consumer bullet is a name
+        outside `_ROOT_CONSUMERS`, and each of these is none of those. Measured, all
+        in one function scope, all reaching `running` (which IS in `_ROOT_CONSUMERS`),
+        all spelled `tmp_path / 'served'`, no fixture anywhere:
+
+            inline (control)                                              -> 1
+            stores = {'a': tmp_path / 'served'}; running(stores['a'])      -> 0
+            stores = [tmp_path / 'served']; running(stores[0])             -> 0
+            for served in (tmp_path / 'served',): running(served)          -> 0
+            roots = [p for p in (tmp_path / 'served',)]; running(roots[0]) -> 0
+            served = tmp_path / 'served'; def go(): running(served); go()  -> 0
+
+        `_assignments` resolves `Assign` / `AnnAssign` / `NamedExpr` / `withitem` and
+        nothing else, so a `for` target and a comprehension target bind invisibly; and
+        `_path_base` returns None for an `ast.Subscript`, so a container ELEMENT is
+        not a path expression it can name a base for. The closure is the scope arm one
+        level in — `_walk_scope` stops at every nested function, `def go()` included,
+        so it is not only pytest's injection that crosses a boundary. Widening
+        `_assignments` is a separate change and is NOT made here; it is written down
+        rather than guarded, which is the same deal the three bullets above get.
 
     An empty census would therefore NOT prove these files are fully sited, and the
     `test_the_census_can_actually_SEE_a_disk_rooted_site` control below is what stops
@@ -1446,8 +1492,14 @@ def test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted():
     false accusations, and round 3 rejected it for exactly that.
 
     So the honest statement, which replaces the one this PR shipped: the predicate does
-    NOT cover the flow case generally. It covers the flow case WITHIN ONE FUNCTION
-    SCOPE.
+    NOT cover the flow case generally. It covers the flow case within one function
+    scope AND THROUGH A BINDING FORM `_assignments` RESOLVES — the second half was
+    missing from this sentence too, and it is not a technicality: a dict or list
+    element, a `for` target, a comprehension target and a closure all sit inside one
+    function, reach a real consumer, and each measure 0.
+    `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s fourth residual
+    bullet enumerates them with the numbers. Nothing here pins that set; it is written
+    down, not guarded.
     """
     inline = (
         "def test_probe(tmp_path):\n"

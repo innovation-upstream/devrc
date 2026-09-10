@@ -19469,15 +19469,22 @@ class TestTheStoreIsSitedOffTheContendedDisk:
     replacement written for it: a description wider than the implementation, which is
     exactly what stops anyone looking. What the census actually reads is a
     `tmp_path / X` or `tmp_path.joinpath(X)` expression that flows into a store
-    consumer WITHIN ONE FUNCTION SCOPE. The holes, each measured and each pinned by a
-    named guard over there rather than left to be rediscovered as news: a root bound
-    in a `@pytest.fixture` and served in a test that requests it (two live instances,
-    named in `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted`); a root
-    not spelled off the NAME `tmp_path` at all — `Path(tmp_path) / "store"`, an alias
+    consumer within one function scope AND THROUGH A BINDING FORM ITS `_assignments`
+    RESOLVES. The holes, each measured: a root bound in a `@pytest.fixture` and served
+    in a test that requests it (two live instances, named in
+    `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted`); a root not spelled
+    off the NAME `tmp_path` at all — `Path(tmp_path) / "store"`, an alias
     `base = tmp_path`, `os.path.join(...)`, `str(tmp_path) + "/store"`,
-    `tmp_path_factory.mktemp(...)`; and a root reaching a consumer whose name is not
-    in `_ROOT_CONSUMERS`, which that set's own comment records as growth it cannot
-    close.
+    `tmp_path_factory.mktemp(...)`; a root reaching a consumer whose name is not in
+    `_ROOT_CONSUMERS`, which that set's own comment records as growth it cannot close;
+    and — 🔴 THE ONE THIS ENUMERATION MISSED, AND IT IS NONE OF THE OTHER THREE — a
+    root reaching a REAL consumer, in ONE function scope, with no fixture involved,
+    through a binding the census does not resolve: a dict or list ELEMENT
+    (`running(stores['a'])`), a `for` or comprehension TARGET, or a CLOSURE. Measured
+    at 0 each against an inline control of 1; the numbers are in
+    `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY`'s fourth residual
+    bullet. "WITHIN ONE FUNCTION SCOPE" is what this sentence used to say, full stop,
+    and that is wider than the code by exactly this set.
 
     Neither half is the guard. The pair is — and the pair is still not everything.
     """
