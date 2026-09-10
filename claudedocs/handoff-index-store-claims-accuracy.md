@@ -380,24 +380,29 @@ hosts, so 3–7 became 2–6. The claim `index-store-claims-accuracy-2` was take
 and released on completion; a future session claiming rank 2 gets the **cairn-cutover P3**
 item, not the drift one.
 
-1. **Verify the dash premise against the DEPLOYED pod image**, read-only. The whole
-   `seed.sh` guard rests on `/bin/sh` being dash there; that was measured against the
-   `Dockerfile`'s `FROM`, never the running pod.
-   forcing: none
-
-2. **Decide the token allowlist for the 2 remaining local-only entries**
+1. **Decide the token allowlist for the 2 remaining local-only entries**
    (`civitai-app-requests`, `civitai-developer-docs`). `cairn create` answers `not-found`;
    neither scope is in this token's allowlist. Widening it edits the k8s secret and needs a
    pod delete (the token file is read ONCE at startup).
    forcing: none
 
-3. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
+2. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
    **0** occurrences of `policy:` in `service_recon.py` on `origin/main`. 🟡6: `--template`
    over an EXISTING entry prints the first-ever-file template and exits 0 silently,
    destroying an `OPEN:` bullet.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
+- ✅ **THE DASH PREMISE IS TRUE ON THE DEPLOYED POD, AND NO LONGER LOAD-BEARING.**
+  Measured 2026-09-10 against the RUNNING image (`subsystem-store-api:0.8.0`, not
+  the `Dockerfile`): `/bin/sh -> dash` (`/usr/bin/dash`), and its `echo "a\tb"`
+  emits a real TAB. Control: bash emits the literal `a\tb`, so the asymmetry is
+  real and the reading is not a no-op. **But every pod-side emit in `seed.sh` is
+  now `printf`, not `echo`** — `grep -nE "sh -c .*echo"` returns nothing — so the
+  dash-specific behaviour cannot reach the join key any more. The premise held
+  AND the code stopped depending on it; verifying it changed no decision, which
+  is the honest outcome for a `forcing: none` item.
+
 - ✅ **THE CO-TENANT FLAKE IS DIAGNOSED AND FIXED — `devrc#1453` → `eeea9025`. It
   was `git maintenance run --auto --quiet --detach`, never `gc --auto`.**
   Committing spawns it DETACHED, so `subprocess.run` returns when the parent exits
