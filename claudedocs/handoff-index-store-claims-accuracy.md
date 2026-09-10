@@ -387,38 +387,64 @@ item, not the drift one.
    forcing: gate — it reds the sandbox tier non-deterministically, and the only reason
    #1304 merged through it was a human re-running and reading both results.
 
-2. **Decide `cairn-cutover.py` P3.** It invokes `seed.sh` WITHOUT `--allow-overwrite`
-   (`cairn-cutover.py:1379-1382`) over an ADD + SUPERSEDES + MERGED set, where
-   SUPERSEDES/MERGED are BY DEFINITION entries whose pod bytes differ. 🔴 #1304 made this
-   WORSE: the new NAME-CHECK is a SECOND refusal P3 can hit. Either pass the flag or
-   declare P3 dead post-cutover.
-   forcing: regression — a shipped code path that can never complete.
-
-3. **Fix the opencode blindness in `scripts/lib/clawgate_handoff.sh`.** Diagnosed (squash
-   `13775144`), NOT fixed. It reads only `CLAUDE_CODE_SESSION_ID`;
-   `grep -c OPENCODE_SESSION_ID` is **0**. Detached opencode ⇒ exit 3 forever; NESTED
-   opencode inherits the outer Claude session's id ⇒ exit 0 with **another session's
-   tasks**.
-   forcing: regression — the nested path silently misattributes today.
-
-4. **Verify the dash premise against the DEPLOYED pod image**, read-only. The whole
+2. **Verify the dash premise against the DEPLOYED pod image**, read-only. The whole
    `seed.sh` guard rests on `/bin/sh` being dash there; that was measured against the
    `Dockerfile`'s `FROM`, never the running pod.
    forcing: none
 
-5. **Decide the token allowlist for the 2 remaining local-only entries**
+3. **Decide the token allowlist for the 2 remaining local-only entries**
    (`civitai-app-requests`, `civitai-developer-docs`). `cairn create` answers `not-found`;
    neither scope is in this token's allowlist. Widening it edits the k8s secret and needs a
    pod delete (the token file is read ONCE at startup).
    forcing: none
 
-6. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
+4. **Fix `devrc#1170`'s 🟡5 and 🟡6.** Still never started. 🟡5: re-measured 2026-09-04,
    **0** occurrences of `policy:` in `service_recon.py` on `origin/main`. 🟡6: `--template`
    over an EXISTING entry prints the first-ever-file template and exits 0 silently,
    destroying an `OPEN:` bullet.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
+- ✅ **THE OPENCODE BLINDNESS IS FIXED — `devrc#1365` → squash `14126d94`.**
+  `clawgate_resolve` reads `OPENCODE_SESSION_ID` before `CLAUDE_CODE_SESSION_ID`
+  (verified on `origin/main` by content: 9 occurrences where the item said 0), and
+  refuses outright when `$OPENCODE` is set with no opencode id, because the claude
+  id in scope there may be an ancestor's and nothing can tell. 🔴 **This item was
+  still telling the next session to do work that had already merged** — the ranked
+  list is not self-closing, and the only moment anyone checks is the next writer's.
+  ⚠ It buys CORRECTNESS, not capability: `clawgatectl` has no opencode tier
+  (measured 2026-09-07, `grep -rl OPENCODE containers/` = 0 against 5 for the claude
+  var), so opencode sessions resolve exit 5 rather than their own tasks until that
+  lands — a Go change in `homelab-talos`.
+
+- ✅ **P3 IS RETIRED — `devrc#1428` → squash `13c0791a`, and the framing in the old
+  ranked item was the wrong half of the choice.** It read "either pass the flag or
+  declare P3 dead", calling `--allow-overwrite` the one-line fix. That flag is the
+  DATA-LOSS path: `seed.sh`'s tar adds and overwrites but never deletes, so a push
+  from a frozen mirror silently reverts every pod-newer entry and reports success.
+  The exit-8 refusal was the last guard, not the bug. P3 now refuses with
+  `RC_CUTOVER_COMPLETE (19)`, conditioned on state (`refused > 0`) so a genuine
+  first cutover still passes through.
+- 🔴 **FOUR AUDIT ROUNDS, AND THE LAST THREE FOUND MY OWN PROSE, NOT MY CODE.** The
+  guard was right after round 1; rounds 2–4 each found that the *fix round* had
+  written something false or harmful. Round 2: the predicate `writable == 0` failed
+  in BOTH directions (a post-freeze creation disarmed it; EROFS tripped it falsely).
+  Round 3: `refused > 0` then failed OPEN on the `other` bucket — I traded one
+  direction for the other. Round 4: my ordering guard used `str.index`, which found
+  an earlier unrelated occurrence, so the defect it existed to stop passed it.
+- 🔴 **THE ADVICE WAS THE WORST DEFECT, AND IT WAS MINE.** A recovery route I
+  recommended (`--freeze --apply`) writes a SECOND mode ledger recording 0444;
+  `--unfreeze` takes the newest, so a 0600 entry is "restored" to 0444 and the
+  rollback exits 0. Reproduced end to end by the round-4 auditor, along with the
+  control proving the caveat is load-bearing. **Prose that tells an operator what to
+  do is payload — audit it like code.**
+- ⚠ **`cairn create` EXISTS** (`34d00d90`/#1254, `PUT` + `If-None-Match: *`), so
+  retiring P3 strands nothing. Two comments in the tree still claimed the API had
+  "no create route"; that stale sentence was what made this look costly.
+- ⚠ **A mutation batch that reports a green may have applied NO mutant.** My first
+  attempt at the round-4 verification had a non-matching anchor and printed "97
+  passed" — indistinguishable from a survival. Only the traceback caught it.
+
 - 🔴 **A VERSION STRING DERIVED FROM THE COMPILED SOURCE IS STILL NOT A CURRENCY SIGNAL.**
   `clawgatectl.nix` reads `version` out of the very `client.go` it compiles — the design that
   exists so a label cannot lie about its code — and the workbench STILL sat 2 commits stale at

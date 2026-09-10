@@ -41,6 +41,26 @@
 # deliberately its own code: it means "this gate could not vouch for its own
 # answer", which is a different finding from "the tests failed".
 #
+# 🔴 AND A VERDICT IS NOT A GATE UNLESS IT COVERED THE WHOLE SUITE. A runner's
+# `RESULT: PASS` is true of the targets it ran and silent about how many that
+# was, so a narrowed run and a full gate were byte-identical on the only line
+# this script parsed. MEASURED 2026-09-08 at the parent commit:
+#
+#     DEVRC_TARGETS=scripts/collector/i3/tests scripts/gate.sh --tier pytest
+#     -> GATE: RESULT=PASS exit=0        (1 of 28 targets; 12 tests; 3m04s)
+#
+# That line is what everyone quotes as "the gate passed". So each runner now
+# prints its own scope (`SCOPE: FULL|PARTIAL|SCOPED|UNKNOWN`) and this script
+# requires to SEE `SCOPE: FULL` from every tier it ran before it may print
+# `GATE: RESULT=PASS`.
+#
+#   * status zero + scope not FULL        -> exit 91, GATE: RESULT=PARTIAL
+#
+# 🔴 A POSITIVE CONTROL, NOT AN ABSENCE CHECK. "Warn when narrowed, treat
+# silence as full" would make an old runner, a truncated log and a renamed
+# marker all read as a full gate — the reassuring zero this repo keeps banning.
+# A MISSING scope line is therefore NOT a pass either; it lands in the same 91.
+#
 # Usage:
 #   scripts/gate.sh [--tier pytest|node|both] [--set hermetic|all]
 #                   [--timeout SECS] [--log-dir DIR] [ROOT]
@@ -55,6 +75,13 @@
 # Env:
 #   DEVRC_GATE_TIMEOUT    default for --timeout, in seconds (default 3600). The
 #                         flag wins over it.
+#   MIN_TESTS             read by run-tests.sh as a one-off override of the
+#                         GLOBAL collected-test floor, and REFUSED here when set
+#                         in the ambient environment: it changes what this gate
+#                         will ACCEPT, so a green carrying it is not a full-gate
+#                         verdict. Listed because gate.sh reads it in that
+#                         refusal — see DEVRC_GATE_ALLOW_AMBIENT below.
+#   DEVRC_TARGETS         same: run-tests.sh's target narrowing, refused here.
 #   DEVRC_GATE_NO_REEXEC  =1 to run against the ambient PATH instead of
 #                         re-entering `nix develop`. See the RE-EXEC block.
 #   DEVRC_GATE_ENV        =1 means "already inside a sanctioned gate
@@ -68,11 +95,24 @@
 #   PYTEST_CURRENT_TEST   read, not set: its presence means "we are running
 #                         inside a pytest process", which suppresses the re-exec
 #                         so a nested run cannot re-enter `nix develop`.
+#   DEVRC_GATE_ALLOW_AMBIENT
+#                         =1 suppresses the gate-weakening-variable refusal
+#                         below. It exists ONLY so this repo's own tests can
+#                         drive the DEVRC_GATE_*_RUNNER seam deliberately. It is
+#                         NOT a way to run a real gate: with it set, a replaced
+#                         runner can print `RESULT: PASS` having run nothing and
+#                         this script will believe it.
 #
-# Exit: 0 = every selected tier passed and agreed with its own content.
+# Exit: 0 = every selected tier passed and agreed with its own content, and
+#           every tier reported `SCOPE: FULL`.
 #       1 = a tier genuinely failed.
 #       2 = a usage/precondition problem in this script.
 #      90 = status/content disagreement, or a truncated run: NOT a verdict.
+#      91 = every tier passed, but at least one did NOT run the whole suite (or
+#           did not say). NOT a gate result. Precedence is
+#           UNVOUCHED(90) > FAIL(1) > PARTIAL(91) > PASS(0): a real failure is
+#           the more actionable finding, so narrowing only decides the verdict
+#           of a run that otherwise passed.
 #
 # TEST SEAM: DEVRC_GATE_PYTEST_RUNNER / DEVRC_GATE_NODE_RUNNER override the
 # runner paths. They exist so the negative controls in
@@ -129,6 +169,69 @@ esac
 case "$TIMEOUT" in
   ''|*[!0-9]*) echo "gate: FATAL — --timeout must be a whole number of seconds, got '$TIMEOUT'" >&2; exit 2 ;;
 esac
+
+# 🔴 REFUSE AN AMBIENTLY-WEAKENED GATE UP FRONT, not only after the fact. This
+# script has no narrowing flag, so every route runs through the ENVIRONMENT —
+# a value nobody typed for THIS command, exported for some earlier one and still
+# in the shell. The post-hoc SCOPE check below catches the narrowing ones, but
+# only after paying the full run; catching them here costs nothing and names the
+# variable, which is the whole remedy.
+#
+# 🔴 ALL FOUR, NOT JUST `DEVRC_TARGETS`. An earlier revision of this block said
+# that variable was "the ONLY way its pytest tier gets narrowed", and that was
+# false in three directions — an over-broad claim beside an asymmetric refusal,
+# which reads as coverage and provides none:
+#   DEVRC_TARGETS              narrows to a target subset (SCOPE catches it late)
+#   DEVRC_GATE_PYTEST_RUNNER   REPLACES the runner wholesale — an ambient value
+#   DEVRC_GATE_NODE_RUNNER     pointing at anything that prints `SCOPE: FULL` +
+#                              `RESULT: PASS (exit=0)` yields a green gate with
+#                              NOTHING run, and no later check can see it
+#   MIN_TESTS                  overrides the collected-test floor
+# The runner-replacement pair is the worst of them and is exactly what the
+# in-repo tests use to drive this script against a forced-green stub. That seam
+# is legitimate FOR TESTS and must never be reachable by accident from a shell.
+#
+# NOT unset-and-continue: silently ignoring an operator's exported value is the
+# mirror defect (they asked for something and got something else with no word
+# said), and this script's doctrine is that such a mistake must be loud.
+_gate_ambient=()
+for _v in DEVRC_TARGETS DEVRC_GATE_PYTEST_RUNNER DEVRC_GATE_NODE_RUNNER MIN_TESTS; do
+  [ -n "${!_v+x}" ] && _gate_ambient+=("$_v=${!_v}")
+done
+# 🔴 COMPARE AGAINST THE STRING, not emptiness. `-z` accepted ANY non-empty
+# value, so `DEVRC_GATE_ALLOW_AMBIENT=0` — which anyone would read, and set, as
+# "off" — silently ENABLED the bypass. Measured: `=0` with a stub runner gave
+# `GATE: RESULT=PASS exit=0` having run nothing. Every other boolean in this
+# file already compares against "1" (`DEVRC_GATE_NO_REEXEC`, `DEVRC_GATE_ENV`,
+# `DEVRC_GATE_REEXEC`); this one was the odd spelling, and the header and the
+# FATAL below both document it as `=1`. Nothing pinned either spelling, which
+# is why a one-word divergence survived.
+if [ "${#_gate_ambient[@]}" -gt 0 ] && [ "${DEVRC_GATE_ALLOW_AMBIENT:-0}" != "1" ]; then
+  echo "gate: FATAL — ${#_gate_ambient[@]} gate-weakening variable(s) set in this environment:" >&2
+  for _a in "${_gate_ambient[@]}"; do echo "         $_a" >&2; done
+  echo "  Each one changes what this gate RUNS or what it will ACCEPT, while" >&2
+  echo "  GATE: RESULT=PASS still reads as a full-gate verdict. A replaced runner" >&2
+  echo "  can print a green verdict having run nothing at all." >&2
+  echo "  \`unset\` them, or run \`env -u <VAR> scripts/gate.sh …\`." >&2
+  echo "  For a deliberate fast, change-scoped run use scripts/scoped-tests.sh," >&2
+  echo "  which is explicitly NOT a gate." >&2
+  echo "  DEVRC_GATE_ALLOW_AMBIENT=1 exists ONLY for this repo's own tests, which" >&2
+  echo "  must drive the runner seam; it is not a way to run a real gate." >&2
+  exit 2
+fi
+# 🔴 IF THE ESCAPE WAS HONOURED, SAY SO — IN THE VERDICT BLOCK, NOT ONLY HERE.
+# This commit added a whole announcement mechanism for suspended ledgers on the
+# doctrine that "a guard that quietly stops applying is the #276 shape this file
+# exists to refuse", and then added an escape hatch that did exactly that:
+# measured, `DEVRC_GATE_ALLOW_AMBIENT=1` with a stub runner produced output
+# BYTE-IDENTICAL to a real full gate. The data was already in hand and thrown
+# away unprinted. The realistic path is not exotic — the FATAL above advertises
+# the variable, so whoever hits the refusal reads two lines and exports it.
+GATE_AMBIENT_HONOURED=()
+if [ "${#_gate_ambient[@]}" -gt 0 ]; then
+  GATE_AMBIENT_HONOURED=("${_gate_ambient[@]}")
+fi
+unset _gate_ambient _v _a
 
 # --- GUARD 9: NO TEST MAY OPERATE ON THE REPO THE SUITE RUNS FROM -------------
 # 🔴 BEFORE the ROOT block below, not after it: with GIT_DIR set and no
@@ -273,13 +376,14 @@ fi
 
 GATE_FAIL=0
 GATE_UNVOUCHED=0
+GATE_PARTIAL=0
 TIER_LINES=()
 
 # Run one runner. Everything that matters is decided from ($rc, log content).
 run_tier() { # $1 = label, $2.. = command
   local label="$1"; shift
   local log="$LOG_DIR/$label.log"
-  local rc reason verdict panic
+  local rc reason verdict panic scope
 
   echo "gate: === $label === (full log: $log)"
   if [ -n "$TIMEOUT_BIN" ]; then
@@ -299,6 +403,11 @@ run_tier() { # $1 = label, $2.. = command
   verdict="$(grep -aE '^RESULT: (PASS|FAIL)' "$log" | tail -1 || true)"
   panic="$(grep -ac 'panic: test timed out' "$log" || true)"
   : "${panic:=0}"
+  # Same anchoring rule as the verdict: column 0, so a test fixture echoing the
+  # word cannot be mistaken for the runner's own claim. Empty when the runner
+  # printed no scope line at all — which is NOT read as FULL below.
+  scope="$(grep -aoE '^SCOPE: (FULL|NONE|PARTIAL|SCOPED|UNKNOWN)' "$log" | tail -1 || true)"
+  scope="${scope#SCOPE: }"
 
   reason=""
   if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
@@ -339,8 +448,20 @@ run_tier() { # $1 = label, $2.. = command
   elif [ "$rc" -ne 0 ]; then
     GATE_FAIL=1
     TIER_LINES+=("FAIL  $label  exit=$rc${reason:+  ($reason)}  verdict='${verdict:-<none>}'")
+  elif [ "$scope" != "FULL" ]; then
+    # 🔴 The tier PASSED and is still not a gate result. Anything other than a
+    # positively-observed FULL lands here, the empty string included: a runner
+    # that printed no scope at all has not told us it ran the whole suite, and
+    # inferring one from silence is exactly the reassuring zero this check
+    # exists to remove.
+    GATE_PARTIAL=1
+    echo "gate: $label passed but did NOT run the whole suite." >&2
+    echo "  scope reported: ${scope:-<none — the runner printed no SCOPE line>}" >&2
+    echo "  A narrowed run's verdict is about what it ran. This gate will not" >&2
+    echo "  report PASS off it — see $log for which targets/files were selected." >&2
+    TIER_LINES+=("PARTIAL  $label  exit=0  scope='${scope:-<none>}'  verdict='$verdict'")
   else
-    TIER_LINES+=("PASS  $label  exit=0  verdict='$verdict'")
+    TIER_LINES+=("PASS  $label  exit=0  scope=FULL  verdict='$verdict'")
   fi
   echo
 }
@@ -355,6 +476,14 @@ fi
 echo "======================== GATE ========================"
 for l in "${TIER_LINES[@]}"; do echo "  $l"; done
 echo "  logs: $LOG_DIR"
+# The escape hatch, named where the verdict is read. Without this the block is
+# byte-identical to an unweakened run, and a replaced runner can print a green
+# verdict having executed nothing.
+if [ "${#GATE_AMBIENT_HONOURED[@]}" -gt 0 ]; then
+  echo "  🔴 AMBIENT WEAKENING HONOURED (DEVRC_GATE_ALLOW_AMBIENT=1) — this is NOT a full-gate verdict:"
+  for a in "${GATE_AMBIENT_HONOURED[@]}"; do echo "       $a"; done
+  echo "     Each of these changes what ran or what was accepted. Do not quote this run as a gate."
+fi
 
 # Precedence: "could not vouch" outranks "failed", which outranks "passed". A
 # gate that cannot trust its own instrument must never report a plain FAIL, let
@@ -366,6 +495,10 @@ fi
 if [ "$GATE_FAIL" -ne 0 ]; then
   echo "GATE: RESULT=FAIL exit=1"
   exit 1
+fi
+if [ "$GATE_PARTIAL" -ne 0 ]; then
+  echo "GATE: RESULT=PARTIAL exit=91"
+  exit 91
 fi
 echo "GATE: RESULT=PASS exit=0"
 exit 0
