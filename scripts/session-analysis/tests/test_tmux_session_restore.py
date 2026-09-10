@@ -1283,8 +1283,32 @@ def test_a_restore_with_no_tmux_server_REFUSES(tmp_path, monkeypatch, capsys):
     """🔴 THE REGRESSION TEST FOR THE MEASURED LOSS. With no server, the old
     code ran `tmux new-session` itself, sent into the server it had just
     created inside its own cgroup, and systemd killed it on exit. Nothing may
-    be sent, and no session may be created."""
+    be sent, and no session may be created.
+
+    🔴 THE rc == 0 IS STILL DELIBERATE, AND ITS REASON HAS NOW BEEN WRONG TWICE.
+    Round 1 justified it with "no server is the normal COLD-BOOT state, because
+    the unit fires on a 45s timer" — that trigger is gone. Round 2 replaced it
+    with "what is left is a rare race: a stale socket, or a server with zero
+    sessions", and the FREQUENCY half of that was false: EVERY tmux server has
+    zero sessions for its first ~100ms, which is exactly the window
+    `PathChanged=` fires in.
+
+    `wait_for_tmux_server()` now covers that window, and the POST-FIX frequency
+    of this branch is UNMEASURED — establishing it needs reboots this change has
+    not had. The conclusion does not depend on it: `OnFailure=notify-failure@%n`
+    bypasses DND, and a branch reachable by a race must not raise an alarm
+    indistinguishable from a real failure, however often the race happens. See
+    the comment at the refusal in `cmd_restore` for the full argument.
+    """
     monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: True)
+    # 🔴 WITHOUT THIS THE TEST SLEEPS THE WHOLE POLL BOUND ON THE DEV-HOST TIER.
+    # `wait_for_tmux_server` bails instantly when the SOCKET is absent, and the
+    # nix sandbox has none — but the dev host has a live one, so the poll would
+    # find it and wait out `TMUX_SERVER_WAIT_SECONDS` against a probe stubbed to
+    # "absent" forever. Pointing the socket at a path that does not exist is the
+    # per-tier-identical fixture; it is the same reason the comment above this
+    # block gives for stubbing the probe at all.
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: tmp_path / "no-socket")
     monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
 
     ran: list[list[str]] = []
@@ -1298,7 +1322,13 @@ def test_a_restore_with_no_tmux_server_REFUSES(tmp_path, monkeypatch, capsys):
 
     rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
 
-    assert rc == 0, "a standing cold-boot state must not fire the OnFailure toast"
+    assert rc == 0, (
+        "the refusal must not fire the DND-bypassing OnFailure toast. The "
+        "conclusion does not rest on how OFTEN this branch is reached — that "
+        "frequency is UNMEASURED post-poll, and the two previous attempts to "
+        "state it were both wrong. It rests on the branch being reachable by a "
+        "RACE at all: such an alarm is indistinguishable from a real failure."
+    )
     assert ran == [], f"ran tmux commands while refusing: {ran}"
     assert not any("new-session" in c for cmd in ran for c in cmd)
     assert not any("send-keys" in c for cmd in ran for c in cmd)
@@ -1331,6 +1361,10 @@ def test_the_refusal_is_checked_BEFORE_the_send_loop_creates_anything(tmp_path, 
     `tmux new-session` would report correctly and still have destroyed the
     workspace."""
     monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    # See `test_a_restore_with_no_tmux_server_REFUSES` — absent socket => the
+    # poll bails on its first probe, so `order` also pins that the poll does not
+    # spin against a stubbed-absent server.
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: tmp_path / "no-socket")
     order: list[str] = []
     monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into",
                         lambda: order.append("guard") or True)
@@ -1373,6 +1407,202 @@ def test_the_server_guard_reads_has_session_and_treats_failure_as_absent(monkeyp
     rc["v"] = 0
     assert tsr.no_tmux_server_to_restore_into() is False
     assert seen and seen[0][:2] == ["tmux", "has-session"], seen
+
+
+# --- the trigger's observable is not this script's precondition ------------ #
+#
+# 🔴 THE DEPLOY-BLOCKER ROUND 1 FOUND. `tmux-session-restore.path` fires when
+# the SOCKET FILE appears. `no_tmux_server_to_restore_into` needs a SESSION.
+# tmux creates the socket in `server_start()` BEFORE sourcing its config, and
+# the first session is queued behind the whole config — three blocking
+# `run-shell` plugin loads plus continuum's replay.
+#
+# MEASURED 2026-09-07 (continuum EXCLUDED, so every figure is a LOWER bound):
+# socket at t0+0.009s; first session at t_sock+0.098–0.112s; the path-triggered
+# ExecStart reached `has-session` at t_sock+0.065s in one run and +0.288s in
+# another. THE OUTCOME FLIPPED BETWEEN RUNS. When it loses: refusal, exit 0,
+# `Result=success`, no `OnFailure`, and NO RETRY — the socket is created once,
+# so no second event ever comes. Silent no-restore, the exact failure this unit
+# exists to prevent.
+#
+# 🔴 EVERY TEST HERE INJECTS BOTH `sleep` AND THE SOCKET PATH. Real sleeps would
+# make the suite take the bound; a real socket lookup would take a DIFFERENT
+# branch on each tier (the dev host has a live socket, the nix sandbox has none)
+# — the structural blindness the comment above `_plan_of` describes.
+
+def _poll(monkeypatch, tmp_path, answers, socket_exists=True):
+    """Drive `wait_for_tmux_server` with a scripted probe and a fake clock.
+
+    `answers` is the sequence `no_tmux_server_to_restore_into` returns (True =
+    absent). It is padded with its last value, so a caller can say "absent
+    forever" with `[True]`. Returns `(result, slept)`.
+    """
+    seq = list(answers)
+    calls = {"n": 0}
+
+    def probe():
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i] if i < len(seq) else seq[-1]
+
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", probe)
+    sock = tmp_path / ("sock" if socket_exists else "nothing-here")
+    if socket_exists:
+        sock.write_text("")   # a plain file: the poll asks only whether it EXISTS
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: sock)
+    slept: list[float] = []
+    return tsr.wait_for_tmux_server(sleep=slept.append), slept
+
+
+def test_the_poll_returns_at_once_when_a_session_already_exists(tmp_path, monkeypatch):
+    """The common case must cost nothing. A poll that always slept one step
+    would add latency to every healthy boot and would still pass every other
+    test in this block."""
+    (found, waited, why), slept = _poll(monkeypatch, tmp_path, [False])
+    assert (found, waited, why) == (True, 0.0, "already-running")
+    assert slept == [], f"slept before probing: {slept}"
+
+
+def test_the_poll_bails_INSTANTLY_when_there_is_no_socket(tmp_path, monkeypatch):
+    """🔴 THE #1351 REGRESSION, IN A NEW PLACE. An earlier revision of this arc
+    burned a full 120s timeout in the nix build sandbox — which has no tmux
+    server — and turned an empty-plan restore into a failure. The socket is the
+    free discriminator: it is what the path unit triggers on, so its ABSENCE
+    means nothing is starting and there is nothing to wait for."""
+    (found, waited, why), slept = _poll(monkeypatch, tmp_path, [True],
+                                        socket_exists=False)
+    # 🔴 THE SLEEP ASSERTION GOES FIRST, DELIBERATELY. A mutation sweep measured
+    # the earlier ordering "killing" the removed-bail mutant on the tuple
+    # comparison, which carries no message — a kill for the wrong reason, and
+    # indistinguishable in the log from a kill by a different guard. The claim
+    # this test is ABOUT is "it did not wait", so that is what asserts first.
+    assert slept == [], (
+        f"waited {sum(slept)}s for a server that cannot be coming — there is no "
+        "socket, so nothing is starting. This is the #1351 shape: a full "
+        "timeout burned in the nix build sandbox, turning a no-op into a hang."
+    )
+    assert (found, waited, why) == (False, 0.0, "no-socket"), (found, waited, why)
+
+
+def test_the_poll_WAITS_for_a_session_that_appears_after_the_socket(tmp_path, monkeypatch):
+    """🔴 THE REGRESSION FOR THE DEPLOY-BLOCKER ITSELF. Before this poll, a
+    first probe of "absent" was final: the unit refused and exited 0, and no
+    second trigger event ever came. Here the socket exists and the session
+    appears on the third probe — the measured shape."""
+    (found, waited, why), slept = _poll(monkeypatch, tmp_path,
+                                        [True, True, False])
+    assert found is True, "refused a session that appeared while tmux read its config"
+    assert why == "appeared"
+    assert waited > 0, "reported no wait for a session it had to wait for"
+    assert len(slept) == 2, f"probe/sleep interleaving is wrong: {slept}"
+
+
+def test_the_poll_gives_up_at_the_BOUND_and_says_which_way(tmp_path, monkeypatch):
+    """Bounded, and the reason is distinguishable. `timeout` (a socket existed
+    and nothing answered) and `no-socket` (nothing was ever coming) are
+    different faults; the refusal message prints them differently so an operator
+    is not left guessing which one a silent boot was."""
+    (found, waited, why), slept = _poll(monkeypatch, tmp_path, [True])
+    assert (found, why) == (False, "timeout")
+    assert waited >= tsr.TMUX_SERVER_WAIT_SECONDS, waited
+    assert sum(slept) >= tsr.TMUX_SERVER_WAIT_SECONDS, slept
+    # Bounded ABOVE too: a poll that overshot its own bound would be a different
+    # bug, invisible to the assertion above.
+    assert waited < tsr.TMUX_SERVER_WAIT_SECONDS + 1.0, waited
+
+
+def test_the_poll_bound_leaves_room_for_the_UNMEASURED_replay_term(tmp_path):
+    """AN INVARIANT GUARD, LABELLED AS ONE — no bug ever violated it.
+
+    It pins the ARGUMENT for the constant rather than the constant: the
+    measurement that produced 0.098–0.112s deliberately EXCLUDED continuum, so
+    it is a lower bound on a production boot that also replays ~45 panes from a
+    cold cache. A bound set near the measurement would be set against a number
+    that does not describe the case it has to cover. 5s is ~45x it and is the
+    floor below which the constant is provably arguing from the wrong figure.
+    """
+    assert tsr.TMUX_SERVER_WAIT_SECONDS >= 5.0, (
+        f"TMUX_SERVER_WAIT_SECONDS={tsr.TMUX_SERVER_WAIT_SECONDS} is close to "
+        "the 0.11s first-session measurement, which was taken with continuum "
+        "EXCLUDED and is therefore a LOWER bound on the window this must cover. "
+        "Losing the race is a SILENT no-restore with no retry; overshooting "
+        "costs latency on a path that then does nothing."
+    )
+
+
+def test_cmd_restore_does_NOT_refuse_a_session_that_appears_during_the_poll(
+    tmp_path, monkeypatch, capsys
+):
+    """🔴 THE SEAM, NOT THE COMPONENT. `wait_for_tmux_server` can be perfect and
+    `cmd_restore` still refuse, if it does not consult it — which is precisely
+    what the code did before this round. This drives the whole command."""
+    seq = [True, True, False]
+    calls = {"n": 0}
+
+    def probe():
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i] if i < len(seq) else seq[-1]
+
+    sock = tmp_path / "sock"
+    sock.write_text("")
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", probe)
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: sock)
+    # 🔴 THE REAL POLL, WITH A NO-OP CLOCK — not a stub. Stubbing the poll here
+    # would test that `cmd_restore` believes whatever it is told, which is not
+    # the seam this test is about. Captured BEFORE patching so the wrapper does
+    # not call itself.
+    real_wait = tsr.wait_for_tmux_server
+    monkeypatch.setattr(tsr, "wait_for_tmux_server",
+                        lambda **k: real_wait(sleep=lambda s: None, socket=sock))
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", lambda *a, **k: (True, 5.0))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
+    sent: list[list[str]] = []
+    monkeypatch.setattr(tsr, "run", lambda cmd: sent.append(cmd) or "")
+    monkeypatch.setattr(tsr, "_verify_sends", lambda t, **k: (len(t), []))
+
+    rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+    out = capsys.readouterr()
+
+    assert rc == 0, out.err
+    assert "REFUSING" not in out.err, (
+        "cmd_restore refused a workspace whose session appeared 2 probes in — "
+        "the trigger fires on the SOCKET, which tmux creates before its config"
+    )
+    assert any("send-keys" in c for cmd in sent for c in cmd), \
+        "nothing was resumed even though a server was found"
+    assert "waited" in out.out, (
+        "the wait is not reported. A restore that had to wait and one that did "
+        "not are different boots, and the journal is where that is read."
+    )
+
+
+def test_the_refusal_names_the_wait_and_which_fault_it_was(tmp_path, monkeypatch, capsys):
+    """A refusal after a full-bound wait and a refusal with no socket at all are
+    different faults with the same one-line symptom. The message must separate
+    them, or the operator's next step is a guess."""
+    sock = tmp_path / "sock"
+    sock.write_text("")
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: True)
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: sock)
+    monkeypatch.setattr(tsr, "wait_for_tmux_server",
+                        lambda **k: (False, tsr.TMUX_SERVER_WAIT_SECONDS, "timeout"))
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "run", lambda cmd: (_ for _ in ()).throw(
+        AssertionError("ran a tmux command while refusing")))
+
+    rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+    err = capsys.readouterr().err
+
+    assert rc == 0
+    assert "REFUSING" in err
+    assert f"waited {tsr.TMUX_SERVER_WAIT_SECONDS:.1f}s" in err, err
+    assert "no server answered" in err, (
+        "the timeout fault reads identically to 'the socket was already gone'; "
+        f"got: {err}"
+    )
 
 
 # --- the two exit-1 branches, previously unpinned (mutants SURVIVED) ------- #

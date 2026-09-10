@@ -33,6 +33,37 @@ in
 {
   enable = true;
   defaultEditor = true;
+
+  # The ruby/python3 REMOTE-PLUGIN hosts (`:h provider-ruby`, `:h
+  # provider-python`) -- NOT the python LSP server, which is a separate process
+  # and unaffected. home-manager 26.05 flips both defaults to false; until
+  # `home.stateVersion` reaches 26.05 the legacy `true` is taken and each emits
+  # an eval warning on every switch. Adopted early rather than pinned, because
+  # nothing here uses them. Measured 2026-09-07 on the workbench:
+  #
+  #   - rplugin.vim is 71 bytes -- four empty section headers, zero registered
+  #     remote plugins -- on BOTH the generation's manifest and
+  #     ~/.local/share/nvim/rplugin.vim.
+  #   - None of the 4 nix plugins below nor the 25 packer-managed plugins in
+  #     .config/nvim/lua/plugins.lua ships an `rplugin/`, `pythonx/` or `ruby/`
+  #     directory.
+  #   - GNU grep (not the ugrep wrapper) over .config/nvim/ for
+  #     python|ruby|pynvim|provider|py3eval|*_host_prog finds only comments.
+  #   - Generation closure 8,708,381,320 -> 8,664,830,096 B, i.e. -43,551,224
+  #     (~41.5 MiB), measured at base 18bc1500 with `nix path-info -S`. The
+  #     saving is entirely ruby (ruby-3.4.9 + gems + the two provider envs);
+  #     withPython3 costs the neovim WRAPPER nothing, because home-manager
+  #     passes wrapRc = false and the host_prog line lands in this init.lua
+  #     rather than in the wrapper.
+  #
+  # Setting either option to either value silences the warning -- it hangs off
+  # the default thunk (lib/deprecations.nix, mkStateVersionOptionDefault), so
+  # merely being explicit is enough. `false` is chosen for the closure.
+  #
+  # Cost if this is ever wrong: `:python3`/`:ruby` and any remote plugin raise
+  # E319. Flip back to `true` and switch.
+  withRuby = false;
+  withPython3 = false;
   #package = pkgs.neovim;
   extraConfig = initVim;
   plugins = with pkgs.vimPlugins; with plugins; [

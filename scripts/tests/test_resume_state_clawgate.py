@@ -19,11 +19,19 @@ suite is built around, and each is the same disease this repo keeps meeting:
      wrong" (claude/RULES.md: an empty result cannot distinguish two
      mechanisms). `resolve` must say so rather than report a clean resolution.
   3. 🔴 A CONSTANT THAT IS NEVER UNDER TEST. The session id comes from
-     `CLAUDE_CODE_SESSION_ID`; there is no `CLAUDE_SESSION_ID`, and reading the
-     name that does not exist ships a feature that is INERT and indistinguishable
-     from a working one. Both names are written as LITERALS in this file and
-     never imported from the subject, and the negative control sets the wrong
-     one and watches the tool refuse.
+     `OPENCODE_SESSION_ID` first and `CLAUDE_CODE_SESSION_ID` second; there is
+     no `CLAUDE_SESSION_ID`, and reading the name that does not exist ships a
+     feature that is INERT and indistinguishable from a working one. All three
+     names are written as LITERALS in this file and never imported from the
+     subject, and the negative control sets the wrong one and watches the tool
+     refuse.
+
+     🔴 THE ORDER IS ITSELF A CONTRACT, not a detail. opencode INHERITS the
+     outer session's `CLAUDE_CODE_SESSION_ID`, so reading claude-first returned
+     a clean exit 0 carrying ANOTHER SESSION'S TASKS from inside a nested
+     opencode run. `TestOpencodeSessionIdIsTierZero` asserts on the URL that was
+     actually requested, since stdout cannot distinguish "picked the right id"
+     from "picked the wrong one and described the right one".
 
      ⚠ THE HARNESS ITSELF NEARLY WALKED THAT CONTROL. `CLAUDE_CODE_SESSION_ID`
      is set in the environment of any real Claude Code session, so a subprocess
@@ -50,6 +58,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -70,6 +79,17 @@ HANDOFF_DOC_TOOL = REPO_ROOT / "scripts" / "lib" / "handoff_doc.py"
 # inert. `WRONG_SESSION_VAR` is a real, plausible spelling that does not exist.
 SESSION_VAR = "CLAUDE_CODE_SESSION_ID"
 WRONG_SESSION_VAR = "CLAUDE_SESSION_ID"
+#: 🔴 opencode's own per-tool-call id, and TIER 0 — it outranks `SESSION_VAR`.
+#: Also a literal, for the same reason as the two above: this suite must be able
+#: to see the subject reading a name that does not exist. It is exported by the
+#: `shell.env` hook in `scripts/opencode/plugin/session-env.js` (wired in
+#: `nix/home.nix`), so it is present ONLY inside an opencode tool shell.
+OPENCODE_SESSION_VAR = "OPENCODE_SESSION_ID"
+#: 🔴 NOT a session id — the MARKER opencode's CLI exports (`OPENCODE=1`, from a
+#: yargs top-level middleware). It decides whether an inherited claude id is
+#: REFUSED, so it is behaviour-deciding for the subject and must be popped from
+#: the harness exactly like the three ids above. A literal for the same reason.
+OPENCODE_MARKER_VAR = "OPENCODE"
 
 # The four task states, taken from THIS REPO'S SINGLE DEFINITION rather than
 # spelled again here — `test_clawgate_predicate_single_source.py` walks every
@@ -147,8 +167,15 @@ def shell_fn_body(src: str, name: str) -> str:
     Scoping every scan below to one function is what makes them STATE
     assertions rather than file-wide word searches: a `jq` call that moves out
     of `clawgate_rank_rows` leaves the ledger, and one that moves in joins it.
+
+    🔴 `\\s*` before the brace, because the two files this is used on differ:
+    `clawgate_handoff.sh` writes `name(){` and `browser` writes `name() {`. The
+    seam test below open-coded a SECOND extractor to cope with that, which meant
+    one concept had two implementations in one file — and a cosmetic
+    `clawgate_resolve() {` would have broken this one's five call sites while
+    the copy passed. Widened here instead.
     """
-    m = re.search(rf"^{re.escape(name)}\(\)\{{\n(.*?)^\}}\s*$", src, re.M | re.S)
+    m = re.search(rf"^{re.escape(name)}\(\)\s*\{{\n(.*?)^\}}\s*$", src, re.M | re.S)
     assert m, f"{name}() is no longer a top-level `name(){{ … }}` block"
     return m.group(1)
 
@@ -203,10 +230,34 @@ def _base_env() -> dict:
     🔴 Both session-id spellings are popped. See the module docstring: the real
     one is present in every Claude Code session, and inheriting it made the
     negative control pass while the code read the wrong name.
+
+    🔴 `OPENCODE_SESSION_VAR` is popped for the SAME reason, and it is the more
+    dangerous of the three to leave in: it is TIER 0, so an inherited value does
+    not merely answer a question the subject should have failed — it OUTRANKS
+    the variable the test is setting. Run this suite from inside an opencode
+    tool shell without this pop and every claude-tier assertion resolves
+    opencode's id instead, silently. Pinned by
+    `test_the_harness_carries_no_session_variable_at_all`.
+
+    🔴 `OPENCODE` IS POPPED TOO, AND IT IS NOT A SESSION ID — it is the MARKER
+    that decides whether an inherited claude id is refused, so it changes the
+    subject's behaviour without naming a session. Leaving it in was measured, on
+    this file, at the commit that introduced the refusal: **246 passed** with a
+    clean environment, **86 failed** with `OPENCODE=1` exported, and **240
+    passed** at the pre-refusal commit under the same variable. The sensitivity
+    is created by the feature, so the pop has to arrive with it.
+
+    That is not hypothetical here: this repo ships `/handoff` as an opencode
+    command, opencode sets `OPENCODE=1` and hands its tool shells
+    `{...process.env}`, so an agent running this suite from an opencode shell
+    would get 86 failures belonging to no diff — which reads exactly like a
+    defect in whatever branch is under test.
     """
     env = dict(os.environ)
     env.pop(SESSION_VAR, None)
     env.pop(WRONG_SESSION_VAR, None)
+    env.pop(OPENCODE_SESSION_VAR, None)
+    env.pop(OPENCODE_MARKER_VAR, None)
     return env
 
 
@@ -1375,7 +1426,7 @@ def resolver(tmp_path):
            code="200", rc="0", env_file: str | None = None,
            jq_fail_on: int | None = None, jq_fail_out: str = "",
            tasklist=None, control=None, ctl_code="200", ctl_rc="0",
-           ctl2_code="200", ctl2_rc="0"):
+           ctl2_code="200", ctl2_rc="0", extra_env: dict | None = None):
         env = _base_env()
         env["HOME"] = str(home)
         env["PATH"] = f"{binp}{os.pathsep}{env['PATH']}"
@@ -1417,6 +1468,12 @@ def resolver(tmp_path):
             env["STUB_BODY"] = str(body)
         if session is not None:
             env[session] = session_id
+        # AFTER the `session` assignment on purpose: the nested-opencode tests
+        # need BOTH variables set at once, and which one wins is the behaviour
+        # under test — so this must be able to add the second, never be
+        # overwritten by the first.
+        if extra_env:
+            env.update(extra_env)
         if env_file is not None:
             (home / ".claude" / "clawgate.env").write_text(env_file, encoding="utf-8")
         return subprocess.run(["bash", str(LIB), "resolve"], capture_output=True,
@@ -2280,6 +2337,253 @@ def urls(resolver) -> list[str]:
     return log.read_text().split() if log.exists() else []
 
 
+BROWSER = REPO_ROOT / "scripts" / "browser-bridge" / "browser"
+
+
+class TestOpencodeSessionIdIsTierZero:
+    """`resolve` must read opencode's own id BEFORE Claude Code's.
+
+    🔴 THE TWO FAILURES THIS PINS ARE NOT THE SAME SHAPE, and only one is loud.
+    A DETACHED opencode run has no claude variable at all, so the old code
+    returned exit 3 forever — annoying, but self-announcing. A NESTED opencode
+    run INHERITS `CLAUDE_CODE_SESSION_ID` from its parent and hands it to its
+    tool shells verbatim, so the old code returned exit 0 carrying the PARENT
+    SESSION'S TASKS. That one is silent and reads exactly like a clean
+    resolution — it is the reason the order, not merely the presence of a second
+    variable, is what is under test here.
+
+    Every assertion below is on the URL the subject actually requested, because
+    that is the only place the chosen id becomes observable. Asserting on the
+    stdout wording instead would pass for a subject that picked the wrong id and
+    described the right one.
+    """
+
+    OC = "oc-sess-777"
+    CC = "claude-parent-111"
+
+    def _main_url_ids(self, resolver) -> list[str]:
+        """The session id out of every `/api/sessions/<id>/tasks` URL requested."""
+        return [m.group(1) for u in urls(resolver)
+                if (m := re.search(r"/api/sessions/([^/]+)/tasks", u))]
+
+    def test_detached_opencode_resolves_instead_of_refusing(self, resolver):
+        """Only the opencode var set — the old code exited 3 without asking."""
+        r = resolver(ONE, session=OPENCODE_SESSION_VAR, session_id=self.OC)
+        assert r.returncode == 0, (
+            f"a detached opencode run must reach the board.\n"
+            f"rc={r.returncode}\nstdout={r.stdout}\nstderr={r.stderr}"
+        )
+        assert recorded(r.stdout) == ["193"], r.stdout
+        assert self._main_url_ids(resolver) == [self.OC], urls(resolver)
+
+    def test_nested_opencode_never_resolves_the_parent_claude_session(self, resolver):
+        """BOTH set, different ids. The opencode id must win — and the parent's
+        must not appear in ANY request. Two directions, because a subject that
+        asked for neither would satisfy the absence half alone."""
+        r = resolver(ONE, session=OPENCODE_SESSION_VAR, session_id=self.OC,
+                     extra_env={SESSION_VAR: self.CC})
+        assert self._main_url_ids(resolver) == [self.OC], (
+            f"nested opencode asked the board about the WRONG session — this is "
+            f"the silent misattribution.\nurls={urls(resolver)}"
+        )
+        joined = "\n".join(urls(resolver))
+        assert self.CC not in joined, (
+            f"the parent Claude session's id reached the wire.\n{joined}"
+        )
+        assert r.returncode == 0, r.stdout
+
+    def test_claude_only_is_unchanged(self, resolver):
+        """The pre-existing path, pinned so the new tier cannot capture it."""
+        r = resolver(ONE, session=SESSION_VAR, session_id=self.CC)
+        assert r.returncode == 0, r.stdout
+        assert self._main_url_ids(resolver) == [self.CC], urls(resolver)
+
+    def test_an_empty_opencode_var_falls_through_to_claude_OUTSIDE_opencode(self, resolver):
+        """Set-but-EMPTY must not shadow the claude tier in an ordinary Claude
+        Code session. `-n` rather than `-v`/`${x+set}` is what makes that true.
+
+        ⚠ NOTE THE `OUTSIDE` IN THE NAME. An earlier draft of this test asserted
+        the fallthrough with NO opencode marker in the environment either way,
+        which pinned the hazard below as intended behaviour. The two cases are
+        distinguished by `$OPENCODE`, not by the empty id.
+        """
+        r = resolver(ONE, session=SESSION_VAR, session_id=self.CC,
+                     extra_env={OPENCODE_SESSION_VAR: ""})
+        assert r.returncode == 0, r.stdout
+        assert self._main_url_ids(resolver) == [self.CC], urls(resolver)
+
+    @pytest.mark.parametrize("oc_id", ["", None], ids=["empty", "absent"])
+    def test_INSIDE_opencode_an_inherited_claude_id_is_REFUSED(self, resolver, oc_id):
+        """🔴 THE DANGEROUS HALF. `$OPENCODE=1` with no usable opencode id means
+        the `CLAUDE_CODE_SESSION_ID` in scope MAY have been INHERITED from an
+        ancestor — and nothing distinguishes that from the mirror nesting, where
+        a Claude Code session launched FROM an opencode tool exports its own id.
+        Using an inherited one returns another session's tasks with exit 0, the
+        silent misattribution this class exists to stop, so both refuse: a
+        missing field beats a wrong one.
+
+        Both spellings are driven because they arise differently: EMPTY is what
+        `scripts/opencode/plugin/session-env.js` deliberately writes on the PTY
+        path, ABSENT is a run with no plugin at all. Nothing may be asked in
+        either.
+        """
+        extra = {OPENCODE_MARKER_VAR: "1"}
+        if oc_id is not None:
+            extra[OPENCODE_SESSION_VAR] = oc_id
+        r = resolver(ONE, session=SESSION_VAR, session_id=self.CC,
+                     extra_env=extra)
+        assert r.returncode == 3, (
+            f"an inherited claude id inside opencode must be REFUSED, not used.\n"
+            f"rc={r.returncode}\nstdout={r.stdout}"
+        )
+        assert not urls(resolver), (
+            f"the board was asked with an INHERITED id: {urls(resolver)}"
+        )
+        assert self.CC not in r.stdout, (
+            f"the refusal leaked the ancestor's id.\n{r.stdout}"
+        )
+
+    def test_a_real_opencode_id_still_wins_INSIDE_opencode(self, resolver):
+        """The refusal above must not swallow the working case: with `$OPENCODE`
+        set AND a real opencode id, tier 0 resolves normally. Without this, a
+        guard that refused unconditionally inside opencode would pass every
+        assertion in the test above."""
+        r = resolver(ONE, session=OPENCODE_SESSION_VAR, session_id=self.OC,
+                     extra_env={OPENCODE_MARKER_VAR: "1", SESSION_VAR: self.CC})
+        assert r.returncode == 0, r.stdout
+        assert self._main_url_ids(resolver) == [self.OC], urls(resolver)
+
+    def test_the_claude_tier_refusal_names_the_CLAUDE_variable(self, resolver):
+        """🔴 THE MIRROR OF `..._CAME_FROM`, and its absence let a mutant live:
+        hardcoding `$OPENCODE_SESSION_ID` into the refusal message passed the
+        whole file, because the only assertion on WHICH variable a refusal names
+        was on the opencode tier. A one-directional pair cannot see a message
+        that always names tier 0."""
+        r = resolver(ONE, session=SESSION_VAR, session_id="has/a/slash")
+        assert r.returncode == 3, r.stdout
+        assert SESSION_VAR in r.stdout, r.stdout
+        assert OPENCODE_SESSION_VAR not in r.stdout, (
+            f"named the opencode variable for an id that came from the claude "
+            f"tier — `sid_src` is not being used.\n{r.stdout}"
+        )
+
+    def test_neither_variable_set_exits_3_and_names_BOTH(self, resolver):
+        r = resolver(ONE, session=None)
+        assert r.returncode == 3, r.stdout
+        assert OPENCODE_SESSION_VAR in r.stdout and SESSION_VAR in r.stdout, (
+            f"the refusal must name both variables it consulted, or the reader "
+            f"cannot tell which one to set.\n{r.stdout}"
+        )
+        assert not urls(resolver), f"nothing may be asked: {urls(resolver)}"
+
+    def test_the_refusal_names_the_variable_the_id_CAME_FROM(self, resolver):
+        """A bad opencode id must not be reported against the claude variable.
+        This is the message-hardcoding class the lib's own header warns about:
+        a refusal naming a variable the code did not read sends the reader to
+        fix the wrong thing."""
+        r = resolver(ONE, session=OPENCODE_SESSION_VAR, session_id="has/a/slash")
+        assert r.returncode == 3, r.stdout
+        assert OPENCODE_SESSION_VAR in r.stdout, r.stdout
+        assert SESSION_VAR not in r.stdout, (
+            f"named the claude variable for an id that came from opencode.\n"
+            f"{r.stdout}"
+        )
+
+    def test_the_harness_carries_no_session_variable_at_all(self):
+        """The control that keeps every test above honest. An inherited
+        `OPENCODE_SESSION_ID` OUTRANKS the variable each test sets, so without
+        this pop the claude-tier assertions would silently measure opencode's
+        id — the same way an inherited `CLAUDE_CODE_SESSION_ID` once made the
+        original negative control pass against code reading the wrong name.
+
+        🔴 IT INJECTS EACH VARIABLE FIRST, and the first draft did not — it read
+        `_base_env()` and asserted each name was absent, which is TRUE FOR FREE
+        whenever the ambient shell never had that name. MEASURED: deleting
+        `env.pop(OPENCODE_MARKER_VAR, …)` SURVIVED all 246 tests, because the
+        developer shell had no `OPENCODE` for the pop to remove. A guard on an
+        absence can only fire when the contaminant is present, so it has to
+        supply the contaminant itself — the same lesson this file already
+        records about the session ids, one variable over.
+        """
+        popped = (SESSION_VAR, WRONG_SESSION_VAR, OPENCODE_SESSION_VAR,
+                  OPENCODE_MARKER_VAR)
+        with mock.patch.dict(os.environ, {v: f"contaminant-{v}" for v in popped}):
+            # positive control: the contaminant really is in the source dict,
+            # so a clean result below is the pop working and not an empty input.
+            for var in popped:
+                assert var in os.environ, f"the harness failed to inject {var}"
+            env = _base_env()
+            for var in popped:
+                assert var not in env, (
+                    f"{var} survived _base_env() — it would reach the subject "
+                    f"and decide an answer the test meant to control."
+                )
+
+    def test_precedence_agrees_with_browser_derive_session_id(self):
+        """🔴 A SEAM, NOT A STYLE POINT. Two independent resolvers now decide
+        'which session am I' from the same two variables. If they disagree,
+        `browser` attributes a run to opencode while `resolve` attributes the
+        SAME run to the parent — and nothing fails, because each is internally
+        consistent. Pin the RELATIONSHIP: opencode must be READ first in both.
+
+        🔴 SCOPED TO THE FUNCTION BODY AND DECOMMENTED, and the first draft of
+        this test was neither. A whole-file `find` measures the order the two
+        names are first MENTIONED — which in `browser` is its header prose, 26 KB
+        above the code — so it failed against an implementation that was already
+        correct. A guard on where a word appears is walkable by rewording; this
+        one reads the branches.
+        """
+        for path, fn in ((LIB, "clawgate_resolve"), (BROWSER, "derive_session_id")):
+            src = path.read_text(encoding="utf-8")
+            # `shell_fn_body` (widened to accept `name() {`) rather than a
+            # second extractor — one concept, one implementation.
+            body = _decommented(shell_fn_body(src, fn))
+            oc = body.find(OPENCODE_SESSION_VAR)
+            cc = body.find(SESSION_VAR)
+            assert oc != -1, f"{path.name}:{fn} does not READ {OPENCODE_SESSION_VAR}"
+            assert cc != -1, f"{path.name}:{fn} does not READ {SESSION_VAR}"
+            assert oc < cc, (
+                f"{path.name}:{fn} reads {SESSION_VAR} before "
+                f"{OPENCODE_SESSION_VAR}; the two resolvers would attribute the "
+                f"same run differently, and neither would fail."
+            )
+            # 🔴 THE ORDERING IS HALF THE DESIGN, AND PINNING ONLY IT IS WHAT
+            # LET THE ROUND-1 DEFECT THROUGH. `clawgate_resolve` shipped with
+            # the precedence copied and the MARKER ARM left behind, so both
+            # resolvers "agreed" by the ordering check above while one of them
+            # still used an inherited id. Pin the RELATIONSHIP too: each must
+            # also consult the `OPENCODE` marker, which is what makes the claude
+            # tier conditional rather than unconditional.
+            #
+            # 🔴 FILE-SCOPED, NOT BODY-SCOPED, AND THE FIRST DRAFT GOT THIS
+            # WRONG — it asserted the marker inside the resolving function and
+            # FAILED against `browser`, which was never defective. The two
+            # implementations place the arm differently: this lib refuses inside
+            # `clawgate_resolve`, while `browser` tags the already-returned id
+            # at file scope (`case "$SESSION_ID" in claude:*)`) and lets
+            # `server.py` refuse it. Ordering is a within-function property;
+            # consulting the marker is not. Asserting otherwise measured a
+            # layout difference and called it a defect.
+            # 🔴 THE EXPANSION FORM, AND ONLY BEFORE AN INLINE `#`. `_decommented`
+            # blanks WHOLE-LINE comments only — deliberately, because these files
+            # carry `#` inside quoted strings — so a bare-token search was
+            # satisfiable by a trailing `# was gated on OPENCODE` with the arm
+            # deleted. MEASURED: browser's arm removed plus that comment left the
+            # file 246 passed. Requiring `${OPENCODE:-}` (what both files actually
+            # write) in the code half of some line closes the reachable walk.
+            marker_expansion = "${%s:-}" % OPENCODE_MARKER_VAR
+            consulted = any(
+                marker_expansion in ln.split("#", 1)[0]
+                for ln in _decommented(src).splitlines()
+            )
+            assert consulted, (
+                f"{path.name} orders the two ids but never consults "
+                f"`{marker_expansion}` in code, so an id reached through the "
+                f"claude tier is used unconditionally — the exact shape that "
+                f"shipped when only the precedence was ported."
+            )
+
+
 class TestZeroPositiveControl:
     # --------------------------------------------------- the upgraded wording
     def test_a_control_that_RESOLVES_ROWS_upgrades_the_zero_verdict(self, resolver):
@@ -2570,6 +2874,14 @@ class TestZeroPositiveControl:
 HANDOFF_PINS: list[tuple[str, str]] = [
     ("scripts/lib/clawgate_handoff.sh", "the step invokes the tool that owns the resolution"),
     (SESSION_VAR, "🔴 the EXACT session variable reaches the executor"),
+    (OPENCODE_SESSION_VAR, "🔴 TIER 0 reaches the executor — the doc named only "
+                           "the claude var while the code read this one first"),
+    # 🔴 NOT the bare `$OPENCODE`: it is a PREFIX of `$OPENCODE_SESSION_ID`, so
+    # one ordinary edit elsewhere in the doc would satisfy it with this sentence
+    # deleted — and a reword to "...it USES the claude id" would satisfy it while
+    # contradicting the code. Pin the verb.
+    ("set) with no opencode id it REFUSES",
+     "🔴 the inherited-id REFUSAL is stated as a refusal, not just the ordering"),
     ("clawgate-task: 193", "the front-matter SHAPE is shown, not described"),
     ("NEVER create a task", "🔴 a task is never minted to fill a blank field"),
     ("ASK the user which one", "several resolved => a question, not a guess"),

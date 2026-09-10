@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: "The hosted subsystem store (pod in ns `subsystem-store`) and its client `scripts/cairn`. Use for: `cairn doctor`, cairn sync/recall/search/ls-entries/who, a stale or unstamped store, a `cairn` exit 4, seeding the pod, a scope a token cannot reach. Writes are `subsystem-index`; pruning is `prune-index`."
+description: "The hosted subsystem store (pod in ns `subsystem-store`), client `cairn` on PATH. Use for: `cairn doctor`, cairn sync/recall/search/ls-entries, cairn-who, a stale or unstamped store, a `cairn` exit 4, seeding the pod, a scope a token cannot reach. Writes are `subsystem-index`; pruning is `prune-index`."
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
@@ -32,13 +32,35 @@ staleness it was run to measure.
 | this repo's digest | `cairn recall` (`--scope X` / `--repo PATH`) |
 | find a hunk by text | `cairn search '<query>'` (`--all-scopes` to search every scope) |
 | what does the cache actually hold | `cairn ls-entries` |
-| parse-check the cached entries | `cairn validate` |
-| which sessions/windows/transcripts worked a task | `cairn who <task>` (`--json`, `--host`, `--no-windows`) |
+| parse-check the cached entries | `cairn validate` — ⚠ see below, it is NOT the write-protocol check |
+| the WRITE-protocol parse check | `cairn-validate --scope <scope>` — a SEPARATE binary, see below |
+| which sessions/windows/transcripts worked a task | `cairn-who <task>` (`--json`, `--host`, `--no-windows`) — a SEPARATE binary |
 | diagnose anything above going wrong | `cairn doctor` |
 
-`cairn who` is about a **task**, not a store entry: it touches no store and never
-syncs, and it has its own longer `--timeout` because it shells into tmux on two
-hosts.
+🔴 **`cairn validate` IS NOT THE WRITE-PROTOCOL CHECK, and it stops being one
+silently, at exit 0.** Once a host has run `home-manager switch`, the client on
+PATH is the pinned OSS package, which reimplements `validate` on the reader's
+resolver instead of shelling the writer. MEASURED on one scope of the live cache,
+both clients at the locked rev: the package writes **0 bytes to stdout** (a
+77-byte state banner on stderr) and exits 0, where the writer prints **5,766
+bytes on stdout** with `entry shape:`, `marker reachability:` and `dropped
+lines:` — the last meaning content is ALREADY LOST. Both are "green"; one of them
+is empty on the stream you read. **The mandated post-write check is
+`cairn-validate --scope <scope>`** — the SAME spelling `subsystem-index` names,
+which is the point: two skills naming one mandated command in two ways is how
+one of them goes unpinned and drifts. It is a devrc-only launcher over
+`scripts/lib/subsystem_touch.py` and lands on PATH in the same switch that swaps
+`cairn`. It cannot be a `cairn` subcommand: `cairn` is the pinned OSS package,
+and the writer it runs is devrc-only and deliberately absent from that repo.
+⚠ Exit codes differ too: the writer exits **3** on a malformed entry, the packaged
+client **5** (`EXIT_CORRUPT`; `3` is `EXIT_UNREACHABLE_NO_CACHE` for the client).
+
+🔴 **`cairn-who` is a separate command, not a `cairn` subcommand.** It is about a
+**task**, not a store entry: it touches no store and never syncs, takes none of
+the `--scope`/`--repo`/`--no-sync` flags, and has its own longer `--timeout`
+because it shells into tmux on two hosts rather than fetching an HTTP snapshot.
+Typing it as a `cairn` subcommand is no longer valid: argparse exits 2 with an
+`invalid choice` naming the verbs that remain.
 
 **Writes are not this skill's.** `subsystem-index` owns the one protocol for
 every writer; `prune-index` owns deletion, with its own confirmation gate. Load
@@ -68,9 +90,15 @@ there; it is not restated here.
 
 ## Where a host reads from
 
-`scripts/lib/subsystem_read_store.py` is the ONE answer, and
-`cairn doctor`'s `reader-resolution` check prints it. Two directories exist and
-they are not interchangeable: `~/.cache/subsystem-store` is the synced
+`scripts/lib/subsystem_read_store.py` is the ONE answer for devrc's OWN readers
+(the `subsystem-index` writer and `cairn-who`), and `cairn doctor`'s
+`reader-resolution` check prints it. ⚠ The deployed `cairn` is the pinned flake
+package and carries its OWN copy of that module; the two agree today and are
+consolidated in a later slice — so if they ever disagree, `doctor`'s printed
+path is the authority for the CLIENT, and this file's for the writer.
+
+Two directories exist and they are not interchangeable:
+`~/.cache/subsystem-store` is the synced
 read-through cache, stamped by `cairn sync`; `~/.claude/analyze-service-index`
 is the pre-cutover per-host mirror, frozen and refreshed by nothing.
 **The discriminator is the stamp, not the path** — a store that cannot date

@@ -23,6 +23,7 @@ import io
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -48,15 +49,26 @@ def _write(root, session_id, lines, project="-srv-repo"):
     return p
 
 
-def _assistant(skill):
-    return json.dumps({"type": "assistant", "timestamp": "2026-08-21T10:01:00.000Z",
+def _stamp(days_ago):
+    """🔴 FIXTURE TIMES ARE RELATIVE TO NOW, NEVER A WALL-CLOCK DATE. These
+    records were pinned to a literal `2026-08-21`, which was inside every window
+    the tool had (there were none) until `DEFAULT_SINCE_DAYS` landed and it was
+    18 days old — the whole `TestTheGuardDoesNotBREAKTheToolsPRIMARYMODE` class
+    went red on a corpus that had not changed. A fixture anchored to a calendar
+    date is a test that expires; anchored to `now`, it cannot."""
+    when = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    return when.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _assistant(skill, days_ago=1, text="ok"):
+    return json.dumps({"type": "assistant", "timestamp": _stamp(days_ago),
                        "cwd": "/srv/repo", "attributionSkill": skill,
-                       "message": {"content": [{"type": "text", "text": "ok"}]}})
+                       "message": {"content": [{"type": "text", "text": text}]}})
 
 
-def _user():
-    return json.dumps({"type": "user", "timestamp": "2026-08-21T10:00:00.000Z",
-                       "cwd": "/srv/repo", "message": {"content": "hi"}})
+def _user(days_ago=1, text="hi"):
+    return json.dumps({"type": "user", "timestamp": _stamp(days_ago),
+                       "cwd": "/srv/repo", "message": {"content": text}})
 
 
 def run(root, argv):
@@ -199,3 +211,103 @@ class TestSkillWithOpencodeOnlyIsRefused:
         code, out, err = run(corpus, ["--skill", "signal", "--opencode-only"])
         assert code == 2
         assert "cannot be answered" in err
+
+
+@pytest.fixture
+def corpus_with_an_old_session(tmp_path):
+    """A RECENT session and one comfortably outside the default window.
+
+    The two share no search term on purpose: `zzancient` is in the old session
+    only, so a test that finds it has found THAT session and not the fixture's
+    other one.
+    """
+    _write(tmp_path, "recent", [_user(days_ago=1), _assistant("signal", 1)])
+    old = fs_days_outside_the_window()
+    _write(tmp_path, "ancient",
+           [_user(days_ago=old, text="zzancient"),
+            _assistant("zzoldskill", old, text="zzancient")])
+    return tmp_path
+
+
+def fs_days_outside_the_window():
+    """Derived from the constant, never a literal. A test that hardcoded `40`
+    would silently stop testing the boundary the day the default moved."""
+    mod = _load()
+    return mod.DEFAULT_SINCE_DAYS * 3
+
+
+class TestTheDefaultArchiveWindow:
+    """🔴 END-TO-END, THROUGH THE REAL WALK. `resolve_window` is unit-tested in
+    `test_find_session_live.py`; this class is the seam check — that the cutoff
+    it returns actually reaches `search()` and changes the result set. A window
+    computed correctly and never passed on would pass every unit test.
+
+    🔴 EVERY ASSERTION READS SESSION IDS OUT OF `--json`, NOT WORDS OUT OF THE
+    HUMAN OUTPUT. The first draft asserted `"ancient" not in out` and FAILED
+    against correct code, because the human path echoes the query: `No sessions
+    matched: zzancient` contains the word the guard was looking for. That is the
+    spelled-guard trap in `claude/RULES.md` — assert the STATE (which session
+    ids came back), never a word another line can spell.
+    """
+
+    @staticmethod
+    def ids(root, argv):
+        code, out, err = run(root, list(argv) + ["--json"])
+        assert code == 0, err
+        return [r["session_id"] for r in json.loads(out)], err
+
+    def test_a_session_OUTSIDE_the_window_is_NOT_returned_by_default(
+            self, corpus_with_an_old_session):
+        got, _ = self.ids(corpus_with_an_old_session, ["zzancient"])
+        assert got == [], (
+            f"the default window did not reach the walk — {got} came back, so "
+            "the cutoff was computed and then dropped")
+
+    def test_all_time_FINDS_the_one_the_default_window_hid(
+            self, corpus_with_an_old_session):
+        """🔴 THE POSITIVE CONTROL, and the test above is worthless without it.
+        "the default returned nothing" is indistinguishable from "the fixture
+        never matched anything" until the same query under `--all-time` returns
+        a non-zero count."""
+        got, _ = self.ids(corpus_with_an_old_session, ["zzancient", "--all-time"])
+        assert got == ["ancient"], (
+            "--all-time did not find a session the fixture definitely contains "
+            f"— the corpus or the query is wrong, not the window: {got}")
+
+    def test_an_EXPLICIT_since_reaches_it_too(self, corpus_with_an_old_session):
+        old = fs_days_outside_the_window()
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=old + 5)).date().isoformat()
+        got, _ = self.ids(corpus_with_an_old_session,
+                          ["zzancient", "--since", cutoff])
+        assert got == ["ancient"]
+
+    def test_a_SKILL_query_is_UNWINDOWED_end_to_end(
+            self, corpus_with_an_old_session):
+        """🔴 The exemption has to survive the trip to `search()`, not just
+        `resolve_window`. `adoption-scan` asks this exact question."""
+        got, _ = self.ids(corpus_with_an_old_session, ["--skill", "zzoldskill"])
+        assert got == ["ancient"], (
+            "a --skill query was windowed — 'has skill X ever been used' "
+            f"silently became 'used in the last few days': {got}")
+
+    def test_the_RECENT_session_is_still_found_by_default(
+            self, corpus_with_an_old_session):
+        """The window must cut the old one and ONLY the old one — the boundary
+        control on the two tests above."""
+        got, _ = self.ids(corpus_with_an_old_session, ["hi"])
+        assert got == ["recent"]
+
+    def test_the_WINDOW_IS_DISCLOSED_even_when_it_hid_everything(
+            self, corpus_with_an_old_session):
+        """The sentence that stops "No sessions matched" reading as a
+        corpus-wide absence."""
+        _, err = self.ids(corpus_with_an_old_session, ["zzancient"])
+        assert "ARCHIVE window:" in err, err
+        assert "--all-time" in err, (
+            "the notice must say how to LIFT the bound, not only that one exists")
+
+    def test_the_disclosure_names_the_WHOLE_corpus_under_all_time(
+            self, corpus_with_an_old_session):
+        _, err = self.ids(corpus_with_an_old_session, ["zzancient", "--all-time"])
+        assert "WHOLE corpus" in err and "nothing was cut" in err

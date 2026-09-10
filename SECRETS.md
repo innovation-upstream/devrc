@@ -23,7 +23,7 @@ Legend for "seeded by HM?":
 |---|---|---|---|---|
 | `~/.config/activity-collector/env` | `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_DATABASE`, `CLICKHOUSE_TABLE`, `ACTIVITY_HOST`, `ACTIVITY_BATCH_SIZE`, `ACTIVITY_FLUSH_SECONDS`, `ACTIVITY_MAX_BUFFER_BYTES`, `ACTIVITY_MAX_BUFFER_AGE_SECONDS`, `ACTIVITY_HTTP_TIMEOUT`, (`ACTIVITY_SPOOL_DIR`) | both (workbench + laptop) | **auto** (from `scripts/collector/.env.example`, chmod 600) | Only `CLICKHOUSE_PASSWORD` is sensitive: the authed **writer** cred lives in the SOPS secret `homelab-talos/clusters/homelab/apps/activity/secrets.enc.yaml` (decrypt with `SOPS_AGE_KEY_FILE=~/workspace/homelab-talos/.secrets/age.key`). `.env.example` default is empty (unauthed `default` user). Set `ACTIVITY_HOST` distinctly per host (`workbench`/`laptop` — both machines are hostname `nixos`). **Laptop** must point `CLICKHOUSE_URL` at its nebula CH endpoint. See the `activity` skill. |
 | `~/.claude/clawgate.env` | `CLAWGATE_API_URL`, `CLAWGATE_HOOK_TOKEN` | both (workbench primary) | manual | The machine hook token for the clawgate service (`clawgate.zacx.dev` / NodePort `192.168.50.250:30302`). Same value stored in homelab secret `task-drafter-agent-secrets` (ns `devpod-task-drafter`, key `CLAWGATE_HOOK_TOKEN`). Write via stdin so the token isn't in shell history. See the `clawgate` skill. **Rotation coupling:** rotating this token requires updating that k8s secret too, or the daily drafter digest 401s silently. |
-| `~/.config/subsystem-store/env` | `SUBSYSTEM_STORE_URL`, `SUBSYSTEM_STORE_TOKEN` | both (workbench + laptop) | manual (chmod 600) | Bearer token for the hosted `/analyze-service` store API (`store.zacx.dev/api/`), read by `scripts/cairn`. Source of truth: k8s secret `subsystem-store-token`, key `token`, ns `subsystem-store` on **homelab**. Write via stdin/`printf` so the token isn't in shell history. Environment variables of the same name override the file, which is how the tests point at a throwaway server. **Rotation coupling:** the server accepts a SET of tokens for overlap, so rotate by adding the new one to the k8s secret first, updating **both** host files, then dropping the old — rotating the secret alone silently orphans both hosts and every `cairn` call reports `store-unreachable` with an HTTP 401 reason. ⚠ **Edge gotcha, measured 2026-08-25:** Cloudflare answers **403** to the default `Python-urllib/*` User-Agent on this host (same token, same path: curl default UA → 200, `Python-urllib/3.12` → 403). That 403 is the edge, not the app — it is neither a bad token nor an outage. `scripts/cairn` sets its own UA; any other client must too. |
+| `~/.config/subsystem-store/env` | `SUBSYSTEM_STORE_URL`, `SUBSYSTEM_STORE_TOKEN` | both (workbench + laptop) | manual (chmod 600) | Bearer token for the hosted `/analyze-service` store API (`store.zacx.dev/api/`), read by the `cairn` client on PATH — since 2026-09-08 that is the PINNED `ZacxDev/cairn` flake package, not `scripts/cairn`, which is still in the repo but no longer deployed. Source of truth: k8s secret `subsystem-store-token`, key `token`, ns `subsystem-store` on **homelab**. Write via stdin/`printf` so the token isn't in shell history. Environment variables of the same name override the file, which is how the tests point at a throwaway server. **Rotation coupling:** the server accepts a SET of tokens for overlap, so rotate by adding the new one to the k8s secret first, updating **both** host files, then dropping the old — rotating the secret alone silently orphans both hosts and every `cairn` call reports `store-unreachable` with an HTTP 401 reason. ⚠ **Edge gotcha, measured 2026-08-25:** Cloudflare answers **403** to the default `Python-urllib/*` User-Agent on this host (same token, same path: curl default UA → 200, `Python-urllib/3.12` → 403). That 403 is the edge, not the app — it is neither a bad token nor an outage. The `cairn` client sets its own UA (both the pinned package and the in-repo `scripts/cairn`); any other client must too. |
 | *(none — the `REPO_COS_*` env names)* | `REPO_COS_SEND`, `REPO_COS_FROM`, `REPO_COS_REPLY_TO`, `REPO_COS_PROD_KUBECONFIG`, `REPO_COS_RELAY_NS`, `REPO_COS_RELAY_SVC` | workbench only (serverMode daily timer) | none — no file | 🔴 **NO CREDENTIAL FILE ANY MORE.** `~/.config/repo-cos/env` held `OPENROUTER_API_KEY` for the weekly repo chief-of-staff, which was RETIRED 2026-09-07 along with its timer; nothing reads that file. The env NAMES survive because the module that reads them, `scripts/task-spec-drafter/email_send.py` (the DKIM relay send path), moved to the drafter and kept them — renaming them is a separate change. The drafter's unit sets `REPO_COS_PROD_KUBECONFIG` itself and none of these is a secret. Safe to `rm ~/.config/repo-cos/env`. |
 | `~/.config/bar/media.env` | `PROWLARR_URL`, `PROWLARR_KEY`, `STASH_URL`, `STASH_KEY`, `WHISPARR_URL`, `WHISPARR_KEY`, `QBIT_URL` | workbench (graphical) | manual (0600) | API keys from each self-hosted service's own admin UI (Prowlarr / Stash / Whisparr → Settings → General/API key). **source: UNKNOWN for exact service endpoints — verify** the URLs against the current homelab/media deployment. Consumed by `scripts/media-detail`, `media-menu`, `deep-search`, `bar-status-poll`. |
 | `~/.config/bar/airvpn.env` | `AIRVPN_API`, `AIRVPN_COUNTRY`, `AIRVPN_FWD_PORT`, `AIRVPN_WG_PORT`, `AIRVPN_MANIFEST`, `AIRVPN_SIGNAL_ICON`, `AIRVPN_SUDO`, `AIRVPN_SUDO_HELPER` | workbench (graphical) | manual (0600) | `AIRVPN_API` = AirVPN client-area API key (airvpn.org account → Client Area → API). Remaining keys are non-secret tuning. Consumed by `scripts/airvpn-menu`, `bar-status-poll`. |
@@ -283,10 +283,39 @@ no commit; this flag is it, upstreamed. What remains unexercised is only a
 unchanged.** `age-keygen -y` prints only the `age1…` recipient (measured, age
 v1.3.1: exactly 63 bytes, `age1…` + one `\n`), which is why the pin above is
 committed in a public repo. The secret half is never printed, never hashed into a
-message, and never passed in argv. ⚠ **age-keygen's stderr is NOT safe** — a file
-it cannot parse comes back as `unknown identity type: "<the offending line>"`,
-i.e. it echoes its input, which on a mangled identity is the secret key. The tool
-quotes no stream at all on that path.
+message, and never passed in argv. ⚠ **age-keygen's stderr is NOT safe** — on
+**age ≤ 1.3.1** a file it cannot parse comes back as
+`unknown identity type: "<the offending line>"`, i.e. it echoes its input, which
+on a mangled identity is the secret key. The tool quotes no stream at all on that
+path.
+
+🔴 **age 1.3.2 removed that echo — and the redaction STAYS. Do not delete it as
+dead code.** Upstream dropped the offending argument from the error deliberately
+(`parse.go`: *"Don't include arg in the error: it may contain private key
+material, and callers print these errors"*). Measured 2026-09-08 on this host,
+same fixtures against both binaries — 8 realistic manglings (leading/trailing
+space, case-folded, CRLF, prefix typo, quoted, truncated, trailing NUL):
+
+| binary | manglings echoing secret material into stderr |
+|---|---|
+| `age-1.3.1` (positive control — the sweep CAN see a leak) | **4 / 8** |
+| `age-1.3.2` (currently on PATH) | **0 / 8** |
+
+The `0` is reportable only because the same sweep scored `4` against 1.3.1; a
+bare zero here would be indistinguishable from a sweep wired to nothing.
+
+The guard is kept regardless, for two independent reasons: `age-keygen` is
+**whatever is on PATH** and this repo does not pin the operator's binary, so a
+defence that is only correct on the newest release is not a defence; and a
+recovery is exactly the situation where someone reaches for an older `age` on a
+machine that is not this one. Its non-vacuity no longer depends on upstream
+keeping the bug. Two tests in
+`scripts/tests/test_analyze_service_index_escrow_verify.py` hold it up:
+`test_the_redaction_is_pinned_against_a_STUB_that_echoes_like_age_v1_3_1` puts a
+stub on PATH that echoes the way 1.3.1 did, so the guard is exercised whatever
+age is installed, and
+`test_which_age_keygen_ECHO_REGIME_is_installed_is_OBSERVED_not_assumed` reads
+the installed regime rather than assuming one.
 
 ##### Verifying a hand-pasted note (the browser-clipboard leg)
 
@@ -359,8 +388,8 @@ disaster-recovery key gets rotated, or a tampered backup gets waved through:
 | `28` `NO-ARTIFACT` | zero objects under the prefix | wrong `--host`/prefix, or the backups are gone — `restore-verify.py` diagnoses which |
 | `29` `AGE-MISSING` | `age` is not on PATH | environment fault; says nothing about the escrow |
 | `30` `ARTIFACT-UNREADABLE` | failed before the key was used | diagnose the object, not the key |
-| `25` `DECRYPT-FAILED` | age wrote **nothing**: wrong key **or** damaged header — **not separable** | try a **different** artifact (`--scope <other>`) with the same escrowed copy: if another opens, the key is fine and this object's header is damaged. **Do not rotate first.** |
-| `33` `ARTIFACT-CORRUPT` | age authenticated the header (**the key worked**) then failed the payload | 🔴 **the backup is TAMPERED/CORRUPT/TRUNCATED.** Check the other retained objects. Do not rotate. |
+| `25` `DECRYPT-FAILED` | age refused **before the payload**: wrong key **or** damaged header — **not separable**. ⚠ The same code also carries a second message, *"CANNOT SAY WHY"*, when age refuses in a way this tool cannot read — then **three** causes stay open, corruption included. Read the sentence, not just the number. | try a **different** artifact (`--scope <other>`) with the same escrowed copy: if another opens, the key is fine and this object's header is damaged. **Do not rotate first.** |
+| `33` `ARTIFACT-CORRUPT` | age got past the header — **the key worked** — and then failed: a payload chunk that would not authenticate, or an artifact that ran out of bytes. ⚠ The same code carries a **second** message for a damaged header MAC, where age proved the key and never read a payload byte. Read the sentence, not just the number. | 🔴 **the backup is TAMPERED/CORRUPT/TRUNCATED.** Check the other retained objects. Do not rotate. |
 | `31` `ARTIFACT-EMPTY` | age exited **zero** on an empty payload (**the key worked**) | the artifact holds nothing; do not rotate |
 | `26` `RESTORE-FAILED` | decrypted fine, the git bundle is bad | artifact fault; do not rotate |
 
@@ -368,11 +397,72 @@ disaster-recovery key gets rotated, or a tampered backup gets waved through:
 the `--host` prefix trap `restore-verify.py` documents), and neither is a verdict
 on the escrow.
 
-Measured (age v1.3.1, many offsets and sizes): a wrong key or a damaged header
-leaves **no** plaintext file, while payload corruption and truncation leave one —
-because age writes output *before* authenticating the payload. That, plus a
-machine-readable cause published by `restore-verify.py`, is what separates the
-rows; none of it is parsed out of age's stderr.
+🔴 **HOW `25` AND `33` ARE TOLD APART — AND HOW THAT GOT WEAKER (2026-09-08).**
+
+Originally: measured on age **v1.3.1**, a wrong key or a damaged header left
+**no** plaintext file, while payload corruption and truncation left one, because
+age created its `--output` as soon as it had authenticated the header. File
+presence therefore *was* the discriminator, and none of it was parsed out of
+age's stderr.
+
+**age v1.3.2 took that away.** It creates `--output` **lazily**, on the first
+successful write — re-measured 2026-09-08 across 7 payload sizes × 5 manglings
+on both versions. So a tampered artifact **under 64 KiB leaves no file at all**,
+which is every artifact this subsystem produces. Left alone, that reported a
+TAMPERED backup as `25` — the row that points at your key.
+
+The distinction **survives**, but on weaker footing: it is now taken primarily
+from age's own refusal message, which is byte-identical on v1.3.1 and v1.3.2.
+File presence is kept as a second signal — still **sufficient**, no longer
+**necessary**. Both are combined in `escrow-verify.py`; the classification itself
+is `restore-verify.py::classify_age_refusal`.
+
+🔴 **THE FIRST VERSION OF THAT TABLE HAD THREE ENTRIES AND MISSED THREE ORDINARY
+FAULTS (corrected 2026-09-09).** An adversarial audit of the change above drove
+really-damaged artifacts through the real verifier on both age versions and found
+that a flipped header-MAC bit, a payload stripped to nothing, and a payload
+truncated to 8 bytes each produce a refusal none of the three entries named — so
+they landed in the *"CANNOT SAY WHY"* message, which told the operator age had
+probably reworded when the artifact was simply damaged. The table is now keyed on
+**where age got to**, which is the thing the verdict actually turns on:
+
+| age said | reached | classification |
+|---|---|---|
+| `no identity matched any of the recipients` | no identity shown to work | pre-auth → `25` |
+| `failed to read header`, `failed to parse X25519 recipient`, `invalid X25519 recipient block` | no identity shown to work | pre-auth → `25` |
+| `bad header MAC` | **a stanza unwrapped** — the key WORKS — but the header failed its integrity check | key proven → `33` |
+| `failed to decrypt and authenticate payload chunk` | **past the header** | post-auth → `33` |
+| `failed to read nonce`, `unexpected EOF`, `last chunk is empty` | **past the header** | post-auth → `33` |
+
+🔴 **`bad header MAC` is the one to read twice.** It was filed pre-auth in the
+first draft of this table, where row `25` tells the operator *"the escrowed
+identity does not match … if none open, the key is the likely cause"* — a
+rotation-shaped sentence about a key the message vindicates. The discriminating
+control, measured on both versions: decrypt the **same** damaged blob with the
+right identity and with a wrong one — `bad header MAC` vs `no identity matched`.
+age reaches the header's integrity check only after an identity has unwrapped a
+recipient stanza, so that message is positive evidence the escrow **works**. It
+gets `33` with its own sentence, because `33`'s usual wording asserts age
+*authenticated* the header, which is what a MAC failure means it did not.
+
+The pre-auth/post-auth split is measured, not reasoned: age authenticates the
+whole header before it reads the nonce, so truncating *inside* the header and
+truncating *after* it produce disjoint messages (every in-header truncation
+carries `failed to read header`). A post-auth refusal therefore proves the
+escrowed identity opened the header, which is exactly what `33` claims. Note the
+first line of `classify_age_refusal`'s marker tuple order is load-bearing for
+this: age's in-header EOF messages nest the post-auth clause inside the pre-auth
+one, so the pre-auth markers are matched first.
+
+⚠ **Say plainly what that costs:** a substring match on another tool's prose is
+weaker than the phase observation it replaced, and this subsystem's own design
+notes argue against exactly that shape. The mitigation is that an
+**unrecognised** message is still its own outcome — the verifier then says it
+*cannot say why* and names all three causes, rather than picking one. If you see
+that sentence, age has said something no measured fault produces: teach
+`classify_age_refusal` the new string rather than acting on a guess. ⚠ And do not
+read "no measured fault reaches it" as "nothing can" — that is a claim about a
+sweep, and the sweep above is what the previous one's wording got wrong.
 
 ⚠ It cannot unlock the vault and will not try: every `bw` call runs with stdin on
 `/dev/null`, `--nointeraction`, and a timeout, so an unattended run **fails fast

@@ -105,6 +105,16 @@ ALLOWLIST = [
     ("scripts/tests/test_handoff_index.py", "assert first.startswith(",
      "ASSERTS a module's shebang shape to justify its executable bit; writes no "
      "stub and execs nothing"),
+    # Shape (b) once more, and the same needle-without-the-prefix rule as the
+    # entry above: `scripts/cairn-who` goes on PATH as a bare command via
+    # `mkOutOfStoreSymlink`, so a file there without a shebang is a
+    # `command not found` that reads as a broken deploy. The test READS the
+    # launcher off disk and asserts the first line's two-character prefix; it
+    # writes no stub and execs nothing, so `testlib.mockbin.write_exec` has
+    # nothing to own here.
+    ("scripts/tests/test_cairn_split.py", "assert first.startswith(",
+     "ASSERTS the cairn-who launcher's shebang shape to justify its executable "
+     "bit; writes no stub and execs nothing"),
     ("scripts/tests/test_playwright_nixos.py", "/bin/sh",
      "writes /bin/sh directly — absolute, present in the sandbox"),
     ("scripts/tests/test_notify_failure.py", "_bash",
@@ -145,6 +155,22 @@ ALLOWLIST = [
      "alternative and the stub bodies are POSIX sh. It arrived carrying the "
      "/usr/bin/env defect and this guard caught it on its first gate run — "
      "which is the guard working, not a reason to widen it"),
+    # 🔴 A THIRD SHAPE, and the only one where an UNRESOLVABLE interpreter is the
+    # point. test_the_verifier_runs_with_its_shebang_BROKEN writes a deliberately
+    # nonexistent interpreter onto a COPY of check-nebula-relays.sh and then asserts
+    # the run still SUCCEEDS — proving apply-nebula-relay.sh reads the verifier
+    # through "$BASH" rather than exec'ing it. This is the guard's own hazard
+    # inverted into a control: if the interpreter ever started mattering, that test
+    # fails loudly, which is the opposite of the silent breakage this scan exists to
+    # prevent. Nothing execs the stub, so an unresolvable path cannot hide anything.
+    # It names the path fragment rather than a shebang so this file's
+    # test_this_guards_source_does_not_match_itself stays green.
+    ("scripts/tests/test_nebula_relay_apply.py", "nonexistent/interpreter",
+     "shape (c) — writes an INTENTIONALLY unresolvable interpreter as a negative "
+     "control and asserts the run succeeds anyway; the stub is never exec'd"),
+    ("scripts/tests/test_nebula_relay_apply.py", "original.startswith",
+     "shape (b) — ASSERTS the copied verifier still has a shebang before the line "
+     "above replaces it; writes nothing"),
 ]
 
 

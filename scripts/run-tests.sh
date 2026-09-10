@@ -106,6 +106,17 @@
 #              source, precisely because nobody TYPED it and it is therefore
 #              the harder of the two to notice. Prefer the flag; export this
 #              only for the length of one command.
+#   DEVRC_TEST_BUDGET_ONLY
+#              TEST SEAM. Stop right after the `parallelism =N` banner, having
+#              run no tests at all, and exit 3. Exists so
+#              `scripts/tests/test_run_tests_jobs.py` can observe the worker
+#              budget eleven times without paying eleven full nested runs. It
+#              can only ever make a run RED — see the block next to the banner.
+#   DEVRC_TEST_CGROUP_ROOT / DEVRC_TEST_CGROUP_SELF
+#              TEST SEAM. Point the CPU-quota walk at a fake cgroup hierarchy so
+#              the container branch (a quota NARROWER than the node's core
+#              count) is testable on a host that has no quota — which is every
+#              host here. See the _devrc_cpu_budget block.
 #
 # Usage:
 #   scripts/run-tests.sh [--set hermetic|all] [--check-targets] [--check-floors]
@@ -1081,7 +1092,10 @@ fi
 #
 # 🔴 WHAT THIS CAN NO LONGER CATCH, stated plainly rather than left to be
 # discovered: deleting up to `min(50, m/20)` tests from a SINGLE target is now
-# silent — up to 50 of scripts/tests' ~1900, 1 of the 13-test i3 suite. The old
+# silent — up to 50 of scripts/tests' 12870 (⚠ this figure read "~1900" and
+# undated until 2026-09-08; it was 6.8x stale, which understates the target and
+# so OVERSTATES the proportion this blind spot covers), 1 of the 13-test i3
+# suite. Re-derive it rather than trusting it — nothing asserts on it. The old
 # exact total went red on a one-test deletion. That precision is what cost
 # eleven reconciliations in a day, and it has never once caught a real deletion;
 # the collapses it exists for — a suite emptied, renamed, dropped from
@@ -1684,7 +1698,54 @@ TARGET_FLOORS=(
   # own count put through the gate's formula and printed BY the gate, not
   # arithmetic on the two sides. Pinned AFTER merging main into the branch, per
   # the ORDER note above.
-  "scripts/tests|12793"
+  # 2026-09-08, MERGED: main's `cairn-who` split (12870) plus #1370's 54-test
+  # preflight harness. Neither side's number survives the merge — this one was
+  # re-derived by running the gate on the MERGED tree and putting its own
+  # printed count through `_suggested_floor`, per the note both sides carried.
+  # ⚠ Carried forward from main, because an audit round read it as closing more
+  # than it does: the ratchet removes ACCUMULATED drift, not the per-target
+  # slack, and ~50 is what the rule deliberately leaves. A suite inside that
+  # band is not protected from silent deletion by this floor.
+  #
+  # 2026-09-08, the cairn flake pin: 13076 collected, so 12927 carried 149 of
+  # SLACK. 13076 - min(50, max(1, 13076/20)) = 13076 - 50 = 13026, the
+  # AUTHORITATIVE gate's own printed count put through the documented rule, and
+  # pinned AFTER rebasing onto origin/main (01956bf0) per the ORDER note — a
+  # floor is a claim about the tree you measured.
+  # ⚠ THE +8 IS THIS BRANCH'S AND WAS ATTRIBUTED, NOT ASSUMED. The same gate ran
+  # on PLAIN origin/main in a separate detached worktree as the control and
+  # printed collected=13068; the branch printed 13076. The delta is exactly
+  # `scripts/tests/test_cairn_flake_pin.py`'s 8 tests, and all 8 pass.
+  # ⚠ Both runs also reported failed=20, every one in `test_nebula_relay_apply.py`
+  # (arrived with #1272) — IDENTICAL on both sides, which is what makes the
+  # collected count above trustworthy despite a red gate: whatever those are,
+  # they are not this branch.
+  # 🔴 BUT "main is red on its own" IS NOT A DURABLE PROPERTY: an audit round
+  # measured 30 passed / 0 failed in that same file at `01956bf0`, hours later.
+  # 🔴 AND THE DIAGNOSIS WRITTEN HERE FOR THAT PAIR WAS WRONG — RETRACTED IN
+  # PLACE so nobody re-derives it. It said the suite "reads LIVE HOST STATE
+  # (`/etc/nebula/ca.crt`, `/etc/nixos/configuration.nix`)", that #1272's sudo
+  # apply "flips it from red to green with no commit involved", and therefore
+  # that "its result is keyed to the HOST, not to the tree". Both readings were
+  # real; the inference was not. The split was between TIERS and the cause was in
+  # the TREE. `apply-nebula-relay.sh` executed the verifier directly, which
+  # dispatches on its `#!/usr/bin/env bash` shebang; the nix build sandbox has no
+  # /usr/bin, so every exec died with `bad interpreter` and the script printed
+  # `ABORT: the verifier could not read the current config (rc=126)`. rc 126 is
+  # "found but not executable" and is none of the verifier's own codes, which is
+  # why the abort blamed the CONFIG for an interpreter fault and the failure did
+  # not read as a shebang problem. The dev-host tier — which HAS /usr/bin/env —
+  # was green throughout, so the two readings were two TIERS, not one host
+  # changing state. #1407 (4f12fcef, merged into this branch) fixed it in the
+  # TREE by running the verifier through `$BASH`; measured on this branch after
+  # that merge, dev-host tier: 30 passed, 0 failed. (That is a dev-host
+  # measurement and says nothing about the sandbox tier — read both, per the
+  # DEVHOST_TARGETS note and the one-tier-floor note above, which this now
+  # agrees with instead of contradicting.)
+  # ⚠ The `age`/`opencode` 7 that were red the same morning are GONE; main fixed
+  # them. This baseline has gone stale twice in one day: RE-DERIVE it with a
+  # control run, never quote these numbers.
+  "scripts/tests|13026"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -3341,10 +3402,17 @@ EXPECTED_SKIPS=(
   # recommends for a bisect or a flake hunt. Before this entry that mode exited
   # 1 on GUARD 2 alone: #841 introduced both the test and the parallelism, so it
   # shipped a race whose documented workaround it had broken.
-  # ⚠ "the gate tiers run parallel" is NPROC-DERIVED, NOT structural, so say the
-  # conditional part out loud: `_devrc_default_jobs` is `min(nproc, 4)`, and the
-  # comment beside it anticipates 1–2-core CI nodes. Measured 2026-08-26 on
-  # THIS host: `nix build .#checks.x86_64-linux.pytests` logged
+  # ⚠ "the gate tiers run parallel" is DERIVED FROM THE MACHINE, NOT structural,
+  # so say the conditional part out loud: `_devrc_default_jobs` is
+  # `min(nproc, narrowest cgroup v2 quota, 8)` — see the block that computes it —
+  # and it anticipates 1–2-core CI nodes — the RUNNER does: at one core it
+  # yields 1 and goes serial, which is a supported mode.
+  # ⚠ `scripts/tests/test_run_tests_jobs.py` does NOT: it needs >= 2 usable CPUs
+  # to tell the quota branch from the `nproc` fallback, and is RED (not skipped)
+  # at one, deliberately and loudly. Its header states the boundary and why a
+  # skip is not the remedy. The two claims are about different things and must
+  # not be read as contradicting each other. Measured 2026-08-26 on THIS host, when
+  # the cap was still 4: `nix build .#checks.x86_64-linux.pytests` logged
   # `parallelism =4 (-n 4 --dist loadfile)`, so the sandbox saw >= 4 cores and
   # the control ran. On a genuinely 1-core builder the gating tier is SERIAL, this
   # pin applies, and GUARD 9's positive control does not run behind a green
@@ -3531,13 +3599,112 @@ _count_of() { # $1 = alternation regex, $2 = summary line
 # this in a pod requesting 1 CPU (limit 4); on a 1-2 core node a fixed -n 4
 # oversubscribes and pushes every timing-sensitive test in the suite — the 15s
 # subprocess waits, the gitenv settle re-read — toward its deadline, which turns
-# a capacity problem into a flaky gate. Capped at 4 because the measured win is
-# concentrated in one target and more workers past that buy little.
+# a capacity problem into a flaky gate.
+#
+# 🔴 THE BUDGET IS THE CGROUP QUOTA, NOT `nproc` — and on the tier that made the
+# old cap of 4 necessary, those two DISAGREE. `nproc` reports the cores of the
+# NODE, not the container's limit, so in the `devrc-ci` pod (limit 4 on a much
+# larger node) `nproc` answers with the node's count and every "adapt to the
+# machine" formula built on it silently oversubscribes by that factor. The old
+# `min(nproc, 4)` was not really adapting: the constant 4 was doing the work,
+# and it happened to equal the CI pod's limit. Reading `cpu.max` makes the
+# adaptation real — it yields exactly 4 in that pod for the RIGHT reason, and
+# yields the true core count on a dev host where there is no quota.
+#
+# ⚠ MEASURED, both branches, 2026-09-08: on the workbench every cgroup v2 level
+# from the leaf scope up to `user.slice` reads `max 100000` (no quota), so the
+# walk falls through to `nproc` = 24 and jobs = 8. A quota'd cgroup reads
+# `<quota> <period>`; 400000/100000 = 4 cores. Cgroup v1, an unreadable
+# hierarchy and a missing `/proc/self/cgroup` all fall back to `nproc`, which is
+# the pre-existing behaviour — this can only ever narrow the budget, never widen
+# it past what `nproc` already allowed.
+#
+# The ceiling is now 8 rather than 4. The measured win IS concentrated in one
+# target (`scripts/tests`, 40% of the run) and that is exactly the target with
+# enough files for `--dist loadfile` to keep 8 workers fed; the flat 4 left 20
+# of this box's 24 cores idle on a solo run. It is still a ceiling and not
+# `nproc`, because past ~8 the run is bounded by the biggest single FILE.
+#
+# TEST SEAM: DEVRC_TEST_CGROUP_ROOT / DEVRC_TEST_CGROUP_SELF point the walk at a
+# fake hierarchy so `scripts/tests/test_run_tests_jobs.py` can exercise the
+# quota branch on a host that HAS no quota — which is every dev host here, and
+# would otherwise leave the branch that matters (the CI pod's) untested on the
+# only machines anyone runs the tests on. A seam for tests, not a way to lie to
+# the runner about its own budget.
+_devrc_cpu_budget() {
+  # Narrowest readable cgroup v2 quota, walking leaf -> root; first numeric
+  # quota wins. Fail-open: any unreadable step just leaves the answer empty.
+  local cg d q p root self
+  root="${DEVRC_TEST_CGROUP_ROOT:-/sys/fs/cgroup}"
+  root="${root%/}"           # normalised so the `break` below can string-compare
+  [ -n "$root" ] || root="/"
+  self="${DEVRC_TEST_CGROUP_SELF:-/proc/self/cgroup}"
+  # 🔴 THE `0::` LINE, NOT THE FIRST LINE. `cut -d: -f3 | head -1` took whichever
+  # line came first, and on a HYBRID v1+v2 host that is a cgroup v1 controller
+  # line — so a real v2 quota was missed and the budget silently fell back to
+  # `nproc`. `sed -n 's/^0:://p'` selects the unified-hierarchy line by its own
+  # marker, and because it strips a fixed PREFIX rather than splitting on `:` it
+  # also survives a cgroup path that itself contains a colon (a systemd scope
+  # name can).
+  cg="$(sed -n 's/^0:://p' "$self" 2>/dev/null | head -1)"
+  [ -n "$cg" ] || return 0
+  # 🔴 STRIP THE TRAILING SLASH BEFORE THE WALK. In a k8s cgroupns-private
+  # container `/proc/self/cgroup` reads `0::/`, so `${root}${cg}` is
+  # `<root>/` — which never string-equals `$root`, so the `break` below never
+  # fires, and `dirname "<root>/"` returns the PARENT of the root. The walk then
+  # climbs out of the hierarchy it was given, which is exactly the escape the
+  # break exists to prevent. Normalising here makes the terminator comparable.
+  d="${root}${cg}"
+  d="${d%/}"
+  [ -n "$d" ] || d="/"
+  while [ "${d:-/}" != "/" ]; do
+    if [ -r "$d/cpu.max" ]; then
+      # Reset BEFORE the read, not after. The intent: a `read` that fails
+      # (empty file, short line) must not leave the PREVIOUS iteration's values
+      # in place, because a deeper level's quota re-reported as this level's is
+      # a wrong number rather than a missing one.
+      #
+      # ⚠ LABELLED HONESTLY — THIS IS AN INVARIANT GUARD, NOT TESTED COVERAGE.
+      # Measured 2026-09-08 by deleting these two assignments and running
+      # `scripts/tests/test_run_tests_jobs.py`: the WHOLE file passed and the
+      # mutant SURVIVED. (Deliberately no test count — the first version of this
+      # line said "15 passed" and was stale within the same round, because a case
+      # was added after it was written. The finding is "nothing died", which does
+      # not depend on how many tests there are.) No
+      # fixture reachable through the DEVRC_TEST_CGROUP_* seam can make it
+      # matter — bash's `read` assigns its variables even when it returns
+      # non-zero at EOF, and this walk RETURNS on the first numeric quota, so a
+      # stale NUMERIC pair can never reach a later iteration. Kept because it
+      # costs nothing and forecloses a silent failure if this loop ever stops
+      # returning early; do not count it as covered, and do not restate the
+      # earlier version of this comment, which asserted it was load-bearing.
+      q=""; p=""
+      read -r q p < "$d/cpu.max" 2>/dev/null || true
+      case "${q:-}" in
+        ''|max|*[!0-9]*) : ;;   # "max" = no quota at this level; keep walking up
+        *)
+          case "${p:-}" in ''|0|*[!0-9]*) : ;;
+            *) echo $(( q / p == 0 ? 1 : q / p )); return 0 ;;
+          esac ;;
+      esac
+    fi
+    # Stop at the hierarchy ROOT WE WERE GIVEN. Hardcoding /sys/fs/cgroup here
+    # would walk a seamed run straight out of its fake tree and on up to /.
+    [ "$d" = "$root" ] && break
+    d="$(dirname "$d")"
+  done
+  return 0
+}
 _devrc_default_jobs="$(nproc 2>/dev/null || echo 1)"
 case "$_devrc_default_jobs" in ''|*[!0-9]*|0) _devrc_default_jobs=1 ;; esac
-[ "$_devrc_default_jobs" -gt 4 ] && _devrc_default_jobs=4
+_devrc_quota="$(_devrc_cpu_budget 2>/dev/null || true)"
+case "${_devrc_quota:-}" in
+  ''|*[!0-9]*|0) : ;;
+  *) [ "$_devrc_quota" -lt "$_devrc_default_jobs" ] && _devrc_default_jobs="$_devrc_quota" ;;
+esac
+[ "$_devrc_default_jobs" -gt 8 ] && _devrc_default_jobs=8
 PYTEST_JOBS="${DEVRC_TEST_JOBS:-$_devrc_default_jobs}"
-unset _devrc_default_jobs
+unset _devrc_default_jobs _devrc_quota
 
 # Reject anything that is not a plain positive integer. `00` and `007` are
 # rejected too: they would pass a naive digit test, then fail `-gt 1` and run
@@ -3598,6 +3765,45 @@ fi
 # whether it was parallel cannot be compared against another run's timing, and
 # "it was serial all along" is exactly the failure the `unset` above prevents.
 echo "  parallelism =${PYTEST_JOBS} pytest worker(s)$([ "$PYTEST_JOBS" -gt 1 ] && echo " (-n ${PYTEST_JOBS} --dist loadfile)" || echo " (serial)")"
+
+# TEST SEAM: stop HERE, having computed and announced the worker budget and
+# nothing else.
+#
+# 🔴 WHY IT EXISTS. `scripts/tests/test_run_tests_jobs.py` asserts on the banner
+# line above and on nothing after it, but every case still needs its own process
+# (each drives a different fake cgroup through DEVRC_TEST_CGROUP_ROOT/SELF), so
+# it cannot share one run — ONE nested run per test case. Measured 2026-09-08 on
+# the workbench: a full nested run costs ~150s wall and spawns its own 8 xdist
+# workers inside an outer run that already has 8, so the cost added to the very
+# tier this change exists to speed up is ~150s TIMES the number of cases in that
+# file. With this seam each case costs the preamble only.
+# ⚠ Stated as a rate, not a total, on purpose: the first version said "eleven of
+# them — ~28 minutes" and both numbers were stale within the round that wrote
+# them (the file has 16 cases now). A total here drifts every time a case is
+# added; a rate does not.
+#
+# 🔴 IT CANNOT MANUFACTURE A GREEN. The exit is NON-ZERO on purpose, so the EXIT
+# trap emits `RESULT: FAIL (exit=3)`: a run that executed no tests must never be
+# readable as a pass, and an ambient `DEVRC_TEST_BUDGET_ONLY` leaking into a real
+# gate run therefore reds it loudly instead of quietly skipping the suite. Exit 3
+# is this file's established "an environment precondition stopped the run before
+# it could say anything about the tests" code — the same one `--targets` and the
+# DEVRC_TEST_JOBS validation use — and is deliberately NOT 1 ("tests failed").
+# 🔴 ALL THREE LINES ON ONE STREAM. They used to be two on stdout and the third
+# on stderr, splitting a sentence mid-clause: a stdout-only reader got "…This is
+# a test seam for" with no object, and a stderr-only reader got "…never a way to
+# pass the gate." with no subject. The loudness this block relies on is exactly
+# the part that fragmented. stderr is the right stream for a warning — the
+# machine-read `RESULT:` line stays on stdout, where its consumers parse it.
+# The test cannot catch this on its own: it reads `stdout + stderr` concatenated.
+if [ -n "${DEVRC_TEST_BUDGET_ONLY:-}" ]; then
+  {
+    echo "run-tests: DEVRC_TEST_BUDGET_ONLY is set — stopping after the parallelism"
+    echo "           banner. NO TESTS RAN. This is a test seam for"
+    echo "           scripts/tests/test_run_tests_jobs.py, never a way to pass the gate."
+  } >&2
+  exit 3
+fi
 
 # --- session-marker accounting, shared by GUARDS 7, 8 and 10 -------------------
 # All three ask the same question of the same quantity — "did this plugin
@@ -3945,6 +4151,34 @@ SHELL_TESTS=(
   # nothing. Watched red: mutating `APPLY=0` to `APPLY=1` fails it with
   # "the gate is bypassed".
   "scripts/tests/test_cleanup_disk_gate.sh"
+  # Registered in the SAME commit that adds it, for the reason the entries above
+  # exist. It covers `scripts/diagnose-disk-accounting.sh` — ROOT-PRIVILEGED
+  # bash that had no test file at all, in a repo with no shellcheck gate, which
+  # is precisely why a root COMMAND INJECTION (a planted /tmp directory name
+  # reaching `xargs -I{} sh -c`) and two silent whole-run aborts shipped
+  # invisibly. Nothing in it needs root: the script has a sourceable seam that
+  # returns before the root check, and the suite drives the pure transforms
+  # against fixtures — an lsof header in two different column layouts, a
+  # directory literally named `evil";echo PWNED-AS-$(id -un) >&2;"x`, and a
+  # ~17,500-entry tree sized from the live ARG_MAX. It reaches no launcher, no
+  # network and no git.
+  # 🔴 THIS COMMENT HAS NOW CARRIED A WRONG LINE COUNT TWICE, in the commit
+  # correcting the previous wrong one each time. It said "282 lines"; round 2
+  # replaced that with "282 at the merge base (567 after round 1, 730 after
+  # round 2)" — and 730 was false the moment it was typed (the file was 766).
+  # A count of a file that changes every round cannot be maintained in a comment
+  # in a different file, so none is stated here: run
+  # `wc -l scripts/diagnose-disk-accounting.sh`. The only figure that cannot go
+  # stale is anchored to a sha, and one is enough — the file entered this PR's
+  # history at 282 lines (`git show c1169e3b:scripts/diagnose-disk-accounting.sh
+  # | wc -l`) and has grown with each audit round since.
+  # The other half of the old stale claim: the seam was described as
+  # `BASH_SOURCE[0] != $0 returns before the root check`. That expression was
+  # MEASURED reachable from the environment, removed, and is now a banned
+  # pattern in the suite's own scanner — which only reads
+  # `diagnose-disk-accounting.sh`, so this copy survived it.
+  # Watched red: `s += $col` -> `s += $8` fails it with "SIZE/OFF found at col 7".
+  "scripts/tests/test_diagnose_disk_accounting.sh"
 )
 # 🔴 THE SHELL TESTS ARE IN THE TIMING CENSUS TOO, and the reason is the census's
 # own honesty: it is presented as an accounting of the run, so a population it

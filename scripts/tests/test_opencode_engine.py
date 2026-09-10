@@ -11,7 +11,7 @@ duplicate of it).
   That is a real gap, and it is exactly the gap the version pin exists to cover:
   a config whose keys are unchanged can have its RESOLVED MEANING changed by the
   binary underneath it. opencode.jsonc's header documents a large set of
-  behaviours annotated "measured on v1.18.21 — do not re-derive" — last-match-
+  behaviours annotated "measured on v1.18.29 — do not re-derive" — last-match-
   wins ordering, hidden agents inheriting the global permission block, the exact
   tool set. A static test cannot see any of those change. This file runs the
   real engine and checks them.
@@ -91,7 +91,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OC_DIR = ROOT / "scripts" / "opencode"
 TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 
-# 🔴 THE PIN. Every "measured on v1.18.21" claim in opencode.jsonc's header, in
+# 🔴 THE PIN. Every "measured on v1.18.29" claim in opencode.jsonc's header, in
 # scripts/opencode/README.md and in test_opencode_config.py's docstrings is keyed
 # to this exact version. It is pinned declaratively by nix/pkgs/tools/default.nix
 # resolving `pkgs.opencode` out of flake.lock's nixpkgs.
@@ -190,9 +190,70 @@ TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 #     not apply: `nix profile list` carries no opencode entry, and PATH resolves
 #     into /nix/store/...-opencode-1.18.21 out of the flake itself. This is a
 #     genuine lock movement, not per-host profile drift.
-PINNED_VERSION = "1.18.21"
+#
+# 🔴 RE-DERIVED 1.18.21 -> 1.18.29 (2026-09-08). Another nixpkgs bump moved
+# `pkgs.opencode` under an unchanged config. This pass ran the STRONGER control
+# that the 2026-08-29 entry above explicitly DECLINED — the dual-binary dump —
+# because the superseded binary was still realised in the local store
+# (`/nix/store/...-opencode-1.18.21`), so it cost nothing to rebuild. What was
+# measured, in the DEV SHELL (`nix develop`), which is the tier the gate runs in:
+#
+#   * SEVEN-AGENT DUAL DUMP. `debug agent <a> --pure` for all seven agents under
+#     BOTH binaries, from a config dir seeded out of this repo, canonicalised
+#     (every array sorted) with the harness's own TMPDIR normalised out:
+#     IDENTICAL on all seven — permissions as a set, the resolved tool map
+#     INCLUDING its key set, and the model. Unlike the pass two bumps back,
+#     even `compaction`'s built-in prompt did not move.
+#   * ORDERED bash rule arrays for the four primaries, compared position by
+#     position WITHOUT sorting: equal, at 66 / 67 / 68 / 93 rules
+#     (build / nav / k8s / review). Last-match-wins ordering is exactly what that
+#     comparison pins, and it did not move.
+#   * CONTROLS, reported as a PAIR rather than as a bare "identical":
+#       - same-binary control — two runs of the incoming binary collapse to
+#         identical for all seven agents, so the canonicalisation is validated
+#         and "identical" is not readdir noise being sorted away.
+#       - comparator negative control — flipping ONE boolean in one dump's tool
+#         map makes the comparator name that agent and that key, so "identical"
+#         is not a comparator wired to nothing.
+#   * `nav`'s ENABLED tool set (NAV_EXPECTED_TOOLS below) read off the engine on
+#     BOTH binaries: {glob, grep, invalid, read} on each, out of the same
+#     12-key map — so the "no `list` tool and no `websearch` tool" claim is
+#     re-derived, not re-spelled.
+#   * The browser-only tool-set gate (scripts/browser-bridge/browser-agent's
+#     fail-closed `debug agent browser-agent` check) replicated against BOTH
+#     binaries by rebuilding its scratch project exactly as the wrapper does:
+#     exactly one enabled tool, `browser`, out of 13, with every host tool
+#     present and false, on each. 🔴 ON ONE HOST ONLY — see the next bullet.
+#   * This whole file against the NEW binary with the OLD pin: 1 failed (exactly
+#     the version assertion below), 24 passed — the same load-bearing control the
+#     two entries above ran, and it says every other engine claim holds on the
+#     incoming binary rather than the harness being green by default.
+#
+# 🔴 NOT COVERED by this pass, named so nobody reads it as more than it is:
+#   * THE LAPTOP — ✅ NOW COVERED, 2026-09-08. This entry read "the laptop was
+#     UNREACHABLE at the time (ssh to its nebula address refused), so those
+#     sentences are now split". It answers on nebula now, and by the same method
+#     (`readlink -f $(command -v opencode)` in a LOGIN shell) it resolves to the
+#     identical store path as the workbench: `6pw7n475…-opencode-1.18.29`. The
+#     split sentences elsewhere have been re-conjoined ON THAT EVIDENCE — which
+#     is the only thing that licenses re-conjoining them.
+#     ⚠ Still NOT covered on the laptop: the browser-only RESOLUTION
+#     (`opencode debug agent`). The version and the resolution are two claims;
+#     closing the cheap one does not close the other.
+#   * The DEV SHELL is not the interactive shell — the PRINCIPLE STANDS, its
+#     EXAMPLE WAS FALSE and is retracted. It read that the two "did NOT agree on
+#     `age` in the same session". MEASURED 2026-09-08: non-interactive zsh,
+#     login zsh, login bash and the devShell ALL resolve age v1.3.2, on both
+#     hosts — nothing resolves v1.3.1 anywhere, though v1.3.1 derivations do
+#     remain in the store. The claim was true when written or was never
+#     re-checked; either way it is not true now, and an example that has rotted
+#     argues for the principle less well than no example. "The version on PATH"
+#     is still a claim about ONE shell until you say which — that part needed no
+#     example to be true.
+PINNED_VERSION = "1.18.29"
 
-# MEASURED via `opencode debug agent nav --pure` at 1.18.21. This is the cost AND
+# MEASURED via `opencode debug agent nav --pure` at 1.18.29, on BOTH the incoming
+# and the superseded binary (identical). This is the cost AND
 # blast-radius pin that test_opencode_config.py's `test_nav_is_kept_lean` only
 # asserts about the CONFIG KEYS; here it is read off the engine's resolved tool
 # map. `skill` alone injects the ~3,730-token catalogue on every request.
@@ -661,6 +722,16 @@ def test_engine_is_the_version_every_measurement_is_keyed_to():
     signal, and it clears with the documented one-time per-host prerequisite:
 
         nix profile remove opencode   # then home-manager switch / ship.sh
+
+    🔴 BUT DO NOT REACH FOR THAT FIRST — it was the cause ONCE, in 2026-08, and
+    every red since has been a LOCK MOVEMENT instead. An empty result cannot tell
+    the two apart, so run the discriminating check rather than the plausible
+    remedy (2026-09-08: `nix profile remove opencode` answered "does not match
+    any packages in the profile", the home-manager generation ITSELF provided the
+    new binary, and `nix eval` of the generation's `home.packages` said a switch
+    would build the version already installed — i.e. no switch and no profile
+    removal could have cleared it). The assertion message below carries the
+    check.
     """
     exe = _opencode_bin()
     # Through `_run_opencode` like everything else. `--version` is ~7 bytes and
@@ -676,13 +747,25 @@ def test_engine_is_the_version_every_measurement_is_keyed_to():
         f"claim in scripts/opencode/opencode.jsonc, scripts/opencode/README.md "
         f"and scripts/tests/test_opencode_config.py is keyed to "
         f"{PINNED_VERSION!r}.\n"
-        f"  * On a DEV HOST this usually means the old imperative profile entry "
-        f"is still winning PATH. Fix: `nix profile remove opencode`, then "
-        f"`home-manager switch --flake ~/workspace/devrc --impure`.\n"
+        f"  * FIRST run the DISCRIMINATING check — there are two causes and they "
+        f"need opposite fixes, so do not guess:\n"
+        f"        nix profile list | grep -i opencode\n"
+        f"        readlink -f \"$(command -v opencode)\"\n"
+        f"    An imperative profile entry that wins PATH is a HOST problem: "
+        f"`nix profile remove opencode`, then `home-manager switch --flake "
+        f"~/workspace/devrc --impure`. NO profile entry, with PATH already "
+        f"resolving into a store path the flake built, is a LOCK MOVEMENT, and "
+        f"no amount of switching will change it.\n"
         f"  * If flake.lock genuinely moved opencode, do NOT just bump "
         f"PINNED_VERSION: re-derive the header's measurements against the new "
         f"binary first (the rest of this file tells you which ones changed), "
-        f"then update both together."
+        f"then update both together. The superseded binary is usually still "
+        f"realised in /nix/store (`ls -d /nix/store/*-opencode-*`), which makes "
+        f"the seven-agent dual dump the cheapest control available — run it "
+        f"rather than declining it.\n"
+        f"  * Say WHICH SHELL you measured in. `nix develop` and the login shell "
+        f"can carry different builds of the same tool, and the gate runs in the "
+        f"dev shell."
     )
 
 
@@ -797,6 +880,24 @@ _VERSION_RE = re.compile(
 # nothing and reads as an orphan. Snippets carry no version literal of their own,
 # or they would match themselves when this file is scanned.
 HISTORICAL_VERSION_CLAIMS = (
+    # 🔴 Added by the 2026-09-08 re-derivation pass. Each of
+    # these is a line in the PRIOR pass's own record — a statement about what was
+    # measured THEN, which does not become false when the pin moves and must not
+    # be relabelled to a version nobody ran that measurement on.
+    # (No version literals in this comment: it is scanned like every other line
+    # in this file.)
+    ("scripts/tests/test_opencode_engine.py", "and the harness is shown to",
+     "the prior pass's own account of the control it ran, at the version it ran it on"),
+    ("scripts/tests/test_opencode_engine.py", "out of the flake itself",
+     "the prior pass's record of the store path PATH resolved into at the time"),
+    ("scripts/tests/test_opencode_engine.py", "the same …-opencode-",
+     "the 2026-08-19 convergence record's store path; history"),
+    ("scripts/tests/test_opencode_engine.py", "Another nixpkgs bump moved",
+     "names the 2026-09-08 transition itself"),
+    ("scripts/tests/test_opencode_engine.py", "it cost nothing to rebuild",
+     "the superseded binary's store path, which is what made the dual dump cheap"),
+    ("scripts/opencode/agent/k8s.md", "a dated incident record,",
+     "the k8s index-74 record; its counts describe a tree that no longer exists"),
     # 🔴 Added by the 2026-08-29 re-derivation pass. Each is a claim the engine
     # tests do NOT re-derive, so re-keying it would have been relabelling a
     # measurement nobody repeated — the exact thing this ledger exists to stop.
@@ -898,18 +999,23 @@ HISTORICAL_VERSION_CLAIMS = (
     # session.) The sentences are now SPLIT: the host-version half
     # carries the pin and is re-derived, and each resolution half is dated to its
     # last real measurement and exempted here.
-    ("scripts/browser-bridge/README.md", "browser-only RESOLUTION is last verified",
-     "browser-agent resolution — not re-derived at the pin; nothing in CI observes it"),
-    ("scripts/browser-bridge/README.md", "It was NOT re-derived at the",
-     "the pre-bump measurements cited as evidence the bumps were no-ops"),
-    ("scripts/browser-bridge/README.md", "since the check",
-     "custom-tool mechanism — needs the real binary, not re-derived at the pin"),
-    ("scripts/browser-bridge/README.md", "below needs the real binary",
-     "the pre-bump measurement behind that custom-tool claim"),
-    ("scripts/browser-bridge/reference/agent.md", "It has NOT been re-derived at",
-     "the misattribution warning's evidence — measured at three older versions"),
-    ("scripts/browser-bridge/reference/agent.md", "resolution itself is last measured",
-     "browser-agent resolution for the gate claim — not re-derived at the pin"),
+    # 🔴 THE "NOT RE-DERIVED AT THE PIN" EXEMPTIONS FOR browser-agent ARE GONE,
+    # and their absence is the record. Six entries here used to exempt sentences
+    # saying the browser-only resolution was last verified two bumps back. The
+    # 2026-09-08 pass actually RAN it — the wrapper's own scratch project against
+    # the real pinned binary, and against the superseded one as a control — so
+    # those sentences now carry the pin and need no exemption. What replaced them
+    # is a narrower, TRUE caveat in the same paragraphs: measured on ONE host, by
+    # hand, with nothing in CI observing it. The entries below exempt the older
+    # versions those paragraphs still cite as prior art.
+    ("scripts/browser-bridge/README.md", "before those two.",
+     "the three earlier passes cited as prior art for the resolution claim"),
+    ("scripts/browser-bridge/README.md", "It was verified the same way on",
+     "same prior art, in the custom-tool-mechanism paragraph"),
+    ("scripts/browser-bridge/README.md", "in earlier passes, plus an end-to-end",
+     "the second line of that citation, incl. the one-off --tool browser run"),
+    ("scripts/browser-bridge/reference/agent.md", "in the passes before that.",
+     "the misattribution warning's prior art — measured at three older versions"),
     ("scripts/browser-bridge/reference/agent.md", "and resolved identically on",
      "the pre-bump measurements behind that gate claim"),
     ("scripts/tests/test_opencode_engine.py", 'Five lines said "both hosts run',
@@ -1166,7 +1272,7 @@ def test_engine_and_model_agree_on_every_pinned_command(engine_name, model_agent
 # --------------------------------------------------------------------------- #
 def test_engine_resolves_navs_tool_set_to_exactly_the_pinned_four():
     """test_opencode_config.py's `test_nav_is_kept_lean` docstring says "VERIFIED
-    against `opencode debug agent nav` on 1.18.21: the resolved tool set is
+    against `opencode debug agent nav` on 1.18.29: the resolved tool set is
     exactly {glob, grep, read} (+ the internal `invalid`)" — but that file
     asserts only the CONFIG KEYS, so the verification was a one-off nobody
     re-ran. This re-runs it every gate.

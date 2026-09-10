@@ -153,12 +153,24 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - **Graphical/agent-facing layer is home-manager, never `/etc/nixos`** (migrated PR #74; the old `i3config.nix`/`i3blocks.nix`/`i3blocks-scripts` are RETIRED). Cutover gotcha: finish with `sudo systemctl restart display-manager`, NOT `i3-msg restart`.
 - 🔴 **`scripts/agent-ops` — the "mission control" TUI — is RETIRED, and so are all three of its launchers** (`$mod+i`, tmux `prefix+A`, the ▦ bar button's click). Every panel has an owner: the clawgate queue + live runs → `session-manager`, cluster health → `obs-read`, **local systemd health** → `syshealth --systemd`, momentum + open PRs → `/initiative-scan`, the mail/clawgate counts → bar pills. The one part worth keeping, its `/proc` Claude-session detector, is now `scripts/lib/claude_sessions.py` — shared, and deployed beside the ▦ bar pill (`i3status-claude-runs`), which remains as an indicator. ⚠ fuzzyclaw (`~/.tmux/tasks/*.json`) is UNTRUSTED as a data source.
 - 🔴 **Zach works ENTIRELY via agents → modernization targets this agent-facing layer, NOT interactive-CLI ricing.**
-- **Several docs have enforced byte ceilings, each gated by its own test that OWNS the constants and prints an eviction playbook on failure** — `claude/RULES.md` (the only always-on one) plus the skill bodies `browser`, `prune-skill`, `session-manager` and `handoff`. 🔴 **Read the numbers in the tests, never restate them, and do not restate the LIST either** — `git grep -l MIN_HEADROOM_BYTES scripts/` answers it. This bullet has twice carried a count that was wrong within a day. Any addition needs an eviction in the SAME commit; raising a ceiling needs the commit message to say which instruction would not fit.
+- **Several docs have enforced byte ceilings, each gated by its own test that OWNS the constants and prints an eviction playbook on failure** — `claude/RULES.md` (the only always-on one) plus the skill bodies `browser`, `prune-skill`, `session-manager` and `handoff`. 🔴 **Read the numbers in the tests, never restate them.** 🔴 **And NO SINGLE GREP FINDS THEM ALL — this line said `git grep -l MIN_HEADROOM_BYTES scripts/` "answers it" and that was FALSE, measured 2026-09-07: the ceilings use different mechanisms, so that pattern misses `session-manager` (which this very bullet names — it uses `MIN_HEADROOM_ROWS`) and `clawgate` (asserted as a bare `st_size <=` inside `scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py`, a hook-guard test, not a `*_skill_size.py`).** The union below covers all six known today — `MIN_HEADROOM` alone still misses clawgate, `st_size <=` alone misses four:
+  ```bash
+  git grep -lE 'MIN_HEADROOM|st_size <=' -- scripts/   # ⚠ union, and NOT provably complete
+  ```
+  ⚠ It over-matches too (`dl-router/server.py`, `present/measure.py`, `skill-audit.py` are not doc ceilings), so read each hit rather than counting them. This bullet has now been wrong THREE times: twice carrying a count that was stale within a day, and once — for longer, because nobody re-ran it — carrying a discovery method that silently returned an incomplete set. A grep quoted as authoritative is a claim like any other; the only fix that would stop this recurring is a test enumerating ceilinged docs two-way, which does not exist yet. Any addition needs an eviction in the SAME commit; raising a ceiling needs the commit message to say which instruction would not fit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
+  🔴 **It RE-ENTERS `nix develop` itself — a pause at the start that is not a hang.** Launched
+  outside a gate environment it re-execs into the repo's dev shell instead of printing the
+  `nix develop …` line for you to re-type. Measured 2026-09-08 across every gate log dir on the
+  box, **101 of 382 runs (26%)** had died on that FATAL with pytest never starting, and 91 of
+  those 101 paid the node tier anyway. ⚠ The naive figure was **100 of 100**, and that
+  population was defined by the failure's own cause: the default `LOG_DIR` is a `mktemp -d`, so
+  only runs launched OUTSIDE the dev shell land in bare `/tmp` (101/101 there, 0 of 281
+  inside). `DEVRC_GATE_NO_REEXEC=1` opts out; `--help` lists every variable it reads.
 - 🔴 **BUILD THE TWO `nix` CHECK DERIVATIONS ONE AT A TIME — a combined invocation produces FALSE FAILURES.** `nix build .#checks.x86_64-linux.pytests .#checks.x86_64-linux.nodetests` builds both concurrently, and the tests that shell out to nested `nix` then contend on the store. MEASURED 2026-08-30 on one tree: the combined call reported **2 failures** — `SQLite database … is busy` evaluating `nix/home.nix`, and `OperationalError('database is locked')` in dl-router — while the SAME tree, same derivations, run **sequentially**, reported **0**. Load-dependent, so earlier combined runs were green and looked fine. **A combined GREEN is trustworthy** (a contended run fails loudly, it does not fake a pass); **a combined RED is not**, until re-checked one at a time. This cost a near-miss report of "PR #1029 broke the gate", against a diff that touched one test file and could not reach either failure. ⚠ Same run also reproduced the documented `| tail` trap: `nix build … | tail` printed `NIXBUILD_RC=0` for a build that had just failed 45 tests — read the runners' own `RESULT:` lines, never the piped exit code.
 - **To run a SUBSET, use the flake devShell — it already carries the gate toolchain:** `nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q` (cwd-independent with absolute paths; MEASURED from the repo root and from `/tmp`, pytest 9.1.1). `gate.sh` has no per-file filter and `run-tests.sh`'s positional is a repo ROOT, not a test selector — but that is a gap in those two entry points, **not** in the repo: the toolchain is there, by another door. 🔴 **`.envrc` is `use opencode`, so a loaded direnv does NOT put pytest on PATH** — and the worktree recipe in `claude/RULES.md` says to copy `.envrc`, which propagates that env into every worktree. A bare `python3 -m pytest` failing with `No module named pytest` therefore means you are in the opencode shell, never that the suite is unrunnable. This bullet exists because three true observations — no `gate.sh` filter, no `run-tests.sh` selector, direnv has no pytest — were read as "no subset mode exists", and an ad-hoc `nix-shell -p` was built instead of opening the door that was already there.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
-- 🔴 **NOTHING BLOCKS A MERGE TODAY — `main` is protected in NAME ONLY. You are the gate.** <!-- merge-gate: other -->
+- 🔴 **NOTHING BLOCKS A MERGE TODAY — `main` is protected in NAME ONLY, and the local full-suite ritual that used to stand in for it is DELETED. CI is advisory; read it.** <!-- merge-gate: other -->
   MEASURED 2026-09-02: `required_status_checks` is **absent from the protection object
   entirely** and `enforce_admins: false`, while `GET /branches/main` still reports
   `protected: true`. A PR merges with both Tekton checks red, or with none posted at all.
@@ -184,9 +196,65 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   ⚠ **Tekton still RUNS** — both checks post on a PR head, they just do not gate. That is
   exactly why the marker stays `other`: it records that something runs at merge time, never
   that it blocks. There is still no `.github/workflows`.
-  🔴 **So run BOTH tiers yourself before merging** — `scripts/gate.sh --tier both` AND
-  `nix build .#checks.x86_64-linux.{pytests,nodetests}` one at a time, on the MERGED tree —
-  and name the tier and the base sha in the claim. ⚠ 2026-08-23 measured the OPPOSITE state
+  🔴 **THE LOCAL FULL-SUITE RITUAL BEFORE EVERY MERGE IS NO LONGER EXPECTED — this
+  instruction used to say "run BOTH tiers yourself before merging" and that requirement is
+  DELETED.** What it bought was not worth what it cost: it produced **27–50 concurrent
+  full-suite runs on one 24-core box**, each running the same ~22,000 tests, twice per change
+  (dev-host tier + sandbox tier) — while gating nothing, because nothing blocks a merge. The
+  runs contended with each other badly enough that the dev-host tier repeatedly hit its own
+  3600s cap and produced **no verdict at all**, which is strictly worse than not having run it.
+  What replaces it: **read CI**, and run a **change-scoped** subset locally while you iterate
+  (a separate PR is adding a first-class way to select one — until it lands, use
+  `nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q`, per the SUBSET bullet
+  below). Running the full tiers is still allowed and sometimes right — a broad refactor, a
+  change to the runners themselves — but it is a judgement, not a checklist item, and if you
+  do run one, name the tier and the base sha in the claim.
+  🔴 **CI (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) is ADVISORY — the only automated
+  signal on a PR, and NOT the only one in the system. Read it.** It posts on the PR head, it
+  does not block, and nobody is stopped from merging over a red one. `gh pr checks <n>`. Its
+  tier is the `nix build` sandbox, which is blind to different things than a dev-host run —
+  see the two-tier bullet below.
+  🔴 **A RED CHECK IS WEAK EVIDENCE ON ITS OWN, AND THE RATE IS MEASURED — do not act on the
+  colour, act on the failing test.** Re-derived 2026-09-09 over the 60 most-recently-updated
+  PRs, taking the NEWEST `tekton/devrc-pytests` status per head from
+  `/repos/…/commits/{sha}/statuses`: **21 of 50 terminal verdicts were not success (42%) — 12
+  `failure`, 9 `error` — and a further 10 of the 60 heads (17%) were still `pending`, i.e.
+  never resolved at all.** An independent audit measurement the same day, sampled minutes
+  apart, got 45% and ~10%; treat the pair as "roughly two in five reds are noise", not as a
+  constant. Two consequences: **read the failing test's name and ask whether your diff can
+  reach it** before debugging anything (six recent reds across six branches were each an
+  unrelated single test, with `origin/main`'s own run clean), and a green is one sample from that
+  same tier — do not upgrade it into a guarantee. ⚠ `error` is not `failure`; see the
+  `COULD NOT RUN` note further down. 🔴 **Merging through a red is still a decision you own
+  and should say out loud** — the noise rate is a reason to investigate, never a reason to
+  stop looking.
+  🔴 **BUT A BAD MERGE IS DETECTED, NOT UNDETECTED — `scripts/main-green-check.sh` is the
+  deadman, and it is LIVE.** Verified 2026-09-09 on the workbench: `main-green-check.timer` is
+  `active`, `OnUnitActiveSec=4h` (last run 10:17:35, next 14:17:35), enabled by
+  `enableMainGreenDeadman = true` in `nix/home.nix`. It runs **both `nix build` sandbox tiers
+  — the authoritative ones — against the current tip of `origin/main`**, one at a time,
+  **REPRODUCES a red before alerting** (rc 10 = `RED, REPRODUCED — failed BOTH attempts`), and
+  escalates through `notify-failure@`, the DND-defeating toast class. Its own header says it
+  exists *because* protection is off, and names the two commits that landed straight on `main`
+  and broke it on 2026-09-03 with a human noticing hours later by accident. **So the detection
+  window for a broken `main` is HOURS, not "never"** — and the contrast that matters is that
+  one, not the exact bound. ⚠ **The bound is NOT a flat 4h, three ways.** `OnUnitActiveSec`
+  runs from the last ACTIVATION and `TimeoutStartSec=5400`, so a healthy cycle is up to ~5.5h;
+  and `SuccessExitStatus = 11` makes a run that COULD NOT MEASURE a systemd success, so a
+  deadman that has gone blind needs ~6 consecutive unmeasured runs (~24h) before rc 12 makes
+  any noise. ⚠ It REPORTS ONLY — never fixes, never reverts, never pushes — and it is a
+  `serverMode` unit, so it is running on the workbench and you should not assume it on any
+  other host. This FILE named `drift-check` ten times and this zero times, which is how the
+  sentence below came to be written wrong.
+  🔴 **BE HONEST ABOUT WHAT THIS IS: it is LESS SAFE, deliberately.** Protection is off and the
+  local mandate is gone, so nothing PREVENTS a bad merge; what remains is an advisory check
+  with a measured ~42% noise rate, whoever is reading the PR, and a 4-hourly deadman that
+  catches it AFTER the fact. That is a knowing trade of safety for speed made by the operator,
+  not an arrangement that has been made safe by rearranging it. **Prevention was traded for
+  detection — say it that way**, and note that an earlier draft of this very bullet claimed the
+  backstop was "one advisory check plus whoever is reading the PR", which was false and
+  understated the net by a whole subsystem. Nothing here should be read as reassurance.
+  ⚠ 2026-08-23 measured the OPPOSITE state
   (`contexts` = both checks, `enforce_admins: true`), and earlier that same day `contexts`
   held nodetests ALONE, which collects `*.test.mjs` only — so a Python-only PR could not
   fail it and read `UNSTABLE` with pytests red. **Check the LIST, never that the key
@@ -301,16 +369,19 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   `devrc` + `homelab-talos`; laptop none) and at `githooks/` (08-21). It correlates with
   agent-worktree creation, is NOT a devrc setting, and `git config --local --get
   core.hooksPath` per clone is the only answer.
-  **Until then: run the gate yourself before you merge, and say which command you ran.**
-  Both of these assert collected-test FLOORS and parse structured output rather than reading
+  **If you do run a full tier, say which command you ran** — see the DELETED-RITUAL note
+  above for when that is worth doing at all.
+  Both tiers assert collected-test FLOORS and parse structured output rather than reading
   an exit code, because `node --test <dir>` silently yields a bogus `# tests 1` and a pytest
-  suite can collect 0 with a zero exit. Gate on the MERGED tree, not the PR branch.
+  suite can collect 0 with a zero exit. A full run is only meaningful on the MERGED tree, not
+  the PR branch.
   🔴 **BUT THEY ARE TWO DIFFERENT TIERS, NOT TWO SPELLINGS OF ONE — this line used to join
   them with "or", and that word cost a required check.** `scripts/gate.sh` runs
   `scripts/run-tests.sh` + `scripts/run-node-tests.sh` **on the dev host** (see its
   `PYTEST_RUNNER`/`NODE_RUNNER`); it does **not** invoke `nix build` at all.
   `nix build .#checks.x86_64-linux.{pytests,nodetests}` builds from a `cp -r ${./.}` **store
-  copy with NO `.git`**, and that is the tier **Tekton runs and the merge is gated on**.
+  copy with NO `.git`**, and that is the tier **Tekton runs** — advisory now, but still the
+  only automated one, and the one whose blind spots differ from a dev-host run's.
   Measured 2026-08-23 on #773: four consecutive `GATE: RESULT=PASS` runs, then
   `tekton/devrc-pytests` red — the sandbox tier had never been run. The dev-host tier is also
   structurally blind to anything keyed on the repo being a git checkout: GUARD 10's

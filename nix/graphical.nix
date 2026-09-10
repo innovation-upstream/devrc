@@ -40,12 +40,48 @@ let
   loadWarnAbove = 48;
   loadCritAbove = 72;   # 1.5x the alert threshold: worse than "we already told you"
 
+  # 🔴 SINGLE SOURCE for the cooling fan mapping — passed VERBATIM to BOTH the
+  # `fansBlock` pill and its `fans-detail` click. They are two renderings of ONE
+  # configuration, and they must never disagree about which header is the pump
+  # or what floor alarms.
+  #
+  # This exists because an audit measured the drift: `fans-detail` used to carry
+  # its own `KNOWN_FANS = [(1, "AIO pump", 500), (3, "Case fan", None)]` while
+  # nix passed `--fan pump=1:500 --fan case=3` to the pill alone. Moving the pump
+  # to another header and updating ONLY this line left **84 of 84 tests green**
+  # and produced a pill reading `2448·1650 Idle` beside a view reading
+  # `AIO pump ? unreadable`. The pill's own seam guard could not catch it: it
+  # deliberately asserts STATE not spelling, which is right for the pill.
+  #
+  # The labels are display names because `fans-detail` renders them and the pill
+  # renders none — so a friendly label costs the pill nothing and removes the
+  # second copy. Pinned by
+  # `test_fans_detail.py::test_the_pill_and_the_VIEW_get_the_SAME_fan_mapping`.
+  fanArgs = "--fan 'AIO pump=1:500' --fan 'Case fan=3'";
+
   # Floating btop for the vitals-block left-clicks (memory/cpu/temperature/gpu).
   # `float,float` matches the existing i3 float rule so it opens as a float.
   # Explicit dimensions are REQUIRED — btop refuses to render ("terminal size too
   # small") in the default float size. (This 160x45 shape was the house idiom for
   # every float popup, including the retired agent-ops one.)
   btopCmd = "alacritty --class float,float -o window.dimensions.columns=160 -o window.dimensions.lines=45 -e btop";
+
+  # Used by the runaways pill's clicks. 🔴 NOT shared with the toast's
+  # middle-click action — `_syshealth_action` in bar-status-poll builds its own
+  # string, because this one carries Nix store interpolations that Python cannot
+  # produce. They are TWO SPELLINGS OF ONE RULE and they cannot be collapsed, so
+  # they are pinned to each other by
+  # `test_bar_status.py::test_the_toast_action_and_the_CLICK_are_the_same_shape`,
+  # which reads BOTH files. An earlier revision of this comment claimed they
+  # WERE shared; they never were, and by the time an audit read it they had
+  # already drifted — the toast had lost the `read -n 1` hold below.
+  # 🔴 That hold is load-bearing: syshealth prints and exits in ~0.16 s, and
+  # `alacritty -e CMD` closes when CMD does, so without it the window flashes
+  # and vanishes — indistinguishable from the click doing nothing.
+  # `${home}` rather than a literal `~`: every other working-tree reference in
+  # this file interpolates it, and `~` survives only if the click is spawned
+  # through a shell.
+  syshealthCmd = "alacritty --class float,float -o window.dimensions.columns=120 -o window.dimensions.lines=40 -e ${pkgs.bash}/bin/bash -c '${home}/workspace/devrc/scripts/syshealth; echo; read -n 1 -r -s -p \"[any key to close]\"'";
 
   # Python env for the decoupled bar-status poller (workbench systemd user timer):
   # psycopg2 for the homelab Postgres open-mail_actions count; clawgate + Alertmanager
@@ -150,6 +186,55 @@ let
     chip = "k10temp-*";
     inputs = [ "Tctl" ];
   });
+  # fans: workbench only. AIO pump + case fan RPM, read straight from the
+  # Nuvoton NCT6687D Super I/O via /sys/class/hwmon (no cache, no poller, no
+  # `bar_freshness` sibling — nothing here can go stale).
+  #
+  #   `2660·1736`  Idle      both turning, both above their floors
+  #   `!0·1736`    Critical  the PUMP has stopped
+  #   `2660·?`     Warning   one tacho unreadable
+  #   `?`          Warning   the chip is absent — i.e. `nct6683` is not loaded
+  #
+  # 🔴 NOT hide-at-zero, unlike every count pill. A count's quiet state means
+  # "nothing to do"; a pump RPM is the number itself, and a cooler pill that is
+  # invisible while healthy is invisible in exactly the state it certifies. The
+  # colour rules still hold — neutral until something actually stalls.
+  #
+  # 🔴 The FLOOR IS PER-FAN AND OPTIONAL, and only the pump gets one. fan2 and
+  # fan4-10 have nothing plugged in and read a permanent 0, and a case fan on a
+  # zero-RPM PWM curve may legitimately stop when idle — a blanket floor would
+  # make the pill cry wolf about a fan doing its job. The pump must never stop,
+  # so it alarms below 500 RPM (it runs ~2660-2823, driven at pwm1=114%, which
+  # is normal: MSI overdrives pump headers by design).
+  #
+  # 🔴 Workbench only, and gated in BOTH places — this entry via the `blocks`
+  # list below and the `home.file` further down. The chip is this board's Super
+  # I/O (MSI X670E GAMING PLUS WIFI); the laptop has no such device, and a block
+  # whose script is deployed under a narrower gate than the block itself renders
+  # a command that does not exist.
+  #
+  # 🔴 The driver is `nct6683` (NOT nct6775, which reports "no such device" for
+  # this chip) and NOTHING loads it automatically. `nix/system/apply-nct6683-module.sh`
+  # persists it via boot.kernelModules; until that has been run under sudo this
+  # pill renders `?` after every reboot — deliberately visible, so the missing
+  # driver announces itself rather than showing a blank block.
+  #
+  # 30s: a pump does not change speed meaningfully faster, and this spawns a
+  # python process every tick forever.
+  # 🔴 LEFT-CLICK OPENS THE COOLING VIEW, NOT btop. It used to be btop, which is
+  # a CPU/memory view: when this pill goes red the questions are "is the pump
+  # dead" and "how hot is the thing it was cooling", and btop answers neither.
+  # `fans-detail` is the cooling equivalent of the memory/disk/media detail
+  # floats — pump + case fan with PWM duty, then CPU/GPU/VRM/NVMe temperatures.
+  fansBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-fans ${fanArgs}";
+    json = true;
+    interval = 30;
+    click = [
+      { button = "left"; cmd = "alacritty --class float,float -o window.dimensions.columns=84 -o window.dimensions.lines=22 -e ${scriptsDir}/fans-detail ${fanArgs}"; }
+    ];
+  };
   # nvidia_gpu: workbench only (RTX 5080). The block's state is TEMPERATURE-driven
   # (idle/good/info/warning are UPPER bounds; temp ≤ idle → neutral). Keep it CALM
   # like temperatureBlock: the 5080 idles ~45°C and sits ~65-78°C under sustained
@@ -412,13 +497,38 @@ let
       { button = "left"; cmd = "${scriptsDir}/i3status-gamemode --toggle"; }
     ];
   };
+  # runaways: workbench only. Count of runaway processes (sustained high CPU),
+  # as decided by `scripts/syshealth` — the poller renders that verdict and owns
+  # no predicate of its own. Hide-at-zero; red when >0.
+  # 🔴 BOTH buttons open syshealth in a FLOAT TERMINAL, and the terminal is not
+  # optional. i3status-rust runs a click through `sh -c` with NO CONTROLLING
+  # TERMINAL (the live i3status-rs has TTY `?`), so a bare TUI here exits
+  # `inappropriate ioctl for device` and the click is a SILENT NO-OP. An earlier
+  # revision pointed left-click at a bare fzf menu for exactly that reason.
+  # The bare-command left-clicks elsewhere in this file need no tty either —
+  # rofi menus, yad, and the two toggles are GUIs or fire-and-forget, none of
+  # them a TUI. (An earlier revision of this comment said "all rofi", which is
+  # true of the menu/detail handlers and false of yad/gamemode/rig-control.)
+  # Signal 19, matching SIGNALS in bar-status-poll.
+  runawaysBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-runaways";
+    json = true;
+    interval = 30;
+    signal = 19;
+    click = [
+      { button = "left"; cmd = syshealthCmd; }
+      { button = "right"; cmd = syshealthCmd; }
+    ];
+  };
 
   blocks =
     [ memoryBlock diskBlock netBlock cpuBlock loadBlock temperatureBlock ]
+    ++ lib.optional (!isLaptop) fansBlock
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
-    ++ lib.optionals (!isLaptop) [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock ]
+    ++ lib.optionals (!isLaptop) [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock runawaysBlock ]
     ++ [ timeBlock ]
     ++ lib.optionals (!isLaptop) [ claudeRunsBlock rigcontrolBlock ]
     ++ [ gamemodeBlock notifsBlock ];
@@ -532,6 +642,26 @@ lib.mkIf isNixOS {
   # host renders a `custom` block whose command does not exist.
   home.file.".config/i3status-rust/scripts/i3status-load" = {
     source = ../scripts/i3status-load;
+    executable = true;
+  };
+  # fans: see `fansBlock` above. `mkIf (!isLaptop)` MATCHES the block's gate in
+  # the `blocks` list — the NCT6687D is the workbench board's Super I/O, and the
+  # laptop has no such chip. Gating one of the two and not the other is what
+  # ships a block whose command does not exist.
+  home.file.".config/i3status-rust/scripts/i3status-fans" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-fans;
+    executable = true;
+  };
+  # 🔴 fans-detail is the fans pill's left-click target, AND `i3status-fans`
+  # above is its REQUIRED CO-LOCATED SIBLING — fans-detail loads it by path to
+  # reuse the chip-location and tacho-reading predicate rather than open-coding
+  # a second copy that would drift silently (only one of the two is on screen).
+  # So the two MUST carry the SAME gate: a fans-detail deployed without
+  # i3status-fans beside it renders a red "sibling did not load" banner instead
+  # of the cooling view. Pinned by
+  # `test_fans_detail.py::test_fans_detail_and_its_SIBLING_are_deployed_together`.
+  home.file.".config/i3status-rust/scripts/fans-detail" = lib.mkIf (!isLaptop) {
+    source = ../scripts/fans-detail;
     executable = true;
   };
   # 🔴 claude_sessions.py is a CO-LOCATED SIBLING MODULE, not a block — the same
@@ -660,6 +790,14 @@ lib.mkIf isNixOS {
     source = ../scripts/deep-search;
     executable = true;
   };
+  # runaways: the block script (reads ~/.cache/bar-status/runaways.json).
+  # Workbench-only, matching runawaysBlock's gate. Both clicks run `syshealth`
+  # from the working tree via syshealthCmd, so there is no click handler to
+  # deploy here.
+  home.file.".config/i3status-rust/scripts/i3status-runaways" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-runaways;
+    executable = true;
+  };
 
   # bar-status poller — WORKBENCH ONLY (!isLaptop). Every ~45s it queries clawgate
   # (pending Tasks), the homelab Postgres (open mail_actions), and Alertmanager
@@ -720,10 +858,19 @@ lib.mkIf isNixOS {
       # change to the deadman logic — or to the shared clawgate "needs the
       # operator" predicate, which decides the pill's whole meaning — would leave
       # the unit definition identical and the timer would not re-arm.
+      # syshealth joined that set when the runaways source stopped carrying its
+      # own predicate and started rendering syshealth's verdict — the poller
+      # execs `$DEVRC_DIR/scripts/syshealth`, an explicit working-tree path, so
+      # it belongs here by the rule stated above. Effect is milder than the
+      # others (the unit is a oneshot re-run every 45s, so a changed syshealth
+      # applies on the next poll either way); it is listed because the ledger
+      # claims to enumerate this class, and a ledger that silently omits a
+      # member is worse than one that never claimed to be complete.
       X-Restart-Triggers = [
         "${../scripts/bar-status-poll}"
         "${../scripts/collector/deadman.py}"
         "${../scripts/lib/clawgate_tasks.py}"
+        "${../scripts/syshealth}"
       ];
     };
   };

@@ -205,8 +205,15 @@ Mutation controls, each run on a copy of the HEAD tree, under
 is the positive control, so a red below is the mutant and not the harness.
 **Re-measured 2026-08-26 against the then-current 11-test module** -- the counts
 first recorded here were taken against a 5-test module that never existed, and
-M2/M5 have since gained assertions that also fire. 🔴 The module is **13 tests**
-as of 2026-08-31 (the escape-hatch pins), so the POS control below reads 13.
+M2/M5 have since gained assertions that also fire. 🔴 The module was **13 tests**
+as of 2026-08-31 (the escape-hatch pins), so the POS control rows below read 13.
+🔴 IT IS **16** NOW (#1427 added the carve-out pin, the dispatcher seam guard and
+the battery-floor pin), so those rows are a RECORD OF A PAST RUN, not a
+prediction of your next one -- read the ratio, never the literal. This was the
+last hand-maintained copy of the module's size in this file and it was already
+stale before #1427 touched it; the floor that used to be maintained the same way
+is now pinned by `test_the_batterys_floor_is_re_derived_from_this_modules_size`,
+which is the only number here you never have to update.
 
 ⚠ **A first draft of this note said "the per-mutant FAILED counts are unchanged
 because no mutant here touches the escape hatch". THAT WAS FALSE FOR M5** — and
@@ -383,6 +390,8 @@ every whole-string pin stays GREEN and only
 which proves that assertion executes rather than restating the pins beside it.
 """
 
+import importlib.util
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -394,6 +403,14 @@ EVIDENCE_MD = (
     REPO_ROOT / "claude" / "skills" / "audit-pr" / "reference"
     / "round-ladder-evidence.md"
 )
+# 🔴 Read for ONE reason: the nit carve-out's warrant is a clause this module
+# does not own. See `test_the_carve_outs_cited_clause_still_exists_in_the_dispatcher`.
+DISPATCH_PY = REPO_ROOT / "scripts" / "audit-dispatch.py"
+# 🔴 The mutation battery that sweeps THIS module, read so its hand-maintained
+# floor can be pinned to this module's size. See
+# `test_the_batterys_floor_is_re_derived_from_this_modules_size`.
+BATTERY_SH = REPO_ROOT / "scripts" / "tests" / "mutants-audit-ladder.sh"
+SELF_PY = Path(__file__).resolve()
 
 # --------------------------------------------------------------------------- #
 # THE PINS -- whole normalised strings, never keywords.
@@ -426,6 +443,53 @@ SKILL_STOP_BODY = (
     "required a fix. The first round that returns no findings is the last one — "
     "stop there, and do not re-confirm it. Stop on that, not on the author "
     "saying it's done."
+)
+
+# 🔴 The NIT CARVE-OUT, and the REJECTION that bounds it. Both halves in one
+# region on purpose, for the same reason `RULES_STOP_CLAUSE` carries its
+# not-a-cap qualifier: the carve-out alone reads as "severity gates the ladder"
+# and the obvious next edit is to raise the bar to deploy-blocking, which is the
+# rejected rule. #702 is the measurement that kills it -- six rounds, ZERO
+# deploy-blockers, while its later rounds kept catching false claims the
+# previous round's own fix had written.
+#
+# 🔴 THE QUALIFIER IS THE WHOLE CLAIM, and dropping it is how this went wrong
+# once already. `audit-dispatch.py`'s clause excuses "a nit THAT CHANGES NOTHING
+# A READER DOES" -- a CONDITION. An earlier draft of this pin carried the
+# unqualified "a nit changes nothing a reader does", promoting the condition to
+# an assertion and silently widening the carve-out to every 🟢. That set is not
+# empty and this module documents it 400 lines up: #804's round 8 carried three
+# 🟢, two of them shipped features that could be unwired with the suite green.
+# The wide reading also contradicted `SKILL_HATCH_NOT_A_LICENCE` -- pinned in
+# this same module, and green beside it -- and `RULES_STOP_CLAUSE`, which loads
+# in EVERY session while the skill loads only on trigger.
+#
+# Pinned as WHOLE normalised strings (`claude/RULES.md` -> spelled-guards): the
+# artifact is prose, so a keyword guard is walkable by rewording.
+SKILL_NIT_ONLY_STOPS = (
+    "🔴 **A round that reports only NITS THAT CHANGE NOTHING A READER DOES is a "
+    "stopping round** — the same set `audit-dispatch.py` already keeps out of "
+    "every brief (`nit-is-not-a-finding`), not a wider one. **A 🟢 that DOES "
+    "change what a reader does is a finding and the ladder continues**: #804's "
+    "round 8 carried three, two of them shipped features that could be unwired "
+    "with the suite green. File the stopping kind as one follow-up task naming "
+    "the file, closed when its PR merges or a named reader dismisses it in "
+    "writing — filed rather than fixed, so the round that files them is still "
+    "the last."
+)
+SKILL_ONLY_THE_NIT_SUBSET_STOPS = (
+    "⚠ **That subset is the only class of FINDING that cannot extend a ladder "
+    "— no SEVERITY is, and \"deploy-blocking only\" was rejected.** The "
+    "attribution gate and the prose escape hatch below end a ladder for "
+    "reasons that are not findings at all; this sentence is about findings "
+    "only. `homelab-infra` #702 ran six "
+    "rounds carrying **zero deploy-blockers** while its later rounds kept "
+    "catching false claims the previous round's own fix had written: one "
+    "guard's rationale went through five successive drafts, each retracted by "
+    "the next round. A blocker-keyed ladder ends after round 1, so rounds 2–6 "
+    "never run — draft 1 ships as the code's stated reason, and nobody ever "
+    "asks the retire-or-accept question that ladder ended on. Should-fix "
+    "findings are what keep it running."
 )
 SKILL_NOT_A_CAP = (
     "🔴 **This is NOT a round cap, and a cap was rejected.** The count is set by "
@@ -1034,11 +1098,177 @@ def test_audit_pr_skill_states_the_stop_condition():
     _assert_pinned_once(SKILL_MD, SKILL_STOP_BODY, "the stop-rule body")
 
 
+def test_the_nit_carve_out_is_stated_WITH_the_rejection_that_bounds_it():
+    """🔴 The carve-out and the rejected rule are ONE claim, so both are pinned.
+
+    "A nit cannot extend a ladder" invites exactly one next edit -- raise the
+    bar to deploy-blocking -- and that is the REJECTED rule. `homelab-infra`
+    #702 ran six rounds carrying zero deploy-blockers while its later rounds
+    kept catching false claims the previous round's own fix had written; a
+    blocker-keyed ladder ends after round 1, so those rounds never run.
+    Pinning only the carve-out would leave that rejection free to be dropped by
+    the author who finds it verbose -- the same failure `RULES_STOP_CLAUSE`
+    pins its not-a-cap qualifier against.
+
+    ⚠ THIS DOCSTRING CARRIED THE RETRACTED COUNT UNTIL ROUND 2. "four of its
+    six findings ... ships all four" was planted at five sites and swept at
+    four; this one survived, and it is the surface `SKILL.md` names as the
+    likeliest to -- "the docstring of the test that PINNED the guard". #702
+    ran 23 findings across six rounds (the table at
+    `reference/round-ladder-evidence.md`); no reading yields six. Do not
+    re-derive the number from this file's history.
+    """
+    _assert_pinned_once(SKILL_MD, SKILL_NIT_ONLY_STOPS, "the nit carve-out")
+    _assert_pinned_once(
+        SKILL_MD,
+        SKILL_ONLY_THE_NIT_SUBSET_STOPS,
+        "the rejection of a deploy-blocking-only ladder",
+    )
+
+
+def test_the_batterys_floor_is_re_derived_from_this_modules_size():
+    """🔴 STRUCTURAL replacement for "remember to re-derive the floor".
+
+    `mutants-audit-ladder.sh` carries a hand-maintained `MIN_TESTS` that floors
+    how many tests must RUN before it will score a mutant. Nothing pinned it to
+    this module, and it has now drifted TWICE: 11->13 against a floor of 10
+    (recorded in that file), then 13->15 against a floor of 12, measured during
+    this PR's round 3. At the second drift, deleting BOTH tests the PR added
+    left the battery reporting `✅ 21 row(s), all as expected`, rc 0 -- it
+    vouched for a module that had lost the guards it exists to protect. A floor
+    that is too LOW never complains, so nothing surfaces it.
+
+    Prose asking the next author to re-derive it is what failed twice.
+    `run-tests.sh` already solved this shape for its own table with
+    `--check-floors`, two-way-pinned by `test_run_tests_floors.py`; this is the
+    same pin for this literal, and it prints the replacement value rather than
+    asking anyone to do arithmetic.
+
+    The count is a regex over this file rather than a pytest collection: a
+    collection would re-enter pytest from inside a test.
+
+    🔴 IT MATCHES INDENTED DEFS ON PURPOSE. `^def test_` was the first draft
+    and it is blind to a test METHOD -- MEASURED: appending an ordinary
+    `class TestSomeGrouping:` with three methods gave `^def test_` = 16 while
+    pytest collected 19, so the floor sat three too low and the guard stayed
+    GREEN. That is the dangerous direction, and it is silent. `^\\s*def test_`
+    sees both shapes.
+
+    The parametrising DECORATOR is still asserted absent, but it is NOT the
+    only construct that can make the two numbers diverge -- the first draft of
+    this docstring claimed it was, and the class case above refutes that.
+    Divergence that makes the regex count HIGHER than the collection (a
+    non-collected class, a nested helper named `test_`) fails LOUDLY, because
+    the floor it demands exceeds what runs; only the lower direction is
+    dangerous, and it is the one now covered.
+
+    ⚠ The absence check matches the DECORATOR, not the bare word. The first
+    draft tested `"parametrize" not in src` and failed on its own docstring,
+    which is the word's only occurrence here -- a guard that could never pass,
+    green nowhere, and briefly red for a reason that had nothing to do with
+    the floor it exists to check.
+    """
+    assert BATTERY_SH.is_file(), (
+        f"{BATTERY_SH} is missing. It is the mutation battery for THIS module "
+        "and its header says it is not run by CI, which makes it a plausible "
+        "cleanup target -- but this guard reads its floor. If you moved it, "
+        "re-point BATTERY_SH; if you deleted it, delete this guard in the same "
+        "commit rather than leaving a pin on a file that no longer exists."
+    )
+    battery = _read(BATTERY_SH)
+    literals = re.findall(r"^MIN_TESTS=(\d+)", battery, re.M)
+    assert len(literals) == 1, (
+        f"expected exactly one `MIN_TESTS=` assignment in {BATTERY_SH}, "
+        f"found {len(literals)}: {literals}. This guard reads the literal, so "
+        "a second assignment makes which one the battery uses ambiguous."
+    )
+    floor = int(literals[0])
+
+    src = _read(SELF_PY)
+    assert not re.search(r"^\s*@[\w.]*parametrize", src, re.M), (
+        "this module now parametrises a test, so `^def test_` no longer counts "
+        "the tests that RUN. Re-point this guard at the real collected count "
+        "before trusting it -- a floor derived from the smaller number is too "
+        "LOW, which is the failure mode that never complains."
+    )
+    m = len(re.findall(r"^\s*def test_", src, re.M))
+    expected = m - min(50, max(1, m // 20))
+    assert floor == expected, (
+        f"`{BATTERY_SH.name}` floors at MIN_TESTS={floor}, but this module now "
+        f"has {m} tests, and `run-tests.sh`'s formula "
+        f"`m - min(50, max(1, m // 20))` gives {expected}.\n\n"
+        f"  Set MIN_TESTS={expected} in {BATTERY_SH}.\n\n"
+        "  A floor left BELOW the module's size is invisible: the battery "
+        "keeps printing `all as expected` while tests it was meant to sweep "
+        "quietly disappear. That has happened twice in this file's history."
+    )
+
+
+def test_the_carve_outs_cited_clause_still_exists_in_the_dispatcher():
+    """🔴 SEAM: the skill's warrant is a clause the skill does not own.
+
+    The carve-out is justified by "every brief already carries
+    `nit-is-not-a-finding`" -- a clause in `scripts/audit-dispatch.py`. Rename
+    or delete it there and nothing in the skill's own pins moves: the prose
+    goes on citing an enforcement that no longer ships, which reads to a later
+    author as though the dispatcher handles nits when it does not. The skill
+    side is pinned by the test above; this asserts the other end, so either
+    edit alone fails.
+
+    🔴 STRUCTURAL, not a substring, and the first draft of this guard was the
+    substring. MEASURED: deleting the whole `Clause("nit-is-not-a-finding", …)`
+    while leaving the id behind in a comment -- `# removed the
+    "nit-is-not-a-finding" clause (see history)` -- scored 15 passed here. The
+    guard SURVIVED the exact deletion its own docstring claimed to catch, which
+    is `claude/RULES.md` -> spelled-guards: a guard on a WORD passes while the
+    hazard exists in another shape. Reading `INVARIANT_CLAUSES` cannot be
+    walked that way -- a comment is not a member of the emitted tuple.
+
+    ⚠ "15 passed here" is a claim about THIS MODULE, and the mutant was never a
+    SUITE-level survivor: it kills 5 tests in all, 4 of them in
+    `test_audit_dispatch.py`, which already carries
+    `test_control_a_clause_deleted_from_the_constant_is_detected` for exactly
+    this deletion. What this guard adds is a failure for the SKILL-CITATION
+    reason -- the skill's prose citing an enforcement that no longer ships --
+    not first detection of the deletion. Do not read the row as evidence the
+    suite was blind.
+
+    Deliberately the ID and not the clause TEXT -- `test_audit_dispatch.py`
+    owns the text pin, and a second copy here would drift against it.
+    """
+    spec = importlib.util.spec_from_file_location("audit_dispatch", DISPATCH_PY)
+    assert spec is not None and spec.loader is not None, (
+        f"cannot load {DISPATCH_PY} as a module -- has it moved or been renamed?"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    ids = {clause.id for clause in mod.INVARIANT_CLAUSES}
+    assert "nit-is-not-a-finding" in ids, (
+        "`scripts/audit-dispatch.py` no longer EMITS a clause with the id "
+        "`nit-is-not-a-finding` -- INVARIANT_CLAUSES carries "
+        f"{sorted(ids)} -- but `claude/skills/audit-pr/SKILL.md` still cites "
+        "it as the reason a nit-only round stops the ladder.\n\n"
+        "  If you RENAMED it: update the citation in the skill's stop-rule "
+        "section and `SKILL_NIT_ONLY_STOPS` above, in the same commit.\n"
+        "  If you DELETED it: the carve-out has lost its enforcement -- the "
+        "brief will start soliciting nits as findings again, and a nit-only "
+        "round will read as a round that found something. Restore the clause "
+        "or rewrite the carve-out to stand on its own.\n\n"
+        "  A comment mentioning the id does NOT satisfy this: the tuple is "
+        "read, not the file's text."
+    )
+
+
 def test_the_prose_escape_hatch_demands_its_rationale_IN_THE_SUMMARY():
     """🔴 The escape hatch must produce an ARTIFACT, not a state of mind.
 
-    This is the only clause that ends a ladder WITHOUT a clean round, so a
-    reader has to be able to tell that it was used. "Can NAME" alone is
+    This is one of two clauses that end a ladder WITHOUT a clean round -- the
+    other is the attribution gate, which stopped `homelab-infra` #702 on two
+    consecutive zero-payload rounds while round 6 still returned a 🟡
+    (`reference/round-ladder-evidence.md`). This docstring said "the only
+    clause" until round 4 of #1427; it was already false at `53c9f664`, and
+    what surfaced it was SKILL.md finally naming both enders in one sentence.
+    Either way a reader has to be able to tell that it was used. "Can NAME" alone is
     unobservable: the report looks identical whether the ladder converged or
     the hatch was invoked over unfixed 🟡s.
 

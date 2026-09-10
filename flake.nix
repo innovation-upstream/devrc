@@ -45,9 +45,39 @@
     # paid only when something actually asks for the 1.57 output.
     # ------------------------------------------------------------------------
     nixpkgs-playwright-1_57.url = "github:NixOS/nixpkgs/d61c78f4921b1622127584d67b2e9afddf588c92";
+
+    # ------------------------------------------------------------------------
+    # `cairn` — the subsystem-store client, consumed as a PACKAGE instead of
+    # being forked into `scripts/cairn`. The extracted OSS repo is now the one
+    # copy of the reader; devrc keeps only what the OSS repo deliberately does
+    # not have (`scripts/cairn-who`, the writer, and the `scripts/lib/` modules
+    # those two still import).
+    #
+    # 🔴 THE PIN IS `flake.lock`, NOT THIS URL. The packaged client's VERSION IS
+    # ITS GIT REVISION — cairn's flake derives it from `self.shortRev` precisely
+    # so an artefact cannot be mislabelled — which is worth nothing if the input
+    # resolves to whatever the branch holds at build time. Move it with
+    # `nix flake lock --update-input cairn` and record what changed;
+    # `scripts/tests/test_cairn_flake_pin.py` fails if the lock entry goes away.
+    #
+    # 🔴 DELIBERATELY *NOT* `inputs.nixpkgs.follows = "nixpkgs"`, and the reason
+    # is upstream's rather than ours. cairn's own flake pins `pkgs.python312`
+    # because `server/Dockerfile` is `python:3.12-slim` and its CI pins 3.12; a
+    # bare `pkgs.python3` there once followed nixpkgs to 3.14 and shipped an
+    # interpreter NOTHING in that repo had ever run its suite under (that suite
+    # already emits a 3.14 tar-extraction DeprecationWarning, so the gap was
+    # behaviourally live, not theoretical). Following would rebuild the client
+    # against devrc's `nixpkgs-unstable` — a nixpkgs cairn's CI has never tested
+    # — so the thing deployed would stop being the thing that was tested. Same
+    # SHAPE of argument as the frozen playwright input above, different
+    # mechanism: that one is a version freeze, this one is a refusal to override
+    # someone else's freeze. The cost is a second nixpkgs in the lock, evaluated
+    # only when something asks for the cairn output.
+    # ------------------------------------------------------------------------
+    cairn.url = "github:ZacxDev/cairn";
   };
 
-  outputs = { self, nixpkgs, home-manager, nixpkgs-playwright-1_57, ... }:
+  outputs = { self, nixpkgs, home-manager, nixpkgs-playwright-1_57, cairn, ... }:
     let
       system = "x86_64-linux";
       # Explicit allowUnfree so unfree pkgs (elixir-ls, playwright browsers)
@@ -164,7 +194,18 @@
 
       homeConfigurations."zach" = home-manager.lib.homeManagerConfiguration {
         inherit pkgs;
-        extraSpecialArgs = { isNixOS = true; };
+        # 🔴 `cairnPackage` IS THREADED, NOT LOOKED UP. `nix/home.nix` cannot
+        # reach a flake input on its own — it is a home-manager module, and its
+        # only channel from here is `extraSpecialArgs`. It takes the argument
+        # WITHOUT a default on purpose, so a thread that gets cut is an
+        # evaluation error rather than a `~/.local/bin/cairn` symlink quietly
+        # pointing at `/bin/cairn`. The name differs from the input's
+        # (`cairn` -> `cairnPackage`) so "is the input wired" and "is the
+        # package wired" are not the same substring to a grep or a guard.
+        extraSpecialArgs = {
+          isNixOS = true;
+          cairnPackage = cairn.packages.${system}.cairn;
+        };
         modules = [
           ./nix/home.nix
           {
@@ -332,11 +373,14 @@
             # 🔴 This ALSO makes the sandbox the tier that pins the VERSION.
             # `pkgs.opencode` here and in nix/pkgs/tools/default.nix resolve from
             # the same flake.lock, so CI tests the exact binary the hosts deploy
-            # (1.18.21 at rev c27cdad491a9). Cost, stated as deliberately as the
+            # (1.18.29 — derive the rev with `nix flake metadata --json | jq -r
+            # .locks.nodes.nixpkgs.locked.rev`; a rev spelled here would be an
+            # unguarded claim, since the version scanner sees only the version).
+            # Cost, stated as deliberately as the
             # nodejs and nix entries above: this check's closure grows by
             # opencode, and a nixpkgs bump that moves it invalidates the cache
             # AND turns the version assertion red. That red is the point — the
-            # config header's "measured on v1.18.21 — do not re-derive" claims are
+            # config header's "measured on v1.18.29 — do not re-derive" claims are
             # otherwise pinned to nothing.
             #
             # logrotate: scripts/tests/test_claude_log_rotate.py drives the REAL
@@ -499,6 +543,111 @@
               echo "checks.nodetests: run-node-tests.sh exited $rc — failing the derivation." >&2
               exit "$rc"
             fi
+            touch "$out"
+          '';
+
+        # 🔴 NOTHING INVOKES THIS YET — IT IS AN OUTPUT, NOT A GATE, AND SAYING
+        # SO IS THE POINT. `devrc-ci-pipeline.yaml` in the infra repo hardcodes
+        # exactly two legs (`LEG` ∈ {pytests, nodetests}, built as
+        # `.#checks.x86_64-linux.${LEG}`); there is no `nix flake check` and no
+        # loop, so a third output is never built by CI. Landing it silently
+        # would ship something that READS like a gate and can never fail —
+        # precisely the defect class this check exists to catch, committed by
+        # the check itself.
+        # Run it on demand: `nix build .#checks.x86_64-linux.cairn-client-runs`
+        # (~1.4 s; the cairn package is already in the home-manager closure, so
+        # it adds no build). Wiring a third leg is a separate change to a
+        # GitOps-reconciled repo and is deliberately not bundled here.
+        #
+        # 🔴 THE ONLY CHECK THAT *EXECUTES* THE PINNED CLIENT. Every other cairn
+        # guard in this repo reads `flake.nix` / `flake.lock` / `nix/home.nix` /
+        # `nix/sessionVariables.nix` as TEXT, so all of them stay green while the
+        # pinned client is thoroughly broken: they assert the WIRING, never that
+        # anything runs. A `nix flake lock --update-input cairn` to a revision
+        # where `packages.cairn` still builds but a VERB regressed would leave
+        # this repo's gate fully green and surface at the operator, mid-task.
+        # cairn's own `checks.client-resolves-its-lib` would catch some of that,
+        # and it lives in cairn's flake — which this repo's gate does not run.
+        #
+        # 🔴 IT ASSERTS OUTPUT CONTENT, NOT EXIT CODES, and the two verbs are
+        # asserted DIFFERENTLY on purpose:
+        #   `validate` — a fixture cache with exactly ONE parsable entry must
+        #     produce "1 of 1 entry file(s) parse". That string is the gate: a
+        #     client whose validate prints nothing fails here, which is this
+        #     check's whole reason to exist.
+        #   `doctor`   — asserted only to PRODUCE A REPORT. Its exit code is
+        #     deliberately NOT asserted: in a sandbox with no pod, no token and
+        #     no network, a non-zero doctor verdict is the CORRECT answer, and
+        #     demanding zero would either pin a wrong expectation or push the
+        #     check into faking an environment. Same reasoning cairn's own
+        #     packaging check records.
+        cairn-client-runs =
+        pkgs.runCommandLocal "devrc-cairn-client-runs"
+          {
+            nativeBuildInputs = [
+              cairn.packages.${system}.cairn
+              pkgs.coreutils
+              pkgs.gnugrep
+            ];
+          }
+          ''
+            export HOME="$TMPDIR/home"
+            mkdir -p "$HOME"
+            F="$TMPDIR/cache"
+            mkdir -p "$F/demo"
+
+            # A stamp is REQUIRED, not decoration: the reader refuses a store
+            # that cannot date itself rather than serving it, so without this
+            # the run below fails as `store-unreachable` and would "fail" for a
+            # reason that says nothing about the client's verbs.
+            printf 'synced=1700000000\nrevision=fixture\nentries=1\ncoverage=ALL\n' \
+              > "$F/.sync-stamp"
+
+            cat > "$F/demo/widget.md" <<'ENTRY'
+            ---
+            service: widget
+            scope: demo
+            sensitivity: public
+            created_by: handoff
+            ---
+            # widget
+
+            ## What it is
+            A fixture entry, and the ONLY one — so "1 of 1" below is a real count.
+
+            ## Pointers
+            - `nowhere/real.py` — a pointer.
+
+            ## Nuance / work-history
+            - 2026-01-01: a bullet.
+            ENTRY
+            # The heredoc is indented to match this file; strip that leading
+            # whitespace or the front matter is not at column 0 and the entry
+            # parses as prose. (Measured: an indented `---` is not front matter.)
+            sed -i 's/^            //' "$F/demo/widget.md"
+
+            # --- validate: the verb this gate exists to police -------------
+            rc=0
+            cairn --cache "$F" validate --scope demo --no-sync > val.txt 2>&1 || rc=$?
+            if ! grep -q '1 of 1 entry file(s) parse' val.txt; then
+              echo "checks.cairn-client-runs: the pinned client's \`validate\` did not report" >&2
+              echo "  parsing the one fixture entry. rc=$rc, output follows:" >&2
+              sed 's/^/    /' val.txt >&2
+              exit 1
+            fi
+
+            # --- doctor: drives the deep import closure --------------------
+            # `--help` would NOT do: the hazard packaging introduces is the
+            # sibling-import mechanism, and only a verb that reaches the deep
+            # modules exercises it.
+            cairn --cache "$F" doctor --no-sync > doc.txt 2>&1 || true
+            if [ ! -s doc.txt ]; then
+              echo "checks.cairn-client-runs: \`doctor\` produced NO output at all." >&2
+              echo "  Its exit code is not asserted (no pod in a sandbox), but a" >&2
+              echo "  client that cannot even report is not a working client." >&2
+              exit 1
+            fi
+
             touch "$out"
           '';
       };

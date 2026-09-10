@@ -49,6 +49,12 @@ that is empty by construction and a finding-free pass over it reads as a clean r
 
 Dispatch a subagent (read-only — it must NOT modify files or merge) to audit the change against this checklist. Have it read the diff and the code it touches, not just the PR description.
 
+⚠ **Consider `--round 0` FIRST — the requirements & deletion pass (its own section below).** It
+asks whether the change should EXIST, which no item on the checklist asks; it is the only round
+that can conclude *close this PR, do not audit it*. It is ON TRIAL, so it is a judgement call, not
+a step — but it has to be reachable from here or the trial closes by attrition rather than by
+evidence. Whichever you run, record `ran: R · changed the outcome: C` on the PR.
+
 **Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. What each hid, and `GOPRIVATE`: reference file.
 
 **Brief the auditor on the environment, or it will report false findings** — a fresh worktree is
@@ -76,6 +82,96 @@ kill by **resolved PID**. Never let a pattern reach `pkill -f` — it matches yo
 🔴 **And give it a UNIQUE name/port for any container or scratch dir it creates.** Subagents share
 one scratchpad path and the branch namespace, so two audit rounds that both pick `cgpg` or port
 55432 collide silently and one reports a green computed against the other's database.
+
+## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE (runs BEFORE the checklist)
+
+⚠ **ON TRIAL, NOT A STANDING RULE — read the retirement condition at the end of this section
+before you run it.**
+
+Every axis below asks whether the change is CORRECT. None asks whether it should EXIST, and an
+audit scoped to a diff will never raise it on its own: that is how a 145 KB webhook listener
+nothing had ever run survived every round that read it. Round 0 is the only round that can
+conclude **close this PR, do not audit it**.
+
+The order is the mechanism, not a preference — steps 3–4 spent on something step 2 would have
+deleted is the waste this exists to catch. Work them in order; do not skip ahead.
+
+1. **Question every requirement, and NAME its author.** For each behaviour the diff introduces,
+   record the requirement and its **author of record**: Zach (quote the ask), a **prior audit
+   round** (`#N round R`), a `RULES.md`/`CLAUDE.md` bullet (quote it), or **unattributed** — which
+   is itself a finding. 🔴 **A requirement whose author is a PRIOR ROUND OF THIS LADDER is the
+   highest-scrutiny class, not the safest.** It arrives carrying a measured incident and a case
+   history, so re-opening it reads as ignoring evidence and nobody does — the "requirements from
+   smart people are the most dangerous" case exactly. Then make it less dumb: name the requirement
+   you would drop or weaken, not only the code that implements it.
+2. **Delete.** List what could go — from the diff AND from the code it touches. For each
+   candidate ask: **(a) is it RUNNING** — configured, installed, reachable? **(b) has it ever
+   caught a real problem, or only fired falsely? (c) does something else already check this
+   property against reality?** A "no" to (a) retires it outright; `/adoption-scan` answers (a) and
+   (b) for anything already shipped. Where the payload is prose the deletion instruments already
+   exist — `/prune-skill`, `/prune-memory` — name the one that applies rather than hand-rolling a
+   cut.
+   🔴 **NOT the REVERT TEST below — that answers a DIFFERENT question and is wrong here in both
+   directions.** It decides whether a file is payload or scaffolding, not whether a thing should
+   exist: applied to a PR's own payload it always answers *keep* (reverting it is exactly what
+   stops the deliverable shipping), and applied to the surrounding code it always answers
+   *deletable* (the deliverable ships regardless). Round 0 is the only round that can conclude
+   *close this PR* and a borrowed predicate that can never say so is worse than none. Question (a)
+   is the one that did the work in the incident this section cites — the 145 KB listener had no
+   token configured on either host and had never run.
+3. **Simplify — only what survived step 2.** Owned by `/simplify` and `/code-review`: NAME them,
+   do not restate them here. 🔴 Both of those MUTATE (`/simplify` applies its fixes; `/code-review`
+   takes `--fix`), and you are dispatched READ-ONLY — so this is a recommendation for the OPERATOR
+   to run afterwards, never something you invoke. 🔴 Do not reach for it before steps 1–2 have run;
+   simplifying a part that should not exist is the failure this ordering prevents.
+4. **Do not accelerate or automate anything steps 1–2 have not cleared.** If this round proposes
+   either, name what it applies to and confirm the requirement was questioned and the deletion
+   considered FIRST. The ladder's own cycle time is in scope to REPORT; the attribution gate below
+   is what acts on it.
+   ⚠ This was two steps — *accelerate* then *automate* — and they were merged because nothing read
+   them: the ledger counts only steps 1–2, all four verdicts are step-1/2 outcomes, and step 4 said
+   "report, do not act" while pointing at a gate that already acts. What survives is the ORDERING
+   claim, which is the half that does work. Recorded so the pair is not re-derived as ceremony.
+
+🔴 **ROUND 0 REPORTS; IT DOES NOT MOVE THE LADDER.** Its verdict is one of `proceed to the
+checklist` / `requirement questioned — <which>` / `deletion candidate — <what>` / `close, do not
+audit`. It is **not** a finding for the findings-keyed stop rule, it cannot end a ladder, and it
+cannot license skipping a round. Every stop rule below is unchanged by it.
+
+**Ledger:** `round 0 · requirements: N (unattributed: U) · deletion candidates: D`. Deleting
+nothing at all is reportable — say what you examined to get there.
+
+⚠ **There is deliberately NO add-back percentage here.** An earlier draft asked for `deleted: X ·
+re-added: Y (Y/X = Z%)` "from the same `--numstat` command the attribution gate already runs", and
+that was **false**: `--numstat` reports added and deleted counts per file and cannot tell you that
+an added line is one previously deleted, so `Y` is undefined by the instrument named. The 10%
+add-back heuristic needs a measurement nothing here performs — and the sentence that followed it
+("an add-back of 0% means the deletion pass was too timid") asserted a direction measured nowhere,
+which is the shape this skill tells you to delete rather than reverse. Recorded so nobody derives
+it again.
+
+🔴 **RETIREMENT CONDITION — this section is on trial.** Run it on the next 3–5 PRs and record, on
+each PR, its verdict and whether that verdict CHANGED what happened. **If it ran and changed
+nothing, DELETE this section** — do not automate it further, and do not keep it because it reads
+well.
+
+🔴 **REPORT THE PAIR — `ran: R · changed the outcome: C` — never `C` alone.** A bare zero cannot
+distinguish "it ran five times and was useless" from "nobody ever typed `--round 0`", and those
+have opposite conclusions: the first retires the section, the second says the trial never started.
+`--round` still DEFAULTS to 1, so the second is the likelier reading of a silent zero. `R = 0` is
+not evidence about this section at all — it is evidence about its routing, and the fix is to run it,
+not to delete it. Closed by that pair reaching a decision, recorded on the PR that removes this
+section or on the one that promotes it out of trial.
+
+<!-- 🔴 LOAD-BEARING HEADING, NOT NAVIGATION. `_read_round_zero` in
+     scripts/audit-dispatch.py captures the ROUND 0 section up to the next
+     `## `, and this is that heading. Delete or demote it and the next `## ` is
+     `## After the fixes`, so the round-0 brief silently gains the nine
+     correctness axes it exists to withhold — measured: 3,367 chars -> 4,057.
+     Pinned by test_the_round_zero_section_the_script_reads_is_the_one_the_
+     skill_ships. Reword it freely; keep it a `## `. -->
+
+## THE CHECKLIST — the nine axes (runs AFTER round 0)
 
 **Audit for:**
 1. **Risks** — what breaks in production.
@@ -112,8 +208,8 @@ hindsight — on #498 the plateau was diagnosed six rounds late.
 
 The delta bullet above says to hunt regressions the fix round introduced. **The one it actually
 produces, over and over, is not code — it is the SENTENCE the fix wrote to explain itself.** Measured
-on `homelab-infra` #702: six rounds, **zero 🔴**, the code correct from round 1, and **four of the six
-findings were a claim the previous round had written while fixing the round before it.** One guard's
+on `homelab-infra` #702: six rounds, **zero 🔴**, the code correct from round 1, and **round after
+round the finding was a claim the previous round had written while fixing the round before it.** One guard's
 rationale went through FIVE drafts — each retracted by the next round, each composed in the commit
 that fixed the last.
 
@@ -149,6 +245,22 @@ round applies to the code. Full case history: reference file.
 Rounds continue **only** while the previous round produced a finding that required a fix. The first
 round that returns no findings is the last one — stop there, and do not re-confirm it. Stop on that,
 not on the author saying it's done.
+
+🔴 **A round that reports only NITS THAT CHANGE NOTHING A READER DOES is a stopping round** — the
+same set `audit-dispatch.py` already keeps out of every brief (`nit-is-not-a-finding`), not a wider
+one. **A 🟢 that DOES change what a reader does is a finding and the ladder continues**: #804's round
+8 carried three, two of them shipped features that could be unwired with the suite green. File the
+stopping kind as one follow-up task naming the file, closed when its PR merges or a named reader
+dismisses it in writing — filed rather than fixed, so the round that files them is still the last.
+
+⚠ **That subset is the only class of FINDING that cannot extend a ladder — no SEVERITY is, and
+"deploy-blocking only" was rejected.** The attribution gate and the prose escape hatch below end a
+ladder for reasons that are not findings at all; this sentence is about findings only.
+`homelab-infra` #702 ran six rounds carrying **zero deploy-blockers** while its later rounds kept
+catching false claims the previous round's own fix had written: one guard's rationale went through
+five successive drafts, each retracted by the next round. A blocker-keyed ladder ends after round 1,
+so rounds 2–6 never run — draft 1 ships as the code's stated reason, and nobody ever asks the
+retire-or-accept question that ladder ended on. Should-fix findings are what keep it running.
 
 🔴 **A "safe to merge" VERDICT is not the stop signal — the FINDINGS are.** #804's rounds **5, 6 and
 7 each returned "safe to merge" and each still reported real defects** that were then fixed — the
@@ -200,6 +312,21 @@ merged PRs ship no source file at all** (measured; the reference file dates it),
 file type reads every round of those as zero and stops a ladder that is working. Nor will a pathspec do it — measured wrong in both
 directions on ordinary names (reference file). A round's fix touches a handful of files — read the list and name each one
 payload or scaffolding. **Ambiguous is not zero**: the gate does not fire, and the ladder continues.
+
+🔴 **DECIDE ONCE, AT ROUND 1, AND WRITE IT IN THE CLAIMS BLOCK.** A class that can be re-decided
+each round disarms the gate without anyone choosing to — measured on devrc #1132, where a shared
+test library was named scaffolding early and payload later, in a ladder whose summary claimed it
+stopped on this gate. The tie-breaker for a shared helper is the **REVERT TEST**: if this file's
+diff were reverted, would the PR's stated deliverable still ship? Yes ⇒ scaffolding — however big
+and however reusable the helper is. No ⇒ payload — however deep under `tests/` it sits. Standing
+call for devrc: **`scripts/testlib/**` is SCAFFOLDING**, except a scanner that IS a repo gate on a
+PR whose deliverable is that gate. Reasons and the worked case: reference file.
+
+🔴 **ONE NUMBER, ONE NAME.** Report exactly one payload count per round and call it the same thing
+every time. #1132's ledger carried *"payload lines"* and *"executable payload"* on the same line
+with different values, so its rounds could be read as zero or non-zero at will and the stop needed
+no reclassification to become unfalsifiable. A second count is fine — under a different name, and
+the summary must say which one the stop was taken on.
 
 🔴 **Per-round, and every commit the round actually made.** Anchored at round 1 the count stays
 non-zero forever once an early round touched payload — on #498 that prints the same number for

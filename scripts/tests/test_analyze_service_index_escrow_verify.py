@@ -1346,10 +1346,38 @@ def _corrupt_payload(blob: bytes, offset: int = 400) -> bytes:
     return bytes(b)
 
 
+def _age_header_end(blob: bytes) -> int:
+    """One past the newline that closes age's `--- <mac>` header line."""
+    return blob.index(b"\n", blob.index(b"--- ")) + 1
+
+
+def _strip_payload(blob: bytes) -> bytes:
+    """Everything after the header removed. age opens the header, then has no
+    nonce left to read — a fault in the ARTIFACT, after the key has worked."""
+    end = _age_header_end(blob)
+    assert len(blob) > end, "fixture has no payload to strip"
+    return blob[:end]
+
+
+def _truncate_mid_nonce(blob: bytes) -> bytes:
+    end = _age_header_end(blob)
+    assert len(blob) > end + 8
+    return blob[:end + 8]
+
+
 @pytest.mark.parametrize("mangle,name", [
     (lambda blob: _corrupt_payload(blob, 400), "payload byte flipped"),
     (lambda blob: _corrupt_payload(blob, 300), "payload byte flipped, offset 300"),
     (lambda blob: blob[:-30], "ciphertext truncated"),
+    # 🔴 THE TWO AN ADVERSARIAL AUDIT FOUND MISCLASSIFIED (2026-09-09). Both are
+    # ordinary truncations, both leave the header INTACT and the identity
+    # RIGHT, and both used to reach DECRYPT-FAILED's "CANNOT SAY WHY" — a
+    # verdict that names a wrong key among its three open causes. The tail
+    # truncation above did NOT catch them: it removes 30 bytes from inside a
+    # payload chunk, which age reports as a chunk-authentication failure. These
+    # cut BEFORE any chunk, where age says something else entirely.
+    (_strip_payload, "payload stripped entirely"),
+    (_truncate_mid_nonce, "truncated 8 bytes into the nonce"),
 ])
 def test_a_TAMPERED_or_TRUNCATED_artifact_is_ARTIFACT_CORRUPT_not_EMPTY(
         escrow_world, tmp_path, mangle, name):
@@ -1379,6 +1407,286 @@ def test_a_TAMPERED_or_TRUNCATED_artifact_is_ARTIFACT_CORRUPT_not_EMPTY(
         assert ei.value.exit_code != EV.EXIT_CODES[wrong], (name, wrong)
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE RE-KEYED DISCRIMINATOR (2026-09-08). The test above passes on age
+# v1.3.1 through `plain_present` and on v1.3.2 through the stderr
+# classification, and it CANNOT tell you which — whichever age is installed
+# supplies one signal and the other never runs. The four tests below force each
+# signal in isolation, so both arms are pinned on EVERY host regardless of which
+# age the toolchain happens to hand us. That is the whole reason the toolchain
+# bump was able to reach production behaviour with a green suite.
+# --------------------------------------------------------------------------- #
+def _refusing_decrypt(RVmod, monkeypatch, *, refusal, write_plaintext):
+    """Install a `decrypt` that refuses exactly the way we want to test.
+
+    Writes the plaintext file (or not) BEFORE raising, because that is what the
+    probe observes — `plain_present` is read at the instant of the raise.
+    """
+    def refuse(cipher, plain, identity):
+        if write_plaintext:
+            Path(plain).write_bytes(b"partial plaintext")
+        raise RVmod.RestoreVerifyError(
+            "DECRYPT FAILED (synthetic)", cause=RVmod.DECRYPT_AGE_REFUSED,
+            age_refusal=refusal)
+    monkeypatch.setattr(RVmod, "decrypt", refuse)
+
+
+def test_a_TAMPERED_payload_is_ARTIFACT_CORRUPT_even_when_age_WROTE_NOTHING(
+        escrow_world, monkeypatch):
+    """🔴 THE REGRESSION THE age v1.3.1 -> v1.3.2 BUMP CAUSED, pinned.
+
+    v1.3.2 creates `--output` LAZILY, on the first successful write, so a
+    tampered payload inside the first 64 KiB chunk leaves NO file — measured
+    2026-09-08 at 64 B, 1 KiB, 64 KiB-1, 64 KiB and 64 KiB+1, against v1.3.1
+    which left one (at size 0) in every one of those cases.
+
+    With the classifier keyed on file presence alone that made a TAMPERED backup
+    report as DECRYPT-FAILED — "your escrowed identity may not match" — which is
+    the verdict that gets a good disaster-recovery key rotated while the real
+    fault is a corrupt artifact.
+
+    Here `plain_present` is FALSE and only age's own "failed to decrypt and
+    authenticate payload chunk" is available. The verdict must still be the
+    strong one.
+    """
+    RVmod = EV._rv()
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=RVmod.AGE_REFUSED_PAYLOAD, write_plaintext=False)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "ARTIFACT-CORRUPT"
+    assert ei.value.exit_code == 33
+    assert ei.value.exit_code != EV.EXIT_CODES["DECRYPT-FAILED"]
+
+
+def test_a_TRUNCATED_artifact_is_ARTIFACT_CORRUPT_even_when_age_WROTE_NOTHING(
+        escrow_world, monkeypatch):
+    """🔴 THE SECOND POST-AUTH REFUSAL, FORCED IN ISOLATION (added 2026-09-09).
+
+    An adversarial audit measured that the OR's second arm was `== payload-auth-
+    failed` alone, so a truncation age reports as "failed to read nonce" or
+    "unexpected EOF" — the header opened, the bytes ran out — fell through to
+    "CANNOT SAY WHY", which lists a wrong key among its open causes.
+
+    The real-artifact params on `test_a_TAMPERED_or_TRUNCATED_artifact_is_
+    ARTIFACT_CORRUPT_not_EMPTY` cover this too, but only through whichever
+    signal the INSTALLED age happens to supply: on v1.3.1 they would still pass
+    through `plain_present`. This forces `plain_present` false so the refusal
+    value is the only thing that can produce the verdict, on every host.
+    """
+    RVmod = EV._rv()
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=RVmod.AGE_REFUSED_TRUNCATED, write_plaintext=False)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "ARTIFACT-CORRUPT"
+    assert ei.value.exit_code == 33
+    assert ei.value.exit_code != EV.EXIT_CODES["DECRYPT-FAILED"]
+
+
+def test_a_MAC_failure_wins_over_LEFTOVER_PLAINTEXT(escrow_world, monkeypatch):
+    """🔴 age's OWN CLASSIFICATION BEATS FILE PRESENCE, forced in isolation.
+
+    `_corrupt` is evaluated BEFORE the `AGE_REFUSED_HEADER_MAC` branch and its
+    first disjunct is `plain_present`, so if age ever left an `--output` file on
+    a MAC failure the MAC arm would be unreachable and the operator would get
+    "age authenticated the header with the ESCROWED key" — the one statement a
+    MAC failure specifically disproves.
+
+    An audit raised this out of its own delta and did not probe it, on the
+    grounds that it is unreachable today (`decrypt()` unlinks any stale output
+    first, and v1.3.2 creates the file lazily). Unreachable is not the same as
+    guarded: this forces BOTH signals to disagree — plaintext present AND a MAC
+    refusal — which no real age produces, and requires the classification to
+    win. Without the exclusion clause the mutant survives the whole suite.
+    """
+    RVmod = EV._rv()
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=RVmod.AGE_REFUSED_HEADER_MAC, write_plaintext=True)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "ARTIFACT-CORRUPT"
+    assert "unwrapped one of its recipient stanzas" in ei.value.verdict
+    assert "authenticated the header with the ESCROWED key" not in ei.value.verdict, (
+        "leftover plaintext made the payload branch win over age's own MAC "
+        "refusal, so the verdict asserts an act a MAC failure disproves.")
+
+
+def test_the_STRONG_verdict_fires_on_EVERY_post_auth_refusal_and_NO_other(
+        escrow_world, monkeypatch):
+    """🔴 THE SEAM BETWEEN THE TWO MODULES, ASSERTED AS A LEDGER.
+
+    `escrow-verify.py` reads `RV.AGE_REFUSALS_POST_AUTH` to decide when to say
+    "THE ESCROW IS FINE; THE BACKUP IS NOT". A test that names two refusals by
+    hand goes quietly incomplete the day a third is published — the failure this
+    whole round exists to fix, one level up. So this walks the PUBLISHED set and
+    requires the strong verdict for every member, and requires that no
+    non-member can reach it.
+    """
+    RVmod = EV._rv()
+    assert RVmod.AGE_REFUSALS_POST_AUTH, "an empty set would pass vacuously"
+    assert RVmod.AGE_REFUSALS_PRE_AUTH, "an empty set would pass vacuously"
+    # 🔴 The three groups must PARTITION the published set. A refusal in neither
+    # named set is not a bug — it lands in the unclassified message on purpose —
+    # but it must be VISIBLE here rather than absorbed, so the arithmetic is
+    # asserted before the behaviour.
+    assert not (RVmod.AGE_REFUSALS_POST_AUTH & RVmod.AGE_REFUSALS_PRE_AUTH)
+    assert (RVmod.AGE_REFUSALS_POST_AUTH | RVmod.AGE_REFUSALS_PRE_AUTH
+            | {RVmod.AGE_REFUSED_HEADER_MAC, RVmod.AGE_REFUSED_UNRECOGNISED}
+            ) == RVmod.AGE_REFUSALS, (
+        "a published refusal belongs to no named group and is not the "
+        "fall-through: it will silently take the unclassified verdict. Put it "
+        "in a group, or state here why it belongs with the unknown.")
+
+    for refusal in sorted(RVmod.AGE_REFUSALS_POST_AUTH):
+        _refusing_decrypt(RVmod, monkeypatch, refusal=refusal,
+                          write_plaintext=False)
+        with pytest.raises(EV.EscrowError) as ei:
+            _decrypt_run(escrow_world)
+        assert ei.value.token == "ARTIFACT-CORRUPT", refusal
+        # ...and the message that asserts age got PAST the header, which is the
+        # only one these refusals earn.
+        assert "authenticated the header with the ESCROWED key" in ei.value.verdict
+
+    # 🔴 THE THIRD STATE: the key is PROVEN and the header is damaged. Same
+    # token and exit code as above — the remedy is identical — and a DIFFERENT
+    # message, because "age authenticated the header" is precisely what a MAC
+    # failure means it did not do.
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=RVmod.AGE_REFUSED_HEADER_MAC,
+                      write_plaintext=False)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "ARTIFACT-CORRUPT"
+    assert ei.value.exit_code == 33
+    assert "unwrapped one of its recipient stanzas" in ei.value.verdict
+    assert "authenticated the header with the ESCROWED key" not in ei.value.verdict
+    # 🔴 It must NOT offer the rotation-shaped cause the pre-auth verdict does.
+    assert "TWO CAUSES PRODUCE THIS" not in ei.value.verdict
+    assert "the key is the likely cause" not in ei.value.verdict
+    assert "do NOT rotate the key" in ei.value.verdict
+
+    for refusal in sorted(RVmod.AGE_REFUSALS_PRE_AUTH):
+        _refusing_decrypt(RVmod, monkeypatch, refusal=refusal,
+                          write_plaintext=False)
+        with pytest.raises(EV.EscrowError) as ei:
+            _decrypt_run(escrow_world)
+        assert ei.value.token == "DECRYPT-FAILED", refusal
+        # ...and the TWO-cause sentence, not the three-cause one: age named
+        # which side of the payload it stopped on.
+        assert "TWO CAUSES PRODUCE THIS" in ei.value.verdict, refusal
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=RVmod.AGE_REFUSED_UNRECOGNISED,
+                      write_plaintext=False)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "DECRYPT-FAILED"
+    assert "CANNOT SAY WHY" in ei.value.verdict
+    assert "TWO CAUSES PRODUCE THIS" not in ei.value.verdict
+
+    # 🔴 THE WALK IS OVER THE PUBLISHED SET, and this loop is what makes that
+    # sentence true. The groups above are three hand-named collections; an audit
+    # pointed out that a SIXTH published value added to the partition literal
+    # satisfies every assertion above while being walked by none of them — and
+    # `AGE_REFUSED_HEADER_MAC` is itself the proof that "in neither group" is
+    # not a safe destination. So every value in `AGE_REFUSALS` is driven through
+    # the real consumer here, and each must produce one of the two tokens this
+    # branch family is allowed to emit. A new value that reaches something else
+    # — or nothing — fails without anyone remembering to extend a list.
+    for refusal in sorted(RVmod.AGE_REFUSALS):
+        _refusing_decrypt(RVmod, monkeypatch, refusal=refusal,
+                          write_plaintext=False)
+        with pytest.raises(EV.EscrowError) as ei:
+            _decrypt_run(escrow_world)
+        assert ei.value.token in ("ARTIFACT-CORRUPT", "DECRYPT-FAILED"), refusal
+        # And the strong token is reachable ONLY from the key-proven set.
+        if ei.value.token == "ARTIFACT-CORRUPT":
+            assert refusal in RVmod.AGE_REFUSALS_KEY_PROVEN, (
+                f"{refusal!r} reached ARTIFACT-CORRUPT — 'THE ESCROW IS FINE' — "
+                f"without being published as evidence the key worked.")
+
+
+def test_a_TAMPERED_payload_is_ARTIFACT_CORRUPT_when_only_PLAINTEXT_says_so(
+        escrow_world, monkeypatch):
+    """🔴 THE OTHER ARM, and it is not redundant with the one above.
+
+    On a payload large enough that an earlier chunk already flushed, age leaves
+    partial plaintext — measured on BOTH versions (196608 B of a 256 KiB
+    payload, 983040 B of a 1 MiB one). Presence stopped being NECESSARY
+    evidence; it did NOT stop being SUFFICIENT, and dropping it would lose the
+    only signal that does not depend on age's wording.
+
+    So this forces an UNRECOGNISED refusal — age saying something the classifier
+    cannot read — with plaintext present, and requires the strong verdict.
+    """
+    RVmod = EV._rv()
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=RVmod.AGE_REFUSED_UNRECOGNISED,
+                      write_plaintext=True)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "ARTIFACT-CORRUPT"
+    assert ei.value.exit_code == 33
+
+
+@pytest.mark.parametrize("refusal_attr", ["AGE_REFUSED_NO_IDENTITY",
+                                          "AGE_REFUSED_HEADER"])
+def test_a_NAMED_pre_payload_refusal_is_DECRYPT_FAILED_and_asserts_NEITHER_cause(
+        escrow_world, monkeypatch, refusal_attr):
+    """The two refusals that really do leave the key/header question open.
+
+    🔴 The message must NOT be the unclassified one: age NAMED which side of the
+    payload it stopped on, so exactly two causes remain and the sentence says
+    two.
+    """
+    RVmod = EV._rv()
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=getattr(RVmod, refusal_attr),
+                      write_plaintext=False)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "DECRYPT-FAILED"
+    assert ei.value.exit_code == 25
+    assert ei.value.exit_code != EV.EXIT_CODES["ARTIFACT-CORRUPT"]
+    assert ei.value.verdict.startswith(
+        f"age REFUSED {KEY_DELTA_NEW} before reaching the payload at all. TWO ")
+
+
+def test_an_UNRECOGNISED_refusal_with_NO_plaintext_ADMITS_it_cannot_classify(
+        escrow_world, monkeypatch):
+    """🔴 THE FAIL-SAFE THAT PAYS FOR KEYING ON ANOTHER TOOL'S PROSE.
+
+    The discriminator is now a substring match on age's stderr, which is
+    strictly weaker than the phase observation it replaced. The price of that is
+    that a future age which rewords must NOT quietly land in one of the three
+    answers. This is the branch that makes it land in an admission instead.
+
+    DEFENSIVE, NOT OBSERVED: on both measured age versions every refusal
+    classifies, so this arm is reachable today only from here. It carries the
+    SAME token and exit code as the named case — the remedy is identical — and
+    differs only in saying that THREE causes stay open, which is what
+    `test_every_decrypt_family_VERDICT_is_pinned_WHOLE` and
+    `test_EVERY_destructive_advice_message_is_pinned_WHOLE` hold to the letter.
+    """
+    RVmod = EV._rv()
+    _refusing_decrypt(RVmod, monkeypatch,
+                      refusal=RVmod.AGE_REFUSED_UNRECOGNISED,
+                      write_plaintext=False)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "DECRYPT-FAILED"
+    assert ei.value.exit_code == 25
+    msg = ei.value.verdict
+    assert msg.startswith(f"age REFUSED {KEY_DELTA_NEW} and this verifier "
+                          f"CANNOT SAY WHY.")
+    # 🔴 It must name the third possibility. The whole failure this replaces was
+    # a verdict that quietly dropped "the PAYLOAD is tampered" from the list.
+    assert "the PAYLOAD is tampered" in msg
+    assert "DO NOT ROTATE OR RE-ESCROW ON THIS" in msg
+    # ...and it must NOT make the two-cause claim it is not entitled to.
+    assert "TWO CAUSES PRODUCE THIS" not in msg
+
+
 def test_a_valid_encryption_of_NOTHING_says_the_ESCROW_IS_FINE(escrow_world, tmp_path):
     """🔴 AUDIT CASE 2 — THE ONE THAT GETS A GOOD DR KEY ROTATED.
 
@@ -1388,9 +1696,13 @@ def test_a_valid_encryption_of_NOTHING_says_the_ESCROW_IS_FINE(escrow_world, tmp
     DECRYPT-FAILED — "not (or no longer) a working identity" — for a key that
     had just worked. Acting on that verdict destroys the escrow.
 
-    The discriminator is MEASURED, not guessed (age v1.3.1): a refusal leaves NO
-    output file, a success-on-empty leaves one at size 0. `_decrypt_phase_probe`
-    reads exactly that.
+    The discriminator is MEASURED, not guessed, and it is the rc==0/rc!=0 split
+    published as `restore_verify.DECRYPT_EMPTY_PLAINTEXT` — NOT file presence.
+    That distinction is what kept this row correct across the age v1.3.1 ->
+    v1.3.2 bump, which changed WHEN the output file appears (re-measured
+    2026-09-08: v1.3.1 created it once the header authenticated, v1.3.2 creates
+    it lazily on the first successful write) and broke the sibling
+    ARTIFACT-CORRUPT row that WAS keyed on presence.
     """
     empty = tmp_path / "empty-payload"
     empty.write_bytes(b"")
@@ -1527,8 +1839,9 @@ def test_every_decrypt_family_VERDICT_is_pinned_WHOLE(escrow_world, tmp_path):
     assert ei.value.verdict == (
         f"🔴 {KEY_DELTA_NEW} is TAMPERED, CORRUPT or TRUNCATED. age "
         f"authenticated the header with the ESCROWED key — which a non-matching "
-        f"identity cannot do — began writing plaintext, and then FAILED on the "
-        f"payload. THE ESCROW IS FINE; THE BACKUP IS NOT. This is the finding a "
+        f"identity cannot do — and then FAILED PAST IT: a payload chunk that "
+        f"would not authenticate, or an artifact that ran out of bytes. "
+        f"THE ESCROW IS FINE; THE BACKUP IS NOT. This is the finding a "
         f"backup verifier exists to make: treat the artifact as unusable, check "
         f"the other retained objects for this scope, and do NOT rotate the key.")
 
@@ -1552,7 +1865,7 @@ def test_every_decrypt_family_VERDICT_is_pinned_WHOLE(escrow_world, tmp_path):
                store=escrow_world["store"], work_dir=escrow_world["work"],
                now=NOW, downloader_factory=lambda: d)
     assert ei.value.verdict == (
-        f"age REFUSED {KEY_DELTA_NEW} without writing any plaintext at all. TWO "
+        f"age REFUSED {KEY_DELTA_NEW} before reaching the payload at all. TWO "
         f"CAUSES PRODUCE THIS AND THEY ARE NOT SEPARABLE FROM HERE: the escrowed "
         f"identity does not match this artifact's recipients, or the artifact's "
         f"HEADER is damaged. Neither is asserted. To tell them apart, try a "
@@ -1796,7 +2109,8 @@ def test_the_phase_probe_OBSERVES_rather_than_reimplements(escrow_world):
         seen["state"] = state
     assert RVmod.decrypt is before, "the probe did not restore the original"
     assert seen["state"] == {"reached": False, "returned": False,
-                             "plain_present": None, "cause": None}
+                             "plain_present": None, "cause": None,
+                             "age_refusal": None}
     # And on a real run it records the success phase.
     v, _ = _decrypt_run(escrow_world)
     assert v.decrypt_checked is True
@@ -4231,18 +4545,56 @@ _PINNED_DESTRUCTIVE_TEXTS: frozenset[str] = frozenset({
         're-escrow or rotate on the strength of this. Run `restore-verify.py`'
         ' to diagnose the artifact.'
     ),
-    # ARTIFACT-CORRUPT  (escrow-verify.py:1470)
+    # ARTIFACT-CORRUPT
+    #
+    # 🔴 "began writing plaintext" IS GONE FROM THIS SENTENCE, and the pin is
+    # how you can tell it was a correction rather than a reword. age v1.3.2
+    # creates `--output` lazily, so on every artifact this subsystem produces a
+    # tampered payload writes NO plaintext — the old clause asserted an act the
+    # branch can no longer observe. What survives is the claim that is still
+    # supported: the header authenticated with the escrowed key.
+    #
+    # 🔴 "then FAILED on the payload" WENT THE SAME WAY, one round later
+    # (2026-09-09). The branch now also fires on a TRUNCATED artifact, where age
+    # ran out of bytes reading the nonce and never reached a payload chunk —
+    # asserting the payload there would be the identical mistake in a new
+    # spelling. The sentence names the disjunction it can actually support.
     (
         '🔴 {key} is TAMPERED, CORRUPT or TRUNCATED. age authenticated the '
         'header with the ESCROWED key — which a non-matching identity cannot '
-        'do — began writing plaintext, and then FAILED on the payload. THE '
+        'do — and then FAILED PAST IT: a payload chunk that would not '
+        'authenticate, or an artifact that ran out of bytes. THE '
         'ESCROW IS FINE; THE BACKUP IS NOT. This is the finding a backup '
         'verifier exists to make: treat the artifact as unusable, check the '
         'other retained objects for this scope, and do NOT rotate the key.'
     ),
-    # DECRYPT-FAILED  (escrow-verify.py:1482)
+    # ARTIFACT-CORRUPT, message 2 of 2 — the key is PROVEN and the HEADER is
+    # damaged.
+    #
+    # 🔴 SAME TOKEN AND EXIT CODE, DIFFERENT WITNESS, and the split is the
+    # table's own "split by REMEDY" doctrine rather than a shortcut: the remedy
+    # is identical (the backup is damaged, do not rotate) while the evidence is
+    # not. It may NOT borrow message 1, which asserts age "authenticated the
+    # header" — precisely what a MAC failure means it did not do — and it must
+    # not fall to the pre-auth verdict, which offers a non-matching identity as
+    # an open cause that the discriminating control EXCLUDES.
     (
-        'age REFUSED {key} without writing any plaintext at all. TWO CAUSES '
+        '🔴 {key} has a DAMAGED HEADER. The ESCROWED key unwrapped one of its '
+        'recipient stanzas — which age only lets an identity that MATCHES do — '
+        'and the header then failed its own integrity check. THE ESCROW IS '
+        'FINE; THE BACKUP IS NOT. age never reached the payload, so nothing is '
+        'claimed about it. Treat the artifact as unusable, check the other '
+        'retained objects for this scope, and do NOT rotate the key.'
+    ),
+    # DECRYPT-FAILED, message 1 of 2 — age NAMED a pre-payload refusal.
+    #
+    # 🔴 "without writing any plaintext at all" became "before reaching the
+    # payload at all", for the same reason as above in the mirror direction:
+    # the absence of plaintext is no longer EVIDENCE for this verdict on
+    # v1.3.2, so the sentence now states what age actually said rather than
+    # what the old file-presence observation used to imply.
+    (
+        'age REFUSED {key} before reaching the payload at all. TWO CAUSES '
         'PRODUCE THIS AND THEY ARE NOT SEPARABLE FROM HERE: the escrowed '
         "identity does not match this artifact's recipients, or the "
         "artifact's HEADER is damaged. Neither is asserted. To tell them "
@@ -4251,6 +4603,22 @@ _PINNED_DESTRUCTIVE_TEXTS: frozenset[str] = frozenset({
         ' stamp: if another artifact OPENS, the escrowed key is fine and THIS'
         " object's header is damaged; if none open, the key is the likely "
         'cause. Do NOT rotate the key before running that.'
+    ),
+    # DECRYPT-FAILED, message 2 of 2 — age refused in a way this tool could not
+    # read. SAME token and SAME exit code because the REMEDY is the same; the
+    # difference is that THREE causes stay open instead of two, and the sentence
+    # says so rather than borrowing the two-cause claim.
+    (
+        'age REFUSED {key} and this verifier CANNOT SAY WHY. age exited '
+        'non-zero without leaving plaintext, and its message matched none of '
+        'the refusals this tool knows how to read. THREE THINGS ARE NOW '
+        'EQUALLY CONSISTENT with what was seen and NONE is asserted: the '
+        "escrowed identity does not match, the artifact's HEADER is damaged, "
+        'or the PAYLOAD is tampered. 🔴 DO NOT ROTATE OR RE-ESCROW ON THIS. '
+        "Read age's own message in the detail below, then re-run "
+        '`restore-verify.py` by hand. If age has simply reworded, teach '
+        '`classify_age_refusal` the new string — this refusal exists so that a '
+        'reword produces an ADMISSION rather than a confident wrong answer.'
     ),
     # EXPECT-PUBKEY-MALFORMED  (escrow-verify.py:1548)
     (
@@ -4454,9 +4822,29 @@ def test_EVERY_destructive_advice_message_is_pinned_WHOLE():
                 if _DESTRUCTIVE_ADVICE.search(text)}
     # POSITIVE CONTROL: if this ever collapses to nothing, the pattern or the
     # renderer has broken and the whole ledger would pass vacuously.
+    #
+    # 🔴 AN INDEPENDENT FLOOR, DELIBERATELY A LITERAL — and the previous two
+    # revisions of this line were each wrong in the opposite direction, so the
+    # reasoning is written down rather than re-derived.
+    #
+    # It began as `>= 12` beside a message saying "the measured count is 13",
+    # against a real 15; an audit caught the PROSE. The fix replaced the literal
+    # with `>= len(_PINNED_DESTRUCTIVE_TEXTS)` — which the next audit showed is
+    # implied by the `unpinned` and `stale` assertions below, since together
+    # they force `must_pin == _PINNED_DESTRUCTIVE_TEXTS`. A control that can
+    # only fail when the assertions it precedes also fail is not a control.
+    #
+    # What the original literal bought is a floor that survives someone
+    # "greening" this ledger by deleting pins: a renderer regression that stops
+    # SEEING messages then still goes red here. So the literal comes back,
+    # deliberately loose, with NO count quoted in prose beside it — the drift
+    # was in the sentence, never in the number.
     assert len(must_pin) >= 12, (
         f"only {len(must_pin)} destructive-advice message(s) found — the "
-        f"renderer or the pattern has regressed; the measured count is 13")
+        f"renderer or `_DESTRUCTIVE_ADVICE` has regressed, and a message that "
+        f"stops being SEEN here stops being guarded, silently. This floor is "
+        f"independent of `_PINNED_DESTRUCTIVE_TEXTS` on purpose; do not "
+        f"re-derive it from that set.")
 
     unpinned = must_pin - _PINNED_DESTRUCTIVE_TEXTS
     assert not unpinned, (
@@ -4538,6 +4926,32 @@ def _secret_line(text: str) -> str:
 # printed the whole 74-character secret key. The docstring said "a message that
 # echoed it would be caught here". It would not have been.
 #
+# 🔴 AND IT IS VERSION-DEPENDENT. RE-MEASURED 2026-09-08 over 17 inputs on BOTH
+# age-keygen v1.3.1 and v1.3.2, in the dev shell (`nix develop`):
+#
+#     v1.3.1   6 of 17 inputs put the FULL secret line in stderr
+#     v1.3.2   0 of 17 — and 0 of 17 echo ANY 12-byte run of the input at all
+#
+# v1.3.2 dropped the quoted line: `unknown identity type: "<line>"` became a bare
+# `unknown identity type`. That is an upstream FIX, and it makes the redaction
+# guarded here UNTESTABLE FROM THE LIVE BINARY — untested, NOT unnecessary. Both
+# versions are on this host right now (the login shell has v1.3.1, the dev shell
+# v1.3.2), the deployed backup unit takes whatever its PATH gives it, and the
+# redaction is a property of OUR code rather than a bet on age's wording.
+#
+# So the positive control MOVED to a stub age-keygen that reproduces v1.3.1's
+# echoing stderr verbatim — see
+# `test_the_redaction_is_pinned_against_a_STUB_that_echoes_like_age_v1_3_1`. The
+# live binary is still exercised, but as an OBSERVATION of which regime is
+# installed, not as the thing that makes the guard non-vacuous. An upstream fix
+# must not be able to silence a guard about our own output.
+#
+# 🔴 v1.3.1 ALSO LEAKED ON THREE INPUTS THIS LEDGER NEVER LISTED — a TAB before
+# the secret line, the line wrapped in quotes, and the line indented four
+# spaces. All three are unrecognised-identity-TYPE shapes, i.e. the same
+# mechanism; the ledger was never a complete enumeration and should not be read
+# as one.
+#
 # MEASURED 2026-08-27, age v1.3.1, over six inputs, checking stderr
 # case-INSENSITIVELY against the fixture's own secret:
 #
@@ -4571,15 +4985,30 @@ _MANGLERS = [
 ]
 
 
-def test_the_LEAKING_manglers_really_DO_make_age_keygen_echo_the_secret(tmp_path):
-    """🔴 THE POSITIVE CONTROL THE FIRST VERSION OF THIS GUARD LACKED.
+# 🔴 THE TWO age-keygen REGIMES THIS HOST HAS SEEN, as a closed set. A THIRD is
+# a finding, not a nit: it would mean age echoes on inputs neither measurement
+# covered, and the ledger above would be describing neither binary.
+_REGIME_ECHOES = "echoes the unparsed line (age-keygen <= v1.3.1)"
+_REGIME_SILENT = "never echoes the input (age-keygen >= v1.3.2)"
 
-    A "no key material in the message" assertion is worth exactly as much as the
-    input's ability to PUT key material there. This runs `age-keygen -y` directly
-    on each fixture and asserts the stderr of the two `_LEAKING` manglers really
-    does contain the secret — and that the three `_NON_LEAKING` ones really do
-    not. If age ever stops echoing, this goes red and tells you the guard below
-    has become vacuous, instead of leaving it silently green forever.
+
+def test_which_age_keygen_ECHO_REGIME_is_installed_is_OBSERVED_not_assumed(
+        tmp_path):
+    """🔴 AN OBSERVATION, NOT THE GUARD'S POSITIVE CONTROL — and the difference
+    is the whole lesson of the age v1.3.1 -> v1.3.2 bump.
+
+    This used to BE the positive control: it asserted that the two `_LEAKING`
+    manglers really do put the secret in age-keygen's stderr, so that the
+    redaction test below could not be vacuous. v1.3.2 stopped echoing entirely
+    (0 of 17 inputs, measured 2026-09-08), which took the control away and made
+    a guard about OUR OWN output fail for a reason that has nothing to do with
+    our output. A guard that an upstream FIX can silence is not a guard.
+
+    So the control moved to a stub (next test), and this became what it should
+    always have been: a live reading of which regime the installed binary is in,
+    reported as one of exactly two known ones. It goes red only on a THIRD
+    regime — e.g. a version that echoes on inputs this ledger calls
+    non-leaking — which is a real finding about age, not about us.
 
     ⚠ THE COMPARISON IS CASE-INSENSITIVE, and that is not fussiness: a
     case-SENSITIVE check returns a FALSE NEGATIVE on the lowercased-prefix case
@@ -4589,36 +5018,169 @@ def test_the_LEAKING_manglers_really_DO_make_age_keygen_echo_the_secret(tmp_path
     k = _new_identity(tmp_path, "escrowed.key")
     text = k.read_text(encoding="utf-8")
     secret = _secret_line(text)
-    seen = {_LEAKING: 0, _NON_LEAKING: 0}
+    leaked_labels, quiet_labels = [], []
     for mangler, label, kind in _MANGLERS:
         f = tmp_path / f"probe-{abs(hash(label))}.key"
         f.write_text(mangler(text), encoding="utf-8")
         p = subprocess.run([AGE_KEYGEN, "-y", str(f)], capture_output=True)
         assert p.returncode != 0, f"{label} was ACCEPTED by age-keygen"
         err = p.stderr.decode("utf-8", "replace").lower()
-        leaked = secret.lower() in err
-        assert leaked == (kind is _LEAKING), (
-            f"{label}: expected {kind}, stderr {'HAS' if leaked else 'lacks'} "
-            f"the secret. The ledger above is now wrong about this age version; "
-            f"re-measure before trusting the guard that reads it.")
-        seen[kind] += 1
-    assert seen[_LEAKING] >= 2 and seen[_NON_LEAKING] >= 3, seen
+        (leaked_labels if secret.lower() in err else quiet_labels).append(
+            (label, kind))
+
+    leaked_kinds = {kind for _, kind in leaked_labels}
+    if not leaked_labels:
+        regime = _REGIME_SILENT
+    elif leaked_kinds == {_LEAKING}:
+        regime = _REGIME_ECHOES
+    else:
+        regime = None
+    assert regime is not None, (
+        f"age-keygen is in a THIRD echo regime nobody has measured: it echoed "
+        f"the secret for {leaked_labels}, which includes at least one input the "
+        f"ledger above calls non-leaking. Re-measure the whole ledger — the "
+        f"comment describing WHICH shapes echo is now wrong, and the redaction "
+        f"guard's fixtures were chosen from it.")
+    # 🔴 REPORTED, not silently accepted. `-rA` or a failure elsewhere in this
+    # file is where a reader finds out which binary produced the run.
+    print(f"age-keygen echo regime: {regime} "
+          f"(leaking inputs: {[lbl for lbl, _ in leaked_labels]})")
+    # In the echoing regime the ledger must still be exactly right, because that
+    # is the regime whose fixtures the redaction guard was built from.
+    if regime is _REGIME_ECHOES:
+        assert all(kind is _LEAKING for _, kind in leaked_labels)
+        assert all(kind is _NON_LEAKING for _, kind in quiet_labels)
+
+
+# The v1.3.1 stderr, reproduced EXACTLY. Taken from a real run (`age-keygen -y`
+# on an identity with a leading space on the secret line) rather than
+# paraphrased, so a reader can diff it against the binary if they doubt it.
+_AGE_KEYGEN_V131_ECHO = (
+    'age-keygen: error: failed to parse input: error at line 3: '
+    'unknown identity type: "%s"\n'
+    'age-keygen: report unexpected or unhelpful errors at '
+    'https://filippo.io/age/report\n'
+)
+
+
+def test_the_redaction_is_pinned_against_a_STUB_that_echoes_like_age_v1_3_1(
+        tmp_path, monkeypatch):
+    """🔴 THE POSITIVE CONTROL, MOVED OFF THE LIVE BINARY (2026-09-08).
+
+    The redaction in `backup.py::resolve_recipient` and in this module's
+    NOT-AN-AGE-IDENTITY verdict exists because age-keygen v1.3.1 echoes the
+    input line it could not classify, and on a mangled identity that line is the
+    SECRET KEY. v1.3.2 stopped echoing — an upstream fix — and that silently
+    turned the whole guard vacuous: the mutation "put `p.stderr` back into the
+    message" now survives against v1.3.2 for a reason that says NOTHING about
+    whether our code redacts.
+
+    THE UPSTREAM FIX, NAMED so this is an attributable fact rather than a
+    measurement someone has to re-derive: age v1.3.2, commit `c45ccfd2`
+    ("avoid echoing private keys in errors", reported by Trail of Bits),
+    released 2026-08-29. It dropped the `%q` from `unknown identity type: %q`
+    in `age-keygen`'s parse path. ⚠ The `error at line N` prefix is NOT new —
+    only the echo was removed, so do not read the line number as the fix.
+
+    🔴 AND THE RISK IS LIVE, not historical — BUT NOT FOR THE REASON THIS
+    PARAGRAPH USED TO GIVE, WHICH WAS FALSE. It read "Both versions are
+    installed on this host today (login shell v1.3.1, dev shell v1.3.2)". They
+    are not. MEASURED 2026-09-08 on the workbench: non-interactive zsh, login
+    zsh, login bash and the flake devShell ALL resolve v1.3.2, and the laptop
+    does too — no shell on either host resolves v1.3.1. (v1.3.1 derivations do
+    still sit in the store; nothing puts them on a PATH.) A claim about which
+    binary answers is exactly the kind that rots when a pin moves, which is what
+    happened here.
+
+    The real reason the risk is live, and it is a stronger one: **v1.3.2 did not
+    close every echo path.** MEASURED 2026-09-08 with a synthetic key —
+    `age -r "<AGE-SECRET-KEY-1…>"` still prints the whole key back, because
+    `cmd/age/parse.go` keeps `unknown recipient type: %q`. So a redaction guard
+    is still needed against the CURRENT pinned age, not merely against a version
+    somebody might still have. That is why the leak below is supplied by a STUB
+    rather than by whichever age is installed: the guard's sensitivity must not
+    depend on the toolchain at all.
+
+    So the leak is supplied by a STUB on PATH that reproduces v1.3.1's stderr
+    byte for byte. `backup.py` invokes `age-keygen` as a bare literal (see
+    `age_public_key_bytes`'s note on why argv[0] must stay a literal), so PATH
+    is the whole injection surface and nothing in production changes.
+
+    NEGATIVE CONTROL IS BUILT IN: the stub is asserted to really put the secret
+    in stderr before the redaction is checked, so a stub that stopped working
+    fails loudly instead of certifying an empty stream.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    text = k.read_text(encoding="utf-8")
+    secret = _secret_line(text)
+    body = secret.split("AGE-SECRET-KEY-", 1)[-1]
+
+    mangled = tmp_path / "mangled.key"
+    mangled.write_text(text.replace(secret, " " + secret), encoding="utf-8")
+
+    binx = tmp_path / "stubbin"
+    binx.mkdir()
+    # The stub echoes the OFFENDING LINE of whatever file it is handed, exactly
+    # as v1.3.1 did — it is not hardcoded to this fixture's secret, so it stays
+    # a faithful stand-in if the fixture changes.
+    mockbin.write_exec(binx / "age-keygen", f"""
+line=$(sed -n '3p' "$2" 2>/dev/null)
+printf '{_AGE_KEYGEN_V131_ECHO}' "$line" >&2
+exit 1
+""")
+    monkeypatch.setenv("PATH", f"{binx}:{os.environ['PATH']}")
+
+    # POSITIVE CONTROL: the stub really does leak, so the assertions below are
+    # about redaction and not about an empty stream.
+    probe = subprocess.run(["age-keygen", "-y", str(mangled)],
+                           capture_output=True)
+    assert probe.returncode != 0
+    assert secret.lower() in probe.stderr.decode("utf-8", "replace").lower(), (
+        "the stub stopped echoing — this test can no longer see a leak, so the "
+        "redaction assertion below would be vacuous. Fix the stub.")
+
+    # The escrowed NOTE is the mangled identity: this is the whitespace-paste
+    # failure `--expect-pubkey` exists to catch, and the verdict it produces is
+    # the one that must not carry the key.
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(), note=mangled.read_text(encoding="utf-8"),
+                    expect=_sha_via_documented_shell(k))
+    rendered = str(ei.value).lower()
+    assert ei.value.token == "NOT-AN-AGE-IDENTITY"
+    assert secret.lower() not in rendered
+    # The BODY alone, so a message that dropped the prefix while keeping the key
+    # still fails — the half a `"AGE-SECRET-KEY-" not in msg` spelling check
+    # cannot see.
+    assert body.lower() not in rendered
+    assert "age-secret-key-" not in rendered
+    assert ei.value.detail is None, (
+        "a detail field was populated on a path where the only upstream stream "
+        "available is age-keygen's input-echoing stderr")
 
 
 @pytest.mark.parametrize("mangler,label,kind", _MANGLERS)
 def test_NO_pubkey_failure_message_EVER_carries_key_material(tmp_path, mangler,
                                                              label, kind):
-    """🔴 age-keygen's STDERR ECHOES ITS INPUT on the realistic manglings —
-    measured: an unrecognised identity TYPE comes back as `unknown identity
-    type: "<the line>"`, and on a leading-space or lowercased-prefix paste that
-    line is the SECRET KEY. Quoting it would leak the very thing this module
-    refuses to print, on exactly the failure it exists to report.
+    """age-keygen's STDERR ECHOED ITS INPUT on the realistic manglings —
+    measured on v1.3.1: an unrecognised identity TYPE came back as `unknown
+    identity type: "<the line>"`, and on a leading-space or lowercased-prefix
+    paste that line is the SECRET KEY. Quoting it would leak the very thing this
+    module refuses to print, on exactly the failure it exists to report.
 
-    🔴 THE GUARD IS ONLY AS GOOD AS ITS LEAKING FIXTURES. Two of the five
-    manglers put the real secret into age-keygen's stderr — proven by
-    `test_the_LEAKING_manglers_really_DO_make_age_keygen_echo_the_secret` above,
-    which is this test's positive control. Interpolating `p.stderr` into the
-    NOT-AN-AGE-IDENTITY verdict is killed here by those two.
+    🔴 THIS TEST IS VACUOUS ON age-keygen >= v1.3.2, AND THE DOCSTRING USED TO
+    SAY THE OPPOSITE. It claimed "interpolating `p.stderr` into the
+    NOT-AN-AGE-IDENTITY verdict is killed here by those two". MEASURED
+    2026-09-08 with v1.3.2 installed: that mutation SURVIVES all five params.
+    v1.3.2 prints a bare `unknown identity type` with no quoted line, so no
+    fixture built from the live binary can put key material in the stream.
+
+    The mutation is killed by
+    `test_the_redaction_is_pinned_against_a_STUB_that_echoes_like_age_v1_3_1`,
+    which supplies v1.3.1's stderr deterministically instead of hoping the
+    installed binary still leaks. THIS test is kept because it is still the only
+    one that walks all five manglings against the REAL binary and pins that none
+    of them reaches the message — a weaker claim, and it is stated as one rather
+    than left reading like the guard it used to be.
 
     ⚠ CASE-INSENSITIVE, against the FIXTURE'S OWN secret — a case-sensitive
     check reads clean on the lowercased-prefix case while the whole key body is

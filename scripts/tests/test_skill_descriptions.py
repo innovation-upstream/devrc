@@ -284,7 +284,28 @@ MIN_LISTING_ENTRIES = 30
 # left at the previous, larger number licenses exactly the regrowth this constant
 # exists to catch, so re-pinning it is part of the cut, not follow-up work. The
 # eviction playbook is printed by the failing assertion below.
-LISTING_TOTAL_CEILING_CHARS = 10_800
+#
+# 🔴 RAISED ONCE, DELIBERATELY, 2026-09-08: 10,800 -> 11,192, to admit
+# `civitai-app-release` (392 chars), then LOWERED to 11,170 the same day when
+# the skill was reframed as `civitai-app-fleet` and its ENTRY got 22 chars
+# shorter — description 373->353 (20) plus the shorter name (19->17). An audit
+# caught an earlier wording that credited all 22 to the description; the
+# constant was right and the attribution was not. Re-pinning on a cut is the
+# rule this file states, and it pays part of the raise back. THE RULE ABOVE STILL STANDS — this is the
+# exception, not a precedent, and it was taken by Zach with the "do NOT raise"
+# sentence quoted back to him first. What was weighed:
+#   - Both playbook remedies were available and both were declined: demoting an
+#     existing skill to tier B (steps 0/3), or shipping the new skill at tier B
+#     for 21 chars instead of 392.
+#   - This is a ratchet on devrc's own growth, not the real overflow point —
+#     this module's docstring records the whole listing at ~0.67x of the actual
+#     budget on a 1M window, so nothing was at risk of being dropped.
+#   - The new skill is symptom-routed on purpose ("why was my submit refused"),
+#     which is exactly the surface tier B would have removed.
+# HEADROOM IS STILL 0 BY CHOICE: pinned to the exact new measure, so the NEXT
+# addition of any size reddens this gate and forces the same conversation.
+# If you are reading this while adding a skill: you do not get to raise it too.
+LISTING_TOTAL_CEILING_CHARS = 11_170
 
 # The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
 # recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries

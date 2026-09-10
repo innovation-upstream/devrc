@@ -58,6 +58,14 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+
+# 🔴 RESOLVED AT IMPORT, BEFORE ANY FIXTURE CAN RUN. Several suites in this tree
+# legitimately clobber os.environ["PATH"] (see
+# test_no_real_launchers.PINNED_PATH_CLOBBERS), so a `shutil.which("tmux")` call
+# inside a test body reports on the run order rather than on the host. Measured:
+# the two task-524 tests passed alone and in every pair, and failed only in the
+# full four-suite sweep, for exactly this reason.
+_TMUX_EXE_AT_IMPORT = __import__("shutil").which("tmux")
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -133,6 +141,15 @@ class _Recorder(HTTPServer):
         self.claim_batches = []      # popped one per claim; [] when exhausted
         self.claim_status = 200
         self.result_status = 200
+        # The transcript DELTA STREAM rides the same poll, on the hook tier.
+        # Separate status knobs from the claim's, because the whole point of the
+        # seam tests below is that one surface failing must not disturb the other.
+        self.stream_status = 200
+        self.cursor_status = 200
+        #: How many times the agent has polled (claim requests), and an optional
+        #: callback fired with that count — see the hook in do_POST.
+        self.polls = 0
+        self.on_poll = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -145,6 +162,22 @@ class _Handler(BaseHTTPRequestHandler):
             "auth": self.headers.get("Authorization"),
         })
         if self.path.endswith("/claim"):
+            # 🔴 A DETERMINISTIC HOOK FOR STAGGERING A FIXTURE, replacing a
+            # wall-clock timer — and it is on the CLAIM, which is the agent's ONE
+            # guaranteed request per poll. The obvious hook (the delta POST) does
+            # not fire at all when the only thing to report is a SKIP: run_round
+            # returns early with sent=0 and posts nothing, so a counter there
+            # never advances and the staggered file is never written.
+            #
+            # Why not a timer: measured, under this box's normal load a
+            # `threading.Timer(0.5, …)` fired before the agent's first poll in 3
+            # of 12 runs. Both reasons were then present at poll 1 — the exact
+            # configuration in which the mutant this fixture exists to kill
+            # SURVIVES — and the test passed anyway, so a green run was
+            # indistinguishable from one that proved nothing.
+            self.server.polls += 1
+            if self.server.on_poll:
+                self.server.on_poll(self.server.polls)
             status = self.server.claim_status
             if status != 200:
                 self._reply(status, b'{"error":"no"}')
@@ -152,7 +185,40 @@ class _Handler(BaseHTTPRequestHandler):
             batch = self.server.claim_batches.pop(0) if self.server.claim_batches else []
             self._reply(200, json.dumps({"writes": batch}).encode())
             return
+        if self.path == "/api/transcripts/stream":
+            if self.server.stream_status != 200:
+                self._reply(self.server.stream_status, b'{"error":"no"}')
+                return
+            # 🔴 THE CURSOR IS THE SERVER'S ANSWER, so this stub must actually
+            # answer one — a fake that returned only `{"ok":true}` would leave the
+            # host with no cursor to adopt and the next poll would reseed for ever,
+            # which is not the behaviour under test.
+            frame = json.loads(raw.decode() or "{}")
+            cursors = [
+                {"sessionId": s["sessionId"],
+                 "offset": s.get("offset", 0) + len(s.get("data", "").encode()),
+                 "reason": "accepted"}
+                for s in frame.get("sessions", [])
+            ]
+            self._reply(200, json.dumps(
+                {"ok": True, "applied": len(cursors), "cursors": cursors}).encode())
+            return
         self._reply(self.server.result_status, b'{"ok":true}')
+
+    def do_GET(self):  # noqa: N802 — name fixed by BaseHTTPRequestHandler
+        """The transcript stream's one READ: where the server's cursors are.
+
+        🔴 IT EXISTS SO A MISSING do_GET CANNOT BE MISTAKEN FOR A DEFECT IN THE
+        AGENT. Without it BaseHTTPRequestHandler answers 501, the stream backs
+        off, and every streaming test below would be measuring the stub.
+        """
+        self.server.requests.append({
+            "path": self.path, "body": b"", "auth": self.headers.get("Authorization"),
+        })
+        if self.server.cursor_status != 200:
+            self._reply(self.server.cursor_status, b'{"error":"no"}')
+            return
+        self._reply(200, b'{"sessions":[]}')
 
     def _reply(self, status, body):
         self.send_response(status)
@@ -1630,11 +1696,17 @@ def real_tmux(tmp_path):
 
 def _agent_with_real_tmux(monkeypatch, real_tmux):
     """Point the agent's tmux seam at the private server."""
-    sock, env = real_tmux["sock"], real_tmux["env"]
+    sock, base_env = real_tmux["sock"], real_tmux["env"]
 
-    def run(args):
+    def run(args, env=None):
+        # `env_override` models the real seam: open_window hands tmux a corrected
+        # PATH so a launched pane can find `claude` (task 524). Keep the private
+        # socket pinned whichever environment is used, or the call escapes to the
+        # operator's server — which this fixture exists to prevent.
+        e = dict(env if env is not None else base_env)
+        e["TMUX_TMPDIR"] = base_env["TMUX_TMPDIR"]
         p = subprocess.run(["tmux", "-L", sock, *args], capture_output=True,
-                           text=True, env=env, timeout=30)
+                           text=True, env=e, timeout=30)
         return p.returncode, p.stdout, p.stderr
 
     monkeypatch.setattr(AGENT, "run_tmux", run)
@@ -2065,8 +2137,14 @@ def test_an_EMPTY_pane_current_path_does_not_collapse_the_readback(monkeypatch):
     """
     calls = []
 
-    def fake_run_tmux(args):
+    def fake_run_tmux(args, env=None):
         calls.append(args)
+        # task 524: open_window asks the SERVER for the PATH a launched pane
+        # should get. Answering "unset" here (tmux's `-PATH`) keeps this test
+        # about the READ-BACK parse it was written for — open_window then passes
+        # no env, exactly as it did before that change.
+        if args[0] == "show-environment":
+            return 0, "-PATH\n", ""
         if args[0] == "new-window":
             # Well-formed, three fields, last one EMPTY. Note the trailing tab.
             return 0, "%2\tscratch20\t\n", ""
@@ -2114,7 +2192,13 @@ def test_an_UNREADABLE_pane_current_path_still_REFUSES(monkeypatch):
 
     `claude/RULES.md`: assert the STATE, never a word another branch can spell.
     """
-    def fake_run_tmux(args):
+    def fake_run_tmux(args, env=None):
+        # task 524: open_window now asks the SERVER what PATH a launched pane
+        # should get. "-PATH" is tmux's spelling for an unset variable, so
+        # open_window passes no environment and this test stays about the
+        # unreadable-path refusal it was written for.
+        if args[0] == "show-environment":
+            return 0, "-PATH\n", ""
         if args[0] == "new-window":
             return 0, "%2\tscratch20\t\n", ""
         if args[0] == "display-message":
@@ -2134,3 +2218,534 @@ def test_an_UNREADABLE_pane_current_path_still_REFUSES(monkeypatch):
         f"the unverifiable-path refusal must not be the FALLTHROUGH mismatch: {err!r}. "
         "'could not read where it landed' and 'tmux landed somewhere else' are "
         "different facts and must not share a code path.")
+
+
+# ---------------------------------------------------------------------------
+# task 524: a LAUNCHED PANE must get a PATH that can find `claude`.
+#
+# 🔴 THE EXISTING real_tmux TESTS ARE STRUCTURALLY BLIND TO THIS.
+# `_agent_with_real_tmux` runs tmux with `dict(os.environ, …)` — a FULL
+# developer PATH — so the pane it creates inherits a working PATH by accident of
+# the harness. Under systemd the agent's own PATH is the unit's deliberately
+# minimal `Environment=PATH=` (coreutils + python3 + tmux, 3 entries), and
+# `new-window` with no `-e` hands THAT to the new pane. Measured on workbench
+# 2026-09-07: the launched pane ran `claude` and got `command not found`, while
+# the tmux SERVER's own global PATH was complete — i.e. tmux was never the
+# source, the caller's environment was.
+#
+# So this test supplies the stripped parent environment the unit really has.
+# Without it the assertion cannot fail, which is the whole point.
+# ---------------------------------------------------------------------------
+
+def _pane_environ_path(real_tmux, pane: str) -> str:
+    """The PATH of the pane's own process, read from /proc — not from a shell.
+
+    Reading `/proc/<pid>/environ` is deterministic: it needs no prompt to be
+    ready, no command to be typed and no capture-pane timing. A shell-based read
+    would be racing the pane's own startup.
+    """
+    p = real_tmux["tmux"]("display-message", "-p", "-t", pane, "#{pane_pid}")
+    pid = p.stdout.strip()
+    assert pid.isdigit(), f"no pane pid for {pane!r}: {p.stdout!r}"
+    raw = pathlib.Path(f"/proc/{pid}/environ").read_bytes().decode("utf-8", "replace")
+    for entry in raw.split("\0"):
+        if entry.startswith("PATH="):
+            return entry[5:]
+    return ""
+
+
+def test_a_launched_pane_gets_a_PATH_THAT_CAN_FIND_claude(monkeypatch, tmp_path):
+    """task 524, criterion 3 — RED before the fix, GREEN after.
+
+    🔴 HERMETIC ON PURPOSE: its own tmux server, its own socket dir, and an
+    environment built from scratch rather than from os.environ. It does NOT use
+    the shared `real_tmux` fixture. Measured while writing it: run inside a
+    four-suite sweep it failed while passing alone, because `pane_path_env`
+    came back with another test's tmp_path — some session-scoped fixture in that
+    sweep mutates the ambient environment these helpers capture. A test that
+    depends on ambient state reports on the run order, not on the code.
+
+    The fake `claude` sits in a directory ABSENT from the agent's own PATH and
+    PRESENT in the tmux server's global PATH. That is the live shape, and it is
+    what makes the two outcomes distinguishable: a pane built from the caller's
+    environment cannot see it, one built from the server's can.
+    """
+    tmux_exe = _TMUX_EXE_AT_IMPORT
+    assert tmux_exe, "tmux is in REQUIRED_TOOLS; it must be on PATH here"
+
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    # POSIX-sh body, no shebang — write_exec owns that, and
+    # test_runtime_shebangs.py fails any test that writes its own.
+    write_exec(bindir / "claude", "exit 0\n")
+
+    sockdir = tempfile.mkdtemp(prefix="t524.")
+    sock = "t524-" + os.path.basename(str(tmp_path))
+    # A complete environment we OWN, so nothing ambient can reach this test.
+    server_env = {
+        "PATH": f"{bindir}:{os.path.dirname(tmux_exe)}:/usr/bin:/bin",
+        "TMUX_TMPDIR": sockdir,
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "TERM": "xterm",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
+
+    def tmux(*args, env=None):
+        return subprocess.run([tmux_exe, "-L", sock, *args], capture_output=True,
+                              text=True, env=(env or server_env), timeout=30)
+
+    try:
+        tmux("new-session", "-d", "-s", "scratch20")
+        # POSITIVE CONTROL on the fixture: prove the server really holds a PATH
+        # carrying `claude` BEFORE asserting anything about a pane, so a failure
+        # below is about the pane and never about the setup.
+        seen = tmux("show-environment", "-g", "PATH").stdout.strip()
+        assert str(bindir) in seen, f"fixture did not take; server PATH = {seen!r}"
+
+        # 🔴 THE AGENT'S OWN ENVIRONMENT, as systemd really gives it: PATH
+        # OVERRIDDEN and nothing else, which is exactly what `Environment=PATH=`
+        # does. No `claude` on it.
+        agent_env = dict(server_env, PATH=os.path.dirname(tmux_exe))
+
+        def run(args, env=None):
+            # env=None means "the agent passed nothing" — the defect. A stub that
+            # ignored the argument would pass with or without the fix.
+            e = dict(env if env is not None else agent_env)
+            e["TMUX_TMPDIR"] = sockdir          # pin the private socket only
+            return (lambda p: (p.returncode, p.stdout, p.stderr))(
+                subprocess.run([tmux_exe, "-L", sock, *args], capture_output=True,
+                               text=True, env=e, timeout=30))
+
+        monkeypatch.setattr(AGENT, "run_tmux", run)
+
+        pane, err = AGENT.open_window(str(tmp_path), "scratch20")
+        assert not err, f"open_window failed: {err}"
+        assert pane.startswith("%"), f"no pane id: {pane!r}"
+
+        pid = tmux("display-message", "-p", "-t", pane, "#{pane_pid}").stdout.strip()
+        assert pid.isdigit(), f"no pane pid for {pane!r}"
+        raw = pathlib.Path(f"/proc/{pid}/environ").read_bytes().decode("utf-8", "replace")
+        pane_path = ""
+        for entry in raw.split("\0"):
+            if entry.startswith("PATH="):
+                pane_path = entry[5:]
+                break
+
+        assert pane_path, f"could not read the pane's PATH at all (pane {pane})"
+        assert str(bindir) in pane_path.split(":"), (
+            "the launched pane cannot find `claude`: its PATH is "
+            f"{pane_path!r}, which does not contain {str(bindir)!r}. The pane "
+            "inherited the AGENT's environment instead of the tmux server's. "
+            "This is task 524: on workbench the launched window sat on "
+            "`claude: command not found`."
+        )
+    finally:
+        subprocess.run([tmux_exe, "-L", sock, "kill-server"], capture_output=True,
+                       env=server_env, timeout=30)
+        shutil.rmtree(sockdir, ignore_errors=True)
+
+
+def test_the_launch_env_KEEPS_tmux_reachable_when_the_server_PATH_lacks_it(monkeypatch, tmp_path):
+    """The corrected PATH must PREPEND, never REPLACE — task 524.
+
+    🔴 THE MUTANT THIS EXISTS FOR. `launch_env = dict(os.environ, PATH=pane_path)`
+    reads as the obvious implementation and passes the sibling test above, because
+    there the server's PATH happens to contain tmux. It is wrong: this process
+    re-execs tmux WITH that environment, so an operator PATH that does not carry
+    tmux would leave the agent unable to run tmux at all — the launch fails
+    outright instead of landing a diagnosable window. Measured: without this case
+    that mutant SURVIVES.
+
+    So the server PATH here deliberately does NOT contain tmux. Only the
+    append-our-own behaviour can make this pass.
+    """
+    tmux_exe = _TMUX_EXE_AT_IMPORT
+    assert tmux_exe, "tmux is in REQUIRED_TOOLS; it must be on PATH here"
+
+    bindir = tmp_path / "onlybin"
+    bindir.mkdir()
+
+    sockdir = tempfile.mkdtemp(prefix="t524b.")
+    sock = "t524b-" + os.path.basename(str(tmp_path))
+    server_env = {
+        "PATH": f"{os.path.dirname(tmux_exe)}:/usr/bin:/bin",
+        "TMUX_TMPDIR": sockdir,
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "TERM": "xterm",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
+
+    def tmux(*args):
+        return subprocess.run([tmux_exe, "-L", sock, *args], capture_output=True,
+                              text=True, env=server_env, timeout=30)
+
+    try:
+        tmux("new-session", "-d", "-s", "scratch20")
+        # 🔴 A server PATH WITHOUT tmux on it. This is the whole fixture.
+        tmux("set-environment", "-g", "PATH", str(bindir))
+        seen = tmux("show-environment", "-g", "PATH").stdout.strip()
+        assert seen == f"PATH={bindir}", f"fixture did not take: {seen!r}"
+
+        agent_env = dict(server_env, PATH=os.path.dirname(tmux_exe))
+
+        def run(args, env=None):
+            e = dict(env if env is not None else agent_env)
+            e["TMUX_TMPDIR"] = sockdir
+            # 🔴 BY NAME, NOT BY ABSOLUTE PATH — the real agent runs
+            # `tmux_bin()`, which defaults to the bare name "tmux", so PATH is
+            # what decides whether tmux can be executed at all. A stub using an
+            # absolute path makes this test unable to fail: measured, the
+            # replace-PATH mutant SURVIVED until this line changed.
+            return (lambda p: (p.returncode, p.stdout, p.stderr))(
+                subprocess.run(["tmux", "-L", sock, *args], capture_output=True,
+                               text=True, env=e, timeout=30))
+
+        monkeypatch.setattr(AGENT, "run_tmux", run)
+
+        pane, err = AGENT.open_window(str(tmp_path), "scratch20")
+        assert not err, (
+            "open_window failed with a server PATH that does not carry tmux: "
+            f"{err!r}. The launch environment REPLACED this unit's PATH instead "
+            "of prepending to it, so tmux itself became unreachable."
+        )
+        assert pane.startswith("%"), f"no pane id: {pane!r}"
+    finally:
+        subprocess.run([tmux_exe, "-L", sock, "kill-server"], capture_output=True,
+                       env=server_env, timeout=30)
+        shutil.rmtree(sockdir, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# The transcript DELTA STREAM seam.
+#
+# 🔴 THE MODULE AND THE AGENT ARE EACH TESTED IN ISOLATION ELSEWHERE, AND THAT IS
+# EXACTLY WHY THESE EXIST. `test_transcript_stream.py` drives the protocol against
+# a simulated server; the tests above drive the write path against a stub. Neither
+# ever builds the combined state, and the defect this feature can produce lives in
+# the seam nobody owns: a stream failure reaching the WRITE loop's handler, which
+# would put the agent into its 60-second backoff and delay somebody's typed reply
+# by a minute.
+# --------------------------------------------------------------------------- #
+
+
+def _projects_tree(tmp_path, session_id="stream-sess", body=None):
+    """A synthetic ~/.claude/projects tree with one session."""
+    root = tmp_path / "projects" / "-home-zach-workspace-devrc"
+    root.mkdir(parents=True, exist_ok=True)
+    f = root / f"{session_id}.jsonl"
+    f.write_text(body or (
+        '{"type":"user","sessionId":"%s","message":{"role":"user","content":"hello"}}\n'
+        % session_id), encoding="utf-8")
+    return tmp_path / "projects", f
+
+
+def _stream_posts(server):
+    return [r for r in server.requests if r["path"] == "/api/transcripts/stream"]
+
+
+def test_the_agent_streams_transcript_deltas_on_the_SAME_poll(server, tmux_stub, tmp_path):
+    """🔴 THE WHOLE CLAIM OF THIS FEATURE'S TRANSPORT: no new port, no new
+    connection, no new unit — the deltas ride the poll the write agent already
+    holds. Asserted by seeing BOTH surfaces' traffic from ONE process."""
+    projects, _ = _projects_tree(tmp_path)
+    server.claim_batches = [[write()]]
+    rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=4, env_extra={
+        "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
+
+    posts = _stream_posts(server)
+    assert posts, f"the agent never streamed a delta frame; requests={[r['path'] for r in server.requests]}\n{out}"
+    frame = json.loads(posts[0]["body"])
+    assert frame["host"] == "workbench", frame
+    assert [s["sessionId"] for s in frame["sessions"]] == ["stream-sess"], frame
+    assert frame["sessions"][0]["reset"] is True, "the first frame for an unseen file must reseed"
+
+    # 🔴 THE HOOK TOKEN, NOT THE TERMINAL ONE. Fusing the tiers would mean
+    # disarming the write surface silently takes the operator's session view with
+    # it — see transcript_round's docstring.
+    assert posts[0]["auth"] == "Bearer hook-token-for-the-stream", posts[0]["auth"]
+    claims = [r for r in server.requests if r["path"].endswith("/claim")]
+    assert claims, "the write path stopped working once streaming was added"
+    assert claims[0]["auth"] == "Bearer not-a-real-terminal-token-not-a-real-token"
+
+    # And the write itself still happened.
+    assert len(tmux_stub.send_keys_calls()) == 2, tmux_stub.send_keys_calls()
+
+
+def test_a_FAILING_transcript_stream_does_not_disturb_the_write_path(server, tmux_stub, tmp_path):
+    """🔴 THE SEAM DEFECT THIS GUARDS. Everything the stream can raise is caught
+    at the stream's own call site, NOT by the loop's handler — that handler puts
+    the agent into a 60-second backoff, so a transcript hiccup would delay a
+    typed reply by a minute. The write surface is the capability with a person
+    waiting on it."""
+    projects, _ = _projects_tree(tmp_path)
+    server.stream_status = 500
+    server.claim_batches = [[write()]]
+    rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=4, env_extra={
+        "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
+
+    assert _stream_posts(server), "the stream never even tried — this test is measuring nothing"
+    sends = tmux_stub.send_keys_calls()
+    assert len(sends) == 2, (
+        f"a FAILING transcript stream stopped the write from being delivered: {sends}\n{out}")
+    results = [r for r in server.requests if r["path"].endswith("/result")]
+    assert results and json.loads(results[0]["body"])["state"] == "delivered", out
+    assert "transcript streaming failed this poll" in out, (
+        f"the stream failure was swallowed silently: {out}")
+
+
+def test_no_hook_token_turns_streaming_OFF_and_says_so_without_touching_the_write_path(
+    server, tmux_stub, tmp_path
+):
+    """🔴 NOT FATAL, AND NOT SILENT. The transcript routes are on the hook tier;
+    a host with a terminal token but no hook token must still deliver writes, and
+    the 5-minute bulk push keeps feeding the read model. Exiting here would take
+    the write surface down over a read model's missing key."""
+    projects, _ = _projects_tree(tmp_path)
+    server.claim_batches = [[write()]]
+    rc, out = run_agent(server, tmux_stub, tmp_path, env_extra={
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
+
+    assert not _stream_posts(server), "a frame was streamed with no hook token"
+    assert "transcript streaming is OFF" in out, out
+    assert "bulk push" in out, "the log does not say what still covers the feed: " + out
+    assert len(tmux_stub.send_keys_calls()) == 2, (
+        f"the write path broke when streaming was unconfigured\n{out}")
+
+
+def test_a_transcript_stream_failure_forces_a_RE_HYDRATION_on_the_next_poll(
+    server, tmux_stub, tmp_path
+):
+    """🔴 THE MOST LIKELY CAUSE OF A STREAM FAILURE IS A REDEPLOY, which is
+    exactly when this host's cursors may no longer describe what the server
+    holds. Adopting them again is what makes the gap bounded rather than
+    permanent — so a failure must cost a cursor read, not just a retry."""
+    projects, _ = _projects_tree(tmp_path)
+    server.stream_status = 500
+    server.claim_batches = [[write()], []]
+    rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=8, env_extra={
+        "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
+
+    cursor_reads = [r for r in server.requests if r["path"] == "/api/transcripts/stream/cursors"]
+    assert len(cursor_reads) >= 2, (
+        f"the cursors were read {len(cursor_reads)} time(s) across repeated stream failures — "
+        f"hydration happens once per agent lifetime, so a failure that does not clear it leaves "
+        f"the host resending against cursors the server may no longer hold\n{out}")
+
+
+def test_TWO_skip_reasons_are_each_logged_ONCE_through_the_REAL_loop(server, tmux_stub, tmp_path):
+    """🔴 THE STICKY MEMO'S UNION IS ONLY OBSERVABLE WITH **TWO** REASONS, AND
+    EVERY EARLIER TEST HAD ONE.
+
+    `stream_skips |= fresh` accumulates; mutating it to a REBIND
+    (`stream_skips = fresh`) passed all 208 tests — and it restores exactly the
+    flood round 7 removed. With `= fresh`, `seen` is REPLACED by whatever was
+    fresh, so two simultaneously-present reasons ping-pong forever:
+
+        {A,B} - {A} = {B}   -> seen={B}
+        {A,B} - {B} = {A}   -> seen={A}   -> one line per poll, for ever
+
+    Measured against the real agent as a subprocess: shipped = 2 skip lines,
+    the rebind mutant = 69.
+
+    A single-reason flap does NOT distinguish them (both score 1), and the unit
+    test for `skip_reasons_to_report` cannot either — it does its own `seen |=
+    fresh`, so it is structurally blind to a mutation of the LOOP. This drives
+    the loop, with two reasons whose onsets are STAGGERED so the union is what
+    has to hold.
+    """
+    projects, _first = _projects_tree(tmp_path, "skip-a")
+    d = projects / "-home-zach-workspace-devrc"
+    # Reason 1, present from the first poll: a line still being written.
+    (d / "skip-a.jsonl").write_text('{"type":"user","partial":tr', encoding="utf-8")
+
+    # 🔴 REASON 2 ARRIVES **LATER**, AND THE STAGGER IS THE WHOLE FIXTURE. With
+    # both files present from poll 1 the rebind mutant SURVIVES: the first poll
+    # reports {A,B}, every later poll has fresh=∅, so `stream_skips = fresh` never
+    # executes again and the two formulations are indistinguishable.
+    #
+    # 🔴 SO THE STAGGER MUST BE DETERMINISTIC, AND A `threading.Timer` IS NOT.
+    # Measured with the timer: under this box's normal load it fired before the
+    # agent's first poll in 3 of 12 runs — the degenerate configuration — and the
+    # test PASSED anyway, so the mutant survived 4 of 14 loaded runs while the
+    # battery reported 6/6 at ambient load. The file is now written from the stub
+    # server's own handler on the agent's THIRD POLL, so "after A has been
+    # reported" is a fact about the traffic rather than about the clock.
+    def _second_reason_after_third_poll(n):
+        if n == 3:
+            (d / "skip-b.jsonl").write_bytes(b'{"type":"user","t":"\xff\xfe"}\n')
+
+    server.on_poll = _second_reason_after_third_poll
+    server.claim_batches = [[], [], [], []]
+    rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=30, env_extra={
+        "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
+
+    lines = [l for l in out.splitlines() if "skipped some sessions" in l]
+    # 🔴 EXACTLY TWO, NOT "AT MOST TWO", NOW THAT THE STAGGER IS DETERMINISTIC.
+    # `1 <= len(lines)` was the arm that admitted the degenerate run: one line
+    # means both reasons arrived together, which is precisely the configuration
+    # the mutant survives, so a pass there proved nothing.
+    assert len(lines) == 2, (
+        f"two skip reasons with STAGGERED onsets produced {len(lines)} log lines, want exactly "
+        f"2. 1 means the stagger did not happen and this run proved NOTHING; more than 2 means "
+        f"the memo is not ACCUMULATING — the two reasons are ping-ponging and this loop polls "
+        f"17,280 times a day:\n"
+        + "\n".join(lines[:6]) + "\n---\n" + out[-1500:])
+    reported = " ".join(lines)
+    assert "no-record-boundary" in reported, reported
+    assert "undecodable" in reported, (
+        "the SECOND reason was never reported — with a rebinding memo the two reasons "
+        f"ping-pong and neither ever settles:\n{reported}")
+
+
+def test_a_REPEATING_skip_condition_is_logged_ONCE_not_on_every_poll(server, tmux_stub, tmp_path):
+    """🔴 THE ONE-REASON CASE, WHERE THE COUNT IS DETERMINISTIC.
+
+    One session, one reason, present on every poll: a correct memo logs it
+    exactly once. An upper bound would not do here — `<= 1` is satisfied by ZERO,
+    i.e. by the skip line never being emitted at all, which is the regression
+    this whole arc is about. Measured: with the emit forced off, the `<= 1`
+    version SURVIVED.
+
+    ⚠ THE FIXTURE IS ONE SESSION, AND AN EARLIER COMMENT HERE CLAIMED TWO. It
+    wrote `skip-a.jsonl` — the same path `_projects_tree` had just created — so
+    "the count goes 1 -> 2" never happened and the unused `first` was the tell.
+    The two-reason case it was reaching for is the test above.
+    """
+    projects, _first = _projects_tree(tmp_path, "skip-a")
+    (projects / "-home-zach-workspace-devrc" / "skip-a.jsonl").write_text(
+        '{"type":"user","partial":tr', encoding="utf-8")
+
+    server.claim_batches = [[], [], [], []]
+    rc, out = run_agent(server, tmux_stub, tmp_path, expect_requests=10, env_extra={
+        "CLAWGATE_HOOK_TOKEN": "hook-token-for-the-stream",
+        "CLAUDE_PROJECTS_DIR": str(projects),
+    })
+
+    lines = [l for l in out.splitlines() if "skipped some sessions" in l]
+    assert len(lines) == 1, (
+        f"the skip condition was logged {len(lines)} times across one run, want exactly 1 — "
+        f"0 means the signal is gone, >1 means the memo is not holding and this loop polls "
+        f"17,280 times a day:\n" + "\n".join(lines[:5]) + "\n---\n" + out[-1500:])
+    assert "no-record-boundary" in lines[0], lines[0]
+
+
+def test_a_FLAPPING_skip_reason_is_reported_ONCE_not_on_every_appearance():
+    """🔴 THE SET-COMPARISON MEMO STILL FLOODED, AND ITS OWN DOCSTRING CLAIMED IT
+    DID NOT. Comparing the current reason set against the previous one logs on
+    every change in EITHER direction, so a reason that appears and disappears
+    costs TWO lines per cycle — and `no-record-boundary` is exactly that shape: a
+    session is mid-record on one poll and complete on the next, which the tailer's
+    own docstring calls the ordinary steady state.
+
+    Measured against a transcription of the loop before this fix: 39 log lines
+    over 40 polls when the reason flaps; 8 when it appears 1 poll in 10, which is
+    3,456 a day at the real cadence.
+
+    Driven against the REAL decision function, because a rule inside main()'s loop
+    cannot be tested where it can be wrong — the lesson the previous fix in this
+    same arc had to learn.
+    """
+    report = AGENT.skip_reasons_to_report
+    seen = frozenset()
+    lines = 0
+    # 40 polls, the reason flapping on every other one.
+    for i in range(40):
+        skipped = {"no-record-boundary": 1} if i % 2 == 0 else {"unchanged": 3}
+        fresh = report(seen, skipped)
+        if fresh:
+            lines += 1
+            seen |= fresh
+    assert lines == 1, (
+        f"a FLAPPING reason produced {lines} log lines over 40 polls. At 17,280 polls a day "
+        f"that is a channel nobody reads.")
+
+    # 🔴 THE POSITIVE CONTROL: a genuinely NEW reason must still be reported, or
+    # the bound above is achieved by saying nothing.
+    fresh = report(seen, {"undecodable": 1})
+    assert fresh == frozenset({"undecodable"}), fresh
+
+
+def test_the_skip_memo_key_ignores_COUNTS_and_tracks_REASONS():
+    """🔴 THE SUBPROCESS TEST ABOVE COULD NOT SEE THIS, AND THE MUTANT SURVIVED
+    IT. Its fixture has one skipping session throughout, so no count ever moves —
+    the count-keyed and set-keyed memos behave identically under it. The rule has
+    to be asserted at the point it can be wrong.
+
+    A count moves whenever a different NUMBER of sessions is mid-record this poll
+    than last, and `no-record-boundary` is the ordinary steady state — so a
+    count-keyed memo re-logs the same condition on a loop that runs 17,280 times
+    a day.
+    """
+    k = AGENT.skip_memo_key
+
+    # The COUNT moving must NOT move the key.
+    assert k({"no-record-boundary": 1}) == k({"no-record-boundary": 2}) == k({"no-record-boundary": 97})
+
+    # A new REASON must.
+    assert k({"no-record-boundary": 1}) != k({"no-record-boundary": 1, "undecodable": 1})
+
+    # `unchanged` is the steady state and must not register at all — otherwise
+    # every poll of a quiet fleet logs.
+    assert k({"unchanged": 3}) == k({}) == k(None) == frozenset()
+    assert k({"unchanged": 3, "undecodable": 1}) == k({"undecodable": 9}) == frozenset({"undecodable"})
+
+
+def test_the_reported_reason_bound_matches_the_TAILERS_OWN_set():
+    """🔴 A LEDGER, NOT A RECOMPUTATION. `skip_reasons_to_report` logs at most one
+    line per distinct reason per agent lifetime, so the bound IS the tailer's
+    reason vocabulary — and the prose used to write it out as "four, since there
+    are four reasons" when there were five.
+
+    🔴 THE FIRST VERSION OF THIS TEST WAS A TAUTOLOGY. It built `reportable` as
+    `{r for r in reasons if r != "unchanged"}` and compared it against
+    `skip_memo_key`, whose body is the identical predicate — so both sides
+    recomputed from the same input and the equality held for ANY constant set.
+    Measured: adding a sixth reason to the tailer PASSED, while this test's own
+    docstring claimed such a change "moves this test".
+
+    So the expected set is written out ONCE, by hand, and checked BOTH ways
+    against the module: a reason added upstream fails here (GROWTH), and a reason
+    removed fails here too (SHRINK). That is a ledger — the only kind worth
+    having, and the same shape this repo's other two-way ledgers use.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "ts_for_bound", REPO_ROOT / "scripts" / "lib" / "transcript_stream.py")
+    ts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ts)
+
+    # The ledger. Every entry is a reason a skip line may name; `unchanged` is
+    # deliberately absent because it IS the steady state and must never be logged.
+    WANT_REPORTABLE = {
+        "no-record-boundary",
+        "undecodable",
+        "unreadable",
+        "duplicate-session-id",
+        "no-session-id",
+    }
+
+    declared = {v for k, v in vars(ts).items() if k.startswith("SKIP_") and isinstance(v, str)}
+    assert declared, "the SKIP_* scan found nothing — it is measuring nothing"
+    assert "unchanged" in declared, (
+        f"the steady-state reason is not among the tailer's SKIP_* values: {sorted(declared)}")
+
+    assert declared - {"unchanged"} == WANT_REPORTABLE, (
+        f"the tailer's reportable reasons are {sorted(declared - {'unchanged'})} but this "
+        f"ledger says {sorted(WANT_REPORTABLE)}. A reason added upstream widens the "
+        f"per-lifetime line bound the sticky memo promises; one removed narrows it. Update "
+        f"the ledger deliberately — that IS the accounting.")
+
+    # And the memo key must admit exactly the ledger, no more and no less.
+    assert AGENT.skip_memo_key({r: 1 for r in declared}) == frozenset(WANT_REPORTABLE), (
+        "the memo key does not admit exactly the tailer's reportable reasons, so the bound "
+        "the docstring describes is not the one the code enforces")
