@@ -3503,6 +3503,88 @@ in
     };
   };
 
+  # ── MAKE THAT DEADMAN LOOK SOONER (scripts/main-status-watch.py) ─────────────
+  # The unit above is correct and slow: `OnUnitActiveSec=4h` from its own last
+  # ACTIVATION plus `TimeoutStartSec=5400` means a healthy cycle is up to ~5.5h,
+  # so `main` can be red for most of a working day before anything looks. Every
+  # PR branched in that window inherits the red and a human triages a failure
+  # their diff cannot reach.
+  #
+  # 🔴 THE FIX IS NOT A SHORTER INTERVAL ON THE UNIT ABOVE. Each of its runs is
+  # both nix sandbox tiers — ~20 minutes on a box that routinely carries 20-40
+  # concurrent test runs. Polling harder is the expensive wrong answer. Instead
+  # this unit makes a handful of API reads and starts the deadman EARLY, on
+  # evidence, leaving the expensive confirmation event-driven.
+  #
+  # 🔴 IT NEVER DECIDES ANYTHING, AND THAT IS WHY IT IS SAFE TO RUN OFTEN.
+  # `main-green-check.sh` still makes every claim about main's health, still by
+  # reproduction (red on BOTH attempts, else `VERDICT=flake`). So a flake that
+  # reaches this unit costs compute, not the operator's attention — which is the
+  # whole reason a fast path is affordable at all. `claude/RULES.md`: a
+  # permanently-red gate is worse than no gate, and an alert that fires on a
+  # flake is how you build one.
+  #
+  # 🔴 DELIBERATELY NO `OnFailure = notify-failure@`. This is an ACCELERATOR: if
+  # it breaks, coverage is exactly what it was before it existed — the 4-hourly
+  # deadman is untouched. A transient GitHub outage must not fire the
+  # DND-defeating toast to report that a latency optimisation is offline. It
+  # still ladders (rc 12 after 12 consecutive unmeasured runs, ~2h) so it fails
+  # the unit and shows in `systemctl --user --failed` rather than going blind in
+  # permanent silence — the shape drift-check's rc 18 exists to prevent.
+  # `test_main_status_watch.py::test_the_watcher_is_not_wired_to_the_do_not_
+  # disturb_toast` pins that absence, so a later edit cannot quietly add one.
+  systemd.user.services.main-status-watch = {
+    Unit = {
+      Description = "Start the main-green deadman early when main's CI says main is red";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # rc 10 = TRIGGERED and rc 11 = COULD NOT MEASURE are both successes: the
+      # first is this unit working as designed, the second is a network blip
+      # that costs nothing. Only rc 12 (blind for ~2h) fails the unit.
+      SuccessExitStatus = "10 11";
+      # Bounded well under the timer interval. A handful of `gh api` reads with a
+      # 45s per-call timeout; if it cannot finish in 3 minutes something is wrong
+      # and the next fire is 10 minutes away.
+      TimeoutStartSec = 180;
+      Environment = [
+        # 🔴 `gh` IS THE WHOLE JOB, and `systemctl` is the other half — without
+        # either, every run reports COULD NOT MEASURE and the ladder escalates,
+        # from a unit that looks correct. `git` resolves the origin remote.
+        "PATH=${lib.makeBinPath [ pkgs.gh pkgs.git pkgs.systemd pkgs.python3 pkgs.coreutils ]}"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.python3}/bin/python3 %h/workspace/devrc/scripts/main-status-watch.py";
+      X-Restart-Triggers = [ "${../scripts/main-status-watch.py}" ];
+    };
+  };
+
+  # 10 minutes. The bound this is chosen against is MEASURED, not guessed: over
+  # the 100 newest commits to `main` (2026-09-08..09-10) an authoritative
+  # `tekton/devrc-main-*` verdict landed p50 ~19.6 min / p90 ~26 min after the
+  # commit. So the detection path becomes ~20 min (CI) + <=10 min (this poll) +
+  # ~20 min (the deadman's confirmation) — roughly 50 min worst case against up
+  # to ~5.5h before. Tightening this interval buys at most 10 more minutes off a
+  # ~50-minute total and cannot go below CI's own ~20 min, so it is deliberately
+  # not the lever to reach for.
+  systemd.user.timers.main-status-watch = {
+    Unit = {
+      Description = "Poll main's own CI status so the deadman can be started early";
+    };
+    Timer = {
+      OnStartupSec = "5min";
+      OnUnitActiveSec = "10min";
+    };
+    Install = {
+      # Gated by the SAME master switch as the deadman it accelerates, and for
+      # the same reason: accelerating a check nobody has enabled is meaningless,
+      # and a single switch cannot leave the pair half-armed.
+      WantedBy = lib.optionals (serverMode && enableMainGreenDeadman) [ "timers.target" ];
+    };
+  };
+
   # ── CLAWGATE TMUX READ-MODEL FEEDER (scripts/tmux-snapshot-push.sh) ──────────
   # clawgate runs in a pod on the workbench cluster; tmux sockets are unix sockets
   # on the workbench and laptop HOSTS. The deployment has no hostPath, no
