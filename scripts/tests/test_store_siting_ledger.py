@@ -229,8 +229,19 @@ def test_every_ledgered_file_IMPORTS_AND_CALLS_the_shared_siting_at_least_once()
     15 store roots inline from `tmp_path` under OTHER directory names. Every one of
     them is enumerated, with its reason, in `_DISK_ROOTED_ALLOWLIST` below, and
     `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY` asserts that set in
-    BOTH directions — so this test's "at least once" weakness is covered there
-    rather than left standing.
+    BOTH directions.
+
+    ⚠ "COVERED THERE" IS NOT WHAT THAT AMOUNTS TO, AND THIS SENTENCE USED TO SAY IT
+    WAS. The census reduces the residual; it does not close it. It ran over ONE of
+    the three files named here until this round — a hardcoded
+    `TESTS / "test_subsystem_store_api.py"` under a docstring that talked about the
+    ledger — and it now runs over all three, which is a real widening and still not
+    coverage: `_is_disk_rooted_store_expr` sees a `tmp_path / X` or a
+    `tmp_path.joinpath(X)` that flows into a store consumer WITHIN ONE FUNCTION
+    SCOPE, and nothing else. Its own docstring enumerates what that excludes. So the
+    honest statement is that this test's "at least once" weakness is REDUCED by the
+    census over the sites the census can see, and the rest is written down rather
+    than guarded.
     """
     offenders = []
     for name in sorted(EXPECTED_SERVER_TESTS):
@@ -305,55 +316,75 @@ def test_the_scan_can_actually_SEE_a_build_server_call():
 # recorded rather than migrated because this change was scoped to the write-path sites
 # that were failing the gate, and a 33-site conversion is exactly the shape that got
 # reverted last time.
-_DISK_ROOTED_ALLOWLIST: dict[str, str] = {
-    "TestFourStates.test_store_unreachable_is_503_and_NOT_a_200 :: tmp_path / 'absent'":
-        "the store deliberately does NOT exist; nothing is written and nothing is "
-        "fsynced. Counted at all only because the predicate errs WIDE.",
-    "TestFourStates.test_scope_empty_and_store_unreachable_SHARE_NOTHING :: "
-    "tmp_path / 'absent'":
-        "same absent-store shape as above.",
-    "TestByteIdentityVerifier.test_NEGATIVE_a_ONE_CHARACTER_divergence_FAILS_and_names_"
-    "the_scope :: tmp_path / 'served'":
-        "a `cp -a` of the store fixture served READ-ONLY to `run_verify`; no write "
-        "verb, so no in-request fsync.",
-    "TestByteIdentityVerifier.test_NEGATIVE_a_MISSING_entry_on_the_remote_FAILS :: "
-    "tmp_path / 'served'":
-        "read-only `run_verify` copy, as above.",
-    "TestByteIdentityVerifier.test_a_PAGINATED_index_is_REFUSED_rather_than_partially_"
-    "compared :: tmp_path / 'big'":
-        "read-only `run_verify` fixture. LISTING_PAGE_SIZE+1 entries, so it is also "
-        "the largest store in this population.",
-    "TestByteIdentityVerifier.test_a_scope_of_EXACTLY_LISTING_PAGE_SIZE_is_COMPARED_not_"
-    "refused :: tmp_path / 'at-the-cap'":
-        "read-only `run_verify` fixture, the other side of the same boundary.",
-    "TestByteIdentityVerifier.test_an_UNAMBIGUOUS_scope_of_the_SAME_SHAPE_still_PASSES "
-    ":: tmp_path / 'unambiguous'":
-        "read-only `run_verify` fixture.",
-    "TestByteIdentityVerifier.test_the_disclosure_survives_a_FAILING_run :: "
-    "tmp_path / 'served'":
-        "read-only `run_verify` copy.",
-    "TestByteIdentityVerifier.test_every_permitted_difference_is_ACCOUNTED_FOR_not_"
-    "merely_small :: tmp_path / 'served-elsewhere'":
-        "read-only `run_verify` copy.",
-    "TestByteIdentityVerifier.test_a_POD_SHAPED_remote_PASSES_when_only_the_THREE_"
-    "permitted_lines_differ :: tmp_path / 'served-elsewhere'":
-        "read-only `run_verify` copy.",
-    "TestByteIdentityVerifier.test_a_POD_SHAPED_remote_STILL_FAILS_on_a_real_content_"
-    "difference :: tmp_path / 'served-elsewhere'":
-        "read-only `run_verify` copy.",
-    "TestSeedThenVerify.test_a_seeded_copy_serves_byte_identical_digests :: "
-    "tmp_path / 'stage'":
-        "the output of `seed.sh` run as a SUBPROCESS, then served read-only to "
-        "`run_verify`. The writer is the seed script, not the request path.",
-    "TestSeedThenVerify.test_a_seed_that_MISSED_a_scope_is_caught_by_the_verifier :: "
-    "tmp_path / 'stage'":
-        "same seed-then-verify shape as above.",
-    "TestTheLoaderRefusesHostileEntriesByKind._recall_over_http :: tmp_path / name":
-        "a per-kind hostile store read through `running_subprocess`; the route under "
-        "test is a GET recall, and several kinds are FIFOs that must never be written.",
-    "TestTheLoaderRefusesHostileEntriesByKind.test_the_REFUSED_DIRECTORY_is_a_NAMED_row_"
-    "not_a_silent_skip :: tmp_path / kind":
-        "same hostile-kind read path as above.",
+#
+# 🔴 KEYED BY FILE, BECAUSE THE CENSUS USED TO READ ONE OF THE THREE LEDGERED FILES
+# WHILE ITS OWN PROSE TALKED ABOUT THE LEDGER. `TESTS / "test_subsystem_store_api.py"`
+# was hardcoded in the census test and in the sited-ledger test below — two functions
+# under a frozenset naming three files — and
+# `test_every_ledgered_file_IMPORTS_AND_CALLS_the_shared_siting_at_least_once` pointed
+# at the census as where its own weakness "is covered". MEASURED at the moment of the
+# fix, so it is on record that this closed no live defect: api 15, `test_cairn_write.py`
+# 0, `test_cairn_cli.py` 0. The two zeros are exactly why it mattered anyway — a file
+# contributing nothing is indistinguishable from a file never read, and
+# `test_cairn_write.py` going disk-backed is the incident in this module's own header.
+_DISK_ROOTED_ALLOWLIST: dict[str, dict[str, str]] = {
+    "test_subsystem_store_api.py": {
+        "TestFourStates.test_store_unreachable_is_503_and_NOT_a_200 :: tmp_path / 'absent'":
+            "the store deliberately does NOT exist; nothing is written and nothing is "
+            "fsynced. Counted at all only because the predicate errs WIDE.",
+        "TestFourStates.test_scope_empty_and_store_unreachable_SHARE_NOTHING :: "
+        "tmp_path / 'absent'":
+            "same absent-store shape as above.",
+        "TestByteIdentityVerifier.test_NEGATIVE_a_ONE_CHARACTER_divergence_FAILS_and_names_"
+        "the_scope :: tmp_path / 'served'":
+            "a `cp -a` of the store fixture served READ-ONLY to `run_verify`; no write "
+            "verb, so no in-request fsync.",
+        "TestByteIdentityVerifier.test_NEGATIVE_a_MISSING_entry_on_the_remote_FAILS :: "
+        "tmp_path / 'served'":
+            "read-only `run_verify` copy, as above.",
+        "TestByteIdentityVerifier.test_a_PAGINATED_index_is_REFUSED_rather_than_partially_"
+        "compared :: tmp_path / 'big'":
+            "read-only `run_verify` fixture. LISTING_PAGE_SIZE+1 entries, so it is also "
+            "the largest store in this population.",
+        "TestByteIdentityVerifier.test_a_scope_of_EXACTLY_LISTING_PAGE_SIZE_is_COMPARED_not_"
+        "refused :: tmp_path / 'at-the-cap'":
+            "read-only `run_verify` fixture, the other side of the same boundary.",
+        "TestByteIdentityVerifier.test_an_UNAMBIGUOUS_scope_of_the_SAME_SHAPE_still_PASSES "
+        ":: tmp_path / 'unambiguous'":
+            "read-only `run_verify` fixture.",
+        "TestByteIdentityVerifier.test_the_disclosure_survives_a_FAILING_run :: "
+        "tmp_path / 'served'":
+            "read-only `run_verify` copy.",
+        "TestByteIdentityVerifier.test_every_permitted_difference_is_ACCOUNTED_FOR_not_"
+        "merely_small :: tmp_path / 'served-elsewhere'":
+            "read-only `run_verify` copy.",
+        "TestByteIdentityVerifier.test_a_POD_SHAPED_remote_PASSES_when_only_the_THREE_"
+        "permitted_lines_differ :: tmp_path / 'served-elsewhere'":
+            "read-only `run_verify` copy.",
+        "TestByteIdentityVerifier.test_a_POD_SHAPED_remote_STILL_FAILS_on_a_real_content_"
+        "difference :: tmp_path / 'served-elsewhere'":
+            "read-only `run_verify` copy.",
+        "TestSeedThenVerify.test_a_seeded_copy_serves_byte_identical_digests :: "
+        "tmp_path / 'stage'":
+            "the output of `seed.sh` run as a SUBPROCESS, then served read-only to "
+            "`run_verify`. The writer is the seed script, not the request path.",
+        "TestSeedThenVerify.test_a_seed_that_MISSED_a_scope_is_caught_by_the_verifier :: "
+        "tmp_path / 'stage'":
+            "same seed-then-verify shape as above.",
+        "TestTheLoaderRefusesHostileEntriesByKind._recall_over_http :: tmp_path / name":
+            "a per-kind hostile store read through `running_subprocess`; the route under "
+            "test is a GET recall, and several kinds are FIFOs that must never be written.",
+        "TestTheLoaderRefusesHostileEntriesByKind.test_the_REFUSED_DIRECTORY_is_a_NAMED_row_"
+        "not_a_silent_skip :: tmp_path / kind":
+            "same hostile-kind read path as above.",
+    },
+    # MEASURED, not asserted from the shape of the files: the census reports
+    # ZERO disk-rooted sites in each of these, so an empty allowlist is the
+    # correct entry and any arrival here is a NEW one. An empty dict is a
+    # positive statement — "this file has none" — where a missing key would
+    # only be an absence.
+    "test_cairn_write.py": {},
+    "test_cairn_cli.py": {},
 }
 
 # Directory names that make a `tmp_path / "<name>"` a store root ON SIGHT, with no
@@ -418,6 +449,32 @@ def _is_disk_rooted_store_expr(node: ast.AST) -> bool:
     Constant arm now ALSO counts a path that flows into a store consumer, and
     `_ROOT_NAMES` is the residual on-sight shortcut rather than the whole test.
 
+    🔴 AND THE OPERAND'S *NODE TYPE* WAS THE SAME DEFECT ONE LEVEL DOWN. Both arms
+    used to require `isinstance(right, (ast.Name, ast.Constant))` before consulting
+    the flow gate, which is a guard on the SHAPE of an ordinary spelling: `tmp_path /
+    f"store-{k}"` is an `ast.JoinedStr` and `tmp_path / ("store" + k)` is an
+    `ast.BinOp`, so neither was counted no matter where it flowed. MEASURED as a live
+    hole rather than imagined: swapping
+    `TestTheRENAMEIsFSYNCedToo.test_an_append_fsyncs_BOTH_the_file_and_its_DIRECTORY`
+    back to `_build_store(tmp_path / f"store-{ALLOW_SCOPE}", …)` — a WRITE-PATH store
+    that reaches `api.append_bullet` -> `_replace_bytes` and its two in-request
+    fsyncs, i.e. exactly the flake population this file exists to shrink — left the
+    ledger at **23 passed** and the api file at **760 passed**. The type gate is gone;
+    the flow gate is what does the discriminating, and it already ruled out round 3's
+    `(tmp_path / name).write_text(body)` false positive on its own
+    (`test_a_path_that_is_never_used_as_a_store_still_does_NOT_count` is the control).
+
+    ⚠ THE WIDENING IS NOT A GENERAL "ANY STORE ROOT" CLAIM — READ THE RESIDUAL. The
+    left operand must still be the NAME `tmp_path`, and the expression must still be a
+    `/` or a `.joinpath(...)`, so these remain INVISIBLE and were each measured 0
+    after the widening: `Path(tmp_path) / "store"`, `base = tmp_path` then `base /
+    "store"`, `os.path.join(tmp_path, "store")`, `str(tmp_path) + "/store"`, and
+    `tmp_path_factory.mktemp("store")`. So does any root whose only path to a consumer
+    crosses a `@pytest.fixture` boundary, widened or not — that is the separate hole
+    `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted` pins, and a helper
+    that RETURNS `tmp_path / "holder"` is counted only when the helper is itself
+    CALLED in a store-flowing position, never when pytest injects it as a fixture.
+
     Quoting and spacing still do not matter: they do not survive parsing.
     """
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and (
@@ -426,9 +483,7 @@ def _is_disk_rooted_store_expr(node: ast.AST) -> bool:
         right = node.right
         if isinstance(right, ast.Constant) and right.value in _ROOT_NAMES:
             return True
-        return isinstance(right, (ast.Name, ast.Constant)) and _used_as_a_store_root(
-            node
-        )
+        return _used_as_a_store_root(node)
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -440,9 +495,7 @@ def _is_disk_rooted_store_expr(node: ast.AST) -> bool:
         first = node.args[0]
         if isinstance(first, ast.Constant) and first.value in _ROOT_NAMES:
             return True
-        return isinstance(first, (ast.Name, ast.Constant)) and _used_as_a_store_root(
-            node
-        )
+        return _used_as_a_store_root(node)
     return False
 
 
@@ -717,7 +770,12 @@ def _qualnames(tree: ast.AST) -> dict[int, str]:
 
 
 def _disk_rooted_census(tree: ast.AST) -> dict[str, int]:
-    """Every disk-rooted store site in `tree`, keyed `<qualname> :: <expression>`.
+    """Every site in `tree` that `_is_disk_rooted_store_expr` SEES, keyed
+    `<qualname> :: <expression>`.
+
+    ⚠ That is deliberately narrower than "every disk-rooted store site in `tree`",
+    which is what this line used to say. The predicate's own docstring enumerates
+    what it cannot see, and the census inherits every one of those holes.
 
     The expression comes from `ast.unparse`, so quoting and spacing are normalised
     away exactly as they are for the predicate itself — `tmp_path/"store"` and
@@ -741,6 +799,36 @@ def _disk_rooted_census(tree: ast.AST) -> dict[str, int]:
     return census
 
 
+def _census_over_the_ledgered_files() -> dict[str, int]:
+    """The census over EVERY file in `EXPECTED_SERVER_TESTS`, keyed with the file.
+
+    🔴 THE FILE IS IN THE KEY, AND A LINE NUMBER STILL IS NOT — `_qualnames`' reason
+    holds unchanged. Without the file name two same-named tests in two files would
+    collide into one allowlist entry, which is the flat-total defect one level down:
+    a site arriving in one file and leaving another would read as no change at all.
+
+    One tree at a time, deliberately: `_index_store_root_uses` keys its marks on
+    `id(node)` and clears them per call, so two trees alive at once could see a
+    recycled id vouch for the wrong node. Each file's census is finished before the
+    next file is parsed.
+    """
+    census: dict[str, int] = {}
+    for name in sorted(EXPECTED_SERVER_TESTS):
+        tree = ast.parse((TESTS / name).read_text(encoding="utf-8"))
+        for key, lineno in _disk_rooted_census(tree).items():
+            census[f"{name} :: {key}"] = lineno
+    return census
+
+
+def _flat_allowlist() -> dict[str, str]:
+    """`_DISK_ROOTED_ALLOWLIST` flattened onto the census's `<file> :: …` keys."""
+    return {
+        f"{name} :: {key}": why
+        for name, entries in _DISK_ROOTED_ALLOWLIST.items()
+        for key, why in entries.items()
+    }
+
+
 def test_the_disk_rooted_census_matches_the_allowlist_EXACTLY():
     """🔴 A SET, IN BOTH DIRECTIONS — not a count, and not a ceiling.
 
@@ -760,19 +848,48 @@ def test_the_disk_rooted_census_matches_the_allowlist_EXACTLY():
         actions.
 
     ⚠ IT IS A CLAIM ABOUT WHAT THE PREDICATE CAN SEE, WHICH IS NARROWER THAN "every
-    store root in the file". `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_
-    counted` below records the standing hole: a disk-backed root bound inside a
-    `@pytest.fixture` crosses a scope boundary the AST cannot follow, so it is
-    invisible here. An empty census would therefore NOT prove the file is fully
-    sited, and the `test_the_census_can_actually_SEE_a_disk_rooted_site` control
-    below is what stops an empty one reading as an all-clear.
-    """
-    path = TESTS / "test_subsystem_store_api.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    census = _disk_rooted_census(tree)
+    store root in these files" — SAY THE WHOLE RESIDUAL, NOT ONE HOLE OF IT. This
+    paragraph used to name only the fixture case, which made it read as the complete
+    list. The full set, each half measured:
 
-    unrecorded = sorted(set(census) - set(_DISK_ROOTED_ALLOWLIST))
-    stale = sorted(set(_DISK_ROOTED_ALLOWLIST) - set(census))
+      * a root bound inside a `@pytest.fixture` and served in a test that requests it
+        crosses a scope boundary the AST cannot follow —
+        `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted` pins it, and two
+        live instances are named there;
+      * a root not spelled `tmp_path / X` or `tmp_path.joinpath(X)` at all —
+        `Path(tmp_path) / "store"`, an alias `base = tmp_path`, `os.path.join(...)`,
+        `str(tmp_path) + "/store"`, `tmp_path_factory.mktemp(...)`. Each measured 0,
+        both before and after this round's widening of the operand type;
+      * a root that reaches its consumer through a call the flow arm does not model —
+        `_ROOT_CONSUMERS` closes renames and not GROWTH into a new consumer name,
+        which its own comment records.
+
+    An empty census would therefore NOT prove these files are fully sited, and the
+    `test_the_census_can_actually_SEE_a_disk_rooted_site` control below is what stops
+    an empty one reading as an all-clear.
+
+    🔴 ALL THREE LEDGERED FILES, NOT ONE. This hardcoded
+    `TESTS / "test_subsystem_store_api.py"` while `EXPECTED_SERVER_TESTS` two
+    functions above named three. Measured when that was fixed: 15 / 0 / 0, so no live
+    site was being missed — but a file the scanner never opens reports the same zero
+    as a file that is clean, and this module exists because a fix applied to one file
+    of three was taken for a fix to all three.
+    """
+    census = _census_over_the_ledgered_files()
+    allowlist = _flat_allowlist()
+
+    # The allowlist must describe the SAME file set the census reads. Without this a
+    # file added to the ledger would arrive with no allowlist key at all, and the
+    # absence would read as "nothing to record" rather than as an unmade decision.
+    assert set(_DISK_ROOTED_ALLOWLIST) == set(EXPECTED_SERVER_TESTS), (
+        f"_DISK_ROOTED_ALLOWLIST covers {sorted(_DISK_ROOTED_ALLOWLIST)} but the "
+        f"ledger names {sorted(EXPECTED_SERVER_TESTS)}. Give every ledgered file a "
+        "key — an empty dict is the right entry for a file with no disk-rooted "
+        "sites, and it says so where a missing key would only be silent."
+    )
+
+    unrecorded = sorted(set(census) - set(allowlist))
+    stale = sorted(set(allowlist) - set(census))
     assert not unrecorded, (
         "these disk-backed store roots are NOT in _DISK_ROOTED_ALLOWLIST:\n  "
         + "\n  ".join(f"{k}   (line {census[k]})" for k in unrecorded)
@@ -794,7 +911,7 @@ def test_the_disk_rooted_census_matches_the_allowlist_EXACTLY():
         "still there — widen it back. Deleting the entry for (b) banks a coverage "
         "loss as if it were progress."
     )
-    empty = sorted(k for k, why in _DISK_ROOTED_ALLOWLIST.items() if not why.strip())
+    empty = sorted(k for k, why in allowlist.items() if not why.strip())
     assert not empty, (
         f"these allowlist entries carry no reason: {empty}. An entry without one is "
         "a silenced guard: the whole point of an enumerated allowlist over a count "
@@ -810,17 +927,41 @@ def test_the_census_can_actually_SEE_a_disk_rooted_site():
     of `set() == set()` is satisfied by a scanner wired to nothing just as well as
     by a fully-sited file. So feed it a module that MUST produce a non-zero count
     and watch the number move. Report the pair, never the zero alone.
+
+    🔴 BOTH ARMS, BECAUSE ONE PROBE ONLY EXERCISED ONE. The probe was
+    `root = tmp_path / 'store'`, which `_ROOT_NAMES` answers ON SIGHT with no flow
+    analysis at all: emptying `_ROOT_NAMES` and breaking `_index_store_root_uses`
+    outright would have left this control green, so the "every zero elsewhere is
+    interpretable" claim it makes covered half the predicate. The second probe is
+    named `holder`, outside `_ROOT_NAMES`, and is counted only because it flows into
+    a consumer — so a dead flow arm now fails the control that claims to test it.
     """
-    probe = (
+    on_sight = (
         "def test_probe(tmp_path):\n"
         "    root = tmp_path / 'store'\n"
         "    running(root)\n"
     )
-    census = _disk_rooted_census(ast.parse(probe))
+    census = _disk_rooted_census(ast.parse(on_sight))
     assert list(census) == ["test_probe :: tmp_path / 'store'"], (
         f"the census reported {census} for a module with exactly one obvious "
         "disk-backed store root. Every zero it reports elsewhere is therefore "
         "uninterpretable — fix the scanner, not the ledger."
+    )
+
+    by_flow = (
+        "def test_probe(tmp_path):\n"
+        "    root = tmp_path / 'holder'\n"
+        "    running(root)\n"
+    )
+    assert "holder" not in _ROOT_NAMES, (
+        "this probe's whole point is a directory name the ON-SIGHT arm does not "
+        f"recognise, and _ROOT_NAMES is now {sorted(_ROOT_NAMES)}. Pick another name."
+    )
+    census = _disk_rooted_census(ast.parse(by_flow))
+    assert list(census) == ["test_probe :: tmp_path / 'holder'"], (
+        f"the census reported {census} for a store root that reaches `running(...)` "
+        "under a directory name outside _ROOT_NAMES. The FLOW arm is what counts "
+        "that one, and it is the arm the on-sight probe above cannot see fail."
     )
 
 
@@ -844,27 +985,52 @@ def test_the_census_can_actually_SEE_a_disk_rooted_site():
 #
 # So the census's fixture blind spot is real but NARROWER than "a fixture": it needs
 # the directory name to be outside `_ROOT_NAMES` as well, which is mutant 3 and is
-# exactly what an author writing a holder directory would produce. That mutant is the
-# whole justification for this ledger — without it, a de-siting reaches the disk with
-# every other guard in both files green.
+# exactly what an author writing a holder directory would produce.
 #
-# Keyed the same way as the census: the enclosing class/def, never a line number.
-_SITED_STORE_ROOT_CALLERS: frozenset[str] = frozenset(
-    {
-        # The three shared fixtures. `sited_root` is the one the 18 previously
-        # inline `tmp_path / "store"` sites now take their root from.
-        "store",
-        "scoped_store",
-        "sited_root",
-        # An inline `with` in a test that needs the root before `_build_store`.
-        "TestPUTCreatesANewEntry.test_a_scopes_FIRST_entry_creates_the_directory",
-        # The siting module's own fallback tests, which call it directly.
-        "TestTheSitingRULESThemselvesArePinned.test_mkdtemp_REFUSING_falls_back_"
-        "instead_of_raising",
-        "TestTheSitingRULESThemselvesArePinned.test_the_fallback_honours_a_custom_"
-        "store_NAME",
-    }
-)
+# 🔴 AND "THE ONLY GUARD THAT CAN SEE IT" IS FALSE — RE-MEASURED, IN THE OTHER FILE
+# THE FIRST MEASUREMENT NEVER RAN. Mutant 3's "22 others passed" was a one-FILE run of
+# this 23-test module, and "every other guard in both files green" was extrapolated
+# from it. Re-run over BOTH files on a host with a usable tmpfs, mutant 3 gives
+# **2 failed, 781 passed** — this ledger, and `test_subsystem_store_api.py::
+# TestTheStoreIsSitedOffTheContendedDisk::test_the_sited_root_fixture_ACTUALLY_lands_
+# on_tmpfs_when_one_exists`, which reads the fstype of `sited_root.parent` and finds
+# the disk. The census stayed green, so mutant 3's OTHER half — the census blind spot
+# above — is re-confirmed by the same run.
+#
+# THIS LEDGER STILL EARNS ITS PLACE, AND THE REASON IS THE SCOPE OF THE OTHER GUARD
+# RATHER THAN ITS ABSENCE: the behavioural one SKIPS where no usable tmpfs exists —
+# absent, not tmpfs, under `_MIN_FREE_BYTES` free, or unwritable — and the gate may
+# well be such a place. This one is structural and holds everywhere. So the true claim
+# is "the only guard that can see it ON A MACHINE WITH NO USABLE TMPFS", which is the
+# claim the module header already makes for the pair, and it is why the arm stays.
+#
+# Keyed the same way as the census: `<file> :: <enclosing class/def>`, never a line
+# number, and per-file for the same reason the allowlist is — this read only
+# `test_subsystem_store_api.py` while `EXPECTED_SERVER_TESTS` named three, so a
+# de-siting in `test_cairn_write.py`, the file whose disk-backed fixture is this
+# module's founding incident, was outside it entirely.
+_SITED_STORE_ROOT_CALLERS: dict[str, frozenset[str]] = {
+    "test_subsystem_store_api.py": frozenset(
+        {
+            # The three shared fixtures. `sited_root` is the one the 18 previously
+            # inline `tmp_path / "store"` sites now take their root from.
+            "store",
+            "scoped_store",
+            "sited_root",
+            # An inline `with` in a test that needs the root before `_build_store`.
+            "TestPUTCreatesANewEntry.test_a_scopes_FIRST_entry_creates_the_directory",
+            # The siting module's own fallback tests, which call it directly.
+            "TestTheSitingRULESThemselvesArePinned.test_mkdtemp_REFUSING_falls_back_"
+            "instead_of_raising",
+            "TestTheSitingRULESThemselvesArePinned.test_the_fallback_honours_a_custom_"
+            "store_NAME",
+        }
+    ),
+    # One sited fixture each, and they are the reason this ledger is not api-only:
+    # `test_cairn_write.py`'s `store` is the fixture devrc#1211 left disk-backed.
+    "test_cairn_write.py": frozenset({"store"}),
+    "test_cairn_cli.py": frozenset({"source_store"}),
+}
 
 
 def _store_root_callers(tree: ast.AST) -> set[str]:
@@ -881,6 +1047,15 @@ def _store_root_callers(tree: ast.AST) -> set[str]:
     }
 
 
+def _sited_callers_over_the_ledgered_files() -> set[str]:
+    """`<file> :: <caller>` for every `store_root(...)` call in the ledgered files."""
+    found: set[str] = set()
+    for name in sorted(EXPECTED_SERVER_TESTS):
+        tree = ast.parse((TESTS / name).read_text(encoding="utf-8"))
+        found |= {f"{name} :: {caller}" for caller in _store_root_callers(tree)}
+    return found
+
+
 def test_the_SITED_store_roots_are_a_pinned_ledger_too():
     """Fails when the sited set GROWS *or* SHRINKS, for the same reason as the census.
 
@@ -890,18 +1065,32 @@ def test_the_SITED_store_roots_are_a_pinned_ledger_too():
     change to the ledger this file exists to hold, so it is recorded rather than
     absorbed — the alternative is a `>=` that quietly stops describing the file.
     """
-    path = TESTS / "test_subsystem_store_api.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    found = _store_root_callers(tree)
-    missing = sorted(_SITED_STORE_ROOT_CALLERS - found)
-    extra = sorted(found - _SITED_STORE_ROOT_CALLERS)
+    expected = {
+        f"{name} :: {caller}"
+        for name, callers in _SITED_STORE_ROOT_CALLERS.items()
+        for caller in callers
+    }
+    assert set(_SITED_STORE_ROOT_CALLERS) == set(EXPECTED_SERVER_TESTS), (
+        f"_SITED_STORE_ROOT_CALLERS covers {sorted(_SITED_STORE_ROOT_CALLERS)} but "
+        f"the ledger names {sorted(EXPECTED_SERVER_TESTS)}. Every ledgered file needs "
+        "a key: `test_every_ledgered_file_IMPORTS_AND_CALLS_the_shared_siting_at_"
+        "least_once` already requires at least one call in each, so an empty frozenset "
+        "here would contradict it rather than record anything."
+    )
+    found = _sited_callers_over_the_ledgered_files()
+    missing = sorted(expected - found)
+    extra = sorted(found - expected)
     assert not missing, (
         f"these no longer call store_siting.store_root(): {missing}. A store that "
         "stopped being sited is back in the fsync-contention population — and if it "
         "was re-rooted inside a @pytest.fixture UNDER A DIRECTORY NAME OUTSIDE "
-        "_ROOT_NAMES, this is the ONLY guard that can see it: the census's flow arm "
-        "stops at the fixture's scope boundary and its on-sight arm only recognises "
-        f"{sorted(_ROOT_NAMES)}. Measured by mutation, not assumed. If the removal is "
+        "_ROOT_NAMES, this is the only guard that can see it ON A MACHINE WITH NO "
+        "USABLE TMPFS: the census's flow arm stops at the fixture's scope boundary "
+        f"and its on-sight arm only recognises {sorted(_ROOT_NAMES)}. Where a tmpfs "
+        "IS usable, TestTheStoreIsSitedOffTheContendedDisk's behavioural controls in "
+        "test_subsystem_store_api.py fail alongside this — measured, both arms, on "
+        "the `sited_root`-to-`tmp_path / \"holder\"` mutant. They SKIP where there is "
+        "no tmpfs, which is why this structural arm stays. If the removal is "
         "deliberate, delete the name here in the SAME commit."
     )
     assert not extra, (

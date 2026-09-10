@@ -19459,11 +19459,27 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         checks past a wrong argument — but it can only ever cover the fixtures it
         names, and it SKIPS where there is no tmpfs, which may well be CI.
       * STRUCTURAL, in `test_store_siting_ledger.py`: `_DISK_ROOTED_ALLOWLIST` plus
-        `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY` enumerate EVERY
-        store site in this file and fail when the set grows or shrinks. That one
-        holds on a machine with no tmpfs at all.
+        `test_the_disk_rooted_census_matches_the_allowlist_EXACTLY` enumerate the
+        store sites its predicate CAN SEE — in this file and in the two other
+        ledgered ones — and fail when that set grows or shrinks. That one holds on a
+        machine with no tmpfs at all.
 
-    Neither half is the guard. The pair is.
+    🔴 AND THAT BULLET SAID "EVERY STORE SITE IN THIS FILE", TEN LINES UNDER THE
+    RETRACTION OF THE PREVIOUS OVERCLAIM. Same defect as the paragraph above, in the
+    replacement written for it: a description wider than the implementation, which is
+    exactly what stops anyone looking. What the census actually reads is a
+    `tmp_path / X` or `tmp_path.joinpath(X)` expression that flows into a store
+    consumer WITHIN ONE FUNCTION SCOPE. The holes, each measured and each pinned by a
+    named guard over there rather than left to be rediscovered as news: a root bound
+    in a `@pytest.fixture` and served in a test that requests it (two live instances,
+    named in `test_a_store_root_bound_in_a_pytest_FIXTURE_is_NOT_counted`); a root
+    not spelled off the NAME `tmp_path` at all — `Path(tmp_path) / "store"`, an alias
+    `base = tmp_path`, `os.path.join(...)`, `str(tmp_path) + "/store"`,
+    `tmp_path_factory.mktemp(...)`; and a root reaching a consumer whose name is not
+    in `_ROOT_CONSUMERS`, which that set's own comment records as growth it cannot
+    close.
+
+    Neither half is the guard. The pair is — and the pair is still not everything.
     """
 
     def test_the_fstype_is_resolved_by_LONGEST_mount_point_not_by_prefix(self):
