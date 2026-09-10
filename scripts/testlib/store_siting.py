@@ -144,17 +144,24 @@ _BUDGET_HEADROOM = 1.5
 #
 # 🔴 SAY WHICH POPULATION — THIS NUMBER STOPPED BEING A SUM AND NOTHING SAID SO.
 # `main`'s predecessor constant was documented as the sum over every ledgered file's
-# fixtures, with the note that under `-n 4 --dist loadfile` they do not all hold stores
-# at once, i.e. it was deliberately conservative about CONCURRENCY. This value is a
+# fixtures, with the note that under `-n <PYTEST_JOBS> --dist loadfile` they do not all
+# hold stores at once, i.e. it was deliberately conservative about CONCURRENCY. This value is a
 # single measured PEAK x `_BUDGET_HEADROOM`, and `_check_store_budget` enforces it
 # PER STORE. Two consequences, both real:
 #   * adding a second large fixture no longer moves this number at all. Only a single
 #     store growing past the budget does. That is the whole point of the move — the
 #     old sum moved six times in nineteen commits on edits that touched no store — but
 #     it means this constant is NOT an estimate of what the suite holds in RAM.
-#   * the gated tier runs `-n 4 --dist loadfile`, so up to `PYTEST_JOBS` stores can be
-#     live on one `/dev/shm` simultaneously, each permitted this much. `_MIN_FREE_BYTES`
-#     below is a margin over ONE store, not over four.
+#   * the gated tier runs `-n <PYTEST_JOBS> --dist loadfile`, so up to `PYTEST_JOBS`
+#     stores can be live on one `/dev/shm` simultaneously, each permitted this much.
+#     `_MIN_FREE_BYTES` below is a margin over ONE store, not over all of them.
+#     🔴 DO NOT WRITE A NUMBER HERE. `PYTEST_JOBS` used to be a flat `min(nproc, 4)`
+#     and this comment said `-n 4`; it is now `min(nproc, narrowest cgroup v2 quota, 8)`
+#     and the sentence went stale the day the cap moved. The aggregate is still
+#     irrelevant by orders of magnitude — 8 x 1.88 MB is ~15 MB against a 62 GB
+#     `/dev/shm` (measured 2026-09-08 on the workbench) — which is why widening the
+#     worker count needed no change to any constant in this file, only to the
+#     sentences that had hardcoded the old one.
 # It is not a regression in VALUE today — 1,880,064 slightly exceeds the old sum of
 # 1,875,968 — and `tmpfs_dir()` re-reads `statvfs` on EVERY `store_root` entry, so the
 # free-space floor is a live check against whatever the other workers have already
@@ -178,8 +185,10 @@ _LARGEST_STORE_BYTES = (
 
 # Free space a candidate must have before we will site a store on it: the budget above,
 # with better than 2x margin — over ONE store. 🔴 IT IS NOT A MARGIN OVER A PARALLEL
-# RUN, and the budget above says why: `PYTEST_JOBS` xdist workers (4 in the gated
-# sandbox) may each hold a store this large at the same moment on one `/dev/shm`.
+# RUN, and the budget above says why: `PYTEST_JOBS` xdist workers — up to 8, and
+# whatever the runner's cgroup-quota budget yields on the machine, never a number
+# written down here — may each hold a store this large at the same moment on one
+# `/dev/shm`.
 # What keeps that honest is not this constant but the fact that `tmpfs_dir()`
 # consults `statvfs` afresh at every `store_root` entry, so a worker arriving after the
 # others have filled the mount sees the reduced free space and falls back to disk.

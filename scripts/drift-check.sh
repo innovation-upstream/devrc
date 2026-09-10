@@ -741,6 +741,30 @@
 #                    host. Deliberately NOT forwarded over ssh — the comparison
 #                    happens in the driver, and every value sent across that hop
 #                    is one that has to be proved safe.
+#   DRIFT_SKIP_SSH_PROBE=1  do not probe the remote host's addresses; use the
+#                    first derived candidate as-is. The probe (LAN, then nebula)
+#                    exists because a host that is merely off-LAN otherwise reads
+#                    as UNREACHABLE and escalates rc 13 after
+#                    $DRIFT_UNREACHABLE_ESCALATE runs. It never runs under
+#                    --no-remote, and never when an explicit $REMOTE_SSH names
+#                    one target. MEASURED over the suite, twice: 333 runs reach
+#                    address selection — 279 stopped by --no-remote, 46 by the
+#                    one-candidate rule, and 8 probe. So the two conditions stop
+#                    325 of 333, and the 8 that probe are a DISJOINT cohort, not
+#                    a leak out of the 279. Their ssh calls landed on the
+#                    fixture's own stub, so "0 unstubbed attempts" is a joint
+#                    result of the conditions and the stub. ⚠ Two earlier
+#                    versions of this line got the mechanism wrong in opposite
+#                    directions — one credited the zero to the gate alone, the
+#                    next read it as an 8-in-279 gate leak. It is neither. The fixture ALSO defaults
+#                    this to 1, for determinism rather than containment, so a
+#                    future test that forgets a stub is not the first to notice.
+#                    NOT forwarded over ssh — the remote leg does no probing of
+#                    its own.
+#   SSH_PROBE_TIMEOUT / SSH_PROBE_CMD / SSH_PROBE_LOG_PREFIX
+#                    shared with ship.sh via lib/host-role.sh and documented in
+#                    that script's header; the prefix is set here so the probe's
+#                    diagnostics satisfy this script's journal hygiene.
 set -uo pipefail
 
 # --- Host identity: SOURCED, never copied (see header) ------------------------
@@ -1004,7 +1028,62 @@ if [ "$LOCAL_ROLE" != workbench ] && [ "$LOCAL_ROLE" != laptop ]; then
   exit 6
 fi
 REMOTE_ROLE="$(remote_role_of "$LOCAL_ROLE")"
+# 🔴 CANDIDATES FIRST — same load-bearing order as ship.sh, and for the same
+# reason: `remote_ssh_candidates_of` reads $REMOTE_SSH to detect an OPERATOR
+# override, so computing it after the derived assignment below makes it mistake
+# this script's own default for one, return a single candidate, and skip the
+# probe entirely. Measured in ship.sh, where that ordering left the fallback
+# dead while every lib-level test passed.
+_dc_cands_raw="$(remote_ssh_candidates_of "$LOCAL_ROLE" 2>/dev/null || true)"
 REMOTE_SSH="$(remote_ssh_of "$LOCAL_ROLE")"
+
+# --- Address selection: LAN first, then nebula --------------------------------
+# 🔴 THIS DEADMAN IS THE ONE THAT MOST NEEDS THE FALLBACK, and it was the last
+# to get it. Its whole job is noticing a host that has silently fallen behind —
+# so reaching the host by only ONE of its two addresses turns "the laptop is on
+# a different network" into rc 13 UNREACHABLE, which after
+# $DRIFT_UNREACHABLE_ESCALATE consecutive runs (~24h) escalates and fails the
+# unit for a machine that was answering the whole time. The block below already
+# says a host that is "off, asleep or off-LAN … must not look like drift"; only
+# trying both addresses makes that true.
+#
+# Probing costs up to ONE BOUNDED ssh PER CANDIDATE (two today, at
+# $SSH_PROBE_TIMEOUT each — counted in the unit's TimeoutStartSec model), and
+# only when there is a real choice: an
+# explicit $REMOTE_SSH is a one-element list, so an operator-addressed run is
+# never redirected and makes exactly the connections it used to.
+# 🔴 `[ "$DO_REMOTE" = 1 ]` IS THE FIRST CONDITION, not an afterthought. Line 654
+# documents `--no-remote` as "this host only (no ssh)", and without this gate the
+# probe fires anyway: MEASURED at b280162a, `--no-remote` made two outbound
+# connections to the operator's laptop. `ship.sh` had the gate from the start and
+# this script did not — the same wiring applied asymmetrically to its two
+# callers. The second-order cost was larger than the contract breach:
+# `test_drift_check.py` issues one probe pair per `--no-remote` test, so the
+# suite made 558 real ssh attempts to a live host (279 per address; an earlier
+# note in this file said 568 — that figure was never reproduced), and with the
+# laptop off-LAN
+# each LAN probe burns the full ConnectTimeout — turning a hermetic 7.5-minute
+# module into a half-hour one whose verdict depends on the operator's network.
+if [ "$DO_REMOTE" = 1 ] && [ "${DRIFT_SKIP_SSH_PROBE:-0}" != 1 ] \
+   && command -v first_reachable_ssh >/dev/null; then
+  mapfile -t _dc_cands <<<"$_dc_cands_raw"   # captured ABOVE, before REMOTE_SSH was derived
+  # 🔴 The probe's own diagnostics must carry THIS script's prefix: the journal
+  # accepts only `[`, `===`, `drift-check: ` and indented lines, and an
+  # unprefixed line fails its hygiene guard.
+  SSH_PROBE_LOG_PREFIX=drift-check
+  if [ "${#_dc_cands[@]}" -gt 1 ]; then
+    _dc_chosen="$(first_reachable_ssh "${_dc_cands[@]}")" || _dc_chosen=""
+    if [ -n "$_dc_chosen" ]; then
+      [ "$_dc_chosen" = "$REMOTE_SSH" ] || \
+        echo "drift-check: $REMOTE_SSH did not answer — using $_dc_chosen for $REMOTE_ROLE." >&2
+      REMOTE_SSH="$_dc_chosen"
+    fi
+    # Nothing answered: leave REMOTE_SSH at its default and let the existing
+    # UNREACHABLE path report it. That path already distinguishes an absent host
+    # from drift, and it owns the streak/escalation ledger — short-circuiting
+    # here would bypass both.
+  fi
+fi
 
 # severity <rc> -> a comparable number; higher = worse. Unknown codes rank above
 # every known one so a NEW failure mode can never be silently outranked into

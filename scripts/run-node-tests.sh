@@ -97,11 +97,51 @@ _emit_verdict() {
   local rc="$1"
   [ "$VERDICT_EMITTED" -eq 0 ] || return 0
   VERDICT_EMITTED=1
+  # Ordering owned here rather than at the two call sites — see the identical
+  # note in run-tests.sh's `_emit_verdict`. Always SCOPE, then RESULT.
+  _emit_scope
   if [ "$rc" -eq 0 ]; then
     echo "RESULT: PASS (exit=0)"
   else
     echo "RESULT: FAIL (exit=$rc)"
   fi
+}
+# --- GUARD 5b: this runner states its scope too --------------------------------
+# 🔴 THE POINT IS UNIFORMITY, and it is not decoration. `gate.sh` requires to
+# SEE `SCOPE: FULL` from EVERY tier before it may print a gate PASS — a positive
+# control, so that a runner which says nothing is "cannot vouch" rather than
+# "ran everything". Exempting this tier because it happens to have no narrowing
+# flag today would make that control a per-tier special case, which is precisely
+# the shape RULES.md calls "a guard narrower than its description": it would
+# stop covering this file the moment someone gave it a `--suites` selector.
+#
+# ⚠ So this is CONSTANT ONLY FOR AS LONG AS THIS RUNNER HAS NO SELECTION FLAG.
+# If you add one, this must become a variable that reports it — a hardcoded FULL
+# over a narrowed run is a lie the gate is built to believe.
+# The vocabulary is owned by run-tests.sh's GUARD 11 and pinned two-way by
+# scripts/tests/test_scoped_runs.py.
+#
+# 🔴 NOT A CONSTANT ANY MORE, and the reason is the same false-green shape:
+# `--check-suites` validates the pinned suite list and exits 0 in milliseconds
+# having run ZERO tests. Printing `SCOPE: FULL` + `RESULT: PASS (exit=0)` there
+# is the full-gate-shaped pair off a run that tested nothing. NONE says what
+# actually happened; `gate.sh` treats anything other than FULL as not-a-gate.
+# 🔴 THE PRE-RESOLUTION DEFAULT IS UNKNOWN, NOT FULL — `run-tests.sh` does the
+# same, deliberately: "before the scope is resolved the honest answer is
+# UNKNOWN". This was `FULL`, so any early exit before the suite loop emitted a
+# whole-suite coverage claim from a run that collected nothing. Measured: an
+# unrecognised flag printed `SCOPE: FULL (…always runs every suite)` alongside
+# `RESULT: FAIL (exit=2)`. Not exploitable at the time — `--check-suites` was
+# the only zero-test exit-0 path and it sets NONE — but the next early exit
+# would have inherited the claim silently, which is the same shape as the
+# `SCOPE: NONE` state this very commit added.
+SCOPE_STATE="UNKNOWN"
+SCOPE_DETAIL="the scope has not been resolved yet"
+SCOPE_EMITTED=0
+_emit_scope() {
+  [ "$SCOPE_EMITTED" -eq 0 ] || return 0
+  SCOPE_EMITTED=1
+  echo "SCOPE: ${SCOPE_STATE} (${SCOPE_DETAIL})"
 }
 _on_exit() { _emit_verdict "$?"; }
 trap '_on_exit' EXIT
@@ -381,6 +421,8 @@ if [ "${#pin_problems[@]}" -gt 0 ]; then
 fi
 
 if [ "$CHECK_SUITES_ONLY" -eq 1 ]; then
+  SCOPE_STATE="NONE"
+  SCOPE_DETAIL="--check-suites validated the pinned suite list and ran NO tests"
   echo "run-node-tests: all ${#PINNED_DIRS[@]} pinned suite(s) match discovery."
   for entry in "${SUITES[@]}"; do
     d="${entry%%|*}"; rest="${entry#*|}"
@@ -394,6 +436,13 @@ command -v node >/dev/null 2>&1 || {
   exit 2
 }
 echo "run-node-tests: node $(node --version)"
+
+# 🔴 FULL is claimed HERE — past every early exit, with node present and the
+# suite list validated, at the point this run actually commits to executing
+# every suite. Setting it as the pre-resolution default (as it was) meant any
+# early exit inherited a whole-suite coverage claim for free.
+SCOPE_STATE="FULL"
+SCOPE_DETAIL="this runner has no selection flag; it always runs every suite"
 
 # --- run each suite in its own invocation (GUARD 1, 2, 4) ----------------------
 sum() { grep -E "^# $2 [0-9]+$" "$1" | tail -1 | awk '{print $3}'; }

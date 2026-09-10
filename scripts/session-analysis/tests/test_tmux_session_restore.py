@@ -18,7 +18,9 @@ or writes the real `~/.cache/agent-ledger`, `~/.claude/projects` or
 import importlib.util
 import json
 import os
+import re
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -1281,8 +1283,32 @@ def test_a_restore_with_no_tmux_server_REFUSES(tmp_path, monkeypatch, capsys):
     """🔴 THE REGRESSION TEST FOR THE MEASURED LOSS. With no server, the old
     code ran `tmux new-session` itself, sent into the server it had just
     created inside its own cgroup, and systemd killed it on exit. Nothing may
-    be sent, and no session may be created."""
+    be sent, and no session may be created.
+
+    🔴 THE rc == 0 IS STILL DELIBERATE, AND ITS REASON HAS NOW BEEN WRONG TWICE.
+    Round 1 justified it with "no server is the normal COLD-BOOT state, because
+    the unit fires on a 45s timer" — that trigger is gone. Round 2 replaced it
+    with "what is left is a rare race: a stale socket, or a server with zero
+    sessions", and the FREQUENCY half of that was false: EVERY tmux server has
+    zero sessions for its first ~100ms, which is exactly the window
+    `PathChanged=` fires in.
+
+    `wait_for_tmux_server()` now covers that window, and the POST-FIX frequency
+    of this branch is UNMEASURED — establishing it needs reboots this change has
+    not had. The conclusion does not depend on it: `OnFailure=notify-failure@%n`
+    bypasses DND, and a branch reachable by a race must not raise an alarm
+    indistinguishable from a real failure, however often the race happens. See
+    the comment at the refusal in `cmd_restore` for the full argument.
+    """
     monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: True)
+    # 🔴 WITHOUT THIS THE TEST SLEEPS THE WHOLE POLL BOUND ON THE DEV-HOST TIER.
+    # `wait_for_tmux_server` bails instantly when the SOCKET is absent, and the
+    # nix sandbox has none — but the dev host has a live one, so the poll would
+    # find it and wait out `TMUX_SERVER_WAIT_SECONDS` against a probe stubbed to
+    # "absent" forever. Pointing the socket at a path that does not exist is the
+    # per-tier-identical fixture; it is the same reason the comment above this
+    # block gives for stubbing the probe at all.
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: tmp_path / "no-socket")
     monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
 
     ran: list[list[str]] = []
@@ -1296,7 +1322,13 @@ def test_a_restore_with_no_tmux_server_REFUSES(tmp_path, monkeypatch, capsys):
 
     rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
 
-    assert rc == 0, "a standing cold-boot state must not fire the OnFailure toast"
+    assert rc == 0, (
+        "the refusal must not fire the DND-bypassing OnFailure toast. The "
+        "conclusion does not rest on how OFTEN this branch is reached — that "
+        "frequency is UNMEASURED post-poll, and the two previous attempts to "
+        "state it were both wrong. It rests on the branch being reachable by a "
+        "RACE at all: such an alarm is indistinguishable from a real failure."
+    )
     assert ran == [], f"ran tmux commands while refusing: {ran}"
     assert not any("new-session" in c for cmd in ran for c in cmd)
     assert not any("send-keys" in c for cmd in ran for c in cmd)
@@ -1329,6 +1361,10 @@ def test_the_refusal_is_checked_BEFORE_the_send_loop_creates_anything(tmp_path, 
     `tmux new-session` would report correctly and still have destroyed the
     workspace."""
     monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    # See `test_a_restore_with_no_tmux_server_REFUSES` — absent socket => the
+    # poll bails on its first probe, so `order` also pins that the poll does not
+    # spin against a stubbed-absent server.
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: tmp_path / "no-socket")
     order: list[str] = []
     monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into",
                         lambda: order.append("guard") or True)
@@ -1371,6 +1407,202 @@ def test_the_server_guard_reads_has_session_and_treats_failure_as_absent(monkeyp
     rc["v"] = 0
     assert tsr.no_tmux_server_to_restore_into() is False
     assert seen and seen[0][:2] == ["tmux", "has-session"], seen
+
+
+# --- the trigger's observable is not this script's precondition ------------ #
+#
+# 🔴 THE DEPLOY-BLOCKER ROUND 1 FOUND. `tmux-session-restore.path` fires when
+# the SOCKET FILE appears. `no_tmux_server_to_restore_into` needs a SESSION.
+# tmux creates the socket in `server_start()` BEFORE sourcing its config, and
+# the first session is queued behind the whole config — three blocking
+# `run-shell` plugin loads plus continuum's replay.
+#
+# MEASURED 2026-09-07 (continuum EXCLUDED, so every figure is a LOWER bound):
+# socket at t0+0.009s; first session at t_sock+0.098–0.112s; the path-triggered
+# ExecStart reached `has-session` at t_sock+0.065s in one run and +0.288s in
+# another. THE OUTCOME FLIPPED BETWEEN RUNS. When it loses: refusal, exit 0,
+# `Result=success`, no `OnFailure`, and NO RETRY — the socket is created once,
+# so no second event ever comes. Silent no-restore, the exact failure this unit
+# exists to prevent.
+#
+# 🔴 EVERY TEST HERE INJECTS BOTH `sleep` AND THE SOCKET PATH. Real sleeps would
+# make the suite take the bound; a real socket lookup would take a DIFFERENT
+# branch on each tier (the dev host has a live socket, the nix sandbox has none)
+# — the structural blindness the comment above `_plan_of` describes.
+
+def _poll(monkeypatch, tmp_path, answers, socket_exists=True):
+    """Drive `wait_for_tmux_server` with a scripted probe and a fake clock.
+
+    `answers` is the sequence `no_tmux_server_to_restore_into` returns (True =
+    absent). It is padded with its last value, so a caller can say "absent
+    forever" with `[True]`. Returns `(result, slept)`.
+    """
+    seq = list(answers)
+    calls = {"n": 0}
+
+    def probe():
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i] if i < len(seq) else seq[-1]
+
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", probe)
+    sock = tmp_path / ("sock" if socket_exists else "nothing-here")
+    if socket_exists:
+        sock.write_text("")   # a plain file: the poll asks only whether it EXISTS
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: sock)
+    slept: list[float] = []
+    return tsr.wait_for_tmux_server(sleep=slept.append), slept
+
+
+def test_the_poll_returns_at_once_when_a_session_already_exists(tmp_path, monkeypatch):
+    """The common case must cost nothing. A poll that always slept one step
+    would add latency to every healthy boot and would still pass every other
+    test in this block."""
+    (found, waited, why), slept = _poll(monkeypatch, tmp_path, [False])
+    assert (found, waited, why) == (True, 0.0, "already-running")
+    assert slept == [], f"slept before probing: {slept}"
+
+
+def test_the_poll_bails_INSTANTLY_when_there_is_no_socket(tmp_path, monkeypatch):
+    """🔴 THE #1351 REGRESSION, IN A NEW PLACE. An earlier revision of this arc
+    burned a full 120s timeout in the nix build sandbox — which has no tmux
+    server — and turned an empty-plan restore into a failure. The socket is the
+    free discriminator: it is what the path unit triggers on, so its ABSENCE
+    means nothing is starting and there is nothing to wait for."""
+    (found, waited, why), slept = _poll(monkeypatch, tmp_path, [True],
+                                        socket_exists=False)
+    # 🔴 THE SLEEP ASSERTION GOES FIRST, DELIBERATELY. A mutation sweep measured
+    # the earlier ordering "killing" the removed-bail mutant on the tuple
+    # comparison, which carries no message — a kill for the wrong reason, and
+    # indistinguishable in the log from a kill by a different guard. The claim
+    # this test is ABOUT is "it did not wait", so that is what asserts first.
+    assert slept == [], (
+        f"waited {sum(slept)}s for a server that cannot be coming — there is no "
+        "socket, so nothing is starting. This is the #1351 shape: a full "
+        "timeout burned in the nix build sandbox, turning a no-op into a hang."
+    )
+    assert (found, waited, why) == (False, 0.0, "no-socket"), (found, waited, why)
+
+
+def test_the_poll_WAITS_for_a_session_that_appears_after_the_socket(tmp_path, monkeypatch):
+    """🔴 THE REGRESSION FOR THE DEPLOY-BLOCKER ITSELF. Before this poll, a
+    first probe of "absent" was final: the unit refused and exited 0, and no
+    second trigger event ever came. Here the socket exists and the session
+    appears on the third probe — the measured shape."""
+    (found, waited, why), slept = _poll(monkeypatch, tmp_path,
+                                        [True, True, False])
+    assert found is True, "refused a session that appeared while tmux read its config"
+    assert why == "appeared"
+    assert waited > 0, "reported no wait for a session it had to wait for"
+    assert len(slept) == 2, f"probe/sleep interleaving is wrong: {slept}"
+
+
+def test_the_poll_gives_up_at_the_BOUND_and_says_which_way(tmp_path, monkeypatch):
+    """Bounded, and the reason is distinguishable. `timeout` (a socket existed
+    and nothing answered) and `no-socket` (nothing was ever coming) are
+    different faults; the refusal message prints them differently so an operator
+    is not left guessing which one a silent boot was."""
+    (found, waited, why), slept = _poll(monkeypatch, tmp_path, [True])
+    assert (found, why) == (False, "timeout")
+    assert waited >= tsr.TMUX_SERVER_WAIT_SECONDS, waited
+    assert sum(slept) >= tsr.TMUX_SERVER_WAIT_SECONDS, slept
+    # Bounded ABOVE too: a poll that overshot its own bound would be a different
+    # bug, invisible to the assertion above.
+    assert waited < tsr.TMUX_SERVER_WAIT_SECONDS + 1.0, waited
+
+
+def test_the_poll_bound_leaves_room_for_the_UNMEASURED_replay_term(tmp_path):
+    """AN INVARIANT GUARD, LABELLED AS ONE — no bug ever violated it.
+
+    It pins the ARGUMENT for the constant rather than the constant: the
+    measurement that produced 0.098–0.112s deliberately EXCLUDED continuum, so
+    it is a lower bound on a production boot that also replays ~45 panes from a
+    cold cache. A bound set near the measurement would be set against a number
+    that does not describe the case it has to cover. 5s is ~45x it and is the
+    floor below which the constant is provably arguing from the wrong figure.
+    """
+    assert tsr.TMUX_SERVER_WAIT_SECONDS >= 5.0, (
+        f"TMUX_SERVER_WAIT_SECONDS={tsr.TMUX_SERVER_WAIT_SECONDS} is close to "
+        "the 0.11s first-session measurement, which was taken with continuum "
+        "EXCLUDED and is therefore a LOWER bound on the window this must cover. "
+        "Losing the race is a SILENT no-restore with no retry; overshooting "
+        "costs latency on a path that then does nothing."
+    )
+
+
+def test_cmd_restore_does_NOT_refuse_a_session_that_appears_during_the_poll(
+    tmp_path, monkeypatch, capsys
+):
+    """🔴 THE SEAM, NOT THE COMPONENT. `wait_for_tmux_server` can be perfect and
+    `cmd_restore` still refuse, if it does not consult it — which is precisely
+    what the code did before this round. This drives the whole command."""
+    seq = [True, True, False]
+    calls = {"n": 0}
+
+    def probe():
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i] if i < len(seq) else seq[-1]
+
+    sock = tmp_path / "sock"
+    sock.write_text("")
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", probe)
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: sock)
+    # 🔴 THE REAL POLL, WITH A NO-OP CLOCK — not a stub. Stubbing the poll here
+    # would test that `cmd_restore` believes whatever it is told, which is not
+    # the seam this test is about. Captured BEFORE patching so the wrapper does
+    # not call itself.
+    real_wait = tsr.wait_for_tmux_server
+    monkeypatch.setattr(tsr, "wait_for_tmux_server",
+                        lambda **k: real_wait(sleep=lambda s: None, socket=sock))
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "wait_for_workspace_to_settle", lambda *a, **k: (True, 5.0))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
+    sent: list[list[str]] = []
+    monkeypatch.setattr(tsr, "run", lambda cmd: sent.append(cmd) or "")
+    monkeypatch.setattr(tsr, "_verify_sends", lambda t, **k: (len(t), []))
+
+    rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+    out = capsys.readouterr()
+
+    assert rc == 0, out.err
+    assert "REFUSING" not in out.err, (
+        "cmd_restore refused a workspace whose session appeared 2 probes in — "
+        "the trigger fires on the SOCKET, which tmux creates before its config"
+    )
+    assert any("send-keys" in c for cmd in sent for c in cmd), \
+        "nothing was resumed even though a server was found"
+    assert "waited" in out.out, (
+        "the wait is not reported. A restore that had to wait and one that did "
+        "not are different boots, and the journal is where that is read."
+    )
+
+
+def test_the_refusal_names_the_wait_and_which_fault_it_was(tmp_path, monkeypatch, capsys):
+    """A refusal after a full-bound wait and a refusal with no socket at all are
+    different faults with the same one-line symptom. The message must separate
+    them, or the operator's next step is a guess."""
+    sock = tmp_path / "sock"
+    sock.write_text("")
+    monkeypatch.setattr(tsr, "no_tmux_server_to_restore_into", lambda: True)
+    monkeypatch.setattr(tsr, "tmux_socket_path", lambda: sock)
+    monkeypatch.setattr(tsr, "wait_for_tmux_server",
+                        lambda **k: (False, tsr.TMUX_SERVER_WAIT_SECONDS, "timeout"))
+    monkeypatch.setattr(tsr, "resurrect_last_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr(tsr, "run", lambda cmd: (_ for _ in ()).throw(
+        AssertionError("ran a tmux command while refusing")))
+
+    rc = tsr.cmd_restore(dry_run=False, plan_path=_plan_of(tmp_path))
+    err = capsys.readouterr().err
+
+    assert rc == 0
+    assert "REFUSING" in err
+    assert f"waited {tsr.TMUX_SERVER_WAIT_SECONDS:.1f}s" in err, err
+    assert "no server answered" in err, (
+        "the timeout fault reads identically to 'the socket was already gone'; "
+        f"got: {err}"
+    )
 
 
 # --- the two exit-1 branches, previously unpinned (mutants SURVIVED) ------- #
@@ -1426,3 +1658,673 @@ def test_a_settled_workspace_with_every_send_landed_exits_0(tmp_path, monkeypatc
     out = capsys.readouterr()
     assert rc == 0, out.err
     assert "verified: 2 of 2" in out.out, out.out
+
+
+# --------------------------------------------------------------------------- #
+# cmd_save GENERATIONS — the 2026-09-06 data-loss defect
+#
+# 🔴 WHAT THESE PIN, AND WHY THEY ARE PHRASED THE WAY THEY ARE.
+#
+# MEASURED on the workbench 2026-09-06:
+#   21:47:17  a good plan — 47 entries, 46 carrying a bound session id
+#   21:54:21  the tmux server died, taking 47 claude conversations
+#   22:09:40  a continuum autosave fired on the DEGRADED post-crash workspace
+#             and `cmd_save` overwrote the plan with 10 entries. The cheat-sheet
+#             went in the same second. NO BACKUP EXISTED.
+# The conversations were recovered only from tmux-resurrect's TIMESTAMPED saves.
+#
+# The regression tests below therefore assert the OPERATOR'S OBSERVABLE — "after
+# a shrinking save the previous bindings are still recoverable from the state
+# directory" — and NOT "a file named restore-plan_<stamp>.json exists". Written
+# the second way they would go red at base with an AttributeError, which proves
+# only that a new function was added; written this way they go red at base on
+# the data loss itself.
+#
+# 🔴 Every fixture here repoints STATE_DIR/PLAN/CHEAT into `tmp_path`. Nothing
+# under this heading may touch `~/.config/initiatives` — that is the operator's
+# live recovery state, and writing to it is the very failure under test.
+# --------------------------------------------------------------------------- #
+def _gen_entry(win, sid):
+    return {"session": "main", "window": str(win), "codename": "Vapor",
+            "cwd": "/r", "session_id": sid, "bind_source": "ledger" if sid else "",
+            "ledger_reason": "ok" if sid else "no-record",
+            "title": f"w{win}", "hint": ""}
+
+
+def _plan_with(n_entries, n_bound, first=0):
+    """A plan of `n_entries`, the first `n_bound` of which carry a session id.
+
+    Ids are distinct per (index, offset) so two plans built with different
+    `first` share no bindings — a fixture whose ids collided could not see a
+    mutant that ignored the previous plan entirely.
+    """
+    return [_gen_entry(i, f"{first + i:08d}-2222-4333-8444-555555555555"
+                          if i < n_bound else "")
+            for i in range(n_entries)]
+
+
+@pytest.fixture
+def state(tmp_path, monkeypatch):
+    """Repoint every state path into tmp_path and hand back the directory."""
+    d = tmp_path / "initiatives"
+    monkeypatch.setattr(tsr, "STATE_DIR", d)
+    monkeypatch.setattr(tsr, "PLAN", d / "restore-plan.json")
+    monkeypatch.setattr(tsr, "CHEAT", d / "restore-cheatsheet.md")
+    return d
+
+
+def _save(monkeypatch, plan):
+    monkeypatch.setattr(tsr, "build_plan", lambda: plan)
+    return tsr.cmd_save()
+
+
+def _bound_ids(plan):
+    """The test's OWN copy of `bound_ids`, and deliberately not the module's.
+
+    🔴 The regression tests below must go red at base ON THE DATA LOSS. Calling
+    `tsr.bound_ids` there makes them red at base with an `AttributeError`
+    instead, which proves only that a new function was added and says nothing
+    about whether the bindings survived. Measured: with `tsr.bound_ids` in the
+    assertion, two of the three fell to AttributeError before reaching it.
+    """
+    return {e["session_id"] for e in plan if e.get("session_id")}
+
+
+def _recoverable_ids(state_dir):
+    """Every session id recoverable from ANY plan-shaped JSON under `state_dir`.
+
+    Deliberately implementation-blind: it walks the directory rather than
+    knowing where generations live, so it measures "is the binding still on
+    disk" and not "was it filed the way I expected".
+    """
+    ids = set()
+    for p in state_dir.rglob("*.json"):
+        try:
+            data = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, list):
+            ids |= {e.get("session_id") for e in data
+                    if isinstance(e, dict) and e.get("session_id")}
+    return ids
+
+
+def test_generations_live_beside_the_pointer_never_in_the_real_state_dir(state):
+    """🔴 The safety property every other test here depends on.
+
+    `generations_dir()` must derive from `PLAN.parent`. Bound to the module's
+    own `STATE_DIR` at import time instead, every test below would write into
+    the operator's LIVE `~/.config/initiatives` while still passing.
+    """
+    assert tsr.generations_dir().parent == tsr.PLAN.parent, (
+        "the generations directory is not derived from PLAN.parent — a test "
+        "that repoints PLAN would write generations into the real "
+        "~/.config/initiatives, which is live recovery state")
+    assert str(tsr.generations_dir()).startswith(str(state)), (
+        f"generations_dir() escaped the test state dir: {tsr.generations_dir()}")
+
+
+def test_a_shrinking_save_does_not_destroy_the_previous_bindings(state, monkeypatch,
+                                                                 capsys):
+    """🔴 THE REGRESSION. RED AT BASE — this is the 2026-09-06 loss.
+
+    47 entries / 46 bound, then a degraded 10-entry save. Under the old
+    single-mutable-file writer the 46 ids were gone from disk the instant the
+    second save returned; here they must still be recoverable.
+    """
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+
+    degraded = _plan_with(10, 10, first=900)
+    assert _save(monkeypatch, degraded) == 0
+    capsys.readouterr()
+
+    survived = _recoverable_ids(state)
+    lost = _bound_ids(good) - survived
+    assert not lost, (
+        f"{len(lost)} of the previous save's 46 bound session ids are no longer "
+        f"recoverable from anywhere under {state} — a degraded save destroyed "
+        "the good plan, which is exactly the 2026-09-06 defect")
+
+
+def test_a_shrinking_save_does_not_destroy_the_previous_cheat_sheet(state,
+                                                                    monkeypatch,
+                                                                    capsys):
+    """🔴 RED AT BASE. Same writer, same second, same loss — the cheat-sheet.
+
+    Asserted on a resume COMMAND, not on the file's name: the cheat-sheet's
+    whole value is that each entry carries a runnable `claude --resume <id>`,
+    and that is what the operator rebuilt 24 conversations from.
+    """
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+    wanted = f"claude --resume {good[0]['session_id']}"
+
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    capsys.readouterr()
+
+    found = [p for p in state.rglob("*.md") if wanted in p.read_text()]
+    assert found, (
+        f"no file under {state} still carries `{wanted}` — the previous "
+        "cheat-sheet was overwritten by the degraded save, so the resume "
+        "commands for the dropped conversations are gone")
+
+
+def test_a_pre_generations_plan_is_preserved_by_the_first_new_save(state,
+                                                                   monkeypatch,
+                                                                   capsys):
+    """🔴 RED AT BASE. The DEPLOY of this change must not be the bad save.
+
+    A host upgrading has a REGULAR FILE at the pointer path holding the last
+    plan the old writer wrote — possibly the only good one. Repointing that path
+    without copying it in first unlinks it.
+    """
+    state.mkdir(parents=True)
+    good = _plan_with(47, 46, first=100)
+    tsr.PLAN.write_text(json.dumps(good))
+    tsr.CHEAT.write_text(tsr.cheat_sheet(good))
+    assert not tsr.PLAN.is_symlink(), "fixture must start as a real file"
+
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    capsys.readouterr()
+
+    lost = _bound_ids(good) - _recoverable_ids(state)
+    assert not lost, (
+        f"{len(lost)} bound ids from the pre-existing regular-file plan were "
+        "lost when the pointer was first swapped — the migration must adopt it "
+        "as a generation before moving the pointer")
+
+
+def test_the_pointer_still_reads_as_the_current_plan(state, monkeypatch, capsys):
+    """Reader compatibility: `cmd_restore`, `plan_staleness_hours`,
+    `tmux-restore-observe.sh` and `cmd_show` all read the two fixed paths."""
+    plan = _plan_with(4, 3, first=500)
+    assert _save(monkeypatch, plan) == 0
+    capsys.readouterr()
+
+    assert tsr.PLAN.exists(), "restore-plan.json does not resolve after a save"
+    assert json.loads(tsr.PLAN.read_text()) == plan, (
+        "restore-plan.json does not read back as the plan just saved — every "
+        "existing reader goes through this path")
+    assert tsr.CHEAT.exists() and "claude --resume" in tsr.CHEAT.read_text(), (
+        "restore-cheatsheet.md does not resolve to the current cheat-sheet")
+    assert tsr.cmd_show() == 0
+    assert "claude --resume" in capsys.readouterr().out
+
+
+def test_a_shrinking_save_is_written_not_refused(state, monkeypatch, capsys):
+    """🔴 AN INVARIANT GUARD, NOT A REGRESSION TEST — green at base by design.
+
+    It exists because the tempting fix is a guard that REFUSES to write a
+    smaller plan, and that guard would fire on the operator closing windows,
+    i.e. on ordinary use. A refusal here would leave the current pointer on a
+    workspace that no longer exists. Labelled so nobody counts it as coverage of
+    the loss.
+    """
+    assert _save(monkeypatch, _plan_with(47, 46, first=100)) == 0
+    capsys.readouterr()
+    small = _plan_with(3, 1, first=900)
+    rc = _save(monkeypatch, small)
+    capsys.readouterr()
+
+    assert rc == 0, "a legitimately smaller save was refused"
+    assert json.loads(tsr.PLAN.read_text()) == small, (
+        "the pointer was not advanced to the smaller plan — a shrink must be "
+        "WARNED about, never blocked")
+
+
+def test_a_save_dropping_bound_ids_names_the_recovery_command(state, monkeypatch,
+                                                              capsys):
+    """🔴 RED AT BASE. The warning must hand over a command that WORKS.
+
+    Not just "something was dropped": the path it names is opened and checked to
+    carry the dropped ids, because a warning pointing at the wrong file is worse
+    than none.
+    """
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    err = capsys.readouterr().err
+
+    assert "DROPS 46 bound session id(s)" in err, (
+        f"the shrink report did not name the 46 dropped bindings:\n{err}")
+    assert "47 entries → 10" in err, (
+        f"the shrink report did not name both entry counts:\n{err}")
+    m = re.search(r"restore --plan (\S+)", err)
+    assert m, f"the shrink report named no recovery command:\n{err}"
+    named = Path(m.group(1))
+    assert named.exists(), f"the recovery command names a path that does not exist: {named}"
+    assert tsr.bound_ids(json.loads(named.read_text())) >= tsr.bound_ids(good), (
+        f"the plan the recovery command names ({named}) does not carry the "
+        "dropped bindings — it points at the wrong generation")
+
+
+def test_a_shrink_that_drops_no_bindings_stays_quiet(state, monkeypatch, capsys):
+    """The DISCRIMINATING CONTROL for the report above.
+
+    Without it, a report keyed on the ENTRY COUNT instead of on bound ids passes
+    the previous test exactly. Closing five unbound windows loses nothing
+    resumable, and a line that fires there becomes noise and stops being read.
+    """
+    assert _save(monkeypatch, _plan_with(8, 3, first=100)) == 0
+    capsys.readouterr()
+    # Same three bindings, five unbound windows closed: entries 8 -> 3.
+    assert _save(monkeypatch, _plan_with(3, 3, first=100)) == 0
+    err = capsys.readouterr().err
+
+    assert "DROPS" not in err, (
+        "a shrink that dropped NO bound session id was reported as dropping "
+        f"bindings — the report is keyed on the entry count, not on ids:\n{err}")
+
+
+def test_pruning_keeps_exactly_the_newest_generations(state, monkeypatch, capsys):
+    """🔴 THE POSITIVE CONTROL for retention: the count must MOVE.
+
+    Five saves under a keep of 3 must leave 3, and they must be the NEWEST 3 —
+    a mutant pruning the wrong end leaves the right count. `1 pruned` is
+    asserted on the run that first exceeds the cap, so a pruner wired to nothing
+    (which would leave 5 and report 0) cannot pass.
+    """
+    monkeypatch.setattr(tsr, "KEEP_GENERATIONS", 3)
+    seen = []
+    for i in range(5):
+        assert _save(monkeypatch, _plan_with(2, 2, first=100 * (i + 1))) == 0
+        out = capsys.readouterr().out
+        seen.append(tsr.list_generations()[-1])
+        if i < 3:
+            assert "0 pruned" in out, f"pruned below the cap on save {i}:\n{out}"
+        else:
+            assert "1 pruned" in out, f"did not prune above the cap on save {i}:\n{out}"
+
+    kept = tsr.list_generations()
+    assert len(kept) == 3, f"kept {len(kept)} generations under a cap of 3: {kept}"
+    assert kept == seen[-3:], (
+        f"retention kept the wrong end — kept {kept}, newest three were {seen[-3:]}")
+
+
+def test_pruning_never_deletes_the_generation_the_pointer_is_on(state, monkeypatch,
+                                                                capsys):
+    """🔴 The guard that makes pruning unable to recreate the defect.
+
+    At `keep=0` every stamp is doomed, so only `protect` can save the one the
+    pointer was just aimed at. Without it the save returns 0 having left
+    `restore-plan.json` DANGLING and no current plan on disk — a bad save
+    destroying the plan, from inside the mechanism built to stop that.
+    """
+    assert _save(monkeypatch, _plan_with(4, 4, first=100)) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(tsr, "KEEP_GENERATIONS", 0)
+    plan = _plan_with(4, 4, first=200)
+    assert _save(monkeypatch, plan) == 0
+    capsys.readouterr()
+
+    assert tsr.PLAN.exists(), (
+        "restore-plan.json is dangling after a save — pruning deleted the "
+        "generation the pointer had just been aimed at")
+    assert json.loads(tsr.PLAN.read_text()) == plan
+    assert tsr.list_generations(), "pruning removed the current generation"
+
+
+def test_prune_generations_returns_what_it_removed(state, monkeypatch):
+    """`prune_generations` in isolation, incl. the `protect` refusal it reports.
+
+    The removed list is what `cmd_save` prints, so a pruner that deleted files
+    and reported nothing would make the summary line silently false.
+    """
+    d = tsr.generations_dir()
+    d.mkdir(parents=True)
+    stamps = ["20260101T000001", "20260101T000002", "20260101T000003"]
+    for s in stamps:
+        for p in tsr.generation_paths(s):
+            p.write_text("[]")
+
+    removed = tsr.prune_generations(keep=1, protect=(stamps[0],))
+    assert removed == [stamps[1]], (
+        f"expected only the middle stamp removed, got {removed}")
+    assert tsr.list_generations() == [stamps[0], stamps[2]], (
+        "a protected stamp was deleted, or the newest was not kept")
+    assert not tsr.generation_paths(stamps[1])[1].exists(), (
+        "the cheat-sheet of a pruned generation was left behind — retention "
+        "would then be unbounded in the .md half")
+
+
+def test_two_saves_in_one_second_do_not_share_a_generation(state, monkeypatch,
+                                                           capsys):
+    """🔴 The stamp has one-second resolution; the incident was a same-second write.
+
+    A manual `save` racing the 15-minute continuum hook lands in the same
+    second. Sharing a stamp would overwrite the previous generation — the
+    mutable-file defect reintroduced inside its own fix.
+
+    The clock is frozen on `tsr`'s OWN `time` reference, never on the real
+    module — patching that would hand a frozen clock to pytest itself.
+    """
+    import time as _real_time
+    # 🔴 `gmtime` is the one the stamp uses — the stamp is UTC, deliberately, so
+    # that it stays monotonic across a DST fall-back (see `generation_stamp`).
+    # `localtime`/`mktime` are kept only because other call sites still use them;
+    # a stub that omitted `gmtime` is what caught this change, which is the stub
+    # doing its job rather than a reason to reach back for local time.
+    monkeypatch.setattr(tsr, "time", types.SimpleNamespace(
+        time=lambda: 1757282857.0,
+        gmtime=_real_time.gmtime,
+        localtime=_real_time.localtime,
+        strftime=_real_time.strftime,
+        strptime=_real_time.strptime,
+        mktime=_real_time.mktime))
+
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    capsys.readouterr()
+
+    assert len(tsr.list_generations()) == 2, (
+        f"two saves in one second produced {len(tsr.list_generations())} "
+        "generation(s) — the second overwrote the first")
+    assert not (tsr.bound_ids(good) - _recoverable_ids(state)), (
+        "the same-second save destroyed the previous generation's bindings")
+
+
+def test_a_new_stamp_is_never_older_than_an_existing_generation(state):
+    """🔴 The invariant `list_generations`'s name-sort and all of pruning rest on.
+
+    A FREED slot must not be handed back. Measured while writing these tests:
+    pruning frees the oldest stamp, a same-second save is handed that slot, the
+    new generation sorts OLDEST, pruning selects it as doomed, and the cap stops
+    being enforced (`4 kept (max 3), 0 pruned`). A backwards clock step
+    reproduces it with no race at all — which is why this asks for a stamp from
+    a time BEFORE everything on disk, a case no timing can excuse.
+    """
+    tsr.generations_dir().mkdir(parents=True)
+    for p in tsr.generation_paths("20260601T120000"):
+        p.write_text("[]")
+
+    # 2026-01-01, i.e. five months older than the generation already present.
+    stamp = tsr.free_generation_stamp(when=1767268800.0)
+    assert stamp > "20260601T120000", (
+        f"free_generation_stamp returned {stamp}, which sorts BEFORE an "
+        "existing generation — pruning would then treat the newest save as the "
+        "oldest and the retention cap would stop being enforced")
+
+
+def test_a_failed_write_leaves_the_previous_file_whole(state, monkeypatch):
+    """🔴 `write_text` truncates first; `_write_atomic` must not.
+
+    A save killed mid-write would otherwise leave a zero-byte plan — the same
+    loss in a smaller shape. Simulated by failing the rename, which is the only
+    step that can touch the destination.
+    """
+    state.mkdir(parents=True)
+    target = state / "gen.json"
+    target.write_text('["intact"]')
+
+    def boom(*a, **k):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(tsr.os, "replace", boom)
+    with pytest.raises(OSError):
+        tsr._write_atomic(target, "x" * 5)
+    assert target.read_text() == '["intact"]', (
+        "a failed write truncated or damaged the destination — the write is "
+        "not going through a temp file + rename")
+
+
+def test_an_empty_plan_still_writes_no_generation(state, monkeypatch, capsys):
+    """Pre-existing behaviour, now load-bearing for retention.
+
+    A tmux-less moment must not spend a generation slot: at the cap, empty saves
+    would push real plans off the oldest end.
+    """
+    assert _save(monkeypatch, _plan_with(4, 4, first=100)) == 0
+    capsys.readouterr()
+    before = tsr.list_generations()
+    assert _save(monkeypatch, []) == 1
+    capsys.readouterr()
+    assert tsr.list_generations() == before, (
+        "an empty plan created a generation — repeated, that evicts real ones")
+
+
+# --------------------------------------------------------------------------- #
+# Audit round 1 (2026-09-09) — four findings, each pinned BEHAVIOURALLY.
+#
+# 🔴 THE FIRST ONE IS A MEASURED DATA LOSS AND IT IS NOT A CLOCK-FIXTURE
+# CURIOSITY. `free_generation_stamp` anchored on a LOCAL-time parse, so inside a
+# DST fall-back the anchor landed behind `now`, `stamp > newest` could never be
+# satisfied, and the fall-through returned an OCCUPIED stamp — destroying a bound
+# session id and its cheat-sheet at rc 0 with nothing printed.
+# --------------------------------------------------------------------------- #
+
+
+def _dst_clock(monkeypatch, now):
+    """Freeze `tsr`'s own `time` at `now`, with the REAL zone-aware functions.
+
+    The zone matters: these tests set TZ explicitly rather than trusting the
+    host's, so they assert the same thing on a CI box in UTC as on the operator's
+    workbench in America/Winnipeg. Without that they would pass vacuously
+    wherever the local zone has no DST.
+    """
+    import time as _real_time
+    monkeypatch.setattr(tsr, "time", types.SimpleNamespace(
+        time=lambda: now,
+        gmtime=_real_time.gmtime,
+        localtime=_real_time.localtime,
+        strftime=_real_time.strftime,
+        strptime=_real_time.strptime,
+        mktime=_real_time.mktime))
+
+
+@pytest.mark.parametrize("tz", ["America/Winnipeg", "UTC"])
+def test_a_generation_stamp_is_monotonic_across_a_DST_fall_back(state, monkeypatch, tz):
+    """🔴 The stamp must not repeat when the LOCAL clock repeats an hour.
+
+    2026-11-01 in America/Winnipeg runs 01:00-01:59 CDT and then 01:00-01:59 CST
+    again. A local-time stamp produces the SAME name for two instants an hour
+    apart, and `list_generations` sorts on that name — so the second save's
+    generation sorts as though it were the first's, and the anchor built from it
+    lands behind `now`.
+
+    Pinned in UTC as well as in the DST zone, so the test cannot pass merely
+    because the runner happens to sit somewhere without DST.
+    """
+    monkeypatch.setenv("TZ", tz)
+    import time as _real_time
+    _real_time.tzset()
+    # 🔴 DERIVED, NOT GUESSED. The first draft used an epoch constant that was
+    # a day off (2026-10-31), so the fixture never entered the repeated hour and
+    # BOTH parametrisations passed at base — a vacuous regression test that read
+    # as coverage. Verified: at these two instants the LOCAL stamps are both
+    # `20261101T010000` (collide) while the UTC stamps are `…T060000` /
+    # `…T070000` (do not).
+    first = 1793512800.0            # 2026-11-01 06:00:00 UTC = 01:00 CDT
+    second = first + 3600           # 2026-11-01 07:00:00 UTC = 01:00 CST
+    a = tsr.generation_stamp(first)
+    b = tsr.generation_stamp(second)
+    assert a != b, (
+        f"two instants an hour apart produced the SAME generation stamp {a!r} "
+        f"in TZ={tz} — one save would overwrite the other")
+    assert b > a, (
+        f"the later instant produced the EARLIER-sorting stamp ({b!r} <= {a!r}) "
+        f"in TZ={tz} — list_generations sorts on the name, so pruning would "
+        "delete the wrong end")
+
+
+@pytest.mark.parametrize("tz", ["America/Winnipeg", "UTC"])
+def test_a_save_inside_a_repeated_local_hour_does_not_destroy_a_generation(
+        state, monkeypatch, capsys, tz):
+    """The data loss end to end through `cmd_save` — an INVARIANT GUARD.
+
+    🔴 LABELLED, NOT COUNTED AS REGRESSION COVERAGE, BECAUSE IT IS **GREEN AT
+    BASE** IN BOTH ZONES — measured, not assumed. The deterministic red-at-base
+    guard for this class is
+    `test_a_generation_stamp_is_monotonic_across_a_DST_fall_back`, which fails at
+    base under `America/Winnipeg`.
+
+    Why this one does not go red at base: with a local-time stamp the two saves
+    DO collide on `20261101T010000`, but the base implementation's anchor then
+    calls `time.mktime` on that ambiguous local string, and glibc's tie-break for
+    a repeated hour is unspecified. In this harness it resolves to the CDT
+    reading, so the anchor steps forward and the second save is handed a free
+    stamp anyway. The round-1 audit measured it going BOTH ways depending on
+    prior calls in the process, and measured the losing direction in the
+    production call sequence — so the loss is real but not deterministic from a
+    test, and a test that pretends otherwise would be flaky rather than
+    protective.
+
+    It stays because it pins the PROPERTY that matters — the first save's bound
+    ids remain recoverable after a save inside the repeated hour — on the real
+    `cmd_save` path, and it will hold that property against any future rework of
+    the stamping. It just must not be read as evidence that the bug is caught.
+    """
+    monkeypatch.setenv("TZ", tz)
+    import time as _real_time
+    _real_time.tzset()
+    first = 1793512800.0            # 01:00 CDT — see the derivation above
+    second = first + 3600           # 01:00 CST, the SAME local wall-clock time
+
+    _dst_clock(monkeypatch, first)
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+
+    _dst_clock(monkeypatch, second)
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    capsys.readouterr()
+
+    lost = _bound_ids(good) - _recoverable_ids(state)
+    assert not lost, (
+        f"{len(lost)} of the first save's bound session ids are no longer "
+        f"recoverable after a save inside the repeated local hour (TZ={tz}) — "
+        "the second save overwrote the first's generation")
+
+
+def test_an_exhausted_stamp_search_REFUSES_instead_of_overwriting(state, monkeypatch):
+    """🔴 The fall-through used to return an OCCUPIED stamp and clobber it.
+
+    A save that fails loudly costs one save. A save that clobbers costs the bound
+    plan it existed to protect. Pinned on the REFUSAL, and on the existing
+    generations surviving it.
+
+    🔴 GETTING THE FIXTURE RIGHT IS THE WHOLE TEST, and the obvious version does
+    NOT reach this path: occupying a contiguous run of stamps does not exhaust
+    the search, because the anchor JUMPS PAST `newest` and the slot after the
+    newest generation is free by definition. Written that way first, and it
+    scored DID NOT RAISE — the guard was unreachable, not working.
+
+    The path is reachable only when the directory holds stamps that this
+    caller's `list_generations` did not see — i.e. another process claimed them
+    between the listing and the claim. That is precisely the race
+    `tmux-post-save.sh` creates by backgrounding `save` with no lock, so it is
+    simulated here by holding the listing empty while the files exist.
+    """
+    state.mkdir(parents=True, exist_ok=True)
+    tsr.generations_dir().mkdir(parents=True, exist_ok=True)
+    now = 1757282857.0
+    for i in range(0, 8):
+        tsr.generation_paths(tsr.generation_stamp(now + i))[0].write_text("[]")
+    survivors_before = sorted(p.name for p in tsr.generations_dir().iterdir())
+    # The stale view: this caller saw an empty directory a moment ago.
+    monkeypatch.setattr(tsr, "list_generations", lambda: [])
+
+    with pytest.raises(RuntimeError) as e:
+        tsr.free_generation_stamp(now, limit=5)
+    assert "REFUSING" in str(e.value), (
+        f"the refusal must say what it refused to do; got {e.value!r}")
+    assert sorted(p.name for p in tsr.generations_dir().iterdir()) == survivors_before, (
+        "the refusing path still modified the generations directory")
+
+
+def test_a_concurrent_save_cannot_take_a_stamp_another_save_claimed(state, monkeypatch):
+    """🟡 `tmux-post-save.sh` backgrounds `save` with NO lock, so this races.
+
+    An `exists()` check cannot close it — both callers see the slot free. The
+    claim is `O_CREAT|O_EXCL`, so the second caller must be handed a DIFFERENT
+    stamp even though nothing was written between the two calls.
+    """
+    state.mkdir(parents=True, exist_ok=True)
+    now = 1757282857.0
+    a = tsr.free_generation_stamp(now)
+    b = tsr.free_generation_stamp(now)
+    assert a != b, (
+        f"two callers in the same second were both handed {a!r} — one save "
+        "would overwrite the other's generation")
+
+
+def test_write_atomic_temp_names_are_per_process(state, monkeypatch, tmp_path):
+    """🟡 A fixed `.tmp` is shared state between two concurrent saves.
+
+    Measured on a fixed name: the second `os.replace` raised FileNotFoundError
+    because the first had already renamed the shared temp away. Asserted by
+    catching the temp name in the act, so it pins the NAME rather than the
+    absence of a crash.
+    """
+    seen = []
+    target = tmp_path / "x.json"
+    real_replace = os.replace
+
+    def spy(src, dst):
+        seen.append(str(src))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(tsr.os, "replace", spy)
+    tsr._write_atomic(target, "hello")
+    assert seen, "the write did not go through os.replace at all"
+    assert str(os.getpid()) in seen[0], (
+        f"the temp name {seen[0]!r} does not carry the pid — two concurrent "
+        "saves would share it")
+
+
+def test_prune_reports_only_what_it_actually_deleted(state, monkeypatch, capsys):
+    """🟡 The unlink OSError was swallowed and the stamp appended regardless.
+
+    Measured: `2 kept (max 1), 1 pruned` while NOTHING had been pruned. A
+    persistent unlink failure gives unbounded growth reported as healthy
+    retention on every save.
+    """
+    state.mkdir(parents=True, exist_ok=True)
+    tsr.generations_dir().mkdir(parents=True, exist_ok=True)
+    for stamp in ("20260101T000001", "20260101T000002"):
+        tsr.generation_paths(stamp)[0].write_text("[]")
+
+    real_unlink = Path.unlink
+
+    def refuse(self, *a, **k):
+        if _GEN_PLAN_RE_TEST.match(self.name):
+            raise PermissionError("read-only mount")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    removed = tsr.prune_generations(keep=1)
+    assert removed == [], (
+        f"prune reported {removed} as removed while every unlink was refused — "
+        "a reassuring count from a pruner wired to nothing")
+    assert len(tsr.list_generations()) == 2, "the fixture did not hold"
+
+
+_GEN_PLAN_RE_TEST = re.compile(r"^restore-plan_\d{8}T\d{6}\.json$")
+
+
+def test_the_shrink_report_never_names_a_file_this_save_just_pruned(
+        state, monkeypatch, capsys):
+    """🟡 `protect=(stamp,)` did not cover `previous_gen`.
+
+    The report tells the operator to restore from the previous generation; at a
+    low cap the same call had already deleted it. This file's own rule is that a
+    warning pointing at the wrong file is worse than no warning.
+    """
+    monkeypatch.setattr(tsr, "KEEP_GENERATIONS", 1)
+    good = _plan_with(47, 46, first=100)
+    assert _save(monkeypatch, good) == 0
+    capsys.readouterr()
+    assert _save(monkeypatch, _plan_with(10, 10, first=900)) == 0
+    err = capsys.readouterr().err
+
+    m = re.search(r"restore --plan (\S+)", err)
+    assert m, f"the shrink report did not name a recovery command:\n{err}"
+    named = Path(m.group(1))
+    assert named.exists(), (
+        f"the shrink report names {named}, which this same save deleted — a "
+        "dangling recovery command is worse than none")

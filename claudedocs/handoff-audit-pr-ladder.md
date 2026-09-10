@@ -16,63 +16,28 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-🔴 **RANKS 7 AND 11 ARE BOTH CLOSED AND MERGED.** Claims `audit-pr-ladder-7` and `-11` released.
-
-- **Rank 11** — `#1395` → squash **`63ad792d`**. #1342's control assertions are REACHABLE and
-  there are **EIGHT**, not six (5 `assert` statements; a 4-iteration loop is four controls).
-  Reachability was the live risk: they sit behind an early `return` and a `len(blocks) == 1`
-  assert, either of which would have made all eight vacuous on a green suite. Each was isolated
-  by mutating the PARSER — never the assertion, which proves only that the assertion exists —
-  so exactly one control breaks and fails FIRST. All eight killed carrying their own message.
-  Landed as `TESTLIB_ROWS` in `scripts/tests/mutants-audit-dispatch.py`.
-- **Rank 7** — `#1396` → squash **`e9b665bd`**. `scripts/testlib/**` is **SCAFFOLDING**, PAYLOAD
-  only when the PR's stated deliverable is that module's behaviour, **decided once at round 1**.
-  Tie-breaker shipped as the **REVERT TEST**. Rule in the skill body, evidence + worked case in
-  `claude/skills/audit-pr/reference/round-ladder-evidence.md`.
-- **Verified by CONTENT, never ancestry** (a squash makes the head a permanent non-ancestor —
-  `merge-base --is-ancestor` returns false and that is expected): on `origin/main`,
-  `TESTLIB_ROWS` ×7, the `T9` control row, `*mod.TESTLIB_ROWS` in `_known_mutant_ids`,
-  `DECIDE ONCE`, `ONE NUMBER, ONE NAME`, and the reference section all present.
-- **Gate, four legs, on the MERGED tree at base `b508b684`** (integration branch `integ/r7-r11`
-  carrying BOTH PRs, because disjoint files are not safety): dev-host pytest
-  `21020/21022 failed=0` floor 20342 · dev-host node `1449/1449` floor 1367 · `nix` pytests
-  `RESULT: PASS`, **0** `panic: test timed out`, **0** target FAIL rows · `nix` nodetests
-  `RESULT: PASS`. `nix` derivations built ONE AT A TIME.
-
-**IN FLIGHT — the only thing this session did not land:**
-- 🔴 **The queue-update PR is NOT OPEN yet.** Commit **`9e6c48bb`** (one file,
-  `claudedocs/handoff-audit-pr-ladder.md`, +41/−4) is pushed on branch
-  **`docs/handoff-r7-r11-closed`**, worktree `/home/zach/workspace/devrc-r7-queue`. Its gate run
-  was still executing at session end. **Open the PR and merge it** — until then the ranked list
-  on `main` still shows ranks 7 and 11 as OPEN, which is the exact duplicate-work hazard this
-  doc records as the most-skipped step.
-
-**Carried forward (this section REPLACES, so these live here until they stop being true):**
-- 🔴 **The base clone `~/workspace/devrc` is BEHIND and CANNOT fast-forward.** `merge --ff-only`
-  refuses because the tree holds **untracked** `nix/system/apply-nebula-relay.sh` and
-  `check-nebula-relays.sh` that `#1272`/`01956bf0` has since landed upstream. Measured before
-  touching anything: both local copies are strictly SMALLER than the merged ones (205 vs 480,
-  317 vs 360 lines) with older mtimes, and upstream is a structural superset — stale earlier
-  drafts, not newer WIP. **Preserved byte-exact to
-  `~/workspace/.wip-preserve-nebula-basclone-2026-09-08/` and deliberately NOT deleted** (another
-  session's tree). To unblock: `rm` those two paths, then `git -C ~/workspace/devrc merge
-  --ff-only origin/main`.
-- **Preserved WIP from earlier sessions, still untouched — do not delete without reading:**
-  `~/workspace/.wip-preserve-discord-embed-2026-08-28/` and
-  `~/workspace/.wip-preserve-memory-detail-2026-08-30/`.
-- **The effort's PRs, merged and content-verified** (never by ancestry): `#1153` → `018e5761` ·
-  `#1157` → `3e4c447f` · `#1178` → `0aa90f20` · `#1185` → `76d20386` · `#1191` → `a4529101` ·
-  `#1342` → `08ef1d5a` · `#1395` → `63ad792d` · `#1396` → `e9b665bd`.
-- ⚠ **Fleet parity is STALE — rank 12, still open and now wider.** Last verified at `a4529101`
-  (2026-09-01). `#1316`, `#1342`, `#1395` and `#1396` have none of them been shipped.
-- ⚠ **Worktree count still climbing and still unowned.** This session added five
-  (`devrc-r11-controls`, `devrc-r7-testlib`, `devrc-integ`, `devrc-basectl`, `devrc-r7-queue`)
-  against the ~144 already registered; `basectl`/`mergecheck`/`leakctl` were removed as used.
-  **Remove the rest once the queue PR merges.**
-- **No `clawgate-task:` field recorded.** `clawgate_handoff.sh resolve` returned **rc 5**
-  (nothing resolved) with its positive control PASSING — the board is reachable and the token is
-  accepted, so the 0 is a real reading. Per the tool that is NOT proof this session's id is
-  right: an unknown id also answers 200 with an empty array.
+- Branch / PR: `main` at `c68750f6` (base clone **behind 1**). **`fix/shebang-guard` → PR #1461 OPEN and unmerged.**
+- 🔴 **`main` IS RED and it is this effort's fault.** `tekton/devrc-pytests` fails on `605b29ac`:
+  `test_no_test_writes_a_usr_bin_env_shebang_at_runtime`, 1 of 21,455. #1461 is the fix.
+- **DONE — the ladder's stop condition now carves out nits.** `#1427` → squash **`7edcb1e0`**,
+  shipped to both hosts. `claude/skills/audit-pr/SKILL.md`: a round reporting only NITS THAT
+  CHANGE NOTHING A READER DOES is a stopping round; a 🟢 that DOES change what a reader does is
+  a finding and the ladder continues. The operator's opening ask was the stronger
+  "deploy-blocking only", which the evidence REFUTED and which is now recorded as rejected
+  beside the rule: `homelab-infra` #702 ran six rounds with ZERO deploy-blockers, so a
+  blocker-keyed ladder ends after round 1 and ships every one of them.
+- **DONE — the LAN/nebula gotcha this doc records is FIXED in the scripts.** `#1439` → squash
+  **`605b29ac`**, shipped; both hosts at it, 581/528 managed artifacts, 0 dangling, 0 stale.
+  `lib/host-role.sh` gained `remote_ssh_candidates_of` (pure) + `first_reachable_ssh` (probing,
+  stubbable via `$SSH_PROBE_CMD`); `ship.sh` and `drift-check.sh` try LAN then nebula, announce a
+  fallback, and name every address when none answers. Verified in production on the first real
+  run: `ship: zach@192.168.50.155 did not answer — falling back to zach@10.42.0.100 for laptop.`
+  then `2 hosts compared, both at 605b29ac`. **This is the one-env-var workaround this doc
+  prescribed, promoted into the scripts — see the duplication question below before treating it
+  as settled.**
+- IN FLIGHT: #1461 (un-red main). Issue **#1431** OPEN with a closing condition.
+- Deploy/verify status: `7edcb1e0` and `605b29ac` both deployed to BOTH hosts and verified by
+  the deployed artifact, not by the merge. `main` is red at `605b29ac`; #1461 is not shipped.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -148,67 +113,59 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-🔴 **Numbering is STABLE — the rank is half a `claim-work` slug's identity.** Items 1–6 are
-retained as DONE markers; do not re-claim them.
+🔴 **Numbering is STABLE — the rank is half a `claim-work` slug's identity.** Items 1–12 are
+retained as DONE/open markers; do not re-claim the DONE ones.
 
-1. **DONE (2026-08-31) — ship the laptop.** `drift-check.sh` rc 0, `PARITY-RC=0` on both.
+1. **DONE (2026-08-31) — ship the laptop.**
    forcing: none
 2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.** ⚠ Successor
-   condition real and unowned: now **144** registered worktrees, none prunable. Not filed — no
-   checkable closing condition.
+   condition real and unowned; not filed — no checkable closing condition.
    forcing: none
 3. **DONE (2026-08-31) — `#1133`'s never-run round 3.** `#1157` → `3e4c447f`.
    forcing: none
 4. **DONE (2026-09-01) — the `nix log` port-back.** `#1185` → `76d20386`.
    forcing: none
-5. **DONE (2026-09-07) — `90202ce5..2eaa3c62` audited (round 2: 3 🟡 + 4 🟢), and the findings
-   fixed and shipped via rank 6.** Claim `audit-pr-ladder-5` RELEASED. Closing condition met.
+5. **DONE (2026-09-07) — `90202ce5..2eaa3c62` audited.** Claim `audit-pr-ladder-5` RELEASED.
    forcing: none
-6. **DONE (2026-09-07) — the three 🟡s fixed, then a blind audit of the fix PR found 2 more,
-   which were also fixed.** `#1342` → squash **`08ef1d5a`**, four-leg gate green on the merged
-   tree at base `3f8c81bb`. Claim `audit-pr-ladder-6` RELEASED. ⚠ One item was deliberately left
-   open rather than chased — whether #1342's new control assertions are reachable. **That is
-   now CLOSED by rank 11 (2026-09-08): eight controls, not six, all reachable, none vacuous.**
-   The fix round before the merge changed ZERO payload lines, so one more round would have
-   fired the attribution gate.
+6. **DONE (2026-09-07) — the three 🟡s fixed + blind audit of the fix PR.** `#1342` →
+   `08ef1d5a`. Claim `audit-pr-ladder-6` RELEASED.
    forcing: none
-7. **DONE (2026-09-08) — the call is SCAFFOLDING, decided once at round 1, by the REVERT TEST.**
-   `#1396` → squash **`e9b665bd`**. The reference file states the call, its reason, the worked
-   case (`nix_units.py` +225 — revert it and all 15 corrected claims still ship) and the named
-   exception (a testlib scanner that IS a repo gate, on a PR whose deliverable is that gate); the
-   rule itself is in the skill body, where rules live. Claim `audit-pr-ladder-7` RELEASED.
-   ⚠ **A finding fell out that is NOT about testlib and is worth more than the call itself:**
-   #1132's ledger printed TWO differently-named numbers ("payload lines" / "executable payload"),
-   so its rounds read as zero *or* non-zero at will — the class never had to flip for the gate to
-   be disarmed. Shipped as **ONE NUMBER, ONE NAME**. The churn for #1132's rounds 6 and 7 was
-   deliberately NOT recomputed, so nothing claims that stop was wrong.
+7. **DONE (2026-09-08) — `scripts/testlib/**` is SCAFFOLDING, by the REVERT TEST.** `#1396` →
+   `e9b665bd`. Shipped ONE NUMBER, ONE NAME. Claim `audit-pr-ladder-7` RELEASED.
    forcing: none
 8. **Churn-measure the ladders OUTSIDE devrc** — `homelab-talos`, `civit-datapacket-talos`,
-   `vetr`, `auditloop`, `civitai-gpu-fleet`, `naida-ai`. #1316's waste audit was devrc-only
-   against an "all repos" scope. *Closes when* each repo's in-window ladders are churn-measured
-   or reported UNMEASURABLE with a reason.
+   `vetr`, `auditloop`, `civitai-gpu-fleet`, `naida-ai`. *Closes when* each repo's in-window
+   ladders are churn-measured or reported UNMEASURABLE with a reason. **STILL OPEN.**
    forcing: none
-9. **Mine the stop-rationale prose across all 42 block-carrying PRs** rather than the two read
-   by hand. The only route to a RATE for "ladders that stopped on a stated mechanism", and how
-   #1157's escape-hatch-rationale requirement gets checked at all. *Closes when* the terminal
-   round's summary is classified for every carrier and the rate is published.
+9. **Mine the stop-rationale prose across all 42 block-carrying PRs.** *Closes when* the
+   terminal round's summary is classified for every carrier and the rate is published.
+   **STILL OPEN**, and this session is new evidence for it — see rank 13.
    forcing: none
-10. **Fix the range-coverage hole.** Blocks that skip a round (#1233: blocks 1, 2, 4, with
-    round 3's fixes in `1b5d2e43..eb947328`) leave churn in NO block's range. *Closes when* the
-    measurement additionally reports, per ladder, the churn between the first block's `from`
-    and the head that no block's range covers.
+10. **Fix the range-coverage hole** (blocks that skip a round leave churn in NO block's range).
+    *Closes when* the measurement reports, per ladder, the churn no block's range covers.
+    **STILL OPEN.**
     forcing: none
-11. **DONE (2026-09-08) — #1342's control assertions are REACHABLE, and there are EIGHT of
-    them, not six.** Every one kills its own mutant and fails with its own message; nothing is
-    vacuous. Landed as `TESTLIB_ROWS` in `scripts/tests/mutants-audit-dispatch.py` so the claim
-    is re-derivable rather than believed. Claim `audit-pr-ladder-11` RELEASED. Closing condition
-    met — see "RESOLVED — #1342's controls" under Open investigations for the numbers and the
-    two harness controls.
+11. **DONE (2026-09-08) — #1342's controls are REACHABLE, and there are EIGHT.** Claim
+    `audit-pr-ladder-11` RELEASED.
     forcing: none
-12. **Ship #1316 and #1342 to both hosts and re-verify fleet parity.** Neither has been
-    shipped; parity was last verified at `a4529101` on 2026-09-01 and is stale. *Closes when*
-    `scripts/ship.sh` reports both hosts at the same sha and `scripts/drift-check.sh` is read
-    per-host line (not just its final verdict).
+12. **DONE (2026-09-09) — both hosts converged and parity re-verified** at `7edcb1e0`. Claim
+    `audit-pr-ladder-12` RELEASED.
+    forcing: none
+13. **Merge `#1461` and confirm the sandbox tier goes green.** `main` is RED at `605b29ac` on
+    `test_no_test_writes_a_usr_bin_env_shebang_at_runtime`; the fix is two test files onto
+    `testlib.mockbin.write_exec`, 35 passed locally. *Closes when* `gh pr checks` on the merge
+    commit shows `tekton/devrc-pytests` PASS.
+    forcing: gate — CI red on `main`, `tekton/devrc-pytests` failing at `605b29ac`
+14. **Decide #1439 vs #1287 — one mechanism or two.** Read `scripts/workhost`, then either make
+    `first_reachable_ssh` a caller of it, close #1287, or record why both stay. *Closes when*
+    the decision is written on #1287 by the operator or a named reader.
+    forcing: none
+15. **Remove this arc's six leftover trees** — `devrc-shipaddr` and `devrc-audit-1439-r1..r5`.
+    *Closes when* `git -C ~/workspace/devrc worktree list` and `ls ~/workspace/devrc-audit-*`
+    no longer show them.
+    forcing: none
+16. **Close issue #1431** (the battery's `MIN_TESTS` pin reads a literal, so a conditional
+    override is invisible). Its own closing condition is written on the issue.
     forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -927,35 +884,92 @@ retained as DONE markers; do not re-claim them.
   `git log --no-merges <base>..HEAD` rather than explain the stat away. It confirmed one
   non-merge commit, mine, one file.
 
+- 🔴 **`drift-check.sh` PRINTED `no drift` (rc 16) WITH THE LAPTOP NEVER EVALUATED — AND THE
+  SUMMARY LINE IS NOT WHERE IT SAYS SO.** Both `ship.sh` and `drift-check.sh` derive the laptop's
+  ssh target from `LAPTOP_SSH_DEFAULT` in `scripts/lib/host-role.sh`, which is the **LAN** address
+  `192.168.50.155` — reachable only same-network. Measured 2026-09-09: it timed out, and the run
+  still ended `no drift on the host(s) CHECKED: workbench (local)` + `rc=16`. The script IS honest
+  in its body — `[laptop] UNREACHABLE — … This is not a pass`, `[parity] NOT COMPARED`,
+  `[srcrepo] NOT COMPARED`, `[tiers] laptop: NOT REPORTED` — but a reader who takes the last line
+  gets a clean bill for a fleet of one. **The fix is one env var: `REMOTE_SSH=zach@10.42.0.100`**
+  (nebula), which `remote_ssh_of()` honours unconditionally in BOTH scripts. With it: both hosts
+  checked, `[parity] AGREE`, `[srcrepo] compared=2 same=2 differing=0`. ⚠ The unreachable counter
+  was at **3/4** — one more silent run and it would have escalated to rc 13 on its own, so this
+  was found one run before the deadman would have found it. Open PR **#1287 `feat/workhost`** is
+  exactly this problem (reach a host over whichever path is up) and is unmerged.
+- 🔴 **A `home-manager switch` FAILING WITH `home-manager: command not found` IS THE DOCUMENTED
+  PROFILE-BLANKING, NOT A BROKEN TOOLCHAIN — and the discriminator is an mtime correlation, not a
+  `which`.** `ship.sh` rc 9 on the workbench; `command -v home-manager` immediately after
+  resolved fine (`~/.nix-profile/bin/home-manager`). `~/.local/state/nix/profiles/` showed
+  generations **2103 at 00:41:36** and **2104 at 00:41:45** bracketing the run — a *concurrent*
+  switch (another session), whose intermediate generation drops every `home.packages` binary for
+  ~1s, and a bare-name invocation inside that window dies. **Check for an in-flight switch before
+  re-running, and re-run rather than debugging**: the second attempt was rc 0. Resolving PIDs via
+  `/proc/<pid>/cmdline` and skipping the pgrep itself is the read that answers "is one running";
+  never let a `-f` pattern reach `pkill`.
+- ⚠ **`ship.sh` correctly shipped a DIRTY workbench, and said why.** It classified the 1 untracked
+  path against **162 nix-read paths derived from 29 nix files**, found 0 hits, and stated *"NO
+  dirty path is read by nix — what was built/deployed IS origin/main"*. Dirty is not a blocker;
+  dirty **in a nix-read path** is. That distinction is the difference between a skipped host and a
+  correct deploy.
+
+- 🔴 **THIS SESSION NEVER READ THIS DOC UNTIL THE OPERATOR ASKED, and the cost is measurable.**
+  It worked the stop rule and the LAN/nebula gotcha — both squarely this effort — without
+  opening the handoff, so: **no `claim-work` was taken for any rank**, and **#1287 was not
+  consulted** even though this doc names it as the same problem (rank 14). The queue lock only
+  works if the doc is read FIRST; a session that starts from a bare operator prompt bypasses it
+  entirely, and nothing in the harness catches that. The Stop-hook write-back guard fired at the
+  END, which is one bookend, not both.
+- 🔴 **CI PENDING IS NOT CI ABSENT, and `no checks reported` is a reading with a shelf life.**
+  #1439 was merged after `gh pr checks` said *no checks reported on the branch*; minutes later
+  both Tekton checks posted `pending`, and `devrc-pytests` then FAILED. `main` was red ~20
+  minutes. **Re-read checks immediately before the merge, not minutes before.**
+- 🔴 **The dev-host subset is STRUCTURALLY BLIND to the sandbox tier's hazards, and this is the
+  worked example.** `test_no_test_writes_a_usr_bin_env_shebang_at_runtime` guards against
+  `/usr/bin/env` because **`env` is absent in the nix build sandbox** — so a dev-host run passes
+  it no matter what, and 597 green change-scoped tests said nothing about it. CLAUDE.md's
+  deletion of the full-suite ritual makes reading CI the *replacement* signal, not an optional
+  one.
+- 🔴 **The ladder ran FIVE rounds on #1439 and returned TWO 🔴s, both in its OWN fixes.**
+  (a) the fallback was **dead in `ship.sh`** — `remote_ssh_candidates_of` reads `$REMOTE_SSH` to
+  detect an operator override and `ship.sh` assigned that same variable its DERIVED default two
+  lines earlier, so the probe was skipped every run while 11 lib-level tests and a live probe
+  all passed over the no-op; (b) the test written to prove *nothing reaches a live host* ran the
+  production `drift-check.sh` against the real `$HOME`, fetching in three shared checkouts,
+  calling `gh` authenticated, and **incrementing the real `unreachable-laptop` escalation streak
+  once per suite run**. Both are isolation-seam defects: each half correct alone, broken
+  together, invisible to any test that loads only one file.
+- **The prose-payload stop was exercised again, and the numbers are new evidence for rank 9.**
+  Payload lines per round: **124 → 56 → 15 → 20 → 34**, never zero, so §ATTRIBUTION's gate could
+  not fire; but rounds 3–5 changed **zero executable payload** (verified: `git diff -U0` over the
+  payload files with comment and blank lines stripped is empty). Stopped on the stated criterion
+  with the reason named on the PR. ⚠ Reported ONE number under ONE name throughout and said
+  explicitly which the stop was NOT taken on — per rank 7's own rule.
+- **The `audit-pr` Output section still uses colour-only severity circles.** The operator's font
+  renders 🔴/🟡/🟢 as one glyph — *"i can't tell whats what"*. Words (BLOCKER / SHOULD-FIX / NIT)
+  are legible; the skill's Output section was left unchanged as out of scope for #1427.
+- **`test_drift_check.py`'s command extractor reads loop variables as commands.** `for` and
+  `local` are in `_TRANSPARENT`, so stripping them leaves the VARIABLE NAME as token zero.
+  `target` is allowlisted in `_PROSE_NOT_COMMANDS`; the blind spot predates #1439 and survived
+  only because the file's other loop variable is named `ip`, which passes **by coincidence**
+  (`ip` is a real command already in `UNIT_PATH_REQUIREMENTS`). Widening `_command_tokens` is the
+  structural fix and was deliberately not bundled.
+
 ## How to verify
 ```bash
-# --- rank 5's audit actually ran against the range the doc names ---
-git -C ~/workspace/devrc cat-file -e 90202ce5^{commit} && \
-git -C ~/workspace/devrc cat-file -e 2eaa3c62^{commit} && echo "both ends resolve"
-git -C ~/workspace/devrc merge-base --is-ancestor 2eaa3c62 origin/main && \
-  echo "UNEXPECTED: ancestor" || echo "expected: NOT an ancestor (squash merge)"
-
-# --- F2 is real and still shipping (expect: 'in fn', no 'SURVIVED', rc 1) ---
-bash -c 'f(){ echo "in fn"; exit 1; }; f; echo "SURVIVED"'; echo "rc=$?"
-sed -n '2959,2966p' ~/workspace/devrc/scripts/audit-dispatch.py   # the prose, live on main
-
-# --- #1316 landed, by CONTENT (a squash is never an ancestor) ---
-git -C ~/workspace/devrc show origin/main:claudedocs/audit-ladder-review-2026-09-04.md | wc -l   # 495
-gh pr view 1316 --repo innovation-upstream/devrc --json mergedAt,mergeCommit
-
-# --- the claim is still held by this effort ---
-claim-work --list | grep audit-pr-ladder-5
-
-# --- rank 11: the eight controls, re-derived rather than believed ---
-# Expect the TESTLIB block to print 8 rows `killed by its OWN control` plus
-# `T9 ... SURVIVED as required (control)`. 🔴 If T9 says KILLED, the other eight
-# are uninterpretable — the battery is reacting to the edit, not the semantics.
-nix develop ~/workspace/devrc -c python3 \
-  ~/workspace/devrc/scripts/tests/mutants-audit-dispatch.py | sed -n '/^TESTLIB/,$p'
-
-# The count, re-derived from the file instead of quoted (expect 5 asserts / 8 claims:
-# 4 explicit + a 4-iteration loop). Read the block, do not grep a number out of prose.
-sed -n '2950,2970p' ~/workspace/devrc/scripts/tests/test_audit_dispatch.py
+# 1. the stop rule that shipped (both hosts serve it)
+grep -c "A round that reports only NITS THAT CHANGE NOTHING A READER DOES" \
+  ~/.claude/skills/audit-pr/SKILL.md            # expect 1
+# 2. the fallback, end to end, with the laptop off-LAN — ship.sh's own output
+env -u REMOTE_SSH -u LAPTOP_SSH SHIP_ROLE=workbench \
+  bash ~/workspace/devrc/scripts/ship.sh --print-remote-target
+#    expect: "did not answer — falling back to zach@10.42.0.100", stdout zach@10.42.0.100
+# 3. main's red guard — the ONLY tier that can answer
+gh pr checks 1461 --repo innovation-upstream/devrc
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc/scripts/tests/test_runtime_shebangs.py -q      # expect all pass
+# 4. the drift-check state this session must NOT have touched
+md5sum ~/.local/state/drift-check/unreachable-laptop
 ```
 ## Open investigations — live diagnosis state
 
@@ -1235,3 +1249,43 @@ is load-bearing rather than left standing as a live claim.
 - **Next probe:** mutate each of the six control assertions individually, under
   `PYTHONDONTWRITEBYTECODE=1`, and confirm each fails with its OWN message rather than a
   neighbour's; keep a known-caught mutant as positive control and report the pair.
+
+### `main` is red: #1439's test stubs wrote their own shebang
+- **Symptom + exact repro:** `gh pr checks 1439` → `tekton/devrc-pytests fail … FAILING:
+  test_no_test_writes_a_usr_bin_env_shebang_at_runtime | TOTAL collected=21455 passed=21452
+  skipped=2 failed=1`. Reproduce: `nix develop ~/workspace/devrc -c python3 -m pytest
+  scripts/tests/test_runtime_shebangs.py -q`.
+- **Observed (with values):** two call sites, both added by #1439 —
+  `scripts/tests/test_ship_ssh_fallback.py:107` `p.write_text('#!/usr/bin/env bash\n…')` and
+  `scripts/tests/test_ship_ssh_probe_wiring.py` `_recording_ssh`. The guard's own message:
+  *"a test writes its own shebang — use testlib.mockbin.write_exec"*. Cause per
+  `test_runtime_shebangs.py`: **`env` is not on PATH in the nix build sandbox**, so such a stub
+  is unrunnable in the tier the merge is gated on.
+- **Ruled out:** *an ALLOWLIST entry is the right fix* — the allowlist exists for shapes that
+  cannot use `write_exec` (a bash test stubbing onto PATH; a deliberately unresolvable
+  interpreter), and neither applies to a Python test. via: doc
+- **Ruled out:** *the dev-host subset would have caught it* — it passes anywhere
+  `/usr/bin/env` exists; the hazard is sandbox-only. via: measurement
+- **Leading hypothesis:** none needed — fixed in #1461 by routing both stubs through
+  `testlib.mockbin.write_exec`, which owns the shebang and refuses a body carrying its own.
+  35 passed locally including the guard and its stale-pin accounting.
+- **Next probe:** `gh pr checks 1461`, then merge and re-check `gh pr checks` on the merge
+  commit — the sandbox tier is the only one that can confirm it.
+
+### Does #1439 duplicate open PR #1287 (`feat/workhost`)?
+- **Symptom + exact repro:** this doc's own gotcha says *"Open PR #1287 `feat/workhost` is
+  exactly this problem (reach a host over whichever path is up) and is unmerged."* #1439 solved
+  the same problem inside `lib/host-role.sh`, without that PR being consulted.
+- **Observed (with values):** `gh pr view 1287` → **OPEN**, last updated 2026-09-05,
+  `feat(workhost): reach a dev host over whichever path is up, and say so`. Files:
+  `scripts/workhost`, `scripts/tests/test_workhost.py`, `scripts/tests/mutants-workhost.sh`,
+  `scripts/tests/test_no_real_launchers.py`, `nix/home.nix`, `scripts/README.md`.
+  #1439's files: `scripts/lib/host-role.sh`, `scripts/ship.sh`, `scripts/drift-check.sh`, two
+  new test modules. **Zero file overlap**, so no merge conflict either way.
+- **Ruled out:** *they conflict textually* — disjoint file sets, checked by name. via: command
+- **Leading hypothesis:** two mechanisms now exist for one job — a general `workhost` tool and a
+  ship/drift-specific fallback. That is the "one rule, one place" hazard, not a bug: #1439 is
+  live and proven in production, #1287 is unmerged and 4 days stale.
+- **Next probe:** read `scripts/workhost` in #1287 and decide whether `first_reachable_ssh`
+  should become a thin caller of it, or whether #1287 should be closed. **Operator call — do not
+  resolve unilaterally.**

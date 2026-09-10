@@ -84,10 +84,27 @@ def _gate(tmp_path: Path, *, pytest_runner: Path, extra: list[str] | None = None
     a truncation panic, a runner that lies about its own status) cannot be
     produced by the real runner at all.
     """
+    # 🔴 SCRUB THE OPERATOR-FACING GATE VARIABLES OUT OF THE INHERITED
+    # ENVIRONMENT. `**os.environ` used to pass whatever the caller had exported
+    # straight through. An exported `DEVRC_GATE_TIMEOUT=5` would kill every tier
+    # these negative controls run and read as a gate bug; an exported
+    # `DEVRC_GATE_ENV` or `DEVRC_GATE_NO_REEXEC` changes which code path they
+    # take. A control whose verdict depends on the operator's shell is not a
+    # control. The ledger of names lives in
+    # `test_gate_reexec.py::_AMBIENT_GATE_VARS`, pinned two-way against
+    # gate.sh's own source.
     env = {
-        **os.environ,
-        "DEVRC_GATE_PYTEST_RUNNER": str(pytest_runner),
+        k: v for k, v in os.environ.items()
+        if not k.startswith("DEVRC_GATE_")
     }
+    env["DEVRC_GATE_PYTEST_RUNNER"] = str(pytest_runner)
+    # gate.sh REFUSES (exit 2) when a gate-weakening variable is set in its
+    # environment — the runner-replacement pair included, because an ambient
+    # value pointing at anything that prints a green verdict yields a green
+    # gate with nothing run. Stripping DEVRC_GATE_* above is not enough: the
+    # line above deliberately puts one BACK. This escape exists for exactly
+    # that seam, and nothing outside this repo's own tests sets it.
+    env["DEVRC_GATE_ALLOW_AMBIENT"] = "1"
     return subprocess.run(
         ["bash", str(GATE), "--tier", "pytest", "--log-dir", str(tmp_path / "logs"),
          *(extra or []), str(REPO_ROOT)],
@@ -95,12 +112,20 @@ def _gate(tmp_path: Path, *, pytest_runner: Path, extra: list[str] | None = None
     )
 
 
+# 🔴 THE `SCOPE:` LINE IS PART OF THE RUNNER CONTRACT THESE FIXTURES MODEL, not
+# decoration. `gate.sh` requires to SEE `SCOPE: FULL` from a tier before it may
+# print `GATE: RESULT=PASS` — a POSITIVE control, so that a runner which says
+# nothing about its coverage is "cannot vouch" rather than "ran everything".
+# A fixture that omitted it would therefore be modelling a runner that does not
+# exist, and every PASS assertion below would be asserting the wrong thing.
+# The vocabulary and the requirement are pinned by scripts/tests/test_scoped_runs.py.
 GREEN_BODY = """
 echo "=== pytest scripts/fake ==="
 echo "======================== SUMMARY (hermetic set) ========================"
 echo "  PASS  scripts/fake  (collected=1234 passed=1234 skipped=0 floor=1200)"
 echo "  ----"
 echo "  TOTAL collected=1234  passed=1234  skipped=0  failed=0  (floor: 1200)"
+echo "SCOPE: FULL (28 of 28 hermetic target(s))"
 echo "RESULT: PASS (exit=0)"
 exit 0
 """
@@ -111,6 +136,7 @@ echo "======================== SUMMARY (hermetic set) ========================"
 echo "  FAIL  scripts/fake  (collected=1234 passed=1233 skipped=0 failed=1 errors=0)"
 echo "  ----"
 echo "  TOTAL collected=1234  passed=1233  skipped=0  failed=1  (floor: 1200)"
+echo "SCOPE: FULL (28 of 28 hermetic target(s))"
 echo "RESULT: FAIL (exit=1)"
 exit 1
 """
@@ -223,7 +249,12 @@ def test_the_gate_verdict_survives_a_pipe(tmp_path):
     with a bare `rc=0`.
     """
     r = _fake_runner(tmp_path / "red.sh", RED_BODY)
-    env = {**os.environ, "DEVRC_GATE_PYTEST_RUNNER": str(r)}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DEVRC_GATE_")}
+    env["DEVRC_GATE_PYTEST_RUNNER"] = str(r)
+    # gate.sh refuses gate-weakening env vars, and the line above puts one
+    # BACK deliberately — this suite drives the runner seam. See gate.sh's
+    # pre-flight block.
+    env["DEVRC_GATE_ALLOW_AMBIENT"] = "1"
     proc = subprocess.run(
         ["bash", "-c",
          f"bash {GATE} --tier pytest --log-dir {tmp_path / 'logs'} {REPO_ROOT} 2>&1 | tail -3"],
@@ -255,7 +286,12 @@ def test_the_disagreement_check_is_what_catches_a_lying_runner(tmp_path):
     mutated.write_text(src.replace(needle, 'disagree=""'))
 
     r = _fake_runner(tmp_path / "liar.sh", RED_BODY.replace("exit 1", "exit 0"))
-    env = {**os.environ, "DEVRC_GATE_PYTEST_RUNNER": str(r)}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DEVRC_GATE_")}
+    env["DEVRC_GATE_PYTEST_RUNNER"] = str(r)
+    # gate.sh refuses gate-weakening env vars, and the line above puts one
+    # BACK deliberately — this suite drives the runner seam. See gate.sh's
+    # pre-flight block.
+    env["DEVRC_GATE_ALLOW_AMBIENT"] = "1"
     proc = subprocess.run(
         ["bash", str(mutated), "--tier", "pytest", "--log-dir", str(tmp_path / "m"), str(REPO_ROOT)],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120, env=env,

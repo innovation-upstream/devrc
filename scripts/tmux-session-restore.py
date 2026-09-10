@@ -31,17 +31,23 @@ Usage:
 
 Restore flags:
   --dry-run / -n          show what would happen without sending keys
-  --plan PATH             use a custom plan file instead of the default
+  --plan PATH             use a custom plan file instead of the default. THIS IS
+                          THE RECOVERY PATH: point it at any file in
+                          ~/.config/initiatives/restore-plans/ to resume from an
+                          older generation after a bad save. `save` prints the
+                          exact command whenever a save drops bound session ids.
   --staleness-check [H]   refuse to restore unless the plan is BOTH in step with
                           the saved layout AND produced within H hours of running
                           time (default: 2h). NOT wall-clock age — powered-off
                           time does not count. See `plan_staleness_hours`.
 
-State: ~/.config/initiatives/restore-plan.json  (+ restore-cheatsheet.md)
+State: ~/.config/initiatives/restore-plan.json  (+ restore-cheatsheet.md), each a
+symlink onto the newest file in restore-plans/ — see `cmd_save`.
 Scratchpad codenames come from the canonical scripts/tmux-scratch-slots.sh.
 """
 from __future__ import annotations
 
+import calendar
 import importlib.util
 import json
 import os
@@ -56,6 +62,49 @@ from pathlib import Path
 STATE_DIR = Path(os.path.expanduser("~/.config/initiatives"))
 PLAN = STATE_DIR / "restore-plan.json"
 CHEAT = STATE_DIR / "restore-cheatsheet.md"
+# Where the immutable per-save generations live, and how many are kept.
+#
+# 🔴 THE NAME IS A CONSTANT; THE DIRECTORY IS DERIVED FROM `PLAN.parent`, NOT
+# FROM `STATE_DIR`, and never bound at import time. Two reasons, both measured
+# rather than stylistic:
+#   * the generations dir MUST sit beside the pointer, because the pointer is a
+#     RELATIVE symlink into it. A module-level `STATE_DIR / …` would keep
+#     pointing at the real `~/.config/initiatives` in any test that repoints
+#     only `PLAN`, and that test would then write into the operator's LIVE
+#     recovery state — the exact thing this change exists to protect.
+#   * one derivation means the two can never disagree.
+GENERATIONS_DIRNAME = "restore-plans"
+# 🔴 RETENTION IS A COUNT, NOT AN AGE, and 192 is 48h at continuum's 15-minute
+# save interval (`nix/programs/tmux/default.nix` -> `tmux-post-save.sh`).
+#
+# WHY A COUNT. The writer is hook-driven, so an age bound gives NO bound on disk
+# at all — turn the save interval down and an "keep 48h" rule keeps unboundedly
+# many files. A count bounds disk deterministically whatever the cadence does.
+# The price is that the SPAN is cadence-dependent, and that is stated rather
+# than hidden: at 15 min it is 48h, at 1 min it is 3.2h, and on a host where
+# tmux is rarely up it is weeks.
+#
+# WHY 48h AND NOT LESS. The recovery window has to outlast the interval between
+# a bad save and a human NOTICING it. The 2026-09-06 incident was noticed in
+# ~20 minutes; a crash at 22:00 noticed the following evening is ~20h, and a
+# Friday-night crash noticed Sunday is ~40h. 48h covers the realistic worst case
+# with headroom, and the failure mode of being too small is total loss of the
+# thing this file exists to preserve.
+#
+# WHY NOT MORE. Disk. MEASURED 2026-09-07 on the live 10-entry plan: 3,820 B of
+# JSON + 3,267 B of cheat-sheet = 382/327 B per entry. Extrapolated to the
+# 47-entry workspace of the incident that is ~18 KB + ~15 KB = ~33 KB per
+# generation, so 192 generations is ~6.3 MB. Ten times the retention would still
+# be small, but 48h is where the RECOVERY argument stops paying for itself: a
+# plan older than the last two days describes a workspace the operator no longer
+# wants back.
+KEEP_GENERATIONS = 192
+# `restore-plan_20260907T221535.json` — resurrect's own stamp format, so the two
+# sets of generations sort and read alike. Lexicographic order IS chronological
+# order for this format, which is what lets pruning sort on the NAME rather than
+# on an mtime any `cp`/`rsync` could rewrite.
+_GEN_STAMP_FMT = "%Y%m%dT%H%M%S"
+_GEN_PLAN_RE = re.compile(r"^restore-plan_(\d{8}T\d{6})\.json$")
 # The layout `restore` is racing: resurrect's newest state file, via its `last`
 # symlink. `plan_staleness_hours` measures the plan against THIS rather than
 # against the wall clock — see that docstring for why.
@@ -433,19 +482,395 @@ def cheat_sheet(plan: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def generations_dir() -> Path:
+    """The directory holding the immutable per-save generations.
+
+    Derived from `PLAN.parent` on every call — see `GENERATIONS_DIRNAME`.
+    """
+    return PLAN.parent / GENERATIONS_DIRNAME
+
+
+def generation_stamp(when: float | None = None) -> str:
+    """`20260907T221535` for a POSIX timestamp (now, if none). **UTC.**
+
+    🔴 UTC, NOT LOCAL TIME, AND THAT IS LOAD-BEARING — NOT A STYLE CHOICE.
+    Every ordering guarantee in this file rests on the stamp being monotonic,
+    because `list_generations` sorts on the NAME and pruning deletes from the
+    older end. Local time is NOT monotonic: it repeats an hour at every DST
+    fall-back and can step backwards whenever the zone changes.
+
+    MEASURED on this host's own zone (`America/Winnipeg`), 4 of 4 fixtures, in
+    the production call sequence: with a local-time stamp,
+    `free_generation_stamp`'s anchor landed BEHIND `now` inside the repeated
+    hour, `stamp > newest` could then never be satisfied, and the fall-through
+    returned an OCCUPIED stamp. A bound session id and its cheat-sheet were
+    destroyed, rc 0, nothing printed. That is the mutable-file defect this whole
+    file exists to remove, reappearing once a year in the mechanism built to
+    remove it.
+
+    The resurrect-style `%Y%m%dT%H%M%S` shape is kept because it is what the
+    surrounding tooling reads; only the CLOCK changed. Nothing parses these
+    names as local time — `list_generations` compares them as strings and the
+    only parse is the anchor below, which now uses `calendar.timegm` to match.
+    """
+    return time.strftime(_GEN_STAMP_FMT,
+                         time.gmtime(time.time() if when is None else when))
+
+
+def generation_paths(stamp: str) -> tuple[Path, Path]:
+    """(plan, cheat-sheet) paths for one generation stamp."""
+    d = generations_dir()
+    return (d / f"restore-plan_{stamp}.json",
+            d / f"restore-cheatsheet_{stamp}.md")
+
+
+def free_generation_stamp(when: float | None = None, limit: int = 60) -> str:
+    """A stamp that is FREE and STRICTLY NEWER than every generation present.
+
+    🔴 THE STAMP HAS ONE-SECOND RESOLUTION AND THE INCIDENT WAS A SAME-SECOND
+    WRITE. Two saves inside one second — a manual `save` racing the 15-minute
+    continuum hook — would otherwise land on the SAME stamp, and the second
+    would overwrite the first: the mutable-file defect, reintroduced inside the
+    mechanism built to remove it, and worse than the original because the shrink
+    report would then name a "previous generation" that is the file just
+    clobbered.
+
+    🔴 FREE IS NOT ENOUGH — IT MUST ALSO BE THE NEWEST, AND THAT IS A MEASURED
+    BUG, NOT A HYPOTHETICAL. A first draft returned the first UNOCCUPIED stamp,
+    and `test_pruning_keeps_exactly_the_newest_generations` went red: pruning
+    had just freed the oldest slot, this function handed that freed slot back,
+    the fresh generation therefore sorted OLDEST, `prune_generations` selected
+    it as doomed and `protect` (rightly) refused — so the run reported `4 kept
+    (max 3), 0 pruned` and the retention cap silently stopped being enforced.
+    Any backwards clock step reproduces it without the same-second race. A
+    strictly-increasing name is the invariant `list_generations`'s name-sort and
+    all of pruning rest on, so it is established HERE rather than repaired
+    downstream.
+
+    Cost of stepping forward: the generation is misdated by at most `limit`
+    seconds.
+
+    🔴 PAST `limit` THIS RAISES. It used to return the last candidate, which
+    silently OVERWROTE an existing generation — measured destroying a bound
+    session id and its cheat-sheet at rc 0 with nothing printed, while
+    `prune_generations` reported `0 pruned`. The docstring called that "a
+    bounded, VISIBLE loss"; it was not visible by any means. A save that fails
+    loudly costs one save; a save that clobbers costs the bound plan that save
+    existed to protect, which is the entire subject of this file. So the trade
+    is inverted deliberately: raise, and let the caller's failure be seen.
+
+    🔴 THE FREE-CHECK AND THE CLAIM ARE ONE ATOMIC OPERATION (`O_CREAT|O_EXCL`),
+    NOT `exists()` THEN WRITE. `scripts/tmux-post-save.sh` launches `save`
+    BACKGROUNDED AND DISOWNED WITH NO LOCK, so a manual save genuinely races the
+    15-minute continuum hook — the race this function's first paragraph names.
+    An `exists()` test cannot close it: both processes see the slot free, both
+    return the same stamp, and then they interleave over fixed temp names.
+    Measured with a two-process interleaving: `FileNotFoundError` out of
+    `os.replace`, a generation holding one process's bytes under the other's
+    rename, and `FileExistsError` out of `os.symlink`. Creating the plan file
+    exclusively makes the winner unambiguous and the loser step to the next
+    second.
+    """
+    base = time.time() if when is None else when
+    present = list_generations()
+    newest = present[-1] if present else ""
+    # 🔴 ANCHOR ON THE NEWEST GENERATION, DO NOT STEP TOWARDS IT. Stepping alone
+    # covers a base that is a few seconds behind and NOTHING else: a clock five
+    # months behind (a battery-flat RTC, a restored backup, a container without
+    # NTP) exhausts `limit` and falls through still older than the newest
+    # generation. Measured — `test_a_new_stamp_is_never_older_than_an_existing_
+    # generation` caught exactly that with a step-only implementation. Jumping
+    # the base past `newest` makes the invariant independent of how far behind
+    # the clock is; the loop below then only has to resolve occupancy.
+    if newest:
+        try:
+            # `calendar.timegm`, not `time.mktime` — the stamp is UTC now, and
+            # `mktime` would reinterpret it as local, shifting the anchor by the
+            # UTC offset and (inside a DST fall-back) landing it BEHIND `now`.
+            base = max(base, calendar.timegm(time.strptime(newest, _GEN_STAMP_FMT)) + 1)
+        except ValueError:
+            # An unparseable name cannot have come from `generation_stamp`, and
+            # `_GEN_PLAN_RE` already rejects the wrong SHAPE — so this is a
+            # well-shaped impossible date. Leave the base alone and let the
+            # step loop do what it can rather than crash the save.
+            pass
+    generations_dir().mkdir(parents=True, exist_ok=True)
+    for i in range(limit + 1):
+        stamp = generation_stamp(base + i)
+        if stamp <= newest:
+            continue
+        try:
+            # The CLAIM. Succeeds for exactly one racer; the other gets EEXIST
+            # and steps. The empty file it leaves is overwritten by the caller's
+            # `_write_atomic` a moment later.
+            fd = os.open(generation_paths(stamp)[0],
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return stamp
+    raise RuntimeError(
+        f"could not claim a free generation stamp newer than {newest!r} within "
+        f"{limit}s of {generation_stamp(base)!r}. REFUSING rather than "
+        f"overwriting an existing generation — the previous plan and its bound "
+        f"session ids are intact. Check {generations_dir()} for a clock jump or "
+        f"a stuck concurrent save.")
+
+
+def list_generations() -> list[str]:
+    """Every generation stamp present, OLDEST FIRST.
+
+    Sorted on the NAME, which for `_GEN_STAMP_FMT` is chronological — an mtime
+    sort would reorder the whole set after any `cp`/`rsync` that did not
+    preserve stamps, and pruning would then delete the wrong end.
+
+    Keyed on the PLAN file only. A cheat-sheet with no plan beside it is not a
+    generation you can restore from, so it is not counted as one; `prune_
+    generations` still unlinks it when its stamp is pruned.
+    """
+    try:
+        names = os.listdir(generations_dir())
+    except OSError:
+        return []
+    return sorted(m.group(1) for m in
+                  (_GEN_PLAN_RE.match(n) for n in names) if m)
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write `text` to `path` via a temp file + rename.
+
+    🔴 `write_text` TRUNCATES FIRST. A save killed between the truncate and the
+    write leaves a zero-byte plan — a second, smaller shape of the same
+    data-loss defect this file's generations exist to close, and one that would
+    otherwise apply to every generation as it is created. `os.replace` is atomic
+    within a directory, so a reader sees either the old file or the whole new
+    one, never a half.
+
+    🔴 THE TEMP NAME CARRIES THE PID. A fixed `.tmp` is shared state between two
+    concurrent saves — and they DO run concurrently, because
+    `scripts/tmux-post-save.sh` backgrounds and disowns `save` with no lock.
+    Measured with a two-process interleaving on a fixed name: the second
+    `os.replace` raised `FileNotFoundError` (the first had already renamed the
+    shared temp away), and the surviving generation held one process's bytes
+    under the other's rename. Per-process names make the two writes independent.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except BaseException:
+        # Do not leave this run's temp behind on failure: it does not match
+        # `_GEN_PLAN_RE`, so `prune_generations` would never reap it.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _point_at(link: Path, target: Path) -> None:
+    """Atomically make `link` a RELATIVE symlink to `target`.
+
+    Relative so the whole state dir can be copied or moved as a unit.
+
+    `os.replace` onto the link path is what makes this survive interruption AND
+    what performs the one-time migration: the destination may be a symlink (the
+    ordinary case) or a REGULAR FILE (a host that last saved with the
+    pre-generations writer), and rename replaces either without a window in
+    which the pointer is missing.
+    """
+    # 🔴 PER-PROCESS, for the same reason as `_write_atomic`: with a fixed
+    # `.new` name a concurrent save raised `FileExistsError` out of `os.symlink`
+    # — measured. The unlink-then-symlink pair is not atomic, so two processes
+    # sharing the name interleave between them.
+    tmp = link.with_name(f"{link.name}.{os.getpid()}.new")
+    if os.path.lexists(tmp):        # lexists: a DANGLING leftover link is still there
+        os.unlink(tmp)
+    os.symlink(os.path.relpath(target, link.parent), tmp)
+    os.replace(tmp, link)
+
+
+def adopt_pre_generation_files() -> Path | None:
+    """Preserve a REGULAR-FILE plan/cheat-sheet as a generation. Returns its plan path.
+
+    🔴 THE DEPLOY OF THIS CHANGE MUST NOT ITSELF BE THE BAD SAVE. On a host that
+    has been running the old writer, `restore-plan.json` is a real file holding
+    the last plan — possibly the only good one. The first `cmd_save` under the
+    new writer would repoint that path at a fresh generation and unlink the old
+    inode, losing exactly what generations exist to keep. So copy it in first,
+    stamped from its OWN mtime so it sorts into place chronologically.
+
+    A no-op once the pointer is a symlink, so it is safe to call every save.
+    """
+    if os.path.islink(PLAN) or not PLAN.exists():
+        return None
+    generations_dir().mkdir(parents=True, exist_ok=True)
+    stamp = free_generation_stamp(PLAN.stat().st_mtime)
+    gplan, gcheat = generation_paths(stamp)
+    _write_atomic(gplan, PLAN.read_text())
+    # The cheat-sheet is the SAME defect with the same writer — carry it too, but
+    # only if it is likewise a real file, and never invent one from a plan whose
+    # cheat-sheet is already gone.
+    if not os.path.islink(CHEAT) and CHEAT.exists():
+        _write_atomic(gcheat, CHEAT.read_text())
+    return gplan
+
+
+def prune_generations(keep: int | None = None,
+                      protect: tuple[str, ...] = ()) -> list[str]:
+    """Delete all but the newest `keep` generations. Returns the stamps removed.
+
+    🔴 `protect` NAMES THE GENERATION THE POINTER IS ON. Pruning is the only
+    code here that deletes, so it is the only code that can recreate the defect:
+    a `keep` of 0, a clock that jumped backwards so the new stamp sorts oldest,
+    or a future caller reordering the write and the prune would each unlink the
+    file `restore-plan.json` points at, leaving a DANGLING pointer and no
+    current plan. Refusing to delete a protected stamp makes that unreachable
+    regardless of how the ordering argument is disturbed.
+
+    🔴 A STAMP IS REPORTED REMOVED ONLY IF ITS PLAN FILE ACTUALLY WENT. The
+    unlink `OSError` used to be swallowed and the stamp appended regardless, so
+    the line `cmd_save` prints was internally contradictory — measured
+    `2 kept (max 1), 1 pruned` while NOTHING had been pruned. Worse than a wrong
+    number: a PERSISTENT unlink failure (a read-only remount, an immutable flag,
+    a permissions change) gives unbounded growth reported as healthy retention on
+    every single save — a reassuring count from a pruner wired to nothing.
+    A missing cheat-sheet is NOT a failure: `list_generations` keys on the plan
+    file, so a stamp with no cheat-sheet beside it is already half-gone.
+    """
+    keep = KEEP_GENERATIONS if keep is None else keep
+    stamps = list_generations()
+    doomed = stamps[:max(0, len(stamps) - keep)]
+    removed = []
+    for stamp in doomed:
+        if stamp in protect:
+            continue
+        gplan, gcheat = generation_paths(stamp)
+        try:
+            gplan.unlink()
+        except FileNotFoundError:
+            pass                    # already gone: the outcome we wanted
+        except OSError:
+            continue                # still there — do NOT claim it was pruned
+        try:
+            gcheat.unlink()
+        except OSError:
+            pass                    # not what `list_generations` counts
+        removed.append(stamp)
+    return removed
+
+
+def read_plan(path: Path) -> list[dict] | None:
+    """A saved plan as a list, or None if it is absent / unreadable / not a list.
+
+    Used to compare a new save against the one it replaces. Every failure is one
+    answer — "there is nothing to compare against" — because the comparison is
+    advisory: an unreadable previous plan must never stop the new one being
+    written.
+    """
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+def bound_ids(plan: list[dict]) -> set[str]:
+    """The session ids a plan can actually resume — empty ids are not bindings."""
+    return {e.get("session_id") for e in plan if e.get("session_id")}
+
+
 def cmd_save() -> int:
+    """Write a NEW generation and repoint `restore-plan.json` at it.
+
+    🔴 THIS IS THE FIX FOR THE MEASURED LOSS OF 2026-09-06. The old writer
+    overwrote one mutable file in place:
+
+        21:47:17  a good plan — 47 entries, 46 carrying a bound session id
+        21:54:21  the tmux server died, taking 47 claude conversations
+        22:09:40  a continuum autosave fired on the DEGRADED post-crash
+                  workspace and this function overwrote the plan with 10
+                  entries. The cheat-sheet went in the same second.
+                  NO BACKUP EXISTED.
+
+    The conversations were recovered only because tmux-resurrect keeps its saves
+    TIMESTAMPED and each pane line happens to carry a full `claude --resume
+    <id>`. THAT ASYMMETRY WAS THE BUG: a bad save cost the layout nothing and
+    the bindings everything. This mirrors resurrect — an immutable, timestamped
+    generation per save plus a pointer at the path every reader already knows.
+
+    🔴 WHAT THIS DELIBERATELY DOES **NOT** DO: refuse a shrinking save. The
+    operator closing windows, or genuinely working in fewer, is ordinary use, so
+    a guard that refused on a falling entry count would fire on ordinary use and
+    train everyone to bypass it. The degraded save of 22:09:40 is written here
+    too — it is simply no longer the only copy. What the shrink gets is a
+    WARNING naming the previous generation and the exact command to restore from
+    it, which is the thing the operator had to reconstruct by hand.
+    """
     plan = build_plan()
     if not plan:
+        # An empty plan was already never written, and that stays: a save with
+        # no live panes must not become a generation, or a single tmux-less
+        # moment would push the real ones toward the retention cliff.
         print("no live claude panes found — nothing to snapshot", file=sys.stderr)
         return 1
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    PLAN.write_text(json.dumps(plan, indent=2))
-    CHEAT.write_text(cheat_sheet(plan))
+    generations_dir().mkdir(parents=True, exist_ok=True)
+
+    # Read BOTH facts about the outgoing plan before anything moves.
+    previous = read_plan(PLAN)
+    previous_gen = Path(os.path.realpath(PLAN)) if PLAN.exists() else None
+    adopted = adopt_pre_generation_files()
+    if adopted is not None:
+        # `realpath` of a regular file is the file itself, and that inode is
+        # about to be replaced by the pointer — name the copy instead.
+        previous_gen = adopted
+
+    stamp = free_generation_stamp()
+    gplan, gcheat = generation_paths(stamp)
+    _write_atomic(gplan, json.dumps(plan, indent=2))
+    _write_atomic(gcheat, cheat_sheet(plan))
+    _point_at(PLAN, gplan)
+    _point_at(CHEAT, gcheat)
+    # 🔴 PROTECT THE PREVIOUS GENERATION TOO, NOT JUST THE NEW ONE. The shrink
+    # report below names `previous_gen` as the thing to restore from, and with
+    # `protect=(stamp,)` this very call could delete it first — measured at
+    # KEEP_GENERATIONS=1: the report named a path whose `exists()` was False.
+    # This file's own rule is that a warning pointing at the wrong file is worse
+    # than no warning, and lowering the cap is the natural response to disk
+    # pressure, so the reachable-today argument is not a defence.
+    protected = (stamp,)
+    if previous_gen is not None:
+        m = _GEN_PLAN_RE.match(previous_gen.name)
+        if m:
+            protected += (m.group(1),)
+    pruned = prune_generations(protect=protected)
+
     n_ledger = sum(1 for e in plan if e.get("bind_source") == "ledger")
     n_fuzzy = sum(1 for e in plan if e.get("bind_source") == "fuzzy")
-    print(f"saved {len(plan)} windows → {PLAN}")
+    print(f"saved {len(plan)} windows → {gplan}")
+    print(f"current → {PLAN} (→ {gplan.name})")
+    print(f"generations: {len(list_generations())} kept "
+          f"(max {KEEP_GENERATIONS}), {len(pruned)} pruned")
     print(f"bound: {n_ledger} ledger, {n_fuzzy} pane-content, "
           f"{len(plan) - n_ledger - n_fuzzy} unbound (picker at restore)")
+    # 🔴 THE SHRINK REPORT — A WARNING, NEVER A REFUSAL. The plan is already
+    # written by the time this runs, on purpose; see this function's docstring
+    # for why refusing a shrink is the wrong shape. Keyed on BOUND SESSION IDS
+    # rather than on the entry count, because ids are the payload a bad save
+    # actually costs you: a save that drops five UNBOUND windows lost nothing
+    # resumable and must stay quiet, or the line becomes noise and stops being
+    # read. The recovery command is spelled out because reconstructing it by
+    # hand under pressure is exactly what the 2026-09-06 incident cost.
+    dropped = bound_ids(previous or []) - bound_ids(plan)
+    if dropped and previous_gen is not None:
+        print(f"🔴 this save DROPS {len(dropped)} bound session id(s) the previous "
+              f"plan carried ({len(previous)} entries → {len(plan)}).",
+              file=sys.stderr)
+        print("   NOTHING IS LOST — the previous generation is retained. "
+              "To resume from it instead:", file=sys.stderr)
+        print(f"     tmux-session-restore.py restore --plan {previous_gen}",
+              file=sys.stderr)
     # The counts above cannot tell `0 ledger` apart between a missing module, a
     # restarted server and simply no records — and the first two are what an
     # operator would act on. Sorted by token so the line's shape is stable.
@@ -516,11 +941,130 @@ def no_tmux_server_to_restore_into() -> bool:
 
     Uses `tmux has-session` with no target: it succeeds only when a server is
     running AND holds at least one session. A server with zero sessions reads
-    as "no server" here, deliberately — that is the conservative direction, and
-    it is a state the operator's workspace never sits in.
+    as "no server" here, deliberately — that is the conservative direction,
+    because a server with no sessions is one this process could still end up
+    populating and owning.
+
+    🔴 BUT "A STATE THE OPERATOR'S WORKSPACE NEVER SITS IN" — which this
+    docstring asserted until round 2 of the audit — IS FALSE, and it was the
+    same mistake as the one at the refusal in `cmd_restore`. EVERY tmux server
+    has zero sessions between `server_start()` creating the socket and the
+    first session being created after the config is sourced: MEASURED
+    2026-09-07 at 0.098–0.112s with continuum EXCLUDED. That window is not
+    exotic; it is precisely when `tmux-session-restore.path` fires, because the
+    path unit triggers on the socket. `wait_for_tmux_server()` exists because
+    of it. The predicate is unchanged and still correct — what was wrong was
+    the claim about how often it answers "absent".
     """
     return subprocess.run(["tmux", "has-session"],
                           capture_output=True).returncode != 0
+
+
+# 🔴 HOW LONG TO WAIT FOR THE SESSION THE TRIGGER DOES NOT PROMISE.
+#
+# The path unit fires on the SOCKET FILE appearing. `no_tmux_server_to_restore_into`
+# asks `tmux has-session`, which needs a SESSION. tmux creates the socket in
+# `server_start()` BEFORE it sources its config, and the first session is queued
+# behind the whole config — three blocking `run-shell` plugin loads and
+# continuum's replay. So the trigger's observable is strictly EARLIER than this
+# script's precondition, and the gap is real, not theoretical.
+#
+# MEASURED 2026-09-07 on this host, with continuum EXCLUDED (so every number is
+# a LOWER BOUND — production is slower, with a colder page cache and ~45 panes
+# to replay):
+#   * socket appears at t0+0.009s;
+#   * `has-session` returns rc=1 in 8ms, so it does NOT block behind the config
+#     queue — the refusal is reached, it does not hang;
+#   * the first session exists at t_sock+0.098–0.112s;
+#   * the path-triggered ExecStart reached `has-session` at t_sock+0.065s in one
+#     run and t_sock+0.288s in another.
+# The outcome FLIPPED between those two runs. On a cold boot both variables move
+# the wrong way at once: an idler box makes ExecStart faster, a colder cache and
+# a full workspace make the config slower.
+#
+# 🔴 WHY 30s, AND NOT A NUMBER CLOSER TO THE MEASUREMENT. The two errors are not
+# symmetric. Waiting too long costs LATENCY on a path that then does nothing.
+# Waiting too little costs a SILENT NO-RESTORE — refusal, exit 0,
+# `Result=success`, no `OnFailure`, and no retry, because the socket is created
+# once and no second event ever comes. That is the exact outcome this unit
+# exists to prevent, so the bound is biased long on purpose.
+#
+# 30s is ~270x the measured 0.11s lower bound, which leaves room for the
+# continuum-replay term that measurement deliberately excluded and never
+# quantified. As an upper anchor: the retired `OnActiveSec=45s` timer is evidence
+# that a delay of that ORDER was tolerable on this host's boot path, and 30s
+# stays inside it. That is an anchor, not a derivation — the replay term is
+# unmeasured, and if a future boot is observed refusing after a full 30s wait the
+# right response is to raise this number, not to shorten it.
+#
+# WHEN THE BOUND IS EXCEEDED: control falls through to the refusal in
+# `cmd_restore`, which exits 0 and says how long it waited. The wait is reported
+# so an operator can tell "no server ever came" apart from "a socket was there
+# and nothing answered for the whole bound" — two different faults that the bare
+# refusal reads identically for.
+TMUX_SERVER_WAIT_SECONDS = 30.0
+
+
+def tmux_socket_path() -> Path:
+    """Where `tmux` will look for its socket, by tmux's own rule.
+
+    `$TMUX_TMPDIR/tmux-$UID/default`, falling back to tmux's compiled-in `/tmp`
+    when the variable is unset. This is the SAME formula the path unit's
+    `PathChanged=%t/tmux-%U/default` spells in systemd specifiers, and
+    `scripts/tests/test_tmux_restore_trigger.py` compares the two — that
+    cross-artifact comparison is the only thing that can see the trigger and the
+    query drifting apart, because each side is individually plausible.
+    """
+    root = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    return Path(root) / f"tmux-{os.getuid()}" / "default"
+
+
+def wait_for_tmux_server(timeout: float = TMUX_SERVER_WAIT_SECONDS,
+                         step: float = 0.25,
+                         sleep=time.sleep,
+                         socket: Path | None = None) -> tuple[bool, float, str]:
+    """Poll until a tmux server holds a session. Returns (found?, waited, why).
+
+    🔴 THIS CLOSES THE GAP BETWEEN THE TRIGGER'S OBSERVABLE AND THIS SCRIPT'S
+    PRECONDITION — see `TMUX_SERVER_WAIT_SECONDS` above for the measurements and
+    for why the bound is what it is.
+
+    🔴 IT MUST NOT TURN "THERE IS GENUINELY NO SERVER" INTO A 30-SECOND HANG,
+    and the discriminator is free: the SOCKET FILE. It is the thing the path
+    unit triggers on, so its presence is exactly the evidence that a server is
+    starting. No socket => nothing is coming => return at once. That is the same
+    shape as `wait_for_workspace_to_settle`'s `no_server_after` bail, and it
+    exists for the same reason: #1351 shipped a revision that burned a full
+    120s timeout in the nix build sandbox — which has no tmux server and no
+    socket — and turned an empty-plan restore into a failure.
+
+    `why` is one of:
+      * `already-running` — a session existed on the first probe, no wait at all;
+      * `appeared`        — a session appeared during the wait;
+      * `no-socket`       — bailed immediately; nothing is starting;
+      * `timeout`         — the socket is there and nothing answered in `timeout`.
+
+    `sleep` and `socket` are injected so tests never sleep and never depend on
+    the host having a tmux server. The probe is looked up on the MODULE at call
+    time (not bound at import) so `monkeypatch.setattr(tsr,
+    "no_tmux_server_to_restore_into", …)` reaches it — every existing test in
+    this area patches exactly that name.
+    """
+    def _absent() -> bool:
+        return globals()["no_tmux_server_to_restore_into"]()
+
+    if not _absent():
+        return True, 0.0, "already-running"
+    sock = tmux_socket_path() if socket is None else socket
+    if not sock.exists():
+        return False, 0.0, "no-socket"
+    waited = 0.0
+    while waited < timeout:
+        sleep(step)
+        waited += step
+        if not _absent():
+            return True, waited, "appeared"
+    return False, waited, "timeout"
 
 
 def pane_fingerprint() -> str:
@@ -846,16 +1390,67 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
     # See `no_tmux_server_to_restore_into` for the confirmed mechanism. This
     # must run BEFORE the settle wait and before the send loop: the loop's own
     # `tmux new-session` is the destructive step.
-    if not dry_run and plan and no_tmux_server_to_restore_into():
+    if not dry_run and plan:
+        found, server_waited, why = wait_for_tmux_server()
+    else:
+        found, server_waited, why = True, 0.0, "not-checked"
+    if not dry_run and plan and not found:
         # 🔴 EXIT 0, NOT 1, AND THAT IS A DELIBERATE CHOICE — NOT AN OVERSIGHT.
         # The unit is `OnFailure=notify-failure@%n`, and that toast bypasses
         # DND (`nix/home.nix` — "any unit that can fail on a STANDING condition
-        # breaches it again"). Until the unit is triggered on the tmux socket
-        # appearing rather than a fixed `OnActiveSec=45s`, NO SERVER IS THE
-        # NORMAL COLD-BOOT STATE — a standing condition, firing on every boot
-        # forever. A skip the operator can read in the log is the honest
-        # report; a nightly alarm for an expected state is not.
+        # breaches it again").
+        #
+        # 🔴 THIS REASON HAS NOW BEEN WRONG TWICE. Round 1 said "no server is
+        # the normal COLD-BOOT state, because the unit fires on OnActiveSec=45s"
+        # — that trigger is gone. Round 2 replaced it with "what is left is a
+        # rare race: a stale socket from a SIGKILLed server, or a server with
+        # zero sessions", and the FREQUENCY half of that was false: EVERY tmux
+        # server has zero sessions for its first ~100ms, and that is precisely
+        # the window `PathChanged=` fires in. So the two examples it gave as
+        # exotic were preceded by a state every tmux server passes through, in
+        # the exact window the trigger fires in. (Which of the reachable states
+        # was the MOST common was never measured either — do not add that claim
+        # back in a different spelling.)
+        #
+        # WHAT IS TRUE, stated at the scope it was measured:
+        #   * `PathChanged=` fires on the watched socket being DELETED as well
+        #     as created (MEASURED). Socket deletion is the operator's tmux
+        #     server exiting — routine. The unit's `ConditionPathExists=`
+        #     catches the ordinary shape of that before ExecStart.
+        #   * The socket-appears case used to reach here whenever ExecStart won
+        #     the race against tmux's config queue — MEASURED at 2 of 2 sampled
+        #     runs landing on OPPOSITE sides of it. `wait_for_tmux_server()`
+        #     above is what now covers that window.
+        #   * 🔴 THE POST-FIX FREQUENCY IS UNMEASURED, and saying otherwise is
+        #     how this comment got it wrong twice. Establishing it needs reboots
+        #     this change has not had. What is left after the poll is: no socket
+        #     at all (`why=no-socket` — the server went away between systemd's
+        #     condition check and this process starting), or a socket with
+        #     nothing answering for the full bound (`why=timeout`). Neither
+        #     frequency is known.
+        #
+        # 🔴 THE CONCLUSION DOES NOT DEPEND ON THE FREQUENCY, which is why it
+        # survives the correction. `OnFailure=` here bypasses DND. A branch that
+        # can be reached by a race must not raise an alarm indistinguishable
+        # from a real failure, however often the race happens — an alarm the
+        # operator cannot tell from a real one is an alarm they learn to
+        # dismiss, and this one bypasses DND to reach them. A skip the operator
+        # can read in the log is the honest report. Do NOT replace this with a
+        # third plausible-sounding reason; if you need the frequency, measure it.
+        #
+        # It is READABLE, not merely logged: `tmux-restore-observe.sh` counts
+        # `REFUSING to restore` in this unit's journal and reports a refused
+        # boot as its own verdict (RC_REFUSED). That arm exists because the
+        # resume comparison is gated on `sends != 0`, and a refused run logs
+        # ZERO sends — so before it, a boot where nothing was resumed read CLEAN.
+        why_line = {
+            "no-socket": ("no socket at %s either — the server was gone before "
+                          "this process started" % tmux_socket_path()),
+            "timeout": ("the socket at %s exists but no server answered in "
+                        "%.1fs" % (tmux_socket_path(), server_waited)),
+        }.get(why, "reason=%s" % why)
         print("no tmux server is running — REFUSING to restore.", file=sys.stderr)
+        print(f"  waited {server_waited:.1f}s for one ({why_line}).", file=sys.stderr)
         print("  Starting one here would put it inside this unit's cgroup, and "
               "systemd would kill it the moment this process exits, taking every "
               "resumed conversation with it (measured 2026-09-06: 43 lost).",
@@ -863,6 +1458,10 @@ def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
         print("  Nothing was changed. Once you have a tmux server, re-run: "
               "tmux-session-restore.py restore", file=sys.stderr)
         return 0
+    if not dry_run and plan and server_waited > 0:
+        print(f"waited {server_waited:.1f}s for a tmux server to hold a session "
+              f"({why}) — the path unit triggers on the SOCKET, which tmux "
+              "creates before it sources its config")
     # 🔴 NOTHING TO SEND => NOTHING TO WAIT FOR, AND NOTHING THAT CAN BE LOST.
     # Waiting here made an EMPTY plan take the full settle timeout and then
     # return 1 — a restore that had no work to do reported as a failure.

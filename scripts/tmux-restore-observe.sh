@@ -2,11 +2,21 @@
 # tmux-restore-observe.sh — capture the evidence a reboot produces about the
 # post-boot workspace restore chain, so ONE reboot answers the open question.
 #
-# The open question (claudedocs/handoff-tmux-restore-chain.md): the boot unit
-# `tmux-session-restore.service` is ordered against NOTHING tmux-related, and on
-# a cold boot the script's own `tmux new-session` is what starts the tmux server
-# — which sources tmux.conf, which loads continuum, which fires its own restore
-# concurrently. Expected damage is duplicated or MISPLACED windows.
+# 🔴 THE PREMISE THIS FILE WAS WRITTEN UNDER IS GONE, TWICE OVER — and the
+# stale version was still here after both changes. It read: "the boot unit is
+# ordered against NOTHING tmux-related, and on a cold boot the script's own
+# `tmux new-session` is what starts the tmux server". Neither half is true now:
+#   * #1351 REMOVED the script's `tmux new-session` on the no-server path — it
+#     REFUSES instead, because a server born in the unit's cgroup is destroyed
+#     when ExecStart returns (measured 2026-09-06: 43 conversations lost);
+#   * the ordering now exists — `tmux-session-restore.path` starts the unit when
+#     the tmux SOCKET appears, so the server always pre-exists in another cgroup.
+#
+# What is still open, and what this reader is for: continuum replays the layout
+# while the restore sends into it, so windows can still be duplicated or
+# MISPLACED, and a resume targeting `<session>:<index>` can land in the wrong
+# window. Plus the outcome #1351 introduced and this file was blind to until
+# round 2: the unit RUNNING AND REFUSING, which exits 0 and reads like success.
 #
 # It is a READER. It starts nothing, orders nothing, and adds no boot-path unit
 # — deliberately: three defects in this arc were introduced by changing a boot
@@ -80,6 +90,16 @@ RC_USAGE=2
 RC_INCONCLUSIVE=3
 RC_MISSING=4
 RC_NO_WORKSPACE=5
+# 🔴 THE UNIT RAN AND REFUSED — ITS OWN CODE, BECAUSE IT READ AS RC_CLEAN.
+# `cmd_restore` refuses (exit 0, deliberately, so it cannot fire the DND-
+# bypassing OnFailure toast) when no tmux server holds a session. Such a run
+# logs ZERO `claude --resume` lines, and the resume comparison below is gated on
+# `sends != 0` — so the whole block was SKIPPED and the verdict returned
+# RC_CLEAN. On a boot where nothing at all was resumed, this instrument reported
+# a clean boot. That was measured as a FALSE CLAIM in `tmux-session-restore.py`
+# ("`tmux-restore-observe.sh` is the instrument that surfaces this deliberately-
+# quiet path" — it was not); this code is what makes the claim true.
+RC_REFUSED=6
 
 die() { printf 'tmux-restore-observe: %s\n' "$*" >&2; exit $RC_USAGE; }
 
@@ -131,7 +151,15 @@ emit_plan() {
     return
   fi
   echo "plan_file=$PLAN"
-  echo "plan_mtime=$(stat -c '%y' "$PLAN")"
+  # 🔴 `-L` (dereference) IS LOAD-BEARING, NOT TIDINESS. `$PLAN` is a symlink
+  # onto `restore-plans/restore-plan_<ts>.json` (tmux-session-restore.py
+  # `cmd_save`), and GNU `stat` uses **lstat** by default — MEASURED: on a
+  # symlink whose target was stamped 12:00:00, bare `stat -c '%y'` reported
+  # 22:41:47, the moment the LINK was repointed. Without `-L` this reports when
+  # the pointer moved rather than when the plan was written, which is a
+  # different fact wearing the same name. `[ -f ]` above needs no flag — `test`
+  # dereferences already.
+  echo "plan_mtime=$(stat -Lc '%y' "$PLAN")"
   # One writer: python emits the whole block or none of it, so a partial parse
   # cannot leave a value AND an UNMEASURED marker for the same key.
   local out
@@ -347,7 +375,12 @@ capture() {
         # restore legitimately adds. Printed so the reader can see it, and
         # subtracted below so it cannot masquerade as the race.
         if [ -f "$PLAN" ]; then
-          echo "plan_layout_skew_seconds=$((  $(stat -c '%Y' "$PLAN") - $(stat -c '%Y' "$replayed") ))"
+          # `-L` on the PLAN only: it is a symlink (see `emit_plan`), while
+          # `$replayed` is always a real `tmux_resurrect_*.txt` off the glob in
+          # `replayed_layout`. Without it the skew measures the moment the
+          # pointer was repointed against the layout's write time — two writers
+          # that are no longer the two this line claims to compare.
+          echo "plan_layout_skew_seconds=$((  $(stat -Lc '%Y' "$PLAN") - $(stat -c '%Y' "$replayed") ))"
         fi
       fi
       if [ -f "$PLAN" ]; then
@@ -364,6 +397,13 @@ capture() {
       # the unit logged and the panes actually running claude.
       echo "sends_logged=$(journalctl --user -u "$UNIT" -b --no-pager 2>/dev/null \
         | grep -c 'claude --resume' || true)"
+      # 🔴 THE REFUSAL IS ONLY OBSERVABLE HERE. It exits 0 on purpose, so
+      # `unit_Result`, `unit_ExecMainStatus` and `InactiveExitTimestamp` all read
+      # exactly like a successful restore. The journal line is the only thing
+      # that differs, so it gets its own counted field rather than being left
+      # for a human to spot in the JOURNAL block below.
+      echo "refusals_logged=$(journalctl --user -u "$UNIT" -b --no-pager 2>/dev/null \
+        | grep -c 'REFUSING to restore' || true)"
       if tmux has-session 2>/dev/null; then
         echo "claude_panes_live=$(tmux list-panes -a -F '#{pane_current_command}' 2>/dev/null \
           | grep -cx claude || true)"
@@ -582,9 +622,37 @@ verdict() {
   # Windows coming back is continuum's job; resuming the conversations is this
   # unit's. They fail independently, and on 2026-09-06 the second failed
   # completely while the first was flawless.
-  local sends live
+  local sends live refused
   sends=$(get "$post" sends_logged)
   live=$(get "$post" claude_panes_live)
+  refused=$(get "$post" refusals_logged)
+  # 🔴 THE REFUSAL ARM RUNS BEFORE — AND OUTSIDE — THE `sends != 0` GATE.
+  # That gate is exactly why the quiet path was invisible: a refused run logs
+  # ZERO sends, so every arm below it was skipped and the verdict fell through
+  # to RC_CLEAN. "The unit ran and deliberately did nothing" is a FINDING, and
+  # the one it was hardest to see, because the refusal exits 0 by design.
+  #
+  # An older capture has no `refusals_logged=` field at all; `-n` keeps that an
+  # ordinary absent answer rather than an integer comparison against "".
+  if [ -n "$refused" ] && [ "$refused" != 0 ]; then
+    echo
+    echo "🔴 THE RESTORE REFUSED — the unit ran, found no tmux server holding a"
+    echo "   session, and deliberately did nothing ($refused refusal(s) logged)."
+    echo "   It exits 0 on purpose: OnFailure=notify-failure@%n bypasses DND, and"
+    echo "   a branch reachable by a race must not raise an alarm that reads like"
+    echo "   a real failure. So Result=success, ExecMainStatus=0 and"
+    echo "   InactiveExitTimestamp all look EXACTLY like a successful restore —"
+    echo "   this journal line is the only thing that differs."
+    echo "   The restore script waits for a session before refusing; a refusal"
+    echo "   means that wait was exceeded, or the socket was already gone. Its"
+    echo "   own log line names which. Read the JOURNAL block in:"
+    echo "     $post"
+    # PRECEDENCE, stated because it is not obvious: the window arms below can
+    # still overwrite this code with RC_RACE. Their TEXT is printed alongside
+    # this block either way, so no finding is lost — only the single exit code
+    # is, and a run that both refused and shows race evidence has two problems.
+    rc=$RC_REFUSED
+  fi
   if [ -n "$sends" ] && [ "$sends" != 0 ]; then
     # 🔴 PREFIX match, not equality. The emitters write `key=UNMEASURED
     # reason=...` (see the `claude_panes_live` reader above), and `get` returns
@@ -677,9 +745,17 @@ unit_ran_line() {
   rc_main=$(get "$1" unit_ExecMainStatus)
   if [ -z "$started" ]; then
     echo "🔴 the boot unit has NOT RUN this boot (InactiveExitTimestamp empty)."
-    echo "  Its timer is OnActiveSec=45s — if you ran this immediately after login,"
-    echo "  wait and re-run. 'Result=success' says nothing here: it reads the same"
-    echo "  for a unit that never started."
+    # 🔴 NOT A DURATION ANY MORE, so "wait and re-run" is the wrong advice: the
+    # unit is started by tmux-session-restore.path when the tmux server's
+    # socket is created, and if no server has started this boot there is
+    # nothing to wait for. Naming the trigger tells the operator what to CHECK
+    # (systemctl --user status tmux-session-restore.path) instead of what to
+    # wait for.
+    echo "  It is triggered by tmux-session-restore.path when the tmux server's socket"
+    echo "  appears — NOT on a fixed delay. If no tmux server has started this boot it"
+    echo "  has not fired, and waiting will not change that; check the path unit with"
+    echo "  'systemctl --user status tmux-session-restore.path'. 'Result=success' says"
+    echo "  nothing here: it reads the same for a unit that never started."
   elif [ -n "$rc_main" ] && [ "$rc_main" != 0 ]; then
     # 🔴 `Result` is systemd's verdict on the UNIT; `ExecMainStatus` is the
     # PROCESS's exit code, and for a Type=oneshot they disagree routinely.
@@ -746,6 +822,6 @@ case "$cmd" in
     ;;
   *)
     die "usage: $(basename "$0") pre|post|verdict <pre> <post>|extract <layout>
-  rc 0 clean · 1 race/misplacement · 2 usage · 3 could-not-decide · 4 windows missing · 5 no workspace at all"
+  rc 0 clean · 1 race/misplacement · 2 usage · 3 could-not-decide · 4 windows missing · 5 no workspace at all · 6 the unit ran and REFUSED"
     ;;
 esac

@@ -3308,7 +3308,15 @@ in
       # At today's N=2 that is 120s of new worst case, which 180 could not
       # absorb: the cgroup would be killed mid-run and the deadman would report
       # NOTHING, on a schedule, looking like a unit that merely takes a while.
-      # 420 leaves headroom for one more source repo without another edit.
+      # 🔴 420 does NOT leave headroom for another source repo — this line said
+      # it did, and that was already false when written. Re-derived from the
+      # pinned test's own model: needed was 400 against 420 (20s slack) at the
+      # merge-base, and the address probe added in #1439 took it to 410, so the
+      # slack is 10s. One more source repo costs 2 hosts x 30s = 60s and would
+      # need the ceiling raised to at least 470. The guard catches that LOUDLY
+      # (the test recomputes and fails), so the cost of the stale sentence was a
+      # reader skipping the edit, not a silent overflow — but do not read this
+      # block as permission to add a repo without touching the number.
       #
       # This is a SEAM — the tunable lives in the script, the ceiling lives here,
       # and neither file's tests owned their product. Pinned by
@@ -3316,10 +3324,18 @@ in
       # _repo_fetch`, which recomputes it from both files and fails if either
       # moves out from under the other.
       #
-      # The ConnectTimeout inside the script is 10s and each source fetch is
-      # capped individually, so this ceiling only ever fires on several wedges at
-      # once; the cgroup is killed and the timer re-arms on the next
-      # OnUnitActiveSec.
+      # There are now TWO ConnectTimeouts: the remote leg's 10s, and the address
+      # probe's `$SSH_PROBE_TIMEOUT` (default 5s, per candidate address). Each
+      # source fetch is capped individually too, so this ceiling only ever fires
+      # on several wedges at once; the cgroup is killed and the timer re-arms on
+      # the next OnUnitActiveSec.
+      #
+      # ⚠ The test named above counts the PROBE derivedly (it reads
+      # SSH_PROBE_TIMEOUT from the lib and runs remote_ssh_candidates_of for the
+      # count) but NOT the remote leg's 10s, which sits inside an
+      # undifferentiated `+ 60` literal — raising that 10s to 120s moves nothing
+      # in the test. An earlier version of this comment said it "counts both",
+      # which described coverage one term wider than the implementation.
       TimeoutStartSec = 420;
       Environment = [
         # iproute2 is load-bearing, not incidental: `ip -4 -o addr show` is how
@@ -3613,12 +3629,33 @@ in
         #     prevent. The two agree today; they are not the same mechanism.
         #   * the LAPTOP leg gets no such guard — session-manager reaches it over
         #     ssh through the remote login shell, which sources .zshenv only, and
-        #     nothing in devrc sets TMUX_TMPDIR there. It works because the
-        #     laptop's socket is in /tmp. If the laptop ever acquires this host's
-        #     arrangement it silently reports zero windows — and `tmux` says "no
-        #     server running", which session-manager maps to reachable:true AND
-        #     windows_measured:TRUE, so the torn-collection gate in the pusher
-        #     cannot catch it either. Only an env pin on that side would.
+        #     nothing in devrc sets TMUX_TMPDIR there. The failure shape stands:
+        #     if that leg cannot find the socket it silently reports zero
+        #     windows — `tmux` says "no server running", which session-manager
+        #     maps to reachable:true AND windows_measured:TRUE, so the
+        #     torn-collection gate in the pusher cannot catch it either. Only an
+        #     env pin on that side would.
+        #
+        #     🔴 BUT THE REASON IT WORKS TODAY IS NOT THE ONE THIS COMMENT USED
+        #     TO GIVE, AND THE OLD REASON WAS MEASURED FALSE 2026-09-09. It said
+        #     "It works because the laptop's socket is in /tmp", and predicted
+        #     that acquiring this host's arrangement would break it. The laptop
+        #     HAS this host's arrangement: /tmp/tmux-1000 DOES NOT EXIST, the
+        #     socket is /run/user/1000/tmux-1000/default, and the server's own
+        #     environ carries TMUX_TMPDIR=/run/user/1000. By the old reasoning
+        #     the leg should therefore be reporting zero. It is not — measured
+        #     over the exact path session-manager uses (non-interactive ssh):
+        #     TMUX_TMPDIR=/run/user/1000 is present and `tmux list-windows -a`
+        #     returned 29 windows.
+        #
+        #     It works because TMUX_TMPDIR is in the ssh session environment —
+        #     and `grep -c TMUX_TMPDIR ~/.zshenv` on the laptop is 0, so devrc
+        #     is still not what sets it. That is the SAME undeclared runtime
+        #     state this comment flags two paragraphs up: a fact about this
+        #     boot, not a property of the configuration. So the laptop leg is
+        #     unguarded for the reason stated, but the hazard is currently
+        #     masked rather than absent — do not read "it works" as "it is
+        #     pinned", and do not restore the /tmp explanation.
         # `%t` is the user runtime dir (/run/user/UID).
         # Pinned by `test_the_unit_gives_tmux_its_SOCKET_directory`.
         "TMUX_TMPDIR=%t"
@@ -3732,6 +3769,38 @@ in
         # change there is a change to what this unit delivers, with no edit to
         # the shell at all.
         "${../scripts/lib/build_transcript_push.py}"
+        # 🔴 A THIRD HARD DEPENDENCY, ADDED THE DAY THE HOST LABEL WAS
+        # CONSOLIDATED AND NOT LISTED WITH IT. This unit now EXITS 3 when
+        # host_label.py cannot be resolved, so it is as load-bearing as the
+        # builder beside it — and the same commit did add it to the reply agent's
+        # triggers, which is what makes the omission an asymmetry rather than a
+        # policy.
+        "${../scripts/lib/host_label.py}"
+        # The builder's own import, and the oldest omission in this list:
+        # build_transcript_push.py has imported transcript_search since the
+        # feeder shipped, and cannot run without it —
+        #
+        #   builder without transcript_search.py -> rc 1
+        #   ModuleNotFoundError: No module named 'transcript_search'
+        #
+        # ⚠ WHAT IT COSTS IS ONE TICK, NOT A STALE DEPLOY, AND THE COMMIT THAT
+        # ADDED THIS ENTRY SAID OTHERWISE. This is a `Type=oneshot` fired by a
+        # 5-minute timer, and ExecStart above names the WORKING-TREE path, not a
+        # store path; transcript-push.sh then resolves the builder through
+        # `readlink -f "$0"`, so the next tick execs whatever is on disk with or
+        # without a trigger. Measured on the live unit:
+        #
+        #   ExecStart=…/bash %h/workspace/devrc/scripts/transcript-push.sh
+        #   Type=oneshot   timer: last run 19s ago, next in 4min 40s
+        #
+        # So a missing trigger here buys back at most one 5-minute tick — the
+        # bound the reply-agent block states for exactly this contrast (search
+        # for "where a stale copy costs at most five minutes"). It is listed
+        # because the other three are, and because a hard dependency that can
+        # exit the unit belongs in its own declaration; NOT because omitting it
+        # runs old code indefinitely. That consequence is the resident agent's,
+        # and this arc has now made the same overstatement twice.
+        "${../scripts/lib/transcript_search.py}"
       ];
     };
   };
@@ -3837,14 +3906,38 @@ in
         "TMUX_TMPDIR=%t"
       ];
       ExecStart = "${pkgs.python3}/bin/python3 %h/workspace/devrc/scripts/tmux-reply-agent";
-      # 🔴 THE POLICY MODULE IS A TRIGGER TOO. This is a RESIDENT service, not a
-      # timer: it imports scripts/lib/tmux_text_policy.py once at startup and then
-      # runs for weeks. Without this line, TIGHTENING the text allowlist would
-      # leave the running agent on the OLD predicate indefinitely -- a security
-      # change that appears deployed and is not, on the process that executes.
+      # 🔴 EVERY MODULE THIS UNIT IMPORTS AT STARTUP IS A TRIGGER. This is a
+      # RESIDENT service, not a timer: it loads each of these ONCE and then runs
+      # for weeks. Without a line here, a fix to one of them lands on disk and the
+      # running agent keeps executing the OLD code indefinitely — a change that
+      # appears deployed and is not, on the process that executes.
+      #
+      # tmux_text_policy.py — the text allowlist. TIGHTENING it is a security
+      #   change, and this is the one process it has to reach.
+      # host_label.py — the ONE rule for "which box is this". It decides which
+      #   host's writes this agent claims AND which host the transcript stream
+      #   files its deltas under; a stale copy would either deliver another
+      #   machine's commands or reseed every session for ever.
+      # transcript_stream.py — the transcript delta tailer, and transcript_search
+      #   .py which it loads in turn. A splice bug in either is a CORRECTNESS bug
+      #   in what the operator reads about a session; both were added after the
+      #   two lines above and neither inherited the rule.
+      #
+      # ⚠ THE COVERAGE USED TO SIT WHERE IT MATTERED LEAST. The transcript-push
+      # TIMER — where a stale copy costs at most five minutes, because the next
+      # tick runs fresh code — names every module it depends on and is pinned by
+      # `test_the_unit_restart_triggers_name_EVERY_hard_dependency` (and now by a
+      # source-derived sibling, the way this unit already was). This RESIDENT unit,
+      # where a stale copy lasts until somebody notices, named two while loading
+      # four. Both units and both tests were widened in the same arc; the numbers
+      # are deliberately not restated here, because they moved three times while
+      # this comment sat still.
       X-Restart-Triggers = [
         "${../scripts/tmux-reply-agent}"
         "${../scripts/lib/tmux_text_policy.py}"
+        "${../scripts/lib/host_label.py}"
+        "${../scripts/lib/transcript_stream.py}"
+        "${../scripts/lib/transcript_search.py}"
       ];
     };
     Install = {
@@ -4722,23 +4815,96 @@ in
     };
   };
 
-  # Post-reboot claude session restore — fires ~45s after login so
-  # tmux-continuum has time to restore the session layout first, then this
-  # service resumes claude conversations in each window.  Idempotent: skips
+  # Post-reboot claude session restore — resumes the `claude` conversation in
+  # each window of the workspace tmux-continuum restores.  Idempotent: skips
   # windows already running claude.
+  #
+  # ⚠ "after continuum has restored the layout" is the SCRIPT's doing, not this
+  # unit's ordering, and the distinction matters because the unit's Description
+  # used to claim the latter.  The unit starts when the SOCKET appears —
+  # measured at t_sock+0.065s and +0.288s in two runs, i.e. BEFORE continuum has
+  # replayed anything.  `wait_for_workspace_to_settle()` inside the script is
+  # what waits for the replay to stop moving; nothing in systemd orders it.
+  #
+  # 🔴 TRIGGERED BY THE TMUX SOCKET APPEARING, NOT BY A FIXED DELAY.  The timer
+  # this replaced was `OnActiveSec=45s`, and a duration was never the variable.
+  # On a cold boot nothing else has started tmux by second 45, so the restore
+  # script's own `tmux new-session -d` created the server INSIDE this unit's
+  # cgroup.  The sends were delivered SUCCESSFULLY into it; then ExecStart
+  # returned and `Type=oneshot` + `RemainAfterExit=no` + `KillMode=control-group`
+  # tore the cgroup down, taking the server and every claude process with it.
+  # The unit reported `Result=success`.  Measured 2026-09-06: 43 conversations,
+  # silently.  The journal is what separates that from "the panes were not
+  # ready": `Started tmux child pane N launched by process <pid>` arrived in TWO
+  # cohorts — 17 at the unit's own timestamp naming the unit's pid, then 56
+  # lines 24s later naming a DIFFERENT pid.  Two servers, not one unready one.
+  #
+  # So the trigger is now the OBSERVABLE the restore actually depends on: a tmux
+  # server that this unit did not create, and therefore cannot destroy.
   systemd.user.services.tmux-session-restore = {
     Unit = {
-      Description = "Resume claude conversations after tmux-continuum restores sessions";
-      After = [ "graphical-session.target" ];
-      Wants = [ "graphical-session.target" ];
+      # 🔴 THIS STRING IS WHAT `systemctl --user status` SHOWS, so it is read far
+      # more often than the comments around it. It used to say "after
+      # tmux-continuum restores sessions", and that is now FALSE: the unit
+      # starts when the SOCKET appears, measured at t_sock+0.065s and +0.288s in
+      # two runs — i.e. BEFORE continuum has restored anything. The script's own
+      # `wait_for_workspace_to_settle` is what waits for the replay; the unit's
+      # start is not ordered against it.
+      Description = "Resume claude conversations when the tmux server's socket appears";
+      # 🔴 NO `Wants=/After=graphical-session.target` ANY MORE.  Those ordered a
+      # TIMER-driven unit against the desktop coming up; the socket existing is
+      # a strictly stronger precondition than the desktop existing, and `Wants=`
+      # on a path-triggered unit can PULL IN graphical-session.target on a
+      # headless boot, which is not this unit's business.
+      #
+      # 🔴 SECOND GUARD, NOT A DUPLICATE OF THE PATH UNIT.  `PathChanged=` fires
+      # on any change to the watched name — MEASURED including DELETION (the
+      # server exiting).  Without this condition, `systemctl --user stop` on the
+      # operator's tmux server would start a restore into a box with no server.
+      # With it, systemd skips the unit before ExecStart: measured on this host
+      # 2026-09-07 with both controls — a failing ConditionPathExists left
+      # `Result=success ActiveState=inactive`, ExecStart did NOT run, and the
+      # `OnFailure=` handler did NOT fire (0 firings, against 1 for a genuine
+      # `exit 1` positive control).  That last fact is why this is safe to add
+      # under an `OnFailure=` that bypasses DND.
+      ConditionPathExists = "%t/tmux-%U/default";
       OnFailure = [ "notify-failure@%n.service" ];
     };
     Service = {
       Type = "oneshot";
-      # The timer's OnActiveSec=45s already delays startup; no ExecStartPre needed.
+      # 🔴 NO `RemainAfterExit=yes`.  It is measured to keep a unit-spawned tmux
+      # server alive, and it is the WRONG fix: with `KillMode=control-group`
+      # this unit would then OWN whatever server it started, and a
+      # `systemctl --user stop tmux-session-restore` would kill the operator's
+      # entire workspace.  The trigger change removes the need for it — the
+      # server pre-exists in someone else's cgroup, so there is nothing here to
+      # keep alive.
+      #
+      # The full argument, so a reader with a checkout and no network does not
+      # have to find a PR body: `RemainAfterExit=yes` IS measured to keep a
+      # unit-spawned tmux server alive past ExecStart returning (isolated
+      # experiment, private `-L` socket, `systemd-run --user -p Type=oneshot`:
+      # without it the server dies with the cgroup, with it the server
+      # survives).  That is exactly why it is tempting and exactly why it is
+      # wrong — it does not stop the unit owning the server, it makes the
+      # ownership PERMANENT.  The unit would then hold the operator's entire
+      # workspace in its cgroup for the rest of the session, and any ordinary
+      # `systemctl --user stop`/`restart`, or a `home-manager switch` that
+      # restarts the unit, would take all of it down.  Refusing to create a
+      # server is what makes the ownership question moot.
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.tmux pkgs.coreutils ]}"
         "HOME=%h"
+        # 🔴 LOAD-BEARING, AND IT CLOSES A SEAM.  The path unit below watches
+        # `%t/tmux-%U/default`; `tmux` finds its socket at
+        # `$TMUX_TMPDIR/tmux-$UID/default` and its compiled-in default is
+        # /tmp, NOT %t.  Without this pin the unit could be triggered by a
+        # socket in one directory and then talk to a server in another — the
+        # trigger and the query would be answering about different servers.
+        # Pinning both to `%t` makes them one declaration.  (The two other
+        # units in this file that shell out to tmux pin it for the same reason;
+        # the inherited manager value is undeclared runtime state.)
+        "TMUX_TMPDIR=%t"
       ];
       ExecStart = "${pkgs.python312}/bin/python3 %h/workspace/devrc/scripts/tmux-session-restore.py restore --staleness-check 2";
       # Re-run the unit when the script changes.
@@ -4746,16 +4912,87 @@ in
     };
   };
 
-  systemd.user.timers.tmux-session-restore = {
+  # 🔴 `PathChanged=`, NOT `PathExists=` — AND THAT IS NOT A STYLE CHOICE.
+  # systemd re-checks a path unit's condition the moment the triggered unit
+  # TERMINATES (systemd.path(5)).  `PathExists=` is a STATE, so a socket that
+  # goes on existing re-satisfies it forever.  MEASURED on this host 2026-09-07
+  # with a transient unit on a scratch path: `PathExists=` ran the oneshot 5
+  # times in 8 seconds and left BOTH units `Result=start-limit-hit`, ActiveState
+  # `failed` — which under the `OnFailure=` above is a DND-bypassing toast on
+  # every boot, i.e. strictly worse than the bug being fixed.  The same applies
+  # to `PathExistsGlob=` and `DirectoryNotEmpty=`; all three are states.
+  #
+  # `PathChanged=` is an EVENT, and the same experiment measured it behaving:
+  #   * parent directory absent at arm time  -> no fire (systemd watches the
+  #     nearest existing ancestor and descends), and creating the DIRECTORY
+  #     alone does not fire either — this is the cold-boot shape;
+  #   * the unix socket created              -> fires exactly ONCE;
+  #   * 8s later                             -> still once.  NO BUSY LOOP;
+  #   * a SIBLING file created in the watched directory -> does NOT fire (0),
+  #     against 1 for the watched name.  That matters: this directory collects
+  #     other agents' probe sockets;
+  #   * socket already present when the path unit STARTS -> does NOT fire.
+  #     So a mid-session `home-manager switch` cannot fire a restore into the
+  #     live workspace — which the OnActiveSec timer this replaces DID do,
+  #     45s after every switch.
+  #
+  # ⚠ The known gap, stated rather than hidden: if a tmux server somehow starts
+  # BEFORE this path unit is armed, the pre-existing-socket case above means it
+  # never fires and the restore does not run.  `default.target` is reached
+  # within a second of login, long before any terminal, so this is not the boot
+  # ordering — but it is why the unit is not claimed to be unconditional.
+  #
+  # 🔴 SECOND GAP, AND IT IS A DEPENDENCY ON UNDECLARED RUNTIME STATE.  The
+  # watched path is `%t/tmux-%U/default`.  `tmux` puts its socket at
+  # `$TMUX_TMPDIR/tmux-$UID/default` and its COMPILED-IN DEFAULT IS /tmp, so
+  # this watch is correct only because the INTERACTIVE session has
+  # `TMUX_TMPDIR=/run/user/1000` — and that value appears in no /etc/nixos file,
+  # no /etc/environment.d (which does not exist here), and not in home-manager's
+  # own ~/.config/environment.d/10-home-manager.conf.  Something imports it at
+  # login and nobody has written down what (the same finding is recorded at the
+  # tmux-snapshot-push unit above, where it decided only where that unit
+  # LOOKED).
+  #
+  # 🔴 THE CONSEQUENCE IS STRICTLY WORSE HERE THAN THERE.  For the collector it
+  # decided where to look.  For this unit it decides whether the unit RUNS AT
+  # ALL: if the interactive session ever loses that variable, tmux's socket goes
+  # to /tmp/tmux-$UID/ instead, this path unit's inotify watch never fires, and
+  # NO restore happens.  Silently — there is no failed unit, no toast, and the
+  # only trace is a boot where the unit simply never started.
+  #
+  # ⚠ DETECTABLE, NOT PREVENTED.  `scripts/tmux-restore-observe.sh` prints
+  # "the boot unit has NOT RUN this boot (InactiveExitTimestamp empty)" and
+  # names this path unit as the thing to check, which is exactly the symptom
+  # this produces.  That is a reader an operator has to run, not an alarm.
+  #
+  # 🔴 A FALLBACK WATCH ON /tmp WAS CONSIDERED AND DELIBERATELY NOT ADDED.
+  # `Paths=` accepts several entries, so watching BOTH is one line.  What is not
+  # one line is the consequence: the service pins `TMUX_TMPDIR=%t`, so a unit
+  # fired by a /tmp socket would still query the %t server — the trigger and the
+  # query naming two different servers, which is precisely the seam
+  # `TestTheTriggerAndTheQueryNameOneServer` exists to close, reintroduced by the
+  # fix.  Closing it would mean the service resolving WHICH socket fired.
+  # systemd does pass `$TRIGGER_PATH` (systemd.exec(5), read on this host under
+  # systemd 261), but its own documentation says the information "is provided in
+  # a best-effort way", that simultaneous triggers "will be coalesced and only
+  # one will be reported, with no guarantee as to which one", and that it
+  # "should not be relied upon".  Branching on it is therefore not a fix; it is
+  # a second race.  The alternative — unpinning `TMUX_TMPDIR` so the service
+  # inherits it — puts the unit back on the undeclared runtime state this
+  # comment is about.  So: one watch, one pin, one server, and the dependency
+  # written down.  If TMUX_TMPDIR is ever DECLARED somewhere (an
+  # `environment.d` drop-in, or home-manager's `home.sessionVariables`), that is
+  # the real fix, and it makes this whole paragraph obsolete.
+  systemd.user.paths.tmux-session-restore = {
     Unit = {
-      Description = "One-shot timer — run tmux-session-restore once after login";
+      Description = "Run tmux-session-restore when the tmux server's socket appears";
     };
-    Timer = {
-      OnActiveSec = "45s";
+    Path = {
+      PathChanged = "%t/tmux-%U/default";
       Unit = "tmux-session-restore.service";
     };
     Install = {
-      WantedBy = [ "timers.target" ];
+      WantedBy = [ "default.target" ];
     };
   };
 }
