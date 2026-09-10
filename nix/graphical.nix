@@ -33,8 +33,10 @@ let
   # `test_bar_status.py::test_the_load_pill_threshold_MATCHES_cpu_monitors`.
   #
   # NOT the core count. cpu-monitor was deliberately raised to a flat 48 on
-  # 2026-08-05 to cut toast volume (measured: 123-267/day -> 11-32/day, see
-  # nix/home.nix:298). Keying the pill off `nproc` instead would warn at 24 on
+  # 2026-08-05 to cut toast volume (measured: 123-267/day -> 11-32/day — see the
+  # `dunst` RECALL BUFFER note in nix/home.nix, the paragraph reading "raising
+  # CPU_MON_THRESHOLD/RUNAWAY_PCT on 08-05 cut the workbench from 123-267/day to
+  # 11-32/day", ~:539). Keying the pill off `nproc` instead would warn at 24 on
   # the workbench — which idles in the twenties — re-creating exactly the noise
   # that change removed.
   loadWarnAbove = 48;
@@ -66,18 +68,23 @@ let
   # every float popup, including the retired agent-ops one.)
   btopCmd = "alacritty --class float,float -o window.dimensions.columns=160 -o window.dimensions.lines=45 -e btop";
 
-  # Used by the runaways pill's clicks. 🔴 NOT shared with the toast's
-  # middle-click action — `_syshealth_action` in bar-status-poll builds its own
-  # string, because this one carries Nix store interpolations that Python cannot
-  # produce. They are TWO SPELLINGS OF ONE RULE and they cannot be collapsed, so
-  # they are pinned to each other by
-  # `test_bar_status.py::test_the_toast_action_and_the_CLICK_are_the_same_shape`,
-  # which reads BOTH files. An earlier revision of this comment claimed they
-  # WERE shared; they never were, and by the time an audit read it they had
-  # already drifted — the toast had lost the `read -n 1` hold below.
-  # 🔴 That hold is load-bearing: syshealth prints and exits in ~0.16 s, and
-  # `alacritty -e CMD` closes when CMD does, so without it the window flashes
-  # and vanishes — indistinguishable from the click doing nothing.
+  # The runaways pill's clicks — `runawaysBlock` binds it to BOTH buttons, and
+  # is its only consumer. There is no Python counterpart any more:
+  # `_syshealth_action` and the toast it served were deleted when cpu-monitor was
+  # made the sole runaway announcer (see the `runaways` block in `_toast_specs`),
+  # so this string is now the ONE spelling of the rule rather than one of two
+  # that had to be kept in sync.
+  # 🔴 The `read -n 1` hold is load-bearing: syshealth prints and exits in
+  # ~0.16 s, and `alacritty -e CMD` closes when CMD does, so without it the
+  # window flashes and vanishes — indistinguishable from the click doing
+  # nothing, which is a defect this pill shipped once already.
+  # 🔴 TWO tests, because they pin two DIFFERENT things and one alone is
+  # walkable. `test_the_runaways_CLICK_still_holds_its_terminal_open` pins this
+  # STRING's shape (terminal + syshealth + the hold) and never opens
+  # `runawaysBlock`; `test_the_runaways_pill_CLICKS_are_wired_to_syshealthCmd`
+  # pins that `runawaysBlock` actually commands this binding. MEASURED: with
+  # only the first, re-pointing the left-click at `btopCmd` left 568 passed,
+  # MUTANT SURVIVED — a perfect string nothing calls.
   # `${home}` rather than a literal `~`: every other working-tree reference in
   # this file interpolates it, and `~` survives only if the click is spawned
   # through a shell.
@@ -814,7 +821,7 @@ lib.mkIf isNixOS {
   # repo paths itself (no .zshenv handles under systemd).
   systemd.user.services.bar-status-poll = lib.mkIf (!isLaptop) {
     Unit = {
-      Description = "Poll clawgate/mail/alerts/civitai/media/airvpn/telemetry → ~/.cache/bar-status for the i3 bar";
+      Description = "Poll clawgate/mail/alerts/civitai/media/airvpn/telemetry/runaways → ~/.cache/bar-status for the i3 bar";
       After = [ "network-online.target" ];
       Wants = [ "network-online.target" ];
       # Toast on failure (the notify-failure@ template lives in home.nix, installed

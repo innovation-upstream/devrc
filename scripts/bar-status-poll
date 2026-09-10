@@ -14,7 +14,16 @@ or FROZEN cache — as its VISIBLE "not measured" pill (a trailing `?`), never a
 the empty/invisible block, which is reserved for a MEASURED all-clear. That is
 the bar's CALM principle read correctly: steady state is invisible because it
 was measured and there is nothing, so "I could not look" must not borrow those
-pixels. `scripts/bar_freshness.py` is the one predicate all seven use. After
+pixels. `scripts/bar_freshness.py` is the one predicate all EIGHT use — one per
+entry in `SOURCES` below. That number is DERIVED and read back against this
+sentence by `test_bar_status.py::
+test_the_PROSE_COUNT_of_freshness_consumers_matches_the_SOURCES_ledger`, so it
+is no longer a hand-maintained count (it said SEVEN at SEVEN sites across three
+files for as long as the runaways pill has existed -- round 1 of the audit found
+four, and fixing those found three more, which is why the count is derived now
+and not written down). 🔴 `_COUNT_PROSE` is NOT pinned two-way: nothing asserts
+it enumerates every prose site, so a site it does not list is unguarded and this
+sentence is the only place that says so. After
 writing each file the poller signals i3status-rs (RTMIN+N) so the corresponding
 block refreshes immediately.
 
@@ -562,7 +571,9 @@ def stale(reason: str, err=None) -> dict:
     🔴 EVERY block renders it as its VISIBLE "not measured" pill — `?`, `󰀪 ?`,
     `󰀪 civ ?`, `tlm ?`, `qBit?`, the soft-yellow airvpn icon — and none renders
     it as the empty, invisible one, which means "measured, and there is
-    nothing". `bar_freshness.unmeasured` is the single predicate all seven ask.
+    nothing". `bar_freshness.unmeasured` is the single predicate all EIGHT ask.
+    (Fewer SPELLINGS than blocks: `i3status-clawgate`, `-mail` and `-runaways`
+    all render the bare `?`, so the six above cover eight blocks.)
 
     ⚠ THIS COMMENT USED TO SAY THE OPPOSITE, and it was the comment a maintainer
     would have acted on. It read: every block renders this as the empty pill
@@ -593,7 +604,7 @@ def _load_freshness():
     Same idiom as `_load_clawgate_tasks` / `_load_deadman` / `_load_airvpn_menu`
     above — and no hardcoded fallback copy, for the same reason: a second copy
     of a predicate is how it drifts. If this raises, the poller does not start,
-    every cache stops being rewritten, and within `MAX_CACHE_AGE_SECS` all seven
+    every cache stops being rewritten, and within `MAX_CACHE_AGE_SECS` all EIGHT
     blocks say `?`. That is the honest outcome, and (since PR #492) a visible
     one.
     """
@@ -821,9 +832,25 @@ def _bar_url_action(name: str) -> str:
 
 def _toast_specs() -> dict:
     """Per-source rising-edge toast config, resolved at call time (thresholds are
-    env-tunable and MUST match the block's --red-above in graphical.nix). The
-    action opens the SAME target as the block's left-click, so a middle-click on
-    the toast is a shortcut to the dashboard/UI."""
+    env-tunable and MUST match the block's --red-above in graphical.nix).
+
+    An `action` is the toast's middle-click, and where one exists it opens the
+    same target as that block's left-click, so the toast is a shortcut to the
+    dashboard/UI. That is the rule for `alerts`, `civitai`, `clawgate` and
+    `clawgate_stuck`; `mail`'s action is `None`, so it holds vacuously.
+    🔴 `telemetry` is the KNOWN EXCEPTION and is NOT claimed to follow it: its
+    action opens Grafana, while its block's left-click opens
+    `collector/deadman.py` in a float terminal (`telemetryBlock` in
+    nix/graphical.nix). Two different views of the same question. That divergence
+    was never decided here, so this docstring records it rather than asserting it
+    away — if you make them agree, delete this sentence and widen the rule.
+    ⚠ This used to read "The action opens the SAME target as the block's
+    left-click" flat, with no exception named. It was ALREADY false for
+    `telemetry` when it was written; the only spec that made it look universal
+    was `runaways`, whose action existed expressly to satisfy it and which is
+    gone (see the `runaways` note below). An invariant that survives by being
+    stated is not an invariant.
+    """
     return {
         "alerts": {"threshold": _env_int("ALERTS_TOAST_ABOVE", 30),
                    "urgency": "normal", "summary": "⚠ Homelab alerts firing",
@@ -857,22 +884,66 @@ def _toast_specs() -> dict:
         "telemetry": {"threshold": 0, "urgency": "critical",
                       "summary": "🔴 Telemetry source DEAD",
                       "action": "xdg-open http://grafana.homelab.lan"},
-        # 🔴 Gates on `new_count`, NOT `count` — the same defect `clawgate_stuck`
-        # above exists to avoid, arrived at from the other side. A plain level
-        # latch fires on 0 -> 1 and then stays set while the source is non-zero,
-        # and this source sits non-zero for long stretches on an ordinary day:
-        # a `nix build`'s `cc1plus` legitimately holds 100% for well past the
-        # 10-minute age gate. A genuinely new runaway is then a 1 -> 2 increment
-        # while the latch is ALREADY set — same colour, no toast, and the event
-        # worth interrupting for is the one that cannot interrupt.
-        # `new_count` is the pids absent from the previous poll, so it returns
-        # to 0 once a runaway has been announced and the edge is available again
-        # for the next one. ONE spec, not two: keying a second latch on `count`
-        # beside this one would double-toast the first runaway.
-        "runaways": {"threshold": 0, "urgency": "normal",
-                     "count_key": "new_count",
-                     "summary": "⚠ New runaway process",
-                     "action": _syshealth_action()},
+        # 🔴 `runaways` HAS NO SPEC HERE, DELIBERATELY — and this is a TRADE, not
+        # a redundancy. Read the second paragraph before re-adding one.
+        # `scripts/cpu-monitor.sh` is live as a systemd user unit and fires
+        # `⚠ Runaway process: <comm>` at CRITICAL urgency, capped at
+        # `CPU_MON_MAX_ALERTS_PER_DAY` (default 8, enforced in `alert_capped`).
+        # A spec here was a SECOND announcer at normal urgency, UNCAPPED, firing
+        # ~7 min later.
+        # 🔴 That cap is NOT incidental, and the evidence is the cap's OWN
+        # journal, not the threshold raise this comment used to cite. MEASURED
+        # 2026-09-09, `journalctl --user -u cpu-monitor --since -30d` grepped for
+        # `CPU_MON_MAX_ALERTS_PER_DAY`: the runaway cap demoted a toast to the
+        # journal on 8 separate days — 4, 7, 101, 73, 15, 13, 67, 3 (the three
+        # big ones 2026-08-30, 08-31, 09-06), 283 demotions in total. On those
+        # days an uncapped second announcer is what the cap was holding back.
+        # ⚠ Read that as a FLOOR, in one direction only: `journal_only` records
+        # the demotions, and cpu-monitor writes NO journal line for a toast it
+        # actually delivers (`alert` journals on the no-desktop FALLBACK path
+        # only), so demotions are countable and deliveries are not.
+        # ⚠ The `123-267/day -> 11-32/day` figure belongs to a DIFFERENT knob and
+        # is not evidence for this one: it credits raising CPU_MON_THRESHOLD /
+        # CPU_MON_RUNAWAY_PCT on 2026-08-05 (PR #351, 4c3e9132). The cap landed
+        # six days later, on 2026-08-12, in PR #430 (d71bf18f) -- the raise
+        # itself is dated 2026-08-06 by its commit, not the 08-05 the prose
+        # elsewhere rounds to; whose own headline is ~330 ->
+        # ~60 toasts/day across ALL producers.
+        # 🔴 **The two predicates are NOT the same set, and cpu-monitor's is
+        # STRICTLY NARROWER on the class this source exists for.** MEASURED:
+        # cpu-monitor's `runaway_proc` takes `top -bn2`'s FIRST DATA ROW ONLY
+        # (the awk `exit`), at `CPU_MON_RUNAWAY_PCT=95` (set in nix/home.nix's
+        # cpu-monitor `Environment=` list, ~:2345; the script's own default is
+        # 85), instantaneous, needing the SAME pid for 6x30s. syshealth flags
+        # EVERY eligible process at >=80% LIFETIME-AVERAGE for >=600s
+        # (`find_runaways`, DEF_RUNAWAY_PCT / DEF_RUNAWAY_AGE). So removing this
+        # spec gives up an interrupt for FOUR classes, not three:
+        #   (a) the 80-95% band — e.g. a python3 agent script averaging 88%,
+        #       which the header of this very source names as the likeliest
+        #       runaway class here;
+        #   (b) the runner-up when two are hot, never inspected;
+        #   (c) rank churn, where two processes swap the top slot so
+        #       `runaway_streak` resets and never reaches 6;
+        #   (d) 🔴 EVERYTHING, while an IGNORED process holds the top slot.
+        #       `is_ignored` is applied to the top row and on a match sets
+        #       `cand=""` WITHOUT falling through to the runner-up; the `else`
+        #       branch then resets `runaway_streak` to 0 and clears
+        #       `runaway_alerting`. So a game in `CPU_MON_IGNORE` does not merely
+        #       exempt itself — it blinds cpu-monitor to every other runaway and
+        #       destroys any streak already in progress. This host reaches that
+        #       state: the ignore list is `anno,logd,farthest,darktide`, tuned
+        #       against 12 real "Runaway process: Farthest Fronti" alerts
+        #       (nix/home.nix, the `CPU_MON_IGNORE` comment ~:2347-2358).
+        # The pill still goes RED for all four — only the interrupt is gone.
+        # That was judged the better trade against an uncapped duplicate. 🔴 If
+        # those classes need interrupting, WIDEN CPU-MONITOR (it owns the
+        # interrupt, the cap and the sustain); do not add a second announcer
+        # here. ⚠ Its `✓ Runaway process cleared` (the `clear_alert` call in the
+        # runaway `else` branch) is JOURNAL-ONLY — `clear_alert` toasts only
+        # under `CPU_MON_CLEAR_TOASTS=1`, which nothing in this repo sets — so
+        # there is no recovery toast today, from either announcer.
+        # `media` and `airvpn` are polled sources with no spec either: a source
+        # without a toast is the normal shape, not a gap.
     }
 
 
@@ -1329,54 +1400,22 @@ SYSHEALTH = os.path.join(DEVRC_DIR, "scripts", "syshealth")
 SYSHEALTH_TIMEOUT = 15
 
 
-#: 🔴 The `read -n 1` hold is LOAD-BEARING, not decoration. `syshealth` prints a
-#: table and exits — MEASURED at 0.156-0.187 s on this host — and `alacritty -e
-#: CMD` closes the moment CMD exits, so a bare `-e syshealth` opens a window that
-#: vanishes before it can be read. That is indistinguishable from the click doing
-#: nothing, which is the exact defect (round 1, finding 1) this pill already
-#: shipped once on the click path.
-#: 🔴 This string and `syshealthCmd` in `nix/graphical.nix` are TWO SPELLINGS OF
-#: ONE RULE and they cannot be collapsed — one is Nix with store interpolations,
-#: the other Python. An earlier revision of this comment claimed they were
-#: "shared"; they never were, and they had already drifted apart when an audit
-#: caught it. They are pinned to each other by
-#: `test_the_toast_action_and_the_CLICK_are_the_same_shape`, which reads BOTH
-#: files — a test asserting only that this contains "syshealth" is walkable by a
-#: string that is not a terminal at all, and that is measured, not hypothetical.
-SYSHEALTH_TERM = ("alacritty --class float,float "
-                  "-o window.dimensions.columns=120 -o window.dimensions.lines=40")
-
-
-def _syshealth_action() -> str:
-    """The toast's middle-click target: the SAME shape the block's clicks run,
-    as `_toast_specs`'s docstring requires — a float terminal that HOLDS OPEN.
-    (The revision before last opened Grafana, copy-pasted from the `telemetry`
-    spec; the one after that opened a terminal that closed in ~0.16 s.)"""
-    return ("%s -e bash -c '%s; echo; read -n 1 -r -s -p \"[any key to close]\"'"
-            % (SYSHEALTH_TERM, SYSHEALTH))
-
-
-def parse_runaways(report, prev_pids=()) -> dict:
+def parse_runaways(report) -> dict:
     """Pure: a `syshealth --json` report -> this source's status payload.
-
-    `prev_pids` are the pids the PREVIOUS poll flagged; `new_count` counts the
-    ones absent from it. See the `runaways` entry in `_toast_specs` for why the
-    toast gates on that number and not on `count`.
 
     A report that is not a dict, or carries no `runaways` list, is an ERROR
     payload rather than a zero — `bar_freshness.is_marker` reads `error`, so the
     pill renders the visible `?` instead of a confident "no runaways". A broken
     detector must never be indistinguishable from a quiet one.
+
+    🔴 There is no `new_count` and no `prev_pids`. Both existed ONLY to arm a
+    rising-edge toast latch, and that toast is gone (see `_toast_specs`) because
+    `cpu-monitor.sh` already owns this event. Keeping a field nothing reads is
+    the exact defect this source shipped once as an inert `RUNAWAY_IGNORE` knob.
     """
     if not isinstance(report, dict) or not isinstance(report.get("runaways"), list):
-        return {"count": 0, "new_count": 0, "state": "Idle", "processes": [],
+        return {"count": 0, "state": "Idle", "processes": [],
                 "error": "syshealth --json carried no runaways list"}
-    prev = set()
-    for p in prev_pids or ():
-        try:
-            prev.add(int(p))
-        except (TypeError, ValueError):
-            continue
     flagged = []
     for r in report["runaways"]:
         if not isinstance(r, dict):
@@ -1392,12 +1431,22 @@ def parse_runaways(report, prev_pids=()) -> dict:
         })
     flagged.sort(key=lambda x: -x["cpu"])
     count = len(flagged)
-    new_count = sum(1 for f in flagged if f["pid"] not in prev)
-    # `pid` is read BACK (by the next poll, for `new_count`). `cpu` and `cmd`
-    # are consumed HERE, building `detail`, and by a human reading the cache
-    # file — nothing reads them back. That is a deliberate, stated exception to
-    # "emit no field without a consumer", not an oversight: an earlier revision
-    # of this comment claimed every field had one, which was false for these two.
+    # 🔴 NOT every field has a machine reader, and that is a STATED EXCEPTION,
+    # not a claim that they do. MEASURED across the tree: `count` and `state` are
+    # read back by `scripts/i3status-runaways`; `cpu` and `cmd` are consumed HERE
+    # building `detail`; `pid`, `detail` and the `processes` container that holds
+    # them have NO reader FOR THIS SOURCE — they are a human debugging surface in
+    # ~/.cache/bar-status/runaways.json, kept deliberately. (`detail` has a
+    # would-be reader in `evaluate_edge_toast`'s toast body, but `runaways` has no
+    # toast spec, so it is unreachable — "a consumer exists somewhere in the
+    # file" is not a consumer.)
+    # ⚠ "a human might read it" is a WEAKER standard than the one applied three
+    # lines up, where `new_count` was deleted for having no reader. The
+    # difference is that `new_count` was a DERIVED number that existed only to
+    # drive a latch that no longer exists, while `processes` is the raw evidence
+    # behind `count`. If that distinction stops convincing you, delete the fields
+    # — do not restate this as "every field is consumed", which a previous
+    # revision did and which was false for `cpu`/`cmd` even then.
     if count:
         detail = "%d runaway process(es), top: %s (%.0f%%)" % (
             count, flagged[0]["cmd"], flagged[0]["cpu"])
@@ -1405,7 +1454,6 @@ def parse_runaways(report, prev_pids=()) -> dict:
         detail = "no runaways"
     return {
         "count": count,
-        "new_count": new_count,
         "state": "Warning" if count > 0 else "Idle",
         "detail": detail,
         "processes": flagged,
@@ -1424,20 +1472,15 @@ def fetch_runaways() -> dict:
     exactly like a working freshness guard. Parse stdout; unparseable output is
     the only failure, and it is reported as one.
     """
-    prev = read_prev_status("runaways")
-    prev_pids = []
-    if isinstance(prev, dict) and isinstance(prev.get("processes"), list):
-        prev_pids = [p.get("pid") for p in prev["processes"]
-                     if isinstance(p, dict)]
     try:
         proc = subprocess.run([sys.executable, SYSHEALTH, "--json"],
                               capture_output=True, text=True,
                               timeout=SYSHEALTH_TIMEOUT)
         report = json.loads(proc.stdout)
     except Exception as err:
-        return {"count": 0, "new_count": 0, "state": "Idle", "processes": [],
+        return {"count": 0, "state": "Idle", "processes": [],
                 "error": str(err)[:200]}
-    return parse_runaways(report, prev_pids)
+    return parse_runaways(report)
 
 
 # ---------------------------------------------------------------------------

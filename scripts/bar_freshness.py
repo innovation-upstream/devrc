@@ -11,9 +11,12 @@ bar that lies in exactly the situation its numbers are worth reading.
 `scripts/i3status-clawgate` grew a private fix for this (PR #490). This module is
 that fix, extracted: ONE definition of "too old", ONE no-coercion integer
 reading, ONE age computation, imported by every block instead of respelled in
-seven. A predicate open-coded at N sites is typically wrong at N-1 of them in the
-same direction (RULES.md), and seven hand-copied freshness gates is that shape
-with the ink still wet.
+each. A predicate open-coded at N sites is typically wrong at N-1 of them in the
+same direction (RULES.md), and eight hand-copied freshness gates is that shape
+with the ink still wet. (EIGHT today — one per `bar-status-poll`'s `SOURCES`
+entry: airvpn, alerts, civitai, clawgate, mail, media, runaways, telemetry.
+`i3status-fans`, `-load` and `-claude-runs` name this module only to say they
+do NOT need it: their readings are local and instant, never cached.)
 
 🔴 HOW BLOCKS GET AT IT. The block scripts are EXTENSIONLESS (`i3status-mail`,
 ...), so nothing can `import` them and they cannot be a package. Each loads this
@@ -172,7 +175,7 @@ def carry_forward(recorded, fallback):
     """🔴 A MEASUREMENT OUTAGE MUST NOT MAKE A KNOWN ALARM QUIETER.
 
     THE ONE DEFINITION of *how* an unmeasured cache renders a reading it still
-    holds, so the seven blocks cannot disagree about the grammar. `recorded` is
+    holds, so the eight blocks cannot disagree about the grammar. `recorded` is
     the pill the payload's OWN last reading renders (None when it recorded
     nothing worth carrying); `fallback` is the block's bare "cannot tell" pill.
 
