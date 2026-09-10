@@ -3533,6 +3533,33 @@ in
   # permanent silence — the shape drift-check's rc 18 exists to prevent.
   # `test_main_status_watch.py::test_the_watcher_is_not_wired_to_the_do_not_
   # disturb_toast` pins that absence, so a later edit cannot quietly add one.
+  #
+  # 🔴 THAT LADDER SENTENCE WAS FALSE WHEN FIRST WRITTEN, in the one arm where
+  # the trigger IS the whole job. `reset_streak()` ran as soon as the API walk
+  # succeeded — which it does on every run where only the TRIGGER fails — so the
+  # bump could only ever reach 1 and rc 12 was unreachable for the entire
+  # trigger-failure class. Measured with escalate=2: six consecutive failures
+  # all printed `streak 1/2` and returned rc 11, a systemd SUCCESS. An unloaded
+  # main-green-check.service (renamed unit, a switch without daemon-reload, a
+  # DBus hiccup) therefore left this accelerator inert with the unit reporting
+  # healthy forever — exactly the shape the sentence claimed to prevent. Now
+  # measured 11,12,12,12,12,12 and pinned by
+  # `test_a_REPEATEDLY_failing_trigger_ESCALATES_to_blind`.
+  #
+  # ⚠ DUTY CYCLE, STATED RATHER THAN LEFT SILENT. The debounce is keyed on the
+  # RED EPISODE, not on the newest verdicted sha. Only ~22% of main commits ever
+  # get an authoritative verdict, so the verdicted sha changes repeatedly inside
+  # ONE sustained red window; keying on it would re-trigger each time — roughly a
+  # 47% duty cycle of the most expensive job on this box at the measured 1.43h
+  # verdict gap against ~40 min per deadman run, versus ~17% before this unit
+  # existed. It would also cost ATTENTION, not just compute: main-green-check
+  # carries `OnFailure = notify-failure@` and its memo's red branch exits RC_RED
+  # WITHOUT re-running anything, so a commit flipping pending -> failure inside
+  # one interval would fire the DND-defeating toast having measured nothing.
+  # So: ONE trigger per episode, opened at the first non-flake red and closed
+  # only by an observed GREEN verdict. Worst case is therefore ONE extra deadman
+  # run per red window — which is the whole point of the unit — and the steady
+  # state when main is healthy is zero.
   systemd.user.services.main-status-watch = {
     Unit = {
       Description = "Start the main-green deadman early when main's CI says main is red";

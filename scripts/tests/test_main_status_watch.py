@@ -449,16 +449,67 @@ def test_the_same_red_sha_is_handed_over_exactly_once(h):
     first = h.receipt.read_text()
     second = h.run()
     assert second.returncode == RC_OK, second.stdout
-    assert "already handed" in second.stdout
+    assert "red episode already open" in second.stdout
     assert h.receipt.read_text() == first, "it re-triggered on unchanged evidence"
 
 
-def test_a_NEW_red_sha_triggers_again(h):
+def test_a_NEW_red_sha_in_the_SAME_episode_does_NOT_trigger_again(h):
+    """🔴 THIS EXPECTATION IS THE INVERSE OF THE FIRST DRAFT'S, DELIBERATELY.
+
+    The debounce used to key on the newest VERDICTED sha, and that is the wrong
+    unit: only ~22% of main commits ever get a verdict, so the verdicted sha
+    changes repeatedly inside ONE sustained red window. Every change was a new
+    trigger — at the measured 1.43h median verdict gap against ~40 min per
+    deadman run, roughly a 47% duty cycle of the most expensive job on the box,
+    during exactly the scenario this unit exists for.
+
+    And it cost ATTENTION, not just compute: main-green-check carries
+    `OnFailure = notify-failure@`, and its memo's red branch exits RC_RED
+    WITHOUT re-running anything — so the second trigger fires the DND-defeating
+    toast having measured nothing new.
+    """
     _red_commit(h, "e1" + "0" * 38)
     assert h.run().returncode == RC_TRIGGERED
-    _red_commit(h, "f1" + "0" * 38)
+    _red_commit(h, "f1" + "0" * 38)      # a DIFFERENT red commit, same episode
+    second = h.run()
+    assert second.returncode == RC_OK, second.stdout
+    assert "red episode already open" in second.stdout
+    assert len(h.receipt.read_text().splitlines()) == 1, "it re-triggered mid-episode"
+
+
+def test_a_GREEN_verdict_closes_the_episode_and_a_LATER_red_triggers_again(h):
+    """The episode must actually END, or the unit alerts once and never again.
+    A green verdict is the only thing that closes it — a red window ends when
+    main is observed good, not when it stops being re-verdicted."""
+    _red_commit(h, "a4" + "0" * 38)
     assert h.run().returncode == RC_TRIGGERED
+
+    green = "b4" + "0" * 38
+    h.serve_commits([green])
+    h.serve_statuses(green, [_status(CTX_PY, "success", REAL_SUCCESS)])
+    recovered = h.run()
+    assert recovered.returncode == RC_OK
+    assert "closing the red episode" in recovered.stdout
+
+    _red_commit(h, "c4" + "0" * 38)
+    assert h.run().returncode == RC_TRIGGERED, "a NEW episode must be able to trigger"
     assert len(h.receipt.read_text().splitlines()) == 2
+
+
+def test_a_NON_VERDICT_does_not_close_an_open_episode(h):
+    """Absence is not a fix. If it closed the episode, a red window with a burst
+    of superseded commits would re-trigger the moment one got verdicted."""
+    _red_commit(h, "d4" + "0" * 38)
+    assert h.run().returncode == RC_TRIGGERED
+    quiet = "e4" + "0" * 38
+    h.serve_commits([quiet])
+    h.serve_statuses(quiet, [_status(CTX_PY, "error", REAL_SUPERSEDED)])
+    assert h.run().returncode == RC_OK
+    _red_commit(h, "f4" + "0" * 38)
+    again = h.run()
+    assert again.returncode == RC_OK, again.stdout
+    assert "red episode already open" in again.stdout
+    assert len(h.receipt.read_text().splitlines()) == 1
 
 
 # ══ UNMEASURED AND THE BLIND LADDER ═══════════════════════════════════════════
@@ -514,12 +565,21 @@ def test_running_out_of_the_total_budget_is_UNMEASURED_not_a_kill(h):
     assert not h.triggered()
 
 
-def test_the_total_budget_is_under_the_units_timeout():
-    """Two numbers whose ORDER is the whole guarantee, in two files. If the
-    budget ever exceeds TimeoutStartSec the script is back to being killed
-    mid-read, and nothing else would notice."""
+def test_the_total_budget_PLUS_the_trigger_timeout_is_under_the_units_timeout():
+    """🔴 THREE numbers, and the first draft of this pin named only TWO.
+
+    `trigger_deadman`'s subprocess timeout is NOT charged against `_DEADLINE` —
+    the budget covers the API walk only — so the real worst case is
+    BUDGET + TRIGGER. Measured at a 10s budget: a fast API plus a HANGING
+    trigger ran 30s, three times the budget. 120+30=150 < 180 is safe today,
+    but any edit raising the budget into [150, 179] would keep a
+    `budget < TimeoutStartSec` assertion GREEN while making SIGTERM reachable —
+    the precise outcome the constant exists to prevent, which is what makes the
+    two-number version worse than no pin.
+    """
     src = SCRIPT.read_text(encoding="utf-8")
     budget = int(re.search(r"^TOTAL_BUDGET_S = (\d+)", src, re.M).group(1))
+    trigger = int(re.search(r"^TRIGGER_TIMEOUT_S = (\d+)", src, re.M).group(1))
     declared = int(re.search(r"^UNIT_TIMEOUT_START_SEC = (\d+)", src, re.M).group(1))
     home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
     start = home_nix.index("systemd.user.services.main-status-watch")
@@ -529,7 +589,11 @@ def test_the_total_budget_is_under_the_units_timeout():
         f"the script believes the unit's TimeoutStartSec is {declared}, "
         f"home.nix says {actual} — the guard is reasoning about the wrong number"
     )
-    assert budget < actual, f"budget {budget}s must be under TimeoutStartSec {actual}s"
+    assert budget + trigger < actual, (
+        f"worst case is budget {budget}s + trigger {trigger}s = {budget + trigger}s, "
+        f"which must stay under TimeoutStartSec {actual}s or systemd SIGTERMs the "
+        "run before it can report COULD NOT MEASURE"
+    )
 
 
 # ══ MALFORMED API SHAPES ══════════════════════════════════════════════════════
@@ -617,6 +681,85 @@ def test_the_no_verdict_return_carries_a_SLICEABLE_sha(monkeypatch):
     assert isinstance(sha, str), f"no-verdict sha must be str, got {type(sha).__name__}"
     assert sha[:8] == ""      # the slice every caller performs must not raise
     assert walked == 1
+
+
+def test_a_REPEATEDLY_failing_trigger_ESCALATES_to_blind(h):
+    """🔴 THE LADDER WAS STRUCTURALLY UNREACHABLE FOR THIS ENTIRE CLASS.
+
+    `reset_streak()` used to run as soon as the WALK succeeded — which it does
+    on every one of these runs — so the bump in the trigger-failure handler
+    could only ever return 1 and `n >= escalate` was never true. Measured with
+    escalate=2: six consecutive trigger failures all printed `streak 1/2` and
+    returned rc 11, which `SuccessExitStatus = "10 11"` makes a systemd SUCCESS.
+
+    Scenario: main-green-check.service not loaded (renamed unit, a switch
+    without daemon-reload, a DBus hiccup) — `systemctl --user start` exits 5,
+    the accelerator is inert, and the unit reports healthy forever. That is the
+    shape drift-check's rc 18 exists to prevent, in the one arm where the
+    trigger IS the whole job.
+
+    The single-run test below is consistent with the bug; only the LADDER
+    detects it, which is why this exists separately.
+    """
+    write_exec(h.trigger, 'echo "Failed to start: Unit not found." >&2\nexit 5\n')
+    _red_commit(h, "a5" + "0" * 38)
+    first = h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=3)
+    assert first.returncode == RC_UNMEASURED, first.stdout
+    assert "streak 1/3" in first.stdout, first.stdout
+
+    _red_commit(h, "b5" + "0" * 38)
+    second = h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=3)
+    assert second.returncode == RC_UNMEASURED, second.stdout
+    assert "streak 2/3" in second.stdout, "the walk succeeding reset the streak again"
+
+    _red_commit(h, "c5" + "0" * 38)
+    third = h.run(MAIN_STATUS_WATCH_BLIND_ESCALATE=3)
+    assert third.returncode == RC_BLIND, third.stdout
+
+
+def test_a_failed_episode_write_does_NOT_trigger(h, tmp_path):
+    """🔴 THE ONLY FINDING THAT WOULD HAVE BEEN WORSE THAN NO PR AT ALL.
+
+    The receipt used to be written AFTER a successful trigger, with no error
+    handling. A failed write left the deadman started and no record, so the next
+    run saw the same red as new and started it AGAIN — measured: runs 1/2/3 gave
+    starts=1/2/3, each a real `systemctl --user start main-green-check.service`,
+    i.e. two ~20-minute sandbox tiers every 10 minutes.
+
+    The realistic cause is ENOSPC on ~/.cache, which shares the root filesystem
+    with the nix store — CORRELATED with the failure, since the disk pressure
+    that breaks the write is produced by the very builds least worth re-kicking.
+    So it now records FIRST and fails CLOSED.
+    """
+    _red_commit(h, "d5" + "0" * 38)
+    h.cache.mkdir(parents=True, exist_ok=True)
+    # make the episode path unwritable by making it a directory
+    (h.cache / "red-episode").mkdir()
+    proc = h.run()
+    assert proc.returncode in (RC_UNMEASURED, RC_BLIND), proc.stdout
+    assert "cannot record the red episode" in proc.stdout
+    assert "NOT triggering" in proc.stdout
+    assert not h.triggered(), "it triggered without being able to record it"
+
+
+def test_an_uncreatable_state_dir_is_BLIND_not_a_quiet_success(h, tmp_path):
+    """🔴 THE ARM THE MUTATION SWEEP PROVED UNCOVERED. Mutating this return to
+    RC_OK SURVIVED a fully green 44-test suite — "I could not create my state
+    dir" reading as "looked, nothing to do", the exact reassuring zero this
+    design orbits.
+
+    It is rc 12 rather than rc 11 on purpose: the streak file lives INSIDE the
+    directory that could not be created, so this arm cannot ladder at all. An
+    arm that never advances a ladder and never fails the unit is permanently
+    silent.
+    """
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("", encoding="utf-8")
+    proc = h.run(MAIN_STATUS_WATCH_CACHE=str(blocker / "cache"))
+    assert proc.returncode == RC_BLIND, proc.stdout
+    assert "cannot create the state dir" in proc.stdout
+    assert "NOT 'main is green'" in proc.stdout
+    assert not h.triggered()
 
 
 def test_a_failing_trigger_is_UNMEASURED_not_a_silent_success(h):
@@ -729,7 +872,12 @@ def test_every_env_var_the_code_reads_is_documented_in_the_header():
 
     This exists because `MAIN_STATUS_WATCH_BUDGET` was read for a full commit
     before anything mentioned it — the same shape as an undocumented `MIN_TESTS`.
-    The header IS the `--help` text, so this is the place a reader looks.
+
+    ⚠ The rationale first written here — "the header IS the `--help` text" — was
+    FALSE: `--help` printed `__doc__`, one line, naming ZERO knobs. Rather than
+    delete the sentence, `--help` now prints the header, which
+    `test_help_actually_prints_the_env_knobs` verifies. So the claim is true by
+    construction instead of by assertion.
     """
     src = SCRIPT.read_text(encoding="utf-8")
     read = set(re.findall(r'os\.environ\.get\(\s*"(MAIN_STATUS_WATCH_[A-Z_]+)"', src))
@@ -739,6 +887,24 @@ def test_every_env_var_the_code_reads_is_documented_in_the_header():
         f"read but undocumented: {sorted(read - documented)}; "
         f"documented but never read: {sorted(documented - read)}"
     )
+
+
+def test_help_actually_prints_the_env_knobs(h):
+    """Makes the guard above's rationale true rather than merely asserted.
+
+    A `--help` that prints nothing and exits 0 is the reassuring zero this file
+    argues against, so the positive control is the COUNT, not the exit code.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        capture_output=True, text=True, timeout=60, env=h.env(),
+    )
+    assert proc.returncode == RC_OK, proc.stderr
+    src = SCRIPT.read_text(encoding="utf-8")
+    knobs = set(re.findall(r'os\.environ\.get\(\s*"(MAIN_STATUS_WATCH_[A-Z_]+)"', src))
+    missing = {k for k in knobs if k not in proc.stdout}
+    assert not missing, f"--help does not mention {sorted(missing)}"
+    assert len(proc.stdout.splitlines()) > 20, "--help printed a stub, not the header"
 
 
 def test_the_blind_ladder_default_lives_in_exactly_one_place():

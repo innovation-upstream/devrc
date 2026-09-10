@@ -101,6 +101,26 @@ def say(msg):
     print(f"main-status-watch: {msg}", flush=True)
 
 
+HEADER_SENTINEL = '"""Start the main-green deadman early'
+
+
+def print_header():
+    """Print the comment header — the part that documents the env knobs.
+
+    Bounded by the module docstring's opening line rather than a hardcoded line
+    number: a literal range silently truncates --help the moment the header
+    grows, which main-green-check.sh records having happened to it already.
+    """
+    src = Path(__file__).read_text(encoding="utf-8").splitlines()
+    end = next((i for i, ln in enumerate(src) if ln.startswith(HEADER_SENTINEL)), None)
+    if end is None:
+        say("cannot locate the end of the header (the docstring sentinel moved)")
+        return False
+    for line in src[1:end]:
+        print(line[2:] if line.startswith("# ") else line.lstrip("#"))
+    return True
+
+
 # ── classification ────────────────────────────────────────────────────────────
 # 🔴 ONLY `state == "failure"` IS A RED. Every non-code outcome the pipeline
 # reports — superseded, KILLED, NO GATE POD — arrives as `state == "error"`, and
@@ -242,8 +262,8 @@ class State:
 
     def __init__(self, root):
         self.root = Path(root)
-        self.triggered = self.root / "last-triggered"
         self.streak = self.root / "blind-streak"
+        self.episode = self.root / "red-episode"
 
     def mkdir(self):
         self.root.mkdir(parents=True, exist_ok=True)
@@ -254,11 +274,52 @@ class State:
         except OSError:
             return ""
 
-    def last_triggered(self):
-        return self._read(self.triggered)
+    # ── the RED EPISODE, not the verdict sha ──────────────────────────────────
+    # 🔴 KEYED ON THE EPISODE BECAUSE THE VERDICT SHA IS THE WRONG UNIT. Only
+    # ~22% of main commits ever get an authoritative verdict, so the newest
+    # VERDICTED sha changes repeatedly inside one sustained red window. Keying
+    # the debounce on it re-triggers for every newly-verdicted red commit —
+    # measured at the 1.43h median verdict gap against ~40 min per deadman run,
+    # roughly a 47% duty cycle of the most expensive job on this box, during
+    # exactly the sustained-red scenario this whole unit exists for.
+    #
+    # Worse, it costs ATTENTION, not just compute: main-green-check carries
+    # `OnFailure = notify-failure@` and its memo's red branch exits RC_RED
+    # WITHOUT re-running anything, so a commit flipping pending -> failure inside
+    # one interval fires the DND-defeating toast again having measured nothing.
+    # "A flake costs compute, not attention" is true of ONE isolated flake and
+    # false of a sustained red — which would rebuild the click-through hazard
+    # this unit was built to remove.
+    #
+    # So: ONE trigger per red episode. An episode opens at the first non-flake
+    # red and closes only when a GREEN verdict is observed. While it is open the
+    # operator has already been told, and re-telling them adds no information.
+    def episode_open(self):
+        return self._read(self.episode)
 
-    def record_trigger(self, sha):
-        self.triggered.write_text(sha + "\n", encoding="utf-8")
+    def open_episode(self, sha):
+        """Record the episode BEFORE triggering. Returns False if it cannot.
+
+        🔴 THE ORDER IS THE GUARD. Writing this AFTER a successful trigger means
+        a failed write leaves the deadman started and no record — so the next run
+        sees the same red as new and starts it again, every interval, forever.
+        The realistic cause is ENOSPC on ~/.cache, which shares the root
+        filesystem with the nix store: the disk pressure that makes the write
+        fail is produced by the very builds you least want re-kicked. That is
+        the one failure mode that would be WORSE than not having this unit, so
+        it fails CLOSED — no record, no trigger.
+        """
+        try:
+            self.episode.write_text(sha + "\n", encoding="utf-8")
+            return True
+        except OSError:
+            return False
+
+    def close_episode(self):
+        try:
+            self.episode.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def read_streak(self):
         raw = self._read(self.streak)
@@ -266,7 +327,13 @@ class State:
 
     def bump_streak(self):
         n = self.read_streak() + 1
-        self.streak.write_text(f"{n}\n", encoding="utf-8")
+        try:
+            self.streak.write_text(f"{n}\n", encoding="utf-8")
+        except OSError:
+            # Cannot persist it — report the count we computed rather than
+            # pretending the ladder advanced. A silent 0 here would be the
+            # never-escalates bug this file already carries scars from.
+            say("  ⚠ could not persist the blind streak; it will not advance")
         return n
 
     def reset_streak(self):
@@ -311,6 +378,14 @@ class Unmeasured(Exception):
 # timeout` pins the ordering of the two numbers so tightening one cannot silently
 # invert them.
 TOTAL_BUDGET_S = 120
+# 🔴 A THIRD NUMBER, and the pin used to name only two. `trigger_deadman`'s
+# subprocess timeout is NOT charged against _DEADLINE — the budget covers the
+# API walk only — so the real worst case is BUDGET + TRIGGER, not BUDGET.
+# Measured at a 10s budget: a hanging trigger ran 30s. 120+30=150 < 180 today,
+# but any edit raising the budget into [150, 179] would keep a
+# `budget < TimeoutStartSec` assertion green while making SIGTERM reachable —
+# the exact outcome the constant exists to prevent.
+TRIGGER_TIMEOUT_S = 30
 UNIT_TIMEOUT_START_SEC = 180
 _DEADLINE = None
 
@@ -377,7 +452,8 @@ def trigger_deadman():
         "systemctl", "--user", "start", "--no-block", "main-green-check.service",
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=TRIGGER_TIMEOUT_S)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise Unmeasured(f"cannot start main-green-check: {exc}")
     if proc.returncode != 0:
@@ -439,7 +515,15 @@ def main(argv):
     budget = float(budget) if (budget or "").replace(".", "", 1).isdigit() else TOTAL_BUDGET_S
     _DEADLINE = time.monotonic() + budget
     if len(argv) > 1 and argv[1] in ("-h", "--help"):
-        print(__doc__)
+        # 🔴 THE HEADER, NOT `__doc__`. `__doc__` is one line and names ZERO of
+        # the seven MAIN_STATUS_WATCH_* knobs, so "the header IS the --help
+        # text" — the rationale the env-var guard was filed under — was simply
+        # FALSE. `main-green-check.sh` already prints its own header for
+        # --help; making that claim true is the better fix than deleting it.
+        # Refuses rather than printing nothing if the sentinel moves, for the
+        # same reason main-green-check.sh does: a --help that silently prints
+        # zero lines and exits 0 is the reassuring zero this file argues against.
+        print_header()
         return RC_OK
     if len(argv) > 1:
         say(f"unknown argument: {argv[1]}")
@@ -450,8 +534,21 @@ def main(argv):
     try:
         state.mkdir()
     except OSError as exc:
+        # 🔴 rc 12, NOT rc 11 — AND THE ASYMMETRY IS THE POINT. Every other
+        # unmeasured arm ladders, because a network blip self-heals and should
+        # not fail the unit on its first occurrence. This one cannot ladder at
+        # all: the streak file lives INSIDE the directory that could not be
+        # created, so there is nowhere to count. An arm that can never advance a
+        # ladder and never fails the unit is permanently silent — which is the
+        # reassuring zero ("I could not create my state dir" reading as "looked,
+        # nothing to do") this whole file is built against. A structural failure
+        # that cannot self-heal by retrying is exactly what the ladder would be
+        # waiting for anyway, so it reports it immediately.
         say(f"COULD NOT MEASURE — cannot create the state dir: {exc}")
-        return RC_UNMEASURED
+        say("  🔴 This is NOT 'main is green'. Nothing was read.")
+        say("  Structural, not transient — there is nowhere to record a streak,")
+        say("  so this fails the unit now rather than laddering in silence.")
+        return RC_BLIND
 
     try:
         depth = int(os.environ.get("MAIN_STATUS_WATCH_DEPTH") or 20)
@@ -473,7 +570,16 @@ def main(argv):
             return RC_BLIND
         return RC_UNMEASURED
 
-    state.reset_streak()
+    # 🔴 NO `reset_streak()` HERE. It used to sit exactly here, and it made the
+    # trigger-failure ladder STRUCTURALLY UNREACHABLE: the walk succeeding reset
+    # the streak to 0, so the bump in the trigger handler below could only ever
+    # return 1 and `n >= escalate` was never true. Measured with escalate=2:
+    # six consecutive trigger failures all reported `streak 1/2`, rc 11 — a
+    # systemd success — so an unloaded main-green-check.service (a renamed unit,
+    # a switch without daemon-reload, a DBus hiccup) left this accelerator inert
+    # and the unit reporting healthy forever. That is precisely the shape
+    # drift-check's rc 18 exists to prevent, in the one arm where the trigger IS
+    # the whole job. The reset now happens on each TERMINAL SUCCESS path only.
 
     if verdict == "none":
         # 🔴 NOT GREEN. An empty walk means every recent commit was superseded,
@@ -481,10 +587,20 @@ def main(argv):
         # getting bitten by. Say which it is, and take no action either way.
         say(f"no authoritative {CONTEXT_PREFIX}* verdict in the newest {walked} commits of {repo}.")
         say("  Nothing is claimed about main. The 4-hourly deadman still covers it.")
+        say("  An open red episode (if any) is left open: absence is not a fix.")
+        state.reset_streak()
         return RC_OK
 
     if verdict == "green":
-        say(f"newest main verdict: GREEN at {sha[:8]} (walked {walked}) — nothing to do.")
+        # A green verdict is the ONLY thing that closes a red episode — a red
+        # window ends when main is observed good again, not when it stops being
+        # re-verdicted.
+        if state.episode_open():
+            say(f"main is GREEN again at {sha[:8]} — closing the red episode.")
+        else:
+            say(f"newest main verdict: GREEN at {sha[:8]} (walked {walked}) — nothing to do.")
+        state.close_episode()
+        state.reset_streak()
         return RC_OK
 
     names = sorted({n for d in reds.values() for n in parse_failing_names(d)})
@@ -492,24 +608,44 @@ def main(argv):
     for ctx, desc in sorted(reds.items()):
         say(f"  {ctx}: {desc}")
 
-    if state.last_triggered() == sha:
-        say(f"  already handed {sha[:8]} to main-green-check — not re-triggering.")
+    open_at = state.episode_open()
+    if open_at:
+        say(f"  red episode already open (since {open_at[:8]}) — not re-triggering.")
+        say("  The operator has already been told main is red; a second start")
+        say("  would re-run the same tip, hit the deadman's memo, exit RC_RED and")
+        say("  fire the toast again having measured nothing.")
+        state.reset_streak()
         return RC_OK
 
     if screen_all_known_flakes(list(reds.values())):
         say(f"  every failure is a PROVEN-COMPLETE known flake ({', '.join(names)}) —")
         say("  not spending a confirmation run. No claim about main is made here.")
-        state.record_trigger(sha)
+        # Deliberately does NOT open an episode: a later, non-flake red in the
+        # same window must still be able to trigger.
+        state.reset_streak()
         return RC_OK
+
+    # 🔴 RECORD FIRST, THEN TRIGGER — see State.open_episode. A failed write
+    # must mean NO trigger, or an unwritable cache re-starts the deadman every
+    # interval forever.
+    if not state.open_episode(sha):
+        n = state.bump_streak()
+        say(f"COULD NOT MEASURE — cannot record the red episode (streak {n}/{escalate})")
+        say("  🔴 NOT triggering: without a record this would re-start the")
+        say("  deadman every interval. Failing closed is the cheaper mistake.")
+        return RC_BLIND if n >= escalate else RC_UNMEASURED
 
     try:
         cmd = trigger_deadman()
     except Unmeasured as exc:
         n = state.bump_streak()
         say(f"COULD NOT MEASURE — {exc} (streak {n}/{escalate})")
+        # The episode was opened before the attempt; drop it so a retry is
+        # possible once whatever broke the trigger is fixed.
+        state.close_episode()
         return RC_BLIND if n >= escalate else RC_UNMEASURED
 
-    state.record_trigger(sha)
+    state.reset_streak()
     say(f"  TRIGGERED the authoritative check early: {cmd}")
     say("  🔴 That check — not this one — decides whether main is broken. It runs")
     say("     both sandbox tiers twice and alerts only if the red REPRODUCES.")
