@@ -663,6 +663,53 @@ def test_the_production_trigger_is_systemctl_start_main_green_check():
     )
 
 
+def test_the_trigger_verb_is_MUTATING_so_the_stub_fails_it_closed():
+    """🔴 THE PIN `test_no_real_launchers.py` FILES ITS ACKNOWLEDGEMENT AGAINST.
+
+    `systemctl` is not in `nolaunch.HOST_LAUNCHERS`; it is VERB-SPLIT, and the
+    stub passes a read verb through while blocking a mutating one. syshealth and
+    tmux-restore-observe.sh are acknowledged because their verbs ARE reads. This
+    file is the opposite case — `start` is mutating on purpose, since starting
+    the deadman is the entire job — so its safety rests on:
+
+      1. the SEAM: every behavioural test above sets MAIN_STATUS_WATCH_TRIGGER,
+         so none executes the production argv;
+      2. FAIL-CLOSED: `start` not being a read verb means the stub ERRORS rather
+         than starting a real unit, so a future test that forgets the seam
+         cannot kick off a 20-minute gate run on the operator's box.
+
+    Leg 2 is what protects against a test nobody has written yet, and it is only
+    true while the verb stays mutating and stays the ONLY call site. Both are
+    asserted here, against `SYSTEMCTL_READ_VERBS` ITSELF rather than a copied
+    literal — the acknowledgements above were each shown to blind the guard they
+    were filed under, and this one is not allowed to.
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from testlib import nolaunch  # noqa: E402
+
+    code = _code_only()
+    # exactly one systemctl call site, so the acknowledgement cannot absorb a second
+    assert code.count('"systemctl"') == 1, (
+        "main-status-watch.py has grown a second systemctl call site — "
+        "test_no_real_launchers.py's acknowledgement covers ONE, and a new one "
+        "must be justified there, not absorbed here"
+    )
+    m = re.search(r'"systemctl",\s*"--user",\s*"([a-z-]+)"', code)
+    assert m, "could not find the systemctl argv — the pin cannot read the verb"
+    verb = m.group(1)
+    assert verb == "start", f"the trigger verb moved to {verb!r}"
+    assert verb not in nolaunch.SYSTEMCTL_READ_VERBS, (
+        f"{verb!r} is now a READ verb, so the verb-splitting stub would PASS IT "
+        "THROUGH instead of failing closed — leg 2 of the acknowledgement in "
+        "test_no_real_launchers.py is void and must be re-argued"
+    )
+    # POSITIVE CONTROL: the list is real and this comparison can actually match.
+    assert "status" in nolaunch.SYSTEMCTL_READ_VERBS, (
+        "SYSTEMCTL_READ_VERBS looks empty or renamed — the assertion above "
+        "would then pass for every possible verb"
+    )
+
+
 def test_the_watcher_is_not_wired_to_the_do_not_disturb_toast():
     """🔴 A RELATIONSHIP, not a word: the accelerator must never take the
     operator's attention, because its failure mode is 'coverage is what it was

@@ -243,7 +243,8 @@ def test_the_stubbed_launcher_set_is_pinned():
 # seven scripts named it.
 ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
-        {"airvpn-menu", "keylog-spin-capture.sh", "mention-open.py",
+        {"airvpn-menu", "keylog-spin-capture.sh", "main-status-watch.py",
+         "mention-open.py",
          "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py",
          "syshealth", "tmux-reply-agent", "tmux-restore-observe.sh"},
         "verb-split rather than record-only — see the systemctl tests below. "
@@ -343,7 +344,33 @@ ACKNOWLEDGED_UNSTUBBED = {
         "script_uses_a_READ_verb` pins EVERY occurrence's verb against "
         "SYSTEMCTL_READ_VERBS itself, with a positive control proving the "
         "extractor can see a mutating verb, so this justification goes red the "
-        "moment the script grows one"),
+        "moment the script grows one. "
+        "main-status-watch.py (added 2026-09-10 with the main-red fast trigger) "
+        "is the FIRST entry justified on the OPPOSITE of the verb ground, and "
+        "it is deliberately not absorbed into any sentence above. It genuinely "
+        "INVOKES systemctl, like syshealth and tmux-restore-observe.sh — but its "
+        "verb is `start`, which is MUTATING and is NOT on "
+        "nolaunch.SYSTEMCTL_READ_VERBS. That is the point, not an oversight: the "
+        "script's whole job is to start main-green-check.service early. So the "
+        "acknowledgement rests on TWO independent legs, either of which alone "
+        "would do. (1) SEAM: the command is behind MAIN_STATUS_WATCH_TRIGGER and "
+        "every behavioural test in test_main_status_watch.py sets it, so no test "
+        "executes the production argv — the production string is asserted "
+        "TEXTUALLY, never run. (2) FAIL-CLOSED: because `start` is not a read "
+        "verb, the verb-splitting stub BLOCKS it rather than passing it through, "
+        "so a future test that forgot the seam gets an error, not a real "
+        "20-minute gate run on the operator's box. Leg 2 is why this is safe "
+        "even against a test nobody has written yet. "
+        "🔴 THE PIN, arriving WITH the entry rather than after an audit, which "
+        "is the one lesson the tmux-reply-agent paragraph above asks anyone to "
+        "carry: test_main_status_watch.py::test_the_trigger_verb_is_MUTATING_so_"
+        "the_stub_fails_it_closed reads SYSTEMCTL_READ_VERBS itself rather than "
+        "a copied literal, asserts the trigger's verb is absent from it, and "
+        "asserts the trigger is the file's ONLY systemctl call site — so this "
+        "acknowledgement cannot absorb a SECOND, different systemctl call the "
+        "way the entries above were shown to. Both controls WATCHED: clean tree "
+        "passes, and a second injected call site fails with that test's own "
+        "message"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
          "notify-failure.sh", "playwright-nixos", "regen-known-repos.py",
