@@ -527,7 +527,8 @@ MUTANTS: list[tuple] = [
     ("K54", "deletion", "the picker loses `-i`, so fzf is SMART-CASE: a query "
                         "with an uppercase letter matches NOTHING and the "
                         "operator cannot tell the empty list from a dismissal. "
-                        "MEASURED `NimbusWorks`: 0 rows without, 41 with",
+                        "MEASURED on `_eponymous_corpus()` (195 rows), query "
+                        "`NimbusWorks`: 0 matched without, 15 with",
      "    'fzf -i --tiebreak=end --layout=reverse --info=inline '\n",
      "    'fzf --tiebreak=end --layout=reverse --info=inline '\n",
      "the picker lost `-i`"),
@@ -557,6 +558,39 @@ MUTANTS: list[tuple] = [
      '    if outcome == PICKED_TIMEOUT:\n',
      '    if False:\n',
      "timed out"),
+    # ---- F16: the round-2 audit's findings, as mutants ----------------------
+    # 🔴 K59 IS THE ROW A ROUND-2 AUDIT WROTE FOR ME, AND IT SURVIVED WHEN THEY
+    # RAN IT. `run_picker` reports PICKED_TIMEOUT from TWO arms — the ENXIO loop
+    # (the terminal never opened the rows FIFO) and the READ loop (the list is on
+    # screen and nobody answered). The second IS rofi's `timeout=120`. Round 1's
+    # finding was that this toast had been lost; the guard added to stop it being
+    # lost again used a peer that never opens the FIFOs, so it covered the FIRST
+    # arm only and this mutant passed the whole suite (225 passed).
+    ("K59", "operand swap", "the READ-loop timeout — the picker is OPEN and "
+                            "nobody answered, which is exactly what rofi's "
+                            "`timeout=120` was — degrades to a silent dismissal",
+     "                outcome = PICKED_TIMEOUT\n",
+     "                outcome = PICKED_DISMISSED\n",
+     "timed out"),
+    ("K60", "deletion", "the missing-`fzf` pre-flight stops firing, so a picker "
+                        "that CANNOT RUN answers the click with silence: the "
+                        "shell opens both FIFOs before exec'ing, so `fzf: not "
+                        "found` is indistinguishable from a dismissal",
+     '    if shutil.which("fzf") is None:\n',
+     "    if False:\n",
+     # ⚠ THE TOKEN MUST BE IN THE ASSERTION THAT FIRES FIRST. This row scored
+     # KILLED-WRONG-REASON against "a missing fzf said nothing", because the
+     # mutant trips the earlier `assert not spawned` — the window goes up before
+     # the toast is ever missed. Same short-circuit trap as K58.
+     "picker that cannot run"),
+    ("K61", "widening", "the never-shown toast goes back to blaming the "
+                        "wrapper's PATH — a cause that CANNOT produce it, "
+                        "sending the operator to check something that is fine",
+     '               "the terminal exited before it could show anything — check "\n'
+     '               "DISPLAY and try `alacritty --class float,mention-open -e true`")\n',
+     '               "the terminal exited before the list was shown — check that "\n'
+     '               "alacritty and fzf are on the hint wrapper\'s PATH")\n',
+     "still blames"),
     ("K36", "deletion", "the alacritty wrapper drops `pkgs.git` from the hint's "
                         "PATH: `git` is then absent under the display manager's "
                         "environment, FileNotFoundError is caught as OSError, "
@@ -582,6 +616,7 @@ TARGETS: dict[str, pathlib.Path] = {
     "K45": OPEN_, "K46": OPEN_, "K47": OPEN_,
     "K48": OPEN_, "K49": OPEN_, "K50": OPEN_, "K51": OPEN_, "K52": OPEN_,
     "K54": OPEN_, "K55": OPEN_, "K56": OPEN_, "K57": OPEN_, "K58": OPEN_,
+    "K59": OPEN_, "K60": OPEN_, "K61": OPEN_,
     "K53": ALACRITTY,
     "K40": ALACRITTY, "K41": SCAN, "K42": ALACRITTY,
     # 🔴 A FOURTH FILE, AND A NIX ONE. The wrapper's PATH is a seam between two

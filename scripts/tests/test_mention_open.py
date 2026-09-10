@@ -1907,9 +1907,13 @@ def test_REAL_fzf_is_CASE_INSENSITIVE_only_with_the_flag():
     against an fzf that was case-insensitive anyway, and would not be measuring
     the flag at all.
 
-    Measured here: `NimbusWorks` → 0 rows without, 41 with. Ranking is
-    unaffected (the eponymous repo is 1 either way), which is why adding it
-    costs nothing."""
+    Measured on THIS corpus (195 rows): `NimbusWorks` → **0** matched without
+    `-i`, **15** with. Ranking is unaffected — measured on the LOWERCASE query,
+    the only one where both sides have a ranking to compare: `nimbusworks` → 15
+    matched and the eponymous repo 1st, either way. An earlier docstring said
+    "0 rows without, 41 with … the eponymous repo is 1 either way", which was
+    both wrong (41 came from a scratch corpus, and 392 is the real universe's
+    row count) and self-contradictory: rank is undefined on an empty set."""
     _require_fzf()
     rows, target = _eponymous_corpus()
     mixed = "NimbusWorks"
@@ -1983,13 +1987,35 @@ def test_the_picker_shell_script_has_EXACTLY_the_two_redirections():
     `--prompt="mention > "` and `--pointer=">"`, so a raw `count(">")` is 3 and
     says nothing about where the rows go. `shlex` is the same lexer
     `_picker_flags()` uses, so a `>` that is quoted is data and a `>` that is
-    not is a destination."""
+    not is a destination.
+
+    🔴 FD-PREFIXED REDIRECTIONS COUNT TOO, and the first version of this missed
+    them: `shlex.split` yields `2>/tmp/leak` and `1>/tmp/leak` as single tokens
+    starting with a DIGIT, so a guard keyed on `startswith(("<", ">"))` passed
+    both while this docstring said "both, and no more". No live hazard — the
+    exact-string pin above catches them — but a guard whose description is wider
+    than its body reads as coverage while providing none."""
+    import re as _re
     import shlex
     tokens = shlex.split(MO.PICKER_SH)
-    redirs = [t for t in tokens if t.startswith(("<", ">"))]
+    # `[fd]<…` / `[fd]>…` / `>>` — every redirection shape sh accepts.
+    redirs = [t for t in tokens if _re.match(r"^\d*[<>]", t)]
     assert redirs == ["<$1", ">$2"], (
         f"PICKER_SH's redirections are {redirs}, expected exactly the rows FIFO "
         f"in and the choice FIFO out: {MO.PICKER_SH}")
+
+
+def test_the_redirection_guard_sees_an_FD_PREFIXED_redirection():
+    """POSITIVE CONTROL on the widening above — the exact shape that walked past
+    it. Both of these send the private rows somewhere new while keeping `<$1`
+    and `>$2` intact, so the redirection LIST is what has to notice."""
+    import re as _re
+    import shlex
+    for leak in ('fzf -i <"$1" >"$2" 2>/tmp/leak',
+                 'fzf -i <"$1" >"$2" 1>/tmp/leak'):
+        redirs = [t for t in shlex.split(leak) if _re.match(r"^\d*[<>]", t)]
+        assert redirs != ["<$1", ">$2"], (
+            f"the redirection guard cannot see {leak!r} — it yields {redirs}")
 
 
 def test_the_shell_script_pin_can_actually_FIRE():
@@ -2169,6 +2195,186 @@ class _Wedged:
 
     def terminate(self):
         pass
+
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 2: THE TIMEOUT GUARD COVERED THE WRONG ARM
+#
+# `run_picker` can report `PICKED_TIMEOUT` from TWO places, and they are
+# different failures:
+#
+#   * the ENXIO loop — the terminal never opened the rows FIFO at all;
+#   * the READ loop — the picker is OPEN, the rows were delivered, and nobody
+#     ever answered.
+#
+# The second one IS rofi's `timeout=120`: "the picker is up and the operator
+# walked away". Round 1's finding was that this toast had been LOST; the guard
+# added to stop it being lost again used a peer that never opens the FIFOs, so
+# it only ever exercised the FIRST arm. MEASURED by the round-2 audit: mutating
+# the read loop's `outcome = PICKED_TIMEOUT` to `PICKED_DISMISSED` SURVIVED the
+# whole suite (225 passed).
+# --------------------------------------------------------------------------- #
+class _OpensThenWaits(_FakeTerminal):
+    """A peer that behaves like a REAL picker nobody answers.
+
+    It performs the shell's own redirections, drains the rows — so the operator
+    is looking at a full list — and then simply never writes a selection and
+    never exits. That is the ONLY shape that reaches the read loop's deadline.
+    """
+
+    def popen(self, argv, **kwargs):
+        self.argv = list(argv)
+        rows_fifo, choice_fifo = argv[-3], argv[-2]
+
+        def serve():
+            rfh = open(rows_fifo, "r", encoding="utf-8")
+            wfh = open(choice_fifo, "w", encoding="utf-8")
+            with rfh, wfh:
+                self.payload = rfh.read()
+                self._shown.set()
+                # …and now wait, holding both ends, answering nothing.
+                self._release.wait(timeout=30)
+
+        self._shown = threading.Event()
+        self._release = threading.Event()
+        self._thread = threading.Thread(target=serve, daemon=True)
+        self._thread.start()
+        return self
+
+    def poll(self):
+        return None          # ALIVE the whole time — this is the distinction
+
+    def terminate(self):
+        self._release.set()
+
+
+def test_a_timeout_with_the_LIST_ON_SCREEN_toasts(monkeypatch):
+    """🔴 THE ARM ROFI'S `timeout=` ACTUALLY WAS, pinned at last.
+
+    The sibling test drives the ENXIO arm (a terminal that never opens the
+    FIFOs). This one drives the arm that matters in production: the rows were
+    delivered, the picker is on screen, and the operator walked away.
+
+    The positive control is what separates the two — this asserts the payload
+    REACHED the peer, so a regression that made the terminal fail early would
+    fail here rather than quietly re-testing the other arm."""
+    monkeypatch.setattr(MO, "PICKER_TIMEOUT", 0.6)
+    term = _OpensThenWaits(None)
+    monkeypatch.setattr(MO.subprocess, "Popen", term.popen)
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    try:
+        url = MO.pick(ONE_CANDIDATE)
+    finally:
+        term.terminate()
+    # POSITIVE CONTROL: the list really was delivered, so this is the
+    # picker-is-open arm and not the terminal-never-started one.
+    assert term._shown.is_set(), (
+        "the peer never received the rows — this exercised the ENXIO arm again, "
+        "which is the very substitution this test exists to stop")
+    assert term.rows == MO.picker_rows(ONE_CANDIDATE), term.rows
+    assert url == ""
+    assert said, ("the picker timed out with the list on screen and toasted "
+                  "NOTHING — that is rofi's `timeout=120` case, lost again")
+    assert "timed out" in said[0][0], said
+
+
+def test_the_two_TIMEOUT_arms_are_different_code_paths():
+    """🔴 STRUCTURAL, so the pair above cannot collapse into one. `run_picker`
+    must keep BOTH deadline checks — the ENXIO loop's and the read loop's.
+    Deleting either leaves a hang or a silent dismissal, and a single test can
+    only ever cover one of them."""
+    src = HANDLER.read_text()
+    body = src[src.index("def run_picker("):src.index("def pick(")]
+    assert body.count("PICKED_TIMEOUT") == 2, (
+        f"run_picker names PICKED_TIMEOUT {body.count('PICKED_TIMEOUT')}x — "
+        "expected 2: once when the terminal never opened the rows FIFO, once "
+        "when the list was on screen and nobody answered")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 2: A MISSING `fzf` IS NOT `never-shown`
+# --------------------------------------------------------------------------- #
+def test_a_missing_fzf_is_caught_BEFORE_a_window_is_raised(monkeypatch):
+    """🔴 THE PROSE THIS REPLACES WAS DISPROVED BY ITS OWN FILE. Four places
+    said `never-shown` is "what a missing fzf on the wrapper's PATH looks
+    like". It is not: `/bin/sh` applies `<"$1" >"$2"` BEFORE exec'ing — the very
+    fact `run_picker`'s open-order fix rests on — so a missing fzf gives the
+    rows FIFO a reader and the run ends as a SILENT dismissal.
+
+    MEASURED: `/bin/sh -c 'zzznosuchbinary <"$1" >"$2"'` exits 127 with the
+    redirections applied. And `proc.returncode` cannot rescue it — alacritty
+    0.17.0 exits 0 whether its `-e` command exits 127, exits 0, or does not
+    exist.
+
+    So it is caught BEFORE the spawn, which is better than any toast after it:
+    no window is raised at all."""
+    spawned = []
+    # `pick()` imports `shutil` locally, which binds the SAME module object this
+    # file imported — so patching it here is patching what the handler calls.
+    monkeypatch.setattr(shutil, "which", lambda _n: None)
+    monkeypatch.setattr(MO.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(a) or _Dead())
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    assert MO.pick(ONE_CANDIDATE) == ""
+    assert not spawned, "a window was raised for a picker that cannot run"
+    assert said, "a missing fzf said nothing — the silent dead click"
+    assert "fzf" in said[0][1], said
+
+
+def test_the_missing_fzf_preflight_does_not_fire_when_fzf_IS_present(
+        monkeypatch):
+    """NEGATIVE CONTROL for the test above: with a real fzf on PATH the
+    pre-flight must be invisible, or it would break every ordinary pick."""
+    _require_fzf()
+    row = MO.picker_rows(ONE_CANDIDATE)[0]
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    _term, url = _drive_picker(monkeypatch, choose=row)
+    assert url == ONE_CANDIDATE[0]["url"]
+    assert not said, said
+
+
+def test_the_NEVER_SHOWN_toast_does_not_blame_a_cause_it_cannot_HAVE(
+        monkeypatch):
+    """🔴 A TOAST BODY IS A CLAIM, and this one named two causes that cannot
+    reach it — a missing alacritty raises `FileNotFoundError` at `Popen` and
+    takes the other branch, and a missing fzf is pre-flighted. Sending an
+    operator to check a PATH that is fine is worse than saying less."""
+    monkeypatch.setattr(MO.subprocess, "Popen", lambda *a, **k: _Dead())
+    said = []
+    monkeypatch.setattr(MO, "notify", lambda s, b="": said.append((s, b)))
+    assert MO.pick(ONE_CANDIDATE) == ""
+    body = said[0][1]
+    assert "fzf" not in body, (
+        f"the never-shown toast still blames fzf, which cannot produce it: {body}")
+    assert "PATH" not in body, (
+        f"the never-shown toast still blames the wrapper's PATH: {body}")
+    assert "DISPLAY" in body, body
+
+
+def test_the_PICKED_outcome_set_is_pinned_and_every_one_is_HANDLED():
+    """🔴 TWO-WAY, and the reason is round 1's own finding. `pick()` branches on
+    these constants and its `else` used to be silence, so a fifth outcome added
+    later would be dropped without a sound — which is exactly how the timeout
+    toast went missing in the first place.
+
+    Both directions: the ledger names every `PICKED_*` constant the module
+    defines, and `pick()` accounts for every member of the ledger."""
+    defined = {n for n in dir(MO) if n.startswith("PICKED_")
+               and isinstance(getattr(MO, n), str)}
+    assert defined == {"PICKED_SELECTED", "PICKED_DISMISSED", "PICKED_TIMEOUT",
+                       "PICKED_NEVER_SHOWN"}, sorted(defined)
+    assert set(MO.PICKED_OUTCOMES) == {getattr(MO, n) for n in defined}, (
+        "PICKED_OUTCOMES and the PICKED_* constants disagree")
+    # …and `pick()` must not silently drop one.
+    src = HANDLER.read_text()
+    body = src[src.index("def pick("):]
+    assert "not in PICKED_OUTCOMES" in body, (
+        "pick() no longer has a catch-all for an outcome nobody taught it "
+        "about — that is round 1's lost-toast defect one layer up")
 
 
 @pytest.mark.parametrize("state,write,expected", [

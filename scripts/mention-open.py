@@ -709,6 +709,16 @@ PICKER_LINES = 22
 # bytes live in a kernel pipe buffer between two processes and are gone when
 # both ends close. The pair lives in a 0700 `mkdtemp` removed in a `finally`.
 #
+# ⚠ "REMOVED IN A `finally`" IS TRUE OF EVERY EXIT THE INTERPRETER SEES, AND NOT
+# OF `SIGKILL` — worth stating because 18 orphaned `mention-open-*` dirs were
+# found in a test TMPDIR and read as this claim being false. MEASURED both ways:
+# a full suite run leaves 0, and a process parked inside `run_picker` and
+# SIGKILLed leaves exactly 1. So the orphans are killed TEST subprocesses (the
+# mutation battery and timed-out runs kill pytest), never a click. **No
+# disclosure either way** — what survives is two EMPTY FIFOs, which hold nothing
+# at rest, in a 0700 directory. A click that is killed mid-pick can leave one
+# behind; that is the honest scope of the sentence above.
+#
 # 🔴 THE HEADER GOES DOWN THE SAME PIPE, as `--header-lines`, rather than into
 # `--header` on argv. The note is pinned to name no repository — but pinning is
 # a claim about today's `universe_note`/`guessed_note`, and routing it through
@@ -741,12 +751,19 @@ PICKER_LINES = 22
 # 🔴 `-i` IS LOAD-BEARING AND ITS ABSENCE WAS SILENT. fzf's default is
 # SMART-CASE: a query containing any uppercase letter becomes case-SENSITIVE.
 # rofi's `-i` was unconditional, so the swap quietly changed behaviour.
-# MEASURED on the 392-row synthetic corpus, query `NimbusWorks`: **0 rows**
-# without `-i`, **41** with. An empty list and a dismissal are indistinguishable
-# to `pick()`, so the operator types a capital letter and gets SILENCE — the
-# exact wall this whole change exists to remove, and `repo_universe()` preserves
-# each repo's original casing so mixed-case rows are real. Ranking is unaffected:
-# the eponymous repo is 1/41 with and without.
+# MEASURED through `_eponymous_corpus()` (195 rows), query `NimbusWorks`:
+# **0 rows** matched without `-i`, **15** with. An empty list and a dismissal are
+# indistinguishable to `pick()`, so the operator types a capital letter and gets
+# SILENCE — the exact wall this whole change exists to remove, and
+# `repo_universe()` preserves each repo's original casing so mixed-case rows are
+# real.
+#
+# ⚠ RANKING IS UNAFFECTED, AND THAT IS MEASURED ON THE LOWERCASE QUERY — the
+# only one where both sides have a ranking to compare. `nimbusworks`: 15 matched
+# and the eponymous repo 1st, with `-i` and without. An earlier version of this
+# comment said "1/41 with and without" beside "0 rows without", which is
+# self-contradictory: rank is undefined on an empty set. (41 and 392 came from a
+# scratch corpus, not this one; 392 is the real universe's row count.)
 PICKER_SH = (
     'fzf -i --tiebreak=end --layout=reverse --info=inline '
     '--prompt="mention > " --pointer=">" --color=16 '
@@ -790,14 +807,37 @@ def picker_header(mesg: str) -> list[str]:
 # `TimeoutExpired`, which the old `except` turned into a toast, and the first
 # version of this rewrite swallowed that into the same silent "". Restored here
 # rather than argued away: a picker that timed out is not a picker that was
-# dismissed. `NEVER_SHOWN` is the case rofi had no analogue for — the terminal
-# started and died before it could be fed, which is what a missing `fzf` on the
-# wrapper's PATH looks like, and answering a CLICK with nothing at all is the
-# dead end this whole handler exists to remove.
+# dismissed.
+#
+# 🔴 `NEVER_SHOWN` MEANS THE TERMINAL DIED BEFORE THE SHELL OPENED THE FIFOs,
+# AND IT CANNOT MEAN A MISSING `fzf` — a round-2 audit finding, and the prose it
+# corrects was WRONG IN THE SAME FILE THAT DISPROVES IT. `/bin/sh` applies
+# `<"$1" >"$2"` BEFORE exec'ing the command, which is the whole basis of the
+# open-order deadlock fix in `run_picker` — so a MISSING fzf still gives the rows
+# FIFO a reader, the ENXIO loop still exits normally, and the run ends as a
+# silent `DISMISSED`. MEASURED: `/bin/sh -c 'zzznosuchbinary <"$1" >"$2"'` exits
+# 127 with the redirections APPLIED. ⚠ And `proc.returncode` cannot rescue it —
+# alacritty 0.17.0 exits 0 whether its `-e` command exits 127, exits 0, or does
+# not exist at all.
+#
+# So a missing `fzf` is caught BEFORE the spawn instead, by `pick()`'s
+# `shutil.which` pre-flight — which is strictly better than a post-hoc toast: it
+# never raises a window at all. What still reaches `NEVER_SHOWN` is alacritty
+# starting and exiting before the shell ran — no `DISPLAY`, an X error, a
+# terminal that cannot map a window — and answering a CLICK with nothing at all
+# is the dead end this whole handler exists to remove.
 PICKED_SELECTED = "selected"
 PICKED_DISMISSED = "dismissed"
 PICKED_TIMEOUT = "timeout"
 PICKED_NEVER_SHOWN = "never-shown"
+
+# 🔴 PINNED TWO-WAY by `test_the_PICKED_outcome_set_is_pinned_and_every_one_is_
+# HANDLED`. `pick()` branches on these and its `else` is SILENCE, so a fifth
+# outcome added later would be dropped without a sound — which is the exact
+# failure round 1 found in the timeout arm. The ledger makes adding one a
+# deliberate act.
+PICKED_OUTCOMES = (PICKED_SELECTED, PICKED_DISMISSED, PICKED_TIMEOUT,
+                   PICKED_NEVER_SHOWN)
 
 
 def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
@@ -876,8 +916,12 @@ def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
                 if exc.errno != errno.ENXIO:
                     raise
                 if proc.poll() is not None:
-                    # The terminal died before it could be fed, so the operator
-                    # saw nothing at all. That is NOT a dismissal.
+                    # The terminal exited without the SHELL ever opening the
+                    # rows FIFO, so nothing was ever displayed. That is NOT a
+                    # dismissal. ⚠ It is also NOT a missing `fzf` — see the
+                    # `PICKED_*` block: the shell opens both FIFOs before
+                    # exec'ing, so a missing command still lands here as a
+                    # normal read. `pick()` pre-flights that case instead.
                     return "", PICKED_NEVER_SHOWN
                 if time.monotonic() > deadline:
                     return "", PICKED_TIMEOUT
@@ -984,6 +1028,21 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
     empty query scores nothing. Verified end-to-end against a real fzf, not
     assumed.
     """
+    # 🔴 PRE-FLIGHT, BECAUSE A MISSING `fzf` IS OTHERWISE SILENT. The shell opens
+    # both FIFOs before exec'ing, so `fzf: not found` reaches `run_picker` as an
+    # ordinary empty read — indistinguishable from a dismissal, which is the dead
+    # click the wrapper's PATH test exists to prevent and which no outcome of
+    # `run_picker` can report. Asking HERE costs one `which` on the slow path
+    # only, and it never raises a window to say so. `alacritty` needs no
+    # equivalent: it is `Popen`'s argv[0], so its absence is a
+    # `FileNotFoundError` the handler below already names.
+    import shutil  # noqa: PLC0415 — see run_picker's import comment
+    if shutil.which("fzf") is None:
+        notify("the mention picker is not installed",
+               "fzf is not on this handler's PATH, so the picker cannot run — "
+               "add pkgs.fzf to the hint wrapper in "
+               "nix/programs/alacritty/default.nix")
+        return ""
     rows = picker_rows(candidates)
     header = picker_header(mesg)
     try:
@@ -1002,9 +1061,20 @@ def pick(candidates: list[dict], mesg: str = "") -> str:
         notify("the mention picker timed out",
                f"nothing was selected within {PICKER_TIMEOUT:.0f}s")
     elif outcome == PICKED_NEVER_SHOWN:
+        # ⚠ NAMES THE CAUSE THAT CAN ACTUALLY REACH THIS ARM. It used to say
+        # "check that alacritty and fzf are on the hint wrapper's PATH", and
+        # NEITHER of those can produce it: a missing alacritty raises
+        # `FileNotFoundError` at `Popen` and takes the branch above, and a
+        # missing fzf is pre-flighted before the spawn. What lands here is a
+        # terminal that started and exited before the shell ran.
         notify("the mention picker could not open",
-               "the terminal exited before the list was shown — check that "
-               "alacritty and fzf are on the hint wrapper's PATH")
+               "the terminal exited before it could show anything — check "
+               "DISPLAY and try `alacritty --class float,mention-open -e true`")
+    elif outcome not in PICKED_OUTCOMES:  # pragma: no cover — pinned two-way
+        # 🔴 NOT A SILENT `else`. An outcome nobody taught this function about
+        # is the same defect round 1 found in the timeout arm, one layer up, so
+        # it says so instead of dropping it.
+        notify("the mention picker returned an unknown outcome", str(outcome))
     return row_to_url(chosen, candidates)
 
 
