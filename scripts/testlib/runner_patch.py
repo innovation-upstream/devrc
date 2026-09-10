@@ -46,7 +46,8 @@ def _replace_array(src: str, name: str, entries: list[str]) -> str:
 def patch_runner_source(src: str, targets: list[str], floors: dict[str, int], *,
                         ack: list[str] | None = None,
                         hook_tests: list[str] | None = None,
-                        shell_tests: list[str] | None = None) -> str:
+                        shell_tests: list[str] | None = None,
+                        expected_skips: list[str] | None = None) -> str:
     """Return `src` with HERMETIC_TARGETS and TARGET_FLOORS replaced wholesale.
 
     Both replacements are asserted to have landed. A silently-unmatched regex
@@ -102,10 +103,28 @@ def patch_runner_source(src: str, targets: list[str], floors: dict[str, int], *,
     # GREEN outcome unreachable and every negative control ambiguous. Emptied
     # here, deliberately: this is the one guard a patched copy structurally
     # cannot honour, and it is the real runner's job, not the copy's.
-    patched, n = re.subn(
-        r"^EXPECTED_SKIPS=\(.*?^\)", "EXPECTED_SKIPS=()", patched, count=1, flags=re.S | re.M
-    )
-    assert n == 1, "failed to empty EXPECTED_SKIPS in the copied runner"
+    #
+    # 🔴 EMPTY BY DEFAULT IS ALSO A BLIND SPOT, and it hid two real defects.
+    # Emptying this (and `ack` below) means GUARD 2's and GUARD 7's per-target
+    # ledgers are INERT in every copy, so no test built on this helper can ever
+    # observe how those guards behave against a target the ledgers describe.
+    # PR #1445's scoped-run suite had 45 tests and not one of them could see
+    # that a scoped run of `scripts/tests` failed GUARD 7, or that a scoped run
+    # of `scripts/signal/tests` failed GUARD 2 — the defect lived in the seam
+    # between the scoped runner and the ledgers, and no fixture built the
+    # combined state. claude/RULES.md: "ask which surface your fixture does NOT
+    # load."
+    # So callers can now supply a synthetic ledger naming their own throwaway
+    # target. Default unchanged, because most callers genuinely are not testing
+    # these guards and a non-empty ledger would red them for an unrelated reason.
+    if expected_skips is not None:
+        patched = _replace_array(patched, "EXPECTED_SKIPS", expected_skips)
+    else:
+        patched, n = re.subn(
+            r"^EXPECTED_SKIPS=\(.*?^\)", "EXPECTED_SKIPS=()", patched, count=1,
+            flags=re.S | re.M
+        )
+        assert n == 1, "failed to empty EXPECTED_SKIPS in the copied runner"
 
     # GUARD 7's ledger and the two non-pytest target lists. Left ALONE by
     # default so every existing caller keeps driving the real ones; a caller

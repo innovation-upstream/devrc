@@ -134,7 +134,23 @@
 #     --check-floors            — run GUARD 3a only (validate the TARGET_FLOORS
 #                                 two-way pin, print the table and the derived
 #                                 global floor, exit). Same reason: cheap.
+#     --files "<list>"          — run only these test FILES, space-separated,
+#                                 inside their owning targets. A SCOPE, not a
+#                                 subset: no target floor applies, the run says
+#                                 `SCOPE: SCOPED`, and `gate.sh` REFUSES to
+#                                 report a gate PASS off it. Mutually exclusive
+#                                 with --targets/DEVRC_TARGETS. Every path must
+#                                 exist and lie under a declared target; an
+#                                 empty list is FATAL. Produce the list with
+#                                 `scripts/scoped-tests.sh`, which maps a git
+#                                 diff to it — this script never guesses.
 #   ROOT defaults to the git repo root (or the script's parent-parent).
+#
+# EVERY run also prints, on its own line and on every exit path:
+#     SCOPE: FULL|PARTIAL|SCOPED|UNKNOWN (<detail>)
+# See GUARD 11 below. It is a POSITIVE marker — `gate.sh` requires to see
+# `SCOPE: FULL` before it may emit a gate PASS, so a missing line is
+# "cannot vouch", never "the whole suite ran".
 #
 # Exit non-zero if ANY selected suite fails OR any guard above trips. Prints a
 # per-dir + total summary (collected / passed / skipped / failed) and, on EVERY
@@ -172,6 +188,12 @@ _emit_verdict() {
   local rc="$1"
   [ "$VERDICT_EMITTED" -eq 0 ] || return 0
   VERDICT_EMITTED=1
+  # 🔴 THE ORDERING IS OWNED HERE, not at the two call sites. The happy path
+  # calls this function explicitly at the end of the run and the EXIT trap calls
+  # it again; a scope emitted from the trap alone would land AFTER the verdict on
+  # that path and BEFORE it on every abort. One writer, one order, always
+  # SCOPE-then-RESULT — because RESULT is the line every consumer reads last.
+  _emit_scope
   # 🔴 THIS LINE'S FORMAT IS A MACHINE CONTRACT — DO NOT APPEND TO IT.
   # `test_gate_exit_truthfulness.py` matches it with `^RESULT: (PASS|FAIL)
   # \(exit=(\d+)\)$`, ANCHORED AT BOTH ENDS. A first draft of the subset work
@@ -186,6 +208,56 @@ _emit_verdict() {
     echo "RESULT: FAIL (exit=$rc)"
   fi
 }
+# --- GUARD 11: THE RUN STATES ITS OWN SCOPE, POSITIVELY -----------------------
+# 🔴 A VERDICT WITHOUT A SCOPE IS NOT A VERDICT. `RESULT: PASS` is true of the
+# targets that ran, and says nothing about how many that was — so a narrowed run
+# and a full gate are byte-identical on the one line every consumer parses. That
+# was not hypothetical: MEASURED 2026-09-08 on this file's parent commit,
+#   DEVRC_TARGETS=scripts/collector/i3/tests scripts/gate.sh --tier pytest
+# printed `GATE: RESULT=PASS exit=0` after running 1 of 28 targets (12 tests) —
+# a full-gate PASS off a 12-test run, quotable as "the gate passed".
+#
+# 🔴 AND IT IS A POSITIVE MARKER, NOT AN ABSENCE CHECK. The obvious design is
+# "print a warning when narrowed, and let silence mean full" — which is the
+# reassuring zero this repo keeps banning: an old runner, a truncated log, a
+# renamed marker and a genuinely full run are then indistinguishable, and every
+# one of them reads as FULL. So EVERY run prints a SCOPE line, including the
+# full one, and `gate.sh` requires to SEE `SCOPE: FULL` before it may emit
+# `GATE: RESULT=PASS`. A missing line is UNVOUCHED, never a pass.
+#
+# Emitted from the EXIT trap, beside the verdict and for the same reason: an
+# abort, a kill or an `exit 3` precondition must still say what it did or did
+# not cover. Before the scope is resolved the honest answer is UNKNOWN, and
+# UNKNOWN is not FULL.
+#
+# 🔴 FORMAT IS A MACHINE CONTRACT, matched `^SCOPE: (FULL|PARTIAL|SCOPED|UNKNOWN)`
+# by `scripts/gate.sh` and pinned two-way by
+# `scripts/tests/test_scoped_runs.py::test_the_scope_vocabulary_is_pinned_two_way`.
+# Do not rename a state without moving both sides in the same commit.
+#   NONE     the invocation ran NO TESTS AT ALL — `--check-targets` and
+#            `--check-floors` validate a table and exit in milliseconds. 🔴 They
+#            used to print `SCOPE: FULL` + `RESULT: PASS (exit=0)` in about two
+#            seconds, having collected nothing: the full-gate-shaped pair, off a
+#            run that tested nothing. `gate.sh` cannot be driven into it (it
+#            passes no such flag), so it was never a false green THROUGH the
+#            gate — but it is a false green in the content contract this marker
+#            exists to establish, and CLAUDE.md now tells readers to parse
+#            exactly that pair. The whole value of `SCOPE: FULL` is that it can
+#            be trusted without re-running anything.
+#   FULL     every declared target of the selected set ran.
+#   PARTIAL  a TARGET subset ran (--targets / DEVRC_TARGETS). Still floor-guarded
+#            per selected target, so it is a real claim about those targets.
+#   SCOPED   a FILE subset ran (--files). NOT floor-guarded against the target's
+#            own floor — see the SCOPED FILE SELECTION block.
+#   UNKNOWN  the run ended before the scope was decided.
+SCOPE_STATE="UNKNOWN"
+SCOPE_DETAIL="the run ended before its scope was resolved"
+SCOPE_EMITTED=0
+_emit_scope() {
+  [ "$SCOPE_EMITTED" -eq 0 ] || return 0
+  SCOPE_EMITTED=1
+  echo "SCOPE: ${SCOPE_STATE} (${SCOPE_DETAIL})"
+}
 # 🔴 THE VERDICT FIRST, THEN THE SHREDDER. `NOGIT_DIR` holds GUARD 10's
 # key snapshots, which are full `key<TAB>value` dumps of the operator's REAL git
 # config — `remote.origin.url` included, which can carry a token. The normal
@@ -196,6 +268,7 @@ _emit_verdict() {
 # verdict just announced.
 _on_exit() {
   local rc=$?
+  # `_emit_verdict` emits the scope itself, in order. Calling it here is enough.
   _emit_verdict "$rc"
   [ -n "${NOGIT_DIR:-}" ] && rm -rf "$NOGIT_DIR" 2>/dev/null || true
   return 0
@@ -248,6 +321,38 @@ SET_TOTAL=0
 SUBSET_NOTE=""
 CHECK_TARGETS_ONLY=0
 CHECK_FLOORS_ONLY=0
+# --- SCOPED FILE SELECTION (--files) ------------------------------------------
+# 🔴 A SECOND, STRICTLY NARROWER NARROWING — and it is deliberately NOT spelled
+# as an extension of `--targets`. The two make DIFFERENT claims and must not be
+# confused for one another:
+#
+#   --targets  a SUBSET. Each selected target still runs whole and is still
+#              checked against its own TARGET_FLOORS entry, so the verdict is a
+#              real (partial) claim: "these suites did not shrink and did pass".
+#   --files    a SCOPE. Individual test FILES run inside their owning target, so
+#              the target's floor CANNOT apply — 2 files of scripts/tests will
+#              never collect its 13,026. This is an ITERATION tool, and its
+#              verdict is only ever "the named files passed".
+#
+# Overloading `--targets` to accept paths would have merged those two claims
+# behind one word, and the exact-match rule that makes `--targets` safe (a typo
+# is FATAL, never a silent narrowing) is the thing that would have had to go.
+#
+# WHY IT EXISTS. MEASURED 2026-09-08 in this worktree's devShell:
+#   `pytest scripts/tests --collect-only`      13,367 tests, 60.0s wall / 30.5s CPU
+#   `pytest scripts/tests/test_drift_check.py` 461 tests,     0.64s wall
+# i.e. COLLECTION ALONE of the monolithic target costs a minute before a single
+# test runs, and 94x of that is avoidable when the change is one file's worth.
+# `--targets scripts/tests` cannot avoid any of it; only a file selection can.
+#
+# The mapping from a git diff to a file list is a separate, fallible decision
+# and lives OUTSIDE this script, exactly as the `--targets` block says: see
+# `scripts/scoped-tests.sh`. This script's job is to make the SELECTION
+# mistakes loud and to refuse to be quoted as a gate.
+SCOPED_MODE=0
+SCOPED_FILES_RAW=""
+SCOPED_FILES=()
+SCOPED_FLAG_GIVEN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --set) SET="${2:-hermetic}"; shift; [ $# -gt 0 ] && shift ;;
@@ -288,6 +393,22 @@ while [ $# -gt 0 ]; do
       case "$1" in
         --targets=*) ONLY_TARGETS="${1#*=}"; shift ;;
         *)           ONLY_TARGETS="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+      esac
+      ;;
+    # Run a SCOPE of individual test FILES. Same doctrine as --targets above and
+    # for the same reason: a repeated flag is FATAL rather than last-wins,
+    # because the caller this exists for is a WRAPPER appending its own value.
+    --files|--files=*)
+      if [ "$SCOPED_FLAG_GIVEN" -eq 1 ]; then
+        echo "run-tests: FATAL — --files given more than once." >&2
+        echo "           Last-wins would silently discard the earlier selection." >&2
+        echo "           Pass ONE --files with the whole space-separated list." >&2
+        exit 3
+      fi
+      SCOPED_FLAG_GIVEN=1
+      case "$1" in
+        --files=*) SCOPED_FILES_RAW="${1#*=}"; shift ;;
+        *)         SCOPED_FILES_RAW="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
       esac
       ;;
     *) ROOT="$1"; shift ;;
@@ -917,6 +1038,137 @@ fi
 # narrowed — reading it afterwards would report "N of N" on every subset run,
 # which is precisely the reassuring-but-wrong number this is for.
 SET_TOTAL="${#TARGETS[@]}"
+# The UNNARROWED list, kept because `TARGETS` is the thing that gets narrowed.
+# A count alone cannot answer "which ones did NOT run", and that question is the
+# whole content of the CI-gap block in the SUMMARY: with the local full-suite
+# mandate gone, CI is the only automated signal, so the useful thing a narrowed
+# run can print is not what it covered but what it left for CI to find.
+SET_TARGETS_ALL=("${TARGETS[@]}")
+
+# --- SCOPED FILE SELECTION: resolve --files to (files, owning targets) ---------
+# Runs BEFORE the target-subset block below and feeds it: a file scope IS a
+# target subset, further narrowed. Deriving `ONLY_TARGETS` here rather than
+# adding a parallel narrowing path is what keeps every existing subset-aware
+# consumer correct for free — GUARD 5's subset message, GUARD 2's
+# "an entry whose target did not run cannot apply" filter, the SUBSET banner.
+# A second, independent narrowing variable would have had to be threaded
+# through each of those, and the one that was missed would have been silent.
+if [ "$SCOPED_FLAG_GIVEN" -eq 1 ]; then
+  # 🔴 MUTUALLY EXCLUSIVE WITH --targets, and FATAL rather than composed. The
+  # two answer the same question ("what ran?") with different granularity, so a
+  # run carrying both has two sources for one answer and the loser is silent.
+  # This is the shape the --targets block already calls out: the caller that
+  # sets both is a wrapper appending to an operator's selection.
+  if [ "$ONLY_TARGETS_GIVEN" -eq 1 ]; then
+    echo "run-tests: FATAL — --files cannot be combined with ${ONLY_TARGETS_SOURCE}." >&2
+    echo "           A file scope is already a target subset; two narrowings for" >&2
+    echo "           one run means one of them is silently discarded." >&2
+    echo "           Pass --files alone (\`unset DEVRC_TARGETS\` if that is the source)." >&2
+    exit 3
+  fi
+  # `set -f` for the same reason the --targets block gives: word splitting is
+  # wanted, pathname expansion is NOT. A glob here would select whatever happens
+  # to exist and stay green while selecting fewer.
+  set -f
+  # shellcheck disable=SC2206  # word splitting is intended here; globbing is not, hence set -f
+  _scoped_req=($SCOPED_FILES_RAW)
+  set +f
+  if [ "${#_scoped_req[@]}" -eq 0 ]; then
+    # 🔴 THE HAZARD THIS WHOLE MODE IS BUILT AROUND. `--files "$(map_changes)"`
+    # with a mapper that found nothing must never become a run that exits 0
+    # having tested nothing — "no tests to run" reads exactly like a pass, and
+    # a change-detector that selects NOTHING is the likeliest way to produce it.
+    echo "run-tests: FATAL — --files was given but resolved to NOTHING." >&2
+    echo "           A scoped run that selects no files would exit 0 having" >&2
+    echo "           tested nothing, which is indistinguishable from a pass." >&2
+    echo "           If a change-mapper produced this, the mapper found no" >&2
+    echo "           covering tests — run the FULL gate, do not run zero." >&2
+    exit 3
+  fi
+  _scoped_targets=""
+  for _f in "${_scoped_req[@]}"; do
+    # Accept an absolute path under ROOT or a `./`-prefixed one; the target list
+    # is repo-relative, so everything is normalised to that before matching.
+    case "$_f" in
+      "$ROOT"/*) _f="${_f#"$ROOT"/}" ;;
+      ./*)       _f="${_f#./}" ;;
+    esac
+    if [ ! -f "$_f" ]; then
+      echo "run-tests: FATAL — --files names '$_f', which is not a file in this repo." >&2
+      echo "           Paths are repo-relative (or absolute under $ROOT)." >&2
+      echo "           A path that resolves to nothing must not be silently dropped:" >&2
+      echo "           dropping it is how a scope shrinks to zero and still exits 0." >&2
+      exit 3
+    fi
+    # 🔴 IT MUST BE PYTEST-COLLECTABLE, and this is a FAMILY check, not a
+    # spelling nit. `SHELL_TESTS` are `scripts/tests/*.sh` — they sit under the
+    # `scripts/tests` DIRECTORY target, so the ownership check below accepts
+    # them, and the run then hands a shell script to pytest, collects 0, and
+    # reports "A collection error or an import breakage, not a pass". That is a
+    # WRONG DIAGNOSIS for a file that is a perfectly good test in a family
+    # `--files` cannot address. (`HOOK_TESTS` are already refused a line below:
+    # they live under `scripts/claude-hooks/tests/`, which is not a declared
+    # directory target.) Same rule GUARD 5 applies to a FILE target.
+    case "$(basename "$_f")" in
+      test_*.py|*_test.py) : ;;
+      *)
+        echo "run-tests: FATAL — --files names '$_f', which pytest cannot collect." >&2
+        echo "           --files selects pytest test files (test_*.py / *_test.py)." >&2
+        echo "           If this is one of the SHELL_TESTS (scripts/tests/*.sh) or" >&2
+        echo "           HOOK_TESTS (hand-rolled scripts run directly, not via" >&2
+        echo "           pytest), it is a good test in a family this mode cannot" >&2
+        echo "           address at all — those run on a FULL or --targets run." >&2
+        echo "           Refusing rather than handing it to pytest, which would" >&2
+        echo "           collect 0 and report it as a broken import." >&2
+        exit 3
+        ;;
+    esac
+    # Longest-match wins so a file target (`.../test_guard_core.py`) beats a
+    # directory target that happens to contain it. The declared list has no
+    # nesting today; relying on that would make this correct by accident.
+    _own=""
+    for _t in "${TARGETS[@]}"; do
+      case "$_f" in
+        "$_t"|"$_t"/*)
+          [ "${#_t}" -gt "${#_own}" ] && _own="$_t"
+          ;;
+      esac
+    done
+    if [ -z "$_own" ]; then
+      echo "run-tests: FATAL — --files names '$_f', which lies under NO declared '$SET' target." >&2
+      echo "           A file no target owns would run outside this runner's" >&2
+      echo "           per-target guard accounting (GUARDs 5, 7, 8, 10), so its" >&2
+      echo "           result would be a claim about nothing." >&2
+      echo "           Run with --check-targets to print the declared list." >&2
+      exit 3
+    fi
+    # A duplicate FILE inflates the derived scoped floor and then satisfies it by
+    # running the file twice — the identical defect the --targets block measured
+    # for duplicate targets. Fatal for the same reason: the caller is a mapper,
+    # and a mapper that emits duplicates has a bug worth seeing.
+    for _s in ${SCOPED_FILES[@]+"${SCOPED_FILES[@]}"}; do
+      if [ "$_s" = "$_f" ]; then
+        echo "run-tests: FATAL — --files names '$_f' more than once." >&2
+        echo "           A duplicate runs one file twice and counts it twice," >&2
+        echo "           inflating both the collected total and the derived" >&2
+        echo "           scoped floor. De-duplicate the selection before passing it." >&2
+        exit 3
+      fi
+    done
+    SCOPED_FILES+=("$_f")
+    case " $_scoped_targets " in
+      *" $_own "*) : ;;
+      *) _scoped_targets="${_scoped_targets}${_scoped_targets:+ }$_own" ;;
+    esac
+  done
+  SCOPED_MODE=1
+  # Hand the derived target set to the subset block below. `ONLY_TARGETS_SOURCE`
+  # names --files so every message that quotes it stays true.
+  ONLY_TARGETS="$_scoped_targets"
+  ONLY_TARGETS_GIVEN=1
+  ONLY_TARGETS_SOURCE="--files"
+  unset _scoped_req _scoped_targets _f _own _t _s
+fi
 
 # --- TARGET SUBSET (--targets / DEVRC_TARGETS) --------------------------------
 # 🔴 A SUBSET IS A CLAIM THAT THE UNSELECTED TARGETS COULD NOT HAVE CAUGHT THE
@@ -1044,9 +1296,39 @@ if [ "$ONLY_TARGETS_GIVEN" -eq 1 ]; then
   # "N of M", never a bare N: the denominator is what makes this a coverage
   # statement rather than a count. Same reason SET_TOTAL is captured before
   # narrowing.
-  echo "run-tests: SUBSET: ${#TARGETS[@]} of ${SET_TOTAL} '$SET' target(s) selected via ${ONLY_TARGETS_SOURCE}." >&2
-  echo "           Unselected targets did NOT run; this verdict is about the" >&2
-  echo "           selected ones only." >&2
+  if [ "$SCOPED_MODE" -eq 1 ]; then
+    # The word matters: these targets did NOT run whole. Calling this a SUBSET
+    # here while the banner calls it SCOPED is the two-labels-one-fact defect
+    # `--check-floors` and GUARD 5 each had to grow a branch for.
+    echo "run-tests: SCOPED: ${#SCOPED_FILES[@]} file(s) inside ${#TARGETS[@]} of ${SET_TOTAL} '$SET' target(s), via --files." >&2
+    echo "           The other files in those targets did NOT run, and no target" >&2
+    echo "           floor applies. This is NOT a gate run." >&2
+  else
+    echo "run-tests: SUBSET: ${#TARGETS[@]} of ${SET_TOTAL} '$SET' target(s) selected via ${ONLY_TARGETS_SOURCE}." >&2
+    echo "           Unselected targets did NOT run; this verdict is about the" >&2
+    echo "           selected ones only." >&2
+  fi
+fi
+
+# --- GUARD 11: resolve the SCOPE, now that TARGETS is final --------------------
+# The three states are exhaustive and mutually exclusive by construction: this
+# is the only place any of them is assigned after the UNKNOWN default, and it is
+# reached on every path that gets as far as having a target list. Anything that
+# exits before here — a bad flag, a missing tool, a `cd` failure — keeps UNKNOWN,
+# which `gate.sh` treats as not-a-full-gate. That is the intended direction.
+if [ "$SCOPED_MODE" -eq 1 ]; then
+  SCOPE_STATE="SCOPED"
+  SCOPE_DETAIL="${#SCOPED_FILES[@]} file(s) across ${#TARGETS[@]} of ${SET_TOTAL} ${SET} target(s) via --files"
+  # Replaces the subset block's note. A SCOPED run is narrower than the PARTIAL
+  # one that note describes, and saying "3 of 28 targets" alone would overstate
+  # it by the whole width of those targets.
+  SUBSET_NOTE=" — SCOPED: ${#SCOPED_FILES[@]} file(s) in ${#TARGETS[@]} of ${SET_TOTAL} ${SET} target(s) via --files"
+elif [ "$ONLY_TARGETS_GIVEN" -eq 1 ]; then
+  SCOPE_STATE="PARTIAL"
+  SCOPE_DETAIL="${#TARGETS[@]} of ${SET_TOTAL} ${SET} target(s) via ${ONLY_TARGETS_SOURCE}"
+else
+  SCOPE_STATE="FULL"
+  SCOPE_DETAIL="${#TARGETS[@]} of ${SET_TOTAL} ${SET} target(s)"
 fi
 
 # --- GUARD 3's floor table: PER-TARGET, and NOT an exact total -----------------
@@ -2362,6 +2644,11 @@ if [ "${#bad_targets[@]}" -gt 0 ]; then
 fi
 
 if [ "$CHECK_TARGETS_ONLY" -eq 1 ]; then
+  # Ran no tests — see GUARD 11's NONE state. Set here rather than at the
+  # top, because the scope block above has already resolved FULL/PARTIAL/
+  # SCOPED by the time we reach an early exit.
+  SCOPE_STATE="NONE"
+  SCOPE_DETAIL="--check-targets validated the target list and ran NO tests"
   # 🔴 SAY WHEN THIS IS A SUBSET. `all N hermetic target(s) resolve` after
   # validating ONE entry of twenty-eight is the same false full-set claim F3
   # fixed on the floor table and F1 fixed in the SUMMARY banner — this is the
@@ -2424,12 +2711,36 @@ fi
 # The global floor is DERIVED. Nothing hand-writes a total any more; MIN_TESTS
 # survives only as an env override for a one-off (raise it, don't lower it).
 MIN_TESTS_COMPUTED=0
-for t in "${TARGETS[@]}"; do
-  MIN_TESTS_COMPUTED=$(( MIN_TESTS_COMPUTED + $(_floor_for "$t") ))
-done
+if [ "$SCOPED_MODE" -eq 1 ]; then
+  # 🔴 THE TARGET'S OWN FLOOR CANNOT APPLY TO A SLICE OF IT, and pretending
+  # otherwise is not a conservative choice — it is a permanently-red gate. Two
+  # files of `scripts/tests` will never collect its 13,026, so every scoped run
+  # would fail on a floor that was correct about a run nobody asked for.
+  #
+  # So the scoped floor is DERIVED from the selection instead: one test per
+  # selected file. It is deliberately the weakest floor that is still not
+  # vacuous — it cannot see a file that shrank, but it CAN see the failure this
+  # mode is most exposed to, which is a selection that collects nothing at all
+  # (a mapper naming a file with no tests, a collection error, an empty module)
+  # and would otherwise report `collected=0 … RESULT: PASS`.
+  #
+  # ⚠ STATED PLAINLY because a floor that reads stronger than it is would be
+  # worse than none: with two files selected and one collecting zero, a sibling
+  # collecting two satisfies this floor. The per-file blind spot is real and is
+  # why a SCOPED verdict is never a coverage claim. What closes it is not a
+  # bigger number here — it is that the run PRINTS every selected file, so the
+  # reader can see what was asked for beside what ran.
+  MIN_TESTS_COMPUTED="${#SCOPED_FILES[@]}"
+else
+  for t in "${TARGETS[@]}"; do
+    MIN_TESTS_COMPUTED=$(( MIN_TESTS_COMPUTED + $(_floor_for "$t") ))
+  done
+fi
 MIN_TESTS="${MIN_TESTS:-$MIN_TESTS_COMPUTED}"
 
 if [ "$CHECK_FLOORS_ONLY" -eq 1 ]; then
+  SCOPE_STATE="NONE"
+  SCOPE_DETAIL="--check-floors validated the floor table and ran NO tests"
   echo "run-tests: all ${#TARGET_FLOORS[@]} floor(s) pin a known target, both ways (${#ALL_KNOWN_TARGETS[@]} known: hermetic + dev-host)."
   # A floor for a target OUTSIDE the selected set is printed, but is NOT part of
   # the global sum below — `MIN_TESTS_COMPUTED` accumulates over $TARGETS, and
@@ -2464,7 +2775,12 @@ if [ "$CHECK_FLOORS_ONLY" -eq 1 ]; then
   # SELECTED targets, not over `$SET` — printing "the hermetic set" there is a
   # false claim about coverage, and the number it labels is exactly the one a
   # reader uses to decide whether the run was complete.
-  if [ -n "$ONLY_TARGETS" ]; then
+  if [ "$SCOPED_MODE" -eq 1 ]; then
+    # NOT a sum over targets — see the MIN_TESTS_COMPUTED block. Labelling it as
+    # one would read as "these targets' floors add to 2", which is false by four
+    # orders of magnitude and in the reassuring direction.
+    echo "  SCOPED floor (one test per selected file; NO target floor applied) = $MIN_TESTS_COMPUTED"
+  elif [ -n "$ONLY_TARGETS" ]; then
     echo "  GLOBAL floor (sum over the ${#TARGETS[@]} SELECTED target(s), a SUBSET of $SET) = $MIN_TESTS_COMPUTED"
   else
     echo "  GLOBAL floor (sum over the $SET set) = $MIN_TESTS_COMPUTED"
@@ -3867,9 +4183,34 @@ run_pytest() {
   return "$_t_rc"
 }
 
+# Populate SCOPED_TARGET_FILES with the selected files owned by target $1, in
+# selection order. Separate from the run loop so the loop reads the same in both
+# modes; the ownership rule is the one resolved once at --files parse time.
+SCOPED_TARGET_FILES=()
+_scoped_files_for() { # $1 = target
+  local t="$1" f
+  SCOPED_TARGET_FILES=()
+  for f in ${SCOPED_FILES[@]+"${SCOPED_FILES[@]}"}; do
+    case "$f" in
+      "$t"|"$t"/*) SCOPED_TARGET_FILES+=("$f") ;;
+    esac
+  done
+}
+
 _run_pytest_body() {
   local d="$1"
-  echo "=== pytest $d ==="
+  shift
+  # In SCOPED mode the caller passes the FILES to run inside this target; with no
+  # extra arguments the paths are just the target, i.e. the full-run behaviour
+  # this function has always had. One code path, two selections — rather than a
+  # second invocation site whose guard wiring could drift from this one's.
+  local paths=()
+  if [ "$#" -gt 0 ]; then paths=("$@"); else paths=("$d"); fi
+  if [ "${#paths[@]}" -eq 1 ] && [ "${paths[0]}" = "$d" ]; then
+    echo "=== pytest $d ==="
+  else
+    echo "=== pytest $d — SCOPED to ${#paths[@]} file(s): ${paths[*]} ==="
+  fi
 
   # A target is a DIRECTORY **or** a single FILE, and both are load-bearing:
   # scripts/claude-hooks/tests/ mixes pytest-collectable modules with hand-rolled
@@ -3912,7 +4253,7 @@ _run_pytest_body() {
   # 10 refuses a WRITE to any repo outside the session tmp roots, which is the
   # case a pointer strip cannot answer. They landed a day apart from separate
   # branches and both claimed the number; only the numbering was reconciled.
-  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin -p testlib.gitenv_plugin -p testlib.nogit_plugin \
+  python -m pytest "${paths[@]}" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin -p testlib.gitenv_plugin -p testlib.nogit_plugin \
     ${PYTEST_PARALLEL_ARGS[@]+"${PYTEST_PARALLEL_ARGS[@]}"} --no-header -rs >"$log" 2>&1
   rc=$?
   nl_after="$(_nolaunch_lines)"
@@ -4001,19 +4342,40 @@ _run_pytest_body() {
   # GUARD 3 (per-target). Three INDEPENDENT checks, not an elif chain: a suite
   # that both collapsed AND failed used to report only whichever branch matched
   # first, so the second finding was invisible in the summary line.
-  local floor ceiling drift bad
+  local floor ceiling drift bad scoped_here
   bad=0
-  floor="$(_floor_for "$d")" || floor=0
-  drift=$(( floor / 4 ))
-  [ "$drift" -lt 60 ] && drift=60
-  ceiling=$(( floor + drift ))
+  scoped_here=0
+  if [ "$SCOPED_MODE" -eq 1 ]; then
+    # See the MIN_TESTS_COMPUTED block: the target's floor describes the whole
+    # target and is meaningless against a slice of it. One test per selected
+    # file, and NO drift ceiling — the ceiling exists to catch a floor that has
+    # fallen behind a growing suite, and a floor derived from this run's own
+    # selection cannot fall behind anything.
+    scoped_here=1
+    floor="${#paths[@]}"
+    ceiling=0
+    drift=0
+  else
+    floor="$(_floor_for "$d")" || floor=0
+    drift=$(( floor / 4 ))
+    [ "$drift" -lt 60 ] && drift=60
+    ceiling=$(( floor + drift ))
+  fi
 
   if [ "$collected" -lt 1 ]; then
     echo "run-tests: ERROR — $d collected 0 tests (summary: $summary)." >&2
     echo "  A collection error or an import breakage, not a pass." >&2
     RESULTS+=("FAIL  $d (collected 0 tests)")
     bad=1
-  elif [ "$floor" -ge 1 ] && [ "$collected" -lt "$floor" ]; then
+  elif [ "$scoped_here" -eq 1 ] && [ "$collected" -lt "$floor" ]; then
+    echo "run-tests: ERROR — $d collected $collected test(s) from ${#paths[@]} selected file(s)." >&2
+    echo "  A scoped run floors at one test per selected file, so at least one" >&2
+    echo "  named file contributed nothing. Selected here: ${paths[*]}" >&2
+    echo "  Do NOT drop the file to make this pass — a selection that runs" >&2
+    echo "  nothing is the failure this mode exists to refuse." >&2
+    RESULTS+=("FAIL  $d  (SCOPED collected=$collected below ${#paths[@]} selected file(s))")
+    bad=1
+  elif [ "$scoped_here" -eq 0 ] && [ "$floor" -ge 1 ] && [ "$collected" -lt "$floor" ]; then
     # The collapse this floor exists for. Reachable ONLY in 1..floor-1 — the
     # `collected 0` branch above deliberately owns 0, because "the suite did not
     # collect" and "the suite shrank" are different findings.
@@ -4024,7 +4386,7 @@ _run_pytest_body() {
     echo "  the commit — that visible edit IS the accounting." >&2
     RESULTS+=("FAIL  $d  (collected=$collected below floor $floor)")
     bad=1
-  elif [ "$floor" -ge 1 ] && [ "$collected" -gt "$ceiling" ]; then
+  elif [ "$scoped_here" -eq 0 ] && [ "$floor" -ge 1 ] && [ "$collected" -gt "$ceiling" ]; then
     # The OTHER direction, and the one the old single literal kept failing at
     # silently: a floor so far below the real count that the collapse it exists
     # for would fit underneath it. 5638 once stood against a real 6545.
@@ -4041,7 +4403,15 @@ _run_pytest_body() {
     RESULTS+=("FAIL  $d  (collected=$collected passed=$p skipped=$s failed=$f errors=$e)")
     bad=1
   elif [ "$bad" -eq 0 ]; then
-    RESULTS+=("PASS  $d  (collected=$collected passed=$p skipped=$s floor=$floor)")
+    if [ "$scoped_here" -eq 1 ]; then
+      # 🔴 NEVER print `floor=<target floor>` on a scoped row. That number is a
+      # coverage claim about the whole target, and this row covers ${#paths[@]}
+      # files of it — the same false-label defect GUARD 5's and --check-floors'
+      # subset messages each had to grow a branch for.
+      RESULTS+=("PASS  $d  SCOPED (${#paths[@]} file(s): collected=$collected passed=$p skipped=$s) — NOT a claim about $d")
+    else
+      RESULTS+=("PASS  $d  (collected=$collected passed=$p skipped=$s floor=$floor)")
+    fi
   fi
 
   rm -f "$log"
@@ -4056,7 +4426,19 @@ _run_pytest_body() {
 # from a silently green gate. Both mechanisms now agree, and the function ends
 # with the `return` rather than with output.
 for d in "${TARGETS[@]}"; do
-  run_pytest "$d" || fail=1
+  if [ "$SCOPED_MODE" -eq 1 ]; then
+    # 🔴 ONE pytest invocation per OWNING TARGET, never one per file. The
+    # per-target guard accounting (GUARDs 7, 8, 10 and GUARD 9's marker count)
+    # brackets exactly one invocation per `run_pytest` call, and `_markers_ok`
+    # bounds the session markers by the worker count of that one invocation.
+    # Splitting a target across N calls would multiply the markers by N and fail
+    # every one of those guards for a condition the SELECTION created — the same
+    # shape the nested-run serialisation note above records.
+    _scoped_files_for "$d"
+    run_pytest "$d" "${SCOPED_TARGET_FILES[@]}" || fail=1
+  else
+    run_pytest "$d" || fail=1
+  fi
 done
 
 # The claude-hooks tests are hand-rolled scripts (asserts + sys.exit, not
@@ -4070,7 +4452,64 @@ HOOK_TESTS=(
   "scripts/claude-hooks/tests/test_register_nudge_hook.py"
   "scripts/claude-hooks/tests/test_bash_guard.py"
 )
-for HOOK_TEST in "${HOOK_TESTS[@]}"; do
+# 🔴 A SCOPED RUN RUNS THE FILES IT WAS GIVEN AND NOTHING ELSE — and this is the
+# half that decides whether the mode is worth having. MEASURED on this box
+# (load ~93) with a 1-target `--targets` subset: the run took 172s, of which the
+# SELECTED target was 17s and the five SHELL_TESTS below were 101s. A scoped run
+# that still paid for those would be dominated by tests it can never name: the
+# hook and shell entries are hand-rolled scripts, not pytest targets, so no
+# `--files` selection can ever reach them and nothing the operator changed can
+# make them relevant to THIS run.
+#
+# 🔴 SKIPPED LOUDLY, NEVER SILENTLY. A quiet skip of two whole test families is
+# the #276 shape this file exists to refuse. Both are named in the SUMMARY
+# banner's SCOPED block, and the run already says `SCOPE: SCOPED` and
+# `NOT A GATE RUN`, so nothing here can be read as coverage it did not provide.
+# They run on every FULL and every `--targets` PARTIAL run, unchanged.
+SKIPPED_FAMILIES=()
+# --- WHOLE-TARGET EXPECTATIONS SUSPENDED BY A SCOPED RUN -----------------------
+# 🔴 THREE LEDGERS, ONE PROPERTY, AND I ONLY NOTICED IT FOR ONE OF THEM.
+# GUARD 3's TARGET_FLOORS, GUARD 7's NOLAUNCH_ACK and GUARD 2's EXPECTED_SKIPS
+# are all expectations about a target RUN IN FULL. None of them can describe a
+# SLICE of one, and applying them to a slice does not make the gate stricter —
+# it makes it RED for a correct run, which claude/RULES.md rates worse than no
+# gate because it teaches everyone to click through.
+#
+# MEASURED on this branch before the fix, both with every selected test PASSING:
+#   --files scripts/tests/test_ship_detect_role.py
+#     -> 12 passed, `GUARD 7: scripts/tests intercepted NOTHING`, exit 1
+#      (green iff the selection happened to include one of THREE launcher-seam
+#       files out of 181 in that target — a coin flip)
+#   --files scripts/signal/tests/test_search.py
+#     -> 15 passed, `0 test(s) skipped, but 2 of 3 pinned entries apply`, exit 1
+#      (green iff the selection happened to include test_pg_type_compat.py)
+# `scripts/tests` is 63% of the suite, so the primary new workflow was red for
+# the majority case. Worse, both messages printed remediation advice — "delete
+# the NOLAUNCH_ACK entry", "delete its EXPECTED_SKIPS entry" — that would have
+# disabled a guard REPO-WIDE, or reddened the FULL gate, if followed.
+#
+# 🔴 ONLY THE WHOLE-TARGET HALF IS SUSPENDED. Each of these ledgers has two
+# directions and only one of them is a whole-target claim:
+#   GUARD 7  REQUIRED  "this target intercepts >= 1"     -> whole-target, SUSPENDED
+#            PERMITTED "no OTHER target may intercept"   -> per-observation, KEPT
+#   GUARD 2  TOTAL     "skips == applicable pins"        -> whole-target, SUSPENDED
+#            UNPINNED  "no skip may go unexplained"      -> per-observation, KEPT
+# The kept halves are the ones that catch a test reaching the operator's machine
+# or a suite silently skipping — neither of which cares how much of the target
+# ran. The per-invocation plugin-marker checks (`_markers_ok`, GUARD 9's
+# detector count) are also KEPT: they ask "did the guard load for THIS
+# invocation", which is exactly as answerable for a slice as for a target.
+#
+# 🔴 AND SUSPENSION IS ANNOUNCED, NEVER SILENT. Every entry here is printed in
+# the SUMMARY. A guard that quietly stops applying is the #276 shape this whole
+# file exists to refuse; the point is that the reader can see which expectations
+# this run did not evaluate.
+SCOPED_SUSPENDED=()
+if [ "$SCOPED_MODE" -eq 1 ]; then
+  SKIPPED_FAMILIES+=("${#HOOK_TESTS[@]} hand-rolled hook test script(s)")
+  HOOK_TESTS=()
+fi
+for HOOK_TEST in ${HOOK_TESTS[@]+"${HOOK_TESTS[@]}"}; do
   # Was `|| continue` — a SILENT skip, the exact #276 shape GUARD 5 exists to stop:
   # an entry added to this list that the runner quietly rejects, leaving the gate
   # green while the tests never ran. A missing entry is now a loud failure.
@@ -4210,7 +4649,13 @@ _run_shell_test_body() {
   echo
 }
 
-for SHELL_TEST in "${SHELL_TESTS[@]}"; do
+# See the SKIPPED_FAMILIES note above the hook loop: these five were 101s of a
+# measured 172s subset run, and no `--files` selection can name any of them.
+if [ "$SCOPED_MODE" -eq 1 ]; then
+  SKIPPED_FAMILIES+=("${#SHELL_TESTS[@]} shell test script(s)")
+  SHELL_TESTS=()
+fi
+for SHELL_TEST in ${SHELL_TESTS[@]+"${SHELL_TESTS[@]}"}; do
   _st_t0="$(date +%s)"
   TIMING_CALLS=$(( ${TIMING_CALLS:-0} + 1 ))
   _run_shell_test_body "$SHELL_TEST"
@@ -4225,20 +4670,107 @@ done
 # `SUMMARY (hermetic set)` as its FIRST line and `GATE: RESULT=PASS`. A bare
 # "$SET set" there is a positive claim that the whole set ran, printed on the
 # one surface CLAUDE.md tells people to read.
+# --- THE CI GAP: what this run left for something else to find -----------------
+# 🔴 WHY THIS IS THE MOST USEFUL THING A NARROWED RUN PRINTS. There is no longer
+# a mandate that every session run the full suite locally before merging, and
+# branch protection is off, so the only automated signal is the advisory
+# `tekton/devrc-pytests` / `tekton/devrc-nodetests` pair — which runs the FULL
+# set on push and lands minutes later. A narrowed run's job is therefore not to
+# approximate a gate. It is to say, out loud, WHICH work it handed to CI.
+#
+# 🔴 COMPUTED, NOT ASSERTED. Every number here is derived from what this run
+# actually selected against the declared list it actually read, so it cannot
+# drift the way a hand-written "and CI also runs X" sentence would. The ONE
+# claim about CI itself is the check names, and those live in `flake.nix`'s
+# `checks` attrset — if they are renamed this line is wrong and the block still
+# prints a correct, useful gap.
+#
+# ⚠ It reports the gap in THIS tier only. The node tier is named because it is a
+# separate derivation this script cannot see into, never counted.
+_print_ci_gap() {
+  local t s missing=() n_missing=0 other_files=0 n_here n_sel
+  for t in "${SET_TARGETS_ALL[@]}"; do
+    local hit=0
+    for s in "${TARGETS[@]}"; do [ "$t" = "$s" ] && { hit=1; break; }; done
+    [ "$hit" -eq 0 ] && missing+=("$t")
+  done
+  n_missing="${#missing[@]}"
+  # In SCOPED mode the SELECTED targets are also only partly covered: count the
+  # collectable files in each that this run did not name. A gap block that
+  # counted only whole targets would report `0 not selected` for a run that
+  # touched one file of thirteen thousand.
+  if [ "$SCOPED_MODE" -eq 1 ]; then
+    for t in "${TARGETS[@]}"; do
+      if [ -d "$t" ]; then
+        n_here="$(find "$t" -type f \( -name 'test_*.py' -o -name '*_test.py' \) 2>/dev/null | wc -l | tr -d ' ')"
+      else
+        n_here=1
+      fi
+      _scoped_files_for "$t"
+      n_sel="${#SCOPED_TARGET_FILES[@]}"
+      [ "${n_here:-0}" -gt "$n_sel" ] && other_files=$(( other_files + n_here - n_sel ))
+    done
+  fi
+  echo "  ---- what this run did NOT cover (the gap CI closes) ----"
+  echo "    🔴 This is an INNER-LOOP run. The full set runs on push as the advisory"
+  echo "       checks \`tekton/devrc-pytests\` + \`tekton/devrc-nodetests\`, which are"
+  echo "       the only automated signal and land minutes later. Not covered here:"
+  if [ "$n_missing" -gt 0 ]; then
+    echo "       - ${n_missing} of ${SET_TOTAL} pytest target(s) never ran:"
+    for t in "${missing[@]}"; do echo "           $t"; done
+  else
+    echo "       - 0 pytest targets were skipped (every declared target ran)"
+  fi
+  if [ "$SCOPED_MODE" -eq 1 ]; then
+    echo "       - ${other_files} other collectable file(s) inside the selected target(s)"
+    if [ "${#SKIPPED_FAMILIES[@]}" -gt 0 ]; then
+      for s in "${SKIPPED_FAMILIES[@]}"; do echo "       - $s"; done
+    fi
+  fi
+  echo "       - the NODE tier (scripts/run-node-tests.sh) — a separate derivation"
+  echo "         this runner does not invoke at all"
+}
+
 echo "======================== SUMMARY ($SET set)${SUBSET_NOTE} ========================"
 # Second, unmissable statement of the same fact, on the line right below the
 # banner — i.e. the SECOND line `gate.sh` prints. The banner is easy to skim
 # past; a run that tested a fraction of the suite should have to say so in a
 # sentence, next to the numbers a reader is about to believe.
-if [ -n "$SUBSET_NOTE" ]; then
+if [ "$SCOPED_MODE" -eq 1 ]; then
+  # 🔴 THE STRONGEST STATEMENT THIS FILE MAKES, on the second line `gate.sh`
+  # prints. A SCOPED run is not a small gate run — it is a different kind of
+  # claim, and the words have to say so or the numbers below will be read as
+  # coverage.
+  echo "  🔴 SCOPED RUN — NOT A GATE RUN. ${#SCOPED_FILES[@]} file(s) ran, inside"
+  echo "     ${#TARGETS[@]} of ${SET_TOTAL} declared '$SET' target(s). Every OTHER file in those"
+  echo "     targets was NOT executed, and no target's collected-test floor was"
+  echo "     checked — a floor describes a whole target and cannot describe a"
+  echo "     slice of one. This verdict means ONLY: the files named below passed."
+  echo "     It is not evidence that the change is safe to merge; run"
+  echo "     \`scripts/gate.sh\` for that."
+  if [ "${#SKIPPED_FAMILIES[@]}" -gt 0 ]; then
+    # Named, not merely omitted: two whole families of tests did not run and
+    # `--files` cannot reach them, so the only place that fact can appear is
+    # here — on the surface gate.sh prints.
+    echo "     NOT RUN in this mode (no --files selection can name them):"
+    for _skipped in "${SKIPPED_FAMILIES[@]}"; do echo "       - $_skipped"; done
+  fi
+  for _sf in "${SCOPED_FILES[@]}"; do echo "     file: $_sf"; done
+  _print_ci_gap
+elif [ -n "$SUBSET_NOTE" ]; then
   echo "  🔴 PARTIAL RUN — ${#TARGETS[@]} of ${SET_TOTAL} declared '$SET' target(s) ran."
   echo "     Every count below is for the SELECTED targets only. The unselected"
   echo "     ones were NOT executed and this verdict says nothing about them."
   echo "     Selected: ${TARGETS[*]}"
+  _print_ci_gap
 fi
 for r in "${RESULTS[@]}"; do echo "  $r"; done
 echo "  ----"
-echo "  TOTAL collected=$TOT_COLLECTED  passed=$TOT_PASSED  skipped=$TOT_SKIPPED  failed=$TOT_FAILED  (floor: $MIN_TESTS = sum of ${#TARGETS[@]} per-target floors)"
+if [ "$SCOPED_MODE" -eq 1 ]; then
+  echo "  TOTAL collected=$TOT_COLLECTED  passed=$TOT_PASSED  skipped=$TOT_SKIPPED  failed=$TOT_FAILED  (SCOPED floor: $MIN_TESTS = one test per selected file; NO target floor was applied)"
+else
+  echo "  TOTAL collected=$TOT_COLLECTED  passed=$TOT_PASSED  skipped=$TOT_SKIPPED  failed=$TOT_FAILED  (floor: $MIN_TESTS = sum of ${#TARGETS[@]} per-target floors)"
+fi
 
 # --- PER-TARGET TIMING (diagnostic; never changes the verdict) -----------------
 # Read the PER-TARGET TIMING CENSUS header for why this exists. Three properties
@@ -4481,7 +5013,32 @@ if [ "${#unexpected[@]}" -gt 0 ]; then
   fail=1
 fi
 
-if [ "$TOT_SKIPPED" -ne "$pin_expected" ]; then
+# 🔴 THE SKIP TOTAL IS A WHOLE-TARGET EXPECTATION. A pin names a DIRECTORY and a
+# reason; it cannot say which FILE produces the skip. `_skip_entry_applies`
+# therefore counts a pin as applicable whenever its directory is in `TARGETS` —
+# true for a scoped run, whose target is present but only sliced. MEASURED
+# before this branch fixed it: `--files scripts/signal/tests/test_search.py`
+# gave 15 passed, 0 skipped, `0 test(s) skipped, but 2 of 3 pinned entries
+# apply here`, exit 1. Every scoped run inside that 920-test target was red
+# unless the selection happened to include `test_pg_type_compat.py`, and the
+# advice printed below ("delete its EXPECTED_SKIPS entry") would have made the
+# FULL gate red, because the real skip then becomes an UNPINNED skip group.
+#
+# 🔴 THE UNPINNED CHECK ABOVE IS DELIBERATELY *NOT* SUSPENDED. It is the half
+# that catches coverage silently collapsing, it is evaluated per OBSERVED skip,
+# and it does not care how much of the target ran. Its forgiveness still
+# requires each pin's own CONDITION to hold — suspending the total does not make
+# an inapplicable pin forgive anything.
+# 🔴 `${SCOPED_MODE:-0}`, NOT `$SCOPED_MODE`. This block is EXTRACTED from this
+# file and executed standalone under `bash -uo pipefail` by
+# test_conditional_skip_pins.py, where this variable does not exist — a bare
+# expansion is an unbound-variable abort there (exit 127), which took FOUR of
+# that file's tests red in the sandbox tier while the dev host never ran them.
+# Identical remedy, and identical reason, to the `${ONLY_TARGETS:-}` a few
+# screens up; I reintroduced the very defect its comment warns about.
+if [ "${SCOPED_MODE:-0}" -eq 1 ]; then
+  SCOPED_SUSPENDED+=("GUARD 2's skip TOTAL (observed skips == applicable pins; $pin_expected of ${#EXPECTED_SKIPS[@]} pin(s) would have been counted). The UNPINNED-skip check still ran.")
+elif [ "$TOT_SKIPPED" -ne "$pin_expected" ]; then
   echo "  ERROR: $TOT_SKIPPED test(s) skipped, but $pin_expected of ${#EXPECTED_SKIPS[@]} pinned entries apply here." >&2
   if [ "$TOT_SKIPPED" -lt "$pin_expected" ]; then
     echo "         FEWER than pinned: a pinned skip now RUNS (good) — delete its" >&2
@@ -4524,6 +5081,16 @@ for entry in "${NOLAUNCH_SEEN[@]}"; do
   for t in "${TARGETS[@]}"; do [ "$t" = "$nt" ] && is_pytest=1 && break; done
 
   if ack="$(_nolaunch_ack_reason "$nt")"; then
+    # 🔴 THE REQUIRED DIRECTION IS A WHOLE-TARGET CLAIM AND A SCOPED RUN CANNOT
+    # SATISFY IT. The acknowledgement says "*this target*, RUN IN FULL, drives
+    # launchers into the stub" — it names three seam files out of 181. A slice
+    # that does not happen to include one of them intercepts nothing, and that
+    # is CORRECT, not a defect. See the SCOPED_SUSPENDED header for the measured
+    # reproduction and for why only this half is suspended.
+    if [ "${SCOPED_MODE:-0}" -eq 1 ]; then
+      echo "    $nt  intercepted=$nhits (ACKNOWLEDGED — required direction SUSPENDED: a slice cannot be expected to reach the seam)  systemctl-reads=$reads  plugin=$markers"
+      SCOPED_SUSPENDED+=("GUARD 7's REQUIRED direction for $nt (acknowledged targets must intercept >= 1 launcher)")
+    else
     echo "    $nt  intercepted=$nhits (ACKNOWLEDGED)  systemctl-reads=$reads  plugin=$markers"
     # 🔴 The REQUIRED direction: an acknowledged target that intercepts nothing
     # means the guard is wired to nothing. A ledger that only PERMITTED
@@ -4531,6 +5098,7 @@ for entry in "${NOLAUNCH_SEEN[@]}"; do
     # silently covering zero targets.
     if [ "$nhits" -lt 1 ]; then
       nolaunch_problems+=("$nt  — acknowledged as a target that DRIVES launchers into the stub, but it intercepted NOTHING. Either the guard stopped being installed, or those seam tests stopped running. Reason on file: $ack")
+    fi
     fi
   else
     echo "    $nt  intercepted=$nhits  systemctl-reads=$reads  plugin=$markers"
@@ -4967,6 +5535,28 @@ if [ "${#nogit_problems[@]}" -gt 0 ]; then
   fail=1
 fi
 rm -rf "$NOGIT_DIR"
+
+# --- WHAT THIS SCOPED RUN DID NOT EVALUATE ------------------------------------
+# 🔴 PRINTED LAST BECAUSE IT IS POPULATED LAST — the GUARD 2 and GUARD 7
+# evaluation blocks above are what decide to suspend, and they run after the
+# SUMMARY banner. Printing it here rather than not at all is the whole point:
+# a guard that quietly stops applying is the failure this file exists to refuse,
+# so the reader gets the list of expectations this run was structurally unable
+# to evaluate, beside the verdict they are about to believe.
+#
+# ⚠ It is a SUSPENSION list, not a failure list. Nothing here changes `fail`.
+if [ "$SCOPED_MODE" -eq 1 ] && [ "${#SCOPED_SUSPENDED[@]}" -gt 0 ]; then
+  echo "  ---- whole-target expectations SUSPENDED by this SCOPED run ----"
+  echo "    Each of these is a claim about a target RUN IN FULL. A slice cannot"
+  echo "    satisfy one, so applying it would red a correct run — it was NOT"
+  echo "    evaluated here, and CI's full run is what evaluates it."
+  for _susp in "${SCOPED_SUSPENDED[@]}"; do echo "      - $_susp"; done
+  echo "    Still enforced above, because they are per-observation and not"
+  echo "    whole-target: GUARD 7's PERMITTED direction (no unacknowledged target"
+  echo "    may reach a real launcher), GUARD 2's UNPINNED-skip check, GUARD 8's"
+  echo "    spool isolation, GUARD 10's git isolation, and every plugin-marker"
+  echo "    count (which asks whether the guard loaded for THIS invocation)."
+fi
 
 # GUARD 6. One writer, fed the same value `exit` is about to take, so the
 # printed verdict and the process status cannot disagree — including through a

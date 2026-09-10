@@ -724,10 +724,28 @@ def test_every_pytest_target_gets_the_detector():
     "seventeen" while `--check-targets` listed 25 at the time of the audit and
     26 today — a number nobody re-derives is a claim that rots, and the
     assertion below never depended on it.
+
+    🔴 THE SELECTOR NO LONGER NAMES A SHELL VARIABLE. It used to require `$d` on
+    the line, i.e. it identified the invocation by the name of the variable
+    holding the target. MEASURED 2026-09-09: adding `--files` renamed that
+    operand to `"${paths[@]}"` and the population went EMPTY — caught only by the
+    `assert pytest_lines` positive control two lines below, which is the whole
+    reason that line exists. A selector keyed on a name is one rename away from a
+    guard that inspects nothing.
+
+    The population is now every real `python -m pytest` RUN in the runner —
+    comments and the `--version` runnability probe excluded, and nothing else —
+    so a SECOND invocation added anywhere in the file is covered without an edit
+    here, which the `$d` version could never have promised.
     """
     text = re.sub(r"\\\n\s*", " ", RUN_TESTS.read_text(encoding="utf-8"))
-    pytest_lines = [ln for ln in text.splitlines()
-                    if "python -m pytest" in ln and "$d" in ln]
+    pytest_lines = [
+        ln for ln in text.splitlines()
+        if "python -m pytest" in ln
+        and not ln.lstrip().startswith("#")
+        and "--version" not in ln
+        and "echo " not in ln
+    ]
     assert pytest_lines, "could not find the per-target pytest invocation in run-tests.sh"
     for ln in pytest_lines:
         assert "-p testlib.gitenv_plugin" in ln, (
