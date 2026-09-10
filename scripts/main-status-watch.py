@@ -134,6 +134,12 @@ def newest_per_context(rows):
     answer. Without it a stale `pending` from 20 minutes ago outvotes the
     verdict that replaced it.
     """
+    # 🔴 NO isinstance GUARD HERE, DELIBERATELY — ONE RULE, ONE PLACE. A first
+    # draft had one, and a mutation sweep proved it UNREACHABLE: the walk already
+    # rejects a non-object row loudly, naming the commit, so this one could never
+    # execute. Worse, it `continue`d — silently DROPPING a row, and a dropped row
+    # could be the red. A guard that cannot run, and would hide evidence if it
+    # did, is worse than none: it reads as coverage and stops anyone looking.
     seen = {}
     for row in rows:
         ctx = row.get("context", "")
@@ -371,6 +377,15 @@ def find_newest_verdict(repo, depth):
         raise Unmeasured(f"no commits returned for {repo}")
     walked = 0
     for c in commits:
+        # 🔴 `isinstance` BEFORE `.get`, ON EVERY DECODED ELEMENT. `json.loads`
+        # will happily hand back a list of strings — an error envelope, a proxy
+        # page, a future API change — and `.get` on one raises AttributeError.
+        # In a timer that is a bare traceback: the unit fails with no message,
+        # the blind streak is never touched, and nothing says which commit it
+        # choked on. Every unreadable shape must reach the SAME unmeasured path
+        # as a network failure.
+        if not isinstance(c, dict):
+            raise Unmeasured(f"commit entry {walked} was {type(c).__name__}, not an object")
         sha = c.get("sha") or ""
         if not sha:
             continue
@@ -378,10 +393,18 @@ def find_newest_verdict(repo, depth):
         rows = gh_json(f"/repos/{repo}/commits/{sha}/statuses")
         if not isinstance(rows, list):
             raise Unmeasured(f"statuses for {sha[:8]} were not a list")
+        if not all(isinstance(r, dict) for r in rows):
+            raise Unmeasured(f"statuses for {sha[:8]} contained a non-object row")
         verdict, reds = commit_verdict(rows)
         if verdict in ("red", "green"):
             return sha, verdict, reds, walked
-    return None, "none", {}, walked
+    # 🔴 "" AND NOT None, DELIBERATELY. The callers below format `sha[:8]`, and
+    # they are correct only because verdict=="none" is returned together with an
+    # unusable sha — an INVARIANT nothing enforced. A later return path pairing a
+    # None sha with "red" would crash on a timer, silently. An empty string keeps
+    # the pairing honest AND makes the slice total, so a violated invariant
+    # prints a useless sha instead of killing the run.
+    return "", "none", {}, walked
 
 
 def main(argv):
@@ -468,5 +491,47 @@ def main(argv):
     return RC_TRIGGERED
 
 
+def _guarded_main(argv):
+    """🔴 AN UNATTENDED TIMER MUST NOT DIE BY TRACEBACK.
+
+    `main` converts every failure it ANTICIPATED into rc 11 plus a streak entry.
+    This converts the ones it did not: a shape from the API nobody predicted, a
+    library raising something new. Without it those exit 1 with a traceback in
+    the journal, no streak entry, and — because rc 1 is not in this unit's
+    `SuccessExitStatus` — a failed unit carrying no explanation of what broke.
+
+    🔴 THIS IS NOT SWALLOWING THE ERROR, AND THE DIFFERENCE IS THE WHOLE POINT.
+    The exception type and message are PRINTED, the traceback goes to stderr for
+    the journal, and the blind ladder counts it — so a bug that recurs escalates
+    to rc 12 exactly like a persistent outage. A run that cannot look is
+    reported as a run that could not look, never as 'main is green'.
+    """
+    try:
+        return main(argv)
+    except Unmeasured as exc:            # a path that raised after the handler
+        say(f"COULD NOT MEASURE — {exc}")
+        return RC_UNMEASURED
+    except Exception as exc:  # noqa: BLE001 — deliberate; see the docstring
+        import traceback
+        say(f"COULD NOT MEASURE — UNEXPECTED {type(exc).__name__}: {exc}")
+        say("  🔴 This is a BUG in main-status-watch, not a verdict about main.")
+        say("  Nothing is claimed about main; the 4-hourly deadman is unaffected.")
+        traceback.print_exc()
+        try:
+            root = os.environ.get("MAIN_STATUS_WATCH_CACHE") or \
+                Path.home() / ".cache" / "main-status-watch"
+            st = State(root)
+            st.mkdir()
+            n = st.bump_streak()
+            escalate = os.environ.get("MAIN_STATUS_WATCH_BLIND_ESCALATE")
+            escalate = int(escalate) if (escalate or "").isdigit() else 12
+            say(f"  recorded on the blind ladder (streak {n}/{escalate})")
+            if n >= escalate:
+                return RC_BLIND
+        except Exception:  # noqa: BLE001 — the ladder must never mask the report
+            say("  (could not record it on the blind ladder either)")
+        return RC_UNMEASURED
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    sys.exit(_guarded_main(sys.argv))

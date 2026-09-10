@@ -426,13 +426,17 @@ def test_a_LEDGER_MATCHING_name_with_MORE_failures_than_named_triggers(h):
     assert h.triggered()
 
 
-def _ledger():
-    sys.path.insert(0, str(ROOT / "scripts"))
+def _load():
+    """Import the script as a module so pure functions can be driven directly."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("msw", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.KNOWN_FLAKES
+    return mod
+
+
+def _ledger():
+    return _load().KNOWN_FLAKES
 
 
 # ══ DEBOUNCE ══════════════════════════════════════════════════════════════════
@@ -526,6 +530,93 @@ def test_the_total_budget_is_under_the_units_timeout():
         f"home.nix says {actual} — the guard is reasoning about the wrong number"
     )
     assert budget < actual, f"budget {budget}s must be under TimeoutStartSec {actual}s"
+
+
+# ══ MALFORMED API SHAPES ══════════════════════════════════════════════════════
+# 🔴 THIS RUNS UNATTENDED ON A TIMER. An AttributeError inside the walk exits 1
+# with a bare traceback: the unit fails carrying no explanation, and — because
+# `main` never reached its own handler — the blind streak is never touched, so a
+# permanently broken watcher never escalates. Every unreadable shape must land on
+# the SAME unmeasured path as a network failure.
+
+def test_a_commit_list_of_non_objects_is_UNMEASURED_not_a_traceback(h):
+    h.serve("/repos/o/r/commits?sha=main&per_page=20", ["not-an-object"])
+    proc = h.run()
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
+    assert "COULD NOT MEASURE" in proc.stdout
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert not h.triggered()
+
+
+def test_a_status_row_that_is_not_an_object_is_UNMEASURED_not_a_traceback(h):
+    sha = "a3" + "0" * 38
+    h.serve_commits([sha])
+    h.serve_statuses(sha, ["not-an-object"])
+    proc = h.run()
+    assert proc.returncode == RC_UNMEASURED, proc.stdout
+    assert "Traceback" not in proc.stderr, proc.stderr
+
+
+def test_an_unexpected_exception_is_REPORTED_and_LADDERED_not_swallowed(h):
+    """The net exists so a bug degrades to 'could not look', never to a silent
+    unit failure — and never to a claim about main.
+
+    🔴 THE FIXTURE HAD TO BE REBUILT: the first version fed a commit list that
+    was a dict, which `find_newest_verdict` ALREADY rejects with a clean
+    `Unmeasured` — so the test passed with the net deleted, green for the wrong
+    reason, and a mutation sweep caught it. This shape passes every isinstance
+    check and then explodes deep inside `classify`, where `.strip()` meets a
+    dict — a genuinely UNANTICIPATED failure, which is the only kind the net is
+    for.
+    """
+    sha = "b3" + "0" * 38
+    h.serve_commits([sha])
+    h.serve_statuses(sha, [
+        {"context": CTX_PY, "state": "failure", "description": {"nested": "object"}},
+    ])
+    proc = h.run()
+    assert proc.returncode in (RC_UNMEASURED, RC_BLIND), proc.stdout
+    assert "UNEXPECTED AttributeError" in proc.stdout, proc.stdout
+    assert "BUG in main-status-watch" in proc.stdout
+    assert "blind ladder (streak" in proc.stdout, "an unexpected failure must be counted"
+    assert "GREEN" not in proc.stdout
+    assert not h.triggered()
+
+
+def test_a_NON_VERDICT_is_never_treated_as_green(h):
+    """🔴 THE HEADLINE FACT ABOUT THIS SIGNAL: only ~21% of main commits carry an
+    authoritative verdict, so 'main's status' is USUALLY NOT A VERDICT. Absence
+    must be reported as absence — the design's answer is 'claim nothing, take no
+    action, the 4-hourly deadman still covers it'."""
+    shas = [f"{i:040x}" for i in range(5)]
+    h.serve_commits(shas)
+    for s in shas:
+        h.serve_statuses(s, [_status(CTX_PY, "error", REAL_SUPERSEDED)])
+    proc = h.run()
+    assert proc.returncode == RC_OK, proc.stdout
+    assert "no authoritative" in proc.stdout
+    assert "deadman still covers it" in proc.stdout
+    assert "GREEN" not in proc.stdout
+    assert not h.triggered()
+
+
+def test_the_no_verdict_return_carries_a_SLICEABLE_sha(monkeypatch):
+    """🔴 A PAIRING, NOT A VALUE. Every caller formats `sha[:8]`, and they are
+    correct today only because verdict=="none" happens to be returned alongside
+    an unusable sha — an invariant nothing enforced. Returning None there makes
+    the slice a latent TypeError that only a future return-path pairing would
+    reach, on a timer, silently. Pinning the TYPE is what makes the slice total.
+    """
+    mod = _load()
+    monkeypatch.setattr(mod, "gh_json", lambda path, timeout=45: (
+        [{"sha": "z" * 40}] if "commits?sha=main" in path
+        else [{"context": CTX_PY, "state": "error", "description": REAL_SUPERSEDED}]
+    ))
+    sha, verdict, reds, walked = mod.find_newest_verdict("o/r", 5)
+    assert verdict == "none"
+    assert isinstance(sha, str), f"no-verdict sha must be str, got {type(sha).__name__}"
+    assert sha[:8] == ""      # the slice every caller performs must not raise
+    assert walked == 1
 
 
 def test_a_failing_trigger_is_UNMEASURED_not_a_silent_success(h):
